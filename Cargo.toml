@@ -1,0 +1,41 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/squallz-format-api",
+    "crates/squallz-core",
+    "crates/squallz-formats",
+    "crates/squallz-i18n",
+    "crates/squallz-recovery",
+    "crates/squallz-cli",
+    "crates/squallz-gui",
+]
+exclude = [
+    "fuzz",
+    "third_party/urlpattern-0.3.0-squallz",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = ""
+
+[workspace.dependencies]
+thiserror = "2"
+zeroize = "1"
+clap = { version = "4", features = ["derive"] }
+ctrlc = "3"
+dirs = "6"
+globset = "0.4"
+log = "0.4"
+rpassword = "7"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sys-locale = "0.3"
+
+[patch.crates-io]
+urlpattern = { path = "third_party/urlpattern-0.3.0-squallz" }
+
+[profile.release]
+lto = "thin"
+strip = true

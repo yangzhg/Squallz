@@ -1,0 +1,55 @@
+minimum_pre_commit_version: "3.6.0"
+default_stages: [pre-commit]
+
+exclude: |
+  (?x)^(
+    target/|
+    frontend/dist/|
+    frontend/node_modules/|
+    benches/
+  )
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-json
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: mixed-line-ending
+        args: [--fix=lf]
+      - id: check-added-large-files
+        args: [--maxkb=1024]
+
+  - repo: local
+    hooks:
+      - id: cargo-fmt
+        name: cargo fmt
+        entry: cargo fmt --all
+        language: system
+        pass_filenames: false
+        files: '(^Cargo\.toml$|^crates/.*\.rs$|^third_party/.*\.rs$)'
+
+      - id: cargo-check
+        name: cargo check workspace
+        entry: cargo check --workspace
+        language: system
+        pass_filenames: false
+        files: '(^Cargo\.toml$|^Cargo\.lock$|^crates/|^third_party/urlpattern-0\.3\.0-squallz/)'
+
+      - id: frontend-check
+        name: frontend style and type check
+        entry: bash -lc 'cd frontend && npm run check'
+        language: system
+        pass_filenames: false
+        files: '(^frontend/(src|scripts)/|^frontend/(package\.json|package-lock\.json|svelte\.config\.js|tsconfig\.json|vite\.config\.ts)$)'
+
+      - id: diff-whitespace
+        name: staged whitespace check
+        entry: git diff --check --cached
+        language: system
+        pass_filenames: false
+        always_run: true

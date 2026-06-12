@@ -1,0 +1,52 @@
+name: ZIP Reader Fuzz
+
+on:
+  schedule:
+    - cron: "17 18 * * *"
+  workflow_dispatch:
+    inputs:
+      runs:
+        description: "libFuzzer run count"
+        required: false
+        default: "1048576"
+      max_len:
+        description: "Maximum generated input length in bytes"
+        required: false
+        default: "32768"
+
+permissions:
+  contents: read
+
+jobs:
+  zip-reader:
+    name: ZIP reader fuzz campaign
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      RUST_BACKTRACE: "1"
+      SQUALLZ_FUZZ_REQUIRE_CARGO_FUZZ: "1"
+      SQUALLZ_FUZZ_RUNS: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.runs || '1048576' }}
+      SQUALLZ_FUZZ_MAX_LEN: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.max_len || '32768' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install nightly Rust and cargo-fuzz
+        run: |
+          rustup toolchain install nightly --profile minimal
+          cargo install cargo-fuzz --locked
+
+      - name: Run ZIP reader fuzz campaign
+        run: scripts/zip_fuzz_smoke.sh
+
+      - name: Upload fuzz campaign evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zip-reader-fuzz-${{ github.run_id }}
+          if-no-files-found: ignore
+          path: |
+            benches/ZIP_FUZZ_CAMPAIGN.md
+            target/squallz-zip-fuzz/zip_reader.log
+            fuzz/artifacts/zip_reader/**

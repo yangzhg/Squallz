@@ -1,0 +1,18 @@
+[package]
+name = "squallz-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Squallz 引擎：高层 API、任务调度、安全护栏"
+
+[dependencies]
+squallz-format-api = { path = "../squallz-format-api", version = "0.1.0" }
+blake3 = { version = "1.8.5", features = ["pure"] }
+crc32fast = "1"
+md-5 = "0.10"
+sha1 = "0.10"
+sha2 = "0.10"
+thiserror.workspace = true
+crc32c = "0.6.8"
+globset.workspace = true
+fs4 = "1"

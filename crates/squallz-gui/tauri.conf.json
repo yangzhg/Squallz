@@ -1,0 +1,87 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Squallz",
+  "version": "0.1.0",
+  "identifier": "dev.squallz.desktop",
+  "build": {
+    "frontendDist": "../../frontend/dist",
+    "devUrl": "http://localhost:5173",
+    "beforeDevCommand": "npm --prefix ../frontend run dev",
+    "beforeBuildCommand": "node ../frontend/scripts/tauri-before-build.mjs"
+  },
+  "app": {
+    "macOSPrivateApi": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "Squallz",
+        "width": 1280,
+        "height": 800,
+        "minWidth": 960,
+        "minHeight": 640,
+        "dragDropEnabled": true,
+        "decorations": true,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "trafficLightPosition": { "x": 16, "y": 17 },
+        "transparent": false,
+        "shadow": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["app"],
+    "category": "Utility",
+    "resources": {
+      "../../docs/privacy.md": "legal/privacy.md",
+      "../../docs/licenses.md": "legal/licenses.md",
+      "../../docs/format-support.md": "help/format-support.md",
+      "../../docs/help/filename-encoding.md": "help/filename-encoding.md",
+      "../../docs/help/forgot-password.md": "help/forgot-password.md",
+      "../../docs/help/damaged-archive.md": "help/damaged-archive.md",
+      "../../docs/help/batch-scripts.md": "help/batch-scripts.md",
+      "localization/en.lproj/InfoPlist.strings": "en.lproj/InfoPlist.strings",
+      "localization/zh-Hans.lproj/InfoPlist.strings": "zh-Hans.lproj/InfoPlist.strings",
+      "../../target/release/sqz": "bin/sqz"
+    },
+    "macOS": {
+      "infoPlist": "Info.plist"
+    },
+    "icon": ["icons/icon.icns", "icons/icon.png"],
+    "fileAssociations": [
+      {
+        "name": "Squallz Archives",
+        "description": "Archive files supported by Squallz",
+        "ext": [
+          "zip",
+          "jar",
+          "apk",
+          "cbz",
+          "cbr",
+          "ipa",
+          "7z",
+          "rar",
+          "sqz",
+          "tar",
+          "tgz",
+          "tbz2",
+          "txz",
+          "tzst"
+        ],
+        "role": "Viewer",
+        "rank": "Alternate"
+      },
+      {
+        "name": "Squallz Compressed Streams",
+        "description": "Compressed stream files supported by Squallz",
+        "ext": ["gz", "bz2", "xz", "zst", "lz4", "br"],
+        "role": "Viewer",
+        "rank": "Alternate"
+      }
+    ]
+  }
+}

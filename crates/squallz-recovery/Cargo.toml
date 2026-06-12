@@ -1,0 +1,11 @@
+[package]
+name = "squallz-recovery"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Squallz recovery data operations"
+
+[dependencies]
+squallz-format-api = { path = "../squallz-format-api", version = "0.1.0" }
+rust-par2 = "0.1.2"
+serde.workspace = true

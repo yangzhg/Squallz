@@ -1,0 +1,1 @@
+{"default":{"identifier":"default","description":"Main window: core events, file dialogs, reveal in Finder.","local":true,"windows":["main"],"permissions":["core:default","core:event:default","core:window:default","core:webview:default","dialog:default","opener:default","opener:allow-open-path","opener:allow-reveal-item-in-dir"]}}

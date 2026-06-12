@@ -1,0 +1,38 @@
+[package]
+name = "squallz-gui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Squallz 桌面应用（Tauri 2）"
+
+# Tauri's macros need generated code; unsafe is still avoided in our own
+# business logic (the workspace-wide forbid stays on core/format-api/formats).
+
+[[bin]]
+name = "squallz-gui"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+squallz-core = { path = "../squallz-core", version = "0.1.0" }
+squallz-formats = { path = "../squallz-formats", version = "0.1.0" }
+squallz-i18n = { path = "../squallz-i18n", version = "0.1.0" }
+squallz-recovery = { path = "../squallz-recovery", version = "0.1.0" }
+tauri = { version = "2", features = ["macos-private-api"] }
+tauri-plugin-dialog = "2"
+tauri-plugin-opener = "2"
+serde.workspace = true
+serde_json.workspace = true
+dirs.workspace = true
+fs4 = "1"
+log.workspace = true
+base64 = "0.22"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6.3"
+objc2-app-kit = { version = "0.3.2", features = ["NSApplication"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security_Credentials"] }

@@ -1,0 +1,8 @@
+target/
+node_modules/
+dist/
+benches/
+AGENTS.md
+ITERATION_LOG.md
+.DS_Store
+.cargo-ok

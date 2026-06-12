@@ -1,0 +1,21 @@
+[package]
+name = "squallz-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+squallz-format-api = { path = "../crates/squallz-format-api", version = "0.1.0" }
+squallz-formats = { path = "../crates/squallz-formats", version = "0.1.0" }
+
+[[bin]]
+name = "zip_reader"
+path = "fuzz_targets/zip_reader.rs"
+test = false
+doc = false
+bench = false
