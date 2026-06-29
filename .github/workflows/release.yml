@@ -1,17 +1,239 @@
-name: Release Artifacts
+name: Release
 
 on:
   push:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      platform:
+        description: "Release target to build"
+        required: true
+        default: "all"
+        type: choice
+        options:
+          - all
+          - source
+          - macos-arm64
+          - macos-x64
+          - windows-x64
+          - linux-x64
+      profile:
+        description: "Build profile"
+        required: true
+        default: "release"
+        type: choice
+        options:
+          - release
+          - debug
+      publish_release:
+        description: "Create or update the GitHub Release"
+        required: true
+        default: false
+        type: boolean
+      release_tag:
+        description: "Existing tag to publish when manually dispatching"
+        required: false
+        default: "v0.1.0"
+        type: string
 
 permissions:
   contents: read
 
+concurrency:
+  group: release-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: false
+
 jobs:
+  plan:
+    name: Plan release
+    runs-on: ubuntu-24.04
+    outputs:
+      has_packages: ${{ steps.plan.outputs.has_packages }}
+      include_source: ${{ steps.plan.outputs.include_source }}
+      package_matrix: ${{ steps.plan.outputs.package_matrix }}
+      profile: ${{ steps.plan.outputs.profile }}
+      publish_release: ${{ steps.plan.outputs.publish_release }}
+      release_tag: ${{ steps.plan.outputs.release_tag }}
+      version: ${{ steps.plan.outputs.version }}
+
+    steps:
+      - name: Compute release plan
+        id: plan
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_PLATFORM: ${{ inputs.platform }}
+          INPUT_PROFILE: ${{ inputs.profile }}
+          INPUT_PUBLISH_RELEASE: ${{ inputs.publish_release }}
+          INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
+          REF_NAME: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          RUN_NUMBER: ${{ github.run_number }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          python3 <<'PY' >> "${GITHUB_OUTPUT}"
+          import json
+          import os
+          import sys
+
+          platforms = [
+              {
+                  "platform": "macos-arm64",
+                  "os": "macos-15",
+                  "runner_os": "macOS",
+                  "arch": "arm64",
+                  "make_target": "app-macos",
+              },
+              {
+                  "platform": "macos-x64",
+                  "os": "macos-15-intel",
+                  "runner_os": "macOS",
+                  "arch": "x64",
+                  "make_target": "app-macos",
+              },
+              {
+                  "platform": "windows-x64",
+                  "os": "windows-2025",
+                  "runner_os": "Windows",
+                  "arch": "x64",
+                  "make_target": "app-windows",
+              },
+              {
+                  "platform": "linux-x64",
+                  "os": "ubuntu-24.04",
+                  "runner_os": "Linux",
+                  "arch": "x64",
+                  "make_target": "app-linux",
+              },
+          ]
+
+          event_name = os.environ["EVENT_NAME"]
+          selected = os.environ.get("INPUT_PLATFORM") or "all"
+          profile = os.environ.get("INPUT_PROFILE") or "release"
+          publish_input = os.environ.get("INPUT_PUBLISH_RELEASE", "false").lower()
+          input_release_tag = (os.environ.get("INPUT_RELEASE_TAG") or "").strip()
+          ref_name = os.environ["REF_NAME"]
+          ref_type = os.environ["REF_TYPE"]
+          source_sha = os.environ["SOURCE_SHA"]
+          run_number = os.environ["RUN_NUMBER"]
+
+          if event_name == "push":
+              selected = "all"
+              profile = "release"
+              publish_release = ref_type == "tag"
+              release_tag = ref_name
+          else:
+              publish_release = publish_input == "true"
+              release_tag = input_release_tag
+              if publish_release and not release_tag:
+                  print("publish_release requires release_tag for manual dispatch", file=sys.stderr)
+                  sys.exit(1)
+
+          if profile not in {"release", "debug"}:
+              print(f"invalid profile: {profile}", file=sys.stderr)
+              sys.exit(1)
+
+          if selected == "all":
+              selected_packages = platforms
+              include_source = True
+          elif selected == "source":
+              selected_packages = []
+              include_source = True
+          else:
+              selected_packages = [item for item in platforms if item["platform"] == selected]
+              include_source = False
+              if not selected_packages:
+                  print(f"invalid platform: {selected}", file=sys.stderr)
+                  sys.exit(1)
+
+          if release_tag:
+              version = release_tag
+          else:
+              version = f"run-{run_number}-{source_sha[:7]}"
+
+          outputs = {
+              "has_packages": "true" if selected_packages else "false",
+              "include_source": "true" if include_source else "false",
+              "package_matrix": json.dumps({"include": selected_packages}, separators=(",", ":")),
+              "profile": profile,
+              "publish_release": "true" if publish_release else "false",
+              "release_tag": release_tag,
+              "version": version,
+          }
+          for key, value in outputs.items():
+              print(f"{key}={value}")
+          PY
+
+  source:
+    name: Package source
+    needs: plan
+    if: needs.plan.outputs.include_source == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      attestations: write
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Create source packages
+        shell: bash
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          out="target/release-assets"
+          rm -rf "$out"
+          mkdir -p "$out"
+
+          prefix="Squallz-${VERSION}/"
+          git archive --format=tar --prefix="$prefix" HEAD \
+            | gzip -n > "$out/Squallz-${VERSION}-source.tar.gz"
+          git archive --format=zip --prefix="$prefix" HEAD \
+            -o "$out/Squallz-${VERSION}-source.zip"
+
+      - name: Generate source release metadata
+        run: |
+          python3 scripts/release_finalize_assets.py \
+            --assets-dir target/release-assets \
+            --version "${{ needs.plan.outputs.version }}" \
+            --platform source \
+            --arch all \
+            --profile source \
+            --kind source-archive \
+            --repository "${{ github.repository }}" \
+            --source-ref "${{ github.ref }}" \
+            --source-sha "${{ github.sha }}" \
+            --workflow "${{ github.workflow }}" \
+            --run-id "${{ github.run_id }}" \
+            --run-attempt "${{ github.run_attempt }}" \
+            --runner-os "${{ runner.os }}"
+
+      - name: Attest source assets
+        uses: actions/attest@v4
+        with:
+          subject-checksums: target/release-assets/ATTESTATION_SUBJECTS_SHA256SUMS
+
+      - name: Upload source assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: squallz-source-${{ github.run_id }}
+          if-no-files-found: error
+          path: |
+            target/release-assets/*
+            !target/release-assets/ATTESTATION_SUBJECTS_SHA256SUMS
+            !target/release-assets/RELEASE_ASSETS_MANIFEST.json
+            !target/release-assets/SHA256SUMS
+
   package:
     name: Package ${{ matrix.platform }}
+    needs: plan
+    if: needs.plan.outputs.has_packages == 'true'
     runs-on: ${{ matrix.os }}
     permissions:
       attestations: write
@@ -19,18 +241,13 @@ jobs:
       id-token: write
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - os: macos-latest
-            platform: macos
-          - os: windows-latest
-            platform: windows
-          - os: ubuntu-24.04
-            platform: linux
+      matrix: ${{ fromJSON(needs.plan.outputs.package_matrix) }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Install Rust stable
         shell: bash
@@ -53,12 +270,12 @@ jobs:
             build-essential \
             curl \
             file \
+            libayatana-appindicator3-dev \
             libgtk-3-dev \
             libssl-dev \
-            libxdo-dev \
-            libayatana-appindicator3-dev \
-            librsvg2-dev \
             libwebkit2gtk-4.1-dev \
+            libxdo-dev \
+            librsvg2-dev \
             patchelf \
             pkg-config \
             wget
@@ -67,23 +284,49 @@ jobs:
         run: npm --prefix frontend ci
 
       - name: Build platform package
-        run: npm --prefix frontend run tauri -- build
-
-      - name: Collect release artifacts
         shell: bash
+        env:
+          PROFILE: ${{ needs.plan.outputs.profile }}
+          MAKE_TARGET: ${{ matrix.make_target }}
         run: |
           set -euo pipefail
 
-          version="${GITHUB_REF_NAME}"
-          if [[ "${GITHUB_REF_TYPE}" != "tag" ]]; then
-            version="run-${GITHUB_RUN_NUMBER}-${GITHUB_SHA::7}"
+          if [[ "$PROFILE" == "release" ]]; then
+            if [[ "${RUNNER_OS}" == "Windows" ]]; then
+              npm --prefix frontend run tauri -- build
+            else
+              make "$MAKE_TARGET"
+            fi
+          else
+            if [[ "${RUNNER_OS}" == "Windows" ]]; then
+              npm --prefix frontend run tauri -- build --debug
+            else
+              make app-debug
+            fi
+            cargo build -p squallz-cli
           fi
 
-          arch="$(uname -m)"
-          target_id="${{ matrix.platform }}-${arch}"
-          out="target/release-artifacts"
-          rm -rf "$out"
-          mkdir -p "$out"
+      - name: Collect platform release assets
+        shell: bash
+        env:
+          ARCH: ${{ matrix.arch }}
+          PLATFORM: ${{ matrix.platform }}
+          PROFILE: ${{ needs.plan.outputs.profile }}
+          VERSION: ${{ needs.plan.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          profile_dir="target/release"
+          profile_suffix=""
+          if [[ "$PROFILE" == "debug" ]]; then
+            profile_dir="target/debug"
+            profile_suffix="-debug"
+          fi
+
+          out="target/release-assets"
+          tmp="target/release-packaging"
+          rm -rf "$out" "$tmp"
+          mkdir -p "$out" "$tmp"
 
           copy_artifact() {
             local source="$1"
@@ -96,102 +339,132 @@ jobs:
             cp "$source" "$destination"
           }
 
-          case "${RUNNER_OS}" in
-            Windows)
-              cli_path="target/release/sqz.exe"
-              cli_name="sqz-${version}-${target_id}.exe"
-              gui_path="target/release/squallz-gui.exe"
-              gui_name="Squallz-${version}-${target_id}.exe"
-              ;;
-            *)
-              cli_path="target/release/sqz"
-              cli_name="sqz-${version}-${target_id}"
-              gui_path="target/release/squallz-gui"
-              gui_name="Squallz-${version}-${target_id}"
-              ;;
-          esac
+          copy_executable_archive() {
+            local source="$1"
+            local binary_name="$2"
+            local archive_name="$3"
+            local dir="$tmp/${archive_name%.tar.gz}"
+            mkdir -p "$dir"
+            cp "$source" "$dir/$binary_name"
+            chmod +x "$dir/$binary_name"
+            tar -C "$dir" -czf "$out/$archive_name" "$binary_name"
+          }
 
-          if [[ -f "$cli_path" ]]; then
-            copy_artifact "$cli_path" "$cli_name"
+          if [[ "${RUNNER_OS}" == "Windows" ]]; then
+            copy_artifact \
+              "$profile_dir/sqz.exe" \
+              "sqz-${VERSION}-${PLATFORM}${profile_suffix}.exe"
+            copy_artifact \
+              "$profile_dir/squallz-gui.exe" \
+              "Squallz-${VERSION}-${PLATFORM}${profile_suffix}.exe"
+          else
+            copy_executable_archive \
+              "$profile_dir/sqz" \
+              "sqz" \
+              "sqz-${VERSION}-${PLATFORM}${profile_suffix}.tar.gz"
           fi
 
-          if [[ "${RUNNER_OS}" != "macOS" && -f "$gui_path" ]]; then
-            copy_artifact "$gui_path" "$gui_name"
+          if [[ "${RUNNER_OS}" == "macOS" ]]; then
+            app_path="$profile_dir/bundle/macos/Squallz.app"
+            if [[ ! -d "$app_path" ]]; then
+              echo "Expected macOS app bundle is missing: $app_path"
+              exit 1
+            fi
+            ditto -c -k --sequesterRsrc --keepParent \
+              "$app_path" \
+              "$out/Squallz-${VERSION}-${PLATFORM}${profile_suffix}.app.zip"
+          elif [[ "${RUNNER_OS}" == "Linux" ]]; then
+            copy_executable_archive \
+              "$profile_dir/squallz-gui" \
+              "Squallz" \
+              "Squallz-${VERSION}-${PLATFORM}${profile_suffix}.tar.gz"
           fi
 
-          if [[ "${RUNNER_OS}" == "macOS" && -d target/release/bundle ]]; then
-            while IFS= read -r -d '' app_bundle; do
-              ditto -c -k --sequesterRsrc --keepParent \
-                "$app_bundle" \
-                "$out/Squallz-${version}-${target_id}.app.zip"
-            done < <(find target/release/bundle -type d -name "Squallz.app" -print0)
-          fi
-
-          if [[ -d target/release/bundle ]]; then
+          bundle_dir="$profile_dir/bundle"
+          if [[ -d "$bundle_dir" ]]; then
             while IFS= read -r -d '' file; do
               case "$file" in
                 *.app/*) continue ;;
               esac
-              relative="${file#target/release/bundle/}"
-              artifact_name="${relative//\//-}"
-              copy_artifact "$file" "$artifact_name"
-            done < <(find target/release/bundle -type f -print0)
+              case "$file" in
+                *.AppImage|*.deb|*.dmg|*.exe|*.msi|*.rpm|*.tar.gz|*.zip)
+                  relative="${file#$bundle_dir/}"
+                  artifact_name="bundle-${PLATFORM}-${relative//\//-}"
+                  copy_artifact "$file" "$artifact_name"
+                  ;;
+              esac
+            done < <(find "$bundle_dir" -type f -print0)
           fi
 
-          artifact_count="$(find "$out" -type f ! -name SHA256SUMS | wc -l | tr -d ' ')"
-          if [[ "$artifact_count" == "0" ]]; then
-            echo "No release artifacts were collected."
-            exit 1
-          fi
+      - name: Generate platform release metadata
+        run: |
+          python3 scripts/release_finalize_assets.py \
+            --assets-dir target/release-assets \
+            --version "${{ needs.plan.outputs.version }}" \
+            --platform "${{ matrix.platform }}" \
+            --arch "${{ matrix.arch }}" \
+            --profile "${{ needs.plan.outputs.profile }}" \
+            --kind desktop-binary \
+            --repository "${{ github.repository }}" \
+            --source-ref "${{ github.ref }}" \
+            --source-sha "${{ github.sha }}" \
+            --workflow "${{ github.workflow }}" \
+            --run-id "${{ github.run_id }}" \
+            --run-attempt "${{ github.run_attempt }}" \
+            --runner-os "${{ runner.os }}"
 
-          (
-            cd "$out"
-            if command -v sha256sum >/dev/null 2>&1; then
-              find . -maxdepth 1 -type f ! -name SHA256SUMS -print0 \
-                | sort -z \
-                | xargs -0 sha256sum \
-                | sed 's#  \./#  #' > SHA256SUMS
-            else
-              find . -maxdepth 1 -type f ! -name SHA256SUMS -print0 \
-                | sort -z \
-                | xargs -0 shasum -a 256 \
-                | sed 's#  \./#  #' > SHA256SUMS
-            fi
-          )
-
-          echo "Collected release artifacts:"
-          find "$out" -maxdepth 1 -type f -print | sort
-
-      - name: Attest release artifacts
+      - name: Attest platform release assets
         uses: actions/attest@v4
         with:
-          subject-checksums: target/release-artifacts/SHA256SUMS
+          subject-checksums: target/release-assets/ATTESTATION_SUBJECTS_SHA256SUMS
 
-      - name: Upload release artifacts
+      - name: Upload platform release assets
         uses: actions/upload-artifact@v4
         with:
           name: squallz-${{ matrix.platform }}-${{ github.run_id }}
           if-no-files-found: error
-          path: target/release-artifacts/*
+          path: |
+            target/release-assets/*
+            !target/release-assets/ATTESTATION_SUBJECTS_SHA256SUMS
+            !target/release-assets/RELEASE_ASSETS_MANIFEST.json
+            !target/release-assets/SHA256SUMS
 
   publish:
-    name: Publish GitHub release
-    if: github.ref_type == 'tag'
-    needs: package
+    name: Publish GitHub Release
+    needs:
+      - plan
+      - source
+      - package
+    if: |
+      always()
+      && needs.plan.outputs.publish_release == 'true'
+      && !contains(needs.*.result, 'failure')
+      && !contains(needs.*.result, 'cancelled')
     runs-on: ubuntu-24.04
     permissions:
+      attestations: write
       contents: write
+      id-token: write
 
     steps:
-      - name: Download release artifacts
+      - name: Download release assets
         uses: actions/download-artifact@v4
         with:
           path: downloaded-artifacts
 
-      - name: Prepare release assets
+      - name: Prepare final release assets
         shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.plan.outputs.release_tag }}
+          REPOSITORY: ${{ github.repository }}
+          VERSION: ${{ needs.plan.outputs.version }}
         run: |
           set -euo pipefail
+
+          if [[ -z "$RELEASE_TAG" ]]; then
+            echo "release_tag is required when publish_release is true"
+            exit 1
+          fi
 
           rm -rf release-assets
           mkdir -p release-assets
@@ -203,30 +476,185 @@ jobs:
               exit 1
             fi
             cp "$file" "release-assets/$name"
-          done < <(find downloaded-artifacts -type f ! -name SHA256SUMS -print0)
+          done < <(find downloaded-artifacts -type f -print0)
 
           (
             cd release-assets
-            find . -maxdepth 1 -type f ! -name SHA256SUMS -print0 \
+            find . -maxdepth 1 -type f ! -name ATTESTATION_SUBJECTS_SHA256SUMS -print0 \
               | sort -z \
               | xargs -0 sha256sum \
-              | sed 's#  \./#  #' > SHA256SUMS
+              | sed 's#  \./#  #' > ATTESTATION_SUBJECTS_SHA256SUMS
           )
 
-          echo "Release assets:"
-          find release-assets -maxdepth 1 -type f -print | sort
+          python3 <<'PY'
+          import hashlib
+          import json
+          import os
+          from datetime import datetime, timezone
+          from pathlib import Path
 
-      - name: Create or update GitHub release
+          assets_dir = Path("release-assets")
+          repository = os.environ["REPOSITORY"]
+          version = os.environ["VERSION"]
+
+          def sha256_file(path: Path) -> str:
+              digest = hashlib.sha256()
+              with path.open("rb") as handle:
+                  for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                      digest.update(chunk)
+              return digest.hexdigest()
+
+          primary_assets = []
+          for path in sorted(assets_dir.iterdir()):
+              if not path.is_file():
+                  continue
+              if path.name in {
+                  "ATTESTATION_SUBJECTS_SHA256SUMS",
+                  "RELEASE_ASSETS_MANIFEST.json",
+                  "RELEASE_NOTES.md",
+                  "SHA256SUMS",
+              }:
+                  continue
+              if path.name.endswith((".sha256", ".provenance.json")):
+                  continue
+              primary_assets.append(path)
+
+          metadata = {}
+          for path in primary_assets:
+              evidence_path = path.with_name(f"{path.name}.provenance.json")
+              if evidence_path.is_file():
+                  metadata[path.name] = json.loads(evidence_path.read_text(encoding="utf-8"))
+
+          manifest_assets = []
+          checksum_rows = []
+          for path in primary_assets:
+              digest = sha256_file(path)
+              evidence = metadata.get(path.name, {})
+              build = evidence.get("build", {})
+              manifest_assets.append(
+                  {
+                      "name": path.name,
+                      "sha256": digest,
+                      "size_bytes": path.stat().st_size,
+                      "platform": build.get("platform", "unknown"),
+                      "architecture": build.get("architecture", "unknown"),
+                      "profile": build.get("profile", "unknown"),
+                      "kind": build.get("kind", "unknown"),
+                  }
+              )
+              checksum_rows.append(f"{digest}  {path.name}")
+
+          (assets_dir / "SHA256SUMS").write_text(
+              "\n".join(checksum_rows) + "\n",
+              encoding="utf-8",
+          )
+          (assets_dir / "RELEASE_ASSETS_MANIFEST.json").write_text(
+              json.dumps(
+                  {
+                      "schema": "dev.squallz.release.manifest.v1",
+                      "repository": repository,
+                      "version": version,
+                      "generated_at_utc": datetime.now(timezone.utc)
+                      .replace(microsecond=0)
+                      .isoformat(),
+                      "assets": manifest_assets,
+                  },
+                  ensure_ascii=False,
+                  indent=2,
+                  sort_keys=True,
+              )
+              + "\n",
+              encoding="utf-8",
+          )
+
+          lines = [
+              f"# Squallz {version}",
+              "",
+              "Unsigned early desktop binaries. Verify the checksum and GitHub Artifact Attestation before running a downloaded asset.",
+              "",
+              "## Downloads",
+              "",
+              "| Asset | Platform | Architecture | Profile |",
+              "| --- | --- | --- | --- |",
+          ]
+          for path in primary_assets:
+              evidence = metadata.get(path.name, {})
+              build = evidence.get("build", {})
+              lines.append(
+                  "| "
+                  + " | ".join(
+                      [
+                          f"`{path.name}`",
+                          str(build.get("platform", "unknown")),
+                          str(build.get("architecture", "unknown")),
+                          str(build.get("profile", "unknown")),
+                      ]
+                  )
+                  + " |"
+              )
+
+          lines.extend(
+              [
+                  "",
+                  "## Verification",
+                  "",
+                  "Each primary asset has a sibling `.sha256` file and `.provenance.json` evidence file.",
+                  "",
+                  "```sh",
+                  "shasum -a 256 /path/to/asset",
+                  f"gh attestation verify /path/to/asset --repo {repository}",
+                  "```",
+                  "",
+                  "Compare the SHA-256 value with the matching `.sha256` file before bypassing macOS Gatekeeper, Windows SmartScreen, or Linux executable-permission prompts.",
+              ]
+          )
+          (assets_dir / "RELEASE_NOTES.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+          PY
+
+          (
+            cd release-assets
+            find . -maxdepth 1 -type f \
+              ! -name ATTESTATION_SUBJECTS_SHA256SUMS \
+              ! -name RELEASE_NOTES.md \
+              -print0 \
+              | sort -z \
+              | xargs -0 sha256sum \
+              | sed 's#  \./#  #' > ATTESTATION_SUBJECTS_SHA256SUMS
+          )
+
+          echo "Final release assets:"
+          find release-assets -maxdepth 1 -type f \
+            ! -name ATTESTATION_SUBJECTS_SHA256SUMS \
+            ! -name RELEASE_NOTES.md \
+            -print | sort
+
+      - name: Attest final release assets
+        uses: actions/attest@v4
+        with:
+          subject-checksums: release-assets/ATTESTATION_SUBJECTS_SHA256SUMS
+
+      - name: Create or update GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.plan.outputs.release_tag }}
         shell: bash
         run: |
           set -euo pipefail
 
-          if ! gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
-            gh release create "${GITHUB_REF_NAME}" \
-              --title "Squallz ${GITHUB_REF_NAME}" \
-              --notes "Unsigned preview artifacts. Verify checksums with SHA256SUMS and provenance with GitHub Artifact Attestations."
+          title="Squallz ${RELEASE_TAG}"
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release edit "$RELEASE_TAG" \
+              --title "$title" \
+              --notes-file release-assets/RELEASE_NOTES.md
+          else
+            gh release create "$RELEASE_TAG" \
+              --verify-tag \
+              --title "$title" \
+              --notes-file release-assets/RELEASE_NOTES.md
           fi
 
-          gh release upload "${GITHUB_REF_NAME}" release-assets/* --clobber
+          mapfile -d '' assets < <(find release-assets -maxdepth 1 -type f \
+            ! -name ATTESTATION_SUBJECTS_SHA256SUMS \
+            ! -name RELEASE_NOTES.md \
+            -print0 | sort -z)
+          gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber

@@ -189,24 +189,25 @@ make dev
 make app-release
 ```
 
-## 未签名下载包和构建
+## 未签名的 GitHub Release 二进制
 
-这一节面向下载 Squallz 预编译二进制或安装包的用户，也适用于本地执行
-`make app-release` 生成的包。当前可下载版本和预览版桌面构建还没有做代码签名和公证。
+这一节只适用于从 GitHub Releases 下载 Squallz 预编译二进制的用户，不适用于从源码运行，
+也不适用于后续通过包管理器安装的版本。当前早期桌面二进制还没有做代码签名和公证。
 归档处理和 CLI 行为不受影响，但操作系统可能在应用启动前拦截，或在安装文件管理器入口时提示风险。
 
 只有在你自己构建了该应用，或确认下载来源可信时，才绕过这些系统提示。如果下载页面同时提供
 checksum，请先比对后再绕过操作系统警告。如果你不确定二进制来自哪里，删除它并改为从源码构建。
 
-由 GitHub Actions 发布流程生成的下载文件会附带 `SHA256SUMS` 和 GitHub Artifact
-Attestations。下载文件后，先验证 checksum 和构建来源，再处理操作系统拦截：
+由 GitHub Actions 发布流程生成的下载文件会附带逐文件 `.sha256`、`.provenance.json`
+证据文件，以及 GitHub Artifact Attestations。从 GitHub Releases 下载文件后，先验证
+checksum 和构建来源，再处理操作系统拦截：
 
 ```sh
-shasum -a 256 /path/to/downloaded-file
-gh attestation verify /path/to/downloaded-file --repo yangzhg/Squallz
+shasum -a 256 /path/to/downloaded-asset
+gh attestation verify /path/to/downloaded-asset --repo yangzhg/Squallz
 ```
 
-把命令输出的 SHA-256 值和 `SHA256SUMS` 中对应文件名的那一行进行比对。
+把命令输出的 SHA-256 值和对应的 `.sha256` 文件进行比对。
 
 ### macOS
 

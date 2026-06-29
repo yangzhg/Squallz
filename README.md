@@ -199,13 +199,14 @@ Package the app for the current platform:
 make app-release
 ```
 
-## Unsigned Downloads and Builds
+## Unsigned GitHub Release Binaries
 
-This section is for users who download prebuilt Squallz binaries or installers,
-and it also applies to packages produced locally with `make app-release`.
-Current downloadable and preview desktop builds are not code-signed or notarized
-yet. Archive handling and CLI behavior are unchanged, but the operating system
-may block the app before it starts or warn when installing file-manager actions.
+This section applies only to users who download prebuilt Squallz binaries from
+GitHub Releases. It does not apply to running from source or to future package
+manager installs. Current early desktop binaries are not code-signed or
+notarized yet. Archive handling and CLI behavior are unchanged, but the
+operating system may block the app before it starts or warn when installing
+file-manager actions.
 
 Only bypass these warnings for an app bundle or binary you built yourself, or
 for a download from a source you trust. If a checksum is published next to the
@@ -213,15 +214,16 @@ download, compare it before bypassing the operating-system warning. If you are
 not sure where the binary came from, delete it and build from source instead.
 
 Release artifacts produced by the GitHub Actions release workflow include
-`SHA256SUMS` and GitHub Artifact Attestations. After downloading a file, verify
-the checksum and build provenance before bypassing operating-system warnings:
+per-asset `.sha256` files, `.provenance.json` evidence files, and GitHub
+Artifact Attestations. After downloading a file from GitHub Releases, verify the
+checksum and build provenance before bypassing operating-system warnings:
 
 ```sh
-shasum -a 256 /path/to/downloaded-file
-gh attestation verify /path/to/downloaded-file --repo yangzhg/Squallz
+shasum -a 256 /path/to/downloaded-asset
+gh attestation verify /path/to/downloaded-asset --repo yangzhg/Squallz
 ```
 
-Compare the printed SHA-256 value with the matching line in `SHA256SUMS`.
+Compare the printed SHA-256 value with the matching `.sha256` file.
 
 ### macOS
 
