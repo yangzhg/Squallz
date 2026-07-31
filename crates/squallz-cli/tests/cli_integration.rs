@@ -35,6 +35,22 @@ fn stdout_json(out: &Output) -> serde_json::Value {
     serde_json::from_str(&stdout(out)).expect("valid JSON")
 }
 
+fn json_output_paths(report: &serde_json::Value) -> Vec<PathBuf> {
+    report["outputs"]
+        .as_array()
+        .expect("output path array")
+        .iter()
+        .map(|path| PathBuf::from(path.as_str().expect("output path string")))
+        .collect()
+}
+
+fn output_paths_bytes(paths: &[PathBuf]) -> u64 {
+    paths
+        .iter()
+        .map(|path| std::fs::metadata(path).expect("output metadata").len())
+        .sum()
+}
+
 fn write_fake_executable(dir: &Path, name: &str) -> PathBuf {
     let path = if cfg!(windows) {
         dir.join(format!("{name}.exe"))
@@ -50,6 +66,49 @@ fn write_fake_executable(dir: &Path, name: &str) -> PathBuf {
         std::fs::set_permissions(&path, perms).unwrap();
     }
     path
+}
+
+fn write_sfx_pe_stub(dir: &Path) -> PathBuf {
+    let path = dir.join("sfx-stub.exe");
+    let mut bytes = vec![0u8; 512];
+    bytes[..2].copy_from_slice(b"MZ");
+    bytes[0x3c..0x40].copy_from_slice(&0x80u32.to_le_bytes());
+    bytes[0x80..0x84].copy_from_slice(b"PE\0\0");
+    let marker = squallz_core::SFX_CLI_STUB_MARKER;
+    bytes[0x100..0x100 + marker.len()].copy_from_slice(&marker);
+    std::fs::write(&path, bytes).unwrap();
+    path
+}
+
+fn write_sfx_macos_app_stub(dir: &Path) -> PathBuf {
+    let bundle = dir.join("Squallz.app");
+    let executable = bundle.join("Contents/MacOS/squallz-gui");
+    std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(bundle.join("Contents/Resources")).unwrap();
+    let mut bytes = vec![0u8; 512];
+    bytes[..4].copy_from_slice(&[0xcf, 0xfa, 0xed, 0xfe]);
+    let marker = squallz_core::SFX_GUI_STUB_MARKER;
+    bytes[0x100..0x100 + marker.len()].copy_from_slice(&marker);
+    std::fs::write(executable, bytes).unwrap();
+    std::fs::write(
+        bundle.join("Contents/Info.plist"),
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict>
+<key>CFBundleExecutable</key><string>squallz-gui</string>
+<key>LSMinimumSystemVersion</key><string>11.0</string>
+</dict></plist>
+"#,
+    )
+    .unwrap();
+    bundle
+}
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+fn sfx_command(path: &Path) -> Command {
+    let mut cmd = Command::new(path);
+    cmd.env_remove("SQZ_LANG");
+    cmd.env("SQZ_LOCALES_DIR", "/nonexistent/squallz-test-locales");
+    cmd
 }
 
 fn assert_no_i18n_keys(text: &str) {
@@ -89,6 +148,7 @@ fn cli_surface_contract_help_tokens_are_stable() {
     for token in [
         "compress",
         "pack",
+        "sfx",
         "estimate",
         "duplicates",
         "checksum",
@@ -103,6 +163,7 @@ fn cli_surface_contract_help_tokens_are_stable() {
         "verify",
         "repair",
         "batch",
+        "check-update",
         "doctor",
         "info",
         "--lang",
@@ -132,6 +193,7 @@ fn cli_surface_contract_help_tokens_are_stable() {
                 "--password",
                 "--encrypt-names",
                 "--exclude",
+                "--content-policy",
             ],
         ),
         (
@@ -140,12 +202,30 @@ fn cli_surface_contract_help_tokens_are_stable() {
                 "--inner-format",
                 "--profile",
                 "--recovery",
+                "--exclude",
+                "--content-policy",
                 "--split",
                 "--threads",
                 "--memory-limit",
                 "--json",
             ],
         ),
+        (
+            &["estimate", "--help"],
+            &["--exclude", "--content-policy", "--output", "--json"],
+        ),
+        (
+            &["sfx", "create", "--help"],
+            &[
+                "--output",
+                "--target",
+                "--stub",
+                "--force",
+                "--memory-limit",
+                "--json",
+            ],
+        ),
+        (&["sfx", "inspect", "--help"], &["--memory-limit", "--json"]),
         (
             &["extract", "--help"],
             &[
@@ -169,7 +249,7 @@ fn cli_surface_contract_help_tokens_are_stable() {
             &["checksum", "--help"],
             &["--algorithm", "--check", "--exclude", "--json"],
         ),
-        (&["list", "--help"], &["--json", "--tree"]),
+        (&["list", "--help"], &["--search", "--json", "--tree"]),
         (
             &["nested", "list", "--help"],
             &[
@@ -177,6 +257,7 @@ fn cli_surface_contract_help_tokens_are_stable() {
                 "--encoding",
                 "--nested-password",
                 "--nested-encoding",
+                "--search",
                 "--json",
                 "--tree",
             ],
@@ -198,9 +279,12 @@ fn cli_surface_contract_help_tokens_are_stable() {
         ),
         (
             &["convert", "--help"],
-            &["--profile", "--password", "--encoding", "--json"],
+            &["--profile", "--password", "--encoding", "--force", "--json"],
         ),
-        (&["export", "--help"], &["--profile", "--output", "--json"]),
+        (
+            &["export", "--help"],
+            &["--profile", "--output", "--force", "--json"],
+        ),
         (
             &["update", "--help"],
             &[
@@ -211,6 +295,7 @@ fn cli_surface_contract_help_tokens_are_stable() {
                 "--move",
                 "--profile",
                 "--exclude",
+                "--content-policy",
                 "--json",
             ],
         ),
@@ -233,6 +318,7 @@ fn cli_surface_contract_help_tokens_are_stable() {
             ],
         ),
         (&["batch", "--help"], &["--keep-going", "--json", "script"]),
+        (&["check-update", "--help"], &["--json"]),
         (&["doctor", "--help"], &["--strict", "--json"]),
     ];
 
@@ -279,6 +365,20 @@ fn localized_help_uses_requested_english_surface() {
         "stdout: {help}"
     );
 
+    let update_help = run(sqz().args(["check-update", "--lang", "en-US", "--help"]));
+    assert!(
+        update_help.status.success(),
+        "stderr: {}",
+        stderr(&update_help)
+    );
+    let help = stdout(&update_help);
+    assert!(
+        help.contains("Check the stable Squallz release channel")
+            && help.contains("does not download or install update packages"),
+        "stdout: {help}"
+    );
+    assert!(!help.contains("检查 Squallz 稳定版"), "stdout: {help}");
+
     let compress_help = run(sqz().args(["compress", "--lang", "en-US", "--help"]));
     assert!(
         compress_help.status.success(),
@@ -291,7 +391,35 @@ fn localized_help_uses_requested_english_surface() {
         "stdout: {help}"
     );
     assert!(help.contains("--memory-limit"), "stdout: {help}");
+    assert!(
+        help.contains("Explicit --exclude rules are combined with the selected policy"),
+        "stdout: {help}"
+    );
     assert!(!help.contains("输入文件或目录"), "stdout: {help}");
+
+    let list_help = run(sqz().args(["list", "--lang", "en-US", "--help"]));
+    assert!(list_help.status.success(), "stderr: {}", stderr(&list_help));
+    let help = stdout(&list_help);
+    assert!(
+        help.contains("Search literal text across complete entry paths, ignoring case."),
+        "stdout: {help}"
+    );
+    assert!(!help.contains("按完整条目路径"), "stdout: {help}");
+
+    let nested_list_help = run(sqz()
+        .env("SQZ_LANG", "en-US")
+        .args(["nested", "list", "--help"]));
+    assert!(
+        nested_list_help.status.success(),
+        "stderr: {}",
+        stderr(&nested_list_help)
+    );
+    let help = stdout(&nested_list_help);
+    assert!(
+        help.contains("Search literal text across complete nested entry paths, ignoring case."),
+        "stdout: {help}"
+    );
+    assert!(!help.contains("按完整嵌套条目路径"), "stdout: {help}");
 
     let nested_help = run(sqz()
         .env("SQZ_LANG", "en-US")
@@ -320,6 +448,18 @@ fn localized_help_uses_requested_english_surface() {
     let help = stdout(&zh_root_help);
     assert!(
         help.contains("跨平台压缩解压工具") && help.contains("压缩文件/目录"),
+        "stdout: {help}"
+    );
+
+    let zh_update_help = run(sqz().args(["check-update", "--lang", "zh-CN", "--help"]));
+    assert!(
+        zh_update_help.status.success(),
+        "stderr: {}",
+        stderr(&zh_update_help)
+    );
+    let help = stdout(&zh_update_help);
+    assert!(
+        help.contains("检查 Squallz 稳定版软件更新") && help.contains("不会下载或安装"),
         "stdout: {help}"
     );
 }
@@ -397,6 +537,13 @@ fn output_style_modern_is_opt_in_and_keeps_json_stable() {
     assert!(text.contains("Selection"), "stdout: {text}");
     assert!(text.contains("Safety limits"), "stdout: {text}");
     assert!(text.contains("all entries"), "stdout: {text}");
+    assert!(text.contains("Scope"), "stdout: {text}");
+    assert!(text.contains("Target"), "stdout: {text}");
+    assert!(text.contains("Created"), "stdout: {text}");
+    assert!(text.contains("Skipped"), "stdout: {text}");
+    assert!(text.contains("Replaced"), "stdout: {text}");
+    assert!(text.contains("Renamed"), "stdout: {text}");
+    assert!(text.contains("failed"), "stdout: {text}");
 
     let out = run(sqz()
         .args([
@@ -1678,6 +1825,369 @@ fn sample_tree(dir: &Path) -> PathBuf {
     root
 }
 
+fn content_policy_tree(dir: &Path, name: &str) -> PathBuf {
+    let root = dir.join(name);
+    std::fs::create_dir_all(root.join("__MACOSX")).unwrap();
+    std::fs::write(root.join("keep.txt"), b"keep").unwrap();
+    std::fs::write(root.join(".env"), b"MODE=test").unwrap();
+    std::fs::write(root.join("skip.tmp"), b"scratch").unwrap();
+    std::fs::write(root.join(".DS_Store"), b"finder metadata").unwrap();
+    std::fs::write(root.join("._keep.txt"), b"appledouble metadata").unwrap();
+    std::fs::write(root.join("__MACOSX/metadata"), b"metadata").unwrap();
+    root
+}
+
+fn listed_paths(archive: &Path) -> Vec<String> {
+    let out = run(sqz().arg("list").arg(archive).arg("--json"));
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    stdout_json(&out)
+        .as_array()
+        .expect("entry array")
+        .iter()
+        .filter_map(|entry| entry["path"].as_str().map(str::to_owned))
+        .collect()
+}
+
+fn assert_cross_platform_clean(paths: &[String], root_name: &str) {
+    assert!(paths
+        .iter()
+        .any(|path| path == &format!("{root_name}/keep.txt")));
+    assert!(paths
+        .iter()
+        .any(|path| path == &format!("{root_name}/.env")));
+    assert!(!paths.iter().any(|path| path.ends_with("/.DS_Store")));
+    assert!(!paths.iter().any(|path| {
+        path.rsplit_once('/')
+            .is_some_and(|(_, name)| name.starts_with("._"))
+    }));
+    assert!(!paths
+        .iter()
+        .any(|path| path.contains("/__MACOSX/") || path.ends_with("/__MACOSX")));
+    assert!(!paths.iter().any(|path| path.ends_with(".tmp")));
+}
+
+#[cfg(target_os = "macos")]
+fn preset_path_for_test_home(home: &Path) -> PathBuf {
+    home.join("Library/Application Support/Squallz/presets.json")
+}
+
+#[cfg(target_os = "linux")]
+fn preset_path_for_test_home(home: &Path) -> PathBuf {
+    home.join(".config/Squallz/presets.json")
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn file_manager_create_fallback_uses_bound_shared_preset() {
+    let dir = temp_dir("file-manager-create-preset");
+    let home = dir.join("home");
+    let root = sample_tree(&dir);
+    std::fs::create_dir_all(root.join("__MACOSX")).unwrap();
+    std::fs::write(root.join(".DS_Store"), b"finder metadata").unwrap();
+    std::fs::write(root.join("._a.txt"), b"appledouble metadata").unwrap();
+    std::fs::write(root.join("__MACOSX/metadata"), b"metadata").unwrap();
+    std::fs::write(root.join(".env"), b"MODE=test").unwrap();
+    let archive = dir.join("preset-output.7z");
+
+    let mut document = squallz_core::PresetDocument::seeded();
+    let mut options = document
+        .presets
+        .iter()
+        .find_map(squallz_core::NamedPreset::create_options)
+        .expect("built-in create preset")
+        .clone();
+    options.level = squallz_core::PresetCompressionLevel::new(8).expect("valid level");
+    options.content_policy = squallz_core::CreateContentPolicy::CrossPlatformClean;
+    options.excludes.clear();
+    let id = squallz_core::PresetId::new("user.create.cli-fallback").expect("valid id");
+    document.presets.push(squallz_core::NamedPreset::Create {
+        id: id.clone(),
+        label: squallz_core::PresetLabel::new("CLI fallback").expect("valid label"),
+        built_in: false,
+        options,
+    });
+    document.bindings.file_manager_create = Some(id);
+    squallz_core::PresetStore::new(preset_path_for_test_home(&home))
+        .compare_and_swap(0, document)
+        .expect("write preset fixture");
+
+    let out = run(sqz()
+        .env("HOME", &home)
+        .env_remove("XDG_CONFIG_HOME")
+        .arg("compress")
+        .arg(&root)
+        .arg("-o")
+        .arg(&archive)
+        .arg("--file-manager-preset")
+        .arg("--json"));
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    let report = stdout_json(&out);
+    assert_eq!(report["level"], 8);
+    assert_eq!(report["output"], archive.display().to_string());
+
+    let listed = run(sqz().arg("list").arg(&archive).arg("--json"));
+    assert!(listed.status.success(), "stderr: {}", stderr(&listed));
+    let entries = stdout_json(&listed);
+    let paths: Vec<&str> = entries
+        .as_array()
+        .expect("entry array")
+        .iter()
+        .filter_map(|entry| entry["path"].as_str())
+        .collect();
+    assert!(!paths.iter().any(|path| path.ends_with(".DS_Store")));
+    assert!(!paths.iter().any(|path| path.ends_with("._a.txt")));
+    assert!(!paths.iter().any(|path| path.contains("__MACOSX")));
+    assert!(paths.iter().any(|path| path.ends_with(".env")));
+    assert!(paths.iter().any(|path| path.ends_with("junk.tmp")));
+    assert!(paths.iter().any(|path| path.contains(".git")));
+
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn file_manager_fallback_rejects_a_malformed_shared_preset() {
+    let dir = temp_dir("file-manager-malformed-preset");
+    let home = dir.join("home");
+    let input = dir.join("input.txt");
+    let archive = dir.join("must-not-exist.7z");
+    std::fs::write(&input, b"payload").unwrap();
+    let preset_path = preset_path_for_test_home(&home);
+    std::fs::create_dir_all(preset_path.parent().expect("preset parent")).unwrap();
+    std::fs::write(&preset_path, b"{not json").unwrap();
+
+    let out = run(sqz()
+        .env("HOME", &home)
+        .env_remove("XDG_CONFIG_HOME")
+        .args(["--lang", "en-US", "compress"])
+        .arg(&input)
+        .arg("-o")
+        .arg(&archive)
+        .arg("--file-manager-preset"));
+    assert_eq!(out.status.code(), Some(1), "stderr: {}", stderr(&out));
+    assert!(
+        stderr(&out).contains("cannot load the shared file-manager preset"),
+        "stderr: {}",
+        stderr(&out)
+    );
+    assert!(!archive.exists());
+
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn preset_cli_round_trips_clone_update_bind_and_delete() {
+    let dir = temp_dir("preset-cli-round-trip");
+    let home = dir.join("home");
+    let edit_file = dir.join("preset.json");
+
+    let listed = run(sqz()
+        .env("HOME", &home)
+        .env_remove("XDG_CONFIG_HOME")
+        .args(["--lang", "en-US", "preset", "list", "--json"]));
+    assert!(listed.status.success(), "stderr: {}", stderr(&listed));
+    let listed = stdout_json(&listed);
+    assert_eq!(listed["schema_version"], 4);
+    assert_eq!(listed["revision"], 0);
+    assert_eq!(listed["presets"].as_array().map(Vec::len), Some(3));
+
+    let cloned = run(sqz()
+        .env("HOME", &home)
+        .env_remove("XDG_CONFIG_HOME")
+        .args([
+            "--lang",
+            "en-US",
+            "preset",
+            "clone",
+            squallz_core::CROSS_PLATFORM_CREATE_PRESET_ID,
+            "user.create.portable",
+            "--label",
+            "Portable",
+            "--json",
+        ]));
+    assert!(cloned.status.success(), "stderr: {}", stderr(&cloned));
+    let cloned = stdout_json(&cloned);
+    assert_eq!(cloned["revision"], 1);
+    assert_eq!(cloned["preset"]["id"], "user.create.portable");
+    assert_eq!(cloned["preset"]["built_in"], false);
+
+    let shown = run(sqz()
+        .env("HOME", &home)
+        .env_remove("XDG_CONFIG_HOME")
+        .args([
+            "--lang",
+            "en-US",
+            "preset",
+            "show",
+            "user.create.portable",
+            "--json",
+        ]));
+    assert!(shown.status.success(), "stderr: {}", stderr(&shown));
+    let mut edited = stdout_json(&shown);
+    edited["label"] = serde_json::json!("Portable maximum");
+    edited["options"]["level"] = serde_json::json!(9);
+    std::fs::write(&edit_file, serde_json::to_vec_pretty(&edited).unwrap()).unwrap();
+
+    let updated = run(sqz()
+        .env("HOME", &home)
+        .env_remove("XDG_CONFIG_HOME")
+        .args([
+            "--lang",
+            "en-US",
+            "preset",
+            "update",
+            "user.create.portable",
+            "--file",
+        ])
+        .arg(&edit_file)
+        .arg("--json"));
+    assert!(updated.status.success(), "stderr: {}", stderr(&updated));
+    let updated = stdout_json(&updated);
+    assert_eq!(updated["revision"], 2);
+    assert_eq!(updated["preset"]["label"], "Portable maximum");
+    assert_eq!(updated["preset"]["options"]["level"], 9);
+
+    let bound = run(sqz()
+        .env("HOME", &home)
+        .env_remove("XDG_CONFIG_HOME")
+        .args([
+            "--lang",
+            "en-US",
+            "preset",
+            "bind",
+            "app-create",
+            "user.create.portable",
+            "--json",
+        ]));
+    assert!(bound.status.success(), "stderr: {}", stderr(&bound));
+    let bound = stdout_json(&bound);
+    assert_eq!(bound["revision"], 3);
+    assert_eq!(
+        bound["bindings"]["app_default_create"],
+        "user.create.portable"
+    );
+
+    let deleted = run(sqz()
+        .env("HOME", &home)
+        .env_remove("XDG_CONFIG_HOME")
+        .args([
+            "--lang",
+            "en-US",
+            "preset",
+            "delete",
+            "user.create.portable",
+            "--json",
+        ]));
+    assert!(deleted.status.success(), "stderr: {}", stderr(&deleted));
+    let deleted = stdout_json(&deleted);
+    assert_eq!(deleted["revision"], 4);
+    assert_eq!(
+        deleted["bindings"]["app_default_create"],
+        squallz_core::BALANCED_CREATE_PRESET_ID
+    );
+
+    let final_document = squallz_core::PresetStore::new(preset_path_for_test_home(&home))
+        .load()
+        .expect("preset document should remain readable");
+    assert_eq!(final_document.revision, 4);
+    assert!(final_document
+        .presets
+        .iter()
+        .all(|preset| preset.id().as_str() != "user.create.portable"));
+
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn preset_cli_rejects_unsafe_file_manager_binding_without_changing_document() {
+    let dir = temp_dir("preset-cli-binding-validation");
+    let home = dir.join("home");
+    let edit_file = dir.join("prompt.json");
+
+    let cloned = run(sqz()
+        .env("HOME", &home)
+        .env_remove("XDG_CONFIG_HOME")
+        .args([
+            "--lang",
+            "en-US",
+            "preset",
+            "clone",
+            squallz_core::CROSS_PLATFORM_CREATE_PRESET_ID,
+            "user.create.prompt",
+            "--label",
+            "Prompt for password",
+            "--json",
+        ]));
+    assert!(cloned.status.success(), "stderr: {}", stderr(&cloned));
+
+    let shown = run(sqz()
+        .env("HOME", &home)
+        .env_remove("XDG_CONFIG_HOME")
+        .args([
+            "--lang",
+            "en-US",
+            "preset",
+            "show",
+            "user.create.prompt",
+            "--json",
+        ]));
+    assert!(shown.status.success(), "stderr: {}", stderr(&shown));
+    let mut edited = stdout_json(&shown);
+    edited["options"]["credential"] = serde_json::json!({ "kind": "prompt" });
+    std::fs::write(&edit_file, serde_json::to_vec_pretty(&edited).unwrap()).unwrap();
+    let updated = run(sqz()
+        .env("HOME", &home)
+        .env_remove("XDG_CONFIG_HOME")
+        .args([
+            "--lang",
+            "en-US",
+            "preset",
+            "update",
+            "user.create.prompt",
+            "--file",
+        ])
+        .arg(&edit_file)
+        .arg("--json"));
+    assert!(updated.status.success(), "stderr: {}", stderr(&updated));
+    assert_eq!(stdout_json(&updated)["revision"], 2);
+
+    let rejected = run(sqz()
+        .env("HOME", &home)
+        .env_remove("XDG_CONFIG_HOME")
+        .args([
+            "--lang",
+            "en-US",
+            "preset",
+            "bind",
+            "file-manager-create",
+            "user.create.prompt",
+            "--json",
+        ]));
+    assert_eq!(rejected.status.code(), Some(1));
+    let rejected = stdout_json(&rejected);
+    assert_eq!(rejected["ok"], false);
+    assert!(rejected["error"]["message"]
+        .as_str()
+        .is_some_and(|message| message.contains("file-manager create preset")));
+
+    let document = squallz_core::PresetStore::new(preset_path_for_test_home(&home))
+        .load()
+        .expect("rejected binding must preserve the document");
+    assert_eq!(document.revision, 2);
+    assert_eq!(
+        document
+            .bindings
+            .file_manager_create
+            .as_ref()
+            .map(squallz_core::PresetId::as_str),
+        Some(squallz_core::CROSS_PLATFORM_CREATE_PRESET_ID)
+    );
+
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 #[test]
 fn batch_json_script_runs_core_archive_jobs() {
     let dir = temp_dir("batch-json");
@@ -1720,6 +2230,25 @@ fn batch_json_script_runs_core_archive_jobs() {
     assert_eq!(report["jobs"][0]["operation"], "estimate");
     assert_eq!(report["jobs"][1]["operation"], "test");
     assert_eq!(report["jobs"][2]["operation"], "extract");
+    assert_eq!(report["jobs"][2]["result"]["matched"], true);
+    assert_eq!(
+        report["jobs"][2]["result"]["plan"]["destination"],
+        extracted.display().to_string()
+    );
+    assert_eq!(report["jobs"][2]["result"]["plan"]["entries"], 1);
+    assert_eq!(
+        report["jobs"][2]["result"]["counts"]["destination"],
+        extracted.display().to_string()
+    );
+    assert_eq!(report["jobs"][2]["result"]["counts"]["created"], 1);
+    assert_eq!(report["jobs"][2]["result"]["counts"]["skipped"], 0);
+    assert_eq!(report["jobs"][2]["result"]["counts"]["replaced"], 0);
+    assert_eq!(report["jobs"][2]["result"]["counts"]["renamed"], 0);
+    assert_eq!(report["jobs"][2]["result"]["counts"]["failed"], 0);
+    assert_eq!(
+        report["results"][2]["result"]["counts"],
+        report["jobs"][2]["result"]["counts"]
+    );
     assert_eq!(report["jobs"][3]["operation"], "convert");
     assert_eq!(report["jobs"][4]["operation"], "checksum");
     assert_eq!(report["jobs"][4]["result"]["algorithm"], "sha256");
@@ -1741,6 +2270,256 @@ fn batch_json_script_runs_core_archive_jobs() {
         std::fs::read_to_string(extracted.join("project/a.txt")).unwrap(),
         "hello world"
     );
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn batch_content_policy_covers_create_estimate_pack_and_update() {
+    let dir = temp_dir("batch-content-policy");
+    let _root = content_policy_tree(&dir, "batch-policy-input");
+    let seed = dir.join("seed.txt");
+    let updated = dir.join("updated.zip");
+    std::fs::write(&seed, b"seed").unwrap();
+    let out = run(sqz().arg("compress").arg(&seed).arg("-o").arg(&updated));
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+
+    let script = dir.join("content-policy.json");
+    let manifest = serde_json::json!({
+        "jobs": [
+            {
+                "id": "estimate-clean",
+                "kind": "estimate",
+                "inputs": ["batch-policy-input"],
+                "content_policy": "cross_platform_clean",
+                "excludes": ["*.tmp", ".DS_Store", "*.tmp"]
+            },
+            {
+                "id": "compress-clean",
+                "kind": "compress",
+                "inputs": ["batch-policy-input"],
+                "output": "clean.zip",
+                "content_policy": "cross_platform_clean",
+                "excludes": ["*.tmp", ".DS_Store", "*.tmp"]
+            },
+            {
+                "id": "pack-clean",
+                "kind": "pack",
+                "inputs": ["batch-policy-input"],
+                "output": "clean.sqz",
+                "content_policy": "cross_platform_clean",
+                "excludes": ["*.tmp", ".DS_Store", "*.tmp"]
+            },
+            {
+                "id": "update-clean",
+                "kind": "update",
+                "archive": "updated.zip",
+                "add": ["batch-policy-input"],
+                "content_policy": "cross_platform_clean",
+                "excludes": ["*.tmp", ".DS_Store", "*.tmp"]
+            }
+        ]
+    });
+    std::fs::write(&script, serde_json::to_string_pretty(&manifest).unwrap()).unwrap();
+
+    let out = run(sqz().arg("batch").arg(&script).arg("--json"));
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    let report = stdout_json(&out);
+    assert_eq!(report["ok"], true);
+    assert_eq!(report["total"], 4);
+    assert_eq!(report["jobs"][0]["result"]["entries"], 3);
+    assert_eq!(report["jobs"][0]["result"]["files"], 2);
+
+    for archive in [dir.join("clean.zip"), dir.join("clean.sqz"), updated] {
+        assert_cross_platform_clean(&listed_paths(&archive), "batch-policy-input");
+    }
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn batch_create_jobs_report_actual_split_output_families() {
+    let dir = temp_dir("batch-create-report");
+    incompressible_file(&dir, "batch-data.bin");
+    let script = dir.join("batch.json");
+    let manifest = serde_json::json!({
+        "version": 1,
+        "jobs": [
+            {
+                "id": "compress-split",
+                "kind": "compress",
+                "inputs": ["batch-data.bin"],
+                "output": "batch.zip",
+                "split": 30 * 1024,
+                "profile": "fast"
+            },
+            {
+                "id": "pack-split",
+                "kind": "pack",
+                "inputs": ["batch-data.bin"],
+                "output": "batch.sqz",
+                "split": 30 * 1024,
+                "inner_format": "sqz",
+                "recovery": 10
+            },
+            {
+                "id": "compress-native-zip",
+                "kind": "compress",
+                "inputs": ["batch-data.bin"],
+                "output": "batch-native.zip",
+                "split": 64 * 1024,
+                "split_mode": "native",
+                "profile": "fast"
+            }
+        ]
+    });
+    std::fs::write(&script, serde_json::to_string_pretty(&manifest).unwrap()).unwrap();
+
+    let out = run(sqz().arg("batch").arg(&script).arg("--json"));
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    let report = stdout_json(&out);
+    assert_eq!(report["ok"], true);
+    assert_eq!(report["total"], 3);
+    assert_eq!(report["jobs"], report["results"]);
+
+    let compress = &report["jobs"][0]["result"];
+    assert_eq!(compress["operation"], "compress");
+    assert_eq!(compress["split"], true);
+    assert_eq!(
+        compress["output"],
+        dir.join("batch.zip").display().to_string()
+    );
+    assert_eq!(
+        compress["primary_output"],
+        dir.join("batch.zip.001").display().to_string()
+    );
+    let compress_volume_count = compress["volumes"].as_u64().unwrap() as usize;
+    let compress_outputs = json_output_paths(compress);
+    let expected_compress_outputs = (1..=compress_volume_count)
+        .map(|index| dir.join(format!("batch.zip.{index:03}")))
+        .collect::<Vec<_>>();
+    assert_eq!(compress_outputs, expected_compress_outputs);
+    assert_eq!(
+        compress["total_bytes"],
+        output_paths_bytes(&compress_outputs)
+    );
+
+    let pack = &report["jobs"][1]["result"];
+    assert_eq!(pack["operation"], "pack");
+    assert_eq!(pack["split"], true);
+    assert_eq!(pack["output"], dir.join("batch.sqz").display().to_string());
+    assert_eq!(
+        pack["primary_output"],
+        dir.join("batch.sqz.001").display().to_string()
+    );
+    let pack_volume_count = pack["volumes"].as_u64().unwrap() as usize;
+    let pack_outputs = json_output_paths(pack);
+    let expected_pack_volumes = (1..=pack_volume_count)
+        .map(|index| dir.join(format!("batch.sqz.{index:03}")))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        &pack_outputs[..pack_volume_count],
+        expected_pack_volumes.as_slice()
+    );
+    let mut expected_sidecars = std::fs::read_dir(&dir)
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("batch.sqz.rev"))
+        })
+        .collect::<Vec<_>>();
+    expected_sidecars.sort();
+    assert!(!expected_sidecars.is_empty());
+    assert_eq!(
+        &pack_outputs[pack_volume_count..],
+        expected_sidecars.as_slice()
+    );
+    assert_eq!(pack["total_bytes"], output_paths_bytes(&pack_outputs));
+
+    let native = &report["jobs"][2]["result"];
+    assert_eq!(native["operation"], "compress");
+    assert_eq!(native["split"], true);
+    assert_eq!(
+        native["primary_output"],
+        dir.join("batch-native.zip").display().to_string()
+    );
+    let native_outputs = json_output_paths(native);
+    assert_eq!(native_outputs.first(), Some(&dir.join("batch-native.z01")));
+    assert_eq!(native_outputs.last(), Some(&dir.join("batch-native.zip")));
+    assert!(native_outputs.len() >= 2);
+    assert!(native_outputs.iter().all(|path| path.is_file()));
+
+    let human = run(sqz()
+        .args(["--lang", "en-US", "--style", "modern", "--color", "never"])
+        .arg("batch")
+        .arg(&script));
+    assert!(human.status.success(), "stderr: {}", stderr(&human));
+    let human_text = stdout(&human);
+    assert!(
+        human_text.contains("Previous outputs need review"),
+        "stdout: {human_text}"
+    );
+    assert!(
+        human_text.contains("Test the new archive first"),
+        "stdout: {human_text}"
+    );
+    let retained = std::fs::read_dir(&dir)
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.to_string_lossy().contains(".split-backup-"))
+        .collect::<Vec<_>>();
+    assert!(!retained.is_empty());
+    for path in retained {
+        assert!(
+            human_text.contains(&path.display().to_string()),
+            "human batch output omitted preserved path {}: {human_text}",
+            path.display()
+        );
+    }
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn batch_convert_can_publish_native_zip_volumes() {
+    let dir = temp_dir("batch-convert-native-zip");
+    let input = incompressible_file_with_len(&dir, "payload.bin", 180 * 1024);
+    let source = dir.join("source.7z");
+    let create = run(sqz().arg("compress").arg(&input).arg("-o").arg(&source));
+    assert!(create.status.success(), "stderr: {}", stderr(&create));
+
+    let script = dir.join("batch.json");
+    let manifest = serde_json::json!({
+        "version": 1,
+        "jobs": [{
+            "id": "convert-native",
+            "kind": "convert",
+            "src": "source.7z",
+            "output": "converted.zip",
+            "split": 64 * 1024,
+            "split_mode": "native",
+            "profile": "balanced"
+        }]
+    });
+    std::fs::write(&script, serde_json::to_string_pretty(&manifest).unwrap()).unwrap();
+
+    let out = run(sqz().arg("batch").arg(&script).arg("--json"));
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    let report = stdout_json(&out);
+    let result = &report["jobs"][0]["result"];
+    let destination = dir.join("converted.zip");
+    let outputs = json_output_paths(result);
+    assert_eq!(result["operation"], "convert");
+    assert_eq!(result["split"], true);
+    assert_eq!(result["primary_output"], destination.display().to_string());
+    assert_eq!(outputs.first(), Some(&dir.join("converted.z01")));
+    assert_eq!(outputs.last(), Some(&destination));
+    assert!(outputs.len() >= 2);
+    assert!(outputs.iter().all(|path| path.is_file()));
 
     std::fs::remove_dir_all(&dir).unwrap();
 }
@@ -1959,6 +2738,38 @@ fn batch_extract_honors_shared_safety_limits() {
     assert_eq!(report["jobs"][0]["error_kind"], "resource_limit_exceeded");
     assert_eq!(report["jobs"][0]["exit_code"], 6);
 
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn batch_extract_no_match_preserves_an_invalid_destination() {
+    let dir = temp_dir("batch-no-match-invalid-destination");
+    let root = sample_tree(&dir);
+    let archive = dir.join("source.zip");
+    let occupied = dir.join("occupied-output");
+    let script = dir.join("batch.json");
+    let created = run(sqz().arg("compress").arg(&root).arg("-o").arg(&archive));
+    assert!(created.status.success(), "stderr: {}", stderr(&created));
+    std::fs::write(&occupied, b"keep").unwrap();
+    let manifest = serde_json::json!({
+        "version": 1,
+        "jobs": [{
+            "kind": "extract",
+            "archive": "source.zip",
+            "dest": "occupied-output",
+            "includes": ["does/not/exist"]
+        }]
+    });
+    std::fs::write(&script, serde_json::to_string_pretty(&manifest).unwrap()).unwrap();
+
+    let out = run(sqz().arg("batch").arg(&script).arg("--json"));
+
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    let report = stdout_json(&out);
+    assert_eq!(report["ok"], true);
+    assert_eq!(report["jobs"][0]["result"]["matched"], false);
+    assert_eq!(report["jobs"][0]["result"]["plan"]["entries"], 0);
+    assert_eq!(std::fs::read(&occupied).unwrap(), b"keep");
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -2278,6 +3089,7 @@ fn compress_list_test_extract_roundtrip_with_json() {
         .arg("-o")
         .arg(&archive)
         .args(["--format", "zip"])
+        .arg("--test-after-create")
         .arg("--json"));
     assert!(out.status.success(), "compress failed: {}", stderr(&out));
     let report: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("valid JSON");
@@ -2286,6 +3098,18 @@ fn compress_list_test_extract_roundtrip_with_json() {
     assert_eq!(report["output"], archive.display().to_string());
     assert_eq!(report["split"], false);
     assert_eq!(report["volumes"], 1);
+    assert_eq!(report["tested_after_create"], true);
+    assert!(report["entries_tested_after_create"]
+        .as_u64()
+        .is_some_and(|count| count > 0));
+    assert_eq!(
+        report["outputs"],
+        serde_json::json!([archive.display().to_string()])
+    );
+    assert_eq!(
+        report["total_bytes"],
+        std::fs::metadata(&archive).unwrap().len()
+    );
 
     // list --json: parseable array with complete fields
     let out = run(sqz().arg("list").arg(&archive).arg("--json"));
@@ -2304,6 +3128,39 @@ fn compress_list_test_extract_roundtrip_with_json() {
     assert!(file["crc32"].is_u64());
     assert_eq!(file["encrypted"], false);
     assert_eq!(file["encoding"], "utf-8");
+
+    // list --search: literal, case-insensitive full-path filtering keeps the
+    // existing JSON entry object unchanged.
+    let expected_nested_file = entries
+        .iter()
+        .find(|e| e["path"] == "project/sub/b.txt")
+        .cloned()
+        .expect("b.txt listed");
+    let out = run(sqz()
+        .arg("list")
+        .arg(&archive)
+        .args(["--search", "SUB\\B.TXT", "--json"]));
+    assert!(
+        out.status.success(),
+        "list --search failed: {}",
+        stderr(&out)
+    );
+    let filtered: serde_json::Value =
+        serde_json::from_str(&stdout(&out)).expect("valid filtered JSON");
+    assert_eq!(filtered, serde_json::json!([expected_nested_file]));
+
+    let out = run(sqz()
+        .arg("list")
+        .arg(&archive)
+        .args(["--search", "  ", "--json"]));
+    assert!(
+        out.status.success(),
+        "blank list --search failed: {}",
+        stderr(&out)
+    );
+    let unfiltered: serde_json::Value =
+        serde_json::from_str(&stdout(&out)).expect("valid unfiltered JSON");
+    assert_eq!(unfiltered.as_array(), Some(entries));
 
     // list --tree: human-readable hierarchy without changing JSON contracts
     let out = run(sqz()
@@ -2343,6 +3200,23 @@ fn compress_list_test_extract_roundtrip_with_json() {
     assert_eq!(report["best_effort"], false);
     assert_eq!(report["skipped"], 0);
     assert!(report["problems"].as_array().unwrap().is_empty());
+    assert_eq!(report["plan"]["destination"], dest.display().to_string());
+    assert_eq!(report["plan"]["layout"], "direct");
+    assert!(report["plan"]["entries"].as_u64().unwrap() >= 6);
+    assert_eq!(report["counts"]["destination"], dest.display().to_string());
+    assert!(report["counts"]["created"].as_u64().unwrap() >= 4);
+    assert_eq!(report["counts"]["skipped"], 0);
+    assert_eq!(report["counts"]["replaced"], 0);
+    assert_eq!(report["counts"]["renamed"], 0);
+    assert_eq!(report["counts"]["failed"], 0);
+    assert_eq!(report["selected_entries"], report["plan"]["entries"]);
+    assert_eq!(
+        report["counts"]["selected_entries"],
+        report["selected_entries"]
+    );
+    assert_eq!(report["counts"]["directories"], report["directories"]);
+    assert_eq!(report["counts"]["output_bytes"], report["output_bytes"]);
+    assert!(report["output_bytes"].as_u64().unwrap() > 0);
     assert_eq!(
         std::fs::read(dest.join("project/a.txt")).unwrap(),
         b"hello world"
@@ -2388,10 +3262,24 @@ fn nested_archive_list_and_extract_through_the_cli() {
         "inner compress failed: {}",
         stderr(&out)
     );
+    let loose_payload = dir.join("loose-payload.txt");
+    std::fs::write(&loose_payload, b"loose nested content").unwrap();
+    let logical_inner = dir.join("logical.zip");
+    let out = run(sqz()
+        .arg("compress")
+        .arg(&loose_payload)
+        .arg("-o")
+        .arg(&logical_inner));
+    assert!(
+        out.status.success(),
+        "loose inner compress failed: {}",
+        stderr(&out)
+    );
 
     let outer_root = dir.join("outer");
     std::fs::create_dir_all(outer_root.join("bundles")).unwrap();
     std::fs::copy(&inner, outer_root.join("bundles/inner.zip")).unwrap();
+    std::fs::copy(&logical_inner, outer_root.join("bundles/logical.zip")).unwrap();
     std::fs::write(outer_root.join("readme.txt"), b"outer").unwrap();
     let outer = dir.join("outer.zip");
     let out = run(sqz().arg("compress").arg(&outer_root).arg("-o").arg(&outer));
@@ -2417,6 +3305,28 @@ fn nested_archive_list_and_extract_through_the_cli() {
         .map(|e| e["path"].as_str().unwrap())
         .collect();
     assert!(paths.contains(&"project/sub/b.txt"));
+
+    let expected_nested_file = entries
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["path"] == "project/sub/b.txt")
+        .cloned()
+        .expect("nested b.txt listed");
+    let out = run(sqz()
+        .arg("nested")
+        .arg("list")
+        .arg(&outer)
+        .arg(nested_entry)
+        .args(["--search", "SUB\\B.TXT", "--json"]));
+    assert!(
+        out.status.success(),
+        "nested list --search failed: {}",
+        stderr(&out)
+    );
+    let filtered: serde_json::Value =
+        serde_json::from_str(&stdout(&out)).expect("valid nested filtered JSON");
+    assert_eq!(filtered, serde_json::json!([expected_nested_file]));
 
     let out = run(sqz()
         .arg("nested")
@@ -2479,11 +3389,49 @@ fn nested_archive_list_and_extract_through_the_cli() {
     assert_eq!(report["best_effort"], false);
     assert_eq!(report["skipped"], 0);
     assert!(report["problems"].as_array().unwrap().is_empty());
+    assert_eq!(report["plan"]["requested_destination"], report["dest"]);
+    assert_eq!(report["plan"]["destination"], report["dest"]);
+    assert_eq!(report["plan"]["layout"], "direct");
+    assert_eq!(report["plan"]["entries"], report["selected_entries"]);
+    assert_eq!(report["counts"]["destination"], report["dest"]);
+    assert_eq!(
+        report["counts"]["selected_entries"],
+        report["selected_entries"]
+    );
+    assert_eq!(report["counts"]["directories"], report["directories"]);
+    assert_eq!(report["counts"]["skipped"], 0);
+    assert_eq!(report["counts"]["replaced"], 0);
+    assert_eq!(report["counts"]["renamed"], 0);
+    assert_eq!(report["counts"]["failed"], 0);
+    assert_eq!(report["counts"]["output_bytes"], report["output_bytes"]);
+    assert_eq!(report["output_bytes"], 14);
     assert_eq!(
         std::fs::read(dest.join("project/sub/b.txt")).unwrap(),
         b"nested content"
     );
     assert!(!dest.join("project/a.txt").exists());
+
+    let out = run(sqz()
+        .args(["--lang", "en-US", "nested", "extract"])
+        .arg(&outer)
+        .arg(nested_entry)
+        .arg("-d")
+        .arg(&dest)
+        .arg("--include")
+        .arg("project/sub/*")
+        .arg("--json"));
+    assert!(
+        out.status.success(),
+        "nested conflict extract failed: {}",
+        stderr(&out)
+    );
+    let conflict = stdout_json(&out);
+    assert_eq!(
+        conflict["skipped"], 0,
+        "legacy skipped remains the best-effort problem count"
+    );
+    assert_eq!(conflict["counts"]["skipped"], 1);
+    assert_eq!(conflict["counts"]["failed"], 0);
 
     let empty_dest = dir.join("nested-empty-out");
     let out = run(sqz()
@@ -2508,7 +3456,61 @@ fn nested_archive_list_and_extract_through_the_cli() {
     assert_eq!(report["best_effort"], false);
     assert_eq!(report["skipped"], 0);
     assert!(report["problems"].as_array().unwrap().is_empty());
+    assert_eq!(report["plan"]["requested_destination"], report["dest"]);
+    assert_eq!(report["plan"]["destination"], report["dest"]);
+    assert_eq!(report["plan"]["entries"], 0);
+    assert_eq!(
+        report["counts"],
+        serde_json::json!({
+            "destination": empty_dest.display().to_string(),
+            "selected_entries": 0,
+            "created": 0,
+            "directories": 0,
+            "skipped": 0,
+            "replaced": 0,
+            "renamed": 0,
+            "failed": 0,
+            "output_bytes": 0
+        })
+    );
+    assert_eq!(report["selected_entries"], 0);
+    assert_eq!(report["directories"], 0);
+    assert_eq!(report["output_bytes"], 0);
     assert!(!empty_dest.exists());
+
+    let smart_dest = dir.join("nested-smart-out");
+    let out = run(sqz()
+        .args(["--lang", "en-US", "nested", "extract"])
+        .arg(&outer)
+        .arg("outer/bundles/logical.zip")
+        .arg("-d")
+        .arg(&smart_dest)
+        .args(["--smart", "--json"]));
+    assert!(
+        out.status.success(),
+        "nested smart extract failed: {}",
+        stderr(&out)
+    );
+    let report = stdout_json(&out);
+    let planned_dest = smart_dest.join("logical");
+    assert_eq!(report["dest"], planned_dest.display().to_string());
+    assert_eq!(report["plan"]["layout"], "wrap_in_folder");
+    assert_eq!(
+        report["plan"]["requested_destination"],
+        smart_dest.display().to_string()
+    );
+    assert_eq!(
+        report["plan"]["destination"],
+        planned_dest.display().to_string()
+    );
+    assert_eq!(
+        report["counts"]["destination"],
+        planned_dest.display().to_string()
+    );
+    assert_eq!(
+        std::fs::read(planned_dest.join("loose-payload.txt")).unwrap(),
+        b"loose nested content"
+    );
 
     let modern_dest = dir.join("nested-modern-out");
     let out = run(sqz()
@@ -2539,6 +3541,54 @@ fn nested_archive_list_and_extract_through_the_cli() {
         b"nested content"
     );
     assert!(!modern_dest.join("project/a.txt").exists());
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn compress_integrity_test_reuses_the_creation_password() {
+    let dir = temp_dir("create-integrity-password");
+    let root = sample_tree(&dir);
+    let archive = dir.join("protected.7z");
+
+    let out = run(sqz()
+        .args(["--lang", "en-US", "compress"])
+        .arg(&root)
+        .arg("-o")
+        .arg(&archive)
+        .args([
+            "--format",
+            "7z",
+            "--password",
+            "test password",
+            "--encrypt-names",
+            "--test-after-create",
+            "--json",
+        ]));
+
+    assert!(
+        out.status.success(),
+        "encrypted creation and integrity test failed: {}",
+        stderr(&out)
+    );
+    let report = stdout_json(&out);
+    assert_eq!(report["tested_after_create"], true);
+    assert!(report["entries_tested_after_create"]
+        .as_u64()
+        .is_some_and(|count| count > 0));
+
+    let out = run(sqz().arg("list").arg(&archive).arg("--json"));
+    assert_eq!(out.status.code(), Some(4), "stdout: {}", stdout(&out));
+
+    let out = run(sqz()
+        .arg("list")
+        .arg(&archive)
+        .args(["--password", "test password", "--json"]));
+    assert!(
+        out.status.success(),
+        "encrypted archive should reopen with its password: {}",
+        stderr(&out)
+    );
 
     std::fs::remove_dir_all(&dir).unwrap();
 }
@@ -2821,6 +3871,14 @@ fn pack_creates_sqz_container_as_a_first_class_cli_entry() {
     assert_eq!(report["volumes"], 1);
     assert_eq!(report["inner_format"], "sqz");
     assert_eq!(report["recovery_percent"], 10);
+    assert_eq!(
+        report["outputs"],
+        serde_json::json!([archive.display().to_string()])
+    );
+    assert_eq!(
+        report["total_bytes"],
+        std::fs::metadata(&archive).unwrap().len()
+    );
 
     let out = run(sqz().arg("list").arg(&archive).arg("--json"));
     assert!(out.status.success(), "list failed: {}", stderr(&out));
@@ -2868,9 +3926,24 @@ fn pack_creates_sqz_container_as_a_first_class_cli_entry() {
         dir.join("packed-split.sqz.001").display().to_string()
     );
     assert_eq!(report["split"], true);
-    assert!(report["volumes"].as_u64().unwrap() >= 2);
+    let split_volume_count = report["volumes"].as_u64().unwrap() as usize;
+    assert!(split_volume_count >= 2);
     assert_eq!(report["inner_format"], "sqz");
     assert_eq!(report["recovery_percent"], 10);
+    let split_outputs = json_output_paths(&report);
+    let expected_split_volumes = (1..=split_volume_count)
+        .map(|index| dir.join(format!("packed-split.sqz.{index:03}")))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        &split_outputs[..split_volume_count],
+        expected_split_volumes.as_slice()
+    );
+    assert!(split_outputs.len() > split_volume_count);
+    assert!(split_outputs[split_volume_count..].iter().all(|path| path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with("packed-split.sqz.rev"))));
+    assert_eq!(report["total_bytes"], output_paths_bytes(&split_outputs));
 
     let zip_profile_archive = dir.join("packed-zip-profile.sqz");
     let out = run(sqz()
@@ -3423,6 +4496,80 @@ fn compress_exclude_prunes_entries() {
 }
 
 #[test]
+fn create_content_policy_is_opt_in_across_cli_create_paths() {
+    let dir = temp_dir("content-policy-cli");
+    let root = content_policy_tree(&dir, "policy-input");
+
+    let legacy = dir.join("legacy.zip");
+    let out = run(sqz()
+        .arg("compress")
+        .arg(&root)
+        .arg("-o")
+        .arg(&legacy)
+        .args(["--exclude", "*.tmp"]));
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    let legacy_paths = listed_paths(&legacy);
+    assert!(legacy_paths.iter().any(|path| path.ends_with("/.DS_Store")));
+    assert!(legacy_paths
+        .iter()
+        .any(|path| path.ends_with("/._keep.txt")));
+    assert!(legacy_paths.iter().any(|path| path.contains("/__MACOSX/")));
+    assert!(!legacy_paths.iter().any(|path| path.ends_with(".tmp")));
+
+    let clean = dir.join("clean.zip");
+    let out = run(sqz()
+        .arg("compress")
+        .arg(&root)
+        .arg("-o")
+        .arg(&clean)
+        .args(["--content-policy", "cross-platform-clean"])
+        .args(["--exclude", "*.tmp", "--exclude", ".DS_Store"])
+        .args(["--exclude", "*.tmp"]));
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    assert_cross_platform_clean(&listed_paths(&clean), "policy-input");
+
+    let out = run(sqz()
+        .arg("estimate")
+        .arg(&root)
+        .args(["--content-policy", "cross-platform-clean"])
+        .args(["--exclude", "*.tmp"])
+        .arg("--json"));
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    let estimate = stdout_json(&out);
+    assert_eq!(estimate["entries"], 3);
+    assert_eq!(estimate["files"], 2);
+    assert_eq!(estimate["directories"], 1);
+
+    let packed = dir.join("clean.sqz");
+    let out = run(sqz()
+        .arg("pack")
+        .arg(&root)
+        .arg("-o")
+        .arg(&packed)
+        .args(["--content-policy", "cross-platform-clean"])
+        .args(["--exclude", "*.tmp"]));
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    assert_cross_platform_clean(&listed_paths(&packed), "policy-input");
+
+    let seed = dir.join("seed.txt");
+    let updated = dir.join("updated.zip");
+    std::fs::write(&seed, b"seed").unwrap();
+    let out = run(sqz().arg("compress").arg(&seed).arg("-o").arg(&updated));
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    let out = run(sqz()
+        .arg("update")
+        .arg(&updated)
+        .arg("--add")
+        .arg(&root)
+        .args(["--content-policy", "cross-platform-clean"])
+        .args(["--exclude", "*.tmp"]));
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    assert_cross_platform_clean(&listed_paths(&updated), "policy-input");
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
 fn compress_profile_matches_gui_presets_and_allows_level_override() {
     let dir = temp_dir("compress-profile");
     let root = sample_tree(&dir);
@@ -3486,7 +4633,7 @@ fn estimate_matches_gui_create_preflight_semantics() {
     assert_eq!(report["total_bytes"], 25);
     assert_eq!(
         report["output_budget_bytes"],
-        25 + 1024 * 1024 + 4 * 1024 + 4096
+        25 + 1024 * 1024 + 4 * 1024 + 4096 + 2
     );
     assert_eq!(report["disk"]["path"], planned.display().to_string());
     assert_eq!(
@@ -3546,7 +4693,101 @@ fn extract_include_selects_entries() {
     assert_eq!(report["best_effort"], false);
     assert_eq!(report["skipped"], 0);
     assert!(report["problems"].as_array().unwrap().is_empty());
+    assert_eq!(report["plan"]["destination"], dest2.display().to_string());
+    assert_eq!(report["plan"]["entries"], 0);
+    assert_eq!(
+        report["counts"],
+        serde_json::json!({
+            "destination": dest2.display().to_string(),
+            "selected_entries": 0,
+            "created": 0,
+            "directories": 0,
+            "skipped": 0,
+            "replaced": 0,
+            "renamed": 0,
+            "failed": 0,
+            "output_bytes": 0
+        })
+    );
+    assert_eq!(report["selected_entries"], 0);
+    assert_eq!(report["directories"], 0);
+    assert_eq!(report["output_bytes"], 0);
     assert!(!dest2.join("project").exists());
+
+    let occupied_dest = dir.join("occupied-no-match");
+    std::fs::write(&occupied_dest, b"keep").unwrap();
+    let out = run(sqz()
+        .arg("extract")
+        .arg(&archive)
+        .arg("-d")
+        .arg(&occupied_dest)
+        .args(["--include", "no/such/entry", "--json"]));
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    let report = stdout_json(&out);
+    assert_eq!(report["matched"], false);
+    assert_eq!(report["plan"]["entries"], 0);
+    assert_eq!(std::fs::read(&occupied_dest).unwrap(), b"keep");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn extract_smart_no_match_keeps_legacy_dest_and_reports_planned_target() {
+    let dir = temp_dir("extract-smart-no-match");
+    let input = dir.join("payload.txt");
+    let archive = dir.join("loose.zip");
+    std::fs::write(&input, b"payload").unwrap();
+    let out = run(sqz().arg("compress").arg(&input).arg("-o").arg(&archive));
+    assert!(out.status.success(), "compress failed: {}", stderr(&out));
+
+    let dest = dir.join("output");
+    let out = run(sqz()
+        .args(["--lang", "en-US", "extract"])
+        .arg(&archive)
+        .arg("-d")
+        .arg(&dest)
+        .args(["--include", "does/not/exist", "--smart", "--json"]));
+    assert!(out.status.success(), "extract failed: {}", stderr(&out));
+    let report = stdout_json(&out);
+    assert_eq!(report["matched"], false);
+    assert_eq!(report["dest"], dest.display().to_string());
+    assert_eq!(report["plan"]["layout"], "wrap_in_folder");
+    assert_eq!(
+        report["plan"]["destination"],
+        dest.join("loose").display().to_string()
+    );
+    assert_eq!(
+        report["counts"]["destination"],
+        dest.join("loose").display().to_string()
+    );
+    assert_eq!(report["counts"]["selected_entries"], 0);
+    assert_eq!(report["counts"]["created"], 0);
+    assert_eq!(report["counts"]["directories"], 0);
+    assert_eq!(report["counts"]["skipped"], 0);
+    assert_eq!(report["counts"]["replaced"], 0);
+    assert_eq!(report["counts"]["renamed"], 0);
+    assert_eq!(report["counts"]["failed"], 0);
+    assert_eq!(report["counts"]["output_bytes"], 0);
+    assert!(!dest.exists());
+
+    let occupied_dest = dir.join("occupied-output");
+    std::fs::create_dir_all(&occupied_dest).unwrap();
+    let occupied_wrapper = occupied_dest.join("loose");
+    std::fs::write(&occupied_wrapper, b"keep").unwrap();
+    let out = run(sqz()
+        .arg("extract")
+        .arg(&archive)
+        .arg("-d")
+        .arg(&occupied_dest)
+        .args(["--include", "does/not/exist", "--smart", "--json"]));
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    let report = stdout_json(&out);
+    assert_eq!(report["matched"], false);
+    assert_eq!(
+        report["plan"]["destination"],
+        occupied_wrapper.display().to_string()
+    );
+    assert_eq!(std::fs::read(&occupied_wrapper).unwrap(), b"keep");
+
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -3641,11 +4882,120 @@ fn extract_best_effort_skips_unreadable_entries() {
     assert_eq!(report["best_effort"], true);
     assert_eq!(report["skipped"], 1);
     assert!(report["problems"][0].as_str().unwrap().contains("bad.txt"));
+    assert_eq!(report["problems_total"], 1);
+    assert_eq!(report["problems_truncated"], false);
+    assert_eq!(
+        report["counts"]["destination"],
+        json_dest.display().to_string()
+    );
+    assert_eq!(report["counts"]["created"], 1);
+    assert_eq!(report["counts"]["skipped"], 0);
+    assert_eq!(report["counts"]["replaced"], 0);
+    assert_eq!(report["counts"]["renamed"], 0);
+    assert_eq!(report["counts"]["failed"], 1);
+    assert_eq!(
+        report["counts"]["selected_entries"],
+        report["plan"]["entries"]
+    );
+    assert_eq!(report["counts"]["output_bytes"], 9);
     assert_eq!(
         std::fs::read(json_dest.join("src/good.txt")).unwrap(),
         b"good-data"
     );
     assert!(!json_dest.join("src/bad.txt").exists());
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn extract_best_effort_json_bounds_problem_preview_without_losing_total() {
+    let dir = temp_dir("best-effort-bounded-problems");
+    let root = dir.join("src");
+    std::fs::create_dir_all(&root).unwrap();
+    let mut payloads = Vec::new();
+    for index in 0..25 {
+        let payload = format!("squallz-damaged-payload-{index:02}").into_bytes();
+        std::fs::write(root.join(format!("damaged-{index:02}.txt")), &payload).unwrap();
+        payloads.push(payload);
+    }
+    let archive = dir.join("damaged.zip");
+    let out = run(sqz()
+        .arg("compress")
+        .arg(&root)
+        .arg("-o")
+        .arg(&archive)
+        .args(["--level", "0"]));
+    assert!(out.status.success(), "compress failed: {}", stderr(&out));
+    for payload in &payloads {
+        corrupt_stored_zip_payload(&archive, payload);
+    }
+
+    let out = run(sqz()
+        .args(["--lang", "en-US", "test"])
+        .arg(&archive)
+        .arg("--json"));
+    assert_eq!(out.status.code(), Some(3), "stderr: {}", stderr(&out));
+    let test_report: serde_json::Value =
+        serde_json::from_str(&stdout(&out)).expect("valid test JSON");
+    assert_eq!(test_report["ok"], false);
+    assert_eq!(test_report["entries_tested"], 26);
+    assert_eq!(test_report["problems_total"], 25);
+    assert_eq!(test_report["problems_truncated"], true);
+    assert_eq!(test_report["problems"].as_array().map(Vec::len), Some(20));
+
+    let out = run(sqz()
+        .args(["--lang", "en-US", "--verbose", "test"])
+        .arg(&archive));
+    assert_eq!(out.status.code(), Some(3), "stderr: {}", stderr(&out));
+    assert!(
+        stderr(&out).contains("Showing the first 20 problems; 5 more were omitted."),
+        "stderr: {}",
+        stderr(&out)
+    );
+
+    let destination = dir.join("recovered");
+    let out = run(sqz()
+        .args(["--lang", "en-US", "extract"])
+        .arg(&archive)
+        .arg("-d")
+        .arg(&destination)
+        .arg("--best-effort")
+        .arg("--json"));
+    assert!(
+        out.status.success(),
+        "best-effort extract failed: {}",
+        stderr(&out)
+    );
+    let report: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("valid JSON");
+    assert_eq!(report["skipped"], 25);
+    assert_eq!(report["problems_total"], 25);
+    assert_eq!(report["problems_truncated"], true);
+    assert_eq!(report["problems"].as_array().map(Vec::len), Some(20));
+    assert_eq!(report["counts"]["failed"], 25);
+    assert_eq!(report["counts"]["created"], 0);
+
+    let verbose_destination = dir.join("recovered-verbose");
+    let out = run(sqz()
+        .args(["--lang", "en-US", "--verbose", "extract"])
+        .arg(&archive)
+        .arg("-d")
+        .arg(&verbose_destination)
+        .arg("--best-effort"));
+    assert!(
+        out.status.success(),
+        "verbose best-effort extract failed: {}",
+        stderr(&out)
+    );
+    assert!(
+        stderr(&out).contains("Best-effort extract skipped 25 unreadable item(s)"),
+        "stderr: {}",
+        stderr(&out)
+    );
+    assert!(
+        stderr(&out).contains("Showing the first 20 problems; 5 more were omitted."),
+        "stderr: {}",
+        stderr(&out)
+    );
 
     std::fs::remove_dir_all(&dir).unwrap();
 }
@@ -4234,6 +5584,72 @@ fn overwrite_ask_degrades_to_skip_without_a_tty() {
 }
 
 #[test]
+fn extract_json_separates_conflict_outcomes_from_legacy_best_effort_skips() {
+    let dir = temp_dir("extract-outcome-counts");
+    let root = sample_tree(&dir);
+    let archive = dir.join("out.zip");
+    let out = run(sqz().arg("compress").arg(&root).arg("-o").arg(&archive));
+    assert!(out.status.success(), "compress failed: {}", stderr(&out));
+
+    let run_policy = |name: &str, policy: &str| {
+        let dest = dir.join(name);
+        std::fs::create_dir_all(dest.join("project")).unwrap();
+        std::fs::write(dest.join("project/a.txt"), b"KEEP ME").unwrap();
+        let out = run(sqz()
+            .args(["--lang", "en-US", "extract"])
+            .arg(&archive)
+            .arg("-d")
+            .arg(&dest)
+            .args(["--overwrite", policy, "--json"]));
+        assert!(
+            out.status.success(),
+            "{policy} extract failed: {}",
+            stderr(&out)
+        );
+        (dest, stdout_json(&out))
+    };
+
+    let (skip_dest, skip) = run_policy("skip", "skip");
+    assert_eq!(skip["skipped"], 0, "legacy skipped must stay unchanged");
+    assert_eq!(
+        skip["counts"]["destination"],
+        skip_dest.display().to_string()
+    );
+    assert_eq!(skip["counts"]["skipped"], 1);
+    assert_eq!(skip["counts"]["replaced"], 0);
+    assert_eq!(skip["counts"]["renamed"], 0);
+    assert_eq!(skip["counts"]["failed"], 0);
+    assert_eq!(
+        std::fs::read(skip_dest.join("project/a.txt")).unwrap(),
+        b"KEEP ME"
+    );
+
+    let (replace_dest, replace) = run_policy("replace", "all");
+    assert_eq!(replace["skipped"], 0);
+    assert_eq!(replace["counts"]["skipped"], 0);
+    assert_eq!(replace["counts"]["replaced"], 1);
+    assert_eq!(replace["counts"]["renamed"], 0);
+    assert_eq!(replace["counts"]["failed"], 0);
+    assert_eq!(
+        std::fs::read(replace_dest.join("project/a.txt")).unwrap(),
+        b"hello world"
+    );
+
+    let (rename_dest, rename) = run_policy("rename", "rename");
+    assert_eq!(rename["skipped"], 0);
+    assert_eq!(rename["counts"]["skipped"], 0);
+    assert_eq!(rename["counts"]["replaced"], 0);
+    assert_eq!(rename["counts"]["renamed"], 1);
+    assert_eq!(rename["counts"]["failed"], 0);
+    assert_eq!(
+        std::fs::read(rename_dest.join("project/a.txt")).unwrap(),
+        b"KEEP ME"
+    );
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
 fn info_json_reports_formats_and_capabilities() {
     let out = run(sqz().arg("info").arg("--json"));
     assert!(out.status.success());
@@ -4271,17 +5687,47 @@ fn info_json_reports_formats_and_capabilities() {
         true
     );
     assert_eq!(
-        zip["implementation"]["release_gate"],
-        serde_json::Value::Null
+        zip["implementation"]["optional_external"]["scope"],
+        "native_split_read"
     );
+    assert_eq!(
+        zip["implementation"]["optional_external"]["env"],
+        "SQUALLZ_7Z"
+    );
+    assert!(zip["implementation"]["optional_external"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|tool| tool == "7zz"));
+    let limitations = zip["implementation"]["limitations"].as_array().unwrap();
+    let limitation = |scope: &str| {
+        limitations
+            .iter()
+            .find(|limitation| limitation["scope"] == scope)
+            .unwrap_or_else(|| panic!("{scope} ZIP limitation missing"))
+    };
+    assert_eq!(
+        limitation("native_split_read")["status"],
+        "external_required"
+    );
+    assert_eq!(limitation("native_split_create")["status"], "built_in");
+    assert_eq!(
+        limitation("native_split_encrypted")["status"],
+        "external_required"
+    );
+    assert!(zip["implementation"]["release_gate"]
+        .as_str()
+        .is_some_and(|gate| gate.contains("three-platform filesystem")));
 }
 
 #[test]
 fn info_json_reports_external_tool_availability() {
     let missing_7z = "/definitely/missing/squallz-test-7z";
+    let missing_unrar = "/definitely/missing/squallz-test-unrar";
     let missing_wimlib = "/definitely/missing/squallz-test-wimlib";
     let out = run(sqz()
         .env("SQUALLZ_7Z", missing_7z)
+        .env("SQUALLZ_UNRAR", missing_unrar)
         .env("SQUALLZ_WIMLIB", missing_wimlib)
         .env_remove("SQUALLZ_BSDTAR")
         .arg("info")
@@ -4309,15 +5755,31 @@ fn info_json_reports_external_tool_availability() {
     assert_eq!(rar_read["source"], "env");
     assert_eq!(rar_read["selected"], missing_7z);
     assert_eq!(rar_read["path_exists"], false);
+    let zip_split_read = &find("zip")["implementation"]["optional_external"]["availability"];
+    assert_eq!(zip_split_read["available"], false);
+    assert_eq!(zip_split_read["configured"], true);
+    assert_eq!(zip_split_read["source"], "env");
+    assert_eq!(zip_split_read["selected"], missing_7z);
+    assert_eq!(zip_split_read["path_exists"], false);
     let rar_policy = &find("rar")["implementation"]["policy"];
     assert_eq!(rar_policy["read_only"], true);
     assert_eq!(rar_policy["bundled"], false);
     assert_eq!(rar_policy["primary_env"], "SQUALLZ_7Z");
     assert_eq!(rar_policy["fallback_env"], "SQUALLZ_BSDTAR");
-    assert_eq!(rar_policy["fallback_scope"], "diagnostic_or_rar5_v6");
+    assert_eq!(rar_policy["rar7_decoder_env"], "SQUALLZ_UNRAR");
+    assert_eq!(
+        rar_policy["fallback_scope"],
+        "diagnostic_single_file_or_confirmed_unencrypted_rar7_v6"
+    );
     assert!(rar_policy["license_boundary"]
         .as_str()
-        .is_some_and(|boundary| boundary.contains("does not link unrar code")));
+        .is_some_and(|boundary| boundary.contains("does not link or bundle unrar code")));
+    let rar7_decoder = &find("rar")["implementation"]["availability"]["rar7_v6_decoder"];
+    assert_eq!(rar7_decoder["available"], false);
+    assert_eq!(rar7_decoder["configured"], true);
+    assert_eq!(rar7_decoder["source"], "env");
+    assert_eq!(rar7_decoder["selected"], missing_unrar);
+    assert_eq!(rar7_decoder["path_exists"], false);
 
     let wim_write = &find("wim")["implementation"]["availability"]["write"];
     assert_eq!(wim_write["available"], false);
@@ -4342,22 +5804,33 @@ fn info_json_reports_available_external_tool_from_path() {
     } else {
         bin.join("7zz")
     };
+    let unrar = if cfg!(windows) {
+        bin.join("unrar.exe")
+    } else {
+        bin.join("unrar")
+    };
     std::fs::write(&tool, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::write(&unrar, "#!/bin/sh\nexit 0\n").unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let mut perms = std::fs::metadata(&tool).unwrap().permissions();
         perms.set_mode(0o755);
         std::fs::set_permissions(&tool, perms).unwrap();
+        let mut perms = std::fs::metadata(&unrar).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&unrar, perms).unwrap();
     }
     let old_path = std::env::var_os("PATH").unwrap_or_default();
     let path =
         std::env::join_paths(std::iter::once(bin.clone()).chain(std::env::split_paths(&old_path)))
             .unwrap();
     let selected = tool.to_string_lossy().into_owned();
+    let selected_unrar = unrar.to_string_lossy().into_owned();
 
     let out = run(sqz()
         .env_remove("SQUALLZ_7Z")
+        .env_remove("SQUALLZ_UNRAR")
         .env_remove("SQUALLZ_BSDTAR")
         .env("PATH", path)
         .arg("info")
@@ -4387,8 +5860,16 @@ fn info_json_reports_available_external_tool_from_path() {
     assert_eq!(rar_read["path_exists"], true);
     assert_eq!(
         find("rar")["implementation"]["policy"]["fallback_scope"],
-        "diagnostic_or_rar5_v6"
+        "diagnostic_single_file_or_confirmed_unencrypted_rar7_v6"
     );
+    let rar7_decoder = &find("rar")["implementation"]["availability"]["rar7_v6_decoder"];
+    assert_eq!(rar7_decoder["available"], true);
+    assert_eq!(rar7_decoder["source"], "path");
+    assert_eq!(
+        rar7_decoder["selected"].as_str(),
+        Some(selected_unrar.as_str())
+    );
+    assert_eq!(rar7_decoder["path_exists"], true);
 
     std::fs::remove_dir_all(&dir).unwrap();
 }
@@ -4511,7 +5992,7 @@ fn info_text_marks_builtin_and_external_implementations() {
     );
     assert!(!zip_line.contains("yes"), "{zip_line}");
     assert!(
-        rar_line.contains("external: 7zz/7z; bsdtar diagnostic fallback"),
+        rar_line.contains("external: 7zz/7z; bsdtar and optional unrar fallback"),
         "{rar_line}"
     );
     assert!(rar_line.contains("extract test"), "{rar_line}");
@@ -4637,7 +6118,7 @@ fn info_modern_groups_formats_and_uses_capability_matrix() {
     assert!(text.contains("ready(7z)"), "{text}");
     assert!(text.contains("unsupported"), "{text}");
     assert!(text.contains("external: 7zz/7z"), "{text}");
-    assert!(text.contains("bsdtar diagnostic"), "{text}");
+    assert!(text.contains("optional unrar fallback"), "{text}");
     assert!(text.contains("external: 7zz read; wimlib write"), "{text}");
     assert!(!text.contains("Implementation:"), "{text}");
     assert_no_i18n_keys(&text);
@@ -4683,6 +6164,7 @@ fn info_lists_all_i3_formats_registry_driven() {
     assert_eq!(wim["kind"], "archive");
     assert_eq!(wim["capabilities"]["can_create"], true);
     assert_eq!(wim["capabilities"]["can_extract"], true);
+    assert_eq!(wim["capabilities"]["can_split"], true);
     assert_eq!(wim["capabilities"]["can_test"], true);
     assert_eq!(wim["implementation"]["status"], "external_required");
     assert_eq!(wim["implementation"]["write"]["env"], "SQUALLZ_WIMLIB");
@@ -4693,7 +6175,13 @@ fn info_lists_all_i3_formats_registry_driven() {
         .any(|tool| tool == "wimlib-imagex"));
     assert!(wim["implementation"]["release_gate"]
         .as_str()
-        .is_some_and(|gate| gate.contains("real WIM compatibility matrix")));
+        .is_some_and(|gate| gate.contains("three-platform")));
+    let wim_limitations = wim["implementation"]["limitations"]
+        .as_array()
+        .unwrap_or_else(|| panic!("WIM limitations missing from sqz info"));
+    assert!(wim_limitations.iter().any(|item| {
+        item["scope"] == "native_split_create" && item["status"] == "external_required"
+    }));
     for id in ["gzip", "bzip2", "xz", "zstd", "lz4", "brotli"] {
         assert_eq!(find(id)["kind"], "compressor");
     }
@@ -4715,6 +6203,15 @@ fn info_lists_all_i3_formats_registry_driven() {
         .unwrap()
         .iter()
         .any(|tool| tool == "bsdtar"));
+    assert!(rar["implementation"]["read"]["fallback_tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|tool| tool == "unrar"));
+    assert_eq!(
+        rar["implementation"]["read"]["rar7_decoder_env"],
+        "SQUALLZ_UNRAR"
+    );
     let rar_policy = &rar["implementation"]["policy"];
     assert_eq!(rar_policy["read_only"], true);
     assert_eq!(rar_policy["bundled"], false);
@@ -4728,7 +6225,20 @@ fn info_lists_all_i3_formats_registry_driven() {
         .unwrap()
         .iter()
         .any(|tool| tool == "bsdtar"));
-    assert_eq!(rar_policy["fallback_scope"], "diagnostic_or_rar5_v6");
+    assert!(rar_policy["fallback_tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|tool| tool == "unrar"));
+    assert_eq!(rar_policy["rar7_decoder_env"], "SQUALLZ_UNRAR");
+    assert_eq!(
+        rar_policy["fallback_scope"],
+        "diagnostic_single_file_or_confirmed_unencrypted_rar7_v6"
+    );
+    assert_eq!(
+        rar_policy["native_multi_volume"]["encrypted_read"],
+        "stdin_only_password_bridge"
+    );
     assert!(rar_policy["release_claim"]
         .as_str()
         .is_some_and(|claim| claim.contains("read-only public-sample subset")));
@@ -4750,8 +6260,12 @@ fn info_lists_all_i3_formats_registry_driven() {
     };
     assert!(has_rar_limit("create", "unsupported"));
     assert!(has_rar_limit("recovery_records", "unsupported"));
-    assert!(has_rar_limit("encrypted", "not_release_claimed"));
+    assert!(has_rar_limit(
+        "encrypted",
+        "implemented_not_release_claimed"
+    ));
     assert!(has_rar_limit("multi_volume", "not_release_claimed"));
+    assert!(has_rar_limit("rar7_v6", "implemented_not_release_claimed"));
     assert!(has_rar_limit("damaged_repair", "unsupported"));
     assert!(rar["extensions"]
         .as_array()
@@ -4956,7 +6470,8 @@ if [ "$1" = "capture" ]; then
   [ -f "$src/project/sub/b.txt" ]
   [ "$(cat "$src/project/a.txt")" = "hello world" ]
   [ "$(cat "$src/project/sub/b.txt")" = "nested content" ]
-  printf 'MSWIM\000\000\000fake-cli-wim' > "$out"
+  printf 'MSWIM\000\000\000\320\000\000\000\000\015\001\000\000\000\000\000\000\200\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\001\000\001\000' > "$out"
+  dd if=/dev/zero bs=164 count=1 >> "$out" 2>/dev/null
   exit 0
 fi
 printf 'unexpected wimlib args\n' >&2
@@ -5623,6 +7138,12 @@ fn compress_split_produces_volumes_and_reads_back_transparently() {
     );
     assert_eq!(report["split"], true);
     assert_eq!(report["volumes"], 4);
+    let json_outputs = json_output_paths(&report);
+    let expected_outputs = (1..=4)
+        .map(|index| dir.join(format!("out-json.zip.{index:03}")))
+        .collect::<Vec<_>>();
+    assert_eq!(json_outputs, expected_outputs);
+    assert_eq!(report["total_bytes"], output_paths_bytes(&json_outputs));
 
     // list/test/extract operate on the first volume transparently.
     let first = dir.join("out.zip.001");
@@ -5648,6 +7169,93 @@ fn compress_split_produces_volumes_and_reads_back_transparently() {
         "stderr: {}",
         stderr(&out)
     );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn compress_native_zip_split_reports_pkware_volume_family() {
+    let dir = temp_dir("native-zip-split-cli");
+    let input = incompressible_file_with_len(&dir, "data.bin", 180 * 1024);
+    let archive = dir.join("native.zip");
+
+    let out = run(sqz()
+        .arg("compress")
+        .arg(&input)
+        .arg("-o")
+        .arg(&archive)
+        .args(["--split", "64k", "--split-mode", "native", "--json"]));
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    let report = stdout_json(&out);
+    let outputs = json_output_paths(&report);
+    assert_eq!(report["split"], true);
+    assert_eq!(report["primary_output"], archive.display().to_string());
+    assert_eq!(outputs.first(), Some(&dir.join("native.z01")));
+    assert_eq!(outputs.last(), Some(&archive));
+    assert!(outputs.len() >= 3);
+    assert!(outputs.iter().all(|path| path.is_file()));
+    assert!(!dir.join("native.zip.001").exists());
+
+    let missing_size = run(sqz()
+        .arg("compress")
+        .arg(&input)
+        .arg("-o")
+        .arg(dir.join("invalid.zip"))
+        .args(["--split-mode", "native"]));
+    assert!(!missing_size.status.success());
+    assert!(
+        stderr(&missing_size).contains("--split"),
+        "stderr: {}",
+        stderr(&missing_size)
+    );
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn compress_split_human_output_reports_preserved_previous_outputs() {
+    let dir = temp_dir("split-cli-preserved-output");
+    let input = incompressible_file(&dir, "data.bin");
+    let archive = dir.join("out.zip");
+
+    let first = run(sqz()
+        .args(["--lang", "en-US", "--style", "classic"])
+        .arg("compress")
+        .arg(&input)
+        .arg("-o")
+        .arg(&archive)
+        .args(["--split", "30k"]));
+    assert!(first.status.success(), "stderr: {}", stderr(&first));
+
+    let second = run(sqz()
+        .args(["--lang", "en-US", "--style", "classic"])
+        .arg("compress")
+        .arg(&input)
+        .arg("-o")
+        .arg(&archive)
+        .args(["--split", "30k"]));
+    assert!(second.status.success(), "stderr: {}", stderr(&second));
+    assert!(stdout(&second).contains("Created"));
+    let warning = stderr(&second);
+    assert!(
+        warning.contains("Previous output paths kept")
+            && warning.contains("Test the new archive first"),
+        "stderr: {warning}"
+    );
+    let retained = std::fs::read_dir(&dir)
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.to_string_lossy().contains(".split-backup-"))
+        .collect::<Vec<_>>();
+    assert!(!retained.is_empty());
+    for path in retained {
+        assert!(
+            warning.contains(&path.display().to_string()),
+            "classic output omitted preserved path {}: {warning}",
+            path.display()
+        );
+    }
+
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -6256,6 +7864,109 @@ fn convert_zip_to_7z_to_zip_roundtrip() {
 }
 
 #[test]
+fn convert_can_publish_and_report_split_volumes() {
+    let dir = temp_dir("convert-cli-split");
+    let input = incompressible_file_with_len(&dir, "payload.bin", 400 * 1024);
+    let source = dir.join("source.zip");
+    let output = dir.join("converted.7z");
+    run(sqz().arg("compress").arg(&input).arg("-o").arg(&source));
+
+    let out = run(sqz()
+        .args(["--lang", "en-US", "convert"])
+        .arg(&source)
+        .arg("-o")
+        .arg(&output)
+        .args(["--split", "100k", "--json"]));
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    let report: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("valid JSON");
+    let primary = dir.join("converted.7z.001");
+    let second = dir.join("converted.7z.002");
+    assert_eq!(report["operation"], "convert");
+    assert_eq!(report["split"], true);
+    assert!(report["volumes"].as_u64().is_some_and(|count| count >= 2));
+    assert_eq!(report["primary_output"], primary.display().to_string());
+    assert!(report["outputs"]
+        .as_array()
+        .is_some_and(|outputs| outputs.len() >= 2));
+    assert!(!output.exists());
+    assert!(primary.is_file());
+    assert!(second.is_file());
+
+    let out = run(sqz().arg("list").arg(&primary).arg("--json"));
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    let entries: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("valid JSON");
+    assert!(entries
+        .as_array()
+        .is_some_and(|entries| entries.iter().any(|entry| entry["path"] == "payload.bin")));
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn convert_and_export_require_explicit_existing_output_authorization() {
+    let dir = temp_dir("convert-export-output-policy");
+    let root = sample_tree(&dir);
+    let zip = dir.join("source.zip");
+    let sqz_archive = dir.join("source.sqz");
+    run(sqz().arg("compress").arg(&root).arg("-o").arg(&zip));
+    run(sqz().arg("compress").arg(&root).arg("-o").arg(&sqz_archive));
+
+    let converted = dir.join("converted.7z");
+    std::fs::write(&converted, b"keep converted output").unwrap();
+    let out = run(sqz()
+        .args(["--lang", "en-US", "convert"])
+        .arg(&zip)
+        .arg("-o")
+        .arg(&converted)
+        .arg("--json"));
+    assert_json_error(
+        &out,
+        7,
+        "output_exists",
+        "output location is already occupied",
+    );
+    assert_eq!(std::fs::read(&converted).unwrap(), b"keep converted output");
+
+    let out = run(sqz()
+        .arg("convert")
+        .arg(&zip)
+        .arg("-o")
+        .arg(&converted)
+        .args(["--force", "--json"]));
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    let out = run(sqz().arg("list").arg(&converted).arg("--json"));
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+
+    let exported = dir.join("exported.zip");
+    std::fs::write(&exported, b"keep exported output").unwrap();
+    let out = run(sqz()
+        .args(["--lang", "en-US", "export"])
+        .arg(&sqz_archive)
+        .arg("-o")
+        .arg(&exported)
+        .arg("--json"));
+    assert_json_error(
+        &out,
+        7,
+        "output_exists",
+        "output location is already occupied",
+    );
+    assert_eq!(std::fs::read(&exported).unwrap(), b"keep exported output");
+
+    let out = run(sqz()
+        .arg("export")
+        .arg(&sqz_archive)
+        .arg("-o")
+        .arg(&exported)
+        .args(["--force", "--json"]));
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    let out = run(sqz().arg("list").arg(&exported).arg("--json"));
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
 fn cli_encrypt_names_hides_7z_header_until_password_is_supplied() {
     let dir = temp_dir("cli-7z-header");
     let root = sample_tree(&dir);
@@ -6659,27 +8370,91 @@ fn update_add_delete_rename_through_the_cli() {
 #[cfg(unix)]
 #[test]
 fn recovery_commands_bridge_to_external_par2_tool() {
+    use base64::Engine as _;
     use std::os::unix::fs::PermissionsExt;
 
     let dir = temp_dir("recovery-cli");
     let archive = dir.join("protected.zip");
     let recovery = dir.join("protected.zip.par2");
+    let recovery_fixture = dir.join("protected.zip.fixture.par2");
+    let recovery_volume_fixture = dir.join("protected.zip.fixture.vol0+1.par2");
+    let multi_first = dir.join("set.zip.001");
+    let multi_second = dir.join("set.zip.002");
+    let multi_recovery = dir.join("set.zip.par2");
+    let multi_recovery_volume = dir.join("set.zip.vol0+4.par2");
     let tool = dir.join("fake-par2");
     let log = dir.join("fake-par2.log");
     std::fs::write(&archive, b"archive bytes").unwrap();
+    std::fs::write(&multi_first, b"damaged").unwrap();
+    let fixture = base64::engine::general_purpose::STANDARD
+        .decode(include_str!("../../squallz-recovery/tests/fixtures/protected.zip.par2.b64").trim())
+        .unwrap();
+    std::fs::write(&recovery_fixture, fixture).unwrap();
+    std::fs::write(
+        &recovery_volume_fixture,
+        base64::engine::general_purpose::STANDARD
+            .decode(
+                include_str!("../../squallz-recovery/tests/fixtures/protected.zip.vol0+1.par2.b64")
+                    .trim(),
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        &multi_recovery,
+        base64::engine::general_purpose::STANDARD
+            .decode(
+                include_str!("../../squallz-recovery/tests/fixtures/multi-set.zip.par2.b64").trim(),
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        &multi_recovery_volume,
+        base64::engine::general_purpose::STANDARD
+            .decode(
+                include_str!("../../squallz-recovery/tests/fixtures/multi-set.zip.vol0+4.par2.b64")
+                    .trim(),
+            )
+            .unwrap(),
+    )
+    .unwrap();
     std::fs::write(
         &tool,
         r#"#!/bin/sh
 echo "$*" >> "$SQUALLZ_FAKE_PAR2_LOG"
 case "$1" in
   create)
-    printf 'fake recovery data\n' > "$3"
+    cp "$SQUALLZ_FAKE_PAR2_FIXTURE" "$4"
+    cp "$SQUALLZ_FAKE_PAR2_VOLUME_FIXTURE" "${4%.par2}.vol0+1.par2"
     ;;
   verify|repair)
-    test -f "$2" || exit 2
+    recovery="$2"
+    base=""
+    case "$2" in
+      -B*)
+        base="${2#-B}"
+        recovery="$3"
+        ;;
+    esac
+    test -f "$recovery" || exit 2
     if [ "$1" = repair ]; then
-      target="${2%.par2}"
-      printf 'repaired bytes\n' > "$target"
+      if [ -n "$base" ] && [ "$(basename "${recovery%.par2}")" = "set.zip" ]; then
+        printf 'first-volume-original\n' > "$base/set.zip.001"
+        printf 'second-volume-original\n' > "$base/set.zip.002"
+      elif [ -n "$base" ]; then
+        target="$base/$(basename "${recovery%.par2}")"
+        printf 'archive bytes' > "$target"
+      else
+        target="${recovery%.par2}"
+        printf 'archive bytes' > "$target"
+      fi
+      if [ -n "${SQUALLZ_FAKE_PAR2_COMPETITOR:-}" ]; then
+        printf 'competing output\n' > "$SQUALLZ_FAKE_PAR2_COMPETITOR"
+      fi
+      if [ -n "${SQUALLZ_FAKE_PAR2_FAIL:-}" ]; then
+        exit "$SQUALLZ_FAKE_PAR2_FAIL"
+      fi
     fi
     ;;
   *)
@@ -6696,6 +8471,8 @@ esac
     let out = run(sqz()
         .env("SQUALLZ_PAR2", &tool)
         .env("SQUALLZ_FAKE_PAR2_LOG", &log)
+        .env("SQUALLZ_FAKE_PAR2_FIXTURE", &recovery_fixture)
+        .env("SQUALLZ_FAKE_PAR2_VOLUME_FIXTURE", &recovery_volume_fixture)
         .arg("protect")
         .arg(&archive)
         .arg("--recovery")
@@ -6706,14 +8483,18 @@ esac
     assert_eq!(report["ok"], true);
     assert_eq!(report["operation"], "protect");
     assert_eq!(report["redundancy_percent"], 12);
+    assert_eq!(report["outputs"].as_array().map(Vec::len), Some(2));
     let recovery_path = recovery.to_string_lossy().into_owned();
     assert_eq!(report["recovery"].as_str(), Some(recovery_path.as_str()));
     assert!(recovery.is_file());
+    assert!(dir.join("protected.zip.vol0+1.par2").is_file());
 
     let modern_recovery = dir.join("modern.zip.par2");
     let out = run(sqz()
         .env("SQUALLZ_PAR2", &tool)
         .env("SQUALLZ_FAKE_PAR2_LOG", &log)
+        .env("SQUALLZ_FAKE_PAR2_FIXTURE", &recovery_fixture)
+        .env("SQUALLZ_FAKE_PAR2_VOLUME_FIXTURE", &recovery_volume_fixture)
         .args(["--lang", "en-US", "--style", "modern", "--color", "never"])
         .arg("protect")
         .arg(&archive)
@@ -6727,16 +8508,44 @@ esac
             && text.contains("Recovery report")
             && text.contains("Operation")
             && text.contains("Tool")
+            && text.contains("Files")
             && text.contains("protect")
+            && text.contains("modern.zip.par2")
+            && text.contains("modern.zip.vol0+1.par2")
             && text.contains("┬")
             && text.contains("┼"),
-        "modern recovery output should use a status panel and table: {text}"
+        "modern recovery output should show the complete physical output set: {text}"
     );
     assert!(modern_recovery.is_file());
+    assert!(dir.join("modern.zip.vol0+1.par2").is_file());
+
+    let classic_recovery = dir.join("classic.zip.par2");
+    let out = run(sqz()
+        .env("SQUALLZ_PAR2", &tool)
+        .env("SQUALLZ_FAKE_PAR2_LOG", &log)
+        .env("SQUALLZ_FAKE_PAR2_FIXTURE", &recovery_fixture)
+        .env("SQUALLZ_FAKE_PAR2_VOLUME_FIXTURE", &recovery_volume_fixture)
+        .args(["--lang", "en-US", "--style", "classic"])
+        .arg("protect")
+        .arg(&archive)
+        .arg("--recovery")
+        .arg(&classic_recovery)
+        .args(["--redundancy", "12%"]));
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    let text = stdout(&out);
+    assert!(
+        text.contains("Files:")
+            && text.contains(classic_recovery.to_string_lossy().as_ref())
+            && text.contains("classic.zip.vol0+1.par2"),
+        "classic recovery output should show the complete physical output set: {text}"
+    );
+    assert!(classic_recovery.is_file());
+    assert!(dir.join("classic.zip.vol0+1.par2").is_file());
 
     let out = run(sqz()
         .env("SQUALLZ_PAR2", &tool)
         .env("SQUALLZ_FAKE_PAR2_LOG", &log)
+        .env("SQUALLZ_FAKE_PAR2_FIXTURE", &recovery_fixture)
         .arg("verify")
         .arg(&archive)
         .arg("--use-recovery")
@@ -6751,6 +8560,7 @@ esac
     let out = run(sqz()
         .env("SQUALLZ_PAR2", &tool)
         .env("SQUALLZ_FAKE_PAR2_LOG", &log)
+        .env("SQUALLZ_FAKE_PAR2_FIXTURE", &recovery_fixture)
         .args(["--lang", "en-US", "--style", "modern", "--color", "never"])
         .arg("verify")
         .arg(&archive)
@@ -6774,6 +8584,8 @@ esac
     let out = run(sqz()
         .env("SQUALLZ_PAR2", &tool)
         .env("SQUALLZ_FAKE_PAR2_LOG", &log)
+        .env("SQUALLZ_FAKE_PAR2_FIXTURE", &recovery_fixture)
+        .args(["--lang", "en-US"])
         .arg("repair")
         .arg(&archive)
         .arg("--use-recovery")
@@ -6785,19 +8597,16 @@ esac
     assert_eq!(report["ok"], true);
     assert_eq!(report["operation"], "repair");
 
-    let modern_repair_archive = dir.join("modern-repair.zip");
-    let modern_repair_recovery = dir.join("modern-repair.zip.par2");
-    std::fs::write(&modern_repair_archive, b"damaged bytes").unwrap();
-    std::fs::write(&modern_repair_recovery, b"fake recovery data").unwrap();
     let out = run(sqz()
         .env("SQUALLZ_PAR2", &tool)
         .env("SQUALLZ_FAKE_PAR2_LOG", &log)
+        .env("SQUALLZ_FAKE_PAR2_FIXTURE", &recovery_fixture)
         .args(["--lang", "en-US", "--style", "modern", "--color", "never"])
         .arg("repair")
-        .arg(&modern_repair_archive)
+        .arg(&archive)
         .arg("--use-recovery")
         .arg("--recovery")
-        .arg(&modern_repair_recovery));
+        .arg(&recovery));
     assert!(out.status.success(), "stderr: {}", stderr(&out));
     let text = stdout(&out);
     assert!(
@@ -6811,24 +8620,19 @@ esac
             && text.contains("┼"),
         "modern recovery repair output should use a status panel and table: {text}"
     );
-    assert_eq!(
-        std::fs::read(&modern_repair_archive).unwrap(),
-        b"repaired bytes\n"
-    );
+    assert_eq!(std::fs::read(&archive).unwrap(), b"archive bytes");
 
-    let copy_archive = dir.join("damaged.zip");
-    let copy_recovery = dir.join("damaged.zip.par2");
     let copy_output = dir.join("restored.zip");
-    std::fs::write(&copy_archive, b"damaged bytes").unwrap();
-    std::fs::write(&copy_recovery, b"fake recovery data").unwrap();
     let out = run(sqz()
         .env("SQUALLZ_PAR2", &tool)
         .env("SQUALLZ_FAKE_PAR2_LOG", &log)
+        .env("SQUALLZ_FAKE_PAR2_FIXTURE", &recovery_fixture)
+        .args(["--lang", "en-US"])
         .arg("repair")
-        .arg(&copy_archive)
+        .arg(&archive)
         .arg("--use-recovery")
         .arg("--recovery")
-        .arg(&copy_recovery)
+        .arg(&recovery)
         .arg("--output")
         .arg(&copy_output)
         .arg("--json"));
@@ -6838,29 +8642,303 @@ esac
     assert_eq!(report["operation"], "repair");
     let output_path = copy_output.to_string_lossy().into_owned();
     assert_eq!(report["output"].as_str(), Some(output_path.as_str()));
-    assert_eq!(std::fs::read(&copy_archive).unwrap(), b"damaged bytes");
-    assert_eq!(std::fs::read(&copy_output).unwrap(), b"repaired bytes\n");
+    assert_eq!(std::fs::read(&archive).unwrap(), b"archive bytes");
+    assert_eq!(std::fs::read(&copy_output).unwrap(), b"archive bytes");
+
+    let multi_output = dir.join("restored-set");
+    let out = run(sqz()
+        .env("SQUALLZ_PAR2", &tool)
+        .env("SQUALLZ_FAKE_PAR2_LOG", &log)
+        .arg("repair")
+        .arg(&multi_first)
+        .arg("--use-recovery")
+        .arg("--recovery")
+        .arg(&multi_recovery)
+        .arg("--output-dir")
+        .arg(&multi_output)
+        .arg("--json"));
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    let report: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
+    assert_eq!(report["ok"], true);
+    assert_eq!(report["operation"], "repair");
+    assert_eq!(report["source_file_count"], 2);
+    assert_eq!(
+        report["output"].as_str(),
+        Some(multi_output.to_string_lossy().as_ref())
+    );
+    assert_eq!(
+        std::fs::read(multi_output.join("set.zip.001")).unwrap(),
+        b"first-volume-original\n"
+    );
+    assert_eq!(
+        std::fs::read(multi_output.join("set.zip.002")).unwrap(),
+        b"second-volume-original\n"
+    );
+    assert_eq!(std::fs::read(&multi_first).unwrap(), b"damaged");
+    assert!(!multi_second.exists());
+    assert!(std::fs::read_dir(&multi_output).unwrap().all(|entry| {
+        !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .to_ascii_lowercase()
+            .ends_with(".par2")
+    }));
+
+    let batch_output = dir.join("batch-restored-set");
+    let batch_script = dir.join("repair-set-batch.json");
+    std::fs::write(
+        &batch_script,
+        serde_json::json!({
+            "jobs": [{
+                "id": "repair-set",
+                "operation": "repair_recovery",
+                "archive": multi_first,
+                "recovery_path": multi_recovery,
+                "output_dir": batch_output
+            }]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let out = run(sqz()
+        .env("SQUALLZ_PAR2", &tool)
+        .env("SQUALLZ_FAKE_PAR2_LOG", &log)
+        .arg("batch")
+        .arg(&batch_script)
+        .arg("--json"));
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    let report: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
+    assert_eq!(report["jobs"][0]["ok"], true);
+    assert_eq!(report["jobs"][0]["result"]["source_file_count"], 2);
+    assert_eq!(
+        std::fs::read(batch_output.join("set.zip.001")).unwrap(),
+        b"first-volume-original\n"
+    );
+    assert_eq!(
+        std::fs::read(batch_output.join("set.zip.002")).unwrap(),
+        b"second-volume-original\n"
+    );
+
+    let source_before_conflicts = std::fs::read(&archive).unwrap();
+    std::fs::write(&copy_output, b"existing output\n").unwrap();
+    let log_before_existing_conflict = std::fs::read_to_string(&log).unwrap();
+    let out = run(sqz()
+        .env("SQUALLZ_PAR2", &tool)
+        .env("SQUALLZ_FAKE_PAR2_LOG", &log)
+        .env("SQUALLZ_FAKE_PAR2_FIXTURE", &recovery_fixture)
+        .args(["--lang", "en-US"])
+        .arg("repair")
+        .arg(&archive)
+        .arg("--use-recovery")
+        .arg("--recovery")
+        .arg(&recovery)
+        .arg("--output")
+        .arg(&copy_output)
+        .arg("--json"));
+    assert_json_error(
+        &out,
+        7,
+        "output_exists",
+        "output location is already occupied",
+    );
+    assert_eq!(std::fs::read(&copy_output).unwrap(), b"existing output\n");
+    assert_eq!(std::fs::read(&archive).unwrap(), source_before_conflicts);
+    assert_eq!(
+        std::fs::read_to_string(&log).unwrap(),
+        log_before_existing_conflict,
+        "an existing output should be rejected before running PAR2"
+    );
+
+    let late_output = dir.join("late-restored.zip");
+    let out = run(sqz()
+        .env("SQUALLZ_PAR2", &tool)
+        .env("SQUALLZ_FAKE_PAR2_LOG", &log)
+        .env("SQUALLZ_FAKE_PAR2_FIXTURE", &recovery_fixture)
+        .env("SQUALLZ_FAKE_PAR2_COMPETITOR", &late_output)
+        .args(["--lang", "en-US"])
+        .arg("repair")
+        .arg(&archive)
+        .arg("--use-recovery")
+        .arg("--recovery")
+        .arg(&recovery)
+        .arg("--output")
+        .arg(&late_output)
+        .arg("--json"));
+    assert_json_error(
+        &out,
+        7,
+        "output_exists",
+        "output location is already occupied",
+    );
+    assert_eq!(std::fs::read(&late_output).unwrap(), b"competing output\n");
+    assert_eq!(std::fs::read(&archive).unwrap(), source_before_conflicts);
+
+    let failed_output = dir.join("failed-restored.zip");
+    let out = run(sqz()
+        .env("SQUALLZ_PAR2", &tool)
+        .env("SQUALLZ_FAKE_PAR2_LOG", &log)
+        .env("SQUALLZ_FAKE_PAR2_FIXTURE", &recovery_fixture)
+        .env("SQUALLZ_FAKE_PAR2_FAIL", "9")
+        .args(["--lang", "en-US"])
+        .arg("repair")
+        .arg(&archive)
+        .arg("--use-recovery")
+        .arg("--recovery")
+        .arg(&recovery)
+        .arg("--output")
+        .arg(&failed_output)
+        .arg("--json"));
+    assert_eq!(out.status.code(), Some(3), "stdout: {}", stdout(&out));
+    let failed_report: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
+    assert_eq!(failed_report["ok"], false);
+    assert_eq!(failed_report["output"], serde_json::Value::Null);
+    assert_eq!(failed_report["status_code"], 9);
+    assert!(!failed_output.exists());
+    assert_eq!(std::fs::read(&archive).unwrap(), source_before_conflicts);
+    assert!(std::fs::read_dir(&dir).unwrap().all(|entry| {
+        !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .contains(".sqz-par2-repair-")
+    }));
 
     let log = std::fs::read_to_string(&log).unwrap();
     assert!(log.contains("create -r12"), "log: {log}");
     assert!(log.contains("verify"), "log: {log}");
     assert!(log.contains("repair"), "log: {log}");
+    assert!(std::fs::read_dir(&dir).unwrap().all(|entry| {
+        let name = entry.unwrap().file_name();
+        let name = name.to_string_lossy();
+        !name.contains(".sqz-par2-protect-") && !name.ends_with(".squallz-output-set.json")
+    }));
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
 #[cfg(unix)]
 #[test]
+fn protect_rejects_existing_destinations_and_unexpected_backend_outputs() {
+    use base64::Engine as _;
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = temp_dir("recovery-protect-boundaries");
+    let archive = dir.join("protected.zip");
+    let recovery = dir.join("protected.zip.par2");
+    let volume = dir.join("protected.zip.vol0+1.par2");
+    let fixture = dir.join("fixture.par2");
+    let volume_fixture = dir.join("fixture.vol0+1.par2");
+    let tool = dir.join("fake-par2");
+    let log = dir.join("fake-par2.log");
+    std::fs::write(&archive, b"archive bytes").unwrap();
+    std::fs::write(
+        &fixture,
+        base64::engine::general_purpose::STANDARD
+            .decode(
+                include_str!("../../squallz-recovery/tests/fixtures/protected.zip.par2.b64").trim(),
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        &volume_fixture,
+        base64::engine::general_purpose::STANDARD
+            .decode(
+                include_str!("../../squallz-recovery/tests/fixtures/protected.zip.vol0+1.par2.b64")
+                    .trim(),
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        &tool,
+        r#"#!/bin/sh
+echo "$*" >> "$SQUALLZ_FAKE_PAR2_LOG"
+cp "$SQUALLZ_FAKE_PAR2_FIXTURE" "$4"
+cp "$SQUALLZ_FAKE_PAR2_VOLUME_FIXTURE" "${4%.par2}.vol0+1.par2"
+printf 'foreign output\n' > "$(dirname "$4")/foreign.tmp"
+"#,
+    )
+    .unwrap();
+    let mut permissions = std::fs::metadata(&tool).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&tool, permissions).unwrap();
+
+    std::fs::write(&recovery, b"existing recovery").unwrap();
+    let out = run(sqz()
+        .env("SQUALLZ_PAR2", &tool)
+        .env("SQUALLZ_FAKE_PAR2_LOG", &log)
+        .env("SQUALLZ_FAKE_PAR2_FIXTURE", &fixture)
+        .env("SQUALLZ_FAKE_PAR2_VOLUME_FIXTURE", &volume_fixture)
+        .arg("protect")
+        .arg(&archive)
+        .arg("--recovery")
+        .arg(&recovery)
+        .arg("--json"));
+    assert!(!out.status.success(), "stdout: {}", stdout(&out));
+    assert_eq!(std::fs::read(&recovery).unwrap(), b"existing recovery");
+    assert!(
+        !log.exists(),
+        "the backend must not start for an occupied output"
+    );
+
+    std::fs::remove_file(&recovery).unwrap();
+    let out = run(sqz()
+        .env("SQUALLZ_PAR2", &tool)
+        .env("SQUALLZ_FAKE_PAR2_LOG", &log)
+        .env("SQUALLZ_FAKE_PAR2_FIXTURE", &fixture)
+        .env("SQUALLZ_FAKE_PAR2_VOLUME_FIXTURE", &volume_fixture)
+        .arg("protect")
+        .arg(&archive)
+        .arg("--recovery")
+        .arg(&recovery)
+        .arg("--json"));
+    assert!(!out.status.success(), "stdout: {}", stdout(&out));
+    assert!(!recovery.exists());
+    assert!(!volume.exists());
+    assert_eq!(std::fs::read(&archive).unwrap(), b"archive bytes");
+    assert!(std::fs::read_dir(&dir).unwrap().all(|entry| {
+        let name = entry.unwrap().file_name();
+        let name = name.to_string_lossy();
+        !name.contains(".sqz-par2-protect-") && !name.ends_with(".squallz-output-set.json")
+    }));
+
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
 fn protect_tolerate_loss_maps_split_volumes_to_redundancy() {
+    use base64::Engine as _;
     use std::os::unix::fs::PermissionsExt;
 
     let dir = temp_dir("recovery-tolerate-loss");
-    let first = dir.join("split.zip.001");
-    let second = dir.join("split.zip.002");
-    let third = dir.join("split.zip.003");
-    std::fs::write(&first, vec![b'a'; 100]).unwrap();
-    std::fs::write(&second, vec![b'b'; 100]).unwrap();
-    std::fs::write(&third, vec![b'c'; 100]).unwrap();
-    let recovery = dir.join("split.zip.par2");
+    let first = dir.join("set.zip.001");
+    let second = dir.join("set.zip.002");
+    std::fs::write(&first, b"first-volume-original\n").unwrap();
+    std::fs::write(&second, b"second-volume-original\n").unwrap();
+    let recovery = dir.join("set.zip.par2");
+    let recovery_fixture = dir.join("set.zip.fixture.par2");
+    let recovery_volume_fixture = dir.join("set.zip.fixture.vol0+4.par2");
+    std::fs::write(
+        &recovery_fixture,
+        base64::engine::general_purpose::STANDARD
+            .decode(
+                include_str!("../../squallz-recovery/tests/fixtures/multi-set.zip.par2.b64").trim(),
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        &recovery_volume_fixture,
+        base64::engine::general_purpose::STANDARD
+            .decode(
+                include_str!("../../squallz-recovery/tests/fixtures/multi-set.zip.vol0+4.par2.b64")
+                    .trim(),
+            )
+            .unwrap(),
+    )
+    .unwrap();
     let tool = dir.join("fake-par2");
     let log = dir.join("fake-par2.log");
     std::fs::write(
@@ -6869,7 +8947,11 @@ fn protect_tolerate_loss_maps_split_volumes_to_redundancy() {
 echo "$*" >> "$SQUALLZ_FAKE_PAR2_LOG"
 case "$1" in
   create)
-    printf 'fake recovery data\n' > "$3"
+    cp "$SQUALLZ_FAKE_PAR2_FIXTURE" "$4"
+    cp "$SQUALLZ_FAKE_PAR2_VOLUME_FIXTURE" "${4%.par2}.vol0+4.par2"
+    ;;
+  verify)
+    test -f "$3"
     ;;
   *)
     exit 64
@@ -6885,10 +8967,12 @@ esac
     let out = run(sqz()
         .env("SQUALLZ_PAR2", &tool)
         .env("SQUALLZ_FAKE_PAR2_LOG", &log)
+        .env("SQUALLZ_FAKE_PAR2_FIXTURE", &recovery_fixture)
+        .env("SQUALLZ_FAKE_PAR2_VOLUME_FIXTURE", &recovery_volume_fixture)
         .arg("protect")
         .arg(&first)
         .arg("--tolerate-loss")
-        .arg("2volumes")
+        .arg("1volume")
         .arg("--recovery")
         .arg(&recovery)
         .arg("--json"));
@@ -6896,18 +8980,58 @@ esac
     let report: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
     assert_eq!(report["ok"], true);
     assert_eq!(report["operation"], "protect");
-    assert_eq!(report["redundancy_percent"], 67);
+    assert_eq!(report["redundancy_percent"], 52);
     assert!(recovery.is_file());
 
-    let log = std::fs::read_to_string(&log).unwrap();
-    assert!(log.contains("create -r67"), "log: {log}");
-    assert!(log.contains(first.to_string_lossy().as_ref()), "log: {log}");
+    let log_text = std::fs::read_to_string(&log).unwrap();
+    assert!(log_text.contains("create -r52"), "log: {log_text}");
     assert!(
-        log.contains(second.to_string_lossy().as_ref()),
-        "log: {log}"
+        log_text.contains(first.to_string_lossy().as_ref()),
+        "log: {log_text}"
     );
-    assert!(log.contains(third.to_string_lossy().as_ref()), "log: {log}");
-
+    assert!(
+        log_text.contains(second.to_string_lossy().as_ref()),
+        "log: {log_text}"
+    );
+    let batch_recovery = dir.join("set-batch.par2");
+    let batch_script = dir.join("protect-batch.json");
+    std::fs::write(
+        &batch_script,
+        serde_json::json!({
+            "jobs": [{
+                "id": "protect-volume-set",
+                "operation": "protect",
+                "archive": second,
+                "recovery_path": batch_recovery,
+                "redundancy": 25
+            }]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let out = run(sqz()
+        .env("SQUALLZ_PAR2", &tool)
+        .env("SQUALLZ_FAKE_PAR2_LOG", &log)
+        .env("SQUALLZ_FAKE_PAR2_FIXTURE", &recovery_fixture)
+        .env("SQUALLZ_FAKE_PAR2_VOLUME_FIXTURE", &recovery_volume_fixture)
+        .arg("batch")
+        .arg(&batch_script)
+        .arg("--json"));
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    let report: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
+    assert_eq!(report["jobs"][0]["ok"], true);
+    assert_eq!(report["jobs"][0]["result"]["redundancy_percent"], 25);
+    assert!(batch_recovery.is_file());
+    let log_text = std::fs::read_to_string(&log).unwrap();
+    assert!(log_text.contains("create -r25"), "log: {log_text}");
+    assert!(
+        log_text.contains(first.to_string_lossy().as_ref()),
+        "log: {log_text}"
+    );
+    assert!(
+        log_text.contains(second.to_string_lossy().as_ref()),
+        "log: {log_text}"
+    );
     let single = dir.join("single.zip");
     std::fs::write(&single, b"single").unwrap();
     let out = run(sqz()
@@ -6921,7 +9045,7 @@ esac
         &out,
         2,
         "unsupported",
-        "--tolerate-loss requires a .001 split volume set",
+        "--tolerate-loss requires a multi-file archive set",
     );
 
     std::fs::remove_dir_all(&dir).unwrap();
@@ -6969,4 +9093,312 @@ fn extract_symlink_follow_materializes_content() {
         assert_eq!(std::fs::read(&link).unwrap(), b"the real bytes");
         std::fs::remove_dir_all(&dir).unwrap();
     }
+}
+
+#[test]
+fn sfx_create_inspect_open_and_tamper_detection_are_wired_through_cli() {
+    let dir = temp_dir("sfx-cli");
+    let input = dir.join("readme.txt");
+    let archive = dir.join("payload.zip");
+    let stub = write_sfx_pe_stub(&dir);
+    let output = dir.join("package.exe");
+    std::fs::write(&input, b"Squallz self extractor").unwrap();
+
+    let compressed = run(sqz().arg("compress").arg(&input).arg("-o").arg(&archive));
+    assert!(
+        compressed.status.success(),
+        "stderr: {}",
+        stderr(&compressed)
+    );
+
+    let created = run(sqz()
+        .args(["--lang", "en-US", "sfx", "create"])
+        .arg(&archive)
+        .arg("--target")
+        .arg("windows")
+        .arg("--stub")
+        .arg(&stub)
+        .arg("-o")
+        .arg(&output)
+        .arg("--json"));
+    assert!(created.status.success(), "stderr: {}", stderr(&created));
+    let report = stdout_json(&created);
+    assert_eq!(report["operation"], "sfx_create");
+    assert_eq!(report["target"], "windows");
+    assert_eq!(report["requires_signing"], true);
+    assert_eq!(report["preserved_outputs"], serde_json::json!([]));
+    assert_eq!(report["auto_run"], false);
+
+    let replaced = run(sqz()
+        .args(["--lang", "en-US", "sfx", "create"])
+        .arg(&archive)
+        .arg("--target")
+        .arg("windows")
+        .arg("--stub")
+        .arg(&stub)
+        .arg("-o")
+        .arg(&output)
+        .arg("--force")
+        .arg("--json"));
+    assert!(replaced.status.success(), "stderr: {}", stderr(&replaced));
+    let replacement_report = stdout_json(&replaced);
+    let preserved = replacement_report["preserved_outputs"]
+        .as_array()
+        .expect("SFX replacement backup paths");
+    assert_eq!(preserved.len(), 1);
+    let preserved_path = PathBuf::from(preserved[0].as_str().expect("SFX backup path"));
+    assert!(preserved_path.exists());
+    std::fs::remove_file(&preserved_path).unwrap();
+
+    let replaced_human = run(sqz()
+        .args(["--lang", "en-US", "sfx", "create"])
+        .arg(&archive)
+        .arg("--target")
+        .arg("windows")
+        .arg("--stub")
+        .arg(&stub)
+        .arg("-o")
+        .arg(&output)
+        .arg("--force"));
+    assert!(
+        replaced_human.status.success(),
+        "stderr: {}",
+        stderr(&replaced_human)
+    );
+    let human_stderr = stderr(&replaced_human);
+    assert!(human_stderr.contains("Previous output paths kept: 1"));
+    assert!(human_stderr.contains("Test the new archive first"));
+    assert!(human_stderr.contains(".squallz-sfx-"));
+    assert!(human_stderr.contains("previous"));
+
+    let inspected = run(sqz()
+        .args(["--lang", "en-US", "sfx", "inspect"])
+        .arg(&output)
+        .arg("--json"));
+    assert!(inspected.status.success(), "stderr: {}", stderr(&inspected));
+    let report = stdout_json(&inspected);
+    assert_eq!(report["operation"], "sfx_inspect");
+    assert_eq!(report["checksum_verified"], true);
+
+    let listed = run(sqz().arg("list").arg(&output).arg("--json"));
+    assert!(listed.status.success(), "stderr: {}", stderr(&listed));
+    let entries = stdout_json(&listed);
+    assert_eq!(entries[0]["path"], "readme.txt");
+
+    let dest = dir.join("extracted");
+    let extracted = run(sqz()
+        .arg("extract")
+        .arg(&output)
+        .arg("-d")
+        .arg(&dest)
+        .arg("--json"));
+    assert!(extracted.status.success(), "stderr: {}", stderr(&extracted));
+    assert_eq!(
+        std::fs::read(dest.join("readme.txt")).unwrap(),
+        b"Squallz self extractor"
+    );
+
+    let info = squallz_core::inspect_sfx(&output).unwrap().unwrap();
+    let mut bytes = std::fs::read(&output).unwrap();
+    bytes[(info.payload_offset + 8) as usize] ^= 0x5a;
+    std::fs::write(&output, bytes).unwrap();
+    let tampered = run(sqz()
+        .args(["--lang", "en-US", "sfx", "inspect"])
+        .arg(&output)
+        .arg("--json"));
+    assert_json_error(&tampered, 3, "corrupt_archive", "checksum mismatch");
+
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+#[test]
+fn sfx_create_json_handles_a_non_utf8_output_path_without_panicking() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    let dir = temp_dir("sfx-cli-non-utf8-json");
+    let input = dir.join("readme.txt");
+    let archive = dir.join("payload.zip");
+    let stub = write_sfx_pe_stub(&dir);
+    let output = dir.join(OsString::from_vec(b"package-\xff.exe".to_vec()));
+    std::fs::write(&input, b"non-UTF-8 output path").unwrap();
+
+    let compressed = run(sqz().arg("compress").arg(&input).arg("-o").arg(&archive));
+    assert!(
+        compressed.status.success(),
+        "stderr: {}",
+        stderr(&compressed)
+    );
+    let created = run(sqz()
+        .args(["--lang", "en-US", "sfx", "create"])
+        .arg(&archive)
+        .arg("--target")
+        .arg("windows")
+        .arg("--stub")
+        .arg(&stub)
+        .arg("-o")
+        .arg(&output)
+        .arg("--json"));
+
+    assert!(created.status.success(), "stderr: {}", stderr(&created));
+    assert!(output.is_file());
+    let report = stdout_json(&created);
+    assert_eq!(report["ok"], true);
+    assert_eq!(report["operation"], "sfx_create");
+    assert!(report["path"].as_str().is_some());
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn sfx_create_json_reports_an_unsupported_non_utf8_output_path_without_panicking() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    let dir = temp_dir("sfx-cli-non-utf8-json");
+    let input = dir.join("readme.txt");
+    let archive = dir.join("payload.zip");
+    let stub = write_sfx_pe_stub(&dir);
+    let output = dir.join(OsString::from_vec(b"package-\xff.exe".to_vec()));
+    std::fs::write(&input, b"non-UTF-8 output path").unwrap();
+
+    let compressed = run(sqz().arg("compress").arg(&input).arg("-o").arg(&archive));
+    assert!(
+        compressed.status.success(),
+        "stderr: {}",
+        stderr(&compressed)
+    );
+    let created = run(sqz()
+        .args(["--lang", "en-US", "sfx", "create"])
+        .arg(&archive)
+        .arg("--target")
+        .arg("windows")
+        .arg("--stub")
+        .arg(&stub)
+        .arg("-o")
+        .arg(&output)
+        .arg("--json"));
+
+    assert_eq!(created.status.code(), Some(7));
+    assert!(stderr(&created).trim().is_empty());
+    let report = stdout_json(&created);
+    assert_eq!(report["ok"], false);
+    assert_eq!(report["error"]["kind"], "io");
+    assert_eq!(report["error"]["exit_code"], 7);
+    assert!(!output.exists());
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn macos_single_file_sfx_has_an_explicit_cli_boundary() {
+    let dir = temp_dir("sfx-macos-cli");
+    let input = dir.join("readme.txt");
+    let archive = dir.join("payload.zip");
+    let output = dir.join("package");
+    std::fs::write(&input, b"payload").unwrap();
+    let compressed = run(sqz().arg("compress").arg(&input).arg("-o").arg(&archive));
+    assert!(compressed.status.success());
+
+    let result = run(sqz()
+        .args(["--lang", "en-US", "sfx", "create"])
+        .arg(&archive)
+        .arg("--target")
+        .arg("macos")
+        .arg("-o")
+        .arg(&output)
+        .arg("--json"));
+    assert_json_error(&result, 2, "unsupported", "requires --stub Squallz.app");
+    assert!(!output.exists());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn macos_sfx_app_bundle_create_and_inspect_are_wired_through_cli() {
+    let dir = temp_dir("sfx-macos-app-cli");
+    let input = dir.join("readme.txt");
+    let archive = dir.join("payload.zip");
+    let stub = write_sfx_macos_app_stub(&dir);
+    let output = dir.join("Release.app");
+    std::fs::write(&input, b"macOS bundle payload").unwrap();
+    let compressed = run(sqz().arg("compress").arg(&input).arg("-o").arg(&archive));
+    assert!(
+        compressed.status.success(),
+        "stderr: {}",
+        stderr(&compressed)
+    );
+
+    let created = run(sqz()
+        .args(["--lang", "en-US", "sfx", "create"])
+        .arg(&archive)
+        .args(["--target", "macos"])
+        .arg("--stub")
+        .arg(&stub)
+        .arg("-o")
+        .arg(&output)
+        .arg("--json"));
+    assert!(created.status.success(), "stderr: {}", stderr(&created));
+    let report = stdout_json(&created);
+    assert_eq!(report["target"], "macos");
+    assert_eq!(report["layout"], "macos_app");
+    assert_eq!(report["requires_signing"], true);
+    assert!(report["payload_sha256"].as_str().is_some());
+
+    let inspected = run(sqz()
+        .args(["--lang", "en-US", "sfx", "inspect"])
+        .arg(&output)
+        .arg("--json"));
+    assert!(inspected.status.success(), "stderr: {}", stderr(&inspected));
+    let report = stdout_json(&inspected);
+    assert_eq!(report["layout"], "macos_app");
+    assert_eq!(report["checksum_verified"], true);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+#[test]
+fn host_sfx_stub_executes_list_and_extract_runtime() {
+    let dir = temp_dir("sfx-host-runtime");
+    let input = dir.join("runtime.txt");
+    let archive = dir.join("payload.zip");
+    let target = if cfg!(target_os = "windows") {
+        "windows"
+    } else {
+        "linux"
+    };
+    let output = if cfg!(target_os = "windows") {
+        dir.join("runtime.exe")
+    } else {
+        dir.join("runtime.run")
+    };
+    std::fs::write(&input, b"runtime payload").unwrap();
+    let compressed = run(sqz().arg("compress").arg(&input).arg("-o").arg(&archive));
+    assert!(compressed.status.success());
+
+    let created = run(sqz()
+        .arg("sfx")
+        .arg("create")
+        .arg(&archive)
+        .arg("--target")
+        .arg(target)
+        .arg("-o")
+        .arg(&output)
+        .arg("--json"));
+    assert!(created.status.success(), "stderr: {}", stderr(&created));
+
+    let listed = run(sfx_command(&output).args(["--list", "--json"]));
+    assert!(listed.status.success(), "stderr: {}", stderr(&listed));
+    let entries = stdout_json(&listed);
+    assert_eq!(entries[0]["path"], "runtime.txt");
+
+    let dest = dir.join("runtime-out");
+    let extracted = run(sfx_command(&output).arg("-d").arg(&dest).arg("--json"));
+    assert!(extracted.status.success(), "stderr: {}", stderr(&extracted));
+    assert_eq!(
+        std::fs::read(dest.join("runtime.txt")).unwrap(),
+        b"runtime payload"
+    );
+    std::fs::remove_dir_all(dir).unwrap();
 }

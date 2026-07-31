@@ -7,12 +7,14 @@ mod common;
 use std::fs;
 use std::io::Read;
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use common::{build_stored_zip, command_exists, crc32, engine, RawZipEntry, TempDir};
 use squallz_format_api::{
     CompressionLevel, ControlToken, CreateOptions, Detected, EntryMeta, EntryPath, EntryType,
-    ExtractOptions, ExtractProblemReporter, FormatError, NoProgress, OpenOptions,
+    ExtractOptions, ExtractProblemReporter, FormatError, NoProgress, OpenOptions, OverwritePolicy,
+    ProgressPhase, ProgressSink,
 };
 
 #[derive(Default)]
@@ -26,6 +28,34 @@ impl ExtractProblemReporter for SkippedCollector {
             .lock()
             .unwrap()
             .push(format!("{}: {error}", path.display));
+    }
+}
+
+struct CancelOnUnexpectedEntry<'a> {
+    ctl: Arc<ControlToken>,
+    allowed: &'a [&'a str],
+    monitor_input_progress: AtomicBool,
+    saw_unexpected: AtomicBool,
+}
+
+impl ProgressSink for CancelOnUnexpectedEntry<'_> {
+    fn on_progress(&self, _done: u64, _total: u64, current: &EntryPath) {
+        if self.monitor_input_progress.load(Ordering::Relaxed)
+            && !current.display.is_empty()
+            && !self.allowed.contains(&current.display.as_str())
+        {
+            self.saw_unexpected.store(true, Ordering::Relaxed);
+            self.ctl.cancel();
+        }
+    }
+
+    fn on_phase(&self, phase: ProgressPhase, _interruptible: bool) {
+        if matches!(
+            phase,
+            ProgressPhase::OutputSplit | ProgressPhase::OutputVerify
+        ) {
+            self.monitor_input_progress.store(false, Ordering::Relaxed);
+        }
     }
 }
 
@@ -251,6 +281,353 @@ fn build_fixture_tree(root: &std::path::Path) {
 }
 
 #[test]
+fn create_excludes_existing_output_and_inner_temp_from_multiple_inputs() {
+    let tmp = TempDir::new("create-output-exclusion");
+    let project = tmp.path().join("project");
+    let nested = project.join("nested");
+    fs::create_dir_all(&nested).unwrap();
+    fs::write(project.join("keep.txt"), b"keep me").unwrap();
+    fs::write(project.join("archive.zip.notes"), b"ordinary file").unwrap();
+    let outside = tmp.path().join("outside.txt");
+    fs::write(&outside, b"second input").unwrap();
+
+    let archive = nested.join("..").join("archive.zip");
+    fs::write(&archive, b"stale archive").unwrap();
+    let ctl = ControlToken::new();
+    let progress = CancelOnUnexpectedEntry {
+        ctl: Arc::clone(&ctl),
+        allowed: &[
+            "project",
+            "project/archive.zip.notes",
+            "project/keep.txt",
+            "project/nested",
+            "outside.txt",
+        ],
+        monitor_input_progress: AtomicBool::new(true),
+        saw_unexpected: AtomicBool::new(false),
+    };
+    engine()
+        .create(
+            &archive,
+            &[project, outside],
+            &CreateOptions::default(),
+            &progress,
+            &ctl,
+        )
+        .unwrap();
+
+    assert!(!progress.saw_unexpected.load(Ordering::Relaxed));
+    let entries = engine().list(&archive, &OpenOptions::default()).unwrap();
+    let names: Vec<_> = entries
+        .iter()
+        .map(|entry| entry.path.display.as_str())
+        .collect();
+    assert!(names.contains(&"project/keep.txt"), "names: {names:?}");
+    assert!(
+        names.contains(&"project/archive.zip.notes"),
+        "similarly named ordinary file was excluded: {names:?}"
+    );
+    assert!(names.contains(&"outside.txt"), "names: {names:?}");
+    assert!(!names.contains(&"project/archive.zip"), "names: {names:?}");
+    assert!(
+        !names
+            .iter()
+            .any(|name| name.contains(".create-") && name.contains(".tmp.")),
+        "names: {names:?}"
+    );
+}
+
+#[test]
+fn create_rejects_an_explicit_output_input_without_overwriting_it() {
+    let tmp = TempDir::new("create-output-as-input");
+    let archive = tmp.path().join("archive.zip");
+    let original = b"this file must survive a rejected create";
+    fs::write(&archive, original).unwrap();
+
+    let error = engine()
+        .create(
+            &archive,
+            std::slice::from_ref(&archive),
+            &CreateOptions::default(),
+            &NoProgress,
+            &ControlToken::new(),
+        )
+        .unwrap_err();
+
+    assert!(matches!(error, FormatError::Unsupported(_)));
+    assert!(error.to_string().contains("cannot also be an input"));
+    assert_eq!(fs::read(&archive).unwrap(), original);
+}
+
+#[cfg(unix)]
+#[test]
+fn create_rejects_a_symlink_output_without_touching_its_target() {
+    let tmp = TempDir::new("create-output-symlink-leaf");
+    let project = tmp.path().join("project");
+    let outside = tmp.path().join("outside");
+    fs::create_dir_all(&project).unwrap();
+    fs::create_dir_all(&outside).unwrap();
+    let input = outside.join("source.bin");
+    let original = b"source behind the output symlink";
+    fs::write(&input, original).unwrap();
+    let archive = project.join("archive.zip");
+    std::os::unix::fs::symlink(&input, &archive).unwrap();
+
+    let error = engine()
+        .create(
+            &archive,
+            std::slice::from_ref(&input),
+            &CreateOptions::default(),
+            &NoProgress,
+            &ControlToken::new(),
+        )
+        .unwrap_err();
+
+    assert!(matches!(error, FormatError::Unsupported(_)));
+    assert_eq!(fs::read(&input).unwrap(), original);
+    assert!(fs::symlink_metadata(&archive)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+}
+
+#[cfg(unix)]
+#[test]
+fn create_keeps_a_differently_named_hardlink_as_an_input() {
+    let tmp = TempDir::new("create-output-hardlink-leaf");
+    let input = tmp.path().join("source.bin");
+    let archive = tmp.path().join("archive.zip");
+    let original = b"source shared with the old output directory entry";
+    fs::write(&input, original).unwrap();
+    fs::hard_link(&input, &archive).unwrap();
+
+    engine()
+        .create(
+            &archive,
+            std::slice::from_ref(&input),
+            &CreateOptions::default(),
+            &NoProgress,
+            &ControlToken::new(),
+        )
+        .unwrap();
+
+    assert_eq!(fs::read(&input).unwrap(), original);
+    let names: Vec<_> = engine()
+        .list(&archive, &OpenOptions::default())
+        .unwrap()
+        .into_iter()
+        .map(|entry| entry.path.display)
+        .collect();
+    assert!(names.iter().any(|name| name == "source.bin"));
+}
+
+#[cfg(unix)]
+#[test]
+fn create_excludes_output_temp_through_symlinked_parent() {
+    let tmp = TempDir::new("create-output-symlink-parent");
+    let project = tmp.path().join("project");
+    fs::create_dir_all(&project).unwrap();
+    fs::write(project.join("keep.txt"), b"keep me").unwrap();
+    let alias = tmp.path().join("project-alias");
+    std::os::unix::fs::symlink(&project, &alias).unwrap();
+    let archive = alias.join("archive.zip");
+    fs::write(project.join("archive.zip"), b"stale archive").unwrap();
+
+    let ctl = ControlToken::new();
+    let progress = CancelOnUnexpectedEntry {
+        ctl: Arc::clone(&ctl),
+        allowed: &["project", "project/keep.txt"],
+        monitor_input_progress: AtomicBool::new(true),
+        saw_unexpected: AtomicBool::new(false),
+    };
+    engine()
+        .create(
+            &archive,
+            std::slice::from_ref(&project),
+            &CreateOptions::default(),
+            &progress,
+            &ctl,
+        )
+        .unwrap();
+
+    assert!(!progress.saw_unexpected.load(Ordering::Relaxed));
+    let names: Vec<_> = engine()
+        .list(&archive, &OpenOptions::default())
+        .unwrap()
+        .into_iter()
+        .map(|entry| entry.path.display)
+        .collect();
+    assert!(names.iter().any(|name| name == "project/keep.txt"));
+    assert!(!names.iter().any(|name| name == "project/archive.zip"));
+}
+
+#[test]
+fn split_create_excludes_old_target_volumes_without_prefix_overreach() {
+    let tmp = TempDir::new("create-split-output-exclusion");
+    let project = tmp.path().join("project");
+    fs::create_dir_all(&project).unwrap();
+    let keep = project.join("keep.bin");
+    let mut payload = Vec::with_capacity(32 * 1024);
+    let mut state = 0x1234_5678u32;
+    for _ in 0..32 * 1024 {
+        state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        payload.push((state >> 24) as u8);
+    }
+    fs::write(&keep, payload).unwrap();
+    let old_first = project.join("bundle.zip.001");
+    let old_second = project.join("bundle.zip.002");
+    let stale_part = project.join("bundle.zip.999.part");
+    let ordinary = project.join("bundle.zip.001.notes");
+    let pid = std::process::id();
+    let legacy_staging_name = format!(".bundle.zip.sqz-split-{pid}.tmp");
+    let legacy_staging_entry = format!("project/{legacy_staging_name}");
+    let legacy_staging_path = project.join(&legacy_staging_name);
+    let outer_collision_name = format!(".bundle.zip.split-{pid}-0.tmp.bundle.zip");
+    let outer_collision_entry = format!("project/{outer_collision_name}");
+    let outer_collision_path = project.join(&outer_collision_name);
+    let selected_outer_name = format!(".bundle.zip.split-{pid}-1.tmp.bundle.zip");
+    let selected_outer_entry = format!("project/{selected_outer_name}");
+    let inner_collision_name =
+        format!(".{selected_outer_name}.create-{pid}-0.tmp.{selected_outer_name}");
+    let inner_collision_entry = format!("project/{inner_collision_name}");
+    let inner_collision_path = project.join(&inner_collision_name);
+    let selected_inner_name =
+        format!(".{selected_outer_name}.create-{pid}-1.tmp.{selected_outer_name}");
+    let selected_inner_entry = format!("project/{selected_inner_name}");
+    fs::write(&old_first, b"old first volume").unwrap();
+    fs::write(&old_second, b"old second volume").unwrap();
+    fs::write(&stale_part, b"stale internal split staging").unwrap();
+    fs::write(&ordinary, b"ordinary file").unwrap();
+    fs::write(&legacy_staging_path, b"legacy staging-name collision").unwrap();
+    fs::write(
+        &outer_collision_path,
+        b"pre-existing complete staging archive",
+    )
+    .unwrap();
+    fs::write(&inner_collision_path, b"pre-existing inner create temp").unwrap();
+
+    let archive = project.join("bundle.zip");
+    let opts = CreateOptions {
+        split_size: Some(4 * 1024),
+        ..CreateOptions::default()
+    };
+    let engine = engine();
+    let plan = engine
+        .plan_create(&archive, std::slice::from_ref(&project), &opts)
+        .unwrap();
+    let ctl = ControlToken::new();
+    let allowed = [
+        "project",
+        "project/bundle.zip.001.notes",
+        "project/keep.bin",
+        legacy_staging_entry.as_str(),
+        inner_collision_entry.as_str(),
+    ];
+    let progress = CancelOnUnexpectedEntry {
+        ctl: Arc::clone(&ctl),
+        allowed: &allowed,
+        monitor_input_progress: AtomicBool::new(true),
+        saw_unexpected: AtomicBool::new(false),
+    };
+    engine
+        .create(
+            &archive,
+            std::slice::from_ref(&project),
+            &opts,
+            &progress,
+            &ctl,
+        )
+        .unwrap();
+
+    assert!(!progress.saw_unexpected.load(Ordering::Relaxed));
+    let names: Vec<_> = engine
+        .list(&project.join("bundle.zip.001"), &OpenOptions::default())
+        .unwrap()
+        .into_iter()
+        .map(|entry| entry.path.display)
+        .collect();
+    assert!(names.iter().any(|name| name == "project/keep.bin"));
+    assert!(names
+        .iter()
+        .any(|name| name == "project/bundle.zip.001.notes"));
+    assert!(!names.iter().any(|name| name == "project/bundle.zip.001"));
+    assert!(!names.iter().any(|name| name == "project/bundle.zip.002"));
+    assert!(!names
+        .iter()
+        .any(|name| name == "project/bundle.zip.999.part"));
+    assert!(names.iter().any(|name| name == &legacy_staging_entry));
+    assert!(!names.iter().any(|name| name == &outer_collision_entry));
+    assert!(names.iter().any(|name| name == &inner_collision_entry));
+    assert!(!names.iter().any(|name| name == &selected_outer_entry));
+    assert!(!names.iter().any(|name| name == &selected_inner_entry));
+    assert_eq!(plan.inputs.entries, names.len());
+    assert_eq!(
+        fs::read(&legacy_staging_path).unwrap(),
+        b"legacy staging-name collision"
+    );
+    assert_eq!(
+        fs::read(&outer_collision_path).unwrap(),
+        b"pre-existing complete staging archive"
+    );
+    assert_eq!(
+        fs::read(&inner_collision_path).unwrap(),
+        b"pre-existing inner create temp"
+    );
+    assert_eq!(
+        fs::read(&stale_part).unwrap(),
+        b"stale internal split staging"
+    );
+}
+
+#[test]
+fn split_create_excludes_case_variant_volumes_on_case_insensitive_filesystems() {
+    let tmp = TempDir::new("create-split-case-exclusion");
+    let project = tmp.path().join("project");
+    fs::create_dir_all(&project).unwrap();
+    let mut payload = Vec::with_capacity(24 * 1024);
+    let mut state = 0x89ab_cdefu32;
+    for _ in 0..24 * 1024 {
+        state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        payload.push((state >> 24) as u8);
+    }
+    fs::write(project.join("keep.bin"), payload).unwrap();
+    let old_volume = project.join("BUNDLE.ZIP.999");
+    let ordinary = project.join("BUNDLE.ZIP.999.notes");
+    fs::write(&old_volume, b"old volume").unwrap();
+    fs::write(&ordinary, b"ordinary file").unwrap();
+
+    let archive = project.join("bundle.zip");
+    if fs::metadata(project.join("bundle.zip.999")).is_err() {
+        return;
+    }
+
+    engine()
+        .create(
+            &archive,
+            std::slice::from_ref(&project),
+            &CreateOptions {
+                split_size: Some(4 * 1024),
+                ..CreateOptions::default()
+            },
+            &NoProgress,
+            &ControlToken::new(),
+        )
+        .unwrap();
+
+    let names: Vec<_> = engine()
+        .list(&project.join("bundle.zip.001"), &OpenOptions::default())
+        .unwrap()
+        .into_iter()
+        .map(|entry| entry.path.display)
+        .collect();
+    assert!(!names.iter().any(|name| name == "project/BUNDLE.ZIP.999"));
+    assert!(names
+        .iter()
+        .any(|name| name == "project/BUNDLE.ZIP.999.notes"));
+    assert!(!old_volume.exists());
+}
+
+#[test]
 fn roundtrip_create_list_extract_test() {
     let tmp = TempDir::new("roundtrip");
     build_fixture_tree(tmp.path());
@@ -419,6 +796,83 @@ fn interop_system_zip_is_readable() {
 }
 
 #[test]
+fn interop_infozip_native_split_opens_from_any_volume() {
+    if !command_exists("zip") || !command_exists("7zz") {
+        eprintln!("skipped: Info-ZIP zip or 7zz not found");
+        return;
+    }
+    let tmp = TempDir::new("native-split");
+    let mut payload = vec![0u8; 200 * 1024];
+    let mut state = 0x4d59_5df4_d0f3_3173u64;
+    for byte in &mut payload {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        *byte = state as u8;
+    }
+    fs::write(tmp.path().join("payload.bin"), &payload).unwrap();
+    let output = Command::new("zip")
+        .args(["-0", "-q", "-s", "64k", "native.zip", "payload.bin"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "Info-ZIP split creation failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let first = tmp.path().join("native.z01");
+    let second = tmp.path().join("native.z02");
+    let final_path = tmp.path().join("native.zip");
+    assert!(first.is_file());
+    assert!(second.is_file());
+    assert!(final_path.is_file());
+
+    let eng = engine();
+    let (format, entries, source_set) = eng
+        .list_with_format_and_source_set(&second, &OpenOptions::default())
+        .unwrap();
+    assert_eq!(format, "zip");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].path.display, "payload.bin");
+    let source_set = source_set.unwrap();
+    assert_eq!(source_set.primary(), final_path);
+    assert_eq!(source_set.members().first(), Some(&first));
+    assert_eq!(source_set.members().last(), Some(&final_path));
+
+    let report = eng
+        .test(
+            &first,
+            &OpenOptions::default(),
+            &NoProgress,
+            &ControlToken::new(),
+        )
+        .unwrap();
+    assert_eq!(report.entries_tested, 1);
+    assert!(report.problems.is_empty());
+
+    let dest = tmp.path().join("dest");
+    eng.extract(
+        &second,
+        &dest,
+        None,
+        &OpenOptions::default(),
+        &ExtractOptions::default(),
+        &NoProgress,
+        &ControlToken::new(),
+    )
+    .unwrap();
+    assert_eq!(fs::read(dest.join("payload.bin")).unwrap(), payload);
+
+    let hidden = tmp.path().join("native.z02.missing");
+    fs::rename(&second, &hidden).unwrap();
+    let error = eng.list(&first, &OpenOptions::default()).unwrap_err();
+    assert_eq!(error.missing_volume_path(), Some(second.as_path()));
+    fs::rename(hidden, second).unwrap();
+}
+
+#[test]
 fn empty_zip_lists_zero_entries() {
     let tmp = TempDir::new("empty");
     let archive = tmp.path().join("empty.zip");
@@ -531,13 +985,19 @@ fn best_effort_extract_skips_crc_damaged_entry() {
     let archive = tmp.path().join("damaged.zip");
     fs::write(&archive, bytes).unwrap();
 
+    let strict_dest = tmp.path().join("strict");
+    fs::create_dir_all(&strict_dest).unwrap();
+    fs::write(strict_dest.join("bad.txt"), b"existing bytes").unwrap();
     let strict_err = eng
         .extract(
             &archive,
-            &tmp.path().join("strict"),
+            &strict_dest,
             None,
             &OpenOptions::default(),
-            &ExtractOptions::default(),
+            &ExtractOptions {
+                overwrite: OverwritePolicy::Overwrite,
+                ..ExtractOptions::default()
+            },
             &NoProgress,
             &ControlToken::new(),
         )
@@ -548,6 +1008,19 @@ fn best_effort_extract_skips_crc_damaged_entry() {
             FormatError::Io(_) | FormatError::CorruptArchive(_) | FormatError::Other(_)
         ),
         "{strict_err:?}"
+    );
+    assert_eq!(
+        fs::read(strict_dest.join("bad.txt")).unwrap(),
+        b"existing bytes"
+    );
+    assert!(
+        fs::read_dir(&strict_dest).unwrap().all(|entry| {
+            entry
+                .ok()
+                .and_then(|entry| entry.file_name().into_string().ok())
+                .is_none_or(|name| !name.starts_with(".squallz-extract-"))
+        }),
+        "strict extraction left a staging file behind"
     );
 
     let collector = Arc::new(SkippedCollector::default());

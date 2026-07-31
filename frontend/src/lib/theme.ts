@@ -101,7 +101,7 @@ export function colorWheelHsl(hex: string): HslColor {
   return rgbToHsl(parseHexColor(hex));
 }
 
-export function colorWheelMarkerStyle(hex: string): string {
+export function colorWheelVariables(hex: string): Record<string, string> {
   const hsl = colorWheelHsl(hex);
   const radians = (hsl.h * Math.PI) / 180;
   const radius = hsl.s * 44;
@@ -114,7 +114,12 @@ export function colorWheelMarkerStyle(hex: string): string {
     .map((hue) => `${colorToHex(hslToRgb({ h: hue, s: 1, l: hsl.l }))} ${hue}deg`)
     .join(", ");
   const background = `radial-gradient(circle, ${neutralHex} 0 10%, ${neutralRgba(0.78)} 25%, ${neutralRgba(0)} 67%), conic-gradient(from 0deg, ${stops})`;
-  return `--wheel-x: ${x.toFixed(2)}%; --wheel-y: ${y.toFixed(2)}%; --wheel-marker: ${hex}; --wheel-bg: ${background}`;
+  return {
+    "--wheel-x": `${x.toFixed(2)}%`,
+    "--wheel-y": `${y.toFixed(2)}%`,
+    "--wheel-marker": hex,
+    "--wheel-bg": background,
+  };
 }
 
 export function colorFromWheelPoint(hex: string, x: number, y: number, size: number): string {
@@ -200,16 +205,6 @@ export function deriveCustomPaletteTokens(
     "--chip-fg": accentInk,
     "--chip-border": colorToRgba(accent, theme === "dark" ? 0.38 : 0.34),
   };
-}
-
-export function tokenStyle(tokens: Record<string, string>): string {
-  return Object.entries(tokens)
-    .map(([name, value]) => `${name}: ${value}`)
-    .join("; ");
-}
-
-export function customPaletteTokenStyle(hex: string, theme: ResolvedTheme, contrastGuard: boolean): string {
-  return tokenStyle(deriveCustomPaletteTokens(hex, theme, contrastGuard));
 }
 
 export function buildCustomPaletteData(hex: string, theme: ResolvedTheme, contrastGuard: boolean): Palette {

@@ -1,6 +1,6 @@
 //! Extraction safety primitives shared by every archive format:
 //! path sanitization (Zip Slip), Windows portability checks and
-//! decompression-bomb accounting (PLAN.md §2.3).
+//! decompression-bomb accounting.
 
 use std::path::{Component, Path, PathBuf};
 

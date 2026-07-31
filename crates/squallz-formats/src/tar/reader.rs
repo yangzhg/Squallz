@@ -9,12 +9,18 @@ use std::path::Path;
 use std::time::{Duration, SystemTime};
 
 use squallz_format_api::{
-    ArchiveReader, ControlToken, EntryMeta, EntryPath, EntryType, ExtractOptions, ExtractSink,
-    FormatError, ProgressSink, ReadSeek, StreamFactory, TestReport,
+    empty_extract_report, ArchiveReader, BoundedProblemLog, ControlToken, EntryMeta, EntryPath,
+    EntryType, ExtractOptions, ExtractReport, ExtractSink, FormatError, LimitsAccountant,
+    ProgressSink, ReadSeek, SafetyLimits, StreamFactory, TestReport, TestSummary,
+    TEST_PROBLEM_PREVIEW_LIMIT,
 };
 
-/// Chunk size when draining entry data (test pass).
+/// Chunk size when draining entry data and compound stream tails.
 const READ_CHUNK: usize = 64 * 1024;
+/// Maximum decompressed data accepted after TAR's logical end marker. This
+/// budget is deliberately separate from extracted-file limits: the tail is
+/// read only to finish the compound decoder's integrity checks.
+const MAX_STREAM_END_BYTES: u64 = 16 * 1024 * 1024;
 
 /// Unified tar input: both variants can produce a fresh stream positioned
 /// at the start of the (decompressed) tar data.
@@ -84,15 +90,124 @@ impl TarArchiveReader {
 
     /// Sums the file sizes for progress totals (cheap pre-pass for seekable
     /// sources only; a streamed source would pay a full re-decompression).
-    fn total_file_bytes(&mut self) -> Result<u64, FormatError> {
+    fn total_file_bytes(&mut self, wanted: Option<&HashSet<Vec<u8>>>) -> Result<u64, FormatError> {
         let mut total = 0u64;
         for meta in self.entries() {
             let meta = meta?;
-            if matches!(meta.entry_type, EntryType::File) {
+            if matches!(meta.entry_type, EntryType::File)
+                && wanted.is_none_or(|paths| paths.contains(meta.path.raw.as_slice()))
+            {
                 total += meta.size;
             }
         }
         Ok(total)
+    }
+
+    /// TAR iteration stops at the archive's zero blocks, before a compound
+    /// decoder necessarily reaches its trailer. Drain streamed inputs so the
+    /// compressor can validate its final checksum and size fields.
+    fn validate_stream_end(&mut self, ctl: &ControlToken) -> Result<(), FormatError> {
+        if self.is_seekable() {
+            return Ok(());
+        }
+        let Some(archive) = self.archive.take() else {
+            return Err(FormatError::Other(
+                "tar reader lost its source stream".into(),
+            ));
+        };
+        let mut input = archive.into_inner();
+        let result = match &mut input {
+            TarInput::Streamed(reader) => {
+                let mut buf = vec![0u8; READ_CHUNK];
+                let mut drained = 0u64;
+                loop {
+                    if let Err(error) = ctl.checkpoint() {
+                        break Err(error);
+                    }
+                    let remaining = MAX_STREAM_END_BYTES.saturating_sub(drained);
+                    let read_len = (remaining.saturating_add(1) as usize).min(buf.len());
+                    match reader.read(&mut buf[..read_len]) {
+                        Ok(0) => break Ok(()),
+                        Ok(n) => {
+                            drained = drained.saturating_add(n as u64);
+                            if drained > MAX_STREAM_END_BYTES {
+                                break Err(FormatError::ResourceLimitExceeded(format!(
+                                    "compound stream tail exceeds fixed safety limit of {MAX_STREAM_END_BYTES} bytes"
+                                )));
+                            }
+                        }
+                        Err(error) => break Err(error.into()),
+                    }
+                }
+            }
+            TarInput::Seekable(_) => Err(FormatError::Other(
+                "tar streamed reader lost its decoder".into(),
+            )),
+        };
+        self.archive = Some(tar::Archive::new(input));
+        result
+    }
+
+    fn test_with_problem_recorder(
+        &mut self,
+        progress: &dyn ProgressSink,
+        ctl: &ControlToken,
+        mut record_problem: impl FnMut(String),
+    ) -> Result<u64, FormatError> {
+        let streamed = !self.is_seekable();
+        let archive = self.rebuild()?;
+        let mut buf = vec![0u8; READ_CHUNK];
+        let mut done = 0u64;
+        let mut entries_tested = 0u64;
+        let mut accountant = LimitsAccountant::new(SafetyLimits::default());
+        for item in archive.entries()? {
+            ctl.checkpoint()?;
+            let mut entry = match item {
+                Ok(entry) => entry,
+                Err(e) => {
+                    // A broken header desynchronizes the stream, so later
+                    // bytes cannot be treated as independent entries.
+                    record_problem(e.to_string());
+                    break;
+                }
+            };
+            entries_tested += 1;
+            let path = match meta_of(&entry) {
+                Ok(meta) => meta.path,
+                Err(e) => {
+                    record_problem(e.to_string());
+                    continue;
+                }
+            };
+            // Draining validates entry framing and, for compound inputs, the
+            // underlying stream's integrity checks.
+            loop {
+                ctl.checkpoint()?;
+                match entry.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if streamed {
+                            accountant.add_output_bytes(n as u64)?;
+                        }
+                        done += n as u64;
+                        progress.on_progress(done, 0, &path);
+                    }
+                    Err(e) => {
+                        record_problem(format!("{path}: {e}"));
+                        break;
+                    }
+                }
+            }
+        }
+        match self.validate_stream_end(ctl) {
+            Ok(()) => {}
+            Err(error @ (FormatError::Cancelled | FormatError::ResourceLimitExceeded(_))) => {
+                return Err(error)
+            }
+            Err(error) => record_problem(error.to_string()),
+        }
+        progress.on_progress(done, done, &EntryPath::from_utf8(""));
+        Ok(entries_tested)
     }
 }
 
@@ -174,13 +289,28 @@ impl ArchiveReader for TarArchiveReader {
         progress: &dyn ProgressSink,
         ctl: &ControlToken,
     ) -> Result<(), FormatError> {
+        self.extract_with_report(dest, selection, opts, progress, ctl)
+            .map(drop)
+    }
+
+    fn extract_with_report(
+        &mut self,
+        dest: &Path,
+        selection: Option<&[EntryPath]>,
+        opts: &ExtractOptions,
+        progress: &dyn ProgressSink,
+        ctl: &ControlToken,
+    ) -> Result<ExtractReport, FormatError> {
+        if selection.is_some_and(<[EntryPath]>::is_empty) {
+            return Ok(empty_extract_report(dest, progress));
+        }
         let wanted: Option<HashSet<Vec<u8>>> =
             selection.map(|s| s.iter().map(|p| p.raw.clone()).collect());
         // Progress total: cheap metadata pre-pass for seekable sources;
         // streamed sources report an unknown total (0) instead of paying a
         // second full decompression.
         let total = if self.is_seekable() {
-            self.total_file_bytes()?
+            self.total_file_bytes(wanted.as_ref())?
         } else {
             0
         };
@@ -197,14 +327,20 @@ impl ArchiveReader for TarArchiveReader {
             match meta.entry_type {
                 EntryType::File => {
                     if let Some(out_path) = sink.file_target(&meta, progress, ctl)? {
-                        sink.write_file(&meta, &out_path, &mut entry, progress, ctl)?;
+                        if opts.best_effort {
+                            sink.write_file_best_effort(
+                                &meta, &out_path, &mut entry, progress, ctl,
+                            )?;
+                        } else {
+                            sink.write_file(&meta, &out_path, &mut entry, progress, ctl)?;
+                        }
                     }
                 }
                 _ => sink.write_meta_entry(&meta, progress, ctl)?,
             }
         }
-        sink.finish(progress);
-        Ok(())
+        self.validate_stream_end(ctl)?;
+        Ok(sink.finish_with_report(progress))
     }
 
     fn test(
@@ -212,47 +348,28 @@ impl ArchiveReader for TarArchiveReader {
         progress: &dyn ProgressSink,
         ctl: &ControlToken,
     ) -> Result<TestReport, FormatError> {
-        let mut report = TestReport::default();
-        let archive = self.rebuild()?;
-        let mut buf = vec![0u8; READ_CHUNK];
-        let mut done = 0u64;
-        for item in archive.entries()? {
-            ctl.checkpoint()?;
-            let mut entry = match item {
-                Ok(entry) => entry,
-                Err(e) => {
-                    // A broken header desynchronizes the stream; record the
-                    // problem and stop instead of misparsing what follows.
-                    report.problems.push(e.to_string());
-                    break;
-                }
-            };
-            report.entries_tested += 1;
-            let path = match meta_of(&entry) {
-                Ok(meta) => meta.path,
-                Err(e) => {
-                    report.problems.push(e.to_string());
-                    continue;
-                }
-            };
-            // Draining the data validates entry framing and, for compressed
-            // sources, the integrity of the underlying stream.
-            loop {
-                ctl.checkpoint()?;
-                match entry.read(&mut buf) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        done += n as u64;
-                        progress.on_progress(done, 0, &path);
-                    }
-                    Err(e) => {
-                        report.problems.push(format!("{path}: {e}"));
-                        break;
-                    }
-                }
-            }
-        }
-        progress.on_progress(done, done, &EntryPath::from_utf8(""));
-        Ok(report)
+        let mut problems = Vec::new();
+        let entries_tested =
+            self.test_with_problem_recorder(progress, ctl, |problem| problems.push(problem))?;
+        Ok(TestReport {
+            entries_tested,
+            problems,
+            recovery: None,
+        })
+    }
+
+    fn test_summary(
+        &mut self,
+        progress: &dyn ProgressSink,
+        ctl: &ControlToken,
+    ) -> Result<TestSummary, FormatError> {
+        let problems = BoundedProblemLog::new(TEST_PROBLEM_PREVIEW_LIMIT);
+        let entries_tested =
+            self.test_with_problem_recorder(progress, ctl, |problem| problems.record(problem))?;
+        Ok(TestSummary {
+            entries_tested,
+            problems: problems.snapshot(),
+            recovery: None,
+        })
     }
 }

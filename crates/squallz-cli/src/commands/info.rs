@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 use squallz_core::api::{FormatInfo, FormatKind};
+use squallz_formats::{sevenzip_backend_status, SevenZipBackendSource};
 
 use super::reports::print_pretty_json;
 use crate::commands::{Ctx, ModernStatusField, ModernTableColumn, ModernTableRow};
@@ -516,7 +517,7 @@ fn backend_detail(ctx: &Ctx, format_id: &str) -> String {
         "rar" => label(
             ctx,
             "cli.info.engine.rar",
-            "external: 7zz/7z; bsdtar diagnostic fallback",
+            "external: 7zz/7z; bsdtar and optional unrar fallback",
         ),
         id if long_tail_7z_bridge_format(id) => {
             label(ctx, "cli.info.engine.7z", "external: 7zz/7z")
@@ -1628,6 +1629,45 @@ fn first_tool_name(availability: &Value) -> Option<&str> {
 
 pub(crate) fn implementation_json(format_id: &str) -> Value {
     match format_id {
+        "zip" => json!({
+            "status": "built_in",
+            "bundled": true,
+            "read": {
+                "kind": "rust",
+            },
+            "write": {
+                "kind": "rust",
+            },
+            "optional_external": {
+                "scope": "native_split_read",
+                "tools": ["7zz", "7z", "7za"],
+                "env": "SQUALLZ_7Z",
+                "availability": sevenzip_availability(),
+            },
+            "availability": {
+                "read": built_in_availability(),
+                "write": built_in_availability(),
+            },
+            "limitations": [
+                {
+                    "scope": "native_split_read",
+                    "status": "external_required",
+                    "reason": "native .z01/.zip sets are header-validated and staged privately, then read through 7zz/7z from any member",
+                },
+                {
+                    "scope": "native_split_create",
+                    "status": "built_in",
+                    "reason": "ZIP creation can write PKWARE-compatible .z01/.z02/.../.zip sets without an external encoder",
+                },
+                {
+                    "scope": "native_split_encrypted",
+                    "status": "external_required",
+                    "reason": "encrypted native split ZIP uses 7zz/7z with the password sent only through a short-lived stdin pipe, never through process arguments or environment variables",
+                },
+            ],
+            "platforms": ["macos", "windows", "linux"],
+            "release_gate": "native split ZIP creation requires a three-platform filesystem matrix; native split reading also requires a packaged-7z matrix",
+        }),
         "wim" => json!({
             "status": "external_required",
             "bundled": false,
@@ -1644,8 +1684,25 @@ pub(crate) fn implementation_json(format_id: &str) -> Value {
                 "read": sevenzip_availability(),
                 "write": env_or_path_availability(Some("SQUALLZ_WIMLIB"), &["wimlib-imagex"]),
             },
+            "limitations": [
+                {
+                    "scope": "native_split_read",
+                    "status": "external_required",
+                    "reason": "native .swm sets are header-validated and staged privately, then read through 7zz/7z from any standard member",
+                },
+                {
+                    "scope": "native_split_create",
+                    "status": "external_required",
+                    "reason": "Split WIM creation uses wimlib-imagex and publishes the standard first.swm, first2.swm, ... family transactionally",
+                },
+                {
+                    "scope": "native_split_size",
+                    "status": "format_limit",
+                    "reason": "the requested part size is a target because one indivisible WIM resource can make a part larger",
+                },
+            ],
             "platforms": ["macos", "windows", "linux"],
-            "release_gate": "real WIM compatibility matrix plus wimlib/7z packaging and license review",
+            "release_gate": "broader WIM and Split WIM corpus plus three-platform wimlib/7z packaging and license review",
         }),
         "rar" => json!({
             "status": "external_required",
@@ -1654,8 +1711,9 @@ pub(crate) fn implementation_json(format_id: &str) -> Value {
                 "kind": "external_tool",
                 "tools": ["7zz", "7z", "7za"],
                 "env": "SQUALLZ_7Z",
-                "fallback_tools": ["bsdtar"],
+                "fallback_tools": ["bsdtar", "unrar"],
                 "fallback_env": "SQUALLZ_BSDTAR",
+                "rar7_decoder_env": "SQUALLZ_UNRAR",
             },
             "write": {
                 "kind": "unsupported",
@@ -1664,6 +1722,10 @@ pub(crate) fn implementation_json(format_id: &str) -> Value {
             "policy": rar_policy_json(),
             "availability": {
                 "read": rar_read_availability(),
+                "rar7_v6_decoder": env_or_path_availability(
+                    Some("SQUALLZ_UNRAR"),
+                    &["unrar"],
+                ),
                 "write": unsupported_availability(),
             },
             "limitations": [
@@ -1679,13 +1741,18 @@ pub(crate) fn implementation_json(format_id: &str) -> Value {
                 },
                 {
                     "scope": "encrypted",
-                    "status": "not_release_claimed",
-                    "reason": "encrypted RAR compatibility requires a licensed/full compatibility matrix",
+                    "status": "implemented_not_release_claimed",
+                    "reason": "encrypted RAR reading uses 7zz/7z with a stdin-only password bridge; a licensed full corpus and three-platform package matrix are still required for a release claim",
                 },
                 {
                     "scope": "multi_volume",
                     "status": "not_release_claimed",
-                    "reason": "the current stream bridge opens one source stream; adjacent-volume handling needs a path-aware engine readiness check",
+                    "reason": "native partN.rar and legacy rar/r00 read orchestration is implemented with private first-volume staging, but a licensed full corpus and macOS/Windows/Linux package matrix are still required for a release claim",
+                },
+                {
+                    "scope": "rar7_v6",
+                    "status": "implemented_not_release_claimed",
+                    "reason": "confirmed-unencrypted RAR7 v6 entry streams can use an optional user-installed unrar decoder after 7zz/7z listing and volume validation; encrypted input stays on the stdin-only 7zz/7z path, and a full three-platform corpus is still required",
                 },
                 {
                     "scope": "damaged_repair",
@@ -1740,12 +1807,21 @@ fn rar_policy_json() -> Value {
         "bundled": false,
         "primary_tools": ["7zz", "7z", "7za"],
         "primary_env": "SQUALLZ_7Z",
-        "fallback_tools": ["bsdtar"],
+        "fallback_tools": ["bsdtar", "unrar"],
         "fallback_env": "SQUALLZ_BSDTAR",
-        "fallback_scope": "diagnostic_or_rar5_v6",
-        "fallback_reason": "explicit SQUALLZ_BSDTAR override or RAR5 v6 method detection may select bsdtar; bsdtar is not a bundled product guarantee",
-        "license_boundary": "Squallz does not link unrar code or create RAR archives; bundling 7zz/7z would require LGPL plus unRAR restriction notices, source/replacement path, and RAR creation must remain unsupported",
-        "release_claim": "read-only public-sample subset; encrypted, full multi-volume, and damaged RAR repair are not release-claimed",
+        "rar7_decoder_env": "SQUALLZ_UNRAR",
+        "fallback_scope": "diagnostic_single_file_or_confirmed_unencrypted_rar7_v6",
+        "fallback_reason": "bsdtar remains an explicit or single-file v6 fallback; optional unrar only streams confirmed-unencrypted RAR7 v6 entries after 7zz/7z listing and volume validation; neither tool is bundled",
+        "native_multi_volume": {
+            "read_only": true,
+            "tools": ["7zz", "7z", "7za"],
+            "optional_rar7_decoder": ["unrar"],
+            "names": ["partN.rar", "partNNN.rar", ".rar/.r00-.r99"],
+            "encrypted_read": "stdin_only_password_bridge",
+            "status": "implemented_not_release_claimed",
+        },
+        "license_boundary": "Squallz does not link or bundle unrar code and does not create RAR archives; optional unrar is user-installed and read-only, while bundling 7zz/7z would require LGPL plus unRAR restriction notices, source/replacement path, and RAR creation must remain unsupported",
+        "release_claim": "read-only public-sample subset; native multi-volume orchestration plus real macOS RAR5, legacy RAR4 old-style, and confirmed-unencrypted RAR7 v6 volume smokes are implemented, but broader historical RAR4 and encrypted/solid coverage, the full three-platform package matrix, and damaged RAR repair are not release-claimed",
     })
 }
 
@@ -1764,7 +1840,22 @@ fn unsupported_availability() -> Value {
 }
 
 fn sevenzip_availability() -> Value {
-    env_or_path_availability(Some("SQUALLZ_7Z"), &["7zz", "7z", "7za"])
+    let status = sevenzip_backend_status();
+    let source = match status.source() {
+        Some(SevenZipBackendSource::Application) => Some("application"),
+        Some(SevenZipBackendSource::Environment) => Some("env"),
+        Some(SevenZipBackendSource::Path) => Some("path"),
+        None => None,
+    };
+    json!({
+        "available": status.available(),
+        "source": source,
+        "env": "SQUALLZ_7Z",
+        "selected": status.selected().map(|path| path.to_string_lossy()),
+        "configured": status.configured(),
+        "path_exists": status.executable().is_some(),
+        "tools": ["7zz", "7z", "7za"],
+    })
 }
 
 fn rar_read_availability() -> Value {

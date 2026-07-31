@@ -1,6 +1,6 @@
 # 依赖许可证与维护状态台账
 
-> PLAN.md §4 合规红线：引入任何依赖必须在此记录名称、锁定版本、许可证、维护状态。
+> 引入任何依赖必须在此记录名称、锁定版本、许可证和维护状态。
 > 项目本体：MIT OR Apache-2.0。
 
 ## 直接依赖
@@ -39,6 +39,9 @@
 | log | 0.4.31 | MIT OR Apache-2.0 | 活跃（rust-lang 官方） | i18n 缺 key 的 debug 日志门面 |
 | rpassword | 7.5.4 | Apache-2.0 | 活跃（conradkleinespel） | TTY 密码交互输入 |
 | ctrlc | 3.5.2 | MIT OR Apache-2.0 | 活跃（Detegr） | Ctrl-C → ControlToken.cancel() |
+| tokio | 1.52.3 | MIT | 活跃（Tokio 官方） | `squallz-cli` 直接依赖：用 current-thread runtime 执行共享的 `sqz check-update` 异步请求，并在等待期间响应 ControlToken / Ctrl-C 取消；不启动后台更新任务 |
+| winapi-util | 0.1.11 | Unlicense OR MIT | 活跃（BurntSushi） | Windows 目录和文件的卷序列号、文件 ID 查询，用于分卷工作空间及 RAR 邻卷路径绑定 |
+| libc | 0.2.186 | MIT OR Apache-2.0 | 活跃（rust-lang） | macOS 目标卷大小写语义查询（squallz-core） |
 
 ## 关键传递依赖
 
@@ -49,6 +52,7 @@
 | dirs-sys / option-ext | 0.5.0 / 0.2.0 | MIT OR Apache-2.0 / MPL-2.0 | dirs 平台后端；option-ext 为 MPL-2.0（文件级 copyleft，仅静态链接使用、不修改其源码，分发无义务传染，可接受） |
 | nix | 0.31.3 | MIT | ctrlc 的 Unix 信号后端 |
 | rtoolbox | 0.0.5 | Apache-2.0 | rpassword 的终端工具箱 |
+| tokio-macros | 2.7.0 | MIT | Tokio 的 `select!` 宏实现；由 CLI 更新检查的可取消异步等待引入 |
 
 注：option-ext 的 MPL-2.0 为弱 copyleft（仅约束对该文件本身的修改），与 MIT/Apache 项目组合分发常见且合规；已在白名单中单列说明。
 
@@ -82,19 +86,34 @@
 | twox-hash | 2.1.2 | MIT | lz4_flex frame 校验（xxhash32） |
 
 全部满足宽松许可证白名单（MIT/Apache-2.0/BSD/Zlib/bzip2 族），无 copyleft 传染风险。
-unsafe 仅存在于 liblzma-sys / zstd-sys 等 FFI -sys 层，squallz-formats 与
-squallz-core 保持 `#![forbid(unsafe_code)]`。
+squallz-formats 保持 `#![forbid(unsafe_code)]`；squallz-core 使用
+`#![deny(unsafe_code)]`，只在平台系统调用边界局部 allow。Windows 的
+`GetFileInformationByHandleEx` 使用调用期间有效的输出结构，`MoveFileExW` 使用调用期间有效的
+NUL 结尾 UTF-16 缓冲区；macOS 的 `pathconf(_PC_CASE_SENSITIVE)` 使用调用期间有效的
+NUL 结尾路径副本，系统调用不保留指针，未知结果保守按不区分大小写处理。
 
 ## 新增直接依赖
 
 | 依赖 | 版本（锁定） | 许可证 | 维护状态 | 用途 |
 | ---- | ---- | ---- | ---- | ---- |
 | fs4 | 1.1.0 | MIT OR Apache-2.0 | 活跃（al8n，fs2 的维护继任 fork，rustix 后端无 libc） | 磁盘剩余空间预检（squallz-core 分卷切割、squallz-formats ZIP update） |
+| rustix | 1.1.4 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | 活跃（Bytecode Alliance） | macOS、Apple 平台与 Linux 上的内核原子 no-replace rename；RAR 邻卷 no-follow/non-blocking 打开 |
+| windows-sys | 0.61.2 | MIT OR Apache-2.0 | 活跃（Microsoft windows-rs） | Windows `MoveFileExW` 原子 no-replace 移动；flags 固定为 0，不启用覆盖或跨卷复制 |
 
 注：globset（已登记）同时作为 squallz-formats 的直接依赖
 （ZIP update 的 --delete glob 匹配），版本与许可证不变。
-fs4 的传递依赖 rustix / errno / bitflags 均为 MIT OR Apache-2.0（rustix 另含
-Apache-2.0 WITH LLVM-exception 选项），满足宽松许可证白名单。
+rustix 同时是 fs4 的传递依赖；errno / bitflags 均为 MIT OR Apache-2.0，
+满足宽松许可证白名单。
+
+## 新增直接依赖（squallz-update，共享软件更新检查）
+
+| 依赖 | 版本（锁定） | 许可证 | 维护状态 | 用途 |
+| ---- | ---- | ---- | ---- | ---- |
+| reqwest | 0.13.4 | MIT OR Apache-2.0 | 活跃（seanmonstar，Rust HTTP 生态主流客户端） | GUI 与 `sqz check-update` 共用：从固定的 GitHub Releases 地址读取最新稳定版元数据、发布清单和公开信任证据；不下载或安装软件 |
+| semver | 1.0.28 | MIT OR Apache-2.0 | 活跃（dtolnay） | GUI 与 CLI 共用：严格解析并比较当前 Squallz 版本与 GitHub Release 标签 |
+
+`squallz-update` 是只读的内部共享 crate。桌面端只保留 Tauri IPC 与缓存包装，CLI 只在
+用户显式运行 `sqz check-update` 时调用它。
 
 ## 新增直接依赖（squallz-gui，Rust）
 
@@ -105,10 +124,16 @@ Apache-2.0 WITH LLVM-exception 选项），满足宽松许可证白名单。
 | tauri-plugin-dialog | 2.7.1 | Apache-2.0 OR MIT | 活跃（tauri 官方 plugins-workspace） | 系统文件打开/保存面板 |
 | tauri-plugin-opener | 2.5.4 | Apache-2.0 OR MIT | 活跃（同上） | Finder 中显示（revealItemInDir） |
 | serde | 1.0.228 | MIT OR Apache-2.0 | 活跃（serde-rs/dtolnay） | IPC DTO 派生（此前为传递依赖，现转 workspace 直接依赖） |
+| trash | 5.2.6 | MIT | 活跃（Byron/trash-rs；持续发布并维护三平台系统废纸篓适配） | 成功创建归档后将用户明确选择的顶层源移入 macOS/Windows/Linux 系统废纸篓；不提供永久删除 fallback |
+| tempfile | 3.27.0 | MIT OR Apache-2.0 | 活跃（Stebalien/Rust CLI 工作组生态） | 归档条目打开与嵌套预览的随机私有临时目录、独占文件和退出清理；IPC 只暴露不透明会话 ID |
+| objc2 | 0.6.4 | MIT | 活跃（madsmtm/objc2） | macOS AppKit 与 Objective-C 类型安全桥接；只在 macOS 目标编译 |
+| objc2-app-kit | 0.3.2 | Zlib OR Apache-2.0 OR MIT | 活跃（madsmtm/objc2） | macOS 系统工作区、应用激活与默认处理器查询 |
+| objc2-foundation | 0.3.2 | MIT | 活跃（madsmtm/objc2） | macOS bundle、字符串与无损本地文件 URL |
 
 tauri 的传递依赖树较大（wry/tao/objc2 系、muda 等），均为 MIT/Apache-2.0
-双许可（objc2 系为 MIT），满足白名单；unsafe 集中在 tauri/wry 框架层，
-squallz-gui 业务代码不写 unsafe。
+或兼容的 Zlib 宽松许可证，满足白名单。Squallz 自有的 unsafe 只存在于小范围平台桥接：
+上述 core 系统调用、macOS 系统集成，以及 Windows 凭据存储和配置替换 API。
+归档读取、临时文件租约与跨平台 GUI 业务层保持安全 Rust。
 
 ## 新增直接依赖（frontend，npm — 仅列直接依赖）
 
@@ -130,7 +155,7 @@ squallz-gui 业务代码不写 unsafe。
 | 素材 | 许可证 | 说明 |
 | ---- | ---- | ---- |
 | Lucide 图标（lucide.dev） | ISC | 前端以内联 SVG path 子集使用（frontend/src/components/Icon.svelte），线宽 1.75 |
-| Squallz app icon | 项目自有 | 用户给定 SVG，作为 `crates/squallz-gui/icons/squallz-logo.svg` 源文件并生成桌面 app icon |
+| Squallz app icon | 项目自有 | 用户选定的拉链图标，经透明底适配后保存为 `crates/squallz-gui/icons/squallz-icon-source.png`，并生成桌面、应用内图标与 macOS Icon Composer 资源 |
 
 ## PAR2 外部工具桥接
 
@@ -154,16 +179,19 @@ squallz-gui 业务代码不写 unsafe。
 | 工具 / 候选 | 版本 | 许可证 | 维护状态 | 用途 |
 | ---- | ---- | ---- | ---- | ---- |
 | 7-Zip / 7zz / 7z | 外部可执行文件，未随本仓库锁定或分发 | GNU LGPL + unRAR restriction（按官方 `license.txt` 复核） | 活跃；官方支持三平台构建和广泛格式清单 | 长尾 unpack-only bridge；候选 WIM writer；RAR 只读候选 |
+| RARLAB UnRAR | 用户自行安装的外部可执行文件，未随本仓库锁定或分发 | RARLAB freeware / unRAR license，禁止借此重建专有 RAR 压缩算法 | 活跃；官方 RAR/WinRAR 平台包提供命令行 UnRAR | 仅为 7zz/7z 已明确确认未加密的 RAR7 v6 条目提供只读流式解码 |
 | wimlib / wimlib-imagex | 外部库或可执行文件候选，未引入 | GPL-3.0 / LGPL-2.1 组合，具体构建配置需发布前复核 | 活跃；官方介绍为跨平台 WIM 创建/修改/提取库 | WIM pack/unpack 发布阻断候选 |
 | libarchive / bsdtar | 系统或外部可执行文件，未随本仓库锁定或分发 | BSD 风格许可证，但具体系统构建含格式插件差异 | 活跃；当前仅作本机 RAR 诊断 fallback | 不作为首发跨平台产品承诺；仅保留诊断或用户显式 fallback |
 
-2026-06-20 复核官方 7-Zip `license.txt` 与 RARLAB 下载/许可页面后，当前结论保持不变：
+2026-07-28 复核官方 7-Zip `license.txt` 与 RARLAB 下载、UnRAR 7 说明和许可页面后，当前结论保持不变：
 Squallz 不链接 unrar 源码、不创建 RAR、不实现 RAR recovery record；RAR 只能是外部工具只读能力。
 当前 `squallz-formats` 已实现 7zz/7z read bridge，并让 RAR 只读路径默认优先使用
 `SQUALLZ_7Z` / `7zz` / `7z` / `7za`；但没有把 7-Zip 二进制打包进产物。发布前若随包分发
 7zz/7z，必须补齐 LGPL/unRAR restriction 告知、源码或 relink/replace 路径、平台包内文件归属、
-以及 RAR 创建禁令说明。`SQUALLZ_BSDTAR` / `bsdtar` 仅是诊断或 RAR5-v6 fallback，不是跨平台
-bundled capability。WIM
+以及 RAR 创建禁令说明。`SQUALLZ_BSDTAR` / `bsdtar` 仅是诊断或单文件 RAR7 v6 fallback，不是跨平台
+bundled capability。`SQUALLZ_UNRAR` / `unrar` 只在 7zz/7z 明确证明 RAR7 v6 输入未加密后
+流式读取条目，不接收密码，也不随 Squallz 分发；若未来考虑随包分发，必须先单独完成 RARLAB
+许可、版本、平台文件归属和用户可见告知审查。WIM
 创建已实现 external `wimlib-imagex` bridge，但当前仍只调用用户或测试环境提供的外部工具；
 没有把 wimlib 链接或打包进 Squallz 产物。后续若随包分发 wimlib/wimlib-imagex，必须先补真实
 WIM 样本矩阵、平台包归属、GPL/LGPL 源码与替换义务、以及用户可见许可证说明。
@@ -172,11 +200,12 @@ WIM 样本矩阵、平台包归属、GPL/LGPL 源码与替换义务、以及用�
 
 | 依赖 | 版本（锁定） | 许可证 | 维护状态 | 用途 |
 | ---- | ---- | ---- | ---- | ---- |
-| blake3 | 1.8.5 | CC0-1.0 OR Apache-2.0 OR Apache-2.0 WITH LLVM-exception | 活跃（BLAKE3-team） | `.sqz` payload 强哈希与篡改检测 |
+| blake3 | 1.8.5 | CC0-1.0 OR Apache-2.0 OR Apache-2.0 WITH LLVM-exception | 活跃（BLAKE3-team） | `.sqz` payload 强哈希与篡改检测；归档读取时的来源内容摘要及 Trash 前复核 |
 | crc32c | 0.6.8 | Apache-2.0/MIT | 低频维护但接口稳定；硬件加速 + 软件 fallback | `.sqz` header/footer/payload CRC-32C；core `SQZV` 分卷小头 CRC-32C |
 | reed-solomon-erasure | 6.0.0 | MIT | 活跃维护（darrenldl；docs.rs 与 GitHub 源码可用，当前版本编译通过） | `.sqz` 内嵌 Reed-Solomon GF(2^8) payload block 恢复 |
 
-`blake3` 的传递依赖 `arrayref` / `arrayvec` 为宽松许可证；`crc32c` 不引入 copyleft 依赖。
+`blake3` 同时是 `squallz-core` 与 `squallz-gui` 的直接依赖，桌面来源清理使用 `pure` feature，
+不会引入平台汇编。其传递依赖 `arrayref` / `arrayvec` 为宽松许可证；`crc32c` 不引入 copyleft 依赖。
 `reed-solomon-erasure` 在 `crates/squallz-formats/Cargo.toml` 中禁用默认 `std` feature，避免为
 SQZ 恢复路径引入旧 `parking_lot 0.11` / `instant` advisory 链；当前关键传递依赖为 `libm` /
 `lru` / `hashbrown` / `ahash` / `smallvec` / `spin`，均满足宽松许可证白名单。

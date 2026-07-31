@@ -108,12 +108,12 @@ require_blocker_report \
 require_blocker_report \
   "Windows Credential Manager runtime smoke" \
   "benches/WINDOWS_CREDENTIAL_MANAGER_SMOKE.md" \
-  "Run \`scripts/windows_credential_manager_smoke.ps1\` on Windows and commit the report."
+  "Run \`scripts/windows_credential_manager_smoke.ps1\` on Windows and retain the local report."
 
 require_blocker_report \
   "Linux Secret Service runtime smoke" \
   "benches/LINUX_SECRET_SERVICE_SMOKE.md" \
-  "Run \`scripts/linux_secret_service_smoke.sh\` in a real Linux desktop session and commit the report."
+  "Run \`scripts/linux_secret_service_smoke.sh\` in a real Linux desktop session and retain the local report."
 
 require_blocker_report \
   "Windows live UI and Explorer integration" \
@@ -149,7 +149,7 @@ fi
   printf '# Squallz Release Readiness Gate\n\n'
   printf 'Status: %s\n\n' "$status"
   printf '## Scope\n\n'
-  printf 'This gate aggregates product-named release evidence only. It intentionally does not depend on numbered iteration reports or self-referential gate artifacts.\n\n'
+  printf 'This gate aggregates local release evidence without requiring generated reports in source control.\n\n'
   printf '## Summary\n\n'
   printf -- '- Local evidence regressions: %s\n' "${#local_failures[@]}"
   printf -- '- Formal release blockers: %s\n' "${#formal_blockers[@]}"
@@ -173,7 +173,7 @@ fi
 
   printf '\n## Notes\n\n'
   printf -- '- A blocked status is expected until all formal external signoff reports pass.\n'
-  printf -- '- Iteration traces belong in `PROGRESS.md` and `ITERATION_LOG.md`, not in the release evidence graph.\n'
+  printf -- '- Generated reports stay under the ignored `benches/` directory.\n'
 } >"$REPORT"
 
 printf 'report=%s\n' "$REPORT"

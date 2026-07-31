@@ -12,6 +12,9 @@
   <a href="README.zh-CN.md">Chinese README</a> |
   <a href="docs/format-support.md">Format support</a> |
   <a href="docs/sqz-container-format-v1.md">SQZ format</a> |
+  <a href="docs/SELF_EXTRACTING.md">SFX format</a> |
+  <a href="docs/PRESETS.md">Archive presets</a> |
+  <a href="docs/macos-release.md">macOS release</a> |
   <a href="docs/privacy.md">Privacy</a>
 </p>
 
@@ -41,7 +44,7 @@ flowchart LR
 | Area | What Squallz does |
 | --- | --- |
 | Desktop app | Tauri desktop UI with shared task progress, theme settings, history, passwords, drag/drop, and platform shell handoff paths. |
-| CLI | `sqz` supports archive creation, extraction, listing, testing, conversion, nested archives, checksums, duplicate scans, batch jobs, diagnostics, and JSON output. |
+| CLI | `sqz` supports archive and SFX creation, extraction, listing, testing, conversion, nested archives, checksums, duplicate scans, batch jobs, diagnostics, and JSON output. |
 | Native container | `.sqz` stores entries with footer indexes, checksums, embedded Reed-Solomon recovery, split volumes, and standard archive export. |
 | Safety | Centralized extraction guardrails for path traversal, Zip Slip, symlink breakout, output limits, entry limits, and compression-ratio limits. |
 | Privacy | No ads, no telemetry, no file uploads. Saved archive passwords go through the system credential store only when the user opts in. |
@@ -54,10 +57,12 @@ what is intentionally unsupported.
 | Capability | Current boundary |
 | --- | --- |
 | Built-in archive work | ZIP/ZIP64, TAR, 7z, and single-stream compressors such as gzip, bzip2, xz, zstd, lz4, and brotli. |
+| Native ZIP volumes | Built-in creation and conversion write PKWARE-compatible `.z01/.z02/…/.zip` sets and use the final `.zip` as the primary output. Existing sets are validated, located from any member, staged privately, and read through external 7zz/7z; encrypted-read passwords use stdin rather than process arguments or environment variables. |
 | Native `.sqz` | Create, list, test, extract, repair within recovery limits, split volumes, and export to standard archives. |
 | WIM | Create/read paths exist through external tooling, primarily `wimlib-imagex` and 7zz/7z where available. Not bundled by default. |
 | Long-tail unpack-only formats | APFS, AR, ARJ, CAB, CHM, CPIO, CramFS, DMG, EXT, FAT, GPT, HFS, IHEX, ISO, LZH, LZMA, MBR, MSI, NSIS, NTFS, QCOW2, RPM, SquashFS, UDF, UEFI, VDI, VHD, VHDX, VMDK, XAR, and Z through the 7zz/7z bridge when installed. |
-| RAR | Read-only bridge path. Squallz does not create RAR, does not implement RAR recovery records, and does not claim damaged RAR repair. |
+| RAR | Read-only bridge when external 7zz/7z is installed. Encrypted and plain `partN.rar` and legacy `.rar/.r00`–`.r99` sets can open from any member through the stdin-only password path; real encrypted RAR, RAR4, and full three-platform coverage are not release-claimed. Squallz does not create RAR, implement RAR recovery records, or repair damaged RAR. |
+| Self-extracting archives | SFX v1 assembles a complete ZIP payload with a Squallz-aware Windows PE/Linux ELF stub or a macOS GUI `.app` template. The CLI and desktop Create page support the host target; the final artifact must be signed after assembly. |
 | External recovery | PAR2 verify/repair has a Rust fallback and optional external bridge. PAR2 create uses an external standard tool when present. |
 
 Run the machine-readable inventory at any time:
@@ -105,9 +110,26 @@ Create and inspect a standard archive:
 ```sh
 sqz compress ./Photos -o Photos.zip --profile balanced
 sqz list Photos.zip --tree
+sqz list Photos.zip --search "RAW/2026" --json
 sqz test Photos.zip --json
 sqz extract Photos.zip -d ./Restored --smart
+sqz preset list
+sqz preset clone builtin.create.cross-platform-7z user.create.portable --label "Portable"
 ```
+
+Create and verify a Windows or Linux self-extractor from a complete ZIP
+payload:
+
+```sh
+sqz sfx create Photos.zip --target windows --stub sqz.exe -o Photos.exe
+sqz sfx create Photos.zip --target macos --stub Squallz.app -o Photos.app
+sqz sfx inspect Photos.exe
+```
+
+The runtime can list, test or safely extract the payload and never auto-runs
+archived code. Build first, sign the final executable afterward. The layout and
+macOS signing boundary are documented in
+[docs/SELF_EXTRACTING.md](docs/SELF_EXTRACTING.md).
 
 Create a self-recovery `.sqz` container:
 
@@ -128,12 +150,36 @@ sqz duplicates ./Downloads --min-size 1m --json
 sqz batch jobs.json --keep-going --json
 ```
 
+Show the installed CLI version or check the stable release channel:
+
+```sh
+sqz --version
+sqz check-update
+sqz check-update --json
+```
+
+`sqz --version` is local and does not make a network request. `sqz
+check-update` only reads stable-release metadata; it does not download or
+install an update package. Its normal `up_to_date`, `update_available`, and `ahead`
+results all exit with code 0, including an available release that has no
+matching package for this platform. This command is separate from `sqz update`,
+which edits entries in an existing archive.
+
 Convert without manually extracting to disk:
 
 ```sh
 sqz convert source.zip -o source.7z --profile maximum
+sqz convert source.zip -o source.7z --profile balanced --split 700m
+sqz convert source.7z -o source.zip --split 700m --split-mode native
 sqz export archive.sqz -o archive.tar.zst
 ```
+
+Conversion and export refuse an existing output by default. Split conversion
+publishes generic `.001/.002/...` volumes by default; native ZIP mode publishes
+`.z01/.z02/.../.zip`. Both layouts report every physical output. Add `--force` only after
+choosing to replace the destination: Squallz binds that exact file or numbered set before work starts
+and returns `destination_changed` instead of overwriting it if another process
+modifies it before commit.
 
 ## Desktop App
 
@@ -152,6 +198,8 @@ on a small set of dependable desktop workflows:
 
 - Open archives, browse entries, preview supported files, and extract safely.
 - Compress, convert, test, checksum, repair, and export through shared task jobs.
+- Save versioned create and extract presets, with separate app and file-manager
+  bindings and no passwords or job paths in preset JSON.
 - Use light/dark themes, accent palettes, reduced-motion-aware UI, and localized
   English/Chinese text.
 - Store passwords only through the OS credential store when the user explicitly
@@ -199,90 +247,87 @@ Package the app for the current platform:
 make app-release
 ```
 
-## Unsigned GitHub Release Binaries
+## Release Trust
 
-This section applies only to users who download prebuilt Squallz binaries from
-GitHub Releases. It does not apply to running from source or to future package
-manager installs. Current early desktop binaries are not code-signed or
-notarized yet. Archive handling and CLI behavior are unchanged, but the
-operating system may block the app before it starts or warn when installing
-file-manager actions.
+GitHub Release assets carry their own trust state. Do not assume every file in
+a release has the same platform signature:
 
-Only bypass these warnings for an app bundle or binary you built yourself, or
-for a download from a source you trust. If a checksum is published next to the
-download, compare it before bypassing the operating-system warning. If you are
-not sure where the binary came from, delete it and build from source instead.
+| State | Meaning |
+| --- | --- |
+| `developer-id-notarized` | The macOS DMG passed Developer ID signing, Apple notarization, stapling, Gatekeeper, and final hash checks. |
+| `unsigned-preview` | No platform signing or notarization evidence is claimed. Windows and Linux packages currently use this state. |
+| `source` | Source archive; desktop code signing does not apply. |
 
-Release artifacts produced by the GitHub Actions release workflow include
-per-asset `.sha256` files, `.provenance.json` evidence files, and GitHub
-Artifact Attestations. After downloading a file from GitHub Releases, verify the
-checksum and build provenance before bypassing operating-system warnings:
+The public macOS workflow publishes only a DMG after the full trust chain
+passes. It does not fall back to an unsigned macOS package. Older releases that
+do not report a trust state should be treated as unsigned previews.
+
+Before any platform asset is collected, the release workflow runs the frontend
+and Rust qualification checks. Each platform job then executes its packaged
+`sqz` binary through an offline ZIP create, test, list, extract, and byte-for-byte
+round trip. macOS previews also test the separately published raw CLI. This
+runtime smoke is a release gate; it does not replace installer or clean-machine
+validation.
+
+Every primary asset has a matching `.sha256` and `.provenance.json` file plus a
+GitHub Artifact Attestation. A `developer-id-notarized` DMG also has a
+`.trust.json` summary. Check those files before running a download:
 
 ```sh
 shasum -a 256 /path/to/downloaded-asset
 gh attestation verify /path/to/downloaded-asset --repo yangzhg/Squallz
 ```
 
-Compare the printed SHA-256 value with the matching `.sha256` file.
+Compare the printed SHA-256 value with the matching `.sha256` file. The full
+macOS maintainer procedure is documented in
+[docs/macos-release.md](docs/macos-release.md).
 
 ### macOS
 
-If Finder says the developer cannot be verified, or that Apple cannot check the
-app for malicious software:
+For a `developer-id-notarized` DMG, verify Apple's ticket and Gatekeeper result:
 
-1. Verify that the download came from the expected release page, and compare the
-   checksum if one is provided.
-2. Move `Squallz.app` to `Applications` if you want to keep the app installed.
-3. Control-click or right-click `Squallz.app`, choose **Open**, then confirm
-   **Open** again.
-4. If macOS still blocks it, open **System Settings** → **Privacy & Security**,
-   then choose **Open Anyway** for Squallz.
+```sh
+xcrun stapler validate /path/to/Squallz.dmg
+spctl --assess --type open --context context:primary-signature --verbose=4 /path/to/Squallz.dmg
+```
 
-If macOS says the app is damaged and cannot be opened after you have verified
-the source, remove the quarantine attribute, then open the app again:
+If either command fails or macOS blocks a DMG marked
+`developer-id-notarized`, stop and report the release. Do not remove quarantine
+or use **Open Anyway** for a package whose published trust claim does not match
+the macOS result.
+
+An `unsigned-preview` app may be blocked even when its checksum is correct.
+Only bypass that warning for a build you made yourself or a preview whose source
+and provenance you have verified. Control-click the app and choose **Open**; if
+needed, macOS also exposes **Open Anyway** under **Privacy & Security**. Removing
+quarantine is a last resort for a verified preview:
 
 ```sh
 xattr -dr com.apple.quarantine /path/to/Squallz.app
 ```
 
-If the downloaded `sqz` CLI binary is blocked or is not executable, verify the
-source first, then run:
+For a verified preview CLI that lacks execute permission:
 
 ```sh
 xattr -d com.apple.quarantine /path/to/sqz
 chmod +x /path/to/sqz
 ```
 
-### Windows
+### Windows and Linux previews
 
-If Microsoft Defender SmartScreen shows "Windows protected your PC":
+Current Windows and Linux downloads are `unsigned-preview`. On Windows, verify
+the checksum and provenance before choosing **More info** → **Run anyway** in a
+SmartScreen warning. Do not restore a file quarantined by security software if
+you cannot verify its source.
 
-1. Verify that the download came from the expected release page, and compare the
-   checksum if one is provided.
-2. Choose **More info** → **Run anyway**.
-
-If Microsoft Defender or another security tool quarantines the file, only
-restore or allow it after you have verified the source and checksum. If you
-cannot verify the binary, delete it and build Squallz from source instead.
-
-### Linux
-
-If the shell says `Permission denied`, or a downloaded AppImage/binary does not
-start, make it executable:
+On Linux, a verified AppImage or binary may need execute permission:
 
 ```sh
 chmod +x /path/to/Squallz
 chmod +x /path/to/sqz
 ```
 
-If your desktop environment asks whether to trust or integrate the downloaded
-application, approve it only after verifying the source and checksum. If the
-package manager or sandbox policy blocks the app, build from source or use the
-native package format for your distribution.
-
-Signed and notarized release artifacts are the expected path for future
-distribution builds. Until then, treat downloaded unsigned binaries as preview
-builds.
+If you cannot verify an unsigned preview, delete it and build from source.
 
 Project checks:
 
@@ -290,6 +335,7 @@ Project checks:
 cargo fmt --all -- --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all
+make test-release-tools
 npm --prefix frontend run check
 npm --prefix frontend run build
 ```
@@ -302,6 +348,7 @@ npm --prefix frontend run build
 | `crates/squallz-formats` | Archive format implementations and external bridges. |
 | `crates/squallz-format-api` | Format traits, entries, extraction contracts, safety helpers, and registry types. |
 | `crates/squallz-recovery` | Recovery verification and repair support. |
+| `crates/squallz-update` | Stable-release discovery shared by the desktop app and CLI; no download or installation path. |
 | `crates/squallz-cli` | `sqz` command-line interface. |
 | `crates/squallz-gui` | Tauri backend, desktop integration, jobs, settings, secrets, and IPC. |
 | `frontend` | Svelte UI, design tokens, task dialogs, i18n, and frontend state. |

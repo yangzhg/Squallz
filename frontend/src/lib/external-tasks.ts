@@ -1,15 +1,28 @@
 import { basename, dirname } from "./format";
+import {
+  archiveNameWithoutVolumeSuffix,
+  stripLegacyRarVolumeSuffix,
+} from "./archive-names";
 import type { JobSpec } from "./ipc";
 
 export const externalOpenActions = [
   "checksum",
   "extract-here",
   "extract-to-folder",
+  "extract-sfx",
   "compress-to-7z",
   "test-archive",
 ] as const;
 
 export type ExternalOpenAction = (typeof externalOpenActions)[number];
+export const desktopIntegrationActions = [
+  "checksum",
+  "extract-here",
+  "extract-to-folder",
+  "compress-to-7z",
+  "test-archive",
+] as const satisfies readonly ExternalOpenAction[];
+export type DesktopIntegrationAction = (typeof desktopIntegrationActions)[number];
 export type ArchiveStemName = (name: string) => string;
 
 export interface ExternalOpenActionCopy {
@@ -62,6 +75,10 @@ const externalOpenActionCopyByAction: Record<ExternalOpenAction, ExternalOpenAct
     labelKey: "gui.settings.integration.context_action.extract_to_archive",
     fallbackLabel: "Extract to <archive>/",
   },
+  "extract-sfx": {
+    labelKey: "gui.external_task.extract_sfx",
+    fallbackLabel: "Extract self-extractor",
+  },
   "compress-to-7z": {
     labelKey: "gui.settings.integration.context_action.compress_to_7z",
     fallbackLabel: "Compress to 7Z",
@@ -89,7 +106,8 @@ export function normalizeExternalTaskPaths(paths: readonly unknown[]): string[] 
 }
 
 export function defaultExternalArchiveStemName(name = "archive"): string {
-  const unsplit = name.replace(/\.\d{3,}$/i, "");
+  const withoutLegacyVolume = stripLegacyRarVolumeSuffix(name);
+  const unsplit = archiveNameWithoutVolumeSuffix(withoutLegacyVolume);
   const lower = unsplit.toLowerCase().trimEnd();
   const extension = externalArchiveExtensions.find((item) => lower.endsWith(`.${item}`));
   if (extension) return unsplit.slice(0, -(extension.length + 1));
@@ -139,6 +157,21 @@ export function buildExternalTaskJobSpec(
   if (action === "extract-here" || action === "extract-to-folder") {
     return extractJobSpec(action, validPaths, stemName);
   }
+  if (action === "extract-sfx") {
+    return {
+      kind: "extract",
+      path: firstPath,
+      dest: options.output?.trim() || joinPath(dirname(firstPath), stemName(basename(firstPath))),
+      selection: null,
+      overwrite: "ask",
+      symlinks: "skip",
+      smart: false,
+      encoding: null,
+      password: null,
+      verify_sfx: true,
+      best_effort: false,
+    };
+  }
   if (action === "compress-to-7z") {
     return {
       kind: "compress",
@@ -148,7 +181,11 @@ export function buildExternalTaskJobSpec(
       password: null,
       encrypt_names: false,
       split_size: null,
+      split_mode: "generic",
       excludes: [],
+      replace_existing: false,
+      completion: "none",
+      post_success: "keep_source",
     };
   }
   return {
@@ -164,6 +201,7 @@ function extractJobSpec(
   paths: string[],
   stemName: ArchiveStemName,
 ): JobSpec {
+  const smart = action === "extract-here";
   if (paths.length === 1) {
     const path = paths[0] ?? "";
     return {
@@ -173,7 +211,7 @@ function extractJobSpec(
       selection: null,
       overwrite: "ask",
       symlinks: "preserve",
-      smart: true,
+      smart,
       encoding: null,
       password: null,
       best_effort: false,
@@ -190,7 +228,7 @@ function extractJobSpec(
     })),
     overwrite: "ask",
     symlinks: "preserve",
-    smart: true,
+    smart,
   };
 }
 

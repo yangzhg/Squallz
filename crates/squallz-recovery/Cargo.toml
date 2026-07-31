@@ -6,6 +6,13 @@ license.workspace = true
 description = "Squallz recovery data operations"
 
 [dependencies]
+squallz-core = { path = "../squallz-core", version = "0.1.0" }
 squallz-format-api = { path = "../squallz-format-api", version = "0.1.0" }
 rust-par2 = "0.1.2"
+blake3 = { version = "1.8.5", features = ["prefer_intrinsics"] }
+fs4 = "1"
 serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+base64 = "0.22"

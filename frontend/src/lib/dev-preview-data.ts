@@ -2,7 +2,10 @@ import type {
   ArchiveInfo,
   EntryDto,
   EntryPreviewDto,
+  IntegrationStatusDto,
+  IntegrationSystemDiagnosticsDto,
   NestedArchivePreviewDto,
+  QueueWaitReason,
 } from "./ipc";
 
 export interface ArchivePreview {
@@ -15,6 +18,29 @@ export interface ArchivePreview {
   nestedPreview: NestedArchivePreviewDto | null;
 }
 
+type PreviewTaskKind =
+  | "compress"
+  | "compress_split"
+  | "compress_sfx"
+  | "compress_sfx_failure"
+  | "recovery_cleanup_ready"
+  | "recovery_cleanup_unconfirmed"
+  | "recovery_cleanup_record"
+  | "extract"
+  | "extract_unknown_current"
+  | "batch_extract"
+  | "test"
+  | "checksum"
+  | "checksum_check"
+  | "recovery_protect"
+  | "recovery_verify_repairable"
+  | "recovery_verify_multi_file_repairable"
+  | "recovery_verify_over_capacity"
+  | "update_scan"
+  | "update_verify"
+  | "update_commit";
+type TaskQueuePreview = Exclude<QueueWaitReason, "queue_order">;
+
 export interface RuntimePreviews {
   archive: ArchivePreview | null;
   batchPaths: string[];
@@ -25,9 +51,16 @@ export interface RuntimePreviews {
   dropPaths: string[];
   preflightScanned: number;
   preflightCurrent: string;
-  completedTask: "compress" | "extract" | "extract_unknown_current" | "batch_extract" | "test" | "checksum" | "checksum_check" | null;
-  activeTask: "compress" | "extract" | "extract_unknown_current" | "batch_extract" | "test" | "checksum" | "checksum_check" | null;
+  preflightDestinationBytes: number;
+  preflightDestinationCurrent: string;
+  extractAvailableBytes: number;
+  toast: "warning" | "danger" | null;
+  completedTask: PreviewTaskKind | null;
+  activeTask: PreviewTaskKind | null;
+  taskQueue: TaskQueuePreview | null;
   jobSubmitDelayMs: number;
+  integrationStatus: IntegrationStatusDto | null;
+  integrationDiagnostics: IntegrationSystemDiagnosticsDto | null;
 }
 
 const emptyRuntimePreviews: RuntimePreviews = {
@@ -40,9 +73,16 @@ const emptyRuntimePreviews: RuntimePreviews = {
   dropPaths: [],
   preflightScanned: 0,
   preflightCurrent: "",
+  preflightDestinationBytes: 0,
+  preflightDestinationCurrent: "",
+  extractAvailableBytes: 0,
+  toast: null,
   completedTask: null,
   activeTask: null,
+  taskQueue: null,
   jobSubmitDelayMs: 0,
+  integrationStatus: null,
+  integrationDiagnostics: null,
 };
 
 const sampleArchiveRoot = "/Users/alex/Squallz Samples";
@@ -160,9 +200,26 @@ export function readRuntimePreviews(params: URLSearchParams, pageSize: number): 
   const preflightCurrent = preflightScanned > 0
     ? params.get("previewPreflightCurrent") ?? "project/src/main.rs"
     : "";
+  const preflightDestinationBytes = numericParam(params, "previewDestinationBytes", 0);
+  const preflightDestinationCurrent = preflightDestinationBytes > 0
+    ? params.get("previewDestinationCurrent") ?? "/Users/alex/Archives/project.zip"
+    : "";
+  const extractAvailableBytes = numericParam(
+    params,
+    "previewExtractAvailableBytes",
+    256 * 1024 * 1024 * 1024,
+  );
   const completedTask = completedTaskParam(params.get("previewCompletedTask"));
   const activeTask = completedTaskParam(params.get("previewActiveTask"));
+  const taskQueueParam = params.get("previewTaskQueue");
+  const taskQueue = taskQueueParam === "cpu"
+    ? "cpu_budget"
+    : taskQueueParam === "1" || taskQueueParam === "slot"
+      ? "parallel_limit"
+      : null;
   const jobSubmitDelayMs = Math.max(0, Math.min(1200, numericParam(params, "previewJobSubmitDelayMs", 0)));
+  const toastParam = params.get("previewToast");
+  const toast = toastParam === "warning" || toastParam === "danger" ? toastParam : null;
 
   return {
     archive: readArchivePreview(params, pageSize),
@@ -174,21 +231,189 @@ export function readRuntimePreviews(params: URLSearchParams, pageSize: number): 
     dropPaths: listParam(params, "dropPaths", "|"),
     preflightScanned,
     preflightCurrent,
+    preflightDestinationBytes,
+    preflightDestinationCurrent,
+    extractAvailableBytes,
+    toast,
     completedTask,
     activeTask,
+    taskQueue,
     jobSubmitDelayMs,
+    integrationStatus: readIntegrationPreview(params),
+    integrationDiagnostics: readIntegrationDiagnosticsPreview(params),
+  };
+}
+
+function readIntegrationPreview(params: URLSearchParams): IntegrationStatusDto | null {
+  const preview = params.get("previewIntegration");
+  if (preview !== "healthy" && preview !== "repair" && preview !== "missing") return null;
+
+  const actionNames: Array<[string, string]> = [
+    ["checksum", "Checksum"],
+    ["extract-here", "Extract Here"],
+    ["extract-to-folder", "Extract to <archive>/"],
+    ["compress-to-7z", "Compress to 7Z"],
+    ["test-archive", "Test archive"],
+  ];
+  const states = actionNames.map(([id, name], index) => {
+    if (preview === "missing") return { id, name, state: "missing" as const, issue: null };
+    if (preview === "repair" && index === 1) {
+      return { id, name, state: "damaged" as const, issue: "script_outdated" };
+    }
+    if (preview === "repair" && index === 2) {
+      return { id, name, state: "missing" as const, issue: null };
+    }
+    return { id, name, state: "healthy" as const, issue: null };
+  });
+  const installed = states
+    .filter((action) => action.state !== "missing")
+    .map((action) => ({
+      id: action.id,
+      name: action.name,
+      kind: "macos_finder_quick_action",
+      path: `/Users/alex/Library/Services/Squallz-${action.id}.workflow`,
+      script_path: `/Users/alex/Library/Application Support/Squallz/context-actions/${action.id}.sh`,
+    }));
+
+  return {
+    platform: "macos",
+    services_dir: "/Users/alex/Library/Services",
+    script_dir: "/Users/alex/Library/Application Support/Squallz/context-actions",
+    health: preview === "healthy" ? "healthy" : preview === "missing" ? "missing" : "needs_repair",
+    actions: states,
+    can_repair: true,
+    can_remove: preview !== "missing",
+    installed,
+    missing: states.filter((action) => action.state === "missing").map((action) => action.name),
+    unsupported: [],
+  };
+}
+
+function readIntegrationDiagnosticsPreview(params: URLSearchParams): IntegrationSystemDiagnosticsDto | null {
+  const preview = params.get("previewIntegration");
+  if (preview !== "healthy" && preview !== "repair" && preview !== "missing") return null;
+
+  const requestedState = params.get("previewDefaultHandlers");
+  const summaryState = requestedState === "squallz" || requestedState === "mixed" || requestedState === "other" || requestedState === "unknown" || requestedState === "unavailable"
+    ? requestedState
+    : preview === "missing"
+      ? "other"
+      : "mixed";
+  const extensions = [
+    "zip", "jar", "apk", "cbz", "cbr", "ipa", "7z", "rar", "sqz", "tar",
+    "tgz", "tbz2", "txz", "tzst", "gz", "bz2", "xz", "zst", "lz4", "br",
+    "001", "wim", "swm",
+  ];
+  const handlers = summaryState === "unavailable"
+    ? []
+    : extensions.map((extension, index) => {
+        const state = summaryState === "squallz"
+          ? "squallz" as const
+          : summaryState === "unknown" && index === extensions.length - 1
+            ? "unknown" as const
+            : summaryState === "mixed" && (extension === "rar" || extension === "sqz")
+              ? "squallz" as const
+              : "other" as const;
+        return {
+          extension,
+          state,
+          application_name: state === "squallz"
+            ? "Squallz"
+            : state === "other"
+              ? extension === "7z" ? "Keka" : "Archive Utility"
+              : null,
+        };
+      });
+  const sevenZipPreview = params.get("previewSevenZip");
+  const sevenZipAvailable = sevenZipPreview !== "missing" && sevenZipPreview !== "misconfigured";
+  const sevenZipConfigured = sevenZipPreview === "misconfigured";
+  const sevenZipSource = sevenZipPreview === "application"
+    ? "application" as const
+    : sevenZipConfigured
+      ? "environment" as const
+      : sevenZipAvailable
+        ? "path" as const
+        : null;
+  const wimlibPreview = params.get("previewWimlib");
+  const wimlibAvailable = wimlibPreview !== "missing" && wimlibPreview !== "misconfigured";
+  const wimlibConfigured = wimlibPreview === "misconfigured";
+  const wimlibSource = wimlibPreview === "application"
+    ? "application" as const
+    : wimlibConfigured
+      ? "environment" as const
+      : wimlibAvailable
+        ? "path" as const
+        : null;
+  const unrarPreview = params.get("previewUnrar");
+  const unrarAvailable = unrarPreview !== "missing" && unrarPreview !== "misconfigured";
+  const unrarConfigured = unrarPreview === "misconfigured";
+  const unrarSource = unrarConfigured
+    ? "environment" as const
+    : unrarAvailable
+      ? "path" as const
+      : null;
+
+  return {
+    platform: "macos",
+    backends: [
+      {
+        id: "sevenzip",
+        available: sevenZipAvailable,
+        configured: sevenZipConfigured,
+        source: sevenZipSource,
+        tool: sevenZipAvailable ? "7zz" : null,
+      },
+      ...(wimlibPreview === "checking" ? [] : [{
+        id: "wimlib",
+        available: wimlibAvailable,
+        configured: wimlibConfigured,
+        source: wimlibSource,
+        tool: wimlibAvailable ? "wimlib-imagex" : null,
+      }]),
+      {
+        id: "unrar",
+        available: unrarAvailable,
+        configured: unrarConfigured,
+        source: unrarSource,
+        tool: unrarAvailable ? "unrar" : null,
+      },
+    ],
+    default_handlers: {
+      state: summaryState,
+      total: handlers.length,
+      checked: handlers.filter((handler) => handler.state !== "unknown").length,
+      squallz: handlers.filter((handler) => handler.state === "squallz").length,
+      handlers,
+    },
+    file_manager_visibility: {
+      state: "manual_check",
+      reason: "not_exposed_by_platform",
+    },
   };
 }
 
 function completedTaskParam(value: string | null): RuntimePreviews["completedTask"] {
   if (
     value === "compress" ||
+    value === "compress_split" ||
+    value === "compress_sfx" ||
+    value === "compress_sfx_failure" ||
+    value === "recovery_cleanup_ready" ||
+    value === "recovery_cleanup_unconfirmed" ||
+    value === "recovery_cleanup_record" ||
     value === "extract" ||
     value === "extract_unknown_current" ||
     value === "batch_extract" ||
     value === "test" ||
     value === "checksum" ||
-    value === "checksum_check"
+    value === "checksum_check" ||
+    value === "recovery_protect" ||
+    value === "recovery_verify_repairable" ||
+    value === "recovery_verify_multi_file_repairable" ||
+    value === "recovery_verify_over_capacity" ||
+    value === "update_scan" ||
+    value === "update_verify" ||
+    value === "update_commit"
   ) {
     return value;
   }
@@ -211,7 +436,9 @@ function readArchivePreview(params: URLSearchParams, pageSize: number): ArchiveP
     info: {
       id: 9_001,
       path: `${sampleArchiveRoot}/${name}`,
+      source: `${sampleArchiveRoot}/${name}`,
       name,
+      read_only: false,
       format,
       entry_count: total,
       volumes: null,
@@ -249,12 +476,9 @@ export function previewSampleForEntry(
       outer_path: outerPath,
       entry_path: entryPath,
       display_name: "cover-preview.png",
-      temp_path: "/tmp/squallz-nested-cover-preview.png",
+      preview_id: "preview-dev-cover",
       size: 4_096,
       archive_like: false,
-      preview_mime: "image/png",
-      preview_data_url:
-        "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAKCAYAAAC9vt6cAAABQUlEQVR4nBXMIU5EUQxA0VnKWCwWi8ViebLy4RqCaAKiYkQFJBWEVJBQgUCwv3L/WcA5ndffXK3fuV4/c7N6btfX3K2a+/UxDytH1ts8rpindZmX5XNZr/O+bD7X83wvndNZCIRACIRACIRACIRACIRACIRACIRACOQINsEm2ASbYBNsgk2wCTbBJtgEm2ATbIJNsI9ACZRACZRACZRACZRACZRACZRACZRACfQIjMAIjMAIjMAIjMAIjMAIjMAIjMAIjMCOwAmcwAmcwAmcwAmcwAmcwAmcwAmcwAn8CIIgCIIgCIIgCIIgCIIgCIIgCIIgCIIgjiAJkiAJkiAJkiAJkiAJkiAJkiAJkiAJ8giKoAiKoAiKoAiKoAiKoAiKoAiKoAiKoI6gCZqgCZqgCZqgCZqgCZqgCZqgCZqgCVrnHw41jeA2BOxvAAAAAElFTkSuQmCC",
     };
   }
 
@@ -263,11 +487,9 @@ export function previewSampleForEntry(
       outer_path: outerPath,
       entry_path: entryPath,
       display_name: "Launch plan.pdf",
-      temp_path: "/tmp/squallz-nested-launch-plan.pdf",
+      preview_id: "preview-dev-launch-plan",
       size: 3_800_000,
       archive_like: false,
-      preview_mime: null,
-      preview_data_url: null,
     };
   }
 

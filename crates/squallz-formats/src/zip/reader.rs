@@ -10,8 +10,9 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use crc32fast::Hasher;
 use flate2::read::DeflateDecoder;
 use squallz_format_api::{
-    ArchiveReader, ControlToken, EntryMeta, EntryPath, EntryType, FormatError, OpenOptions,
-    Password, ProgressSink, ReadSeek, TestReport,
+    ArchiveReader, BoundedProblemLog, ControlToken, EntryMeta, EntryPath, EntryType, FormatError,
+    OpenOptions, Password, ProgressSink, ReadSeek, TestReport, TestSummary,
+    TEST_PROBLEM_PREVIEW_LIMIT,
 };
 use zip::read::ZipFile;
 use zip::{ZipArchive, ZipReadOptions};
@@ -141,6 +142,10 @@ impl ZipArchiveReader {
     /// entry content, so they are read here (they are tiny).
     fn meta_at(&mut self, idx: usize) -> Result<EntryMeta, FormatError> {
         let path = self.paths[idx].clone();
+        self.meta_at_with_path(idx, path)
+    }
+
+    fn meta_at_with_path(&mut self, idx: usize, path: EntryPath) -> Result<EntryMeta, FormatError> {
         let file = self.archive.by_index_raw(idx).map_err(map_zip_error)?;
         let is_dir = file.is_dir();
         let is_symlink = file.is_symlink();
@@ -168,6 +173,53 @@ impl ZipArchiveReader {
             meta.entry_type = EntryType::Symlink { target };
         }
         Ok(meta)
+    }
+
+    fn test_with_problem_recorder(
+        &mut self,
+        progress: &dyn ProgressSink,
+        ctl: &ControlToken,
+        mut record_problem: impl FnMut(String),
+    ) -> Result<u64, FormatError> {
+        let total: u64 = (0..self.archive.len())
+            .filter_map(|i| self.archive.by_index_raw(i).ok().map(|f| f.size()))
+            .sum();
+        let mut done = 0u64;
+        let mut entries_tested = 0u64;
+        for idx in 0..self.archive.len() {
+            ctl.checkpoint()?;
+            let path = self.paths[idx].clone();
+            progress.on_progress(done, total, &path);
+            entries_tested += 1;
+            match self.open_entry(idx) {
+                // Missing or incorrect credentials are hard failures, not
+                // evidence that the archive payload is damaged.
+                Err(e @ (FormatError::PasswordRequired | FormatError::WrongPassword)) => {
+                    return Err(e)
+                }
+                Err(e) => record_problem(format!("{path}: {e}")),
+                Ok(mut file) => {
+                    // Reading through EOF makes the ZIP backend verify CRCs.
+                    let mut buf = [0u8; 64 * 1024];
+                    loop {
+                        ctl.checkpoint()?;
+                        match file.read(&mut buf) {
+                            Ok(0) => break,
+                            Ok(n) => {
+                                done += n as u64;
+                                progress.on_progress(done, total, &path);
+                            }
+                            Err(e) => {
+                                record_problem(format!("{path}: {e}"));
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        progress.on_progress(total, total, &EntryPath::from_utf8(""));
+        Ok(entries_tested)
     }
 }
 
@@ -204,11 +256,72 @@ impl LocalZipArchiveReader {
             index_by_raw,
         })
     }
+
+    fn test_with_problem_recorder(
+        &mut self,
+        progress: &dyn ProgressSink,
+        ctl: &ControlToken,
+        mut record_problem: impl FnMut(String),
+    ) -> Result<u64, FormatError> {
+        let total: u64 = self
+            .entries
+            .iter()
+            .filter(|entry| matches!(entry.meta.entry_type, EntryType::File))
+            .map(|entry| entry.meta.size)
+            .sum();
+        let mut done = 0u64;
+        let mut entries_tested = 0u64;
+        let entries = self.entries.clone();
+        for entry in entries {
+            ctl.checkpoint()?;
+            if !matches!(entry.meta.entry_type, EntryType::File) {
+                continue;
+            }
+            entries_tested += 1;
+            progress.on_progress(done, total, &entry.meta.path);
+            match self.read_entry(&entry.meta.path) {
+                Ok(mut data) => {
+                    let mut buf = [0u8; 64 * 1024];
+                    loop {
+                        ctl.checkpoint()?;
+                        match data.read(&mut buf) {
+                            Ok(0) => break,
+                            Ok(n) => {
+                                done += n as u64;
+                                progress.on_progress(done, total, &entry.meta.path);
+                            }
+                            Err(e) => {
+                                record_problem(format!("{}: {e}", entry.meta.path));
+                                break;
+                            }
+                        }
+                    }
+                }
+                Err(e @ (FormatError::PasswordRequired | FormatError::WrongPassword)) => {
+                    return Err(e);
+                }
+                Err(e) => record_problem(format!("{}: {e}", entry.meta.path)),
+            }
+        }
+        progress.on_progress(total, total, &EntryPath::from_utf8(""));
+        Ok(entries_tested)
+    }
 }
 
 impl ArchiveReader for LocalZipArchiveReader {
     fn entries(&mut self) -> Box<dyn Iterator<Item = Result<EntryMeta, FormatError>> + '_> {
         Box::new(self.entries.iter().map(|entry| Ok(entry.meta.clone())))
+    }
+
+    fn consume_entries(
+        mut self: Box<Self>,
+        visitor: &mut dyn FnMut(EntryMeta) -> Result<(), FormatError>,
+    ) -> Result<(), FormatError> {
+        self.index_by_raw = HashMap::new();
+        for entry in std::mem::take(&mut self.entries) {
+            visitor(entry.meta)?;
+        }
+        Ok(())
     }
 
     fn read_entry(&mut self, path: &EntryPath) -> Result<Box<dyn Read + '_>, FormatError> {
@@ -261,48 +374,29 @@ impl ArchiveReader for LocalZipArchiveReader {
         progress: &dyn ProgressSink,
         ctl: &ControlToken,
     ) -> Result<TestReport, FormatError> {
-        let mut report = TestReport::default();
-        let total: u64 = self
-            .entries
-            .iter()
-            .filter(|entry| matches!(entry.meta.entry_type, EntryType::File))
-            .map(|entry| entry.meta.size)
-            .sum();
-        let mut done = 0u64;
-        let entries = self.entries.clone();
-        for entry in entries {
-            ctl.checkpoint()?;
-            if !matches!(entry.meta.entry_type, EntryType::File) {
-                continue;
-            }
-            report.entries_tested += 1;
-            progress.on_progress(done, total, &entry.meta.path);
-            match self.read_entry(&entry.meta.path) {
-                Ok(mut data) => {
-                    let mut buf = [0u8; 64 * 1024];
-                    loop {
-                        ctl.checkpoint()?;
-                        match data.read(&mut buf) {
-                            Ok(0) => break,
-                            Ok(n) => {
-                                done += n as u64;
-                                progress.on_progress(done, total, &entry.meta.path);
-                            }
-                            Err(e) => {
-                                report.problems.push(format!("{}: {e}", entry.meta.path));
-                                break;
-                            }
-                        }
-                    }
-                }
-                Err(e @ (FormatError::PasswordRequired | FormatError::WrongPassword)) => {
-                    return Err(e);
-                }
-                Err(e) => report.problems.push(format!("{}: {e}", entry.meta.path)),
-            }
-        }
-        progress.on_progress(total, total, &EntryPath::from_utf8(""));
-        Ok(report)
+        let mut problems = Vec::new();
+        let entries_tested =
+            self.test_with_problem_recorder(progress, ctl, |problem| problems.push(problem))?;
+        Ok(TestReport {
+            entries_tested,
+            problems,
+            recovery: None,
+        })
+    }
+
+    fn test_summary(
+        &mut self,
+        progress: &dyn ProgressSink,
+        ctl: &ControlToken,
+    ) -> Result<TestSummary, FormatError> {
+        let problems = BoundedProblemLog::new(TEST_PROBLEM_PREVIEW_LIMIT);
+        let entries_tested =
+            self.test_with_problem_recorder(progress, ctl, |problem| problems.record(problem))?;
+        Ok(TestSummary {
+            entries_tested,
+            problems: problems.snapshot(),
+            recovery: None,
+        })
     }
 }
 
@@ -695,6 +789,18 @@ impl ArchiveReader for ZipArchiveReader {
         }))
     }
 
+    fn consume_entries(
+        mut self: Box<Self>,
+        visitor: &mut dyn FnMut(EntryMeta) -> Result<(), FormatError>,
+    ) -> Result<(), FormatError> {
+        let paths = std::mem::take(&mut self.paths);
+        self.index_by_raw = HashMap::new();
+        for (idx, path) in paths.into_iter().enumerate() {
+            visitor(self.meta_at_with_path(idx, path)?)?;
+        }
+        Ok(())
+    }
+
     fn read_entry(&mut self, path: &EntryPath) -> Result<Box<dyn Read + '_>, FormatError> {
         let idx = *self
             .index_by_raw
@@ -708,46 +814,28 @@ impl ArchiveReader for ZipArchiveReader {
         progress: &dyn ProgressSink,
         ctl: &ControlToken,
     ) -> Result<TestReport, FormatError> {
-        let mut report = TestReport::default();
-        let total: u64 = (0..self.archive.len())
-            .filter_map(|i| self.archive.by_index_raw(i).ok().map(|f| f.size()))
-            .sum();
-        let mut done = 0u64;
-        for idx in 0..self.archive.len() {
-            ctl.checkpoint()?;
-            let path = self.paths[idx].clone();
-            progress.on_progress(done, total, &path);
-            report.entries_tested += 1;
-            match self.open_entry(idx) {
-                // Missing/wrong password is an input problem, not archive
-                // damage: surface it as a hard error.
-                Err(e @ (FormatError::PasswordRequired | FormatError::WrongPassword)) => {
-                    return Err(e)
-                }
-                // Anything else is recorded as a per-entry problem
-                // (log-only text; presentation layers localize by variant).
-                Err(e) => report.problems.push(format!("{path}: {e}")),
-                Ok(mut file) => {
-                    // Reading to EOF drives the zip crate's CRC32 check.
-                    let mut buf = [0u8; 64 * 1024];
-                    loop {
-                        ctl.checkpoint()?;
-                        match file.read(&mut buf) {
-                            Ok(0) => break,
-                            Ok(n) => {
-                                done += n as u64;
-                                progress.on_progress(done, total, &path);
-                            }
-                            Err(e) => {
-                                report.problems.push(format!("{path}: {e}"));
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        progress.on_progress(total, total, &EntryPath::from_utf8(""));
-        Ok(report)
+        let mut problems = Vec::new();
+        let entries_tested =
+            self.test_with_problem_recorder(progress, ctl, |problem| problems.push(problem))?;
+        Ok(TestReport {
+            entries_tested,
+            problems,
+            recovery: None,
+        })
+    }
+
+    fn test_summary(
+        &mut self,
+        progress: &dyn ProgressSink,
+        ctl: &ControlToken,
+    ) -> Result<TestSummary, FormatError> {
+        let problems = BoundedProblemLog::new(TEST_PROBLEM_PREVIEW_LIMIT);
+        let entries_tested =
+            self.test_with_problem_recorder(progress, ctl, |problem| problems.record(problem))?;
+        Ok(TestSummary {
+            entries_tested,
+            problems: problems.snapshot(),
+            recovery: None,
+        })
     }
 }

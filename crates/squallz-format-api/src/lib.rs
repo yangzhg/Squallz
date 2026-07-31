@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 //! squallz-format-api: unified abstractions for the format layer.
 //!
-//! Design principles (see PLAN.md §3.3):
+//! Design principles:
 //! - Two abstractions: [`Compressor`] (single stream, gzip/zstd/...) and
 //!   [`ArchiveFormat`] (container, zip/tar/7z/...). Compound formats
 //!   (`.tar.gz`) are detected by the registry as "outer compressor + inner
@@ -29,17 +29,21 @@ mod traits;
 
 pub use entry::{EntryMeta, EntryPath, EntryType};
 pub use error::FormatError;
-pub use extract::{extract_entries, ExtractSink};
-pub use options::{
-    CompressionLevel, ConflictDecision, ConflictResolver, CreateOptions, ExtractOptions,
-    ExtractProblemReporter, FormatCapabilities, OpenOptions, OverwritePolicy, Password,
-    RecoverySummary, ResourceOptions, SafetyLimits, SqzCreateOptions, SymlinkPolicy, TestReport,
-    UpdateOp,
+pub use extract::{
+    empty_extract_report, extract_entries, extract_entries_with_report, ExtractReport, ExtractSink,
 };
-pub use progress::{ControlToken, NoProgress, ProgressSink};
+pub use options::{
+    BoundedProblemLog, CompressionLevel, ConflictDecision, ConflictResolver, CreateOptions,
+    ExtractOptions, ExtractProblemReporter, FormatCapabilities, FormatCreateBudget, OpenOptions,
+    OverwritePolicy, Password, ProblemPreview, RecoverySummary, ResourceOptions, SafetyLimits,
+    SplitOutputMode, SqzCreateOptions, SymlinkPolicy, TestReport, TestSummary, UpdateOp,
+    EXTRACT_PROBLEM_PREVIEW_LIMIT, TEST_PROBLEM_PREVIEW_LIMIT,
+};
+pub use progress::{ControlToken, NoProgress, ProgressPhase, ProgressSink};
 pub use registry::{split_volume_name, Detected, FormatInfo, FormatKind, FormatRegistry};
 pub use safety::{check_windows_portability, sanitize_entry_path, LimitsAccountant};
 pub use traits::{
-    ArchiveFormat, ArchiveReader, ArchiveWriter, CompressSink, Compressor, ReadSeek, StreamFactory,
-    WriteSeek,
+    ArchiveFormat, ArchiveReader, ArchiveSourceSet, ArchiveWriter, CompressSink, Compressor,
+    NativeVolumeBudget, NativeVolumeLimits, NativeVolumeWriter, PhysicalFileIdentity,
+    PreparedUpdateAdditions, ReadSeek, StreamFactory, WriteSeek,
 };

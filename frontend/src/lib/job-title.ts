@@ -18,7 +18,11 @@ function translate(key: string, fallback: string, params: Record<string, string 
 export function jobTitleFor(spec: JobSpec): string {
   switch (spec.kind) {
     case "compress":
-      return translate("gui.task.job.compress", "Compress {name}", { name: basename(spec.dest) });
+      return spec.sfx_target
+        ? translate("gui.task.job.create_sfx", "Create self-extractor {name}", { name: basename(spec.dest) })
+        : translate("gui.task.job.compress", "Compress {name}", { name: basename(spec.dest) });
+    case "publish_macos_sfx":
+      return translate("gui.task.job.publish_macos_sfx", "Publish {name}", { name: basename(spec.output) });
     case "extract":
       return translate("gui.task.job.extract", "Extract {name}", { name: basename(spec.path) });
     case "batch_extract":

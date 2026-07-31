@@ -26,6 +26,7 @@ pub fn run(
     out_password: Option<String>,
     threads: Option<usize>,
     memory_limit: Option<u64>,
+    force: bool,
     json_output: bool,
 ) -> Result<(), CliError> {
     if !is_sqz_path(&archive) {
@@ -55,15 +56,30 @@ pub fn run(
         resources: resource_options(threads, memory_limit),
         ..CreateOptions::default()
     };
-    ctx.engine.convert(
+    let commit_policy = match super::create_commit_policy(
+        &output,
+        squallz_core::CreateArtifactKind::Archive,
+        force,
+        &progress,
+        &ctx.ctl,
+    ) {
+        Ok(policy) => policy,
+        Err(error) => {
+            progress.finish();
+            return Err(error.into());
+        }
+    };
+    let result = ctx.engine.convert_with_policy(
         &archive,
         &output,
         &OpenOptions::default(),
         &create_opts,
+        commit_policy,
         &progress,
         &ctx.ctl,
-    )?;
+    );
     progress.finish();
+    result?;
     if json_output {
         let value = json!({
             "ok": true,

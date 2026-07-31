@@ -541,6 +541,30 @@ pub(crate) mod tests {
         passwords: Mutex<HashMap<PathBuf, String>>,
     }
 
+    pub(crate) struct ReadFailingSecretStore;
+
+    impl SecretStore for ReadFailingSecretStore {
+        fn is_available(&self) -> bool {
+            true
+        }
+
+        fn get_archive_password(&self, _path: &Path) -> Result<Option<Password>, SecretStoreError> {
+            Err(SecretStoreError::new("secret store is locked"))
+        }
+
+        fn set_archive_password(
+            &self,
+            _path: &Path,
+            _password: &str,
+        ) -> Result<(), SecretStoreError> {
+            Err(SecretStoreError::new("secret store is locked"))
+        }
+
+        fn delete_archive_password(&self, _path: &Path) -> Result<(), SecretStoreError> {
+            Err(SecretStoreError::new("secret store is locked"))
+        }
+    }
+
     fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
         match mutex.lock() {
             Ok(guard) => guard,

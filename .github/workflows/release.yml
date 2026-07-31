@@ -41,7 +41,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.ref }}-${{ github.event_name }}
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.publish_release && format('refs/tags/{0}', inputs.release_tag) || github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -55,9 +55,17 @@ jobs:
       profile: ${{ steps.plan.outputs.profile }}
       publish_release: ${{ steps.plan.outputs.publish_release }}
       release_tag: ${{ steps.plan.outputs.release_tag }}
+      source_ref: ${{ steps.plan.outputs.source_ref }}
+      source_sha: ${{ steps.plan.outputs.source_sha }}
       version: ${{ steps.plan.outputs.version }}
 
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_release && format('refs/tags/{0}', inputs.release_tag) || github.ref }}
+
       - name: Compute release plan
         id: plan
         env:
@@ -66,15 +74,19 @@ jobs:
           INPUT_PROFILE: ${{ inputs.profile }}
           INPUT_PUBLISH_RELEASE: ${{ inputs.publish_release }}
           INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
+          GITHUB_REF_VALUE: ${{ github.ref }}
           REF_NAME: ${{ github.ref_name }}
           REF_TYPE: ${{ github.ref_type }}
           RUN_NUMBER: ${{ github.run_number }}
-          SOURCE_SHA: ${{ github.sha }}
         run: |
           python3 <<'PY' >> "${GITHUB_OUTPUT}"
           import json
           import os
+          import re
+          import subprocess
           import sys
+          import tomllib
+          from pathlib import Path
 
           platforms = [
               {
@@ -112,10 +124,13 @@ jobs:
           profile = os.environ.get("INPUT_PROFILE") or "release"
           publish_input = os.environ.get("INPUT_PUBLISH_RELEASE", "false").lower()
           input_release_tag = (os.environ.get("INPUT_RELEASE_TAG") or "").strip()
+          github_ref = os.environ["GITHUB_REF_VALUE"]
           ref_name = os.environ["REF_NAME"]
           ref_type = os.environ["REF_TYPE"]
-          source_sha = os.environ["SOURCE_SHA"]
           run_number = os.environ["RUN_NUMBER"]
+          source_sha = subprocess.check_output(
+              ["git", "rev-parse", "HEAD"], text=True
+          ).strip()
 
           if event_name == "push":
               selected = "all"
@@ -124,7 +139,7 @@ jobs:
               release_tag = ref_name
           else:
               publish_release = publish_input == "true"
-              release_tag = input_release_tag
+              release_tag = input_release_tag if publish_release else ""
               if publish_release and not release_tag:
                   print("publish_release requires release_tag for manual dispatch", file=sys.stderr)
                   sys.exit(1)
@@ -133,8 +148,65 @@ jobs:
               print(f"invalid profile: {profile}", file=sys.stderr)
               sys.exit(1)
 
+          if publish_release and (selected != "all" or profile != "release"):
+              print(
+                  "public releases require platform=all and profile=release; "
+                  "use publish_release=false for partial or debug previews",
+                  file=sys.stderr,
+              )
+              sys.exit(1)
+
+          if publish_release:
+              match = re.fullmatch(
+                  r"v(?P<version>\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)",
+                  release_tag,
+              )
+              if match is None:
+                  print(
+                      "public release_tag must be a v-prefixed semantic version",
+                      file=sys.stderr,
+                  )
+                  sys.exit(1)
+
+              expected_version = match.group("version")
+              cargo_version = tomllib.loads(Path("Cargo.toml").read_text(encoding="utf-8"))[
+                  "workspace"
+              ]["package"]["version"]
+              tauri_version = json.loads(
+                  Path("crates/squallz-gui/tauri.conf.json").read_text(encoding="utf-8")
+              )["version"]
+              frontend_version = json.loads(
+                  Path("frontend/package.json").read_text(encoding="utf-8")
+              )["version"]
+              frontend_lock_version = json.loads(
+                  Path("frontend/package-lock.json").read_text(encoding="utf-8")
+              )["packages"][""]["version"]
+              versions = {
+                  "release tag": expected_version,
+                  "Cargo workspace": cargo_version,
+                  "Tauri": tauri_version,
+                  "frontend package": frontend_version,
+                  "frontend lockfile": frontend_lock_version,
+              }
+              if len(set(versions.values())) != 1:
+                  detail = ", ".join(f"{name}={value}" for name, value in versions.items())
+                  print(f"public release version mismatch: {detail}", file=sys.stderr)
+                  sys.exit(1)
+
+              tag_sha = subprocess.check_output(
+                  ["git", "rev-parse", f"refs/tags/{release_tag}^{{commit}}"],
+                  text=True,
+              ).strip()
+              if tag_sha != source_sha:
+                  print(
+                      f"checked-out commit {source_sha} does not match "
+                      f"refs/tags/{release_tag} ({tag_sha})",
+                      file=sys.stderr,
+                  )
+                  sys.exit(1)
+
           if selected == "all":
-              selected_packages = platforms
+              selected_packages = [dict(item) for item in platforms]
               include_source = True
           elif selected == "source":
               selected_packages = []
@@ -146,10 +218,18 @@ jobs:
                   print(f"invalid platform: {selected}", file=sys.stderr)
                   sys.exit(1)
 
-          if release_tag:
+          for item in selected_packages:
+              item["trust_state"] = (
+                  "developer-id-notarized"
+                  if publish_release and item["runner_os"] == "macOS"
+                  else "unsigned-preview"
+              )
+
+          if publish_release:
               version = release_tag
           else:
               version = f"run-{run_number}-{source_sha[:7]}"
+          source_ref = f"refs/tags/{release_tag}" if publish_release else github_ref
 
           outputs = {
               "has_packages": "true" if selected_packages else "false",
@@ -158,15 +238,84 @@ jobs:
               "profile": profile,
               "publish_release": "true" if publish_release else "false",
               "release_tag": release_tag,
+              "source_ref": source_ref,
+              "source_sha": source_sha,
               "version": version,
           }
           for key, value in outputs.items():
               print(f"{key}={value}")
           PY
 
+      - name: Test release tools
+        run: python3 -m unittest discover -s scripts/tests -p 'test_*.py'
+
+  quality:
+    name: Qualify release source
+    needs: plan
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.plan.outputs.source_sha }}
+
+      - name: Install Rust stable
+        run: |
+          rustup toolchain install stable \
+            --profile minimal \
+            --component rustfmt \
+            --component clippy
+          rustup default stable
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            curl \
+            file \
+            libayatana-appindicator3-dev \
+            libgtk-3-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev \
+            librsvg2-dev \
+            patchelf \
+            pkg-config \
+            wget
+
+      - name: Install frontend dependencies
+        run: npm --prefix frontend ci
+
+      - name: Test and build frontend
+        run: |
+          npm --prefix frontend test
+          npm --prefix frontend run check
+          npm --prefix frontend run build
+
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check
+
+      - name: Lint Rust workspace
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Test Rust workspace
+        run: cargo test --all
+
   source:
     name: Package source
-    needs: plan
+    needs:
+      - plan
+      - quality
     if: needs.plan.outputs.include_source == 'true'
     runs-on: ubuntu-24.04
     permissions:
@@ -179,6 +328,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: ${{ needs.plan.outputs.source_sha }}
 
       - name: Create source packages
         shell: bash
@@ -207,8 +357,9 @@ jobs:
             --profile source \
             --kind source-archive \
             --repository "${{ github.repository }}" \
-            --source-ref "${{ github.ref }}" \
-            --source-sha "${{ github.sha }}" \
+            --source-ref "${{ needs.plan.outputs.source_ref }}" \
+            --source-sha "${{ needs.plan.outputs.source_sha }}" \
+            --trust-state source \
             --workflow "${{ github.workflow }}" \
             --run-id "${{ github.run_id }}" \
             --run-attempt "${{ github.run_attempt }}" \
@@ -232,7 +383,9 @@ jobs:
 
   package:
     name: Package ${{ matrix.platform }}
-    needs: plan
+    needs:
+      - plan
+      - quality
     if: needs.plan.outputs.has_packages == 'true'
     runs-on: ${{ matrix.os }}
     permissions:
@@ -248,6 +401,38 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: ${{ needs.plan.outputs.source_sha }}
+
+      - name: Require macOS public release credentials
+        if: runner.os == 'macOS' && needs.plan.outputs.publish_release == 'true'
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_NOTARY_ISSUER: ${{ secrets.APPLE_NOTARY_ISSUER }}
+          APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          APPLE_NOTARY_PRIVATE_KEY_B64: ${{ secrets.APPLE_NOTARY_PRIVATE_KEY_B64 }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+
+          missing=()
+          [[ -n "$APPLE_CERTIFICATE" ]] || missing+=(APPLE_CERTIFICATE)
+          [[ -n "$APPLE_CERTIFICATE_PASSWORD" ]] || missing+=(APPLE_CERTIFICATE_PASSWORD)
+          [[ -n "$APPLE_NOTARY_ISSUER" ]] || missing+=(APPLE_NOTARY_ISSUER)
+          [[ -n "$APPLE_NOTARY_KEY_ID" ]] || missing+=(APPLE_NOTARY_KEY_ID)
+          [[ -n "$APPLE_NOTARY_PRIVATE_KEY_B64" ]] || missing+=(APPLE_NOTARY_PRIVATE_KEY_B64)
+          [[ -n "$APPLE_SIGNING_IDENTITY" ]] || missing+=(APPLE_SIGNING_IDENTITY)
+          [[ -n "$APPLE_TEAM_ID" ]] || missing+=(APPLE_TEAM_ID)
+          if (( ${#missing[@]} > 0 )); then
+            printf 'Missing required macOS public release secret: %s\n' "${missing[@]}" >&2
+            exit 1
+          fi
+          if [[ "$APPLE_SIGNING_IDENTITY" != "Developer ID Application:"*"($APPLE_TEAM_ID)"* ]]; then
+            echo "APPLE_SIGNING_IDENTITY must be a Developer ID Application identity for APPLE_TEAM_ID" >&2
+            exit 1
+          fi
 
       - name: Install Rust stable
         shell: bash
@@ -283,7 +468,19 @@ jobs:
       - name: Install frontend dependencies
         run: npm --prefix frontend ci
 
-      - name: Build platform package
+      - name: Build signed macOS app and DMG
+        if: runner.os == 'macOS' && needs.plan.outputs.publish_release == 'true'
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          set -euo pipefail
+          npm --prefix frontend run tauri -- build --ci --bundles app,dmg
+
+      - name: Build preview or non-macOS package
+        if: runner.os != 'macOS' || needs.plan.outputs.publish_release != 'true'
         shell: bash
         env:
           PROFILE: ${{ needs.plan.outputs.profile }}
@@ -306,12 +503,81 @@ jobs:
             cargo build -p squallz-cli
           fi
 
+      - name: Notarize and staple public macOS artifacts
+        if: runner.os == 'macOS' && needs.plan.outputs.publish_release == 'true'
+        shell: bash
+        env:
+          APPLE_NOTARY_ISSUER: ${{ secrets.APPLE_NOTARY_ISSUER }}
+          APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          APPLE_NOTARY_PRIVATE_KEY_B64: ${{ secrets.APPLE_NOTARY_PRIVATE_KEY_B64 }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+
+          app_path="target/release/bundle/macos/Squallz.app"
+          dmg_candidates=(target/release/bundle/dmg/*.dmg)
+          if [[ ! -d "$app_path" ]]; then
+            echo "Expected signed macOS app bundle is missing: $app_path" >&2
+            exit 1
+          fi
+          if (( ${#dmg_candidates[@]} != 1 )); then
+            echo "Expected exactly one macOS DMG, found ${#dmg_candidates[@]}" >&2
+            exit 1
+          fi
+
+          umask 077
+          api_key_path="$RUNNER_TEMP/AuthKey_${APPLE_NOTARY_KEY_ID}.p8"
+          trap 'rm -f "$api_key_path"' EXIT
+          printf '%s' "$APPLE_NOTARY_PRIVATE_KEY_B64" \
+            | openssl base64 -d -A > "$api_key_path"
+          chmod 600 "$api_key_path"
+
+          python3 scripts/macos_release_trust.py notarize \
+            --app "$app_path" \
+            --dmg "${dmg_candidates[0]}" \
+            --evidence-dir target/macos-release-trust \
+            --identity "$APPLE_SIGNING_IDENTITY" \
+            --team-id "$APPLE_TEAM_ID" \
+            --api-key-id "$APPLE_NOTARY_KEY_ID" \
+            --api-issuer "$APPLE_NOTARY_ISSUER" \
+            --api-key-path "$api_key_path" \
+            --architecture "${{ matrix.arch }}"
+
+          test -s target/macos-release-trust/trust-summary.json
+
+      - name: Smoke packaged release CLI
+        shell: bash
+        env:
+          PROFILE: ${{ needs.plan.outputs.profile }}
+          PUBLIC_RELEASE: ${{ needs.plan.outputs.publish_release }}
+        run: |
+          set -euo pipefail
+
+          python_cmd="python3"
+          if ! command -v "$python_cmd" >/dev/null 2>&1; then
+            python_cmd="python"
+          fi
+          "$python_cmd" scripts/release_binary_smoke.py \
+            --project-root . \
+            --platform "${{ matrix.platform }}" \
+            --profile "$PROFILE"
+          if [[ "${RUNNER_OS}" == "macOS" && "$PUBLIC_RELEASE" != "true" ]]; then
+            "$python_cmd" scripts/release_binary_smoke.py \
+              --project-root . \
+              --platform "${{ matrix.platform }}" \
+              --profile "$PROFILE" \
+              --binary "target/$PROFILE/sqz"
+          fi
+
       - name: Collect platform release assets
         shell: bash
         env:
           ARCH: ${{ matrix.arch }}
           PLATFORM: ${{ matrix.platform }}
           PROFILE: ${{ needs.plan.outputs.profile }}
+          PUBLIC_RELEASE: ${{ needs.plan.outputs.publish_release }}
           VERSION: ${{ needs.plan.outputs.version }}
         run: |
           set -euo pipefail
@@ -357,7 +623,7 @@ jobs:
             copy_artifact \
               "$profile_dir/squallz-gui.exe" \
               "Squallz-${VERSION}-${PLATFORM}${profile_suffix}.exe"
-          else
+          elif [[ "${RUNNER_OS}" != "macOS" || "$PUBLIC_RELEASE" != "true" ]]; then
             copy_executable_archive \
               "$profile_dir/sqz" \
               "sqz" \
@@ -365,14 +631,26 @@ jobs:
           fi
 
           if [[ "${RUNNER_OS}" == "macOS" ]]; then
-            app_path="$profile_dir/bundle/macos/Squallz.app"
-            if [[ ! -d "$app_path" ]]; then
-              echo "Expected macOS app bundle is missing: $app_path"
-              exit 1
+            if [[ "$PUBLIC_RELEASE" == "true" ]]; then
+              shopt -s nullglob
+              dmg_candidates=("$profile_dir"/bundle/dmg/*.dmg)
+              if (( ${#dmg_candidates[@]} != 1 )); then
+                echo "Expected exactly one notarized macOS DMG, found ${#dmg_candidates[@]}" >&2
+                exit 1
+              fi
+              copy_artifact \
+                "${dmg_candidates[0]}" \
+                "Squallz-${VERSION}-${PLATFORM}.dmg"
+            else
+              app_path="$profile_dir/bundle/macos/Squallz.app"
+              if [[ ! -d "$app_path" ]]; then
+                echo "Expected macOS app bundle is missing: $app_path"
+                exit 1
+              fi
+              ditto -c -k --sequesterRsrc --keepParent \
+                "$app_path" \
+                "$out/Squallz-${VERSION}-${PLATFORM}${profile_suffix}.app.zip"
             fi
-            ditto -c -k --sequesterRsrc --keepParent \
-              "$app_path" \
-              "$out/Squallz-${VERSION}-${PLATFORM}${profile_suffix}.app.zip"
           elif [[ "${RUNNER_OS}" == "Linux" ]]; then
             copy_executable_archive \
               "$profile_dir/squallz-gui" \
@@ -381,7 +659,8 @@ jobs:
           fi
 
           bundle_dir="$profile_dir/bundle"
-          if [[ -d "$bundle_dir" ]]; then
+          if [[ -d "$bundle_dir" ]] \
+            && [[ "${RUNNER_OS}" != "macOS" || "$PUBLIC_RELEASE" != "true" ]]; then
             while IFS= read -r -d '' file; do
               case "$file" in
                 *.app/*) continue ;;
@@ -406,6 +685,11 @@ jobs:
             python_cmd="python"
           fi
 
+          trust_args=(--trust-state "${{ matrix.trust_state }}")
+          if [[ "${{ matrix.trust_state }}" == "developer-id-notarized" ]]; then
+            trust_args+=(--trust-evidence target/macos-release-trust/trust-summary.json)
+          fi
+
           "$python_cmd" scripts/release_finalize_assets.py \
             --assets-dir target/release-assets \
             --version "${{ needs.plan.outputs.version }}" \
@@ -414,8 +698,9 @@ jobs:
             --profile "${{ needs.plan.outputs.profile }}" \
             --kind desktop-binary \
             --repository "${{ github.repository }}" \
-            --source-ref "${{ github.ref }}" \
-            --source-sha "${{ github.sha }}" \
+            --source-ref "${{ needs.plan.outputs.source_ref }}" \
+            --source-sha "${{ needs.plan.outputs.source_sha }}" \
+            "${trust_args[@]}" \
             --workflow "${{ github.workflow }}" \
             --run-id "${{ github.run_id }}" \
             --run-attempt "${{ github.run_attempt }}" \
@@ -437,17 +722,29 @@ jobs:
             !target/release-assets/RELEASE_ASSETS_MANIFEST.json
             !target/release-assets/SHA256SUMS
 
+      - name: Upload macOS release trust evidence
+        if: always() && runner.os == 'macOS' && needs.plan.outputs.publish_release == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-release-trust-${{ matrix.platform }}-${{ github.run_id }}
+          if-no-files-found: warn
+          retention-days: 30
+          path: target/macos-release-trust/*
+
   publish:
     name: Publish GitHub Release
     needs:
       - plan
+      - quality
       - source
       - package
     if: |
       always()
       && needs.plan.outputs.publish_release == 'true'
-      && !contains(needs.*.result, 'failure')
-      && !contains(needs.*.result, 'cancelled')
+      && needs.plan.result == 'success'
+      && needs.quality.result == 'success'
+      && needs.source.result == 'success'
+      && needs.package.result == 'success'
     runs-on: ubuntu-24.04
     permissions:
       attestations: write
@@ -455,9 +752,31 @@ jobs:
       id-token: write
 
     steps:
+      - name: Checkout release commit
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.plan.outputs.source_sha }}
+
+      - name: Verify release tag is unchanged
+        shell: bash
+        env:
+          EXPECTED_SOURCE_SHA: ${{ needs.plan.outputs.source_sha }}
+          RELEASE_TAG: ${{ needs.plan.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          git fetch --force --no-tags origin \
+            "+refs/tags/${RELEASE_TAG}:refs/tags/${RELEASE_TAG}"
+          current_source_sha="$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}")"
+          if [[ "$current_source_sha" != "$EXPECTED_SOURCE_SHA" ]]; then
+            echo "Release tag changed after packaging; refusing to publish" >&2
+            exit 1
+          fi
+
       - name: Download release assets
         uses: actions/download-artifact@v4
         with:
+          pattern: squallz-*
           path: downloaded-artifacts
 
       - name: Prepare final release assets
@@ -465,6 +784,8 @@ jobs:
         env:
           RELEASE_TAG: ${{ needs.plan.outputs.release_tag }}
           REPOSITORY: ${{ github.repository }}
+          SOURCE_REF: ${{ needs.plan.outputs.source_ref }}
+          SOURCE_SHA: ${{ needs.plan.outputs.source_sha }}
           VERSION: ${{ needs.plan.outputs.version }}
         run: |
           set -euo pipefail
@@ -486,138 +807,12 @@ jobs:
             cp "$file" "release-assets/$name"
           done < <(find downloaded-artifacts -type f -print0)
 
-          (
-            cd release-assets
-            find . -maxdepth 1 -type f ! -name ATTESTATION_SUBJECTS_SHA256SUMS -print0 \
-              | sort -z \
-              | xargs -0 sha256sum \
-              | sed 's#  \./#  #' > ATTESTATION_SUBJECTS_SHA256SUMS
-          )
-
-          python3 <<'PY'
-          import hashlib
-          import json
-          import os
-          from datetime import datetime, timezone
-          from pathlib import Path
-
-          assets_dir = Path("release-assets")
-          repository = os.environ["REPOSITORY"]
-          version = os.environ["VERSION"]
-
-          def sha256_file(path: Path) -> str:
-              digest = hashlib.sha256()
-              with path.open("rb") as handle:
-                  for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                      digest.update(chunk)
-              return digest.hexdigest()
-
-          primary_assets = []
-          for path in sorted(assets_dir.iterdir()):
-              if not path.is_file():
-                  continue
-              if path.name in {
-                  "ATTESTATION_SUBJECTS_SHA256SUMS",
-                  "RELEASE_ASSETS_MANIFEST.json",
-                  "RELEASE_NOTES.md",
-                  "SHA256SUMS",
-              }:
-                  continue
-              if path.name.endswith((".sha256", ".provenance.json")):
-                  continue
-              primary_assets.append(path)
-
-          metadata = {}
-          for path in primary_assets:
-              evidence_path = path.with_name(f"{path.name}.provenance.json")
-              if evidence_path.is_file():
-                  metadata[path.name] = json.loads(evidence_path.read_text(encoding="utf-8"))
-
-          manifest_assets = []
-          checksum_rows = []
-          for path in primary_assets:
-              digest = sha256_file(path)
-              evidence = metadata.get(path.name, {})
-              build = evidence.get("build", {})
-              manifest_assets.append(
-                  {
-                      "name": path.name,
-                      "sha256": digest,
-                      "size_bytes": path.stat().st_size,
-                      "platform": build.get("platform", "unknown"),
-                      "architecture": build.get("architecture", "unknown"),
-                      "profile": build.get("profile", "unknown"),
-                      "kind": build.get("kind", "unknown"),
-                  }
-              )
-              checksum_rows.append(f"{digest}  {path.name}")
-
-          (assets_dir / "SHA256SUMS").write_text(
-              "\n".join(checksum_rows) + "\n",
-              encoding="utf-8",
-          )
-          (assets_dir / "RELEASE_ASSETS_MANIFEST.json").write_text(
-              json.dumps(
-                  {
-                      "schema": "dev.squallz.release.manifest.v1",
-                      "repository": repository,
-                      "version": version,
-                      "generated_at_utc": datetime.now(timezone.utc)
-                      .replace(microsecond=0)
-                      .isoformat(),
-                      "assets": manifest_assets,
-                  },
-                  ensure_ascii=False,
-                  indent=2,
-                  sort_keys=True,
-              )
-              + "\n",
-              encoding="utf-8",
-          )
-
-          lines = [
-              f"# Squallz {version}",
-              "",
-              "Unsigned early desktop binaries. Verify the checksum and GitHub Artifact Attestation before running a downloaded asset.",
-              "",
-              "## Downloads",
-              "",
-              "| Asset | Platform | Architecture | Profile |",
-              "| --- | --- | --- | --- |",
-          ]
-          for path in primary_assets:
-              evidence = metadata.get(path.name, {})
-              build = evidence.get("build", {})
-              lines.append(
-                  "| "
-                  + " | ".join(
-                      [
-                          f"`{path.name}`",
-                          str(build.get("platform", "unknown")),
-                          str(build.get("architecture", "unknown")),
-                          str(build.get("profile", "unknown")),
-                      ]
-                  )
-                  + " |"
-              )
-
-          lines.extend(
-              [
-                  "",
-                  "## Verification",
-                  "",
-                  "Each primary asset has a sibling `.sha256` file and `.provenance.json` evidence file.",
-                  "",
-                  "```sh",
-                  "shasum -a 256 /path/to/asset",
-                  f"gh attestation verify /path/to/asset --repo {repository}",
-                  "```",
-                  "",
-                  "Compare the SHA-256 value with the matching `.sha256` file before bypassing macOS Gatekeeper, Windows SmartScreen, or Linux executable-permission prompts.",
-              ]
-          )
-          (assets_dir / "RELEASE_NOTES.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
-          PY
+          python3 scripts/release_prepare_public.py \
+            --assets-dir release-assets \
+            --version "$VERSION" \
+            --repository "$REPOSITORY" \
+            --source-ref "$SOURCE_REF" \
+            --source-sha "$SOURCE_SHA"
 
           (
             cd release-assets
@@ -643,6 +838,7 @@ jobs:
 
       - name: Create or update GitHub Release
         env:
+          EXPECTED_SOURCE_SHA: ${{ needs.plan.outputs.source_sha }}
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ needs.plan.outputs.release_tag }}
@@ -650,20 +846,48 @@ jobs:
         run: |
           set -euo pipefail
 
+          git fetch --force --no-tags origin \
+            "+refs/tags/${RELEASE_TAG}:refs/tags/${RELEASE_TAG}"
+          current_source_sha="$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}")"
+          if [[ "$current_source_sha" != "$EXPECTED_SOURCE_SHA" ]]; then
+            echo "Release tag changed before publication; refusing to publish" >&2
+            exit 1
+          fi
+
           title="Squallz ${RELEASE_TAG}"
+          mapfile -d '' assets < <(find release-assets -maxdepth 1 -type f \
+            ! -name ATTESTATION_SUBJECTS_SHA256SUMS \
+            ! -name RELEASE_NOTES.md \
+            -print0 | sort -z)
+          existing_release=false
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            gh release edit "$RELEASE_TAG" \
-              --title "$title" \
-              --notes-file release-assets/RELEASE_NOTES.md
+            existing_release=true
+            gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
           else
-            gh release create "$RELEASE_TAG" \
+            gh release create "$RELEASE_TAG" "${assets[@]}" \
               --verify-tag \
               --title "$title" \
               --notes-file release-assets/RELEASE_NOTES.md
           fi
 
-          mapfile -d '' assets < <(find release-assets -maxdepth 1 -type f \
-            ! -name ATTESTATION_SUBJECTS_SHA256SUMS \
-            ! -name RELEASE_NOTES.md \
-            -print0 | sort -z)
-          gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
+          expected_assets="$RUNNER_TEMP/squallz-expected-release-assets.txt"
+          actual_assets="$RUNNER_TEMP/squallz-actual-release-assets.txt"
+          printf '%s\n' "${assets[@]##*/}" | sort > "$expected_assets"
+          while IFS= read -r published_asset; do
+            if ! grep -Fqx -- "$published_asset" "$expected_assets"; then
+              gh release delete-asset "$RELEASE_TAG" "$published_asset" --yes
+            fi
+          done < <(
+            gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name' | sort
+          )
+          gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name' \
+            | sort > "$actual_assets"
+          if ! diff -u "$expected_assets" "$actual_assets"; then
+            echo "Published release assets do not match this workflow run" >&2
+            exit 1
+          fi
+          if [[ "$existing_release" == "true" ]]; then
+            gh release edit "$RELEASE_TAG" \
+              --title "$title" \
+              --notes-file release-assets/RELEASE_NOTES.md
+          fi

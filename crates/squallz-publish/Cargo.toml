@@ -1,0 +1,13 @@
+[package]
+name = "squallz-publish"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Squallz platform publishing and trust workflows"
+
+[dependencies]
+squallz-core = { path = "../squallz-core", version = "0.1.0" }
+serde_json.workspace = true
+
+[dev-dependencies]
+squallz-formats = { path = "../squallz-formats", version = "0.1.0" }

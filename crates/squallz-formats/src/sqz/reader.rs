@@ -5,8 +5,9 @@ use std::time::{Duration, SystemTime};
 
 use reed_solomon_erasure::galois_8::ReedSolomon;
 use squallz_format_api::{
-    ArchiveFormat, ArchiveReader, Compressor, ControlToken, EntryMeta, EntryPath, EntryType,
-    FormatError, OpenOptions, ProgressSink, ReadSeek, RecoverySummary, StreamFactory, TestReport,
+    ArchiveFormat, ArchiveReader, BoundedProblemLog, Compressor, ControlToken, EntryMeta,
+    EntryPath, EntryType, FormatError, OpenOptions, ProgressSink, ReadSeek, RecoverySummary,
+    StreamFactory, TestReport, TestSummary, TEST_PROBLEM_PREVIEW_LIMIT,
 };
 
 use crate::{sevenz::SevenZFormat, tar::TarFormat, zip::ZipFormat};
@@ -290,11 +291,74 @@ impl EntrySetSqzReader {
         }
         Ok(out)
     }
+
+    fn test_with_problem_recorder(
+        &mut self,
+        progress: &dyn ProgressSink,
+        ctl: &ControlToken,
+        mut record_problem: impl FnMut(String),
+    ) -> Result<u64, FormatError> {
+        let total: u64 = self
+            .records
+            .iter()
+            .filter(|record| matches!(record.meta.entry_type, EntryType::File))
+            .map(|record| record.data_size)
+            .sum();
+        let mut done = 0u64;
+        let mut entries_tested = 0u64;
+        for record in self.records.clone() {
+            ctl.checkpoint()?;
+            entries_tested += 1;
+            if !matches!(record.meta.entry_type, EntryType::File) {
+                progress.on_progress(done, total, &record.meta.path);
+                continue;
+            }
+            if self.record_has_unrepaired_block(&record) {
+                record_problem(format!(
+                    "{}: unrepaired SQZ recovery block damage",
+                    record.meta.path
+                ));
+                progress.on_progress(done, total, &record.meta.path);
+                continue;
+            }
+            match self.read_record_bytes(&record) {
+                Ok(data) => {
+                    for chunk in data.chunks(VERIFY_CHUNK) {
+                        ctl.checkpoint()?;
+                        done += chunk.len() as u64;
+                        progress.on_progress(done, total, &record.meta.path);
+                    }
+                    let hash = *blake3::hash(&data).as_bytes();
+                    let crc = crc32c::crc32c(&data);
+                    if hash != record.hash || crc != record.crc32c {
+                        record_problem(format!(
+                            "{}: checksum mismatch (BLAKE3/CRC-32C)",
+                            record.meta.path
+                        ));
+                    }
+                }
+                Err(e) => record_problem(format!("{}: {e}", record.meta.path)),
+            }
+        }
+        let total = if total == 0 { done } else { total };
+        progress.on_progress(total, total, &EntryPath::from_utf8(""));
+        Ok(entries_tested)
+    }
 }
 
 impl ArchiveReader for EntrySetSqzReader {
     fn entries(&mut self) -> Box<dyn Iterator<Item = Result<EntryMeta, FormatError>> + '_> {
         Box::new(self.records.iter().map(|record| Ok(record.meta.clone())))
+    }
+
+    fn consume_entries(
+        mut self: Box<Self>,
+        visitor: &mut dyn FnMut(EntryMeta) -> Result<(), FormatError>,
+    ) -> Result<(), FormatError> {
+        for record in std::mem::take(&mut self.records) {
+            visitor(record.meta)?;
+        }
+        Ok(())
     }
 
     fn read_entry(&mut self, path: &EntryPath) -> Result<Box<dyn Read + '_>, FormatError> {
@@ -330,56 +394,31 @@ impl ArchiveReader for EntrySetSqzReader {
         progress: &dyn ProgressSink,
         ctl: &ControlToken,
     ) -> Result<TestReport, FormatError> {
-        let mut report = TestReport {
-            recovery: self.recovery.as_ref().map(RecoveryState::summary),
-            ..TestReport::default()
-        };
-        let total: u64 = self
-            .records
-            .iter()
-            .filter(|r| matches!(r.meta.entry_type, EntryType::File))
-            .map(|r| r.data_size)
-            .sum();
-        let mut done = 0u64;
-        for record in self.records.clone() {
-            ctl.checkpoint()?;
-            report.entries_tested += 1;
-            if !matches!(record.meta.entry_type, EntryType::File) {
-                progress.on_progress(done, total, &record.meta.path);
-                continue;
-            }
-            if self.record_has_unrepaired_block(&record) {
-                report.problems.push(format!(
-                    "{}: unrepaired SQZ recovery block damage",
-                    record.meta.path
-                ));
-                progress.on_progress(done, total, &record.meta.path);
-                continue;
-            }
-            match self.read_record_bytes(&record) {
-                Ok(data) => {
-                    for chunk in data.chunks(VERIFY_CHUNK) {
-                        ctl.checkpoint()?;
-                        done += chunk.len() as u64;
-                        progress.on_progress(done, total, &record.meta.path);
-                    }
-                    let hash = *blake3::hash(&data).as_bytes();
-                    let crc = crc32c::crc32c(&data);
-                    if hash != record.hash || crc != record.crc32c {
-                        report.problems.push(format!(
-                            "{}: checksum mismatch (BLAKE3/CRC-32C)",
-                            record.meta.path
-                        ));
-                    }
-                }
-                Err(e) => {
-                    report.problems.push(format!("{}: {e}", record.meta.path));
-                }
-            }
-        }
-        let total = if total == 0 { done } else { total };
-        progress.on_progress(total, total, &EntryPath::from_utf8(""));
-        Ok(report)
+        let recovery = self.recovery.as_ref().map(RecoveryState::summary);
+        let mut problems = Vec::new();
+        let entries_tested =
+            self.test_with_problem_recorder(progress, ctl, |problem| problems.push(problem))?;
+        Ok(TestReport {
+            entries_tested,
+            problems,
+            recovery,
+        })
+    }
+
+    fn test_summary(
+        &mut self,
+        progress: &dyn ProgressSink,
+        ctl: &ControlToken,
+    ) -> Result<TestSummary, FormatError> {
+        let recovery = self.recovery.as_ref().map(RecoveryState::summary);
+        let problems = BoundedProblemLog::new(TEST_PROBLEM_PREVIEW_LIMIT);
+        let entries_tested =
+            self.test_with_problem_recorder(progress, ctl, |problem| problems.record(problem))?;
+        Ok(TestSummary {
+            entries_tested,
+            problems: problems.snapshot(),
+            recovery,
+        })
     }
 }
 
@@ -388,6 +427,16 @@ impl ArchiveReader for SqzArchiveReader {
         match self {
             SqzArchiveReader::EntrySet(reader) => reader.entries(),
             SqzArchiveReader::Inner { reader, .. } => reader.entries(),
+        }
+    }
+
+    fn consume_entries(
+        self: Box<Self>,
+        visitor: &mut dyn FnMut(EntryMeta) -> Result<(), FormatError>,
+    ) -> Result<(), FormatError> {
+        match *self {
+            SqzArchiveReader::EntrySet(reader) => Box::new(reader).consume_entries(visitor),
+            SqzArchiveReader::Inner { reader, .. } => reader.consume_entries(visitor),
         }
     }
 
@@ -410,6 +459,26 @@ impl ArchiveReader for SqzArchiveReader {
                 outer_recovery,
             } => {
                 let mut report = reader.test(progress, ctl)?;
+                if report.recovery.is_none() {
+                    report.recovery = outer_recovery.clone();
+                }
+                Ok(report)
+            }
+        }
+    }
+
+    fn test_summary(
+        &mut self,
+        progress: &dyn ProgressSink,
+        ctl: &ControlToken,
+    ) -> Result<TestSummary, FormatError> {
+        match self {
+            SqzArchiveReader::EntrySet(reader) => reader.test_summary(progress, ctl),
+            SqzArchiveReader::Inner {
+                reader,
+                outer_recovery,
+            } => {
+                let mut report = reader.test_summary(progress, ctl)?;
                 if report.recovery.is_none() {
                     report.recovery = outer_recovery.clone();
                 }

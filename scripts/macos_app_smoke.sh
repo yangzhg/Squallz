@@ -49,6 +49,13 @@ if [[ ! -x "$EXE" ]]; then
   fail "missing app executable: $EXE; run 'make app-debug' first, or pass a release app built with 'make app-macos'"
 fi
 
+DIRECT_DEPENDENCIES="$(otool -L "$EXE")"
+for framework in CloudKit CoreData CoreImage CoreText QuartzCore; do
+  if grep -Fq "/$framework.framework/" <<<"$DIRECT_DEPENDENCIES"; then
+    fail "app executable eagerly links unused $framework.framework"
+  fi
+done
+
 mkdir -p "$WORK" "$ROOT/benches" "$HOME_DIR/Library/Application Support/Squallz"
 rm -f "$TRACE" "$WINDOW_JSON" "$TIMING_JSON"
 
@@ -61,11 +68,13 @@ assert p["CFBundleExecutable"] == "squallz-gui", p.get("CFBundleExecutable")
 assert p["CFBundleIdentifier"] == "dev.squallz.desktop", p.get("CFBundleIdentifier")
 types = p.get("CFBundleDocumentTypes", [])
 exts = {e for t in types for e in t.get("CFBundleTypeExtensions", [])}
-for ext in ["zip", "7z", "sqz", "tar", "tgz", "gz", "xz", "zst", "br"]:
+for ext in ["zip", "7z", "sqz", "tar", "tgz", "gz", "xz", "zst", "br", "001", "wim", "swm"]:
     assert ext in exts, f"missing {ext}"
 for t in types:
     assert t.get("CFBundleTypeRole") == "Viewer", t
-    assert t.get("LSHandlerRank") == "Alternate", t
+    expected_rank = "Owner" if t.get("CFBundleTypeExtensions") == ["sqz"] else "Alternate"
+    assert t.get("LSHandlerRank") == expected_rank, t
+    assert "public.archive" not in t.get("LSItemContentTypes", []), t
 PY
 
 cat > "$HOME_DIR/Library/Application Support/Squallz/settings.json" <<'JSON'
@@ -156,6 +165,13 @@ for line in open(sys.argv[1], encoding="utf-8"):
         break
 assert focus_ok, "main window was not shown and focused"
 PY
+
+for _ in {1..80}; do
+  if grep -q '"event":"frontend.render.ready"' "$TRACE" 2>/dev/null; then
+    break
+  fi
+  sleep 0.1
+done
 
 for _ in {1..50}; do
   swift - "$APP_PID" "$WINDOW_JSON" <<'SWIFT' >/dev/null 2>&1 || true
@@ -493,6 +509,8 @@ archive file argument, isolated HOME, and a temporary trace file.
 ## Checks
 
 - Info.plist document types include archive/stream extensions and use Viewer + Alternate.
+- The app executable does not eagerly link unused CloudKit, CoreData, CoreImage,
+  CoreText, or QuartzCore frameworks.
 - \`squallz-gui\` process starts from the bundle.
 - Frontend drains the OS open-file path and calls \`open_archive\` successfully.
 - First WebView content frame is the archive browser for the opened file, not

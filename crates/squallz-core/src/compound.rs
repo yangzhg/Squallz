@@ -3,27 +3,113 @@
 //! compressed file (`x.gz`), and the shared write-side sink that lets a
 //! streaming archive writer (tar) feed a compressor without a temp file.
 
-use std::io::{Read, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::api::{
     ArchiveReader, CompressSink, Compressor, ControlToken, EntryMeta, EntryPath, EntryType,
-    FormatError, ProgressSink, SafetyLimits, StreamFactory, TestReport,
+    FormatError, ProgressPhase, ProgressSink, SafetyLimits, StreamFactory, TestReport,
 };
-use crate::Source;
+use crate::controlled_io::ControlledRead;
 
-/// Builds a factory that re-opens the source (single file or volume set)
-/// and wraps it into the compressor's decoding reader; each call restarts
-/// the decompressed stream.
+struct RestartableSource {
+    inner: Arc<Mutex<RestartableSourceInner>>,
+}
+
+struct RestartableSourceInner {
+    stream: Box<dyn crate::api::ReadSeek>,
+    position: Option<u64>,
+}
+
+impl RestartableSource {
+    fn new(stream: Box<dyn crate::api::ReadSeek>) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(RestartableSourceInner {
+                stream,
+                position: None,
+            })),
+        }
+    }
+
+    fn reader(&self) -> RestartableSourceReader {
+        RestartableSourceReader {
+            inner: Arc::clone(&self.inner),
+            position: 0,
+        }
+    }
+}
+
+struct RestartableSourceReader {
+    inner: Arc<Mutex<RestartableSourceInner>>,
+    position: u64,
+}
+
+impl Read for RestartableSourceReader {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        let mut source = lock_restartable_source(&self.inner);
+        if source.position != Some(self.position) {
+            match source.stream.seek(SeekFrom::Start(self.position)) {
+                Ok(position) if position == self.position => source.position = Some(position),
+                Ok(_) => {
+                    source.position = None;
+                    return Err(io::Error::other(
+                        "compound source did not seek to the requested position",
+                    ));
+                }
+                Err(error) => {
+                    source.position = None;
+                    return Err(error);
+                }
+            }
+        }
+        match source.stream.read(buf) {
+            Ok(read) => {
+                self.position = self
+                    .position
+                    .checked_add(read as u64)
+                    .ok_or_else(|| io::Error::other("compound source position overflow"))?;
+                source.position = Some(self.position);
+                Ok(read)
+            }
+            Err(error) => {
+                source.position = None;
+                Err(error)
+            }
+        }
+    }
+}
+
+fn lock_restartable_source(
+    inner: &Mutex<RestartableSourceInner>,
+) -> MutexGuard<'_, RestartableSourceInner> {
+    match inner.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            let mut guard = poisoned.into_inner();
+            guard.position = None;
+            guard
+        }
+    }
+}
+
+/// Builds a factory over the already-opened source stream. Each call starts a
+/// new logical cursor without resolving the source path again.
 pub(crate) fn decompress_factory(
-    source: &Source,
+    stream: Box<dyn crate::api::ReadSeek>,
     compressor: Arc<dyn Compressor>,
+    control: &ControlToken,
 ) -> StreamFactory {
-    let source = source.clone();
+    let source = RestartableSource::new(stream);
+    let control = control.clone();
     Box::new(move || {
-        let stream = source.open_stream()?;
-        compressor.decompress_reader(Box::new(stream))
+        control.checkpoint()?;
+        let compressed = ControlledRead::boxed(Box::new(source.reader()), &control);
+        let reader = compressor.decompress_reader(compressed)?;
+        Ok(ControlledRead::boxed(reader, &control))
     })
 }
 
@@ -65,6 +151,13 @@ impl SingleFileArchiveReader {
 impl ArchiveReader for SingleFileArchiveReader {
     fn entries(&mut self) -> Box<dyn Iterator<Item = Result<EntryMeta, FormatError>> + '_> {
         Box::new(std::iter::once(Ok(self.meta.clone())))
+    }
+
+    fn consume_entries(
+        self: Box<Self>,
+        visitor: &mut dyn FnMut(EntryMeta) -> Result<(), FormatError>,
+    ) -> Result<(), FormatError> {
+        visitor(self.meta)
     }
 
     fn read_entry(&mut self, path: &EntryPath) -> Result<Box<dyn Read + '_>, FormatError> {
@@ -174,6 +267,14 @@ impl ProgressSink for KnownTotal<'_> {
         self.inner
             .on_entry_progress(done, self.total, &self.label, done, self.total);
     }
+
+    fn on_scan_progress(&self, entries: u64, current: &EntryPath) {
+        self.inner.on_scan_progress(entries, current);
+    }
+
+    fn on_phase(&self, phase: ProgressPhase, interruptible: bool) {
+        self.inner.on_phase(phase, interruptible);
+    }
 }
 
 /// Reader adapter that reports byte-granular progress and honours
@@ -239,6 +340,28 @@ mod tests {
 
     fn stream_factory(bytes: &'static [u8]) -> StreamFactory {
         Box::new(move || Ok(Box::new(Cursor::new(bytes)) as Box<dyn Read + Send>))
+    }
+
+    #[test]
+    fn restartable_source_keeps_independent_cursor_positions() {
+        let source = RestartableSource::new(Box::new(Cursor::new(b"abcdef".to_vec())));
+        let mut first = source.reader();
+        let mut second = source.reader();
+        let mut head = [0u8; 2];
+        first.read_exact(&mut head).unwrap();
+        assert_eq!(&head, b"ab");
+
+        let mut other_head = [0u8; 3];
+        second.read_exact(&mut other_head).unwrap();
+        assert_eq!(&other_head, b"abc");
+
+        let mut first_tail = Vec::new();
+        first.read_to_end(&mut first_tail).unwrap();
+        assert_eq!(first_tail, b"cdef");
+
+        let mut second_tail = Vec::new();
+        second.read_to_end(&mut second_tail).unwrap();
+        assert_eq!(second_tail, b"def");
     }
 
     #[test]

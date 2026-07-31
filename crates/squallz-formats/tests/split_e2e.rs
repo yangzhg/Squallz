@@ -5,11 +5,53 @@ mod common;
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
-use common::{engine, TempDir};
+use common::{command_exists, engine, TempDir};
 use squallz_core::api::{
-    ControlToken, CreateOptions, ExtractOptions, FormatError, NoProgress, OpenOptions,
+    ControlToken, CreateOptions, EntryPath, ExtractOptions, FormatError, NoProgress, OpenOptions,
+    ProgressPhase, ProgressSink, SplitOutputMode,
 };
+
+#[derive(Default)]
+struct SplitProgress {
+    phases: Mutex<Vec<(ProgressPhase, bool)>>,
+    events: Mutex<Vec<(u64, u64, String)>>,
+}
+
+impl ProgressSink for SplitProgress {
+    fn on_progress(&self, done: u64, total: u64, current: &EntryPath) {
+        self.events
+            .lock()
+            .unwrap()
+            .push((done, total, current.display.clone()));
+    }
+
+    fn on_phase(&self, phase: ProgressPhase, interruptible: bool) {
+        self.phases.lock().unwrap().push((phase, interruptible));
+    }
+}
+
+struct CancelDuringSplit {
+    ctl: Arc<ControlToken>,
+    splitting: AtomicBool,
+}
+
+impl ProgressSink for CancelDuringSplit {
+    fn on_progress(&self, done: u64, _total: u64, _current: &EntryPath) {
+        if done > 0 && self.splitting.load(Ordering::Relaxed) {
+            self.ctl.cancel();
+        }
+    }
+
+    fn on_phase(&self, phase: ProgressPhase, _interruptible: bool) {
+        if phase == ProgressPhase::OutputSplit {
+            self.splitting.store(true, Ordering::Relaxed);
+        }
+    }
+}
 
 /// Deterministic pseudo-random (incompressible-ish) payload.
 fn payload(len: usize) -> Vec<u8> {
@@ -20,6 +62,14 @@ fn payload(len: usize) -> Vec<u8> {
             (state >> 24) as u8
         })
         .collect()
+}
+
+fn system_7z() -> Option<&'static str> {
+    ["7zz", "7z"].into_iter().find(|tool| command_exists(tool))
+}
+
+fn system_wimlib() -> Option<&'static str> {
+    command_exists("wimlib-imagex").then_some("wimlib-imagex")
 }
 
 /// Creates `data.bin` (100 KB) under `dir` and returns its path.
@@ -44,6 +94,583 @@ fn split_archive(dir: &Path, volume_size: u64) -> PathBuf {
         .create(&dest, &[input], &opts, &NoProgress, &ControlToken::new())
         .unwrap();
     dest
+}
+
+fn output_bytes(paths: &[PathBuf]) -> u64 {
+    paths
+        .iter()
+        .map(|path| fs::metadata(path).unwrap().len())
+        .sum()
+}
+
+#[test]
+fn create_report_tracks_a_single_committed_output() {
+    let tmp = TempDir::new("create-report-single");
+    let input = sample_input_with_len(tmp.path(), 16 * 1024);
+    let dest = tmp.path().join("out.zip");
+    let engine = engine();
+    let plan = engine
+        .plan_create(
+            &dest,
+            std::slice::from_ref(&input),
+            &CreateOptions::default(),
+        )
+        .unwrap();
+    let report = engine
+        .create_with_report(
+            &dest,
+            &[input],
+            &CreateOptions::default(),
+            &NoProgress,
+            &ControlToken::new(),
+        )
+        .unwrap();
+
+    assert_eq!(plan.primary_output, dest);
+    assert_eq!(report.primary_output, dest);
+    assert_eq!(report.outputs, vec![dest.clone()]);
+    assert_eq!(report.split_volume_count, None);
+    assert_eq!(
+        report.total_output_bytes,
+        fs::metadata(&dest).unwrap().len()
+    );
+    assert!(plan.final_output_budget_bytes >= report.total_output_bytes);
+    assert!(plan.workspace_budget_bytes >= plan.final_output_budget_bytes);
+}
+
+#[test]
+fn create_report_tracks_real_split_outputs_and_primary_volume() {
+    let tmp = TempDir::new("create-report-split");
+    let input = sample_input(tmp.path());
+    let requested = tmp.path().join("out.zip.003");
+    let opts = CreateOptions {
+        split_size: Some(30 * 1024),
+        ..CreateOptions::default()
+    };
+    let engine = engine();
+    let progress = SplitProgress::default();
+    let plan = engine
+        .plan_create(&requested, std::slice::from_ref(&input), &opts)
+        .unwrap();
+    let report = engine
+        .create_with_report(&requested, &[input], &opts, &progress, &ControlToken::new())
+        .unwrap();
+
+    let first = tmp.path().join("out.zip.001");
+    assert_eq!(plan.primary_output, first);
+    assert_eq!(report.primary_output, first);
+    assert_eq!(report.outputs.first(), Some(&first));
+    assert_eq!(report.split_volume_count, Some(report.outputs.len()));
+    assert_eq!(report.total_output_bytes, output_bytes(&report.outputs));
+    assert!(report.outputs.iter().all(|path| path.is_file()));
+    assert!(!tmp.path().join("out.zip").exists());
+    assert!(plan.final_output_budget_bytes >= report.total_output_bytes);
+    assert!(plan.workspace_budget_bytes > plan.final_output_budget_bytes);
+
+    let phases = progress.phases.lock().unwrap();
+    assert!(phases.contains(&(ProgressPhase::OutputSplit, true)));
+    let events = progress.events.lock().unwrap();
+    let split_events = events
+        .iter()
+        .filter(|(_, _, current)| current.starts_with("out.zip."))
+        .collect::<Vec<_>>();
+    assert!(!split_events.is_empty());
+    assert!(split_events
+        .windows(2)
+        .all(|events| events[0].0 <= events[1].0));
+    assert_eq!(
+        split_events.last().map(|event| (event.0, event.1)),
+        Some((report.total_output_bytes, report.total_output_bytes))
+    );
+}
+
+#[test]
+fn cancelling_generic_split_does_not_publish_partial_volumes() {
+    let tmp = TempDir::new("cancel-generic-split");
+    let input = sample_input_with_len(tmp.path(), 512 * 1024);
+    let dest = tmp.path().join("out.zip");
+    let opts = CreateOptions {
+        split_size: Some(64 * 1024),
+        ..CreateOptions::default()
+    };
+    let ctl = ControlToken::new();
+    let progress = CancelDuringSplit {
+        ctl: ctl.clone(),
+        splitting: AtomicBool::new(false),
+    };
+
+    let error = engine()
+        .create(&dest, &[input], &opts, &progress, &ctl)
+        .unwrap_err();
+
+    assert!(matches!(error, FormatError::Cancelled));
+    assert!(!dest.exists());
+    assert!(!tmp.path().join("out.zip.001").exists());
+    let mut remaining = fs::read_dir(tmp.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect::<Vec<_>>();
+    remaining.sort();
+    assert_eq!(remaining, vec![std::ffi::OsString::from("data.bin")]);
+}
+
+#[test]
+fn native_zip_create_uses_pkware_names_and_primary_volume() {
+    let tmp = TempDir::new("create-native-zip");
+    let input = sample_input_with_len(tmp.path(), 180 * 1024);
+    let dest = tmp.path().join("native.zip");
+    let opts = CreateOptions {
+        split_size: Some(64 * 1024),
+        split_mode: SplitOutputMode::Native,
+        ..CreateOptions::default()
+    };
+    let engine = engine();
+    let plan = engine
+        .plan_create(&dest, std::slice::from_ref(&input), &opts)
+        .unwrap();
+    let report = engine
+        .create_with_report(&dest, &[input], &opts, &NoProgress, &ControlToken::new())
+        .unwrap();
+
+    assert_eq!(plan.primary_output, dest);
+    assert_eq!(report.primary_output, dest);
+    assert_eq!(report.outputs.last(), Some(&dest));
+    assert_eq!(report.split_volume_count, Some(report.outputs.len()));
+    assert!(report.outputs.len() >= 3);
+    assert_eq!(report.outputs[0], tmp.path().join("native.z01"));
+    assert_eq!(report.outputs[1], tmp.path().join("native.z02"));
+    assert_eq!(&fs::read(&report.outputs[0]).unwrap()[..4], b"PK\x07\x08");
+    assert_eq!(report.total_output_bytes, output_bytes(&report.outputs));
+    assert!(plan.final_output_budget_bytes >= report.total_output_bytes);
+    assert!(plan
+        .split_volume_count_budget
+        .is_some_and(|count| count as usize >= report.outputs.len()));
+
+    let Some(tool) = system_7z() else {
+        eprintln!("skipping external native ZIP check: no system 7zz/7z on PATH");
+        return;
+    };
+    let check = Command::new(tool).arg("t").arg(&dest).output().unwrap();
+    assert!(
+        check.status.success(),
+        "{tool} could not test Squallz native ZIP volumes: stdout={} stderr={}",
+        String::from_utf8_lossy(&check.stdout),
+        String::from_utf8_lossy(&check.stderr)
+    );
+}
+
+#[test]
+fn native_split_wim_create_uses_standard_names_and_primary_member() {
+    let (Some(sevenz), Some(_wimlib)) = (system_7z(), system_wimlib()) else {
+        eprintln!("skipping Split WIM create interop: 7zz/7z or wimlib-imagex is unavailable");
+        return;
+    };
+    let tmp = TempDir::new("create-native-split-wim");
+    let mut inputs = Vec::new();
+    let mut expected = Vec::new();
+    for index in 0..5u8 {
+        let mut bytes = payload(1024 * 1024);
+        bytes[0] ^= index;
+        let path = tmp.path().join(format!("piece-{index}.bin"));
+        fs::write(&path, &bytes).unwrap();
+        inputs.push(path);
+        expected.push(bytes);
+    }
+    let dest = tmp.path().join("install.swm");
+    let opts = CreateOptions {
+        level: squallz_core::api::CompressionLevel::Store,
+        split_size: Some(2 * 1024 * 1024),
+        split_mode: SplitOutputMode::Native,
+        ..CreateOptions::default()
+    };
+    let engine = engine();
+    let plan = engine
+        .plan_create(&dest, &inputs, &opts)
+        .unwrap_or_else(|error| panic!("Split WIM planning failed: {error}"));
+    let progress = SplitProgress::default();
+    let report = engine
+        .create_with_report(&dest, &inputs, &opts, &progress, &ControlToken::new())
+        .unwrap_or_else(|error| panic!("Split WIM creation failed: {error}"));
+
+    assert_eq!(plan.primary_output, dest);
+    assert_eq!(report.primary_output, dest);
+    assert_eq!(report.outputs.first(), Some(&dest));
+    assert_eq!(report.split_volume_count, Some(report.outputs.len()));
+    assert!(report.outputs.len() >= 2);
+    for (index, output) in report.outputs.iter().enumerate() {
+        let expected_name = if index == 0 {
+            "install.swm".to_owned()
+        } else {
+            format!("install{}.swm", index + 1)
+        };
+        assert_eq!(
+            output.file_name().and_then(|name| name.to_str()),
+            Some(expected_name.as_str())
+        );
+    }
+    assert_eq!(report.total_output_bytes, output_bytes(&report.outputs));
+    assert!(plan.final_output_budget_bytes >= report.total_output_bytes);
+    assert!(plan
+        .split_volume_count_budget
+        .is_some_and(|count| count as usize >= report.outputs.len()));
+    assert!(progress
+        .phases
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|(phase, _)| *phase == ProgressPhase::OutputSplit));
+    let events = progress.events.lock().unwrap();
+    let real_events = events
+        .iter()
+        .filter(|(_, total, _)| *total == report.total_output_bytes)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        real_events.last().map(|(done, total, _)| (*done, *total)),
+        Some((report.total_output_bytes, report.total_output_bytes))
+    );
+
+    let selected = report
+        .outputs
+        .last()
+        .unwrap_or_else(|| panic!("Split WIM report has no members"));
+    let (_, entries, source_set) = engine
+        .list_with_format_and_source_set(selected, &OpenOptions::default())
+        .unwrap();
+    assert!(entries
+        .iter()
+        .any(|entry| entry.path.display == "piece-3.bin"));
+    let source_set = source_set.unwrap();
+    assert_eq!(source_set.primary(), dest);
+    assert_eq!(source_set.members(), report.outputs);
+
+    let extracted = tmp.path().join("created-extracted");
+    engine
+        .extract(
+            selected,
+            &extracted,
+            None,
+            &OpenOptions::default(),
+            &ExtractOptions::default(),
+            &NoProgress,
+            &ControlToken::new(),
+        )
+        .unwrap();
+    assert_eq!(
+        fs::read(extracted.join("piece-3.bin")).unwrap(),
+        expected[3]
+    );
+
+    let direct_check = Command::new(sevenz).arg("t").arg(&dest).output().unwrap();
+    assert!(
+        direct_check.status.success(),
+        "{sevenz} could not test Squallz Split WIM: stdout={} stderr={}",
+        String::from_utf8_lossy(&direct_check.stdout),
+        String::from_utf8_lossy(&direct_check.stderr)
+    );
+}
+
+#[test]
+fn native_split_wim_conversion_uses_the_first_swm_as_primary() {
+    let (Some(_sevenz), Some(_wimlib)) = (system_7z(), system_wimlib()) else {
+        eprintln!("skipping Split WIM conversion: 7zz/7z or wimlib-imagex is unavailable");
+        return;
+    };
+    let tmp = TempDir::new("convert-native-split-wim");
+    let inputs = (0..4u8)
+        .map(|index| {
+            let mut bytes = payload(1024 * 1024);
+            bytes[0] ^= index;
+            let path = tmp.path().join(format!("convert-{index}.bin"));
+            fs::write(&path, bytes).unwrap();
+            path
+        })
+        .collect::<Vec<_>>();
+    let source = tmp.path().join("source.zip");
+    let engine = engine();
+    engine
+        .create(
+            &source,
+            &inputs,
+            &CreateOptions::default(),
+            &NoProgress,
+            &ControlToken::new(),
+        )
+        .unwrap();
+
+    let destination = tmp.path().join("converted.swm");
+    let options = CreateOptions {
+        level: squallz_core::api::CompressionLevel::Store,
+        split_size: Some(2 * 1024 * 1024),
+        split_mode: SplitOutputMode::Native,
+        ..CreateOptions::default()
+    };
+    let plan = engine
+        .plan_convert(&source, &destination, &OpenOptions::default(), &options)
+        .unwrap();
+    let report = engine
+        .convert_with_report(
+            &source,
+            &destination,
+            &OpenOptions::default(),
+            &options,
+            &NoProgress,
+            &ControlToken::new(),
+        )
+        .unwrap();
+
+    assert_eq!(plan.primary_output, destination);
+    assert_eq!(report.primary_output, destination);
+    assert_eq!(report.outputs.first(), Some(&destination));
+    assert!(report.outputs.len() >= 2);
+    assert_eq!(report.split_volume_count, Some(report.outputs.len()));
+    assert_eq!(report.total_output_bytes, output_bytes(&report.outputs));
+    assert!(plan.final_output_budget_bytes >= report.total_output_bytes);
+    assert!(plan
+        .split_volume_count_budget
+        .is_some_and(|count| count as usize >= report.outputs.len()));
+    for (index, output) in report.outputs.iter().enumerate() {
+        let expected = if index == 0 {
+            "converted.swm".to_owned()
+        } else {
+            format!("converted{}.swm", index + 1)
+        };
+        assert_eq!(
+            output.file_name().and_then(|name| name.to_str()),
+            Some(expected.as_str())
+        );
+    }
+
+    let selected = report
+        .outputs
+        .last()
+        .unwrap_or_else(|| panic!("Split WIM conversion report has no members"));
+    let (_, entries, source_set) = engine
+        .list_with_format_and_source_set(selected, &OpenOptions::default())
+        .unwrap();
+    assert!(entries
+        .iter()
+        .any(|entry| entry.path.display == "convert-2.bin"));
+    assert_eq!(
+        source_set
+            .unwrap_or_else(|| panic!("Split WIM conversion did not report its source set"))
+            .primary(),
+        destination
+    );
+}
+
+#[test]
+fn cancelling_native_split_wim_does_not_publish_partial_members() {
+    let Some(_wimlib) = system_wimlib() else {
+        eprintln!("skipping Split WIM cancellation: wimlib-imagex is unavailable");
+        return;
+    };
+    let tmp = TempDir::new("cancel-native-split-wim");
+    let input = sample_input_with_len(tmp.path(), 3 * 1024 * 1024);
+    let dest = tmp.path().join("cancelled.swm");
+    let opts = CreateOptions {
+        level: squallz_core::api::CompressionLevel::Store,
+        split_size: Some(1024 * 1024),
+        split_mode: SplitOutputMode::Native,
+        ..CreateOptions::default()
+    };
+    let ctl = ControlToken::new();
+    let progress = CancelDuringSplit {
+        ctl: ctl.clone(),
+        splitting: AtomicBool::new(false),
+    };
+
+    let error = engine()
+        .create(&dest, &[input], &opts, &progress, &ctl)
+        .unwrap_err();
+
+    assert!(matches!(error, FormatError::Cancelled));
+    assert!(!dest.exists());
+    assert!(!tmp.path().join("cancelled2.swm").exists());
+    let mut remaining = fs::read_dir(tmp.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect::<Vec<_>>();
+    remaining.sort();
+    assert_eq!(remaining, vec![std::ffi::OsString::from("data.bin")]);
+}
+
+#[test]
+fn native_split_wim_opens_from_any_member_and_reports_missing_parts() {
+    let (Some(sevenz), Some(wimlib)) = (system_7z(), system_wimlib()) else {
+        eprintln!("skipping Split WIM interop: 7zz/7z or wimlib-imagex is unavailable");
+        return;
+    };
+    let tmp = TempDir::new("split-wim-interop");
+    let source = tmp.path().join("source");
+    fs::create_dir(&source).unwrap();
+    let expected = payload(5 * 1024 * 1024);
+    fs::write(source.join("payload.bin"), &expected).unwrap();
+    fs::write(source.join("readme.txt"), b"native Split WIM\n").unwrap();
+    let standalone = tmp.path().join("source.wim");
+    let capture = Command::new(wimlib)
+        .arg("capture")
+        .arg(&source)
+        .arg(&standalone)
+        .arg("Squallz")
+        .arg("--compress=none")
+        .arg("--no-acls")
+        .arg("--quiet")
+        .output()
+        .unwrap();
+    assert!(
+        capture.status.success(),
+        "wimlib capture failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&capture.stdout),
+        String::from_utf8_lossy(&capture.stderr)
+    );
+    let first = tmp.path().join("archive.swm");
+    let split = Command::new(wimlib)
+        .arg("split")
+        .arg(&standalone)
+        .arg(&first)
+        .arg("1")
+        .arg("--quiet")
+        .output()
+        .unwrap();
+    assert!(
+        split.status.success(),
+        "wimlib split failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&split.stdout),
+        String::from_utf8_lossy(&split.stderr)
+    );
+    let second = tmp.path().join("archive2.swm");
+    let third = tmp.path().join("archive3.swm");
+    assert!(second.is_file());
+    assert!(third.is_file());
+
+    let engine = engine();
+    let (_, entries, source_set) = engine
+        .list_with_format_and_source_set(&second, &OpenOptions::default())
+        .unwrap();
+    assert!(entries
+        .iter()
+        .any(|entry| entry.path.display == "payload.bin"));
+    let source_set = source_set.unwrap();
+    assert_eq!(source_set.primary(), first);
+    assert_eq!(
+        source_set.members(),
+        [first.clone(), second.clone(), third.clone()]
+    );
+
+    let report = engine
+        .test(
+            &third,
+            &OpenOptions::default(),
+            &NoProgress,
+            &ControlToken::new(),
+        )
+        .unwrap();
+    assert!(report.is_ok());
+    let extracted = tmp.path().join("extracted");
+    engine
+        .extract(
+            &second,
+            &extracted,
+            None,
+            &OpenOptions::default(),
+            &ExtractOptions::default(),
+            &NoProgress,
+            &ControlToken::new(),
+        )
+        .unwrap();
+    assert_eq!(fs::read(extracted.join("payload.bin")).unwrap(), expected);
+
+    let saved_second = fs::read(&second).unwrap();
+    fs::remove_file(&second).unwrap();
+    let error = engine.list(&third, &OpenOptions::default()).unwrap_err();
+    assert_eq!(error.missing_volume_path(), Some(second.as_path()));
+    fs::write(second, saved_second).unwrap();
+
+    let direct_check = Command::new(sevenz).arg("t").arg(&first).output().unwrap();
+    assert!(
+        direct_check.status.success(),
+        "{sevenz} could not test the wimlib Split WIM: stdout={} stderr={}",
+        String::from_utf8_lossy(&direct_check.stdout),
+        String::from_utf8_lossy(&direct_check.stderr)
+    );
+}
+
+#[test]
+fn native_split_validation_rejects_unsupported_layouts_before_writing() {
+    let tmp = TempDir::new("native-split-validation");
+    let input = sample_input_with_len(tmp.path(), 8 * 1024);
+    let engine = engine();
+
+    let no_size = CreateOptions {
+        split_mode: SplitOutputMode::Native,
+        ..CreateOptions::default()
+    };
+    assert!(matches!(
+        engine.plan_create(
+            &tmp.path().join("no-size.zip"),
+            std::slice::from_ref(&input),
+            &no_size
+        ),
+        Err(FormatError::Unsupported(_))
+    ));
+
+    let unsupported_format = CreateOptions {
+        split_size: Some(64 * 1024),
+        split_mode: SplitOutputMode::Native,
+        ..CreateOptions::default()
+    };
+    assert!(matches!(
+        engine.plan_create(
+            &tmp.path().join("unsupported.7z"),
+            std::slice::from_ref(&input),
+            &unsupported_format,
+        ),
+        Err(FormatError::Unsupported(_))
+    ));
+
+    let too_small = CreateOptions {
+        split_size: Some(32 * 1024),
+        split_mode: SplitOutputMode::Native,
+        ..CreateOptions::default()
+    };
+    let output = tmp.path().join("too-small.zip");
+    assert!(matches!(
+        engine.plan_create(&output, &[input], &too_small),
+        Err(FormatError::Unsupported(_))
+    ));
+    assert!(!output.exists());
+}
+
+#[test]
+fn sqz_create_report_includes_recovery_sidecars_without_counting_them_as_volumes() {
+    let tmp = TempDir::new("create-report-sqz");
+    let input = sample_input(tmp.path());
+    let dest = tmp.path().join("out.sqz");
+    let stale_sidecar = tmp.path().join("out.sqz.rev999");
+    fs::write(&stale_sidecar, b"stale recovery sidecar").unwrap();
+    let opts = CreateOptions {
+        split_size: Some(30 * 1024),
+        ..CreateOptions::default()
+    };
+    let report = engine()
+        .create_with_report(&dest, &[input], &opts, &NoProgress, &ControlToken::new())
+        .unwrap();
+
+    let volume_count = report.split_volume_count.unwrap();
+    assert!(volume_count >= 4);
+    assert!(report.outputs.len() > volume_count);
+    assert!(report.outputs[..volume_count].iter().all(|path| path
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .contains(".sqz.0")));
+    assert!(report.outputs[volume_count..].iter().all(|path| path
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .contains(".rev")));
+    assert_eq!(report.total_output_bytes, output_bytes(&report.outputs));
+    assert!(!stale_sidecar.exists());
 }
 
 fn volume_paths(dir: &Path, base: &str) -> Vec<PathBuf> {
@@ -222,6 +849,233 @@ fn split_create_produces_volumes_and_roundtrips() {
 }
 
 #[test]
+fn numbered_sevenz_volumes_interoperate_with_system_7zip() {
+    let Some(tool) = system_7z() else {
+        eprintln!("skipping: no system 7zz/7z on PATH (covered by self-read tests)");
+        return;
+    };
+    let tmp = TempDir::new("split-7z-interop");
+    let input = sample_input(tmp.path());
+    let ctl = ControlToken::new();
+
+    let ours = tmp.path().join("ours.7z");
+    engine()
+        .create(
+            &ours,
+            std::slice::from_ref(&input),
+            &CreateOptions {
+                split_size: Some(30 * 1024),
+                ..CreateOptions::default()
+            },
+            &NoProgress,
+            &ctl,
+        )
+        .unwrap();
+    let ours_first = tmp.path().join("ours.7z.001");
+    let check = Command::new(tool)
+        .arg("t")
+        .arg(&ours_first)
+        .output()
+        .unwrap();
+    assert!(
+        check.status.success(),
+        "{tool} could not test Squallz volumes: stdout={} stderr={}",
+        String::from_utf8_lossy(&check.stdout),
+        String::from_utf8_lossy(&check.stderr)
+    );
+
+    let system_input = tmp.path().join("system-data.bin");
+    fs::write(&system_input, payload(100 * 1024)).unwrap();
+    let system_archive = tmp.path().join("system.7z");
+    let create = Command::new(tool)
+        .arg("a")
+        .arg("-t7z")
+        .arg("-mx=0")
+        .arg("-v30k")
+        .arg(&system_archive)
+        .arg("system-data.bin")
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    assert!(
+        create.status.success(),
+        "{tool} could not create numbered volumes: stdout={} stderr={}",
+        String::from_utf8_lossy(&create.stdout),
+        String::from_utf8_lossy(&create.stderr)
+    );
+
+    let system_middle = tmp.path().join("system.7z.002");
+    assert!(system_middle.is_file());
+    let entries = engine()
+        .list(&system_middle, &OpenOptions::default())
+        .unwrap();
+    assert!(entries
+        .iter()
+        .any(|entry| entry.path.display == "system-data.bin"));
+
+    let out = tmp.path().join("system-extracted");
+    engine()
+        .extract(
+            &system_middle,
+            &out,
+            None,
+            &OpenOptions::default(),
+            &ExtractOptions::default(),
+            &NoProgress,
+            &ctl,
+        )
+        .unwrap();
+    assert_eq!(
+        fs::read(out.join("system-data.bin")).unwrap(),
+        payload(100 * 1024)
+    );
+
+    fs::remove_file(&system_middle).unwrap();
+    let error = engine()
+        .list(&tmp.path().join("system.7z.001"), &OpenOptions::default())
+        .unwrap_err();
+    match error {
+        FormatError::CorruptArchive(detail) => assert!(
+            detail.contains("system.7z.002"),
+            "missing volume detail: {detail}"
+        ),
+        other => panic!("expected CorruptArchive, got {other:?}"),
+    }
+}
+
+#[test]
+fn split_rebuild_replaces_current_volumes_and_removes_unsplit_base() {
+    let tmp = TempDir::new("split-rebuild");
+    let input = sample_input(tmp.path());
+    let dest = tmp.path().join("out.zip");
+    fs::write(&dest, b"old unsplit archive").unwrap();
+    fs::write(tmp.path().join("out.zip.001"), b"old first volume").unwrap();
+    fs::write(tmp.path().join("out.zip.002"), b"old second volume").unwrap();
+    fs::write(tmp.path().join("out.zip.999"), b"old stale volume").unwrap();
+
+    engine()
+        .create(
+            &dest,
+            &[input],
+            &CreateOptions {
+                split_size: Some(30 * 1024),
+                ..CreateOptions::default()
+            },
+            &NoProgress,
+            &ControlToken::new(),
+        )
+        .unwrap();
+
+    let first = tmp.path().join("out.zip.001");
+    assert!(!dest.exists());
+    assert_ne!(fs::read(&first).unwrap(), b"old first volume");
+    assert!(!tmp.path().join("out.zip.999").exists());
+    assert_eq!(
+        engine().list(&first, &OpenOptions::default()).unwrap()[0]
+            .path
+            .display,
+        "data.bin"
+    );
+}
+
+#[test]
+fn split_create_rejects_a_directory_at_the_unsplit_base() {
+    let tmp = TempDir::new("split-base-directory");
+    let input = sample_input(tmp.path());
+    let dest = tmp.path().join("out.zip");
+    fs::create_dir(&dest).unwrap();
+
+    let error = engine()
+        .create(
+            &dest,
+            &[input],
+            &CreateOptions {
+                split_size: Some(30 * 1024),
+                ..CreateOptions::default()
+            },
+            &NoProgress,
+            &ControlToken::new(),
+        )
+        .unwrap_err();
+
+    assert!(matches!(error, FormatError::Unsupported(_)));
+    assert!(dest.is_dir());
+    assert!(volume_paths(tmp.path(), "out.zip.").is_empty());
+}
+
+#[test]
+fn split_create_rejects_an_abnormal_stale_volume_without_replacing_the_old_set() {
+    let tmp = TempDir::new("split-stale-directory");
+    let input = sample_input(tmp.path());
+    let dest = tmp.path().join("out.zip");
+    let first = tmp.path().join("out.zip.001");
+    let stale = tmp.path().join("out.zip.999");
+    fs::write(&first, b"old first volume").unwrap();
+    fs::create_dir(&stale).unwrap();
+
+    let error = engine()
+        .create(
+            &dest,
+            &[input],
+            &CreateOptions {
+                split_size: Some(30 * 1024),
+                ..CreateOptions::default()
+            },
+            &NoProgress,
+            &ControlToken::new(),
+        )
+        .unwrap_err();
+
+    assert!(matches!(error, FormatError::Unsupported(_)));
+    assert_eq!(fs::read(&first).unwrap(), b"old first volume");
+    assert!(stale.is_dir());
+    assert!(!tmp.path().join("out.zip.002").exists());
+}
+
+#[cfg(windows)]
+#[test]
+fn split_rebuild_rolls_back_when_an_existing_volume_is_occupied() {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    let tmp = TempDir::new("split-occupied-volume");
+    let input = sample_input(tmp.path());
+    let dest = tmp.path().join("out.zip");
+    let first = tmp.path().join("out.zip.001");
+    let second = tmp.path().join("out.zip.002");
+    fs::write(&dest, b"old unsplit archive").unwrap();
+    fs::write(&first, b"old first volume").unwrap();
+    fs::write(&second, b"old second volume").unwrap();
+    let occupied = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .share_mode(0)
+        .open(&second)
+        .unwrap();
+
+    let error = engine()
+        .create(
+            &dest,
+            &[input],
+            &CreateOptions {
+                split_size: Some(30 * 1024),
+                ..CreateOptions::default()
+            },
+            &NoProgress,
+            &ControlToken::new(),
+        )
+        .unwrap_err();
+
+    drop(occupied);
+    assert!(matches!(error, FormatError::Io(_)));
+    assert_eq!(fs::read(&dest).unwrap(), b"old unsplit archive");
+    assert_eq!(fs::read(&first).unwrap(), b"old first volume");
+    assert_eq!(fs::read(&second).unwrap(), b"old second volume");
+    assert!(volume_paths(tmp.path(), "out.zip.")
+        .iter()
+        .all(|path| path == &first || path == &second));
+}
+
+#[test]
 fn missing_middle_volume_is_corrupt_with_detail() {
     let tmp = TempDir::new("split-missing");
     split_archive(tmp.path(), 30 * 1024);
@@ -371,6 +1225,72 @@ fn split_sqz_writes_sqzv_headers_and_roundtrips() {
         )
         .unwrap();
     assert_eq!(fs::read(out.join("data.bin")).unwrap(), payload(100 * 1024));
+}
+
+#[test]
+fn split_sqz_excludes_but_preserves_fixed_parts_from_an_input_directory() {
+    let tmp = TempDir::new("split-sqz-stale-parts");
+    let source = tmp.path().join("source");
+    fs::create_dir_all(&source).unwrap();
+    fs::write(source.join("data.bin"), payload(100 * 1024)).unwrap();
+    let stale_volume_part = source.join("out.sqz.999.part");
+    let stale_recovery_part = source.join("out.sqz.rev999.part");
+    let private_volume_stage = source.join(".out.sqz.001.split-stage-123-4-0.tmp.out.sqz.001");
+    let private_recovery_stage =
+        source.join(".out.sqz.rev001.split-stage-123-4-0.tmp.out.sqz.rev001");
+    let ordinary = source.join("out.sqz.rev000.part");
+    fs::write(&stale_volume_part, b"stale volume staging").unwrap();
+    fs::write(&stale_recovery_part, b"stale recovery staging").unwrap();
+    fs::write(&private_volume_stage, b"private volume staging").unwrap();
+    fs::write(&private_recovery_stage, b"private recovery staging").unwrap();
+    fs::write(&ordinary, b"ordinary file").unwrap();
+
+    let dest = source.join("out.sqz");
+    engine()
+        .create(
+            &dest,
+            std::slice::from_ref(&source),
+            &CreateOptions {
+                split_size: Some(30 * 1024),
+                ..CreateOptions::default()
+            },
+            &NoProgress,
+            &ControlToken::new(),
+        )
+        .unwrap();
+
+    let names: Vec<_> = engine()
+        .list(&source.join("out.sqz.001"), &OpenOptions::default())
+        .unwrap()
+        .into_iter()
+        .map(|entry| entry.path.display)
+        .collect();
+    assert!(names.iter().any(|name| name == "source/data.bin"));
+    assert!(names
+        .iter()
+        .any(|name| name == "source/out.sqz.rev000.part"));
+    assert!(!names.iter().any(|name| name == "source/out.sqz.999.part"));
+    assert!(!names
+        .iter()
+        .any(|name| name == "source/out.sqz.rev999.part"));
+    assert!(!names.iter().any(|name| name.contains(".split-stage-")));
+    assert_eq!(
+        fs::read(stale_volume_part).unwrap(),
+        b"stale volume staging"
+    );
+    assert_eq!(
+        fs::read(stale_recovery_part).unwrap(),
+        b"stale recovery staging"
+    );
+    assert_eq!(
+        fs::read(private_volume_stage).unwrap(),
+        b"private volume staging"
+    );
+    assert_eq!(
+        fs::read(private_recovery_stage).unwrap(),
+        b"private recovery staging"
+    );
+    assert!(ordinary.exists());
 }
 
 #[test]

@@ -6,10 +6,140 @@
   <true/>
   <key>CFBundleDevelopmentRegion</key>
   <string>en</string>
+  <key>CFBundleIconFile</key>
+  <string>AppIcon</string>
+  <key>CFBundleIconName</key>
+  <string>AppIcon</string>
   <key>CFBundleLocalizations</key>
   <array>
     <string>en</string>
     <string>zh-Hans</string>
+  </array>
+  <key>UTExportedTypeDeclarations</key>
+  <array>
+    <dict>
+      <key>UTTypeIdentifier</key>
+      <string>dev.squallz.sqz-archive</string>
+      <key>UTTypeConformsTo</key>
+      <array><string>public.archive</string></array>
+      <key>UTTypeDescription</key>
+      <string>Squallz archive file</string>
+      <key>UTTypeTagSpecification</key>
+      <dict><key>public.filename-extension</key><array><string>sqz</string></array></dict>
+    </dict>
+  </array>
+  <key>UTImportedTypeDeclarations</key>
+  <array>
+    <dict>
+      <key>UTTypeIdentifier</key>
+      <string>dev.squallz.archive.apk</string>
+      <key>UTTypeConformsTo</key>
+      <array><string>public.zip-archive</string></array>
+      <key>UTTypeDescription</key>
+      <string>Archive files supported by Squallz</string>
+      <key>UTTypeTagSpecification</key>
+      <dict><key>public.filename-extension</key><array><string>apk</string></array></dict>
+    </dict>
+    <dict>
+      <key>UTTypeIdentifier</key>
+      <string>dev.squallz.archive.cbz</string>
+      <key>UTTypeConformsTo</key>
+      <array><string>public.zip-archive</string></array>
+      <key>UTTypeDescription</key>
+      <string>Archive files supported by Squallz</string>
+      <key>UTTypeTagSpecification</key>
+      <dict><key>public.filename-extension</key><array><string>cbz</string></array></dict>
+    </dict>
+    <dict>
+      <key>UTTypeIdentifier</key>
+      <string>dev.squallz.archive.cbr</string>
+      <key>UTTypeConformsTo</key>
+      <array><string>public.archive</string></array>
+      <key>UTTypeDescription</key>
+      <string>Archive files supported by Squallz</string>
+      <key>UTTypeTagSpecification</key>
+      <dict><key>public.filename-extension</key><array><string>cbr</string></array></dict>
+    </dict>
+    <dict>
+      <key>UTTypeIdentifier</key>
+      <string>dev.squallz.archive.rar</string>
+      <key>UTTypeConformsTo</key>
+      <array><string>public.archive</string></array>
+      <key>UTTypeDescription</key>
+      <string>Archive files supported by Squallz</string>
+      <key>UTTypeTagSpecification</key>
+      <dict><key>public.filename-extension</key><array><string>rar</string></array></dict>
+    </dict>
+    <dict>
+      <key>UTTypeIdentifier</key>
+      <string>dev.squallz.archive.tar-zstd</string>
+      <key>UTTypeConformsTo</key>
+      <array><string>public.archive</string></array>
+      <key>UTTypeDescription</key>
+      <string>Archive files supported by Squallz</string>
+      <key>UTTypeTagSpecification</key>
+      <dict><key>public.filename-extension</key><array><string>tzst</string></array></dict>
+    </dict>
+    <dict>
+      <key>UTTypeIdentifier</key>
+      <string>dev.squallz.archive.split-volume</string>
+      <key>UTTypeConformsTo</key>
+      <array><string>public.archive</string></array>
+      <key>UTTypeDescription</key>
+      <string>Split archive first volume</string>
+      <key>UTTypeTagSpecification</key>
+      <dict><key>public.filename-extension</key><array><string>001</string></array></dict>
+    </dict>
+    <dict>
+      <key>UTTypeIdentifier</key>
+      <string>dev.squallz.archive.wim</string>
+      <key>UTTypeConformsTo</key>
+      <array><string>public.archive</string></array>
+      <key>UTTypeDescription</key>
+      <string>Windows Imaging Format archive</string>
+      <key>UTTypeTagSpecification</key>
+      <dict><key>public.filename-extension</key><array><string>wim</string></array></dict>
+    </dict>
+    <dict>
+      <key>UTTypeIdentifier</key>
+      <string>dev.squallz.archive.split-wim</string>
+      <key>UTTypeConformsTo</key>
+      <array><string>public.archive</string></array>
+      <key>UTTypeDescription</key>
+      <string>Split Windows Imaging Format archive</string>
+      <key>UTTypeTagSpecification</key>
+      <dict><key>public.filename-extension</key><array><string>swm</string></array></dict>
+    </dict>
+    <dict>
+      <key>UTTypeIdentifier</key>
+      <string>dev.squallz.stream.zstd</string>
+      <key>UTTypeConformsTo</key>
+      <array><string>public.archive</string></array>
+      <key>UTTypeDescription</key>
+      <string>Compressed stream files supported by Squallz</string>
+      <key>UTTypeTagSpecification</key>
+      <dict><key>public.filename-extension</key><array><string>zst</string></array></dict>
+    </dict>
+    <dict>
+      <key>UTTypeIdentifier</key>
+      <string>dev.squallz.stream.lz4</string>
+      <key>UTTypeConformsTo</key>
+      <array><string>public.archive</string></array>
+      <key>UTTypeDescription</key>
+      <string>Compressed stream files supported by Squallz</string>
+      <key>UTTypeTagSpecification</key>
+      <dict><key>public.filename-extension</key><array><string>lz4</string></array></dict>
+    </dict>
+    <dict>
+      <key>UTTypeIdentifier</key>
+      <string>dev.squallz.stream.brotli</string>
+      <key>UTTypeConformsTo</key>
+      <array><string>public.archive</string></array>
+      <key>UTTypeDescription</key>
+      <string>Compressed stream files supported by Squallz</string>
+      <key>UTTypeTagSpecification</key>
+      <dict><key>public.filename-extension</key><array><string>br</string></array></dict>
+    </dict>
   </array>
 </dict>
 </plist>

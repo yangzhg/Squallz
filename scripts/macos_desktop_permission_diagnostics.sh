@@ -153,7 +153,7 @@ write_report() {
       echo "Resolve the blocked rows above, then rerun"
       echo "\`scripts/macos_finder_context_menu_smoke.sh\`. If the blocked"
       echo "row is \`session-unlocked\`, unlock and use the active console desktop"
-      echo "session; if it is a TCC row, grant that permission to the terminal/Codex host."
+      echo "session; if it is a TCC row, grant that permission to the terminal host application."
     else
       echo "Permission preflight is clear. If native screenshots or Finder menu"
       echo "clicks still block, the remaining issue is likely active Space,"
@@ -244,13 +244,13 @@ if [[ -s "$WORK/session.json" ]]; then
   if [[ "$(json_get screen_capture_preflight)" == "true" ]]; then
     pass "screen-recording" "CGPreflightScreenCaptureAccess=true"
   else
-    block "screen-recording" "CGPreflightScreenCaptureAccess=false; grant Screen Recording to the terminal/Codex host"
+    block "screen-recording" "CGPreflightScreenCaptureAccess=false; grant Screen Recording to the terminal host application"
   fi
 
   if [[ "$(json_get accessibility_trusted)" == "true" ]]; then
     pass "accessibility-trusted" "AXIsProcessTrusted=true"
   else
-    block "accessibility-trusted" "AXIsProcessTrusted=false; grant Accessibility to the terminal/Codex host"
+    block "accessibility-trusted" "AXIsProcessTrusted=false; grant Accessibility to the terminal host application"
   fi
 
   case "$(json_get session_on_console)" in

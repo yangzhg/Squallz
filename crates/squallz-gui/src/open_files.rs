@@ -9,19 +9,25 @@ use std::{
     collections::HashSet,
     ffi::OsString,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex, MutexGuard,
+    },
 };
 
 use serde::Serialize;
 use serde_json::json;
-use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Emitter, EventTarget, Manager, WebviewUrl, WebviewWindowBuilder};
 
 use crate::validation_trace;
 
 pub const OPEN_FILES_EVENT: &str = "app://open-files";
 pub const EXTERNAL_TASK_ACTION_ARG: &str = "--squallz-action";
 pub const EXTERNAL_TASK_OUTPUT_ARG: &str = "--squallz-output";
-const TASK_WINDOW_LABEL: &str = "task";
+const SFX_EXTERNAL_ACTION: &str = "extract-sfx";
+const TASK_WINDOW_LABEL_PREFIX: &str = "task-";
+#[cfg(test)]
+const TASK_WINDOW_CAPABILITY_PATTERN: &str = "task-*";
 const TASK_WINDOW_TITLE: &str = "Squallz Task";
 const TASK_WINDOW_INNER_SIZE: (f64, f64) = (780.0, 560.0);
 const TASK_WINDOW_MIN_INNER_SIZE: (f64, f64) = (620.0, 420.0);
@@ -31,6 +37,7 @@ const TASK_WINDOW_QUERY_MODE_VALUE: &str = "1";
 const TASK_WINDOW_QUERY_ACTION: &str = "externalTask";
 const TASK_WINDOW_QUERY_OUTPUT: &str = "externalOutput";
 const TASK_WINDOW_QUERY_PATH: &str = "externalPath";
+static TASK_WINDOW_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct OpenFilesEvent {
@@ -43,7 +50,7 @@ pub struct OpenFilesEvent {
 
 #[derive(Debug, PartialEq)]
 struct TaskWindowLaunchConfig {
-    label: &'static str,
+    label: String,
     title: &'static str,
     url: PathBuf,
     inner_size: (f64, f64),
@@ -181,7 +188,8 @@ pub fn emit_open_files(app: &AppHandle, event: &OpenFilesEvent) {
         return;
     }
     focus_main_window(app);
-    if let Err(e) = app.emit(OPEN_FILES_EVENT, event) {
+    let target = EventTarget::webview_window("main");
+    if let Err(e) = app.emit_to(target, OPEN_FILES_EVENT, event) {
         log::error!("events: emit {OPEN_FILES_EVENT} failed: {e}");
     }
 }
@@ -244,32 +252,8 @@ fn close_main_window(app: &AppHandle) {
 }
 
 fn open_external_task_window(app: &AppHandle, event: &OpenFilesEvent) -> bool {
-    let config = task_window_launch_config(event);
-    if let Some(window) = app.get_webview_window(config.label) {
-        let show = window.show().map_err(|e| e.to_string());
-        let unminimize = window.unminimize().map_err(|e| e.to_string());
-        let focus = window.set_focus().map_err(|e| e.to_string());
-        let emit = window
-            .emit(OPEN_FILES_EVENT, event)
-            .map_err(|e| e.to_string());
-        let emit_ok = emit.is_ok();
-        validation_trace::trace(
-            "window.task.reuse",
-            json!({
-                "show_ok": show.is_ok(),
-                "unminimize_ok": unminimize.is_ok(),
-                "focus_ok": focus.is_ok(),
-                "emit_ok": emit_ok,
-                "show_err": show.err(),
-                "unminimize_err": unminimize.err(),
-                "focus_err": focus.err(),
-                "emit_err": emit.err(),
-            }),
-        );
-        return emit_ok;
-    }
-
-    let window = WebviewWindowBuilder::new(app, config.label, WebviewUrl::App(config.url))
+    let config = task_window_launch_config(event, next_task_window_label());
+    let window = WebviewWindowBuilder::new(app, config.label.clone(), WebviewUrl::App(config.url))
         .title(config.title)
         .inner_size(config.inner_size.0, config.inner_size.1)
         .min_inner_size(config.min_inner_size.0, config.min_inner_size.1)
@@ -285,6 +269,7 @@ fn open_external_task_window(app: &AppHandle, event: &OpenFilesEvent) -> bool {
             validation_trace::trace(
                 "window.task.open",
                 json!({
+                    "label": config.label,
                     "action": event.action.clone(),
                     "paths": event.paths.clone(),
                 }),
@@ -295,6 +280,7 @@ fn open_external_task_window(app: &AppHandle, event: &OpenFilesEvent) -> bool {
             validation_trace::trace(
                 "window.task.open_err",
                 json!({
+                    "label": config.label,
                     "error": e.to_string(),
                     "action": event.action.clone(),
                     "paths": event.paths.clone(),
@@ -305,9 +291,17 @@ fn open_external_task_window(app: &AppHandle, event: &OpenFilesEvent) -> bool {
     }
 }
 
-fn task_window_launch_config(event: &OpenFilesEvent) -> TaskWindowLaunchConfig {
+fn next_task_window_label() -> String {
+    let sequence = TASK_WINDOW_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    format!(
+        "{TASK_WINDOW_LABEL_PREFIX}{}-{sequence}",
+        std::process::id()
+    )
+}
+
+fn task_window_launch_config(event: &OpenFilesEvent, label: String) -> TaskWindowLaunchConfig {
     TaskWindowLaunchConfig {
-        label: TASK_WINDOW_LABEL,
+        label,
         title: TASK_WINDOW_TITLE,
         url: external_task_window_path(event),
         inner_size: TASK_WINDOW_INNER_SIZE,
@@ -435,6 +429,30 @@ pub fn event_from_args(args: impl IntoIterator<Item = OsString>) -> OpenFilesEve
     .normalized()
 }
 
+pub fn startup_event(args: impl IntoIterator<Item = OsString>) -> OpenFilesEvent {
+    match std::env::current_exe()
+        .ok()
+        .and_then(|executable| sfx_event_for_executable(&executable))
+    {
+        Some(event) => event,
+        None => event_from_args(args),
+    }
+}
+
+fn sfx_event_for_executable(executable: &Path) -> Option<OpenFilesEvent> {
+    let bundle = squallz_core::macos_sfx_bundle_for_executable(executable)?;
+    let stem = bundle.file_stem()?.to_string_lossy();
+    if stem.trim().is_empty() {
+        return None;
+    }
+    let output = bundle.parent()?.join(stem.as_ref());
+    Some(OpenFilesEvent {
+        paths: vec![path_to_string(bundle)],
+        action: Some(SFX_EXTERNAL_ACTION.to_owned()),
+        output: Some(path_to_string(output)),
+    })
+}
+
 pub fn path_to_string(path: PathBuf) -> String {
     path.to_string_lossy().into_owned()
 }
@@ -487,7 +505,8 @@ mod tests {
 
     use super::{
         canonical_or_original, event_from_args, external_task_window_path, query_component,
-        OpenFileRequests, OpenFilesEvent, EXTERNAL_TASK_ACTION_ARG, EXTERNAL_TASK_OUTPUT_ARG,
+        sfx_event_for_executable, OpenFileRequests, OpenFilesEvent, EXTERNAL_TASK_ACTION_ARG,
+        EXTERNAL_TASK_OUTPUT_ARG, TASK_WINDOW_CAPABILITY_PATTERN,
     };
 
     #[test]
@@ -596,6 +615,39 @@ mod tests {
     }
 
     #[test]
+    fn embedded_macos_bundle_launches_the_shared_sfx_extract_task() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "squallz-open-files-sfx-{}-{nonce}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let bundle = dir.join("Photos.app");
+        let executable = bundle.join("Contents/MacOS/squallz-gui");
+        fs::create_dir_all(bundle.join("Contents/Resources/squallz-sfx")).unwrap();
+        fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        fs::write(&executable, b"stub").unwrap();
+        fs::write(
+            bundle.join("Contents/Resources/squallz-sfx/manifest.v1"),
+            b"manifest",
+        )
+        .unwrap();
+
+        let event = sfx_event_for_executable(&executable).unwrap();
+        assert_eq!(event.action.as_deref(), Some("extract-sfx"));
+        assert_eq!(event.paths, vec![bundle.to_string_lossy().into_owned()]);
+        assert_eq!(
+            event.output.as_deref(),
+            Some(dir.join("Photos").to_string_lossy().as_ref())
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn external_task_window_path_reuses_frontend_task_window_query() {
         let event = OpenFilesEvent {
             paths: vec!["/tmp/photos/a file.jpg".into(), "/tmp/photos/b.jpg".into()],
@@ -614,11 +666,57 @@ mod tests {
     }
 
     #[test]
+    fn external_task_window_labels_are_unique_per_native_window() {
+        let first = super::next_task_window_label();
+        let second = super::next_task_window_label();
+
+        assert_ne!(first, second);
+        assert!(first.starts_with(super::TASK_WINDOW_LABEL_PREFIX));
+        assert!(second.starts_with(super::TASK_WINDOW_LABEL_PREFIX));
+    }
+
+    #[test]
+    fn external_task_window_has_only_the_desktop_permissions_it_uses() {
+        let capability: serde_json::Value =
+            serde_json::from_str(include_str!("../capabilities/task.json")).unwrap();
+        let windows = capability["windows"].as_array().unwrap();
+        assert!(windows
+            .iter()
+            .any(|window| window == TASK_WINDOW_CAPABILITY_PATTERN));
+
+        let permissions = capability["permissions"].as_array().unwrap();
+        for required in [
+            "core:event:allow-listen",
+            "core:event:allow-unlisten",
+            "core:window:allow-show",
+            "core:window:allow-unminimize",
+            "core:window:allow-set-focus",
+            "core:window:allow-close",
+            "opener:allow-open-path",
+            "opener:allow-reveal-item-in-dir",
+        ] {
+            assert!(permissions.iter().any(|permission| permission == required));
+        }
+        assert!(!permissions.iter().any(|permission| {
+            permission
+                .as_str()
+                .is_some_and(|permission| permission.starts_with("dialog:"))
+        }));
+        assert!(!permissions
+            .iter()
+            .any(|permission| permission == "core:window:allow-destroy"));
+        assert!(!permissions
+            .iter()
+            .any(|permission| permission == "core:window:allow-hide"));
+    }
+
+    #[test]
     fn external_task_window_path_preserves_every_external_action_handoff() {
         for action in [
             "checksum",
             "extract-here",
             "extract-to-folder",
+            "extract-sfx",
             "compress-to-7z",
             "test-archive",
         ] {

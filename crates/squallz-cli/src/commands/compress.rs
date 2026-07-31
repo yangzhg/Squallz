@@ -1,15 +1,16 @@
 //! `sqz compress`: create an archive from files/directories, optionally as
-//! `.001` split volumes (`--split`).
+//! generic `.001` volumes or a supported format-native set.
 
 use std::path::{Path, PathBuf};
 
 use serde_json::json;
 use squallz_core::api::{
-    CompressionLevel, CreateOptions, Detected, FormatError, Password, SqzCreateOptions,
+    CompressionLevel, CreateOptions, Detected, FormatError, OpenOptions, Password, ProgressPhase,
+    ProgressSink, SplitOutputMode, SqzCreateOptions,
 };
-use squallz_core::{collect_volume_set, VolumeSet};
+use squallz_core::CreateArtifactKind;
 
-use super::reports::print_pretty_json;
+use super::reports::{create_report_json, print_preserved_output_warning, print_pretty_json};
 use crate::args::resource_options;
 use crate::commands::{Ctx, ModernStatusField, ModernTableColumn, ModernTableRow};
 use crate::errors::CliError;
@@ -51,8 +52,10 @@ pub fn run(
     encrypt_names: bool,
     excludes: Vec<String>,
     split: Option<u64>,
+    split_mode: SplitOutputMode,
     threads: Option<usize>,
     memory_limit: Option<u64>,
+    test_after_create: bool,
     json_output: bool,
 ) -> Result<(), CliError> {
     run_create(
@@ -66,8 +69,10 @@ pub fn run(
         encrypt_names,
         excludes,
         split,
+        split_mode,
         threads,
         memory_limit,
+        test_after_create,
         json_output,
         CreateJsonReport::compress(),
     )
@@ -85,6 +90,7 @@ pub fn run_pack(
     split: Option<u64>,
     threads: Option<usize>,
     memory_limit: Option<u64>,
+    test_after_create: bool,
     json_output: bool,
 ) -> Result<(), CliError> {
     let is_sqz = output
@@ -108,8 +114,10 @@ pub fn run_pack(
         false,
         excludes,
         split,
+        SplitOutputMode::Generic,
         threads,
         memory_limit,
+        test_after_create,
         json_output,
         CreateJsonReport::pack_sqz(inner_format, recovery),
     )
@@ -127,60 +135,107 @@ fn run_create(
     encrypt_names: bool,
     excludes: Vec<String>,
     split: Option<u64>,
+    split_mode: SplitOutputMode,
     threads: Option<usize>,
     memory_limit: Option<u64>,
+    test_after_create: bool,
     json_output: bool,
     json_report: CreateJsonReport,
 ) -> Result<(), CliError> {
     validate_requested_format(ctx, &output, requested_format)?;
-    let progress = CliProgress::new_for_operation(
-        ctx.quiet,
-        ctx.verbose,
-        json_output,
-        ctx.output_style,
-        ctx.color,
-        ctx.accent,
-        if json_report.operation == "pack_sqz" {
-            "pack"
-        } else {
-            "compress"
-        },
-    );
+    let progress_operation = if json_report.operation == "pack_sqz" {
+        "pack"
+    } else {
+        "compress"
+    };
+    let make_progress = || {
+        CliProgress::new_for_operation(
+            ctx.quiet,
+            ctx.verbose,
+            json_output,
+            ctx.output_style,
+            ctx.color,
+            ctx.accent,
+            progress_operation,
+        )
+    };
     let opts = CreateOptions {
         level: CompressionLevel::from_numeric(level),
         password: password.map(Password::new),
         encrypt_filenames: encrypt_names,
         excludes,
         split_size: split,
+        split_mode,
         resources: resource_options(threads, memory_limit),
         sqz,
     };
+    let kind = if split.is_some() {
+        CreateArtifactKind::SplitArchive
+    } else {
+        CreateArtifactKind::Archive
+    };
+    let inspection_progress = make_progress();
+    let policy =
+        match super::create_commit_policy(&output, kind, true, &inspection_progress, &ctx.ctl) {
+            Ok(policy) => policy,
+            Err(error) => {
+                inspection_progress.finish();
+                return Err(error.into());
+            }
+        };
+    inspection_progress.finish();
+    let progress = make_progress();
     let result = ctx
         .engine
-        .create(&output, &inputs, &opts, &progress, &ctx.ctl);
+        .create_with_report_policy(&output, &inputs, &opts, policy, &progress, &ctx.ctl);
     progress.finish();
-    result?;
-    let format_label = create_format_label(ctx, &output, requested_format);
-    if split.is_some() {
-        let first = split_first_volume_path(&output);
-        let volume_set = collect_volume_set(&first).ok();
-        let volume_count = volume_count_or_zero(volume_set.as_ref());
-        let output_size = split_output_size_or_dash(volume_set.as_ref());
-        let count = volume_count.to_string();
-        let path = first.display().to_string();
-        if json_output {
-            let mut value = json!({
-                "ok": true,
-                "operation": json_report.operation,
-                "output": path,
-                "level": level,
-                "split": true,
-                "volumes": volume_count,
-            });
-            add_create_json_fields(&mut value, &json_report);
-            print_pretty_json(&value)?;
-            return Ok(());
+    let create_report = result?;
+    let entries_tested_after_create = if test_after_create {
+        let verify_progress = make_progress();
+        verify_progress.on_phase(ProgressPhase::OutputVerify, true);
+        let report = ctx.engine.test_summary(
+            &create_report.primary_output,
+            &OpenOptions {
+                password: opts.password.clone(),
+                encoding_override: None,
+            },
+            &verify_progress,
+            &ctx.ctl,
+        );
+        verify_progress.finish();
+        let report = report?;
+        if !report.is_ok() {
+            let preview = report.problems.messages.join("; ");
+            let detail = if preview.is_empty() {
+                format!(
+                    "created archive failed integrity testing with {} problem(s)",
+                    report.problems.total
+                )
+            } else {
+                format!("created archive failed integrity testing: {preview}")
+            };
+            return Err(FormatError::CorruptArchive(detail).into());
         }
+        Some(report.entries_tested)
+    } else {
+        None
+    };
+    let format_label = create_format_label(ctx, &output, requested_format);
+    if json_output {
+        let mut value = create_report_json(&create_report);
+        value["ok"] = json!(true);
+        value["operation"] = json!(json_report.operation);
+        value["level"] = json!(level);
+        value["tested_after_create"] = json!(entries_tested_after_create.is_some());
+        value["entries_tested_after_create"] = json!(entries_tested_after_create);
+        add_create_json_fields(&mut value, &json_report);
+        print_pretty_json(&value)?;
+        return Ok(());
+    }
+    let path = create_report.primary_output.display().to_string();
+    let output_size = fmt_bytes(create_report.total_output_bytes);
+    if let Some(volume_count) = create_report.split_volume_count {
+        let count = volume_count.to_string();
         if ctx.is_modern() {
             let result = CreateResultView {
                 title_key: "cli.compress.result_title_split",
@@ -201,21 +256,6 @@ fn run_create(
             ctx.print_success(&message);
         }
     } else {
-        let path = output.display().to_string();
-        let output_size = output_size_label(&output);
-        if json_output {
-            let mut value = json!({
-                "ok": true,
-                "operation": json_report.operation,
-                "output": path,
-                "level": level,
-                "split": false,
-                "volumes": 1,
-            });
-            add_create_json_fields(&mut value, &json_report);
-            print_pretty_json(&value)?;
-            return Ok(());
-        }
         if ctx.is_modern() {
             let result = CreateResultView {
                 title_key: "cli.compress.result_title",
@@ -232,6 +272,18 @@ fn run_create(
             let message = ctx.loc.format("cli.compress.done", &[("path", &path)]);
             ctx.print_success(&message);
         }
+    }
+    let preserved_outputs = create_report
+        .preserved_outputs
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>();
+    print_preserved_output_warning(ctx, &preserved_outputs);
+    if let Some(entries) = entries_tested_after_create {
+        ctx.eprint_notice(ctx.loc.format(
+            "cli.compress.tested_after_create",
+            &[("count", &entries.to_string())],
+        ));
     }
     Ok(())
 }
@@ -475,62 +527,6 @@ fn detected_format_label(ctx: &Ctx, name: &str) -> Option<String> {
     }
 }
 
-fn output_size_label(path: &Path) -> String {
-    match std::fs::metadata(path) {
-        Ok(metadata) => fmt_bytes(metadata.len()),
-        Err(_) => "-".to_owned(),
-    }
-}
-
-fn split_first_volume_path(output: &Path) -> PathBuf {
-    let name = output_file_name_or_empty(output);
-    let base_name = split_base_name(&name);
-    output.with_file_name(format!("{base_name}.001"))
-}
-
-fn output_file_name_or_empty(output: &Path) -> String {
-    match output.file_name() {
-        Some(name) => name.to_string_lossy().into_owned(),
-        None => String::new(),
-    }
-}
-
-fn split_base_name(name: &str) -> String {
-    // Tolerate an explicit first-volume output name (`-o x.zip.001`).
-    match squallz_core::api::split_volume_name(name) {
-        Some((base, _)) => base.to_owned(),
-        None => name.to_owned(),
-    }
-}
-
-fn volume_count_or_zero(paths: Option<&VolumeSet>) -> usize {
-    match paths {
-        Some(paths) => paths.len(),
-        None => 0,
-    }
-}
-
-fn split_output_size_or_dash(paths: Option<&VolumeSet>) -> String {
-    match paths {
-        Some(paths) => split_output_size_label(paths),
-        None => "-".to_owned(),
-    }
-}
-
-fn split_output_size_label(paths: &VolumeSet) -> String {
-    if paths.is_empty() {
-        return "-".to_owned();
-    }
-    let mut total = 0_u64;
-    for path in paths.iter() {
-        let Ok(metadata) = std::fs::metadata(path) else {
-            return "-".to_owned();
-        };
-        total = total.saturating_add(metadata.len());
-    }
-    fmt_bytes(total)
-}
-
 fn recovery_percent_label(recovery_percent: Option<u8>) -> String {
     match recovery_percent {
         Some(percent) => format!("{percent}%"),
@@ -626,26 +622,5 @@ fn detected_format_key(ctx: &Ctx, name: &str) -> Option<String> {
             compressor,
             inner_archive: None,
         } => Some(format!("compressor:{}", compressor.id())),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn split_first_volume_path_accepts_plain_and_explicit_first_volume_outputs() {
-        assert_eq!(
-            split_first_volume_path(Path::new("archive.zip")),
-            PathBuf::from("archive.zip.001")
-        );
-        assert_eq!(
-            split_first_volume_path(Path::new("archive.zip.001")),
-            PathBuf::from("archive.zip.001")
-        );
-        assert_eq!(
-            split_first_volume_path(Path::new("nested/archive.zip.001")),
-            PathBuf::from("nested/archive.zip.001")
-        );
     }
 }

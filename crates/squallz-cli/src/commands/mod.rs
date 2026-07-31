@@ -2,6 +2,7 @@
 //! dispatches here.
 
 mod batch;
+mod check_update;
 mod checksum;
 mod compress;
 mod convert;
@@ -13,16 +14,21 @@ mod extract;
 mod info;
 mod list;
 mod nested;
+mod preset;
 mod recovery;
 mod reports;
+pub(crate) mod sfx;
 mod test;
 mod update;
 
 use std::io::IsTerminal;
+use std::path::Path;
 use std::sync::Arc;
 
-use squallz_core::api::ControlToken;
-use squallz_core::Engine;
+use squallz_core::api::{ControlToken, FormatError, ProgressSink};
+use squallz_core::{
+    inspect_create_destination_with_progress, CreateArtifactKind, CreateCommitPolicy, Engine,
+};
 use squallz_i18n::Localizer;
 
 use crate::args::{effective_compression_level, AccentArg, Cmd, ColorArg, OutputStyleArg};
@@ -30,6 +36,26 @@ use crate::errors::CliError;
 use crate::ui::{self, Tone};
 
 const MODERN_PANEL_INNER_WIDTH: usize = 96;
+
+fn create_commit_policy(
+    destination: &Path,
+    kind: CreateArtifactKind,
+    allow_existing: bool,
+    progress: &dyn ProgressSink,
+    ctl: &ControlToken,
+) -> Result<CreateCommitPolicy, FormatError> {
+    if !allow_existing {
+        return Ok(CreateCommitPolicy::NoReplace);
+    }
+    let state = inspect_create_destination_with_progress(destination, kind, progress, ctl)?;
+    match (state.conflict, state.guard) {
+        (false, None) => Ok(CreateCommitPolicy::NoReplace),
+        (true, Some(guard)) => Ok(CreateCommitPolicy::ReplaceIfUnchanged(guard)),
+        _ => Err(FormatError::Other(
+            "create destination inspection returned an inconsistent result".into(),
+        )),
+    }
+}
 
 /// Shared command context.
 pub struct Ctx {
@@ -436,24 +462,56 @@ pub fn dispatch(cmd: Cmd, ctx: &Ctx) -> Result<(), CliError> {
             password,
             encrypt_names,
             excludes,
+            content_policy,
             split,
+            split_mode,
             threads,
             memory_limit,
+            test_after_create,
+            file_manager_preset,
             json,
-        } => compress::run(
-            ctx,
-            inputs,
-            output,
-            format,
-            effective_compression_level(level, profile),
-            password,
-            encrypt_names,
-            excludes,
-            split,
-            threads,
-            memory_limit,
-            json,
-        ),
+        } => {
+            let mut level = level;
+            let mut excludes = excludes;
+            let mut split = split;
+            let mut test_after_create = test_after_create;
+            if file_manager_preset {
+                let preset = crate::file_manager_presets::load_create_options()?;
+                if level.is_none() && profile.is_none() {
+                    level = Some(preset.level);
+                }
+                let mut preset_excludes = preset.excludes;
+                preset_excludes.append(&mut excludes);
+                excludes = crate::content_policy::resolve_create_excludes(
+                    Some(squallz_core::CreateContentPolicy::Custom),
+                    preset_excludes,
+                );
+                if split.is_none() {
+                    split = preset.split;
+                }
+                test_after_create |= preset.test_after_create;
+            }
+            let excludes = crate::content_policy::resolve_create_excludes(
+                content_policy.map(Into::into),
+                excludes,
+            );
+            compress::run(
+                ctx,
+                inputs,
+                output,
+                format,
+                effective_compression_level(level, profile),
+                password,
+                encrypt_names,
+                excludes,
+                split,
+                split_mode.unwrap_or_default().into(),
+                threads,
+                memory_limit,
+                test_after_create,
+                json,
+            )
+        }
         Cmd::Pack {
             inputs,
             output,
@@ -462,9 +520,11 @@ pub fn dispatch(cmd: Cmd, ctx: &Ctx) -> Result<(), CliError> {
             inner_format,
             recovery,
             excludes,
+            content_policy,
             split,
             threads,
             memory_limit,
+            test_after_create,
             json,
         } => compress::run_pack(
             ctx,
@@ -473,18 +533,33 @@ pub fn dispatch(cmd: Cmd, ctx: &Ctx) -> Result<(), CliError> {
             effective_compression_level(level, profile),
             inner_format,
             recovery,
-            excludes,
+            crate::content_policy::resolve_create_excludes(
+                content_policy.map(Into::into),
+                excludes,
+            ),
             split,
             threads,
             memory_limit,
+            test_after_create,
             json,
         ),
+        Cmd::Sfx { cmd } => sfx::run(ctx, cmd),
         Cmd::Estimate {
             inputs,
             excludes,
+            content_policy,
             output,
             json,
-        } => estimate::run(ctx, inputs, excludes, output, json),
+        } => estimate::run(
+            ctx,
+            inputs,
+            crate::content_policy::resolve_create_excludes(
+                content_policy.map(Into::into),
+                excludes,
+            ),
+            output,
+            json,
+        ),
         Cmd::Duplicates {
             inputs,
             excludes,
@@ -513,36 +588,52 @@ pub fn dispatch(cmd: Cmd, ctx: &Ctx) -> Result<(), CliError> {
             max_output_bytes,
             max_entries,
             max_compression_ratio,
+            file_manager_preset,
             json,
-        } => extract::run(
-            ctx,
-            archive,
-            dest,
-            includes,
-            overwrite,
-            password,
-            encoding,
-            symlinks,
-            smart,
-            best_effort,
-            threads,
-            memory_limit,
-            max_output_bytes,
-            max_entries,
-            max_compression_ratio,
-            json,
-        ),
+        } => {
+            let (overwrite, encoding, symlinks) = if file_manager_preset {
+                let preset = crate::file_manager_presets::load_extract_options()?;
+                (
+                    preset.overwrite,
+                    encoding.or(preset.encoding),
+                    preset.symlinks,
+                )
+            } else {
+                (overwrite, encoding, symlinks)
+            };
+            extract::run(
+                ctx,
+                archive,
+                dest,
+                includes,
+                overwrite,
+                password,
+                encoding,
+                symlinks,
+                smart,
+                best_effort,
+                threads,
+                memory_limit,
+                max_output_bytes,
+                max_entries,
+                max_compression_ratio,
+                json,
+            )
+        }
         Cmd::Convert {
             src,
             output,
             password,
             out_password,
             encrypt_names,
+            split,
+            split_mode,
             level,
             profile,
             encoding,
             threads,
             memory_limit,
+            force,
             json,
         } => convert::run(
             ctx,
@@ -551,10 +642,13 @@ pub fn dispatch(cmd: Cmd, ctx: &Ctx) -> Result<(), CliError> {
             password,
             out_password,
             encrypt_names,
+            split,
+            split_mode.unwrap_or_default().into(),
             effective_compression_level(level, profile),
             encoding,
             threads,
             memory_limit,
+            force,
             json,
         ),
         Cmd::Nested { cmd } => nested::run(ctx, cmd),
@@ -566,6 +660,7 @@ pub fn dispatch(cmd: Cmd, ctx: &Ctx) -> Result<(), CliError> {
             out_password,
             threads,
             memory_limit,
+            force,
             json,
         } => export::run(
             ctx,
@@ -575,6 +670,7 @@ pub fn dispatch(cmd: Cmd, ctx: &Ctx) -> Result<(), CliError> {
             out_password,
             threads,
             memory_limit,
+            force,
             json,
         ),
         Cmd::Update {
@@ -585,6 +681,7 @@ pub fn dispatch(cmd: Cmd, ctx: &Ctx) -> Result<(), CliError> {
             rename,
             move_entries,
             excludes,
+            content_policy,
             password,
             encrypt_names,
             level,
@@ -600,7 +697,10 @@ pub fn dispatch(cmd: Cmd, ctx: &Ctx) -> Result<(), CliError> {
             delete,
             rename,
             move_entries,
-            excludes,
+            crate::content_policy::resolve_create_excludes(
+                content_policy.map(Into::into),
+                excludes,
+            ),
             password,
             encrypt_names,
             effective_compression_level(level, profile),
@@ -625,6 +725,7 @@ pub fn dispatch(cmd: Cmd, ctx: &Ctx) -> Result<(), CliError> {
             archive,
             use_recovery,
             output,
+            output_dir,
             recovery,
             level,
             profile,
@@ -636,6 +737,7 @@ pub fn dispatch(cmd: Cmd, ctx: &Ctx) -> Result<(), CliError> {
             archive,
             use_recovery,
             output,
+            output_dir,
             recovery,
             effective_compression_level(level, profile),
             threads,
@@ -647,14 +749,17 @@ pub fn dispatch(cmd: Cmd, ctx: &Ctx) -> Result<(), CliError> {
             keep_going,
             json,
         } => batch::run(ctx, script, keep_going, json),
+        Cmd::CheckUpdate { json } => check_update::run(ctx, json),
         Cmd::Doctor { strict, json } => doctor::run(ctx, strict, json),
+        Cmd::Preset { cmd } => preset::run(ctx, cmd),
         Cmd::List {
             archive,
             password,
             encoding,
+            search,
             json,
             tree,
-        } => list::run(ctx, archive, password, encoding, json, tree),
+        } => list::run(ctx, archive, password, encoding, search, json, tree),
         Cmd::Test {
             archive,
             password,

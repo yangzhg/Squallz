@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 description = "Squallz 内置格式实现（扩展新格式只改这里）"
 
+[features]
+default = ["process-backend"]
+process-backend = []
+
 [dependencies]
 blake3 = "1.8.5"
 brotli = "8"
@@ -27,3 +31,9 @@ zstd = { version = "0.13", features = ["zstdmt"] }
 
 [dev-dependencies]
 squallz-core = { path = "../squallz-core", version = "0.1.0" }
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "=1.1.4", features = ["fs"] }
+
+[target.'cfg(windows)'.dependencies]
+winapi-util = "0.1.11"

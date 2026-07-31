@@ -24,7 +24,16 @@ If you have PAR2 data:
 ```sh
 sqz verify archive.zip --use-recovery --json
 sqz repair archive.zip --use-recovery -o repaired.zip --json
+sqz repair archive.zip.001 --use-recovery --output-dir repaired-set --json
 ```
+
+For a single-file PAR2 set, `-o` creates a repair copy without replacing an
+occupied output location. For split or multi-file sets, `--output-dir` creates
+a new folder containing every file described by the PAR2 set, including any
+reconstructed missing members and nested paths. The source files stay
+unchanged, the destination must not already exist, and PAR2 files or backend
+artifacts are not published into it. Omitting both output options repairs the
+source set in place.
 
 If it is `.sqz`:
 
@@ -74,7 +83,13 @@ sqz list archive.zip --json
 ```sh
 sqz verify archive.zip --use-recovery --json
 sqz repair archive.zip --use-recovery -o repaired.zip --json
+sqz repair archive.zip.001 --use-recovery --output-dir repaired-set --json
 ```
+
+单文件 PAR2 恢复集使用 `-o` 时会创建不覆盖已占用输出位置的修复副本。分卷或多文件集使用
+`--output-dir` 时会创建一个全新文件夹，写入 PAR2 描述的全部文件、重建的缺失成员和原有嵌套
+路径；源文件保持不变，目标文件夹必须尚不存在，PAR2 文件和后端临时产物不会混入结果。
+两个输出选项都省略时，仍会按 PAR2 语义原地修复源文件集。
 
 如果是 `.sqz`：
 

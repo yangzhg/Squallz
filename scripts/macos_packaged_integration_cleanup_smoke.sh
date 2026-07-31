@@ -13,7 +13,7 @@ if [[ "$APP" != /* ]]; then
   APP="$ROOT/$APP"
 fi
 EXE="$APP/Contents/MacOS/squallz-gui"
-SQZ_HELPER="$APP/Contents/Resources/bin/sqz"
+SQZ_HELPER="$APP/Contents/MacOS/sqz"
 WORK="$ROOT/target/squallz-macos-packaged-integration-cleanup-smoke"
 HOME_DIR="$WORK/home"
 TRACE="$WORK/trace.jsonl"
@@ -93,6 +93,7 @@ events = [json.loads(line) for line in trace.read_text(encoding="utf-8").splitli
 payloads = {event: [item["payload"] for item in events if item.get("event") == event] for event in {
     "integration.apply.ok",
     "integration.status.after_apply",
+    "integration.system_diagnostics",
     "integration.remove.ok",
     "integration.status.after_remove",
 }}
@@ -100,14 +101,17 @@ for key in payloads:
     assert payloads[key], f"missing {key}"
 apply = payloads["integration.apply.ok"][-1]
 after_apply = payloads["integration.status.after_apply"][-1]
+diagnostics = payloads["integration.system_diagnostics"][-1]
 remove = payloads["integration.remove.ok"][-1]
 after_remove = payloads["integration.status.after_remove"][-1]
 assert apply["platform"] == "macos", apply
-assert len(apply.get("installed", [])) == 4, apply
-assert len(after_apply.get("installed", [])) == 4 and not after_apply.get("missing"), after_apply
-assert len(remove.get("removed", [])) == 4 and not remove.get("missing"), remove
+assert len(apply.get("installed", [])) == 5, apply
+assert len(after_apply.get("installed", [])) == 5 and not after_apply.get("missing"), after_apply
+assert diagnostics.get("default_handlers", {}).get("total") == 23, diagnostics
+assert diagnostics.get("file_manager_visibility", {}).get("state") == "manual_check", diagnostics
+assert len(remove.get("removed", [])) == 5 and not remove.get("missing"), remove
 assert not after_remove.get("installed"), after_remove
-assert len(after_remove.get("missing", [])) == 4, after_remove
+assert len(after_remove.get("missing", [])) == 5, after_remove
 services_dir = pathlib.Path(remove["services_dir"])
 script_dir = pathlib.Path(remove["script_dir"])
 assert str(services_dir).startswith(str(home)), services_dir
@@ -136,6 +140,9 @@ for line in open(sys.argv[1], encoding="utf-8"):
         detail = f"installed={len(payload.get('installed', []))}"
     elif item["event"] == "integration.status.after_apply":
         detail = f"installed={len(payload.get('installed', []))} missing={len(payload.get('missing', []))}"
+    elif item["event"] == "integration.system_diagnostics":
+        handlers = payload.get("default_handlers", {})
+        detail = f"default_handlers={handlers.get('squallz', 0)}/{handlers.get('total', 0)} state={handlers.get('state')}"
     elif item["event"] == "integration.remove.ok":
         detail = f"removed={len(payload.get('removed', []))} missing={len(payload.get('missing', []))}"
     elif item["event"] == "integration.status.after_remove":
@@ -169,10 +176,12 @@ behind in the isolated user profile.
 ## Checks
 
 - \`squallz-gui\` starts from the bundle.
-- \`integration.apply.ok\` installs exactly four Finder actions.
-- \`integration.status.after_apply\` reports four installed actions and no missing actions.
-- \`integration.remove.ok\` removes exactly four Finder actions and reports no missing actions.
-- \`integration.status.after_remove\` reports zero installed actions and four missing actions.
+- \`integration.apply.ok\` installs exactly five Finder actions.
+- \`integration.status.after_apply\` reports five installed actions and no missing actions.
+- \`integration.system_diagnostics\` reports all 23 declared file types and keeps
+  Finder visibility as a manual check.
+- \`integration.remove.ok\` removes exactly five Finder actions and reports no missing actions.
+- \`integration.status.after_remove\` reports zero installed actions and five missing actions.
 - Every workflow/script path installed by the packaged app is absent after removal.
 
 ## Cleanup Summary
@@ -188,8 +197,10 @@ $TRACE_SUMMARY
 ## Boundary
 
 This smoke uses an isolated HOME and does not modify the real user's
-\`~/Library/Services\`. It does not click Finder UI, refresh the system Services
-cache, or validate Windows/Linux shell integration uninstallers.
+\`~/Library/Services\`. It requests the public macOS Services refresh after
+installation and removal, but does not treat that refresh as proof that a menu
+is visible. It does not click Finder UI or validate Windows/Linux shell
+integration uninstallers.
 EOF
 
 echo "report=$REPORT"

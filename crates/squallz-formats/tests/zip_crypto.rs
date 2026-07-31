@@ -106,6 +106,103 @@ fn aes256_roundtrip_and_password_errors() {
 }
 
 #[test]
+fn encrypted_infozip_native_split_uses_the_secure_password_bridge() {
+    if !command_exists("zip") || !command_exists("7zz") {
+        eprintln!("skipped: Info-ZIP zip or 7zz not found");
+        return;
+    }
+
+    let tmp = TempDir::new("encrypted-native-split");
+    let mut payload = vec![0u8; 200 * 1024];
+    let mut state = 0x6a09_e667_f3bc_c909u64;
+    for byte in &mut payload {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        *byte = state as u8;
+    }
+    let source = tmp.path().join("payload.bin");
+    fs::write(&source, &payload).unwrap();
+
+    let eng = engine();
+    let ctl = ControlToken::new();
+    let encrypted = tmp.path().join("encrypted.zip");
+    eng.create(
+        &encrypted,
+        &[source],
+        &CreateOptions {
+            password: Some(Password::new("native-split-password")),
+            ..CreateOptions::default()
+        },
+        &NoProgress,
+        &ctl,
+    )
+    .unwrap();
+
+    let output = Command::new("zip")
+        .args(["-q", "-s", "64k", "encrypted.zip", "--out", "native.zip"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "Info-ZIP split conversion failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let first = tmp.path().join("native.z01");
+    let final_path = tmp.path().join("native.zip");
+    assert!(first.is_file());
+    assert!(final_path.is_file());
+
+    let entries = eng.list(&first, &open_with(None)).unwrap();
+    assert_eq!(entries.len(), 1);
+    assert!(entries[0].encrypted);
+
+    let error = eng
+        .test(&first, &open_with(None), &NoProgress, &ctl)
+        .unwrap_err();
+    assert!(matches!(error, FormatError::PasswordRequired), "{error:?}");
+    let error = eng
+        .test(
+            &first,
+            &open_with(Some("wrong-native-split-password")),
+            &NoProgress,
+            &ctl,
+        )
+        .unwrap_err();
+    assert!(matches!(error, FormatError::WrongPassword), "{error:?}");
+
+    let wrong_dest = tmp.path().join("wrong-password");
+    let error = eng
+        .extract(
+            &first,
+            &wrong_dest,
+            None,
+            &open_with(Some("wrong-native-split-password")),
+            &ExtractOptions::default(),
+            &NoProgress,
+            &ctl,
+        )
+        .unwrap_err();
+    assert!(matches!(error, FormatError::WrongPassword), "{error:?}");
+    assert!(!wrong_dest.join("payload.bin").exists());
+
+    let dest = tmp.path().join("dest");
+    eng.extract(
+        &first,
+        &dest,
+        None,
+        &open_with(Some("native-split-password")),
+        &ExtractOptions::default(),
+        &NoProgress,
+        &ctl,
+    )
+    .unwrap();
+    assert_eq!(fs::read(dest.join("payload.bin")).unwrap(), payload);
+}
+
+#[test]
 fn zipcrypto_legacy_archive_is_readable() {
     if !command_exists("zip") {
         eprintln!("skipped: system zip not found");

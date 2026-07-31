@@ -8,15 +8,65 @@ use std::env;
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use squallz_gui::state::{AppState, DEFAULT_PAGE_SIZE};
+
+#[global_allocator]
+static ALLOCATOR: TrackingAllocator = TrackingAllocator;
+
+static LIVE_HEAP_BYTES: AtomicUsize = AtomicUsize::new(0);
+static PEAK_HEAP_BYTES: AtomicUsize = AtomicUsize::new(0);
 
 const DEFAULT_ENTRIES: usize = 100_000;
 const DEFAULT_MAX_FIRST_SCREEN_MS: u128 = 1_000;
 const DEFAULT_MAX_PAGE_MS: u128 = 50;
 const DEFAULT_MAX_FILTER_MS: u128 = 250;
 const LARGE_DIR: &str = "files/";
+
+struct TrackingAllocator;
+
+unsafe impl std::alloc::GlobalAlloc for TrackingAllocator {
+    unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+        let pointer = unsafe { std::alloc::System.alloc(layout) };
+        if !pointer.is_null() {
+            record_allocation(layout.size());
+        }
+        pointer
+    }
+
+    unsafe fn alloc_zeroed(&self, layout: std::alloc::Layout) -> *mut u8 {
+        let pointer = unsafe { std::alloc::System.alloc_zeroed(layout) };
+        if !pointer.is_null() {
+            record_allocation(layout.size());
+        }
+        pointer
+    }
+
+    unsafe fn dealloc(&self, pointer: *mut u8, layout: std::alloc::Layout) {
+        record_deallocation(layout.size());
+        unsafe { std::alloc::System.dealloc(pointer, layout) };
+    }
+
+    unsafe fn realloc(
+        &self,
+        pointer: *mut u8,
+        layout: std::alloc::Layout,
+        new_size: usize,
+    ) -> *mut u8 {
+        let replacement = unsafe { std::alloc::System.realloc(pointer, layout, new_size) };
+        if replacement.is_null() {
+            return replacement;
+        }
+        if new_size >= layout.size() {
+            record_allocation(new_size - layout.size());
+        } else {
+            record_deallocation(layout.size() - new_size);
+        }
+        replacement
+    }
+}
 
 #[derive(Debug)]
 struct Args {
@@ -37,6 +87,14 @@ struct Timings {
     middle_page: Duration,
     last_page: Duration,
     filter: Duration,
+}
+
+#[derive(Debug)]
+struct HeapUsage {
+    before_open: usize,
+    after_open: usize,
+    open_peak: usize,
+    after_browse: usize,
 }
 
 fn main() {
@@ -62,12 +120,16 @@ fn run() -> Result<(), String> {
     write_large_zip(&args.archive, args.entries)?;
     let generate = t0.elapsed();
 
+    let before_open = LIVE_HEAP_BYTES.load(Ordering::Relaxed);
+    PEAK_HEAP_BYTES.store(before_open, Ordering::Relaxed);
     let state = AppState::new();
     let t0 = Instant::now();
     let info = state
         .open_archive(&args.archive, None, None)
         .map_err(|e| format!("open archive: {e}"))?;
     let open = t0.elapsed();
+    let after_open = LIVE_HEAP_BYTES.load(Ordering::Relaxed);
+    let open_peak = PEAK_HEAP_BYTES.load(Ordering::Relaxed);
 
     let t0 = Instant::now();
     let root = state
@@ -126,6 +188,12 @@ fn run() -> Result<(), String> {
         return Err("middle/last/filter page sanity check failed".to_owned());
     }
 
+    let heap = HeapUsage {
+        before_open,
+        after_open,
+        open_peak,
+        after_browse: LIVE_HEAP_BYTES.load(Ordering::Relaxed),
+    };
     let timings = Timings {
         generate,
         open,
@@ -138,6 +206,7 @@ fn run() -> Result<(), String> {
     let report = render_report(
         &args,
         &timings,
+        &heap,
         args.archive.metadata().ok().map(|m| m.len()),
     );
     fs::write(&args.report, report).map_err(|e| format!("write report: {e}"))?;
@@ -150,6 +219,8 @@ fn run() -> Result<(), String> {
     println!("first_screen_ms={}", ms(timings.first_screen()));
     println!("first_page_ms={}", ms(timings.first_page));
     println!("filter_ms={}", ms(timings.filter));
+    println!("open_heap_bytes={}", heap.open_delta());
+    println!("open_peak_heap_bytes={}", heap.open_peak_delta());
     if !failures.is_empty() {
         return Err(format!("threshold failure: {}", failures.join("; ")));
     }
@@ -262,6 +333,17 @@ fn print_help() {
     println!(
         "Usage: cargo run -p squallz-gui --example gui_browse_bench -- [--entries N] [--archive PATH] [--report PATH] [--max-first-screen-ms N] [--max-page-ms N] [--max-filter-ms N]"
     );
+}
+
+fn record_allocation(bytes: usize) {
+    let live = LIVE_HEAP_BYTES
+        .fetch_add(bytes, Ordering::Relaxed)
+        .saturating_add(bytes);
+    PEAK_HEAP_BYTES.fetch_max(live, Ordering::Relaxed);
+}
+
+fn record_deallocation(bytes: usize) {
+    LIVE_HEAP_BYTES.fetch_sub(bytes, Ordering::Relaxed);
 }
 
 fn parse_ms(flag: &str, value: &str) -> Result<u128, String> {
@@ -401,7 +483,12 @@ fn write_u64(out: &mut dyn Write, value: u64) -> Result<(), String> {
         .map_err(|e| format!("write u64: {e}"))
 }
 
-fn render_report(args: &Args, timings: &Timings, archive_bytes: Option<u64>) -> String {
+fn render_report(
+    args: &Args,
+    timings: &Timings,
+    heap: &HeapUsage,
+    archive_bytes: Option<u64>,
+) -> String {
     let first_screen_ms = ms(timings.first_screen());
     let max_page_ms = max_page_ms(timings);
     let filter_ms = ms(timings.filter);
@@ -413,7 +500,7 @@ fn render_report(args: &Args, timings: &Timings, archive_bytes: Option<u64>) -> 
     format!(
         r#"# Squallz Performance Report
 
-## GUI 100k Browse Smoke
+## GUI Large-Archive Browse Smoke
 - Generated at unix seconds: {}
 - Platform: {}
 - Entries: {}
@@ -437,8 +524,18 @@ fn render_report(args: &Args, timings: &Timings, archive_bytes: Option<u64>) -> 
 | First screen total | {} |
 | Max single page | {} |
 
+| Rust heap checkpoint | Bytes | MiB |
+| -------------------- | ----: | --: |
+| Before archive open | {} | {:.1} |
+| Open + index peak | {} | {:.1} |
+| After open + index | {} | {:.1} |
+| After browse smoke | {} | {:.1} |
+| Archive open live delta | {} | {:.1} |
+| Archive open peak delta | {} | {:.1} |
+
 Notes:
 - This benchmark exercises the GUI backend browse path (`AppState::open_archive` + `list_entries`) with a generated ZIP64 archive containing empty files under `files/`.
+- Heap checkpoints cover Rust allocations made by this benchmark process. They exclude mapped files, thread stacks, WebView/native allocations, and allocator bookkeeping.
 - It fails with a non-zero exit code when thresholds are exceeded.
 - It does not verify rendered WebView pixels or user interaction; visual/window smoke remains separate evidence.
 "#,
@@ -461,7 +558,29 @@ Notes:
         filter_ms,
         first_screen_ms,
         max_page_ms,
+        heap.before_open,
+        mib(heap.before_open),
+        heap.open_peak,
+        mib(heap.open_peak),
+        heap.after_open,
+        mib(heap.after_open),
+        heap.after_browse,
+        mib(heap.after_browse),
+        heap.open_delta(),
+        mib(heap.open_delta()),
+        heap.open_peak_delta(),
+        mib(heap.open_peak_delta()),
     )
+}
+
+impl HeapUsage {
+    fn open_delta(&self) -> usize {
+        self.after_open.saturating_sub(self.before_open)
+    }
+
+    fn open_peak_delta(&self) -> usize {
+        self.open_peak.saturating_sub(self.before_open)
+    }
 }
 
 fn threshold_failures(args: &Args, timings: &Timings) -> Vec<String> {
@@ -513,4 +632,8 @@ fn archive_bytes_label(archive_bytes: Option<u64>) -> String {
 
 fn ms(duration: Duration) -> u128 {
     duration.as_millis()
+}
+
+fn mib(bytes: usize) -> f64 {
+    bytes as f64 / (1024.0 * 1024.0)
 }

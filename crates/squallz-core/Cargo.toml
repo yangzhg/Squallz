@@ -7,7 +7,7 @@ description = "Squallz 引擎：高层 API、任务调度、安全护栏"
 
 [dependencies]
 squallz-format-api = { path = "../squallz-format-api", version = "0.1.0" }
-blake3 = { version = "1.8.5", features = ["pure"] }
+blake3 = { version = "1.8.5", features = ["prefer_intrinsics"] }
 crc32fast = "1"
 md-5 = "0.10"
 sha1 = "0.10"
@@ -16,3 +16,15 @@ thiserror.workspace = true
 crc32c = "0.6.8"
 globset.workspace = true
 fs4 = "1"
+serde.workspace = true
+serde_json.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+winapi-util = "0.1.11"
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "=1.1.4", features = ["fs"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "=0.2.186"

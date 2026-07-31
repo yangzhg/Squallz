@@ -4,7 +4,7 @@
 
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 
-use crate::api::FormatError;
+use crate::api::{ControlToken, EntryMeta, EntryPath, FormatError};
 
 /// Compiled set of glob patterns matched against `/`-separated entry paths.
 ///
@@ -62,6 +62,29 @@ impl PathFilter {
     pub fn matches(&self, path: &str) -> bool {
         self.set.as_ref().is_some_and(|s| s.is_match(path))
     }
+
+    /// Selects matching archive entries while honoring an interactive
+    /// operation's pause/cancellation token. An empty filter keeps the
+    /// caller's `None` convention for whole-archive extraction.
+    pub fn select_entries(
+        &self,
+        entries: &[EntryMeta],
+        control: &ControlToken,
+    ) -> Result<Option<Vec<EntryPath>>, FormatError> {
+        if self.is_empty() {
+            control.checkpoint()?;
+            return Ok(None);
+        }
+        let mut selected = Vec::new();
+        for entry in entries {
+            control.checkpoint()?;
+            if self.matches(&entry.path.display) {
+                selected.push(entry.path.clone());
+            }
+        }
+        control.checkpoint()?;
+        Ok(Some(selected))
+    }
 }
 
 /// Expands one user pattern into the glob variants described on
@@ -102,6 +125,27 @@ mod tests {
         assert!(f.is_empty());
         assert!(!f.matches("anything"));
         assert!(!f.matches("nested/file.txt"));
+    }
+
+    #[test]
+    fn controlled_selection_stops_before_scanning_entries() {
+        let f = filter(&["*.txt"]);
+        let entries = vec![EntryMeta {
+            path: EntryPath::from_utf8("file.txt"),
+            entry_type: crate::api::EntryType::File,
+            size: 1,
+            compressed_size: None,
+            modified: None,
+            unix_mode: None,
+            crc32: None,
+            encrypted: false,
+        }];
+        let control = ControlToken::new();
+        control.cancel();
+
+        let error = f.select_entries(&entries, &control).unwrap_err();
+
+        assert!(matches!(error, FormatError::Cancelled));
     }
 
     #[test]

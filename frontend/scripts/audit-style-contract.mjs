@@ -165,6 +165,9 @@ function auditFile(file) {
 
   for (const [index, line] of lines.entries()) {
     const number = index + 1;
+    if (relativePath.endsWith(".svelte") && /\bstyle\s*=|\bstyle:[a-zA-Z-]+/.test(line)) {
+      add(relativePath, number, "Element-level style; bind runtime values through shared CSS variables and keep rules in design.css.");
+    }
     if (/font-size:\s*(?!var\()[^;]*\b\d+(?:\.\d+)?px\b/.test(line)) {
       add(relativePath, number, "Raw typography size; use the --type-* scale.");
     }

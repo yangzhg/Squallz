@@ -10,6 +10,7 @@ use common::{engine, TempDir};
 use squallz_core::api::{
     ControlToken, CreateOptions, ExtractOptions, FormatError, NoProgress, OpenOptions, Password,
 };
+use squallz_core::{inspect_create_destination, CreateArtifactKind, CreateCommitPolicy};
 
 /// Builds a small tree and packs it into `name` under `dir`, returning the
 /// archive path.
@@ -109,6 +110,318 @@ fn zip_to_tar_gz_and_back() {
 }
 
 #[test]
+fn unsplit_conversion_replaces_without_hidden_backup_artifacts() {
+    let tmp = TempDir::new("convert-atomic-replace");
+    let source = make_archive(tmp.path(), "source.zip");
+    let destination = tmp.path().join("converted.7z");
+    fs::write(&destination, b"previous output").unwrap();
+
+    let report = engine()
+        .convert_with_report(
+            &source,
+            &destination,
+            &OpenOptions::default(),
+            &CreateOptions::default(),
+            &NoProgress,
+            &ControlToken::new(),
+        )
+        .unwrap();
+
+    assert_eq!(report.primary_output, destination);
+    assert_eq!(report.outputs, vec![destination.clone()]);
+    assert!(report.preserved_outputs.is_empty());
+    assert_eq!(report.split_volume_count, None);
+    assert_eq!(
+        report.total_output_bytes,
+        fs::metadata(&destination).unwrap().len()
+    );
+    assert_eq!(
+        engine()
+            .list(&destination, &OpenOptions::default())
+            .unwrap()
+            .iter()
+            .filter(|entry| matches!(entry.entry_type, squallz_core::api::EntryType::File))
+            .count(),
+        2
+    );
+    assert!(!fs::read_dir(tmp.path()).unwrap().any(|entry| {
+        let name = entry.unwrap().file_name();
+        let name = name.to_string_lossy();
+        name.contains("replace-backup") || name.contains(".convert-")
+    }));
+}
+
+#[test]
+fn explicit_conversion_policy_refuses_unapproved_or_changed_outputs() {
+    let tmp = TempDir::new("convert-explicit-destination-policy");
+    let source = make_archive(tmp.path(), "source.zip");
+    let destination = tmp.path().join("converted.7z");
+    fs::write(&destination, b"unapproved output").unwrap();
+    let ctl = ControlToken::new();
+
+    let error = engine()
+        .convert_with_policy(
+            &source,
+            &destination,
+            &OpenOptions::default(),
+            &CreateOptions::default(),
+            CreateCommitPolicy::NoReplace,
+            &NoProgress,
+            &ctl,
+        )
+        .unwrap_err();
+    assert!(error.is_output_exists());
+    assert_eq!(fs::read(&destination).unwrap(), b"unapproved output");
+
+    let guard = inspect_create_destination(&destination, CreateArtifactKind::Archive)
+        .unwrap()
+        .guard
+        .unwrap();
+    fs::write(&destination, b"newer output from another app").unwrap();
+    let error = engine()
+        .convert_with_policy(
+            &source,
+            &destination,
+            &OpenOptions::default(),
+            &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceIfUnchanged(guard),
+            &NoProgress,
+            &ctl,
+        )
+        .unwrap_err();
+    assert!(error.is_destination_changed());
+    assert_eq!(
+        fs::read(&destination).unwrap(),
+        b"newer output from another app"
+    );
+    assert!(!fs::read_dir(tmp.path()).unwrap().any(|entry| {
+        let name = entry.unwrap().file_name();
+        let name = name.to_string_lossy();
+        name.contains(".convert-")
+            || name.contains("replace-backup")
+            || name.starts_with(".squallz-update-")
+    }));
+
+    let current_guard = inspect_create_destination(&destination, CreateArtifactKind::Archive)
+        .unwrap()
+        .guard
+        .unwrap();
+    engine()
+        .convert_with_policy(
+            &source,
+            &destination,
+            &OpenOptions::default(),
+            &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceIfUnchanged(current_guard),
+            &NoProgress,
+            &ctl,
+        )
+        .unwrap();
+    assert_eq!(
+        engine()
+            .list(&destination, &OpenOptions::default())
+            .unwrap()
+            .iter()
+            .filter(|entry| matches!(entry.entry_type, squallz_core::api::EntryType::File))
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn split_conversion_requires_and_returns_an_artifact_report() {
+    let tmp = TempDir::new("convert-split-report");
+    let source = make_archive(tmp.path(), "source.zip");
+    let destination = tmp.path().join("converted.7z");
+    let options = CreateOptions {
+        split_size: Some(1024),
+        ..CreateOptions::default()
+    };
+    let ctl = ControlToken::new();
+
+    let error = engine()
+        .convert(
+            &source,
+            &destination,
+            &OpenOptions::default(),
+            &options,
+            &NoProgress,
+            &ctl,
+        )
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        FormatError::Unsupported(ref detail) if detail.contains("convert_with_report")
+    ));
+
+    let error = engine()
+        .convert_with_atomic_replace(
+            &source,
+            &destination,
+            &OpenOptions::default(),
+            &options,
+            &NoProgress,
+            &ctl,
+        )
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        FormatError::Unsupported(ref detail)
+            if detail.contains("convert_with_atomic_replace") && detail.contains("split")
+    ));
+    assert!(!destination.exists());
+
+    let first = engine()
+        .convert_with_report(
+            &source,
+            &destination,
+            &OpenOptions::default(),
+            &options,
+            &NoProgress,
+            &ctl,
+        )
+        .unwrap();
+    assert_eq!(first.split_volume_count, Some(first.outputs.len()));
+    assert!(first.preserved_outputs.is_empty());
+
+    let error = engine()
+        .convert_with_report_policy(
+            &source,
+            &destination,
+            &OpenOptions::default(),
+            &options,
+            CreateCommitPolicy::NoReplace,
+            &NoProgress,
+            &ctl,
+        )
+        .unwrap_err();
+    assert!(error.is_output_exists());
+
+    let second = engine()
+        .convert_with_report(
+            &source,
+            &destination,
+            &OpenOptions::default(),
+            &options,
+            &NoProgress,
+            &ctl,
+        )
+        .unwrap();
+    assert_eq!(second.preserved_outputs.len(), first.outputs.len());
+    for path in second.outputs.iter().chain(second.preserved_outputs.iter()) {
+        assert!(
+            path.is_file(),
+            "reported path is missing: {}",
+            path.display()
+        );
+    }
+}
+
+#[test]
+fn conversion_plan_reuses_the_real_split_output_layout() {
+    let tmp = TempDir::new("convert-plan-split");
+    let source = make_archive(tmp.path(), "source.zip");
+    let destination = tmp.path().join("converted.7z");
+    let options = CreateOptions {
+        split_size: Some(1024),
+        ..CreateOptions::default()
+    };
+    let engine = engine();
+
+    let plan = engine
+        .plan_convert(&source, &destination, &OpenOptions::default(), &options)
+        .unwrap();
+    assert_eq!(plan.inputs.input_count, 1);
+    assert_eq!(plan.inputs.files, 2);
+    assert_eq!(plan.inputs.directories, 2);
+    assert_eq!(plan.inputs.total_bytes, 4107);
+    assert_eq!(plan.primary_output, tmp.path().join("converted.7z.001"));
+    assert!(plan
+        .split_volume_count_budget
+        .is_some_and(|count| count > 1));
+    assert!(plan.workspace_budget_bytes >= plan.final_output_budget_bytes);
+
+    let report = engine
+        .convert_with_report(
+            &source,
+            &destination,
+            &OpenOptions::default(),
+            &options,
+            &NoProgress,
+            &ControlToken::new(),
+        )
+        .unwrap();
+    assert!(report.total_output_bytes <= plan.final_output_budget_bytes);
+    assert!(plan
+        .split_volume_count_budget
+        .is_some_and(|budget| budget as usize >= report.split_volume_count.unwrap()));
+}
+
+#[test]
+fn conversion_plan_rejects_invalid_single_stream_layout() {
+    let tmp = TempDir::new("convert-plan-stream-layout");
+    let source = make_archive(tmp.path(), "source.zip");
+    let destination = tmp.path().join("converted.gz");
+
+    let error = engine()
+        .plan_convert(
+            &source,
+            &destination,
+            &OpenOptions::default(),
+            &CreateOptions::default(),
+        )
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        FormatError::Unsupported(ref detail)
+            if detail.contains("gzip") && detail.contains("exactly one file")
+    ));
+    assert!(!destination.exists());
+}
+
+#[test]
+fn conversion_plan_rejects_an_invalid_target_before_opening_the_source() {
+    let tmp = TempDir::new("convert-plan-target-first");
+    let source = tmp.path().join("missing-source.zip");
+    let destination = tmp.path().join("converted.swm");
+
+    let error = engine()
+        .plan_convert(
+            &source,
+            &destination,
+            &OpenOptions::default(),
+            &CreateOptions::default(),
+        )
+        .unwrap_err();
+
+    assert!(error.is_split_wim_creation_unsupported());
+    assert_eq!(fs::read_dir(tmp.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn swm_destination_without_native_options_is_rejected_before_source_open_or_staging() {
+    let tmp = TempDir::new("convert-split-wim-preflight");
+    let source = tmp.path().join("missing-source.zip");
+    let destination = tmp.path().join("image.swm");
+
+    let error = engine()
+        .convert_with_report(
+            &source,
+            &destination,
+            &OpenOptions::default(),
+            &CreateOptions::default(),
+            &NoProgress,
+            &ControlToken::new(),
+        )
+        .unwrap_err();
+
+    assert!(error.is_split_wim_creation_unsupported());
+    assert!(!destination.exists());
+    assert_eq!(fs::read_dir(tmp.path()).unwrap().count(), 0);
+}
+
+#[test]
 fn encrypted_source_to_encrypted_destination() {
     let tmp = TempDir::new("convert-encrypted");
     let root = tmp.path().join("data");
@@ -188,10 +501,12 @@ fn symlink_to_7z_reports_unsupported_with_entry() {
     engine()
         .create(&src, &[root], &CreateOptions::default(), &NoProgress, &ctl)
         .unwrap();
+    let dest = tmp.path().join("out.7z");
+    fs::write(&dest, b"previous output").unwrap();
     let err = engine()
         .convert(
             &src,
-            &tmp.path().join("out.7z"),
+            &dest,
             &OpenOptions::default(),
             &CreateOptions::default(),
             &NoProgress,
@@ -219,6 +534,7 @@ fn symlink_to_7z_reports_unsupported_with_entry() {
         }
         other => panic!("expected Unsupported, got {other:?}"),
     }
+    assert_eq!(fs::read(dest).unwrap(), b"previous output");
 }
 
 #[test]

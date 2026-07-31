@@ -7,11 +7,35 @@ use std::fs;
 use std::io;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
+use std::sync::Mutex;
 
 use common::{engine, TempDir};
 use squallz_core::api::{
-    ControlToken, CreateOptions, EntryType, ExtractOptions, FormatError, NoProgress, OpenOptions,
+    ControlToken, CreateOptions, EntryPath, EntryType, ExtractOptions, ExtractReport, FormatError,
+    NoProgress, OpenOptions, ProgressSink,
 };
+
+#[derive(Default)]
+struct EntryProgressTotals {
+    totals: Mutex<Vec<u64>>,
+}
+
+impl ProgressSink for EntryProgressTotals {
+    fn on_progress(&self, _done: u64, _total: u64, _current: &EntryPath) {}
+
+    fn on_entry_progress(
+        &self,
+        _done: u64,
+        total: u64,
+        current: &EntryPath,
+        _entry_done: u64,
+        _entry_total: u64,
+    ) {
+        if current.display == "small.txt" {
+            self.totals.lock().unwrap().push(total);
+        }
+    }
+}
 
 /// Builds the fixture tree: executable file, Chinese name, deep nesting,
 /// symlink.
@@ -56,6 +80,27 @@ fn tar_roundtrip_permissions_symlink_unicode_deep() {
         )
         .unwrap();
 
+    let empty_out = dir.path().join("empty-selection");
+    let empty_report = engine
+        .extract_with_report(
+            &archive,
+            &empty_out,
+            Some(&[]),
+            &OpenOptions::default(),
+            &ExtractOptions::default(),
+            &NoProgress,
+            &ctl,
+        )
+        .unwrap();
+    assert_eq!(
+        empty_report,
+        ExtractReport {
+            destination: empty_out.clone(),
+            ..ExtractReport::default()
+        }
+    );
+    assert!(!empty_out.exists());
+
     // Listing: types, mode and symlink target survive.
     let entries = engine.list(&archive, &OpenOptions::default()).unwrap();
     let by_name = |name: &str| {
@@ -80,8 +125,8 @@ fn tar_roundtrip_permissions_symlink_unicode_deep() {
 
     // Extraction: contents, permissions and the link itself.
     let out = dir.path().join("out");
-    engine
-        .extract(
+    let extract_report = engine
+        .extract_with_report(
             &archive,
             &out,
             None,
@@ -91,6 +136,24 @@ fn tar_roundtrip_permissions_symlink_unicode_deep() {
             &ctl,
         )
         .unwrap();
+    assert_eq!(extract_report.destination, out);
+    assert_eq!(extract_report.selected_entries, entries.len() as u64);
+    assert_eq!(extract_report.failed + extract_report.skipped, 0);
+    assert_eq!(
+        extract_report.created
+            + extract_report.directories
+            + extract_report.replaced
+            + extract_report.renamed,
+        extract_report.selected_entries
+    );
+    assert_eq!(
+        extract_report.output_bytes,
+        entries
+            .iter()
+            .filter(|entry| matches!(entry.entry_type, EntryType::File))
+            .map(|entry| entry.size)
+            .sum::<u64>()
+    );
     assert_eq!(
         fs::read_to_string(out.join("tree/普通文件.txt")).unwrap(),
         "中文内容 chinese content"
@@ -113,6 +176,56 @@ fn tar_roundtrip_permissions_symlink_unicode_deep() {
         .unwrap();
     assert!(report.is_ok(), "problems: {:?}", report.problems);
     assert!(report.entries_tested >= 7);
+}
+
+#[test]
+fn tar_selection_progress_uses_only_selected_file_bytes() {
+    let dir = TempDir::new("tar-selection-progress");
+    let archive = dir.path().join("selection.tar");
+    {
+        let file = fs::File::create(&archive).unwrap();
+        let mut builder = tar::Builder::new(file);
+        let small = b"tiny";
+        let large = vec![0x5a; 256 * 1024];
+        let mut small_header = tar::Header::new_gnu();
+        small_header.set_mode(0o644);
+        small_header.set_size(small.len() as u64);
+        small_header.set_entry_type(tar::EntryType::Regular);
+        builder
+            .append_data(&mut small_header, "small.txt", small.as_slice())
+            .unwrap();
+        let mut large_header = tar::Header::new_gnu();
+        large_header.set_mode(0o644);
+        large_header.set_size(large.len() as u64);
+        large_header.set_entry_type(tar::EntryType::Regular);
+        builder
+            .append_data(&mut large_header, "large.bin", large.as_slice())
+            .unwrap();
+        builder.finish().unwrap();
+    }
+    let engine = engine();
+    let destination = dir.path().join("selected-output");
+    let selection = [EntryPath::from_utf8("small.txt")];
+    let progress = EntryProgressTotals::default();
+
+    let report = engine
+        .extract_with_report(
+            &archive,
+            &destination,
+            Some(&selection),
+            &OpenOptions::default(),
+            &ExtractOptions::default(),
+            &progress,
+            &ControlToken::new(),
+        )
+        .unwrap();
+
+    assert_eq!(report.output_bytes, 4);
+    assert_eq!(fs::read(destination.join("small.txt")).unwrap(), b"tiny");
+    assert!(!destination.join("large.bin").exists());
+    let totals = progress.totals.lock().unwrap();
+    assert!(!totals.is_empty());
+    assert!(totals.iter().all(|total| *total == 4));
 }
 
 #[test]

@@ -5,7 +5,10 @@ members = [
     "crates/squallz-core",
     "crates/squallz-formats",
     "crates/squallz-i18n",
+    "crates/squallz-publish",
     "crates/squallz-recovery",
+    "crates/squallz-quicklook",
+    "crates/squallz-update",
     "crates/squallz-cli",
     "crates/squallz-gui",
 ]

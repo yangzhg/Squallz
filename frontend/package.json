@@ -6,7 +6,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "test": "node --test src/lib/app-icon.test.mjs src/lib/archive-filter.test.mjs src/lib/archive-names.test.mjs src/lib/bundle-budget.test.mjs src/lib/convert-workflow.test.mjs src/lib/create-completion.test.mjs src/lib/create-sources.test.mjs src/lib/desktop-path.test.mjs src/lib/extract-result.test.mjs src/lib/job-snapshot.test.mjs src/lib/localized-copy.test.mjs src/lib/preview-presentation.test.mjs src/lib/preview-response.test.mjs src/lib/recovery-result.test.mjs src/lib/recovery-workspace.test.mjs src/lib/source-cleanup.test.mjs src/lib/task-center.test.mjs src/lib/task-dialog.test.mjs src/lib/toasts.test.mjs",
+    "build": "vite build && node scripts/check-bundle-budget.mjs",
     "check": "npm run check:style && svelte-check --tsconfig ./tsconfig.json",
     "check:style": "node scripts/audit-style-contract.mjs",
     "tauri": "node scripts/tauri-cli.mjs",

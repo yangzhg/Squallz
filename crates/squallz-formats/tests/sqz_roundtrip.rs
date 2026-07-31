@@ -675,6 +675,131 @@ fn sqz_custom_recovery_percent_controls_payload_parity_shards() {
 }
 
 #[test]
+fn sqz_create_plan_covers_recovery_larger_than_generic_slack() {
+    let tmp = TempDir::new("sqz-plan-large-recovery");
+    let input = tmp.path().join("large.bin");
+    fs::write(&input, recovery_payload(160)).unwrap();
+    let archive = tmp.path().join("large.sqz");
+    let opts = CreateOptions {
+        sqz: SqzCreateOptions {
+            recovery_percent: 100,
+            ..SqzCreateOptions::default()
+        },
+        ..CreateOptions::default()
+    };
+    let eng = engine();
+    let plan = eng
+        .plan_create(&archive, std::slice::from_ref(&input), &opts)
+        .unwrap();
+    let generic_budget = plan.inputs.output_budget_bytes();
+    let report = eng
+        .create_with_report(&archive, &[input], &opts, &NoProgress, &ControlToken::new())
+        .unwrap();
+
+    assert!(report.total_output_bytes > generic_budget + 1024 * 1024);
+    assert_eq!(
+        plan.archive_output_budget_bytes,
+        plan.final_output_budget_bytes
+    );
+    assert!(plan.final_output_budget_bytes >= report.total_output_bytes);
+    assert_eq!(plan.workspace_budget_bytes, plan.final_output_budget_bytes);
+    assert_eq!(plan.system_temp_budget_bytes, 0);
+}
+
+#[test]
+fn sqz_create_plan_covers_inner_archive_profiles_and_temporary_files() {
+    let tmp = TempDir::new("sqz-plan-inner-profiles");
+    let input = tmp.path().join("payload.bin");
+    fs::write(&input, recovery_payload(32)).unwrap();
+    let eng = engine();
+
+    for (inner_format, recovery_percent) in [("zip", 10), ("tar", 25), ("7z", 50), ("zstd", 100)] {
+        let archive = tmp.path().join(format!("{inner_format}.sqz"));
+        let opts = CreateOptions {
+            sqz: SqzCreateOptions {
+                inner_format: inner_format.to_owned(),
+                recovery_percent,
+            },
+            ..CreateOptions::default()
+        };
+        let plan = eng
+            .plan_create(&archive, std::slice::from_ref(&input), &opts)
+            .unwrap();
+        let report = eng
+            .create_with_report(
+                &archive,
+                std::slice::from_ref(&input),
+                &opts,
+                &NoProgress,
+                &ControlToken::new(),
+            )
+            .unwrap();
+
+        assert!(
+            plan.final_output_budget_bytes >= report.total_output_bytes,
+            "{inner_format} plan {} must cover actual {}",
+            plan.final_output_budget_bytes,
+            report.total_output_bytes
+        );
+        assert_eq!(
+            plan.archive_output_budget_bytes,
+            plan.final_output_budget_bytes
+        );
+        let expected_temp = if inner_format == "zstd" {
+            plan.inputs.output_budget_bytes().saturating_mul(2)
+        } else {
+            plan.inputs.output_budget_bytes()
+        };
+        let folded_temp = plan
+            .workspace_budget_bytes
+            .saturating_sub(plan.final_output_budget_bytes);
+        assert!(
+            folded_temp.saturating_add(plan.system_temp_budget_bytes) >= expected_temp,
+            "{inner_format} plan must reserve its system temporary files"
+        );
+    }
+}
+
+#[test]
+fn split_sqz_create_plan_covers_inner_temp_and_recovery_sidecars() {
+    let tmp = TempDir::new("sqz-plan-split-inner");
+    let input = tmp.path().join("payload.bin");
+    fs::write(&input, recovery_payload(32)).unwrap();
+    let archive = tmp.path().join("split.sqz");
+    let opts = CreateOptions {
+        split_size: Some(256 * 1024),
+        sqz: SqzCreateOptions {
+            inner_format: "tar".to_owned(),
+            recovery_percent: 100,
+        },
+        ..CreateOptions::default()
+    };
+    let eng = engine();
+    let plan = eng
+        .plan_create(&archive, std::slice::from_ref(&input), &opts)
+        .unwrap();
+    let report = eng
+        .create_with_report(&archive, &[input], &opts, &NoProgress, &ControlToken::new())
+        .unwrap();
+
+    assert!(plan.final_output_budget_bytes >= report.total_output_bytes);
+    assert!(plan.workspace_budget_bytes > plan.final_output_budget_bytes);
+    let destination_peak_without_system_temp = plan
+        .archive_output_budget_bytes
+        .saturating_add(plan.final_output_budget_bytes)
+        .saturating_add(1024 * 1024);
+    let folded_temp = plan
+        .workspace_budget_bytes
+        .saturating_sub(destination_peak_without_system_temp);
+    assert!(
+        folded_temp.saturating_add(plan.system_temp_budget_bytes)
+            >= plan.inputs.output_budget_bytes()
+    );
+    assert!(report.split_volume_count.is_some());
+    assert!(report.outputs.len() > report.split_volume_count.unwrap());
+}
+
+#[test]
 fn sqz_embedded_recovery_reports_over_limit_payload_damage() {
     let tmp = TempDir::new("sqz-recovery-over-limit");
     let project = tmp.path().join("project");

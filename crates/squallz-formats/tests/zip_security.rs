@@ -1,4 +1,4 @@
-//! Security tests (PLAN.md §2.3): Zip Slip, symlink breakout,
+//! Security tests: Zip Slip, symlink breakout,
 //! decompression-bomb guardrails and overwrite policies.
 
 mod common;

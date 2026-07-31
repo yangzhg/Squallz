@@ -8,6 +8,8 @@
     ariaLabel,
     rules,
     emptyLabel,
+    disabled = false,
+    disabledReason = "",
     onInput,
   }: {
     title: string;
@@ -18,6 +20,8 @@
     ariaLabel: string;
     rules: string[];
     emptyLabel: string;
+    disabled?: boolean;
+    disabledReason?: string;
     onInput: (value: string) => void;
   } = $props();
 </script>
@@ -35,7 +39,9 @@
     rows="3"
     {value}
     {placeholder}
-    aria-label={ariaLabel}
+    {disabled}
+    title={disabledReason}
+    aria-label={disabledReason ? `${ariaLabel} · ${disabledReason}` : ariaLabel}
     oninput={(event) => onInput((event.currentTarget as HTMLTextAreaElement).value)}
   ></textarea>
   <div class="tag-row">

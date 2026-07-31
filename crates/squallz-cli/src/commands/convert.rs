@@ -7,9 +7,10 @@ use std::path::{Path, PathBuf};
 use serde_json::json;
 use squallz_core::api::{
     split_volume_name, CompressionLevel, CreateOptions, Detected, OpenOptions, Password,
+    SplitOutputMode,
 };
 
-use super::reports::print_pretty_json;
+use super::reports::{create_report_json, print_preserved_output_warning, print_pretty_json};
 use crate::args::resource_options;
 use crate::commands::{Ctx, ModernStatusField, ModernTableColumn, ModernTableRow};
 use crate::errors::CliError;
@@ -25,10 +26,13 @@ pub fn run(
     password: Option<String>,
     out_password: Option<String>,
     encrypt_names: bool,
+    split: Option<u64>,
+    split_mode: SplitOutputMode,
     level: u8,
     encoding: Option<String>,
     threads: Option<usize>,
     memory_limit: Option<u64>,
+    force: bool,
     json_output: bool,
 ) -> Result<(), CliError> {
     let progress = CliProgress::new_for_operation(
@@ -45,35 +49,56 @@ pub fn run(
         level: CompressionLevel::from_numeric(level),
         password: out_password.map(Password::new),
         encrypt_filenames: encrypt_names,
+        split_size: split,
+        split_mode,
         resources: resource_options(threads, memory_limit),
         ..CreateOptions::default()
     };
+    let artifact_kind = if split.is_some() {
+        squallz_core::CreateArtifactKind::SplitArchive
+    } else {
+        squallz_core::CreateArtifactKind::Archive
+    };
+    let commit_policy =
+        match super::create_commit_policy(&output, artifact_kind, force, &progress, &ctx.ctl) {
+            Ok(policy) => policy,
+            Err(error) => {
+                progress.finish();
+                return Err(error.into());
+            }
+        };
     let explicit = password.map(Password::new);
     let result = with_password_retry(&ctx.loc, explicit.as_ref(), |pw| {
         let open = OpenOptions {
             password: pw.cloned(),
             encoding_override: encoding.clone(),
         };
-        ctx.engine
-            .convert(&src, &output, &open, &create_opts, &progress, &ctx.ctl)
+        ctx.engine.convert_with_report_policy(
+            &src,
+            &output,
+            &open,
+            &create_opts,
+            commit_policy,
+            &progress,
+            &ctx.ctl,
+        )
     });
     progress.finish();
-    result?;
+    let report = result?;
     if json_output {
-        let value = json!({
-            "ok": true,
-            "operation": "convert",
-            "source": src.display().to_string(),
-            "output": output.display().to_string(),
-        });
+        let mut value = create_report_json(&report);
+        value["ok"] = json!(true);
+        value["operation"] = json!("convert");
+        value["source"] = json!(src.display().to_string());
         print_pretty_json(&value)?;
         return Ok(());
     }
-    let path = output.display().to_string();
+    let path = report.primary_output.display().to_string();
+    let output_size = fmt_bytes(report.total_output_bytes);
+    let volume_count = report.split_volume_count.unwrap_or(1).to_string();
     if ctx.is_modern() {
         let source_format = detected_format_label(ctx, &src);
         let target_format = detected_format_label(ctx, &output);
-        let output_size = output_size_label(&output);
         ctx.print_modern_status_panel(
             &ctx.loc.t("cli.convert.result_title"),
             &ctx.loc.t("common.done"),
@@ -85,6 +110,7 @@ pub fn run(
                     format!("{source_format} → {target_format}"),
                 ),
                 ModernStatusField::new(ctx.loc.t("common.output_size"), output_size.clone()),
+                ModernStatusField::new(ctx.loc.t("common.volumes"), volume_count.clone()),
                 ModernStatusField::new(ctx.loc.t("common.source"), src.display().to_string()),
                 ModernStatusField::new(ctx.loc.t("common.output"), path.clone()),
             ],
@@ -129,6 +155,7 @@ pub fn run(
                     ctx.loc.t("cli.convert.memory_limit"),
                     memory_limit_label(ctx, memory_limit),
                 ]),
+                ModernTableRow::new(vec![ctx.loc.t("common.volumes"), volume_count]),
                 ModernTableRow::new(vec![ctx.loc.t("common.output_size"), output_size]),
             ],
         );
@@ -136,6 +163,12 @@ pub fn run(
         let message = ctx.loc.format("cli.convert.done", &[("path", &path)]);
         ctx.print_success(&message);
     }
+    let preserved_outputs = report
+        .preserved_outputs
+        .iter()
+        .map(|preserved| preserved.display().to_string())
+        .collect::<Vec<_>>();
+    print_preserved_output_warning(ctx, &preserved_outputs);
     Ok(())
 }
 
@@ -174,13 +207,6 @@ fn detect_name_for_path(path: &Path) -> Option<String> {
     match split_volume_name(name) {
         Some((base, _)) => Some(base.to_owned()),
         None => Some(name.to_owned()),
-    }
-}
-
-fn output_size_label(path: &Path) -> String {
-    match std::fs::metadata(path) {
-        Ok(metadata) => fmt_bytes(metadata.len()),
-        Err(_) => "-".to_owned(),
     }
 }
 

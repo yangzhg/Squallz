@@ -7,7 +7,7 @@ APP="${1:-"$ROOT/target/release/bundle/macos/Squallz.app"}"
 if [[ "$APP" != /* ]]; then
   APP="$ROOT/$APP"
 fi
-SQZ_HELPER="$APP/Contents/Resources/bin/sqz"
+SQZ_HELPER="$APP/Contents/MacOS/sqz"
 WORK="$ROOT/target/squallz-macos-finder-context-menu-smoke"
 FIXTURE_DIR="$WORK/fixture"
 FIXTURE_ARCHIVE="$FIXTURE_DIR/finder-context-menu-smoke.zip"
@@ -87,7 +87,7 @@ write_report() {
     echo "the real user-visible \`~/Library/Services\`, reveals a fixture ZIP in Finder,"
     echo "opens the visible Finder context menu through System Events, clicks the"
     echo "temporary action, and verifies that the action ran the packaged first-party"
-    echo "\`Contents/Resources/bin/sqz test\` helper against the selected archive."
+    echo "\`Contents/MacOS/sqz test\` helper against the selected archive."
     echo
     echo "## Inputs"
     echo

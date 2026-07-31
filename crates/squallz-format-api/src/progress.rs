@@ -6,12 +6,65 @@ use std::sync::Arc;
 use crate::entry::EntryPath;
 use crate::error::FormatError;
 
+/// A semantic progress phase for operations whose byte counters cover
+/// different work sets and therefore must not be presented as one percentage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ProgressPhase {
+    /// Loading source metadata or preparing private recovery inputs.
+    RecoveryPrepare,
+    /// Checking protected files and recovery blocks.
+    RecoveryVerify,
+    /// Computing parity or rebuilding protected data.
+    RecoveryProcess,
+    /// Writing or publishing the completed recovery result.
+    RecoveryFinalize,
+    /// Replaying a durable output-publication transaction after interruption.
+    OutputRecovery,
+    /// Writing a completed archive into its physical volume files.
+    OutputSplit,
+    /// Verifying a completed output and its final destination binding.
+    OutputVerify,
+    /// Publishing a completed output through its durable transaction.
+    OutputCommit,
+    /// Verifying and cleaning output-publication artifacts.
+    OutputCleanup,
+    /// Replaying a durable archive-update transaction after interruption.
+    UpdateRecovery,
+    /// Rewriting archive entries into a new package.
+    UpdateRewrite,
+    /// Binding the source and replacement package contents to the transaction.
+    UpdateVerify,
+    /// Installing the replacement package through durable no-replace moves.
+    UpdateCommit,
+    /// Verifying and removing transaction artifacts after installation.
+    UpdateCleanup,
+    /// Verifying the source and isolated copy before macOS SFX signing.
+    SfxPublishVerify,
+    /// Applying and verifying Developer ID signatures.
+    SfxPublishSign,
+    /// Waiting for Apple notarization and its accepted log.
+    SfxPublishNotarize,
+    /// Stapling and validating the notarized macOS app.
+    SfxPublishFinalize,
+}
+
 /// Progress reporting. Designed as a `Send + Sync` shared reference: multiple
 /// worker threads can report concurrently; implementations aggregate with
 /// atomics or channels.
 pub trait ProgressSink: Send + Sync {
     /// Bytes processed / total bytes / current entry
     fn on_progress(&self, done: u64, total: u64, current: &EntryPath);
+
+    /// Reports an input-manifest scan without reinterpreting the entry count as
+    /// bytes. Implementations can opt in when their presentation model can
+    /// distinguish scanning from byte transfer.
+    fn on_scan_progress(&self, _entries: u64, _current: &EntryPath) {}
+
+    /// Announces a semantic phase before its byte events. `interruptible`
+    /// describes whether pause and cancellation requests can still take effect
+    /// safely in that phase. Implementations may ignore phase information.
+    fn on_phase(&self, _phase: ProgressPhase, _interruptible: bool) {}
 
     /// Bytes processed for the current entry in addition to the overall
     /// progress. Implementations that only care about the old aggregate
@@ -38,8 +91,16 @@ impl ProgressSink for NoProgress {
 
 /// Cancellation + pause token. Worker threads call
 /// [`ControlToken::checkpoint`] at chunk boundaries.
-#[derive(Debug, Default)]
+///
+/// Clones share the same state so stream adapters can retain control without
+/// requiring every archive format to own an `Arc<ControlToken>`.
+#[derive(Debug, Clone, Default)]
 pub struct ControlToken {
+    state: Arc<ControlState>,
+}
+
+#[derive(Debug, Default)]
+struct ControlState {
     cancelled: AtomicBool,
     paused: AtomicBool,
 }
@@ -52,27 +113,27 @@ impl ControlToken {
 
     /// Requests cancellation (irreversible).
     pub fn cancel(&self) {
-        self.cancelled.store(true, Ordering::Relaxed);
+        self.state.cancelled.store(true, Ordering::Relaxed);
     }
 
     /// Requests a pause.
     pub fn pause(&self) {
-        self.paused.store(true, Ordering::Relaxed);
+        self.state.paused.store(true, Ordering::Relaxed);
     }
 
     /// Resumes execution.
     pub fn resume(&self) {
-        self.paused.store(false, Ordering::Relaxed);
+        self.state.paused.store(false, Ordering::Relaxed);
     }
 
     /// Whether cancellation has been requested.
     pub fn is_cancelled(&self) -> bool {
-        self.cancelled.load(Ordering::Relaxed)
+        self.state.cancelled.load(Ordering::Relaxed)
     }
 
     /// Whether currently paused.
     pub fn is_paused(&self) -> bool {
-        self.paused.load(Ordering::Relaxed)
+        self.state.paused.load(Ordering::Relaxed)
     }
 
     /// Chunk-boundary checkpoint: blocks while paused, returns
@@ -114,5 +175,20 @@ mod tests {
 
         assert!(matches!(ctl.checkpoint(), Err(FormatError::Cancelled)));
         assert!(ctl.is_cancelled());
+    }
+
+    #[test]
+    fn cloned_control_token_shares_pause_and_cancellation() {
+        let original = ControlToken::default();
+        let clone = original.clone();
+
+        clone.pause();
+        assert!(original.is_paused());
+        original.resume();
+        assert!(!clone.is_paused());
+
+        original.cancel();
+        assert!(clone.is_cancelled());
+        assert!(matches!(clone.checkpoint(), Err(FormatError::Cancelled)));
     }
 }

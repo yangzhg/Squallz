@@ -6,6 +6,7 @@ use std::time::UNIX_EPOCH;
 
 use serde_json::{json, Value};
 use squallz_core::api::{EntryMeta, EntryType, OpenOptions, Password};
+use squallz_core::{fold_archive_search_path, fold_archive_search_query, rank_folded_archive_path};
 
 use super::reports::print_pretty_json;
 use crate::commands::{Ctx, ModernStatusField, ModernTableColumn, ModernTableRow};
@@ -19,6 +20,7 @@ pub fn run(
     archive: PathBuf,
     password: Option<String>,
     encoding: Option<String>,
+    search: Option<String>,
     json: bool,
     tree: bool,
 ) -> Result<(), CliError> {
@@ -32,6 +34,7 @@ pub fn run(
             },
         )
     })?;
+    let entries = filter_entries_for_search(entries, search.as_deref());
 
     if json {
         let value = Value::Array(entries.iter().map(entry_json).collect());
@@ -65,6 +68,33 @@ pub fn run(
     let message = ctx.loc.format("cli.list.total", &[("count", &count)]);
     ctx.print_success(&message);
     Ok(())
+}
+
+pub(crate) fn filter_entries_for_search(
+    entries: Vec<EntryMeta>,
+    search: Option<&str>,
+) -> Vec<EntryMeta> {
+    let query = search.map(fold_archive_search_query).unwrap_or_default();
+    if query.is_empty() {
+        return entries;
+    }
+
+    let mut matches = entries
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, entry)| {
+            let folded_path = fold_archive_search_path(&entry.path.display);
+            let rank = rank_folded_archive_path(&folded_path, &query)?;
+            Some((rank, folded_path, index, entry))
+        })
+        .collect::<Vec<_>>();
+    matches.sort_by(|left, right| {
+        left.0
+            .cmp(&right.0)
+            .then_with(|| left.1.cmp(&right.1))
+            .then_with(|| left.2.cmp(&right.2))
+    });
+    matches.into_iter().map(|(_, _, _, entry)| entry).collect()
 }
 
 pub(crate) fn print_modern_table(ctx: &Ctx, entries: &[EntryMeta]) {
@@ -423,6 +453,47 @@ mod tests {
         assert_eq!(summary.total_size, 3072);
         assert_eq!(summary.packed_size_label(), "1.5 KiB");
         assert_eq!(summary.file_packed_label(), "1.5 KiB");
+    }
+
+    #[test]
+    fn archive_search_filters_and_ranks_literal_full_paths() {
+        let entries = vec![
+            entry("query-parent/inside.txt", EntryType::File, 1, Some(1)),
+            entry("docs/annual-query.txt", EntryType::File, 1, Some(1)),
+            entry("docs/query-notes.txt", EntryType::File, 1, Some(1)),
+            entry("docs/QUERY", EntryType::Dir, 0, Some(0)),
+            entry("docs/unrelated.txt", EntryType::File, 1, Some(1)),
+        ];
+
+        let matches = filter_entries_for_search(entries, Some("  query  "));
+        let paths: Vec<&str> = matches
+            .iter()
+            .map(|entry| entry.path.display.as_str())
+            .collect();
+        assert_eq!(
+            paths,
+            vec![
+                "docs/QUERY",
+                "docs/query-notes.txt",
+                "docs/annual-query.txt",
+                "query-parent/inside.txt"
+            ]
+        );
+    }
+
+    #[test]
+    fn blank_archive_search_preserves_the_original_array_order() {
+        let entries = vec![
+            entry("z.txt", EntryType::File, 1, Some(1)),
+            entry("a.txt", EntryType::File, 1, Some(1)),
+        ];
+
+        let matches = filter_entries_for_search(entries, Some(" \t "));
+        let paths: Vec<&str> = matches
+            .iter()
+            .map(|entry| entry.path.display.as_str())
+            .collect();
+        assert_eq!(paths, vec!["z.txt", "a.txt"]);
     }
 
     #[test]

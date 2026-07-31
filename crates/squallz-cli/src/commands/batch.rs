@@ -11,15 +11,16 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use squallz_core::api::{
     split_volume_name, CompressionLevel, CreateOptions, Detected, EntryPath, ExtractOptions,
-    FormatError, NoProgress, OpenOptions, OverwritePolicy, Password, SqzCreateOptions,
-    SymlinkPolicy, TestReport, UpdateOp,
+    FormatError, NoProgress, OpenOptions, OverwritePolicy, Password, SplitOutputMode,
+    SqzCreateOptions, SymlinkPolicy, TestSummary, UpdateOp,
 };
-use squallz_core::{
-    analyze_extract_layout, collect_volume_set, ChecksumAlgorithm, PathFilter, SmartLayout,
-};
+use squallz_core::{ChecksumAlgorithm, CreateContentPolicy, PathFilter};
 
 use crate::args::{resource_options, safety_limits};
-use crate::commands::reports::{print_pretty_json, recovery_summary_json, test_report_json};
+use crate::commands::reports::{
+    create_report_json, empty_extract_counts_json, extract_counts_json, extract_plan_json,
+    print_preserved_output_warning, print_pretty_json, recovery_summary_json, test_report_json,
+};
 use crate::errors::{error_kind, exit_code, localize_error, CliError};
 
 use super::Ctx;
@@ -30,6 +31,22 @@ struct BatchScript {
     base_dir: Option<PathBuf>,
     #[serde(default)]
     jobs: Vec<BatchJob>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum BatchSplitMode {
+    Generic,
+    Native,
+}
+
+impl From<BatchSplitMode> for SplitOutputMode {
+    fn from(value: BatchSplitMode) -> Self {
+        match value {
+            BatchSplitMode::Generic => Self::Generic,
+            BatchSplitMode::Native => Self::Native,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -63,6 +80,8 @@ struct BatchJob {
     #[serde(default)]
     excludes: Vec<String>,
     #[serde(default)]
+    content_policy: Option<CreateContentPolicy>,
+    #[serde(default)]
     algorithm: Option<String>,
     #[serde(default, alias = "manifest")]
     check: Option<PathBuf>,
@@ -70,6 +89,8 @@ struct BatchJob {
     min_size: Option<u64>,
     #[serde(default)]
     fail_on_found: bool,
+    #[serde(default)]
+    output_dir: Option<PathBuf>,
     #[serde(default)]
     threads: Option<usize>,
     #[serde(default)]
@@ -90,6 +111,10 @@ struct BatchJob {
     symlinks: Option<String>,
     #[serde(default)]
     split: Option<u64>,
+    #[serde(default)]
+    split_mode: Option<BatchSplitMode>,
+    #[serde(default)]
+    test_after_create: bool,
     #[serde(default)]
     encrypt_names: bool,
     #[serde(default)]
@@ -258,9 +283,9 @@ fn run_job(
         "export" => run_export_job(ctx, base_dir, job),
         "repair_sqz" => run_repair_sqz_job(ctx, base_dir, job),
         "repair_zip" => run_repair_zip_job(ctx, base_dir, job),
-        "protect" => run_protect_job(base_dir, job),
-        "verify_recovery" => run_verify_recovery_job(base_dir, job),
-        "repair_recovery" => run_repair_recovery_job(base_dir, job),
+        "protect" => run_protect_job(ctx, base_dir, job),
+        "verify_recovery" => run_verify_recovery_job(ctx, base_dir, job),
+        "repair_recovery" => run_repair_recovery_job(ctx, base_dir, job),
         "update" => run_update_job(ctx, base_dir, job),
         other => Err(FormatError::Unsupported(format!(
             "unsupported batch operation: {other}"
@@ -270,7 +295,9 @@ fn run_job(
 
 fn run_estimate_job(ctx: &Ctx, base_dir: &Path, job: &BatchJob) -> Result<JobSuccess, FormatError> {
     let inputs = resolve_inputs(base_dir, &job.inputs)?;
-    let estimate = ctx.engine.estimate_create_inputs(&inputs, &job.excludes)?;
+    let excludes =
+        crate::content_policy::resolve_create_excludes(job.content_policy, job.excludes.clone());
+    let estimate = ctx.engine.estimate_create_inputs(&inputs, &excludes)?;
     let mut result = json!({
         "operation": "estimate",
         "input_count": estimate.input_count,
@@ -294,7 +321,7 @@ fn run_test_job(ctx: &Ctx, base_dir: &Path, job: &BatchJob) -> Result<JobSuccess
     let archive = required_path(base_dir, job.archive.as_deref(), "archive")?;
     let report = ctx
         .engine
-        .test(&archive, &open_options(job), &NoProgress, &ctx.ctl)?;
+        .test_summary(&archive, &open_options(job), &NoProgress, &ctx.ctl)?;
     if report.is_ok() {
         Ok(JobSuccess {
             detail: format!(
@@ -308,6 +335,8 @@ fn run_test_job(ctx: &Ctx, base_dir: &Path, job: &BatchJob) -> Result<JobSuccess
                 "archive": archive.display().to_string(),
                 "entries_tested": report.entries_tested,
                 "problems": [],
+                "problems_total": 0,
+                "problems_truncated": false,
             }),
         })
     } else {
@@ -317,48 +346,9 @@ fn run_test_job(ctx: &Ctx, base_dir: &Path, job: &BatchJob) -> Result<JobSuccess
 
 fn run_extract_job(ctx: &Ctx, base_dir: &Path, job: &BatchJob) -> Result<JobSuccess, FormatError> {
     let archive = required_path(base_dir, job.archive.as_deref(), "archive")?;
-    let mut dest = job_dest_or_base(base_dir, job.dest.as_deref());
+    let dest = job_dest_or_base(base_dir, job.dest.as_deref());
+    let open = open_options(job);
     let filter = PathFilter::new(&job.includes)?;
-    let entries = if job.smart || !filter.is_empty() {
-        Some(ctx.engine.list(&archive, &open_options(job))?)
-    } else {
-        None
-    };
-    let selection = if filter.is_empty() {
-        None
-    } else {
-        let listed_entries = entries.as_ref().ok_or_else(|| {
-            FormatError::Other("batch extract include filters require listed entries".into())
-        })?;
-        let selected = listed_entries
-            .iter()
-            .filter(|entry| filter.matches(&entry.path.display))
-            .map(|entry| entry.path.clone())
-            .collect::<Vec<_>>();
-        if selected.is_empty() {
-            return Ok(JobSuccess {
-                detail: format!("no entries matched in {}", archive.display()),
-                result: json!({
-                    "operation": "extract",
-                    "archive": archive.display().to_string(),
-                    "dest": dest.display().to_string(),
-                    "matched": false,
-                    "best_effort": job.best_effort,
-                }),
-            });
-        }
-        Some(selected)
-    };
-    if job.smart {
-        let layout_entries = match entries.as_deref() {
-            Some(entries) => entries,
-            None => &[],
-        };
-        match analyze_extract_layout(layout_entries) {
-            SmartLayout::DirectExtract => {}
-            SmartLayout::WrapInFolder => dest = dest.join(ctx.engine.archive_stem(&archive)),
-        }
-    }
     let opts = ExtractOptions {
         overwrite: parse_overwrite(job.overwrite.as_deref())?,
         symlinks: parse_symlinks(job.symlinks.as_deref())?,
@@ -371,23 +361,52 @@ fn run_extract_job(ctx: &Ctx, base_dir: &Path, job: &BatchJob) -> Result<JobSucc
         best_effort: job.best_effort,
         ..ExtractOptions::default()
     };
-    ctx.engine.extract(
+    let (plan, report) = ctx.engine.plan_and_extract_with_report_controlled(
         &archive,
         &dest,
-        selection.as_deref(),
-        &open_options(job),
+        &archive,
+        job.smart,
+        &open,
         &opts,
         &NoProgress,
         &ctx.ctl,
+        |entries, control| filter.select_entries(entries, control),
+        |_| Ok(()),
     )?;
+    if !filter.is_empty() && plan.scope.entries == 0 {
+        return Ok(JobSuccess {
+            detail: format!("no entries matched in {}", archive.display()),
+            result: json!({
+                "operation": "extract",
+                "archive": archive.display().to_string(),
+                "dest": plan.requested_destination.display().to_string(),
+                "matched": false,
+                "best_effort": job.best_effort,
+                "plan": extract_plan_json(&plan),
+                "counts": empty_extract_counts_json(&plan.destination),
+                "selected_entries": 0,
+                "directories": 0,
+                "output_bytes": 0,
+            }),
+        });
+    }
     Ok(JobSuccess {
-        detail: format!("extracted {} to {}", archive.display(), dest.display()),
+        detail: format!(
+            "extracted {} to {}",
+            archive.display(),
+            report.destination.display()
+        ),
         result: json!({
             "operation": "extract",
             "archive": archive.display().to_string(),
-            "dest": dest.display().to_string(),
+            "dest": report.destination.display().to_string(),
             "matched": true,
             "best_effort": job.best_effort,
+            "plan": extract_plan_json(&plan),
+            "counts": extract_counts_json(&report),
+            "selected_entries": report.selected_entries,
+            "directories": report.directories,
+            "output_bytes": report.output_bytes,
         }),
     })
 }
@@ -404,25 +423,59 @@ fn run_compress_job(ctx: &Ctx, base_dir: &Path, job: &BatchJob) -> Result<JobSuc
     let output = required_path(base_dir, job.output.as_deref(), "output")?;
     validate_requested_format(ctx, &output, job.format.as_deref())?;
     let level = job_level(job)?;
+    let excludes =
+        crate::content_policy::resolve_create_excludes(job.content_policy, job.excludes.clone());
     let opts = CreateOptions {
         level: CompressionLevel::from_numeric(level),
         password: job.password.clone().map(Password::new),
         encrypt_filenames: job.encrypt_names,
         split_size: job.split,
-        excludes: job.excludes.clone(),
+        split_mode: job
+            .split_mode
+            .map_or(SplitOutputMode::Generic, SplitOutputMode::from),
+        excludes,
         resources: resource_options(job.threads, job.memory_limit),
         ..CreateOptions::default()
     };
-    ctx.engine
-        .create(&output, &inputs, &opts, &NoProgress, &ctx.ctl)?;
-    Ok(JobSuccess {
-        detail: format!("created {}", output.display()),
-        result: json!({
-            "operation": "compress",
-            "output": output.display().to_string(),
-            "level": level,
-        }),
-    })
+    let kind = if job.split.is_some() {
+        squallz_core::CreateArtifactKind::SplitArchive
+    } else {
+        squallz_core::CreateArtifactKind::Archive
+    };
+    let policy = super::create_commit_policy(&output, kind, true, &NoProgress, &ctx.ctl)?;
+    let report = ctx.engine.create_with_report_policy(
+        &output,
+        &inputs,
+        &opts,
+        policy,
+        &NoProgress,
+        &ctx.ctl,
+    )?;
+    let entries_tested_after_create = if job.test_after_create {
+        let test_report = ctx.engine.test_summary(
+            &report.primary_output,
+            &OpenOptions {
+                password: opts.password.clone(),
+                encoding_override: None,
+            },
+            &NoProgress,
+            &ctx.ctl,
+        )?;
+        if !test_report.is_ok() {
+            return Err(test_report_error(test_report));
+        }
+        Some(test_report.entries_tested)
+    } else {
+        None
+    };
+    let detail = format!("created {}", report.primary_output.display());
+    let mut result = create_report_json(&report);
+    result["output"] = json!(output.display().to_string());
+    result["operation"] = json!("compress");
+    result["level"] = json!(level);
+    result["tested_after_create"] = json!(entries_tested_after_create.is_some());
+    result["entries_tested_after_create"] = json!(entries_tested_after_create);
+    Ok(JobSuccess { detail, result })
 }
 
 fn run_checksum_job(ctx: &Ctx, base_dir: &Path, job: &BatchJob) -> Result<JobSuccess, FormatError> {
@@ -524,19 +577,41 @@ fn run_convert_job(ctx: &Ctx, base_dir: &Path, job: &BatchJob) -> Result<JobSucc
             .or_else(|| job.password.clone())
             .map(Password::new),
         encrypt_filenames: job.encrypt_names,
+        split_size: job.split,
+        split_mode: job
+            .split_mode
+            .map_or(SplitOutputMode::Generic, SplitOutputMode::from),
         resources: resource_options(job.threads, job.memory_limit),
         ..CreateOptions::default()
     };
-    ctx.engine
-        .convert(&src, &output, &open, &create, &NoProgress, &ctx.ctl)?;
+    let allow_existing = matches!(
+        parse_overwrite(job.overwrite.as_deref())?,
+        OverwritePolicy::Overwrite
+    );
+    let kind = if job.split.is_some() {
+        squallz_core::CreateArtifactKind::SplitArchive
+    } else {
+        squallz_core::CreateArtifactKind::Archive
+    };
+    let commit_policy =
+        super::create_commit_policy(&output, kind, allow_existing, &NoProgress, &ctx.ctl)?;
+    let report = ctx.engine.convert_with_report_policy(
+        &src,
+        &output,
+        &open,
+        &create,
+        commit_policy,
+        &NoProgress,
+        &ctx.ctl,
+    )?;
+    let mut result = create_report_json(&report);
+    result["operation"] = json!("convert");
+    result["source"] = json!(src.display().to_string());
+    result["output"] = json!(output.display().to_string());
+    result["level"] = json!(level);
     Ok(JobSuccess {
         detail: format!("converted {} to {}", src.display(), output.display()),
-        result: json!({
-            "operation": "convert",
-            "source": src.display().to_string(),
-            "output": output.display().to_string(),
-            "level": level,
-        }),
+        result,
     })
 }
 
@@ -546,10 +621,15 @@ fn run_pack_job(ctx: &Ctx, base_dir: &Path, job: &BatchJob) -> Result<JobSuccess
     let level = job_level(job)?;
     let inner_format = job_inner_format(job);
     let recovery_percent = job_recovery_percent(job, 25)?;
+    let excludes =
+        crate::content_policy::resolve_create_excludes(job.content_policy, job.excludes.clone());
     let opts = CreateOptions {
         level: CompressionLevel::from_numeric(level),
         split_size: job.split,
-        excludes: job.excludes.clone(),
+        split_mode: job
+            .split_mode
+            .map_or(SplitOutputMode::Generic, SplitOutputMode::from),
+        excludes,
         resources: resource_options(job.threads, job.memory_limit),
         sqz: SqzCreateOptions {
             inner_format: inner_format.clone(),
@@ -557,18 +637,28 @@ fn run_pack_job(ctx: &Ctx, base_dir: &Path, job: &BatchJob) -> Result<JobSuccess
         },
         ..CreateOptions::default()
     };
-    ctx.engine
-        .create(&output, &inputs, &opts, &NoProgress, &ctx.ctl)?;
-    Ok(JobSuccess {
-        detail: format!("packed {}", output.display()),
-        result: json!({
-            "operation": "pack",
-            "output": output.display().to_string(),
-            "level": level,
-            "inner_format": inner_format,
-            "recovery_percent": recovery_percent,
-        }),
-    })
+    let kind = if job.split.is_some() {
+        squallz_core::CreateArtifactKind::SplitArchive
+    } else {
+        squallz_core::CreateArtifactKind::Archive
+    };
+    let policy = super::create_commit_policy(&output, kind, true, &NoProgress, &ctx.ctl)?;
+    let report = ctx.engine.create_with_report_policy(
+        &output,
+        &inputs,
+        &opts,
+        policy,
+        &NoProgress,
+        &ctx.ctl,
+    )?;
+    let detail = format!("packed {}", report.primary_output.display());
+    let mut result = create_report_json(&report);
+    result["output"] = json!(output.display().to_string());
+    result["operation"] = json!("pack");
+    result["level"] = json!(level);
+    result["inner_format"] = json!(inner_format);
+    result["recovery_percent"] = json!(recovery_percent);
+    Ok(JobSuccess { detail, result })
 }
 
 fn job_inner_format(job: &BatchJob) -> String {
@@ -606,11 +696,23 @@ fn run_export_job(ctx: &Ctx, base_dir: &Path, job: &BatchJob) -> Result<JobSucce
         resources: resource_options(job.threads, job.memory_limit),
         ..CreateOptions::default()
     };
-    ctx.engine.convert(
+    let allow_existing = matches!(
+        parse_overwrite(job.overwrite.as_deref())?,
+        OverwritePolicy::Overwrite
+    );
+    let commit_policy = super::create_commit_policy(
+        &output,
+        squallz_core::CreateArtifactKind::Archive,
+        allow_existing,
+        &NoProgress,
+        &ctx.ctl,
+    )?;
+    ctx.engine.convert_with_policy(
         &archive,
         &output,
         &OpenOptions::default(),
         &create,
+        commit_policy,
         &NoProgress,
         &ctx.ctl,
     )?;
@@ -652,7 +754,7 @@ fn run_repair_sqz_job(
     }
     let source_report =
         ctx.engine
-            .test(&archive, &OpenOptions::default(), &NoProgress, &ctx.ctl)?;
+            .test_summary(&archive, &OpenOptions::default(), &NoProgress, &ctx.ctl)?;
     if !source_report.is_ok() {
         return Err(test_report_error(source_report));
     }
@@ -712,7 +814,7 @@ fn run_repair_zip_job(
     }
     let source_report =
         ctx.engine
-            .test(&archive, &OpenOptions::default(), &NoProgress, &ctx.ctl)?;
+            .test_summary(&archive, &OpenOptions::default(), &NoProgress, &ctx.ctl)?;
     if !source_report.is_ok() {
         return Err(test_report_error(source_report));
     }
@@ -744,20 +846,26 @@ fn run_repair_zip_job(
     })
 }
 
-fn run_protect_job(base_dir: &Path, job: &BatchJob) -> Result<JobSuccess, FormatError> {
+fn run_protect_job(ctx: &Ctx, base_dir: &Path, job: &BatchJob) -> Result<JobSuccess, FormatError> {
     let archive = required_path(
         base_dir,
         job.archive.as_deref().or(job.src.as_deref()),
         "archive",
     )?;
-    let sources = protect_sources(&archive)?;
+    let sources = ctx.engine.recovery_protect_sources(&archive)?;
     let redundancy = match job.tolerate_loss {
         Some(count) => redundancy_for_tolerated_volume_loss(&sources, count)?,
         None => job_redundancy(job),
     };
     let recovery_path = job_recovery_path(base_dir, job)?;
-    let report =
-        squallz_recovery::protect_files(&archive, redundancy, recovery_path.as_deref(), &sources)?;
+    let report = squallz_recovery::protect_files_controlled(
+        &archive,
+        redundancy,
+        recovery_path.as_deref(),
+        &sources,
+        &NoProgress,
+        &ctx.ctl,
+    )?;
     recovery_success(report, false)
 }
 
@@ -765,18 +873,31 @@ fn job_redundancy(job: &BatchJob) -> u8 {
     job.redundancy.map_or(10, |redundancy| redundancy)
 }
 
-fn run_verify_recovery_job(base_dir: &Path, job: &BatchJob) -> Result<JobSuccess, FormatError> {
+fn run_verify_recovery_job(
+    ctx: &Ctx,
+    base_dir: &Path,
+    job: &BatchJob,
+) -> Result<JobSuccess, FormatError> {
     let archive = required_path(
         base_dir,
         job.archive.as_deref().or(job.src.as_deref()),
         "archive",
     )?;
     let recovery_path = job_recovery_path(base_dir, job)?;
-    let report = squallz_recovery::verify(&archive, recovery_path.as_deref())?;
+    let report = squallz_recovery::verify_controlled(
+        &archive,
+        recovery_path.as_deref(),
+        &NoProgress,
+        &ctx.ctl,
+    )?;
     recovery_success(report, true)
 }
 
-fn run_repair_recovery_job(base_dir: &Path, job: &BatchJob) -> Result<JobSuccess, FormatError> {
+fn run_repair_recovery_job(
+    ctx: &Ctx,
+    base_dir: &Path,
+    job: &BatchJob,
+) -> Result<JobSuccess, FormatError> {
     let archive = required_path(
         base_dir,
         job.archive.as_deref().or(job.src.as_deref()),
@@ -787,8 +908,32 @@ fn run_repair_recovery_job(base_dir: &Path, job: &BatchJob) -> Result<JobSuccess
         .as_deref()
         .or(job.dest.as_deref())
         .map(|path| resolve_path(base_dir, path));
+    let output_dir = job
+        .output_dir
+        .as_deref()
+        .map(|path| resolve_path(base_dir, path));
+    if output.is_some() && output_dir.is_some() {
+        return Err(FormatError::Unsupported(
+            "batch repair_recovery accepts either output/dest or output_dir, not both".into(),
+        ));
+    }
     let recovery_path = job_recovery_path(base_dir, job)?;
-    let report = squallz_recovery::repair(&archive, output.as_deref(), recovery_path.as_deref())?;
+    let report = match output_dir.as_deref() {
+        Some(directory) => squallz_recovery::repair_to_directory_controlled(
+            &archive,
+            directory,
+            recovery_path.as_deref(),
+            &NoProgress,
+            &ctx.ctl,
+        )?,
+        None => squallz_recovery::repair_controlled(
+            &archive,
+            output.as_deref(),
+            recovery_path.as_deref(),
+            &NoProgress,
+            &ctx.ctl,
+        )?,
+    };
     recovery_success(report, true)
 }
 
@@ -832,11 +977,13 @@ fn run_update_job(ctx: &Ctx, base_dir: &Path, job: &BatchJob) -> Result<JobSucce
     }
     let operation_count = ops.len();
     let level = job_level(job)?;
+    let excludes =
+        crate::content_policy::resolve_create_excludes(job.content_policy, job.excludes.clone());
     let opts = CreateOptions {
         level: CompressionLevel::from_numeric(level),
         password: job.password.clone().map(Password::new),
         encrypt_filenames: job.encrypt_names,
-        excludes: job.excludes.clone(),
+        excludes,
         resources: resource_options(job.threads, job.memory_limit),
         ..CreateOptions::default()
     };
@@ -1095,27 +1242,13 @@ fn status_code_label(status_code: Option<i32>) -> String {
     }
 }
 
-fn protect_sources(archive: &Path) -> Result<Vec<PathBuf>, FormatError> {
-    if split_volume_name(path_file_name_str_or_empty(archive)).is_some() {
-        let volumes = collect_volume_set(archive)?;
-        return Ok(volumes.iter().cloned().collect());
-    }
-    Ok(vec![archive.to_path_buf()])
-}
-
-fn path_file_name_str_or_empty(path: &Path) -> &str {
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .map_or("", |name| name)
-}
-
 fn redundancy_for_tolerated_volume_loss(
     sources: &[PathBuf],
     tolerate_loss: u32,
 ) -> Result<u8, FormatError> {
     if sources.len() <= 1 {
         return Err(FormatError::Unsupported(
-            "batch tolerate_loss requires a .001 split volume set".into(),
+            "batch tolerate_loss requires a multi-file archive set".into(),
         ));
     }
     let count = tolerated_loss_count(tolerate_loss);
@@ -1240,8 +1373,13 @@ fn detected_format_key(ctx: &Ctx, name: &str) -> Option<String> {
     }
 }
 
-fn test_report_error(report: TestReport) -> FormatError {
-    let problems = report.problems.join("; ");
+fn test_report_error(report: TestSummary) -> FormatError {
+    let omitted = report.problems.omitted();
+    let mut problems = report.problems.messages;
+    if omitted > 0 {
+        problems.push(format!("{omitted} additional integrity problem(s) omitted"));
+    }
+    let problems = problems.join("; ");
     FormatError::CorruptArchive(if problems.is_empty() {
         "batch test failed".to_owned()
     } else {
@@ -1355,16 +1493,26 @@ fn print_human_report(
     reports: &[BatchJobReport],
     failed: usize,
 ) {
+    let preserved_outputs = batch_preserved_output_paths(reports);
     if ctx.is_modern() {
         let succeeded = reports.len().saturating_sub(failed);
-        let tone = if failed == 0 {
+        let tone = if failed > 0 {
+            crate::ui::Tone::Danger
+        } else if preserved_outputs.is_empty() {
             crate::ui::Tone::Success
         } else {
-            crate::ui::Tone::Danger
+            crate::ui::Tone::Warning
+        };
+        let status = if failed > 0 {
+            "failed".to_owned()
+        } else if preserved_outputs.is_empty() {
+            "done".to_owned()
+        } else {
+            ctx.loc.t("cli.create.preserved_status")
         };
         ctx.print_modern_status_panel(
             "Batch result",
-            if failed == 0 { "done" } else { "failed" },
+            &status,
             tone,
             &format!("{} jobs from {}", reports.len(), script.display()),
             &[
@@ -1402,6 +1550,7 @@ fn print_human_report(
             ],
             &rows,
         );
+        print_preserved_output_warning(ctx, &preserved_outputs);
         return;
     }
     for report in reports {
@@ -1411,4 +1560,18 @@ fn print_human_report(
             ctx.eprint_problem(format!("{}: {}", report.id, report.detail));
         }
     }
+    print_preserved_output_warning(ctx, &preserved_outputs);
+}
+
+fn batch_preserved_output_paths(reports: &[BatchJobReport]) -> Vec<String> {
+    reports
+        .iter()
+        .filter(|report| report.ok)
+        .filter_map(|report| report.result.as_ref())
+        .filter_map(|result| result.get("preserved_outputs"))
+        .filter_map(Value::as_array)
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_owned)
+        .collect()
 }

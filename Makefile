@@ -9,6 +9,7 @@ MACOS_APP_RELEASE := $(ROOT)/target/release/bundle/macos/Squallz.app
 SMOKE_APP ?= $(MACOS_APP_DEBUG)
 PACKAGE_APP ?= $(MACOS_APP_RELEASE)
 POWERSHELL ?= powershell
+PYTHON ?= $(if $(filter windows,$(NATIVE_OS)),python,python3)
 
 .PHONY: help
 help:
@@ -30,7 +31,8 @@ help:
 	@echo "Tests:"
 	@echo "  make test-rust            Rust tests except GUI crate"
 	@echo "  make test-gui             GUI lib/bin tests"
-	@echo "  make test                 Rust + GUI tests"
+	@echo "  make test-release-tools   Release metadata and trust tests"
+	@echo "  make test                 Rust + GUI + release tool tests"
 	@echo
 	@echo "Build:"
 	@echo "  make build                cargo build --workspace"
@@ -38,6 +40,7 @@ help:
 	@echo "  make frontend-build       Vite production build"
 	@echo
 	@echo "App packaging:"
+	@echo "  make macos-app-icon       Rebuild the macOS 26 app icon assets"
 	@echo "  make app                  Build debug Tauri app"
 	@echo "  make app-debug            Build debug Tauri app for current OS"
 	@echo "  make app-release          Build release Tauri app and bundles for current OS"
@@ -52,6 +55,7 @@ help:
 	@echo "Smoke:"
 	@echo "  make smoke-native         Run the native smoke for the current OS"
 	@echo "  make smoke-macos          Launch real macOS app smoke"
+	@echo "  make smoke-macos-quicklook Validate Finder Quick Look integration"
 	@echo "  make smoke-linux          Run Linux Secret Service smoke on Linux"
 	@echo "  make smoke-windows        Run Windows Credential Manager smoke on Windows"
 	@echo
@@ -120,8 +124,12 @@ test-rust:
 test-gui:
 	cargo test -p squallz-gui --lib --bins
 
+.PHONY: test-release-tools
+test-release-tools:
+	"$(PYTHON)" -m unittest discover -s scripts/tests -p 'test_*.py'
+
 .PHONY: test
-test: test-rust test-gui
+test: test-rust test-gui test-release-tools
 
 .PHONY: build
 build:
@@ -145,6 +153,10 @@ app: app-debug
 app-debug:
 	cd "$(FRONTEND)" && npm run tauri -- build --debug
 
+.PHONY: macos-app-icon
+macos-app-icon: require-macos
+	scripts/build_macos_app_icon.sh
+
 .PHONY: app-release package
 app-release:
 	cd "$(FRONTEND)" && npm run tauri -- build
@@ -164,7 +176,7 @@ package-linux: app-linux
 
 package-windows: app-windows
 
-.PHONY: smoke-native smoke-app smoke-macos smoke-linux smoke-windows
+.PHONY: smoke-native smoke-app smoke-macos smoke-macos-quicklook smoke-linux smoke-windows
 smoke-native:
 	@case "$(NATIVE_OS)" in \
 		macos) $(MAKE) smoke-macos ;; \
@@ -177,6 +189,9 @@ smoke-app: smoke-macos
 
 smoke-macos: require-macos
 	scripts/macos_app_smoke.sh "$(SMOKE_APP)"
+
+smoke-macos-quicklook: require-macos
+	scripts/macos_quicklook_smoke.sh "$(SMOKE_APP)"
 
 smoke-linux: require-linux
 	scripts/linux_secret_service_smoke.sh

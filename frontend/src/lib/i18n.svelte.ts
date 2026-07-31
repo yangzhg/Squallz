@@ -20,6 +20,7 @@ const fallbackLoaders: Record<string, () => Promise<{ default: Record<string, st
   }),
 );
 const fallbackLanguageTags = Object.keys(fallbackLoaders).sort();
+let localeLoadGeneration = 0;
 
 function normalizedLang(lang?: string | null): string {
   const fallback = fallbackLoaders[fallbackLang] ? fallbackLang : fallbackLanguageTags[0] ?? fallbackLang;
@@ -70,17 +71,21 @@ export async function listBundledLanguages(): Promise<Array<{ tag: string; name:
 
 /** Loads the locale table (explicit tag, or backend-resolved default). */
 export async function loadLocale(lang?: string | null): Promise<void> {
+  const generation = ++localeLoadGeneration;
   try {
     const res = await ipc.getLocaleTable(lang ?? null);
+    if (generation !== localeLoadGeneration) return;
     store.lang = res.lang;
     store.table = res.table;
     applyDocumentLanguage(res.lang);
     store.ready = true;
   } catch {
-    const fallbackLang = normalizedLang(lang);
-    store.lang = fallbackLang;
-    store.table = await fallbackTable(fallbackLang);
-    applyDocumentLanguage(fallbackLang);
+    const resolvedLang = normalizedLang(lang);
+    const table = await fallbackTable(resolvedLang);
+    if (generation !== localeLoadGeneration) return;
+    store.lang = resolvedLang;
+    store.table = table;
+    applyDocumentLanguage(resolvedLang);
     store.ready = true;
   }
 }
@@ -96,14 +101,28 @@ export function i18nReady(): boolean {
 }
 
 /** Translates a key, substituting `{name}` placeholders. */
-export function t(key: string, params?: Record<string, string | number>): string {
-  let out = store.table[key] ?? key;
+function interpolate(template: string, params?: Record<string, string | number>): string {
+  let out = template;
   if (params) {
     for (const [name, value] of Object.entries(params)) {
       out = out.split(`{${name}}`).join(String(value));
     }
   }
   return out;
+}
+
+export function t(key: string, params?: Record<string, string | number>): string {
+  return interpolate(store.table[key] ?? key, params);
+}
+
+/** Uses bundled English copy while the locale table is still loading. */
+export function tFallback(
+  key: string,
+  fallback: string,
+  params?: Record<string, string | number>,
+): string {
+  const translated = t(key, params);
+  return translated === key ? interpolate(fallback, params) : translated;
 }
 
 /** Renders a structured backend error through the locale table. */

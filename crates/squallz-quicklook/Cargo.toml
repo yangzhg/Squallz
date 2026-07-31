@@ -1,0 +1,18 @@
+[package]
+name = "squallz-quicklook"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Bounded archive summaries for the macOS Finder Quick Look extension"
+
+[lib]
+crate-type = ["rlib", "staticlib"]
+
+[dependencies]
+squallz-format-api = { path = "../squallz-format-api", version = "0.1.0" }
+squallz-formats = { path = "../squallz-formats", version = "0.1.0", default-features = false }
+squallz-i18n = { path = "../squallz-i18n", version = "0.1.0" }
+
+[dev-dependencies]
+tempfile = "3.27.0"
+zip = { version = "8.6.0", default-features = false, features = ["deflate"] }

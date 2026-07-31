@@ -75,6 +75,7 @@ export function dirname(path: string): string {
   const normalized = path.replaceAll("\\", "/");
   const i = normalized.lastIndexOf("/");
   if (i < 0) return ".";
+  if (i === 2 && normalized[1] === ":") return normalized.slice(0, 3);
   return i === 0 ? "/" : normalized.slice(0, i);
 }
 

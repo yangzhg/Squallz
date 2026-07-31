@@ -56,9 +56,17 @@ fn remove_slot(slots: &Mutex<HashMap<u64, Arc<Slot>>>, job_id: u64) {
 }
 
 impl AskBridge {
+    /// Registers the answer slot before the matching UI event is emitted.
+    /// Repeated preparation for the same pending question is harmless.
+    pub fn prepare(&self, job_id: u64) {
+        lock_unpoisoned(&self.slots)
+            .entry(job_id)
+            .or_insert_with(|| Arc::new(Slot::default()));
+    }
+
     /// Blocks the calling worker thread until the frontend answers or
-    /// `cancelled()` turns true (returns `None`). The caller emits the
-    /// matching event *before* calling this.
+    /// `cancelled()` turns true (returns `None`). Prompt callers prepare the
+    /// slot, emit the matching event, then call this method.
     pub fn wait(&self, job_id: u64, cancelled: &dyn Fn() -> bool) -> Option<AskAnswer> {
         let slot = {
             let mut slots = lock_unpoisoned(&self.slots);
@@ -70,27 +78,33 @@ impl AskBridge {
         };
         let mut answer = lock_unpoisoned(&slot.answer);
         loop {
-            if let Some(a) = answer.take() {
-                remove_slot(&self.slots, job_id);
-                return Some(a);
-            }
             if cancelled() {
                 remove_slot(&self.slots, job_id);
                 return None;
+            }
+            if let Some(a) = answer.take() {
+                remove_slot(&self.slots, job_id);
+                return Some(a);
             }
             // Bounded wait so a cancel without an answer still unblocks.
             answer = wait_timeout_unpoisoned(&slot.cv, answer, Duration::from_millis(100));
         }
     }
 
-    /// Delivers the frontend's answer to a waiting job (no-op when the job
-    /// is not waiting, e.g. it was cancelled meanwhile).
-    pub fn answer(&self, job_id: u64, answer: AskAnswer) {
+    /// Delivers the frontend's answer to a waiting job. Returns `false` when
+    /// the question is no longer pending or has already been answered.
+    pub fn answer(&self, job_id: u64, answer: AskAnswer) -> bool {
         let slot = lock_unpoisoned(&self.slots).get(&job_id).cloned();
-        if let Some(slot) = slot {
-            *lock_unpoisoned(&slot.answer) = Some(answer);
-            slot.cv.notify_all();
+        let Some(slot) = slot else {
+            return false;
+        };
+        let mut pending = lock_unpoisoned(&slot.answer);
+        if pending.is_some() {
+            return false;
         }
+        *pending = Some(answer);
+        slot.cv.notify_all();
+        true
     }
 
     /// Wakes a waiting job so it can observe its cancellation predicate
@@ -98,6 +112,9 @@ impl AskBridge {
     pub fn wake_cancelled(&self, job_id: u64) {
         let slot = lock_unpoisoned(&self.slots).get(&job_id).cloned();
         if let Some(slot) = slot {
+            // Match the waiter's predicate lock so cancellation cannot land
+            // between its final predicate check and the condition wait.
+            let _answer = lock_unpoisoned(&slot.answer);
             slot.cv.notify_all();
         }
     }
@@ -124,14 +141,14 @@ mod tests {
         let bridge = Arc::new(AskBridge::default());
         let b = Arc::clone(&bridge);
         let worker = std::thread::spawn(move || b.wait(7, &|| false));
-        std::thread::sleep(Duration::from_millis(50));
-        bridge.answer(
+        wait_for_slot(&bridge, 7);
+        assert!(bridge.answer(
             7,
             AskAnswer::Conflict {
                 decision: "skip".into(),
                 apply_all: true,
             },
-        );
+        ));
         match worker.join().unwrap() {
             Some(AskAnswer::Conflict {
                 decision,
@@ -142,6 +159,19 @@ mod tests {
             }
             other => panic!("unexpected answer: {other:?}"),
         }
+    }
+
+    #[test]
+    fn prepared_slot_accepts_an_answer_before_wait_begins() {
+        let bridge = AskBridge::default();
+        bridge.prepare(13);
+        assert!(bridge.answer(13, AskAnswer::Password(Some("ready".into()))));
+
+        match bridge.wait(13, &|| false) {
+            Some(AskAnswer::Password(Some(password))) => assert_eq!(password, "ready"),
+            other => panic!("unexpected answer: {other:?}"),
+        }
+        assert!(!bridge.answer(13, AskAnswer::Password(None)));
     }
 
     #[test]
@@ -193,6 +223,17 @@ mod tests {
     }
 
     #[test]
+    fn cancellation_wins_over_an_answer_that_arrived_at_the_same_time() {
+        let bridge = AskBridge::default();
+        let slot = Arc::new(Slot::default());
+        *lock_unpoisoned(&slot.answer) = Some(AskAnswer::Password(Some("too late".into())));
+        lock_unpoisoned(&bridge.slots).insert(12, slot);
+
+        assert!(bridge.wait(12, &|| true).is_none());
+        assert!(!lock_unpoisoned(&bridge.slots).contains_key(&12));
+    }
+
+    #[test]
     fn bridge_recovers_after_slots_lock_poison() {
         let bridge = Arc::new(AskBridge::default());
         let poison_bridge = Arc::clone(&bridge);
@@ -204,8 +245,8 @@ mod tests {
 
         let b = Arc::clone(&bridge);
         let worker = std::thread::spawn(move || b.wait(9, &|| false));
-        std::thread::sleep(Duration::from_millis(50));
-        bridge.answer(9, AskAnswer::Password(Some("secret".into())));
+        wait_for_slot(&bridge, 9);
+        assert!(bridge.answer(9, AskAnswer::Password(Some("secret".into()))));
 
         match worker.join().unwrap() {
             Some(AskAnswer::Password(Some(password))) => assert_eq!(password, "secret"),
@@ -227,14 +268,14 @@ mod tests {
         let b = Arc::new(bridge);
         let worker_bridge = Arc::clone(&b);
         let worker = std::thread::spawn(move || worker_bridge.wait(10, &|| false));
-        std::thread::sleep(Duration::from_millis(50));
-        b.answer(
+        wait_for_slot(&b, 10);
+        assert!(b.answer(
             10,
             AskAnswer::Conflict {
                 decision: "overwrite".into(),
                 apply_all: false,
             },
-        );
+        ));
 
         match worker.join().unwrap() {
             Some(AskAnswer::Conflict {

@@ -48,7 +48,7 @@ pub fn with_password_retry<T>(
         }
         let pw = rpassword::prompt_password(loc.t("cli.password.prompt"))
             .map(Password::new)
-            .map_err(FormatError::Io)?;
+            .map_err(FormatError::from)?;
         match op(Some(&pw)) {
             Err(e @ (FormatError::PasswordRequired | FormatError::WrongPassword)) => last_err = e,
             other => return other,

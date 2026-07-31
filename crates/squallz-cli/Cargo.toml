@@ -13,14 +13,20 @@ path = "src/main.rs"
 squallz-core = { path = "../squallz-core", version = "0.1.0" }
 squallz-formats = { path = "../squallz-formats", version = "0.1.0" }
 squallz-i18n = { path = "../squallz-i18n", version = "0.1.0" }
+squallz-publish = { path = "../squallz-publish", version = "0.1.0" }
 squallz-recovery = { path = "../squallz-recovery", version = "0.1.0" }
+squallz-update = { path = "../squallz-update", version = "0.1.0" }
 clap.workspace = true
 ctrlc.workspace = true
+dirs.workspace = true
 fs4 = "1"
 rpassword.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+tokio = { version = "1.52.3", features = ["rt", "time", "macros"] }
 unicode-width = "0.2"
 
 # Integration tests drive the binary via CARGO_BIN_EXE_sqz (std::process) and
-# parse --json output with serde_json; no extra dev-dependencies needed.
+# parse --json output with serde_json.
+[dev-dependencies]
+base64 = "0.22"

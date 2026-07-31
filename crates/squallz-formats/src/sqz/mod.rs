@@ -6,8 +6,8 @@
 //! small payload damage can be repaired before entries are exposed.
 
 use squallz_format_api::{
-    ArchiveFormat, ArchiveReader, ArchiveWriter, CreateOptions, FormatCapabilities, FormatError,
-    OpenOptions, ReadSeek, WriteSeek,
+    ArchiveFormat, ArchiveReader, ArchiveWriter, CreateOptions, FormatCapabilities,
+    FormatCreateBudget, FormatError, OpenOptions, ReadSeek, WriteSeek,
 };
 
 mod reader;
@@ -99,6 +99,16 @@ impl ArchiveFormat for SqzFormat {
     ) -> Result<Box<dyn ArchiveWriter>, FormatError> {
         self.check_create_opts(opts)?;
         writer::create(dst, opts)
+    }
+
+    fn create_budget(
+        &self,
+        content_bytes: u64,
+        archive_bytes: u64,
+        opts: &CreateOptions,
+    ) -> Result<FormatCreateBudget, FormatError> {
+        self.check_create_opts(opts)?;
+        writer::create_budget(content_bytes, archive_bytes, opts)
     }
 }
 

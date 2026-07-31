@@ -3,6 +3,9 @@ export type DensityChoice = "compact" | "standard" | "comfort";
 export type NumericSetting = number | null;
 export type CreateProfileId = "fast" | "balanced" | "maximum" | "custom";
 export type CreateFormatId = "zip" | "7z" | "sqz" | "tar.zst" | "wim";
+export type CreateSplitPreset = "none" | "25-mib" | "100-mib" | "700-mib" | "4-gib" | "custom";
+export type CreateSplitUnit = "mib" | "gib";
+export type CreateSplitMode = "generic" | "native";
 export type Screen =
   | "browse"
   | "recent"
@@ -14,7 +17,6 @@ export type Screen =
   | "duplicates"
   | "password"
   | "conflict"
-  | "cannotRepair"
   | "recovery"
   | "archiveInfo"
   | "integration"
@@ -87,7 +89,6 @@ export const screenIds: Screen[] = [
   "duplicates",
   "password",
   "conflict",
-  "cannotRepair",
   "recovery",
   "archiveInfo",
   "integration",
@@ -131,7 +132,7 @@ export const createFormats: Record<CreateFormatId, CreateFormat> = {
     password: "Data encryption only; file names remain visible",
     can_encrypt_data: true,
     can_encrypt_names: false,
-    split: "ZIP split is supported through .zip/.zNN sets",
+    split: "Generic .zip.001/.002 or native .z01 … .zip volumes",
     recovery: "Use PAR2 after create for open-format recovery",
     note: "Best for sharing with Windows and built-in tools",
   },
@@ -144,7 +145,7 @@ export const createFormats: Record<CreateFormatId, CreateFormat> = {
     password: "AES-256 can encrypt file names",
     can_encrypt_data: true,
     can_encrypt_names: true,
-    split: "Byte split volumes supported",
+    split: "Squallz .7z.001/.002 byte-split set",
     recovery: "Use PAR2 sidecar for standard 7Z recovery",
     note: "Best ratio and privacy for long-term archives",
   },
@@ -154,10 +155,10 @@ export const createFormats: Record<CreateFormatId, CreateFormat> = {
     filterName: "SQZ archive",
     extensions: ["sqz"],
     method: "Squallz container",
-    password: "No launch encryption claim; use standard encrypted inner archives when needed",
+    password: "SQZ does not encrypt the container itself; use an encrypted inner archive when needed",
     can_encrypt_data: false,
     can_encrypt_names: false,
-    split: "SQZV split volumes with recovery sidecars",
+    split: "SQZV .sqz.001/.002 volumes with recovery sidecars",
     recovery: "Embedded recovery is available through SQZ workflows",
     note: "Best when self-repair and export are more important than ubiquity",
   },
@@ -170,7 +171,7 @@ export const createFormats: Record<CreateFormatId, CreateFormat> = {
     password: "No built-in encryption",
     can_encrypt_data: false,
     can_encrypt_names: false,
-    split: "No native split claim",
+    split: "Squallz .tar.zst.001/.002 byte-split set",
     recovery: "Use PAR2 sidecar after create",
     note: "Fast developer archives with strong compression speed",
   },
@@ -183,7 +184,7 @@ export const createFormats: Record<CreateFormatId, CreateFormat> = {
     password: "No Squallz password layer for WIM",
     can_encrypt_data: false,
     can_encrypt_names: false,
-    split: "Split WIM is not a launch claim",
+    split: "Generic .wim.001/.002 or native .swm, 2.swm, … volumes",
     recovery: "Use PAR2 sidecar after image creation",
     note: "Requires SQUALLZ_WIMLIB or wimlib-imagex on PATH",
   },
@@ -210,18 +211,18 @@ export const settingsSections: ScreenAction[] = [
   { screen: "settingsSecurity", label: "Security", icon: "shield-alert", detail: "Safety limits and extraction guards" },
   { screen: "settingsPerformance", label: "Performance", icon: "hourglass", detail: "Workers, task flow, scale limits" },
   { screen: "passwordBook", label: "Password Book", icon: "lock", detail: "Secret-store status and saved archive secrets" },
-  { screen: "integration", label: "File Associations", icon: "archive", detail: "Open With and file-manager actions" },
+  { screen: "integration", label: "Formats & Integration", icon: "archive", detail: "Archive capabilities and file-manager actions" },
 ];
 
 export const quickActions: ScreenAction[] = [
-  { screen: "extract", label: "Extract selected", icon: "archive", detail: "Destination, conflicts, password" },
+  { screen: "extract", label: "Extract archive", icon: "archive", detail: "Destination, conflicts, password" },
   { screen: "batch", label: "Batch extract review", icon: "list", detail: "Review all archives before starting" },
   { screen: "checksum", label: "Checksum files", icon: "check-circle", detail: "SHA-256, BLAKE3, CRC32" },
   { screen: "duplicates", label: "Find duplicates", icon: "search", detail: "BLAKE3 scan with CLI parity" },
   { screen: "settingsSecurity", label: "Security settings", icon: "shield-alert", detail: "Safety limits and guards" },
   { screen: "passwordBook", label: "Password Book", icon: "lock", detail: "Saved archive password status" },
   { screen: "colors", label: "Open Colors", icon: "palette", detail: "Accent palette and contrast guard" },
-  { screen: "integration", label: "File Associations", icon: "settings", detail: "Open With and file-manager actions" },
+  { screen: "integration", label: "Formats & Integration", icon: "settings", detail: "Archive capabilities and file-manager actions" },
 ];
 
 export const classicCommands = [
@@ -238,31 +239,6 @@ export const classicCommands = [
   ["search", "Duplicates", "accent"],
   ["repeat", "Convert", "neutral"],
   ["info", "Info", "neutral"],
-];
-
-export const contextActions = [
-  "Extract Here",
-  "Extract to <archive>/",
-  "Add to archive...",
-  "Compress to ZIP",
-  "Compress to 7Z",
-  "Protect with PAR2",
-  "Test archive",
-  "Repair archive",
-  "Export SQZ",
-  "Convert archive",
-];
-
-export const recoveryModes = [
-  { name: "PAR2 sidecar", detail: "Keeps .7z unchanged", size: "+3.8 GB", tone: "safe" },
-  { name: "SQZ container", detail: "Payload self-repair and export", size: "+2/8 shards", tone: "self" },
-  { name: "Dual protection", detail: "Run SQZ and PAR2 as separate passes", size: "Separate jobs", tone: "strong" },
-];
-
-export const recoveryBlocks = [
-  { group: "G0", data: "192", recovery: "24", damage: "0", status: "OK" },
-  { group: "G1", data: "192", recovery: "24", damage: "2", status: "Repairable" },
-  { group: "G2", data: "188", recovery: "24", damage: "0", status: "OK" },
 ];
 
 export const palettes: Palette[] = [

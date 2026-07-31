@@ -4,14 +4,15 @@
 //! loose entries are wrapped in a folder named after the archive.
 
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::Arc;
 
 use serde_json::json;
 use squallz_core::api::{
-    ConflictResolver, EntryMeta, EntryPath, ExtractOptions, ExtractProblemReporter, FormatError,
-    OpenOptions, OverwritePolicy, Password, SymlinkPolicy,
+    BoundedProblemLog, ConflictResolver, EntryPath, ExtractOptions, ExtractProblemReporter,
+    ExtractReport, FormatError, OpenOptions, OverwritePolicy, Password, ProblemPreview,
+    SymlinkPolicy,
 };
-use squallz_core::{analyze_extract_layout, PathFilter, SmartLayout};
+use squallz_core::{ExtractPlan, PathFilter, SmartLayout};
 use squallz_i18n::{localize_error, Localizer};
 
 use crate::args::{resource_options, safety_limits, OverwriteArg, SymlinkArg};
@@ -21,30 +22,25 @@ use crate::progress::{fmt_bytes, CliProgress};
 use crate::prompt::{stdin_is_tty, with_password_retry, CliConflictResolver};
 use crate::ui::Tone;
 
-use super::reports::print_pretty_json;
-
-fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    match mutex.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    }
-}
+use super::reports::{
+    empty_extract_counts_json, extract_counts_json, extract_plan_json, print_pretty_json,
+};
 
 pub(crate) struct CliExtractProblemReporter {
     loc: Arc<Localizer>,
-    problems: Mutex<Vec<String>>,
+    problems: BoundedProblemLog,
 }
 
 impl CliExtractProblemReporter {
     pub(crate) fn new(loc: Arc<Localizer>) -> Self {
         Self {
             loc,
-            problems: Mutex::new(Vec::new()),
+            problems: BoundedProblemLog::default(),
         }
     }
 
-    pub(crate) fn problems(&self) -> Vec<String> {
-        lock_unpoisoned(&self.problems).clone()
+    pub(crate) fn summary(&self) -> ProblemPreview {
+        self.problems.snapshot()
     }
 }
 
@@ -57,8 +53,13 @@ impl ExtractProblemReporter for CliExtractProblemReporter {
                 ("message", &localize_error(&self.loc, error)),
             ],
         );
-        lock_unpoisoned(&self.problems).push(message);
+        self.problems.record(message);
     }
+}
+
+struct ExtractRunOutcome {
+    plan: ExtractPlan,
+    report: Option<ExtractReport>,
 }
 
 #[allow(clippy::too_many_arguments)] // direct image of the CLI surface
@@ -119,40 +120,26 @@ pub fn run(
         "extract",
     );
     let explicit = password.map(Password::new);
-    // The final destination (smart mode may add a wrapping folder); set
-    // inside the closure, reported after it.
-    let mut final_dest = dest.clone();
-    // Returns false when --include patterns matched no entry.
     let result = with_password_retry(&ctx.loc, explicit.as_ref(), |pw| {
         let open = OpenOptions {
             password: pw.cloned(),
             encoding_override: encoding.clone(),
         };
-        // --smart and --include both need the entry list up front.
-        let entries = if smart || !filter.is_empty() {
-            Some(ctx.engine.list(&archive, &open)?)
-        } else {
-            None
-        };
-        let selection: Option<Vec<EntryPath>> = if filter.is_empty() {
-            None
-        } else {
-            entries.as_ref().map(|entries| {
-                entries
-                    .iter()
-                    .filter(|e| filter.matches(&e.path.display))
-                    .map(|e| e.path.clone())
-                    .collect()
-            })
-        };
-        if let Some(sel) = &selection {
-            if sel.is_empty() {
-                return Ok(false);
-            }
-        }
-        final_dest = dest.clone();
+        let (plan, report) = ctx.engine.plan_and_extract_with_report_controlled(
+            &archive,
+            &dest,
+            &archive,
+            smart,
+            &open,
+            &x_opts,
+            &progress,
+            &ctx.ctl,
+            |entries, control| filter.select_entries(entries, control),
+            |_| Ok(()),
+        )?;
+        let no_match = !filter.is_empty() && plan.scope.entries == 0;
         if smart {
-            match analyze_extract_layout(layout_entries(entries.as_deref())) {
+            match plan.layout {
                 SmartLayout::DirectExtract => {
                     ctx.eprint_notice(ctx.loc.t("cli.extract.smart_direct"));
                 }
@@ -162,63 +149,67 @@ pub fn run(
                         .loc
                         .format("cli.extract.smart_wrap", &[("folder", &folder)]);
                     ctx.eprint_notice(&message);
-                    final_dest = dest.join(folder);
                 }
             }
         }
-        ctx.engine.extract(
-            &archive,
-            &final_dest,
-            selection.as_deref(),
-            &open,
-            &x_opts,
-            &progress,
-            &ctx.ctl,
-        )?;
-        Ok(true)
+        Ok(ExtractRunOutcome {
+            plan,
+            report: (!no_match).then_some(report),
+        })
     });
     progress.finish();
-    if !result? {
+    let outcome = result?;
+    let Some(report) = outcome.report else {
+        let path = outcome.plan.requested_destination.display().to_string();
         if json_output {
             let value = json!({
                 "ok": true,
                 "operation": "extract",
-                "dest": final_dest.display().to_string(),
+                "dest": path,
                 "matched": false,
                 "best_effort": best_effort,
                 "skipped": 0,
                 "problems": [],
+                "problems_total": 0,
+                "problems_truncated": false,
+                "plan": extract_plan_json(&outcome.plan),
+                "counts": empty_extract_counts_json(&outcome.plan.destination),
+                "selected_entries": 0,
+                "directories": 0,
+                "output_bytes": 0,
             });
             print_pretty_json(&value)?;
             return Ok(());
         }
         if ctx.is_modern() {
-            print_extract_no_match(
-                ctx,
-                &final_dest.display().to_string(),
-                includes.len(),
-                smart,
-                best_effort,
-            );
+            print_extract_no_match(ctx, &path, includes.len(), smart, best_effort);
         } else {
             ctx.eprint_notice(ctx.loc.t("cli.extract.no_match"));
         }
         return Ok(());
-    }
-    let path = final_dest.display().to_string();
+    };
+    let path = report.destination.display().to_string();
     let problems = match problem_reporter.as_ref() {
-        Some(reporter) => reporter.problems(),
-        None => Vec::new(),
+        Some(reporter) => reporter.summary(),
+        None => ProblemPreview::default(),
     };
     if json_output {
+        let problems_truncated = problems.is_truncated();
         let value = json!({
             "ok": true,
             "operation": "extract",
             "dest": path,
             "matched": true,
             "best_effort": best_effort,
-            "skipped": problems.len(),
-            "problems": problems,
+            "skipped": problems.total,
+            "problems": problems.messages,
+            "problems_total": problems.total,
+            "problems_truncated": problems_truncated,
+            "plan": extract_plan_json(&outcome.plan),
+            "counts": extract_counts_json(&report),
+            "selected_entries": report.selected_entries,
+            "directories": report.directories,
+            "output_bytes": report.output_bytes,
         });
         print_pretty_json(&value)?;
         return Ok(());
@@ -229,7 +220,7 @@ pub fn run(
         } else {
             ctx.loc.t("common.strict")
         };
-        let tone = if problems.is_empty() {
+        let tone = if report.skipped == 0 && report.failed == 0 {
             Tone::Success
         } else {
             Tone::Warning
@@ -239,27 +230,37 @@ pub fn run(
             archive: &archive_label,
             mode: &mode,
             path: &path,
-            skipped: problems.len(),
             tone,
             opts: &x_opts,
             include_count: includes.len(),
             smart,
             encoding_selected: encoding.is_some(),
+            plan: &outcome.plan,
+            report: &report,
         };
         print_extract_result(ctx, &result);
     } else {
         let message = ctx.loc.format("cli.extract.done", &[("path", &path)]);
         ctx.print_success(&message);
     }
-    if problem_reporter.is_some() && !problems.is_empty() {
-        let count = problems.len().to_string();
+    if problem_reporter.is_some() && problems.total > 0 {
+        let count = problems.total.to_string();
         let message = ctx
             .loc
             .format("cli.extract.best_effort_summary", &[("count", &count)]);
         ctx.eprint_notice(&message);
         if ctx.verbose {
-            for problem in problems {
-                ctx.eprint_problem(&problem);
+            for problem in &problems.messages {
+                ctx.eprint_problem(problem);
+            }
+            if problems.is_truncated() {
+                let shown = problems.messages.len().to_string();
+                let omitted = problems.omitted().to_string();
+                let message = ctx.loc.format(
+                    "cli.extract.best_effort_preview_truncated",
+                    &[("shown", &shown), ("omitted", &omitted)],
+                );
+                ctx.eprint_notice(&message);
             }
         }
     }
@@ -273,26 +274,21 @@ fn extract_dest_or_current(dest: Option<PathBuf>) -> PathBuf {
     }
 }
 
-fn layout_entries(entries: Option<&[EntryMeta]>) -> &[EntryMeta] {
-    match entries {
-        Some(entries) => entries,
-        None => &[],
-    }
-}
-
 struct ExtractResultView<'a> {
     archive: &'a str,
     mode: &'a str,
     path: &'a str,
-    skipped: usize,
     tone: Tone,
     opts: &'a ExtractOptions,
     include_count: usize,
     smart: bool,
     encoding_selected: bool,
+    plan: &'a ExtractPlan,
+    report: &'a ExtractReport,
 }
 
 fn print_extract_result(ctx: &Ctx, result: &ExtractResultView<'_>) {
+    let scope = extract_scope_label(ctx, result.plan);
     ctx.print_modern_status_panel(
         &ctx.loc.t("cli.extract.result_title"),
         &ctx.loc.t("common.done"),
@@ -300,18 +296,38 @@ fn print_extract_result(ctx: &Ctx, result: &ExtractResultView<'_>) {
         &format!("{} · {}", result.mode, result.path),
         &[
             ModernStatusField::new(ctx.loc.t("common.mode"), result.mode.to_owned()),
-            ModernStatusField::new(ctx.loc.t("common.skipped"), result.skipped.to_string()),
-            ModernStatusField::new(ctx.loc.t("common.destination"), result.path.to_owned()),
+            ModernStatusField::new(ctx.loc.t("common.scope"), scope),
+            ModernStatusField::new(ctx.loc.t("common.target"), result.path.to_owned()),
+            ModernStatusField::new(
+                ctx.loc.t("common.created"),
+                result.report.created.to_string(),
+            ),
+            ModernStatusField::new(
+                ctx.loc.t("common.skipped"),
+                result.report.skipped.to_string(),
+            ),
+            ModernStatusField::new(
+                ctx.loc.t("common.replaced"),
+                result.report.replaced.to_string(),
+            ),
+            ModernStatusField::new(
+                ctx.loc.t("common.renamed"),
+                result.report.renamed.to_string(),
+            ),
+            ModernStatusField::new(ctx.loc.t("common.failed"), result.report.failed.to_string()),
         ],
     );
     print_extract_plan(ctx, result);
     let result_row = vec![
         ctx.loc.t("common.done"),
-        result.mode.to_owned(),
-        result.skipped.to_string(),
+        result.report.created.to_string(),
+        result.report.skipped.to_string(),
+        result.report.replaced.to_string(),
+        result.report.renamed.to_string(),
+        result.report.failed.to_string(),
         result.path.to_owned(),
     ];
-    let status_row = if result.skipped == 0 {
+    let status_row = if result.report.skipped == 0 && result.report.failed == 0 {
         ModernTableRow::success(result_row)
     } else {
         ModernTableRow::warning(result_row)
@@ -319,10 +335,13 @@ fn print_extract_result(ctx: &Ctx, result: &ExtractResultView<'_>) {
     ctx.print_modern_table(
         &ctx.loc.t("cli.extract.summary_title"),
         &[
-            ModernTableColumn::new(ctx.loc.t("common.status"), 12),
-            ModernTableColumn::new(ctx.loc.t("common.mode"), 14),
-            ModernTableColumn::right(ctx.loc.t("common.skipped"), 8),
-            ModernTableColumn::new(ctx.loc.t("common.destination"), 58),
+            ModernTableColumn::new(ctx.loc.t("common.status"), 10),
+            ModernTableColumn::right(ctx.loc.t("common.created"), 9),
+            ModernTableColumn::right(ctx.loc.t("common.skipped"), 9),
+            ModernTableColumn::right(ctx.loc.t("common.replaced"), 9),
+            ModernTableColumn::right(ctx.loc.t("common.renamed"), 9),
+            ModernTableColumn::right(ctx.loc.t("common.failed"), 9),
+            ModernTableColumn::new(ctx.loc.t("common.destination"), 42),
         ],
         &[status_row],
     );
@@ -344,11 +363,11 @@ fn print_extract_result(ctx: &Ctx, result: &ExtractResultView<'_>) {
             ModernTableRow::new(vec![
                 ctx.loc.t("common.selection"),
                 ctx.loc.t("common.entries"),
-                selection_label(ctx, result.include_count),
+                extract_scope_label(ctx, result.plan),
                 if result.smart {
                     ctx.loc.t("common.smart_layout")
                 } else {
-                    result.mode.to_owned()
+                    selection_label(ctx, result.include_count)
                 },
             ]),
             ModernTableRow::new(vec![
@@ -357,12 +376,15 @@ fn print_extract_result(ctx: &Ctx, result: &ExtractResultView<'_>) {
                 overwrite_policy_label(ctx, result.opts.overwrite),
                 safety_limits_label(result.opts),
             ]),
-            ModernTableRow::success(vec![
-                ctx.loc.t("common.destination"),
-                ctx.loc.t("common.skipped"),
-                result.skipped.to_string(),
-                result.path.to_owned(),
-            ]),
+            ModernTableRow::with_tone(
+                vec![
+                    ctx.loc.t("common.target"),
+                    ctx.loc.t("common.done"),
+                    extract_counts_label(ctx, result.report),
+                    result.path.to_owned(),
+                ],
+                result.tone,
+            ),
         ],
     );
     ctx.print_modern_table(
@@ -428,7 +450,7 @@ fn print_extract_plan(ctx: &Ctx, result: &ExtractResultView<'_>) {
             ModernTableRow::success(vec![
                 ctx.loc.t("cli.extract.stage.select"),
                 ctx.loc.t("common.done"),
-                ctx.loc.t("cli.extract.detail.select"),
+                extract_scope_label(ctx, result.plan),
                 selection_label(ctx, result.include_count),
             ]),
             ModernTableRow::success(vec![
@@ -446,22 +468,9 @@ fn print_extract_plan(ctx: &Ctx, result: &ExtractResultView<'_>) {
                     ctx.loc.t("cli.extract.stage.write"),
                     ctx.loc.t("common.done"),
                     ctx.loc.t("cli.extract.detail.write"),
-                    format!(
-                        "{} · {} · {}",
-                        result.path,
-                        result.mode,
-                        if result.smart {
-                            ctx.loc.t("common.smart_layout")
-                        } else {
-                            format!("{} {}", ctx.loc.t("common.skipped"), result.skipped)
-                        }
-                    ),
+                    result.plan.destination.display().to_string(),
                 ],
-                if result.skipped == 0 {
-                    Tone::Success
-                } else {
-                    Tone::Warning
-                },
+                result.tone,
             ),
         ],
     );
@@ -477,17 +486,18 @@ fn print_extract_details(ctx: &Ctx, result: &ExtractResultView<'_>) {
         ],
         &[
             ModernTableRow::new(vec![
-                ctx.loc.t("common.selection"),
-                selection_label(ctx, result.include_count),
+                ctx.loc.t("common.scope"),
+                extract_scope_label(ctx, result.plan),
                 ctx.loc.t("cli.extract.detail.select"),
             ]),
             ModernTableRow::new(vec![
-                ctx.loc.t("common.smart_layout"),
-                if result.smart {
-                    ctx.loc.t("common.yes")
-                } else {
-                    ctx.loc.t("common.no")
-                },
+                ctx.loc.t("common.target"),
+                result.plan.destination.display().to_string(),
+                result.plan.requested_destination.display().to_string(),
+            ]),
+            ModernTableRow::new(vec![
+                ctx.loc.t("common.size"),
+                fmt_bytes(result.report.output_bytes),
                 result.path.to_owned(),
             ]),
             ModernTableRow::new(vec![
@@ -511,11 +521,47 @@ fn print_extract_details(ctx: &Ctx, result: &ExtractResultView<'_>) {
             ]),
             ModernTableRow::with_tone(
                 vec![
+                    ctx.loc.t("common.created"),
+                    result.report.created.to_string(),
+                    ctx.loc.t("cli.extract.detail.write"),
+                ],
+                Tone::Success,
+            ),
+            ModernTableRow::with_tone(
+                vec![
                     ctx.loc.t("common.skipped"),
-                    result.skipped.to_string(),
+                    result.report.skipped.to_string(),
+                    overwrite_policy_label(ctx, result.opts.overwrite),
+                ],
+                if result.report.skipped == 0 {
+                    Tone::Success
+                } else {
+                    Tone::Warning
+                },
+            ),
+            ModernTableRow::with_tone(
+                vec![
+                    ctx.loc.t("common.replaced"),
+                    result.report.replaced.to_string(),
+                    ctx.loc.t("common.policy.overwrite"),
+                ],
+                Tone::Success,
+            ),
+            ModernTableRow::with_tone(
+                vec![
+                    ctx.loc.t("common.renamed"),
+                    result.report.renamed.to_string(),
+                    ctx.loc.t("common.policy.rename_both"),
+                ],
+                Tone::Success,
+            ),
+            ModernTableRow::with_tone(
+                vec![
+                    ctx.loc.t("common.failed"),
+                    result.report.failed.to_string(),
                     ctx.loc.t("common.problems"),
                 ],
-                if result.skipped == 0 {
+                if result.report.failed == 0 {
                     Tone::Success
                 } else {
                     Tone::Warning
@@ -589,6 +635,35 @@ fn print_extract_no_match(
     );
 }
 
+fn extract_scope_label(ctx: &Ctx, plan: &ExtractPlan) -> String {
+    format!(
+        "{} {} · {} {} · {} {} · {}",
+        plan.scope.entries,
+        ctx.loc.t("common.entries"),
+        plan.scope.files,
+        ctx.loc.t("common.files"),
+        plan.scope.directories,
+        ctx.loc.t("common.directories"),
+        fmt_bytes(plan.scope.total_bytes),
+    )
+}
+
+fn extract_counts_label(ctx: &Ctx, report: &ExtractReport) -> String {
+    format!(
+        "{} {} · {} {} · {} {} · {} {} · {} {}",
+        ctx.loc.t("common.created"),
+        report.created,
+        ctx.loc.t("common.skipped"),
+        report.skipped,
+        ctx.loc.t("common.replaced"),
+        report.replaced,
+        ctx.loc.t("common.renamed"),
+        report.renamed,
+        ctx.loc.t("common.failed"),
+        report.failed,
+    )
+}
+
 fn selection_label(ctx: &Ctx, include_count: usize) -> String {
     if include_count == 0 {
         return ctx.loc.t("common.all_entries");
@@ -623,4 +698,30 @@ fn safety_limits_label(opts: &ExtractOptions) -> String {
         fmt_bytes(opts.limits.max_output_bytes),
         opts.limits.max_compression_ratio,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cli_problem_reporter_keeps_an_exact_count_and_bounded_preview() {
+        let reporter =
+            CliExtractProblemReporter::new(Arc::new(Localizer::with_user_dir(Some("en-US"), None)));
+        let path = EntryPath::from_utf8("damaged/item.bin");
+
+        for index in 0..25 {
+            reporter.skipped_entry(
+                &path,
+                &FormatError::CorruptArchive(format!("checksum mismatch {index}")),
+            );
+        }
+
+        let summary = reporter.summary();
+        assert_eq!(summary.total, 25);
+        assert_eq!(summary.messages.len(), 20);
+        assert!(summary.messages[0].contains("damaged/item.bin"));
+        assert!(summary.is_truncated());
+        assert_eq!(summary.omitted(), 5);
+    }
 }

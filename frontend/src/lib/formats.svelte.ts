@@ -1,6 +1,11 @@
 // Format capability cache (drives the compress dialog and drop-type
 // detection). Loaded once at startup from `get_formats`.
 
+import {
+  archiveNameWithoutVolumeSuffix,
+  isLegacyRarVolumeName,
+  isNativeSplitZipVolumeName,
+} from "./archive-names";
 import { ipc, type FormatDto } from "./ipc";
 
 const store = $state({
@@ -34,8 +39,8 @@ export function creatableFormats(): FormatDto[] {
 /** Whether a local path looks like an archive we can open. */
 export function isArchivePath(path: string): boolean {
   const name = path.split("/").pop()?.toLowerCase() ?? "";
-  // Split volumes (x.zip.001) open as archives too.
-  const unsplit = name.replace(/\.\d{3,}$/, "");
+  if (isLegacyRarVolumeName(name) || isNativeSplitZipVolumeName(name)) return true;
+  const unsplit = archiveNameWithoutVolumeSuffix(name);
   for (const ext of store.extensions) {
     if (unsplit.endsWith(`.${ext}`)) return true;
   }

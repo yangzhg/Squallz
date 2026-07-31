@@ -7,7 +7,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use reed_solomon_erasure::galois_8::ReedSolomon;
 use squallz_format_api::{
     ArchiveFormat, ArchiveWriter, CompressionLevel, Compressor, CreateOptions, EntryMeta,
-    EntryPath, EntryType, FormatError, ResourceOptions, SqzCreateOptions, WriteSeek,
+    EntryPath, EntryType, FormatCreateBudget, FormatError, ResourceOptions, SqzCreateOptions,
+    WriteSeek,
 };
 
 use crate::{sevenz::SevenZFormat, tar::TarFormat, zip::ZipFormat};
@@ -23,6 +24,9 @@ use super::{
 const COPY_CHUNK: usize = 64 * 1024;
 const ABSENT_TIMESTAMP_SECS: u64 = u64::MAX;
 const ABSENT_UNIX_MODE: u32 = u32::MAX;
+const DESCRIPTOR_BUDGET: u64 = 1024;
+const INNER_INDEX_BUDGET: u64 = 4096;
+const RECOVERY_PRIMARY_HEADER_LEN: u64 = 84;
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 struct PendingRecord {
@@ -71,6 +75,109 @@ pub(super) fn create(
             "unsupported sqz inner format: {other}"
         ))),
     }
+}
+
+pub(super) fn create_budget(
+    content_bytes: u64,
+    archive_bytes: u64,
+    opts: &CreateOptions,
+) -> Result<FormatCreateBudget, FormatError> {
+    let (payload_bytes, index_bytes, system_temp_bytes) = match opts.sqz.inner_format.as_str() {
+        "sqz" => (
+            content_bytes,
+            archive_bytes
+                .saturating_sub(content_bytes)
+                .max(INNER_INDEX_BUDGET),
+            0,
+        ),
+        "zip" | "tar" | "7z" => (archive_bytes, INNER_INDEX_BUDGET, archive_bytes),
+        "zstd" => (
+            archive_bytes,
+            INNER_INDEX_BUDGET,
+            checked_mul(archive_bytes, 2, "SQZ temporary workspace")?,
+        ),
+        other => {
+            return Err(FormatError::Unsupported(format!(
+                "unsupported sqz inner format: {other}"
+            )))
+        }
+    };
+    Ok(FormatCreateBudget {
+        output_bytes: sqz_output_budget(payload_bytes, index_bytes, opts.sqz.parity_shards())?,
+        system_temp_bytes,
+    })
+}
+
+fn sqz_output_budget(
+    payload_bytes: u64,
+    index_bytes: u64,
+    parity_shards: usize,
+) -> Result<u64, FormatError> {
+    let block_size = u64::from(BLOCK_SIZE);
+    let payload_blocks = payload_bytes.div_ceil(block_size);
+    let payload_groups = payload_blocks.div_ceil(SqzCreateOptions::DATA_SHARDS as u64);
+    let payload_hashes = checked_mul(payload_blocks, 32, "SQZ payload hashes")?;
+    let parity_bytes = checked_mul(
+        checked_mul(payload_groups, parity_shards as u64, "SQZ recovery shards")?,
+        block_size,
+        "SQZ recovery parity",
+    )?;
+    let primary_bytes = checked_sum(
+        [
+            RECOVERY_PRIMARY_HEADER_LEN,
+            payload_hashes,
+            parity_bytes,
+            index_bytes,
+        ],
+        "SQZ recovery section",
+    )?;
+
+    let protection_blocks = primary_bytes.div_ceil(block_size);
+    let protection_hashes = checked_mul(protection_blocks, 32, "SQZ recovery hashes")?;
+    let protection_groups = protection_blocks.div_ceil(u64::from(RECOVERY_DATA_SHARDS));
+    let protection_parity = checked_mul(
+        checked_mul(
+            protection_groups,
+            u64::from(RECOVERY_PARITY_SHARDS),
+            "SQZ recovery protection shards",
+        )?,
+        block_size,
+        "SQZ recovery protection parity",
+    )?;
+    let recovery_bytes = checked_sum(
+        [
+            primary_bytes,
+            protection_hashes,
+            protection_parity,
+            RECOVERY_PROTECTION_TRAILER_LEN as u64,
+        ],
+        "SQZ protected recovery section",
+    )?;
+
+    checked_sum(
+        [
+            HEADER_LEN as u64,
+            DESCRIPTOR_BUDGET,
+            payload_bytes,
+            recovery_bytes,
+            index_bytes,
+            FOOTER_LEN as u64,
+        ],
+        "SQZ output budget",
+    )
+}
+
+fn checked_mul(left: u64, right: u64, context: &str) -> Result<u64, FormatError> {
+    left.checked_mul(right)
+        .ok_or_else(|| FormatError::ResourceLimitExceeded(format!("{context} overflow")))
+}
+
+fn checked_sum<const N: usize>(values: [u64; N], context: &str) -> Result<u64, FormatError> {
+    values.into_iter().try_fold(0u64, |total, value| {
+        total
+            .checked_add(value)
+            .ok_or_else(|| FormatError::ResourceLimitExceeded(format!("{context} overflow")))
+    })
 }
 
 impl SqzArchiveWriter {
@@ -347,7 +454,7 @@ fn create_temp_inner_file(ext: &str) -> Result<(TempPathGuard, File), FormatErro
         {
             Ok(file) => return Ok((TempPathGuard { path }, file)),
             Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(err) => return Err(FormatError::Io(err)),
+            Err(err) => return Err(FormatError::from(err)),
         }
     }
     Err(FormatError::Io(std::io::Error::new(

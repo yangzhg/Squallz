@@ -5,8 +5,8 @@ edition.workspace = true
 license.workspace = true
 description = "Squallz 桌面应用（Tauri 2）"
 
-# Tauri's macros need generated code; unsafe is still avoided in our own
-# business logic (the workspace-wide forbid stays on core/format-api/formats).
+# Tauri's macros need generated code; GUI business logic does not add unsafe.
+# Core keeps its only Windows no-replace FFI in one audited, scoped function.
 
 [[bin]]
 name = "squallz-gui"
@@ -19,8 +19,10 @@ tauri-build = { version = "2", features = [] }
 squallz-core = { path = "../squallz-core", version = "0.1.0" }
 squallz-formats = { path = "../squallz-formats", version = "0.1.0" }
 squallz-i18n = { path = "../squallz-i18n", version = "0.1.0" }
+squallz-publish = { path = "../squallz-publish", version = "0.1.0" }
 squallz-recovery = { path = "../squallz-recovery", version = "0.1.0" }
-tauri = { version = "2", features = ["macos-private-api"] }
+squallz-update = { path = "../squallz-update", version = "0.1.0" }
+tauri = { version = "~2.11.2", features = ["macos-private-api"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
 serde.workspace = true
@@ -29,10 +31,14 @@ dirs.workspace = true
 fs4 = "1"
 log.workspace = true
 base64 = "0.22"
-
+blake3 = { version = "1.8.5", features = ["prefer_intrinsics"] }
+trash = "=5.2.6"
+tempfile = "3.27.0"
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6.3"
-objc2-app-kit = { version = "0.3.2", features = ["NSApplication"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSApplication", "NSWorkspace"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSBundle", "NSString", "NSURL"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security_Credentials"] }
+winapi-util = "0.1.11"
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security_Credentials", "Win32_Storage_FileSystem"] }

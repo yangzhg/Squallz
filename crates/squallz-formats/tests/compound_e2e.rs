@@ -6,12 +6,16 @@
 mod common;
 
 use std::fs;
+use std::io::Write;
 use std::path::Path;
 use std::process::Command;
 
 use common::{command_exists, engine, TempDir};
+use flate2::write::GzEncoder;
+use flate2::Compression;
 use squallz_core::api::{
     ControlToken, CreateOptions, EntryType, ExtractOptions, FormatError, NoProgress, OpenOptions,
+    SafetyLimits,
 };
 
 /// Compound suffixes and the matching system-tar creation flag.
@@ -28,6 +32,24 @@ fn build_tree(root: &Path) {
     fs::write(root.join("a.txt"), "hello compound world").unwrap();
     fs::write(root.join("sub/b.bin"), vec![7u8; 100_000]).unwrap();
     fs::write(root.join("sub/嵌套/中文.txt"), "中文内容").unwrap();
+}
+
+fn write_single_byte_tar_gz(archive: &Path, trailing_zeros: usize) {
+    let mut tar_bytes = Vec::new();
+    {
+        let mut builder = tar::Builder::new(&mut tar_bytes);
+        let mut header = tar::Header::new_gnu();
+        header.set_path("file.txt").unwrap();
+        header.set_size(1);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder.append(&header, &b"x"[..]).unwrap();
+        builder.finish().unwrap();
+    }
+    tar_bytes.resize(tar_bytes.len() + trailing_zeros, 0);
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(&tar_bytes).unwrap();
+    fs::write(archive, encoder.finish().unwrap()).unwrap();
 }
 
 /// Compares the three fixture files between two extracted roots.
@@ -164,6 +186,153 @@ fn system_tar_to_ours_all_compound_suffixes() {
             .unwrap();
         assert_tree_equal(&out.join("tree"), &root);
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn opened_compound_reader_does_not_follow_a_replaced_source_path() {
+    let dir = TempDir::new("compound-opened-source-binding");
+    let original_root = dir.path().join("original/tree");
+    let replacement_root = dir.path().join("replacement/tree");
+    fs::create_dir_all(&original_root).unwrap();
+    fs::create_dir_all(&replacement_root).unwrap();
+    fs::write(original_root.join("payload.txt"), "original payload").unwrap();
+    fs::write(replacement_root.join("payload.txt"), "replacement payload").unwrap();
+    let archive = dir.path().join("source.tar.gz");
+    let replacement = dir.path().join("replacement.tar.gz");
+    let engine = engine();
+    let ctl = ControlToken::new();
+    engine
+        .create(
+            &archive,
+            std::slice::from_ref(&original_root),
+            &CreateOptions::default(),
+            &NoProgress,
+            &ctl,
+        )
+        .unwrap();
+    engine
+        .create(
+            &replacement,
+            std::slice::from_ref(&replacement_root),
+            &CreateOptions::default(),
+            &NoProgress,
+            &ctl,
+        )
+        .unwrap();
+
+    let mut reader = engine.open(&archive, &OpenOptions::default()).unwrap();
+    fs::remove_file(&archive).unwrap();
+    fs::rename(&replacement, &archive).unwrap();
+
+    let entries = reader.entries().collect::<Result<Vec<_>, _>>().unwrap();
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[1].path.display, "tree/payload.txt");
+    assert!(reader.test(&NoProgress, &ctl).unwrap().is_ok());
+    let out = dir.path().join("out");
+    reader
+        .extract(&out, None, &ExtractOptions::default(), &NoProgress, &ctl)
+        .unwrap();
+    assert_eq!(
+        fs::read_to_string(out.join("tree/payload.txt")).unwrap(),
+        "original payload"
+    );
+}
+
+#[test]
+fn damaged_gzip_trailer_fails_tar_test_and_extract() {
+    let dir = TempDir::new("compound-damaged-gzip-trailer");
+    let root = dir.path().join("tree");
+    build_tree(&root);
+    let engine = engine();
+    let ctl = ControlToken::new();
+    let archive = dir.path().join("damaged.tar.gz");
+    engine
+        .create(
+            &archive,
+            &[root],
+            &CreateOptions::default(),
+            &NoProgress,
+            &ctl,
+        )
+        .unwrap();
+
+    let mut bytes = fs::read(&archive).unwrap();
+    let trailer_crc = bytes.len().checked_sub(8).unwrap();
+    bytes[trailer_crc] ^= 0x5a;
+    fs::write(&archive, bytes).unwrap();
+
+    let report = engine
+        .test(&archive, &OpenOptions::default(), &NoProgress, &ctl)
+        .unwrap();
+    assert!(
+        !report.is_ok(),
+        "testing tar.gz must validate the gzip trailer"
+    );
+
+    let err = engine
+        .extract(
+            &archive,
+            &dir.path().join("out"),
+            None,
+            &OpenOptions::default(),
+            &ExtractOptions::default(),
+            &NoProgress,
+            &ctl,
+        )
+        .unwrap_err();
+    assert!(
+        matches!(err, FormatError::Io(_) | FormatError::CorruptArchive(_)),
+        "extracting tar.gz must validate the gzip trailer: {err}"
+    );
+}
+
+#[test]
+fn compound_trailer_drain_does_not_consume_extract_output_budget() {
+    let dir = TempDir::new("compound-trailer-separate-output-budget");
+    let archive = dir.path().join("single-byte.tar.gz");
+    write_single_byte_tar_gz(&archive, 0);
+
+    let opts = ExtractOptions {
+        limits: SafetyLimits {
+            max_output_bytes: 1,
+            ..SafetyLimits::default()
+        },
+        ..ExtractOptions::default()
+    };
+    let out = dir.path().join("out");
+    engine()
+        .extract(
+            &archive,
+            &out,
+            None,
+            &OpenOptions::default(),
+            &opts,
+            &NoProgress,
+            &ControlToken::new(),
+        )
+        .unwrap();
+    assert_eq!(fs::read(out.join("file.txt")).unwrap(), b"x");
+}
+
+#[test]
+fn compound_trailer_drain_has_a_fixed_safety_limit() {
+    let dir = TempDir::new("compound-trailer-fixed-limit");
+    let archive = dir.path().join("padded.tar.gz");
+    write_single_byte_tar_gz(&archive, 17 * 1024 * 1024);
+
+    let err = engine()
+        .extract(
+            &archive,
+            &dir.path().join("out"),
+            None,
+            &OpenOptions::default(),
+            &ExtractOptions::default(),
+            &NoProgress,
+            &ControlToken::new(),
+        )
+        .unwrap_err();
+    assert!(matches!(err, FormatError::ResourceLimitExceeded(_)));
 }
 
 #[test]

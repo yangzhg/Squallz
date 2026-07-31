@@ -8,16 +8,18 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
 use squallz_core::api::{
-    ConflictResolver, EntryMeta, EntryPath, ExtractOptions, ExtractProblemReporter, FormatError,
-    OpenOptions, OverwritePolicy, Password,
+    ConflictResolver, EntryPath, ExtractOptions, ExtractProblemReporter, ExtractReport,
+    FormatError, OpenOptions, OverwritePolicy, Password, ProblemPreview,
 };
-use squallz_core::{analyze_extract_layout, PathFilter, SmartLayout};
+use squallz_core::{ExtractPlan, PathFilter, SmartLayout};
 
 use crate::args::{resource_options, safety_limits, NestedCmd, OverwriteArg, SymlinkArg};
 use crate::commands::{
     extract::CliExtractProblemReporter,
     list::{entry_json, print_modern_table, print_tree},
-    reports::print_pretty_json,
+    reports::{
+        empty_extract_counts_json, extract_counts_json, extract_plan_json, print_pretty_json,
+    },
     Ctx, ModernStatusField, ModernTableColumn, ModernTableRow,
 };
 use crate::errors::CliError;
@@ -31,6 +33,11 @@ static NESTED_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 struct NestedTempArchive {
     path: PathBuf,
+}
+
+struct NestedExtractRunOutcome {
+    plan: ExtractPlan,
+    report: Option<ExtractReport>,
 }
 
 impl NestedTempArchive {
@@ -54,6 +61,7 @@ pub fn run(ctx: &Ctx, cmd: NestedCmd) -> Result<(), CliError> {
             encoding,
             nested_password,
             nested_encoding,
+            search,
             json,
             tree,
         } => list_nested(
@@ -64,6 +72,7 @@ pub fn run(ctx: &Ctx, cmd: NestedCmd) -> Result<(), CliError> {
             encoding,
             nested_password,
             nested_encoding,
+            search,
             json,
             tree,
         ),
@@ -119,6 +128,7 @@ fn list_nested(
     encoding: Option<String>,
     nested_password: Option<String>,
     nested_encoding: Option<String>,
+    search: Option<String>,
     json: bool,
     tree: bool,
 ) -> Result<(), CliError> {
@@ -133,6 +143,7 @@ fn list_nested(
             },
         )
     })?;
+    let entries = crate::commands::list::filter_entries_for_search(entries, search.as_deref());
 
     if json {
         let array: Vec<Value> = entries.iter().map(entry_json).collect();
@@ -192,6 +203,7 @@ fn extract_nested(
 ) -> Result<(), CliError> {
     let temp = extract_nested_archive_to_temp(ctx, archive, &entry, password, encoding)?;
     let dest = extract_dest_or_current(dest);
+    let archive_display_path = PathBuf::from(safe_entry_basename(&entry));
     let filter = PathFilter::new(&includes)?;
 
     let mut overwrite: OverwritePolicy = overwrite.into();
@@ -229,89 +241,89 @@ fn extract_nested(
         "nested",
     );
     let explicit = nested_password.map(Password::new);
-    let mut final_dest = dest.clone();
     let result = with_password_retry(&ctx.loc, explicit.as_ref(), |pw| {
         let open = OpenOptions {
             password: pw.cloned(),
             encoding_override: nested_encoding.clone(),
         };
-        let entries = if smart || !filter.is_empty() {
-            Some(ctx.engine.list(temp.path(), &open)?)
-        } else {
-            None
-        };
-        let selection: Option<Vec<EntryPath>> = if filter.is_empty() {
-            None
-        } else {
-            entries.as_ref().map(|entries| {
-                entries
-                    .iter()
-                    .filter(|e| filter.matches(&e.path.display))
-                    .map(|e| e.path.clone())
-                    .collect()
-            })
-        };
-        if let Some(sel) = &selection {
-            if sel.is_empty() {
-                return Ok(false);
-            }
-        }
-        final_dest = dest.clone();
-        if smart {
-            match analyze_extract_layout(layout_entries(entries.as_deref())) {
-                SmartLayout::DirectExtract => {
-                    ctx.eprint_notice(ctx.loc.t("cli.extract.smart_direct"));
-                }
-                SmartLayout::WrapInFolder => {
-                    let folder = archive_stem_for_entry(ctx, &entry);
-                    let message = ctx
-                        .loc
-                        .format("cli.extract.smart_wrap", &[("folder", &folder)]);
-                    ctx.eprint_notice(&message);
-                    final_dest = dest.join(folder);
-                }
-            }
-        }
-        ctx.engine.extract(
+        let (plan, report) = ctx.engine.plan_and_extract_with_report_controlled(
             temp.path(),
-            &final_dest,
-            selection.as_deref(),
+            &dest,
+            &archive_display_path,
+            smart,
             &open,
             &x_opts,
             &progress,
             &ctx.ctl,
+            |entries, control| filter.select_entries(entries, control),
+            |_| Ok(()),
         )?;
-        Ok(true)
+        let no_match = !filter.is_empty() && plan.scope.entries == 0;
+        if smart {
+            match plan.layout {
+                SmartLayout::DirectExtract => {
+                    ctx.eprint_notice(ctx.loc.t("cli.extract.smart_direct"));
+                }
+                SmartLayout::WrapInFolder => {
+                    let folder = ctx.engine.archive_stem(&archive_display_path);
+                    let message = ctx
+                        .loc
+                        .format("cli.extract.smart_wrap", &[("folder", &folder)]);
+                    ctx.eprint_notice(&message);
+                }
+            }
+        }
+        Ok(NestedExtractRunOutcome {
+            plan,
+            report: (!no_match).then_some(report),
+        })
     });
     progress.finish();
-    if !result? {
+    let outcome = result?;
+    let Some(report) = outcome.report else {
+        let path = outcome.plan.requested_destination.display().to_string();
         if json_output {
             let value = json!({
                 "ok": true,
                 "operation": "nested_extract",
-                "dest": final_dest.display().to_string(),
+                "dest": path,
                 "matched": false,
                 "best_effort": best_effort,
                 "skipped": 0,
                 "problems": [],
+                "problems_total": 0,
+                "problems_truncated": false,
+                "plan": extract_plan_json(&outcome.plan),
+                "counts": empty_extract_counts_json(&outcome.plan.destination),
+                "selected_entries": 0,
+                "directories": 0,
+                "output_bytes": 0,
             });
             print_pretty_json(&value)?;
             return Ok(());
         }
         ctx.eprint_notice(ctx.loc.t("cli.extract.no_match"));
         return Ok(());
-    }
-    let path = final_dest.display().to_string();
+    };
+    let path = report.destination.display().to_string();
     let problems = reported_extract_problems(problem_reporter.as_ref());
     if json_output {
+        let problems_truncated = problems.is_truncated();
         let value = json!({
             "ok": true,
             "operation": "nested_extract",
             "dest": path,
             "matched": true,
             "best_effort": best_effort,
-            "skipped": problems.len(),
-            "problems": problems,
+            "skipped": problems.total,
+            "problems": problems.messages,
+            "problems_total": problems.total,
+            "problems_truncated": problems_truncated,
+            "plan": extract_plan_json(&outcome.plan),
+            "counts": extract_counts_json(&report),
+            "selected_entries": report.selected_entries,
+            "directories": report.directories,
+            "output_bytes": report.output_bytes,
         });
         print_pretty_json(&value)?;
         return Ok(());
@@ -322,7 +334,7 @@ fn extract_nested(
         } else {
             ctx.loc.t("common.strict")
         };
-        let tone = if problems.is_empty() {
+        let tone = if report.skipped == 0 && report.failed == 0 {
             Tone::Success
         } else {
             Tone::Warning
@@ -334,37 +346,55 @@ fn extract_nested(
             &format!("{mode} · {path}"),
             &[
                 ModernStatusField::new(ctx.loc.t("common.mode"), mode.clone()),
-                ModernStatusField::new(ctx.loc.t("common.skipped"), problems.len().to_string()),
+                ModernStatusField::new(ctx.loc.t("common.skipped"), report.skipped.to_string()),
+                ModernStatusField::new(ctx.loc.t("common.failed"), report.failed.to_string()),
             ],
         );
+        let result_row = vec![
+            ctx.loc.t("common.done"),
+            mode,
+            report.skipped.to_string(),
+            report.failed.to_string(),
+            path.clone(),
+        ];
+        let result_row = if report.skipped == 0 && report.failed == 0 {
+            ModernTableRow::success(result_row)
+        } else {
+            ModernTableRow::warning(result_row)
+        };
         ctx.print_modern_table(
             &ctx.loc.t("cli.extract.result_title"),
             &[
                 ModernTableColumn::new(ctx.loc.t("common.status"), 12),
                 ModernTableColumn::new(ctx.loc.t("common.mode"), 12),
                 ModernTableColumn::right(ctx.loc.t("common.skipped"), 8),
-                ModernTableColumn::new(ctx.loc.t("common.destination"), 58),
+                ModernTableColumn::right(ctx.loc.t("common.failed"), 8),
+                ModernTableColumn::new(ctx.loc.t("common.destination"), 50),
             ],
-            &[ModernTableRow::success(vec![
-                ctx.loc.t("common.done"),
-                mode,
-                problems.len().to_string(),
-                path.clone(),
-            ])],
+            &[result_row],
         );
     } else {
         let message = ctx.loc.format("cli.extract.done", &[("path", &path)]);
         ctx.print_success(&message);
     }
-    if problem_reporter.is_some() && !problems.is_empty() {
-        let count = problems.len().to_string();
+    if problem_reporter.is_some() && problems.total > 0 {
+        let count = problems.total.to_string();
         let message = ctx
             .loc
             .format("cli.extract.best_effort_summary", &[("count", &count)]);
         ctx.eprint_notice(&message);
         if ctx.verbose {
-            for problem in problems {
-                ctx.eprint_problem(&problem);
+            for problem in &problems.messages {
+                ctx.eprint_problem(problem);
+            }
+            if problems.is_truncated() {
+                let shown = problems.messages.len().to_string();
+                let omitted = problems.omitted().to_string();
+                let message = ctx.loc.format(
+                    "cli.extract.best_effort_preview_truncated",
+                    &[("shown", &shown), ("omitted", &omitted)],
+                );
+                ctx.eprint_notice(&message);
             }
         }
     }
@@ -385,19 +415,12 @@ fn extract_dest_or_current(dest: Option<PathBuf>) -> PathBuf {
     }
 }
 
-fn layout_entries(entries: Option<&[EntryMeta]>) -> &[EntryMeta] {
-    match entries {
-        Some(entries) => entries,
-        None => &[],
-    }
-}
-
 fn reported_extract_problems(
     problem_reporter: Option<&Arc<CliExtractProblemReporter>>,
-) -> Vec<String> {
+) -> ProblemPreview {
     match problem_reporter {
-        Some(reporter) => reporter.problems(),
-        None => Vec::new(),
+        Some(reporter) => reporter.summary(),
+        None => ProblemPreview::default(),
     }
 }
 
@@ -463,11 +486,6 @@ fn create_nested_temp_file(entry_path: &str) -> Result<(PathBuf, File), FormatEr
         "cannot create unique nested archive temp file for {}",
         safe_entry_basename(entry_path)
     )))
-}
-
-fn archive_stem_for_entry(ctx: &Ctx, entry_path: &str) -> String {
-    ctx.engine
-        .archive_stem(Path::new(&safe_entry_basename(entry_path)))
 }
 
 fn entry_basename_or_fallback(entry_path: &str) -> &str {

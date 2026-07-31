@@ -13,7 +13,7 @@ use std::io::{IsTerminal, Write};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use squallz_core::api::{EntryPath, ProgressSink};
+use squallz_core::api::{EntryPath, ProgressPhase, ProgressSink};
 
 use crate::args::{AccentArg, ColorArg, OutputStyleArg};
 use crate::ui::{self, Tone};
@@ -54,6 +54,9 @@ struct State {
     drawn: bool,
     drawn_lines: usize,
     frame: usize,
+    scanning: bool,
+    phase: Option<ProgressPhase>,
+    interruptible: bool,
 }
 
 fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -105,6 +108,9 @@ impl CliProgress {
                 drawn: false,
                 drawn_lines: 0,
                 frame: 0,
+                scanning: false,
+                phase: None,
+                interruptible: true,
             }),
         }
     }
@@ -125,6 +131,19 @@ impl CliProgress {
 
     fn draw_bar(&self, done: u64, total: u64, current: &EntryPath) {
         let mut state = lock_unpoisoned(&self.state);
+        if state.scanning {
+            state.start = Instant::now();
+            state.last_draw = None;
+            state.scanning = false;
+        }
+        let phase = state.phase;
+        let interruptible = state.interruptible;
+        let recovery_phase = is_recovery_progress_phase(phase);
+        let (done, total) = if phase.is_some() && !interruptible && !recovery_phase {
+            (0, 0)
+        } else {
+            (done, total)
+        };
         let finished = total > 0 && done >= total;
         if let Some(last) = state.last_draw {
             if !finished && last.elapsed() < REDRAW_INTERVAL {
@@ -138,7 +157,9 @@ impl CliProgress {
 
         let elapsed_duration = state.start.elapsed();
         let elapsed = elapsed_duration.as_secs_f64();
-        let speed = if elapsed > 0.05 {
+        let speed = if recovery_phase && total > 0 {
+            0.0
+        } else if elapsed > 0.05 {
             done as f64 / elapsed
         } else {
             0.0
@@ -163,8 +184,50 @@ impl CliProgress {
             speed: speed as u64,
             elapsed_secs: elapsed_duration.as_secs(),
             frame,
+            phase,
+            interruptible,
         };
         let block = render_progress_line(style, color, accent, snapshot);
+        let block = normalize_progress_block(&block, color);
+        let line_count = block.lines().count().max(1);
+        write_progress_block(&block, state.drawn, state.drawn_lines.max(1));
+        state.drawn_lines = line_count;
+        let _ = std::io::stderr().flush();
+    }
+
+    fn draw_scan(&self, entries: u64, current: &EntryPath) {
+        let mut state = lock_unpoisoned(&self.state);
+        state.scanning = true;
+        state.phase = None;
+        state.interruptible = true;
+        if let Some(last) = state.last_draw {
+            if last.elapsed() < REDRAW_INTERVAL {
+                return;
+            }
+        }
+        state.last_draw = Some(Instant::now());
+        state.drawn = true;
+        let frame = state.frame;
+        state.frame = state.frame.wrapping_add(1);
+
+        let (style, color, accent, operation) = match &self.mode {
+            Mode::Bar {
+                style,
+                color,
+                accent,
+                operation,
+            } => (*style, *color, *accent, operation.as_str()),
+            _ => return,
+        };
+        let block = render_scan_progress_line(
+            style,
+            color,
+            accent,
+            operation,
+            entries,
+            &current.display,
+            frame,
+        );
         let block = normalize_progress_block(&block, color);
         let line_count = block.lines().count().max(1);
         write_progress_block(&block, state.drawn, state.drawn_lines.max(1));
@@ -182,15 +245,43 @@ impl CliProgress {
             eprintln!("{}", current.display);
         }
     }
+
+    fn begin_phase(&self, phase: ProgressPhase, interruptible: bool) {
+        {
+            let mut state = lock_unpoisoned(&self.state);
+            state.start = Instant::now();
+            state.last_draw = None;
+            state.scanning = false;
+            state.phase = Some(phase);
+            state.interruptible = interruptible;
+        }
+        match self.mode {
+            Mode::Silent => {}
+            Mode::Bar { .. } => self.draw_bar(0, 0, &EntryPath::from_utf8("")),
+            Mode::Verbose => eprintln!("-- {} --", progress_phase_label(phase)),
+        }
+    }
 }
 
 impl ProgressSink for CliProgress {
+    fn on_scan_progress(&self, entries: u64, current: &EntryPath) {
+        match self.mode {
+            Mode::Silent => {}
+            Mode::Bar { .. } => self.draw_scan(entries, current),
+            Mode::Verbose => self.print_verbose(current),
+        }
+    }
+
     fn on_progress(&self, done: u64, total: u64, current: &EntryPath) {
         match self.mode {
             Mode::Silent => {}
             Mode::Bar { .. } => self.draw_bar(done, total, current),
             Mode::Verbose => self.print_verbose(current),
         }
+    }
+
+    fn on_phase(&self, phase: ProgressPhase, interruptible: bool) {
+        self.begin_phase(phase, interruptible);
     }
 }
 
@@ -203,6 +294,8 @@ struct ProgressFrame<'a> {
     speed: u64,
     elapsed_secs: u64,
     frame: usize,
+    phase: Option<ProgressPhase>,
+    interruptible: bool,
 }
 
 fn render_progress_line(
@@ -214,7 +307,42 @@ fn render_progress_line(
     if style.is_modern() {
         return render_modern_progress_line(color, accent, snapshot);
     }
+    if is_recovery_progress_phase(snapshot.phase) && snapshot.total > 0 {
+        let pct = percent(snapshot.done, snapshot.total);
+        let filled = pct * CLASSIC_BAR_CELLS / 100;
+        return format!(
+            "[{}{}] {} {:>3}%  {}",
+            "#".repeat(filled),
+            "-".repeat(CLASSIC_BAR_CELLS - filled),
+            snapshot
+                .phase
+                .map(progress_phase_label)
+                .unwrap_or("RECOVERY"),
+            pct,
+            snapshot.current,
+        );
+    }
+    if snapshot.phase == Some(ProgressPhase::RecoveryPrepare)
+        && snapshot.total == 0
+        && snapshot.done > 0
+    {
+        return format!(
+            "[{}] PREPARE  {}  {}/s  {}",
+            ".".repeat(CLASSIC_BAR_CELLS),
+            fmt_bytes(snapshot.done),
+            fmt_bytes(snapshot.speed),
+            snapshot.current,
+        );
+    }
     if snapshot.total == 0 {
+        if let Some(phase) = snapshot.phase {
+            return format!(
+                "[{}] {} active  {}",
+                ".".repeat(CLASSIC_BAR_CELLS),
+                progress_phase_label(phase),
+                snapshot.current,
+            );
+        }
         format!(
             "[{}] {}  {}/s  {}",
             ".".repeat(CLASSIC_BAR_CELLS),
@@ -223,10 +351,14 @@ fn render_progress_line(
             snapshot.current,
         )
     } else {
+        let phase = snapshot
+            .phase
+            .map(|phase| format!("{}  ", progress_phase_label(phase)))
+            .unwrap_or_default();
         let pct = percent(snapshot.done, snapshot.total);
         let filled = pct * CLASSIC_BAR_CELLS / 100;
         format!(
-            "[{}{}] {:>3}%  {} / {}  {}/s  {}",
+            "[{}{}] {phase}{:>3}%  {} / {}  {}/s  {}",
             "#".repeat(filled),
             "-".repeat(CLASSIC_BAR_CELLS - filled),
             pct,
@@ -236,6 +368,49 @@ fn render_progress_line(
             snapshot.current,
         )
     }
+}
+
+fn render_scan_progress_line(
+    style: OutputStyleArg,
+    color: bool,
+    accent: AccentArg,
+    operation: &str,
+    entries: u64,
+    current: &str,
+    frame: usize,
+) -> String {
+    if !style.is_modern() {
+        return format!(
+            "[{}] SCAN #{entries}  {current}",
+            ".".repeat(CLASSIC_BAR_CELLS),
+        );
+    }
+
+    let operation = operation.trim().to_ascii_uppercase();
+    let operation = if operation.is_empty() {
+        "WORK".to_owned()
+    } else {
+        operation
+    };
+    let pulse = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"][frame % 8];
+    let top = modern_hud_top(
+        &format!("{pulse} {operation} · SCAN"),
+        &format!("#{entries}"),
+    );
+    let gauge = modern_hud_content(&format!(
+        "▕{}▏  SCAN #{entries}  ·  {}",
+        streaming_gauge(frame),
+        modern_activity_spark(frame),
+    ));
+    let current = truncate_middle(current, MODERN_HUD_INNER_WIDTH.saturating_sub(6));
+    let current = modern_hud_content(&format!("SCAN  {current}"));
+    [
+        ui::paint_tone(color, accent, Tone::Primary, &top),
+        ui::paint_tone(color, accent, Tone::Primary, &gauge),
+        ui::paint_tone(color, accent, Tone::Secondary, &current),
+        ui::paint_tone(color, accent, Tone::Primary, &modern_hud_bottom()),
+    ]
+    .join("\n")
 }
 
 fn render_modern_progress_line(
@@ -250,25 +425,41 @@ fn render_modern_progress_line(
     } else {
         operation_label
     };
-    let pulse = if snapshot.total > 0 && snapshot.done >= snapshot.total {
+    let phase_is_explicit = snapshot.phase.is_some();
+    let recovery_percentage = is_recovery_progress_phase(snapshot.phase) && snapshot.total > 0;
+    let pulse = if !phase_is_explicit && snapshot.total > 0 && snapshot.done >= snapshot.total {
         "◆"
     } else {
         ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"][snapshot.frame % 8]
     };
-    let state = if snapshot.total == 0 {
+    let recovery_streaming = snapshot.phase == Some(ProgressPhase::RecoveryPrepare)
+        && snapshot.total == 0
+        && snapshot.done > 0;
+    let phase_without_total = phase_is_explicit && snapshot.total == 0 && !recovery_streaming;
+    let state = if phase_is_explicit && !snapshot.interruptible {
+        "SAFE"
+    } else if phase_is_explicit {
+        "RUN"
+    } else if snapshot.total == 0 {
         "LIVE"
-    } else if snapshot.done >= snapshot.total {
+    } else if !phase_is_explicit && snapshot.done >= snapshot.total {
         "DONE"
     } else {
         "RUN"
     };
-    let phase = modern_phase(operation_raw, snapshot.done, snapshot.total);
-    let progress_tone = if snapshot.total > 0 && snapshot.done >= snapshot.total {
-        Tone::Success
-    } else {
-        Tone::Primary
-    };
-    let top_right = if snapshot.total == 0 {
+    let phase = snapshot
+        .phase
+        .map(progress_phase_label)
+        .unwrap_or_else(|| modern_phase(operation_raw, snapshot.done, snapshot.total));
+    let progress_tone =
+        if !phase_is_explicit && snapshot.total > 0 && snapshot.done >= snapshot.total {
+            Tone::Success
+        } else {
+            Tone::Primary
+        };
+    let top_right = if phase_without_total {
+        "phase active".to_owned()
+    } else if snapshot.total == 0 {
         "streaming".to_owned()
     } else {
         format!("{:>3}%", percent(snapshot.done, snapshot.total))
@@ -277,16 +468,16 @@ fn render_modern_progress_line(
         &format!("{pulse} {operation_label} · {state} · operation cockpit · phase {phase}"),
         &top_right,
     );
-    let status_eta = if snapshot.total == 0 {
+    let status_eta = if snapshot.total == 0 || recovery_percentage {
         "ETA --".to_owned()
     } else {
         eta_label(snapshot.done, snapshot.total, snapshot.speed)
     };
-    let phase_rail = modern_phase_rail(operation_raw, phase, snapshot.total);
+    let phase_rail = modern_phase_rail(operation_raw, phase, snapshot.total, snapshot.phase);
     let elapsed = fmt_duration(snapshot.elapsed_secs);
     let status_line = modern_hud_content(&format!(
         "Phase {phase}   phase rail {phase_rail}   {status_eta}   elapsed {elapsed}   next {}",
-        modern_next_phase(operation_raw, phase, snapshot.total),
+        modern_next_phase(operation_raw, phase, snapshot.total, snapshot.phase),
     ));
     let snapshot_title = modern_metric_section(
         "Transfer board · Snapshot dashboard + Signal matrix + Transfer matrix",
@@ -294,11 +485,30 @@ fn render_modern_progress_line(
     let snapshot_header = modern_snapshot_header();
     let action_title = modern_metric_section("Action queue · route, cue, finish");
     let action_header = modern_action_header();
-    let gauge = if snapshot.total == 0 {
+    let gauge = if phase_without_total {
+        modern_hud_content(&format!(
+            "▕{}▏  PHASE {phase}  ·  byte total unavailable  ·  pulse {}",
+            streaming_gauge(snapshot.frame),
+            modern_activity_spark(snapshot.frame),
+        ))
+    } else if snapshot.total == 0 {
         modern_hud_content(&format!(
             "▕{}▏  STREAM  processed {}  ·  adaptive read  ·  pulse {}",
             streaming_gauge(snapshot.frame),
             fmt_bytes(snapshot.done),
+            modern_activity_spark(snapshot.frame),
+        ))
+    } else if recovery_percentage {
+        let pct = percent(snapshot.done, snapshot.total);
+        let filled = pct * MODERN_BAR_CELLS / 100;
+        let gauge = format!(
+            "{}{}",
+            "▰".repeat(filled),
+            "▱".repeat(MODERN_BAR_CELLS - filled)
+        );
+        modern_hud_content(&format!(
+            "▕{gauge}▏  {pct:>3}%  phase progress  ·  next {}  ·  pulse {}",
+            modern_next_phase(operation_raw, phase, snapshot.total, snapshot.phase),
             modern_activity_spark(snapshot.frame),
         ))
     } else {
@@ -313,7 +523,7 @@ fn render_modern_progress_line(
             "▕{gauge}▏  {pct:>3}%  {} / {}  ·  next {}  ·  pulse {}",
             fmt_bytes(snapshot.done),
             fmt_bytes(snapshot.total),
-            modern_next_phase(operation_raw, phase, snapshot.total),
+            modern_next_phase(operation_raw, phase, snapshot.total, snapshot.phase),
             modern_activity_spark(snapshot.frame),
         ))
     };
@@ -324,6 +534,7 @@ fn render_modern_progress_line(
         snapshot.total,
         snapshot.speed,
         snapshot.current,
+        snapshot.phase,
     );
     let snapshot_values = modern_snapshot_rows(snapshot, phase, &status_eta);
 
@@ -385,12 +596,24 @@ fn modern_snapshot_header() -> String {
 }
 
 fn modern_snapshot_rows(snapshot: ProgressFrame<'_>, phase: &str, eta: &str) -> Vec<String> {
-    let progress = if snapshot.total == 0 {
+    let recovery_streaming = snapshot.phase == Some(ProgressPhase::RecoveryPrepare)
+        && snapshot.total == 0
+        && snapshot.done > 0;
+    let phase_without_total =
+        snapshot.phase.is_some() && snapshot.total == 0 && !recovery_streaming;
+    let recovery_percentage = is_recovery_progress_phase(snapshot.phase) && snapshot.total > 0;
+    let progress = if phase_without_total {
+        format!("{phase} · ACTIVE")
+    } else if snapshot.total == 0 {
         "STREAM".to_owned()
     } else {
         format!("{:>3}% · {phase}", percent(snapshot.done, snapshot.total))
     };
-    let payload = if snapshot.total == 0 {
+    let payload = if phase_without_total {
+        "byte total unavailable".to_owned()
+    } else if recovery_percentage {
+        "backend stage progress".to_owned()
+    } else if snapshot.total == 0 {
         format!("processed {}", fmt_bytes(snapshot.done))
     } else {
         format!(
@@ -400,21 +623,41 @@ fn modern_snapshot_rows(snapshot: ProgressFrame<'_>, phase: &str, eta: &str) -> 
         )
     };
     let eta = eta_without_prefix(eta);
-    let speed_eta = if snapshot.total == 0 {
+    let speed_eta = if phase_without_total {
+        "phase-local metrics pending".to_owned()
+    } else if recovery_percentage {
+        "stage-local percentage".to_owned()
+    } else if snapshot.total == 0 {
         format!("{}/s · adaptive read", fmt_bytes(snapshot.speed))
     } else {
         format!("{}/s · ETA {eta}", fmt_bytes(snapshot.speed))
     };
     let current = modern_current_label(snapshot.current, snapshot.done, snapshot.total);
-    let progress_signal = modern_snapshot_signal(snapshot.done, snapshot.total, snapshot.frame);
-    let payload_signal = format!(
-        "{} · {}",
-        modern_lane_label(snapshot.operation, snapshot.total),
-        modern_guardrail_label(snapshot.operation)
-    );
+    let progress_signal = if phase_without_total {
+        format!("{} · phase pulse", modern_stream_mini_gauge(snapshot.frame))
+    } else {
+        modern_snapshot_signal(snapshot.done, snapshot.total, snapshot.frame)
+    };
+    let payload_signal = if phase_without_total || recovery_percentage {
+        modern_explicit_phase_signal(snapshot.phase).to_owned()
+    } else {
+        format!(
+            "{} · {}",
+            modern_lane_label(snapshot.operation, snapshot.total),
+            modern_guardrail_label(snapshot.operation)
+        )
+    };
     let current_signal = modern_activity_spark(snapshot.frame);
-    let speed_row_value = format!("{}/s", fmt_bytes(snapshot.speed));
-    let speed_signal = if snapshot.total == 0 {
+    let speed_row_value = if phase_without_total || recovery_percentage {
+        "--".to_owned()
+    } else {
+        format!("{}/s", fmt_bytes(snapshot.speed))
+    };
+    let speed_signal = if phase_without_total {
+        "not reported".to_owned()
+    } else if recovery_percentage {
+        "backend reported".to_owned()
+    } else if snapshot.total == 0 {
         "adaptive read".to_owned()
     } else {
         format!("ETA {eta}")
@@ -439,7 +682,7 @@ fn modern_snapshot_rows(snapshot: ProgressFrame<'_>, phase: &str, eta: &str) -> 
             (
                 &format!(
                     "next {}",
-                    modern_next_phase(snapshot.operation, phase, snapshot.total)
+                    modern_next_phase(snapshot.operation, phase, snapshot.total, snapshot.phase,)
                 ),
                 MODERN_SNAPSHOT_WIDTHS[3],
                 ModernMetricAlign::Left,
@@ -480,7 +723,7 @@ fn modern_snapshot_rows(snapshot: ProgressFrame<'_>, phase: &str, eta: &str) -> 
                 ModernMetricAlign::Left,
             ),
             (
-                modern_operator_cue(snapshot.operation, phase, snapshot.total),
+                modern_operator_cue(snapshot.operation, phase, snapshot.total, snapshot.phase),
                 MODERN_SNAPSHOT_WIDTHS[3],
                 ModernMetricAlign::Left,
             ),
@@ -500,7 +743,7 @@ fn modern_snapshot_rows(snapshot: ProgressFrame<'_>, phase: &str, eta: &str) -> 
             (
                 &format!(
                     "{} · {}",
-                    modern_operator_cue(snapshot.operation, phase, snapshot.total),
+                    modern_operator_cue(snapshot.operation, phase, snapshot.total, snapshot.phase,),
                     current_signal
                 ),
                 MODERN_SNAPSHOT_WIDTHS[3],
@@ -557,13 +800,21 @@ fn modern_action_value(
     total: u64,
     speed: u64,
     current: &str,
+    explicit_phase: Option<ProgressPhase>,
 ) -> String {
     let route = format!(
         "now {phase} -> {}",
-        modern_next_phase(operation, phase, total)
+        modern_next_phase(operation, phase, total, explicit_phase)
     );
     let finish = format!("finish {}", modern_finish_hint(operation));
-    let display = if current.trim().is_empty() {
+    let display = if is_recovery_progress_phase(explicit_phase) && total > 0 {
+        format!("stage {:>3}%", percent(done, total))
+    } else if explicit_phase.is_some()
+        && total == 0
+        && !(explicit_phase == Some(ProgressPhase::RecoveryPrepare) && done > 0)
+    {
+        "phase active".to_owned()
+    } else if current.trim().is_empty() {
         format!("{}/s", fmt_bytes(speed))
     } else {
         format!("current {}", modern_current_label(current, done, total))
@@ -571,7 +822,7 @@ fn modern_action_value(
     modern_metric_table_line(&[
         (&route, MODERN_ACTION_WIDTHS[0], ModernMetricAlign::Left),
         (
-            modern_operator_cue(operation, phase, total),
+            modern_operator_cue(operation, phase, total, explicit_phase),
             MODERN_ACTION_WIDTHS[1],
             ModernMetricAlign::Left,
         ),
@@ -580,7 +831,40 @@ fn modern_action_value(
     ])
 }
 
-fn modern_operator_cue(operation: &str, phase: &str, total: u64) -> &'static str {
+fn modern_operator_cue(
+    operation: &str,
+    phase: &str,
+    total: u64,
+    explicit_phase: Option<ProgressPhase>,
+) -> &'static str {
+    if is_recovery_progress_phase(explicit_phase) {
+        return match explicit_phase {
+            Some(ProgressPhase::RecoveryPrepare) => "prepare recovery inputs",
+            Some(ProgressPhase::RecoveryVerify) => "check protected data",
+            Some(ProgressPhase::RecoveryProcess) => "process recovery blocks",
+            Some(ProgressPhase::RecoveryFinalize) => "finish recovery result",
+            _ => "follow recovery stage",
+        };
+    }
+    if explicit_phase == Some(ProgressPhase::OutputSplit) {
+        return "write physical volume set";
+    }
+    if matches!(
+        explicit_phase,
+        Some(
+            ProgressPhase::OutputRecovery
+                | ProgressPhase::OutputCommit
+                | ProgressPhase::OutputCleanup
+        )
+    ) {
+        return "let durable publish finish";
+    }
+    if matches!(phase, "RECOVER" | "COMMIT" | "CLEANUP") {
+        return "let durable update finish";
+    }
+    if matches!(phase, "REWRITE" | "VERIFY") && total == 0 {
+        return "await phase byte total";
+    }
     if total == 0 {
         return match operation.trim().to_ascii_lowercase().as_str() {
             "extract" => "keep stream open until placement",
@@ -609,6 +893,32 @@ fn modern_operator_cue(operation: &str, phase: &str, total: u64) -> &'static str
         "repair" => "apply recovery blocks",
         "test" | "verify" => "validate payload checksums",
         _ => "keep job moving",
+    }
+}
+
+fn modern_explicit_phase_signal(phase: Option<ProgressPhase>) -> &'static str {
+    match phase {
+        Some(
+            ProgressPhase::RecoveryPrepare
+            | ProgressPhase::RecoveryVerify
+            | ProgressPhase::RecoveryProcess
+            | ProgressPhase::RecoveryFinalize,
+        ) => "recovery engine · stage progress",
+        Some(ProgressPhase::OutputSplit) => "volume output · byte progress",
+        Some(
+            ProgressPhase::OutputRecovery
+            | ProgressPhase::OutputVerify
+            | ProgressPhase::OutputCommit
+            | ProgressPhase::OutputCleanup,
+        ) => "durable publish · integrity guard",
+        Some(
+            ProgressPhase::UpdateRecovery
+            | ProgressPhase::UpdateRewrite
+            | ProgressPhase::UpdateVerify
+            | ProgressPhase::UpdateCommit
+            | ProgressPhase::UpdateCleanup,
+        ) => "durable update · integrity guard",
+        _ => "durable work · integrity guard",
     }
 }
 
@@ -694,8 +1004,16 @@ fn modern_current_label(current: &str, done: u64, total: u64) -> String {
     truncate_middle(current, MODERN_HUD_INNER_WIDTH.saturating_sub(16))
 }
 
-fn modern_phase_rail(operation: &str, active_phase: &str, total: u64) -> String {
-    let stages = modern_phase_stages(operation, total);
+fn modern_phase_rail(
+    operation: &str,
+    active_phase: &str,
+    total: u64,
+    explicit_phase: Option<ProgressPhase>,
+) -> String {
+    let stages: Vec<_> = match explicit_phase {
+        Some(phase) => explicit_phase_stages(phase).to_vec(),
+        None => modern_phase_stages(operation, total).into_iter().collect(),
+    };
     stages
         .into_iter()
         .map(|stage| {
@@ -709,8 +1027,16 @@ fn modern_phase_rail(operation: &str, active_phase: &str, total: u64) -> String 
         .join(" ━━ ")
 }
 
-fn modern_next_phase(operation: &str, active_phase: &str, total: u64) -> &'static str {
-    let stages = modern_phase_stages(operation, total);
+fn modern_next_phase(
+    operation: &str,
+    active_phase: &str,
+    total: u64,
+    explicit_phase: Option<ProgressPhase>,
+) -> &'static str {
+    let stages: Vec<_> = match explicit_phase {
+        Some(phase) => explicit_phase_stages(phase).to_vec(),
+        None => modern_phase_stages(operation, total).into_iter().collect(),
+    };
     if let Some(next) = stages
         .iter()
         .position(|stage| *stage == active_phase)
@@ -719,8 +1045,70 @@ fn modern_next_phase(operation: &str, active_phase: &str, total: u64) -> &'stati
     {
         next
     } else {
-        "COMMIT"
+        if explicit_phase.is_some() {
+            "RESULT"
+        } else {
+            "COMMIT"
+        }
     }
+}
+
+fn explicit_phase_stages(phase: ProgressPhase) -> &'static [&'static str] {
+    const RECOVERY_STAGES: &[&str] = &["PREPARE", "VERIFY", "PROCESS", "FINALIZE"];
+    const SPLIT_OUTPUT_STAGES: &[&str] = &["SPLIT", "PUBLISH", "CLEANUP"];
+    const OUTPUT_STAGES: &[&str] = &["RECOVER", "VERIFY", "PUBLISH", "CLEANUP"];
+    const UPDATE_STAGES: &[&str] = &["RECOVER", "REWRITE", "VERIFY", "COMMIT", "CLEANUP"];
+    const FALLBACK_STAGES: &[&str] = &["WORK"];
+
+    match phase {
+        ProgressPhase::RecoveryPrepare
+        | ProgressPhase::RecoveryVerify
+        | ProgressPhase::RecoveryProcess
+        | ProgressPhase::RecoveryFinalize => RECOVERY_STAGES,
+        ProgressPhase::OutputSplit => SPLIT_OUTPUT_STAGES,
+        ProgressPhase::OutputRecovery
+        | ProgressPhase::OutputVerify
+        | ProgressPhase::OutputCommit
+        | ProgressPhase::OutputCleanup => OUTPUT_STAGES,
+        ProgressPhase::UpdateRecovery
+        | ProgressPhase::UpdateRewrite
+        | ProgressPhase::UpdateVerify
+        | ProgressPhase::UpdateCommit
+        | ProgressPhase::UpdateCleanup => UPDATE_STAGES,
+        _ => FALLBACK_STAGES,
+    }
+}
+
+fn progress_phase_label(phase: ProgressPhase) -> &'static str {
+    match phase {
+        ProgressPhase::RecoveryPrepare => "PREPARE",
+        ProgressPhase::RecoveryVerify => "VERIFY",
+        ProgressPhase::RecoveryProcess => "PROCESS",
+        ProgressPhase::RecoveryFinalize => "FINALIZE",
+        ProgressPhase::OutputSplit => "SPLIT",
+        ProgressPhase::OutputRecovery => "RECOVER",
+        ProgressPhase::OutputVerify => "VERIFY",
+        ProgressPhase::OutputCommit => "PUBLISH",
+        ProgressPhase::OutputCleanup => "CLEANUP",
+        ProgressPhase::UpdateRecovery => "RECOVER",
+        ProgressPhase::UpdateRewrite => "REWRITE",
+        ProgressPhase::UpdateVerify => "VERIFY",
+        ProgressPhase::UpdateCommit => "COMMIT",
+        ProgressPhase::UpdateCleanup => "CLEANUP",
+        _ => "WORK",
+    }
+}
+
+fn is_recovery_progress_phase(phase: Option<ProgressPhase>) -> bool {
+    matches!(
+        phase,
+        Some(
+            ProgressPhase::RecoveryPrepare
+                | ProgressPhase::RecoveryVerify
+                | ProgressPhase::RecoveryProcess
+                | ProgressPhase::RecoveryFinalize
+        )
+    )
 }
 
 fn modern_finish_hint(operation: &str) -> &'static str {
@@ -968,6 +1356,8 @@ mod tests {
             speed,
             elapsed_secs,
             frame,
+            phase: None,
+            interruptible: true,
         }
     }
 
@@ -989,6 +1379,9 @@ mod tests {
                 drawn: false,
                 drawn_lines: 0,
                 frame: 0,
+                scanning: false,
+                phase: None,
+                interruptible: true,
             }),
         }
     }
@@ -1146,6 +1539,177 @@ mod tests {
         assert!(!line.contains("Scene dashboard"));
         assert!(!line.contains("Task board"));
         assert!(!line.contains("Workload board"));
+    }
+
+    #[test]
+    fn update_phases_do_not_report_the_task_done_early() {
+        let mut verify = progress_frame("update", 100, 100, "archive.zip", 64, 1, 0);
+        verify.phase = Some(ProgressPhase::UpdateVerify);
+        let verify_line =
+            render_progress_line(OutputStyleArg::Modern, false, AccentArg::Lagoon, verify);
+        assert!(verify_line.contains("UPDATE · RUN"));
+        assert!(verify_line.contains("Phase VERIFY"));
+        assert!(verify_line.contains("REWRITE"));
+        assert!(verify_line.contains("CLEANUP"));
+        assert!(!verify_line.contains("UPDATE · DONE"));
+
+        let mut commit = progress_frame("update", 0, 0, "archive.zip", 0, 0, 1);
+        commit.phase = Some(ProgressPhase::UpdateCommit);
+        commit.interruptible = false;
+        let commit_line =
+            render_progress_line(OutputStyleArg::Modern, false, AccentArg::Lagoon, commit);
+        assert!(commit_line.contains("UPDATE · SAFE"));
+        assert!(commit_line.contains("Phase COMMIT"));
+        assert!(commit_line.contains("byte total unavailable"));
+        assert!(!commit_line.contains("100%"));
+        assert!(!commit_line.contains("adaptive read"));
+        assert!(!commit_line.contains("processed 0 B"));
+
+        let classic_commit =
+            render_progress_line(OutputStyleArg::Classic, false, AccentArg::Lagoon, commit);
+        assert!(classic_commit.contains("COMMIT active"));
+        assert!(!classic_commit.contains("/s"));
+
+        let mut publish = progress_frame("compress", 0, 0, "archive.zip", 0, 0, 2);
+        publish.phase = Some(ProgressPhase::OutputCommit);
+        publish.interruptible = false;
+        let publish_line =
+            render_progress_line(OutputStyleArg::Modern, false, AccentArg::Lagoon, publish);
+        assert!(publish_line.contains("Phase PUBLISH"));
+        assert!(publish_line.contains("○ RECOVER ━━ ○ VERIFY ━━ ● PUBLISH ━━ ○ CLEANUP"));
+        assert!(publish_line.contains("let durable publish finish"));
+        assert!(!publish_line.to_ascii_lowercase().contains("update"));
+
+        let mut split = progress_frame(
+            "compress",
+            64 * 1024,
+            256 * 1024,
+            "archive.zip.001",
+            64 * 1024,
+            1,
+            3,
+        );
+        split.phase = Some(ProgressPhase::OutputSplit);
+        let split_line =
+            render_progress_line(OutputStyleArg::Modern, false, AccentArg::Lagoon, split);
+        assert!(split_line.contains("Phase SPLIT"));
+        assert!(split_line.contains("● SPLIT ━━ ○ PUBLISH ━━ ○ CLEANUP"));
+        assert!(!split_line.contains("RECOVER"));
+        assert_eq!(
+            modern_explicit_phase_signal(Some(ProgressPhase::OutputSplit)),
+            "volume output · byte progress"
+        );
+        assert_eq!(
+            modern_operator_cue(
+                "compress",
+                "SPLIT",
+                256 * 1024,
+                Some(ProgressPhase::OutputSplit)
+            ),
+            "write physical volume set"
+        );
+    }
+
+    #[test]
+    fn recovery_stage_percentages_are_not_presented_as_bytes() {
+        let mut recovery = progress_frame("repair", 380, 1000, "archive.zip", 512, 1, 0);
+        recovery.phase = Some(ProgressPhase::RecoveryProcess);
+        recovery.interruptible = false;
+
+        let classic =
+            render_progress_line(OutputStyleArg::Classic, false, AccentArg::Lagoon, recovery);
+        assert!(classic.contains("PROCESS"));
+        assert!(classic.contains("38%"));
+        assert!(!classic.contains("380 B"));
+        assert!(!classic.contains("1000 B"));
+        assert!(!classic.contains("/s"));
+
+        let modern =
+            render_progress_line(OutputStyleArg::Modern, false, AccentArg::Lagoon, recovery);
+        assert!(modern.contains("Phase PROCESS"));
+        assert!(modern.contains("phase progress"));
+        assert!(modern.contains("backend stage progress"));
+        assert!(modern.contains("stage-local percentage"));
+        assert!(!modern.contains("380 B"));
+        assert!(!modern.contains("1000 B"));
+        assert!(!modern.contains("/s"));
+    }
+
+    #[test]
+    fn recovery_prepare_copy_keeps_real_streamed_byte_feedback() {
+        let mut recovery = progress_frame("repair", 768 * 1024, 0, "archive.zip", 128 * 1024, 2, 1);
+        recovery.phase = Some(ProgressPhase::RecoveryPrepare);
+
+        let classic =
+            render_progress_line(OutputStyleArg::Classic, false, AccentArg::Lagoon, recovery);
+        assert!(classic.contains("PREPARE"));
+        assert!(classic.contains("768.0 KiB"));
+        assert!(classic.contains("128.0 KiB/s"));
+
+        let modern =
+            render_progress_line(OutputStyleArg::Modern, false, AccentArg::Lagoon, recovery);
+        assert!(modern.contains("Phase PREPARE"));
+        assert!(modern.contains("processed 768.0 KiB"));
+        assert!(modern.contains("128.0 KiB/s"));
+    }
+
+    #[test]
+    fn classic_scan_progress_reports_entries_without_byte_metrics() {
+        let line = render_scan_progress_line(
+            OutputStyleArg::Classic,
+            true,
+            AccentArg::Teal,
+            "update",
+            42,
+            "folder/item.txt",
+            0,
+        );
+
+        assert!(line.starts_with("[............................]"));
+        assert!(line.contains("SCAN #42"));
+        assert!(line.contains("folder/item.txt"));
+        assert!(!line.contains(" B"));
+        assert!(!line.contains("iB"));
+        assert!(!line.contains("/s"));
+        assert!(!line.contains('%'));
+        assert!(!line.contains("\x1b["));
+    }
+
+    #[test]
+    fn modern_scan_progress_reports_entries_without_byte_metrics() {
+        let line = render_scan_progress_line(
+            OutputStyleArg::Modern,
+            false,
+            AccentArg::Lagoon,
+            "update",
+            42,
+            "folder/item.txt",
+            3,
+        );
+
+        assert!(line.contains("UPDATE · SCAN"));
+        assert!(line.contains("SCAN #42"));
+        assert!(line.contains("folder/item.txt"));
+        assert!(line.contains('⠸'));
+        assert!(line.contains('◆'));
+        assert!(!line.contains(" B"));
+        assert!(!line.contains("iB"));
+        assert!(!line.contains("/s"));
+        assert!(!line.contains('%'));
+        assert!(!line.contains("\x1b["));
+        assert_eq!(line.lines().count(), 4);
+    }
+
+    #[test]
+    fn verbose_scan_progress_keeps_path_only_behavior() {
+        let progress = progress_for_test(Mode::Verbose);
+        let current = EntryPath::from_utf8("folder/item.txt");
+
+        progress.on_scan_progress(42, &current);
+
+        let state = lock_unpoisoned(&progress.state);
+        assert_eq!(state.last_entry, "folder/item.txt");
+        assert!(!state.scanning);
     }
 
     #[test]

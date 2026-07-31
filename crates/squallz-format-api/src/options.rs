@@ -2,7 +2,7 @@
 
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use zeroize::Zeroizing;
 
@@ -83,6 +83,87 @@ pub trait ConflictResolver: Send + Sync {
 pub trait ExtractProblemReporter: Send + Sync {
     /// Records one entry that could not be read or verified.
     fn skipped_entry(&self, path: &EntryPath, error: &FormatError);
+}
+
+/// Maximum number of best-effort extraction problems retained for display.
+pub const EXTRACT_PROBLEM_PREVIEW_LIMIT: usize = 20;
+/// Maximum number of integrity-test problems retained for display.
+pub const TEST_PROBLEM_PREVIEW_LIMIT: usize = 20;
+
+/// Exact problem count plus a bounded, ordered preview.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProblemPreview {
+    /// Total number of problems observed, including omitted messages.
+    pub total: u64,
+    /// First messages retained in observation order.
+    pub messages: Vec<String>,
+}
+
+impl ProblemPreview {
+    /// Whether some observed problems are absent from [`Self::messages`].
+    pub fn is_truncated(&self) -> bool {
+        self.total > self.messages.len() as u64
+    }
+
+    /// Number of observed problems absent from [`Self::messages`].
+    pub fn omitted(&self) -> u64 {
+        self.total.saturating_sub(self.messages.len() as u64)
+    }
+}
+
+#[derive(Debug, Default)]
+struct ProblemLogState {
+    total: u64,
+    messages: Vec<String>,
+}
+
+/// Thread-safe problem accumulator whose memory use does not grow with every
+/// damaged entry.
+#[derive(Debug)]
+pub struct BoundedProblemLog {
+    preview_limit: usize,
+    state: Mutex<ProblemLogState>,
+}
+
+impl BoundedProblemLog {
+    /// Creates a log retaining at most `preview_limit` messages.
+    pub fn new(preview_limit: usize) -> Self {
+        Self {
+            preview_limit,
+            state: Mutex::new(ProblemLogState::default()),
+        }
+    }
+
+    /// Records one problem while keeping only the bounded preview.
+    pub fn record(&self, message: impl Into<String>) {
+        let mut state = self.lock();
+        state.total = state.total.saturating_add(1);
+        if state.messages.len() < self.preview_limit {
+            state.messages.push(message.into());
+        }
+    }
+
+    /// Returns an owned snapshot for result serialization or presentation.
+    pub fn snapshot(&self) -> ProblemPreview {
+        let state = self.lock();
+        ProblemPreview {
+            total: state.total,
+            messages: state.messages.clone(),
+        }
+    }
+
+    fn lock(&self) -> MutexGuard<'_, ProblemLogState> {
+        match self.state.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+}
+
+impl Default for BoundedProblemLog {
+    fn default() -> Self {
+        Self::new(EXTRACT_PROBLEM_PREVIEW_LIMIT)
+    }
 }
 
 /// Decompression-bomb guardrails. Exceeding a limit returns
@@ -242,6 +323,16 @@ impl CompressionLevel {
     }
 }
 
+/// Physical layout used when [`CreateOptions::split_size`] is set.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SplitOutputMode {
+    /// Format-independent byte volumes named `.001`, `.002`, and so on.
+    #[default]
+    Generic,
+    /// The archive format's interoperable native multi-volume layout.
+    Native,
+}
+
 /// Options for creating an archive.
 #[derive(Debug, Clone, Default)]
 pub struct CreateOptions {
@@ -252,14 +343,39 @@ pub struct CreateOptions {
     /// Encrypt file names (only effective for formats with
     /// `can_encrypt_names`, e.g. 7z)
     pub encrypt_filenames: bool,
-    /// Split volume size in bytes (semantics: `.001` byte splitting)
+    /// Split volume size in bytes.
     pub split_size: Option<u64>,
+    /// Physical layout used when `split_size` is present.
+    pub split_mode: SplitOutputMode,
     /// Threads and memory
     pub resources: ResourceOptions,
     /// Exclude patterns (glob)
     pub excludes: Vec<String>,
     /// SQZ-specific creation profile.
     pub sqz: SqzCreateOptions,
+}
+
+/// Format-specific create budget built from the shared input estimate.
+///
+/// `archive_bytes` is the generic upper bound supplied by core. Formats may
+/// raise the destination bound for container-specific redundancy and report
+/// temporary files that live outside the destination filesystem.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FormatCreateBudget {
+    /// Upper bound for the complete archive before optional volume splitting.
+    pub output_bytes: u64,
+    /// Peak additional bytes written below `std::env::temp_dir()`.
+    pub system_temp_bytes: u64,
+}
+
+impl FormatCreateBudget {
+    /// Default budget for formats that stream directly to the destination.
+    pub const fn direct(output_bytes: u64) -> Self {
+        Self {
+            output_bytes,
+            system_temp_bytes: 0,
+        }
+    }
 }
 
 /// SQZ creation profile.
@@ -325,7 +441,10 @@ pub struct FormatCapabilities {
 pub struct TestReport {
     /// Number of entries tested
     pub entries_tested: u64,
-    /// Problem list (empty = passed); log-only text, not user-facing copy
+    /// Complete compatibility problem list (empty = passed); log-only text,
+    /// not user-facing copy. Product frontends should prefer
+    /// [`TestSummary`] so damaged archives cannot grow display diagnostics
+    /// without bound.
     pub problems: Vec<String>,
     /// Optional archive recovery summary. Formats without recovery data leave
     /// this as `None`.
@@ -336,6 +455,44 @@ impl TestReport {
     /// Whether everything passed.
     pub fn is_ok(&self) -> bool {
         self.problems.is_empty()
+    }
+}
+
+/// Integrity-test result with an exact problem count and bounded preview.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TestSummary {
+    /// Number of entries tested.
+    pub entries_tested: u64,
+    /// Exact problem count and the first retained diagnostics.
+    pub problems: ProblemPreview,
+    /// Optional archive recovery summary.
+    pub recovery: Option<RecoverySummary>,
+}
+
+impl TestSummary {
+    /// Whether everything passed.
+    pub fn is_ok(&self) -> bool {
+        self.problems.total == 0
+    }
+}
+
+impl From<TestReport> for TestSummary {
+    fn from(report: TestReport) -> Self {
+        let TestReport {
+            entries_tested,
+            mut problems,
+            recovery,
+        } = report;
+        let total = problems.len() as u64;
+        problems.truncate(TEST_PROBLEM_PREVIEW_LIMIT);
+        Self {
+            entries_tested,
+            problems: ProblemPreview {
+                total,
+                messages: problems,
+            },
+            recovery,
+        }
     }
 }
 
@@ -411,6 +568,74 @@ mod tests {
         let p = Password::new("secret");
         assert_eq!(format!("{p:?}"), "Password(***)");
         assert_eq!(p.expose(), "secret");
+    }
+
+    #[test]
+    fn bounded_problem_log_keeps_exact_total_and_ordered_preview() {
+        let log = BoundedProblemLog::new(3);
+        for index in 0..10_000 {
+            log.record(format!("problem-{index}"));
+        }
+
+        let preview = log.snapshot();
+        assert_eq!(preview.total, 10_000);
+        assert_eq!(
+            preview.messages,
+            vec!["problem-0", "problem-1", "problem-2"]
+        );
+        assert!(preview.is_truncated());
+        assert_eq!(preview.omitted(), 9_997);
+    }
+
+    #[test]
+    fn zero_length_problem_preview_still_counts_every_problem() {
+        let log = BoundedProblemLog::new(0);
+        log.record("first");
+        log.record("second");
+
+        let preview = log.snapshot();
+        assert_eq!(preview.total, 2);
+        assert!(preview.messages.is_empty());
+        assert!(preview.is_truncated());
+        assert_eq!(preview.omitted(), 2);
+    }
+
+    #[test]
+    fn bounded_problem_log_recovers_after_mutex_poison() {
+        let log = Arc::new(BoundedProblemLog::new(2));
+        let worker = Arc::clone(&log);
+        let poisoned = std::thread::spawn(move || {
+            let _guard = worker
+                .state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            panic!("poison bounded problem log");
+        });
+        assert!(poisoned.join().is_err());
+
+        log.record("after poison");
+        let preview = log.snapshot();
+        assert_eq!(preview.total, 1);
+        assert_eq!(preview.messages, ["after poison"]);
+    }
+
+    #[test]
+    fn test_summary_adapts_legacy_report_without_changing_its_literal_shape() {
+        let report = TestReport {
+            entries_tested: 25,
+            problems: (0..25).map(|index| format!("problem-{index}")).collect(),
+            recovery: None,
+        };
+
+        let summary = TestSummary::from(report);
+        assert_eq!(summary.entries_tested, 25);
+        assert_eq!(summary.problems.total, 25);
+        assert_eq!(summary.problems.messages.len(), TEST_PROBLEM_PREVIEW_LIMIT);
+        assert_eq!(summary.problems.messages[0], "problem-0");
+        assert_eq!(summary.problems.messages[19], "problem-19");
+        assert!(summary.problems.is_truncated());
+        assert_eq!(summary.problems.omitted(), 5);
+        assert!(!summary.is_ok());
     }
 
     #[test]
