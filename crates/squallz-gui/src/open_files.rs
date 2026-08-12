@@ -441,11 +441,7 @@ pub fn startup_event(args: impl IntoIterator<Item = OsString>) -> OpenFilesEvent
 
 fn sfx_event_for_executable(executable: &Path) -> Option<OpenFilesEvent> {
     let bundle = squallz_core::macos_sfx_bundle_for_executable(executable)?;
-    let stem = bundle.file_stem()?.to_string_lossy();
-    if stem.trim().is_empty() {
-        return None;
-    }
-    let output = bundle.parent()?.join(stem.as_ref());
+    let output = squallz_core::default_sfx_extract_destination(bundle.parent()?, &bundle);
     Some(OpenFilesEvent {
         paths: vec![path_to_string(bundle)],
         action: Some(SFX_EXTERNAL_ACTION.to_owned()),
@@ -643,6 +639,35 @@ mod tests {
         assert_eq!(
             event.output.as_deref(),
             Some(dir.join("Photos").to_string_lossy().as_ref())
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn embedded_macos_bundle_keeps_special_stems_below_its_parent() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "squallz-open-files-sfx-special-{}-{nonce}",
+            std::process::id()
+        ));
+        let bundle = dir.join("...app");
+        let executable = bundle.join("Contents/MacOS/squallz-gui");
+        fs::create_dir_all(bundle.join("Contents/Resources/squallz-sfx")).unwrap();
+        fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        fs::write(&executable, b"stub").unwrap();
+        fs::write(
+            bundle.join("Contents/Resources/squallz-sfx/manifest.v1"),
+            b"manifest",
+        )
+        .unwrap();
+
+        let event = sfx_event_for_executable(&executable).unwrap();
+        assert_eq!(
+            event.output.as_deref(),
+            Some(dir.join("extracted").to_string_lossy().as_ref())
         );
         fs::remove_dir_all(dir).unwrap();
     }

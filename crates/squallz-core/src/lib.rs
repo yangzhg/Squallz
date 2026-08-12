@@ -67,9 +67,10 @@ pub use queue::{
     Job, JobId, JobProgress, JobQueue, JobResources, JobState, QueueWaitReason, QueuedJobStatus,
 };
 pub use sfx::{
-    inspect_sfx, macos_sfx_bundle_for_executable, sfx_recovery_details, validate_sfx_template,
-    verify_sfx_payload, SfxBuildOptions, SfxBuildReport, SfxInfo, SfxLayout, SfxRecoveryDetails,
-    SfxTarget, VerifiedSfxBuildReport, SFX_CLI_STUB_MARKER, SFX_GUI_STUB_MARKER,
+    default_sfx_extract_destination, inspect_sfx, macos_sfx_bundle_for_executable,
+    sfx_recovery_details, validate_sfx_template, verify_sfx_payload, SfxBuildOptions,
+    SfxBuildReport, SfxInfo, SfxLayout, SfxRecoveryDetails, SfxTarget, VerifiedSfxBuildReport,
+    SFX_CLI_STUB_MARKER, SFX_GUI_STUB_MARKER,
 };
 pub use volumes::{collect_volume_set, collect_volume_set_with_control, VolumeSet};
 

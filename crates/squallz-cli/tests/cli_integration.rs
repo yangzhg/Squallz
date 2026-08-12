@@ -395,7 +395,14 @@ fn localized_help_uses_requested_english_surface() {
         help.contains("Explicit --exclude rules are combined with the selected policy"),
         "stdout: {help}"
     );
-    assert!(!help.contains("输入文件或目录"), "stdout: {help}");
+    assert!(
+        help.contains("Reopen the created archive and read every entry before reporting success"),
+        "stdout: {help}"
+    );
+    assert!(
+        !help.contains("输入文件或目录") && !help.contains("创建完成后重新打开归档"),
+        "stdout: {help}"
+    );
 
     let list_help = run(sqz().args(["list", "--lang", "en-US", "--help"]));
     assert!(list_help.status.success(), "stderr: {}", stderr(&list_help));

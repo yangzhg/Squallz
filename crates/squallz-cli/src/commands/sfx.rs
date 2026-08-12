@@ -337,12 +337,10 @@ pub fn run_embedded(ctx: &Ctx, executable: PathBuf, cli: SfxRuntimeCli) -> Resul
 }
 
 fn default_extract_dest(executable: &Path) -> Result<PathBuf, FormatError> {
-    let stem = executable
-        .file_stem()
-        .and_then(|value| value.to_str())
-        .filter(|value| !value.is_empty())
-        .unwrap_or("extracted");
-    Ok(std::env::current_dir()?.join(stem))
+    Ok(squallz_core::default_sfx_extract_destination(
+        &std::env::current_dir()?,
+        executable,
+    ))
 }
 
 pub fn embedded_probe(path: &Path) -> Result<bool, FormatError> {
@@ -359,6 +357,16 @@ mod tests {
     fn default_destination_uses_executable_stem() {
         let dest = default_extract_dest(Path::new("/tmp/Release.exe")).unwrap();
         assert_eq!(dest.file_name().unwrap(), "Release");
+    }
+
+    #[test]
+    fn default_destination_keeps_special_stems_below_the_current_directory() {
+        let base = std::env::current_dir().unwrap();
+        for executable in ["...exe", "...run", "squallz", "CON.exe", "name..run"] {
+            let dest = default_extract_dest(Path::new(executable)).unwrap();
+            assert_eq!(dest.parent(), Some(base.as_path()));
+            assert_eq!(dest.file_name().unwrap(), "extracted");
+        }
     }
 
     #[test]

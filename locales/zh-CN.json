@@ -1421,6 +1421,7 @@
   "gui.archive.open_first": "请先打开",
   "gui.archive.open_dialog_title": "打开压缩包",
   "gui.archive.filter_archives": "压缩包",
+  "gui.archive.filter_all_files": "所有文件",
   "gui.archive.volumes": "分卷",
   "gui.archive.single": "单文件",
   "gui.table.archive": "压缩包列表",

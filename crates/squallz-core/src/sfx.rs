@@ -10,12 +10,12 @@ mod transaction;
 
 use std::fs::{self, File};
 use std::io::{self, Read, Seek, SeekFrom, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use crc32fast::Hasher;
 use squallz_format_api::{
-    split_volume_name, ControlToken, CreateOptions, Detected, EntryPath, FormatError, OpenOptions,
-    ProgressPhase, ProgressSink, ReadSeek, ResourceOptions,
+    check_windows_portability, split_volume_name, ControlToken, CreateOptions, Detected, EntryPath,
+    FormatError, OpenOptions, ProgressPhase, ProgressSink, ReadSeek, ResourceOptions,
 };
 
 use crate::filesystem_identity::{
@@ -40,6 +40,28 @@ pub const SFX_CLI_STUB_MARKER: [u8; 24] = *b"SQUALLZ_CLI_SFX_STUB_V1\0";
 /// Marker compiled into the Squallz GUI binary used by macOS SFX app
 /// templates.
 pub const SFX_GUI_STUB_MARKER: [u8; 24] = *b"SQUALLZ_GUI_SFX_STUB_V1\0";
+
+/// Chooses the default extraction directory below a caller-provided base.
+///
+/// Artifact names such as `...exe` have a `..` file stem. The chosen name
+/// must be a portable path component and the artifact must have an extension,
+/// so an extensionless executable cannot select itself. Invalid or missing
+/// stems use a stable, ordinary folder name.
+pub fn default_sfx_extract_destination(base: &Path, artifact: &Path) -> PathBuf {
+    let folder = artifact
+        .file_stem()
+        .filter(|_| artifact.extension().is_some())
+        .filter(|stem| {
+            let mut components = Path::new(stem).components();
+            matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none()
+        })
+        .filter(|stem| {
+            stem.to_str()
+                .is_some_and(|name| check_windows_portability(name).is_ok())
+        })
+        .unwrap_or_else(|| std::ffi::OsStr::new("extracted"));
+    base.join(folder)
+}
 
 /// Physical SFX packaging layout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1782,6 +1804,29 @@ mod tests {
             std::process::id(),
             std::thread::current().name().unwrap_or("test")
         ))
+    }
+
+    #[test]
+    fn default_extract_destination_stays_below_its_base() {
+        let base = Path::new("/tmp/packages");
+        assert_eq!(
+            default_sfx_extract_destination(base, Path::new("Release.exe")),
+            base.join("Release")
+        );
+        for artifact in [
+            "...exe",
+            "...run",
+            "...app",
+            "squallz",
+            "CON.exe",
+            "name..run",
+            "name .app",
+            "a:b.exe",
+        ] {
+            let destination = default_sfx_extract_destination(base, Path::new(artifact));
+            assert_eq!(destination, base.join("extracted"));
+            assert_eq!(destination.parent(), Some(base));
+        }
     }
 
     #[test]

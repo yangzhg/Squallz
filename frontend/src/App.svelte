@@ -5985,22 +5985,30 @@
     showNotice(tr("gui.archive.opening_picker", "Opening file picker..."));
     try {
       const { open } = await getDialogModule();
+      // An unfiltered macOS dialog keeps arbitrary numbered volumes selectable.
+      const filters: OpenDialogOptions["filters"] = platformKind() === "macos"
+        ? undefined
+        : [
+            {
+              name: tr("gui.archive.filter_all_files", "All files"),
+              extensions: ["*"],
+            },
+            {
+              name: tr("gui.archive.filter_archives", "Archives"),
+              extensions: [
+                ...registryFormatExtensions(),
+                ...legacyRarVolumeExtensions,
+                ...nativeSplitZipVolumeExtensions,
+                "001",
+              ],
+            },
+            { name: tr("gui.recovery.par2_files", "PAR2 recovery files"), extensions: ["par2"] },
+          ];
       const selected = await openNativeDialog("archive.open", open, {
         title: tr("gui.archive.open_dialog_title", "Open archive"),
         multiple: false,
         directory: false,
-        filters: [
-          {
-            name: tr("gui.archive.filter_archives", "Archives"),
-            extensions: [
-              ...registryFormatExtensions(),
-              ...legacyRarVolumeExtensions,
-              ...nativeSplitZipVolumeExtensions,
-              "001",
-            ],
-          },
-          { name: tr("gui.recovery.par2_files", "PAR2 recovery files"), extensions: ["par2"] },
-        ],
+        filters,
       });
       const path = Array.isArray(selected) ? selected[0] : selected;
       if (typeof path === "string") {

@@ -32,6 +32,7 @@ const BUNDLE_BASE_SLACK_BYTES: u64 = 1024 * 1024;
 const MIN_ALLOCATION_GRANULARITY: u64 = 4096;
 const ENTRY_METADATA_ALLOCATIONS: u64 = 2;
 const DESKTOP_QUICK_LOOK_EXTENSION: &str = "Contents/PlugIns/SquallzQuickLook.appex";
+const DESKTOP_CLI_SIDECAR: &str = "Contents/MacOS/sqz";
 
 #[derive(Debug)]
 enum TemplateEntryKind {
@@ -134,7 +135,7 @@ pub(super) fn prepare_template(template: &Path) -> Result<PreparedTemplate, Form
             FormatError::Unsupported("app template executable is outside the bundle".into())
         })?;
     let minimum_system_version = template_minimum_system_version(&plist)?;
-    let entries = scan_template(template)?;
+    let entries = scan_template(template, &executable_relative)?;
     let prepared = PreparedTemplate {
         template: template.to_path_buf(),
         root_identity,
@@ -675,19 +676,30 @@ fn template_minimum_system_version(plist: &str) -> Result<String, FormatError> {
     plist_string_value(plist, "LSMinimumSystemVersion", "LSMinimumSystemVersion").map(str::to_owned)
 }
 
-fn scan_template(template: &Path) -> Result<Vec<TemplateEntry>, FormatError> {
+fn scan_template(
+    template: &Path,
+    executable_relative: &Path,
+) -> Result<Vec<TemplateEntry>, FormatError> {
     let mut entries = Vec::new();
-    scan_dir(template, Path::new(""), 0, &mut entries)?;
+    scan_dir(
+        template,
+        Path::new(""),
+        executable_relative,
+        0,
+        &mut entries,
+    )?;
     Ok(entries)
 }
 
-fn is_desktop_quick_look_extension(relative: &Path) -> bool {
+fn is_desktop_only_entry(relative: &Path, executable_relative: &Path) -> bool {
     relative.starts_with(Path::new(DESKTOP_QUICK_LOOK_EXTENSION))
+        || (relative == Path::new(DESKTOP_CLI_SIDECAR) && relative != executable_relative)
 }
 
 fn scan_dir(
     template: &Path,
     relative: &Path,
+    executable_relative: &Path,
     depth: usize,
     entries: &mut Vec<TemplateEntry>,
 ) -> Result<(), FormatError> {
@@ -703,7 +715,7 @@ fn scan_dir(
             || child.starts_with(Path::new("Contents/_CodeSignature"))
             || child.starts_with(resource_relative_dir())
             || is_localized_info_plist(&child)
-            || is_desktop_quick_look_extension(&child)
+            || is_desktop_only_entry(&child, executable_relative)
         {
             continue;
         }
@@ -743,7 +755,7 @@ fn scan_dir(
         });
         if is_dir {
             validate_scanned_directory(&item.path(), identity)?;
-            scan_dir(template, &child, depth + 1, entries)?;
+            scan_dir(template, &child, executable_relative, depth + 1, entries)?;
             validate_scanned_directory(&item.path(), identity)?;
         }
     }
@@ -1502,16 +1514,27 @@ mod tests {
     }
 
     #[test]
-    fn desktop_quick_look_extension_is_not_copied_into_sfx_bundles() {
+    fn desktop_only_components_are_not_copied_into_sfx_bundles() {
         let extension = Path::new(DESKTOP_QUICK_LOOK_EXTENSION);
+        let executable = Path::new("Contents/MacOS/squallz-gui");
 
-        assert!(is_desktop_quick_look_extension(extension));
-        assert!(is_desktop_quick_look_extension(
-            &extension.join("Contents/MacOS/SquallzQuickLook")
+        assert!(is_desktop_only_entry(extension, executable));
+        assert!(is_desktop_only_entry(
+            &extension.join("Contents/MacOS/SquallzQuickLook"),
+            executable
         ));
-        assert!(!is_desktop_quick_look_extension(Path::new(
-            "Contents/PlugIns/AnotherExtension.appex"
-        )));
+        assert!(is_desktop_only_entry(
+            Path::new(DESKTOP_CLI_SIDECAR),
+            executable
+        ));
+        assert!(!is_desktop_only_entry(
+            Path::new("Contents/PlugIns/AnotherExtension.appex"),
+            executable
+        ));
+        assert!(!is_desktop_only_entry(
+            Path::new(DESKTOP_CLI_SIDECAR),
+            Path::new(DESKTOP_CLI_SIDECAR)
+        ));
     }
 
     #[test]

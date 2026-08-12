@@ -263,6 +263,7 @@ fn localize_compress_help_en(cmd: Command) -> Command {
         })
         .mut_arg("threads", threads_help_en)
         .mut_arg("memory_limit", memory_limit_help_en)
+        .mut_arg("test_after_create", test_after_create_help_en)
         .mut_arg("json", json_help_en)
 }
 
@@ -282,9 +283,10 @@ fn localize_pack_help_en(cmd: Command) -> Command {
         })
         .mut_arg("excludes", exclude_help_en)
         .mut_arg("content_policy", content_policy_help_en)
-        .mut_arg("split", split_help_en)
+        .mut_arg("split", generic_split_help_en)
         .mut_arg("threads", threads_help_en)
         .mut_arg("memory_limit", memory_limit_help_en)
+        .mut_arg("test_after_create", test_after_create_help_en)
         .mut_arg("json", json_help_en)
 }
 
@@ -634,7 +636,15 @@ fn content_policy_help_en(arg: clap::Arg) -> clap::Arg {
 }
 
 fn split_help_en(arg: clap::Arg) -> clap::Arg {
-    arg.help("Split volume size, such as 500k, 100m, or 1g. Outputs .001/.002/... volumes.")
+    arg.help("Split volume size, such as 500k, 100m, or 1g. Generic mode writes .001/.002/...; native ZIP and WIM use their standard volume names.")
+}
+
+fn generic_split_help_en(arg: clap::Arg) -> clap::Arg {
+    arg.help("Split volume size, such as 500k, 100m, or 1g. Writes .001/.002/... volumes.")
+}
+
+fn test_after_create_help_en(arg: clap::Arg) -> clap::Arg {
+    arg.help("Reopen the created archive and read every entry before reporting success.")
 }
 
 fn profile_help_en(arg: clap::Arg) -> clap::Arg {
@@ -1165,7 +1175,7 @@ pub enum Cmd {
         /// 归档内容策略；显式 --exclude 会与策略规则合并
         #[arg(long, value_enum)]
         content_policy: Option<CreateContentPolicyArg>,
-        /// 分卷大小（如 500k / 100m / 1g），产物为 .001/.002/... 分卷
+        /// 分卷大小（如 500k / 100m / 1g）；默认生成 .001/.002，原生模式使用 ZIP/WIM 标准命名
         #[arg(long, value_name = "SIZE", value_parser = parse_size)]
         split: Option<u64>,
         /// 分卷布局：generic 为 .001/.002，native 为格式原生布局（支持 ZIP 与 WIM）
@@ -1385,7 +1395,7 @@ pub enum Cmd {
         /// 加密目标条目名（仅支持 7z 等具备 header encryption 的格式）
         #[arg(long)]
         encrypt_names: bool,
-        /// 分卷大小（如 500k / 100m / 1g），产物为 .001/.002/... 分卷
+        /// 分卷大小（如 500k / 100m / 1g）；默认生成 .001/.002，原生模式使用 ZIP/WIM 标准命名
         #[arg(long, value_name = "SIZE", value_parser = parse_size)]
         split: Option<u64>,
         /// 分卷布局：generic 为 .001/.002，native 为格式原生布局（支持 ZIP 与 WIM）
