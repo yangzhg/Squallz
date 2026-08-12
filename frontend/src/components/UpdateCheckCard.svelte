@@ -76,7 +76,7 @@
     }
     if (result?.status === "update_available") {
       if (result.metadataSource === "latest_release_manifest") {
-        return tr("gui.update.available_manifest_body", "Squallz {version} is ready. GitHub limited its release API, so Squallz recovered the exact package and SHA-256 from the published release manifest. Review it before downloading.")
+        return tr("gui.update.available_manifest_body", "Squallz {version} is available. GitHub API access was limited, so package details and SHA-256 came from the release manifest. Review them before downloading.")
           .replace("{version}", `v${result.latestVersion}`);
       }
       if (result.metadataSource === "latest_release_redirect") {
@@ -94,12 +94,12 @@
     }
     if (lastSuccessAt !== null) {
       return automaticChecksEnabled
-        ? tr("gui.update.recent_check_body", "The stable release channel was checked successfully within the last 24 hours. You can still check again now.")
-        : tr("gui.update.recent_manual_body", "The stable release channel was checked successfully within the last 24 hours. Automatic checks are off.");
+        ? tr("gui.update.recent_check_body", "A stable release check succeeded in the last 24 hours. You can check again now.")
+        : tr("gui.update.recent_manual_body", "A stable release check succeeded in the last 24 hours. Automatic checks are off.");
     }
     return automaticChecksEnabled
-      ? tr("gui.update.automatic_idle_body", "Squallz checks the stable GitHub Releases channel at most once every 24 hours. Updates are never installed silently.")
-      : tr("gui.update.idle_body", "Check the stable GitHub Releases channel when you choose. Squallz never installs an update silently.");
+      ? tr("gui.update.automatic_idle_body", "Squallz checks GitHub for stable releases at most once every 24 hours. Checking does not download or install updates.")
+      : tr("gui.update.idle_body", "Check GitHub for stable releases whenever you want. Checking does not download or install updates.");
   }
 
   function lastCheckedLabel(): string {

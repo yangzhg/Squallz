@@ -88,7 +88,7 @@
       <div>
         <span class="eyebrow">{surface.tr("gui.extract.eyebrow", "Extract")}</span>
         <h1>{surface.title}</h1>
-        <p>{surface.tr("gui.extract.safe_subtitle", "Destination preview, smart folder behavior, conflicts, passwords, and safety limits are visible before the job starts.")}</p>
+        <p>{surface.tr("gui.extract.safe_subtitle", "Review the destination, folder layout, conflicts, password, and safety limits before extracting.")}</p>
       </div>
       <button
         class="primary sheet-action"
@@ -105,7 +105,7 @@
           <div class="extract-destination-setup">
             <div class="path-decision">
               <span class="block-label">{surface.destination.label}</span>
-              <strong>{surface.destination.path}</strong>
+              <strong title={surface.destination.path}>{surface.destination.path}</strong>
               <p>{surface.tr("gui.extract.snapshot_hint", "Smart extract captures the current safety settings when the job starts.")}</p>
             </div>
             <div class="destination-grid">
@@ -242,11 +242,11 @@
               {/each}
             </div>
             <div class="classic-label">{surface.tr("gui.inspector.archive", "Archive")}</div>
-            <div class="classic-input">{surface.archive.line}</div>
+            <div class="classic-input classic-copy-wrap">{surface.archive.line}</div>
             <div class="classic-label">{surface.tr("common.selection", "Selection")}</div>
-            <div class="classic-input accent">{surface.archive.selection}</div>
+            <div class="classic-input accent classic-copy-wrap">{surface.archive.selection}</div>
             <div class="classic-label">{surface.tr("gui.extract.password", "Password")}</div>
-            <div class="classic-input">{surface.archive.password}</div>
+            <div class="classic-input classic-copy-wrap">{surface.archive.password}</div>
             <div class="classic-label">{surface.tr("gui.extract.conflicts", "Conflicts")}</div>
             <div class="classic-segments">
               {#each surface.overwrite.choices as choice (choice.id)}
@@ -272,9 +272,9 @@
               {/each}
             </div>
             <div class="classic-label">{surface.tr("gui.archive.encoding", "Encoding")}</div>
-            <div class="classic-input">{surface.encoding.label}</div>
+            <div class="classic-input classic-copy-wrap">{surface.encoding.label}</div>
             <div class="classic-label">{surface.tr("gui.extract.safety", "Safety")}</div>
-            <div class="classic-input accent classic-extract-safety">{surface.tr("gui.extract.safety_blocked", "Zip Slip, bomb ratio, reserved names, symlink escape blocked")}</div>
+            <div class="classic-input accent classic-copy-wrap classic-extract-safety">{surface.tr("gui.extract.safety_blocked", "Zip Slip, bomb ratio, reserved names, symlink escape blocked")}</div>
           </div>
           <div class="classic-extract-actions">
             <button

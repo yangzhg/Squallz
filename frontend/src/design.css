@@ -2735,8 +2735,9 @@ select option {
   .classic-task-empty strong,
   .classic-task-empty span
 ) {
-  overflow-wrap: normal;
-  word-break: keep-all;
+  overflow-wrap: anywhere;
+  line-break: strict;
+  word-break: normal;
 }
 
 .task-modal-body {
@@ -3128,9 +3129,11 @@ select option {
 
 .task-current-pending span {
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+  text-wrap: pretty;
+  user-select: text;
+  white-space: normal;
+  word-break: normal;
 }
 
 .task-result-callout {
@@ -3759,11 +3762,11 @@ select option {
 
 .modern-sidebar button.history-card strong {
   overflow: visible;
-  overflow-wrap: normal;
+  overflow-wrap: anywhere;
   text-overflow: clip;
   text-wrap: balance;
   white-space: normal;
-  word-break: keep-all;
+  word-break: normal;
 }
 
 .modern-content {
@@ -4577,15 +4580,18 @@ select option {
   padding-top: var(--space-sm);
 }
 
-.classic-input.convert-copy {
+.classic-input:is(.convert-copy, .classic-copy-wrap) {
   height: auto;
   min-height: var(--control-height-compact);
+  align-items: flex-start;
   overflow: visible;
   padding-block: var(--space-sm);
   line-height: var(--type-control-line);
   overflow-wrap: anywhere;
   text-overflow: clip;
+  user-select: text;
   white-space: normal;
+  word-break: normal;
 }
 
 .convert-custom-level-classic {
@@ -4692,7 +4698,8 @@ select option {
 }
 
 :lang(zh) .create-setup-summary-item :is(strong, small) {
-  word-break: keep-all;
+  line-break: strict;
+  word-break: normal;
 }
 
 .create-setup-summary-item > div > span,
@@ -7251,10 +7258,14 @@ select option {
 }
 
 .path-decision strong {
+  min-width: 0;
   margin-top: 4px;
+  overflow-wrap: anywhere;
   color: var(--color-text-primary);
   font-family: var(--font-mono);
   font-size: var(--type-body);
+  user-select: text;
+  word-break: normal;
 }
 
 .path-decision p {
@@ -8347,6 +8358,10 @@ input.secure-input {
   display: block;
 }
 
+.settings-route-card > span {
+  min-width: 0;
+}
+
 .settings-route-card strong {
   font-size: var(--type-control);
   line-height: var(--type-control-line);
@@ -8363,7 +8378,8 @@ input.secure-input {
 }
 
 :lang(zh) .settings-route-card small {
-  word-break: keep-all;
+  line-break: strict;
+  word-break: normal;
 }
 
 .settings-metric-grid,
@@ -8763,6 +8779,22 @@ input.secure-input {
   border-top: 1px solid var(--color-border-default);
   color: var(--color-control-fg);
   font-size: var(--type-control);
+}
+
+.limits-table.recent-table > div {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 2fr) auto;
+}
+
+.limits-table.archive-info-table > div {
+  grid-template-columns: minmax(100px, 0.5fr) minmax(0, 2fr);
+}
+
+.limits-table:is(.recent-table, .archive-info-table) :is(span, strong) {
+  overflow: visible;
+  overflow-wrap: anywhere;
+  text-overflow: clip;
+  white-space: normal;
+  word-break: normal;
 }
 
 .limits-table > div:first-child {
@@ -11616,8 +11648,9 @@ select.classic-input:focus {
 }
 
 .classic-capability-grid small {
-  word-break: keep-all;
+  overflow-wrap: anywhere;
   text-wrap: balance;
+  word-break: normal;
 }
 
 .classic-button-row {
@@ -12781,7 +12814,7 @@ select.classic-input:focus {
     overflow-x: auto;
   }
 
-  .limits-table > div {
+  .limits-table:not(.recent-table):not(.archive-info-table) > div {
     min-width: 620px;
   }
 
@@ -13473,6 +13506,9 @@ select.classic-input:focus {
   }
 
   .modern-convert > .sheet-head,
+  .modern-extract > .sheet-head,
+  .modern-recent > .sheet-head,
+  .modern-archive-info > .sheet-head,
   :is(.modern-checksum, .modern-duplicates, .modern-batch) > .sheet-head {
     align-items: stretch;
     flex-direction: column;
@@ -13480,9 +13516,24 @@ select.classic-input:focus {
   }
 
   .modern-convert > .sheet-head .sheet-action,
+  .modern-extract > .sheet-head .sheet-action,
+  .modern-recent > .sheet-head .sheet-action,
+  .modern-archive-info > .sheet-head .sheet-action,
   :is(.modern-checksum, .modern-duplicates, .modern-batch) > .sheet-head .sheet-action {
     width: 100%;
     min-width: 0;
+  }
+
+  .modern-extract .extract-essentials-grid .destination-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .modern-extract .destination-grid :is(strong, span) {
+    overflow: visible;
+    overflow-wrap: anywhere;
+    text-overflow: clip;
+    white-space: normal;
+    word-break: normal;
   }
 
   .modern-recovery > .sheet-head {
@@ -13532,7 +13583,7 @@ select.classic-input:focus {
     white-space: normal;
   }
 
-  .classic-extract > header {
+  :is(.classic-extract, .classic-info) > header {
     height: auto;
     min-height: var(--classic-sheet-header-height);
     align-items: stretch;
@@ -13540,18 +13591,18 @@ select.classic-input:focus {
     padding: var(--space-md);
   }
 
-  .classic-extract > header p {
+  :is(.classic-extract, .classic-info) > header p {
     text-wrap: balance;
   }
 
-  .classic-extract > header .classic-button-row {
+  :is(.classic-extract, .classic-info) > header .classic-button-row {
     width: 100%;
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: var(--space-sm);
   }
 
-  .classic-extract > header .classic-button-row button {
+  :is(.classic-extract, .classic-info) > header .classic-button-row button {
     width: 100%;
     min-width: 0;
     height: var(--control-height);
@@ -14816,7 +14867,8 @@ select.classic-input:focus {
 
 :lang(zh) .design-root :is(p, small) {
   overflow-wrap: anywhere;
-  word-break: keep-all;
+  line-break: strict;
+  word-break: normal;
 }
 
 .design-root :is(.path-decision, .recovery-callout, .recovery-ribbon, .setting-callout, .classic-input.accent, .input-shell.accent) {

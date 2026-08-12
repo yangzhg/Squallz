@@ -241,9 +241,9 @@
                   <small id="password-error-classic" class="password-inline-error" role="alert">{surface.error}</small>
                 {/if}
               </div>
-              <div class="classic-label">{surface.tr("gui.password.remember_short", "Remember")}</div><div class="classic-input">{surface.sessionDetail}</div>
-              <div class="classic-label">{surface.tr("gui.password.fallback", "Fallback")}</div><div class="classic-input">{surface.tr("gui.password.manual_overrides_saved", "Manual input overrides saved password")}</div>
-              <div class="classic-label">{surface.tr("gui.password.on_failure", "On failure")}</div><div class="classic-input accent">{surface.failureDetail}</div>
+              <div class="classic-label">{surface.tr("gui.password.remember_short", "Remember")}</div><div class="classic-input classic-copy-wrap">{surface.sessionDetail}</div>
+              <div class="classic-label">{surface.tr("gui.password.fallback", "Fallback")}</div><div class="classic-input classic-copy-wrap">{surface.tr("gui.password.manual_overrides_saved", "Manual input overrides saved password")}</div>
+              <div class="classic-label">{surface.tr("gui.password.on_failure", "On failure")}</div><div class="classic-input accent classic-copy-wrap">{surface.failureDetail}</div>
             </div>
             <div class="classic-extract-actions">
               <button type="button" onclick={surface.onCancel}>{surface.tr("common.cancel", "Cancel")}</button>

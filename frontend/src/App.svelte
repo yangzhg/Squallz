@@ -12274,7 +12274,7 @@
         error,
         true,
         "gui.preview.nested_failed",
-        "Nested archive preview failed or unsupported",
+        "Could not preview this nested archive",
       );
       entryPreviewFailure = {
         entryPath,
@@ -14403,7 +14403,10 @@
   }
 
   function classicCommandDisplayLabel(label: string): string {
-    if (label === "View") return previewActionLabel();
+    if (label === "View") {
+      const entryPath = selectedPreviewPath();
+      return entryPath ? previewActionLabel(entryPath) : tr("gui.action.open_preview", "Open");
+    }
     return label === "Extract To" && hasArchiveSelection()
       ? actionLabel("Extract selected")
       : classicCommandLabel(label);
@@ -14767,7 +14770,7 @@
                 <div>
                   <span class="eyebrow">{tr("gui.recent.eyebrow", "Workspace / Recent")}</span>
                   <h1>{tr("gui.recent.title", "Recent archives")}</h1>
-                  <p>{tr("gui.recent.subtitle", "Reopen local archives you used recently. Squallz keeps only the file paths, never archive contents.")}</p>
+                  <p>{tr("gui.recent.subtitle", "Reopen recent archives. Squallz stores paths only, never archive contents.")}</p>
                 </div>
                 <button class="primary sheet-action" onclick={() => void openArchiveFromDialog()}><Icon name="folder-open" size={17} />{archiveOpenStatus === "opening" ? toolbarLabel("Opening") : toolbarLabel("Open")}</button>
               </div>
@@ -14857,7 +14860,7 @@
                 <div>
                   <span class="eyebrow">{tr("gui.archive.info_eyebrow", "Archive / Info")}</span>
                   <h1>{tr("gui.archive.info_title", "Archive information")}</h1>
-                  <p>{tr("gui.archive.info_subtitle", "Current archive, selection, extraction target, encoding, and volume state.")}</p>
+                  <p>{tr("gui.archive.info_subtitle", "Archive, selection, destination, encoding, and volume details.")}</p>
                 </div>
                 <button class="sheet-action" onclick={() => setScreen("browse")}><Icon name="archive" size={17} />{tr("gui.nav.back_to_archive", "Back to archive")}</button>
               </div>
@@ -15136,7 +15139,7 @@
             <header>
               <div>
                 <h1>{tr("gui.archive.info_title", "Archive information")}</h1>
-                <p>{tr("gui.archive.info_subtitle", "Current archive, selection, extraction target, encoding, and volume state.")}</p>
+                <p>{tr("gui.archive.info_subtitle", "Archive, selection, destination, encoding, and volume details.")}</p>
               </div>
               <div class="classic-button-row">
                 <button onclick={() => setScreen("browse")}>{tr("gui.nav.back_to_archive", "Back to archive")}</button>
@@ -15155,7 +15158,7 @@
                 <div class="classic-form-grid compact">
                   {#each archiveInfoRows() as row}
                     <div class="classic-label">{row[0]}</div>
-                    <div class="classic-input">{row[1]}</div>
+                    <div class="classic-input classic-copy-wrap">{row[1]}</div>
                   {/each}
                 </div>
               </section>
@@ -15165,7 +15168,7 @@
                   <div class="classic-label">{tr("common.mode", "Mode")}</div>
                   <div class="classic-input accent">{extractDestinationTitle(extractDestinationMode)}</div>
                   <div class="classic-label">{tr("common.destination", "Destination")}</div>
-                  <div class="classic-input">{effectiveExtractDest()}</div>
+                  <div class="classic-input classic-copy-wrap">{effectiveExtractDest()}</div>
                 </div>
               </aside>
             </div>

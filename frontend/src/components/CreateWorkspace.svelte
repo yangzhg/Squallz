@@ -318,7 +318,7 @@
         <div id="classic-create-general" class="classic-label classic-create-section-target">
           {surface.tr("gui.create.archive_name", "Archive name")}
         </div>
-        <div class="classic-input">{surface.classic.archiveName}</div>
+        <div class="classic-input classic-copy-wrap">{surface.classic.archiveName}</div>
         <CreateOutputOptions {...surface.output} />
         <div class="classic-label">{surface.tr("gui.create.archive_format", "Archive format")}</div>
         <div class="classic-segments" aria-label={surface.tr("gui.create.classic_archive_format", "Classic archive format")}>
@@ -339,7 +339,7 @@
           >{surface.tr("gui.create.rar_read_only", "RAR · Extract only")}</span>
         </div>
         <div class="classic-label">{surface.tr("gui.create.format_boundary", "Format boundary")}</div>
-        <div class="classic-input accent">{surface.formatNote}</div>
+        <div class="classic-input accent classic-copy-wrap">{surface.formatNote}</div>
         {#if surface.sqzPayload}
           <div class="classic-label">{surface.sqzPayload.label}</div>
           <div class="classic-segments" role="group" aria-label={surface.sqzPayload.label}>
@@ -372,7 +372,7 @@
           {/each}
         </div>
         <div class="classic-label">{surface.tr("gui.create.compression_method", "Compression method")}</div>
-        <div class="classic-input">{surface.compression.method}</div>
+        <div class="classic-input classic-copy-wrap">{surface.compression.method}</div>
         {#if surface.compression.custom}
           <div class="classic-label">{surface.tr("gui.create.custom_level", "Custom level")}</div>
           <div class="classic-input classic-custom-level">
@@ -420,9 +420,9 @@
         <div id="classic-create-recovery" class="classic-label classic-create-section-target">
           {surface.tr("gui.recovery.title", "Recovery")}
         </div>
-        <div class="classic-input accent">{surface.classic.recoveryCapability}</div>
+        <div class="classic-input accent classic-copy-wrap">{surface.classic.recoveryCapability}</div>
         <div class="classic-label">{surface.tr("gui.create.update_mode", "Update mode")}</div>
-        <div class="classic-input">{surface.classic.updateMode}</div>
+        <div class="classic-input classic-copy-wrap">{surface.classic.updateMode}</div>
         <div id="classic-create-preflight" class="classic-create-preflight classic-create-section-target">
           <CreatePreflightStatus {...surface.preflight} />
         </div>

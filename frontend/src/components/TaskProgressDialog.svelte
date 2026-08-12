@@ -344,7 +344,7 @@
               data-task-progress-source={taskCurrentProgressSource(task)}
               aria-live="polite"
             >
-              <span>{taskCurrentLabel(task)}</span>
+              <span title={taskCurrentLabel(task)}>{taskCurrentLabel(task)}</span>
             </div>
           {/if}
         </section>
