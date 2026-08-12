@@ -1,8 +1,9 @@
 //! Locates the first-party SFX template shipped with the desktop app.
 
+use std::fs;
 use std::path::{Path, PathBuf};
 
-use squallz_core::SfxTarget;
+use squallz_core::{discover_packaged_sfx_runtime, SfxTarget};
 
 pub(crate) fn discover_host_template() -> Option<PathBuf> {
     let executable = std::env::current_exe().ok()?;
@@ -60,23 +61,18 @@ fn valid_macos_template(bundle: &Path) -> bool {
 }
 
 fn discover_cli_template(target: SfxTarget, executable: &Path) -> Option<PathBuf> {
-    let file_names: &[&str] = match target {
+    let legacy_file_names: &[&str] = match target {
         SfxTarget::Windows => &["sqz.exe", "sqz"],
         SfxTarget::Linux => &["sqz"],
         SfxTarget::Macos => return None,
     };
     let executable_dir = executable.parent()?;
-    let mut candidates = Vec::new();
-    for file_name in file_names {
-        candidates.push(executable_dir.join(file_name));
-        candidates.push(executable_dir.join("bin").join(file_name));
-        candidates.push(executable_dir.join("resources/bin").join(file_name));
-        if let Some(prefix) = executable_dir.parent() {
-            candidates.push(prefix.join("lib/Squallz/bin").join(file_name));
-            candidates.push(prefix.join("lib/squallz/bin").join(file_name));
-        }
-    }
-    candidates.into_iter().find(|candidate| candidate.is_file())
+    discover_packaged_sfx_runtime(executable).or_else(|| {
+        legacy_file_names
+            .iter()
+            .map(|file_name| executable_dir.join(file_name))
+            .find(|candidate| fs::symlink_metadata(candidate).is_ok())
+    })
 }
 
 #[cfg(test)]
@@ -114,10 +110,30 @@ mod tests {
     }
 
     #[test]
-    fn installed_linux_executable_resolves_packaged_cli() {
-        let dir = temp_dir("linux-cli");
+    fn installed_linux_executable_prefers_packaged_sfx_runtime() {
+        let dir = temp_dir("linux-runtime");
         let executable = dir.join("usr/bin/squallz-gui");
+        let runtime = dir.join("usr/lib/squallz-gui/bin/sqz-sfx.stub");
         let cli = dir.join("usr/lib/Squallz/bin/sqz");
+        fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        fs::create_dir_all(runtime.parent().unwrap()).unwrap();
+        fs::create_dir_all(cli.parent().unwrap()).unwrap();
+        fs::write(&executable, b"gui").unwrap();
+        fs::write(&runtime, b"runtime").unwrap();
+        fs::write(&cli, b"cli").unwrap();
+
+        assert_eq!(
+            discover_for_executable(SfxTarget::Linux, &executable),
+            Some(runtime)
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn installed_linux_executable_falls_back_to_legacy_cli() {
+        let dir = temp_dir("linux-legacy-cli");
+        let executable = dir.join("usr/bin/squallz-gui");
+        let cli = dir.join("usr/bin/sqz");
         fs::create_dir_all(executable.parent().unwrap()).unwrap();
         fs::create_dir_all(cli.parent().unwrap()).unwrap();
         fs::write(&executable, b"gui").unwrap();
@@ -131,17 +147,34 @@ mod tests {
     }
 
     #[test]
-    fn windows_resource_without_extension_is_still_a_valid_template() {
-        let dir = temp_dir("windows-cli");
+    fn windows_executable_resolves_packaged_sfx_runtime() {
+        let dir = temp_dir("windows-runtime");
         let executable = dir.join("Squallz.exe");
-        let cli = dir.join("bin/sqz");
-        fs::create_dir_all(cli.parent().unwrap()).unwrap();
+        let runtime = dir.join("bin/sqz-sfx.stub");
+        fs::create_dir_all(runtime.parent().unwrap()).unwrap();
+        fs::write(&executable, b"gui").unwrap();
+        fs::write(&runtime, b"runtime").unwrap();
+
+        assert_eq!(
+            discover_for_executable(SfxTarget::Windows, &executable),
+            Some(runtime)
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn invalid_dedicated_runtime_is_not_hidden_by_legacy_cli() {
+        let dir = temp_dir("invalid-runtime");
+        let executable = dir.join("Squallz.exe");
+        let runtime = dir.join("bin/sqz-sfx.stub");
+        let cli = dir.join("bin/sqz.exe");
+        fs::create_dir_all(&runtime).unwrap();
         fs::write(&executable, b"gui").unwrap();
         fs::write(&cli, b"cli").unwrap();
 
         assert_eq!(
             discover_for_executable(SfxTarget::Windows, &executable),
-            Some(cli)
+            Some(runtime)
         );
         fs::remove_dir_all(dir).unwrap();
     }

@@ -617,11 +617,17 @@ jobs:
           }
 
           if [[ "${RUNNER_OS}" == "Windows" ]]; then
+            shopt -s nullglob
+            nsis_candidates=("$profile_dir"/bundle/nsis/*.exe)
+            if (( ${#nsis_candidates[@]} != 1 )); then
+              echo "Expected exactly one Windows NSIS installer, found ${#nsis_candidates[@]}" >&2
+              exit 1
+            fi
             copy_artifact \
               "$profile_dir/sqz.exe" \
               "sqz-${VERSION}-${PLATFORM}${profile_suffix}.exe"
             copy_artifact \
-              "$profile_dir/squallz-gui.exe" \
+              "${nsis_candidates[0]}" \
               "Squallz-${VERSION}-${PLATFORM}${profile_suffix}.exe"
           elif [[ "${RUNNER_OS}" != "macOS" || "$PUBLIC_RELEASE" != "true" ]]; then
             copy_executable_archive \
@@ -652,9 +658,15 @@ jobs:
                 "$out/Squallz-${VERSION}-${PLATFORM}${profile_suffix}.app.zip"
             fi
           elif [[ "${RUNNER_OS}" == "Linux" ]]; then
+            shopt -s nullglob
+            appimage_candidates=("$profile_dir"/bundle/appimage/*.AppImage)
+            if (( ${#appimage_candidates[@]} != 1 )); then
+              echo "Expected exactly one Linux AppImage, found ${#appimage_candidates[@]}" >&2
+              exit 1
+            fi
             copy_executable_archive \
-              "$profile_dir/squallz-gui" \
-              "Squallz" \
+              "${appimage_candidates[0]}" \
+              "Squallz.AppImage" \
               "Squallz-${VERSION}-${PLATFORM}${profile_suffix}.tar.gz"
           fi
 

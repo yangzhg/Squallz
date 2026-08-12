@@ -11,8 +11,8 @@ use crc32fast::Hasher;
 use flate2::read::DeflateDecoder;
 use squallz_format_api::{
     ArchiveReader, BoundedProblemLog, ControlToken, EntryMeta, EntryPath, EntryType, FormatError,
-    OpenOptions, Password, ProgressSink, ReadSeek, TestReport, TestSummary,
-    TEST_PROBLEM_PREVIEW_LIMIT,
+    LimitsAccountant, OpenOptions, Password, ProgressSink, ReadSeek, SafetyLimits, TestReport,
+    TestSummary, TEST_PROBLEM_PREVIEW_LIMIT,
 };
 use zip::read::ZipFile;
 use zip::{ZipArchive, ZipReadOptions};
@@ -20,6 +20,11 @@ use zip::{ZipArchive, ZipReadOptions};
 use super::datetime::from_zip_datetime;
 use super::encoding::{decode_entry_name, resolve_fallback_encoding};
 use super::error::map_zip_error;
+
+/// ZIP entry names are limited to 65,535 bytes on the wire. Symlink targets
+/// are paths too, so use the same archive-level ceiling instead of a
+/// platform-specific `PATH_MAX` that would make listing vary by host OS.
+const MAX_SYMLINK_TARGET_BYTES: usize = u16::MAX as usize;
 
 /// Opens a ZIP reader. Normal archives use the zip crate's central
 /// directory reader; damaged archives that still contain local file headers
@@ -126,16 +131,24 @@ impl ZipArchiveReader {
             .map_err(map_zip_error)
     }
 
-    fn symlink_target_or_empty(&mut self, idx: usize) -> Vec<u8> {
+    fn symlink_target_or_empty(&mut self, idx: usize) -> Result<Vec<u8>, FormatError> {
         let result = self.open_entry(idx).and_then(|mut f| {
             let mut buf = Vec::new();
-            f.read_to_end(&mut buf)?;
+            f.by_ref()
+                .take((MAX_SYMLINK_TARGET_BYTES + 1) as u64)
+                .read_to_end(&mut buf)?;
+            if buf.len() > MAX_SYMLINK_TARGET_BYTES {
+                return Err(FormatError::ResourceLimitExceeded(format!(
+                    "ZIP symlink target exceeds the {MAX_SYMLINK_TARGET_BYTES}-byte limit"
+                )));
+            }
             Ok(buf)
         });
-        let Ok(target) = result else {
-            return Vec::new();
-        };
-        target
+        match result {
+            Ok(target) => Ok(target),
+            Err(error @ FormatError::ResourceLimitExceeded(_)) => Err(error),
+            Err(_) => Ok(Vec::new()),
+        }
     }
 
     /// Builds the metadata of entry `idx`. Symlink targets are stored as
@@ -169,7 +182,7 @@ impl ZipArchiveReader {
             // encrypted symlink without a usable password fall back to an
             // empty target (extraction will surface PasswordRequired on
             // file entries anyway).
-            let target = self.symlink_target_or_empty(idx);
+            let target = self.symlink_target_or_empty(idx)?;
             meta.entry_type = EntryType::Symlink { target };
         }
         Ok(meta)
@@ -177,6 +190,7 @@ impl ZipArchiveReader {
 
     fn test_with_problem_recorder(
         &mut self,
+        limits: Option<&SafetyLimits>,
         progress: &dyn ProgressSink,
         ctl: &ControlToken,
         mut record_problem: impl FnMut(String),
@@ -186,9 +200,17 @@ impl ZipArchiveReader {
             .sum();
         let mut done = 0u64;
         let mut entries_tested = 0u64;
+        let mut accountant = limits.copied().map(LimitsAccountant::new);
         for idx in 0..self.archive.len() {
             ctl.checkpoint()?;
             let path = self.paths[idx].clone();
+            let meta = if let Some(accountant) = &mut accountant {
+                let meta = self.meta_at(idx)?;
+                accountant.check_entry(&meta)?;
+                Some(meta)
+            } else {
+                None
+            };
             progress.on_progress(done, total, &path);
             entries_tested += 1;
             match self.open_entry(idx) {
@@ -201,12 +223,22 @@ impl ZipArchiveReader {
                 Ok(mut file) => {
                     // Reading through EOF makes the ZIP backend verify CRCs.
                     let mut buf = [0u8; 64 * 1024];
+                    let mut entry_output_bytes = 0u64;
                     loop {
                         ctl.checkpoint()?;
                         match file.read(&mut buf) {
                             Ok(0) => break,
                             Ok(n) => {
-                                done += n as u64;
+                                if let (Some(accountant), Some(meta)) =
+                                    (&mut accountant, meta.as_ref())
+                                {
+                                    accountant.add_entry_output_bytes(
+                                        meta,
+                                        &mut entry_output_bytes,
+                                        n as u64,
+                                    )?;
+                                }
+                                done = done.saturating_add(n as u64);
                                 progress.on_progress(done, total, &path);
                             }
                             Err(e) => {
@@ -259,6 +291,7 @@ impl LocalZipArchiveReader {
 
     fn test_with_problem_recorder(
         &mut self,
+        limits: Option<&SafetyLimits>,
         progress: &dyn ProgressSink,
         ctl: &ControlToken,
         mut record_problem: impl FnMut(String),
@@ -271,23 +304,35 @@ impl LocalZipArchiveReader {
             .sum();
         let mut done = 0u64;
         let mut entries_tested = 0u64;
+        let mut accountant = limits.copied().map(LimitsAccountant::new);
         let entries = self.entries.clone();
-        for entry in entries {
+        for (idx, entry) in entries.into_iter().enumerate() {
             ctl.checkpoint()?;
+            if let Some(accountant) = &mut accountant {
+                accountant.check_entry(&entry.meta)?;
+            }
             if !matches!(entry.meta.entry_type, EntryType::File) {
                 continue;
             }
             entries_tested += 1;
             progress.on_progress(done, total, &entry.meta.path);
-            match self.read_entry(&entry.meta.path) {
+            match self.read_entry_at(idx) {
                 Ok(mut data) => {
                     let mut buf = [0u8; 64 * 1024];
+                    let mut entry_output_bytes = 0u64;
                     loop {
                         ctl.checkpoint()?;
                         match data.read(&mut buf) {
                             Ok(0) => break,
                             Ok(n) => {
-                                done += n as u64;
+                                if let Some(accountant) = &mut accountant {
+                                    accountant.add_entry_output_bytes(
+                                        &entry.meta,
+                                        &mut entry_output_bytes,
+                                        n as u64,
+                                    )?;
+                                }
+                                done = done.saturating_add(n as u64);
                                 progress.on_progress(done, total, &entry.meta.path);
                             }
                             Err(e) => {
@@ -306,30 +351,12 @@ impl LocalZipArchiveReader {
         progress.on_progress(total, total, &EntryPath::from_utf8(""));
         Ok(entries_tested)
     }
-}
 
-impl ArchiveReader for LocalZipArchiveReader {
-    fn entries(&mut self) -> Box<dyn Iterator<Item = Result<EntryMeta, FormatError>> + '_> {
-        Box::new(self.entries.iter().map(|entry| Ok(entry.meta.clone())))
-    }
-
-    fn consume_entries(
-        mut self: Box<Self>,
-        visitor: &mut dyn FnMut(EntryMeta) -> Result<(), FormatError>,
-    ) -> Result<(), FormatError> {
-        self.index_by_raw = HashMap::new();
-        for entry in std::mem::take(&mut self.entries) {
-            visitor(entry.meta)?;
-        }
-        Ok(())
-    }
-
-    fn read_entry(&mut self, path: &EntryPath) -> Result<Box<dyn Read + '_>, FormatError> {
-        let idx = *self
-            .index_by_raw
-            .get(&path.raw)
-            .ok_or_else(|| FormatError::Other(format!("entry not found: {path}")))?;
-        let entry = &self.entries[idx];
+    fn read_entry_at(&mut self, idx: usize) -> Result<Box<dyn Read + '_>, FormatError> {
+        let entry = self
+            .entries
+            .get(idx)
+            .ok_or_else(|| FormatError::CorruptArchive("ZIP entry index is out of range".into()))?;
         if entry.flags & 0x01 != 0 {
             return Err(FormatError::PasswordRequired);
         }
@@ -368,6 +395,31 @@ impl ArchiveReader for LocalZipArchiveReader {
             ))),
         }
     }
+}
+
+impl ArchiveReader for LocalZipArchiveReader {
+    fn entries(&mut self) -> Box<dyn Iterator<Item = Result<EntryMeta, FormatError>> + '_> {
+        Box::new(self.entries.iter().map(|entry| Ok(entry.meta.clone())))
+    }
+
+    fn consume_entries(
+        mut self: Box<Self>,
+        visitor: &mut dyn FnMut(EntryMeta) -> Result<(), FormatError>,
+    ) -> Result<(), FormatError> {
+        self.index_by_raw = HashMap::new();
+        for entry in std::mem::take(&mut self.entries) {
+            visitor(entry.meta)?;
+        }
+        Ok(())
+    }
+
+    fn read_entry(&mut self, path: &EntryPath) -> Result<Box<dyn Read + '_>, FormatError> {
+        let idx = *self
+            .index_by_raw
+            .get(&path.raw)
+            .ok_or_else(|| FormatError::Other(format!("entry not found: {path}")))?;
+        self.read_entry_at(idx)
+    }
 
     fn test(
         &mut self,
@@ -376,7 +428,7 @@ impl ArchiveReader for LocalZipArchiveReader {
     ) -> Result<TestReport, FormatError> {
         let mut problems = Vec::new();
         let entries_tested =
-            self.test_with_problem_recorder(progress, ctl, |problem| problems.push(problem))?;
+            self.test_with_problem_recorder(None, progress, ctl, |problem| problems.push(problem))?;
         Ok(TestReport {
             entries_tested,
             problems,
@@ -390,8 +442,26 @@ impl ArchiveReader for LocalZipArchiveReader {
         ctl: &ControlToken,
     ) -> Result<TestSummary, FormatError> {
         let problems = BoundedProblemLog::new(TEST_PROBLEM_PREVIEW_LIMIT);
+        let entries_tested = self
+            .test_with_problem_recorder(None, progress, ctl, |problem| problems.record(problem))?;
+        Ok(TestSummary {
+            entries_tested,
+            problems: problems.snapshot(),
+            recovery: None,
+        })
+    }
+
+    fn test_summary_with_limits(
+        &mut self,
+        limits: &SafetyLimits,
+        progress: &dyn ProgressSink,
+        ctl: &ControlToken,
+    ) -> Result<TestSummary, FormatError> {
+        let problems = BoundedProblemLog::new(TEST_PROBLEM_PREVIEW_LIMIT);
         let entries_tested =
-            self.test_with_problem_recorder(progress, ctl, |problem| problems.record(problem))?;
+            self.test_with_problem_recorder(Some(limits), progress, ctl, |problem| {
+                problems.record(problem)
+            })?;
         Ok(TestSummary {
             entries_tested,
             problems: problems.snapshot(),
@@ -816,7 +886,7 @@ impl ArchiveReader for ZipArchiveReader {
     ) -> Result<TestReport, FormatError> {
         let mut problems = Vec::new();
         let entries_tested =
-            self.test_with_problem_recorder(progress, ctl, |problem| problems.push(problem))?;
+            self.test_with_problem_recorder(None, progress, ctl, |problem| problems.push(problem))?;
         Ok(TestReport {
             entries_tested,
             problems,
@@ -830,12 +900,176 @@ impl ArchiveReader for ZipArchiveReader {
         ctl: &ControlToken,
     ) -> Result<TestSummary, FormatError> {
         let problems = BoundedProblemLog::new(TEST_PROBLEM_PREVIEW_LIMIT);
-        let entries_tested =
-            self.test_with_problem_recorder(progress, ctl, |problem| problems.record(problem))?;
+        let entries_tested = self
+            .test_with_problem_recorder(None, progress, ctl, |problem| problems.record(problem))?;
         Ok(TestSummary {
             entries_tested,
             problems: problems.snapshot(),
             recovery: None,
         })
+    }
+
+    fn test_summary_with_limits(
+        &mut self,
+        limits: &SafetyLimits,
+        progress: &dyn ProgressSink,
+        ctl: &ControlToken,
+    ) -> Result<TestSummary, FormatError> {
+        let problems = BoundedProblemLog::new(TEST_PROBLEM_PREVIEW_LIMIT);
+        let entries_tested =
+            self.test_with_problem_recorder(Some(limits), progress, ctl, |problem| {
+                problems.record(problem)
+            })?;
+        Ok(TestSummary {
+            entries_tested,
+            problems: problems.snapshot(),
+            recovery: None,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{Cursor, Write as _};
+
+    use squallz_format_api::{
+        ControlToken, EntryType, FormatError, NoProgress, OpenOptions, SafetyLimits,
+    };
+
+    use super::{open, MAX_SYMLINK_TARGET_BYTES};
+
+    fn deflated_symlink_archive(target: &[u8]) -> Vec<u8> {
+        let mut writer = ::zip::ZipWriter::new(Cursor::new(Vec::new()));
+        writer
+            .start_file(
+                "link",
+                ::zip::write::SimpleFileOptions::default()
+                    .compression_method(::zip::CompressionMethod::Deflated)
+                    .system(::zip::System::Unix)
+                    .unix_permissions(0o777),
+            )
+            .expect("start deflated symlink fixture");
+        writer
+            .write_all(target)
+            .expect("write deflated symlink fixture");
+        let mut bytes = writer
+            .finish()
+            .expect("finish deflated symlink fixture")
+            .into_inner();
+
+        // `zip::ZipWriter::add_symlink` deliberately forces Stored. Start a
+        // genuine Deflate entry above, then mark that entry as a Unix symlink
+        // in its central-directory attributes.
+        let eocd = bytes
+            .windows(4)
+            .rposition(|window| window == b"PK\x05\x06")
+            .expect("fixture end-of-central-directory record");
+        let central_offset = u32::from_le_bytes(
+            bytes[eocd + 16..eocd + 20]
+                .try_into()
+                .expect("fixture central-directory offset"),
+        ) as usize;
+        assert_eq!(&bytes[central_offset..central_offset + 4], b"PK\x01\x02");
+        let external_attributes = (0o120777u32) << 16;
+        bytes[central_offset + 38..central_offset + 42]
+            .copy_from_slice(&external_attributes.to_le_bytes());
+
+        let mut archive = ::zip::ZipArchive::new(Cursor::new(bytes.clone()))
+            .expect("reopen deflated symlink fixture");
+        let entry = archive
+            .by_index_raw(0)
+            .expect("read deflated symlink fixture entry");
+        assert!(entry.is_symlink());
+        assert_eq!(entry.compression(), ::zip::CompressionMethod::Deflated);
+        bytes
+    }
+
+    #[test]
+    fn deflated_symlink_target_within_limit_is_listed() {
+        let bytes = deflated_symlink_archive(b"directory/file.txt");
+        let mut reader = open(Box::new(Cursor::new(bytes)), &OpenOptions::default())
+            .expect("open deflated symlink archive");
+
+        let entries = reader
+            .entries()
+            .collect::<Result<Vec<_>, _>>()
+            .expect("list deflated symlink archive");
+
+        assert_eq!(entries.len(), 1);
+        assert!(matches!(
+            &entries[0].entry_type,
+            EntryType::Symlink { target } if target == b"directory/file.txt"
+        ));
+    }
+
+    #[test]
+    fn oversized_deflated_symlink_target_hits_resource_limit() {
+        let target = vec![b'a'; MAX_SYMLINK_TARGET_BYTES + 1];
+        let bytes = deflated_symlink_archive(&target);
+        assert!(bytes.len() < target.len());
+        let mut reader = open(Box::new(Cursor::new(bytes)), &OpenOptions::default())
+            .expect("open oversized deflated symlink archive");
+
+        let error = reader
+            .entries()
+            .next()
+            .expect("oversized symlink entry")
+            .expect_err("oversized symlink target must be rejected");
+
+        assert!(matches!(
+            error,
+            FormatError::ResourceLimitExceeded(ref detail)
+                if detail == "ZIP symlink target exceeds the 65535-byte limit"
+        ));
+    }
+
+    #[test]
+    fn integrity_test_charges_observed_output_bytes() {
+        let mut writer = ::zip::ZipWriter::new(Cursor::new(Vec::new()));
+        writer
+            .start_file(
+                "large.txt",
+                ::zip::write::SimpleFileOptions::default()
+                    .compression_method(::zip::CompressionMethod::Deflated),
+            )
+            .expect("start guarded ZIP fixture");
+        writer
+            .write_all(&vec![b'a'; 128 * 1024])
+            .expect("write guarded ZIP fixture");
+        let mut bytes = writer
+            .finish()
+            .expect("finish guarded ZIP fixture")
+            .into_inner();
+        let eocd = bytes
+            .windows(4)
+            .rposition(|window| window == b"PK\x05\x06")
+            .expect("guarded fixture end-of-central-directory record");
+        let central_offset = u32::from_le_bytes(
+            bytes[eocd + 16..eocd + 20]
+                .try_into()
+                .expect("guarded fixture central-directory offset"),
+        ) as usize;
+        assert_eq!(&bytes[central_offset..central_offset + 4], b"PK\x01\x02");
+        bytes[central_offset + 24..central_offset + 28].copy_from_slice(&1u32.to_le_bytes());
+
+        let mut reader = open(Box::new(Cursor::new(bytes)), &OpenOptions::default())
+            .expect("open guarded ZIP fixture");
+        let declared = reader
+            .entries()
+            .next()
+            .expect("guarded ZIP entry")
+            .expect("read guarded ZIP metadata");
+        assert_eq!(declared.size, 1);
+        let limits = SafetyLimits {
+            max_output_bytes: 64 * 1024,
+            max_entries: u64::MAX,
+            max_compression_ratio: u32::MAX,
+        };
+
+        let error = reader
+            .test_summary_with_limits(&limits, &NoProgress, &ControlToken::default())
+            .expect_err("integrity test must enforce actual decoded bytes");
+
+        assert!(matches!(error, FormatError::ResourceLimitExceeded(_)));
     }
 }

@@ -3991,6 +3991,7 @@ dependencies = [
  "squallz-i18n",
  "squallz-publish",
  "squallz-recovery",
+ "squallz-sfx-runtime",
  "squallz-update",
  "tokio",
  "unicode-width",
@@ -4126,6 +4127,19 @@ dependencies = [
  "serde_json",
  "squallz-core",
  "squallz-format-api",
+]
+
+[[package]]
+name = "squallz-sfx-runtime"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "ctrlc",
+ "rpassword",
+ "serde_json",
+ "squallz-core",
+ "squallz-formats",
+ "squallz-i18n",
 ]
 
 [[package]]

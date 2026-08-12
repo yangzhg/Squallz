@@ -29,6 +29,15 @@ the PE optional header and locates the footer immediately before it. Builders
 reject an already signed stub; the correct order is assemble once, then sign
 the completed artifact.
 
+Packaged Windows NSIS installers and Linux AppImages ship a dedicated `sqz-sfx`
+runtime as the data resource `bin/sqz-sfx.stub`. Standalone GUI binaries do not
+contain bundle resources. The desktop app prefers the dedicated runtime over
+the full `sqz` CLI. An unsigned legacy `sqz` remains a compatibility fallback
+for older packages, but a signed Windows CLI cannot be used as a template
+because it already has a PE certificate table. The dedicated runtime exposes
+only runtime help/version and self-extraction actions; list, test or extract
+without an embedded payload exits with an error.
+
 The ZIP payload stays independently inspectable. Squallz exposes a bounded
 view of the payload to the normal ZIP reader, so the reader cannot consume
 stub or footer bytes. Conventional ZIP tools can also recover the payload;
@@ -187,8 +196,8 @@ References:
 Create a target artifact from a complete ZIP payload:
 
 ```text
-sqz sfx create payload.zip --target windows --stub sqz.exe -o package.exe
-sqz sfx create payload.zip --target linux --stub sqz -o package.run
+sqz sfx create payload.zip --target windows --stub sqz-sfx.stub -o package.exe
+sqz sfx create payload.zip --target linux --stub sqz-sfx.stub -o package.run
 sqz sfx create payload.zip --target macos --stub Squallz.app -o Package.app
 ```
 
@@ -198,10 +207,12 @@ different artifact, the command reports `destination_changed` before moving an
 output. A later active path race can instead produce a recovery error with
 paths to inspect.
 
-When Windows/Linux host and target match, the current `sqz` binary is the
-default stub. A packaged macOS `sqz` automatically finds its enclosing
-`Squallz.app`; development builds use `--stub Squallz.app`. The builder checks
-the executable format and the correct Squallz runtime marker before writing.
+When Windows/Linux host and target match, `sqz` first looks for the packaged
+`sqz-sfx.stub` and falls back to the current unsigned `sqz` binary for older
+or development layouts. A packaged macOS `sqz` automatically finds its
+enclosing `Squallz.app`; development builds use `--stub Squallz.app`. The
+builder checks the executable format and the correct Squallz runtime marker
+before writing.
 
 Inspect and verify an artifact without executing it:
 
@@ -269,7 +280,20 @@ line.
 
 - Assemble first, then sign the final PE/ELF artifact or macOS app bundle.
 - Use an unsigned Windows stub. Authenticode signing belongs after SFX
-  assembly, and the signed result must be retested with `sqz sfx inspect`.
+  assembly, and the signed result must be retested with `sqz sfx inspect` and
+  executed on Windows. A typical publisher command is
+  `signtool sign /fd SHA256 /tr <RFC3161-timestamp-URL> /td SHA256 package.exe`.
+  Never sign `sqz-sfx-template.stub` itself. Its extension must also stay
+  `.stub` in the bundler source path so Windows package signing does not treat
+  it as an executable resource.
+- Preserve the executable mode on the packaged Linux template. SFX assembly
+  adds the owner execute bit to the final `.run`; release smoke must verify the
+  mode and launch that exact output on Linux.
+- Publish the NSIS installer as the exact Windows desktop update asset. Publish
+  a tar archive containing `Squallz.AppImage` as the exact Linux desktop update
+  asset. Do not put a standalone GUI executable under either update name: it
+  has no bundled SFX runtime. Windows and Linux packages remain explicitly
+  marked as unsigned previews until their platform signing pipelines exist.
 - A signed macOS source app is accepted, but its outer signature is not copied.
   The generated SFX omits the desktop CLI sidecar and Quick Look extension.
   Sign the outer `.app` with hardened runtime and a secure timestamp, verify with
@@ -278,7 +302,13 @@ line.
   using the publisher's existing Developer ID identity and Keychain profile.
 - Treat an unsigned artifact as untrusted in CLI and GUI messaging.
 - Test the actual output on the target operating system; a synthetic stub test
-  proves container layout, not executable-loader behavior.
+  proves container layout, not executable-loader behavior. Release smoke must
+  install the generated NSIS package or extract the generated AppImage and
+  compare its `bin/sqz-sfx.stub` with the build template. It must then use the
+  dedicated template while retaining the full CLI version, split create, list,
+  test, extract and payload-create checks. It must also verify the dedicated
+  runtime identity, require it to be strictly smaller than the full `sqz` CLI,
+  and exercise an unsigned legacy `sqz` fallback where that fallback is valid.
 - Benchmark guarded replacement with cold caches and large macOS bundles. The
   full-tree digest is intentionally stronger than a metadata-only check, but
   its release-scale read amplification has not yet been qualified.

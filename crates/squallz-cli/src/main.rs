@@ -16,15 +16,14 @@ mod ui;
 
 use std::any::Any;
 use std::panic;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::Parser;
-use squallz_core::api::{ControlToken, FormatError};
+use squallz_core::api::ControlToken;
 use squallz_core::{Engine, SFX_CLI_STUB_MARKER};
 use squallz_i18n::Localizer;
 
-use crate::args::{Cli, SfxRuntimeCli};
+use crate::args::Cli;
 use crate::commands::Ctx;
 use crate::errors::{
     error_kind, exit_code, localize_error, localize_update_error, update_error_kind,
@@ -44,15 +43,11 @@ fn main() {
 }
 
 fn run_cli() {
-    match embedded_sfx_probe() {
-        Ok(Some(path)) => {
-            run_embedded_sfx(path, None);
-            return;
-        }
-        Ok(None) => {}
-        Err(error) => {
-            run_embedded_sfx(PathBuf::new(), Some(error));
-            return;
+    if let Ok(path) = std::env::current_exe() {
+        let args = std::env::args_os().skip(1).collect::<Vec<_>>();
+        match squallz_sfx_runtime::probe(&path) {
+            Ok(false) => {}
+            Ok(true) | Err(_) => std::process::exit(squallz_sfx_runtime::run(&path, &args)),
         }
     }
 
@@ -80,37 +75,6 @@ fn run_cli() {
         json_errors,
         output_style,
     );
-}
-
-fn embedded_sfx_probe() -> Result<Option<PathBuf>, FormatError> {
-    let path = match std::env::current_exe() {
-        Ok(path) => path,
-        Err(_) => return Ok(None),
-    };
-    if commands::sfx::embedded_probe(&path)? {
-        Ok(Some(path))
-    } else {
-        Ok(None)
-    }
-}
-
-fn run_embedded_sfx(path: PathBuf, probe_error: Option<FormatError>) {
-    let cli = SfxRuntimeCli::parse();
-    let output_style = cli.output_style;
-    let json_errors = cli.json;
-    let (ctx, loc) = command_context(
-        cli.lang.as_deref(),
-        cli.quiet,
-        cli.verbose,
-        output_style,
-        cli.color,
-        cli.accent,
-    );
-    let result = match probe_error {
-        Some(error) => Err(CliError::Format(error)),
-        None => commands::sfx::run_embedded(&ctx, path, cli),
-    };
-    finish_command(result, &ctx, &loc, json_errors, output_style);
 }
 
 fn command_context(

@@ -62,6 +62,18 @@ pub fn registry() -> FormatRegistry {
     reg
 }
 
+/// Builds the ZIP-only registry used by the Windows and Linux SFX runtime.
+///
+/// SFX v1 always carries one complete ZIP payload. This registry deliberately
+/// omits every other format and exposes a read-only ZIP adapter, keeping
+/// archive creation, updates, and native volume writing outside the runtime
+/// capability boundary.
+pub fn sfx_zip_registry() -> FormatRegistry {
+    let mut reg = FormatRegistry::new();
+    reg.register_archive(Arc::new(zip::SfxZipFormat));
+    reg
+}
+
 /// Builds the self-contained registry used inside constrained preview hosts.
 ///
 /// Finder Quick Look extensions cannot rely on launching a sibling process.
@@ -170,6 +182,14 @@ mod tests {
         assert!(!ids.contains(&"rar"));
         assert!(!ids.contains(&"wim"));
         assert!(!ids.contains(&"iso"));
+    }
+
+    #[test]
+    fn sfx_registry_contains_only_read_only_zip() {
+        let formats = super::sfx_zip_registry().formats();
+
+        assert_eq!(formats.len(), 1);
+        assert_archive(&formats[0], &["zip"], false, true, false, false, false);
     }
 
     fn missing_volume<T>(result: Result<T, FormatError>) -> std::path::PathBuf {

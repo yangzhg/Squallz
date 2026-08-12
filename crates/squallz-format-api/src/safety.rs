@@ -153,6 +153,33 @@ impl LimitsAccountant {
         Ok(())
     }
 
+    /// Registers bytes actually decoded for one archive entry.
+    ///
+    /// This applies both the cumulative output limit and the per-entry ratio
+    /// limit to observed output, so integrity tests and extraction do not have
+    /// to trust an archive's declared uncompressed size.
+    pub fn add_entry_output_bytes(
+        &mut self,
+        meta: &EntryMeta,
+        entry_output_bytes: &mut u64,
+        n: u64,
+    ) -> Result<(), FormatError> {
+        *entry_output_bytes = entry_output_bytes.saturating_add(n);
+        self.add_output_bytes(n)?;
+        if *entry_output_bytes > RATIO_CHECK_MIN_SIZE {
+            if let Some(compressed) = meta.compressed_size {
+                let ratio = *entry_output_bytes / compressed.max(1);
+                if ratio > u64::from(self.limits.max_compression_ratio) {
+                    return Err(FormatError::ResourceLimitExceeded(format!(
+                        "entry '{}' observed compression ratio {} exceeds limit of {}",
+                        meta.path, ratio, self.limits.max_compression_ratio
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Cumulative output bytes written so far.
     pub fn output_bytes(&self) -> u64 {
         self.output_bytes
@@ -281,6 +308,25 @@ mod tests {
         // Large file with an extreme ratio: rejected.
         assert!(matches!(
             acc.check_entry(&meta("bomb", 10 * 1024 * 1024 * 1024, Some(1024))),
+            Err(FormatError::ResourceLimitExceeded(_))
+        ));
+    }
+
+    #[test]
+    fn accountant_checks_observed_entry_output() {
+        let mut acc = LimitsAccountant::new(SafetyLimits {
+            max_output_bytes: u64::MAX,
+            max_entries: u64::MAX,
+            max_compression_ratio: 4,
+        });
+        let entry = meta("observed", 1, Some(1024));
+        let mut observed = 0u64;
+
+        assert!(acc
+            .add_entry_output_bytes(&entry, &mut observed, 1024 * 1024)
+            .is_ok());
+        assert!(matches!(
+            acc.add_entry_output_bytes(&entry, &mut observed, 1),
             Err(FormatError::ResourceLimitExceeded(_))
         ));
     }

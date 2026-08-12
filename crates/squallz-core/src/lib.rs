@@ -67,9 +67,10 @@ pub use queue::{
     Job, JobId, JobProgress, JobQueue, JobResources, JobState, QueueWaitReason, QueuedJobStatus,
 };
 pub use sfx::{
-    default_sfx_extract_destination, inspect_sfx, macos_sfx_bundle_for_executable,
-    sfx_recovery_details, validate_sfx_template, verify_sfx_payload, SfxBuildOptions,
-    SfxBuildReport, SfxInfo, SfxLayout, SfxRecoveryDetails, SfxTarget, VerifiedSfxBuildReport,
+    default_sfx_extract_destination, discover_packaged_sfx_runtime, inspect_sfx,
+    macos_sfx_bundle_for_executable, sfx_recovery_details, validate_sfx_template,
+    verify_and_open_sfx_payload, verify_sfx_payload, SfxBuildOptions, SfxBuildReport, SfxInfo,
+    SfxLayout, SfxRecoveryDetails, SfxTarget, VerifiedSfxBuildReport, VerifiedSfxPayload,
     SFX_CLI_STUB_MARKER, SFX_GUI_STUB_MARKER,
 };
 pub use volumes::{collect_volume_set, collect_volume_set_with_control, VolumeSet};
@@ -605,6 +606,34 @@ impl Engine {
     ) -> Result<Box<dyn ArchiveReader>, FormatError> {
         self.open_identified_with_control(path, opts, control)
             .map(|opened| opened.reader)
+    }
+
+    /// Opens a previously verified single-file SFX through its retained file
+    /// handle. The executable path is never reopened, and only a ZIP format
+    /// implementation may accept the bounded payload stream.
+    pub fn open_verified_sfx_with_control(
+        &self,
+        payload: &VerifiedSfxPayload,
+        opts: &OpenOptions,
+        control: &ControlToken,
+    ) -> Result<Box<dyn ArchiveReader>, FormatError> {
+        control.checkpoint()?;
+        payload.verify_held_state()?;
+        let mut stream = ControlledReadSeek::boxed(payload.open_reader()?, control);
+        let (head, tail) = controlled_result(control, sniff_window(&mut *stream))?;
+        let reader = match self.registry.detect(Some("payload.zip"), &head, &tail) {
+            Some(api::Detected::Archive(format)) if format.id() == "zip" => {
+                controlled_result(control, format.open_with_control(stream, opts, control))?
+            }
+            _ => {
+                return Err(FormatError::CorruptArchive(
+                    "SFX payload is not a supported ZIP archive".into(),
+                ))
+            }
+        };
+        payload.verify_held_state()?;
+        control.checkpoint()?;
+        Ok(reader)
     }
 
     fn open_identified_with_control(

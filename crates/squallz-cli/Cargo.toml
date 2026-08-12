@@ -15,6 +15,7 @@ squallz-formats = { path = "../squallz-formats", version = "0.1.0" }
 squallz-i18n = { path = "../squallz-i18n", version = "0.1.0" }
 squallz-publish = { path = "../squallz-publish", version = "0.1.0" }
 squallz-recovery = { path = "../squallz-recovery", version = "0.1.0" }
+squallz-sfx-runtime = { path = "../squallz-sfx-runtime", version = "0.1.0" }
 squallz-update = { path = "../squallz-update", version = "0.1.0" }
 clap.workspace = true
 ctrlc.workspace = true

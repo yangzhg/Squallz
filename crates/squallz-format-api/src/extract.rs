@@ -446,9 +446,9 @@ impl<'o> ExtractSink<'o> {
                 if n == 0 {
                     break;
                 }
-                self.accountant.add_output_bytes(n as u64)?;
+                self.accountant
+                    .add_entry_output_bytes(meta, &mut written, n as u64)?;
                 out.write_all(&buf[..n])?;
-                written = written.saturating_add(n as u64);
                 self.done += n as u64;
                 progress.on_entry_progress(
                     self.done,
@@ -523,9 +523,9 @@ impl<'o> ExtractSink<'o> {
                 if n == 0 {
                     break;
                 }
-                self.accountant.add_output_bytes(n as u64)?;
+                self.accountant
+                    .add_entry_output_bytes(meta, &mut written, n as u64)?;
                 out.write_all(&buf[..n])?;
-                written = written.saturating_add(n as u64);
                 self.done += n as u64;
                 progress.on_entry_progress(
                     self.done,
@@ -1821,6 +1821,46 @@ mod tests {
             "{error:?}"
         );
         assert_eq!(fs::read(&target).unwrap(), b"old");
+        assert!(extract_temp_paths(&dir).is_empty());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn observed_ratio_limit_rejects_underreported_output() {
+        let dir = temp_dir("atomic-observed-ratio-limit");
+        let opts = ExtractOptions {
+            limits: crate::SafetyLimits {
+                max_output_bytes: u64::MAX,
+                max_entries: u64::MAX,
+                max_compression_ratio: 2,
+            },
+            ..ExtractOptions::default()
+        };
+        let mut sink = ExtractSink::new(&dir, &opts, 1).unwrap();
+        let mut meta = file_meta("expanded.txt");
+        meta.size = 1;
+        meta.compressed_size = Some(1024);
+        let out = sink
+            .file_target(&meta, &NoProgress, &ControlToken::default())
+            .unwrap()
+            .unwrap();
+        let expanded = vec![b'a'; 2 * 1024 * 1024];
+
+        let error = sink
+            .write_file(
+                &meta,
+                &out,
+                &mut Cursor::new(expanded),
+                &NoProgress,
+                &ControlToken::default(),
+            )
+            .unwrap_err();
+
+        assert!(
+            matches!(error, FormatError::ResourceLimitExceeded(_)),
+            "{error:?}"
+        );
+        assert!(!out.exists());
         assert!(extract_temp_paths(&dir).is_empty());
         fs::remove_dir_all(&dir).unwrap();
     }

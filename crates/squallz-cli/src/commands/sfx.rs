@@ -1,4 +1,4 @@
-//! SFX creation, inspection and embedded-runtime dispatch.
+//! SFX creation, inspection, and macOS publishing.
 
 use std::path::{Path, PathBuf};
 
@@ -8,11 +8,11 @@ mod macos_publish;
 use serde_json::json;
 use squallz_core::api::FormatError;
 use squallz_core::{
-    inspect_sfx, verify_sfx_payload, CreateArtifactKind, SfxBuildOptions, SfxTarget,
-    SfxTarget::Macos,
+    discover_packaged_sfx_runtime, verify_sfx_payload, CreateArtifactKind, SfxBuildOptions,
+    SfxTarget, SfxTarget::Macos,
 };
 
-use crate::args::{resource_options, SfxCmd, SfxRuntimeCli, SymlinkArg};
+use crate::args::{resource_options, SfxCmd};
 use crate::commands::reports::{print_preserved_output_warning, print_pretty_json};
 use crate::commands::Ctx;
 use crate::errors::CliError;
@@ -271,7 +271,8 @@ fn resolve_stub(target: SfxTarget, stub: Option<PathBuf>) -> Result<PathBuf, For
             target.as_str()
         )));
     }
-    std::env::current_exe().map_err(FormatError::from)
+    let executable = std::env::current_exe().map_err(FormatError::from)?;
+    Ok(discover_packaged_sfx_runtime(&executable).unwrap_or(executable))
 }
 
 fn current_macos_app_template() -> Result<Option<PathBuf>, FormatError> {
@@ -291,83 +292,9 @@ fn hex_digest(bytes: [u8; 32]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-pub fn run_embedded(ctx: &Ctx, executable: PathBuf, cli: SfxRuntimeCli) -> Result<(), CliError> {
-    let resources = resource_options(cli.threads, cli.memory_limit);
-    let progress = CliProgress::new_for_operation(
-        ctx.quiet,
-        ctx.verbose,
-        cli.json,
-        ctx.output_style,
-        ctx.color,
-        ctx.accent,
-        "test",
-    );
-    let verification = verify_sfx_payload(&executable, &resources, &progress, &ctx.ctl);
-    progress.finish();
-    verification?;
-
-    if cli.list {
-        return super::list::run(ctx, executable, None, None, None, cli.json, false);
-    }
-    if cli.test {
-        return super::test::run(ctx, executable, None, None, cli.json);
-    }
-    let output = match cli.output {
-        Some(path) => path,
-        None => default_extract_dest(&executable)?,
-    };
-    super::extract::run(
-        ctx,
-        executable,
-        Some(output),
-        Vec::new(),
-        cli.overwrite,
-        None,
-        None,
-        SymlinkArg::Skip,
-        true,
-        false,
-        cli.threads,
-        cli.memory_limit,
-        cli.max_output_bytes,
-        cli.max_entries,
-        cli.max_compression_ratio,
-        cli.json,
-    )
-}
-
-fn default_extract_dest(executable: &Path) -> Result<PathBuf, FormatError> {
-    Ok(squallz_core::default_sfx_extract_destination(
-        &std::env::current_dir()?,
-        executable,
-    ))
-}
-
-pub fn embedded_probe(path: &Path) -> Result<bool, FormatError> {
-    Ok(inspect_sfx(path)?.is_some())
-}
-
 #[cfg(test)]
 mod tests {
-    use clap::Parser;
-
     use super::*;
-
-    #[test]
-    fn default_destination_uses_executable_stem() {
-        let dest = default_extract_dest(Path::new("/tmp/Release.exe")).unwrap();
-        assert_eq!(dest.file_name().unwrap(), "Release");
-    }
-
-    #[test]
-    fn default_destination_keeps_special_stems_below_the_current_directory() {
-        let base = std::env::current_dir().unwrap();
-        for executable in ["...exe", "...run", "squallz", "CON.exe", "name..run"] {
-            let dest = default_extract_dest(Path::new(executable)).unwrap();
-            assert_eq!(dest.parent(), Some(base.as_path()));
-            assert_eq!(dest.file_name().unwrap(), "extracted");
-        }
-    }
 
     #[test]
     fn cross_target_without_stub_is_rejected() {
@@ -383,14 +310,5 @@ mod tests {
     fn macos_default_stub_requires_an_app_context() {
         let err = resolve_stub(SfxTarget::Macos, None).unwrap_err();
         assert!(matches!(err, FormatError::Unsupported(_)));
-    }
-
-    #[test]
-    fn overwrite_arg_is_part_of_runtime_contract() {
-        let parsed = SfxRuntimeCli::try_parse_from(["sfx", "--overwrite", "rename"]).unwrap();
-        assert!(matches!(
-            parsed.overwrite,
-            crate::args::OverwriteArg::Rename
-        ));
     }
 }

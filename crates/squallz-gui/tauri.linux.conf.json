@@ -1,0 +1,9 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "targets": ["appimage"],
+    "resources": {
+      "../../target/release/sqz-sfx-template.stub": "bin/sqz-sfx.stub"
+    }
+  }
+}

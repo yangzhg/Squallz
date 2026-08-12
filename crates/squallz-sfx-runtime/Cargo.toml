@@ -1,0 +1,22 @@
+[package]
+name = "squallz-sfx-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Minimal Squallz self-extracting archive runtime"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "sqz-sfx"
+path = "src/main.rs"
+
+[dependencies]
+squallz-core = { path = "../squallz-core", version = "0.1.0" }
+squallz-formats = { path = "../squallz-formats", version = "0.1.0", default-features = false }
+squallz-i18n = { path = "../squallz-i18n", version = "0.1.0" }
+clap.workspace = true
+ctrlc.workspace = true
+rpassword.workspace = true
+serde_json.workspace = true

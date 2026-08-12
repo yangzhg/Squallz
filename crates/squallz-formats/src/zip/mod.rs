@@ -47,6 +47,28 @@ const SPLIT_MAGIC: [u8; 4] = [0x50, 0x4B, 0x07, 0x08];
 /// The ZIP archive format.
 pub(crate) struct ZipFormat;
 
+/// Read-only ZIP surface used by the single-file SFX runtime.
+///
+/// Keeping this adapter separate from [`ZipFormat`] prevents a constrained
+/// runtime registry from exposing archive creation, updates, or native volume
+/// writing while reusing the same ZIP reader and extraction safety boundary.
+pub(crate) struct SfxZipFormat;
+
+fn sniff_zip(head: &[u8], tail: &[u8]) -> bool {
+    // Plain ZIP starts with a local header; an empty ZIP starts with the
+    // EOCD record directly.
+    if head.starts_with(&LOCAL_MAGIC)
+        || head.starts_with(&EOCD_MAGIC)
+        || head.starts_with(&SPLIT_MAGIC)
+    {
+        return true;
+    }
+    // SFX archives start with an executable stub but still end with an EOCD
+    // record, so also scan the tail window.
+    tail.windows(EOCD_MAGIC.len())
+        .any(|window| window == EOCD_MAGIC)
+}
+
 impl ArchiveFormat for ZipFormat {
     fn id(&self) -> &'static str {
         "zip"
@@ -70,17 +92,7 @@ impl ArchiveFormat for ZipFormat {
     }
 
     fn sniff(&self, head: &[u8], tail: &[u8]) -> bool {
-        // Plain ZIP starts with a local header; an empty ZIP starts with the
-        // EOCD record directly.
-        if head.starts_with(&LOCAL_MAGIC)
-            || head.starts_with(&EOCD_MAGIC)
-            || head.starts_with(&SPLIT_MAGIC)
-        {
-            return true;
-        }
-        // SFX archives start with an MZ executable stub but still end with
-        // the EOCD record, so also scan the tail window.
-        tail.windows(EOCD_MAGIC.len()).any(|w| w == EOCD_MAGIC)
+        sniff_zip(head, tail)
     }
 
     fn open(
@@ -271,6 +283,47 @@ impl ArchiveFormat for ZipFormat {
     }
 }
 
+impl ArchiveFormat for SfxZipFormat {
+    fn id(&self) -> &'static str {
+        "zip"
+    }
+
+    fn extensions(&self) -> &'static [&'static str] {
+        &["zip"]
+    }
+
+    fn capabilities(&self) -> FormatCapabilities {
+        FormatCapabilities {
+            can_extract: true,
+            can_encrypt_data: true,
+            can_test: true,
+            ..FormatCapabilities::default()
+        }
+    }
+
+    fn sniff(&self, head: &[u8], tail: &[u8]) -> bool {
+        sniff_zip(head, tail)
+    }
+
+    fn open(
+        &self,
+        src: Box<dyn ReadSeek>,
+        opts: &OpenOptions,
+    ) -> Result<Box<dyn ArchiveReader>, FormatError> {
+        reader::open(src, opts)
+    }
+
+    fn create(
+        &self,
+        _dst: Box<dyn WriteSeek>,
+        _opts: &CreateOptions,
+    ) -> Result<Box<dyn ArchiveWriter>, FormatError> {
+        Err(FormatError::Unsupported(
+            "the SFX runtime ZIP registry is read-only".into(),
+        ))
+    }
+}
+
 #[cfg(feature = "process-backend")]
 struct SplitZipArchiveReader {
     staged: StagedSplitZipSet,
@@ -432,7 +485,9 @@ impl ArchiveReader for SplitZipArchiveReader {
 
 #[cfg(test)]
 mod tests {
-    use squallz_format_api::{EntryMeta, EntryPath, EntryType};
+    use std::io::{Cursor, Write as _};
+
+    use squallz_format_api::{EntryMeta, EntryPath, EntryType, NoProgress};
 
     use super::*;
 
@@ -453,6 +508,78 @@ mod tests {
         assert!(capabilities.can_split);
         assert!(capabilities.can_update);
         assert!(capabilities.can_test);
+    }
+
+    #[test]
+    fn sfx_zip_format_exposes_only_the_read_surface() {
+        let format = SfxZipFormat;
+
+        assert_eq!(format.id(), "zip");
+        assert_eq!(format.extensions(), &["zip"]);
+
+        let capabilities = format.capabilities();
+        assert!(!capabilities.can_create);
+        assert!(capabilities.can_extract);
+        assert!(capabilities.can_encrypt_data);
+        assert!(!capabilities.can_encrypt_names);
+        assert!(!capabilities.can_split);
+        assert!(!capabilities.can_update);
+        assert!(capabilities.can_test);
+
+        let error = match format.create(
+            Box::new(Cursor::new(Vec::<u8>::new())),
+            &CreateOptions::default(),
+        ) {
+            Ok(_) => panic!("SFX ZIP adapter must reject creation"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, FormatError::Unsupported(_)));
+    }
+
+    #[test]
+    fn sfx_zip_format_reuses_the_shared_reader() {
+        let mut archive = ::zip::ZipWriter::new(Cursor::new(Vec::new()));
+        archive
+            .start_file(
+                "payload.txt",
+                ::zip::write::SimpleFileOptions::default()
+                    .compression_method(::zip::CompressionMethod::Deflated),
+            )
+            .expect("start SFX ZIP fixture entry");
+        archive
+            .write_all(b"SFX payload")
+            .expect("write SFX ZIP fixture entry");
+        let bytes = archive
+            .finish()
+            .expect("finish SFX ZIP fixture")
+            .into_inner();
+
+        let format = SfxZipFormat;
+        let mut reader = format
+            .open(Box::new(Cursor::new(bytes)), &OpenOptions::default())
+            .expect("open SFX ZIP through shared reader");
+        let entries = reader
+            .entries()
+            .collect::<Result<Vec<_>, _>>()
+            .expect("list SFX ZIP entries");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].path.display, "payload.txt");
+
+        let mut contents = Vec::new();
+        {
+            let mut entry = reader
+                .read_entry(&entries[0].path)
+                .expect("open SFX ZIP payload entry");
+            std::io::Read::read_to_end(&mut entry, &mut contents)
+                .expect("read SFX ZIP payload entry");
+        }
+        assert_eq!(contents, b"SFX payload");
+
+        let report = reader
+            .test_summary(&NoProgress, &ControlToken::default())
+            .expect("test SFX ZIP payload");
+        assert!(report.is_ok());
+        assert_eq!(report.entries_tested, 1);
     }
 
     #[test]

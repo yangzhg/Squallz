@@ -753,6 +753,29 @@ pub trait ArchiveReader: Send {
     ) -> Result<TestSummary, FormatError> {
         self.test(progress, ctl).map(TestSummary::from)
     }
+
+    /// Integrity test with explicit decompression-bomb guardrails.
+    ///
+    /// The compatibility implementation validates declared metadata before
+    /// forwarding to [`ArchiveReader::test_summary`]. Readers that stream
+    /// decoded contents should override this method and charge observed bytes
+    /// as they are read, because untrusted metadata can understate output.
+    fn test_summary_with_limits(
+        &mut self,
+        limits: &SafetyLimits,
+        progress: &dyn ProgressSink,
+        ctl: &ControlToken,
+    ) -> Result<TestSummary, FormatError> {
+        let mut accountant = LimitsAccountant::new(*limits);
+        for entry in self.entries() {
+            ctl.checkpoint()?;
+            let entry = entry?;
+            accountant.check_entry(&entry)?;
+            accountant.add_output_bytes(entry.size)?;
+        }
+        ctl.checkpoint()?;
+        self.test_summary(progress, ctl)
+    }
 }
 
 /// Write handle of an archive being created.

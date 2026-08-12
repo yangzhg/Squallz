@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import tempfile
@@ -18,6 +19,8 @@ from typing import Any
 
 PLATFORMS = ("macos-arm64", "macos-x64", "windows-x64", "linux-x64")
 PROFILES = ("release", "debug")
+SFX_RESOURCE_SOURCE = "../../target/release/sqz-sfx-template.stub"
+SFX_RESOURCE_TARGET = "bin/sqz-sfx.stub"
 TOML_SECTION = re.compile(r"^\s*\[([^\]]+)\]\s*(?:#.*)?$")
 TOML_VERSION = re.compile(
     r"""^\s*version\s*=\s*(?:"([^"]+)"|'([^']+)')\s*(?:#.*)?$"""
@@ -46,12 +49,11 @@ def release_sfx_template_path(
     project_root: Path,
     platform: str,
     profile: str,
-    binary: Path,
 ) -> Path:
     if platform in {"macos-arm64", "macos-x64"}:
         return project_root / "target" / profile / "bundle/macos/Squallz.app"
     if platform in {"windows-x64", "linux-x64"}:
-        return binary
+        return project_root / "target/release/sqz-sfx-template.stub"
     raise SmokeError(f"unsupported release platform: {platform}")
 
 
@@ -63,6 +65,202 @@ def sfx_target(platform: str) -> str:
     if platform == "linux-x64":
         return "linux"
     raise SmokeError(f"unsupported release platform: {platform}")
+
+
+def require_desktop_bundle_config(
+    project_root: Path,
+    platform: str,
+    template: Path,
+) -> None:
+    if platform == "windows-x64":
+        platform_name = "windows"
+        bundle_target = "nsis"
+    elif platform == "linux-x64":
+        platform_name = "linux"
+        bundle_target = "appimage"
+    else:
+        return
+
+    config_path = (
+        project_root / f"crates/squallz-gui/tauri.{platform_name}.conf.json"
+    )
+    try:
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise SmokeError(
+            f"could not read the {platform_name} desktop bundle config"
+        ) from error
+    bundle = config.get("bundle")
+    if not isinstance(bundle, dict) or bundle.get("targets") != [bundle_target]:
+        raise SmokeError(
+            f"{platform_name} desktop bundle must target {bundle_target}"
+        )
+    resources = bundle.get("resources")
+    if (
+        not isinstance(resources, dict)
+        or resources.get(SFX_RESOURCE_SOURCE) != SFX_RESOURCE_TARGET
+    ):
+        raise SmokeError(
+            f"{platform_name} desktop bundle does not install the dedicated SFX runtime"
+        )
+    configured_source = (config_path.parent / SFX_RESOURCE_SOURCE).resolve()
+    if configured_source != template.resolve():
+        raise SmokeError(
+            f"{platform_name} desktop bundle uses a different SFX template source"
+        )
+
+
+def require_single_desktop_bundle(
+    project_root: Path,
+    platform: str,
+    profile: str,
+) -> Path:
+    if platform == "windows-x64":
+        bundle_dir = project_root / "target" / profile / "bundle/nsis"
+        pattern = "*.exe"
+        description = "Windows NSIS installer"
+    elif platform == "linux-x64":
+        bundle_dir = project_root / "target" / profile / "bundle/appimage"
+        pattern = "*.AppImage"
+        description = "Linux AppImage"
+    else:
+        raise SmokeError(f"unsupported desktop bundle platform: {platform}")
+
+    candidates = sorted(
+        path
+        for path in bundle_dir.glob(pattern)
+        if path.is_file() and not path.is_symlink()
+    )
+    if len(candidates) != 1:
+        raise SmokeError(
+            f"expected exactly one {description}, found {len(candidates)}"
+        )
+    artifact = candidates[0].resolve()
+    if platform == "linux-x64" and not os.access(artifact, os.X_OK):
+        raise SmokeError("Linux AppImage is not executable")
+    return artifact
+
+
+def require_packaged_runtime_file(
+    packaged_runtime: Path,
+    template: Path,
+    target: str,
+) -> None:
+    try:
+        metadata = packaged_runtime.lstat()
+    except OSError as error:
+        raise SmokeError(
+            f"{target} desktop bundle is missing {SFX_RESOURCE_TARGET}"
+        ) from error
+    if not stat.S_ISREG(metadata.st_mode) or packaged_runtime.is_symlink():
+        raise SmokeError(
+            f"{target} desktop bundle SFX runtime is not a regular file"
+        )
+    try:
+        matches_source = file_digest(packaged_runtime) == file_digest(template)
+    except OSError as error:
+        raise SmokeError(
+            f"{target} desktop bundle SFX runtime could not be inspected"
+        ) from error
+    if not matches_source:
+        raise SmokeError(
+            f"{target} desktop bundle SFX runtime differs from the build template"
+        )
+    if target == "linux" and metadata.st_mode & (
+        stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH
+    ) == 0:
+        raise SmokeError("Linux desktop bundle SFX runtime is not executable")
+    if target == "windows" and windows_pe_certificate_table(packaged_runtime) is not None:
+        raise SmokeError("Windows desktop bundle SFX runtime must remain unsigned")
+
+
+def invoke_bundle_artifact(
+    command: Sequence[os.PathLike[str] | str],
+    phase: str,
+    workspace: Path,
+    runner: Runner,
+) -> None:
+    try:
+        result = runner(
+            [os.fspath(argument) for argument in command],
+            cwd=workspace,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+    except OSError as error:
+        raise SmokeError(f"{phase} could not start") from error
+    if result.returncode != 0:
+        detail = result.stderr.strip().replace(os.fspath(workspace), "<smoke>")
+        suffix = f": {detail}" if detail else ""
+        raise SmokeError(
+            f"{phase} failed with exit code {result.returncode}{suffix}"
+        )
+
+
+def require_packaged_desktop_runtime(
+    project_root: Path,
+    platform: str,
+    profile: str,
+    template: Path,
+    workspace: Path,
+    runner: Runner = subprocess.run,
+) -> Path:
+    require_desktop_bundle_config(project_root, platform, template)
+    bundle = require_single_desktop_bundle(project_root, platform, profile)
+    if platform == "linux-x64":
+        extract_root = workspace / "appimage-extract"
+        extract_root.mkdir(parents=True)
+        invoke_bundle_artifact(
+            (bundle, "--appimage-extract"),
+            "Linux AppImage extraction",
+            extract_root,
+            runner,
+        )
+        packaged_runtime = (
+            extract_root
+            / "squashfs-root/usr/lib/Squallz"
+            / SFX_RESOURCE_TARGET
+        )
+        require_packaged_runtime_file(packaged_runtime, template, "linux")
+        return bundle
+
+    install_root = workspace / "nsis-install"
+    invoke_bundle_artifact(
+        (bundle, "/S", "/NS", f"/D={install_root}"),
+        "Windows NSIS installation",
+        workspace,
+        runner,
+    )
+    uninstaller = install_root / "uninstall.exe"
+    validation_error: SmokeError | None = None
+    try:
+        require_packaged_runtime_file(
+            install_root / SFX_RESOURCE_TARGET,
+            template,
+            "windows",
+        )
+    except SmokeError as error:
+        validation_error = error
+    if not uninstaller.is_file():
+        if validation_error is not None:
+            raise validation_error
+        raise SmokeError("Windows NSIS installation did not provide an uninstaller")
+    try:
+        invoke_bundle_artifact(
+            (uninstaller, "/S"),
+            "Windows NSIS cleanup",
+            workspace,
+            runner,
+        )
+    except SmokeError:
+        if validation_error is None:
+            raise
+    if validation_error is not None:
+        raise validation_error
+    return bundle
 
 
 def workspace_version(manifest: Path) -> str:
@@ -109,11 +307,68 @@ def require_sfx_template(path: Path, target: str) -> Path:
         ):
             raise SmokeError("macOS SFX template is not a valid app bundle")
         return resolved
-    if not resolved.is_file():
+    try:
+        metadata = path.lstat()
+    except OSError as error:
+        raise SmokeError(f"{target} SFX template could not be inspected") from error
+    if not stat.S_ISREG(metadata.st_mode) or path.is_symlink():
         raise SmokeError(f"{target} SFX template is not a regular file")
     if os.name != "nt" and not os.access(resolved, os.X_OK):
         raise SmokeError(f"{target} SFX template is not executable")
+    if target == "windows" and windows_pe_certificate_table(resolved) is not None:
+        raise SmokeError("Windows SFX template must remain unsigned before assembly")
     return resolved
+
+
+def require_dedicated_template_size(template: Path, binary: Path) -> None:
+    try:
+        template_bytes = template.stat().st_size
+        binary_bytes = binary.stat().st_size
+    except OSError as error:
+        raise SmokeError("SFX runtime size could not be inspected") from error
+    if template_bytes >= binary_bytes:
+        raise SmokeError("dedicated SFX runtime is not smaller than the full release CLI")
+
+
+def windows_pe_certificate_table(path: Path) -> tuple[int, int] | None:
+    try:
+        with path.open("rb") as handle:
+            dos_header = handle.read(64)
+            if not dos_header.startswith(b"MZ"):
+                return None
+            if len(dos_header) != 64:
+                raise SmokeError("Windows SFX template has a truncated DOS header")
+            pe_offset = int.from_bytes(dos_header[0x3C:0x40], "little")
+            handle.seek(pe_offset)
+            pe_header = handle.read(24)
+            if len(pe_header) != 24 or pe_header[:4] != b"PE\0\0":
+                raise SmokeError("Windows SFX template has an invalid PE header")
+            optional_size = int.from_bytes(pe_header[20:22], "little")
+            optional = handle.read(optional_size)
+            if len(optional) != optional_size:
+                raise SmokeError("Windows SFX template has a truncated optional header")
+    except OSError as error:
+        raise SmokeError("Windows SFX template could not be inspected") from error
+
+    magic = int.from_bytes(optional[:2], "little")
+    if magic == 0x10B:
+        data_directories = 96
+        directory_count = 92
+    elif magic == 0x20B:
+        data_directories = 112
+        directory_count = 108
+    else:
+        raise SmokeError("Windows SFX template has an unsupported PE optional header")
+    if directory_count + 4 > len(optional):
+        raise SmokeError("Windows SFX template has an incomplete PE data directory")
+    if int.from_bytes(optional[directory_count : directory_count + 4], "little") <= 4:
+        return None
+    certificate_entry = data_directories + 4 * 8
+    if certificate_entry + 8 > len(optional):
+        raise SmokeError("Windows SFX template has an incomplete certificate directory")
+    offset = int.from_bytes(optional[certificate_entry : certificate_entry + 4], "little")
+    size = int.from_bytes(optional[certificate_entry + 4 : certificate_entry + 8], "little")
+    return None if offset == 0 and size == 0 else (offset, size)
 
 
 def invoke(
@@ -332,6 +587,70 @@ def require_sfx_inspect_report(
         raise SmokeError("sfx inspect did not verify the created artifact and payload checksum")
 
 
+def create_and_inspect_sfx(
+    binary: Path,
+    payload: Path,
+    output: Path,
+    target: str,
+    template: Path,
+    common: Sequence[str],
+    workspace: Path,
+    runner: Runner,
+    phase: str,
+) -> dict[str, Any]:
+    create_report = require_success_report(
+        invoke_json(
+            binary,
+            f"{phase} create",
+            (
+                *common,
+                "sfx",
+                "create",
+                payload,
+                "--output",
+                output,
+                "--target",
+                target,
+                "--stub",
+                template,
+                "--json",
+            ),
+            workspace,
+            runner,
+        ),
+        f"{phase} create",
+    )
+    require_sfx_create_report(create_report, payload, output, target)
+    if target == "linux" and output.stat().st_mode & (
+        stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH
+    ) == 0:
+        raise SmokeError(f"{phase} output is missing its Linux executable mode")
+
+    inspect_report = require_success_report(
+        invoke_json(
+            binary,
+            f"{phase} inspect",
+            (*common, "sfx", "inspect", output, "--json"),
+            workspace,
+            runner,
+        ),
+        f"{phase} inspect",
+    )
+    require_sfx_inspect_report(inspect_report, create_report, output)
+    return create_report
+
+
+def require_runtime_test_report(
+    report: dict[str, Any], expected_entries: int, phase: str
+) -> None:
+    if (
+        not isinstance(report.get("entries_tested"), int)
+        or report["entries_tested"] < expected_entries
+        or report.get("problems") != []
+    ):
+        raise SmokeError(f"{phase} did not prove payload integrity")
+
+
 def run_smoke(
     binary: Path,
     expected_version: str,
@@ -343,6 +662,8 @@ def run_smoke(
     binary = require_binary(binary)
     target = sfx_target(platform)
     host_template = require_sfx_template(host_template, target)
+    if target != "macos" and host_template != binary:
+        require_dedicated_template_size(host_template, binary)
     source = create_fixture(workspace)
     expected_files = source_files(source)
     archive = workspace / "release-smoke.zip"
@@ -351,6 +672,17 @@ def run_smoke(
     sfx_output = sfx_output_path(workspace, target)
     sfx_destination = workspace / "sfx-extracted"
     common = ("--lang", "en-US", "--quiet", "--color", "never")
+
+    if target != "macos" and host_template != binary:
+        runtime_version = invoke(
+            host_template,
+            "dedicated sfx runtime version",
+            ("--version",),
+            workspace,
+            runner,
+        )
+        if runtime_version.stdout.strip() != f"sqz-sfx {expected_version}":
+            raise SmokeError("dedicated SFX template has the wrong runtime identity")
 
     version = invoke(binary, "version", ("--version",), workspace, runner)
     if version.stdout.strip() != f"sqz {expected_version}":
@@ -482,41 +814,17 @@ def run_smoke(
     )
     require_single_zip_payload(payload_report, sfx_payload, len(expected_files))
 
-    create_report = require_success_report(
-        invoke_json(
-            binary,
-            "sfx create",
-            (
-                *common,
-                "sfx",
-                "create",
-                sfx_payload,
-                "--output",
-                sfx_output,
-                "--target",
-                target,
-                "--stub",
-                host_template,
-                "--json",
-            ),
-            workspace,
-            runner,
-        ),
-        "sfx create",
+    create_and_inspect_sfx(
+        binary,
+        sfx_payload,
+        sfx_output,
+        target,
+        host_template,
+        common,
+        workspace,
+        runner,
+        "sfx",
     )
-    require_sfx_create_report(create_report, sfx_payload, sfx_output, target)
-
-    inspect_report = require_success_report(
-        invoke_json(
-            binary,
-            "sfx inspect",
-            (*common, "sfx", "inspect", sfx_output, "--json"),
-            workspace,
-            runner,
-        ),
-        "sfx inspect",
-    )
-    require_sfx_inspect_report(inspect_report, create_report, sfx_output)
 
     if target != "macos":
         sfx_listing = invoke_json(
@@ -549,12 +857,7 @@ def run_smoke(
             ),
             "sfx runtime test",
         )
-        if (
-            not isinstance(sfx_test.get("entries_tested"), int)
-            or sfx_test["entries_tested"] < len(expected_files)
-            or sfx_test.get("problems") != []
-        ):
-            raise SmokeError("sfx runtime test did not prove payload integrity")
+        require_runtime_test_report(sfx_test, len(expected_files), "sfx runtime test")
 
         sfx_extract = require_success_report(
             invoke_json(
@@ -575,6 +878,40 @@ def run_smoke(
             raise SmokeError("sfx runtime extract reported failed entries")
         if extracted_files(sfx_destination) != expected_files:
             raise SmokeError("SFX-extracted files do not match the source bytes")
+
+        legacy_template_signed = (
+            target == "windows" and windows_pe_certificate_table(binary) is not None
+        )
+        if not legacy_template_signed:
+            legacy_output = sfx_output.with_name(
+                f"release-smoke-legacy-sfx{sfx_output.suffix}"
+            )
+            create_and_inspect_sfx(
+                binary,
+                sfx_payload,
+                legacy_output,
+                target,
+                binary,
+                common,
+                workspace,
+                runner,
+                "legacy sfx",
+            )
+            legacy_test = require_success_report(
+                invoke_json(
+                    legacy_output,
+                    "legacy sfx runtime test",
+                    ("--test", "--json"),
+                    workspace,
+                    runner,
+                ),
+                "legacy sfx runtime test",
+            )
+            require_runtime_test_report(
+                legacy_test,
+                len(expected_files),
+                "legacy sfx runtime test",
+            )
 
     return len(expected_files)
 
@@ -604,14 +941,22 @@ def main() -> int:
             project_root,
             args.platform,
             args.profile,
-            binary,
         )
         version = workspace_version(project_root / "Cargo.toml")
         with tempfile.TemporaryDirectory(prefix="squallz-release-smoke-") as tmp:
+            workspace = Path(tmp)
+            if args.platform in {"windows-x64", "linux-x64"}:
+                require_packaged_desktop_runtime(
+                    project_root,
+                    args.platform,
+                    args.profile,
+                    host_template,
+                    workspace,
+                )
             count = run_smoke(
                 binary,
                 version,
-                Path(tmp),
+                workspace,
                 args.platform,
                 host_template,
             )

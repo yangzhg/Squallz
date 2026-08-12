@@ -63,6 +63,28 @@ pub fn default_sfx_extract_destination(base: &Path, artifact: &Path) -> PathBuf 
     base.join(folder)
 }
 
+/// Finds the dedicated SFX runtime distributed beside a desktop executable or
+/// CLI. A present candidate is returned even when it is invalid so callers can
+/// surface a damaged installation instead of silently falling back to a larger
+/// legacy stub.
+pub fn discover_packaged_sfx_runtime(executable: &Path) -> Option<PathBuf> {
+    let executable_dir = executable.parent()?;
+    let mut directories = vec![
+        executable_dir.to_path_buf(),
+        executable_dir.join("bin"),
+        executable_dir.join("resources/bin"),
+    ];
+    if let Some(prefix) = executable_dir.parent() {
+        directories.push(prefix.join("lib/Squallz/bin"));
+        directories.push(prefix.join("lib/squallz/bin"));
+        directories.push(prefix.join("lib/squallz-gui/bin"));
+    }
+    directories
+        .into_iter()
+        .map(|directory| directory.join("sqz-sfx.stub"))
+        .find(|candidate| fs::symlink_metadata(candidate).is_ok())
+}
+
 /// Physical SFX packaging layout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SfxLayout {
@@ -168,6 +190,59 @@ impl SfxInfo {
     /// Stub length before the payload.
     pub fn stub_bytes(self) -> u64 {
         self.stub_bytes_value
+    }
+}
+
+/// A verified single-file SFX payload bound to the file that was checked.
+///
+/// The held file is opened without following the final path component. Later
+/// readers clone that handle instead of reopening `source_path`, so replacing
+/// the executable path after verification cannot substitute another payload.
+pub struct VerifiedSfxPayload {
+    source_path: PathBuf,
+    file: File,
+    identity: PathIdentity,
+    state: RegularFileState,
+    info: SfxInfo,
+}
+
+impl std::fmt::Debug for VerifiedSfxPayload {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("VerifiedSfxPayload")
+            .field("source_path", &self.source_path)
+            .field("info", &self.info)
+            .finish_non_exhaustive()
+    }
+}
+
+impl VerifiedSfxPayload {
+    /// Footer metadata retained after the declared payload checksum passed.
+    pub fn info(&self) -> SfxInfo {
+        self.info
+    }
+
+    /// Original path used to bind the held file.
+    pub fn source_path(&self) -> &Path {
+        &self.source_path
+    }
+
+    pub(crate) fn open_reader(&self) -> Result<Box<dyn ReadSeek>, FormatError> {
+        self.verify_held_state()?;
+        let file = self.file.try_clone()?;
+        if file_identity(&file)? != self.identity || !self.state.matches(&file.metadata()?) {
+            return Err(FormatError::input_changed());
+        }
+        Ok(Box::new(SfxPayloadReader::from_file(file, self.info)))
+    }
+
+    pub(crate) fn verify_held_state(&self) -> Result<(), FormatError> {
+        if file_identity(&self.file)? != self.identity
+            || !self.state.matches(&self.file.metadata()?)
+        {
+            return Err(FormatError::input_changed());
+        }
+        Ok(())
     }
 }
 
@@ -512,14 +587,81 @@ pub fn verify_sfx_payload(
     progress: &dyn ProgressSink,
     ctl: &ControlToken,
 ) -> Result<SfxInfo, FormatError> {
-    let info = inspect_sfx(path)?.ok_or_else(|| {
-        FormatError::Unsupported(format!("{} is not a Squallz SFX artifact", path.display()))
-    })?;
-    if info.layout == SfxLayout::MacosApp {
+    if fs::symlink_metadata(path)?.is_dir() {
+        let info = inspect_sfx(path)?.ok_or_else(|| {
+            FormatError::Unsupported(format!("{} is not a Squallz SFX artifact", path.display()))
+        })?;
         return bundle::verify(path, info, resources, progress, ctl);
     }
-    let mut file = File::open(path)?;
-    file.seek(SeekFrom::Start(info.payload_offset))?;
+    verify_and_open_sfx_payload(path, resources, progress, ctl).map(|payload| payload.info())
+}
+
+/// Verifies a Windows/Linux single-file SFX and retains the exact file handle
+/// whose payload checksum passed.
+///
+/// macOS SFX app bundles use multiple files and remain supported by
+/// [`verify_sfx_payload`]; this handle-oriented API deliberately accepts only
+/// the single-file layout.
+pub fn verify_and_open_sfx_payload(
+    path: &Path,
+    resources: &ResourceOptions,
+    progress: &dyn ProgressSink,
+    ctl: &ControlToken,
+) -> Result<VerifiedSfxPayload, FormatError> {
+    ctl.checkpoint()?;
+    let path_metadata = fs::symlink_metadata(path)?;
+    if path_metadata.file_type().is_symlink() {
+        return Err(FormatError::Unsupported(format!(
+            "SFX artifact must not be a symbolic link: {}",
+            path.display()
+        )));
+    }
+    if path_metadata.is_dir() {
+        return Err(FormatError::Unsupported(
+            "verified SFX payload handles support Windows/Linux single-file artifacts only; macOS app bundles use verify_sfx_payload"
+                .into(),
+        ));
+    }
+
+    let mut file = open_regular_file_no_follow(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(FormatError::Unsupported(format!(
+            "SFX artifact must be a regular file: {}",
+            path.display()
+        )));
+    }
+    let identity = file_identity(&file)?;
+    let state = RegularFileState::from_metadata(&metadata);
+    verify_sfx_path_binding(path, identity, &state)?;
+
+    let info = inspect_single_file_sfx(&mut file, state.bytes())?.ok_or_else(|| {
+        FormatError::Unsupported(format!("{} is not a Squallz SFX artifact", path.display()))
+    })?;
+    verify_sfx_file_binding(&file, identity, &state)?;
+    verify_sfx_path_binding(path, identity, &state)?;
+    verify_single_file_payload_checksum(&file, info, resources, progress, ctl)?;
+    verify_sfx_file_binding(&file, identity, &state)?;
+    verify_sfx_path_binding(path, identity, &state)?;
+    ctl.checkpoint()?;
+
+    Ok(VerifiedSfxPayload {
+        source_path: path.to_path_buf(),
+        file,
+        identity,
+        state,
+        info,
+    })
+}
+
+fn verify_single_file_payload_checksum(
+    file: &File,
+    info: SfxInfo,
+    resources: &ResourceOptions,
+    progress: &dyn ProgressSink,
+    ctl: &ControlToken,
+) -> Result<(), FormatError> {
+    let mut reader = SfxPayloadReader::from_file(file.try_clone()?, info);
     let buffer_len = resources.stream_buffer_size(COPY_BUFFER_BYTES)?;
     let mut buffer = vec![0u8; buffer_len];
     let mut hasher = Hasher::new();
@@ -529,7 +671,7 @@ pub fn verify_sfx_payload(
     while remaining > 0 {
         ctl.checkpoint()?;
         let limit = remaining.min(buffer.len() as u64) as usize;
-        let read = file.read(&mut buffer[..limit])?;
+        let read = reader.read(&mut buffer[..limit])?;
         if read == 0 {
             return Err(FormatError::CorruptArchive(
                 "SFX payload ended before its declared length".into(),
@@ -540,6 +682,7 @@ pub fn verify_sfx_payload(
         done += read as u64;
         progress.on_entry_progress(done, info.payload_bytes, &label, done, info.payload_bytes);
     }
+    ctl.checkpoint()?;
     let actual = hasher.finalize();
     if actual != info.payload_crc32 {
         return Err(FormatError::CorruptArchive(format!(
@@ -547,7 +690,35 @@ pub fn verify_sfx_payload(
             info.payload_crc32
         )));
     }
-    Ok(info)
+    Ok(())
+}
+
+fn verify_sfx_file_binding(
+    file: &File,
+    identity: PathIdentity,
+    state: &RegularFileState,
+) -> Result<(), FormatError> {
+    if file_identity(file)? != identity || !state.matches(&file.metadata()?) {
+        return Err(FormatError::input_changed());
+    }
+    Ok(())
+}
+
+fn verify_sfx_path_binding(
+    path: &Path,
+    identity: PathIdentity,
+    state: &RegularFileState,
+) -> Result<(), FormatError> {
+    let identity_before = path_identity(path).map_err(|_| FormatError::input_changed())?;
+    let metadata = fs::symlink_metadata(path).map_err(|_| FormatError::input_changed())?;
+    if identity_before != identity
+        || metadata.file_type().is_symlink()
+        || !state.matches(&metadata)
+        || path_identity(path).map_err(|_| FormatError::input_changed())? != identity
+    {
+        return Err(FormatError::input_changed());
+    }
+    Ok(())
 }
 
 impl Engine {
@@ -1750,14 +1921,16 @@ struct SfxPayloadReader {
 
 impl SfxPayloadReader {
     fn new(path: &Path, info: SfxInfo) -> Result<Self, FormatError> {
-        let mut file = File::open(path)?;
-        file.seek(SeekFrom::Start(info.payload_offset))?;
-        Ok(Self {
+        Ok(Self::from_file(File::open(path)?, info))
+    }
+
+    fn from_file(file: File, info: SfxInfo) -> Self {
+        Self {
             file,
             start: info.payload_offset,
             len: info.payload_bytes,
             position: 0,
-        })
+        }
     }
 }
 
@@ -1768,7 +1941,11 @@ impl Read for SfxPayloadReader {
             return Ok(0);
         }
         let limit = remaining.min(buffer.len() as u64) as usize;
-        let read = self.file.read(&mut buffer[..limit])?;
+        let offset = self
+            .start
+            .checked_add(self.position)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "SFX read overflow"))?;
+        let read = read_file_at(&self.file, &mut buffer[..limit], offset)?;
         self.position = self.position.saturating_add(read as u64);
         Ok(read)
     }
@@ -1788,15 +1965,106 @@ impl Seek for SfxPayloadReader {
             ));
         }
         let next = next as u64;
-        self.file.seek(SeekFrom::Start(self.start + next))?;
         self.position = next;
         Ok(next)
     }
 }
 
+#[cfg(unix)]
+fn read_file_at(file: &File, buffer: &mut [u8], offset: u64) -> io::Result<usize> {
+    use std::os::unix::fs::FileExt;
+
+    file.read_at(buffer, offset)
+}
+
+#[cfg(windows)]
+fn read_file_at(file: &File, buffer: &mut [u8], offset: u64) -> io::Result<usize> {
+    use std::os::windows::fs::FileExt;
+
+    file.seek_read(buffer, offset)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn read_file_at(file: &File, buffer: &mut [u8], offset: u64) -> io::Result<usize> {
+    let mut file = file.try_clone()?;
+    file.seek(SeekFrom::Start(offset))?;
+    file.read(buffer)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Cursor;
+    use std::sync::Arc;
+
+    use squallz_format_api::{
+        ArchiveFormat, ArchiveReader, ArchiveWriter, EntryMeta, FormatCapabilities, FormatRegistry,
+        NoProgress, TestReport, WriteSeek,
+    };
+
+    struct TestZipFormat;
+
+    struct TestZipReader {
+        bytes: Vec<u8>,
+    }
+
+    impl ArchiveFormat for TestZipFormat {
+        fn id(&self) -> &'static str {
+            "zip"
+        }
+
+        fn extensions(&self) -> &'static [&'static str] {
+            &["zip"]
+        }
+
+        fn capabilities(&self) -> FormatCapabilities {
+            FormatCapabilities {
+                can_extract: true,
+                can_test: true,
+                ..FormatCapabilities::default()
+            }
+        }
+
+        fn sniff(&self, head: &[u8], _tail: &[u8]) -> bool {
+            head.starts_with(b"TESTZIP\0")
+        }
+
+        fn open(
+            &self,
+            mut src: Box<dyn ReadSeek>,
+            _opts: &OpenOptions,
+        ) -> Result<Box<dyn ArchiveReader>, FormatError> {
+            let mut bytes = Vec::new();
+            src.read_to_end(&mut bytes)?;
+            Ok(Box::new(TestZipReader { bytes }))
+        }
+
+        fn create(
+            &self,
+            _dst: Box<dyn WriteSeek>,
+            _opts: &CreateOptions,
+        ) -> Result<Box<dyn ArchiveWriter>, FormatError> {
+            Err(FormatError::Unsupported("test reader is read-only".into()))
+        }
+    }
+
+    impl ArchiveReader for TestZipReader {
+        fn entries(&mut self) -> Box<dyn Iterator<Item = Result<EntryMeta, FormatError>> + '_> {
+            Box::new(std::iter::empty())
+        }
+
+        fn read_entry(&mut self, _path: &EntryPath) -> Result<Box<dyn Read + '_>, FormatError> {
+            Ok(Box::new(Cursor::new(self.bytes.clone())))
+        }
+
+        fn test(
+            &mut self,
+            _progress: &dyn ProgressSink,
+            _ctl: &ControlToken,
+        ) -> Result<TestReport, FormatError> {
+            Ok(TestReport::default())
+        }
+    }
 
     fn temp_file(tag: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
@@ -1804,6 +2072,23 @@ mod tests {
             std::process::id(),
             std::thread::current().name().unwrap_or("test")
         ))
+    }
+
+    fn write_single_file_sfx(path: &Path, payload: &[u8], payload_crc32: u32) {
+        let footer = SfxFooter {
+            target: SfxTarget::Linux,
+            payload_offset: 4,
+            payload_bytes: payload.len() as u64,
+            payload_crc32,
+        };
+        let mut bytes = b"STUB".to_vec();
+        bytes.extend_from_slice(payload);
+        bytes.extend_from_slice(&footer.encode());
+        fs::write(path, bytes).unwrap();
+    }
+
+    fn write_valid_single_file_sfx(path: &Path, payload: &[u8]) {
+        write_single_file_sfx(path, payload, crc32fast::hash(payload));
     }
 
     #[test]
@@ -1827,6 +2112,36 @@ mod tests {
             assert_eq!(destination, base.join("extracted"));
             assert_eq!(destination.parent(), Some(base));
         }
+    }
+
+    #[test]
+    fn packaged_runtime_discovery_uses_platform_resource_locations() {
+        let root = temp_file("packaged-runtime-discovery");
+        let _ = fs::remove_dir_all(&root);
+        let executable = root.join("usr/bin/sqz");
+        let runtime = root.join("usr/lib/squallz-gui/bin/sqz-sfx.stub");
+        fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        fs::create_dir_all(runtime.parent().unwrap()).unwrap();
+        fs::write(&executable, b"cli").unwrap();
+        fs::write(&runtime, b"runtime").unwrap();
+
+        assert_eq!(discover_packaged_sfx_runtime(&executable), Some(runtime));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn packaged_runtime_discovery_reports_a_present_invalid_candidate() {
+        let root = temp_file("packaged-runtime-invalid");
+        let _ = fs::remove_dir_all(&root);
+        let executable = root.join("Squallz.exe");
+        let runtime = root.join("bin/sqz-sfx.stub");
+        fs::create_dir_all(&runtime).unwrap();
+        fs::write(&executable, b"gui").unwrap();
+
+        assert_eq!(discover_packaged_sfx_runtime(&executable), Some(runtime));
+
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -1900,6 +2215,176 @@ mod tests {
         assert!(reader.seek(SeekFrom::End(1)).is_err());
 
         fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn verified_payload_readers_have_independent_positions() {
+        let path = temp_file("verified-reader-positions");
+        let payload_bytes = b"TESTZIP\0payload";
+        write_valid_single_file_sfx(&path, payload_bytes);
+
+        let payload = verify_and_open_sfx_payload(
+            &path,
+            &ResourceOptions::default(),
+            &NoProgress,
+            &ControlToken::default(),
+        )
+        .unwrap();
+        let mut first = payload.open_reader().unwrap();
+        let mut second = payload.open_reader().unwrap();
+
+        let mut prefix = [0u8; 4];
+        first.read_exact(&mut prefix).unwrap();
+        assert_eq!(&prefix, b"TEST");
+
+        let mut complete = Vec::new();
+        second.read_to_end(&mut complete).unwrap();
+        assert_eq!(complete, payload_bytes);
+
+        let mut suffix = Vec::new();
+        first.read_to_end(&mut suffix).unwrap();
+        assert_eq!(suffix, &payload_bytes[4..]);
+
+        drop(first);
+        drop(second);
+        drop(payload);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn verified_open_never_reopens_a_rebound_source_path() {
+        let dir = temp_file("verified-path-rebind");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir(&dir).unwrap();
+        let path = dir.join("package.run");
+        let retained_path = dir.join("verified-original.run");
+        let original = b"TESTZIP\0original";
+        let replacement = b"TESTZIP\0replacement";
+        write_valid_single_file_sfx(&path, original);
+
+        let payload = verify_and_open_sfx_payload(
+            &path,
+            &ResourceOptions::default(),
+            &NoProgress,
+            &ControlToken::default(),
+        )
+        .unwrap();
+        assert_eq!(payload.source_path(), path);
+        assert_eq!(payload.info().payload_bytes, original.len() as u64);
+
+        fs::rename(&path, &retained_path).unwrap();
+        write_valid_single_file_sfx(&path, replacement);
+
+        let mut registry = FormatRegistry::new();
+        registry.register_archive(Arc::new(TestZipFormat));
+        let engine = Engine::new(registry);
+        match engine.open_verified_sfx_with_control(
+            &payload,
+            &OpenOptions::default(),
+            &ControlToken::default(),
+        ) {
+            Ok(mut reader) => {
+                let mut opened = Vec::new();
+                reader
+                    .read_entry(&EntryPath::from_utf8("payload"))
+                    .unwrap()
+                    .read_to_end(&mut opened)
+                    .unwrap();
+                assert_eq!(opened, original);
+                assert_ne!(opened, replacement);
+            }
+            Err(error) => assert!(error.is_input_changed(), "unexpected error: {error}"),
+        }
+
+        drop(payload);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn verified_open_rejects_a_non_zip_payload_registry() {
+        let path = temp_file("verified-non-zip-registry");
+        write_valid_single_file_sfx(&path, b"not a registered zip");
+        let payload = verify_and_open_sfx_payload(
+            &path,
+            &ResourceOptions::default(),
+            &NoProgress,
+            &ControlToken::default(),
+        )
+        .unwrap();
+
+        let engine = Engine::new(FormatRegistry::new());
+        let error = match engine.open_verified_sfx_with_control(
+            &payload,
+            &OpenOptions::default(),
+            &ControlToken::default(),
+        ) {
+            Ok(_) => panic!("non-ZIP payload registry unexpectedly opened"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, FormatError::CorruptArchive(_)));
+
+        drop(payload);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn verified_payload_rejects_a_checksum_mismatch() {
+        let path = temp_file("verified-checksum-mismatch");
+        write_single_file_sfx(&path, b"TESTZIP\0damaged", crc32fast::hash(b"other"));
+
+        let error = verify_and_open_sfx_payload(
+            &path,
+            &ResourceOptions::default(),
+            &NoProgress,
+            &ControlToken::default(),
+        )
+        .unwrap_err();
+        assert!(matches!(error, FormatError::CorruptArchive(_)));
+
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn verified_payload_api_rejects_bundle_layouts_explicitly() {
+        let path = temp_file("verified-bundle-layout").with_extension("app");
+        let _ = fs::remove_dir_all(&path);
+        fs::create_dir(&path).unwrap();
+
+        let error = verify_and_open_sfx_payload(
+            &path,
+            &ResourceOptions::default(),
+            &NoProgress,
+            &ControlToken::default(),
+        )
+        .unwrap_err();
+        assert!(matches!(error, FormatError::Unsupported(_)));
+
+        fs::remove_dir(path).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn verified_payload_api_does_not_follow_a_symbolic_link() {
+        use std::os::unix::fs::symlink;
+
+        let target = temp_file("verified-symlink-target");
+        let link = temp_file("verified-symlink-link");
+        let _ = fs::remove_file(&target);
+        let _ = fs::remove_file(&link);
+        write_valid_single_file_sfx(&target, b"TESTZIP\0payload");
+        symlink(&target, &link).unwrap();
+
+        let error = verify_and_open_sfx_payload(
+            &link,
+            &ResourceOptions::default(),
+            &NoProgress,
+            &ControlToken::default(),
+        )
+        .unwrap_err();
+        assert!(matches!(error, FormatError::Unsupported(_)));
+
+        fs::remove_file(link).unwrap();
+        fs::remove_file(target).unwrap();
     }
 
     #[test]

@@ -1934,66 +1934,6 @@ pub enum SymlinkArg {
     Skip,
 }
 
-/// Argument surface used when an SFX-capable sqz stub runs with an embedded
-/// payload. Default action is safe extraction; list and test are explicit.
-#[derive(Parser)]
-#[command(
-    name = "squallz-sfx",
-    version,
-    about = "Squallz self-extracting archive",
-    group(ArgGroup::new("mode").multiple(false).args(["list", "test"]))
-)]
-pub struct SfxRuntimeCli {
-    /// 界面语言
-    #[arg(long)]
-    pub lang: Option<String>,
-    /// 静默模式
-    #[arg(short, long)]
-    pub quiet: bool,
-    /// 详细模式
-    #[arg(short, long, conflicts_with = "quiet")]
-    pub verbose: bool,
-    /// 人类可读输出风格
-    #[arg(long = "style", value_enum, default_value_t)]
-    pub output_style: OutputStyleArg,
-    /// 颜色输出策略
-    #[arg(long, value_enum, default_value_t)]
-    pub color: ColorArg,
-    /// modern 输出配色
-    #[arg(long, value_enum, default_value_t)]
-    pub accent: AccentArg,
-    /// 目标目录；默认在当前目录创建与 SFX 同名的文件夹
-    #[arg(short = 'd', long, conflicts_with_all = ["list", "test"])]
-    pub output: Option<PathBuf>,
-    /// 只列出载荷内容，不解压
-    #[arg(long)]
-    pub list: bool,
-    /// 只测试载荷完整性，不解压
-    #[arg(long)]
-    pub test: bool,
-    /// 文件冲突策略
-    #[arg(long, value_enum, default_value_t)]
-    pub overwrite: OverwriteArg,
-    /// 解压 worker 线程数
-    #[arg(long, value_name = "N", value_parser = parse_nonzero_usize)]
-    pub threads: Option<usize>,
-    /// 流式缓冲内存上限
-    #[arg(long, value_name = "SIZE", value_parser = parse_nonzero_size)]
-    pub memory_limit: Option<u64>,
-    /// 最大总输出字节数
-    #[arg(long, value_name = "SIZE", value_parser = parse_nonzero_size)]
-    pub max_output_bytes: Option<u64>,
-    /// 最大解压条目数
-    #[arg(long, value_name = "N", value_parser = parse_nonzero_u64)]
-    pub max_entries: Option<u64>,
-    /// 单条目最大解压/压缩比
-    #[arg(long, value_name = "N", value_parser = parse_nonzero_u32)]
-    pub max_compression_ratio: Option<u32>,
-    /// 以 JSON 输出
-    #[arg(long)]
-    pub json: bool,
-}
-
 impl From<SymlinkArg> for SymlinkPolicy {
     fn from(v: SymlinkArg) -> Self {
         match v {

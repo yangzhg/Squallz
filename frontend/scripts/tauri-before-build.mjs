@@ -99,6 +99,27 @@ if (targetTriple === universalMacTarget) {
     throw new Error(`built sqz sidecar is missing: ${cliPath}`);
   }
   copyFileSync(cliPath, sidecarPath);
+
+  if (targetTriple.includes("windows") || targetTriple.includes("linux")) {
+    const runtimeArgs = [
+      "build",
+      "--manifest-path",
+      resolve(root, "Cargo.toml"),
+      "-p",
+      "squallz-sfx-runtime",
+      "--release",
+    ];
+    if (targetTriple !== hostTriple) runtimeArgs.push("--target", targetTriple);
+    run("cargo", runtimeArgs, root, cargoEnv);
+
+    const runtimePath = resolve(profileDir, `sqz-sfx${executableSuffix}`);
+    if (!existsSync(runtimePath)) {
+      throw new Error(`built sqz-sfx runtime is missing: ${runtimePath}`);
+    }
+    const templatePath = resolve(root, "target", "release", "sqz-sfx-template.stub");
+    copyFileSync(runtimePath, templatePath);
+    if (!executableSuffix) chmodSync(templatePath, 0o755);
+  }
 }
 if (!executableSuffix) chmodSync(sidecarPath, 0o755);
 
