@@ -11,10 +11,6 @@
     CreateWorkspaceVariant,
   } from "./components/ArchiveOperationWorkspaceHost.svelte";
   import type {
-    ConvertWorkspaceSurface,
-    ConvertWorkspaceVariant,
-  } from "./components/ArchiveOperationWorkspaceHost.svelte";
-  import type {
     ExtractWorkspaceSurface,
     ExtractWorkspaceVariant,
   } from "./components/ArchiveOperationWorkspaceHost.svelte";
@@ -140,11 +136,12 @@
     formatBytes,
     parseDelimitedRules,
   } from "./lib/format";
-  import {
-    ensureConvertOutputExtension,
-    sourceMatchesConvertTarget,
-    suggestedConvertTargetFormat,
-  } from "./lib/convert-format";
+  import type {
+    ConvertRouteBridge,
+    ConvertRouteHandle,
+    ConvertRouteOwner,
+    ConvertRouteStatus,
+  } from "./lib/convert-route";
   import {
     fat32CompatibleSplitSizeBytes,
     resolveSplitSizeBytes,
@@ -396,26 +393,6 @@
     confirmLateConflict: boolean;
     restoreCredentialPrompt: boolean;
     restoreEncryptNames: boolean;
-  }>;
-  type ConvertPreflightStage = CreatePreflightStage;
-  type ConvertPreflightPhase =
-    | "idle"
-    | "choosingDest"
-    | "measuring"
-    | "checkingTemp"
-    | "checkingDest"
-    | "reviewing"
-    | "submitting"
-    | "ready"
-    | "cancelled"
-    | "blocked";
-  type ConvertJobSpec = Extract<JobSpec, { kind: "convert" }>;
-  type PendingConvertSubmission = Readonly<{
-    spec: ConvertJobSpec;
-    targetFormat: CreateFormatId;
-    profile: CreateProfileId;
-    sourceTitle: string;
-    splitSize: number | null;
   }>;
   class JobSubmitBlockedError extends Error {
     readonly reason: TaskSubmissionBlockReason;
@@ -956,35 +933,15 @@
   let customCreateLevelError = $state("");
   let activeCreateProfile = $state<CreateProfileId>(loadCreateProfile());
   let activeCreateFormat = $state<CreateFormatId>(isCreateFormatId(createFormatParam) ? createFormatParam : loadCreateFormat());
-  let convertTargetFormat = $state<CreateFormatId>("zip");
-  let convertProfile = $state<CreateProfileId>(loadCreateProfile());
-  let convertCustomLevel = $state(loadCustomCreateLevel());
-  let convertCustomLevelError = $state("");
-  let convertPassword = $state("");
-  let convertPasswordConfirmation = $state("");
-  let convertPasswordVisible = $state(false);
-  let convertEncryptNames = $state(false);
-  let convertSplitPreset = $state<CreateSplitPreset>("none");
-  let convertSplitMode = $state<CreateSplitMode>("generic");
-  let convertCustomSplitAmount = $state("100");
-  let convertCustomSplitUnit = $state<CreateSplitUnit>("mib");
-  let convertOptionsValidationAttempted = $state(false);
-  let convertAdvancedOpen = $state(false);
-  let lastConvertPlan = $state<CreatePlanDto | null>(null);
-  let lastConvertDiskSpace = $state<DiskSpaceDto | null>(null);
-  let lastConvertTempDiskSpace = $state<DiskSpaceDto | null>(null);
-  let lastConvertSystemTempDiskSpace = $state<DiskSpaceDto | null>(null);
-  let lastConvertDest = $state<string | null>(null);
-  let pendingConvertSubmission = $state<PendingConvertSubmission | null>(null);
-  let convertPreflightPhase = $state<ConvertPreflightPhase>("idle");
-  let convertPreflightCurrent = $state("");
-  let convertPreflightIssue = $state("");
-  let convertPreflightIssueStage = $state<ConvertPreflightStage | null>(null);
-  let convertPreflightRequestId: string | null = null;
-  let convertPreflightRequestKind = $state<"plan" | "destination" | null>(null);
-  let convertPreflightCancelPending = $state(false);
-  let convertPreflightGeneration = 0;
-  let previousConvertArchiveIdentity: string | null = null;
+  const convertRouteOwner: ConvertRouteOwner = {};
+  let convertRouteHandle = $state<ConvertRouteHandle | null>(null);
+  let convertRouteStatus = $derived<ConvertRouteStatus>(convertRouteHandle?.status() ?? {
+    sourceFormat: currentArchive?.format.toUpperCase() ?? "-",
+    targetLabel: "-",
+    profileLabel: "-",
+    methodLabel: "-",
+    destination: currentArchive?.path ?? openArchiveFirstLabel(),
+  });
   let createPassword = $state("");
   let createPasswordConfirmation = $state("");
   let createPasswordVisible = $state(false);
@@ -1180,18 +1137,7 @@
 
   $effect(() => {
     const current = currentArchive;
-    const identity = current ? `${current.id}:${current.source}` : null;
-    if (identity === previousConvertArchiveIdentity) return;
-    previousConvertArchiveIdentity = identity;
-    if (convertPreflightPhase !== "submitting") {
-      if (convertPreflightRequestId) {
-        void cancelConvertPreflight({ announce: false });
-      }
-      resetConvertPreflightResult(true);
-    }
-    convertTargetFormat = suggestedConvertTargetFormat(current?.format);
-    convertCustomLevelError = "";
-    resetConvertOutputOptions();
+    convertRouteHandle?.syncArchive(current);
   });
 
   $effect(() => {
@@ -1540,7 +1486,7 @@
     createPreflightClosed = true;
     createPreflightCleanup?.();
     createPreflightCleanup = null;
-    void cancelConvertPreflight({ announce: false });
+    convertRouteHandle?.dispose();
   });
 
   onMount(() => {
@@ -2059,19 +2005,8 @@
 
   function preventConvertSubmissionNavigation(next: Screen): boolean {
     if (screen !== "convert" || next === "convert") return false;
-    if (convertPreflightPhase === "submitting") {
-      showNotice(
-        tr(
-          "gui.convert.wait_for_submission_before_leaving",
-          "Wait until Squallz finishes adding this conversion to the queue",
-        ),
-      );
-      return true;
-    }
-    if (convertPreflightRequestId) {
-      void cancelConvertPreflight({ announce: false });
-    }
-    resetConvertPreflightResult(true);
+    if (convertRouteHandle && !convertRouteHandle.canLeave()) return true;
+    convertRouteHandle?.leave();
     return false;
   }
 
@@ -2173,15 +2108,7 @@
   }
 
   function applyCreatePreflightEvent(event: CreatePreflightEvent) {
-    if (
-      convertPreflightRequestId
-      && event.request_id === convertPreflightRequestId
-      && event.phase === "destination"
-      && convertPreflightRequestKind === "destination"
-    ) {
-      convertPreflightCurrent = String(event.current ?? "");
-      return;
-    }
+    if (convertRouteHandle?.applyPreflightEvent(event)) return;
     if (!createPreflightRequestId || event.request_id !== createPreflightRequestId) return;
     if (event.phase === "destination" && createPreflightRequestKind === "destination") {
       const processedBytes = Number(event.processed_bytes ?? 0);
@@ -3958,39 +3885,6 @@
     }
   }
 
-  async function inspectCreateDestinationForConvert(
-    path: string,
-    split: boolean,
-  ): Promise<CreateDestinationInspectionDto> {
-    await ensureCreatePreflightListener();
-    const requestId = nextPreflightRequestId();
-    convertPreflightRequestId = requestId;
-    convertPreflightRequestKind = "destination";
-    convertPreflightCancelPending = false;
-    convertPreflightCurrent = "";
-    try {
-      const inspection = await ipc.inspectCreateDestination(path, split, requestId, null);
-      if (convertPreflightRequestId === requestId && convertPreflightCancelPending) {
-        throw new CreateDestinationInspectionError(undefined, true);
-      }
-      return inspection;
-    } catch (error) {
-      const cancelled = convertPreflightRequestId === requestId && convertPreflightCancelPending;
-      if (error instanceof CreateDestinationInspectionError) {
-        if (!cancelled || error.cancelled) throw error;
-        throw new CreateDestinationInspectionError(error.detail ?? undefined, true);
-      }
-      throw new CreateDestinationInspectionError(error, cancelled);
-    } finally {
-      if (convertPreflightRequestId === requestId) {
-        convertPreflightRequestId = null;
-        convertPreflightRequestKind = null;
-        convertPreflightCancelPending = false;
-        convertPreflightCurrent = "";
-      }
-    }
-  }
-
   function createDestinationInspectionCancelled(error: unknown): boolean {
     return error instanceof CreateDestinationInspectionError
       && (error.cancelled || error.detail?.key === "error.cancelled");
@@ -4686,7 +4580,7 @@
       onExtractSelection: () => openExtractWorkspace("selection"),
       onAddFiles: () => void submitAddToArchiveJob(),
       onOpenRecovery: () => setScreen("recovery"),
-      onConvert: () => void submitConvertJob(),
+      onConvert: () => setScreen("convert"),
       onOpenInfo: () => setScreen("archiveInfo"),
       onRenameSelection: () => void submitRenameSelectedJob(),
       onDeleteSelection: () => void submitDeleteSelectedJob(),
@@ -6463,20 +6357,6 @@
       .replace("{diagnostics}", diagnostics);
   }
 
-  function convertSourceSummary(): string {
-    if (!currentArchive) return openArchiveFirstLabel();
-    const diagnostics = currentArchive.garbled_count
-      ? tr("gui.archive.names_review", "{count} names need review")
-          .replace("{count}", currentArchive.garbled_count.toLocaleString())
-      : currentArchive.legacy_encoding_count
-        ? tr("gui.archive.legacy_names", "{count} legacy encoded names")
-            .replace("{count}", currentArchive.legacy_encoding_count.toLocaleString())
-        : tr("gui.archive.names_clean", "Names decoded cleanly");
-    return tr("gui.convert.source_summary", "{count} entries · {diagnostics}")
-      .replace("{count}", currentArchive.entry_count.toLocaleString())
-      .replace("{diagnostics}", diagnostics);
-  }
-
   function showArchiveReturnBar(value: Screen = screen): boolean {
     return currentArchive !== null && archiveReturnScreens.includes(value);
   }
@@ -7959,378 +7839,6 @@
     return extractDestInDefaultFolder(pathDir(outerDisplayPath), pathBaseName(entryPath));
   }
 
-  function convertProfileData(profileId: CreateProfileId) {
-    if (profileId === "custom") {
-      return {
-        label: tr("gui.create.profile.custom", "Custom"),
-        level: convertCustomLevel,
-        detail: tr("gui.convert.custom_level_detail", "Choose an exact level for this conversion"),
-      };
-    }
-    return createProfiles[profileId];
-  }
-
-  function convertProfileDetail(profileId: CreateProfileId = convertProfile): string {
-    return profileId === "custom"
-      ? convertProfileData(profileId).detail
-      : createProfileDetail(profileId);
-  }
-
-  function chooseConvertProfile(next: CreateProfileId): void {
-    if (convertPreflightBusy() || pendingConvertSubmission) return;
-    convertProfile = next;
-    convertCustomLevelError = "";
-  }
-
-  function updateConvertCustomLevelFromInput(event: Event): void {
-    const input = event.currentTarget as HTMLInputElement;
-    const next = parseCustomCreateLevelInput(input);
-    if (next === null) {
-      convertCustomLevelError = customCreateLevelInvalidMessage();
-      return;
-    }
-    convertCustomLevel = clampCreateLevel(next);
-    convertCustomLevelError = "";
-    convertProfile = "custom";
-  }
-
-  function chooseConvertTargetFormat(next: CreateFormatId): void {
-    if (convertPreflightBusy() || pendingConvertSubmission) return;
-    convertTargetFormat = next;
-    if (nativeSplitKind(next) === null) convertSplitMode = "generic";
-    const format = createFormats[next];
-    if (!format.can_encrypt_data) {
-      clearConvertPasswordFields();
-    } else if (!format.can_encrypt_names) {
-      convertEncryptNames = false;
-    }
-    convertOptionsValidationAttempted = false;
-  }
-
-  function clearConvertPasswordFields(): void {
-    convertPassword = "";
-    convertPasswordConfirmation = "";
-    convertPasswordVisible = false;
-    convertEncryptNames = false;
-  }
-
-  function resetConvertOutputOptions(): void {
-    clearConvertPasswordFields();
-    convertSplitPreset = "none";
-    convertSplitMode = "generic";
-    convertCustomSplitAmount = "100";
-    convertCustomSplitUnit = "mib";
-    convertOptionsValidationAttempted = false;
-    convertAdvancedOpen = false;
-  }
-
-  function convertPreflightBusy(): boolean {
-    return [
-      "choosingDest",
-      "measuring",
-      "checkingTemp",
-      "checkingDest",
-      "submitting",
-    ].includes(convertPreflightPhase);
-  }
-
-  function beginConvertPreflight(): number {
-    convertPreflightGeneration += 1;
-    convertPreflightPhase = "choosingDest";
-    convertPreflightCurrent = "";
-    convertPreflightIssue = "";
-    convertPreflightIssueStage = null;
-    convertPreflightRequestId = null;
-    convertPreflightRequestKind = null;
-    convertPreflightCancelPending = false;
-    lastConvertPlan = null;
-    lastConvertDiskSpace = null;
-    lastConvertTempDiskSpace = null;
-    lastConvertSystemTempDiskSpace = null;
-    lastConvertDest = null;
-    pendingConvertSubmission = null;
-    return convertPreflightGeneration;
-  }
-
-  function convertPreflightCurrentGeneration(generation: number): boolean {
-    return convertPreflightGeneration === generation;
-  }
-
-  function resetConvertPreflightResult(clearPassword = false): void {
-    convertPreflightGeneration += 1;
-    convertPreflightPhase = "idle";
-    convertPreflightCurrent = "";
-    convertPreflightIssue = "";
-    convertPreflightIssueStage = null;
-    convertPreflightRequestId = null;
-    convertPreflightRequestKind = null;
-    convertPreflightCancelPending = false;
-    lastConvertPlan = null;
-    lastConvertDiskSpace = null;
-    lastConvertTempDiskSpace = null;
-    lastConvertSystemTempDiskSpace = null;
-    lastConvertDest = null;
-    pendingConvertSubmission = null;
-    if (clearPassword) clearConvertPasswordFields();
-  }
-
-  function discardPendingConvertPlan(restoreFocus = false): void {
-    resetConvertPreflightResult(true);
-    convertOptionsValidationAttempted = false;
-    if (restoreFocus) {
-      void tick().then(() => {
-        document.querySelector<HTMLElement>(".modern-convert .sheet-action, .classic-convert .classic-primary")?.focus();
-      });
-    }
-  }
-
-  function finishConvertPreflightWithIssue(
-    stage: ConvertPreflightStage,
-    message: string,
-    phase: "blocked" | "cancelled" = "blocked",
-  ): void {
-    convertPreflightIssueStage = stage;
-    convertPreflightIssue = message;
-    convertPreflightCurrent = "";
-    convertPreflightRequestId = null;
-    convertPreflightRequestKind = null;
-    convertPreflightCancelPending = false;
-    convertPreflightPhase = phase;
-    pendingConvertSubmission = null;
-    showNotice(message);
-  }
-
-  function convertPreflightCancellable(): boolean {
-    return convertPreflightRequestId !== null
-      && (convertPreflightRequestKind === "plan" || convertPreflightRequestKind === "destination")
-      && (convertPreflightPhase === "measuring"
-        || convertPreflightPhase === "choosingDest"
-        || convertPreflightPhase === "submitting");
-  }
-
-  async function cancelConvertPreflight(
-    options: { announce?: boolean } = {},
-  ): Promise<void> {
-    const announce = options.announce ?? true;
-    const requestId = convertPreflightRequestId;
-    const requestKind = convertPreflightRequestKind;
-    if (!requestId || !requestKind || convertPreflightCancelPending) return;
-    convertPreflightCancelPending = true;
-    try {
-      if (requestKind === "plan") {
-        await ipc.cancelConvertPlan(requestId);
-      } else {
-        await ipc.cancelCreateDestinationInspection(requestId);
-      }
-      if (
-        announce
-        && convertPreflightRequestId === requestId
-        && convertPreflightCancelPending
-      ) {
-        showNotice(tr("gui.convert.preflight_cancel_requested", "Stopping conversion checks…"));
-      }
-    } catch {
-      if (convertPreflightRequestId !== requestId) return;
-      convertPreflightCancelPending = false;
-      if (announce) {
-        showNotice(tr("gui.convert.preflight_cancel_failed", "Could not stop the current check. It will continue."));
-      }
-    }
-  }
-
-  function updateConvertPassword(value: string): void {
-    convertPassword = value;
-    convertOptionsValidationAttempted = false;
-    if (value.length === 0) {
-      convertPasswordConfirmation = "";
-      convertEncryptNames = false;
-    }
-  }
-
-  function updateConvertPasswordConfirmation(value: string): void {
-    convertPasswordConfirmation = value;
-    convertOptionsValidationAttempted = false;
-  }
-
-  function updateConvertEncryptNames(enabled: boolean): void {
-    convertEncryptNames = enabled
-      && createNameEncryptionAvailable(convertTargetFormat)
-      && convertPassword.length > 0;
-  }
-
-  function updateConvertSplitPreset(preset: CreateSplitPreset): void {
-    convertSplitPreset = preset;
-    if (preset === "none") convertSplitMode = "generic";
-    convertOptionsValidationAttempted = false;
-  }
-
-  function updateConvertSplitMode(mode: CreateSplitMode): void {
-    if (mode === "native" && nativeSplitKind(convertTargetFormat) === null) {
-      showNotice(tr(
-        "gui.create.native_layout_unavailable",
-        "Native volume layout is available for ZIP and WIM; self-extracting output must remain a single ZIP.",
-      ));
-      return;
-    }
-    convertSplitMode = mode;
-    convertOptionsValidationAttempted = false;
-  }
-
-  function updateConvertCustomSplitAmount(value: string): void {
-    convertCustomSplitAmount = value;
-    convertOptionsValidationAttempted = false;
-  }
-
-  function updateConvertCustomSplitUnit(unit: CreateSplitUnit): void {
-    convertCustomSplitUnit = unit;
-    convertOptionsValidationAttempted = false;
-  }
-
-  function convertSplitSizeBytes(): number | null {
-    return resolveSplitSizeBytes(
-      convertSplitPreset,
-      convertCustomSplitAmount,
-      convertCustomSplitUnit,
-    );
-  }
-
-  function convertPasswordValidationMessage(): string {
-    if (!createPasswordDataAvailable(convertTargetFormat) || convertPassword.length === 0) return "";
-    if (convertPasswordConfirmation.length === 0) {
-      return tr("gui.convert.confirm_password_required", "Confirm the destination password before starting");
-    }
-    if (convertPassword !== convertPasswordConfirmation) {
-      return tr("gui.convert.passwords_do_not_match", "The destination passwords do not match");
-    }
-    return "";
-  }
-
-  function convertSplitValidationMessage(): string {
-    const splitSize = convertSplitSizeBytes();
-    if (convertSplitPreset === "custom" && splitSize === null) {
-      return tr("gui.convert.invalid_part_size", "Enter a part size of at least 0.1 MiB");
-    }
-    if (
-      convertTargetFormat === "zip"
-      && convertSplitMode === "native"
-      && splitSize !== null
-      && splitSize > fat32CompatibleSplitSizeBytes
-    ) {
-      return tr("gui.create.native_zip_part_size_limit", "Native ZIP parts cannot exceed 4 GiB − 1 byte");
-    }
-    return "";
-  }
-
-  function visibleConvertPasswordError(): string {
-    const error = convertPasswordValidationMessage();
-    return convertOptionsValidationAttempted || convertPasswordConfirmation.length > 0 ? error : "";
-  }
-
-  function visibleConvertSplitError(): string {
-    const error = convertSplitValidationMessage();
-    return convertOptionsValidationAttempted || convertCustomSplitAmount.length > 0 ? error : "";
-  }
-
-  function validateConvertOptions(): boolean {
-    convertOptionsValidationAttempted = true;
-    const error = convertPasswordValidationMessage() || convertSplitValidationMessage();
-    if (!error) return true;
-    convertAdvancedOpen = true;
-    showNotice(error);
-    return false;
-  }
-
-  function toggleConvertAdvancedFromKeyboard(event: KeyboardEvent): void {
-    if (event.key !== "Enter" && event.key !== " " && event.key !== "Spacebar") return;
-    event.preventDefault();
-    convertAdvancedOpen = !convertAdvancedOpen;
-  }
-
-  function convertCompressionLevel(profileId: CreateProfileId = convertProfile): number {
-    return convertProfileData(profileId).level;
-  }
-
-  function convertMethodLabel(
-    formatId: CreateFormatId = convertTargetFormat,
-    profileId: CreateProfileId = convertProfile,
-  ): string {
-    return tr("gui.convert.method_level", "{method} · Level {level}")
-      .replace("{method}", createFormatMethod(formatId))
-      .replace("{level}", String(convertCompressionLevel(profileId)));
-  }
-
-  function convertFormatNote(formatId: CreateFormatId = convertTargetFormat): string {
-    if (currentArchive && sourceMatchesConvertTarget(currentArchive.format, formatId)) {
-      return tr("gui.convert.same_format_note", "Target format equals the source; it will be recompressed.");
-    }
-    return createFormatNoteFor(formatId);
-  }
-
-  function convertOptionsLockedReason(): string {
-    if (convertPreflightBusy()) {
-      return tr("gui.convert.options_locked", "Conversion options are locked while checks are running");
-    }
-    return pendingConvertSubmission
-      ? tr("gui.convert.options_locked_review", "Cancel the current plan before changing conversion options")
-      : "";
-  }
-
-  function convertOutputExtension(
-    formatId: CreateFormatId = convertTargetFormat,
-  ): string {
-    return archiveOutputExtension(
-      formatId,
-      convertSplitSizeBytes(),
-      convertSplitMode,
-    );
-  }
-
-  function defaultConvertDest(formatId: CreateFormatId = convertTargetFormat): string {
-    if (!currentArchive) return openArchiveFirstLabel();
-    const base = archiveStemName(currentArchive.name);
-    const outputBase = sourceMatchesConvertTarget(currentArchive.format, formatId)
-      ? `${base}.converted`
-      : base;
-    return `${pathDir(currentArchive.path)}/${outputBase}.${convertOutputExtension(formatId)}`;
-  }
-
-  function convertDestinationPreview(): string {
-    if (lastConvertPlan) return lastConvertPlan.primary_output;
-    if (lastConvertDest) return lastConvertDest;
-    const destination = defaultConvertDest();
-    if (convertSplitSizeBytes() === null) return destination;
-    return convertSplitMode === "native"
-      ? convertTargetFormat === "wim"
-        ? tr(
-            "gui.convert.native_split_wim_destination_preview",
-            "{destination} is the first part; following parts add 2, 3, … before .swm",
-          ).replace("{destination}", destination)
-        : tr("gui.convert.native_split_destination_preview", "{destination} → .z01, .z02, …, final .zip")
-            .replace("{destination}", destination)
-      : tr("gui.convert.split_destination_preview", "{destination} → {destination}.001, .002, …")
-          .replaceAll("{destination}", destination);
-  }
-
-  function convertVolumePreview(): string {
-    const splitSize = convertSplitSizeBytes();
-    if (splitSize === null) {
-      return tr("gui.convert.single_archive_summary", "Single converted archive · no numbered parts");
-    }
-    const nativeWim = convertSplitMode === "native" && convertTargetFormat === "wim";
-    const key = nativeWim
-      ? "gui.convert.native_split_wim_summary"
-      : convertSplitMode === "native"
-        ? "gui.convert.native_split_summary"
-        : "gui.convert.split_summary";
-    const fallback = nativeWim
-      ? "{size} target per part · native .swm set; one large file may exceed the target"
-      : convertSplitMode === "native"
-        ? "{size} per part · native ZIP set ending in .zip"
-        : "{size} per part · the exact file list appears when conversion finishes";
-    return tr(key, fallback)
-      .replace("{size}", formatBytes(splitSize));
-  }
-
   function defaultSqzExportDest(): string {
     const source = recoverySourcePath();
     if (!source) return openArchiveFirstLabel();
@@ -9507,195 +9015,6 @@
     };
   }
 
-  function convertWorkspaceSurface(variant: ConvertWorkspaceVariant): ConvertWorkspaceSurface {
-    const requiredReason = convertArchiveRequiredReason();
-    const optionIssue = visibleConvertPasswordError() || visibleConvertSplitError();
-    const lockedReason = convertOptionsLockedReason();
-    const disabledReason = requiredReason || lockedReason;
-    const startLabel = pendingConvertSubmission
-      ? tr("gui.convert.review_plan_below", "Review plan below")
-      : convertPreflightBusy()
-        ? tr("gui.convert.checking", "Checking")
-        : tr("gui.convert.start", "Convert");
-    const sourceFormat = currentArchive?.format.toUpperCase() ?? "-";
-    const readinessState = pendingConvertSubmission
-      ? tr("gui.convert.review_ready", "Review ready")
-      : convertPreflightBusy()
-        ? tr("gui.convert.checking", "Checking")
-        : convertPreflightIssue
-        ? tr("gui.state.needs_attention", "Needs attention")
-        : currentArchive && !requiredReason && !optionIssue
-          ? tr("gui.state.ready", "Ready")
-          : optionIssue
-            ? tr("gui.state.needs_attention", "Needs attention")
-            : requiredReason || openArchiveFirstLabel();
-    const review = pendingConvertSubmission && lastConvertPlan
-      ? {
-          plan: lastConvertPlan,
-          splitSize: pendingConvertSubmission.splitSize,
-          issue: convertPreflightIssue,
-          busy: convertPreflightPhase === "submitting",
-          retry: convertPreflightIssueStage === "submit"
-            || convertPreflightIssueStage === "destination",
-          onConfirm: () => void confirmConvertPlan(),
-          onCancel: cancelConvertPlanReview,
-        }
-      : null;
-
-    return {
-      tr,
-      start: {
-        label: startLabel,
-        disabled: Boolean(disabledReason),
-        title: disabledReason,
-        ariaLabel: labelWithDisabledReason(startLabel, disabledReason),
-        busy: convertPreflightBusy(),
-        onSelect: () => void submitConvertJob(),
-      },
-      source: {
-        path: currentArchive?.path ?? openArchiveFirstLabel(),
-        format: sourceFormat,
-        summary: convertSourceSummary(),
-      },
-      destination: {
-        path: convertDestinationPreview(),
-      },
-      formats: createFormatIds.map((formatId) => ({
-        id: formatId,
-        label: createFormats[formatId].label,
-        selected: convertTargetFormat === formatId,
-        disabled: Boolean(lockedReason),
-        title: lockedReason || convertFormatNote(formatId),
-        ariaLabel: labelWithDisabledReason(createFormats[formatId].label, lockedReason),
-        onSelect: () => chooseConvertTargetFormat(formatId),
-      })),
-      formatNote: convertFormatNote(),
-      profiles: createProfileIds.map((profileId) => ({
-        id: profileId,
-        label: createProfileLabel(profileId),
-        selected: convertProfile === profileId,
-        disabled: Boolean(lockedReason),
-        title: lockedReason,
-        ariaLabel: labelWithDisabledReason(createProfileLabel(profileId), lockedReason),
-        onSelect: () => chooseConvertProfile(profileId),
-      })),
-      compression: {
-        level: convertCompressionLevel(),
-        detail: convertProfileDetail(),
-        method: convertMethodLabel(),
-        custom: convertProfile === "custom"
-          ? {
-              value: convertCustomLevel,
-              error: convertCustomLevelError,
-              disabled: Boolean(lockedReason),
-              title: lockedReason,
-              rangeAriaLabel: labelWithDisabledReason(
-                variant === "classic"
-                  ? tr("gui.convert.classic_custom_level", "Classic conversion compression level")
-                  : tr("gui.convert.custom_level", "Conversion compression level"),
-                lockedReason,
-              ),
-              numberAriaLabel: labelWithDisabledReason(
-                variant === "classic"
-                  ? tr("gui.convert.classic_custom_level_number", "Classic conversion compression level number")
-                  : tr("gui.convert.custom_level_number", "Conversion compression level number"),
-                lockedReason,
-              ),
-              onInput: updateConvertCustomLevelFromInput,
-              onChange: updateConvertCustomLevelFromInput,
-            }
-          : null,
-      },
-      advanced: {
-        open: convertAdvancedOpen,
-        detail: tr(
-          "gui.convert.advanced.detail",
-          "Optional destination password and numbered volume size; the source password is requested only when needed.",
-        ),
-        onToggle: (open) => (convertAdvancedOpen = open),
-        onKeydown: toggleConvertAdvancedFromKeyboard,
-      },
-      protection: {
-        variant,
-        password: convertPassword,
-        passwordConfirmation: convertPasswordConfirmation,
-        passwordVisible: convertPasswordVisible,
-        encryptNames: convertEncryptNames,
-        canEncryptData: createPasswordDataAvailable(convertTargetFormat),
-        canEncryptNames: createNameEncryptionAvailable(convertTargetFormat),
-        splitDisabled: false,
-        splitPreset: convertSplitPreset,
-        splitMode: convertSplitMode,
-        nativeSplitKind: nativeSplitKind(convertTargetFormat),
-        customSplitAmount: convertCustomSplitAmount,
-        customSplitUnit: convertCustomSplitUnit,
-        passwordCapability: createFormatPassword(convertTargetFormat),
-        nameEncryptionCapability: createNameEncryptionCapability(convertTargetFormat),
-        splitCapability: createFormatSplit(convertTargetFormat),
-        splitSummary: convertVolumePreview(),
-        passwordError: visibleConvertPasswordError(),
-        splitError: visibleConvertSplitError(),
-        passwordTitle: tr("gui.convert.destination_password", "Destination password"),
-        splitTitle: tr("gui.convert.output_volumes", "Output volumes"),
-        disabled: Boolean(lockedReason),
-        disabledReason: lockedReason,
-        tr,
-        onPasswordInput: updateConvertPassword,
-        onPasswordConfirmationInput: updateConvertPasswordConfirmation,
-        onPasswordVisibleChange: (visible) => (convertPasswordVisible = visible),
-        onEncryptNamesChange: updateConvertEncryptNames,
-        onSplitPresetChange: updateConvertSplitPreset,
-        onSplitModeChange: updateConvertSplitMode,
-        onCustomSplitAmountInput: updateConvertCustomSplitAmount,
-        onCustomSplitUnitChange: updateConvertCustomSplitUnit,
-      },
-      contract: {
-        title: tr("gui.convert.contract_title", "Conversion scope"),
-        body: tr("gui.convert.contract_body", "The task uses the shared archive engine, keeps the source unchanged, and confirms before replacing an existing output."),
-      },
-      readiness: {
-        title: tr("gui.convert.readiness", "Readiness"),
-        state: readinessState,
-        body: currentArchive
-          ? pendingConvertSubmission
-            ? tr("gui.convert.review_ready_body", "Checks are complete. Review the measured source, output layout, and safety bounds before starting.")
-            : convertPreflightBusy()
-              ? tr("gui.convert.checking_body", "Squallz is reading archive metadata and checking the required filesystems.")
-              : convertPreflightIssue
-                ? convertPreflightIssue
-                : requiredReason || optionIssue
-            ? tr("gui.convert.fix_options_body", "Correct the highlighted option before starting.")
-            : tr("gui.convert.ready_body", "Choose the format, profile, protection, and volume settings, then select a destination and review the conversion plan.")
-          : tr("gui.convert.open_archive_first_body", "Open an archive before converting."),
-      },
-      guard: {
-        title: tr("gui.settings.security.guard", "Guard"),
-        body: tr(
-          "gui.convert.guard_body",
-          "The source stays unchanged. Passwords remain in memory only, and replacement consent covers the complete numbered output set.",
-        ),
-      },
-      showPreflight: convertPreflightPhase !== "idle",
-      preflight: {
-        phase: convertPreflightPhase,
-        requestKind: convertPreflightRequestKind,
-        cancelPending: convertPreflightCancelPending,
-        current: convertPreflightCurrent,
-        issue: convertPreflightIssue,
-        issueStage: convertPreflightIssueStage,
-        lockedReason,
-        cancellable: convertPreflightCancellable(),
-        destination: lastConvertDest,
-        plan: lastConvertPlan,
-        workspaceDisk: lastConvertTempDiskSpace,
-        systemTempDisk: lastConvertSystemTempDiskSpace,
-        destinationDisk: lastConvertDiskSpace,
-        onCancel: () => void cancelConvertPreflight(),
-      },
-      review,
-    };
-  }
-
   function createEstimateStatusbar(): string {
     const interrupted = createPreflightStageIssueSummary("source");
     if (interrupted) return interrupted;
@@ -10334,13 +9653,6 @@
       return tr("gui.extract.plan_wait_before_start", "Wait for the extraction preview to finish");
     }
     return "";
-  }
-
-  function convertArchiveRequiredReason(): string {
-    if (!currentArchive) {
-      return tr("gui.precondition.open_before_convert", "Open an archive before converting");
-    }
-    return convertProfile === "custom" ? convertCustomLevelError : "";
   }
 
   function archiveInfoRows(): Array<[string, string]> {
@@ -11184,350 +10496,6 @@
       showNotice(tr("gui.recovery.archive_test_requires_desktop_service", "Archive testing requires the desktop service."));
     } finally {
       recoverySubmissionPending = false;
-    }
-  }
-
-  async function submitConvertJob() {
-    const archiveForJob = currentArchive;
-    if (!archiveForJob) {
-      showNotice(tr("gui.precondition.open_before_convert", "Open an archive before converting"));
-      return;
-    }
-    if (convertProfile === "custom" && convertCustomLevelError) {
-      showNotice(convertCustomLevelError);
-      return;
-    }
-    if (!validateConvertOptions()) return;
-    if (convertPreflightBusy() || pendingConvertSubmission || focusBlockingTaskIfAny()) return;
-    const targetFormat = convertTargetFormat;
-    const profile = convertProfile;
-    const defaultDest = defaultConvertDest(targetFormat);
-    const level = convertCompressionLevel(profile);
-    const splitSize = convertSplitSizeBytes();
-    const destPassword = createPasswordDataAvailable(targetFormat) && convertPassword.length > 0
-      ? convertPassword
-      : null;
-    const encryptNames = Boolean(destPassword)
-      && convertEncryptNames
-      && createNameEncryptionAvailable(targetFormat);
-    const sourceTitle = archiveTitle();
-    const sourceEncoding = archiveEncodingForJob();
-    const generation = beginConvertPreflight();
-    try {
-      const { confirm, save } = await getDialogModule();
-      if (!convertPreflightCurrentGeneration(generation)) return;
-      const selected = await saveNativeDialog("convert.save-archive", save, {
-        title: tr("gui.convert.save_as", "Convert archive as"),
-        defaultPath: defaultDest,
-        filters: [{
-          name: createFormatFilterName(targetFormat),
-          extensions: convertOutputExtension(targetFormat) === "swm"
-            ? ["swm"]
-            : createFormats[targetFormat].extensions,
-        }],
-      });
-      if (!convertPreflightCurrentGeneration(generation)) return;
-      if (!selected) {
-        clearConvertPasswordFields();
-        finishConvertPreflightWithIssue(
-          "destination",
-          tr("gui.convert.destination_selection_cancelled", "Destination selection cancelled · no task was added"),
-          "cancelled",
-        );
-        return;
-      }
-      const dest = ensureConvertOutputExtension(
-        selected,
-        targetFormat,
-        convertOutputExtension(targetFormat) === "swm" ? "swm" : undefined,
-      );
-      lastConvertDest = dest;
-      if (sameDesktopPath(dest, archiveForJob.path, initialPlatform)) {
-        finishConvertPreflightWithIssue(
-          "destination",
-          tr("gui.convert.same_path", "Target cannot be the same as the source"),
-        );
-        return;
-      }
-      const authorization = await authorizeArchiveOutput(
-        dest,
-        confirm,
-        splitSize !== null,
-        inspectCreateDestinationForConvert,
-      );
-      if (!convertPreflightCurrentGeneration(generation)) return;
-      if (!authorization) {
-        clearConvertPasswordFields();
-        finishConvertPreflightWithIssue(
-          "destination",
-          tr("gui.convert.replacement_cancelled", "Existing output kept · no task was added"),
-          "cancelled",
-        );
-        return;
-      }
-      const spec: ConvertJobSpec = {
-        kind: "convert",
-        src: archiveForJob.source,
-        dest,
-        level,
-        src_encoding: sourceEncoding,
-        src_password: null,
-        dest_password: destPassword,
-        encrypt_names: encryptNames,
-        split_size: splitSize,
-        split_mode: splitSize === null ? "generic" : convertSplitMode,
-        replace_existing: authorization.replaceExisting,
-        replacement_guard: authorization.replacementGuard,
-      };
-
-      const preflightRequestId = nextPreflightRequestId();
-      convertPreflightRequestId = preflightRequestId;
-      convertPreflightRequestKind = "plan";
-      convertPreflightCancelPending = false;
-      convertPreflightPhase = "measuring";
-      const { runConvertPreflight } = await import("./lib/convert-preflight");
-      if (!convertPreflightCurrentGeneration(generation)) return;
-      const outcome = await runConvertPreflight({
-        spec,
-        requestId: preflightRequestId,
-        destinationDirectory: desktopDirname(dest, platformKind()),
-        isCurrent: () => convertPreflightCurrentGeneration(generation),
-        cancelRequested: () =>
-          convertPreflightRequestId === preflightRequestId
-          && convertPreflightCancelPending,
-        onPlanRequestComplete: () => {
-          if (convertPreflightRequestId !== preflightRequestId) return;
-          convertPreflightRequestId = null;
-          convertPreflightRequestKind = null;
-          convertPreflightCancelPending = false;
-        },
-        onPhase: (phase) => (convertPreflightPhase = phase),
-        onPlan: (plan) => (lastConvertPlan = plan),
-        onTempDisk: (disk) => (lastConvertTempDiskSpace = disk),
-        onSystemTempDisk: (disk) => (lastConvertSystemTempDiskSpace = disk),
-        onDestinationDisk: (disk) => (lastConvertDiskSpace = disk),
-      });
-      if (outcome.status === "stale") return;
-      if (outcome.status === "cancelled") {
-        clearConvertPasswordFields();
-        finishConvertPreflightWithIssue(
-          "source",
-          tr("gui.convert.preflight_cancelled_notice", "Conversion checks cancelled · no task was added"),
-          "cancelled",
-        );
-        return;
-      }
-      if (outcome.status === "error") {
-        let message: string;
-        if (outcome.code === "plan") {
-          message = isErrorDto(outcome.error)
-            ? tError(outcome.error)
-            : tr("gui.convert.plan_failed", "Could not read the archive metadata. Check the password and archive, then try again.");
-        } else if (outcome.code === "workspace_space") {
-          message = tr("gui.convert.not_enough_workspace_space", "Not enough destination space for the conversion workspace · {available} available")
-            .replace("{available}", formatBytes(outcome.availableBytes ?? 0));
-        } else if (outcome.code === "system_temp_space") {
-          message = tr("gui.convert.not_enough_system_temp_space", "Not enough space in the system temporary directory · {available} available")
-            .replace("{available}", formatBytes(outcome.availableBytes ?? 0));
-        } else if (outcome.code === "destination_space") {
-          message = tr("gui.convert.not_enough_destination_space", "Not enough free space in the destination · {available} available")
-            .replace("{available}", formatBytes(outcome.availableBytes ?? 0));
-        } else if (outcome.code === "destination_service") {
-          message = tr("gui.convert.destination_check_requires_desktop_service", "Destination disk check requires the desktop service");
-        } else {
-          message = tr("gui.convert.workspace_check_requires_desktop_service", "Workspace check requires the desktop service");
-        }
-        finishConvertPreflightWithIssue(outcome.stage, message);
-        return;
-      }
-      if (outcome.status !== "ready") return;
-      const plan = outcome.plan;
-
-      pendingConvertSubmission = {
-        spec,
-        targetFormat,
-        profile,
-        sourceTitle,
-        splitSize,
-      };
-      convertPreflightIssue = "";
-      convertPreflightIssueStage = null;
-      convertPreflightPhase = "reviewing";
-      showNotice(tr("gui.convert.review_ready_notice", "Checks complete · review before converting"));
-      await tick();
-      document.querySelector<HTMLElement>(".create-plan-review")?.focus({ preventScroll: false });
-    } catch (error) {
-      if (!convertPreflightCurrentGeneration(generation)) return;
-      if (createDestinationInspectionCancelled(error)) {
-        clearConvertPasswordFields();
-        finishConvertPreflightWithIssue(
-          "destination",
-          tr("gui.convert.preflight_cancelled_notice", "Conversion checks cancelled · no task was added"),
-          "cancelled",
-        );
-      } else if (error instanceof CreateDestinationInspectionError) {
-        finishConvertPreflightWithIssue(
-          "destination",
-          error.detail
-            ? tError(error.detail)
-            : tr("gui.output.inspect_failed", "Could not check the output. Review the destination and try again."),
-        );
-      } else {
-        finishConvertPreflightWithIssue(
-          "destination",
-          tr("gui.convert.requires_desktop_service", "Conversion requires the desktop service"),
-        );
-      }
-    }
-  }
-
-  function cancelConvertPlanReview(): void {
-    if (!pendingConvertSubmission || convertPreflightBusy()) return;
-    discardPendingConvertPlan(true);
-    showNotice(
-      tr(
-        "gui.convert.review.cancelled",
-        "Conversion plan cancelled · the destination password was cleared and no task was added",
-      ),
-    );
-  }
-
-  async function refreshConfirmedConvertDestination(
-    spec: ConvertJobSpec,
-  ): Promise<ConvertJobSpec | null> {
-    const inspection = await inspectCreateDestinationForConvert(
-      spec.dest,
-      spec.split_size !== null,
-    );
-    if (!inspection.conflict) {
-      return {
-        ...spec,
-        replace_existing: false,
-        replacement_guard: null,
-      };
-    }
-    if (inspection.guard === null) {
-      throw new CreateDestinationInspectionError();
-    }
-    if (
-      spec.replace_existing === true
-      && inspection.guard === spec.replacement_guard
-    ) return spec;
-
-    const { confirm } = await getDialogModule();
-    const replaceCurrent = await confirm(
-      tr(
-        "gui.convert.replace_changed.body",
-        "The output at {path} changed after the plan was checked. Replace the current output with the converted archive?",
-      ).replace("{path}", spec.dest),
-      {
-        title: tr("gui.convert.replace_changed.title", "Destination changed · replace current output?"),
-        kind: "warning",
-        okLabel: tr("gui.convert.replace_changed.action", "Replace current output"),
-        cancelLabel: tr("gui.convert.replace_changed.cancel", "Keep current output"),
-      },
-    );
-    if (!replaceCurrent) return null;
-    return {
-      ...spec,
-      replace_existing: true,
-      replacement_guard: inspection.guard,
-    };
-  }
-
-  async function confirmConvertPlan(): Promise<void> {
-    if (convertPreflightBusy()) return;
-    const pending = pendingConvertSubmission;
-    const plan = lastConvertPlan;
-    if (!pending || !plan) {
-      showNotice(tr("gui.convert.review.expired", "This conversion plan is no longer current. Start the checks again."));
-      resetConvertPreflightResult(true);
-      return;
-    }
-    if (focusBlockingTaskIfAny()) return;
-    convertPreflightIssue = "";
-    convertPreflightIssueStage = null;
-    convertPreflightPhase = "submitting";
-    if (!taskWindowMode) {
-      taskCenterReturnFocus = document.querySelector<HTMLElement>(".create-plan-review")
-        ?? taskCenterReturnFocus;
-    }
-
-    let submissionSpec: ConvertJobSpec;
-    try {
-      const refreshed = await refreshConfirmedConvertDestination(pending.spec);
-      if (!refreshed) {
-        convertPreflightPhase = "reviewing";
-        showNotice(tr("gui.convert.replace_changed.kept", "Current output kept · nothing was added to the queue"));
-        return;
-      }
-      submissionSpec = refreshed;
-      if (refreshed !== pending.spec) {
-        pendingConvertSubmission = { ...pending, spec: refreshed };
-      }
-    } catch (error) {
-      if (createDestinationInspectionCancelled(error)) {
-        convertPreflightIssueStage = "destination";
-        convertPreflightIssue = tr(
-          "gui.convert.destination_recheck_cancelled",
-          "Output recheck cancelled · the conversion plan was not submitted",
-        );
-        convertPreflightCurrent = "";
-        convertPreflightRequestId = null;
-        convertPreflightRequestKind = null;
-        convertPreflightCancelPending = false;
-        convertPreflightPhase = "reviewing";
-        showNotice(convertPreflightIssue);
-        void tick().then(() => {
-          document.querySelector<HTMLElement>(".create-plan-review")?.focus({ preventScroll: false });
-        });
-        return;
-      }
-      convertPreflightIssueStage = "destination";
-      convertPreflightIssue = error instanceof CreateDestinationInspectionError && error.detail
-        ? tError(error.detail)
-        : tr("gui.convert.destination_recheck_failed", "Could not recheck the destination. Review it and try again.");
-      convertPreflightPhase = "blocked";
-      showNotice(convertPreflightIssue);
-      return;
-    }
-
-    try {
-      await submitJob(submissionSpec);
-    } catch (error) {
-      convertPreflightIssueStage = "submit";
-      convertPreflightIssue = isJobSubmitBlocked(error)
-        ? jobSubmitBlockedMessage(error)
-        : tr("gui.convert.submission_requires_desktop_service", "Conversion submission requires the desktop service");
-      convertPreflightPhase = "blocked";
-      showNotice(convertPreflightIssue);
-      return;
-    }
-
-    const shouldRestorePrimaryFocus = !taskWindowMode
-      && !taskCenterOpen
-      && document.activeElement instanceof HTMLElement
-      && document.activeElement.closest(".create-plan-review") !== null;
-    pendingConvertSubmission = null;
-    clearConvertPasswordFields();
-    convertOptionsValidationAttempted = false;
-    convertPreflightPhase = "ready";
-    showNotice(
-      tr("gui.convert.queued_notice", "Conversion added to queue · {size} source")
-        .replace("{size}", formatBytes(plan.total_bytes)),
-    );
-    const volumeDetail = pending.splitSize === null
-      ? ""
-      : tr("gui.convert.history_split_size", " · {size} parts")
-          .replace("{size}", formatBytes(pending.splitSize));
-    recordOperation({
-      status: "queued",
-      title: tr("gui.convert.queued", "Conversion added to queue"),
-      detail: `${pending.sourceTitle} -> ${pathBaseName(plan.primary_output)} · ${createFormats[pending.targetFormat].label} · ${createProfileLabel(pending.profile)}${volumeDetail}`,
-    });
-    if (shouldRestorePrimaryFocus) {
-      await tick();
-      document.querySelector<HTMLElement>(".modern-convert .sheet-action, .classic-convert .classic-primary")?.focus();
     }
   }
 
@@ -14213,6 +13181,40 @@
     }, 2600);
   }
 
+  const convertRouteBridge: ConvertRouteBridge = {
+    getArchive: () => currentArchive,
+    tr,
+    tError: (error) => isErrorDto(error) ? tError(error) : String(error),
+    showNotice,
+    ensurePreflightListener: ensureCreatePreflightListener,
+    getDialogModule,
+    saveNativeDialog,
+    submitJob,
+    focusBlockingTaskIfAny: () => Boolean(focusBlockingTaskIfAny()),
+    isJobSubmitBlocked,
+    jobSubmitBlockedMessage,
+    recordQueuedOperation: (title, detail) => recordOperation({
+      status: "queued",
+      title,
+      detail,
+    }),
+    archiveStemName: (name) => archiveStemName(name),
+    platform: platformKind,
+    prepareSubmitFocus: () => {
+      if (taskWindowMode) return;
+      taskCenterReturnFocus = document.querySelector<HTMLElement>(".create-plan-review")
+        ?? taskCenterReturnFocus;
+    },
+    shouldRestorePrimaryFocus: () => !taskWindowMode
+      && !taskCenterOpen
+      && document.activeElement instanceof HTMLElement
+      && document.activeElement.closest(".create-plan-review") !== null,
+    register: (handle) => {
+      convertRouteHandle = handle;
+      handle.syncArchive(currentArchive);
+    },
+  };
+
   function showChecksumCopyFeedback(
     kind: "checksum" | "checksum_check" | "task",
     taskId: number | null,
@@ -14387,7 +13389,11 @@
       if (label === "Rename") return tr("gui.precondition.open_before_rename", "Open an archive before renaming entries");
       if (label === "Move") return tr("gui.precondition.open_before_move", "Open an archive before moving entries");
       if (label === "New Folder") return tr("gui.precondition.open_before_new_folder", "Open an archive before creating a folder");
-      if (label === "Convert") return convertArchiveRequiredReason();
+      if (label === "Convert") {
+        return currentArchive
+          ? ""
+          : tr("gui.precondition.open_before_convert", "Open an archive before converting");
+      }
       return openArchiveFirstLabel();
     }
     if (currentArchive.read_only) return archiveMutationDisabledReason();
@@ -14812,7 +13818,8 @@
             <ArchiveOperationWorkspaceHost
               kind="convert"
               variant="modern"
-              surface={convertWorkspaceSurface("modern")}
+              owner={convertRouteOwner}
+              bridge={convertRouteBridge}
               loadingTitle={tr("gui.convert.workspace_loading", "Loading Convert")}
               loadingBody={tr("gui.convert.workspace_loading_body", "Preparing output formats and compression choices.")}
               failureTitle={tr("gui.convert.workspace_load_failed", "Convert could not be loaded")}
@@ -15186,7 +14193,8 @@
         <ArchiveOperationWorkspaceHost
           kind="convert"
           variant="classic"
-          surface={convertWorkspaceSurface("classic")}
+          owner={convertRouteOwner}
+          bridge={convertRouteBridge}
           loadingTitle={tr("gui.convert.workspace_loading", "Loading Convert")}
           loadingBody={tr("gui.convert.workspace_loading_body", "Preparing output formats and compression choices.")}
           failureTitle={tr("gui.convert.workspace_load_failed", "Convert could not be loaded")}
@@ -15285,10 +14293,10 @@
         {:else if screen === "convert"}
           <span>{tr("gui.convert.title", "Convert archive")}</span>
           <span>{tr("gui.convert.status_source_target", "{source} → {target}")
-            .replace("{source}", currentArchive?.format.toUpperCase() ?? "-")
-            .replace("{target}", createFormats[convertTargetFormat].label)}</span>
-          <span>{createProfileLabel(convertProfile)} · {convertMethodLabel()}</span>
-          <strong>{tr("gui.convert.status_destination", "Destination: {destination}").replace("{destination}", convertDestinationPreview())}</strong>
+            .replace("{source}", convertRouteStatus.sourceFormat)
+            .replace("{target}", convertRouteStatus.targetLabel)}</span>
+          <span>{convertRouteStatus.profileLabel} · {convertRouteStatus.methodLabel}</span>
+          <strong>{tr("gui.convert.status_destination", "Destination: {destination}").replace("{destination}", convertRouteStatus.destination)}</strong>
         {:else if screen === "extract"}
           {@const extractActionStatus = extractActionLabel()}
           {@const extractScopeStatus = `${extractSelectionLabel()} · ${extractDestinationTitle(extractDestinationMode)}`}

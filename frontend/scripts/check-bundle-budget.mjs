@@ -3,8 +3,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { gzipSync } from "node:zlib";
 
-export const ENTRY_RAW_BUDGET = 470_000;
-export const ENTRY_GZIP_BUDGET = 136_000;
+export const ENTRY_RAW_BUDGET = 453_000;
+export const ENTRY_GZIP_BUDGET = 132_000;
 export const STARTUP_DYNAMIC_CHUNK_NAMES = ["event", "window"];
 
 const JAVASCRIPT_EXTENSIONS = new Set([".js", ".mjs"]);

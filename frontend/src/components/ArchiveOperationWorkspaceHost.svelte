@@ -2,9 +2,10 @@
   import type { Component } from "svelte";
   import { createDeferredComponentLoader } from "../lib/deferred-component";
   import type {
-    ConvertWorkspaceSurface,
+    ConvertRouteBridge,
+    ConvertRouteOwner,
     ConvertWorkspaceVariant,
-  } from "./ConvertWorkspace.svelte";
+  } from "../lib/convert-route";
   import type {
     CreateWorkspaceSurface,
     CreateWorkspaceVariant,
@@ -14,10 +15,7 @@
     ExtractWorkspaceVariant,
   } from "./ExtractWorkspace.svelte";
 
-  export type {
-    ConvertWorkspaceSurface,
-    ConvertWorkspaceVariant,
-  } from "./ConvertWorkspace.svelte";
+  export type { ConvertWorkspaceVariant } from "../lib/convert-route";
   export type {
     CreateWorkspaceSurface,
     CreateWorkspaceVariant,
@@ -28,8 +26,6 @@
   } from "./ExtractWorkspace.svelte";
 
   type WorkspaceKind = "create" | "convert" | "extract";
-  type WorkspaceVariant = CreateWorkspaceVariant | ConvertWorkspaceVariant | ExtractWorkspaceVariant;
-  type WorkspaceSurface = CreateWorkspaceSurface | ConvertWorkspaceSurface | ExtractWorkspaceSurface;
   type WorkspaceProps = {
     loadingTitle: string;
     loadingBody: string;
@@ -38,20 +34,22 @@
     retryLabel: string;
   } & (
     | { kind: "create"; variant: CreateWorkspaceVariant; surface: CreateWorkspaceSurface }
-    | { kind: "convert"; variant: ConvertWorkspaceVariant; surface: ConvertWorkspaceSurface }
+    | {
+        kind: "convert";
+        variant: ConvertWorkspaceVariant;
+        owner: ConvertRouteOwner;
+        bridge: ConvertRouteBridge;
+      }
     | { kind: "extract"; variant: ExtractWorkspaceVariant; surface: ExtractWorkspaceSurface }
   );
-  type WorkspaceComponent = Component<{
-    variant: WorkspaceVariant;
-    surface: WorkspaceSurface;
-  }>;
+  type WorkspaceComponent = Component<Record<string, unknown>>;
 
   const workspaceLoaders = {
     create: createDeferredComponentLoader<WorkspaceComponent>(
       () => import("./CreateWorkspace.svelte") as Promise<{ default: WorkspaceComponent }>,
     ),
     convert: createDeferredComponentLoader<WorkspaceComponent>(
-      () => import("./ConvertWorkspace.svelte") as Promise<{ default: WorkspaceComponent }>,
+      () => import("./ConvertWorkspaceRoute.svelte") as Promise<{ default: WorkspaceComponent }>,
     ),
     extract: createDeferredComponentLoader<WorkspaceComponent>(
       () => import("./ExtractWorkspace.svelte") as Promise<{ default: WorkspaceComponent }>,
@@ -110,7 +108,11 @@
     </div>
   {/if}
 {:then Workspace}
-  <Workspace variant={props.variant} surface={props.surface} />
+  {#if props.kind === "convert"}
+    <Workspace variant={props.variant} owner={props.owner} bridge={props.bridge} />
+  {:else}
+    <Workspace variant={props.variant} surface={props.surface} />
+  {/if}
 {:catch}
   {#if props.variant === "modern"}
     <div class={modernClass}>
