@@ -12126,6 +12126,11 @@ select.classic-input:focus {
   background: var(--color-surface);
 }
 
+.classic-table-header {
+  min-width: 0;
+  display: grid;
+}
+
 .classic-workbench-strip {
   min-width: 0;
   min-height: 38px;

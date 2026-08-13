@@ -301,6 +301,8 @@ run_sqz checksum "$@"
         script_name: "squallz-extract-here.sh",
         desktop_name: "squallz-extract-here.desktop",
         script_body: r#"
+collect_regular_file_inputs "$@" || exit 0
+set -- "${SQUALLZ_REGULAR_FILE_INPUTS[@]}"
 if run_gui_task "extract-here" "$@"; then
   exit 0
 fi
@@ -317,6 +319,8 @@ done
         script_name: "squallz-extract-to-folder.sh",
         desktop_name: "squallz-extract-to-folder.desktop",
         script_body: r#"
+collect_regular_file_inputs "$@" || exit 0
+set -- "${SQUALLZ_REGULAR_FILE_INPUTS[@]}"
 if run_gui_task "extract-to-folder" "$@"; then
   exit 0
 fi
@@ -385,11 +389,12 @@ run_sqz compress "$@" -o "$output" --file-manager-preset
         script_name: "squallz-test-archive.sh",
         desktop_name: "squallz-test-archive.desktop",
         script_body: r#"
-if run_gui_task "test-archive" "$@"; then
-  exit 0
-fi
+collect_regular_file_inputs "$@" || exit 0
+set -- "${SQUALLZ_REGULAR_FILE_INPUTS[@]}"
 for item in "$@"; do
-  [[ -f "$item" ]] || continue
+  if run_gui_task "test-archive" "$item"; then
+    continue
+  fi
   run_sqz test "$item"
 done
 "#,
@@ -404,6 +409,8 @@ CLI_NOT_FOUND_TITLE={cli_not_found_title}
 CLI_NOT_FOUND_MESSAGE={cli_not_found_message}
 SQUALLZ_TASK_WINDOW_ACTION_ARG={task_window_action_arg}
 SQUALLZ_TASK_WINDOW_OUTPUT_ARG={task_window_output_arg}
+SQUALLZ_APPIMAGE={installed_appimage}
+SQUALLZ_APPIMAGE_EXTRACT_AND_RUN={installed_appimage_extract_and_run}
 
 notify_missing_cli() {
   if command -v notify-send >/dev/null 2>&1; then
@@ -436,6 +443,11 @@ resolve_gui() {
     return 0
   fi
 
+  if [[ -n "$SQUALLZ_APPIMAGE" && -f "$SQUALLZ_APPIMAGE" && ! -L "$SQUALLZ_APPIMAGE" && -x "$SQUALLZ_APPIMAGE" ]]; then
+    printf '%s\n' "$SQUALLZ_APPIMAGE"
+    return 0
+  fi
+
   local -a candidates
   candidates=()
   if [[ -n "${APPDIR:-}" ]]; then
@@ -459,13 +471,24 @@ resolve_gui() {
   return 1
 }
 
+launch_gui() {
+  local gui
+  gui="$1"
+  shift
+  if [[ "$gui" == "$SQUALLZ_APPIMAGE" && "$SQUALLZ_APPIMAGE_EXTRACT_AND_RUN" == "1" ]]; then
+    APPIMAGE_EXTRACT_AND_RUN=1 "$gui" "$@" >/dev/null 2>&1 &
+  else
+    "$gui" "$@" >/dev/null 2>&1 &
+  fi
+}
+
 run_gui_task() {
   local action gui
   action="$1"
   shift
   gui="$(resolve_gui 2>/dev/null || true)"
   [[ -n "$gui" ]] || return 1
-  "$gui" "$SQUALLZ_TASK_WINDOW_ACTION_ARG" "$action" "$@" >/dev/null 2>&1 &
+  launch_gui "$gui" "$SQUALLZ_TASK_WINDOW_ACTION_ARG" "$action" "$@"
 }
 
 run_gui_task_with_output() {
@@ -475,7 +498,7 @@ run_gui_task_with_output() {
   shift 2
   gui="$(resolve_gui 2>/dev/null || true)"
   [[ -n "$gui" ]] || return 1
-  "$gui" "$SQUALLZ_TASK_WINDOW_ACTION_ARG" "$action" "$SQUALLZ_TASK_WINDOW_OUTPUT_ARG" "$output" "$@" >/dev/null 2>&1 &
+  launch_gui "$gui" "$SQUALLZ_TASK_WINDOW_ACTION_ARG" "$action" "$SQUALLZ_TASK_WINDOW_OUTPUT_ARG" "$output" "$@"
 }
 
 SQZ=""
@@ -485,6 +508,32 @@ run_sqz() {
   fi
   "$SQZ" "$@"
 }
+
+collect_regular_file_inputs() {
+  local item
+  SQUALLZ_REGULAR_FILE_INPUTS=()
+  for item in "$@"; do
+    if [[ -f "$item" ]]; then
+      SQUALLZ_REGULAR_FILE_INPUTS+=("$item")
+    fi
+  done
+  [[ ${#SQUALLZ_REGULAR_FILE_INPUTS[@]} -gt 0 ]]
+}
+
+SQUALLZ_ACTION_INPUTS=()
+for SQUALLZ_ACTION_INPUT in "$@"; do
+  [[ -n "$SQUALLZ_ACTION_INPUT" ]] || continue
+  if [[ "$SQUALLZ_ACTION_INPUT" == /* ]]; then
+    SQUALLZ_ACTION_INPUTS+=("$SQUALLZ_ACTION_INPUT")
+  else
+    SQUALLZ_ACTION_INPUTS+=("$PWD/$SQUALLZ_ACTION_INPUT")
+  fi
+done
+if [[ ${#SQUALLZ_ACTION_INPUTS[@]} -eq 0 ]]; then
+  exit 0
+fi
+set -- "${SQUALLZ_ACTION_INPUTS[@]}"
+unset SQUALLZ_ACTION_INPUTS SQUALLZ_ACTION_INPUT
 "#;
 
 #[cfg(any(target_os = "windows", all(test, target_os = "macos")))]
@@ -1112,6 +1161,87 @@ fn linux_home_dir() -> io::Result<std::path::PathBuf> {
     })
 }
 
+#[cfg(any(target_os = "linux", all(test, target_os = "macos")))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LinuxAppImageLaunchMode {
+    Mounted,
+    ExtractAndRun,
+}
+
+#[cfg(any(target_os = "linux", all(test, target_os = "macos")))]
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct LinuxAppImageLaunch {
+    path: PathBuf,
+    mode: LinuxAppImageLaunchMode,
+}
+
+#[cfg(any(target_os = "linux", all(test, target_os = "macos")))]
+fn current_linux_appimage_launch() -> Option<LinuxAppImageLaunch> {
+    let appimage = std::env::var_os("APPIMAGE");
+    let appdir = std::env::var_os("APPDIR");
+    let current_exe = std::env::current_exe().ok()?;
+    let temp_dir = std::env::temp_dir();
+    validated_linux_appimage_launch(
+        appimage.as_deref().map(Path::new),
+        appdir.as_deref().map(Path::new),
+        &current_exe,
+        &temp_dir,
+    )
+}
+
+#[cfg(any(target_os = "linux", all(test, target_os = "macos")))]
+fn validated_linux_appimage_launch(
+    appimage: Option<&Path>,
+    appdir: Option<&Path>,
+    current_exe: &Path,
+    temp_dir: &Path,
+) -> Option<LinuxAppImageLaunch> {
+    let appimage = appimage?;
+    let appdir = appdir?;
+    if !appimage.is_absolute() || !appdir.is_absolute() || !current_exe.is_absolute() {
+        return None;
+    }
+    if managed_path_kind(appimage).ok()? != ManagedPathKind::RegularFile
+        || !path_is_executable(appimage)
+        || managed_path_kind(appdir).ok()? != ManagedPathKind::Directory
+    {
+        return None;
+    }
+
+    let canonical_temp_dir = fs::canonicalize(temp_dir).ok()?;
+    let canonical_appdir = fs::canonicalize(appdir).ok()?;
+    let appdir_name = canonical_appdir.file_name()?.to_str()?;
+    if canonical_appdir.parent() != Some(canonical_temp_dir.as_path()) {
+        return None;
+    }
+    let mode = if appdir_name.starts_with(".mount_") {
+        LinuxAppImageLaunchMode::Mounted
+    } else if appdir_name.starts_with("appimage_extracted_") {
+        LinuxAppImageLaunchMode::ExtractAndRun
+    } else {
+        return None;
+    };
+
+    let canonical_exe = fs::canonicalize(current_exe).ok()?;
+    if canonical_exe == canonical_appdir || !canonical_exe.starts_with(&canonical_appdir) {
+        return None;
+    }
+
+    let canonical_appimage = fs::canonicalize(appimage).ok()?;
+    if managed_path_kind(appimage).ok()? != ManagedPathKind::RegularFile
+        || !path_is_executable(appimage)
+        || managed_path_kind(&canonical_appimage).ok()? != ManagedPathKind::RegularFile
+        || !path_is_executable(&canonical_appimage)
+        || canonical_appimage.to_str().is_none()
+    {
+        return None;
+    }
+    Some(LinuxAppImageLaunch {
+        path: canonical_appimage,
+        mode,
+    })
+}
+
 #[cfg(target_os = "windows")]
 fn windows_data_dir() -> io::Result<PathBuf> {
     dirs::data_dir()
@@ -1377,12 +1507,25 @@ fn install_linux_file_manager_actions_at_with_localizer(
     home: &Path,
     loc: &Localizer,
 ) -> io::Result<IntegrationApplyResultDto> {
+    install_linux_file_manager_actions_at_with_localizer_and_appimage(
+        home,
+        loc,
+        current_linux_appimage_launch().as_ref(),
+    )
+}
+
+#[cfg(any(target_os = "linux", all(test, target_os = "macos")))]
+fn install_linux_file_manager_actions_at_with_localizer_and_appimage(
+    home: &Path,
+    loc: &Localizer,
+    appimage: Option<&LinuxAppImageLaunch>,
+) -> io::Result<IntegrationApplyResultDto> {
     let (services_dir, script_dir, nautilus_dir) = linux_integration_dirs(home);
     let data_home = linux_data_home(home);
     create_managed_directory(&data_home, &services_dir)?;
     create_managed_directory(&data_home, &script_dir)?;
     create_managed_directory(&data_home, &nautilus_dir)?;
-    let preamble = linux_script_preamble(loc);
+    let preamble = linux_script_preamble(loc, appimage);
 
     let mut installed = Vec::new();
     for action in LINUX_FILE_MANAGER_ACTIONS {
@@ -1401,6 +1544,7 @@ fn install_linux_file_manager_actions_at_with_localizer(
             &service_path,
             linux_service_menu(action, &name, &script_path),
         )?;
+        make_executable(&service_path)?;
 
         let nautilus_path = linux_nautilus_action_path(&nautilus_dir, &name);
         remove_stale_nautilus_scripts(&nautilus_dir, action, &nautilus_path)?;
@@ -1431,7 +1575,7 @@ fn install_linux_file_manager_actions_at_with_localizer(
 }
 
 #[cfg(any(target_os = "linux", all(test, target_os = "macos")))]
-fn linux_script_preamble(loc: &Localizer) -> String {
+fn linux_script_preamble(loc: &Localizer, appimage: Option<&LinuxAppImageLaunch>) -> String {
     LINUX_SCRIPT_PREAMBLE_TEMPLATE
         .replace(
             "{cli_not_found_title}",
@@ -1449,6 +1593,22 @@ fn linux_script_preamble(loc: &Localizer) -> String {
             "{task_window_output_arg}",
             &shell_single_quote_value(EXTERNAL_TASK_OUTPUT_ARG),
         )
+        .replace(
+            "{installed_appimage}",
+            &appimage
+                .and_then(|launch| launch.path.to_str())
+                .map(shell_single_quote_value)
+                .unwrap_or_else(|| "''".to_owned()),
+        )
+        .replace(
+            "{installed_appimage_extract_and_run}",
+            if appimage.is_some_and(|launch| launch.mode == LinuxAppImageLaunchMode::ExtractAndRun)
+            {
+                "'1'"
+            } else {
+                "'0'"
+            },
+        )
 }
 
 #[cfg(any(target_os = "linux", all(test, target_os = "macos")))]
@@ -1465,12 +1625,25 @@ fn linux_file_manager_actions_status_at_with_localizer(
     home: &Path,
     loc: &Localizer,
 ) -> io::Result<IntegrationStatusDto> {
+    linux_file_manager_actions_status_at_with_localizer_and_appimage(
+        home,
+        loc,
+        current_linux_appimage_launch().as_ref(),
+    )
+}
+
+#[cfg(any(target_os = "linux", all(test, target_os = "macos")))]
+fn linux_file_manager_actions_status_at_with_localizer_and_appimage(
+    home: &Path,
+    loc: &Localizer,
+    appimage: Option<&LinuxAppImageLaunch>,
+) -> io::Result<IntegrationStatusDto> {
     let (services_dir, script_dir, nautilus_dir) = linux_integration_dirs(home);
     let data_home = linux_data_home(home);
     verify_managed_directory(&data_home, &services_dir)?;
     verify_managed_directory(&data_home, &script_dir)?;
     verify_managed_directory(&data_home, &nautilus_dir)?;
-    let preamble = linux_script_preamble(loc);
+    let preamble = linux_script_preamble(loc, appimage);
     let mut actions = Vec::new();
     let mut installed = Vec::new();
     let mut missing = Vec::new();
@@ -1517,6 +1690,7 @@ fn linux_file_manager_actions_status_at_with_localizer(
                     Some("launcher_outdated"),
                 )
             } else if !path_is_executable(&script_path)
+                || !path_is_executable(&service_path)
                 || !path_is_executable(&expected_nautilus_path)
             {
                 (
@@ -1951,7 +2125,7 @@ fn replace_managed_file(path: &Path) -> io::Result<()> {
     }
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+#[cfg(target_os = "macos")]
 fn replace_managed_directory(path: &Path) -> io::Result<()> {
     match managed_path_kind(path)? {
         ManagedPathKind::Missing => Ok(()),
@@ -1980,7 +2154,7 @@ fn remove_owned_file(path: &Path) -> io::Result<bool> {
     }
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+#[cfg(target_os = "macos")]
 fn remove_owned_directory(path: &Path) -> io::Result<bool> {
     match managed_path_kind(path)? {
         ManagedPathKind::Missing => Ok(false),
@@ -2126,8 +2300,18 @@ fn linux_integration_dirs(home: &Path) -> (PathBuf, PathBuf, PathBuf) {
 
 #[cfg(any(target_os = "linux", all(test, target_os = "macos")))]
 fn linux_data_home(home: &Path) -> PathBuf {
-    match std::env::var_os("XDG_DATA_HOME").filter(|value| !value.is_empty()) {
-        Some(path) => PathBuf::from(path),
+    let value = std::env::var_os("XDG_DATA_HOME");
+    linux_data_home_from_env(home, value.as_deref())
+}
+
+#[cfg(any(target_os = "linux", all(test, target_os = "macos")))]
+fn linux_data_home_from_env(home: &Path, value: Option<&std::ffi::OsStr>) -> PathBuf {
+    match value
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+    {
+        Some(path) => path,
         None => home.join(".local").join("share"),
     }
 }
@@ -3561,12 +3745,16 @@ printf '\n' >> "$SQUALLZ_QA_LOG"
 mod linux_file_manager_tests {
     use super::{
         desktop_exec_argument, install_linux_file_manager_actions_at_with_language,
-        linux_file_manager_actions_status_at_with_language, linux_integration_dirs,
+        install_linux_file_manager_actions_at_with_localizer_and_appimage,
+        linux_data_home_from_env, linux_file_manager_actions_status_at_with_language,
+        linux_file_manager_actions_status_at_with_localizer_and_appimage, linux_integration_dirs,
         remove_linux_file_manager_actions_at_with_language, safe_visible_file_name,
+        validated_linux_appimage_launch, LinuxAppImageLaunchMode,
     };
     use crate::dto::{IntegrationActionHealthStateDto, IntegrationHealthStateDto};
+    use squallz_i18n::Localizer;
     use std::fs;
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{symlink, PermissionsExt};
     use std::path::{Path, PathBuf};
     use std::process::{Command, Stdio};
     use std::thread;
@@ -3591,6 +3779,10 @@ mod linux_file_manager_tests {
             let script = Path::new(&action.script_path);
             assert!(service.is_file());
             assert!(script.is_file());
+            assert_ne!(
+                fs::metadata(service).unwrap().permissions().mode() & 0o111,
+                0
+            );
 
             let service_text = fs::read_to_string(service).unwrap();
             assert!(service_text.contains("ServiceTypes=KonqPopupMenu/Plugin"));
@@ -3636,6 +3828,89 @@ mod linux_file_manager_tests {
         assert!(
             gui_log.contains("<--squallz-action><checksum>"),
             "log: {gui_log}"
+        );
+
+        let relative_gui_log = home.join("relative-gui-args.log");
+        run_linux_action_script_with_gui_from(
+            &script_for(&result, "test-archive"),
+            &fake_gui,
+            &relative_gui_log,
+            &sample,
+            &["one.zip", "folder input", "two.7z"],
+        );
+        let relative_gui_log = wait_for_log_contains(
+            &relative_gui_log,
+            &format!("<{}>", sample.join("two.7z").display()),
+        );
+        assert!(
+            relative_gui_log.contains(&format!(
+                "<--squallz-action><test-archive><{}>",
+                sample.join("one.zip").display()
+            )),
+            "log: {relative_gui_log}"
+        );
+        assert!(
+            relative_gui_log.contains(&format!(
+                "<--squallz-action><test-archive><{}>",
+                sample.join("two.7z").display()
+            )),
+            "log: {relative_gui_log}"
+        );
+        assert!(
+            !relative_gui_log.contains(&format!("<{}>", sample.join("folder input").display())),
+            "directories must not be handed to archive-test jobs: {relative_gui_log}"
+        );
+
+        let relative_extract_log = home.join("relative-extract-gui-args.log");
+        run_linux_action_script_with_gui_from(
+            &script_for(&result, "extract-here"),
+            &fake_gui,
+            &relative_extract_log,
+            &sample,
+            &["one.zip", "folder input"],
+        );
+        let relative_extract_log = wait_for_log_contains(
+            &relative_extract_log,
+            &format!("<{}>", sample.join("one.zip").display()),
+        );
+        assert!(
+            !relative_extract_log.contains(&format!("<{}>", sample.join("folder input").display())),
+            "directories must not be handed to archive-extract jobs: {relative_extract_log}"
+        );
+
+        let relative_compress_log = home.join("relative-compress-gui-args.log");
+        fs::write(sample.join("plain file.7z"), b"existing output").unwrap();
+        run_linux_action_script_with_gui_from(
+            &script_for(&result, "compress-to-7z"),
+            &fake_gui,
+            &relative_compress_log,
+            &sample,
+            &["plain file.txt"],
+        );
+        let relative_compress_log = wait_for_log_contains(
+            &relative_compress_log,
+            &format!("<{}>", sample.join("plain file.txt").display()),
+        );
+        assert!(
+            relative_compress_log.contains(&format!(
+                "<--squallz-action><compress-to-7z><--squallz-output><{}><{}>",
+                sample.join("plain file 2.7z").display(),
+                sample.join("plain file.txt").display()
+            )),
+            "log: {relative_compress_log}"
+        );
+
+        let empty_gui_log = home.join("empty-gui-args.log");
+        run_linux_action_script_with_gui_from(
+            &script_for(&result, "test-archive"),
+            &fake_gui,
+            &empty_gui_log,
+            &sample,
+            &[],
+        );
+        assert!(
+            !empty_gui_log.exists(),
+            "an empty file-manager selection must not launch a task"
         );
 
         let fake_sqz = home.join("fake-sqz");
@@ -3787,6 +4062,19 @@ mod linux_file_manager_tests {
     }
 
     #[test]
+    fn linux_data_home_ignores_relative_xdg_paths() {
+        let home = Path::new("/home/squallz");
+        assert_eq!(
+            linux_data_home_from_env(home, Some(std::ffi::OsStr::new("relative/data"))),
+            home.join(".local/share")
+        );
+        assert_eq!(
+            linux_data_home_from_env(home, Some(std::ffi::OsStr::new("/var/lib/squallz"))),
+            PathBuf::from("/var/lib/squallz")
+        );
+    }
+
+    #[test]
     fn corrupted_nautilus_launcher_remains_visible_to_status_and_cleanup() {
         let home = temp_home("squallz-linux-integration-damaged-launcher");
         let installed =
@@ -3820,6 +4108,279 @@ mod linux_file_manager_tests {
 
         remove_linux_file_manager_actions_at_with_language(&home, Some("en-US")).unwrap();
         assert!(!launcher.exists());
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn installed_actions_keep_a_valid_appimage_path_and_require_repair_after_it_moves() {
+        let root = temp_home("squallz-linux-appimage-actions");
+        let home = root.join("home");
+        let mount = root.join(".mount_Squallz");
+        let current_exe = mount.join("usr/bin/squallz-gui");
+        let original_appimage = root.join("Squallz user's.AppImage");
+        let moved_appimage = root.join("Squallz moved.AppImage");
+        write_fake_sh_tool(&current_exe);
+        write_fake_sh_tool(&original_appimage);
+
+        let installed_appimage = validated_linux_appimage_launch(
+            Some(&original_appimage),
+            Some(&mount),
+            &current_exe,
+            &root,
+        )
+        .unwrap();
+        let loc = Localizer::load(Some("en-US"));
+        let installed = install_linux_file_manager_actions_at_with_localizer_and_appimage(
+            &home,
+            &loc,
+            Some(&installed_appimage),
+        )
+        .unwrap();
+        let checksum_script = script_for(&installed, "checksum");
+        let script_text = fs::read_to_string(&checksum_script).unwrap();
+        let escaped_path = installed_appimage
+            .path
+            .to_string_lossy()
+            .replace('\'', "'\"'\"'");
+        assert!(script_text.contains(&format!("SQUALLZ_APPIMAGE='{escaped_path}'")));
+        assert!(script_text.contains("SQUALLZ_APPIMAGE_EXTRACT_AND_RUN='0'"));
+
+        let sample = root.join("sample file.txt");
+        fs::write(&sample, b"sample").unwrap();
+        let gui_log = root.join("appimage-gui.log");
+        let output = Command::new("/bin/bash")
+            .arg(&checksum_script)
+            .arg(&sample)
+            .env_remove("APPDIR")
+            .env_remove("APPIMAGE")
+            .env_remove("SQUALLZ_CLI")
+            .env_remove("SQUALLZ_GUI")
+            .env("SQUALLZ_QA_LOG", &gui_log)
+            .env("PATH", "/usr/bin:/bin")
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "persistent AppImage handoff failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let gui_log = wait_for_log_contains(&gui_log, "<--squallz-action><checksum>");
+        assert!(gui_log.contains("<--squallz-action><checksum>"));
+        assert!(gui_log.contains(&format!("<{}>", sample.display())));
+
+        fs::rename(&original_appimage, &moved_appimage).unwrap();
+        let moved_appimage = validated_linux_appimage_launch(
+            Some(&moved_appimage),
+            Some(&mount),
+            &current_exe,
+            &root,
+        )
+        .unwrap();
+        let moved_status = linux_file_manager_actions_status_at_with_localizer_and_appimage(
+            &home,
+            &loc,
+            Some(&moved_appimage),
+        )
+        .unwrap();
+        assert_eq!(moved_status.health, IntegrationHealthStateDto::NeedsRepair);
+        assert!(moved_status.can_repair);
+        assert!(moved_status.actions.iter().all(|action| {
+            action.state == IntegrationActionHealthStateDto::Damaged
+                && action.issue.as_deref() == Some("script_outdated")
+        }));
+
+        install_linux_file_manager_actions_at_with_localizer_and_appimage(
+            &home,
+            &loc,
+            Some(&moved_appimage),
+        )
+        .unwrap();
+        let repaired = linux_file_manager_actions_status_at_with_localizer_and_appimage(
+            &home,
+            &loc,
+            Some(&moved_appimage),
+        )
+        .unwrap();
+        assert_eq!(repaired.health, IntegrationHealthStateDto::Healthy);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn extract_and_run_appimage_actions_preserve_the_runtime_mode() {
+        let root = temp_home("squallz-linux-extracted-appimage-actions");
+        let home = root.join("home");
+        let extracted = root.join("appimage_extracted_0123456789abcdef");
+        let current_exe = extracted.join("usr/bin/squallz-gui");
+        let appimage = root.join("Squallz.AppImage");
+        write_fake_sh_tool(&current_exe);
+        write_fake_sh_tool(&appimage);
+
+        let launch =
+            validated_linux_appimage_launch(Some(&appimage), Some(&extracted), &current_exe, &root)
+                .unwrap();
+        assert_eq!(launch.mode, LinuxAppImageLaunchMode::ExtractAndRun);
+
+        let loc = Localizer::load(Some("en-US"));
+        let installed = install_linux_file_manager_actions_at_with_localizer_and_appimage(
+            &home,
+            &loc,
+            Some(&launch),
+        )
+        .unwrap();
+        let checksum_script = script_for(&installed, "checksum");
+        let script_text = fs::read_to_string(&checksum_script).unwrap();
+        assert!(script_text.contains("SQUALLZ_APPIMAGE_EXTRACT_AND_RUN='1'"));
+
+        let sample = root.join("sample.txt");
+        fs::write(&sample, b"sample").unwrap();
+        let gui_log = root.join("appimage-extracted-gui.log");
+        let output = Command::new("/bin/bash")
+            .arg(&checksum_script)
+            .arg(&sample)
+            .env_remove("APPDIR")
+            .env_remove("APPIMAGE")
+            .env_remove("APPIMAGE_EXTRACT_AND_RUN")
+            .env_remove("SQUALLZ_CLI")
+            .env_remove("SQUALLZ_GUI")
+            .env("SQUALLZ_QA_LOG", &gui_log)
+            .env("PATH", "/usr/bin:/bin")
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "persistent extracted AppImage handoff failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let gui_log = wait_for_log_contains(&gui_log, "<--squallz-action><checksum>");
+        assert!(gui_log.contains("<APPIMAGE_EXTRACT_AND_RUN=1>"));
+
+        let mount = root.join(".mount_Squallz");
+        let mounted_exe = mount.join("usr/bin/squallz-gui");
+        write_fake_sh_tool(&mounted_exe);
+        let mounted_launch =
+            validated_linux_appimage_launch(Some(&appimage), Some(&mount), &mounted_exe, &root)
+                .unwrap();
+        assert_eq!(mounted_launch.mode, LinuxAppImageLaunchMode::Mounted);
+        let mounted_status = linux_file_manager_actions_status_at_with_localizer_and_appimage(
+            &home,
+            &loc,
+            Some(&mounted_launch),
+        )
+        .unwrap();
+        assert_eq!(
+            mounted_status.health,
+            IntegrationHealthStateDto::NeedsRepair
+        );
+        assert!(mounted_status.actions.iter().all(|action| {
+            action.state == IntegrationActionHealthStateDto::Damaged
+                && action.issue.as_deref() == Some("script_outdated")
+        }));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn appimage_path_validation_rejects_environment_injection_and_symlinks() {
+        let root = temp_home("squallz-linux-appimage-validation");
+        let mount = root.join(".mount_Squallz");
+        let current_exe = mount.join("usr/bin/squallz-gui");
+        let outside_exe = root.join("outside/squallz-gui");
+        let appimage = root.join("Squallz.AppImage");
+        let appimage_link = root.join("Squallz-link.AppImage");
+        write_fake_sh_tool(&current_exe);
+        write_fake_sh_tool(&outside_exe);
+        write_fake_sh_tool(&appimage);
+        symlink(&appimage, &appimage_link).unwrap();
+
+        assert_eq!(
+            validated_linux_appimage_launch(Some(&appimage), Some(&mount), &current_exe, &root,),
+            Some(super::LinuxAppImageLaunch {
+                path: fs::canonicalize(&appimage).unwrap(),
+                mode: LinuxAppImageLaunchMode::Mounted,
+            })
+        );
+        assert!(validated_linux_appimage_launch(
+            Some(Path::new("Squallz.AppImage")),
+            Some(&mount),
+            &current_exe,
+            &root,
+        )
+        .is_none());
+        assert!(validated_linux_appimage_launch(
+            Some(&appimage_link),
+            Some(&mount),
+            &current_exe,
+            &root,
+        )
+        .is_none());
+        assert!(validated_linux_appimage_launch(
+            Some(&appimage),
+            Some(&mount),
+            &outside_exe,
+            &root,
+        )
+        .is_none());
+
+        let injected_appdir = root.join("not-an-appimage-mount");
+        fs::create_dir_all(&injected_appdir).unwrap();
+        assert!(validated_linux_appimage_launch(
+            Some(&appimage),
+            Some(&injected_appdir),
+            &outside_exe,
+            &root,
+        )
+        .is_none());
+
+        let mut permissions = fs::metadata(&appimage).unwrap().permissions();
+        permissions.set_mode(0o644);
+        fs::set_permissions(&appimage, permissions).unwrap();
+        assert!(validated_linux_appimage_launch(
+            Some(&appimage),
+            Some(&mount),
+            &current_exe,
+            &root,
+        )
+        .is_none());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn non_executable_kde_service_requires_repair() {
+        let home = temp_home("squallz-linux-integration-kde-permissions");
+        let installed =
+            install_linux_file_manager_actions_at_with_language(&home, Some("en-US")).unwrap();
+        let service = Path::new(&installed.installed[0].path);
+        let mut permissions = fs::metadata(service).unwrap().permissions();
+        permissions.set_mode(0o644);
+        fs::set_permissions(service, permissions).unwrap();
+
+        let status =
+            linux_file_manager_actions_status_at_with_language(&home, Some("en-US")).unwrap();
+        assert_eq!(status.health, IntegrationHealthStateDto::NeedsRepair);
+        assert!(status.can_repair);
+        let damaged = status
+            .actions
+            .iter()
+            .find(|action| action.id == installed.installed[0].id)
+            .unwrap();
+        assert_eq!(damaged.state, IntegrationActionHealthStateDto::Damaged);
+        assert_eq!(damaged.issue.as_deref(), Some("script_not_executable"));
+
+        install_linux_file_manager_actions_at_with_language(&home, Some("en-US")).unwrap();
+        assert_ne!(
+            fs::metadata(service).unwrap().permissions().mode() & 0o111,
+            0
+        );
+        let repaired =
+            linux_file_manager_actions_status_at_with_language(&home, Some("en-US")).unwrap();
+        assert_eq!(repaired.health, IntegrationHealthStateDto::Healthy);
+
         let _ = fs::remove_dir_all(home);
     }
 
@@ -3899,6 +4460,31 @@ mod linux_file_manager_tests {
         );
     }
 
+    fn run_linux_action_script_with_gui_from(
+        script: &str,
+        fake_gui: &Path,
+        log: &Path,
+        current_dir: &Path,
+        inputs: &[&str],
+    ) {
+        let mut command = Command::new("/bin/bash");
+        command
+            .arg(script)
+            .current_dir(current_dir)
+            .env("SQUALLZ_GUI", fake_gui)
+            .env("SQUALLZ_QA_LOG", log)
+            .env("PATH", "/usr/bin:/bin")
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .args(inputs);
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "script {script} failed with relative gui inputs: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     fn wait_for_log_contains(path: &Path, needle: &str) -> String {
         for _ in 0..300 {
             if let Ok(contents) = fs::read_to_string(path) {
@@ -3912,9 +4498,13 @@ mod linux_file_manager_tests {
     }
 
     fn write_fake_sh_tool(path: &Path) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
         fs::write(
             path,
             r#"#!/bin/sh
+printf '<APPIMAGE_EXTRACT_AND_RUN=%s>' "${APPIMAGE_EXTRACT_AND_RUN:-}" >> "$SQUALLZ_QA_LOG"
 for arg in "$@"; do
   printf '<%s>' "$arg" >> "$SQUALLZ_QA_LOG"
 done

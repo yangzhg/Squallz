@@ -749,7 +749,7 @@ fn macos_sfx_can_create_its_zip_payload_from_inputs() {
 }
 
 #[test]
-fn macos_sfx_ignores_template_entries_added_after_preparation() {
+fn macos_sfx_rejects_template_entries_added_after_preparation() {
     let temp = TempDir::new("sfx-macos-prepared-template-members");
     let template = temp.path().join("Squallz.app");
     let input = temp.path().join("input.bin");
@@ -765,14 +765,13 @@ fn macos_sfx_ignores_template_entries_added_after_preparation() {
         let late = late.clone();
         move || fs::write(&late, b"late").unwrap()
     });
-    create_macos_sfx_from_input(&template, &input, &output, false, &progress).unwrap();
+    let error =
+        create_macos_sfx_from_input(&template, &input, &output, false, &progress).unwrap_err();
 
     assert!(progress.fired.load(Ordering::Acquire));
-    assert_eq!(
-        fs::read(output.join("Contents/Resources/theme/early.dat")).unwrap(),
-        b"early"
-    );
-    assert!(!output.join("Contents/Resources/theme/late.dat").exists());
+    assert!(matches!(error, FormatError::CorruptArchive(_)));
+    assert!(error.to_string().contains("app template changed"));
+    assert!(!output.exists());
     assert_no_private_sfx_staging(temp.path());
 }
 

@@ -243,6 +243,7 @@
   } from "./lib/task-model";
   import {
     latestMatchingRecoveryTask,
+    recoveryRouteForOpen,
     recoveryRepairGate,
     recoveryResultBoolean as recoveryResultMetricBoolean,
     recoveryResultConfirmsRepairCapacity,
@@ -4447,6 +4448,7 @@
               items: visibleMoveConflictItems(),
             }
           : null,
+        structureWarning: archiveStructureWarningText(),
         totalRows: currentArchive ? totalRows() : 0,
         rows,
         paddingTop: browsePaddingTop(CLASSIC_ROW_HEIGHT),
@@ -4456,6 +4458,7 @@
       },
       tr,
       onOpenRoot: () => void openArchiveBreadcrumb(-1),
+      onOpenRecovery: openCurrentArchiveRecoveryConfiguration,
       onOpenNestedPreview: () => void openNestedPreviewArchive(),
       onExtractNestedPreview: () => void extractNestedPreviewArchive(),
       onClearPreview: (restoreEntryFocus) => clearEntryPreviewState(restoreEntryFocus),
@@ -4561,6 +4564,7 @@
               items: visibleMoveConflictItems(),
             }
           : null,
+        structureWarning: archiveStructureWarningText(),
         encodingWarning: hasEncodingWarning() ? archiveWarningText() : null,
         totalRows: totalRows(),
         filterText: filterText(),
@@ -4579,7 +4583,7 @@
       onExtractAll: () => openExtractWorkspace("all"),
       onExtractSelection: () => openExtractWorkspace("selection"),
       onAddFiles: () => void submitAddToArchiveJob(),
-      onOpenRecovery: () => setScreen("recovery"),
+      onOpenRecovery: openCurrentArchiveRecoveryConfiguration,
       onConvert: () => setScreen("convert"),
       onOpenInfo: () => setScreen("archiveInfo"),
       onRenameSelection: () => void submitRenameSelectedJob(),
@@ -5857,11 +5861,16 @@
     }
   }
 
-  function openRecoveryConfiguration() {
+  function openRecoveryConfiguration(source: "preserve" | "current" = "preserve") {
     if (preventCreateSubmissionNavigation("recovery")) return;
-    if (currentArchive && recoverySourceMode === "none" && recoveryPar2Override === null) {
-      recoverySourceMode = "current";
-    }
+    const route = recoveryRouteForOpen(source, Boolean(currentArchive), {
+      sourceMode: recoverySourceMode,
+      sourceOverride: recoverySourceOverride,
+      par2Override: recoveryPar2Override,
+    });
+    recoverySourceMode = route.sourceMode;
+    recoverySourceOverride = route.sourceOverride;
+    recoveryPar2Override = route.par2Override;
     setScreen("recovery");
     showNotice(
       recoverySourcePath()
@@ -5869,6 +5878,10 @@
           .replace("{name}", recoverySourceName() ?? tr("gui.archive.generic", "Archive"))
         : tr("gui.recovery.choose_archive_to_begin", "Choose a damaged archive or a PAR2 file to begin."),
     );
+  }
+
+  function openCurrentArchiveRecoveryConfiguration() {
+    openRecoveryConfiguration("current");
   }
 
   async function openArchiveFromDialog() {
@@ -6384,6 +6397,18 @@
     }
     return tr("gui.archive.encoding_warning", "Encoding review needed for {count} names.")
       .replace("{count}", count.toLocaleString());
+  }
+
+  function archiveStructureWarningText(): string | null {
+    if (currentArchive?.structure !== "zip_local_headers_recovered") return null;
+    return tr(
+      "gui.archive.zip_local_headers_recovered",
+      "The ZIP index is missing or unreadable. The visible files came from local headers; test the archive and rebuild its index before relying on it.",
+    );
+  }
+
+  function hasArchiveStructureWarning(): boolean {
+    return archiveStructureWarningText() !== null;
   }
 
   function hasEncodingWarning(): boolean {
@@ -13104,7 +13129,7 @@
       return tr("gui.settings.password_book.refresh_to_check", "Refresh to check for a saved password");
     }
     if (!passwordBookStatus.available) {
-      return tr("gui.settings.password_book.secret_store_unavailable_detail", "The system secret store is unavailable; passwords can stay in this session only");
+      return tr("gui.settings.password_book.secret_store_unavailable_detail", "The system secret store is unavailable. Make sure it is installed and running with a default password collection; passwords stay in this session until then.");
     }
     return passwordBookStatus.saved
       ? tr("gui.settings.password_book.current_has_saved_entry", "Current archive has a saved secret-store entry")
@@ -13155,7 +13180,7 @@
       await refreshArchivePasswordBookStatus(currentArchive.path);
       showNotice(tr("gui.settings.password_book.status_refreshed", "Password Book status refreshed"));
     } catch {
-      showNotice(tr("gui.settings.password_book.status_check_failed", "Could not check Password Book status. Check secret-store access and try again."));
+      showNotice(tr("gui.settings.password_book.status_check_failed", "Could not check Password Book status. Start or unlock the system secret store, then try again."));
     }
   }
 
@@ -13680,7 +13705,7 @@
           {:else}
             <button aria-busy={archiveOpenStatus === "opening"} onclick={() => void openArchiveFromDialog()}><Icon name="folder-open" size={16} />{archiveOpenStatus === "opening" ? toolbarLabel("Opening") : toolbarLabel("Open")}</button>
             <button onclick={() => setScreen("create")}><Icon name="sparkles" size={16} />{toolbarLabel("Create")}</button>
-            <button onclick={openRecoveryConfiguration}><Icon name="shield-alert" size={16} />{tr("gui.recovery.title", "Recovery")}</button>
+            <button onclick={() => openRecoveryConfiguration()}><Icon name="shield-alert" size={16} />{tr("gui.recovery.title", "Recovery")}</button>
             <button class="primary" disabled={!currentArchive} title={archiveActionTitle(hasArchiveOpen())} onclick={() => openExtractWorkspace("all")}><Icon name="archive" size={16} />{toolbarLabel("Extract")}</button>
             <button
               bind:this={quickActionButton}
@@ -14091,6 +14116,8 @@
             <div class="encoding-chip accent"><Icon name="check-circle" size={14} />{checksumAlgorithmLabel(checksumAlgorithm)}</div>
           {:else if screen === "duplicates"}
             <div class="encoding-chip accent"><Icon name="search" size={14} />{tr("gui.duplicates.blake3_scan", "BLAKE3 scan")}</div>
+          {:else if currentArchive && hasArchiveStructureWarning()}
+            <div class="encoding-chip warning"><Icon name="alert-triangle" size={14} />{tr("gui.archive.zip_index_damaged", "ZIP index damaged")}</div>
           {:else if currentArchive && hasEncodingWarning()}
             <div class="encoding-chip warning"><Icon name="alert-triangle" size={14} />{tr("gui.encoding.gbk_suggested", "GBK suggested")}</div>
           {:else if currentArchive}

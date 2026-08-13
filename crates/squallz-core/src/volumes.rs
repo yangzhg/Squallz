@@ -6202,9 +6202,27 @@ mod tests {
         let second = volume_path(&base, 2);
         std::fs::write(&first, b"old first").unwrap();
         std::fs::write(&second, b"old second").unwrap();
+        let original_modified = std::fs::metadata(&first).unwrap().modified().unwrap();
         let snapshot = snapshot_managed_split_outputs(&base, false).unwrap();
 
-        std::fs::write(&first, b"new first").unwrap();
+        let rewritten_modified = original_modified
+            .checked_sub(std::time::Duration::from_secs(2))
+            .or_else(|| original_modified.checked_add(std::time::Duration::from_secs(2)))
+            .unwrap();
+        let mut rewritten = OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(&first)
+            .unwrap();
+        rewritten.write_all(b"new first").unwrap();
+        rewritten
+            .set_times(std::fs::FileTimes::new().set_modified(rewritten_modified))
+            .unwrap();
+        drop(rewritten);
+        assert_ne!(
+            std::fs::metadata(&first).unwrap().modified().unwrap(),
+            original_modified
+        );
         let error = verify_split_snapshot_unchanged(&base, false, &snapshot).unwrap_err();
 
         assert!(error.is_destination_changed());

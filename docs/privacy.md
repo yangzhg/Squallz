@@ -17,6 +17,7 @@
 - 密码：只有用户显式选择记住当前压缩包密码时，才写入系统密码库。当前后端覆盖 macOS Keychain、
   Linux Secret Service（通过 `secret-tool`）和 Windows Credential Manager；每个平台都必须用对应
   smoke 在真实目标系统验收后才能作为正式发布证据。
+  Linux 会先通过 `gdbus` 只读检查当前桌面会话是否有默认密码库；这项检查不会创建、解锁或修改密码库。
   Squallz 不把明文密码写入设置、localStorage、日志或任务队列。
 - 诊断报告：本地诊断输出不得包含明文密码或压缩包内容。
 

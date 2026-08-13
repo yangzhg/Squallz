@@ -219,6 +219,9 @@ pub struct ArchiveInfo {
     pub read_only: bool,
     /// Format identifier (`zip` / `7z` / `tar.gz` …)
     pub format: String,
+    /// Machine-readable structural state (`complete` or
+    /// `zip_local_headers_recovered`).
+    pub structure: String,
     /// Total number of entries
     pub entry_count: usize,
     /// Physical volume file names in archive order (`None` for single files)

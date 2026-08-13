@@ -8,9 +8,9 @@ use std::sync::Arc;
 
 use serde_json::json;
 use squallz_core::api::{
-    BoundedProblemLog, ConflictResolver, EntryPath, ExtractOptions, ExtractProblemReporter,
-    ExtractReport, FormatError, OpenOptions, OverwritePolicy, Password, ProblemPreview,
-    SymlinkPolicy,
+    ArchiveStructureStatus, BoundedProblemLog, ConflictResolver, EntryPath, ExtractOptions,
+    ExtractProblemReporter, ExtractReport, FormatError, OpenOptions, OverwritePolicy, Password,
+    ProblemPreview, SymlinkPolicy,
 };
 use squallz_core::{ExtractPlan, PathFilter, SmartLayout};
 use squallz_i18n::{localize_error, Localizer};
@@ -60,6 +60,7 @@ impl ExtractProblemReporter for CliExtractProblemReporter {
 struct ExtractRunOutcome {
     plan: ExtractPlan,
     report: Option<ExtractReport>,
+    structure: ArchiveStructureStatus,
 }
 
 #[allow(clippy::too_many_arguments)] // direct image of the CLI surface
@@ -125,18 +126,20 @@ pub fn run(
             password: pw.cloned(),
             encoding_override: encoding.clone(),
         };
-        let (plan, report) = ctx.engine.plan_and_extract_with_report_controlled(
-            &archive,
-            &dest,
-            &archive,
-            smart,
-            &open,
-            &x_opts,
-            &progress,
-            &ctx.ctl,
-            |entries, control| filter.select_entries(entries, control),
-            |_| Ok(()),
-        )?;
+        let (plan, report, structure) = ctx
+            .engine
+            .plan_and_extract_with_report_and_structure_controlled(
+                &archive,
+                &dest,
+                &archive,
+                smart,
+                &open,
+                &x_opts,
+                &progress,
+                &ctx.ctl,
+                |entries, control| filter.select_entries(entries, control),
+                |_| Ok(()),
+            )?;
         let no_match = !filter.is_empty() && plan.scope.entries == 0;
         if smart {
             match plan.layout {
@@ -155,10 +158,14 @@ pub fn run(
         Ok(ExtractRunOutcome {
             plan,
             report: (!no_match).then_some(report),
+            structure,
         })
     });
     progress.finish();
     let outcome = result?;
+    if outcome.structure == ArchiveStructureStatus::ZipLocalHeadersRecovered {
+        ctx.eprint_problem(ctx.loc.t("cli.extract.zip_local_headers_recovered"));
+    }
     let Some(report) = outcome.report else {
         let path = outcome.plan.requested_destination.display().to_string();
         if json_output {

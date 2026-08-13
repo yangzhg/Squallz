@@ -13,6 +13,7 @@ use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
 
 use crc32fast::Hasher;
+use sha2::{Digest, Sha256};
 use squallz_format_api::{
     check_windows_portability, split_volume_name, ControlToken, CreateOptions, Detected, EntryPath,
     FormatError, OpenOptions, ProgressPhase, ProgressSink, ReadSeek, ResourceOptions,
@@ -32,6 +33,8 @@ pub use transaction::{sfx_recovery_details, SfxRecoveryDetails};
 const FOOTER_MAGIC: [u8; 8] = *b"SQZSFX1\0";
 const FOOTER_LEN: u64 = 32;
 const COPY_BUFFER_BYTES: usize = 64 * 1024;
+const LINUX_TEMPLATE_DATA_MAGIC: [u8; 8] = *b"SQZSFXD1";
+const LINUX_TEMPLATE_DATA_HEADER_LEN: u64 = 48;
 
 /// Marker compiled into the Squallz CLI binary so cross-target builders can
 /// reject unrelated executable stubs.
@@ -861,7 +864,7 @@ impl Engine {
         validate_build_paths(stub, payload.path(), dest, opts.overwrite)?;
         payload.verify()?;
         let payload_bytes = payload.len();
-        let stub_bytes = validated_template.state.bytes();
+        let stub_bytes = validated_template.stub_bytes;
         let total_bytes = stub_bytes
             .checked_add(payload_bytes)
             .and_then(|value| value.checked_add(FOOTER_LEN))
@@ -875,7 +878,10 @@ impl Engine {
             let mut output = reserved.file.try_clone()?;
             let mut done = 0u64;
             verify_single_file_template_binding(stub, &validated_template)?;
-            validated_template.file.seek(SeekFrom::Start(0))?;
+            validated_template
+                .file
+                .seek(SeekFrom::Start(validated_template.stub_offset))?;
+            let expected_digest = validated_template.expected_digest;
             copy_plain_file(
                 stub,
                 &mut validated_template.file,
@@ -887,6 +893,7 @@ impl Engine {
                 total_bytes,
                 "stub",
                 stub_bytes,
+                expected_digest,
             )?;
             verify_single_file_template_binding(stub, &validated_template)?;
             let payload_crc32 = copy_payload(
@@ -1213,6 +1220,9 @@ struct ValidatedSingleFileTemplate {
     file: File,
     identity: PathIdentity,
     state: RegularFileState,
+    stub_offset: u64,
+    stub_bytes: u64,
+    expected_digest: Option<[u8; 32]>,
     permissions: fs::Permissions,
 }
 
@@ -1291,6 +1301,107 @@ enum ValidatedSfxTemplate {
     Macos(bundle::PreparedTemplate),
 }
 
+#[derive(Clone, Copy)]
+struct SingleFileTemplateContent {
+    offset: u64,
+    bytes: u64,
+    expected_digest: Option<[u8; 32]>,
+}
+
+fn single_file_template_content(
+    file: &mut File,
+    file_bytes: u64,
+    target: SfxTarget,
+    resources: &ResourceOptions,
+    ctl: &ControlToken,
+) -> Result<SingleFileTemplateContent, FormatError> {
+    if file_bytes < LINUX_TEMPLATE_DATA_MAGIC.len() as u64 {
+        return Ok(SingleFileTemplateContent {
+            offset: 0,
+            bytes: file_bytes,
+            expected_digest: None,
+        });
+    }
+
+    file.seek(SeekFrom::Start(0))?;
+    let mut magic = [0u8; LINUX_TEMPLATE_DATA_MAGIC.len()];
+    file.read_exact(&mut magic)?;
+    if magic != LINUX_TEMPLATE_DATA_MAGIC {
+        return Ok(SingleFileTemplateContent {
+            offset: 0,
+            bytes: file_bytes,
+            expected_digest: None,
+        });
+    }
+    if target != SfxTarget::Linux {
+        return Err(FormatError::Unsupported(
+            "Linux SFX template data cannot be used for another target".into(),
+        ));
+    }
+
+    let mut length = [0u8; 8];
+    let mut expected_digest = [0u8; 32];
+    file.read_exact(&mut length)?;
+    file.read_exact(&mut expected_digest)?;
+    let content_bytes = u64::from_le_bytes(length);
+    let expected_file_bytes = LINUX_TEMPLATE_DATA_HEADER_LEN
+        .checked_add(content_bytes)
+        .ok_or_else(|| {
+            FormatError::Unsupported("Linux SFX template data length overflow".into())
+        })?;
+    if content_bytes == 0 || expected_file_bytes != file_bytes {
+        return Err(FormatError::Unsupported(
+            "Linux SFX template data has an invalid length".into(),
+        ));
+    }
+
+    let mut hasher = Sha256::new();
+    let mut remaining = content_bytes;
+    let mut buffer = vec![0u8; resources.stream_buffer_size(COPY_BUFFER_BYTES)?];
+    while remaining > 0 {
+        ctl.checkpoint()?;
+        let limit = remaining.min(buffer.len() as u64) as usize;
+        let read = file.read(&mut buffer[..limit])?;
+        if read == 0 {
+            return Err(FormatError::Io(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "Linux SFX template data was truncated",
+            )));
+        }
+        hasher.update(&buffer[..read]);
+        remaining -= read as u64;
+    }
+    let actual_digest: [u8; 32] = hasher.finalize().into();
+    if actual_digest != expected_digest {
+        return Err(FormatError::Unsupported(
+            "Linux SFX template data failed its SHA-256 check".into(),
+        ));
+    }
+
+    Ok(SingleFileTemplateContent {
+        offset: LINUX_TEMPLATE_DATA_HEADER_LEN,
+        bytes: content_bytes,
+        expected_digest: Some(expected_digest),
+    })
+}
+
+fn content_has_sfx_footer(
+    file: &mut File,
+    content: SingleFileTemplateContent,
+) -> Result<bool, FormatError> {
+    if content.bytes < FOOTER_LEN {
+        return Ok(false);
+    }
+    let footer_offset = content
+        .offset
+        .checked_add(content.bytes - FOOTER_LEN)
+        .ok_or_else(|| FormatError::CorruptArchive("SFX template offset overflow".into()))?;
+    file.seek(SeekFrom::Start(footer_offset))?;
+    let mut bytes = [0u8; FOOTER_LEN as usize];
+    file.read_exact(&mut bytes)?;
+    Ok(SfxFooter::decode(&bytes, content.bytes)?.is_some())
+}
+
 /// Validates that an SFX runtime template is a first-party Squallz runtime for
 /// the requested target. The template is only read; no payload or output is
 /// created.
@@ -1328,12 +1439,24 @@ fn validate_sfx_template_for_build(
     }
     let identity = file_identity(&stub_file)?;
     let state = RegularFileState::from_metadata(&metadata);
-    if inspect_single_file_sfx(&mut stub_file, metadata.len())?.is_some() {
+    let content = single_file_template_content(
+        &mut stub_file,
+        metadata.len(),
+        opts.target,
+        &opts.resources,
+        ctl,
+    )?;
+    let contains_sfx = if content.offset == 0 {
+        inspect_single_file_sfx(&mut stub_file, content.bytes)?.is_some()
+    } else {
+        content_has_sfx_footer(&mut stub_file, content)?
+    };
+    if contains_sfx {
         return Err(FormatError::Unsupported(
             "an existing SFX artifact cannot be reused as a stub".into(),
         ));
     }
-    stub_file.seek(SeekFrom::Start(0))?;
+    stub_file.seek(SeekFrom::Start(content.offset))?;
     let detected_target = executable_target_from_file(&mut stub_file, stub)?;
     if detected_target != opts.target {
         return Err(FormatError::Unsupported(format!(
@@ -1349,17 +1472,26 @@ fn validate_sfx_template_for_build(
             "use an unsigned Squallz Windows stub and sign the completed SFX artifact".into(),
         ));
     }
-    stub_file.seek(SeekFrom::Start(0))?;
-    if !file_has_marker(&mut stub_file, &SFX_CLI_STUB_MARKER, &opts.resources, ctl)? {
+    stub_file.seek(SeekFrom::Start(content.offset))?;
+    let mut content_reader = (&mut stub_file).take(content.bytes);
+    if !file_has_marker(
+        &mut content_reader,
+        &SFX_CLI_STUB_MARKER,
+        &opts.resources,
+        ctl,
+    )? {
         return Err(FormatError::Unsupported(
             "the selected executable is not a Squallz SFX-capable CLI stub".into(),
         ));
     }
-    stub_file.seek(SeekFrom::Start(0))?;
+    stub_file.seek(SeekFrom::Start(content.offset))?;
     let template = ValidatedSingleFileTemplate {
         file: stub_file,
         identity,
         state,
+        stub_offset: content.offset,
+        stub_bytes: content.bytes,
+        expected_digest: content.expected_digest,
         permissions: metadata.permissions(),
     };
     verify_single_file_template_binding(stub, &template)?;
@@ -1375,7 +1507,7 @@ fn plan_sfx_from_summary(
     let final_output_budget_bytes = match validated_template {
         ValidatedSfxTemplate::Macos(prepared) => prepared.output_budget(dest, payload_budget)?,
         ValidatedSfxTemplate::SingleFile(template) => {
-            single_file_output_budget(template.state.bytes(), payload_budget)?
+            single_file_output_budget(template.stub_bytes, payload_budget)?
         }
     };
     Ok(create_sfx_plan(
@@ -1725,8 +1857,8 @@ fn is_macho_magic(bytes: &[u8]) -> bool {
     )
 }
 
-pub(super) fn file_has_marker(
-    file: &mut File,
+pub(super) fn file_has_marker<R: Read + ?Sized>(
+    reader: &mut R,
     marker: &[u8],
     resources: &ResourceOptions,
     ctl: &ControlToken,
@@ -1738,7 +1870,7 @@ pub(super) fn file_has_marker(
     let mut carry = 0usize;
     loop {
         ctl.checkpoint()?;
-        let read = file.read(&mut buffer[carry..])?;
+        let read = reader.read(&mut buffer[carry..])?;
         let used = carry + read;
         if buffer[..used]
             .windows(marker.len())
@@ -1766,10 +1898,12 @@ fn copy_plain_file(
     overall_total: u64,
     label: &str,
     expected_len: u64,
+    expected_digest: Option<[u8; 32]>,
 ) -> Result<(), FormatError> {
     let mut current_done = 0u64;
     let mut remaining = expected_len;
     let mut buffer = vec![0u8; resources.stream_buffer_size(COPY_BUFFER_BYTES)?];
+    let mut hasher = expected_digest.map(|_| Sha256::new());
     let entry = EntryPath::from_utf8(label);
     while remaining > 0 {
         ctl.checkpoint()?;
@@ -1782,6 +1916,9 @@ fn copy_plain_file(
             )));
         }
         output.write_all(&buffer[..read])?;
+        if let Some(hasher) = &mut hasher {
+            hasher.update(&buffer[..read]);
+        }
         remaining -= read as u64;
         current_done += read as u64;
         *overall_done += read as u64;
@@ -1794,6 +1931,12 @@ fn copy_plain_file(
         );
     }
     reject_trailing_source_bytes(source_file, source)?;
+    if let (Some(hasher), Some(expected_digest)) = (hasher, expected_digest) {
+        let actual_digest: [u8; 32] = hasher.finalize().into();
+        if actual_digest != expected_digest {
+            return Err(FormatError::input_changed());
+        }
+    }
     Ok(())
 }
 
@@ -1995,6 +2138,7 @@ fn read_file_at(file: &File, buffer: &mut [u8], offset: u64) -> io::Result<usize
 mod tests {
     use super::*;
     use std::io::Cursor;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
 
     use squallz_format_api::{
@@ -2089,6 +2233,44 @@ mod tests {
 
     fn write_valid_single_file_sfx(path: &Path, payload: &[u8]) {
         write_single_file_sfx(path, payload, crc32fast::hash(payload));
+    }
+
+    fn write_linux_template_data(path: &Path, runtime: &[u8]) {
+        let mut data = Vec::with_capacity(LINUX_TEMPLATE_DATA_HEADER_LEN as usize + runtime.len());
+        data.extend_from_slice(&LINUX_TEMPLATE_DATA_MAGIC);
+        data.extend_from_slice(&(runtime.len() as u64).to_le_bytes());
+        data.extend_from_slice(&Sha256::digest(runtime));
+        data.extend_from_slice(runtime);
+        fs::write(path, data).unwrap();
+    }
+
+    struct MutatingTemplateProgress {
+        path: PathBuf,
+        offset: u64,
+        original_modified: std::time::SystemTime,
+        mutated: AtomicBool,
+    }
+
+    impl ProgressSink for MutatingTemplateProgress {
+        fn on_progress(&self, _done: u64, _total: u64, _current: &EntryPath) {}
+
+        fn on_entry_progress(
+            &self,
+            _done: u64,
+            _total: u64,
+            current: &EntryPath,
+            _current_done: u64,
+            _current_total: u64,
+        ) {
+            if current.display != "stub" || self.mutated.swap(true, Ordering::SeqCst) {
+                return;
+            }
+            let mut file = fs::OpenOptions::new().write(true).open(&self.path).unwrap();
+            file.seek(SeekFrom::Start(self.offset)).unwrap();
+            file.write_all(&[0x5a]).unwrap();
+            file.set_times(fs::FileTimes::new().set_modified(self.original_modified))
+                .unwrap();
+        }
     }
 
     #[test]
@@ -2429,6 +2611,229 @@ mod tests {
             events.into_inner(),
             vec!["sync", "verify", "permissions", "sync"]
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn single_file_output_gains_owner_execute_from_data_template_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = temp_file("data-template-permissions");
+        let file = File::create(&path).unwrap();
+
+        copy_executable_permissions(fs::Permissions::from_mode(0o644), &file).unwrap();
+
+        assert_eq!(file.metadata().unwrap().permissions().mode() & 0o777, 0o744);
+        drop(file);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn linux_template_data_validates_only_its_bounded_runtime() {
+        let path = temp_file("linux-template-data-valid");
+        let mut runtime = b"\x7fELF first-party runtime ".to_vec();
+        runtime.extend_from_slice(&SFX_CLI_STUB_MARKER);
+        runtime.extend_from_slice(b" trailing runtime bytes");
+        write_linux_template_data(&path, &runtime);
+        let options = SfxBuildOptions {
+            target: SfxTarget::Linux,
+            ..SfxBuildOptions::default()
+        };
+
+        let ValidatedSfxTemplate::SingleFile(mut template) =
+            validate_sfx_template_for_build(&path, &options, &ControlToken::default()).unwrap()
+        else {
+            panic!("Linux data template must use the single-file layout");
+        };
+        assert_eq!(template.stub_offset, LINUX_TEMPLATE_DATA_HEADER_LEN);
+        assert_eq!(template.stub_bytes, runtime.len() as u64);
+        template
+            .file
+            .seek(SeekFrom::Start(template.stub_offset))
+            .unwrap();
+        let mut copied = Vec::new();
+        template
+            .file
+            .take(template.stub_bytes)
+            .read_to_end(&mut copied)
+            .unwrap();
+        assert_eq!(copied, runtime);
+
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn linux_template_data_rejects_trailing_or_modified_bytes() {
+        let path = temp_file("linux-template-data-invalid");
+        let mut runtime = b"\x7fELF runtime ".to_vec();
+        runtime.extend_from_slice(&SFX_CLI_STUB_MARKER);
+        let options = SfxBuildOptions {
+            target: SfxTarget::Linux,
+            ..SfxBuildOptions::default()
+        };
+
+        write_linux_template_data(&path, &runtime);
+        let mut trailing = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        trailing.write_all(b"late").unwrap();
+        drop(trailing);
+        let error = validate_sfx_template(&path, &options, &ControlToken::default()).unwrap_err();
+        assert!(
+            matches!(error, FormatError::Unsupported(message) if message.contains("invalid length"))
+        );
+
+        write_linux_template_data(&path, &runtime);
+        let mut file = fs::OpenOptions::new().write(true).open(&path).unwrap();
+        file.seek(SeekFrom::Start(LINUX_TEMPLATE_DATA_HEADER_LEN))
+            .unwrap();
+        file.write_all(b"X").unwrap();
+        drop(file);
+        let error = validate_sfx_template(&path, &options, &ControlToken::default()).unwrap_err();
+        assert!(matches!(error, FormatError::Unsupported(message) if message.contains("SHA-256")));
+
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn linux_template_data_enforces_length_target_and_marker() {
+        let path = temp_file("linux-template-data-contract");
+        let linux_options = SfxBuildOptions {
+            target: SfxTarget::Linux,
+            ..SfxBuildOptions::default()
+        };
+
+        write_linux_template_data(&path, b"\x7fELF runtime without marker");
+        let error =
+            validate_sfx_template(&path, &linux_options, &ControlToken::default()).unwrap_err();
+        assert!(
+            matches!(error, FormatError::Unsupported(message) if message.contains("not a Squallz SFX-capable"))
+        );
+
+        let mut runtime = b"\x7fELF runtime ".to_vec();
+        runtime.extend_from_slice(&SFX_CLI_STUB_MARKER);
+        write_linux_template_data(&path, &runtime);
+        let windows_options = SfxBuildOptions {
+            target: SfxTarget::Windows,
+            ..SfxBuildOptions::default()
+        };
+        let error =
+            validate_sfx_template(&path, &windows_options, &ControlToken::default()).unwrap_err();
+        assert!(
+            matches!(error, FormatError::Unsupported(message) if message.contains("another target"))
+        );
+
+        let mut overflow = LINUX_TEMPLATE_DATA_MAGIC.to_vec();
+        overflow.extend_from_slice(&u64::MAX.to_le_bytes());
+        overflow.extend_from_slice(&[0u8; 32]);
+        fs::write(&path, overflow).unwrap();
+        let error =
+            validate_sfx_template(&path, &linux_options, &ControlToken::default()).unwrap_err();
+        assert!(
+            matches!(error, FormatError::Unsupported(message) if message.contains("length overflow"))
+        );
+
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn linux_template_data_build_writes_only_the_raw_runtime() {
+        let dir = temp_file("linux-template-data-build");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir(&dir).unwrap();
+        let template_path = dir.join("sqz-sfx.stub");
+        let archive_path = dir.join("payload.zip");
+        let output_path = dir.join("package.run");
+        let mut runtime = b"\x7fELF first-party runtime ".to_vec();
+        runtime.extend_from_slice(&SFX_CLI_STUB_MARKER);
+        write_linux_template_data(&template_path, &runtime);
+        fs::write(&archive_path, b"TESTZIP\0payload").unwrap();
+        let mut registry = FormatRegistry::new();
+        registry.register_archive(Arc::new(TestZipFormat));
+        let engine = Engine::new(registry);
+        let options = SfxBuildOptions {
+            target: SfxTarget::Linux,
+            ..SfxBuildOptions::default()
+        };
+
+        let report = engine
+            .create_sfx(
+                &template_path,
+                &archive_path,
+                &output_path,
+                &options,
+                &NoProgress,
+                &ControlToken::default(),
+            )
+            .unwrap();
+
+        assert_eq!(report.stub_bytes, runtime.len() as u64);
+        let output = fs::read(&output_path).unwrap();
+        assert!(output.starts_with(&runtime));
+        assert!(!output.starts_with(&LINUX_TEMPLATE_DATA_MAGIC));
+        assert_eq!(
+            inspect_sfx(&output_path).unwrap().unwrap().stub_bytes(),
+            runtime.len() as u64
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            assert_ne!(
+                fs::metadata(&output_path).unwrap().permissions().mode() & 0o100,
+                0
+            );
+        }
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn linux_template_data_copy_rechecks_digest_before_publish() {
+        let dir = temp_file("linux-template-data-copy-digest");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir(&dir).unwrap();
+        let template_path = dir.join("sqz-sfx.stub");
+        let archive_path = dir.join("payload.zip");
+        let output_path = dir.join("package.run");
+        let mut runtime = vec![0u8; 24 * 1024];
+        runtime[..4].copy_from_slice(b"\x7fELF");
+        runtime[64..64 + SFX_CLI_STUB_MARKER.len()].copy_from_slice(&SFX_CLI_STUB_MARKER);
+        write_linux_template_data(&template_path, &runtime);
+        fs::write(&archive_path, b"TESTZIP\0payload").unwrap();
+        let original_modified = fs::metadata(&template_path).unwrap().modified().unwrap();
+        let progress = MutatingTemplateProgress {
+            path: template_path.clone(),
+            offset: LINUX_TEMPLATE_DATA_HEADER_LEN + 12 * 1024,
+            original_modified,
+            mutated: AtomicBool::new(false),
+        };
+        let mut registry = FormatRegistry::new();
+        registry.register_archive(Arc::new(TestZipFormat));
+        let engine = Engine::new(registry);
+        let options = SfxBuildOptions {
+            target: SfxTarget::Linux,
+            resources: ResourceOptions {
+                memory_limit: Some(ResourceOptions::MIN_STREAM_BUFFER_BYTES),
+                ..ResourceOptions::default()
+            },
+            ..SfxBuildOptions::default()
+        };
+
+        let error = engine
+            .create_sfx(
+                &template_path,
+                &archive_path,
+                &output_path,
+                &options,
+                &progress,
+                &ControlToken::default(),
+            )
+            .unwrap_err();
+
+        assert!(progress.mutated.load(Ordering::SeqCst));
+        assert!(error.is_input_changed(), "unexpected error: {error}");
+        assert!(!output_path.exists());
+
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

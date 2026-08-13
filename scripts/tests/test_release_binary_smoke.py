@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import subprocess
@@ -20,6 +21,25 @@ def make_executable(path: Path, contents: bytes = b"fixture") -> Path:
     path.write_bytes(contents)
     path.chmod(0o755)
     return path
+
+
+def make_data_file(path: Path, contents: bytes = b"fixture") -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(contents)
+    path.chmod(0o644)
+    return path
+
+
+def make_linux_template(path: Path, runtime: bytes = b"fixture") -> Path:
+    contents = b"".join(
+        (
+            smoke.LINUX_SFX_DATA_MAGIC,
+            len(runtime).to_bytes(8, "little"),
+            hashlib.sha256(runtime).digest(),
+            runtime,
+        )
+    )
+    return make_data_file(path, contents)
 
 
 def make_macos_template(path: Path) -> Path:
@@ -51,26 +71,37 @@ def make_signed_pe_template(path: Path) -> Path:
 def make_bundle_config(root: Path, platform: str, target: str) -> Path:
     path = root / f"crates/squallz-gui/tauri.{platform}.conf.json"
     path.parent.mkdir(parents=True, exist_ok=True)
+    bundle: dict[str, object] = {
+        "targets": [target],
+        "resources": {
+            smoke.SFX_RESOURCE_SOURCE: smoke.SFX_RESOURCE_TARGET,
+        },
+    }
+    if platform == "linux":
+        bundle["fileAssociations"] = [
+            {"ext": ["zip"], "mimeType": "application/zip"},
+            {"ext": ["7z"], "mimeType": "application/x-7z-compressed"},
+        ]
     path.write_text(
-        json.dumps(
-            {
-                "bundle": {
-                    "targets": [target],
-                    "resources": {
-                        smoke.SFX_RESOURCE_SOURCE: smoke.SFX_RESOURCE_TARGET,
-                    },
-                }
-            }
-        ),
+        json.dumps({"bundle": bundle}),
         encoding="utf-8",
     )
     return path
 
 
 class FakeDesktopBundle:
-    def __init__(self, platform: str, template: Path) -> None:
+    def __init__(
+        self,
+        platform: str,
+        template: Path,
+        desktop_mime_types: tuple[str, ...] = (
+            "application/zip",
+            "application/x-7z-compressed",
+        ),
+    ) -> None:
         self.platform = platform
         self.template = template
+        self.desktop_mime_types = desktop_mime_types
         self.commands: list[list[str]] = []
 
     def __call__(
@@ -87,7 +118,17 @@ class FakeDesktopBundle:
                 / "squashfs-root/usr/lib/Squallz"
                 / smoke.SFX_RESOURCE_TARGET
             )
-            make_executable(packaged, self.template.read_bytes())
+            make_data_file(packaged, self.template.read_bytes())
+            desktop = (
+                Path(cwd)
+                / "squashfs-root/usr/share/applications/Squallz.desktop"
+            )
+            desktop.parent.mkdir(parents=True, exist_ok=True)
+            desktop.write_text(
+                "[Desktop Entry]\n"
+                f"MimeType={';'.join(self.desktop_mime_types)};\n",
+                encoding="utf-8",
+            )
         elif any(argument.startswith("/D=") for argument in command):
             destination = Path(
                 next(argument[3:] for argument in command if argument.startswith("/D="))
@@ -332,8 +373,12 @@ class ReleaseBinarySmokeTests(unittest.TestCase):
         for platform, target, binary_name, output_name in cases:
             with self.subTest(platform=platform), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
-                binary = make_executable(root / binary_name, b"full CLI fixture")
-                template = make_executable(root / "bin/sqz-sfx.stub", b"stub")
+                binary = make_executable(root / binary_name, b"full CLI fixture" * 8)
+                template = (
+                    make_linux_template(root / "bin/sqz-sfx.stub", b"stub")
+                    if target == "linux"
+                    else make_executable(root / "bin/sqz-sfx.stub", b"stub")
+                )
                 runner = FakeSqz("1.2.3")
 
                 count = smoke.run_smoke(
@@ -347,10 +392,15 @@ class ReleaseBinarySmokeTests(unittest.TestCase):
 
                 self.assertEqual(count, 3)
                 self.assertEqual(len(runner.commands), 15)
-                self.assertEqual(
-                    runner.commands[0],
-                    [str(template.resolve()), "--version"],
+                runtime_probe = (
+                    root / "work/sqz-sfx-runtime-probe"
+                    if target == "linux"
+                    else template.resolve()
                 )
+                self.assertEqual(runner.commands[0], [str(runtime_probe), "--version"])
+                if target == "linux":
+                    self.assertEqual(runtime_probe.read_bytes(), b"stub")
+                    self.assertEqual(runtime_probe.stat().st_mode & 0o777, 0o700)
                 sfx_create = runner.commands[7]
                 self.assertEqual(
                     sfx_create[sfx_create.index("--target") + 1],
@@ -480,8 +530,8 @@ class ReleaseBinarySmokeTests(unittest.TestCase):
     def test_linux_sfx_output_must_keep_an_executable_mode(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            binary = make_executable(root / "sqz", b"full CLI fixture")
-            template = make_executable(root / "sqz-sfx.stub", b"stub")
+            binary = make_executable(root / "sqz", b"full CLI fixture" * 8)
+            template = make_linux_template(root / "sqz-sfx.stub", b"stub")
             runner = FakeSqz("1.2.3", non_executable_sfx=True)
 
             with self.assertRaisesRegex(
@@ -612,6 +662,30 @@ class ReleaseBinarySmokeTests(unittest.TestCase):
             ):
                 smoke.require_sfx_template(template, "linux")
 
+    def test_linux_build_template_must_use_data_mode(self) -> None:
+        if sys.platform == "win32":
+            self.skipTest("POSIX mode bits are not available on Windows")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            binary = make_executable(root / "sqz", b"full CLI fixture" * 8)
+            template = make_linux_template(root / "sqz-sfx-template.stub", b"stub")
+            template.chmod(0o755)
+
+            with self.assertRaisesRegex(
+                smoke.SmokeError,
+                "build SFX template must use data mode 0644",
+            ):
+                smoke.run_smoke(
+                    binary,
+                    "1.2.3",
+                    root / "work",
+                    "linux-x64",
+                    template,
+                    FakeSqz("1.2.3"),
+                )
+
+            self.assertFalse((root / "work/release smoke").exists())
+
     def test_dedicated_sfx_runtime_must_be_smaller_than_the_full_cli(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -632,9 +706,11 @@ class ReleaseBinarySmokeTests(unittest.TestCase):
         for platform, config_name, target, artifact_name in cases:
             with self.subTest(platform=platform), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
-                template = make_executable(
-                    root / "target/release/sqz-sfx-template.stub",
-                    b"dedicated runtime",
+                template_path = root / "target/release/sqz-sfx-template.stub"
+                template = (
+                    make_linux_template(template_path, b"dedicated runtime")
+                    if platform == "linux-x64"
+                    else make_executable(template_path, b"dedicated runtime")
                 )
                 make_bundle_config(root, config_name, target)
                 bundle_dir = root / "target/debug/bundle" / target
@@ -671,6 +747,39 @@ class ReleaseBinarySmokeTests(unittest.TestCase):
                     template,
                 )
 
+    def test_packaged_linux_mime_types_must_match_the_bundle_config(self) -> None:
+        cases = (
+            ((), "has no packaged MIME associations"),
+            (("application/zip",), "MIME associations differ from the bundle config"),
+        )
+        for packaged_mime_types, message in cases:
+            with self.subTest(packaged_mime_types=packaged_mime_types):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    template = make_linux_template(
+                        root / "target/release/sqz-sfx-template.stub",
+                        b"dedicated runtime",
+                    )
+                    make_bundle_config(root, "linux", "appimage")
+                    make_executable(
+                        root / "target/debug/bundle/appimage/Squallz.AppImage"
+                    )
+                    runner = FakeDesktopBundle(
+                        "linux",
+                        template,
+                        desktop_mime_types=packaged_mime_types,
+                    )
+
+                    with self.assertRaisesRegex(smoke.SmokeError, message):
+                        smoke.require_packaged_desktop_runtime(
+                            root,
+                            "linux-x64",
+                            "debug",
+                            template,
+                            root / "smoke",
+                            runner,
+                        )
+
     def test_platform_bundle_requires_exactly_one_artifact(self) -> None:
         for count in (0, 2):
             with self.subTest(count=count), tempfile.TemporaryDirectory() as tmp:
@@ -689,11 +798,11 @@ class ReleaseBinarySmokeTests(unittest.TestCase):
                         "release",
                     )
 
-    def test_packaged_linux_runtime_must_match_and_remain_executable(self) -> None:
+    def test_packaged_linux_runtime_must_match_and_remain_data(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            template = make_executable(root / "sqz-sfx-template.stub", b"source")
-            packaged = make_executable(root / "sqz-sfx.stub", b"changed")
+            template = make_linux_template(root / "sqz-sfx-template.stub", b"source")
+            packaged = make_linux_template(root / "sqz-sfx.stub", b"changed")
 
             with self.assertRaisesRegex(
                 smoke.SmokeError,
@@ -702,12 +811,31 @@ class ReleaseBinarySmokeTests(unittest.TestCase):
                 smoke.require_packaged_runtime_file(packaged, template, "linux")
 
             packaged.write_bytes(template.read_bytes())
-            packaged.chmod(0o644)
+            packaged.chmod(0o755)
             with self.assertRaisesRegex(
                 smoke.SmokeError,
-                "is not executable",
+                "must use data mode 0644",
             ):
                 smoke.require_packaged_runtime_file(packaged, template, "linux")
+
+            packaged.chmod(0o644)
+            smoke.require_packaged_runtime_file(packaged, template, "linux")
+
+    def test_linux_template_data_rejects_length_and_digest_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = make_linux_template(Path(tmp) / "sqz-sfx.stub", b"runtime")
+
+            with path.open("ab") as handle:
+                handle.write(b"late")
+            with self.assertRaisesRegex(smoke.SmokeError, "invalid length"):
+                smoke.linux_sfx_data_info(path)
+
+            make_linux_template(path, b"runtime")
+            with path.open("r+b") as handle:
+                handle.seek(smoke.LINUX_SFX_DATA_HEADER_BYTES)
+                handle.write(b"X")
+            with self.assertRaisesRegex(smoke.SmokeError, "SHA-256"):
+                smoke.linux_sfx_data_info(path)
 
 
 if __name__ == "__main__":

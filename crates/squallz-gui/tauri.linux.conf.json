@@ -4,6 +4,80 @@
     "targets": ["appimage"],
     "resources": {
       "../../target/release/sqz-sfx-template.stub": "bin/sqz-sfx.stub"
-    }
+    },
+    "fileAssociations": [
+      {
+        "ext": ["zip"],
+        "mimeType": "application/zip"
+      },
+      {
+        "ext": ["jar"],
+        "mimeType": "application/x-java-archive"
+      },
+      {
+        "ext": ["apk"],
+        "mimeType": "application/vnd.android.package-archive"
+      },
+      {
+        "ext": ["cbz"],
+        "mimeType": "application/vnd.comicbook+zip"
+      },
+      {
+        "ext": ["7z"],
+        "mimeType": "application/x-7z-compressed"
+      },
+      {
+        "ext": ["rar"],
+        "mimeType": "application/vnd.rar"
+      },
+      {
+        "ext": ["cbr"],
+        "mimeType": "application/vnd.comicbook-rar"
+      },
+      {
+        "ext": ["tar"],
+        "mimeType": "application/x-tar"
+      },
+      {
+        "ext": ["tgz"],
+        "mimeType": "application/x-compressed-tar"
+      },
+      {
+        "ext": ["tbz2"],
+        "mimeType": "application/x-bzip-compressed-tar"
+      },
+      {
+        "ext": ["txz"],
+        "mimeType": "application/x-xz-compressed-tar"
+      },
+      {
+        "ext": ["tzst"],
+        "mimeType": "application/x-zstd-compressed-tar"
+      },
+      {
+        "ext": ["wim", "swm"],
+        "mimeType": "application/x-ms-wim"
+      },
+      {
+        "ext": ["gz"],
+        "mimeType": "application/gzip"
+      },
+      {
+        "ext": ["bz2"],
+        "mimeType": "application/x-bzip"
+      },
+      {
+        "ext": ["xz"],
+        "mimeType": "application/x-xz"
+      },
+      {
+        "ext": ["zst"],
+        "mimeType": "application/zstd"
+      },
+      {
+        "ext": ["lz4"],
+        "mimeType": "application/x-lz4"
+      }
+    ]
   }
 }

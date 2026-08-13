@@ -43,7 +43,7 @@ pub use progress::{ControlToken, NoProgress, ProgressPhase, ProgressSink};
 pub use registry::{split_volume_name, Detected, FormatInfo, FormatKind, FormatRegistry};
 pub use safety::{check_windows_portability, sanitize_entry_path, LimitsAccountant};
 pub use traits::{
-    ArchiveFormat, ArchiveReader, ArchiveSourceSet, ArchiveWriter, CompressSink, Compressor,
-    NativeVolumeBudget, NativeVolumeLimits, NativeVolumeWriter, PhysicalFileIdentity,
-    PreparedUpdateAdditions, ReadSeek, StreamFactory, WriteSeek,
+    ArchiveFormat, ArchiveReader, ArchiveSourceSet, ArchiveStructureStatus, ArchiveWriter,
+    CompressSink, Compressor, NativeVolumeBudget, NativeVolumeLimits, NativeVolumeWriter,
+    PhysicalFileIdentity, PreparedUpdateAdditions, ReadSeek, StreamFactory, WriteSeek,
 };

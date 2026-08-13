@@ -18,8 +18,9 @@
 - GUI 只允许把这些能力显示为 external dependency，不允许在工具缺失时假装内置可用。
 - RAR 与原生 ZIP `.z01/.zip` 分卷读取仍可通过 7zz/7z bridge；Squallz 不创建 RAR，也不实现 RAR recovery record。ZIP 原生分卷创建已内置，不依赖外部编码器。
 - `sqz info --json` 的 RAR `implementation.policy` 必须继续声明 `read_only=true`、
-  `bundled=false`、主路径为 `SQUALLZ_7Z` / 7zz/7z/7za，`bsdtar` 只是诊断或单文件 v6 fallback，
+  `bundled=false`、主路径为 `SQUALLZ_7Z` / 7zz/7z/7za，`bsdtar` 只是显式或经严格验证的单文件兼容 fallback，
   `SQUALLZ_UNRAR` / `unrar` 只用于明确未加密的 RAR7 v6 条目流；
+  旧 `fallback_scope` 字符串为兼容字段，完整机器可读范围以 `fallback_scopes` 数组为准；
   GUI 和发布说明不得把 RAR 描述成 fully bundled 或 WinRAR-level compatibility。
 - 发布检查必须确认包内没有静默捆绑 7zz/7z、unrar、wimlib-imagex、PAR2 或 bsdtar，`sqz info --json`
   的 external dependency / override path 仍可见，且用户文档没有把当前包描述成 fully bundled。
@@ -32,7 +33,7 @@
 | unrar | 仅解码由 7zz/7z 明确确认未加密的 RAR7 v6 条目流 | 默认不打包，只调用用户安装或测试环境提供的可执行文件 | 单独复核 RARLAB 许可与版本；记录平台文件归属；保留 `SQUALLZ_UNRAR` override；不得把读取能力扩展成 RAR 创建、编码器复刻或加密密码通道 |
 | wimlib-imagex | WIM 创建与原生 Split WIM `.swm` 分卷 writer | 默认不打包，只调用用户安装或测试环境提供的可执行文件 | WIM capture/split real matrix 通过；记录 wimlib 版本、构建配置和平台；提供 GPL/LGPL 许可证、对应源码、组件归属和 `SQUALLZ_WIMLIB` override；说明 NTFS/Windows metadata 平台差异，以及单个资源可能超过目标卷大小 |
 | par2cmdline / par2cmdline-turbo | PAR2 create/verify/repair 外部工具；Rust fallback 只覆盖 verify/repair | 默认不打包；PAR2 create 仍依赖外部标准工具 | GPL 许可证、源码提供或书面 offer、二进制名称/版本、`SQUALLZ_PAR2` override、用户替换路径和 create/verify/repair smoke |
-| bsdtar / libarchive | RAR 诊断 fallback 或本机调试 | 不作为首发跨平台产品承诺 | 不随包进入默认产品路径；如保留，只能作为用户显式配置或诊断 fallback |
+| bsdtar / libarchive | RAR 显式 fallback、本机诊断，或经严格验证的单文件兼容 fallback | 不作为首发跨平台产品承诺 | 不随包进入默认产品路径；自动选择必须限于已知后端缺口，旧 p7zip RAR5 路径还须先核对两个后端的普通文件路径与大小 |
 
 ## RAR 只读边界
 
@@ -43,9 +44,11 @@ RAR recovery record，也不处理 RAR `.rev`。官方 7-Zip `license.txt` 对 R
 格式层才会从 `SQUALLZ_UNRAR` 或 PATH 选择它。该子进程关闭配置文件和 list-file 解析、禁止密码提示、
 使用空标准输入，并只向共享安全解压引擎提供条目字节流。
 
-`bsdtar` / libarchive 只能作为显式配置、诊断 fallback，或单文件 RAR7 v6 方法检测后的 fallback。由于系统
-libarchive 构建是否包含 RAR 支持随平台而变，它不能作为首发跨平台产品承诺，也不能让 GUI 显示为
-fully bundled capability。
+`bsdtar` / libarchive 只能作为显式配置、诊断 fallback，或经严格验证的单文件兼容 fallback。自动选择
+只覆盖明确的 RAR7 v6 方法或旧 p7zip 16.02 的 RAR5 压缩方法缺口；后者还要求两个后端报告完全一致、
+可无损表达且不含通配符的普通文件路径与大小。目录、链接、加密、密码输入、清单分歧和未知后端版本
+都继续使用 7zz/7z 或如实失败。由于系统 libarchive 构建是否包含 RAR 支持随平台而变，它不能作为
+首发跨平台产品承诺，也不能让 GUI 显示为 fully bundled capability。
 
 RAR 格式多卷只读固定使用外部 7zz/7z 做列表、加密状态和卷数验证：`partN.rar` 和旧式 `.rar/.r00`–`.r99` 卷组先复制到
 Squallz 独占创建的暂存目录，再以规范首卷名调用外部工具；用户原目录不会直接传给后端。

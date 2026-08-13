@@ -9,7 +9,14 @@ use std::path::Path;
 use std::process::{Command, Output};
 use std::sync::Arc;
 #[cfg(target_os = "linux")]
-use std::{env, io::Write, path::PathBuf, process::Stdio};
+use std::{
+    env,
+    io::{Read, Write},
+    os::unix::{fs::PermissionsExt, process::CommandExt},
+    path::PathBuf,
+    process::Stdio,
+    time::{Duration, Instant},
+};
 #[cfg(target_os = "windows")]
 use std::{ptr, slice};
 
@@ -189,67 +196,386 @@ struct LinuxSecretServiceStore;
 
 #[cfg(target_os = "linux")]
 impl LinuxSecretServiceStore {
+    const COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
+    const COMMAND_OUTPUT_LIMIT: usize = 1024 * 1024;
+
+    fn is_executable(path: &Path) -> bool {
+        path.metadata()
+            .map(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+    }
+
+    fn find_on_path(name: &str) -> Option<PathBuf> {
+        let path = env::var_os("PATH")?;
+        env::split_paths(&path)
+            .map(|dir| dir.join(name))
+            .find(|candidate| Self::is_executable(candidate))
+    }
+
     fn secret_tool() -> Option<PathBuf> {
         if let Some(path) = env::var_os("SQUALLZ_SECRET_TOOL") {
             let path = PathBuf::from(path);
-            return path.is_file().then_some(path);
+            return Self::is_executable(&path).then_some(path);
         }
-        let path = env::var_os("PATH")?;
-        env::split_paths(&path)
-            .map(|dir| dir.join("secret-tool"))
-            .find(|candidate| candidate.is_file())
+        Self::find_on_path("secret-tool")
+    }
+
+    fn gdbus() -> Option<PathBuf> {
+        Self::find_on_path("gdbus")
+    }
+
+    fn drain_nonblocking_output(
+        reader: &mut impl Read,
+        retained: &mut Vec<u8>,
+        overflow: &mut bool,
+    ) -> std::io::Result<(bool, bool)> {
+        let mut buffer = [0_u8; 16 * 1024];
+        match reader.read(&mut buffer) {
+            Ok(0) => Ok((false, true)),
+            Ok(read) => {
+                let retain = read.min(Self::COMMAND_OUTPUT_LIMIT.saturating_sub(retained.len()));
+                retained.extend_from_slice(&buffer[..retain]);
+                *overflow |= retain != read;
+                Ok((true, false))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok((false, false)),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn set_nonblocking(
+        descriptor: &impl std::os::fd::AsFd,
+        stream: &str,
+    ) -> Result<(), SecretStoreError> {
+        let flags = rustix::fs::fcntl_getfl(descriptor).map_err(|error| {
+            SecretStoreError::new(format!(
+                "Linux Secret Service {stream} flags could not be read: {error}"
+            ))
+        })?;
+        rustix::fs::fcntl_setfl(descriptor, flags | rustix::fs::OFlags::NONBLOCK).map_err(|error| {
+            SecretStoreError::new(format!(
+                "Linux Secret Service {stream} could not be made non-blocking: {error}"
+            ))
+        })
+    }
+
+    fn terminate_command_group(
+        child: &mut std::process::Child,
+        process_group: rustix::process::Pid,
+    ) {
+        let _ = rustix::process::kill_process_group(process_group, rustix::process::Signal::KILL);
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    fn run_command(
+        tool: &Path,
+        args: &[&str],
+        stdin: Option<&str>,
+        name: &str,
+        timeout: Duration,
+    ) -> Result<Output, SecretStoreError> {
+        let started = Instant::now();
+        let mut command = Command::new(tool);
+        command
+            .args(args)
+            .stdin(if stdin.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        command.process_group(0);
+        let mut child = command.spawn().map_err(|error| {
+            SecretStoreError::new(format!(
+                "Linux Secret Service {name} command could not start: {error}"
+            ))
+        })?;
+        let process_group = rustix::process::Pid::from_child(&child);
+        let mut input = if stdin.is_some() {
+            match child.stdin.take() {
+                Some(input) => Some(input),
+                None => {
+                    Self::terminate_command_group(&mut child, process_group);
+                    return Err(SecretStoreError::new(
+                        "Linux Secret Service input is unavailable",
+                    ));
+                }
+            }
+        } else {
+            None
+        };
+        let mut stdout = match child.stdout.take() {
+            Some(stdout) => stdout,
+            None => {
+                Self::terminate_command_group(&mut child, process_group);
+                return Err(SecretStoreError::new(
+                    "Linux Secret Service output is unavailable",
+                ));
+            }
+        };
+        let mut stderr = match child.stderr.take() {
+            Some(stderr) => stderr,
+            None => {
+                Self::terminate_command_group(&mut child, process_group);
+                return Err(SecretStoreError::new(
+                    "Linux Secret Service diagnostics are unavailable",
+                ));
+            }
+        };
+
+        if let Some(input) = &input {
+            if let Err(error) = Self::set_nonblocking(input, "input") {
+                Self::terminate_command_group(&mut child, process_group);
+                return Err(error);
+            }
+        }
+        if let Err(error) = Self::set_nonblocking(&stdout, "output") {
+            Self::terminate_command_group(&mut child, process_group);
+            return Err(error);
+        }
+        if let Err(error) = Self::set_nonblocking(&stderr, "diagnostics") {
+            Self::terminate_command_group(&mut child, process_group);
+            return Err(error);
+        }
+
+        let secret = stdin.map(str::as_bytes).unwrap_or_default();
+        let mut secret_offset = 0usize;
+        let mut stdout_bytes = Vec::new();
+        let mut stderr_bytes = Vec::new();
+        let mut stdout_overflow = false;
+        let mut stderr_overflow = false;
+        let mut stdout_open = true;
+        let mut stderr_open = true;
+        let mut status = None;
+
+        loop {
+            let mut progressed = false;
+            if status.is_none() {
+                match child.try_wait() {
+                    Ok(Some(exit_status)) => {
+                        status = Some(exit_status);
+                        progressed = true;
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        Self::terminate_command_group(&mut child, process_group);
+                        return Err(SecretStoreError::new(format!(
+                            "Linux Secret Service {name} command failed: {error}"
+                        )));
+                    }
+                }
+            }
+
+            if let Some(writer) = input.as_mut() {
+                if secret_offset == secret.len() {
+                    input = None;
+                    progressed = true;
+                } else {
+                    match writer.write(&secret[secret_offset..]) {
+                        Ok(0) => {
+                            Self::terminate_command_group(&mut child, process_group);
+                            return Err(SecretStoreError::new(
+                                "Linux Secret Service input closed before the password was written",
+                            ));
+                        }
+                        Ok(written) => {
+                            secret_offset += written;
+                            progressed = true;
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                        Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => {
+                            Self::terminate_command_group(&mut child, process_group);
+                            return Err(SecretStoreError::new(
+                                "Linux Secret Service input closed before the password was written",
+                            ));
+                        }
+                        Err(error) => {
+                            Self::terminate_command_group(&mut child, process_group);
+                            return Err(SecretStoreError::new(format!(
+                                "Linux Secret Service input failed: {error}"
+                            )));
+                        }
+                    }
+                }
+            }
+
+            if stdout_open {
+                match Self::drain_nonblocking_output(
+                    &mut stdout,
+                    &mut stdout_bytes,
+                    &mut stdout_overflow,
+                ) {
+                    Ok((read_progress, closed)) => {
+                        progressed |= read_progress;
+                        stdout_open = !closed;
+                    }
+                    Err(error) => {
+                        Self::terminate_command_group(&mut child, process_group);
+                        return Err(SecretStoreError::new(format!(
+                            "Linux Secret Service output stream failed: {error}"
+                        )));
+                    }
+                }
+            }
+            if stderr_open {
+                match Self::drain_nonblocking_output(
+                    &mut stderr,
+                    &mut stderr_bytes,
+                    &mut stderr_overflow,
+                ) {
+                    Ok((read_progress, closed)) => {
+                        progressed |= read_progress;
+                        stderr_open = !closed;
+                    }
+                    Err(error) => {
+                        Self::terminate_command_group(&mut child, process_group);
+                        return Err(SecretStoreError::new(format!(
+                            "Linux Secret Service diagnostic stream failed: {error}"
+                        )));
+                    }
+                }
+            }
+
+            if let Some(exit_status) = status {
+                if input.is_none() && !stdout_open && !stderr_open {
+                    if stdout_overflow || stderr_overflow {
+                        return Err(SecretStoreError::new(format!(
+                            "Linux Secret Service {name} command returned too much output"
+                        )));
+                    }
+                    return Ok(Output {
+                        status: exit_status,
+                        stdout: stdout_bytes,
+                        stderr: stderr_bytes,
+                    });
+                }
+            }
+
+            if started.elapsed() >= timeout {
+                Self::terminate_command_group(&mut child, process_group);
+                return Err(SecretStoreError::new(format!(
+                    "Linux Secret Service did not respond within {} seconds. Start or unlock the desktop password store, then try again.",
+                    timeout.as_secs()
+                )));
+            }
+            if !progressed {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
     }
 
     fn run_secret_tool(args: &[&str], stdin: Option<&str>) -> Result<Output, SecretStoreError> {
         let tool = Self::secret_tool()
-            .ok_or_else(|| SecretStoreError::new("Linux secret-tool is not available"))?;
-        let mut command = Command::new(tool);
-        command
-            .args(args)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        if let Some(secret) = stdin {
-            let mut child = command
-                .stdin(Stdio::piped())
-                .spawn()
-                .map_err(|e| SecretStoreError::new(format!("secret-tool failed: {e}")))?;
-            let mut input = child
-                .stdin
-                .take()
-                .ok_or_else(|| SecretStoreError::new("secret-tool stdin is unavailable"))?;
-            input
-                .write_all(secret.as_bytes())
-                .map_err(|e| SecretStoreError::new(format!("secret-tool stdin failed: {e}")))?;
-            drop(input);
-            child
-                .wait_with_output()
-                .map_err(|e| SecretStoreError::new(format!("secret-tool failed: {e}")))
-        } else {
-            command
-                .output()
-                .map_err(|e| SecretStoreError::new(format!("secret-tool failed: {e}")))
+            .ok_or_else(|| {
+                SecretStoreError::new(
+                    "Linux secret-tool is not installed or is not executable. Install the desktop Secret Service tools, then try again.",
+                )
+            })?;
+        Self::run_command(&tool, args, stdin, "secret-tool", Self::COMMAND_TIMEOUT)
+    }
+
+    fn default_collection_path(stdout: &[u8]) -> Option<&str> {
+        let stdout = std::str::from_utf8(stdout).ok()?;
+        let marker = "objectpath '";
+        let start = stdout.find(marker)? + marker.len();
+        let remainder = &stdout[start..];
+        let end = remainder.find('\'')?;
+        Some(&remainder[..end])
+    }
+
+    fn no_default_collection_error() -> SecretStoreError {
+        SecretStoreError::new(
+            "Linux Secret Service has no usable default password collection. Create or unlock a default keyring in the desktop password manager, then try again.",
+        )
+    }
+
+    fn service_unavailable_error() -> SecretStoreError {
+        SecretStoreError::new(
+            "Linux Secret Service is not available in this desktop session. Start the desktop password-store service, then try again.",
+        )
+    }
+
+    fn check_default_collection_with(
+        gdbus: &Path,
+        timeout: Duration,
+    ) -> Result<(), SecretStoreError> {
+        let output = Self::run_command(
+            gdbus,
+            &[
+                "call",
+                "--session",
+                "--dest",
+                "org.freedesktop.secrets",
+                "--object-path",
+                "/org/freedesktop/secrets",
+                "--method",
+                "org.freedesktop.Secret.Service.ReadAlias",
+                "default",
+            ],
+            None,
+            "status-check",
+            timeout,
+        )?;
+        if !output.status.success() {
+            return Err(Self::service_unavailable_error());
         }
+        match Self::default_collection_path(&output.stdout) {
+            Some(path) if path != "/" => Ok(()),
+            Some(_) => Err(Self::no_default_collection_error()),
+            None => Err(SecretStoreError::new(
+                "Linux Secret Service returned an invalid default password collection. Restart the desktop password-store service, then try again.",
+            )),
+        }
+    }
+
+    fn ensure_available() -> Result<(), SecretStoreError> {
+        if Self::secret_tool().is_none() {
+            return Err(SecretStoreError::new(
+                "Linux secret-tool is not installed or is not executable. Install the desktop Secret Service tools, then try again.",
+            ));
+        }
+        let gdbus = Self::gdbus().ok_or_else(|| {
+            SecretStoreError::new(
+                "Linux Secret Service status checking requires the gdbus utility. Install the desktop GLib tools, then try again.",
+            )
+        })?;
+        Self::check_default_collection_with(&gdbus, Self::COMMAND_TIMEOUT)
     }
 
     fn output_error(action: &str, output: &Output) -> SecretStoreError {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-        let detail = if stderr.is_empty() {
+        let normalized = stderr.to_lowercase();
+        let detail = if normalized.contains("object does not exist at path")
+            || normalized.contains("no such object")
+        {
+            return Self::no_default_collection_error();
+        } else if normalized.contains("serviceunknown")
+            || normalized.contains("namehasnoowner")
+            || normalized.contains("cannot autolaunch")
+            || normalized.contains("cannot connect")
+            || normalized.contains("was not provided by any .service")
+        {
+            return Self::service_unavailable_error();
+        } else if normalized.contains("locked") || normalized.contains("prompt dismissed") {
+            format!(
+                "Linux Secret Service {action} failed because the desktop password store is locked. Unlock it, then try again."
+            )
+        } else {
             format!(
                 "Linux Secret Service {action} failed with status {}",
                 output.status
             )
-        } else {
-            format!("Linux Secret Service {action} failed: {stderr}")
         };
         SecretStoreError::new(detail)
     }
 
     fn missing(output: &Output) -> bool {
-        let stderr = String::from_utf8_lossy(&output.stderr).to_lowercase();
-        stderr.is_empty()
-            || stderr.contains("not found")
-            || stderr.contains("no such")
-            || stderr.contains("couldn't find")
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr = stderr.trim().to_lowercase();
+        output.status.code() == Some(1)
+            && (stderr.is_empty() || stderr.contains("couldn't find matching"))
     }
 }
 
@@ -266,11 +592,11 @@ fn linux_secret_tool_attributes(path: &Path) -> [String; 4] {
 #[cfg(target_os = "linux")]
 impl SecretStore for LinuxSecretServiceStore {
     fn is_available(&self) -> bool {
-        Self::secret_tool().is_some()
+        Self::ensure_available().is_ok()
     }
 
     fn get_archive_password(&self, path: &Path) -> Result<Option<Password>, SecretStoreError> {
-        if !self.is_available() {
+        if Self::ensure_available().is_err() {
             return Ok(None);
         }
         let attrs = linux_secret_tool_attributes(path);
@@ -292,11 +618,7 @@ impl SecretStore for LinuxSecretServiceStore {
     }
 
     fn set_archive_password(&self, path: &Path, password: &str) -> Result<(), SecretStoreError> {
-        if !self.is_available() {
-            return Err(SecretStoreError::new(
-                "Linux Secret Service is not available",
-            ));
-        }
+        Self::ensure_available()?;
         let label = archive_label(path);
         let attrs = linux_secret_tool_attributes(path);
         let args: Vec<&str> = ["store", "--label", label.as_str()]
@@ -312,9 +634,7 @@ impl SecretStore for LinuxSecretServiceStore {
     }
 
     fn delete_archive_password(&self, path: &Path) -> Result<(), SecretStoreError> {
-        if !self.is_available() {
-            return Ok(());
-        }
+        Self::ensure_available()?;
         let attrs = linux_secret_tool_attributes(path);
         let args: Vec<&str> = std::iter::once("clear")
             .chain(attrs.iter().map(String::as_str))
@@ -523,8 +843,14 @@ pub(crate) mod tests {
     use std::collections::HashMap;
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     use std::env;
+    #[cfg(target_os = "linux")]
+    use std::fs;
+    #[cfg(target_os = "linux")]
+    use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
     use std::sync::{Mutex, MutexGuard};
+    #[cfg(target_os = "linux")]
+    use std::time::{Duration, Instant};
 
     #[cfg(target_os = "linux")]
     use super::LinuxSecretServiceStore;
@@ -643,6 +969,186 @@ pub(crate) mod tests {
                 "archive:/tmp/demo.7z".to_owned(),
             ],
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    fn linux_test_script(body: &str) -> (tempfile::TempDir, PathBuf) {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("command");
+        fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        let mut permissions = fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(&path, permissions).unwrap();
+        (directory, path)
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_secret_service_requires_a_default_collection() {
+        let (_directory, missing) = linux_test_script("printf \"(objectpath '/',)\\n\"");
+        let error = LinuxSecretServiceStore::check_default_collection_with(
+            &missing,
+            Duration::from_secs(1),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("default password collection"));
+
+        let (_directory, available) = linux_test_script(
+            "printf \"(objectpath '/org/freedesktop/secrets/collection/login',)\\n\"",
+        );
+        LinuxSecretServiceStore::check_default_collection_with(&available, Duration::from_secs(1))
+            .unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_secret_service_command_has_a_hard_timeout() {
+        let (_directory, command) = linux_test_script("exec sleep 30");
+        let started = Instant::now();
+        let error = LinuxSecretServiceStore::run_command(
+            &command,
+            &[],
+            None,
+            "test",
+            Duration::from_millis(50),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("did not respond"));
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_secret_service_timeout_covers_blocked_secret_input() {
+        let (_directory, command) = linux_test_script("exec sleep 1");
+        let secret = format!("sensitive-marker{}", "x".repeat(4 * 1024 * 1024));
+        let started = Instant::now();
+        let error = LinuxSecretServiceStore::run_command(
+            &command,
+            &[],
+            Some(&secret),
+            "test",
+            Duration::from_millis(50),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("did not respond"));
+        assert!(!error.to_string().contains("sensitive-marker"));
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_secret_service_timeout_covers_descendants_holding_pipes() {
+        let (_directory, command) = linux_test_script("sleep 30 & exit 0");
+        let started = Instant::now();
+        let error = LinuxSecretServiceStore::run_command(
+            &command,
+            &[],
+            None,
+            "test",
+            Duration::from_millis(50),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("did not respond"));
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_secret_service_rejects_success_without_consuming_secret_input() {
+        let (_directory, command) = linux_test_script("exit 0");
+        let secret = format!("sensitive-marker{}", "x".repeat(4 * 1024 * 1024));
+        let started = Instant::now();
+        let error = LinuxSecretServiceStore::run_command(
+            &command,
+            &[],
+            Some(&secret),
+            "test",
+            Duration::from_secs(1),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("input closed"));
+        assert!(!error.to_string().contains("sensitive-marker"));
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_secret_service_drains_large_command_output() {
+        let (_directory, command) =
+            linux_test_script("head -c 262144 /dev/zero; printf diagnostics >&2");
+        let started = Instant::now();
+        let output = LinuxSecretServiceStore::run_command(
+            &command,
+            &[],
+            None,
+            "test",
+            Duration::from_secs(1),
+        )
+        .unwrap();
+
+        assert!(output.status.success());
+        assert_eq!(output.stdout.len(), 262_144);
+        assert_eq!(output.stderr, b"diagnostics");
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_secret_service_timeout_is_fair_under_continuous_output() {
+        let (_directory, command) = linux_test_script("while :; do printf 0123456789abcdef; done");
+        let started = Instant::now();
+        let error = LinuxSecretServiceStore::run_command(
+            &command,
+            &[],
+            None,
+            "test",
+            Duration::from_millis(50),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("did not respond"));
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_secret_service_executable_check_rejects_plain_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("secret-tool");
+        fs::write(&path, "not executable").unwrap();
+
+        assert!(!LinuxSecretServiceStore::is_executable(&path));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_secret_service_missing_requires_the_expected_exit_status() {
+        let (_directory, missing) = linux_test_script("exit 1");
+        let output = LinuxSecretServiceStore::run_command(
+            &missing,
+            &[],
+            None,
+            "test",
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        assert!(LinuxSecretServiceStore::missing(&output));
+
+        let (_directory, failed) = linux_test_script("exit 2");
+        let output = LinuxSecretServiceStore::run_command(
+            &failed,
+            &[],
+            None,
+            "test",
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        assert!(!LinuxSecretServiceStore::missing(&output));
     }
 
     #[test]

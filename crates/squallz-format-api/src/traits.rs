@@ -21,6 +21,36 @@ const STREAM_CHUNK: usize = 64 * 1024;
 pub trait ReadSeek: Read + Seek + Send {}
 impl<T: Read + Seek + Send> ReadSeek for T {}
 
+/// Structural state of an opened archive.
+///
+/// A reader can expose recoverable entries while still reporting that the
+/// container itself is incomplete. Product callers must not treat a
+/// recovered view as proof that the archive structure is intact.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ArchiveStructureStatus {
+    /// The format's normal structural index opened successfully.
+    #[default]
+    Complete,
+    /// ZIP entries were recovered from local file headers because the central
+    /// directory could not be opened.
+    ZipLocalHeadersRecovered,
+}
+
+impl ArchiveStructureStatus {
+    /// Whether the archive opened through its complete, normal structure.
+    pub const fn is_complete(self) -> bool {
+        matches!(self, Self::Complete)
+    }
+
+    /// Stable machine-readable identifier for reports and IPC boundaries.
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Complete => "complete",
+            Self::ZipLocalHeadersRecovered => "zip_local_headers_recovered",
+        }
+    }
+}
+
 /// Stable identity of an already-opened physical source file.
 ///
 /// The engine captures this from the open file handle before a format uses
@@ -658,6 +688,12 @@ pub trait ArchiveFormat: Send + Sync {
 
 /// Read handle of an opened archive.
 pub trait ArchiveReader: Send {
+    /// Reports whether this reader opened the archive through its complete
+    /// structure or through a recovery-only path.
+    fn structure_status(&self) -> ArchiveStructureStatus {
+        ArchiveStructureStatus::Complete
+    }
+
     /// Native physical volume set backing this opened reader, when known.
     ///
     /// Generic byte-split streams are tracked by the engine instead. Formats

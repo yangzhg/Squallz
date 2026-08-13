@@ -21,6 +21,8 @@ PLATFORMS = ("macos-arm64", "macos-x64", "windows-x64", "linux-x64")
 PROFILES = ("release", "debug")
 SFX_RESOURCE_SOURCE = "../../target/release/sqz-sfx-template.stub"
 SFX_RESOURCE_TARGET = "bin/sqz-sfx.stub"
+LINUX_SFX_DATA_MAGIC = b"SQZSFXD1"
+LINUX_SFX_DATA_HEADER_BYTES = 48
 TOML_SECTION = re.compile(r"^\s*\[([^\]]+)\]\s*(?:#.*)?$")
 TOML_VERSION = re.compile(
     r"""^\s*version\s*=\s*(?:"([^"]+)"|'([^']+)')\s*(?:#.*)?$"""
@@ -32,6 +34,66 @@ class SmokeError(RuntimeError):
 
 
 Runner = Callable[..., subprocess.CompletedProcess[str]]
+
+
+def linux_sfx_data_info(path: Path) -> tuple[int, int, bytes] | None:
+    try:
+        file_bytes = path.stat().st_size
+        with path.open("rb") as handle:
+            magic = handle.read(len(LINUX_SFX_DATA_MAGIC))
+            if magic != LINUX_SFX_DATA_MAGIC:
+                return None
+            length = handle.read(8)
+            expected_digest = handle.read(32)
+            if len(length) != 8 or len(expected_digest) != 32:
+                raise SmokeError("Linux SFX template data header is truncated")
+            runtime_bytes = int.from_bytes(length, "little")
+            if (
+                runtime_bytes <= 0
+                or LINUX_SFX_DATA_HEADER_BYTES + runtime_bytes != file_bytes
+            ):
+                raise SmokeError("Linux SFX template data has an invalid length")
+            digest = hashlib.sha256()
+            remaining = runtime_bytes
+            while remaining > 0:
+                chunk = handle.read(min(64 * 1024, remaining))
+                if not chunk:
+                    raise SmokeError("Linux SFX template data is truncated")
+                digest.update(chunk)
+                remaining -= len(chunk)
+    except OSError as error:
+        raise SmokeError("Linux SFX template data could not be inspected") from error
+    if digest.digest() != expected_digest:
+        raise SmokeError("Linux SFX template data failed its SHA-256 check")
+    return LINUX_SFX_DATA_HEADER_BYTES, runtime_bytes, expected_digest
+
+
+def extract_linux_sfx_runtime(template: Path, destination: Path) -> None:
+    info = linux_sfx_data_info(template)
+    if info is None:
+        raise SmokeError("packaged Linux SFX template is not a data resource")
+    offset, runtime_bytes, expected_digest = info
+    digest = hashlib.sha256()
+    try:
+        with template.open("rb") as source, destination.open("xb") as output:
+            source.seek(offset)
+            remaining = runtime_bytes
+            while remaining > 0:
+                chunk = source.read(min(64 * 1024, remaining))
+                if not chunk:
+                    raise SmokeError("Linux SFX runtime probe source is truncated")
+                output.write(chunk)
+                digest.update(chunk)
+                remaining -= len(chunk)
+        destination.chmod(0o700)
+    except (OSError, SmokeError) as error:
+        destination.unlink(missing_ok=True)
+        if isinstance(error, SmokeError):
+            raise
+        raise SmokeError("dedicated SFX runtime probe could not be prepared") from error
+    if digest.digest() != expected_digest:
+        destination.unlink(missing_ok=True)
+        raise SmokeError("dedicated SFX runtime probe failed its SHA-256 check")
 
 
 def release_binary_path(project_root: Path, platform: str, profile: str) -> Path:
@@ -71,7 +133,7 @@ def require_desktop_bundle_config(
     project_root: Path,
     platform: str,
     template: Path,
-) -> None:
+) -> set[str] | None:
     if platform == "windows-x64":
         platform_name = "windows"
         bundle_target = "nsis"
@@ -79,7 +141,7 @@ def require_desktop_bundle_config(
         platform_name = "linux"
         bundle_target = "appimage"
     else:
-        return
+        return None
 
     config_path = (
         project_root / f"crates/squallz-gui/tauri.{platform_name}.conf.json"
@@ -108,6 +170,23 @@ def require_desktop_bundle_config(
         raise SmokeError(
             f"{platform_name} desktop bundle uses a different SFX template source"
         )
+    if platform != "linux-x64":
+        return None
+
+    file_associations = bundle.get("fileAssociations")
+    if not isinstance(file_associations, list) or not file_associations:
+        raise SmokeError("Linux desktop bundle config has no MIME associations")
+    mime_types: set[str] = set()
+    for association in file_associations:
+        if not isinstance(association, dict):
+            raise SmokeError("Linux desktop bundle config has an invalid MIME association")
+        mime_type = association.get("mimeType")
+        if not isinstance(mime_type, str) or not mime_type.strip():
+            raise SmokeError("Linux desktop bundle config has an invalid MIME association")
+        mime_types.add(mime_type.strip())
+    if not mime_types:
+        raise SmokeError("Linux desktop bundle config has no MIME associations")
+    return mime_types
 
 
 def require_single_desktop_bundle(
@@ -166,12 +245,46 @@ def require_packaged_runtime_file(
         raise SmokeError(
             f"{target} desktop bundle SFX runtime differs from the build template"
         )
-    if target == "linux" and metadata.st_mode & (
-        stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH
-    ) == 0:
-        raise SmokeError("Linux desktop bundle SFX runtime is not executable")
+    if target == "linux" and os.name != "nt" and stat.S_IMODE(metadata.st_mode) != 0o644:
+        raise SmokeError("Linux desktop bundle SFX runtime must use data mode 0644")
+    if target == "linux" and linux_sfx_data_info(packaged_runtime) is None:
+        raise SmokeError("Linux desktop bundle SFX runtime is not a data resource")
     if target == "windows" and windows_pe_certificate_table(packaged_runtime) is not None:
         raise SmokeError("Windows desktop bundle SFX runtime must remain unsigned")
+
+
+def require_packaged_linux_mime_types(
+    app_dir: Path,
+    configured_mime_types: set[str],
+) -> None:
+    desktop_dir = app_dir / "usr/share/applications"
+    desktop_files = sorted(
+        path
+        for path in desktop_dir.glob("*.desktop")
+        if path.is_file() and not path.is_symlink()
+    )
+    packaged_mime_types: set[str] = set()
+    try:
+        for desktop_file in desktop_files:
+            in_desktop_entry = False
+            for raw_line in desktop_file.read_text(encoding="utf-8").splitlines():
+                line = raw_line.strip()
+                if line.startswith("[") and line.endswith("]"):
+                    in_desktop_entry = line == "[Desktop Entry]"
+                elif in_desktop_entry and line.startswith("MimeType="):
+                    packaged_mime_types.update(
+                        mime_type.strip()
+                        for mime_type in line.removeprefix("MimeType=").split(";")
+                        if mime_type.strip()
+                    )
+    except (OSError, UnicodeError) as error:
+        raise SmokeError("Linux desktop bundle MIME associations could not be read") from error
+    if not packaged_mime_types:
+        raise SmokeError("Linux desktop bundle has no packaged MIME associations")
+    if packaged_mime_types != configured_mime_types:
+        raise SmokeError(
+            "Linux desktop bundle MIME associations differ from the bundle config"
+        )
 
 
 def invoke_bundle_artifact(
@@ -208,7 +321,11 @@ def require_packaged_desktop_runtime(
     workspace: Path,
     runner: Runner = subprocess.run,
 ) -> Path:
-    require_desktop_bundle_config(project_root, platform, template)
+    configured_mime_types = require_desktop_bundle_config(
+        project_root,
+        platform,
+        template,
+    )
     bundle = require_single_desktop_bundle(project_root, platform, profile)
     if platform == "linux-x64":
         extract_root = workspace / "appimage-extract"
@@ -219,12 +336,12 @@ def require_packaged_desktop_runtime(
             extract_root,
             runner,
         )
-        packaged_runtime = (
-            extract_root
-            / "squashfs-root/usr/lib/Squallz"
-            / SFX_RESOURCE_TARGET
-        )
+        app_dir = extract_root / "squashfs-root"
+        packaged_runtime = app_dir / "usr/lib/Squallz" / SFX_RESOURCE_TARGET
         require_packaged_runtime_file(packaged_runtime, template, "linux")
+        if configured_mime_types is None:
+            raise SmokeError("Linux desktop bundle config has no MIME associations")
+        require_packaged_linux_mime_types(app_dir, configured_mime_types)
         return bundle
 
     install_root = workspace / "nsis-install"
@@ -314,7 +431,8 @@ def require_sfx_template(path: Path, target: str) -> Path:
     if not stat.S_ISREG(metadata.st_mode) or path.is_symlink():
         raise SmokeError(f"{target} SFX template is not a regular file")
     if os.name != "nt" and not os.access(resolved, os.X_OK):
-        raise SmokeError(f"{target} SFX template is not executable")
+        if target != "linux" or linux_sfx_data_info(resolved) is None:
+            raise SmokeError(f"{target} SFX template is not executable")
     if target == "windows" and windows_pe_certificate_table(resolved) is not None:
         raise SmokeError("Windows SFX template must remain unsigned before assembly")
     return resolved
@@ -323,6 +441,9 @@ def require_sfx_template(path: Path, target: str) -> Path:
 def require_dedicated_template_size(template: Path, binary: Path) -> None:
     try:
         template_bytes = template.stat().st_size
+        linux_data = linux_sfx_data_info(template)
+        if linux_data is not None:
+            template_bytes = linux_data[1]
         binary_bytes = binary.stat().st_size
     except OSError as error:
         raise SmokeError("SFX runtime size could not be inspected") from error
@@ -662,8 +783,22 @@ def run_smoke(
     binary = require_binary(binary)
     target = sfx_target(platform)
     host_template = require_sfx_template(host_template, target)
-    if target != "macos" and host_template != binary:
+    dedicated_template = target != "macos" and host_template != binary
+    if dedicated_template:
         require_dedicated_template_size(host_template, binary)
+    if (
+        target == "linux"
+        and dedicated_template
+        and linux_sfx_data_info(host_template) is None
+    ):
+        raise SmokeError("Linux build SFX template must be a data resource")
+    if (
+        target == "linux"
+        and dedicated_template
+        and os.name != "nt"
+        and stat.S_IMODE(host_template.lstat().st_mode) != 0o644
+    ):
+        raise SmokeError("Linux build SFX template must use data mode 0644")
     source = create_fixture(workspace)
     expected_files = source_files(source)
     archive = workspace / "release-smoke.zip"
@@ -673,9 +808,13 @@ def run_smoke(
     sfx_destination = workspace / "sfx-extracted"
     common = ("--lang", "en-US", "--quiet", "--color", "never")
 
-    if target != "macos" and host_template != binary:
+    if dedicated_template:
+        runtime_probe = host_template
+        if target == "linux":
+            runtime_probe = workspace / "sqz-sfx-runtime-probe"
+            extract_linux_sfx_runtime(host_template, runtime_probe)
         runtime_version = invoke(
-            host_template,
+            runtime_probe,
             "dedicated sfx runtime version",
             ("--version",),
             workspace,

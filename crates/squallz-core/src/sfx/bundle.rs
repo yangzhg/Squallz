@@ -5,6 +5,7 @@ use std::ffi::OsStr;
 use std::fs::{self, File};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
+use std::time::SystemTime;
 
 use sha2::{Digest, Sha256};
 use squallz_format_api::{ControlToken, EntryPath, FormatError, ProgressSink, ResourceOptions};
@@ -36,9 +37,67 @@ const DESKTOP_CLI_SIDECAR: &str = "Contents/MacOS/sqz";
 
 #[derive(Debug)]
 enum TemplateEntryKind {
-    Directory,
+    Directory { state: TemplateDirectoryState },
     File { state: RegularFileState },
     Symlink { target: PathBuf },
+}
+
+#[derive(Debug, Clone)]
+struct TemplateDirectoryState {
+    modified: Option<SystemTime>,
+    #[cfg(unix)]
+    changed: (i64, i64),
+    #[cfg(windows)]
+    windows_times: (u64, u64),
+}
+
+impl TemplateDirectoryState {
+    fn from_metadata(metadata: &fs::Metadata) -> Self {
+        Self {
+            modified: metadata.modified().ok(),
+            #[cfg(unix)]
+            changed: directory_unix_change_time(metadata),
+            #[cfg(windows)]
+            windows_times: directory_windows_times(metadata),
+        }
+    }
+
+    fn matches(&self, metadata: &fs::Metadata) -> bool {
+        metadata.is_dir()
+            && !metadata.file_type().is_symlink()
+            && metadata.modified().ok() == self.modified
+            && {
+                #[cfg(unix)]
+                {
+                    directory_unix_change_time(metadata) == self.changed
+                }
+                #[cfg(not(unix))]
+                {
+                    #[cfg(windows)]
+                    {
+                        directory_windows_times(metadata) == self.windows_times
+                    }
+                    #[cfg(not(windows))]
+                    {
+                        true
+                    }
+                }
+            }
+    }
+}
+
+#[cfg(unix)]
+fn directory_unix_change_time(metadata: &fs::Metadata) -> (i64, i64) {
+    use std::os::unix::fs::MetadataExt;
+
+    (metadata.ctime(), metadata.ctime_nsec())
+}
+
+#[cfg(windows)]
+fn directory_windows_times(metadata: &fs::Metadata) -> (u64, u64) {
+    use std::os::windows::fs::MetadataExt;
+
+    (metadata.creation_time(), metadata.last_write_time())
 }
 
 #[derive(Debug)]
@@ -53,6 +112,7 @@ struct TemplateEntry {
 pub(super) struct PreparedTemplate {
     template: PathBuf,
     root_identity: super::transaction::PathIdentity,
+    root_state: TemplateDirectoryState,
     root_permissions: fs::Permissions,
     executable_relative: PathBuf,
     minimum_system_version: String,
@@ -85,8 +145,7 @@ impl PreparedTemplate {
 
     fn validate_root(&self) -> Result<(), FormatError> {
         let metadata = prepared_path_metadata(&self.template)?;
-        if !metadata.is_dir()
-            || metadata.file_type().is_symlink()
+        if !self.root_state.matches(&metadata)
             || prepared_path_identity(&self.template)? != self.root_identity
         {
             return Err(template_changed(&self.template));
@@ -139,6 +198,7 @@ pub(super) fn prepare_template(template: &Path) -> Result<PreparedTemplate, Form
     let prepared = PreparedTemplate {
         template: template.to_path_buf(),
         root_identity,
+        root_state: TemplateDirectoryState::from_metadata(&root_metadata),
         root_permissions: root_metadata.permissions(),
         executable_relative,
         minimum_system_version,
@@ -257,7 +317,7 @@ pub(super) fn stage(
         tree.ensure_dir(Path::new("Contents/Resources"))?;
         if !prepared.entries.iter().any(|entry| {
             entry.relative == Path::new("Contents/Resources")
-                && matches!(entry.kind, TemplateEntryKind::Directory)
+                && matches!(entry.kind, TemplateEntryKind::Directory { .. })
         }) {
             set_generated_directory_permissions(&tree, Path::new("Contents/Resources"))?;
         }
@@ -732,7 +792,9 @@ fn scan_dir(
             validate_symlink(template, &child, &target)?;
             TemplateEntryKind::Symlink { target }
         } else if metadata.is_dir() {
-            TemplateEntryKind::Directory
+            TemplateEntryKind::Directory {
+                state: TemplateDirectoryState::from_metadata(&metadata),
+            }
         } else if metadata.is_file() {
             TemplateEntryKind::File {
                 state: RegularFileState::from_metadata(&metadata),
@@ -746,17 +808,20 @@ fn scan_dir(
         if super::transaction::path_identity(&item.path())? != identity {
             return Err(template_changed(&item.path()));
         }
-        let is_dir = matches!(kind, TemplateEntryKind::Directory);
+        let directory_state = match &kind {
+            TemplateEntryKind::Directory { state } => Some(state.clone()),
+            _ => None,
+        };
         entries.push(TemplateEntry {
             relative: child.clone(),
             kind,
             identity,
             permissions: metadata.permissions(),
         });
-        if is_dir {
-            validate_scanned_directory(&item.path(), identity)?;
+        if let Some(state) = directory_state {
+            validate_scanned_directory(&item.path(), identity, &state)?;
             scan_dir(template, &child, executable_relative, depth + 1, entries)?;
-            validate_scanned_directory(&item.path(), identity)?;
+            validate_scanned_directory(&item.path(), identity, &state)?;
         }
     }
     Ok(())
@@ -765,12 +830,10 @@ fn scan_dir(
 fn validate_scanned_directory(
     path: &Path,
     identity: super::transaction::PathIdentity,
+    state: &TemplateDirectoryState,
 ) -> Result<(), FormatError> {
     let metadata = fs::symlink_metadata(path)?;
-    if !metadata.is_dir()
-        || metadata.file_type().is_symlink()
-        || super::transaction::path_identity(path)? != identity
-    {
+    if !state.matches(&metadata) || super::transaction::path_identity(path)? != identity {
         return Err(template_changed(path));
     }
     Ok(())
@@ -819,7 +882,7 @@ fn bundle_output_budget(
     total = checked_budget_add(total, entry_output_budget(root, 0, allocation)?)?;
     for entry in entries {
         let stored_bytes = match &entry.kind {
-            TemplateEntryKind::Directory => 0,
+            TemplateEntryKind::Directory { .. } => 0,
             TemplateEntryKind::File { state } => state.bytes(),
             TemplateEntryKind::Symlink { target } => encoded_path_bytes(target)?,
         };
@@ -930,11 +993,13 @@ fn bundle_budget_overflow() -> FormatError {
 }
 
 fn validate_template_directory(path: &Path, entry: &TemplateEntry) -> Result<(), FormatError> {
+    let TemplateEntryKind::Directory { state } = &entry.kind else {
+        return Err(FormatError::Other(
+            "prepared macOS SFX entry is not a directory".into(),
+        ));
+    };
     let metadata = prepared_path_metadata(path)?;
-    if !metadata.is_dir()
-        || metadata.file_type().is_symlink()
-        || prepared_path_identity(path)? != entry.identity
-    {
+    if !state.matches(&metadata) || prepared_path_identity(path)? != entry.identity {
         return Err(template_changed(path));
     }
     Ok(())
@@ -1043,7 +1108,7 @@ fn copy_template(
         ctl.checkpoint()?;
         let source = prepared.template.join(&entry.relative);
         match &entry.kind {
-            TemplateEntryKind::Directory => {
+            TemplateEntryKind::Directory { .. } => {
                 validate_template_directory(&source, entry)?;
                 tree.create_dir(&entry.relative)?;
             }
@@ -1082,7 +1147,7 @@ fn apply_template_directory_permissions(
     tree: &BundleTree,
 ) -> Result<(), FormatError> {
     for entry in prepared.entries.iter().rev() {
-        if matches!(entry.kind, TemplateEntryKind::Directory) {
+        if matches!(entry.kind, TemplateEntryKind::Directory { .. }) {
             validate_template_directory(&prepared.template.join(&entry.relative), entry)?;
             tree.set_permissions(&entry.relative, entry.permissions.clone(), true)?;
         }
@@ -1225,7 +1290,7 @@ fn write_bundle_metadata(
     for locale in ["en.lproj", "zh-Hans.lproj"] {
         let dir = Path::new("Contents/Resources").join(locale);
         if prepared.entries.iter().any(|entry| {
-            entry.relative == dir && matches!(entry.kind, TemplateEntryKind::Directory)
+            entry.relative == dir && matches!(entry.kind, TemplateEntryKind::Directory { .. })
         }) {
             write_tree_file(
                 tree,
@@ -1295,7 +1360,8 @@ fn sync_bundle_directories(
     tree: &BundleTree,
 ) -> Result<(), FormatError> {
     let order = bundle_directory_sync_order(prepared.entries.iter().filter_map(|entry| {
-        matches!(entry.kind, TemplateEntryKind::Directory).then_some(entry.relative.as_path())
+        matches!(entry.kind, TemplateEntryKind::Directory { .. })
+            .then_some(entry.relative.as_path())
     }));
     for relative in order {
         tree.sync_dir(&relative)?;

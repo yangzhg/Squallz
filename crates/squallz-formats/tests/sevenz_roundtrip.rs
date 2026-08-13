@@ -210,6 +210,11 @@ fn sevenz_encrypted_content_requires_password() {
             .is_none_or(|name| !name.starts_with(".squallz-extract-"))
     }));
 
+    let error = engine
+        .test_summary(&archive, &wrong, &NoProgress, &ctl)
+        .unwrap_err();
+    assert!(matches!(error, FormatError::WrongPassword), "{error:?}");
+
     // With the password everything decrypts.
     let open = OpenOptions {
         password: Some(Password::new("correct horse")),

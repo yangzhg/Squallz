@@ -84,6 +84,7 @@ fn lock_open_file_queue<'a>(
 impl OpenFileRequests {
     /// Adds opened paths. If the frontend has already called `take`, return
     /// an event that should be emitted immediately; otherwise keep them.
+    #[cfg(any(test, target_os = "macos", target_os = "ios", target_os = "android"))]
     pub fn push(&self, paths: Vec<String>) -> Option<OpenFilesEvent> {
         self.push_event(OpenFilesEvent::from_paths(paths))
     }
@@ -147,6 +148,7 @@ impl OpenFileRequests {
 }
 
 impl OpenFilesEvent {
+    #[cfg(any(test, target_os = "macos", target_os = "ios", target_os = "android"))]
     pub fn from_paths(paths: Vec<String>) -> Self {
         Self {
             paths,

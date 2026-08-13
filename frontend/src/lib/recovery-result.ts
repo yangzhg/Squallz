@@ -9,6 +9,26 @@ export interface RecoveryProtectionResult {
   outputs: string[];
 }
 
+export interface RecoveryRouteState {
+  sourceMode: "none" | "current" | "selected";
+  sourceOverride: string | null;
+  par2Override: string | null;
+}
+
+export function recoveryRouteForOpen(
+  source: "preserve" | "current",
+  hasCurrentArchive: boolean,
+  route: RecoveryRouteState,
+): RecoveryRouteState {
+  if (
+    hasCurrentArchive
+    && (source === "current" || (route.sourceMode === "none" && route.par2Override === null))
+  ) {
+    return { sourceMode: "current", sourceOverride: null, par2Override: null };
+  }
+  return { ...route };
+}
+
 function recordValue(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>

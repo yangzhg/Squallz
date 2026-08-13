@@ -17,6 +17,11 @@ JSON 中的 `problems` 只保留前 20 条问题预览，`problems_total` 是完
 `problems_truncated` 表示是否还有未展示问题；`counts.failed` 仍是本次完成任务的权威失败条目数。
 这样即使压缩包包含大量损坏条目，诊断文本也不会无限占用内存。
 
+ZIP 中央目录缺失或无法读取时，`list` 仍可从本地文件头给出恢复视图，`extract` 也可复制其中
+校验通过的载荷；这不代表原压缩包结构完整。此时 `test --json` 会返回退出码 3、
+`ok: false` 和 `structure: "zip_local_headers_recovered"`。可用
+`sqz repair archive.zip -o rebuilt.zip --json` 生成不覆盖原件的新包，再对新包运行 `test`。
+
 ## 有恢复数据时
 
 如果提前生成过 PAR2：
@@ -43,7 +48,7 @@ sqz export repaired.sqz -o repaired.zip --json
 
 ## 没有恢复数据时
 
-- ZIP：Squallz 可以尝试从 intact local headers 重建 central directory。
+- ZIP：Squallz 可以尝试从完整的本地文件头重建中央目录。
 - 其他格式：只能尽力列出、测试或提取仍可读条目。
 - RAR：Squallz 不实现 RAR recovery record，也不创建 RAR；收到 RAR 时可以读取或转换为开放格式，
   但不能承诺修复未提前保护的 RAR 损坏包。

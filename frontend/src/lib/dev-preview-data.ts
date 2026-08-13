@@ -440,6 +440,9 @@ function readArchivePreview(params: URLSearchParams, pageSize: number): ArchiveP
       name,
       read_only: false,
       format,
+      structure: params.get("previewRecoveredZip") === "1"
+        ? "zip_local_headers_recovered"
+        : "complete",
       entry_count: total,
       volumes: null,
       legacy_encoding_count: 0,

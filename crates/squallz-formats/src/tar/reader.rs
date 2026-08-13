@@ -171,14 +171,21 @@ impl TarArchiveReader {
                     break;
                 }
             };
-            entries_tested += 1;
-            let path = match meta_of(&entry) {
-                Ok(meta) => meta.path,
+            let meta = match meta_of(&entry) {
+                Ok(meta) => meta,
                 Err(e) => {
+                    // Preserve the test report contract: an entry whose
+                    // metadata is malformed was still encountered and tested.
+                    entries_tested += 1;
                     record_problem(e.to_string());
                     continue;
                 }
             };
+            if is_tar_root_directory(&meta) {
+                continue;
+            }
+            entries_tested += 1;
+            let path = meta.path;
             // Draining validates entry framing and, for compound inputs, the
             // underlying stream's integrity checks.
             loop {
@@ -252,6 +259,11 @@ fn meta_of<R: Read>(entry: &tar::Entry<'_, R>) -> Result<EntryMeta, FormatError>
     })
 }
 
+fn is_tar_root_directory(meta: &EntryMeta) -> bool {
+    matches!(&meta.entry_type, EntryType::Dir)
+        && (meta.path.raw.as_slice() == b"." || meta.path.raw.as_slice() == b"./")
+}
+
 impl ArchiveReader for TarArchiveReader {
     fn entries(&mut self) -> Box<dyn Iterator<Item = Result<EntryMeta, FormatError>> + '_> {
         let archive = match self.rebuild() {
@@ -259,9 +271,15 @@ impl ArchiveReader for TarArchiveReader {
             Err(e) => return Box::new(std::iter::once(Err(e))),
         };
         match archive.entries() {
-            Ok(entries) => Box::new(
-                entries.map(|item| item.map_err(FormatError::from).and_then(|e| meta_of(&e))),
-            ),
+            Ok(entries) => Box::new(entries.filter_map(|item| {
+                match item
+                    .map_err(FormatError::from)
+                    .and_then(|entry| meta_of(&entry))
+                {
+                    Ok(meta) if is_tar_root_directory(&meta) => None,
+                    result => Some(result),
+                }
+            })),
             Err(e) => Box::new(std::iter::once(Err(e.into()))),
         }
     }
@@ -319,6 +337,9 @@ impl ArchiveReader for TarArchiveReader {
         for item in archive.entries()? {
             let mut entry = item?;
             let meta = meta_of(&entry)?;
+            if is_tar_root_directory(&meta) {
+                continue;
+            }
             if let Some(w) = &wanted {
                 if !w.contains(meta.path.raw.as_slice()) {
                     continue;

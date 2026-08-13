@@ -60,10 +60,12 @@ required_screenshot_fields = [
 ]
 
 required_action_names = [
+    "gnome_checksum",
     "gnome_extract_here",
     "gnome_extract_to_folder",
     "gnome_test_archive",
     "gnome_compress",
+    "dolphin_checksum",
     "dolphin_extract_here",
     "dolphin_extract_to_folder",
     "dolphin_test_archive",
@@ -240,7 +242,7 @@ if manifest is not None and manifest_path is not None:
 
     actions = manifest.get("actions")
     if not isinstance(actions, dict):
-        blocked.append("actions must be an object with GNOME Files and KDE Dolphin extract/test/compress rows")
+        blocked.append("actions must be an object with GNOME Files and KDE Dolphin checksum/extract/test/compress rows")
     else:
         for action_name in required_action_names:
             action = actions.get(action_name)
@@ -295,7 +297,7 @@ now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 if not evidence_rows:
     evidence_rows.append("| package/logs/screenshots | blocked | no manifest supplied |")
 if not action_rows:
-    action_rows.append("| gnome+dolphin extract/test/compress | blocked | no manifest supplied |")
+    action_rows.append("| gnome+dolphin checksum/extract/test/compress | blocked | no manifest supplied |")
 
 report_path.write_text(
     "\n".join(
@@ -328,7 +330,7 @@ report_path.write_text(
             "screenshot paths, and the required boolean assertions listed in this script.",
             "",
             "The `actions` object must contain GNOME Files and KDE Dolphin rows for",
-            "`extract_here`, `extract_to_folder`, `test_archive`, and `compress`; each",
+            "`checksum`, `extract_here`, `extract_to_folder`, `test_archive`, and `compress`; each",
             "action needs `menu_visible`, `invoked`, `packaged_binary`,",
             "`visible_feedback`, `output_verified`, `log`, and `screenshot`.",
             "",

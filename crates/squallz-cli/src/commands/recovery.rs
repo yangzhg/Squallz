@@ -8,7 +8,10 @@ use squallz_recovery::RecoveryReport;
 
 use crate::args::resource_options;
 use crate::commands::{
-    reports::{print_pretty_json, print_test_problems, recovery_summary_json, test_report_json},
+    reports::{
+        print_pretty_json, print_test_problems, print_test_problems_with_structure,
+        recovery_summary_json, test_report_json, test_report_json_with_structure,
+    },
     Ctx, ModernStatusField, ModernTableColumn, ModernTableRow,
 };
 use crate::errors::CliError;
@@ -343,10 +346,14 @@ fn repair_zip_rebuild(
         .into());
     }
 
-    let source_report =
-        ctx.engine
-            .test_summary(&archive, &OpenOptions::default(), &NoProgress, &ctx.ctl)?;
-    if !source_report.is_ok() {
+    let source_test = ctx.engine.test_summary_with_structure(
+        &archive,
+        &OpenOptions::default(),
+        &NoProgress,
+        &ctx.ctl,
+    )?;
+    if !source_test.payload_is_ok() {
+        let source_report = &source_test.summary;
         if json {
             let value = json!({
                 "ok": false,
@@ -355,20 +362,22 @@ fn repair_zip_rebuild(
                 "output": output.display().to_string(),
                 "tool": "zip-local-header-rebuild",
                 "in_place": false,
-                "source": test_report_json(&source_report),
+                "source": test_report_json_with_structure(source_report, source_test.structure),
                 "problems": &source_report.problems.messages,
                 "problems_total": source_report.problems.total,
                 "problems_truncated": source_report.problems.is_truncated(),
             });
             print_pretty_json(&value)?;
         } else {
-            print_test_problems(ctx, &source_report);
+            print_test_problems_with_structure(ctx, source_report, source_test.structure);
             let count = source_report.problems.total.to_string();
             let message = ctx.loc.format("cli.test.failed", &[("count", &count)]);
             ctx.eprint_problem(&message);
         }
         return Err(CliError::Exit(EXIT_CORRUPT));
     }
+    let structure = source_test.structure;
+    let source_report = source_test.into_summary();
 
     let progress = CliProgress::new_for_operation(
         ctx.quiet,
@@ -401,7 +410,7 @@ fn repair_zip_rebuild(
             "output": output.display().to_string(),
             "tool": "zip-local-header-rebuild",
             "in_place": in_place,
-            "source": test_report_json(&source_report),
+            "source": test_report_json_with_structure(&source_report, structure),
         });
         print_pretty_json(&value)?;
     } else if ctx.is_modern() {

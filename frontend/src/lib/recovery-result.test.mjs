@@ -19,11 +19,49 @@ test("recovery results gate repair and expose one semantic tone", async () => {
     const {
       latestMatchingRecoveryTask,
       readRecoveryProtectionResult,
+      recoveryRouteForOpen,
       recoveryRepairGate,
       recoveryResultConfirmsRepairCapacity,
       recoveryResultHasNoDamage,
       recoveryResultTone,
     } = await server.ssrLoadModule("/src/lib/recovery-result.ts");
+
+    const staleRoute = {
+      sourceMode: "selected",
+      sourceOverride: "/tmp/older.zip",
+      par2Override: "/tmp/older.zip.par2",
+    };
+    assert.deepEqual(recoveryRouteForOpen("current", true, staleRoute), {
+      sourceMode: "current",
+      sourceOverride: null,
+      par2Override: null,
+    });
+    assert.deepEqual(recoveryRouteForOpen("preserve", true, staleRoute), staleRoute);
+    assert.deepEqual(
+      recoveryRouteForOpen("preserve", true, {
+        sourceMode: "none",
+        sourceOverride: "/tmp/stale.zip",
+        par2Override: null,
+      }),
+      { sourceMode: "current", sourceOverride: null, par2Override: null },
+    );
+
+    const { render } = await server.ssrLoadModule("svelte/server");
+    const { default: ArchiveStructureWarning } = await server.ssrLoadModule(
+      "/src/components/ArchiveStructureWarning.svelte",
+    );
+    const { body: structureWarning } = render(ArchiveStructureWarning, {
+      props: {
+        message: "The ZIP index is damaged.",
+        actionLabel: "Open ZIP repair",
+        onRepair: () => {},
+      },
+    });
+    assert.match(structureWarning, /data-archive-structure-warning/);
+    assert.match(structureWarning, /role="status"/);
+    assert.match(structureWarning, /The ZIP index is damaged\./);
+    assert.match(structureWarning, /data-archive-structure-repair/);
+    assert.match(structureWarning, />Open ZIP repair<\/button>/);
 
     assert.equal(recoveryRepairGate(null), "verify_first");
     assert.equal(recoveryResultTone(null), "neutral");

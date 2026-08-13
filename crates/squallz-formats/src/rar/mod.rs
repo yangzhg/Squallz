@@ -1,14 +1,16 @@
 //! RAR/CBR read bridge.
 //!
 //! Squallz does not create RAR archives and does not link unrar code into
-//! the binary. This bridge prefers the `7zz`/`7z` external reader, keeps
-//! `bsdtar`/libarchive as an explicit diagnostic fallback, and can use an
-//! installed `unrar` executable for confirmed-unencrypted RAR7 entry streams
-//! that 7-Zip cannot decode. External readers only list or stream entries;
-//! extraction still flows through the shared safe extraction engine.
+//! the binary. This bridge prefers the `7zz`/`7z` external reader, uses a
+//! compatible `bsdtar`/libarchive reader for a narrow set of single-file
+//! decoder gaps, and can use an installed `unrar` executable for
+//! confirmed-unencrypted RAR7 entry streams that 7-Zip cannot decode.
+//! External readers only list or stream entries; extraction still flows
+//! through the shared safe extraction engine.
 
 mod volume;
 
+use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
@@ -415,29 +417,14 @@ impl RarBackend {
         if let Some(tool) = sevenzip_bridge::sevenzip_tool_if_configured_or_installed() {
             let listing =
                 sevenzip_bridge::list_entries_with_archive_properties(&tool, archive, None, ctl)?;
-            let rar7_v6 =
-                rar7_v6_listing_is_confirmed_unencrypted(&String::from_utf8_lossy(&listing.stdout));
-            if rar7_v6 {
-                if let Some(bsdtar) = bsdtar_tool_if_available() {
-                    return Ok(SelectedRarBackend {
-                        backend: Self::Bsdtar(bsdtar),
-                        listing: None,
-                    });
-                }
-                if let Some(unrar) = unrar_tool_if_available() {
-                    return Ok(SelectedRarBackend {
-                        backend: Self::SevenZipUnrar {
-                            sevenzip: tool,
-                            unrar,
-                        },
-                        listing: Some(RarListing::from_sevenzip(listing)),
-                    });
-                }
-            }
-            return Ok(SelectedRarBackend {
-                backend: Self::SevenZip(tool),
-                listing: Some(RarListing::from_sevenzip(listing)),
-            });
+            return select_single_unencrypted_backend(
+                tool,
+                archive,
+                listing,
+                bsdtar_tool_if_available(),
+                unrar_tool_if_available(),
+                ctl,
+            );
         }
         Ok(SelectedRarBackend {
             backend: Self::Bsdtar(bsdtar_tool()),
@@ -499,6 +486,145 @@ impl RarListing {
             archive: Some(listing.archive),
         }
     }
+}
+
+fn select_single_unencrypted_backend(
+    sevenzip: PathBuf,
+    archive: &Path,
+    listing: sevenzip_bridge::SevenZipListing,
+    bsdtar: Option<PathBuf>,
+    unrar: Option<PathBuf>,
+    ctl: &ControlToken,
+) -> Result<SelectedRarBackend, FormatError> {
+    let listing_text = String::from_utf8_lossy(&listing.stdout);
+    let rar7_v6 = rar7_v6_listing_is_confirmed_unencrypted(&listing_text);
+    let legacy_p7zip_rar5 = legacy_p7zip_rar5_decoder_gap(&listing_text);
+    let listing = RarListing::from_sevenzip(listing);
+
+    if rar7_v6 {
+        if let Some(bsdtar) = bsdtar {
+            return Ok(SelectedRarBackend {
+                backend: RarBackend::Bsdtar(bsdtar),
+                listing: None,
+            });
+        }
+        if let Some(unrar) = unrar {
+            return Ok(SelectedRarBackend {
+                backend: RarBackend::SevenZipUnrar { sevenzip, unrar },
+                listing: Some(listing),
+            });
+        }
+    } else if legacy_p7zip_rar5 {
+        if let Some(bsdtar) = bsdtar {
+            match bsdtar_listing_matches(&listing.entries, &bsdtar, archive, ctl) {
+                Ok(true) => {
+                    return Ok(SelectedRarBackend {
+                        backend: RarBackend::Bsdtar(bsdtar),
+                        listing: Some(listing),
+                    });
+                }
+                Err(FormatError::Cancelled) => return Err(FormatError::Cancelled),
+                Ok(false) | Err(_) => {}
+            }
+        }
+    }
+
+    Ok(SelectedRarBackend {
+        backend: RarBackend::SevenZip(sevenzip),
+        listing: Some(listing),
+    })
+}
+
+fn legacy_p7zip_rar5_decoder_gap(text: &str) -> bool {
+    let legacy_p7zip = text
+        .lines()
+        .any(|line| line.trim_start().starts_with("p7zip Version 16.02 "));
+    let rar5 = text.lines().any(|line| line.trim() == "Type = Rar5");
+    if !legacy_p7zip || !rar5 {
+        return false;
+    }
+
+    let mut has_path = false;
+    let mut has_entry_field = false;
+    let mut compressed = false;
+    let mut encrypted = None;
+    let mut compressed_entry = false;
+    for line in text.lines().chain(std::iter::once("")) {
+        if line.is_empty() {
+            if has_path && has_entry_field {
+                if encrypted != Some(false) {
+                    return false;
+                }
+                compressed_entry |= compressed;
+            }
+            has_path = false;
+            has_entry_field = false;
+            compressed = false;
+            encrypted = None;
+            continue;
+        }
+        let Some((key, value)) = line.split_once(" = ") else {
+            continue;
+        };
+        let value = value.trim();
+        match key.trim() {
+            "Path" => has_path = !value.is_empty(),
+            "Folder" | "Size" | "Packed Size" | "Attributes" | "CRC" => {
+                has_entry_field = true;
+            }
+            "Method" => {
+                compressed = value
+                    .strip_prefix('m')
+                    .and_then(|method| method.as_bytes().first())
+                    .is_some_and(|level| matches!(level, b'1'..=b'5'));
+            }
+            "Encrypted" if value == "-" => encrypted = Some(false),
+            "Encrypted" => return false,
+            "Symbolic Link" | "Hard Link" | "Copy Link" if !value.is_empty() => return false,
+            _ => {}
+        }
+    }
+    compressed_entry
+}
+
+fn bsdtar_listing_matches(
+    sevenzip_entries: &[EntryMeta],
+    tool: &Path,
+    archive: &Path,
+    ctl: &ControlToken,
+) -> Result<bool, FormatError> {
+    if sevenzip_entries.iter().any(|entry| entry.encrypted) {
+        return Ok(false);
+    }
+    let Some(sevenzip_files) = literal_regular_files(sevenzip_entries, false) else {
+        return Ok(false);
+    };
+    let bsdtar_entries = list_bsdtar_entries(tool, archive, ctl)?;
+    let Some(bsdtar_files) = literal_regular_files(&bsdtar_entries, true) else {
+        return Ok(false);
+    };
+    Ok(!sevenzip_files.is_empty() && sevenzip_files == bsdtar_files)
+}
+
+fn literal_regular_files(
+    entries: &[EntryMeta],
+    require_detailed_metadata: bool,
+) -> Option<BTreeMap<Vec<u8>, u64>> {
+    let mut files = BTreeMap::new();
+    for entry in entries {
+        if !matches!(entry.entry_type, EntryType::File)
+            || entry.encrypted
+            || (require_detailed_metadata && entry.unix_mode.is_none())
+            || entry.path.raw != entry.path.display.as_bytes()
+            || entry.path.raw.iter().any(|byte| {
+                byte.is_ascii_control() || matches!(byte, b'*' | b'?' | b'[' | b']' | b'\\')
+            })
+            || files.insert(entry.path.raw.clone(), entry.size).is_some()
+        {
+            return None;
+        }
+    }
+    Some(files)
 }
 
 fn bsdtar_tool() -> PathBuf {
@@ -1584,6 +1710,240 @@ exit 2
             "Path = hello.txt\nSize = 5\nMethod = v6:m3:128K\nEncrypted = -\n\n\
              Path = unknown.txt\nSize = 7\nMethod = v6:m3:128K\n"
         ));
+    }
+
+    #[test]
+    fn legacy_p7zip_rar5_detection_is_narrow() {
+        let compressed_rar5 = "7-Zip [64] 16.02\n\
+            p7zip Version 16.02 (locale=C)\n\n\
+            Path = archive.rar\nType = Rar5\nPhysical Size = 100\n\n\
+            Path = hello.txt\nSize = 5\nMethod = m5:17\nEncrypted = -\n";
+        assert!(legacy_p7zip_rar5_decoder_gap(compressed_rar5));
+        assert!(!legacy_p7zip_rar5_decoder_gap(
+            &compressed_rar5.replace("p7zip Version 16.02", "7-Zip 16.02")
+        ));
+        assert!(!legacy_p7zip_rar5_decoder_gap(
+            &compressed_rar5.replace("Type = Rar5", "Type = Rar")
+        ));
+        assert!(!legacy_p7zip_rar5_decoder_gap(
+            &compressed_rar5.replace("Method = m5:17", "Method = m0")
+        ));
+        assert!(!legacy_p7zip_rar5_decoder_gap(
+            &compressed_rar5.replace("Encrypted = -", "Encrypted = +")
+        ));
+        assert!(!legacy_p7zip_rar5_decoder_gap(
+            &compressed_rar5.replace("Encrypted = -\n", "")
+        ));
+        assert!(!legacy_p7zip_rar5_decoder_gap(&format!(
+            "{compressed_rar5}Symbolic Link = target.txt\n"
+        )));
+    }
+
+    #[test]
+    fn bsdtar_fallback_requires_unambiguous_detailed_regular_files() {
+        let entry = |raw: Vec<u8>, display: &str, entry_type: EntryType| EntryMeta {
+            path: EntryPath::from_raw(raw, display.to_owned(), "utf-8"),
+            entry_type,
+            size: 1,
+            compressed_size: None,
+            modified: None,
+            unix_mode: Some(0o100644),
+            crc32: None,
+            encrypted: false,
+        };
+        let safe = entry(b"safe.txt".to_vec(), "safe.txt", EntryType::File);
+        assert_eq!(
+            literal_regular_files(std::slice::from_ref(&safe), true)
+                .unwrap()
+                .get(b"safe.txt".as_slice()),
+            Some(&1)
+        );
+        let mut missing_detail = safe.clone();
+        missing_detail.unix_mode = None;
+        assert!(literal_regular_files(&[missing_detail], true).is_none());
+        assert!(
+            literal_regular_files(&[entry(b"*.txt".to_vec(), "*.txt", EntryType::File)], true)
+                .is_none()
+        );
+        assert!(literal_regular_files(&[entry(vec![0xff], "�", EntryType::File)], true).is_none());
+        assert!(literal_regular_files(
+            &[entry(b"folder".to_vec(), "folder", EntryType::Dir)],
+            true
+        )
+        .is_none());
+        assert!(literal_regular_files(
+            &[entry(
+                b"link".to_vec(),
+                "link",
+                EntryType::Symlink {
+                    target: b"safe.txt".to_vec(),
+                },
+            )],
+            true,
+        )
+        .is_none());
+        assert!(literal_regular_files(
+            &[
+                entry(b"same.txt".to_vec(), "same.txt", EntryType::File),
+                entry(b"same.txt".to_vec(), "same.txt", EntryType::File),
+            ],
+            true,
+        )
+        .is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn legacy_p7zip_rar5_uses_only_a_matching_bsdtar_stream_backend() {
+        use std::io::Read;
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = temp_path("legacy-p7zip-fallback", "dir");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let archive = root.join("sample.rar");
+        let sevenzip = root.join("7z");
+        let bsdtar = root.join("bsdtar");
+        let wrong_path = root.join("wrong-path-bsdtar");
+        let wrong_size = root.join("wrong-size-bsdtar");
+        fs::write(&archive, RAR5_MAGIC).unwrap();
+        fs::write(
+            &sevenzip,
+            r#"#!/bin/sh
+set -eu
+if [ "$1" = "x" ] && [ "$2" = "-so" ]; then
+  printf 'Unsupported Method\n' >&2
+  exit 2
+fi
+exit 3
+"#,
+        )
+        .unwrap();
+        fs::write(
+            &bsdtar,
+            r#"#!/bin/sh
+set -eu
+if [ "$1" = "-tf" ]; then
+  printf 'hello.txt\n'
+  exit 0
+fi
+if [ "$1" = "-tvf" ]; then
+  printf '%s\n' '-rw-r--r--  0 0  0  20 Jan  1  2020 hello.txt'
+  exit 0
+fi
+if [ "$1" = "-xOf" ] && [ "$3" = "--" ] && [ "$4" = "hello.txt" ]; then
+  printf 'decoded by libarchive'
+  exit 0
+fi
+exit 4
+"#,
+        )
+        .unwrap();
+        fs::write(
+            &wrong_path,
+            r#"#!/bin/sh
+set -eu
+if [ "$1" = "-tf" ]; then
+  printf 'different.txt\n'
+  exit 0
+fi
+if [ "$1" = "-tvf" ]; then
+  printf '%s\n' '-rw-r--r--  0 0  0  20 Jan  1  2020 different.txt'
+  exit 0
+fi
+exit 4
+"#,
+        )
+        .unwrap();
+        fs::write(
+            &wrong_size,
+            r#"#!/bin/sh
+set -eu
+if [ "$1" = "-tf" ]; then printf 'hello.txt\n'; exit 0; fi
+if [ "$1" = "-tvf" ]; then
+  printf '%s\n' '-rw-r--r--  0 0  0  19 Jan  1  2020 hello.txt'
+  exit 0
+fi
+exit 4
+"#,
+        )
+        .unwrap();
+        for tool in [&sevenzip, &bsdtar, &wrong_path, &wrong_size] {
+            let mut permissions = fs::metadata(tool).unwrap().permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(tool, permissions).unwrap();
+        }
+
+        let listing = || sevenzip_bridge::SevenZipListing {
+            entries: vec![EntryMeta {
+                path: EntryPath::from_utf8("hello.txt"),
+                entry_type: EntryType::File,
+                size: 20,
+                compressed_size: Some(12),
+                modified: None,
+                unix_mode: None,
+                crc32: Some(0x1234ABCD),
+                encrypted: false,
+            }],
+            archive: sevenzip_bridge::SevenZipArchiveProperties::default(),
+            stdout: b"p7zip Version 16.02 (locale=C)\nType = Rar5\n\n\
+                Path = hello.txt\nSize = 20\nMethod = m5:17\nEncrypted = -\n"
+                .to_vec(),
+        };
+        let selected = select_single_unencrypted_backend(
+            sevenzip.clone(),
+            &archive,
+            listing(),
+            Some(bsdtar.clone()),
+            None,
+            &ControlToken::default(),
+        )
+        .unwrap();
+        assert!(matches!(&selected.backend, RarBackend::Bsdtar(_)));
+        let entry = &selected.listing.as_ref().unwrap().entries[0];
+        assert_eq!(entry.path.display, "hello.txt");
+        assert_eq!(entry.size, 20);
+        assert_eq!(entry.crc32, Some(0x1234ABCD));
+        let mut contents = String::new();
+        selected
+            .backend
+            .read_entry(&archive, &entry.path, None, &ControlToken::default())
+            .unwrap()
+            .read_to_string(&mut contents)
+            .unwrap();
+        assert_eq!(contents, "decoded by libarchive");
+
+        for fallback in [&wrong_path, &wrong_size] {
+            let selected = select_single_unencrypted_backend(
+                sevenzip.clone(),
+                &archive,
+                listing(),
+                Some(fallback.clone()),
+                None,
+                &ControlToken::default(),
+            )
+            .unwrap();
+            assert!(matches!(&selected.backend, RarBackend::SevenZip(_)));
+        }
+        let selected = select_single_unencrypted_backend(
+            sevenzip,
+            &archive,
+            listing(),
+            Some(wrong_path),
+            None,
+            &ControlToken::default(),
+        )
+        .unwrap();
+        let entry = &selected.listing.as_ref().unwrap().entries[0];
+        let error = selected
+            .backend
+            .read_entry(&archive, &entry.path, None, &ControlToken::default())
+            .unwrap()
+            .read_to_end(&mut Vec::new())
+            .unwrap_err();
+        assert!(error.to_string().contains("7-Zip failed while reading"));
+
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(unix)]

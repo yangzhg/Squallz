@@ -289,10 +289,10 @@ fn forget_archive_password_impl(
     secrets: &dyn SecretStore,
     path: &Path,
 ) -> Result<PasswordBookStatusDto, ErrorDto> {
+    state.forget_password(path);
     secrets
         .delete_archive_password(path)
         .map_err(|error| ErrorDto::secret_store(error.to_string()))?;
-    state.forget_password(path);
     Ok(PasswordBookStatusDto {
         available: secrets.is_available(),
         saved: false,
@@ -1737,39 +1737,56 @@ pub fn answer_password(
 
 /// Persistent password-book status for one archive path.
 #[tauri::command]
-pub fn archive_password_status(
+pub async fn archive_password_status(
     secrets: State<'_, SharedSecretStore>,
     path: String,
 ) -> Result<PasswordBookStatusDto, ErrorDto> {
-    archive_password_status_impl(secrets.as_ref(), Path::new(&path))
+    let secrets = Arc::clone(secrets.inner());
+    tauri::async_runtime::spawn_blocking(move || {
+        archive_password_status_impl(secrets.as_ref(), Path::new(&path))
+    })
+    .await
+    .map_err(|error| ErrorDto::other(format!("password-book status task failed: {error}")))?
 }
 
 /// Verifies and saves the current archive password in the platform store.
 #[tauri::command]
-pub fn remember_archive_password(
+pub async fn remember_archive_password(
     state: State<'_, Arc<AppState>>,
     secrets: State<'_, SharedSecretStore>,
     path: String,
     password: String,
     encoding: Option<String>,
 ) -> Result<PasswordBookStatusDto, ErrorDto> {
-    remember_archive_password_impl(
-        state.as_ref(),
-        secrets.as_ref(),
-        Path::new(&path),
-        &password,
-        encoding.as_deref(),
-    )
+    let state = Arc::clone(state.inner());
+    let secrets = Arc::clone(secrets.inner());
+    tauri::async_runtime::spawn_blocking(move || {
+        remember_archive_password_impl(
+            state.as_ref(),
+            secrets.as_ref(),
+            Path::new(&path),
+            &password,
+            encoding.as_deref(),
+        )
+    })
+    .await
+    .map_err(|error| ErrorDto::other(format!("password-book save task failed: {error}")))?
 }
 
 /// Forgets the current archive password from both Keychain and session cache.
 #[tauri::command]
-pub fn forget_archive_password(
+pub async fn forget_archive_password(
     state: State<'_, Arc<AppState>>,
     secrets: State<'_, SharedSecretStore>,
     path: String,
 ) -> Result<PasswordBookStatusDto, ErrorDto> {
-    forget_archive_password_impl(state.as_ref(), secrets.as_ref(), Path::new(&path))
+    let state = Arc::clone(state.inner());
+    let secrets = Arc::clone(secrets.inner());
+    tauri::async_runtime::spawn_blocking(move || {
+        forget_archive_password_impl(state.as_ref(), secrets.as_ref(), Path::new(&path))
+    })
+    .await
+    .map_err(|error| ErrorDto::other(format!("password-book forget task failed: {error}")))?
 }
 
 /// Returns file paths that were opened by the OS before the frontend drained
@@ -4118,6 +4135,19 @@ mod tests {
         assert_eq!(error.key, "error.secret_store");
         assert!(error.params.is_empty());
         assert!(error.detail.contains("locked"));
+    }
+
+    #[test]
+    fn forgetting_always_clears_the_session_password_when_persistent_delete_fails() {
+        let path = Path::new("/tmp/locked-password-book.7z");
+        let state = AppState::new();
+        state.remember_password(path, "session secret");
+
+        let error = forget_archive_password_impl(&state, &ReadFailingSecretStore, path)
+            .expect_err("persistent delete must still be reported");
+
+        assert_eq!(error.key, "error.secret_store");
+        assert!(state.password_for(path).is_none());
     }
 
     #[test]

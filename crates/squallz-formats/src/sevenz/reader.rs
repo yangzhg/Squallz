@@ -51,6 +51,7 @@ impl SevenZArchiveReader {
         let mut done = 0u64;
         let mut cancelled = false;
         let mut mapping_failure = None;
+        let password_supplied = self.password_supplied;
         let backend_result = self.inner.for_each_entries(|entry, reader| {
             if ctl.checkpoint().is_err() {
                 cancelled = true;
@@ -79,7 +80,19 @@ impl SevenZArchiveReader {
                         progress.on_progress(done, total, &meta.path);
                     }
                     Err(e) => {
-                        record_problem(format!("{}: {e}", meta.path));
+                        let error = classify_entry_read_error(
+                            FormatError::from(e),
+                            meta.encrypted,
+                            password_supplied,
+                        );
+                        if matches!(
+                            error,
+                            FormatError::PasswordRequired | FormatError::WrongPassword
+                        ) {
+                            mapping_failure = Some(error);
+                            return Ok(false);
+                        }
+                        record_problem(format!("{}: {error}", meta.path));
                         break;
                     }
                 }

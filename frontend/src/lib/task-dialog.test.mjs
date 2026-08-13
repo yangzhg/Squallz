@@ -619,6 +619,70 @@ test("SFX result and recovery details use the durable single-backup contract", a
       ),
     );
 
+    const recoveredZipTest = {
+      ...boundedTest,
+      result: {
+        ...boundedTest.result,
+        problems: 1,
+        problem_messages: ["core-only structural diagnostic"],
+        problems_total: 1,
+        problems_truncated: false,
+        structure: "zip_local_headers_recovered",
+      },
+    };
+    assert.ok(
+      taskResultDetailRows(recoveredZipTest).some(
+        (row) => row.label === "Problem 1"
+          && row.value === "ZIP central directory is missing or unreadable; entries were recovered from local headers",
+      ),
+    );
+    const recoveredZipExtract = {
+      ...extracted,
+      result: {
+        ...extracted.result,
+        skipped: 0,
+        problems: [],
+        problems_total: 0,
+        structure: "zip_local_headers_recovered",
+        counts: {
+          ...extracted.result.counts,
+          skipped: 0,
+          failed: 0,
+        },
+      },
+    };
+    assert.equal(taskOutcomeNeedsAttention(recoveredZipExtract), true);
+    assert.equal(
+      taskNextStepDetail(recoveredZipExtract, false),
+      "The ZIP index is missing or unreadable. The visible files came from local headers; test the archive and rebuild its index before relying on it.",
+    );
+    assert.ok(
+      taskResultDetailRows(recoveredZipExtract).some(
+        (row) => row.label === "ZIP index damaged"
+          && row.value === "The ZIP index is missing or unreadable. The visible files came from local headers; test the archive and rebuild its index before relying on it.",
+      ),
+    );
+    await loadLocale("zh-CN");
+    const recoveredZipRowsZh = taskResultDetailRows(recoveredZipTest);
+    assert.ok(
+      recoveredZipRowsZh.some(
+        (row) => row.label === "问题 1"
+          && row.value === "ZIP 中央目录缺失或无法读取；条目来自本地文件头恢复视图",
+      ),
+    );
+    assert.ok(
+      recoveredZipRowsZh.every(
+        (row) => !row.value.includes("core-only structural diagnostic"),
+      ),
+    );
+    assert.ok(
+      taskResultDetailRows(recoveredZipExtract).some(
+        (row) => row.label === "ZIP 索引已损坏"
+          && row.value === "ZIP 索引缺失或无法读取。当前文件列表来自本地文件头；请先测试压缩包并重建索引，再将其作为完整压缩包使用。",
+      ),
+    );
+    await loadLocale("en-US");
+
     const skippedOnlyExtract = {
       ...extracted,
       result: {
@@ -665,6 +729,30 @@ test("SFX result and recovery details use the durable single-backup contract", a
     const groupedRows = taskResultDetailRows(groupedBatch);
     assert.ok(groupedRows.some((row) => row.label === "Archives" && row.value === "1"));
     assert.ok(groupedRows.some((row) => row.label === "Selected files" && row.value === "2"));
+
+    const recoveredBatch = {
+      ...groupedBatch,
+      result: {
+        ...groupedBatch.result,
+        structure: "zip_local_headers_recovered",
+        recovered_archives: 1,
+        outputs: [
+          {
+            archive: "/Users/alex/recovered.zip",
+            dest: "/Users/alex/recovered",
+            structure: "zip_local_headers_recovered",
+          },
+        ],
+      },
+    };
+    assert.equal(taskOutcomeNeedsAttention(recoveredBatch), true);
+    assert.ok(
+      taskResultDetailRows(recoveredBatch).some(
+        (row) => row.label === "ZIP index damaged"
+          && row.value.includes("recovered.zip")
+          && row.value.includes("The ZIP index is missing or unreadable."),
+      ),
+    );
 
     const legacyExtract = {
       ...extracted,

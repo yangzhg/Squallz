@@ -85,6 +85,7 @@
         targetDir: string;
         items: readonly MoveConflictItem[];
       } | null;
+      structureWarning: string | null;
       totalRows: number;
       rows: readonly ClassicBrowserEntry[];
       paddingTop: number;
@@ -94,6 +95,7 @@
     };
     tr: Translate;
     onOpenRoot: () => void;
+    onOpenRecovery: () => void;
     onOpenNestedPreview: () => void;
     onExtractNestedPreview: () => void;
     onClearPreview: (restoreEntryFocus?: boolean) => void;
@@ -124,12 +126,14 @@
 
 <script lang="ts">
   import Icon from "./Icon.svelte";
+  import ArchiveStructureWarning from "./ArchiveStructureWarning.svelte";
   import { cssVariables } from "../lib/css-variables";
 
   let {
     view,
     tr,
     onOpenRoot,
+    onOpenRecovery,
     onOpenNestedPreview,
     onExtractNestedPreview,
     onClearPreview,
@@ -283,91 +287,100 @@
   </aside>
 
   <section class="classic-table-wrap">
-    {#if view.workbenchVisible}
-      <div class="classic-workbench-strip">
-        <label>
-          <span>{tr("gui.action.rename_to", "Rename to")}</span>
-          <input
-            aria-label={tr("gui.rename.classic_table_target_name", "Classic table rename target name")}
-            value={view.rename.value}
-            disabled={!view.rename.visible}
-            title={view.rename.visible ? "" : tr("gui.precondition.select_one_file", "Select exactly one file")}
-            oninput={(event) => onRenameTargetChange(event.currentTarget.value)}
-            onblur={() => onCommitRenameTarget()}
-          />
-        </label>
-        <label>
-          <span>{tr("gui.action.move_to", "Move to")}</span>
-          <input
-            aria-label={tr("gui.move.classic_table_target_folder", "Classic table move target folder")}
-            value={view.move.value}
-            disabled={view.archiveReadOnly}
-            title={view.move.disabledReason}
-            oninput={(event) => onMoveTargetChange(event.currentTarget.value)}
-            onblur={() => onCommitMoveTarget()}
-          />
-        </label>
-        <label>
-          <span>{tr("gui.action.new_folder", "New folder")}</span>
-          <input
-            aria-label={tr("gui.new_folder.classic_name", "Classic new folder name")}
-            value={view.newFolder.value}
-            disabled={view.archiveReadOnly}
-            title={view.move.disabledReason}
-            oninput={(event) => onNewFolderChange(event.currentTarget.value)}
-            onblur={() => onCommitNewFolder()}
-          />
-        </label>
-        <small>{view.rename.status} · {view.move.status} · {view.newFolder.status}</small>
-      </div>
-    {:else}
-      <div class="classic-workbench-strip empty-workbench-strip">
-        <span>{view.archiveOpen ? view.selectedSummary : view.openArchiveFirst}</span>
-        <small>
-          {view.archiveOpen
-            ? tr("gui.preview.keyboard_hint", "Space or Return opens the focused item")
-            : tr("gui.classic.empty_workbench_hint", "Archive editing controls appear after an archive is open.")}
-        </small>
-      </div>
-    {/if}
-    {#if view.conflict}
-      <div
-        class="classic-move-conflict-review"
-        role="dialog"
-        aria-label={tr("gui.move.conflicts", "Move target conflicts")}
-        tabindex="-1"
-      >
-        <header>
-          <strong>
-            {tr("gui.move.conflict_count", "{count} move conflicts").replace("{count}", String(view.conflict.count))}
-          </strong>
-          <span>
-            {tr("gui.move.ready_target", "{count} ready · target {target}")
-              .replace("{count}", String(view.conflict.readyCount))
-              .replace("{target}", view.conflict.targetDir)}
-          </span>
-        </header>
-        <div class="classic-move-conflict-table">
-          <div>
-            <b>{tr("common.source", "Source")}</b>
-            <b>{tr("gui.move.existing_target", "Existing target")}</b>
-            <b>{tr("gui.move.keep_both_target", "Keep both target")}</b>
+    <div class="classic-table-header">
+      {#if view.structureWarning}
+        <ArchiveStructureWarning
+          message={view.structureWarning}
+          actionLabel={tr("gui.archive.open_zip_repair", "Open ZIP repair")}
+          onRepair={onOpenRecovery}
+        />
+      {/if}
+      {#if view.workbenchVisible}
+        <div class="classic-workbench-strip">
+          <label>
+            <span>{tr("gui.action.rename_to", "Rename to")}</span>
+            <input
+              aria-label={tr("gui.rename.classic_table_target_name", "Classic table rename target name")}
+              value={view.rename.value}
+              disabled={!view.rename.visible}
+              title={view.rename.visible ? "" : tr("gui.precondition.select_one_file", "Select exactly one file")}
+              oninput={(event) => onRenameTargetChange(event.currentTarget.value)}
+              onblur={() => onCommitRenameTarget()}
+            />
+          </label>
+          <label>
+            <span>{tr("gui.action.move_to", "Move to")}</span>
+            <input
+              aria-label={tr("gui.move.classic_table_target_folder", "Classic table move target folder")}
+              value={view.move.value}
+              disabled={view.archiveReadOnly}
+              title={view.move.disabledReason}
+              oninput={(event) => onMoveTargetChange(event.currentTarget.value)}
+              onblur={() => onCommitMoveTarget()}
+            />
+          </label>
+          <label>
+            <span>{tr("gui.action.new_folder", "New folder")}</span>
+            <input
+              aria-label={tr("gui.new_folder.classic_name", "Classic new folder name")}
+              value={view.newFolder.value}
+              disabled={view.archiveReadOnly}
+              title={view.move.disabledReason}
+              oninput={(event) => onNewFolderChange(event.currentTarget.value)}
+              onblur={() => onCommitNewFolder()}
+            />
+          </label>
+          <small>{view.rename.status} · {view.move.status} · {view.newFolder.status}</small>
+        </div>
+      {:else}
+        <div class="classic-workbench-strip empty-workbench-strip">
+          <span>{view.archiveOpen ? view.selectedSummary : view.openArchiveFirst}</span>
+          <small>
+            {view.archiveOpen
+              ? tr("gui.preview.keyboard_hint", "Space or Return opens the focused item")
+              : tr("gui.classic.empty_workbench_hint", "Archive editing controls appear after an archive is open.")}
+          </small>
+        </div>
+      {/if}
+      {#if view.conflict}
+        <div
+          class="classic-move-conflict-review"
+          role="dialog"
+          aria-label={tr("gui.move.conflicts", "Move target conflicts")}
+          tabindex="-1"
+        >
+          <header>
+            <strong>
+              {tr("gui.move.conflict_count", "{count} move conflicts").replace("{count}", String(view.conflict.count))}
+            </strong>
+            <span>
+              {tr("gui.move.ready_target", "{count} ready · target {target}")
+                .replace("{count}", String(view.conflict.readyCount))
+                .replace("{target}", view.conflict.targetDir)}
+            </span>
+          </header>
+          <div class="classic-move-conflict-table">
+            <div>
+              <b>{tr("common.source", "Source")}</b>
+              <b>{tr("gui.move.existing_target", "Existing target")}</b>
+              <b>{tr("gui.move.keep_both_target", "Keep both target")}</b>
+            </div>
+            {#each view.conflict.items as item}
+              <div><strong>{item.from}</strong><span>{item.to}</span><em>{item.keepBothTo}</em></div>
+            {/each}
           </div>
-          {#each view.conflict.items as item}
-            <div><strong>{item.from}</strong><span>{item.to}</span><em>{item.keepBothTo}</em></div>
-          {/each}
+          <div class="classic-button-row compact-row">
+            <button onclick={onCancelMoveConflict}>{tr("gui.common.cancel", "Cancel")}</button>
+            <button disabled={view.conflict.readyCount === 0} onclick={onSubmitMoveReadyOnly}>
+              {tr("gui.move.ready_only", "Move ready only")}
+            </button>
+            <button class="classic-primary" onclick={onSubmitMoveKeepBoth}>
+              {tr("gui.move.keep_both_all", "Keep both and move all")}
+            </button>
+          </div>
         </div>
-        <div class="classic-button-row compact-row">
-          <button onclick={onCancelMoveConflict}>{tr("gui.common.cancel", "Cancel")}</button>
-          <button disabled={view.conflict.readyCount === 0} onclick={onSubmitMoveReadyOnly}>
-            {tr("gui.move.ready_only", "Move ready only")}
-          </button>
-          <button class="classic-primary" onclick={onSubmitMoveKeepBoth}>
-            {tr("gui.move.keep_both_all", "Keep both and move all")}
-          </button>
-        </div>
-      </div>
-    {/if}
+      {/if}
+    </div>
     <div
       class="classic-table"
       role="table"

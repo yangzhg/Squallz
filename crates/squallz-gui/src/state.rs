@@ -414,9 +414,9 @@ impl AppState {
                 .or_else(|| self.password_for(path)),
             encoding_override: encoding.map(str::to_owned),
         };
-        let (format, entries, native_source_set) = self
+        let (format, entries, native_source_set, structure) = self
             .engine
-            .list_with_format_and_source_set_with_entry_limit_and_control(
+            .list_with_format_source_set_and_structure_with_entry_limit_and_control(
                 path,
                 &open_opts,
                 max_entries,
@@ -494,6 +494,7 @@ impl AppState {
             name: display_name,
             read_only: identity.read_only,
             format,
+            structure: structure.id().to_owned(),
             entry_count,
             volumes,
             legacy_encoding_count: encoding.legacy_count,
@@ -1451,6 +1452,7 @@ mod tests {
         let state = AppState::new();
         let info = state.open_archive(&zip, None, None).unwrap();
         assert_eq!(info.format, "zip");
+        assert_eq!(info.structure, "complete");
         assert_eq!(info.name, "test.zip");
         assert!(info.volumes.is_none());
         assert!(info.entry_count >= 3, "files (and maybe dirs) listed");
@@ -1470,6 +1472,27 @@ mod tests {
 
         // Unknown handle is a structured error.
         assert!(state.list_entries(999, 0, 500, "", None).is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn open_archive_marks_zip_local_header_recovery_views() {
+        let dir = temp_dir("open-recovered-zip");
+        let zip = make_zip(&dir, &["recoverable.txt"]);
+        let mut bytes = std::fs::read(&zip).unwrap();
+        let central_start = bytes
+            .windows(4)
+            .position(|window| window == b"PK\x01\x02")
+            .expect("central directory exists");
+        bytes.truncate(central_start);
+        std::fs::write(&zip, bytes).unwrap();
+
+        let state = AppState::new();
+        let info = state.open_archive(&zip, None, None).unwrap();
+
+        assert_eq!(info.format, "zip");
+        assert_eq!(info.structure, "zip_local_headers_recovered");
+        assert!(info.entry_count >= 1);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

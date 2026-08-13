@@ -126,6 +126,7 @@ rustix 同时是 fs4 的传递依赖；errno / bitflags 均为 MIT OR Apache-2.0
 | serde | 1.0.228 | MIT OR Apache-2.0 | 活跃（serde-rs/dtolnay） | IPC DTO 派生（此前为传递依赖，现转 workspace 直接依赖） |
 | trash | 5.2.6 | MIT | 活跃（Byron/trash-rs；持续发布并维护三平台系统废纸篓适配） | 成功创建归档后将用户明确选择的顶层源移入 macOS/Windows/Linux 系统废纸篓；不提供永久删除 fallback |
 | tempfile | 3.27.0 | MIT OR Apache-2.0 | 活跃（Stebalien/Rust CLI 工作组生态） | 归档条目打开与嵌套预览的随机私有临时目录、独占文件和退出清理；IPC 只暴露不透明会话 ID |
+| rustix | 1.1.4 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | 活跃（Bytecode Alliance） | Linux Secret Service 子进程的非阻塞管道与进程组超时终止；此前已是 core/formats 直接依赖 |
 | objc2 | 0.6.4 | MIT | 活跃（madsmtm/objc2） | macOS AppKit 与 Objective-C 类型安全桥接；只在 macOS 目标编译 |
 | objc2-app-kit | 0.3.2 | Zlib OR Apache-2.0 OR MIT | 活跃（madsmtm/objc2） | macOS 系统工作区、应用激活与默认处理器查询 |
 | objc2-foundation | 0.3.2 | MIT | 活跃（madsmtm/objc2） | macOS bundle、字符串与无损本地文件 URL |
@@ -181,15 +182,15 @@ tauri 的传递依赖树较大（wry/tao/objc2 系、muda 等），均为 MIT/Ap
 | 7-Zip / 7zz / 7z | 外部可执行文件，未随本仓库锁定或分发 | GNU LGPL + unRAR restriction（按官方 `license.txt` 复核） | 活跃；官方支持三平台构建和广泛格式清单 | 长尾 unpack-only bridge；候选 WIM writer；RAR 只读候选 |
 | RARLAB UnRAR | 用户自行安装的外部可执行文件，未随本仓库锁定或分发 | RARLAB freeware / unRAR license，禁止借此重建专有 RAR 压缩算法 | 活跃；官方 RAR/WinRAR 平台包提供命令行 UnRAR | 仅为 7zz/7z 已明确确认未加密的 RAR7 v6 条目提供只读流式解码 |
 | wimlib / wimlib-imagex | 外部库或可执行文件候选，未引入 | GPL-3.0 / LGPL-2.1 组合，具体构建配置需发布前复核 | 活跃；官方介绍为跨平台 WIM 创建/修改/提取库 | WIM pack/unpack 发布阻断候选 |
-| libarchive / bsdtar | 系统或外部可执行文件，未随本仓库锁定或分发 | BSD 风格许可证，但具体系统构建含格式插件差异 | 活跃；当前仅作本机 RAR 诊断 fallback | 不作为首发跨平台产品承诺；仅保留诊断或用户显式 fallback |
+| libarchive / bsdtar | 系统或外部可执行文件，未随本仓库锁定或分发 | BSD 风格许可证，但具体系统构建含格式插件差异 | 活跃；用于本机 RAR 诊断、用户显式选择或经严格验证的单文件兼容 fallback | 不作为首发跨平台产品承诺；旧 p7zip RAR5 自动选择只覆盖已知解码缺口，并先核对普通文件路径与大小 |
 
 2026-07-28 复核官方 7-Zip `license.txt` 与 RARLAB 下载、UnRAR 7 说明和许可页面后，当前结论保持不变：
 Squallz 不链接 unrar 源码、不创建 RAR、不实现 RAR recovery record；RAR 只能是外部工具只读能力。
 当前 `squallz-formats` 已实现 7zz/7z read bridge，并让 RAR 只读路径默认优先使用
 `SQUALLZ_7Z` / `7zz` / `7z` / `7za`；但没有把 7-Zip 二进制打包进产物。发布前若随包分发
 7zz/7z，必须补齐 LGPL/unRAR restriction 告知、源码或 relink/replace 路径、平台包内文件归属、
-以及 RAR 创建禁令说明。`SQUALLZ_BSDTAR` / `bsdtar` 仅是诊断或单文件 RAR7 v6 fallback，不是跨平台
-bundled capability。`SQUALLZ_UNRAR` / `unrar` 只在 7zz/7z 明确证明 RAR7 v6 输入未加密后
+以及 RAR 创建禁令说明。`SQUALLZ_BSDTAR` / `bsdtar` 仅是显式、诊断或经严格验证的单文件兼容 fallback，
+不是跨平台 bundled capability。`SQUALLZ_UNRAR` / `unrar` 只在 7zz/7z 明确证明 RAR7 v6 输入未加密后
 流式读取条目，不接收密码，也不随 Squallz 分发；若未来考虑随包分发，必须先单独完成 RARLAB
 许可、版本、平台文件归属和用户可见告知审查。WIM
 创建已实现 external `wimlib-imagex` bridge，但当前仍只调用用户或测试环境提供的外部工具；

@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::time::UNIX_EPOCH;
 
 use serde_json::{json, Value};
-use squallz_core::api::{EntryMeta, EntryType, OpenOptions, Password};
+use squallz_core::api::{ArchiveStructureStatus, EntryMeta, EntryType, OpenOptions, Password};
 use squallz_core::{fold_archive_search_path, fold_archive_search_query, rank_folded_archive_path};
 
 use super::reports::print_pretty_json;
@@ -25,8 +25,8 @@ pub fn run(
     tree: bool,
 ) -> Result<(), CliError> {
     let explicit = password.map(Password::new);
-    let entries = with_password_retry(&ctx.loc, explicit.as_ref(), |pw| {
-        ctx.engine.list(
+    let (entries, structure) = with_password_retry(&ctx.loc, explicit.as_ref(), |pw| {
+        ctx.engine.list_with_structure(
             &archive,
             &OpenOptions {
                 password: pw.cloned(),
@@ -34,6 +34,9 @@ pub fn run(
             },
         )
     })?;
+    if structure == ArchiveStructureStatus::ZipLocalHeadersRecovered {
+        ctx.eprint_problem(ctx.loc.t("cli.list.zip_local_headers_recovered"));
+    }
     let entries = filter_entries_for_search(entries, search.as_deref());
 
     if json {

@@ -10,7 +10,11 @@ import {
   recoveryResultOk,
 } from "./recovery-result";
 import { platformTrashName } from "./platform-labels";
-import { readExtractResultCounts } from "./extract-result";
+import {
+  extractResultHasRecoveredZipStructure,
+  readExtractResultCounts,
+  recoveredZipArchivePaths,
+} from "./extract-result";
 import {
   resultProblemMessages,
   resultProblemTotal,
@@ -573,7 +577,15 @@ function appendProblems(rows: TaskResultDetailRow[], task: TaskDialogModel): voi
   const problems = resultProblemMessages(task.result);
   const displayed = problems.slice(0, 6);
   for (const [index, problem] of displayed.entries()) {
-    const value = compactResultDetail(problem);
+    const localizedProblem = task.spec.kind === "test"
+      && index === 0
+      && task.result?.structure === "zip_local_headers_recovered"
+      ? tr(
+        "gui.task.result_zip_local_headers_recovered",
+        "ZIP central directory is missing or unreadable; entries were recovered from local headers",
+      )
+      : problem;
+    const value = compactResultDetail(localizedProblem);
     if (value) {
       rows.push({
         label: t("gui.task.result_problem_n", { index: index + 1 }),
@@ -591,6 +603,24 @@ function appendProblems(rows: TaskResultDetailRow[], task: TaskDialogModel): voi
       }),
     });
   }
+}
+
+function appendArchiveStructureWarning(
+  rows: TaskResultDetailRow[],
+  task: TaskDialogModel,
+): void {
+  if (!extractResultHasRecoveredZipStructure(task.result)) return;
+  const archives = recoveredZipArchivePaths(task.result)
+    .map((archive) => pathBaseName(archive) || archive);
+  const warning = tr(
+    "gui.archive.zip_local_headers_recovered",
+    "The ZIP index is missing or unreadable. The visible files came from local headers; test the archive and rebuild its index before relying on it.",
+  );
+  rows.push({
+    label: tr("gui.archive.zip_index_damaged", "ZIP index damaged"),
+    value: archives.length > 0 ? `${archives.join("\n")}\n${warning}` : warning,
+    scrollable: archives.length > 0,
+  });
 }
 
 export function taskResultDetailTitle(task: TaskDialogModel): string {
@@ -919,6 +949,7 @@ export function taskResultDetailRows(task: TaskDialogModel): TaskResultDetailRow
         value: formatBytes(extractResultNumber(task, "output_bytes")),
       },
     );
+    appendArchiveStructureWarning(rows, task);
     appendProblems(rows, task);
     return rows;
   }
@@ -1020,6 +1051,7 @@ export function taskResultDetailRows(task: TaskDialogModel): TaskResultDetailRow
         value: selectedArchives.toLocaleString(),
       });
     }
+    appendArchiveStructureWarning(rows, task);
   }
 
   if (task.revealPath) {
@@ -1232,6 +1264,17 @@ export function taskNextStepDetail(task: TaskDialogModel, taskWindowMode: boolea
     return tr(
       "gui.task.next_step_recovery_verify_failed",
       "Review the recovery report before deciding whether to repair or extract readable files.",
+    );
+  }
+  if (
+    (task.spec.kind === "extract"
+      || task.spec.kind === "extract_nested"
+      || task.spec.kind === "batch_extract")
+    && extractResultHasRecoveredZipStructure(task.result)
+  ) {
+    return tr(
+      "gui.archive.zip_local_headers_recovered",
+      "The ZIP index is missing or unreadable. The visible files came from local headers; test the archive and rebuild its index before relying on it.",
     );
   }
   if (task.spec.kind === "compress" || task.spec.kind === "convert") {

@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-import { chmodSync, copyFileSync, existsSync, readFileSync, rmSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { dirname, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -8,6 +9,7 @@ const frontendDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const root = resolve(frontendDir, "..");
 const universalMacTarget = "universal-apple-darwin";
 const universalMacComponents = ["aarch64-apple-darwin", "x86_64-apple-darwin"];
+const linuxSfxDataMagic = Buffer.from("SQZSFXD1", "ascii");
 
 for (const profile of ["debug", "release"]) {
   const legacyDocs = resolve(root, "target", profile, "bundle", "macos", "Squallz.app", "Contents", "Resources", "docs");
@@ -26,6 +28,17 @@ function run(command, args, cwd, env = process.env) {
   if (result.status !== 0) {
     process.exit(result.status ?? 1);
   }
+}
+
+function writeLinuxSfxData(runtimePath, templatePath) {
+  const runtime = readFileSync(runtimePath);
+  const length = Buffer.alloc(8);
+  length.writeBigUInt64LE(BigInt(runtime.length));
+  const digest = createHash("sha256").update(runtime).digest();
+  writeFileSync(templatePath, Buffer.concat([linuxSfxDataMagic, length, digest, runtime]), {
+    mode: 0o644,
+  });
+  chmodSync(templatePath, 0o644);
 }
 
 function rustHostTriple() {
@@ -117,8 +130,11 @@ if (targetTriple === universalMacTarget) {
       throw new Error(`built sqz-sfx runtime is missing: ${runtimePath}`);
     }
     const templatePath = resolve(root, "target", "release", "sqz-sfx-template.stub");
-    copyFileSync(runtimePath, templatePath);
-    if (!executableSuffix) chmodSync(templatePath, 0o755);
+    if (targetTriple.includes("linux")) {
+      writeLinuxSfxData(runtimePath, templatePath);
+    } else {
+      copyFileSync(runtimePath, templatePath);
+    }
   }
 }
 if (!executableSuffix) chmodSync(sidecarPath, 0o755);

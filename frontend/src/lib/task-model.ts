@@ -101,7 +101,8 @@ export function taskOutcomeNeedsAttention(task: TaskDialogModel): boolean {
     return task.result?.ok === false;
   }
   if (task.spec.kind === "batch_extract") {
-    return Number(task.result?.failed ?? 0) > 0;
+    return Number(task.result?.failed ?? 0) > 0
+      || extractResultNeedsAttention(task.result);
   }
   if (task.spec.kind === "extract" || task.spec.kind === "extract_nested") {
     return extractResultNeedsAttention(task.result);

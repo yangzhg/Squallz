@@ -16,6 +16,7 @@ export interface ArchiveInfo {
   name: string;
   read_only: boolean;
   format: string;
+  structure: "complete" | "zip_local_headers_recovered";
   entry_count: number;
   volumes: string[] | null;
   legacy_encoding_count: number;

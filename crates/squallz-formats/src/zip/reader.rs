@@ -10,9 +10,9 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use crc32fast::Hasher;
 use flate2::read::DeflateDecoder;
 use squallz_format_api::{
-    ArchiveReader, BoundedProblemLog, ControlToken, EntryMeta, EntryPath, EntryType, FormatError,
-    LimitsAccountant, OpenOptions, Password, ProgressSink, ReadSeek, SafetyLimits, TestReport,
-    TestSummary, TEST_PROBLEM_PREVIEW_LIMIT,
+    ArchiveReader, ArchiveStructureStatus, BoundedProblemLog, ControlToken, EntryMeta, EntryPath,
+    EntryType, FormatError, LimitsAccountant, OpenOptions, Password, ProgressSink, ReadSeek,
+    SafetyLimits, TestReport, TestSummary, TEST_PROBLEM_PREVIEW_LIMIT,
 };
 use zip::read::ZipFile;
 use zip::{ZipArchive, ZipReadOptions};
@@ -398,6 +398,10 @@ impl LocalZipArchiveReader {
 }
 
 impl ArchiveReader for LocalZipArchiveReader {
+    fn structure_status(&self) -> ArchiveStructureStatus {
+        ArchiveStructureStatus::ZipLocalHeadersRecovered
+    }
+
     fn entries(&mut self) -> Box<dyn Iterator<Item = Result<EntryMeta, FormatError>> + '_> {
         Box::new(self.entries.iter().map(|entry| Ok(entry.meta.clone())))
     }

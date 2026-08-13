@@ -16,11 +16,11 @@ use std::time::{Instant, SystemTime};
 use std::os::unix::fs::MetadataExt;
 
 use squallz_core::api::{
-    split_volume_name, ArchiveSourceSet, BoundedProblemLog, CompressionLevel, ConflictDecision,
-    ConflictResolver, ControlToken, CreateOptions, Detected, EntryMeta, EntryPath,
-    ExtractProblemReporter, ExtractReport, FormatError, OpenOptions, OverwritePolicy, Password,
-    ProblemPreview, ProgressPhase, ProgressSink, RecoverySummary, SplitOutputMode, SymlinkPolicy,
-    UpdateOp,
+    split_volume_name, ArchiveSourceSet, ArchiveStructureStatus, BoundedProblemLog,
+    CompressionLevel, ConflictDecision, ConflictResolver, ControlToken, CreateOptions, Detected,
+    EntryMeta, EntryPath, ExtractProblemReporter, ExtractReport, FormatError, OpenOptions,
+    OverwritePolicy, Password, ProblemPreview, ProgressPhase, ProgressSink, RecoverySummary,
+    SplitOutputMode, SymlinkPolicy, UpdateOp,
 };
 use squallz_core::{
     create_destination_has_conflict, validate_sfx_template, ChecksumAlgorithm, CreateArtifactKind,
@@ -2621,11 +2621,12 @@ fn is_plain_zip_path(path: &Path) -> bool {
 fn extract_result_json(
     plan: ExtractPlan,
     report: ExtractReport,
+    structure: ArchiveStructureStatus,
     best_effort: bool,
     problems: ProblemPreview,
 ) -> serde_json::Value {
     let problems_truncated = problems.is_truncated();
-    serde_json::json!({
+    let mut result = serde_json::json!({
         "dest": report.destination.to_string_lossy(),
         "best_effort": best_effort,
         "skipped": problems.total,
@@ -2644,7 +2645,11 @@ fn extract_result_json(
             "failed": report.failed,
             "output_bytes": report.output_bytes,
         },
-    })
+    });
+    if !structure.is_complete() {
+        result["structure"] = serde_json::json!(structure.id());
+    }
+    result
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2671,7 +2676,7 @@ fn run_extract_archive_job(
     password: Option<&str>,
     verify_sfx: bool,
     best_effort: bool,
-) -> Result<serde_json::Value, FormatError> {
+) -> Result<(serde_json::Value, ArchiveStructureStatus), FormatError> {
     if verify_sfx {
         squallz_core::verify_sfx_payload(archive, &settings.resource_options(), sink, ctl)?;
     }
@@ -2706,7 +2711,7 @@ fn run_extract_archive_job(
     };
     let archive = archive.to_path_buf();
     let dest = dest.to_path_buf();
-    let (plan, report) = with_gui_password(
+    let (plan, report, structure) = with_gui_password(
         state,
         bridge,
         &**events,
@@ -2724,7 +2729,7 @@ fn run_extract_archive_job(
             };
             state
                 .engine
-                .plan_and_extract_with_report_guarded_controlled(
+                .plan_and_extract_with_report_guarded_and_structure_controlled(
                     &archive,
                     &dest,
                     Path::new(archive_display_name),
@@ -2748,12 +2753,14 @@ fn run_extract_archive_job(
                 )
         },
     )?;
-    Ok(extract_result_json(
+    let result = extract_result_json(
         plan,
         report,
+        structure,
         best_effort,
         problem_collector.summary(),
-    ))
+    );
+    Ok((result, structure))
 }
 
 #[allow(clippy::too_many_arguments)] // batch job shares the same GUI job context as extract
@@ -2786,6 +2793,7 @@ fn run_batch_extract_job(
     let mut outputs = Vec::new();
     let mut failures = Vec::new();
     let mut skipped_total = 0usize;
+    let mut recovered_archives = 0usize;
 
     for (index, work_item) in work_items.iter().enumerate() {
         ctl.checkpoint()?;
@@ -2819,7 +2827,7 @@ fn run_batch_extract_job(
             false,
             item.best_effort,
         ) {
-            Ok(result) => {
+            Ok((result, structure)) => {
                 let skipped = match result.get("skipped").and_then(|value| value.as_u64()) {
                     Some(value) => value as usize,
                     None => 0,
@@ -2833,14 +2841,19 @@ fn run_batch_extract_job(
                     .and_then(|value| value.as_bool())
                     .is_some_and(|value| value);
                 skipped_total = skipped_total.saturating_add(skipped);
-                outputs.push(serde_json::json!({
+                let mut output = serde_json::json!({
                     "archive": shown_path,
                     "dest": dest,
                     "skipped": skipped,
                     "best_effort": best_effort,
                     "plan": result["plan"].clone(),
                     "counts": result["counts"].clone(),
-                }));
+                });
+                if structure == ArchiveStructureStatus::ZipLocalHeadersRecovered {
+                    recovered_archives = recovered_archives.saturating_add(1);
+                    output["structure"] = result["structure"].clone();
+                }
+                outputs.push(output);
             }
             Err(FormatError::Cancelled) => return Err(FormatError::Cancelled),
             Err(error) => {
@@ -2858,7 +2871,7 @@ fn run_batch_extract_job(
         batch_sink.finish_archive(index, label);
     }
 
-    Ok(serde_json::json!({
+    let mut result = serde_json::json!({
         "operation": "batch_extract",
         "archives": work_items.len(),
         "selected_archives": items.len(),
@@ -2868,7 +2881,13 @@ fn run_batch_extract_job(
         "skipped": skipped_total,
         "outputs": outputs,
         "failures": failures,
-    }))
+    });
+    if recovered_archives > 0 {
+        result["structure"] =
+            serde_json::json!(ArchiveStructureStatus::ZipLocalHeadersRecovered.id());
+        result["recovered_archives"] = serde_json::json!(recovered_archives);
+    }
+    Ok(result)
 }
 
 /// Executes one job spec on the worker thread. Returns an optional result
@@ -4388,7 +4407,7 @@ fn run_job(
                 _ => path.as_str(),
             };
             let display_name = batch_archive_label(Path::new(display_path));
-            let result = run_extract_archive_job(
+            let (result, _) = run_extract_archive_job(
                 state,
                 settings,
                 bridge,
@@ -4520,7 +4539,7 @@ fn run_job(
             );
             state.forget_password(&temp_path);
             let physical = temp_path.to_string_lossy();
-            let result = extraction.map_err(|error| {
+            let (result, _) = extraction.map_err(|error| {
                 redact_format_error_path(error, physical.as_ref(), display_name)
             })?;
             Ok(Some(result))
@@ -4536,7 +4555,7 @@ fn run_job(
                 _ => path.as_str(),
             };
             let display_name = batch_archive_label(Path::new(display_path));
-            let report = with_gui_password(
+            let outcome = with_gui_password(
                 state,
                 bridge,
                 &**events,
@@ -4552,15 +4571,19 @@ fn run_job(
                         password: pw.cloned(),
                         encoding_override: encoding.clone(),
                     };
-                    state.engine.test_summary(&archive, &open, sink, ctl)
+                    state
+                        .engine
+                        .test_summary_with_structure(&archive, &open, sink, ctl)
                 },
             )?;
+            let structure = outcome.structure;
+            let report = outcome.into_summary();
             let ok = report.is_ok();
             let entries_tested = report.entries_tested;
             let problems_total = report.problems.total;
             let problems_truncated = report.problems.is_truncated();
             let problem_messages = report.problems.messages;
-            Ok(Some(serde_json::json!({
+            let mut result = serde_json::json!({
                 "ok": ok,
                 "entries": entries_tested,
                 "entries_tested": entries_tested,
@@ -4568,7 +4591,11 @@ fn run_job(
                 "problem_messages": problem_messages,
                 "problems_total": problems_total,
                 "problems_truncated": problems_truncated,
-            })))
+            });
+            if !structure.is_complete() {
+                result["structure"] = serde_json::json!(structure.id());
+            }
+            Ok(Some(result))
         }
         JobSpec::Convert {
             src,
@@ -4714,12 +4741,18 @@ fn run_job(
                     "ZIP index rebuild output must be a ZIP-family archive".into(),
                 ));
             }
-            let test_report = state
-                .engine
-                .test(&src_path, &OpenOptions::default(), sink, ctl)?;
-            if !test_report.is_ok() {
-                return Err(FormatError::CorruptArchive(test_report.problems.join("; ")));
+            let source_test = state.engine.test_summary_with_structure(
+                &src_path,
+                &OpenOptions::default(),
+                sink,
+                ctl,
+            )?;
+            if !source_test.payload_is_ok() {
+                return Err(FormatError::CorruptArchive(
+                    source_test.summary.problems.messages.join("; "),
+                ));
             }
+            let source_entries = source_test.summary.entries_tested;
             let create = CreateOptions {
                 level: CompressionLevel::from_numeric(*level),
                 resources: settings.resource_options(),
@@ -4738,7 +4771,7 @@ fn run_job(
                 "tool": "zip-local-header-rebuild",
                 "dest": dest_path.to_string_lossy(),
                 "in_place": in_place,
-                "source_entries": test_report.entries_tested,
+                "source_entries": source_entries,
             })))
         }
         JobSpec::Protect {
@@ -5285,6 +5318,7 @@ mod tests {
                 failed: 1,
                 output_bytes: 4096,
             },
+            ArchiveStructureStatus::Complete,
             true,
             ProblemPreview {
                 total: 1,
@@ -8751,6 +8785,13 @@ mod tests {
                 &ControlToken::new(),
             )
             .unwrap();
+        let mut zip_b_bytes = std::fs::read(&zip_b).unwrap();
+        let central_start = zip_b_bytes
+            .windows(4)
+            .position(|window| window == b"PK\x01\x02")
+            .expect("central directory exists in sample");
+        zip_b_bytes.truncate(central_start);
+        std::fs::write(&zip_b, zip_b_bytes).unwrap();
 
         let manager = JobManager::new();
         let sink = Arc::new(TestSink::default());
@@ -8804,9 +8845,67 @@ mod tests {
         assert_eq!(result["outputs"][0]["plan"]["layout"], "direct");
         assert_eq!(result["outputs"][0]["counts"]["created"], 1);
         assert_eq!(result["outputs"][0]["counts"]["failed"], 0);
+        assert!(result["outputs"][0].get("structure").is_none());
+        assert_eq!(
+            result["outputs"][1]["structure"],
+            "zip_local_headers_recovered"
+        );
+        assert_eq!(result["structure"], "zip_local_headers_recovered");
+        assert_eq!(result["recovered_archives"], 1);
         assert!(events.iter().any(|(name, payload)| name == EV_PROGRESS
             && payload["id"] == id
             && payload["total"].as_u64().unwrap_or(0) == 2 * BATCH_PROGRESS_SCALE));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn extract_job_reports_recovered_zip_structure() {
+        let dir = temp_dir("extract-recovered-zip-structure");
+        let archive = dir.join("missing-central-directory.zip");
+        let destination = dir.join("output");
+        let mut bytes = build_stored_zip(&[(b"recoverable.txt", b"recoverable payload")]);
+        let central_start = bytes
+            .windows(4)
+            .position(|window| window == b"PK\x01\x02")
+            .expect("central directory exists in sample");
+        bytes.truncate(central_start);
+        std::fs::write(&archive, bytes).unwrap();
+
+        let manager = JobManager::new();
+        let state = Arc::new(AppState::new());
+        let sink = Arc::new(TestSink::default());
+        let events: Arc<dyn EventSink> = sink.clone();
+        let id = manager.submit(
+            Arc::clone(&state),
+            Arc::clone(&events),
+            JobSpec::Extract {
+                path: archive.to_string_lossy().into_owned(),
+                dest: destination.to_string_lossy().into_owned(),
+                expected_destination: None,
+                expected_input_guard: None,
+                selection: None,
+                overwrite: "skip".into(),
+                symlinks: "preserve".into(),
+                smart: false,
+                encoding: None,
+                password: None,
+                verify_sfx: false,
+                best_effort: false,
+            },
+            SettingsDto::default(),
+        );
+        manager.wait_idle();
+
+        assert_eq!(
+            std::fs::read(destination.join("recoverable.txt")).unwrap(),
+            b"recoverable payload"
+        );
+        let events = sink.events.lock().unwrap().clone();
+        assert_eq!(states_of(&events, id), vec!["queued", "running", "done"]);
+        let result = done_result(&events, id).unwrap();
+        assert_eq!(result["structure"], "zip_local_headers_recovered");
+        assert_eq!(result["counts"]["created"], 1);
+        assert_eq!(result["counts"]["failed"], 0);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -11306,6 +11405,45 @@ exit 2
             result["problem_messages"].as_array().map(Vec::len),
             Some(20)
         );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn recovered_zip_test_job_reports_typed_structure_status() {
+        let dir = temp_dir("test-recovered-zip-structure");
+        let archive = dir.join("missing-central-directory.zip");
+        let mut bytes = build_stored_zip(&[(b"recoverable.txt", b"recoverable payload")]);
+        let central_start = bytes
+            .windows(4)
+            .position(|window| window == b"PK\x01\x02")
+            .expect("central directory exists in sample");
+        bytes.truncate(central_start);
+        std::fs::write(&archive, bytes).unwrap();
+
+        let manager = JobManager::new();
+        let state = Arc::new(AppState::new());
+        let sink = Arc::new(TestSink::default());
+        let events: Arc<dyn EventSink> = sink.clone();
+        let id = manager.submit(
+            Arc::clone(&state),
+            Arc::clone(&events),
+            JobSpec::Test {
+                path: archive.to_string_lossy().into_owned(),
+                encoding: None,
+                password: None,
+            },
+            SettingsDto::default(),
+        );
+        manager.wait_idle();
+
+        let events = sink.events.lock().unwrap().clone();
+        assert_eq!(states_of(&events, id), vec!["queued", "running", "done"]);
+        let result = done_result(&events, id).unwrap();
+        assert_eq!(result["ok"], false);
+        assert_eq!(result["entries_tested"], 1);
+        assert_eq!(result["problems_total"], 1);
+        assert_eq!(result["structure"], "zip_local_headers_recovered");
+        assert_eq!(result["problem_messages"].as_array().map(Vec::len), Some(1));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

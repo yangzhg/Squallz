@@ -14,7 +14,7 @@ use common::{build_stored_zip, command_exists, crc32, engine, RawZipEntry, TempD
 use squallz_format_api::{
     CompressionLevel, ControlToken, CreateOptions, Detected, EntryMeta, EntryPath, EntryType,
     ExtractOptions, ExtractProblemReporter, FormatError, NoProgress, OpenOptions, OverwritePolicy,
-    ProgressPhase, ProgressSink,
+    ProgressPhase, ProgressSink, TestReport,
 };
 
 #[derive(Default)]
@@ -29,6 +29,18 @@ impl ExtractProblemReporter for SkippedCollector {
             .unwrap()
             .push(format!("{}: {error}", path.display));
     }
+}
+
+fn assert_recovered_structure_problem(report: &TestReport, expected_entries: u64) {
+    assert_eq!(report.entries_tested, expected_entries);
+    assert!(!report.is_ok(), "recovered ZIP structure must not pass");
+    assert_eq!(report.problems.len(), 1, "{:?}", report.problems);
+    assert!(
+        report.problems[0].contains("central directory is missing or unreadable")
+            && report.problems[0].contains("recovered from local headers"),
+        "{:?}",
+        report.problems
+    );
 }
 
 struct CancelOnUnexpectedEntry<'a> {
@@ -1101,8 +1113,7 @@ fn local_header_fallback_extracts_when_central_directory_is_missing() {
             &ControlToken::new(),
         )
         .unwrap();
-    assert!(report.is_ok(), "{:?}", report.problems);
-    assert_eq!(report.entries_tested, 2);
+    assert_recovered_structure_problem(&report, 2);
 }
 
 #[test]
@@ -1133,8 +1144,7 @@ fn local_header_fallback_extracts_zip64_local_sizes() {
             &ControlToken::new(),
         )
         .unwrap();
-    assert!(report.is_ok(), "{:?}", report.problems);
-    assert_eq!(report.entries_tested, 1);
+    assert_recovered_structure_problem(&report, 1);
 
     let dest = tmp.path().join("out");
     eng.extract(
@@ -1301,8 +1311,7 @@ fn local_header_fallback_extracts_signed_zip64_data_descriptor_entries() {
             &ControlToken::new(),
         )
         .unwrap();
-    assert!(report.is_ok(), "{:?}", report.problems);
-    assert_eq!(report.entries_tested, 2);
+    assert_recovered_structure_problem(&report, 2);
 
     let dest = tmp.path().join("out");
     eng.extract(
@@ -1367,8 +1376,7 @@ fn local_header_fallback_extracts_unsigned_zip64_data_descriptor_entries() {
             &ControlToken::new(),
         )
         .unwrap();
-    assert!(report.is_ok(), "{:?}", report.problems);
-    assert_eq!(report.entries_tested, 2);
+    assert_recovered_structure_problem(&report, 2);
 
     let dest = tmp.path().join("out");
     eng.extract(
@@ -1451,8 +1459,7 @@ fn local_header_fallback_extracts_signed_data_descriptor_entries() {
             &ControlToken::new(),
         )
         .unwrap();
-    assert!(report.is_ok(), "{:?}", report.problems);
-    assert_eq!(report.entries_tested, 2);
+    assert_recovered_structure_problem(&report, 2);
 }
 
 #[test]
@@ -1515,8 +1522,7 @@ fn local_header_fallback_extracts_unsigned_data_descriptor_entries() {
             &ControlToken::new(),
         )
         .unwrap();
-    assert!(report.is_ok(), "{:?}", report.problems);
-    assert_eq!(report.entries_tested, 2);
+    assert_recovered_structure_problem(&report, 2);
 }
 
 #[test]

@@ -152,6 +152,13 @@ therefore means that the managed files are correct, not that Nautilus or Dolphin
 is installed, running, or displaying them. There is no Thunar installer and no
 `xdg-mime` or default-application claim.
 
+Official `linux-x64` packages are built on Ubuntu 22.04, and the release job
+rejects a packaging host whose glibc baseline is not 2.35. This bounds the
+glibc version available to Squallz binaries at build time; it does not claim
+that every Linux distribution can run the AppImage. WebKitGTK, the graphics
+stack, AppImage runtime behavior, and file-manager integration still require
+native package smoke tests on each supported distribution.
+
 Remaining Linux release work:
 
 - run native Nautilus and Dolphin smoke tests on supported distributions;

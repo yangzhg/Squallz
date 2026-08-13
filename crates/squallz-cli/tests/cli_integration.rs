@@ -1855,6 +1855,106 @@ fn listed_paths(archive: &Path) -> Vec<String> {
         .collect()
 }
 
+#[test]
+fn system_tar_root_placeholder_is_ignored_consistently() {
+    let Some(archiver) = ["bsdtar", "tar"].into_iter().find(|command| {
+        Command::new(command)
+            .arg("--version")
+            .output()
+            .is_ok_and(|output| output.status.success())
+    }) else {
+        eprintln!("skipping: no system tar");
+        return;
+    };
+
+    let dir = temp_dir("system-tar-root-placeholder");
+    let source = dir.join("source");
+    let archive = dir.join("external.tar");
+    let destination = dir.join("output");
+    std::fs::create_dir_all(source.join("nested")).unwrap();
+    std::fs::write(source.join("alpha.txt"), b"alpha").unwrap();
+    std::fs::write(source.join("nested/beta.txt"), b"beta").unwrap();
+
+    let created = Command::new(archiver)
+        .arg("-cf")
+        .arg(&archive)
+        .arg("-C")
+        .arg(&source)
+        .arg(".")
+        .output()
+        .expect("run system tar");
+    assert!(
+        created.status.success(),
+        "{archiver} create failed: {}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+    let fixture_listing = Command::new(archiver)
+        .arg("-tf")
+        .arg(&archive)
+        .output()
+        .expect("list system tar fixture");
+    assert!(fixture_listing.status.success());
+    assert!(
+        String::from_utf8_lossy(&fixture_listing.stdout)
+            .lines()
+            .any(|path| path == "." || path == "./"),
+        "fixture must contain the system tar root placeholder"
+    );
+
+    let listed = run(sqz()
+        .args(["--lang", "en-US", "list"])
+        .arg(&archive)
+        .arg("--json"));
+    assert!(listed.status.success(), "list failed: {}", stderr(&listed));
+    let entries = stdout_json(&listed);
+    let entries = entries.as_array().expect("entry array");
+    let paths: Vec<&str> = entries
+        .iter()
+        .filter_map(|entry| entry["path"].as_str())
+        .collect();
+    assert!(!paths.iter().any(|path| *path == "." || *path == "./"));
+    assert!(paths.contains(&"./alpha.txt"), "paths: {paths:?}");
+    assert!(paths.contains(&"./nested/beta.txt"), "paths: {paths:?}");
+
+    let tested = run(sqz()
+        .args(["--lang", "en-US", "test"])
+        .arg(&archive)
+        .arg("--json"));
+    assert!(tested.status.success(), "test failed: {}", stderr(&tested));
+    let tested = stdout_json(&tested);
+    assert_eq!(tested["ok"], true);
+    assert_eq!(tested["entries_tested"], entries.len() as u64);
+
+    let extracted = run(sqz()
+        .args(["--lang", "en-US", "extract"])
+        .arg(&archive)
+        .arg("-d")
+        .arg(&destination)
+        .args(["--overwrite", "all", "--json"]));
+    assert!(
+        extracted.status.success(),
+        "extract failed: {}{}",
+        stdout(&extracted),
+        stderr(&extracted)
+    );
+    let extracted = stdout_json(&extracted);
+    assert_eq!(extracted["ok"], true);
+    assert_eq!(
+        extracted["counts"]["selected_entries"],
+        entries.len() as u64
+    );
+    assert_eq!(
+        std::fs::read(destination.join("alpha.txt")).unwrap(),
+        b"alpha"
+    );
+    assert_eq!(
+        std::fs::read(destination.join("nested/beta.txt")).unwrap(),
+        b"beta"
+    );
+
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 fn assert_cross_platform_clean(paths: &[String], root_name: &str) {
     assert!(paths
         .iter()
@@ -3189,6 +3289,7 @@ fn compress_list_test_extract_roundtrip_with_json() {
     assert_eq!(report["ok"], true);
     assert!(report["entries_tested"].as_u64().unwrap() >= 6);
     assert!(report["problems"].as_array().unwrap().is_empty());
+    assert!(report.get("structure").is_none());
 
     // extract and compare contents
     let dest = dir.join("extracted");
@@ -3199,7 +3300,13 @@ fn compress_list_test_extract_roundtrip_with_json() {
         .arg(&dest)
         .arg("--json"));
     assert!(out.status.success(), "extract failed: {}", stderr(&out));
+    assert!(
+        stderr(&out).trim().is_empty(),
+        "healthy archive extraction must not warn: {}",
+        stderr(&out)
+    );
     let report: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("valid JSON");
+    assert!(report.get("structure").is_none());
     assert_eq!(report["ok"], true);
     assert_eq!(report["operation"], "extract");
     assert_eq!(report["dest"], dest.display().to_string());
@@ -5020,7 +5127,10 @@ fn zip_local_header_fallback_is_available_through_cli() {
     )
     .unwrap();
 
-    let out = run(sqz().arg("list").arg(&archive).arg("--json"));
+    let out = run(sqz()
+        .args(["--lang", "en-US", "list"])
+        .arg(&archive)
+        .arg("--json"));
     assert!(out.status.success(), "list failed: {}", stderr(&out));
     let entries: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("valid JSON");
     let paths: Vec<&str> = entries
@@ -5030,13 +5140,28 @@ fn zip_local_header_fallback_is_available_through_cli() {
         .map(|entry| entry["path"].as_str().unwrap())
         .collect();
     assert_eq!(paths, vec!["good.txt", "docs/readme.md"]);
+    assert!(
+        stderr(&out).contains("central directory is missing or unreadable"),
+        "stderr: {}",
+        stderr(&out)
+    );
 
     let out = run(sqz().arg("test").arg(&archive).arg("--json"));
-    assert!(out.status.success(), "test failed: {}", stderr(&out));
+    assert_eq!(out.status.code(), Some(3), "stderr: {}", stderr(&out));
     let report: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("valid JSON");
-    assert_eq!(report["ok"], true);
+    assert_eq!(report["ok"], false);
+    assert_eq!(report["structure"], "zip_local_headers_recovered");
     assert_eq!(report["entries_tested"], 2);
-    assert!(report["problems"].as_array().unwrap().is_empty());
+    assert_eq!(report["problems_total"], 1);
+    assert!(report["problems"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|problem| {
+            problem
+                .as_str()
+                .is_some_and(|text| text.contains("central directory"))
+        }));
 
     let dest = dir.join("out");
     let out = run(sqz()
@@ -5045,10 +5170,64 @@ fn zip_local_header_fallback_is_available_through_cli() {
         .arg("-d")
         .arg(&dest));
     assert!(out.status.success(), "extract failed: {}", stderr(&out));
+    assert!(
+        stderr(&out).contains("Extraction used a recovery view from local headers"),
+        "stderr: {}",
+        stderr(&out)
+    );
     assert_eq!(std::fs::read(dest.join("good.txt")).unwrap(), b"safe bytes");
     assert_eq!(
         std::fs::read_to_string(dest.join("docs/readme.md")).unwrap(),
         "# recovered\n"
+    );
+
+    let json_dest = dir.join("json-out");
+    let out = run(sqz()
+        .args(["--lang", "en-US", "extract"])
+        .arg(&archive)
+        .arg("-d")
+        .arg(&json_dest)
+        .arg("--json"));
+    assert!(
+        out.status.success(),
+        "JSON extract failed: {}",
+        stderr(&out)
+    );
+    assert!(
+        stderr(&out).contains("Extraction used a recovery view from local headers"),
+        "stderr: {}",
+        stderr(&out)
+    );
+    let report = stdout_json(&out);
+    let fields: std::collections::BTreeSet<&str> = report
+        .as_object()
+        .expect("extract report object")
+        .keys()
+        .map(|key| key.as_str())
+        .collect();
+    let legacy_fields = [
+        "best_effort",
+        "counts",
+        "dest",
+        "directories",
+        "matched",
+        "ok",
+        "operation",
+        "output_bytes",
+        "plan",
+        "problems",
+        "problems_total",
+        "problems_truncated",
+        "selected_entries",
+        "skipped",
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(fields, legacy_fields);
+    assert_eq!(report["ok"], true);
+    assert_eq!(
+        std::fs::read(json_dest.join("good.txt")).unwrap(),
+        b"safe bytes"
     );
 
     std::fs::remove_dir_all(&dir).unwrap();
@@ -5087,8 +5266,10 @@ fn repair_zip_rebuilds_missing_central_directory_through_cli() {
     assert_eq!(report["archive"], archive.display().to_string());
     assert_eq!(report["output"], repaired.display().to_string());
     assert_eq!(report["in_place"], false);
-    assert_eq!(report["source"]["ok"], true);
+    assert_eq!(report["source"]["ok"], false);
+    assert_eq!(report["source"]["structure"], "zip_local_headers_recovered");
     assert_eq!(report["source"]["entries_tested"], 2);
+    assert_eq!(report["source"]["problems_total"], 1);
 
     let rebuilt = std::fs::read(&repaired).unwrap();
     assert!(
@@ -5104,6 +5285,7 @@ fn repair_zip_rebuilds_missing_central_directory_through_cli() {
     assert!(out.status.success(), "test failed: {}", stderr(&out));
     let report: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("valid JSON");
     assert_eq!(report["ok"], true);
+    assert!(report.get("structure").is_none());
 
     let dest = dir.join("out");
     let out = run(sqz().arg("extract").arg(&repaired).arg("-d").arg(&dest));
@@ -5226,11 +5408,12 @@ fn zip64_local_header_fallback_is_available_through_cli() {
     assert_eq!(entries[0]["compressed_size"], 26);
 
     let out = run(sqz().arg("test").arg(&archive).arg("--json"));
-    assert!(out.status.success(), "test failed: {}", stderr(&out));
+    assert_eq!(out.status.code(), Some(3), "stderr: {}", stderr(&out));
     let report: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("valid JSON");
-    assert_eq!(report["ok"], true);
+    assert_eq!(report["ok"], false);
+    assert_eq!(report["structure"], "zip_local_headers_recovered");
     assert_eq!(report["entries_tested"], 1);
-    assert!(report["problems"].as_array().unwrap().is_empty());
+    assert_eq!(report["problems_total"], 1);
 
     let dest = dir.join("out");
     let out = run(sqz()
@@ -5377,11 +5560,12 @@ fn zip64_data_descriptor_fallback_is_available_through_cli() {
     assert_eq!(entries[0]["compressed_size"], 24);
 
     let out = run(sqz().arg("test").arg(&archive).arg("--json"));
-    assert!(out.status.success(), "test failed: {}", stderr(&out));
+    assert_eq!(out.status.code(), Some(3), "stderr: {}", stderr(&out));
     let report: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("valid JSON");
-    assert_eq!(report["ok"], true);
+    assert_eq!(report["ok"], false);
+    assert_eq!(report["structure"], "zip_local_headers_recovered");
     assert_eq!(report["entries_tested"], 1);
-    assert!(report["problems"].as_array().unwrap().is_empty());
+    assert_eq!(report["problems_total"], 1);
 
     let dest = dir.join("out");
     let out = run(sqz()
@@ -5778,6 +5962,14 @@ fn info_json_reports_external_tool_availability() {
         rar_policy["fallback_scope"],
         "diagnostic_single_file_or_confirmed_unencrypted_rar7_v6"
     );
+    assert_eq!(
+        rar_policy["fallback_scopes"],
+        serde_json::json!([
+            "explicit_diagnostic",
+            "validated_p7zip_16_02_rar5_single_file",
+            "confirmed_unencrypted_rar7_v6_single_file",
+        ])
+    );
     assert!(rar_policy["license_boundary"]
         .as_str()
         .is_some_and(|boundary| boundary.contains("does not link or bundle unrar code")));
@@ -5869,6 +6061,11 @@ fn info_json_reports_available_external_tool_from_path() {
         find("rar")["implementation"]["policy"]["fallback_scope"],
         "diagnostic_single_file_or_confirmed_unencrypted_rar7_v6"
     );
+    assert!(find("rar")["implementation"]["policy"]["fallback_scopes"]
+        .as_array()
+        .is_some_and(|scopes| scopes
+            .iter()
+            .any(|scope| scope == "validated_p7zip_16_02_rar5_single_file")));
     let rar7_decoder = &find("rar")["implementation"]["availability"]["rar7_v6_decoder"];
     assert_eq!(rar7_decoder["available"], true);
     assert_eq!(rar7_decoder["source"], "path");
@@ -6242,6 +6439,11 @@ fn info_lists_all_i3_formats_registry_driven() {
         rar_policy["fallback_scope"],
         "diagnostic_single_file_or_confirmed_unencrypted_rar7_v6"
     );
+    assert!(rar_policy["fallback_scopes"]
+        .as_array()
+        .is_some_and(|scopes| scopes
+            .iter()
+            .any(|scope| scope == "validated_p7zip_16_02_rar5_single_file")));
     assert_eq!(
         rar_policy["native_multi_volume"]["encrypted_read"],
         "stdin_only_password_bridge"
@@ -8013,6 +8215,28 @@ fn cli_encrypt_names_hides_7z_header_until_password_is_supplied() {
         .unwrap()
         .iter()
         .any(|e| e["path"] == "project/a.txt"));
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn cli_test_reports_wrong_password_for_encrypted_7z_content() {
+    let dir = temp_dir("cli-7z-wrong-password");
+    let root = sample_tree(&dir);
+    let archive = dir.join("protected.7z");
+    let out = run(sqz()
+        .arg("compress")
+        .arg(&root)
+        .arg("-o")
+        .arg(&archive)
+        .args(["--password", "correct password", "--json"]));
+    assert!(out.status.success(), "compress failed: {}", stderr(&out));
+
+    let out = run(sqz()
+        .arg("test")
+        .arg(&archive)
+        .args(["--password", "wrong password", "--json"]));
+    assert_json_error(&out, 4, "wrong_password", "Wrong password");
 
     std::fs::remove_dir_all(&dir).unwrap();
 }

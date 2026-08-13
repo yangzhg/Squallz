@@ -24,7 +24,9 @@ Generated: $(date -u +"%Y-%m-%dT%H:%M:%SZ")
 ## Scope
 
 This smoke check runs Squallz's real Linux \`SecretStore\` backend through
-\`secret-tool\`, using a throwaway archive path and a non-user password.
+\`secret-tool\`, using a throwaway archive path and a non-user password. It
+first uses \`gdbus\` to verify that the desktop session exposes a default
+password collection without creating, unlocking, or modifying one.
 
 ## Inputs
 
@@ -70,6 +72,29 @@ fi
 SECRET_TOOL="$(command -v secret-tool || true)"
 if [[ -z "$SECRET_TOOL" ]]; then
   blocked "missing secret-tool; install libsecret-tools or the distro equivalent"
+fi
+
+GDBUS="$(command -v gdbus || true)"
+if [[ -z "$GDBUS" ]]; then
+  blocked "missing gdbus; install the distro's GLib command-line tools" "$SECRET_TOOL"
+fi
+
+set +e
+DEFAULT_COLLECTION="$({
+  timeout 5s "$GDBUS" call \
+    --session \
+    --dest org.freedesktop.secrets \
+    --object-path /org/freedesktop/secrets \
+    --method org.freedesktop.Secret.Service.ReadAlias \
+    default
+} 2>&1)"
+default_collection_status="$?"
+set -e
+if [[ "$default_collection_status" -ne 0 ]]; then
+  blocked "Secret Service did not provide a usable status response; start the desktop password-store service and retry" "$SECRET_TOOL"
+fi
+if [[ "$DEFAULT_COLLECTION" == *"objectpath '/'"* ]]; then
+  blocked "Secret Service has no default password collection; create or unlock a default keyring and retry" "$SECRET_TOOL"
 fi
 
 mkdir -p "$WORK"

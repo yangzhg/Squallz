@@ -1454,6 +1454,8 @@ mod tests {
         victim: PathBuf,
         trigger: PathBuf,
         victim_modified: std::time::SystemTime,
+        #[cfg(unix)]
+        victim_metadata: Metadata,
         fired: AtomicBool,
     }
 
@@ -1464,6 +1466,20 @@ mod tests {
                 || self.fired.swap(true, Ordering::Relaxed)
             {
                 return;
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+
+                let changed =
+                    change_ctime_without_changing_mode(&self.victim, &self.victim_metadata);
+                assert_ne!(
+                    (
+                        self.victim_metadata.ctime(),
+                        self.victim_metadata.ctime_nsec()
+                    ),
+                    (changed.ctime(), changed.ctime_nsec())
+                );
             }
             fs::write(&self.victim, b"changed").unwrap();
             fs::File::open(&self.victim)
@@ -1650,10 +1666,13 @@ mod tests {
         fs::create_dir(&root).unwrap();
         fs::write(&victim, b"payload").unwrap();
         fs::write(&trigger, b"trigger").unwrap();
+        let victim_metadata = fs::metadata(&victim).unwrap();
         let progress = RewriteSiblingOnTrigger {
             victim: victim.clone(),
             trigger,
-            victim_modified: fs::metadata(&victim).unwrap().modified().unwrap(),
+            victim_modified: victim_metadata.modified().unwrap(),
+            #[cfg(unix)]
+            victim_metadata,
             fired: AtomicBool::new(false),
         };
         let ctl = ControlToken::default();
@@ -1677,10 +1696,13 @@ mod tests {
         fs::create_dir_all(&nested).unwrap();
         fs::write(&victim, b"payload").unwrap();
         fs::write(&trigger, b"trigger").unwrap();
+        let victim_metadata = fs::metadata(&victim).unwrap();
         let progress = RewriteSiblingOnTrigger {
             victim: victim.clone(),
             trigger,
-            victim_modified: fs::metadata(&victim).unwrap().modified().unwrap(),
+            victim_modified: victim_metadata.modified().unwrap(),
+            #[cfg(unix)]
+            victim_metadata,
             fired: AtomicBool::new(false),
         };
         let ctl = ControlToken::default();

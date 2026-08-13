@@ -158,7 +158,7 @@ Current route:
 | PAR2 create | External standard PAR2 bridge plus core publication transaction | Implemented when the tool exists. The backend creates beside the destination in a private directory with an explicit source base; Squallz parses and verifies the complete index/volume set, then publishes every bound file no-replace through a crash-resumable journal and reports the physical outputs. Packaging and license evidence remain required before bundling |
 | Long-tail unpack-only | 7zz/7z bridge | Registry/CLI path plus generated real seed matrix pass on current macOS host; broader third-party corpus and target-platform package evidence remain |
 | WIM create, standalone WIM/ESD read, and native Split WIM create/read | External wimlib-imagex and 7zz/7z bridges | Real local wimlib/7zz create/split/list/test/extract passes on the current macOS host. Native creation publishes a validated standard `.swm`, `2.swm`, … family transactionally with the first member primary; cancellation does not expose partial members. A complete existing family opens from any member after exact-name, GUID, part-count, stable-identity, and completeness validation, and missing parts are named precisely. Target-platform package/license and broader third-party corpus remain |
-| RAR read | External 7zz/7z bridge; bsdtar for explicit diagnostics or single-file v6; optional user-installed unrar for confirmed-unencrypted RAR7 v6 streams | Squallz does not include a RAR decoder. The read-only path supports encrypted input through the stdin-only 7zz/7z password bridge; RAR-format `partN.rar` and legacy `.rar/.r00`–`.r99` sets use isolated first-volume staging and open from any member. On macOS, real RAR5 and old-style RAR4 volume sets including header encryption pass list/extract, password, and missing-volume checks; a real two-volume RAR7 v6 set also passes list/test/extract from its second member with byte-identical output when unrar is configured. Broader historical RAR4, encrypted/solid RAR7 coverage, and the full three-platform package matrix are not release-claimed. Damaged repair is unsupported |
+| RAR read | External 7zz/7z bridge; bsdtar for explicit use or a validated single-file decoder gap; optional user-installed unrar for confirmed-unencrypted RAR7 v6 streams | Squallz does not include a RAR decoder. The read-only path supports encrypted input through the stdin-only 7zz/7z password bridge. On Linux, a public compressed RAR5 sample that p7zip 16.02 can list but cannot decode passes list/test/extract through bsdtar only after both tools report exactly matching regular-file paths and sizes. RAR-format `partN.rar` and legacy `.rar/.r00`–`.r99` sets remain on isolated first-volume 7zz/7z staging and can open from any member. On macOS, real RAR5 and old-style RAR4 volume sets including header encryption pass list/extract, password, and missing-volume checks; a real two-volume RAR7 v6 set also passes list/test/extract from its second member with byte-identical output when unrar is configured. Broader historical RAR4, encrypted/solid RAR7 coverage, and the full three-platform package matrix are not release-claimed. Damaged repair is unsupported |
 
 The 7zz bridge lists entries with `7z l -slt` and streams one entry at a time
 with `7z x -so`. The bridge output still flows through Squallz shared safe
@@ -227,7 +227,7 @@ Implemented code paths:
   seed fixtures do for directory rows.
 - `rar`/`cbr` now use the same `SQUALLZ_7Z` / `7zz` / `7z` / `7za`
   priority path for listing and ordinary per-entry streaming.
-  `SQUALLZ_BSDTAR` remains an explicit diagnostic or single-file-v6 fallback.
+  `SQUALLZ_BSDTAR` remains an explicit diagnostic or validated single-file compatibility fallback.
   If 7zz/7z positively reports at least one v6 entry and explicitly marks
   every readable entry block as unencrypted,
   `SQUALLZ_UNRAR` or `unrar` on PATH can stream the entry after the same
@@ -286,10 +286,12 @@ Implemented code paths:
 - `sqz info --json` also exposes `implementation.policy` for RAR so GUI,
   scripts, and release checks can distinguish the actual product boundary from
   runtime availability: RAR is read-only, not bundled, primary read uses
-  `SQUALLZ_7Z` / `7zz` / `7z` / `7za`; `SQUALLZ_BSDTAR` / `bsdtar` is a
-  diagnostic or single-file-v6 fallback, while `SQUALLZ_UNRAR` / `unrar` is
-  an optional decoder for confirmed-unencrypted RAR7 v6 entry streams. Neither
-  fallback is a bundled cross-platform promise.
+  `SQUALLZ_7Z` / `7zz` / `7z` / `7za`; `SQUALLZ_BSDTAR` / `bsdtar` is an
+  explicit or validated single-file compatibility fallback, while
+  `SQUALLZ_UNRAR` / `unrar` is an optional decoder for confirmed-unencrypted
+  RAR7 v6 entry streams. Neither fallback is a bundled cross-platform promise.
+  The original `fallback_scope` string remains a compatibility alias; new
+  consumers should use the exhaustive `fallback_scopes` array.
 - `sqz compress <inputs...> -o image.wim` can use `SQUALLZ_WIMLIB` or
   `wimlib-imagex` from PATH. The writer stages entries in a temporary
   directory, calls `wimlib-imagex capture`, then copies the WIM image into the

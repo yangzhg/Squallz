@@ -39,6 +39,9 @@ objc2 = "0.6.3"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSApplication", "NSWorkspace"] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSBundle", "NSString", "NSURL"] }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { version = "1.1.4", features = ["fs", "process"] }
+
 [target.'cfg(target_os = "windows")'.dependencies]
 winapi-util = "0.1.11"
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security_Credentials", "Win32_Storage_FileSystem"] }

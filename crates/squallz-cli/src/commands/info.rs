@@ -1810,8 +1810,14 @@ fn rar_policy_json() -> Value {
         "fallback_tools": ["bsdtar", "unrar"],
         "fallback_env": "SQUALLZ_BSDTAR",
         "rar7_decoder_env": "SQUALLZ_UNRAR",
+        // Kept for compatibility with the original single-value policy field.
         "fallback_scope": "diagnostic_single_file_or_confirmed_unencrypted_rar7_v6",
-        "fallback_reason": "bsdtar remains an explicit or single-file v6 fallback; optional unrar only streams confirmed-unencrypted RAR7 v6 entries after 7zz/7z listing and volume validation; neither tool is bundled",
+        "fallback_scopes": [
+            "explicit_diagnostic",
+            "validated_p7zip_16_02_rar5_single_file",
+            "confirmed_unencrypted_rar7_v6_single_file",
+        ],
+        "fallback_reason": "bsdtar remains explicit, can handle confirmed single-file RAR7 v6 input, and is selected for the legacy p7zip 16.02 RAR5 decoder gap only after exact regular-file path and size agreement; optional unrar only streams confirmed-unencrypted RAR7 v6 entries after 7zz/7z listing and volume validation; neither tool is bundled",
         "native_multi_volume": {
             "read_only": true,
             "tools": ["7zz", "7z", "7za"],

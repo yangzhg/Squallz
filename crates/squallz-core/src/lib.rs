@@ -81,9 +81,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use api::{
-    ArchiveReader, ControlToken, CreateOptions, EntryMeta, EntryPath, EntryType, ExtractOptions,
-    FormatError, FormatInfo, FormatRegistry, OpenOptions, ProgressSink, ReadSeek, SafetyLimits,
-    TestReport, TestSummary, UpdateOp,
+    ArchiveReader, ArchiveStructureStatus, ControlToken, CreateOptions, EntryMeta, EntryPath,
+    EntryType, ExtractOptions, FormatError, FormatInfo, FormatRegistry, OpenOptions, ProgressSink,
+    ReadSeek, SafetyLimits, TestReport, TestSummary, UpdateOp, TEST_PROBLEM_PREVIEW_LIMIT,
 };
 use compound::{decompress_factory, SingleFileArchiveReader};
 use controlled_io::{controlled_result, ControlledReadSeek};
@@ -93,6 +93,34 @@ use volumes::MultiVolumeReader;
 /// create/update/convert/test operations.
 pub struct Engine {
     registry: FormatRegistry,
+}
+
+/// Integrity result that keeps payload verification separate from the
+/// archive structure used to reach those payloads.
+#[derive(Debug, Clone)]
+pub struct ArchiveTestOutcome {
+    pub summary: TestSummary,
+    pub structure: ArchiveStructureStatus,
+    payload_problem_count: u64,
+}
+
+impl ArchiveTestOutcome {
+    /// Whether every readable payload entry passed verification. A recovered
+    /// archive can satisfy this while still failing [`TestSummary::is_ok`]
+    /// because its container structure is incomplete.
+    pub const fn payload_is_ok(&self) -> bool {
+        self.payload_problem_count == 0
+    }
+
+    /// Exact number of payload problems before the structural issue is added.
+    pub const fn payload_problem_count(&self) -> u64 {
+        self.payload_problem_count
+    }
+
+    /// Consumes the outcome and returns the complete integrity summary.
+    pub fn into_summary(self) -> TestSummary {
+        self.summary
+    }
 }
 
 /// Preflight summary for local inputs before a create/update-add job starts.
@@ -468,6 +496,38 @@ fn collect_consumed_reader_entries(
     Ok(entries)
 }
 
+fn structure_problem(status: ArchiveStructureStatus) -> Option<&'static str> {
+    match status {
+        ArchiveStructureStatus::Complete => None,
+        ArchiveStructureStatus::ZipLocalHeadersRecovered => Some(
+            "ZIP central directory is missing or unreadable; entries were recovered from local headers",
+        ),
+    }
+}
+
+fn add_structure_problem_to_summary(summary: &mut TestSummary, status: ArchiveStructureStatus) {
+    let Some(problem) = structure_problem(status) else {
+        return;
+    };
+    summary.problems.total = summary.problems.total.saturating_add(1);
+    if TEST_PROBLEM_PREVIEW_LIMIT == 0 {
+        return;
+    }
+    if summary.problems.messages.len() >= TEST_PROBLEM_PREVIEW_LIMIT {
+        summary
+            .problems
+            .messages
+            .truncate(TEST_PROBLEM_PREVIEW_LIMIT.saturating_sub(1));
+    }
+    summary.problems.messages.insert(0, problem.to_owned());
+}
+
+fn add_structure_problem_to_report(report: &mut TestReport, status: ArchiveStructureStatus) {
+    if let Some(problem) = structure_problem(status) {
+        report.problems.insert(0, problem.to_owned());
+    }
+}
+
 fn push_reader_entry(
     entries: &mut Vec<EntryMeta>,
     entry: EntryMeta,
@@ -770,17 +830,60 @@ impl Engine {
         max_entries: u64,
         control: &ControlToken,
     ) -> Result<(String, Vec<EntryMeta>, Option<api::ArchiveSourceSet>), FormatError> {
+        self.list_with_format_source_set_and_structure_with_entry_limit_and_control(
+            path,
+            opts,
+            max_entries,
+            control,
+        )
+        .map(|(format, entries, source_set, _)| (format, entries, source_set))
+    }
+
+    /// Lists entries while retaining the reader's explicit structural state.
+    /// Compatibility list methods intentionally keep their existing return
+    /// shapes and delegate here.
+    pub fn list_with_format_source_set_and_structure_with_entry_limit_and_control(
+        &self,
+        path: &Path,
+        opts: &OpenOptions,
+        max_entries: u64,
+        control: &ControlToken,
+    ) -> Result<
+        (
+            String,
+            Vec<EntryMeta>,
+            Option<api::ArchiveSourceSet>,
+            ArchiveStructureStatus,
+        ),
+        FormatError,
+    > {
         control.checkpoint()?;
         let opened = self.open_identified_with_control(path, opts, control)?;
         let source_set = opened.native_source_set().cloned();
+        let structure = opened.reader.structure_status();
         let OpenedArchive { format, reader, .. } = opened;
         let entries = collect_consumed_reader_entries(reader, max_entries, control)?;
-        Ok((format, entries, source_set))
+        Ok((format, entries, source_set, structure))
     }
 
     /// Lists entries.
     pub fn list(&self, path: &Path, opts: &OpenOptions) -> Result<Vec<EntryMeta>, FormatError> {
         self.list_with_control(path, opts, &ControlToken::default())
+    }
+
+    /// Lists entries together with the structural state used to reach them.
+    pub fn list_with_structure(
+        &self,
+        path: &Path,
+        opts: &OpenOptions,
+    ) -> Result<(Vec<EntryMeta>, ArchiveStructureStatus), FormatError> {
+        self.list_with_format_source_set_and_structure_with_entry_limit_and_control(
+            path,
+            opts,
+            SafetyLimits::default().max_entries,
+            &ControlToken::default(),
+        )
+        .map(|(_, entries, _, structure)| (entries, structure))
     }
 
     /// Lists entries while checking the shared pause/cancellation token
@@ -1064,7 +1167,42 @@ impl Engine {
         F: FnOnce(&[EntryMeta], &ControlToken) -> Result<Option<Vec<EntryPath>>, FormatError>,
         V: FnOnce(&ExtractPlan) -> Result<(), FormatError>,
     {
-        self.plan_and_extract_with_report_guarded_controlled(
+        self.plan_and_extract_with_report_and_structure_controlled(
+            archive,
+            requested_destination,
+            archive_display_path,
+            smart,
+            open_opts,
+            extract_opts,
+            progress,
+            ctl,
+            select,
+            validate_plan,
+        )
+        .map(|(plan, report, _)| (plan, report))
+    }
+
+    /// Controlled extraction that also reports the structure of the reader
+    /// used for the operation. This does not reopen or rescan the archive.
+    #[allow(clippy::too_many_arguments)] // engine facade: each argument has a distinct role
+    pub fn plan_and_extract_with_report_and_structure_controlled<F, V>(
+        &self,
+        archive: &Path,
+        requested_destination: &Path,
+        archive_display_path: &Path,
+        smart: bool,
+        open_opts: &OpenOptions,
+        extract_opts: &ExtractOptions,
+        progress: &dyn ProgressSink,
+        ctl: &ControlToken,
+        select: F,
+        validate_plan: V,
+    ) -> Result<(ExtractPlan, api::ExtractReport, ArchiveStructureStatus), FormatError>
+    where
+        F: FnOnce(&[EntryMeta], &ControlToken) -> Result<Option<Vec<EntryPath>>, FormatError>,
+        V: FnOnce(&ExtractPlan) -> Result<(), FormatError>,
+    {
+        self.plan_and_extract_with_report_guarded_and_structure_controlled(
             archive,
             requested_destination,
             archive_display_path,
@@ -1105,8 +1243,46 @@ impl Engine {
         F: FnOnce(&[EntryMeta], &ControlToken) -> Result<Option<Vec<EntryPath>>, FormatError>,
         V: FnOnce(&ExtractPlan) -> Result<(), FormatError>,
     {
+        self.plan_and_extract_with_report_guarded_and_structure_controlled(
+            archive,
+            requested_destination,
+            archive_display_path,
+            smart,
+            open_opts,
+            extract_opts,
+            progress,
+            ctl,
+            expected_input_guard,
+            select,
+            validate_plan,
+        )
+        .map(|(plan, report, _)| (plan, report))
+    }
+
+    /// Guarded extraction that also reports the structure of the same reader
+    /// used for guard validation, planning, and extraction.
+    #[allow(clippy::too_many_arguments)] // shared guarded extraction implementation
+    pub fn plan_and_extract_with_report_guarded_and_structure_controlled<F, V>(
+        &self,
+        archive: &Path,
+        requested_destination: &Path,
+        archive_display_path: &Path,
+        smart: bool,
+        open_opts: &OpenOptions,
+        extract_opts: &ExtractOptions,
+        progress: &dyn ProgressSink,
+        ctl: &ControlToken,
+        expected_input_guard: Option<ExtractInputGuard>,
+        select: F,
+        validate_plan: V,
+    ) -> Result<(ExtractPlan, api::ExtractReport, ArchiveStructureStatus), FormatError>
+    where
+        F: FnOnce(&[EntryMeta], &ControlToken) -> Result<Option<Vec<EntryPath>>, FormatError>,
+        V: FnOnce(&ExtractPlan) -> Result<(), FormatError>,
+    {
         ctl.checkpoint()?;
         let mut opened = self.open_identified_with_control(archive, open_opts, ctl)?;
+        let structure = opened.reader.structure_status();
         let source_before = expected_input_guard
             .map(|_| opened.inspect_source_state(archive, ctl))
             .transpose()?;
@@ -1161,7 +1337,7 @@ impl Engine {
                 ctl,
             ),
         )?;
-        Ok((plan, report))
+        Ok((plan, report, structure))
     }
 
     /// Integrity test.
@@ -1173,7 +1349,10 @@ impl Engine {
         ctl: &ControlToken,
     ) -> Result<TestReport, FormatError> {
         let mut reader = self.open_with_control(path, opts, ctl)?;
-        controlled_result(ctl, reader.test(progress, ctl))
+        let structure = reader.structure_status();
+        let mut report = controlled_result(ctl, reader.test(progress, ctl))?;
+        add_structure_problem_to_report(&mut report, structure);
+        Ok(report)
     }
 
     /// Integrity test with an exact problem count and bounded diagnostic
@@ -1185,8 +1364,30 @@ impl Engine {
         progress: &dyn ProgressSink,
         ctl: &ControlToken,
     ) -> Result<TestSummary, FormatError> {
+        self.test_summary_with_structure(path, opts, progress, ctl)
+            .map(ArchiveTestOutcome::into_summary)
+    }
+
+    /// Integrity test that retains typed structure status and the payload-only
+    /// problem count. ZIP index repair uses this to accept readable local
+    /// payloads without pretending the damaged source archive is complete.
+    pub fn test_summary_with_structure(
+        &self,
+        path: &Path,
+        opts: &OpenOptions,
+        progress: &dyn ProgressSink,
+        ctl: &ControlToken,
+    ) -> Result<ArchiveTestOutcome, FormatError> {
         let mut reader = self.open_with_control(path, opts, ctl)?;
-        controlled_result(ctl, reader.test_summary(progress, ctl))
+        let structure = reader.structure_status();
+        let mut summary = controlled_result(ctl, reader.test_summary(progress, ctl))?;
+        let payload_problem_count = summary.problems.total;
+        add_structure_problem_to_summary(&mut summary, structure);
+        Ok(ArchiveTestOutcome {
+            summary,
+            structure,
+            payload_problem_count,
+        })
     }
 
     /// Creates an archive. The output format is chosen by the extension of
@@ -2598,6 +2799,7 @@ mod tests {
         entry_size: u64,
         source_set: Option<api::ArchiveSourceSet>,
         source_verifications: Option<Arc<AtomicUsize>>,
+        structure: ArchiveStructureStatus,
     }
 
     struct CountingExtractReader {
@@ -2607,6 +2809,7 @@ mod tests {
         entry_size: u64,
         source_set: Option<api::ArchiveSourceSet>,
         source_verifications: Option<Arc<AtomicUsize>>,
+        structure: ArchiveStructureStatus,
     }
 
     struct FileOpenProbeFormat {
@@ -2801,6 +3004,7 @@ mod tests {
                 entry_size: self.entry_size,
                 source_set: self.source_set.clone(),
                 source_verifications: self.source_verifications.clone(),
+                structure: self.structure,
             }))
         }
 
@@ -2814,6 +3018,10 @@ mod tests {
     }
 
     impl ArchiveReader for CountingExtractReader {
+        fn structure_status(&self) -> ArchiveStructureStatus {
+            self.structure
+        }
+
         fn source_set(&self) -> Option<&api::ArchiveSourceSet> {
             self.source_set.as_ref()
         }
@@ -3142,6 +3350,7 @@ mod tests {
             entry_size,
             source_set: None,
             source_verifications: None,
+            structure: ArchiveStructureStatus::Complete,
         }));
         (Engine::new(registry), opens, extracts)
     }
@@ -3272,6 +3481,48 @@ mod tests {
     }
 
     #[test]
+    fn guarded_extract_reports_structure_from_the_same_reader() {
+        let dir = temp_dir("guarded-extract-structure");
+        let archive = dir.join("archive.counted");
+        let destination = dir.join("output");
+        std::fs::write(&archive, b"archive").unwrap();
+        let opens = Arc::new(AtomicUsize::new(0));
+        let extracts = Arc::new(AtomicUsize::new(0));
+        let mut registry = FormatRegistry::new();
+        registry.register_archive(Arc::new(CountingExtractFormat {
+            opens: Arc::clone(&opens),
+            extracts: Arc::clone(&extracts),
+            entry_count: 1,
+            entry_size: 7,
+            source_set: None,
+            source_verifications: None,
+            structure: ArchiveStructureStatus::ZipLocalHeadersRecovered,
+        }));
+        let engine = Engine::new(registry);
+
+        let (_, _, structure) = engine
+            .plan_and_extract_with_report_guarded_and_structure_controlled(
+                &archive,
+                &destination,
+                &archive,
+                false,
+                &OpenOptions::default(),
+                &ExtractOptions::default(),
+                &api::NoProgress,
+                &ControlToken::default(),
+                None,
+                |_, _| Ok(None),
+                |_| Ok(()),
+            )
+            .unwrap();
+
+        assert_eq!(structure, ArchiveStructureStatus::ZipLocalHeadersRecovered);
+        assert_eq!(opens.load(Ordering::SeqCst), 1);
+        assert_eq!(extracts.load(Ordering::SeqCst), 1);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn guarded_extract_binds_the_opened_readers_source_set() {
         let dir = temp_dir("planned-extract-reader-source-set");
         let archive = dir.join("archive.counted");
@@ -3295,6 +3546,7 @@ mod tests {
             entry_size: 7,
             source_set: Some(source_set),
             source_verifications: Some(Arc::clone(&source_verifications)),
+            structure: ArchiveStructureStatus::Complete,
         }));
         let engine = Engine::new(registry);
         let control = ControlToken::default();

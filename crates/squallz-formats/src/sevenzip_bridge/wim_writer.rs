@@ -1001,14 +1001,21 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn wim_capture_cancellation_terminates_the_external_tool() {
+        use std::os::unix::fs::PermissionsExt;
+
         let _guard = env_lock();
         let _restore_wimlib = EnvRestore::new("SQUALLZ_WIMLIB");
-        let tool = Path::new("/usr/bin/yes");
-        assert!(
-            tool.is_file(),
-            "WIM cancellation test requires /usr/bin/yes"
-        );
-        std::env::set_var("SQUALLZ_WIMLIB", tool);
+        let tool = TempPath::new("sh")
+            .unwrap_or_else(|error| panic!("create fake WIM tool path: {error}"));
+        fs::write(tool.path(), b"#!/bin/sh\nexec /bin/sleep 30\n")
+            .unwrap_or_else(|error| panic!("write fake WIM tool: {error}"));
+        let mut permissions = fs::metadata(tool.path())
+            .unwrap_or_else(|error| panic!("read fake WIM tool permissions: {error}"))
+            .permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(tool.path(), permissions)
+            .unwrap_or_else(|error| panic!("make fake WIM tool executable: {error}"));
+        std::env::set_var("SQUALLZ_WIMLIB", tool.path());
 
         let control = ControlToken::default();
         let writer = create_with_control(
@@ -1030,7 +1037,10 @@ mod tests {
             .join()
             .unwrap_or_else(|_| panic!("WIM cancellation thread panicked"));
 
-        assert!(matches!(error, FormatError::Cancelled));
+        assert!(
+            matches!(error, FormatError::Cancelled),
+            "expected WIM cancellation, got {error:?}"
+        );
         assert!(
             started.elapsed() < std::time::Duration::from_secs(5),
             "WIM capture cancellation took {:?}",

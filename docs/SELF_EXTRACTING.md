@@ -38,6 +38,19 @@ because it already has a PE certificate table. The dedicated runtime exposes
 only runtime help/version and self-extraction actions; list, test or extract
 without an embedded payload exits with an error.
 
+Inside a Linux AppImage, `sqz-sfx.stub` is stored with mode `0644` in a
+packaging-only data envelope. The fixed 48-byte envelope contains the
+`SQZSFXD1` magic, the raw ELF length and its SHA-256, followed by the unchanged
+ELF bytes. This prevents AppImage dependency deployment from treating the
+template as a shared library and rewriting its RUNPATH. The SFX builder checks
+the exact envelope length and streams the bounded ELF through SHA-256 before it
+checks the ELF target and Squallz marker. It retains that digest and checks it
+again while copying the raw ELF into the staged output, so a template changed
+after validation is discarded rather than published. Only the raw ELF bytes
+enter the final SFX v1 layout, and the builder adds the owner execute bit to the
+resulting `.run` artifact. Windows continues to package an unsigned raw PE
+template.
+
 The ZIP payload stays independently inspectable. Squallz exposes a bounded
 view of the payload to the normal ZIP reader, so the reader cannot consume
 stub or footer bytes. Conventional ZIP tools can also recover the payload;
@@ -286,9 +299,12 @@ line.
   Never sign `sqz-sfx-template.stub` itself. Its extension must also stay
   `.stub` in the bundler source path so Windows package signing does not treat
   it as an executable resource.
-- Preserve the executable mode on the packaged Linux template. SFX assembly
-  adds the owner execute bit to the final `.run`; release smoke must verify the
-  mode and launch that exact output on Linux.
+- Store the packaged Linux template as a mode `0644` `SQZSFXD1` data resource
+  and compare the complete envelope byte-for-byte with the build template after
+  AppImage extraction. Release smoke may stream the hash-verified raw ELF into
+  a private executable probe to verify the runtime identity; SFX assembly adds
+  the owner execute bit to the final `.run`, whose mode and behavior must be
+  verified directly on Linux.
 - Publish the NSIS installer as the exact Windows desktop update asset. Publish
   a tar archive containing `Squallz.AppImage` as the exact Linux desktop update
   asset. Do not put a standalone GUI executable under either update name: it

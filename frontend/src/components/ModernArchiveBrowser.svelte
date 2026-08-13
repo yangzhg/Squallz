@@ -74,6 +74,7 @@
         targetDir: string;
         items: readonly MoveConflictItem[];
       } | null;
+      structureWarning: string | null;
       encodingWarning: string | null;
       totalRows: number;
       filterText: string;
@@ -137,6 +138,7 @@
 <script lang="ts">
   import { onMount, tick } from "svelte";
   import Icon from "./Icon.svelte";
+  import ArchiveStructureWarning from "./ArchiveStructureWarning.svelte";
   import { cssVariables, type CssVariableMap } from "../lib/css-variables";
 
   let {
@@ -412,6 +414,14 @@
     </div>
     <button onclick={onOpenRecovery}>{tr("gui.recovery.open_recovery", "Open Recovery")}</button>
   </div>
+
+  {#if view.structureWarning}
+    <ArchiveStructureWarning
+      message={view.structureWarning}
+      actionLabel={tr("gui.archive.open_zip_repair", "Open ZIP repair")}
+      onRepair={onOpenRecovery}
+    />
+  {/if}
 
   {#if view.encodingWarning}
     <div class="warning-ribbon">

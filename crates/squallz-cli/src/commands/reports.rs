@@ -1,7 +1,9 @@
 use std::path::Path;
 
 use serde_json::{json, Value};
-use squallz_core::api::{ExtractReport, FormatError, RecoverySummary, TestSummary};
+use squallz_core::api::{
+    ArchiveStructureStatus, ExtractReport, FormatError, RecoverySummary, TestSummary,
+};
 use squallz_core::{CreateReport, ExtractPlan, SmartLayout};
 
 use crate::errors::CliError;
@@ -148,9 +150,48 @@ pub(crate) fn test_report_json(report: &TestSummary) -> Value {
     })
 }
 
+pub(crate) fn test_report_json_with_structure(
+    report: &TestSummary,
+    structure: ArchiveStructureStatus,
+) -> Value {
+    let mut value = test_report_json(report);
+    if !structure.is_complete() {
+        value["structure"] = json!(structure.id());
+    }
+    value
+}
+
 pub(crate) fn print_test_problems(ctx: &Ctx, report: &TestSummary) {
-    for problem in &report.problems.messages {
-        let message = ctx.loc.format("cli.test.problem", &[("detail", problem)]);
+    print_test_problems_with_structure(ctx, report, ArchiveStructureStatus::Complete);
+}
+
+pub(crate) fn localized_test_problems(
+    ctx: &Ctx,
+    report: &TestSummary,
+    structure: ArchiveStructureStatus,
+) -> Vec<String> {
+    report
+        .problems
+        .messages
+        .iter()
+        .enumerate()
+        .map(|(index, problem)| {
+            if index == 0 && structure == ArchiveStructureStatus::ZipLocalHeadersRecovered {
+                ctx.loc.t("cli.test.zip_local_headers_recovered")
+            } else {
+                problem.clone()
+            }
+        })
+        .collect()
+}
+
+pub(crate) fn print_test_problems_with_structure(
+    ctx: &Ctx,
+    report: &TestSummary,
+    structure: ArchiveStructureStatus,
+) {
+    for problem in localized_test_problems(ctx, report, structure) {
+        let message = ctx.loc.format("cli.test.problem", &[("detail", &problem)]);
         ctx.eprint_problem(&message);
     }
     if report.problems.is_truncated() {
@@ -186,6 +227,44 @@ mod tests {
     use squallz_core::{ExtractPlan, ExtractScope, SmartLayout};
 
     use super::*;
+
+    #[test]
+    fn complete_structure_keeps_the_legacy_test_json_shape() {
+        let report = TestSummary {
+            entries_tested: 2,
+            ..TestSummary::default()
+        };
+
+        assert_eq!(
+            test_report_json_with_structure(&report, ArchiveStructureStatus::Complete),
+            test_report_json(&report)
+        );
+    }
+
+    #[test]
+    fn recovered_structure_is_reported_without_changing_existing_fields() {
+        let report = TestSummary {
+            entries_tested: 2,
+            ..TestSummary::default()
+        };
+        let legacy = test_report_json(&report);
+        let recovered = test_report_json_with_structure(
+            &report,
+            ArchiveStructureStatus::ZipLocalHeadersRecovered,
+        );
+
+        assert_eq!(recovered["structure"], "zip_local_headers_recovered");
+        for key in [
+            "ok",
+            "entries_tested",
+            "problems",
+            "problems_total",
+            "problems_truncated",
+            "recovery",
+        ] {
+            assert_eq!(recovered[key], legacy[key], "field {key}");
+        }
+    }
 
     #[test]
     fn create_report_json_keeps_recovery_sidecars_out_of_volume_count() {

@@ -20,6 +20,7 @@ use crate::args::{resource_options, safety_limits};
 use crate::commands::reports::{
     create_report_json, empty_extract_counts_json, extract_counts_json, extract_plan_json,
     print_preserved_output_warning, print_pretty_json, recovery_summary_json, test_report_json,
+    test_report_json_with_structure,
 };
 use crate::errors::{error_kind, exit_code, localize_error, CliError};
 
@@ -812,12 +813,17 @@ fn run_repair_zip_job(
             "batch repair_zip output must be a ZIP-family archive".into(),
         ));
     }
-    let source_report =
-        ctx.engine
-            .test_summary(&archive, &OpenOptions::default(), &NoProgress, &ctx.ctl)?;
-    if !source_report.is_ok() {
-        return Err(test_report_error(source_report));
+    let source_test = ctx.engine.test_summary_with_structure(
+        &archive,
+        &OpenOptions::default(),
+        &NoProgress,
+        &ctx.ctl,
+    )?;
+    if !source_test.payload_is_ok() {
+        return Err(test_report_error(source_test.into_summary()));
     }
+    let structure = source_test.structure;
+    let source_report = source_test.into_summary();
     let level = job_level(job)?;
     let create = CreateOptions {
         level: CompressionLevel::from_numeric(level),
@@ -840,7 +846,7 @@ fn run_repair_zip_job(
             "output": output.display().to_string(),
             "tool": "zip-local-header-rebuild",
             "in_place": in_place,
-            "source": test_report_json(&source_report),
+            "source": test_report_json_with_structure(&source_report, structure),
             "level": level,
         }),
     })

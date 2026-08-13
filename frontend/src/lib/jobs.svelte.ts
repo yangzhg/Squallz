@@ -43,6 +43,7 @@ import {
   shouldRefreshSourceCleanupRecovery,
 } from "./source-cleanup";
 import {
+  extractResultHasRecoveredZipStructure,
   extractResultNeedsAttention,
   readExtractResultOutcome,
 } from "./extract-result";
@@ -436,6 +437,10 @@ function terminalHistoryStatus(task: Task): Extract<OperationStatus, "done" | "f
   if (task.spec.kind === "checksum_check" && task.result?.ok === false) return "failed";
   if (task.spec.kind === "batch_extract" && Number(task.result?.failed ?? 0) > 0) return "failed";
   if (
+    task.spec.kind === "batch_extract"
+    && extractResultHasRecoveredZipStructure(task.result)
+  ) return "info";
+  if (
     (task.spec.kind === "extract" || task.spec.kind === "extract_nested") &&
     extractResultNeedsAttention(task.result)
   ) return "info";
@@ -751,9 +756,13 @@ function finishToast(task: Task): void {
     if (revealAfterExtract && task.revealPath) {
       revealPath(task.revealPath);
     }
+    const recoveredStructure = extractResultHasRecoveredZipStructure(task.result);
     const toast = {
-      kind: failed > 0 ? "warning" : "success",
+      kind: failed > 0 || recoveredStructure ? "warning" : "success",
       title: t("gui.toast.batch_extract_done", { extracted, failed }),
+      body: recoveredStructure
+        ? t("gui.archive.zip_local_headers_recovered")
+        : undefined,
     } satisfies Parameters<typeof pushToast>[0];
     if (task.revealPath) {
       pushToast({
@@ -767,12 +776,15 @@ function finishToast(task: Task): void {
     const dest = String(task.result?.dest ?? spec.dest);
     const bestEffort = spec.best_effort || task.result?.best_effort === true;
     const outcome = readExtractResultOutcome(task.result);
+    const recoveredStructure = extractResultHasRecoveredZipStructure(task.result);
     task.revealPath = dest;
     if (revealAfterExtract) {
       revealPath(dest);
     }
     pushToast({
-      kind: outcome.skipped > 0 || outcome.failed > 0 ? "warning" : "success",
+      kind: recoveredStructure || outcome.skipped > 0 || outcome.failed > 0
+        ? "warning"
+        : "success",
       title: outcome.failed > 0
         ? t("gui.toast.best_effort_extract_attention", {
             failed: outcome.failed,
@@ -783,6 +795,9 @@ function finishToast(task: Task): void {
           : outcome.skipped > 0
             ? t("gui.toast.extract_done_skipped", { count: outcome.skipped })
         : t("gui.toast.extract_done", { path: dest }),
+      body: recoveredStructure
+        ? t("gui.archive.zip_local_headers_recovered")
+        : undefined,
       action: { label: t("gui.toast.reveal"), run: () => revealPath(dest) },
     });
   } else if (spec.kind === "compress") {
