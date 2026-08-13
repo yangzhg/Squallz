@@ -589,8 +589,7 @@ test("SFX result and recovery details use the durable single-backup contract", a
         ok: false,
         entries: 42,
         entries_tested: 42,
-        problems: 30,
-        problem_messages: Array.from(
+        problems: Array.from(
           { length: 20 },
           (_, index) => `damaged/item-${index + 1}.bin: checksum mismatch`,
         ),
@@ -623,8 +622,7 @@ test("SFX result and recovery details use the durable single-backup contract", a
       ...boundedTest,
       result: {
         ...boundedTest.result,
-        problems: 1,
-        problem_messages: ["core-only structural diagnostic"],
+        problems: ["core-only structural diagnostic"],
         problems_total: 1,
         problems_truncated: false,
         structure: "zip_local_headers_recovered",
@@ -752,22 +750,6 @@ test("SFX result and recovery details use the durable single-backup contract", a
           && row.value.includes("recovered.zip")
           && row.value.includes("The ZIP index is missing or unreadable."),
       ),
-    );
-
-    const legacyExtract = {
-      ...extracted,
-      result: {
-        dest: "/Users/alex/Downloads/Photos",
-        best_effort: false,
-        skipped: 0,
-        problems: [],
-      },
-    };
-    assert.equal(taskHasInlineResults(legacyExtract), false);
-    assert.equal(taskResultDetailTitle(legacyExtract), "Result details");
-    assert.equal(
-      taskDialogResultSummary(legacyExtract),
-      "Output: Photos",
     );
 
     const journal = "/Users/alex/Exports/.squallz-sfx-transaction.json";

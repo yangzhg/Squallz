@@ -3,13 +3,14 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::json;
 use squallz_core::api::{ControlToken, EntryPath, ProgressSink};
 
 use crate::events::EventSink;
+use squallz_core::lock_unpoisoned;
 
 pub(crate) const EV_CREATE_PREFLIGHT: &str = "create://preflight";
 const DESTINATION_PROGRESS_INTERVAL: Duration = Duration::from_millis(120);
@@ -30,13 +31,6 @@ pub(crate) enum PreflightRequestKind {
     ConvertPlan,
     ExtractPlan,
     OpenArchive,
-}
-
-fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    match mutex.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    }
 }
 
 /// Owns cancellation tokens for preflight requests. The request kind, window

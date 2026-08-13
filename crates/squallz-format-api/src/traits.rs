@@ -8,7 +8,7 @@ use crate::entry::{EntryMeta, EntryPath};
 use crate::error::FormatError;
 use crate::options::{
     CompressionLevel, CreateOptions, ExtractOptions, FormatCapabilities, FormatCreateBudget,
-    OpenOptions, ResourceOptions, SafetyLimits, TestReport, TestSummary, UpdateOp,
+    OpenOptions, ResourceOptions, SafetyLimits, TestSummary, UpdateOp,
 };
 use crate::progress::{ControlToken, ProgressSink};
 use crate::safety::LimitsAccountant;
@@ -405,8 +405,7 @@ pub trait ArchiveFormat: Send + Sync {
     ///
     /// `src` is the authoritative content of the already-opened selected
     /// file. Implementations must not reopen `source_path` in place of it.
-    /// The default keeps existing single-stream format implementations
-    /// source-compatible.
+    /// The default is sufficient for single-stream formats.
     fn open_file(
         &self,
         source_path: &Path,
@@ -607,45 +606,6 @@ pub trait ArchiveFormat: Send + Sync {
             self.id()
         )))
     }
-    /// Append/delete/rename (returns `Unsupported` when `can_update=false`).
-    /// Implementation contract: write to a temporary file + atomic rename,
-    /// pre-check disk space.
-    fn update(
-        &self,
-        _src: &Path,
-        _ops: &[UpdateOp],
-        _opts: &CreateOptions,
-        _progress: &dyn ProgressSink,
-        _ctl: &ControlToken,
-    ) -> Result<(), FormatError> {
-        Err(FormatError::Unsupported(format!(
-            "format {} cannot update existing archives",
-            self.id()
-        )))
-    }
-
-    /// Whether this implementation consumes engine-prepared additions.
-    /// Formats that keep the default return value continue to receive the
-    /// original [`UpdateOp`] path contract without an extra input scan.
-    fn accepts_prepared_update_additions(&self) -> bool {
-        false
-    }
-
-    /// Updates an archive using additions already bound to their source
-    /// objects by the engine. Existing format implementations keep their
-    /// previous behavior through the default forwarding implementation.
-    fn update_with_prepared_additions(
-        &self,
-        src: &Path,
-        ops: &[UpdateOp],
-        _additions: &mut dyn PreparedUpdateAdditions,
-        opts: &CreateOptions,
-        progress: &dyn ProgressSink,
-        ctl: &ControlToken,
-    ) -> Result<(), FormatError> {
-        self.update(src, ops, opts, progress, ctl)
-    }
-
     /// Whether this implementation can rewrite an update into caller-owned
     /// streams. The caller retains responsibility for locking, source
     /// identity checks, durable staging and committing the replacement.
@@ -717,7 +677,7 @@ pub trait ArchiveReader: Send {
 
     /// Transfers entry metadata out of a reader that will not be used again.
     ///
-    /// The default preserves compatibility by visiting [`ArchiveReader::entries`].
+    /// The default visits [`ArchiveReader::entries`].
     /// Readers that retain decoded path tables can override this method and
     /// move those paths into the visitor instead of cloning them.
     fn consume_entries(
@@ -768,31 +728,17 @@ pub trait ArchiveReader: Send {
     /// conversion).
     fn read_entry(&mut self, path: &EntryPath) -> Result<Box<dyn Read + '_>, FormatError>;
 
-    /// Compatibility integrity test returning the complete problem list.
-    /// Product frontends should prefer [`ArchiveReader::test_summary`].
-    fn test(
-        &mut self,
-        progress: &dyn ProgressSink,
-        ctl: &ControlToken,
-    ) -> Result<TestReport, FormatError>;
-
     /// Integrity test with an exact problem count and bounded diagnostic
     /// preview.
-    ///
-    /// The compatibility default adapts [`ArchiveReader::test`]. Readers
-    /// that can encounter many independent problems should override this
-    /// method and collect directly into a bounded log.
     fn test_summary(
         &mut self,
         progress: &dyn ProgressSink,
         ctl: &ControlToken,
-    ) -> Result<TestSummary, FormatError> {
-        self.test(progress, ctl).map(TestSummary::from)
-    }
+    ) -> Result<TestSummary, FormatError>;
 
     /// Integrity test with explicit decompression-bomb guardrails.
     ///
-    /// The compatibility implementation validates declared metadata before
+    /// The default implementation validates declared metadata before
     /// forwarding to [`ArchiveReader::test_summary`]. Readers that stream
     /// decoded contents should override this method and charge observed bytes
     /// as they are read, because untrusted metadata can understate output.
@@ -834,46 +780,6 @@ mod tests {
 
     struct DummyArchiveFormat;
     struct EmptyPreparedAdditions;
-    struct LegacyTestReader;
-
-    impl ArchiveReader for LegacyTestReader {
-        fn entries(&mut self) -> Box<dyn Iterator<Item = Result<EntryMeta, FormatError>> + '_> {
-            Box::new(std::iter::empty())
-        }
-
-        fn read_entry(&mut self, _path: &EntryPath) -> Result<Box<dyn Read + '_>, FormatError> {
-            Err(FormatError::Unsupported("legacy test reader".into()))
-        }
-
-        fn test(
-            &mut self,
-            _progress: &dyn ProgressSink,
-            _ctl: &ControlToken,
-        ) -> Result<TestReport, FormatError> {
-            Ok(TestReport {
-                entries_tested: 25,
-                problems: (0..25).map(|index| format!("problem-{index}")).collect(),
-                recovery: None,
-            })
-        }
-    }
-
-    #[test]
-    fn test_summary_default_adapts_legacy_reader() {
-        let mut reader = LegacyTestReader;
-        let summary = reader
-            .test_summary(&crate::NoProgress, &ControlToken::new())
-            .unwrap();
-
-        assert_eq!(summary.entries_tested, 25);
-        assert_eq!(summary.problems.total, 25);
-        assert_eq!(
-            summary.problems.messages.len(),
-            crate::TEST_PROBLEM_PREVIEW_LIMIT
-        );
-        assert_eq!(summary.problems.omitted(), 5);
-    }
-
     #[test]
     fn source_set_can_keep_native_order_with_a_different_primary() {
         let first = PathBuf::from("archive.z01");
@@ -962,7 +868,6 @@ mod tests {
     fn archive_format_default_stream_and_update_errors_name_the_format() {
         let format = DummyArchiveFormat;
 
-        assert!(!format.accepts_prepared_update_additions());
         assert!(!format.supports_update_rewrite());
 
         let open_message = match format.open_stream(
@@ -983,27 +888,7 @@ mod tests {
         assert!(create_message.contains("dummy"));
         assert!(create_message.contains("non-seekable stream"));
 
-        let update_message = unsupported_message(format.update(
-            Path::new("archive.dummy"),
-            &[],
-            &CreateOptions::default(),
-            &crate::NoProgress,
-            &ControlToken::default(),
-        ));
-        assert!(update_message.contains("dummy"));
-        assert!(update_message.contains("update existing archives"));
-
         let mut additions = EmptyPreparedAdditions;
-        let prepared_message = unsupported_message(format.update_with_prepared_additions(
-            Path::new("archive.dummy"),
-            &[],
-            &mut additions,
-            &CreateOptions::default(),
-            &crate::NoProgress,
-            &ControlToken::default(),
-        ));
-        assert_eq!(prepared_message, update_message);
-
         let rewrite_message = unsupported_message(format.rewrite_update(
             Box::new(std::io::Cursor::new(Vec::<u8>::new())),
             Box::new(std::io::Cursor::new(Vec::<u8>::new())),

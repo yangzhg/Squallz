@@ -13,6 +13,7 @@ use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
 
 use crc32fast::Hasher;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use squallz_format_api::{
     check_windows_portability, split_volume_name, ControlToken, CreateOptions, Detected, EntryPath,
@@ -68,8 +69,7 @@ pub fn default_sfx_extract_destination(base: &Path, artifact: &Path) -> PathBuf 
 
 /// Finds the dedicated SFX runtime distributed beside a desktop executable or
 /// CLI. A present candidate is returned even when it is invalid so callers can
-/// surface a damaged installation instead of silently falling back to a larger
-/// legacy stub.
+/// surface a damaged installation directly.
 pub fn discover_packaged_sfx_runtime(executable: &Path) -> Option<PathBuf> {
     let executable_dir = executable.parent()?;
     let mut directories = vec![
@@ -108,7 +108,8 @@ impl SfxLayout {
 }
 
 /// Target operating system carried by an SFX artifact.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SfxTarget {
     /// Windows Portable Executable.
     Windows,
@@ -299,9 +300,6 @@ pub struct SfxBuildReport {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedSfxBuildReport {
     pub sfx: SfxBuildReport,
-    /// Regular-file fingerprints retained for API compatibility. New source
-    /// verification should consume [`Self::manifest`].
-    pub inputs: Vec<crate::CreateInputFingerprint>,
     /// Complete writer-authoritative manifest in payload entry order.
     pub manifest: Vec<CreateInputManifestEntry>,
 }
@@ -1132,7 +1130,7 @@ impl Engine {
                 capture_input_manifest,
                 create_reservation,
             )?;
-            let captured_inputs = (verified.inputs, verified.manifest);
+            let input_manifest = verified.manifest;
             let bound_payload = BoundSfxPayload::from_reserved(self, payload_reservation)?;
             ctl.checkpoint()?;
             let staged = match validated_template {
@@ -1155,10 +1153,10 @@ impl Engine {
                     template,
                 ),
             }?;
-            Ok((staged, captured_inputs))
+            Ok((staged, input_manifest))
         })();
         match result {
-            Ok((staged, (input_fingerprints, input_manifest))) => {
+            Ok((staged, input_manifest)) => {
                 publish_staged_sfx_after_cleanup(staged, dest, commit_policy, progress, ctl, || {
                     transaction::discard_staged_path(
                         &payload,
@@ -1169,7 +1167,6 @@ impl Engine {
                 })
                 .map(|sfx| VerifiedSfxBuildReport {
                     sfx,
-                    inputs: input_fingerprints,
                     manifest: input_manifest,
                 })
             }
@@ -2143,7 +2140,7 @@ mod tests {
 
     use squallz_format_api::{
         ArchiveFormat, ArchiveReader, ArchiveWriter, EntryMeta, FormatCapabilities, FormatRegistry,
-        NoProgress, TestReport, WriteSeek,
+        NoProgress, TestSummary, WriteSeek,
     };
 
     struct TestZipFormat;
@@ -2201,12 +2198,12 @@ mod tests {
             Ok(Box::new(Cursor::new(self.bytes.clone())))
         }
 
-        fn test(
+        fn test_summary(
             &mut self,
             _progress: &dyn ProgressSink,
             _ctl: &ControlToken,
-        ) -> Result<TestReport, FormatError> {
-            Ok(TestReport::default())
+        ) -> Result<TestSummary, FormatError> {
+            Ok(TestSummary::default())
         }
     }
 

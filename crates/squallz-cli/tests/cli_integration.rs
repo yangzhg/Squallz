@@ -171,11 +171,7 @@ fn cli_surface_contract_help_tokens_are_stable() {
         "--verbose",
         "--style",
         "--color",
-        "--accent",
         "--palette",
-        "--theme",
-        "--color-scheme",
-        "--scheme",
     ] {
         assert!(help.contains(token), "root help missing {token}: {help}");
     }
@@ -349,17 +345,10 @@ fn localized_help_uses_requested_english_surface() {
         help.contains("Human-readable output style"),
         "stdout: {help}"
     );
-    assert!(
-        help.contains("auto, always, rich, fancy, or never"),
-        "stdout: {help}"
-    );
-    for palette in ["squallz", "brand", "icon", "surge", "glass", "teal", "mono"] {
+    assert!(help.contains("auto, always, or never"), "stdout: {help}");
+    for palette in ["squallz", "ocean", "jade", "sunset", "violet", "mono"] {
         assert!(help.contains(palette), "stdout missing {palette}: {help}");
     }
-    assert!(
-        help.contains("--color-scheme") && help.contains("--scheme") && help.contains("--colors"),
-        "stdout: {help}"
-    );
     assert!(
         !help.contains("压缩文件/目录") && !help.contains("跨平台压缩解压工具"),
         "stdout: {help}"
@@ -935,27 +924,14 @@ fn output_style_modern_is_opt_in_and_keeps_json_stable() {
     assert!(text.contains("speed"), "stdout: {text}");
     assert!(text.contains("Modern style guide"), "stdout: {text}");
     assert!(text.contains("operation cockpit"), "stdout: {text}");
-    assert!(text.contains("--color fancy"), "stdout: {text}");
-    assert!(text.contains("--color rich"), "stdout: {text}");
+    assert!(text.contains("--color always"), "stdout: {text}");
     assert!(text.contains("Palette gallery"), "stdout: {text}");
-    assert!(text.contains("--palette brand"), "stdout: {text}");
-    assert!(text.contains("--palette cascade"), "stdout: {text}");
-    assert!(text.contains("--palette daylight"), "stdout: {text}");
-    assert!(text.contains("--palette foam"), "stdout: {text}");
-    assert!(text.contains("--palette skyline"), "stdout: {text}");
-    assert!(text.contains("--palette aero"), "stdout: {text}");
-    assert!(text.contains("--palette crest"), "stdout: {text}");
-    assert!(text.contains("--palette halo"), "stdout: {text}");
-    assert!(text.contains("--palette tropic"), "stdout: {text}");
-    assert!(text.contains("--palette kinetic"), "stdout: {text}");
-    assert!(text.contains("--palette radiant"), "stdout: {text}");
-    assert!(text.contains("--palette crystal"), "stdout: {text}");
-    assert!(text.contains("--palette lumina"), "stdout: {text}");
-    assert!(text.contains("--colors glass"), "stdout: {text}");
-    assert!(text.contains("--colors icon"), "stdout: {text}");
-    assert!(text.contains("Color scheme"), "stdout: {text}");
-    assert!(text.contains("--color-scheme / --scheme"), "stdout: {text}");
-    assert!(text.contains("--colors"), "stdout: {text}");
+    for palette in ["squallz", "ocean", "jade", "sunset", "violet", "mono"] {
+        assert!(
+            text.contains(&format!("--palette {palette}")),
+            "stdout: {text}"
+        );
+    }
     assert!(text.contains("Unpack archives"), "stdout: {text}");
     assert!(
         text.contains("sqz extract archive -d out --smart"),
@@ -1016,497 +992,8 @@ fn output_style_modern_is_opt_in_and_keeps_json_stable() {
 }
 
 #[test]
-fn color_option_controls_modern_human_output_only() {
-    let out = run(sqz().args([
-        "--lang", "en-US", "--style", "modern", "--color", "always", "info",
-    ]));
-    assert!(out.status.success(), "stderr: {}", stderr(&out));
-    assert!(
-        stdout(&out).contains("\x1b["),
-        "--color always should colorize modern human stdout: {}",
-        stdout(&out)
-    );
-
-    let out = run(sqz().args([
-        "--lang", "en-US", "--style", "modern", "--color", "never", "info",
-    ]));
-    assert!(out.status.success(), "stderr: {}", stderr(&out));
-    assert!(
-        !stdout(&out).contains("\x1b["),
-        "--color never must suppress ANSI: {}",
-        stdout(&out)
-    );
-
-    let out = run(sqz().args([
-        "--lang", "en-US", "--style", "modern", "--color", "rich", "info",
-    ]));
-    assert!(out.status.success(), "stderr: {}", stderr(&out));
-    assert!(
-        stdout(&out).contains("\x1b["),
-        "--color rich should force ANSI for modern demos and redirected previews: {}",
-        stdout(&out)
-    );
-
-    let out = run(sqz().args([
-        "--lang", "en-US", "--style", "modern", "--color", "fancy", "info",
-    ]));
-    assert!(out.status.success(), "stderr: {}", stderr(&out));
-    assert!(
-        stdout(&out).contains("\x1b["),
-        "--color fancy should force ANSI for modern live-progress demos and redirected previews: {}",
-        stdout(&out)
-    );
-
-    let out = run(sqz().args([
-        "--lang", "en-US", "--style", "classic", "--color", "always", "info",
-    ]));
-    assert!(out.status.success(), "stderr: {}", stderr(&out));
-    assert!(
-        !stdout(&out).contains("\x1b["),
-        "classic output stays conservative even when color is forced: {}",
-        stdout(&out)
-    );
-
-    let out = run(sqz().args(["--style", "modern", "--color", "always", "info", "--json"]));
-    assert!(out.status.success(), "stderr: {}", stderr(&out));
-    assert!(
-        !stdout(&out).contains("\x1b["),
-        "JSON stdout must never contain ANSI: {}",
-        stdout(&out)
-    );
-    assert!(stdout_json(&out).is_array());
-
-    let out = run(sqz().args([
-        "--lang", "en-US", "--style", "modern", "--color", "always", "--accent", "amber", "info",
-    ]));
-    assert!(out.status.success(), "stderr: {}", stderr(&out));
-    assert!(
-        stdout(&out).contains("\x1b[1;38;5;214m"),
-        "--accent amber should use amber as the modern primary color: {}",
-        stdout(&out)
-    );
-
-    let out = run(sqz().args([
-        "--lang",
-        "en-US",
-        "--style",
-        "modern",
-        "--color",
-        "always",
-        "--palette",
-        "icon",
-        "info",
-    ]));
-    assert!(out.status.success(), "stderr: {}", stderr(&out));
-    let text = stdout(&out);
-    assert!(
-        text.contains("\x1b[1;38;2;45;212;191m") && text.contains("\x1b[38;2;14;165;233m"),
-        "--palette icon should explicitly use the approved app icon teal-to-sky accents: {text}"
-    );
-
-    let out = run(sqz().args([
-        "--lang",
-        "en-US",
-        "--style",
-        "modern",
-        "--color",
-        "always",
-        "--palette",
-        "squallz",
-        "info",
-    ]));
-    assert!(out.status.success(), "stderr: {}", stderr(&out));
-    assert!(
-        stdout(&out).contains("\x1b[1;38;2;45;212;191m"),
-        "--palette squallz should use the exact app icon teal primary color: {}",
-        stdout(&out)
-    );
-
-    let out = run(sqz().args([
-        "--lang",
-        "en-US",
-        "--style",
-        "modern",
-        "--color",
-        "always",
-        "--palette",
-        "brand",
-        "info",
-    ]));
-    assert!(out.status.success(), "stderr: {}", stderr(&out));
-    let text = stdout(&out);
-    assert!(
-        text.contains("\x1b[1;38;2;45;212;191m") && text.contains("\x1b[38;2;14;165;233m"),
-        "--palette brand should use the approved app icon teal-to-sky accents: {text}"
-    );
-
-    let out = run(sqz().args([
-        "--lang",
-        "en-US",
-        "--style",
-        "modern",
-        "--color",
-        "always",
-        "--palette",
-        "cascade",
-        "info",
-    ]));
-    assert!(out.status.success(), "stderr: {}", stderr(&out));
-    let text = stdout(&out);
-    assert!(
-        text.contains("\x1b[1;38;2;45;212;191m") && text.contains("\x1b[38;2;125;211;252m"),
-        "--palette cascade should keep the approved teal primary with brighter sky secondary accents: {text}"
-    );
-
-    let out = run(sqz().args([
-        "--lang",
-        "en-US",
-        "--style",
-        "modern",
-        "--color",
-        "always",
-        "--palette",
-        "daylight",
-        "info",
-    ]));
-    assert!(out.status.success(), "stderr: {}", stderr(&out));
-    let text = stdout(&out);
-    assert!(
-        text.contains("\x1b[1;38;2;45;212;191m") && text.contains("\x1b[38;2;103;232;249m"),
-        "--palette daylight should use approved teal primary with a bright sky secondary accent: {text}"
-    );
-
-    let out = run(sqz().args([
-        "--lang",
-        "en-US",
-        "--style",
-        "modern",
-        "--color",
-        "always",
-        "--palette",
-        "skyline",
-        "info",
-    ]));
-    assert!(out.status.success(), "stderr: {}", stderr(&out));
-    let text = stdout(&out);
-    assert!(
-        text.contains("\x1b[1;38;2;14;165;233m") && text.contains("\x1b[38;2;45;212;191m"),
-        "--palette skyline should invert the approved app icon colors for a brighter blue-led terminal look: {text}"
-    );
-
-    let out = run(sqz().args([
-        "--lang",
-        "en-US",
-        "--style",
-        "modern",
-        "--color",
-        "always",
-        "--palette",
-        "aero",
-        "info",
-    ]));
-    assert!(out.status.success(), "stderr: {}", stderr(&out));
-    let text = stdout(&out);
-    assert!(
-        text.contains("\x1b[1;38;2;125;211;252m") && text.contains("\x1b[38;2;45;212;191m"),
-        "--palette aero should use light sky primary and Squallz teal secondary accents: {text}"
-    );
-
-    let out = run(sqz().args([
-        "--lang",
-        "en-US",
-        "--style",
-        "modern",
-        "--color",
-        "always",
-        "--palette",
-        "crest",
-        "info",
-    ]));
-    assert!(out.status.success(), "stderr: {}", stderr(&out));
-    let text = stdout(&out);
-    assert!(
-        text.contains("\x1b[1;38;2;56;189;248m") && text.contains("\x1b[38;2;94;234;212m"),
-        "--palette crest should use bright sky primary and luminous aqua secondary accents: {text}"
-    );
-
-    let out = run(sqz().args([
-        "--lang",
-        "en-US",
-        "--style",
-        "modern",
-        "--color",
-        "always",
-        "--palette",
-        "halo",
-        "info",
-    ]));
-    assert!(out.status.success(), "stderr: {}", stderr(&out));
-    let text = stdout(&out);
-    assert!(
-        text.contains("\x1b[1;38;2;94;234;212m") && text.contains("\x1b[38;2;56;189;248m"),
-        "--palette halo should use luminous teal primary and bright sky secondary accents: {text}"
-    );
-
-    let out = run(sqz().args([
-        "--lang",
-        "en-US",
-        "--style",
-        "modern",
-        "--color",
-        "always",
-        "--palette",
-        "tropic",
-        "info",
-    ]));
-    assert!(out.status.success(), "stderr: {}", stderr(&out));
-    let text = stdout(&out);
-    assert!(
-        text.contains("\x1b[1;38;2;45;212;191m") && text.contains("\x1b[38;2;34;211;238m"),
-        "--palette tropic should use the approved teal primary and electric cyan secondary accents: {text}"
-    );
-
-    let out = run(sqz().args([
-        "--lang",
-        "en-US",
-        "--style",
-        "modern",
-        "--color",
-        "always",
-        "--palette",
-        "kinetic",
-        "info",
-    ]));
-    assert!(out.status.success(), "stderr: {}", stderr(&out));
-    let text = stdout(&out);
-    assert!(
-        text.contains("\x1b[1;38;2;45;212;191m") && text.contains("\x1b[38;2;96;165;250m"),
-        "--palette kinetic should use the approved teal primary and high-energy sky secondary accents: {text}"
-    );
-
-    let out = run(sqz().args([
-        "--lang",
-        "en-US",
-        "--style",
-        "modern",
-        "--color",
-        "always",
-        "--palette",
-        "radiant",
-        "info",
-    ]));
-    assert!(out.status.success(), "stderr: {}", stderr(&out));
-    let text = stdout(&out);
-    assert!(
-        text.contains("\x1b[1;38;2;45;212;191m")
-            && text.contains("\x1b[38;2;186;230;253m")
-            && text.contains("--palette radiant"),
-        "--palette radiant should use approved teal primary and bright sky-glass secondary accents: {text}"
-    );
-
-    let out = run(sqz().args([
-        "--lang",
-        "en-US",
-        "--style",
-        "modern",
-        "--color",
-        "always",
-        "--palette",
-        "surge",
-        "info",
-    ]));
-    assert!(out.status.success(), "stderr: {}", stderr(&out));
-    let text = stdout(&out);
-    assert!(
-        text.contains("\x1b[1;38;2;45;212;191m")
-            && text.contains("\x1b[38;2;56;189;248m")
-            && text.contains("--palette surge"),
-        "--palette surge should keep the approved teal primary with vivid sky-blue secondary accents: {text}"
-    );
-
-    let out = run(sqz().args([
-        "--lang", "en-US", "--style", "modern", "--color", "always", "--colors", "glass", "info",
-    ]));
-    assert!(out.status.success(), "stderr: {}", stderr(&out));
-    let text = stdout(&out);
-    assert!(
-        text.contains("\x1b[1;38;2;103;232;249m") && text.contains("\x1b[38;2;45;212;191m"),
-        "--colors glass should use bright cyan primary with Squallz teal secondary accents: {text}"
-    );
-
-    let out = run(sqz().args([
-        "--lang", "en-US", "--style", "modern", "--color", "always", "--colors", "icon", "info",
-    ]));
-    assert!(out.status.success(), "stderr: {}", stderr(&out));
-    let text = stdout(&out);
-    assert!(
-        text.contains("\x1b[1;38;2;45;212;191m") && text.contains("\x1b[38;2;14;165;233m"),
-        "--colors icon should behave as the explicit app icon palette alias: {text}"
-    );
-
-    let out = run(sqz().args([
-        "--lang",
-        "en-US",
-        "--style",
-        "modern",
-        "--color",
-        "always",
-        "--palette",
-        "nova",
-        "info",
-    ]));
-    assert!(out.status.success(), "stderr: {}", stderr(&out));
-    let text = stdout(&out);
-    assert!(
-        text.contains("\x1b[1;38;2;34;211;238m") && text.contains("\x1b[38;2;250;204;21m"),
-        "--palette nova should use bright cyan primary and sunlit gold secondary accents: {text}"
-    );
-
-    let out = run(sqz().args([
-        "--lang",
-        "en-US",
-        "--style",
-        "modern",
-        "--color",
-        "always",
-        "--palette",
-        "crystal",
-        "info",
-    ]));
-    assert!(out.status.success(), "stderr: {}", stderr(&out));
-    let text = stdout(&out);
-    assert!(
-        text.contains("\x1b[1;38;2;94;234;212m") && text.contains("\x1b[38;2;125;211;252m"),
-        "--palette crystal should use luminous aqua and clear sky truecolor accents: {text}"
-    );
-
-    let out = run(sqz().args([
-        "--lang",
-        "en-US",
-        "--style",
-        "modern",
-        "--color",
-        "always",
-        "--palette",
-        "lumina",
-        "info",
-    ]));
-    assert!(out.status.success(), "stderr: {}", stderr(&out));
-    let text = stdout(&out);
-    assert!(
-        text.contains("\x1b[1;38;2;103;232;249m") && text.contains("\x1b[38;2;251;113;133m"),
-        "--palette lumina should use bright cyan primary and coral secondary accents: {text}"
-    );
-
-    let out = run(sqz().args([
-        "--lang",
-        "en-US",
-        "--style",
-        "modern",
-        "--color",
-        "always",
-        "--palette",
-        "azure",
-        "info",
-    ]));
-    assert!(out.status.success(), "stderr: {}", stderr(&out));
-    let text = stdout(&out);
-    assert!(
-        text.contains("\x1b[1;38;2;56;189;248m") && text.contains("\x1b[38;2;45;212;191m"),
-        "--palette azure should use bright sky primary and Squallz teal secondary accents: {text}"
-    );
-
-    let out = run(sqz().args([
-        "--lang",
-        "en-US",
-        "--style",
-        "modern",
-        "--color",
-        "always",
-        "--palette",
-        "surf",
-        "info",
-    ]));
-    assert!(out.status.success(), "stderr: {}", stderr(&out));
-    let text = stdout(&out);
-    assert!(
-        text.contains("\x1b[1;38;2;34;211;238m") && text.contains("\x1b[38;2;14;165;233m"),
-        "--palette surf should use electric cyan primary and sky secondary accents: {text}"
-    );
-
-    let out = run(sqz().args([
-        "--lang",
-        "en-US",
-        "--style",
-        "modern",
-        "--color",
-        "always",
-        "--palette",
-        "signal",
-        "info",
-    ]));
-    assert!(out.status.success(), "stderr: {}", stderr(&out));
-    let text = stdout(&out);
-    assert!(
-        text.contains("\x1b[1;38;2;94;234;212m") && text.contains("\x1b[38;2;56;189;248m"),
-        "--palette signal should use bright teal primary and sky secondary accents: {text}"
-    );
-
-    let out = run(sqz().args([
-        "--lang",
-        "en-US",
-        "--style",
-        "modern",
-        "--color",
-        "always",
-        "--palette",
-        "tide",
-        "info",
-    ]));
-    assert!(out.status.success(), "stderr: {}", stderr(&out));
-    let text = stdout(&out);
-    assert!(
-        text.contains("\x1b[1;38;2;103;232;249m") && text.contains("\x1b[38;2;56;189;248m"),
-        "--palette tide should use light cyan primary and sky secondary accents: {text}"
-    );
-
-    let out = run(sqz().args([
-        "--lang",
-        "en-US",
-        "--style",
-        "modern",
-        "--color",
-        "always",
-        "--palette",
-        "neon",
-        "info",
-    ]));
-    assert!(out.status.success(), "stderr: {}", stderr(&out));
-    let text = stdout(&out);
-    assert!(
-        text.contains("\x1b[1;38;2;34;211;238m") && text.contains("\x1b[38;2;244;114;182m"),
-        "--palette neon should use cyan primary and pink secondary truecolor accents: {text}"
-    );
-
-    let out = run(sqz().args([
-        "--lang",
-        "en-US",
-        "--style",
-        "modern",
-        "--color",
-        "always",
-        "--palette",
-        "electric",
-        "info",
-    ]));
-    assert!(out.status.success(), "stderr: {}", stderr(&out));
-    let text = stdout(&out);
-    assert!(
-        text.contains("\x1b[1;38;2;34;211;238m") && text.contains("\x1b[38;2;167;139;250m"),
-        "--palette electric should use cyan primary and violet secondary truecolor accents: {text}"
-    );
-
-    let out = run(sqz().args([
+fn color_and_palette_options_have_one_canonical_surface() {
+    let colored = run(sqz().args([
         "--lang",
         "en-US",
         "--style",
@@ -1517,268 +1004,39 @@ fn color_option_controls_modern_human_output_only() {
         "ocean",
         "info",
     ]));
-    assert!(out.status.success(), "stderr: {}", stderr(&out));
-    let text = stdout(&out);
+    assert!(colored.status.success(), "stderr: {}", stderr(&colored));
+    let colored_text = stdout(&colored);
+    assert!(colored_text.contains("\u{1b}["), "stdout: {colored_text}");
     assert!(
-        text.contains("\x1b[1;38;2;14;165;233m") && text.contains("\x1b[38;2;45;212;191m"),
-        "--palette ocean should use sky primary and teal secondary truecolor accents: {text}"
+        colored_text.contains("--palette ocean"),
+        "stdout: {colored_text}"
     );
 
-    let out = run(sqz().args([
+    let plain = run(sqz().args([
         "--lang",
         "en-US",
         "--style",
         "modern",
         "--color",
-        "always",
+        "never",
         "--palette",
-        "jade",
+        "mono",
         "info",
     ]));
-    assert!(out.status.success(), "stderr: {}", stderr(&out));
-    let text = stdout(&out);
-    assert!(
-        text.contains("\x1b[1;38;2;52;211;153m") && text.contains("\x1b[38;2;45;212;191m"),
-        "--palette jade should use green-cyan primary and Squallz teal secondary accents: {text}"
-    );
+    assert!(plain.status.success(), "stderr: {}", stderr(&plain));
+    assert!(!stdout(&plain).contains("\u{1b}["));
 
-    let out = run(sqz().args([
-        "--lang",
-        "en-US",
-        "--style",
-        "modern",
-        "--color",
-        "always",
-        "--palette",
-        "rose",
-        "info",
-    ]));
-    assert!(out.status.success(), "stderr: {}", stderr(&out));
-    assert!(
-        stdout(&out).contains("\x1b[1;38;5;205m"),
-        "--palette rose should use the rose primary color: {}",
-        stdout(&out)
-    );
-
-    let out = run(sqz().args([
-        "--lang",
-        "en-US",
-        "--style",
-        "modern",
-        "--color",
-        "always",
-        "--palette",
-        "aqua",
-        "info",
-    ]));
-    assert!(out.status.success(), "stderr: {}", stderr(&out));
-    assert!(
-        stdout(&out).contains("\x1b[1;38;5;51m"),
-        "--palette aqua should use the bright aqua primary color: {}",
-        stdout(&out)
-    );
-
-    let out = run(sqz().args([
-        "--lang",
-        "en-US",
-        "--style",
-        "modern",
-        "--color",
-        "always",
-        "--palette",
-        "glacier",
-        "info",
-    ]));
-    assert!(out.status.success(), "stderr: {}", stderr(&out));
-    assert!(
-        stdout(&out).contains("\x1b[1;38;5;87m"),
-        "--palette glacier should use a bright cyan/sky primary color: {}",
-        stdout(&out)
-    );
-
-    let out = run(sqz().args([
-        "--lang",
-        "en-US",
-        "--style",
-        "modern",
-        "--color",
-        "always",
-        "--palette",
-        "aurora",
-        "info",
-    ]));
-    assert!(out.status.success(), "stderr: {}", stderr(&out));
-    assert!(
-        stdout(&out).contains("\x1b[1;38;5;86m"),
-        "--palette aurora should use a mint/cyan primary color: {}",
-        stdout(&out)
-    );
-
-    let out = run(sqz().args([
-        "--lang",
-        "en-US",
-        "--style",
-        "modern",
-        "--color",
-        "always",
-        "--palette",
-        "prism",
-        "info",
-    ]));
-    assert!(out.status.success(), "stderr: {}", stderr(&out));
-    let text = stdout(&out);
-    assert!(
-        text.contains("\x1b[1;38;5;51m") && text.contains("\x1b[38;5;213m"),
-        "--palette prism should use cyan primary and magenta secondary accents: {text}"
-    );
-
-    let out = run(sqz().args([
-        "--lang",
-        "en-US",
-        "--style",
-        "modern",
-        "--color",
-        "always",
-        "--palette",
-        "lagoon",
-        "info",
-    ]));
-    assert!(out.status.success(), "stderr: {}", stderr(&out));
-    let text = stdout(&out);
-    assert!(
-        text.contains("\x1b[1;38;2;45;212;191m") && text.contains("\x1b[38;2;56;189;248m"),
-        "--palette lagoon should use vivid teal and sky truecolor accents: {text}"
-    );
-
-    let out = run(sqz().args([
-        "--lang",
-        "en-US",
-        "--style",
-        "modern",
-        "--color",
-        "always",
-        "--palette",
-        "mint",
-        "info",
-    ]));
-    assert!(out.status.success(), "stderr: {}", stderr(&out));
-    let text = stdout(&out);
-    assert!(
-        text.contains("\x1b[1;38;2;45;212;191m") && text.contains("\x1b[38;2;125;211;252m"),
-        "--palette mint should keep the Squallz teal base with a softer sky accent: {text}"
-    );
-
-    let out = run(sqz().args([
-        "--lang",
-        "en-US",
-        "--style",
-        "modern",
-        "--color",
-        "always",
-        "--palette",
-        "sunset",
-        "info",
-    ]));
-    assert!(out.status.success(), "stderr: {}", stderr(&out));
-    let text = stdout(&out);
-    assert!(
-        text.contains("\x1b[1;38;2;251;146;60m") && text.contains("\x1b[38;2;244;114;182m"),
-        "--palette sunset should use warm orange and rose truecolor accents: {text}"
-    );
-
-    let out = run(sqz().args([
-        "--lang",
-        "en-US",
-        "--style",
-        "modern",
-        "--color",
-        "always",
-        "--palette",
-        "citrus",
-        "info",
-    ]));
-    assert!(out.status.success(), "stderr: {}", stderr(&out));
-    let text = stdout(&out);
-    assert!(
-        text.contains("\x1b[1;38;2;163;230;53m") && text.contains("\x1b[38;2;34;211;238m"),
-        "--palette citrus should use fresh lime and cyan truecolor accents: {text}"
-    );
-
-    let out = run(sqz().args([
-        "--lang",
-        "en-US",
-        "--style",
-        "modern",
-        "--color",
-        "always",
-        "--palette",
-        "breeze",
-        "info",
-    ]));
-    assert!(out.status.success(), "stderr: {}", stderr(&out));
-    let text = stdout(&out);
-    assert!(
-        text.contains("\x1b[1;38;2;20;184;166m") && text.contains("\x1b[38;2;56;189;248m"),
-        "--palette breeze should use teal primary and sky secondary truecolor accents: {text}"
-    );
-
-    let out = run(sqz().args([
-        "--lang",
-        "en-US",
-        "--style",
-        "modern",
-        "--color",
-        "always",
-        "--color-scheme",
-        "breeze",
-        "info",
-    ]));
-    assert!(out.status.success(), "stderr: {}", stderr(&out));
-    let text = stdout(&out);
-    assert!(
-        text.contains("\x1b[1;38;2;20;184;166m") && text.contains("\x1b[38;2;56;189;248m"),
-        "--color-scheme should behave as a visible alias for modern palette selection: {text}"
-    );
-
-    let out = run(sqz().args([
-        "--lang", "en-US", "--style", "modern", "--color", "always", "--scheme", "breeze", "info",
-    ]));
-    assert!(out.status.success(), "stderr: {}", stderr(&out));
-    let text = stdout(&out);
-    assert!(
-        text.contains("\x1b[1;38;2;20;184;166m") && text.contains("\x1b[38;2;56;189;248m"),
-        "--scheme should behave as a visible alias for modern palette selection: {text}"
-    );
-
-    let out = run(sqz().args([
-        "--lang", "en-US", "--style", "modern", "--color", "always", "--theme", "ocean", "info",
-    ]));
-    assert!(out.status.success(), "stderr: {}", stderr(&out));
-    let text = stdout(&out);
-    assert!(
-        text.contains("\x1b[1;38;2;14;165;233m") && text.contains("\x1b[38;2;45;212;191m"),
-        "--theme should behave as a visible alias for modern palette selection: {text}"
-    );
-
-    let out = run(sqz().args([
-        "--lang",
-        "en-US",
-        "--style",
-        "modern",
-        "--color",
-        "always",
-        "--palette",
-        "vapor",
-        "info",
-    ]));
-    assert!(out.status.success(), "stderr: {}", stderr(&out));
-    let text = stdout(&out);
-    assert!(
-        text.contains("\x1b[1;38;2;125;211;252m") && text.contains("\x1b[38;2;192;132;252m"),
-        "--palette vapor should use luminous sky primary and soft violet secondary accents: {text}"
-    );
+    for removed in [
+        ["--theme", "ocean"],
+        ["--colors", "ocean"],
+        ["--color-scheme", "ocean"],
+        ["--color", "rich"],
+        ["--color", "fancy"],
+    ] {
+        let output = run(sqz().args([removed[0], removed[1], "info"]));
+        assert_eq!(output.status.code(), Some(2), "stdout: {}", stdout(&output));
+    }
 }
-
 #[test]
 fn cli_surface_contract_format_errors_use_json_envelope() {
     let dir = temp_dir("cli-surface-json-errors");
@@ -2030,7 +1288,7 @@ fn file_manager_create_fallback_uses_bound_shared_preset() {
     assert!(out.status.success(), "stderr: {}", stderr(&out));
     let report = stdout_json(&out);
     assert_eq!(report["level"], 8);
-    assert_eq!(report["output"], archive.display().to_string());
+    assert_eq!(report["primary_output"], archive.display().to_string());
 
     let listed = run(sqz().arg("list").arg(&archive).arg("--json"));
     assert!(listed.status.success(), "stderr: {}", stderr(&listed));
@@ -2095,7 +1353,7 @@ fn preset_cli_round_trips_clone_update_bind_and_delete() {
         .args(["--lang", "en-US", "preset", "list", "--json"]));
     assert!(listed.status.success(), "stderr: {}", stderr(&listed));
     let listed = stdout_json(&listed);
-    assert_eq!(listed["schema_version"], 4);
+    assert_eq!(listed["schema_version"], 1);
     assert_eq!(listed["revision"], 0);
     assert_eq!(listed["presets"].as_array().map(Vec::len), Some(3));
 
@@ -2314,11 +1572,10 @@ fn batch_json_script_runs_core_archive_jobs() {
     .unwrap();
 
     let manifest = serde_json::json!({
-        "version": 1,
         "jobs": [
             { "kind": "estimate", "inputs": ["project"], "output": "planned.zip" },
             { "kind": "test", "archive": "source.zip" },
-            { "kind": "extract", "archive": "source.zip", "dest": "out", "includes": ["project/a.txt"], "overwrite": "all" },
+            { "kind": "extract", "archive": "source.zip", "dest": "out", "includes": ["project/a.txt"], "overwrite": "overwrite" },
             { "kind": "convert", "src": "source.zip", "output": "converted.7z", "profile": "fast" },
             { "kind": "checksum", "inputs": ["project/a.txt"], "algorithm": "sha256" },
             { "kind": "checksum_check", "check": "SHA256SUMS", "algorithm": "sha256" },
@@ -2334,9 +1591,9 @@ fn batch_json_script_runs_core_archive_jobs() {
     assert_eq!(report["operation"], "batch");
     assert_eq!(report["total"], 7);
     assert_eq!(report["failed"], 0);
-    assert_eq!(report["jobs"][0]["operation"], "estimate");
-    assert_eq!(report["jobs"][1]["operation"], "test");
-    assert_eq!(report["jobs"][2]["operation"], "extract");
+    assert_eq!(report["jobs"][0]["kind"], "estimate");
+    assert_eq!(report["jobs"][1]["kind"], "test");
+    assert_eq!(report["jobs"][2]["kind"], "extract");
     assert_eq!(report["jobs"][2]["result"]["matched"], true);
     assert_eq!(
         report["jobs"][2]["result"]["plan"]["destination"],
@@ -2352,17 +1609,13 @@ fn batch_json_script_runs_core_archive_jobs() {
     assert_eq!(report["jobs"][2]["result"]["counts"]["replaced"], 0);
     assert_eq!(report["jobs"][2]["result"]["counts"]["renamed"], 0);
     assert_eq!(report["jobs"][2]["result"]["counts"]["failed"], 0);
-    assert_eq!(
-        report["results"][2]["result"]["counts"],
-        report["jobs"][2]["result"]["counts"]
-    );
-    assert_eq!(report["jobs"][3]["operation"], "convert");
-    assert_eq!(report["jobs"][4]["operation"], "checksum");
+    assert_eq!(report["jobs"][3]["kind"], "convert");
+    assert_eq!(report["jobs"][4]["kind"], "checksum");
     assert_eq!(report["jobs"][4]["result"]["algorithm"], "sha256");
     assert_eq!(report["jobs"][4]["result"]["files_hashed"], 1);
-    assert_eq!(report["jobs"][5]["operation"], "checksum_check");
+    assert_eq!(report["jobs"][5]["kind"], "checksum_check");
     assert_eq!(report["jobs"][5]["result"]["passed"], 1);
-    assert_eq!(report["jobs"][6]["operation"], "duplicates");
+    assert_eq!(report["jobs"][6]["kind"], "duplicates");
     assert_eq!(report["jobs"][6]["result"]["duplicate_groups"], 1);
     assert_eq!(report["jobs"][6]["result"]["duplicate_files"], 2);
     assert!(
@@ -2450,7 +1703,6 @@ fn batch_create_jobs_report_actual_split_output_families() {
     incompressible_file(&dir, "batch-data.bin");
     let script = dir.join("batch.json");
     let manifest = serde_json::json!({
-        "version": 1,
         "jobs": [
             {
                 "id": "compress-split",
@@ -2487,20 +1739,16 @@ fn batch_create_jobs_report_actual_split_output_families() {
     let report = stdout_json(&out);
     assert_eq!(report["ok"], true);
     assert_eq!(report["total"], 3);
-    assert_eq!(report["jobs"], report["results"]);
+    assert!(report.get("results").is_none());
 
     let compress = &report["jobs"][0]["result"];
     assert_eq!(compress["operation"], "compress");
     assert_eq!(compress["split"], true);
     assert_eq!(
-        compress["output"],
-        dir.join("batch.zip").display().to_string()
-    );
-    assert_eq!(
         compress["primary_output"],
         dir.join("batch.zip.001").display().to_string()
     );
-    let compress_volume_count = compress["volumes"].as_u64().unwrap() as usize;
+    let compress_volume_count = compress["volume_count"].as_u64().unwrap() as usize;
     let compress_outputs = json_output_paths(compress);
     let expected_compress_outputs = (1..=compress_volume_count)
         .map(|index| dir.join(format!("batch.zip.{index:03}")))
@@ -2514,12 +1762,11 @@ fn batch_create_jobs_report_actual_split_output_families() {
     let pack = &report["jobs"][1]["result"];
     assert_eq!(pack["operation"], "pack");
     assert_eq!(pack["split"], true);
-    assert_eq!(pack["output"], dir.join("batch.sqz").display().to_string());
     assert_eq!(
         pack["primary_output"],
         dir.join("batch.sqz.001").display().to_string()
     );
-    let pack_volume_count = pack["volumes"].as_u64().unwrap() as usize;
+    let pack_volume_count = pack["volume_count"].as_u64().unwrap() as usize;
     let pack_outputs = json_output_paths(pack);
     let expected_pack_volumes = (1..=pack_volume_count)
         .map(|index| dir.join(format!("batch.sqz.{index:03}")))
@@ -2601,7 +1848,6 @@ fn batch_convert_can_publish_native_zip_volumes() {
 
     let script = dir.join("batch.json");
     let manifest = serde_json::json!({
-        "version": 1,
         "jobs": [{
             "id": "convert-native",
             "kind": "convert",
@@ -2637,7 +1883,6 @@ fn batch_modern_human_output_uses_job_table() {
     let _root = sample_tree(&dir);
     let script = dir.join("batch.json");
     let manifest = serde_json::json!({
-        "version": 1,
         "jobs": [
             { "id": "plan", "kind": "estimate", "inputs": ["project"], "output": "planned.zip" },
             { "id": "missing-test", "kind": "test", "archive": "missing.zip" }
@@ -2690,7 +1935,6 @@ fn batch_json_script_runs_workbench_archive_jobs() {
     assert!(sqz_out.status.success(), "stderr: {}", stderr(&sqz_out));
 
     let manifest = serde_json::json!({
-        "version": 1,
         "jobs": [
             {
                 "kind": "update",
@@ -2700,7 +1944,7 @@ fn batch_json_script_runs_workbench_archive_jobs() {
                 "rename": [{ "from": "project/sub/b.txt", "to": "project/sub/renamed.txt" }],
                 "profile": "fast"
             },
-            { "kind": "export_sqz", "archive": "container.sqz", "output": "exported.zip" },
+            { "kind": "export", "archive": "container.sqz", "output": "exported.zip" },
             { "kind": "repair_zip", "archive": "source.zip", "output": "rebuilt.zip" },
             { "kind": "repair_sqz", "archive": "container.sqz", "output": "repaired.sqz" }
         ]
@@ -2718,7 +1962,7 @@ fn batch_json_script_runs_workbench_archive_jobs() {
             .as_array()
             .unwrap()
             .iter()
-            .map(|job| job["operation"].as_str().unwrap())
+            .map(|job| job["kind"].as_str().unwrap())
             .collect::<Vec<_>>(),
         vec!["update", "export", "repair_zip", "repair_sqz"]
     );
@@ -2769,11 +2013,10 @@ fn batch_keep_going_reports_failures_without_stopping() {
     .unwrap();
 
     let manifest = serde_json::json!({
-        "version": 1,
         "jobs": [
             { "kind": "checksum_check", "check": "SHA256SUMS.bad", "algorithm": "sha256" },
             { "kind": "test", "archive": "missing.zip" },
-            { "kind": "extract", "archive": "source.zip", "dest": "out", "includes": ["project/sub/b.txt"], "overwrite": "all" }
+            { "kind": "extract", "archive": "source.zip", "dest": "out", "includes": ["project/sub/b.txt"], "overwrite": "overwrite" }
         ]
     });
     std::fs::write(&script, serde_json::to_string_pretty(&manifest).unwrap()).unwrap();
@@ -2794,7 +2037,7 @@ fn batch_keep_going_reports_failures_without_stopping() {
     assert_eq!(report["total"], 3);
     assert_eq!(report["failed"], 2);
     assert_eq!(report["jobs"][0]["ok"], false);
-    assert_eq!(report["jobs"][0]["operation"], "checksum_check");
+    assert_eq!(report["jobs"][0]["kind"], "checksum_check");
     assert_eq!(report["jobs"][0]["error_kind"], "corrupt_archive");
     assert_eq!(report["jobs"][1]["ok"], false);
     assert_eq!(report["jobs"][1]["error_kind"], "io");
@@ -2817,13 +2060,12 @@ fn batch_extract_honors_shared_safety_limits() {
     assert!(created.status.success(), "stderr: {}", stderr(&created));
 
     let manifest = serde_json::json!({
-        "version": 1,
         "jobs": [
             {
                 "kind": "extract",
                 "archive": "source.zip",
                 "dest": "limited-out",
-                "overwrite": "all",
+                "overwrite": "overwrite",
                 "max_output_bytes": 1
             }
         ]
@@ -2841,7 +2083,7 @@ fn batch_extract_honors_shared_safety_limits() {
     assert_eq!(report["ok"], false);
     assert_eq!(report["total"], 1);
     assert_eq!(report["failed"], 1);
-    assert_eq!(report["jobs"][0]["operation"], "extract");
+    assert_eq!(report["jobs"][0]["kind"], "extract");
     assert_eq!(report["jobs"][0]["error_kind"], "resource_limit_exceeded");
     assert_eq!(report["jobs"][0]["exit_code"], 6);
 
@@ -2859,7 +2101,6 @@ fn batch_extract_no_match_preserves_an_invalid_destination() {
     assert!(created.status.success(), "stderr: {}", stderr(&created));
     std::fs::write(&occupied, b"keep").unwrap();
     let manifest = serde_json::json!({
-        "version": 1,
         "jobs": [{
             "kind": "extract",
             "archive": "source.zip",
@@ -2877,6 +2118,46 @@ fn batch_extract_no_match_preserves_an_invalid_destination() {
     assert_eq!(report["jobs"][0]["result"]["matched"], false);
     assert_eq!(report["jobs"][0]["result"]["plan"]["entries"], 0);
     assert_eq!(std::fs::read(&occupied).unwrap(), b"keep");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn batch_rejects_removed_schema_fields_and_operation_names() {
+    let dir = temp_dir("batch-current-schema");
+
+    for (name, manifest) in [
+        (
+            "version",
+            serde_json::json!({
+                "version": 1,
+                "jobs": [{ "kind": "test", "archive": "archive.zip" }]
+            }),
+        ),
+        (
+            "operation-alias",
+            serde_json::json!({
+                "jobs": [{ "kind": "verify_checksum", "check": "SHA256SUMS" }]
+            }),
+        ),
+        (
+            "path-alias",
+            serde_json::json!({
+                "jobs": [{ "kind": "convert", "archive": "source.zip", "output": "out.7z" }]
+            }),
+        ),
+        (
+            "irrelevant-current-field",
+            serde_json::json!({
+                "jobs": [{ "kind": "test", "archive": "source.zip", "inputs": ["ignored"] }]
+            }),
+        ),
+    ] {
+        let script = dir.join(format!("{name}.json"));
+        std::fs::write(&script, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+        let out = run(sqz().arg("batch").arg(&script).arg("--json"));
+        assert!(!out.status.success(), "{name} unexpectedly succeeded");
+    }
+
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -3202,9 +2483,9 @@ fn compress_list_test_extract_roundtrip_with_json() {
     let report: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("valid JSON");
     assert_eq!(report["ok"], true);
     assert_eq!(report["operation"], "compress");
-    assert_eq!(report["output"], archive.display().to_string());
+    assert_eq!(report["primary_output"], archive.display().to_string());
     assert_eq!(report["split"], false);
-    assert_eq!(report["volumes"], 1);
+    assert_eq!(report["volume_count"], 1);
     assert_eq!(report["tested_after_create"], true);
     assert!(report["entries_tested_after_create"]
         .as_u64()
@@ -3312,7 +2593,6 @@ fn compress_list_test_extract_roundtrip_with_json() {
     assert_eq!(report["dest"], dest.display().to_string());
     assert_eq!(report["matched"], true);
     assert_eq!(report["best_effort"], false);
-    assert_eq!(report["skipped"], 0);
     assert!(report["problems"].as_array().unwrap().is_empty());
     assert_eq!(report["plan"]["destination"], dest.display().to_string());
     assert_eq!(report["plan"]["layout"], "direct");
@@ -3323,14 +2603,11 @@ fn compress_list_test_extract_roundtrip_with_json() {
     assert_eq!(report["counts"]["replaced"], 0);
     assert_eq!(report["counts"]["renamed"], 0);
     assert_eq!(report["counts"]["failed"], 0);
-    assert_eq!(report["selected_entries"], report["plan"]["entries"]);
     assert_eq!(
         report["counts"]["selected_entries"],
-        report["selected_entries"]
+        report["plan"]["entries"]
     );
-    assert_eq!(report["counts"]["directories"], report["directories"]);
-    assert_eq!(report["counts"]["output_bytes"], report["output_bytes"]);
-    assert!(report["output_bytes"].as_u64().unwrap() > 0);
+    assert!(report["counts"]["output_bytes"].as_u64().unwrap() > 0);
     assert_eq!(
         std::fs::read(dest.join("project/a.txt")).unwrap(),
         b"hello world"
@@ -3501,24 +2778,24 @@ fn nested_archive_list_and_extract_through_the_cli() {
     assert_eq!(report["dest"], dest.display().to_string());
     assert_eq!(report["matched"], true);
     assert_eq!(report["best_effort"], false);
-    assert_eq!(report["skipped"], 0);
     assert!(report["problems"].as_array().unwrap().is_empty());
     assert_eq!(report["plan"]["requested_destination"], report["dest"]);
     assert_eq!(report["plan"]["destination"], report["dest"]);
     assert_eq!(report["plan"]["layout"], "direct");
-    assert_eq!(report["plan"]["entries"], report["selected_entries"]);
+    assert_eq!(
+        report["plan"]["entries"],
+        report["counts"]["selected_entries"]
+    );
     assert_eq!(report["counts"]["destination"], report["dest"]);
     assert_eq!(
         report["counts"]["selected_entries"],
-        report["selected_entries"]
+        report["plan"]["entries"]
     );
-    assert_eq!(report["counts"]["directories"], report["directories"]);
     assert_eq!(report["counts"]["skipped"], 0);
     assert_eq!(report["counts"]["replaced"], 0);
     assert_eq!(report["counts"]["renamed"], 0);
     assert_eq!(report["counts"]["failed"], 0);
-    assert_eq!(report["counts"]["output_bytes"], report["output_bytes"]);
-    assert_eq!(report["output_bytes"], 14);
+    assert_eq!(report["counts"]["output_bytes"], 14);
     assert_eq!(
         std::fs::read(dest.join("project/sub/b.txt")).unwrap(),
         b"nested content"
@@ -3540,10 +2817,7 @@ fn nested_archive_list_and_extract_through_the_cli() {
         stderr(&out)
     );
     let conflict = stdout_json(&out);
-    assert_eq!(
-        conflict["skipped"], 0,
-        "legacy skipped remains the best-effort problem count"
-    );
+    assert_eq!(conflict["problems_total"], 0);
     assert_eq!(conflict["counts"]["skipped"], 1);
     assert_eq!(conflict["counts"]["failed"], 0);
 
@@ -3568,7 +2842,6 @@ fn nested_archive_list_and_extract_through_the_cli() {
     assert_eq!(report["dest"], empty_dest.display().to_string());
     assert_eq!(report["matched"], false);
     assert_eq!(report["best_effort"], false);
-    assert_eq!(report["skipped"], 0);
     assert!(report["problems"].as_array().unwrap().is_empty());
     assert_eq!(report["plan"]["requested_destination"], report["dest"]);
     assert_eq!(report["plan"]["destination"], report["dest"]);
@@ -3587,9 +2860,6 @@ fn nested_archive_list_and_extract_through_the_cli() {
             "output_bytes": 0
         })
     );
-    assert_eq!(report["selected_entries"], 0);
-    assert_eq!(report["directories"], 0);
-    assert_eq!(report["output_bytes"], 0);
     assert!(!empty_dest.exists());
 
     let smart_dest = dir.join("nested-smart-out");
@@ -3980,9 +3250,9 @@ fn pack_creates_sqz_container_as_a_first_class_cli_entry() {
     let report: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("valid JSON");
     assert_eq!(report["ok"], true);
     assert_eq!(report["operation"], "pack_sqz");
-    assert_eq!(report["output"], archive.display().to_string());
+    assert_eq!(report["primary_output"], archive.display().to_string());
     assert_eq!(report["split"], false);
-    assert_eq!(report["volumes"], 1);
+    assert_eq!(report["volume_count"], 1);
     assert_eq!(report["inner_format"], "sqz");
     assert_eq!(report["recovery_percent"], 10);
     assert_eq!(
@@ -4036,11 +3306,11 @@ fn pack_creates_sqz_container_as_a_first_class_cli_entry() {
     assert_eq!(report["ok"], true);
     assert_eq!(report["operation"], "pack_sqz");
     assert_eq!(
-        report["output"],
+        report["primary_output"],
         dir.join("packed-split.sqz.001").display().to_string()
     );
     assert_eq!(report["split"], true);
-    let split_volume_count = report["volumes"].as_u64().unwrap() as usize;
+    let split_volume_count = report["volume_count"].as_u64().unwrap() as usize;
     assert!(split_volume_count >= 2);
     assert_eq!(report["inner_format"], "sqz");
     assert_eq!(report["recovery_percent"], 10);
@@ -4082,7 +3352,10 @@ fn pack_creates_sqz_container_as_a_first_class_cli_entry() {
     let report: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("valid JSON");
     assert_eq!(report["ok"], true);
     assert_eq!(report["operation"], "pack_sqz");
-    assert_eq!(report["output"], zip_profile_archive.display().to_string());
+    assert_eq!(
+        report["primary_output"],
+        zip_profile_archive.display().to_string()
+    );
     assert_eq!(report["inner_format"], "zip");
     assert_eq!(report["recovery_percent"], 10);
 
@@ -4217,12 +3490,7 @@ fn pack_creates_sqz_container_as_a_first_class_cli_entry() {
             .args(["--inner-format", profile]));
         assert_eq!(out.status.code(), Some(2), "stderr: {}", stderr(&out));
         assert!(
-            stderr(&out).contains("currently supports only --inner-format sqz")
-                && stderr(&out).contains("zip")
-                && stderr(&out).contains("tar")
-                && stderr(&out).contains("7z")
-                && stderr(&out).contains("zstd")
-                && stderr(&out).contains(profile),
+            stderr(&out).contains("unsupported SQZ inner format 'raw'"),
             "stderr: {}",
             stderr(&out)
         );
@@ -4261,9 +3529,9 @@ fn assert_sqz_standard_inner_profile_roundtrip(
     let report: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("valid JSON");
     assert_eq!(report["ok"], true);
     assert_eq!(report["operation"], "pack_sqz");
-    assert_eq!(report["output"], archive.display().to_string());
+    assert_eq!(report["primary_output"], archive.display().to_string());
     assert_eq!(report["split"], false);
-    assert_eq!(report["volumes"], 1);
+    assert_eq!(report["volume_count"], 1);
     assert_eq!(report["inner_format"], profile);
     assert_eq!(report["recovery_percent"], 10);
 
@@ -4340,7 +3608,6 @@ fn assert_sqz_standard_inner_profile_roundtrip(
     assert_eq!(report["dest"], dest.display().to_string());
     assert_eq!(report["matched"], true);
     assert_eq!(report["best_effort"], false);
-    assert_eq!(report["skipped"], 0);
     assert!(report["problems"].as_array().unwrap().is_empty());
     assert_eq!(
         std::fs::read(dest.join("project/sub/b.txt")).unwrap(),
@@ -4473,7 +3740,6 @@ fn sqz_tar_inner_profile_uses_outer_recovery_before_inner_open() {
     let report: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("valid JSON");
     assert_eq!(report["ok"], true);
     assert_eq!(report["matched"], true);
-    assert_eq!(report["skipped"], 0);
     assert!(report["problems"].as_array().unwrap().is_empty());
     assert_eq!(
         std::fs::read(dest.join("project/sub/b.txt")).unwrap(),
@@ -4614,21 +3880,27 @@ fn create_content_policy_is_opt_in_across_cli_create_paths() {
     let dir = temp_dir("content-policy-cli");
     let root = content_policy_tree(&dir, "policy-input");
 
-    let legacy = dir.join("legacy.zip");
+    let explicit_only = dir.join("explicit-only.zip");
     let out = run(sqz()
         .arg("compress")
         .arg(&root)
         .arg("-o")
-        .arg(&legacy)
+        .arg(&explicit_only)
         .args(["--exclude", "*.tmp"]));
     assert!(out.status.success(), "stderr: {}", stderr(&out));
-    let legacy_paths = listed_paths(&legacy);
-    assert!(legacy_paths.iter().any(|path| path.ends_with("/.DS_Store")));
-    assert!(legacy_paths
+    let explicit_only_paths = listed_paths(&explicit_only);
+    assert!(explicit_only_paths
+        .iter()
+        .any(|path| path.ends_with("/.DS_Store")));
+    assert!(explicit_only_paths
         .iter()
         .any(|path| path.ends_with("/._keep.txt")));
-    assert!(legacy_paths.iter().any(|path| path.contains("/__MACOSX/")));
-    assert!(!legacy_paths.iter().any(|path| path.ends_with(".tmp")));
+    assert!(explicit_only_paths
+        .iter()
+        .any(|path| path.contains("/__MACOSX/")));
+    assert!(!explicit_only_paths
+        .iter()
+        .any(|path| path.ends_with(".tmp")));
 
     let clean = dir.join("clean.zip");
     let out = run(sqz()
@@ -4805,7 +4077,6 @@ fn extract_include_selects_entries() {
     assert_eq!(report["dest"], dest2.display().to_string());
     assert_eq!(report["matched"], false);
     assert_eq!(report["best_effort"], false);
-    assert_eq!(report["skipped"], 0);
     assert!(report["problems"].as_array().unwrap().is_empty());
     assert_eq!(report["plan"]["destination"], dest2.display().to_string());
     assert_eq!(report["plan"]["entries"], 0);
@@ -4823,9 +4094,6 @@ fn extract_include_selects_entries() {
             "output_bytes": 0
         })
     );
-    assert_eq!(report["selected_entries"], 0);
-    assert_eq!(report["directories"], 0);
-    assert_eq!(report["output_bytes"], 0);
     assert!(!dest2.join("project").exists());
 
     let occupied_dest = dir.join("occupied-no-match");
@@ -4845,7 +4113,7 @@ fn extract_include_selects_entries() {
 }
 
 #[test]
-fn extract_smart_no_match_keeps_legacy_dest_and_reports_planned_target() {
+fn extract_smart_no_match_keeps_requested_dest_and_reports_planned_target() {
     let dir = temp_dir("extract-smart-no-match");
     let input = dir.join("payload.txt");
     let archive = dir.join("loose.zip");
@@ -4994,7 +4262,6 @@ fn extract_best_effort_skips_unreadable_entries() {
     assert_eq!(report["dest"], json_dest.display().to_string());
     assert_eq!(report["matched"], true);
     assert_eq!(report["best_effort"], true);
-    assert_eq!(report["skipped"], 1);
     assert!(report["problems"][0].as_str().unwrap().contains("bad.txt"));
     assert_eq!(report["problems_total"], 1);
     assert_eq!(report["problems_truncated"], false);
@@ -5081,7 +4348,6 @@ fn extract_best_effort_json_bounds_problem_preview_without_losing_total() {
         stderr(&out)
     );
     let report: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("valid JSON");
-    assert_eq!(report["skipped"], 25);
     assert_eq!(report["problems_total"], 25);
     assert_eq!(report["problems_truncated"], true);
     assert_eq!(report["problems"].as_array().map(Vec::len), Some(20));
@@ -5205,25 +4471,21 @@ fn zip_local_header_fallback_is_available_through_cli() {
         .keys()
         .map(|key| key.as_str())
         .collect();
-    let legacy_fields = [
+    let expected_fields = [
         "best_effort",
         "counts",
         "dest",
-        "directories",
         "matched",
         "ok",
         "operation",
-        "output_bytes",
         "plan",
         "problems",
         "problems_total",
         "problems_truncated",
-        "selected_entries",
-        "skipped",
     ]
     .into_iter()
     .collect();
-    assert_eq!(fields, legacy_fields);
+    assert_eq!(fields, expected_fields);
     assert_eq!(report["ok"], true);
     assert_eq!(
         std::fs::read(json_dest.join("good.txt")).unwrap(),
@@ -5775,7 +5037,7 @@ fn overwrite_ask_degrades_to_skip_without_a_tty() {
 }
 
 #[test]
-fn extract_json_separates_conflict_outcomes_from_legacy_best_effort_skips() {
+fn extract_json_separates_conflict_outcomes_from_problem_counts() {
     let dir = temp_dir("extract-outcome-counts");
     let root = sample_tree(&dir);
     let archive = dir.join("out.zip");
@@ -5801,7 +5063,7 @@ fn extract_json_separates_conflict_outcomes_from_legacy_best_effort_skips() {
     };
 
     let (skip_dest, skip) = run_policy("skip", "skip");
-    assert_eq!(skip["skipped"], 0, "legacy skipped must stay unchanged");
+    assert_eq!(skip["problems_total"], 0);
     assert_eq!(
         skip["counts"]["destination"],
         skip_dest.display().to_string()
@@ -5816,7 +5078,7 @@ fn extract_json_separates_conflict_outcomes_from_legacy_best_effort_skips() {
     );
 
     let (replace_dest, replace) = run_policy("replace", "all");
-    assert_eq!(replace["skipped"], 0);
+    assert_eq!(replace["problems_total"], 0);
     assert_eq!(replace["counts"]["skipped"], 0);
     assert_eq!(replace["counts"]["replaced"], 1);
     assert_eq!(replace["counts"]["renamed"], 0);
@@ -5827,7 +5089,7 @@ fn extract_json_separates_conflict_outcomes_from_legacy_best_effort_skips() {
     );
 
     let (rename_dest, rename) = run_policy("rename", "rename");
-    assert_eq!(rename["skipped"], 0);
+    assert_eq!(rename["problems_total"], 0);
     assert_eq!(rename["counts"]["skipped"], 0);
     assert_eq!(rename["counts"]["replaced"], 0);
     assert_eq!(rename["counts"]["renamed"], 1);
@@ -5959,10 +5221,6 @@ fn info_json_reports_external_tool_availability() {
     assert_eq!(rar_policy["fallback_env"], "SQUALLZ_BSDTAR");
     assert_eq!(rar_policy["rar7_decoder_env"], "SQUALLZ_UNRAR");
     assert_eq!(
-        rar_policy["fallback_scope"],
-        "diagnostic_single_file_or_confirmed_unencrypted_rar7_v6"
-    );
-    assert_eq!(
         rar_policy["fallback_scopes"],
         serde_json::json!([
             "explicit_diagnostic",
@@ -6057,10 +5315,6 @@ fn info_json_reports_available_external_tool_from_path() {
     assert_eq!(rar_read["source"], "path");
     assert_eq!(rar_read["selected"].as_str(), Some(selected.as_str()));
     assert_eq!(rar_read["path_exists"], true);
-    assert_eq!(
-        find("rar")["implementation"]["policy"]["fallback_scope"],
-        "diagnostic_single_file_or_confirmed_unencrypted_rar7_v6"
-    );
     assert!(find("rar")["implementation"]["policy"]["fallback_scopes"]
         .as_array()
         .is_some_and(|scopes| scopes
@@ -6251,8 +5505,7 @@ fn info_modern_groups_formats_and_uses_capability_matrix() {
     assert!(text.contains("Modern output"), "{text}");
     assert!(text.contains("Modern style guide"), "{text}");
     assert!(text.contains("operation cockpit"), "{text}");
-    assert!(text.contains("--color fancy"), "{text}");
-    assert!(text.contains("--color rich"), "{text}");
+    assert!(text.contains("--color always"), "{text}");
     assert!(text.contains("Best for"), "{text}");
     assert!(text.contains("Signal"), "{text}");
     assert!(text.contains("Palette gallery"), "{text}");
@@ -6263,28 +5516,11 @@ fn info_modern_groups_formats_and_uses_capability_matrix() {
         "{text}"
     );
     assert!(text.contains("speed"), "{text}");
-    assert!(text.contains("--palette brand"), "{text}");
-    assert!(text.contains("--palette cascade"), "{text}");
-    assert!(text.contains("--palette daylight"), "{text}");
-    assert!(text.contains("--palette foam"), "{text}");
-    assert!(text.contains("--palette skyline"), "{text}");
-    assert!(text.contains("--palette aero"), "{text}");
-    assert!(text.contains("--palette crest"), "{text}");
-    assert!(text.contains("--palette halo"), "{text}");
-    assert!(text.contains("--palette tropic"), "{text}");
-    assert!(text.contains("--palette kinetic"), "{text}");
-    assert!(text.contains("--palette radiant"), "{text}");
-    assert!(text.contains("--palette surge"), "{text}");
-    assert!(text.contains("--colors icon"), "{text}");
-    assert!(text.contains("--colors glass"), "{text}");
-    assert!(text.contains("--palette nova"), "{text}");
-    assert!(text.contains("--palette crystal"), "{text}");
-    assert!(text.contains("--palette lumina"), "{text}");
+    for palette in ["squallz", "ocean", "jade", "sunset", "violet", "mono"] {
+        assert!(text.contains(&format!("--palette {palette}")), "{text}");
+    }
     assert!(text.contains("Color mode"), "{text}");
     assert!(text.contains("Palette"), "{text}");
-    assert!(text.contains("Color scheme"), "{text}");
-    assert!(text.contains("--color-scheme / --scheme"), "{text}");
-    assert!(text.contains("--colors"), "{text}");
     assert!(text.contains("Progress HUD"), "{text}");
     assert!(
         text.contains("operation cockpit")
@@ -6435,10 +5671,6 @@ fn info_lists_all_i3_formats_registry_driven() {
         .iter()
         .any(|tool| tool == "unrar"));
     assert_eq!(rar_policy["rar7_decoder_env"], "SQUALLZ_UNRAR");
-    assert_eq!(
-        rar_policy["fallback_scope"],
-        "diagnostic_single_file_or_confirmed_unencrypted_rar7_v6"
-    );
     assert!(rar_policy["fallback_scopes"]
         .as_array()
         .is_some_and(|scopes| scopes
@@ -6748,7 +5980,7 @@ exit 2
     let report = stdout_json(&out);
     assert_eq!(report["ok"], true);
     assert_eq!(report["operation"], "compress");
-    assert_eq!(report["output"], archive.display().to_string());
+    assert_eq!(report["primary_output"], archive.display().to_string());
     assert!(std::fs::read(&archive).unwrap().starts_with(b"MSWIM\0\0\0"));
 
     let out = run(sqz()
@@ -7194,7 +6426,7 @@ exit 2
     assert_eq!(report["ok"], true);
     assert_eq!(report["operation"], "extract");
     assert_eq!(report["best_effort"], true);
-    assert_eq!(report["skipped"], 1);
+    assert_eq!(report["problems_total"], 1);
     assert!(
         report["problems"]
             .as_array()
@@ -7342,11 +6574,11 @@ fn compress_split_produces_volumes_and_reads_back_transparently() {
     assert_eq!(report["ok"], true);
     assert_eq!(report["operation"], "compress");
     assert_eq!(
-        report["output"],
+        report["primary_output"],
         dir.join("out-json.zip.001").display().to_string()
     );
     assert_eq!(report["split"], true);
-    assert_eq!(report["volumes"], 4);
+    assert_eq!(report["volume_count"], 4);
     let json_outputs = json_output_paths(&report);
     let expected_outputs = (1..=4)
         .map(|index| dir.join(format!("out-json.zip.{index:03}")))
@@ -8056,7 +7288,7 @@ fn convert_zip_to_7z_to_zip_roundtrip() {
     assert_eq!(report["ok"], true);
     assert_eq!(report["operation"], "convert");
     assert_eq!(report["source"], sevenz.display().to_string());
-    assert_eq!(report["output"], back.display().to_string());
+    assert_eq!(report["primary_output"], back.display().to_string());
 
     // Round-tripped archive extracts to identical content.
     let dest = dir.join("restored");
@@ -8092,7 +7324,9 @@ fn convert_can_publish_and_report_split_volumes() {
     let second = dir.join("converted.7z.002");
     assert_eq!(report["operation"], "convert");
     assert_eq!(report["split"], true);
-    assert!(report["volumes"].as_u64().is_some_and(|count| count >= 2));
+    assert!(report["volume_count"]
+        .as_u64()
+        .is_some_and(|count| count >= 2));
     assert_eq!(report["primary_output"], primary.display().to_string());
     assert!(report["outputs"]
         .as_array()
@@ -8233,6 +7467,7 @@ fn cli_test_reports_wrong_password_for_encrypted_7z_content() {
     assert!(out.status.success(), "compress failed: {}", stderr(&out));
 
     let out = run(sqz()
+        .args(["--lang", "en-US"])
         .arg("test")
         .arg(&archive)
         .args(["--password", "wrong password", "--json"]));
@@ -8923,7 +8158,7 @@ esac
         serde_json::json!({
             "jobs": [{
                 "id": "repair-set",
-                "operation": "repair_recovery",
+                "kind": "repair_recovery",
                 "archive": multi_first,
                 "recovery_path": multi_recovery,
                 "output_dir": batch_output
@@ -9231,7 +8466,7 @@ esac
         serde_json::json!({
             "jobs": [{
                 "id": "protect-volume-set",
-                "operation": "protect",
+                "kind": "protect",
                 "archive": second,
                 "recovery_path": batch_recovery,
                 "redundancy": 25

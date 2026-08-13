@@ -23,7 +23,7 @@ use squallz_format_api::{
     BoundedProblemLog, ControlToken, CreateOptions, EntryMeta, EntryPath, EntryType,
     FormatCapabilities, FormatCreateBudget, FormatError, NativeVolumeBudget, NativeVolumeLimits,
     NativeVolumeWriter, OpenOptions, Password, PhysicalFileIdentity, ProgressSink, ReadSeek,
-    SplitOutputMode, TestReport, TestSummary, WriteSeek, TEST_PROBLEM_PREVIEW_LIMIT,
+    SplitOutputMode, TestSummary, WriteSeek, TEST_PROBLEM_PREVIEW_LIMIT,
 };
 
 use crate::external_process::{self, ControlledChild};
@@ -642,21 +642,6 @@ impl ArchiveReader for SevenZipArchiveReader {
 
     fn read_entry(&mut self, path: &EntryPath) -> Result<Box<dyn Read + '_>, FormatError> {
         self.read_entry_with_control(path, &self.control)
-    }
-
-    fn test(
-        &mut self,
-        progress: &dyn ProgressSink,
-        ctl: &squallz_format_api::ControlToken,
-    ) -> Result<TestReport, FormatError> {
-        let mut problems = Vec::new();
-        let entries_tested =
-            self.test_with_problem_recorder(progress, ctl, |problem| problems.push(problem))?;
-        Ok(TestReport {
-            entries_tested,
-            problems,
-            recovery: None,
-        })
     }
 
     fn test_summary(
@@ -2092,7 +2077,7 @@ exit 2
         assert_eq!(dash, "dash entry content");
 
         let report = reader
-            .test(
+            .test_summary(
                 &squallz_format_api::NoProgress,
                 &squallz_format_api::ControlToken::new(),
             )

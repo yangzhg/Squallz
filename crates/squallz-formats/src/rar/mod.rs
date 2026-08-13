@@ -19,7 +19,7 @@ use std::process::{ChildStdout, Command, Stdio};
 use squallz_format_api::{
     ArchiveFormat, ArchiveReader, ArchiveSourceSet, ArchiveWriter, BoundedProblemLog, ControlToken,
     CreateOptions, EntryMeta, EntryPath, EntryType, FormatCapabilities, FormatError, OpenOptions,
-    Password, PhysicalFileIdentity, ProgressSink, ReadSeek, TestReport, TestSummary, WriteSeek,
+    Password, PhysicalFileIdentity, ProgressSink, ReadSeek, TestSummary, WriteSeek,
     TEST_PROBLEM_PREVIEW_LIMIT,
 };
 
@@ -314,21 +314,6 @@ impl ArchiveReader for RarArchiveReader {
 
     fn read_entry(&mut self, path: &EntryPath) -> Result<Box<dyn Read + '_>, FormatError> {
         self.read_entry_with_control(path, &self.control)
-    }
-
-    fn test(
-        &mut self,
-        progress: &dyn ProgressSink,
-        ctl: &squallz_format_api::ControlToken,
-    ) -> Result<TestReport, FormatError> {
-        let mut problems = Vec::new();
-        let entries_tested =
-            self.test_with_problem_recorder(progress, ctl, |problem| problems.push(problem))?;
-        Ok(TestReport {
-            entries_tested,
-            problems,
-            recovery: None,
-        })
     }
 
     fn test_summary(
@@ -1389,7 +1374,7 @@ exit 2
         assert_eq!(dash, "dash entry content");
 
         let report = reader
-            .test(
+            .test_summary(
                 &squallz_format_api::NoProgress,
                 &squallz_format_api::ControlToken::new(),
             )
@@ -2059,7 +2044,7 @@ printf 'rar7 via unrar'
         assert_eq!(contents, "rar7 via unrar");
 
         let report = reader
-            .test(
+            .test_summary(
                 &squallz_format_api::NoProgress,
                 &squallz_format_api::ControlToken::new(),
             )
@@ -2297,7 +2282,7 @@ exit 2
         assert_eq!(dash, "dash entry content");
 
         let report = reader
-            .test(
+            .test_summary(
                 &squallz_format_api::NoProgress,
                 &squallz_format_api::ControlToken::new(),
             )

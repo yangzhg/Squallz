@@ -5,14 +5,15 @@
 use std::path::{Path, PathBuf};
 
 use serde_json::json;
-use squallz_core::api::{
-    split_volume_name, CompressionLevel, CreateOptions, Detected, FormatError, OpenOptions,
-    Password,
-};
+use squallz_core::api::{CompressionLevel, CreateOptions, FormatError, OpenOptions, Password};
+use squallz_core::is_sqz_archive_path;
 
 use super::reports::print_pretty_json;
 use crate::args::resource_options;
-use crate::commands::{Ctx, ModernStatusField, ModernTableColumn, ModernTableRow};
+use crate::commands::{
+    detected_format_label, memory_limit_label, threads_label, Ctx, ModernStatusField,
+    ModernTableColumn, ModernTableRow,
+};
 use crate::errors::CliError;
 use crate::progress::{fmt_bytes, CliProgress};
 use crate::ui::Tone;
@@ -29,12 +30,12 @@ pub fn run(
     force: bool,
     json_output: bool,
 ) -> Result<(), CliError> {
-    if !is_sqz_path(&archive) {
+    if !is_sqz_archive_path(&archive) {
         return Err(
             FormatError::Unsupported("export expects a .sqz source container".into()).into(),
         );
     }
-    if is_sqz_path(&output) {
+    if is_sqz_archive_path(&output) {
         return Err(FormatError::Unsupported(
             "export output must be a standard archive, not .sqz".into(),
         )
@@ -159,63 +160,6 @@ pub fn run(
     Ok(())
 }
 
-fn threads_label(ctx: &Ctx, threads: Option<usize>) -> String {
-    threads.map_or_else(|| ctx.loc.t("common.auto"), |threads| threads.to_string())
-}
-
-fn memory_limit_label(ctx: &Ctx, memory_limit: Option<u64>) -> String {
-    memory_limit.map_or_else(|| ctx.loc.t("common.auto"), fmt_bytes)
-}
-
-fn is_sqz_path(path: &Path) -> bool {
-    if is_plain_sqz_path(path) {
-        return true;
-    }
-    match split_sqz_base_name(path) {
-        Some(base) => is_plain_sqz_path(Path::new(&base)),
-        None => false,
-    }
-}
-
-fn split_sqz_base_name(path: &Path) -> Option<String> {
-    let name = path.file_name().and_then(|name| name.to_str())?;
-    split_volume_name(name).map(|(base, _)| base.to_owned())
-}
-
-fn is_plain_sqz_path(path: &Path) -> bool {
-    path.extension()
-        .and_then(|ext| ext.to_str())
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("sqz"))
-}
-
-fn detected_format_label(ctx: &Ctx, path: &Path) -> String {
-    match detected_format_name(ctx, path) {
-        Some(name) => name,
-        None => "-".to_owned(),
-    }
-}
-
-fn detected_format_name(ctx: &Ctx, path: &Path) -> Option<String> {
-    let name = detect_name_for_path(path)?;
-    match ctx.engine.registry().detect_by_name(&name)? {
-        Detected::Archive(archive) => Some(archive.id().to_owned()),
-        Detected::Compressed {
-            compressor,
-            inner_archive: Some(archive),
-        } => Some(format!("{}.{}", archive.id(), compressor.id())),
-        Detected::Compressed {
-            compressor,
-            inner_archive: None,
-        } => Some(compressor.id().to_owned()),
-    }
-}
-
-fn detect_name_for_path(path: &Path) -> Option<String> {
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .map(ToOwned::to_owned)
-}
-
 fn output_size_label(path: &Path) -> String {
     match std::fs::metadata(path) {
         Ok(metadata) => fmt_bytes(metadata.len()),
@@ -237,11 +181,11 @@ mod tests {
 
     #[test]
     fn sqz_path_accepts_plain_and_split_sqz_sources_only() {
-        assert!(is_sqz_path(Path::new("archive.sqz")));
-        assert!(is_sqz_path(Path::new("archive.sqz.001")));
-        assert!(is_sqz_path(Path::new("ARCHIVE.SQZ")));
-        assert!(!is_sqz_path(Path::new("archive.zip")));
-        assert!(!is_sqz_path(Path::new("archive.zip.001")));
-        assert!(!is_sqz_path(Path::new("/")));
+        assert!(is_sqz_archive_path(Path::new("archive.sqz")));
+        assert!(is_sqz_archive_path(Path::new("archive.sqz.001")));
+        assert!(is_sqz_archive_path(Path::new("ARCHIVE.SQZ")));
+        assert!(!is_sqz_archive_path(Path::new("archive.zip")));
+        assert!(!is_sqz_archive_path(Path::new("archive.zip.001")));
+        assert!(!is_sqz_archive_path(Path::new("/")));
     }
 }

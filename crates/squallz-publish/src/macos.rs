@@ -495,19 +495,6 @@ fn publish_in_workspace<R: ToolRunner>(
     }
 
     phase(PublishPhase::Sign);
-    let sidecar = workspace.stage.path.join("Contents/MacOS/sqz");
-    match fs::symlink_metadata(&sidecar) {
-        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
-            sign_path(workspace, runner, identity, &sidecar, ctl)?;
-        }
-        Ok(_) => {
-            return Err(FormatError::Unsupported(
-                "macOS SFX CLI sidecar must be a regular non-symlink file".into(),
-            ));
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error.into()),
-    }
     sign_path(workspace, runner, identity, &workspace.stage.path, ctl)?;
     verify_codesign(workspace, runner, ctl)?;
     let signature = inspect_signature(workspace, runner, ctl)?;
@@ -1345,31 +1332,6 @@ mod tests {
                 "xcrun", "codesign", "spctl",
             ]
         );
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn publishing_signs_a_legacy_cli_sidecar_before_the_outer_bundle() {
-        let root = temp_dir("sfx-publish-legacy-sidecar");
-        let source = create_test_sfx(&root);
-        write_fake_macho(&source.join("Contents/MacOS/sqz"), &SFX_CLI_STUB_MARKER);
-        let mut runner = FakeRunner::accepted();
-
-        publish_for_test(&root, &mut runner).unwrap();
-
-        let signed_paths = runner
-            .calls
-            .iter()
-            .filter(|call| {
-                call.first().is_some_and(|program| program == "codesign")
-                    && call.get(1).is_some_and(|argument| argument == "--force")
-            })
-            .map(|call| PathBuf::from(call.last().unwrap()))
-            .collect::<Vec<_>>();
-        assert_eq!(signed_paths.len(), 2);
-        assert!(signed_paths[0].ends_with("Contents/MacOS/sqz"));
-        assert_eq!(signed_paths[1].extension(), Some(OsStr::new("app")));
-        assert_no_private_workspaces(&root);
         fs::remove_dir_all(root).unwrap();
     }
 

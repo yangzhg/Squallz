@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -8,10 +8,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use serde::{Deserialize, Serialize};
 use squallz_format_api::{ControlToken, EntryPath, FormatError, ProgressSink};
 
+use crate::archive_path::checked_path_component;
 use crate::filesystem_identity::{
     file_identity, open_regular_file_no_follow_read_write, path_identity, PathIdentity,
     RegularFileState,
 };
+use crate::stored_os_string::StoredOsString;
 
 const HASH_BUFFER_BYTES: usize = 256 * 1024;
 const JOURNAL_MAX_BYTES: usize = 256 * 1024;
@@ -54,8 +56,8 @@ struct HashProgress<'a> {
 #[serde(deny_unknown_fields)]
 struct JournalRecord {
     version: u32,
-    primary: StoredName,
-    holder: StoredName,
+    primary: StoredOsString,
+    holder: StoredOsString,
     holder_identity: PathIdentity,
     members: Vec<JournalMember>,
 }
@@ -63,18 +65,10 @@ struct JournalRecord {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct JournalMember {
-    name: StoredName,
+    name: StoredOsString,
     identity: PathIdentity,
     state: RegularFileState,
     digest: [u8; 32],
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "encoding", content = "units", rename_all = "snake_case")]
-enum StoredName {
-    Unix(Vec<u8>),
-    Windows(Vec<u16>),
-    Utf8(String),
 }
 
 struct OpenJournal {
@@ -134,14 +128,14 @@ pub fn prepare_file_set_publication(
         )));
     }
 
-    let primary_name = checked_component(primary.file_name(), "primary output")?;
-    let parent = fs::canonicalize(parent_directory(primary))?;
+    let primary_name = checked_path_component(primary.file_name(), "primary output")?;
+    let parent = fs::canonicalize(crate::parent_or_current(primary))?;
     let primary = parent.join(&primary_name);
     let parent_file = crate::open_directory(&parent)?;
     let parent_identity = file_identity(&parent_file)?;
     ensure_directory_binding(&parent, &parent_file, parent_identity, "destination parent")?;
 
-    let holder_parent = fs::canonicalize(parent_directory(staging_directory))?;
+    let holder_parent = fs::canonicalize(crate::parent_or_current(staging_directory))?;
     if holder_parent != parent {
         return Err(FormatError::Unsupported(
             "file-set staging directory must be beside the destination".into(),
@@ -159,7 +153,7 @@ pub fn prepare_file_set_publication(
             "file-set staging directory must be a direct destination sibling".into(),
         ));
     }
-    checked_component(holder.file_name(), "staging directory")?;
+    checked_path_component(holder.file_name(), "staging directory")?;
     let holder_file = crate::open_directory(&holder)?;
     let holder_identity = file_identity(&holder_file)?;
     ensure_directory_binding(&holder, &holder_file, holder_identity, "staging directory")?;
@@ -169,8 +163,8 @@ pub fn prepare_file_set_publication(
     let mut total_bytes = 0u64;
     for staged in staged_files {
         control.checkpoint()?;
-        let name = checked_component(staged.file_name(), "staged output")?;
-        let staged_parent = fs::canonicalize(parent_directory(staged))?;
+        let name = checked_path_component(staged.file_name(), "staged output")?;
+        let staged_parent = fs::canonicalize(crate::parent_or_current(staged))?;
         if staged_parent != holder || !names.insert(name.clone()) {
             return Err(FormatError::Unsupported(
                 "file-set staging contains an outside or duplicate member".into(),
@@ -374,7 +368,7 @@ impl PreparedFileSetPublication {
     fn journal_record(&self) -> Result<JournalRecord, FormatError> {
         Ok(JournalRecord {
             version: JOURNAL_VERSION,
-            primary: StoredName::from_os_string(
+            primary: StoredOsString::from_os_string(
                 self.primary
                     .file_name()
                     .ok_or_else(|| {
@@ -382,7 +376,7 @@ impl PreparedFileSetPublication {
                     })?
                     .to_os_string(),
             )?,
-            holder: StoredName::from_os_string(
+            holder: StoredOsString::from_os_string(
                 self.holder
                     .file_name()
                     .ok_or_else(|| {
@@ -398,7 +392,7 @@ impl PreparedFileSetPublication {
                 .iter()
                 .map(|member| {
                     Ok(JournalMember {
-                        name: StoredName::from_os_string(member.name.clone())?,
+                        name: StoredOsString::from_os_string(member.name.clone())?,
                         identity: member.identity,
                         state: member.state.clone(),
                         digest: member.digest,
@@ -453,13 +447,13 @@ fn resolve_transaction(
     }
 
     let primary_name = checked_stored_component(&record.primary, "primary output")?;
-    let requested_name = checked_component(primary.file_name(), "primary output")?;
+    let requested_name = checked_path_component(primary.file_name(), "primary output")?;
     if primary_name != requested_name {
         return Err(FormatError::Unsupported(
             "file-set publication journal belongs to another output".into(),
         ));
     }
-    let parent = fs::canonicalize(parent_directory(primary))?;
+    let parent = fs::canonicalize(crate::parent_or_current(primary))?;
     let parent_file = crate::open_directory(&parent)?;
     let parent_identity = file_identity(&parent_file)?;
     ensure_directory_binding(&parent, &parent_file, parent_identity, "destination parent")?;
@@ -814,7 +808,7 @@ fn write_journal(
                 "file-set publication journal exceeds {JOURNAL_MAX_BYTES} bytes"
             )));
         }
-        let parent = parent_directory(&path);
+        let parent = crate::parent_or_current(&path);
         let file_name = path
             .file_name()
             .ok_or_else(|| FormatError::Unsupported("file-set journal has no file name".into()))?;
@@ -957,12 +951,12 @@ fn journal_path(primary: &Path) -> Result<PathBuf, FormatError> {
     let mut journal_name = OsString::from(".");
     journal_name.push(name);
     journal_name.push(".squallz-output-set.json");
-    Ok(parent_directory(primary).join(journal_name))
+    Ok(crate::parent_or_current(primary).join(journal_name))
 }
 
 fn lock_output_set(primary: &Path) -> Result<File, FormatError> {
-    let parent = fs::canonicalize(parent_directory(primary))?;
-    let name = checked_component(primary.file_name(), "primary output")?;
+    let parent = fs::canonicalize(crate::parent_or_current(primary))?;
+    let name = checked_path_component(primary.file_name(), "primary output")?;
     let mut identity = blake3::Hasher::new();
     identity.update(parent.as_os_str().to_string_lossy().as_bytes());
     identity.update(b"\0");
@@ -979,89 +973,9 @@ fn lock_output_set(primary: &Path) -> Result<File, FormatError> {
     Ok(lock)
 }
 
-fn checked_component(name: Option<&OsStr>, role: &str) -> Result<OsString, FormatError> {
-    let name = name.ok_or_else(|| FormatError::Unsupported(format!("{role} has no file name")))?;
-    let path = Path::new(name);
-    if path.file_name() != Some(path.as_os_str())
-        || path
-            .parent()
-            .is_some_and(|parent| !parent.as_os_str().is_empty())
-    {
-        return Err(FormatError::Unsupported(format!(
-            "{role} must be a single file name"
-        )));
-    }
-    Ok(name.to_os_string())
-}
-
-fn checked_stored_component(name: &StoredName, role: &str) -> Result<OsString, FormatError> {
+fn checked_stored_component(name: &StoredOsString, role: &str) -> Result<OsString, FormatError> {
     let name = name.to_os_string()?;
-    checked_component(Some(&name), role)
-}
-
-impl StoredName {
-    #[cfg(unix)]
-    fn from_os_string(name: OsString) -> Result<Self, FormatError> {
-        use std::os::unix::ffi::OsStringExt;
-
-        Ok(Self::Unix(name.into_vec()))
-    }
-
-    #[cfg(windows)]
-    fn from_os_string(name: OsString) -> Result<Self, FormatError> {
-        use std::os::windows::ffi::OsStrExt;
-
-        Ok(Self::Windows(name.encode_wide().collect()))
-    }
-
-    #[cfg(not(any(unix, windows)))]
-    fn from_os_string(name: OsString) -> Result<Self, FormatError> {
-        name.into_string().map(Self::Utf8).map_err(|_| {
-            FormatError::Unsupported(
-                "file-set publication names must be UTF-8 on this platform".into(),
-            )
-        })
-    }
-
-    #[cfg(unix)]
-    fn to_os_string(&self) -> Result<OsString, FormatError> {
-        use std::os::unix::ffi::OsStringExt;
-
-        match self {
-            Self::Unix(bytes) => Ok(OsString::from_vec(bytes.clone())),
-            _ => Err(FormatError::Unsupported(
-                "file-set publication journal belongs to another platform".into(),
-            )),
-        }
-    }
-
-    #[cfg(windows)]
-    fn to_os_string(&self) -> Result<OsString, FormatError> {
-        use std::os::windows::ffi::OsStringExt;
-
-        match self {
-            Self::Windows(units) => Ok(OsString::from_wide(units)),
-            _ => Err(FormatError::Unsupported(
-                "file-set publication journal belongs to another platform".into(),
-            )),
-        }
-    }
-
-    #[cfg(not(any(unix, windows)))]
-    fn to_os_string(&self) -> Result<OsString, FormatError> {
-        match self {
-            Self::Utf8(name) => Ok(OsString::from(name)),
-            _ => Err(FormatError::Unsupported(
-                "file-set publication journal belongs to another platform".into(),
-            )),
-        }
-    }
-}
-
-fn parent_directory(path: &Path) -> &Path {
-    path.parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."))
+    checked_path_component(Some(&name), role)
 }
 
 fn binding_error<const N: usize>(reason: &str, paths: [&Path; N]) -> FormatError {

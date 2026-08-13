@@ -85,7 +85,7 @@ fn sevenz_roundtrip_list_test_extract() {
     assert_eq!(script.unix_mode.map(|m| m & 0o7777), Some(0o755));
 
     let report = engine
-        .test(&archive, &OpenOptions::default(), &NoProgress, &ctl)
+        .test_summary(&archive, &OpenOptions::default(), &NoProgress, &ctl)
         .unwrap();
     assert!(report.is_ok(), "problems: {:?}", report.problems);
 

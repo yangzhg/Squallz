@@ -27,15 +27,7 @@ export type Screen =
   | "settingsPerformance"
   | "passwordBook";
 export type PaletteId = "aqua" | "sage" | "nordic" | "copper" | "aubergine" | "mono" | "custom";
-export type ChecksumAlgorithmId =
-  | "sha256"
-  | "sha224"
-  | "sha384"
-  | "sha512"
-  | "sha1"
-  | "md5"
-  | "blake3"
-  | "crc32";
+export type ChecksumAlgorithmId = ChecksumAlgorithm;
 export type Palette = {
   id: PaletteId;
   name: string;
@@ -339,3 +331,4 @@ export const palettes: Palette[] = [
 ];
 
 export const builtInPalettes = palettes.filter((palette) => palette.id !== "custom");
+import type { ChecksumAlgorithm } from "./ipc";

@@ -6,5 +6,6 @@ license.workspace = true
 description = "Squallz 格式层统一抽象：Compressor / ArchiveFormat trait 与注册表"
 
 [dependencies]
+serde.workspace = true
 thiserror.workspace = true
 zeroize.workspace = true

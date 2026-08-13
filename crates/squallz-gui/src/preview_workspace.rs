@@ -5,7 +5,7 @@ use std::fs::{self, File, Metadata, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use squallz_core::api::PhysicalFileIdentity;
@@ -13,6 +13,8 @@ use squallz_core::{
     open_directory_no_follow, open_regular_file_no_follow, open_regular_file_no_follow_read_write,
     physical_file_identity, physical_path_identity,
 };
+
+use squallz_core::lock_unpoisoned;
 
 const REGISTRY_NAME: &str = "squallz-preview-v1";
 const SWEEP_LOCK_NAME: &str = ".sweep.lock";
@@ -536,13 +538,6 @@ fn create_private_file(path: &Path) -> io::Result<File> {
         options.mode(0o600);
     }
     options.open(path)
-}
-
-fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    match mutex.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    }
 }
 
 #[cfg(test)]

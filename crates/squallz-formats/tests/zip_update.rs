@@ -13,8 +13,8 @@ use std::time::{Duration, Instant};
 
 use common::{command_exists, engine, TempDir};
 use squallz_core::api::{
-    CompressionLevel, ControlToken, CreateOptions, Detected, EntryMeta, EntryPath, FormatError,
-    NoProgress, OpenOptions, Password, ProgressPhase, ProgressSink, UpdateOp,
+    CompressionLevel, ControlToken, CreateOptions, EntryMeta, EntryPath, FormatError, NoProgress,
+    OpenOptions, Password, ProgressPhase, ProgressSink, UpdateOp,
 };
 
 /// Builds a base archive with project/a.txt, project/sub/b.txt, project/c.log.
@@ -193,11 +193,6 @@ struct PauseDuringRawCopy {
     reached: mpsc::SyncSender<(u64, u64)>,
 }
 
-struct CancelOnRewriteComplete {
-    ctl: Arc<ControlToken>,
-    fired: AtomicBool,
-}
-
 struct ResumeOnDrop(Arc<ControlToken>);
 
 impl Drop for ResumeOnDrop {
@@ -277,18 +272,6 @@ impl ProgressSink for PauseDuringRawCopy {
                 self.ctl.pause();
                 self.reached.send((current_done, current_total)).unwrap();
             }
-        }
-    }
-}
-
-impl ProgressSink for CancelOnRewriteComplete {
-    fn on_progress(&self, done: u64, total: u64, current: &EntryPath) {
-        if total > 0
-            && done == total
-            && current.display.is_empty()
-            && !self.fired.swap(true, Ordering::SeqCst)
-        {
-            self.ctl.cancel();
         }
     }
 }
@@ -411,22 +394,11 @@ fn assert_update_source_change(error: FormatError, archive: &Path, original_arch
 }
 
 fn assert_no_update_temp(parent: &Path) {
-    let legacy = fs::read_dir(parent).unwrap().any(|entry| {
-        let name = entry.unwrap().file_name();
-        let name = name.to_string_lossy();
-        name.contains(".sqz-update-") && name.ends_with(".tmp")
-    });
-    assert!(!legacy, "legacy ZIP update temporary file remains");
     let artifacts = update_transaction_artifacts(parent);
     assert!(
         artifacts.is_empty(),
         "ZIP update transaction artifacts remain: {artifacts:?}"
     );
-}
-
-fn legacy_update_temp_path(archive: &Path) -> PathBuf {
-    let name = archive.file_name().unwrap().to_string_lossy();
-    archive.with_file_name(format!(".{name}.sqz-update-{}.tmp", std::process::id()))
 }
 
 fn update_transaction_artifacts(parent: &Path) -> Vec<String> {
@@ -558,61 +530,6 @@ fn rewrite_progress_excludes_deleted_entry_bytes() {
         Some(expected_total)
     );
     assert!(!list_names(&archive, None).contains(&"project/a.txt".to_owned()));
-}
-
-#[test]
-fn engine_update_preserves_preexisting_legacy_fixed_temp_file() {
-    let tmp = TempDir::new("update-legacy-temp-sentinel");
-    let archive = base_archive(tmp.path(), None);
-    let legacy_temp = legacy_update_temp_path(&archive);
-    let sentinel = b"owned by another process";
-    fs::write(&legacy_temp, sentinel).unwrap();
-
-    run_update(
-        &archive,
-        &[UpdateOp::Delete {
-            pattern: "*.log".into(),
-        }],
-        &CreateOptions::default(),
-    )
-    .unwrap();
-
-    assert_eq!(fs::read(&legacy_temp).unwrap(), sentinel);
-    assert!(!list_names(&archive, None)
-        .iter()
-        .any(|name| name.ends_with(".log")));
-    assert_unzip_t(&archive);
-}
-
-#[cfg(unix)]
-#[test]
-fn engine_update_preserves_legacy_fixed_temp_symlink_and_victim() {
-    use std::os::unix::fs::symlink;
-
-    let tmp = TempDir::new("update-legacy-temp-symlink");
-    let archive = base_archive(tmp.path(), None);
-    let legacy_temp = legacy_update_temp_path(&archive);
-    let victim = tmp.path().join("victim.txt");
-    let victim_contents = b"must remain untouched";
-    fs::write(&victim, victim_contents).unwrap();
-    symlink(&victim, &legacy_temp).unwrap();
-
-    run_update(
-        &archive,
-        &[UpdateOp::Delete {
-            pattern: "*.log".into(),
-        }],
-        &CreateOptions::default(),
-    )
-    .unwrap();
-
-    assert!(fs::symlink_metadata(&legacy_temp)
-        .unwrap()
-        .file_type()
-        .is_symlink());
-    assert_eq!(fs::read_link(&legacy_temp).unwrap(), victim);
-    assert_eq!(fs::read(&victim).unwrap(), victim_contents);
-    assert_unzip_t(&archive);
 }
 
 #[test]
@@ -992,40 +909,6 @@ fn update_can_cancel_during_unchanged_entry_raw_copy() {
     let (current_done, current_total) = progress.observed.lock().unwrap().unwrap();
     assert!(current_done > 0);
     assert!(current_done < current_total);
-    assert_eq!(fs::read(&archive).unwrap(), original_archive);
-    assert_no_update_temp(tmp.path());
-}
-
-#[test]
-fn legacy_update_honors_cancel_from_final_rewrite_progress() {
-    let tmp = TempDir::new("legacy-update-final-cancel");
-    let archive = base_archive(tmp.path(), None);
-    let original_archive = fs::read(&archive).unwrap();
-    let control = ControlToken::new();
-    let progress = CancelOnRewriteComplete {
-        ctl: Arc::clone(&control),
-        fired: AtomicBool::new(false),
-    };
-    let registry = squallz_formats::registry();
-    let format = match registry.detect_by_name("base.zip") {
-        Some(Detected::Archive(format)) => format,
-        _ => panic!("ZIP format is not registered"),
-    };
-
-    let error = format
-        .update(
-            &archive,
-            &[UpdateOp::Delete {
-                pattern: "*.log".into(),
-            }],
-            &CreateOptions::default(),
-            &progress,
-            &control,
-        )
-        .unwrap_err();
-
-    assert!(matches!(error, FormatError::Cancelled));
-    assert!(progress.fired.load(Ordering::SeqCst));
     assert_eq!(fs::read(&archive).unwrap(), original_archive);
     assert_no_update_temp(tmp.path());
 }

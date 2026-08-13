@@ -27,7 +27,7 @@ use squallz_format_api::{
 };
 #[cfg(feature = "process-backend")]
 use squallz_format_api::{
-    BoundedProblemLog, EntryMeta, EntryPath, EntryType, Password, TestReport, TestSummary,
+    BoundedProblemLog, EntryMeta, EntryPath, EntryType, Password, TestSummary,
     TEST_PROBLEM_PREVIEW_LIMIT,
 };
 
@@ -229,33 +229,6 @@ impl ArchiveFormat for ZipFormat {
         split::write_native_volumes(source, output, progress, ctl)
     }
 
-    fn update(
-        &self,
-        src: &Path,
-        ops: &[UpdateOp],
-        opts: &CreateOptions,
-        progress: &dyn ProgressSink,
-        ctl: &ControlToken,
-    ) -> Result<(), FormatError> {
-        update::update_archive(src, ops, opts, progress, ctl)
-    }
-
-    fn accepts_prepared_update_additions(&self) -> bool {
-        true
-    }
-
-    fn update_with_prepared_additions(
-        &self,
-        src: &Path,
-        ops: &[UpdateOp],
-        additions: &mut dyn PreparedUpdateAdditions,
-        opts: &CreateOptions,
-        progress: &dyn ProgressSink,
-        ctl: &ControlToken,
-    ) -> Result<(), FormatError> {
-        update::update_archive_with_prepared_additions(src, ops, additions, opts, progress, ctl)
-    }
-
     fn supports_update_rewrite(&self) -> bool {
         true
     }
@@ -452,21 +425,6 @@ impl ArchiveReader for SplitZipArchiveReader {
         self.read_entry_with_control(path, &self.control)
     }
 
-    fn test(
-        &mut self,
-        progress: &dyn ProgressSink,
-        ctl: &ControlToken,
-    ) -> Result<TestReport, FormatError> {
-        let mut problems = Vec::new();
-        let entries_tested =
-            self.test_with_problem_recorder(progress, ctl, |problem| problems.push(problem))?;
-        Ok(TestReport {
-            entries_tested,
-            problems,
-            recovery: None,
-        })
-    }
-
     fn test_summary(
         &mut self,
         progress: &dyn ProgressSink,
@@ -499,7 +457,6 @@ mod tests {
         assert_eq!(format.extensions(), &["zip", "jar", "apk", "cbz", "ipa"]);
 
         let capabilities = format.capabilities();
-        assert!(format.accepts_prepared_update_additions());
         assert!(format.supports_update_rewrite());
         assert!(capabilities.can_create);
         assert!(capabilities.can_extract);

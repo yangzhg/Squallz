@@ -44,7 +44,7 @@ cannot be divided across parts. `--force`
 authorizes replacement of the exact file or numbered set inspected when the command starts;
 if another process changes it before commit, the command fails with
 `destination_changed` and keeps the newer file. Batch `convert` and `export`
-jobs use the same rule: set `"overwrite": "all"` to authorize an existing
+jobs use the same rule: set `"overwrite": "overwrite"` to authorize an existing
 output.
 
 ## Version and Software Update Checks
@@ -134,7 +134,7 @@ same contract with `"output_dir": "repaired-set"`; `output`/`dest` and
   "jobs": [
     { "kind": "compress", "inputs": ["project"], "output": "project.zip", "profile": "balanced" },
     { "kind": "test", "archive": "project.zip" },
-    { "kind": "extract", "archive": "project.zip", "dest": "out", "overwrite": "all" }
+    { "kind": "extract", "archive": "project.zip", "dest": "out", "overwrite": "overwrite" }
   ]
 }
 ```
@@ -187,7 +187,7 @@ ZIP 目标可用 `--split-mode native` 改为 `.z01/.z02/.../.zip`，WIM 目标�
 不能跨卷切分，设置的大小是目标值，不是每卷的绝对上限。
 只有明确使用 `--force` 才会授权替换命令启动时检查到的那个文件或编号集合；如果提交前它被其他程序改动，命令会以 `destination_changed` 失败并
 保留较新的文件。批处理中的 `convert`、`export` 采用相同规则，需要替换时设置
-`"overwrite": "all"`。
+`"overwrite": "overwrite"`。
 
 ## 版本与软件更新检查
 

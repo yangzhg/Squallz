@@ -10,11 +10,12 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use squallz_format_api::{OverwritePolicy, SqzInnerFormat, SymlinkPolicy};
 use thiserror::Error;
 
 use crate::content_policy::CreateContentPolicy;
 
-pub const PRESET_SCHEMA_VERSION: u32 = 4;
+pub const PRESET_SCHEMA_VERSION: u32 = 1;
 pub const MIN_SPLIT_SIZE_BYTES: u64 = 104_858;
 pub const MAX_SPLIT_SIZE_BYTES: u64 = 9_007_199_254_740_991;
 pub const BALANCED_CREATE_PRESET_ID: &str = "builtin.create.balanced-7z";
@@ -23,13 +24,7 @@ pub const SMART_EXTRACT_PRESET_ID: &str = "builtin.extract.smart";
 
 const MAX_PRESET_FILE_BYTES: u64 = 1024 * 1024;
 const CROSS_PLATFORM_CREATE_PRESET_LABEL: &str = "Cross-platform 7Z";
-const MIGRATED_CROSS_PLATFORM_CREATE_PRESET_ID_BASE: &str = "user.create.cross-platform-7z";
-const MIGRATED_CROSS_PLATFORM_EXTRACT_PRESET_ID_BASE: &str = "user.extract.cross-platform-7z";
-const MIGRATED_CROSS_PLATFORM_CREATE_PRESET_LABEL_BASE: &str = "Cross-platform 7Z (legacy)";
-// A full v1 document may contain 64 presets. Migration adds the cross-platform
-// built-in without dropping user data.
-const MAX_V1_PRESETS: usize = 64;
-const MAX_PRESETS: usize = MAX_V1_PRESETS + 1;
+const MAX_PRESETS: usize = 64;
 const MAX_PRESET_ID_BYTES: usize = 64;
 const MAX_PRESET_LABEL_CHARS: usize = 40;
 const MAX_FORMAT_ID_BYTES: usize = 32;
@@ -182,28 +177,11 @@ pub enum VolumeMode {
     Split { size_bytes: ByteSize },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SqzInnerFormat {
-    EntrySet,
-    Zip,
-    SevenZip,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum FormatSpecificOptions {
     None,
     Sqz { inner_format: SqzInnerFormat },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ExistingOutputPolicy {
-    Ask,
-    Skip,
-    Overwrite,
-    Rename,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -218,7 +196,7 @@ pub enum CreateDestinationBase {
 #[serde(deny_unknown_fields)]
 pub struct CreateDestination {
     pub base: CreateDestinationBase,
-    pub existing_output: ExistingOutputPolicy,
+    pub existing_output: OverwritePolicy,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -251,7 +229,6 @@ pub struct CreatePreset {
     pub format_options: FormatSpecificOptions,
     pub completion: CreateCompletionAction,
     pub post_success: PostSuccessAction,
-    #[serde(default)]
     pub test_after_create: bool,
 }
 
@@ -278,14 +255,6 @@ pub struct ExtractDestination {
     pub layout: ExtractLayout,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SymlinkHandling {
-    Preserve,
-    Skip,
-    Follow,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum EntryNameEncoding {
@@ -297,8 +266,8 @@ pub enum EntryNameEncoding {
 #[serde(deny_unknown_fields)]
 pub struct ExtractPreset {
     pub destination: ExtractDestination,
-    pub existing_output: ExistingOutputPolicy,
-    pub symlinks: SymlinkHandling,
+    pub existing_output: OverwritePolicy,
+    pub symlinks: SymlinkPolicy,
     pub encoding: EntryNameEncoding,
     pub credential: ExtractCredential,
     pub post_success: PostSuccessAction,
@@ -385,400 +354,10 @@ struct PresetSchemaVersion {
     schema_version: u64,
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PresetDocumentV1 {
-    schema_version: u32,
-    revision: u64,
-    presets: Vec<NamedPresetV1>,
-    bindings: PresetBindings,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PresetDocumentV2 {
-    schema_version: u32,
-    revision: u64,
-    presets: Vec<NamedPresetV2>,
-    bindings: PresetBindings,
-}
-
-#[derive(Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-enum NamedPresetV1 {
-    Create {
-        id: PresetId,
-        label: PresetLabel,
-        built_in: bool,
-        options: CreatePresetV1,
-    },
-    Extract {
-        id: PresetId,
-        label: PresetLabel,
-        built_in: bool,
-        options: ExtractPresetV2,
-    },
-}
-
-#[derive(Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-enum NamedPresetV2 {
-    Create {
-        id: PresetId,
-        label: PresetLabel,
-        built_in: bool,
-        options: CreatePresetV2,
-    },
-    Extract {
-        id: PresetId,
-        label: PresetLabel,
-        built_in: bool,
-        options: ExtractPresetV2,
-    },
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CreatePresetV1 {
-    format: FormatId,
-    level: PresetCompressionLevel,
-    credential: CreateCredential,
-    encrypt_names: bool,
-    volumes: VolumeMode,
-    excludes: Vec<String>,
-    output: CreateOutput,
-    format_options: FormatSpecificOptions,
-    post_success: LegacyPostSuccessAction,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CreatePresetV2 {
-    format: FormatId,
-    level: PresetCompressionLevel,
-    credential: CreateCredential,
-    encrypt_names: bool,
-    volumes: VolumeMode,
-    content_policy: CreateContentPolicy,
-    excludes: Vec<String>,
-    output: CreateOutput,
-    format_options: FormatSpecificOptions,
-    post_success: LegacyPostSuccessAction,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ExtractPresetV2 {
-    destination: ExtractDestination,
-    existing_output: ExistingOutputPolicy,
-    symlinks: SymlinkHandling,
-    encoding: EntryNameEncoding,
-    credential: ExtractCredential,
-    post_success: LegacyPostSuccessAction,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum LegacyPostSuccessAction {
-    KeepSource,
-}
-
-impl PresetDocumentV1 {
-    fn migrate(self) -> Result<PresetDocument, PresetError> {
-        if self.schema_version != 1 {
-            return Err(PresetError::UnsupportedVersion {
-                found: u64::from(self.schema_version),
-            });
-        }
-        let mut presets = self
-            .presets
-            .into_iter()
-            .map(NamedPresetV1::migrate)
-            .collect::<Vec<_>>();
-        let mut bindings = self.bindings;
-        validate_v1_semantics(&presets, &bindings)?;
-        migrate_cross_platform_id_collision(&mut presets, &mut bindings)?;
-        migrate_cross_platform_create_label_collision(&mut presets)?;
-        presets.push(cross_platform_create_preset());
-        let document = PresetDocument {
-            schema_version: PRESET_SCHEMA_VERSION,
-            revision: self.revision,
-            presets,
-            bindings,
-        };
-        document.validate()?;
-        Ok(document)
-    }
-}
-
-impl PresetDocumentV2 {
-    fn migrate(self) -> Result<PresetDocument, PresetError> {
-        if self.schema_version != 2 {
-            return Err(PresetError::UnsupportedVersion {
-                found: u64::from(self.schema_version),
-            });
-        }
-        let document = PresetDocument {
-            schema_version: PRESET_SCHEMA_VERSION,
-            revision: self.revision,
-            presets: self
-                .presets
-                .into_iter()
-                .map(NamedPresetV2::migrate)
-                .collect(),
-            bindings: self.bindings,
-        };
-        document.validate()?;
-        Ok(document)
-    }
-}
-
-fn validate_v1_semantics(
-    presets: &[NamedPreset],
-    bindings: &PresetBindings,
-) -> Result<(), PresetValidationError> {
-    validate_preset_collection(
-        presets,
-        MAX_V1_PRESETS,
-        &[BALANCED_CREATE_PRESET_ID, SMART_EXTRACT_PRESET_ID],
-    )?;
-    validate_builtin_preset(presets, balanced_create_preset())?;
-    validate_builtin_preset(presets, smart_extract_preset())?;
-    validate_preset_bindings(presets, bindings)
-}
-
-fn migrate_cross_platform_id_collision(
-    presets: &mut [NamedPreset],
-    bindings: &mut PresetBindings,
-) -> Result<(), PresetValidationError> {
-    let Some(index) = presets
-        .iter()
-        .position(|preset| preset.id().as_str() == CROSS_PLATFORM_CREATE_PRESET_ID)
-    else {
-        return Ok(());
-    };
-    if presets[index].built_in() {
-        return Ok(());
-    }
-
-    let kind = presets[index].kind();
-    let replacement = available_migrated_cross_platform_id(presets, kind)?;
-    match &mut presets[index] {
-        NamedPreset::Create { id, .. } | NamedPreset::Extract { id, .. } => {
-            *id = replacement.clone();
-        }
-    };
-
-    let matching_bindings = match kind {
-        PresetKind::Create => [
-            &mut bindings.app_default_create,
-            &mut bindings.file_manager_create,
-        ],
-        PresetKind::Extract => [
-            &mut bindings.app_default_extract,
-            &mut bindings.file_manager_extract,
-        ],
-    };
-    for binding in matching_bindings {
-        if binding.as_ref().map(PresetId::as_str) == Some(CROSS_PLATFORM_CREATE_PRESET_ID) {
-            *binding = Some(replacement.clone());
-        }
-    }
-    Ok(())
-}
-
-fn available_migrated_cross_platform_id(
-    presets: &[NamedPreset],
-    kind: PresetKind,
-) -> Result<PresetId, PresetValidationError> {
-    let base = match kind {
-        PresetKind::Create => MIGRATED_CROSS_PLATFORM_CREATE_PRESET_ID_BASE,
-        PresetKind::Extract => MIGRATED_CROSS_PLATFORM_EXTRACT_PRESET_ID_BASE,
-    };
-    for sequence in 1..=presets.len().saturating_add(1) {
-        let candidate = if sequence == 1 {
-            base.to_owned()
-        } else {
-            format!("{base}-{sequence}")
-        };
-        if presets
-            .iter()
-            .all(|preset| preset.id().as_str() != candidate.as_str())
-        {
-            return PresetId::new(candidate);
-        }
-    }
-    Err(PresetValidationError::new(
-        "cannot reserve an id for a migrated cross-platform preset",
-    ))
-}
-
-fn migrate_cross_platform_create_label_collision(
-    presets: &mut [NamedPreset],
-) -> Result<(), PresetValidationError> {
-    let canonical_label = CROSS_PLATFORM_CREATE_PRESET_LABEL.to_lowercase();
-    let Some(index) = presets.iter().position(|preset| {
-        preset.kind() == PresetKind::Create
-            && preset.label().as_str().to_lowercase() == canonical_label
-    }) else {
-        return Ok(());
-    };
-    if presets[index].built_in() {
-        return Ok(());
-    }
-
-    let replacement = available_migrated_cross_platform_label(presets)?;
-    if let NamedPreset::Create { label, .. } = &mut presets[index] {
-        *label = replacement;
-    }
-    Ok(())
-}
-
-fn available_migrated_cross_platform_label(
-    presets: &[NamedPreset],
-) -> Result<PresetLabel, PresetValidationError> {
-    for sequence in 1..=presets.len().saturating_add(1) {
-        let candidate = if sequence == 1 {
-            MIGRATED_CROSS_PLATFORM_CREATE_PRESET_LABEL_BASE.to_owned()
-        } else {
-            format!("{MIGRATED_CROSS_PLATFORM_CREATE_PRESET_LABEL_BASE} {sequence}")
-        };
-        let normalized = candidate.to_lowercase();
-        if presets.iter().all(|preset| {
-            preset.kind() != PresetKind::Create
-                || preset.label().as_str().to_lowercase() != normalized
-        }) {
-            return PresetLabel::new(candidate);
-        }
-    }
-    Err(PresetValidationError::new(
-        "cannot reserve a label for a migrated cross-platform preset",
-    ))
-}
-
-impl NamedPresetV1 {
-    fn migrate(self) -> NamedPreset {
-        match self {
-            Self::Create {
-                id,
-                label,
-                built_in,
-                options,
-            } => NamedPreset::Create {
-                id,
-                label,
-                built_in,
-                options: options.migrate(),
-            },
-            Self::Extract {
-                id,
-                label,
-                built_in,
-                options,
-            } => NamedPreset::Extract {
-                id,
-                label,
-                built_in,
-                options: options.migrate(),
-            },
-        }
-    }
-}
-
-impl NamedPresetV2 {
-    fn migrate(self) -> NamedPreset {
-        match self {
-            Self::Create {
-                id,
-                label,
-                built_in,
-                options,
-            } => NamedPreset::Create {
-                id,
-                label,
-                built_in,
-                options: options.migrate(),
-            },
-            Self::Extract {
-                id,
-                label,
-                built_in,
-                options,
-            } => NamedPreset::Extract {
-                id,
-                label,
-                built_in,
-                options: options.migrate(),
-            },
-        }
-    }
-}
-
-impl CreatePresetV1 {
-    fn migrate(self) -> CreatePreset {
-        CreatePreset {
-            format: self.format,
-            level: self.level,
-            credential: self.credential,
-            encrypt_names: self.encrypt_names,
-            volumes: self.volumes,
-            content_policy: CreateContentPolicy::Custom,
-            excludes: self.excludes,
-            output: self.output,
-            destination: default_create_destination(),
-            format_options: self.format_options,
-            completion: CreateCompletionAction::None,
-            post_success: self.post_success.migrate(),
-            test_after_create: false,
-        }
-    }
-}
-
-impl CreatePresetV2 {
-    fn migrate(self) -> CreatePreset {
-        CreatePreset {
-            format: self.format,
-            level: self.level,
-            credential: self.credential,
-            encrypt_names: self.encrypt_names,
-            volumes: self.volumes,
-            content_policy: self.content_policy,
-            excludes: self.excludes,
-            output: self.output,
-            destination: default_create_destination(),
-            format_options: self.format_options,
-            completion: CreateCompletionAction::None,
-            post_success: self.post_success.migrate(),
-            test_after_create: false,
-        }
-    }
-}
-
-impl ExtractPresetV2 {
-    fn migrate(self) -> ExtractPreset {
-        ExtractPreset {
-            destination: self.destination,
-            existing_output: self.existing_output,
-            symlinks: self.symlinks,
-            encoding: self.encoding,
-            credential: self.credential,
-            post_success: self.post_success.migrate(),
-        }
-    }
-}
-
-impl LegacyPostSuccessAction {
-    const fn migrate(self) -> PostSuccessAction {
-        match self {
-            Self::KeepSource => PostSuccessAction::KeepSource,
-        }
-    }
-}
-
 const fn default_create_destination() -> CreateDestination {
     CreateDestination {
         base: CreateDestinationBase::Ask,
-        existing_output: ExistingOutputPolicy::Ask,
+        existing_output: OverwritePolicy::Ask,
     }
 }
 
@@ -995,8 +574,8 @@ fn smart_extract_preset() -> NamedPreset {
                 base: ExtractDestinationBase::DefaultDirectory,
                 layout: ExtractLayout::Smart,
             },
-            existing_output: ExistingOutputPolicy::Ask,
-            symlinks: SymlinkHandling::Preserve,
+            existing_output: OverwritePolicy::Ask,
+            symlinks: SymlinkPolicy::Preserve,
             encoding: EntryNameEncoding::Auto,
             credential: ExtractCredential::PromptWhenNeeded,
             post_success: PostSuccessAction::KeepSource,
@@ -1120,10 +699,10 @@ fn validate_create_preset(options: &CreatePreset) -> Result<(), PresetValidation
             options.destination.base,
             options.destination.existing_output
         ),
-        (CreateDestinationBase::Ask, ExistingOutputPolicy::Ask)
+        (CreateDestinationBase::Ask, OverwritePolicy::Ask)
             | (
                 CreateDestinationBase::SourceParent | CreateDestinationBase::DefaultDirectory,
-                ExistingOutputPolicy::Rename
+                OverwritePolicy::RenameBoth
             )
     ) {
         return Err(PresetValidationError::new(
@@ -1419,38 +998,15 @@ fn read_document(path: &Path) -> Result<PresetDocument, PresetError> {
 fn decode_document(bytes: &[u8]) -> Result<PresetDocument, PresetError> {
     let version: PresetSchemaVersion =
         serde_json::from_slice(bytes).map_err(|error| PresetError::Decode(error.to_string()))?;
-    match version.schema_version {
-        1 => {
-            let document: PresetDocumentV1 = serde_json::from_slice(bytes)
-                .map_err(|error| PresetError::Decode(error.to_string()))?;
-            document.migrate()
-        }
-        2 => {
-            let document: PresetDocumentV2 = serde_json::from_slice(bytes)
-                .map_err(|error| PresetError::Decode(error.to_string()))?;
-            document.migrate()
-        }
-        3 => {
-            let mut document: PresetDocument = serde_json::from_slice(bytes)
-                .map_err(|error| PresetError::Decode(error.to_string()))?;
-            for preset in &mut document.presets {
-                if let NamedPreset::Create { options, .. } = preset {
-                    options.test_after_create =
-                        options.post_success == PostSuccessAction::TrashSource;
-                }
-            }
-            document.schema_version = PRESET_SCHEMA_VERSION;
-            document.validate()?;
-            Ok(document)
-        }
-        found if found == u64::from(PRESET_SCHEMA_VERSION) => {
-            let document: PresetDocument = serde_json::from_slice(bytes)
-                .map_err(|error| PresetError::Decode(error.to_string()))?;
-            document.validate()?;
-            Ok(document)
-        }
-        found => Err(PresetError::UnsupportedVersion { found }),
+    if version.schema_version != u64::from(PRESET_SCHEMA_VERSION) {
+        return Err(PresetError::UnsupportedVersion {
+            found: version.schema_version,
+        });
     }
+    let document: PresetDocument =
+        serde_json::from_slice(bytes).map_err(|error| PresetError::Decode(error.to_string()))?;
+    document.validate()?;
+    Ok(document)
 }
 
 fn readable_document_path(path: &Path) -> PathBuf {
@@ -1488,7 +1044,7 @@ fn write_document_atomically(path: &Path, contents: &[u8]) -> io::Result<()> {
         let _ = fs::remove_file(&temp_path);
         return Err(error);
     }
-    sync_parent(path)
+    crate::sync_directory(crate::parent_or_current(path))
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -1531,21 +1087,6 @@ fn prepare_windows_replacement(path: &Path, backup_path: &Path) -> io::Result<()
     Ok(())
 }
 
-fn sync_parent(path: &Path) -> io::Result<()> {
-    #[cfg(unix)]
-    {
-        let parent = path.parent().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "preset path has no parent")
-        })?;
-        File::open(parent)?.sync_all()
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = path;
-        Ok(())
-    }
-}
-
 fn sibling_artifact_path(path: &Path, tag: &str, sequence: Option<u64>) -> PathBuf {
     let file_name = path
         .file_name()
@@ -1566,15 +1107,12 @@ mod tests {
         preset_id, preset_label, sibling_artifact_path, smart_extract_preset,
         validate_create_preset, validate_extract_preset, ByteSize, CreateCompletionAction,
         CreateContentPolicy, CreateCredential, CreateDestination, CreateDestinationBase,
-        CreateOutput, CreatePreset, ExistingOutputPolicy, ExtractCredential, ExtractDestination,
-        ExtractDestinationBase, ExtractLayout, ExtractPreset, FormatSpecificOptions, NamedPreset,
+        CreateOutput, CreatePreset, ExtractCredential, ExtractDestination, ExtractDestinationBase,
+        ExtractLayout, ExtractPreset, FormatSpecificOptions, NamedPreset, OverwritePolicy,
         PostSuccessAction, PresetCompressionLevel, PresetDocument, PresetError, PresetStore,
-        SqzInnerFormat, SymlinkHandling, VolumeMode, BALANCED_CREATE_PRESET_ID,
-        CROSS_PLATFORM_CREATE_PRESET_ID, CROSS_PLATFORM_CREATE_PRESET_LABEL, MAX_PRESET_FILE_BYTES,
-        MAX_SPLIT_SIZE_BYTES, MIGRATED_CROSS_PLATFORM_CREATE_PRESET_ID_BASE,
-        MIGRATED_CROSS_PLATFORM_CREATE_PRESET_LABEL_BASE,
-        MIGRATED_CROSS_PLATFORM_EXTRACT_PRESET_ID_BASE, MIN_SPLIT_SIZE_BYTES,
-        PRESET_SCHEMA_VERSION,
+        SqzInnerFormat, SymlinkPolicy, VolumeMode, BALANCED_CREATE_PRESET_ID,
+        CROSS_PLATFORM_CREATE_PRESET_ID, MAX_PRESET_FILE_BYTES, MAX_SPLIT_SIZE_BYTES,
+        MIN_SPLIT_SIZE_BYTES, PRESET_SCHEMA_VERSION,
     };
 
     fn temp_path(name: &str) -> std::path::PathBuf {
@@ -1608,7 +1146,7 @@ mod tests {
                 output: CreateOutput::Archive,
                 destination: CreateDestination {
                     base: CreateDestinationBase::Ask,
-                    existing_output: ExistingOutputPolicy::Ask,
+                    existing_output: OverwritePolicy::Ask,
                 },
                 format_options: FormatSpecificOptions::None,
                 completion: CreateCompletionAction::None,
@@ -1616,80 +1154,6 @@ mod tests {
                 test_after_create: false,
             },
         }
-    }
-
-    fn legacy_v1_bytes(mut document: PresetDocument) -> Vec<u8> {
-        document.schema_version = 1;
-        document.presets.retain(|preset| {
-            preset.id().as_str() != CROSS_PLATFORM_CREATE_PRESET_ID || !preset.built_in()
-        });
-        let mut value = serde_json::to_value(document).expect("serialize legacy fixture");
-        remove_v3_create_fields(&mut value);
-        let presets = value
-            .get_mut("presets")
-            .and_then(serde_json::Value::as_array_mut)
-            .expect("legacy presets should be an array");
-        for preset in presets {
-            if preset.get("kind").and_then(serde_json::Value::as_str) == Some("create") {
-                preset
-                    .get_mut("options")
-                    .and_then(serde_json::Value::as_object_mut)
-                    .expect("legacy create options should be an object")
-                    .remove("content_policy");
-            }
-        }
-        serde_json::to_vec(&value).expect("serialize legacy JSON")
-    }
-
-    fn legacy_v2_bytes(mut document: PresetDocument) -> Vec<u8> {
-        document.schema_version = 2;
-        let mut value = serde_json::to_value(document).expect("serialize version 2 fixture");
-        remove_v3_create_fields(&mut value);
-        serde_json::to_vec(&value).expect("serialize version 2 JSON")
-    }
-
-    fn legacy_v3_bytes(mut document: PresetDocument) -> Vec<u8> {
-        document.schema_version = 3;
-        let mut value = serde_json::to_value(document).expect("serialize version 3 fixture");
-        let presets = value
-            .get_mut("presets")
-            .and_then(serde_json::Value::as_array_mut)
-            .expect("preset fixture should contain an array");
-        for preset in presets {
-            if preset.get("kind").and_then(serde_json::Value::as_str) == Some("create") {
-                let options = preset
-                    .get_mut("options")
-                    .and_then(serde_json::Value::as_object_mut)
-                    .expect("create options should be an object");
-                assert!(options.remove("test_after_create").is_some());
-            }
-        }
-        serde_json::to_vec(&value).expect("serialize version 3 JSON")
-    }
-
-    fn remove_v3_create_fields(value: &mut serde_json::Value) {
-        let presets = value
-            .get_mut("presets")
-            .and_then(serde_json::Value::as_array_mut)
-            .expect("preset fixture should contain an array");
-        for preset in presets {
-            if preset.get("kind").and_then(serde_json::Value::as_str) == Some("create") {
-                let options = preset
-                    .get_mut("options")
-                    .and_then(serde_json::Value::as_object_mut)
-                    .expect("create options should be an object");
-                assert!(options.remove("destination").is_some());
-                assert!(options.remove("completion").is_some());
-                assert!(options.remove("test_after_create").is_some());
-            }
-        }
-    }
-
-    fn legacy_seeded_document() -> PresetDocument {
-        let mut document = PresetDocument::seeded();
-        document.bindings.app_default_create = Some(preset_id(BALANCED_CREATE_PRESET_ID));
-        document.bindings.file_manager_create = Some(preset_id(BALANCED_CREATE_PRESET_ID));
-        document
     }
 
     fn set_last_create_split_size(document: &mut PresetDocument, size: u64) {
@@ -1712,7 +1176,7 @@ mod tests {
         let json = serde_json::to_string_pretty(&document).expect("preset JSON should serialize");
         assert!(!json.contains("password"), "{json}");
         assert!(!json.contains("secret_ref"), "{json}");
-        assert!(json.contains("\"schema_version\": 4"), "{json}");
+        assert!(json.contains("\"schema_version\": 1"), "{json}");
         let decoded = decode_document(json.as_bytes()).expect("preset JSON should round-trip");
         assert_eq!(decoded, document);
     }
@@ -1744,7 +1208,7 @@ mod tests {
             options.destination,
             CreateDestination {
                 base: CreateDestinationBase::Ask,
-                existing_output: ExistingOutputPolicy::Ask,
+                existing_output: OverwritePolicy::Ask,
             }
         );
         assert_eq!(options.completion, CreateCompletionAction::None);
@@ -1759,352 +1223,6 @@ mod tests {
     }
 
     #[test]
-    fn v1_load_migrates_create_presets_without_rewriting_the_file() {
-        let path = temp_path("v1-migration");
-        std::fs::create_dir_all(path.parent().expect("test path should have parent"))
-            .expect("create test directory");
-        let mut legacy = legacy_seeded_document();
-        legacy.revision = 37;
-        legacy
-            .presets
-            .push(custom_create("user.create.portable", "Portable"));
-        let expected_bindings = legacy.bindings.clone();
-        let bytes = legacy_v1_bytes(legacy);
-        std::fs::write(&path, &bytes).expect("write legacy preset fixture");
-
-        let migrated = PresetStore::new(&path)
-            .load()
-            .expect("load and migrate v1 presets");
-
-        assert_eq!(migrated.schema_version, PRESET_SCHEMA_VERSION);
-        assert_eq!(migrated.revision, 37);
-        assert_eq!(migrated.bindings, expected_bindings);
-        assert_eq!(
-            std::fs::read(&path).expect("read legacy preset fixture"),
-            bytes
-        );
-        for preset in &migrated.presets {
-            if let Some(options) = preset.create_options() {
-                assert_eq!(
-                    options.destination,
-                    CreateDestination {
-                        base: CreateDestinationBase::Ask,
-                        existing_output: ExistingOutputPolicy::Ask,
-                    }
-                );
-                assert_eq!(options.completion, CreateCompletionAction::None);
-                assert_eq!(options.post_success, PostSuccessAction::KeepSource);
-                if preset.id().as_str() != CROSS_PLATFORM_CREATE_PRESET_ID {
-                    assert_eq!(options.content_policy, CreateContentPolicy::Custom);
-                }
-            }
-        }
-        let custom = migrated
-            .preset(&preset_id("user.create.portable"))
-            .and_then(NamedPreset::create_options)
-            .expect("custom legacy preset should be preserved");
-        assert_eq!(custom.excludes, [".git"]);
-        let expected_cross_platform = cross_platform_create_preset();
-        assert_eq!(
-            migrated.preset(expected_cross_platform.id()),
-            Some(&expected_cross_platform)
-        );
-        let _ = std::fs::remove_dir_all(path.parent().expect("test path should have parent"));
-    }
-
-    #[test]
-    fn v2_load_adds_safe_create_actions_without_rewriting_the_file() {
-        let path = temp_path("v2-migration");
-        std::fs::create_dir_all(path.parent().expect("test path should have parent"))
-            .expect("create test directory");
-        let mut legacy = PresetDocument::seeded();
-        legacy.revision = 39;
-        legacy
-            .presets
-            .push(custom_create("user.create.portable", "Portable"));
-        let expected = legacy.clone();
-        let bytes = legacy_v2_bytes(legacy);
-        std::fs::write(&path, &bytes).expect("write version 2 preset fixture");
-
-        let migrated = PresetStore::new(&path)
-            .load()
-            .expect("load and migrate version 2 presets");
-
-        assert_eq!(migrated, expected);
-        assert_eq!(migrated.schema_version, PRESET_SCHEMA_VERSION);
-        assert_eq!(migrated.revision, 39);
-        assert_eq!(
-            std::fs::read(&path).expect("read version 2 preset fixture"),
-            bytes
-        );
-        let custom = migrated
-            .preset(&preset_id("user.create.portable"))
-            .and_then(NamedPreset::create_options)
-            .expect("custom version 2 preset should be preserved");
-        assert_eq!(custom.content_policy, CreateContentPolicy::Custom);
-        assert_eq!(custom.excludes, [".git"]);
-        assert_eq!(
-            custom.destination,
-            CreateDestination {
-                base: CreateDestinationBase::Ask,
-                existing_output: ExistingOutputPolicy::Ask,
-            }
-        );
-        assert_eq!(custom.completion, CreateCompletionAction::None);
-        assert_eq!(custom.post_success, PostSuccessAction::KeepSource);
-        let _ = std::fs::remove_dir_all(path.parent().expect("test path should have parent"));
-    }
-
-    #[test]
-    fn v3_load_adds_disabled_integrity_testing_without_rewriting_the_file() {
-        let path = temp_path("v3-migration");
-        std::fs::create_dir_all(path.parent().expect("test path should have parent"))
-            .expect("create test directory");
-        let mut legacy = PresetDocument::seeded();
-        legacy.revision = 41;
-        legacy
-            .presets
-            .push(custom_create("user.create.portable", "Portable"));
-        let expected = legacy.clone();
-        let bytes = legacy_v3_bytes(legacy);
-        std::fs::write(&path, &bytes).expect("write version 3 preset fixture");
-
-        let migrated = PresetStore::new(&path)
-            .load()
-            .expect("load and migrate version 3 presets");
-
-        assert_eq!(migrated, expected);
-        assert_eq!(migrated.schema_version, PRESET_SCHEMA_VERSION);
-        assert_eq!(migrated.revision, 41);
-        assert_eq!(
-            std::fs::read(&path).expect("read version 3 preset fixture"),
-            bytes
-        );
-        assert!(migrated
-            .presets
-            .iter()
-            .filter_map(NamedPreset::create_options)
-            .all(|options| !options.test_after_create));
-        let _ = std::fs::remove_dir_all(path.parent().expect("test path should have parent"));
-    }
-
-    #[test]
-    fn v3_trash_source_presets_enable_required_integrity_testing() {
-        let mut legacy = PresetDocument::seeded();
-        let mut create = custom_create("user.create.cleanup", "Create and clean up");
-        let NamedPreset::Create { options, .. } = &mut create else {
-            panic!("custom preset should be a create preset");
-        };
-        options.post_success = PostSuccessAction::TrashSource;
-        options.content_policy = CreateContentPolicy::KeepAllFiles;
-        options.excludes.clear();
-        options.test_after_create = false;
-        legacy.presets.push(create);
-
-        let migrated =
-            decode_document(&legacy_v3_bytes(legacy)).expect("migrate version 3 cleanup preset");
-        let options = migrated
-            .preset(&preset_id("user.create.cleanup"))
-            .and_then(NamedPreset::create_options)
-            .expect("migrated cleanup preset should be present");
-
-        assert_eq!(options.post_success, PostSuccessAction::TrashSource);
-        assert!(options.test_after_create);
-    }
-
-    #[test]
-    fn v1_cross_platform_id_collision_is_renamed_and_create_bindings_follow() {
-        let mut legacy = PresetDocument::seeded();
-        legacy.revision = 41;
-        let expected_options = {
-            let collision = legacy
-                .presets
-                .iter_mut()
-                .find(|preset| preset.id().as_str() == CROSS_PLATFORM_CREATE_PRESET_ID)
-                .expect("cross-platform fixture should be present");
-            let NamedPreset::Create {
-                label,
-                built_in,
-                options,
-                ..
-            } = collision
-            else {
-                panic!("cross-platform fixture should be a create preset");
-            };
-            *label = preset_label(CROSS_PLATFORM_CREATE_PRESET_LABEL);
-            *built_in = false;
-            options.content_policy = CreateContentPolicy::Custom;
-            options.excludes = vec!["*.cache".to_owned()];
-            options.clone()
-        };
-        legacy.presets.push(custom_create(
-            MIGRATED_CROSS_PLATFORM_CREATE_PRESET_ID_BASE,
-            MIGRATED_CROSS_PLATFORM_CREATE_PRESET_LABEL_BASE,
-        ));
-        let bytes = legacy_v1_bytes(legacy);
-
-        let migrated = decode_document(&bytes).expect("migrate colliding v1 preset");
-
-        let renamed_id = preset_id(&format!(
-            "{MIGRATED_CROSS_PLATFORM_CREATE_PRESET_ID_BASE}-2"
-        ));
-        let renamed = migrated
-            .preset(&renamed_id)
-            .expect("colliding user preset should be renamed");
-        let NamedPreset::Create {
-            label,
-            built_in,
-            options,
-            ..
-        } = renamed
-        else {
-            panic!("renamed preset should remain a create preset");
-        };
-        assert_eq!(
-            label.as_str(),
-            format!("{MIGRATED_CROSS_PLATFORM_CREATE_PRESET_LABEL_BASE} 2")
-        );
-        assert!(!*built_in);
-        assert_eq!(options, &expected_options);
-        assert_eq!(migrated.revision, 41);
-        assert_eq!(
-            migrated.bindings.app_default_create.as_ref(),
-            Some(&renamed_id)
-        );
-        assert_eq!(
-            migrated.bindings.file_manager_create.as_ref(),
-            Some(&renamed_id)
-        );
-        assert!(migrated
-            .preset(&preset_id(MIGRATED_CROSS_PLATFORM_CREATE_PRESET_ID_BASE))
-            .is_some());
-        let expected_builtin = cross_platform_create_preset();
-        assert_eq!(
-            migrated.preset(expected_builtin.id()),
-            Some(&expected_builtin)
-        );
-    }
-
-    #[test]
-    fn v1_extract_using_the_new_builtin_id_is_renamed_and_extract_bindings_follow() {
-        let mut legacy = PresetDocument::seeded();
-        legacy.revision = 43;
-        let expected_options = smart_extract_preset()
-            .extract_options()
-            .expect("smart extract fixture should contain extract options")
-            .clone();
-        let collision_index = legacy
-            .presets
-            .iter()
-            .position(|preset| preset.id().as_str() == CROSS_PLATFORM_CREATE_PRESET_ID)
-            .expect("cross-platform fixture should be present");
-        legacy.presets[collision_index] = NamedPreset::Extract {
-            id: preset_id(CROSS_PLATFORM_CREATE_PRESET_ID),
-            label: preset_label("Legacy extract collision"),
-            built_in: false,
-            options: expected_options.clone(),
-        };
-        legacy.presets.push(NamedPreset::Extract {
-            id: preset_id(MIGRATED_CROSS_PLATFORM_EXTRACT_PRESET_ID_BASE),
-            label: preset_label("Occupied extract migration id"),
-            built_in: false,
-            options: expected_options.clone(),
-        });
-        legacy.bindings.app_default_create = Some(preset_id(BALANCED_CREATE_PRESET_ID));
-        legacy.bindings.file_manager_create = Some(preset_id(BALANCED_CREATE_PRESET_ID));
-        legacy.bindings.app_default_extract = Some(preset_id(CROSS_PLATFORM_CREATE_PRESET_ID));
-        legacy.bindings.file_manager_extract = Some(preset_id(CROSS_PLATFORM_CREATE_PRESET_ID));
-        let bytes = legacy_v1_bytes(legacy);
-
-        let migrated = decode_document(&bytes).expect("migrate colliding v1 extract preset");
-
-        let renamed_id = preset_id(&format!(
-            "{MIGRATED_CROSS_PLATFORM_EXTRACT_PRESET_ID_BASE}-2"
-        ));
-        let renamed = migrated
-            .preset(&renamed_id)
-            .expect("colliding extract preset should be renamed");
-        let NamedPreset::Extract {
-            label,
-            built_in,
-            options,
-            ..
-        } = renamed
-        else {
-            panic!("renamed preset should remain an extract preset");
-        };
-        assert_eq!(label.as_str(), "Legacy extract collision");
-        assert!(!*built_in);
-        assert_eq!(options, &expected_options);
-        assert_eq!(migrated.revision, 43);
-        assert_eq!(
-            migrated.bindings.app_default_extract.as_ref(),
-            Some(&renamed_id)
-        );
-        assert_eq!(
-            migrated.bindings.file_manager_extract.as_ref(),
-            Some(&renamed_id)
-        );
-        let balanced_id = preset_id(BALANCED_CREATE_PRESET_ID);
-        assert_eq!(
-            migrated.bindings.app_default_create.as_ref(),
-            Some(&balanced_id)
-        );
-        assert_eq!(
-            migrated.bindings.file_manager_create.as_ref(),
-            Some(&balanced_id)
-        );
-        assert!(migrated
-            .preset(&preset_id(MIGRATED_CROSS_PLATFORM_EXTRACT_PRESET_ID_BASE))
-            .is_some());
-        let expected_builtin = cross_platform_create_preset();
-        assert_eq!(
-            migrated.preset(expected_builtin.id()),
-            Some(&expected_builtin)
-        );
-    }
-
-    #[test]
-    fn v1_dangling_future_create_binding_is_not_healed_by_the_new_builtin() {
-        let mut legacy = legacy_seeded_document();
-        legacy.bindings.app_default_create = Some(preset_id(CROSS_PLATFORM_CREATE_PRESET_ID));
-        let bytes = legacy_v1_bytes(legacy);
-
-        assert!(matches!(
-            decode_document(&bytes),
-            Err(PresetError::Validation(_))
-        ));
-    }
-
-    #[test]
-    fn v1_wrong_kind_future_create_binding_is_rejected_before_migration() {
-        let mut legacy = PresetDocument::seeded();
-        let extract_options = smart_extract_preset()
-            .extract_options()
-            .expect("smart extract fixture should contain extract options")
-            .clone();
-        let collision_index = legacy
-            .presets
-            .iter()
-            .position(|preset| preset.id().as_str() == CROSS_PLATFORM_CREATE_PRESET_ID)
-            .expect("cross-platform fixture should be present");
-        legacy.presets[collision_index] = NamedPreset::Extract {
-            id: preset_id(CROSS_PLATFORM_CREATE_PRESET_ID),
-            label: preset_label("Wrong kind collision"),
-            built_in: false,
-            options: extract_options,
-        };
-        legacy.bindings.app_default_create = Some(preset_id(CROSS_PLATFORM_CREATE_PRESET_ID));
-        legacy.bindings.file_manager_create = Some(preset_id(BALANCED_CREATE_PRESET_ID));
-        let bytes = legacy_v1_bytes(legacy);
-
-        assert!(matches!(
-            decode_document(&bytes),
-            Err(PresetError::Validation(_))
-        ));
-    }
-
-    #[test]
     fn byte_size_serializes_as_a_decimal_string_and_rejects_numbers() {
         let json = serde_json::to_string(&ByteSize::new(4_294_967_296))
             .expect("byte size should serialize");
@@ -2113,13 +1231,13 @@ mod tests {
     }
 
     #[test]
-    fn future_versions_and_unknown_v4_fields_are_rejected() {
+    fn unsupported_versions_and_unknown_fields_are_rejected() {
         let mut unknown_document = PresetDocument::seeded();
         unknown_document.schema_version = PRESET_SCHEMA_VERSION + 1;
         let unknown = serde_json::to_vec(&unknown_document).expect("serialize unknown version");
         assert!(matches!(
             decode_document(&unknown),
-            Err(PresetError::UnsupportedVersion { found: 5 })
+            Err(PresetError::UnsupportedVersion { found: 2 })
         ));
 
         let mut value = serde_json::to_value(PresetDocument::seeded()).expect("serialize document");
@@ -2150,72 +1268,9 @@ mod tests {
     }
 
     #[test]
-    fn legacy_versions_keep_their_strict_field_sets() {
-        let mut v2: serde_json::Value =
-            serde_json::from_slice(&legacy_v2_bytes(PresetDocument::seeded()))
-                .expect("decode version 2 fixture");
-        let v2_options = v2
-            .get_mut("presets")
-            .and_then(serde_json::Value::as_array_mut)
-            .and_then(|presets| presets.first_mut())
-            .and_then(|preset| preset.get_mut("options"))
-            .and_then(serde_json::Value::as_object_mut)
-            .expect("create options should be an object");
-        assert!(v2_options.remove("content_policy").is_some());
-        let bytes = serde_json::to_vec(&v2).expect("serialize modified v2 document");
-        assert!(matches!(
-            decode_document(&bytes),
-            Err(PresetError::Decode(_))
-        ));
-
-        let mut v2: serde_json::Value =
-            serde_json::from_slice(&legacy_v2_bytes(PresetDocument::seeded()))
-                .expect("decode version 2 fixture");
-        let v2_options = v2
-            .get_mut("presets")
-            .and_then(serde_json::Value::as_array_mut)
-            .and_then(|presets| presets.first_mut())
-            .and_then(|preset| preset.get_mut("options"))
-            .and_then(serde_json::Value::as_object_mut)
-            .expect("create options should be an object");
-        v2_options.insert("completion".to_owned(), serde_json::json!("none"));
-        let bytes = serde_json::to_vec(&v2).expect("serialize modified v2 document");
-        assert!(matches!(
-            decode_document(&bytes),
-            Err(PresetError::Decode(_))
-        ));
-
-        let mut v1: serde_json::Value =
-            serde_json::from_slice(&legacy_v1_bytes(legacy_seeded_document()))
-                .expect("decode legacy fixture");
-        let v1_options = v1
-            .get_mut("presets")
-            .and_then(serde_json::Value::as_array_mut)
-            .and_then(|presets| presets.first_mut())
-            .and_then(|preset| preset.get_mut("options"))
-            .and_then(serde_json::Value::as_object_mut)
-            .expect("legacy create options should be an object");
-        v1_options.insert("future_field".to_owned(), serde_json::json!(true));
-        let bytes = serde_json::to_vec(&v1).expect("serialize modified v1 document");
-        assert!(matches!(
-            decode_document(&bytes),
-            Err(PresetError::Decode(_))
-        ));
-    }
-
-    #[test]
     fn duplicate_json_fields_and_secret_references_are_rejected() {
         let json = serde_json::to_string(&PresetDocument::seeded()).expect("serialize document");
         let duplicate = json.replacen("\"revision\":0", "\"revision\":0,\"revision\":1", 1);
-        assert!(matches!(
-            decode_document(duplicate.as_bytes()),
-            Err(PresetError::Decode(_))
-        ));
-
-        let legacy_json = String::from_utf8(legacy_v1_bytes(legacy_seeded_document()))
-            .expect("legacy fixture should be UTF-8");
-        let duplicate = legacy_json.replacen("\"revision\":0", "\"revision\":0,\"revision\":1", 1);
-        assert_ne!(duplicate, legacy_json);
         assert!(matches!(
             decode_document(duplicate.as_bytes()),
             Err(PresetError::Decode(_))
@@ -2270,9 +1325,9 @@ mod tests {
     }
 
     #[test]
-    fn sqz_entry_set_and_exclude_globs_use_runtime_schema_rules() {
+    fn sqz_payload_and_exclude_globs_use_runtime_schema_rules() {
         let mut document = PresetDocument::seeded();
-        let mut preset = custom_create("user.create.sqz", "SQZ entry set");
+        let mut preset = custom_create("user.create.sqz", "Native SQZ payload");
         let NamedPreset::Create { options, .. } = &mut preset else {
             panic!("custom preset should be a create preset");
         };
@@ -2280,12 +1335,12 @@ mod tests {
         options.credential = CreateCredential::None;
         options.volumes = VolumeMode::Single;
         options.format_options = FormatSpecificOptions::Sqz {
-            inner_format: SqzInnerFormat::EntrySet,
+            inner_format: SqzInnerFormat::Sqz,
         };
         document.presets.push(preset);
-        document.validate().expect("entry-set SQZ should validate");
+        document.validate().expect("native SQZ should validate");
         let json = serde_json::to_string(&document).expect("serialize SQZ preset");
-        assert!(json.contains("\"inner_format\":\"entry_set\""), "{json}");
+        assert!(json.contains("\"inner_format\":\"sqz\""), "{json}");
 
         let NamedPreset::Create { options, .. } = document
             .presets
@@ -2306,10 +1361,10 @@ mod tests {
             CreateDestinationBase::DefaultDirectory,
         ];
         let policies = [
-            ExistingOutputPolicy::Ask,
-            ExistingOutputPolicy::Skip,
-            ExistingOutputPolicy::Overwrite,
-            ExistingOutputPolicy::Rename,
+            OverwritePolicy::Ask,
+            OverwritePolicy::Skip,
+            OverwritePolicy::Overwrite,
+            OverwritePolicy::RenameBoth,
         ];
 
         for base in bases {
@@ -2324,11 +1379,11 @@ mod tests {
                 };
                 let expected = matches!(
                     (base, existing_output),
-                    (CreateDestinationBase::Ask, ExistingOutputPolicy::Ask)
+                    (CreateDestinationBase::Ask, OverwritePolicy::Ask)
                         | (
                             CreateDestinationBase::SourceParent
                                 | CreateDestinationBase::DefaultDirectory,
-                            ExistingOutputPolicy::Rename
+                            OverwritePolicy::RenameBoth
                         )
                 );
                 assert_eq!(
@@ -2416,7 +1471,7 @@ mod tests {
                 },
                 destination: CreateDestination {
                     base: CreateDestinationBase::Ask,
-                    existing_output: ExistingOutputPolicy::Ask,
+                    existing_output: OverwritePolicy::Ask,
                 },
                 format_options: FormatSpecificOptions::None,
                 completion: CreateCompletionAction::None,
@@ -2453,7 +1508,7 @@ mod tests {
     }
 
     #[test]
-    fn v4_create_actions_round_trip() {
+    fn create_actions_round_trip() {
         let mut document = PresetDocument::seeded();
         let mut preset = custom_create("user.create.actions", "Create actions");
         let NamedPreset::Create { options, .. } = &mut preset else {
@@ -2461,7 +1516,7 @@ mod tests {
         };
         options.destination = CreateDestination {
             base: CreateDestinationBase::SourceParent,
-            existing_output: ExistingOutputPolicy::Rename,
+            existing_output: OverwritePolicy::RenameBoth,
         };
         options.completion = CreateCompletionAction::RevealOutput;
         options.post_success = PostSuccessAction::TrashSource;
@@ -2470,11 +1525,9 @@ mod tests {
         options.excludes.clear();
         document.presets.push(preset);
 
-        document
-            .validate()
-            .expect("version 4 actions should validate");
-        let bytes = serde_json::to_vec(&document).expect("serialize version 4 actions");
-        let decoded = decode_document(&bytes).expect("decode version 4 actions");
+        document.validate().expect("create actions should validate");
+        let bytes = serde_json::to_vec(&document).expect("serialize create actions");
+        let decoded = decode_document(&bytes).expect("decode create actions");
         assert_eq!(decoded, document);
     }
 
@@ -2519,7 +1572,7 @@ mod tests {
             options.volumes = VolumeMode::Single;
             options.format_options = if format == "sqz" {
                 FormatSpecificOptions::Sqz {
-                    inner_format: SqzInnerFormat::EntrySet,
+                    inner_format: SqzInnerFormat::Sqz,
                 }
             } else {
                 FormatSpecificOptions::None
@@ -2684,8 +1737,8 @@ mod tests {
                     base: ExtractDestinationBase::Ask,
                     layout: ExtractLayout::Direct,
                 },
-                existing_output: ExistingOutputPolicy::Rename,
-                symlinks: SymlinkHandling::Skip,
+                existing_output: OverwritePolicy::RenameBoth,
+                symlinks: SymlinkPolicy::Skip,
                 encoding: super::EntryNameEncoding::Named {
                     label: "gb18030".to_owned(),
                 },

@@ -6,11 +6,14 @@ use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
-use squallz_core::api::{EntryMeta, EntryType, FormatError, ResourceOptions, SafetyLimits};
+use squallz_core::api::{
+    EntryMeta, EntryType, FormatError, OverwritePolicy, ResourceOptions, SafetyLimits,
+    SplitOutputMode, SymlinkPolicy,
+};
 use squallz_core::{
-    CreateCompletionAction, CreateContentPolicy, CreateDestinationGuard, CreateInputEstimate,
-    CreatePlan, ExtractInputGuard, ExtractPlan, ExtractSpace, PostSuccessAction,
-    SfxRecoveryDetails, SmartLayout,
+    ChecksumAlgorithm, CreateCompletionAction, CreateContentPolicy, CreateDestinationGuard,
+    CreateInputEstimate, CreatePlan, ExtractInputGuard, ExtractPlan, ExtractSpace,
+    PostSuccessAction, SfxRecoveryDetails, SfxTarget, SmartLayout, SqzInnerFormat,
 };
 use squallz_i18n::error_message;
 use squallz_recovery::RecoveryCleanupDetails;
@@ -227,7 +230,7 @@ pub struct ArchiveInfo {
     /// Physical volume file names in archive order (`None` for single files)
     pub volumes: Option<Vec<String>>,
     /// Entry names decoded with a non-UTF-8 encoding.
-    pub legacy_encoding_count: usize,
+    pub non_utf8_name_count: usize,
     /// Entry names that still contain replacement characters after decoding.
     pub garbled_count: usize,
     /// Most common non-UTF-8 decoding label, if any.
@@ -351,7 +354,7 @@ pub struct CreatePlanDto {
     pub system_temp_budget_bytes: u64,
 }
 
-/// Legacy input-only create estimate retained for command compatibility.
+/// Input scan summary returned by the lightweight create estimate command.
 #[derive(Debug, Clone, Serialize)]
 pub struct CreateEstimateDto {
     pub input_count: usize,
@@ -523,9 +526,20 @@ pub struct EntryPreviewDto {
     pub archive_like: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ExternalTaskActionDto {
+    Checksum,
+    ExtractHere,
+    ExtractToFolder,
+    ExtractSfx,
+    CompressTo7z,
+    TestArchive,
+}
+
 /// Job submission parameters (`submit_job`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum JobSpec {
     /// Create an archive from local inputs.
     Compress {
@@ -535,30 +549,21 @@ pub enum JobSpec {
         password: Option<String>,
         encrypt_names: bool,
         split_size: Option<u64>,
-        #[serde(default)]
-        split_mode: Option<String>,
+        split_mode: SplitOutputMode,
         excludes: Vec<String>,
-        #[serde(default)]
-        content_policy: Option<CreateContentPolicy>,
-        #[serde(default)]
-        sqz_inner_format: Option<String>,
-        #[serde(default)]
-        sfx_target: Option<String>,
-        #[serde(default)]
-        completion: Option<CreateCompletionAction>,
-        #[serde(default)]
-        post_success: Option<PostSuccessAction>,
+        content_policy: CreateContentPolicy,
+        sqz_inner_format: Option<SqzInnerFormat>,
+        sfx_target: Option<SfxTarget>,
+        completion: CreateCompletionAction,
+        post_success: PostSuccessAction,
         /// Reopen the committed output and read every entry before reporting
         /// success. Source cleanup also requires this check.
-        #[serde(default)]
-        test_after_create: Option<bool>,
-        /// `Some(true)` is supplied only after a native Save panel confirms
-        /// replacement. Omitted legacy payloads retain their prior behavior.
-        #[serde(default)]
-        replace_existing: Option<bool>,
+        test_after_create: bool,
+        /// True only after a native Save panel confirms replacement.
+        replace_existing: bool,
         /// Opaque core authorization captured immediately before the native
         /// replacement confirmation. It must never enter task snapshots.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(skip_serializing_if = "Option::is_none")]
         replacement_guard: Option<CreateDestinationGuard>,
     },
     /// Publish a separate Developer ID-signed and notarized macOS SFX app.
@@ -573,31 +578,28 @@ pub enum JobSpec {
     Extract {
         path: String,
         dest: String,
-        /// Final destination returned by the most recent extraction plan.
-        /// Omitted callers retain the legacy replan-and-run behavior.
-        #[serde(default)]
+        /// Final destination returned by the most recent extraction plan, or
+        /// `None` when an external action intentionally requests a fresh plan.
         expected_destination: Option<String>,
         /// Opaque binding to the source and selected scope returned by the
         /// most recent extraction preflight. It must not enter task snapshots.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(skip_serializing_if = "Option::is_none")]
         expected_input_guard: Option<ExtractInputGuard>,
         selection: Option<Vec<String>>,
-        overwrite: String,
-        symlinks: String,
+        overwrite: OverwritePolicy,
+        symlinks: SymlinkPolicy,
         smart: bool,
         encoding: Option<String>,
         password: Option<String>,
-        #[serde(default)]
         verify_sfx: bool,
-        #[serde(default)]
         best_effort: bool,
     },
     /// Extract multiple archives as one foreground GUI job. Archives run in
     /// sequence so the UI has one modal, one cancel control, and one result.
     BatchExtract {
         items: Vec<BatchExtractItem>,
-        overwrite: String,
-        symlinks: String,
+        overwrite: OverwritePolicy,
+        symlinks: SymlinkPolicy,
         smart: bool,
     },
     /// Extract the contents of an archive entry that is itself an archive.
@@ -605,12 +607,11 @@ pub enum JobSpec {
         outer_path: String,
         entry_path: String,
         dest: String,
-        overwrite: String,
-        symlinks: String,
+        overwrite: OverwritePolicy,
+        symlinks: SymlinkPolicy,
         smart: bool,
         encoding: Option<String>,
         password: Option<String>,
-        #[serde(default)]
         best_effort: bool,
     },
     /// Integrity test.
@@ -628,17 +629,13 @@ pub enum JobSpec {
         src_password: Option<String>,
         dest_password: Option<String>,
         encrypt_names: bool,
-        #[serde(default)]
         split_size: Option<u64>,
-        #[serde(default)]
-        split_mode: Option<String>,
-        /// New callers always state whether replacement was confirmed.
-        /// Omitted legacy payloads retain their prior replacement behavior.
-        #[serde(default)]
-        replace_existing: Option<bool>,
+        split_mode: SplitOutputMode,
+        /// True only after replacement was confirmed.
+        replace_existing: bool,
         /// Opaque authorization for the destination state the user confirmed.
         /// It must never enter task snapshots.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(skip_serializing_if = "Option::is_none")]
         replacement_guard: Option<CreateDestinationGuard>,
     },
     /// Export a SQZ container to a standard archive.
@@ -647,13 +644,11 @@ pub enum JobSpec {
         dest: String,
         level: u8,
         dest_password: Option<String>,
-        /// New callers always state whether replacement was confirmed.
-        /// Omitted legacy payloads retain their prior replacement behavior.
-        #[serde(default)]
-        replace_existing: Option<bool>,
+        /// True only after replacement was confirmed.
+        replace_existing: bool,
         /// Opaque authorization for the destination state the user confirmed.
         /// It must never enter task snapshots.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(skip_serializing_if = "Option::is_none")]
         replacement_guard: Option<CreateDestinationGuard>,
     },
     /// Rewrite a damaged SQZ container into a new repaired SQZ.
@@ -684,7 +679,6 @@ pub enum JobSpec {
     RepairRecovery {
         path: String,
         output: Option<String>,
-        #[serde(default)]
         output_directory: bool,
         recovery: Option<String>,
     },
@@ -694,35 +688,27 @@ pub enum JobSpec {
         add: Vec<String>,
         delete: Vec<String>,
         rename: Vec<RenameSpec>,
-        #[serde(default)]
         mkdir: Vec<String>,
-        #[serde(default)]
         excludes: Vec<String>,
-        #[serde(default)]
-        content_policy: Option<CreateContentPolicy>,
+        content_policy: CreateContentPolicy,
         password: Option<String>,
         level: u8,
     },
     /// Compute local-file checksums without modifying inputs.
     Checksum {
         inputs: Vec<String>,
-        #[serde(default)]
         excludes: Vec<String>,
-        #[serde(default = "default_checksum_algorithm")]
-        algorithm: String,
+        algorithm: ChecksumAlgorithm,
     },
     /// Verify a checksum manifest without modifying inputs.
     ChecksumCheck {
         manifest: String,
-        #[serde(default = "default_checksum_algorithm")]
-        algorithm: String,
+        algorithm: ChecksumAlgorithm,
     },
     /// Scan local files for duplicate content without modifying anything.
     DuplicateScan {
         inputs: Vec<String>,
-        #[serde(default)]
         excludes: Vec<String>,
-        #[serde(default = "default_duplicate_min_size")]
         min_size: u64,
     },
 }
@@ -800,27 +786,20 @@ impl JobSpec {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BatchExtractItem {
     pub path: String,
     pub dest: String,
     pub encoding: Option<String>,
     pub password: Option<String>,
-    #[serde(default)]
     pub best_effort: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RenameSpec {
     pub from: String,
     pub to: String,
-}
-
-fn default_duplicate_min_size() -> u64 {
-    1
-}
-
-fn default_checksum_algorithm() -> String {
-    "sha256".into()
 }
 
 /// Progress event payload (`job://progress`, throttled to ≥60 ms).
@@ -947,8 +926,6 @@ pub struct IntegrationStatusDto {
     pub actions: Vec<IntegrationActionHealthDto>,
     pub can_repair: bool,
     pub can_remove: bool,
-    pub installed: Vec<IntegrationActionDto>,
-    pub missing: Vec<String>,
     pub unsupported: Vec<String>,
 }
 
@@ -1054,7 +1031,6 @@ pub struct LanguageDto {
 
 /// Persisted GUI settings.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(default)]
 pub struct SettingsDto {
     /// `"system" | "light" | "dark"`
     pub theme: Option<String>,
@@ -1076,7 +1052,7 @@ pub struct SettingsDto {
     pub default_create_dir: Option<String>,
     /// Reveal the destination folder in Finder after a successful extract job.
     pub reveal_after_extract: bool,
-    /// `None` preserves the default of checking the stable channel automatically.
+    /// `None` uses the product default of checking the stable channel automatically.
     pub check_updates_automatically: Option<bool>,
     /// Upper bound on total extracted bytes.
     pub safety_max_output_bytes: Option<u64>,
@@ -1501,15 +1477,19 @@ mod tests {
             serde_json::json!({
                 "kind": "compress", "inputs": ["source"], "dest": "archive.7z",
                 "level": 5, "password": secret, "encrypt_names": true,
-                "split_size": null, "excludes": [],
+                "split_size": null, "split_mode": "generic", "excludes": [],
+                "content_policy": "keep_all_files", "sqz_inner_format": null,
+                "sfx_target": null, "completion": "none",
+                "post_success": "keep_source", "test_after_create": false,
                 "replace_existing": true, "replacement_guard": replacement_guard.clone()
             }),
             serde_json::json!({
                 "kind": "extract", "path": "archive.7z", "dest": "out",
+                "expected_destination": null,
                 "selection": null, "overwrite": "ask", "symlinks": "preserve",
                 "smart": false, "encoding": null, "password": secret,
                 "expected_input_guard": input_guard,
-                "best_effort": false
+                "verify_sfx": false, "best_effort": false
             }),
             serde_json::json!({
                 "kind": "batch_extract", "items": [{
@@ -1531,6 +1511,7 @@ mod tests {
                 "kind": "convert", "src": "source.7z", "dest": "dest.7z",
                 "level": 5, "src_encoding": null, "src_password": secret,
                 "dest_password": secret, "encrypt_names": true,
+                "split_size": null, "split_mode": "generic",
                 "replace_existing": true, "replacement_guard": replacement_guard.clone()
             }),
             serde_json::json!({
@@ -1541,7 +1522,7 @@ mod tests {
             serde_json::json!({
                 "kind": "update", "path": "archive.7z", "add": [], "delete": [],
                 "rename": [], "mkdir": [], "excludes": [], "password": secret,
-                "level": 5
+                "content_policy": "keep_all_files", "level": 5
             }),
             serde_json::json!({
                 "kind": "publish_macos_sfx", "source": "Unsigned.app",
@@ -1565,7 +1546,7 @@ mod tests {
     }
 
     #[test]
-    fn job_spec_serde_defaults_match_frontend_contract() {
+    fn job_spec_requires_the_complete_frontend_contract() {
         let compress: JobSpec = serde_json::from_str(
             r#"{
               "kind":"compress",
@@ -1575,7 +1556,16 @@ mod tests {
               "password":null,
               "encrypt_names":false,
               "split_size":null,
-              "excludes":[]
+              "split_mode":"generic",
+              "excludes":[],
+              "content_policy":"keep_all_files",
+              "sqz_inner_format":null,
+              "sfx_target":null,
+              "completion":"none",
+              "post_success":"keep_source",
+              "test_after_create":false,
+              "replace_existing":false,
+              "replacement_guard":null
             }"#,
         )
         .expect("valid compress job spec");
@@ -1589,12 +1579,15 @@ mod tests {
                 test_after_create,
                 ..
             } => {
-                assert!(content_policy.is_none());
+                assert_eq!(
+                    content_policy,
+                    squallz_core::CreateContentPolicy::KeepAllFiles
+                );
                 assert!(sfx_target.is_none());
                 assert!(sqz_inner_format.is_none());
-                assert!(completion.is_none());
-                assert!(post_success.is_none());
-                assert!(test_after_create.is_none());
+                assert_eq!(completion, squallz_core::CreateCompletionAction::None);
+                assert_eq!(post_success, squallz_core::PostSuccessAction::KeepSource);
+                assert!(!test_after_create);
             }
             other => panic!("unexpected job spec: {other:?}"),
         }
@@ -1604,12 +1597,16 @@ mod tests {
               "kind":"extract",
               "path":"archive.zip",
               "dest":"out",
+              "expected_destination":null,
+              "expected_input_guard":null,
               "selection":null,
               "overwrite":"skip",
               "symlinks":"preserve",
               "smart":true,
               "encoding":null,
-              "password":null
+              "password":null,
+              "verify_sfx":false,
+              "best_effort":false
             }"#,
         )
         .expect("valid extract job spec");
@@ -1629,7 +1626,7 @@ mod tests {
             other => panic!("unexpected job spec: {other:?}"),
         }
 
-        let convert: JobSpec = serde_json::from_str(
+        let convert = serde_json::from_str::<JobSpec>(
             r#"{
               "kind":"convert",
               "src":"source.zip",
@@ -1640,23 +1637,13 @@ mod tests {
               "dest_password":null,
               "encrypt_names":false
             }"#,
-        )
-        .expect("valid legacy convert job spec");
-        match convert {
-            JobSpec::Convert {
-                replace_existing,
-                replacement_guard,
-                split_size,
-                ..
-            } => {
-                assert!(replace_existing.is_none());
-                assert!(replacement_guard.is_none());
-                assert!(split_size.is_none());
-            }
-            other => panic!("unexpected job spec: {other:?}"),
-        }
+        );
+        assert!(
+            convert.is_err(),
+            "convert payload must state replacement policy"
+        );
 
-        let export: JobSpec = serde_json::from_str(
+        let export = serde_json::from_str::<JobSpec>(
             r#"{
               "kind":"export_sqz",
               "src":"source.sqz",
@@ -1664,21 +1651,13 @@ mod tests {
               "level":5,
               "dest_password":null
             }"#,
-        )
-        .expect("valid legacy export job spec");
-        match export {
-            JobSpec::ExportSqz {
-                replace_existing,
-                replacement_guard,
-                ..
-            } => {
-                assert!(replace_existing.is_none());
-                assert!(replacement_guard.is_none());
-            }
-            other => panic!("unexpected job spec: {other:?}"),
-        }
+        );
+        assert!(
+            export.is_err(),
+            "export payload must state replacement policy"
+        );
 
-        let batch: JobSpec = serde_json::from_str(
+        let batch = serde_json::from_str::<JobSpec>(
             r#"{
               "kind":"batch_extract",
               "items":[{"path":"one.zip","dest":"out","encoding":null,"password":null}],
@@ -1686,31 +1665,17 @@ mod tests {
               "symlinks":"preserve",
               "smart":true
             }"#,
-        )
-        .expect("valid batch extract job spec");
-        match batch {
-            JobSpec::BatchExtract { items, smart, .. } => {
-                assert!(smart);
-                assert_eq!(items.len(), 1);
-                assert!(!items[0].best_effort);
-            }
-            other => panic!("unexpected job spec: {other:?}"),
-        }
+        );
+        assert!(batch.is_err(), "batch items must state best_effort");
 
-        let checksum: JobSpec =
-            serde_json::from_str(r#"{"kind":"checksum","inputs":["a.txt"],"excludes":[]}"#)
-                .expect("valid checksum job spec");
-        match checksum {
-            JobSpec::Checksum { algorithm, .. } => assert_eq!(algorithm, "sha256"),
-            other => panic!("unexpected job spec: {other:?}"),
-        }
+        let checksum = serde_json::from_str::<JobSpec>(
+            r#"{"kind":"checksum","inputs":["a.txt"],"excludes":[]}"#,
+        );
+        assert!(checksum.is_err(), "checksum jobs must state the algorithm");
 
-        let duplicates: JobSpec =
-            serde_json::from_str(r#"{"kind":"duplicate_scan","inputs":["."],"excludes":[]}"#)
-                .expect("valid duplicate scan job spec");
-        match duplicates {
-            JobSpec::DuplicateScan { min_size, .. } => assert_eq!(min_size, 1),
-            other => panic!("unexpected job spec: {other:?}"),
-        }
+        let duplicates = serde_json::from_str::<JobSpec>(
+            r#"{"kind":"duplicate_scan","inputs":["."],"excludes":[]}"#,
+        );
+        assert!(duplicates.is_err(), "duplicate scans must state min_size");
     }
 }

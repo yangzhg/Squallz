@@ -221,12 +221,11 @@ class FakeSqz:
             report: object = {
                 "ok": True,
                 "operation": "compress",
-                "output": str(output),
                 "primary_output": str(output),
                 "outputs": [str(member) for member in outputs],
                 "total_bytes": total_bytes,
                 "split": split,
-                "volumes": len(outputs),
+                "volume_count": len(outputs),
                 "tested_after_create": True,
                 "entries_tested_after_create": 3,
             }
@@ -391,7 +390,7 @@ class ReleaseBinarySmokeTests(unittest.TestCase):
                 )
 
                 self.assertEqual(count, 3)
-                self.assertEqual(len(runner.commands), 15)
+                self.assertEqual(len(runner.commands), 12)
                 runtime_probe = (
                     root / "work/sqz-sfx-runtime-probe"
                     if target == "linux"
@@ -428,21 +427,6 @@ class ReleaseBinarySmokeTests(unittest.TestCase):
                         "--json",
                     ],
                 )
-                legacy_create = runner.commands[12]
-                self.assertEqual(
-                    Path(legacy_create[legacy_create.index("--stub") + 1]),
-                    binary.resolve(),
-                )
-                legacy_output = (
-                    root
-                    / "work"
-                    / f"release-smoke-legacy-sfx{Path(output_name).suffix}"
-                )
-                self.assertEqual(
-                    runner.commands[14],
-                    [str(legacy_output), "--test", "--json"],
-                )
-
     def test_missing_generic_split_member_fails_before_reading(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

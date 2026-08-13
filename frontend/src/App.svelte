@@ -124,7 +124,7 @@
     type SfxCreateCapabilityDto,
     type SourceCleanupRecoveryNotice,
     type FormatDto,
-    type ExistingOutputPolicy,
+    type OverwritePolicy,
   } from "./lib/ipc";
   import {
     previewSampleForEntry,
@@ -368,13 +368,13 @@
     splitMode: CreateSplitMode;
     contentPolicy: CreateContentPolicy;
     excludes: readonly string[];
-    sqzInnerFormat: "sqz" | "zip" | "7z" | null;
+    sqzInnerFormat: PresetSqzInnerFormat | null;
     sfxEnabled: boolean;
     sfxTarget: PlatformKind | null;
     outputExtension: string;
     destination: Readonly<{
       base: CreateDestinationBase;
-      existing_output: ExistingOutputPolicy;
+      existing_output: OverwritePolicy;
     }>;
     completion: CreateCompletionAction;
     postSuccess: PostSuccessAction;
@@ -747,7 +747,7 @@
   const extractDestinationModes: ExtractDestinationMode[] = ["smart", "archive", "same", "choose"];
   const extractOverwriteModes: ExtractOverwriteMode[] = ["ask", "skip", "overwrite", "rename"];
   const extractSymlinkModes: ExtractSymlinkMode[] = ["preserve", "skip", "follow"];
-  const presetSqzInnerFormats: PresetSqzInnerFormat[] = ["entry_set", "zip", "seven_zip"];
+  const presetSqzInnerFormats: PresetSqzInnerFormat[] = ["sqz", "zip", "tar", "7z", "zstd"];
   const numberFormatter = new Intl.NumberFormat("en-US");
   let safetyMaxOutputGiB = $state<NumericSetting>(defaultSafety.maxOutputGiB);
   let safetyMaxEntries = $state<NumericSetting>(defaultSafety.maxEntries);
@@ -899,7 +899,7 @@
   let extractPresetMutationState = $state<ArchivePresetMutationState>("idle");
   let createPresetCredentialIntent = $state<"none" | "prompt">("none");
   let createPresetSfxTarget = $state<PresetSfxTarget>("current_platform");
-  let createPresetSqzInnerFormat = $state<PresetSqzInnerFormat>("entry_set");
+  let createPresetSqzInnerFormat = $state<PresetSqzInnerFormat>("sqz");
   let createPresetSplitSizeBytes = $state<string | null>(null);
   let createPresetDraftTouched = isCreateFormatId(createFormatParam);
   let extractPresetDraftTouched = false;
@@ -953,7 +953,7 @@
   let createCustomSplitUnit = $state<CreateSplitUnit>("mib");
   let createContentPolicy = $state<CreateContentPolicy>("cross_platform_clean");
   let createDestinationBase = $state<CreateDestinationBase>("ask");
-  let createExistingOutputPolicy = $state<ExistingOutputPolicy>("ask");
+  let createOverwritePolicy = $state<OverwritePolicy>("ask");
   let createCompletion = $state<CreateCompletionAction>("none");
   let createPostSuccess = $state<PostSuccessAction>("keep_source");
   let createTestAfterCreate = $state(false);
@@ -1499,18 +1499,13 @@
   onMount(() => {
     let cancelled = false;
     void ipc.getArchivePresets()
-      .then(async (document) => {
+      .then((document) => {
         if (cancelled) return;
-        const readyDocument = await migrateLegacyCreatePresets(document).catch(() => {
-          showNotice(tr("gui.presets.legacy_import_failed", "Older compression presets were left in place because they could not be imported"));
-          return document;
-        });
-        if (cancelled) return;
-        presetDocument = readyDocument;
+        presetDocument = document;
         presetLoadState = "ready";
         applyDefaultCreatePresetWhenReady();
-        if (!extractPresetDraftTouched && readyDocument.bindings.app_default_extract) {
-          applyExtractPreset(readyDocument.bindings.app_default_extract, false);
+        if (!extractPresetDraftTouched && document.bindings.app_default_extract) {
+          applyExtractPreset(document.bindings.app_default_extract, false);
         }
       })
       .catch(() => {
@@ -2628,7 +2623,7 @@
     if (value === createDestinationBase) return;
     markCreatePresetDraftTouched();
     createDestinationBase = value;
-    createExistingOutputPolicy = value === "ask" ? "ask" : "rename";
+    createOverwritePolicy = value === "ask" ? "ask" : "rename";
   }
 
   function updateCreateCompletion(value: CreateCompletionAction) {
@@ -2701,7 +2696,7 @@
     markCreatePresetDraftTouched();
     activeCreateFormat = next;
     if (nativeSplitKind(next, createSfxEnabled) === null) createSplitMode = "generic";
-    if (next === "sqz") createPresetSqzInnerFormat = "entry_set";
+    if (next === "sqz") createPresetSqzInnerFormat = "sqz";
     persistCreateFormat(next);
     const format = activeCreateFormatData();
     if (!format.can_encrypt_data) {
@@ -2945,7 +2940,7 @@
       splitMode,
       contentPolicy: createContentPolicy,
       excludes: createContentPolicy === "custom" ? [...createExcludeRules()] : [],
-      sqzInnerFormat: format === "sqz" ? presetSqzInnerFormatValueForJob(createPresetSqzInnerFormat) : null,
+      sqzInnerFormat: format === "sqz" ? createPresetSqzInnerFormat : null,
       sfxEnabled: createSfxEnabled,
       sfxTarget: createSfxEnabled ? resolvedPresetSfxTarget(createPresetSfxTarget) : null,
       outputExtension: archiveOutputExtension(
@@ -2957,7 +2952,7 @@
       ),
       destination: {
         base: createDestinationBase,
-        existing_output: createExistingOutputPolicy,
+        existing_output: createOverwritePolicy,
       },
       completion: createCompletion,
       postSuccess: createPostSuccess,
@@ -3051,8 +3046,10 @@
 
   function presetSqzInnerFormatLabel(innerFormat: PresetSqzInnerFormat): string {
     if (innerFormat === "zip") return tr("gui.presets.sqz_inner_zip", "ZIP payload");
-    if (innerFormat === "seven_zip") return tr("gui.presets.sqz_inner_7z", "7Z payload");
-    return tr("gui.presets.sqz_inner_entry_set", "Native entry set");
+    if (innerFormat === "tar") return tr("gui.presets.sqz_inner_tar", "TAR payload");
+    if (innerFormat === "7z") return tr("gui.presets.sqz_inner_7z", "7Z payload");
+    if (innerFormat === "zstd") return tr("gui.presets.sqz_inner_zstd", "Zstandard payload");
+    return tr("gui.presets.sqz_inner_sqz", "Native SQZ payload");
   }
 
   function createContentPolicyLabel(policy: CreateContentPolicy): string {
@@ -3131,7 +3128,7 @@
         : { kind: "none" },
       destination: {
         base: createDestinationBase,
-        existing_output: createExistingOutputPolicy,
+        existing_output: createOverwritePolicy,
       },
       completion: createCompletion,
       post_success: createPostSuccess,
@@ -3177,69 +3174,6 @@
 
   function normalizePresetName(value: string): string {
     return Array.from(value.replace(/\s+/gu, " ").trim()).slice(0, 40).join("");
-  }
-
-  async function migrateLegacyCreatePresets(document: ArchivePresetDocument): Promise<ArchivePresetDocument> {
-    const storage = previewStorage();
-    const raw = storage?.getItem("squallz.customCreateProfiles.v1");
-    if (!storage || !raw) return document;
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(raw);
-    } catch {
-      return document;
-    }
-    if (!Array.isArray(parsed)) return document;
-    const next = structuredClone(document);
-    let imported = 0;
-    for (const [index, item] of parsed.entries()) {
-      if (!item || typeof item !== "object" || next.presets.length >= maxArchivePresets) continue;
-      const legacy = item as { id?: unknown; name?: unknown; level?: unknown };
-      const name = normalizePresetName(typeof legacy.name === "string" ? legacy.name : "");
-      const level = Number(legacy.level);
-      if (!name || !Number.isInteger(level) || level < 1 || level > 9) continue;
-      const rawId = typeof legacy.id === "string" ? legacy.id : String(index + 1);
-      const suffix = rawId.toLowerCase().replace(/[^a-z0-9._-]+/gu, "-").replace(/^-+|-+$/gu, "").slice(0, 36)
-        || String(index + 1);
-      const id = `user.create.legacy-${suffix}`;
-      if (next.presets.some((preset) => preset.id === id)) continue;
-      let label = name;
-      for (let copy = 2; next.presets.some((preset) => preset.kind === "create" && preset.label.toLocaleLowerCase() === label.toLocaleLowerCase()); copy += 1) {
-        const marker = ` ${copy}`;
-        label = `${Array.from(name).slice(0, 40 - marker.length).join("")}${marker}`;
-      }
-      next.presets.push({
-        kind: "create",
-        id,
-        label,
-        built_in: false,
-        options: {
-          format: "7z",
-          level,
-          credential: { kind: "none" },
-          encrypt_names: false,
-          volumes: { kind: "single" },
-          content_policy: "custom",
-          excludes: [],
-          output: { kind: "archive" },
-          format_options: { kind: "none" },
-          destination: { base: "ask", existing_output: "ask" },
-          completion: "none",
-          post_success: "keep_source",
-          test_after_create: false,
-        },
-      });
-      imported += 1;
-    }
-    if (imported === 0) return document;
-    const saved = await ipc.saveArchivePresets(document.revision, next);
-    storage.removeItem("squallz.customCreateProfiles.v1");
-    storage.removeItem("squallz.activeCustomCreateProfile");
-    showNotice(
-      tr("gui.presets.legacy_imported", "Imported {count} older compression presets")
-        .replace("{count}", String(imported)),
-    );
-    return saved;
   }
 
   function presetNameExists(kind: "create" | "extract", name: string, exceptId: string | null): boolean {
@@ -3379,12 +3313,6 @@
     return target === "current_platform" ? sfxCreateCapability.target : target;
   }
 
-  function presetSqzInnerFormatValueForJob(innerFormat: PresetSqzInnerFormat): "sqz" | "zip" | "7z" {
-    if (innerFormat === "zip") return "zip";
-    if (innerFormat === "seven_zip") return "7z";
-    return "sqz";
-  }
-
   function applyCreatePreset(id: string | null, announce = true) {
     if (createPreflightBusy()) {
       if (announce) showNotice(tr("gui.presets.busy", "Wait for the current preflight to finish"));
@@ -3442,9 +3370,9 @@
       : "current_platform";
     createPresetSqzInnerFormat = preset.options.format_options.kind === "sqz"
       ? preset.options.format_options.inner_format
-      : "entry_set";
+      : "sqz";
     createDestinationBase = preset.options.destination.base;
-    createExistingOutputPolicy = preset.options.destination.base === "ask" ? "ask" : "rename";
+    createOverwritePolicy = preset.options.destination.base === "ask" ? "ask" : "rename";
     createCompletion = preset.options.completion;
     createPostSuccess = preset.options.post_success;
     createTestAfterCreate = preset.options.test_after_create;
@@ -3854,7 +3782,7 @@
   async function inspectCreateDestinationForCreate(
     path: string,
     split: boolean,
-    sfxTarget: string | null,
+    sfxTarget: PlatformKind | null,
   ): Promise<CreateDestinationInspectionDto> {
     await ensureCreatePreflightListener();
     const requestId = nextPreflightRequestId();
@@ -6360,9 +6288,9 @@
     const diagnostics = currentArchive.garbled_count
       ? tr("gui.archive.names_review", "{count} names need review")
           .replace("{count}", currentArchive.garbled_count.toLocaleString())
-      : currentArchive.legacy_encoding_count
-        ? tr("gui.archive.legacy_names", "{count} legacy encoded names")
-            .replace("{count}", currentArchive.legacy_encoding_count.toLocaleString())
+      : currentArchive.non_utf8_name_count
+        ? tr("gui.archive.non_utf8_names", "{count} non-UTF-8 names")
+            .replace("{count}", currentArchive.non_utf8_name_count.toLocaleString())
         : tr("gui.archive.names_clean", "Names decoded cleanly");
     return tr("gui.archive.summary", "{count} entries · {format} · {diagnostics}")
       .replace("{count}", currentArchive.entry_count.toLocaleString())
@@ -6391,7 +6319,7 @@
 
   function archiveWarningText(): string {
     if (!currentArchive) return openArchiveFirstLabel();
-    const count = currentArchive.garbled_count || currentArchive.legacy_encoding_count;
+    const count = currentArchive.garbled_count || currentArchive.non_utf8_name_count;
     if (count === 0) {
       return tr("gui.archive.encoding_clean", "No filename encoding issues detected.");
     }
@@ -6412,7 +6340,7 @@
   }
 
   function hasEncodingWarning(): boolean {
-    return Boolean(currentArchive && (currentArchive.garbled_count > 0 || currentArchive.legacy_encoding_count > 0));
+    return Boolean(currentArchive && (currentArchive.garbled_count > 0 || currentArchive.non_utf8_name_count > 0));
   }
 
   function isEntrySelected(entry: DisplayEntry): boolean {
@@ -9808,6 +9736,7 @@
         smart,
         encoding,
         password: null,
+        verify_sfx: false,
         best_effort: false,
       },
       success,
@@ -9844,12 +9773,15 @@
         kind: "extract",
         path: currentArchive.source,
         dest: jobDestination,
+        expected_destination: null,
+        expected_input_guard: null,
         selection,
         overwrite: extractOverwriteMode,
         symlinks: extractSymlinkMode,
         smart: extractDestinationMode === "smart",
         encoding: extractEncodingForJob(),
         password: null,
+        verify_sfx: false,
         best_effort: false,
       },
       success,
@@ -10183,8 +10115,8 @@
     if (algorithm === "sha224") return tr("gui.checksum.algorithm_sha224_hint", "SHA-2");
     if (algorithm === "sha384") return tr("gui.checksum.algorithm_sha384_hint", "Signed releases");
     if (algorithm === "sha512") return tr("gui.checksum.algorithm_sha512_hint", "Wide SHA-2");
-    if (algorithm === "sha1") return tr("gui.checksum.algorithm_sha1_hint", "Legacy");
-    if (algorithm === "md5") return tr("gui.checksum.algorithm_md5_hint", "Legacy");
+    if (algorithm === "sha1") return tr("gui.checksum.algorithm_sha1_hint", "Weak");
+    if (algorithm === "md5") return tr("gui.checksum.algorithm_md5_hint", "Weak");
     if (algorithm === "blake3") return tr("gui.checksum.algorithm_blake3_hint", "Fast");
     return tr("gui.checksum.algorithm_crc32_hint", "ZIP CRC");
   }
@@ -10443,12 +10375,15 @@
         kind: "extract",
         path: jobSource,
         dest,
+        expected_destination: null,
+        expected_input_guard: null,
         selection,
         overwrite: "rename",
         symlinks: "preserve",
         smart: true,
         encoding: recoveryEncodingForJob(),
         password: null,
+        verify_sfx: false,
         best_effort: true,
       });
       recoveryContextTaskIds.add(id);
@@ -10872,6 +10807,7 @@
         rename: [],
         mkdir: [],
         excludes: [],
+        content_policy: "keep_all_files",
         password: null,
         level: 6,
       },
@@ -10932,6 +10868,7 @@
         rename: [{ from, to }],
         mkdir: [],
         excludes: [],
+        content_policy: "keep_all_files",
         password: null,
         level: 6,
       },
@@ -10999,6 +10936,7 @@
         rename,
         mkdir: [targetDir],
         excludes: [],
+        content_policy: "keep_all_files",
         password: null,
         level: 6,
       },
@@ -11064,6 +11002,7 @@
         rename: [],
         mkdir: [folder],
         excludes: [],
+        content_policy: "keep_all_files",
         password: null,
         level: 6,
       },

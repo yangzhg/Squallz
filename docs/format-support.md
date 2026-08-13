@@ -153,7 +153,7 @@ Current route:
 | TAR | Rust `tar` crate | Implemented |
 | 7z | Rust `sevenz-rust2` | Implemented |
 | XZ / BZIP2 / GZIP | Rust-facing compressor crates | Implemented |
-| `.sqz` | Squallz native container + Reed-Solomon | Implemented core capability; entry-set plus zip/tar/7z/zstd inner profiles covered |
+| `.sqz` | Squallz native container + Reed-Solomon | Implemented core capability; native SQZ plus zip/tar/7z/zstd inner profiles covered |
 | PAR2 verify/repair | Rust fallback plus external PAR2 bridge | Implemented for single-file, split-volume, and multi-file sets. Safe-copy repair publishes one member as a new no-replace file or the exact described set as a new no-replace directory; source files stay unchanged, unsafe member paths are rejected, and external success is checksum-verified before publication |
 | PAR2 create | External standard PAR2 bridge plus core publication transaction | Implemented when the tool exists. The backend creates beside the destination in a private directory with an explicit source base; Squallz parses and verifies the complete index/volume set, then publishes every bound file no-replace through a crash-resumable journal and reports the physical outputs. Packaging and license evidence remain required before bundling |
 | Long-tail unpack-only | 7zz/7z bridge | Registry/CLI path plus generated real seed matrix pass on current macOS host; broader third-party corpus and target-platform package evidence remain |
@@ -200,11 +200,10 @@ Implemented code paths:
   `sqz doctor --strict` exits 8 when a runtime dependency required by a
   product-claimed capability is missing; explicit non-goals such as RAR
   creation remain a boundary rather than a strict failure.
-- `sqz pack --inner-format` supports `sqz` / `entry-set`, `zip`, `tar`, `7z`,
+- `sqz pack --inner-format` supports `sqz`, `zip`, `tar`, `7z`,
   and `zstd`. The zstd profile stores a protected `tar.zst` payload so
   `list`, `test`, `extract`, and `export` still expose normal multi-file
-  archive entries; raw remains a deferred profile because it has no directory
-  or multi-file archive semantics.
+  archive entries.
 - `sqz list/test/extract` can use `SQUALLZ_7Z` or PATH candidates
   `7zz`, `7z`, `7za` for bridge-backed archives.
 - Standalone WIM/ESD files use that bridge. A path-backed WIM header marked as
@@ -222,10 +221,10 @@ Implemented code paths:
   as a metadata block.
 - The 7zz `-slt` parser also skips root pseudo-entries reported as `.` or
   `./`, which real CPIO fixtures expose before actual file members.
-- The bridge now infers directory entries when real disk-image listings expose
+- The bridge infers directory entries when real disk-image listings expose
   a path prefix as a zero-byte file before child paths, which real DMG/HFS+
   seed fixtures do for directory rows.
-- `rar`/`cbr` now use the same `SQUALLZ_7Z` / `7zz` / `7z` / `7za`
+- `rar`/`cbr` use the same `SQUALLZ_7Z` / `7zz` / `7z` / `7za`
   priority path for listing and ordinary per-entry streaming.
   `SQUALLZ_BSDTAR` remains an explicit diagnostic or validated single-file compatibility fallback.
   If 7zz/7z positively reports at least one v6 entry and explicitly marks
@@ -289,14 +288,13 @@ Implemented code paths:
   `SQUALLZ_7Z` / `7zz` / `7z` / `7za`; `SQUALLZ_BSDTAR` / `bsdtar` is an
   explicit or validated single-file compatibility fallback, while
   `SQUALLZ_UNRAR` / `unrar` is an optional decoder for confirmed-unencrypted
-  RAR7 v6 entry streams. Neither fallback is a bundled cross-platform promise.
-  The original `fallback_scope` string remains a compatibility alias; new
-  consumers should use the exhaustive `fallback_scopes` array.
+  RAR7 v6 entry streams. Neither fallback is a bundled cross-platform promise;
+  `fallback_scopes` is the exhaustive machine-readable policy.
 - `sqz compress <inputs...> -o image.wim` can use `SQUALLZ_WIMLIB` or
   `wimlib-imagex` from PATH. The writer stages entries in a temporary
   directory, calls `wimlib-imagex capture`, then copies the WIM image into the
   normal Squallz destination writer.
-- Create output now goes through a same-directory temporary file before
+- Create output goes through a same-directory temporary file before
   replacing the target, so a missing WIM writer or failed create does not leave
   an empty archive at the requested destination.
 
@@ -338,7 +336,7 @@ Open product boundaries:
   unpack path, not installer execution semantics. The CHM seed is a minimal
   high-level ITSF/ITSP/PMGL fixture with NameList and one stored `hello.txt`
   file; it covers the 7zz CHM unpack path, not broad CHM corpus behavior.
-  The current seed report has no explicit deferrals. VHD/QCOW2/VMDK/VDI/VHDX/UEFI/NTFS/MSI/NSIS/CHM rows are now also
+  The current seed report has no explicit deferrals. VHD/QCOW2/VMDK/VDI/VHDX/UEFI/NTFS/MSI/NSIS/CHM rows are also
   checked against the 7zz/7z `-slt` top-level backend type (`VHD`, `QCOW`,
   `VMDK`, `VDI`, `VHDX`, `UEFIc`, `UEFIf`, `NTFS`, `Compound`, `Nsis`, or `Chm`) rather than
   passing because 7zz scanned an embedded FAT/MBR payload, unrelated bytes, or
@@ -359,7 +357,7 @@ Open product boundaries:
   password typing, byte-identical extraction, exact missing-member diagnostics,
   rejection of an extra same-family member, first-volume-flag validation, and
   external volume-count verification. Native multi-volume orchestration is
-  implemented. A RARLAB 7.23 default-compression RAR7 v6 two-volume set now
+  implemented. A RARLAB 7.23 default-compression RAR7 v6 two-volume set
   also passes list, test, and extraction from its second member through
   7zz/7z plus configured unrar; the 5,896-byte output matches its source
   SHA-256, and removing the second volume reports the exact missing name.
@@ -396,7 +394,7 @@ Open product boundaries:
   damaged samples only if Squallz wants to claim WinRAR-level/full RAR
   compatibility. The current support scope is the reduced read-only public
   sample subset plus implemented encrypted reading and native volume
-  orchestration. Header-encrypted RAR5 and old-style RAR4 volumes now have real
+  orchestration. Header-encrypted RAR5 and old-style RAR4 volumes have real
   macOS smokes, and confirmed-unencrypted RAR7 v6 has a real optional-unrar
   two-volume smoke; broader historical RAR4, encrypted/solid, and full
   multi-volume corpus coverage remains `not_release_claimed`, while

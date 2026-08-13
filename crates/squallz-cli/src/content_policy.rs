@@ -17,7 +17,7 @@ mod tests {
     use super::resolve_create_excludes;
 
     #[test]
-    fn omitted_policy_preserves_the_legacy_explicit_list() {
+    fn omitted_policy_uses_only_the_explicit_patterns() {
         let explicit = vec!["*.tmp".to_owned(), "*.tmp".to_owned()];
 
         assert_eq!(resolve_create_excludes(None, explicit.clone()), explicit);

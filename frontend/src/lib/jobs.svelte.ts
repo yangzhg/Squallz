@@ -1310,6 +1310,7 @@ function previewTaskSpec(kind: PreviewTaskKind): JobSpec {
       rename: [],
       mkdir: [],
       excludes: [".DS_Store"],
+      content_policy: "keep_all_files",
       password: null,
       level: 5,
     };
@@ -1326,10 +1327,14 @@ function previewTaskSpec(kind: PreviewTaskKind): JobSpec {
       split_size: kind === "compress_split" ? 8 * 1024 * 1024 : null,
       split_mode: "generic",
       excludes: [],
+      content_policy: "keep_all_files",
+      sqz_inner_format: null,
       sfx_target: sfx ? "macos" : null,
       replace_existing: kind !== "compress",
+      replacement_guard: null,
       completion: "none",
       post_success: "keep_source",
+      test_after_create: false,
     };
   }
   if (kind === "extract" || kind === "extract_unknown_current") {
@@ -1337,12 +1342,15 @@ function previewTaskSpec(kind: PreviewTaskKind): JobSpec {
       kind: "extract",
       path: `${sampleRoot}/product-backup.zip`,
       dest: `${sampleOutputRoot}/product-backup`,
+      expected_destination: null,
+      expected_input_guard: null,
       selection: null,
       overwrite: "ask",
       symlinks: "preserve",
       smart: true,
       encoding: null,
       password: null,
+      verify_sfx: false,
       best_effort: false,
     };
   }
@@ -1359,6 +1367,7 @@ function previewTaskSpec(kind: PreviewTaskKind): JobSpec {
       kind: "repair_recovery",
       path: `${sampleRoot}/product-backup.zip`,
       output: `${sampleOutputRoot}/product-backup.repaired.zip`,
+      output_directory: false,
       recovery: `${sampleRoot}/product-backup.zip.par2`,
     };
   }
@@ -1511,8 +1520,7 @@ function previewTaskResult(kind: PreviewTaskKind): Record<string, unknown> {
       ok: false,
       entries: 42,
       entries_tested: 42,
-      problems: 30,
-      problem_messages: problemMessages,
+      problems: problemMessages,
       problems_total: 30,
       problems_truncated: true,
     };

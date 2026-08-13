@@ -11,8 +11,9 @@ use clap::{
     error::ErrorKind, Arg, ArgAction, ArgGroup, Command, CommandFactory, Parser, Subcommand,
     ValueEnum,
 };
+use serde::Deserialize;
 use squallz_core::api::{
-    OverwritePolicy, ResourceOptions, SafetyLimits, SplitOutputMode, SymlinkPolicy,
+    OverwritePolicy, ResourceOptions, SafetyLimits, SplitOutputMode, SqzInnerFormat, SymlinkPolicy,
 };
 use squallz_core::{ChecksumAlgorithm, CreateContentPolicy, PresetKind, SfxTarget};
 
@@ -110,10 +111,10 @@ fn localize_help_en(cmd: Command) -> Command {
             arg.help("Human-readable output style. Defaults to classic; modern only changes non-JSON output.")
         })
         .mut_arg("color", |arg| {
-            arg.help("When to colorize modern human output: auto, always, rich, fancy, or never.")
+            arg.help("When to colorize modern human output: auto, always, or never.")
         })
         .mut_arg("accent", |arg| {
-            arg.help("Theme palette for modern human output: squallz, brand, icon, cascade, daylight, foam, skyline, aero, crest, halo, tropic, kinetic, radiant, surge, glass, nova, crystal, lumina, azure, surf, signal, tide, breeze, neon, electric, vapor, ocean, jade, teal, aqua, glacier, aurora, prism, lagoon, mint, sunset, citrus, blue, violet, amber, rose, or mono. Also available as --palette, --theme, --color-scheme, --scheme, or --colors.")
+            arg.help("Theme palette for modern human output: squallz, ocean, jade, sunset, violet, or mono.")
         });
 
     cmd.mut_subcommand("compress", localize_compress_help_en)
@@ -276,7 +277,7 @@ fn localize_pack_help_en(cmd: Command) -> Command {
         })
         .mut_arg("profile", profile_help_en)
         .mut_arg("inner_format", |arg| {
-            arg.help("SQZ v1 inner payload profile: sqz, entry-set, zip, tar, 7z, or zstd.")
+            arg.help("SQZ v1 inner payload profile: sqz, zip, tar, 7z, or zstd.")
         })
         .mut_arg("recovery", |arg| {
             arg.help("SQZ payload recovery redundancy percentage, such as 10 or 10%.")
@@ -550,16 +551,16 @@ fn localize_check_update_help_zh(cmd: Command) -> Command {
             .hide_default_value(true)
     })
     .mut_arg("color", |arg| {
-        arg.help("modern 输出的颜色策略：auto、always、rich、fancy 或 never。")
+        arg.help("modern 输出的颜色策略：auto、always 或 never。")
             .hide_possible_values(true)
             .hide_default_value(true)
     })
     .mut_arg("accent", |arg| {
-        arg.help("modern 输出配色；默认 squallz，也可使用 --palette、--theme、--color-scheme、--scheme 或 --colors。")
-            .hide_possible_values(true)
-            .hide_default_value(true)
-            .visible_alias(None::<&'static str>)
-            .aliases(["palette", "theme", "color-scheme", "scheme", "colors"])
+        arg.help(
+            "modern 输出配色；使用 --palette，可选 squallz、ocean、jade、sunset、violet 或 mono。",
+        )
+        .hide_possible_values(true)
+        .hide_default_value(true)
     })
     .mut_subcommand("check-update", |cmd| {
         cmd.help_template(HELP_TEMPLATE)
@@ -786,20 +787,6 @@ pub fn parse_tolerate_loss(s: &str) -> Result<u32, String> {
     }
 }
 
-/// Parses the SQZ v1 inner payload profile.
-pub fn parse_sqz_inner_format(s: &str) -> Result<String, String> {
-    let normalized = s.trim().to_ascii_lowercase();
-    match normalized.as_str() {
-        "sqz" | "entry-set" | "entryset" | "entries" => Ok("sqz".to_string()),
-        "zip" | "tar" | "7z" | "zstd" => Ok(normalized),
-        "" => Err("inner format must not be empty".to_string()),
-        "raw" => Err(format!(
-            "SQZ v1 currently supports only --inner-format sqz (entry-set), zip, tar, 7z, and zstd; inner format '{normalized}' is planned but not implemented"
-        )),
-        other => Err(format!("unsupported SQZ inner format '{other}'")),
-    }
-}
-
 /// Maps CLI resource flags onto the shared core resource options.
 pub fn resource_options(threads: Option<usize>, memory_limit: Option<u64>) -> ResourceOptions {
     ResourceOptions {
@@ -845,14 +832,8 @@ pub struct Cli {
     /// 颜色输出策略（默认 auto；只影响人类可读输出）
     #[arg(long, global = true, value_enum, default_value_t)]
     pub color: ColorArg,
-    /// modern 人类输出配色（默认 squallz；可用 --palette / --theme / --color-scheme / --colors；不影响 JSON / classic）
-    #[arg(
-        long,
-        visible_aliases = ["palette", "theme", "color-scheme", "scheme", "colors"],
-        global = true,
-        value_enum,
-        default_value_t
-    )]
+    /// modern 人类输出配色（默认 squallz；不影响 JSON / classic）
+    #[arg(long = "palette", global = true, value_enum, default_value_t)]
     pub accent: AccentArg,
     #[command(subcommand)]
     pub cmd: Cmd,
@@ -873,7 +854,8 @@ impl OutputStyleArg {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CreateProfileArg {
     /// Quick sharing, lower CPU pressure
     Fast,
@@ -988,28 +970,20 @@ pub fn effective_compression_level(level: Option<u8>, profile: Option<CreateProf
 pub enum ChecksumAlgorithmArg {
     /// SHA-256, conventional for release artifacts and scripts
     #[default]
-    #[value(alias = "sha-256")]
     Sha256,
     /// BLAKE3, fast modern content hashing
-    #[value(alias = "b3")]
     Blake3,
     /// SHA-512, wider SHA-2 digest used by some manifests
-    #[value(alias = "sha-512")]
     Sha512,
-    /// SHA-384, SHA-2 compatibility for signed release manifests
-    #[value(alias = "sha-384")]
+    /// SHA-384, used by some signed release manifests
     Sha384,
-    /// SHA-224, SHA-2 compatibility for uncommon manifests
-    #[value(alias = "sha-224")]
+    /// SHA-224, used by some uncommon manifests
     Sha224,
-    /// SHA-1, legacy manifest compatibility
-    #[value(alias = "sha-1")]
+    /// SHA-1, a weak algorithm for verification-only workflows
     Sha1,
-    /// MD5, legacy manifest compatibility
-    #[value(alias = "md-5")]
+    /// MD5, a weak algorithm for verification-only workflows
     Md5,
     /// ZIP-compatible CRC-32
-    #[value(alias = "crc-32")]
     Crc32,
 }
 
@@ -1035,10 +1009,6 @@ pub enum ColorArg {
     Auto,
     /// Always emit ANSI color in human output
     Always,
-    /// Force rich ANSI color for modern screenshots, demos, and redirected previews
-    Rich,
-    /// Force richer ANSI color for modern live progress, screenshots, and redirected demos
-    Fancy,
     /// Never emit ANSI color
     Never,
 }
@@ -1047,8 +1017,6 @@ impl ColorArg {
     pub fn enabled(self, stream_is_terminal: bool) -> bool {
         match self {
             Self::Always => true,
-            Self::Rich => true,
-            Self::Fancy => true,
             Self::Never => false,
             Self::Auto => stream_is_terminal && std::env::var_os("NO_COLOR").is_none(),
         }
@@ -1060,86 +1028,14 @@ pub enum AccentArg {
     /// Squallz brand palette matching the app icon teal-to-sky gradient
     #[default]
     Squallz,
-    /// Short brand alias for the approved teal-to-sky app icon palette
-    Brand,
-    /// Explicit app-icon palette using the approved teal-to-sky SVG gradient
-    Icon,
-    /// Cascade palette with approved teal primary and brighter sky highlights
-    Cascade,
-    /// Bright daylight palette using approved teal with a clean sky highlight
-    Daylight,
-    /// Soft foam palette using approved teal with an ice-blue highlight
-    Foam,
-    /// Skyline palette with sky primary and the approved Squallz teal highlight
-    Skyline,
-    /// Airy sky-led palette with the approved Squallz teal highlight
-    Aero,
-    /// Crest palette with bright sky primary and luminous aqua secondary accents
-    Crest,
-    /// Halo palette with luminous teal primary and bright sky secondary accents
-    Halo,
-    /// Tropic palette with the approved teal primary and electric cyan secondary accents
-    Tropic,
-    /// Kinetic palette with the approved teal primary and high-energy sky secondary accents
-    Kinetic,
-    /// Radiant palette with approved teal primary and bright sky-glass highlights
-    Radiant,
-    /// Surge palette with approved teal primary and vivid sky-blue highlights for live HUDs
-    Surge,
-    /// Glassy teal-to-sky palette with brighter readable highlights
-    Glass,
-    /// Nova palette with bright cyan primary and sunlit gold highlights
-    Nova,
-    /// Crystal palette with luminous aqua primary and clear sky highlights
-    Crystal,
-    /// Lumina palette with bright cyan primary and coral highlights for vivid modern dashboards
-    Lumina,
-    /// Bright azure palette with sky primary and Squallz teal highlights
-    Azure,
-    /// Surf palette with electric cyan primary and sky-blue highlights
-    Surf,
-    /// High-signal teal and sky palette with a brighter primary accent
-    Signal,
-    /// Bright tide palette with light cyan primary and sky highlights
-    Tide,
-    /// Breeze palette with teal primary and sky highlights for calm high-contrast terminals
-    Breeze,
-    /// Neon palette with cyan primary and pink highlights for high-contrast modern terminals
-    Neon,
-    /// Electric cyan and violet palette for high-energy modern terminals
-    Electric,
-    /// Vapor palette with luminous sky primary and soft violet highlights
-    Vapor,
     /// Ocean palette with sky-blue primary and teal highlights
     Ocean,
     /// Jade palette with fresh green-cyan primary and Squallz teal highlights
     Jade,
-    /// Teal/cyan palette
-    Teal,
-    /// Aqua palette with brighter cyan highlights
-    Aqua,
-    /// Glacier palette with bright cyan and sky highlights
-    Glacier,
-    /// Aurora palette with mint and cyan highlights
-    Aurora,
-    /// Prism palette with cyan and magenta highlights
-    Prism,
-    /// Lagoon palette with vivid teal and sky tones
-    Lagoon,
-    /// Mint palette with the Squallz teal base and a softer sky highlight
-    Mint,
     /// Warm sunset palette with orange and rose highlights
     Sunset,
-    /// Fresh citrus palette with lime and cyan highlights
-    Citrus,
-    /// Crisp blue palette
-    Blue,
     /// Violet palette
     Violet,
-    /// Warm amber palette
-    Amber,
-    /// Bright rose palette
-    Rose,
     /// Monochrome high-contrast palette
     Mono,
 }
@@ -1211,10 +1107,10 @@ pub enum Cmd {
         /// 内置创建预设（fast=2，balanced=6，maximum=9）
         #[arg(long, value_enum)]
         profile: Option<CreateProfileArg>,
-        /// SQZ v1 内部 payload profile（支持 sqz / entry-set / zip / tar / 7z / zstd）
-        #[arg(long, default_value = "sqz", value_parser = parse_sqz_inner_format)]
-        inner_format: String,
-        /// SQZ payload 恢复冗余比例（如 10 或 10%；默认 25% 兼容原 8+2）
+        /// SQZ v1 内部 payload profile（支持 sqz / zip / tar / 7z / zstd）
+        #[arg(long, default_value_t = SqzInnerFormat::Sqz)]
+        inner_format: SqzInnerFormat,
+        /// SQZ payload 恢复冗余比例（如 10 或 10%；默认 25%）
         #[arg(long, default_value = "25%", value_parser = parse_percent)]
         recovery: u8,
         /// 排除 glob 模式（可多次，如 --exclude .git --exclude "*.tmp"）

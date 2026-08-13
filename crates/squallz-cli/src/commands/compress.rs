@@ -6,20 +6,22 @@ use std::path::{Path, PathBuf};
 use serde_json::json;
 use squallz_core::api::{
     CompressionLevel, CreateOptions, Detected, FormatError, OpenOptions, Password, ProgressPhase,
-    ProgressSink, SplitOutputMode, SqzCreateOptions,
+    ProgressSink, SplitOutputMode, SqzCreateOptions, SqzInnerFormat,
 };
 use squallz_core::CreateArtifactKind;
 
 use super::reports::{create_report_json, print_preserved_output_warning, print_pretty_json};
 use crate::args::resource_options;
-use crate::commands::{Ctx, ModernStatusField, ModernTableColumn, ModernTableRow};
+use crate::commands::{
+    detected_format_name_for_name, Ctx, ModernStatusField, ModernTableColumn, ModernTableRow,
+};
 use crate::errors::CliError;
 use crate::progress::{fmt_bytes, CliProgress};
 use crate::ui::Tone;
 
 struct CreateJsonReport {
     operation: &'static str,
-    inner_format: Option<String>,
+    inner_format: Option<SqzInnerFormat>,
     recovery_percent: Option<u8>,
 }
 
@@ -32,7 +34,7 @@ impl CreateJsonReport {
         }
     }
 
-    fn pack_sqz(inner_format: String, recovery_percent: u8) -> Self {
+    fn pack_sqz(inner_format: SqzInnerFormat, recovery_percent: u8) -> Self {
         Self {
             operation: "pack_sqz",
             inner_format: Some(inner_format),
@@ -84,7 +86,7 @@ pub fn run_pack(
     inputs: Vec<PathBuf>,
     output: PathBuf,
     level: u8,
-    inner_format: String,
+    inner_format: SqzInnerFormat,
     recovery: u8,
     excludes: Vec<String>,
     split: Option<u64>,
@@ -106,7 +108,7 @@ pub fn run_pack(
         output,
         Some("sqz"),
         SqzCreateOptions {
-            inner_format: inner_format.clone(),
+            inner_format,
             recovery_percent: recovery,
         },
         level,
@@ -397,7 +399,7 @@ fn print_create_result(ctx: &Ctx, result: &CreateResultView<'_>) {
                 ModernTableRow::new(vec![ctx.loc.t("common.format"), "sqz".to_owned()]),
                 ModernTableRow::new(vec![
                     ctx.loc.t("cli.pack.inner_format"),
-                    inner_format.clone(),
+                    inner_format.to_string(),
                 ]),
                 ModernTableRow::new(vec![ctx.loc.t("cli.pack.recovery_redundancy"), recovery]),
             ],
@@ -503,7 +505,7 @@ fn create_format_label(ctx: &Ctx, output: &Path, requested_format: Option<&str>)
     if let Some(detected) = output
         .file_name()
         .and_then(|name| name.to_str())
-        .and_then(|name| detected_format_label(ctx, name))
+        .and_then(|name| detected_format_name_for_name(ctx, name))
     {
         return detected;
     }
@@ -511,20 +513,6 @@ fn create_format_label(ctx: &Ctx, output: &Path, requested_format: Option<&str>)
         return format.to_ascii_lowercase();
     }
     "-".to_owned()
-}
-
-fn detected_format_label(ctx: &Ctx, name: &str) -> Option<String> {
-    match ctx.engine.registry().detect_by_name(name)? {
-        Detected::Archive(archive) => Some(archive.id().to_owned()),
-        Detected::Compressed {
-            compressor,
-            inner_archive: Some(archive),
-        } => Some(format!("{}.{}", archive.id(), compressor.id())),
-        Detected::Compressed {
-            compressor,
-            inner_archive: None,
-        } => Some(compressor.id().to_owned()),
-    }
 }
 
 fn recovery_percent_label(recovery_percent: Option<u8>) -> String {

@@ -29,13 +29,12 @@ pub(crate) fn create_report_json(report: &CreateReport) -> Value {
         .map(|path| path.display().to_string())
         .collect::<Vec<_>>();
     json!({
-        "output": report.primary_output.display().to_string(),
         "primary_output": report.primary_output.display().to_string(),
         "outputs": outputs,
         "preserved_outputs": preserved_outputs,
         "total_bytes": report.total_output_bytes,
         "split": report.split_volume_count.is_some(),
-        "volumes": report.split_volume_count.unwrap_or(1),
+        "volume_count": report.split_volume_count.unwrap_or(1),
     })
 }
 
@@ -229,7 +228,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn complete_structure_keeps_the_legacy_test_json_shape() {
+    fn complete_structure_uses_the_standard_test_json_shape() {
         let report = TestSummary {
             entries_tested: 2,
             ..TestSummary::default()
@@ -242,12 +241,12 @@ mod tests {
     }
 
     #[test]
-    fn recovered_structure_is_reported_without_changing_existing_fields() {
+    fn recovered_structure_adds_status_to_the_standard_fields() {
         let report = TestSummary {
             entries_tested: 2,
             ..TestSummary::default()
         };
-        let legacy = test_report_json(&report);
+        let standard = test_report_json(&report);
         let recovered = test_report_json_with_structure(
             &report,
             ArchiveStructureStatus::ZipLocalHeadersRecovered,
@@ -262,7 +261,7 @@ mod tests {
             "problems_truncated",
             "recovery",
         ] {
-            assert_eq!(recovered[key], legacy[key], "field {key}");
+            assert_eq!(recovered[key], standard[key], "field {key}");
         }
     }
 
@@ -285,7 +284,6 @@ mod tests {
 
         let value = create_report_json(&report);
 
-        assert_eq!(value["output"], "backup.sqz.001");
         assert_eq!(value["primary_output"], "backup.sqz.001");
         assert_eq!(
             value["outputs"],
@@ -302,7 +300,7 @@ mod tests {
             json!([".backup.sqz.001.split-backup-123-0.tmp.backup.sqz.001"])
         );
         assert_eq!(value["split"], true);
-        assert_eq!(value["volumes"], 2);
+        assert_eq!(value["volume_count"], 2);
     }
 
     #[test]

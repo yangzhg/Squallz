@@ -2,8 +2,10 @@
 
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::sync::{Arc, Mutex, MutexGuard};
 
+use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 use crate::entry::{EntryMeta, EntryPath};
@@ -33,7 +35,8 @@ impl fmt::Debug for Password {
 }
 
 /// Overwrite policy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum OverwritePolicy {
     /// Overwrite existing files
     Overwrite,
@@ -41,6 +44,7 @@ pub enum OverwritePolicy {
     #[default]
     Skip,
     /// Keep both (auto-rename to `name (1).ext`)
+    #[serde(rename = "rename")]
     RenameBoth,
     /// Ask through [`ConflictResolver`]; degrades to Skip when no resolver
     /// is provided
@@ -48,7 +52,8 @@ pub enum OverwritePolicy {
 }
 
 /// Symbolic link handling policy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SymlinkPolicy {
     /// Restore as a symbolic link (Unix default)
     #[default]
@@ -100,6 +105,11 @@ pub struct ProblemPreview {
 }
 
 impl ProblemPreview {
+    /// Whether no problems were observed.
+    pub fn is_empty(&self) -> bool {
+        self.total == 0
+    }
+
     /// Whether some observed problems are absent from [`Self::messages`].
     pub fn is_truncated(&self) -> bool {
         self.total > self.messages.len() as u64
@@ -324,7 +334,8 @@ impl CompressionLevel {
 }
 
 /// Physical layout used when [`CreateOptions::split_size`] is set.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SplitOutputMode {
     /// Format-independent byte volumes named `.001`, `.002`, and so on.
     #[default]
@@ -378,14 +389,57 @@ impl FormatCreateBudget {
     }
 }
 
+/// Payload format stored inside an SQZ container.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SqzInnerFormat {
+    Sqz,
+    Zip,
+    Tar,
+    #[serde(rename = "7z")]
+    SevenZip,
+    Zstd,
+}
+
+impl SqzInnerFormat {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Sqz => "sqz",
+            Self::Zip => "zip",
+            Self::Tar => "tar",
+            Self::SevenZip => "7z",
+            Self::Zstd => "zstd",
+        }
+    }
+}
+
+impl fmt::Display for SqzInnerFormat {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for SqzInnerFormat {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "sqz" => Ok(Self::Sqz),
+            "zip" => Ok(Self::Zip),
+            "tar" => Ok(Self::Tar),
+            "7z" => Ok(Self::SevenZip),
+            "zstd" => Ok(Self::Zstd),
+            "" => Err("inner format must not be empty".to_string()),
+            other => Err(format!("unsupported SQZ inner format '{other}'")),
+        }
+    }
+}
+
 /// SQZ creation profile.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SqzCreateOptions {
-    /// Payload profile label written into the SQZ descriptor.
-    ///
-    /// Current v1 stores a transparent entry set. Future profiles may wrap a
-    /// standard inner archive payload such as `7z` or `zip`.
-    pub inner_format: String,
+    /// Payload profile written into the SQZ descriptor.
+    pub inner_format: SqzInnerFormat,
     /// Requested payload recovery redundancy percentage.
     pub recovery_percent: u8,
 }
@@ -393,8 +447,8 @@ pub struct SqzCreateOptions {
 impl Default for SqzCreateOptions {
     fn default() -> Self {
         Self {
-            inner_format: "sqz".to_string(),
-            // Preserve the original v1 8 data + 2 parity behavior.
+            inner_format: SqzInnerFormat::Sqz,
+            // Eight data shards and two parity shards.
             recovery_percent: 25,
         }
     }
@@ -436,28 +490,6 @@ pub struct FormatCapabilities {
     pub can_test: bool,
 }
 
-/// Integrity test report.
-#[derive(Debug, Clone, Default)]
-pub struct TestReport {
-    /// Number of entries tested
-    pub entries_tested: u64,
-    /// Complete compatibility problem list (empty = passed); log-only text,
-    /// not user-facing copy. Product frontends should prefer
-    /// [`TestSummary`] so damaged archives cannot grow display diagnostics
-    /// without bound.
-    pub problems: Vec<String>,
-    /// Optional archive recovery summary. Formats without recovery data leave
-    /// this as `None`.
-    pub recovery: Option<RecoverySummary>,
-}
-
-impl TestReport {
-    /// Whether everything passed.
-    pub fn is_ok(&self) -> bool {
-        self.problems.is_empty()
-    }
-}
-
 /// Integrity-test result with an exact problem count and bounded preview.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TestSummary {
@@ -473,26 +505,6 @@ impl TestSummary {
     /// Whether everything passed.
     pub fn is_ok(&self) -> bool {
         self.problems.total == 0
-    }
-}
-
-impl From<TestReport> for TestSummary {
-    fn from(report: TestReport) -> Self {
-        let TestReport {
-            entries_tested,
-            mut problems,
-            recovery,
-        } = report;
-        let total = problems.len() as u64;
-        problems.truncate(TEST_PROBLEM_PREVIEW_LIMIT);
-        Self {
-            entries_tested,
-            problems: ProblemPreview {
-                total,
-                messages: problems,
-            },
-            recovery,
-        }
     }
 }
 
@@ -617,25 +629,6 @@ mod tests {
         let preview = log.snapshot();
         assert_eq!(preview.total, 1);
         assert_eq!(preview.messages, ["after poison"]);
-    }
-
-    #[test]
-    fn test_summary_adapts_legacy_report_without_changing_its_literal_shape() {
-        let report = TestReport {
-            entries_tested: 25,
-            problems: (0..25).map(|index| format!("problem-{index}")).collect(),
-            recovery: None,
-        };
-
-        let summary = TestSummary::from(report);
-        assert_eq!(summary.entries_tested, 25);
-        assert_eq!(summary.problems.total, 25);
-        assert_eq!(summary.problems.messages.len(), TEST_PROBLEM_PREVIEW_LIMIT);
-        assert_eq!(summary.problems.messages[0], "problem-0");
-        assert_eq!(summary.problems.messages[19], "problem-19");
-        assert!(summary.problems.is_truncated());
-        assert_eq!(summary.problems.omitted(), 5);
-        assert!(!summary.is_ok());
     }
 
     #[test]

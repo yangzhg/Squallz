@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
+use squallz_core::parent_or_current;
 use squallz_format_api::{ControlToken, FormatError, PhysicalFileIdentity};
 
 const JOURNAL_VERSION: u32 = 1;
@@ -949,12 +950,6 @@ fn checked_output_name(output: &Path) -> Result<&OsStr, FormatError> {
             "PAR2 repair output has an invalid file name".to_owned(),
         ))
     }
-}
-
-fn parent_or_current(path: &Path) -> &Path {
-    path.parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."))
 }
 
 fn target_key(target: &Path) -> String {

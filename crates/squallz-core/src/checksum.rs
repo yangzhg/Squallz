@@ -4,6 +4,7 @@ use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
 use sha2::Digest;
 
 use crate::api::{ControlToken, EntryPath, EntryType, FormatError, NoProgress, ProgressSink};
@@ -12,7 +13,8 @@ use crate::{inputs, PathFilter};
 const HASH_BUFFER_SIZE: usize = 128 * 1024;
 const CHECKSUM_PROGRESS_STEP_BYTES: u64 = 1024 * 1024;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ChecksumAlgorithm {
     Blake3,
     Md5,
@@ -25,16 +27,16 @@ pub enum ChecksumAlgorithm {
 }
 
 impl ChecksumAlgorithm {
-    pub fn parse_alias(value: &str) -> Option<Self> {
+    pub fn parse(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
-            "blake3" | "b3" => Some(Self::Blake3),
-            "md5" | "md-5" => Some(Self::Md5),
-            "sha1" | "sha-1" => Some(Self::Sha1),
-            "sha224" | "sha-224" => Some(Self::Sha224),
-            "sha256" | "sha-256" => Some(Self::Sha256),
-            "sha384" | "sha-384" => Some(Self::Sha384),
-            "sha512" | "sha-512" => Some(Self::Sha512),
-            "crc32" | "crc-32" => Some(Self::Crc32),
+            "blake3" => Some(Self::Blake3),
+            "md5" => Some(Self::Md5),
+            "sha1" => Some(Self::Sha1),
+            "sha224" => Some(Self::Sha224),
+            "sha256" => Some(Self::Sha256),
+            "sha384" => Some(Self::Sha384),
+            "sha512" => Some(Self::Sha512),
+            "crc32" => Some(Self::Crc32),
             _ => None,
         }
     }
@@ -650,29 +652,23 @@ mod tests {
     }
 
     #[test]
-    fn checksum_algorithm_aliases_cover_cli_and_gui_values() {
+    fn checksum_algorithm_ids_are_the_only_accepted_values() {
         let cases = [
             ("md5", ChecksumAlgorithm::Md5),
-            ("md-5", ChecksumAlgorithm::Md5),
             ("sha1", ChecksumAlgorithm::Sha1),
-            ("sha-1", ChecksumAlgorithm::Sha1),
             ("sha224", ChecksumAlgorithm::Sha224),
-            ("sha-224", ChecksumAlgorithm::Sha224),
             ("sha256", ChecksumAlgorithm::Sha256),
-            ("sha-256", ChecksumAlgorithm::Sha256),
             ("sha384", ChecksumAlgorithm::Sha384),
-            ("sha-384", ChecksumAlgorithm::Sha384),
             ("sha512", ChecksumAlgorithm::Sha512),
-            ("sha-512", ChecksumAlgorithm::Sha512),
             ("blake3", ChecksumAlgorithm::Blake3),
-            ("b3", ChecksumAlgorithm::Blake3),
             ("crc32", ChecksumAlgorithm::Crc32),
-            ("crc-32", ChecksumAlgorithm::Crc32),
         ];
 
-        for (alias, algorithm) in cases {
-            assert_eq!(ChecksumAlgorithm::parse_alias(alias), Some(algorithm));
+        for (id, algorithm) in cases {
+            assert_eq!(ChecksumAlgorithm::parse(id), Some(algorithm));
         }
-        assert_eq!(ChecksumAlgorithm::parse_alias("sha3-256"), None);
+        for unsupported in ["b3", "sha-256", "crc-32", "sha3-256"] {
+            assert_eq!(ChecksumAlgorithm::parse(unsupported), None);
+        }
     }
 }

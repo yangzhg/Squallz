@@ -67,8 +67,8 @@ pub trait ProgressSink: Send + Sync {
     fn on_phase(&self, _phase: ProgressPhase, _interruptible: bool) {}
 
     /// Bytes processed for the current entry in addition to the overall
-    /// progress. Implementations that only care about the old aggregate
-    /// contract can keep the default forwarding behavior.
+    /// progress. Aggregate-only implementations can keep the default
+    /// forwarding behavior.
     fn on_entry_progress(
         &self,
         done: u64,

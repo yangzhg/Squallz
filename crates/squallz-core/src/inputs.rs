@@ -9,6 +9,9 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use crate::api::{ControlToken, EntryPath, EntryType, FormatError};
+use crate::archive_path::{
+    is_canonical_positive_u32, is_canonical_positive_u64, is_canonical_process_sequence,
+};
 use crate::filesystem_identity::{
     file_identity, open_regular_file_no_follow, path_identity, PathIdentity, RegularFileState,
 };
@@ -253,9 +256,8 @@ pub(crate) fn prepare_single_stream_input(
     input: &Path,
     name: EntryPath,
 ) -> Result<PreparedInputItem, FormatError> {
-    // Bare compressors historically accept a symbolic link to a file. Resolve
-    // that user-facing alias once, then bind and later open the resolved file
-    // without following a new final-component link.
+    // Resolve a user-selected symbolic link once, then bind and later open the
+    // resulting regular file without following a new final-component link.
     let source = std::fs::canonicalize(input)?;
     let metadata = std::fs::symlink_metadata(&source)?;
     if metadata.file_type().is_symlink() || !metadata.is_file() {
@@ -735,7 +737,7 @@ fn is_update_work_file_name(name: &str) -> bool {
             let Some((key, process)) = suffix.split_once('-') else {
                 return false;
             };
-            is_lower_hex(key, 16) && valid_process_sequence(process)
+            is_lower_hex(key, 16) && is_canonical_process_sequence(process)
         })
     {
         return true;
@@ -744,9 +746,9 @@ fn is_update_work_file_name(name: &str) -> bool {
         .strip_prefix(".squallz-update-journal-")
         .and_then(|suffix| suffix.strip_suffix(".tmp"))
         .is_some_and(|suffix| {
-            valid_process_sequence(suffix)
+            is_canonical_process_sequence(suffix)
                 || suffix.split_once('-').is_some_and(|(key, process)| {
-                    is_lower_hex(key, 16) && valid_process_sequence(process)
+                    is_lower_hex(key, 16) && is_canonical_process_sequence(process)
                 })
         })
     {
@@ -762,35 +764,11 @@ fn is_update_work_file_name(name: &str) -> bool {
         .is_some_and(|key| is_lower_hex(key, 64))
 }
 
-fn valid_process_sequence(value: &str) -> bool {
-    let Some((pid, sequence)) = value.split_once('-') else {
-        return false;
-    };
-    !sequence.contains('-') && is_canonical_positive_u32(pid) && is_canonical_positive_u64(sequence)
-}
-
 fn is_lower_hex(value: &str, length: usize) -> bool {
     value.len() == length
         && value
             .bytes()
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-}
-
-fn has_canonical_positive_integer_syntax(value: &str) -> bool {
-    let Some((&first, rest)) = value.as_bytes().split_first() else {
-        return false;
-    };
-    (b'1'..=b'9').contains(&first) && rest.iter().all(|byte| byte.is_ascii_digit())
-}
-
-fn is_canonical_positive_u32(value: &str) -> bool {
-    has_canonical_positive_integer_syntax(value)
-        && value.parse::<u32>().is_ok_and(|value| value != 0)
-}
-
-fn is_canonical_positive_u64(value: &str) -> bool {
-    has_canonical_positive_integer_syntax(value)
-        && value.parse::<u64>().is_ok_and(|value| value != 0)
 }
 
 #[cfg(unix)]

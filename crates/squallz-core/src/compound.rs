@@ -8,8 +8,9 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::api::{
-    ArchiveReader, CompressSink, Compressor, ControlToken, EntryMeta, EntryPath, EntryType,
-    FormatError, ProgressPhase, ProgressSink, SafetyLimits, StreamFactory, TestReport,
+    ArchiveReader, BoundedProblemLog, CompressSink, Compressor, ControlToken, EntryMeta, EntryPath,
+    EntryType, FormatError, ProgressPhase, ProgressSink, SafetyLimits, StreamFactory, TestSummary,
+    TEST_PROBLEM_PREVIEW_LIMIT,
 };
 use crate::controlled_io::ControlledRead;
 
@@ -167,19 +168,15 @@ impl ArchiveReader for SingleFileArchiveReader {
         Ok((self.factory)()?)
     }
 
-    fn test(
+    fn test_summary(
         &mut self,
         progress: &dyn ProgressSink,
         ctl: &ControlToken,
-    ) -> Result<TestReport, FormatError> {
+    ) -> Result<TestSummary, FormatError> {
         // Reading to EOF drives the backend's integrity checks (gzip CRC32,
         // xz check, zstd frame checksums). Default limits guard against
         // bombs during the test itself.
-        let mut report = TestReport {
-            entries_tested: 1,
-            problems: Vec::new(),
-            recovery: None,
-        };
+        let problems = BoundedProblemLog::new(TEST_PROBLEM_PREVIEW_LIMIT);
         let mut accountant = crate::api::LimitsAccountant::new(SafetyLimits::default());
         let mut reader = (self.factory)()?;
         let mut buf = vec![0u8; 64 * 1024];
@@ -194,13 +191,17 @@ impl ArchiveReader for SingleFileArchiveReader {
                     progress.on_progress(done, 0, &self.meta.path);
                 }
                 Err(e) => {
-                    report.problems.push(format!("{}: {e}", self.meta.path));
+                    problems.record(format!("{}: {e}", self.meta.path));
                     break;
                 }
             }
         }
         progress.on_progress(done, done, &EntryPath::from_utf8(""));
-        Ok(report)
+        Ok(TestSummary {
+            entries_tested: 1,
+            problems: problems.snapshot(),
+            recovery: None,
+        })
     }
 }
 

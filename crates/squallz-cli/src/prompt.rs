@@ -4,10 +4,11 @@
 
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::Path;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use squallz_core::api::{ConflictDecision, ConflictResolver, EntryMeta, FormatError, Password};
+use squallz_core::lock_unpoisoned;
 use squallz_i18n::Localizer;
 
 /// Prompted attempts after a missing/wrong password: 1 initial + 2 retries.
@@ -55,13 +56,6 @@ pub fn with_password_retry<T>(
         }
     }
     Err(last_err)
-}
-
-fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    match mutex.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    }
 }
 
 /// "Apply to all" memory of the interactive resolver.

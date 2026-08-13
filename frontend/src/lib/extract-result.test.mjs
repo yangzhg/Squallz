@@ -7,7 +7,7 @@ import {
   readExtractResultOutcome,
 } from "./extract-result.ts";
 
-test("structured extraction counts remain distinct from legacy best-effort problems", () => {
+test("extraction counts drive the result outcome", () => {
   const result = {
     dest: "/Users/alex/Downloads/Photos",
     best_effort: true,
@@ -27,22 +27,11 @@ test("structured extraction counts remain distinct from legacy best-effort probl
   };
 
   assert.deepEqual(readExtractResultOutcome(result), {
-    structured: true,
     skipped: 2,
     failed: 1,
   });
   assert.equal(readExtractResultCounts(result)?.destination, result.dest);
   assert.equal(extractResultNeedsAttention(result), true);
-});
-
-test("legacy extraction results keep their historical skipped fallback", () => {
-  assert.deepEqual(readExtractResultOutcome({ skipped: 3 }), {
-    structured: false,
-    skipped: 3,
-    failed: 0,
-  });
-  assert.equal(readExtractResultCounts({ skipped: 3 }), null);
-  assert.equal(extractResultNeedsAttention({ skipped: 3 }), false);
 });
 
 test("structured skipped entries need attention even when no entry failed", () => {

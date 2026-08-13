@@ -9,23 +9,24 @@ use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime};
 
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 
 use squallz_core::api::{
-    split_volume_name, ArchiveSourceSet, ArchiveStructureStatus, BoundedProblemLog,
-    CompressionLevel, ConflictDecision, ConflictResolver, ControlToken, CreateOptions, Detected,
-    EntryMeta, EntryPath, ExtractProblemReporter, ExtractReport, FormatError, OpenOptions,
-    OverwritePolicy, Password, ProblemPreview, ProgressPhase, ProgressSink, RecoverySummary,
-    SplitOutputMode, SymlinkPolicy, UpdateOp,
+    ArchiveSourceSet, ArchiveStructureStatus, BoundedProblemLog, CompressionLevel,
+    ConflictDecision, ConflictResolver, ControlToken, CreateOptions, Detected, EntryMeta,
+    EntryPath, ExtractProblemReporter, ExtractReport, FormatError, OpenOptions, OverwritePolicy,
+    Password, ProblemPreview, ProgressPhase, ProgressSink, RecoverySummary, SymlinkPolicy,
+    UpdateOp,
 };
 use squallz_core::{
-    create_destination_has_conflict, validate_sfx_template, ChecksumAlgorithm, CreateArtifactKind,
-    CreateCommitPolicy, CreateDestinationGuard, CreateInputManifestEntry, CreateInputModifiedTime,
-    CreateReport, Engine, ExtractInputGuard, ExtractPlan, JobId, JobQueue, JobResources, JobState,
+    create_destination_has_conflict, is_plain_sqz_path, is_sqz_archive_path, is_zip_family_path,
+    sync_directory, validate_sfx_template, CreateArtifactKind, CreateCommitPolicy,
+    CreateDestinationGuard, CreateInputManifestEntry, CreateInputModifiedTime, CreateReport,
+    Engine, ExtractInputGuard, ExtractPlan, JobId, JobQueue, JobResources, JobState,
     PostSuccessAction, QueueWaitReason, SfxBuildOptions, SfxBuildReport, SfxTarget,
 };
 use squallz_publish::{publish_macos_sfx, MacosSfxPublishPhase};
@@ -39,11 +40,12 @@ use crate::dto::{
 use crate::events::{emit, EventSink, EV_ASK_CONFLICT, EV_ASK_PASSWORD, EV_PROGRESS, EV_STATE};
 use crate::nested::{create_nested_job_workspace, extract_nested_archive_to_temp_for_job};
 use crate::source_cleanup_journal::{
-    remove_empty_holder_if_identity, source_path_identity, sync_directory, PendingSourceCleanup,
+    remove_empty_holder_if_identity, source_path_identity, PendingSourceCleanup,
     SourceCleanupJournal, SourceCleanupRecord, SourceCleanupRecovery, SourcePathIdentity,
     HOLDER_PREFIX,
 };
 use crate::state::{AppState, ResolvedArchiveSource};
+use squallz_core::lock_unpoisoned;
 
 /// Minimum interval between two progress events.
 const PROGRESS_THROTTLE_MS: u128 = 60;
@@ -102,18 +104,8 @@ enum CpuReservationProfile {
     HostParallel,
 }
 
-fn create_cpu_reservation_profile(
-    engine: &Engine,
-    destination: &str,
-    sqz_inner_format: Option<&str>,
-) -> CpuReservationProfile {
+fn create_cpu_reservation_profile(engine: &Engine, destination: &str) -> CpuReservationProfile {
     match engine.registry().detect_by_name(destination) {
-        Some(Detected::Archive(format))
-            if format.id() == "sqz"
-                && sqz_inner_format.is_some_and(|id| id.eq_ignore_ascii_case("zstd")) =>
-        {
-            CpuReservationProfile::ConfigurableEncoder
-        }
         Some(Detected::Archive(format)) if format.id() == "wim" => {
             CpuReservationProfile::ConfigurableEncoder
         }
@@ -126,13 +118,9 @@ fn create_cpu_reservation_profile(
 
 fn scheduler_cpu_profile(engine: &Engine, spec: &JobSpec) -> CpuReservationProfile {
     match spec {
-        JobSpec::Compress {
-            dest,
-            sqz_inner_format,
-            ..
-        } => create_cpu_reservation_profile(engine, dest, sqz_inner_format.as_deref()),
+        JobSpec::Compress { dest, .. } => create_cpu_reservation_profile(engine, dest),
         JobSpec::Convert { dest, .. } | JobSpec::ExportSqz { dest, .. } => {
-            create_cpu_reservation_profile(engine, dest, None)
+            create_cpu_reservation_profile(engine, dest)
         }
         JobSpec::Protect { .. }
         | JobSpec::VerifyRecovery { .. }
@@ -209,13 +197,6 @@ fn job_supports_pause(spec: &JobSpec) -> bool {
             | JobSpec::VerifyRecovery { .. }
             | JobSpec::RepairRecovery { .. }
     )
-}
-
-fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    match mutex.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    }
 }
 
 fn metadata_len_or_zero(meta: Option<&fs::Metadata>) -> u64 {
@@ -2574,50 +2555,6 @@ fn with_gui_password<R>(
     }
 }
 
-fn overwrite_policy(s: &str) -> OverwritePolicy {
-    match s {
-        "overwrite" => OverwritePolicy::Overwrite,
-        "rename" => OverwritePolicy::RenameBoth,
-        "ask" => OverwritePolicy::Ask,
-        _ => OverwritePolicy::Skip,
-    }
-}
-
-fn symlink_policy(s: &str) -> SymlinkPolicy {
-    match s {
-        "follow" => SymlinkPolicy::Follow,
-        "skip" => SymlinkPolicy::Skip,
-        _ => SymlinkPolicy::Preserve,
-    }
-}
-
-fn is_sqz_source_path(path: &Path) -> bool {
-    is_plain_sqz_path(path)
-        || path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| {
-                split_volume_name(name).is_some_and(|(base, _)| is_plain_sqz_path(Path::new(base)))
-            })
-}
-
-fn is_plain_sqz_path(path: &Path) -> bool {
-    path.extension()
-        .and_then(|ext| ext.to_str())
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("sqz"))
-}
-
-fn is_plain_zip_path(path: &Path) -> bool {
-    path.extension()
-        .and_then(|ext| ext.to_str())
-        .is_some_and(|ext| {
-            matches!(
-                ext.to_ascii_lowercase().as_str(),
-                "zip" | "jar" | "apk" | "cbz" | "ipa"
-            )
-        })
-}
-
 fn extract_result_json(
     plan: ExtractPlan,
     report: ExtractReport,
@@ -2629,7 +2566,6 @@ fn extract_result_json(
     let mut result = serde_json::json!({
         "dest": report.destination.to_string_lossy(),
         "best_effort": best_effort,
-        "skipped": problems.total,
         "problems": problems.messages,
         "problems_total": problems.total,
         "problems_truncated": problems_truncated,
@@ -2669,8 +2605,8 @@ fn run_extract_archive_job(
     expected_destination: Option<&Path>,
     expected_input_guard: Option<ExtractInputGuard>,
     selection: Option<&[String]>,
-    overwrite: &str,
-    symlinks: &str,
+    overwrite: &OverwritePolicy,
+    symlinks: &SymlinkPolicy,
     smart: bool,
     encoding: Option<String>,
     password: Option<&str>,
@@ -2680,7 +2616,7 @@ fn run_extract_archive_job(
     if verify_sfx {
         squallz_core::verify_sfx_payload(archive, &settings.resource_options(), sink, ctl)?;
     }
-    let policy = overwrite_policy(overwrite);
+    let policy = *overwrite;
     let resolver: Option<Arc<dyn ConflictResolver>> = if policy == OverwritePolicy::Ask {
         Some(Arc::new(GuiConflictResolver {
             gui_id,
@@ -2702,7 +2638,7 @@ fn run_extract_archive_job(
     let x_opts = squallz_core::api::ExtractOptions {
         overwrite: policy,
         resolver,
-        symlinks: symlink_policy(symlinks),
+        symlinks: *symlinks,
         limits: settings.safety_limits(),
         resources: settings.resource_options(),
         best_effort,
@@ -2776,8 +2712,8 @@ fn run_batch_extract_job(
     gui_id: u64,
     items: &[BatchExtractItem],
     display_items: &[BatchExtractItem],
-    overwrite: &str,
-    symlinks: &str,
+    overwrite: &OverwritePolicy,
+    symlinks: &SymlinkPolicy,
     smart: bool,
 ) -> Result<serde_json::Value, FormatError> {
     if items.is_empty() {
@@ -2792,7 +2728,6 @@ fn run_batch_extract_job(
     let batch_sink = BatchProgressSink::new(sink, work_items.len());
     let mut outputs = Vec::new();
     let mut failures = Vec::new();
-    let mut skipped_total = 0usize;
     let mut recovered_archives = 0usize;
 
     for (index, work_item) in work_items.iter().enumerate() {
@@ -2827,33 +2762,12 @@ fn run_batch_extract_job(
             false,
             item.best_effort,
         ) {
-            Ok((result, structure)) => {
-                let skipped = match result.get("skipped").and_then(|value| value.as_u64()) {
-                    Some(value) => value as usize,
-                    None => 0,
-                };
-                let dest = match result.get("dest").and_then(|value| value.as_str()) {
-                    Some(value) => value.to_owned(),
-                    None => String::new(),
-                };
-                let best_effort = result
-                    .get("best_effort")
-                    .and_then(|value| value.as_bool())
-                    .is_some_and(|value| value);
-                skipped_total = skipped_total.saturating_add(skipped);
-                let mut output = serde_json::json!({
-                    "archive": shown_path,
-                    "dest": dest,
-                    "skipped": skipped,
-                    "best_effort": best_effort,
-                    "plan": result["plan"].clone(),
-                    "counts": result["counts"].clone(),
-                });
+            Ok((mut result, structure)) => {
+                result["archive"] = serde_json::json!(shown_path);
                 if structure == ArchiveStructureStatus::ZipLocalHeadersRecovered {
                     recovered_archives = recovered_archives.saturating_add(1);
-                    output["structure"] = result["structure"].clone();
                 }
-                outputs.push(output);
+                outputs.push(result);
             }
             Err(FormatError::Cancelled) => return Err(FormatError::Cancelled),
             Err(error) => {
@@ -2878,7 +2792,6 @@ fn run_batch_extract_job(
         "collapsed_volumes": items.len().saturating_sub(work_items.len()),
         "extracted": outputs.len(),
         "failed": failures.len(),
-        "skipped": skipped_total,
         "outputs": outputs,
         "failures": failures,
     });
@@ -2888,19 +2801,6 @@ fn run_batch_extract_job(
         result["recovered_archives"] = serde_json::json!(recovered_archives);
     }
     Ok(result)
-}
-
-/// Executes one job spec on the worker thread. Returns an optional result
-/// payload attached to the final `done` state event.
-fn gui_sfx_target(value: &str) -> Result<SfxTarget, FormatError> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "macos" | "mac" | "darwin" => Ok(SfxTarget::Macos),
-        "windows" | "win" => Ok(SfxTarget::Windows),
-        "linux" => Ok(SfxTarget::Linux),
-        _ => Err(FormatError::Unsupported(format!(
-            "unknown SFX target: {value}"
-        ))),
-    }
 }
 
 pub(crate) struct CreateJobRequest {
@@ -2915,11 +2815,11 @@ pub(crate) struct CreateJobRequest {
 }
 
 fn job_output_commit_policy(
-    replace_existing: Option<bool>,
+    replace_existing: bool,
     replacement_guard: Option<CreateDestinationGuard>,
     operation: &str,
 ) -> Result<CreateCommitPolicy, FormatError> {
-    match (replace_existing.unwrap_or(false), replacement_guard) {
+    match (replace_existing, replacement_guard) {
         (false, None) => Ok(CreateCommitPolicy::NoReplace),
         (false, Some(_)) => Err(FormatError::Unsupported(format!(
             "a replacement guard cannot be used by a no-replace {operation} job"
@@ -2997,17 +2897,15 @@ pub(crate) fn create_job_request(
         password: password.as_deref().map(Password::new),
         encrypt_filenames: *encrypt_names,
         split_size: *split_size,
-        split_mode: gui_split_output_mode(split_mode.as_deref())?,
+        split_mode: *split_mode,
         resources: settings.resource_options(),
-        excludes: content_policy
-            .map(|policy| policy.resolve_excludes(excludes))
-            .unwrap_or_else(|| excludes.clone()),
+        excludes: content_policy.resolve_excludes(excludes),
         ..CreateOptions::default()
     };
     if let Some(inner_format) = sqz_inner_format {
-        options.sqz.inner_format.clone_from(inner_format);
+        options.sqz.inner_format = *inner_format;
     }
-    let sfx_target = sfx_target.as_deref().map(gui_sfx_target).transpose()?;
+    let sfx_target = *sfx_target;
     if let Some(target) = sfx_target {
         if target != SfxTarget::host() {
             return Err(FormatError::Unsupported(format!(
@@ -3017,18 +2915,15 @@ pub(crate) fn create_job_request(
         }
     }
 
-    let replace_existing = replace_existing.unwrap_or(false);
-    let commit_policy =
-        job_output_commit_policy(Some(replace_existing), *replacement_guard, "create")?;
-    let post_success = post_success.unwrap_or(PostSuccessAction::KeepSource);
+    let replace_existing = *replace_existing;
+    let commit_policy = job_output_commit_policy(replace_existing, *replacement_guard, "create")?;
     Ok(CreateJobRequest {
         inputs: inputs.iter().map(PathBuf::from).collect(),
         dest: PathBuf::from(dest),
         options,
         sfx_target,
-        post_success,
-        test_after_create: test_after_create.unwrap_or(false)
-            || post_success == PostSuccessAction::TrashSource,
+        post_success: *post_success,
+        test_after_create: *test_after_create || *post_success == PostSuccessAction::TrashSource,
         replace_existing,
         commit_policy,
     })
@@ -3058,20 +2953,10 @@ pub(crate) fn convert_create_options(
         password: dest_password.as_deref().map(Password::new),
         encrypt_filenames: *encrypt_names,
         split_size: *split_size,
-        split_mode: gui_split_output_mode(split_mode.as_deref())?,
+        split_mode: *split_mode,
         resources: settings.resource_options(),
         ..CreateOptions::default()
     })
-}
-
-fn gui_split_output_mode(value: Option<&str>) -> Result<SplitOutputMode, FormatError> {
-    match value.map(str::trim).filter(|value| !value.is_empty()) {
-        None | Some("generic") => Ok(SplitOutputMode::Generic),
-        Some("native") => Ok(SplitOutputMode::Native),
-        Some(value) => Err(FormatError::Unsupported(format!(
-            "unknown split output mode: {value}"
-        ))),
-    }
 }
 
 #[derive(Debug)]
@@ -4179,7 +4064,6 @@ fn sfx_report_result(
         .collect::<Vec<_>>();
     serde_json::json!({
         "operation": "create_sfx",
-        "dest": primary_output.clone(),
         "primary_output": primary_output.clone(),
         "outputs": [primary_output],
         "preserved_outputs": preserved_outputs,
@@ -4366,7 +4250,6 @@ fn run_job(
             Ok(Some(serde_json::json!({
                 "operation": "sfx_publish_macos",
                 "source": report.source.to_string_lossy(),
-                "dest": report.output.to_string_lossy(),
                 "primary_output": report.output.to_string_lossy(),
                 "outputs": [report.output.to_string_lossy()],
                 "target": report.info.target.as_str(),
@@ -4582,13 +4465,12 @@ fn run_job(
             let entries_tested = report.entries_tested;
             let problems_total = report.problems.total;
             let problems_truncated = report.problems.is_truncated();
-            let problem_messages = report.problems.messages;
+            let problems = report.problems.messages;
             let mut result = serde_json::json!({
                 "ok": ok,
                 "entries": entries_tested,
                 "entries_tested": entries_tested,
-                "problems": problems_total,
-                "problem_messages": problem_messages,
+                "problems": problems,
                 "problems_total": problems_total,
                 "problems_truncated": problems_truncated,
             });
@@ -4659,12 +4541,12 @@ fn run_job(
         } => {
             let src_path = PathBuf::from(src);
             let dest_path = PathBuf::from(dest);
-            if !is_sqz_source_path(&src_path) {
+            if !is_sqz_archive_path(&src_path) {
                 return Err(FormatError::Unsupported(
                     "export expects a .sqz source container".into(),
                 ));
             }
-            if is_sqz_source_path(&dest_path) {
+            if is_sqz_archive_path(&dest_path) {
                 return Err(FormatError::Unsupported(
                     "export output must be a standard archive, not .sqz".into(),
                 ));
@@ -4693,7 +4575,7 @@ fn run_job(
         JobSpec::RepairSqz { src, dest, level } => {
             let src_path = PathBuf::from(src);
             let dest_path = PathBuf::from(dest);
-            if !is_sqz_source_path(&src_path) {
+            if !is_sqz_archive_path(&src_path) {
                 return Err(FormatError::Unsupported(
                     "SQZ repair expects a .sqz source container".into(),
                 ));
@@ -4708,11 +4590,17 @@ fn run_job(
                 resources: settings.resource_options(),
                 ..CreateOptions::default()
             };
-            let test_report = state
-                .engine
-                .test(&src_path, &OpenOptions::default(), sink, ctl)?;
+            let test_report =
+                state
+                    .engine
+                    .test_summary(&src_path, &OpenOptions::default(), sink, ctl)?;
             if !test_report.is_ok() {
-                return Err(FormatError::CorruptArchive(test_report.problems.join("; ")));
+                let detail = if test_report.problems.messages.is_empty() {
+                    "archive integrity test failed".to_owned()
+                } else {
+                    test_report.problems.messages.join("; ")
+                };
+                return Err(FormatError::CorruptArchive(detail));
             }
             let in_place = state.engine.convert_with_atomic_replace(
                 &src_path,
@@ -4731,12 +4619,12 @@ fn run_job(
         JobSpec::RepairZip { src, dest, level } => {
             let src_path = PathBuf::from(src);
             let dest_path = PathBuf::from(dest);
-            if !is_plain_zip_path(&src_path) {
+            if !is_zip_family_path(&src_path) {
                 return Err(FormatError::Unsupported(
                     "ZIP index rebuild expects a ZIP-family source archive".into(),
                 ));
             }
-            if !is_plain_zip_path(&dest_path) {
+            if !is_zip_family_path(&dest_path) {
                 return Err(FormatError::Unsupported(
                     "ZIP index rebuild output must be a ZIP-family archive".into(),
                 ));
@@ -4878,9 +4766,7 @@ fn run_job(
                 level: CompressionLevel::from_numeric(*level),
                 password: password.as_deref().map(Password::new),
                 resources: settings.resource_options(),
-                excludes: content_policy
-                    .map(|policy| policy.resolve_excludes(excludes))
-                    .unwrap_or_else(|| excludes.clone()),
+                excludes: content_policy.resolve_excludes(excludes),
                 ..CreateOptions::default()
             };
             state.engine.update(&archive, &ops, &opts, sink, ctl)?;
@@ -4899,7 +4785,7 @@ fn run_job(
                     "checksum needs at least one input".into(),
                 ));
             }
-            let algorithm = parse_checksum_algorithm(algorithm)?;
+            let algorithm = *algorithm;
             ctl.checkpoint()?;
             sink.on_progress(0, 0, &EntryPath::from_utf8("Computing checksums"));
             let inputs = inputs.iter().map(PathBuf::from).collect::<Vec<_>>();
@@ -4931,7 +4817,7 @@ fn run_job(
                     "checksum verification needs a manifest".into(),
                 ));
             }
-            let algorithm = parse_checksum_algorithm(algorithm)?;
+            let algorithm = *algorithm;
             ctl.checkpoint()?;
             sink.on_progress(0, 0, &EntryPath::from_utf8("Verifying checksum manifest"));
             let report = state.engine.verify_checksum_manifest_with_progress(
@@ -5000,12 +4886,6 @@ fn run_job(
             })))
         }
     }
-}
-
-fn parse_checksum_algorithm(value: &str) -> Result<ChecksumAlgorithm, FormatError> {
-    ChecksumAlgorithm::parse_alias(value).ok_or_else(|| {
-        FormatError::Unsupported(format!("unsupported checksum algorithm: {}", value.trim()))
-    })
 }
 
 fn recovery_summary_json(summary: &RecoverySummary) -> serde_json::Value {
@@ -5105,8 +4985,11 @@ fn selection_matches(entry: &EntryMeta, selection: &[String]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dto::{BatchExtractItem, JobSpec, PERFORMANCE_STREAM_BUFFER_MAX_BYTES};
+    use crate::dto::{
+        BatchExtractItem, ExternalTaskActionDto, JobSpec, PERFORMANCE_STREAM_BUFFER_MAX_BYTES,
+    };
     use crate::preview_sessions::PreviewSessionManager;
+    use squallz_core::ChecksumAlgorithm;
     use std::io::Write as _;
     use std::sync::Mutex as StdMutex;
 
@@ -5181,15 +5064,10 @@ mod tests {
         };
         let zstd = compress_file_job(Path::new("input.bin"), Path::new("archive.tar.zst"));
         let wim = compress_file_job(Path::new("input.bin"), Path::new("archive.wim"));
-        let sqz_zstd = compress_file_job_with_inner_format(
-            Path::new("input.bin"),
-            Path::new("archive.sqz"),
-            Some("zstd"),
-        );
         let sqz_7z = compress_file_job_with_inner_format(
             Path::new("input.bin"),
             Path::new("archive.sqz"),
-            Some("7z"),
+            Some(squallz_core::SqzInnerFormat::SevenZip),
         );
         let recovery = JobSpec::Protect {
             path: "archive.zip".into(),
@@ -5199,7 +5077,7 @@ mod tests {
         let light = JobSpec::Checksum {
             inputs: vec!["input.bin".into()],
             excludes: Vec::new(),
-            algorithm: "blake3".into(),
+            algorithm: ChecksumAlgorithm::Blake3,
         };
         let automatic = SettingsDto::default();
         let manual = SettingsDto {
@@ -5225,14 +5103,6 @@ mod tests {
         );
         assert_eq!(
             scheduler_resources(scheduler_cpu_profile(&state.engine, &wim), &automatic, 8),
-            JobResources::new(8)
-        );
-        assert_eq!(
-            scheduler_resources(
-                scheduler_cpu_profile(&state.engine, &sqz_zstd),
-                &automatic,
-                8,
-            ),
             JobResources::new(8)
         );
         assert_eq!(
@@ -5289,7 +5159,7 @@ mod tests {
     }
 
     #[test]
-    fn extract_result_keeps_legacy_problems_separate_from_core_counts() {
+    fn extract_result_keeps_problem_preview_separate_from_core_counts() {
         let destination = PathBuf::from("output/archive");
         let result = extract_result_json(
             ExtractPlan {
@@ -5327,7 +5197,7 @@ mod tests {
         );
 
         assert_eq!(result["dest"], destination.to_string_lossy().as_ref());
-        assert_eq!(result["skipped"], 1);
+        assert!(result.get("skipped").is_none());
         assert_eq!(result["problems"].as_array().map(Vec::len), Some(1));
         assert_eq!(result["problems_total"], 1);
         assert_eq!(result["problems_truncated"], false);
@@ -5470,7 +5340,7 @@ mod tests {
         JobSpec::Checksum {
             inputs: vec![input.to_string_lossy().into_owned()],
             excludes: Vec::new(),
-            algorithm: "sha256".into(),
+            algorithm: ChecksumAlgorithm::Sha256,
         }
     }
 
@@ -5481,7 +5351,7 @@ mod tests {
     fn compress_file_job_with_inner_format(
         input: &Path,
         output: &Path,
-        sqz_inner_format: Option<&str>,
+        sqz_inner_format: Option<squallz_core::SqzInnerFormat>,
     ) -> JobSpec {
         JobSpec::Compress {
             inputs: vec![input.to_string_lossy().into_owned()],
@@ -5490,15 +5360,15 @@ mod tests {
             password: None,
             encrypt_names: false,
             split_size: None,
-            split_mode: None,
+            split_mode: squallz_core::api::SplitOutputMode::Generic,
             excludes: Vec::new(),
-            content_policy: None,
-            sqz_inner_format: sqz_inner_format.map(str::to_owned),
+            content_policy: squallz_core::CreateContentPolicy::KeepAllFiles,
+            sqz_inner_format,
             sfx_target: None,
-            completion: None,
-            post_success: None,
-            test_after_create: None,
-            replace_existing: Some(false),
+            completion: squallz_core::CreateCompletionAction::None,
+            post_success: PostSuccessAction::KeepSource,
+            test_after_create: false,
+            replace_existing: false,
             replacement_guard: None,
         }
     }
@@ -7318,8 +7188,8 @@ mod tests {
                 expected_destination: None,
                 expected_input_guard: None,
                 selection: None,
-                overwrite: "ask".into(),
-                symlinks: "preserve".into(),
+                overwrite: squallz_core::api::OverwritePolicy::Ask,
+                symlinks: squallz_core::api::SymlinkPolicy::Preserve,
                 smart: false,
                 encoding: None,
                 password: None,
@@ -7510,15 +7380,15 @@ mod tests {
                 password: None,
                 encrypt_names: false,
                 split_size: None,
-                split_mode: None,
+                split_mode: squallz_core::api::SplitOutputMode::Generic,
                 excludes: vec![],
-                content_policy: None,
+                content_policy: squallz_core::CreateContentPolicy::KeepAllFiles,
                 sqz_inner_format: None,
                 sfx_target: None,
-                completion: None,
-                post_success: None,
-                test_after_create: None,
-                replace_existing: None,
+                completion: squallz_core::CreateCompletionAction::None,
+                post_success: PostSuccessAction::KeepSource,
+                test_after_create: false,
+                replace_existing: false,
                 replacement_guard: None,
             },
             SettingsDto::default(),
@@ -7544,15 +7414,15 @@ mod tests {
             password: Some("secret".into()),
             encrypt_names: true,
             split_size: Some(32 * 1024),
-            split_mode: None,
+            split_mode: squallz_core::api::SplitOutputMode::Generic,
             excludes: vec!["*.tmp".into()],
-            content_policy: Some(squallz_core::CreateContentPolicy::CrossPlatformClean),
-            sqz_inner_format: Some("zip".into()),
+            content_policy: squallz_core::CreateContentPolicy::CrossPlatformClean,
+            sqz_inner_format: Some(squallz_core::SqzInnerFormat::Zip),
             sfx_target: None,
-            completion: None,
-            post_success: None,
-            test_after_create: Some(true),
-            replace_existing: None,
+            completion: squallz_core::CreateCompletionAction::None,
+            post_success: PostSuccessAction::KeepSource,
+            test_after_create: true,
+            replace_existing: false,
             replacement_guard: None,
         };
         let settings = SettingsDto {
@@ -7575,7 +7445,10 @@ mod tests {
             request.options.excludes,
             vec![".DS_Store", "._*", "__MACOSX", "*.tmp"]
         );
-        assert_eq!(request.options.sqz.inner_format, "zip");
+        assert_eq!(
+            request.options.sqz.inner_format,
+            squallz_core::SqzInnerFormat::Zip
+        );
         assert_eq!(request.options.resources.threads, Some(3));
         assert_eq!(request.options.resources.memory_limit, Some(32 * 1024));
         assert!(request.sfx_options().is_none());
@@ -7606,8 +7479,8 @@ mod tests {
             dest_password: Some("destination secret".into()),
             encrypt_names: true,
             split_size: Some(256 * 1024),
-            split_mode: None,
-            replace_existing: None,
+            split_mode: squallz_core::api::SplitOutputMode::Generic,
+            replace_existing: false,
             replacement_guard: None,
         };
         let settings = SettingsDto {
@@ -7636,23 +7509,18 @@ mod tests {
     }
 
     #[test]
-    fn gui_split_output_mode_accepts_only_the_shared_layout_ids() {
-        assert_eq!(
-            gui_split_output_mode(None).unwrap(),
-            SplitOutputMode::Generic
+    fn job_policy_enums_reject_unknown_values() {
+        assert!(serde_json::from_str::<squallz_core::api::SplitOutputMode>("\"generic\"").is_ok());
+        assert!(
+            serde_json::from_str::<squallz_core::api::SplitOutputMode>("\"format_specific\"")
+                .is_err()
         );
-        assert_eq!(
-            gui_split_output_mode(Some("generic")).unwrap(),
-            SplitOutputMode::Generic
-        );
-        assert_eq!(
-            gui_split_output_mode(Some("native")).unwrap(),
-            SplitOutputMode::Native
-        );
-        assert!(matches!(
-            gui_split_output_mode(Some("format_specific")),
-            Err(FormatError::Unsupported(_))
-        ));
+        assert!(serde_json::from_str::<squallz_core::api::OverwritePolicy>("\"replace\"").is_err());
+        assert!(serde_json::from_str::<squallz_core::api::SymlinkPolicy>("\"unsafe\"").is_err());
+        assert!(serde_json::from_str::<squallz_core::SqzInnerFormat>("\"raw\"").is_err());
+        assert!(serde_json::from_str::<SfxTarget>("\"darwin\"").is_err());
+        assert!(serde_json::from_str::<ChecksumAlgorithm>("\"sha-256\"").is_err());
+        assert!(serde_json::from_str::<ExternalTaskActionDto>("\"extract\"").is_err());
     }
 
     #[test]
@@ -7676,7 +7544,7 @@ mod tests {
         else {
             unreachable!();
         };
-        *replace_existing = Some(true);
+        *replace_existing = true;
         *replacement_guard = Some(guard);
 
         let request = create_job_request(&spec, &SettingsDto::default()).unwrap();
@@ -7709,7 +7577,7 @@ mod tests {
         else {
             unreachable!();
         };
-        *replace_existing = Some(false);
+        *replace_existing = false;
         *replacement_guard = Some(guard);
 
         assert!(matches!(
@@ -7720,13 +7588,13 @@ mod tests {
     }
 
     #[test]
-    fn legacy_output_jobs_default_to_no_replace_and_require_a_guard_for_replacement() {
+    fn output_jobs_require_a_guard_for_replacement() {
         for operation in ["create", "convert", "export"] {
             assert_eq!(
-                job_output_commit_policy(None, None, operation).unwrap(),
+                job_output_commit_policy(false, None, operation).unwrap(),
                 CreateCommitPolicy::NoReplace
             );
-            let error = job_output_commit_policy(Some(true), None, operation).unwrap_err();
+            let error = job_output_commit_policy(true, None, operation).unwrap_err();
             assert!(matches!(
                 error,
                 FormatError::Unsupported(detail)
@@ -7818,7 +7686,7 @@ mod tests {
             JobSpec::Checksum {
                 inputs: vec!["payload.bin".into()],
                 excludes: Vec::new(),
-                algorithm: "sha256".into(),
+                algorithm: ChecksumAlgorithm::Sha256,
             },
             "running",
         );
@@ -8011,8 +7879,8 @@ mod tests {
                 outer_path: "outer.zip".into(),
                 entry_path: "inner.zip".into(),
                 dest: "output".into(),
-                overwrite: "rename".into(),
-                symlinks: "skip".into(),
+                overwrite: squallz_core::api::OverwritePolicy::RenameBoth,
+                symlinks: squallz_core::api::SymlinkPolicy::Skip,
                 smart: true,
                 encoding: None,
                 password: None,
@@ -8095,15 +7963,15 @@ mod tests {
                 password: None,
                 encrypt_names: false,
                 split_size: None,
-                split_mode: None,
+                split_mode: squallz_core::api::SplitOutputMode::Generic,
                 excludes: vec![],
-                content_policy: None,
+                content_policy: squallz_core::CreateContentPolicy::KeepAllFiles,
                 sqz_inner_format: None,
                 sfx_target: None,
-                completion: None,
-                post_success: Some(PostSuccessAction::TrashSource),
-                test_after_create: None,
-                replace_existing: None,
+                completion: squallz_core::CreateCompletionAction::None,
+                post_success: PostSuccessAction::TrashSource,
+                test_after_create: false,
+                replace_existing: false,
                 replacement_guard: None,
             },
             SettingsDto::default(),
@@ -8150,15 +8018,15 @@ mod tests {
                 password: None,
                 encrypt_names: false,
                 split_size: None,
-                split_mode: None,
+                split_mode: squallz_core::api::SplitOutputMode::Generic,
                 excludes: vec![],
-                content_policy: None,
+                content_policy: squallz_core::CreateContentPolicy::KeepAllFiles,
                 sqz_inner_format: None,
                 sfx_target: None,
-                completion: None,
-                post_success: Some(PostSuccessAction::TrashSource),
-                test_after_create: None,
-                replace_existing: Some(false),
+                completion: squallz_core::CreateCompletionAction::None,
+                post_success: PostSuccessAction::TrashSource,
+                test_after_create: false,
+                replace_existing: false,
                 replacement_guard: None,
             },
             SettingsDto::default(),
@@ -8207,15 +8075,15 @@ mod tests {
                 password: None,
                 encrypt_names: false,
                 split_size: None,
-                split_mode: None,
+                split_mode: squallz_core::api::SplitOutputMode::Generic,
                 excludes: vec![],
-                content_policy: None,
+                content_policy: squallz_core::CreateContentPolicy::KeepAllFiles,
                 sqz_inner_format: None,
                 sfx_target: None,
-                completion: None,
-                post_success: None,
-                test_after_create: None,
-                replace_existing: Some(false),
+                completion: squallz_core::CreateCompletionAction::None,
+                post_success: PostSuccessAction::KeepSource,
+                test_after_create: false,
+                replace_existing: false,
                 replacement_guard: None,
             },
             SettingsDto::default(),
@@ -8230,15 +8098,15 @@ mod tests {
                 password: None,
                 encrypt_names: false,
                 split_size: Some(8 * 1024),
-                split_mode: None,
+                split_mode: squallz_core::api::SplitOutputMode::Generic,
                 excludes: vec![],
-                content_policy: None,
+                content_policy: squallz_core::CreateContentPolicy::KeepAllFiles,
                 sqz_inner_format: None,
                 sfx_target: None,
-                completion: None,
-                post_success: None,
-                test_after_create: None,
-                replace_existing: Some(false),
+                completion: squallz_core::CreateCompletionAction::None,
+                post_success: PostSuccessAction::KeepSource,
+                test_after_create: false,
+                replace_existing: false,
                 replacement_guard: None,
             },
             SettingsDto::default(),
@@ -8269,15 +8137,15 @@ mod tests {
                 password: None,
                 encrypt_names: false,
                 split_size: None,
-                split_mode: None,
+                split_mode: squallz_core::api::SplitOutputMode::Generic,
                 excludes: vec![],
-                content_policy: None,
+                content_policy: squallz_core::CreateContentPolicy::KeepAllFiles,
                 sqz_inner_format: None,
                 sfx_target: None,
-                completion: None,
-                post_success: None,
-                test_after_create: None,
-                replace_existing: Some(true),
+                completion: squallz_core::CreateCompletionAction::None,
+                post_success: PostSuccessAction::KeepSource,
+                test_after_create: false,
+                replace_existing: true,
                 replacement_guard: Some(replacement_guard),
             },
             SettingsDto::default(),
@@ -8314,15 +8182,15 @@ mod tests {
                 password: None,
                 encrypt_names: false,
                 split_size: None,
-                split_mode: None,
+                split_mode: squallz_core::api::SplitOutputMode::Generic,
                 excludes: vec![],
-                content_policy: None,
+                content_policy: squallz_core::CreateContentPolicy::KeepAllFiles,
                 sqz_inner_format: None,
                 sfx_target: None,
-                completion: None,
-                post_success: None,
-                test_after_create: None,
-                replace_existing: Some(false),
+                completion: squallz_core::CreateCompletionAction::None,
+                post_success: PostSuccessAction::KeepSource,
+                test_after_create: false,
+                replace_existing: false,
                 replacement_guard: None,
             },
             SettingsDto::default(),
@@ -8337,8 +8205,8 @@ mod tests {
                 expected_destination: None,
                 expected_input_guard: None,
                 selection: None,
-                overwrite: "skip".into(),
-                symlinks: "preserve".into(),
+                overwrite: squallz_core::api::OverwritePolicy::Skip,
+                symlinks: squallz_core::api::SymlinkPolicy::Preserve,
                 smart: false,
                 encoding: None,
                 password: None,
@@ -8431,8 +8299,8 @@ mod tests {
                 expected_destination: Some(stale_destination.to_string_lossy().into_owned()),
                 expected_input_guard: None,
                 selection: None,
-                overwrite: "skip".into(),
-                symlinks: "preserve".into(),
+                overwrite: squallz_core::api::OverwritePolicy::Skip,
+                symlinks: squallz_core::api::SymlinkPolicy::Preserve,
                 smart: false,
                 encoding: None,
                 password: None,
@@ -8524,8 +8392,8 @@ mod tests {
                 expected_destination: Some(destination.to_string_lossy().into_owned()),
                 expected_input_guard: Some(input_guard),
                 selection: None,
-                overwrite: "skip".into(),
-                symlinks: "preserve".into(),
+                overwrite: squallz_core::api::OverwritePolicy::Skip,
+                symlinks: squallz_core::api::SymlinkPolicy::Preserve,
                 smart: false,
                 encoding: None,
                 password: None,
@@ -8572,15 +8440,15 @@ mod tests {
                 password: None,
                 encrypt_names: false,
                 split_size: Some(8 * 1024),
-                split_mode: None,
+                split_mode: squallz_core::api::SplitOutputMode::Generic,
                 excludes: vec![],
-                content_policy: None,
+                content_policy: squallz_core::CreateContentPolicy::KeepAllFiles,
                 sqz_inner_format: None,
                 sfx_target: None,
-                completion: None,
-                post_success: None,
-                test_after_create: Some(true),
-                replace_existing: Some(false),
+                completion: squallz_core::CreateCompletionAction::None,
+                post_success: PostSuccessAction::KeepSource,
+                test_after_create: true,
+                replace_existing: false,
                 replacement_guard: None,
             },
             SettingsDto::default(),
@@ -8625,47 +8493,30 @@ mod tests {
 
     #[test]
     fn compress_job_forwards_the_sqz_inner_format() {
-        let dir = temp_dir("sqz-inner-format");
-        let src = dir.join("data");
-        std::fs::create_dir_all(&src).unwrap();
-        std::fs::write(src.join("hello.txt"), b"hello sqz profile").unwrap();
-        let archive = dir.join("profile.sqz");
+        let spec = JobSpec::Compress {
+            inputs: vec!["data".into()],
+            dest: "profile.sqz".into(),
+            level: 5,
+            password: None,
+            encrypt_names: false,
+            split_size: None,
+            split_mode: squallz_core::api::SplitOutputMode::Generic,
+            excludes: vec![],
+            content_policy: squallz_core::CreateContentPolicy::KeepAllFiles,
+            sqz_inner_format: Some(squallz_core::SqzInnerFormat::Zip),
+            sfx_target: None,
+            completion: squallz_core::CreateCompletionAction::None,
+            post_success: PostSuccessAction::KeepSource,
+            test_after_create: false,
+            replace_existing: false,
+            replacement_guard: None,
+        };
 
-        let manager = JobManager::new();
-        let state = Arc::new(AppState::new());
-        let sink = Arc::new(TestSink::default());
-        let events: Arc<dyn EventSink> = sink.clone();
-        let id = manager.submit(
-            Arc::clone(&state),
-            Arc::clone(&events),
-            JobSpec::Compress {
-                inputs: vec![src.to_string_lossy().into_owned()],
-                dest: archive.to_string_lossy().into_owned(),
-                level: 5,
-                password: None,
-                encrypt_names: false,
-                split_size: None,
-                split_mode: None,
-                excludes: vec![],
-                content_policy: None,
-                sqz_inner_format: Some("unsupported-test-profile".to_owned()),
-                sfx_target: None,
-                completion: None,
-                post_success: None,
-                test_after_create: None,
-                replace_existing: Some(false),
-                replacement_guard: None,
-            },
-            SettingsDto::default(),
-        );
-        manager.wait_idle();
-
+        let request = create_job_request(&spec, &SettingsDto::default()).unwrap();
         assert_eq!(
-            manager.snapshot(id).map(|snapshot| snapshot.state),
-            Some("failed".into())
+            request.options.sqz.inner_format,
+            squallz_core::SqzInnerFormat::Zip
         );
-        assert!(!archive.exists());
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[cfg(target_os = "macos")]
@@ -8694,15 +8545,15 @@ mod tests {
                 password: None,
                 encrypt_names: false,
                 split_size: None,
-                split_mode: None,
+                split_mode: squallz_core::api::SplitOutputMode::Generic,
                 excludes: vec![],
-                content_policy: None,
+                content_policy: squallz_core::CreateContentPolicy::KeepAllFiles,
                 sqz_inner_format: None,
-                sfx_target: Some("macos".into()),
-                completion: None,
-                post_success: None,
-                test_after_create: Some(true),
-                replace_existing: Some(false),
+                sfx_target: Some(SfxTarget::Macos),
+                completion: squallz_core::CreateCompletionAction::None,
+                post_success: PostSuccessAction::KeepSource,
+                test_after_create: true,
+                replace_existing: false,
                 replacement_guard: None,
             },
             SettingsDto::default(),
@@ -8818,8 +8669,8 @@ mod tests {
                         best_effort: false,
                     },
                 ],
-                overwrite: "skip".into(),
-                symlinks: "preserve".into(),
+                overwrite: squallz_core::api::OverwritePolicy::Skip,
+                symlinks: squallz_core::api::SymlinkPolicy::Preserve,
                 smart: false,
             },
             SettingsDto::default(),
@@ -8884,8 +8735,8 @@ mod tests {
                 expected_destination: None,
                 expected_input_guard: None,
                 selection: None,
-                overwrite: "skip".into(),
-                symlinks: "preserve".into(),
+                overwrite: squallz_core::api::OverwritePolicy::Skip,
+                symlinks: squallz_core::api::SymlinkPolicy::Preserve,
                 smart: false,
                 encoding: None,
                 password: None,
@@ -9093,8 +8944,8 @@ esac
                         best_effort: false,
                     },
                 ],
-                overwrite: "skip".into(),
-                symlinks: "skip".into(),
+                overwrite: squallz_core::api::OverwritePolicy::Skip,
+                symlinks: squallz_core::api::SymlinkPolicy::Skip,
                 smart: false,
             },
             SettingsDto::default(),
@@ -9237,8 +9088,8 @@ esac
                         best_effort: false,
                     },
                 ],
-                overwrite: "skip".into(),
-                symlinks: "skip".into(),
+                overwrite: squallz_core::api::OverwritePolicy::Skip,
+                symlinks: squallz_core::api::SymlinkPolicy::Skip,
                 smart: false,
             },
             SettingsDto::default(),
@@ -9503,8 +9354,8 @@ esac
                 expected_destination: None,
                 expected_input_guard: None,
                 selection: None,
-                overwrite: "ask".into(),
-                symlinks: "preserve".into(),
+                overwrite: squallz_core::api::OverwritePolicy::Ask,
+                symlinks: squallz_core::api::SymlinkPolicy::Preserve,
                 smart: false,
                 encoding: None,
                 password: None,
@@ -9609,15 +9460,15 @@ esac
                 password: Some("audit-password-must-not-appear".into()),
                 encrypt_names: false,
                 split_size: None,
-                split_mode: None,
+                split_mode: squallz_core::api::SplitOutputMode::Generic,
                 excludes: vec![],
-                content_policy: None,
+                content_policy: squallz_core::CreateContentPolicy::KeepAllFiles,
                 sqz_inner_format: None,
                 sfx_target: None,
-                completion: None,
-                post_success: None,
-                test_after_create: None,
-                replace_existing: Some(false),
+                completion: squallz_core::CreateCompletionAction::None,
+                post_success: PostSuccessAction::KeepSource,
+                test_after_create: false,
+                replace_existing: false,
                 replacement_guard: None,
             },
             SettingsDto::default(),
@@ -9680,8 +9531,8 @@ esac
                 outer_path: outer.to_string_lossy().into_owned(),
                 entry_path: inner_name.into(),
                 dest: out.to_string_lossy().into_owned(),
-                overwrite: "skip".into(),
-                symlinks: "preserve".into(),
+                overwrite: squallz_core::api::OverwritePolicy::Skip,
+                symlinks: squallz_core::api::SymlinkPolicy::Preserve,
                 smart: true,
                 encoding: None,
                 password: None,
@@ -9766,8 +9617,8 @@ esac
                 outer_path: outer.to_string_lossy().into_owned(),
                 entry_path: inner_name.into(),
                 dest: out.to_string_lossy().into_owned(),
-                overwrite: "skip".into(),
-                symlinks: "preserve".into(),
+                overwrite: squallz_core::api::OverwritePolicy::Skip,
+                symlinks: squallz_core::api::SymlinkPolicy::Preserve,
                 smart: true,
                 encoding: None,
                 password: None,
@@ -9855,8 +9706,8 @@ esac
                 outer_path: outer.to_string_lossy().into_owned(),
                 entry_path: inner_name.into(),
                 dest: out.to_string_lossy().into_owned(),
-                overwrite: "skip".into(),
-                symlinks: "preserve".into(),
+                overwrite: squallz_core::api::OverwritePolicy::Skip,
+                symlinks: squallz_core::api::SymlinkPolicy::Preserve,
                 smart: true,
                 encoding: None,
                 password: None,
@@ -9953,8 +9804,8 @@ esac
             outer_path: archive.source.clone(),
             entry_path: inner_name.into(),
             dest: out.to_string_lossy().into_owned(),
-            overwrite: "skip".into(),
-            symlinks: "preserve".into(),
+            overwrite: squallz_core::api::OverwritePolicy::Skip,
+            symlinks: squallz_core::api::SymlinkPolicy::Preserve,
             smart: true,
             encoding: None,
             password: None,
@@ -10067,8 +9918,8 @@ esac
                 dest_password: None,
                 encrypt_names: false,
                 split_size: None,
-                split_mode: None,
-                replace_existing: None,
+                split_mode: squallz_core::api::SplitOutputMode::Generic,
+                replace_existing: false,
                 replacement_guard: None,
             },
             SettingsDto::default(),
@@ -10128,8 +9979,8 @@ esac
                 dest_password: Some("destination secret".into()),
                 encrypt_names: true,
                 split_size: Some(256 * 1024),
-                split_mode: None,
-                replace_existing: Some(false),
+                split_mode: squallz_core::api::SplitOutputMode::Generic,
+                replace_existing: false,
                 replacement_guard: None,
             },
             SettingsDto::default(),
@@ -10347,8 +10198,8 @@ exit 2
                 dest_password: None,
                 encrypt_names: false,
                 split_size: None,
-                split_mode: None,
-                replace_existing: Some(false),
+                split_mode: squallz_core::api::SplitOutputMode::Generic,
+                replace_existing: false,
                 replacement_guard: None,
             },
             SettingsDto::default(),
@@ -10420,7 +10271,7 @@ exit 2
                 dest: zip.to_string_lossy().into_owned(),
                 level: 6,
                 dest_password: None,
-                replace_existing: None,
+                replace_existing: false,
                 replacement_guard: None,
             },
             SettingsDto::default(),
@@ -10449,14 +10300,14 @@ exit 2
     }
 
     #[test]
-    fn legacy_conversion_jobs_fail_closed_for_existing_outputs() {
-        let dir = temp_dir("legacy-conversion-output-policy");
+    fn conversion_jobs_without_replace_permission_preserve_existing_outputs() {
+        let dir = temp_dir("conversion-output-policy");
         let input = dir.join("hello.txt");
         let zip = dir.join("source.zip");
         let sqz = dir.join("source.sqz");
         let converted = dir.join("converted.7z");
         let exported = dir.join("exported.zip");
-        std::fs::write(&input, b"legacy output policy").unwrap();
+        std::fs::write(&input, b"output policy").unwrap();
 
         let state = Arc::new(AppState::new());
         for archive in [&zip, &sqz] {
@@ -10489,8 +10340,8 @@ exit 2
                 dest_password: None,
                 encrypt_names: false,
                 split_size: None,
-                split_mode: None,
-                replace_existing: None,
+                split_mode: squallz_core::api::SplitOutputMode::Generic,
+                replace_existing: false,
                 replacement_guard: None,
             },
             SettingsDto::default(),
@@ -10503,7 +10354,7 @@ exit 2
                 dest: exported.to_string_lossy().into_owned(),
                 level: 6,
                 dest_password: None,
-                replace_existing: None,
+                replace_existing: false,
                 replacement_guard: None,
             },
             SettingsDto::default(),
@@ -10570,7 +10421,7 @@ exit 2
                 dest: output.to_string_lossy().into_owned(),
                 level: 6,
                 dest_password: None,
-                replace_existing: Some(true),
+                replace_existing: true,
                 replacement_guard: Some(guard),
             },
             SettingsDto::default(),
@@ -10646,7 +10497,7 @@ exit 2
                 dest: zip.to_string_lossy().into_owned(),
                 level: 6,
                 dest_password: None,
-                replace_existing: Some(false),
+                replace_existing: false,
                 replacement_guard: None,
             },
             SettingsDto::default(),
@@ -10670,7 +10521,7 @@ exit 2
         let entries = engine.list(&zip, &OpenOptions::default()).unwrap();
         assert!(entries.iter().any(|entry| entry.path.display == "data.bin"));
         let report = engine
-            .test(
+            .test_summary(
                 &repaired,
                 &OpenOptions::default(),
                 &squallz_core::api::NoProgress,
@@ -10735,7 +10586,7 @@ exit 2
         assert!(repaired.exists());
         let report = AppState::new()
             .engine
-            .test(
+            .test_summary(
                 &repaired,
                 &OpenOptions::default(),
                 &squallz_core::api::NoProgress,
@@ -10778,7 +10629,7 @@ exit 2
 
         let report = AppState::new()
             .engine
-            .test(
+            .test_summary(
                 &damaged,
                 &OpenOptions::default(),
                 &squallz_core::api::NoProgress,
@@ -10837,7 +10688,7 @@ exit 2
 
         let report = AppState::new()
             .engine
-            .test(
+            .test_summary(
                 &split_repaired,
                 &OpenOptions::default(),
                 &squallz_core::api::NoProgress,
@@ -10898,7 +10749,7 @@ exit 2
                 rename: vec![],
                 mkdir: vec![],
                 excludes: vec![],
-                content_policy: None,
+                content_policy: squallz_core::CreateContentPolicy::KeepAllFiles,
                 password: None,
                 level: 5,
             },
@@ -10959,7 +10810,7 @@ exit 2
                 rename: vec![],
                 mkdir: vec![],
                 excludes: vec!["node_modules".into(), "*.tmp".into()],
-                content_policy: Some(squallz_core::CreateContentPolicy::CrossPlatformClean),
+                content_policy: squallz_core::CreateContentPolicy::CrossPlatformClean,
                 password: None,
                 level: 5,
             },
@@ -11043,7 +10894,7 @@ exit 2
             JobSpec::Checksum {
                 inputs: vec![root.to_string_lossy().into_owned()],
                 excludes: vec!["target".into()],
-                algorithm: "sha256".into(),
+                algorithm: ChecksumAlgorithm::Sha256,
             },
             SettingsDto::default(),
         );
@@ -11102,7 +10953,7 @@ exit 2
             Arc::clone(&events),
             JobSpec::ChecksumCheck {
                 manifest: dir.join("SHA256SUMS").to_string_lossy().into_owned(),
-                algorithm: "sha256".into(),
+                algorithm: ChecksumAlgorithm::Sha256,
             },
             SettingsDto::default(),
         );
@@ -11152,7 +11003,7 @@ exit 2
                 rename: vec![],
                 mkdir: vec!["new-folder".into()],
                 excludes: vec![],
-                content_policy: None,
+                content_policy: squallz_core::CreateContentPolicy::KeepAllFiles,
                 password: None,
                 level: 5,
             },
@@ -11209,7 +11060,7 @@ exit 2
                 }],
                 mkdir: vec![],
                 excludes: vec![],
-                content_policy: None,
+                content_policy: squallz_core::CreateContentPolicy::KeepAllFiles,
                 password: None,
                 level: 5,
             },
@@ -11272,8 +11123,8 @@ exit 2
                 expected_destination: None,
                 expected_input_guard: None,
                 selection: None,
-                overwrite: "skip".into(),
-                symlinks: "preserve".into(),
+                overwrite: squallz_core::api::OverwritePolicy::Skip,
+                symlinks: squallz_core::api::SymlinkPolicy::Preserve,
                 smart: false,
                 encoding: None,
                 password: None,
@@ -11325,8 +11176,8 @@ exit 2
                 expected_destination: None,
                 expected_input_guard: None,
                 selection: None,
-                overwrite: "rename".into(),
-                symlinks: "preserve".into(),
+                overwrite: squallz_core::api::OverwritePolicy::RenameBoth,
+                symlinks: squallz_core::api::SymlinkPolicy::Preserve,
                 smart: false,
                 encoding: None,
                 password: None,
@@ -11343,7 +11194,7 @@ exit 2
         assert_eq!(states_of(&events, id), vec!["queued", "running", "done"]);
         let result = done_result(&events, id).unwrap();
         assert_eq!(result["best_effort"], true);
-        assert_eq!(result["skipped"], 1);
+        assert_eq!(result["problems_total"], 1);
         assert_eq!(result["counts"]["selected_entries"], 2);
         assert_eq!(result["counts"]["created"], 1);
         assert_eq!(result["counts"]["failed"], 1);
@@ -11398,13 +11249,9 @@ exit 2
         assert_eq!(result["ok"], false);
         assert_eq!(result["entries"], 25);
         assert_eq!(result["entries_tested"], 25);
-        assert_eq!(result["problems"], 25);
         assert_eq!(result["problems_total"], 25);
         assert_eq!(result["problems_truncated"], true);
-        assert_eq!(
-            result["problem_messages"].as_array().map(Vec::len),
-            Some(20)
-        );
+        assert_eq!(result["problems"].as_array().map(Vec::len), Some(20));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -11443,7 +11290,7 @@ exit 2
         assert_eq!(result["entries_tested"], 1);
         assert_eq!(result["problems_total"], 1);
         assert_eq!(result["structure"], "zip_local_headers_recovered");
-        assert_eq!(result["problem_messages"].as_array().map(Vec::len), Some(1));
+        assert_eq!(result["problems"].as_array().map(Vec::len), Some(1));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

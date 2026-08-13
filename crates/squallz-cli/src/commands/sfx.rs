@@ -272,7 +272,11 @@ fn resolve_stub(target: SfxTarget, stub: Option<PathBuf>) -> Result<PathBuf, For
         )));
     }
     let executable = std::env::current_exe().map_err(FormatError::from)?;
-    Ok(discover_packaged_sfx_runtime(&executable).unwrap_or(executable))
+    discover_packaged_sfx_runtime(&executable).ok_or_else(|| {
+        FormatError::Unsupported(
+            "SFX creation requires a packaged sqz-sfx.stub or an explicit --stub path".into(),
+        )
+    })
 }
 
 fn current_macos_app_template() -> Result<Option<PathBuf>, FormatError> {

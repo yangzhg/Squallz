@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { chmodSync, copyFileSync, existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { dirname, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -10,13 +10,6 @@ const root = resolve(frontendDir, "..");
 const universalMacTarget = "universal-apple-darwin";
 const universalMacComponents = ["aarch64-apple-darwin", "x86_64-apple-darwin"];
 const linuxSfxDataMagic = Buffer.from("SQZSFXD1", "ascii");
-
-for (const profile of ["debug", "release"]) {
-  const legacyDocs = resolve(root, "target", profile, "bundle", "macos", "Squallz.app", "Contents", "Resources", "docs");
-  if (existsSync(legacyDocs)) {
-    rmSync(legacyDocs, { recursive: true, force: true });
-  }
-}
 
 function run(command, args, cwd, env = process.env) {
   const result = spawnSync(command, args, {

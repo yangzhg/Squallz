@@ -7,6 +7,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::Duration;
 
+use squallz_core::lock_unpoisoned;
+
 /// Answer produced by the frontend modal.
 #[derive(Debug, Clone)]
 pub enum AskAnswer {
@@ -31,13 +33,6 @@ struct Slot {
 #[derive(Default)]
 pub struct AskBridge {
     slots: Mutex<HashMap<u64, Arc<Slot>>>,
-}
-
-fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    match mutex.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    }
 }
 
 fn wait_timeout_unpoisoned<'a, T>(

@@ -46,7 +46,7 @@ npm --prefix frontend run build
 - GUI and CLI should use shared capabilities instead of reimplementing archive behavior.
 - User-visible GUI text belongs in `locales/en-US.json` and `locales/zh-CN.json`.
 - Frontend visual rules should go through classes and design tokens in `frontend/src/design.css`.
-- Public API, CLI, and container-format changes should preserve compatibility or document the break.
+- Public API, CLI, and container-format changes must update every caller, test, and document atomically; do not retain deprecated aliases or parallel schemas.
 
 ## 中文
 

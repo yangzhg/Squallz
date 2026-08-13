@@ -169,7 +169,7 @@ fn system_tar_to_ours_all_compound_suffixes() {
             "{suffix}: a.txt missing from listing"
         );
         let report = engine
-            .test(&archive, &OpenOptions::default(), &NoProgress, &ctl)
+            .test_summary(&archive, &OpenOptions::default(), &NoProgress, &ctl)
             .unwrap();
         assert!(report.is_ok(), "{suffix}: {:?}", report.problems);
         let out = dir.path().join("ourout");
@@ -228,7 +228,7 @@ fn opened_compound_reader_does_not_follow_a_replaced_source_path() {
     let entries = reader.entries().collect::<Result<Vec<_>, _>>().unwrap();
     assert_eq!(entries.len(), 2);
     assert_eq!(entries[1].path.display, "tree/payload.txt");
-    assert!(reader.test(&NoProgress, &ctl).unwrap().is_ok());
+    assert!(reader.test_summary(&NoProgress, &ctl).unwrap().is_ok());
     let out = dir.path().join("out");
     reader
         .extract(&out, None, &ExtractOptions::default(), &NoProgress, &ctl)
@@ -263,7 +263,7 @@ fn damaged_gzip_trailer_fails_tar_test_and_extract() {
     fs::write(&archive, bytes).unwrap();
 
     let report = engine
-        .test(&archive, &OpenOptions::default(), &NoProgress, &ctl)
+        .test_summary(&archive, &OpenOptions::default(), &NoProgress, &ctl)
         .unwrap();
     assert!(
         !report.is_ok(),
@@ -363,7 +363,7 @@ fn plain_gz_single_entry_virtual_archive() {
 
     // test passes.
     let report = engine
-        .test(&archive, &OpenOptions::default(), &NoProgress, &ctl)
+        .test_summary(&archive, &OpenOptions::default(), &NoProgress, &ctl)
         .unwrap();
     assert!(report.is_ok());
 

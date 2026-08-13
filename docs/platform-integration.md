@@ -42,8 +42,8 @@ The overall result is derived from those five action results:
 
 Install and Repair use the same idempotent backend. The interface reads status
 again after the write and only reports success when all five actions are
-healthy. The old `installed` and `missing` fields remain in the IPC response for
-compatibility; new UI must use the per-action health data.
+healthy. Status uses only the per-action health records; aggregate state is
+derived from that single source of truth.
 
 This action-file check does not claim that a menu is visible in the current
 file manager. Default applications are read by the separate system

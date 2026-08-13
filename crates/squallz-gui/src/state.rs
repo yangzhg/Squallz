@@ -7,7 +7,7 @@ use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 
 use squallz_core::api::{
     split_volume_name, ControlToken, EntryMeta, EntryType, FormatError, OpenOptions, Password,
@@ -21,6 +21,7 @@ use tempfile::TempPath;
 
 use crate::dto::{ArchiveInfo, EntryDto, Page};
 use crate::preview_sessions::{PreviewResourceLease, PreviewResourceReservation};
+use squallz_core::lock_unpoisoned;
 
 /// Default page size of the entry list.
 pub const DEFAULT_PAGE_SIZE: usize = 500;
@@ -198,13 +199,6 @@ pub struct AppState {
     /// Session password cache: archive path → password (zeroized on drop and
     /// cleared when the app exits).
     passwords: Mutex<HashMap<PathBuf, Password>>,
-}
-
-fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    match mutex.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    }
 }
 
 impl AppState {
@@ -497,7 +491,7 @@ impl AppState {
             structure: structure.id().to_owned(),
             entry_count,
             volumes,
-            legacy_encoding_count: encoding.legacy_count,
+            non_utf8_name_count: encoding.non_utf8_name_count,
             garbled_count: encoding.garbled_count,
             suggested_encoding: encoding.suggested,
             encoding_override: encoding.override_label,
@@ -841,7 +835,7 @@ fn path_file_names<'a>(
 }
 
 struct EncodingDiagnostics {
-    legacy_count: usize,
+    non_utf8_name_count: usize,
     garbled_count: usize,
     suggested: Option<String>,
     override_label: Option<String>,
@@ -853,7 +847,7 @@ fn encoding_diagnostics(
     control: &ControlToken,
 ) -> Result<EncodingDiagnostics, FormatError> {
     let mut counts: HashMap<String, usize> = HashMap::new();
-    let mut legacy_count = 0;
+    let mut non_utf8_name_count = 0;
     let mut garbled_count = 0;
     for meta in entries {
         control.checkpoint()?;
@@ -861,7 +855,7 @@ fn encoding_diagnostics(
             garbled_count += 1;
         }
         if !meta.path.encoding.eq_ignore_ascii_case("utf-8") {
-            legacy_count += 1;
+            non_utf8_name_count += 1;
             *counts.entry(meta.path.encoding.to_owned()).or_default() += 1;
         }
     }
@@ -870,7 +864,7 @@ fn encoding_diagnostics(
         .max_by_key(|(_, count)| *count)
         .map(|(encoding, _)| encoding);
     Ok(EncodingDiagnostics {
-        legacy_count,
+        non_utf8_name_count,
         garbled_count,
         suggested,
         override_label: override_label.map(str::to_owned),
@@ -1340,7 +1334,7 @@ mod tests {
     }
 
     fn make_raw_name_zip(dir: &Path, raw_name: &[u8]) -> PathBuf {
-        let data = b"legacy name";
+        let data = b"non-utf8 name";
         let crc = crc32(data);
         let size = data.len() as u32;
         let name_len = raw_name.len() as u16;
@@ -1391,7 +1385,7 @@ mod tests {
         out.extend_from_slice(&central_offset.to_le_bytes());
         out.extend_from_slice(&0u16.to_le_bytes());
 
-        let dest = dir.join("legacy-gbk.zip");
+        let dest = dir.join("gbk-names.zip");
         std::fs::write(&dest, out).unwrap();
         dest
     }
@@ -1418,7 +1412,7 @@ mod tests {
     }
 
     #[test]
-    fn encoding_diagnostics_reports_legacy_and_garbled_names() {
+    fn encoding_diagnostics_reports_non_utf8_and_garbled_names() {
         let entries = vec![
             meta(EntryPath::from_utf8("plain.txt")),
             meta(EntryPath::from_raw(
@@ -1439,7 +1433,7 @@ mod tests {
         ];
 
         let diag = encoding_diagnostics(&entries, Some("gbk"), &ControlToken::default()).unwrap();
-        assert_eq!(diag.legacy_count, 3);
+        assert_eq!(diag.non_utf8_name_count, 3);
         assert_eq!(diag.garbled_count, 1);
         assert_eq!(diag.suggested.as_deref(), Some("GBK"));
         assert_eq!(diag.override_label.as_deref(), Some("gbk"));
@@ -1817,7 +1811,7 @@ mod tests {
     }
 
     #[test]
-    fn open_archive_reports_legacy_encoding_diagnostics() {
+    fn open_archive_reports_non_utf8_encoding_diagnostics() {
         let dir = temp_dir("encoding-info");
         let zip = make_raw_name_zip(
             &dir,
@@ -1828,7 +1822,7 @@ mod tests {
         );
         let state = AppState::new();
         let info = state.open_archive(&zip, None, None).unwrap();
-        assert_eq!(info.legacy_encoding_count, 1);
+        assert_eq!(info.non_utf8_name_count, 1);
         assert_eq!(info.garbled_count, 0);
         assert_eq!(info.suggested_encoding.as_deref(), Some("GBK"));
         assert!(info.encoding_override.is_none());

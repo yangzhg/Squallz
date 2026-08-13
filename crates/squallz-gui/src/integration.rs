@@ -834,8 +834,6 @@ pub fn integration_status_for_language(language: Option<&str>) -> io::Result<Int
             actions: Vec::new(),
             can_repair: false,
             can_remove: false,
-            installed: Vec::new(),
-            missing: Vec::new(),
             unsupported: vec![
                 "Desktop file-manager integration is not available on this platform".to_owned(),
             ],
@@ -1395,8 +1393,6 @@ fn macos_finder_actions_status_at_with_localizer(
     verify_managed_directory(home, &script_dir)?;
     let preamble = finder_script_preamble(current_app_bundle_path().as_deref(), loc);
     let mut actions = Vec::new();
-    let mut installed = Vec::new();
-    let mut missing = Vec::new();
     let mut can_remove = false;
     for action in FINDER_ACTIONS {
         let name = action_name(action, loc);
@@ -1462,18 +1458,6 @@ fn macos_finder_actions_status_at_with_localizer(
                 )
             }
         };
-        if state == IntegrationActionHealthStateDto::Healthy {
-            installed.push(action_dto_with_name(
-                action,
-                &name,
-                &services_dir,
-                &script_dir,
-            ));
-        } else if state == IntegrationActionHealthStateDto::Missing
-            || matches!(issue, Some("script_missing" | "launcher_missing"))
-        {
-            missing.push(name.clone());
-        }
         actions.push(integration_action_health(action.id, &name, state, issue));
     }
 
@@ -1487,8 +1471,6 @@ fn macos_finder_actions_status_at_with_localizer(
         actions,
         can_repair: true,
         can_remove,
-        installed,
-        missing,
         unsupported: Vec::new(),
     })
 }
@@ -1645,8 +1627,6 @@ fn linux_file_manager_actions_status_at_with_localizer_and_appimage(
     verify_managed_directory(&data_home, &nautilus_dir)?;
     let preamble = linux_script_preamble(loc, appimage);
     let mut actions = Vec::new();
-    let mut installed = Vec::new();
-    let mut missing = Vec::new();
     let mut can_remove = false;
     for action in LINUX_FILE_MANAGER_ACTIONS {
         let name = linux_action_name(action, loc);
@@ -1720,18 +1700,6 @@ fn linux_file_manager_actions_status_at_with_localizer_and_appimage(
             } else {
                 (IntegrationActionHealthStateDto::Healthy, None)
             };
-        if state == IntegrationActionHealthStateDto::Healthy {
-            installed.push(linux_action_dto_with_name(
-                action,
-                &name,
-                &services_dir,
-                &script_dir,
-            ));
-        } else if state == IntegrationActionHealthStateDto::Missing
-            || matches!(issue, Some("script_missing" | "launcher_missing"))
-        {
-            missing.push(name.clone());
-        }
         actions.push(integration_action_health(action.id, &name, state, issue));
     }
 
@@ -1745,8 +1713,6 @@ fn linux_file_manager_actions_status_at_with_localizer_and_appimage(
         actions,
         can_repair: true,
         can_remove,
-        installed,
-        missing,
         unsupported: Vec::new(),
     })
 }
@@ -1883,8 +1849,6 @@ fn windows_explorer_actions_status_at_with_localizer(
     verify_managed_directory(data_dir, &script_dir)?;
     let preamble = windows_script_preamble(loc);
     let mut actions = Vec::new();
-    let mut installed = Vec::new();
-    let mut missing = Vec::new();
     let manifest_path = windows_registry_manifest_path(&script_dir);
     let manifest_kind = managed_path_kind(&manifest_path)?;
     let manifest_exists = manifest_kind != ManagedPathKind::Missing;
@@ -1933,18 +1897,6 @@ fn windows_explorer_actions_status_at_with_localizer(
         } else {
             (IntegrationActionHealthStateDto::Healthy, None)
         };
-        if state == IntegrationActionHealthStateDto::Healthy {
-            installed.push(windows_action_dto_with_name(
-                action,
-                &name,
-                &services_dir,
-                &script_dir,
-            ));
-        } else if state == IntegrationActionHealthStateDto::Missing
-            || matches!(issue, Some("script_missing" | "registry_missing"))
-        {
-            missing.push(name.clone());
-        }
         actions.push(integration_action_health(action.id, &name, state, issue));
     }
 
@@ -1958,8 +1910,6 @@ fn windows_explorer_actions_status_at_with_localizer(
         actions,
         can_repair: true,
         can_remove,
-        installed,
-        missing,
         unsupported: Vec::new(),
     })
 }
@@ -3231,8 +3181,7 @@ mod tests {
         }
 
         let status = macos_finder_actions_status_at_with_language(&home, None).unwrap();
-        assert_eq!(status.installed.len(), 5);
-        assert!(status.missing.is_empty());
+        assert_eq!(status.actions.len(), 5);
         assert_eq!(status.health, IntegrationHealthStateDto::Healthy);
         assert!(status.can_repair);
         assert!(status.can_remove);
@@ -3386,8 +3335,10 @@ mod tests {
         assert!(removed.missing.is_empty());
 
         let status = macos_finder_actions_status_at_with_language(&home, None).unwrap();
-        assert!(status.installed.is_empty());
-        assert_eq!(status.missing.len(), 5);
+        assert!(status
+            .actions
+            .iter()
+            .all(|action| action.state == IntegrationActionHealthStateDto::Missing));
         assert_eq!(status.health, IntegrationHealthStateDto::Missing);
         assert!(!status.can_remove);
 
@@ -3436,10 +3387,9 @@ mod tests {
         assert!(script_text.contains("XX install CLI"));
 
         let status = macos_finder_actions_status_at_with_localizer(&home, &loc).unwrap();
-        assert_eq!(status.installed.len(), 5);
-        assert!(status.missing.is_empty());
+        assert_eq!(status.actions.len(), 5);
         assert!(status
-            .installed
+            .actions
             .iter()
             .any(|item| item.name == "Squallz XX Extract"));
 
@@ -3590,7 +3540,7 @@ mod tests {
     }
 
     #[test]
-    fn localized_finder_install_replaces_legacy_english_workflows() {
+    fn finder_language_change_updates_the_managed_workflows() {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -3652,16 +3602,15 @@ mod tests {
 
         let localized_status =
             macos_finder_actions_status_at_with_language(&home, Some("zh-CN")).unwrap();
-        assert_eq!(localized_status.installed.len(), 5);
-        assert!(localized_status.missing.is_empty());
+        assert_eq!(localized_status.actions.len(), 5);
         assert!(localized_status
-            .installed
+            .actions
             .iter()
             .any(|item| item.name == "Squallz 就地解压"));
 
-        let legacy_status = macos_finder_actions_status_at_with_language(&home, None).unwrap();
-        assert_eq!(legacy_status.installed.len(), 5);
-        assert!(legacy_status.missing.is_empty());
+        let default_language_status =
+            macos_finder_actions_status_at_with_language(&home, None).unwrap();
+        assert_eq!(default_language_status.actions.len(), 5);
 
         let removed = remove_macos_finder_actions_at_with_language(&home, Some("zh-CN")).unwrap();
         assert_eq!(removed.removed.len(), 5);
@@ -3670,8 +3619,10 @@ mod tests {
 
         let status_after_remove =
             macos_finder_actions_status_at_with_language(&home, Some("zh-CN")).unwrap();
-        assert!(status_after_remove.installed.is_empty());
-        assert_eq!(status_after_remove.missing.len(), 5);
+        assert!(status_after_remove
+            .actions
+            .iter()
+            .all(|action| action.state == IntegrationActionHealthStateDto::Missing));
 
         let _ = fs::remove_dir_all(home);
     }
@@ -3838,6 +3789,10 @@ mod linux_file_manager_tests {
             &sample,
             &["one.zip", "folder input", "two.7z"],
         );
+        let _ = wait_for_log_contains(
+            &relative_gui_log,
+            &format!("<{}>", sample.join("one.zip").display()),
+        );
         let relative_gui_log = wait_for_log_contains(
             &relative_gui_log,
             &format!("<{}>", sample.join("two.7z").display()),
@@ -3990,8 +3945,7 @@ mod linux_file_manager_tests {
 
         let status =
             linux_file_manager_actions_status_at_with_language(&home, Some("en-US")).unwrap();
-        assert_eq!(status.installed.len(), 5);
-        assert!(status.missing.is_empty());
+        assert_eq!(status.actions.len(), 5);
         assert_eq!(status.health, IntegrationHealthStateDto::Healthy);
         assert!(status
             .actions
@@ -4005,8 +3959,10 @@ mod linux_file_manager_tests {
 
         let status_after_remove =
             linux_file_manager_actions_status_at_with_language(&home, Some("en-US")).unwrap();
-        assert!(status_after_remove.installed.is_empty());
-        assert_eq!(status_after_remove.missing.len(), 5);
+        assert!(status_after_remove
+            .actions
+            .iter()
+            .all(|action| action.state == IntegrationActionHealthStateDto::Missing));
         assert_eq!(
             status_after_remove.health,
             IntegrationHealthStateDto::Missing
@@ -4016,7 +3972,7 @@ mod linux_file_manager_tests {
     }
 
     #[test]
-    fn localized_linux_install_replaces_stale_nautilus_script_names() {
+    fn linux_language_change_replaces_stale_nautilus_script_names() {
         let home = temp_home("squallz-linux-integration-locale-test");
 
         let english =
@@ -4043,8 +3999,7 @@ mod linux_file_manager_tests {
 
         let status =
             linux_file_manager_actions_status_at_with_language(&home, Some("zh-CN")).unwrap();
-        assert_eq!(status.installed.len(), 5);
-        assert!(status.missing.is_empty());
+        assert_eq!(status.actions.len(), 5);
 
         let removed =
             remove_linux_file_manager_actions_at_with_language(&home, Some("zh-CN")).unwrap();
@@ -4504,11 +4459,18 @@ mod linux_file_manager_tests {
         fs::write(
             path,
             r#"#!/bin/sh
-printf '<APPIMAGE_EXTRACT_AND_RUN=%s>' "${APPIMAGE_EXTRACT_AND_RUN:-}" >> "$SQUALLZ_QA_LOG"
-for arg in "$@"; do
-  printf '<%s>' "$arg" >> "$SQUALLZ_QA_LOG"
+lock="${SQUALLZ_QA_LOG}.lock"
+while ! mkdir "$lock" 2>/dev/null; do
+  sleep 0.01
 done
-printf '\n' >> "$SQUALLZ_QA_LOG"
+trap 'rmdir "$lock"' EXIT
+{
+  printf '<APPIMAGE_EXTRACT_AND_RUN=%s>' "${APPIMAGE_EXTRACT_AND_RUN:-}"
+  for arg in "$@"; do
+    printf '<%s>' "$arg"
+  done
+  printf '\n'
+} >> "$SQUALLZ_QA_LOG"
 "#,
         )
         .unwrap();
@@ -4591,8 +4553,7 @@ mod windows_explorer_tests {
 
         let status =
             windows_explorer_actions_status_at_with_language(&data_dir, Some("en-US")).unwrap();
-        assert_eq!(status.installed.len(), 5);
-        assert!(status.missing.is_empty());
+        assert_eq!(status.actions.len(), 5);
         assert_eq!(status.health, IntegrationHealthStateDto::Healthy);
         assert!(status
             .actions
@@ -4606,8 +4567,10 @@ mod windows_explorer_tests {
 
         let status_after_remove =
             windows_explorer_actions_status_at_with_language(&data_dir, Some("en-US")).unwrap();
-        assert!(status_after_remove.installed.is_empty());
-        assert_eq!(status_after_remove.missing.len(), 5);
+        assert!(status_after_remove
+            .actions
+            .iter()
+            .all(|action| action.state == IntegrationActionHealthStateDto::Missing));
         assert_eq!(
             status_after_remove.health,
             IntegrationHealthStateDto::Missing
@@ -4686,9 +4649,9 @@ mod windows_explorer_tests {
         assert!(script_text.contains("XX install CLI"));
 
         let status = windows_explorer_actions_status_at_with_localizer(&data_dir, &loc).unwrap();
-        assert_eq!(status.installed.len(), 5);
+        assert_eq!(status.actions.len(), 5);
         assert!(status
-            .installed
+            .actions
             .iter()
             .any(|item| item.name == "Squallz XX Extract"));
 

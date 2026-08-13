@@ -811,17 +811,12 @@ fn modern_output_rows(ctx: &Ctx) -> Vec<ModernTableRow> {
         ModernTableRow::new(vec![
             label(ctx, "cli.info.output.color_mode", "Color mode"),
             color,
-            "auto follows TTY and NO_COLOR; rich/fancy force modern ANSI for screenshots, redirected demos, and live progress previews; always/never remain explicit".to_owned(),
+            "auto follows TTY and NO_COLOR; always and never are explicit".to_owned(),
         ]),
         ModernTableRow::success(vec![
             label(ctx, "common.palette", "Palette"),
             palette,
-            "use --palette / --theme / --colors to switch modern terminal colors; surge keeps the approved teal primary with a vivid sky-blue HUD accent".to_owned(),
-        ]),
-        ModernTableRow::success(vec![
-            label(ctx, "common.color_scheme", "Color scheme"),
-            "--color-scheme / --scheme / --colors".to_owned(),
-            "visible aliases for the same modern palette control; JSON and classic output remain unchanged".to_owned(),
+            "use --palette to switch modern terminal colors; JSON and classic output remain unchanged".to_owned(),
         ]),
         ModernTableRow::success(vec![
             label(ctx, "cli.info.output.progress_hud", "Progress HUD"),
@@ -845,7 +840,7 @@ fn modern_style_guide_rows(ctx: &Ctx) -> Vec<ModernTableRow> {
             "operation cockpit".to_owned(),
             "progress gauge + snapshot dashboard table + phase rail + signal matrix + transfer board + transfer matrix + action queue"
                 .to_owned(),
-            "sqz compress input -o out.7z --style modern --color fancy".to_owned(),
+            "sqz compress input -o out.7z --style modern --color always".to_owned(),
         ]),
         ModernTableRow::success(vec![
             label(ctx, "cli.info.style.result", "Finished operation"),
@@ -859,7 +854,7 @@ fn modern_style_guide_rows(ctx: &Ctx) -> Vec<ModernTableRow> {
             "scorecard + decision tables".to_owned(),
             "support map, format coverage, capability lanes, runtime inventory, and palette gallery"
                 .to_owned(),
-            "sqz info --style modern --color rich".to_owned(),
+            "sqz info --style modern --color always".to_owned(),
         ]),
         ModernTableRow::new(vec![
             label(ctx, "cli.info.style.audit", "Script or audit log"),
@@ -874,136 +869,6 @@ fn modern_style_guide_rows(ctx: &Ctx) -> Vec<ModernTableRow> {
 fn modern_palette_rows(ctx: &Ctx) -> Vec<ModernTableRow> {
     vec![
         ModernTableRow::success(vec![
-            "brand".to_owned(),
-            "--palette brand".to_owned(),
-            "#2DD4BF primary + #0EA5E9 secondary".to_owned(),
-            label(
-                ctx,
-                "cli.info.palette.best_brand",
-                "short brand option for the approved app icon colors",
-            ),
-        ]),
-        ModernTableRow::success(vec![
-            "icon".to_owned(),
-            "--colors icon".to_owned(),
-            "#2DD4BF -> #0EA5E9 approved icon gradient".to_owned(),
-            label(
-                ctx,
-                "cli.info.palette.best_icon",
-                "explicitly use the selected app icon palette",
-            ),
-        ]),
-        ModernTableRow::success(vec![
-            "cascade".to_owned(),
-            "--palette cascade".to_owned(),
-            "#2DD4BF primary + #7DD3FC secondary".to_owned(),
-            label(
-                ctx,
-                "cli.info.palette.best_cascade",
-                "brighter modern tables while preserving the approved app icon teal",
-            ),
-        ]),
-        ModernTableRow::success(vec![
-            "daylight".to_owned(),
-            "--palette daylight".to_owned(),
-            "#2DD4BF primary + #67E8F9 secondary".to_owned(),
-            label(
-                ctx,
-                "cli.info.palette.best_daylight",
-                "bright teal/sky output for modern tables and live progress without dark chrome",
-            ),
-        ]),
-        ModernTableRow::success(vec![
-            "foam".to_owned(),
-            "--palette foam".to_owned(),
-            "#2DD4BF primary + #E0F2FE secondary".to_owned(),
-            label(
-                ctx,
-                "cli.info.palette.best_foam",
-                "soft app-icon colors with a bright ice-blue highlight and no dark chrome",
-            ),
-        ]),
-        ModernTableRow::success(vec![
-            "skyline".to_owned(),
-            "--palette skyline".to_owned(),
-            "#0EA5E9 primary + #2DD4BF secondary".to_owned(),
-            label(
-                ctx,
-                "cli.info.palette.best_skyline",
-                "brighter blue-led terminal output while keeping the approved icon colors",
-            ),
-        ]),
-        ModernTableRow::success(vec![
-            "aero".to_owned(),
-            "--palette aero".to_owned(),
-            "#7DD3FC primary + #2DD4BF secondary".to_owned(),
-            label(
-                ctx,
-                "cli.info.palette.best_aero",
-                "lighter sky-led modern output while staying in the approved icon palette",
-            ),
-        ]),
-        ModernTableRow::success(vec![
-            "crest".to_owned(),
-            "--palette crest".to_owned(),
-            "#38BDF8 primary + #5EEAD4 secondary".to_owned(),
-            label(
-                ctx,
-                "cli.info.palette.best_crest",
-                "brighter teal/sky command demos without dark chrome",
-            ),
-        ]),
-        ModernTableRow::success(vec![
-            "halo".to_owned(),
-            "--palette halo".to_owned(),
-            "#5EEAD4 primary + #38BDF8 secondary".to_owned(),
-            label(
-                ctx,
-                "cli.info.palette.best_halo",
-                "bright teal/sky output for richer modern progress and tables",
-            ),
-        ]),
-        ModernTableRow::success(vec![
-            "tropic".to_owned(),
-            "--palette tropic".to_owned(),
-            "#2DD4BF primary + #22D3EE secondary".to_owned(),
-            label(
-                ctx,
-                "cli.info.palette.best_tropic",
-                "approved teal with a brighter cyan accent for fancy transfer boards",
-            ),
-        ]),
-        ModernTableRow::success(vec![
-            "kinetic".to_owned(),
-            "--palette kinetic".to_owned(),
-            "#2DD4BF primary + #60A5FA secondary".to_owned(),
-            label(
-                ctx,
-                "cli.info.palette.best_kinetic",
-                "approved teal with a more energetic sky accent for live transfer matrices",
-            ),
-        ]),
-        ModernTableRow::success(vec![
-            "radiant".to_owned(),
-            "--palette radiant".to_owned(),
-            "#2DD4BF primary + #BAE6FD secondary".to_owned(),
-            label(
-                ctx,
-                "cli.info.palette.best_radiant",
-                "approved teal with a brighter sky-glass highlight for modern progress dashboards",
-            ),
-        ]),
-        ModernTableRow::success(vec![
-            "surge".to_owned(),
-            "--palette surge".to_owned(),
-            "#2DD4BF primary + #38BDF8 secondary".to_owned(),
-            label(
-                ctx,
-                "cli.info.palette.best_surge",
-                "approved teal with vivid sky-blue accents for live HUDs and dense tables",
-            ),
-        ]),
-        ModernTableRow::success(vec![
             "squallz".to_owned(),
             "--palette squallz".to_owned(),
             "#2DD4BF primary + #0EA5E9 secondary".to_owned(),
@@ -1014,64 +879,28 @@ fn modern_palette_rows(ctx: &Ctx) -> Vec<ModernTableRow> {
             ),
         ]),
         ModernTableRow::success(vec![
-            "glass".to_owned(),
-            "--colors glass".to_owned(),
-            "bright cyan primary + Squallz teal secondary".to_owned(),
-            label(
-                ctx,
-                "cli.info.palette.best_fancy",
-                "more luminous modern terminals without dark chrome",
-            ),
+            "ocean".to_owned(),
+            "--palette ocean".to_owned(),
+            "#0EA5E9 primary + #2DD4BF secondary".to_owned(),
+            label(ctx, "cli.info.palette.best_ocean", "blue-led output"),
         ]),
         ModernTableRow::success(vec![
-            "nova".to_owned(),
-            "--palette nova".to_owned(),
-            "bright cyan primary + sunlit gold secondary".to_owned(),
-            label(
-                ctx,
-                "cli.info.palette.best_vivid",
-                "more vivid modern output without dark chrome",
-            ),
-        ]),
-        ModernTableRow::success(vec![
-            "crystal".to_owned(),
-            "--palette crystal".to_owned(),
-            "luminous aqua primary + clear sky secondary".to_owned(),
-            label(
-                ctx,
-                "cli.info.palette.best_crystal",
-                "fancy bright tables while staying in the icon color family",
-            ),
-        ]),
-        ModernTableRow::success(vec![
-            "lumina".to_owned(),
-            "--palette lumina".to_owned(),
-            "bright cyan primary + coral secondary".to_owned(),
-            label(
-                ctx,
-                "cli.info.palette.best_lumina",
-                "richer demos and screenshots with vivid modern contrast",
-            ),
+            "jade".to_owned(),
+            "--palette jade".to_owned(),
+            "#34D399 primary + #2DD4BF secondary".to_owned(),
+            label(ctx, "cli.info.palette.best_jade", "green-led output"),
         ]),
         ModernTableRow::new(vec![
-            "signal".to_owned(),
-            "--theme signal".to_owned(),
-            "high-signal teal + sky highlight".to_owned(),
-            label(
-                ctx,
-                "cli.info.palette.best_dense",
-                "dense tables and long diagnostics",
-            ),
+            "sunset".to_owned(),
+            "--palette sunset".to_owned(),
+            "#FB923C primary + #F472B6 secondary".to_owned(),
+            label(ctx, "cli.info.palette.best_sunset", "warm output"),
         ]),
         ModernTableRow::new(vec![
-            "vapor".to_owned(),
-            "--color-scheme vapor".to_owned(),
-            "sky primary + soft violet secondary".to_owned(),
-            label(
-                ctx,
-                "cli.info.palette.best_demo",
-                "presentations and screenshots",
-            ),
+            "violet".to_owned(),
+            "--palette violet".to_owned(),
+            "ANSI violet primary + secondary".to_owned(),
+            label(ctx, "cli.info.palette.best_violet", "256-color terminals"),
         ]),
         ModernTableRow::new(vec![
             "mono".to_owned(),
@@ -1810,8 +1639,6 @@ fn rar_policy_json() -> Value {
         "fallback_tools": ["bsdtar", "unrar"],
         "fallback_env": "SQUALLZ_BSDTAR",
         "rar7_decoder_env": "SQUALLZ_UNRAR",
-        // Kept for compatibility with the original single-value policy field.
-        "fallback_scope": "diagnostic_single_file_or_confirmed_unencrypted_rar7_v6",
         "fallback_scopes": [
             "explicit_diagnostic",
             "validated_p7zip_16_02_rar5_single_file",

@@ -14,7 +14,7 @@ use common::{build_stored_zip, command_exists, crc32, engine, RawZipEntry, TempD
 use squallz_format_api::{
     CompressionLevel, ControlToken, CreateOptions, Detected, EntryMeta, EntryPath, EntryType,
     ExtractOptions, ExtractProblemReporter, FormatError, NoProgress, OpenOptions, OverwritePolicy,
-    ProgressPhase, ProgressSink, TestReport,
+    ProgressPhase, ProgressSink, TestSummary,
 };
 
 #[derive(Default)]
@@ -31,13 +31,13 @@ impl ExtractProblemReporter for SkippedCollector {
     }
 }
 
-fn assert_recovered_structure_problem(report: &TestReport, expected_entries: u64) {
+fn assert_recovered_structure_problem(report: &TestSummary, expected_entries: u64) {
     assert_eq!(report.entries_tested, expected_entries);
     assert!(!report.is_ok(), "recovered ZIP structure must not pass");
-    assert_eq!(report.problems.len(), 1, "{:?}", report.problems);
+    assert_eq!(report.problems.total, 1, "{:?}", report.problems);
     assert!(
-        report.problems[0].contains("central directory is missing or unreadable")
-            && report.problems[0].contains("recovered from local headers"),
+        report.problems.messages[0].contains("central directory is missing or unreadable")
+            && report.problems.messages[0].contains("recovered from local headers"),
         "{:?}",
         report.problems
     );
@@ -491,9 +491,6 @@ fn split_create_excludes_old_target_volumes_without_prefix_overreach() {
     let stale_part = project.join("bundle.zip.999.part");
     let ordinary = project.join("bundle.zip.001.notes");
     let pid = std::process::id();
-    let legacy_staging_name = format!(".bundle.zip.sqz-split-{pid}.tmp");
-    let legacy_staging_entry = format!("project/{legacy_staging_name}");
-    let legacy_staging_path = project.join(&legacy_staging_name);
     let outer_collision_name = format!(".bundle.zip.split-{pid}-0.tmp.bundle.zip");
     let outer_collision_entry = format!("project/{outer_collision_name}");
     let outer_collision_path = project.join(&outer_collision_name);
@@ -510,7 +507,6 @@ fn split_create_excludes_old_target_volumes_without_prefix_overreach() {
     fs::write(&old_second, b"old second volume").unwrap();
     fs::write(&stale_part, b"stale internal split staging").unwrap();
     fs::write(&ordinary, b"ordinary file").unwrap();
-    fs::write(&legacy_staging_path, b"legacy staging-name collision").unwrap();
     fs::write(
         &outer_collision_path,
         b"pre-existing complete staging archive",
@@ -532,7 +528,6 @@ fn split_create_excludes_old_target_volumes_without_prefix_overreach() {
         "project",
         "project/bundle.zip.001.notes",
         "project/keep.bin",
-        legacy_staging_entry.as_str(),
         inner_collision_entry.as_str(),
     ];
     let progress = CancelOnUnexpectedEntry {
@@ -567,16 +562,11 @@ fn split_create_excludes_old_target_volumes_without_prefix_overreach() {
     assert!(!names
         .iter()
         .any(|name| name == "project/bundle.zip.999.part"));
-    assert!(names.iter().any(|name| name == &legacy_staging_entry));
     assert!(!names.iter().any(|name| name == &outer_collision_entry));
     assert!(names.iter().any(|name| name == &inner_collision_entry));
     assert!(!names.iter().any(|name| name == &selected_outer_entry));
     assert!(!names.iter().any(|name| name == &selected_inner_entry));
     assert_eq!(plan.inputs.entries, names.len());
-    assert_eq!(
-        fs::read(&legacy_staging_path).unwrap(),
-        b"legacy staging-name collision"
-    );
     assert_eq!(
         fs::read(&outer_collision_path).unwrap(),
         b"pre-existing complete staging archive"
@@ -728,7 +718,7 @@ fn roundtrip_create_list_extract_test() {
 
     // Integrity test passes for every entry.
     let report = eng
-        .test(&archive, &OpenOptions::default(), &NoProgress, &ctl)
+        .test_summary(&archive, &OpenOptions::default(), &NoProgress, &ctl)
         .unwrap();
     assert!(report.is_ok(), "problems: {:?}", report.problems);
     assert_eq!(report.entries_tested, entries.len() as u64);
@@ -854,7 +844,7 @@ fn interop_infozip_native_split_opens_from_any_volume() {
     assert_eq!(source_set.members().last(), Some(&final_path));
 
     let report = eng
-        .test(
+        .test_summary(
             &first,
             &OpenOptions::default(),
             &NoProgress,
@@ -1106,7 +1096,7 @@ fn local_header_fallback_extracts_when_central_directory_is_missing() {
     );
 
     let report = eng
-        .test(
+        .test_summary(
             &archive,
             &OpenOptions::default(),
             &NoProgress,
@@ -1137,7 +1127,7 @@ fn local_header_fallback_extracts_zip64_local_sizes() {
     assert_eq!(entries[0].compressed_size, Some(26));
 
     let report = eng
-        .test(
+        .test_summary(
             &archive,
             &OpenOptions::default(),
             &NoProgress,
@@ -1184,7 +1174,7 @@ fn local_header_fallback_lists_encrypted_entries_but_requires_password_to_read()
     assert_eq!(entries[0].size, 32);
 
     let err = eng
-        .test(
+        .test_summary(
             &archive,
             &OpenOptions::default(),
             &NoProgress,
@@ -1232,7 +1222,7 @@ fn local_header_fallback_lists_unsupported_methods_but_refuses_to_read() {
     assert_eq!(entries[0].compressed_size, Some(25));
 
     let report = eng
-        .test(
+        .test_summary(
             &archive,
             &OpenOptions::default(),
             &NoProgress,
@@ -1244,6 +1234,7 @@ fn local_header_fallback_lists_unsupported_methods_but_refuses_to_read() {
     assert!(
         report
             .problems
+            .messages
             .iter()
             .any(|problem| problem.contains("compression method 14")),
         "{:?}",
@@ -1304,7 +1295,7 @@ fn local_header_fallback_extracts_signed_zip64_data_descriptor_entries() {
     assert_eq!(entries[0].compressed_size, Some(24));
 
     let report = eng
-        .test(
+        .test_summary(
             &archive,
             &OpenOptions::default(),
             &NoProgress,
@@ -1369,7 +1360,7 @@ fn local_header_fallback_extracts_unsigned_zip64_data_descriptor_entries() {
     assert_eq!(entries[0].compressed_size, Some(31));
 
     let report = eng
-        .test(
+        .test_summary(
             &archive,
             &OpenOptions::default(),
             &NoProgress,
@@ -1452,7 +1443,7 @@ fn local_header_fallback_extracts_signed_data_descriptor_entries() {
     );
 
     let report = eng
-        .test(
+        .test_summary(
             &archive,
             &OpenOptions::default(),
             &NoProgress,
@@ -1515,7 +1506,7 @@ fn local_header_fallback_extracts_unsigned_data_descriptor_entries() {
     );
 
     let report = eng
-        .test(
+        .test_summary(
             &archive,
             &OpenOptions::default(),
             &NoProgress,
@@ -1549,7 +1540,7 @@ fn local_header_fallback_reports_crc_mismatch() {
     assert_eq!(entries[0].path.display, "bad.txt");
 
     let report = eng
-        .test(
+        .test_summary(
             &archive,
             &OpenOptions::default(),
             &NoProgress,
@@ -1561,6 +1552,7 @@ fn local_header_fallback_reports_crc_mismatch() {
     assert!(
         report
             .problems
+            .messages
             .iter()
             .any(|problem| problem.contains("CRC mismatch")),
         "{:?}",

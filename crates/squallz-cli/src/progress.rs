@@ -10,10 +10,11 @@
 //! it carries no language-pack copy.
 
 use std::io::{IsTerminal, Write};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use squallz_core::api::{EntryPath, ProgressPhase, ProgressSink};
+use squallz_core::lock_unpoisoned;
 
 use crate::args::{AccentArg, ColorArg, OutputStyleArg};
 use crate::ui::{self, Tone};
@@ -57,13 +58,6 @@ struct State {
     scanning: bool,
     phase: Option<ProgressPhase>,
     interruptible: bool,
-}
-
-fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    match mutex.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    }
 }
 
 /// stderr progress sink shared by every command.
@@ -1408,7 +1402,7 @@ mod tests {
         let line = render_progress_line(
             OutputStyleArg::Modern,
             true,
-            AccentArg::Teal,
+            AccentArg::Squallz,
             progress_frame(
                 "compress",
                 512 * 1024,
@@ -1479,7 +1473,7 @@ mod tests {
         let line = render_progress_line(
             OutputStyleArg::Modern,
             false,
-            AccentArg::Lagoon,
+            AccentArg::Ocean,
             progress_frame(
                 "extract",
                 768 * 1024,
@@ -1546,7 +1540,7 @@ mod tests {
         let mut verify = progress_frame("update", 100, 100, "archive.zip", 64, 1, 0);
         verify.phase = Some(ProgressPhase::UpdateVerify);
         let verify_line =
-            render_progress_line(OutputStyleArg::Modern, false, AccentArg::Lagoon, verify);
+            render_progress_line(OutputStyleArg::Modern, false, AccentArg::Ocean, verify);
         assert!(verify_line.contains("UPDATE · RUN"));
         assert!(verify_line.contains("Phase VERIFY"));
         assert!(verify_line.contains("REWRITE"));
@@ -1557,7 +1551,7 @@ mod tests {
         commit.phase = Some(ProgressPhase::UpdateCommit);
         commit.interruptible = false;
         let commit_line =
-            render_progress_line(OutputStyleArg::Modern, false, AccentArg::Lagoon, commit);
+            render_progress_line(OutputStyleArg::Modern, false, AccentArg::Ocean, commit);
         assert!(commit_line.contains("UPDATE · SAFE"));
         assert!(commit_line.contains("Phase COMMIT"));
         assert!(commit_line.contains("byte total unavailable"));
@@ -1566,7 +1560,7 @@ mod tests {
         assert!(!commit_line.contains("processed 0 B"));
 
         let classic_commit =
-            render_progress_line(OutputStyleArg::Classic, false, AccentArg::Lagoon, commit);
+            render_progress_line(OutputStyleArg::Classic, false, AccentArg::Ocean, commit);
         assert!(classic_commit.contains("COMMIT active"));
         assert!(!classic_commit.contains("/s"));
 
@@ -1574,7 +1568,7 @@ mod tests {
         publish.phase = Some(ProgressPhase::OutputCommit);
         publish.interruptible = false;
         let publish_line =
-            render_progress_line(OutputStyleArg::Modern, false, AccentArg::Lagoon, publish);
+            render_progress_line(OutputStyleArg::Modern, false, AccentArg::Ocean, publish);
         assert!(publish_line.contains("Phase PUBLISH"));
         assert!(publish_line.contains("○ RECOVER ━━ ○ VERIFY ━━ ● PUBLISH ━━ ○ CLEANUP"));
         assert!(publish_line.contains("let durable publish finish"));
@@ -1591,7 +1585,7 @@ mod tests {
         );
         split.phase = Some(ProgressPhase::OutputSplit);
         let split_line =
-            render_progress_line(OutputStyleArg::Modern, false, AccentArg::Lagoon, split);
+            render_progress_line(OutputStyleArg::Modern, false, AccentArg::Ocean, split);
         assert!(split_line.contains("Phase SPLIT"));
         assert!(split_line.contains("● SPLIT ━━ ○ PUBLISH ━━ ○ CLEANUP"));
         assert!(!split_line.contains("RECOVER"));
@@ -1617,7 +1611,7 @@ mod tests {
         recovery.interruptible = false;
 
         let classic =
-            render_progress_line(OutputStyleArg::Classic, false, AccentArg::Lagoon, recovery);
+            render_progress_line(OutputStyleArg::Classic, false, AccentArg::Ocean, recovery);
         assert!(classic.contains("PROCESS"));
         assert!(classic.contains("38%"));
         assert!(!classic.contains("380 B"));
@@ -1625,7 +1619,7 @@ mod tests {
         assert!(!classic.contains("/s"));
 
         let modern =
-            render_progress_line(OutputStyleArg::Modern, false, AccentArg::Lagoon, recovery);
+            render_progress_line(OutputStyleArg::Modern, false, AccentArg::Ocean, recovery);
         assert!(modern.contains("Phase PROCESS"));
         assert!(modern.contains("phase progress"));
         assert!(modern.contains("backend stage progress"));
@@ -1641,13 +1635,13 @@ mod tests {
         recovery.phase = Some(ProgressPhase::RecoveryPrepare);
 
         let classic =
-            render_progress_line(OutputStyleArg::Classic, false, AccentArg::Lagoon, recovery);
+            render_progress_line(OutputStyleArg::Classic, false, AccentArg::Ocean, recovery);
         assert!(classic.contains("PREPARE"));
         assert!(classic.contains("768.0 KiB"));
         assert!(classic.contains("128.0 KiB/s"));
 
         let modern =
-            render_progress_line(OutputStyleArg::Modern, false, AccentArg::Lagoon, recovery);
+            render_progress_line(OutputStyleArg::Modern, false, AccentArg::Ocean, recovery);
         assert!(modern.contains("Phase PREPARE"));
         assert!(modern.contains("processed 768.0 KiB"));
         assert!(modern.contains("128.0 KiB/s"));
@@ -1658,7 +1652,7 @@ mod tests {
         let line = render_scan_progress_line(
             OutputStyleArg::Classic,
             true,
-            AccentArg::Teal,
+            AccentArg::Squallz,
             "update",
             42,
             "folder/item.txt",
@@ -1680,7 +1674,7 @@ mod tests {
         let line = render_scan_progress_line(
             OutputStyleArg::Modern,
             false,
-            AccentArg::Lagoon,
+            AccentArg::Ocean,
             "update",
             42,
             "folder/item.txt",
@@ -1717,7 +1711,7 @@ mod tests {
         let line = render_progress_line(
             OutputStyleArg::Classic,
             true,
-            AccentArg::Teal,
+            AccentArg::Squallz,
             progress_frame(
                 "compress",
                 512 * 1024,

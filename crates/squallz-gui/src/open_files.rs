@@ -366,8 +366,6 @@ fn activate_app() -> serde_json::Value {
     let active_before = ns_app.isActive();
     ns_app.unhide(None);
     ns_app.activate();
-    #[allow(deprecated)]
-    ns_app.activateIgnoringOtherApps(true);
 
     json!({
         "main_thread": true,

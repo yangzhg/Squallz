@@ -1,13 +1,14 @@
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::Path;
 use std::sync::mpsc::{self, RecvTimeoutError};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use squallz_core::api::{
     ConflictDecision, ConflictResolver, ControlToken, EntryMeta, FormatError, Password,
 };
+use squallz_core::lock_unpoisoned;
 use squallz_i18n::Localizer;
 
 use crate::output::safe_terminal_text;
@@ -205,13 +206,6 @@ fn rename_candidate(stem: &str, extension: Option<&str>, number: u32) -> String 
     match extension {
         Some(extension) => format!("{stem} ({number}).{extension}"),
         None => format!("{stem} ({number})"),
-    }
-}
-
-fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    match mutex.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
     }
 }
 

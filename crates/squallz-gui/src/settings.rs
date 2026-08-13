@@ -5,9 +5,10 @@ use std::ffi::OsString;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::Mutex;
 
 use crate::dto::SettingsDto;
+use squallz_core::lock_unpoisoned;
 
 static SETTINGS_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -16,13 +17,6 @@ static SETTINGS_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 pub struct SettingsStore {
     path: Option<PathBuf>,
     current: Mutex<SettingsDto>,
-}
-
-fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    match mutex.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    }
 }
 
 fn read_settings(path: Option<&Path>) -> SettingsDto {
@@ -283,18 +277,6 @@ mod tests {
         assert_eq!(reloaded.ui_mode.as_deref(), Some("classic"));
         assert_eq!(reloaded.resource_options().threads, Some(3));
 
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[test]
-    fn legacy_settings_enable_automatic_update_checks() {
-        let path = temp_settings_path("legacy-update-check");
-        std::fs::write(&path, r#"{"theme":"dark","reveal_after_extract":true}"#)
-            .expect("legacy settings fixture");
-
-        let settings = SettingsStore::load_from_path(Some(path.clone())).get();
-
-        assert!(settings.automatic_update_checks_enabled());
         let _ = std::fs::remove_file(path);
     }
 

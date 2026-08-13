@@ -16,6 +16,7 @@ use crate::filesystem_identity::path_change_time;
 use crate::filesystem_identity::{
     file_identity, open_regular_file_no_follow, path_identity, PathIdentity, RegularFileState,
 };
+use crate::parent_or_current;
 
 const TOKEN_PREFIX: &str = "sqcg1_";
 const TOKEN_BYTES: usize = 65;
@@ -414,8 +415,7 @@ fn numbered_create_destination(path: &Path, number: usize) -> PathBuf {
 /// Final publication policy for archive and SFX creation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CreateCommitPolicy {
-    /// Compatibility behavior for callers that explicitly rely on replacing
-    /// whatever occupies the destination at commit time.
+    /// Replace whatever occupies the destination at commit time.
     ReplaceExisting,
     /// Publish only when the managed destination family is still absent.
     NoReplace,
@@ -1332,12 +1332,6 @@ fn os_sort_key(value: &OsStr) -> Vec<u8> {
 #[cfg(not(any(unix, windows)))]
 fn os_sort_key(value: &OsStr) -> Vec<u8> {
     value.to_string_lossy().as_bytes().to_vec()
-}
-
-fn parent_or_current(path: &Path) -> &Path {
-    path.parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."))
 }
 
 fn encode_guard(bytes: [u8; TOKEN_BYTES]) -> String {

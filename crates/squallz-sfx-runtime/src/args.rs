@@ -373,7 +373,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_modes_limits_and_legacy_presentation_flags() {
+    fn parses_modes_limits_and_presentation_flags() {
         let args = os_args(&[
             "--list",
             "--json",

@@ -86,9 +86,9 @@ test("created archive results retain integrity-test evidence", async () => {
     assert.equal(result.testedAfterCreate, true);
     assert.equal(result.entriesTestedAfterCreate, 17);
 
-    const legacy = readCreateResult(null, "/tmp/fallback.zip", false);
-    assert.equal(legacy.testedAfterCreate, false);
-    assert.equal(legacy.entriesTestedAfterCreate, 0);
+    const missingResult = readCreateResult(null, "/tmp/fallback.zip", false);
+    assert.equal(missingResult.testedAfterCreate, false);
+    assert.equal(missingResult.entriesTestedAfterCreate, 0);
   } finally {
     await server.close();
   }

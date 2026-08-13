@@ -172,7 +172,7 @@ fn tar_roundtrip_permissions_symlink_unicode_deep() {
 
     // Integrity test passes.
     let report = engine
-        .test(&archive, &OpenOptions::default(), &NoProgress, &ctl)
+        .test_summary(&archive, &OpenOptions::default(), &NoProgress, &ctl)
         .unwrap();
     assert!(report.is_ok(), "problems: {:?}", report.problems);
     assert!(report.entries_tested >= 7);
@@ -254,11 +254,11 @@ fn tar_link_entries_without_targets_are_reported() {
         );
 
         let report = engine
-            .test(&archive, &OpenOptions::default(), &NoProgress, &ctl)
+            .test_summary(&archive, &OpenOptions::default(), &NoProgress, &ctl)
             .unwrap();
         assert!(!report.is_ok(), "{name}: test must report the bad entry");
         assert!(
-            report.problems.iter().any(|problem| {
+            report.problems.messages.iter().any(|problem| {
                 problem.contains(expected_kind)
                     && problem.contains("missing target")
                     && problem.contains("broken-link")

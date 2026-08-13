@@ -276,9 +276,9 @@ export class ConvertSession implements ConvertRouteHandle {
     const diagnostics = archive.garbled_count
       ? this.tr("gui.archive.names_review", "{count} names need review")
           .replace("{count}", archive.garbled_count.toLocaleString())
-      : archive.legacy_encoding_count
-        ? this.tr("gui.archive.legacy_names", "{count} legacy encoded names")
-            .replace("{count}", archive.legacy_encoding_count.toLocaleString())
+      : archive.non_utf8_name_count
+        ? this.tr("gui.archive.non_utf8_names", "{count} non-UTF-8 names")
+            .replace("{count}", archive.non_utf8_name_count.toLocaleString())
         : this.tr("gui.archive.names_clean", "Names decoded cleanly");
     return this.tr("gui.convert.source_summary", "{count} entries · {diagnostics}")
       .replace("{count}", archive.entry_count.toLocaleString())

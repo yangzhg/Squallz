@@ -640,7 +640,7 @@ fn discover_bound_set(
         return Ok(None);
     };
     let candidates = discover_candidates(&selected_path, selected_identity, &mut scheme, control)?;
-    let source_parent = parent_or_current(&selected_path).to_path_buf();
+    let source_parent = stable_source::parent_or_current(&selected_path).to_path_buf();
     match (selected_metadata, evidence) {
         (Some(metadata), RarSetEvidence::PublicHeaders) => {
             validate_candidate_headers(&candidates, metadata, &scheme, &source_parent, control)?;
@@ -801,7 +801,7 @@ fn native_scheme(
     if let Some(name) = parse_legacy_name(file_name) {
         validate_named_index(name.index, metadata)?;
         if metadata.version == RarVersion::Rar5 && name.index == 0 {
-            let has_legacy_sibling = parent_or_current(source_path)
+            let has_legacy_sibling = stable_source::parent_or_current(source_path)
                 .read_dir()
                 .ok()
                 .into_iter()
@@ -869,7 +869,7 @@ fn discover_candidates(
         },
     );
 
-    let parent = parent_or_current(source_path);
+    let parent = stable_source::parent_or_current(source_path);
     for entry in fs::read_dir(parent)? {
         control.checkpoint()?;
         let entry = entry?;
@@ -1475,10 +1475,6 @@ fn open_regular_file_no_follow(path: &Path) -> Result<File, FormatError> {
 
 fn verify_source_binding(path: &Path, expected: &SourceIdentity) -> Result<(), FormatError> {
     stable_source::verify_source_binding(path, expected, "RAR volume")
-}
-
-fn parent_or_current(path: &Path) -> &Path {
-    stable_source::parent_or_current(path)
 }
 
 fn ensure_volume_index(index: u64) -> Result<(), FormatError> {

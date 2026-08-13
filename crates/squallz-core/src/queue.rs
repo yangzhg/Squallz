@@ -11,6 +11,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 
 use crate::api::{ControlToken, EntryPath, FormatError, ProgressPhase, ProgressSink};
+use crate::lock_unpoisoned;
 
 /// A queued unit of work. It receives the job's own control token and a
 /// progress sink that feeds the queue's per-job progress snapshot.
@@ -153,13 +154,6 @@ impl Inner {
 impl Default for Inner {
     fn default() -> Self {
         Self::new(1, 1, 1)
-    }
-}
-
-fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    match mutex.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
     }
 }
 

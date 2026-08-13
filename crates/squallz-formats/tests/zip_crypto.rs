@@ -91,11 +91,11 @@ fn aes256_roundtrip_and_password_errors() {
 
     // test() also distinguishes the password cases.
     let err = eng
-        .test(&archive, &open_with(None), &NoProgress, &ctl)
+        .test_summary(&archive, &open_with(None), &NoProgress, &ctl)
         .unwrap_err();
     assert!(matches!(err, FormatError::PasswordRequired), "{err:?}");
     let report = eng
-        .test(
+        .test_summary(
             &archive,
             &open_with(Some("correct horse")),
             &NoProgress,
@@ -160,11 +160,11 @@ fn encrypted_infozip_native_split_uses_the_secure_password_bridge() {
     assert!(entries[0].encrypted);
 
     let error = eng
-        .test(&first, &open_with(None), &NoProgress, &ctl)
+        .test_summary(&first, &open_with(None), &NoProgress, &ctl)
         .unwrap_err();
     assert!(matches!(error, FormatError::PasswordRequired), "{error:?}");
     let error = eng
-        .test(
+        .test_summary(
             &first,
             &open_with(Some("wrong-native-split-password")),
             &NoProgress,

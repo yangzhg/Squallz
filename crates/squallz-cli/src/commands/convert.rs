@@ -2,17 +2,22 @@
 //! without extracting to disk. `--password` decrypts the source,
 //! `--out-password` encrypts the destination.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+
+#[cfg(test)]
+use std::path::Path;
 
 use serde_json::json;
-use squallz_core::api::{
-    split_volume_name, CompressionLevel, CreateOptions, Detected, OpenOptions, Password,
-    SplitOutputMode,
-};
+use squallz_core::api::{CompressionLevel, CreateOptions, OpenOptions, Password, SplitOutputMode};
 
 use super::reports::{create_report_json, print_preserved_output_warning, print_pretty_json};
 use crate::args::resource_options;
-use crate::commands::{Ctx, ModernStatusField, ModernTableColumn, ModernTableRow};
+#[cfg(test)]
+use crate::commands::detect_name_for_path;
+use crate::commands::{
+    detected_format_label, memory_limit_label, threads_label, Ctx, ModernStatusField,
+    ModernTableColumn, ModernTableRow,
+};
 use crate::errors::CliError;
 use crate::progress::{fmt_bytes, CliProgress};
 use crate::prompt::with_password_retry;
@@ -170,44 +175,6 @@ pub fn run(
         .collect::<Vec<_>>();
     print_preserved_output_warning(ctx, &preserved_outputs);
     Ok(())
-}
-
-fn threads_label(ctx: &Ctx, threads: Option<usize>) -> String {
-    threads.map_or_else(|| ctx.loc.t("common.auto"), |threads| threads.to_string())
-}
-
-fn memory_limit_label(ctx: &Ctx, memory_limit: Option<u64>) -> String {
-    memory_limit.map_or_else(|| ctx.loc.t("common.auto"), fmt_bytes)
-}
-
-fn detected_format_label(ctx: &Ctx, path: &Path) -> String {
-    match detected_format_name(ctx, path) {
-        Some(name) => name,
-        None => "-".to_owned(),
-    }
-}
-
-fn detected_format_name(ctx: &Ctx, path: &Path) -> Option<String> {
-    let name = detect_name_for_path(path)?;
-    match ctx.engine.registry().detect_by_name(&name)? {
-        Detected::Archive(archive) => Some(archive.id().to_owned()),
-        Detected::Compressed {
-            compressor,
-            inner_archive: Some(archive),
-        } => Some(format!("{}.{}", archive.id(), compressor.id())),
-        Detected::Compressed {
-            compressor,
-            inner_archive: None,
-        } => Some(compressor.id().to_owned()),
-    }
-}
-
-fn detect_name_for_path(path: &Path) -> Option<String> {
-    let name = path.file_name().and_then(|name| name.to_str())?;
-    match split_volume_name(name) {
-        Some((base, _)) => Some(base.to_owned()),
-        None => Some(name.to_owned()),
-    }
 }
 
 fn yes_no(ctx: &Ctx, value: bool) -> String {

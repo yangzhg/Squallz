@@ -25,7 +25,7 @@ use std::io::IsTerminal;
 use std::path::Path;
 use std::sync::Arc;
 
-use squallz_core::api::{ControlToken, FormatError, ProgressSink};
+use squallz_core::api::{split_volume_name, ControlToken, Detected, FormatError, ProgressSink};
 use squallz_core::{
     inspect_create_destination_with_progress, CreateArtifactKind, CreateCommitPolicy, Engine,
 };
@@ -33,9 +33,49 @@ use squallz_i18n::Localizer;
 
 use crate::args::{effective_compression_level, AccentArg, Cmd, ColorArg, OutputStyleArg};
 use crate::errors::CliError;
+use crate::progress::fmt_bytes;
 use crate::ui::{self, Tone};
 
 const MODERN_PANEL_INNER_WIDTH: usize = 96;
+
+fn threads_label(ctx: &Ctx, threads: Option<usize>) -> String {
+    threads.map_or_else(|| ctx.loc.t("common.auto"), |threads| threads.to_string())
+}
+
+fn memory_limit_label(ctx: &Ctx, memory_limit: Option<u64>) -> String {
+    memory_limit.map_or_else(|| ctx.loc.t("common.auto"), fmt_bytes)
+}
+
+fn detected_format_label(ctx: &Ctx, path: &Path) -> String {
+    detected_format_name(ctx, path).unwrap_or_else(|| "-".to_owned())
+}
+
+fn detected_format_name(ctx: &Ctx, path: &Path) -> Option<String> {
+    let name = detect_name_for_path(path)?;
+    detected_format_name_for_name(ctx, &name)
+}
+
+fn detected_format_name_for_name(ctx: &Ctx, name: &str) -> Option<String> {
+    match ctx.engine.registry().detect_by_name(name)? {
+        Detected::Archive(archive) => Some(archive.id().to_owned()),
+        Detected::Compressed {
+            compressor,
+            inner_archive: Some(archive),
+        } => Some(format!("{}.{}", archive.id(), compressor.id())),
+        Detected::Compressed {
+            compressor,
+            inner_archive: None,
+        } => Some(compressor.id().to_owned()),
+    }
+}
+
+fn detect_name_for_path(path: &Path) -> Option<String> {
+    let name = path.file_name().and_then(|name| name.to_str())?;
+    Some(match split_volume_name(name) {
+        Some((base, _)) => base.to_owned(),
+        None => name.to_owned(),
+    })
+}
 
 fn create_commit_policy(
     destination: &Path,

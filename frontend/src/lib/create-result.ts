@@ -26,7 +26,6 @@ export function readCreateResult(
   fallbackSplit: boolean,
 ): CreateResult {
   const primaryOutput = resultString(result, "primary_output")
-    ?? resultString(result, "dest")
     ?? fallbackOutput;
   const rawOutputs = result?.outputs;
   const outputs = Array.isArray(rawOutputs)

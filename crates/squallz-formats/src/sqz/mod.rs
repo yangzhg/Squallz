@@ -46,15 +46,6 @@ impl SqzFormat {
                 "format sqz does not support encryption in v1 S1".into(),
             ));
         }
-        if !matches!(
-            opts.sqz.inner_format.as_str(),
-            "sqz" | "zip" | "tar" | "7z" | "zstd"
-        ) {
-            return Err(FormatError::Unsupported(
-                "SQZ v1 currently supports only inner-format sqz (entry-set), zip, tar, 7z, and zstd"
-                    .into(),
-            ));
-        }
         Ok(())
     }
 }

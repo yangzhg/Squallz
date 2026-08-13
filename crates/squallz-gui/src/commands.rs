@@ -14,7 +14,8 @@ use tauri::{AppHandle, Emitter, EventTarget, Manager, State, WebviewWindow};
 use tauri_plugin_opener::OpenerExt;
 
 use squallz_core::api::{
-    ControlToken, Detected, FormatError, FormatKind, OpenOptions, Password, ProgressSink,
+    ControlToken, Detected, FormatError, FormatKind, OpenOptions, OverwritePolicy, Password,
+    ProgressSink, SymlinkPolicy,
 };
 #[cfg(test)]
 use squallz_core::api::{NoProgress, SafetyLimits};
@@ -22,8 +23,9 @@ use squallz_core::{
     create_destination_has_conflict as core_create_destination_has_conflict,
     find_available_create_destination as core_find_available_create_destination,
     inspect_create_destination_with_progress as inspect_core_create_destination_with_progress,
-    CreateArtifactKind, CreateCredential, CreateOutput, EntryNameEncoding, ExistingOutputPolicy,
-    PresetDocument, PresetError, PresetStore, SymlinkHandling, VolumeMode,
+    parent_or_current, ChecksumAlgorithm, CreateArtifactKind, CreateCompletionAction,
+    CreateContentPolicy, CreateCredential, CreateOutput, EntryNameEncoding, PostSuccessAction,
+    PresetDocument, PresetError, PresetStore, SfxTarget, VolumeMode,
 };
 use squallz_i18n::Localizer;
 
@@ -34,10 +36,10 @@ use crate::create_preflight::{
 use crate::dto::{
     normalize_performance_stream_buffer_limit, ArchiveInfo, BatchExtractItem,
     CreateDestinationInspectionDto, CreateEstimateDto, CreatePlanDto, DiskSpaceDto, EntryDto,
-    EntryPreviewDto, ErrorDto, ExtractPlanPreflightDto, FormatDto, IntegrationApplyResultDto,
-    IntegrationRemoveResultDto, IntegrationStatusDto, IntegrationSystemDiagnosticsDto, JobSpec,
-    LanguageDto, LocaleTable, NestedArchivePreviewDto, Page, PasswordBookStatusDto, SettingsDto,
-    SfxCreateCapabilityDto,
+    EntryPreviewDto, ErrorDto, ExternalTaskActionDto, ExtractPlanPreflightDto, FormatDto,
+    IntegrationApplyResultDto, IntegrationRemoveResultDto, IntegrationStatusDto,
+    IntegrationSystemDiagnosticsDto, JobSpec, LanguageDto, LocaleTable, NestedArchivePreviewDto,
+    Page, PasswordBookStatusDto, SettingsDto, SfxCreateCapabilityDto,
 };
 use crate::events::EventSink;
 use crate::integration;
@@ -1353,16 +1355,6 @@ fn preview_archive_entry_impl(
     })
 }
 
-fn parent_or_current(path: &Path) -> &Path {
-    match path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-    {
-        Some(parent) => parent,
-        None => Path::new("."),
-    }
-}
-
 fn operation_history_file_name(path: &Path) -> &str {
     match path.file_name().and_then(|name| name.to_str()) {
         Some(name) => name,
@@ -1896,17 +1888,17 @@ pub fn save_archive_presets(
 pub fn resolve_external_task_job(
     state: State<'_, Arc<AppState>>,
     presets: State<'_, Arc<PresetStore>>,
-    action: String,
+    action: ExternalTaskActionDto,
     paths: Vec<String>,
     output: Option<String>,
-    checksum_algorithm: String,
+    checksum_algorithm: ChecksumAlgorithm,
     checksum_excludes: Vec<String>,
 ) -> Result<Option<JobSpec>, ErrorDto> {
     let document = presets.load().map_err(preset_error_dto)?;
     resolve_external_task_job_impl(
         &state,
         &document,
-        &action,
+        action,
         paths,
         output,
         checksum_algorithm,
@@ -1917,10 +1909,10 @@ pub fn resolve_external_task_job(
 fn resolve_external_task_job_impl(
     state: &AppState,
     document: &PresetDocument,
-    action: &str,
+    action: ExternalTaskActionDto,
     paths: Vec<String>,
     output: Option<String>,
-    checksum_algorithm: String,
+    checksum_algorithm: ChecksumAlgorithm,
     checksum_excludes: Vec<String>,
 ) -> Result<Option<JobSpec>, ErrorDto> {
     let paths: Vec<String> = paths.into_iter().filter(|path| !path.is_empty()).collect();
@@ -1928,15 +1920,15 @@ fn resolve_external_task_job_impl(
         return Ok(None);
     };
     match action {
-        "checksum" => Ok(Some(JobSpec::Checksum {
+        ExternalTaskActionDto::Checksum => Ok(Some(JobSpec::Checksum {
             inputs: paths,
             excludes: checksum_excludes,
             algorithm: checksum_algorithm,
         })),
-        "extract-here" | "extract-to-folder" => {
+        ExternalTaskActionDto::ExtractHere | ExternalTaskActionDto::ExtractToFolder => {
             resolve_external_extract_job(state, document, action, paths).map(Some)
         }
-        "extract-sfx" => Ok(Some(JobSpec::Extract {
+        ExternalTaskActionDto::ExtractSfx => Ok(Some(JobSpec::Extract {
             path: first.clone(),
             dest: output
                 .as_deref()
@@ -1947,15 +1939,15 @@ fn resolve_external_task_job_impl(
             expected_destination: None,
             expected_input_guard: None,
             selection: None,
-            overwrite: "ask".to_owned(),
-            symlinks: "skip".to_owned(),
+            overwrite: squallz_core::api::OverwritePolicy::Ask,
+            symlinks: squallz_core::api::SymlinkPolicy::Skip,
             smart: false,
             encoding: None,
             password: None,
             verify_sfx: true,
             best_effort: false,
         })),
-        "compress-to-7z" => {
+        ExternalTaskActionDto::CompressTo7z => {
             let (
                 level,
                 encrypt_names,
@@ -1983,14 +1975,23 @@ fn resolve_external_task_job_impl(
                     options.level.get(),
                     options.encrypt_names,
                     split_size,
-                    Some(options.content_policy),
+                    options.content_policy,
                     options.excludes.clone(),
-                    Some(options.completion),
-                    Some(options.post_success),
-                    Some(options.test_after_create),
+                    options.completion,
+                    options.post_success,
+                    options.test_after_create,
                 )
             } else {
-                (5, false, None, None, Vec::new(), None, None, None)
+                (
+                    5,
+                    false,
+                    None,
+                    CreateContentPolicy::KeepAllFiles,
+                    Vec::new(),
+                    CreateCompletionAction::None,
+                    PostSuccessAction::KeepSource,
+                    false,
+                )
             };
             Ok(Some(JobSpec::Compress {
                 inputs: paths.clone(),
@@ -1999,7 +2000,7 @@ fn resolve_external_task_job_impl(
                 password: None,
                 encrypt_names,
                 split_size,
-                split_mode: None,
+                split_mode: squallz_core::api::SplitOutputMode::Generic,
                 excludes,
                 content_policy,
                 sqz_inner_format: None,
@@ -2007,18 +2008,15 @@ fn resolve_external_task_job_impl(
                 completion,
                 post_success,
                 test_after_create,
-                replace_existing: Some(false),
+                replace_existing: false,
                 replacement_guard: None,
             }))
         }
-        "test-archive" => Ok(Some(JobSpec::Test {
+        ExternalTaskActionDto::TestArchive => Ok(Some(JobSpec::Test {
             path: first.clone(),
             encoding: None,
             password: None,
         })),
-        _ => Err(ErrorDto::other(format!(
-            "unsupported external task action: {action}"
-        ))),
     }
 }
 
@@ -2056,7 +2054,7 @@ fn bound_extract_preset(
 fn resolve_external_extract_job(
     state: &AppState,
     document: &PresetDocument,
-    action: &str,
+    action: ExternalTaskActionDto,
     paths: Vec<String>,
 ) -> Result<JobSpec, ErrorDto> {
     let (overwrite, symlinks, encoding) = if let Some(options) = bound_extract_preset(document)? {
@@ -2064,15 +2062,11 @@ fn resolve_external_extract_job(
             EntryNameEncoding::Auto => None,
             EntryNameEncoding::Named { label } => Some(label.clone()),
         };
-        (
-            existing_output_policy_value(options.existing_output).to_owned(),
-            symlink_handling_value(options.symlinks).to_owned(),
-            encoding,
-        )
+        (options.existing_output, options.symlinks, encoding)
     } else {
-        ("ask".to_owned(), "preserve".to_owned(), None)
+        (OverwritePolicy::Ask, SymlinkPolicy::Preserve, None)
     };
-    let smart = action == "extract-here";
+    let smart = action == ExternalTaskActionDto::ExtractHere;
     if paths.len() == 1 {
         let path = paths.into_iter().next().ok_or_else(|| {
             ErrorDto::other("external extract path disappeared during resolution")
@@ -2109,27 +2103,14 @@ fn resolve_external_extract_job(
     })
 }
 
-fn existing_output_policy_value(policy: ExistingOutputPolicy) -> &'static str {
-    match policy {
-        ExistingOutputPolicy::Ask => "ask",
-        ExistingOutputPolicy::Skip => "skip",
-        ExistingOutputPolicy::Overwrite => "overwrite",
-        ExistingOutputPolicy::Rename => "rename",
-    }
-}
-
-fn symlink_handling_value(policy: SymlinkHandling) -> &'static str {
-    match policy {
-        SymlinkHandling::Preserve => "preserve",
-        SymlinkHandling::Skip => "skip",
-        SymlinkHandling::Follow => "follow",
-    }
-}
-
-fn external_extract_destination(state: &AppState, action: &str, path: &str) -> String {
+fn external_extract_destination(
+    state: &AppState,
+    action: ExternalTaskActionDto,
+    path: &str,
+) -> String {
     let source = Path::new(path);
     let parent = source.parent().unwrap_or_else(|| Path::new(""));
-    if action == "extract-here" {
+    if action == ExternalTaskActionDto::ExtractHere {
         return parent.to_string_lossy().into_owned();
     }
     parent
@@ -2139,7 +2120,7 @@ fn external_extract_destination(state: &AppState, action: &str, path: &str) -> S
 }
 
 fn external_archive_folder(state: &AppState, path: &str) -> String {
-    external_extract_destination(state, "extract-to-folder", path)
+    external_extract_destination(state, ExternalTaskActionDto::ExtractToFolder, path)
 }
 
 fn external_compress_output(state: &AppState, paths: &[String], requested: Option<&str>) -> String {
@@ -2260,7 +2241,7 @@ pub async fn inspect_create_destination(
     requests: State<'_, Arc<PreflightRequests>>,
     proposed: String,
     split: bool,
-    sfx_target: Option<String>,
+    sfx_target: Option<SfxTarget>,
     request_id: String,
 ) -> Result<CreateDestinationInspectionDto, ErrorDto> {
     let owner = window.label().to_owned();
@@ -2278,7 +2259,7 @@ pub async fn inspect_create_destination(
         let result = inspect_create_destination_impl_with_progress(
             &proposed,
             split,
-            sfx_target.as_deref(),
+            sfx_target,
             &progress,
             &worker_token,
         );
@@ -2311,7 +2292,7 @@ pub fn cancel_create_destination_inspection(
 fn inspect_create_destination_impl(
     proposed: &str,
     split: bool,
-    sfx_target: Option<&str>,
+    sfx_target: Option<SfxTarget>,
 ) -> Result<CreateDestinationInspectionDto, ErrorDto> {
     inspect_create_destination_impl_with_progress(
         proposed,
@@ -2325,23 +2306,13 @@ fn inspect_create_destination_impl(
 fn inspect_create_destination_impl_with_progress(
     proposed: &str,
     split: bool,
-    sfx_target: Option<&str>,
+    sfx_target: Option<SfxTarget>,
     progress: &dyn ProgressSink,
     control: &ControlToken,
 ) -> Result<CreateDestinationInspectionDto, ErrorDto> {
-    let kind = match sfx_target
-        .map(str::trim)
-        .filter(|target| !target.is_empty())
-        .map(str::to_ascii_lowercase)
-        .as_deref()
-    {
-        Some("macos" | "mac" | "darwin") => CreateArtifactKind::SfxMacosApp,
-        Some("windows" | "win" | "linux") => CreateArtifactKind::SfxSingleFile,
-        Some(target) => {
-            return Err(ErrorDto::from(FormatError::Unsupported(format!(
-                "unknown SFX target: {target}"
-            ))));
-        }
+    let kind = match sfx_target {
+        Some(SfxTarget::Macos) => CreateArtifactKind::SfxMacosApp,
+        Some(SfxTarget::Windows | SfxTarget::Linux) => CreateArtifactKind::SfxSingleFile,
         None if split => CreateArtifactKind::SplitArchive,
         None => CreateArtifactKind::Archive,
     };
@@ -2560,13 +2531,13 @@ mod tests {
         CompressionLevel, ControlToken, CreateOptions, EntryPath, ExtractOptions, FormatError,
         NoProgress, OpenOptions, Password, ProgressSink, SafetyLimits,
     };
+    use squallz_core::api::{OverwritePolicy, SymlinkPolicy};
     use squallz_core::{
-        ByteSize, CreateCompletionAction, CreateCredential, CreateDestination,
+        ByteSize, ChecksumAlgorithm, CreateCompletionAction, CreateCredential, CreateDestination,
         CreateDestinationBase, CreateOutput, CreatePreset, Engine, EntryNameEncoding,
-        ExistingOutputPolicy, ExtractCredential, ExtractDestination, ExtractDestinationBase,
-        ExtractLayout, ExtractPreset, FormatId, FormatSpecificOptions, NamedPreset,
-        PostSuccessAction, PresetCompressionLevel, PresetId, PresetLabel, SymlinkHandling,
-        VolumeMode,
+        ExtractCredential, ExtractDestination, ExtractDestinationBase, ExtractLayout,
+        ExtractPreset, FormatId, FormatSpecificOptions, NamedPreset, PostSuccessAction,
+        PresetCompressionLevel, PresetId, PresetLabel, VolumeMode,
     };
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -2584,7 +2555,7 @@ mod tests {
         resolve_external_task_job_impl, unique_create_destination_path, valid_accent_palette,
         valid_hex_color, MAX_ARCHIVE_PAGE_SIZE,
     };
-    use crate::dto::{ErrorDto, JobSpec, SettingsDto};
+    use crate::dto::{ErrorDto, ExternalTaskActionDto, JobSpec, SettingsDto};
     use crate::secrets::{tests::MemorySecretStore, tests::ReadFailingSecretStore, SecretStore};
     use crate::state::{AppState, DEFAULT_PAGE_SIZE};
 
@@ -2728,8 +2699,8 @@ mod tests {
             dest_password: Some("new secret".into()),
             encrypt_names: true,
             split_size: Some(128 * 1024),
-            split_mode: None,
-            replace_existing: Some(false),
+            split_mode: squallz_core::api::SplitOutputMode::Generic,
+            replace_existing: false,
             replacement_guard: None,
         };
 
@@ -2780,8 +2751,8 @@ mod tests {
             dest_password: None,
             encrypt_names: false,
             split_size: None,
-            split_mode: None,
-            replace_existing: Some(false),
+            split_mode: squallz_core::api::SplitOutputMode::Generic,
+            replace_existing: false,
             replacement_guard: None,
         };
 
@@ -2905,10 +2876,10 @@ mod tests {
         let here = resolve_external_task_job_impl(
             &state,
             &presets,
-            "extract-here",
+            ExternalTaskActionDto::ExtractHere,
             vec![archive.clone()],
             None,
-            "sha256".to_owned(),
+            ChecksumAlgorithm::Sha256,
             Vec::new(),
         )
         .expect("extract-here should resolve")
@@ -2924,10 +2895,10 @@ mod tests {
         let folder = resolve_external_task_job_impl(
             &state,
             &presets,
-            "extract-to-folder",
+            ExternalTaskActionDto::ExtractToFolder,
             vec![archive],
             None,
-            "sha256".to_owned(),
+            ChecksumAlgorithm::Sha256,
             Vec::new(),
         )
         .expect("extract-to-folder should resolve")
@@ -2948,10 +2919,10 @@ mod tests {
         let job = resolve_external_task_job_impl(
             &state,
             &presets,
-            "compress-to-7z",
+            ExternalTaskActionDto::CompressTo7z,
             vec!["/Users/example/Documents/report".to_owned()],
             None,
-            "sha256".to_owned(),
+            ChecksumAlgorithm::Sha256,
             Vec::new(),
         )
         .expect("create action should resolve")
@@ -2991,10 +2962,10 @@ mod tests {
         let create = resolve_external_task_job_impl(
             &state,
             &presets,
-            "compress-to-7z",
+            ExternalTaskActionDto::CompressTo7z,
             vec!["/Users/example/Documents/report".to_owned()],
             None,
-            "sha256".to_owned(),
+            ChecksumAlgorithm::Sha256,
             Vec::new(),
         )
         .expect("unbound create action should use safe defaults")
@@ -3014,11 +2985,14 @@ mod tests {
                 assert_eq!(level, 5);
                 assert!(!encrypt_names);
                 assert_eq!(split_size, None);
-                assert!(content_policy.is_none());
+                assert_eq!(
+                    content_policy,
+                    squallz_core::CreateContentPolicy::KeepAllFiles
+                );
                 assert!(excludes.is_empty());
                 assert_eq!(sqz_inner_format, None);
-                assert_eq!(completion, None);
-                assert_eq!(post_success, None);
+                assert_eq!(completion, CreateCompletionAction::None);
+                assert_eq!(post_success, PostSuccessAction::KeepSource);
             }
             other => panic!("expected compress job, got {other:?}"),
         }
@@ -3026,10 +3000,10 @@ mod tests {
         let extract = resolve_external_task_job_impl(
             &state,
             &presets,
-            "extract-here",
+            ExternalTaskActionDto::ExtractHere,
             vec!["/Users/example/Downloads/report.7z".to_owned()],
             None,
-            "sha256".to_owned(),
+            ChecksumAlgorithm::Sha256,
             Vec::new(),
         )
         .expect("unbound extract action should use safe defaults")
@@ -3041,8 +3015,8 @@ mod tests {
                 encoding,
                 ..
             } => {
-                assert_eq!(overwrite, "ask");
-                assert_eq!(symlinks, "preserve");
+                assert!(matches!(overwrite, OverwritePolicy::Ask));
+                assert!(matches!(symlinks, SymlinkPolicy::Preserve));
                 assert_eq!(encoding, None);
             }
             other => panic!("expected extract job, got {other:?}"),
@@ -3072,7 +3046,7 @@ mod tests {
                 output: CreateOutput::Archive,
                 destination: CreateDestination {
                     base: CreateDestinationBase::Ask,
-                    existing_output: ExistingOutputPolicy::Ask,
+                    existing_output: OverwritePolicy::Ask,
                 },
                 format_options: FormatSpecificOptions::None,
                 completion: CreateCompletionAction::None,
@@ -3093,8 +3067,8 @@ mod tests {
                     base: ExtractDestinationBase::Ask,
                     layout: ExtractLayout::Direct,
                 },
-                existing_output: ExistingOutputPolicy::Rename,
-                symlinks: SymlinkHandling::Skip,
+                existing_output: OverwritePolicy::RenameBoth,
+                symlinks: SymlinkPolicy::Skip,
                 encoding: EntryNameEncoding::Named {
                     label: "GBK".to_owned(),
                 },
@@ -3110,10 +3084,10 @@ mod tests {
         let create = resolve_external_task_job_impl(
             &state,
             &presets,
-            "compress-to-7z",
+            ExternalTaskActionDto::CompressTo7z,
             vec!["/Users/example/Documents/report".to_owned()],
             None,
-            "sha256".to_owned(),
+            ChecksumAlgorithm::Sha256,
             Vec::new(),
         )
         .expect("bound create action should resolve")
@@ -3131,14 +3105,11 @@ mod tests {
             } => {
                 assert_eq!(level, 8);
                 assert_eq!(split_size, Some(2 * 1024 * 1024));
-                assert_eq!(
-                    content_policy,
-                    Some(squallz_core::CreateContentPolicy::Custom)
-                );
+                assert_eq!(content_policy, squallz_core::CreateContentPolicy::Custom);
                 assert_eq!(excludes, vec!["*.tmp"]);
-                assert_eq!(completion, Some(CreateCompletionAction::None));
-                assert_eq!(post_success, Some(PostSuccessAction::KeepSource));
-                assert_eq!(test_after_create, Some(true));
+                assert_eq!(completion, CreateCompletionAction::None);
+                assert_eq!(post_success, PostSuccessAction::KeepSource);
+                assert!(test_after_create);
             }
             other => panic!("expected compress job, got {other:?}"),
         }
@@ -3146,10 +3117,10 @@ mod tests {
         let extract = resolve_external_task_job_impl(
             &state,
             &presets,
-            "extract-here",
+            ExternalTaskActionDto::ExtractHere,
             vec!["/Users/example/Downloads/backup.tar.gz".to_owned()],
             None,
-            "sha256".to_owned(),
+            ChecksumAlgorithm::Sha256,
             Vec::new(),
         )
         .expect("bound extract action should resolve")
@@ -3165,8 +3136,8 @@ mod tests {
             } => {
                 assert_eq!(dest, "/Users/example/Downloads");
                 assert!(smart);
-                assert_eq!(overwrite, "rename");
-                assert_eq!(symlinks, "skip");
+                assert!(matches!(overwrite, OverwritePolicy::RenameBoth));
+                assert!(matches!(symlinks, SymlinkPolicy::Skip));
                 assert_eq!(encoding.as_deref(), Some("GBK"));
             }
             other => panic!("expected extract job, got {other:?}"),

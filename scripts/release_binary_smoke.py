@@ -586,7 +586,7 @@ def require_generic_split_family(
     report: dict[str, Any],
     archive: Path,
 ) -> list[Path]:
-    volume_count = report.get("volumes")
+    volume_count = report.get("volume_count")
     if (
         report.get("split") is not True
         or type(volume_count) is not int
@@ -603,7 +603,6 @@ def require_generic_split_family(
         not isinstance(outputs, list)
         or any(not isinstance(path, str) or not path for path in outputs)
         or [Path(path) for path in outputs] != expected
-        or report.get("output") != os.fspath(expected[0])
         or report.get("primary_output") != os.fspath(expected[0])
     ):
         raise SmokeError("compress report did not identify the generic split output family")
@@ -628,8 +627,7 @@ def require_single_zip_payload(
     if (
         report.get("operation") != "compress"
         or report.get("split") is not False
-        or report.get("volumes") != 1
-        or report.get("output") != os.fspath(archive)
+        or report.get("volume_count") != 1
         or report.get("primary_output") != os.fspath(archive)
         or report.get("outputs") != [os.fspath(archive)]
         or report.get("tested_after_create") is not True
@@ -1017,40 +1015,6 @@ def run_smoke(
             raise SmokeError("sfx runtime extract reported failed entries")
         if extracted_files(sfx_destination) != expected_files:
             raise SmokeError("SFX-extracted files do not match the source bytes")
-
-        legacy_template_signed = (
-            target == "windows" and windows_pe_certificate_table(binary) is not None
-        )
-        if not legacy_template_signed:
-            legacy_output = sfx_output.with_name(
-                f"release-smoke-legacy-sfx{sfx_output.suffix}"
-            )
-            create_and_inspect_sfx(
-                binary,
-                sfx_payload,
-                legacy_output,
-                target,
-                binary,
-                common,
-                workspace,
-                runner,
-                "legacy sfx",
-            )
-            legacy_test = require_success_report(
-                invoke_json(
-                    legacy_output,
-                    "legacy sfx runtime test",
-                    ("--test", "--json"),
-                    workspace,
-                    runner,
-                ),
-                "legacy sfx runtime test",
-            )
-            require_runtime_test_report(
-                legacy_test,
-                len(expected_files),
-                "legacy sfx runtime test",
-            )
 
     return len(expected_files)
 

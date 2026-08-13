@@ -1,8 +1,9 @@
 use std::io::{self, IsTerminal, Write};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use squallz_core::api::{EntryPath, ProgressSink};
+use squallz_core::lock_unpoisoned;
 use squallz_i18n::Localizer;
 
 use crate::output::safe_terminal_text;
@@ -142,13 +143,6 @@ impl ProgressSink for RuntimeProgress {
         write_stderr(&format!("\r\x1b[2K{line}"));
         state.line_visible = true;
         state.last_draw = Some(Instant::now());
-    }
-}
-
-fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    match mutex.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
     }
 }
 

@@ -378,7 +378,7 @@ mod tests {
         let paths = [
             missing_volume(engine.open(&archive, &open_options)),
             missing_volume(engine.list(&archive, &open_options)),
-            missing_volume(engine.test(&archive, &open_options, &NoProgress, &control)),
+            missing_volume(engine.test_summary(&archive, &open_options, &NoProgress, &control)),
             missing_volume(engine.extract(
                 &archive,
                 &destination,

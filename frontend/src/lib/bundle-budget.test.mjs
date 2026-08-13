@@ -21,7 +21,7 @@ test("bundle budget resolves the production module entry", () => {
     "assets/index-def.js",
   );
   assert.throws(
-    () => entryScriptPath('<script src="/assets/legacy.js"></script>'),
+    () => entryScriptPath('<script src="/assets/app.js"></script>'),
     /no module entry script/,
   );
 });

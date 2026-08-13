@@ -13,7 +13,7 @@ use sevenz_rust2::ArchiveEntry;
 use squallz_format_api::{
     empty_extract_report, ArchiveReader, BoundedProblemLog, ControlToken, EntryMeta, EntryPath,
     EntryType, ExtractOptions, ExtractReport, ExtractSink, FormatError, OpenOptions, ProgressSink,
-    ReadSeek, TestReport, TestSummary, TEST_PROBLEM_PREVIEW_LIMIT,
+    ReadSeek, TestSummary, TEST_PROBLEM_PREVIEW_LIMIT,
 };
 
 use super::{map_7z_error, FILE_ATTRIBUTE_UNIX_EXTENSION};
@@ -585,21 +585,6 @@ impl ArchiveReader for SevenZArchiveReader {
         }
         backend_result.map_err(map_7z_error)?;
         Ok(sink.finish_with_report(progress))
-    }
-
-    fn test(
-        &mut self,
-        progress: &dyn ProgressSink,
-        ctl: &ControlToken,
-    ) -> Result<TestReport, FormatError> {
-        let mut problems = Vec::new();
-        let entries_tested =
-            self.test_with_problem_recorder(progress, ctl, |problem| problems.push(problem))?;
-        Ok(TestReport {
-            entries_tested,
-            problems,
-            recovery: None,
-        })
     }
 
     fn test_summary(

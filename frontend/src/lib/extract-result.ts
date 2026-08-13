@@ -11,7 +11,6 @@ export interface ExtractResultCounts {
 }
 
 export interface ExtractResultOutcome {
-  structured: boolean;
   skipped: number;
   failed: number;
 }
@@ -75,14 +74,12 @@ export function readExtractResultOutcome(
   const counts = readExtractResultCounts(result);
   if (counts) {
     return {
-      structured: true,
       skipped: counts.skipped,
       failed: counts.failed,
     };
   }
   return {
-    structured: false,
-    skipped: resultCount(result?.skipped),
+    skipped: 0,
     failed: 0,
   };
 }
@@ -92,5 +89,6 @@ export function extractResultNeedsAttention(
 ): boolean {
   const outcome = readExtractResultOutcome(result);
   return extractResultHasRecoveredZipStructure(result)
-    || (outcome.structured && (outcome.skipped > 0 || outcome.failed > 0));
+    || outcome.skipped > 0
+    || outcome.failed > 0;
 }

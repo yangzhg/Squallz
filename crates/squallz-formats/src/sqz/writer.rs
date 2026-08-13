@@ -8,7 +8,7 @@ use reed_solomon_erasure::galois_8::ReedSolomon;
 use squallz_format_api::{
     ArchiveFormat, ArchiveWriter, CompressionLevel, Compressor, CreateOptions, EntryMeta,
     EntryPath, EntryType, FormatCreateBudget, FormatError, ResourceOptions, SqzCreateOptions,
-    WriteSeek,
+    SqzInnerFormat, WriteSeek,
 };
 
 use crate::{sevenz::SevenZFormat, tar::TarFormat, zip::ZipFormat};
@@ -49,31 +49,28 @@ pub(super) fn create(
     dst: Box<dyn WriteSeek>,
     opts: &CreateOptions,
 ) -> Result<Box<dyn ArchiveWriter>, FormatError> {
-    match opts.sqz.inner_format.as_str() {
-        "sqz" => Ok(Box::new(SqzArchiveWriter::new(dst, &opts.sqz)?)),
-        "zip" => Ok(Box::new(InnerArchiveSqzWriter::new(
+    match opts.sqz.inner_format {
+        SqzInnerFormat::Sqz => Ok(Box::new(SqzArchiveWriter::new(dst, &opts.sqz)?)),
+        SqzInnerFormat::Zip => Ok(Box::new(InnerArchiveSqzWriter::new(
             dst,
             opts,
             InnerProfile::Zip,
         )?)),
-        "tar" => Ok(Box::new(InnerArchiveSqzWriter::new(
+        SqzInnerFormat::Tar => Ok(Box::new(InnerArchiveSqzWriter::new(
             dst,
             opts,
             InnerProfile::Tar,
         )?)),
-        "7z" => Ok(Box::new(InnerArchiveSqzWriter::new(
+        SqzInnerFormat::SevenZip => Ok(Box::new(InnerArchiveSqzWriter::new(
             dst,
             opts,
             InnerProfile::SevenZ,
         )?)),
-        "zstd" => Ok(Box::new(InnerArchiveSqzWriter::new(
+        SqzInnerFormat::Zstd => Ok(Box::new(InnerArchiveSqzWriter::new(
             dst,
             opts,
             InnerProfile::TarZstd,
         )?)),
-        other => Err(FormatError::Unsupported(format!(
-            "unsupported sqz inner format: {other}"
-        ))),
     }
 }
 
@@ -82,25 +79,22 @@ pub(super) fn create_budget(
     archive_bytes: u64,
     opts: &CreateOptions,
 ) -> Result<FormatCreateBudget, FormatError> {
-    let (payload_bytes, index_bytes, system_temp_bytes) = match opts.sqz.inner_format.as_str() {
-        "sqz" => (
+    let (payload_bytes, index_bytes, system_temp_bytes) = match opts.sqz.inner_format {
+        SqzInnerFormat::Sqz => (
             content_bytes,
             archive_bytes
                 .saturating_sub(content_bytes)
                 .max(INNER_INDEX_BUDGET),
             0,
         ),
-        "zip" | "tar" | "7z" => (archive_bytes, INNER_INDEX_BUDGET, archive_bytes),
-        "zstd" => (
+        SqzInnerFormat::Zip | SqzInnerFormat::Tar | SqzInnerFormat::SevenZip => {
+            (archive_bytes, INNER_INDEX_BUDGET, archive_bytes)
+        }
+        SqzInnerFormat::Zstd => (
             archive_bytes,
             INNER_INDEX_BUDGET,
             checked_mul(archive_bytes, 2, "SQZ temporary workspace")?,
         ),
-        other => {
-            return Err(FormatError::Unsupported(format!(
-                "unsupported sqz inner format: {other}"
-            )))
-        }
     };
     Ok(FormatCreateBudget {
         output_bytes: sqz_output_budget(payload_bytes, index_bytes, opts.sqz.parity_shards())?,
@@ -472,7 +466,7 @@ fn new_container_uuid() -> (u64, u64) {
 
 fn descriptor_tlv(opts: &SqzCreateOptions) -> Result<Vec<u8>, FormatError> {
     let mut out = Vec::new();
-    put_tlv(&mut out, 0x0001, opts.inner_format.as_bytes())?;
+    put_tlv(&mut out, 0x0001, opts.inner_format.as_str().as_bytes())?;
     let recovery_hint = format!(
         "transparent;recovery=rs-gf8-{}+{};requested-recovery={}%",
         SqzCreateOptions::DATA_SHARDS,

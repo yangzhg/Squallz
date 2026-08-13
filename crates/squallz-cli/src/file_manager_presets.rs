@@ -4,8 +4,8 @@
 
 use squallz_core::api::FormatError;
 use squallz_core::{
-    CreateCredential, CreateOutput, EntryNameEncoding, ExistingOutputPolicy, NamedPreset,
-    PresetDocument, PresetError, PresetId, PresetStore, SymlinkHandling, VolumeMode,
+    CreateCredential, CreateOutput, EntryNameEncoding, NamedPreset, OverwritePolicy,
+    PresetDocument, PresetError, PresetId, PresetStore, SymlinkPolicy, VolumeMode,
 };
 
 use crate::args::{OverwriteArg, SymlinkArg};
@@ -95,19 +95,19 @@ fn resolve_extract_options(
         .ok_or_else(|| invalid_binding("extract"))?;
     Ok(FileManagerExtractOptions {
         overwrite: match options.existing_output {
-            ExistingOutputPolicy::Ask => OverwriteArg::Ask,
-            ExistingOutputPolicy::Skip => OverwriteArg::Skip,
-            ExistingOutputPolicy::Overwrite => OverwriteArg::All,
-            ExistingOutputPolicy::Rename => OverwriteArg::Rename,
+            OverwritePolicy::Ask => OverwriteArg::Ask,
+            OverwritePolicy::Skip => OverwriteArg::Skip,
+            OverwritePolicy::Overwrite => OverwriteArg::All,
+            OverwritePolicy::RenameBoth => OverwriteArg::Rename,
         },
         encoding: match &options.encoding {
             EntryNameEncoding::Auto => None,
             EntryNameEncoding::Named { label } => Some(label.clone()),
         },
         symlinks: match options.symlinks {
-            SymlinkHandling::Preserve => SymlinkArg::Preserve,
-            SymlinkHandling::Skip => SymlinkArg::Skip,
-            SymlinkHandling::Follow => SymlinkArg::Follow,
+            SymlinkPolicy::Preserve => SymlinkArg::Preserve,
+            SymlinkPolicy::Skip => SymlinkArg::Skip,
+            SymlinkPolicy::Follow => SymlinkArg::Follow,
         },
     })
 }
@@ -146,8 +146,8 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use squallz_core::{
-        ByteSize, EntryNameEncoding, ExistingOutputPolicy, NamedPreset, PresetCompressionLevel,
-        PresetDocument, PresetId, PresetLabel, PresetStore, SymlinkHandling, VolumeMode,
+        ByteSize, EntryNameEncoding, NamedPreset, OverwritePolicy, PresetCompressionLevel,
+        PresetDocument, PresetId, PresetLabel, PresetStore, SymlinkPolicy, VolumeMode,
     };
 
     use super::{
@@ -208,8 +208,8 @@ mod tests {
             .find_map(NamedPreset::extract_options)
             .expect("built-in extract preset")
             .clone();
-        extract_options.existing_output = ExistingOutputPolicy::Rename;
-        extract_options.symlinks = SymlinkHandling::Skip;
+        extract_options.existing_output = OverwritePolicy::RenameBoth;
+        extract_options.symlinks = SymlinkPolicy::Skip;
         extract_options.encoding = EntryNameEncoding::Named {
             label: "shift_jis".to_owned(),
         };

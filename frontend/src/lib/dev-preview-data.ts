@@ -265,16 +265,6 @@ function readIntegrationPreview(params: URLSearchParams): IntegrationStatusDto |
     }
     return { id, name, state: "healthy" as const, issue: null };
   });
-  const installed = states
-    .filter((action) => action.state !== "missing")
-    .map((action) => ({
-      id: action.id,
-      name: action.name,
-      kind: "macos_finder_quick_action",
-      path: `/Users/alex/Library/Services/Squallz-${action.id}.workflow`,
-      script_path: `/Users/alex/Library/Application Support/Squallz/context-actions/${action.id}.sh`,
-    }));
-
   return {
     platform: "macos",
     services_dir: "/Users/alex/Library/Services",
@@ -283,8 +273,6 @@ function readIntegrationPreview(params: URLSearchParams): IntegrationStatusDto |
     actions: states,
     can_repair: true,
     can_remove: preview !== "missing",
-    installed,
-    missing: states.filter((action) => action.state === "missing").map((action) => action.name),
     unsupported: [],
   };
 }
@@ -445,7 +433,7 @@ function readArchivePreview(params: URLSearchParams, pageSize: number): ArchiveP
         : "complete",
       entry_count: total,
       volumes: null,
-      legacy_encoding_count: 0,
+      non_utf8_name_count: 0,
       garbled_count: 0,
       suggested_encoding: null,
       encoding_override: null,

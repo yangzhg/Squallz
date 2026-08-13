@@ -161,7 +161,7 @@ impl PreparedAddition {
                         error
                     }
                 })?;
-            data.finish(None, self.meta.size)?;
+            data.finish(self.meta.size)?;
             input.validate_after_read(&file)
         } else {
             input.validate_non_file()?;
@@ -214,14 +214,9 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
-    use crate::api::{
-        ArchiveFormat, ArchiveReader, FormatCapabilities, FormatRegistry, NoProgress, OpenOptions,
-        ReadSeek, WriteSeek,
-    };
-    use crate::Engine;
+    use crate::api::NoProgress;
 
     struct ShortReadWriter;
-    struct LegacyUpdateFormat;
 
     #[derive(Default)]
     struct ScanProgress {
@@ -257,54 +252,6 @@ mod tests {
                     ctl.cancel();
                 }
             }
-        }
-    }
-
-    impl ArchiveFormat for LegacyUpdateFormat {
-        fn id(&self) -> &'static str {
-            "legacy-update"
-        }
-
-        fn extensions(&self) -> &'static [&'static str] {
-            &["legacy"]
-        }
-
-        fn capabilities(&self) -> FormatCapabilities {
-            FormatCapabilities {
-                can_update: true,
-                ..FormatCapabilities::default()
-            }
-        }
-
-        fn sniff(&self, _head: &[u8], _tail: &[u8]) -> bool {
-            false
-        }
-
-        fn open(
-            &self,
-            _source: Box<dyn ReadSeek>,
-            _options: &OpenOptions,
-        ) -> Result<Box<dyn ArchiveReader>, FormatError> {
-            Err(FormatError::Unsupported("legacy test open".into()))
-        }
-
-        fn create(
-            &self,
-            _output: Box<dyn WriteSeek>,
-            _options: &CreateOptions,
-        ) -> Result<Box<dyn ArchiveWriter>, FormatError> {
-            Err(FormatError::Unsupported("legacy test create".into()))
-        }
-
-        fn update(
-            &self,
-            _source: &Path,
-            _operations: &[UpdateOp],
-            _options: &CreateOptions,
-            _progress: &dyn ProgressSink,
-            _control: &ControlToken,
-        ) -> Result<(), FormatError> {
-            Ok(())
         }
     }
 
@@ -461,28 +408,5 @@ mod tests {
         assert!(matches!(error, FormatError::Cancelled));
         assert_eq!(progress.events(), vec![(1, "source.bin".to_owned())]);
         std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn legacy_update_formats_do_not_trigger_a_core_input_scan() {
-        let mut registry = FormatRegistry::new();
-        registry.register_archive(Arc::new(LegacyUpdateFormat));
-        let engine = Engine::new(registry);
-        let operations = [UpdateOp::Add {
-            src: Path::new("missing-source.bin").to_path_buf(),
-            dest: EntryPath::from_utf8("missing-source.bin"),
-        }];
-        let progress = ScanProgress::default();
-
-        engine
-            .update(
-                Path::new("archive.legacy"),
-                &operations,
-                &CreateOptions::default(),
-                &progress,
-                &ControlToken::default(),
-            )
-            .unwrap();
-        assert!(progress.events().is_empty());
     }
 }

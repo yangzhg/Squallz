@@ -51,7 +51,7 @@ function archiveInfo(id, name, entryCount = rows.length) {
     format: "zip",
     entry_count: entryCount,
     volumes: null,
-    legacy_encoding_count: 0,
+    non_utf8_name_count: 0,
     garbled_count: 0,
     suggested_encoding: null,
     encoding_override: null,

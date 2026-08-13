@@ -26,7 +26,7 @@ const colorLiteralFiles = new Set([
   "src/lib/theme.ts",
   "src/lib/ui-model.ts",
 ]);
-const legacyColorTokens = [
+const forbiddenColorTokens = [
   "--ink",
   "--muted",
   "--faint",
@@ -45,7 +45,7 @@ const legacyColorTokens = [
   "--disabled-ink",
 ];
 const paletteSeedTokens = ["--accent", "--accent-2", "--accent-soft", "--accent-ink", "--accent-shadow"];
-const retiredSelectors = [
+const forbiddenSelectors = [
   ".mode-choice-grid",
   ".mode-card",
   ".mode-setting",
@@ -178,9 +178,9 @@ function auditFile(file) {
       add(relativePath, number, "Raw font weight; use --font-weight-normal or --font-weight-medium.");
     }
 
-    for (const token of legacyColorTokens) {
+    for (const token of forbiddenColorTokens) {
       if (line.includes(token)) {
-        add(relativePath, number, `Legacy color alias ${token}; use the semantic --color-* token.`);
+        add(relativePath, number, `Non-semantic color token ${token}; use the --color-* contract.`);
       }
     }
 
@@ -218,7 +218,7 @@ function auditDesignCss(source, lines) {
       add("src/design.css", 1, `Missing font-weight token ${token}.`);
     }
   }
-  for (const selector of retiredSelectors) {
+  for (const selector of forbiddenSelectors) {
     if (selectorIsDefined(source, selector)) {
       add("src/design.css", 1, `Retired selector ${selector} is still defined.`);
     }

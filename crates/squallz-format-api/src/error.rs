@@ -98,7 +98,8 @@ impl FormatError {
     }
 
     /// Creates a corrupt-archive error that identifies one required split
-    /// volume. The variant remains `CorruptArchive` for CLI/API compatibility.
+    /// volume. This is classified as `CorruptArchive` because the requested
+    /// archive set is structurally incomplete.
     pub fn missing_volume(path: impl AsRef<Path>) -> Self {
         Self::CorruptArchive(format!(
             "{MISSING_VOLUME_PREFIX}{}",

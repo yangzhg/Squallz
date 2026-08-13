@@ -7,7 +7,7 @@ use reed_solomon_erasure::galois_8::ReedSolomon;
 use squallz_format_api::{
     ArchiveFormat, ArchiveReader, BoundedProblemLog, Compressor, ControlToken, EntryMeta,
     EntryPath, EntryType, FormatError, OpenOptions, ProgressSink, ReadSeek, RecoverySummary,
-    StreamFactory, TestReport, TestSummary, TEST_PROBLEM_PREVIEW_LIMIT,
+    StreamFactory, TestSummary, TEST_PROBLEM_PREVIEW_LIMIT,
 };
 
 use crate::{sevenz::SevenZFormat, tar::TarFormat, zip::ZipFormat};
@@ -389,22 +389,6 @@ impl ArchiveReader for EntrySetSqzReader {
         }))
     }
 
-    fn test(
-        &mut self,
-        progress: &dyn ProgressSink,
-        ctl: &ControlToken,
-    ) -> Result<TestReport, FormatError> {
-        let recovery = self.recovery.as_ref().map(RecoveryState::summary);
-        let mut problems = Vec::new();
-        let entries_tested =
-            self.test_with_problem_recorder(progress, ctl, |problem| problems.push(problem))?;
-        Ok(TestReport {
-            entries_tested,
-            problems,
-            recovery,
-        })
-    }
-
     fn test_summary(
         &mut self,
         progress: &dyn ProgressSink,
@@ -444,26 +428,6 @@ impl ArchiveReader for SqzArchiveReader {
         match self {
             SqzArchiveReader::EntrySet(reader) => reader.read_entry(path),
             SqzArchiveReader::Inner { reader, .. } => reader.read_entry(path),
-        }
-    }
-
-    fn test(
-        &mut self,
-        progress: &dyn ProgressSink,
-        ctl: &ControlToken,
-    ) -> Result<TestReport, FormatError> {
-        match self {
-            SqzArchiveReader::EntrySet(reader) => reader.test(progress, ctl),
-            SqzArchiveReader::Inner {
-                reader,
-                outer_recovery,
-            } => {
-                let mut report = reader.test(progress, ctl)?;
-                if report.recovery.is_none() {
-                    report.recovery = outer_recovery.clone();
-                }
-                Ok(report)
-            }
         }
     }
 
@@ -610,15 +574,19 @@ impl RecoveryState {
         let mut bytes = vec![0u8; len];
         src.seek(SeekFrom::Start(footer.recovery_offset))?;
         src.read_exact(&mut bytes)?;
-        let mut state = Self::parse_protected_or_legacy(&bytes)?;
+        let mut state = Self::parse_protected(&bytes)?;
         state.repair(src)?;
         Ok(Some(state))
     }
 
-    fn parse_protected_or_legacy(section: &[u8]) -> Result<Self, FormatError> {
+    fn parse_protected(section: &[u8]) -> Result<Self, FormatError> {
         let trailer = match parse_recovery_protection_trailer(section) {
             Ok(Some(trailer)) => trailer,
-            Ok(None) => return Self::parse(section),
+            Ok(None) => {
+                return Err(FormatError::CorruptArchive(
+                    "sqz recovery section is missing its protection trailer".into(),
+                ));
+            }
             Err(trailer_err) => {
                 if recovery_protection_trailer_crc_mismatch(section) {
                     return Self::parse_with_damaged_protection_trailer(section);
@@ -1282,7 +1250,7 @@ fn recover_footer_from_recovery_scan(
         let mut section = vec![0u8; section_len_usize];
         src.seek(SeekFrom::Start(recovery_offset))?;
         src.read_exact(&mut section)?;
-        let recovery = match RecoveryState::parse_protected_or_legacy(&section) {
+        let recovery = match RecoveryState::parse_protected(&section) {
             Ok(recovery) => recovery,
             Err(_) => continue,
         };

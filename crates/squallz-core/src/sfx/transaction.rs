@@ -9,14 +9,19 @@ use serde::{Deserialize, Serialize};
 use squallz_format_api::FormatError;
 
 use super::{output_exists_error, validate_publish_destination, SfxLayout};
+use crate::archive_path::{checked_path_component, is_canonical_process_sequence};
 use crate::destination_guard::{
     path_state_digest, verify_destination_guard, verify_moved_path_state,
 };
 pub(super) use crate::filesystem_identity::{file_identity, path_identity, PathIdentity};
-use crate::{CreateArtifactKind, CreateCommitPolicy, CreateDestinationGuard};
+use crate::stored_os_string::StoredOsString;
+use crate::{
+    parent_or_current, sync_directory, CreateArtifactKind, CreateCommitPolicy,
+    CreateDestinationGuard,
+};
 
-const TRANSACTION_VERSION: u32 = 4;
-const CLEANUP_VERSION: u32 = 2;
+const TRANSACTION_VERSION: u32 = 1;
+const CLEANUP_VERSION: u32 = 1;
 const TRANSACTION_MAX_BYTES: usize = 64 * 1024;
 const TRANSACTION_JOURNAL_NAME: &str = ".squallz-sfx-transaction.json";
 const TRANSACTION_COMPLETION_NAME: &str = ".squallz-sfx-completed.json";
@@ -98,7 +103,7 @@ pub(super) fn merge_cleanup_result(
 struct BoundOutput {
     path: PathBuf,
     identity: PathIdentity,
-    digest: Option<[u8; 32]>,
+    digest: [u8; 32],
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -124,30 +129,19 @@ impl From<SfxLayout> for JournalLayout {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "encoding", content = "units", rename_all = "snake_case")]
-enum StoredName {
-    Unix(Vec<u8>),
-    Windows(Vec<u16>),
-    Utf8(String),
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct TransactionRecord {
     version: u32,
     layout: JournalLayout,
-    destination: StoredName,
-    staging_destination: Option<StoredName>,
-    requested_destination: Option<StoredName>,
-    staged: StoredName,
-    holder: StoredName,
+    destination: StoredOsString,
+    requested_destination: StoredOsString,
+    staged: StoredOsString,
+    holder: StoredOsString,
     holder_identity: PathIdentity,
     previous_identity: PathIdentity,
     replacement_identity: PathIdentity,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    previous_digest: Option<[u8; 32]>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    replacement_digest: Option<[u8; 32]>,
+    previous_digest: [u8; 32],
+    replacement_digest: [u8; 32],
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -156,12 +150,11 @@ struct CleanupRecord {
     version: u32,
     kind: CleanupKind,
     layout: JournalLayout,
-    requested_destination: StoredName,
-    staged: StoredName,
-    quarantine: StoredName,
+    requested_destination: StoredOsString,
+    staged: StoredOsString,
+    quarantine: StoredOsString,
     identity: PathIdentity,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    state_digest: Option<[u8; 32]>,
+    state_digest: [u8; 32],
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -202,90 +195,8 @@ struct ResolvedTransaction {
     holder_identity: PathIdentity,
     previous_identity: PathIdentity,
     replacement_identity: PathIdentity,
-    previous_digest: Option<[u8; 32]>,
-    replacement_digest: Option<[u8; 32]>,
-}
-
-impl StoredName {
-    #[cfg(unix)]
-    fn from_os_str(name: &OsStr) -> Result<Self, FormatError> {
-        use std::os::unix::ffi::OsStrExt;
-
-        let bytes = name.as_bytes();
-        if bytes.contains(&0) {
-            return Err(FormatError::Unsupported(
-                "SFX transaction path contains a null byte".into(),
-            ));
-        }
-        Ok(Self::Unix(bytes.to_vec()))
-    }
-
-    #[cfg(windows)]
-    fn from_os_str(name: &OsStr) -> Result<Self, FormatError> {
-        use std::os::windows::ffi::OsStrExt;
-
-        let units = name.encode_wide().collect::<Vec<_>>();
-        if units.contains(&0) {
-            return Err(FormatError::Unsupported(
-                "SFX transaction path contains a null unit".into(),
-            ));
-        }
-        Ok(Self::Windows(units))
-    }
-
-    #[cfg(not(any(unix, windows)))]
-    fn from_os_str(name: &OsStr) -> Result<Self, FormatError> {
-        name.to_str()
-            .map(|name| Self::Utf8(name.to_owned()))
-            .ok_or_else(|| {
-                FormatError::Unsupported(
-                    "SFX transaction paths must be UTF-8 on this platform".into(),
-                )
-            })
-    }
-
-    #[cfg(unix)]
-    fn to_os_string(&self) -> Result<OsString, FormatError> {
-        use std::os::unix::ffi::OsStringExt;
-
-        match self {
-            Self::Unix(bytes) if !bytes.contains(&0) => Ok(OsString::from_vec(bytes.clone())),
-            Self::Unix(_) => Err(FormatError::Unsupported(
-                "SFX transaction path contains a null byte".into(),
-            )),
-            _ => Err(FormatError::Unsupported(
-                "SFX transaction journal belongs to another platform".into(),
-            )),
-        }
-    }
-
-    #[cfg(windows)]
-    fn to_os_string(&self) -> Result<OsString, FormatError> {
-        use std::os::windows::ffi::OsStringExt;
-
-        match self {
-            Self::Windows(units) if !units.contains(&0) => Ok(OsString::from_wide(units)),
-            Self::Windows(_) => Err(FormatError::Unsupported(
-                "SFX transaction path contains a null unit".into(),
-            )),
-            _ => Err(FormatError::Unsupported(
-                "SFX transaction journal belongs to another platform".into(),
-            )),
-        }
-    }
-
-    #[cfg(not(any(unix, windows)))]
-    fn to_os_string(&self) -> Result<OsString, FormatError> {
-        match self {
-            Self::Utf8(name) if !name.as_bytes().contains(&0) => Ok(OsString::from(name)),
-            Self::Utf8(_) => Err(FormatError::Unsupported(
-                "SFX transaction path contains a null byte".into(),
-            )),
-            _ => Err(FormatError::Unsupported(
-                "SFX transaction journal belongs to another platform".into(),
-            )),
-        }
-    }
+    previous_digest: [u8; 32],
+    replacement_digest: [u8; 32],
 }
 
 pub(super) fn replace_bound_staged_path(
@@ -583,17 +494,17 @@ fn discard_staged_path_inner(
         version: CLEANUP_VERSION,
         kind,
         layout: layout.into(),
-        requested_destination: StoredName::from_os_str(
+        requested_destination: StoredOsString::from_os_str(
             requested_destination.file_name().ok_or_else(|| {
                 FormatError::Unsupported("SFX destination has no file name".into())
             })?,
         )?,
-        staged: StoredName::from_os_str(staged_name)?,
-        quarantine: StoredName::from_os_str(quarantine.file_name().ok_or_else(|| {
+        staged: StoredOsString::from_os_str(staged_name)?,
+        quarantine: StoredOsString::from_os_str(quarantine.file_name().ok_or_else(|| {
             FormatError::Unsupported("SFX cleanup quarantine has no file name".into())
         })?)?,
         identity: staged_identity,
-        state_digest: Some(state_digest),
+        state_digest,
     };
     write_cleanup_record(requested_destination, &record, &mut sync_directory).map_err(|error| {
         recovery_error_without_staging(
@@ -762,21 +673,7 @@ where
         .map_err(|error| with_cleanup_details(error, &cleanup_target, &cleanup_paths))?;
     let quarantine_identity = observed_identity(&quarantine)
         .map_err(|error| with_cleanup_details(error, &cleanup_target, &cleanup_paths))?;
-    let expected_digest = match open.record.version {
-        1 => match (staged_identity, quarantine_identity) {
-            (Some(identity), None) if identity == open.record.identity => {
-                path_state_digest(&staged)
-                    .map_err(|error| with_cleanup_details(error, &cleanup_target, &cleanup_paths))?
-            }
-            (None, Some(identity)) if identity == open.record.identity => {
-                path_state_digest(&quarantine)
-                    .map_err(|error| with_cleanup_details(error, &cleanup_target, &cleanup_paths))?
-            }
-            _ => None,
-        },
-        CLEANUP_VERSION => open.record.state_digest,
-        _ => None,
-    };
+    let expected_digest = open.record.state_digest;
     match (staged_identity, quarantine_identity) {
         (Some(identity), None) if identity == open.record.identity => {
             ensure_staged_identity(&staged, open.record.identity, layout)
@@ -855,7 +752,7 @@ struct CleanupDisposal<'a> {
     quarantine: &'a Path,
     expected_identity: PathIdentity,
     layout: SfxLayout,
-    expected_digest: Option<[u8; 32]>,
+    expected_digest: [u8; 32],
     cleanup_target: &'a Path,
     cleanup_paths: &'a [&'a PathBuf],
 }
@@ -945,14 +842,11 @@ where
 
 fn verify_cleanup_path_digest(
     path: &Path,
-    expected: Option<[u8; 32]>,
+    expected: [u8; 32],
     cleanup_target: &Path,
     cleanup_paths: &[&PathBuf],
     phase: &str,
 ) -> Result<(), FormatError> {
-    let Some(expected) = expected else {
-        return Ok(());
-    };
     let observed = path_state_digest(path)
         .map_err(|error| with_cleanup_details(error, cleanup_target, cleanup_paths))?;
     if observed == Some(expected) {
@@ -1051,29 +945,12 @@ fn read_cleanup_record(path: &Path, recovery_target: &Path) -> Result<OpenCleanu
             format!("SFX cleanup record is invalid: {error}"),
         )
     })?;
-    match (record.version, record.state_digest) {
-        (1, None) | (CLEANUP_VERSION, Some(_)) => {}
-        (1, Some(_)) => {
-            return Err(recovery_error_without_staging(
-                recovery_target,
-                vec![path.to_path_buf()],
-                "SFX cleanup v1 record unexpectedly contains a tree digest".into(),
-            ));
-        }
-        (CLEANUP_VERSION, None) => {
-            return Err(recovery_error_without_staging(
-                recovery_target,
-                vec![path.to_path_buf()],
-                "SFX cleanup v2 record is missing its tree digest".into(),
-            ));
-        }
-        (version, _) => {
-            return Err(recovery_error_without_staging(
-                recovery_target,
-                vec![path.to_path_buf()],
-                format!("unsupported SFX cleanup record version: {version}"),
-            ));
-        }
+    if record.version != CLEANUP_VERSION {
+        return Err(recovery_error_without_staging(
+            recovery_target,
+            vec![path.to_path_buf()],
+            format!("unsupported SFX cleanup record version: {}", record.version),
+        ));
     }
     let open = OpenCleanup {
         path: path.to_path_buf(),
@@ -1100,7 +977,7 @@ fn current_paths<const N: usize>(paths: [&Path; N]) -> Vec<PathBuf> {
 fn cleanup_quarantine_name_is_reserved(name: &str) -> bool {
     name.strip_prefix(".squallz-sfx-cleanup-")
         .and_then(|name| name.strip_suffix(".tmp"))
-        .is_some_and(valid_pid_sequence)
+        .is_some_and(is_canonical_process_sequence)
 }
 
 fn reserve_cleanup_quarantine(parent: &Path) -> Result<PathBuf, FormatError> {
@@ -1156,7 +1033,7 @@ where
 fn cleanup_journal_temp_name_is_reserved(name: &str) -> bool {
     name.strip_prefix(".squallz-sfx-cleanup-journal-")
         .and_then(|name| name.strip_suffix(".tmp"))
-        .is_some_and(valid_pid_sequence)
+        .is_some_and(is_canonical_process_sequence)
 }
 
 fn with_active_staging_path(error: FormatError, staged: &Path) -> FormatError {
@@ -1315,27 +1192,25 @@ fn classify_cleanup_owned_path(
             "SFX cleanup record paths changed identity".into(),
         ));
     }
-    if let Some(expected) = open.record.state_digest {
-        let current = match (staged_identity, quarantine_identity) {
-            (Some(_), None) => Some(staged.as_path()),
-            (None, Some(_)) => Some(quarantine.as_path()),
-            (None, None) | (Some(_), Some(_)) => None,
-        };
-        if let Some(current) = current {
-            let observed = path_state_digest(current).map_err(|error| {
-                recovery_error_without_staging(
-                    &recovery_target,
-                    current_paths([record_path, &staged, &quarantine]),
-                    format!("SFX cleanup tree could not be verified: {error}"),
-                )
-            })?;
-            if observed != Some(expected) {
-                return Err(recovery_error_without_staging(
-                    &recovery_target,
-                    current_paths([record_path, &staged, &quarantine]),
-                    "SFX cleanup tree changed after its record was published".into(),
-                ));
-            }
+    let current = match (staged_identity, quarantine_identity) {
+        (Some(_), None) => Some(staged.as_path()),
+        (None, Some(_)) => Some(quarantine.as_path()),
+        (None, None) | (Some(_), Some(_)) => None,
+    };
+    if let Some(current) = current {
+        let observed = path_state_digest(current).map_err(|error| {
+            recovery_error_without_staging(
+                &recovery_target,
+                current_paths([record_path, &staged, &quarantine]),
+                format!("SFX cleanup tree could not be verified: {error}"),
+            )
+        })?;
+        if observed != Some(open.record.state_digest) {
+            return Err(recovery_error_without_staging(
+                &recovery_target,
+                current_paths([record_path, &staged, &quarantine]),
+                "SFX cleanup tree changed after its record was published".into(),
+            ));
         }
     }
     let owned = [record_path, staged.as_path(), quarantine.as_path()]
@@ -1464,11 +1339,9 @@ fn validate_pending_record_state(transaction: &ResolvedTransaction) -> Result<()
     for (path, expected, digest) in locations {
         if let Some(identity) = observed_identity(path).map_err(|error| error.to_string())? {
             if identity == expected {
-                if let Some(digest) = digest {
-                    let observed = path_state_digest(path).map_err(|error| error.to_string())?;
-                    if observed != Some(digest) {
-                        return Err(format!("content changed at {}", path.display()));
-                    }
+                let observed = path_state_digest(path).map_err(|error| error.to_string())?;
+                if observed != Some(digest) {
+                    return Err(format!("content changed at {}", path.display()));
                 }
                 if expected == transaction.replacement_identity {
                     replacement_entries += 1;
@@ -1492,12 +1365,10 @@ fn validate_completed_record_state(transaction: &ResolvedTransaction) -> Result<
     {
         return Err("completed destination identity changed".into());
     }
-    if let Some(expected) = transaction.replacement_digest {
-        let observed =
-            path_state_digest(&transaction.destination).map_err(|error| error.to_string())?;
-        if observed != Some(expected) {
-            return Err("completed destination content changed".into());
-        }
+    let observed =
+        path_state_digest(&transaction.destination).map_err(|error| error.to_string())?;
+    if observed != Some(transaction.replacement_digest) {
+        return Err("completed destination content changed".into());
     }
     let holder = match fs::symlink_metadata(&transaction.holder) {
         Ok(metadata) => metadata,
@@ -1531,12 +1402,10 @@ fn validate_completed_record_state(transaction: &ResolvedTransaction) -> Result<
         if identity != transaction.previous_identity {
             return Err("completed previous-output identity changed".into());
         }
-        if let Some(expected) = transaction.previous_digest {
-            let observed =
-                path_state_digest(&transaction.previous).map_err(|error| error.to_string())?;
-            if observed != Some(expected) {
-                return Err("completed previous-output content changed".into());
-            }
+        let observed =
+            path_state_digest(&transaction.previous).map_err(|error| error.to_string())?;
+        if observed != Some(transaction.previous_digest) {
+            return Err("completed previous-output content changed".into());
         }
     }
     Ok(())
@@ -1545,7 +1414,7 @@ fn validate_completed_record_state(transaction: &ResolvedTransaction) -> Result<
 fn journal_temp_name_is_reserved(name: &str) -> bool {
     name.strip_prefix(".squallz-sfx-journal-")
         .and_then(|name| name.strip_suffix(".tmp"))
-        .is_some_and(valid_pid_sequence)
+        .is_some_and(is_canonical_process_sequence)
 }
 
 fn has_sfx_artifact_shape(candidate: &Path) -> bool {
@@ -1975,24 +1844,23 @@ where
         holder_identity,
         previous_identity,
         replacement_identity,
-        previous_digest: Some(digests.previous),
-        replacement_digest: Some(digests.replacement),
+        previous_digest: digests.previous,
+        replacement_digest: digests.replacement,
     };
     let record = TransactionRecord {
         version: TRANSACTION_VERSION,
         layout: layout.into(),
-        destination: StoredName::from_os_str(destination_name)?,
-        staging_destination: None,
-        requested_destination: Some(StoredName::from_os_str(requested_name)?),
-        staged: StoredName::from_os_str(staged_name)?,
-        holder: StoredName::from_os_str(holder.file_name().ok_or_else(|| {
+        destination: StoredOsString::from_os_str(destination_name)?,
+        requested_destination: StoredOsString::from_os_str(requested_name)?,
+        staged: StoredOsString::from_os_str(staged_name)?,
+        holder: StoredOsString::from_os_str(holder.file_name().ok_or_else(|| {
             FormatError::Unsupported("SFX transaction holder has no file name".into())
         })?)?,
         holder_identity,
         previous_identity,
         replacement_identity,
-        previous_digest: Some(digests.previous),
-        replacement_digest: Some(digests.replacement),
+        previous_digest: digests.previous,
+        replacement_digest: digests.replacement,
     };
     if let Err(error) =
         verify_prejournal_digests(destination, requested_destination, staged, digests)
@@ -2345,7 +2213,7 @@ fn move_bound<M, S>(
     source: &Path,
     destination: &Path,
     identity: PathIdentity,
-    digest: Option<[u8; 32]>,
+    digest: [u8; 32],
     role: &str,
     move_no_replace: &mut M,
     sync: &mut S,
@@ -2389,7 +2257,7 @@ fn remove_duplicate_source<S>(
     source: &Path,
     destination: &Path,
     identity: PathIdentity,
-    digest: Option<[u8; 32]>,
+    digest: [u8; 32],
     role: &str,
     sync: &mut S,
 ) -> Result<(), FormatError>
@@ -2543,29 +2411,27 @@ fn verify_bound_outputs(destination: &Path, outputs: &[BoundOutput]) -> Result<(
     for output in outputs {
         match observed_identity(&output.path) {
             Ok(Some(identity)) if identity == output.identity => {
-                if let Some(expected) = output.digest {
-                    match path_state_digest(&output.path) {
-                        Ok(Some(observed)) if observed == expected => {}
-                        Ok(_) => {
-                            return Err(bound_output_conflict(
-                                destination,
-                                outputs,
-                                format!(
-                                    "preserved SFX output content changed at {}",
-                                    output.path.display()
-                                ),
-                            ));
-                        }
-                        Err(error) => {
-                            return Err(bound_output_conflict(
-                                destination,
-                                outputs,
-                                format!(
-                                    "preserved SFX output content could not be verified at {}: {error}",
-                                    output.path.display()
-                                ),
-                            ));
-                        }
+                match path_state_digest(&output.path) {
+                    Ok(Some(observed)) if observed == output.digest => {}
+                    Ok(_) => {
+                        return Err(bound_output_conflict(
+                            destination,
+                            outputs,
+                            format!(
+                                "preserved SFX output content changed at {}",
+                                output.path.display()
+                            ),
+                        ));
+                    }
+                    Err(error) => {
+                        return Err(bound_output_conflict(
+                            destination,
+                            outputs,
+                            format!(
+                                "preserved SFX output content could not be verified at {}: {error}",
+                                output.path.display()
+                            ),
+                        ));
                     }
                 }
             }
@@ -2931,22 +2797,16 @@ fn resolve_transaction(
     Ok(transaction)
 }
 
-fn legacy_transaction_digests(
-    previous: Option<[u8; 32]>,
-    replacement: Option<[u8; 32]>,
-) -> Result<Option<TransactionDigests>, FormatError> {
-    if previous.is_some() || replacement.is_some() {
-        return Err(FormatError::Unsupported(
-            "legacy SFX transaction journal contains v4 content digests".into(),
-        ));
-    }
-    Ok(None)
-}
-
 fn resolve_transaction_paths(
     destination: &Path,
     record: &TransactionRecord,
 ) -> Result<ResolvedTransaction, FormatError> {
+    if record.version != TRANSACTION_VERSION {
+        return Err(FormatError::Unsupported(format!(
+            "unsupported SFX transaction journal version: {}",
+            record.version
+        )));
+    }
     let destination_name = checked_component(&record.destination)?;
     if destination.file_name() != Some(destination_name.as_os_str()) {
         return Err(FormatError::Unsupported(
@@ -2958,76 +2818,8 @@ fn resolve_transaction_paths(
         JournalLayout::MacosApp => SfxLayout::MacosApp,
     };
     let staged_name = checked_component(&record.staged)?;
-    let (staging_valid, reserved_holder, digests) = match record.version {
-        1 => (
-            record.staging_destination.is_none()
-                && record.requested_destination.is_none()
-                && staging_name_matches(&staged_name, &destination_name, layout),
-            false,
-            legacy_transaction_digests(record.previous_digest, record.replacement_digest)?,
-        ),
-        2 => {
-            let staging_valid = match (&record.staging_destination, &record.requested_destination) {
-                (Some(name), None) => {
-                    staging_name_matches(&staged_name, &checked_component(name)?, layout)
-                }
-                _ => false,
-            };
-            (
-                staging_valid,
-                false,
-                legacy_transaction_digests(record.previous_digest, record.replacement_digest)?,
-            )
-        }
-        3 => {
-            let staging_valid = match (&record.staging_destination, &record.requested_destination) {
-                (None, Some(name)) => {
-                    checked_component(name)?;
-                    staging_name_is_reserved(&staged_name)
-                }
-                _ => false,
-            };
-            (
-                staging_valid,
-                true,
-                legacy_transaction_digests(record.previous_digest, record.replacement_digest)?,
-            )
-        }
-        4 => {
-            let staging_valid = match (&record.staging_destination, &record.requested_destination) {
-                (None, Some(name)) => {
-                    checked_component(name)?;
-                    staging_name_is_reserved(&staged_name)
-                }
-                _ => false,
-            };
-            let (Some(previous_digest), Some(replacement_digest)) =
-                (record.previous_digest, record.replacement_digest)
-            else {
-                return Err(FormatError::Unsupported(
-                    "SFX transaction v4 journal is missing content digests".into(),
-                ));
-            };
-            (
-                staging_valid,
-                true,
-                Some(TransactionDigests {
-                    previous: previous_digest,
-                    replacement: replacement_digest,
-                }),
-            )
-        }
-        version => {
-            return Err(FormatError::Unsupported(format!(
-                "unsupported SFX transaction journal version: {version}"
-            )));
-        }
-    };
-    let (previous_digest, replacement_digest) = match digests {
-        Some(digests) => (Some(digests.previous), Some(digests.replacement)),
-        None => (None, None),
-    };
-    if !staging_valid {
+    checked_component(&record.requested_destination)?;
+    if !staging_name_is_reserved(&staged_name) {
         return Err(FormatError::Unsupported(
             "SFX transaction journal contains an invalid staging path".into(),
         ));
@@ -3036,15 +2828,7 @@ fn resolve_transaction_paths(
     let holder_name_text = holder_name.to_str().ok_or_else(|| {
         FormatError::Unsupported("SFX transaction holder name must be UTF-8".into())
     })?;
-    let holder_valid = if reserved_holder {
-        holder_name_is_reserved(holder_name_text)
-    } else {
-        let expected_prefix = legacy_holder_prefix(destination)?;
-        holder_name_text
-            .strip_prefix(&expected_prefix)
-            .is_some_and(valid_pid_sequence)
-    };
-    if !holder_valid {
+    if !holder_name_is_reserved(holder_name_text) {
         return Err(FormatError::Unsupported(
             "SFX transaction journal contains an invalid holder path".into(),
         ));
@@ -3071,8 +2855,8 @@ fn resolve_transaction_paths(
         holder_identity: record.holder_identity,
         previous_identity: record.previous_identity,
         replacement_identity: record.replacement_identity,
-        previous_digest,
-        replacement_digest,
+        previous_digest: record.previous_digest,
+        replacement_digest: record.replacement_digest,
     };
     Ok(transaction)
 }
@@ -3200,14 +2984,11 @@ fn ensure_identity(
 fn ensure_bound_state(
     path: &Path,
     identity: PathIdentity,
-    digest: Option<[u8; 32]>,
+    digest: [u8; 32],
     transaction: &ResolvedTransaction,
     role: &str,
 ) -> Result<(), FormatError> {
     ensure_identity(path, identity, transaction, role)?;
-    let Some(expected) = digest else {
-        return Ok(());
-    };
     let observed = path_state_digest(path).map_err(|error| {
         transaction_conflict(
             transaction,
@@ -3217,7 +2998,7 @@ fn ensure_bound_state(
             ),
         )
     })?;
-    if observed == Some(expected) {
+    if observed == Some(digest) {
         return Ok(());
     }
     Err(transaction_conflict(
@@ -3261,7 +3042,7 @@ fn verify_reachable_transaction_digests(
             "previous-output backup",
         ),
     ] {
-        if digest.is_some() && observed_identity(path)? == Some(identity) {
+        if observed_identity(path)? == Some(identity) {
             ensure_bound_state(path, identity, digest, transaction, role)?;
         }
     }
@@ -3345,65 +3126,23 @@ where
     );
 }
 
-fn checked_component(name: &StoredName) -> Result<OsString, FormatError> {
+fn checked_component(name: &StoredOsString) -> Result<OsString, FormatError> {
     let name = name.to_os_string()?;
-    let path = Path::new(&name);
-    if path.file_name() != Some(path.as_os_str())
-        || path
-            .parent()
-            .is_some_and(|parent| !parent.as_os_str().is_empty())
-    {
-        return Err(FormatError::Unsupported(
-            "SFX transaction path is not a single file name".into(),
-        ));
-    }
-    Ok(name)
-}
-
-fn staging_name_matches(candidate: &OsStr, destination: &OsStr, layout: SfxLayout) -> bool {
-    let Some(candidate) = candidate.to_str() else {
-        return false;
-    };
-    let destination = destination.to_string_lossy();
-    let purpose = match layout {
-        SfxLayout::SingleFile => "sfx",
-        SfxLayout::MacosApp => "sfx-bundle",
-    };
-    let prefix = format!(".{destination}.{purpose}-");
-    let suffix = format!(".tmp.{destination}");
-    let Some(middle) = candidate
-        .strip_prefix(&prefix)
-        .and_then(|value| value.strip_suffix(&suffix))
-    else {
-        return false;
-    };
-    let Some((process, attempt)) = middle.split_once('-') else {
-        return false;
-    };
-    process.parse::<u32>().is_ok_and(|value| value > 0) && attempt.parse::<u32>().is_ok()
-}
-
-fn valid_pid_sequence(value: &str) -> bool {
-    let Some((process, sequence)) = value.split_once('-') else {
-        return false;
-    };
-    !sequence.contains('-')
-        && process.parse::<u32>().is_ok_and(|value| value > 0)
-        && sequence.parse::<u64>().is_ok_and(|value| value > 0)
+    checked_path_component(Some(&name), "SFX transaction path")
 }
 
 fn staging_name_is_reserved(name: &OsStr) -> bool {
     name.to_str()
         .and_then(|name| name.strip_prefix(".squallz-sfx-stage-"))
         .and_then(|name| name.strip_suffix(".tmp"))
-        .is_some_and(valid_pid_sequence)
+        .is_some_and(is_canonical_process_sequence)
 }
 
 fn payload_name_is_reserved(name: &OsStr) -> bool {
     name.to_str()
         .and_then(|name| name.strip_prefix(".squallz-sfx-payload-"))
         .and_then(|name| name.strip_suffix(".zip"))
-        .is_some_and(valid_pid_sequence)
+        .is_some_and(is_canonical_process_sequence)
 }
 
 fn cleanup_source_name_is_valid(record: &CleanupRecord, name: &OsStr) -> bool {
@@ -3616,12 +3355,9 @@ where
 fn verify_completed_path_digest(
     transaction: &ResolvedTransaction,
     path: &Path,
-    expected: Option<[u8; 32]>,
+    expected: [u8; 32],
     role: &str,
 ) -> Result<(), FormatError> {
-    let Some(expected) = expected else {
-        return Ok(());
-    };
     let observed = path_state_digest(path).map_err(|error| {
         recovery_error_without_staging(
             &transaction.destination,
@@ -3692,18 +3428,19 @@ fn resolve_publish_destination(destination: &Path) -> Result<PathBuf, FormatErro
         )
     })?;
     let recorded = parent_or_current(&requested).join(&recorded_name);
+    let requested_alias = checked_component(&record.requested_destination).map_err(|error| {
+        recovery_error(
+            &requested,
+            vec![journal.clone()],
+            format!(
+                "the directory SFX transaction journal at {} has an invalid requested destination and was left untouched: {error}",
+                journal.display()
+            ),
+        )
+    })?;
     let requested_matches_record = requested.file_name() == Some(recorded_name.as_os_str())
         || requested_name == recorded_name.as_os_str()
-        || record
-            .requested_destination
-            .as_ref()
-            .and_then(|name| checked_component(name).ok())
-            .is_some_and(|alias| requested_name == alias.as_os_str())
-        || record
-            .staging_destination
-            .as_ref()
-            .and_then(|name| checked_component(name).ok())
-            .is_some_and(|alias| requested_name == alias.as_os_str());
+        || requested_name == requested_alias.as_os_str();
     if requested_matches_record {
         return Ok(recorded);
     }
@@ -3767,14 +3504,9 @@ fn completion_path(destination: &Path) -> PathBuf {
     parent_or_current(destination).join(TRANSACTION_COMPLETION_NAME)
 }
 
-fn legacy_holder_prefix(destination: &Path) -> Result<String, FormatError> {
-    let key = destination_key(destination)?;
-    Ok(format!(".squallz-sfx-{}-", &key[..16]))
-}
-
 fn holder_name_is_reserved(name: &str) -> bool {
     name.strip_prefix(".squallz-sfx-holder-")
-        .is_some_and(valid_pid_sequence)
+        .is_some_and(is_canonical_process_sequence)
 }
 
 fn lock_destination(destination: &Path) -> Result<File, FormatError> {
@@ -3840,12 +3572,6 @@ where
     Ok(())
 }
 
-fn parent_or_current(path: &Path) -> &Path {
-    path.parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."))
-}
-
 fn open_journal_file(path: &Path) -> io::Result<File> {
     let mut options = OpenOptions::new();
     options.read(true);
@@ -3859,35 +3585,6 @@ fn open_journal_file(path: &Path) -> io::Result<File> {
     options.open(path)
 }
 
-#[cfg(unix)]
-fn sync_directory(path: &Path) -> io::Result<()> {
-    File::open(path)?.sync_all()
-}
-
-#[cfg(windows)]
-fn sync_directory(path: &Path) -> io::Result<()> {
-    use std::os::windows::fs::OpenOptionsExt;
-    use windows_sys::Win32::Storage::FileSystem::{
-        FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-    };
-
-    OpenOptions::new()
-        .read(true)
-        .write(true)
-        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
-        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
-        .open(path)?
-        .sync_all()
-}
-
-#[cfg(not(any(unix, windows)))]
-fn sync_directory(_path: &Path) -> io::Result<()> {
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "durable SFX transactions are unavailable on this platform",
-    ))
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -3895,7 +3592,7 @@ mod tests {
     use squallz_format_api::{
         ArchiveFormat, ArchiveReader, ArchiveWriter, ControlToken, CreateOptions, EntryMeta,
         EntryPath, FormatCapabilities, FormatRegistry, NoProgress,
-        OpenOptions as ArchiveOpenOptions, ReadSeek, TestReport, WriteSeek,
+        OpenOptions as ArchiveOpenOptions, ReadSeek, TestSummary, WriteSeek,
     };
 
     use super::*;
@@ -3980,12 +3677,12 @@ mod tests {
             ))
         }
 
-        fn test(
+        fn test_summary(
             &mut self,
             _progress: &dyn squallz_format_api::ProgressSink,
             _control: &ControlToken,
-        ) -> Result<TestReport, FormatError> {
-            Ok(TestReport::default())
+        ) -> Result<TestSummary, FormatError> {
+            Ok(TestSummary::default())
         }
     }
 
@@ -4055,51 +3752,6 @@ mod tests {
         writer.write_all(&bytes).unwrap();
         writer.sync_all().unwrap();
         assert_eq!(path_identity(&open.path).unwrap(), identity);
-    }
-
-    fn legacy_transaction_fixture(
-        destination: &Path,
-        version: u32,
-        staging_destination: Option<&OsStr>,
-    ) -> TransactionRecord {
-        let destination_name = destination.file_name().unwrap();
-        let staging_name = staging_destination.unwrap_or(destination_name);
-        let staging_name = format!(
-            ".{}.sfx-{}-0.tmp.{}",
-            staging_name.to_string_lossy(),
-            std::process::id(),
-            staging_name.to_string_lossy()
-        );
-        let staged = parent_or_current(destination).join(&staging_name);
-        fs::write(&staged, b"legacy staged output").unwrap();
-        let holder_name = format!(
-            "{}{}-1",
-            legacy_holder_prefix(destination).unwrap(),
-            std::process::id()
-        );
-        let holder = parent_or_current(destination).join(&holder_name);
-        fs::create_dir(&holder).unwrap();
-        let previous = holder.join("previous");
-        let replacement = holder.join("replacement");
-        fs::write(&previous, b"legacy previous output").unwrap();
-        fs::write(&replacement, b"legacy replacement output").unwrap();
-        TransactionRecord {
-            version,
-            layout: JournalLayout::SingleFile,
-            destination: StoredName::from_os_str(destination_name).unwrap(),
-            staging_destination: staging_destination
-                .map(StoredName::from_os_str)
-                .transpose()
-                .unwrap(),
-            requested_destination: None,
-            staged: StoredName::from_os_str(OsStr::new(&staging_name)).unwrap(),
-            holder: StoredName::from_os_str(OsStr::new(&holder_name)).unwrap(),
-            holder_identity: path_identity(&holder).unwrap(),
-            previous_identity: path_identity(&previous).unwrap(),
-            replacement_identity: path_identity(&replacement).unwrap(),
-            previous_digest: None,
-            replacement_digest: None,
-        }
     }
 
     fn acknowledge_completed_backup(error: &FormatError, destination: &Path) -> Vec<u8> {
@@ -4383,109 +4035,8 @@ mod tests {
     }
 
     #[test]
-    fn v3_transaction_fixture_with_reserved_paths_is_recovered() {
-        let dir = test_dir("v3-reserved-path-fixture");
-        fs::create_dir(&dir).unwrap();
-        let destination = dir.join("package.exe");
-        fs::write(&destination, b"previous").unwrap();
-        let staged = staged_file(&destination, b"replacement");
-        let previous_digest = path_state_digest(&destination).unwrap().unwrap();
-        let replacement_digest = path_state_digest(&staged).unwrap().unwrap();
-        let (open, _transaction) = begin_transaction(
-            &canonical_destination(&destination).unwrap(),
-            &canonical_requested_destination(&destination).unwrap(),
-            &staged,
-            path_identity(&staged).unwrap(),
-            SfxLayout::SingleFile,
-            TransactionDigests {
-                previous: previous_digest,
-                replacement: replacement_digest,
-            },
-            &mut sync_directory,
-        )
-        .unwrap();
-        let journal = open.path.clone();
-        drop(open);
-        let mut fixture: serde_json::Value =
-            serde_json::from_slice(&fs::read(&journal).unwrap()).unwrap();
-        let object = fixture.as_object_mut().unwrap();
-        object.insert("version".into(), serde_json::Value::from(3));
-        object.remove("previous_digest");
-        object.remove("replacement_digest");
-        let file = OpenOptions::new()
-            .write(true)
-            .truncate(true)
-            .open(&journal)
-            .unwrap();
-        serde_json::to_writer(&file, &fixture).unwrap();
-        file.sync_all().unwrap();
-        sync_directory(&dir).unwrap();
-
-        let pending = preflight_destination(&destination).unwrap_err();
-        assert_eq!(fs::read(&destination).unwrap(), b"replacement");
-        assert_eq!(
-            acknowledge_completed_backup(&pending, &destination),
-            b"previous"
-        );
-        assert!(!journal.exists());
-        assert!(!completion_path(&destination).exists());
-        cleanup(&dir, &destination);
-    }
-
-    #[test]
-    fn v1_transaction_fixture_resolves_legacy_staging_and_rejects_digests() {
-        let dir = test_dir("v1-transaction-fixture");
-        fs::create_dir(&dir).unwrap();
-        let destination = dir.join("package.exe");
-        let mut record = legacy_transaction_fixture(&destination, 1, None);
-
-        let resolved = resolve_transaction_paths(&destination, &record).unwrap();
-        let expected_staged = record.staged.to_os_string().unwrap();
-
-        assert_eq!(
-            resolved.staged.file_name(),
-            Some(expected_staged.as_os_str())
-        );
-        assert!(resolved.previous_digest.is_none());
-        assert!(resolved.replacement_digest.is_none());
-        record.previous_digest = Some([1; 32]);
-        record.replacement_digest = Some([2; 32]);
-        let error = resolve_transaction_paths(&destination, &record).unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("legacy SFX transaction journal contains v4 content digests"));
-        cleanup(&dir, &destination);
-    }
-
-    #[test]
-    fn v2_transaction_fixture_resolves_bound_staging_and_rejects_digests() {
-        let dir = test_dir("v2-transaction-fixture");
-        fs::create_dir(&dir).unwrap();
-        let destination = dir.join("package.exe");
-        let staging_destination = OsStr::new("requested.exe");
-        let mut record = legacy_transaction_fixture(&destination, 2, Some(staging_destination));
-
-        let resolved = resolve_transaction_paths(&destination, &record).unwrap();
-        let expected_staged = record.staged.to_os_string().unwrap();
-
-        assert_eq!(
-            resolved.staged.file_name(),
-            Some(expected_staged.as_os_str())
-        );
-        assert!(resolved.previous_digest.is_none());
-        assert!(resolved.replacement_digest.is_none());
-        record.previous_digest = Some([3; 32]);
-        record.replacement_digest = Some([4; 32]);
-        let error = resolve_transaction_paths(&destination, &record).unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("legacy SFX transaction journal contains v4 content digests"));
-        cleanup(&dir, &destination);
-    }
-
-    #[test]
-    fn v4_recovery_rejects_same_identity_content_changes_after_a_crash() {
-        let dir = test_dir("v4-recovery-content-change");
+    fn recovery_rejects_same_identity_content_changes_after_a_crash() {
+        let dir = test_dir("recovery-content-change");
         fs::create_dir(&dir).unwrap();
         let destination = dir.join("package.exe");
         fs::write(&destination, b"previous").unwrap();
@@ -4529,8 +4080,8 @@ mod tests {
     }
 
     #[test]
-    fn completed_v4_transaction_rechecks_backup_content_before_cleanup() {
-        let dir = test_dir("v4-completed-content-change");
+    fn completed_transaction_rechecks_backup_content_before_cleanup() {
+        let dir = test_dir("completed-content-change");
         fs::create_dir(&dir).unwrap();
         let destination = dir.join("package.exe");
         fs::write(&destination, b"previous").unwrap();
@@ -4551,8 +4102,8 @@ mod tests {
     }
 
     #[test]
-    fn cleanup_v2_preserves_a_quarantined_app_when_a_deep_member_arrives() {
-        let dir = test_dir("cleanup-v2-deep-member");
+    fn cleanup_preserves_a_quarantined_app_when_a_deep_member_arrives() {
+        let dir = test_dir("cleanup-deep-member");
         fs::create_dir(&dir).unwrap();
         let destination = dir.join("Package.app");
         let (staged, staged_identity) =
@@ -4567,12 +4118,12 @@ mod tests {
             version: CLEANUP_VERSION,
             kind: CleanupKind::Stage,
             layout: JournalLayout::MacosApp,
-            requested_destination: StoredName::from_os_str(destination.file_name().unwrap())
+            requested_destination: StoredOsString::from_os_str(destination.file_name().unwrap())
                 .unwrap(),
-            staged: StoredName::from_os_str(staged.file_name().unwrap()).unwrap(),
-            quarantine: StoredName::from_os_str(quarantine.file_name().unwrap()).unwrap(),
+            staged: StoredOsString::from_os_str(staged.file_name().unwrap()).unwrap(),
+            quarantine: StoredOsString::from_os_str(quarantine.file_name().unwrap()).unwrap(),
             identity: staged_identity,
-            state_digest: Some(state_digest),
+            state_digest,
         };
         write_cleanup_record(&destination, &record, &mut sync_directory).unwrap();
         let mut injected = false;
@@ -4602,8 +4153,8 @@ mod tests {
     }
 
     #[test]
-    fn cleanup_v2_preserves_a_file_rebound_after_digest_validation() {
-        let dir = test_dir("cleanup-v2-file-post-digest-rebind");
+    fn cleanup_preserves_a_file_rebound_after_digest_validation() {
+        let dir = test_dir("cleanup-file-post-digest-rebind");
         fs::create_dir(&dir).unwrap();
         let destination = dir.join("package.exe");
         let (staged, staged_identity) =
@@ -4616,12 +4167,12 @@ mod tests {
             version: CLEANUP_VERSION,
             kind: CleanupKind::Stage,
             layout: JournalLayout::SingleFile,
-            requested_destination: StoredName::from_os_str(destination.file_name().unwrap())
+            requested_destination: StoredOsString::from_os_str(destination.file_name().unwrap())
                 .unwrap(),
-            staged: StoredName::from_os_str(staged.file_name().unwrap()).unwrap(),
-            quarantine: StoredName::from_os_str(quarantine.file_name().unwrap()).unwrap(),
+            staged: StoredOsString::from_os_str(staged.file_name().unwrap()).unwrap(),
+            quarantine: StoredOsString::from_os_str(quarantine.file_name().unwrap()).unwrap(),
             identity: staged_identity,
-            state_digest: Some(state_digest),
+            state_digest,
         };
         write_cleanup_record(&destination, &record, &mut sync_directory).unwrap();
         crate::move_path_no_replace(&staged, &quarantine).unwrap();
@@ -4655,8 +4206,8 @@ mod tests {
     }
 
     #[test]
-    fn cleanup_v2_preserves_a_deep_directory_rebound_after_digest_validation() {
-        let dir = test_dir("cleanup-v2-deep-post-digest-rebind");
+    fn cleanup_preserves_a_deep_directory_rebound_after_digest_validation() {
+        let dir = test_dir("cleanup-deep-post-digest-rebind");
         fs::create_dir(&dir).unwrap();
         let destination = dir.join("Package.app");
         let (staged, staged_identity) =
@@ -4671,12 +4222,12 @@ mod tests {
             version: CLEANUP_VERSION,
             kind: CleanupKind::Stage,
             layout: JournalLayout::MacosApp,
-            requested_destination: StoredName::from_os_str(destination.file_name().unwrap())
+            requested_destination: StoredOsString::from_os_str(destination.file_name().unwrap())
                 .unwrap(),
-            staged: StoredName::from_os_str(staged.file_name().unwrap()).unwrap(),
-            quarantine: StoredName::from_os_str(quarantine.file_name().unwrap()).unwrap(),
+            staged: StoredOsString::from_os_str(staged.file_name().unwrap()).unwrap(),
+            quarantine: StoredOsString::from_os_str(quarantine.file_name().unwrap()).unwrap(),
             identity: staged_identity,
-            state_digest: Some(state_digest),
+            state_digest,
         };
         write_cleanup_record(&destination, &record, &mut sync_directory).unwrap();
         crate::move_path_no_replace(&staged, &quarantine).unwrap();
@@ -4715,39 +4266,6 @@ mod tests {
         assert!(error
             .to_string()
             .contains("without deleting an unverified path"));
-        cleanup(&dir, &destination);
-    }
-
-    #[test]
-    fn cleanup_v1_app_record_is_recovered_through_the_explicit_legacy_branch() {
-        let dir = test_dir("cleanup-v1-app-compatibility");
-        fs::create_dir(&dir).unwrap();
-        let destination = dir.join("Package.app");
-        let (staged, staged_identity) =
-            reserve_staged_path(&destination, SfxLayout::MacosApp).unwrap();
-        let original = staged.join("Contents/Resources/original.dat");
-        fs::create_dir_all(original.parent().unwrap()).unwrap();
-        fs::write(original, b"legacy staging data").unwrap();
-        let parent = fs::canonicalize(&dir).unwrap();
-        let quarantine = reserve_cleanup_quarantine(&parent).unwrap();
-        let record = CleanupRecord {
-            version: 1,
-            kind: CleanupKind::Stage,
-            layout: JournalLayout::MacosApp,
-            requested_destination: StoredName::from_os_str(destination.file_name().unwrap())
-                .unwrap(),
-            staged: StoredName::from_os_str(staged.file_name().unwrap()).unwrap(),
-            quarantine: StoredName::from_os_str(quarantine.file_name().unwrap()).unwrap(),
-            identity: staged_identity,
-            state_digest: None,
-        };
-        write_cleanup_record(&destination, &record, &mut sync_directory).unwrap();
-
-        reconcile_cleanup(&destination, &mut sync_directory).unwrap();
-
-        assert!(!staged.exists());
-        assert!(!quarantine.exists());
-        assert!(!dir.join(CLEANUP_JOURNAL_NAME).exists());
         cleanup(&dir, &destination);
     }
 

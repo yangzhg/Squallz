@@ -4,6 +4,7 @@ use serde_json::{json, Value};
 use squallz_core::api::{
     split_volume_name, CompressionLevel, CreateOptions, FormatError, NoProgress, OpenOptions,
 };
+use squallz_core::{is_plain_sqz_path, is_sqz_archive_path, is_zip_family_path};
 use squallz_recovery::RecoveryReport;
 
 use crate::args::resource_options;
@@ -182,7 +183,7 @@ pub fn repair(
             json,
         );
     }
-    if is_plain_zip_path(&archive) {
+    if is_zip_family_path(&archive) {
         return repair_zip_rebuild(
             ctx,
             archive,
@@ -339,7 +340,7 @@ fn repair_zip_rebuild(
             FormatError::Unsupported("ZIP rebuild repair requires --output <path>".into()).into(),
         );
     };
-    if !is_plain_zip_path(&output) {
+    if !is_zip_family_path(&output) {
         return Err(FormatError::Unsupported(
             "ZIP rebuild output must be a ZIP-family archive (.zip/.jar/.apk/.cbz/.ipa)".into(),
         )
@@ -429,41 +430,6 @@ fn repair_zip_rebuild(
         ctx.print_success(&message);
     }
     Ok(())
-}
-
-fn is_sqz_archive_path(path: &Path) -> bool {
-    is_plain_sqz_path(path)
-        || path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| {
-                split_volume_name(name).is_some_and(|(base, _)| is_plain_sqz_path(Path::new(base)))
-            })
-}
-
-fn is_plain_sqz_path(path: &Path) -> bool {
-    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-        return false;
-    };
-    Path::new(name)
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("sqz"))
-}
-
-fn is_plain_zip_path(path: &Path) -> bool {
-    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-        return false;
-    };
-    Path::new(name)
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .is_some_and(|ext| {
-            matches!(
-                ext.to_ascii_lowercase().as_str(),
-                "zip" | "jar" | "apk" | "cbz" | "ipa"
-            )
-        })
 }
 
 fn is_split_sqz_volume_path(path: &Path) -> bool {

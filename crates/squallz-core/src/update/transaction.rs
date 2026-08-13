@@ -10,6 +10,7 @@ use crate::api::{
     ArchiveFormat, ControlToken, CreateOptions, EntryPath, FormatError, PreparedUpdateAdditions,
     ProgressPhase, ProgressSink, UpdateOp,
 };
+use crate::archive_path::{checked_path_component, is_canonical_process_sequence};
 use crate::destination_guard::{
     verify_destination_guard, verify_destination_guard_with_progress, verify_path_state_digest,
 };
@@ -17,10 +18,9 @@ use crate::filesystem_identity::{
     file_identity, open_regular_file_no_follow, open_regular_file_no_follow_for_cleanup,
     path_identity, PathIdentity, RegularFileState,
 };
-use crate::{CreateArtifactKind, CreateDestinationGuard};
+use crate::{parent_or_current, sync_directory, CreateArtifactKind, CreateDestinationGuard};
 
-const TRANSACTION_VERSION_V1: u32 = 1;
-const TRANSACTION_VERSION: u32 = 2;
+const TRANSACTION_VERSION: u32 = 1;
 const JOURNAL_MAX_BYTES: usize = 16 * 1024;
 const DIGEST_BUFFER_BYTES: usize = 256 * 1024;
 const LOCK_POLL_INTERVAL: Duration = Duration::from_millis(50);
@@ -73,7 +73,7 @@ struct TransactionRecord {
     source_identity: PathIdentity,
     source_state: RegularFileState,
     source_digest: [u8; 32],
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     source_path_state_digest: Option<[u8; 32]>,
     staging_identity: PathIdentity,
     staging_state: RegularFileState,
@@ -1073,11 +1073,7 @@ fn record_for(
     key: &str,
 ) -> Result<TransactionRecord, FormatError> {
     Ok(TransactionRecord {
-        version: if transaction.source_path_state_digest.is_some() {
-            TRANSACTION_VERSION
-        } else {
-            TRANSACTION_VERSION_V1
-        },
+        version: TRANSACTION_VERSION,
         key: key.to_owned(),
         target_name: component_string(&transaction.target, "archive update target")?,
         staging_name: component_string(&transaction.staging, "update staging")?,
@@ -1388,37 +1384,34 @@ fn resolve_transaction(
     key: &str,
     record: &TransactionRecord,
 ) -> Result<ResolvedTransaction, FormatError> {
-    match (record.version, record.source_path_state_digest) {
-        (TRANSACTION_VERSION_V1, None) | (TRANSACTION_VERSION, Some(_)) => {}
-        (TRANSACTION_VERSION_V1, Some(_)) => {
-            return Err(FormatError::Unsupported(
-                "version 1 update transactions cannot contain a guarded destination digest".into(),
-            ));
-        }
-        (TRANSACTION_VERSION, None) => {
-            return Err(FormatError::Unsupported(
-                "version 2 update transaction is missing its guarded destination digest".into(),
-            ));
-        }
-        (version, _) => {
-            return Err(FormatError::Unsupported(format!(
-                "unsupported update transaction version: {version}"
-            )));
-        }
+    if record.version != TRANSACTION_VERSION {
+        return Err(FormatError::Unsupported(format!(
+            "unsupported update transaction version: {}",
+            record.version
+        )));
     }
     if record.key != key {
         return Err(FormatError::Unsupported(
             "update transaction belongs to a different target key".into(),
         ));
     }
-    let target_name = checked_component(&record.target_name, "update target")?;
+    let target_name = checked_path_component(
+        Some(Path::new(&record.target_name).as_os_str()),
+        "update target",
+    )?;
     if target.file_name() != Some(target_name.as_os_str()) {
         return Err(FormatError::Unsupported(
             "update transaction belongs to a different archive".into(),
         ));
     }
-    let staging_name = checked_component(&record.staging_name, "update staging")?;
-    let holder_name = checked_component(&record.holder_name, "update holder")?;
+    let staging_name = checked_path_component(
+        Some(Path::new(&record.staging_name).as_os_str()),
+        "update staging",
+    )?;
+    let holder_name = checked_path_component(
+        Some(Path::new(&record.holder_name).as_os_str()),
+        "update holder",
+    )?;
     if !staging_name_is_reserved(&record.staging_name, key)
         || !holder_name_is_reserved(&record.holder_name, key)
     {
@@ -3000,36 +2993,18 @@ fn completion_path(target: &Path, key: &str) -> PathBuf {
 fn staging_name_is_reserved(name: &str, key: &str) -> bool {
     name.strip_prefix(&format!(".squallz-update-stage-{}-", &key[..16]))
         .and_then(|name| name.strip_suffix(".tmp"))
-        .is_some_and(valid_pid_sequence)
+        .is_some_and(is_canonical_process_sequence)
 }
 
 fn holder_name_is_reserved(name: &str, key: &str) -> bool {
     name.strip_prefix(&format!(".squallz-update-holder-{}-", &key[..16]))
-        .is_some_and(valid_pid_sequence)
+        .is_some_and(is_canonical_process_sequence)
 }
 
 fn journal_temp_name_is_reserved(name: &str, key: &str) -> bool {
     name.strip_prefix(&format!(".squallz-update-journal-{}-", &key[..16]))
         .and_then(|name| name.strip_suffix(".tmp"))
-        .is_some_and(valid_pid_sequence)
-}
-
-fn valid_pid_sequence(value: &str) -> bool {
-    let Some((pid, sequence)) = value.split_once('-') else {
-        return false;
-    };
-    !sequence.contains('-')
-        && canonical_positive_integer(pid)
-        && canonical_positive_integer(sequence)
-        && pid.parse::<u32>().is_ok()
-        && sequence.parse::<u64>().is_ok()
-}
-
-fn canonical_positive_integer(value: &str) -> bool {
-    let Some((&first, rest)) = value.as_bytes().split_first() else {
-        return false;
-    };
-    (b'1'..=b'9').contains(&first) && rest.iter().all(u8::is_ascii_digit)
+        .is_some_and(is_canonical_process_sequence)
 }
 
 fn component_string(path: &Path, role: &str) -> Result<String, FormatError> {
@@ -3037,20 +3012,6 @@ fn component_string(path: &Path, role: &str) -> Result<String, FormatError> {
         .and_then(|name| name.to_str())
         .map(str::to_owned)
         .ok_or_else(|| FormatError::Unsupported(format!("{role} has an invalid file name")))
-}
-
-fn checked_component(name: &str, role: &str) -> Result<std::ffi::OsString, FormatError> {
-    let path = Path::new(name);
-    if path.file_name() != Some(path.as_os_str())
-        || path
-            .parent()
-            .is_some_and(|parent| !parent.as_os_str().is_empty())
-    {
-        return Err(FormatError::Unsupported(format!(
-            "{role} is not a single file name"
-        )));
-    }
-    Ok(path.as_os_str().to_owned())
 }
 
 fn path_exists(path: &Path) -> Result<bool, FormatError> {
@@ -3069,16 +3030,6 @@ fn sync_rename_parents(source: &Path, destination: &Path) -> io::Result<()> {
         sync_directory(source_parent)?;
     }
     Ok(())
-}
-
-fn sync_directory(path: &Path) -> io::Result<()> {
-    crate::open_directory(path)?.sync_all()
-}
-
-fn parent_or_current(path: &Path) -> &Path {
-    path.parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."))
 }
 
 fn path_key(domain: &[u8], path: &Path) -> Result<String, FormatError> {
@@ -3174,14 +3125,7 @@ mod tests {
             holder_identity,
         );
         let record = record_for(&transaction, &key).unwrap();
-        assert_eq!(
-            record.version,
-            if guarded {
-                TRANSACTION_VERSION
-            } else {
-                TRANSACTION_VERSION_V1
-            }
-        );
+        assert_eq!(record.version, TRANSACTION_VERSION);
         let journal = write_journal(&transaction, record)
             .map_err(|error| match error {
                 JournalPublishError::BeforePublish(error)

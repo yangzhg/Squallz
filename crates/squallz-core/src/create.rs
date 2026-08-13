@@ -20,9 +20,9 @@ use crate::inputs::{
 };
 use crate::volumes::{self, MIN_SPLIT_SIZE};
 use crate::{
-    CreateArtifactKind, CreateCommitPolicy, CreateInputEstimate, CreateInputFingerprint,
-    CreateInputManifestEntry, CreateInputModifiedTime, CreateInputSummary, CreatePlan,
-    CreateReport, Engine, PathFilter, VerifiedCreateReport,
+    CreateArtifactKind, CreateCommitPolicy, CreateInputEstimate, CreateInputManifestEntry,
+    CreateInputModifiedTime, CreateInputSummary, CreatePlan, CreateReport, Engine, PathFilter,
+    VerifiedCreateReport,
 };
 
 pub(crate) struct OutputArtifacts {
@@ -536,7 +536,6 @@ fn create_with_reserved_outputs_and_policy(
     }
     Ok(VerifiedCreateReport {
         create: outputs.into_report(),
-        inputs: staged_archive.inputs,
         manifest: staged_archive.manifest,
     })
 }
@@ -684,7 +683,6 @@ struct CreateTarget<'a> {
 
 struct CreatedArchive {
     output_bytes: u64,
-    inputs: Vec<CreateInputFingerprint>,
     manifest: Vec<CreateInputManifestEntry>,
 }
 
@@ -844,7 +842,6 @@ fn create_unsplit(
         }
         Ok(CreatedArchive {
             output_bytes,
-            inputs: captured_inputs.fingerprints,
             manifest: captured_inputs.manifest,
         })
     })();
@@ -1522,7 +1519,6 @@ fn split_output_base(dest: &Path) -> Result<PathBuf, FormatError> {
 /// byte-granular progress on file contents and chunk-boundary cancellation.
 #[derive(Default)]
 struct CapturedCreateInputs {
-    fingerprints: Vec<CreateInputFingerprint>,
     manifest: Vec<CreateInputManifestEntry>,
 }
 
@@ -1559,15 +1555,12 @@ fn write_entries(
                     ProgressRead::new(&mut file, progress, ctl, &item.name, done, total, item.size);
                 let mut data = TrackedInputRead::new(data, capture_input_manifest);
                 add_entry_data(sink, &meta, &mut data, ctl)?;
-                let fingerprint = data.finish(source_path, item.size)?;
+                let blake3 = data.finish(item.size)?;
                 prepared.validate_after_read(&file)?;
-                if let Some(fingerprint) = fingerprint {
-                    captured.manifest.push(create_manifest_entry(
-                        fingerprint.path.clone(),
-                        &meta,
-                        Some(fingerprint.blake3),
-                    ));
-                    captured.fingerprints.push(fingerprint);
+                if let Some(source_path) = source_path {
+                    captured
+                        .manifest
+                        .push(create_manifest_entry(source_path, &meta, blake3));
                 }
             }
             _ => {
@@ -1635,11 +1628,7 @@ impl<R> TrackedInputRead<R> {
         }
     }
 
-    pub(crate) fn finish(
-        self,
-        path: Option<PathBuf>,
-        expected_size: u64,
-    ) -> Result<Option<CreateInputFingerprint>, FormatError> {
+    pub(crate) fn finish(self, expected_size: u64) -> Result<Option<[u8; 32]>, FormatError> {
         if self.bytes != expected_size {
             return Err(FormatError::Io(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
@@ -1652,13 +1641,7 @@ impl<R> TrackedInputRead<R> {
         let Some(hasher) = self.hasher else {
             return Ok(None);
         };
-        let path = path
-            .ok_or_else(|| FormatError::Other("verified create lost a source identity".into()))?;
-        Ok(Some(CreateInputFingerprint {
-            path,
-            size: self.bytes,
-            blake3: *hasher.finalize().as_bytes(),
-        }))
+        Ok(Some(*hasher.finalize().as_bytes()))
     }
 }
 
@@ -1706,16 +1689,11 @@ fn create_single_stream(
     let source_path = capture_input_manifest.then(|| prepared.source_path().to_path_buf());
     let mut src = TrackedInputRead::new(&mut source, capture_input_manifest);
     compressor.compress(&mut src, &mut dst, opts.level, &opts.resources, &sink, ctl)?;
-    let fingerprint = src.finish(source_path, item.size)?;
+    let blake3 = src.finish(item.size)?;
     prepared.validate_after_read(&source)?;
-    let captured = if let Some(fingerprint) = fingerprint {
+    let captured = if let Some(source_path) = source_path {
         CapturedCreateInputs {
-            manifest: vec![create_manifest_entry(
-                fingerprint.path.clone(),
-                &entry_meta,
-                Some(fingerprint.blake3),
-            )],
-            fingerprints: vec![fingerprint],
+            manifest: vec![create_manifest_entry(source_path, &entry_meta, blake3)],
         }
     } else {
         CapturedCreateInputs::default()

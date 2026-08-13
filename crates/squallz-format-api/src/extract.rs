@@ -1164,7 +1164,7 @@ fn restore_permissions(_path: &Path, _meta: &EntryMeta, _opts: &ExtractOptions) 
 mod tests {
     use super::*;
     use crate::options::ConflictResolver;
-    use crate::{NoProgress, TestReport};
+    use crate::{NoProgress, TestSummary};
     use std::io::Cursor;
     use std::sync::Arc;
 
@@ -1275,11 +1275,11 @@ mod tests {
             panic!("an explicitly empty selection must not read an entry")
         }
 
-        fn test(
+        fn test_summary(
             &mut self,
             _progress: &dyn ProgressSink,
             _ctl: &ControlToken,
-        ) -> Result<TestReport, FormatError> {
+        ) -> Result<TestSummary, FormatError> {
             panic!("an explicitly empty selection must not test the archive")
         }
     }
@@ -1297,12 +1297,12 @@ mod tests {
             panic!("dangling link tests must not read file content")
         }
 
-        fn test(
+        fn test_summary(
             &mut self,
             _progress: &dyn ProgressSink,
             _ctl: &ControlToken,
-        ) -> Result<TestReport, FormatError> {
-            Ok(TestReport::default())
+        ) -> Result<TestSummary, FormatError> {
+            Ok(TestSummary::default())
         }
     }
 

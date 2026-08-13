@@ -9,13 +9,14 @@ use std::collections::VecDeque;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use squallz_core::api::FormatError;
 
 use crate::dto::JobSpec;
+use squallz_core::lock_unpoisoned;
 
 const DEFAULT_MAX_RECORDS: usize = 500;
 const DEFAULT_EXPORT_FILE_NAME: &str = "operation-audit.json";
@@ -45,13 +46,6 @@ pub struct OperationAudit {
     path: Option<PathBuf>,
     max_records: usize,
     records: Mutex<VecDeque<OperationAuditRecord>>,
-}
-
-fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    match mutex.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    }
 }
 
 fn existing_records(path: Option<&Path>, max_records: usize) -> VecDeque<OperationAuditRecord> {
@@ -224,7 +218,7 @@ pub fn summarize_job(spec: &JobSpec) -> OperationAuditSummary {
             sfx_target,
             ..
         } => {
-            let sfx = sfx_target.as_deref();
+            let sfx = sfx_target.map(|target| target.as_str());
             OperationAuditSummary {
                 kind: if sfx.is_some() {
                     "create_sfx"
@@ -360,7 +354,7 @@ pub fn summarize_job(spec: &JobSpec) -> OperationAuditSummary {
                 "{} input{} · {}",
                 inputs.len(),
                 plural(inputs.len()),
-                algorithm
+                algorithm.id()
             ),
         },
         JobSpec::ChecksumCheck {
@@ -369,7 +363,7 @@ pub fn summarize_job(spec: &JobSpec) -> OperationAuditSummary {
         } => OperationAuditSummary {
             kind: "checksum_check".into(),
             title: "Verify checksum manifest".into(),
-            detail: format!("{} · {}", base(manifest), algorithm),
+            detail: format!("{} · {}", base(manifest), algorithm.id()),
         },
         JobSpec::DuplicateScan {
             inputs, min_size, ..
@@ -689,15 +683,15 @@ mod tests {
             password: Some("do-not-log".into()),
             encrypt_names: true,
             split_size: None,
-            split_mode: None,
+            split_mode: squallz_core::api::SplitOutputMode::Generic,
             excludes: vec![],
-            content_policy: None,
+            content_policy: squallz_core::CreateContentPolicy::KeepAllFiles,
             sqz_inner_format: None,
             sfx_target: None,
-            completion: None,
-            post_success: None,
-            test_after_create: None,
-            replace_existing: Some(false),
+            completion: squallz_core::CreateCompletionAction::None,
+            post_success: squallz_core::PostSuccessAction::KeepSource,
+            test_after_create: false,
+            replace_existing: false,
             replacement_guard: None,
         };
         let summary = summarize_job(&spec);
@@ -726,8 +720,8 @@ mod tests {
                     best_effort: true,
                 },
             ],
-            overwrite: "ask".into(),
-            symlinks: "preserve".into(),
+            overwrite: squallz_core::api::OverwritePolicy::Ask,
+            symlinks: squallz_core::api::SymlinkPolicy::Preserve,
             smart: true,
         };
         let summary = summarize_job(&spec);

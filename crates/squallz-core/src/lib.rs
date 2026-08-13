@@ -6,7 +6,9 @@
 //! never depends on a concrete format implementation.
 
 pub use squallz_format_api as api;
+pub use squallz_format_api::{OverwritePolicy, SqzInnerFormat, SymlinkPolicy};
 
+mod archive_path;
 mod archive_search;
 mod checksum;
 mod compound;
@@ -25,9 +27,11 @@ mod output_set;
 mod presets;
 mod queue;
 mod sfx;
+mod stored_os_string;
 mod update;
 mod volumes;
 
+pub use archive_path::{is_plain_sqz_path, is_sqz_archive_path, is_zip_family_path};
 pub use archive_search::{
     fold_archive_search_path, fold_archive_search_query, rank_folded_archive_path,
     ArchivePathSearchRank,
@@ -55,13 +59,12 @@ pub use output_set::{
 };
 pub use presets::{
     ByteSize, CreateCompletionAction, CreateCredential, CreateDestination, CreateDestinationBase,
-    CreateOutput, CreatePreset, EntryNameEncoding, ExistingOutputPolicy, ExtractCredential,
-    ExtractDestination, ExtractDestinationBase, ExtractLayout, ExtractPreset, FormatId,
-    FormatSpecificOptions, NamedPreset, PostSuccessAction, PresetBindings, PresetCompressionLevel,
-    PresetDocument, PresetError, PresetId, PresetKind, PresetLabel, PresetStore,
-    PresetValidationError, SfxTargetPolicy, SqzInnerFormat, SymlinkHandling, VolumeMode,
-    BALANCED_CREATE_PRESET_ID, CROSS_PLATFORM_CREATE_PRESET_ID, MAX_SPLIT_SIZE_BYTES,
-    MIN_SPLIT_SIZE_BYTES, PRESET_SCHEMA_VERSION, SMART_EXTRACT_PRESET_ID,
+    CreateOutput, CreatePreset, EntryNameEncoding, ExtractCredential, ExtractDestination,
+    ExtractDestinationBase, ExtractLayout, ExtractPreset, FormatId, FormatSpecificOptions,
+    NamedPreset, PostSuccessAction, PresetBindings, PresetCompressionLevel, PresetDocument,
+    PresetError, PresetId, PresetKind, PresetLabel, PresetStore, PresetValidationError,
+    SfxTargetPolicy, VolumeMode, BALANCED_CREATE_PRESET_ID, CROSS_PLATFORM_CREATE_PRESET_ID,
+    MAX_SPLIT_SIZE_BYTES, MIN_SPLIT_SIZE_BYTES, PRESET_SCHEMA_VERSION, SMART_EXTRACT_PRESET_ID,
 };
 pub use queue::{
     Job, JobId, JobProgress, JobQueue, JobResources, JobState, QueueWaitReason, QueuedJobStatus,
@@ -73,21 +76,42 @@ pub use sfx::{
     SfxLayout, SfxRecoveryDetails, SfxTarget, VerifiedSfxBuildReport, VerifiedSfxPayload,
     SFX_CLI_STUB_MARKER, SFX_GUI_STUB_MARKER,
 };
+pub use stored_os_string::StoredOsString;
 pub use volumes::{collect_volume_set, collect_volume_set_with_control, VolumeSet};
 
 use std::fs::{self, File};
 use std::io::{self, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use api::{
     ArchiveReader, ArchiveStructureStatus, ControlToken, CreateOptions, EntryMeta, EntryPath,
     EntryType, ExtractOptions, FormatError, FormatInfo, FormatRegistry, OpenOptions, ProgressSink,
-    ReadSeek, SafetyLimits, TestReport, TestSummary, UpdateOp, TEST_PROBLEM_PREVIEW_LIMIT,
+    ReadSeek, SafetyLimits, TestSummary, UpdateOp, TEST_PROBLEM_PREVIEW_LIMIT,
 };
 use compound::{decompress_factory, SingleFileArchiveReader};
 use controlled_io::{controlled_result, ControlledReadSeek};
 use volumes::MultiVolumeReader;
+
+/// Locks a mutex and recovers its contents if another thread panicked while
+/// holding the lock.
+pub fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    match mutex.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+pub fn parent_or_current(path: &Path) -> &Path {
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+}
+
+/// Flushes directory metadata after a durable filesystem transaction.
+pub fn sync_directory(path: &Path) -> io::Result<()> {
+    open_directory(path)?.sync_all()
+}
 
 /// Engine: owns the registry and provides the high-level list/extract/
 /// create/update/convert/test operations.
@@ -188,16 +212,6 @@ pub struct CreateReport {
     pub split_volume_count: Option<usize>,
 }
 
-/// Content identity captured from the exact bytes consumed by archive
-/// creation. Desktop source-cleanup verification uses this report without
-/// reading every input once before compression.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CreateInputFingerprint {
-    pub path: PathBuf,
-    pub size: u64,
-    pub blake3: [u8; 32],
-}
-
 /// Stable, totally ordered representation of an entry modification time.
 ///
 /// The value is the signed nanosecond offset from the Unix epoch, giving
@@ -246,9 +260,6 @@ pub struct CreateInputManifestEntry {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedCreateReport {
     pub create: CreateReport,
-    /// Regular-file fingerprints retained for API compatibility. New source
-    /// verification should consume [`Self::manifest`].
-    pub inputs: Vec<CreateInputFingerprint>,
     /// Complete writer-authoritative manifest in archive entry order.
     pub manifest: Vec<CreateInputManifestEntry>,
 }
@@ -522,12 +533,6 @@ fn add_structure_problem_to_summary(summary: &mut TestSummary, status: ArchiveSt
     summary.problems.messages.insert(0, problem.to_owned());
 }
 
-fn add_structure_problem_to_report(report: &mut TestReport, status: ArchiveStructureStatus) {
-    if let Some(problem) = structure_problem(status) {
-        report.problems.insert(0, problem.to_owned());
-    }
-}
-
 fn push_reader_entry(
     entries: &mut Vec<EntryMeta>,
     entry: EntryMeta,
@@ -785,16 +790,6 @@ impl Engine {
         }
     }
 
-    /// Lists entries and returns the format selected from the archive bytes.
-    pub fn list_with_format(
-        &self,
-        path: &Path,
-        opts: &OpenOptions,
-    ) -> Result<(String, Vec<EntryMeta>), FormatError> {
-        self.list_with_format_and_source_set(path, opts)
-            .map(|(format, entries, _)| (format, entries))
-    }
-
     /// Lists entries, returning the detected format and any native physical
     /// volume set retained by the opened reader.
     pub fn list_with_format_and_source_set(
@@ -840,8 +835,6 @@ impl Engine {
     }
 
     /// Lists entries while retaining the reader's explicit structural state.
-    /// Compatibility list methods intentionally keep their existing return
-    /// shapes and delegate here.
     pub fn list_with_format_source_set_and_structure_with_entry_limit_and_control(
         &self,
         path: &Path,
@@ -934,54 +927,6 @@ impl Engine {
         controlled_result(
             ctl,
             reader.extract_with_report(dest, selection, extract_opts, progress, ctl),
-        )
-    }
-
-    /// Opens an archive and builds a read-only extraction preflight. The
-    /// physical archive path is used only to read entries; smart folder naming
-    /// comes from `archive_display_path` so nested staging names never leak.
-    #[allow(clippy::too_many_arguments)] // engine facade: each argument has a distinct role
-    pub fn plan_extract(
-        &self,
-        archive: &Path,
-        requested_destination: &Path,
-        archive_display_path: &Path,
-        selection: Option<&[EntryPath]>,
-        smart: bool,
-        open_opts: &OpenOptions,
-    ) -> Result<ExtractPlan, FormatError> {
-        self.plan_extract_with_control(
-            archive,
-            requested_destination,
-            archive_display_path,
-            selection,
-            smart,
-            open_opts,
-            &ControlToken::default(),
-        )
-    }
-
-    /// Controlled variant of [`Engine::plan_extract`] used by interactive
-    /// callers that must stop stale read-only work promptly.
-    #[allow(clippy::too_many_arguments)] // engine facade: each argument has a distinct role
-    pub fn plan_extract_with_control(
-        &self,
-        archive: &Path,
-        requested_destination: &Path,
-        archive_display_path: &Path,
-        selection: Option<&[EntryPath]>,
-        smart: bool,
-        open_opts: &OpenOptions,
-        control: &ControlToken,
-    ) -> Result<ExtractPlan, FormatError> {
-        let entries = self.list_with_control(archive, open_opts, control)?;
-        self.plan_extract_from_entries_with_control(
-            requested_destination,
-            archive_display_path,
-            &entries,
-            selection,
-            smart,
-            control,
         )
     }
 
@@ -1107,48 +1052,12 @@ impl Engine {
     }
 
     /// Lists, plans, and extracts through one opened archive reader. The
-    /// selector receives the complete entry list and can derive an exact
-    /// selection for include filters or directory expansion. `validate_plan`
-    /// runs after planning and before the reader can create the destination,
-    /// allowing queued callers to reject a stale preflight. Keeping the reader
-    /// alive avoids reopening password-protected, split, nested, or streamed
-    /// archives between the worker's preflight and extraction pass.
-    #[allow(clippy::too_many_arguments)] // engine facade: each argument has a distinct role
-    pub fn plan_and_extract_with_report<F, V>(
-        &self,
-        archive: &Path,
-        requested_destination: &Path,
-        archive_display_path: &Path,
-        smart: bool,
-        open_opts: &OpenOptions,
-        extract_opts: &ExtractOptions,
-        progress: &dyn ProgressSink,
-        ctl: &ControlToken,
-        select: F,
-        validate_plan: V,
-    ) -> Result<(ExtractPlan, api::ExtractReport), FormatError>
-    where
-        F: FnOnce(&[EntryMeta]) -> Option<Vec<EntryPath>>,
-        V: FnOnce(&ExtractPlan) -> Result<(), FormatError>,
-    {
-        self.plan_and_extract_with_report_controlled(
-            archive,
-            requested_destination,
-            archive_display_path,
-            smart,
-            open_opts,
-            extract_opts,
-            progress,
-            ctl,
-            |entries, _| Ok(select(entries)),
-            validate_plan,
-        )
-    }
-
-    /// Controlled-selection variant of
-    /// [`Engine::plan_and_extract_with_report`]. The selector can checkpoint
-    /// while expanding a large path filter without changing the established
-    /// facade used by existing callers.
+    /// selector receives the complete entry list and can checkpoint while
+    /// deriving an exact selection for include filters or directory
+    /// expansion. `validate_plan` runs after planning and before the reader can
+    /// create the destination. Keeping the reader alive avoids reopening
+    /// password-protected, split, nested, or streamed archives between
+    /// preflight and extraction.
     #[allow(clippy::too_many_arguments)] // engine facade: each argument has a distinct role
     pub fn plan_and_extract_with_report_controlled<F, V>(
         &self,
@@ -1215,48 +1124,6 @@ impl Engine {
             select,
             validate_plan,
         )
-    }
-
-    /// Controlled extraction with an optional input guard from
-    /// [`Engine::plan_extract_with_input_guard_controlled`].
-    ///
-    /// Guarded callers compare complete entry metadata, selected scope and the
-    /// actual native or generic source set retained by this opened reader
-    /// before planning. Source state is checked once more after destination
-    /// validation and space inspection, immediately before extraction.
-    #[allow(clippy::too_many_arguments)] // engine facade: each argument has a distinct role
-    pub fn plan_and_extract_with_report_guarded_controlled<F, V>(
-        &self,
-        archive: &Path,
-        requested_destination: &Path,
-        archive_display_path: &Path,
-        smart: bool,
-        open_opts: &OpenOptions,
-        extract_opts: &ExtractOptions,
-        progress: &dyn ProgressSink,
-        ctl: &ControlToken,
-        expected_input_guard: Option<ExtractInputGuard>,
-        select: F,
-        validate_plan: V,
-    ) -> Result<(ExtractPlan, api::ExtractReport), FormatError>
-    where
-        F: FnOnce(&[EntryMeta], &ControlToken) -> Result<Option<Vec<EntryPath>>, FormatError>,
-        V: FnOnce(&ExtractPlan) -> Result<(), FormatError>,
-    {
-        self.plan_and_extract_with_report_guarded_and_structure_controlled(
-            archive,
-            requested_destination,
-            archive_display_path,
-            smart,
-            open_opts,
-            extract_opts,
-            progress,
-            ctl,
-            expected_input_guard,
-            select,
-            validate_plan,
-        )
-        .map(|(plan, report, _)| (plan, report))
     }
 
     /// Guarded extraction that also reports the structure of the same reader
@@ -1338,21 +1205,6 @@ impl Engine {
             ),
         )?;
         Ok((plan, report, structure))
-    }
-
-    /// Integrity test.
-    pub fn test(
-        &self,
-        path: &Path,
-        opts: &OpenOptions,
-        progress: &dyn ProgressSink,
-        ctl: &ControlToken,
-    ) -> Result<TestReport, FormatError> {
-        let mut reader = self.open_with_control(path, opts, ctl)?;
-        let structure = reader.structure_status();
-        let mut report = controlled_result(ctl, reader.test(progress, ctl))?;
-        add_structure_problem_to_report(&mut report, structure);
-        Ok(report)
     }
 
     /// Integrity test with an exact problem count and bounded diagnostic
@@ -1452,28 +1304,6 @@ impl Engine {
         ctl: &ControlToken,
     ) -> Result<CreateReport, FormatError> {
         create::create_no_replace(self, dest, inputs, opts, progress, ctl)
-    }
-
-    /// Creates an archive and reports every source entry accepted by the
-    /// writer. Regular-file hashes come from the writer's input stream, so no
-    /// extra content pass is performed.
-    pub fn create_with_verification(
-        &self,
-        dest: &Path,
-        inputs: &[PathBuf],
-        opts: &CreateOptions,
-        progress: &dyn ProgressSink,
-        ctl: &ControlToken,
-    ) -> Result<VerifiedCreateReport, FormatError> {
-        create::create_verified(
-            self,
-            dest,
-            inputs,
-            opts,
-            progress,
-            ctl,
-            CreateCommitPolicy::ReplaceExisting,
-        )
     }
 
     /// Verified creation using an explicit final publication policy.
@@ -1702,10 +1532,8 @@ impl Engine {
         checksum::verify_checksum_manifest_with_progress(manifest, algorithm, progress, ctl)
     }
 
-    /// Applies append/delete/rename operations to an existing archive
-    /// (formats with `can_update`). Stream-rewrite formats use the core's
-    /// durable target transaction; legacy formats retain their own update
-    /// implementation.
+    /// Applies append/delete/rename operations through the core-owned durable
+    /// target transaction.
     pub fn update(
         &self,
         path: &Path,
@@ -1731,14 +1559,13 @@ impl Engine {
                         f.id()
                     )));
                 }
-                if f.supports_update_rewrite() {
-                    update::run_update_rewrite(f.as_ref(), path, ops, opts, progress, ctl)
-                } else if f.accepts_prepared_update_additions() {
-                    let mut additions = update::prepare_additions(ops, opts, progress, ctl)?;
-                    f.update_with_prepared_additions(path, ops, &mut additions, opts, progress, ctl)
-                } else {
-                    f.update(path, ops, opts, progress, ctl)
+                if !f.supports_update_rewrite() {
+                    return Err(FormatError::Unsupported(format!(
+                        "format {} cannot rewrite updates through the shared transaction",
+                        f.id()
+                    )));
                 }
+                update::run_update_rewrite(f.as_ref(), path, ops, opts, progress, ctl)
             }
             _ => Err(FormatError::Unsupported(format!(
                 "updating this format is not supported: {name}"
@@ -2206,13 +2033,7 @@ fn atomic_replace_file(_src: &Path, _dest: &Path) -> io::Result<()> {
 }
 
 pub(crate) fn open_parent_directory(path: &Path) -> io::Result<File> {
-    open_directory(parent_directory(path))
-}
-
-fn parent_directory(path: &Path) -> &Path {
-    path.parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."))
+    open_directory(parent_or_current(path))
 }
 
 /// Returns the stable physical identity of the current no-follow path entry.
@@ -2393,8 +2214,8 @@ pub fn replace_file_atomically(src: &Path, dest: &Path) -> io::Result<()> {
 /// error. The staged path must remain exclusively owned by the caller;
 /// symbolic links and other non-regular entries are rejected.
 pub fn publish_file_no_replace(tmp: &Path, dest: &Path) -> Result<(), FormatError> {
-    let source_parent_path = parent_directory(tmp);
-    let destination_parent_path = parent_directory(dest);
+    let source_parent_path = parent_or_current(tmp);
+    let destination_parent_path = parent_or_current(dest);
     let source_parent = if source_parent_path == destination_parent_path {
         None
     } else {
@@ -2440,8 +2261,8 @@ pub fn publish_file_no_replace(tmp: &Path, dest: &Path) -> Result<(), FormatErro
 /// remain unchanged and the returned error satisfies
 /// [`FormatError::is_output_exists`].
 pub fn publish_directory_no_replace(tmp: &Path, dest: &Path) -> Result<(), FormatError> {
-    let source_parent_path = parent_directory(tmp);
-    let destination_parent_path = parent_directory(dest);
+    let source_parent_path = parent_or_current(tmp);
+    let destination_parent_path = parent_or_current(dest);
     let source_parent = if source_parent_path == destination_parent_path {
         None
     } else {
@@ -2490,8 +2311,8 @@ pub(crate) fn publish_bound_file_no_replace(
         ))));
     }
     file.sync_all()?;
-    let source_parent_path = parent_directory(tmp);
-    let destination_parent_path = parent_directory(dest);
+    let source_parent_path = parent_or_current(tmp);
+    let destination_parent_path = parent_or_current(dest);
     let source_parent = if source_parent_path == destination_parent_path {
         None
     } else {
@@ -3084,12 +2905,12 @@ mod tests {
             Ok(Box::new(io::empty()))
         }
 
-        fn test(
+        fn test_summary(
             &mut self,
             _progress: &dyn ProgressSink,
             _ctl: &ControlToken,
-        ) -> Result<TestReport, FormatError> {
-            Ok(TestReport::default())
+        ) -> Result<TestSummary, FormatError> {
+            Ok(TestSummary::default())
         }
     }
 
@@ -3424,7 +3245,7 @@ mod tests {
         extract_options.limits.max_entries = 2;
 
         let error = engine
-            .plan_and_extract_with_report(
+            .plan_and_extract_with_report_controlled(
                 &archive,
                 &destination,
                 &archive,
@@ -3433,7 +3254,7 @@ mod tests {
                 &extract_options,
                 &api::NoProgress,
                 &ControlToken::default(),
-                |_| None,
+                |_, _| Ok(None),
                 |_| Ok(()),
             )
             .unwrap_err();
@@ -3458,7 +3279,7 @@ mod tests {
         let (engine, opens, extracts) = counting_extract_engine(1, 7);
 
         let (plan, report) = engine
-            .plan_and_extract_with_report(
+            .plan_and_extract_with_report_controlled(
                 &archive,
                 &destination,
                 &archive,
@@ -3467,7 +3288,7 @@ mod tests {
                 &ExtractOptions::default(),
                 &api::NoProgress,
                 &ControlToken::default(),
-                |_| None,
+                |_, _| Ok(None),
                 |_| Ok(()),
             )
             .unwrap();
@@ -3565,7 +3386,7 @@ mod tests {
         std::fs::write(&companion, b"changed companion").unwrap();
 
         let error = engine
-            .plan_and_extract_with_report_guarded_controlled(
+            .plan_and_extract_with_report_guarded_and_structure_controlled(
                 &archive,
                 &destination,
                 &archive,
@@ -3597,7 +3418,7 @@ mod tests {
         let (engine, opens, extracts) = counting_extract_engine(1, 7);
 
         let error = engine
-            .plan_and_extract_with_report(
+            .plan_and_extract_with_report_controlled(
                 &archive,
                 &destination,
                 &archive,
@@ -3606,7 +3427,7 @@ mod tests {
                 &ExtractOptions::default(),
                 &api::NoProgress,
                 &ControlToken::default(),
-                |_| None,
+                |_, _| Ok(None),
                 |plan| Err(FormatError::destination_changed(&plan.destination)),
             )
             .unwrap_err();
@@ -3627,7 +3448,7 @@ mod tests {
         let (engine, opens, extracts) = counting_extract_engine(1, u64::MAX);
 
         let error = engine
-            .plan_and_extract_with_report(
+            .plan_and_extract_with_report_controlled(
                 &archive,
                 &destination,
                 &archive,
@@ -3636,7 +3457,7 @@ mod tests {
                 &ExtractOptions::default(),
                 &api::NoProgress,
                 &ControlToken::default(),
-                |_| None,
+                |_, _| Ok(None),
                 |_| Ok(()),
             )
             .unwrap_err();
@@ -5019,20 +4840,13 @@ mod tests {
             .unwrap();
 
         assert_eq!(verified.create.outputs, vec![dest]);
-        assert_eq!(verified.inputs.len(), 1);
-        assert_eq!(
-            verified.inputs[0].path,
-            std::fs::canonicalize(input).unwrap()
-        );
-        assert_eq!(verified.inputs[0].size, payload.len() as u64);
-        assert_eq!(verified.inputs[0].blake3, *blake3::hash(payload).as_bytes());
         assert_eq!(verified.manifest.len(), 1);
         let entry = &verified.manifest[0];
-        assert_eq!(entry.source_path, verified.inputs[0].path);
+        assert_eq!(entry.source_path, std::fs::canonicalize(input).unwrap());
         assert_eq!(entry.archive_path, EntryPath::from_utf8("source.bin"));
         assert_eq!(entry.entry_type, EntryType::File);
         assert_eq!(entry.size, payload.len() as u64);
-        assert_eq!(entry.blake3, Some(verified.inputs[0].blake3));
+        assert_eq!(entry.blake3, Some(*blake3::hash(payload).as_bytes()));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -5132,7 +4946,6 @@ mod tests {
             )
             .unwrap();
 
-        assert!(verified.inputs.is_empty());
         assert_eq!(verified.manifest.len(), 1);
         let entry = &verified.manifest[0];
         assert_eq!(

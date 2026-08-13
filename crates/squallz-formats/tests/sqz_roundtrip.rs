@@ -9,7 +9,7 @@ use std::path::Path;
 use common::{engine, TempDir};
 use squallz_core::api::{
     ControlToken, CreateOptions, EntryType, ExtractOptions, FormatError, NoProgress, OpenOptions,
-    SqzCreateOptions,
+    SqzCreateOptions, SqzInnerFormat,
 };
 
 const SQZ_RECOVERY_BLOCK: usize = 64 * 1024;
@@ -131,7 +131,7 @@ fn sqz_file_header_crc_damage_falls_back_to_footer() {
     let entries = eng.list(&damaged, &OpenOptions::default()).unwrap();
     assert!(entries.iter().any(|e| e.path.display == "project/a.txt"));
     let report = eng
-        .test(&damaged, &OpenOptions::default(), &NoProgress, &ctl)
+        .test_summary(&damaged, &OpenOptions::default(), &NoProgress, &ctl)
         .unwrap();
     assert!(report.is_ok(), "problems: {:?}", report.problems);
 
@@ -232,7 +232,7 @@ fn sqz_footer_magic_damage_recovers_from_recovery_scan() {
     let entries = eng.list(&damaged, &OpenOptions::default()).unwrap();
     assert!(entries.iter().any(|e| e.path.display == "project/a.txt"));
     let report = eng
-        .test(&damaged, &OpenOptions::default(), &NoProgress, &ctl)
+        .test_summary(&damaged, &OpenOptions::default(), &NoProgress, &ctl)
         .unwrap();
     assert!(report.is_ok(), "problems: {:?}", report.problems);
 
@@ -279,7 +279,7 @@ fn sqz_footer_crc_field_damage_recovers_from_recovery_scan() {
     let entries = eng.list(&damaged, &OpenOptions::default()).unwrap();
     assert!(entries.iter().any(|e| e.path.display == "project/a.txt"));
     let report = eng
-        .test(&damaged, &OpenOptions::default(), &NoProgress, &ctl)
+        .test_summary(&damaged, &OpenOptions::default(), &NoProgress, &ctl)
         .unwrap();
     assert!(report.is_ok(), "problems: {:?}", report.problems);
 
@@ -324,7 +324,7 @@ fn sqz_recovery_protection_trailer_damage_uses_intact_primary() {
     let entries = eng.list(&damaged, &OpenOptions::default()).unwrap();
     assert!(entries.iter().any(|e| e.path.display == "project/a.txt"));
     let report = eng
-        .test(&damaged, &OpenOptions::default(), &NoProgress, &ctl)
+        .test_summary(&damaged, &OpenOptions::default(), &NoProgress, &ctl)
         .unwrap();
     assert!(report.is_ok(), "problems: {:?}", report.problems);
 
@@ -436,7 +436,7 @@ fn sqz_roundtrip_create_list_extract_test() {
     }
 
     let report = eng
-        .test(&archive, &OpenOptions::default(), &NoProgress, &ctl)
+        .test_summary(&archive, &OpenOptions::default(), &NoProgress, &ctl)
         .unwrap();
     assert!(report.is_ok(), "problems: {:?}", report.problems);
     assert_eq!(report.entries_tested, entries.len() as u64);
@@ -531,7 +531,7 @@ fn sqz_recovery_section_self_protection_repairs_primary_damage() {
     let entries = eng.list(&damaged, &OpenOptions::default()).unwrap();
     assert!(entries.iter().any(|e| e.path.display == "project/a.txt"));
     let report = eng
-        .test(&damaged, &OpenOptions::default(), &NoProgress, &ctl)
+        .test_summary(&damaged, &OpenOptions::default(), &NoProgress, &ctl)
         .unwrap();
     assert!(report.is_ok(), "problems: {:?}", report.problems);
 
@@ -603,7 +603,7 @@ fn sqz_embedded_recovery_repairs_single_payload_block() {
     fs::write(&corrupt, bytes).unwrap();
 
     let report = eng
-        .test(&corrupt, &OpenOptions::default(), &NoProgress, &ctl)
+        .test_summary(&corrupt, &OpenOptions::default(), &NoProgress, &ctl)
         .unwrap();
     assert!(report.is_ok(), "problems: {:?}", report.problems);
     let recovery = report.recovery.as_ref().expect("SQZ recovery summary");
@@ -659,7 +659,7 @@ fn sqz_custom_recovery_percent_controls_payload_parity_shards() {
     fs::write(&corrupt, bytes).unwrap();
 
     let report = eng
-        .test(&corrupt, &OpenOptions::default(), &NoProgress, &ctl)
+        .test_summary(&corrupt, &OpenOptions::default(), &NoProgress, &ctl)
         .unwrap();
     assert!(!report.is_ok());
     let recovery = report.recovery.as_ref().expect("SQZ recovery summary");
@@ -670,6 +670,7 @@ fn sqz_custom_recovery_percent_controls_payload_parity_shards() {
     assert!(!recovery.repair_possible);
     assert!(report
         .problems
+        .messages
         .iter()
         .any(|problem| problem.contains("unrepaired SQZ recovery block damage")));
 }
@@ -713,11 +714,16 @@ fn sqz_create_plan_covers_inner_archive_profiles_and_temporary_files() {
     fs::write(&input, recovery_payload(32)).unwrap();
     let eng = engine();
 
-    for (inner_format, recovery_percent) in [("zip", 10), ("tar", 25), ("7z", 50), ("zstd", 100)] {
+    for (inner_format, recovery_percent) in [
+        (SqzInnerFormat::Zip, 10),
+        (SqzInnerFormat::Tar, 25),
+        (SqzInnerFormat::SevenZip, 50),
+        (SqzInnerFormat::Zstd, 100),
+    ] {
         let archive = tmp.path().join(format!("{inner_format}.sqz"));
         let opts = CreateOptions {
             sqz: SqzCreateOptions {
-                inner_format: inner_format.to_owned(),
+                inner_format,
                 recovery_percent,
             },
             ..CreateOptions::default()
@@ -745,7 +751,7 @@ fn sqz_create_plan_covers_inner_archive_profiles_and_temporary_files() {
             plan.archive_output_budget_bytes,
             plan.final_output_budget_bytes
         );
-        let expected_temp = if inner_format == "zstd" {
+        let expected_temp = if inner_format == SqzInnerFormat::Zstd {
             plan.inputs.output_budget_bytes().saturating_mul(2)
         } else {
             plan.inputs.output_budget_bytes()
@@ -769,7 +775,7 @@ fn split_sqz_create_plan_covers_inner_temp_and_recovery_sidecars() {
     let opts = CreateOptions {
         split_size: Some(256 * 1024),
         sqz: SqzCreateOptions {
-            inner_format: "tar".to_owned(),
+            inner_format: SqzInnerFormat::Tar,
             recovery_percent: 100,
         },
         ..CreateOptions::default()
@@ -824,7 +830,7 @@ fn sqz_embedded_recovery_reports_over_limit_payload_damage() {
     fs::write(&corrupt, bytes).unwrap();
 
     let report = eng
-        .test(&corrupt, &OpenOptions::default(), &NoProgress, &ctl)
+        .test_summary(&corrupt, &OpenOptions::default(), &NoProgress, &ctl)
         .unwrap();
     assert!(!report.is_ok());
     let recovery = report.recovery.as_ref().expect("SQZ recovery summary");
@@ -835,6 +841,7 @@ fn sqz_embedded_recovery_reports_over_limit_payload_damage() {
     assert!(!recovery.repair_possible);
     assert!(report
         .problems
+        .messages
         .iter()
         .any(|p| p.contains("unrepaired SQZ recovery block damage")));
 

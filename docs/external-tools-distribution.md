@@ -19,8 +19,8 @@
 - RAR 与原生 ZIP `.z01/.zip` 分卷读取仍可通过 7zz/7z bridge；Squallz 不创建 RAR，也不实现 RAR recovery record。ZIP 原生分卷创建已内置，不依赖外部编码器。
 - `sqz info --json` 的 RAR `implementation.policy` 必须继续声明 `read_only=true`、
   `bundled=false`、主路径为 `SQUALLZ_7Z` / 7zz/7z/7za，`bsdtar` 只是显式或经严格验证的单文件兼容 fallback，
-  `SQUALLZ_UNRAR` / `unrar` 只用于明确未加密的 RAR7 v6 条目流；
-  旧 `fallback_scope` 字符串为兼容字段，完整机器可读范围以 `fallback_scopes` 数组为准；
+  `SQUALLZ_UNRAR` / `unrar` 只用于明确未加密的 RAR7 v6 条目流，完整机器可读范围由
+  `fallback_scopes` 数组声明；
   GUI 和发布说明不得把 RAR 描述成 fully bundled 或 WinRAR-level compatibility。
 - 发布检查必须确认包内没有静默捆绑 7zz/7z、unrar、wimlib-imagex、PAR2 或 bsdtar，`sqz info --json`
   的 external dependency / override path 仍可见，且用户文档没有把当前包描述成 fully bundled。

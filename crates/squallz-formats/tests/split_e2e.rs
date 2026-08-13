@@ -558,7 +558,7 @@ fn native_split_wim_opens_from_any_member_and_reports_missing_parts() {
     );
 
     let report = engine
-        .test(
+        .test_summary(
             &third,
             &OpenOptions::default(),
             &NoProgress,
@@ -838,7 +838,7 @@ fn split_create_produces_volumes_and_roundtrips() {
 
     // test passes too.
     let report = engine()
-        .test(
+        .test_summary(
             &volumes[0],
             &OpenOptions::default(),
             &NoProgress,
@@ -1373,7 +1373,7 @@ fn missing_sqzv_payload_volume_recovers_when_within_rs_capacity() {
     assert_eq!(entries[0].path.display, "data.bin");
 
     let report = engine()
-        .test(&first, &OpenOptions::default(), &NoProgress, &ctl)
+        .test_summary(&first, &OpenOptions::default(), &NoProgress, &ctl)
         .unwrap();
     assert!(report.is_ok(), "problems: {:?}", report.problems);
 
@@ -1416,7 +1416,7 @@ fn missing_sqzv_payload_volume_recovers_from_rev_parity_when_rs_capacity_exceede
     assert_eq!(entries[0].path.display, "data.bin");
 
     let report = engine()
-        .test(&first, &OpenOptions::default(), &NoProgress, &ctl)
+        .test_summary(&first, &OpenOptions::default(), &NoProgress, &ctl)
         .unwrap();
     assert!(report.is_ok(), "problems: {:?}", report.problems);
 
@@ -1461,7 +1461,7 @@ fn missing_two_sqzv_payload_volumes_recover_from_dual_rev_parity() {
     assert_eq!(entries[0].path.display, "data.bin");
 
     let report = engine()
-        .test(&first, &OpenOptions::default(), &NoProgress, &ctl)
+        .test_summary(&first, &OpenOptions::default(), &NoProgress, &ctl)
         .unwrap();
     assert!(report.is_ok(), "problems: {:?}", report.problems);
 
@@ -1630,7 +1630,7 @@ fn missing_two_sqzv_payload_volumes_fail_without_dual_rev_parity() {
 
     let first = tmp.path().join("out.sqz.001");
     let report = engine()
-        .test(&first, &OpenOptions::default(), &NoProgress, &ctl)
+        .test_summary(&first, &OpenOptions::default(), &NoProgress, &ctl)
         .unwrap();
     assert!(
         !report.is_ok(),
@@ -1688,7 +1688,7 @@ fn missing_three_sqzv_payload_volumes_recover_from_triple_rev_parity() {
     assert_eq!(entries[0].path.display, "data.bin");
 
     let report = engine()
-        .test(&first, &OpenOptions::default(), &NoProgress, &ctl)
+        .test_summary(&first, &OpenOptions::default(), &NoProgress, &ctl)
         .unwrap();
     assert!(report.is_ok(), "problems: {:?}", report.problems);
 
@@ -1729,7 +1729,7 @@ fn missing_three_sqzv_payload_volumes_fail_without_triple_rev_parity() {
 
     let first = tmp.path().join("out.sqz.001");
     let report = engine()
-        .test(&first, &OpenOptions::default(), &NoProgress, &ctl)
+        .test_summary(&first, &OpenOptions::default(), &NoProgress, &ctl)
         .unwrap();
     assert!(
         !report.is_ok(),
@@ -1784,7 +1784,7 @@ fn missing_four_sqzv_payload_volumes_still_fail_with_three_rev_parity() {
 
     let first = tmp.path().join("out.sqz.001");
     let report = engine()
-        .test(&first, &OpenOptions::default(), &NoProgress, &ctl)
+        .test_summary(&first, &OpenOptions::default(), &NoProgress, &ctl)
         .unwrap();
     assert!(
         !report.is_ok(),
@@ -1812,7 +1812,7 @@ fn missing_sqzv_payload_volume_over_capacity_fails_without_rev_parity() {
 
     let first = tmp.path().join("out.sqz.001");
     let report = engine()
-        .test(&first, &OpenOptions::default(), &NoProgress, &ctl)
+        .test_summary(&first, &OpenOptions::default(), &NoProgress, &ctl)
         .unwrap();
     assert!(
         !report.is_ok(),
@@ -1869,7 +1869,7 @@ fn missing_sqzv_tail_volume_recovers_from_rev_sidecar() {
     assert_eq!(entries[0].path.display, "data.bin");
 
     let report = engine()
-        .test(&first, &OpenOptions::default(), &NoProgress, &ctl)
+        .test_summary(&first, &OpenOptions::default(), &NoProgress, &ctl)
         .unwrap();
     assert!(report.is_ok(), "problems: {:?}", report.problems);
 
@@ -1918,7 +1918,7 @@ fn missing_sqzv_payload_and_tail_recover_from_parity_plus_tail_mirror() {
     assert_eq!(entries[0].path.display, "data.bin");
 
     let report = engine()
-        .test(&first, &OpenOptions::default(), &NoProgress, &ctl)
+        .test_summary(&first, &OpenOptions::default(), &NoProgress, &ctl)
         .unwrap();
     assert!(report.is_ok(), "problems: {:?}", report.problems);
 

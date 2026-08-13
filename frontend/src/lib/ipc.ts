@@ -19,7 +19,7 @@ export interface ArchiveInfo {
   structure: "complete" | "zip_local_headers_recovered";
   entry_count: number;
   volumes: string[] | null;
-  legacy_encoding_count: number;
+  non_utf8_name_count: number;
   garbled_count: number;
   suggested_encoding: string | null;
   encoding_override: string | null;
@@ -124,13 +124,33 @@ export interface SourceCleanupRecoveryNotice {
 }
 
 export type CreateDestinationBase = "ask" | "source_parent" | "default_directory";
-export type ExistingOutputPolicy = "ask" | "skip" | "overwrite" | "rename";
+export type OverwritePolicy = "ask" | "skip" | "overwrite" | "rename";
+export type SplitOutputMode = "generic" | "native";
+export type SymlinkPolicy = "preserve" | "follow" | "skip";
 export type CreateCompletionAction = "none" | "reveal_output" | "open_in_squallz";
 export type PostSuccessAction = "keep_source" | "trash_source";
+export type SqzInnerFormat = "sqz" | "zip" | "tar" | "7z" | "zstd";
+export type SfxTarget = "macos" | "windows" | "linux";
+export type ChecksumAlgorithm =
+  | "sha256"
+  | "sha224"
+  | "sha384"
+  | "sha512"
+  | "sha1"
+  | "md5"
+  | "blake3"
+  | "crc32";
+export type ExternalTaskAction =
+  | "checksum"
+  | "extract-here"
+  | "extract-to-folder"
+  | "extract-sfx"
+  | "compress-to-7z"
+  | "test-archive";
 
 export interface CreateDestination {
   base: CreateDestinationBase;
-  existing_output: ExistingOutputPolicy;
+  existing_output: OverwritePolicy;
 }
 
 export interface NestedArchivePreviewDto {
@@ -165,16 +185,16 @@ export type JobSpec =
       password: string | null;
       encrypt_names: boolean;
       split_size: number | null;
-      split_mode: "generic" | "native";
+      split_mode: SplitOutputMode;
       excludes: string[];
-      content_policy?: CreateContentPolicy | null;
-      sqz_inner_format?: "sqz" | "zip" | "7z" | null;
-      sfx_target?: "macos" | "windows" | "linux" | null;
-      replace_existing?: boolean;
-      replacement_guard?: string | null;
-      completion?: CreateCompletionAction | null;
-      post_success?: PostSuccessAction | null;
-      test_after_create?: boolean | null;
+      content_policy: CreateContentPolicy;
+      sqz_inner_format: SqzInnerFormat | null;
+      sfx_target: SfxTarget | null;
+      replace_existing: boolean;
+      replacement_guard: string | null;
+      completion: CreateCompletionAction;
+      post_success: PostSuccessAction;
+      test_after_create: boolean;
     }
   | {
       kind: "publish_macos_sfx";
@@ -187,15 +207,15 @@ export type JobSpec =
       kind: "extract";
       path: string;
       dest: string;
-      expected_destination?: string | null;
-      expected_input_guard?: string | null;
+      expected_destination: string | null;
+      expected_input_guard: string | null;
       selection: string[] | null;
-      overwrite: string;
-      symlinks: string;
+      overwrite: OverwritePolicy;
+      symlinks: SymlinkPolicy;
       smart: boolean;
       encoding: string | null;
       password: string | null;
-      verify_sfx?: boolean;
+      verify_sfx: boolean;
       best_effort: boolean;
     }
   | {
@@ -207,8 +227,8 @@ export type JobSpec =
         password: string | null;
         best_effort: boolean;
       }>;
-      overwrite: string;
-      symlinks: string;
+      overwrite: OverwritePolicy;
+      symlinks: SymlinkPolicy;
       smart: boolean;
     }
   | {
@@ -216,15 +236,15 @@ export type JobSpec =
       outer_path: string;
       entry_path: string;
       dest: string;
-      overwrite: string;
-      symlinks: string;
-	      smart: boolean;
-	      encoding: string | null;
-	      password: string | null;
-	      best_effort: boolean;
-	    }
-	  | {
-	      kind: "test";
+      overwrite: OverwritePolicy;
+      symlinks: SymlinkPolicy;
+      smart: boolean;
+      encoding: string | null;
+      password: string | null;
+      best_effort: boolean;
+    }
+  | {
+      kind: "test";
       path: string;
       encoding: string | null;
       password: string | null;
@@ -239,9 +259,9 @@ export type JobSpec =
       dest_password: string | null;
       encrypt_names: boolean;
       split_size: number | null;
-      split_mode: "generic" | "native";
-      replace_existing?: boolean;
-      replacement_guard?: string | null;
+      split_mode: SplitOutputMode;
+      replace_existing: boolean;
+      replacement_guard: string | null;
     }
   | {
       kind: "export_sqz";
@@ -249,8 +269,8 @@ export type JobSpec =
       dest: string;
       level: number;
       dest_password: string | null;
-      replace_existing?: boolean;
-      replacement_guard?: string | null;
+      replace_existing: boolean;
+      replacement_guard: string | null;
     }
   | {
       kind: "repair_sqz";
@@ -279,7 +299,7 @@ export type JobSpec =
       kind: "repair_recovery";
       path: string;
       output: string | null;
-      output_directory?: boolean;
+      output_directory: boolean;
       recovery: string | null;
     }
   | {
@@ -288,9 +308,9 @@ export type JobSpec =
       add: string[];
       delete: string[];
       rename: Array<{ from: string; to: string }>;
-      mkdir?: string[];
+      mkdir: string[];
       excludes: string[];
-      content_policy?: CreateContentPolicy | null;
+      content_policy: CreateContentPolicy;
       password: string | null;
       level: number;
     }
@@ -298,12 +318,12 @@ export type JobSpec =
       kind: "checksum";
       inputs: string[];
       excludes: string[];
-      algorithm: string;
+      algorithm: ChecksumAlgorithm;
     }
   | {
       kind: "checksum_check";
       manifest: string;
-      algorithm: string;
+      algorithm: ChecksumAlgorithm;
     }
   | {
       kind: "duplicate_scan";
@@ -475,7 +495,7 @@ export type PresetCreateOutput =
 
 export type PresetFormatOptions =
   | { kind: "none" }
-  | { kind: "sqz"; inner_format: "entry_set" | "zip" | "seven_zip" };
+  | { kind: "sqz"; inner_format: SqzInnerFormat };
 
 export interface CreateArchivePresetOptions {
   format: string;
@@ -498,7 +518,7 @@ export interface ExtractArchivePresetOptions {
     base: "archive_parent" | "default_directory" | "ask";
     layout: "direct" | "smart" | "archive_folder";
   };
-  existing_output: ExistingOutputPolicy;
+  existing_output: OverwritePolicy;
   symlinks: "preserve" | "skip" | "follow";
   encoding: { kind: "auto" } | { kind: "named"; label: string };
   credential: PresetExtractCredential;
@@ -578,8 +598,6 @@ export interface IntegrationStatusDto {
   actions: IntegrationActionHealthDto[];
   can_repair: boolean;
   can_remove: boolean;
-  installed: IntegrationActionDto[];
-  missing: string[];
   unsupported: string[];
 }
 
@@ -726,7 +744,7 @@ export const ipc = {
     path: string,
     split: boolean,
     requestId: string,
-    sfxTarget?: string | null,
+    sfxTarget?: SfxTarget | null,
   ) =>
     invoke<CreateDestinationInspectionDto>("inspect_create_destination", {
       proposed: path,
@@ -831,10 +849,10 @@ export const ipc = {
   saveArchivePresets: (expectedRevision: number, document: ArchivePresetDocument) =>
     invoke<ArchivePresetDocument>("save_archive_presets", { expectedRevision, document }),
   resolveExternalTaskJob: (
-    action: string,
+    action: ExternalTaskAction,
     paths: string[],
     output: string | null,
-    checksumAlgorithm: string,
+    checksumAlgorithm: ChecksumAlgorithm,
     checksumExcludes: string[],
   ) =>
     invoke<JobSpec | null>("resolve_external_task_job", {

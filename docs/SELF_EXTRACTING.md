@@ -31,10 +31,7 @@ the completed artifact.
 
 Packaged Windows NSIS installers and Linux AppImages ship a dedicated `sqz-sfx`
 runtime as the data resource `bin/sqz-sfx.stub`. Standalone GUI binaries do not
-contain bundle resources. The desktop app prefers the dedicated runtime over
-the full `sqz` CLI. An unsigned legacy `sqz` remains a compatibility fallback
-for older packages, but a signed Windows CLI cannot be used as a template
-because it already has a PE certificate table. The dedicated runtime exposes
+contain bundle resources and cannot create an SFX. The dedicated runtime exposes
 only runtime help/version and self-extraction actions; list, test or extract
 without an embedded payload exits with an error.
 
@@ -117,7 +114,7 @@ extracts beside the `.app` into a same-name folder. It never auto-runs payload
 content.
 
 If the source app is signed, the builder omits its stale
-`Contents/_CodeSignature` directory. The new bundle is intentionally unsigned:
+`Contents/_CodeSignature` directory. The resulting bundle is intentionally unsigned:
 sign nested executables and the outer bundle from the inside out. The outer app
 signature must be last because it seals the payload and manifest as resources.
 
@@ -131,7 +128,7 @@ distribution warning rather than a successful trust check.
 Replacing an existing self-extractor is a guarded, recoverable transaction.
 Before the build starts, Squallz binds the exact artifact the caller approved.
 After staging is complete, it coordinates publishers per output directory,
-locks the exact destination, recovers any older transaction, and verifies that
+locks the exact destination, recovers any matching transaction, and verifies that
 binding again at the final publication boundary. A single-file SFX is bound by
 its filesystem identity, selected stable metadata, and full content. A macOS
 SFX binds the complete bundle tree, including member names, entry types, file
@@ -143,8 +140,8 @@ transaction boundary and can instead produce a recovery error that requires
 inspection.
 
 After the guard passes, Squallz writes a fixed
-`.squallz-sfx-transaction.json` record beside the destination. New records use
-transaction version 4 and keep the lossless destination spelling, any verified
+`.squallz-sfx-transaction.json` record beside the destination. Records use
+transaction version 1 and keep the lossless destination spelling, any verified
 filesystem alias, the identities of the holder, replacement, and previous
 output, and fixed content-state digests for both old and new artifacts. Those
 digests are checked before and after transaction moves and while recovery is
@@ -157,12 +154,10 @@ the next one begins. Once the replacement is installed, the active record is
 atomically renamed to `.squallz-sfx-completed.json`. This happens before the
 build reports success, so a crash cannot hide an unacknowledged backup.
 
-The reader remains compatible with transaction versions 1 through 3. Those
-legacy records do not contain the version 4 content digests and are recovered
-under their original identity-bound rules; Squallz never rewrites or invents
-missing digests in an old record. Cleanup records are written as version 2 with
-a state digest, while version 1 remains readable. These are private recovery
-record versions and do not change the public SFX v1 container layout.
+Only transaction version 1 and cleanup version 1 are accepted. Both require
+content-state digests. Invalid private records are left untouched and reported
+for inspection. These private record versions do not change the public SFX v1
+container layout.
 
 If a build is interrupted, the next build for that destination resumes the
 recorded transaction, including after a case-insensitive alias was used.
@@ -177,7 +172,7 @@ or GUI.
 
 Staging cleanup uses `.squallz-sfx-cleanup.json` and an identity-bound
 quarantine. Current cleanup records also bind the quarantined content state.
-Before removal, version 2 cleanup moves the quarantine without replacement to
+Before removal, cleanup moves the quarantine without replacement to
 a fresh, currently absent isolation name in the reserved namespace, syncs the
 parent directory, then checks its identity and full content digest again. If
 any check fails, Squallz keeps the record and the current objects for
@@ -220,12 +215,11 @@ different artifact, the command reports `destination_changed` before moving an
 output. A later active path race can instead produce a recovery error with
 paths to inspect.
 
-When Windows/Linux host and target match, `sqz` first looks for the packaged
-`sqz-sfx.stub` and falls back to the current unsigned `sqz` binary for older
-or development layouts. A packaged macOS `sqz` automatically finds its
-enclosing `Squallz.app`; development builds use `--stub Squallz.app`. The
-builder checks the executable format and the correct Squallz runtime marker
-before writing.
+When Windows/Linux host and target match, `sqz` uses the packaged
+`sqz-sfx.stub`; development or standalone builds must pass `--stub`. A
+packaged macOS `sqz` automatically finds its enclosing `Squallz.app`;
+development builds use `--stub Squallz.app`. The builder checks the executable
+format and the correct Squallz runtime marker before writing.
 
 Inspect and verify an artifact without executing it:
 
@@ -258,8 +252,8 @@ snapshot, history, audit record and user-visible error omit the selected
 identity and profile.
 
 `publish-macos` is deliberately no-replace. It verifies and snapshots the
-source bundle, copies it into a private sibling workspace, signs a legacy
-`Contents/MacOS/sqz` sidecar when present and the outer app last, then requires
+source bundle, copies it into a private sibling workspace, signs the outer app,
+then requires
 all of the following before publishing the requested output:
 
 1. a timestamped hardened-runtime Developer ID Application signature;
@@ -323,8 +317,7 @@ line.
   compare its `bin/sqz-sfx.stub` with the build template. It must then use the
   dedicated template while retaining the full CLI version, split create, list,
   test, extract and payload-create checks. It must also verify the dedicated
-  runtime identity, require it to be strictly smaller than the full `sqz` CLI,
-  and exercise an unsigned legacy `sqz` fallback where that fallback is valid.
+  runtime identity and require it to be strictly smaller than the full `sqz` CLI.
 - Benchmark guarded replacement with cold caches and large macOS bundles. The
   full-tree digest is intentionally stronger than a metadata-only check, but
   its release-scale read amplification has not yet been qualified.

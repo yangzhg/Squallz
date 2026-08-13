@@ -289,15 +289,11 @@ fn extract_nested(
                 "dest": path,
                 "matched": false,
                 "best_effort": best_effort,
-                "skipped": 0,
                 "problems": [],
                 "problems_total": 0,
                 "problems_truncated": false,
                 "plan": extract_plan_json(&outcome.plan),
                 "counts": empty_extract_counts_json(&outcome.plan.destination),
-                "selected_entries": 0,
-                "directories": 0,
-                "output_bytes": 0,
             });
             print_pretty_json(&value)?;
             return Ok(());
@@ -315,15 +311,11 @@ fn extract_nested(
             "dest": path,
             "matched": true,
             "best_effort": best_effort,
-            "skipped": problems.total,
             "problems": problems.messages,
             "problems_total": problems.total,
             "problems_truncated": problems_truncated,
             "plan": extract_plan_json(&outcome.plan),
             "counts": extract_counts_json(&report),
-            "selected_entries": report.selected_entries,
-            "directories": report.directories,
-            "output_bytes": report.output_bytes,
         });
         print_pretty_json(&value)?;
         return Ok(());

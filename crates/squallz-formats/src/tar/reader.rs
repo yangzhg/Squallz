@@ -11,8 +11,7 @@ use std::time::{Duration, SystemTime};
 use squallz_format_api::{
     empty_extract_report, ArchiveReader, BoundedProblemLog, ControlToken, EntryMeta, EntryPath,
     EntryType, ExtractOptions, ExtractReport, ExtractSink, FormatError, LimitsAccountant,
-    ProgressSink, ReadSeek, SafetyLimits, StreamFactory, TestReport, TestSummary,
-    TEST_PROBLEM_PREVIEW_LIMIT,
+    ProgressSink, ReadSeek, SafetyLimits, StreamFactory, TestSummary, TEST_PROBLEM_PREVIEW_LIMIT,
 };
 
 /// Chunk size when draining entry data and compound stream tails.
@@ -362,21 +361,6 @@ impl ArchiveReader for TarArchiveReader {
         }
         self.validate_stream_end(ctl)?;
         Ok(sink.finish_with_report(progress))
-    }
-
-    fn test(
-        &mut self,
-        progress: &dyn ProgressSink,
-        ctl: &ControlToken,
-    ) -> Result<TestReport, FormatError> {
-        let mut problems = Vec::new();
-        let entries_tested =
-            self.test_with_problem_recorder(progress, ctl, |problem| problems.push(problem))?;
-        Ok(TestReport {
-            entries_tested,
-            problems,
-            recovery: None,
-        })
     }
 
     fn test_summary(

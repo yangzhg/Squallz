@@ -848,9 +848,11 @@ pub(crate) mod tests {
     #[cfg(target_os = "linux")]
     use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
-    use std::sync::{Mutex, MutexGuard};
+    use std::sync::Mutex;
     #[cfg(target_os = "linux")]
     use std::time::{Duration, Instant};
+
+    use squallz_core::lock_unpoisoned;
 
     #[cfg(target_os = "linux")]
     use super::LinuxSecretServiceStore;
@@ -888,13 +890,6 @@ pub(crate) mod tests {
 
         fn delete_archive_password(&self, _path: &Path) -> Result<(), SecretStoreError> {
             Err(SecretStoreError::new("secret store is locked"))
-        }
-    }
-
-    fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-        match mutex.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
         }
     }
 

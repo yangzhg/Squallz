@@ -5,7 +5,7 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 
 use squallz_core::api::FormatError;
 use tempfile::{Builder, TempPath};
@@ -13,6 +13,7 @@ use tempfile::{Builder, TempPath};
 use crate::nested::{write_archive_entry_limited, PREVIEW_ENTRY_TOO_LARGE_DETAIL};
 use crate::preview_workspace::PreviewWorkspace;
 use crate::state::AppState;
+use squallz_core::lock_unpoisoned;
 
 pub(crate) const MAX_PREVIEW_ENTRY_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_PREVIEW_RESOURCE_BYTES: u64 = 512 * 1024 * 1024;
@@ -508,13 +509,6 @@ fn release_reservation_usage(resources: &mut PreviewResources) {
     resources.in_flight_bytes = resources
         .in_flight_bytes
         .saturating_sub(MAX_PREVIEW_ENTRY_BYTES);
-}
-
-fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    match mutex.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    }
 }
 
 fn session_for_owner<'a>(

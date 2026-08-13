@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
+use squallz_core::{sync_directory, StoredOsString};
 
 const JOURNAL_VERSION: u32 = 1;
 // A Windows extended-length path may contain almost 32K UTF-16 units. The
@@ -180,10 +181,10 @@ impl PendingSourceCleanup {
 #[serde(deny_unknown_fields)]
 struct JournalDocument {
     version: u32,
-    original: StoredPath,
-    staged: StoredPath,
-    holder: StoredPath,
-    preserved: StoredPath,
+    original: StoredOsString,
+    staged: StoredOsString,
+    holder: StoredOsString,
+    preserved: StoredOsString,
     identity: SourcePathIdentity,
 }
 
@@ -191,10 +192,10 @@ impl JournalDocument {
     fn from_record(record: &SourceCleanupRecord) -> io::Result<Self> {
         Ok(Self {
             version: JOURNAL_VERSION,
-            original: StoredPath::from_path(&record.original)?,
-            staged: StoredPath::from_path(&record.staged)?,
-            holder: StoredPath::from_path(&record.holder)?,
-            preserved: StoredPath::from_path(&record.preserved)?,
+            original: stored_path(&record.original)?,
+            staged: stored_path(&record.staged)?,
+            holder: stored_path(&record.holder)?,
+            preserved: stored_path(&record.preserved)?,
             identity: record.identity,
         })
     }
@@ -207,10 +208,10 @@ impl JournalDocument {
             ));
         }
         Ok(SourceCleanupRecord {
-            original: self.original.into_path()?,
-            staged: self.staged.into_path()?,
-            holder: self.holder.into_path()?,
-            preserved: self.preserved.into_path()?,
+            original: restored_path(self.original)?,
+            staged: restored_path(self.staged)?,
+            holder: restored_path(self.holder)?,
+            preserved: restored_path(self.preserved)?,
             identity: self.identity,
         })
     }
@@ -228,112 +229,14 @@ fn serialize_journal(document: &JournalDocument) -> io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(tag = "encoding", content = "units", rename_all = "snake_case")]
-enum StoredPath {
-    UnixBytes(Vec<u8>),
-    WindowsWide(Vec<u16>),
-    Utf8(String),
+fn stored_path(path: &Path) -> io::Result<StoredOsString> {
+    StoredOsString::from_path(path)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))
 }
 
-impl StoredPath {
-    fn from_path(path: &Path) -> io::Result<Self> {
-        #[cfg(unix)]
-        {
-            use std::os::unix::ffi::OsStrExt;
-
-            let bytes = path.as_os_str().as_bytes();
-            if bytes.contains(&0) {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "source cleanup path contains a null byte",
-                ));
-            }
-            Ok(Self::UnixBytes(bytes.to_vec()))
-        }
-        #[cfg(windows)]
-        {
-            use std::os::windows::ffi::OsStrExt;
-
-            let units: Vec<u16> = path.as_os_str().encode_wide().collect();
-            if units.contains(&0) {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "source cleanup path contains a null unit",
-                ));
-            }
-            Ok(Self::WindowsWide(units))
-        }
-        #[cfg(not(any(unix, windows)))]
-        {
-            path.to_str()
-                .map(|value| Self::Utf8(value.to_owned()))
-                .ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "source cleanup path is not valid UTF-8",
-                    )
-                })
-        }
-    }
-
-    fn into_path(self) -> io::Result<PathBuf> {
-        match self {
-            Self::UnixBytes(bytes) => {
-                #[cfg(unix)]
-                {
-                    use std::os::unix::ffi::OsStringExt;
-
-                    if bytes.contains(&0) {
-                        return Err(io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            "source cleanup path contains a null byte",
-                        ));
-                    }
-                    Ok(PathBuf::from(OsString::from_vec(bytes)))
-                }
-                #[cfg(not(unix))]
-                {
-                    let _ = bytes;
-                    Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "source cleanup journal belongs to another platform",
-                    ))
-                }
-            }
-            Self::WindowsWide(units) => {
-                #[cfg(windows)]
-                {
-                    use std::os::windows::ffi::OsStringExt;
-
-                    if units.contains(&0) {
-                        return Err(io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            "source cleanup path contains a null unit",
-                        ));
-                    }
-                    Ok(PathBuf::from(OsString::from_wide(&units)))
-                }
-                #[cfg(not(windows))]
-                {
-                    let _ = units;
-                    Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "source cleanup journal belongs to another platform",
-                    ))
-                }
-            }
-            Self::Utf8(value) => {
-                if value.as_bytes().contains(&0) {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "source cleanup path contains a null byte",
-                    ));
-                }
-                Ok(PathBuf::from(value))
-            }
-        }
-    }
+fn restored_path(path: StoredOsString) -> io::Result<PathBuf> {
+    path.into_path_buf()
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
 fn validate_record_layout(record: &SourceCleanupRecord, require_holder: bool) -> io::Result<()> {
@@ -1054,36 +957,6 @@ fn sync_parent(path: &Path) -> io::Result<()> {
     sync_directory(parent)
 }
 
-#[cfg(unix)]
-pub(crate) fn sync_directory(path: &Path) -> io::Result<()> {
-    File::open(path)?.sync_all()
-}
-
-#[cfg(windows)]
-pub(crate) fn sync_directory(path: &Path) -> io::Result<()> {
-    use std::os::windows::fs::OpenOptionsExt;
-
-    use windows_sys::Win32::Storage::FileSystem::{
-        FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-    };
-
-    OpenOptions::new()
-        .read(true)
-        .write(true)
-        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
-        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
-        .open(path)?
-        .sync_all()
-}
-
-#[cfg(not(any(unix, windows)))]
-pub(crate) fn sync_directory(_path: &Path) -> io::Result<()> {
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "durable source cleanup is unavailable on this platform",
-    ))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1500,7 +1373,7 @@ mod tests {
 
         fs::remove_file(&journal_path).unwrap();
         let mut document = JournalDocument::from_record(&record).unwrap();
-        document.staged = StoredPath::from_path(&record.holder.join("../victim")).unwrap();
+        document.staged = stored_path(&record.holder.join("../victim")).unwrap();
         fs::write(&journal_path, serde_json::to_vec(&document).unwrap()).unwrap();
         assert!(journal.recover_pending().is_err());
         assert_eq!(fs::read(&record.original).unwrap(), b"source");
@@ -1526,7 +1399,7 @@ mod tests {
     #[test]
     fn journal_size_limit_accepts_platform_length_paths_and_rejects_larger_records() {
         fn document_with_units(units: usize) -> JournalDocument {
-            let path = || StoredPath::WindowsWide(vec![u16::MAX; units]);
+            let path = || StoredOsString::Windows(vec![u16::MAX; units]);
             JournalDocument {
                 version: JOURNAL_VERSION,
                 original: path(),
@@ -1563,7 +1436,7 @@ mod tests {
         use std::os::unix::ffi::OsStringExt;
 
         let path = PathBuf::from(OsString::from_vec(b"/tmp/source-\xff".to_vec()));
-        let restored = StoredPath::from_path(&path).unwrap().into_path().unwrap();
+        let restored = restored_path(stored_path(&path).unwrap()).unwrap();
         assert_eq!(restored, path);
     }
 

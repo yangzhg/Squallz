@@ -13,9 +13,9 @@ The preset document is stored beside the other Squallz configuration files:
 - Linux: `$XDG_CONFIG_HOME/Squallz/presets.json` (normally
   `~/.config/Squallz/presets.json`)
 
-`schema_version` controls compatibility and `revision` is used for
-compare-and-swap updates. Squallz validates the complete replacement before it
-changes the file. Writes use a private same-directory temporary file, an
+`schema_version` identifies the current document contract and `revision` is
+used for compare-and-swap updates. Squallz validates the complete replacement
+before it changes the file. Writes use a private same-directory temporary file, an
 inter-process lock and a durable replacement. A corrupt document or an unknown
 schema version is reported and left untouched.
 
@@ -52,17 +52,17 @@ compare-and-swap validation, inter-process lock and atomic replacement. A
 concurrent edit fails instead of overwriting the newer document. Built-in
 presets cannot be updated or deleted. Deleting a bound custom preset restores
 the corresponding safe built-in binding; `unbind` is the explicit way to leave
-a slot empty. File-manager bindings still have the stricter compatibility rules
+a slot empty. File-manager bindings must satisfy the stricter preset-kind rules
 described below.
 
-## Version 4 contract
+## Current contract
 
 A document contains named create and extract presets plus four optional
 bindings:
 
 ```json
 {
-  "schema_version": 4,
+  "schema_version": 1,
   "revision": 0,
   "presets": [
     {
@@ -108,7 +108,7 @@ app currently accepts values up to JavaScript's exact-integer limit. Runtime
 password prompts are valid only for ZIP and 7Z presets, the two create formats
 with data encryption.
 
-`content_policy` is required on every version 4 create preset. It accepts these
+`content_policy` is required on every create preset. It accepts these
 JSON values:
 
 - `cross_platform_clean` adds `.DS_Store`, `._*` and `__MACOSX` to the resolved
@@ -126,7 +126,7 @@ format.
 Create destinations contain a symbolic `base` and an `existing_output` policy;
 they never contain a selected path. The bases are `ask`, `source_parent` and
 `default_directory`. The existing-output values are `ask`, `skip`, `overwrite`
-and `rename`, shared with extract presets. Version 4 create presets accept only
+and `rename`, shared with extract presets. Create presets accept only
 the combinations the desktop shell can execute without ambiguity: `ask` with
 `ask`, or either automatic base with `rename`. The desktop shell resolves the
 policy to a concrete destination before it submits a job.
@@ -182,7 +182,7 @@ partial, failed or cancelled even when the archive itself was created
 successfully.
 
 Extract presets cover destination policy, existing-file handling, symbolic
-links, filename encoding and runtime password prompting. Version 4 accepts the
+links, filename encoding and runtime password prompting. The current schema accepts the
 four destination combinations the desktop app can represent without loss:
 
 - smart layout in the configured default directory;
@@ -194,7 +194,7 @@ Extract presets currently require `post_success: "keep_source"`. Removing the
 source archive is rejected at validation rather than saved as an action the
 desktop job cannot execute.
 
-Version 4 requires three immutable built-ins:
+The schema requires three immutable built-ins:
 
 - `builtin.create.cross-platform-7z` uses `cross_platform_clean` and is the
   create default for a newly seeded app and file-manager configuration.
@@ -209,62 +209,13 @@ All create built-ins use `ask` for both destination fields, `none` for
 completion, `keep_source` for source retention and disable the optional
 creation-time integrity test.
 
-## Version 3 migration
-
-Version 3 documents are decoded with their original field set. Presets that
-keep their sources receive `test_after_create: false`; presets that move
-sources to the trash receive `true` because the integrity test is now a
-mandatory cleanup guard. Loading does not rewrite the file. The next successful
-compare-and-swap save writes a version 4 document and advances the revision
-normally.
-
-## Version 2 migration
-
-Version 2 documents are decoded with their original strict field set and then
-migrated in memory. Each create preset receives an `ask` destination with an
-`ask` existing-output policy and `completion` becomes `none`. All existing
-fields, the revision and all four bindings remain unchanged. Version 2 only
-allowed `keep_source`, so migration cannot introduce source cleanup.
-
-## Version 1 migration
-
-Version 1 documents are decoded with their original strict field set and then
-migrated in memory through the same safe version 4 defaults. Squallz does not
-treat a missing `content_policy` as a current-schema default.
-
-During migration:
-
-- `schema_version` becomes `4` and the cross-platform built-in is added;
-- `revision` and all four binding targets remain unchanged, except when a
-  user preset occupies the new built-in ID as described below;
-- every existing create preset becomes `custom`, with its original `excludes`
-  array unchanged;
-- every create preset receives the `ask` / `ask` destination and `none`
-  completion defaults;
-- extract presets and the other create options remain unchanged.
-
-If a user preset already uses `builtin.create.cross-platform-7z`, migration
-moves it to the first free kind-specific ID (`user.create.cross-platform-7z`
-or `user.extract.cross-platform-7z`, with a numeric suffix when needed) and
-updates only that kind's app and file-manager bindings. A user create preset
-named `Cross-platform 7Z` is similarly renamed to the first free `(legacy)`
-label. Its options and binding behavior do not change. A version 1 preset that
-claims an unknown built-in identity remains invalid rather than being rewritten
-as user data.
-
-Loading a version 1, version 2 or version 3 file does not rewrite it. This preserves the
-behavior of existing app and file-manager bindings, including a binding to
-Balanced 7Z. A newly seeded document uses Cross-platform 7Z instead. The next
-successful compare-and-swap save writes a version 4 document and advances the
-revision in the normal way.
-
 ## Passwords and paths
 
 Preset JSON never contains a plaintext password, selected source, final output
 path or temporary path. A create preset can say that a password must be asked
 for when the job starts. An extract preset can ask only when the archive needs
 one. Password Book entries remain in the operating system credential store and
-are not referenced from the version 4 preset schema.
+are not referenced from the preset schema.
 
 ## Desktop and file-manager behavior
 
@@ -296,20 +247,17 @@ authoritative. Incompatible presets cannot be bound. An empty file-manager
 binding uses level 5, a single volume and no implicit exclusions rather than
 pretending that a named preset is selected.
 
-## Compatibility
+## Validation
 
-Readers accept strict version 1, version 2 and version 3 documents through the
-migrations above, and strict version 4 documents directly. They reject unknown
-fields, duplicate JSON fields, unknown enum values, missing fields required by that
-version and unsupported schema versions. Older Squallz builds that only
-understand version 3 cannot read a version 4 file.
+Readers accept only strict version 1 documents. They reject unknown fields,
+duplicate JSON fields, unknown enum values, missing required fields and every
+other schema version. An invalid document is reported and left untouched; the
+user may remove it to seed a fresh current document.
 
-This is a preset-document and public `CreatePreset` schema change, not an SQZ or
-archive-container format change. Rust callers that construct `CreatePreset`
-must provide `content_policy`, `destination`, `completion` and
-`test_after_create`. The lower-level format API still receives a resolved
+Rust callers that construct `CreatePreset` must provide `content_policy`,
+`destination`, `completion` and `test_after_create`. The lower-level format API receives a resolved
 `CreateOptions.excludes` list and concrete output path. Direct CLI commands and
-batch jobs continue to own their explicit output paths. CLI preset management
+batch jobs own their explicit output paths. CLI preset management
 edits only reusable policy and bindings; it does not inject paths or plaintext
-credentials into the schema. Generated file-manager fallbacks continue to read
+credentials into the schema. Generated file-manager actions read
 the shared preset document.

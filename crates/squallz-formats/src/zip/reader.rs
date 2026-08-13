@@ -12,7 +12,7 @@ use flate2::read::DeflateDecoder;
 use squallz_format_api::{
     ArchiveReader, ArchiveStructureStatus, BoundedProblemLog, ControlToken, EntryMeta, EntryPath,
     EntryType, FormatError, LimitsAccountant, OpenOptions, Password, ProgressSink, ReadSeek,
-    SafetyLimits, TestReport, TestSummary, TEST_PROBLEM_PREVIEW_LIMIT,
+    SafetyLimits, TestSummary, TEST_PROBLEM_PREVIEW_LIMIT,
 };
 use zip::read::ZipFile;
 use zip::{ZipArchive, ZipReadOptions};
@@ -423,21 +423,6 @@ impl ArchiveReader for LocalZipArchiveReader {
             .get(&path.raw)
             .ok_or_else(|| FormatError::Other(format!("entry not found: {path}")))?;
         self.read_entry_at(idx)
-    }
-
-    fn test(
-        &mut self,
-        progress: &dyn ProgressSink,
-        ctl: &ControlToken,
-    ) -> Result<TestReport, FormatError> {
-        let mut problems = Vec::new();
-        let entries_tested =
-            self.test_with_problem_recorder(None, progress, ctl, |problem| problems.push(problem))?;
-        Ok(TestReport {
-            entries_tested,
-            problems,
-            recovery: None,
-        })
     }
 
     fn test_summary(
@@ -881,21 +866,6 @@ impl ArchiveReader for ZipArchiveReader {
             .get(&path.raw)
             .ok_or_else(|| FormatError::Other(format!("entry not found: {path}")))?;
         Ok(Box::new(self.open_entry(idx)?))
-    }
-
-    fn test(
-        &mut self,
-        progress: &dyn ProgressSink,
-        ctl: &ControlToken,
-    ) -> Result<TestReport, FormatError> {
-        let mut problems = Vec::new();
-        let entries_tested =
-            self.test_with_problem_recorder(None, progress, ctl, |problem| problems.push(problem))?;
-        Ok(TestReport {
-            entries_tested,
-            problems,
-            recovery: None,
-        })
     }
 
     fn test_summary(

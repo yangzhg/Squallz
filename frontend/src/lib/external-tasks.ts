@@ -3,7 +3,7 @@ import {
   archiveNameWithoutVolumeSuffix,
   stripLegacyRarVolumeSuffix,
 } from "./archive-names";
-import type { JobSpec } from "./ipc";
+import type { ChecksumAlgorithm, ExternalTaskAction, JobSpec } from "./ipc";
 
 export const externalOpenActions = [
   "checksum",
@@ -12,7 +12,7 @@ export const externalOpenActions = [
   "extract-sfx",
   "compress-to-7z",
   "test-archive",
-] as const;
+] as const satisfies readonly ExternalTaskAction[];
 
 export type ExternalOpenAction = (typeof externalOpenActions)[number];
 export const desktopIntegrationActions = [
@@ -33,7 +33,7 @@ export interface ExternalOpenActionCopy {
 export interface ExternalTaskJobOptions {
   paths: readonly unknown[];
   output: string | null;
-  checksumAlgorithm: string;
+  checksumAlgorithm: ChecksumAlgorithm;
   checksumExcludes: string[];
   archiveStemName?: ArchiveStemName;
 }
@@ -162,6 +162,8 @@ export function buildExternalTaskJobSpec(
       kind: "extract",
       path: firstPath,
       dest: options.output?.trim() || joinPath(dirname(firstPath), stemName(basename(firstPath))),
+      expected_destination: null,
+      expected_input_guard: null,
       selection: null,
       overwrite: "ask",
       symlinks: "skip",
@@ -183,9 +185,14 @@ export function buildExternalTaskJobSpec(
       split_size: null,
       split_mode: "generic",
       excludes: [],
+      content_policy: "keep_all_files",
+      sqz_inner_format: null,
+      sfx_target: null,
       replace_existing: false,
+      replacement_guard: null,
       completion: "none",
       post_success: "keep_source",
+      test_after_create: false,
     };
   }
   return {
@@ -208,12 +215,15 @@ function extractJobSpec(
       kind: "extract",
       path,
       dest: externalExtractDest(action, path, stemName),
+      expected_destination: null,
+      expected_input_guard: null,
       selection: null,
       overwrite: "ask",
       symlinks: "preserve",
       smart,
       encoding: null,
       password: null,
+      verify_sfx: false,
       best_effort: false,
     };
   }

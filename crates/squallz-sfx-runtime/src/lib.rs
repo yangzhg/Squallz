@@ -377,7 +377,7 @@ mod tests {
     use std::io::Cursor;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use squallz_core::api::{EntryPath, NoProgress, TestReport};
+    use squallz_core::api::{EntryPath, NoProgress, TestSummary};
 
     use super::*;
 
@@ -406,12 +406,12 @@ mod tests {
             Err(FormatError::WrongPassword)
         }
 
-        fn test(
+        fn test_summary(
             &mut self,
             _progress: &dyn ProgressSink,
             _ctl: &ControlToken,
-        ) -> Result<TestReport, FormatError> {
-            Ok(TestReport::default())
+        ) -> Result<TestSummary, FormatError> {
+            Ok(TestSummary::default())
         }
     }
 

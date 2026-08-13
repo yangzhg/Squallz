@@ -10,13 +10,16 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use squallz_core::api::{
-    split_volume_name, CompressionLevel, CreateOptions, Detected, EntryPath, ExtractOptions,
-    FormatError, NoProgress, OpenOptions, OverwritePolicy, Password, SplitOutputMode,
-    SqzCreateOptions, SymlinkPolicy, TestSummary, UpdateOp,
+    CompressionLevel, CreateOptions, Detected, EntryPath, ExtractOptions, FormatError, NoProgress,
+    OpenOptions, OverwritePolicy, Password, SplitOutputMode, SqzCreateOptions, SqzInnerFormat,
+    SymlinkPolicy, TestSummary, UpdateOp,
 };
-use squallz_core::{ChecksumAlgorithm, CreateContentPolicy, PathFilter};
+use squallz_core::{
+    is_plain_sqz_path, is_sqz_archive_path, is_zip_family_path, ChecksumAlgorithm,
+    CreateContentPolicy, PathFilter,
+};
 
-use crate::args::{resource_options, safety_limits};
+use crate::args::{resource_options, safety_limits, CreateProfileArg};
 use crate::commands::reports::{
     create_report_json, empty_extract_counts_json, extract_counts_json, extract_plan_json,
     print_preserved_output_warning, print_pretty_json, recovery_summary_json, test_report_json,
@@ -27,109 +30,288 @@ use crate::errors::{error_kind, exit_code, localize_error, CliError};
 use super::Ctx;
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct BatchScript {
-    #[serde(default)]
     base_dir: Option<PathBuf>,
-    #[serde(default)]
     jobs: Vec<BatchJob>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum BatchSplitMode {
-    Generic,
-    Native,
+enum BatchOverwrite {
+    Overwrite,
+    Skip,
+    Rename,
 }
 
-impl From<BatchSplitMode> for SplitOutputMode {
-    fn from(value: BatchSplitMode) -> Self {
+impl From<BatchOverwrite> for OverwritePolicy {
+    fn from(value: BatchOverwrite) -> Self {
         match value {
-            BatchSplitMode::Generic => Self::Generic,
-            BatchSplitMode::Native => Self::Native,
+            BatchOverwrite::Overwrite => Self::Overwrite,
+            BatchOverwrite::Skip => Self::Skip,
+            BatchOverwrite::Rename => Self::RenameBoth,
         }
     }
 }
 
 #[derive(Debug, Deserialize)]
-struct BatchJob {
-    #[serde(default)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum BatchJob {
+    Estimate(EstimateJob),
+    Test(TestJob),
+    Extract(ExtractJob),
+    Compress(CompressJob),
+    Checksum(ChecksumJob),
+    ChecksumCheck(ChecksumCheckJob),
+    Duplicates(DuplicatesJob),
+    Convert(ConvertJob),
+    Pack(PackJob),
+    Export(ExportJob),
+    RepairSqz(RepairJob),
+    RepairZip(RepairJob),
+    Protect(ProtectJob),
+    VerifyRecovery(VerifyRecoveryJob),
+    RepairRecovery(RepairRecoveryJob),
+    Update(UpdateJob),
+}
+
+impl BatchJob {
+    fn id(&self) -> Option<&str> {
+        match self {
+            Self::Estimate(job) => job.id.as_deref(),
+            Self::Test(job) => job.id.as_deref(),
+            Self::Extract(job) => job.id.as_deref(),
+            Self::Compress(job) => job.id.as_deref(),
+            Self::Checksum(job) => job.id.as_deref(),
+            Self::ChecksumCheck(job) => job.id.as_deref(),
+            Self::Duplicates(job) => job.id.as_deref(),
+            Self::Convert(job) => job.id.as_deref(),
+            Self::Pack(job) => job.id.as_deref(),
+            Self::Export(job) => job.id.as_deref(),
+            Self::RepairSqz(job) | Self::RepairZip(job) => job.id.as_deref(),
+            Self::Protect(job) => job.id.as_deref(),
+            Self::VerifyRecovery(job) => job.id.as_deref(),
+            Self::RepairRecovery(job) => job.id.as_deref(),
+            Self::Update(job) => job.id.as_deref(),
+        }
+    }
+
+    const fn kind(&self) -> &'static str {
+        match self {
+            Self::Estimate(_) => "estimate",
+            Self::Test(_) => "test",
+            Self::Extract(_) => "extract",
+            Self::Compress(_) => "compress",
+            Self::Checksum(_) => "checksum",
+            Self::ChecksumCheck(_) => "checksum_check",
+            Self::Duplicates(_) => "duplicates",
+            Self::Convert(_) => "convert",
+            Self::Pack(_) => "pack",
+            Self::Export(_) => "export",
+            Self::RepairSqz(_) => "repair_sqz",
+            Self::RepairZip(_) => "repair_zip",
+            Self::Protect(_) => "protect",
+            Self::VerifyRecovery(_) => "verify_recovery",
+            Self::RepairRecovery(_) => "repair_recovery",
+            Self::Update(_) => "update",
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EstimateJob {
     id: Option<String>,
-    #[serde(alias = "op", alias = "type", alias = "kind")]
-    operation: String,
-    #[serde(default)]
-    archive: Option<PathBuf>,
-    #[serde(default)]
-    src: Option<PathBuf>,
-    #[serde(default)]
-    dest: Option<PathBuf>,
-    #[serde(default)]
     inputs: Vec<PathBuf>,
-    #[serde(default)]
     output: Option<PathBuf>,
     #[serde(default)]
-    format: Option<String>,
-    #[serde(default)]
-    level: Option<u8>,
-    #[serde(default)]
-    profile: Option<String>,
-    #[serde(default)]
+    excludes: Vec<String>,
+    content_policy: Option<CreateContentPolicy>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TestJob {
+    id: Option<String>,
+    archive: PathBuf,
     password: Option<String>,
-    #[serde(default)]
     encoding: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExtractJob {
+    id: Option<String>,
+    archive: PathBuf,
+    dest: Option<PathBuf>,
     #[serde(default)]
     includes: Vec<String>,
-    #[serde(default)]
-    excludes: Vec<String>,
-    #[serde(default)]
-    content_policy: Option<CreateContentPolicy>,
-    #[serde(default)]
-    algorithm: Option<String>,
-    #[serde(default, alias = "manifest")]
-    check: Option<PathBuf>,
-    #[serde(default, alias = "minimum_size")]
-    min_size: Option<u64>,
-    #[serde(default)]
-    fail_on_found: bool,
-    #[serde(default)]
-    output_dir: Option<PathBuf>,
-    #[serde(default)]
-    threads: Option<usize>,
-    #[serde(default)]
-    memory_limit: Option<u64>,
-    #[serde(default)]
-    max_output_bytes: Option<u64>,
-    #[serde(default)]
-    max_entries: Option<u64>,
-    #[serde(default)]
-    max_compression_ratio: Option<u32>,
+    overwrite: Option<BatchOverwrite>,
+    symlinks: Option<SymlinkPolicy>,
     #[serde(default)]
     smart: bool,
     #[serde(default)]
     best_effort: bool,
-    #[serde(default)]
-    overwrite: Option<String>,
-    #[serde(default)]
-    symlinks: Option<String>,
-    #[serde(default)]
-    split: Option<u64>,
-    #[serde(default)]
-    split_mode: Option<BatchSplitMode>,
-    #[serde(default)]
-    test_after_create: bool,
+    password: Option<String>,
+    encoding: Option<String>,
+    threads: Option<usize>,
+    memory_limit: Option<u64>,
+    max_output_bytes: Option<u64>,
+    max_entries: Option<u64>,
+    max_compression_ratio: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CompressJob {
+    id: Option<String>,
+    inputs: Vec<PathBuf>,
+    output: PathBuf,
+    format: Option<String>,
+    level: Option<u8>,
+    profile: Option<CreateProfileArg>,
+    password: Option<String>,
     #[serde(default)]
     encrypt_names: bool,
+    split: Option<u64>,
+    split_mode: Option<SplitOutputMode>,
+    content_policy: Option<CreateContentPolicy>,
     #[serde(default)]
+    excludes: Vec<String>,
+    threads: Option<usize>,
+    memory_limit: Option<u64>,
+    #[serde(default)]
+    test_after_create: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ChecksumJob {
+    id: Option<String>,
+    inputs: Vec<PathBuf>,
+    algorithm: Option<ChecksumAlgorithm>,
+    #[serde(default)]
+    excludes: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ChecksumCheckJob {
+    id: Option<String>,
+    check: PathBuf,
+    algorithm: Option<ChecksumAlgorithm>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DuplicatesJob {
+    id: Option<String>,
+    inputs: Vec<PathBuf>,
+    #[serde(default)]
+    excludes: Vec<String>,
+    min_size: Option<u64>,
+    #[serde(default)]
+    fail_on_found: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConvertJob {
+    id: Option<String>,
+    src: PathBuf,
+    output: PathBuf,
+    level: Option<u8>,
+    profile: Option<CreateProfileArg>,
+    password: Option<String>,
     out_password: Option<String>,
     #[serde(default)]
-    inner_format: Option<String>,
+    encrypt_names: bool,
+    encoding: Option<String>,
+    split: Option<u64>,
+    split_mode: Option<SplitOutputMode>,
+    threads: Option<usize>,
+    memory_limit: Option<u64>,
+    overwrite: Option<BatchOverwrite>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PackJob {
+    id: Option<String>,
+    inputs: Vec<PathBuf>,
+    output: PathBuf,
+    inner_format: Option<SqzInnerFormat>,
+    recovery: Option<u8>,
+    level: Option<u8>,
+    profile: Option<CreateProfileArg>,
+    split: Option<u64>,
+    split_mode: Option<SplitOutputMode>,
+    content_policy: Option<CreateContentPolicy>,
     #[serde(default)]
-    recovery: Option<BatchRecovery>,
-    #[serde(default, alias = "recovery_file", alias = "par2")]
+    excludes: Vec<String>,
+    threads: Option<usize>,
+    memory_limit: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExportJob {
+    id: Option<String>,
+    archive: PathBuf,
+    output: PathBuf,
+    level: Option<u8>,
+    profile: Option<CreateProfileArg>,
+    out_password: Option<String>,
+    threads: Option<usize>,
+    memory_limit: Option<u64>,
+    overwrite: Option<BatchOverwrite>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RepairJob {
+    id: Option<String>,
+    archive: PathBuf,
+    output: PathBuf,
+    level: Option<u8>,
+    profile: Option<CreateProfileArg>,
+    threads: Option<usize>,
+    memory_limit: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProtectJob {
+    id: Option<String>,
+    archive: PathBuf,
     recovery_path: Option<PathBuf>,
-    #[serde(default)]
     redundancy: Option<u8>,
-    #[serde(default)]
     tolerate_loss: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VerifyRecoveryJob {
+    id: Option<String>,
+    archive: PathBuf,
+    recovery_path: Option<PathBuf>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RepairRecoveryJob {
+    id: Option<String>,
+    archive: PathBuf,
+    output: Option<PathBuf>,
+    output_dir: Option<PathBuf>,
+    recovery_path: Option<PathBuf>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UpdateJob {
+    id: Option<String>,
+    archive: PathBuf,
     #[serde(default)]
     add: Vec<PathBuf>,
     #[serde(default)]
@@ -138,23 +320,23 @@ struct BatchJob {
     delete: Vec<String>,
     #[serde(default)]
     rename: Vec<BatchMove>,
-    #[serde(default, rename = "move", alias = "moves")]
-    move_entries: Vec<BatchMove>,
+    content_policy: Option<CreateContentPolicy>,
+    #[serde(default)]
+    excludes: Vec<String>,
+    password: Option<String>,
+    #[serde(default)]
+    encrypt_names: bool,
+    level: Option<u8>,
+    profile: Option<CreateProfileArg>,
+    threads: Option<usize>,
+    memory_limit: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(untagged)]
-enum BatchRecovery {
-    Percent(u8),
-    Text(String),
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(untagged)]
-enum BatchMove {
-    Object { from: String, to: String },
-    Pair([String; 2]),
-    Spec(String),
+#[serde(deny_unknown_fields)]
+struct BatchMove {
+    from: String,
+    to: String,
 }
 
 #[derive(Debug)]
@@ -191,9 +373,9 @@ pub fn run(
 
     let mut reports = Vec::with_capacity(parsed.jobs.len());
     for (index, job) in parsed.jobs.iter().enumerate() {
-        let id = job_id_or_default(job.id.as_deref(), index);
-        let kind = normalize_operation(&job.operation);
-        let report = match run_job(ctx, &base_dir, job, kind) {
+        let id = job_id_or_default(job.id(), index);
+        let kind = job.kind();
+        let report = match run_job(ctx, &base_dir, job) {
             Ok(success) => BatchJobReport {
                 id,
                 kind: kind.to_owned(),
@@ -265,36 +447,32 @@ fn first_failed_exit_code(reports: &[BatchJobReport]) -> i32 {
     1
 }
 
-fn run_job(
-    ctx: &Ctx,
-    base_dir: &Path,
-    job: &BatchJob,
-    operation: &str,
-) -> Result<JobSuccess, FormatError> {
-    match operation {
-        "estimate" => run_estimate_job(ctx, base_dir, job),
-        "test" => run_test_job(ctx, base_dir, job),
-        "extract" => run_extract_job(ctx, base_dir, job),
-        "compress" => run_compress_job(ctx, base_dir, job),
-        "checksum" => run_checksum_job(ctx, base_dir, job),
-        "checksum_check" => run_checksum_check_job(ctx, base_dir, job),
-        "duplicates" => run_duplicates_job(ctx, base_dir, job),
-        "convert" => run_convert_job(ctx, base_dir, job),
-        "pack" => run_pack_job(ctx, base_dir, job),
-        "export" => run_export_job(ctx, base_dir, job),
-        "repair_sqz" => run_repair_sqz_job(ctx, base_dir, job),
-        "repair_zip" => run_repair_zip_job(ctx, base_dir, job),
-        "protect" => run_protect_job(ctx, base_dir, job),
-        "verify_recovery" => run_verify_recovery_job(ctx, base_dir, job),
-        "repair_recovery" => run_repair_recovery_job(ctx, base_dir, job),
-        "update" => run_update_job(ctx, base_dir, job),
-        other => Err(FormatError::Unsupported(format!(
-            "unsupported batch operation: {other}"
-        ))),
+fn run_job(ctx: &Ctx, base_dir: &Path, job: &BatchJob) -> Result<JobSuccess, FormatError> {
+    match job {
+        BatchJob::Estimate(job) => run_estimate_job(ctx, base_dir, job),
+        BatchJob::Test(job) => run_test_job(ctx, base_dir, job),
+        BatchJob::Extract(job) => run_extract_job(ctx, base_dir, job),
+        BatchJob::Compress(job) => run_compress_job(ctx, base_dir, job),
+        BatchJob::Checksum(job) => run_checksum_job(ctx, base_dir, job),
+        BatchJob::ChecksumCheck(job) => run_checksum_check_job(ctx, base_dir, job),
+        BatchJob::Duplicates(job) => run_duplicates_job(ctx, base_dir, job),
+        BatchJob::Convert(job) => run_convert_job(ctx, base_dir, job),
+        BatchJob::Pack(job) => run_pack_job(ctx, base_dir, job),
+        BatchJob::Export(job) => run_export_job(ctx, base_dir, job),
+        BatchJob::RepairSqz(job) => run_repair_sqz_job(ctx, base_dir, job),
+        BatchJob::RepairZip(job) => run_repair_zip_job(ctx, base_dir, job),
+        BatchJob::Protect(job) => run_protect_job(ctx, base_dir, job),
+        BatchJob::VerifyRecovery(job) => run_verify_recovery_job(ctx, base_dir, job),
+        BatchJob::RepairRecovery(job) => run_repair_recovery_job(ctx, base_dir, job),
+        BatchJob::Update(job) => run_update_job(ctx, base_dir, job),
     }
 }
 
-fn run_estimate_job(ctx: &Ctx, base_dir: &Path, job: &BatchJob) -> Result<JobSuccess, FormatError> {
+fn run_estimate_job(
+    ctx: &Ctx,
+    base_dir: &Path,
+    job: &EstimateJob,
+) -> Result<JobSuccess, FormatError> {
     let inputs = resolve_inputs(base_dir, &job.inputs)?;
     let excludes =
         crate::content_policy::resolve_create_excludes(job.content_policy, job.excludes.clone());
@@ -318,11 +496,14 @@ fn run_estimate_job(ctx: &Ctx, base_dir: &Path, job: &BatchJob) -> Result<JobSuc
     })
 }
 
-fn run_test_job(ctx: &Ctx, base_dir: &Path, job: &BatchJob) -> Result<JobSuccess, FormatError> {
-    let archive = required_path(base_dir, job.archive.as_deref(), "archive")?;
-    let report = ctx
-        .engine
-        .test_summary(&archive, &open_options(job), &NoProgress, &ctx.ctl)?;
+fn run_test_job(ctx: &Ctx, base_dir: &Path, job: &TestJob) -> Result<JobSuccess, FormatError> {
+    let archive = resolve_path(base_dir, &job.archive);
+    let report = ctx.engine.test_summary(
+        &archive,
+        &open_options(&job.password, &job.encoding),
+        &NoProgress,
+        &ctx.ctl,
+    )?;
     if report.is_ok() {
         Ok(JobSuccess {
             detail: format!(
@@ -345,14 +526,18 @@ fn run_test_job(ctx: &Ctx, base_dir: &Path, job: &BatchJob) -> Result<JobSuccess
     }
 }
 
-fn run_extract_job(ctx: &Ctx, base_dir: &Path, job: &BatchJob) -> Result<JobSuccess, FormatError> {
-    let archive = required_path(base_dir, job.archive.as_deref(), "archive")?;
+fn run_extract_job(
+    ctx: &Ctx,
+    base_dir: &Path,
+    job: &ExtractJob,
+) -> Result<JobSuccess, FormatError> {
+    let archive = resolve_path(base_dir, &job.archive);
     let dest = job_dest_or_base(base_dir, job.dest.as_deref());
-    let open = open_options(job);
+    let open = open_options(&job.password, &job.encoding);
     let filter = PathFilter::new(&job.includes)?;
     let opts = ExtractOptions {
-        overwrite: parse_overwrite(job.overwrite.as_deref())?,
-        symlinks: parse_symlinks(job.symlinks.as_deref())?,
+        overwrite: job.overwrite.unwrap_or(BatchOverwrite::Skip).into(),
+        symlinks: job.symlinks.unwrap_or(SymlinkPolicy::Preserve),
         limits: safety_limits(
             job.max_output_bytes,
             job.max_entries,
@@ -385,9 +570,6 @@ fn run_extract_job(ctx: &Ctx, base_dir: &Path, job: &BatchJob) -> Result<JobSucc
                 "best_effort": job.best_effort,
                 "plan": extract_plan_json(&plan),
                 "counts": empty_extract_counts_json(&plan.destination),
-                "selected_entries": 0,
-                "directories": 0,
-                "output_bytes": 0,
             }),
         });
     }
@@ -405,9 +587,6 @@ fn run_extract_job(ctx: &Ctx, base_dir: &Path, job: &BatchJob) -> Result<JobSucc
             "best_effort": job.best_effort,
             "plan": extract_plan_json(&plan),
             "counts": extract_counts_json(&report),
-            "selected_entries": report.selected_entries,
-            "directories": report.directories,
-            "output_bytes": report.output_bytes,
         }),
     })
 }
@@ -419,11 +598,15 @@ fn job_dest_or_base(base_dir: &Path, dest: Option<&Path>) -> PathBuf {
     }
 }
 
-fn run_compress_job(ctx: &Ctx, base_dir: &Path, job: &BatchJob) -> Result<JobSuccess, FormatError> {
+fn run_compress_job(
+    ctx: &Ctx,
+    base_dir: &Path,
+    job: &CompressJob,
+) -> Result<JobSuccess, FormatError> {
     let inputs = resolve_inputs(base_dir, &job.inputs)?;
-    let output = required_path(base_dir, job.output.as_deref(), "output")?;
+    let output = resolve_path(base_dir, &job.output);
     validate_requested_format(ctx, &output, job.format.as_deref())?;
-    let level = job_level(job)?;
+    let level = compression_level(job.level, job.profile)?;
     let excludes =
         crate::content_policy::resolve_create_excludes(job.content_policy, job.excludes.clone());
     let opts = CreateOptions {
@@ -431,9 +614,7 @@ fn run_compress_job(ctx: &Ctx, base_dir: &Path, job: &BatchJob) -> Result<JobSuc
         password: job.password.clone().map(Password::new),
         encrypt_filenames: job.encrypt_names,
         split_size: job.split,
-        split_mode: job
-            .split_mode
-            .map_or(SplitOutputMode::Generic, SplitOutputMode::from),
+        split_mode: job.split_mode.unwrap_or(SplitOutputMode::Generic),
         excludes,
         resources: resource_options(job.threads, job.memory_limit),
         ..CreateOptions::default()
@@ -471,7 +652,6 @@ fn run_compress_job(ctx: &Ctx, base_dir: &Path, job: &BatchJob) -> Result<JobSuc
     };
     let detail = format!("created {}", report.primary_output.display());
     let mut result = create_report_json(&report);
-    result["output"] = json!(output.display().to_string());
     result["operation"] = json!("compress");
     result["level"] = json!(level);
     result["tested_after_create"] = json!(entries_tested_after_create.is_some());
@@ -479,12 +659,13 @@ fn run_compress_job(ctx: &Ctx, base_dir: &Path, job: &BatchJob) -> Result<JobSuc
     Ok(JobSuccess { detail, result })
 }
 
-fn run_checksum_job(ctx: &Ctx, base_dir: &Path, job: &BatchJob) -> Result<JobSuccess, FormatError> {
-    if job.check.is_some() {
-        return run_checksum_check_job(ctx, base_dir, job);
-    }
+fn run_checksum_job(
+    ctx: &Ctx,
+    base_dir: &Path,
+    job: &ChecksumJob,
+) -> Result<JobSuccess, FormatError> {
     let inputs = resolve_inputs(base_dir, &job.inputs)?;
-    let algorithm = parse_checksum_algorithm(job.algorithm.as_deref())?;
+    let algorithm = job.algorithm.unwrap_or(ChecksumAlgorithm::Sha256);
     let report = ctx.engine.checksum_files_with_progress(
         &inputs,
         &job.excludes,
@@ -505,10 +686,10 @@ fn run_checksum_job(ctx: &Ctx, base_dir: &Path, job: &BatchJob) -> Result<JobSuc
 fn run_checksum_check_job(
     ctx: &Ctx,
     base_dir: &Path,
-    job: &BatchJob,
+    job: &ChecksumCheckJob,
 ) -> Result<JobSuccess, FormatError> {
-    let manifest = required_path(base_dir, job.check.as_deref(), "check")?;
-    let algorithm = parse_checksum_algorithm(job.algorithm.as_deref())?;
+    let manifest = resolve_path(base_dir, &job.check);
+    let algorithm = job.algorithm.unwrap_or(ChecksumAlgorithm::Sha256);
     let report = ctx.engine.verify_checksum_manifest_with_progress(
         &manifest,
         algorithm,
@@ -534,10 +715,10 @@ fn run_checksum_check_job(
 fn run_duplicates_job(
     ctx: &Ctx,
     base_dir: &Path,
-    job: &BatchJob,
+    job: &DuplicatesJob,
 ) -> Result<JobSuccess, FormatError> {
     let inputs = resolve_inputs(base_dir, &job.inputs)?;
-    let min_size = job_min_size(job);
+    let min_size = job.min_size.unwrap_or(1);
     let report = ctx
         .engine
         .find_duplicate_files(&inputs, &job.excludes, min_size)?;
@@ -557,19 +738,15 @@ fn run_duplicates_job(
     })
 }
 
-fn job_min_size(job: &BatchJob) -> u64 {
-    job.min_size.map_or(1, |size| size)
-}
-
-fn run_convert_job(ctx: &Ctx, base_dir: &Path, job: &BatchJob) -> Result<JobSuccess, FormatError> {
-    let src = required_path(
-        base_dir,
-        job.src.as_deref().or(job.archive.as_deref()),
-        "src",
-    )?;
-    let output = required_path(base_dir, job.output.as_deref(), "output")?;
-    let level = job_level(job)?;
-    let open = open_options(job);
+fn run_convert_job(
+    ctx: &Ctx,
+    base_dir: &Path,
+    job: &ConvertJob,
+) -> Result<JobSuccess, FormatError> {
+    let src = resolve_path(base_dir, &job.src);
+    let output = resolve_path(base_dir, &job.output);
+    let level = compression_level(job.level, job.profile)?;
+    let open = open_options(&job.password, &job.encoding);
     let create = CreateOptions {
         level: CompressionLevel::from_numeric(level),
         password: job
@@ -579,14 +756,12 @@ fn run_convert_job(ctx: &Ctx, base_dir: &Path, job: &BatchJob) -> Result<JobSucc
             .map(Password::new),
         encrypt_filenames: job.encrypt_names,
         split_size: job.split,
-        split_mode: job
-            .split_mode
-            .map_or(SplitOutputMode::Generic, SplitOutputMode::from),
+        split_mode: job.split_mode.unwrap_or(SplitOutputMode::Generic),
         resources: resource_options(job.threads, job.memory_limit),
         ..CreateOptions::default()
     };
     let allow_existing = matches!(
-        parse_overwrite(job.overwrite.as_deref())?,
+        job.overwrite.unwrap_or(BatchOverwrite::Skip).into(),
         OverwritePolicy::Overwrite
     );
     let kind = if job.split.is_some() {
@@ -608,7 +783,6 @@ fn run_convert_job(ctx: &Ctx, base_dir: &Path, job: &BatchJob) -> Result<JobSucc
     let mut result = create_report_json(&report);
     result["operation"] = json!("convert");
     result["source"] = json!(src.display().to_string());
-    result["output"] = json!(output.display().to_string());
     result["level"] = json!(level);
     Ok(JobSuccess {
         detail: format!("converted {} to {}", src.display(), output.display()),
@@ -616,24 +790,22 @@ fn run_convert_job(ctx: &Ctx, base_dir: &Path, job: &BatchJob) -> Result<JobSucc
     })
 }
 
-fn run_pack_job(ctx: &Ctx, base_dir: &Path, job: &BatchJob) -> Result<JobSuccess, FormatError> {
+fn run_pack_job(ctx: &Ctx, base_dir: &Path, job: &PackJob) -> Result<JobSuccess, FormatError> {
     let inputs = resolve_inputs(base_dir, &job.inputs)?;
-    let output = required_path(base_dir, job.output.as_deref(), "output")?;
-    let level = job_level(job)?;
-    let inner_format = job_inner_format(job);
-    let recovery_percent = job_recovery_percent(job, 25)?;
+    let output = resolve_path(base_dir, &job.output);
+    let level = compression_level(job.level, job.profile)?;
+    let inner_format = job.inner_format.unwrap_or(SqzInnerFormat::Sqz);
+    let recovery_percent = job.recovery.unwrap_or(25);
     let excludes =
         crate::content_policy::resolve_create_excludes(job.content_policy, job.excludes.clone());
     let opts = CreateOptions {
         level: CompressionLevel::from_numeric(level),
         split_size: job.split,
-        split_mode: job
-            .split_mode
-            .map_or(SplitOutputMode::Generic, SplitOutputMode::from),
+        split_mode: job.split_mode.unwrap_or(SplitOutputMode::Generic),
         excludes,
         resources: resource_options(job.threads, job.memory_limit),
         sqz: SqzCreateOptions {
-            inner_format: inner_format.clone(),
+            inner_format,
             recovery_percent,
         },
         ..CreateOptions::default()
@@ -654,7 +826,6 @@ fn run_pack_job(ctx: &Ctx, base_dir: &Path, job: &BatchJob) -> Result<JobSuccess
     )?;
     let detail = format!("packed {}", report.primary_output.display());
     let mut result = create_report_json(&report);
-    result["output"] = json!(output.display().to_string());
     result["operation"] = json!("pack");
     result["level"] = json!(level);
     result["inner_format"] = json!(inner_format);
@@ -662,35 +833,20 @@ fn run_pack_job(ctx: &Ctx, base_dir: &Path, job: &BatchJob) -> Result<JobSuccess
     Ok(JobSuccess { detail, result })
 }
 
-fn job_inner_format(job: &BatchJob) -> String {
-    match job.inner_format.as_deref() {
-        Some(format) => format.to_owned(),
-        None => "sqz".to_owned(),
-    }
-}
-
-fn run_export_job(ctx: &Ctx, base_dir: &Path, job: &BatchJob) -> Result<JobSuccess, FormatError> {
-    let archive = required_path(
-        base_dir,
-        job.archive.as_deref().or(job.src.as_deref()),
-        "archive",
-    )?;
-    let output = required_path(
-        base_dir,
-        job.output.as_deref().or(job.dest.as_deref()),
-        "output",
-    )?;
-    if !is_sqz_source_path(&archive) {
+fn run_export_job(ctx: &Ctx, base_dir: &Path, job: &ExportJob) -> Result<JobSuccess, FormatError> {
+    let archive = resolve_path(base_dir, &job.archive);
+    let output = resolve_path(base_dir, &job.output);
+    if !is_sqz_archive_path(&archive) {
         return Err(FormatError::Unsupported(
             "batch export expects a .sqz source container".into(),
         ));
     }
-    if is_sqz_source_path(&output) {
+    if is_sqz_archive_path(&output) {
         return Err(FormatError::Unsupported(
             "batch export output must be a standard archive, not .sqz".into(),
         ));
     }
-    let level = job_level(job)?;
+    let level = compression_level(job.level, job.profile)?;
     let create = CreateOptions {
         level: CompressionLevel::from_numeric(level),
         password: job.out_password.clone().map(Password::new),
@@ -698,7 +854,7 @@ fn run_export_job(ctx: &Ctx, base_dir: &Path, job: &BatchJob) -> Result<JobSucce
         ..CreateOptions::default()
     };
     let allow_existing = matches!(
-        parse_overwrite(job.overwrite.as_deref())?,
+        job.overwrite.unwrap_or(BatchOverwrite::Skip).into(),
         OverwritePolicy::Overwrite
     );
     let commit_policy = super::create_commit_policy(
@@ -731,19 +887,11 @@ fn run_export_job(ctx: &Ctx, base_dir: &Path, job: &BatchJob) -> Result<JobSucce
 fn run_repair_sqz_job(
     ctx: &Ctx,
     base_dir: &Path,
-    job: &BatchJob,
+    job: &RepairJob,
 ) -> Result<JobSuccess, FormatError> {
-    let archive = required_path(
-        base_dir,
-        job.archive.as_deref().or(job.src.as_deref()),
-        "archive",
-    )?;
-    let output = required_path(
-        base_dir,
-        job.output.as_deref().or(job.dest.as_deref()),
-        "output",
-    )?;
-    if !is_sqz_source_path(&archive) {
+    let archive = resolve_path(base_dir, &job.archive);
+    let output = resolve_path(base_dir, &job.output);
+    if !is_sqz_archive_path(&archive) {
         return Err(FormatError::Unsupported(
             "batch repair_sqz expects a .sqz source container".into(),
         ));
@@ -759,7 +907,7 @@ fn run_repair_sqz_job(
     if !source_report.is_ok() {
         return Err(test_report_error(source_report));
     }
-    let level = job_level(job)?;
+    let level = compression_level(job.level, job.profile)?;
     let create = CreateOptions {
         level: CompressionLevel::from_numeric(level),
         resources: resource_options(job.threads, job.memory_limit),
@@ -791,24 +939,16 @@ fn run_repair_sqz_job(
 fn run_repair_zip_job(
     ctx: &Ctx,
     base_dir: &Path,
-    job: &BatchJob,
+    job: &RepairJob,
 ) -> Result<JobSuccess, FormatError> {
-    let archive = required_path(
-        base_dir,
-        job.archive.as_deref().or(job.src.as_deref()),
-        "archive",
-    )?;
-    let output = required_path(
-        base_dir,
-        job.output.as_deref().or(job.dest.as_deref()),
-        "output",
-    )?;
-    if !is_plain_zip_path(&archive) {
+    let archive = resolve_path(base_dir, &job.archive);
+    let output = resolve_path(base_dir, &job.output);
+    if !is_zip_family_path(&archive) {
         return Err(FormatError::Unsupported(
             "batch repair_zip expects a ZIP-family source archive".into(),
         ));
     }
-    if !is_plain_zip_path(&output) {
+    if !is_zip_family_path(&output) {
         return Err(FormatError::Unsupported(
             "batch repair_zip output must be a ZIP-family archive".into(),
         ));
@@ -824,7 +964,7 @@ fn run_repair_zip_job(
     }
     let structure = source_test.structure;
     let source_report = source_test.into_summary();
-    let level = job_level(job)?;
+    let level = compression_level(job.level, job.profile)?;
     let create = CreateOptions {
         level: CompressionLevel::from_numeric(level),
         resources: resource_options(job.threads, job.memory_limit),
@@ -852,18 +992,18 @@ fn run_repair_zip_job(
     })
 }
 
-fn run_protect_job(ctx: &Ctx, base_dir: &Path, job: &BatchJob) -> Result<JobSuccess, FormatError> {
-    let archive = required_path(
-        base_dir,
-        job.archive.as_deref().or(job.src.as_deref()),
-        "archive",
-    )?;
+fn run_protect_job(
+    ctx: &Ctx,
+    base_dir: &Path,
+    job: &ProtectJob,
+) -> Result<JobSuccess, FormatError> {
+    let archive = resolve_path(base_dir, &job.archive);
     let sources = ctx.engine.recovery_protect_sources(&archive)?;
     let redundancy = match job.tolerate_loss {
         Some(count) => redundancy_for_tolerated_volume_loss(&sources, count)?,
-        None => job_redundancy(job),
+        None => job.redundancy.unwrap_or(10),
     };
-    let recovery_path = job_recovery_path(base_dir, job)?;
+    let recovery_path = resolve_optional_path(base_dir, job.recovery_path.as_deref());
     let report = squallz_recovery::protect_files_controlled(
         &archive,
         redundancy,
@@ -875,21 +1015,13 @@ fn run_protect_job(ctx: &Ctx, base_dir: &Path, job: &BatchJob) -> Result<JobSucc
     recovery_success(report, false)
 }
 
-fn job_redundancy(job: &BatchJob) -> u8 {
-    job.redundancy.map_or(10, |redundancy| redundancy)
-}
-
 fn run_verify_recovery_job(
     ctx: &Ctx,
     base_dir: &Path,
-    job: &BatchJob,
+    job: &VerifyRecoveryJob,
 ) -> Result<JobSuccess, FormatError> {
-    let archive = required_path(
-        base_dir,
-        job.archive.as_deref().or(job.src.as_deref()),
-        "archive",
-    )?;
-    let recovery_path = job_recovery_path(base_dir, job)?;
+    let archive = resolve_path(base_dir, &job.archive);
+    let recovery_path = resolve_optional_path(base_dir, job.recovery_path.as_deref());
     let report = squallz_recovery::verify_controlled(
         &archive,
         recovery_path.as_deref(),
@@ -902,17 +1034,12 @@ fn run_verify_recovery_job(
 fn run_repair_recovery_job(
     ctx: &Ctx,
     base_dir: &Path,
-    job: &BatchJob,
+    job: &RepairRecoveryJob,
 ) -> Result<JobSuccess, FormatError> {
-    let archive = required_path(
-        base_dir,
-        job.archive.as_deref().or(job.src.as_deref()),
-        "archive",
-    )?;
+    let archive = resolve_path(base_dir, &job.archive);
     let output = job
         .output
         .as_deref()
-        .or(job.dest.as_deref())
         .map(|path| resolve_path(base_dir, path));
     let output_dir = job
         .output_dir
@@ -923,7 +1050,7 @@ fn run_repair_recovery_job(
             "batch repair_recovery accepts either output/dest or output_dir, not both".into(),
         ));
     }
-    let recovery_path = job_recovery_path(base_dir, job)?;
+    let recovery_path = resolve_optional_path(base_dir, job.recovery_path.as_deref());
     let report = match output_dir.as_deref() {
         Some(directory) => squallz_recovery::repair_to_directory_controlled(
             &archive,
@@ -943,15 +1070,10 @@ fn run_repair_recovery_job(
     recovery_success(report, true)
 }
 
-fn run_update_job(ctx: &Ctx, base_dir: &Path, job: &BatchJob) -> Result<JobSuccess, FormatError> {
-    let archive = required_path(base_dir, job.archive.as_deref(), "archive")?;
+fn run_update_job(ctx: &Ctx, base_dir: &Path, job: &UpdateJob) -> Result<JobSuccess, FormatError> {
+    let archive = resolve_path(base_dir, &job.archive);
     let mut ops = Vec::new();
-    let add_inputs = if job.add.is_empty() {
-        &job.inputs
-    } else {
-        &job.add
-    };
-    for src in add_inputs {
+    for src in &job.add {
         let src = resolve_path(base_dir, src);
         let dest = path_file_name_string_or_empty(&src);
         ops.push(UpdateOp::Add {
@@ -969,8 +1091,8 @@ fn run_update_job(ctx: &Ctx, base_dir: &Path, job: &BatchJob) -> Result<JobSucce
             pattern: pattern.clone(),
         });
     }
-    for item in job.rename.iter().chain(job.move_entries.iter()) {
-        let (from, to) = item.as_pair()?;
+    for item in &job.rename {
+        let (from, to) = item.as_pair();
         ops.push(UpdateOp::Rename {
             from: EntryPath::from_utf8(from),
             to: EntryPath::from_utf8(to),
@@ -982,7 +1104,7 @@ fn run_update_job(ctx: &Ctx, base_dir: &Path, job: &BatchJob) -> Result<JobSucce
         ));
     }
     let operation_count = ops.len();
-    let level = job_level(job)?;
+    let level = compression_level(job.level, job.profile)?;
     let excludes =
         crate::content_policy::resolve_create_excludes(job.content_policy, job.excludes.clone());
     let opts = CreateOptions {
@@ -1025,16 +1147,6 @@ fn resolve_inputs(base_dir: &Path, inputs: &[PathBuf]) -> Result<Vec<PathBuf>, F
         .collect())
 }
 
-fn required_path(
-    base_dir: &Path,
-    value: Option<&Path>,
-    field: &str,
-) -> Result<PathBuf, FormatError> {
-    value
-        .map(|path| resolve_path(base_dir, path))
-        .ok_or_else(|| FormatError::Unsupported(format!("batch job missing {field}")))
-}
-
 fn resolve_path(base_dir: &Path, path: &Path) -> PathBuf {
     if path.is_absolute() {
         path.to_path_buf()
@@ -1043,64 +1155,14 @@ fn resolve_path(base_dir: &Path, path: &Path) -> PathBuf {
     }
 }
 
-fn open_options(job: &BatchJob) -> OpenOptions {
+fn resolve_optional_path(base_dir: &Path, path: Option<&Path>) -> Option<PathBuf> {
+    path.map(|path| resolve_path(base_dir, path))
+}
+
+fn open_options(password: &Option<String>, encoding: &Option<String>) -> OpenOptions {
     OpenOptions {
-        password: job.password.clone().map(Password::new),
-        encoding_override: job.encoding.clone(),
-    }
-}
-
-fn parse_overwrite(value: Option<&str>) -> Result<OverwritePolicy, FormatError> {
-    let normalized = value.map_or("skip", |value| value).to_ascii_lowercase();
-    match normalized.as_str() {
-        "overwrite" | "replace" | "all" => Ok(OverwritePolicy::Overwrite),
-        "skip" => Ok(OverwritePolicy::Skip),
-        "rename" | "rename-both" | "keep-both" => Ok(OverwritePolicy::RenameBoth),
-        // Batch scripts are non-interactive; `ask` degrades to the safe policy.
-        "ask" => Ok(OverwritePolicy::Skip),
-        other => Err(FormatError::Unsupported(format!(
-            "unsupported batch overwrite policy: {other}"
-        ))),
-    }
-}
-
-fn parse_symlinks(value: Option<&str>) -> Result<SymlinkPolicy, FormatError> {
-    let normalized = value.map_or("preserve", |value| value).to_ascii_lowercase();
-    match normalized.as_str() {
-        "preserve" => Ok(SymlinkPolicy::Preserve),
-        "follow" => Ok(SymlinkPolicy::Follow),
-        "skip" => Ok(SymlinkPolicy::Skip),
-        other => Err(FormatError::Unsupported(format!(
-            "unsupported batch symlink policy: {other}"
-        ))),
-    }
-}
-
-fn normalize_operation(operation: &str) -> &str {
-    match operation {
-        "create" => "compress",
-        "pack_sqz" => "pack",
-        "export_sqz" => "export",
-        "check_checksum" => "checksum_check",
-        "verify_checksum" => "checksum_check",
-        "duplicate_scan" => "duplicates",
-        "verify" => "verify_recovery",
-        "repair_par2" => "repair_recovery",
-        "verify_par2" => "verify_recovery",
-        "protect_recovery" => "protect",
-        other => other,
-    }
-}
-
-fn parse_checksum_algorithm(value: Option<&str>) -> Result<ChecksumAlgorithm, FormatError> {
-    let raw = value.map_or("sha256", |value| value);
-    let normalized = raw.trim().to_ascii_lowercase().to_owned();
-    if let Some(algorithm) = ChecksumAlgorithm::parse_alias(&normalized) {
-        Ok(algorithm)
-    } else {
-        Err(FormatError::Unsupported(format!(
-            "unsupported batch checksum algorithm: {normalized}"
-        )))
+        password: password.clone().map(Password::new),
+        encoding_override: encoding.clone(),
     }
 }
 
@@ -1171,42 +1233,6 @@ fn duplicate_report_json(report: &squallz_core::DuplicateScanReport, min_size: u
             })
         }).collect::<Vec<_>>(),
     })
-}
-
-fn job_recovery_percent(job: &BatchJob, default: u8) -> Result<u8, FormatError> {
-    match job.recovery.as_ref() {
-        None => Ok(default),
-        Some(BatchRecovery::Percent(value)) => Ok(*value),
-        Some(BatchRecovery::Text(value)) => value
-            .trim()
-            .trim_end_matches('%')
-            .parse::<u8>()
-            .map_err(|_| {
-                FormatError::Unsupported(format!(
-                    "batch recovery percent must be 0-100, got {value}"
-                ))
-            }),
-    }
-}
-
-fn job_recovery_path(base_dir: &Path, job: &BatchJob) -> Result<Option<PathBuf>, FormatError> {
-    if let Some(path) = job.recovery_path.as_deref() {
-        return Ok(Some(resolve_path(base_dir, path)));
-    }
-    match job.recovery.as_ref() {
-        Some(BatchRecovery::Text(value)) if !looks_like_percent(value) => {
-            Ok(Some(resolve_path(base_dir, Path::new(value))))
-        }
-        Some(BatchRecovery::Percent(_)) => Err(FormatError::Unsupported(
-            "batch PAR2 jobs require recovery_path/recovery as a path, not a percent".into(),
-        )),
-        _ => Ok(None),
-    }
-}
-
-fn looks_like_percent(value: &str) -> bool {
-    let trimmed = value.trim().trim_end_matches('%');
-    !trimmed.is_empty() && trimmed.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 fn recovery_success(
@@ -1284,8 +1310,11 @@ fn tolerated_loss_count(tolerate_loss: u32) -> usize {
     }
 }
 
-fn job_level(job: &BatchJob) -> Result<u8, FormatError> {
-    if let Some(level) = job.level {
+fn compression_level(
+    level: Option<u8>,
+    profile: Option<CreateProfileArg>,
+) -> Result<u8, FormatError> {
+    if let Some(level) = level {
         return if level <= 9 {
             Ok(level)
         } else {
@@ -1294,21 +1323,7 @@ fn job_level(job: &BatchJob) -> Result<u8, FormatError> {
             )))
         };
     }
-    match job_profile(job) {
-        "fast" => Ok(2),
-        "balanced" | "standard" => Ok(6),
-        "maximum" | "max" => Ok(9),
-        other => Err(FormatError::Unsupported(format!(
-            "unsupported batch compression profile: {other}"
-        ))),
-    }
-}
-
-fn job_profile(job: &BatchJob) -> &str {
-    match job.profile.as_deref() {
-        Some(profile) => profile,
-        None => "balanced",
-    }
+    Ok(profile.unwrap_or(CreateProfileArg::Balanced).level())
 }
 
 fn validate_requested_format(
@@ -1394,46 +1409,9 @@ fn test_report_error(report: TestSummary) -> FormatError {
 }
 
 impl BatchMove {
-    fn as_pair(&self) -> Result<(String, String), FormatError> {
-        match self {
-            BatchMove::Object { from, to } => Ok((from.clone(), to.clone())),
-            BatchMove::Pair([from, to]) => Ok((from.clone(), to.clone())),
-            BatchMove::Spec(spec) => spec
-                .split_once('=')
-                .map(|(from, to)| (from.to_owned(), to.to_owned()))
-                .ok_or_else(|| {
-                    FormatError::Unsupported(format!(
-                        "batch rename/move must be FROM=TO or {{from,to}}, got {spec}"
-                    ))
-                }),
-        }
+    fn as_pair(&self) -> (String, String) {
+        (self.from.clone(), self.to.clone())
     }
-}
-
-fn is_sqz_source_path(path: &Path) -> bool {
-    is_plain_sqz_path(path)
-        || path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .and_then(|name| split_volume_name(name).map(|(base, _)| base.to_owned()))
-            .is_some_and(|base| is_plain_sqz_path(Path::new(&base)))
-}
-
-fn is_plain_sqz_path(path: &Path) -> bool {
-    path.extension()
-        .and_then(|ext| ext.to_str())
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("sqz"))
-}
-
-fn is_plain_zip_path(path: &Path) -> bool {
-    path.extension()
-        .and_then(|ext| ext.to_str())
-        .is_some_and(|ext| {
-            matches!(
-                ext.to_ascii_lowercase().as_str(),
-                "zip" | "jar" | "apk" | "cbz" | "ipa"
-            )
-        })
 }
 
 fn print_json_report(
@@ -1453,7 +1431,6 @@ fn print_json_report(
         "total": reports.len(),
         "failed": failed,
         "jobs": jobs,
-        "results": jobs,
     });
     print_pretty_json(&value)
 }
@@ -1466,7 +1443,6 @@ fn json_job_reports(reports: &[BatchJobReport]) -> Vec<Value> {
                 json!({
                     "id": report.id,
                     "kind": report.kind,
-                    "operation": report.kind,
                     "ok": true,
                     "detail": report.detail,
                     "exit_code": 0,
@@ -1476,7 +1452,6 @@ fn json_job_reports(reports: &[BatchJobReport]) -> Vec<Value> {
                 json!({
                     "id": report.id,
                     "kind": report.kind,
-                    "operation": report.kind,
                     "ok": false,
                     "detail": report.detail,
                     "exit_code": report.exit_code,
@@ -1580,4 +1555,34 @@ fn batch_preserved_output_paths(reports: &[BatchJobReport]) -> Vec<String> {
         .filter_map(Value::as_str)
         .map(str::to_owned)
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BatchScript;
+
+    #[test]
+    fn batch_policy_fields_accept_only_the_current_contract() {
+        for script in [
+            r#"{"jobs":[{"kind":"extract","archive":"a.zip","overwrite":"replace"}]}"#,
+            r#"{"jobs":[{"kind":"checksum","inputs":["a"],"algorithm":"sha-256"}]}"#,
+            r#"{"jobs":[{"kind":"pack","inputs":["a"],"output":"a.sqz","inner_format":"raw"}]}"#,
+            r#"{"jobs":[{"kind":"compress","inputs":["a"],"output":"a.zip","profile":"default"}]}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<BatchScript>(script).is_err(),
+                "{script}"
+            );
+        }
+
+        let current = r#"{
+          "jobs": [
+            {"kind":"extract","archive":"a.zip","overwrite":"rename","symlinks":"skip"},
+            {"kind":"checksum","inputs":["a"],"algorithm":"sha256"},
+            {"kind":"pack","inputs":["a"],"output":"a.sqz","inner_format":"7z"},
+            {"kind":"compress","inputs":["a"],"output":"a.zip","profile":"balanced"}
+          ]
+        }"#;
+        assert!(serde_json::from_str::<BatchScript>(current).is_ok());
+    }
 }
