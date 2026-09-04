@@ -359,6 +359,33 @@ def require_packaged_desktop_runtime(
             template,
             "windows",
         )
+        cli_candidates = (
+            install_root / "sqz.exe",
+            install_root / "resources/bin/sqz.exe",
+        )
+        packaged_cli = next(
+            (
+                path.resolve()
+                for path in cli_candidates
+                if path.is_file() and not path.is_symlink()
+            ),
+            None,
+        )
+        if packaged_cli is None:
+            raise SmokeError("Windows NSIS installation did not provide the packaged CLI")
+        gui_candidates = (
+            install_root / "Squallz.exe",
+            install_root / "squallz-gui.exe",
+        )
+        if not any(path.is_file() and not path.is_symlink() for path in gui_candidates):
+            raise SmokeError("Windows NSIS installation did not provide the desktop app")
+        invoke(
+            packaged_cli,
+            "Windows NSIS packaged CLI",
+            ("--version",),
+            workspace,
+            runner,
+        )
     except SmokeError as error:
         validation_error = error
     if not uninstaller.is_file():

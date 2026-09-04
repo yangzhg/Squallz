@@ -26,6 +26,27 @@ class ReleaseWorkflowTests(unittest.TestCase):
             body.index("Check ZIP fuzz target"),
         )
 
+    def test_windows_package_runs_native_explorer_integration_tests(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        package_job = re.search(
+            r"^  package:\n(?P<body>.*?)(?=^  [a-z][a-z0-9_-]*:\n|\Z)",
+            workflow,
+            flags=re.DOTALL | re.MULTILINE,
+        )
+
+        self.assertIsNotNone(package_job)
+        body = package_job.group("body")
+        self.assertIn("Test Windows Explorer integration", body)
+        self.assertIn("if: runner.os == 'Windows'", body)
+        self.assertIn(
+            "cargo test -p squallz-gui windows_explorer_tests --lib -- --test-threads=1",
+            body,
+        )
+        self.assertLess(
+            body.index("Test Windows Explorer integration"),
+            body.index("Build preview or non-macOS package"),
+        )
+
     def test_linux_package_uses_the_glibc_235_build_baseline(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
         linux_matrix = re.search(

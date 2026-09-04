@@ -483,6 +483,11 @@ jobs:
             pkg-config \
             wget
 
+      - name: Test Windows Explorer integration
+        if: runner.os == 'Windows'
+        shell: bash
+        run: cargo test -p squallz-gui windows_explorer_tests --lib -- --test-threads=1
+
       - name: Install frontend dependencies
         run: npm --prefix frontend ci
 

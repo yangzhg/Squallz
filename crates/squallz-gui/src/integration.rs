@@ -2452,6 +2452,20 @@ fn windows_integration_dirs(data_dir: &Path) -> (String, PathBuf) {
 
 #[cfg(any(target_os = "windows", all(test, target_os = "macos")))]
 fn windows_registry_root() -> &'static str {
+    #[cfg(all(test, target_os = "windows"))]
+    {
+        static TEST_ROOT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        return TEST_ROOT
+            .get_or_init(|| {
+                format!(
+                    "HKEY_CURRENT_USER\\Software\\Squallz\\Tests\\{}",
+                    std::process::id()
+                )
+            })
+            .as_str();
+    }
+
+    #[cfg(not(all(test, target_os = "windows")))]
     "HKEY_CURRENT_USER\\Software\\Classes"
 }
 
@@ -4483,7 +4497,7 @@ trap 'rmdir "$lock"' EXIT
 }
 
 #[cfg(test)]
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 mod windows_explorer_tests {
     use super::{
         install_windows_explorer_actions_at_with_language,
@@ -4494,13 +4508,21 @@ mod windows_explorer_tests {
         windows_registry_manifest_path,
     };
     use crate::dto::{IntegrationActionHealthStateDto, IntegrationHealthStateDto};
+    use squallz_core::lock_unpoisoned;
     use squallz_i18n::Localizer;
     use std::fs;
     use std::path::{Path, PathBuf};
+    #[cfg(target_os = "windows")]
+    use std::process::Command;
+    use std::sync::Mutex;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    static WINDOWS_EXPLORER_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn installs_windows_explorer_actions_that_reuse_task_window_handoff() {
+        let _test_lock = lock_unpoisoned(&WINDOWS_EXPLORER_TEST_LOCK);
+        let _registry = IsolatedTestRegistry::new();
         let data_dir = temp_dir("squallz-windows-explorer-test");
         let result =
             install_windows_explorer_actions_at_with_language(&data_dir, Some("en-US")).unwrap();
@@ -4538,6 +4560,7 @@ mod windows_explorer_tests {
             assert!(script_text.contains("Start-Process"));
             assert!(script_text.contains("Resolve-Sqz"));
             assert!(script_text.contains("SQUALLZ_CLI"));
+            assert_powershell_syntax(script);
             assert!(manifest_text.contains(&action.name));
             assert!(manifest_text.contains(&path_fragment(script)));
             if matches!(
@@ -4584,6 +4607,8 @@ mod windows_explorer_tests {
 
     #[test]
     fn altered_windows_registry_manifest_requires_repair_and_can_be_removed() {
+        let _test_lock = lock_unpoisoned(&WINDOWS_EXPLORER_TEST_LOCK);
+        let _registry = IsolatedTestRegistry::new();
         let data_dir = temp_dir("squallz-windows-explorer-damaged-registry");
         install_windows_explorer_actions_at_with_language(&data_dir, Some("en-US")).unwrap();
         let (_, script_dir) = windows_integration_dirs(&data_dir);
@@ -4613,6 +4638,8 @@ mod windows_explorer_tests {
 
     #[test]
     fn custom_language_pack_names_windows_explorer_verbs_without_code_changes() {
+        let _test_lock = lock_unpoisoned(&WINDOWS_EXPLORER_TEST_LOCK);
+        let _registry = IsolatedTestRegistry::new();
         let data_dir = temp_dir("squallz-windows-explorer-locale-home");
         let locale_dir = temp_dir("squallz-windows-explorer-locale-pack");
         fs::create_dir_all(&locale_dir).unwrap();
@@ -4674,6 +4701,53 @@ mod windows_explorer_tests {
     }
 
     fn path_fragment(path: &Path) -> String {
-        path.to_string_lossy().into_owned()
+        let value = path.to_string_lossy().into_owned();
+        if cfg!(target_os = "windows") {
+            value.replace('\\', "\\\\")
+        } else {
+            value
+        }
     }
+
+    struct IsolatedTestRegistry;
+
+    impl IsolatedTestRegistry {
+        fn new() -> Self {
+            clear_test_registry();
+            Self
+        }
+    }
+
+    impl Drop for IsolatedTestRegistry {
+        fn drop(&mut self) {
+            clear_test_registry();
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn clear_test_registry() {
+        let _ = Command::new("reg.exe")
+            .args(["delete", super::windows_registry_root(), "/f"])
+            .output();
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn clear_test_registry() {}
+
+    #[cfg(target_os = "windows")]
+    fn assert_powershell_syntax(script: &Path) {
+        let status = Command::new("powershell.exe")
+            .args([
+                "-NoProfile",
+                "-Command",
+                "$errors = $null; $null = [System.Management.Automation.Language.Parser]::ParseFile($env:SQUALLZ_SCRIPT_TO_PARSE, [ref]$null, [ref]$errors); if ($errors.Count -ne 0) { $errors | Out-String | Write-Error; exit 1 }",
+            ])
+            .env("SQUALLZ_SCRIPT_TO_PARSE", script)
+            .status()
+            .expect("PowerShell must be available on Windows");
+        assert!(status.success(), "PowerShell rejected {}", script.display());
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn assert_powershell_syntax(_script: &Path) {}
 }
