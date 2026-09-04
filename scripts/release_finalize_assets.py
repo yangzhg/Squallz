@@ -36,13 +36,13 @@ def is_primary_asset(path: Path) -> bool:
 
 
 def write_text(path: Path, value: str) -> None:
-    path.write_text(value, encoding="utf-8")
+    path.write_bytes(value.encode("utf-8"))
 
 
 def write_json(path: Path, value: object) -> None:
-    path.write_text(
+    write_text(
+        path,
         json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
     )
 
 

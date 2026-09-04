@@ -114,6 +114,18 @@ class ReleaseFinalizeAssetsTests(unittest.TestCase):
                 self.assertEqual(provenance["trust"]["state"], trust_state)
                 self.assertIs(provenance["trust"]["unsigned"], True)
                 self.assertNotIn("trust_evidence", manifest)
+                metadata_paths = (
+                    assets_dir / f"{asset.name}.sha256",
+                    assets_dir / f"{asset.name}.provenance.json",
+                    assets_dir / "SHA256SUMS",
+                    assets_dir / "RELEASE_ASSETS_MANIFEST.json",
+                    assets_dir / "ATTESTATION_SUBJECTS_SHA256SUMS",
+                )
+                for metadata_path in metadata_paths:
+                    with self.subTest(metadata=metadata_path.name):
+                        contents = metadata_path.read_bytes()
+                        self.assertNotIn(b"\r", contents)
+                        self.assertTrue(contents.endswith(b"\n"))
 
     def test_developer_id_notarized_copies_validated_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

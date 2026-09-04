@@ -4993,13 +4993,16 @@ mod tests {
     use std::io::Write as _;
     use std::sync::Mutex as StdMutex;
 
+    #[cfg(unix)]
     static EXTERNAL_TOOL_ENV_LOCK: StdMutex<()> = StdMutex::new(());
 
+    #[cfg(unix)]
     struct EnvRestore {
         key: &'static str,
         old: Option<std::ffi::OsString>,
     }
 
+    #[cfg(unix)]
     impl EnvRestore {
         fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
             let old = std::env::var_os(key);
@@ -5008,6 +5011,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     impl Drop for EnvRestore {
         fn drop(&mut self) {
             match &self.old {
@@ -6395,6 +6399,7 @@ mod tests {
         !crc
     }
 
+    #[cfg(unix)]
     fn rar5_test_volume(index: u64, has_next: bool) -> Vec<u8> {
         fn encode_vint(mut value: u64) -> Vec<u8> {
             let mut bytes = Vec::new();
@@ -6439,6 +6444,7 @@ mod tests {
         bytes
     }
 
+    #[cfg(unix)]
     fn split_zip_test_final_volume(final_disk: u16) -> Vec<u8> {
         let mut bytes = vec![0u8; 22];
         bytes[..4].copy_from_slice(b"PK\x05\x06");

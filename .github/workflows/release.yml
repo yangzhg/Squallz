@@ -61,7 +61,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_release && format('refs/tags/{0}', inputs.release_tag) || github.ref }}
@@ -256,7 +256,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
           ref: ${{ needs.plan.outputs.source_sha }}
@@ -270,7 +270,7 @@ jobs:
           rustup default stable
 
       - name: Install Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: "22"
           cache: npm
@@ -330,7 +330,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
           ref: ${{ needs.plan.outputs.source_sha }}
@@ -376,7 +376,7 @@ jobs:
           subject-checksums: target/release-assets/ATTESTATION_SUBJECTS_SHA256SUMS
 
       - name: Upload source assets
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: squallz-source-${{ github.run_id }}
           if-no-files-found: error
@@ -403,7 +403,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
           ref: ${{ needs.plan.outputs.source_sha }}
@@ -446,7 +446,7 @@ jobs:
           rustup default stable
 
       - name: Install Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: "22"
           cache: npm
@@ -540,7 +540,7 @@ jobs:
 
       - name: Upload Windows runtime test evidence
         if: always() && runner.os == 'Windows'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: windows-runtime-validation-${{ github.run_id }}
           if-no-files-found: warn
@@ -771,7 +771,7 @@ jobs:
           subject-checksums: target/release-assets/ATTESTATION_SUBJECTS_SHA256SUMS
 
       - name: Upload platform release assets
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: squallz-${{ matrix.platform }}-${{ github.run_id }}
           if-no-files-found: error
@@ -783,7 +783,7 @@ jobs:
 
       - name: Upload macOS release trust evidence
         if: always() && runner.os == 'macOS' && needs.plan.outputs.publish_release == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: macos-release-trust-${{ matrix.platform }}-${{ github.run_id }}
           if-no-files-found: warn
@@ -812,7 +812,7 @@ jobs:
 
     steps:
       - name: Checkout release commit
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
           ref: ${{ needs.plan.outputs.source_sha }}
@@ -833,7 +833,7 @@ jobs:
           fi
 
       - name: Download release assets
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: squallz-*
           path: downloaded-artifacts

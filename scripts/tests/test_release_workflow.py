@@ -4,9 +4,24 @@ from pathlib import Path
 
 
 WORKFLOW = Path(__file__).resolve().parents[2] / ".github/workflows/release.yml"
+ZIP_FUZZ_WORKFLOW = Path(__file__).resolve().parents[2] / ".github/workflows/zip-fuzz.yml"
 
 
 class ReleaseWorkflowTests(unittest.TestCase):
+    def test_workflows_use_supported_action_majors(self) -> None:
+        release = WORKFLOW.read_text(encoding="utf-8")
+        zip_fuzz = ZIP_FUZZ_WORKFLOW.read_text(encoding="utf-8")
+
+        for workflow in (release, zip_fuzz):
+            self.assertNotRegex(
+                workflow,
+                r"actions/(?:checkout|setup-node|upload-artifact|download-artifact)@v4",
+            )
+            self.assertIn("actions/checkout@v7", workflow)
+            self.assertIn("actions/upload-artifact@v7", workflow)
+        self.assertIn("actions/setup-node@v7", release)
+        self.assertIn("actions/download-artifact@v8", release)
+
     def test_release_quality_compiles_the_excluded_fuzz_target(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
         quality_job = re.search(
