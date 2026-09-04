@@ -109,7 +109,7 @@ lines = [
     f"- libFuzzer max generated input in this run: {max_len} bytes.",
     "- Entry listing cap: first 32 entries.",
     "- File read cap: first 8 file entries, up to 64 KiB each.",
-    "- Archive `test()` is invoked only when declared file bytes are <= 256 KiB.",
+    "- Integrity testing is limited to 32 entries and 256 KiB of observed output.",
     "",
     "These bounds keep the campaign focused on parser robustness instead of turning a fuzz gate into a decompression-bomb or throughput benchmark.",
     "",

@@ -7,6 +7,25 @@ WORKFLOW = Path(__file__).resolve().parents[2] / ".github/workflows/release.yml"
 
 
 class ReleaseWorkflowTests(unittest.TestCase):
+    def test_release_quality_compiles_the_excluded_fuzz_target(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        quality_job = re.search(
+            r"^  quality:\n(?P<body>.*?)(?=^  [a-z][a-z0-9_-]*:\n|\Z)",
+            workflow,
+            flags=re.DOTALL | re.MULTILINE,
+        )
+
+        self.assertIsNotNone(quality_job)
+        body = quality_job.group("body")
+        self.assertIn(
+            "cargo check --manifest-path fuzz/Cargo.toml --bins",
+            body,
+        )
+        self.assertLess(
+            body.index("Test Rust workspace"),
+            body.index("Check ZIP fuzz target"),
+        )
+
     def test_linux_package_uses_the_glibc_235_build_baseline(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
         linux_matrix = re.search(

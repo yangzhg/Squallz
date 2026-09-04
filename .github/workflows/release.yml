@@ -313,6 +313,9 @@ jobs:
       - name: Test Rust workspace
         run: cargo test --all
 
+      - name: Check ZIP fuzz target
+        run: cargo check --manifest-path fuzz/Cargo.toml --bins
+
   source:
     name: Package source
     needs:
