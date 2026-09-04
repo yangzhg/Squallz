@@ -47,6 +47,7 @@ npm --prefix frontend run build
 - User-visible GUI text belongs in `locales/en-US.json` and `locales/zh-CN.json`.
 - Frontend visual rules should go through classes and design tokens in `frontend/src/design.css`.
 - Public API, CLI, and container-format changes must update every caller, test, and document atomically; do not retain deprecated aliases or parallel schemas.
+- Interoperability with standard archive formats remains a product contract and must be verified against real tools.
 
 ## 中文
 
@@ -83,4 +84,5 @@ npm --prefix frontend run build
 - GUI 和 CLI 应复用共享能力，不重复实现归档行为。
 - GUI 用户可见文案属于 `locales/en-US.json` 和 `locales/zh-CN.json`。
 - 前端视觉规则应通过 class 和 `frontend/src/design.css` 的 design token 管理。
-- 公共 API、CLI 和容器格式变更应保持兼容；破坏性变化需要先记录。
+- 项目 1.0 前，公共 API、CLI 参数、设置和预设 schema 只保留当前合同；变更时一次性更新调用方、测试和文档，不保留旧别名、迁移适配器或并行 schema。
+- 标准归档格式的互操作仍是产品合同，必须使用真实工具验证。
