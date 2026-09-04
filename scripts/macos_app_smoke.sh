@@ -81,7 +81,21 @@ cat > "$HOME_DIR/Library/Application Support/Squallz/settings.json" <<'JSON'
 {
   "theme": "light",
   "language": "en-US",
-  "ui_mode": "modern"
+  "ui_mode": "modern",
+  "ui_density": "standard",
+  "accent_palette": "aqua",
+  "custom_accent": null,
+  "accent_contrast_guard": true,
+  "default_extract_dir": null,
+  "default_create_dir": null,
+  "reveal_after_extract": false,
+  "check_updates_automatically": false,
+  "safety_max_output_bytes": null,
+  "safety_max_entries": null,
+  "safety_max_compression_ratio": null,
+  "performance_threads": null,
+  "performance_memory_limit_bytes": null,
+  "performance_parallel_jobs": null
 }
 JSON
 
@@ -305,6 +319,12 @@ else:
     )
     add_content_check("screen", render_payload.get("screen") == "browse", f"screen={render_payload.get('screen')!r}")
     add_content_check("ui mode", render_payload.get("ui_mode") == "modern", f"ui_mode={render_payload.get('ui_mode')!r}")
+    add_content_check("language", render_payload.get("language") == "en-US", f"language={render_payload.get('language')!r}")
+    add_content_check(
+        "mode selection complete",
+        render_payload.get("mode_selection_blocked") is False,
+        f"mode_selection_blocked={render_payload.get('mode_selection_blocked')!r}",
+    )
     add_content_check("archive name", archive_name == expected_archive, f"archive={archive_name!r}; expected={expected_archive!r}")
     add_content_check(
         "entry count",

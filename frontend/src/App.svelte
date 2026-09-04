@@ -7036,6 +7036,8 @@
         reason,
         screen,
         ui_mode: activeUiMode(),
+        language: currentLang(),
+        mode_selection_blocked: modeSelectionBlocked,
         archive: currentArchive?.name ?? null,
         entry_count: currentArchive?.entry_count ?? null,
         viewport_width: document.documentElement.clientWidth,
@@ -12570,7 +12572,9 @@
     const outputPath = taskOutputPath(task);
     if (!outputPath || !taskOutputCanOpen(task)) return;
     if (task.spec.kind === "compress") {
-      await openArchivePath(outputPath, "open-file");
+      if (await openArchivePath(outputPath, "open-file")) {
+        await dismissTaskDialog(task);
+      }
       return;
     }
     try {
