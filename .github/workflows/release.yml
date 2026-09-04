@@ -524,7 +524,11 @@ jobs:
       - name: Test Windows Explorer integration
         if: runner.os == 'Windows'
         shell: bash
-        run: cargo test -p squallz-gui windows_explorer_tests --lib -- --test-threads=1
+        run: |
+          cargo test -p squallz-core \
+            tests::windows_file_operation_retries_only_transient_share_locks \
+            --lib -- --exact
+          cargo test -p squallz-gui windows_explorer_tests --lib -- --test-threads=1
 
       - name: Test Windows Credential Manager
         if: runner.os == 'Windows'

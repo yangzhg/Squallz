@@ -1985,6 +1985,34 @@ fn atomic_replace_file(src: &Path, dest: &Path) -> io::Result<()> {
 }
 
 #[cfg(windows)]
+fn retry_windows_file_operation(mut operation: impl FnMut() -> bool) -> io::Result<()> {
+    use std::time::{Duration, Instant};
+
+    use windows_sys::Win32::Foundation::{ERROR_LOCK_VIOLATION, ERROR_SHARING_VIOLATION};
+
+    const RETRY_WINDOW: Duration = Duration::from_secs(2);
+    const RETRY_DELAY: Duration = Duration::from_millis(50);
+
+    let deadline = Instant::now() + RETRY_WINDOW;
+    loop {
+        if operation() {
+            return Ok(());
+        }
+        let error = io::Error::last_os_error();
+        if !matches!(
+            error.raw_os_error(),
+            Some(code)
+                if code == ERROR_SHARING_VIOLATION as i32
+                    || code == ERROR_LOCK_VIOLATION as i32
+        ) || Instant::now() >= deadline
+        {
+            return Err(error);
+        }
+        std::thread::sleep(RETRY_DELAY);
+    }
+}
+
+#[cfg(windows)]
 #[allow(unsafe_code)]
 fn atomic_replace_file(src: &Path, dest: &Path) -> io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
@@ -2010,18 +2038,13 @@ fn atomic_replace_file(src: &Path, dest: &Path) -> io::Result<()> {
     // SAFETY: both buffers remain valid null-terminated UTF-16 strings for
     // this synchronous call. COPY_ALLOWED is deliberately omitted so the
     // operation cannot fall back to a non-atomic copy/delete sequence.
-    if unsafe {
+    retry_windows_file_operation(|| unsafe {
         MoveFileExW(
             src.as_ptr(),
             dest.as_ptr(),
             MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
         )
-    } != 0
-    {
-        Ok(())
-    } else {
-        Err(io::Error::last_os_error())
-    }
+    } != 0)
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -2433,11 +2456,12 @@ fn move_path_no_replace_impl(src: &Path, dest: &Path) -> io::Result<()> {
     // SAFETY: both pointers remain valid null-terminated UTF-16 strings for
     // this synchronous call. Zero flags deliberately omit replacement and
     // cross-volume copy behavior.
-    if unsafe { MoveFileExW(src.as_ptr(), dest.as_ptr(), 0) } != 0 {
-        return Ok(());
-    }
-
-    let error = io::Error::last_os_error();
+    let error = match retry_windows_file_operation(|| unsafe {
+        MoveFileExW(src.as_ptr(), dest.as_ptr(), 0) != 0
+    }) {
+        Ok(()) => return Ok(()),
+        Err(error) => error,
+    };
     match error.raw_os_error() {
         Some(code) if code == ERROR_ALREADY_EXISTS as i32 || code == ERROR_FILE_EXISTS as i32 => {
             Err(io::Error::new(io::ErrorKind::AlreadyExists, error))
@@ -5270,6 +5294,45 @@ mod tests {
             .is_symlink());
         assert!(!dest.exists());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[allow(unsafe_code)]
+    fn windows_file_operation_retries_only_transient_share_locks() {
+        use std::cell::Cell;
+
+        use windows_sys::Win32::Foundation::{
+            SetLastError, ERROR_ACCESS_DENIED, ERROR_SHARING_VIOLATION,
+        };
+
+        let attempts = Cell::new(0u32);
+        retry_windows_file_operation(|| {
+            let attempt = attempts.get() + 1;
+            attempts.set(attempt);
+            if attempt < 3 {
+                // SAFETY: the test controls this thread and reads the error
+                // immediately through retry_windows_file_operation.
+                unsafe { SetLastError(ERROR_SHARING_VIOLATION) };
+                false
+            } else {
+                true
+            }
+        })
+        .unwrap();
+        assert_eq!(attempts.get(), 3);
+
+        let attempts = Cell::new(0u32);
+        let error = retry_windows_file_operation(|| {
+            attempts.set(attempts.get() + 1);
+            // SAFETY: the test controls this thread and reads the error
+            // immediately through retry_windows_file_operation.
+            unsafe { SetLastError(ERROR_ACCESS_DENIED) };
+            false
+        })
+        .unwrap_err();
+        assert_eq!(attempts.get(), 1);
+        assert_eq!(error.raw_os_error(), Some(ERROR_ACCESS_DENIED as i32));
     }
 
     #[cfg(windows)]

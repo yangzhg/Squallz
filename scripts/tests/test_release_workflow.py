@@ -39,6 +39,10 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertIn("Test Windows Explorer integration", body)
         self.assertIn("if: runner.os == 'Windows'", body)
         self.assertIn(
+            "tests::windows_file_operation_retries_only_transient_share_locks",
+            body,
+        )
+        self.assertIn(
             "cargo test -p squallz-gui windows_explorer_tests --lib -- --test-threads=1",
             body,
         )
