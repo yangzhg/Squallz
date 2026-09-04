@@ -2693,6 +2693,8 @@ fn windows_explorer_registry_entries_match(
 fn windows_registry_key_exists(key: &str) -> bool {
     std::process::Command::new("reg.exe")
         .args(["query", key])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .status()
         .is_ok_and(|status| status.success())
 }
@@ -2711,6 +2713,8 @@ fn windows_registry_value_matches(key: &str, name: Option<&str>, expected: &str)
     }
     command
         .args(["/f", expected, "/d", "/e"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .status()
         .is_ok_and(|status| status.success())
 }
@@ -2732,12 +2736,13 @@ fn windows_reg_delete_key(key: &str) -> io::Result<()> {
 
 #[cfg(target_os = "windows")]
 fn windows_reg_command<const N: usize>(args: [&str; N]) -> io::Result<()> {
-    let status = std::process::Command::new("reg.exe").args(args).status()?;
-    if status.success() {
+    let output = std::process::Command::new("reg.exe").args(args).output()?;
+    if output.status.success() {
         Ok(())
     } else {
         Err(io::Error::other(format!(
-            "reg.exe failed with status {status}"
+            "reg.exe failed with status {}",
+            output.status
         )))
     }
 }
@@ -4535,15 +4540,15 @@ mod windows_explorer_tests {
         let manifest = windows_registry_manifest_path(&script_dir);
         assert!(manifest.is_file());
         let manifest_text = fs::read_to_string(&manifest).unwrap();
+        let registry_root = super::windows_registry_root();
         assert!(manifest_text.contains("Windows Registry Editor Version 5.00"));
-        assert!(manifest_text.contains(
-            "HKEY_CURRENT_USER\\Software\\Classes\\SystemFileAssociations\\.zip\\shell\\Squallz.extract-here"
-        ));
-        assert!(manifest_text
-            .contains("HKEY_CURRENT_USER\\Software\\Classes\\*\\shell\\Squallz.checksum"));
-        assert!(manifest_text.contains(
-            "HKEY_CURRENT_USER\\Software\\Classes\\Directory\\shell\\Squallz.compress-to-7z"
-        ));
+        assert!(manifest_text.contains(&format!(
+            "{registry_root}\\SystemFileAssociations\\.zip\\shell\\Squallz.extract-here"
+        )));
+        assert!(manifest_text.contains(&format!("{registry_root}\\*\\shell\\Squallz.checksum")));
+        assert!(manifest_text.contains(&format!(
+            "{registry_root}\\Directory\\shell\\Squallz.compress-to-7z"
+        )));
         assert!(manifest_text.contains("\"MultiSelectModel\"=\"Player\""));
         assert!(manifest_text.contains("powershell.exe -NoProfile -ExecutionPolicy Bypass -File"));
         assert!(manifest_text.contains("%1"));
