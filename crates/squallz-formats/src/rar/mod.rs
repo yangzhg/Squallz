@@ -1027,6 +1027,9 @@ impl Drop for CommandStdoutReader {
 mod tests {
     use super::*;
     use std::fs::{self, File};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEMP_PATH_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
     fn env_lock() -> std::sync::MutexGuard<'static, ()> {
         crate::TEST_ENV_LOCK
@@ -1035,7 +1038,15 @@ mod tests {
     }
 
     fn temp_path(tag: &str, ext: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("squallz-rar-{tag}-{}-{ext}", std::process::id()))
+        let sequence = TEMP_PATH_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "squallz-rar-{tag}-{}-{sequence}-{nanos}-{ext}",
+            std::process::id()
+        ))
     }
 
     fn write_test_executable(dir: &Path, name: &str) -> PathBuf {
