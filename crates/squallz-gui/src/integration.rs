@@ -3765,6 +3765,7 @@ mod linux_file_manager_tests {
         fs::write(sample.join("two.7z"), b"archive").unwrap();
         fs::write(sample.join("plain file.txt"), b"plain").unwrap();
         fs::write(sample.join("folder input/nested.txt"), b"nested").unwrap();
+        let sample_cwd = fs::canonicalize(&sample).unwrap();
 
         let fake_gui = home.join("fake-squallz-gui");
         let gui_log = home.join("gui-args.log");
@@ -3786,33 +3787,33 @@ mod linux_file_manager_tests {
             &script_for(&result, "test-archive"),
             &fake_gui,
             &relative_gui_log,
-            &sample,
+            &sample_cwd,
             &["one.zip", "folder input", "two.7z"],
         );
         let _ = wait_for_log_contains(
             &relative_gui_log,
-            &format!("<{}>", sample.join("one.zip").display()),
+            &format!("<{}>", sample_cwd.join("one.zip").display()),
         );
         let relative_gui_log = wait_for_log_contains(
             &relative_gui_log,
-            &format!("<{}>", sample.join("two.7z").display()),
+            &format!("<{}>", sample_cwd.join("two.7z").display()),
         );
         assert!(
             relative_gui_log.contains(&format!(
                 "<--squallz-action><test-archive><{}>",
-                sample.join("one.zip").display()
+                sample_cwd.join("one.zip").display()
             )),
             "log: {relative_gui_log}"
         );
         assert!(
             relative_gui_log.contains(&format!(
                 "<--squallz-action><test-archive><{}>",
-                sample.join("two.7z").display()
+                sample_cwd.join("two.7z").display()
             )),
             "log: {relative_gui_log}"
         );
         assert!(
-            !relative_gui_log.contains(&format!("<{}>", sample.join("folder input").display())),
+            !relative_gui_log.contains(&format!("<{}>", sample_cwd.join("folder input").display())),
             "directories must not be handed to archive-test jobs: {relative_gui_log}"
         );
 
@@ -3821,15 +3822,16 @@ mod linux_file_manager_tests {
             &script_for(&result, "extract-here"),
             &fake_gui,
             &relative_extract_log,
-            &sample,
+            &sample_cwd,
             &["one.zip", "folder input"],
         );
         let relative_extract_log = wait_for_log_contains(
             &relative_extract_log,
-            &format!("<{}>", sample.join("one.zip").display()),
+            &format!("<{}>", sample_cwd.join("one.zip").display()),
         );
         assert!(
-            !relative_extract_log.contains(&format!("<{}>", sample.join("folder input").display())),
+            !relative_extract_log
+                .contains(&format!("<{}>", sample_cwd.join("folder input").display())),
             "directories must not be handed to archive-extract jobs: {relative_extract_log}"
         );
 
@@ -3839,18 +3841,18 @@ mod linux_file_manager_tests {
             &script_for(&result, "compress-to-7z"),
             &fake_gui,
             &relative_compress_log,
-            &sample,
+            &sample_cwd,
             &["plain file.txt"],
         );
         let relative_compress_log = wait_for_log_contains(
             &relative_compress_log,
-            &format!("<{}>", sample.join("plain file.txt").display()),
+            &format!("<{}>", sample_cwd.join("plain file.txt").display()),
         );
         assert!(
             relative_compress_log.contains(&format!(
                 "<--squallz-action><compress-to-7z><--squallz-output><{}><{}>",
-                sample.join("plain file 2.7z").display(),
-                sample.join("plain file.txt").display()
+                sample_cwd.join("plain file 2.7z").display(),
+                sample_cwd.join("plain file.txt").display()
             )),
             "log: {relative_compress_log}"
         );
@@ -3860,7 +3862,7 @@ mod linux_file_manager_tests {
             &script_for(&result, "test-archive"),
             &fake_gui,
             &empty_gui_log,
-            &sample,
+            &sample_cwd,
             &[],
         );
         assert!(
