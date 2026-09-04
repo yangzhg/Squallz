@@ -570,7 +570,7 @@ fn strip_ascii_suffix(value: &OsStr, suffix: &str) -> Option<OsString> {
 
     let wide = value.encode_wide().collect::<Vec<_>>();
     let suffix = suffix.encode_utf16().collect::<Vec<_>>();
-    let prefix = wide.strip_suffix(&suffix)?;
+    let prefix = wide.strip_suffix(suffix.as_slice())?;
     Some(OsString::from_wide(prefix))
 }
 
