@@ -1099,11 +1099,11 @@ impl SettingsDto {
 }
 
 fn safety_u64_or_default(value: Option<u64>, default: u64) -> u64 {
-    value.map_or(default, |value| value).max(1)
+    value.unwrap_or(default).max(1)
 }
 
 fn safety_u32_or_default(value: Option<u32>, default: u32) -> u32 {
-    value.map_or(default, |value| value).max(1)
+    value.unwrap_or(default).max(1)
 }
 
 /// Locale table response (`get_locale_table`).

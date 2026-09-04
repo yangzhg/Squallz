@@ -1015,7 +1015,7 @@ pub fn get_operation_audit(
 }
 
 fn operation_audit_limit(limit: Option<usize>) -> usize {
-    limit.map_or(DEFAULT_OPERATION_AUDIT_LIMIT, |limit| limit)
+    limit.unwrap_or(DEFAULT_OPERATION_AUDIT_LIMIT)
 }
 
 /// Exports the backend-generated operation audit to a user-selected JSON file.

@@ -1071,13 +1071,7 @@ fn repair_protected_recovery(
         ));
     }
 
-    let mut hashes: Vec<[u8; 32]> = Vec::with_capacity(block_count);
-    for chunk in protection[..hash_len].chunks_exact(32) {
-        hashes.push(fixed_array::<32>(
-            chunk,
-            "sqz recovery protection block hash",
-        )?);
-    }
+    let hashes = protection[..hash_len].as_chunks::<32>().0.to_vec();
     let parity = &protection[hash_len..];
     let mut repaired = primary.to_vec();
 

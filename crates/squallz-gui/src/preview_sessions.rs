@@ -288,10 +288,9 @@ impl PreviewSessionManager {
             if resources.closing {
                 return Err(session_unavailable());
             }
-            let needs_external_slot = match session_for_owner(&resources.sessions, id, owner) {
-                Ok(session) => !session.sticky_external_pin && session.pending_external_uses == 0,
-                Err(error) => return Err(error),
-            };
+            let session = session_for_owner(&resources.sessions, id, owner)?;
+            let needs_external_slot =
+                !session.sticky_external_pin && session.pending_external_uses == 0;
             if needs_external_slot
                 && resources.retained_or_pending_external_count() >= MAX_RETAINED_EXTERNAL_SESSIONS
             {
