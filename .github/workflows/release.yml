@@ -488,6 +488,22 @@ jobs:
         shell: bash
         run: cargo test -p squallz-gui windows_explorer_tests --lib -- --test-threads=1
 
+      - name: Test Windows Credential Manager
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/windows_credential_manager_smoke.ps1
+
+      - name: Upload Windows runtime test evidence
+        if: always() && runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-runtime-validation-${{ github.run_id }}
+          if-no-files-found: warn
+          path: |
+            benches/WINDOWS_CREDENTIAL_MANAGER_SMOKE.md
+            target/squallz-windows-credential-validation/test.log
+            target/squallz-windows-credential-validation/test.stderr.log
+
       - name: Install frontend dependencies
         run: npm --prefix frontend ci
 

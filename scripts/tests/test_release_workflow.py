@@ -42,8 +42,16 @@ class ReleaseWorkflowTests(unittest.TestCase):
             "cargo test -p squallz-gui windows_explorer_tests --lib -- --test-threads=1",
             body,
         )
+        self.assertIn("Test Windows Credential Manager", body)
+        self.assertIn("./scripts/windows_credential_manager_smoke.ps1", body)
+        self.assertIn("Upload Windows runtime test evidence", body)
+        self.assertIn("benches/WINDOWS_CREDENTIAL_MANAGER_SMOKE.md", body)
         self.assertLess(
             body.index("Test Windows Explorer integration"),
+            body.index("Test Windows Credential Manager"),
+        )
+        self.assertLess(
+            body.index("Test Windows Credential Manager"),
             body.index("Build preview or non-macOS package"),
         )
 
