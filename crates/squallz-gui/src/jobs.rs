@@ -1110,10 +1110,7 @@ impl JobManager {
                 .map(|(gui_id, entry)| (*gui_id, entry.clone()))
                 .collect::<Vec<_>>()
         };
-        entries
-            .iter()
-            .filter(|(gui_id, entry)| self.cancel_managed_job(*gui_id, entry))
-            .count()
+        self.cancel_managed_jobs(&entries)
     }
 
     /// Cancels all unfinished jobs before application shutdown.
@@ -1127,35 +1124,39 @@ impl JobManager {
                 .map(|(gui_id, entry)| (*gui_id, entry.clone()))
                 .collect::<Vec<_>>()
         };
-        entries
-            .iter()
-            .filter(|(gui_id, entry)| self.cancel_managed_job(*gui_id, entry))
-            .count()
+        self.cancel_managed_jobs(&entries)
     }
 
     fn cancel_managed_job(&self, gui_id: u64, entry: &ManagedJob) -> bool {
-        let Some(state) = self.queue.state(entry.queue_id) else {
-            return false;
-        };
-        if state.is_terminal() {
-            return false;
-        }
-        if entry.cancel_flag.swap(true, Ordering::Relaxed) {
-            return false;
-        }
-        if !self.queue.try_cancel(entry.queue_id) {
-            entry.cancel_flag.store(false, Ordering::Relaxed);
-            return false;
-        }
-        self.bridge.wake_cancelled(gui_id);
-        if self.queue.state(entry.queue_id) == Some(JobState::Cancelled) {
-            if let Some(version) =
-                lock_unpoisoned(&self.snapshots).set_state(gui_id, "cancelled", None, None)
-            {
-                emit_state(&*entry.events, gui_id, version, "cancelled", None);
+        self.cancel_managed_jobs(&[(gui_id, entry.clone())]) == 1
+    }
+
+    fn cancel_managed_jobs(&self, entries: &[(u64, ManagedJob)]) -> usize {
+        let queue_ids = entries
+            .iter()
+            .map(|(_, entry)| entry.queue_id)
+            .collect::<Vec<_>>();
+        let cancelled = self
+            .queue
+            .try_cancel_many(&queue_ids)
+            .into_iter()
+            .collect::<HashSet<_>>();
+
+        for (gui_id, entry) in entries {
+            if !cancelled.contains(&entry.queue_id) {
+                continue;
+            }
+            entry.cancel_flag.store(true, Ordering::Relaxed);
+            self.bridge.wake_cancelled(*gui_id);
+            if self.queue.state(entry.queue_id) == Some(JobState::Cancelled) {
+                if let Some(version) =
+                    lock_unpoisoned(&self.snapshots).set_state(*gui_id, "cancelled", None, None)
+                {
+                    emit_state(&*entry.events, *gui_id, version, "cancelled", None);
+                }
             }
         }
-        true
+        cancelled.len()
     }
 
     /// Blocks until all queued and running work has drained.

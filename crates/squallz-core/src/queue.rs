@@ -4,7 +4,7 @@
 //! queue remains strictly ordered. The GUI drives its task panel from this
 //! module; the CLI does not use it yet.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
@@ -181,18 +181,32 @@ impl Inner {
         Some((job, Arc::clone(&slot.token), state))
     }
 
-    fn request_cancel(&self, id: JobId) -> Option<bool> {
+    fn request_cancel_many(&self, ids: &[JobId]) -> (Vec<JobId>, Vec<JobId>) {
+        let mut queue = lock_unpoisoned(&self.queue);
         let mut slots = lock_unpoisoned(&self.slots);
-        let slot = slots.get_mut(&id)?;
-        if slot.state.is_terminal() || !slot.interruptible || slot.token.is_cancelled() {
-            return None;
+        let mut requested = Vec::with_capacity(ids.len());
+        let mut cancelled_queued = Vec::new();
+
+        for id in ids {
+            let Some(slot) = slots.get_mut(id) else {
+                continue;
+            };
+            if slot.state.is_terminal() || !slot.interruptible || slot.token.is_cancelled() {
+                continue;
+            }
+            slot.token.cancel();
+            requested.push(*id);
+            if slot.state == JobState::Queued && slot.job.take().is_some() {
+                slot.state = JobState::Cancelled;
+                cancelled_queued.push(*id);
+            }
         }
-        slot.token.cancel();
-        let queued = slot.state == JobState::Queued && slot.job.is_some();
-        if queued {
-            slot.job = None;
+
+        if !cancelled_queued.is_empty() {
+            let cancelled = cancelled_queued.iter().copied().collect::<HashSet<_>>();
+            queue.retain(|id| !cancelled.contains(id));
         }
-        Some(queued)
+        (requested, cancelled_queued)
     }
 
     fn notify_state(&self, id: JobId, state: &JobState) {
@@ -598,14 +612,21 @@ impl JobQueue {
     /// Attempts to cancel a job, returning `false` when its current phase can
     /// no longer be interrupted safely or the job is unavailable.
     pub fn try_cancel(&self, id: JobId) -> bool {
-        let Some(was_queued) = self.inner.request_cancel(id) else {
-            return false;
-        };
-        if was_queued {
-            self.inner.set_state(id, JobState::Cancelled);
+        !self.try_cancel_many(&[id]).is_empty()
+    }
+
+    /// Attempts to cancel a group as one scheduling transaction. Every
+    /// cancellable queued job is removed before running work can release
+    /// capacity for another job in the same group.
+    pub fn try_cancel_many(&self, ids: &[JobId]) -> Vec<JobId> {
+        let (requested, cancelled_queued) = self.inner.request_cancel_many(ids);
+        for id in &cancelled_queued {
+            self.inner.notify_state(*id, &JobState::Cancelled);
+        }
+        if !cancelled_queued.is_empty() {
             self.inner.notify_waiters();
         }
-        true
+        requested
     }
 
     /// Blocks until the queue is empty and no job is running (test/CLI
@@ -1036,6 +1057,43 @@ mod tests {
     }
 
     #[test]
+    fn batch_cancel_removes_queued_jobs_before_releasing_capacity() {
+        let queue = JobQueue::new(1);
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let running = queue.submit(Box::new(move |ctl, _progress| {
+            started_tx.send(()).unwrap();
+            release_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+            ctl.checkpoint()
+        }));
+        started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+
+        let queued_ran = Arc::new(AtomicBool::new(false));
+        let first_flag = Arc::clone(&queued_ran);
+        let first_queued = queue.submit(Box::new(move |_ctl, _progress| {
+            first_flag.store(true, Ordering::SeqCst);
+            Ok(())
+        }));
+        let second_flag = Arc::clone(&queued_ran);
+        let second_queued = queue.submit(Box::new(move |_ctl, _progress| {
+            second_flag.store(true, Ordering::SeqCst);
+            Ok(())
+        }));
+
+        assert_eq!(
+            queue.try_cancel_many(&[running, first_queued, second_queued]),
+            vec![running, first_queued, second_queued]
+        );
+        assert_eq!(queue.state(first_queued), Some(JobState::Cancelled));
+        assert_eq!(queue.state(second_queued), Some(JobState::Cancelled));
+        release_tx.send(()).unwrap();
+        queue.wait_idle();
+
+        assert_eq!(queue.state(running), Some(JobState::Cancelled));
+        assert!(!queued_ran.load(Ordering::SeqCst));
+    }
+
+    #[test]
     fn queued_jobs_can_move_without_touching_running_or_paused_work() {
         let queue = JobQueue::new(1);
         let (gate_tx, gate_rx) = mpsc::channel::<()>();
@@ -1165,7 +1223,7 @@ mod tests {
             panic!("queued job was not claimed");
         };
         assert_eq!(claimed_state, JobState::Running);
-        assert_eq!(inner.request_cancel(id), Some(false));
+        assert_eq!(inner.request_cancel_many(&[id]), (vec![id], Vec::new()));
         assert!(token.is_cancelled());
         assert_eq!(
             lock_unpoisoned(&inner.slots)
