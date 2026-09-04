@@ -47,12 +47,16 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertIn("Upload Windows runtime test evidence", body)
         self.assertIn("benches/WINDOWS_CREDENTIAL_MANAGER_SMOKE.md", body)
         self.assertLess(
+            body.index("Build preview or non-macOS package"),
+            body.index("Test Windows Explorer integration"),
+        )
+        self.assertLess(
             body.index("Test Windows Explorer integration"),
             body.index("Test Windows Credential Manager"),
         )
         self.assertLess(
             body.index("Test Windows Credential Manager"),
-            body.index("Build preview or non-macOS package"),
+            body.index("Smoke packaged release CLI"),
         )
 
     def test_linux_package_uses_the_glibc_235_build_baseline(self) -> None:
