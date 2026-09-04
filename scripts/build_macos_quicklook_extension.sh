@@ -76,6 +76,7 @@ component_executable() {
     return 2
   fi
 
+  # The Rust static archive uses the SDK-provided liblzma implementation.
   if ! CLANG_MODULE_CACHE_PATH="$MODULE_CACHE" \
     SWIFT_MODULE_CACHE_PATH="$MODULE_CACHE" \
     MACOSX_DEPLOYMENT_TARGET="$EXTENSION_MINIMUM_VERSION" \
@@ -89,6 +90,7 @@ component_executable() {
       -whole-module-optimization \
       "$SOURCE_ROOT/PreviewProvider.swift" \
       "$rust_library" \
+      -llzma \
       -framework CoreGraphics \
       -framework Foundation \
       -framework QuickLookUI \
