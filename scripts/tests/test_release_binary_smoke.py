@@ -561,6 +561,28 @@ class ReleaseBinarySmokeTests(unittest.TestCase):
 
             self.assertFalse(any("extract" in command for command in runner.commands))
 
+    def test_binary_failure_uses_json_stdout_when_stderr_is_empty(self) -> None:
+        def fail_with_json(
+            command: list[str], **_: object
+        ) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(
+                command,
+                2,
+                '{"ok":false,"error":{"kind":"unsupported","message":"stub marker missing"}}',
+                "",
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            with self.assertRaisesRegex(smoke.SmokeError, "stub marker missing"):
+                smoke.invoke(
+                    workspace / "sqz.exe",
+                    "sfx create",
+                    ("--json",),
+                    workspace,
+                    fail_with_json,
+                )
+
     def test_sfx_checksum_mismatch_fails_before_runtime_execution(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

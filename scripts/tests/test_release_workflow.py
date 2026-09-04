@@ -46,6 +46,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertIn("./scripts/windows_credential_manager_smoke.ps1", body)
         self.assertIn("Upload Windows runtime test evidence", body)
         self.assertIn("benches/WINDOWS_CREDENTIAL_MANAGER_SMOKE.md", body)
+        self.assertIn("target/release/sqz-sfx-template.stub", body)
         self.assertLess(
             body.index("Build preview or non-macOS package"),
             body.index("Test Windows Explorer integration"),

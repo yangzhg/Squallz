@@ -539,7 +539,10 @@ def invoke(
     except OSError as error:
         raise SmokeError(f"{phase} could not start the release CLI") from error
     if result.returncode != 0:
-        detail = result.stderr.strip().replace(os.fspath(workspace), "<smoke>")
+        detail = result.stderr.strip() or result.stdout.strip()
+        detail = detail.replace(os.fspath(workspace), "<smoke>")
+        if len(detail) > 2000:
+            detail = f"{detail[:2000]}…"
         suffix = f": {detail}" if detail else ""
         raise SmokeError(f"{phase} failed with exit code {result.returncode}{suffix}")
     return result

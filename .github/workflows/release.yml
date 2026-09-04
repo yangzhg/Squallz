@@ -541,6 +541,7 @@ jobs:
             benches/WINDOWS_CREDENTIAL_MANAGER_SMOKE.md
             target/squallz-windows-credential-validation/test.log
             target/squallz-windows-credential-validation/test.stderr.log
+            target/release/sqz-sfx-template.stub
 
       - name: Notarize and staple public macOS artifacts
         if: runner.os == 'macOS' && needs.plan.outputs.publish_release == 'true'
