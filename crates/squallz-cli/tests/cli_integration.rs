@@ -1,7 +1,7 @@
 //! End-to-end CLI integration tests, driving the real `sqz` binary through
 //! `CARGO_BIN_EXE_sqz` (no extra harness dependency).
 //!
-//! Every invocation pins the language environment (`SQZ_LANG` removed,
+//! Every invocation pins the language environment (`SQZ_LANG` cleared,
 //! `SQZ_LOCALES_DIR` pointed at a non-existent directory) so the assertions
 //! are independent of the developer's machine.
 
@@ -1025,17 +1025,6 @@ fn color_and_palette_options_have_one_canonical_surface() {
     ]));
     assert!(plain.status.success(), "stderr: {}", stderr(&plain));
     assert!(!stdout(&plain).contains("\u{1b}["));
-
-    for removed in [
-        ["--theme", "ocean"],
-        ["--colors", "ocean"],
-        ["--color-scheme", "ocean"],
-        ["--color", "rich"],
-        ["--color", "fancy"],
-    ] {
-        let output = run(sqz().args([removed[0], removed[1], "info"]));
-        assert_eq!(output.status.code(), Some(2), "stdout: {}", stdout(&output));
-    }
 }
 #[test]
 fn cli_surface_contract_format_errors_use_json_envelope() {
@@ -2122,31 +2111,31 @@ fn batch_extract_no_match_preserves_an_invalid_destination() {
 }
 
 #[test]
-fn batch_rejects_removed_schema_fields_and_operation_names() {
+fn batch_rejects_unknown_fields_and_operation_names() {
     let dir = temp_dir("batch-current-schema");
 
     for (name, manifest) in [
         (
-            "version",
+            "top-level-field",
             serde_json::json!({
-                "version": 1,
+                "unexpected": true,
                 "jobs": [{ "kind": "test", "archive": "archive.zip" }]
             }),
         ),
         (
-            "operation-alias",
+            "operation",
             serde_json::json!({
-                "jobs": [{ "kind": "verify_checksum", "check": "SHA256SUMS" }]
+                "jobs": [{ "kind": "unknown_operation", "check": "SHA256SUMS" }]
             }),
         ),
         (
-            "path-alias",
+            "job-field",
             serde_json::json!({
-                "jobs": [{ "kind": "convert", "archive": "source.zip", "output": "out.7z" }]
+                "jobs": [{ "kind": "convert", "src": "source.zip", "output": "out.7z", "unexpected": true }]
             }),
         ),
         (
-            "irrelevant-current-field",
+            "wrong-job-field",
             serde_json::json!({
                 "jobs": [{ "kind": "test", "archive": "source.zip", "inputs": ["ignored"] }]
             }),
@@ -5565,9 +5554,8 @@ fn info_modern_groups_formats_and_uses_capability_matrix() {
 }
 
 #[test]
-fn info_lists_all_i3_formats_registry_driven() {
-    // The CLI itself was not touched for I3: every new format must surface
-    // through the registry alone.
+fn info_lists_all_formats_from_the_registry() {
+    // Every supported format must surface through the shared registry.
     let out = run(sqz().arg("info").arg("--json"));
     assert!(out.status.success());
     let formats: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("valid JSON");

@@ -285,7 +285,7 @@ cat > "$REPORT" <<EOF
 
 Date: $(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
-Scope: I10-S2 standard PAR2 create/verify/repair interoperability through the Squallz CLI.
+Scope: Standard PAR2 create/verify/repair interoperability through the Squallz CLI.
 
 Tool:
 - Path: \`$PAR2_TOOL\`
@@ -350,7 +350,7 @@ Boundary:
 
 - External standard PAR2 output remains unstructured; Squallz exposes \`metrics: null\` for this bridge.
 - The built-in \`rust-par2\` fallback still covers verify/repair only; standard PAR2 create still requires an external tool.
-- This smoke closes the standard \`par2\` create/verify/repair gate for local development. Packaging a GPL PAR2 executable remains a release/legal decision for I15.
+- Packaging a GPL PAR2 executable remains a release and legal decision.
 EOF
 
 echo "Wrote $REPORT"

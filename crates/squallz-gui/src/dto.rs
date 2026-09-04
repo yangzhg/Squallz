@@ -1031,6 +1031,7 @@ pub struct LanguageDto {
 
 /// Persisted GUI settings.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct SettingsDto {
     /// `"system" | "light" | "dark"`
     pub theme: Option<String>,
@@ -1391,6 +1392,12 @@ mod tests {
         assert_eq!(custom.max_output_bytes, 1);
         assert_eq!(custom.max_entries, 50);
         assert_eq!(custom.max_compression_ratio, 1);
+    }
+
+    #[test]
+    fn settings_reject_unknown_fields() {
+        let json = r#"{"reveal_after_extract":false,"unexpected_setting":true}"#;
+        assert!(serde_json::from_str::<SettingsDto>(json).is_err());
     }
 
     #[test]

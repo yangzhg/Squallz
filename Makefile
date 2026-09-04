@@ -41,16 +41,11 @@ help:
 	@echo
 	@echo "App packaging:"
 	@echo "  make macos-app-icon       Rebuild the macOS 26 app icon assets"
-	@echo "  make app                  Build debug Tauri app"
 	@echo "  make app-debug            Build debug Tauri app for current OS"
 	@echo "  make app-release          Build release Tauri app and bundles for current OS"
-	@echo "  make package              Alias for app-release"
 	@echo "  make app-macos            Build macOS package on macOS"
 	@echo "  make app-linux            Build Linux package on Linux"
 	@echo "  make app-windows          Build Windows package on Windows"
-	@echo "  make package-macos        Alias for app-macos"
-	@echo "  make package-linux        Alias for app-linux"
-	@echo "  make package-windows      Alias for app-windows"
 	@echo
 	@echo "Smoke:"
 	@echo "  make smoke-native         Run the native smoke for the current OS"
@@ -147,9 +142,7 @@ frontend-build:
 dev:
 	cd "$(FRONTEND)" && npm run tauri:dev
 
-.PHONY: app app-debug
-app: app-debug
-
+.PHONY: app-debug
 app-debug:
 	cd "$(FRONTEND)" && npm run tauri -- build --debug
 
@@ -157,26 +150,18 @@ app-debug:
 macos-app-icon: require-macos
 	scripts/build_macos_app_icon.sh
 
-.PHONY: app-release package
+.PHONY: app-release
 app-release:
 	cd "$(FRONTEND)" && npm run tauri -- build
 
-package: app-release
-
-.PHONY: app-macos app-linux app-windows package-macos package-linux package-windows
+.PHONY: app-macos app-linux app-windows
 app-macos: require-macos app-release
 
 app-linux: require-linux app-release
 
 app-windows: require-windows app-release
 
-package-macos: app-macos
-
-package-linux: app-linux
-
-package-windows: app-windows
-
-.PHONY: smoke-native smoke-app smoke-macos smoke-macos-quicklook smoke-linux smoke-windows
+.PHONY: smoke-native smoke-macos smoke-macos-quicklook smoke-linux smoke-windows
 smoke-native:
 	@case "$(NATIVE_OS)" in \
 		macos) $(MAKE) smoke-macos ;; \
@@ -184,9 +169,6 @@ smoke-native:
 		windows) $(MAKE) smoke-windows ;; \
 		*) echo "No native smoke is configured for host: $(NATIVE_OS)"; exit 2 ;; \
 	esac
-
-smoke-app: smoke-macos
-
 smoke-macos: require-macos
 	scripts/macos_app_smoke.sh "$(SMOKE_APP)"
 

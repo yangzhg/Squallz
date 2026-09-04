@@ -308,7 +308,7 @@ fn tar_hardlink_entries_are_mapped() {
         other => panic!("expected hardlink, got {other:?}"),
     }
 
-    // Extraction must not fail; hardlink materialisation itself is I4.
+    // The same archive must remain extractable after listing its hardlink metadata.
     let out = dir.path().join("out");
     let ctl = ControlToken::new();
     engine

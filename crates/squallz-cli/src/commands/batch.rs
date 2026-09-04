@@ -1562,12 +1562,12 @@ mod tests {
     use super::BatchScript;
 
     #[test]
-    fn batch_policy_fields_accept_only_the_current_contract() {
+    fn batch_policy_fields_reject_unknown_values() {
         for script in [
-            r#"{"jobs":[{"kind":"extract","archive":"a.zip","overwrite":"replace"}]}"#,
-            r#"{"jobs":[{"kind":"checksum","inputs":["a"],"algorithm":"sha-256"}]}"#,
-            r#"{"jobs":[{"kind":"pack","inputs":["a"],"output":"a.sqz","inner_format":"raw"}]}"#,
-            r#"{"jobs":[{"kind":"compress","inputs":["a"],"output":"a.zip","profile":"default"}]}"#,
+            r#"{"jobs":[{"kind":"extract","archive":"a.zip","overwrite":"invalid"}]}"#,
+            r#"{"jobs":[{"kind":"checksum","inputs":["a"],"algorithm":"invalid"}]}"#,
+            r#"{"jobs":[{"kind":"pack","inputs":["a"],"output":"a.sqz","inner_format":"invalid"}]}"#,
+            r#"{"jobs":[{"kind":"compress","inputs":["a"],"output":"a.zip","profile":"invalid"}]}"#,
         ] {
             assert!(
                 serde_json::from_str::<BatchScript>(script).is_err(),

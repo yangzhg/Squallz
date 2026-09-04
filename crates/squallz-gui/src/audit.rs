@@ -22,6 +22,7 @@ const DEFAULT_MAX_RECORDS: usize = 500;
 const DEFAULT_EXPORT_FILE_NAME: &str = "operation-audit.json";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OperationAuditRecord {
     pub id: u64,
     pub time: u64,
@@ -635,6 +636,37 @@ mod tests {
         assert!(written.contains("\"records\""));
         assert!(written.contains("\"Extract archive\""));
         assert!(!written.contains("first.zip"));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn audit_load_skips_records_with_unknown_fields() {
+        let dir = temp_dir("strict-schema");
+        let path = dir.join("operation-audit.jsonl");
+        let valid = serde_json::to_string(&OperationAuditRecord {
+            id: 2,
+            time: 20,
+            kind: "test".into(),
+            state: "done".into(),
+            title: "Test archive".into(),
+            detail: "ok.zip".into(),
+            result_summary: None,
+            error_key: None,
+        })
+        .unwrap();
+        std::fs::write(
+            &path,
+            format!(
+                "{{\"id\":1,\"time\":10,\"kind\":\"test\",\"state\":\"done\",\"title\":\"Unexpected\",\"detail\":\"unexpected.zip\",\"unexpected_field\":true}}\n{valid}\n"
+            ),
+        )
+        .unwrap();
+
+        let audit = OperationAudit::with_path(path, 10);
+        let recent = audit.recent(10);
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].id, 2);
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
