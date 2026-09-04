@@ -34,6 +34,7 @@ use crate::errors::{
 static SFX_STUB_IDENTITY: [u8; 24] = SFX_CLI_STUB_MARKER;
 
 fn main() {
+    std::hint::black_box(&SFX_STUB_IDENTITY);
     install_broken_pipe_panic_hook();
     match panic::catch_unwind(run_cli) {
         Ok(()) => {}

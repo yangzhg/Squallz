@@ -10,6 +10,7 @@ const root = resolve(frontendDir, "..");
 const universalMacTarget = "universal-apple-darwin";
 const universalMacComponents = ["aarch64-apple-darwin", "x86_64-apple-darwin"];
 const linuxSfxDataMagic = Buffer.from("SQZSFXD1", "ascii");
+const sfxCliStubMarker = Buffer.from("SQUALLZ_CLI_SFX_STUB_V1\0", "ascii");
 
 function run(command, args, cwd, env = process.env) {
   const result = spawnSync(command, args, {
@@ -23,8 +24,16 @@ function run(command, args, cwd, env = process.env) {
   }
 }
 
-function writeLinuxSfxData(runtimePath, templatePath) {
+function readSfxRuntime(runtimePath) {
   const runtime = readFileSync(runtimePath);
+  if (!runtime.includes(sfxCliStubMarker)) {
+    throw new Error(`built sqz-sfx runtime is missing its identity marker: ${runtimePath}`);
+  }
+  return runtime;
+}
+
+function writeLinuxSfxData(runtimePath, templatePath) {
+  const runtime = readSfxRuntime(runtimePath);
   const length = Buffer.alloc(8);
   length.writeBigUInt64LE(BigInt(runtime.length));
   const digest = createHash("sha256").update(runtime).digest();
@@ -126,6 +135,7 @@ if (targetTriple === universalMacTarget) {
     if (targetTriple.includes("linux")) {
       writeLinuxSfxData(runtimePath, templatePath);
     } else {
+      readSfxRuntime(runtimePath);
       copyFileSync(runtimePath, templatePath);
     }
   }
