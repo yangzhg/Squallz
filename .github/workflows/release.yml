@@ -528,6 +528,9 @@ jobs:
           cargo test -p squallz-core \
             tests::windows_file_operation_retries_only_transient_share_locks \
             --lib -- --exact
+          cargo test -p squallz-core \
+            sfx::tests::staged_sfx_releases_windows_write_handle_before_digest \
+            --lib -- --exact
           cargo test -p squallz-gui windows_explorer_tests --lib -- --test-threads=1
 
       - name: Test Windows Credential Manager

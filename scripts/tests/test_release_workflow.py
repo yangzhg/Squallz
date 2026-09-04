@@ -43,6 +43,10 @@ class ReleaseWorkflowTests(unittest.TestCase):
             body,
         )
         self.assertIn(
+            "sfx::tests::staged_sfx_releases_windows_write_handle_before_digest",
+            body,
+        )
+        self.assertIn(
             "cargo test -p squallz-gui windows_explorer_tests --lib -- --test-threads=1",
             body,
         )

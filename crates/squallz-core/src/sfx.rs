@@ -326,8 +326,14 @@ impl StagedSfx {
         Ok(())
     }
 
-    fn discard(&self) -> Result<(), FormatError> {
+    fn release_held_file(&mut self) -> Result<(), FormatError> {
         self.verify_held_identity()?;
+        drop(self.held_file.take());
+        Ok(())
+    }
+
+    fn discard(&mut self) -> Result<(), FormatError> {
+        self.release_held_file()?;
         transaction::discard_staged_path(
             &self.path,
             self.identity,
@@ -1556,7 +1562,7 @@ where
 }
 
 fn publish_staged_sfx_after_cleanup(
-    staged: StagedSfx,
+    mut staged: StagedSfx,
     dest: &Path,
     commit_policy: CreateCommitPolicy,
     progress: &dyn ProgressSink,
@@ -1581,7 +1587,7 @@ fn publish_staged_sfx(
     progress: &dyn ProgressSink,
     ctl: &ControlToken,
 ) -> Result<SfxBuildReport, FormatError> {
-    staged.verify_held_identity()?;
+    staged.release_held_file()?;
     progress.on_phase(ProgressPhase::OutputCommit, false);
     if let Err(error) = ctl.checkpoint() {
         let target = staged.report.path.clone();
@@ -2608,6 +2614,56 @@ mod tests {
             events.into_inner(),
             vec!["sync", "verify", "permissions", "sync"]
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn staged_sfx_releases_windows_write_handle_before_digest() {
+        use windows_sys::Win32::Foundation::{ERROR_LOCK_VIOLATION, ERROR_SHARING_VIOLATION};
+
+        let destination = temp_file("windows-staged-handle").with_extension("exe");
+        let _ = fs::remove_file(&destination);
+        let mut reserved = transaction::reserve_single_file_stage(&destination).unwrap();
+        reserved.file.write_all(b"staged SFX bytes").unwrap();
+        reserved.file.sync_all().unwrap();
+        let path = reserved.path.clone();
+        let mut staged = StagedSfx {
+            path: path.clone(),
+            identity: reserved.identity,
+            held_file: Some(reserved.file),
+            report: SfxBuildReport {
+                path: destination.clone(),
+                target: SfxTarget::Windows,
+                layout: SfxLayout::SingleFile,
+                stub_bytes: 1,
+                payload_bytes: 1,
+                total_bytes: 2,
+                payload_crc32: 0,
+                payload_sha256: None,
+                requires_signing: true,
+                preserved_outputs: Vec::new(),
+            },
+            progress_total: 2,
+        };
+
+        let error = crate::destination_guard::path_state_digest(&path).unwrap_err();
+        assert!(matches!(
+            error,
+            FormatError::Io(ref error)
+                if matches!(
+                    error.raw_os_error(),
+                    Some(code)
+                        if code == ERROR_SHARING_VIOLATION as i32
+                            || code == ERROR_LOCK_VIOLATION as i32
+                )
+        ));
+
+        staged.release_held_file().unwrap();
+        assert!(crate::destination_guard::path_state_digest(&path)
+            .unwrap()
+            .is_some());
+        staged.discard().unwrap();
+        assert!(!path.exists());
     }
 
     #[cfg(unix)]
