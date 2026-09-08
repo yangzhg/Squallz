@@ -16,12 +16,12 @@ path = "src/main.rs"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-squallz-core = { path = "../squallz-core", version = "0.1.0" }
-squallz-formats = { path = "../squallz-formats", version = "0.1.0" }
-squallz-i18n = { path = "../squallz-i18n", version = "0.1.0" }
-squallz-publish = { path = "../squallz-publish", version = "0.1.0" }
-squallz-recovery = { path = "../squallz-recovery", version = "0.1.0" }
-squallz-update = { path = "../squallz-update", version = "0.1.0" }
+squallz-core = { path = "../squallz-core", version = "0.2.0" }
+squallz-formats = { path = "../squallz-formats", version = "0.2.0" }
+squallz-i18n = { path = "../squallz-i18n", version = "0.2.0" }
+squallz-publish = { path = "../squallz-publish", version = "0.2.0" }
+squallz-recovery = { path = "../squallz-recovery", version = "0.2.0" }
+squallz-update = { path = "../squallz-update", version = "0.2.0" }
 tauri = { version = "~2.11.2", features = ["macos-private-api"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"

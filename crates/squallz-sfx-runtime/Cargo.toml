@@ -13,9 +13,9 @@ name = "sqz-sfx"
 path = "src/main.rs"
 
 [dependencies]
-squallz-core = { path = "../squallz-core", version = "0.1.0" }
-squallz-formats = { path = "../squallz-formats", version = "0.1.0", default-features = false }
-squallz-i18n = { path = "../squallz-i18n", version = "0.1.0" }
+squallz-core = { path = "../squallz-core", version = "0.2.0" }
+squallz-formats = { path = "../squallz-formats", version = "0.2.0", default-features = false }
+squallz-i18n = { path = "../squallz-i18n", version = "0.2.0" }
 clap.workspace = true
 ctrlc.workspace = true
 rpassword.workspace = true

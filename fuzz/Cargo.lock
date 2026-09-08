@@ -730,6 +730,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9a8e94ea7f378bd32cbbd37198a4a91436180c5bb472411e48b5ec2e2124ae9e"
 dependencies = [
  "serde_core",
+ "serde_derive",
 ]
 
 [[package]]
@@ -824,15 +825,16 @@ checksum = "6980e8d7511241f8acf4aebddbb1ff938df5eebe98691418c4468d0b72a96a67"
 
 [[package]]
 name = "squallz-format-api"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
+ "serde",
  "thiserror",
  "zeroize",
 ]
 
 [[package]]
 name = "squallz-formats"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blake3",
  "brotli",
@@ -847,9 +849,11 @@ dependencies = [
  "liblzma",
  "lz4_flex",
  "reed-solomon-erasure",
+ "rustix",
  "sevenz-rust2",
  "squallz-format-api",
  "tar",
+ "winapi-util",
  "zip",
  "zstd",
 ]
@@ -993,6 +997,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "23939e44bb9a5d7576fa2b563dc2e136628f1224e88a8deed09e04858b77871f"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "winapi-util"
+version = "0.1.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
+dependencies = [
+ "windows-sys",
 ]
 
 [[package]]

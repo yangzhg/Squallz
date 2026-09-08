@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Optional
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "release_prepare_public.py"
@@ -12,6 +13,14 @@ VERSION = "v1.2.3"
 REPOSITORY = "squallz/squallz"
 SOURCE_REF = "refs/tags/v1.2.3"
 SOURCE_SHA = "a" * 40
+CURATED_NOTES = """## Highlights
+
+- Shared desktop and CLI archive workflows.
+
+## Known limitations
+
+- Some formats require external tools.
+"""
 ASSETS = (
     ("Squallz-v1.2.3-source.tar.gz", "source", "all", "source", "source-archive", "source"),
     ("Squallz-v1.2.3-source.zip", "source", "all", "source", "source-archive", "source"),
@@ -95,7 +104,14 @@ class ReleasePreparePublicTests(unittest.TestCase):
                 json.dumps(provenance), encoding="utf-8"
             )
 
-    def run_prepare(self, assets_dir: Path) -> subprocess.CompletedProcess[str]:
+    def run_prepare(
+        self,
+        assets_dir: Path,
+        notes: Optional[str] = CURATED_NOTES,
+    ) -> subprocess.CompletedProcess[str]:
+        notes_file = assets_dir.parent / "release-notes.md"
+        if notes is not None:
+            notes_file.write_text(notes, encoding="utf-8")
         return subprocess.run(
             [
                 sys.executable,
@@ -110,6 +126,8 @@ class ReleasePreparePublicTests(unittest.TestCase):
                 SOURCE_REF,
                 "--source-sha",
                 SOURCE_SHA,
+                "--notes-file",
+                str(notes_file),
             ],
             capture_output=True,
             text=True,
@@ -137,7 +155,30 @@ class ReleasePreparePublicTests(unittest.TestCase):
                 {"source", "unsigned-preview", "developer-id-notarized"},
             )
             notes = (assets_dir / "RELEASE_NOTES.md").read_text(encoding="utf-8")
+            self.assertIn("Shared desktop and CLI archive workflows.", notes)
+            self.assertIn("Some formats require external tools.", notes)
+            self.assertIn("## Asset trust", notes)
             self.assertIn("Squallz-v1.2.3-macos-arm64.dmg", notes)
+
+    def test_curated_notes_require_highlights_and_known_limitations(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            assets_dir = Path(tmp) / "assets"
+            self.create_fixture(assets_dir)
+
+            result = self.run_prepare(assets_dir, "## Highlights\n\n- Faster.\n")
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("release notes are missing ## Known limitations", result.stderr)
+
+    def test_missing_curated_notes_are_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            assets_dir = Path(tmp) / "assets"
+            self.create_fixture(assets_dir)
+
+            result = self.run_prepare(assets_dir, None)
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("release notes could not be read", result.stderr)
 
     def test_missing_provenance_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

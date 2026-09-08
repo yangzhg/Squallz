@@ -24,13 +24,13 @@ liblzma = "0.4"
 lz4_flex = "0.13"
 reed-solomon-erasure = { version = "6.0.0", default-features = false }
 sevenz-rust2 = "0.21.0"
-squallz-format-api = { path = "../squallz-format-api", version = "0.1.0" }
+squallz-format-api = { path = "../squallz-format-api", version = "0.2.0" }
 tar = "0.4"
 zip = { version = "8.6.0", default-features = false, features = ["aes-crypto", "deflate"] }
 zstd = { version = "0.13", features = ["zstdmt"] }
 
 [dev-dependencies]
-squallz-core = { path = "../squallz-core", version = "0.1.0" }
+squallz-core = { path = "../squallz-core", version = "0.2.0" }
 
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "=1.1.4", features = ["fs"] }

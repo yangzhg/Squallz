@@ -10,8 +10,8 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-squallz-format-api = { path = "../crates/squallz-format-api", version = "0.1.0" }
-squallz-formats = { path = "../crates/squallz-formats", version = "0.1.0" }
+squallz-format-api = { path = "../crates/squallz-format-api", version = "0.2.0" }
+squallz-formats = { path = "../crates/squallz-formats", version = "0.2.0" }
 
 [[bin]]
 name = "zip_reader"

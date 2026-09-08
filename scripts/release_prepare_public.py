@@ -46,6 +46,7 @@ EXPECTED_PLATFORMS = {
         "trust_state": "unsigned-preview",
     },
 }
+REQUIRED_RELEASE_NOTE_HEADINGS = ("## Highlights", "## Known limitations")
 
 
 class ReleaseError(RuntimeError):
@@ -68,6 +69,22 @@ def load_object(path: Path, label: str) -> dict[str, object]:
     if not isinstance(value, dict):
         raise ReleaseError(f"{label} must be a JSON object: {path.name}")
     return value
+
+
+def load_release_notes(path: Path) -> str:
+    try:
+        body = path.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeError) as error:
+        raise ReleaseError(f"release notes could not be read: {path}") from error
+    if not body:
+        raise ReleaseError("release notes are empty")
+    lines = body.splitlines()
+    if any(line.startswith("# ") for line in lines):
+        raise ReleaseError("release notes body must not contain a level-one heading")
+    for heading in REQUIRED_RELEASE_NOTE_HEADINGS:
+        if heading not in lines:
+            raise ReleaseError(f"release notes are missing {heading}")
+    return body
 
 
 def require_mapping(
@@ -232,7 +249,9 @@ def prepare_release(
     repository: str,
     source_ref: str,
     source_sha: str,
+    notes_file: Path,
 ) -> None:
+    release_notes = load_release_notes(notes_file)
     primary_assets = sorted(
         path
         for path in assets_dir.iterdir()
@@ -333,6 +352,10 @@ def prepare_release(
     lines = [
         f"# Squallz {version}",
         "",
+        *release_notes.splitlines(),
+        "",
+        "## Asset trust",
+        "",
         "Trust is reported per asset. Verify the checksum and GitHub Artifact Attestation before running a download.",
         "",
         "- `developer-id-notarized`: signed with the Squallz Developer ID, accepted by Apple notarization, stapled, and checked with Gatekeeper.",
@@ -386,6 +409,7 @@ def main() -> int:
     parser.add_argument("--repository", required=True)
     parser.add_argument("--source-ref", required=True)
     parser.add_argument("--source-sha", required=True)
+    parser.add_argument("--notes-file", required=True)
     args = parser.parse_args()
     try:
         prepare_release(
@@ -394,6 +418,7 @@ def main() -> int:
             repository=args.repository,
             source_ref=args.source_ref,
             source_sha=args.source_sha,
+            notes_file=Path(args.notes_file),
         )
     except (OSError, UnicodeError, ReleaseError) as error:
         raise SystemExit(f"public release validation failed: {error}") from error

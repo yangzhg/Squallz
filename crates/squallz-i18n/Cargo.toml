@@ -6,7 +6,7 @@ license.workspace = true
 description = "Squallz 语言包机制：内置 locales + 用户目录覆盖，CLI/GUI 共享"
 
 [dependencies]
-squallz-format-api = { path = "../squallz-format-api", version = "0.1.0" }
+squallz-format-api = { path = "../squallz-format-api", version = "0.2.0" }
 dirs.workspace = true
 log.workspace = true
 serde_json.workspace = true

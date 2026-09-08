@@ -34,7 +34,7 @@ on:
       release_tag:
         description: "Existing tag to publish when manually dispatching"
         required: false
-        default: "v0.1.0"
+        default: "v0.2.0"
         type: string
 
 permissions:
@@ -178,15 +178,16 @@ jobs:
               frontend_version = json.loads(
                   Path("frontend/package.json").read_text(encoding="utf-8")
               )["version"]
-              frontend_lock_version = json.loads(
+              frontend_lock = json.loads(
                   Path("frontend/package-lock.json").read_text(encoding="utf-8")
-              )["packages"][""]["version"]
+              )
               versions = {
                   "release tag": expected_version,
                   "Cargo workspace": cargo_version,
                   "Tauri": tauri_version,
                   "frontend package": frontend_version,
-                  "frontend lockfile": frontend_lock_version,
+                  "frontend lockfile": frontend_lock["version"],
+                  "frontend lockfile root package": frontend_lock["packages"][""]["version"],
               }
               if len(set(versions.values())) != 1:
                   detail = ", ".join(f"{name}={value}" for name, value in versions.items())
@@ -871,7 +872,8 @@ jobs:
             --version "$VERSION" \
             --repository "$REPOSITORY" \
             --source-ref "$SOURCE_REF" \
-            --source-sha "$SOURCE_SHA"
+            --source-sha "$SOURCE_SHA" \
+            --notes-file "docs/releases/${VERSION}.md"
 
           (
             cd release-assets

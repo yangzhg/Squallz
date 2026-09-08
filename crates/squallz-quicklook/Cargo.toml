@@ -9,9 +9,9 @@ description = "Bounded archive summaries for the macOS Finder Quick Look extensi
 crate-type = ["rlib", "staticlib"]
 
 [dependencies]
-squallz-format-api = { path = "../squallz-format-api", version = "0.1.0" }
-squallz-formats = { path = "../squallz-formats", version = "0.1.0", default-features = false }
-squallz-i18n = { path = "../squallz-i18n", version = "0.1.0" }
+squallz-format-api = { path = "../squallz-format-api", version = "0.2.0" }
+squallz-formats = { path = "../squallz-formats", version = "0.2.0", default-features = false }
+squallz-i18n = { path = "../squallz-i18n", version = "0.2.0" }
 
 [dev-dependencies]
 tempfile = "3.27.0"
