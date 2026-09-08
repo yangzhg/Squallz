@@ -14,6 +14,7 @@ MODULE_CACHE="$OUTPUT_ROOT/module-cache"
 APPEX="$OUTPUT_ROOT/SquallzQuickLook.appex"
 EXECUTABLE="$APPEX/Contents/MacOS/SquallzQuickLook"
 TARGET="${TAURI_ENV_TARGET_TRIPLE:-}"
+CARGO_OUTPUT_ROOT="$(node "$ROOT/frontend/scripts/cargo-target-dir.mjs" "$ROOT")"
 
 if [[ -z "$TARGET" ]]; then
   TARGET="$(rustc -vV | awk '/^host: / { print $2 }')"
@@ -60,7 +61,7 @@ component_executable() {
   esac
 
   local output="$BUILD_ROOT/SquallzQuickLook-$component"
-  local rust_library="$ROOT/target/$component/release/libsquallz_quicklook.a"
+  local rust_library="$CARGO_OUTPUT_ROOT/$component/release/libsquallz_quicklook.a"
 
   if ! MACOSX_DEPLOYMENT_TARGET="$EXTENSION_MINIMUM_VERSION" cargo build \
     --manifest-path "$ROOT/Cargo.toml" \

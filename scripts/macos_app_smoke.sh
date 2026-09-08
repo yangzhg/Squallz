@@ -7,6 +7,7 @@ if [[ "$APP" != /* ]]; then
   APP="$ROOT/$APP"
 fi
 EXE="$APP/Contents/MacOS/squallz-gui"
+SQZ="$APP/Contents/MacOS/sqz"
 WORK="$ROOT/target/squallz-macos-smoke"
 HOME_DIR="$WORK/home"
 TRACE="$WORK/trace.jsonl"
@@ -48,6 +49,9 @@ PY
 if [[ ! -x "$EXE" ]]; then
   fail "missing app executable: $EXE; run 'make app-debug' first, or pass a release app built with 'make app-macos'"
 fi
+if [[ ! -x "$SQZ" ]]; then
+  fail "missing app CLI sidecar: $SQZ"
+fi
 
 DIRECT_DEPENDENCIES="$(otool -L "$EXE")"
 for framework in CloudKit CoreData CoreImage CoreText QuartzCore; do
@@ -76,6 +80,12 @@ for t in types:
     assert t.get("LSHandlerRank") == expected_rank, t
     assert "public.archive" not in t.get("LSItemContentTypes", []), t
 PY
+
+APP_VERSION="$(plutil -extract CFBundleShortVersionString raw "$APP/Contents/Info.plist")"
+SQZ_VERSION="$("$SQZ" --version)"
+if [[ "$SQZ_VERSION" != "sqz $APP_VERSION" ]]; then
+  fail "app version $APP_VERSION does not match bundled CLI version: $SQZ_VERSION"
+fi
 
 cat > "$HOME_DIR/Library/Application Support/Squallz/settings.json" <<'JSON'
 {
@@ -364,13 +374,18 @@ first_trace = None if first_trace is None else first_trace
 archive_delta = first_event_delta("open_archive.ok")
 if archive_delta is None:
     archive_delta = shell_delta(open_s)
+process_delta = first_event_delta("process.start")
+process_source = "process.start trace"
+if process_delta is None:
+    process_delta = shell_delta(pid_s)
+    process_source = "pgrep fallback after LaunchServices open"
 
 metrics = [
     {
-        "name": "Process observed",
-        "ms": shell_delta(pid_s),
+        "name": "Process started",
+        "ms": process_delta,
         "target_ms": max_process_ms,
-        "source": "pgrep after LaunchServices open",
+        "source": process_source,
     },
     {
         "name": "First validation trace",
@@ -521,6 +536,8 @@ archive file argument, isolated HOME, and a temporary trace file.
 ## Inputs
 
 - App: \`$APP\`
+- App version: \`$APP_VERSION\`
+- Bundled CLI: \`$SQZ_VERSION\`
 - Archive: \`$ARCHIVE\`
 - Isolated HOME: \`$HOME_DIR\`
 - Trace: \`$TRACE\`
@@ -532,6 +549,7 @@ archive file argument, isolated HOME, and a temporary trace file.
 - The app executable does not eagerly link unused CloudKit, CoreData, CoreImage,
   CoreText, or QuartzCore frameworks.
 - \`squallz-gui\` process starts from the bundle.
+- The app and bundled \`sqz\` CLI report the same version.
 - Frontend drains the OS open-file path and calls \`open_archive\` successfully.
 - First WebView content frame is the archive browser for the opened file, not
   the first-run chooser, an empty shell, a password/error page, or a generic

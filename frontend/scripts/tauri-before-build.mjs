@@ -1,9 +1,10 @@
 #!/usr/bin/env node
-import { chmodSync, copyFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { dirname, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { cargoTargetDirectory } from "./cargo-target-dir.mjs";
 
 const frontendDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const root = resolve(frontendDir, "..");
@@ -79,7 +80,10 @@ const cargoEnv = targetTriple.endsWith("apple-darwin")
   ? { ...process.env, MACOSX_DEPLOYMENT_TARGET: macosDeploymentTarget() }
   : process.env;
 const executableSuffix = targetTriple.includes("windows") ? ".exe" : "";
-const sidecarPath = resolve(root, "target", "release", `sqz-${targetTriple}${executableSuffix}`);
+const cargoOutputRoot = cargoTargetDirectory(root, { env: cargoEnv });
+const stagedReleaseDir = resolve(root, "target", "release");
+const sidecarPath = resolve(stagedReleaseDir, `sqz-${targetTriple}${executableSuffix}`);
+mkdirSync(stagedReleaseDir, { recursive: true });
 
 if (targetTriple === universalMacTarget) {
   const componentPaths = universalMacComponents.map((componentTarget) => {
@@ -93,7 +97,7 @@ if (targetTriple === universalMacTarget) {
       "--target",
       componentTarget,
     ], root, cargoEnv);
-    return resolve(root, "target", componentTarget, "release", "sqz");
+    return resolve(cargoOutputRoot, componentTarget, "release", "sqz");
   });
   for (const componentPath of componentPaths) {
     if (!existsSync(componentPath)) {
@@ -107,8 +111,8 @@ if (targetTriple === universalMacTarget) {
   run("cargo", cargoArgs, root, cargoEnv);
 
   const profileDir = targetTriple === hostTriple
-    ? resolve(root, "target", "release")
-    : resolve(root, "target", targetTriple, "release");
+    ? resolve(cargoOutputRoot, "release")
+    : resolve(cargoOutputRoot, targetTriple, "release");
   const cliPath = resolve(profileDir, `sqz${executableSuffix}`);
   if (!existsSync(cliPath)) {
     throw new Error(`built sqz sidecar is missing: ${cliPath}`);
@@ -131,7 +135,7 @@ if (targetTriple === universalMacTarget) {
     if (!existsSync(runtimePath)) {
       throw new Error(`built sqz-sfx runtime is missing: ${runtimePath}`);
     }
-    const templatePath = resolve(root, "target", "release", "sqz-sfx-template.stub");
+    const templatePath = resolve(stagedReleaseDir, "sqz-sfx-template.stub");
     if (targetTriple.includes("linux")) {
       writeLinuxSfxData(runtimePath, templatePath);
     } else {
