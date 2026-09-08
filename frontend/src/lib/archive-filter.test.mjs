@@ -1,11 +1,7 @@
 import assert from "node:assert/strict";
-import path from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
 
-import { createServer } from "vite";
-
-const frontendRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+import { createTestServer } from "../../tests/runtime.mjs";
 
 const rows = [
   {
@@ -64,12 +60,7 @@ async function flushPromises() {
 }
 
 test("archive search spans paths and rejects cancelled, failed, and stale results", async () => {
-  const server = await createServer({
-    appType: "custom",
-    logLevel: "silent",
-    root: frontendRoot,
-    server: { hmr: false, middlewareMode: true },
-  });
+  const server = await createTestServer();
 
   try {
     const archive = await server.ssrLoadModule("/src/lib/archive.svelte.ts");
@@ -343,12 +334,7 @@ test("archive search spans paths and rejects cancelled, failed, and stale result
 });
 
 test("a later row selection invalidates an in-flight full selection", async () => {
-  const server = await createServer({
-    appType: "custom",
-    logLevel: "silent",
-    root: frontendRoot,
-    server: { hmr: false, middlewareMode: true },
-  });
+  const server = await createTestServer();
 
   try {
     const archive = await server.ssrLoadModule("/src/lib/archive.svelte.ts");
@@ -414,12 +400,7 @@ test("a later row selection invalidates an in-flight full selection", async () =
 });
 
 test("replacing or dismissing an archive open cancels its exact backend request", async () => {
-  const server = await createServer({
-    appType: "custom",
-    logLevel: "silent",
-    root: frontendRoot,
-    server: { hmr: false, middlewareMode: true },
-  });
+  const server = await createTestServer();
 
   try {
     const archive = await server.ssrLoadModule("/src/lib/archive.svelte.ts");

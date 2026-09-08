@@ -1,11 +1,7 @@
 import assert from "node:assert/strict";
-import path from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
 
-import { createServer } from "vite";
-
-const frontendRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+import { createTestServer } from "../../tests/runtime.mjs";
 
 function sfxTask(overrides = {}) {
   return {
@@ -58,12 +54,7 @@ function sfxTask(overrides = {}) {
 }
 
 test("SFX result and recovery details use the durable single-backup contract", async () => {
-  const server = await createServer({
-    appType: "custom",
-    logLevel: "silent",
-    root: frontendRoot,
-    server: { hmr: false, middlewareMode: true },
-  });
+  const server = await createTestServer();
 
   try {
     const { loadLocale } = await server.ssrLoadModule("/src/lib/i18n.svelte.ts");
@@ -912,12 +903,7 @@ test("SFX result and recovery details use the durable single-backup contract", a
 });
 
 test("task questions keep empty passwords pending and normalize conflict scope", async () => {
-  const server = await createServer({
-    appType: "custom",
-    logLevel: "silent",
-    root: frontendRoot,
-    server: { hmr: false, middlewareMode: true },
-  });
+  const server = await createTestServer();
 
   try {
     const {

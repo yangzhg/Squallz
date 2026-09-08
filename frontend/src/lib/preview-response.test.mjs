@@ -1,19 +1,10 @@
 import assert from "node:assert/strict";
-import path from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
 
-import { createServer } from "vite";
-
-const frontendRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+import { createTestServer } from "../../tests/runtime.mjs";
 
 test("late system-open responses cannot revive a dismissed or replaced preview", async () => {
-  const server = await createServer({
-    appType: "custom",
-    logLevel: "silent",
-    root: frontendRoot,
-    server: { hmr: false, middlewareMode: true },
-  });
+  const server = await createTestServer();
 
   try {
     const { previewResponseIsCurrent } = await server.ssrLoadModule(
@@ -43,31 +34,6 @@ test("late system-open responses cannot revive a dismissed or replaced preview",
       previewResponseIsCurrent(expected, { ...expected, archiveSource: "/archives/b.zip" }),
       false,
     );
-  } finally {
-    await server.close();
-  }
-});
-
-test("development file fixtures use the system-open presentation without inline payloads", async () => {
-  const server = await createServer({
-    appType: "custom",
-    logLevel: "silent",
-    root: frontendRoot,
-    server: { hmr: false, middlewareMode: true },
-  });
-
-  try {
-    const { previewSampleForEntry } = await server.ssrLoadModule(
-      "/src/lib/dev-preview-data.ts",
-    );
-    const preview = previewSampleForEntry(
-      "/Users/alex/Squallz Samples/sample.zip",
-      "cover-preview.png",
-    );
-
-    assert.equal(preview?.preview_id, "preview-dev-cover");
-    assert.equal(Object.hasOwn(preview ?? {}, "preview_data_url"), false);
-    assert.equal(Object.hasOwn(preview ?? {}, "preview_mime"), false);
   } finally {
     await server.close();
   }

@@ -1,11 +1,7 @@
 import assert from "node:assert/strict";
-import path from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
 
-import { createServer } from "vite";
-
-const frontendRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+import { createTestServer } from "../../tests/runtime.mjs";
 
 const noop = () => {};
 const actions = {
@@ -84,12 +80,7 @@ function redundancyPresetTag(html, percent) {
 }
 
 test("modern and classic recovery workspaces expose the same semantic actions", async () => {
-  const server = await createServer({
-    appType: "custom",
-    logLevel: "silent",
-    root: frontendRoot,
-    server: { hmr: false, middlewareMode: true },
-  });
+  const server = await createTestServer();
 
   try {
     const { render } = await server.ssrLoadModule("svelte/server");
@@ -153,12 +144,7 @@ test("modern and classic recovery workspaces expose the same semantic actions", 
 });
 
 test("invalid recovery strength is explained and blocks protection", async () => {
-  const server = await createServer({
-    appType: "custom",
-    logLevel: "silent",
-    root: frontendRoot,
-    server: { hmr: false, middlewareMode: true },
-  });
+  const server = await createTestServer();
 
   try {
     const { render } = await server.ssrLoadModule("svelte/server");

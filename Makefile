@@ -5,9 +5,7 @@ FRONTEND := $(ROOT)/frontend
 UNAME_S := $(shell uname -s 2>/dev/null || echo unknown)
 NATIVE_OS := $(if $(filter Windows_NT,$(OS)),windows,$(if $(filter Darwin,$(UNAME_S)),macos,$(if $(filter Linux,$(UNAME_S)),linux,unknown)))
 MACOS_APP_DEBUG := $(ROOT)/target/debug/bundle/macos/Squallz.app
-MACOS_APP_RELEASE := $(ROOT)/target/release/bundle/macos/Squallz.app
 SMOKE_APP ?= $(MACOS_APP_DEBUG)
-PACKAGE_APP ?= $(MACOS_APP_RELEASE)
 POWERSHELL ?= powershell
 PYTHON ?= $(if $(filter windows,$(NATIVE_OS)),python,python3)
 
@@ -24,15 +22,15 @@ help:
 	@echo "  make fmt                  Format Rust workspace"
 	@echo "  make fmt-check            Check Rust formatting"
 	@echo "  make rust-check           cargo check --workspace"
-	@echo "  make frontend-check       Svelte/style checks"
+	@echo "  make frontend-check       Svelte and TypeScript checks"
 	@echo "  make check                Formatting, Rust check, frontend check"
 	@echo "  make precommit            Run pre-commit on all files"
 	@echo
 	@echo "Tests:"
-	@echo "  make test-rust            Rust tests except GUI crate"
-	@echo "  make test-gui             GUI lib/bin tests"
+	@echo "  make test-rust            Rust workspace tests"
+	@echo "  make test-frontend        Frontend behavior tests"
 	@echo "  make test-release-tools   Release metadata and trust tests"
-	@echo "  make test                 Rust + GUI + release tool tests"
+	@echo "  make test                 Rust, frontend, and release tool tests"
 	@echo
 	@echo "Build:"
 	@echo "  make build                cargo build --workspace"
@@ -113,18 +111,18 @@ precommit:
 
 .PHONY: test-rust
 test-rust:
-	cargo test --workspace --exclude squallz-gui
+	cargo test --workspace
 
-.PHONY: test-gui
-test-gui:
-	cargo test -p squallz-gui --lib --bins
+.PHONY: test-frontend
+test-frontend:
+	cd "$(FRONTEND)" && npm test
 
 .PHONY: test-release-tools
 test-release-tools:
 	"$(PYTHON)" -m unittest discover -s scripts/tests -p 'test_*.py'
 
 .PHONY: test
-test: test-rust test-gui test-release-tools
+test: test-rust test-frontend test-release-tools
 
 .PHONY: build
 build:

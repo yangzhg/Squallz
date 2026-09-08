@@ -28,7 +28,7 @@ flowchart TB
 | `frontend` | Svelte UI, design tokens, task dialogs, i18n, and frontend state. |
 | `locales` | Built-in English and Chinese language packs. |
 | `docs` | Format, privacy, platform, license, help, and release-boundary documentation. |
-| `scripts` | Smoke tests, platform checks, release readiness, and UI audits. |
+| `scripts` | Smoke tests, platform checks, packaging, and release tools. |
 
 ## Verification Commands
 
@@ -36,6 +36,7 @@ flowchart TB
 cargo fmt --all -- --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all
+npm --prefix frontend test
 npm --prefix frontend run check
 npm --prefix frontend run build
 ```
@@ -66,7 +67,7 @@ Squallz 围绕共享归档逻辑和薄入口层组织。
 | `frontend` | Svelte UI、design token、任务弹窗、i18n 和前端状态。 |
 | `locales` | 内置英文和中文语言包。 |
 | `docs` | 格式、隐私、平台、许可证、帮助和发布边界文档。 |
-| `scripts` | smoke、平台检查、发布 gate 和 UI 审计脚本。 |
+| `scripts` | smoke、平台检查、打包和发布工具。 |
 
 ## 校验命令
 
@@ -74,6 +75,7 @@ Squallz 围绕共享归档逻辑和薄入口层组织。
 cargo fmt --all -- --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all
+npm --prefix frontend test
 npm --prefix frontend run check
 npm --prefix frontend run build
 ```

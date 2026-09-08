@@ -1,19 +1,10 @@
 import assert from "node:assert/strict";
-import path from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
 
-import { createServer } from "vite";
-
-const frontendRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+import { createTestServer } from "../../tests/runtime.mjs";
 
 test("folder normalization trims absolute paths without accepting relative input", async () => {
-  const server = await createServer({
-    appType: "custom",
-    logLevel: "silent",
-    root: frontendRoot,
-    server: { hmr: false, middlewareMode: true },
-  });
+  const server = await createTestServer();
 
   try {
     const { normalizeDesktopFolder } = await server.ssrLoadModule(

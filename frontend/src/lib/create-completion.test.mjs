@@ -1,19 +1,10 @@
 import assert from "node:assert/strict";
-import path from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
 
-import { createServer } from "vite";
-
-const frontendRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+import { createTestServer } from "../../tests/runtime.mjs";
 
 test("created archive opening falls back to reveal only when opening fails", async () => {
-  const server = await createServer({
-    appType: "custom",
-    logLevel: "silent",
-    root: frontendRoot,
-    server: { hmr: false, middlewareMode: true },
-  });
+  const server = await createTestServer();
 
   try {
     const { openCreatedOutputWithFallback } = await server.ssrLoadModule(
@@ -64,12 +55,7 @@ test("created archive opening falls back to reveal only when opening fails", asy
 });
 
 test("created archive results retain integrity-test evidence", async () => {
-  const server = await createServer({
-    appType: "custom",
-    logLevel: "silent",
-    root: frontendRoot,
-    server: { hmr: false, middlewareMode: true },
-  });
+  const server = await createTestServer();
 
   try {
     const { readCreateResult } = await server.ssrLoadModule("/src/lib/create-result.ts");

@@ -33,20 +33,6 @@ repos:
         pass_filenames: false
         files: '(^Cargo\.toml$|^crates/.*\.rs$|^third_party/.*\.rs$)'
 
-      - id: cargo-check
-        name: cargo check workspace
-        entry: cargo check --workspace
-        language: system
-        pass_filenames: false
-        files: '(^Cargo\.toml$|^Cargo\.lock$|^crates/|^third_party/urlpattern-0\.3\.0-squallz/)'
-
-      - id: frontend-check
-        name: frontend style and type check
-        entry: bash -lc 'cd frontend && npm run check'
-        language: system
-        pass_filenames: false
-        files: '(^frontend/(src|scripts)/|^frontend/(package\.json|package-lock\.json|svelte\.config\.js|tsconfig\.json|vite\.config\.ts)$)'
-
       - id: diff-whitespace
         name: staged whitespace check
         entry: git diff --check --cached

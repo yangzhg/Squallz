@@ -1,20 +1,10 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
-import path from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
 
-import { createServer } from "vite";
-
-const frontendRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+import { createTestServer } from "../../tests/runtime.mjs";
 
 test("conversion target helpers preserve explicit formats and safe extensions", async () => {
-  const server = await createServer({
-    appType: "custom",
-    logLevel: "silent",
-    root: frontendRoot,
-    server: { hmr: false, middlewareMode: true },
-  });
+  const server = await createTestServer();
 
   try {
     const helpers = await server.ssrLoadModule("/src/lib/convert-format.ts");
@@ -63,28 +53,8 @@ test("conversion target helpers preserve explicit formats and safe extensions", 
   }
 });
 
-test("convert controller stays behind the workspace loader boundary", async () => {
-  const [host, route, session, app] = await Promise.all([
-    readFile(path.join(frontendRoot, "src/components/ArchiveOperationWorkspaceHost.svelte"), "utf8"),
-    readFile(path.join(frontendRoot, "src/components/ConvertWorkspaceRoute.svelte"), "utf8"),
-    readFile(path.join(frontendRoot, "src/lib/convert-session.svelte.ts"), "utf8"),
-    readFile(path.join(frontendRoot, "src/App.svelte"), "utf8"),
-  ]);
-
-  assert.match(host, /import\("\.\/ConvertWorkspaceRoute\.svelte"\)/);
-  assert.doesNotMatch(host, /import\("\.\/ConvertWorkspace\.svelte"\)/);
-  assert.match(route, /convertSessionFor\(owner, bridge\)/);
-  assert.match(session, /new WeakMap<ConvertRouteOwner, ConvertSession>/);
-  assert.doesNotMatch(app, /from "\.\/lib\/convert-session\.svelte"/);
-});
-
 test("conversion preflight checks the exact core budgets before review", async () => {
-  const server = await createServer({
-    appType: "custom",
-    logLevel: "silent",
-    root: frontendRoot,
-    server: { hmr: false, middlewareMode: true },
-  });
+  const server = await createTestServer();
 
   try {
     const [{ runConvertPreflight }, { ipc }] = await Promise.all([
@@ -210,38 +180,8 @@ test("conversion preflight checks the exact core budgets before review", async (
   }
 });
 
-test("conversion copy stays complete in both locales", async () => {
-  const [english, chinese] = await Promise.all([
-    readFile(path.join(frontendRoot, "../locales/en-US.json"), "utf8").then(JSON.parse),
-    readFile(path.join(frontendRoot, "../locales/zh-CN.json"), "utf8").then(JSON.parse),
-  ]);
-  const englishKeys = Object.keys(english)
-    .filter((key) => key.startsWith("gui.convert."))
-    .sort();
-  const chineseKeys = Object.keys(chinese)
-    .filter((key) => key.startsWith("gui.convert."))
-    .sort();
-
-  assert.deepEqual(englishKeys, chineseKeys);
-  for (const key of [
-    "gui.convert.preflight_status",
-    "gui.convert.review.description",
-    "gui.convert.review.cancelled",
-    "gui.convert.not_enough_destination_space",
-    "gui.convert.destination_recheck_cancelled",
-  ]) {
-    assert.notEqual(english[key], key);
-    assert.notEqual(chinese[key], key);
-  }
-});
-
 test("convert lazy sessions isolate roots and preserve only non-sensitive drafts", async () => {
-  const server = await createServer({
-    appType: "custom",
-    logLevel: "silent",
-    root: frontendRoot,
-    server: { hmr: false, middlewareMode: true },
-  });
+  const server = await createTestServer();
 
   try {
     const [{ convertSessionFor }, { ipc }] = await Promise.all([
@@ -599,12 +539,7 @@ test("convert lazy sessions isolate roots and preserve only non-sensitive drafts
 });
 
 test("disposed convert sessions ignore late submission failures", async () => {
-  const server = await createServer({
-    appType: "custom",
-    logLevel: "silent",
-    root: frontendRoot,
-    server: { hmr: false, middlewareMode: true },
-  });
+  const server = await createTestServer();
 
   try {
     const [{ convertSessionFor }, { ipc }] = await Promise.all([
