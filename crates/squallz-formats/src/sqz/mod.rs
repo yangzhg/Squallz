@@ -6,8 +6,8 @@
 //! small payload damage can be repaired before entries are exposed.
 
 use squallz_format_api::{
-    ArchiveFormat, ArchiveReader, ArchiveWriter, CreateOptions, FormatCapabilities, FormatError,
-    OpenOptions, ReadSeek, WriteSeek,
+    ArchiveFormat, ArchiveReader, ArchiveWriter, CreateOptions, FormatCapabilities,
+    FormatCreateBudget, FormatError, OpenOptions, ReadSeek, WriteSeek,
 };
 
 mod reader;
@@ -44,15 +44,6 @@ impl SqzFormat {
         if opts.password.is_some() || opts.encrypt_filenames {
             return Err(FormatError::Unsupported(
                 "format sqz does not support encryption in v1 S1".into(),
-            ));
-        }
-        if !matches!(
-            opts.sqz.inner_format.as_str(),
-            "sqz" | "zip" | "tar" | "7z" | "zstd"
-        ) {
-            return Err(FormatError::Unsupported(
-                "SQZ v1 currently supports only inner-format sqz (entry-set), zip, tar, 7z, and zstd"
-                    .into(),
             ));
         }
         Ok(())
@@ -99,6 +90,16 @@ impl ArchiveFormat for SqzFormat {
     ) -> Result<Box<dyn ArchiveWriter>, FormatError> {
         self.check_create_opts(opts)?;
         writer::create(dst, opts)
+    }
+
+    fn create_budget(
+        &self,
+        content_bytes: u64,
+        archive_bytes: u64,
+        opts: &CreateOptions,
+    ) -> Result<FormatCreateBudget, FormatError> {
+        self.check_create_opts(opts)?;
+        writer::create_budget(content_bytes, archive_bytes, opts)
     }
 }
 

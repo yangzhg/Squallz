@@ -69,7 +69,7 @@ pub(super) fn map_7z_error(e: sevenz_rust2::Error) -> FormatError {
     match e {
         E::PasswordRequired => FormatError::PasswordRequired,
         E::MaybeBadPassword(_) => FormatError::WrongPassword,
-        E::Io(e, _) | E::FileOpen(e, _) => FormatError::Io(e),
+        E::Io(e, _) | E::FileOpen(e, _) => FormatError::from(e),
         E::UnsupportedCompressionMethod(m) => {
             FormatError::Unsupported(format!("7z compression method: {m}"))
         }
@@ -166,6 +166,12 @@ mod tests {
             FormatError::Io(error) => assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof),
             other => panic!("expected io error, got {other:?}"),
         }
+
+        let storage_full = sevenz_rust2::Error::Io(
+            io::Error::new(io::ErrorKind::StorageFull, "no space left"),
+            Cow::Borrowed("archive output"),
+        );
+        assert!(matches!(map_7z_error(storage_full), FormatError::DiskFull));
 
         match map_7z_error(sevenz_rust2::Error::UnsupportedCompressionMethod(
             "BCJ2".to_string(),

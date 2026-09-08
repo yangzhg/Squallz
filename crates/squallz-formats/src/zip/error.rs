@@ -10,7 +10,7 @@ use zip::result::ZipError;
 /// (`InvalidPassword`).
 pub(super) fn map_zip_error(e: ZipError) -> FormatError {
     match e {
-        ZipError::Io(io) => FormatError::Io(io),
+        ZipError::Io(io) => FormatError::from(io),
         ZipError::InvalidArchive(msg) => FormatError::CorruptArchive(msg.into_owned()),
         ZipError::UnsupportedArchive(msg) if msg == ZipError::PASSWORD_REQUIRED => {
             FormatError::PasswordRequired
@@ -48,6 +48,14 @@ mod tests {
             FormatError::Io(err) => assert_eq!(err.kind(), io::ErrorKind::PermissionDenied),
             other => panic!("expected Io, got {other:?}"),
         }
+
+        assert!(matches!(
+            map_zip_error(ZipError::Io(io::Error::new(
+                io::ErrorKind::StorageFull,
+                "no space left"
+            ))),
+            FormatError::DiskFull
+        ));
     }
 
     #[test]

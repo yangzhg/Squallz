@@ -1,6 +1,6 @@
-//! 7Z write side: LZMA2 compression, optional AES-256 content encryption
-//! and header (file name) encryption. Symlinks/hardlinks are not stored yet
-//! (planned with the I4 update work).
+//! 7Z write side: LZMA2 compression, optional AES-256 content encryption,
+//! and header (file name) encryption. Symlinks and hardlinks are rejected
+//! because this writer does not encode link metadata.
 
 use std::io::Read;
 

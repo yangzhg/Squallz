@@ -102,7 +102,7 @@ if [[ "${#blockers[@]}" -eq 0 ]]; then
   if [[ "$code" == "0" && "$UI_SCRIPTING" == "true" ]]; then
     pass "accessibility-ui-scripting" "System Events UI scripting is enabled"
   elif [[ "$code" == "0" && "$UI_SCRIPTING" == "false" ]]; then
-    block "accessibility-ui-scripting" "System Events reports UI elements enabled=false; enable Accessibility for the terminal/Codex host before real Finder menu click smoke"
+    block "accessibility-ui-scripting" "System Events reports UI elements enabled=false; enable Accessibility for the terminal host application before the Finder menu click check"
   else
     block "accessibility-ui-scripting" "cannot query System Events UI scripting: $(result_text ui-scripting)"
   fi

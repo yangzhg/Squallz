@@ -9,18 +9,20 @@ use std::collections::VecDeque;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use squallz_core::api::FormatError;
 
 use crate::dto::JobSpec;
+use squallz_core::lock_unpoisoned;
 
 const DEFAULT_MAX_RECORDS: usize = 500;
 const DEFAULT_EXPORT_FILE_NAME: &str = "operation-audit.json";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OperationAuditRecord {
     pub id: u64,
     pub time: u64,
@@ -45,13 +47,6 @@ pub struct OperationAudit {
     path: Option<PathBuf>,
     max_records: usize,
     records: Mutex<VecDeque<OperationAuditRecord>>,
-}
-
-fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    match mutex.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    }
 }
 
 fn existing_records(path: Option<&Path>, max_records: usize) -> VecDeque<OperationAuditRecord> {
@@ -218,15 +213,38 @@ pub fn now_millis() -> u64 {
 
 pub fn summarize_job(spec: &JobSpec) -> OperationAuditSummary {
     match spec {
-        JobSpec::Compress { inputs, dest, .. } => OperationAuditSummary {
-            kind: "compress".into(),
-            title: "Create archive".into(),
-            detail: format!(
-                "{} input{} -> {}",
-                inputs.len(),
-                plural(inputs.len()),
-                base(dest)
-            ),
+        JobSpec::Compress {
+            inputs,
+            dest,
+            sfx_target,
+            ..
+        } => {
+            let sfx = sfx_target.map(|target| target.as_str());
+            OperationAuditSummary {
+                kind: if sfx.is_some() {
+                    "create_sfx"
+                } else {
+                    "compress"
+                }
+                .into(),
+                title: if sfx.is_some() {
+                    "Create self-extractor".into()
+                } else {
+                    "Create archive".into()
+                },
+                detail: format!(
+                    "{} input{} -> {}{}",
+                    inputs.len(),
+                    plural(inputs.len()),
+                    base(dest),
+                    sfx.map(|target| format!(" · {target}")).unwrap_or_default()
+                ),
+            }
+        }
+        JobSpec::PublishMacosSfx { source, output, .. } => OperationAuditSummary {
+            kind: "publish_macos_sfx".into(),
+            title: "Publish macOS self-extractor".into(),
+            detail: format!("{} -> {}", base(source), base(output)),
         },
         JobSpec::Extract {
             path,
@@ -337,7 +355,7 @@ pub fn summarize_job(spec: &JobSpec) -> OperationAuditSummary {
                 "{} input{} · {}",
                 inputs.len(),
                 plural(inputs.len()),
-                algorithm
+                algorithm.id()
             ),
         },
         JobSpec::ChecksumCheck {
@@ -346,7 +364,7 @@ pub fn summarize_job(spec: &JobSpec) -> OperationAuditSummary {
         } => OperationAuditSummary {
             kind: "checksum_check".into(),
             title: "Verify checksum manifest".into(),
-            detail: format!("{} · {}", base(manifest), algorithm),
+            detail: format!("{} · {}", base(manifest), algorithm.id()),
         },
         JobSpec::DuplicateScan {
             inputs, min_size, ..
@@ -365,7 +383,40 @@ pub fn summarize_job(spec: &JobSpec) -> OperationAuditSummary {
 
 pub fn summarize_result(result: Option<&serde_json::Value>) -> Option<String> {
     let value = result?;
-    if value.get("operation").and_then(|v| v.as_str()) == Some("batch_extract") {
+    let operation = value.get("operation").and_then(|v| v.as_str());
+    if operation == Some("create") {
+        let total_bytes = json_u64_or(value, "total_bytes", 0);
+        let summary = if value.get("split").and_then(|value| value.as_bool()) == Some(true) {
+            let volume_count = json_u64_or(value, "volume_count", 1);
+            format!(
+                "created {volume_count} volume{}, {total_bytes} bytes",
+                plural_u64(volume_count)
+            )
+        } else {
+            format!("created archive, {total_bytes} bytes")
+        };
+        return Some(append_source_cleanup_summary(summary, value));
+    }
+    if operation == Some("create_sfx") {
+        let total_bytes = json_u64_or(value, "total_bytes", 0);
+        let signing = if value
+            .get("requires_signing")
+            .and_then(|v| v.as_bool())
+            .is_some_and(|required| required)
+        {
+            ", signing required"
+        } else {
+            ""
+        };
+        return Some(append_source_cleanup_summary(
+            format!("created self-extractor, {total_bytes} bytes{signing}"),
+            value,
+        ));
+    }
+    if operation == Some("sfx_publish_macos") {
+        return Some("signed, notarized, stapled, and verified".into());
+    }
+    if operation == Some("batch_extract") {
         let archives = json_u64_or(value, "archives", 0);
         let extracted = json_u64_or(value, "extracted", 0);
         let failed = json_u64_or(value, "failed", 0);
@@ -417,6 +468,28 @@ pub fn summarize_result(result: Option<&serde_json::Value>) -> Option<String> {
         return Some(if ok { "ok".into() } else { "not ok".into() });
     }
     None
+}
+
+fn append_source_cleanup_summary(mut summary: String, result: &serde_json::Value) -> String {
+    let Some(cleanup) = result.get("source_cleanup") else {
+        return summary;
+    };
+    let status = match cleanup.get("status").and_then(|value| value.as_str()) {
+        Some("completed") => "completed",
+        Some("partial") => "partial",
+        Some("blocked") => "blocked",
+        Some("cancelled") => "cancelled",
+        Some("failed") => "failed",
+        Some("not_requested") | None => return summary,
+        Some(_) => "unknown",
+    };
+    let moved = json_u64_or(cleanup, "moved", 0);
+    let kept = json_u64_or(cleanup, "kept", 0);
+    let recovery_required = json_u64_or(cleanup, "recovery_required", 0);
+    summary.push_str(&format!(
+        ", source cleanup {status}, {moved} moved, {kept} not moved, {recovery_required} recovery required"
+    ));
+    summary
 }
 
 fn load_existing_records(path: &Path, max_records: usize) -> VecDeque<OperationAuditRecord> {
@@ -568,6 +641,37 @@ mod tests {
     }
 
     #[test]
+    fn audit_load_skips_records_with_unknown_fields() {
+        let dir = temp_dir("strict-schema");
+        let path = dir.join("operation-audit.jsonl");
+        let valid = serde_json::to_string(&OperationAuditRecord {
+            id: 2,
+            time: 20,
+            kind: "test".into(),
+            state: "done".into(),
+            title: "Test archive".into(),
+            detail: "ok.zip".into(),
+            result_summary: None,
+            error_key: None,
+        })
+        .unwrap();
+        std::fs::write(
+            &path,
+            format!(
+                "{{\"id\":1,\"time\":10,\"kind\":\"test\",\"state\":\"done\",\"title\":\"Unexpected\",\"detail\":\"unexpected.zip\",\"unexpected_field\":true}}\n{valid}\n"
+            ),
+        )
+        .unwrap();
+
+        let audit = OperationAudit::with_path(path, 10);
+        let recent = audit.recent(10);
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].id, 2);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn audit_lock_recovers_after_poison() {
         let audit = std::sync::Arc::new(OperationAudit::memory());
         let poisoned_audit = std::sync::Arc::clone(&audit);
@@ -611,7 +715,16 @@ mod tests {
             password: Some("do-not-log".into()),
             encrypt_names: true,
             split_size: None,
+            split_mode: squallz_core::api::SplitOutputMode::Generic,
             excludes: vec![],
+            content_policy: squallz_core::CreateContentPolicy::KeepAllFiles,
+            sqz_inner_format: None,
+            sfx_target: None,
+            completion: squallz_core::CreateCompletionAction::None,
+            post_success: squallz_core::PostSuccessAction::KeepSource,
+            test_after_create: false,
+            replace_existing: false,
+            replacement_guard: None,
         };
         let summary = summarize_job(&spec);
         assert_eq!(summary.kind, "compress");
@@ -639,8 +752,8 @@ mod tests {
                     best_effort: true,
                 },
             ],
-            overwrite: "ask".into(),
-            symlinks: "preserve".into(),
+            overwrite: squallz_core::api::OverwritePolicy::Ask,
+            symlinks: squallz_core::api::SymlinkPolicy::Preserve,
             smart: true,
         };
         let summary = summarize_job(&spec);
@@ -662,6 +775,58 @@ mod tests {
         assert_eq!(
             summarize_result(Some(&result)).as_deref(),
             Some("1/2 archives extracted, 1 failed, 3 skipped")
+        );
+    }
+
+    #[test]
+    fn create_result_summary_uses_counts_without_persisting_output_paths() {
+        let result = serde_json::json!({
+            "operation": "create",
+            "primary_output": "/Users/example/Documents/private-backup.zip.001",
+            "outputs": [
+                "/Users/example/Documents/private-backup.zip.001",
+                "/Users/example/Documents/private-backup.zip.002"
+            ],
+            "total_bytes": 8192,
+            "volume_count": 2,
+            "split": true,
+            "source_cleanup": {
+                "status": "partial",
+                "moved": 1,
+                "kept": 1
+            },
+        });
+        let summary = summarize_result(Some(&result)).expect("create result summary");
+        assert_eq!(
+            summary,
+            "created 2 volumes, 8192 bytes, source cleanup partial, 1 moved, 1 not moved, 0 recovery required"
+        );
+        assert!(!summary.contains("private-backup"));
+        assert!(!summary.contains("/Users/example"));
+
+        let unsplit = serde_json::json!({
+            "operation": "create",
+            "primary_output": "/Users/example/Documents/private-backup.zip",
+            "outputs": ["/Users/example/Documents/private-backup.zip"],
+            "total_bytes": 4096,
+            "volume_count": 1,
+            "split": false,
+        });
+        assert_eq!(
+            summarize_result(Some(&unsplit)).as_deref(),
+            Some("created archive, 4096 bytes")
+        );
+
+        let sfx = serde_json::json!({
+            "operation": "create_sfx",
+            "primary_output": "/Users/example/Documents/private-backup.app",
+            "outputs": ["/Users/example/Documents/private-backup.app"],
+            "total_bytes": 16384,
+            "requires_signing": true,
+        });
+        assert_eq!(
+            summarize_result(Some(&sfx)).as_deref(),
+            Some("created self-extractor, 16384 bytes, signing required")
         );
     }
 }

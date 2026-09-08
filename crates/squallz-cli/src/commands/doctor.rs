@@ -299,7 +299,7 @@ fn rar_boundary_check(formats: &[FormatInfo]) -> DoctorCheck {
         status: CheckStatus::Boundary,
         scope: "RAR unpack-only".to_owned(),
         detail: format!(
-            "RAR is unpack-only through external 7zz/7z with bsdtar as a diagnostic fallback; RAR creation, RAR recovery records, encrypted/full multi-volume compatibility, and damaged RAR repair remain outside release claims ({limits} documented limitations)"
+            "RAR is unpack-only through external 7zz/7z with bsdtar as a diagnostic fallback or validated single-file compatibility fallback; RAR creation, RAR recovery records, encrypted/full multi-volume compatibility, and damaged RAR repair remain outside release claims ({limits} documented limitations)"
         ),
         strict_required: false,
         formats: if present {

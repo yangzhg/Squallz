@@ -3,13 +3,15 @@
 use std::io::{Cursor, Read};
 
 use libfuzzer_sys::fuzz_target;
-use squallz_format_api::{ControlToken, Detected, EntryType, NoProgress, OpenOptions};
+use squallz_format_api::{
+    ControlToken, Detected, EntryType, NoProgress, OpenOptions, SafetyLimits,
+};
 
 const MAX_INPUT_BYTES: usize = 2 * 1024 * 1024;
 const MAX_ENTRIES_TO_LIST: usize = 32;
 const MAX_ENTRIES_TO_READ: usize = 8;
 const MAX_ENTRY_READ_BYTES: usize = 64 * 1024;
-const MAX_TEST_DECLARED_BYTES: u64 = 256 * 1024;
+const MAX_TEST_OUTPUT_BYTES: u64 = 256 * 1024;
 
 fuzz_target!(|data: &[u8]| {
     fuzz_zip_reader(data);
@@ -45,16 +47,14 @@ fn fuzz_zip_reader(data: &[u8]) {
         .filter_map(Result::ok)
         .collect::<Vec<_>>();
 
-    let declared_file_bytes = entries
-        .iter()
-        .filter(|entry| matches!(entry.entry_type, EntryType::File))
-        .map(|entry| entry.size)
-        .fold(0u64, u64::saturating_add);
-    if declared_file_bytes <= MAX_TEST_DECLARED_BYTES {
-        let progress = NoProgress;
-        let control = ControlToken::default();
-        let _ = reader.test(&progress, &control);
-    }
+    let progress = NoProgress;
+    let control = ControlToken::default();
+    let limits = SafetyLimits {
+        max_output_bytes: MAX_TEST_OUTPUT_BYTES,
+        max_entries: MAX_ENTRIES_TO_LIST as u64,
+        ..SafetyLimits::default()
+    };
+    let _ = reader.test_summary_with_limits(&limits, &progress, &control);
 
     let mut read_buf = [0u8; 4096];
     for entry in entries

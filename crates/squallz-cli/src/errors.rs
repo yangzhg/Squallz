@@ -2,15 +2,17 @@
 //! mapping and exit codes (documented in docs/exit-codes.md).
 
 use squallz_core::api::FormatError;
+use squallz_update::{UpdateError, UpdateErrorKind};
 
 pub use squallz_i18n::localize_error;
 
-/// A command failure: either a structured engine error (localized at the
-/// edge in `main`) or an exit code whose message has already been printed by
-/// the command itself (e.g. a failed integrity test report).
+/// A command failure localized at the process boundary, or an exit code for
+/// a report that the command already printed.
 pub enum CliError {
     /// Engine error, localized and printed by `main`.
     Format(FormatError),
+    /// Stable-channel update discovery error, localized at the CLI boundary.
+    Update(UpdateError),
     /// Message already emitted; only the exit code remains.
     Exit(i32),
 }
@@ -19,6 +21,41 @@ impl From<FormatError> for CliError {
     fn from(e: FormatError) -> Self {
         Self::Format(e)
     }
+}
+
+impl From<UpdateError> for CliError {
+    fn from(e: UpdateError) -> Self {
+        Self::Update(e)
+    }
+}
+
+pub fn update_exit_code(e: &UpdateError) -> i32 {
+    update_exit_code_for_kind(e.kind())
+}
+
+fn update_exit_code_for_kind(kind: UpdateErrorKind) -> i32 {
+    match kind {
+        UpdateErrorKind::Network | UpdateErrorKind::RateLimited | UpdateErrorKind::Unavailable => 7,
+        UpdateErrorKind::InvalidResponse | UpdateErrorKind::NoRelease => 1,
+    }
+}
+
+pub fn update_error_kind(e: &UpdateError) -> &'static str {
+    update_error_kind_for_kind(e.kind())
+}
+
+fn update_error_kind_for_kind(kind: UpdateErrorKind) -> &'static str {
+    match kind {
+        UpdateErrorKind::Network => "update_network",
+        UpdateErrorKind::RateLimited => "update_rate_limited",
+        UpdateErrorKind::InvalidResponse => "update_invalid_response",
+        UpdateErrorKind::NoRelease => "update_no_release",
+        UpdateErrorKind::Unavailable => "update_unavailable",
+    }
+}
+
+pub fn localize_update_error(loc: &squallz_i18n::Localizer, e: &UpdateError) -> String {
+    loc.t(e.i18n_key())
 }
 
 /// FormatError → exit-code mapping (see docs/exit-codes.md).
@@ -49,6 +86,8 @@ pub fn error_kind(e: &FormatError) -> &'static str {
         FormatError::SymlinkBreakout(_) => "symlink_breakout",
         FormatError::ResourceLimitExceeded(_) => "resource_limit_exceeded",
         FormatError::UnsafeFileName(_) => "unsafe_file_name",
+        FormatError::Io(_) if e.is_destination_changed() => "destination_changed",
+        FormatError::Io(_) if e.is_output_exists() => "output_exists",
         FormatError::Io(_) => "io",
         FormatError::DiskFull => "disk_full",
         FormatError::DependencyMissing(_) => "dependency_missing",
@@ -106,6 +145,24 @@ mod tests {
                 "io",
                 7,
             ),
+            (
+                FormatError::output_exists("archive.repaired.zip"),
+                "output_exists",
+                7,
+            ),
+            (
+                FormatError::destination_changed("archive.zip"),
+                "destination_changed",
+                7,
+            ),
+            (
+                FormatError::Io(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    "temporary allocation collision",
+                )),
+                "io",
+                7,
+            ),
             (FormatError::DiskFull, "disk_full", 7),
             (
                 FormatError::DependencyMissing("7zz".to_string()),
@@ -136,6 +193,33 @@ mod tests {
         match err {
             CliError::Format(FormatError::DependencyMissing(tool)) => assert_eq!(tool, "par2"),
             _ => panic!("expected dependency-missing format error"),
+        }
+    }
+
+    #[test]
+    fn missing_volume_keeps_the_corrupt_archive_cli_contract() {
+        let error = FormatError::missing_volume("archive.7z.004");
+
+        assert_eq!(exit_code(&error), 3);
+        assert_eq!(error_kind(&error), "corrupt_archive");
+    }
+
+    #[test]
+    fn update_error_exit_codes_distinguish_transport_from_metadata() {
+        let cases = [
+            (UpdateErrorKind::Network, "update_network", 7),
+            (UpdateErrorKind::RateLimited, "update_rate_limited", 7),
+            (
+                UpdateErrorKind::InvalidResponse,
+                "update_invalid_response",
+                1,
+            ),
+            (UpdateErrorKind::NoRelease, "update_no_release", 1),
+            (UpdateErrorKind::Unavailable, "update_unavailable", 7),
+        ];
+        for (kind, expected_kind, expected_code) in cases {
+            assert_eq!(update_error_kind_for_kind(kind), expected_kind);
+            assert_eq!(update_exit_code_for_kind(kind), expected_code);
         }
     }
 }

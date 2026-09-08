@@ -1,5 +1,6 @@
-//! Format registry and detection (extension first, then magic numbers),
-//! including compound-format recognition (`.tar.gz` and friends).
+//! Format registry and detection (verified name hint, then magic numbers and
+//! extension fallback), including compound-format recognition (`.tar.gz` and
+//! friends).
 
 use std::sync::Arc;
 
@@ -69,6 +70,26 @@ pub fn split_volume_name(filename: &str) -> Option<(&str, u32)> {
     Some((base, index))
 }
 
+/// Splits a native ZIP data-volume name into its base name and one-based disk
+/// number (`"x.z01"` → `("x", 1)`). The final disk uses `.zip` and is
+/// validated by the ZIP format implementation before any sibling is trusted.
+pub fn split_zip_volume_name(filename: &str) -> Option<(&str, u64)> {
+    let (base, suffix) = filename.rsplit_once('.')?;
+    let bytes = suffix.as_bytes();
+    if base.is_empty()
+        || bytes.len() < 3
+        || !bytes[0].eq_ignore_ascii_case(&b'z')
+        || !bytes[1..].iter().all(u8::is_ascii_digit)
+    {
+        return None;
+    }
+    let number = suffix[1..].parse().ok()?;
+    if number == 0 {
+        return None;
+    }
+    Some((base, number))
+}
+
 impl FormatRegistry {
     /// Empty registry.
     pub fn new() -> Self {
@@ -103,10 +124,13 @@ impl FormatRegistry {
 
     /// Detects by file name (extension), correctly handling double
     /// extensions such as `.tar.gz`, registered aliases (`.tgz`) and
-    /// split-volume suffixes (`x.zip.001` detects as `x.zip`).
+    /// generic or native ZIP split-volume suffixes (`x.zip.001` and `x.z01`
+    /// both detect as ZIP candidates).
     pub fn detect_by_name(&self, filename: &str) -> Option<Detected> {
+        let split_zip_name = split_zip_volume_name(filename).map(|(base, _)| format!("{base}.zip"));
         let stripped = split_volume_name(filename).map_or(filename, |(base, _)| base);
-        let lower = self.canonical_name(&stripped.to_lowercase());
+        let detected_name = split_zip_name.as_deref().unwrap_or(stripped);
+        let lower = self.canonical_name(&detected_name.to_lowercase());
         // Archive extensions take priority (.zip/.7z/.tar never double as
         // compressor extensions).
         for f in &self.archives {
@@ -140,33 +164,41 @@ impl FormatRegistry {
         None
     }
 
-    /// Combined detection: extension first, then archive magic numbers,
-    /// then compressor magic numbers (extensionless `.gz`-like streams are
-    /// detected as a plain compressed file — the inner content, if any, is
-    /// discovered when the virtual single entry is opened).
+    /// Combined detection: a name hint is accepted first only when its
+    /// selected format also recognizes the bytes. This preserves compound
+    /// streams such as `.tar.gz` without trusting a misleading suffix. Other
+    /// magic matches follow, then the name remains the fallback for formats
+    /// whose signatures are not available in the sniff window.
     pub fn detect(&self, name_hint: Option<&str>, head: &[u8], tail: &[u8]) -> Option<Detected> {
-        if let Some(name) = name_hint {
-            if let Some(d) = self.detect_by_name(name) {
-                return Some(d);
-            }
+        let named = name_hint.and_then(|name| self.detect_by_name(name));
+        let named_matches = named.as_ref().is_some_and(|detected| match detected {
+            Detected::Archive(format) => format.sniff(head, tail),
+            Detected::Compressed { compressor, .. } => compressor.sniff(head),
+        });
+        if named_matches {
+            return named;
         }
         if let Some(f) = self.archives.iter().find(|f| f.sniff(head, tail)) {
             return Some(Detected::Archive(Arc::clone(f)));
         }
-        self.compressors
-            .iter()
-            .find(|c| c.sniff(head))
-            .map(|c| Detected::Compressed {
-                compressor: Arc::clone(c),
+        if let Some(compressor) = self.compressors.iter().find(|c| c.sniff(head)) {
+            return Some(Detected::Compressed {
+                compressor: Arc::clone(compressor),
                 inner_archive: None,
-            })
+            });
+        }
+        named
     }
 
     /// Strips the recognized format suffix from a file name: split-volume
     /// suffix first, then alias/compound/archive/compressor extensions
-    /// (`x.zip.001` → `x`, `backup.tar.gz` → `backup`, `notes.tgz` →
-    /// `notes`). Used to derive a folder name for smart extraction.
+    /// (`x.zip.001` → `x`, `x.z01` → `x`, `backup.tar.gz` → `backup`,
+    /// `notes.tgz` → `notes`). Used to derive a folder name for smart
+    /// extraction.
     pub fn display_stem(&self, filename: &str) -> String {
+        if let Some((base, _)) = split_zip_volume_name(filename) {
+            return base.to_owned();
+        }
         let name = split_volume_name(filename).map_or(filename, |(base, _)| base);
         let lower = name.to_lowercase();
         // Aliases collapse a whole compound suffix at once (`.tgz`).
@@ -259,5 +291,22 @@ mod tests {
         assert_eq!(split_volume_name("archive.zip.00a"), None);
         assert_eq!(split_volume_name("archive.zip.01"), None);
         assert_eq!(split_volume_name(".001"), None);
+    }
+
+    #[test]
+    fn split_zip_volume_name_accepts_native_data_volumes() {
+        assert_eq!(split_zip_volume_name("archive.z01"), Some(("archive", 1)));
+        assert_eq!(
+            split_zip_volume_name("archive.tar.Z100"),
+            Some(("archive.tar", 100))
+        );
+    }
+
+    #[test]
+    fn split_zip_volume_name_rejects_non_native_names() {
+        assert_eq!(split_zip_volume_name("archive.z00"), None);
+        assert_eq!(split_zip_volume_name("archive.z1"), None);
+        assert_eq!(split_zip_volume_name("archive.za1"), None);
+        assert_eq!(split_zip_volume_name(".z01"), None);
     }
 }

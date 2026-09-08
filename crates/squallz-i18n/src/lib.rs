@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 //! squallz-i18n: language-pack lookup shared by the CLI and the GUI
-//! (PLAN.md §5.5: a language is a configuration file).
+//! A language pack is treated as configuration rather than compiled UI code.
 //!
 //! - Built-in packs (`locales/<BCP47>.json` at the repository root) are
 //!   embedded at compile time; the GUI ships the same files as resources.
@@ -48,10 +48,7 @@ impl Localizer {
     /// User packs are loaded from `SQZ_LOCALES_DIR` or the platform default
     /// locale directory.
     pub fn load(explicit: Option<&str>) -> Self {
-        let requested = explicit
-            .map(str::to_owned)
-            .or_else(|| std::env::var(LANG_ENV).ok().filter(|s| !s.is_empty()))
-            .or_else(sys_locale::get_locale);
+        let requested = requested_language(explicit);
         Self::with_user_dir(requested.as_deref(), user_locales_dir().as_deref())
     }
 
@@ -134,6 +131,16 @@ impl Localizer {
         }
         out
     }
+}
+
+/// Resolves the requested language before language-pack negotiation. CLI help
+/// uses the same selection chain as runtime output so early `--help` handling
+/// cannot disagree with the command it documents.
+pub fn requested_language(explicit: Option<&str>) -> Option<String> {
+    explicit
+        .map(str::to_owned)
+        .or_else(|| std::env::var(LANG_ENV).ok().filter(|s| !s.is_empty()))
+        .or_else(sys_locale::get_locale)
 }
 
 /// Parses the embedded packs. The built-ins are validated by unit tests, so
@@ -292,6 +299,26 @@ mod tests {
     }
 
     #[test]
+    fn builtin_locale_sources_do_not_repeat_keys() {
+        for (tag, source) in BUILTIN {
+            let mut keys = std::collections::HashSet::new();
+            for (index, line) in source.lines().enumerate() {
+                let trimmed = line.trim_start();
+                let Some(key_end) = trimmed.strip_prefix('"').and_then(|rest| rest.find("\":"))
+                else {
+                    continue;
+                };
+                let key = &trimmed[1..=key_end];
+                assert!(
+                    keys.insert(key),
+                    "{tag} repeats locale key {key:?} on line {}",
+                    index + 1
+                );
+            }
+        }
+    }
+
+    #[test]
     fn builtin_manifest_tracks_locale_files() {
         let locales_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../locales");
         let mut file_tags = Vec::new();
@@ -337,6 +364,11 @@ mod tests {
             "en-US"
         );
         assert_eq!(Localizer::with_user_dir(None, None).language(), "en-US");
+    }
+
+    #[test]
+    fn explicit_requested_language_has_priority() {
+        assert_eq!(requested_language(Some("zh-CN")), Some("zh-CN".to_owned()));
     }
 
     #[test]

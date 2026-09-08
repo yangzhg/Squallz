@@ -1,6 +1,6 @@
-//! SymlinkPolicy::Follow and hardlink extraction tests (the I4 closure of
-//! the I1 leftovers): followed links materialize the target's content,
-//! cycles/escaping targets are skipped, hardlinks restore as hard links.
+//! SymlinkPolicy::Follow and hardlink extraction tests: followed links
+//! materialize the target's content, cycles or escaping targets are skipped,
+//! and hardlinks restore as hard links.
 
 #![cfg(unix)]
 

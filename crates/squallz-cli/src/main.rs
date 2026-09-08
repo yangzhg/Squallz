@@ -7,7 +7,9 @@
 
 mod args;
 mod commands;
+mod content_policy;
 mod errors;
+mod file_manager_presets;
 mod progress;
 mod prompt;
 mod ui;
@@ -18,14 +20,21 @@ use std::sync::Arc;
 
 use clap::Parser;
 use squallz_core::api::ControlToken;
-use squallz_core::Engine;
+use squallz_core::{Engine, SFX_CLI_STUB_MARKER};
 use squallz_i18n::Localizer;
 
 use crate::args::Cli;
 use crate::commands::Ctx;
-use crate::errors::{error_kind, exit_code, localize_error, CliError};
+use crate::errors::{
+    error_kind, exit_code, localize_error, localize_update_error, update_error_kind,
+    update_exit_code, CliError,
+};
+
+#[used]
+static SFX_STUB_IDENTITY: [u8; 24] = SFX_CLI_STUB_MARKER;
 
 fn main() {
+    std::hint::black_box(&SFX_STUB_IDENTITY);
     install_broken_pipe_panic_hook();
     match panic::catch_unwind(run_cli) {
         Ok(()) => {}
@@ -35,6 +44,14 @@ fn main() {
 }
 
 fn run_cli() {
+    if let Ok(path) = std::env::current_exe() {
+        let args = std::env::args_os().skip(1).collect::<Vec<_>>();
+        match squallz_sfx_runtime::probe(&path) {
+            Ok(false) => {}
+            Ok(true) | Err(_) => std::process::exit(squallz_sfx_runtime::run(&path, &args)),
+        }
+    }
+
     if let Some(code) = args::try_print_localized_help(std::env::args_os()) {
         std::process::exit(code);
     }
@@ -44,36 +61,80 @@ fn run_cli() {
     let output_style = cli.output_style;
     let color = cli.color;
     let accent = cli.accent;
-    let loc = Arc::new(Localizer::load(cli.lang.as_deref()));
-    let ctl = ControlToken::new();
-
-    // Ctrl-C cancels gracefully: workers notice at the next chunk boundary
-    // and unwind with FormatError::Cancelled (exit code 5). Failing to
-    // install the handler must not break the CLI itself.
-    let handler_ctl = Arc::clone(&ctl);
-    let _ = ctrlc::set_handler(move || handler_ctl.cancel());
-
-    let ctx = Ctx {
-        engine: Engine::new(squallz_formats::registry()),
-        loc: Arc::clone(&loc),
-        ctl,
-        quiet: cli.quiet,
-        verbose: cli.verbose,
+    let (ctx, loc) = command_context(
+        cli.lang.as_deref(),
+        cli.quiet,
+        cli.verbose,
         output_style,
         color,
         accent,
-    };
-    match commands::dispatch(cli.cmd, &ctx) {
+    );
+    finish_command(
+        commands::dispatch(cli.cmd, &ctx),
+        &ctx,
+        &loc,
+        json_errors,
+        output_style,
+    );
+}
+
+fn command_context(
+    lang: Option<&str>,
+    quiet: bool,
+    verbose: bool,
+    output_style: args::OutputStyleArg,
+    color: args::ColorArg,
+    accent: args::AccentArg,
+) -> (Ctx, Arc<Localizer>) {
+    let loc = Arc::new(Localizer::load(lang));
+    let ctl = ControlToken::new();
+    let handler_ctl = Arc::clone(&ctl);
+    let _ = ctrlc::set_handler(move || handler_ctl.cancel());
+    (
+        Ctx {
+            engine: Engine::new(squallz_formats::registry()),
+            loc: Arc::clone(&loc),
+            ctl,
+            quiet,
+            verbose,
+            output_style,
+            color,
+            accent,
+        },
+        loc,
+    )
+}
+
+fn finish_command(
+    result: Result<(), CliError>,
+    ctx: &Ctx,
+    loc: &Localizer,
+    json_errors: bool,
+    output_style: args::OutputStyleArg,
+) {
+    match result {
         Ok(()) => {}
         Err(CliError::Format(e)) => {
-            let message = localize_error(&loc, &e);
+            let message = localize_error(loc, &e);
             let code = exit_code(&e);
             if json_errors {
                 if print_json_error(error_kind(&e), &message, code).is_err() {
-                    print_human_error(&ctx, output_style, &loc, &message);
+                    print_human_error(ctx, output_style, loc, &message);
                 }
             } else {
-                print_human_error(&ctx, output_style, &loc, &message);
+                print_human_error(ctx, output_style, loc, &message);
+            }
+            std::process::exit(code);
+        }
+        Err(CliError::Update(e)) => {
+            let message = localize_update_error(loc, &e);
+            let code = update_exit_code(&e);
+            if json_errors {
+                if print_json_error(update_error_kind(&e), &message, code).is_err() {
+                    print_human_error(ctx, output_style, loc, &message);
+                }
+            } else {
+                print_human_error(ctx, output_style, loc, &message);
             }
             std::process::exit(code);
         }

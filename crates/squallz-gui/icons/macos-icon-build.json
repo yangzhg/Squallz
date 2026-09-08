@@ -1,0 +1,8 @@
+{
+  "schema": 1,
+  "source_sha256": "c8386f791bf3a6fc54d98638f44ec7ed72324c7d40417fec5b327de3594eec24",
+  "assets_car_sha256": "0dc5559844a5e1848d9c7ad58913943f08c8395ca653cb1013026c0fade6c937",
+  "xcode_version": "26.6",
+  "xcode_build": "17F113",
+  "minimum_macos": "11.0"
+}

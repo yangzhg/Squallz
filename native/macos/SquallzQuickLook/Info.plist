@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleAllowMixedLocalizations</key>
+  <true/>
+  <key>CFBundleDevelopmentRegion</key>
+  <string>en</string>
+  <key>CFBundleDisplayName</key>
+  <string>Squallz Archive Preview</string>
+  <key>CFBundleExecutable</key>
+  <string>SquallzQuickLook</string>
+  <key>CFBundleIdentifier</key>
+  <string>dev.squallz.desktop.quicklook</string>
+  <key>CFBundleInfoDictionaryVersion</key>
+  <string>6.0</string>
+  <key>CFBundleLocalizations</key>
+  <array>
+    <string>en</string>
+    <string>zh-Hans</string>
+  </array>
+  <key>CFBundleName</key>
+  <string>SquallzQuickLook</string>
+  <key>CFBundlePackageType</key>
+  <string>XPC!</string>
+  <key>CFBundleShortVersionString</key>
+  <string>0.0.0</string>
+  <key>CFBundleSupportedPlatforms</key>
+  <array>
+    <string>MacOSX</string>
+  </array>
+  <key>CFBundleVersion</key>
+  <string>0.0.0</string>
+  <key>LSMinimumSystemVersion</key>
+  <string>12.0</string>
+  <key>NSHumanReadableCopyright</key>
+  <string>Copyright © 2026 Squallz contributors.</string>
+  <key>NSExtension</key>
+  <dict>
+    <key>NSExtensionAttributes</key>
+    <dict>
+      <key>QLIsDataBasedPreview</key>
+      <true/>
+      <key>QLSupportsSearchableItems</key>
+      <false/>
+      <key>QLSupportedContentTypes</key>
+      <array>
+        <string>public.zip-archive</string>
+        <string>com.sun.java-archive</string>
+        <string>dev.squallz.archive.apk</string>
+        <string>dev.squallz.archive.cbz</string>
+        <string>com.apple.itunes.ipa</string>
+        <string>org.7-zip.7-zip-archive</string>
+        <string>public.tar-archive</string>
+        <string>org.gnu.gnu-zip-tar-archive</string>
+        <string>public.tar-bzip2-archive</string>
+        <string>org.tukaani.tar-xz-archive</string>
+        <string>dev.squallz.archive.tar-zstd</string>
+        <string>dev.squallz.sqz-archive</string>
+        <string>org.gnu.gnu-zip-archive</string>
+        <string>public.bzip2-archive</string>
+        <string>org.tukaani.xz-archive</string>
+        <string>dev.squallz.stream.zstd</string>
+        <string>dev.squallz.stream.lz4</string>
+        <string>dev.squallz.stream.brotli</string>
+      </array>
+    </dict>
+    <key>NSExtensionPointIdentifier</key>
+    <string>com.apple.quicklook.preview</string>
+    <key>NSExtensionPrincipalClass</key>
+    <string>SquallzQuickLook.PreviewProvider</string>
+  </dict>
+</dict>
+</plist>

@@ -1,14 +1,14 @@
 {
   "name": "squallz-frontend",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "license": "MIT OR Apache-2.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "test": "node --test scripts/*.test.mjs src/lib/*.test.mjs",
     "build": "vite build",
-    "check": "npm run check:style && svelte-check --tsconfig ./tsconfig.json",
-    "check:style": "node scripts/audit-style-contract.mjs",
+    "check": "svelte-check --tsconfig ./tsconfig.json",
     "tauri": "node scripts/tauri-cli.mjs",
     "tauri:dev": "node scripts/tauri-cli.mjs dev"
   },

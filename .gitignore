@@ -3,6 +3,7 @@ node_modules/
 dist/
 benches/
 AGENTS.md
-ITERATION_LOG.md
+PLAN.md
+PROGRESS.md
 .DS_Store
 .cargo-ok

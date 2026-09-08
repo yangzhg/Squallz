@@ -33,6 +33,7 @@ export type TaskWindowShellStatus =
   | "starting"
   | "started"
   | "no-selection"
+  | "preset-error"
   | "requires-desktop-service"
   | "busy";
 
@@ -120,7 +121,7 @@ export function taskWindowWaitingMessage(
   translate: TaskWindowTranslate,
 ): string {
   if (!action) {
-    return translate("gui.external_task.waiting_body", "The selected action will open here.");
+    return translate("gui.external_task.waiting_body", "Tasks started from Finder or a file manager will appear here.");
   }
   return translate("gui.external_task.waiting_action", "Waiting for {action} to start")
     .replace("{action}", taskWindowActionLabel(action, translate));
@@ -142,6 +143,8 @@ export function taskWindowShellTitle(
       return translate("gui.external_task.title_started", "Task started");
     case "no-selection":
       return translate("gui.external_task.title_no_selection", "No file selected");
+    case "preset-error":
+      return translate("gui.external_task.title_preset_error", "Preset needs attention");
     case "requires-desktop-service":
       return translate("gui.external_task.title_requires_desktop_service", "Desktop service unavailable");
     case "busy":
@@ -155,7 +158,7 @@ export function taskWindowShellTitle(
           translate,
         );
       }
-      return translate("gui.external_task.title_waiting", "Task window ready");
+      return translate("gui.external_task.title_waiting", "Ready for a task");
   }
 }
 
@@ -185,6 +188,11 @@ export function taskWindowShellMessage(
       return translate("gui.external_task.started", "Task window started");
     case "no-selection":
       return translate("gui.external_task.no_selection", "No file was provided for this action");
+    case "preset-error":
+      return translate(
+        "gui.external_task.preset_error",
+        "The file-manager preset could not be used. Open Squallz, review it, then try again.",
+      );
     case "requires-desktop-service":
       return translate("gui.external_task.requires_desktop_service", "This action requires the desktop service");
     case "busy":
@@ -208,6 +216,8 @@ export function taskWindowSubmitNotice(
       return translate("gui.external_task.no_selection", "No file was provided for this action");
     case "requires-desktop-service":
       return translate("gui.external_task.requires_desktop_service", "This action requires the desktop service");
+    case "preset-error":
+      return null;
     case "waiting":
     case "starting":
     case "busy":

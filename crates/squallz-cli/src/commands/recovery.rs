@@ -4,12 +4,15 @@ use serde_json::{json, Value};
 use squallz_core::api::{
     split_volume_name, CompressionLevel, CreateOptions, FormatError, NoProgress, OpenOptions,
 };
-use squallz_core::collect_volume_set;
+use squallz_core::{is_plain_sqz_path, is_sqz_archive_path, is_zip_family_path};
 use squallz_recovery::RecoveryReport;
 
 use crate::args::resource_options;
 use crate::commands::{
-    reports::{print_pretty_json, recovery_summary_json, test_report_json},
+    reports::{
+        print_pretty_json, print_test_problems, print_test_problems_with_structure,
+        recovery_summary_json, test_report_json, test_report_json_with_structure,
+    },
     Ctx, ModernStatusField, ModernTableColumn, ModernTableRow,
 };
 use crate::errors::CliError;
@@ -31,12 +34,6 @@ fn repair_output_or_archive(output: Option<PathBuf>, archive: &Path) -> PathBuf 
         Some(path) => path,
         None => archive.to_path_buf(),
     }
-}
-
-fn file_name_text(path: &Path) -> &str {
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .map_or("", |name| name)
 }
 
 fn tolerated_loss_count(tolerate_loss: u32) -> usize {
@@ -75,13 +72,30 @@ pub fn protect(
     recovery: Option<PathBuf>,
     json: bool,
 ) -> Result<(), CliError> {
-    let sources = protect_sources(&archive)?;
+    let sources = ctx.engine.recovery_protect_sources(&archive)?;
     let redundancy = match tolerate_loss {
         Some(count) => redundancy_for_tolerated_volume_loss(&sources, count)?,
         None => redundancy_or_default(redundancy),
     };
-    let report =
-        squallz_recovery::protect_files(&archive, redundancy, recovery.as_deref(), &sources)?;
+    let progress = CliProgress::new_for_operation(
+        ctx.quiet,
+        ctx.verbose,
+        json,
+        ctx.output_style,
+        ctx.color,
+        ctx.accent,
+        "protect",
+    );
+    let report = squallz_recovery::protect_files_controlled(
+        &archive,
+        redundancy,
+        recovery.as_deref(),
+        &sources,
+        &progress,
+        &ctx.ctl,
+    );
+    progress.finish();
+    let report = report?;
     emit_report(ctx, &report, json, false)
 }
 
@@ -92,7 +106,19 @@ pub fn verify(
     recovery: Option<PathBuf>,
     json: bool,
 ) -> Result<(), CliError> {
-    let report = squallz_recovery::verify(&archive, recovery.as_deref())?;
+    let progress = CliProgress::new_for_operation(
+        ctx.quiet,
+        ctx.verbose,
+        json,
+        ctx.output_style,
+        ctx.color,
+        ctx.accent,
+        "verify",
+    );
+    let report =
+        squallz_recovery::verify_controlled(&archive, recovery.as_deref(), &progress, &ctx.ctl);
+    progress.finish();
+    let report = report?;
     emit_report(ctx, &report, json, true)
 }
 
@@ -102,14 +128,47 @@ pub fn repair(
     archive: PathBuf,
     use_recovery: bool,
     output: Option<PathBuf>,
+    output_dir: Option<PathBuf>,
     recovery: Option<PathBuf>,
     level: u8,
     threads: Option<usize>,
     memory_limit: Option<u64>,
     json: bool,
 ) -> Result<(), CliError> {
+    if output_dir.is_some() && !use_recovery {
+        return Err(FormatError::Unsupported(
+            "--output-dir is only available with --use-recovery".into(),
+        )
+        .into());
+    }
     if use_recovery {
-        let report = squallz_recovery::repair(&archive, output.as_deref(), recovery.as_deref())?;
+        let progress = CliProgress::new_for_operation(
+            ctx.quiet,
+            ctx.verbose,
+            json,
+            ctx.output_style,
+            ctx.color,
+            ctx.accent,
+            "repair",
+        );
+        let report = match output_dir.as_deref() {
+            Some(directory) => squallz_recovery::repair_to_directory_controlled(
+                &archive,
+                directory,
+                recovery.as_deref(),
+                &progress,
+                &ctx.ctl,
+            ),
+            None => squallz_recovery::repair_controlled(
+                &archive,
+                output.as_deref(),
+                recovery.as_deref(),
+                &progress,
+                &ctx.ctl,
+            ),
+        };
+        progress.finish();
+        let report = report?;
         return emit_report(ctx, &report, json, true);
     }
     if is_sqz_archive_path(&archive) {
@@ -124,7 +183,7 @@ pub fn repair(
             json,
         );
     }
-    if is_plain_zip_path(&archive) {
+    if is_zip_family_path(&archive) {
         return repair_zip_rebuild(
             ctx,
             archive,
@@ -176,7 +235,7 @@ fn repair_sqz(
 
     let source_report =
         ctx.engine
-            .test(&archive, &OpenOptions::default(), &NoProgress, &ctx.ctl)?;
+            .test_summary(&archive, &OpenOptions::default(), &NoProgress, &ctx.ctl)?;
     if !source_report.is_ok() {
         if json {
             let archive_path = archive.display().to_string();
@@ -190,15 +249,14 @@ fn repair_sqz(
                 "in_place": false,
                 "source": test_report_json(&source_report),
                 "recovery": source_report.recovery.as_ref().map(recovery_summary_json),
-                "problems": &source_report.problems,
+                "problems": &source_report.problems.messages,
+                "problems_total": source_report.problems.total,
+                "problems_truncated": source_report.problems.is_truncated(),
             });
             print_pretty_json(&value)?;
         } else {
-            for problem in &source_report.problems {
-                let message = ctx.loc.format("cli.test.problem", &[("detail", problem)]);
-                ctx.eprint_problem(&message);
-            }
-            let count = source_report.problems.len().to_string();
+            print_test_problems(ctx, &source_report);
+            let count = source_report.problems.total.to_string();
             let message = ctx.loc.format("cli.test.failed", &[("count", &count)]);
             ctx.eprint_problem(&message);
         }
@@ -282,17 +340,21 @@ fn repair_zip_rebuild(
             FormatError::Unsupported("ZIP rebuild repair requires --output <path>".into()).into(),
         );
     };
-    if !is_plain_zip_path(&output) {
+    if !is_zip_family_path(&output) {
         return Err(FormatError::Unsupported(
             "ZIP rebuild output must be a ZIP-family archive (.zip/.jar/.apk/.cbz/.ipa)".into(),
         )
         .into());
     }
 
-    let source_report =
-        ctx.engine
-            .test(&archive, &OpenOptions::default(), &NoProgress, &ctx.ctl)?;
-    if !source_report.is_ok() {
+    let source_test = ctx.engine.test_summary_with_structure(
+        &archive,
+        &OpenOptions::default(),
+        &NoProgress,
+        &ctx.ctl,
+    )?;
+    if !source_test.payload_is_ok() {
+        let source_report = &source_test.summary;
         if json {
             let value = json!({
                 "ok": false,
@@ -301,21 +363,22 @@ fn repair_zip_rebuild(
                 "output": output.display().to_string(),
                 "tool": "zip-local-header-rebuild",
                 "in_place": false,
-                "source": test_report_json(&source_report),
-                "problems": &source_report.problems,
+                "source": test_report_json_with_structure(source_report, source_test.structure),
+                "problems": &source_report.problems.messages,
+                "problems_total": source_report.problems.total,
+                "problems_truncated": source_report.problems.is_truncated(),
             });
             print_pretty_json(&value)?;
         } else {
-            for problem in &source_report.problems {
-                let message = ctx.loc.format("cli.test.problem", &[("detail", problem)]);
-                ctx.eprint_problem(&message);
-            }
-            let count = source_report.problems.len().to_string();
+            print_test_problems_with_structure(ctx, source_report, source_test.structure);
+            let count = source_report.problems.total.to_string();
             let message = ctx.loc.format("cli.test.failed", &[("count", &count)]);
             ctx.eprint_problem(&message);
         }
         return Err(CliError::Exit(EXIT_CORRUPT));
     }
+    let structure = source_test.structure;
+    let source_report = source_test.into_summary();
 
     let progress = CliProgress::new_for_operation(
         ctx.quiet,
@@ -348,7 +411,7 @@ fn repair_zip_rebuild(
             "output": output.display().to_string(),
             "tool": "zip-local-header-rebuild",
             "in_place": in_place,
-            "source": test_report_json(&source_report),
+            "source": test_report_json_with_structure(&source_report, structure),
         });
         print_pretty_json(&value)?;
     } else if ctx.is_modern() {
@@ -369,41 +432,6 @@ fn repair_zip_rebuild(
     Ok(())
 }
 
-fn is_sqz_archive_path(path: &Path) -> bool {
-    is_plain_sqz_path(path)
-        || path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| {
-                split_volume_name(name).is_some_and(|(base, _)| is_plain_sqz_path(Path::new(base)))
-            })
-}
-
-fn is_plain_sqz_path(path: &Path) -> bool {
-    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-        return false;
-    };
-    Path::new(name)
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("sqz"))
-}
-
-fn is_plain_zip_path(path: &Path) -> bool {
-    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-        return false;
-    };
-    Path::new(name)
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .is_some_and(|ext| {
-            matches!(
-                ext.to_ascii_lowercase().as_str(),
-                "zip" | "jar" | "apk" | "cbz" | "ipa"
-            )
-        })
-}
-
 fn is_split_sqz_volume_path(path: &Path) -> bool {
     let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
         return false;
@@ -416,21 +444,13 @@ fn is_split_sqz_volume_path(path: &Path) -> bool {
     })
 }
 
-fn protect_sources(archive: &Path) -> Result<Vec<PathBuf>, CliError> {
-    if split_volume_name(file_name_text(archive)).is_some() {
-        let volumes = collect_volume_set(archive)?;
-        return Ok(volumes.iter().cloned().collect());
-    }
-    Ok(vec![archive.to_path_buf()])
-}
-
 fn redundancy_for_tolerated_volume_loss(
     sources: &[PathBuf],
     tolerate_loss: u32,
 ) -> Result<u8, CliError> {
     if sources.len() <= 1 {
         return Err(FormatError::Unsupported(
-            "--tolerate-loss requires a .001 split volume set".into(),
+            "--tolerate-loss requires a multi-file archive set".into(),
         )
         .into());
     }
@@ -444,7 +464,7 @@ fn redundancy_for_tolerated_volume_loss(
     }
     let mut sizes = Vec::with_capacity(sources.len());
     for path in sources {
-        sizes.push(std::fs::metadata(path).map_err(FormatError::Io)?.len());
+        sizes.push(std::fs::metadata(path).map_err(FormatError::from)?.len());
     }
     let total: u64 = sizes.iter().sum();
     if total == 0 {
@@ -479,6 +499,12 @@ fn emit_report(
         };
         let message = ctx.loc.format(key, &[("path", &path)]);
         ctx.print_success(&message);
+        if !report.outputs.is_empty() {
+            println!("{}:", ctx.loc.t("common.files"));
+            for output in &report.outputs {
+                println!("  {}", output.display());
+            }
+        }
     } else if !report.stderr.is_empty() {
         ctx.eprint_problem(&report.stderr);
     }
@@ -544,19 +570,26 @@ fn print_archive_repair_modern(
 
 fn print_recovery_report_modern(ctx: &Ctx, report: &RecoveryReport) {
     let recovery_path = report.recovery.display().to_string();
+    let mut fields = vec![
+        ModernStatusField::new(ctx.loc.t("common.operation"), report.operation),
+        ModernStatusField::new(
+            ctx.loc.t("common.archive"),
+            report.archive.display().to_string(),
+        ),
+        ModernStatusField::new(ctx.loc.t("common.recovery"), recovery_path.clone()),
+    ];
+    if !report.outputs.is_empty() {
+        fields.push(ModernStatusField::new(
+            ctx.loc.t("common.files"),
+            report.outputs.len().to_string(),
+        ));
+    }
     ctx.print_modern_status_panel(
         &ctx.loc.t("cli.recovery.result_title"),
         &ctx.loc.t("common.done"),
         Tone::Success,
         &format!("{} · {}", report.operation, recovery_path),
-        &[
-            ModernStatusField::new(ctx.loc.t("common.operation"), report.operation),
-            ModernStatusField::new(
-                ctx.loc.t("common.archive"),
-                report.archive.display().to_string(),
-            ),
-            ModernStatusField::new(ctx.loc.t("common.recovery"), recovery_path.clone()),
-        ],
+        &fields,
     );
     ctx.print_modern_table(
         &ctx.loc.t("cli.recovery.report_title"),
@@ -575,6 +608,24 @@ fn print_recovery_report_modern(ctx: &Ctx, report: &RecoveryReport) {
             status_code_or_dash(report.status_code),
         ])],
     );
+    if !report.outputs.is_empty() {
+        let rows = report
+            .outputs
+            .iter()
+            .map(|output| {
+                let name = match output.file_name() {
+                    Some(name) => name.to_string_lossy().into_owned(),
+                    None => output.display().to_string(),
+                };
+                ModernTableRow::success(vec![name])
+            })
+            .collect::<Vec<_>>();
+        ctx.print_modern_wrapped_table(
+            &ctx.loc.t("common.files"),
+            &[ModernTableColumn::new(ctx.loc.t("common.name"), 100)],
+            &rows,
+        );
+    }
     if let Some(metrics) = &report.metrics {
         ctx.print_modern_table(
             &ctx.loc.t("cli.recovery.metrics_title"),

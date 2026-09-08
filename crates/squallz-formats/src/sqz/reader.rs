@@ -5,8 +5,9 @@ use std::time::{Duration, SystemTime};
 
 use reed_solomon_erasure::galois_8::ReedSolomon;
 use squallz_format_api::{
-    ArchiveFormat, ArchiveReader, Compressor, ControlToken, EntryMeta, EntryPath, EntryType,
-    FormatError, OpenOptions, ProgressSink, ReadSeek, RecoverySummary, StreamFactory, TestReport,
+    ArchiveFormat, ArchiveReader, BoundedProblemLog, Compressor, ControlToken, EntryMeta,
+    EntryPath, EntryType, FormatError, OpenOptions, ProgressSink, ReadSeek, RecoverySummary,
+    StreamFactory, TestSummary, TEST_PROBLEM_PREVIEW_LIMIT,
 };
 
 use crate::{sevenz::SevenZFormat, tar::TarFormat, zip::ZipFormat};
@@ -290,11 +291,74 @@ impl EntrySetSqzReader {
         }
         Ok(out)
     }
+
+    fn test_with_problem_recorder(
+        &mut self,
+        progress: &dyn ProgressSink,
+        ctl: &ControlToken,
+        mut record_problem: impl FnMut(String),
+    ) -> Result<u64, FormatError> {
+        let total: u64 = self
+            .records
+            .iter()
+            .filter(|record| matches!(record.meta.entry_type, EntryType::File))
+            .map(|record| record.data_size)
+            .sum();
+        let mut done = 0u64;
+        let mut entries_tested = 0u64;
+        for record in self.records.clone() {
+            ctl.checkpoint()?;
+            entries_tested += 1;
+            if !matches!(record.meta.entry_type, EntryType::File) {
+                progress.on_progress(done, total, &record.meta.path);
+                continue;
+            }
+            if self.record_has_unrepaired_block(&record) {
+                record_problem(format!(
+                    "{}: unrepaired SQZ recovery block damage",
+                    record.meta.path
+                ));
+                progress.on_progress(done, total, &record.meta.path);
+                continue;
+            }
+            match self.read_record_bytes(&record) {
+                Ok(data) => {
+                    for chunk in data.chunks(VERIFY_CHUNK) {
+                        ctl.checkpoint()?;
+                        done += chunk.len() as u64;
+                        progress.on_progress(done, total, &record.meta.path);
+                    }
+                    let hash = *blake3::hash(&data).as_bytes();
+                    let crc = crc32c::crc32c(&data);
+                    if hash != record.hash || crc != record.crc32c {
+                        record_problem(format!(
+                            "{}: checksum mismatch (BLAKE3/CRC-32C)",
+                            record.meta.path
+                        ));
+                    }
+                }
+                Err(e) => record_problem(format!("{}: {e}", record.meta.path)),
+            }
+        }
+        let total = if total == 0 { done } else { total };
+        progress.on_progress(total, total, &EntryPath::from_utf8(""));
+        Ok(entries_tested)
+    }
 }
 
 impl ArchiveReader for EntrySetSqzReader {
     fn entries(&mut self) -> Box<dyn Iterator<Item = Result<EntryMeta, FormatError>> + '_> {
         Box::new(self.records.iter().map(|record| Ok(record.meta.clone())))
+    }
+
+    fn consume_entries(
+        mut self: Box<Self>,
+        visitor: &mut dyn FnMut(EntryMeta) -> Result<(), FormatError>,
+    ) -> Result<(), FormatError> {
+        for record in std::mem::take(&mut self.records) {
+            visitor(record.meta)?;
+        }
+        Ok(())
     }
 
     fn read_entry(&mut self, path: &EntryPath) -> Result<Box<dyn Read + '_>, FormatError> {
@@ -325,61 +389,20 @@ impl ArchiveReader for EntrySetSqzReader {
         }))
     }
 
-    fn test(
+    fn test_summary(
         &mut self,
         progress: &dyn ProgressSink,
         ctl: &ControlToken,
-    ) -> Result<TestReport, FormatError> {
-        let mut report = TestReport {
-            recovery: self.recovery.as_ref().map(RecoveryState::summary),
-            ..TestReport::default()
-        };
-        let total: u64 = self
-            .records
-            .iter()
-            .filter(|r| matches!(r.meta.entry_type, EntryType::File))
-            .map(|r| r.data_size)
-            .sum();
-        let mut done = 0u64;
-        for record in self.records.clone() {
-            ctl.checkpoint()?;
-            report.entries_tested += 1;
-            if !matches!(record.meta.entry_type, EntryType::File) {
-                progress.on_progress(done, total, &record.meta.path);
-                continue;
-            }
-            if self.record_has_unrepaired_block(&record) {
-                report.problems.push(format!(
-                    "{}: unrepaired SQZ recovery block damage",
-                    record.meta.path
-                ));
-                progress.on_progress(done, total, &record.meta.path);
-                continue;
-            }
-            match self.read_record_bytes(&record) {
-                Ok(data) => {
-                    for chunk in data.chunks(VERIFY_CHUNK) {
-                        ctl.checkpoint()?;
-                        done += chunk.len() as u64;
-                        progress.on_progress(done, total, &record.meta.path);
-                    }
-                    let hash = *blake3::hash(&data).as_bytes();
-                    let crc = crc32c::crc32c(&data);
-                    if hash != record.hash || crc != record.crc32c {
-                        report.problems.push(format!(
-                            "{}: checksum mismatch (BLAKE3/CRC-32C)",
-                            record.meta.path
-                        ));
-                    }
-                }
-                Err(e) => {
-                    report.problems.push(format!("{}: {e}", record.meta.path));
-                }
-            }
-        }
-        let total = if total == 0 { done } else { total };
-        progress.on_progress(total, total, &EntryPath::from_utf8(""));
-        Ok(report)
+    ) -> Result<TestSummary, FormatError> {
+        let recovery = self.recovery.as_ref().map(RecoveryState::summary);
+        let problems = BoundedProblemLog::new(TEST_PROBLEM_PREVIEW_LIMIT);
+        let entries_tested =
+            self.test_with_problem_recorder(progress, ctl, |problem| problems.record(problem))?;
+        Ok(TestSummary {
+            entries_tested,
+            problems: problems.snapshot(),
+            recovery,
+        })
     }
 }
 
@@ -391,6 +414,16 @@ impl ArchiveReader for SqzArchiveReader {
         }
     }
 
+    fn consume_entries(
+        self: Box<Self>,
+        visitor: &mut dyn FnMut(EntryMeta) -> Result<(), FormatError>,
+    ) -> Result<(), FormatError> {
+        match *self {
+            SqzArchiveReader::EntrySet(reader) => Box::new(reader).consume_entries(visitor),
+            SqzArchiveReader::Inner { reader, .. } => reader.consume_entries(visitor),
+        }
+    }
+
     fn read_entry(&mut self, path: &EntryPath) -> Result<Box<dyn Read + '_>, FormatError> {
         match self {
             SqzArchiveReader::EntrySet(reader) => reader.read_entry(path),
@@ -398,18 +431,18 @@ impl ArchiveReader for SqzArchiveReader {
         }
     }
 
-    fn test(
+    fn test_summary(
         &mut self,
         progress: &dyn ProgressSink,
         ctl: &ControlToken,
-    ) -> Result<TestReport, FormatError> {
+    ) -> Result<TestSummary, FormatError> {
         match self {
-            SqzArchiveReader::EntrySet(reader) => reader.test(progress, ctl),
+            SqzArchiveReader::EntrySet(reader) => reader.test_summary(progress, ctl),
             SqzArchiveReader::Inner {
                 reader,
                 outer_recovery,
             } => {
-                let mut report = reader.test(progress, ctl)?;
+                let mut report = reader.test_summary(progress, ctl)?;
                 if report.recovery.is_none() {
                     report.recovery = outer_recovery.clone();
                 }
@@ -541,15 +574,19 @@ impl RecoveryState {
         let mut bytes = vec![0u8; len];
         src.seek(SeekFrom::Start(footer.recovery_offset))?;
         src.read_exact(&mut bytes)?;
-        let mut state = Self::parse_protected_or_legacy(&bytes)?;
+        let mut state = Self::parse_protected(&bytes)?;
         state.repair(src)?;
         Ok(Some(state))
     }
 
-    fn parse_protected_or_legacy(section: &[u8]) -> Result<Self, FormatError> {
+    fn parse_protected(section: &[u8]) -> Result<Self, FormatError> {
         let trailer = match parse_recovery_protection_trailer(section) {
             Ok(Some(trailer)) => trailer,
-            Ok(None) => return Self::parse(section),
+            Ok(None) => {
+                return Err(FormatError::CorruptArchive(
+                    "sqz recovery section is missing its protection trailer".into(),
+                ));
+            }
             Err(trailer_err) => {
                 if recovery_protection_trailer_crc_mismatch(section) {
                     return Self::parse_with_damaged_protection_trailer(section);
@@ -1034,13 +1071,7 @@ fn repair_protected_recovery(
         ));
     }
 
-    let mut hashes: Vec<[u8; 32]> = Vec::with_capacity(block_count);
-    for chunk in protection[..hash_len].chunks_exact(32) {
-        hashes.push(fixed_array::<32>(
-            chunk,
-            "sqz recovery protection block hash",
-        )?);
-    }
+    let hashes = protection[..hash_len].as_chunks::<32>().0.to_vec();
     let parity = &protection[hash_len..];
     let mut repaired = primary.to_vec();
 
@@ -1213,7 +1244,7 @@ fn recover_footer_from_recovery_scan(
         let mut section = vec![0u8; section_len_usize];
         src.seek(SeekFrom::Start(recovery_offset))?;
         src.read_exact(&mut section)?;
-        let recovery = match RecoveryState::parse_protected_or_legacy(&section) {
+        let recovery = match RecoveryState::parse_protected(&section) {
             Ok(recovery) => recovery,
             Err(_) => continue,
         };

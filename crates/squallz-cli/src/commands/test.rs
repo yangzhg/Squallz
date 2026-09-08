@@ -2,10 +2,13 @@
 
 use std::path::{Path, PathBuf};
 
-use squallz_core::api::{OpenOptions, Password, TestReport};
+use squallz_core::api::{OpenOptions, Password, TestSummary};
 
 use crate::commands::{
-    reports::{print_pretty_json, test_report_json},
+    reports::{
+        localized_test_problems, print_pretty_json, print_test_problems_with_structure,
+        test_report_json_with_structure,
+    },
     Ctx, ModernStatusField, ModernTableColumn, ModernTableRow,
 };
 use crate::errors::CliError;
@@ -16,19 +19,19 @@ use crate::ui::Tone;
 /// Exit code for a failed integrity test (= CorruptArchive).
 const EXIT_CORRUPT: i32 = 3;
 
-fn entry_count_label(report: &TestReport) -> String {
+fn entry_count_label(report: &TestSummary) -> String {
     report.entries_tested.to_string()
 }
 
-fn problem_count_label(report: &TestReport) -> String {
-    report.problems.len().to_string()
+fn problem_count_label(report: &TestSummary) -> String {
+    report.problems.total.to_string()
 }
 
 fn archive_label(path: &Path) -> String {
     path.display().to_string()
 }
 
-fn test_exit_result(report: &TestReport) -> Result<(), CliError> {
+fn test_exit_result(report: &TestSummary) -> Result<(), CliError> {
     if report.is_ok() {
         Ok(())
     } else {
@@ -36,9 +39,8 @@ fn test_exit_result(report: &TestReport) -> Result<(), CliError> {
     }
 }
 
-fn problem_rows(report: &TestReport) -> Vec<ModernTableRow> {
-    report
-        .problems
+fn problem_rows(problems: &[String]) -> Vec<ModernTableRow> {
+    problems
         .iter()
         .enumerate()
         .map(|(idx, problem)| ModernTableRow::danger(vec![(idx + 1).to_string(), problem.clone()]))
@@ -62,8 +64,8 @@ pub fn run(
         "test",
     );
     let explicit = password.map(Password::new);
-    let report = with_password_retry(&ctx.loc, explicit.as_ref(), |pw| {
-        ctx.engine.test(
+    let outcome = with_password_retry(&ctx.loc, explicit.as_ref(), |pw| {
+        ctx.engine.test_summary_with_structure(
             &archive,
             &OpenOptions {
                 password: pw.cloned(),
@@ -74,10 +76,12 @@ pub fn run(
         )
     });
     progress.finish();
-    let report = report?;
+    let outcome = outcome?;
+    let structure = outcome.structure;
+    let report = outcome.into_summary();
 
     if json {
-        let value = test_report_json(&report);
+        let value = test_report_json_with_structure(&report, structure);
         print_pretty_json(&value)?;
         return test_exit_result(&report);
     }
@@ -119,10 +123,7 @@ pub fn run(
         }
         Ok(())
     } else {
-        for problem in &report.problems {
-            let message = ctx.loc.format("cli.test.problem", &[("detail", problem)]);
-            ctx.eprint_problem(&message);
-        }
+        print_test_problems_with_structure(ctx, &report, structure);
         let message = ctx
             .loc
             .format("cli.test.failed", &[("count", &problem_count)]);
@@ -152,7 +153,8 @@ pub fn run(
                     archive_name,
                 ])],
             );
-            let rows = problem_rows(&report);
+            let problems = localized_test_problems(ctx, &report, structure);
+            let rows = problem_rows(&problems);
             ctx.print_modern_wrapped_table(
                 &ctx.loc.t("cli.test.problems_title"),
                 &[
@@ -171,14 +173,18 @@ pub fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use squallz_core::api::ProblemPreview;
 
-    fn report(entries_tested: u64, problems: &[&str]) -> TestReport {
-        TestReport {
+    fn report(entries_tested: u64, problems: &[&str]) -> TestSummary {
+        TestSummary {
             entries_tested,
-            problems: problems
-                .iter()
-                .map(|problem| (*problem).to_owned())
-                .collect(),
+            problems: ProblemPreview {
+                total: problems.len() as u64,
+                messages: problems
+                    .iter()
+                    .map(|problem| (*problem).to_owned())
+                    .collect(),
+            },
             recovery: None,
         }
     }
@@ -195,7 +201,8 @@ mod tests {
 
     #[test]
     fn problem_rows_are_one_based_and_danger_toned() {
-        let rows = problem_rows(&report(3, &["bad crc", "missing tail"]));
+        let problems = ["bad crc".to_owned(), "missing tail".to_owned()];
+        let rows = problem_rows(&problems);
 
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].cells, vec!["1", "bad crc"]);

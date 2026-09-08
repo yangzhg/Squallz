@@ -14,7 +14,7 @@ if [[ "$APP" != /* ]]; then
 fi
 EXE="$APP/Contents/MacOS/squallz-gui"
 WORK="$ROOT/target/squallz-native-screenshots"
-OUT_DIR="$ROOT/benches/screenshots/i9-native"
+OUT_DIR="$ROOT/benches/screenshots/macos-native"
 REPORT="$ROOT/benches/MACOS_NATIVE_SCREENSHOTS.md"
 ARCHIVE="$WORK/workspace-documents.zip"
 

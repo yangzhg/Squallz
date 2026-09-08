@@ -7,18 +7,53 @@
 //! `sqz` CLI when the app handoff is unavailable.
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
-use std::fs;
+use std::fs::{self, File};
 use std::io;
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
-use std::path::{Path, PathBuf};
+use std::io::Read;
+#[cfg(target_os = "macos")]
+use std::os::unix::fs::DirBuilderExt;
+use std::path::Path;
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+use std::path::PathBuf;
+#[cfg(target_os = "macos")]
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 use crate::dto::IntegrationActionDto;
-use crate::dto::{IntegrationApplyResultDto, IntegrationRemoveResultDto, IntegrationStatusDto};
+use crate::dto::{
+    IntegrationActionHealthDto, IntegrationActionHealthStateDto, IntegrationApplyResultDto,
+    IntegrationDefaultHandlersDto, IntegrationDefaultHandlersStateDto,
+    IntegrationFileManagerVisibilityDto, IntegrationFileManagerVisibilityStateDto,
+    IntegrationHealthStateDto, IntegrationRemoveResultDto, IntegrationStatusDto,
+    IntegrationSystemDiagnosticsDto, RuntimeBackendSourceDto, RuntimeBackendStatusDto,
+};
+#[cfg(target_os = "macos")]
+use crate::dto::{IntegrationDefaultHandlerDto, IntegrationDefaultHandlerStateDto};
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 use crate::open_files::{EXTERNAL_TASK_ACTION_ARG, EXTERNAL_TASK_OUTPUT_ARG};
+use squallz_formats::{SevenZipBackendSource, UnrarBackendSource, WimlibBackendSource};
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 use squallz_i18n::Localizer;
+
+#[cfg(target_os = "macos")]
+use objc2::rc::autoreleasepool;
+#[cfg(target_os = "macos")]
+use objc2_app_kit::{NSUpdateDynamicServices, NSWorkspace};
+#[cfg(target_os = "macos")]
+use objc2_foundation::{NSBundle, NSString, NSURL};
+
+#[cfg(target_os = "macos")]
+const SQUALLZ_BUNDLE_IDENTIFIER: &str = "dev.squallz.desktop";
+
+#[cfg(target_os = "macos")]
+const MACOS_DECLARED_FILE_EXTENSIONS: &[&str] = &[
+    "zip", "jar", "apk", "cbz", "cbr", "ipa", "7z", "rar", "tar", "tgz", "tbz2", "txz", "tzst",
+    "001", "wim", "swm", "sqz", "gz", "bz2", "xz", "zst", "lz4", "br",
+];
+
+#[cfg(target_os = "macos")]
+static DEFAULT_HANDLER_PROBE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[cfg(target_os = "macos")]
 #[derive(Debug, Clone, Copy)]
@@ -53,7 +88,7 @@ fi
 for item in "$@"; do
   [[ -f "$item" ]] || continue
   dest="$(dirname "$item")"
-  run_sqz extract "$item" -d "$dest" --smart
+  run_sqz extract "$item" -d "$dest" --smart --file-manager-preset
 done
 "#,
     },
@@ -81,7 +116,7 @@ for item in "$@"; do
   [[ -f "$item" ]] || continue
   dest="$(dirname "$item")/$(archive_stem "$item")"
   mkdir -p "$dest"
-  run_sqz extract "$item" -d "$dest"
+  run_sqz extract "$item" -d "$dest" --file-manager-preset
 done
 "#,
     },
@@ -121,7 +156,7 @@ output="$(unique_output "$output")"
 if run_gui_task_with_output "compress-to-7z" "$output" "$@"; then
   exit 0
 fi
-run_sqz compress "$@" -o "$output" --level 5
+run_sqz compress "$@" -o "$output" --file-manager-preset
 "#,
     },
     FinderAction {
@@ -158,15 +193,15 @@ resolve_sqz() {
   local -a candidates
   candidates=()
   if [[ -n "${SQUALLZ_INSTALLED_APP_BUNDLE:-}" ]]; then
-    candidates+=("${SQUALLZ_INSTALLED_APP_BUNDLE}/Contents/Resources/bin/sqz")
     candidates+=("${SQUALLZ_INSTALLED_APP_BUNDLE}/Contents/MacOS/sqz")
+    candidates+=("${SQUALLZ_INSTALLED_APP_BUNDLE}/Contents/Resources/bin/sqz")
   fi
   if [[ -n "${SQUALLZ_APP_BUNDLE:-}" ]]; then
-    candidates+=("${SQUALLZ_APP_BUNDLE}/Contents/Resources/bin/sqz")
     candidates+=("${SQUALLZ_APP_BUNDLE}/Contents/MacOS/sqz")
+    candidates+=("${SQUALLZ_APP_BUNDLE}/Contents/Resources/bin/sqz")
   fi
-  candidates+=("/Applications/Squallz.app/Contents/Resources/bin/sqz")
   candidates+=("/Applications/Squallz.app/Contents/MacOS/sqz")
+  candidates+=("/Applications/Squallz.app/Contents/Resources/bin/sqz")
   candidates+=("$HOME/.cargo/bin/sqz")
 
   for candidate in "${candidates[@]}"; do
@@ -184,6 +219,10 @@ resolve_sqz() {
 }
 
 resolve_app_bundle() {
+  if [[ "${SQUALLZ_DISABLE_GUI_HANDOFF:-}" == "1" ]]; then
+    return 1
+  fi
+
   local -a candidates
   candidates=()
   if [[ -n "${SQUALLZ_INSTALLED_APP_BUNDLE:-}" ]]; then
@@ -262,13 +301,15 @@ run_sqz checksum "$@"
         script_name: "squallz-extract-here.sh",
         desktop_name: "squallz-extract-here.desktop",
         script_body: r#"
+collect_regular_file_inputs "$@" || exit 0
+set -- "${SQUALLZ_REGULAR_FILE_INPUTS[@]}"
 if run_gui_task "extract-here" "$@"; then
   exit 0
 fi
 for item in "$@"; do
   [[ -f "$item" ]] || continue
   dest="$(dirname -- "$item")"
-  run_sqz extract "$item" -d "$dest" --smart
+  run_sqz extract "$item" -d "$dest" --smart --file-manager-preset
 done
 "#,
     },
@@ -278,6 +319,8 @@ done
         script_name: "squallz-extract-to-folder.sh",
         desktop_name: "squallz-extract-to-folder.desktop",
         script_body: r#"
+collect_regular_file_inputs "$@" || exit 0
+set -- "${SQUALLZ_REGULAR_FILE_INPUTS[@]}"
 if run_gui_task "extract-to-folder" "$@"; then
   exit 0
 fi
@@ -297,7 +340,7 @@ for item in "$@"; do
   [[ -f "$item" ]] || continue
   dest="$(dirname -- "$item")/$(archive_stem "$item")"
   mkdir -p -- "$dest"
-  run_sqz extract "$item" -d "$dest"
+  run_sqz extract "$item" -d "$dest" --file-manager-preset
 done
 "#,
     },
@@ -337,7 +380,7 @@ output="$(unique_output "$output")"
 if run_gui_task_with_output "compress-to-7z" "$output" "$@"; then
   exit 0
 fi
-run_sqz compress "$@" -o "$output" --level 5
+run_sqz compress "$@" -o "$output" --file-manager-preset
 "#,
     },
     LinuxFileManagerAction {
@@ -346,11 +389,12 @@ run_sqz compress "$@" -o "$output" --level 5
         script_name: "squallz-test-archive.sh",
         desktop_name: "squallz-test-archive.desktop",
         script_body: r#"
-if run_gui_task "test-archive" "$@"; then
-  exit 0
-fi
+collect_regular_file_inputs "$@" || exit 0
+set -- "${SQUALLZ_REGULAR_FILE_INPUTS[@]}"
 for item in "$@"; do
-  [[ -f "$item" ]] || continue
+  if run_gui_task "test-archive" "$item"; then
+    continue
+  fi
   run_sqz test "$item"
 done
 "#,
@@ -365,6 +409,8 @@ CLI_NOT_FOUND_TITLE={cli_not_found_title}
 CLI_NOT_FOUND_MESSAGE={cli_not_found_message}
 SQUALLZ_TASK_WINDOW_ACTION_ARG={task_window_action_arg}
 SQUALLZ_TASK_WINDOW_OUTPUT_ARG={task_window_output_arg}
+SQUALLZ_APPIMAGE={installed_appimage}
+SQUALLZ_APPIMAGE_EXTRACT_AND_RUN={installed_appimage_extract_and_run}
 
 notify_missing_cli() {
   if command -v notify-send >/dev/null 2>&1; then
@@ -397,6 +443,11 @@ resolve_gui() {
     return 0
   fi
 
+  if [[ -n "$SQUALLZ_APPIMAGE" && -f "$SQUALLZ_APPIMAGE" && ! -L "$SQUALLZ_APPIMAGE" && -x "$SQUALLZ_APPIMAGE" ]]; then
+    printf '%s\n' "$SQUALLZ_APPIMAGE"
+    return 0
+  fi
+
   local -a candidates
   candidates=()
   if [[ -n "${APPDIR:-}" ]]; then
@@ -420,13 +471,24 @@ resolve_gui() {
   return 1
 }
 
+launch_gui() {
+  local gui
+  gui="$1"
+  shift
+  if [[ "$gui" == "$SQUALLZ_APPIMAGE" && "$SQUALLZ_APPIMAGE_EXTRACT_AND_RUN" == "1" ]]; then
+    APPIMAGE_EXTRACT_AND_RUN=1 "$gui" "$@" >/dev/null 2>&1 &
+  else
+    "$gui" "$@" >/dev/null 2>&1 &
+  fi
+}
+
 run_gui_task() {
   local action gui
   action="$1"
   shift
   gui="$(resolve_gui 2>/dev/null || true)"
   [[ -n "$gui" ]] || return 1
-  "$gui" "$SQUALLZ_TASK_WINDOW_ACTION_ARG" "$action" "$@" >/dev/null 2>&1 &
+  launch_gui "$gui" "$SQUALLZ_TASK_WINDOW_ACTION_ARG" "$action" "$@"
 }
 
 run_gui_task_with_output() {
@@ -436,7 +498,7 @@ run_gui_task_with_output() {
   shift 2
   gui="$(resolve_gui 2>/dev/null || true)"
   [[ -n "$gui" ]] || return 1
-  "$gui" "$SQUALLZ_TASK_WINDOW_ACTION_ARG" "$action" "$SQUALLZ_TASK_WINDOW_OUTPUT_ARG" "$output" "$@" >/dev/null 2>&1 &
+  launch_gui "$gui" "$SQUALLZ_TASK_WINDOW_ACTION_ARG" "$action" "$SQUALLZ_TASK_WINDOW_OUTPUT_ARG" "$output" "$@"
 }
 
 SQZ=""
@@ -446,6 +508,32 @@ run_sqz() {
   fi
   "$SQZ" "$@"
 }
+
+collect_regular_file_inputs() {
+  local item
+  SQUALLZ_REGULAR_FILE_INPUTS=()
+  for item in "$@"; do
+    if [[ -f "$item" ]]; then
+      SQUALLZ_REGULAR_FILE_INPUTS+=("$item")
+    fi
+  done
+  [[ ${#SQUALLZ_REGULAR_FILE_INPUTS[@]} -gt 0 ]]
+}
+
+SQUALLZ_ACTION_INPUTS=()
+for SQUALLZ_ACTION_INPUT in "$@"; do
+  [[ -n "$SQUALLZ_ACTION_INPUT" ]] || continue
+  if [[ "$SQUALLZ_ACTION_INPUT" == /* ]]; then
+    SQUALLZ_ACTION_INPUTS+=("$SQUALLZ_ACTION_INPUT")
+  else
+    SQUALLZ_ACTION_INPUTS+=("$PWD/$SQUALLZ_ACTION_INPUT")
+  fi
+done
+if [[ ${#SQUALLZ_ACTION_INPUTS[@]} -eq 0 ]]; then
+  exit 0
+fi
+set -- "${SQUALLZ_ACTION_INPUTS[@]}"
+unset SQUALLZ_ACTION_INPUTS SQUALLZ_ACTION_INPUT
 "#;
 
 #[cfg(any(target_os = "windows", all(test, target_os = "macos")))]
@@ -481,7 +569,7 @@ if ($Selected.Count -eq 0) { exit 0 }
 if (Invoke-SquallzGuiTask -Action 'extract-here' -Paths $Selected) { exit 0 }
 foreach ($Item in $Selected) {
   $Dest = Split-Path -Parent $Item
-  Invoke-Sqz extract $Item -d $Dest --smart
+  Invoke-Sqz extract $Item -d $Dest --smart --file-manager-preset
 }
 "#,
     },
@@ -497,7 +585,7 @@ foreach ($Item in $Selected) {
   $Parent = Split-Path -Parent $Item
   $Dest = Join-Path $Parent (Get-ArchiveStem $Item)
   New-Item -ItemType Directory -Force -Path $Dest | Out-Null
-  Invoke-Sqz extract $Item -d $Dest
+  Invoke-Sqz extract $Item -d $Dest --file-manager-preset
 }
 "#,
     },
@@ -516,7 +604,7 @@ if ($Selected.Count -eq 1) {
 }
 $Output = New-UniqueOutputPath $Output
 if (Invoke-SquallzGuiTask -Action 'compress-to-7z' -Output $Output -Paths $Selected) { exit 0 }
-$Arguments = @('compress') + $Selected + @('-o', $Output, '--level', '5')
+$Arguments = @('compress') + $Selected + @('-o', $Output, '--file-manager-preset')
 Invoke-Sqz @Arguments
 "#,
     },
@@ -680,7 +768,9 @@ pub fn apply_visible_integrations_for_language(
     #[cfg(target_os = "macos")]
     {
         let home = macos_home_dir()?;
-        install_macos_finder_actions_at_with_language(&home, language)
+        let result = install_macos_finder_actions_at_with_language(&home, language)?;
+        NSUpdateDynamicServices();
+        Ok(result)
     }
 
     #[cfg(target_os = "linux")]
@@ -740,12 +830,269 @@ pub fn integration_status_for_language(language: Option<&str>) -> io::Result<Int
             platform: std::env::consts::OS.to_owned(),
             services_dir: String::new(),
             script_dir: String::new(),
-            installed: Vec::new(),
-            missing: Vec::new(),
+            health: IntegrationHealthStateDto::Unavailable,
+            actions: Vec::new(),
+            can_repair: false,
+            can_remove: false,
             unsupported: vec![
                 "Desktop file-manager integration is not available on this platform".to_owned(),
             ],
         })
+    }
+}
+
+/// Reads system-owned integration evidence without changing user preferences.
+pub fn system_integration_diagnostics() -> IntegrationSystemDiagnosticsDto {
+    #[cfg(target_os = "macos")]
+    {
+        macos_system_integration_diagnostics()
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    IntegrationSystemDiagnosticsDto {
+        platform: std::env::consts::OS.to_owned(),
+        backends: runtime_backend_statuses(),
+        default_handlers: unavailable_default_handlers(),
+        file_manager_visibility: IntegrationFileManagerVisibilityDto {
+            state: IntegrationFileManagerVisibilityStateDto::Unsupported,
+            reason: "unsupported_platform".to_owned(),
+        },
+    }
+}
+
+fn runtime_backend_statuses() -> Vec<RuntimeBackendStatusDto> {
+    let sevenzip = squallz_formats::sevenzip_backend_status();
+    let sevenzip_source = sevenzip.source().map(|source| match source {
+        SevenZipBackendSource::Application => RuntimeBackendSourceDto::Application,
+        SevenZipBackendSource::Environment => RuntimeBackendSourceDto::Environment,
+        SevenZipBackendSource::Path => RuntimeBackendSourceDto::Path,
+    });
+    let unrar = squallz_formats::unrar_backend_status();
+    let unrar_source = unrar.source().map(|source| match source {
+        UnrarBackendSource::Environment => RuntimeBackendSourceDto::Environment,
+        UnrarBackendSource::Path => RuntimeBackendSourceDto::Path,
+    });
+    let wimlib = squallz_formats::wimlib_backend_status();
+    let wimlib_source = wimlib.source().map(|source| match source {
+        WimlibBackendSource::Application => RuntimeBackendSourceDto::Application,
+        WimlibBackendSource::Environment => RuntimeBackendSourceDto::Environment,
+        WimlibBackendSource::Path => RuntimeBackendSourceDto::Path,
+    });
+    vec![
+        RuntimeBackendStatusDto {
+            id: "sevenzip".to_owned(),
+            available: sevenzip.available(),
+            configured: sevenzip.configured(),
+            source: sevenzip_source,
+            tool: runtime_backend_tool_name(sevenzip.executable()),
+        },
+        RuntimeBackendStatusDto {
+            id: "unrar".to_owned(),
+            available: unrar.available(),
+            configured: unrar.configured(),
+            source: unrar_source,
+            tool: runtime_backend_tool_name(unrar.executable()),
+        },
+        RuntimeBackendStatusDto {
+            id: "wimlib".to_owned(),
+            available: wimlib.available(),
+            configured: wimlib.configured(),
+            source: wimlib_source,
+            tool: runtime_backend_tool_name(wimlib.executable()),
+        },
+    ]
+}
+
+fn runtime_backend_tool_name(executable: Option<&Path>) -> Option<String> {
+    executable
+        .and_then(Path::file_name)
+        .map(|name| name.to_string_lossy().into_owned())
+}
+
+#[cfg(test)]
+mod runtime_backend_tests {
+    use super::*;
+
+    #[test]
+    fn runtime_backend_diagnostics_do_not_expose_executable_paths() {
+        let backends = runtime_backend_statuses();
+        assert_eq!(backends.len(), 3);
+        assert_eq!(backends[0].id, "sevenzip");
+        assert_eq!(backends[1].id, "unrar");
+        assert_eq!(backends[2].id, "wimlib");
+        for backend in backends {
+            if let Some(tool) = backend.tool {
+                assert_eq!(Path::new(&tool).components().count(), 1);
+            }
+        }
+    }
+}
+
+fn unavailable_default_handlers() -> IntegrationDefaultHandlersDto {
+    IntegrationDefaultHandlersDto {
+        state: IntegrationDefaultHandlersStateDto::Unavailable,
+        total: 0,
+        checked: 0,
+        squallz: 0,
+        handlers: Vec::new(),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn summarize_default_handlers(
+    handlers: Vec<IntegrationDefaultHandlerDto>,
+) -> IntegrationDefaultHandlersDto {
+    let total = handlers.len();
+    let checked = handlers
+        .iter()
+        .filter(|handler| handler.state != IntegrationDefaultHandlerStateDto::Unknown)
+        .count();
+    let squallz = handlers
+        .iter()
+        .filter(|handler| handler.state == IntegrationDefaultHandlerStateDto::Squallz)
+        .count();
+    let state = if total == 0 {
+        IntegrationDefaultHandlersStateDto::Unavailable
+    } else if checked != total {
+        IntegrationDefaultHandlersStateDto::Unknown
+    } else if squallz == total {
+        IntegrationDefaultHandlersStateDto::Squallz
+    } else if squallz == 0 {
+        IntegrationDefaultHandlersStateDto::Other
+    } else {
+        IntegrationDefaultHandlersStateDto::Mixed
+    };
+
+    IntegrationDefaultHandlersDto {
+        state,
+        total,
+        checked,
+        squallz,
+        handlers,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_system_integration_diagnostics() -> IntegrationSystemDiagnosticsDto {
+    let default_handlers = macos_default_handler_diagnostics()
+        .map(summarize_default_handlers)
+        .unwrap_or_else(|_| unavailable_default_handlers());
+
+    IntegrationSystemDiagnosticsDto {
+        platform: "macos".to_owned(),
+        backends: runtime_backend_statuses(),
+        default_handlers,
+        file_manager_visibility: IntegrationFileManagerVisibilityDto {
+            state: IntegrationFileManagerVisibilityStateDto::ManualCheck,
+            reason: "not_exposed_by_platform".to_owned(),
+        },
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_default_handler_diagnostics() -> io::Result<Vec<IntegrationDefaultHandlerDto>> {
+    let sequence = DEFAULT_HANDLER_PROBE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let probe_dir = std::env::temp_dir().join(format!(
+        "squallz-default-handlers-{}-{sequence}",
+        std::process::id()
+    ));
+    fs::DirBuilder::new().mode(0o700).create(&probe_dir)?;
+
+    let result = (|| {
+        let mut handlers = Vec::with_capacity(MACOS_DECLARED_FILE_EXTENSIONS.len());
+        for extension in MACOS_DECLARED_FILE_EXTENSIONS {
+            let probe_path = probe_dir.join(format!("probe.{extension}"));
+            File::options()
+                .write(true)
+                .create_new(true)
+                .open(&probe_path)?;
+            handlers.push(macos_default_handler_for_probe(extension, &probe_path));
+        }
+        Ok(handlers)
+    })();
+
+    let _ = fs::remove_dir_all(&probe_dir);
+    result
+}
+
+#[cfg(target_os = "macos")]
+fn macos_default_handler_for_probe(
+    extension: &str,
+    probe_path: &Path,
+) -> IntegrationDefaultHandlerDto {
+    autoreleasepool(|_| {
+        let probe_path = probe_path.to_string_lossy();
+        let probe_url = NSURL::fileURLWithPath(&NSString::from_str(&probe_path));
+        let Some(application_url) =
+            NSWorkspace::sharedWorkspace().URLForApplicationToOpenURL(&probe_url)
+        else {
+            return unknown_default_handler(extension);
+        };
+        let Some(bundle_identifier) = NSBundle::bundleWithURL(&application_url)
+            .and_then(|bundle| bundle.bundleIdentifier())
+            .map(|identifier| identifier.to_string())
+        else {
+            return unknown_default_handler(extension);
+        };
+        let application_name = application_url
+            .lastPathComponent()
+            .map(|name| name.to_string())
+            .and_then(|name| {
+                let name = name.strip_suffix(".app").unwrap_or(&name).trim();
+                (!name.is_empty()).then(|| name.to_owned())
+            });
+
+        IntegrationDefaultHandlerDto {
+            extension: extension.to_owned(),
+            state: if bundle_identifier == SQUALLZ_BUNDLE_IDENTIFIER {
+                IntegrationDefaultHandlerStateDto::Squallz
+            } else {
+                IntegrationDefaultHandlerStateDto::Other
+            },
+            application_name,
+        }
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn unknown_default_handler(extension: &str) -> IntegrationDefaultHandlerDto {
+    IntegrationDefaultHandlerDto {
+        extension: extension.to_owned(),
+        state: IntegrationDefaultHandlerStateDto::Unknown,
+        application_name: None,
+    }
+}
+
+fn integration_health_state(actions: &[IntegrationActionHealthDto]) -> IntegrationHealthStateDto {
+    if actions.is_empty() {
+        return IntegrationHealthStateDto::Unavailable;
+    }
+    if actions
+        .iter()
+        .all(|action| action.state == IntegrationActionHealthStateDto::Healthy)
+    {
+        return IntegrationHealthStateDto::Healthy;
+    }
+    if actions
+        .iter()
+        .all(|action| action.state == IntegrationActionHealthStateDto::Missing)
+    {
+        return IntegrationHealthStateDto::Missing;
+    }
+    IntegrationHealthStateDto::NeedsRepair
+}
+
+fn integration_action_health(
+    id: &str,
+    name: &str,
+    state: IntegrationActionHealthStateDto,
+    issue: Option<&str>,
+) -> IntegrationActionHealthDto {
+    IntegrationActionHealthDto {
+        id: id.to_owned(),
+        name: name.to_owned(),
+        state,
+        issue: issue.map(ToOwned::to_owned),
     }
 }
 
@@ -759,7 +1106,9 @@ pub fn remove_visible_integrations_for_language(
     #[cfg(target_os = "macos")]
     {
         let home = macos_home_dir()?;
-        remove_macos_finder_actions_at_with_language(&home, language)
+        let result = remove_macos_finder_actions_at_with_language(&home, language)?;
+        NSUpdateDynamicServices();
+        Ok(result)
     }
 
     #[cfg(target_os = "linux")]
@@ -810,6 +1159,87 @@ fn linux_home_dir() -> io::Result<std::path::PathBuf> {
     })
 }
 
+#[cfg(any(target_os = "linux", all(test, target_os = "macos")))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LinuxAppImageLaunchMode {
+    Mounted,
+    ExtractAndRun,
+}
+
+#[cfg(any(target_os = "linux", all(test, target_os = "macos")))]
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct LinuxAppImageLaunch {
+    path: PathBuf,
+    mode: LinuxAppImageLaunchMode,
+}
+
+#[cfg(any(target_os = "linux", all(test, target_os = "macos")))]
+fn current_linux_appimage_launch() -> Option<LinuxAppImageLaunch> {
+    let appimage = std::env::var_os("APPIMAGE");
+    let appdir = std::env::var_os("APPDIR");
+    let current_exe = std::env::current_exe().ok()?;
+    let temp_dir = std::env::temp_dir();
+    validated_linux_appimage_launch(
+        appimage.as_deref().map(Path::new),
+        appdir.as_deref().map(Path::new),
+        &current_exe,
+        &temp_dir,
+    )
+}
+
+#[cfg(any(target_os = "linux", all(test, target_os = "macos")))]
+fn validated_linux_appimage_launch(
+    appimage: Option<&Path>,
+    appdir: Option<&Path>,
+    current_exe: &Path,
+    temp_dir: &Path,
+) -> Option<LinuxAppImageLaunch> {
+    let appimage = appimage?;
+    let appdir = appdir?;
+    if !appimage.is_absolute() || !appdir.is_absolute() || !current_exe.is_absolute() {
+        return None;
+    }
+    if managed_path_kind(appimage).ok()? != ManagedPathKind::RegularFile
+        || !path_is_executable(appimage)
+        || managed_path_kind(appdir).ok()? != ManagedPathKind::Directory
+    {
+        return None;
+    }
+
+    let canonical_temp_dir = fs::canonicalize(temp_dir).ok()?;
+    let canonical_appdir = fs::canonicalize(appdir).ok()?;
+    let appdir_name = canonical_appdir.file_name()?.to_str()?;
+    if canonical_appdir.parent() != Some(canonical_temp_dir.as_path()) {
+        return None;
+    }
+    let mode = if appdir_name.starts_with(".mount_") {
+        LinuxAppImageLaunchMode::Mounted
+    } else if appdir_name.starts_with("appimage_extracted_") {
+        LinuxAppImageLaunchMode::ExtractAndRun
+    } else {
+        return None;
+    };
+
+    let canonical_exe = fs::canonicalize(current_exe).ok()?;
+    if canonical_exe == canonical_appdir || !canonical_exe.starts_with(&canonical_appdir) {
+        return None;
+    }
+
+    let canonical_appimage = fs::canonicalize(appimage).ok()?;
+    if managed_path_kind(appimage).ok()? != ManagedPathKind::RegularFile
+        || !path_is_executable(appimage)
+        || managed_path_kind(&canonical_appimage).ok()? != ManagedPathKind::RegularFile
+        || !path_is_executable(&canonical_appimage)
+        || canonical_appimage.to_str().is_none()
+    {
+        return None;
+    }
+    Some(LinuxAppImageLaunch {
+        path: canonical_appimage,
+        mode,
+    })
+}
+
 #[cfg(target_os = "windows")]
 fn windows_data_dir() -> io::Result<PathBuf> {
     dirs::data_dir()
@@ -837,25 +1267,28 @@ fn install_macos_finder_actions_at_with_localizer(
     loc: &Localizer,
 ) -> io::Result<IntegrationApplyResultDto> {
     let (services_dir, script_dir) = macos_integration_dirs(home);
-    fs::create_dir_all(&services_dir)?;
-    fs::create_dir_all(&script_dir)?;
+    create_managed_directory(home, &services_dir)?;
+    create_managed_directory(home, &script_dir)?;
     let preamble = finder_script_preamble(current_app_bundle_path().as_deref(), loc);
 
     let mut installed = Vec::new();
     for action in FINDER_ACTIONS {
         let name = action_name(action, loc);
-        let workflow_dir = workflow_path_for_name(&services_dir, &name);
+        let workflow_dir = workflow_path_for_action(&services_dir, action);
         remove_stale_workflows(&services_dir, action, &workflow_dir)?;
 
         let script_path = script_dir.join(action.script_name);
+        replace_managed_file(&script_path)?;
         fs::write(
             &script_path,
             format!("{preamble}\n{}", action.script_body.trim_start()),
         )?;
         make_executable(&script_path)?;
 
+        replace_managed_directory(&workflow_dir)?;
         let contents_dir = workflow_dir.join("Contents");
-        fs::create_dir_all(&contents_dir)?;
+        fs::create_dir(&workflow_dir)?;
+        fs::create_dir(&contents_dir)?;
         fs::write(contents_dir.join("Info.plist"), info_plist(action, &name))?;
         fs::write(
             contents_dir.join("document.wflow"),
@@ -956,32 +1389,88 @@ fn macos_finder_actions_status_at_with_localizer(
     loc: &Localizer,
 ) -> io::Result<IntegrationStatusDto> {
     let (services_dir, script_dir) = macos_integration_dirs(home);
-    let mut installed = Vec::new();
-    let mut missing = Vec::new();
+    verify_managed_directory(home, &services_dir)?;
+    verify_managed_directory(home, &script_dir)?;
+    let preamble = finder_script_preamble(current_app_bundle_path().as_deref(), loc);
+    let mut actions = Vec::new();
+    let mut can_remove = false;
     for action in FINDER_ACTIONS {
-        let script = script_dir.join(action.script_name);
-        if script.is_file() {
-            if let Some(workflow) = installed_workflow_dir(&services_dir, action)? {
-                if let Some(name) = workflow_display_name(&workflow) {
-                    installed.push(action_dto_with_name(
-                        action,
-                        &name,
-                        &services_dir,
-                        &script_dir,
-                    ));
-                    continue;
-                }
+        let name = action_name(action, loc);
+        let script_path = script_dir.join(action.script_name);
+        let workflow_path = workflow_path_for_action(&services_dir, action);
+        let script_kind = managed_path_kind(&script_path)?;
+        let workflow_kind = managed_path_kind(&workflow_path)?;
+        let workflows = action_workflow_dirs(&services_dir, action)?;
+        let script_artifact_exists = script_kind != ManagedPathKind::Missing;
+        let workflow_artifact_exists =
+            workflow_kind != ManagedPathKind::Missing || !workflows.is_empty();
+        can_remove |= script_artifact_exists || workflow_artifact_exists;
+
+        let expected_script = format!("{preamble}\n{}", action.script_body.trim_start());
+        let (state, issue) = if !script_artifact_exists && !workflow_artifact_exists {
+            (IntegrationActionHealthStateDto::Missing, None)
+        } else if !script_artifact_exists {
+            (
+                IntegrationActionHealthStateDto::Damaged,
+                Some("script_missing"),
+            )
+        } else if script_kind != ManagedPathKind::RegularFile {
+            (
+                IntegrationActionHealthStateDto::Damaged,
+                Some("script_outdated"),
+            )
+        } else if !workflow_artifact_exists {
+            (
+                IntegrationActionHealthStateDto::Damaged,
+                Some("launcher_missing"),
+            )
+        } else if workflow_kind != ManagedPathKind::Directory {
+            (
+                IntegrationActionHealthStateDto::Damaged,
+                Some("launcher_outdated"),
+            )
+        } else if !path_is_executable(&script_path) {
+            (
+                IntegrationActionHealthStateDto::Damaged,
+                Some("script_not_executable"),
+            )
+        } else if !file_matches(&script_path, expected_script.as_bytes()) {
+            (
+                IntegrationActionHealthStateDto::Damaged,
+                Some("script_outdated"),
+            )
+        } else if workflows.len() != 1 || workflows.first() != Some(&workflow_path) {
+            (
+                IntegrationActionHealthStateDto::Damaged,
+                Some("launcher_outdated"),
+            )
+        } else {
+            let info = workflow_path.join("Contents").join("Info.plist");
+            let document = workflow_path.join("Contents").join("document.wflow");
+            if file_matches(&info, info_plist(action, &name).as_bytes())
+                && file_matches(&document, document_workflow(&name, &script_path).as_bytes())
+            {
+                (IntegrationActionHealthStateDto::Healthy, None)
+            } else {
+                (
+                    IntegrationActionHealthStateDto::Damaged,
+                    Some("launcher_outdated"),
+                )
             }
-        }
-        missing.push(action_name(action, loc));
+        };
+        actions.push(integration_action_health(action.id, &name, state, issue));
     }
+
+    let health = integration_health_state(&actions);
 
     Ok(IntegrationStatusDto {
         platform: "macos".to_owned(),
         services_dir: path_to_string(&services_dir),
         script_dir: path_to_string(&script_dir),
-        installed,
-        missing,
+        health,
+        actions,
+        can_repair: true,
+        can_remove,
         unsupported: Vec::new(),
     })
 }
@@ -1000,16 +1489,31 @@ fn install_linux_file_manager_actions_at_with_localizer(
     home: &Path,
     loc: &Localizer,
 ) -> io::Result<IntegrationApplyResultDto> {
+    install_linux_file_manager_actions_at_with_localizer_and_appimage(
+        home,
+        loc,
+        current_linux_appimage_launch().as_ref(),
+    )
+}
+
+#[cfg(any(target_os = "linux", all(test, target_os = "macos")))]
+fn install_linux_file_manager_actions_at_with_localizer_and_appimage(
+    home: &Path,
+    loc: &Localizer,
+    appimage: Option<&LinuxAppImageLaunch>,
+) -> io::Result<IntegrationApplyResultDto> {
     let (services_dir, script_dir, nautilus_dir) = linux_integration_dirs(home);
-    fs::create_dir_all(&services_dir)?;
-    fs::create_dir_all(&script_dir)?;
-    fs::create_dir_all(&nautilus_dir)?;
-    let preamble = linux_script_preamble(loc);
+    let data_home = linux_data_home(home);
+    create_managed_directory(&data_home, &services_dir)?;
+    create_managed_directory(&data_home, &script_dir)?;
+    create_managed_directory(&data_home, &nautilus_dir)?;
+    let preamble = linux_script_preamble(loc, appimage);
 
     let mut installed = Vec::new();
     for action in LINUX_FILE_MANAGER_ACTIONS {
         let name = linux_action_name(action, loc);
         let script_path = script_dir.join(action.script_name);
+        replace_managed_file(&script_path)?;
         fs::write(
             &script_path,
             format!("{preamble}\n{}", action.script_body.trim_start()),
@@ -1017,13 +1521,16 @@ fn install_linux_file_manager_actions_at_with_localizer(
         make_executable(&script_path)?;
 
         let service_path = linux_service_menu_path(&services_dir, action);
+        replace_managed_file(&service_path)?;
         fs::write(
             &service_path,
             linux_service_menu(action, &name, &script_path),
         )?;
+        make_executable(&service_path)?;
 
         let nautilus_path = linux_nautilus_action_path(&nautilus_dir, &name);
         remove_stale_nautilus_scripts(&nautilus_dir, action, &nautilus_path)?;
+        replace_managed_file(&nautilus_path)?;
         fs::write(
             &nautilus_path,
             linux_nautilus_launcher(action, &script_path),
@@ -1050,7 +1557,7 @@ fn install_linux_file_manager_actions_at_with_localizer(
 }
 
 #[cfg(any(target_os = "linux", all(test, target_os = "macos")))]
-fn linux_script_preamble(loc: &Localizer) -> String {
+fn linux_script_preamble(loc: &Localizer, appimage: Option<&LinuxAppImageLaunch>) -> String {
     LINUX_SCRIPT_PREAMBLE_TEMPLATE
         .replace(
             "{cli_not_found_title}",
@@ -1068,6 +1575,22 @@ fn linux_script_preamble(loc: &Localizer) -> String {
             "{task_window_output_arg}",
             &shell_single_quote_value(EXTERNAL_TASK_OUTPUT_ARG),
         )
+        .replace(
+            "{installed_appimage}",
+            &appimage
+                .and_then(|launch| launch.path.to_str())
+                .map(shell_single_quote_value)
+                .unwrap_or_else(|| "''".to_owned()),
+        )
+        .replace(
+            "{installed_appimage_extract_and_run}",
+            if appimage.is_some_and(|launch| launch.mode == LinuxAppImageLaunchMode::ExtractAndRun)
+            {
+                "'1'"
+            } else {
+                "'0'"
+            },
+        )
 }
 
 #[cfg(any(target_os = "linux", all(test, target_os = "macos")))]
@@ -1084,32 +1607,112 @@ fn linux_file_manager_actions_status_at_with_localizer(
     home: &Path,
     loc: &Localizer,
 ) -> io::Result<IntegrationStatusDto> {
+    linux_file_manager_actions_status_at_with_localizer_and_appimage(
+        home,
+        loc,
+        current_linux_appimage_launch().as_ref(),
+    )
+}
+
+#[cfg(any(target_os = "linux", all(test, target_os = "macos")))]
+fn linux_file_manager_actions_status_at_with_localizer_and_appimage(
+    home: &Path,
+    loc: &Localizer,
+    appimage: Option<&LinuxAppImageLaunch>,
+) -> io::Result<IntegrationStatusDto> {
     let (services_dir, script_dir, nautilus_dir) = linux_integration_dirs(home);
-    let mut installed = Vec::new();
-    let mut missing = Vec::new();
+    let data_home = linux_data_home(home);
+    verify_managed_directory(&data_home, &services_dir)?;
+    verify_managed_directory(&data_home, &script_dir)?;
+    verify_managed_directory(&data_home, &nautilus_dir)?;
+    let preamble = linux_script_preamble(loc, appimage);
+    let mut actions = Vec::new();
+    let mut can_remove = false;
     for action in LINUX_FILE_MANAGER_ACTIONS {
         let name = linux_action_name(action, loc);
-        let script = script_dir.join(action.script_name);
-        let service = linux_service_menu_path(&services_dir, action);
-        let nautilus = installed_nautilus_script(&nautilus_dir, action)?;
-        if script.is_file() && service.is_file() && nautilus.is_some() {
-            installed.push(linux_action_dto_with_name(
-                action,
-                &name,
-                &services_dir,
-                &script_dir,
-            ));
-        } else {
-            missing.push(name);
-        }
+        let script_path = script_dir.join(action.script_name);
+        let service_path = linux_service_menu_path(&services_dir, action);
+        let expected_nautilus_path = linux_nautilus_action_path(&nautilus_dir, &name);
+        let script_kind = managed_path_kind(&script_path)?;
+        let service_kind = managed_path_kind(&service_path)?;
+        let nautilus_kind = managed_path_kind(&expected_nautilus_path)?;
+        let nautilus_scripts = action_nautilus_scripts(&nautilus_dir, action)?;
+        let script_artifact_exists = script_kind != ManagedPathKind::Missing;
+        let service_artifact_exists = service_kind != ManagedPathKind::Missing;
+        let nautilus_artifact_exists =
+            nautilus_kind != ManagedPathKind::Missing || !nautilus_scripts.is_empty();
+        can_remove |= script_artifact_exists || service_artifact_exists || nautilus_artifact_exists;
+
+        let expected_script = format!("{preamble}\n{}", action.script_body.trim_start());
+        let (state, issue) =
+            if !script_artifact_exists && !service_artifact_exists && !nautilus_artifact_exists {
+                (IntegrationActionHealthStateDto::Missing, None)
+            } else if !script_artifact_exists {
+                (
+                    IntegrationActionHealthStateDto::Damaged,
+                    Some("script_missing"),
+                )
+            } else if script_kind != ManagedPathKind::RegularFile {
+                (
+                    IntegrationActionHealthStateDto::Damaged,
+                    Some("script_outdated"),
+                )
+            } else if !service_artifact_exists || !nautilus_artifact_exists {
+                (
+                    IntegrationActionHealthStateDto::Damaged,
+                    Some("launcher_missing"),
+                )
+            } else if service_kind != ManagedPathKind::RegularFile
+                || nautilus_kind != ManagedPathKind::RegularFile
+            {
+                (
+                    IntegrationActionHealthStateDto::Damaged,
+                    Some("launcher_outdated"),
+                )
+            } else if !path_is_executable(&script_path)
+                || !path_is_executable(&service_path)
+                || !path_is_executable(&expected_nautilus_path)
+            {
+                (
+                    IntegrationActionHealthStateDto::Damaged,
+                    Some("script_not_executable"),
+                )
+            } else if !file_matches(&script_path, expected_script.as_bytes()) {
+                (
+                    IntegrationActionHealthStateDto::Damaged,
+                    Some("script_outdated"),
+                )
+            } else if nautilus_scripts.len() != 1
+                || nautilus_scripts.first() != Some(&expected_nautilus_path)
+                || !file_matches(
+                    &service_path,
+                    linux_service_menu(action, &name, &script_path).as_bytes(),
+                )
+                || !file_matches(
+                    &expected_nautilus_path,
+                    linux_nautilus_launcher(action, &script_path).as_bytes(),
+                )
+            {
+                (
+                    IntegrationActionHealthStateDto::Damaged,
+                    Some("launcher_outdated"),
+                )
+            } else {
+                (IntegrationActionHealthStateDto::Healthy, None)
+            };
+        actions.push(integration_action_health(action.id, &name, state, issue));
     }
+
+    let health = integration_health_state(&actions);
 
     Ok(IntegrationStatusDto {
         platform: "linux".to_owned(),
         services_dir: path_to_string(&services_dir),
         script_dir: path_to_string(&script_dir),
-        installed,
-        missing,
+        health,
+        actions,
+        can_repair: true,
+        can_remove,
         unsupported: Vec::new(),
     })
 }
@@ -1129,26 +1732,27 @@ fn remove_linux_file_manager_actions_at_with_localizer(
     loc: &Localizer,
 ) -> io::Result<IntegrationRemoveResultDto> {
     let (services_dir, script_dir, nautilus_dir) = linux_integration_dirs(home);
+    let data_home = linux_data_home(home);
+    verify_managed_directory(&data_home, &services_dir)?;
+    verify_managed_directory(&data_home, &script_dir)?;
+    verify_managed_directory(&data_home, &nautilus_dir)?;
     let mut removed = Vec::new();
     let mut missing = Vec::new();
 
     for action in LINUX_FILE_MANAGER_ACTIONS {
         let script = script_dir.join(action.script_name);
         let service = linux_service_menu_path(&services_dir, action);
-        let mut existed = script.exists() || service.exists();
-
-        if script.exists() {
-            fs::remove_file(&script)?;
-        }
-        if service.exists() {
-            fs::remove_file(&service)?;
-        }
-        for nautilus in action_nautilus_scripts(&nautilus_dir, action)? {
-            fs::remove_file(nautilus)?;
-            existed = true;
-        }
-
         let name = linux_action_name(action, loc);
+        let expected_nautilus = linux_nautilus_action_path(&nautilus_dir, &name);
+        let mut existed = remove_owned_file(&script)?;
+        existed |= remove_owned_file(&service)?;
+        for nautilus in action_nautilus_scripts(&nautilus_dir, action)? {
+            if nautilus != expected_nautilus {
+                existed |= remove_owned_file(&nautilus)?;
+            }
+        }
+        existed |= remove_owned_file(&expected_nautilus)?;
+
         if existed {
             removed.push(linux_action_dto_with_name(
                 action,
@@ -1193,13 +1797,14 @@ fn install_windows_explorer_actions_at_with_localizer(
     loc: &Localizer,
 ) -> io::Result<IntegrationApplyResultDto> {
     let (services_dir, script_dir) = windows_integration_dirs(data_dir);
-    fs::create_dir_all(&script_dir)?;
+    create_managed_directory(data_dir, &script_dir)?;
     let preamble = windows_script_preamble(loc);
 
     let mut installed = Vec::new();
     for action in WINDOWS_EXPLORER_ACTIONS {
         let name = windows_action_name(action, loc);
         let script_path = script_dir.join(action.script_name);
+        replace_managed_file(&script_path)?;
         fs::write(
             &script_path,
             format!("{preamble}\n{}", action.script_body.trim_start()),
@@ -1212,10 +1817,9 @@ fn install_windows_explorer_actions_at_with_localizer(
         ));
     }
 
-    fs::write(
-        windows_registry_manifest_path(&script_dir),
-        windows_registry_manifest(&script_dir, loc),
-    )?;
+    let manifest_path = windows_registry_manifest_path(&script_dir);
+    replace_managed_file(&manifest_path)?;
+    fs::write(manifest_path, windows_registry_manifest(&script_dir, loc))?;
     apply_windows_explorer_registry_entries(&script_dir, loc)?;
 
     Ok(IntegrationApplyResultDto {
@@ -1242,29 +1846,70 @@ fn windows_explorer_actions_status_at_with_localizer(
     loc: &Localizer,
 ) -> io::Result<IntegrationStatusDto> {
     let (services_dir, script_dir) = windows_integration_dirs(data_dir);
-    let mut installed = Vec::new();
-    let mut missing = Vec::new();
+    verify_managed_directory(data_dir, &script_dir)?;
+    let preamble = windows_script_preamble(loc);
+    let mut actions = Vec::new();
+    let manifest_path = windows_registry_manifest_path(&script_dir);
+    let manifest_kind = managed_path_kind(&manifest_path)?;
+    let manifest_exists = manifest_kind != ManagedPathKind::Missing;
+    let manifest_matches = file_matches(
+        &manifest_path,
+        windows_registry_manifest(&script_dir, loc).as_bytes(),
+    );
+    let mut can_remove = manifest_exists;
     for action in WINDOWS_EXPLORER_ACTIONS {
         let name = windows_action_name(action, loc);
-        let script = script_dir.join(action.script_name);
-        if script.is_file() && windows_explorer_registry_entries_installed(&script_dir, action) {
-            installed.push(windows_action_dto_with_name(
-                action,
-                &name,
-                &services_dir,
-                &script_dir,
-            ));
+        let script_path = script_dir.join(action.script_name);
+        let script_kind = managed_path_kind(&script_path)?;
+        let script_artifact_exists = script_kind != ManagedPathKind::Missing;
+        let registry_present = windows_explorer_registry_entries_present(&script_dir, action);
+        let registry_matches = windows_explorer_registry_entries_match(&script_dir, action, loc);
+        can_remove |= script_artifact_exists || registry_present;
+
+        let expected_script = format!("{preamble}\n{}", action.script_body.trim_start());
+        let (state, issue) = if !script_artifact_exists && !registry_present && !manifest_exists {
+            (IntegrationActionHealthStateDto::Missing, None)
+        } else if !script_artifact_exists {
+            (
+                IntegrationActionHealthStateDto::Damaged,
+                Some("script_missing"),
+            )
+        } else if script_kind != ManagedPathKind::RegularFile {
+            (
+                IntegrationActionHealthStateDto::Damaged,
+                Some("script_outdated"),
+            )
+        } else if !registry_present {
+            (
+                IntegrationActionHealthStateDto::Damaged,
+                Some("registry_missing"),
+            )
+        } else if !file_matches(&script_path, expected_script.as_bytes()) {
+            (
+                IntegrationActionHealthStateDto::Damaged,
+                Some("script_outdated"),
+            )
+        } else if !registry_matches || !manifest_matches {
+            (
+                IntegrationActionHealthStateDto::Damaged,
+                Some("registry_outdated"),
+            )
         } else {
-            missing.push(name);
-        }
+            (IntegrationActionHealthStateDto::Healthy, None)
+        };
+        actions.push(integration_action_health(action.id, &name, state, issue));
     }
+
+    let health = integration_health_state(&actions);
 
     Ok(IntegrationStatusDto {
         platform: "windows".to_owned(),
         services_dir,
         script_dir: path_to_string(&script_dir),
-        installed,
-        missing,
+        health,
+        actions,
+        can_repair: true,
+        can_remove,
         unsupported: Vec::new(),
     })
 }
@@ -1284,21 +1929,23 @@ fn remove_windows_explorer_actions_at_with_localizer(
     loc: &Localizer,
 ) -> io::Result<IntegrationRemoveResultDto> {
     let (services_dir, script_dir) = windows_integration_dirs(data_dir);
+    verify_managed_directory(data_dir, &script_dir)?;
     let mut removed = Vec::new();
     let mut missing = Vec::new();
+    let manifest = windows_registry_manifest_path(&script_dir);
+    let manifest_exists = managed_path_kind(&manifest)? != ManagedPathKind::Missing;
 
     for action in WINDOWS_EXPLORER_ACTIONS {
         let script = script_dir.join(action.script_name);
-        let existed =
-            script.exists() || windows_explorer_registry_entries_installed(&script_dir, action);
+        let existed = managed_path_kind(&script)? != ManagedPathKind::Missing
+            || windows_explorer_registry_entries_present(&script_dir, action)
+            || manifest_exists;
 
-        if script.exists() {
-            fs::remove_file(&script)?;
-        }
         remove_windows_explorer_registry_entries(action)?;
+        let script_removed = remove_owned_file(&script)?;
 
         let name = windows_action_name(action, loc);
-        if existed {
+        if existed || script_removed {
             removed.push(windows_action_dto_with_name(
                 action,
                 &name,
@@ -1310,10 +1957,7 @@ fn remove_windows_explorer_actions_at_with_localizer(
         }
     }
 
-    let manifest = windows_registry_manifest_path(&script_dir);
-    if manifest.exists() {
-        fs::remove_file(manifest)?;
-    }
+    let _ = remove_owned_file(&manifest)?;
     if directory_is_empty(&script_dir) {
         let _ = fs::remove_dir(&script_dir);
     }
@@ -1343,19 +1987,22 @@ fn remove_macos_finder_actions_at_with_localizer(
     loc: &Localizer,
 ) -> io::Result<IntegrationRemoveResultDto> {
     let (services_dir, script_dir) = macos_integration_dirs(home);
+    verify_managed_directory(home, &services_dir)?;
+    verify_managed_directory(home, &script_dir)?;
     let mut removed = Vec::new();
     let mut missing = Vec::new();
 
     for action in FINDER_ACTIONS {
         let script = script_dir.join(action.script_name);
-        let mut existed = script.exists();
+        let fixed_workflow = workflow_path_for_action(&services_dir, action);
+        let mut existed = managed_path_kind(&script)? != ManagedPathKind::Missing;
         for workflow in action_workflow_dirs(&services_dir, action)? {
-            fs::remove_dir_all(&workflow)?;
-            existed = true;
+            if workflow != fixed_workflow {
+                existed |= remove_owned_directory(&workflow)?;
+            }
         }
-        if script.exists() {
-            fs::remove_file(&script)?;
-        }
+        existed |= remove_owned_directory(&fixed_workflow)?;
+        existed |= remove_owned_file(&script)?;
         if existed {
             let name = action_name(action, loc);
             removed.push(action_dto_with_name(
@@ -1381,6 +2028,189 @@ fn remove_macos_finder_actions_at_with_localizer(
         missing,
         unsupported: Vec::new(),
     })
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ManagedPathKind {
+    Missing,
+    RegularFile,
+    Directory,
+    SymbolicLink,
+    Other,
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn managed_path_kind(path: &Path) -> io::Result<ManagedPathKind> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(ManagedPathKind::Missing);
+        }
+        Err(error) => return Err(error),
+    };
+    let file_type = metadata.file_type();
+    if file_type.is_symlink() {
+        Ok(ManagedPathKind::SymbolicLink)
+    } else if file_type.is_file() {
+        Ok(ManagedPathKind::RegularFile)
+    } else if file_type.is_dir() {
+        Ok(ManagedPathKind::Directory)
+    } else {
+        Ok(ManagedPathKind::Other)
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn replace_managed_file(path: &Path) -> io::Result<()> {
+    match managed_path_kind(path)? {
+        ManagedPathKind::Missing => Ok(()),
+        ManagedPathKind::RegularFile => fs::remove_file(path),
+        ManagedPathKind::Directory | ManagedPathKind::SymbolicLink | ManagedPathKind::Other => {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "refusing to replace an unexpected integration file type",
+            ))
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn replace_managed_directory(path: &Path) -> io::Result<()> {
+    match managed_path_kind(path)? {
+        ManagedPathKind::Missing => Ok(()),
+        ManagedPathKind::Directory => fs::remove_dir_all(path),
+        ManagedPathKind::RegularFile | ManagedPathKind::SymbolicLink | ManagedPathKind::Other => {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "refusing to replace an unexpected integration directory type",
+            ))
+        }
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn remove_owned_file(path: &Path) -> io::Result<bool> {
+    match managed_path_kind(path)? {
+        ManagedPathKind::Missing => Ok(false),
+        ManagedPathKind::Directory => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "refusing to remove a directory where an integration file is expected",
+        )),
+        ManagedPathKind::RegularFile | ManagedPathKind::SymbolicLink | ManagedPathKind::Other => {
+            fs::remove_file(path)?;
+            Ok(true)
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn remove_owned_directory(path: &Path) -> io::Result<bool> {
+    match managed_path_kind(path)? {
+        ManagedPathKind::Missing => Ok(false),
+        ManagedPathKind::Directory => fs::remove_dir_all(path).map(|()| true),
+        ManagedPathKind::RegularFile | ManagedPathKind::SymbolicLink | ManagedPathKind::Other => {
+            fs::remove_file(path).map(|()| true)
+        }
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn create_managed_directory(root: &Path, path: &Path) -> io::Result<()> {
+    fs::create_dir_all(root)?;
+    let relative = path.strip_prefix(root).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "integration directory is outside its managed root",
+        )
+    })?;
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        let std::path::Component::Normal(name) = component else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "integration directory contains an invalid component",
+            ));
+        };
+        current.push(name);
+        match managed_path_kind(&current)? {
+            ManagedPathKind::Missing => fs::create_dir(&current)?,
+            ManagedPathKind::Directory => {}
+            ManagedPathKind::RegularFile
+            | ManagedPathKind::SymbolicLink
+            | ManagedPathKind::Other => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "integration directory contains an unexpected file type",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn verify_managed_directory(root: &Path, path: &Path) -> io::Result<()> {
+    let relative = path.strip_prefix(root).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "integration directory is outside its managed root",
+        )
+    })?;
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        let std::path::Component::Normal(name) = component else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "integration directory contains an invalid component",
+            ));
+        };
+        current.push(name);
+        match managed_path_kind(&current)? {
+            ManagedPathKind::Missing => return Ok(()),
+            ManagedPathKind::Directory => {}
+            ManagedPathKind::RegularFile
+            | ManagedPathKind::SymbolicLink
+            | ManagedPathKind::Other => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "integration directory contains an unexpected file type",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn file_matches(path: &Path, expected: &[u8]) -> bool {
+    if !matches!(managed_path_kind(path), Ok(ManagedPathKind::RegularFile)) {
+        return false;
+    }
+    let Ok(mut file) = File::open(path) else {
+        return false;
+    };
+    let Ok(metadata) = file.metadata() else {
+        return false;
+    };
+    let Ok(expected_len) = u64::try_from(expected.len()) else {
+        return false;
+    };
+    if metadata.len() != expected_len {
+        return false;
+    }
+
+    let mut actual = vec![0; expected.len()];
+    file.read_exact(&mut actual).is_ok() && actual == expected
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn path_is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
+    matches!(managed_path_kind(path), Ok(ManagedPathKind::RegularFile))
+        && fs::symlink_metadata(path)
+            .is_ok_and(|metadata| metadata.permissions().mode() & 0o111 != 0)
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
@@ -1420,8 +2250,18 @@ fn linux_integration_dirs(home: &Path) -> (PathBuf, PathBuf, PathBuf) {
 
 #[cfg(any(target_os = "linux", all(test, target_os = "macos")))]
 fn linux_data_home(home: &Path) -> PathBuf {
-    match std::env::var_os("XDG_DATA_HOME").filter(|value| !value.is_empty()) {
-        Some(path) => PathBuf::from(path),
+    let value = std::env::var_os("XDG_DATA_HOME");
+    linux_data_home_from_env(home, value.as_deref())
+}
+
+#[cfg(any(target_os = "linux", all(test, target_os = "macos")))]
+fn linux_data_home_from_env(home: &Path, value: Option<&std::ffi::OsStr>) -> PathBuf {
+    match value
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+    {
+        Some(path) => path,
         None => home.join(".local").join("share"),
     }
 }
@@ -1446,7 +2286,8 @@ fn safe_visible_file_name(name: &str) -> String {
             out.push(ch);
         }
     }
-    if out.trim().is_empty() {
+    let trimmed = out.trim();
+    if trimmed.is_empty() || matches!(trimmed, "." | "..") {
         "Squallz Action".to_owned()
     } else {
         out
@@ -1478,7 +2319,7 @@ Exec={} %F
         desktop_entry_escape(&action_id),
         desktop_entry_escape(&action_id),
         desktop_entry_escape(name),
-        shell_single_quote_value(&path_to_string(script_path)),
+        desktop_exec_argument(&path_to_string(script_path)),
     )
 }
 
@@ -1511,28 +2352,21 @@ fn remove_stale_nautilus_scripts(
 }
 
 #[cfg(any(target_os = "linux", all(test, target_os = "macos")))]
-fn installed_nautilus_script(
-    nautilus_dir: &Path,
-    action: &LinuxFileManagerAction,
-) -> io::Result<Option<PathBuf>> {
-    Ok(action_nautilus_scripts(nautilus_dir, action)?
-        .into_iter()
-        .next())
-}
-
-#[cfg(any(target_os = "linux", all(test, target_os = "macos")))]
 fn action_nautilus_scripts(
     nautilus_dir: &Path,
     action: &LinuxFileManagerAction,
 ) -> io::Result<Vec<PathBuf>> {
-    let Ok(entries) = fs::read_dir(nautilus_dir) else {
-        return Ok(Vec::new());
+    let entries = match fs::read_dir(nautilus_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
     };
     let marker = format!("SQUALLZ_ACTION_ID={}", action.id);
     let mut scripts = Vec::new();
     for entry in entries {
         let path = entry?.path();
-        if !path.is_file() {
+        let metadata = fs::symlink_metadata(&path)?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
             continue;
         }
         if file_contains(&path, &marker) {
@@ -1578,6 +2412,29 @@ fn desktop_entry_escape(value: &str) -> String {
         .replace('\r', "")
 }
 
+#[cfg(any(target_os = "linux", all(test, target_os = "macos")))]
+fn desktop_exec_argument(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len() + 2);
+    escaped.push('"');
+    for character in value.chars() {
+        match character {
+            '\\' => escaped.push_str("\\\\\\\\"),
+            '"' | '$' | '`' => {
+                escaped.push('\\');
+                escaped.push('\\');
+                escaped.push(character);
+            }
+            '%' => escaped.push_str("%%"),
+            '\n' => escaped.push_str("\\n"),
+            '\t' => escaped.push_str("\\t"),
+            '\r' => escaped.push_str("\\r"),
+            _ => escaped.push(character),
+        }
+    }
+    escaped.push('"');
+    escaped
+}
+
 #[cfg(any(target_os = "windows", all(test, target_os = "macos")))]
 const WINDOWS_ARCHIVE_EXTENSIONS: &[&str] = &[
     ".zip", ".jar", ".apk", ".cbz", ".ipa", ".7z", ".rar", ".cbr", ".sqz", ".tar", ".tgz", ".tbz2",
@@ -1595,6 +2452,20 @@ fn windows_integration_dirs(data_dir: &Path) -> (String, PathBuf) {
 
 #[cfg(any(target_os = "windows", all(test, target_os = "macos")))]
 fn windows_registry_root() -> &'static str {
+    #[cfg(all(test, target_os = "windows"))]
+    {
+        static TEST_ROOT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        return TEST_ROOT
+            .get_or_init(|| {
+                format!(
+                    "HKEY_CURRENT_USER\\Software\\Squallz\\Tests\\{}",
+                    std::process::id()
+                )
+            })
+            .as_str();
+    }
+
+    #[cfg(not(all(test, target_os = "windows")))]
     "HKEY_CURRENT_USER\\Software\\Classes"
 }
 
@@ -1764,17 +2635,17 @@ fn remove_windows_explorer_registry_entries(_action: &WindowsExplorerAction) -> 
 }
 
 #[cfg(target_os = "windows")]
-fn windows_explorer_registry_entries_installed(
+fn windows_explorer_registry_entries_present(
     _script_dir: &Path,
     action: &WindowsExplorerAction,
 ) -> bool {
     windows_registry_keys(action)
         .iter()
-        .all(|key| windows_registry_key_exists(key))
+        .any(|key| windows_registry_key_exists(key))
 }
 
 #[cfg(all(test, target_os = "macos"))]
-fn windows_explorer_registry_entries_installed(
+fn windows_explorer_registry_entries_present(
     script_dir: &Path,
     action: &WindowsExplorerAction,
 ) -> bool {
@@ -1784,13 +2655,66 @@ fn windows_explorer_registry_entries_installed(
     };
     windows_registry_keys(action)
         .iter()
-        .all(|key| contents.contains(key))
+        .any(|key| contents.contains(key))
+}
+
+#[cfg(target_os = "windows")]
+fn windows_explorer_registry_entries_match(
+    script_dir: &Path,
+    action: &WindowsExplorerAction,
+    loc: &Localizer,
+) -> bool {
+    let name = windows_action_name(action, loc);
+    let command = windows_registry_command(&script_dir.join(action.script_name));
+    windows_registry_keys(action).iter().all(|key| {
+        windows_registry_value_matches(key, None, &name)
+            && windows_registry_value_matches(key, Some("Icon"), "squallz-gui.exe")
+            && windows_registry_value_matches(key, Some("MultiSelectModel"), "Player")
+            && windows_registry_value_matches(&format!("{key}\\command"), None, &command)
+    })
+}
+
+#[cfg(all(test, target_os = "macos"))]
+fn windows_explorer_registry_entries_match(
+    script_dir: &Path,
+    action: &WindowsExplorerAction,
+    _loc: &Localizer,
+) -> bool {
+    let manifest = windows_registry_manifest_path(script_dir);
+    let Ok(contents) = fs::read_to_string(manifest) else {
+        return false;
+    };
+    windows_registry_keys(action)
+        .iter()
+        .all(|key| contents.contains(&format!("[{key}]")))
 }
 
 #[cfg(target_os = "windows")]
 fn windows_registry_key_exists(key: &str) -> bool {
     std::process::Command::new("reg.exe")
         .args(["query", key])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+#[cfg(target_os = "windows")]
+fn windows_registry_value_matches(key: &str, name: Option<&str>, expected: &str) -> bool {
+    let mut command = std::process::Command::new("reg.exe");
+    command.args(["query", key]);
+    match name {
+        Some(name) => {
+            command.args(["/v", name]);
+        }
+        None => {
+            command.arg("/ve");
+        }
+    }
+    command
+        .args(["/f", expected, "/d", "/e"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .status()
         .is_ok_and(|status| status.success())
 }
@@ -1812,19 +2736,20 @@ fn windows_reg_delete_key(key: &str) -> io::Result<()> {
 
 #[cfg(target_os = "windows")]
 fn windows_reg_command<const N: usize>(args: [&str; N]) -> io::Result<()> {
-    let status = std::process::Command::new("reg.exe").args(args).status()?;
-    if status.success() {
+    let output = std::process::Command::new("reg.exe").args(args).output()?;
+    if output.status.success() {
         Ok(())
     } else {
         Err(io::Error::other(format!(
-            "reg.exe failed with status {status}"
+            "reg.exe failed with status {}",
+            output.status
         )))
     }
 }
 
 #[cfg(target_os = "macos")]
-fn workflow_path_for_name(services_dir: &Path, name: &str) -> std::path::PathBuf {
-    services_dir.join(format!("{name}.workflow"))
+fn workflow_path_for_action(services_dir: &Path, action: &FinderAction) -> std::path::PathBuf {
+    services_dir.join(format!("Squallz-{}.workflow", action.id))
 }
 
 #[cfg(target_os = "macos")]
@@ -1837,31 +2762,27 @@ fn remove_stale_workflows(
         if workflow == selected_workflow {
             continue;
         }
-        fs::remove_dir_all(workflow)?;
+        let _ = remove_owned_directory(&workflow)?;
     }
     Ok(())
 }
 
 #[cfg(target_os = "macos")]
-fn installed_workflow_dir(
-    services_dir: &Path,
-    action: &FinderAction,
-) -> io::Result<Option<PathBuf>> {
-    Ok(action_workflow_dirs(services_dir, action)?
-        .into_iter()
-        .next())
-}
-
-#[cfg(target_os = "macos")]
 fn action_workflow_dirs(services_dir: &Path, action: &FinderAction) -> io::Result<Vec<PathBuf>> {
-    let Ok(entries) = fs::read_dir(services_dir) else {
-        return Ok(Vec::new());
+    let entries = match fs::read_dir(services_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
     };
     let bundle_id = action_bundle_id(action);
     let mut workflows = Vec::new();
     for entry in entries {
         let path = entry?.path();
         if path.extension().and_then(|ext| ext.to_str()) != Some("workflow") {
+            continue;
+        }
+        let metadata = fs::symlink_metadata(&path)?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
             continue;
         }
         let document = path.join("Contents").join("document.wflow");
@@ -1892,14 +2813,6 @@ fn workflow_has_bundle_id(workflow: &Path, bundle_id: &str) -> bool {
 }
 
 #[cfg(target_os = "macos")]
-fn workflow_display_name(workflow: &Path) -> Option<String> {
-    workflow
-        .file_stem()
-        .and_then(|name| name.to_str())
-        .map(ToOwned::to_owned)
-}
-
-#[cfg(target_os = "macos")]
 fn action_dto_with_name(
     action: &FinderAction,
     name: &str,
@@ -1910,7 +2823,7 @@ fn action_dto_with_name(
         id: action.id.to_owned(),
         name: name.to_owned(),
         kind: "macos_finder_quick_action".to_owned(),
-        path: path_to_string(&workflow_path_for_name(services_dir, name)),
+        path: path_to_string(&workflow_path_for_action(services_dir, action)),
         script_path: path_to_string(&script_dir.join(action.script_name)),
     }
 }
@@ -2077,16 +2990,125 @@ mod tests {
         directory_is_empty, finder_script_preamble, install_macos_finder_actions_at_with_language,
         install_macos_finder_actions_at_with_localizer,
         macos_finder_actions_status_at_with_language,
-        macos_finder_actions_status_at_with_localizer,
+        macos_finder_actions_status_at_with_localizer, macos_integration_dirs,
         remove_macos_finder_actions_at_with_language,
-        remove_macos_finder_actions_at_with_localizer,
+        remove_macos_finder_actions_at_with_localizer, summarize_default_handlers,
+        MACOS_DECLARED_FILE_EXTENSIONS, SQUALLZ_BUNDLE_IDENTIFIER,
+    };
+    use crate::dto::{
+        IntegrationActionHealthStateDto, IntegrationDefaultHandlerDto,
+        IntegrationDefaultHandlerStateDto, IntegrationDefaultHandlersStateDto,
+        IntegrationHealthStateDto,
     };
     use squallz_i18n::Localizer;
     use std::fs;
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{symlink, PermissionsExt};
     use std::path::{Path, PathBuf};
     use std::process::{Command, Stdio};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn default_handler_summary_keeps_unknown_and_mixed_states_distinct() {
+        let all_squallz = summarize_default_handlers(vec![
+            default_handler("zip", IntegrationDefaultHandlerStateDto::Squallz),
+            default_handler("7z", IntegrationDefaultHandlerStateDto::Squallz),
+        ]);
+        assert_eq!(
+            all_squallz.state,
+            IntegrationDefaultHandlersStateDto::Squallz
+        );
+        assert_eq!(all_squallz.checked, 2);
+        assert_eq!(all_squallz.squallz, 2);
+
+        let mixed = summarize_default_handlers(vec![
+            default_handler("zip", IntegrationDefaultHandlerStateDto::Other),
+            default_handler("sqz", IntegrationDefaultHandlerStateDto::Squallz),
+        ]);
+        assert_eq!(mixed.state, IntegrationDefaultHandlersStateDto::Mixed);
+        assert_eq!(mixed.squallz, 1);
+
+        let all_other = summarize_default_handlers(vec![default_handler(
+            "zip",
+            IntegrationDefaultHandlerStateDto::Other,
+        )]);
+        assert_eq!(all_other.state, IntegrationDefaultHandlersStateDto::Other);
+
+        let partial = summarize_default_handlers(vec![
+            default_handler("zip", IntegrationDefaultHandlerStateDto::Other),
+            default_handler("sqz", IntegrationDefaultHandlerStateDto::Unknown),
+        ]);
+        assert_eq!(partial.state, IntegrationDefaultHandlersStateDto::Unknown);
+        assert_eq!(partial.total, 2);
+        assert_eq!(partial.checked, 1);
+
+        let unavailable = summarize_default_handlers(Vec::new());
+        assert_eq!(
+            unavailable.state,
+            IntegrationDefaultHandlersStateDto::Unavailable
+        );
+    }
+
+    #[test]
+    fn default_handler_probe_extensions_match_the_bundle_declaration() {
+        let config: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        let identifier = config
+            .get("identifier")
+            .and_then(serde_json::Value::as_str)
+            .unwrap();
+        assert_eq!(identifier, SQUALLZ_BUNDLE_IDENTIFIER);
+
+        let declared = config
+            .pointer("/bundle/fileAssociations")
+            .and_then(serde_json::Value::as_array)
+            .unwrap()
+            .iter()
+            .flat_map(|association| {
+                association
+                    .get("ext")
+                    .and_then(serde_json::Value::as_array)
+                    .into_iter()
+                    .flatten()
+            })
+            .filter_map(serde_json::Value::as_str)
+            .collect::<Vec<_>>();
+        assert_eq!(declared, MACOS_DECLARED_FILE_EXTENSIONS);
+    }
+
+    #[test]
+    fn bundle_declares_complete_cross_platform_icon_set() {
+        let config: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        let icons = config
+            .pointer("/bundle/icon")
+            .and_then(serde_json::Value::as_array)
+            .unwrap()
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            icons,
+            [
+                "icons/32x32.png",
+                "icons/128x128.png",
+                "icons/128x128@2x.png",
+                "icons/icon.icns",
+                "icons/icon.ico",
+            ]
+        );
+    }
+
+    fn default_handler(
+        extension: &str,
+        state: IntegrationDefaultHandlerStateDto,
+    ) -> IntegrationDefaultHandlerDto {
+        IntegrationDefaultHandlerDto {
+            extension: extension.to_owned(),
+            state,
+            application_name: None,
+        }
+    }
 
     #[test]
     fn finder_script_preamble_localizes_cli_error_alert() {
@@ -2096,6 +3118,7 @@ mod tests {
         assert!(preamble.contains("找不到 Squallz 命令行工具"));
         assert!(preamble.contains("访达快捷操作"));
         assert!(preamble.contains("CLI_NOT_FOUND_ALERT='display alert"));
+        assert!(preamble.contains("SQUALLZ_DISABLE_GUI_HANDOFF"));
     }
 
     #[test]
@@ -2151,6 +3174,7 @@ mod tests {
             assert!(script.is_file());
             let body = fs::read_to_string(script).unwrap();
             assert!(body.contains("resolve_sqz"));
+            assert!(body.contains("Contents/MacOS/sqz"));
             assert!(body.contains("Contents/Resources/bin/sqz"));
             assert!(body.contains("run_gui_task"));
             assert!(body.contains("--squallz-action"));
@@ -2176,8 +3200,37 @@ mod tests {
         }
 
         let status = macos_finder_actions_status_at_with_language(&home, None).unwrap();
-        assert_eq!(status.installed.len(), 5);
-        assert!(status.missing.is_empty());
+        assert_eq!(status.actions.len(), 5);
+        assert_eq!(status.health, IntegrationHealthStateDto::Healthy);
+        assert!(status.can_repair);
+        assert!(status.can_remove);
+        assert!(status
+            .actions
+            .iter()
+            .all(|action| action.state == IntegrationActionHealthStateDto::Healthy));
+
+        let checksum_script = result
+            .installed
+            .iter()
+            .find(|action| action.id == "checksum")
+            .map(|action| action.script_path.clone())
+            .unwrap();
+        fs::write(&checksum_script, b"#!/bin/zsh\nexit 1\n").unwrap();
+        let damaged = macos_finder_actions_status_at_with_language(&home, None).unwrap();
+        assert_eq!(damaged.health, IntegrationHealthStateDto::NeedsRepair);
+        let checksum_health = damaged
+            .actions
+            .iter()
+            .find(|action| action.id == "checksum")
+            .unwrap();
+        assert_eq!(
+            checksum_health.state,
+            IntegrationActionHealthStateDto::Damaged
+        );
+        assert_eq!(checksum_health.issue.as_deref(), Some("script_outdated"));
+        install_macos_finder_actions_at_with_language(&home, None).unwrap();
+        let repaired = macos_finder_actions_status_at_with_language(&home, None).unwrap();
+        assert_eq!(repaired.health, IntegrationHealthStateDto::Healthy);
 
         let fake_sqz = home.join("fake-sqz");
         let log = home.join("sqz-args.log");
@@ -2256,24 +3309,32 @@ mod tests {
         let parent = sample.to_string_lossy().into_owned();
         let log = fs::read_to_string(&log).unwrap();
         assert!(
-            log.contains(&format!("<extract><{one}><-d><{parent}><--smart>")),
-            "log: {log}"
-        );
-        assert!(
-            log.contains(&format!("<extract><{two}><-d><{parent}><--smart>")),
-            "log: {log}"
-        );
-        assert!(
-            log.contains(&format!("<extract><{one}><-d><{parent}/one>")),
-            "log: {log}"
-        );
-        assert!(
-            log.contains(&format!("<extract><{two}><-d><{parent}/two>")),
+            log.contains(&format!(
+                "<extract><{one}><-d><{parent}><--smart><--file-manager-preset>"
+            )),
             "log: {log}"
         );
         assert!(
             log.contains(&format!(
-                "<compress><{plain}><{folder}><-o><{parent}/Archive.7z><--level><5>"
+                "<extract><{two}><-d><{parent}><--smart><--file-manager-preset>"
+            )),
+            "log: {log}"
+        );
+        assert!(
+            log.contains(&format!(
+                "<extract><{one}><-d><{parent}/one><--file-manager-preset>"
+            )),
+            "log: {log}"
+        );
+        assert!(
+            log.contains(&format!(
+                "<extract><{two}><-d><{parent}/two><--file-manager-preset>"
+            )),
+            "log: {log}"
+        );
+        assert!(
+            log.contains(&format!(
+                "<compress><{plain}><{folder}><-o><{parent}/Archive.7z><--file-manager-preset>"
             )),
             "log: {log}"
         );
@@ -2293,8 +3354,12 @@ mod tests {
         assert!(removed.missing.is_empty());
 
         let status = macos_finder_actions_status_at_with_language(&home, None).unwrap();
-        assert!(status.installed.is_empty());
-        assert_eq!(status.missing.len(), 5);
+        assert!(status
+            .actions
+            .iter()
+            .all(|action| action.state == IntegrationActionHealthStateDto::Missing));
+        assert_eq!(status.health, IntegrationHealthStateDto::Missing);
+        assert!(!status.can_remove);
 
         let _ = fs::remove_dir_all(home);
     }
@@ -2341,10 +3406,9 @@ mod tests {
         assert!(script_text.contains("XX install CLI"));
 
         let status = macos_finder_actions_status_at_with_localizer(&home, &loc).unwrap();
-        assert_eq!(status.installed.len(), 5);
-        assert!(status.missing.is_empty());
+        assert_eq!(status.actions.len(), 5);
         assert!(status
-            .installed
+            .actions
             .iter()
             .any(|item| item.name == "Squallz XX Extract"));
 
@@ -2357,7 +3421,145 @@ mod tests {
     }
 
     #[test]
-    fn localized_finder_install_replaces_legacy_english_workflows() {
+    fn finder_workflow_paths_do_not_depend_on_localized_names() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let home = std::env::temp_dir().join(format!("squallz-integration-safe-name-{nonce}"));
+        let locale_dir =
+            std::env::temp_dir().join(format!("squallz-integration-safe-locale-{nonce}"));
+        fs::create_dir_all(&locale_dir).unwrap();
+        fs::write(
+            locale_dir.join("xx-XX.json"),
+            r#"{
+  "meta.name": "XX",
+  "gui.integration.finder.action.checksum": "../Outside",
+  "gui.integration.finder.action.extract_here": "/tmp/Outside",
+  "gui.integration.finder.action.extract_to_folder": "Nested/Outside",
+  "gui.integration.finder.action.compress_to_7z": ".",
+  "gui.integration.finder.action.test_archive": ".."
+}"#,
+        )
+        .unwrap();
+        let loc = Localizer::with_user_dir(Some("xx-XX"), Some(&locale_dir));
+
+        let result = install_macos_finder_actions_at_with_localizer(&home, &loc).unwrap();
+        let (services_dir, _) = macos_integration_dirs(&home);
+        assert_eq!(result.installed.len(), 5);
+        for action in result.installed {
+            let workflow = Path::new(&action.path);
+            assert_eq!(workflow.parent(), Some(services_dir.as_path()));
+            assert!(workflow
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("Squallz-") && name.ends_with(".workflow")));
+        }
+        assert!(!home.join("Library/Outside.workflow").exists());
+
+        let _ = fs::remove_dir_all(home);
+        let _ = fs::remove_dir_all(locale_dir);
+    }
+
+    #[test]
+    fn finder_install_refuses_managed_output_symlinks() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let home = std::env::temp_dir().join(format!("squallz-integration-symlink-{nonce}"));
+        let (services_dir, script_dir) = macos_integration_dirs(&home);
+        fs::create_dir_all(&services_dir).unwrap();
+        fs::create_dir_all(&script_dir).unwrap();
+        let victim = home.join("victim.txt");
+        fs::write(&victim, b"keep me").unwrap();
+        symlink(&victim, script_dir.join("squallz-checksum.sh")).unwrap();
+
+        let error = install_macos_finder_actions_at_with_language(&home, None).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(fs::read(&victim).unwrap(), b"keep me");
+
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn finder_install_refuses_symlinked_managed_directories() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let home = std::env::temp_dir().join(format!("squallz-integration-parent-link-{nonce}"));
+        let outside = home.join("outside-services");
+        fs::create_dir_all(home.join("Library")).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        symlink(&outside, home.join("Library/Services")).unwrap();
+
+        let error = install_macos_finder_actions_at_with_language(&home, None).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(fs::read_dir(&outside).unwrap().count(), 0);
+
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn damaged_fixed_workflow_stays_repairable_and_removable() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let home =
+            std::env::temp_dir().join(format!("squallz-integration-damaged-workflow-{nonce}"));
+        let installed = install_macos_finder_actions_at_with_language(&home, None).unwrap();
+        let checksum = installed
+            .installed
+            .iter()
+            .find(|action| action.id == "checksum")
+            .unwrap();
+        fs::remove_file(Path::new(&checksum.path).join("Contents/Info.plist")).unwrap();
+
+        let status = macos_finder_actions_status_at_with_language(&home, None).unwrap();
+        assert_eq!(status.health, IntegrationHealthStateDto::NeedsRepair);
+        assert!(status.can_remove);
+        let checksum_health = status
+            .actions
+            .iter()
+            .find(|action| action.id == "checksum")
+            .unwrap();
+        assert_eq!(
+            checksum_health.state,
+            IntegrationActionHealthStateDto::Damaged
+        );
+        assert_eq!(checksum_health.issue.as_deref(), Some("launcher_outdated"));
+
+        let removed = remove_macos_finder_actions_at_with_language(&home, None).unwrap();
+        assert_eq!(removed.removed.len(), 5);
+        let after_remove = macos_finder_actions_status_at_with_language(&home, None).unwrap();
+        assert_eq!(after_remove.health, IntegrationHealthStateDto::Missing);
+
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn finder_install_does_not_recursively_delete_a_script_directory() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let home = std::env::temp_dir().join(format!("squallz-integration-script-dir-{nonce}"));
+        let (_, script_dir) = macos_integration_dirs(&home);
+        let unexpected = script_dir.join("squallz-checksum.sh");
+        fs::create_dir_all(&unexpected).unwrap();
+        fs::write(unexpected.join("keep.txt"), b"keep me").unwrap();
+
+        let error = install_macos_finder_actions_at_with_language(&home, None).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(fs::read(unexpected.join("keep.txt")).unwrap(), b"keep me");
+
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn finder_language_change_updates_the_managed_workflows() {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -2383,7 +3585,7 @@ mod tests {
             .unwrap();
         assert_eq!(localized_extract.name, "Squallz 就地解压");
         assert!(Path::new(&localized_extract.path).is_dir());
-        assert!(!Path::new(&english_extract.path).exists());
+        assert_eq!(localized_extract.path, english_extract.path);
 
         let info = Path::new(&localized_extract.path)
             .join("Contents")
@@ -2419,16 +3621,15 @@ mod tests {
 
         let localized_status =
             macos_finder_actions_status_at_with_language(&home, Some("zh-CN")).unwrap();
-        assert_eq!(localized_status.installed.len(), 5);
-        assert!(localized_status.missing.is_empty());
+        assert_eq!(localized_status.actions.len(), 5);
         assert!(localized_status
-            .installed
+            .actions
             .iter()
             .any(|item| item.name == "Squallz 就地解压"));
 
-        let legacy_status = macos_finder_actions_status_at_with_language(&home, None).unwrap();
-        assert_eq!(legacy_status.installed.len(), 5);
-        assert!(legacy_status.missing.is_empty());
+        let default_language_status =
+            macos_finder_actions_status_at_with_language(&home, None).unwrap();
+        assert_eq!(default_language_status.actions.len(), 5);
 
         let removed = remove_macos_finder_actions_at_with_language(&home, Some("zh-CN")).unwrap();
         assert_eq!(removed.removed.len(), 5);
@@ -2437,8 +3638,10 @@ mod tests {
 
         let status_after_remove =
             macos_finder_actions_status_at_with_language(&home, Some("zh-CN")).unwrap();
-        assert!(status_after_remove.installed.is_empty());
-        assert_eq!(status_after_remove.missing.len(), 5);
+        assert!(status_after_remove
+            .actions
+            .iter()
+            .all(|action| action.state == IntegrationActionHealthStateDto::Missing));
 
         let _ = fs::remove_dir_all(home);
     }
@@ -2511,12 +3714,17 @@ printf '\n' >> "$SQUALLZ_QA_LOG"
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod linux_file_manager_tests {
     use super::{
-        install_linux_file_manager_actions_at_with_language,
-        linux_file_manager_actions_status_at_with_language, linux_integration_dirs,
-        remove_linux_file_manager_actions_at_with_language,
+        desktop_exec_argument, install_linux_file_manager_actions_at_with_language,
+        install_linux_file_manager_actions_at_with_localizer_and_appimage,
+        linux_data_home_from_env, linux_file_manager_actions_status_at_with_language,
+        linux_file_manager_actions_status_at_with_localizer_and_appimage, linux_integration_dirs,
+        remove_linux_file_manager_actions_at_with_language, safe_visible_file_name,
+        validated_linux_appimage_launch, LinuxAppImageLaunchMode,
     };
+    use crate::dto::{IntegrationActionHealthStateDto, IntegrationHealthStateDto};
+    use squallz_i18n::Localizer;
     use std::fs;
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{symlink, PermissionsExt};
     use std::path::{Path, PathBuf};
     use std::process::{Command, Stdio};
     use std::thread;
@@ -2541,11 +3749,15 @@ mod linux_file_manager_tests {
             let script = Path::new(&action.script_path);
             assert!(service.is_file());
             assert!(script.is_file());
+            assert_ne!(
+                fs::metadata(service).unwrap().permissions().mode() & 0o111,
+                0
+            );
 
             let service_text = fs::read_to_string(service).unwrap();
             assert!(service_text.contains("ServiceTypes=KonqPopupMenu/Plugin"));
             assert!(service_text.contains("Actions=squallz-"));
-            assert!(service_text.contains("Exec='"));
+            assert!(service_text.contains("Exec=\""));
             assert!(service_text.contains(" %F"));
             assert!(service_text.contains(&action.name));
 
@@ -2572,6 +3784,7 @@ mod linux_file_manager_tests {
         fs::write(sample.join("two.7z"), b"archive").unwrap();
         fs::write(sample.join("plain file.txt"), b"plain").unwrap();
         fs::write(sample.join("folder input/nested.txt"), b"nested").unwrap();
+        let sample_cwd = fs::canonicalize(&sample).unwrap();
 
         let fake_gui = home.join("fake-squallz-gui");
         let gui_log = home.join("gui-args.log");
@@ -2586,6 +3799,94 @@ mod linux_file_manager_tests {
         assert!(
             gui_log.contains("<--squallz-action><checksum>"),
             "log: {gui_log}"
+        );
+
+        let relative_gui_log = home.join("relative-gui-args.log");
+        run_linux_action_script_with_gui_from(
+            &script_for(&result, "test-archive"),
+            &fake_gui,
+            &relative_gui_log,
+            &sample_cwd,
+            &["one.zip", "folder input", "two.7z"],
+        );
+        let _ = wait_for_log_contains(
+            &relative_gui_log,
+            &format!("<{}>", sample_cwd.join("one.zip").display()),
+        );
+        let relative_gui_log = wait_for_log_contains(
+            &relative_gui_log,
+            &format!("<{}>", sample_cwd.join("two.7z").display()),
+        );
+        assert!(
+            relative_gui_log.contains(&format!(
+                "<--squallz-action><test-archive><{}>",
+                sample_cwd.join("one.zip").display()
+            )),
+            "log: {relative_gui_log}"
+        );
+        assert!(
+            relative_gui_log.contains(&format!(
+                "<--squallz-action><test-archive><{}>",
+                sample_cwd.join("two.7z").display()
+            )),
+            "log: {relative_gui_log}"
+        );
+        assert!(
+            !relative_gui_log.contains(&format!("<{}>", sample_cwd.join("folder input").display())),
+            "directories must not be handed to archive-test jobs: {relative_gui_log}"
+        );
+
+        let relative_extract_log = home.join("relative-extract-gui-args.log");
+        run_linux_action_script_with_gui_from(
+            &script_for(&result, "extract-here"),
+            &fake_gui,
+            &relative_extract_log,
+            &sample_cwd,
+            &["one.zip", "folder input"],
+        );
+        let relative_extract_log = wait_for_log_contains(
+            &relative_extract_log,
+            &format!("<{}>", sample_cwd.join("one.zip").display()),
+        );
+        assert!(
+            !relative_extract_log
+                .contains(&format!("<{}>", sample_cwd.join("folder input").display())),
+            "directories must not be handed to archive-extract jobs: {relative_extract_log}"
+        );
+
+        let relative_compress_log = home.join("relative-compress-gui-args.log");
+        fs::write(sample.join("plain file.7z"), b"existing output").unwrap();
+        run_linux_action_script_with_gui_from(
+            &script_for(&result, "compress-to-7z"),
+            &fake_gui,
+            &relative_compress_log,
+            &sample_cwd,
+            &["plain file.txt"],
+        );
+        let relative_compress_log = wait_for_log_contains(
+            &relative_compress_log,
+            &format!("<{}>", sample_cwd.join("plain file.txt").display()),
+        );
+        assert!(
+            relative_compress_log.contains(&format!(
+                "<--squallz-action><compress-to-7z><--squallz-output><{}><{}>",
+                sample_cwd.join("plain file 2.7z").display(),
+                sample_cwd.join("plain file.txt").display()
+            )),
+            "log: {relative_compress_log}"
+        );
+
+        let empty_gui_log = home.join("empty-gui-args.log");
+        run_linux_action_script_with_gui_from(
+            &script_for(&result, "test-archive"),
+            &fake_gui,
+            &empty_gui_log,
+            &sample_cwd,
+            &[],
+        );
+        assert!(
+            !empty_gui_log.exists(),
+            "an empty file-manager selection must not launch a task"
         );
 
         let fake_sqz = home.join("fake-sqz");
@@ -2627,20 +3928,26 @@ mod linux_file_manager_tests {
         let parent = sample.to_string_lossy().into_owned();
         let cli_log = fs::read_to_string(&cli_log).unwrap();
         assert!(
-            cli_log.contains(&format!("<extract><{one}><-d><{parent}><--smart>")),
-            "log: {cli_log}"
-        );
-        assert!(
-            cli_log.contains(&format!("<extract><{two}><-d><{parent}><--smart>")),
-            "log: {cli_log}"
-        );
-        assert!(
-            cli_log.contains(&format!("<extract><{one}><-d><{parent}/one>")),
+            cli_log.contains(&format!(
+                "<extract><{one}><-d><{parent}><--smart><--file-manager-preset>"
+            )),
             "log: {cli_log}"
         );
         assert!(
             cli_log.contains(&format!(
-                "<compress><{plain}><{folder}><-o><{parent}/Archive.7z><--level><5>"
+                "<extract><{two}><-d><{parent}><--smart><--file-manager-preset>"
+            )),
+            "log: {cli_log}"
+        );
+        assert!(
+            cli_log.contains(&format!(
+                "<extract><{one}><-d><{parent}/one><--file-manager-preset>"
+            )),
+            "log: {cli_log}"
+        );
+        assert!(
+            cli_log.contains(&format!(
+                "<compress><{plain}><{folder}><-o><{parent}/Archive.7z><--file-manager-preset>"
             )),
             "log: {cli_log}"
         );
@@ -2659,8 +3966,12 @@ mod linux_file_manager_tests {
 
         let status =
             linux_file_manager_actions_status_at_with_language(&home, Some("en-US")).unwrap();
-        assert_eq!(status.installed.len(), 5);
-        assert!(status.missing.is_empty());
+        assert_eq!(status.actions.len(), 5);
+        assert_eq!(status.health, IntegrationHealthStateDto::Healthy);
+        assert!(status
+            .actions
+            .iter()
+            .all(|action| action.state == IntegrationActionHealthStateDto::Healthy));
 
         let removed =
             remove_linux_file_manager_actions_at_with_language(&home, Some("en-US")).unwrap();
@@ -2669,14 +3980,20 @@ mod linux_file_manager_tests {
 
         let status_after_remove =
             linux_file_manager_actions_status_at_with_language(&home, Some("en-US")).unwrap();
-        assert!(status_after_remove.installed.is_empty());
-        assert_eq!(status_after_remove.missing.len(), 5);
+        assert!(status_after_remove
+            .actions
+            .iter()
+            .all(|action| action.state == IntegrationActionHealthStateDto::Missing));
+        assert_eq!(
+            status_after_remove.health,
+            IntegrationHealthStateDto::Missing
+        );
 
         let _ = fs::remove_dir_all(home);
     }
 
     #[test]
-    fn localized_linux_install_replaces_stale_nautilus_script_names() {
+    fn linux_language_change_replaces_stale_nautilus_script_names() {
         let home = temp_home("squallz-linux-integration-locale-test");
 
         let english =
@@ -2703,14 +4020,357 @@ mod linux_file_manager_tests {
 
         let status =
             linux_file_manager_actions_status_at_with_language(&home, Some("zh-CN")).unwrap();
-        assert_eq!(status.installed.len(), 5);
-        assert!(status.missing.is_empty());
+        assert_eq!(status.actions.len(), 5);
 
         let removed =
             remove_linux_file_manager_actions_at_with_language(&home, Some("zh-CN")).unwrap();
         assert_eq!(removed.removed.len(), 5);
 
         let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn nautilus_action_names_cannot_escape_the_managed_directory() {
+        assert_eq!(safe_visible_file_name(".."), "Squallz Action");
+        assert_eq!(safe_visible_file_name("."), "Squallz Action");
+        assert_eq!(safe_visible_file_name("../Outside"), ".._Outside");
+        assert_eq!(safe_visible_file_name("/tmp/Outside"), "_tmp_Outside");
+    }
+
+    #[test]
+    fn linux_data_home_ignores_relative_xdg_paths() {
+        let home = Path::new("/home/squallz");
+        assert_eq!(
+            linux_data_home_from_env(home, Some(std::ffi::OsStr::new("relative/data"))),
+            home.join(".local/share")
+        );
+        assert_eq!(
+            linux_data_home_from_env(home, Some(std::ffi::OsStr::new("/var/lib/squallz"))),
+            PathBuf::from("/var/lib/squallz")
+        );
+    }
+
+    #[test]
+    fn corrupted_nautilus_launcher_remains_visible_to_status_and_cleanup() {
+        let home = temp_home("squallz-linux-integration-damaged-launcher");
+        let installed =
+            install_linux_file_manager_actions_at_with_language(&home, Some("en-US")).unwrap();
+        let extract = installed
+            .installed
+            .iter()
+            .find(|action| action.id == "extract-here")
+            .unwrap();
+        let (_, _, nautilus_dir) = linux_integration_dirs(&home);
+        let launcher = nautilus_dir.join(&extract.name);
+        fs::write(&launcher, b"#!/usr/bin/env bash\nexit 1\n").unwrap();
+        let mut permissions = fs::metadata(&launcher).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&launcher, permissions).unwrap();
+
+        let status =
+            linux_file_manager_actions_status_at_with_language(&home, Some("en-US")).unwrap();
+        assert_eq!(status.health, IntegrationHealthStateDto::NeedsRepair);
+        assert!(status.can_remove);
+        let extract_health = status
+            .actions
+            .iter()
+            .find(|action| action.id == "extract-here")
+            .unwrap();
+        assert_eq!(
+            extract_health.state,
+            IntegrationActionHealthStateDto::Damaged
+        );
+        assert_eq!(extract_health.issue.as_deref(), Some("launcher_outdated"));
+
+        remove_linux_file_manager_actions_at_with_language(&home, Some("en-US")).unwrap();
+        assert!(!launcher.exists());
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn installed_actions_keep_a_valid_appimage_path_and_require_repair_after_it_moves() {
+        let root = temp_home("squallz-linux-appimage-actions");
+        let home = root.join("home");
+        let mount = root.join(".mount_Squallz");
+        let current_exe = mount.join("usr/bin/squallz-gui");
+        let original_appimage = root.join("Squallz user's.AppImage");
+        let moved_appimage = root.join("Squallz moved.AppImage");
+        write_fake_sh_tool(&current_exe);
+        write_fake_sh_tool(&original_appimage);
+
+        let installed_appimage = validated_linux_appimage_launch(
+            Some(&original_appimage),
+            Some(&mount),
+            &current_exe,
+            &root,
+        )
+        .unwrap();
+        let loc = Localizer::load(Some("en-US"));
+        let installed = install_linux_file_manager_actions_at_with_localizer_and_appimage(
+            &home,
+            &loc,
+            Some(&installed_appimage),
+        )
+        .unwrap();
+        let checksum_script = script_for(&installed, "checksum");
+        let script_text = fs::read_to_string(&checksum_script).unwrap();
+        let escaped_path = installed_appimage
+            .path
+            .to_string_lossy()
+            .replace('\'', "'\"'\"'");
+        assert!(script_text.contains(&format!("SQUALLZ_APPIMAGE='{escaped_path}'")));
+        assert!(script_text.contains("SQUALLZ_APPIMAGE_EXTRACT_AND_RUN='0'"));
+
+        let sample = root.join("sample file.txt");
+        fs::write(&sample, b"sample").unwrap();
+        let gui_log = root.join("appimage-gui.log");
+        let output = Command::new("/bin/bash")
+            .arg(&checksum_script)
+            .arg(&sample)
+            .env_remove("APPDIR")
+            .env_remove("APPIMAGE")
+            .env_remove("SQUALLZ_CLI")
+            .env_remove("SQUALLZ_GUI")
+            .env("SQUALLZ_QA_LOG", &gui_log)
+            .env("PATH", "/usr/bin:/bin")
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "persistent AppImage handoff failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let gui_log = wait_for_log_contains(&gui_log, "<--squallz-action><checksum>");
+        assert!(gui_log.contains("<--squallz-action><checksum>"));
+        assert!(gui_log.contains(&format!("<{}>", sample.display())));
+
+        fs::rename(&original_appimage, &moved_appimage).unwrap();
+        let moved_appimage = validated_linux_appimage_launch(
+            Some(&moved_appimage),
+            Some(&mount),
+            &current_exe,
+            &root,
+        )
+        .unwrap();
+        let moved_status = linux_file_manager_actions_status_at_with_localizer_and_appimage(
+            &home,
+            &loc,
+            Some(&moved_appimage),
+        )
+        .unwrap();
+        assert_eq!(moved_status.health, IntegrationHealthStateDto::NeedsRepair);
+        assert!(moved_status.can_repair);
+        assert!(moved_status.actions.iter().all(|action| {
+            action.state == IntegrationActionHealthStateDto::Damaged
+                && action.issue.as_deref() == Some("script_outdated")
+        }));
+
+        install_linux_file_manager_actions_at_with_localizer_and_appimage(
+            &home,
+            &loc,
+            Some(&moved_appimage),
+        )
+        .unwrap();
+        let repaired = linux_file_manager_actions_status_at_with_localizer_and_appimage(
+            &home,
+            &loc,
+            Some(&moved_appimage),
+        )
+        .unwrap();
+        assert_eq!(repaired.health, IntegrationHealthStateDto::Healthy);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn extract_and_run_appimage_actions_preserve_the_runtime_mode() {
+        let root = temp_home("squallz-linux-extracted-appimage-actions");
+        let home = root.join("home");
+        let extracted = root.join("appimage_extracted_0123456789abcdef");
+        let current_exe = extracted.join("usr/bin/squallz-gui");
+        let appimage = root.join("Squallz.AppImage");
+        write_fake_sh_tool(&current_exe);
+        write_fake_sh_tool(&appimage);
+
+        let launch =
+            validated_linux_appimage_launch(Some(&appimage), Some(&extracted), &current_exe, &root)
+                .unwrap();
+        assert_eq!(launch.mode, LinuxAppImageLaunchMode::ExtractAndRun);
+
+        let loc = Localizer::load(Some("en-US"));
+        let installed = install_linux_file_manager_actions_at_with_localizer_and_appimage(
+            &home,
+            &loc,
+            Some(&launch),
+        )
+        .unwrap();
+        let checksum_script = script_for(&installed, "checksum");
+        let script_text = fs::read_to_string(&checksum_script).unwrap();
+        assert!(script_text.contains("SQUALLZ_APPIMAGE_EXTRACT_AND_RUN='1'"));
+
+        let sample = root.join("sample.txt");
+        fs::write(&sample, b"sample").unwrap();
+        let gui_log = root.join("appimage-extracted-gui.log");
+        let output = Command::new("/bin/bash")
+            .arg(&checksum_script)
+            .arg(&sample)
+            .env_remove("APPDIR")
+            .env_remove("APPIMAGE")
+            .env_remove("APPIMAGE_EXTRACT_AND_RUN")
+            .env_remove("SQUALLZ_CLI")
+            .env_remove("SQUALLZ_GUI")
+            .env("SQUALLZ_QA_LOG", &gui_log)
+            .env("PATH", "/usr/bin:/bin")
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "persistent extracted AppImage handoff failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let gui_log = wait_for_log_contains(&gui_log, "<--squallz-action><checksum>");
+        assert!(gui_log.contains("<APPIMAGE_EXTRACT_AND_RUN=1>"));
+
+        let mount = root.join(".mount_Squallz");
+        let mounted_exe = mount.join("usr/bin/squallz-gui");
+        write_fake_sh_tool(&mounted_exe);
+        let mounted_launch =
+            validated_linux_appimage_launch(Some(&appimage), Some(&mount), &mounted_exe, &root)
+                .unwrap();
+        assert_eq!(mounted_launch.mode, LinuxAppImageLaunchMode::Mounted);
+        let mounted_status = linux_file_manager_actions_status_at_with_localizer_and_appimage(
+            &home,
+            &loc,
+            Some(&mounted_launch),
+        )
+        .unwrap();
+        assert_eq!(
+            mounted_status.health,
+            IntegrationHealthStateDto::NeedsRepair
+        );
+        assert!(mounted_status.actions.iter().all(|action| {
+            action.state == IntegrationActionHealthStateDto::Damaged
+                && action.issue.as_deref() == Some("script_outdated")
+        }));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn appimage_path_validation_rejects_environment_injection_and_symlinks() {
+        let root = temp_home("squallz-linux-appimage-validation");
+        let mount = root.join(".mount_Squallz");
+        let current_exe = mount.join("usr/bin/squallz-gui");
+        let outside_exe = root.join("outside/squallz-gui");
+        let appimage = root.join("Squallz.AppImage");
+        let appimage_link = root.join("Squallz-link.AppImage");
+        write_fake_sh_tool(&current_exe);
+        write_fake_sh_tool(&outside_exe);
+        write_fake_sh_tool(&appimage);
+        symlink(&appimage, &appimage_link).unwrap();
+
+        assert_eq!(
+            validated_linux_appimage_launch(Some(&appimage), Some(&mount), &current_exe, &root,),
+            Some(super::LinuxAppImageLaunch {
+                path: fs::canonicalize(&appimage).unwrap(),
+                mode: LinuxAppImageLaunchMode::Mounted,
+            })
+        );
+        assert!(validated_linux_appimage_launch(
+            Some(Path::new("Squallz.AppImage")),
+            Some(&mount),
+            &current_exe,
+            &root,
+        )
+        .is_none());
+        assert!(validated_linux_appimage_launch(
+            Some(&appimage_link),
+            Some(&mount),
+            &current_exe,
+            &root,
+        )
+        .is_none());
+        assert!(validated_linux_appimage_launch(
+            Some(&appimage),
+            Some(&mount),
+            &outside_exe,
+            &root,
+        )
+        .is_none());
+
+        let injected_appdir = root.join("not-an-appimage-mount");
+        fs::create_dir_all(&injected_appdir).unwrap();
+        assert!(validated_linux_appimage_launch(
+            Some(&appimage),
+            Some(&injected_appdir),
+            &outside_exe,
+            &root,
+        )
+        .is_none());
+
+        let mut permissions = fs::metadata(&appimage).unwrap().permissions();
+        permissions.set_mode(0o644);
+        fs::set_permissions(&appimage, permissions).unwrap();
+        assert!(validated_linux_appimage_launch(
+            Some(&appimage),
+            Some(&mount),
+            &current_exe,
+            &root,
+        )
+        .is_none());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn non_executable_kde_service_requires_repair() {
+        let home = temp_home("squallz-linux-integration-kde-permissions");
+        let installed =
+            install_linux_file_manager_actions_at_with_language(&home, Some("en-US")).unwrap();
+        let service = Path::new(&installed.installed[0].path);
+        let mut permissions = fs::metadata(service).unwrap().permissions();
+        permissions.set_mode(0o644);
+        fs::set_permissions(service, permissions).unwrap();
+
+        let status =
+            linux_file_manager_actions_status_at_with_language(&home, Some("en-US")).unwrap();
+        assert_eq!(status.health, IntegrationHealthStateDto::NeedsRepair);
+        assert!(status.can_repair);
+        let damaged = status
+            .actions
+            .iter()
+            .find(|action| action.id == installed.installed[0].id)
+            .unwrap();
+        assert_eq!(damaged.state, IntegrationActionHealthStateDto::Damaged);
+        assert_eq!(damaged.issue.as_deref(), Some("script_not_executable"));
+
+        install_linux_file_manager_actions_at_with_language(&home, Some("en-US")).unwrap();
+        assert_ne!(
+            fs::metadata(service).unwrap().permissions().mode() & 0o111,
+            0
+        );
+        let repaired =
+            linux_file_manager_actions_status_at_with_language(&home, Some("en-US")).unwrap();
+        assert_eq!(repaired.health, IntegrationHealthStateDto::Healthy);
+
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn desktop_exec_argument_escapes_both_parsing_layers_and_field_codes() {
+        let escaped = desktop_exec_argument("/tmp/Squallz\\tools %F\n$tool`\"");
+        assert!(escaped.starts_with('"') && escaped.ends_with('"'));
+        assert!(escaped.contains("\\\\\\\\"));
+        assert!(escaped.contains("%%F"));
+        assert!(escaped.contains("\\n"));
+        assert!(!escaped.contains('\n'));
+        assert!(escaped.contains("\\\\$"));
+        assert!(escaped.contains("\\\\`"));
+        assert!(escaped.contains("\\\\\""));
     }
 
     fn temp_home(prefix: &str) -> PathBuf {
@@ -2776,6 +4436,31 @@ mod linux_file_manager_tests {
         );
     }
 
+    fn run_linux_action_script_with_gui_from(
+        script: &str,
+        fake_gui: &Path,
+        log: &Path,
+        current_dir: &Path,
+        inputs: &[&str],
+    ) {
+        let mut command = Command::new("/bin/bash");
+        command
+            .arg(script)
+            .current_dir(current_dir)
+            .env("SQUALLZ_GUI", fake_gui)
+            .env("SQUALLZ_QA_LOG", log)
+            .env("PATH", "/usr/bin:/bin")
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .args(inputs);
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "script {script} failed with relative gui inputs: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     fn wait_for_log_contains(path: &Path, needle: &str) -> String {
         for _ in 0..300 {
             if let Ok(contents) = fs::read_to_string(path) {
@@ -2789,13 +4474,24 @@ mod linux_file_manager_tests {
     }
 
     fn write_fake_sh_tool(path: &Path) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
         fs::write(
             path,
             r#"#!/bin/sh
-for arg in "$@"; do
-  printf '<%s>' "$arg" >> "$SQUALLZ_QA_LOG"
+lock="${SQUALLZ_QA_LOG}.lock"
+while ! mkdir "$lock" 2>/dev/null; do
+  sleep 0.01
 done
-printf '\n' >> "$SQUALLZ_QA_LOG"
+trap 'rmdir "$lock"' EXIT
+{
+  printf '<APPIMAGE_EXTRACT_AND_RUN=%s>' "${APPIMAGE_EXTRACT_AND_RUN:-}"
+  for arg in "$@"; do
+    printf '<%s>' "$arg"
+  done
+  printf '\n'
+} >> "$SQUALLZ_QA_LOG"
 "#,
         )
         .unwrap();
@@ -2806,7 +4502,7 @@ printf '\n' >> "$SQUALLZ_QA_LOG"
 }
 
 #[cfg(test)]
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 mod windows_explorer_tests {
     use super::{
         install_windows_explorer_actions_at_with_language,
@@ -2816,13 +4512,22 @@ mod windows_explorer_tests {
         windows_explorer_actions_status_at_with_localizer, windows_integration_dirs,
         windows_registry_manifest_path,
     };
+    use crate::dto::{IntegrationActionHealthStateDto, IntegrationHealthStateDto};
+    use squallz_core::lock_unpoisoned;
     use squallz_i18n::Localizer;
     use std::fs;
     use std::path::{Path, PathBuf};
+    #[cfg(target_os = "windows")]
+    use std::process::Command;
+    use std::sync::Mutex;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    static WINDOWS_EXPLORER_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn installs_windows_explorer_actions_that_reuse_task_window_handoff() {
+        let _test_lock = lock_unpoisoned(&WINDOWS_EXPLORER_TEST_LOCK);
+        let _registry = IsolatedTestRegistry::new();
         let data_dir = temp_dir("squallz-windows-explorer-test");
         let result =
             install_windows_explorer_actions_at_with_language(&data_dir, Some("en-US")).unwrap();
@@ -2835,15 +4540,15 @@ mod windows_explorer_tests {
         let manifest = windows_registry_manifest_path(&script_dir);
         assert!(manifest.is_file());
         let manifest_text = fs::read_to_string(&manifest).unwrap();
+        let registry_root = super::windows_registry_root();
         assert!(manifest_text.contains("Windows Registry Editor Version 5.00"));
-        assert!(manifest_text.contains(
-            "HKEY_CURRENT_USER\\Software\\Classes\\SystemFileAssociations\\.zip\\shell\\Squallz.extract-here"
-        ));
-        assert!(manifest_text
-            .contains("HKEY_CURRENT_USER\\Software\\Classes\\*\\shell\\Squallz.checksum"));
-        assert!(manifest_text.contains(
-            "HKEY_CURRENT_USER\\Software\\Classes\\Directory\\shell\\Squallz.compress-to-7z"
-        ));
+        assert!(manifest_text.contains(&format!(
+            "{registry_root}\\SystemFileAssociations\\.zip\\shell\\Squallz.extract-here"
+        )));
+        assert!(manifest_text.contains(&format!("{registry_root}\\*\\shell\\Squallz.checksum")));
+        assert!(manifest_text.contains(&format!(
+            "{registry_root}\\Directory\\shell\\Squallz.compress-to-7z"
+        )));
         assert!(manifest_text.contains("\"MultiSelectModel\"=\"Player\""));
         assert!(manifest_text.contains("powershell.exe -NoProfile -ExecutionPolicy Bypass -File"));
         assert!(manifest_text.contains("%1"));
@@ -2860,8 +4565,15 @@ mod windows_explorer_tests {
             assert!(script_text.contains("Start-Process"));
             assert!(script_text.contains("Resolve-Sqz"));
             assert!(script_text.contains("SQUALLZ_CLI"));
+            assert_powershell_syntax(script);
             assert!(manifest_text.contains(&action.name));
             assert!(manifest_text.contains(&path_fragment(script)));
+            if matches!(
+                action.id.as_str(),
+                "extract-here" | "extract-to-folder" | "compress-to-7z"
+            ) {
+                assert!(script_text.contains("--file-manager-preset"));
+            }
             if action.id == "compress-to-7z" {
                 assert!(script_text.contains("--squallz-output"));
                 assert!(script_text.contains("$SquallzTaskWindowOutputArg = '--squallz-output'"));
@@ -2871,8 +4583,12 @@ mod windows_explorer_tests {
 
         let status =
             windows_explorer_actions_status_at_with_language(&data_dir, Some("en-US")).unwrap();
-        assert_eq!(status.installed.len(), 5);
-        assert!(status.missing.is_empty());
+        assert_eq!(status.actions.len(), 5);
+        assert_eq!(status.health, IntegrationHealthStateDto::Healthy);
+        assert!(status
+            .actions
+            .iter()
+            .all(|action| action.state == IntegrationActionHealthStateDto::Healthy));
 
         let removed =
             remove_windows_explorer_actions_at_with_language(&data_dir, Some("en-US")).unwrap();
@@ -2881,8 +4597,45 @@ mod windows_explorer_tests {
 
         let status_after_remove =
             windows_explorer_actions_status_at_with_language(&data_dir, Some("en-US")).unwrap();
-        assert!(status_after_remove.installed.is_empty());
-        assert_eq!(status_after_remove.missing.len(), 5);
+        assert!(status_after_remove
+            .actions
+            .iter()
+            .all(|action| action.state == IntegrationActionHealthStateDto::Missing));
+        assert_eq!(
+            status_after_remove.health,
+            IntegrationHealthStateDto::Missing
+        );
+        assert!(!manifest.exists());
+
+        let _ = fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
+    fn altered_windows_registry_manifest_requires_repair_and_can_be_removed() {
+        let _test_lock = lock_unpoisoned(&WINDOWS_EXPLORER_TEST_LOCK);
+        let _registry = IsolatedTestRegistry::new();
+        let data_dir = temp_dir("squallz-windows-explorer-damaged-registry");
+        install_windows_explorer_actions_at_with_language(&data_dir, Some("en-US")).unwrap();
+        let (_, script_dir) = windows_integration_dirs(&data_dir);
+        let manifest = windows_registry_manifest_path(&script_dir);
+        let contents = fs::read_to_string(&manifest).unwrap();
+        fs::write(&manifest, contents.replace("\"Player\"", "\"Single\"")).unwrap();
+
+        let status =
+            windows_explorer_actions_status_at_with_language(&data_dir, Some("en-US")).unwrap();
+        assert_eq!(status.health, IntegrationHealthStateDto::NeedsRepair);
+        assert!(status.can_remove);
+        assert!(status.actions.iter().all(|action| {
+            action.state == IntegrationActionHealthStateDto::Damaged
+                && action.issue.as_deref() == Some("registry_outdated")
+        }));
+
+        let removed =
+            remove_windows_explorer_actions_at_with_language(&data_dir, Some("en-US")).unwrap();
+        assert_eq!(removed.removed.len(), 5);
+        let after_remove =
+            windows_explorer_actions_status_at_with_language(&data_dir, Some("en-US")).unwrap();
+        assert_eq!(after_remove.health, IntegrationHealthStateDto::Missing);
         assert!(!manifest.exists());
 
         let _ = fs::remove_dir_all(data_dir);
@@ -2890,6 +4643,8 @@ mod windows_explorer_tests {
 
     #[test]
     fn custom_language_pack_names_windows_explorer_verbs_without_code_changes() {
+        let _test_lock = lock_unpoisoned(&WINDOWS_EXPLORER_TEST_LOCK);
+        let _registry = IsolatedTestRegistry::new();
         let data_dir = temp_dir("squallz-windows-explorer-locale-home");
         let locale_dir = temp_dir("squallz-windows-explorer-locale-pack");
         fs::create_dir_all(&locale_dir).unwrap();
@@ -2928,9 +4683,9 @@ mod windows_explorer_tests {
         assert!(script_text.contains("XX install CLI"));
 
         let status = windows_explorer_actions_status_at_with_localizer(&data_dir, &loc).unwrap();
-        assert_eq!(status.installed.len(), 5);
+        assert_eq!(status.actions.len(), 5);
         assert!(status
-            .installed
+            .actions
             .iter()
             .any(|item| item.name == "Squallz XX Extract"));
 
@@ -2951,6 +4706,53 @@ mod windows_explorer_tests {
     }
 
     fn path_fragment(path: &Path) -> String {
-        path.to_string_lossy().into_owned()
+        let value = path.to_string_lossy().into_owned();
+        if cfg!(target_os = "windows") {
+            value.replace('\\', "\\\\")
+        } else {
+            value
+        }
     }
+
+    struct IsolatedTestRegistry;
+
+    impl IsolatedTestRegistry {
+        fn new() -> Self {
+            clear_test_registry();
+            Self
+        }
+    }
+
+    impl Drop for IsolatedTestRegistry {
+        fn drop(&mut self) {
+            clear_test_registry();
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn clear_test_registry() {
+        let _ = Command::new("reg.exe")
+            .args(["delete", super::windows_registry_root(), "/f"])
+            .output();
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn clear_test_registry() {}
+
+    #[cfg(target_os = "windows")]
+    fn assert_powershell_syntax(script: &Path) {
+        let status = Command::new("powershell.exe")
+            .args([
+                "-NoProfile",
+                "-Command",
+                "$errors = $null; $null = [System.Management.Automation.Language.Parser]::ParseFile($env:SQUALLZ_SCRIPT_TO_PARSE, [ref]$null, [ref]$errors); if ($errors.Count -ne 0) { $errors | Out-String | Write-Error; exit 1 }",
+            ])
+            .env("SQUALLZ_SCRIPT_TO_PARSE", script)
+            .status()
+            .expect("PowerShell must be available on Windows");
+        assert!(status.success(), "PowerShell rejected {}", script.display());
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn assert_powershell_syntax(_script: &Path) {}
 }

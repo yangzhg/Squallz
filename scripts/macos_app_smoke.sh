@@ -7,6 +7,7 @@ if [[ "$APP" != /* ]]; then
   APP="$ROOT/$APP"
 fi
 EXE="$APP/Contents/MacOS/squallz-gui"
+SQZ="$APP/Contents/MacOS/sqz"
 WORK="$ROOT/target/squallz-macos-smoke"
 HOME_DIR="$WORK/home"
 TRACE="$WORK/trace.jsonl"
@@ -18,10 +19,10 @@ if [[ "$ARCHIVE" != /* ]]; then
 fi
 WINDOW_JSON="$WORK/window.json"
 TIMING_JSON="$WORK/timing.json"
-I14_MAX_PROCESS_MS="${SQUALLZ_I14_MAX_PROCESS_MS:-300}"
-I14_MAX_OPEN_ARCHIVE_MS="${SQUALLZ_I14_MAX_OPEN_ARCHIVE_MS:-1000}"
-I14_MAX_RENDER_READY_MS="${SQUALLZ_I14_MAX_RENDER_READY_MS:-$I14_MAX_OPEN_ARCHIVE_MS}"
-I14_MAX_WINDOW_MS="${SQUALLZ_I14_MAX_WINDOW_MS:-}"
+MAX_PROCESS_MS="${SQUALLZ_SMOKE_MAX_PROCESS_MS:-300}"
+MAX_OPEN_ARCHIVE_MS="${SQUALLZ_SMOKE_MAX_OPEN_ARCHIVE_MS:-1000}"
+MAX_RENDER_READY_MS="${SQUALLZ_SMOKE_MAX_RENDER_READY_MS:-$MAX_OPEN_ARCHIVE_MS}"
+MAX_WINDOW_MS="${SQUALLZ_SMOKE_MAX_WINDOW_MS:-}"
 if [[ -n "${SQUALLZ_VALIDATION_REPORT:-}" ]]; then
   REPORT="$SQUALLZ_VALIDATION_REPORT"
 elif [[ "$ARCHIVE_EXT" == "zip" ]]; then
@@ -48,6 +49,16 @@ PY
 if [[ ! -x "$EXE" ]]; then
   fail "missing app executable: $EXE; run 'make app-debug' first, or pass a release app built with 'make app-macos'"
 fi
+if [[ ! -x "$SQZ" ]]; then
+  fail "missing app CLI sidecar: $SQZ"
+fi
+
+DIRECT_DEPENDENCIES="$(otool -L "$EXE")"
+for framework in CloudKit CoreData CoreImage CoreText QuartzCore; do
+  if grep -Fq "/$framework.framework/" <<<"$DIRECT_DEPENDENCIES"; then
+    fail "app executable eagerly links unused $framework.framework"
+  fi
+done
 
 mkdir -p "$WORK" "$ROOT/benches" "$HOME_DIR/Library/Application Support/Squallz"
 rm -f "$TRACE" "$WINDOW_JSON" "$TIMING_JSON"
@@ -61,18 +72,40 @@ assert p["CFBundleExecutable"] == "squallz-gui", p.get("CFBundleExecutable")
 assert p["CFBundleIdentifier"] == "dev.squallz.desktop", p.get("CFBundleIdentifier")
 types = p.get("CFBundleDocumentTypes", [])
 exts = {e for t in types for e in t.get("CFBundleTypeExtensions", [])}
-for ext in ["zip", "7z", "sqz", "tar", "tgz", "gz", "xz", "zst", "br"]:
+for ext in ["zip", "7z", "sqz", "tar", "tgz", "gz", "xz", "zst", "br", "001", "wim", "swm"]:
     assert ext in exts, f"missing {ext}"
 for t in types:
     assert t.get("CFBundleTypeRole") == "Viewer", t
-    assert t.get("LSHandlerRank") == "Alternate", t
+    expected_rank = "Owner" if t.get("CFBundleTypeExtensions") == ["sqz"] else "Alternate"
+    assert t.get("LSHandlerRank") == expected_rank, t
+    assert "public.archive" not in t.get("LSItemContentTypes", []), t
 PY
+
+APP_VERSION="$(plutil -extract CFBundleShortVersionString raw "$APP/Contents/Info.plist")"
+SQZ_VERSION="$("$SQZ" --version)"
+if [[ "$SQZ_VERSION" != "sqz $APP_VERSION" ]]; then
+  fail "app version $APP_VERSION does not match bundled CLI version: $SQZ_VERSION"
+fi
 
 cat > "$HOME_DIR/Library/Application Support/Squallz/settings.json" <<'JSON'
 {
   "theme": "light",
   "language": "en-US",
-  "ui_mode": "modern"
+  "ui_mode": "modern",
+  "ui_density": "standard",
+  "accent_palette": "aqua",
+  "custom_accent": null,
+  "accent_contrast_guard": true,
+  "default_extract_dir": null,
+  "default_create_dir": null,
+  "reveal_after_extract": false,
+  "check_updates_automatically": false,
+  "safety_max_output_bytes": null,
+  "safety_max_entries": null,
+  "safety_max_compression_ratio": null,
+  "performance_threads": null,
+  "performance_memory_limit_bytes": null,
+  "performance_parallel_jobs": null
 }
 JSON
 
@@ -157,6 +190,13 @@ for line in open(sys.argv[1], encoding="utf-8"):
 assert focus_ok, "main window was not shown and focused"
 PY
 
+for _ in {1..80}; do
+  if grep -q '"event":"frontend.render.ready"' "$TRACE" 2>/dev/null; then
+    break
+  fi
+  sleep 0.1
+done
+
 for _ in {1..50}; do
   swift - "$APP_PID" "$WINDOW_JSON" <<'SWIFT' >/dev/null 2>&1 || true
 import CoreGraphics
@@ -209,7 +249,7 @@ for line in open(sys.argv[1], encoding="utf-8"):
     print(f"- +{process_ms}ms {item['event']}: {item['payload']}")
 PY
 )"
-TIMING_SUMMARY="$(python3 - "$TRACE" "$TIMING_JSON" "$LAUNCH_MS" "$APP_PID_MS" "$OPEN_OK_MS" "$WINDOW_MS" "$ARCHIVE" "$I14_MAX_PROCESS_MS" "$I14_MAX_OPEN_ARCHIVE_MS" "$I14_MAX_RENDER_READY_MS" "$I14_MAX_WINDOW_MS" <<'PY'
+TIMING_SUMMARY="$(python3 - "$TRACE" "$TIMING_JSON" "$LAUNCH_MS" "$APP_PID_MS" "$OPEN_OK_MS" "$WINDOW_MS" "$ARCHIVE" "$MAX_PROCESS_MS" "$MAX_OPEN_ARCHIVE_MS" "$MAX_RENDER_READY_MS" "$MAX_WINDOW_MS" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -289,6 +329,12 @@ else:
     )
     add_content_check("screen", render_payload.get("screen") == "browse", f"screen={render_payload.get('screen')!r}")
     add_content_check("ui mode", render_payload.get("ui_mode") == "modern", f"ui_mode={render_payload.get('ui_mode')!r}")
+    add_content_check("language", render_payload.get("language") == "en-US", f"language={render_payload.get('language')!r}")
+    add_content_check(
+        "mode selection complete",
+        render_payload.get("mode_selection_blocked") is False,
+        f"mode_selection_blocked={render_payload.get('mode_selection_blocked')!r}",
+    )
     add_content_check("archive name", archive_name == expected_archive, f"archive={archive_name!r}; expected={expected_archive!r}")
     add_content_check(
         "entry count",
@@ -328,13 +374,18 @@ first_trace = None if first_trace is None else first_trace
 archive_delta = first_event_delta("open_archive.ok")
 if archive_delta is None:
     archive_delta = shell_delta(open_s)
+process_delta = first_event_delta("process.start")
+process_source = "process.start trace"
+if process_delta is None:
+    process_delta = shell_delta(pid_s)
+    process_source = "pgrep fallback after LaunchServices open"
 
 metrics = [
     {
-        "name": "Process observed",
-        "ms": shell_delta(pid_s),
+        "name": "Process started",
+        "ms": process_delta,
         "target_ms": max_process_ms,
-        "source": "pgrep after LaunchServices open",
+        "source": process_source,
     },
     {
         "name": "First validation trace",
@@ -485,6 +536,8 @@ archive file argument, isolated HOME, and a temporary trace file.
 ## Inputs
 
 - App: \`$APP\`
+- App version: \`$APP_VERSION\`
+- Bundled CLI: \`$SQZ_VERSION\`
 - Archive: \`$ARCHIVE\`
 - Isolated HOME: \`$HOME_DIR\`
 - Trace: \`$TRACE\`
@@ -493,7 +546,10 @@ archive file argument, isolated HOME, and a temporary trace file.
 ## Checks
 
 - Info.plist document types include archive/stream extensions and use Viewer + Alternate.
+- The app executable does not eagerly link unused CloudKit, CoreData, CoreImage,
+  CoreText, or QuartzCore frameworks.
 - \`squallz-gui\` process starts from the bundle.
+- The app and bundled \`sqz\` CLI report the same version.
 - Frontend drains the OS open-file path and calls \`open_archive\` successfully.
 - First WebView content frame is the archive browser for the opened file, not
   the first-run chooser, an empty shell, a password/error page, or a generic

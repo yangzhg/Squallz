@@ -15,7 +15,7 @@
 - Recovery Section 同时写入 Footer Index 的 BLAKE3-256 与完整镜像；打开归档时若主 Footer Index hash 不匹配，会使用镜像恢复目录。
 - Recovery Section primary 后追加 `RSPC` 保护层：对 primary RSEC 自身按 64 KiB 分块记录 BLAKE3，并写入 8+2 RS parity。打开归档时若 primary RSEC hash 不匹配，会先按保护层修复，再解析恢复数据。
 - 打开归档时会先读取 Recovery Section 并尝试修复 payload block；能力内的坏数据块在 `test` / `extract` 时透明使用修复后的字节；超过恢复能力时 `test` 报告 unrepaired，严格 `extract` 失败。
-- `test` 的共享 `TestReport.recovery` 会报告 `scheme=sqz-embedded-rs-gf8`、block/shard 布局、可用 recovery blocks、damaged/repaired/unrepaired blocks 与 `repair_possible`；`sqz test --json`、`.sqz repair --json` 与 GUI `RepairSqz` job result 都必须消费这份格式层报告。
+- `test` 的共享 `TestSummary.recovery` 会报告 `scheme=sqz-embedded-rs-gf8`、block/shard 布局、可用 recovery blocks、damaged/repaired/unrepaired blocks 与 `repair_possible`；`sqz test --json`、`.sqz repair --json` 与 GUI `RepairSqz` job result 都必须消费这份格式层报告。
 - File Header 损坏时，只要末尾 Footer Header 与 Footer Index 完整，读取可回退到尾部定位；当 File Header CRC 仍合法时，reader 会校验 header/footer UUID 一致性，避免误拼接容器。
 - Footer tail magic 或 CRC 覆盖字段损坏时，reader 只在 File Header 有效、可扫描到合法 `RSPC` trailer 且 Recovery Section / Index mirror 完整时重建 Footer 定位。Footer CRC 合法但 index bounds 非法仍必须失败。`RSPC` trailer CRC 单独损坏时，如果 primary `RSEC` 完整且重算出的 protection payload 与现有 bytes 完全一致，reader 可直接解析 primary；trailer 与 primary 同时损坏、或 trailer CRC 合法但版本/算法等语义非法时仍失败。
 - `.sqz` 使用 `split_size` 输出 `.001` 分卷时，每个物理卷写入 32 字节 `SQZV` 小头；读取时 core volume reader 校验并剥离小头，再把逻辑 `.sqz` 字节流交给格式层。
@@ -24,9 +24,9 @@
 - 多卷 `.sqz` 同时写出 `name.sqz.rev001`，其中 `SQZR` 小头后的 payload 是所有物理 `SQZV` 卷的逐字节 XOR parity；当任意一个物理卷缺失且其他物理卷完整时，core volume reader 可先重建缺失卷，再交给 SQZ reader 校验和修复。若尾卷缺失但 `name.sqz.revNNN` 有效，reader 可用尾卷镜像补回尾卷，再用 `.rev001` 恢复另一个缺失的 payload 卷。
 - 三个及以上物理卷的 `.sqz` split 还会写出 `name.sqz.rev002`，其中 `SQZR` algorithm=2 表示按卷号系数生成的 GF(256) 加权 parity；当两个物理卷缺失且 `rev001/rev002` 都有效、总卷数不超过 255 时，core volume reader 可解出两个缺失卷并继续交给 SQZ reader 校验。
 - 四个及以上物理卷的 `.sqz` split 还会写出 `name.sqz.rev003`，其中 `SQZR` algorithm=3 表示按卷号系数平方生成的 GF(256) 二次 parity；当三个物理卷缺失且 `rev001/rev002/rev003` 都有效、总卷数不超过 255 时，core volume reader 可解出三个缺失卷并继续交给 SQZ reader 校验。四个及以上物理卷同时缺失不承诺恢复。
-- `sqz pack --inner-format` 当前接受 `sqz` / `entry-set` / `zip` / `tar` / `7z` / `zstd`。`sqz` profile 写入条目集合；标准 inner profile 先写入一个内部 ZIP/TAR/7Z payload，读取时再把内部归档条目暴露给 `list/test/extract`。`zstd` profile 写入 TAR payload 后压缩为 `__sqz_inner.tar.zst`，读取时先走外层 SQZ recovery，再将 zstd 解压流交给 TAR reader 暴露条目。`raw` inner payload profile 仍明确拒绝。
+- `sqz pack --inner-format` 接受 `sqz` / `zip` / `tar` / `7z` / `zstd`。`sqz` profile 写入原生条目集合；标准 inner profile 先写入一个内部 ZIP/TAR/7Z payload，读取时再把内部归档条目暴露给 `list/test/extract`。`zstd` profile 写入 TAR payload 后压缩为 `__sqz_inner.tar.zst`，读取时先走外层 SQZ recovery，再将 zstd 解压流交给 TAR reader 暴露条目。
 - `sqz export` 已实现为透明条目导出：读取 `.sqz` 或 `.sqz.001` 可见 entries，再按用户指定扩展名
-  写成标准 archive（ZIP/7Z/TAR/TAR.ZST 等由现有 engine 支持的目标格式决定）。`sqz` / entry-set
+  写成标准 archive（ZIP/7Z/TAR/TAR.ZST 等由现有 engine 支持的目标格式决定）。`sqz`
   profile 直接导出外层条目；`zip` / `tar` / `7z` profiles 先由 reader 代理内部归档 entries，
   再重写为目标标准包。当前不承诺 byte-for-byte 还原内部归档原始字节。
 
@@ -107,7 +107,7 @@ Payload Descriptor 描述容器内部封装的内容。采用 TLV（Type-Length-
 
 | tag | 名称 | value 内容 |
 | --- | --- | --- |
-| `0x0001` | inner_format | 内部格式标识字符串，如 `sqz` / `zip` / `7z` / `tar` / `zstd` / `raw`；当前 v1 实现接受 `sqz` / `zip` / `tar` / `7z` / `zstd` |
+| `0x0001` | inner_format | 内部格式标识字符串：`sqz` / `zip` / `7z` / `tar` / `zstd` |
 | `0x0002` | original_name | 原始文件或归档名，UTF-8 |
 | `0x0003` | payload_total_size | 8 字节，payload 原始总长度 |
 | `0x0004` | payload_block_count | 8 字节，数据块数量 |
@@ -171,7 +171,7 @@ RSPC protection payload
 RSPC trailer
 ```
 
-保护层只包住 `RSEC primary`，不改变 primary 的字段定义，旧实现若不认识保护层会因尾随字节拒绝读取新文件。
+保护层只包住 `RSEC primary`，不改变 primary 的字段定义。当前 reader 要求每个非空 Recovery Section 都带有有效的 `RSPC` 保护层。
 
 `RSPC protection payload` 内容：
 
@@ -328,7 +328,7 @@ Footer Header 放在文件最后，便于从尾部反向定位，实现头部损
 ### 10.1 verify
 
 1. 校验末尾 Footer Header；必要时校验 File Header CRC 与 header/footer UUID。一方损坏只在另一方和恢复索引可信时回退重建。
-2. 读 Recovery Section；若有 `RSPC` 保护层，先验证并在能力内修复 `RSEC primary`。
+2. 读 Recovery Section；必须验证 `RSPC` 保护层，并在能力内修复 `RSEC primary`。
 3. 用 `index_hash` 检查主 Footer Index；不匹配时用 `index_mirror` 恢复目录。
 4. 逐块比对 BLAKE3 block hash，标记损坏 payload block。
 5. 按 RS group 尝试恢复能力内的损坏块；修复后重新比对 block hash。

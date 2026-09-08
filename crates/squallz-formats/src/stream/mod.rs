@@ -70,7 +70,7 @@ impl<E: Write + Send> CompressSink for EncoderSink<E> {
             .encoder
             .take()
             .ok_or_else(|| FormatError::Other("compressed stream already finished".into()))?;
-        (self.finish_fn)(encoder).map_err(FormatError::Io)
+        (self.finish_fn)(encoder).map_err(FormatError::from)
     }
 }
 
@@ -160,5 +160,13 @@ mod tests {
             matches!(err, FormatError::Io(ref error) if error.to_string().contains("late encoder failure")),
             "expected late io error, got {err:?}"
         );
+
+        let mut sink = EncoderSink::boxed(Vec::<u8>::new(), |_encoder| {
+            Err(io::Error::new(
+                io::ErrorKind::QuotaExceeded,
+                "quota exhausted",
+            ))
+        });
+        assert!(matches!(sink.finish(), Err(FormatError::DiskFull)));
     }
 }

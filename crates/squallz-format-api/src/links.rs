@@ -17,6 +17,7 @@ const MAX_LINK_DEPTH: usize = 40;
 /// Normalizes an archive-internal path: drops empty and `.` components and
 /// trailing slashes. Returns `None` when a `..` component escapes the root
 /// or the path is absolute.
+#[cfg(test)]
 fn normalize(path: &str) -> Option<String> {
     if path.starts_with('/') {
         return None;
@@ -35,19 +36,49 @@ fn normalize(path: &str) -> Option<String> {
     Some(parts.join("/"))
 }
 
-/// Normalizes a hardlink target (raw bytes): hardlink targets name another
-/// entry by its full archive path (tar semantics), so no joining happens.
-pub(crate) fn normalize_archive_path(target: &[u8]) -> Option<String> {
-    let target = String::from_utf8_lossy(target);
+fn normalize_raw(path: &[u8]) -> Option<Vec<u8>> {
+    if path
+        .first()
+        .is_some_and(|byte| matches!(*byte, b'/' | b'\\'))
+    {
+        return None;
+    }
+    let mut parts: Vec<&[u8]> = Vec::new();
+    for component in path.split(|byte| matches!(*byte, b'/' | b'\\')) {
+        match component {
+            b"" | b"." => {}
+            b".." => {
+                parts.pop()?;
+            }
+            component => parts.push(component),
+        }
+    }
+    let capacity = parts
+        .iter()
+        .map(|part| part.len())
+        .sum::<usize>()
+        .saturating_add(parts.len().saturating_sub(1));
+    let mut normalized = Vec::with_capacity(capacity);
+    for (index, part) in parts.into_iter().enumerate() {
+        if index > 0 {
+            normalized.push(b'/');
+        }
+        normalized.extend_from_slice(part);
+    }
+    Some(normalized)
+}
+
+pub(crate) fn normalize_archive_path_raw(target: &[u8]) -> Option<Vec<u8>> {
     if target.is_empty() {
         return None;
     }
-    normalize(&target).filter(|p| !p.is_empty())
+    normalize_raw(target).filter(|path| !path.is_empty())
 }
 
 /// Resolves a *symlink* target (raw bytes) against the directory containing
 /// the link (file-system semantics). Returns the normalized
 /// archive-internal path of the target.
+#[cfg(test)]
 pub(crate) fn resolve_target_path(link_path: &str, target: &[u8]) -> Option<String> {
     let target = String::from_utf8_lossy(target);
     if target.is_empty() {
@@ -65,6 +96,28 @@ pub(crate) fn resolve_target_path(link_path: &str, target: &[u8]) -> Option<Stri
     normalize(&joined)
 }
 
+pub(crate) fn resolve_target_path_raw(link_path: &[u8], target: &[u8]) -> Option<Vec<u8>> {
+    if target.is_empty()
+        || target
+            .first()
+            .is_some_and(|byte| matches!(*byte, b'/' | b'\\'))
+    {
+        return None;
+    }
+    let normalized_link = normalize_raw(link_path)?;
+    let parent_end = normalized_link.iter().rposition(|byte| *byte == b'/');
+    let mut joined = match parent_end {
+        Some(index) => normalized_link[..index].to_vec(),
+        None => Vec::new(),
+    };
+    if !joined.is_empty() {
+        joined.push(b'/');
+    }
+    joined.extend_from_slice(target);
+    normalize_raw(&joined).filter(|path| !path.is_empty())
+}
+
+#[cfg(test)]
 fn link_parent(normalized_link_path: &str) -> &str {
     let mut parent = "";
     if let Some((dir, _name)) = normalized_link_path.rsplit_once('/') {
@@ -76,7 +129,7 @@ fn link_parent(normalized_link_path: &str) -> &str {
 /// Index over archive entries for link resolution, keyed by normalized
 /// display path.
 pub(crate) struct LinkResolver<'a> {
-    by_path: HashMap<String, &'a EntryMeta>,
+    by_path: HashMap<Vec<u8>, &'a EntryMeta>,
 }
 
 impl<'a> LinkResolver<'a> {
@@ -84,7 +137,7 @@ impl<'a> LinkResolver<'a> {
     pub(crate) fn new(metas: &'a [EntryMeta]) -> Self {
         let mut by_path = HashMap::with_capacity(metas.len());
         for meta in metas {
-            if let Some(key) = normalize(&meta.path.display) {
+            if let Some(key) = normalize_archive_path_raw(&meta.path.raw) {
                 if !key.is_empty() {
                     by_path.insert(key, meta);
                 }
@@ -99,16 +152,16 @@ impl<'a> LinkResolver<'a> {
     /// Returns `None` for targets that leave the archive, dangle, form a
     /// cycle, or end on a non-file entry.
     pub(crate) fn resolve_to_file(&self, link: &EntryMeta) -> Option<&'a EntryMeta> {
-        let mut visited: HashSet<String> = HashSet::new();
-        let mut current_path = normalize(&link.path.display)?;
+        let mut visited: HashSet<Vec<u8>> = HashSet::new();
+        let mut current_path = normalize_archive_path_raw(&link.path.raw)?;
         let mut current = link.entry_type.clone();
         for _ in 0..MAX_LINK_DEPTH {
             if !visited.insert(current_path.clone()) {
                 return None; // cycle
             }
             let next = match &current {
-                EntryType::Symlink { target } => resolve_target_path(&current_path, target)?,
-                EntryType::Hardlink { target } => normalize_archive_path(target)?,
+                EntryType::Symlink { target } => resolve_target_path_raw(&current_path, target)?,
+                EntryType::Hardlink { target } => normalize_archive_path_raw(target)?,
                 _ => return None,
             };
             let meta = *self.by_path.get(&next)?;
@@ -188,5 +241,21 @@ mod tests {
         assert_eq!(resolved.path.display, "data.txt");
         assert!(resolver.resolve_to_file(&metas[3]).is_none(), "cycle");
         assert!(resolver.resolve_to_file(&metas[5]).is_none(), "dangling");
+    }
+
+    #[test]
+    fn resolver_keeps_distinct_non_utf8_raw_paths() {
+        let mut first = meta("first.txt", EntryType::File);
+        first.path = EntryPath::from_raw(vec![0x80], "first.txt".into(), "legacy");
+        let mut second = meta("second.txt", EntryType::File);
+        second.path = EntryPath::from_raw(vec![0x81], "second.txt".into(), "legacy");
+        let hardlink = meta("hard.txt", EntryType::Hardlink { target: vec![0x80] });
+        let entries = vec![first, second, hardlink];
+        let resolver = LinkResolver::new(&entries);
+
+        let resolved = resolver.resolve_to_file(&entries[2]).unwrap();
+
+        assert_eq!(resolved.path.raw, vec![0x80]);
+        assert_eq!(resolved.path.display, "first.txt");
     }
 }

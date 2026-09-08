@@ -8,9 +8,11 @@ use squallz_core::api::{CompressionLevel, CreateOptions, EntryPath, Password, Up
 
 use super::reports::print_pretty_json;
 use crate::args::resource_options;
-use crate::commands::{Ctx, ModernStatusField, ModernTableColumn, ModernTableRow};
+use crate::commands::{
+    memory_limit_label, threads_label, Ctx, ModernStatusField, ModernTableColumn, ModernTableRow,
+};
 use crate::errors::CliError;
-use crate::progress::{fmt_bytes, CliProgress};
+use crate::progress::CliProgress;
 use crate::ui::Tone;
 
 #[allow(clippy::too_many_arguments)] // direct image of the CLI surface
@@ -182,11 +184,11 @@ pub fn run(
                 ]),
                 ModernTableRow::new(vec![
                     ctx.loc.t("common.threads"),
-                    threads_label(threads, &ctx.loc.t("common.auto")),
+                    threads_label(ctx, threads),
                 ]),
                 ModernTableRow::new(vec![
                     ctx.loc.t("common.memory_limit"),
-                    memory_limit_label(memory_limit, &ctx.loc.t("common.auto")),
+                    memory_limit_label(ctx, memory_limit),
                 ]),
             ],
         );
@@ -201,20 +203,6 @@ fn add_dest_from_path(path: &Path) -> String {
     match path.file_name() {
         Some(name) => name.to_string_lossy().into_owned(),
         None => String::new(),
-    }
-}
-
-fn threads_label(threads: Option<usize>, auto: &str) -> String {
-    match threads {
-        Some(threads) => threads.to_string(),
-        None => auto.to_owned(),
-    }
-}
-
-fn memory_limit_label(memory_limit: Option<u64>, auto: &str) -> String {
-    match memory_limit {
-        Some(memory_limit) => fmt_bytes(memory_limit),
-        None => auto.to_owned(),
     }
 }
 

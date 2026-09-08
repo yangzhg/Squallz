@@ -12,6 +12,8 @@
   <a href="README.md">English README</a> |
   <a href="docs/format-support.md">格式支持</a> |
   <a href="docs/sqz-container-format-v1.md">SQZ 规范</a> |
+  <a href="docs/SELF_EXTRACTING.md">SFX 规范</a> |
+  <a href="docs/macos-release.md">macOS 发布</a> |
   <a href="docs/privacy.md">隐私说明</a>
 </p>
 
@@ -39,7 +41,7 @@ flowchart LR
 | 模块 | 能力 |
 | --- | --- |
 | 桌面应用 | Tauri 桌面 UI，支持共享任务进度、主题设置、历史记录、密码保存、拖拽和平台入口交接。 |
-| CLI | `sqz` 支持创建、解压、列出、测试、转换、嵌套归档、checksum、重复文件扫描、批处理、诊断和 JSON 输出。 |
+| CLI | `sqz` 支持创建压缩包和 SFX、解压、列出、测试、转换、嵌套归档、checksum、重复文件扫描、批处理、诊断和 JSON 输出。 |
 | 原生容器 | `.sqz` 包含条目目录、校验和、内嵌 Reed-Solomon 恢复、分卷以及标准归档导出。 |
 | 安全边界 | 集中处理路径穿越、Zip Slip、符号链接越界、输出大小、条目数量和压缩比限制。 |
 | 隐私 | 无广告、无遥测、不上传文件。只有用户主动选择记住密码时，才写入系统密码库。 |
@@ -55,6 +57,7 @@ Squallz 会明确区分内置能力、外部工具能力和不支持的能力。
 | WIM | 通过外部工具路径实现创建/读取，主要依赖可用的 `wimlib-imagex` 和 7zz/7z；默认不随包内置。 |
 | 长尾只读格式 | 安装 7zz/7z 后，可通过桥接读取 APFS、AR、ARJ、CAB、CHM、CPIO、CramFS、DMG、EXT、FAT、GPT、HFS、IHEX、ISO、LZH、LZMA、MBR、MSI、NSIS、NTFS、QCOW2、RPM、SquashFS、UDF、UEFI、VDI、VHD、VHDX、VMDK、XAR、Z 等格式。 |
 | RAR | 只读桥接。Squallz 不创建 RAR，不实现 RAR recovery record，也不承诺修复损坏 RAR。 |
+| 自解压文件 | SFX v1 可把完整 ZIP 载荷与 Squallz Windows PE、Linux ELF stub 或 macOS GUI `.app` 模板组装为目标平台产物。CLI 与桌面创建页支持当前主机目标，完成后再签名。 |
 | 外置恢复 | PAR2 verify/repair 有 Rust fallback 和可选外部桥接；PAR2 create 在本机存在标准外部工具时可用。 |
 
 可以随时查看当前机器上的实际能力：
@@ -105,6 +108,17 @@ sqz test Photos.zip --json
 sqz extract Photos.zip -d ./Restored --smart
 ```
 
+用完整 ZIP 载荷创建并校验 Windows 或 Linux 自解压文件：
+
+```sh
+sqz sfx create Photos.zip --target windows --stub sqz.exe -o Photos.exe
+sqz sfx create Photos.zip --target macos --stub Squallz.app -o Photos.app
+sqz sfx inspect Photos.exe
+```
+
+运行时只提供列出、测试和安全解压，不会自动执行压缩包内的代码。产物组装完成后再做最终签名。布局和 macOS 签名边界见
+[docs/SELF_EXTRACTING.md](docs/SELF_EXTRACTING.md)。
+
 创建自恢复 `.sqz` 容器：
 
 ```sh
@@ -124,12 +138,29 @@ sqz duplicates ./Downloads --min-size 1m --json
 sqz batch jobs.json --keep-going --json
 ```
 
+查看已安装的 CLI 版本，或检查稳定版发布通道：
+
+```sh
+sqz --version
+sqz check-update
+sqz check-update --json
+```
+
+`sqz --version` 只读取本地版本，不会联网。`sqz check-update` 只读取稳定版发布元数据，
+不会下载或安装更新软件包。`up_to_date`、`update_available` 和 `ahead` 都属于正常结果并以 0
+退出；发现新版本但当前平台没有适配包时也仍然以 0 退出。它与 `sqz update` 不同，后者
+用于添加、删除、重命名或移动已有压缩包中的条目。
+
 不手动落盘解压，直接转换：
 
 ```sh
 sqz convert source.zip -o source.7z --profile maximum
+sqz convert source.zip -o source.7z --profile balanced --split 700m
 sqz export archive.sqz -o archive.tar.zst
 ```
+
+转换和导出默认拒绝已有输出。分卷转换会发布 `.001/.002/...` 并报告每一个分卷。
+只有明确决定替换文件或完整编号集合时，才使用 `--force`。
 
 ## 桌面应用
 
@@ -189,72 +220,71 @@ make dev
 make app-release
 ```
 
-## 未签名的 GitHub Release 二进制
+## 发布产物的信任状态
 
-这一节只适用于从 GitHub Releases 下载 Squallz 预编译二进制的用户，不适用于从源码运行，
-也不适用于后续通过包管理器安装的版本。当前早期桌面二进制还没有做代码签名和公证。
-归档处理和 CLI 行为不受影响，但操作系统可能在应用启动前拦截，或在安装文件管理器入口时提示风险。
+GitHub Release 中的每个文件都有独立的信任状态，不能把同一批附件笼统理解为“全部已签名”：
 
-只有在你自己构建了该应用，或确认下载来源可信时，才绕过这些系统提示。如果下载页面同时提供
-checksum，请先比对后再绕过操作系统警告。如果你不确定二进制来自哪里，删除它并改为从源码构建。
+| 状态 | 含义 |
+| --- | --- |
+| `developer-id-notarized` | macOS DMG 已通过 Developer ID 签名、Apple 公证、staple、Gatekeeper 和最终哈希检查。 |
+| `unsigned-preview` | 不声明平台签名或公证证据；当前 Windows 和 Linux 包使用这一状态。 |
+| `source` | 源码归档，不适用桌面代码签名。 |
 
-由 GitHub Actions 发布流程生成的下载文件会附带逐文件 `.sha256`、`.provenance.json`
-证据文件，以及 GitHub Artifact Attestations。从 GitHub Releases 下载文件后，先验证
-checksum 和构建来源，再处理操作系统拦截：
+公开 macOS 流程只有在完整信任链通过后才会发布 DMG，不会降级上传未签名的 macOS 包。没有标注
+信任状态的旧版本应按未签名预览版处理。
+
+每个主要附件都有同名 `.sha256`、`.provenance.json` 和 GitHub Artifact Attestation；
+`developer-id-notarized` DMG 还会带同名 `.trust.json`。运行下载文件前先核对这些证据：
 
 ```sh
 shasum -a 256 /path/to/downloaded-asset
 gh attestation verify /path/to/downloaded-asset --repo yangzhg/Squallz
 ```
 
-把命令输出的 SHA-256 值和对应的 `.sha256` 文件进行比对。
+把命令输出的 SHA-256 值和对应的 `.sha256` 文件进行比对。维护者使用的完整 macOS 流程见
+[docs/macos-release.md](docs/macos-release.md)。
 
 ### macOS
 
-如果 Finder 提示无法验证开发者，或提示 Apple 无法检查这个应用是否包含恶意软件：
+对标记为 `developer-id-notarized` 的 DMG，再检查 Apple ticket 和 Gatekeeper：
 
-1. 先确认下载来自预期的发布页；如果发布页提供 checksum，先完成比对。
-2. 如果你准备长期使用，把 `Squallz.app` 移到“应用程序”目录。
-3. 按住 Control 或右键点击 `Squallz.app`，选择“打开”，再确认“打开”。
-4. 如果 macOS 仍然拦截，打开“系统设置 → 隐私与安全性”，找到 Squallz 后选择“仍要打开”。
+```sh
+xcrun stapler validate /path/to/Squallz.dmg
+spctl --assess --type open --context context:primary-signature --verbose=4 /path/to/Squallz.dmg
+```
 
-如果确认来源可信后，macOS 仍提示应用已损坏、无法打开，通常是 unsigned bundle 上的
-quarantine 属性导致的。移除该属性后再重新打开：
+如果任一命令失败，或系统拦截了标记为 `developer-id-notarized` 的 DMG，应停止安装并反馈发布问题。
+不要对“发布声明”和系统检查结果不一致的包移除 quarantine，也不要选择“仍要打开”。
+
+未签名预览版即使 checksum 正确也可能被系统拦截。只有在自己构建，或已经核对来源和 provenance
+时才绕过提示：先右键或按住 Control 打开应用；确有需要时，再到“隐私与安全性”选择“仍要打开”。
+移除 quarantine 只作为已验证预览版的最后手段：
 
 ```sh
 xattr -dr com.apple.quarantine /path/to/Squallz.app
 ```
 
-如果下载的 `sqz` CLI 二进制被拦截或没有执行权限，先确认来源可信，再执行：
+已验证的预览版 CLI 如果没有执行权限，可以运行：
 
 ```sh
 xattr -d com.apple.quarantine /path/to/sqz
 chmod +x /path/to/sqz
 ```
 
-### Windows
+### Windows 和 Linux 预览版
 
-如果 Microsoft Defender SmartScreen 提示“Windows 已保护你的电脑”：
+当前 Windows 和 Linux 下载标记为 `unsigned-preview`。Windows 出现 SmartScreen 警告时，先核对
+checksum 和 provenance，再选择“更多信息 → 仍要运行”。如果无法验证来源，不要恢复被安全软件
+隔离的文件。
 
-1. 先确认下载来自预期的发布页；如果发布页提供 checksum，先完成比对。
-2. 选择“更多信息 → 仍要运行”。
-
-如果 Microsoft Defender 或其他安全工具隔离了文件，只有在你确认来源和 checksum 可信后，
-才恢复或允许该文件。如果无法验证这个二进制，删除它并改为从源码构建 Squallz。
-
-### Linux
-
-如果终端提示 `Permission denied`，或下载的 AppImage/二进制无法启动，先给它执行权限：
+Linux 上已验证的 AppImage 或二进制可能需要补执行权限：
 
 ```sh
 chmod +x /path/to/Squallz
 chmod +x /path/to/sqz
 ```
 
-如果桌面环境询问是否信任或集成下载的应用，请只在确认来源和 checksum 可信后同意。
-如果包管理器或沙箱策略拦截应用，建议从源码构建，或改用当前发行版的原生包格式。
-
-后续正式分发构建应使用签名和公证产物。在此之前，请把下载到的未签名二进制视为预览版构建。
+无法验证未签名预览版时，请删除它并从源码构建。
 
 常用校验：
 
@@ -262,6 +292,7 @@ chmod +x /path/to/sqz
 cargo fmt --all -- --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all
+make test-release-tools
 npm --prefix frontend run check
 npm --prefix frontend run build
 ```
@@ -274,6 +305,7 @@ npm --prefix frontend run build
 | `crates/squallz-formats` | 归档格式实现和外部工具桥接。 |
 | `crates/squallz-format-api` | 格式 trait、条目模型、解压契约、安全 helper 和 registry 类型。 |
 | `crates/squallz-recovery` | 恢复校验和修复支持。 |
+| `crates/squallz-update` | GUI 和 CLI 共用的稳定版发现逻辑，不包含下载或安装路径。 |
 | `crates/squallz-cli` | `sqz` 命令行入口。 |
 | `crates/squallz-gui` | Tauri 后端、桌面集成、任务、设置、密码和 IPC。 |
 | `frontend` | Svelte UI、design token、任务弹窗、i18n 和前端状态。 |

@@ -13,7 +13,7 @@ if [[ "$APP" != /* ]]; then
   APP="$ROOT/$APP"
 fi
 EXE="$APP/Contents/MacOS/squallz-gui"
-SQZ_HELPER="$APP/Contents/Resources/bin/sqz"
+SQZ_HELPER="$APP/Contents/MacOS/sqz"
 WORK="$ROOT/target/squallz-macos-packaged-quick-actions-smoke"
 HOME_DIR="$WORK/home"
 TRACE="$WORK/trace.jsonl"
@@ -35,10 +35,27 @@ fi
 if [[ ! -x "$SQZ_HELPER" ]]; then
   fail "missing bundled sqz helper: $SQZ_HELPER"
 fi
+
+declared_minimum="$(/usr/bin/plutil -extract LSMinimumSystemVersion raw "$APP/Contents/Info.plist")"
+verify_binary_minimum() {
+  local binary="$1"
+  local minimum_versions
+  minimum_versions="$(/usr/bin/xcrun vtool -show-build "$binary" \
+    | awk '$1 == "minos" { print $2 }' \
+    | sort -u)"
+  if [[ -z "$minimum_versions" ]]; then
+    fail "missing LC_BUILD_VERSION minos in $binary"
+  fi
+  if [[ "$minimum_versions" != "$declared_minimum" ]]; then
+    fail "$binary requires macOS $minimum_versions but Info.plist declares $declared_minimum"
+  fi
+}
+verify_binary_minimum "$EXE"
+verify_binary_minimum "$SQZ_HELPER"
+
 if pgrep -x squallz-gui >/dev/null; then
   fail "squallz-gui is already running; close it before running packaged Quick Actions smoke"
 fi
-
 mkdir -p "$WORK" "$ROOT/benches" "$HOME_DIR/Library/Application Support/Squallz" "$FIXTURE"
 rm -f "$TRACE" "$REPORT"
 rm -rf "$HOME_DIR/Library/Services" "$HOME_DIR/Library/Application Support/Squallz/context-actions" "$FIXTURE" "$FAKE_BIN"
@@ -79,11 +96,32 @@ printf 'packaged helper compress payload\n' > "$FIXTURE/compress-case/source/c.t
 printf 'nested compress payload\n' > "$FIXTURE/compress-case/source/sub/d.txt"
 
 cleanup() {
-  if [[ -n "${APP_PID:-}" ]]; then
-    kill "$APP_PID" >/dev/null 2>&1 || true
-  fi
+  while IFS= read -r pid; do
+    [[ -n "$pid" ]] && kill "$pid" >/dev/null 2>&1 || true
+  done < <(pgrep -x squallz-gui || true)
 }
 trap cleanup EXIT
+
+wait_for_file() {
+  local path="$1"
+  local description="$2"
+  for _ in {1..200}; do
+    [[ -f "$path" ]] && return 0
+    sleep 0.05
+  done
+  fail "$description"
+}
+
+wait_for_archive() {
+  local path="$1"
+  for _ in {1..200}; do
+    if [[ -f "$path" ]] && "$SQZ_HELPER" test "$path" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.05
+  done
+  fail "compress-to-7z did not finish a readable archive"
+}
 
 open -n -a "$APP" \
   --env "HOME=$HOME_DIR" \
@@ -124,9 +162,27 @@ events = [json.loads(line) for line in trace.read_text(encoding="utf-8").splitli
 matches = [item["payload"] for item in events if item.get("event") == "integration.apply.ok"]
 assert matches, "missing integration.apply.ok"
 apply = matches[-1]
+diagnostic_matches = [item["payload"] for item in events if item.get("event") == "integration.system_diagnostics"]
+assert diagnostic_matches, "missing integration.system_diagnostics"
+diagnostics = diagnostic_matches[-1]
+assert diagnostics.get("platform") == "macos", diagnostics
+default_handlers = diagnostics.get("default_handlers", {})
+handlers = default_handlers.get("handlers", [])
+assert default_handlers.get("total") == 23, default_handlers
+assert len(handlers) == 23, default_handlers
+assert 0 <= default_handlers.get("checked", -1) <= 23, default_handlers
+assert 0 <= default_handlers.get("squallz", -1) <= 23, default_handlers
+assert default_handlers.get("state") in {"squallz", "mixed", "other", "unknown", "unavailable"}, default_handlers
+for handler in handlers:
+    assert handler.get("state") in {"squallz", "other", "unknown"}, handler
+    application_name = handler.get("application_name")
+    assert application_name is None or ("/" not in application_name and "\\" not in application_name), handler
+visibility = diagnostics.get("file_manager_visibility", {})
+assert visibility.get("state") == "manual_check", visibility
+assert visibility.get("reason") == "not_exposed_by_platform", visibility
 assert apply["platform"] == "macos", apply
 installed = apply.get("installed", [])
-assert len(installed) == 4, apply
+assert len(installed) == 5, apply
 for item in installed:
     script = pathlib.Path(item["script_path"])
     workflow = pathlib.Path(item["path"])
@@ -134,7 +190,7 @@ for item in installed:
     assert str(workflow).startswith(str(home)), workflow
     assert script.is_file(), script
     body = script.read_text(encoding="utf-8")
-    assert "Contents/Resources/bin/sqz" in body, script
+    assert "Contents/MacOS/sqz" in body, script
     assert str(app) in body, f"script did not capture packaged app path: {script}"
     print(f"{item['id']}\t{script}\t{workflow}")
 PY
@@ -148,12 +204,19 @@ for action in "${ACTIONS[@]}"; do
   WORKFLOW_FOR["$id"]="$workflow_path"
 done
 
-for id in extract-here extract-to-folder compress-to-7z test-archive; do
+for id in checksum extract-here extract-to-folder compress-to-7z test-archive; do
   [[ -n "${SCRIPT_FOR[$id]:-}" ]] || fail "missing generated script for $id"
   [[ -n "${WORKFLOW_FOR[$id]:-}" ]] || fail "missing generated workflow for $id"
   /bin/zsh -n "${SCRIPT_FOR[$id]}"
   /usr/bin/plutil -lint "${WORKFLOW_FOR[$id]}/Contents/Info.plist" "${WORKFLOW_FOR[$id]}/Contents/document.wflow" >/dev/null
 done
+
+kill "$APP_PID" >/dev/null 2>&1 || true
+for _ in {1..50}; do
+  kill -0 "$APP_PID" >/dev/null 2>&1 || break
+  sleep 0.05
+done
+APP_PID=""
 
 run_workflow() {
   local workflow="$1"
@@ -161,18 +224,20 @@ run_workflow() {
   env -u SQUALLZ_CLI \
     -u SQUALLZ_APP_BUNDLE \
     HOME="$HOME_DIR" \
+    SQUALLZ_DISABLE_GUI_HANDOFF=1 \
     PATH="$FAKE_BIN:/usr/bin:/bin:/usr/sbin:/sbin" \
     /usr/bin/automator -i "$1" "$workflow" >/dev/null
 }
 
+run_workflow "${WORKFLOW_FOR[checksum]}" "$FIXTURE/source/a.txt"
 run_workflow "${WORKFLOW_FOR[test-archive]}" "$FIXTURE/source.zip"
 run_workflow "${WORKFLOW_FOR[extract-here]}" "$FIXTURE/here-case/here.zip"
 run_workflow "${WORKFLOW_FOR[extract-to-folder]}" "$FIXTURE/folder-case/folder.zip"
 run_workflow "${WORKFLOW_FOR[compress-to-7z]}" "$FIXTURE/compress-case/source"
 
-[[ -f "$FIXTURE/here-case/source/a.txt" ]] || fail "extract-here did not create here-case/source/a.txt"
-[[ -f "$FIXTURE/folder-case/folder/source/a.txt" ]] || fail "extract-to-folder did not create folder-case/folder/source/a.txt"
-[[ -f "$FIXTURE/compress-case/source.7z" ]] || fail "compress-to-7z did not create compress-case/source.7z"
+wait_for_file "$FIXTURE/here-case/source/a.txt" "extract-here did not create here-case/source/a.txt"
+wait_for_file "$FIXTURE/folder-case/folder/source/a.txt" "extract-to-folder did not create folder-case/folder/source/a.txt"
+wait_for_archive "$FIXTURE/compress-case/source.7z"
 run_workflow "${WORKFLOW_FOR[test-archive]}" "$FIXTURE/compress-case/source.7z"
 
 TRACE_SUMMARY="$(python3 - "$TRACE" <<'PY'
@@ -185,6 +250,9 @@ for line in open(sys.argv[1], encoding="utf-8"):
         detail = f"installed={len(payload.get('installed', []))} script_dir={payload.get('script_dir')}"
     elif item["event"] == "integration.status.after_apply":
         detail = f"installed={len(payload.get('installed', []))} missing={len(payload.get('missing', []))}"
+    elif item["event"] == "integration.system_diagnostics":
+        handlers = payload.get("default_handlers", {})
+        detail = f"default_handlers={handlers.get('squallz', 0)}/{handlers.get('total', 0)} state={handlers.get('state')} finder={payload.get('file_manager_visibility', {}).get('state')}"
     else:
         detail = str(payload)
     print(f"- +{item.get('process_ms', '?')}ms {item['event']}: {detail}")
@@ -200,9 +268,10 @@ Generated: $(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
 This smoke check launches the packaged macOS app through LaunchServices with an
 isolated HOME, lets the real Tauri backend install Finder Quick Actions, then
-runs the generated \`.workflow\` bundles through \`/usr/bin/automator\`. It verifies
-that packaged Quick Actions can resolve the first-party
-\`Contents/Resources/bin/sqz\` helper and perform real archive operations without
+runs the generated \`.workflow\` bundles through \`/usr/bin/automator\`. It sets
+the workflow's supported GUI-handoff test switch, forcing every workflow to
+resolve the first-party
+\`Contents/MacOS/sqz\` helper and perform real archive operations without
 a developer PATH.
 
 ## Inputs
@@ -217,15 +286,18 @@ a developer PATH.
 ## Checks
 
 - \`squallz-gui\` starts from the bundle.
-- \`integration.apply.ok\` installs exactly four Finder actions into isolated HOME.
+- \`integration.apply.ok\` installs exactly five Finder actions into isolated HOME.
+- \`integration.system_diagnostics\` reports all 23 declared file types without
+  exposing application paths and keeps Finder visibility as a manual check.
 - Every generated script captures the packaged app path and contains the
-  \`Contents/Resources/bin/sqz\` resolver candidate.
+  \`Contents/MacOS/sqz\` resolver candidate.
 - Scripts pass \`/bin/zsh -n\`.
 - Workflow plists pass \`plutil -lint\`.
 - Workflows run through \`/usr/bin/automator\` with \`SQUALLZ_CLI\` and
   \`SQUALLZ_APP_BUNDLE\` unset and a
-  failing fake \`sqz\` first on \`PATH\`, so success proves the generated scripts
-  use the captured packaged app helper.
+  failing fake \`sqz\` first on \`PATH\`. GUI handoff is disabled, so Automator's
+  exit status is the bundled CLI action's terminal status.
+- \`Squallz Checksum\` completes against a real file.
 - \`Squallz Test Archive\` succeeds on a ZIP made for this smoke.
 - \`Squallz Extract Here\` extracts the ZIP next to the archive.
 - \`Squallz Extract to Folder\` extracts into the derived folder.

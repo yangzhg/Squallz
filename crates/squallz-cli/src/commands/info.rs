@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 use squallz_core::api::{FormatInfo, FormatKind};
+use squallz_formats::{sevenzip_backend_status, SevenZipBackendSource};
 
 use super::reports::print_pretty_json;
 use crate::commands::{Ctx, ModernStatusField, ModernTableColumn, ModernTableRow};
@@ -516,7 +517,7 @@ fn backend_detail(ctx: &Ctx, format_id: &str) -> String {
         "rar" => label(
             ctx,
             "cli.info.engine.rar",
-            "external: 7zz/7z; bsdtar diagnostic fallback",
+            "external: 7zz/7z; bsdtar and optional unrar fallback",
         ),
         id if long_tail_7z_bridge_format(id) => {
             label(ctx, "cli.info.engine.7z", "external: 7zz/7z")
@@ -810,17 +811,12 @@ fn modern_output_rows(ctx: &Ctx) -> Vec<ModernTableRow> {
         ModernTableRow::new(vec![
             label(ctx, "cli.info.output.color_mode", "Color mode"),
             color,
-            "auto follows TTY and NO_COLOR; rich/fancy force modern ANSI for screenshots, redirected demos, and live progress previews; always/never remain explicit".to_owned(),
+            "auto follows TTY and NO_COLOR; always and never are explicit".to_owned(),
         ]),
         ModernTableRow::success(vec![
             label(ctx, "common.palette", "Palette"),
             palette,
-            "use --palette / --theme / --colors to switch modern terminal colors; surge keeps the approved teal primary with a vivid sky-blue HUD accent".to_owned(),
-        ]),
-        ModernTableRow::success(vec![
-            label(ctx, "common.color_scheme", "Color scheme"),
-            "--color-scheme / --scheme / --colors".to_owned(),
-            "visible aliases for the same modern palette control; JSON and classic output remain unchanged".to_owned(),
+            "use --palette to switch modern terminal colors; JSON and classic output remain unchanged".to_owned(),
         ]),
         ModernTableRow::success(vec![
             label(ctx, "cli.info.output.progress_hud", "Progress HUD"),
@@ -844,7 +840,7 @@ fn modern_style_guide_rows(ctx: &Ctx) -> Vec<ModernTableRow> {
             "operation cockpit".to_owned(),
             "progress gauge + snapshot dashboard table + phase rail + signal matrix + transfer board + transfer matrix + action queue"
                 .to_owned(),
-            "sqz compress input -o out.7z --style modern --color fancy".to_owned(),
+            "sqz compress input -o out.7z --style modern --color always".to_owned(),
         ]),
         ModernTableRow::success(vec![
             label(ctx, "cli.info.style.result", "Finished operation"),
@@ -858,7 +854,7 @@ fn modern_style_guide_rows(ctx: &Ctx) -> Vec<ModernTableRow> {
             "scorecard + decision tables".to_owned(),
             "support map, format coverage, capability lanes, runtime inventory, and palette gallery"
                 .to_owned(),
-            "sqz info --style modern --color rich".to_owned(),
+            "sqz info --style modern --color always".to_owned(),
         ]),
         ModernTableRow::new(vec![
             label(ctx, "cli.info.style.audit", "Script or audit log"),
@@ -873,136 +869,6 @@ fn modern_style_guide_rows(ctx: &Ctx) -> Vec<ModernTableRow> {
 fn modern_palette_rows(ctx: &Ctx) -> Vec<ModernTableRow> {
     vec![
         ModernTableRow::success(vec![
-            "brand".to_owned(),
-            "--palette brand".to_owned(),
-            "#2DD4BF primary + #0EA5E9 secondary".to_owned(),
-            label(
-                ctx,
-                "cli.info.palette.best_brand",
-                "short brand option for the approved app icon colors",
-            ),
-        ]),
-        ModernTableRow::success(vec![
-            "icon".to_owned(),
-            "--colors icon".to_owned(),
-            "#2DD4BF -> #0EA5E9 approved icon gradient".to_owned(),
-            label(
-                ctx,
-                "cli.info.palette.best_icon",
-                "explicitly use the selected app icon palette",
-            ),
-        ]),
-        ModernTableRow::success(vec![
-            "cascade".to_owned(),
-            "--palette cascade".to_owned(),
-            "#2DD4BF primary + #7DD3FC secondary".to_owned(),
-            label(
-                ctx,
-                "cli.info.palette.best_cascade",
-                "brighter modern tables while preserving the approved app icon teal",
-            ),
-        ]),
-        ModernTableRow::success(vec![
-            "daylight".to_owned(),
-            "--palette daylight".to_owned(),
-            "#2DD4BF primary + #67E8F9 secondary".to_owned(),
-            label(
-                ctx,
-                "cli.info.palette.best_daylight",
-                "bright teal/sky output for modern tables and live progress without dark chrome",
-            ),
-        ]),
-        ModernTableRow::success(vec![
-            "foam".to_owned(),
-            "--palette foam".to_owned(),
-            "#2DD4BF primary + #E0F2FE secondary".to_owned(),
-            label(
-                ctx,
-                "cli.info.palette.best_foam",
-                "soft app-icon colors with a bright ice-blue highlight and no dark chrome",
-            ),
-        ]),
-        ModernTableRow::success(vec![
-            "skyline".to_owned(),
-            "--palette skyline".to_owned(),
-            "#0EA5E9 primary + #2DD4BF secondary".to_owned(),
-            label(
-                ctx,
-                "cli.info.palette.best_skyline",
-                "brighter blue-led terminal output while keeping the approved icon colors",
-            ),
-        ]),
-        ModernTableRow::success(vec![
-            "aero".to_owned(),
-            "--palette aero".to_owned(),
-            "#7DD3FC primary + #2DD4BF secondary".to_owned(),
-            label(
-                ctx,
-                "cli.info.palette.best_aero",
-                "lighter sky-led modern output while staying in the approved icon palette",
-            ),
-        ]),
-        ModernTableRow::success(vec![
-            "crest".to_owned(),
-            "--palette crest".to_owned(),
-            "#38BDF8 primary + #5EEAD4 secondary".to_owned(),
-            label(
-                ctx,
-                "cli.info.palette.best_crest",
-                "brighter teal/sky command demos without dark chrome",
-            ),
-        ]),
-        ModernTableRow::success(vec![
-            "halo".to_owned(),
-            "--palette halo".to_owned(),
-            "#5EEAD4 primary + #38BDF8 secondary".to_owned(),
-            label(
-                ctx,
-                "cli.info.palette.best_halo",
-                "bright teal/sky output for richer modern progress and tables",
-            ),
-        ]),
-        ModernTableRow::success(vec![
-            "tropic".to_owned(),
-            "--palette tropic".to_owned(),
-            "#2DD4BF primary + #22D3EE secondary".to_owned(),
-            label(
-                ctx,
-                "cli.info.palette.best_tropic",
-                "approved teal with a brighter cyan accent for fancy transfer boards",
-            ),
-        ]),
-        ModernTableRow::success(vec![
-            "kinetic".to_owned(),
-            "--palette kinetic".to_owned(),
-            "#2DD4BF primary + #60A5FA secondary".to_owned(),
-            label(
-                ctx,
-                "cli.info.palette.best_kinetic",
-                "approved teal with a more energetic sky accent for live transfer matrices",
-            ),
-        ]),
-        ModernTableRow::success(vec![
-            "radiant".to_owned(),
-            "--palette radiant".to_owned(),
-            "#2DD4BF primary + #BAE6FD secondary".to_owned(),
-            label(
-                ctx,
-                "cli.info.palette.best_radiant",
-                "approved teal with a brighter sky-glass highlight for modern progress dashboards",
-            ),
-        ]),
-        ModernTableRow::success(vec![
-            "surge".to_owned(),
-            "--palette surge".to_owned(),
-            "#2DD4BF primary + #38BDF8 secondary".to_owned(),
-            label(
-                ctx,
-                "cli.info.palette.best_surge",
-                "approved teal with vivid sky-blue accents for live HUDs and dense tables",
-            ),
-        ]),
-        ModernTableRow::success(vec![
             "squallz".to_owned(),
             "--palette squallz".to_owned(),
             "#2DD4BF primary + #0EA5E9 secondary".to_owned(),
@@ -1013,64 +879,28 @@ fn modern_palette_rows(ctx: &Ctx) -> Vec<ModernTableRow> {
             ),
         ]),
         ModernTableRow::success(vec![
-            "glass".to_owned(),
-            "--colors glass".to_owned(),
-            "bright cyan primary + Squallz teal secondary".to_owned(),
-            label(
-                ctx,
-                "cli.info.palette.best_fancy",
-                "more luminous modern terminals without dark chrome",
-            ),
+            "ocean".to_owned(),
+            "--palette ocean".to_owned(),
+            "#0EA5E9 primary + #2DD4BF secondary".to_owned(),
+            label(ctx, "cli.info.palette.best_ocean", "blue-led output"),
         ]),
         ModernTableRow::success(vec![
-            "nova".to_owned(),
-            "--palette nova".to_owned(),
-            "bright cyan primary + sunlit gold secondary".to_owned(),
-            label(
-                ctx,
-                "cli.info.palette.best_vivid",
-                "more vivid modern output without dark chrome",
-            ),
-        ]),
-        ModernTableRow::success(vec![
-            "crystal".to_owned(),
-            "--palette crystal".to_owned(),
-            "luminous aqua primary + clear sky secondary".to_owned(),
-            label(
-                ctx,
-                "cli.info.palette.best_crystal",
-                "fancy bright tables while staying in the icon color family",
-            ),
-        ]),
-        ModernTableRow::success(vec![
-            "lumina".to_owned(),
-            "--palette lumina".to_owned(),
-            "bright cyan primary + coral secondary".to_owned(),
-            label(
-                ctx,
-                "cli.info.palette.best_lumina",
-                "richer demos and screenshots with vivid modern contrast",
-            ),
+            "jade".to_owned(),
+            "--palette jade".to_owned(),
+            "#34D399 primary + #2DD4BF secondary".to_owned(),
+            label(ctx, "cli.info.palette.best_jade", "green-led output"),
         ]),
         ModernTableRow::new(vec![
-            "signal".to_owned(),
-            "--theme signal".to_owned(),
-            "high-signal teal + sky highlight".to_owned(),
-            label(
-                ctx,
-                "cli.info.palette.best_dense",
-                "dense tables and long diagnostics",
-            ),
+            "sunset".to_owned(),
+            "--palette sunset".to_owned(),
+            "#FB923C primary + #F472B6 secondary".to_owned(),
+            label(ctx, "cli.info.palette.best_sunset", "warm output"),
         ]),
         ModernTableRow::new(vec![
-            "vapor".to_owned(),
-            "--color-scheme vapor".to_owned(),
-            "sky primary + soft violet secondary".to_owned(),
-            label(
-                ctx,
-                "cli.info.palette.best_demo",
-                "presentations and screenshots",
-            ),
+            "violet".to_owned(),
+            "--palette violet".to_owned(),
+            "ANSI violet primary + secondary".to_owned(),
+            label(ctx, "cli.info.palette.best_violet", "256-color terminals"),
         ]),
         ModernTableRow::new(vec![
             "mono".to_owned(),
@@ -1628,6 +1458,45 @@ fn first_tool_name(availability: &Value) -> Option<&str> {
 
 pub(crate) fn implementation_json(format_id: &str) -> Value {
     match format_id {
+        "zip" => json!({
+            "status": "built_in",
+            "bundled": true,
+            "read": {
+                "kind": "rust",
+            },
+            "write": {
+                "kind": "rust",
+            },
+            "optional_external": {
+                "scope": "native_split_read",
+                "tools": ["7zz", "7z", "7za"],
+                "env": "SQUALLZ_7Z",
+                "availability": sevenzip_availability(),
+            },
+            "availability": {
+                "read": built_in_availability(),
+                "write": built_in_availability(),
+            },
+            "limitations": [
+                {
+                    "scope": "native_split_read",
+                    "status": "external_required",
+                    "reason": "native .z01/.zip sets are header-validated and staged privately, then read through 7zz/7z from any member",
+                },
+                {
+                    "scope": "native_split_create",
+                    "status": "built_in",
+                    "reason": "ZIP creation can write PKWARE-compatible .z01/.z02/.../.zip sets without an external encoder",
+                },
+                {
+                    "scope": "native_split_encrypted",
+                    "status": "external_required",
+                    "reason": "encrypted native split ZIP uses 7zz/7z with the password sent only through a short-lived stdin pipe, never through process arguments or environment variables",
+                },
+            ],
+            "platforms": ["macos", "windows", "linux"],
+            "release_gate": "native split ZIP creation requires a three-platform filesystem matrix; native split reading also requires a packaged-7z matrix",
+        }),
         "wim" => json!({
             "status": "external_required",
             "bundled": false,
@@ -1644,8 +1513,25 @@ pub(crate) fn implementation_json(format_id: &str) -> Value {
                 "read": sevenzip_availability(),
                 "write": env_or_path_availability(Some("SQUALLZ_WIMLIB"), &["wimlib-imagex"]),
             },
+            "limitations": [
+                {
+                    "scope": "native_split_read",
+                    "status": "external_required",
+                    "reason": "native .swm sets are header-validated and staged privately, then read through 7zz/7z from any standard member",
+                },
+                {
+                    "scope": "native_split_create",
+                    "status": "external_required",
+                    "reason": "Split WIM creation uses wimlib-imagex and publishes the standard first.swm, first2.swm, ... family transactionally",
+                },
+                {
+                    "scope": "native_split_size",
+                    "status": "format_limit",
+                    "reason": "the requested part size is a target because one indivisible WIM resource can make a part larger",
+                },
+            ],
             "platforms": ["macos", "windows", "linux"],
-            "release_gate": "real WIM compatibility matrix plus wimlib/7z packaging and license review",
+            "release_gate": "broader WIM and Split WIM corpus plus three-platform wimlib/7z packaging and license review",
         }),
         "rar" => json!({
             "status": "external_required",
@@ -1654,8 +1540,9 @@ pub(crate) fn implementation_json(format_id: &str) -> Value {
                 "kind": "external_tool",
                 "tools": ["7zz", "7z", "7za"],
                 "env": "SQUALLZ_7Z",
-                "fallback_tools": ["bsdtar"],
+                "fallback_tools": ["bsdtar", "unrar"],
                 "fallback_env": "SQUALLZ_BSDTAR",
+                "rar7_decoder_env": "SQUALLZ_UNRAR",
             },
             "write": {
                 "kind": "unsupported",
@@ -1664,6 +1551,10 @@ pub(crate) fn implementation_json(format_id: &str) -> Value {
             "policy": rar_policy_json(),
             "availability": {
                 "read": rar_read_availability(),
+                "rar7_v6_decoder": env_or_path_availability(
+                    Some("SQUALLZ_UNRAR"),
+                    &["unrar"],
+                ),
                 "write": unsupported_availability(),
             },
             "limitations": [
@@ -1679,13 +1570,18 @@ pub(crate) fn implementation_json(format_id: &str) -> Value {
                 },
                 {
                     "scope": "encrypted",
-                    "status": "not_release_claimed",
-                    "reason": "encrypted RAR compatibility requires a licensed/full compatibility matrix",
+                    "status": "implemented_not_release_claimed",
+                    "reason": "encrypted RAR reading uses 7zz/7z with a stdin-only password bridge; a licensed full corpus and three-platform package matrix are still required for a release claim",
                 },
                 {
                     "scope": "multi_volume",
                     "status": "not_release_claimed",
-                    "reason": "the current stream bridge opens one source stream; adjacent-volume handling needs a path-aware engine readiness check",
+                    "reason": "native partN.rar and legacy rar/r00 read orchestration is implemented with private first-volume staging, but a licensed full corpus and macOS/Windows/Linux package matrix are still required for a release claim",
+                },
+                {
+                    "scope": "rar7_v6",
+                    "status": "implemented_not_release_claimed",
+                    "reason": "confirmed-unencrypted RAR7 v6 entry streams can use an optional user-installed unrar decoder after 7zz/7z listing and volume validation; encrypted input stays on the stdin-only 7zz/7z path, and a full three-platform corpus is still required",
                 },
                 {
                     "scope": "damaged_repair",
@@ -1740,12 +1636,25 @@ fn rar_policy_json() -> Value {
         "bundled": false,
         "primary_tools": ["7zz", "7z", "7za"],
         "primary_env": "SQUALLZ_7Z",
-        "fallback_tools": ["bsdtar"],
+        "fallback_tools": ["bsdtar", "unrar"],
         "fallback_env": "SQUALLZ_BSDTAR",
-        "fallback_scope": "diagnostic_or_rar5_v6",
-        "fallback_reason": "explicit SQUALLZ_BSDTAR override or RAR5 v6 method detection may select bsdtar; bsdtar is not a bundled product guarantee",
-        "license_boundary": "Squallz does not link unrar code or create RAR archives; bundling 7zz/7z would require LGPL plus unRAR restriction notices, source/replacement path, and RAR creation must remain unsupported",
-        "release_claim": "read-only public-sample subset; encrypted, full multi-volume, and damaged RAR repair are not release-claimed",
+        "rar7_decoder_env": "SQUALLZ_UNRAR",
+        "fallback_scopes": [
+            "explicit_diagnostic",
+            "validated_p7zip_16_02_rar5_single_file",
+            "confirmed_unencrypted_rar7_v6_single_file",
+        ],
+        "fallback_reason": "bsdtar remains explicit, can handle confirmed single-file RAR7 v6 input, and is selected for the legacy p7zip 16.02 RAR5 decoder gap only after exact regular-file path and size agreement; optional unrar only streams confirmed-unencrypted RAR7 v6 entries after 7zz/7z listing and volume validation; neither tool is bundled",
+        "native_multi_volume": {
+            "read_only": true,
+            "tools": ["7zz", "7z", "7za"],
+            "optional_rar7_decoder": ["unrar"],
+            "names": ["partN.rar", "partNNN.rar", ".rar/.r00-.r99"],
+            "encrypted_read": "stdin_only_password_bridge",
+            "status": "implemented_not_release_claimed",
+        },
+        "license_boundary": "Squallz does not link or bundle unrar code and does not create RAR archives; optional unrar is user-installed and read-only, while bundling 7zz/7z would require LGPL plus unRAR restriction notices, source/replacement path, and RAR creation must remain unsupported",
+        "release_claim": "read-only public-sample subset; native multi-volume orchestration plus real macOS RAR5, legacy RAR4 old-style, and confirmed-unencrypted RAR7 v6 volume smokes are implemented, but broader historical RAR4 and encrypted/solid coverage, the full three-platform package matrix, and damaged RAR repair are not release-claimed",
     })
 }
 
@@ -1764,7 +1673,22 @@ fn unsupported_availability() -> Value {
 }
 
 fn sevenzip_availability() -> Value {
-    env_or_path_availability(Some("SQUALLZ_7Z"), &["7zz", "7z", "7za"])
+    let status = sevenzip_backend_status();
+    let source = match status.source() {
+        Some(SevenZipBackendSource::Application) => Some("application"),
+        Some(SevenZipBackendSource::Environment) => Some("env"),
+        Some(SevenZipBackendSource::Path) => Some("path"),
+        None => None,
+    };
+    json!({
+        "available": status.available(),
+        "source": source,
+        "env": "SQUALLZ_7Z",
+        "selected": status.selected().map(|path| path.to_string_lossy()),
+        "configured": status.configured(),
+        "path_exists": status.executable().is_some(),
+        "tools": ["7zz", "7z", "7za"],
+    })
 }
 
 fn rar_read_availability() -> Value {
