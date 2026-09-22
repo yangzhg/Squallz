@@ -2,11 +2,14 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-REPORT="$ROOT/benches/ZIP64_LARGE_SMOKE.md"
-WORK="$ROOT/target/squallz-zip64-large-smoke"
+WORK_ROOT="$ROOT/target/squallz-zip64-large-smoke"
+mkdir -p "$WORK_ROOT"
+WORK="$(mktemp -d "$WORK_ROOT/run.XXXXXX")"
+REPORT="$WORK/report.md"
 LOG="$WORK/cargo-test.log"
 TIME_LOG="$WORK/time.log"
 TMPROOT="${TMPDIR:-/tmp}"
+RUN_TMP=""
 MIN_FREE_KIB="${SQUALLZ_ZIP64_MIN_FREE_KIB:-12582912}" # 12 GiB.
 CMD=(cargo test -p squallz-formats --test zip_roundtrip zip64_store_5gib_roundtrip -- --ignored --exact --nocapture)
 
@@ -46,27 +49,28 @@ add_row() {
 }
 
 available_kib() {
-  df -k "$TMPROOT" | awk 'NR == 2 { print $4 }'
+  df -Pk "$TMPROOT" | awk 'NR == 2 { print $4 }'
 }
 
-count_temp_dirs() {
-  find "$TMPROOT" -maxdepth 1 -type d -name 'squallz-zip-test-zip64-*' 2>/dev/null | wc -l | tr -d ' '
-}
-
-cleanup_temp_dirs() {
-  find "$TMPROOT" -maxdepth 1 -type d -name 'squallz-zip-test-zip64-*' -exec rm -rf {} + 2>/dev/null || true
+cleanup_temp_dir() {
+  if [[ -n "$RUN_TMP" ]]; then
+    rm -rf -- "$RUN_TMP" || return 1
+    RUN_TMP=""
+  fi
 }
 
 peak_rss() {
   if [[ -f "$TIME_LOG" ]]; then
-    awk '/maximum resident set size/ {
-      if (index($0, ":") > 0) {
-        sub(/^[^:]*:[[:space:]]*/, "");
-        print;
-      } else {
+    awk '
+      /maximum resident set size/ {
         print $1;
+        exit;
       }
-    }' "$TIME_LOG" | tail -1
+      /Maximum resident set size \(kbytes\):/ {
+        printf "%.0f\n", $NF * 1024;
+        exit;
+      }
+    ' "$TIME_LOG"
   fi
 }
 
@@ -89,7 +93,7 @@ the generated temporary archive.
 
 ## Inputs
 
-- Temp root: \`$TMPROOT\`
+- Temporary archive data is isolated per run and removed on exit.
 - Minimum free space: \`$MIN_FREE_KIB KiB\`
 - Cargo log: \`$(relpath "$LOG")\`
 - Time log: \`$(relpath "$TIME_LOG")\`
@@ -109,7 +113,7 @@ $(printf '%s\n' "${rows[@]}")
 ## Resource Observations
 
 - Duration seconds: \`${duration_seconds:-n/a}\`
-- Peak RSS bytes: \`${peak_rss_bytes:-n/a}\`
+- Peak RSS bytes (Cargo invocation, including compilation): \`${peak_rss_bytes:-n/a}\`
 
 ## Failures
 
@@ -129,32 +133,35 @@ blocked() {
   exit 2
 }
 
-mkdir -p "$ROOT/benches" "$WORK"
+trap cleanup_temp_dir EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 if [[ ! -d "$TMPROOT" ]]; then
-  blocked "temp root does not exist: $TMPROOT"
+  blocked "temp root does not exist"
 fi
+TMPROOT="$(cd "$TMPROOT" && pwd -P)"
 
 free_kib="$(available_kib)"
 if [[ -z "$free_kib" || "$free_kib" -lt "$MIN_FREE_KIB" ]]; then
-  blocked "insufficient free space in $TMPROOT: ${free_kib:-unknown} KiB available, $MIN_FREE_KIB KiB required"
+  blocked "insufficient temporary space: ${free_kib:-unknown} KiB available, $MIN_FREE_KIB KiB required"
 fi
-add_row "disk preflight" "pass" "$TMPROOT has $free_kib KiB free; required $MIN_FREE_KIB KiB"
+add_row "disk preflight" "pass" "$free_kib KiB free; required $MIN_FREE_KIB KiB"
 
-cleanup_temp_dirs
-before_count="$(count_temp_dirs)"
-if [[ "$before_count" == "0" ]]; then
-  add_row "pre-run temp cleanup" "pass" "no stale squallz ZIP64 temp directories remain"
-else
-  add_row "pre-run temp cleanup" "fail" "$before_count stale squallz ZIP64 temp directories remain"
-fi
+RUN_TMP="$(mktemp -d "$TMPROOT/squallz-zip64.XXXXXX")"
+add_row "temporary directory isolation" "pass" "this run owns a private temporary directory"
 
 start_seconds="$(date +%s)"
 set +e
 (
   cd "$ROOT"
+  export TMPDIR="$RUN_TMP"
   if [[ -x /usr/bin/time ]]; then
-    /usr/bin/time -l "${CMD[@]}"
+    case "$(uname -s)" in
+      Darwin) LC_ALL=C /usr/bin/time -l "${CMD[@]}" ;;
+      Linux) LC_ALL=C /usr/bin/time -v "${CMD[@]}" ;;
+      *) "${CMD[@]}" ;;
+    esac
   else
     "${CMD[@]}"
   fi
@@ -177,12 +184,10 @@ else
   add_row "test result marker" "fail" "cargo log is missing \`zip64_store_5gib_roundtrip ... ok\`"
 fi
 
-cleanup_temp_dirs
-after_count="$(count_temp_dirs)"
-if [[ "$after_count" == "0" ]]; then
-  add_row "post-run temp cleanup" "pass" "no squallz ZIP64 temp directories remain"
+if cleanup_temp_dir; then
+  add_row "post-run temp cleanup" "pass" "this run's temporary directory was removed"
 else
-  add_row "post-run temp cleanup" "fail" "$after_count squallz ZIP64 temp directories remain after cleanup"
+  add_row "post-run temp cleanup" "fail" "could not remove this run's temporary directory"
 fi
 
 if [[ "$test_status" -ne 0 || "${#failures[@]}" -gt 0 ]]; then
