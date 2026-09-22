@@ -299,20 +299,6 @@
   {/if}
 
   <div class="inspector-block">
-    <span class="block-label">{tr("gui.inspector.health", "Health")}</span>
-    <div class="health-score">
-      <strong>{view.archive ? tr("gui.state.ready", "Ready") : tr("gui.state.idle", "Idle")}</strong>
-      <span>{view.archive ? tr("gui.archive.zip_slip_guard_on", "Zip Slip guard on") : view.openArchiveFirst}</span>
-    </div>
-    <progress
-      class="meter meter-progress"
-      value={view.archive ? 84 : 0}
-      max="100"
-      aria-label={tr("gui.inspector.health", "Health")}
-    ></progress>
-  </div>
-
-  <div class="inspector-block">
     <span class="block-label">{tr("gui.inspector.archive", "Archive")}</span>
     <dl>
       <div><dt>{tr("gui.archive.format", "Format")}</dt><dd>{view.archive?.format ?? tr("common.none", "None")}</dd></div>
