@@ -9114,6 +9114,8 @@ input.secure-input {
   border: 1px solid var(--color-border-default);
   border-radius: 10px;
   background: var(--color-surface);
+  color: var(--color-text-primary);
+  box-shadow: var(--shadow-surface);
 }
 
 .custom-preview.theme-light {
@@ -14046,7 +14048,6 @@ select.classic-input:focus {
   .classic-recovery-sheet,
   .classic-extract-sheet,
   .palette-card,
-  .theme-preview,
   .contrast-note,
   .classic-capability-grid div,
   .classic-extract-form,
