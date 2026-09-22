@@ -3631,6 +3631,7 @@ mod tests {
         let preview_path = sessions
             .path_for_external_use(&preview.preview_id, "test-window")
             .unwrap();
+        assert_eq!(preview_path.file_name().unwrap(), "note.txt");
         assert_eq!(std::fs::read(preview_path).unwrap(), b"preview me");
 
         sessions.cleanup();
