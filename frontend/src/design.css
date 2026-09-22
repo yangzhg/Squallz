@@ -14752,7 +14752,9 @@ select.classic-input:focus {
     transition: none;
   }
 
-  .settings-switch input::after {
+  .settings-switch input::after,
+  .task-center-row::before,
+  .task-center-row::after {
     transition: none;
   }
 
@@ -14795,10 +14797,18 @@ select.classic-input:focus {
   .task-center-panel,
   .task-center-detail,
   .sfx-publish-card,
-  .app-icon,
-  .task-modal-card[data-task-active="true"] .task-modal-progress-block progress::-webkit-progress-value,
-  .task-modal-card[data-task-active="true"] .task-modal-progress-block progress::-moz-progress-bar {
+  .app-icon {
     animation: none;
+  }
+
+  .design-root :where(.task-modal-progress-block progress, .meter-progress)::-webkit-progress-value {
+    animation: none;
+    transition: none;
+  }
+
+  .design-root :where(.task-modal-progress-block progress, .meter-progress)::-moz-progress-bar {
+    animation: none;
+    transition: none;
   }
 
   .first-run-choice-action svg {
