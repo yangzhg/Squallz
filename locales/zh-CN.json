@@ -3447,7 +3447,7 @@
   "gui.task.show_in_file_manager": "在 {fileManager} 中显示",
   "gui.task.output_folder_opened": "已打开输出文件夹",
   "gui.task.output_opened": "已打开输出",
-  "gui.task.open_output_failed": "无法打开任务输出",
+  "gui.task.open_output_failed": "无法打开任务输出。请尝试在文件管理器中显示，或检查输出是否仍然存在。",
   "gui.recovery.insufficient_par2_data": "验证发现的损坏超出当前 PAR2 数据的修复能力",
   "gui.recovery.repair_par2_as": "将 PAR2 修复结果另存为",
   "gui.recovery.choose_repaired_set_parent": "选择修复文件集新文件夹的保存位置",

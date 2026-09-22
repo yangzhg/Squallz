@@ -1618,6 +1618,19 @@ pub fn job_snapshot(
 }
 
 #[tauri::command]
+pub fn open_job_output(
+    app: AppHandle,
+    window: WebviewWindow,
+    jobs: State<'_, Arc<JobManager>>,
+    id: u64,
+) -> Result<(), ErrorDto> {
+    let path = jobs.openable_output_for_window(window.label(), id)?;
+    app.opener()
+        .open_path(path.to_string_lossy().into_owned(), None::<String>)
+        .map_err(|_| ErrorDto::other("cannot open task output"))
+}
+
+#[tauri::command]
 pub fn job_snapshots(
     window: WebviewWindow,
     jobs: State<'_, Arc<JobManager>>,

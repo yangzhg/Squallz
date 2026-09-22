@@ -117,6 +117,7 @@ pub fn run() {
             commands::get_macos_sfx_publisher_status,
             commands::submit_job,
             commands::job_snapshot,
+            commands::open_job_output,
             commands::job_snapshots,
             commands::dismiss_job_snapshots,
             commands::get_source_cleanup_recovery,

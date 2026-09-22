@@ -12570,7 +12570,7 @@
 
   async function openTaskOutput(task: TaskDialogModel): Promise<void> {
     const outputPath = taskOutputPath(task);
-    if (!outputPath || !taskOutputCanOpen(task)) return;
+    if (task.id === null || task.state !== "done" || !outputPath || !taskOutputCanOpen(task)) return;
     if (task.spec.kind === "compress") {
       if (await openArchivePath(outputPath, "open-file")) {
         await dismissTaskDialog(task);
@@ -12578,15 +12578,14 @@
       return;
     }
     try {
-      const { openPath } = await import("@tauri-apps/plugin-opener");
-      await openPath(outputPath);
+      await ipc.openJobOutput(task.id);
       showNotice(
         taskOutputIsFolder(task)
           ? tr("gui.task.output_folder_opened", "Output folder opened")
           : tr("gui.task.output_opened", "Output opened"),
       );
     } catch {
-      showNotice(tr("gui.task.open_output_failed", "Cannot open the task output"));
+      showNotice(tr("gui.task.open_output_failed", "Cannot open the task output. Try revealing it in your file manager, or check that it still exists."));
     }
   }
 

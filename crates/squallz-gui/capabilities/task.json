@@ -10,7 +10,6 @@
     "core:window:allow-unminimize",
     "core:window:allow-set-focus",
     "core:window:allow-close",
-    "opener:allow-open-path",
     "opener:allow-reveal-item-in-dir"
   ]
 }

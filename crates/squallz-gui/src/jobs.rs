@@ -23,6 +23,7 @@ use crate::source_cleanup_journal::SourceCleanupJournal;
 use crate::state::{AppState, ResolvedArchiveSource};
 
 mod execution;
+mod output;
 mod snapshots;
 mod source_cleanup;
 

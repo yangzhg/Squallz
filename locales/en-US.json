@@ -3447,7 +3447,7 @@
   "gui.task.show_in_file_manager": "Show in {fileManager}",
   "gui.task.output_folder_opened": "Output folder opened",
   "gui.task.output_opened": "Output opened",
-  "gui.task.open_output_failed": "Cannot open the task output",
+  "gui.task.open_output_failed": "Cannot open the task output. Try revealing it in your file manager, or check that it still exists.",
   "gui.recovery.insufficient_par2_data": "Verification found more damage than the available PAR2 data can repair",
   "gui.recovery.repair_par2_as": "Repair with PAR2 as",
   "gui.recovery.choose_repaired_set_parent": "Choose where to create the repaired set folder",

@@ -1352,6 +1352,11 @@ fn compress_then_extract_round_trip() {
     assert_eq!(extract_result["counts"]["renamed"], 0);
     assert_eq!(extract_result["counts"]["failed"], 0);
     assert_eq!(extract_result["counts"]["output_bytes"], 13);
+    assert_eq!(
+        manager.openable_output_for_window("main", id2).unwrap(),
+        out
+    );
+    assert!(manager.openable_output_for_window("main", id1).is_err());
     let events = sink.events.lock().unwrap();
     assert_eq!(states_of(&events, id1), vec!["queued", "running", "done"]);
     assert_eq!(states_of(&events, id2), vec!["queued", "running", "done"]);
@@ -1798,6 +1803,10 @@ fn batch_extract_runs_multiple_archives_as_one_job() {
     );
     assert_eq!(result["structure"], "zip_local_headers_recovered");
     assert_eq!(result["recovered_archives"], 1);
+    assert_eq!(
+        manager.openable_output_for_window("main", id).unwrap(),
+        out_a
+    );
     assert!(events.iter().any(|(name, payload)| name == EV_PROGRESS
         && payload["id"] == id
         && payload["total"].as_u64().unwrap_or(0) == 2 * BATCH_PROGRESS_SCALE));
@@ -2921,6 +2930,10 @@ fn convert_job_round_trip_through_queue() {
     manager.wait_idle();
 
     assert!(sevenz.exists());
+    assert_eq!(
+        manager.openable_output_for_window("main", id).unwrap(),
+        sevenz
+    );
     let entries = AppState::new()
         .engine
         .list(&sevenz, &OpenOptions::default())
@@ -3758,6 +3771,10 @@ fn update_job_deletes_selected_entry() {
         .unwrap();
     assert!(entries.iter().any(|e| e.path.display == "data/keep.txt"));
     assert!(!entries.iter().any(|e| e.path.display == "data/drop.txt"));
+    assert_eq!(
+        manager.openable_output_for_window("main", id).unwrap(),
+        archive
+    );
     std::fs::remove_dir_all(&dir).unwrap();
 }
 

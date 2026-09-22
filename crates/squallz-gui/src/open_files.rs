@@ -717,7 +717,6 @@ mod tests {
             "core:window:allow-unminimize",
             "core:window:allow-set-focus",
             "core:window:allow-close",
-            "opener:allow-open-path",
             "opener:allow-reveal-item-in-dir",
         ] {
             assert!(permissions.iter().any(|permission| permission == required));
@@ -733,6 +732,9 @@ mod tests {
         assert!(!permissions
             .iter()
             .any(|permission| permission == "core:window:allow-hide"));
+        assert!(!permissions
+            .iter()
+            .any(|permission| permission == "opener:allow-open-path"));
     }
 
     #[test]
