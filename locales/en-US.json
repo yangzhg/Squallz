@@ -617,7 +617,6 @@
   "gui.screen.settings_performance": "Settings · Performance",
   "gui.screen.password_book": "Settings · Password Book",
   "gui.external_task.window_label": "Squallz task window",
-  "gui.external_task.eyebrow": "Squallz task",
   "gui.external_task.waiting_title": "Preparing task",
   "gui.external_task.title_waiting": "Ready for a task",
   "gui.external_task.title_waiting_action": "Waiting for {action}",

@@ -617,7 +617,6 @@
   "gui.screen.settings_performance": "设置 · 性能",
   "gui.screen.password_book": "设置 · 密码本",
   "gui.external_task.window_label": "Squallz 任务窗口",
-  "gui.external_task.eyebrow": "Squallz 任务",
   "gui.external_task.waiting_title": "正在准备任务",
   "gui.external_task.title_waiting": "等待任务",
   "gui.external_task.title_waiting_action": "正在等待 {action}",

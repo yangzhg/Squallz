@@ -12157,7 +12157,8 @@
   function taskDialogSurface(task: TaskDialogModel): TaskProgressDialogSurfaceProps {
     return {
       task,
-      rootClass: `task-modal-overlay design-root platform-${activePlatform} palette-${activePalette} theme-${activeTheme} density-${activeDensityChoice}`,
+      presentation: taskWindowMode ? "window" : "dialog",
+      rootClass: `${taskWindowMode ? "task-window-surface" : "task-modal-overlay"} design-root platform-${activePlatform} palette-${activePalette} theme-${activeTheme} density-${activeDensityChoice}`,
       rootVariables: customPaletteVariables(),
       copyFeedback: taskChecksumCopyFeedback(task),
       copyFeedbackTone: taskChecksumCopyFeedbackTone(task),
@@ -13461,18 +13462,22 @@
   />
 {/if}
 
-{#if taskDialogVisible() && !macosSfxPublisherTask}
+{#snippet taskProgressSurface(task: TaskDialogModel)}
+  <TaskProgressDialogHost
+    surface={taskDialogSurface(task)}
+    loadingTitle={tr("gui.task_surface.loading", "Loading task view")}
+    loadingBody={tr("gui.task_surface.loading_body", "Preparing live progress, results, and task controls.")}
+    failureTitle={tr("gui.task_surface.load_failed", "Task view could not be loaded")}
+    failureBody={tr("gui.task_surface.load_failed_body", "The task is still safe. Retry loading its progress and controls.")}
+    retryLabel={tr("gui.task_surface.retry", "Retry view")}
+    backLabel={tr("gui.task.back_to_tasks", "Back to tasks")}
+  />
+{/snippet}
+
+{#if !taskWindowMode && taskDialogVisible() && !macosSfxPublisherTask}
   {@const task = taskDialogTask()}
   {#if task}
-    <TaskProgressDialogHost
-      surface={taskDialogSurface(task)}
-      loadingTitle={tr("gui.task_surface.loading", "Loading task view")}
-      loadingBody={tr("gui.task_surface.loading_body", "Preparing live progress, results, and task controls.")}
-      failureTitle={tr("gui.task_surface.load_failed", "Task view could not be loaded")}
-      failureBody={tr("gui.task_surface.load_failed_body", "The task is still safe. Retry loading its progress and controls.")}
-      retryLabel={tr("gui.task_surface.retry", "Retry view")}
-      backLabel={tr("gui.task.back_to_tasks", "Back to tasks")}
-    />
+    {@render taskProgressSurface(task)}
   {/if}
 {/if}
 
@@ -13616,14 +13621,18 @@
     class={`design-root task-window-root platform-${activePlatform} palette-${activePalette} theme-${activeTheme} density-${activeDensityChoice}`}
     use:cssVariables={customPaletteVariables()}
     aria-label={tr("gui.external_task.window_label", "Squallz task window")}
-    aria-hidden={blockingModalVisible() ? "true" : undefined}
-    inert={blockingModalVisible()}
+    aria-hidden={macosSfxPublisherTask ? "true" : undefined}
+    inert={macosSfxPublisherTask !== null}
   >
-    {#if !blockingModalVisible()}
+    {#if taskDialogVisible()}
+      {@const task = taskDialogTask()}
+      {#if task}
+        {@render taskProgressSurface(task)}
+      {/if}
+    {:else}
       <section class="task-window-empty" role="status">
         <AppIcon size={42} title="Squallz" />
         <div>
-          <span class="eyebrow">{tr("gui.external_task.eyebrow", "Squallz task")}</span>
           <h1>{taskWindowShellTitleCopy}</h1>
           <p>{taskWindowShellCopy}</p>
         </div>

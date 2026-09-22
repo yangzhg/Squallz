@@ -40,7 +40,7 @@
   let failureTitleId = $derived(`task-surface-${presentation}-load-failed-title`);
 
   $effect(() => {
-    if (presentation !== "dialog" || fallbackCard === null) return;
+    if (presentation === "panel" || fallbackCard === null) return;
     void tick().then(() => fallbackCard?.focus());
   });
 

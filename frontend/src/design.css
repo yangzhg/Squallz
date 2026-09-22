@@ -123,6 +123,7 @@
   --color-search-active-bg: color-mix(in srgb, var(--color-accent-bg) 46%, var(--color-surface));
   --classic-path-tools-width: 210px;
   --task-panel-padding: 18px;
+  --task-window-padding: var(--space-lg);
   --task-empty-padding: 20px;
   --task-modal-gap: 14px;
   --task-modal-max-width: 620px;
@@ -2766,12 +2767,6 @@ select option {
   gap: var(--space-xs);
 }
 
-.task-modal-brand-icon {
-  width: var(--control-icon-size);
-  height: var(--control-icon-size);
-  flex: 0 0 var(--control-icon-size);
-}
-
 .task-modal-head h2 {
   margin: 2px 0 0;
   color: var(--color-text-strong);
@@ -3477,25 +3472,66 @@ select option {
 }
 
 .task-window-root {
-  min-height: 100vh;
+  height: 100vh;
+  height: 100dvh;
+  min-height: 0;
   display: grid;
-  place-items: center;
-  padding: 24px;
-  background:
-    linear-gradient(180deg, var(--color-bg-app), var(--color-surface-muted));
+  grid-template-rows: minmax(0, 1fr);
+  overflow: hidden;
+  background: var(--color-bg-app);
+}
+
+.task-window-surface {
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr);
+}
+
+.task-window-surface .task-modal-card {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  max-height: none;
+  padding: var(--task-window-padding);
+  border: 0;
+  border-radius: 0;
+  background: var(--color-bg-app);
+  box-shadow: none;
+}
+
+.task-window-surface .task-modal-card:focus {
+  outline: none;
+}
+
+.task-window-surface .task-modal-head {
+  padding-bottom: var(--space-md);
+  border-bottom: var(--border-width-control) solid var(--color-divider);
+}
+
+.task-window-surface .task-modal-head h2 {
+  margin: 0;
+}
+
+.task-window-surface .task-modal-body {
+  align-content: start;
+}
+
+.task-window-surface .task-modal-actions {
+  padding-top: var(--space-md);
+  border-top: var(--border-width-control) solid var(--color-divider);
 }
 
 .task-window-empty {
-  width: min(520px, 100%);
+  width: min(var(--task-modal-max-width), 100%);
+  justify-self: center;
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
-  gap: 14px;
+  gap: var(--space-md);
   align-items: center;
-  padding: var(--task-empty-padding);
-  border: 1px solid var(--color-border-default);
-  border-radius: var(--radius-panel);
-  background: var(--color-surface-overlay);
-  box-shadow: var(--shadow-surface);
+  align-content: center;
+  padding: var(--task-window-padding);
 }
 
 .task-window-empty h1 {
@@ -14640,7 +14676,7 @@ select.classic-input:focus {
     transition: opacity var(--motion-duration-fast) var(--motion-ease-standard);
   }
 
-  :is(.first-run-brand, .task-window-empty, .archive-start-mark, .task-modal-eyebrow) .app-icon {
+  :is(.first-run-brand, .task-window-empty, .archive-start-mark) .app-icon {
     animation: app-icon-breathe var(--motion-brand-pulse) var(--motion-ease-standard) var(--motion-brand-iterations);
   }
 

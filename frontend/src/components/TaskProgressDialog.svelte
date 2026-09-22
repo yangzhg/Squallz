@@ -1,6 +1,5 @@
 <script lang="ts">
   import { tick } from "svelte";
-  import AppIcon from "./AppIcon.svelte";
   import Icon from "./Icon.svelte";
   import { cssVariables, type CssVariableMap } from "../lib/css-variables";
   import type { TaskConflictDecision, TaskDialogModel } from "../lib/task-dialog";
@@ -115,7 +114,7 @@
     passwordError?: string | null;
     conflictQuestion?: ConflictQuestion | null;
     conflictApplyAll?: boolean;
-    presentation?: "dialog" | "panel";
+    presentation?: "dialog" | "panel" | "window";
     taskOutputPath: (task: TaskDialogModel) => string | null;
     taskRevealOutputLabel: () => string;
     taskWindowMode: boolean;
@@ -277,16 +276,11 @@
   >
     <header class="task-modal-head">
       <div>
-        <span class="task-modal-eyebrow">
-          {#if taskWindowMode}
-            <AppIcon class="task-modal-brand-icon" />
-          {/if}
-          <span class="eyebrow">
-            {taskWindowMode
-              ? tr("gui.external_task.eyebrow", "Squallz task")
-              : taskDialogEyebrow(task)}
+        {#if presentation !== "window"}
+          <span class="task-modal-eyebrow">
+            <span class="eyebrow">{taskDialogEyebrow(task)}</span>
           </span>
-        </span>
+        {/if}
         <h2 id={titleId}>{taskTitleLabel(task)}</h2>
       </div>
       <strong class={`task-modal-state state-${displayedTaskTone()}`}>{displayedTaskState()}</strong>
