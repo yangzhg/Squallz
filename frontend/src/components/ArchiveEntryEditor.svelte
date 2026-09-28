@@ -72,6 +72,10 @@
           bind:this={input}
           {value}
           {placeholder}
+          autocorrect="off"
+          autocapitalize="off"
+          autocomplete="off"
+          spellcheck={false}
           disabled={submitting}
           aria-describedby={`${id}-status ${id}-hint`}
           oninput={(event) => onChange(event.currentTarget.value)}
