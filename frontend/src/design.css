@@ -125,7 +125,6 @@
   --preview-sheet-viewport-reserve: 112px;
   --preview-panel-close-size: var(--control-height-compact);
   --layer-preview-sheet: 12;
-  --color-search-active-bg: color-mix(in srgb, var(--color-accent-bg) 46%, var(--color-surface));
   --classic-path-tools-width: 210px;
   --task-panel-padding: 18px;
   --task-window-padding: var(--space-lg);
@@ -10615,6 +10614,11 @@ input.secure-input {
   background: var(--color-surface-raised);
 }
 
+.archive-filter-field,
+.classic-search {
+  --color-search-active-bg: color-mix(in srgb, var(--color-accent-bg) 46%, var(--color-surface));
+}
+
 .archive-filter-field {
   min-width: 0;
   height: var(--control-height);
@@ -10626,17 +10630,6 @@ input.secure-input {
   border-radius: var(--control-radius);
   background: var(--color-surface);
   color: var(--color-text-secondary);
-}
-
-.archive-filter-field:focus-within {
-  border-color: var(--color-accent-border);
-  box-shadow: 0 0 0 var(--border-width-focus) var(--color-focus-ring);
-}
-
-.archive-filter-field.searching,
-.classic-search.searching {
-  border-color: var(--color-accent-border);
-  background: var(--color-search-active-bg);
 }
 
 .archive-filter-field input {
@@ -14150,6 +14143,25 @@ select.classic-input:focus {
 .design-root :is(input, textarea, select, button):focus-visible {
   outline: 0;
   box-shadow: 0 0 0 3px var(--color-focus-ring);
+}
+
+.design-root :is(.archive-filter-field, .classic-search):focus-within {
+  border-color: var(--color-accent-border);
+  box-shadow: 0 0 0 var(--border-width-focus) var(--color-focus-ring);
+}
+
+.design-root :is(.archive-filter-field, .classic-search).searching {
+  border-color: var(--color-accent-border);
+  background: var(--color-search-active-bg);
+}
+
+.design-root :is(.archive-filter-field, .classic-search)
+  input:not([type="checkbox"]):not([type="radio"]):not([type="range"]) {
+  background: transparent;
+}
+
+.design-root :is(.archive-filter-field, .classic-search) input:focus-visible {
+  box-shadow: none;
 }
 
 .design-root :where(

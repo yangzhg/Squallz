@@ -105,6 +105,11 @@ sqz extract archive.zip -d recovered --best-effort --json
 ```
 
 The safety limits are enforced by shared core code, not by a separate CLI-only extraction path.
+`list --json`, `nested list --json`, and SFX JSON listings report `modified` as
+signed Unix seconds, rounded down to whole seconds. Zero is the Unix epoch;
+negative values preserve dates before 1970. `null` means the time is unavailable
+or outside the signed 64-bit range. Listing precision does not change the finer
+timestamps retained during extraction or archive conversion.
 Best-effort JSON keeps `problems` as a bounded preview of the first 20 messages.
 Use `problems_total` for the exact count and `problems_truncated` to detect omitted
 messages; `counts.failed` remains the authoritative completed-run failure count.
@@ -239,6 +244,9 @@ sqz extract archive.zip -d recovered --best-effort --json
 ```
 
 这些安全限制由共享 core 执行，不是 CLI 单独实现的一条解压路径。
+`list --json`、`nested list --json` 与 SFX 的 JSON 列表将 `modified` 表示为有符号 Unix 秒，
+不足一秒的部分向下取整。0 表示 Unix epoch，负数保留 1970 年之前的时间；`null` 表示时间
+未知或超出有符号 64 位范围。列表的显示精度不改变解压和转换时保留的更精细时间。
 尽力解压 JSON 的 `problems` 只保留前 20 条问题预览；`problems_total` 提供完整数量，
 `problems_truncated` 表示是否还有未展示内容，`counts.failed` 仍是本次完成任务的权威失败条目数。
 

@@ -805,20 +805,49 @@ fn snapshot_controls_use_requester_scope_and_owner_event_sink() {
 fn conflict_answers_require_the_owner_and_current_prompt_type() {
     let dir = temp_dir("snapshot-conflict-answer");
     let archive = dir.join("conflict.zip");
-    std::fs::write(
-        &archive,
-        build_stored_zip(&[(b"same.txt", b"new bytes"), (b"next.txt", b"next bytes")]),
-    )
-    .unwrap();
+    let inputs = dir.join("inputs");
+    std::fs::create_dir_all(&inputs).unwrap();
+    let epoch = std::time::UNIX_EPOCH;
+    let incoming_time = epoch - std::time::Duration::from_secs(1);
+    let existing_time = epoch - std::time::Duration::from_secs(2);
+    for (name, data, modified) in [
+        ("same.txt", b"new bytes".as_slice(), incoming_time),
+        ("next.txt", b"next bytes".as_slice(), epoch),
+    ] {
+        let path = inputs.join(name);
+        std::fs::write(&path, data).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(modified))
+            .unwrap();
+    }
+    let state = Arc::new(AppState::new());
+    state
+        .engine
+        .create(
+            &archive,
+            &[inputs.join("same.txt"), inputs.join("next.txt")],
+            &CreateOptions::default(),
+            &squallz_core::api::NoProgress,
+            &squallz_core::api::ControlToken::new(),
+        )
+        .unwrap();
     let output = dir.join("output");
     std::fs::create_dir_all(&output).unwrap();
     let existing = output.join("same.txt");
     std::fs::write(&existing, b"original bytes").unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&existing)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(existing_time))
+        .unwrap();
     let next_existing = output.join("next.txt");
     std::fs::write(&next_existing, b"keep next file").unwrap();
 
     let manager = JobManager::new();
-    let state = Arc::new(AppState::new());
     let owner_sink = Arc::new(TestSink::default());
     let owner_events: Arc<dyn EventSink> = owner_sink.clone();
     let id = manager.submit_for_test_window(
@@ -861,6 +890,8 @@ fn conflict_answers_require_the_owner_and_current_prompt_type() {
     assert_eq!(serialized["kind"], "conflict");
     assert_eq!(serialized["prompt"]["incoming_path"], "same.txt");
     assert_eq!(serialized["prompt"]["existing_size"], 14);
+    assert_eq!(serialized["prompt"]["existing_modified"], -2);
+    assert_eq!(serialized["prompt"]["incoming_modified"], -1);
     assert!(manager
         .snapshot_for_window("main", id)
         .unwrap()
@@ -902,6 +933,10 @@ fn conflict_answers_require_the_owner_and_current_prompt_type() {
         .question
         .unwrap();
     assert!(next_question.version() > question_version);
+    assert_eq!(
+        serde_json::to_value(&next_question).unwrap()["prompt"]["incoming_modified"],
+        0
+    );
     assert!(manager
         .answer_conflict_for_window(
             "task-conflict-owner",
@@ -935,6 +970,10 @@ fn conflict_answers_require_the_owner_and_current_prompt_type() {
         "error.other"
     );
     manager.wait_idle();
+    assert_eq!(
+        std::fs::metadata(&existing).unwrap().modified().unwrap(),
+        existing_time
+    );
 
     let terminal = manager.snapshot_for_window("main", id).unwrap();
     assert_eq!(terminal.interaction, None);

@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use squallz_core::api::{
-    ArchiveSourceSet, ArchiveStructureStatus, BoundedProblemLog, CompressionLevel,
+    unix_seconds, ArchiveSourceSet, ArchiveStructureStatus, BoundedProblemLog, CompressionLevel,
     ConflictDecision, ConflictResolver, ControlToken, CreateOptions, EntryMeta, EntryPath,
     EntrySelection, ExtractProblemReporter, ExtractReport, FormatError, OpenOptions,
     OverwritePolicy, Password, ProblemPreview, ProgressPhase, ProgressSink, RecoverySummary,
@@ -205,14 +205,10 @@ impl ConflictResolver for GuiConflictResolver {
                 existing_modified: meta
                     .as_ref()
                     .and_then(|m| m.modified().ok())
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_secs()),
+                    .and_then(unix_seconds),
                 incoming_path: incoming.path.display.clone(),
                 incoming_size: incoming.size,
-                incoming_modified: incoming
-                    .modified
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_secs()),
+                incoming_modified: incoming.modified.and_then(unix_seconds),
             }),
         );
         let Some(JobQuestion::Conflict(prompt)) = question else {

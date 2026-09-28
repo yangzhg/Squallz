@@ -3,12 +3,11 @@
 //! by the frontend i18n store.
 
 use std::collections::HashMap;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use squallz_core::api::{
-    EntryMeta, EntryType, FormatError, OverwritePolicy, ResourceOptions, SafetyLimits,
-    SplitOutputMode, SymlinkPolicy,
+    unix_seconds, EntryMeta, EntryType, FormatError, OverwritePolicy, ResourceOptions,
+    SafetyLimits, SplitOutputMode, SymlinkPolicy,
 };
 use squallz_core::{
     ChecksumAlgorithm, CreateCompletionAction, CreateContentPolicy, CreateDestinationGuard,
@@ -253,8 +252,8 @@ pub struct EntryDto {
     pub size: u64,
     /// Compressed size when the format reports one
     pub compressed: Option<u64>,
-    /// Modification time as Unix seconds
-    pub modified: Option<u64>,
+    /// Modification time as signed Unix seconds, rounded down.
+    pub modified: Option<i64>,
     /// CRC32 checksum
     pub crc: Option<u32>,
     /// Whether the content is encrypted
@@ -300,10 +299,6 @@ impl EntryDto {
             encoding: "utf-8".to_owned(),
         }
     }
-}
-
-fn unix_seconds(t: SystemTime) -> Option<u64> {
-    t.duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs())
 }
 
 /// One page of entry rows.
@@ -847,11 +842,13 @@ pub struct AskConflictEvent {
     /// Existing file (absolute path)
     pub existing_path: String,
     pub existing_size: u64,
-    pub existing_modified: Option<u64>,
+    /// Signed Unix seconds, rounded down; `None` when unavailable.
+    pub existing_modified: Option<i64>,
     /// Incoming archive entry
     pub incoming_path: String,
     pub incoming_size: u64,
-    pub incoming_modified: Option<u64>,
+    /// Signed Unix seconds, rounded down; `None` when unavailable.
+    pub incoming_modified: Option<i64>,
 }
 
 /// Password prompt payload (`job://ask-password`).
@@ -1473,7 +1470,7 @@ mod tests {
         meta.modified = Some(UNIX_EPOCH - Duration::from_secs(1));
         assert_eq!(
             EntryDto::from_meta(&meta, "other".to_owned(), "other".to_owned()).modified,
-            None
+            Some(-1)
         );
 
         let synthesized = EntryDto::synthesized_dir("dir/".to_owned(), "dir".to_owned());

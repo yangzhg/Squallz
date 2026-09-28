@@ -208,6 +208,16 @@ const linkPreviewItems: EntryDto[] = ([
   encoding: "utf-8",
 }));
 
+const historicalTimePreviewEntries: EntryDto[] = import.meta.env.DEV ? ([
+  ["Correspondence 1900.pdf", -2_208_943_800],
+  ["Lunar mission 1969.pdf", -14_182_980],
+  ["Archive index 1970.txt", 0],
+  ["Undated manuscript.txt", null],
+  ["Uncertain manuscript.txt", Number.MAX_SAFE_INTEGER],
+] satisfies [string, number | null][]).map(([name, modified]) => ({
+  ...archivePreviewEntries[2], path: name, display: name, modified,
+})) : [];
+
 const longNamePreviewEntries: EntryDto[] = [
   {
     ...archivePreviewEntries[2],
@@ -449,6 +459,7 @@ function readArchivePreview(params: URLSearchParams, pageSize: number): ArchiveP
     ...archivePreviewEntries,
     ...(params.get("previewLinks") === "1" ? linkPreviewItems : []),
     ...(params.get("previewLongNames") === "1" ? longNamePreviewEntries : []),
+    ...(params.get("previewHistoricalTimes") === "1" ? historicalTimePreviewEntries : []),
   ];
   const nestedItems = params.get("previewLinks") === "1"
     ? [...nestedPreviewItems, ...linkPreviewItems]

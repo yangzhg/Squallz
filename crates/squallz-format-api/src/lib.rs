@@ -28,7 +28,7 @@ mod registry;
 mod safety;
 mod traits;
 
-pub use entry::{EntryMeta, EntryPath, EntryType};
+pub use entry::{unix_seconds, EntryMeta, EntryPath, EntryType};
 pub use error::FormatError;
 pub use extract::{
     empty_extract_report, extract_entries, extract_entries_with_report, ExtractReport, ExtractSink,

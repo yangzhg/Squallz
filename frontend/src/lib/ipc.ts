@@ -32,6 +32,7 @@ export interface EntryDto {
   entry_type: "file" | "dir" | "symlink" | "hardlink" | "other";
   size: number;
   compressed: number | null;
+  /** Signed Unix seconds, rounded down; null when unavailable. */
   modified: number | null;
   crc: number | null;
   encrypted: boolean;
@@ -439,9 +440,11 @@ export interface AskConflictEvent {
   version: number;
   existing_path: string;
   existing_size: number;
+  /** Signed Unix seconds, rounded down; null when unavailable. */
   existing_modified: number | null;
   incoming_path: string;
   incoming_size: number;
+  /** Signed Unix seconds, rounded down; null when unavailable. */
   incoming_modified: number | null;
 }
 

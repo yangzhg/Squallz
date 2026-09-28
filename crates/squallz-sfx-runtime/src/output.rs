@@ -1,8 +1,9 @@
 use std::io::{self, Write};
-use std::time::UNIX_EPOCH;
 
 use serde_json::{json, Value};
-use squallz_core::api::{EntryMeta, EntryType, ExtractReport, FormatError, TestSummary};
+use squallz_core::api::{
+    unix_seconds, EntryMeta, EntryType, ExtractReport, FormatError, TestSummary,
+};
 use squallz_core::{ExtractPlan, SmartLayout};
 use squallz_i18n::{localize_error, Localizer};
 
@@ -78,10 +79,7 @@ pub(crate) fn entry_json(entry: &EntryMeta) -> Value {
         "link_target": link_target,
         "size": entry.size,
         "compressed_size": entry.compressed_size,
-        "modified": entry
-            .modified
-            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-            .map(|duration| duration.as_secs()),
+        "modified": entry.modified.and_then(unix_seconds),
         "unix_mode": entry.unix_mode,
         "crc32": entry.crc32,
         "encrypted": entry.encrypted,
@@ -182,6 +180,29 @@ pub(crate) fn error_kind(error: &FormatError) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn entry_json_preserves_signed_modification_times() {
+        use std::time::{Duration, UNIX_EPOCH};
+        let mut entry = EntryMeta {
+            path: squallz_core::api::EntryPath::from_utf8("history.txt"),
+            entry_type: EntryType::File,
+            size: 0,
+            compressed_size: Some(0),
+            modified: None,
+            unix_mode: None,
+            crc32: None,
+            encrypted: false,
+        };
+        assert!(entry_json(&entry)["modified"].is_null());
+        for (time, expected) in [
+            (UNIX_EPOCH, 0),
+            (UNIX_EPOCH - Duration::from_nanos(100), -1),
+        ] {
+            entry.modified = Some(time);
+            assert_eq!(entry_json(&entry)["modified"], expected);
+        }
+    }
 
     #[test]
     fn stable_exit_mapping_covers_every_format_error_family() {

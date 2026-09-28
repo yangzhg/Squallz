@@ -2,7 +2,21 @@
 
 use std::borrow::Cow;
 use std::fmt;
-use std::time::SystemTime;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Signed Unix seconds for entry lists and metadata comparisons shown to users.
+/// Subseconds round down, so the instant just before the epoch stays in 1969.
+/// Returns `None` only when the value cannot fit in a signed 64-bit timestamp.
+pub fn unix_seconds(time: SystemTime) -> Option<i64> {
+    let seconds = match time.duration_since(UNIX_EPOCH) {
+        Ok(duration) => i128::from(duration.as_secs()),
+        Err(error) => {
+            let duration = error.duration();
+            -i128::from(duration.as_secs()) - i128::from(duration.subsec_nanos() != 0)
+        }
+    };
+    i64::try_from(seconds).ok()
+}
 
 /// Path of an entry inside an archive: raw bytes are the source of truth,
 /// the display name is decoded per encoding.
@@ -113,6 +127,26 @@ pub struct EntryMeta {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn unix_seconds_preserves_epoch_and_floors_signed_subseconds() {
+        // Use instants representable by Windows' 100 ns SystemTime clock.
+        for (time, expected) in [
+            (UNIX_EPOCH, 0),
+            (UNIX_EPOCH + Duration::from_nanos(100), 0),
+            (UNIX_EPOCH + Duration::new(1, 999_999_900), 1),
+            (UNIX_EPOCH - Duration::from_nanos(100), -1),
+            (UNIX_EPOCH - Duration::from_secs(1), -1),
+            (UNIX_EPOCH - Duration::new(1, 100), -2),
+            (
+                UNIX_EPOCH - Duration::from_secs(2_208_988_800),
+                -2_208_988_800,
+            ),
+        ] {
+            assert_eq!(unix_seconds(time), Some(expected));
+        }
+    }
 
     #[test]
     fn entry_path_display() {

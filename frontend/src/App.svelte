@@ -143,6 +143,7 @@
     basename as pathBaseName,
     dirname as pathDir,
     formatBytes,
+    formatModified,
     parseDelimitedRules,
   } from "./lib/format";
   import type {
@@ -6243,17 +6244,6 @@
       tr("gui.recovery.using_default_par2", "Verify and Repair will look for {name} beside the archive.")
         .replace("{name}", pathBaseName(`${source}.par2`)),
     );
-  }
-
-  function formatModified(value: number | null): string {
-    if (value == null) return "-";
-    const date = new Date(value * 1000);
-    const year = date.getFullYear();
-    const month = String(date.getMonth() + 1).padStart(2, "0");
-    const day = String(date.getDate()).padStart(2, "0");
-    const hour = String(date.getHours()).padStart(2, "0");
-    const minute = String(date.getMinutes()).padStart(2, "0");
-    return `${year}-${month}-${day} ${hour}:${minute}`;
   }
 
   function entryType(row: EntryDto): string {
