@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::io::{self, Cursor, Read, Seek, SeekFrom};
+use std::io::{self, Read, Seek, SeekFrom};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
@@ -24,6 +24,9 @@ use super::{
 const VERIFY_CHUNK: usize = 64 * 1024;
 const FOOTER_RECOVERY_SCAN_WINDOW: u64 = 64 * 1024 * 1024;
 
+#[cfg(test)]
+mod tests;
+
 #[derive(Clone)]
 struct SqzRecord {
     meta: EntryMeta,
@@ -44,7 +47,7 @@ pub(super) enum SqzArchiveReader {
 pub(super) struct EntrySetSqzReader {
     src: Box<dyn ReadSeek>,
     records: Vec<SqzRecord>,
-    recovery: Option<RecoveryState>,
+    recovery: Option<Arc<RecoveredPayload>>,
 }
 
 impl SqzArchiveReader {
@@ -94,7 +97,16 @@ impl SqzArchiveReader {
                 .data_offset
                 .checked_add(record.data_size)
                 .ok_or_else(|| FormatError::CorruptArchive("sqz entry offset overflows".into()))?;
-            if matches!(record.meta.entry_type, EntryType::File) && data_end > footer.index_offset {
+            let inside_recovery_payload = recovery.as_ref().is_none_or(|state| {
+                record
+                    .data_offset
+                    .checked_sub(state.payload_start)
+                    .and_then(|start| start.checked_add(record.data_size))
+                    .is_some_and(|end| end <= state.payload_length)
+            });
+            if matches!(record.meta.entry_type, EntryType::File)
+                && (data_end > footer.index_offset || !inside_recovery_payload)
+            {
                 return Err(FormatError::CorruptArchive(format!(
                     "sqz entry points outside payload: {}",
                     record.meta.path
@@ -102,6 +114,17 @@ impl SqzArchiveReader {
             }
         }
         src.seek(SeekFrom::Start(0))?;
+        let recovery = recovery.map(|state| Arc::new(RecoveredPayload::from(state)));
+        if let Some(recovery) = &recovery {
+            if !recovery.repaired_blocks.is_empty() {
+                src = Box::new(RecoveredReadSeek {
+                    inner: src,
+                    recovery: Arc::clone(recovery),
+                    len,
+                    pos: 0,
+                });
+            }
+        }
         let reader = EntrySetSqzReader {
             src,
             records,
@@ -113,7 +136,7 @@ impl SqzArchiveReader {
 
 impl EntrySetSqzReader {
     fn open_inner_profile(
-        mut self,
+        self,
         inner_format: &str,
         opts: &OpenOptions,
     ) -> Result<SqzArchiveReader, FormatError> {
@@ -136,24 +159,20 @@ impl EntrySetSqzReader {
                         "sqz inner {inner_format} payload has unrepaired damaged data"
                     )));
                 }
-                let outer_recovery = self.recovery.as_ref().map(RecoveryState::summary);
+                let outer_recovery = self.recovery.as_ref().map(|state| state.summary.clone());
                 if inner_format == "zstd" {
                     let inner =
-                        TarFormat.open_stream(self.zstd_tar_stream_factory(record)?, opts)?;
+                        TarFormat.open_stream(self.zstd_tar_stream_factory(record), opts)?;
                     return Ok(SqzArchiveReader::Inner {
                         reader: inner,
                         outer_recovery,
                     });
                 }
-                let inner_src: Box<dyn ReadSeek> = if self.record_has_repaired_block(record) {
-                    Box::new(Cursor::new(self.read_record_bytes(record)?))
-                } else {
-                    Box::new(BoundedReadSeek::new(
-                        self.src,
-                        record.data_offset,
-                        record.data_size,
-                    ))
-                };
+                let inner_src: Box<dyn ReadSeek> = Box::new(BoundedReadSeek::new(
+                    self.src,
+                    record.data_offset,
+                    record.data_size,
+                ));
                 let inner = match inner_format {
                     "zip" => ZipFormat.open(inner_src, opts)?,
                     "tar" => TarFormat.open(inner_src, opts)?,
@@ -186,21 +205,13 @@ impl EntrySetSqzReader {
         Some((start / block_size, end / block_size))
     }
 
-    fn zstd_tar_stream_factory(mut self, record: &SqzRecord) -> Result<StreamFactory, FormatError> {
-        if self.record_has_repaired_block(record) {
-            let payload: Arc<[u8]> = self.read_record_bytes(record)?.into();
-            return Ok(Box::new(move || {
-                let compressor = crate::stream::Zstd;
-                compressor.decompress_reader(Box::new(Cursor::new(Arc::clone(&payload))))
-            }));
-        }
-
+    fn zstd_tar_stream_factory(self, record: &SqzRecord) -> StreamFactory {
         let shared = Arc::new(Mutex::new(BoundedReadSeek::new(
             self.src,
             record.data_offset,
             record.data_size,
         )));
-        Ok(Box::new(move || {
+        Box::new(move || {
             {
                 let mut source = shared.lock().map_err(|_| {
                     FormatError::Other("sqz zstd payload reader lock poisoned".into())
@@ -211,17 +222,7 @@ impl EntrySetSqzReader {
             compressor.decompress_reader(Box::new(SharedBoundedRead {
                 inner: Arc::clone(&shared),
             }))
-        }))
-    }
-
-    fn record_has_repaired_block(&self, record: &SqzRecord) -> bool {
-        let Some((start, end)) = self.record_blocks(record) else {
-            return false;
-        };
-        let Some(recovery) = &self.recovery else {
-            return false;
-        };
-        (start..=end).any(|index| recovery.repaired_blocks.contains_key(&index))
+        })
     }
 
     fn record_has_unrepaired_block(&self, record: &SqzRecord) -> bool {
@@ -232,64 +233,6 @@ impl EntrySetSqzReader {
             return false;
         };
         (start..=end).any(|index| recovery.unrepaired_blocks.contains(&index))
-    }
-
-    fn read_record_bytes(&mut self, record: &SqzRecord) -> Result<Vec<u8>, FormatError> {
-        let mut out = Vec::with_capacity(record.data_size as usize);
-        if self.recovery.is_none() {
-            self.src.seek(SeekFrom::Start(record.data_offset))?;
-            let mut limited = (&mut *self.src).take(record.data_size);
-            limited.read_to_end(&mut out)?;
-            if out.len() as u64 != record.data_size {
-                return Err(FormatError::CorruptArchive("truncated file data".into()));
-            }
-            return Ok(out);
-        }
-
-        let mut pos = 0u64;
-        while pos < record.data_size {
-            let absolute = record
-                .data_offset
-                .checked_add(pos)
-                .ok_or_else(|| FormatError::CorruptArchive("sqz entry offset overflows".into()))?;
-            let Some(recovery) = self.recovery.as_ref() else {
-                return Err(FormatError::CorruptArchive(
-                    "sqz recovery state missing while reading recovered record".into(),
-                ));
-            };
-            let relative = absolute
-                .checked_sub(recovery.payload_start)
-                .ok_or_else(|| {
-                    FormatError::CorruptArchive("sqz entry starts before payload".into())
-                })?;
-            let block_index = relative / recovery.block_size as u64;
-            if recovery.unrepaired_blocks.contains(&block_index) {
-                return Err(FormatError::CorruptArchive(format!(
-                    "sqz block {block_index} exceeds recovery capacity"
-                )));
-            }
-            let block_offset = (relative % recovery.block_size as u64) as usize;
-            let take = (recovery.block_size - block_offset).min((record.data_size - pos) as usize);
-            let repaired_block = recovery.repaired_blocks.get(&block_index).cloned();
-            if let Some(block) = repaired_block {
-                let end = block_offset.checked_add(take).ok_or_else(|| {
-                    FormatError::CorruptArchive("sqz repaired block offset overflows".into())
-                })?;
-                if end > block.len() {
-                    return Err(FormatError::CorruptArchive(
-                        "sqz repaired block is shorter than requested".into(),
-                    ));
-                }
-                out.extend_from_slice(&block[block_offset..end]);
-            } else {
-                self.src.seek(SeekFrom::Start(absolute))?;
-                let start_len = out.len();
-                out.resize(start_len + take, 0);
-                self.src.read_exact(&mut out[start_len..])?;
-            }
-            pos += take as u64;
-        }
-        Ok(out)
     }
 
     fn test_with_problem_recorder(
@@ -306,6 +249,7 @@ impl EntrySetSqzReader {
             .sum();
         let mut done = 0u64;
         let mut entries_tested = 0u64;
+        let mut buffer = [0u8; VERIFY_CHUNK];
         for record in self.records.clone() {
             ctl.checkpoint()?;
             entries_tested += 1;
@@ -321,22 +265,43 @@ impl EntrySetSqzReader {
                 progress.on_progress(done, total, &record.meta.path);
                 continue;
             }
-            match self.read_record_bytes(&record) {
-                Ok(data) => {
-                    for chunk in data.chunks(VERIFY_CHUNK) {
-                        ctl.checkpoint()?;
-                        done += chunk.len() as u64;
-                        progress.on_progress(done, total, &record.meta.path);
+            let verified = (|| {
+                self.src.seek(SeekFrom::Start(record.data_offset))?;
+                let mut data = EntryData {
+                    inner: &mut *self.src,
+                    remaining: record.data_size,
+                };
+                let mut hash = blake3::Hasher::new();
+                let mut crc = 0;
+                loop {
+                    ctl.checkpoint()?;
+                    let count = match data.read(&mut buffer) {
+                        Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                        result => result?,
+                    };
+                    if count == 0 {
+                        break;
                     }
-                    let hash = *blake3::hash(&data).as_bytes();
-                    let crc = crc32c::crc32c(&data);
-                    if hash != record.hash || crc != record.crc32c {
+                    hash.update(&buffer[..count]);
+                    crc = crc32c::crc32c_append(crc, &buffer[..count]);
+                    done += count as u64;
+                    progress.on_progress(done, total, &record.meta.path);
+                }
+                Ok::<_, FormatError>(
+                    *hash.finalize().as_bytes() == record.hash && crc == record.crc32c,
+                )
+            })();
+            ctl.checkpoint()?;
+            match verified {
+                Ok(valid) => {
+                    if !valid {
                         record_problem(format!(
                             "{}: checksum mismatch (BLAKE3/CRC-32C)",
                             record.meta.path
                         ));
                     }
                 }
+                Err(FormatError::Cancelled) => return Err(FormatError::Cancelled),
                 Err(e) => record_problem(format!("{}: {e}", record.meta.path)),
             }
         }
@@ -382,10 +347,6 @@ impl ArchiveReader for EntrySetSqzReader {
                 "sqz entry has unrepaired damaged data: {path}"
             )));
         }
-        if self.record_has_repaired_block(&record) {
-            let data = self.read_record_bytes(&record)?;
-            return consume(&mut Cursor::new(data));
-        }
         self.src.seek(SeekFrom::Start(record.data_offset))?;
         consume(&mut EntryData {
             inner: &mut *self.src,
@@ -398,7 +359,7 @@ impl ArchiveReader for EntrySetSqzReader {
         progress: &dyn ProgressSink,
         ctl: &ControlToken,
     ) -> Result<TestSummary, FormatError> {
-        let recovery = self.recovery.as_ref().map(RecoveryState::summary);
+        let recovery = self.recovery.as_ref().map(|state| state.summary.clone());
         let problems = BoundedProblemLog::new(TEST_PROBLEM_PREVIEW_LIMIT);
         let entries_tested =
             self.test_with_problem_recorder(progress, ctl, |problem| problems.record(problem))?;
@@ -460,6 +421,97 @@ impl ArchiveReader for SqzArchiveReader {
     }
 }
 
+struct RecoveredPayload {
+    summary: RecoverySummary,
+    payload_start: u64,
+    payload_length: u64,
+    block_size: usize,
+    repaired_blocks: HashMap<u64, Vec<u8>>,
+    unrepaired_blocks: HashSet<u64>,
+}
+
+impl From<RecoveryState> for RecoveredPayload {
+    fn from(state: RecoveryState) -> Self {
+        Self {
+            summary: state.summary(),
+            payload_start: state.payload_start,
+            payload_length: state.payload_length,
+            block_size: state.block_size,
+            repaired_blocks: state.repaired_blocks,
+            unrepaired_blocks: state.unrepaired_blocks,
+        }
+    }
+}
+
+struct RecoveredReadSeek {
+    inner: Box<dyn ReadSeek>,
+    recovery: Arc<RecoveredPayload>,
+    len: u64,
+    pos: u64,
+}
+
+impl Read for RecoveredReadSeek {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if self.pos >= self.len || buf.is_empty() {
+            return Ok(0);
+        }
+        let mut want = (self.len - self.pos).min(buf.len() as u64) as usize;
+        if let Some(relative) = self.pos.checked_sub(self.recovery.payload_start) {
+            if relative < self.recovery.payload_length {
+                let block_size = self.recovery.block_size as u64;
+                let block_index = relative / block_size;
+                let block_offset = (relative % block_size) as usize;
+                want = (self.recovery.payload_length - relative)
+                    .min(want as u64)
+                    .min(block_size - block_offset as u64) as usize;
+                if self.recovery.unrepaired_blocks.contains(&block_index) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "SQZ payload exceeds recovery capacity",
+                    ));
+                }
+                if let Some(block) = self.recovery.repaired_blocks.get(&block_index) {
+                    let bytes = block
+                        .get(block_offset..block_offset + want)
+                        .ok_or_else(|| {
+                            io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                "truncated SQZ repaired block",
+                            )
+                        })?;
+                    buf[..want].copy_from_slice(bytes);
+                    self.pos += want as u64;
+                    return Ok(want);
+                }
+            }
+        } else {
+            want = (self.recovery.payload_start - self.pos).min(want as u64) as usize;
+        }
+        self.inner.seek(SeekFrom::Start(self.pos))?;
+        let count = self.inner.read(&mut buf[..want])?;
+        self.pos += count as u64;
+        Ok(count)
+    }
+}
+
+impl Seek for RecoveredReadSeek {
+    fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+        let next = match pos {
+            SeekFrom::Start(offset) => i128::from(offset),
+            SeekFrom::End(offset) => i128::from(self.len) + i128::from(offset),
+            SeekFrom::Current(offset) => i128::from(self.pos) + i128::from(offset),
+        };
+        if next < 0 || next > i128::from(u64::MAX) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid SQZ payload seek",
+            ));
+        }
+        self.pos = next as u64;
+        Ok(self.pos)
+    }
+}
+
 struct BoundedReadSeek {
     inner: Box<dyn ReadSeek>,
     start: u64,
@@ -484,7 +536,7 @@ impl Read for BoundedReadSeek {
             return Ok(0);
         }
         let remaining = self.len - self.pos;
-        let want = (remaining as usize).min(buf.len());
+        let want = remaining.min(buf.len() as u64) as usize;
         let absolute = self.start.checked_add(self.pos).ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -537,11 +589,17 @@ struct EntryData<'a> {
 
 impl Read for EntryData<'_> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        if self.remaining == 0 {
+        if self.remaining == 0 || buf.is_empty() {
             return Ok(0);
         }
-        let want = (self.remaining as usize).min(buf.len());
+        let want = self.remaining.min(buf.len() as u64) as usize;
         let n = self.inner.read(&mut buf[..want])?;
+        if n == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "truncated SQZ file data",
+            ));
+        }
         self.remaining -= n as u64;
         Ok(n)
     }
