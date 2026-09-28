@@ -27,6 +27,9 @@ type PreviewTaskKind =
   | "compress_sfx_failure"
   | "convert_failure"
   | "convert_encrypted_failure"
+  | "duplicate_scan"
+  | "duplicate_scan_clean"
+  | "duplicate_scan_failure"
   | "recovery_cleanup_ready"
   | "recovery_cleanup_unconfirmed"
   | "recovery_cleanup_record"
@@ -433,6 +436,7 @@ function completedTaskParam(value: string | null): RuntimePreviews["completedTas
     value === "compress_sfx_failure" ||
     value === "convert_failure" ||
     value === "convert_encrypted_failure" ||
+    value === "duplicate_scan" || value === "duplicate_scan_clean" || value === "duplicate_scan_failure" ||
     value === "recovery_cleanup_ready" ||
     value === "recovery_cleanup_unconfirmed" ||
     value === "recovery_cleanup_record" ||

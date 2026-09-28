@@ -1,5 +1,6 @@
 <script lang="ts" module>
   import type { ChecksumAlgorithmId } from "../lib/ui-model";
+  import type { DuplicateReportSurface } from "./DuplicateReport.svelte";
 
   export type ToolsWorkspaceKind = "batch" | "checksum" | "duplicates";
   export type ToolsWorkspaceVariant = "modern" | "classic";
@@ -115,17 +116,7 @@
       countLabel: string;
       onInput: (value: string) => void;
     };
-    metrics: {
-      filesScanned: string;
-      bytesScanned: string;
-      candidateFiles: string;
-      hashedBytes: string;
-      duplicateFiles: string;
-      duplicateGroups: string;
-      reclaimable: string;
-      taskState: string;
-      reviewState: string;
-    };
+    report: DuplicateReportSurface;
     actions: {
       onChooseFolder: () => void;
       onUseArchiveFolder: () => void;
@@ -168,6 +159,7 @@
   import ArchiveReturnStrip from "./ArchiveReturnStrip.svelte";
   import ChecksumAlgorithmPicker from "./ChecksumAlgorithmPicker.svelte";
   import ExcludeRulesEditor from "./ExcludeRulesEditor.svelte";
+  import DuplicateReport from "./DuplicateReport.svelte";
   import Icon from "./Icon.svelte";
 
   let {
@@ -234,7 +226,7 @@
       </div>
     </div>
     {#if report.context}
-      <dl class="checksum-report-context">
+      <dl class="tool-report-context">
         <div>
           <dt>{report.kind === "checksum"
             ? surface.tr("gui.checksum.report_target", "Report target")
@@ -462,9 +454,8 @@
         <div>
           <span class="eyebrow">{surface.tr("gui.duplicates.eyebrow", "Tools / Duplicate Finder")}</span>
           <h1>{surface.tr("gui.duplicates.title", "Find duplicate local files")}</h1>
-          <p>{surface.tr("gui.duplicates.modern_subtitle", "BLAKE3 hashes are computed by the shared core engine; this scan never deletes, moves, links, or modifies files.")}</p>
+          <p>{surface.tr("gui.duplicates.modern_subtitle", "Find identical files in local folders and review every copy before deciding what to keep.")}</p>
           <div class="duplicate-safety-strip" aria-label={surface.tr("gui.duplicates.safety_summary", "Duplicate scan safety summary")}>
-            <span><Icon name="search" size={14} />{surface.tr("gui.duplicates.cli_contract", "CLI parity: sqz duplicates")}</span>
             <span><Icon name="list" size={14} />{surface.tr("gui.duplicates.grouped_review", "Grouped review before cleanup")}</span>
             <span><Icon name="check-circle" size={14} />{surface.tr("gui.duplicates.no_auto_delete", "No automatic deletion")}</span>
           </div>
@@ -474,13 +465,6 @@
 
       <div class="settings-layout">
         <section class="settings-main-panel">
-          <div class="settings-metric-grid">
-            <div><span>{surface.tr("common.target", "Target")}</span><strong>{surface.target.name}</strong><small>{surface.target.label}</small></div>
-            <div><span>{surface.tr("gui.duplicates.minimum_size", "Minimum size")}</span><strong>{surface.minimumSize.label}</strong><small>{surface.tr("gui.duplicates.smaller_ignored", "Smaller files are ignored before hashing")}</small></div>
-            <div><span>{surface.tr("gui.duplicates.latest_groups", "Latest groups")}</span><strong>{surface.metrics.duplicateGroups}</strong><small>{surface.tr("gui.duplicates.duplicate_files_count", "{count} duplicate files").replace("{count}", surface.metrics.duplicateFiles)}</small></div>
-            <div><span>{surface.tr("gui.duplicates.reclaimable", "Reclaimable")}</span><strong>{surface.metrics.reclaimable}</strong><small>{surface.tr("gui.duplicates.potential_space", "Potential space if one copy per group remains")}</small></div>
-          </div>
-
           <div class="level-control settings-slider">
             <div><strong>{surface.tr("gui.duplicates.scan_target", "Scan target")}</strong><span>{surface.target.label}</span></div>
             <div class="path-preview">{surface.target.label}</div>
@@ -520,12 +504,6 @@
             onInput={surface.excludes.onInput}
           />
 
-          <div class="limits-table">
-            <div><b>{surface.tr("gui.duplicates.result", "Result")}</b><b>{surface.tr("gui.duplicates.count", "Count")}</b><b>{surface.tr("gui.duplicates.bytes", "Bytes")}</b><b>{surface.tr("common.status", "Status")}</b></div>
-            <div><span>{surface.tr("gui.duplicates.files_scanned", "Files scanned")}</span><span>{surface.metrics.filesScanned}</span><span>{surface.metrics.bytesScanned}</span><strong>{surface.metrics.taskState}</strong></div>
-            <div><span>{surface.tr("gui.duplicates.candidates_hashed", "Candidates hashed")}</span><span>{surface.metrics.candidateFiles}</span><span>{surface.metrics.hashedBytes}</span><strong>BLAKE3</strong></div>
-            <div><span>{surface.tr("gui.duplicates.duplicate_groups", "Duplicate groups")}</span><span>{surface.metrics.duplicateGroups}</span><span>{surface.metrics.reclaimable}</span><strong>{surface.metrics.reviewState}</strong></div>
-          </div>
         </section>
 
         <aside class="settings-side-panel">
@@ -546,6 +524,7 @@
           </div>
         </aside>
       </div>
+      {#key surface.report.taskId}<DuplicateReport report={surface.report} tr={surface.tr} />{/key}
     </div>
   {:else}
     <div class="classic-dialog-body" class:with-archive-return={surface.archiveReturn.visible}>
@@ -564,9 +543,8 @@
         <header>
           <div>
             <h1>{surface.title}</h1>
-            <p>{surface.tr("gui.duplicates.subtitle", "Scan local folders with the same BLAKE3 duplicate detector exposed by sqz duplicates; no cleanup action is run.")}</p>
+            <p>{surface.tr("gui.duplicates.subtitle", "Find identical files in local folders and review every copy before deciding what to keep.")}</p>
             <div class="duplicate-safety-strip classic-duplicate-safety" aria-label={surface.tr("gui.duplicates.safety_summary", "Duplicate scan safety summary")}>
-              <span><Icon name="search" size={13} />{surface.tr("gui.duplicates.cli_contract", "CLI parity: sqz duplicates")}</span>
               <span><Icon name="list" size={13} />{surface.tr("gui.duplicates.grouped_review", "Grouped review before cleanup")}</span>
               <span><Icon name="check-circle" size={13} />{surface.tr("gui.duplicates.no_auto_delete", "No automatic deletion")}</span>
             </div>
@@ -610,16 +588,8 @@
               ></textarea>
             </div>
           </section>
-          <aside>
-            <h2>{surface.tr("gui.duplicates.latest_result", "Latest result")}</h2>
-            <div class="classic-form-grid compact no-pad">
-              <div class="classic-label">{surface.tr("common.status", "State")}</div><div class="classic-input">{surface.metrics.taskState}</div>
-              <div class="classic-label">{surface.tr("gui.duplicates.files", "Files")}</div><div class="classic-input">{surface.metrics.filesScanned}</div>
-              <div class="classic-label">{surface.tr("gui.duplicates.groups", "Groups")}</div><div class="classic-input accent">{surface.metrics.duplicateGroups}</div>
-              <div class="classic-label">{surface.tr("gui.duplicates.reclaimable", "Reclaimable")}</div><div class="classic-input accent">{surface.metrics.reclaimable}</div>
-            </div>
-          </aside>
         </div>
+        {#key surface.report.taskId}<DuplicateReport report={surface.report} tr={surface.tr} />{/key}
       </section>
     </div>
   {/if}

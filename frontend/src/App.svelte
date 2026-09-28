@@ -243,6 +243,7 @@
     normalizeTaskConflictAnswer,
     taskPasswordReady,
     taskChecksumResultText,
+    taskDuplicateGroups,
     taskOutcomeNeedsAttention,
     taskReviewScreen,
     taskOutputCanOpen,
@@ -642,6 +643,9 @@
   let checksumResultPanel = $state<HTMLElement | null>(null);
   let checksumCheckResultPanel = $state<HTMLElement | null>(null);
   let checksumReportTaskIds = $state<Partial<Record<ChecksumResultKind, number>>>({});
+  let duplicateReportTaskId = $state<number | null>(null);
+  let duplicateReportPanel = $state<HTMLElement | null>(null);
+  let duplicateReportFocusPending = false;
   let checksumCopyFeedbackKind = $state<"checksum" | "checksum_check" | "task" | null>(null);
   let checksumCopyFeedbackTaskId = $state<number | null>(null);
   let checksumCopyFeedbackMessage = $state<string | null>(null);
@@ -1253,7 +1257,7 @@
   $effect(() => {
     const completedTask = runtimePreviews.completedTask;
     if (!completedTask) return;
-    const id = installCompletedTaskPreview(completedTask, params.has("previewChecksumHistory"));
+    const id = installCompletedTaskPreview(completedTask, params.has("previewChecksumHistory") || params.has("previewDuplicateHistory"));
     if (id === null) return;
     taskDialogTaskId = id;
     taskDialogDismissedId = null;
@@ -2141,6 +2145,7 @@
     if (next !== "create") createPrimaryFocusPending = false;
     if (next !== "extract") extractReviewFocusPending = false;
     if (next !== "convert") convertReviewFocusPending = false;
+    if (next !== "duplicates") duplicateReportFocusPending = false;
     if (next !== "password") pendingArchiveTaskReview = null;
     if (screen === "create" && next !== "create" && pendingCreateSubmission) {
       discardPendingCreatePlan();
@@ -2189,6 +2194,20 @@
     if (!panel) return;
     panel.scrollIntoView({ block: "nearest", inline: "nearest" });
     panel.focus({ preventScroll: true });
+  }
+
+  async function focusDuplicateReportPanel(): Promise<void> {
+    duplicateReportFocusPending = true;
+    await tick();
+    if (screen !== "duplicates" || !duplicateReportPanel || blockingModalVisible()) return;
+    duplicateReportFocusPending = false;
+    duplicateReportPanel.scrollIntoView({ block: "start", inline: "nearest" });
+    duplicateReportPanel.focus({ preventScroll: true });
+  }
+
+  function registerDuplicateReportPanel(node: HTMLElement | null): void {
+    duplicateReportPanel = node;
+    if (node && duplicateReportFocusPending) void focusDuplicateReportPanel();
   }
 
   $effect(() => {
@@ -10158,7 +10177,7 @@
   }
 
   function duplicatesWorkspaceSurface(variant: ToolsWorkspaceVariant): DuplicatesWorkspaceSurface {
-    const duplicateGroups = duplicateResultNumber("duplicate_groups");
+    const task = selectedDuplicateScanTask();
 
     return {
       kind: "duplicates",
@@ -10183,18 +10202,33 @@
           .replace("{count}", String(duplicateExcludeRules().length)),
         onInput: (value) => (duplicateExcludeText = value),
       },
-      metrics: {
-        filesScanned: duplicateResultNumber("files_scanned").toLocaleString(),
-        bytesScanned: formatBytes(duplicateResultNumber("bytes_scanned")),
-        candidateFiles: duplicateResultNumber("candidate_files").toLocaleString(),
-        hashedBytes: formatBytes(duplicateResultNumber("hashed_bytes")),
-        duplicateFiles: duplicateResultNumber("duplicate_files").toLocaleString(),
-        duplicateGroups: duplicateGroups.toLocaleString(),
-        reclaimable: formatBytes(duplicateResultNumber("reclaimable_bytes")),
-        taskState: taskStateLabel(latestDuplicateScanTask()?.state),
-        reviewState: duplicateGroups > 0
-          ? tr("gui.duplicates.review_only", "Review only")
-          : tr("gui.duplicates.clean", "Clean"),
+      report: {
+        taskId: task?.id ?? null,
+        state: taskStateLabel(task?.state),
+        context: task?.spec.kind === "duplicate_scan" ? {
+          sources: task.spec.inputs,
+          minimumSize: formatBytes(task.spec.min_size),
+          excludes: task.spec.excludes,
+        } : null,
+        summary: [
+          { label: tr("gui.duplicates.files_scanned", "Files scanned"), value: duplicateResultLabel("files_scanned") },
+          { label: tr("gui.duplicates.bytes_scanned", "Bytes scanned"), value: duplicateResultLabel("bytes_scanned", true) },
+          { label: tr("gui.duplicates.candidates_hashed", "Candidates hashed"), value: duplicateResultLabel("candidate_files") },
+          { label: tr("gui.duplicates.hashed_bytes", "Bytes hashed"), value: duplicateResultLabel("hashed_bytes", true) },
+          { label: tr("gui.duplicates.groups", "Groups"), value: duplicateResultLabel("duplicate_groups") },
+          { label: tr("gui.duplicates.files", "Files"), value: duplicateResultLabel("duplicate_files") },
+          { label: tr("gui.duplicates.reclaimable", "Reclaimable"), value: duplicateResultLabel("reclaimable_bytes", true) },
+        ],
+        groups: taskDuplicateGroups(task),
+        emptyMessage: !task
+          ? tr("gui.duplicates.report_empty", "Choose a folder and start a scan to find duplicate files.")
+          : task.state === "done" && task.result?.duplicate_groups === 0
+            && Array.isArray(task.result.groups) && task.result.groups.length === 0
+            ? tr("gui.duplicates.report_clean", "No duplicate files were found within this scan's size and exclude rules.")
+            : task.state === "queued" || task.state === "running" || task.state === "paused"
+              ? tr("gui.duplicates.report_pending", "The report will appear when this scan finishes. Follow its progress in the task center.")
+              : tr("gui.duplicates.report_unavailable", "No complete report is available for this scan. Open its task details to review the outcome, or run a new scan."),
+        onMount: registerDuplicateReportPanel,
       },
       actions: {
         onChooseFolder: () => void chooseDuplicateScanFolder(),
@@ -10461,7 +10495,9 @@
     return target ? pathBaseName(target) || target : tr("gui.duplicates.no_folder_selected", "No folder selected");
   }
 
-  function latestDuplicateScanTask(): Task | null {
+  function selectedDuplicateScanTask(): Task | null {
+    const selected = jobRows.find((task) => task.id === duplicateReportTaskId && task.spec.kind === "duplicate_scan");
+    if (selected) return selected;
     for (let index = jobRows.length - 1; index >= 0; index -= 1) {
       const task = jobRows[index];
       if (task.spec.kind === "duplicate_scan") return task;
@@ -10469,9 +10505,14 @@
     return null;
   }
 
-  function duplicateResultNumber(key: string): number {
-    const value = latestDuplicateScanTask()?.result?.[key];
-    return typeof value === "number" && Number.isFinite(value) ? value : 0;
+  function duplicateResultNumber(key: string): number | null {
+    const value = selectedDuplicateScanTask()?.result?.[key];
+    return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
+  }
+
+  function duplicateResultLabel(key: string, bytes = false): string {
+    const value = duplicateResultNumber(key);
+    return value === null ? "—" : bytes ? formatBytes(value) : value.toLocaleString();
   }
 
   function duplicateExcludeRules(): string[] {
@@ -10543,12 +10584,13 @@
     }
     if (focusBlockingTaskIfAny()) return;
     try {
-      await submitJob({
+      const id = await submitJob({
         kind: "duplicate_scan",
         inputs: [target],
         excludes: duplicateExcludeRules(),
         min_size: Math.max(0, Math.floor(duplicateMinSize)),
       });
+      duplicateReportTaskId = id;
       showNotice(tr("gui.duplicates.queued", "Duplicate scan added to queue"));
       recordOperation({
         status: "queued",
@@ -12823,11 +12865,13 @@
     if (task.id !== null && (task.spec.kind === "checksum" || task.spec.kind === "checksum_check")) {
       checksumReportTaskIds[task.spec.kind] = task.id;
     }
+    if (task.id !== null && task.spec.kind === "duplicate_scan") duplicateReportTaskId = task.id;
     setScreen(target);
     void dismissTaskDialog(task);
     if (target === "checksum") {
       void focusChecksumResultPanel(task.spec.kind === "checksum_check" ? "checksum_check" : "checksum");
     }
+    if (target === "duplicates") void focusDuplicateReportPanel();
   }
 
   function toggleTaskDetails(task: TaskDialogModel): void {
@@ -14150,7 +14194,7 @@
         class="modern-shell"
         class:settings-shell={isSettingsScreen()}
         class:no-archive-shell={screen === "browse" && !currentArchive}
-        class:no-inspector-shell={screen === "recent" || screen === "convert" || screen === "create" || screen === "extract"}
+        class:no-inspector-shell={screen === "recent" || screen === "convert" || screen === "create" || screen === "extract" || screen === "duplicates"}
       >
         <aside class="modern-sidebar" aria-label={tr("gui.aria.navigation", "Navigation")}>
           <div class="sidebar-section">
@@ -14370,7 +14414,7 @@
 	          {/if}
         </section>
 
-        {#if !isSettingsScreen() && screen !== "recent" && screen !== "convert" && screen !== "create" && screen !== "extract" && (screen !== "browse" || currentArchive)}
+        {#if !isSettingsScreen() && screen !== "recent" && screen !== "convert" && screen !== "create" && screen !== "extract" && screen !== "duplicates" && (screen !== "browse" || currentArchive)}
           <ModernInspectorHost
             surface={modernInspectorSurface()}
             ariaLabel={tr("gui.aria.archive_inspector", "Archive inspector")}
@@ -14744,7 +14788,7 @@
           <span>{tr("gui.screen.duplicates", "Duplicate Finder")}</span>
           <span>{tr("gui.status.target", "Target: {target}").replace("{target}", duplicateScanTargetName())}</span>
           <span>{tr("gui.duplicates.status_min_excludes", "Min: {min} · {count} excludes").replace("{min}", formatBytes(duplicateMinSize)).replace("{count}", String(duplicateExcludeRules().length))}</span>
-          <strong>{tr("gui.duplicates.status_groups_reclaimable", "{groups} groups · {size} reclaimable").replace("{groups}", duplicateResultNumber("duplicate_groups").toLocaleString()).replace("{size}", formatBytes(duplicateResultNumber("reclaimable_bytes")))}</strong>
+          <strong>{tr("gui.duplicates.status_groups_reclaimable", "{groups} groups · {size} reclaimable").replace("{groups}", duplicateResultLabel("duplicate_groups")).replace("{size}", duplicateResultLabel("reclaimable_bytes", true))}</strong>
         {:else if screen === "password"}
           <span>{tr("gui.screen.password", "Password Required")}</span>
           <span>{passwordPromptName()}</span>

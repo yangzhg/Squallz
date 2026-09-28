@@ -132,6 +132,24 @@ export function taskChecksumItems(task: TaskDialogModel): Record<string, unknown
   );
 }
 
+export interface DuplicateGroupSummary {
+  hash: string;
+  size: number;
+  paths: string[];
+}
+
+export function taskDuplicateGroups(task: TaskDialogModel | null): DuplicateGroupSummary[] {
+  const groups = task?.spec.kind === "duplicate_scan" ? task.result?.groups : null;
+  if (!Array.isArray(groups)) return [];
+  return groups.flatMap((group) => {
+    if (!group || typeof group !== "object" || typeof group.hash !== "string"
+      || typeof group.size !== "number" || !Number.isFinite(group.size) || group.size < 0
+      || !Array.isArray(group.paths)) return [];
+    const paths = group.paths.filter((path: unknown): path is string => typeof path === "string");
+    return paths.length < 2 ? [] : [{ hash: group.hash, size: group.size, paths }];
+  });
+}
+
 export function checksumItemText(item: Record<string, unknown>, key: string): string {
   const value = item[key];
   return typeof value === "string" ? value : "";

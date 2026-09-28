@@ -3387,7 +3387,7 @@ select option {
   gap: 8px;
 }
 
-.checksum-report-context {
+.tool-report-context {
   min-width: 0;
   display: flex;
   flex-wrap: wrap;
@@ -3397,28 +3397,28 @@ select option {
   line-height: var(--type-control-line);
 }
 
-.checksum-report-context > div {
+.tool-report-context > div {
   min-width: 0;
   display: grid;
   gap: var(--space-xs);
 }
 
-.checksum-report-context > div:first-child {
+.tool-report-context > div:first-child {
   flex-basis: 100%;
 }
 
-.checksum-report-context dt {
+.tool-report-context dt {
   color: var(--color-text-secondary);
 }
 
-.checksum-report-context dd {
+.tool-report-context dd {
   min-width: 0;
   margin: 0;
   color: var(--color-text-primary);
   overflow-wrap: anywhere;
 }
 
-.checksum-report-context dd span {
+.tool-report-context dd span {
   display: block;
   white-space: pre-wrap;
 }
@@ -8570,6 +8570,150 @@ input.secure-input {
 
 .modern-checksum .checksum-result-panel {
   margin-top: 0;
+}
+
+.settings-view.modern-duplicates {
+  height: auto;
+  min-height: 100%;
+}
+
+.modern-duplicates > .settings-layout {
+  flex: 0 0 auto;
+  align-items: start;
+}
+
+.modern-duplicates .settings-main-panel {
+  display: grid;
+  gap: var(--space-md);
+  overflow: visible;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.classic-duplicates .classic-batch-grid {
+  height: auto;
+  overflow: visible;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.classic-duplicates .classic-batch-grid > section {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.classic-duplicates .classic-form-grid > div.classic-input {
+  height: auto;
+  overflow: visible;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.duplicate-report {
+  min-width: 0;
+  flex: 0 0 auto;
+  display: grid;
+  gap: var(--space-lg);
+  padding: var(--space-lg);
+  border: var(--border-width-control) solid var(--color-border-default);
+  border-radius: var(--radius-panel);
+  background: var(--color-surface-raised);
+  color: var(--color-text-primary);
+}
+
+.classic-duplicates > .duplicate-report {
+  margin: var(--space-md);
+}
+
+.duplicate-report:focus-visible,
+.duplicate-report h2:focus-visible,
+.duplicate-report li:focus-visible,
+.duplicate-report-group summary:focus-visible {
+  outline: var(--border-width-focus) solid var(--color-focus-ring);
+  outline-offset: var(--space-xs);
+}
+
+.duplicate-report-heading,
+.duplicate-report-pagination {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-sm);
+}
+
+.duplicate-report h2 {
+  margin: 0;
+  font-size: var(--type-body);
+  line-height: var(--type-body-line);
+}
+
+.duplicate-report-hint,
+.duplicate-report-heading > span,
+.duplicate-report-pagination > span,
+.duplicate-report-group summary > span,
+.duplicate-report-digest > span {
+  margin: 0;
+  color: var(--color-text-secondary);
+  font-size: var(--type-control);
+  line-height: var(--type-control-line);
+}
+
+.duplicate-report-groups,
+.duplicate-report-group-body,
+.duplicate-report-digest {
+  min-width: 0;
+  display: grid;
+  gap: var(--space-sm);
+}
+
+.duplicate-report-group {
+  min-width: 0;
+  border-top: var(--border-width-control) solid var(--color-divider);
+}
+
+.duplicate-report-group summary {
+  padding-block: var(--space-md);
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+
+.duplicate-report-group summary strong {
+  margin-inline-end: var(--space-md);
+  font-size: var(--type-body);
+}
+
+.duplicate-report-group summary:hover {
+  color: var(--color-accent);
+}
+
+.duplicate-report-group-body {
+  padding-bottom: var(--space-md);
+}
+
+.duplicate-report-group-body ul {
+  min-width: 0;
+  display: grid;
+  gap: var(--space-sm);
+  margin: 0;
+  padding-inline-start: var(--space-lg);
+}
+
+.duplicate-report-group-body li,
+.duplicate-report-digest code {
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: var(--type-control);
+  line-height: var(--type-control-line);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.duplicate-report-group-body button {
+  justify-self: start;
 }
 
 .settings-route-list {

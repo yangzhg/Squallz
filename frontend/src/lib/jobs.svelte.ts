@@ -1277,6 +1277,9 @@ type PreviewTaskKind =
   | "compress_sfx_failure"
   | "convert_failure"
   | "convert_encrypted_failure"
+  | "duplicate_scan"
+  | "duplicate_scan_clean"
+  | "duplicate_scan_failure"
   | "recovery_cleanup_ready"
   | "recovery_cleanup_unconfirmed"
   | "recovery_cleanup_record"
@@ -1327,6 +1330,10 @@ function isRecoveryCleanupPreview(kind: PreviewTaskKind): boolean {
 }
 
 function previewTaskSpec(kind: PreviewTaskKind): JobSpec {
+  if (kind === "duplicate_scan" || kind === "duplicate_scan_clean" || kind === "duplicate_scan_failure") {
+    return { kind: "duplicate_scan", inputs: [`${sampleRoot}/${kind === "duplicate_scan_clean" ? "Inbox" : "Archive review"}`],
+      excludes: ["cache"], min_size: 1024 };
+  }
   if (kind === "convert_failure" || kind === "convert_encrypted_failure") {
     const encrypted = kind === "convert_encrypted_failure";
     return {
@@ -1466,6 +1473,18 @@ function previewTaskSpec(kind: PreviewTaskKind): JobSpec {
 }
 
 function previewTaskResult(kind: PreviewTaskKind): Record<string, unknown> {
+  if (kind === "duplicate_scan" || kind === "duplicate_scan_clean") {
+    const groups = kind === "duplicate_scan_clean" ? [] : Array.from({ length: 25 }, (_, index) => {
+      const paths = Array.from({ length: index === 0 ? 60 : 2 }, (_, copy) =>
+        `${sampleRoot}/Archive review/Project ${index + 1}/Copy ${copy + 1}/季度归档与设计资料/Final presentation with a descriptive file name.pdf`);
+      return { hash: (index + 1).toString(16).padStart(64, "0"), hash_algorithm: "blake3", size: 2048,
+        count: paths.length, reclaimable_bytes: (paths.length - 1) * 2048, paths };
+    });
+    const count = groups.reduce((total, group) => total + group.paths.length, 0);
+    return { operation: "duplicates", hash_algorithm: "blake3", input_count: 1, min_size: 1024,
+      files_scanned: count + 4, bytes_scanned: (count + 4) * 2048, candidate_files: count, hashed_bytes: count * 2048,
+      duplicate_groups: groups.length, duplicate_files: count, reclaimable_bytes: (count - groups.length) * 2048, groups };
+  }
   if (isUpdatePreview(kind)) return { operation: "update" };
   if (kind === "recovery_protect") {
     const recovery = `${sampleOutputRoot}/product-backup.zip.par2`;
@@ -1652,6 +1671,7 @@ function previewTaskResult(kind: PreviewTaskKind): Record<string, unknown> {
 }
 
 function previewRevealPath(kind: PreviewTaskKind): string | null {
+  if (kind === "duplicate_scan" || kind === "duplicate_scan_clean" || kind === "duplicate_scan_failure") return null;
   if (isUpdatePreview(kind)) return `${sampleRoot}/product-backup.zip`;
   if (kind === "recovery_protect") return `${sampleOutputRoot}/product-backup.zip.par2`;
   if (isRecoveryPreview(kind)) return null;
@@ -1666,6 +1686,10 @@ function previewRevealPath(kind: PreviewTaskKind): string | null {
 }
 
 function previewProgress(kind: PreviewTaskKind, state: Extract<JobStateName, "done" | "running">) {
+  if (kind === "duplicate_scan" || kind === "duplicate_scan_clean" || kind === "duplicate_scan_failure") {
+    const bytes = state === "done" ? (kind === "duplicate_scan_clean" ? 4 : 112) * 2048 : 0;
+    return { done: bytes, total: bytes, current: "", currentDone: 0, currentTotal: 0, speed: 0 };
+  }
   if (kind === "archive_open") {
     return {
       done: 0,
@@ -1831,6 +1855,9 @@ function previewTaskOffset(kind: PreviewTaskKind): number {
   if (kind === "extract_failure") return 24;
   if (kind === "convert_failure") return 25;
   if (kind === "convert_encrypted_failure") return 26;
+  if (kind === "duplicate_scan") return 27;
+  if (kind === "duplicate_scan_clean") return 28;
+  if (kind === "duplicate_scan_failure") return 29;
   if (kind === "extract_unknown_current") return 4;
   if (kind === "test") return 5;
   if (kind === "checksum") return 6;
@@ -1846,7 +1873,7 @@ function installTaskPreview(kind: PreviewTaskKind, state: Extract<JobStateName, 
   const spec = previewTaskSpec(kind);
   const progress = previewProgress(kind, state);
   const previewState = kind === "compress_failure" || kind === "compress_sfx_failure" || kind === "extract_failure"
-    || kind === "convert_failure" || kind === "convert_encrypted_failure" || isRecoveryCleanupPreview(kind)
+    || kind === "convert_failure" || kind === "convert_encrypted_failure" || kind === "duplicate_scan_failure" || isRecoveryCleanupPreview(kind)
     ? "failed"
     : state;
   const target = isRecoveryCleanupPreview(kind)
@@ -1860,6 +1887,8 @@ function installTaskPreview(kind: PreviewTaskKind, state: Extract<JobStateName, 
     `${sampleOutputRoot}/.squallz-par2-repair-8f3d4a9e1c7b2d5f.json`;
   const error: ErrorDto = kind === "compress_failure"
     ? { key: "error.io", params: { detail: "Could not write the archive output" }, detail: "Could not write the archive output" }
+    : kind === "duplicate_scan_failure"
+    ? { key: "error.io", params: { detail: "Could not read the scan folder" }, detail: "Could not read the scan folder" }
     : kind === "convert_failure" || kind === "convert_encrypted_failure"
     ? { key: "error.io", params: { detail: "Could not write the converted archive" }, detail: "Could not write the converted archive" }
     : kind === "extract_failure"
@@ -1929,9 +1958,13 @@ function installTaskPreview(kind: PreviewTaskKind, state: Extract<JobStateName, 
   return id;
 }
 
-export function installCompletedTaskPreview(kind: PreviewTaskKind, includeChecksumHistory = false): number | null {
+export function installCompletedTaskPreview(kind: PreviewTaskKind, includeReportHistory = false): number | null {
   const id = installTaskPreview(kind, "done");
-  if (!import.meta.env.DEV || !includeChecksumHistory || id === null) return id;
+  if (!import.meta.env.DEV || !includeReportHistory || id === null) return id;
+  if (kind === "duplicate_scan") {
+    installTaskPreview("duplicate_scan_clean", "done");
+    return id;
+  }
   const previous = find(id);
   if (!previous || (kind !== "checksum" && kind !== "checksum_check") || find(id + 2000)) return id;
   const source = `${sampleRoot}/current-release`;
