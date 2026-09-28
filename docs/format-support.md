@@ -152,6 +152,19 @@ and [Info-ZIP extra-field specification](https://libzip.org/specifications/extra
 
 ## Extracted metadata
 
+The built-in 7z reader recognizes symbolic links stored with the Unix attribute
+extension by 7-Zip/p7zip. Link targets are decoded with CRC verification and a
+65,535-byte limit; malformed, empty or non-UTF-8 targets are rejected. Listing
+reads only blocks containing accessible link targets, draining preceding solid
+entries with a fixed buffer. Encrypted targets remain unavailable until a
+password is supplied, while the link type and encryption status remain visible.
+Extraction uses the shared link policies, conflict handling and atomic
+publication. A skipped link needs no password unless another selected entry
+requires its encrypted block. The streaming Follow policy can only copy a
+regular target already extracted into the destination; forward references,
+unselected targets and unresolved links are reported as skipped. Windows
+reparse-point payloads and 7z link creation remain unsupported.
+
 The shared extraction sink restores known modification times for regular files
 and explicit directory entries. Precision and representable dates depend on the
 archive format and destination filesystem. Missing timestamps are left to the

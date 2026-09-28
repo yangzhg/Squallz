@@ -194,6 +194,19 @@ const nestedPreviewItems: EntryDto[] = [
   },
 ];
 
+const linkPreviewItems: EntryDto[] = ([
+  { path: "report-link", display: "report-link", entry_type: "symlink", encrypted: false },
+  { path: "report-copy", display: "report-copy", entry_type: "hardlink", encrypted: false },
+  { path: "private-link", display: "private-link", entry_type: "symlink", encrypted: true },
+] satisfies Pick<EntryDto, "path" | "display" | "entry_type" | "encrypted">[]).map((entry) => ({
+  ...entry,
+  size: 15,
+  compressed: 15,
+  modified: 1781199120,
+  crc: null,
+  encoding: "utf-8",
+}));
+
 export function readRuntimePreviews(params: URLSearchParams, pageSize: number): RuntimePreviews {
   if (!import.meta.env.DEV) return emptyRuntimePreviews;
 
@@ -417,13 +430,19 @@ function readArchivePreview(params: URLSearchParams, pageSize: number): ArchiveP
 
   const format = (params.get("previewFormat") ?? "zip").toLowerCase();
   const name = `product-backup.${format}`;
+  const entries = params.get("previewLinks") === "1"
+    ? [...archivePreviewEntries, ...linkPreviewItems]
+    : archivePreviewEntries;
+  const nestedItems = params.get("previewLinks") === "1"
+    ? [...nestedPreviewItems, ...linkPreviewItems]
+    : nestedPreviewItems;
   const selected = listParam(params, "previewSelected", ",");
   const largeEntryCount = numericParam(params, "previewLargeEntries", 0);
   const pages = largeEntryCount > 0 ? largePreviewPages(largeEntryCount, pageSize) : null;
-  const rows = pages?.get(0) ?? archivePreviewEntries.filter(
+  const rows = pages?.get(0) ?? entries.filter(
     (entry) => !entry.path.replace(/\/+$/g, "").includes("/"),
   );
-  const previewRows = pages ? undefined : archivePreviewEntries;
+  const previewRows = pages ? undefined : entries;
   const total = largeEntryCount > 0 ? largeEntryCount : rows.length;
 
   return {
@@ -437,7 +456,7 @@ function readArchivePreview(params: URLSearchParams, pageSize: number): ArchiveP
       structure: params.get("previewRecoveredZip") === "1"
         ? "zip_local_headers_recovered"
         : "complete",
-      entry_count: largeEntryCount > 0 ? largeEntryCount : archivePreviewEntries.length,
+      entry_count: largeEntryCount > 0 ? largeEntryCount : entries.length,
       volumes: null,
       non_utf8_name_count: 0,
       garbled_count: 0,
@@ -454,9 +473,9 @@ function readArchivePreview(params: URLSearchParams, pageSize: number): ArchiveP
           outer_path: `${sampleArchiveRoot}/${name}`,
           entry_path: "locked-secrets.7z",
           format: "7z",
-          entry_count: nestedPreviewItems.length,
+          entry_count: nestedItems.length,
           truncated: false,
-          items: nestedPreviewItems,
+          items: nestedItems,
         }
       : null,
   };

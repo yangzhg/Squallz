@@ -13,30 +13,131 @@ use sevenz_rust2::ArchiveEntry;
 use squallz_format_api::{
     empty_extract_report, ArchiveReader, BoundedProblemLog, ControlToken, EntryMeta, EntryPath,
     EntryType, ExtractOptions, ExtractReport, ExtractSink, FormatError, OpenOptions, ProgressSink,
-    ReadSeek, TestSummary, TEST_PROBLEM_PREVIEW_LIMIT,
+    ReadSeek, SymlinkPolicy, TestSummary, TEST_PROBLEM_PREVIEW_LIMIT,
 };
 
+use super::streams::EntryStreams;
 use super::{map_7z_error, FILE_ATTRIBUTE_UNIX_EXTENSION};
 
 /// Chunk size when draining entry data (test pass).
 const READ_CHUNK: usize = 64 * 1024;
+const MAX_SYMLINK_TARGET_BYTES: usize = u16::MAX as usize;
 
 /// Read handle over a 7z archive.
 pub(super) struct SevenZArchiveReader {
-    inner: sevenz_rust2::ArchiveReader<Box<dyn ReadSeek>>,
+    inner: EntryStreams,
     password_supplied: bool,
+    control: ControlToken,
 }
 
 impl SevenZArchiveReader {
     pub(super) fn open(src: Box<dyn ReadSeek>, opts: &OpenOptions) -> Result<Self, FormatError> {
+        Self::open_controlled(src, opts, &ControlToken::default())
+    }
+
+    pub(super) fn open_controlled(
+        src: Box<dyn ReadSeek>,
+        opts: &OpenOptions,
+        ctl: &ControlToken,
+    ) -> Result<Self, FormatError> {
         let password = open_password(opts);
         // Opening a header-encrypted archive without a password surfaces
         // PasswordRequired here.
-        let inner = sevenz_rust2::ArchiveReader::new(src, password).map_err(map_7z_error)?;
+        let inner = EntryStreams::new(src, password).map_err(map_7z_error)?;
+        ctl.checkpoint()?;
         Ok(Self {
             inner,
             password_supplied: opts.password.is_some(),
+            control: ctl.clone(),
         })
+    }
+
+    fn listed_entries(&mut self) -> Result<Vec<EntryMeta>, FormatError> {
+        self.control.checkpoint()?;
+        let archive = self.inner.archive();
+        let mut metas = archive
+            .files
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| {
+                self.control.checkpoint()?;
+                if is_symlink(entry) && entry.size() == 0 {
+                    return Err(FormatError::CorruptArchive(
+                        "7z symlink target is empty".into(),
+                    ));
+                }
+                entry_is_encrypted(archive, index).map(|encrypted| meta_of(entry, encrypted))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let wanted: HashSet<_> = metas
+            .iter()
+            .filter(|meta| {
+                matches!(meta.entry_type, EntryType::Symlink { .. })
+                    && (!meta.encrypted || self.password_supplied)
+            })
+            .map(|meta| meta.path.raw.clone())
+            .collect();
+        if wanted.is_empty() {
+            return Ok(metas);
+        }
+        let plans = build_entry_read_plans(archive, Some(&wanted))?;
+        let blocks: HashSet<_> = archive
+            .files
+            .iter()
+            .filter(|entry| is_symlink(entry) && wanted.contains(entry.name().as_bytes()))
+            .filter_map(|entry| {
+                plans
+                    .get(&entry_identity(entry))
+                    .and_then(|plan| plan.block_index)
+            })
+            .collect();
+        let mut failure = None;
+        let ctl = &self.control;
+        let password_supplied = self.password_supplied;
+        let result = self
+            .inner
+            .for_each_in_blocks(Some(&blocks), |entry, reader| {
+                if failure.is_some() {
+                    return Ok(false);
+                }
+                let Some(plan) = plans.get(&entry_identity(entry)) else {
+                    failure = Some(FormatError::CorruptArchive(
+                        "7z entry is missing from its stream map".into(),
+                    ));
+                    return Ok(false);
+                };
+                let result = (|| {
+                    ctl.checkpoint()?;
+                    if is_symlink(entry) && wanted.contains(entry.name().as_bytes()) {
+                        let target = read_symlink_target(reader, ctl)?;
+                        let meta = metas.get_mut(plan.file_index).ok_or_else(|| {
+                            FormatError::CorruptArchive(
+                                "7z entry is missing from its file list".into(),
+                            )
+                        })?;
+                        meta.entry_type = EntryType::Symlink { target };
+                    } else if plan.selected_later_in_block {
+                        drain_entry(reader, ctl)?;
+                    }
+                    Ok(plan.selected_later_in_block)
+                })();
+                match result {
+                    Ok(next) => Ok(next),
+                    Err(error) => {
+                        failure = Some(classify_entry_read_error(
+                            error,
+                            plan.encrypted,
+                            password_supplied,
+                        ));
+                        Ok(false)
+                    }
+                }
+            });
+        if let Some(error) = failure {
+            return Err(error);
+        }
+        result.map_err(map_7z_error)?;
+        Ok(metas)
     }
 
     fn test_with_problem_recorder(
@@ -123,19 +224,28 @@ fn open_password(opts: &OpenOptions) -> sevenz_rust2::Password {
     }
 }
 
-/// Builds the [`EntryMeta`] of one 7z entry (names are UTF-8 strings in the
-/// 7z model, decoded from UTF-16 by the backend).
+fn unix_attributes(entry: &ArchiveEntry) -> Option<u32> {
+    let attributes = entry.windows_attributes();
+    (entry.has_windows_attributes && attributes & FILE_ATTRIBUTE_UNIX_EXTENSION != 0)
+        .then_some(attributes >> 16)
+}
+
+fn is_symlink(entry: &ArchiveEntry) -> bool {
+    unix_attributes(entry).is_some_and(|mode| mode & 0o170000 == 0o120000)
+}
+
+/// Builds metadata from the header. Link targets are decoded separately
+/// from their bounded entry stream, never interpreted as ordinary files.
 fn meta_of(entry: &ArchiveEntry, encrypted: bool) -> EntryMeta {
-    let entry_type = if entry.is_directory() {
+    let entry_type = if is_symlink(entry) {
+        EntryType::Symlink { target: Vec::new() }
+    } else if entry.is_directory() {
         EntryType::Dir
     } else {
         EntryType::File
     };
     // p7zip stores Unix permissions in the high attribute bits.
-    let attributes = entry.windows_attributes();
-    let unix_mode = (entry.has_windows_attributes
-        && attributes & FILE_ATTRIBUTE_UNIX_EXTENSION != 0)
-        .then_some((attributes >> 16) & 0o7777);
+    let unix_mode = unix_attributes(entry).map(|mode| mode & 0o7777);
     EntryMeta {
         path: EntryPath::from_utf8(entry.name()),
         entry_type,
@@ -148,6 +258,35 @@ fn meta_of(entry: &ArchiveEntry, encrypted: bool) -> EntryMeta {
         crc32: entry.has_crc.then_some(entry.crc as u32),
         encrypted: encrypted && entry.has_stream(),
     }
+}
+
+#[cfg(test)]
+mod tests;
+
+fn read_symlink_target(reader: &mut dyn Read, ctl: &ControlToken) -> Result<Vec<u8>, FormatError> {
+    ctl.checkpoint()?;
+    let mut target = Vec::new();
+    let mut chunk = [0; 4096];
+    loop {
+        ctl.checkpoint()?;
+        let remaining = (MAX_SYMLINK_TARGET_BYTES + 1 - target.len()).min(chunk.len());
+        let read = reader.read(&mut chunk[..remaining])?;
+        if read == 0 {
+            break;
+        }
+        target.extend_from_slice(&chunk[..read]);
+        if target.len() > MAX_SYMLINK_TARGET_BYTES {
+            return Err(FormatError::ResourceLimitExceeded(format!(
+                "7z symlink target exceeds the {MAX_SYMLINK_TARGET_BYTES}-byte limit"
+            )));
+        }
+    }
+    if target.is_empty() || target.contains(&0) || std::str::from_utf8(&target).is_err() {
+        return Err(FormatError::CorruptArchive(
+            "7z symlink target is not a nonempty UTF-8 path".into(),
+        ));
+    }
+    Ok(target)
 }
 
 fn drain_entry(reader: &mut dyn Read, ctl: &ControlToken) -> Result<(), FormatError> {
@@ -293,6 +432,33 @@ fn best_effort_recoverable(error: &FormatError) -> bool {
     )
 }
 
+fn skip_entry_stream(
+    reader: &mut dyn Read,
+    sink: &mut ExtractSink<'_>,
+    remaining: &mut RemainingSelectedByBlock,
+    plan: EntryReadPlan,
+    best_effort: bool,
+    password_supplied: bool,
+    ctl: &ControlToken,
+) -> Result<bool, FormatError> {
+    ctl.checkpoint()?;
+    if !plan.selected_later_in_block {
+        return Ok(plan.block_index.is_none());
+    }
+    match drain_entry(reader, ctl)
+        .map_err(|error| classify_entry_read_error(error, plan.encrypted, password_supplied))
+    {
+        Ok(()) => Ok(true),
+        Err(error) if best_effort && best_effort_recoverable(&error) => {
+            if let Some(block) = plan.block_index {
+                record_unprocessed_block_entries(sink, remaining, block, ctl)?;
+            }
+            Ok(false)
+        }
+        Err(error) => Err(error),
+    }
+}
+
 struct ReadErrorTracker<'r> {
     inner: &'r mut dyn Read,
     failed: bool,
@@ -365,17 +531,17 @@ fn write_entry_best_effort(
 
 impl ArchiveReader for SevenZArchiveReader {
     fn entries(&mut self) -> Box<dyn Iterator<Item = Result<EntryMeta, FormatError>> + '_> {
-        let archive = self.inner.archive();
-        Box::new(
-            archive
-                .files
-                .iter()
-                .enumerate()
-                .map(move |(file_index, entry)| {
-                    entry_is_encrypted(archive, file_index)
-                        .map(|encrypted| meta_of(entry, encrypted))
-                }),
-        )
+        if !self.inner.archive().files.iter().any(is_symlink) {
+            let archive = self.inner.archive();
+            return Box::new(archive.files.iter().enumerate().map(|(index, entry)| {
+                self.control.checkpoint()?;
+                entry_is_encrypted(archive, index).map(|encrypted| meta_of(entry, encrypted))
+            }));
+        }
+        match self.listed_entries() {
+            Ok(entries) => Box::new(entries.into_iter().map(Ok)),
+            Err(error) => Box::new(std::iter::once(Err(error))),
+        }
     }
 
     fn read_entry(&mut self, path: &EntryPath) -> Result<Box<dyn Read + '_>, FormatError> {
@@ -433,6 +599,7 @@ impl ArchiveReader for SevenZArchiveReader {
             .iter()
             .filter(|e| {
                 !e.is_directory()
+                    && !is_symlink(e)
                     && wanted
                         .as_ref()
                         .is_none_or(|w| w.contains(e.name().as_bytes()))
@@ -440,144 +607,173 @@ impl ArchiveReader for SevenZArchiveReader {
             .map(|e| e.size())
             .sum();
         let entry_plans = build_entry_read_plans(self.inner.archive(), wanted.as_ref())?;
+        let data_blocks = self
+            .inner
+            .archive()
+            .files
+            .iter()
+            .filter(|entry| {
+                wanted
+                    .as_ref()
+                    .is_none_or(|paths| paths.contains(entry.name().as_bytes()))
+                    && !(is_symlink(entry) && opts.symlinks == SymlinkPolicy::Skip)
+            })
+            .filter_map(|entry| {
+                entry_plans
+                    .get(&entry_identity(entry))
+                    .and_then(|plan| plan.block_index)
+            })
+            .collect();
         let mut remaining_selected =
             build_remaining_selected_by_block(self.inner.archive(), &entry_plans, wanted.as_ref())?;
         let mut sink = ExtractSink::new(dest, opts, total, progress)?;
         let mut failure: Option<FormatError> = None;
-        let backend_result = self.inner.for_each_entries(|entry, reader| {
-            // The backend may continue with a later non-solid block after
-            // a callback returns false. Keep later callbacks side-effect
-            // free once the first Squallz error has been recorded.
-            if failure.is_some() {
-                return Ok(false);
-            }
-            let Some(plan) = entry_plans.get(&entry_identity(entry)).copied() else {
-                failure = Some(FormatError::CorruptArchive(
-                    "7z entry is missing from its stream map".into(),
-                ));
-                return Ok(false);
-            };
-            let meta = meta_of(entry, plan.encrypted);
-            let selected = wanted
-                .as_ref()
-                .is_none_or(|paths| paths.contains(meta.path.raw.as_slice()));
-            if selected {
-                if let Some(block_index) = plan.block_index {
-                    if let Some(entries) = remaining_selected.get_mut(&block_index) {
-                        entries.remove(&plan.file_index);
+        let backend_result =
+            self.inner
+                .for_each_entries_with_data_blocks(&data_blocks, |entry, reader| {
+                    // The backend may continue with a later non-solid block after
+                    // a callback returns false. Keep later callbacks side-effect
+                    // free once the first Squallz error has been recorded.
+                    if failure.is_some() {
+                        return Ok(false);
                     }
-                }
-            }
-            let result = (|| -> Result<bool, FormatError> {
-                if !selected {
-                    if plan.block_index.is_none() {
-                        Ok(true)
-                    } else if plan.selected_later_in_block {
-                        match drain_entry(reader, ctl).map_err(|error| {
-                            classify_entry_read_error(error, meta.encrypted, password_supplied)
-                        }) {
-                            Ok(()) => Ok(true),
-                            Err(error) if opts.best_effort && best_effort_recoverable(&error) => {
-                                if let Some(block_index) = plan.block_index {
-                                    record_unprocessed_block_entries(
-                                        &mut sink,
-                                        &mut remaining_selected,
-                                        block_index,
-                                        ctl,
-                                    )?;
-                                }
-                                Ok(false)
+                    let Some(plan) = entry_plans.get(&entry_identity(entry)).copied() else {
+                        failure = Some(FormatError::CorruptArchive(
+                            "7z entry is missing from its stream map".into(),
+                        ));
+                        return Ok(false);
+                    };
+                    let mut meta = meta_of(entry, plan.encrypted);
+                    let selected = wanted
+                        .as_ref()
+                        .is_none_or(|paths| paths.contains(meta.path.raw.as_slice()));
+                    if selected {
+                        if let Some(block_index) = plan.block_index {
+                            if let Some(entries) = remaining_selected.get_mut(&block_index) {
+                                entries.remove(&plan.file_index);
                             }
-                            Err(error) => Err(error),
                         }
-                    } else {
-                        // No later selected entry depends on this block. The
-                        // backend can skip it and continue at the next block.
-                        Ok(false)
                     }
-                } else {
-                    match meta.entry_type {
-                        EntryType::File => {
-                            sink.file_target(&meta, progress, ctl).and_then(|target| {
-                                match target {
-                                    Some(out_path) if opts.best_effort => {
-                                        match write_entry_best_effort(
-                                            &mut sink,
-                                            &meta,
-                                            &out_path,
+                    let result = (|| -> Result<bool, FormatError> {
+                        if !selected {
+                            skip_entry_stream(
+                                reader,
+                                &mut sink,
+                                &mut remaining_selected,
+                                plan,
+                                opts.best_effort,
+                                password_supplied,
+                                ctl,
+                            )
+                        } else {
+                            match meta.entry_type {
+                                EntryType::Symlink { .. } => {
+                                    if opts.symlinks == SymlinkPolicy::Skip {
+                                        sink.write_meta_entry(&meta, progress, ctl)?;
+                                        return skip_entry_stream(
                                             reader,
-                                            progress,
-                                            ctl,
+                                            &mut sink,
+                                            &mut remaining_selected,
+                                            plan,
+                                            opts.best_effort,
                                             password_supplied,
-                                        )? {
-                                            true => Ok(true),
-                                            false => {
-                                                if let Some(block_index) = plan.block_index {
-                                                    record_unprocessed_block_entries(
-                                                        &mut sink,
-                                                        &mut remaining_selected,
-                                                        block_index,
-                                                        ctl,
-                                                    )?;
-                                                }
-                                                Ok(false)
-                                            }
-                                        }
+                                            ctl,
+                                        );
                                     }
-                                    Some(out_path) => write_entry(
-                                        &mut sink,
-                                        &meta,
-                                        &out_path,
-                                        reader,
-                                        progress,
-                                        ctl,
-                                        password_supplied,
-                                    )
-                                    .map(|()| true),
-                                    // A skipped solid entry is decoded only when a
-                                    // later selected entry shares its block.
-                                    None if plan.selected_later_in_block => {
-                                        match drain_entry(reader, ctl).map_err(|error| {
-                                            classify_entry_read_error(
-                                                error,
-                                                meta.encrypted,
+                                    match read_symlink_target(reader, ctl).map_err(|error| {
+                                        classify_entry_read_error(
+                                            error,
+                                            meta.encrypted,
+                                            password_supplied,
+                                        )
+                                    }) {
+                                        Ok(target) => {
+                                            meta.entry_type = EntryType::Symlink { target }
+                                        }
+                                        Err(error)
+                                            if opts.best_effort
+                                                && best_effort_recoverable(&error) =>
+                                        {
+                                            sink.record_best_effort_failure(&meta, &error, ctl)?;
+                                            if let Some(block) = plan.block_index {
+                                                record_unprocessed_block_entries(
+                                                    &mut sink,
+                                                    &mut remaining_selected,
+                                                    block,
+                                                    ctl,
+                                                )?;
+                                            }
+                                            return Ok(false);
+                                        }
+                                        Err(error) => return Err(error),
+                                    }
+                                    sink.write_meta_entry(&meta, progress, ctl)?;
+                                    Ok(true)
+                                }
+                                EntryType::File => {
+                                    sink.file_target(&meta, progress, ctl).and_then(|target| {
+                                        match target {
+                                            Some(out_path) if opts.best_effort => {
+                                                match write_entry_best_effort(
+                                                    &mut sink,
+                                                    &meta,
+                                                    &out_path,
+                                                    reader,
+                                                    progress,
+                                                    ctl,
+                                                    password_supplied,
+                                                )? {
+                                                    true => Ok(true),
+                                                    false => {
+                                                        if let Some(block_index) = plan.block_index
+                                                        {
+                                                            record_unprocessed_block_entries(
+                                                                &mut sink,
+                                                                &mut remaining_selected,
+                                                                block_index,
+                                                                ctl,
+                                                            )?;
+                                                        }
+                                                        Ok(false)
+                                                    }
+                                                }
+                                            }
+                                            Some(out_path) => write_entry(
+                                                &mut sink,
+                                                &meta,
+                                                &out_path,
+                                                reader,
+                                                progress,
+                                                ctl,
                                                 password_supplied,
                                             )
-                                        }) {
-                                            Ok(()) => Ok(true),
-                                            Err(error)
-                                                if opts.best_effort
-                                                    && best_effort_recoverable(&error) =>
-                                            {
-                                                if let Some(block_index) = plan.block_index {
-                                                    record_unprocessed_block_entries(
-                                                        &mut sink,
-                                                        &mut remaining_selected,
-                                                        block_index,
-                                                        ctl,
-                                                    )?;
-                                                }
-                                                Ok(false)
-                                            }
-                                            Err(error) => Err(error),
+                                            .map(|()| true),
+                                            // A skipped solid entry is decoded only when a
+                                            // later selected entry shares its block.
+                                            None => skip_entry_stream(
+                                                reader,
+                                                &mut sink,
+                                                &mut remaining_selected,
+                                                plan,
+                                                opts.best_effort,
+                                                password_supplied,
+                                                ctl,
+                                            ),
                                         }
-                                    }
-                                    None => Ok(plan.block_index.is_none()),
+                                    })
                                 }
-                            })
+                                _ => sink.write_meta_entry(&meta, progress, ctl).map(|()| true),
+                            }
                         }
-                        _ => sink.write_meta_entry(&meta, progress, ctl).map(|()| true),
+                    })();
+                    match result {
+                        Ok(continue_block) => Ok(continue_block),
+                        Err(e) => {
+                            failure = Some(e);
+                            Ok(false)
+                        }
                     }
-                }
-            })();
-            match result {
-                Ok(continue_block) => Ok(continue_block),
-                Err(e) => {
-                    failure = Some(e);
-                    Ok(false)
-                }
-            }
-        });
+                });
         // Preserve the first shared-safety error even if the backend also
         // fails while unwinding or preparing a later block.
         if let Some(e) = failure {

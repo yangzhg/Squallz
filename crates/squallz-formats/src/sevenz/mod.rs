@@ -3,11 +3,12 @@
 //! and optional AES-256 content + header (file name) encryption.
 
 mod reader;
+mod streams;
 mod writer;
 
 use squallz_format_api::{
-    ArchiveFormat, ArchiveReader, ArchiveWriter, CreateOptions, FormatCapabilities, FormatError,
-    OpenOptions, ReadSeek, WriteSeek,
+    ArchiveFormat, ArchiveReader, ArchiveWriter, ControlToken, CreateOptions, FormatCapabilities,
+    FormatError, OpenOptions, PhysicalFileIdentity, ReadSeek, WriteSeek,
 };
 
 /// 7z signature: `7z¼¯'\x1c`.
@@ -52,6 +53,29 @@ impl ArchiveFormat for SevenZFormat {
         opts: &OpenOptions,
     ) -> Result<Box<dyn ArchiveReader>, FormatError> {
         Ok(Box::new(reader::SevenZArchiveReader::open(src, opts)?))
+    }
+
+    fn open_with_control(
+        &self,
+        src: Box<dyn ReadSeek>,
+        opts: &OpenOptions,
+        ctl: &ControlToken,
+    ) -> Result<Box<dyn ArchiveReader>, FormatError> {
+        ctl.checkpoint()?;
+        Ok(Box::new(reader::SevenZArchiveReader::open_controlled(
+            src, opts, ctl,
+        )?))
+    }
+
+    fn open_file_with_control(
+        &self,
+        _source_path: &std::path::Path,
+        _source_identity: Option<PhysicalFileIdentity>,
+        src: Box<dyn ReadSeek>,
+        opts: &OpenOptions,
+        ctl: &ControlToken,
+    ) -> Result<Box<dyn ArchiveReader>, FormatError> {
+        self.open_with_control(src, opts, ctl)
     }
 
     fn create(

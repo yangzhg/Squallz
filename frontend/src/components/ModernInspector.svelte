@@ -215,7 +215,12 @@
       <div class="nested-preview-list">
         {#each view.preview.nested.rows as item}
           <div>
-            <span>{item.entry_type === "dir" ? "DIR" : "FILE"}</span>
+            {#if item.entry_type === "symlink" || item.entry_type === "hardlink"}
+              {@const label = (item.entry_type === "symlink" ? tr("gui.attr.symlink", "Symbolic link") : tr("gui.attr.hardlink", "Hard link")) + (item.encrypted ? ` · ${tr("gui.attr.encrypted", "Encrypted")}` : "")}
+              <span role="img" aria-label={label} title={label}><Icon name={item.encrypted ? "lock" : "link"} size={14} /></span>
+            {:else}
+              <span>{item.entry_type === "dir" ? "DIR" : "FILE"}</span>
+            {/if}
             <strong>{item.display}</strong>
             <small>{formatBytes(item.size)}</small>
           </div>

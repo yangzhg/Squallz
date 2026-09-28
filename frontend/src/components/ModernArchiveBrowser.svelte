@@ -473,12 +473,14 @@
               class:type-folder={entry.type === "folder"}
               class:type-locked={entry.type === "locked"}
               class:type-warning={entry.type === "warning"}
-              role={entry.type === "locked" ? "img" : undefined}
-              aria-label={entry.type === "locked" ? tr("gui.list.encrypted_tip", "Entry is encrypted") : undefined}
-              title={entry.type === "locked" ? tr("gui.list.encrypted_tip", "Entry is encrypted") : undefined}
+              role="img"
+              aria-label={entry.attr}
+              title={entry.attr}
             >
               {#if entry.type === "locked"}
                 <Icon name="lock" size={14} />
+              {:else if entry.source?.entry_type === "symlink" || entry.source?.entry_type === "hardlink"}
+                <Icon name="link" size={14} />
               {:else}
                 {entry.type === "folder"
                   ? "DIR"
