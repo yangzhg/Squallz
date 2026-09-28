@@ -1,4 +1,4 @@
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 //! squallz-format-api: unified abstractions for the format layer.
 //!
 //! Design principles:
@@ -20,6 +20,7 @@
 mod entry;
 mod error;
 mod extract;
+mod file_ops;
 mod links;
 mod options;
 mod progress;
@@ -32,6 +33,7 @@ pub use error::FormatError;
 pub use extract::{
     empty_extract_report, extract_entries, extract_entries_with_report, ExtractReport, ExtractSink,
 };
+pub use file_ops::{atomic_replace_file, move_path_no_replace};
 pub use options::{
     BoundedProblemLog, CompressionLevel, ConflictDecision, ConflictResolver, CreateOptions,
     EntrySelection, ExtractOptions, ExtractProblemReporter, FormatCapabilities, FormatCreateBudget,

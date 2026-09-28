@@ -119,6 +119,14 @@ fn create_pending_value<T>(
 struct PendingOutput {
     path: Option<PathBuf>,
     file: Option<fs::File>,
+    kind: PendingOutputKind,
+}
+
+enum PendingOutputKind {
+    File,
+    SymbolicLink,
+    #[cfg(windows)]
+    DirectorySymbolicLink,
 }
 
 /// Empty destination placeholder used to keep a no-replace decision valid
@@ -163,6 +171,7 @@ impl PendingOutput {
         Ok(Self {
             path: Some(path),
             file: Some(file),
+            kind: PendingOutputKind::File,
         })
     }
 
@@ -171,6 +180,7 @@ impl PendingOutput {
         Ok(Self {
             path: Some(path),
             file: None,
+            kind: PendingOutputKind::File,
         })
     }
 
@@ -185,6 +195,7 @@ impl PendingOutput {
         Ok(Some(Self {
             path: Some(path),
             file: None,
+            kind: PendingOutputKind::SymbolicLink,
         }))
     }
 
@@ -205,6 +216,11 @@ impl PendingOutput {
             Ok((path, ())) => Ok(Some(Self {
                 path: Some(path),
                 file: None,
+                kind: if target_is_dir {
+                    PendingOutputKind::DirectorySymbolicLink
+                } else {
+                    PendingOutputKind::SymbolicLink
+                },
             })),
             Err(FormatError::Io(error)) if is_windows_symlink_privilege_error(&error) => Ok(None),
             Err(error) => Err(error),
@@ -249,6 +265,10 @@ impl PendingOutput {
             .ok_or_else(|| FormatError::Other("extraction staging path is unavailable".into()))?;
         if replace_existing {
             rename(staged, target)?;
+        } else if !matches!(self.kind, PendingOutputKind::File) {
+            // Hard-link APIs may follow a source symlink; move the staged
+            // link itself without replacing a concurrently created target.
+            crate::move_path_no_replace(staged, target)?;
         } else {
             match hard_link(staged, target) {
                 Ok(()) => fs::remove_file(staged)?,
@@ -275,7 +295,15 @@ impl Drop for PendingOutput {
     fn drop(&mut self) {
         self.file.take();
         if let Some(path) = self.path.take() {
-            let _ = fs::remove_file(path);
+            match self.kind {
+                #[cfg(windows)]
+                PendingOutputKind::DirectorySymbolicLink => {
+                    let _ = fs::remove_dir(path);
+                }
+                _ => {
+                    let _ = fs::remove_file(path);
+                }
+            }
         }
     }
 }
@@ -2463,6 +2491,73 @@ mod tests {
         assert_eq!(fs::read(&target).unwrap(), b"old");
         assert!(extract_temp_paths(&dir).is_empty());
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn symlink_publication_preserves_links_when_hard_links_follow_the_source() {
+        let dir = temp_dir("publish-symlink-as-link");
+        fs::write(dir.join("source.txt"), b"source contents").unwrap();
+        fs::create_dir(dir.join("source-dir")).unwrap();
+        fs::write(dir.join("source-dir/keep.txt"), b"keep directory contents").unwrap();
+        for (index, (source, directory)) in [
+            ("source.txt", false),
+            ("source-dir", true),
+            ("missing.txt", false),
+            ("missing-dir", true),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let target = dir.join(format!("link-{index}"));
+            let pending = PendingOutput::symlink(Path::new(source), &target, directory)
+                .unwrap()
+                .expect("symlink creation permission is required for this test");
+            pending
+                .commit_using(
+                    &target,
+                    false,
+                    // CreateHardLink on Windows follows the source symlink.
+                    |from, to| fs::hard_link(from.canonicalize()?, to),
+                    |from, to| fs::rename(from, to),
+                )
+                .unwrap();
+            assert!(fs::symlink_metadata(&target)
+                .unwrap()
+                .file_type()
+                .is_symlink());
+            assert_eq!(fs::read_link(&target).unwrap(), Path::new(source));
+        }
+        assert_eq!(
+            fs::read(dir.join("source.txt")).unwrap(),
+            b"source contents"
+        );
+        assert_eq!(
+            fs::read(dir.join("source-dir/keep.txt")).unwrap(),
+            b"keep directory contents"
+        );
+        assert!(extract_temp_paths(&dir).is_empty());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn symlink_publication_preserves_a_late_conflict_and_cleans_staging() {
+        let dir = temp_dir("publish-symlink-conflict");
+        for directory in [false, true] {
+            let target = dir.join(format!("link-{directory}"));
+            let pending = PendingOutput::symlink(Path::new("missing"), &target, directory)
+                .unwrap()
+                .expect("symlink creation permission is required for this test");
+            fs::write(&target, b"competing output").unwrap();
+            let error = pending.commit(&target, false).unwrap_err();
+            assert!(
+                matches!(error, FormatError::Io(ref error) if error.kind() == std::io::ErrorKind::AlreadyExists)
+            );
+            assert_eq!(fs::read(&target).unwrap(), b"competing output");
+            assert!(extract_temp_paths(&dir).is_empty());
+        }
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[cfg(unix)]

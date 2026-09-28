@@ -177,6 +177,14 @@ their own known timestamp, falling back to the target's. Preserved symbolic link
 do not yet restore link timestamps and never set the target's timestamp. This
 does not restore ownership, ACLs, extended attributes, creation or access times.
 
+When no replacement was requested, preserved symbolic links are published by
+moving the staged link itself with the platform's atomic no-replace operation.
+This retains file, directory and dangling links without following their targets.
+A competing destination is left unchanged. Cleanup after failed publication
+operates on the staged link itself. Windows still requires permission to create
+symbolic links; the existing skipped-link report applies when that permission is
+unavailable.
+
 ## Cross-Platform Route
 
 Squallz must not rely on macOS `/usr/bin/bsdtar`, Linux distribution tools, or a

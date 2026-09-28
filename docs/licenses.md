@@ -98,8 +98,8 @@ NUL 结尾路径副本，系统调用不保留指针，未知结果保守按不�
 | 依赖 | 版本（锁定） | 许可证 | 维护状态 | 用途 |
 | ---- | ---- | ---- | ---- | ---- |
 | fs4 | 1.1.0 | MIT OR Apache-2.0 | 活跃（al8n，fs2 的维护继任 fork，rustix 后端无 libc） | 磁盘剩余空间预检（squallz-core 分卷切割、squallz-formats ZIP update） |
-| rustix | 1.1.4 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | 活跃（Bytecode Alliance） | macOS、Apple 平台与 Linux 上的内核原子 no-replace rename；RAR 邻卷 no-follow/non-blocking 打开；共享解压通过 no-follow 目录句柄恢复元数据 |
-| windows-sys | 0.61.2 | MIT OR Apache-2.0 | 活跃（Microsoft windows-rs） | Windows `MoveFileExW` 原子 no-replace 移动；flags 固定为 0，不启用覆盖或跨卷复制；共享解压目录句柄的访问、共享及 reparse-point 标志 |
+| rustix | 1.1.4 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | 活跃（Bytecode Alliance） | core 与共享解压复用 macOS、Apple 平台和 Linux 的内核原子 no-replace rename；RAR 邻卷 no-follow/non-blocking 打开；共享解压通过 no-follow 目录句柄恢复元数据 |
+| windows-sys | 0.61.2 | MIT OR Apache-2.0 | 活跃（Microsoft windows-rs） | core 与共享解压复用 Windows `MoveFileExW`：no-replace 移动使用 flags 0，文件替换使用 REPLACE_EXISTING / WRITE_THROUGH，均不启用跨卷复制；共享解压目录句柄的访问、共享及 reparse-point 标志 |
 
 注：globset（已登记）同时作为 squallz-formats 的直接依赖
 （ZIP update 的 --delete glob 匹配），版本与许可证不变。
