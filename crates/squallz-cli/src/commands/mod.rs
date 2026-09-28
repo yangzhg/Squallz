@@ -718,6 +718,8 @@ pub fn dispatch(cmd: Cmd, ctx: &Ctx) -> Result<(), CliError> {
             add,
             mkdir,
             delete,
+            delete_entries,
+            encoding,
             rename,
             move_entries,
             excludes,
@@ -735,6 +737,8 @@ pub fn dispatch(cmd: Cmd, ctx: &Ctx) -> Result<(), CliError> {
             add,
             mkdir,
             delete,
+            delete_entries,
+            encoding,
             rename,
             move_entries,
             crate::content_policy::resolve_create_excludes(

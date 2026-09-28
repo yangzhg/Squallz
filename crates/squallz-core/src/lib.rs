@@ -48,7 +48,7 @@ pub use destination_guard::{
 };
 pub use duplicates::{DuplicateGroup, DuplicateScanReport};
 pub use extract_guard::{build_extract_input_guard, ArchiveSourceState, ExtractInputGuard};
-pub use filter::PathFilter;
+pub use filter::{resolve_literal_selection, PathFilter};
 pub use layout::{
     analyze_extract_layout, inspect_extract_space, ExtractPlan, ExtractScope, ExtractSpace,
     SmartLayout,

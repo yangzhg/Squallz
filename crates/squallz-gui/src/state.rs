@@ -878,7 +878,7 @@ pub(crate) fn normalized_entry_path(meta: &EntryMeta) -> String {
     normalized_entry_path_ref(meta).into_owned()
 }
 
-fn normalized_entry_path_ref(meta: &EntryMeta) -> Cow<'_, str> {
+pub(crate) fn normalized_entry_path_ref(meta: &EntryMeta) -> Cow<'_, str> {
     let display = meta.path.display.as_str();
     if display.contains('\\') {
         let replaced = display.replace('\\', "/");

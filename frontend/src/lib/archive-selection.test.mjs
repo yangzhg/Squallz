@@ -28,13 +28,20 @@ function info(total) {
 }
 
 async function loadSelectionHandlers(archive, overrides = {}) {
+  const server = await createTestServer();
+  let archiveSelectionRoots;
+  try {
+    ({ archiveSelectionRoots } = await server.ssrLoadModule("/src/lib/archive-editing.ts"));
+  } finally {
+    await server.close();
+  }
   const component = await readFile(new URL("../App.svelte", import.meta.url), "utf8");
   const script = component.match(/<script lang="ts">([\s\S]*?)<\/script>/)?.[1];
   assert.ok(script);
   const source = ts.createSourceFile("App.ts", script, ts.ScriptTarget.Latest, true);
   const names = new Set([
     "selectEntry", "selectOnlyEntry", "showEntryContextAt", "runArchiveSelection", "toggleEntrySelection",
-    "submitDeleteSelectedJob", "selectedDeletePatterns", "closeEntryContext",
+    "submitDeleteSelectedJob", "selectedDeletePaths", "closeEntryContext",
     "selectedRenameSource", "canRenameSelection", "hasArchiveSelection", "hasArchiveOpen", "submitRenameSelectedJob",
   ]);
   const declarations = source.statements.filter(
@@ -46,6 +53,7 @@ async function loadSelectionHandlers(archive, overrides = {}) {
   );
   return vm.runInNewContext(`${outputText}\n({ selectEntry, selectOnlyEntry, showEntryContextAt, toggleEntrySelection, submitDeleteSelectedJob, canRenameSelection, submitRenameSelectedJob, context: () => entryContext })`, {
     ...archive,
+    archiveSelectionRoots,
     archiveSelectionBusyReason: () => "",
     entryPreviewForPath: () => null,
     clearEntryPreviewState: () => {},

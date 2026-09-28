@@ -1,10 +1,12 @@
 //! `sqz update`: append/delete/rename entries of an existing archive
-//! (temp-file rewrite + atomic replacement happens in the format layer).
+//! (core owns the temporary rewrite and atomic replacement).
 
 use std::path::{Path, PathBuf};
 
 use serde_json::json;
-use squallz_core::api::{CompressionLevel, CreateOptions, EntryPath, Password, UpdateOp};
+use squallz_core::api::{
+    CompressionLevel, CreateOptions, EntryPath, FormatError, OpenOptions, Password, UpdateOp,
+};
 
 use super::reports::print_pretty_json;
 use crate::args::resource_options;
@@ -22,6 +24,8 @@ pub fn run(
     add: Vec<PathBuf>,
     mkdir: Vec<String>,
     delete: Vec<String>,
+    delete_entries: Vec<String>,
+    encoding: Option<String>,
     rename: Vec<(String, String)>,
     move_entries: Vec<(String, String)>,
     excludes: Vec<String>,
@@ -35,6 +39,7 @@ pub fn run(
     let add_count = add.len();
     let mkdir_count = mkdir.len();
     let delete_count = delete.len();
+    let delete_entry_count = delete_entries.len();
     let rename_count = rename.len();
     let move_count = move_entries.len();
     let exclude_count = excludes.len();
@@ -54,6 +59,12 @@ pub fn run(
     for pattern in delete {
         ops.push(UpdateOp::Delete { pattern });
     }
+    ops.extend(literal_deletions(
+        ctx,
+        &archive,
+        &delete_entries,
+        encoding.as_deref(),
+    )?);
     for (from, to) in rename {
         ops.push(UpdateOp::Rename {
             from: EntryPath::from_utf8(from),
@@ -75,7 +86,8 @@ pub fn run(
         resources: resource_options(threads, memory_limit),
         ..CreateOptions::default()
     };
-    let operation_count = ops.len();
+    let operation_count =
+        add_count + mkdir_count + delete_count + delete_entry_count + rename_count + move_count;
     let progress = CliProgress::new_for_operation(
         ctx.quiet,
         ctx.verbose,
@@ -117,7 +129,7 @@ pub fn run(
                     touched_count(
                         add_count,
                         mkdir_count,
-                        delete_count,
+                        delete_count.saturating_add(delete_entry_count),
                         rename_count,
                         move_count,
                     ),
@@ -147,6 +159,11 @@ pub fn run(
                     ctx.loc.t("cli.update.delete_patterns"),
                     delete_count.to_string(),
                     ctx.loc.t("cli.update.detail.delete_patterns"),
+                ]),
+                ModernTableRow::new(vec![
+                    ctx.loc.t("cli.update.delete_entries"),
+                    delete_entry_count.to_string(),
+                    ctx.loc.t("cli.update.detail.delete_entries"),
                 ]),
                 ModernTableRow::new(vec![
                     ctx.loc.t("cli.update.rename_entries"),
@@ -197,6 +214,39 @@ pub fn run(
         ctx.print_success(&message);
     }
     Ok(())
+}
+
+pub(super) fn literal_deletions(
+    ctx: &Ctx,
+    archive: &Path,
+    paths: &[String],
+    encoding: Option<&str>,
+) -> Result<Vec<UpdateOp>, FormatError> {
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+    let entries = ctx.engine.list_with_control(
+        archive,
+        &OpenOptions {
+            encoding_override: encoding.map(str::to_owned),
+            ..OpenOptions::default()
+        },
+        &ctx.ctl,
+    )?;
+    let selected = squallz_core::resolve_literal_selection(
+        entries.iter().map(|entry| {
+            (
+                std::borrow::Cow::Borrowed(entry.path.display.as_str()),
+                &entry.path,
+            )
+        }),
+        paths,
+        &ctx.ctl,
+    )?;
+    Ok(selected
+        .into_iter()
+        .map(|path| UpdateOp::DeleteEntry { path })
+        .collect())
 }
 
 fn add_dest_from_path(path: &Path) -> String {

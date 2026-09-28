@@ -50,7 +50,7 @@ sqz batch batch.json --keep-going --json
 | `test` | 完整性测试 | `archive`, `password`, `encoding` |
 | `extract` | 解压全部或匹配条目 | `archive`, `dest`, `includes`, `overwrite`, `symlinks`, `smart`, `best_effort`, `password`, `encoding`, `threads`, `memory_limit`, `max_output_bytes`, `max_entries`, `max_compression_ratio` |
 | `convert` | 流式转换归档格式 | `src`, `output`, `level`, `profile`, `password`, `out_password`, `encrypt_names`, `encoding`, `split`, `split_mode`, `threads`, `memory_limit` |
-| `update` | 添加、创建目录、删除、重命名或移动条目 | `archive`, `add`, `mkdir`, `delete`, `rename`, `content_policy`, `excludes`, `password`, `level`, `profile`, `threads`, `memory_limit` |
+| `update` | 添加、创建目录、删除、重命名或移动条目 | `archive`, `add`, `mkdir`, `delete`, `delete_entries`, `encoding`, `rename`, `content_policy`, `excludes`, `password`, `level`, `profile`, `threads`, `memory_limit` |
 | `export` | 把 `.sqz` 导出为标准归档 | `archive`, `output`, `level`, `profile`, `out_password`, `threads`, `memory_limit` |
 | `repair_zip` | 用可读 local headers 重建 ZIP central directory | `archive`, `output`, `level`, `profile`, `threads`, `memory_limit` |
 | `repair_sqz` | 用 `.sqz` 内嵌恢复信息重写健康容器 | `archive`, `output`, `level`, `profile`, `threads`, `memory_limit` |
@@ -143,6 +143,19 @@ macOS 辅助文件：`.DS_Store`、`._*` 和 `__MACOSX`；普通隐藏文件（�
 ```
 
 `rename` 使用 `{ "from": "...", "to": "..." }` 对象；改变父目录即为移动。
+
+`delete_entries` 按归档内的完整字面路径删除，不解释通配符。比如
+`"delete_entries": ["notes.txt", "reports[1]/"]` 只删除根目录的 `notes.txt`
+以及 `reports[1]/` 整个子树，不影响其他目录的同名条目。目录路径必须保留末尾的 `/`；
+所有指定路径都必须存在（目录可以是由子条目隐含的），否则整个更新失败，原归档保持不变。
+CLI 对应 `sqz update archive.zip --delete-entry 'notes.txt' --delete-entry 'reports[1]/'`。
+旧编码名称使用与 `list` 相同的 `encoding`（CLI 为 `--encoding`）解析。显示路径不唯一时
+拒绝精确删除；匹配成功后使用原始名称字节执行，不将解码后的名称写回归档。
+若更新后仍需保留非 UTF-8 名称，当前 ZIP 更新会明确失败并保留原包。请先用 `convert`
+配合同样的 `encoding` 保存为 UTF-8 命名的 ZIP，再编辑；不会静默重编码保留的文件名。
+
+`delete` 按 glob 匹配，对应 CLI 的 `--delete`：例如 `"delete": ["*.log"]`
+会删除各层目录匹配的日志文件，匹配目录时包含其子树。需要精确删除时使用 `delete_entries`。
 
 ## JSON 输出合同
 

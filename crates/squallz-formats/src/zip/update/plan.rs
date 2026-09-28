@@ -1,16 +1,16 @@
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Seek};
 
-use globset::GlobSet;
 use squallz_format_api::{sanitize_entry_path, ControlToken, EntryPath, FormatError, UpdateOp};
 use zip::ZipArchive;
 
-use super::{addition_meta, map_controlled_zip_error, AdditionSet};
+use super::{addition_meta, map_controlled_zip_error, AdditionSet, Deletions};
 
 struct ArchiveName {
     raw: String,
     key: String,
     directory: bool,
+    deleted: bool,
 }
 
 struct Rename {
@@ -66,7 +66,7 @@ fn safe_target(path: &str) -> Result<String, FormatError> {
 pub(super) fn prepare<R: Read + Seek>(
     archive: &mut ZipArchive<R>,
     ops: &[UpdateOp],
-    deletes: &Option<GlobSet>,
+    deletes: &mut Deletions,
     additions: &impl AdditionSet,
     ctl: &ControlToken,
 ) -> Result<HashMap<String, String>, FormatError> {
@@ -80,13 +80,22 @@ pub(super) fn prepare<R: Read + Seek>(
         let raw = String::from_utf8_lossy(file.name_raw()).into_owned();
         let key = raw.trim_end_matches('/').to_owned();
         let directory = file.is_dir();
+        deletes.observe(file.name_raw());
+        let deleted = deletes.matches(file.name_raw());
+        if !deleted && std::str::from_utf8(file.name_raw()).is_err() {
+            return Err(FormatError::Unsupported(
+                "ZIP update cannot preserve non-UTF-8 entry names; convert the archive to a UTF-8 ZIP before editing".into(),
+            ));
+        }
         original.insert(&key, directory);
         names.push(ArchiveName {
             raw,
             key,
             directory,
+            deleted,
         });
     }
+    deletes.validate()?;
 
     let mut requested = HashMap::<String, Rename>::new();
     let mut destinations = HashSet::new();
@@ -145,7 +154,7 @@ pub(super) fn prepare<R: Read + Seek>(
     let mut retained = Namespace::default();
     for name in &names {
         ctl.checkpoint()?;
-        if deletes.as_ref().is_some_and(|set| set.is_match(&name.key)) {
+        if name.deleted {
             continue;
         }
         let source = requested.get_key_value(&name.key).or_else(|| {

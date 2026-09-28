@@ -34,10 +34,19 @@ impl ZipArchiveWriter {
         file: zip::read::ZipFile<'_, R>,
         rename_to: Option<&str>,
     ) -> Result<(), FormatError> {
-        let result = match rename_to {
-            Some(name) => self.inner.raw_copy_file_rename(file, name),
-            None => self.inner.raw_copy_file(file),
+        let name = match rename_to {
+            Some(name) => name.to_owned(),
+            // ZIP readers may decode unflagged names as CP437 even when
+            // their original bytes are valid UTF-8. Retain those bytes.
+            None => std::str::from_utf8(file.name_raw())
+                .map_err(|_| {
+                    FormatError::Unsupported(
+                        "ZIP update cannot preserve non-UTF-8 entry names".into(),
+                    )
+                })?
+                .to_owned(),
         };
+        let result = self.inner.raw_copy_file_rename(file, name);
         controlled_zip_result(result, &self.control)
     }
 

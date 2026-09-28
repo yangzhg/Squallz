@@ -10,7 +10,6 @@ use std::io::{Read, Seek, SeekFrom};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use squallz_format_api::{
     ArchiveWriter, ControlToken, CreateOptions, EntryMeta, EntryPath, FormatError,
     PreparedUpdateAdditions, ProgressSink, ReadSeek, UpdateOp, WriteSeek,
@@ -19,7 +18,9 @@ use zip::ZipArchive;
 
 use super::error::map_zip_error;
 use super::writer::ZipArchiveWriter;
+use delete::Deletions;
 
+mod delete;
 mod plan;
 
 /// Extra bytes included in the early space estimate for central-directory
@@ -56,7 +57,7 @@ struct EngineAdditions<'a>(&'a mut dyn PreparedUpdateAdditions);
 struct PreparedRewrite<'a> {
     archive: ZipArchive<RawCopySource<'a>>,
     raw_copy: RawCopyTracker,
-    deletes: Option<GlobSet>,
+    deletes: Deletions,
     renames: HashMap<String, String>,
 }
 
@@ -240,10 +241,7 @@ fn prepare_update<'a>(
     ctl: &'a ControlToken,
 ) -> Result<PreparedRewrite<'a>, FormatError> {
     ctl.checkpoint()?;
-    let deletes = build_path_set(ops.iter().filter_map(|op| match op {
-        UpdateOp::Delete { pattern } => Some(pattern.as_str()),
-        _ => None,
-    }))?;
+    let mut deletes = Deletions::new(ops, ctl)?;
     let raw_copy = RawCopyTracker::default();
     let source = RawCopySource {
         inner: source,
@@ -255,7 +253,7 @@ fn prepare_update<'a>(
         ZipArchive::new(source).map_err(|error| map_controlled_zip_error(error, ctl))?;
     ctl.checkpoint()?;
 
-    let renames = plan::prepare(&mut archive, ops, &deletes, additions, ctl)?;
+    let renames = plan::prepare(&mut archive, ops, &mut deletes, additions, ctl)?;
     Ok(PreparedRewrite {
         archive,
         raw_copy,
@@ -270,7 +268,7 @@ fn rewrite(
     archive: &mut ZipArchive<RawCopySource<'_>>,
     raw_copy: &RawCopyTracker,
     output: Box<dyn WriteSeek>,
-    deletes: &Option<GlobSet>,
+    deletes: &Deletions,
     renames: &HashMap<String, String>,
     additions: &mut impl AdditionSet,
     opts: &CreateOptions,
@@ -287,9 +285,7 @@ fn rewrite(
         let file = archive
             .by_index_raw(index)
             .map_err(|error| map_controlled_zip_error(error, ctl))?;
-        let name = String::from_utf8_lossy(file.name_raw());
-        let key = name.trim_end_matches('/');
-        if !deletes.as_ref().is_some_and(|set| set.is_match(key)) {
+        if !deletes.matches(file.name_raw()) {
             copied_total = copied_total.saturating_add(file.compressed_size());
         }
     }
@@ -306,7 +302,7 @@ fn rewrite(
         let compressed = file.compressed_size();
         let path = EntryPath::from_utf8(name.clone());
         progress.on_progress(done, total, &path);
-        if deletes.as_ref().is_some_and(|set| set.is_match(&key)) {
+        if deletes.matches(file.name_raw()) {
             continue; // dropped entry
         }
         let rename_to = renames.get(&name).or_else(|| renames.get(&key));
@@ -394,40 +390,6 @@ impl AdditionSet for EngineAdditions<'_> {
         self.0
             .add_entry(index, writer, progress, ctl, completed_bytes, total_bytes)
     }
-}
-
-/// Compiles path globs. Each pattern is expanded the same way as the
-/// engine-side `PathFilter` so that bare names match at any depth and matched
-/// directories prune their subtree.
-fn build_path_set<'a>(
-    patterns: impl Iterator<Item = &'a str>,
-) -> Result<Option<GlobSet>, FormatError> {
-    let patterns: Vec<&str> = patterns.collect();
-    if patterns.is_empty() {
-        return Ok(None);
-    }
-    let mut builder = GlobSetBuilder::new();
-    for pattern in patterns {
-        let p = pattern.trim_end_matches('/');
-        let mut variants = vec![p.to_owned(), format!("{p}/**")];
-        if !p.contains('/') {
-            variants.push(format!("**/{p}"));
-            variants.push(format!("**/{p}/**"));
-        }
-        for variant in variants {
-            let glob = GlobBuilder::new(&variant)
-                .literal_separator(true)
-                .build()
-                .map_err(|e| {
-                    FormatError::Other(format!("invalid glob pattern '{pattern}': {e}"))
-                })?;
-            builder.add(glob);
-        }
-    }
-    let set = builder
-        .build()
-        .map_err(|e| FormatError::Other(format!("invalid glob pattern set: {e}")))?;
-    Ok(Some(set))
 }
 
 #[cfg(test)]

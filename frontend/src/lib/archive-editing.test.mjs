@@ -10,6 +10,7 @@ async function loadEditing(overrides = {}) {
   let helpers;
   try {
     helpers = await server.ssrLoadModule("/src/lib/archive-editing.ts");
+    helpers = { ...helpers, isErrorDto: (await server.ssrLoadModule("/src/lib/ipc.ts")).isErrorDto };
   } finally {
     await server.close();
   }
@@ -22,7 +23,7 @@ async function loadEditing(overrides = {}) {
     "normalizeMoveTargetDir", "submitMovePlan", "buildMovePlan", "moveTargetForPath", "uniqueArchiveTarget",
     "archiveEditPathProblem", "moveTargetProblem", "submitMoveSelectedJob",
     "normalizeRenameTargetName", "selectedRenameSource", "renameTargetIssue", "archiveEntryExtension",
-    "submitRenameSelectedJob",
+    "submitRenameSelectedJob", "selectedDeletePaths", "submitDeleteSelectedJob", "submitCurrentArchiveJob",
     "openArchiveEditor",
   ]);
   const declarations = source.statements.filter(
@@ -34,10 +35,12 @@ async function loadEditing(overrides = {}) {
   );
   const submitted = [];
   const notices = [];
+  const toasts = [];
   const closed = [];
   const context = {
     ...helpers,
-    currentArchive: { id: 17, source: "/tmp/archive-editing.zip" },
+    currentArchive: { id: 17, source: "/tmp/archive-editing.zip", encoding_override: "gbk" },
+    archiveTitle: () => "archive-editing.zip",
     archiveDirs: ["docs"],
     newFolderName: "计划",
     renameTargetName: "重命名",
@@ -58,19 +61,62 @@ async function loadEditing(overrides = {}) {
     blockSelectionScopedAction: () => false,
     archiveMutationDisabledReason: () => "",
     showNotice: (message) => notices.push(message),
+    pushToast: (toast) => toasts.push(toast),
+    tError: (error) => error.key,
+    focusBlockingTaskIfAny: () => false,
+    isJobSubmitBlocked: () => false,
     recordOperation: () => {},
     tr: (_key, fallback) => fallback,
-    submitCurrentArchiveJob: async (spec) => { submitted.push(spec); return true; },
+    submitJob: async (spec) => { submitted.push(spec); return 1; },
     ...overrides,
   };
-  const handlers = vm.runInNewContext(`${outputText}\n({ normalizeNewFolderPath, commitNewFolderName, submitNewFolderJob, normalizeMoveTargetDir, submitMoveSelectedJob, submitMovePlan, buildMovePlan, normalizeRenameTargetName, submitRenameSelectedJob, openArchiveEditor })`, context);
-  return { ...handlers, submitted, notices, closed, context };
+  const handlers = vm.runInNewContext(`${outputText}\n({ normalizeNewFolderPath, commitNewFolderName, submitNewFolderJob, normalizeMoveTargetDir, submitMoveSelectedJob, submitMovePlan, buildMovePlan, normalizeRenameTargetName, submitRenameSelectedJob, submitDeleteSelectedJob, openArchiveEditor })`, context);
+  return { ...handlers, submitted, notices, toasts, closed, context };
 }
 
 test("new folders are created inside the displayed archive directory", async () => {
   const editing = await loadEditing();
   await editing.submitNewFolderJob();
   assert.deepEqual(Array.from(editing.submitted[0].mkdir), ["docs/计划/"]);
+});
+
+test("deleting selected entries preserves literal paths and directory boundaries", async () => {
+  const editing = await loadEditing({
+    selectedPaths: () => new Set(["notes.txt", "资料[1]/", "资料[1]/a.txt", "资料[1]/sub/", "literal?.txt"]),
+  });
+  await editing.submitDeleteSelectedJob();
+  assert.equal(editing.submitted.length, 1);
+  const job = editing.submitted[0];
+  assert.equal(job.kind, "update");
+  assert.equal(job.path, "/tmp/archive-editing.zip");
+  assert.equal(job.encoding, "gbk");
+  assert.deepEqual(Array.from(job.delete), ["notes.txt", "资料[1]/", "literal?.txt"]);
+  assert.deepEqual(Array.from(job.rename), []);
+  assert.deepEqual(Array.from(job.add), []);
+});
+
+test("deletion does not queue an empty, read-only, or unfinished selection", async () => {
+  for (const overrides of [
+    { selectedPaths: () => new Set() },
+    { archiveMutationDisabledReason: () => "Read only" },
+    { blockSelectionScopedAction: () => true },
+    { currentArchive: null },
+  ]) {
+    const editing = await loadEditing(overrides);
+    await editing.submitDeleteSelectedJob();
+    assert.equal(editing.submitted.length, 0);
+  }
+  const operations = [];
+  const editing = await loadEditing({
+    submitJob: async () => { throw new Error("unavailable"); },
+    recordOperation: (operation) => operations.push(operation),
+  });
+  await editing.submitDeleteSelectedJob();
+  assert.deepEqual(operations, []);
+  assert.equal(editing.toasts.length, 1);
+  assert.equal(editing.toasts[0].kind, "danger");
+  assert.equal(editing.toasts[0].title, "Could not queue the task");
+  assert.match(editing.toasts[0].body, /try again/u);
 });
 
 test("moving entries does not try to recreate the destination directory", async () => {
@@ -165,7 +211,7 @@ test("read-only edit entrypoints are blocked and failed submissions retain the f
   blocked.openArchiveEditor("new-folder");
   assert.equal(blocked.context.archiveEditKind, null);
   assert.deepEqual(blocked.notices, ["Read only"]);
-  const failed = await loadEditing({ submitCurrentArchiveJob: async () => false });
+  const failed = await loadEditing({ submitJob: async () => { throw new Error("unavailable"); } });
   failed.openArchiveEditor("rename");
   failed.context.renameTargetName = "renamed.txt";
   await failed.submitRenameSelectedJob();

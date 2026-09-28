@@ -686,7 +686,10 @@ pub enum JobSpec {
     Update {
         path: String,
         add: Vec<String>,
+        /// Literal selected paths; directories retain their trailing `/`.
         delete: Vec<String>,
+        /// Entry-name decoding used by the archive browser's selection.
+        encoding: Option<String>,
         rename: Vec<RenameSpec>,
         mkdir: Vec<String>,
         excludes: Vec<String>,

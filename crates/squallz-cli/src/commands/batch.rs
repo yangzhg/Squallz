@@ -319,6 +319,9 @@ struct UpdateJob {
     #[serde(default)]
     delete: Vec<String>,
     #[serde(default)]
+    delete_entries: Vec<String>,
+    encoding: Option<String>,
+    #[serde(default)]
     rename: Vec<BatchMove>,
     content_policy: Option<CreateContentPolicy>,
     #[serde(default)]
@@ -1091,6 +1094,12 @@ fn run_update_job(ctx: &Ctx, base_dir: &Path, job: &UpdateJob) -> Result<JobSucc
             pattern: pattern.clone(),
         });
     }
+    ops.extend(super::update::literal_deletions(
+        ctx,
+        &archive,
+        &job.delete_entries,
+        job.encoding.as_deref(),
+    )?);
     for item in &job.rename {
         let (from, to) = item.as_pair();
         ops.push(UpdateOp::Rename {
@@ -1103,7 +1112,11 @@ fn run_update_job(ctx: &Ctx, base_dir: &Path, job: &UpdateJob) -> Result<JobSucc
             "batch update job has no operations".into(),
         ));
     }
-    let operation_count = ops.len();
+    let operation_count = job.add.len()
+        + job.mkdir.len()
+        + job.delete.len()
+        + job.delete_entries.len()
+        + job.rename.len();
     let level = compression_level(job.level, job.profile)?;
     let excludes =
         crate::content_policy::resolve_create_excludes(job.content_policy, job.excludes.clone());

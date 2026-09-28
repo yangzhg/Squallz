@@ -3753,6 +3753,7 @@ fn update_job_deletes_selected_entry() {
             path: archive.to_string_lossy().into_owned(),
             add: vec![],
             delete: vec!["data/drop.txt".into()],
+            encoding: None,
             rename: vec![],
             mkdir: vec![],
             excludes: vec![],
@@ -3776,6 +3777,182 @@ fn update_job_deletes_selected_entry() {
         archive
     );
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn update_job_deletes_only_literal_selected_paths() {
+    let dir = temp_dir("update-delete-literal");
+    for name in [
+        "notes.txt",
+        "folder/notes.txt",
+        "data/drop[1].txt",
+        "data/drop1.txt",
+        "logs/drop.txt",
+        "folder/logs/keep.txt",
+        "logstash/keep.txt",
+    ] {
+        let path = dir.join(name);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, name.as_bytes()).unwrap();
+    }
+    let archive = dir.join("out.zip");
+    let state = Arc::new(AppState::new());
+    let inputs = ["notes.txt", "folder", "data", "logs", "logstash"].map(|name| dir.join(name));
+    state
+        .engine
+        .create(
+            &archive,
+            &inputs,
+            &CreateOptions::default(),
+            &squallz_core::api::NoProgress,
+            &ControlToken::new(),
+        )
+        .unwrap();
+
+    let manager = JobManager::new();
+    let sink = Arc::new(TestSink::default());
+    let events: Arc<dyn EventSink> = sink.clone();
+    let id = manager.submit(
+        Arc::clone(&state),
+        events,
+        JobSpec::Update {
+            path: archive.to_string_lossy().into_owned(),
+            add: vec![],
+            delete: vec![
+                "notes.txt".into(),
+                "data/drop[1].txt".into(),
+                "logs/".into(),
+            ],
+            encoding: None,
+            rename: vec![],
+            mkdir: vec![],
+            excludes: vec![],
+            content_policy: squallz_core::CreateContentPolicy::KeepAllFiles,
+            password: None,
+            level: 5,
+        },
+        SettingsDto::default(),
+    );
+    manager.wait_idle();
+    assert_eq!(
+        states_of(&sink.events.lock().unwrap(), id),
+        vec!["queued", "running", "done"]
+    );
+    let mut names = state
+        .engine
+        .list(&archive, &OpenOptions::default())
+        .unwrap()
+        .into_iter()
+        .map(|entry| entry.path.display)
+        .collect::<Vec<_>>();
+    names.sort();
+    assert_eq!(
+        names,
+        [
+            "data/",
+            "data/drop1.txt",
+            "folder/",
+            "folder/logs/",
+            "folder/logs/keep.txt",
+            "folder/notes.txt",
+            "logstash/",
+            "logstash/keep.txt",
+        ]
+    );
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn update_job_resolves_display_names_and_rejects_ambiguous_or_missing_selection() {
+    for (source_name, raw_name, selected, expected_state) in [
+        (
+            "first.txt",
+            &[0xc4, 0xe3, b'[', b'1', b']', b'.', b't', b'x', b't'][..],
+            "你[1].txt",
+            "done",
+        ),
+        (
+            "nested/first.txt",
+            &b"///////first.txt"[..],
+            "first.txt",
+            "failed",
+        ),
+        ("first.txt", &b"first.txt"[..], "missing.txt", "failed"),
+    ] {
+        let dir = temp_dir("update-delete-displayed");
+        fs::create_dir_all(dir.join("nested")).unwrap();
+        fs::write(dir.join("first.txt"), b"root content").unwrap();
+        fs::write(dir.join("nested/first.txt"), b"nested content").unwrap();
+        let archive = dir.join("out.zip");
+        let state = Arc::new(AppState::new());
+        state
+            .engine
+            .create(
+                &archive,
+                &[dir.join("first.txt"), dir.join("nested")],
+                &CreateOptions::default(),
+                &squallz_core::api::NoProgress,
+                &ControlToken::new(),
+            )
+            .unwrap();
+        let mut bytes = fs::read(&archive).unwrap();
+        assert_eq!(source_name.len(), raw_name.len());
+        let offsets: Vec<_> = bytes
+            .windows(source_name.len())
+            .enumerate()
+            .filter_map(|(offset, name)| (name == source_name.as_bytes()).then_some(offset))
+            .collect();
+        // The root name is also a suffix of the nested entry; leave that
+        // suffix untouched when replacing only the root header names.
+        let offsets: Vec<_> = offsets
+            .into_iter()
+            .filter(|offset| *offset == 0 || bytes[offset - 1] != b'/')
+            .collect();
+        assert_eq!(offsets.len(), 2);
+        for offset in offsets {
+            bytes[offset..offset + raw_name.len()].copy_from_slice(raw_name);
+        }
+        fs::write(&archive, &bytes).unwrap();
+        let manager = JobManager::new();
+        let sink = Arc::new(TestSink::default());
+        let events: Arc<dyn EventSink> = sink.clone();
+        let id = manager.submit(
+            Arc::clone(&state),
+            events,
+            JobSpec::Update {
+                path: archive.to_string_lossy().into_owned(),
+                add: vec![],
+                delete: vec![selected.into()],
+                encoding: Some("gbk".into()),
+                rename: vec![],
+                mkdir: vec![],
+                excludes: vec![],
+                content_policy: squallz_core::CreateContentPolicy::KeepAllFiles,
+                password: None,
+                level: 5,
+            },
+            SettingsDto::default(),
+        );
+        manager.wait_idle();
+        assert_eq!(
+            states_of(&sink.events.lock().unwrap(), id),
+            ["queued", "running", expected_state]
+        );
+        if expected_state == "failed" {
+            assert_eq!(fs::read(&archive).unwrap(), bytes);
+        } else {
+            let mut names: Vec<_> = state
+                .engine
+                .list(&archive, &OpenOptions::default())
+                .unwrap()
+                .into_iter()
+                .map(|entry| entry.path.display)
+                .collect();
+            names.sort();
+            assert_eq!(names, ["nested/", "nested/first.txt"]);
+        }
+        fs::remove_dir_all(dir).unwrap();
+    }
 }
 
 #[test]
@@ -3818,6 +3995,7 @@ fn update_job_add_directory_applies_content_policy_and_explicit_excludes() {
             path: archive.to_string_lossy().into_owned(),
             add: vec![extra.to_string_lossy().into_owned()],
             delete: vec![],
+            encoding: None,
             rename: vec![],
             mkdir: vec![],
             excludes: vec!["node_modules".into(), "*.tmp".into()],
@@ -4011,6 +4189,7 @@ fn update_job_creates_directory_and_moves_a_subtree_into_it() {
             path: archive.to_string_lossy().into_owned(),
             add: vec![],
             delete: vec![],
+            encoding: None,
             rename: vec![],
             mkdir: vec!["new-folder".into()],
             excludes: vec![],
@@ -4040,6 +4219,7 @@ fn update_job_creates_directory_and_moves_a_subtree_into_it() {
             path: archive.to_string_lossy().into_owned(),
             add: vec![],
             delete: vec![],
+            encoding: None,
             mkdir: vec![],
             excludes: vec![],
             rename: vec![crate::dto::RenameSpec {
@@ -4106,6 +4286,7 @@ fn update_job_reports_target_conflict_as_failed() {
             path: archive.to_string_lossy().into_owned(),
             add: vec![],
             delete: vec![],
+            encoding: None,
             rename: vec![crate::dto::RenameSpec {
                 from: "seed/a.txt".into(),
                 to: "seed/b.txt".into(),

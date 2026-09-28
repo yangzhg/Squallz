@@ -71,7 +71,7 @@ pub(crate) fn prepare_additions(
                     ctl.checkpoint()?;
                 }
             }
-            UpdateOp::Delete { .. } | UpdateOp::Rename { .. } => {}
+            UpdateOp::Delete { .. } | UpdateOp::DeleteEntry { .. } | UpdateOp::Rename { .. } => {}
         }
     }
     Ok(PreparedAdditions { entries })

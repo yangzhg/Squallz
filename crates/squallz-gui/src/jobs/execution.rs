@@ -1447,6 +1447,7 @@ impl JobContext<'_> {
                 path,
                 add,
                 delete,
+                encoding,
                 rename,
                 mkdir,
                 excludes,
@@ -1469,10 +1470,27 @@ impl JobContext<'_> {
                         path: EntryPath::from_utf8(dir.clone()),
                     });
                 }
-                for pattern in delete {
-                    ops.push(UpdateOp::Delete {
-                        pattern: pattern.clone(),
-                    });
+                if !delete.is_empty() {
+                    let entries = state.engine.list_with_control(
+                        &archive,
+                        &OpenOptions {
+                            password: password.as_deref().map(Password::new),
+                            encoding_override: encoding.clone(),
+                        },
+                        ctl,
+                    )?;
+                    let selected = squallz_core::resolve_literal_selection(
+                        entries.iter().map(|entry| {
+                            (crate::state::normalized_entry_path_ref(entry), &entry.path)
+                        }),
+                        delete,
+                        ctl,
+                    )?;
+                    ops.extend(
+                        selected
+                            .into_iter()
+                            .map(|path| UpdateOp::DeleteEntry { path }),
+                    );
                 }
                 for item in rename {
                     ops.push(UpdateOp::Rename {
@@ -1495,7 +1513,7 @@ impl JobContext<'_> {
                 state.engine.update(&archive, &ops, &opts, sink, ctl)?;
                 Ok(Some(serde_json::json!({
                     "archive": archive.to_string_lossy(),
-                    "operations": ops.len(),
+                    "operations": add.len() + delete.len() + rename.len() + mkdir.len(),
                 })))
             }
             JobSpec::Checksum {

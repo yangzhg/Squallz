@@ -554,6 +554,13 @@ pub enum UpdateOp {
         /// Glob pattern
         pattern: String,
     },
+    /// Delete one literal archive path. A trailing `/` selects that exact
+    /// directory and its complete subtree, including implicit directories.
+    /// Missing paths fail the update before the archive is rewritten.
+    DeleteEntry {
+        /// Original entry-name bytes; no glob expansion or path normalization.
+        path: EntryPath,
+    },
     /// Rename a file or a directory and its complete subtree. Directory
     /// sources may be implicit (only their descendants have archive entries).
     Rename {

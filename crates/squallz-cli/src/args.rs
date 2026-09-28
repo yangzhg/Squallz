@@ -507,6 +507,12 @@ fn localize_update_help_en(cmd: Command) -> Command {
         .mut_arg("delete", |arg| {
             arg.help("Delete entries matching a glob. Can be repeated.")
         })
+        .mut_arg("delete_entries", |arg| {
+            arg.help("Delete a literal archive path. End directories with / to delete their subtree. Can be repeated.")
+        })
+        .mut_arg("encoding", |arg| {
+            arg.help("Entry-name encoding for literal deletion, such as gbk or shift_jis.")
+        })
         .mut_arg("rename", |arg| {
             arg.help("Rename an entry. Format: from=to. Can be repeated.")
         })
@@ -1355,7 +1361,7 @@ pub enum Cmd {
     },
     /// 修改已有压缩包：追加 / 删除 / 重命名 / 移动条目
     #[command(group(
-        ArgGroup::new("ops").required(true).multiple(true).args(["add", "delete", "rename", "move_entries", "mkdir"])
+        ArgGroup::new("ops").required(true).multiple(true).args(["add", "delete", "delete_entries", "rename", "move_entries", "mkdir"])
     ))]
     Update {
         /// 压缩包路径
@@ -1369,6 +1375,12 @@ pub enum Cmd {
         /// 按 glob 删除条目（可多次，如 --delete "*.log"）
         #[arg(long = "delete", value_name = "GLOB")]
         delete: Vec<String>,
+        /// 按完整字面路径删除条目；目录以 / 结尾并删除整个子树（可多次）
+        #[arg(long = "delete-entry", value_name = "ENTRY_PATH")]
+        delete_entries: Vec<String>,
+        /// 精确删除时使用的条目名编码（如 gbk / shift_jis）
+        #[arg(long)]
+        encoding: Option<String>,
         /// 重命名条目（可多次，格式 from=to）
         #[arg(long = "rename", value_name = "FROM=TO", value_parser = parse_rename)]
         rename: Vec<(String, String)>,

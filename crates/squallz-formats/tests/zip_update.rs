@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Barrier, Mutex};
 use std::time::{Duration, Instant};
 
-use common::{command_exists, engine, TempDir};
+use common::{build_stored_zip, command_exists, engine, RawZipEntry, TempDir};
 use squallz_core::api::{
     CompressionLevel, ControlToken, CreateOptions, EntryMeta, EntryPath, FormatError, NoProgress,
     OpenOptions, Password, ProgressPhase, ProgressSink, UpdateOp,
@@ -33,6 +33,23 @@ fn base_archive(dir: &Path, password: Option<&str>) -> PathBuf {
         .create(&dest, &[root], &opts, &NoProgress, &ControlToken::new())
         .unwrap();
     dest
+}
+
+fn named_archive(dir: &Path, names: &[&str]) -> PathBuf {
+    use std::io::Write;
+    let archive = dir.join("named.zip");
+    let mut writer = zip::ZipWriter::new(fs::File::create(&archive).unwrap());
+    for name in names {
+        let options = zip::write::SimpleFileOptions::default();
+        if name.ends_with('/') {
+            writer.add_directory(*name, options).unwrap();
+        } else {
+            writer.start_file(*name, options).unwrap();
+            writer.write_all(name.as_bytes()).unwrap();
+        }
+    }
+    writer.finish().unwrap();
+    archive
 }
 
 const LARGE_RAW_COPY_ENTRY: &str = "raw-copy/large.bin";
@@ -505,8 +522,8 @@ fn rewrite_progress_excludes_deleted_entry_bytes() {
     engine()
         .update(
             &archive,
-            &[UpdateOp::Delete {
-                pattern: "project/a.txt".into(),
+            &[UpdateOp::DeleteEntry {
+                path: EntryPath::from_utf8("project/a.txt"),
             }],
             &CreateOptions::default(),
             &progress,
@@ -1125,6 +1142,318 @@ fn update_add_directory_applies_create_excludes() {
     assert!(!names.iter().any(|n| n.contains(".git")), "{names:?}");
     assert!(!names.iter().any(|n| n.ends_with(".tmp")), "{names:?}");
     assert_unzip_t(&archive);
+}
+
+#[test]
+fn update_delete_resolves_legacy_names_to_original_entry_bytes() {
+    let tmp = TempDir::new("update-delete-legacy");
+    let archive = tmp.path().join("legacy.zip");
+    let (name, _, errors) = encoding_rs::GBK.encode("压缩文件中文名称测试[1].txt");
+    assert!(!errors);
+    fs::write(
+        &archive,
+        build_stored_zip(&[
+            RawZipEntry {
+                name: name.into_owned(),
+                data: b"delete me".to_vec(),
+            },
+            RawZipEntry {
+                name: b"keep.txt".to_vec(),
+                data: b"keep me".to_vec(),
+            },
+        ]),
+    )
+    .unwrap();
+    let entries = engine()
+        .list(
+            &archive,
+            &OpenOptions {
+                encoding_override: Some("gbk".into()),
+                ..OpenOptions::default()
+            },
+        )
+        .unwrap();
+    let selected = squallz_core::resolve_literal_selection(
+        entries.iter().map(|entry| {
+            (
+                std::borrow::Cow::Borrowed(entry.path.display.as_str()),
+                &entry.path,
+            )
+        }),
+        &["压缩文件中文名称测试[1].txt".into()],
+        &ControlToken::new(),
+    )
+    .unwrap();
+    let ops: Vec<_> = selected
+        .into_iter()
+        .map(|path| UpdateOp::DeleteEntry { path })
+        .collect();
+    run_update(&archive, &ops, &CreateOptions::default()).unwrap();
+    assert_eq!(list_names(&archive, None), ["keep.txt"]);
+    assert_unzip_t(&archive);
+}
+
+#[test]
+fn update_preserves_unflagged_utf8_names() {
+    let tmp = TempDir::new("update-unflagged-utf8");
+    let archive = tmp.path().join("unflagged.zip");
+    let retained = "资料/保留.txt";
+    fs::write(
+        &archive,
+        build_stored_zip(&[
+            RawZipEntry {
+                name: retained.as_bytes().to_vec(),
+                data: b"keep me".to_vec(),
+            },
+            RawZipEntry {
+                name: b"drop.txt".to_vec(),
+                data: b"drop me".to_vec(),
+            },
+        ]),
+    )
+    .unwrap();
+    run_update(
+        &archive,
+        &[UpdateOp::DeleteEntry {
+            path: EntryPath::from_utf8("drop.txt"),
+        }],
+        &CreateOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(list_names(&archive, None), [retained]);
+    let mut reader = zip::ZipArchive::new(fs::File::open(&archive).unwrap()).unwrap();
+    assert_eq!(
+        reader.by_index_raw(0).unwrap().name_raw(),
+        retained.as_bytes()
+    );
+    assert_unzip_t(&archive);
+}
+
+#[test]
+fn update_cannot_silently_reencode_retained_legacy_names() {
+    let tmp = TempDir::new("update-retained-legacy");
+    let archive = tmp.path().join("legacy.zip");
+    let (name, _, errors) = encoding_rs::GBK.encode("压缩文件中文名称测试.txt");
+    assert!(!errors);
+    let before = build_stored_zip(&[
+        RawZipEntry {
+            name: name.into_owned(),
+            data: b"keep me".to_vec(),
+        },
+        RawZipEntry {
+            name: b"drop.txt".to_vec(),
+            data: b"drop me".to_vec(),
+        },
+    ]);
+    fs::write(&archive, &before).unwrap();
+    let error = run_update(
+        &archive,
+        &[UpdateOp::DeleteEntry {
+            path: EntryPath::from_utf8("drop.txt"),
+        }],
+        &CreateOptions::default(),
+    )
+    .unwrap_err();
+    assert!(matches!(error, FormatError::Unsupported(message) if message.contains("entry names")));
+    assert_eq!(fs::read(&archive).unwrap(), before);
+    assert_no_update_temp(tmp.path());
+}
+
+#[test]
+fn update_delete_literal_paths_preserve_metacharacters_and_archive_depth() {
+    let tmp = TempDir::new("update-delete-literal");
+    let selected = [
+        "notes.txt",
+        "a[1].txt",
+        "x?.txt",
+        "x*.txt",
+        "one{a,b}.txt",
+        "资料/说明.txt",
+    ];
+    let retained = [
+        "nested/notes.txt",
+        "a1.txt",
+        "xa.txt",
+        "onea.txt",
+        "keep.txt",
+    ];
+    let archive = named_archive(
+        tmp.path(),
+        &[selected.as_slice(), retained.as_slice()].concat(),
+    );
+    let operations: Vec<_> = selected
+        .into_iter()
+        .map(|path| UpdateOp::DeleteEntry {
+            path: EntryPath::from_utf8(path),
+        })
+        .collect();
+    run_update(&archive, &operations, &CreateOptions::default()).unwrap();
+    let mut expected = retained.to_vec();
+    expected.sort();
+    assert_eq!(list_names(&archive, None), expected);
+    assert_unzip_t(&archive);
+    assert_no_update_temp(tmp.path());
+}
+
+#[test]
+fn update_delete_literal_directory_removes_only_its_complete_subtree() {
+    for explicit in [false, true] {
+        let tmp = TempDir::new("update-delete-directory");
+        let mut names = vec![
+            "logs/a.txt",
+            "logs/sub/b.txt",
+            "other/logs/keep.txt",
+            "logstash/keep.txt",
+        ];
+        if explicit {
+            names.extend(["logs/", "logs/sub/"]);
+        }
+        let archive = named_archive(tmp.path(), &names);
+        run_update(
+            &archive,
+            &[UpdateOp::DeleteEntry {
+                path: EntryPath::from_utf8("logs/"),
+            }],
+            &CreateOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            list_names(&archive, None),
+            ["logstash/keep.txt", "other/logs/keep.txt"]
+        );
+        assert_unzip_t(&archive);
+    }
+}
+
+#[test]
+fn update_delete_literal_file_and_directory_are_distinct() {
+    for (selected, expected) in [
+        ("docs", vec!["docs/", "docs/readme.txt", "keep.txt"]),
+        ("docs/", vec!["docs", "keep.txt"]),
+    ] {
+        let tmp = TempDir::new("update-delete-file-directory");
+        let archive = named_archive(
+            tmp.path(),
+            &["docs", "docs/", "docs/readme.txt", "keep.txt"],
+        );
+        run_update(
+            &archive,
+            &[UpdateOp::DeleteEntry {
+                path: EntryPath::from_utf8(selected),
+            }],
+            &CreateOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(list_names(&archive, None), expected);
+        assert_unzip_t(&archive);
+    }
+}
+
+#[test]
+fn update_delete_missing_or_empty_literal_path_is_atomic() {
+    let tmp = TempDir::new("update-delete-missing");
+    let archive = base_archive(tmp.path(), None);
+    let before = fs::read(&archive).unwrap();
+    for missing in ["", "missing.txt", "project/sub", "project/a.txt/"] {
+        let result = run_update(
+            &archive,
+            &[
+                UpdateOp::Delete {
+                    pattern: "*.log".into(),
+                },
+                UpdateOp::DeleteEntry {
+                    path: EntryPath::from_utf8("project/a.txt"),
+                },
+                UpdateOp::DeleteEntry {
+                    path: EntryPath::from_utf8(missing),
+                },
+            ],
+            &CreateOptions::default(),
+        );
+        assert_other_contains(
+            result.unwrap_err(),
+            if missing.is_empty() {
+                "cannot be empty"
+            } else {
+                "not found"
+            },
+        );
+        assert_eq!(fs::read(&archive).unwrap(), before, "{missing}");
+        assert_no_update_temp(tmp.path());
+    }
+}
+
+#[test]
+fn update_delete_literal_and_glob_operations_can_be_combined_with_replacement() {
+    let tmp = TempDir::new("update-delete-combined");
+    let archive = base_archive(tmp.path(), None);
+    let replacement = tmp.path().join("replacement.txt");
+    fs::write(&replacement, b"replacement").unwrap();
+    run_update(
+        &archive,
+        &[
+            UpdateOp::DeleteEntry {
+                path: EntryPath::from_utf8("project/a.txt"),
+            },
+            UpdateOp::Delete {
+                pattern: "*.log".into(),
+            },
+            UpdateOp::Add {
+                src: replacement,
+                dest: EntryPath::from_utf8("project/a.txt"),
+            },
+        ],
+        &CreateOptions::default(),
+    )
+    .unwrap();
+    assert!(!list_names(&archive, None)
+        .iter()
+        .any(|name| name.ends_with(".log")));
+    let mut archive_reader = zip::ZipArchive::new(fs::File::open(&archive).unwrap()).unwrap();
+    let mut data = String::new();
+    std::io::Read::read_to_string(
+        &mut archive_reader.by_name("project/a.txt").unwrap(),
+        &mut data,
+    )
+    .unwrap();
+    assert_eq!(data, "replacement");
+    assert_unzip_t(&archive);
+}
+
+#[test]
+fn update_delete_literal_keeps_encrypted_payloads_without_a_password() {
+    let tmp = TempDir::new("update-delete-encrypted");
+    let archive = base_archive(tmp.path(), Some("deletion-test-password"));
+    run_update(
+        &archive,
+        &[UpdateOp::DeleteEntry {
+            path: EntryPath::from_utf8("project/sub/"),
+        }],
+        &CreateOptions::default(),
+    )
+    .unwrap();
+    let options = OpenOptions {
+        password: Some(Password::new("deletion-test-password")),
+        encoding_override: None,
+    };
+    let entries = engine().list(&archive, &options).unwrap();
+    assert!(!entries
+        .iter()
+        .any(|entry| entry.path.display.starts_with("project/sub/")));
+    assert!(entries
+        .iter()
+        .filter(|entry| !entry.path.display.ends_with('/'))
+        .all(|entry| entry.encrypted));
+    let mut reader = engine().open(&archive, &options).unwrap();
+    let mut data = Vec::new();
+    std::io::Read::read_to_end(
+        &mut reader
+            .read_entry(&EntryPath::from_utf8("project/a.txt"))
+            .unwrap(),
+        &mut data,
+    )
+    .unwrap();
+    assert_eq!(data, b"alpha");
 }
 
 #[test]

@@ -306,7 +306,9 @@ export type JobSpec =
       kind: "update";
       path: string;
       add: string[];
+      /** Literal selected paths; directories retain their trailing slash. */
       delete: string[];
+      encoding: string | null;
       rename: Array<{ from: string; to: string }>;
       mkdir: string[];
       excludes: string[];

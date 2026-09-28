@@ -9037,8 +9037,8 @@
     showNotice(message);
   }
 
-  function selectedDeletePatterns(): string[] {
-    return [...selectedPaths()].map((path) => path.endsWith("/") ? path.slice(0, -1) : path);
+  function selectedDeletePaths(): string[] {
+    return archiveSelectionRoots(selectedPaths());
   }
 
   function selectedRenameSource(): string | null {
@@ -9547,7 +9547,13 @@
       return true;
     } catch (error) {
       if (isJobSubmitBlocked(error)) return false;
-      showNotice(tr("gui.job.requires_desktop_service_after_success_label", "{label} requires the desktop service").replace("{label}", success));
+      pushToast({
+        kind: "danger",
+        title: tr("gui.job.submit_failed", "Could not queue the task"),
+        body: isErrorDto(error)
+          ? tError(error)
+          : tr("gui.job.submit_unavailable", "Check that the Squallz desktop service is available, then try again."),
+      });
       return false;
     }
   }
@@ -10665,6 +10671,7 @@
       await submitJob({
         kind: "update",
         path: currentArchive.source,
+        encoding: currentArchive.encoding_override,
         add,
         delete: [],
         rename: [],
@@ -10699,8 +10706,8 @@
       showNotice(readOnly);
       return;
     }
-    const patterns = selectedDeletePatterns();
-    if (patterns.length === 0) {
+    const paths = selectedDeletePaths();
+    if (paths.length === 0) {
       showNotice(tr("gui.precondition.select_entries_before_delete", "Select entries before deleting"));
       return;
     }
@@ -10708,8 +10715,9 @@
       {
         kind: "update",
         path: currentArchive.source,
+        encoding: currentArchive.encoding_override,
         add: [],
-        delete: patterns,
+        delete: paths,
         rename: [],
         mkdir: [],
         excludes: [],
@@ -10717,9 +10725,9 @@
         password: null,
         level: 6,
       },
-      (patterns.length === 1
+      (paths.length === 1
         ? tr("gui.delete.operation_queued", "1 delete operation queued")
-        : tr("gui.delete.operations_queued", "{count} delete operations queued").replace("{count}", patterns.length.toLocaleString())),
+        : tr("gui.delete.operations_queued", "{count} delete operations queued").replace("{count}", paths.length.toLocaleString())),
       tr("gui.precondition.open_before_delete", "Open an archive before deleting entries"),
     );
     if (queued) {
@@ -10727,7 +10735,7 @@
         status: "queued",
         title: tr("gui.delete.queued", "Delete entries queued"),
         detail: tr("gui.delete.entries_from_archive", "{count} entries from {archive}")
-          .replace("{count}", patterns.length.toLocaleString())
+          .replace("{count}", paths.length.toLocaleString())
           .replace("{archive}", archiveTitle()),
       });
     }
@@ -10822,6 +10830,7 @@
       {
         kind: "update",
         path: currentArchive.source,
+        encoding: currentArchive.encoding_override,
         add: [],
         delete: [],
         rename: [{ from, to }],
@@ -10897,6 +10906,7 @@
       {
         kind: "update",
         path: currentArchive.source,
+        encoding: currentArchive.encoding_override,
         add: [],
         delete: [],
         rename,
@@ -10969,6 +10979,7 @@
       {
         kind: "update",
         path: currentArchive.source,
+        encoding: currentArchive.encoding_override,
         add: [],
         delete: [],
         rename: [],

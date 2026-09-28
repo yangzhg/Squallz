@@ -1305,6 +1305,7 @@ function previewTaskSpec(kind: PreviewTaskKind): JobSpec {
     return {
       kind: "update",
       path: `${sampleRoot}/product-backup.zip`,
+      encoding: null,
       add: [`${sampleRoot}/incoming-assets`],
       delete: [],
       rename: [],
