@@ -82,6 +82,7 @@
   --recovery-target-card-min-width: 260px;
   --recovery-workspace-actions-max-width: 560px;
   --recovery-strength-input-width: 78px;
+  --checksum-path-column-min: 240px;
   --theme-preview-light-surface: #ffffff;
   --theme-preview-light-surface-raised: #fbfdfe;
   --theme-preview-light-surface-inset: #edf3f6;
@@ -3386,6 +3387,42 @@ select option {
   gap: 8px;
 }
 
+.checksum-report-context {
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm) var(--space-lg);
+  margin: 0;
+  font-size: var(--type-control);
+  line-height: var(--type-control-line);
+}
+
+.checksum-report-context > div {
+  min-width: 0;
+  display: grid;
+  gap: var(--space-xs);
+}
+
+.checksum-report-context > div:first-child {
+  flex-basis: 100%;
+}
+
+.checksum-report-context dt {
+  color: var(--color-text-secondary);
+}
+
+.checksum-report-context dd {
+  min-width: 0;
+  margin: 0;
+  color: var(--color-text-primary);
+  overflow-wrap: anywhere;
+}
+
+.checksum-report-context dd span {
+  display: block;
+  white-space: pre-wrap;
+}
+
 .checksum-result-actions .checksum-copy-status,
 .task-checksum-head .checksum-copy-status,
 .checksum-copy-status {
@@ -3435,8 +3472,7 @@ select option {
   color: var(--color-control-disabled-fg);
 }
 
-.task-checksum-table,
-.classic-checksum-table {
+.task-checksum-table {
   min-width: 0;
   overflow-x: auto;
   overflow-y: hidden;
@@ -3445,8 +3481,7 @@ select option {
   background: var(--color-surface);
 }
 
-.task-checksum-table > div,
-.classic-checksum-table > div {
+.task-checksum-table > div {
   min-height: 30px;
   display: grid;
   grid-template-columns: minmax(140px, 1fr) minmax(64ch, max-content) 80px;
@@ -3458,8 +3493,7 @@ select option {
   font-size: var(--type-control);
 }
 
-.task-checksum-table > div:first-child,
-.classic-checksum-table > div:first-child {
+.task-checksum-table > div:first-child {
   border-top: 0;
   background: var(--color-surface-raised);
   color: var(--color-text-secondary);
@@ -3468,36 +3502,65 @@ select option {
 
 .task-checksum-table span,
 .task-checksum-table code,
-.task-checksum-table strong,
-.classic-checksum-table span,
-.classic-checksum-table code,
-.classic-checksum-table strong {
+.task-checksum-table strong {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.task-checksum-table code,
-.classic-checksum-table code {
+.task-checksum-table code {
   color: var(--color-text-primary);
   font-family: var(--font-mono);
   font-size: var(--type-control);
 }
 
-.limits-table.checksum-result-table {
+.checksum-result-table {
+  min-width: 0;
   overflow-x: auto;
+  border: var(--border-width-control) solid var(--color-border-default);
+  border-radius: var(--radius-card);
 }
 
-.limits-table.checksum-result-table > div {
-  grid-template-columns: minmax(140px, 1fr) 78px minmax(64ch, max-content) 84px;
+.checksum-result-table table {
+  width: 100%;
+  border-collapse: collapse;
+  color: var(--color-text-primary);
+  font-size: var(--type-control);
+  line-height: var(--type-control-line);
 }
 
-.limits-table.checksum-result-table.checksum-verify-table > div {
-  grid-template-columns: minmax(140px, 1fr) minmax(64ch, max-content) minmax(64ch, max-content) 84px;
+.checksum-result-table :is(th, td) {
+  padding: var(--space-sm);
+  border-bottom: var(--border-width-control) solid var(--color-divider);
+  text-align: start;
+  vertical-align: top;
+  white-space: nowrap;
+  background: var(--table-row-bg);
 }
 
-.limits-table.checksum-result-table code,
+.checksum-result-table th {
+  color: var(--color-text-secondary);
+  font-weight: var(--font-weight-medium);
+  background: var(--table-head-bg);
+}
+
+.checksum-result-table tr:last-child td {
+  border-bottom: 0;
+}
+
+.checksum-result-table .checksum-result-path {
+  min-width: var(--checksum-path-column-min);
+  max-width: var(--checksum-path-column-min);
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.checksum-result-table:focus-visible {
+  outline: var(--border-width-focus) solid var(--color-focus-ring);
+  outline-offset: var(--space-xs);
+}
+
 .checksum-digest {
   min-width: max-content;
   overflow: visible;
@@ -8484,6 +8547,30 @@ input.secure-input {
   overflow: auto;
 }
 
+.settings-view.modern-checksum {
+  height: auto;
+  min-height: 100%;
+}
+
+.modern-checksum > .settings-layout {
+  flex: 0 0 auto;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.settings-view.modern-checksum .settings-main-panel {
+  display: grid;
+  gap: var(--space-md);
+  overflow: visible;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.modern-checksum .checksum-result-panel {
+  margin-top: 0;
+}
+
 .settings-route-list {
   display: grid;
   gap: 8px;
@@ -11716,10 +11803,6 @@ select.classic-input:focus {
   padding-block: 5px;
 }
 
-.classic-checksum-result-panel .checksum-result-summary {
-  padding-bottom: 0;
-}
-
 .classic-checksum .classic-algorithm-grid {
   grid-auto-flow: column;
   grid-auto-columns: minmax(88px, 1fr);
@@ -14075,7 +14158,6 @@ select.classic-input:focus {
   .platform-note,
   .limits-table,
   .task-checksum-table,
-  .classic-checksum-table,
   .classic-preview-table,
   .classic-batch-table,
   .classic-conflict-table
@@ -14849,7 +14931,6 @@ select.classic-input:focus {
   .conflict-head,
   .limits-table > div:first-child,
   .task-checksum-table > div:first-child,
-  .classic-checksum-table > div:first-child,
   .classic-preview-table > div:first-child,
   .classic-batch-table > div:first-child,
   .classic-conflict-table > div:first-child
@@ -14865,8 +14946,7 @@ select.classic-input:focus {
   .assoc-row,
   .conflict-row,
   .limits-table > div,
-  .task-checksum-table > div,
-  .classic-checksum-table > div
+  .task-checksum-table > div
 ) {
   border-color: var(--color-divider);
   background: var(--table-row-bg);

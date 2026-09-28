@@ -242,6 +242,7 @@
     normalizeTaskConflictAnswer,
     taskPasswordReady,
     taskChecksumResultText,
+    taskOutcomeNeedsAttention,
     taskReviewScreen,
     taskOutputCanOpen,
     taskOutputIsFolder,
@@ -635,6 +636,7 @@
   const sourceCleanupBusyToastKey = "source-cleanup-recovery-busy";
   let checksumResultPanel = $state<HTMLElement | null>(null);
   let checksumCheckResultPanel = $state<HTMLElement | null>(null);
+  let checksumReportTaskIds = $state<Partial<Record<ChecksumResultKind, number>>>({});
   let checksumCopyFeedbackKind = $state<"checksum" | "checksum_check" | "task" | null>(null);
   let checksumCopyFeedbackTaskId = $state<number | null>(null);
   let checksumCopyFeedbackMessage = $state<string | null>(null);
@@ -1238,7 +1240,7 @@
   $effect(() => {
     const completedTask = runtimePreviews.completedTask;
     if (!completedTask) return;
-    const id = installCompletedTaskPreview(completedTask);
+    const id = installCompletedTaskPreview(completedTask, params.has("previewChecksumHistory"));
     if (id === null) return;
     taskDialogTaskId = id;
     taskDialogDismissedId = null;
@@ -9946,10 +9948,22 @@
   }
 
   function checksumWorkspaceSurface(variant: ToolsWorkspaceVariant): ChecksumWorkspaceSurface {
+    const calculation = selectedChecksumTask("checksum");
+    const verification = selectedChecksumTask("checksum_check");
+    const reportContext = (task: Task | null) => {
+      if (task?.spec.kind !== "checksum" && task?.spec.kind !== "checksum_check") return null;
+      return {
+        sources: task.spec.kind === "checksum" ? task.spec.inputs : [task.spec.manifest],
+        algorithm: checksumAlgorithmLabel(task.spec.algorithm),
+      };
+    };
+    const reportState = (task: Task | null) => task && taskOutcomeNeedsAttention(task)
+      ? tr("gui.task.state.needs_attention", "Needs attention")
+      : taskStateLabel(task?.state);
     const checksumRows = checksumItems("checksum").slice(0, 20).map((item) => {
       const path = checksumItemText(item, "path");
       return {
-        name: pathBaseName(path) || path,
+        name: path,
         size: formatBytes(checksumItemNumber(item, "size")),
         digest: checksumItemText(item, "digest"),
         status: checksumItemStatus(item),
@@ -9958,7 +9972,7 @@
     const verificationRows = checksumItems("checksum_check").slice(0, 20).map((item) => {
       const path = checksumItemText(item, "path");
       return {
-        name: pathBaseName(path) || path,
+        name: path,
         expected: checksumItemText(item, "expected"),
         actual: checksumItemText(item, "actual") || checksumItemText(item, "error"),
         status: checksumItemStatus(item),
@@ -10001,15 +10015,30 @@
       },
       manifestLabel: checksumManifestLabel(),
       result: {
+        kind: "checksum",
+        context: reportContext(calculation),
+        totalRows: checksumItems("checksum").length,
+        summary: [
+          { label: tr("gui.checksum.hashed_files", "Files hashed"), value: checksumResultNumber("checksum", "files_hashed").toLocaleString() },
+          { label: tr("gui.checksum.hashed_bytes", "Bytes hashed"), value: formatBytes(checksumResultNumber("checksum", "bytes_hashed")) },
+        ],
         rows: checksumRows,
-        state: taskStateLabel(latestChecksumTask("checksum")?.state),
+        state: reportState(calculation),
         feedback: checksumCopyFeedbackFor("checksum"),
         feedbackDanger: checksumCopyFeedbackToneFor("checksum") === "danger",
         onCopy: () => void copyChecksumResults("checksum"),
       },
       verification: {
+        kind: "checksum_check",
+        context: reportContext(verification),
+        totalRows: checksumItems("checksum_check").length,
+        summary: [
+          { label: tr("gui.checksum.passed", "Passed"), value: checksumResultNumber("checksum_check", "passed").toLocaleString() },
+          { label: tr("gui.checksum.failed", "Failed"), value: checksumResultNumber("checksum_check", "failed").toLocaleString() },
+          { label: tr("gui.checksum.checked", "Checked"), value: checksumResultNumber("checksum_check", "checked").toLocaleString() },
+        ],
         rows: verificationRows,
-        state: taskStateLabel(latestChecksumTask("checksum_check")?.state),
+        state: reportState(verification),
         feedback: checksumCopyFeedbackFor("checksum_check"),
         feedbackDanger: checksumCopyFeedbackToneFor("checksum_check") === "danger",
         onCopy: () => void copyChecksumResults("checksum_check"),
@@ -10109,7 +10138,10 @@
     return checksumManifestPath.trim() || tr("gui.checksum.choose_manifest_prompt", "Choose a checksum manifest");
   }
 
-  function latestChecksumTask(kind: "checksum" | "checksum_check"): Task | null {
+  function selectedChecksumTask(kind: "checksum" | "checksum_check"): Task | null {
+    const selectedId = checksumReportTaskIds[kind];
+    const selected = jobRows.find((task) => task.id === selectedId && task.spec.kind === kind);
+    if (selected) return selected;
     for (let index = jobRows.length - 1; index >= 0; index -= 1) {
       const task = jobRows[index];
       if (task.spec.kind === kind) return task;
@@ -10118,12 +10150,12 @@
   }
 
   function checksumResultNumber(kind: "checksum" | "checksum_check", key: string): number {
-    const value = latestChecksumTask(kind)?.result?.[key];
+    const value = selectedChecksumTask(kind)?.result?.[key];
     return typeof value === "number" && Number.isFinite(value) ? value : 0;
   }
 
   function checksumItems(kind: "checksum" | "checksum_check"): Record<string, unknown>[] {
-    const items = latestChecksumTask(kind)?.result?.items;
+    const items = selectedChecksumTask(kind)?.result?.items;
     if (!Array.isArray(items)) return [];
     return items.filter((item): item is Record<string, unknown> => item !== null && typeof item === "object" && !Array.isArray(item));
   }
@@ -10164,7 +10196,7 @@
   }
 
   async function copyChecksumResults(kind: "checksum" | "checksum_check") {
-    await copyChecksumText(checksumResultText(kind), kind);
+    await copyChecksumText(checksumResultText(kind), kind, selectedChecksumTask(kind)?.id ?? null);
   }
 
   async function copyTaskChecksumResults(task: TaskDialogModel) {
@@ -10275,12 +10307,13 @@
     }
     if (focusBlockingTaskIfAny()) return;
     try {
-      await submitJob({
+      const id = await submitJob({
         kind: "checksum",
         inputs: [target],
         excludes: checksumExcludeRules(),
         algorithm: checksumAlgorithm,
       });
+      checksumReportTaskIds.checksum = id;
       showNotice(tr("gui.checksum.queued", "Checksum added to queue"));
       recordOperation({
         status: "queued",
@@ -10301,11 +10334,12 @@
     }
     if (focusBlockingTaskIfAny()) return;
     try {
-      await submitJob({
+      const id = await submitJob({
         kind: "checksum_check",
         manifest,
         algorithm: checksumAlgorithm,
       });
+      checksumReportTaskIds.checksum_check = id;
       showNotice(tr("gui.checksum.verification_queued", "Checksum verification added to queue"));
       recordOperation({
         status: "queued",
@@ -12692,6 +12726,9 @@
       return;
     }
     if (target === "recovery") adoptRecoveryTargetFromTask(task);
+    if (task.id !== null && (task.spec.kind === "checksum" || task.spec.kind === "checksum_check")) {
+      checksumReportTaskIds[task.spec.kind] = task.id;
+    }
     setScreen(target);
     void dismissTaskDialog(task);
     if (target === "checksum") {
@@ -13354,11 +13391,15 @@
   }
 
   function checksumCopyFeedbackFor(kind: "checksum" | "checksum_check"): string | null {
-    return checksumCopyFeedbackKind === kind ? checksumCopyFeedbackMessage : null;
+    return checksumCopyFeedbackKind === kind && checksumCopyFeedbackTaskId === selectedChecksumTask(kind)?.id
+      ? checksumCopyFeedbackMessage
+      : null;
   }
 
   function checksumCopyFeedbackToneFor(kind: "checksum" | "checksum_check"): "success" | "danger" | null {
-    return checksumCopyFeedbackKind === kind ? checksumCopyFeedbackTone : null;
+    return checksumCopyFeedbackKind === kind && checksumCopyFeedbackTaskId === selectedChecksumTask(kind)?.id
+      ? checksumCopyFeedbackTone
+      : null;
   }
 
   function taskChecksumCopyFeedback(task: TaskDialogModel): string | null {
@@ -14430,7 +14471,7 @@
           <span>{tr("gui.screen.checksum", "Checksum")}</span>
           <span>{tr("gui.status.target", "Target: {target}").replace("{target}", checksumTargetName())}</span>
           <span>{tr("gui.checksum.status_algorithm_excludes", "{algorithm} · {count} excludes").replace("{algorithm}", checksumAlgorithmLabel(checksumAlgorithm)).replace("{count}", String(checksumExcludeRules().length))}</span>
-          <strong>{tr("gui.checksum.status_failed_latest", "{count} failed in latest manifest check").replace("{count}", checksumResultNumber("checksum_check", "failed").toLocaleString())}</strong>
+          <strong>{tr("gui.checksum.status_failed_report", "{count} failed in this manifest report").replace("{count}", checksumResultNumber("checksum_check", "failed").toLocaleString())}</strong>
         {:else if screen === "duplicates"}
           <span>{tr("gui.screen.duplicates", "Duplicate Finder")}</span>
           <span>{tr("gui.status.target", "Target: {target}").replace("{target}", duplicateScanTargetName())}</span>

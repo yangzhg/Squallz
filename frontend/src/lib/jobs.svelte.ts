@@ -1903,8 +1903,34 @@ function installTaskPreview(kind: PreviewTaskKind, state: Extract<JobStateName, 
   return id;
 }
 
-export function installCompletedTaskPreview(kind: PreviewTaskKind): number | null {
-  return installTaskPreview(kind, "done");
+export function installCompletedTaskPreview(kind: PreviewTaskKind, includeChecksumHistory = false): number | null {
+  const id = installTaskPreview(kind, "done");
+  if (!import.meta.env.DEV || !includeChecksumHistory || id === null) return id;
+  const previous = find(id);
+  if (!previous || (kind !== "checksum" && kind !== "checksum_check") || find(id + 2000)) return id;
+  const source = `${sampleRoot}/current-release`;
+  const spec: JobSpec = kind === "checksum"
+    ? { kind, inputs: [source], excludes: [], algorithm: "sha512" }
+    : { kind, manifest: `${source}/SHA512SUMS`, algorithm: "sha512" };
+  const digest = "ab".repeat(64);
+  store.tasks.push({
+    ...previous,
+    id: id + 2000,
+    spec,
+    title: titleFor(spec),
+    done: 64,
+    total: 64,
+    current: "release.txt",
+    currentDone: 64,
+    currentTotal: 64,
+    revealPath: source,
+    result: kind === "checksum"
+      ? { operation: kind, algorithm: "sha512", files_hashed: 1, bytes_hashed: 64,
+        items: [{ path: `${source}/release.txt`, digest, size: 64 }] }
+      : { operation: kind, ok: false, checked: 1, passed: 0, failed: 1,
+        items: [{ path: `${source}/release.txt`, expected: digest, actual: "cd".repeat(64), ok: false }] },
+  });
+  return id;
 }
 
 export function installActiveTaskPreview(kind: PreviewTaskKind): number | null {
