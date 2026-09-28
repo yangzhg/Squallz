@@ -261,64 +261,20 @@
     </header>
 
     <div class="task-modal-body">
-    <div class="task-modal-progress-stack">
-      <section class="task-modal-progress-block" data-task-progress-kind="overall">
-        <div class="task-modal-progress-line">
-          <span>{taskOverallProgressLabel(task)}</span>
-          <strong>{taskOverallProgressBadge(task)}</strong>
+    {#if !isTaskActiveState(task.state)}
+      <section
+        class="task-result-callout"
+        class:danger={task.state === "failed"}
+        class:cancelled={task.state === "cancelled"}
+        class:attention={taskOutcomeNeedsAttention(task)}
+      >
+        <span class="task-result-mark"><Icon name={resultIconName()} size={18} /></span>
+        <div class="task-result-copy">
+          <strong>{tr("gui.task.result", "Result")}</strong>
+          <span>{taskDialogResultSummary(task)}</span>
         </div>
-        {#if taskOverallProgressIndeterminate(task)}
-          <progress
-            data-task-progress="overall"
-            data-task-progress-source={task.scanEntries != null ? "scan-entry" : "pending"}
-            max="100"
-            aria-label={taskProgressSummary(task)}
-          ></progress>
-        {:else}
-          <progress
-            data-task-progress="overall"
-            data-task-progress-source={task.scanEntries != null ? "scan-entry" : task.total > 0 ? "engine-bytes" : "pending"}
-            value={taskProgressPercent(task)}
-            max="100"
-            aria-label={taskProgressSummary(task)}
-          ></progress>
-        {/if}
-        <p>{taskProgressSummary(task)}</p>
       </section>
-
-      {#if taskCurrentSectionVisible(task)}
-        <section
-          class="task-modal-progress-block"
-          data-task-progress-kind="current-file"
-          data-task-progress-source={taskCurrentProgressSource(task)}
-        >
-          <div class="task-modal-progress-line">
-            <span>{taskCurrentSectionLabel(task)}</span>
-            <strong>{taskCurrentProgressBadge(task)}</strong>
-          </div>
-          {#if hasTaskCurrentProgress(task)}
-            <progress
-              data-task-progress="current-file"
-              data-task-progress-source="engine-bytes"
-              value={taskCurrentProgressPercent(task)}
-              max="100"
-              aria-label={taskCurrentSectionLabel(task)}
-            ></progress>
-            <p>{taskCurrentProgressSummary(task)}</p>
-          {:else}
-            <div
-              class="task-current-pending"
-              class:active={isTaskProgressingState(task.state)}
-              data-task-progress-source={taskCurrentProgressSource(task)}
-              aria-live="polite"
-            >
-              <span title={taskCurrentLabel(task)}>{taskCurrentLabel(task)}</span>
-            </div>
-          {/if}
-        </section>
-      {/if}
-    </div>
-
+    {/if}
     {#if taskPhaseControlNoticeVisible(task)}
       <section class="task-control-callout" aria-live="polite">
         <Icon name="lock" size={16} />
@@ -409,6 +365,64 @@
       </section>
     {/if}
 
+    <div class="task-modal-progress-stack">
+      <section class="task-modal-progress-block" data-task-progress-kind="overall">
+        <div class="task-modal-progress-line">
+          <span>{taskOverallProgressLabel(task)}</span>
+          <strong>{taskOverallProgressBadge(task)}</strong>
+        </div>
+        {#if taskOverallProgressIndeterminate(task)}
+          <progress
+            data-task-progress="overall"
+            data-task-progress-source={task.scanEntries != null ? "scan-entry" : "pending"}
+            max="100"
+            aria-label={taskProgressSummary(task)}
+          ></progress>
+        {:else}
+          <progress
+            data-task-progress="overall"
+            data-task-progress-source={task.scanEntries != null ? "scan-entry" : task.total > 0 ? "engine-bytes" : "pending"}
+            value={taskProgressPercent(task)}
+            max="100"
+            aria-label={taskProgressSummary(task)}
+          ></progress>
+        {/if}
+        <p>{taskProgressSummary(task)}</p>
+      </section>
+
+      {#if taskCurrentSectionVisible(task)}
+        <section
+          class="task-modal-progress-block"
+          data-task-progress-kind="current-file"
+          data-task-progress-source={taskCurrentProgressSource(task)}
+        >
+          <div class="task-modal-progress-line">
+            <span>{taskCurrentSectionLabel(task)}</span>
+            <strong>{taskCurrentProgressBadge(task)}</strong>
+          </div>
+          {#if hasTaskCurrentProgress(task)}
+            <progress
+              data-task-progress="current-file"
+              data-task-progress-source="engine-bytes"
+              value={taskCurrentProgressPercent(task)}
+              max="100"
+              aria-label={taskCurrentSectionLabel(task)}
+            ></progress>
+            <p>{taskCurrentProgressSummary(task)}</p>
+          {:else}
+            <div
+              class="task-current-pending"
+              class:active={isTaskProgressingState(task.state)}
+              data-task-progress-source={taskCurrentProgressSource(task)}
+              aria-live="polite"
+            >
+              <span title={taskCurrentLabel(task)}>{taskCurrentLabel(task)}</span>
+            </div>
+          {/if}
+        </section>
+      {/if}
+    </div>
+
     {#if taskControlCalloutVisible(task)}
       <section class="task-control-callout" class:attention={task.controlIntent !== null} aria-live="polite">
         <Icon name={task.controlIntent === "cancel" ? "hourglass" : "info"} size={16} />
@@ -420,18 +434,6 @@
     {/if}
 
     {#if !isTaskActiveState(task.state)}
-      <section
-        class="task-result-callout"
-        class:danger={task.state === "failed"}
-        class:cancelled={task.state === "cancelled"}
-        class:attention={taskOutcomeNeedsAttention(task)}
-      >
-        <span class="task-result-mark"><Icon name={resultIconName()} size={18} /></span>
-        <div class="task-result-copy">
-          <strong>{tr("gui.task.result", "Result")}</strong>
-          <span>{taskDialogResultSummary(task)}</span>
-        </div>
-      </section>
       {#if taskErrorDetailsAvailable(task)}
         <div class="task-error-disclosure">
           <button

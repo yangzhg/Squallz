@@ -2287,9 +2287,9 @@ select option {
   z-index: var(--layer-task-center);
   top: var(--task-center-top);
   right: var(--task-center-edge);
-  bottom: var(--task-center-edge);
   width: min(var(--task-center-width), calc(100vw - (var(--task-center-edge) * 2)));
-  height: calc(100vh - var(--task-center-top) - var(--task-center-edge));
+  max-height: calc(100vh - var(--task-center-top) - var(--task-center-edge));
+  max-height: calc(100dvh - var(--task-center-top) - var(--task-center-edge));
   min-height: 0;
   display: grid;
   grid-template-rows: minmax(0, auto) minmax(0, 1fr);
@@ -3619,6 +3619,8 @@ select option {
   height: 100%;
   min-height: 0;
   max-height: none;
+  grid-template-rows: auto minmax(0, max-content) auto;
+  align-content: start;
   padding: var(--task-window-padding);
   border: 0;
   border-radius: 0;
@@ -13381,7 +13383,6 @@ select.classic-input:focus {
   .task-center-layout {
     --task-center-top: var(--task-center-narrow-top);
     right: var(--space-sm);
-    bottom: var(--space-sm);
     left: var(--space-sm);
     width: auto;
   }
