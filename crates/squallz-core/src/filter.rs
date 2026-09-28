@@ -1,67 +1,8 @@
-//! Literal entry selection for edits and glob filtering for compression
-//! input pruning and selective extraction.
-
-use std::borrow::Cow;
-use std::collections::{HashMap, HashSet};
+//! Glob filtering for compression input pruning and selective extraction.
 
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 
 use crate::api::{ControlToken, EntryMeta, EntryPath, FormatError};
-
-/// Resolves literal displayed paths to their original entry identities.
-/// Directories retain `/` and include their descendants. Missing selections
-/// and duplicate displayed names fail rather than selecting an uncertain
-/// target. Callers supply exactly the names presented in their interface.
-pub fn resolve_literal_selection<'a>(
-    entries: impl IntoIterator<Item = (Cow<'a, str>, &'a EntryPath)>,
-    selection: &[String],
-    control: &ControlToken,
-) -> Result<Vec<EntryPath>, FormatError> {
-    control.checkpoint()?;
-    let mut requested = HashMap::new();
-    for path in selection {
-        control.checkpoint()?;
-        if path.is_empty() {
-            return Err(FormatError::Other(
-                "selected entry path cannot be empty".into(),
-            ));
-        }
-        requested.insert(path.as_str(), false);
-    }
-    if requested.is_empty() {
-        return Ok(Vec::new());
-    }
-    let mut selected = Vec::new();
-    let mut seen = HashSet::new();
-    for (display, path) in entries {
-        control.checkpoint()?;
-        let mut matched = false;
-        let parents = display
-            .match_indices('/')
-            .map(|(index, _)| &display[..=index]);
-        for candidate in std::iter::once(display.as_ref()).chain(parents) {
-            if let Some(found) = requested.get_mut(candidate) {
-                *found = true;
-                matched = true;
-            }
-        }
-        if matched {
-            if !seen.insert(display.clone()) {
-                return Err(FormatError::Other(format!(
-                    "ambiguous selected entry in archive: {display}"
-                )));
-            }
-            selected.push(path.clone());
-        }
-    }
-    control.checkpoint()?;
-    if let Some((path, _)) = requested.iter().find(|(_, found)| !**found) {
-        return Err(FormatError::Other(format!(
-            "selected entry not found in archive: {path}"
-        )));
-    }
-    Ok(selected)
-}
 
 /// Compiled set of glob patterns matched against `/`-separated entry paths.
 ///
@@ -162,76 +103,6 @@ fn variants(pattern: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn literal_selection(
-        paths: &[EntryPath],
-        requested: &[&str],
-    ) -> Result<Vec<EntryPath>, FormatError> {
-        resolve_literal_selection(
-            paths
-                .iter()
-                .map(|path| (Cow::Borrowed(path.display.as_str()), path)),
-            &requested
-                .iter()
-                .map(|path| (*path).to_owned())
-                .collect::<Vec<_>>(),
-            &ControlToken::new(),
-        )
-    }
-
-    #[test]
-    fn literal_selection_preserves_raw_names_and_exact_scope() {
-        let legacy = EntryPath::from_raw(
-            vec![0xc4, 0xe3, b'.', b't', b'x', b't'],
-            "你.txt".into(),
-            "GBK",
-        );
-        let paths = [
-            EntryPath::from_utf8("notes.txt"),
-            EntryPath::from_utf8("other/notes.txt"),
-            EntryPath::from_utf8("logs[1]/sub/file.txt"),
-            EntryPath::from_utf8("logs1/keep.txt"),
-            legacy.clone(),
-        ];
-        assert_eq!(
-            literal_selection(&paths, &["notes.txt", "logs[1]/", "logs[1]/sub/", "你.txt"])
-                .unwrap(),
-            [paths[0].clone(), paths[2].clone(), legacy]
-        );
-    }
-
-    #[test]
-    fn literal_selection_rejects_missing_empty_or_ambiguous_names() {
-        let paths = [
-            EntryPath::from_utf8("keep.txt"),
-            EntryPath::from_utf8("docs/file.txt"),
-        ];
-        for requested in ["", "missing", "docs", "keep.txt/"] {
-            assert!(
-                literal_selection(&paths, &["keep.txt", requested]).is_err(),
-                "{requested}"
-            );
-        }
-        let ambiguous = [
-            EntryPath::from_raw(vec![0xff], "same.txt".into(), "utf-8"),
-            EntryPath::from_raw(vec![0xfe], "same.txt".into(), "utf-8"),
-        ];
-        assert!(
-            matches!(literal_selection(&ambiguous, &["same.txt"]), Err(FormatError::Other(message)) if message.contains("ambiguous"))
-        );
-    }
-
-    #[test]
-    fn literal_selection_honors_cancellation_and_empty_selection() {
-        let paths = [EntryPath::from_utf8("keep.txt")];
-        assert!(literal_selection(&paths, &[]).unwrap().is_empty());
-        let control = ControlToken::new();
-        control.cancel();
-        assert!(matches!(
-            resolve_literal_selection(std::iter::empty(), &[], &control),
-            Err(FormatError::Cancelled)
-        ));
-    }
 
     fn filter(patterns: &[&str]) -> PathFilter {
         let owned: Vec<String> = patterns.iter().map(|s| (*s).to_owned()).collect();

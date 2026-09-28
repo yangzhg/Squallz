@@ -23,7 +23,8 @@ use std::path::{Path, PathBuf};
 use squallz_format_api::{
     ArchiveFormat, ArchiveReader, ArchiveSourceSet, ArchiveWriter, ControlToken, CreateOptions,
     FormatCapabilities, FormatError, NativeVolumeLimits, NativeVolumeWriter, OpenOptions,
-    PhysicalFileIdentity, PreparedUpdateAdditions, ProgressSink, ReadSeek, UpdateOp, WriteSeek,
+    PhysicalFileIdentity, PreparedUpdateAdditions, ProgressSink, ReadSeek, UpdateOp, UpdateOptions,
+    WriteSeek,
 };
 #[cfg(feature = "process-backend")]
 use squallz_format_api::{
@@ -248,7 +249,7 @@ impl ArchiveFormat for ZipFormat {
         output: Box<dyn WriteSeek>,
         ops: &[UpdateOp],
         additions: &mut dyn PreparedUpdateAdditions,
-        opts: &CreateOptions,
+        opts: &UpdateOptions,
         progress: &dyn ProgressSink,
         ctl: &ControlToken,
     ) -> Result<(), FormatError> {

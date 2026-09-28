@@ -879,25 +879,8 @@ pub(crate) fn normalized_entry_path(meta: &EntryMeta) -> String {
 }
 
 pub(crate) fn normalized_entry_path_ref(meta: &EntryMeta) -> Cow<'_, str> {
-    let display = meta.path.display.as_str();
-    if display.contains('\\') {
-        let replaced = display.replace('\\', "/");
-        let mut normalized = replaced.trim_start_matches('/').to_owned();
-        if matches!(meta.entry_type, EntryType::Dir) && !normalized.ends_with('/') {
-            normalized.push('/');
-        }
-        return Cow::Owned(normalized);
-    }
-
-    let normalized = display.trim_start_matches('/');
-    if matches!(meta.entry_type, EntryType::Dir) && !normalized.ends_with('/') {
-        let mut owned = String::with_capacity(normalized.len().saturating_add(1));
-        owned.push_str(normalized);
-        owned.push('/');
-        Cow::Owned(owned)
-    } else {
-        Cow::Borrowed(normalized)
-    }
+    meta.path
+        .normalized_display(matches!(meta.entry_type, EntryType::Dir))
 }
 
 fn add_pending_row(

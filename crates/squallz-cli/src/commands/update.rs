@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::json;
 use squallz_core::api::{
-    CompressionLevel, CreateOptions, EntryPath, FormatError, OpenOptions, Password, UpdateOp,
+    CompressionLevel, CreateOptions, EntryPath, EntrySelection, Password, UpdateOp, UpdateOptions,
 };
 
 use super::reports::print_pretty_json;
@@ -59,32 +59,36 @@ pub fn run(
     for pattern in delete {
         ops.push(UpdateOp::Delete { pattern });
     }
-    ops.extend(literal_deletions(
-        ctx,
-        &archive,
-        &delete_entries,
-        encoding.as_deref(),
-    )?);
+    ops.extend(
+        delete_entries
+            .into_iter()
+            .map(|path| UpdateOp::DeleteEntry {
+                path: EntrySelection::Display(path),
+            }),
+    );
     for (from, to) in rename {
         ops.push(UpdateOp::Rename {
-            from: EntryPath::from_utf8(from),
+            from: EntrySelection::Display(from),
             to: EntryPath::from_utf8(to),
         });
     }
     for (from, to) in move_entries {
         ops.push(UpdateOp::Rename {
-            from: EntryPath::from_utf8(from),
+            from: EntrySelection::Display(from),
             to: EntryPath::from_utf8(to),
         });
     }
 
-    let opts = CreateOptions {
-        level: CompressionLevel::from_numeric(level),
-        password: password.map(Password::new),
-        encrypt_filenames: encrypt_names,
-        excludes,
-        resources: resource_options(threads, memory_limit),
-        ..CreateOptions::default()
+    let opts = UpdateOptions {
+        encoding_override: encoding,
+        create: CreateOptions {
+            level: CompressionLevel::from_numeric(level),
+            password: password.map(Password::new),
+            encrypt_filenames: encrypt_names,
+            excludes,
+            resources: resource_options(threads, memory_limit),
+            ..CreateOptions::default()
+        },
     };
     let operation_count =
         add_count + mkdir_count + delete_count + delete_entry_count + rename_count + move_count;
@@ -214,39 +218,6 @@ pub fn run(
         ctx.print_success(&message);
     }
     Ok(())
-}
-
-pub(super) fn literal_deletions(
-    ctx: &Ctx,
-    archive: &Path,
-    paths: &[String],
-    encoding: Option<&str>,
-) -> Result<Vec<UpdateOp>, FormatError> {
-    if paths.is_empty() {
-        return Ok(Vec::new());
-    }
-    let entries = ctx.engine.list_with_control(
-        archive,
-        &OpenOptions {
-            encoding_override: encoding.map(str::to_owned),
-            ..OpenOptions::default()
-        },
-        &ctx.ctl,
-    )?;
-    let selected = squallz_core::resolve_literal_selection(
-        entries.iter().map(|entry| {
-            (
-                std::borrow::Cow::Borrowed(entry.path.display.as_str()),
-                &entry.path,
-            )
-        }),
-        paths,
-        &ctx.ctl,
-    )?;
-    Ok(selected
-        .into_iter()
-        .map(|path| UpdateOp::DeleteEntry { path })
-        .collect())
 }
 
 fn add_dest_from_path(path: &Path) -> String {

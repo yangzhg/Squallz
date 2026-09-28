@@ -10,9 +10,9 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use squallz_core::api::{
-    CompressionLevel, CreateOptions, Detected, EntryPath, ExtractOptions, FormatError, NoProgress,
-    OpenOptions, OverwritePolicy, Password, SplitOutputMode, SqzCreateOptions, SqzInnerFormat,
-    SymlinkPolicy, TestSummary, UpdateOp,
+    CompressionLevel, CreateOptions, Detected, EntryPath, EntrySelection, ExtractOptions,
+    FormatError, NoProgress, OpenOptions, OverwritePolicy, Password, SplitOutputMode,
+    SqzCreateOptions, SqzInnerFormat, SymlinkPolicy, TestSummary, UpdateOp, UpdateOptions,
 };
 use squallz_core::{
     is_plain_sqz_path, is_sqz_archive_path, is_zip_family_path, ChecksumAlgorithm,
@@ -1094,16 +1094,13 @@ fn run_update_job(ctx: &Ctx, base_dir: &Path, job: &UpdateJob) -> Result<JobSucc
             pattern: pattern.clone(),
         });
     }
-    ops.extend(super::update::literal_deletions(
-        ctx,
-        &archive,
-        &job.delete_entries,
-        job.encoding.as_deref(),
-    )?);
+    ops.extend(job.delete_entries.iter().map(|path| UpdateOp::DeleteEntry {
+        path: EntrySelection::Display(path.clone()),
+    }));
     for item in &job.rename {
         let (from, to) = item.as_pair();
         ops.push(UpdateOp::Rename {
-            from: EntryPath::from_utf8(from),
+            from: EntrySelection::Display(from.to_owned()),
             to: EntryPath::from_utf8(to),
         });
     }
@@ -1120,13 +1117,16 @@ fn run_update_job(ctx: &Ctx, base_dir: &Path, job: &UpdateJob) -> Result<JobSucc
     let level = compression_level(job.level, job.profile)?;
     let excludes =
         crate::content_policy::resolve_create_excludes(job.content_policy, job.excludes.clone());
-    let opts = CreateOptions {
-        level: CompressionLevel::from_numeric(level),
-        password: job.password.clone().map(Password::new),
-        encrypt_filenames: job.encrypt_names,
-        excludes,
-        resources: resource_options(job.threads, job.memory_limit),
-        ..CreateOptions::default()
+    let opts = UpdateOptions {
+        encoding_override: job.encoding.clone(),
+        create: CreateOptions {
+            level: CompressionLevel::from_numeric(level),
+            password: job.password.clone().map(Password::new),
+            encrypt_filenames: job.encrypt_names,
+            excludes,
+            resources: resource_options(job.threads, job.memory_limit),
+            ..CreateOptions::default()
+        },
     };
     ctx.engine
         .update(&archive, &ops, &opts, &NoProgress, &ctx.ctl)?;

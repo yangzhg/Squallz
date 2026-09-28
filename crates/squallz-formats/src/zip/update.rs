@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use squallz_format_api::{
     ArchiveWriter, ControlToken, CreateOptions, EntryMeta, EntryPath, FormatError,
-    PreparedUpdateAdditions, ProgressSink, ReadSeek, UpdateOp, WriteSeek,
+    PreparedUpdateAdditions, ProgressSink, ReadSeek, UpdateOp, UpdateOptions, WriteSeek,
 };
 use zip::ZipArchive;
 
@@ -22,6 +22,7 @@ use delete::Deletions;
 
 mod delete;
 mod plan;
+mod selection;
 
 /// Extra bytes included in the early space estimate for central-directory
 /// growth and compression overhead on incompressible additions.
@@ -57,7 +58,6 @@ struct EngineAdditions<'a>(&'a mut dyn PreparedUpdateAdditions);
 struct PreparedRewrite<'a> {
     archive: ZipArchive<RawCopySource<'a>>,
     raw_copy: RawCopyTracker,
-    deletes: Deletions,
     plan: plan::UpdatePlan,
 }
 
@@ -189,7 +189,7 @@ pub(super) fn rewrite_archive(
     output: Box<dyn WriteSeek>,
     ops: &[UpdateOp],
     additions: &mut dyn PreparedUpdateAdditions,
-    opts: &CreateOptions,
+    opts: &UpdateOptions,
     progress: &dyn ProgressSink,
     ctl: &ControlToken,
 ) -> Result<(), FormatError> {
@@ -210,24 +210,30 @@ fn rewrite_archive_impl(
     output: Box<dyn WriteSeek>,
     ops: &[UpdateOp],
     additions: &mut impl AdditionSet,
-    opts: &CreateOptions,
+    opts: &UpdateOptions,
     progress: &dyn ProgressSink,
     ctl: &ControlToken,
 ) -> Result<(), FormatError> {
     let PreparedRewrite {
         mut archive,
         raw_copy,
-        deletes,
         plan,
-    } = prepare_update(source, ops, additions, progress, ctl)?;
+    } = prepare_update(
+        source,
+        ops,
+        additions,
+        opts.encoding_override.as_deref(),
+        progress,
+        ctl,
+    )?;
     rewrite(
         &mut archive,
         &raw_copy,
         output,
-        &deletes,
+        &plan.deletes,
         &plan,
         additions,
-        opts,
+        &opts.create,
         progress,
         ctl,
     )
@@ -237,11 +243,11 @@ fn prepare_update<'a>(
     source: Box<dyn ReadSeek>,
     ops: &[UpdateOp],
     additions: &impl AdditionSet,
+    encoding: Option<&str>,
     progress: &'a dyn ProgressSink,
     ctl: &'a ControlToken,
 ) -> Result<PreparedRewrite<'a>, FormatError> {
     ctl.checkpoint()?;
-    let mut deletes = Deletions::new(ops, ctl)?;
     let raw_copy = RawCopyTracker::default();
     let source = RawCopySource {
         inner: source,
@@ -253,11 +259,10 @@ fn prepare_update<'a>(
         ZipArchive::new(source).map_err(|error| map_controlled_zip_error(error, ctl))?;
     ctl.checkpoint()?;
 
-    let plan = plan::prepare(&mut archive, ops, &mut deletes, additions, ctl)?;
+    let plan = plan::prepare(&mut archive, ops, additions, encoding, ctl)?;
     Ok(PreparedRewrite {
         archive,
         raw_copy,
-        deletes,
         plan,
     })
 }
@@ -285,7 +290,7 @@ fn rewrite(
         let file = archive
             .by_index_raw(index)
             .map_err(|error| map_controlled_zip_error(error, ctl))?;
-        if !deletes.matches(file.name_raw()) {
+        if !deletes.matches(&decode_entry_name(file.name_raw(), plan.encoding)) {
             copied_total = copied_total.saturating_add(file.compressed_size());
         }
     }
@@ -300,7 +305,7 @@ fn rewrite(
         let compressed = file.compressed_size();
         let path = decode_entry_name(file.name_raw(), plan.encoding);
         progress.on_progress(done, total, &path);
-        if deletes.matches(file.name_raw()) {
+        if deletes.matches(&path) {
             continue; // dropped entry
         }
         let rename_to = plan.renames.get(file.name_raw());
@@ -541,6 +546,7 @@ mod tests {
             Box::new(source),
             &[],
             &additions,
+            None,
             &progress,
             control.as_ref(),
         );
@@ -588,7 +594,7 @@ mod tests {
             Box::new(output),
             &[],
             &mut additions,
-            &CreateOptions::default(),
+            &UpdateOptions::default(),
             &squallz_format_api::NoProgress,
             &control,
         );

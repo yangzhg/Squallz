@@ -511,7 +511,7 @@ fn localize_update_help_en(cmd: Command) -> Command {
             arg.help("Delete a literal archive path. End directories with / to delete their subtree. Can be repeated.")
         })
         .mut_arg("encoding", |arg| {
-            arg.help("Entry-name encoding for literal deletion, such as gbk or shift_jis.")
+            arg.help("Source entry-name encoding for selections, globs, renames and progress, such as gbk or shift_jis.")
         })
         .mut_arg("rename", |arg| {
             arg.help("Rename an entry. Format: from=to. Can be repeated.")
@@ -1378,7 +1378,7 @@ pub enum Cmd {
         /// 按完整字面路径删除条目；目录以 / 结尾并删除整个子树（可多次）
         #[arg(long = "delete-entry", value_name = "ENTRY_PATH")]
         delete_entries: Vec<String>,
-        /// 精确删除时使用的条目名编码（如 gbk / shift_jis）
+        /// 源条目名编码，用于选择、glob、重命名和进度显示（如 gbk / shift_jis）
         #[arg(long)]
         encoding: Option<String>,
         /// 重命名条目（可多次，格式 from=to）

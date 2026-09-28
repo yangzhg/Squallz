@@ -534,6 +534,26 @@ pub struct RecoverySummary {
     pub repair_possible: bool,
 }
 
+/// Options for editing an existing archive.
+#[derive(Debug, Clone, Default)]
+pub struct UpdateOptions {
+    /// Compression, encryption and input policies for newly added entries.
+    pub create: CreateOptions,
+    /// Source entry-name encoding used for displayed selections, glob matching,
+    /// namespace validation and progress. `None` uses automatic detection.
+    pub encoding_override: Option<String>,
+}
+
+/// Identifies an existing archive entry without conflating decoded text and bytes.
+#[derive(Debug, Clone)]
+pub enum EntrySelection {
+    /// An identity obtained from the archive reader, including implicit directories.
+    Raw(EntryPath),
+    /// A literal displayed path, resolved within the locked source archive.
+    /// Ambiguous and missing paths are rejected before rewriting.
+    Display(String),
+}
+
 /// Mutation of an existing archive.
 #[derive(Debug, Clone)]
 pub enum UpdateOp {
@@ -558,14 +578,14 @@ pub enum UpdateOp {
     /// directory and its complete subtree, including implicit directories.
     /// Missing paths fail the update before the archive is rewritten.
     DeleteEntry {
-        /// Original entry-name bytes; no glob expansion or path normalization.
-        path: EntryPath,
+        /// Literal selection; no glob expansion.
+        path: EntrySelection,
     },
     /// Rename a file or a directory and its complete subtree. Directory
     /// sources may be implicit (only their descendants have archive entries).
     Rename {
-        /// Old path
-        from: EntryPath,
+        /// Existing file or directory selection.
+        from: EntrySelection,
         /// New path
         to: EntryPath,
     },

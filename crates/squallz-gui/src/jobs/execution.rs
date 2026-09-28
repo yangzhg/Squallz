@@ -9,8 +9,9 @@ use std::sync::{Arc, Mutex};
 use squallz_core::api::{
     ArchiveSourceSet, ArchiveStructureStatus, BoundedProblemLog, CompressionLevel,
     ConflictDecision, ConflictResolver, ControlToken, CreateOptions, EntryMeta, EntryPath,
-    ExtractProblemReporter, ExtractReport, FormatError, OpenOptions, OverwritePolicy, Password,
-    ProblemPreview, ProgressPhase, ProgressSink, RecoverySummary, SymlinkPolicy, UpdateOp,
+    EntrySelection, ExtractProblemReporter, ExtractReport, FormatError, OpenOptions,
+    OverwritePolicy, Password, ProblemPreview, ProgressPhase, ProgressSink, RecoverySummary,
+    SymlinkPolicy, UpdateOp, UpdateOptions,
 };
 use squallz_core::{
     create_destination_has_conflict, is_plain_sqz_path, is_sqz_archive_path, is_zip_family_path,
@@ -1470,31 +1471,12 @@ impl JobContext<'_> {
                         path: EntryPath::from_utf8(dir.clone()),
                     });
                 }
-                if !delete.is_empty() {
-                    let entries = state.engine.list_with_control(
-                        &archive,
-                        &OpenOptions {
-                            password: password.as_deref().map(Password::new),
-                            encoding_override: encoding.clone(),
-                        },
-                        ctl,
-                    )?;
-                    let selected = squallz_core::resolve_literal_selection(
-                        entries.iter().map(|entry| {
-                            (crate::state::normalized_entry_path_ref(entry), &entry.path)
-                        }),
-                        delete,
-                        ctl,
-                    )?;
-                    ops.extend(
-                        selected
-                            .into_iter()
-                            .map(|path| UpdateOp::DeleteEntry { path }),
-                    );
-                }
+                ops.extend(delete.iter().map(|path| UpdateOp::DeleteEntry {
+                    path: EntrySelection::Display(path.clone()),
+                }));
                 for item in rename {
                     ops.push(UpdateOp::Rename {
-                        from: EntryPath::from_utf8(item.from.clone()),
+                        from: EntrySelection::Display(item.from.clone()),
                         to: EntryPath::from_utf8(item.to.clone()),
                     });
                 }
@@ -1503,12 +1485,15 @@ impl JobContext<'_> {
                         "no archive update operations".into(),
                     ));
                 }
-                let opts = CreateOptions {
-                    level: CompressionLevel::from_numeric(*level),
-                    password: password.as_deref().map(Password::new),
-                    resources: settings.resource_options(),
-                    excludes: content_policy.resolve_excludes(excludes),
-                    ..CreateOptions::default()
+                let opts = UpdateOptions {
+                    encoding_override: encoding.clone(),
+                    create: CreateOptions {
+                        level: CompressionLevel::from_numeric(*level),
+                        password: password.as_deref().map(Password::new),
+                        resources: settings.resource_options(),
+                        excludes: content_policy.resolve_excludes(excludes),
+                        ..CreateOptions::default()
+                    },
                 };
                 state.engine.update(&archive, &ops, &opts, sink, ctl)?;
                 Ok(Some(serde_json::json!({

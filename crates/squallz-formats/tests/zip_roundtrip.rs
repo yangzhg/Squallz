@@ -1639,10 +1639,12 @@ fn zip64_store_5gib_roundtrip() {
                 .update(
                     &archive,
                     &[squallz_format_api::UpdateOp::Rename {
-                        from: EntryPath::from_utf8("zeros.bin"),
+                        from: squallz_format_api::EntrySelection::Raw(EntryPath::from_utf8(
+                            "zeros.bin",
+                        )),
                         to: EntryPath::from_utf8(name),
                     }],
-                    &CreateOptions::default(),
+                    &squallz_format_api::UpdateOptions::default(),
                     &NoProgress,
                     &ControlToken::new(),
                 )

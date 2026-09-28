@@ -48,7 +48,7 @@ pub use destination_guard::{
 };
 pub use duplicates::{DuplicateGroup, DuplicateScanReport};
 pub use extract_guard::{build_extract_input_guard, ArchiveSourceState, ExtractInputGuard};
-pub use filter::{resolve_literal_selection, PathFilter};
+pub use filter::PathFilter;
 pub use layout::{
     analyze_extract_layout, inspect_extract_space, ExtractPlan, ExtractScope, ExtractSpace,
     SmartLayout,
@@ -87,7 +87,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use api::{
     ArchiveReader, ArchiveStructureStatus, ControlToken, CreateOptions, EntryMeta, EntryPath,
     EntryType, ExtractOptions, FormatError, FormatInfo, FormatRegistry, OpenOptions, ProgressSink,
-    ReadSeek, SafetyLimits, TestSummary, UpdateOp, TEST_PROBLEM_PREVIEW_LIMIT,
+    ReadSeek, SafetyLimits, TestSummary, UpdateOp, UpdateOptions, TEST_PROBLEM_PREVIEW_LIMIT,
 };
 use compound::{decompress_factory, SingleFileArchiveReader};
 use controlled_io::{controlled_result, ControlledReadSeek};
@@ -1538,7 +1538,7 @@ impl Engine {
         &self,
         path: &Path,
         ops: &[UpdateOp],
-        opts: &CreateOptions,
+        opts: &UpdateOptions,
         progress: &dyn ProgressSink,
         ctl: &ControlToken,
     ) -> Result<(), FormatError> {

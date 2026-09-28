@@ -3864,106 +3864,102 @@ fn update_job_deletes_only_literal_selected_paths() {
 
 #[test]
 fn update_job_resolves_display_names_and_rejects_ambiguous_or_missing_selection() {
-    for (source_name, raw_name, selected, expected_state) in [
-        (
-            "first.txt",
-            &[0xc4, 0xe3, b'[', b'1', b']', b'.', b't', b'x', b't'][..],
-            "你[1].txt",
-            "done",
-        ),
-        (
-            "first.txt",
-            &[0xc4, 0xe3, b'[', b'1', b']', b'.', b't', b'x', b't'][..],
-            "nested/first.txt",
-            "done",
-        ),
-        (
-            "nested/first.txt",
-            &b"///////first.txt"[..],
-            "first.txt",
-            "failed",
-        ),
-        ("first.txt", &b"first.txt"[..], "missing.txt", "failed"),
-    ] {
-        let dir = temp_dir("update-delete-displayed");
-        fs::create_dir_all(dir.join("nested")).unwrap();
-        fs::write(dir.join("first.txt"), b"root content").unwrap();
-        fs::write(dir.join("nested/first.txt"), b"nested content").unwrap();
-        let archive = dir.join("out.zip");
-        let state = Arc::new(AppState::new());
-        state
-            .engine
-            .create(
-                &archive,
-                &[dir.join("first.txt"), dir.join("nested")],
-                &CreateOptions::default(),
-                &squallz_core::api::NoProgress,
-                &ControlToken::new(),
-            )
-            .unwrap();
-        let mut bytes = fs::read(&archive).unwrap();
-        assert_eq!(source_name.len(), raw_name.len());
-        let offsets: Vec<_> = bytes
-            .windows(source_name.len())
-            .enumerate()
-            .filter_map(|(offset, name)| (name == source_name.as_bytes()).then_some(offset))
-            .collect();
-        // The root name is also a suffix of the nested entry; leave that
-        // suffix untouched when replacing only the root header names.
-        let offsets: Vec<_> = offsets
-            .into_iter()
-            .filter(|offset| *offset == 0 || bytes[offset - 1] != b'/')
-            .collect();
-        assert_eq!(offsets.len(), 2);
-        for offset in offsets {
-            bytes[offset..offset + raw_name.len()].copy_from_slice(raw_name);
-        }
-        fs::write(&archive, &bytes).unwrap();
-        let manager = JobManager::new();
-        let sink = Arc::new(TestSink::default());
-        let events: Arc<dyn EventSink> = sink.clone();
-        let id = manager.submit(
-            Arc::clone(&state),
-            events,
-            JobSpec::Update {
-                path: archive.to_string_lossy().into_owned(),
-                add: vec![],
-                delete: vec![selected.into()],
-                encoding: Some("gbk".into()),
-                rename: vec![],
-                mkdir: vec![],
-                excludes: vec![],
-                content_policy: squallz_core::CreateContentPolicy::KeepAllFiles,
-                password: None,
-                level: 5,
-            },
-            SettingsDto::default(),
-        );
-        manager.wait_idle();
-        assert_eq!(
-            states_of(&sink.events.lock().unwrap(), id),
-            ["queued", "running", expected_state]
-        );
-        if expected_state == "failed" {
-            assert_eq!(fs::read(&archive).unwrap(), bytes);
-        } else {
-            let mut names: Vec<_> = state
+    for rename_selected in [false, true] {
+        for (source_name, raw_name, selected, expected_state) in [
+            (
+                "first.txt",
+                &[0xc4, 0xe3, b'[', b'1', b']', b'.', b't', b'x', b't'][..],
+                "你[1].txt",
+                "done",
+            ),
+            (
+                "first.txt",
+                &[0xc4, 0xe3, b'[', b'1', b']', b'.', b't', b'x', b't'][..],
+                "nested/first.txt",
+                "done",
+            ),
+            (
+                "nested/first.txt",
+                &b"///////first.txt"[..],
+                "first.txt",
+                "failed",
+            ),
+            ("first.txt", &b"first.txt"[..], "missing.txt", "failed"),
+        ] {
+            let dir = temp_dir("update-delete-displayed");
+            fs::create_dir_all(dir.join("nested")).unwrap();
+            fs::write(dir.join("first.txt"), b"root content").unwrap();
+            fs::write(dir.join("nested/first.txt"), b"nested content").unwrap();
+            let archive = dir.join("out.zip");
+            let state = Arc::new(AppState::new());
+            state
                 .engine
-                .list(
+                .create(
                     &archive,
-                    &OpenOptions {
-                        encoding_override: Some("gbk".into()),
-                        ..OpenOptions::default()
-                    },
+                    &[dir.join("first.txt"), dir.join("nested")],
+                    &CreateOptions::default(),
+                    &squallz_core::api::NoProgress,
+                    &ControlToken::new(),
                 )
-                .unwrap()
-                .into_iter()
-                .map(|entry| entry.path.display)
+                .unwrap();
+            let mut bytes = fs::read(&archive).unwrap();
+            assert_eq!(source_name.len(), raw_name.len());
+            let offsets: Vec<_> = bytes
+                .windows(source_name.len())
+                .enumerate()
+                .filter_map(|(offset, name)| (name == source_name.as_bytes()).then_some(offset))
                 .collect();
-            names.sort();
-            if selected == "nested/first.txt" {
-                assert_eq!(names, ["nested/", "你[1].txt"]);
-                let entries = state
+            // The root name is also a suffix of the nested entry; leave that
+            // suffix untouched when replacing only the root header names.
+            let offsets: Vec<_> = offsets
+                .into_iter()
+                .filter(|offset| *offset == 0 || bytes[offset - 1] != b'/')
+                .collect();
+            assert_eq!(offsets.len(), 2);
+            for offset in offsets {
+                bytes[offset..offset + raw_name.len()].copy_from_slice(raw_name);
+            }
+            fs::write(&archive, &bytes).unwrap();
+            let manager = JobManager::new();
+            let sink = Arc::new(TestSink::default());
+            let events: Arc<dyn EventSink> = sink.clone();
+            let id = manager.submit(
+                Arc::clone(&state),
+                events,
+                JobSpec::Update {
+                    path: archive.to_string_lossy().into_owned(),
+                    add: vec![],
+                    delete: if rename_selected {
+                        vec![]
+                    } else {
+                        vec![selected.into()]
+                    },
+                    encoding: Some("gbk".into()),
+                    rename: if rename_selected {
+                        vec![crate::dto::RenameSpec {
+                            from: selected.into(),
+                            to: "renamed.txt".into(),
+                        }]
+                    } else {
+                        vec![]
+                    },
+                    mkdir: vec![],
+                    excludes: vec![],
+                    content_policy: squallz_core::CreateContentPolicy::KeepAllFiles,
+                    password: None,
+                    level: 5,
+                },
+                SettingsDto::default(),
+            );
+            manager.wait_idle();
+            assert_eq!(
+                states_of(&sink.events.lock().unwrap(), id),
+                ["queued", "running", expected_state]
+            );
+            if expected_state == "failed" {
+                assert_eq!(fs::read(&archive).unwrap(), bytes);
+            } else {
+                let mut names: Vec<_> = state
                     .engine
                     .list(
                         &archive,
@@ -3972,21 +3968,42 @@ fn update_job_resolves_display_names_and_rejects_ambiguous_or_missing_selection(
                             ..OpenOptions::default()
                         },
                     )
-                    .unwrap();
-                assert_eq!(
-                    entries
-                        .iter()
-                        .find(|entry| entry.path.display == "你[1].txt")
-                        .unwrap()
-                        .path
-                        .raw,
-                    raw_name
-                );
-            } else {
-                assert_eq!(names, ["nested/", "nested/first.txt"]);
+                    .unwrap()
+                    .into_iter()
+                    .map(|entry| entry.path.display)
+                    .collect();
+                names.sort();
+                let expected = match (rename_selected, selected == "nested/first.txt") {
+                    (false, false) => vec!["nested/", "nested/first.txt"],
+                    (false, true) => vec!["nested/", "你[1].txt"],
+                    (true, false) => vec!["nested/", "nested/first.txt", "renamed.txt"],
+                    (true, true) => vec!["nested/", "renamed.txt", "你[1].txt"],
+                };
+                assert_eq!(names, expected);
+                if selected == "nested/first.txt" {
+                    let entries = state
+                        .engine
+                        .list(
+                            &archive,
+                            &OpenOptions {
+                                encoding_override: Some("gbk".into()),
+                                ..OpenOptions::default()
+                            },
+                        )
+                        .unwrap();
+                    assert_eq!(
+                        entries
+                            .iter()
+                            .find(|entry| entry.path.display == "你[1].txt")
+                            .unwrap()
+                            .path
+                            .raw,
+                        raw_name
+                    );
+                }
             }
+            fs::remove_dir_all(dir).unwrap();
         }
-        fs::remove_dir_all(dir).unwrap();
     }
 }
 
@@ -4214,6 +4231,18 @@ fn update_job_creates_directory_and_moves_a_subtree_into_it() {
         )
         .unwrap();
 
+    let mut bytes = std::fs::read(&archive).unwrap();
+    let offsets: Vec<_> = bytes
+        .windows(4)
+        .enumerate()
+        .filter_map(|(index, name)| (name == b"seed").then_some(index))
+        .collect();
+    assert_eq!(offsets.len(), 4);
+    for offset in offsets {
+        bytes[offset..offset + 4].copy_from_slice(b"\xc4\xe3\xba\xc3");
+    }
+    std::fs::write(&archive, bytes).unwrap();
+
     let manager = JobManager::new();
     let sink = Arc::new(TestSink::default());
     let events: Arc<dyn EventSink> = sink.clone();
@@ -4224,7 +4253,7 @@ fn update_job_creates_directory_and_moves_a_subtree_into_it() {
             path: archive.to_string_lossy().into_owned(),
             add: vec![],
             delete: vec![],
-            encoding: None,
+            encoding: Some("gbk".into()),
             rename: vec![],
             mkdir: vec!["new-folder".into()],
             excludes: vec![],
@@ -4254,12 +4283,12 @@ fn update_job_creates_directory_and_moves_a_subtree_into_it() {
             path: archive.to_string_lossy().into_owned(),
             add: vec![],
             delete: vec![],
-            encoding: None,
+            encoding: Some("gbk".into()),
             mkdir: vec![],
             excludes: vec![],
             rename: vec![crate::dto::RenameSpec {
-                from: "seed/".into(),
-                to: "new-folder/seed/".into(),
+                from: "你好/".into(),
+                to: "new-folder/你好/".into(),
             }],
             content_policy: squallz_core::CreateContentPolicy::KeepAllFiles,
             password: None,
@@ -4280,11 +4309,11 @@ fn update_job_creates_directory_and_moves_a_subtree_into_it() {
         .map(|entry| entry.path.display)
         .collect();
     assert!(
-        names.iter().any(|name| name == "new-folder/seed/base.txt"),
+        names.iter().any(|name| name == "new-folder/你好/base.txt"),
         "{names:?}"
     );
     assert!(
-        !names.iter().any(|name| name.starts_with("seed/")),
+        !names.iter().any(|name| name.starts_with("你好/")),
         "{names:?}"
     );
     std::fs::remove_dir_all(&dir).unwrap();

@@ -14,8 +14,9 @@ use std::time::{Duration, Instant};
 
 use common::{build_stored_zip, command_exists, engine, RawZipEntry, TempDir};
 use squallz_core::api::{
-    CompressionLevel, ControlToken, CreateOptions, EntryMeta, EntryPath, FormatError, NoProgress,
-    OpenOptions, Password, ProgressPhase, ProgressSink, UpdateOp,
+    CompressionLevel, ControlToken, CreateOptions, EntryMeta, EntryPath, EntrySelection,
+    FormatError, NoProgress, OpenOptions, Password, ProgressPhase, ProgressSink, UpdateOp,
+    UpdateOptions,
 };
 
 /// Builds a base archive with project/a.txt, project/sub/b.txt, project/c.log.
@@ -61,6 +62,232 @@ struct RawEntrySnapshot {
     encrypted: bool,
     compression: zip::CompressionMethod,
     unix_mode: Option<u32>,
+}
+
+#[derive(Default)]
+struct EntryTrace(Mutex<Vec<EntryPath>>);
+
+impl ProgressSink for EntryTrace {
+    fn on_progress(&self, _done: u64, _total: u64, current: &EntryPath) {
+        if !current.raw.is_empty() {
+            self.0.lock().unwrap().push(current.clone());
+        }
+    }
+}
+
+#[test]
+fn update_encoding_drives_directory_selection_globs_conflicts_and_progress() {
+    for (encoding, directory, file_name) in [
+        (encoding_rs::GBK, "你好[1]", "目录.txt"),
+        (encoding_rs::GBK, "目录[1]", "你.txt"),
+        (encoding_rs::SHIFT_JIS, "日本語[1]", "表.txt"),
+        (encoding_rs::BIG5, "目錄[1]", "書.txt"),
+    ] {
+        for explicit_directory in [false, true] {
+            let tmp = TempDir::new("update-display-encoding");
+            let archive = tmp.path().join("legacy.zip");
+            let source = format!("{directory}/{file_name}");
+            let mut names = vec![
+                source.clone(),
+                format!("{directory}/削除.log"),
+                "保留.txt".into(),
+            ];
+            if explicit_directory {
+                names.push(format!("{directory}/"));
+            }
+            let entries: Vec<_> = names
+                .iter()
+                .map(|name| {
+                    let (raw, _, errors) = encoding.encode(name);
+                    assert!(!errors, "{name}");
+                    RawZipEntry {
+                        name: raw.into_owned(),
+                        data: if name.ends_with('/') {
+                            Vec::new()
+                        } else {
+                            b"unchanged contents".to_vec()
+                        },
+                    }
+                })
+                .collect();
+            let original = build_stored_zip(&entries);
+            fs::write(&archive, &original).unwrap();
+            let options = UpdateOptions {
+                encoding_override: Some(encoding.name().into()),
+                ..Default::default()
+            };
+            let error = run_update(
+                &archive,
+                &[UpdateOp::Rename {
+                    from: EntrySelection::Display(source.clone()),
+                    to: EntryPath::from_utf8("保留.txt"),
+                }],
+                &options,
+            )
+            .unwrap_err();
+            assert_other_contains(error, "already exists");
+            assert_eq!(fs::read(&archive).unwrap(), original);
+            let mut expected = raw_entry_snapshots(&archive);
+            expected.retain(|entry| entry.name != entries[1].name);
+            expected[0].name = format!("整理/{file_name}").into_bytes();
+            if explicit_directory {
+                expected.last_mut().unwrap().name = "整理/".as_bytes().to_vec();
+            }
+            let progress = EntryTrace::default();
+            engine()
+                .update(
+                    &archive,
+                    &[
+                        UpdateOp::Rename {
+                            from: EntrySelection::Display(directory.into()),
+                            to: EntryPath::from_utf8("整理/"),
+                        },
+                        UpdateOp::Delete {
+                            pattern: "*除.log".into(),
+                        },
+                    ],
+                    &options,
+                    &progress,
+                    &ControlToken::new(),
+                )
+                .unwrap();
+            assert_eq!(raw_entry_snapshots(&archive), expected);
+            let trace = progress.0.lock().unwrap();
+            let current = trace
+                .iter()
+                .find(|path| path.raw == entries[0].name)
+                .unwrap();
+            assert_eq!(current.display, source);
+            assert_eq!(current.encoding, encoding.name());
+            assert_unzip_t(&archive);
+            assert_no_update_temp(tmp.path());
+        }
+    }
+}
+
+#[test]
+fn update_display_directory_deletion_preserves_backslash_path_boundaries() {
+    for explicit_directory in [false, true] {
+        let tmp = TempDir::new("update-backslash-directory");
+        let archive = tmp.path().join("legacy.zip");
+        let mut names = vec!["docs\\表.txt", "docs\\sub\\keep.txt", "docs-old\\表.txt"];
+        if explicit_directory {
+            names.push("docs\\");
+        }
+        let entries: Vec<_> = names
+            .iter()
+            .map(|name| RawZipEntry {
+                name: encoding_rs::SHIFT_JIS.encode(name).0.into_owned(),
+                data: if name.ends_with('\\') {
+                    Vec::new()
+                } else {
+                    b"contents".to_vec()
+                },
+            })
+            .collect();
+        let original = build_stored_zip(&entries);
+        fs::write(&archive, &original).unwrap();
+        let options = UpdateOptions {
+            encoding_override: Some("shift_jis".into()),
+            ..Default::default()
+        };
+        // The second byte of the Japanese character is also 0x5c, but it
+        // is not a path separator and must not produce another directory.
+        assert_other_contains(
+            run_update(
+                &archive,
+                &[UpdateOp::DeleteEntry {
+                    path: EntrySelection::Display("docs/表/".into()),
+                }],
+                &options,
+            )
+            .unwrap_err(),
+            "not found",
+        );
+        assert_eq!(fs::read(&archive).unwrap(), original);
+        assert!(matches!(run_update(
+        &archive,
+        &[UpdateOp::Rename {
+            from: EntrySelection::Display("docs/".into()),
+            to: EntryPath::from_utf8("moved/"),
+        }],
+        &options,
+    ), Err(FormatError::Unsupported(message)) if message.contains("separators")));
+        assert_eq!(fs::read(&archive).unwrap(), original);
+        let expected: Vec<_> = raw_entry_snapshots(&archive)
+            .into_iter()
+            .filter(|entry| entry.name == entries[2].name)
+            .collect();
+        assert_eq!(expected.len(), 1);
+        run_update(
+            &archive,
+            &[UpdateOp::DeleteEntry {
+                path: EntrySelection::Display("docs/".into()),
+            }],
+            &options,
+        )
+        .unwrap();
+        assert_eq!(raw_entry_snapshots(&archive), expected);
+        assert_no_update_temp(tmp.path());
+    }
+}
+
+#[test]
+fn update_display_selection_rejects_ambiguous_and_undecodable_paths_atomically() {
+    let tmp = TempDir::new("update-display-ambiguity");
+    let archive = tmp.path().join("legacy.zip");
+    let original = build_stored_zip(&[
+        RawZipEntry {
+            name: b"folder/\xff.txt".to_vec(),
+            data: b"first".to_vec(),
+        },
+        RawZipEntry {
+            name: b"folder/\xfe.txt".to_vec(),
+            data: b"second".to_vec(),
+        },
+    ]);
+    fs::write(&archive, &original).unwrap();
+    let entries = engine()
+        .list(
+            &archive,
+            &OpenOptions {
+                encoding_override: Some("gbk".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(entries[0].path.display, entries[1].path.display);
+    let options = UpdateOptions {
+        encoding_override: Some("gbk".into()),
+        ..Default::default()
+    };
+    for source in [entries[0].path.display.as_str(), "folder/"] {
+        for operation in [
+            UpdateOp::DeleteEntry {
+                path: EntrySelection::Display(source.into()),
+            },
+            UpdateOp::Rename {
+                from: EntrySelection::Display(source.into()),
+                to: EntryPath::from_utf8("target"),
+            },
+        ] {
+            assert_other_contains(
+                run_update(&archive, &[operation], &options).unwrap_err(),
+                "ambiguous",
+            );
+            assert_eq!(fs::read(&archive).unwrap(), original);
+        }
+    }
+    let original = build_stored_zip(&[RawZipEntry {
+        name: b"folder/\xff.txt".to_vec(),
+        data: b"invalid name".to_vec(),
+    }]);
+    fs::write(&archive, &original).unwrap();
+    assert!(matches!(run_update(&archive, &[UpdateOp::Rename {
+        from: EntrySelection::Display("folder/".into()), to: EntryPath::from_utf8("target/"),
+    }], &options), Err(FormatError::Unsupported(message)) if message.contains("encoding")));
+    assert_eq!(fs::read(&archive).unwrap(), original);
+    assert_no_update_temp(tmp.path());
 }
 
 fn raw_entry_snapshots(path: &Path) -> Vec<RawEntrySnapshot> {
@@ -119,9 +346,9 @@ fn update_retains_zipcrypto_payload_and_password_check() {
     run_update(
         &archive,
         &[UpdateOp::DeleteEntry {
-            path: EntryPath::from_utf8("drop.txt"),
+            path: EntrySelection::Raw(EntryPath::from_utf8("drop.txt")),
         }],
-        &CreateOptions::default(),
+        &UpdateOptions::default(),
     )
     .unwrap();
     assert_eq!(raw_entry_snapshots(&archive), before);
@@ -191,14 +418,18 @@ fn update_preserves_mixed_raw_names_without_lossy_identity_collisions() {
         &archive,
         &[
             UpdateOp::DeleteEntry {
-                path: EntryPath::from_utf8("drop.txt"),
+                path: EntrySelection::Raw(EntryPath::from_utf8("drop.txt")),
             },
             UpdateOp::Rename {
-                from: EntryPath::from_raw(names[0].clone(), "unreadable.txt".into(), "utf-8"),
+                from: EntrySelection::Raw(EntryPath::from_raw(
+                    names[0].clone(),
+                    "unreadable.txt".into(),
+                    "utf-8",
+                )),
                 to: EntryPath::from_utf8("renamed.txt"),
             },
         ],
-        &CreateOptions::default(),
+        &UpdateOptions::default(),
     )
     .unwrap();
     assert_eq!(raw_entry_snapshots(&archive), expected);
@@ -239,10 +470,10 @@ fn update_renames_legacy_subtrees_to_utf8_and_keeps_other_names() {
         assert!(run_update(
             &archive,
             &[UpdateOp::Rename {
-                from: from.clone(),
+                from: EntrySelection::Raw(from.clone()),
                 to: EntryPath::from_utf8(target)
             }],
-            &CreateOptions::default()
+            &UpdateOptions::default()
         )
         .is_err());
         assert_eq!(fs::read(&archive).unwrap(), before);
@@ -250,10 +481,10 @@ fn update_renames_legacy_subtrees_to_utf8_and_keeps_other_names() {
     run_update(
         &archive,
         &[UpdateOp::Rename {
-            from,
+            from: EntrySelection::Raw(from),
             to: EntryPath::from_utf8("新的目录/"),
         }],
-        &CreateOptions::default(),
+        &UpdateOptions::default(),
     )
     .unwrap();
     assert_eq!(raw_entry_snapshots(&archive), expected);
@@ -280,10 +511,10 @@ fn update_rejects_legacy_display_name_collisions_and_undecodable_renames() {
     let error = run_update(
         &archive,
         &[UpdateOp::Rename {
-            from: EntryPath::from_utf8("move.txt"),
+            from: EntrySelection::Raw(EntryPath::from_utf8("move.txt")),
             to: EntryPath::from_utf8(displayed),
         }],
-        &CreateOptions::default(),
+        &UpdateOptions::default(),
     )
     .unwrap_err();
     assert_other_contains(error, "already exists");
@@ -296,10 +527,14 @@ fn update_rejects_legacy_display_name_collisions_and_undecodable_renames() {
     let error = run_update(
         &archive,
         &[UpdateOp::Rename {
-            from: EntryPath::from_raw(b"folder/".to_vec(), "folder/".into(), "GBK"),
+            from: EntrySelection::Raw(EntryPath::from_raw(
+                b"folder/".to_vec(),
+                "folder/".into(),
+                "GBK",
+            )),
             to: EntryPath::from_utf8("target/"),
         }],
-        &CreateOptions::default(),
+        &UpdateOptions::default(),
     )
     .unwrap_err();
     assert!(matches!(error, FormatError::Unsupported(message) if message.contains("encoding")));
@@ -380,9 +615,9 @@ fn update_preserves_encrypted_legacy_names_and_payloads() {
         run_update(
             &archive,
             &[UpdateOp::DeleteEntry {
-                path: EntryPath::from_utf8("drop.txt"),
+                path: EntrySelection::Raw(EntryPath::from_utf8("drop.txt")),
             }],
-            &CreateOptions::default(),
+            &UpdateOptions::default(),
         )
         .unwrap();
         assert_eq!(raw_entry_snapshots(&archive), expected);
@@ -437,10 +672,10 @@ fn update_preserves_unix_types_and_permissions() {
     run_update(
         &archive,
         &[UpdateOp::Rename {
-            from: EntryPath::from_utf8("link"),
+            from: EntrySelection::Raw(EntryPath::from_utf8("link")),
             to: EntryPath::from_utf8("renamed-link"),
         }],
-        &CreateOptions::default(),
+        &UpdateOptions::default(),
     )
     .unwrap();
     assert_eq!(raw_entry_snapshots(&archive), expected);
@@ -485,7 +720,7 @@ fn list_names(path: &Path, password: Option<&str>) -> Vec<String> {
     names
 }
 
-fn run_update(path: &Path, ops: &[UpdateOp], opts: &CreateOptions) -> Result<(), FormatError> {
+fn run_update(path: &Path, ops: &[UpdateOp], opts: &UpdateOptions) -> Result<(), FormatError> {
     engine().update(path, ops, opts, &NoProgress, &ControlToken::new())
 }
 
@@ -849,7 +1084,7 @@ fn update_add_file_and_directory() {
             dest: EntryPath::from_utf8("extra"),
         },
     ];
-    run_update(&archive, &ops, &CreateOptions::default()).unwrap();
+    run_update(&archive, &ops, &UpdateOptions::default()).unwrap();
 
     let names = list_names(&archive, None);
     assert!(names.contains(&"new.txt".to_string()));
@@ -868,10 +1103,10 @@ fn engine_update_reports_ordered_monotonic_phases() {
         .update(
             &archive,
             &[UpdateOp::Rename {
-                from: EntryPath::from_utf8("project/a.txt"),
+                from: EntrySelection::Raw(EntryPath::from_utf8("project/a.txt")),
                 to: EntryPath::from_utf8("project/renamed.txt"),
             }],
-            &CreateOptions::default(),
+            &UpdateOptions::default(),
             &progress,
             &ControlToken::new(),
         )
@@ -923,9 +1158,9 @@ fn rewrite_progress_excludes_deleted_entry_bytes() {
         .update(
             &archive,
             &[UpdateOp::DeleteEntry {
-                path: EntryPath::from_utf8("project/a.txt"),
+                path: EntrySelection::Raw(EntryPath::from_utf8("project/a.txt")),
             }],
-            &CreateOptions::default(),
+            &UpdateOptions::default(),
             &progress,
             &ControlToken::new(),
         )
@@ -976,7 +1211,7 @@ fn update_rejects_target_rebind_during_rewrite_without_overwriting_competitor() 
             &[UpdateOp::Delete {
                 pattern: "*.log".into(),
             }],
-            &CreateOptions::default(),
+            &UpdateOptions::default(),
             &progress,
             &ControlToken::new(),
         )
@@ -1003,7 +1238,7 @@ fn update_preserves_archive_permissions() {
         &[UpdateOp::Delete {
             pattern: "*.log".into(),
         }],
-        &CreateOptions::default(),
+        &UpdateOptions::default(),
     )
     .unwrap();
 
@@ -1037,7 +1272,7 @@ fn concurrent_updates_are_serialized_against_the_latest_archive() {
                         src: source,
                         dest: EntryPath::from_utf8(destination),
                     }],
-                    &CreateOptions::default(),
+                    &UpdateOptions::default(),
                     &NoProgress,
                     &ControlToken::new(),
                 )
@@ -1087,14 +1322,21 @@ fn zip_update_process_worker() {
     };
 
     fs::write(worker_marker(&root, role, "ready"), b"ready").unwrap();
+    let mut operations = vec![UpdateOp::Add {
+        src: source,
+        dest: EntryPath::from_utf8(destination),
+    }];
+    if role == "second" {
+        operations.push(UpdateOp::Rename {
+            from: EntrySelection::Display("first.txt".into()),
+            to: EntryPath::from_utf8("renamed-first.txt"),
+        });
+    }
     engine()
         .update(
             &archive,
-            &[UpdateOp::Add {
-                src: source,
-                dest: EntryPath::from_utf8(destination),
-            }],
-            &CreateOptions::default(),
+            &operations,
+            &UpdateOptions::default(),
             &progress,
             &ControlToken::new(),
         )
@@ -1128,7 +1370,8 @@ fn cross_process_updates_wait_for_the_target_lock_and_use_the_latest_archive() {
     second.assert_success(PROCESS_WAIT_TIMEOUT);
 
     let names = list_names(&archive, None);
-    assert!(names.contains(&"first.txt".to_owned()), "{names:?}");
+    assert!(names.contains(&"renamed-first.txt".to_owned()), "{names:?}");
+    assert!(!names.contains(&"first.txt".to_owned()), "{names:?}");
     assert!(names.contains(&"second.txt".to_owned()), "{names:?}");
     assert_no_update_temp(tmp.path());
     assert_unzip_t(&archive);
@@ -1160,7 +1403,7 @@ fn update_add_rejects_same_length_source_replacement_and_preserves_archive() {
         .update(
             &archive,
             &ops,
-            &CreateOptions::default(),
+            &UpdateOptions::default(),
             &progress,
             &ControlToken::new(),
         )
@@ -1223,7 +1466,7 @@ fn update_add_rejects_in_place_rewrite_with_restored_mtime() {
         .update(
             &archive,
             &ops,
-            &CreateOptions::default(),
+            &UpdateOptions::default(),
             &progress,
             &ControlToken::new(),
         )
@@ -1260,7 +1503,16 @@ fn update_add_rechecks_source_path_after_streaming() {
     };
 
     let error = engine()
-        .update(&archive, &ops, &options, &progress, &ControlToken::new())
+        .update(
+            &archive,
+            &ops,
+            &UpdateOptions {
+                create: options.clone(),
+                ..Default::default()
+            },
+            &progress,
+            &ControlToken::new(),
+        )
         .unwrap_err();
 
     assert!(changed.load(Ordering::SeqCst));
@@ -1289,7 +1541,16 @@ fn update_add_can_cancel_while_streaming_one_file() {
     };
 
     let error = engine()
-        .update(&archive, &ops, &options, &progress, &control)
+        .update(
+            &archive,
+            &ops,
+            &UpdateOptions {
+                create: options.clone(),
+                ..Default::default()
+            },
+            &progress,
+            &control,
+        )
         .unwrap_err();
 
     assert!(matches!(error, FormatError::Cancelled));
@@ -1315,7 +1576,7 @@ fn update_can_cancel_during_unchanged_entry_raw_copy() {
             &[UpdateOp::Delete {
                 pattern: "remove.txt".into(),
             }],
-            &CreateOptions::default(),
+            &UpdateOptions::default(),
             &progress,
             &control,
         )
@@ -1354,7 +1615,7 @@ fn update_can_pause_and_resume_during_unchanged_entry_raw_copy() {
             &[UpdateOp::Delete {
                 pattern: "remove.txt".into(),
             }],
-            &CreateOptions::default(),
+            &UpdateOptions::default(),
             &progress,
             &control_for_worker,
         );
@@ -1416,7 +1677,7 @@ fn update_add_can_cancel_while_scanning_a_directory() {
     }];
 
     let error = engine()
-        .update(&archive, &ops, &CreateOptions::default(), &progress, &ctl)
+        .update(&archive, &ops, &UpdateOptions::default(), &progress, &ctl)
         .unwrap_err();
 
     assert!(matches!(error, FormatError::Cancelled));
@@ -1454,7 +1715,7 @@ fn update_add_rejects_symbolic_link_target_change() {
         .update(
             &archive,
             &ops,
-            &CreateOptions::default(),
+            &UpdateOptions::default(),
             &progress,
             &ControlToken::new(),
         )
@@ -1483,7 +1744,7 @@ fn update_add_ignores_directory_members_created_after_preparation() {
         .update(
             &archive,
             &ops,
-            &CreateOptions::default(),
+            &UpdateOptions::default(),
             &progress,
             &ControlToken::new(),
         )
@@ -1504,7 +1765,7 @@ fn update_add_empty_directory_entry() {
         path: EntryPath::from_utf8("empty-folder"),
     }];
 
-    run_update(&archive, &ops, &CreateOptions::default()).unwrap();
+    run_update(&archive, &ops, &UpdateOptions::default()).unwrap();
 
     let names = list_names(&archive, None);
     assert!(names.contains(&"empty-folder/".to_string()), "{names:?}");
@@ -1531,7 +1792,15 @@ fn update_add_directory_applies_create_excludes() {
         excludes: vec!["node_modules".into(), ".git".into(), "*.tmp".into()],
         ..CreateOptions::default()
     };
-    run_update(&archive, &ops, &opts).unwrap();
+    run_update(
+        &archive,
+        &ops,
+        &UpdateOptions {
+            create: opts.clone(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
 
     let names = list_names(&archive, None);
     assert!(names.contains(&"extra/keep.txt".to_string()));
@@ -1564,31 +1833,18 @@ fn update_delete_resolves_legacy_names_to_original_entry_bytes() {
         ]),
     )
     .unwrap();
-    let entries = engine()
-        .list(
-            &archive,
-            &OpenOptions {
-                encoding_override: Some("gbk".into()),
-                ..OpenOptions::default()
-            },
-        )
-        .unwrap();
-    let selected = squallz_core::resolve_literal_selection(
-        entries.iter().map(|entry| {
-            (
-                std::borrow::Cow::Borrowed(entry.path.display.as_str()),
-                &entry.path,
-            )
-        }),
-        &["压缩文件中文名称测试[1].txt".into()],
-        &ControlToken::new(),
+    let ops = [UpdateOp::DeleteEntry {
+        path: EntrySelection::Display("压缩文件中文名称测试[1].txt".into()),
+    }];
+    run_update(
+        &archive,
+        &ops,
+        &UpdateOptions {
+            encoding_override: Some("gbk".into()),
+            ..Default::default()
+        },
     )
     .unwrap();
-    let ops: Vec<_> = selected
-        .into_iter()
-        .map(|path| UpdateOp::DeleteEntry { path })
-        .collect();
-    run_update(&archive, &ops, &CreateOptions::default()).unwrap();
     assert_eq!(list_names(&archive, None), ["keep.txt"]);
     assert_unzip_t(&archive);
 }
@@ -1615,9 +1871,9 @@ fn update_preserves_unflagged_utf8_names() {
     run_update(
         &archive,
         &[UpdateOp::DeleteEntry {
-            path: EntryPath::from_utf8("drop.txt"),
+            path: EntrySelection::Raw(EntryPath::from_utf8("drop.txt")),
         }],
-        &CreateOptions::default(),
+        &UpdateOptions::default(),
     )
     .unwrap();
     assert_eq!(list_names(&archive, None), [retained]);
@@ -1650,9 +1906,9 @@ fn update_preserves_retained_legacy_names() {
     run_update(
         &archive,
         &[UpdateOp::DeleteEntry {
-            path: EntryPath::from_utf8("drop.txt"),
+            path: EntrySelection::Raw(EntryPath::from_utf8("drop.txt")),
         }],
-        &CreateOptions::default(),
+        &UpdateOptions::default(),
     )
     .unwrap();
     let mut reader = zip::ZipArchive::new(fs::File::open(&archive).unwrap()).unwrap();
@@ -1698,10 +1954,10 @@ fn update_delete_literal_paths_preserve_metacharacters_and_archive_depth() {
     let operations: Vec<_> = selected
         .into_iter()
         .map(|path| UpdateOp::DeleteEntry {
-            path: EntryPath::from_utf8(path),
+            path: EntrySelection::Raw(EntryPath::from_utf8(path)),
         })
         .collect();
-    run_update(&archive, &operations, &CreateOptions::default()).unwrap();
+    run_update(&archive, &operations, &UpdateOptions::default()).unwrap();
     let mut expected = retained.to_vec();
     expected.sort();
     assert_eq!(list_names(&archive, None), expected);
@@ -1726,9 +1982,9 @@ fn update_delete_literal_directory_removes_only_its_complete_subtree() {
         run_update(
             &archive,
             &[UpdateOp::DeleteEntry {
-                path: EntryPath::from_utf8("logs/"),
+                path: EntrySelection::Raw(EntryPath::from_utf8("logs/")),
             }],
-            &CreateOptions::default(),
+            &UpdateOptions::default(),
         )
         .unwrap();
         assert_eq!(
@@ -1753,9 +2009,9 @@ fn update_delete_literal_file_and_directory_are_distinct() {
         run_update(
             &archive,
             &[UpdateOp::DeleteEntry {
-                path: EntryPath::from_utf8(selected),
+                path: EntrySelection::Raw(EntryPath::from_utf8(selected)),
             }],
-            &CreateOptions::default(),
+            &UpdateOptions::default(),
         )
         .unwrap();
         assert_eq!(list_names(&archive, None), expected);
@@ -1776,13 +2032,13 @@ fn update_delete_missing_or_empty_literal_path_is_atomic() {
                     pattern: "*.log".into(),
                 },
                 UpdateOp::DeleteEntry {
-                    path: EntryPath::from_utf8("project/a.txt"),
+                    path: EntrySelection::Raw(EntryPath::from_utf8("project/a.txt")),
                 },
                 UpdateOp::DeleteEntry {
-                    path: EntryPath::from_utf8(missing),
+                    path: EntrySelection::Raw(EntryPath::from_utf8(missing)),
                 },
             ],
-            &CreateOptions::default(),
+            &UpdateOptions::default(),
         );
         assert_other_contains(
             result.unwrap_err(),
@@ -1807,7 +2063,7 @@ fn update_delete_literal_and_glob_operations_can_be_combined_with_replacement() 
         &archive,
         &[
             UpdateOp::DeleteEntry {
-                path: EntryPath::from_utf8("project/a.txt"),
+                path: EntrySelection::Raw(EntryPath::from_utf8("project/a.txt")),
             },
             UpdateOp::Delete {
                 pattern: "*.log".into(),
@@ -1817,7 +2073,7 @@ fn update_delete_literal_and_glob_operations_can_be_combined_with_replacement() 
                 dest: EntryPath::from_utf8("project/a.txt"),
             },
         ],
-        &CreateOptions::default(),
+        &UpdateOptions::default(),
     )
     .unwrap();
     assert!(!list_names(&archive, None)
@@ -1841,9 +2097,9 @@ fn update_delete_literal_keeps_encrypted_payloads_without_a_password() {
     run_update(
         &archive,
         &[UpdateOp::DeleteEntry {
-            path: EntryPath::from_utf8("project/sub/"),
+            path: EntrySelection::Raw(EntryPath::from_utf8("project/sub/")),
         }],
-        &CreateOptions::default(),
+        &UpdateOptions::default(),
     )
     .unwrap();
     let options = OpenOptions {
@@ -1877,7 +2133,7 @@ fn update_delete_by_glob() {
     let ops = vec![UpdateOp::Delete {
         pattern: "*.log".into(),
     }];
-    run_update(&archive, &ops, &CreateOptions::default()).unwrap();
+    run_update(&archive, &ops, &UpdateOptions::default()).unwrap();
     let names = list_names(&archive, None);
     assert!(!names.iter().any(|n| n.ends_with(".log")), "{names:?}");
     assert!(names.iter().any(|n| n.contains("a.txt")));
@@ -1886,7 +2142,7 @@ fn update_delete_by_glob() {
     let ops = vec![UpdateOp::Delete {
         pattern: "project/sub".into(),
     }];
-    run_update(&archive, &ops, &CreateOptions::default()).unwrap();
+    run_update(&archive, &ops, &UpdateOptions::default()).unwrap();
     let names = list_names(&archive, None);
     assert!(!names.iter().any(|n| n.contains("sub")), "{names:?}");
     assert_unzip_t(&archive);
@@ -1897,10 +2153,10 @@ fn update_rename_entry() {
     let tmp = TempDir::new("update-rename");
     let archive = base_archive(tmp.path(), None);
     let ops = vec![UpdateOp::Rename {
-        from: EntryPath::from_utf8("project/a.txt"),
+        from: EntrySelection::Raw(EntryPath::from_utf8("project/a.txt")),
         to: EntryPath::from_utf8("project/renamed.txt"),
     }];
-    run_update(&archive, &ops, &CreateOptions::default()).unwrap();
+    run_update(&archive, &ops, &UpdateOptions::default()).unwrap();
     let names = list_names(&archive, None);
     assert!(names.contains(&"project/renamed.txt".to_string()));
     assert!(!names.contains(&"project/a.txt".to_string()));
@@ -1922,10 +2178,10 @@ fn update_rename_entry() {
     // Renaming a missing entry fails and leaves the archive intact.
     let before = fs::read(&archive).unwrap();
     let ops = vec![UpdateOp::Rename {
-        from: EntryPath::from_utf8("missing.txt"),
+        from: EntrySelection::Raw(EntryPath::from_utf8("missing.txt")),
         to: EntryPath::from_utf8("whatever.txt"),
     }];
-    let err = run_update(&archive, &ops, &CreateOptions::default()).unwrap_err();
+    let err = run_update(&archive, &ops, &UpdateOptions::default()).unwrap_err();
     assert!(matches!(err, FormatError::Other(_)));
     assert_eq!(
         fs::read(&archive).unwrap(),
@@ -1942,10 +2198,10 @@ fn update_rename_directory_moves_its_complete_subtree() {
         run_update(
             &archive,
             &[UpdateOp::Rename {
-                from: EntryPath::from_utf8(source),
+                from: EntrySelection::Raw(EntryPath::from_utf8(source)),
                 to: EntryPath::from_utf8("整理/资料/"),
             }],
-            &CreateOptions::default(),
+            &UpdateOptions::default(),
         )
         .unwrap();
         let names = list_names(&archive, None);
@@ -1983,10 +2239,10 @@ fn update_rename_implicit_directory_preserves_unrelated_prefixes() {
     run_update(
         &archive,
         &[UpdateOp::Rename {
-            from: EntryPath::from_utf8("docs/"),
+            from: EntrySelection::Raw(EntryPath::from_utf8("docs/")),
             to: EntryPath::from_utf8("archive/notes/"),
         }],
-        &CreateOptions::default(),
+        &UpdateOptions::default(),
     )
     .unwrap();
     assert_eq!(
@@ -2023,12 +2279,12 @@ fn update_directory_rename_rejects_unsafe_or_ambiguous_plans_atomically() {
         let ops: Vec<_> = case
             .iter()
             .map(|(from, to)| UpdateOp::Rename {
-                from: EntryPath::from_utf8(*from),
+                from: EntrySelection::Raw(EntryPath::from_utf8(*from)),
                 to: EntryPath::from_utf8(*to),
             })
             .collect();
         assert!(
-            run_update(&archive, &ops, &CreateOptions::default()).is_err(),
+            run_update(&archive, &ops, &UpdateOptions::default()).is_err(),
             "{case:?}"
         );
         assert_eq!(fs::read(&archive).unwrap(), before, "{case:?}");
@@ -2057,11 +2313,11 @@ fn update_implicit_directory_targets_do_not_merge_unrelated_trees() {
         let ops: Vec<_> = mappings
             .iter()
             .map(|(from, to)| UpdateOp::Rename {
-                from: EntryPath::from_utf8(*from),
+                from: EntrySelection::Raw(EntryPath::from_utf8(*from)),
                 to: EntryPath::from_utf8(*to),
             })
             .collect();
-        assert!(run_update(&archive, &ops, &CreateOptions::default()).is_err());
+        assert!(run_update(&archive, &ops, &UpdateOptions::default()).is_err());
         assert_eq!(fs::read(&archive).unwrap(), before);
     }
 }
@@ -2073,10 +2329,10 @@ fn update_encrypted_directory_rename_preserves_payloads_without_a_password() {
     run_update(
         &archive,
         &[UpdateOp::Rename {
-            from: EntryPath::from_utf8("project/"),
+            from: EntrySelection::Raw(EntryPath::from_utf8("project/")),
             to: EntryPath::from_utf8("资料/"),
         }],
-        &CreateOptions::default(),
+        &UpdateOptions::default(),
     )
     .unwrap();
     let options = OpenOptions {
@@ -2116,10 +2372,10 @@ fn update_rejects_target_conflicts_without_explicit_delete() {
     let err = run_update(
         &archive,
         &[UpdateOp::Rename {
-            from: EntryPath::from_utf8("project/a.txt"),
+            from: EntrySelection::Raw(EntryPath::from_utf8("project/a.txt")),
             to: EntryPath::from_utf8("project/sub/b.txt"),
         }],
-        &CreateOptions::default(),
+        &UpdateOptions::default(),
     )
     .unwrap_err();
     assert_other_contains(err, "already exists");
@@ -2131,7 +2387,7 @@ fn update_rejects_target_conflicts_without_explicit_delete() {
             src: tmp.path().join("new.txt"),
             dest: EntryPath::from_utf8("project/a.txt"),
         }],
-        &CreateOptions::default(),
+        &UpdateOptions::default(),
     )
     .unwrap_err();
     assert_other_contains(err, "already exists");
@@ -2142,7 +2398,7 @@ fn update_rejects_target_conflicts_without_explicit_delete() {
         &[UpdateOp::AddDir {
             path: EntryPath::from_utf8("project"),
         }],
-        &CreateOptions::default(),
+        &UpdateOptions::default(),
     )
     .unwrap_err();
     assert_other_contains(err, "already exists");
@@ -2152,15 +2408,15 @@ fn update_rejects_target_conflicts_without_explicit_delete() {
         &archive,
         &[
             UpdateOp::Rename {
-                from: EntryPath::from_utf8("project/a.txt"),
+                from: EntrySelection::Raw(EntryPath::from_utf8("project/a.txt")),
                 to: EntryPath::from_utf8("dup.txt"),
             },
             UpdateOp::Rename {
-                from: EntryPath::from_utf8("project/sub/b.txt"),
+                from: EntrySelection::Raw(EntryPath::from_utf8("project/sub/b.txt")),
                 to: EntryPath::from_utf8("dup.txt"),
             },
         ],
-        &CreateOptions::default(),
+        &UpdateOptions::default(),
     )
     .unwrap_err();
     assert_other_contains(err, "duplicate update target");
@@ -2177,7 +2433,7 @@ fn update_rejects_target_conflicts_without_explicit_delete() {
                 dest: EntryPath::from_utf8("project/a.txt"),
             },
         ],
-        &CreateOptions::default(),
+        &UpdateOptions::default(),
     )
     .unwrap();
 
@@ -2208,11 +2464,11 @@ fn update_combined_add_delete_rename() {
             pattern: "*.log".into(),
         },
         UpdateOp::Rename {
-            from: EntryPath::from_utf8("project/sub/b.txt"),
+            from: EntrySelection::Raw(EntryPath::from_utf8("project/sub/b.txt")),
             to: EntryPath::from_utf8("project/sub/beta.txt"),
         },
     ];
-    run_update(&archive, &ops, &CreateOptions::default()).unwrap();
+    run_update(&archive, &ops, &UpdateOptions::default()).unwrap();
     let names = list_names(&archive, None);
     assert!(names.contains(&"fresh.txt".to_string()));
     assert!(names.contains(&"project/sub/beta.txt".to_string()));
@@ -2231,7 +2487,7 @@ fn update_encrypted_archive_without_password_keeps_encryption() {
         src: tmp.path().join("plain.txt"),
         dest: EntryPath::from_utf8("plain.txt"),
     }];
-    run_update(&archive, &ops, &CreateOptions::default()).unwrap();
+    run_update(&archive, &ops, &UpdateOptions::default()).unwrap();
 
     let opts = OpenOptions::default();
     let entries = engine().list(&archive, &opts).unwrap();
@@ -2282,6 +2538,6 @@ fn update_unsupported_format_is_rejected() {
     let ops = vec![UpdateOp::Delete {
         pattern: "f.txt".into(),
     }];
-    let err = run_update(&dest, &ops, &CreateOptions::default()).unwrap_err();
+    let err = run_update(&dest, &ops, &UpdateOptions::default()).unwrap_err();
     assert!(matches!(err, FormatError::Unsupported(_)));
 }

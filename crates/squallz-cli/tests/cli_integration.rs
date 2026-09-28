@@ -7932,8 +7932,14 @@ fn update_literal_deletion_rejects_missing_paths_atomically() {
 }
 
 #[test]
-fn update_literal_deletion_preserves_legacy_entries_in_cli_and_batch() {
-    for batch in [false, true] {
+fn update_edits_legacy_entries_in_cli_and_batch() {
+    for (batch, action, destination) in [
+        (false, None, "你[1].txt"),
+        (true, None, "你[1].txt"),
+        (false, Some("--rename"), "renamed.txt"),
+        (false, Some("--move"), "folder/renamed.txt"),
+        (true, Some("--rename"), "renamed.txt"),
+    ] {
         let dir = temp_dir("update-preserve-legacy-cli");
         std::fs::write(dir.join("first.txt"), b"retained contents").unwrap();
         std::fs::write(dir.join("drop.txt"), b"remove me").unwrap();
@@ -7958,18 +7964,25 @@ fn update_literal_deletion_preserves_legacy_entries_in_cli_and_batch() {
         std::fs::write(&archive, bytes).unwrap();
         let updated = if batch {
             let script = dir.join("update.json");
+            let rename =
+                action.map(|_| serde_json::json!({"from": "你[1].txt", "to": destination}));
             std::fs::write(&script, serde_json::to_vec(&serde_json::json!({
-                "jobs": [{ "kind": "update", "archive": "legacy.zip", "delete_entries": ["drop.txt"], "encoding": "gbk" }]
+                "jobs": [{ "kind": "update", "archive": "legacy.zip", "delete_entries": ["drop.txt"], "encoding": "gbk", "rename": rename.into_iter().collect::<Vec<_>>() }]
             })).unwrap()).unwrap();
             run(sqz().arg("batch").arg(&script).arg("--json"))
         } else {
-            run(sqz().arg("update").arg(&archive).args([
+            let mut command = sqz();
+            command.arg("update").arg(&archive).args([
                 "--delete-entry",
                 "drop.txt",
                 "--encoding",
                 "gbk",
                 "--json",
-            ]))
+            ]);
+            if let Some(action) = action {
+                command.arg(action).arg(format!("你[1].txt={destination}"));
+            }
+            run(&mut command)
         };
         assert!(updated.status.success(), "{}", stderr(&updated));
         let listed = run(sqz()
@@ -7979,7 +7992,7 @@ fn update_literal_deletion_preserves_legacy_entries_in_cli_and_batch() {
         assert!(listed.status.success(), "{}", stderr(&listed));
         let entries = stdout_json(&listed);
         assert_eq!(entries.as_array().unwrap().len(), 1);
-        assert_eq!(entries[0]["path"], "你[1].txt");
+        assert_eq!(entries[0]["path"], destination);
         let output = dir.join("extracted");
         let extracted = run(sqz()
             .arg("extract")
@@ -7989,7 +8002,7 @@ fn update_literal_deletion_preserves_legacy_entries_in_cli_and_batch() {
             .args(["--encoding", "gbk", "--json"]));
         assert!(extracted.status.success(), "{}", stderr(&extracted));
         assert_eq!(
-            std::fs::read(output.join("你[1].txt")).unwrap(),
+            std::fs::read(output.join(destination)).unwrap(),
             b"retained contents"
         );
         std::fs::remove_dir_all(dir).unwrap();

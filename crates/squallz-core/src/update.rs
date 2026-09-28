@@ -3,7 +3,7 @@ use std::time::SystemTime;
 
 use crate::api::{
     ArchiveFormat, ArchiveWriter, ControlToken, CreateOptions, EntryMeta, EntryPath, EntryType,
-    FormatError, PreparedUpdateAdditions, ProgressSink, UpdateOp,
+    FormatError, PreparedUpdateAdditions, ProgressSink, UpdateOp, UpdateOptions,
 };
 use crate::compound::ProgressRead;
 use crate::create::TrackedInputRead;
@@ -81,11 +81,11 @@ pub(crate) fn run_update_rewrite(
     format: &dyn ArchiveFormat,
     target: &std::path::Path,
     ops: &[UpdateOp],
-    opts: &CreateOptions,
+    opts: &UpdateOptions,
     progress: &dyn ProgressSink,
     ctl: &ControlToken,
 ) -> Result<(), FormatError> {
-    let mut additions = prepare_additions(ops, opts, progress, ctl)?;
+    let mut additions = prepare_additions(ops, &opts.create, progress, ctl)?;
     transaction::run(format, target, ops, &mut additions, opts, progress, ctl)
 }
 

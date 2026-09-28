@@ -5,15 +5,17 @@ use squallz_format_api::{sanitize_entry_path, ControlToken, EntryPath, FormatErr
 use zip::ZipArchive;
 
 use super::super::encoding::{decode_entry_name, resolve_fallback_encoding};
+use super::selection::NameLookup;
 use super::{addition_meta, map_controlled_zip_error, AdditionSet, Deletions};
 
 pub(super) struct UpdatePlan {
+    pub(super) deletes: Deletions,
     pub(super) renames: HashMap<Vec<u8>, String>,
     pub(super) encoding: Option<&'static encoding_rs::Encoding>,
 }
 
 struct ArchiveName {
-    raw: Vec<u8>,
+    path: EntryPath,
     key: Vec<u8>,
     directory: bool,
     deleted: bool,
@@ -83,32 +85,40 @@ fn safe_target(path: &str) -> Result<String, FormatError> {
 pub(super) fn prepare<R: Read + Seek>(
     archive: &mut ZipArchive<R>,
     ops: &[UpdateOp],
-    deletes: &mut Deletions,
     additions: &impl AdditionSet,
+    encoding: Option<&str>,
     ctl: &ControlToken,
 ) -> Result<UpdatePlan, FormatError> {
-    let mut names = Vec::with_capacity(archive.len());
-    let mut original = Namespace::default();
+    let mut raw_names = Vec::with_capacity(archive.len());
     for index in 0..archive.len() {
         ctl.checkpoint()?;
         let file = archive
             .by_index_raw(index)
             .map_err(|error| map_controlled_zip_error(error, ctl))?;
-        let raw = file.name_raw().to_vec();
-        let key = path_key(&raw).to_vec();
-        let directory = file.is_dir();
-        deletes.observe(file.name_raw());
-        let deleted = deletes.matches(file.name_raw());
-        original.insert(&key, directory);
+        raw_names.push((file.name_raw().to_vec(), file.is_dir()));
+    }
+    let fallback_encoding =
+        resolve_fallback_encoding(raw_names.iter().map(|name| &name.0), encoding);
+    let mut names = Vec::with_capacity(raw_names.len());
+    for (raw, directory) in raw_names {
+        ctl.checkpoint()?;
         names.push(ArchiveName {
-            raw,
-            key,
+            key: path_key(&raw).to_vec(),
+            path: decode_entry_name(&raw, fallback_encoding),
             directory,
-            deleted,
+            deleted: false,
         });
     }
+    let lookup = NameLookup::new(names.iter().map(|name| (&name.path, name.directory)), ctl)?;
+    let mut deletes = Deletions::new(ops, &lookup, ctl)?;
+    let mut original = Namespace::default();
+    for name in &mut names {
+        ctl.checkpoint()?;
+        deletes.observe(&name.path.raw);
+        name.deleted = deletes.matches(&name.path);
+        original.insert(&name.key, name.directory);
+    }
     deletes.validate()?;
-    let fallback_encoding = resolve_fallback_encoding(names.iter().map(|name| &name.raw), None);
 
     let mut requested = HashMap::<Vec<u8>, Rename>::new();
     let mut destinations = HashSet::new();
@@ -117,8 +127,15 @@ pub(super) fn prepare<R: Read + Seek>(
         let UpdateOp::Rename { from, to } = op else {
             continue;
         };
+        let selected = lookup.resolve(from, true, ctl)?;
+        let from = selected.path;
         let source = path_key(&from.raw);
         let directory = original.directories.contains(source);
+        if (selected.directory || directory) && from.display.contains('\\') {
+            return Err(FormatError::Unsupported(
+                "directory renaming requires forward-slash path separators".into(),
+            ));
+        }
         if !original.contains(source) || (from.raw.ends_with(b"/") && !directory) {
             return Err(FormatError::Other(format!(
                 "rename source not found in archive: {from}"
@@ -130,7 +147,8 @@ pub(super) fn prepare<R: Read + Seek>(
             )));
         }
         let target = safe_target(&to.display)?;
-        let source_display = from.display.trim_end_matches('/');
+        let source_display = from.normalized_display(directory);
+        let source_display = source_display.trim_end_matches('/');
         if source == target.as_bytes()
             || source_display == target
             || (directory
@@ -180,7 +198,7 @@ pub(super) fn prepare<R: Read + Seek>(
         if parents(source).any(|parent| requested.get(parent).is_some_and(|item| item.directory)) {
             return Err(FormatError::Other(format!(
                 "overlapping rename sources: {}",
-                String::from_utf8_lossy(source)
+                decode_entry_name(source, fallback_encoding).display
             )));
         }
     }
@@ -202,8 +220,10 @@ pub(super) fn prepare<R: Read + Seek>(
         if let Some((source, request)) = source {
             let suffix = &name.key[source.len()..];
             let suffix = match std::str::from_utf8(suffix) {
-                Ok(suffix) => std::borrow::Cow::Borrowed(suffix),
-                Err(_) => {
+                Ok(suffix) if name.path.encoding.eq_ignore_ascii_case("utf-8") => {
+                    std::borrow::Cow::Borrowed(suffix)
+                }
+                _ => {
                     let encoding = request.encoding.ok_or_else(|| {
                         FormatError::Unsupported(
                             "renaming this directory requires an unambiguous entry-name encoding"
@@ -223,14 +243,18 @@ pub(super) fn prepare<R: Read + Seek>(
             let target = format!("{}{suffix}", request.target);
             let target = safe_target(&target)?;
             renames.insert(
-                name.raw.clone(),
+                name.path.raw.clone(),
                 format!("{target}{}", if name.directory { "/" } else { "" }),
             );
         } else {
             retained.insert(&name.key, name.directory);
-            let display = decode_entry_name(&name.raw, fallback_encoding).display;
-            if display.as_bytes() != name.raw {
+            let display = &name.path.display;
+            if display.as_bytes() != name.path.raw {
                 retained.insert(path_key(display.as_bytes()), name.directory);
+            }
+            let normalized = name.path.normalized_display(name.directory);
+            if normalized.as_ref() != display {
+                retained.insert(path_key(normalized.as_bytes()), name.directory);
             }
         }
     }
@@ -247,7 +271,7 @@ pub(super) fn prepare<R: Read + Seek>(
     let mut produced = Namespace::default();
     for name in &names {
         ctl.checkpoint()?;
-        if let Some(target) = renames.get(&name.raw) {
+        if let Some(target) = renames.get(&name.path.raw) {
             validate_target(target, name.directory, &retained, &mut produced)?;
         }
     }
@@ -263,6 +287,7 @@ pub(super) fn prepare<R: Read + Seek>(
     }
     ctl.checkpoint()?;
     Ok(UpdatePlan {
+        deletes,
         renames,
         encoding: fallback_encoding,
     })

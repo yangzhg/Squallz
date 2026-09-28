@@ -1,5 +1,6 @@
 //! Entry model: paths (raw bytes as the source of truth), types and metadata.
 
+use std::borrow::Cow;
 use std::fmt;
 use std::time::SystemTime;
 
@@ -38,6 +39,25 @@ impl EntryPath {
             raw,
             display,
             encoding,
+        }
+    }
+
+    /// Path presented by archive browsers: forward slashes, no leading slash,
+    /// and a trailing slash for directories. Raw entry identity is unchanged.
+    pub fn normalized_display(&self, directory: bool) -> Cow<'_, str> {
+        if self.display.contains('\\') {
+            let replaced = self.display.replace('\\', "/");
+            let mut normalized = replaced.trim_start_matches('/').to_owned();
+            if directory && !normalized.ends_with('/') {
+                normalized.push('/');
+            }
+            return Cow::Owned(normalized);
+        }
+        let normalized = self.display.trim_start_matches('/');
+        if directory && !normalized.ends_with('/') {
+            Cow::Owned(format!("{normalized}/"))
+        } else {
+            Cow::Borrowed(normalized)
         }
     }
 }

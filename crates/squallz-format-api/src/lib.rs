@@ -34,10 +34,10 @@ pub use extract::{
 };
 pub use options::{
     BoundedProblemLog, CompressionLevel, ConflictDecision, ConflictResolver, CreateOptions,
-    ExtractOptions, ExtractProblemReporter, FormatCapabilities, FormatCreateBudget, OpenOptions,
-    OverwritePolicy, Password, ProblemPreview, RecoverySummary, ResourceOptions, SafetyLimits,
-    SplitOutputMode, SqzCreateOptions, SqzInnerFormat, SymlinkPolicy, TestSummary, UpdateOp,
-    EXTRACT_PROBLEM_PREVIEW_LIMIT, TEST_PROBLEM_PREVIEW_LIMIT,
+    EntrySelection, ExtractOptions, ExtractProblemReporter, FormatCapabilities, FormatCreateBudget,
+    OpenOptions, OverwritePolicy, Password, ProblemPreview, RecoverySummary, ResourceOptions,
+    SafetyLimits, SplitOutputMode, SqzCreateOptions, SqzInnerFormat, SymlinkPolicy, TestSummary,
+    UpdateOp, UpdateOptions, EXTRACT_PROBLEM_PREVIEW_LIMIT, TEST_PROBLEM_PREVIEW_LIMIT,
 };
 pub use progress::{ControlToken, NoProgress, ProgressPhase, ProgressSink};
 pub use registry::{split_volume_name, Detected, FormatInfo, FormatKind, FormatRegistry};

@@ -8,7 +8,7 @@ use crate::entry::{EntryMeta, EntryPath};
 use crate::error::FormatError;
 use crate::options::{
     CompressionLevel, CreateOptions, ExtractOptions, FormatCapabilities, FormatCreateBudget,
-    OpenOptions, ResourceOptions, SafetyLimits, TestSummary, UpdateOp,
+    OpenOptions, ResourceOptions, SafetyLimits, TestSummary, UpdateOp, UpdateOptions,
 };
 use crate::progress::{ControlToken, ProgressSink};
 use crate::safety::LimitsAccountant;
@@ -635,7 +635,7 @@ pub trait ArchiveFormat: Send + Sync {
         _output: Box<dyn WriteSeek>,
         _ops: &[UpdateOp],
         _additions: &mut dyn PreparedUpdateAdditions,
-        _opts: &CreateOptions,
+        _opts: &UpdateOptions,
         _progress: &dyn ProgressSink,
         _ctl: &ControlToken,
     ) -> Result<(), FormatError> {
@@ -894,7 +894,7 @@ mod tests {
             Box::new(std::io::Cursor::new(Vec::<u8>::new())),
             &[],
             &mut additions,
-            &CreateOptions::default(),
+            &UpdateOptions::default(),
             &crate::NoProgress,
             &ControlToken::default(),
         ));
