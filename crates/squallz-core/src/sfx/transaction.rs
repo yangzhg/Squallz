@@ -3671,7 +3671,11 @@ mod tests {
             Box::new(std::iter::empty())
         }
 
-        fn read_entry(&mut self, _path: &EntryPath) -> Result<Box<dyn Read + '_>, FormatError> {
+        fn read_entry(
+            &mut self,
+            _path: &EntryPath,
+            _consume: &mut dyn FnMut(&mut dyn Read) -> Result<(), FormatError>,
+        ) -> Result<(), FormatError> {
             Err(FormatError::Unsupported(
                 "test ZIP reader has no materialized entries".into(),
             ))

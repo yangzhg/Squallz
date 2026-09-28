@@ -283,12 +283,16 @@ impl ArchiveReader for TarArchiveReader {
         }
     }
 
-    fn read_entry(&mut self, path: &EntryPath) -> Result<Box<dyn Read + '_>, FormatError> {
+    fn read_entry(
+        &mut self,
+        path: &EntryPath,
+        consume: &mut dyn FnMut(&mut dyn Read) -> Result<(), FormatError>,
+    ) -> Result<(), FormatError> {
         let archive = self.rebuild()?;
         for item in archive.entries()? {
-            let entry = item?;
+            let mut entry = item?;
             if entry.path_bytes().as_ref() == path.raw.as_slice() {
-                return Ok(Box::new(entry));
+                return consume(&mut entry);
             }
         }
         Err(FormatError::Other(format!("entry not found: {path}")))

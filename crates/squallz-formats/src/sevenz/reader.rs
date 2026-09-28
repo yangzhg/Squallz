@@ -5,7 +5,7 @@
 //! requested file.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::io::{Cursor, Read};
+use std::io::Read;
 use std::path::Path;
 use std::time::SystemTime;
 
@@ -462,10 +462,12 @@ fn skip_entry_stream(
 struct ReadErrorTracker<'r> {
     inner: &'r mut dyn Read,
     failed: bool,
+    control: &'r ControlToken,
 }
 
 impl Read for ReadErrorTracker<'_> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.control.checkpoint().map_err(std::io::Error::other)?;
         match self.inner.read(buf) {
             Ok(read) => Ok(read),
             Err(error) => {
@@ -505,6 +507,7 @@ fn write_entry(
     let mut tracked = ReadErrorTracker {
         inner: reader,
         failed: false,
+        control: ctl,
     };
     let result = sink.write_file(meta, out_path, &mut tracked, progress, ctl);
     if tracked.failed {
@@ -544,23 +547,84 @@ impl ArchiveReader for SevenZArchiveReader {
         }
     }
 
-    fn read_entry(&mut self, path: &EntryPath) -> Result<Box<dyn Read + '_>, FormatError> {
-        // The backend's random-access read decodes the containing block up
-        // to the requested file and returns it fully decoded (preview-sized
-        // usage; extraction streams instead).
-        let encrypted = self
-            .inner
-            .archive()
+    fn read_entry(
+        &mut self,
+        path: &EntryPath,
+        consume: &mut dyn FnMut(&mut dyn Read) -> Result<(), FormatError>,
+    ) -> Result<(), FormatError> {
+        self.control.checkpoint()?;
+        let archive = self.inner.archive();
+        let index = archive
             .files
             .iter()
-            .position(|entry| entry.name() == path.display)
-            .map(|index| entry_is_encrypted(self.inner.archive(), index))
-            .transpose()?
-            .unwrap_or(false);
-        let data = self.inner.read_file(&path.display).map_err(|error| {
-            classify_entry_read_error(map_7z_error(error), encrypted, self.password_supplied)
+            .rposition(|entry| entry.name() == path.display)
+            .ok_or_else(|| map_7z_error(sevenz_rust2::Error::FileNotFound))?;
+        let encrypted = entry_is_encrypted(archive, index)?;
+        let block = archive
+            .stream_map
+            .file_block_index
+            .get(index)
+            .ok_or_else(|| {
+                FormatError::CorruptArchive("7z stream map is shorter than its file list".into())
+            })?;
+        let Some(block) = *block else {
+            return consume(&mut std::io::empty());
+        };
+        let wanted = entry_identity(&archive.files[index]);
+        let ctl = &self.control;
+        let password_supplied = self.password_supplied;
+        let mut found = false;
+        let mut failure = None;
+        let result =
+            self.inner
+                .for_each_in_blocks(Some(&HashSet::from([block])), |entry, reader| {
+                    let result = (|| {
+                        ctl.checkpoint()?;
+                        if entry_identity(entry) != wanted {
+                            drain_entry(reader, ctl).map_err(|error| {
+                                classify_entry_read_error(error, encrypted, password_supplied)
+                            })?;
+                            return Ok(true);
+                        }
+                        found = true;
+                        let mut tracked = ReadErrorTracker {
+                            inner: reader,
+                            failed: false,
+                            control: ctl,
+                        };
+                        let result = consume(&mut tracked);
+                        if tracked.failed {
+                            result.map_err(|error| {
+                                classify_entry_read_error(error, encrypted, password_supplied)
+                            })?;
+                        } else {
+                            result?;
+                        }
+                        Ok(false)
+                    })();
+                    match result {
+                        Ok(next) => Ok(next),
+                        Err(error) => {
+                            // Keep consumer failures out of the decoder's password
+                            // classification (for example, a destination write error).
+                            failure = Some(error);
+                            Ok(false)
+                        }
+                    }
+                });
+        if ctl.is_cancelled() {
+            return Err(FormatError::Cancelled);
+        }
+        if let Some(error) = failure {
+            return Err(error);
+        }
+        result.map_err(|error| {
+            classify_entry_read_error(map_7z_error(error), encrypted, password_supplied)
         })?;
-        Ok(Box::new(Cursor::new(data)))
+        if !found {
+            return Err(map_7z_error(sevenz_rust2::Error::FileNotFound));
+        }
+        Ok(())
     }
 
     /// Single-pass extraction through the shared safety engine, streaming

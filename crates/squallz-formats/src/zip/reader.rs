@@ -417,12 +417,16 @@ impl ArchiveReader for LocalZipArchiveReader {
         Ok(())
     }
 
-    fn read_entry(&mut self, path: &EntryPath) -> Result<Box<dyn Read + '_>, FormatError> {
+    fn read_entry(
+        &mut self,
+        path: &EntryPath,
+        consume: &mut dyn FnMut(&mut dyn Read) -> Result<(), FormatError>,
+    ) -> Result<(), FormatError> {
         let idx = *self
             .index_by_raw
             .get(&path.raw)
             .ok_or_else(|| FormatError::Other(format!("entry not found: {path}")))?;
-        self.read_entry_at(idx)
+        consume(self.read_entry_at(idx)?.as_mut())
     }
 
     fn test_summary(
@@ -860,12 +864,16 @@ impl ArchiveReader for ZipArchiveReader {
         Ok(())
     }
 
-    fn read_entry(&mut self, path: &EntryPath) -> Result<Box<dyn Read + '_>, FormatError> {
+    fn read_entry(
+        &mut self,
+        path: &EntryPath,
+        consume: &mut dyn FnMut(&mut dyn Read) -> Result<(), FormatError>,
+    ) -> Result<(), FormatError> {
         let idx = *self
             .index_by_raw
             .get(&path.raw)
             .ok_or_else(|| FormatError::Other(format!("entry not found: {path}")))?;
-        Ok(Box::new(self.open_entry(idx)?))
+        consume(&mut self.open_entry(idx)?)
     }
 
     fn test_summary(

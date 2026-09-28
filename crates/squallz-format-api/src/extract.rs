@@ -914,21 +914,27 @@ pub fn extract_entries_with_report<R: ArchiveReader + ?Sized>(
         match &meta.entry_type {
             EntryType::File => {
                 if let Some(out_path) = sink.file_target(meta, progress, ctl)? {
-                    let mut data = match reader.read_entry(&meta.path) {
-                        Ok(data) => data,
-                        Err(e) if opts.best_effort && best_effort_recoverable(&e) => {
+                    let mut wrote = false;
+                    let mut started = false;
+                    let result = reader.read_entry(&meta.path, &mut |data| {
+                        started = true;
+                        wrote = if opts.best_effort {
+                            sink.write_file_best_effort(meta, &out_path, data, progress, ctl)?
+                        } else {
+                            sink.write_file(meta, &out_path, data, progress, ctl)?;
+                            true
+                        };
+                        Ok(())
+                    });
+                    match result {
+                        Ok(()) => {}
+                        Err(e) if !started && opts.best_effort && best_effort_recoverable(&e) => {
                             sink.abandon_file_target(&out_path);
                             sink.record_problem(&meta.path, &e);
                             continue;
                         }
                         Err(e) => return Err(e),
-                    };
-                    let wrote = if opts.best_effort {
-                        sink.write_file_best_effort(meta, &out_path, &mut *data, progress, ctl)?
-                    } else {
-                        sink.write_file(meta, &out_path, &mut *data, progress, ctl)?;
-                        true
-                    };
+                    }
                     if wrote {
                         extracted.insert(meta.path.raw.clone(), out_path);
                     }
@@ -992,19 +998,24 @@ fn materialize_link<R: ArchiveReader + ?Sized>(
         encrypted: target.encrypted,
     };
     if let Some(out_path) = sink.file_target(&meta, progress, ctl)? {
-        let mut data = match reader.read_entry(&target.path) {
-            Ok(data) => data,
-            Err(e) if sink.opts.best_effort && best_effort_recoverable(&e) => {
+        let mut started = false;
+        let result = reader.read_entry(&target.path, &mut |data| {
+            started = true;
+            if sink.opts.best_effort {
+                sink.write_file_best_effort(&meta, &out_path, data, progress, ctl)?;
+            } else {
+                sink.write_file(&meta, &out_path, data, progress, ctl)?;
+            }
+            Ok(())
+        });
+        match result {
+            Ok(()) => {}
+            Err(e) if !started && sink.opts.best_effort && best_effort_recoverable(&e) => {
                 sink.abandon_file_target(&out_path);
                 sink.record_problem(&link.path, &e);
                 return Ok(());
             }
             Err(e) => return Err(e),
-        };
-        if sink.opts.best_effort {
-            sink.write_file_best_effort(&meta, &out_path, &mut *data, progress, ctl)?;
-        } else {
-            sink.write_file(&meta, &out_path, &mut *data, progress, ctl)?;
         }
     }
     Ok(())
@@ -1590,7 +1601,11 @@ mod tests {
             panic!("an explicitly empty selection must not list the archive")
         }
 
-        fn read_entry(&mut self, _path: &EntryPath) -> Result<Box<dyn Read + '_>, FormatError> {
+        fn read_entry(
+            &mut self,
+            _path: &EntryPath,
+            _consume: &mut dyn FnMut(&mut dyn Read) -> Result<(), FormatError>,
+        ) -> Result<(), FormatError> {
             panic!("an explicitly empty selection must not read an entry")
         }
 
@@ -1612,7 +1627,11 @@ mod tests {
             Box::new(self.entries.clone().into_iter().map(Ok))
         }
 
-        fn read_entry(&mut self, _path: &EntryPath) -> Result<Box<dyn Read + '_>, FormatError> {
+        fn read_entry(
+            &mut self,
+            _path: &EntryPath,
+            _consume: &mut dyn FnMut(&mut dyn Read) -> Result<(), FormatError>,
+        ) -> Result<(), FormatError> {
             panic!("dangling link tests must not read file content")
         }
 

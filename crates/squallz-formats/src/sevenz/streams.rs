@@ -107,38 +107,4 @@ impl EntryStreams {
         }
         Ok(())
     }
-
-    pub(super) fn read_file(&mut self, name: &str) -> Result<Vec<u8>, Error> {
-        let index = self
-            .archive
-            .files
-            .iter()
-            .rposition(|entry| entry.name() == name)
-            .ok_or(Error::FileNotFound)?;
-        let block = self
-            .archive
-            .stream_map
-            .file_block_index
-            .get(index)
-            .ok_or_else(|| Error::Other("7z stream map is shorter than its file list".into()))?;
-        let Some(block) = *block else {
-            return Ok(Vec::new());
-        };
-        let wanted = std::ptr::from_ref(&self.archive.files[index]);
-        let mut result = None;
-        self.for_each_in_blocks(Some(&HashSet::from([block])), |entry, reader| {
-            if std::ptr::eq(entry, wanted) {
-                let mut data = Vec::new();
-                reader.read_to_end(&mut data)?;
-                result = Some(data);
-                Ok(false)
-            } else {
-                // Earlier solid entries may be large; drain them without
-                // allocating a whole-file buffer for a later preview.
-                std::io::copy(reader, &mut std::io::sink())?;
-                Ok(true)
-            }
-        })?;
-        result.ok_or(Error::FileNotFound)
-    }
 }

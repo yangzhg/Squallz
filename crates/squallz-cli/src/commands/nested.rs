@@ -430,12 +430,14 @@ fn extract_nested_archive_to_temp(
             encoding_override: encoding.clone(),
         };
         let mut outer = ctx.engine.open(&archive, &open)?;
-        let mut nested = outer.read_entry(&EntryPath::from_utf8(entry))?;
         let (path, mut out) = create_nested_temp_file(entry)?;
-        match std::io::copy(&mut nested, &mut out) {
-            Ok(_) => Ok(path),
-            Err(e) => {
-                let err = FormatError::from(e);
+        match outer.read_entry(&EntryPath::from_utf8(entry), &mut |nested| {
+            std::io::copy(nested, &mut out)?;
+            Ok(())
+        }) {
+            Ok(()) => Ok(path),
+            Err(err) => {
+                drop(out);
                 let _ = fs::remove_file(&path);
                 Err(err)
             }

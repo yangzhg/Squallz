@@ -4,7 +4,6 @@
 //! extracting to disk.
 
 use std::fs::File;
-use std::io::Read;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -72,7 +71,7 @@ pub(crate) fn convert(
         }
     };
 
-    let mut reader = engine.open(src, open_opts)?;
+    let mut reader = engine.open_with_control(src, open_opts, ctl)?;
     let metas = collect_entry_metadata(&mut *reader, ctl)?;
     let plan = plan_convert_from_entries(engine, dest, &metas, create_opts)?;
     ensure_create_space(dest, &plan)?;
@@ -344,15 +343,16 @@ fn copy_entries(
         };
         match meta.entry_type {
             EntryType::File => {
-                let data = reader.read_entry(&meta.path)?;
-                let mut data =
-                    ProgressRead::new(data, progress, ctl, &meta.path, done, total, meta.size);
-                sink.add_entry(&out_meta, Some(&mut data)).map_err(|e| {
-                    if ctl.is_cancelled() {
-                        FormatError::Cancelled
-                    } else {
-                        e
-                    }
+                reader.read_entry(&meta.path, &mut |data| {
+                    let mut data =
+                        ProgressRead::new(data, progress, ctl, &meta.path, done, total, meta.size);
+                    sink.add_entry(&out_meta, Some(&mut data)).map_err(|e| {
+                        if ctl.is_cancelled() {
+                            FormatError::Cancelled
+                        } else {
+                            e
+                        }
+                    })
                 })?;
                 done += meta.size;
             }
@@ -390,23 +390,25 @@ fn single_stream_convert(
             meta.path
         )));
     }
-    let mut data = reader.read_entry(&meta.path)?;
     // Pump locally: the entry reader is not `Send`, so the trait's chunked
     // pump cannot be used here.
     let mut sink = compressor.compress_writer(Box::new(dst), opts.level, &opts.resources)?;
     let label = KnownTotal::new(progress, meta.size, meta.path.clone());
     let mut buf = vec![0u8; opts.resources.stream_buffer_size(64 * 1024)?];
     let mut done = 0u64;
-    loop {
-        ctl.checkpoint()?;
-        let n = data.read(&mut buf)?;
-        if n == 0 {
-            break;
+    reader.read_entry(&meta.path, &mut |data| {
+        loop {
+            ctl.checkpoint()?;
+            let n = data.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            std::io::Write::write_all(&mut sink, &buf[..n])?;
+            done += n as u64;
+            label.on_progress(done, 0, &meta.path);
         }
-        std::io::Write::write_all(&mut sink, &buf[..n])?;
-        done += n as u64;
-        label.on_progress(done, 0, &meta.path);
-    }
+        Ok(())
+    })?;
     sink.finish()?;
     progress.on_progress(meta.size, meta.size, &EntryPath::from_utf8(""));
     Ok(())

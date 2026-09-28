@@ -2783,8 +2783,12 @@ mod tests {
             })
         }
 
-        fn read_entry(&mut self, _path: &EntryPath) -> Result<Box<dyn Read + '_>, FormatError> {
-            Ok(Box::new(io::empty()))
+        fn read_entry(
+            &mut self,
+            _path: &EntryPath,
+            consume: &mut dyn FnMut(&mut dyn Read) -> Result<(), FormatError>,
+        ) -> Result<(), FormatError> {
+            consume(&mut io::empty())
         }
 
         fn test_summary(

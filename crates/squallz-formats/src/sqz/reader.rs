@@ -361,7 +361,11 @@ impl ArchiveReader for EntrySetSqzReader {
         Ok(())
     }
 
-    fn read_entry(&mut self, path: &EntryPath) -> Result<Box<dyn Read + '_>, FormatError> {
+    fn read_entry(
+        &mut self,
+        path: &EntryPath,
+        consume: &mut dyn FnMut(&mut dyn Read) -> Result<(), FormatError>,
+    ) -> Result<(), FormatError> {
         let record = self
             .records
             .iter()
@@ -380,13 +384,13 @@ impl ArchiveReader for EntrySetSqzReader {
         }
         if self.record_has_repaired_block(&record) {
             let data = self.read_record_bytes(&record)?;
-            return Ok(Box::new(Cursor::new(data)));
+            return consume(&mut Cursor::new(data));
         }
         self.src.seek(SeekFrom::Start(record.data_offset))?;
-        Ok(Box::new(EntryData {
+        consume(&mut EntryData {
             inner: &mut *self.src,
             remaining: record.data_size,
-        }))
+        })
     }
 
     fn test_summary(
@@ -424,10 +428,14 @@ impl ArchiveReader for SqzArchiveReader {
         }
     }
 
-    fn read_entry(&mut self, path: &EntryPath) -> Result<Box<dyn Read + '_>, FormatError> {
+    fn read_entry(
+        &mut self,
+        path: &EntryPath,
+        consume: &mut dyn FnMut(&mut dyn Read) -> Result<(), FormatError>,
+    ) -> Result<(), FormatError> {
         match self {
-            SqzArchiveReader::EntrySet(reader) => reader.read_entry(path),
-            SqzArchiveReader::Inner { reader, .. } => reader.read_entry(path),
+            SqzArchiveReader::EntrySet(reader) => reader.read_entry(path, consume),
+            SqzArchiveReader::Inner { reader, .. } => reader.read_entry(path, consume),
         }
     }
 

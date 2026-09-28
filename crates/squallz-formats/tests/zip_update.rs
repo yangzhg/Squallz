@@ -633,9 +633,10 @@ fn update_preserves_encrypted_legacy_names_and_payloads() {
         let mut reader = engine().open(&archive, &options).unwrap();
         let mut contents = Vec::new();
         reader
-            .read_entry(&entries[0].path)
-            .unwrap()
-            .read_to_end(&mut contents)
+            .read_entry(&entries[0].path, &mut |entry| {
+                entry.read_to_end(&mut contents)?;
+                Ok(())
+            })
             .unwrap();
         assert_eq!(contents, b"encrypted contents");
     }
@@ -2116,13 +2117,12 @@ fn update_delete_literal_keeps_encrypted_payloads_without_a_password() {
         .all(|entry| entry.encrypted));
     let mut reader = engine().open(&archive, &options).unwrap();
     let mut data = Vec::new();
-    std::io::Read::read_to_end(
-        &mut reader
-            .read_entry(&EntryPath::from_utf8("project/a.txt"))
-            .unwrap(),
-        &mut data,
-    )
-    .unwrap();
+    reader
+        .read_entry(&EntryPath::from_utf8("project/a.txt"), &mut |entry| {
+            entry.read_to_end(&mut data)?;
+            Ok(())
+        })
+        .unwrap();
     assert_eq!(data, b"alpha");
 }
 
@@ -2166,13 +2166,12 @@ fn update_rename_entry() {
     let opts = OpenOptions::default();
     let mut reader = engine().open(&archive, &opts).unwrap();
     let mut data = Vec::new();
-    std::io::Read::read_to_end(
-        &mut reader
-            .read_entry(&EntryPath::from_utf8("project/renamed.txt"))
-            .unwrap(),
-        &mut data,
-    )
-    .unwrap();
+    reader
+        .read_entry(&EntryPath::from_utf8("project/renamed.txt"), &mut |entry| {
+            entry.read_to_end(&mut data)?;
+            Ok(())
+        })
+        .unwrap();
     assert_eq!(data, b"alpha");
 
     // Renaming a missing entry fails and leaves the archive intact.
@@ -2211,13 +2210,12 @@ fn update_rename_directory_moves_its_complete_subtree() {
         assert!(names.contains(&"project/a.txt".into()));
         let mut reader = engine().open(&archive, &OpenOptions::default()).unwrap();
         let mut data = Vec::new();
-        std::io::Read::read_to_end(
-            &mut reader
-                .read_entry(&EntryPath::from_utf8("整理/资料/b.txt"))
-                .unwrap(),
-            &mut data,
-        )
-        .unwrap();
+        reader
+            .read_entry(&EntryPath::from_utf8("整理/资料/b.txt"), &mut |entry| {
+                entry.read_to_end(&mut data)?;
+                Ok(())
+            })
+            .unwrap();
         assert_eq!(data, b"bravo");
         assert_unzip_t(&archive);
     }
@@ -2350,11 +2348,12 @@ fn update_encrypted_directory_rename_preserves_payloads_without_a_password() {
         ("资料/sub/b.txt", b"bravo".as_slice()),
     ] {
         let mut data = Vec::new();
-        std::io::Read::read_to_end(
-            &mut reader.read_entry(&EntryPath::from_utf8(name)).unwrap(),
-            &mut data,
-        )
-        .unwrap();
+        reader
+            .read_entry(&EntryPath::from_utf8(name), &mut |entry| {
+                entry.read_to_end(&mut data)?;
+                Ok(())
+            })
+            .unwrap();
         assert_eq!(data, expected);
     }
     assert!(!list_names(&archive, Some("directory-test-password"))
@@ -2439,13 +2438,12 @@ fn update_rejects_target_conflicts_without_explicit_delete() {
 
     let mut reader = engine().open(&archive, &OpenOptions::default()).unwrap();
     let mut data = Vec::new();
-    std::io::Read::read_to_end(
-        &mut reader
-            .read_entry(&EntryPath::from_utf8("project/a.txt"))
-            .unwrap(),
-        &mut data,
-    )
-    .unwrap();
+    reader
+        .read_entry(&EntryPath::from_utf8("project/a.txt"), &mut |entry| {
+            entry.read_to_end(&mut data)?;
+            Ok(())
+        })
+        .unwrap();
     assert_eq!(data, b"replacement");
     assert_unzip_t(&archive);
 }
@@ -2509,13 +2507,12 @@ fn update_encrypted_archive_without_password_keeps_encryption() {
     };
     let mut reader = engine().open(&archive, &open).unwrap();
     let mut data = Vec::new();
-    std::io::Read::read_to_end(
-        &mut reader
-            .read_entry(&EntryPath::from_utf8("project/a.txt"))
-            .unwrap(),
-        &mut data,
-    )
-    .unwrap();
+    reader
+        .read_entry(&EntryPath::from_utf8("project/a.txt"), &mut |entry| {
+            entry.read_to_end(&mut data)?;
+            Ok(())
+        })
+        .unwrap();
     assert_eq!(data, b"alpha");
 }
 

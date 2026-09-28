@@ -1657,17 +1657,21 @@ fn zip64_store_5gib_roundtrip() {
         assert_eq!(entries[0].path.display, name);
         assert_eq!(entries[0].size, SIZE);
         assert_eq!(entries[0].compressed_size, Some(SIZE));
-        let mut stream = reader.read_entry(&entries[0].path).unwrap();
         let mut remaining = 0u64;
         let mut buf = vec![0u8; 1024 * 1024];
-        loop {
-            let n = stream.read(&mut buf).unwrap();
-            if n == 0 {
-                break;
-            }
-            assert!(buf[..n].iter().all(|&b| b == 0));
-            remaining += n as u64;
-        }
+        reader
+            .read_entry(&entries[0].path, &mut |stream| {
+                loop {
+                    let n = stream.read(&mut buf)?;
+                    if n == 0 {
+                        break;
+                    }
+                    assert!(buf[..n].iter().all(|&b| b == 0));
+                    remaining += n as u64;
+                }
+                Ok(())
+            })
+            .unwrap();
         assert_eq!(remaining, SIZE);
     }
 }

@@ -161,11 +161,15 @@ impl ArchiveReader for SingleFileArchiveReader {
         visitor(self.meta)
     }
 
-    fn read_entry(&mut self, path: &EntryPath) -> Result<Box<dyn Read + '_>, FormatError> {
+    fn read_entry(
+        &mut self,
+        path: &EntryPath,
+        consume: &mut dyn FnMut(&mut dyn Read) -> Result<(), FormatError>,
+    ) -> Result<(), FormatError> {
         if path.raw != self.meta.path.raw {
             return Err(FormatError::Other(format!("entry not found: {path}")));
         }
-        Ok((self.factory)()?)
+        consume((self.factory)()?.as_mut())
     }
 
     fn test_summary(
@@ -375,9 +379,13 @@ mod tests {
             .expect("entry meta");
         assert_eq!(meta.path.display, "data");
 
-        let mut entry = reader.read_entry(&meta.path).unwrap();
         let mut bytes = Vec::new();
-        entry.read_to_end(&mut bytes).unwrap();
+        reader
+            .read_entry(&meta.path, &mut |entry| {
+                entry.read_to_end(&mut bytes)?;
+                Ok(())
+            })
+            .unwrap();
         assert_eq!(bytes, b"abc");
     }
 

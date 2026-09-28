@@ -724,9 +724,18 @@ pub trait ArchiveReader: Send {
         crate::extract::extract_entries_with_report(self, dest, selection, opts, progress, ctl)
     }
 
-    /// Streams a single entry (GUI preview, nested archives, format
-    /// conversion).
-    fn read_entry(&mut self, path: &EntryPath) -> Result<Box<dyn Read + '_>, FormatError>;
+    /// Consumes a single entry stream (preview, nested archives, conversion).
+    ///
+    /// The consumer is called once after the entry is located. It may stop
+    /// early or return an error without draining the remaining data afterward.
+    /// Decoders lend their stream directly so consumers can enforce limits
+    /// during decoding. Reading to EOF is required to verify checksums.
+    /// Consumer failures unrelated to reading must be preserved unchanged.
+    fn read_entry(
+        &mut self,
+        path: &EntryPath,
+        consume: &mut dyn FnMut(&mut dyn Read) -> Result<(), FormatError>,
+    ) -> Result<(), FormatError>;
 
     /// Integrity test with an exact problem count and bounded diagnostic
     /// preview.
