@@ -17,6 +17,8 @@
   --control-padding-inline: 10px;
   --border-width-control: 1px;
   --check-control-size: 16px;
+  --archive-classic-table-min-width: 1080px;
+  --archive-classic-table-columns: minmax(200px, 1fr) 80px 80px 56px 122px 80px 104px 160px;
   --split-unit-min-width: 72px;
   --radius-shell: 18px;
   --radius-panel: 14px;
@@ -12244,16 +12246,16 @@ select.classic-input:focus {
 
 .classic-head,
 .classic-row {
-  min-width: 900px;
+  min-width: var(--archive-classic-table-min-width);
   display: grid;
-  grid-template-columns: minmax(250px, 1fr) 90px 90px 70px 122px 92px 82px 45px;
+  grid-template-columns: var(--archive-classic-table-columns);
   align-items: center;
-  column-gap: 10px;
-  padding: 0 10px;
+  column-gap: var(--space-sm);
+  padding: 0 var(--control-padding-inline);
 }
 
 .classic-virtual-scroll {
-  min-width: 900px;
+  min-width: var(--archive-classic-table-min-width);
 }
 
 .classic-head {

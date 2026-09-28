@@ -13,7 +13,7 @@
     ratio: string;
     modified: string;
     crc: string;
-    method: string;
+    encoding: string;
     attr: string;
     source?: EntryDto;
     virtualIndex?: number;
@@ -473,18 +473,23 @@
               class:type-folder={entry.type === "folder"}
               class:type-locked={entry.type === "locked"}
               class:type-warning={entry.type === "warning"}
+              role={entry.type === "locked" ? "img" : undefined}
+              aria-label={entry.type === "locked" ? tr("gui.list.encrypted_tip", "Entry is encrypted") : undefined}
+              title={entry.type === "locked" ? tr("gui.list.encrypted_tip", "Entry is encrypted") : undefined}
             >
-              {entry.type === "folder"
-                ? "DIR"
-                : entry.type === "pdf"
-                  ? "PDF"
-                  : entry.type === "sheet"
-                    ? "XLS"
-                    : entry.type === "locked"
-                      ? "AES"
+              {#if entry.type === "locked"}
+                <Icon name="lock" size={14} />
+              {:else}
+                {entry.type === "folder"
+                  ? "DIR"
+                  : entry.type === "pdf"
+                    ? "PDF"
+                    : entry.type === "sheet"
+                      ? "XLS"
                       : entry.type === "warning"
                         ? "TXT"
                         : "FILE"}
+              {/if}
             </span>
             <span class="archive-entry-label">
               <strong>{entry.name}</strong>

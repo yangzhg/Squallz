@@ -1457,7 +1457,7 @@
   "gui.table.ratio": "比例",
   "gui.table.modified": "修改时间",
   "gui.table.crc": "CRC",
-  "gui.table.method": "方法",
+  "gui.table.filename_encoding": "文件名编码",
   "gui.table.attr": "属性",
   "gui.attr.file": "文件",
   "gui.attr.folder": "目录",

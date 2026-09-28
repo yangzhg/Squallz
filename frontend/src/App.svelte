@@ -483,7 +483,7 @@
     ratio: string;
     modified: string;
     crc: string;
-    method: string;
+    encoding: string;
     attr: string;
     source?: EntryDto;
     virtualIndex?: number;
@@ -6285,7 +6285,7 @@
       ratio,
       modified: formatModified(row.modified),
       crc: row.crc == null ? "" : row.crc.toString(16).toUpperCase().padStart(8, "0"),
-      method: row.encrypted ? "AES" : row.encoding === "utf-8" ? "" : row.encoding.toUpperCase(),
+      encoding: row.encoding.toUpperCase(),
       attr: entryAttributeLabel(row),
       source: row,
     };

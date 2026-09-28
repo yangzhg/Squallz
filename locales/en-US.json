@@ -1457,7 +1457,7 @@
   "gui.table.ratio": "Ratio",
   "gui.table.modified": "Modified",
   "gui.table.crc": "CRC",
-  "gui.table.method": "Method",
+  "gui.table.filename_encoding": "Name encoding",
   "gui.table.attr": "Attr",
   "gui.attr.file": "File",
   "gui.attr.folder": "Folder",

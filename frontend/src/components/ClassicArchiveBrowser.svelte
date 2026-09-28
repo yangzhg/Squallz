@@ -12,7 +12,7 @@
     ratio: string;
     modified: string;
     crc: string;
-    method: string;
+    encoding: string;
     attr: string;
     source?: EntryDto;
     virtualIndex?: number;
@@ -131,6 +131,12 @@
     onToggleAllEntries,
     onPreviewEntry,
   }: ClassicArchiveBrowserProps = $props();
+
+  let table: HTMLDivElement | undefined = $state();
+
+  $effect(() => {
+    if (view.totalRows === 0 && table) table.scrollLeft = 0;
+  });
 
   let previewActive = $derived(
     Boolean(
@@ -288,6 +294,7 @@
     <p class="archive-selection-hint">{tr("gui.selection.range_hint", "Shift-click to select a range · ⌘/Ctrl-click to select individual entries")}</p>
     <div
       class="classic-table"
+      bind:this={table}
       role="table"
       aria-label={tr("gui.table.archive", "Archive table")}
       aria-rowcount={Math.max(view.totalRows + 1, 2)}
@@ -315,7 +322,7 @@
         <span role="columnheader">{tr("gui.table.ratio", "Ratio")}</span>
         <span role="columnheader">{tr("gui.table.modified", "Modified")}</span>
         <span role="columnheader">{tr("gui.table.crc", "CRC")}</span>
-        <span role="columnheader">{tr("gui.table.method", "Method")}</span>
+        <span role="columnheader">{tr("gui.table.filename_encoding", "Name encoding")}</span>
         <span role="columnheader">{tr("gui.table.attr", "Attr")}</span>
       </div>
       <div
@@ -386,8 +393,8 @@
             <span role="cell">{entry.ratio}</span>
             <span role="cell">{entry.modified}</span>
             <span role="cell">{entry.crc}</span>
-            <span role="cell">{entry.method}</span>
-            <span role="cell">{entry.attr}</span>
+            <span role="cell">{entry.encoding}</span>
+            <span role="cell" title={entry.attr}>{entry.attr}</span>
           </div>
         {:else}
           <div class="classic-row empty-row" role="row" aria-rowindex="2">
