@@ -29,7 +29,7 @@ import {
   sourceCleanupResult,
   taskChecksumItems,
   taskChecksumResultText,
-  taskFailureReviewScreen,
+  taskReviewScreen,
   taskHasInlineResults,
   taskOutcomeNeedsAttention,
   taskOutputCanOpen,
@@ -55,7 +55,7 @@ export {
   normalizeTaskConflictAnswer,
   taskChecksumItems,
   taskChecksumResultText,
-  taskFailureReviewScreen,
+  taskReviewScreen,
   taskHasInlineResults,
   taskOutcomeNeedsAttention,
   taskOutputCanOpen,
@@ -1121,12 +1121,12 @@ export function taskErrorDetailsActionLabel(task: TaskDialogModel): string {
     : tr("gui.task.show_error_details", "Show error details");
 }
 
-export function taskFailureReviewAvailable(task: TaskDialogModel, taskWindowMode: boolean): boolean {
-  return !taskWindowMode && taskFailureReviewScreen(task) !== null;
+export function taskReviewAvailable(task: TaskDialogModel, taskWindowMode: boolean): boolean {
+  return !taskWindowMode && taskReviewScreen(task) !== null;
 }
 
-export function taskFailureReviewActionLabel(task: TaskDialogModel): string {
-  const target = taskFailureReviewScreen(task);
+export function taskReviewActionLabel(task: TaskDialogModel): string {
+  const target = taskReviewScreen(task);
   if (target === "recovery") return tr("gui.task.open_recovery", "Open Recovery");
   if (target === "browse") return tr("gui.task.return_to_archive", "Return to archive");
   return tr("gui.task.review_settings", "Review task settings");
@@ -1263,6 +1263,14 @@ export function taskNextStepDetail(task: TaskDialogModel, taskWindowMode: boolea
         { detail },
       )
       : detail;
+  }
+  if (task.state === "done" && task.spec.kind === "test") {
+    if (task.result?.ok === false) {
+      return taskWindowMode
+        ? tr("gui.task.next_step_test_failed_window", "Review the test report. To check repair options, open Recovery in the main Squallz window and choose the tested archive.")
+        : tr("gui.task.next_step_test_failed", "Review the test report, then open Recovery to check repair options for this archive.");
+    }
+    return tr("gui.task.next_step_window_results", "Review the result details in this window, then close it.");
   }
   if (isRecoveryDiagnosticTask(task) && recoveryResultOk(task.result) === false) {
     if (task.spec.kind === "repair_recovery") {

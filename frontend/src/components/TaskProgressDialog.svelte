@@ -26,9 +26,9 @@
     taskDialogResultSummary,
     taskErrorDetailsActionLabel,
     taskErrorDetailsAvailable,
-    taskFailureReviewActionLabel,
-    taskFailureReviewAvailable,
-    taskFailureReviewScreen,
+    taskReviewActionLabel,
+    taskReviewAvailable,
+    taskReviewScreen,
     taskTitleLabel,
     taskNextStepDetail,
     taskOpenOutputLabel,
@@ -93,7 +93,7 @@
     onCopyChecksumResults,
     onOpenOutput,
     onPublishMacosSfx,
-    onReviewFailure,
+    onReviewTask,
     onToggleDetails,
     onViewResults,
     onRevealOutput,
@@ -126,7 +126,7 @@
     onCopyChecksumResults: TaskAsyncAction;
     onOpenOutput: TaskAsyncAction;
     onPublishMacosSfx: TaskAsyncAction;
-    onReviewFailure: TaskAction;
+    onReviewTask: TaskAction;
     onToggleDetails: TaskAction;
     onViewResults: TaskAction;
     onRevealOutput: TaskAsyncAction;
@@ -556,7 +556,7 @@
           {@const outputCanOpen = taskOutputCanOpen(task) && !(taskWindowMode && task.spec.kind === "compress")}
           {@const sfxPublishAvailable = macosSfxPublishingAvailable && taskCanPublishMacosSfx(task)}
           {@const primaryActionAvailable = outputCanOpen || sfxPublishAvailable}
-          {@const failureReviewAvailable = taskFailureReviewAvailable(task, taskWindowMode)}
+          {@const reviewAvailable = taskReviewAvailable(task, taskWindowMode)}
           {#if sfxPublishAvailable}
             <button class="primary" type="button" onclick={() => void onPublishMacosSfx(task)}>
               <Icon name="shield-check" size={15} />{tr("gui.task.publish_macos_sfx", "Publish for macOS")}
@@ -567,14 +567,14 @@
               <Icon name={taskOutputIsFolder(task) ? "folder-open" : "external-link"} size={15} />{taskOpenOutputLabel(task)}
             </button>
           {/if}
-          {#if failureReviewAvailable}
-            <button class={primaryActionAvailable ? "primary-lite" : "primary"} type="button" onclick={() => onReviewFailure(task)}>
-              <Icon name={taskFailureReviewScreen(task) === "recovery" ? "shield-alert" : "settings"} size={15} />{taskFailureReviewActionLabel(task)}
+          {#if reviewAvailable}
+            <button class={primaryActionAvailable ? "primary-lite" : "primary"} type="button" onclick={() => onReviewTask(task)}>
+              <Icon name={taskReviewScreen(task) === "recovery" ? "shield-alert" : "settings"} size={15} />{taskReviewActionLabel(task)}
             </button>
           {/if}
           {#if taskResultAvailableForSurface(task, taskWindowMode)}
             <button
-              class={primaryActionAvailable ? undefined : "primary"}
+              class={primaryActionAvailable || reviewAvailable ? undefined : "primary"}
               type="button"
               aria-expanded={taskHasInlineResults(task) ? task.expanded : undefined}
               aria-controls={taskHasInlineResults(task) ? createDetailsId : undefined}

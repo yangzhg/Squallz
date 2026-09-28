@@ -3463,6 +3463,8 @@
   "gui.task.next_step_checksum": "可在此窗口复制校验和结果，或打开校验和工具页查看。",
   "gui.task.next_step_checksum_window": "可在此窗口复制校验和结果。",
   "gui.task.next_step_results": "到对应工具页查看完成报告。",
+  "gui.task.next_step_test_failed": "查看测试报告，然后打开“恢复”，检查该压缩包可用的修复方式。",
+  "gui.task.next_step_test_failed_window": "查看测试报告。需要检查修复方式时，请在 Squallz 主窗口打开“恢复”，选择被测试的压缩包。",
   "gui.task.next_step_window_results": "在此窗口查看结果详情，然后关闭窗口。",
   "gui.task.next_step_done": "任务已完成；关闭此窗口后继续操作。",
   "gui.task.failure.next_password": "返回任务设置，重新输入密码后再开始。",

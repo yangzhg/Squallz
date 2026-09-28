@@ -196,6 +196,7 @@ export function taskHasInlineResults(task: TaskDialogModel): boolean {
     || task.spec.kind === "convert"
     || task.spec.kind === "publish_macos_sfx"
     || task.spec.kind === "protect"
+    || task.spec.kind === "test"
     || (
       (task.spec.kind === "extract" || task.spec.kind === "extract_nested")
       && readExtractResultCounts(task.result) !== null
@@ -203,7 +204,10 @@ export function taskHasInlineResults(task: TaskDialogModel): boolean {
   ) && task.result !== null;
 }
 
-export function taskFailureReviewScreen(task: TaskDialogModel): Screen | null {
+export function taskReviewScreen(task: TaskDialogModel): Screen | null {
+  if (task.state === "done" && task.spec.kind === "test" && task.result?.ok === false) {
+    return "recovery";
+  }
   if (task.state !== "failed") return null;
   switch (task.spec.kind) {
     case "compress":

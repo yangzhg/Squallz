@@ -1404,7 +1404,9 @@ function previewTaskSpec(kind: PreviewTaskKind): JobSpec {
   if (kind === "test" || kind === "archive_open") {
     return {
       kind: "test",
-      path: `${sampleRoot}/product-backup.zip`,
+      path: kind === "test"
+        ? `${sampleRoot}/inspection/damaged-backup.zip`
+        : `${sampleRoot}/product-backup.zip`,
       encoding: null,
       password: null,
     };

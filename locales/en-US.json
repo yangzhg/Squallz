@@ -3463,6 +3463,8 @@
   "gui.task.next_step_checksum": "Copy the checksum results from this window or open the checksum tool page.",
   "gui.task.next_step_checksum_window": "Copy the checksum results from this window.",
   "gui.task.next_step_results": "Review the finished report in its tool page.",
+  "gui.task.next_step_test_failed": "Review the test report, then open Recovery to check repair options for this archive.",
+  "gui.task.next_step_test_failed_window": "Review the test report. To check repair options, open Recovery in the main Squallz window and choose the tested archive.",
   "gui.task.next_step_window_results": "Review the result details in this window, then close it.",
   "gui.task.next_step_done": "The task is finished; close this window to continue.",
   "gui.task.failure.next_password": "Review the task settings and enter the password again.",

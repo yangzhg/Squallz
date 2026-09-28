@@ -242,7 +242,7 @@
     normalizeTaskConflictAnswer,
     taskPasswordReady,
     taskChecksumResultText,
-    taskFailureReviewScreen,
+    taskReviewScreen,
     taskOutputCanOpen,
     taskOutputIsFolder,
     taskOutputPath,
@@ -12331,7 +12331,7 @@
       onCopyChecksumResults: copyTaskChecksumResults,
       onOpenOutput: openTaskOutput,
       onPublishMacosSfx: openMacosSfxPublisher,
-      onReviewFailure: reviewFailedTask,
+      onReviewTask: reviewTask,
       onToggleDetails: toggleTaskDetails,
       onViewResults: viewTaskResults,
       onRevealOutput: revealTaskOutput,
@@ -12363,7 +12363,7 @@
       onCopyChecksumResults: copyTaskChecksumResults,
       onOpenOutput: openTaskOutput,
       onPublishMacosSfx: openMacosSfxPublisher,
-      onReviewFailure: reviewFailedTask,
+      onReviewTask: reviewTask,
       onToggleDetails: toggleTaskDetails,
       onViewResults: viewTaskResults,
       onRevealOutput: revealTaskOutput,
@@ -12679,10 +12679,6 @@
   }
 
   function viewTaskResults(task: TaskDialogModel): void {
-    if (testTaskUsesRecoveryContext(task)) {
-      if (task.id !== null) setTaskExpanded(task.id, true);
-      return;
-    }
     if (taskHasInlineResults(task)) {
       if (task.id !== null) setTaskExpanded(task.id, !task.expanded);
       return;
@@ -12708,9 +12704,9 @@
     setTaskExpanded(task.id, !task.expanded);
   }
 
-  function reviewFailedTask(task: TaskDialogModel): void {
+  function reviewTask(task: TaskDialogModel): void {
     if (taskWindowMode) return;
-    let target = taskFailureReviewScreen(task);
+    let target = taskReviewScreen(task);
     if (target === "archiveInfo" && testTaskUsesRecoveryContext(task)) {
       target = "recovery";
     }

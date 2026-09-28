@@ -83,6 +83,9 @@ test("SFX result and recovery details use the durable single-backup contract", a
       taskHasInlineResults,
       taskKindLabel,
       taskResultAvailableForSurface,
+      taskReviewScreen,
+      taskReviewAvailable,
+      taskReviewActionLabel,
     } = await server.ssrLoadModule("/src/lib/task-dialog.ts");
     const { taskCanPublishMacosSfx } = await server.ssrLoadModule(
       "/src/lib/macos-sfx-publish.ts",
@@ -596,6 +599,22 @@ test("SFX result and recovery details use the durable single-backup contract", a
       taskDialogResultSummary(boundedTest),
       "Archive test found 30 problem(s)",
     );
+    assert.equal(taskHasInlineResults(boundedTest), true);
+    assert.equal(taskResultActionLabel(boundedTest), "Hide results");
+    assert.equal(taskResultActionLabel({ ...boundedTest, expanded: false }), "View results");
+    assert.equal(taskReviewScreen(boundedTest), "recovery");
+    assert.equal(taskReviewAvailable(boundedTest, false), true);
+    assert.equal(taskReviewAvailable(boundedTest, true), false);
+    assert.equal(taskReviewActionLabel(boundedTest), "Open Recovery");
+    assert.match(taskNextStepDetail(boundedTest, false), /open Recovery/u);
+    assert.match(taskNextStepDetail(boundedTest, true), /main Squallz window/u);
+    const passedTest = { ...boundedTest, result: { ...boundedTest.result, ok: true, problems: [], problems_total: 0 } };
+    assert.equal(taskHasInlineResults(passedTest), true);
+    assert.equal(taskReviewScreen(passedTest), null);
+    assert.equal(taskNextStepDetail(passedTest, false), "Review the result details in this window, then close it.");
+    assert.equal(taskReviewScreen({ ...boundedTest, state: "running" }), null);
+    assert.equal(taskReviewScreen({ ...boundedTest, state: "cancelled" }), null);
+    assert.equal(taskReviewScreen({ ...boundedTest, state: "failed", error: { key: "error.corrupt_archive" } }), "recovery");
     const boundedTestRows = taskResultDetailRows(boundedTest);
     assert.ok(
       boundedTestRows.some(
