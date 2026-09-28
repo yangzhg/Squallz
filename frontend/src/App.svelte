@@ -53,6 +53,8 @@
   } from "./lib/history.svelte";
   import { copyTextToClipboard } from "./lib/clipboard";
   import { archiveEditPathIssue, archiveSelectionRoots, normalizeArchivePath } from "./lib/archive-editing";
+  import { appActionAvailability, appActionForShortcut, dispatchAppAction, isTextEditingTarget, type AppAction } from "./lib/app-actions";
+  import { connectNativeMenu, type NativeMenuConnection } from "./lib/native-menu";
   import { trapModalFocus } from "./lib/modal-focus";
   import type { UpdateCheckPreview } from "./lib/app-update.svelte";
   import {
@@ -187,7 +189,7 @@
     type TaskWindowSubmitTransition,
   } from "./lib/task-window";
   import { allFormats, loadFormats } from "./lib/formats.svelte";
-  import { currentLang, listBundledLanguages, loadLocale, t, tError } from "./lib/i18n.svelte";
+  import { currentLang, i18nReady, listBundledLanguages, loadLocale, t, tError } from "./lib/i18n.svelte";
   import { pushToast, removeToastByKey } from "./lib/toasts.svelte";
   import { isNewSourceCleanupRecoveryGeneration } from "./lib/source-cleanup";
   import { currentWebviewWindowListener } from "./lib/tauri-events";
@@ -1326,13 +1328,164 @@
     discardQueuedExtractPlan();
   });
 
-  function isTextEditingTarget(target: EventTarget | null): boolean {
-    if (!(target instanceof HTMLElement)) return false;
-    return target.isContentEditable
-      || target instanceof HTMLInputElement
-      || target instanceof HTMLTextAreaElement
-      || target instanceof HTMLSelectElement;
+  let nativeMenuConnection = $state<NativeMenuConnection | null>(null);
+  let textEditingFocused = $state(false);
+  let taskCenterFocused = $state(false);
+  let reconnectNativeMenu: (() => Promise<void>) | null = null;
+  function appActionContext() {
+    return {
+      blocked: modeSelectionBlocked || blockingModalVisible(),
+      taskWindow: taskWindowMode,
+      opening: archiveOpenStatus === "opening",
+      archive: Boolean(currentArchive),
+      writable: !archiveMutationDisabledReason(),
+      browsing: screen === "browse",
+      selectionBusy: Boolean(archiveSelectionBusyReason()),
+      hasSelection: hasArchiveSelection(),
+      canRename: canRenameSelection(),
+      canPreview: canPreviewEntrySelection(),
+      canSelectAll: !archiveSelectionControl().disabled,
+      hasParent: canGoUpArchive(),
+      textSelection: textEditingFocused || taskCenterFocused,
+      taskCenterAvailable: !modeSelectionBlocked && !blockingModalVisible(),
+    };
   }
+  const availableAppActions = $derived(appActionAvailability(appActionContext()));
+
+  type PreviewActionTarget = { path: string; type: EntryDto["entry_type"] };
+
+  function contextualAppActions(target: PreviewActionTarget) {
+    return appActionAvailability({
+      ...appActionContext(),
+      canPreview: !previewBusy() && previewPolicyFor(target.path, target.type).kind !== "none",
+    });
+  }
+
+  function appActionEnabled(action: AppAction): boolean {
+    return availableAppActions[action];
+  }
+
+  async function runAppAction(action: string, previewTarget?: PreviewActionTarget): Promise<boolean> {
+    try {
+      return await dispatchAppAction(action, previewTarget ? contextualAppActions(previewTarget) : availableAppActions, {
+        open_archive: openArchiveFromDialog,
+        create_archive: () => setScreen("create"),
+        extract_all: () => openExtractWorkspace("all"),
+        extract_selection: () => openExtractWorkspace("selection"),
+        add_files: submitAddToArchiveJob,
+        new_folder: () => openArchiveEditor("new-folder"),
+        rename_entry: () => openArchiveEditor("rename"),
+        move_entries: () => openArchiveEditor("move"),
+        delete_entries: submitDeleteSelectedJob,
+        preview_entry: () => submitPreviewEntry(previewTarget?.path, previewTarget?.type),
+        copy_entries: submitCopyOutSelectedJob,
+        test_archive: submitTestJob,
+        convert_archive: () => setScreen("convert"),
+        archive_info: () => setScreen("archiveInfo"),
+        search_archive: () => {
+          closeQuickActions(false);
+          archiveSearchInput?.focus();
+          archiveSearchInput?.select();
+        },
+        go_up: goArchiveUp,
+        task_center: () => openTaskCenter(document.activeElement instanceof HTMLElement ? document.activeElement : null),
+        select_all: () => {
+          if (!isTextEditingTarget(document.activeElement) && !taskWindowMode && !modeSelectionBlocked
+            && !blockingModalVisible() && !document.activeElement?.closest("#squallz-task-center")
+            && screen === "browse" && currentArchive) {
+            closeQuickActions(false);
+            return selectAllArchiveEntries();
+          }
+          const target = document.activeElement;
+          if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) target.select();
+          else document.execCommand("selectAll");
+        },
+        settings: () => setScreen("settingsGeneral"),
+      });
+    } catch (error) {
+      pushToast({
+        key: "app-action-failed",
+        kind: "danger",
+        title: t("gui.native_menu.action_failed"),
+        body: isErrorDto(error) ? tError(error) : undefined,
+      });
+      return false;
+    }
+  }
+
+  function nativeMenuSnapshot() {
+    return {
+      language: currentLang(),
+      enabled: Object.entries(availableAppActions).filter(([, enabled]) => enabled).map(([id]) => id as AppAction),
+    };
+  }
+
+  function reportNativeMenuFailure(): void {
+    pushToast({
+      key: "native-menu-unavailable",
+      kind: "warning",
+      title: t("gui.native_menu.unavailable"),
+      action: {
+        label: t("gui.error.retry"),
+        run: async () => {
+          if (nativeMenuConnection) nativeMenuConnection.publish(nativeMenuSnapshot(), true);
+          else await reconnectNativeMenu?.();
+        },
+      },
+    });
+  }
+
+  onMount(() => {
+    let disposed = false;
+    let connecting = false;
+    let focusUpdateQueued = false;
+    const syncTextFocus = () => {
+      if (focusUpdateQueued) return;
+      focusUpdateQueued = true;
+      // Removing a focused control can fire focusout during a Svelte DOM update.
+      queueMicrotask(() => {
+        focusUpdateQueued = false;
+        if (!disposed) {
+          textEditingFocused = isTextEditingTarget(document.activeElement);
+          taskCenterFocused = Boolean(document.activeElement?.closest("#squallz-task-center"));
+        }
+      });
+    };
+    const connect = async () => {
+      if (disposed || connecting || nativeMenuConnection) return;
+      connecting = true;
+      try {
+        const connection = await connectNativeMenu(
+          (action) => { if (!disposed) void runAppAction(action); },
+          () => { if (!disposed) reportNativeMenuFailure(); },
+          () => { if (!disposed) removeToastByKey("native-menu-unavailable"); },
+        );
+        if (disposed) connection?.dispose();
+        else nativeMenuConnection = connection;
+      } catch {
+        if (!disposed) reportNativeMenuFailure();
+      } finally {
+        connecting = false;
+      }
+    };
+    reconnectNativeMenu = connect;
+    syncTextFocus();
+    document.addEventListener("focusin", syncTextFocus);
+    document.addEventListener("focusout", syncTextFocus);
+    void connect();
+    return () => {
+      disposed = true;
+      reconnectNativeMenu = null;
+      nativeMenuConnection?.dispose();
+      nativeMenuConnection = null;
+      document.removeEventListener("focusin", syncTextFocus);
+      document.removeEventListener("focusout", syncTextFocus);
+    };
+  });
+
+  $effect(() => {
+    if (i18nReady()) nativeMenuConnection?.publish(nativeMenuSnapshot());
+  });
 
   onMount(() => {
     const media = window.matchMedia("(prefers-color-scheme: dark)");
@@ -1773,35 +1926,16 @@
     };
 
     const onKeyDown = (event: KeyboardEvent) => {
+      if (!nativeMenuConnection) {
+        const action = appActionForShortcut(event, activePlatform);
+        if (action && appActionEnabled(action)) {
+          if (action === "select_all" && isTextEditingTarget(event.target)) return;
+          event.preventDefault();
+          void runAppAction(action);
+          return;
+        }
+      }
       if (modeSelectionBlocked || archiveEditKind !== null) return;
-      if (
-        (event.metaKey || event.ctrlKey) &&
-        event.key.toLowerCase() === "f" &&
-        screen === "browse" &&
-        currentArchive &&
-        !taskWindowMode
-      ) {
-        event.preventDefault();
-        closeQuickActions(false);
-        archiveSearchInput?.focus();
-        archiveSearchInput?.select();
-        return;
-      }
-      if (
-        (event.metaKey || event.ctrlKey) &&
-        !event.altKey &&
-        !event.shiftKey &&
-        event.key.toLowerCase() === "a" &&
-        screen === "browse" &&
-        currentArchive &&
-        !taskWindowMode &&
-        !isTextEditingTarget(event.target)
-      ) {
-        event.preventDefault();
-        closeQuickActions(false);
-        void selectAllArchiveEntries();
-        return;
-      }
       if (event.key === "Escape") {
         if (activePopover === "quickActions") {
           event.preventDefault();
@@ -2205,9 +2339,29 @@
     closeQuickActions();
   }
 
+  function navigationAction(next: Screen): AppAction | undefined {
+    if (next === "extract") return "extract_all";
+    if (next === "create") return "create_archive";
+    if (next === "settingsGeneral") return "settings";
+    return undefined;
+  }
+
+  function navigationDisabled(next: Screen): boolean {
+    const action = navigationAction(next);
+    return action ? !appActionEnabled(action) : false;
+  }
+
+  function navigationDisabledReason(next: Screen): string {
+    if (next === "extract" && navigationDisabled(next)) {
+      return archiveSelectionBusyReason() || archiveActionTitle(hasArchiveOpen());
+    }
+    return "";
+  }
+
   function navigateToScreen(next: Screen) {
-    if (next === "extract") {
-      openExtractWorkspace("all");
+    const action = navigationAction(next);
+    if (action) {
+      void runAppAction(action);
       return;
     }
     setScreen(next);
@@ -4310,7 +4464,7 @@
           busy: previewBusy(),
           entry: entryPreview,
           failed: Boolean(entryPreviewFailure),
-          canPreview: canPreviewEntrySelection(),
+          canPreview: appActionEnabled("preview_entry"),
           actionLabel: previewLabel,
           actionIcon: previewActionIcon(),
           disabledReason: previewDisabledReason,
@@ -4345,7 +4499,7 @@
         if (opened) clearEntryPreviewState();
       }),
       onRevealPreview: () => void revealEntryPreview(),
-      onPreviewSelection: () => void submitPreviewEntry(),
+      onPreviewSelection: () => void runAppAction("preview_entry"),
       onCancelMoveConflict: () => {
         moveConflictReview = null;
       },
@@ -4381,7 +4535,6 @@
         : "eye",
     }));
     const mutationDisabledReason = archiveMutationDisabledReason();
-    const hasSelection = hasArchiveSelection();
     const previewLabel = previewActionLabel();
     const previewDisabledReason = previewSelectedDisabledReason();
     return {
@@ -4391,21 +4544,19 @@
           format: archiveFormat(),
           summary: archiveSummary(),
           dirs: archiveDirs,
-          canGoUp: canGoUpArchive(),
+          canGoUp: appActionEnabled("go_up"),
         },
         actions: {
           mutationDisabledReason,
           renameDisabledReason: renameSelectedDisabledReason(),
           deleteDisabledReason: deleteSelectedDisabledReason(),
           moveDisabledReason: moveSelectedDisabledReason(),
-          canRenameSelection: canRenameSelection(),
-          hasSelection,
-          canPreviewSelection: canPreviewEntrySelection(),
+          enabled: availableAppActions,
           previewBusy: previewBusy(),
           previewDisabledReason,
           previewLabel,
           previewIcon: previewActionIcon(),
-          extractDestinationHint: extractDestinationHint(),
+          extractDestinationHint: archiveSelectionBusyReason() || extractDestinationHint(),
           extractAllLabel: extractAllToLabel(),
           extractSelectedLabel: extractSelectedToLabel(),
           nestedPreview: Boolean(nestedPreview),
@@ -4433,19 +4584,19 @@
       },
       tr,
       onOpenBreadcrumb: (index) => void openArchiveBreadcrumb(index),
-      onGoUp: () => void goArchiveUp(),
+      onGoUp: () => void runAppAction("go_up"),
       onOpenRoot: () => void openArchiveBreadcrumb(-1),
-      onExtractAll: () => openExtractWorkspace("all"),
-      onExtractSelection: () => openExtractWorkspace("selection"),
-      onAddFiles: () => void submitAddToArchiveJob(),
+      onExtractAll: () => void runAppAction("extract_all"),
+      onExtractSelection: () => void runAppAction("extract_selection"),
+      onAddFiles: () => void runAppAction("add_files"),
       onOpenRecovery: openCurrentArchiveRecoveryConfiguration,
-      onConvert: () => setScreen("convert"),
-      onOpenInfo: () => setScreen("archiveInfo"),
-      onRenameSelection: () => openArchiveEditor("rename"),
-      onDeleteSelection: () => void submitDeleteSelectedJob(),
-      onMoveSelection: () => openArchiveEditor("move"),
-      onCreateFolder: () => openArchiveEditor("new-folder"),
-      onPreviewSelection: () => void submitPreviewEntry(),
+      onConvert: () => void runAppAction("convert_archive"),
+      onOpenInfo: () => void runAppAction("archive_info"),
+      onRenameSelection: () => void runAppAction("rename_entry"),
+      onDeleteSelection: () => void runAppAction("delete_entries"),
+      onMoveSelection: () => void runAppAction("move_entries"),
+      onCreateFolder: () => void runAppAction("new_folder"),
+      onPreviewSelection: () => void runAppAction("preview_entry"),
       onOpenNestedPreview: () => void openNestedPreviewArchive(),
       onExtractNestedPreview: () => void extractNestedPreviewArchive(),
       onCancelMoveConflict: () => {
@@ -4514,13 +4665,15 @@
           busy: previewBusy(),
           failed: Boolean(entryPreviewFailure),
           entry: entryPreview,
-          canPreview: canPreviewEntrySelection(),
+          canPreview: appActionEnabled("preview_entry"),
           actionLabel: previewActionLabel(),
           actionIcon: previewActionIcon(),
           disabledReason: previewSelectedDisabledReason(),
         },
-        canRename: canRenameSelection(),
-        canMove: hasArchiveSelection() && !archiveMutationDisabledReason(),
+        canRename: appActionEnabled("rename_entry"),
+        canMove: appActionEnabled("move_entries"),
+        canTest: appActionEnabled("test_archive"),
+        canCopyOut: appActionEnabled("copy_entries"),
         archive: currentArchive
           ? {
               format: archiveFormat(),
@@ -4549,12 +4702,12 @@
         if (opened) clearEntryPreviewState();
       }),
       onRevealPreview: () => void revealEntryPreview(),
-      onPreviewSelection: () => void submitPreviewEntry(),
-      onRenameSelection: () => openArchiveEditor("rename"),
-      onMoveSelection: () => openArchiveEditor("move"),
+      onPreviewSelection: () => void runAppAction("preview_entry"),
+      onRenameSelection: () => void runAppAction("rename_entry"),
+      onMoveSelection: () => void runAppAction("move_entries"),
       onOpenRecovery: openRecoveryConfiguration,
-      onTestArchive: () => void submitTestJob(),
-      onCopyOutSelection: () => void submitCopyOutSelectedJob(),
+      onTestArchive: () => void runAppAction("test_archive"),
+      onCopyOutSelection: () => void runAppAction("copy_entries"),
     };
   }
 
@@ -6610,23 +6763,17 @@
     const contextPath = entryContext?.path ?? null;
     const contextIsDir = entryContext?.isDir === true;
     closeEntryContext();
-    if (action === "extract") {
-      openExtractWorkspace("selection");
-    } else if (action === "delete") {
-      await submitDeleteSelectedJob();
-    } else if (action === "rename") {
-      openArchiveEditor("rename");
-    } else if (action === "move") {
-      openArchiveEditor("move");
-    } else if (action === "preview") {
-      await submitPreviewEntry(contextPath, contextIsDir ? "dir" : undefined);
-    } else {
-      await submitTestJob();
-    }
+    const actions: Record<typeof action, AppAction> = {
+      extract: "extract_selection", delete: "delete_entries", rename: "rename_entry",
+      move: "move_entries", preview: "preview_entry", test: "test_archive",
+    };
+    await runAppAction(actions[action], action === "preview" && contextPath
+      ? { path: contextPath, type: contextIsDir ? "dir" : "file" } : undefined);
   }
 
   function onEntryKeydown(event: KeyboardEvent, entry: DisplayEntry) {
     if (event.target !== event.currentTarget) return;
+    if (event.metaKey || event.ctrlKey || event.altKey || event.isComposing) return;
     if (
       archiveSelectionBusyReason()
       && ["Delete", "Backspace", "e", "E", "m", "M", "F2"].includes(event.key)
@@ -6645,23 +6792,20 @@
       }
     } else if (event.key === "Backspace" && selectedPaths().size === 0) {
       event.preventDefault();
-      void goArchiveUp();
+      void runAppAction("go_up");
     } else if (event.key === "Delete" || event.key === "Backspace") {
       event.preventDefault();
-      void submitDeleteSelectedJob();
-    } else if ((event.metaKey || event.altKey) && event.key === "ArrowUp") {
-      event.preventDefault();
-      void goArchiveUp();
+      if (!event.repeat) void runAppAction("delete_entries");
     } else if (event.key === "e" || event.key === "E") {
       event.preventDefault();
       if (entry.source && !selectedPaths().has(entry.source.path)) {
         selectOnlyEntry(entry);
       }
-      openExtractWorkspace("selection");
+      void runAppAction("extract_selection");
     } else if (event.key === "m" || event.key === "M" || event.key === "F2") {
       event.preventDefault();
       if (entry.source && !selectedPaths().has(entry.source.path)) selectOnlyEntry(entry);
-      void tick().then(() => openArchiveEditor(event.key === "F2" ? "rename" : "move"));
+      if (!event.repeat) void tick().then(() => runAppAction(event.key === "F2" ? "rename_entry" : "move_entries"));
     } else if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
       event.preventDefault();
       const target = event.currentTarget instanceof HTMLElement ? event.currentTarget : null;
@@ -7665,13 +7809,13 @@
         detail: currentArchive ? archiveWarningText() : openArchiveFirstLabel(),
       },
       test: {
-        disabled: Boolean(archiveRequiredReason),
+        disabled: !appActionEnabled("test_archive"),
         title: archiveRequiredReason,
         ariaLabel: labelWithDisabledReason(
           tr("gui.extract.test_first", "Test first"),
           archiveRequiredReason,
         ),
-        onSelect: () => void submitTestJob(),
+        onSelect: () => void runAppAction("test_archive"),
       },
     };
   }
@@ -12038,6 +12182,7 @@
   }
 
   function openTaskCenter(source: HTMLElement | null = null): void {
+    if (!appActionEnabled("task_center") || taskCenterOpen) return;
     taskCenterReturnFocus = source;
     taskCenterFocusTaskId = null;
     taskCenterSelectedTaskId = null;
@@ -13272,46 +13417,30 @@
     return "browse";
   }
 
+  function classicCommandAction(label: string): AppAction | undefined {
+    const actions: Record<string, AppAction> = {
+      Add: "add_files",
+      "Extract To": selectedPaths().size > 0 ? "extract_selection" : "extract_all",
+      Test: "test_archive",
+      View: "preview_entry",
+      Delete: "delete_entries",
+      Rename: "rename_entry",
+      Move: "move_entries",
+      "New Folder": "new_folder",
+      Convert: "convert_archive",
+      Info: "archive_info",
+    };
+    return actions[label];
+  }
+
   function handleClassicCommand(label: string) {
-    if (label === "Add") {
-      void submitAddToArchiveJob();
-      return;
-    }
-    if (label === "Extract To") {
-      const selectionBusyReason = archiveSelectionBusyReason();
-      if (selectionBusyReason) {
-        showNotice(selectionBusyReason);
-        return;
-      }
-      openExtractWorkspace(hasArchiveSelection() ? "selection" : "all");
-      return;
-    }
-    if (label === "Test") {
-      void submitTestJob();
+    const action = classicCommandAction(label);
+    if (action) {
+      void runAppAction(action);
       return;
     }
     if (label === "Protect") {
       openRecoveryConfiguration();
-      return;
-    }
-    if (label === "View") {
-      void submitPreviewEntry();
-      return;
-    }
-    if (label === "Delete") {
-      void submitDeleteSelectedJob();
-      return;
-    }
-    if (label === "Rename") {
-      openArchiveEditor("rename");
-      return;
-    }
-    if (label === "Move") {
-      openArchiveEditor("move");
-      return;
-    }
-    if (label === "New Folder") {
-      openArchiveEditor("new-folder");
       return;
     }
     if (label === "Checksum") {
@@ -13322,24 +13451,14 @@
       setScreen("duplicates");
       return;
     }
-    if (label === "Convert") {
-      setScreen("convert");
-      return;
-    }
-    if (label === "Info") {
-      setScreen("archiveInfo");
-      return;
-    }
     setScreen(screenForCommand(label));
   }
 
   function classicCommandDisabled(label: string): boolean {
-    if (currentArchive && archiveMutationDisabledReason() && ["Add", "Protect", "Delete", "Rename", "Move", "New Folder"].includes(label)) return true;
-    if (label === "Checksum" || label === "Duplicates" || label === "Info" || label === "Protect") return false;
-    if (label === "Extract To" && archiveSelectionBusyReason()) return true;
-    if (label === "Rename") return !canRenameSelection();
-    if (label === "Move" || label === "Delete") return !hasArchiveSelection();
-    if (label === "View") return !canPreviewEntrySelection();
+    const action = classicCommandAction(label);
+    if (action) return !appActionEnabled(action);
+    if (label === "Protect") return Boolean(currentArchive && archiveMutationDisabledReason());
+    if (label === "Checksum" || label === "Duplicates") return false;
     return !hasArchiveOpen();
   }
 
@@ -13544,12 +13663,12 @@
       <span>{tr("gui.context.selection_actions", "Selection actions")}</span>
       <strong>{entryContext.name}</strong>
     </div>
-    <button role="menuitem" disabled={!currentArchive || Boolean(archiveSelectionProgress)} title={archiveSelectionBusyReason() || (currentArchive ? "" : openArchiveFirstLabel())} onclick={() => void runEntryContextAction("extract")}><Icon name="archive" size={15} />{actionLabel("Extract selected")}</button>
-    <button role="menuitem" disabled={Boolean(archiveMutationDisabledReason()) || !hasArchiveSelection()} title={deleteSelectedDisabledReason()} onclick={() => void runEntryContextAction("delete")}><Icon name="x-circle" size={15} />{actionLabel("Delete selected")}</button>
-    <button role="menuitem" disabled={!entryContext.canRename || !canRenameSelection()} title={entryContext.canRename && canRenameSelection() ? "" : tr("gui.precondition.select_one_entry", "Select exactly one file or folder")} onclick={() => void runEntryContextAction("rename")}><Icon name="repeat" size={15} />{actionLabel("Rename selected")}</button>
-    <button role="menuitem" disabled={Boolean(archiveMutationDisabledReason()) || !hasArchiveSelection()} title={moveSelectedDisabledReason()} onclick={() => void runEntryContextAction("move")}><Icon name="repeat" size={15} />{actionLabel("Move selected")}</button>
-    <button role="menuitem" disabled={!entryContext.path} title={entryContext.path ? previewActionLabel(entryContext.path, entryContext.isDir ? "dir" : "file") : tr("gui.preview.select_one", "Select one entry to open or preview")} onclick={() => void runEntryContextAction("preview")}><Icon name={previewActionIcon(entryContext.path, entryContext.isDir ? "dir" : "file")} size={15} />{previewActionLabel(entryContext.path, entryContext.isDir ? "dir" : "file")}</button>
-    <button role="menuitem" disabled={!currentArchive} title={currentArchive ? "" : openArchiveFirstLabel()} onclick={() => void runEntryContextAction("test")}><Icon name="shield-alert" size={15} />{actionLabel("Test archive")}</button>
+    <button role="menuitem" disabled={!appActionEnabled("extract_selection")} title={archiveSelectionBusyReason() || (currentArchive ? "" : openArchiveFirstLabel())} onclick={() => void runEntryContextAction("extract")}><Icon name="archive" size={15} />{actionLabel("Extract selected")}</button>
+    <button role="menuitem" disabled={!appActionEnabled("delete_entries")} title={deleteSelectedDisabledReason()} onclick={() => void runEntryContextAction("delete")}><Icon name="x-circle" size={15} />{actionLabel("Delete selected")}</button>
+    <button role="menuitem" disabled={!entryContext.canRename || !appActionEnabled("rename_entry")} title={renameSelectedDisabledReason()} onclick={() => void runEntryContextAction("rename")}><Icon name="repeat" size={15} />{actionLabel("Rename selected")}</button>
+    <button role="menuitem" disabled={!appActionEnabled("move_entries")} title={moveSelectedDisabledReason()} onclick={() => void runEntryContextAction("move")}><Icon name="repeat" size={15} />{actionLabel("Move selected")}</button>
+    <button role="menuitem" disabled={!entryContext.path || !contextualAppActions({ path: entryContext.path, type: entryContext.isDir ? "dir" : "file" }).preview_entry} title={entryContext.path ? previewActionLabel(entryContext.path, entryContext.isDir ? "dir" : "file") : tr("gui.preview.select_one", "Select one entry to open or preview")} onclick={() => void runEntryContextAction("preview")}><Icon name={previewActionIcon(entryContext.path, entryContext.isDir ? "dir" : "file")} size={15} />{previewActionLabel(entryContext.path, entryContext.isDir ? "dir" : "file")}</button>
+    <button role="menuitem" disabled={!appActionEnabled("test_archive")} title={currentArchive ? "" : openArchiveFirstLabel()} onclick={() => void runEntryContextAction("test")}><Icon name="shield-alert" size={15} />{actionLabel("Test archive")}</button>
   </div>
 {/if}
 
@@ -13668,10 +13787,10 @@
           {#if isSettingsScreen()}
             <button onclick={() => setScreen("browse")}><Icon name="archive" size={16} />{tr("gui.settings.back_to_archives", "Archives")}</button>
           {:else}
-            <button aria-busy={archiveOpenStatus === "opening"} onclick={() => void openArchiveFromDialog()}><Icon name="folder-open" size={16} />{archiveOpenStatus === "opening" ? toolbarLabel("Opening") : toolbarLabel("Open")}</button>
-            <button onclick={() => setScreen("create")}><Icon name="sparkles" size={16} />{toolbarLabel("Create")}</button>
+            <button disabled={!appActionEnabled("open_archive")} aria-busy={archiveOpenStatus === "opening"} onclick={() => void runAppAction("open_archive")}><Icon name="folder-open" size={16} />{archiveOpenStatus === "opening" ? toolbarLabel("Opening") : toolbarLabel("Open")}</button>
+            <button disabled={!appActionEnabled("create_archive")} onclick={() => void runAppAction("create_archive")}><Icon name="sparkles" size={16} />{toolbarLabel("Create")}</button>
             <button onclick={() => openRecoveryConfiguration()}><Icon name="shield-alert" size={16} />{tr("gui.recovery.title", "Recovery")}</button>
-            <button class="primary" disabled={!currentArchive} title={archiveActionTitle(hasArchiveOpen())} onclick={() => openExtractWorkspace("all")}><Icon name="archive" size={16} />{toolbarLabel("Extract")}</button>
+            <button class="primary" disabled={!appActionEnabled("extract_all")} title={archiveSelectionBusyReason() || archiveActionTitle(hasArchiveOpen())} onclick={() => void runAppAction("extract_all")}><Icon name="archive" size={16} />{toolbarLabel("Extract")}</button>
             <button
               bind:this={quickActionButton}
               class="icon-only"
@@ -13705,7 +13824,7 @@
             <span>{tr("gui.quick.subtitle", "Jump without changing layout")}</span>
           </div>
           {#each quickActions as action}
-            <button onclick={() => chooseQuickAction(action.screen)}>
+            <button disabled={navigationDisabled(action.screen)} title={navigationDisabledReason(action.screen)} onclick={() => chooseQuickAction(action.screen)}>
               <Icon name={action.icon} size={15} />
               <span><strong>{quickActionLabel(action.label)}</strong><small>{quickActionDetail(action.label, action.detail)}</small></span>
             </button>
@@ -13723,6 +13842,8 @@
           <div class="sidebar-section">
             {#each nav as item}
               <button
+                disabled={navigationDisabled(screenForNav(item[1]))}
+                title={navigationDisabledReason(screenForNav(item[1]))}
                 class:current={(screen === "recent" && item[1] === "Recent") || (screen === "browse" && item[1] === "Archives") || (screen === "create" && item[1] === "Create") || ((screen === "extract" || screen === "batch" || screen === "password" || screen === "conflict") && item[1] === "Extract") || (screen === "convert" && item[1] === "Convert") || (screen === "checksum" && item[1] === "Checksum") || (screen === "duplicates" && item[1] === "Duplicates") || (screen === "recovery" && item[1] === "Recovery") || (isSettingsScreen() && item[1] === "Settings")}
                 onclick={() => navigateToScreen(screenForNav(item[1]))}
               >
@@ -13776,7 +13897,7 @@
                   <h1>{tr("gui.recent.title", "Recent archives")}</h1>
                   <p>{tr("gui.recent.subtitle", "Reopen recent archives. Squallz stores paths only, never archive contents.")}</p>
                 </div>
-                <button class="primary sheet-action" onclick={() => void openArchiveFromDialog()}><Icon name="folder-open" size={17} />{archiveOpenStatus === "opening" ? toolbarLabel("Opening") : toolbarLabel("Open")}</button>
+                <button class="primary sheet-action" disabled={!appActionEnabled("open_archive")} onclick={() => void runAppAction("open_archive")}><Icon name="folder-open" size={17} />{archiveOpenStatus === "opening" ? toolbarLabel("Opening") : toolbarLabel("Open")}</button>
               </div>
 
               <div class="create-grid">
@@ -13787,7 +13908,7 @@
                     {#each recentFiles() as path}
                       <div><span>{pathBaseName(path) || path}</span><span>{path}</span><button onclick={() => void openArchivePath(path, "dialog")}>{tr("gui.recent.reopen", "Reopen")}</button></div>
                     {:else}
-                      <div><span>{tr("gui.recent.none", "No recent archives")}</span><span>{tr("gui.recent.open_to_start", "Open an archive to start this list.")}</span><button onclick={() => void openArchiveFromDialog()}>{toolbarLabel("Open")}</button></div>
+                      <div><span>{tr("gui.recent.none", "No recent archives")}</span><span>{tr("gui.recent.open_to_start", "Open an archive to start this list.")}</span><button disabled={!appActionEnabled("open_archive")} onclick={() => void runAppAction("open_archive")}>{toolbarLabel("Open")}</button></div>
                     {/each}
                   </div>
                 </section>
@@ -13927,8 +14048,8 @@
 	                openLabel={archiveOpenStatus === "opening" ? toolbarLabel("Opening") : toolbarLabel("Open")}
 	                createLabel={toolbarLabel("Create")}
 	                openBusy={archiveOpenStatus === "opening"}
-	                onOpen={() => void openArchiveFromDialog()}
-	                onCreate={() => setScreen("create")}
+	                onOpen={() => void runAppAction("open_archive")}
+	                onCreate={() => void runAppAction("create_archive")}
 		              />
 		            {/if}
 	            </div>
@@ -13960,10 +14081,11 @@
         </div>
         <div class="classic-top-actions">
           <button
+            disabled={!appActionEnabled("open_archive")}
             aria-busy={archiveOpenStatus === "opening"}
             aria-label={archiveOpenStatus === "opening" ? toolbarLabel("Opening") : toolbarLabel("Open")}
             title={archiveOpenStatus === "opening" ? toolbarLabel("Opening") : toolbarLabel("Open")}
-            onclick={() => void openArchiveFromDialog()}
+            onclick={() => void runAppAction("open_archive")}
           >
             <Icon name="folder-open" size={15} />
             <span class="classic-action-label">{archiveOpenStatus === "opening" ? toolbarLabel("Opening") : toolbarLabel("Open")}</span>
@@ -13971,7 +14093,8 @@
           <button
             aria-label={tr("gui.classic.new_archive", "New archive")}
             title={tr("gui.classic.new_archive", "New archive")}
-            onclick={() => setScreen("create")}
+            disabled={!appActionEnabled("create_archive")}
+            onclick={() => void runAppAction("create_archive")}
           >
             <Icon name="archive" size={15} />
             <span class="classic-action-label">{tr("gui.classic.new_archive", "New archive")}</span>
@@ -14012,7 +14135,8 @@
           <button
             aria-label={navLabel("Settings")}
             title={navLabel("Settings")}
-            onclick={() => setScreen("settingsGeneral")}
+            disabled={!appActionEnabled("settings")}
+            onclick={() => void runAppAction("settings")}
           >
             <Icon name="settings" size={15} />
             <span class="classic-action-label">{navLabel("Settings")}</span>
@@ -14043,10 +14167,10 @@
           <div class="classic-path-navigation" aria-label={tr("gui.nav.archive_navigation", "Archive navigation")}>
             <button
               class="path-button"
-              disabled={!canGoUpArchive()}
+              disabled={!appActionEnabled("go_up")}
               aria-label={tr("gui.nav.up", "Up one level")}
               title={tr("gui.nav.up", "Up one level")}
-              onclick={() => void goArchiveUp()}
+              onclick={() => void runAppAction("go_up")}
             ><Icon name="chevron-up" size={14} /><span>{tr("gui.nav.up_short", "Up")}</span></button>
             <button
               class="path-button"
@@ -14125,7 +14249,7 @@
             <span>{tr("gui.quick.close_hint", "Esc or outside click closes")}</span>
           </div>
           {#each quickActions as action}
-            <button onclick={() => chooseQuickAction(action.screen)}>
+            <button disabled={navigationDisabled(action.screen)} title={navigationDisabledReason(action.screen)} onclick={() => chooseQuickAction(action.screen)}>
               <Icon name={action.icon} size={15} />
               <span><strong>{quickActionLabel(action.label)}</strong><small>{quickActionDetail(action.label, action.detail)}</small></span>
             </button>
@@ -14253,8 +14377,8 @@
               openLabel={archiveOpenStatus === "opening" ? toolbarLabel("Opening") : toolbarLabel("Open")}
               createLabel={tr("gui.classic.create_archive", "Create archive")}
               openBusy={archiveOpenStatus === "opening"}
-              onOpen={() => void openArchiveFromDialog()}
-              onCreate={() => setScreen("create")}
+              onOpen={() => void runAppAction("open_archive")}
+              onCreate={() => void runAppAction("create_archive")}
             />
           </div>
         {:else}

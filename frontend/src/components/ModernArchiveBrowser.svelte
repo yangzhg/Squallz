@@ -1,5 +1,6 @@
 <script lang="ts" module>
   import type { EntryDto } from "../lib/ipc";
+  import type { AppActionAvailability } from "../lib/app-actions";
 
   type Translate = (key: string, fallback: string) => string;
 
@@ -45,9 +46,7 @@
         renameDisabledReason: string;
         deleteDisabledReason: string;
         moveDisabledReason: string;
-        canRenameSelection: boolean;
-        hasSelection: boolean;
-        canPreviewSelection: boolean;
+        enabled: AppActionAvailability;
         previewBusy: boolean;
         previewDisabledReason: string;
         previewLabel: string;
@@ -204,15 +203,15 @@
       <p>{view.archive.summary}</p>
     </div>
     <div class="summary-actions">
-      <button class="primary large" title={view.actions.extractDestinationHint} onclick={onExtractAll}>
+      <button class="primary large" disabled={!view.actions.enabled.extract_all} title={view.actions.extractDestinationHint} onclick={onExtractAll}>
         <Icon name="archive" size={17} />{view.actions.extractAllLabel}
       </button>
-      <button class="ghost large" disabled={!view.actions.hasSelection} title={view.actions.extractDestinationHint} onclick={onExtractSelection}>
+      <button class="ghost large" disabled={!view.actions.enabled.extract_selection} title={view.actions.extractDestinationHint} onclick={onExtractSelection}>
         <Icon name="archive" size={17} />{view.actions.extractSelectedLabel}
       </button>
       <button
         class="ghost large"
-        disabled={Boolean(view.actions.mutationDisabledReason)}
+        disabled={!view.actions.enabled.add_files}
         title={view.actions.mutationDisabledReason}
         onclick={onAddFiles}
       ><Icon name="file" size={17} />{tr("gui.action.add_files", "Add files")}</button>
@@ -222,15 +221,15 @@
         title={view.actions.mutationDisabledReason}
         onclick={onOpenRecovery}
       ><Icon name="shield-alert" size={17} />{tr("gui.action.protect", "Protect")}</button>
-      <button class="ghost large" onclick={onConvert}>
+      <button class="ghost large" disabled={!view.actions.enabled.convert_archive} onclick={onConvert}>
         <Icon name="repeat" size={17} />{tr("gui.action.convert", "Convert")}
       </button>
-      <button class="ghost large" onclick={onOpenInfo}>
+      <button class="ghost large" disabled={!view.actions.enabled.archive_info} onclick={onOpenInfo}>
         <Icon name="info" size={17} />{tr("gui.archive.info", "Info")}
       </button>
       <button
         class="ghost large"
-        disabled={!view.actions.canRenameSelection}
+        disabled={!view.actions.enabled.rename_entry}
         title={view.actions.renameDisabledReason}
         aria-label={labelWithDisabledReason(
           tr("gui.action.rename_selected", "Rename selected"),
@@ -240,7 +239,7 @@
       ><Icon name="repeat" size={17} />{tr("gui.action.rename_selected", "Rename selected")}</button>
       <button
         class="ghost large"
-        disabled={Boolean(view.actions.mutationDisabledReason) || !view.actions.hasSelection}
+        disabled={!view.actions.enabled.delete_entries}
         title={view.actions.deleteDisabledReason}
         aria-label={labelWithDisabledReason(
           tr("gui.action.delete_selected", "Delete selected"),
@@ -250,7 +249,7 @@
       ><Icon name="x-circle" size={17} />{tr("gui.action.delete_selected", "Delete selected")}</button>
       <button
         class="ghost large"
-        disabled={Boolean(view.actions.mutationDisabledReason) || !view.actions.hasSelection}
+        disabled={!view.actions.enabled.move_entries}
         title={view.actions.moveDisabledReason}
         aria-label={labelWithDisabledReason(
           tr("gui.action.move_selected", "Move selected"),
@@ -260,13 +259,13 @@
       ><Icon name="repeat" size={17} />{tr("gui.action.move_selected", "Move selected")}</button>
       <button
         class="ghost large"
-        disabled={Boolean(view.actions.mutationDisabledReason)}
+        disabled={!view.actions.enabled.new_folder}
         title={view.actions.mutationDisabledReason}
         onclick={onCreateFolder}
       ><Icon name="folder-open" size={17} />{tr("gui.action.new_folder", "New folder")}</button>
       <button
         class="ghost large"
-        disabled={!view.actions.canPreviewSelection}
+        disabled={!view.actions.enabled.preview_entry}
         aria-busy={view.actions.previewBusy}
         title={view.actions.previewDisabledReason}
         aria-label={labelWithDisabledReason(

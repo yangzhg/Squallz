@@ -58,6 +58,8 @@
         preview: EntryPreviewView;
         canRename: boolean;
         canMove: boolean;
+        canTest: boolean;
+        canCopyOut: boolean;
         archive: ArchiveSummaryView | null;
         openArchiveFirst: string;
         archiveActionDisabledReason: string;
@@ -286,7 +288,7 @@
         onclick={onOpenRecovery}
       >{tr("gui.action.protect", "Protect")}</button>
       <button
-        disabled={!view.archive}
+        disabled={!view.canTest}
         title={view.archiveActionDisabledReason}
         aria-label={view.archiveActionDisabledReason ? `${tr("gui.action.test_archive", "Test archive")} — ${view.archiveActionDisabledReason}` : tr("gui.action.test_archive", "Test archive")}
         onclick={onTestArchive}
@@ -307,7 +309,7 @@
         onclick={onPreviewSelection}
       >{view.preview.actionLabel}</button>
       <button
-        disabled={Boolean(view.copyOutDisabledReason)}
+        disabled={!view.canCopyOut}
         title={view.copyOutDisabledReason}
         aria-label={view.copyOutDisabledReason ? `${tr("gui.action.copy_out", "Copy out")} — ${view.copyOutDisabledReason}` : tr("gui.action.copy_out", "Copy out")}
         onclick={onCopyOutSelection}

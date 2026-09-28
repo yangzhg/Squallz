@@ -10,6 +10,7 @@ pub mod dto;
 mod events;
 mod integration;
 mod jobs;
+mod native_menu;
 mod nested;
 mod open_files;
 mod preview_sessions;
@@ -67,7 +68,9 @@ pub fn run() {
         .manage(settings)
         .manage(preset_store)
         .manage(secrets::system_secret_store())
+        .on_menu_event(native_menu::handle_event)
         .setup(|app| {
+            native_menu::install(app.handle())?;
             run_validation_integration_gate();
             run_validation_native_drop_gate(app);
             let event = open_files::startup_event(std::env::args_os().skip(1));
@@ -82,6 +85,7 @@ pub fn run() {
             commands::record_validation_event,
             commands::is_validation_session,
             commands::platform_kind,
+            native_menu::update_native_menu,
             commands::take_validation_drop_paths,
             commands::list_entries,
             commands::resolve_archive_directory,
@@ -158,9 +162,15 @@ pub fn run() {
     app.run(|app, event| match event {
         tauri::RunEvent::WindowEvent {
             label,
+            event: tauri::WindowEvent::Focused(focused),
+            ..
+        } => native_menu::focus_changed(app, &label, focused),
+        tauri::RunEvent::WindowEvent {
+            label,
             event: tauri::WindowEvent::Destroyed,
             ..
         } => {
+            native_menu::release_window(app, &label);
             let jobs = app.state::<Arc<JobManager>>();
             let cancelled_jobs = jobs.release_window(&label);
             let preflight = app.state::<Arc<PreflightRequests>>();

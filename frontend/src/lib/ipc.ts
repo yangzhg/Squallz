@@ -2,6 +2,7 @@
 // crates/squallz-gui/src/dto.rs — keep the two files in sync.
 
 import { invoke } from "@tauri-apps/api/core";
+import type { NativeMenuSnapshot } from "./native-menu";
 
 export interface ErrorDto {
   key: string;
@@ -681,6 +682,7 @@ function invokeSettingsOperation<T>(command: string, args: Record<string, unknow
 }
 
 export const ipc = {
+  updateNativeMenu: (snapshot: NativeMenuSnapshot) => invoke<void>("update_native_menu", { snapshot }),
   openArchive: (
     path: string,
     password: string | null,

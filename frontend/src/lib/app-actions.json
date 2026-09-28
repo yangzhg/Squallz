@@ -1,0 +1,21 @@
+[
+  { "id": "open_archive", "group": "file", "label_key": "gui.native_menu.open_archive", "accelerator": "CmdOrCtrl+O" },
+  { "id": "create_archive", "group": "file", "label_key": "gui.native_menu.create_archive", "accelerator": "CmdOrCtrl+N" },
+  { "id": "extract_all", "group": "archive", "label_key": "gui.action.extract_all_to", "accelerator": "CmdOrCtrl+E" },
+  { "id": "extract_selection", "group": "archive", "label_key": "gui.action.extract_selected_to", "accelerator": "CmdOrCtrl+Shift+E" },
+  { "id": "add_files", "group": "archive", "label_key": "gui.action.add_files", "accelerator": "CmdOrCtrl+Shift+A" },
+  { "id": "new_folder", "group": "archive", "label_key": "gui.action.new_folder", "accelerator": "CmdOrCtrl+Shift+N" },
+  { "id": "rename_entry", "group": "archive", "label_key": "gui.action.rename_selected" },
+  { "id": "move_entries", "group": "archive", "label_key": "gui.action.move_selected", "accelerator": "CmdOrCtrl+Shift+M" },
+  { "id": "delete_entries", "group": "archive", "label_key": "gui.action.delete_selected" },
+  { "id": "preview_entry", "group": "archive", "label_key": "gui.action.open_preview" },
+  { "id": "copy_entries", "group": "archive", "label_key": "gui.action.copy_out" },
+  { "id": "test_archive", "group": "archive", "label_key": "gui.action.test_archive", "accelerator": "CmdOrCtrl+T" },
+  { "id": "convert_archive", "group": "archive", "label_key": "gui.action.convert" },
+  { "id": "archive_info", "group": "archive", "label_key": "gui.classic.command.info", "accelerator": "CmdOrCtrl+I" },
+  { "id": "search_archive", "group": "view", "label_key": "gui.native_menu.search_archive", "accelerator": "CmdOrCtrl+F" },
+  { "id": "go_up", "group": "view", "label_key": "gui.native_menu.go_up", "accelerator": "Alt+ArrowUp", "macos_accelerator": "Cmd+ArrowUp" },
+  { "id": "task_center", "group": "view", "label_key": "gui.task_center.title" },
+  { "id": "select_all", "group": "edit", "label_key": "gui.native_menu.select_all", "accelerator": "CmdOrCtrl+A" },
+  { "id": "settings", "group": "application", "label_key": "gui.native_menu.settings", "accelerator": "CmdOrCtrl+," }
+]

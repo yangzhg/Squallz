@@ -38,6 +38,8 @@ test("archive inspector presents metadata and integrity-test availability", asyn
             },
             canRename: false,
             canMove: false,
+            canTest: Boolean(archive),
+            canCopyOut: false,
             openArchiveFirst: "Open an archive first",
             archiveActionDisabledReason: archive ? "" : "Open an archive first",
             selectionSummary: "No entries selected",
