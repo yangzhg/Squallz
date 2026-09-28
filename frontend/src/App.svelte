@@ -174,6 +174,7 @@
   } from "./lib/create-sources";
   import { platformTrashName } from "./lib/platform-labels";
   import { cssVariables, type CssVariableMap } from "./lib/css-variables";
+  import { readWindowRecovery } from "./lib/window-recovery";
   import {
     buildExternalTaskJobSpec,
     externalOpenAction,
@@ -537,6 +538,7 @@
   };
 
   const params = new URLSearchParams(window.location.search);
+  const windowRecovery = readWindowRecovery(params);
   const modeParam = params.get("mode");
   const defaultExtractDirParam = params.get("defaultExtractDir");
   const initialMode: Mode | null = modeParam === "classic" || modeParam === "modern" ? modeParam : null;
@@ -591,12 +593,12 @@
       : null,
   );
   let previousConflictPromptIdentity: string | null = null;
-  let taskDialogTaskId = $state<number | null>(null);
+  let taskDialogTaskId = $state<number | null>(windowRecovery.taskId ?? null);
   let taskDialogDismissedId = $state<number | null>(null);
   let macosSfxPublisherTask = $state<TaskDialogModel | null>(null);
   let LoadedMacosSfxPublisher = $state<MacosSfxPublisherComponentType | null>(null);
   let macosSfxPublisherLoad: Promise<MacosSfxPublisherComponentType> | null = null;
-  let taskCenterOpen = $state(false);
+  let taskCenterOpen = $state(windowRecovery.taskCenter ?? false);
   let taskCenterSelectedTaskId = $state<number | null>(null);
   let taskCenterFocusTaskId = $state<number | null>(null);
   let taskCenterReturnFocus: HTMLElement | null = null;

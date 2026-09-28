@@ -13,7 +13,9 @@
 <script lang="ts">
   import { tick } from "svelte";
   import Icon from "./Icon.svelte";
+  import DeferredViewError from "./DeferredViewError.svelte";
   import { cssVariables } from "../lib/css-variables";
+  import { trapModalFocus } from "../lib/modal-focus";
 
   let {
     surface,
@@ -47,6 +49,10 @@
   function retry(): void {
     component = taskDialogLoader.retry();
   }
+
+  function onFallbackKeydown(event: KeyboardEvent): void {
+    if (presentation === "dialog") trapModalFocus(event, fallbackCard);
+  }
 </script>
 
 {#await component}
@@ -64,6 +70,7 @@
       aria-modal={presentation === "dialog" ? "true" : undefined}
       aria-labelledby={loadingTitleId}
       tabindex="-1"
+      onkeydown={onFallbackKeydown}
     >
       <section class="deferred-workspace-state task-surface-deferred" role="status" aria-live="polite" aria-busy="true">
         <Icon name="hourglass" size={20} />
@@ -71,12 +78,17 @@
           <strong id={loadingTitleId}>{loadingTitle}</strong>
           <span>{loadingBody}</span>
         </div>
+        {#if presentation === "panel"}
+          <div class="deferred-workspace-actions">
+            <button type="button" onclick={() => void surface.onDismiss(surface.task)}>{backLabel}</button>
+          </div>
+        {/if}
       </section>
     </div>
   </section>
 {:then TaskProgressDialog}
   <TaskProgressDialog {...surface} />
-{:catch}
+{:catch error}
   <section
     id={surface.rootId}
     class={`${surface.rootClass} task-surface-shell`}
@@ -91,22 +103,17 @@
       aria-modal={presentation === "dialog" ? "true" : undefined}
       aria-labelledby={failureTitleId}
       tabindex="-1"
+      onkeydown={onFallbackKeydown}
     >
-      <section class="deferred-workspace-state task-surface-deferred danger" role="alert">
-        <Icon name="alert-triangle" size={20} />
-        <div>
-          <strong id={failureTitleId}>{failureTitle}</strong>
-          <span>{failureBody}</span>
-        </div>
-        <div class="deferred-workspace-actions">
-          {#if presentation === "panel"}
-            <button type="button" onclick={() => void surface.onDismiss(surface.task)}>{backLabel}</button>
-          {/if}
-          <button type="button" class="primary-lite" onclick={retry}>
-            <Icon name="rotate-cw" size={15} />{retryLabel}
-          </button>
-        </div>
-      </section>
+      <DeferredViewError
+        {error} title={failureTitle} body={failureBody} {retryLabel} onRetry={retry}
+        titleId={failureTitleId} class="task-surface-deferred"
+        recovery={{ taskId: surface.task.id }}
+      >
+        {#if presentation === "panel"}
+          <button type="button" onclick={() => void surface.onDismiss(surface.task)}>{backLabel}</button>
+        {/if}
+      </DeferredViewError>
     </div>
   </section>
 {/await}

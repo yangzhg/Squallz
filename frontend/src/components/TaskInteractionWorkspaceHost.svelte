@@ -20,6 +20,7 @@
 
 <script lang="ts">
   import Icon from "./Icon.svelte";
+  import DeferredViewError from "./DeferredViewError.svelte";
 
   let {
     surface,
@@ -70,34 +71,22 @@
   {/if}
 {:then Workspace}
   <Workspace {surface} />
-{:catch}
+{:catch error}
   {#if surface.variant === "modern"}
     <div class={modernClass}>
-      <section class="deferred-workspace-state danger" role="alert">
-        <Icon name="alert-triangle" size={20} />
-        <div>
-          <strong>{surface.tr("gui.task_surface.load_failed", "Task view could not be loaded")}</strong>
-          <span>{surface.tr("gui.task_surface.load_failed_body", "The task is still safe. Retry loading its progress and controls.")}</span>
-        </div>
-        <button type="button" class="primary-lite" onclick={retry}>
-          <Icon name="rotate-cw" size={15} />{surface.tr("gui.task_surface.retry", "Retry view")}
-        </button>
-      </section>
+      <DeferredViewError
+        {error} title={surface.tr("gui.task_surface.load_failed", "Task view could not be loaded")}
+        body={surface.tr("gui.task_surface.load_failed_body", "The task is still safe. Retry loading its progress and controls.")}
+        retryLabel={surface.tr("gui.task_surface.retry", "Retry view")} onRetry={retry}
+      />
     </div>
   {:else}
     <div class="classic-dialog-body">
-      <section class={classicClass}>
-        <div class="deferred-workspace-state danger" role="alert">
-          <Icon name="alert-triangle" size={20} />
-          <div>
-            <strong>{surface.tr("gui.task_surface.load_failed", "Task view could not be loaded")}</strong>
-            <span>{surface.tr("gui.task_surface.load_failed_body", "The task is still safe. Retry loading its progress and controls.")}</span>
-          </div>
-          <button type="button" class="classic-primary" onclick={retry}>
-            <Icon name="rotate-cw" size={15} />{surface.tr("gui.task_surface.retry", "Retry view")}
-          </button>
-        </div>
-      </section>
+      <DeferredViewError
+        {error} title={surface.tr("gui.task_surface.load_failed", "Task view could not be loaded")}
+        body={surface.tr("gui.task_surface.load_failed_body", "The task is still safe. Retry loading its progress and controls.")}
+        retryLabel={surface.tr("gui.task_surface.retry", "Retry view")} onRetry={retry} classic
+      />
     </div>
   {/if}
 {/await}

@@ -12,6 +12,7 @@
 
 <script lang="ts">
   import Icon from "./Icon.svelte";
+  import DeferredViewError from "./DeferredViewError.svelte";
 
   let {
     surface,
@@ -49,18 +50,7 @@
     </section>
   {:then ModernInspector}
     <ModernInspector {...surface} />
-  {:catch}
-    <section class="deferred-workspace-state danger" role="alert">
-      <Icon name="alert-triangle" size={20} />
-      <div>
-        <strong>{failureTitle}</strong>
-        <span>{failureBody}</span>
-      </div>
-      <div class="deferred-workspace-actions">
-        <button type="button" class="primary-lite" onclick={retry}>
-          <Icon name="rotate-cw" size={15} />{retryLabel}
-        </button>
-      </div>
-    </section>
+  {:catch error}
+    <DeferredViewError {error} title={failureTitle} body={failureBody} {retryLabel} onRetry={retry} />
   {/await}
 </aside>

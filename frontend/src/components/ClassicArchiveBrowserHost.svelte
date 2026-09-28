@@ -12,6 +12,7 @@
 
 <script lang="ts">
   import Icon from "./Icon.svelte";
+  import DeferredViewError from "./DeferredViewError.svelte";
 
   let {
     surface,
@@ -48,17 +49,8 @@
   </div>
 {:then ClassicArchiveBrowser}
   <ClassicArchiveBrowser {...surface} />
-{:catch}
+{:catch error}
   <div class="classic-body classic-browser-deferred">
-    <section class="deferred-workspace-state danger" role="alert">
-      <Icon name="alert-triangle" size={20} />
-      <div>
-        <strong>{failureTitle}</strong>
-        <span>{failureBody}</span>
-      </div>
-      <button type="button" class="classic-primary" onclick={retry}>
-        <Icon name="rotate-cw" size={15} />{retryLabel}
-      </button>
-    </section>
+    <DeferredViewError {error} title={failureTitle} body={failureBody} {retryLabel} onRetry={retry} classic />
   </div>
 {/await}

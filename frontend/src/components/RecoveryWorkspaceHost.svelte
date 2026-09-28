@@ -10,6 +10,7 @@
 
 <script lang="ts">
   import Icon from "./Icon.svelte";
+  import DeferredViewError from "./DeferredViewError.svelte";
   import type {
     RecoveryWorkspaceActions,
     RecoveryWorkspaceTranslate,
@@ -46,20 +47,12 @@
   </section>
 {:then Workspace}
   <Workspace {variant} {view} {actions} {tr} />
-{:catch}
-  <section class="deferred-workspace-state danger" role="alert">
-    <Icon name="alert-triangle" size={20} />
-    <div>
-      <strong>{tr("gui.recovery.workspace_load_failed", "Recovery could not be loaded")}</strong>
-      <span>{tr("gui.recovery.workspace_load_failed_body", "Your archive was not changed. Retry loading the recovery workspace.")}</span>
-    </div>
-    <button
-      type="button"
-      class:primary-lite={variant === "modern"}
-      class:classic-primary={variant === "classic"}
-      onclick={retry}
-    >
-      <Icon name="rotate-cw" size={15} />{tr("gui.recovery.workspace_retry", "Retry")}
-    </button>
-  </section>
+{:catch error}
+  <DeferredViewError
+    {error}
+    title={tr("gui.recovery.workspace_load_failed", "Recovery could not be loaded")}
+    body={tr("gui.recovery.workspace_load_failed_body", "Your archive was not changed. Retry loading the recovery workspace.")}
+    retryLabel={tr("gui.recovery.workspace_retry", "Retry")}
+    onRetry={retry} classic={variant === "classic"}
+  />
 {/await}

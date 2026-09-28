@@ -59,6 +59,7 @@
 
 <script lang="ts">
   import Icon from "./Icon.svelte";
+  import DeferredViewError from "./DeferredViewError.svelte";
 
   let props: WorkspaceProps = $props();
 
@@ -113,34 +114,14 @@
   {:else}
     <Workspace variant={props.variant} surface={props.surface} />
   {/if}
-{:catch}
+{:catch error}
   {#if props.variant === "modern"}
     <div class={modernClass}>
-      <section class="deferred-workspace-state danger" role="alert">
-        <Icon name="alert-triangle" size={20} />
-        <div>
-          <strong>{props.failureTitle}</strong>
-          <span>{props.failureBody}</span>
-        </div>
-        <button type="button" class="primary-lite" onclick={retry}>
-          <Icon name="rotate-cw" size={15} />{props.retryLabel}
-        </button>
-      </section>
+      <DeferredViewError {error} title={props.failureTitle} body={props.failureBody} retryLabel={props.retryLabel} onRetry={retry} />
     </div>
   {:else}
     <div class="classic-dialog-body">
-      <section class={classicClass}>
-        <div class="deferred-workspace-state danger" role="alert">
-          <Icon name="alert-triangle" size={20} />
-          <div>
-            <strong>{props.failureTitle}</strong>
-            <span>{props.failureBody}</span>
-          </div>
-          <button type="button" class="classic-primary" onclick={retry}>
-            <Icon name="rotate-cw" size={15} />{props.retryLabel}
-          </button>
-        </div>
-      </section>
+      <DeferredViewError {error} title={props.failureTitle} body={props.failureBody} retryLabel={props.retryLabel} onRetry={retry} classic />
     </div>
   {/if}
 {/await}

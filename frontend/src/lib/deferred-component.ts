@@ -5,18 +5,39 @@ export interface DeferredComponentLoader<T> {
   retry: () => Promise<T>;
 }
 
+export class DeferredComponentLoadError extends Error {
+  constructor(cause: unknown, readonly retryFailed: boolean) {
+    super("View could not be loaded", { cause });
+  }
+}
+
 export function createDeferredComponentLoader<T>(
   loadModule: () => Promise<DeferredComponentModule<T>>,
 ): DeferredComponentLoader<T> {
   let cached: Promise<T> | null = null;
+  let failed = false;
+  let failures = 0;
 
   function load(): Promise<T> {
-    cached ??= loadModule().then((module) => module.default);
+    if (cached) return cached;
+    failed = false;
+    cached = Promise.resolve().then(loadModule).then(
+      (module) => {
+        failures = 0;
+        return module.default;
+      },
+      (cause: unknown) => {
+        failed = true;
+        failures += 1;
+        throw new DeferredComponentLoadError(cause, failures > 1);
+      },
+    );
     return cached;
   }
 
   function retry(): Promise<T> {
-    cached = null;
+    // Keep an in-flight request and a successfully loaded component shared.
+    if (failed) cached = null;
     return load();
   }
 
