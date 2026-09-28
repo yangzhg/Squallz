@@ -21,6 +21,7 @@ type ArchiveRefreshStatus = "idle" | "refreshing" | "error";
 type SelectionAnchor = { index: number; generation: number };
 const ARCHIVE_BROWSE_ERROR_TOAST_KEY = "archive-browse-error";
 const ARCHIVE_REFRESH_ERROR_TOAST_KEY = "archive-refresh-error";
+const ARCHIVE_DIRECTORY_CHANGED_TOAST_KEY = "archive-directory-changed";
 const SELECTION_PAGE_CONCURRENCY = 4;
 
 type ValidationArchiveCallKind = "openArchive" | "listEntries" | "searchEntries";
@@ -299,6 +300,7 @@ async function performArchiveOpen(
     store.openError = null;
     clearPasswordBookStatus();
     clearSelection();
+    reportArchiveDirectoryChange(view.requestedDirs, view.dirs);
     pendingInfo = null;
     if (!info.read_only) refreshArchivePasswordBookStatusInBackground(info.path);
     return true;
@@ -366,20 +368,23 @@ async function loadOpenedArchiveView(
 ) {
   while (requestGeneration === store.openGeneration) {
     const generation = store.generation;
-    const dirs = visibleWindow ? [...store.dirs] : [];
+    const requestedDirs = visibleWindow ? [...store.dirs] : [];
     const filter = visibleWindow ? store.filter : "";
-    const prefix = dirs.length ? `${dirs.join("/")}/` : "";
-    const window = visibleWindow?.() ?? { start: 0, end: PAGE_SIZE };
-    const readPage = async (page: number): Promise<Page> => {
-      if (filter.trim()) {
-        const result = await searchArchivePage(id, page, filter.trim(), generation + 1);
-        if (result) return result;
-        throw { key: "error.cancelled", params: {}, detail: "" } satisfies ErrorDto;
-      }
-      markValidationArchiveCall("listEntries");
-      return ipc.listEntries(id, page, prefix, null, PAGE_SIZE);
-    };
     try {
+      const dirs = requestedDirs.length ? await resolveArchiveDirs(id, requestedDirs) : requestedDirs;
+      if (requestGeneration !== store.openGeneration) return null;
+      if (visibleWindow && generation !== store.generation) continue;
+      const prefix = dirs.length ? `${dirs.join("/")}/` : "";
+      const window = visibleWindow?.() ?? { start: 0, end: PAGE_SIZE };
+      const readPage = async (page: number): Promise<Page> => {
+        if (filter.trim()) {
+          const result = await searchArchivePage(id, page, filter.trim(), generation + 1);
+          if (result) return result;
+          throw { key: "error.cancelled", params: {}, detail: "" } satisfies ErrorDto;
+        }
+        markValidationArchiveCall("listEntries");
+        return ipc.listEntries(id, page, prefix, null, PAGE_SIZE);
+      };
       const first = await readPage(Math.max(0, Math.floor(window.start / PAGE_SIZE)));
       if (requestGeneration !== store.openGeneration) return null;
       if (visibleWindow && generation !== store.generation) continue;
@@ -391,7 +396,7 @@ async function loadOpenedArchiveView(
         viewPages(visibleWindow(), first.total).some((page) => !pages.includes(page))
       )) continue;
       return {
-        dirs, filter, total: first.total,
+        requestedDirs, dirs, filter, total: first.total,
         pages: new Map(loaded.map((page) => [page.page, page.items])),
       };
     } catch (error) {
@@ -401,6 +406,23 @@ async function loadOpenedArchiveView(
     }
   }
   return null;
+}
+
+async function resolveArchiveDirs(id: number, dirs: string[]): Promise<string[]> {
+  const prefix = await ipc.resolveArchiveDirectory(id, `${dirs.join("/")}/`);
+  return prefix.split("/").filter(Boolean);
+}
+
+function reportArchiveDirectoryChange(previous: string[], current: string[]): void {
+  if (previous.join("/") === current.join("/")) return;
+  pushToast({
+    key: ARCHIVE_DIRECTORY_CHANGED_TOAST_KEY,
+    kind: "warning",
+    title: t("gui.archive.folder_unavailable", {
+      folder: previous.join("/"),
+      parent: current.join("/") || t("gui.list.archive_root"),
+    }),
+  });
 }
 
 function clearArchiveRefreshStatus(): void {
@@ -589,6 +611,8 @@ async function reload(): Promise<void> {
   }
   store.filterPending = true;
   const generation = ++store.generation;
+  const id = store.info.id;
+  const previousDirs = [...store.dirs];
   clearBrowseError();
   store.pages = new Map();
   store.loading = new Set();
@@ -602,10 +626,22 @@ async function reload(): Promise<void> {
       return;
     }
     const query = store.filter.trim();
-    const page = query
-      ? await searchArchivePage(store.info.id, 0, query, generation)
-      : await listArchiveLevelPage(store.info.id, 0, generation);
+    let page = query
+      ? await searchArchivePage(id, 0, query, generation)
+      : await listArchiveLevelPage(id, 0, generation);
     if (generation !== store.generation || page === null) return;
+    if (!query && page.total === 0 && previousDirs.length) {
+      const dirs = await resolveArchiveDirs(id, previousDirs);
+      if (generation !== store.generation) return;
+      if (dirs.join("/") !== previousDirs.join("/")) {
+        markValidationArchiveCall("listEntries");
+        page = await ipc.listEntries(id, 0, dirs.length ? `${dirs.join("/")}/` : "", null, PAGE_SIZE);
+        if (generation !== store.generation) return;
+        store.dirs = dirs;
+        clearSelection();
+        reportArchiveDirectoryChange(previousDirs, dirs);
+      }
+    }
     store.pages = new Map([[0, page.items]]);
     store.total = page.total;
   } catch (error) {
@@ -728,6 +764,7 @@ async function searchArchivePage(id: number, page: number, query: string, genera
 function clearBrowseError(): void {
   store.browseError = null;
   removeToastByKey(ARCHIVE_BROWSE_ERROR_TOAST_KEY);
+  removeToastByKey(ARCHIVE_DIRECTORY_CHANGED_TOAST_KEY);
 }
 
 function publishBrowseError(error: unknown, generation: number): void {

@@ -102,13 +102,10 @@ export function i18nReady(): boolean {
 
 /** Translates a key, substituting `{name}` placeholders. */
 function interpolate(template: string, params?: Record<string, string | number>): string {
-  let out = template;
-  if (params) {
-    for (const [name, value] of Object.entries(params)) {
-      out = out.split(`{${name}}`).join(String(value));
-    }
-  }
-  return out;
+  if (!params) return template;
+  return template.replace(/\{([^{}]+)\}/g, (placeholder, name: string) =>
+    Object.prototype.hasOwnProperty.call(params, name) ? String(params[name]) : placeholder,
+  );
 }
 
 export function t(key: string, params?: Record<string, string | number>): string {

@@ -2693,6 +2693,7 @@
   "gui.archive.list_refreshed": "Archive list refreshed",
   "gui.archive.refreshing": "Refreshing archive contents…",
   "gui.archive.refresh_failed": "Could not refresh the archive. Retry to see the latest files.",
+  "gui.archive.folder_unavailable": "The folder {folder} is no longer available. Showing {parent}.",
   "gui.mode.saved_preview_desktop_unavailable": "Interface mode changed for this session but was not saved",
   "gui.theme.saved_preview_desktop_unavailable": "Theme changed for this session but was not saved",
   "gui.density.saved_preview_desktop_unavailable": "Spacing changed for this session but was not saved",

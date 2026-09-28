@@ -49,6 +49,7 @@ async function withArchive(run, options = {}) {
     ipc.cancelArchiveOpen = async () => {};
     ipc.cancelArchiveSearch = async () => {};
     ipc.archivePasswordStatus = async () => ({ available: true, saved: false });
+    ipc.resolveArchiveDirectory = async (_id, prefix) => prefix;
     ipc.listEntries = async (id, page, prefix) => {
       requests.push({ id, page, prefix });
       return { items: [row(`${prefix}new.txt`)], total: 1, page };
@@ -296,6 +297,88 @@ test("filename encoding changes reuse atomic refresh", async () => {
     assert.equal(archive.archiveEncoding(), "shift_jis");
     assert.deepEqual(archive.currentDirs(), ["docs"]);
     assert.equal(archive.rowAt(0)?.path, "docs/new.txt");
+  });
+});
+
+test("refresh leaves a missing folder at its nearest surviving parent", async () => {
+  await withArchive(async ({ archive, ipc, requests, toasts, pendingOpen }) => {
+    ipc.resolveArchiveDirectory = async (id, prefix) => {
+      assert.equal(id, 2);
+      assert.equal(prefix, "docs/removed/");
+      return "docs/";
+    };
+    const refreshing = archive.refreshCurrentArchive();
+    pendingOpen.resolve(info(2));
+    assert.equal(await refreshing, true);
+    assert.deepEqual(archive.currentDirs(), ["docs"]);
+    assert.deepEqual(requests, [{ id: 2, page: 0, prefix: "docs/" }]);
+    assert.equal(archive.rowAt(0)?.path, "docs/new.txt");
+    assert.ok(toasts.toasts().some((toast) => toast.key === "archive-directory-changed"));
+  }, { dirs: ["docs", "removed"] });
+});
+
+test("refresh preserves an existing empty folder", async () => {
+  await withArchive(async ({ archive, ipc, toasts, pendingOpen }) => {
+    ipc.listEntries = async (_id, page) => ({ items: [], total: 0, page });
+    const refreshing = archive.refreshCurrentArchive();
+    pendingOpen.resolve(info(2));
+    assert.equal(await refreshing, true);
+    assert.deepEqual(archive.currentDirs(), ["docs"]);
+    assert.equal(archive.totalRows(), 0);
+    assert.equal(toasts.toasts().some((toast) => toast.key === "archive-directory-changed"), false);
+  });
+});
+
+test("a search keeps its query when its missing browsing folder is resolved", async () => {
+  await withArchive(async ({ archive, ipc, pendingOpen }) => {
+    ipc.resolveArchiveDirectory = async () => "";
+    ipc.searchEntries = async (_id, page, query) => {
+      assert.equal(query, "new");
+      return { items: [row("new.txt")], total: 1, page };
+    };
+    const refreshing = archive.refreshCurrentArchive();
+    pendingOpen.resolve(info(2));
+    assert.equal(await refreshing, true);
+    assert.equal(archive.filterText(), "new");
+    assert.deepEqual(archive.currentDirs(), []);
+    assert.equal(archive.rowAt(0)?.path, "new.txt");
+  }, { filter: "new" });
+});
+
+test("navigation supersedes a pending directory resolution", async () => {
+  await withArchive(async ({ archive, ipc, pendingOpen, toasts }) => {
+    const pendingDirectory = deferred();
+    let resolving = false;
+    ipc.resolveArchiveDirectory = async (_id, prefix) => {
+      if (prefix === "docs/") {
+        resolving = true;
+        return pendingDirectory.promise;
+      }
+      return prefix;
+    };
+    const refreshing = archive.refreshCurrentArchive();
+    pendingOpen.resolve(info(2));
+    await until(() => resolving);
+    await archive.enterDirPath("pictures/");
+    pendingDirectory.resolve("");
+    assert.equal(await refreshing, true);
+    assert.deepEqual(archive.currentDirs(), ["pictures"]);
+    assert.equal(archive.rowAt(0)?.path, "pictures/new.txt");
+    assert.equal(toasts.toasts().some((toast) => toast.key === "archive-directory-changed"), false);
+  });
+});
+
+test("navigation to a missing folder displays a real parent instead of a phantom empty folder", async () => {
+  await withArchive(async ({ archive, ipc, requests }) => {
+    ipc.listEntries = async (id, page, prefix) => {
+      requests.push({ id, page, prefix });
+      return { items: prefix ? [] : [row("kept.txt")], total: prefix ? 0 : 1, page };
+    };
+    ipc.resolveArchiveDirectory = async () => "";
+    await archive.enterDirPath("removed/");
+    assert.deepEqual(archive.currentDirs(), []);
+    assert.equal(archive.rowAt(0)?.path, "kept.txt");
+    assert.deepEqual(requests.map(({ prefix }) => prefix), ["removed/", ""]);
   });
 });
 

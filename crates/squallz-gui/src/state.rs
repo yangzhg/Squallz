@@ -589,6 +589,17 @@ impl AppState {
         self.list_entries_for_owner(None, id, page, page_size, dir_prefix, filter)
     }
 
+    /// Resolves a browse location against the current archive's directory index.
+    pub(crate) fn resolve_archive_directory_for_window(
+        &self,
+        owner_window: &str,
+        id: u64,
+        dir_prefix: &str,
+    ) -> Result<String, FormatError> {
+        let archive = self.archive_for_owner(id, Some(owner_window))?;
+        Ok(resolve_archive_directory(&archive, dir_prefix))
+    }
+
     pub(crate) fn list_entries_for_window(
         &self,
         owner_window: &str,
@@ -1088,6 +1099,40 @@ fn cancellable_sort_with<T: Ord>(
     Ok(sorted)
 }
 
+fn resolve_archive_directory(archive: &CachedArchive, dir_prefix: &str) -> String {
+    let mut prefix = dir_prefix.replace('\\', "/").trim_matches('/').to_owned();
+    if !prefix.is_empty() {
+        prefix.push('/');
+    }
+    while !prefix.is_empty() && !archive_directory_exists(archive, &prefix) {
+        prefix.pop();
+        let parent_end = prefix.rfind('/').map_or(0, |index| index + 1);
+        prefix.truncate(parent_end);
+    }
+    prefix
+}
+
+fn archive_directory_exists(archive: &CachedArchive, prefix: &str) -> bool {
+    if prefix.is_empty() || archive.levels.contains_key(prefix) {
+        return true;
+    }
+    // Empty directories have a row in their parent, but no level of their own.
+    let path = prefix.trim_end_matches('/');
+    let (parent, name) = path.rsplit_once('/').map_or(("", path), |(parent, name)| {
+        (&prefix[..parent.len() + 1], name)
+    });
+    let Some(rows) = archive.levels.get(parent) else {
+        return false;
+    };
+    let folded = name.to_lowercase();
+    let start = rows
+        .partition_point(|row| row.is_dir() && row.name(&archive.entries).to_lowercase() < folded);
+    rows[start..]
+        .iter()
+        .take_while(|row| row.is_dir() && row.name(&archive.entries).to_lowercase() == folded)
+        .any(|row| row.name(&archive.entries) == name)
+}
+
 /// Slices one page out of a directory level.
 fn page_level(
     archive: &CachedArchive,
@@ -1302,6 +1347,49 @@ mod tests {
             search_generation: AtomicU64::new(generation),
             _owned_temp: None,
         }
+    }
+
+    #[test]
+    fn archive_directory_resolution_preserves_empty_and_implicit_directories() {
+        let mut empty = file_meta("empty", 0);
+        empty.entry_type = EntryType::Dir;
+        let mut uppercase_empty = file_meta("EMPTY/", 0);
+        uppercase_empty.entry_type = EntryType::Dir;
+        let mut nested_empty = file_meta("docs/vacant/", 0);
+        nested_empty.entry_type = EntryType::Dir;
+        let archive = cached_archive(
+            vec![
+                file_meta("docs/kept/file.txt", 1),
+                file_meta(r"资料\有效\文件.txt", 1),
+                file_meta("Empty", 1),
+                empty,
+                uppercase_empty,
+                nested_empty,
+            ],
+            0,
+        );
+        for (requested, expected) in [
+            ("docs/kept/", "docs/kept/"),
+            ("docs/missing/deep/", "docs/"),
+            ("docs/kept/file.txt/", "docs/kept/"),
+            ("empty/", "empty/"),
+            ("empty/missing/", "empty/"),
+            ("EMPTY/", "EMPTY/"),
+            ("Empty/", ""),
+            ("EmPtY/", ""),
+            ("docs/vacant/", "docs/vacant/"),
+            (r"\资料\有效\missing\", "资料/有效/"),
+            ("missing/", ""),
+            ("/", ""),
+            ("", ""),
+        ] {
+            assert_eq!(resolve_archive_directory(&archive, requested), expected);
+        }
+        assert_eq!(page_level(&archive, 0, 10, "empty/", None).total, 0);
+        assert_eq!(
+            resolve_archive_directory(&cached_archive(vec![], 0), "old/"),
+            ""
+        );
     }
 
     fn crc32(data: &[u8]) -> u32 {
@@ -1675,6 +1763,19 @@ mod tests {
             .list_entries_for_window("window-b", first.id, 0, 10, "", None)
             .unwrap_err()
             .to_string();
+        assert_eq!(
+            unavailable,
+            state
+                .resolve_archive_directory_for_window("window-b", first.id, "src/nested/")
+                .unwrap_err()
+                .to_string()
+        );
+        assert_eq!(
+            state
+                .resolve_archive_directory_for_window("window-a", first.id, "src/nested/removed/")
+                .unwrap(),
+            "src/nested/"
+        );
         assert_eq!(
             unavailable,
             state

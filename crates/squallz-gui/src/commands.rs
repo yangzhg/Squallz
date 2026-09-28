@@ -442,6 +442,19 @@ pub fn take_validation_drop_paths() -> Vec<String> {
     paths
 }
 
+/// Finds the closest existing directory in this window's opened archive.
+#[tauri::command]
+pub fn resolve_archive_directory(
+    window: WebviewWindow,
+    state: State<'_, Arc<AppState>>,
+    id: u64,
+    dir_prefix: String,
+) -> Result<String, ErrorDto> {
+    state
+        .resolve_archive_directory_for_window(window.label(), id, &dir_prefix)
+        .map_err(ErrorDto::from)
+}
+
 /// Pages one directory level of an opened archive (500/page by default).
 #[tauri::command]
 pub fn list_entries(

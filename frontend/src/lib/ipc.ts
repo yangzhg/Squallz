@@ -694,6 +694,8 @@ export const ipc = {
   recordValidationEvent: (event: string, payload: Record<string, unknown>) =>
     invoke<void>("record_validation_event", { event, payload }),
   takeValidationDropPaths: () => invoke<string[]>("take_validation_drop_paths"),
+  resolveArchiveDirectory: (id: number, dirPrefix: string) =>
+    invoke<string>("resolve_archive_directory", { id, dirPrefix }),
   listEntries: (
     id: number,
     page: number,
