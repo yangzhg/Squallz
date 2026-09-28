@@ -17,7 +17,7 @@ use squallz_format_api::{
 use zip::read::ZipFile;
 use zip::{ZipArchive, ZipReadOptions};
 
-use super::datetime::from_zip_datetime;
+use super::datetime::modified_time;
 use super::encoding::{decode_entry_name, resolve_fallback_encoding};
 use super::error::map_zip_error;
 
@@ -171,7 +171,7 @@ impl ZipArchiveReader {
             },
             size: file.size(),
             compressed_size: Some(file.compressed_size()),
-            modified: file.last_modified().map(from_zip_datetime),
+            modified: modified_time(file.last_modified(), file.extra_data_fields()),
             unix_mode: file.unix_mode(),
             crc32: Some(file.crc32()),
             encrypted: file.encrypted(),

@@ -4036,6 +4036,7 @@ dependencies = [
  "brotli",
  "bzip2",
  "chardetng",
+ "chrono",
  "crc32c",
  "crc32fast",
  "encoding_rs",

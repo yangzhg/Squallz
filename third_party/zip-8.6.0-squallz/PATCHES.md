@@ -17,10 +17,15 @@ are unchanged.
   timestamp-based password-check case.
 - The non-UTF-8 writer unit fixture uses byte names without creating invalid
   Rust strings.
+- Raw copies and renames retain NTFS timestamps and Info-ZIP UTC modification
+  times in the generated headers. Timestamp-only edits continue to use their
+  explicitly supplied DOS time, without carrying stale UTC overrides.
 
 Squallz exercises this behavior through `crates/squallz-formats/tests/zip_update.rs`,
 including local/central name agreement, byte-for-byte compressed payloads,
 legacy names, encryption, file types, cancellation and transaction behavior.
+`crates/squallz-formats/tests/zip_timestamps.rs` covers UTC metadata preservation,
+subsecond precision, out-of-DOS-range dates and Info-ZIP interoperability.
 The root workspace and the independent fuzz crate both select this patch.
 
 Replace this copy with an upstream stable release once equivalent preservation

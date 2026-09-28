@@ -68,6 +68,7 @@
 | brotli | 8.0.3 | BSD-3-Clause/MIT | 活跃（dropbox 系，现 brotli 官方推荐 Rust 实现） | brotli 编解码（纯 Rust） |
 | tar | 0.4.46 | MIT OR Apache-2.0 | 活跃（rust-lang 官方系，alexcrichton） | tar 读写（纯 Rust） |
 | sevenz-rust2 | 0.21.0 | Apache-2.0 | 活跃（hasenbanck 接管的 sevenz-rust 继任仓库） | 7z 读写（含 AES-256 与 header 加密，纯 Rust） |
+| chrono | 0.4.45 | MIT OR Apache-2.0 | chronotope 维护；复用工作区已锁定版本 | ZIP DOS 本地时间与 UTC 转换，使用平台时区规则；clock 特性复用已锁定的 iana-time-zone 0.1.65（MIT OR Apache-2.0） |
 | crc32fast | 1.5.0 | MIT OR Apache-2.0 | 活跃 | 7z test 的 CRC 对拍（此前已是 zip 传递依赖） |
 
 ## 关键传递依赖
@@ -216,7 +217,7 @@ SQZ 恢复路径引入旧 `parking_lot 0.11` / `instant` advisory 链；当前�
 | 依赖 | 版本（锁定） | 许可证 | 维护状态 | 引入原因 / 退出条件 |
 | ---- | ---- | ---- | ---- | ---- |
 | urlpattern | 0.3.0（`third_party/urlpattern-0.3.0-squallz`） | MIT | 上游 `urlpattern` 已有 0.6.x；当前 Tauri 2.11.x 仍经 `tauri-utils` 约束到 0.3.x | 供应链处置：本地 patch 保持 0.3 API，并把 `unic-ucd-ident` 替换为 `unicode-ident`，移除 rust-unic advisory 链；Tauri 升级到不依赖 rust-unic 的 urlpattern 后删除 patch |
-| zip | 8.6.0（`third_party/zip-8.6.0-squallz`） | MIT | 保持上游公开 API、依赖和功能开关 | raw copy 按原始字节保存名称，保留加密标志、数据描述符和平台文件属性；上游稳定版本具备等价行为并通过名称/加密/属性/ZIP64 回归后移除本地 patch |
+| zip | 8.6.0（`third_party/zip-8.6.0-squallz`） | MIT | 保持上游公开 API、依赖和功能开关 | raw copy 按原始字节保存名称，保留加密标志、数据描述符、平台文件属性和 UTC 修改时间；上游稳定版本具备等价行为并通过名称/加密/属性/时间/ZIP64 回归后移除本地 patch |
 
 `third_party/urlpattern-0.3.0-squallz` 来源为 crates.io `urlpattern` 0.3.0，保留原 MIT
 许可证文件与源码结构；Squallz 只改 manifest 与 tokenizer identifier 判断依赖，不改变公开 API。

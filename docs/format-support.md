@@ -131,6 +131,27 @@ Executable archive boundary:
 - Self-extractors never run archived programs or scripts automatically. See
   `docs/SELF_EXTRACTING.md` for the versioned layout and trust boundary.
 
+## ZIP modification times
+
+The built-in ZIP reader prefers NTFS UTC modification timestamps (100 ns
+precision), then signed Info-ZIP extended Unix timestamps, then DOS local time.
+DOS-only timestamps use the host's historical time-zone rules and have two-second
+precision. A repeated daylight-saving hour resolves to the earlier instant; a
+nonexistent local time remains unknown. A DOS-only archive has no source time
+zone, so the original instant cannot be recovered after a cross-zone transfer.
+
+Creation writes local DOS time plus NTFS UTC metadata, and an Info-ZIP UTC field
+where signed 32-bit seconds can represent it. Dates outside 1980–2107 retain UTC
+metadata when an extra field can represent them; their DOS field uses the format
+default. Zero NTFS timestamps mean unknown. Raw-copy
+updates and renames retain NTFS and Info-ZIP modification times. Central-directory
+recovery currently does not restore timestamps from local headers. These rules
+describe archive metadata; the shared extraction sink does not yet restore output
+modification times.
+
+References: [PKWARE APPNOTE, sections 4.4.6 and 4.5.5](https://pkware.cachefly.net/webdocs/casestudies/APPNOTE.TXT)
+and [Info-ZIP extra-field specification](https://libzip.org/specifications/extrafld.txt).
+
 ## Cross-Platform Route
 
 Squallz must not rely on macOS `/usr/bin/bsdtar`, Linux distribution tools, or a

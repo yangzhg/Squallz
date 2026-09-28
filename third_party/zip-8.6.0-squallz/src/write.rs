@@ -1632,11 +1632,46 @@ impl<W: Write + Seek> ZipWriter<W> {
         file: ZipFile<'_, R>,
         name: S,
     ) -> ZipResult<()> {
+        let options = Self::raw_copy_options(&file)?;
+        self.raw_copy_file_internal(file, name.to_string().as_bytes(), options)
+    }
+
+    fn raw_copy_options<R: Read>(file: &ZipFile<'_, R>) -> ZipResult<FullFileOptions<'static>> {
+        use crate::extra_fields::ExtraField;
+
         let mut options = file.options().into_full_options();
         if !file.comment().is_empty() {
             options = options.with_file_comment(file.comment());
         }
-        self.raw_copy_file_internal(file, name.to_string().as_bytes(), options)
+        // Timestamp fields describe the source instant independently of DOS
+        // local time. Rebuild only these known fields; ZIP64 offsets, AES and
+        // name-dependent fields must be generated for the new entry.
+        for field in file.extra_data_fields() {
+            match field {
+                ExtraField::Ntfs(ntfs) => {
+                    let mut data = [0u8; 32];
+                    data[4..6].copy_from_slice(&1u16.to_le_bytes());
+                    data[6..8].copy_from_slice(&24u16.to_le_bytes());
+                    data[8..16].copy_from_slice(&ntfs.mtime().to_le_bytes());
+                    data[16..24].copy_from_slice(&ntfs.atime().to_le_bytes());
+                    data[24..32].copy_from_slice(&ntfs.ctime().to_le_bytes());
+                    options.add_extra_data(UsedExtraField::Ntfs.as_u16(), data, false)?;
+                }
+                ExtraField::ExtendedTimestamp(timestamp) => {
+                    if let Some(modified) = timestamp.mod_time() {
+                        let mut data = [0u8; 5];
+                        data[0] = 1;
+                        data[1..].copy_from_slice(&modified.to_le_bytes());
+                        options.add_extra_data(
+                            UsedExtraField::ExtendedTimestamp.as_u16(),
+                            data,
+                            false,
+                        )?;
+                    }
+                }
+            }
+        }
+        Ok(options)
     }
 
     fn raw_copy_file_internal<R: Read, T: FileOptionExtension>(
@@ -1698,10 +1733,7 @@ impl<W: Write + Seek> ZipWriter<W> {
     /// ```
     pub fn raw_copy_file<R: Read>(&mut self, file: ZipFile<'_, R>) -> ZipResult<()> {
         let name = file.name_raw().to_owned();
-        let mut options = file.options().into_full_options();
-        if !file.comment().is_empty() {
-            options = options.with_file_comment(file.comment());
-        }
+        let options = Self::raw_copy_options(&file)?;
         self.raw_copy_file_internal(file, &name, options)
     }
 
