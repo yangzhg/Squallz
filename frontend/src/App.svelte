@@ -1248,6 +1248,15 @@
     if (!activeTaskPreview) return;
     const id = installActiveTaskPreview(activeTaskPreview);
     if (id === null) return;
+    const surface = params.get("previewTaskSurface");
+    if (surface === "panel" || surface === "center") {
+      taskDialogTaskId = null;
+      taskDialogDismissedId = id;
+      taskCenterOpen = true;
+      taskCenterSelectedTaskId = surface === "panel" ? id : null;
+      taskCenterFocusTaskId = id;
+      return;
+    }
     taskDialogTaskId = id;
     taskDialogDismissedId = null;
   });

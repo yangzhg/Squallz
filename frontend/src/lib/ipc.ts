@@ -336,6 +336,9 @@ export type JobSpec =
     };
 
 export type ProgressPhase =
+  | "archive_open"
+  | "archive_test"
+  | "archive_convert"
   | "extract_entries"
   | "extract_metadata"
   | "recovery_prepare"

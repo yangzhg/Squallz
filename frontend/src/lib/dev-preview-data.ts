@@ -19,6 +19,7 @@ export interface ArchivePreview {
 }
 
 type PreviewTaskKind =
+  | "archive_open"
   | "compress"
   | "compress_split"
   | "compress_sfx"
@@ -410,6 +411,7 @@ function readIntegrationDiagnosticsPreview(params: URLSearchParams): Integration
 
 function completedTaskParam(value: string | null): RuntimePreviews["completedTask"] {
   if (
+    value === "archive_open" ||
     value === "compress" ||
     value === "compress_split" ||
     value === "compress_sfx" ||

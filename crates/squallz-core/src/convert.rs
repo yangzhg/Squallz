@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use crate::api::{
     ArchiveReader, Compressor, ControlToken, CreateOptions, Detected, EntryMeta, EntryPath,
-    EntryType, FormatError, OpenOptions, ProgressSink,
+    EntryType, FormatError, OpenOptions, ProgressPhase, ProgressSink,
 };
 use crate::compound::{KnownTotal, ProgressRead};
 use crate::create::{
@@ -71,10 +71,12 @@ pub(crate) fn convert(
         }
     };
 
-    let mut reader = engine.open_with_control(src, open_opts, ctl)?;
+    let mut reader = engine.open_for_operation(src, open_opts, progress, ctl)?;
     let metas = collect_entry_metadata(&mut *reader, ctl)?;
     let plan = plan_convert_from_entries(engine, dest, &metas, create_opts)?;
     ensure_create_space(dest, &plan)?;
+    progress.on_phase(ProgressPhase::ArchiveConvert, true);
+    ctl.checkpoint()?;
     if create_opts.split_size.is_none() {
         let reserved = crate::reserve_bound_sibling_temp_file(dest, "convert")?;
         let staged = reserved.path.clone();

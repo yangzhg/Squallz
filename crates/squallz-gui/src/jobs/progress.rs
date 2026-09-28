@@ -67,6 +67,7 @@ pub(super) struct BatchProgressSink<'a> {
 struct BatchProgressState {
     index: u64,
     archive: String,
+    reading_archive: bool,
 }
 
 impl<'a> BatchProgressSink<'a> {
@@ -77,6 +78,7 @@ impl<'a> BatchProgressSink<'a> {
             state: Mutex::new(BatchProgressState {
                 index: 0,
                 archive: String::new(),
+                reading_archive: false,
             }),
         }
     }
@@ -87,6 +89,7 @@ impl<'a> BatchProgressSink<'a> {
             let mut state = lock_unpoisoned(&self.state);
             state.index = index as u64;
             state.archive = archive.clone();
+            state.reading_archive = false;
         }
         self.emit(index as u64 * BATCH_PROGRESS_SCALE, archive, 0, 0);
     }
@@ -133,7 +136,7 @@ impl ProgressSink for BatchProgressSink<'_> {
             .index
             .saturating_mul(BATCH_PROGRESS_SCALE)
             .saturating_add(archive_done);
-        let current = if current.display.is_empty() {
+        let current = if state.reading_archive || current.display.is_empty() {
             state.archive.clone()
         } else {
             format!("{}: {}", state.archive, current.display)
@@ -155,6 +158,7 @@ impl ProgressSink for BatchProgressSink<'_> {
     }
 
     fn on_phase(&self, phase: ProgressPhase, interruptible: bool) {
+        lock_unpoisoned(&self.state).reading_archive = phase == ProgressPhase::ArchiveOpen;
         self.inner.on_phase(phase, interruptible);
     }
 }
@@ -186,6 +190,19 @@ impl<'a> EmitProgress<'a> {
     }
 
     fn redact_current(&self, current: &EntryPath) -> Option<EntryPath> {
+        if !self.redactions.is_empty()
+            && lock_unpoisoned(&self.inner).phase.as_deref() == Some("archive_open")
+        {
+            for (path, display) in self.redactions {
+                let Some(name) = std::path::Path::new(path).file_name() else {
+                    continue;
+                };
+                let name = name.to_string_lossy();
+                if current.display == name || current.display == format!("{display}: {name}") {
+                    return Some(EntryPath::from_utf8(display));
+                }
+            }
+        }
         self.redactions
             .iter()
             .any(|(path, _)| !path.is_empty() && current.display.contains(path))
@@ -272,7 +289,8 @@ impl<'a> EmitProgress<'a> {
         let indeterminate_phase = matches!(
             w.phase.as_deref(),
             Some(
-                "output_commit"
+                "archive_open"
+                    | "output_commit"
                     | "output_cleanup"
                     | "output_recovery"
                     | "update_recovery"
@@ -309,11 +327,12 @@ impl<'a> EmitProgress<'a> {
         if current_total > 0 {
             w.latest_current_file = Some(snapshot.clone());
         }
-        if elapsed < PROGRESS_THROTTLE_MS {
+        if elapsed < PROGRESS_THROTTLE_MS && w.phase.as_deref() != Some("archive_open") {
             w.latest = Some(snapshot);
             return;
         }
-        if scanned_entries.is_some()
+        if indeterminate_phase
+            || scanned_entries.is_some()
             || percentage_phase
             || w.phase.as_deref() == Some("extract_metadata")
         {
@@ -410,6 +429,9 @@ impl ProgressSink for EmitProgress<'_> {
 
 fn progress_phase_name(phase: ProgressPhase) -> Option<&'static str> {
     match phase {
+        ProgressPhase::ArchiveOpen => Some("archive_open"),
+        ProgressPhase::ArchiveTest => Some("archive_test"),
+        ProgressPhase::ArchiveConvert => Some("archive_convert"),
         ProgressPhase::ExtractEntries => Some("extract_entries"),
         ProgressPhase::ExtractMetadata => Some("extract_metadata"),
         ProgressPhase::RecoveryPrepare => Some("recovery_prepare"),
@@ -475,7 +497,31 @@ mod tests {
         assert_eq!(snapshot.progress.scanned_entries, Some(7));
         assert_eq!((snapshot.progress.total, snapshot.progress.speed), (0, 0));
 
+        progress.on_phase(ProgressPhase::ArchiveOpen, true);
+        progress.on_entry_progress(100, 100, &entry, 20, 20);
+        let snapshot = lock_unpoisoned(&snapshots).snapshot("main", 1).unwrap();
+        assert_eq!(snapshot.progress.current, "input.bin");
+        assert_eq!(snapshot.progress.phase.as_deref(), Some("archive_open"));
+        assert_eq!(snapshot.progress.scanned_entries, None);
+        assert_eq!(
+            (
+                snapshot.progress.done,
+                snapshot.progress.total,
+                snapshot.progress.current_total,
+                snapshot.progress.speed
+            ),
+            (0, 0, 0, 0)
+        );
+
         for (phase, name, interruptible, counts) in [
+            (ProgressPhase::ArchiveOpen, "archive_open", true, (0, 0)),
+            (ProgressPhase::ArchiveTest, "archive_test", true, (25, 100)),
+            (
+                ProgressPhase::ArchiveConvert,
+                "archive_convert",
+                true,
+                (25, 100),
+            ),
             (
                 ProgressPhase::ExtractEntries,
                 "extract_entries",
@@ -558,6 +604,20 @@ mod tests {
 
         batch.finish_archive(0, "first.zip".into());
         batch.start_archive(1, "second.zip".into());
+        batch.on_phase(ProgressPhase::ArchiveOpen, true);
+        batch.on_progress(0, 0, &EntryPath::from_utf8("second.zip"));
+        let snapshot = lock_unpoisoned(&snapshots).snapshot("main", 1).unwrap();
+        assert_eq!(snapshot.progress.phase.as_deref(), Some("archive_open"));
+        assert_eq!(snapshot.progress.current, "second.zip");
+        assert_eq!(
+            (
+                snapshot.progress.done,
+                snapshot.progress.total,
+                snapshot.progress.speed
+            ),
+            (0, 0, 0)
+        );
+        batch.on_phase(ProgressPhase::ExtractEntries, true);
         batch.on_entry_progress(50, 100, &EntryPath::from_utf8("report.txt"), 5, 10);
         progress.flush();
         let snapshot = lock_unpoisoned(&snapshots).snapshot("main", 1).unwrap();
@@ -643,5 +703,13 @@ mod tests {
         let snapshot = lock_unpoisoned(&snapshots).snapshot("main", 42).unwrap();
         assert_eq!(snapshot.progress.current, expected[1]);
         assert!(!snapshot.progress.current.contains(private));
+
+        progress.on_phase(ProgressPhase::ArchiveOpen, true);
+        for current in ["inner.zip".to_owned(), format!("{display}: inner.zip")] {
+            progress.on_progress(0, 0, &EntryPath::from_utf8(current));
+            let snapshot = lock_unpoisoned(&snapshots).snapshot("main", 42).unwrap();
+            assert_eq!(snapshot.progress.current, display);
+            assert_eq!(queue_sink.paths.lock().unwrap().last().unwrap(), display);
+        }
     }
 }

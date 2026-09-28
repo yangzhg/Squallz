@@ -114,14 +114,19 @@ export function taskOutcomeStateTone(task: TaskDialogModel): string {
 }
 
 export function taskProgressPercent(task: TaskDialogModel): number {
-  if (isRestoringDirectories(task)) return 0;
+  if (isIndeterminatePhase(task)) return 0;
   if (task.total > 0) return Math.min(100, Math.round((task.done / task.total) * 100));
   if (task.state === "done") return 100;
   return 0;
 }
 
 export function taskOverallProgressIndeterminate(task: TaskDialogModel): boolean {
-  return isTaskActiveState(task.state) && (task.total === 0 || isRestoringDirectories(task));
+  return isTaskActiveState(task.state) && (task.total === 0 || isIndeterminatePhase(task));
+}
+
+function isIndeterminatePhase(task: TaskDialogModel): boolean {
+  return isTaskActiveState(task.state)
+    && (task.phase === "archive_open" || task.phase === "extract_metadata");
 }
 
 function isRestoringDirectories(task: TaskDialogModel): boolean {
@@ -136,6 +141,9 @@ function isRecoveryProgressPhase(task: TaskDialogModel): boolean {
 }
 
 export function taskProgressPhaseLabel(task: TaskDialogModel): string | null {
+  if (task.phase === "archive_open") return tr("gui.task.phase.archive_open", "Reading archive");
+  if (task.phase === "archive_test") return tr("gui.task.phase.archive_test", "Testing archive");
+  if (task.phase === "archive_convert") return tr("gui.task.phase.archive_convert", "Converting archive");
   if (task.phase === "extract_entries") return tr("gui.task.phase.extract_entries", "Extracting files");
   if (task.phase === "extract_metadata") return tr("gui.task.phase.extract_metadata", "Restoring folder information");
   if (task.phase === "recovery_prepare") return tr("gui.task.phase.recovery_prepare", "Preparing recovery data");
@@ -173,7 +181,7 @@ export function taskOverallProgressBadge(task: TaskDialogModel): string {
     return taskOutcomeStateLabel(task);
   }
   const phase = isTaskActiveState(task.state) ? taskProgressPhaseLabel(task) : null;
-  if (phase && (task.total === 0 || isRestoringDirectories(task)) && isTaskProgressingState(task.state)) return phase;
+  if (phase && (task.total === 0 || isIndeterminatePhase(task)) && isTaskProgressingState(task.state)) return phase;
   if (task.total > 0 || task.state === "done") return `${taskProgressPercent(task)}%`;
   if (isTaskProgressingState(task.state) && task.scanEntries != null) {
     return tr("gui.task.scan_badge", "Scanning");
@@ -185,7 +193,7 @@ export function taskOverallProgressBadge(task: TaskDialogModel): string {
 }
 
 export function hasTaskCurrentProgress(task: TaskDialogModel): boolean {
-  return task.currentTotal > 0 && !isRestoringDirectories(task);
+  return task.currentTotal > 0 && !isIndeterminatePhase(task);
 }
 
 export function taskCurrentSectionVisible(task: TaskDialogModel): boolean {
@@ -215,6 +223,9 @@ export function taskProgressSummary(task: TaskDialogModel): string {
     return t("gui.task.progress_scan", { count: task.scanEntries });
   }
   const phase = isTaskActiveState(task.state) ? taskProgressPhaseLabel(task) : null;
+  if (isTaskActiveState(task.state) && task.phase === "archive_open") {
+    return tr("gui.task.archive_open_detail", "Reading archive information before processing its contents.");
+  }
   if (isRestoringDirectories(task)) {
     return tr("gui.task.extract_metadata_detail", "Restoring folder modification dates and permissions.");
   }
@@ -266,12 +277,16 @@ export function taskProgressSummary(task: TaskDialogModel): string {
 
 export function taskCurrentSectionLabel(task: TaskDialogModel): string {
   if (!isTaskActiveState(task.state)) return tr("gui.task.last_item", "Last item");
+  if (task.phase === "archive_open") return tr("gui.task.current_archive", "Current archive");
   if (isRestoringDirectories(task)) return tr("gui.task.current_folder", "Current folder");
   if (task.scanEntries != null) return tr("gui.task.current_input", "Current input");
   return tr("gui.task.current_file", "Current file");
 }
 
 export function taskCurrentLabel(task: TaskDialogModel): string {
+  if (!task.current && isTaskActiveState(task.state) && task.phase === "archive_open") {
+    return tr("gui.task.phase.archive_open", "Reading archive");
+  }
   return task.current || tr("gui.task.waiting_for_engine", "Preparing progress");
 }
 
@@ -308,6 +323,9 @@ export function taskCurrentProgressSummary(task: TaskDialogModel): string {
   }
   if (task.scanEntries != null) {
     return t("gui.task.current_scan_named", { name: taskCurrentLabel(task) });
+  }
+  if (task.phase === "archive_open") {
+    return tr("gui.task.phase.archive_open", "Reading archive");
   }
   if (!hasTaskCurrentProgress(task)) {
     if (task.current) {

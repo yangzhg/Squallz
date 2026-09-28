@@ -1269,6 +1269,7 @@ export function tasks(): Task[] {
 }
 
 type PreviewTaskKind =
+  | "archive_open"
   | "compress"
   | "compress_split"
   | "compress_sfx"
@@ -1293,6 +1294,8 @@ type PreviewTaskKind =
   | "update_commit";
 
 function previewPhase(kind: PreviewTaskKind): ProgressPhase | null {
+  if (kind === "archive_open") return "archive_open";
+  if (kind === "test") return "archive_test";
   if (kind === "extract_metadata" || kind === "batch_extract_metadata") return "extract_metadata";
   if (kind === "recovery_protect") return "recovery_finalize";
   if (isRecoveryCleanupPreview(kind)) return "recovery_finalize";
@@ -1398,7 +1401,7 @@ function previewTaskSpec(kind: PreviewTaskKind): JobSpec {
       recovery: `${sampleRoot}/product-backup.zip.par2`,
     };
   }
-  if (kind === "test") {
+  if (kind === "test" || kind === "archive_open") {
     return {
       kind: "test",
       path: `${sampleRoot}/product-backup.zip`,
@@ -1530,7 +1533,7 @@ function previewTaskResult(kind: PreviewTaskKind): Record<string, unknown> {
       },
     };
   }
-  if (kind === "test") {
+  if (kind === "test" || kind === "archive_open") {
     const problemMessages = Array.from(
       { length: 20 },
       (_, index) => `damaged/item-${String(index + 1).padStart(2, "0")}.bin: checksum mismatch`,
@@ -1637,13 +1640,23 @@ function previewRevealPath(kind: PreviewTaskKind): string | null {
   if (kind === "compress_split") return `${sampleOutputRoot}/product-backup.zip.001`;
   if (kind === "compress_sfx") return `${sampleOutputRoot}/Installer.app`;
   if (kind === "extract" || kind === "extract_unknown_current" || kind === "extract_metadata") return `${sampleOutputRoot}/product-backup`;
-  if (kind === "test") return null;
+  if (kind === "test" || kind === "archive_open") return null;
   if (kind === "checksum") return `${sampleRoot}/photos`;
   if (kind === "checksum_check") return `${sampleRoot}/photos/SHA256SUMS`;
   return `${sampleOutputRoot}/client-data`;
 }
 
 function previewProgress(kind: PreviewTaskKind, state: Extract<JobStateName, "done" | "running">) {
+  if (kind === "archive_open") {
+    return {
+      done: 0,
+      total: 0,
+      current: state === "done" ? "" : "product-backup.zip",
+      currentDone: 0,
+      currentTotal: 0,
+      speed: 0,
+    };
+  }
   if (kind === "extract_metadata" || kind === "batch_extract_metadata") {
     const batch = kind === "batch_extract_metadata";
     return {
@@ -1777,6 +1790,7 @@ function previewProgress(kind: PreviewTaskKind, state: Extract<JobStateName, "do
 }
 
 function previewTaskOffset(kind: PreviewTaskKind): number {
+  if (kind === "archive_open") return 23;
   if (kind === "extract_metadata") return 21;
   if (kind === "batch_extract_metadata") return 22;
   if (kind === "recovery_protect") return 17;

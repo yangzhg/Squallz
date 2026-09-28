@@ -89,8 +89,9 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use api::{
     ArchiveReader, ArchiveStructureStatus, ControlToken, CreateOptions, EntryMeta, EntryPath,
-    EntryType, ExtractOptions, FormatError, FormatInfo, FormatRegistry, OpenOptions, ProgressSink,
-    ReadSeek, SafetyLimits, TestSummary, UpdateOp, UpdateOptions, TEST_PROBLEM_PREVIEW_LIMIT,
+    EntryType, ExtractOptions, FormatError, FormatInfo, FormatRegistry, OpenOptions, ProgressPhase,
+    ProgressSink, ReadSeek, SafetyLimits, TestSummary, UpdateOp, UpdateOptions,
+    TEST_PROBLEM_PREVIEW_LIMIT,
 };
 use compound::{decompress_factory, SingleFileArchiveReader};
 use controlled_io::{controlled_result, ControlledReadSeek};
@@ -676,6 +677,34 @@ impl Engine {
             .map(|opened| opened.reader)
     }
 
+    pub(crate) fn open_for_operation(
+        &self,
+        path: &Path,
+        opts: &OpenOptions,
+        progress: &dyn ProgressSink,
+        control: &ControlToken,
+    ) -> Result<Box<dyn ArchiveReader>, FormatError> {
+        self.open_identified_for_operation(path, opts, progress, control)
+            .map(|opened| opened.reader)
+    }
+
+    fn open_identified_for_operation(
+        &self,
+        path: &Path,
+        opts: &OpenOptions,
+        progress: &dyn ProgressSink,
+        control: &ControlToken,
+    ) -> Result<OpenedArchive, FormatError> {
+        control.checkpoint()?;
+        progress.on_phase(ProgressPhase::ArchiveOpen, true);
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy())
+            .unwrap_or_default();
+        progress.on_progress(0, 0, &EntryPath::from_utf8(name));
+        self.open_identified_with_control(path, opts, control)
+    }
+
     /// Opens a previously verified single-file SFX through its retained file
     /// handle. The executable path is never reopened, and only a ZIP format
     /// implementation may accept the bounded payload stream.
@@ -906,7 +935,9 @@ impl Engine {
         progress: &dyn ProgressSink,
         ctl: &ControlToken,
     ) -> Result<(), FormatError> {
-        let mut reader = self.open_with_control(path, open_opts, ctl)?;
+        let mut reader = self.open_for_operation(path, open_opts, progress, ctl)?;
+        progress.on_phase(ProgressPhase::ExtractEntries, true);
+        ctl.checkpoint()?;
         controlled_result(
             ctl,
             reader.extract(dest, selection, extract_opts, progress, ctl),
@@ -926,7 +957,9 @@ impl Engine {
         progress: &dyn ProgressSink,
         ctl: &ControlToken,
     ) -> Result<api::ExtractReport, FormatError> {
-        let mut reader = self.open_with_control(path, open_opts, ctl)?;
+        let mut reader = self.open_for_operation(path, open_opts, progress, ctl)?;
+        progress.on_phase(ProgressPhase::ExtractEntries, true);
+        ctl.checkpoint()?;
         controlled_result(
             ctl,
             reader.extract_with_report(dest, selection, extract_opts, progress, ctl),
@@ -1151,7 +1184,7 @@ impl Engine {
         V: FnOnce(&ExtractPlan) -> Result<(), FormatError>,
     {
         ctl.checkpoint()?;
-        let mut opened = self.open_identified_with_control(archive, open_opts, ctl)?;
+        let mut opened = self.open_identified_for_operation(archive, open_opts, progress, ctl)?;
         let structure = opened.reader.structure_status();
         let source_before = expected_input_guard
             .map(|_| opened.inspect_source_state(archive, ctl))
@@ -1197,6 +1230,8 @@ impl Engine {
             }
         }
         drop(entries);
+        progress.on_phase(ProgressPhase::ExtractEntries, true);
+        ctl.checkpoint()?;
         let report = controlled_result(
             ctl,
             opened.reader.extract_with_report(
@@ -1233,8 +1268,10 @@ impl Engine {
         progress: &dyn ProgressSink,
         ctl: &ControlToken,
     ) -> Result<ArchiveTestOutcome, FormatError> {
-        let mut reader = self.open_with_control(path, opts, ctl)?;
+        let mut reader = self.open_for_operation(path, opts, progress, ctl)?;
         let structure = reader.structure_status();
+        progress.on_phase(ProgressPhase::ArchiveTest, true);
+        ctl.checkpoint()?;
         let mut summary = controlled_result(ctl, reader.test_summary(progress, ctl))?;
         let payload_problem_count = summary.problems.total;
         add_structure_problem_to_summary(&mut summary, structure);

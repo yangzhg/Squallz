@@ -134,15 +134,20 @@ impl CliProgress {
         let interruptible = state.interruptible;
         let recovery_phase = is_recovery_progress_phase(phase);
         let (done, total) = if (phase.is_some() && !interruptible && !recovery_phase)
-            || phase == Some(ProgressPhase::ExtractMetadata)
-        {
+            || matches!(
+                phase,
+                Some(ProgressPhase::ArchiveOpen | ProgressPhase::ExtractMetadata)
+            ) {
             (0, 0)
         } else {
             (done, total)
         };
         let finished = total > 0 && done >= total;
         if let Some(last) = state.last_draw {
-            if !finished && last.elapsed() < REDRAW_INTERVAL {
+            if !finished
+                && phase != Some(ProgressPhase::ArchiveOpen)
+                && last.elapsed() < REDRAW_INTERVAL
+            {
                 return;
             }
         }
@@ -300,7 +305,10 @@ fn render_progress_line(
     accent: AccentArg,
     snapshot: ProgressFrame<'_>,
 ) -> String {
-    let snapshot = if snapshot.phase == Some(ProgressPhase::ExtractMetadata) {
+    let snapshot = if matches!(
+        snapshot.phase,
+        Some(ProgressPhase::ArchiveOpen | ProgressPhase::ExtractMetadata)
+    ) {
         ProgressFrame {
             done: 0,
             total: 0,
@@ -843,6 +851,9 @@ fn modern_operator_cue(
     total: u64,
     explicit_phase: Option<ProgressPhase>,
 ) -> &'static str {
+    if explicit_phase == Some(ProgressPhase::ArchiveOpen) {
+        return "read archive information";
+    }
     if explicit_phase == Some(ProgressPhase::ExtractMetadata) {
         return "restore dates and permissions";
     }
@@ -907,6 +918,9 @@ fn modern_operator_cue(
 
 fn modern_explicit_phase_signal(phase: Option<ProgressPhase>) -> &'static str {
     match phase {
+        Some(ProgressPhase::ArchiveOpen) => "reading archive information",
+        Some(ProgressPhase::ArchiveTest) => "archive integrity · byte progress",
+        Some(ProgressPhase::ArchiveConvert) => "archive conversion · byte progress",
         Some(ProgressPhase::ExtractEntries) => "archive extraction · byte progress",
         Some(ProgressPhase::ExtractMetadata) => "folder dates and permissions",
         Some(
@@ -1022,7 +1036,7 @@ fn modern_phase_rail(
     explicit_phase: Option<ProgressPhase>,
 ) -> String {
     let stages: Vec<_> = match explicit_phase {
-        Some(phase) => explicit_phase_stages(phase).to_vec(),
+        Some(phase) => explicit_phase_stages(phase, operation).to_vec(),
         None => modern_phase_stages(operation, total).into_iter().collect(),
     };
     stages
@@ -1045,7 +1059,7 @@ fn modern_next_phase(
     explicit_phase: Option<ProgressPhase>,
 ) -> &'static str {
     let stages: Vec<_> = match explicit_phase {
-        Some(phase) => explicit_phase_stages(phase).to_vec(),
+        Some(phase) => explicit_phase_stages(phase, operation).to_vec(),
         None => modern_phase_stages(operation, total).into_iter().collect(),
     };
     if let Some(next) = stages
@@ -1064,8 +1078,10 @@ fn modern_next_phase(
     }
 }
 
-fn explicit_phase_stages(phase: ProgressPhase) -> &'static [&'static str] {
-    const EXTRACT_STAGES: &[&str] = &["EXTRACT", "FINALIZE"];
+fn explicit_phase_stages(phase: ProgressPhase, operation: &str) -> &'static [&'static str] {
+    const TEST_STAGES: &[&str] = &["OPEN", "TEST"];
+    const CONVERT_STAGES: &[&str] = &["OPEN", "CONVERT"];
+    const EXTRACT_STAGES: &[&str] = &["OPEN", "EXTRACT", "FINALIZE"];
     const RECOVERY_STAGES: &[&str] = &["PREPARE", "VERIFY", "PROCESS", "FINALIZE"];
     const SPLIT_OUTPUT_STAGES: &[&str] = &["SPLIT", "PUBLISH", "CLEANUP"];
     const OUTPUT_STAGES: &[&str] = &["RECOVER", "VERIFY", "PUBLISH", "CLEANUP"];
@@ -1073,6 +1089,13 @@ fn explicit_phase_stages(phase: ProgressPhase) -> &'static [&'static str] {
     const FALLBACK_STAGES: &[&str] = &["WORK"];
 
     match phase {
+        ProgressPhase::ArchiveOpen => match operation.trim().to_ascii_lowercase().as_str() {
+            "extract" => EXTRACT_STAGES,
+            "convert" | "export" | "repair" => CONVERT_STAGES,
+            _ => TEST_STAGES,
+        },
+        ProgressPhase::ArchiveTest => TEST_STAGES,
+        ProgressPhase::ArchiveConvert => CONVERT_STAGES,
         ProgressPhase::ExtractEntries | ProgressPhase::ExtractMetadata => EXTRACT_STAGES,
         ProgressPhase::RecoveryPrepare
         | ProgressPhase::RecoveryVerify
@@ -1094,6 +1117,9 @@ fn explicit_phase_stages(phase: ProgressPhase) -> &'static [&'static str] {
 
 fn progress_phase_label(phase: ProgressPhase) -> &'static str {
     match phase {
+        ProgressPhase::ArchiveOpen => "OPEN",
+        ProgressPhase::ArchiveTest => "TEST",
+        ProgressPhase::ArchiveConvert => "CONVERT",
         ProgressPhase::ExtractEntries => "EXTRACT",
         ProgressPhase::ExtractMetadata => "FINALIZE",
         ProgressPhase::RecoveryPrepare => "PREPARE",
@@ -1623,6 +1649,33 @@ mod tests {
             ),
             "write physical volume set"
         );
+    }
+
+    #[test]
+    fn archive_opening_is_indeterminate_and_resumes_entry_progress() {
+        for (operation, phase, label) in [
+            ("extract", ProgressPhase::ExtractEntries, "EXTRACT"),
+            ("test", ProgressPhase::ArchiveTest, "TEST"),
+            ("convert", ProgressPhase::ArchiveConvert, "CONVERT"),
+        ] {
+            let mut frame = progress_frame(operation, 100, 100, "backup.sqz", 64, 1, 0);
+            frame.phase = Some(ProgressPhase::ArchiveOpen);
+            for style in [OutputStyleArg::Classic, OutputStyleArg::Modern] {
+                let line = render_progress_line(style, false, AccentArg::Ocean, frame);
+                assert!(line.contains("OPEN"));
+                assert!(line.contains("backup.sqz"));
+                assert!(!line.contains("100%"));
+                assert!(!line.contains("/s"));
+                assert!(!line.contains("ETA 0s"));
+            }
+            assert_eq!(modern_next_phase(operation, "OPEN", 0, frame.phase), label);
+            frame.phase = Some(phase);
+            frame.done = 25;
+            let line =
+                render_progress_line(OutputStyleArg::Classic, false, AccentArg::Ocean, frame);
+            assert!(line.contains(label));
+            assert!(line.contains("25%"));
+        }
     }
 
     #[test]
