@@ -554,7 +554,8 @@ pub enum UpdateOp {
         /// Glob pattern
         pattern: String,
     },
-    /// Rename an entry
+    /// Rename a file or a directory and its complete subtree. Directory
+    /// sources may be implicit (only their descendants have archive entries).
     Rename {
         /// Old path
         from: EntryPath,

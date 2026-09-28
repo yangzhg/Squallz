@@ -3983,7 +3983,7 @@ fn checksum_check_job_reports_manifest_mismatch() {
 }
 
 #[test]
-fn update_job_creates_empty_directory_entry() {
+fn update_job_creates_directory_and_moves_a_subtree_into_it() {
     let dir = temp_dir("update-mkdir");
     let seed = dir.join("seed");
     std::fs::create_dir_all(&seed).unwrap();
@@ -4031,6 +4031,47 @@ fn update_job_creates_empty_directory_entry() {
         .map(|e| e.path.display)
         .collect();
     assert!(names.iter().any(|name| name == "new-folder/"));
+    let move_sink = Arc::new(TestSink::default());
+    let move_events: Arc<dyn EventSink> = move_sink.clone();
+    let move_id = manager.submit(
+        Arc::clone(&state),
+        Arc::clone(&move_events),
+        JobSpec::Update {
+            path: archive.to_string_lossy().into_owned(),
+            add: vec![],
+            delete: vec![],
+            mkdir: vec![],
+            excludes: vec![],
+            rename: vec![crate::dto::RenameSpec {
+                from: "seed/".into(),
+                to: "new-folder/seed/".into(),
+            }],
+            content_policy: squallz_core::CreateContentPolicy::KeepAllFiles,
+            password: None,
+            level: 5,
+        },
+        SettingsDto::default(),
+    );
+    manager.wait_idle();
+    assert_eq!(
+        states_of(&move_sink.events.lock().unwrap(), move_id),
+        vec!["queued", "running", "done"]
+    );
+    let names: Vec<_> = state
+        .engine
+        .list(&archive, &OpenOptions::default())
+        .unwrap()
+        .into_iter()
+        .map(|entry| entry.path.display)
+        .collect();
+    assert!(
+        names.iter().any(|name| name == "new-folder/seed/base.txt"),
+        "{names:?}"
+    );
+    assert!(
+        !names.iter().any(|name| name.starts_with("seed/")),
+        "{names:?}"
+    );
     std::fs::remove_dir_all(&dir).unwrap();
 }
 

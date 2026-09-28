@@ -7821,6 +7821,44 @@ fn update_add_delete_rename_through_the_cli() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+#[test]
+fn update_moves_and_renames_complete_directory_trees_through_the_cli() {
+    let dir = temp_dir("update-directory-cli");
+    let root = sample_tree(&dir);
+    let archive = dir.join("out.zip");
+    let created = run(sqz().arg("compress").arg(&root).arg("-o").arg(&archive));
+    assert!(created.status.success(), "{}", stderr(&created));
+    for arguments in [
+        vec!["--mkdir", "archive/"],
+        vec!["--move", "project/sub/=archive/sub/"],
+        vec!["--rename", "archive/=资料/"],
+    ] {
+        let out = run(sqz()
+            .arg("update")
+            .arg(&archive)
+            .args(arguments)
+            .arg("--json"));
+        assert!(out.status.success(), "{}", stderr(&out));
+    }
+    let out = run(sqz().arg("list").arg(&archive).arg("--json"));
+    assert!(out.status.success(), "{}", stderr(&out));
+    let entries: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
+    let paths: Vec<_> = entries
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry["path"].as_str().unwrap())
+        .collect();
+    assert!(paths.contains(&"资料/sub/b.txt"), "{paths:?}");
+    assert!(paths.contains(&"project/a.txt"), "{paths:?}");
+    assert!(!paths
+        .iter()
+        .any(|path| path.starts_with("project/sub/") || path.starts_with("archive/")));
+    let out = run(sqz().arg("test").arg(&archive).arg("--json"));
+    assert!(out.status.success(), "{}", stderr(&out));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 #[cfg(unix)]
 #[test]
 fn recovery_commands_bridge_to_external_par2_tool() {

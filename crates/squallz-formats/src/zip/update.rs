@@ -5,7 +5,7 @@
 //! entries stay encrypted without needing the password). Added files are
 //! compressed with the usual create options.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -19,6 +19,8 @@ use zip::ZipArchive;
 
 use super::error::map_zip_error;
 use super::writer::ZipArchiveWriter;
+
+mod plan;
 
 /// Extra bytes included in the early space estimate for central-directory
 /// growth and compression overhead on incompressible additions.
@@ -242,7 +244,6 @@ fn prepare_update<'a>(
         UpdateOp::Delete { pattern } => Some(pattern.as_str()),
         _ => None,
     }))?;
-    let renames = build_rename_map(ops);
     let raw_copy = RawCopyTracker::default();
     let source = RawCopySource {
         inner: source,
@@ -254,9 +255,7 @@ fn prepare_update<'a>(
         ZipArchive::new(source).map_err(|error| map_controlled_zip_error(error, ctl))?;
     ctl.checkpoint()?;
 
-    // Update targets must be deterministic: no missing rename sources, no
-    // accidental overwrite, and no duplicate targets in the same operation.
-    validate_update_plan(&mut archive, &deletes, &renames, additions, ctl)?;
+    let renames = plan::prepare(&mut archive, ops, &deletes, additions, ctl)?;
     Ok(PreparedRewrite {
         archive,
         raw_copy,
@@ -429,102 +428,6 @@ fn build_path_set<'a>(
         .build()
         .map_err(|e| FormatError::Other(format!("invalid glob pattern set: {e}")))?;
     Ok(Some(set))
-}
-
-/// Maps old entry names to new ones.
-fn build_rename_map(ops: &[UpdateOp]) -> HashMap<String, String> {
-    ops.iter()
-        .filter_map(|op| match op {
-            UpdateOp::Rename { from, to } => Some((from.display.clone(), to.display.clone())),
-            _ => None,
-        })
-        .collect()
-}
-
-/// Rejects update plans that would silently overwrite or duplicate entries.
-fn validate_update_plan<R: Read + Seek>(
-    archive: &mut ZipArchive<R>,
-    deletes: &Option<GlobSet>,
-    renames: &HashMap<String, String>,
-    additions: &impl AdditionSet,
-    ctl: &ControlToken,
-) -> Result<(), FormatError> {
-    ctl.checkpoint()?;
-    let mut names: Vec<(String, String)> = Vec::with_capacity(archive.len());
-    let mut exact_names = HashSet::with_capacity(archive.len());
-    let mut existing = HashSet::new();
-    for i in 0..archive.len() {
-        ctl.checkpoint()?;
-        let file = archive
-            .by_index_raw(i)
-            .map_err(|error| map_controlled_zip_error(error, ctl))?;
-        let name = String::from_utf8_lossy(file.name_raw()).into_owned();
-        let key = archive_key(&name);
-        existing.insert(key.clone());
-        exact_names.insert(name.clone());
-        names.push((name, key));
-    }
-    for from in renames.keys() {
-        ctl.checkpoint()?;
-        let from_key = archive_key(from);
-        let found = exact_names.contains(from) || existing.contains(&from_key);
-        if !found {
-            return Err(FormatError::Other(format!(
-                "rename source not found in archive: {from}"
-            )));
-        }
-    }
-    let mut removed = HashSet::new();
-    for (name, key) in &names {
-        ctl.checkpoint()?;
-        if deletes.as_ref().is_some_and(|set| set.is_match(key))
-            || renames.contains_key(name)
-            || renames.contains_key(key)
-        {
-            removed.insert(key.clone());
-        }
-    }
-    let mut produced = HashMap::new();
-    for target in renames.values() {
-        ctl.checkpoint()?;
-        validate_update_target(target, &existing, &removed, &mut produced)?;
-    }
-    for index in 0..additions.len() {
-        ctl.checkpoint()?;
-        let meta = addition_meta(additions, index)?;
-        validate_update_target(&meta.path.display, &existing, &removed, &mut produced)?;
-    }
-    ctl.checkpoint()?;
-    Ok(())
-}
-
-fn validate_update_target(
-    target: &str,
-    existing: &HashSet<String>,
-    removed: &HashSet<String>,
-    produced: &mut HashMap<String, String>,
-) -> Result<(), FormatError> {
-    let key = archive_key(target);
-    if key.is_empty() {
-        return Err(FormatError::Other(
-            "update target path cannot be empty".into(),
-        ));
-    }
-    if existing.contains(&key) && !removed.contains(&key) {
-        return Err(FormatError::Other(format!(
-            "update target already exists in archive: {target}"
-        )));
-    }
-    if let Some(previous) = produced.insert(key, target.to_string()) {
-        return Err(FormatError::Other(format!(
-            "duplicate update target in archive: {previous} and {target}"
-        )));
-    }
-    Ok(())
-}
-
-fn archive_key(name: &str) -> String {
-    name.trim_end_matches('/').to_string()
 }
 
 #[cfg(test)]

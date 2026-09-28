@@ -2,6 +2,7 @@
   import { tick } from "svelte";
   import Icon from "./Icon.svelte";
   import { cssVariables, type CssVariableMap } from "../lib/css-variables";
+  import { trapModalFocus } from "../lib/modal-focus";
   import type { TaskConflictDecision, TaskDialogModel } from "../lib/task-dialog";
   import {
     checksumItemStatus,
@@ -181,35 +182,8 @@
       : tr("gui.task.interaction.conflict_task_window", "Choose how to handle the file in the separate task window opened by your file manager.");
   }
 
-  function focusableElements(): HTMLElement[] {
-    if (!taskCard) return [];
-    return Array.from(
-      taskCard.querySelectorAll<HTMLElement>(
-        'button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [href], [tabindex]:not([tabindex="-1"])',
-      ),
-    ).filter((element) => !element.hasAttribute("hidden"));
-  }
-
   function onTaskCardKeydown(event: KeyboardEvent): void {
-    if (presentation !== "dialog" || event.key !== "Tab") return;
-    const focusable = focusableElements();
-    if (focusable.length === 0) {
-      event.preventDefault();
-      taskCard?.focus();
-      return;
-    }
-    const first = focusable[0];
-    const last = focusable[focusable.length - 1];
-    if (document.activeElement === taskCard) {
-      event.preventDefault();
-      (event.shiftKey ? last : first).focus();
-    } else if (event.shiftKey && document.activeElement === first) {
-      event.preventDefault();
-      last.focus();
-    } else if (!event.shiftKey && document.activeElement === last) {
-      event.preventDefault();
-      first.focus();
-    }
+    if (presentation === "dialog") trapModalFocus(event, taskCard);
   }
 
   $effect(() => {

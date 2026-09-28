@@ -58,16 +58,7 @@
         extractSelectedLabel: string;
         nestedPreview: boolean;
       };
-      workbench: {
-        renameTarget: string;
-        renameStatus: string;
-        moveTarget: string;
-        normalizedMoveTarget: string;
-        moveTargetPresets: readonly string[];
-        moveStatus: string;
-        newFolderName: string;
-        newFolderStatus: string;
-      };
+      selectedSummary: string;
       conflict: {
         count: number;
         readyCount: number;
@@ -110,12 +101,6 @@
     onPreviewSelection: () => void;
     onOpenNestedPreview: () => void;
     onExtractNestedPreview: () => void;
-    onRenameTargetChange: (value: string) => void;
-    onCommitRenameTarget: () => void;
-    onMoveTargetChange: (value: string) => void;
-    onCommitMoveTarget: (target?: string) => void;
-    onNewFolderChange: (value: string) => void;
-    onCommitNewFolder: () => void;
     onCancelMoveConflict: () => void;
     onSubmitMoveReadyOnly: () => void;
     onSubmitMoveKeepBoth: () => void;
@@ -160,12 +145,6 @@
     onPreviewSelection,
     onOpenNestedPreview,
     onExtractNestedPreview,
-    onRenameTargetChange,
-    onCommitRenameTarget,
-    onMoveTargetChange,
-    onCommitMoveTarget,
-    onNewFolderChange,
-    onCommitNewFolder,
     onCancelMoveConflict,
     onSubmitMoveReadyOnly,
     onSubmitMoveKeepBoth,
@@ -229,11 +208,9 @@
       <button class="primary large" title={view.actions.extractDestinationHint} onclick={onExtractAll}>
         <Icon name="archive" size={17} />{view.actions.extractAllLabel}
       </button>
-      {#if view.actions.hasSelection}
-        <button class="ghost large" title={view.actions.extractDestinationHint} onclick={onExtractSelection}>
-          <Icon name="archive" size={17} />{view.actions.extractSelectedLabel}
-        </button>
-      {/if}
+      <button class="ghost large" disabled={!view.actions.hasSelection} title={view.actions.extractDestinationHint} onclick={onExtractSelection}>
+        <Icon name="archive" size={17} />{view.actions.extractSelectedLabel}
+      </button>
       <button
         class="ghost large"
         disabled={view.archive.readOnly}
@@ -310,65 +287,10 @@
     </div>
   </div>
 
-  {#if view.actions.hasSelection}
-    <div class="workbench-strip">
-      <div class="update-safety-strip" aria-label={tr("gui.update.safety_summary", "Archive update safety summary")}>
-        <span><Icon name="check-circle" size={14} />{tr("gui.update.selection_scoped", "Selection-scoped updates")}</span>
-        <span><Icon name="list" size={14} />{tr("gui.update.target_review", "Review rename and move targets first")}</span>
-        <span><Icon name="archive" size={14} />{tr("gui.update.format_boundaries", "Write-capable formats only")}</span>
-      </div>
-      <label>
-        <span>{tr("gui.action.rename_target", "Rename target")}</span>
-        <input
-          aria-label={tr("gui.rename.target_name", "Rename target name")}
-          value={view.workbench.renameTarget}
-          disabled={!view.actions.canRenameSelection}
-          title={view.actions.canRenameSelection ? "" : tr("gui.precondition.select_one_file", "Select exactly one file")}
-          oninput={(event) => onRenameTargetChange(event.currentTarget.value)}
-          onblur={onCommitRenameTarget}
-        />
-      </label>
-      <label>
-        <span>{tr("gui.action.move_target", "Move target")}</span>
-        <input
-          aria-label={tr("gui.move.target_folder", "Move target folder")}
-          value={view.workbench.moveTarget}
-          disabled={view.archive.readOnly || !view.actions.hasSelection}
-          title={view.actions.moveDisabledReason}
-          oninput={(event) => onMoveTargetChange(event.currentTarget.value)}
-          onblur={() => onCommitMoveTarget()}
-        />
-      </label>
-      <small>{view.workbench.renameStatus}</small>
-      <div class="move-target-presets compact" aria-label={tr("gui.move.target_presets", "Move target presets")}>
-        {#each view.workbench.moveTargetPresets as target}
-          <button
-            class:active={view.workbench.normalizedMoveTarget === target}
-            disabled={view.archive.readOnly || !view.actions.hasSelection}
-            onclick={() => onCommitMoveTarget(target)}
-          >{target}</button>
-        {/each}
-      </div>
-      <small>{view.workbench.moveStatus}</small>
-      <label>
-        <span>{tr("gui.action.new_folder", "New folder")}</span>
-        <input
-          aria-label={tr("gui.new_folder.name", "New folder name")}
-          value={view.workbench.newFolderName}
-          disabled={view.archive.readOnly}
-          title={view.actions.mutationDisabledReason}
-          oninput={(event) => onNewFolderChange(event.currentTarget.value)}
-          onblur={onCommitNewFolder}
-        />
-      </label>
-      <small class="workbench-note">{view.workbench.newFolderStatus}</small>
-    </div>
-  {:else}
-    <div class="workbench-strip empty-workbench-strip">
-      <span>{tr("gui.selection.select_entries_hint", "Select entries to open, rename, move, or extract.")}</span>
-      <small>{tr("gui.preview.keyboard_hint", "Space or Return opens the focused item")}</small>
-    </div>
-  {/if}
+  <div class="workbench-strip empty-workbench-strip">
+    <span>{view.selectedSummary}</span>
+    <small>{tr("gui.preview.keyboard_hint", "Space or Return opens the focused item")}</small>
+  </div>
 
   {#if view.conflict}
     <div class="move-conflict-review" role="dialog" aria-label={tr("gui.move.conflicts", "Move target conflicts")} tabindex="-1">

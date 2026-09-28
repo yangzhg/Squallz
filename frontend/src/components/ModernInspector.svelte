@@ -57,13 +57,7 @@
         kind: "archive";
         preview: EntryPreviewView;
         canRename: boolean;
-        renameTarget: string;
-        renameStatus: string;
         canMove: boolean;
-        moveTarget: string;
-        normalizedMoveTarget: string;
-        moveTargetPresets: readonly string[];
-        moveStatus: string;
         archive: ArchiveSummaryView | null;
         openArchiveFirst: string;
         archiveActionDisabledReason: string;
@@ -82,10 +76,8 @@
     onOpenPreview: () => void;
     onRevealPreview: () => void;
     onPreviewSelection: () => void;
-    onRenameTargetChange: (value: string) => void;
-    onCommitRenameTarget: () => void;
-    onMoveTargetChange: (value: string) => void;
-    onCommitMoveTarget: (target?: string) => void;
+    onRenameSelection: () => void;
+    onMoveSelection: () => void;
     onOpenRecovery: () => void;
     onTestArchive: () => void;
     onCopyOutSelection: () => void;
@@ -107,10 +99,8 @@
     onOpenPreview,
     onRevealPreview,
     onPreviewSelection,
-    onRenameTargetChange,
-    onCommitRenameTarget,
-    onMoveTargetChange,
-    onCommitMoveTarget,
+    onRenameSelection,
+    onMoveSelection,
     onOpenRecovery,
     onTestArchive,
     onCopyOutSelection,
@@ -265,36 +255,12 @@
     {/if}
   </div>
 
-  {#if view.canRename}
-    <div class="inspector-block move-target-block">
-      <span class="block-label">{tr("gui.action.rename_target", "Rename target")}</span>
-      <input
-        class="move-target-input"
-        aria-label={tr("gui.rename.target_name", "Rename target name")}
-        value={view.renameTarget}
-        oninput={(event) => onRenameTargetChange(event.currentTarget.value)}
-        onblur={() => onCommitRenameTarget()}
-      />
-      <p>{view.renameStatus}</p>
-    </div>
-  {/if}
-
-  {#if view.canMove}
-    <div class="inspector-block move-target-block">
-      <span class="block-label">{tr("gui.action.move_target", "Move target")}</span>
-      <input
-        class="move-target-input"
-        aria-label={tr("gui.move.target_folder", "Move target folder")}
-        value={view.moveTarget}
-        oninput={(event) => onMoveTargetChange(event.currentTarget.value)}
-        onblur={() => onCommitMoveTarget()}
-      />
-      <div class="move-target-presets" aria-label={tr("gui.move.target_presets", "Move target presets")}>
-        {#each view.moveTargetPresets as target}
-          <button class:active={view.normalizedMoveTarget === target} onclick={() => onCommitMoveTarget(target)}>{target}</button>
-        {/each}
+  {#if view.canRename || view.canMove}
+    <div class="inspector-block">
+      <div class="inline-actions">
+        <button disabled={!view.canRename} onclick={onRenameSelection}>{tr("gui.action.rename_selected", "Rename selected")}</button>
+        <button disabled={!view.canMove} onclick={onMoveSelection}>{tr("gui.action.move_selected", "Move selected")}</button>
       </div>
-      <p>{view.moveStatus}</p>
     </div>
   {/if}
 

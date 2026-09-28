@@ -97,7 +97,7 @@ test("opening a context menu selects only an unselected target and preserves a s
   }
 });
 
-test("single-file rename rejects a mixed file-and-folder selection", async () => {
+test("single-entry rename accepts a file or folder but rejects mixed selections", async () => {
   await withArchive(async (archive) => {
     const folder = { ...rows[0], path: "folder/", display: "folder", entry_type: "dir", size: 0 };
     archive.installArchivePreview(info(rows.length + 1), [...rows, folder]);
@@ -113,9 +113,9 @@ test("single-file rename rejects a mixed file-and-folder selection", async () =>
     assert.equal(handlers.canRenameSelection(), false);
     await handlers.submitRenameSelectedJob();
     assert.deepEqual(submitted, []);
-    assert.deepEqual(notices, ["Select exactly one file entry before renaming"]);
+    assert.deepEqual(notices, ["Select exactly one file or folder before renaming"]);
     archive.selectRow(folder, rows.length);
-    assert.equal(handlers.canRenameSelection(), false);
+    assert.equal(handlers.canRenameSelection(), true);
     archive.clearSelection();
     assert.equal(handlers.canRenameSelection(), false);
   });

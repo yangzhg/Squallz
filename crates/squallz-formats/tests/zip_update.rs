@@ -1192,6 +1192,178 @@ fn update_rename_entry() {
 }
 
 #[test]
+fn update_rename_directory_moves_its_complete_subtree() {
+    for source in ["project/sub", "project/sub/"] {
+        let tmp = TempDir::new("update-rename-directory");
+        let archive = base_archive(tmp.path(), None);
+        run_update(
+            &archive,
+            &[UpdateOp::Rename {
+                from: EntryPath::from_utf8(source),
+                to: EntryPath::from_utf8("整理/资料/"),
+            }],
+            &CreateOptions::default(),
+        )
+        .unwrap();
+        let names = list_names(&archive, None);
+        assert!(names.contains(&"整理/资料/b.txt".into()), "{names:?}");
+        assert!(names.contains(&"整理/资料/".into()), "{names:?}");
+        assert!(!names.iter().any(|name| name.starts_with("project/sub")));
+        assert!(names.contains(&"project/a.txt".into()));
+        let mut reader = engine().open(&archive, &OpenOptions::default()).unwrap();
+        let mut data = Vec::new();
+        std::io::Read::read_to_end(
+            &mut reader
+                .read_entry(&EntryPath::from_utf8("整理/资料/b.txt"))
+                .unwrap(),
+            &mut data,
+        )
+        .unwrap();
+        assert_eq!(data, b"bravo");
+        assert_unzip_t(&archive);
+    }
+}
+
+#[test]
+fn update_rename_implicit_directory_preserves_unrelated_prefixes() {
+    use std::io::Write;
+    let tmp = TempDir::new("update-rename-implicit-directory");
+    let archive = tmp.path().join("implicit.zip");
+    let mut writer = zip::ZipWriter::new(fs::File::create(&archive).unwrap());
+    for name in ["docs/a.txt", "docs/nested/b.txt", "docs-old/keep.txt"] {
+        writer
+            .start_file(name, zip::write::SimpleFileOptions::default())
+            .unwrap();
+        writer.write_all(name.as_bytes()).unwrap();
+    }
+    writer.finish().unwrap();
+    run_update(
+        &archive,
+        &[UpdateOp::Rename {
+            from: EntryPath::from_utf8("docs/"),
+            to: EntryPath::from_utf8("archive/notes/"),
+        }],
+        &CreateOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        list_names(&archive, None),
+        [
+            "archive/notes/a.txt",
+            "archive/notes/nested/b.txt",
+            "docs-old/keep.txt"
+        ]
+    );
+    assert_unzip_t(&archive);
+}
+
+#[test]
+fn update_directory_rename_rejects_unsafe_or_ambiguous_plans_atomically() {
+    let tmp = TempDir::new("update-directory-conflicts");
+    let archive = base_archive(tmp.path(), None);
+    let before = fs::read(&archive).unwrap();
+    let cases = [
+        vec![("project/sub/", "project/sub/child/")],
+        vec![("project/sub/", "project/")],
+        vec![("project/sub/", "project/a.txt/child/")],
+        vec![("project/sub/", "../outside/")],
+        vec![("project/sub/", "/outside/")],
+        vec![("project/sub/", "C:\\outside\\")],
+        vec![("project/sub/", "")],
+        vec![("project/sub/", "project/sub/")],
+        vec![("project/a.txt", "directory/")],
+        vec![("project/sub/", "one/"), ("project/sub/", "two/")],
+        vec![("project/", "one/"), ("project/sub/", "two/")],
+        vec![("project/a.txt", "same.txt"), ("project/c.log", "same.txt")],
+    ];
+    for case in cases {
+        let ops: Vec<_> = case
+            .iter()
+            .map(|(from, to)| UpdateOp::Rename {
+                from: EntryPath::from_utf8(*from),
+                to: EntryPath::from_utf8(*to),
+            })
+            .collect();
+        assert!(
+            run_update(&archive, &ops, &CreateOptions::default()).is_err(),
+            "{case:?}"
+        );
+        assert_eq!(fs::read(&archive).unwrap(), before, "{case:?}");
+        assert_no_update_temp(tmp.path());
+    }
+}
+
+#[test]
+fn update_implicit_directory_targets_do_not_merge_unrelated_trees() {
+    use std::io::Write;
+    let tmp = TempDir::new("update-implicit-conflicts");
+    let archive = tmp.path().join("implicit.zip");
+    let mut writer = zip::ZipWriter::new(fs::File::create(&archive).unwrap());
+    for name in ["docs/a.txt", "other/b.txt"] {
+        writer
+            .start_file(name, zip::write::SimpleFileOptions::default())
+            .unwrap();
+        writer.write_all(b"content").unwrap();
+    }
+    writer.finish().unwrap();
+    let before = fs::read(&archive).unwrap();
+    for mappings in [
+        vec![("docs/", "other/")],
+        vec![("docs/", "target/"), ("other/", "target/")],
+    ] {
+        let ops: Vec<_> = mappings
+            .iter()
+            .map(|(from, to)| UpdateOp::Rename {
+                from: EntryPath::from_utf8(*from),
+                to: EntryPath::from_utf8(*to),
+            })
+            .collect();
+        assert!(run_update(&archive, &ops, &CreateOptions::default()).is_err());
+        assert_eq!(fs::read(&archive).unwrap(), before);
+    }
+}
+
+#[test]
+fn update_encrypted_directory_rename_preserves_payloads_without_a_password() {
+    let tmp = TempDir::new("update-encrypted-directory");
+    let archive = base_archive(tmp.path(), Some("directory-test-password"));
+    run_update(
+        &archive,
+        &[UpdateOp::Rename {
+            from: EntryPath::from_utf8("project/"),
+            to: EntryPath::from_utf8("资料/"),
+        }],
+        &CreateOptions::default(),
+    )
+    .unwrap();
+    let options = OpenOptions {
+        password: Some(Password::new("directory-test-password")),
+        encoding_override: None,
+    };
+    let entries = engine().list(&archive, &options).unwrap();
+    assert!(entries
+        .iter()
+        .filter(|entry| entry.size > 0)
+        .all(|entry| entry.encrypted));
+    let mut reader = engine().open(&archive, &options).unwrap();
+    for (name, expected) in [
+        ("资料/a.txt", b"alpha".as_slice()),
+        ("资料/sub/b.txt", b"bravo".as_slice()),
+    ] {
+        let mut data = Vec::new();
+        std::io::Read::read_to_end(
+            &mut reader.read_entry(&EntryPath::from_utf8(name)).unwrap(),
+            &mut data,
+        )
+        .unwrap();
+        assert_eq!(data, expected);
+    }
+    assert!(!list_names(&archive, Some("directory-test-password"))
+        .iter()
+        .any(|name| name.starts_with("project/")));
+}
+
+#[test]
 fn update_rejects_target_conflicts_without_explicit_delete() {
     let tmp = TempDir::new("update-conflicts");
     let archive = base_archive(tmp.path(), None);
