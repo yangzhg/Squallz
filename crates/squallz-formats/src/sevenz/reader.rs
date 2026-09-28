@@ -584,7 +584,7 @@ impl ArchiveReader for SevenZArchiveReader {
             return Err(e);
         }
         backend_result.map_err(map_7z_error)?;
-        Ok(sink.finish_with_report(progress))
+        sink.finish_with_report(progress, ctl)
     }
 
     fn test_summary(

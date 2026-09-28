@@ -4023,8 +4023,11 @@ dependencies = [
 name = "squallz-format-api"
 version = "0.2.0"
 dependencies = [
+ "rustix",
  "serde",
  "thiserror 2.0.18",
+ "winapi-util",
+ "windows-sys 0.61.2",
  "zeroize",
 ]
 

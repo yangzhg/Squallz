@@ -40,7 +40,7 @@
 | rpassword | 7.5.4 | Apache-2.0 | 活跃（conradkleinespel） | TTY 密码交互输入 |
 | ctrlc | 3.5.2 | MIT OR Apache-2.0 | 活跃（Detegr） | Ctrl-C → ControlToken.cancel() |
 | tokio | 1.52.3 | MIT | 活跃（Tokio 官方） | `squallz-cli` 直接依赖：用 current-thread runtime 执行共享的 `sqz check-update` 异步请求，并在等待期间响应 ControlToken / Ctrl-C 取消；不启动后台更新任务 |
-| winapi-util | 0.1.11 | Unlicense OR MIT | 活跃（BurntSushi） | Windows 目录和文件的卷序列号、文件 ID 查询，用于分卷工作空间及 RAR 邻卷路径绑定 |
+| winapi-util | 0.1.11 | Unlicense OR MIT | 活跃（BurntSushi） | Windows 目录和文件的卷序列号、文件 ID 查询，用于分卷工作空间、RAR 邻卷路径绑定及共享解压目录元数据恢复 |
 | libc | 0.2.186 | MIT OR Apache-2.0 | 活跃（rust-lang） | macOS 目标卷大小写语义查询（squallz-core） |
 
 ## 关键传递依赖
@@ -98,8 +98,8 @@ NUL 结尾路径副本，系统调用不保留指针，未知结果保守按不�
 | 依赖 | 版本（锁定） | 许可证 | 维护状态 | 用途 |
 | ---- | ---- | ---- | ---- | ---- |
 | fs4 | 1.1.0 | MIT OR Apache-2.0 | 活跃（al8n，fs2 的维护继任 fork，rustix 后端无 libc） | 磁盘剩余空间预检（squallz-core 分卷切割、squallz-formats ZIP update） |
-| rustix | 1.1.4 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | 活跃（Bytecode Alliance） | macOS、Apple 平台与 Linux 上的内核原子 no-replace rename；RAR 邻卷 no-follow/non-blocking 打开 |
-| windows-sys | 0.61.2 | MIT OR Apache-2.0 | 活跃（Microsoft windows-rs） | Windows `MoveFileExW` 原子 no-replace 移动；flags 固定为 0，不启用覆盖或跨卷复制 |
+| rustix | 1.1.4 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | 活跃（Bytecode Alliance） | macOS、Apple 平台与 Linux 上的内核原子 no-replace rename；RAR 邻卷 no-follow/non-blocking 打开；共享解压通过 no-follow 目录句柄恢复元数据 |
+| windows-sys | 0.61.2 | MIT OR Apache-2.0 | 活跃（Microsoft windows-rs） | Windows `MoveFileExW` 原子 no-replace 移动；flags 固定为 0，不启用覆盖或跨卷复制；共享解压目录句柄的访问、共享及 reparse-point 标志 |
 
 注：globset（已登记）同时作为 squallz-formats 的直接依赖
 （ZIP update 的 --delete glob 匹配），版本与许可证不变。

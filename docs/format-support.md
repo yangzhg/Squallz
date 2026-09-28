@@ -145,12 +145,37 @@ where signed 32-bit seconds can represent it. Dates outside 1980–2107 retain U
 metadata when an extra field can represent them; their DOS field uses the format
 default. Zero NTFS timestamps mean unknown. Raw-copy
 updates and renames retain NTFS and Info-ZIP modification times. Central-directory
-recovery currently does not restore timestamps from local headers. These rules
-describe archive metadata; the shared extraction sink does not yet restore output
-modification times.
+recovery currently does not restore timestamps from local headers.
 
 References: [PKWARE APPNOTE, sections 4.4.6 and 4.5.5](https://pkware.cachefly.net/webdocs/casestudies/APPNOTE.TXT)
 and [Info-ZIP extra-field specification](https://libzip.org/specifications/extrafld.txt).
+
+## Extracted metadata
+
+The shared extraction sink restores known modification times for regular files
+and explicit directory entries. Precision and representable dates depend on the
+archive format and destination filesystem. Missing timestamps are left to the
+filesystem. Files receive their metadata through the open staging handle before
+publication. Failed reads or cancellation before a file is committed leave its
+existing target unchanged, as do skipped conflicts. A timestamp-setting failure
+is an extraction error, including in best-effort mode; previously completed
+entries can remain on disk.
+
+Directories receive timestamps and optional Unix permissions after their
+descendants finish, deepest first. This allows read-only archived directories to
+receive their contents. Names that resolve to the same physical directory use
+the last selected directory entry's metadata. Restoration uses bound directory
+handles, rejects symlinks/reparse points and verifies the original directory identity. Directory
+handles require read/search access; a directory that cannot be safely reopened
+causes extraction to fail. Cancellation or failure before finalization can leave
+directory metadata unrestored. Permission restoration retains its best-effort
+policy and can be disabled independently of modification-time restoration.
+
+Hard links share the extracted target's timestamp. When materialized as copies,
+hard links retain the target entry's timestamp and followed symbolic links use
+their own known timestamp, falling back to the target's. Preserved symbolic links
+do not yet restore link timestamps and never set the target's timestamp. This
+does not restore ownership, ACLs, extended attributes, creation or access times.
 
 ## Cross-Platform Route
 

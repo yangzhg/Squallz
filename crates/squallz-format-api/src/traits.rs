@@ -56,7 +56,7 @@ impl ArchiveStructureStatus {
 /// The engine captures this from the open file handle before a format uses
 /// the path to discover sibling files. Path-aware formats compare it with a
 /// no-follow open of the current directory entry before trusting that hint.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub struct PhysicalFileIdentity {
     filesystem: u64,
     file: u64,

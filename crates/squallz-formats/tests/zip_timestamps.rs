@@ -11,7 +11,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use common::{command_exists, engine, TempDir};
 use squallz_format_api::{
     ControlToken, CreateOptions, Detected, EntryMeta, EntryPath, EntrySelection, EntryType,
-    NoProgress, OpenOptions, UpdateOp, UpdateOptions,
+    ExtractOptions, NoProgress, OpenOptions, UpdateOp, UpdateOptions,
 };
 use zip::write::FullFileOptions;
 
@@ -231,6 +231,27 @@ fn interop_infozip_and_unzip_preserve_modification_instant() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(read_time(&archive), Some(expected));
+
+    let extracted = tmp.path().join("squallz-extracted");
+    engine()
+        .extract(
+            &archive,
+            &extracted,
+            None,
+            &OpenOptions::default(),
+            &ExtractOptions::default(),
+            &NoProgress,
+            &ControlToken::default(),
+        )
+        .unwrap();
+    assert_eq!(fs::read(extracted.join("report.txt")).unwrap(), b"payload");
+    assert_eq!(
+        fs::metadata(extracted.join("report.txt"))
+            .unwrap()
+            .modified()
+            .unwrap(),
+        expected
+    );
 
     let ours = tmp.path().join("ours.zip");
     engine()

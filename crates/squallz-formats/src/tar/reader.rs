@@ -360,7 +360,7 @@ impl ArchiveReader for TarArchiveReader {
             }
         }
         self.validate_stream_end(ctl)?;
-        Ok(sink.finish_with_report(progress))
+        sink.finish_with_report(progress, ctl)
     }
 
     fn test_summary(
