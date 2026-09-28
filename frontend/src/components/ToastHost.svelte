@@ -22,6 +22,15 @@
   } = $props();
 
   let runningActionIds = $state<number[]>([]);
+  let host = $state<HTMLElement | null>(null);
+  let leadingToastId: number | undefined;
+
+  $effect(() => {
+    const leading = toasts()[0];
+    if (!host || leading?.id === leadingToastId) return;
+    leadingToastId = leading?.id;
+    if (leading?.kind === "danger" || leading?.kind === "warning") host.scrollTop = 0;
+  });
 
   function toastIcon(kind: ToastKind): string {
     if (kind === "success") return "check-circle";
@@ -49,6 +58,7 @@
 
 {#if toasts().length > 0}
   <section
+    bind:this={host}
     class={`toast-host ${rootClass}`}
     use:cssVariables={rootVariables}
     aria-label={tFallback("gui.toast.notifications", "Notifications")}

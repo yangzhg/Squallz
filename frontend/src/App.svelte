@@ -12255,6 +12255,10 @@
     return taskDialogVisible() || macosSfxPublisherTask !== null || archiveEditKind !== null;
   }
 
+  function taskCenterVisible(): boolean {
+    return !taskWindowMode && taskCenterOpen && !blockingModalVisible() && !modeSelectionBlocked;
+  }
+
   function loadMacosSfxPublisher(): Promise<MacosSfxPublisherComponentType> {
     macosSfxPublisherLoad ??= import("./components/MacosSfxPublisher.svelte")
       .then((module) => module.default)
@@ -13553,13 +13557,40 @@
   }
 </script>
 
-{#if !modeSelectionBlocked}
-  <ToastHost
-    rootClass={`themed-root palette-${activePalette} theme-${activeTheme}`}
-    rootVariables={customPaletteVariables()}
-    blocked={blockingModalVisible()}
-  />
-{/if}
+<div class:task-center-layout={taskCenterVisible()}>
+  {#if !modeSelectionBlocked}
+    <ToastHost
+      rootClass={`themed-root palette-${activePalette} theme-${activeTheme}`}
+      rootVariables={customPaletteVariables()}
+      blocked={blockingModalVisible()}
+    />
+  {/if}
+
+  {#if taskCenterVisible()}
+    {@const selectedTask = taskCenterSelectedTask()}
+    {#if selectedTask}
+      <TaskProgressDialogHost
+        surface={taskCenterDetailSurface(selectedTask)}
+        loadingTitle={tr("gui.task_surface.loading", "Loading task view")}
+        loadingBody={tr("gui.task_surface.loading_body", "Preparing live progress, results, and task controls.")}
+        failureTitle={tr("gui.task_surface.load_failed", "Task view could not be loaded")}
+        failureBody={tr("gui.task_surface.load_failed_body", "The task is still safe. Retry loading its progress and controls.")}
+        retryLabel={tr("gui.task_surface.retry", "Retry view")}
+        backLabel={tr("gui.task.back_to_tasks", "Back to tasks")}
+      />
+    {:else}
+      <TaskCenterHost
+        surface={taskCenterSurface()}
+        loadingTitle={tr("gui.task_surface.center_loading", "Loading task center")}
+        loadingBody={tr("gui.task_surface.center_loading_body", "Preparing recent tasks and the shared queue.")}
+        failureTitle={tr("gui.task_surface.center_load_failed", "Task center could not be loaded")}
+        failureBody={tr("gui.task_surface.center_load_failed_body", "Your tasks are unchanged. Retry loading the task center.")}
+        retryLabel={tr("gui.task_surface.retry", "Retry view")}
+        closeLabel={tr("gui.task_center.close", "Close task center")}
+      />
+    {/if}
+  {/if}
+</div>
 
 {#if appNotice && (!firstRunRequired || taskWindowMode)}
   <div
@@ -13601,31 +13632,6 @@
   {@const task = taskDialogTask()}
   {#if task}
     {@render taskProgressSurface(task)}
-  {/if}
-{/if}
-
-{#if !taskWindowMode && taskCenterOpen && !blockingModalVisible() && !modeSelectionBlocked}
-  {@const selectedTask = taskCenterSelectedTask()}
-  {#if selectedTask}
-    <TaskProgressDialogHost
-      surface={taskCenterDetailSurface(selectedTask)}
-      loadingTitle={tr("gui.task_surface.loading", "Loading task view")}
-      loadingBody={tr("gui.task_surface.loading_body", "Preparing live progress, results, and task controls.")}
-      failureTitle={tr("gui.task_surface.load_failed", "Task view could not be loaded")}
-      failureBody={tr("gui.task_surface.load_failed_body", "The task is still safe. Retry loading its progress and controls.")}
-      retryLabel={tr("gui.task_surface.retry", "Retry view")}
-      backLabel={tr("gui.task.back_to_tasks", "Back to tasks")}
-    />
-  {:else}
-    <TaskCenterHost
-      surface={taskCenterSurface()}
-      loadingTitle={tr("gui.task_surface.center_loading", "Loading task center")}
-      loadingBody={tr("gui.task_surface.center_loading_body", "Preparing recent tasks and the shared queue.")}
-      failureTitle={tr("gui.task_surface.center_load_failed", "Task center could not be loaded")}
-      failureBody={tr("gui.task_surface.center_load_failed_body", "Your tasks are unchanged. Retry loading the task center.")}
-      retryLabel={tr("gui.task_surface.retry", "Retry view")}
-      closeLabel={tr("gui.task_center.close", "Close task center")}
-    />
   {/if}
 {/if}
 

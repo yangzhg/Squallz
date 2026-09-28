@@ -1,4 +1,4 @@
-// Toast store: max 3 on screen, overflow queues. Actionable toasts and danger
+// Toast store: max 3 on screen, ordered by urgency; overflow queues. Actionable toasts and danger
 // stay until dismissed; other info/success toasts last 4 s and warnings 6 s.
 
 export type ToastKind = "info" | "success" | "warning" | "danger";
@@ -89,7 +89,9 @@ function enqueue(toast: Toast): void {
 }
 
 function show(toast: Toast): void {
-  store.visible.push(toast);
+  const nextLower = store.visible.findIndex((visible) => priority(visible.kind) < priority(toast.kind));
+  if (nextLower < 0) store.visible.push(toast);
+  else store.visible.splice(nextLower, 0, toast);
   const ms = toast.action || toast.persistent ? 0 : DURATION[toast.kind];
   if (ms > 0) {
     timers.set(toast.id, setTimeout(() => dismissToast(toast.id), ms));

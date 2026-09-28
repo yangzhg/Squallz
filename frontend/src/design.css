@@ -263,6 +263,7 @@
   --toast-fg: #ffffff;
   --toast-border: transparent;
   --toast-host-width: 390px;
+  --task-center-notification-max-height: min(25vh, 220px);
   --toast-window-controls-safe-height: var(--classic-titlebar-narrow-height);
   --toast-host-top: calc(var(--toast-window-controls-safe-height) + var(--space-sm));
   --toast-backdrop-blur: 18px;
@@ -2277,8 +2278,7 @@ select option {
   align-self: center;
 }
 
-.task-center-panel,
-.task-center-detail {
+.task-center-layout {
   position: fixed;
   z-index: var(--layer-task-center);
   top: var(--task-center-top);
@@ -2287,6 +2287,29 @@ select option {
   width: min(var(--task-center-width), calc(100vw - (var(--task-center-edge) * 2)));
   height: calc(100vh - var(--task-center-top) - var(--task-center-edge));
   min-height: 0;
+  display: grid;
+  grid-template-rows: minmax(0, auto) minmax(0, 1fr);
+}
+
+.task-center-layout:has(> .toast-host) {
+  gap: var(--space-sm);
+}
+
+.task-center-layout > .toast-host {
+  position: static;
+  grid-row: 1;
+  width: 100%;
+  min-height: 0;
+  max-width: none;
+  max-height: var(--task-center-notification-max-height);
+  overscroll-behavior: contain;
+}
+
+.task-center-panel,
+.task-center-detail {
+  grid-row: 2;
+  min-height: 0;
+  min-width: 0;
   overflow: hidden;
   border: var(--border-width-control) solid var(--color-border-default);
   border-radius: var(--radius-panel);
@@ -13074,8 +13097,7 @@ select.classic-input:focus {
 }
 
 @media (max-height: 560px) {
-  .task-center-panel,
-  .task-center-detail {
+  .task-center-layout {
     --task-center-top: var(--task-center-edge);
   }
 }
@@ -13278,8 +13300,7 @@ select.classic-input:focus {
     min-width: 0;
   }
 
-  .task-center-panel,
-  .task-center-detail {
+  .task-center-layout {
     --task-center-top: var(--task-center-narrow-top);
     right: var(--space-sm);
     bottom: var(--space-sm);
@@ -14881,8 +14902,7 @@ select.classic-input:focus {
 }
 
 @media (max-width: 620px) and (max-height: 560px) {
-  .task-center-panel,
-  .task-center-detail {
+  .task-center-layout {
     --task-center-top: var(--task-center-edge);
   }
 }

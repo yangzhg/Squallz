@@ -34,7 +34,7 @@ test("actionable toasts stay visible while timed toasts and the queue keep worki
 
       assert.deepEqual(
         Array.from(toasts(), (toast) => toast.title),
-        ["actionable", "danger", "timed info"],
+        ["danger", "actionable", "timed info"],
       );
       assert.deepEqual(
         timers.map((timer) => timer.delay),
@@ -47,7 +47,7 @@ test("actionable toasts stay visible while timed toasts and the queue keep worki
 
       assert.deepEqual(
         Array.from(toasts(), (toast) => toast.title),
-        ["actionable", "danger", "queued warning"],
+        ["danger", "queued warning", "actionable"],
       );
       assert.deepEqual(
         timers.map((timer) => timer.delay),
@@ -58,7 +58,7 @@ test("actionable toasts stay visible while timed toasts and the queue keep worki
       infoTimer.callback();
       assert.deepEqual(
         Array.from(toasts(), (toast) => toast.title),
-        ["actionable", "danger", "queued warning"],
+        ["danger", "queued warning", "actionable"],
       );
       assert.deepEqual(
         timers.map((timer) => timer.delay),
@@ -97,7 +97,7 @@ test("actionable toasts stay visible while timed toasts and the queue keep worki
 
       assert.deepEqual(
         Array.from(toasts(), (toast) => toast.title),
-        ["second persistent result", "third persistent result", "urgent recovery"],
+        ["urgent recovery", "second persistent result", "third persistent result"],
       );
 
       const urgent = toasts().find((toast) => toast.title === "urgent recovery");
