@@ -60,6 +60,7 @@
     allRowsLoaded,
     archive,
     archiveBrowseError,
+    archiveRefreshStatus,
     archiveOpenError,
     archiveHasSessionPassword,
     archivePasswordBookStatus,
@@ -1835,7 +1836,9 @@
         !refreshedUpdateJobs.has(task.id)
       ) {
         refreshedUpdateJobs.add(task.id);
-        void refreshCurrentArchive().then((ok) => {
+        void refreshCurrentArchive(() => browseVirtualWindow(
+          mode === "classic" ? CLASSIC_ROW_HEIGHT : MODERN_ROW_HEIGHT,
+        )).then((ok) => {
           if (ok) showNotice(tr("gui.archive.list_refreshed", "Archive list refreshed"));
         });
       }
@@ -4388,7 +4391,6 @@
           format: archiveFormat(),
           summary: archiveSummary(),
           dirs: archiveDirs,
-          readOnly: archive.read_only,
           canGoUp: canGoUpArchive(),
         },
         actions: {
@@ -5483,6 +5485,8 @@
   }
 
   function archiveFilterStatus(): string {
+    const refreshStatus = archiveRefreshStatusLabel();
+    if (refreshStatus) return refreshStatus;
     if (archiveBrowseError()) {
       return filterText().trim()
         ? tr("gui.list.search_failed", "Search could not be completed")
@@ -6150,7 +6154,10 @@
     if (!currentArchive) return { start: 0, end: total, top: 0, bottom: 0 };
     const viewport = Math.max(browseViewportHeight || 360, rowHeight * 6);
     const visibleRows = Math.ceil(viewport / rowHeight);
-    const rawStart = Math.floor(browseScrollTop / rowHeight);
+    const rawStart = Math.min(
+      Math.floor(browseScrollTop / rowHeight),
+      Math.max(0, total - visibleRows),
+    );
     const start = Math.max(0, rawStart - VIRTUAL_OVERSCAN_ROWS);
     const end = Math.min(total, start + visibleRows + VIRTUAL_OVERSCAN_ROWS * 2);
     return {
@@ -6397,7 +6404,7 @@
     return {
       checked,
       mixed,
-      disabled: total === 0 || filterPending() || archiveSelectionProgress !== null,
+      disabled: total === 0 || filterPending() || Boolean(busyLabel),
       label,
       busy: Boolean(busyLabel),
       busyLabel,
@@ -6413,7 +6420,14 @@
   function archiveSelectionBusyReason(): string {
     return archiveSelectionProgress
       ? selectionProgressLabel(archiveSelectionProgress.loaded, archiveSelectionProgress.total)
-      : "";
+      : archiveRefreshStatusLabel();
+  }
+
+  function archiveRefreshStatusLabel(): string {
+    const status = archiveRefreshStatus();
+    if (status === "refreshing") return tr("gui.archive.refreshing", "Refreshing archive contents…");
+    if (status === "error") return tr("gui.archive.refresh_failed", "Could not refresh the archive. Retry to see the latest files.");
+    return "";
   }
 
   function blockSelectionScopedAction(): boolean {
@@ -6517,6 +6531,7 @@
       await openArchiveDirectoryEntry(entry.source.path);
       return;
     }
+    if (blockSelectionScopedAction()) return;
     if (archiveLikePath(entry.source.path) && currentArchive) {
       await openNestedArchiveEntry(
         currentArchive.source,
@@ -7959,7 +7974,7 @@
   }
 
   function selectedJobPaths(): string[] | null {
-    if (archiveSelectionProgress) return null;
+    if (archiveSelectionBusyReason()) return null;
     const selected = [...selectedPaths()];
     return selected.length > 0 ? selected : null;
   }
@@ -7970,13 +7985,15 @@
 
   function archiveMutationDisabledReason(): string {
     if (!currentArchive) return openArchiveFirstLabel();
+    const refreshing = archiveRefreshStatusLabel();
+    if (refreshing) return refreshing;
     return currentArchive.read_only
       ? tr("gui.archive.nested_read_only", "Nested archives are read-only. Extract or convert to save changes.")
       : "";
   }
 
   function hasArchiveSelection(): boolean {
-    return hasArchiveOpen() && !archiveSelectionProgress && selectedPaths().size > 0;
+    return hasArchiveOpen() && !archiveSelectionBusyReason() && selectedPaths().size > 0;
   }
 
   function canRenameSelection(): boolean {
@@ -8057,7 +8074,7 @@
   }
 
   function canPreviewEntrySelection(): boolean {
-    return !archiveSelectionProgress && selectedPreviewPolicy().kind !== "none" && !previewBusy();
+    return !archiveSelectionBusyReason() && selectedPreviewPolicy().kind !== "none" && !previewBusy();
   }
 
   function renameSelectedDisabledReason(): string {
@@ -8092,6 +8109,8 @@
   }
 
   function previewSelectedDisabledReason(): string {
+    const selectionBusy = archiveSelectionBusyReason();
+    if (selectionBusy) return selectionBusy;
     if (previewBusy()) return tr("gui.preview.loading", "Preparing item");
     return selectedPreviewPolicy().disabledReason;
   }
@@ -11041,6 +11060,7 @@
       await openArchiveDirectoryEntry(entryPath);
       return;
     }
+    if (blockSelectionScopedAction()) return;
     previewOriginEntryPath = entryPath;
     previewOriginVirtualIndex = virtualIndex;
     if (archiveLikePath(entryPath)) {
@@ -13314,7 +13334,7 @@
   }
 
   function classicCommandDisabled(label: string): boolean {
-    if (currentArchive?.read_only && ["Add", "Protect", "Delete", "Rename", "Move", "New Folder"].includes(label)) return true;
+    if (currentArchive && archiveMutationDisabledReason() && ["Add", "Protect", "Delete", "Rename", "Move", "New Folder"].includes(label)) return true;
     if (label === "Checksum" || label === "Duplicates" || label === "Info" || label === "Protect") return false;
     if (label === "Extract To" && archiveSelectionBusyReason()) return true;
     if (label === "Rename") return !canRenameSelection();
@@ -13324,11 +13344,13 @@
   }
 
   function classicCommandDisabledTitle(label: string): string {
+    if (!classicCommandDisabled(label)) return "";
+    const refreshStatus = archiveRefreshStatusLabel();
+    if (refreshStatus) return refreshStatus;
     if (label === "Extract To") {
       const selectionBusyReason = archiveSelectionBusyReason();
       if (selectionBusyReason) return selectionBusyReason;
     }
-    if (!classicCommandDisabled(label)) return "";
     if (!currentArchive) {
       if (label === "Add") return tr("gui.precondition.open_before_add", "Open an archive before adding files");
       if (label === "Extract To") return tr("gui.precondition.open_before_extract", "Open an archive before extracting");

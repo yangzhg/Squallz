@@ -38,7 +38,6 @@
         format: string;
         summary: string;
         dirs: readonly string[];
-        readOnly: boolean;
         canGoUp: boolean;
       };
       actions: {
@@ -213,13 +212,13 @@
       </button>
       <button
         class="ghost large"
-        disabled={view.archive.readOnly}
+        disabled={Boolean(view.actions.mutationDisabledReason)}
         title={view.actions.mutationDisabledReason}
         onclick={onAddFiles}
       ><Icon name="file" size={17} />{tr("gui.action.add_files", "Add files")}</button>
       <button
         class="ghost large"
-        disabled={view.archive.readOnly}
+        disabled={Boolean(view.actions.mutationDisabledReason)}
         title={view.actions.mutationDisabledReason}
         onclick={onOpenRecovery}
       ><Icon name="shield-alert" size={17} />{tr("gui.action.protect", "Protect")}</button>
@@ -261,7 +260,7 @@
       ><Icon name="repeat" size={17} />{tr("gui.action.move_selected", "Move selected")}</button>
       <button
         class="ghost large"
-        disabled={view.archive.readOnly}
+        disabled={Boolean(view.actions.mutationDisabledReason)}
         title={view.actions.mutationDisabledReason}
         onclick={onCreateFolder}
       ><Icon name="folder-open" size={17} />{tr("gui.action.new_folder", "New folder")}</button>

@@ -8,6 +8,7 @@ import {
   type ArchiveInfo,
   type EntryDto,
   type ErrorDto,
+  type Page,
 } from "./ipc";
 import { t, tError } from "./i18n.svelte";
 import { pushToast, removeToastByKey } from "./toasts.svelte";
@@ -15,8 +16,11 @@ import { pushToast, removeToastByKey } from "./toasts.svelte";
 export const PAGE_SIZE = 500;
 export type PasswordBookStatusState = "idle" | "checking" | "ready" | "error";
 export type RowSelectionResult = "selected" | "stale" | "failed";
+type ArchiveViewWindow = { start: number; end: number };
+type ArchiveRefreshStatus = "idle" | "refreshing" | "error";
 type SelectionAnchor = { index: number; generation: number };
 const ARCHIVE_BROWSE_ERROR_TOAST_KEY = "archive-browse-error";
+const ARCHIVE_REFRESH_ERROR_TOAST_KEY = "archive-refresh-error";
 const SELECTION_PAGE_CONCURRENCY = 4;
 
 type ValidationArchiveCallKind = "openArchive" | "listEntries" | "searchEntries";
@@ -75,12 +79,16 @@ const store = $state({
   generation: 0,
   /** Most recent failure while listing a directory or searching the archive. */
   browseError: null as ErrorDto | null,
+  refreshStatus: "idle" as ArchiveRefreshStatus,
   /** The current archive was opened with a user-entered password. */
   sessionPasswordKnown: false,
   /** User-selected archive-wide file-name encoding. */
   encodingOverride: null as string | null,
   /** Pending open that needs a password (drives the password dialog) */
-  passwordPrompt: null as { path: string; wrong: boolean; encoding: string | null } | null,
+  passwordPrompt: null as {
+    path: string; wrong: boolean; encoding: string | null;
+    visibleWindow?: () => ArchiveViewWindow;
+  } | null,
   /** Most recent structured non-password failure, bound to the attempted path. */
   openError: null as { path: string; error: ErrorDto } | null,
   /** Invalidates superseded open requests before they can publish state. */
@@ -191,6 +199,10 @@ export function archiveBrowseError(): ErrorDto | null {
   return store.browseError;
 }
 
+export function archiveRefreshStatus(): ArchiveRefreshStatus {
+  return store.refreshStatus;
+}
+
 /** Whether the current UI session knows this archive used a password. */
 export function archiveHasSessionPassword(): boolean {
   return store.sessionPasswordKnown;
@@ -222,6 +234,17 @@ export async function openArchive(
   password?: string | null,
   encoding?: string | null,
 ): Promise<boolean> {
+  const visibleWindow = store.passwordPrompt?.path === path ? store.passwordPrompt.visibleWindow : undefined;
+  clearArchiveRefreshStatus();
+  return performArchiveOpen(path, password ?? null, encoding ?? null, visibleWindow);
+}
+
+async function performArchiveOpen(
+  path: string,
+  password: string | null,
+  encoding: string | null,
+  visibleWindow?: () => ArchiveViewWindow,
+): Promise<boolean> {
   cancelActiveArchiveOpenRequest();
   const requestId = nextArchiveOpenRequestId();
   pendingArchiveOpenRequestId = requestId;
@@ -229,6 +252,11 @@ export async function openArchive(
   const retryingPrompt = store.passwordPrompt?.path === path;
   if (!retryingPrompt) store.passwordPrompt = null;
   store.openError = null;
+  const previousId = store.info?.id;
+  if (visibleWindow) {
+    store.refreshStatus = "refreshing";
+    removeToastByKey(ARCHIVE_REFRESH_ERROR_TOAST_KEY);
+  }
   let pendingInfo: ArchiveInfo | null = null;
   try {
     const hadSessionPassword =
@@ -236,8 +264,8 @@ export async function openArchive(
     markValidationArchiveCall("openArchive");
     const info = await ipc.openArchive(
       path,
-      password ?? null,
-      encoding ?? null,
+      password,
+      encoding,
       requestId,
     );
     pendingInfo = info;
@@ -246,25 +274,25 @@ export async function openArchive(
       pendingInfo = null;
       return false;
     }
-    markValidationArchiveCall("listEntries");
-    const page = await ipc.listEntries(info.id, 0, "", null, PAGE_SIZE);
-    if (requestGeneration !== store.openGeneration) {
+    const view = await loadOpenedArchiveView(info.id, requestGeneration, visibleWindow);
+    if (!view || requestGeneration !== store.openGeneration) {
       void ipc.closeArchive(info.id);
       pendingInfo = null;
       return false;
     }
     if (store.info) void ipc.closeArchive(store.info.id);
     store.info = info;
-    store.dirs = [];
+    store.dirs = view.dirs;
     cancelFilterReload();
-    store.filter = "";
+    store.filter = view.filter;
     store.filterPending = false;
     store.previewRows = null;
     clearBrowseError();
+    clearArchiveRefreshStatus();
     store.generation += 1;
-    store.pages = new Map([[0, page.items]]);
+    store.pages = view.pages;
     store.loading = new Set();
-    store.total = page.total;
+    store.total = view.total;
     store.sessionPasswordKnown = password != null || hadSessionPassword;
     store.encodingOverride = info.encoding_override ?? encoding ?? null;
     store.passwordPrompt = null;
@@ -277,21 +305,36 @@ export async function openArchive(
   } catch (e) {
     if (pendingInfo) void ipc.closeArchive(pendingInfo.id);
     if (requestGeneration !== store.openGeneration) return false;
+    if (isErrorDto(e) && (e.key === "error.password_required" || e.key === "error.wrong_password")) {
+      store.passwordPrompt = {
+        path,
+        wrong: e.key === "error.wrong_password" || password != null,
+        encoding,
+        visibleWindow,
+      };
+      return false;
+    }
+    store.passwordPrompt = null;
+    if (visibleWindow) {
+      store.refreshStatus = "error";
+      pushToast({
+        key: ARCHIVE_REFRESH_ERROR_TOAST_KEY,
+        kind: "danger",
+        title: t("gui.archive.refresh_failed"),
+        body: isErrorDto(e) ? tError(e) : t("gui.archive.open_failed_generic"),
+        action: {
+          label: t("gui.error.retry"),
+          run: () => store.info?.id === previousId
+            ? performArchiveOpen(path, password, encoding, visibleWindow)
+            : false,
+        },
+      });
+      return false;
+    }
     if (isErrorDto(e)) {
-      if (e.key === "error.password_required" || e.key === "error.wrong_password") {
-        store.openError = null;
-        store.passwordPrompt = {
-          path,
-          wrong: e.key === "error.wrong_password" || password != null,
-          encoding: encoding ?? null,
-        };
-        return false;
-      }
-      store.passwordPrompt = null;
       store.openError = { path, error: e };
       pushToast({ kind: "danger", title: tError(e) });
     } else {
-      store.passwordPrompt = null;
       store.openError = {
         path,
         error: { key: "error.unknown", params: {}, detail: "" },
@@ -304,6 +347,65 @@ export async function openArchive(
       pendingArchiveOpenRequestId = null;
     }
   }
+}
+
+function viewPages(window: ArchiveViewWindow, total: number): number[] {
+  const count = Math.max(1, window.end - window.start);
+  const start = Math.max(0, Math.min(window.start, total - count));
+  const end = Math.max(start, Math.min(total - 1, start + count - 1));
+  const first = Math.floor(start / PAGE_SIZE);
+  const last = Math.floor(end / PAGE_SIZE);
+  return Array.from({ length: last - first + 1 }, (_, index) => first + index);
+}
+
+/** Loads the current browse context and visible pages before publishing them together. */
+async function loadOpenedArchiveView(
+  id: number,
+  requestGeneration: number,
+  visibleWindow?: () => ArchiveViewWindow,
+) {
+  while (requestGeneration === store.openGeneration) {
+    const generation = store.generation;
+    const dirs = visibleWindow ? [...store.dirs] : [];
+    const filter = visibleWindow ? store.filter : "";
+    const prefix = dirs.length ? `${dirs.join("/")}/` : "";
+    const window = visibleWindow?.() ?? { start: 0, end: PAGE_SIZE };
+    const readPage = async (page: number): Promise<Page> => {
+      if (filter.trim()) {
+        const result = await searchArchivePage(id, page, filter.trim(), generation + 1);
+        if (result) return result;
+        throw { key: "error.cancelled", params: {}, detail: "" } satisfies ErrorDto;
+      }
+      markValidationArchiveCall("listEntries");
+      return ipc.listEntries(id, page, prefix, null, PAGE_SIZE);
+    };
+    try {
+      const first = await readPage(Math.max(0, Math.floor(window.start / PAGE_SIZE)));
+      if (requestGeneration !== store.openGeneration) return null;
+      if (visibleWindow && generation !== store.generation) continue;
+      const pages = viewPages(window, first.total);
+      const loaded = await Promise.all(pages.map((page) => page === first.page ? first : readPage(page)));
+      if (requestGeneration !== store.openGeneration) return null;
+      if (visibleWindow && (
+        generation !== store.generation ||
+        viewPages(visibleWindow(), first.total).some((page) => !pages.includes(page))
+      )) continue;
+      return {
+        dirs, filter, total: first.total,
+        pages: new Map(loaded.map((page) => [page.page, page.items])),
+      };
+    } catch (error) {
+      if (requestGeneration !== store.openGeneration) return null;
+      if (visibleWindow && generation !== store.generation) continue;
+      throw error;
+    }
+  }
+  return null;
+}
+
+function clearArchiveRefreshStatus(): void {
+  store.refreshStatus = "idle";
+  removeToastByKey(ARCHIVE_REFRESH_ERROR_TOAST_KEY);
 }
 
 /** Adopts an archive that was already opened by an archive command. */
@@ -330,6 +432,7 @@ export async function adoptOpenedArchive(info: ArchiveInfo): Promise<boolean> {
   store.filterPending = false;
   store.previewRows = null;
   clearBrowseError();
+  clearArchiveRefreshStatus();
   store.generation += 1;
   store.pages = new Map([[0, page.items]]);
   store.loading = new Set();
@@ -350,6 +453,7 @@ export function cancelPendingArchiveOpen(): void {
   store.openGeneration += 1;
   store.passwordPrompt = null;
   store.openError = null;
+  clearArchiveRefreshStatus();
 }
 
 /** Dismisses the open-time password prompt. */
@@ -390,30 +494,16 @@ function clearPasswordBookStatus(): void {
 export async function reopenWithEncoding(encoding: string | null): Promise<boolean> {
   const current = store.info;
   if (!current) return false;
-  const dirs = [...store.dirs];
-  const filter = store.filter;
-  const ok = await openArchive(current.source, null, encoding);
-  if (!ok) return false;
-  store.dirs = dirs;
-  store.filter = filter;
-  await reload();
-  clearSelection();
-  return true;
+  return performArchiveOpen(current.source, null, encoding, () => ({ start: 0, end: PAGE_SIZE }));
 }
 
 /** Reopens the current archive after an in-place update and refreshes rows. */
-export async function refreshCurrentArchive(): Promise<boolean> {
+export async function refreshCurrentArchive(
+  visibleWindow: () => ArchiveViewWindow = () => ({ start: 0, end: PAGE_SIZE }),
+): Promise<boolean> {
   const current = store.info;
   if (!current) return false;
-  const dirs = [...store.dirs];
-  const filter = store.filter;
-  const ok = await openArchive(current.source, null, store.encodingOverride);
-  if (!ok) return false;
-  store.dirs = dirs;
-  store.filter = filter;
-  await reload();
-  clearSelection();
-  return true;
+  return performArchiveOpen(current.source, null, store.encodingOverride, visibleWindow);
 }
 
 export async function refreshArchivePasswordBookStatus(path = store.info?.path): Promise<void> {
@@ -972,6 +1062,7 @@ export function installArchivePreview(
   store.selectionAnchor = null;
   store.previewRows = options?.previewRows ?? null;
   clearBrowseError();
+  clearArchiveRefreshStatus();
   store.selectedSize =
     options?.selectedSize ??
     rows

@@ -2691,6 +2691,8 @@
   "gui.appearance.saved": "外观设置已保存",
   "gui.appearance.saved_preview": "外观更改已在当前会话生效，但未保存",
   "gui.archive.list_refreshed": "压缩包列表已刷新",
+  "gui.archive.refreshing": "正在刷新归档内容…",
+  "gui.archive.refresh_failed": "归档内容未能刷新，请重试以查看最新文件。",
   "gui.mode.saved_preview_desktop_unavailable": "界面模式已在当前会话生效，但未保存",
   "gui.theme.saved_preview_desktop_unavailable": "主题已在当前会话生效，但未保存",
   "gui.density.saved_preview_desktop_unavailable": "界面间距已在当前会话生效，但未保存",
