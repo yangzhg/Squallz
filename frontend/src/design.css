@@ -114,6 +114,8 @@
   --archive-list-head-height: 34px;
   --archive-list-min-height: 300px;
   --archive-table-min-width: 628px;
+  --archive-table-columns: minmax(260px, 1fr) 80px 80px 140px;
+  --archive-row-height: 42px;
   --archive-filter-field-min-width: 210px;
   --archive-filter-field-max-width: 360px;
   --archive-entry-location-max-share: 44%;
@@ -10696,10 +10698,10 @@ input.secure-input {
 .list-head,
 .modern-row {
   display: grid;
-  grid-template-columns: minmax(260px, 1fr) 90px 90px 118px;
+  grid-template-columns: var(--archive-table-columns);
   align-items: center;
-  column-gap: 14px;
-  padding: 0 14px;
+  column-gap: var(--space-md);
+  padding: 0 var(--space-md);
 }
 
 .list-head {
@@ -10733,9 +10735,28 @@ input.secure-input {
 }
 
 .modern-row {
-  height: 42px;
-  border-bottom: 1px solid var(--color-surface-inset);
+  height: var(--archive-row-height);
+  border-bottom: var(--border-width-control) solid var(--color-surface-inset);
   color: var(--color-text-primary);
+  font-size: var(--type-body);
+  line-height: var(--type-body-line);
+}
+
+.modern-row > span[role="cell"] {
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.modern-row.empty-row {
+  height: auto;
+  min-height: var(--archive-row-height);
+  grid-template-columns: minmax(0, 1fr);
+  padding-block: var(--space-sm);
+}
+
+.modern-row.empty-row .file-name strong {
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .modern-row:last-child {
@@ -10806,6 +10827,16 @@ input.secure-input {
   color: var(--color-text-secondary);
   font-family: var(--font-mono);
   font-size: var(--type-control);
+}
+
+.modern-row .archive-entry-label {
+  display: grid;
+  align-items: stretch;
+  gap: 0;
+}
+
+.modern-row .archive-entry-label small {
+  line-height: var(--type-control-line);
 }
 
 .file-badge {
@@ -14781,6 +14812,11 @@ select.classic-input:focus {
 
 .design-root :is(button:disabled, button:hover, button:focus-visible) :is(svg, span, strong, small) {
   color: inherit;
+}
+
+.design-root :is(.modern-row, .classic-row) .row-preview-button:focus-visible {
+  outline: var(--border-width-focus) solid var(--color-accent-fg);
+  outline-offset: calc(-1 * var(--border-width-focus));
 }
 
 .design-root :is(.classic-commandbar button:disabled span, .classic-commandbar button:disabled strong) {

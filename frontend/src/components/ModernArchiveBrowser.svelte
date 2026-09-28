@@ -494,7 +494,7 @@
               {/if}
             </span>
             <span class="archive-entry-label">
-              <strong>{entry.name}</strong>
+              <strong title={entry.source?.path ?? entry.name}>{entry.name}</strong>
               {#if entry.location}<small title={entry.source?.path}>{entry.location}</small>{/if}
             </span>
             {#if entry.source}
@@ -517,8 +517,7 @@
         </div>
       {:else}
         <div class="modern-row empty-row" role="row" aria-rowindex="2">
-          <div class="file-name" role="cell"><strong>{view.emptyLabel}</strong></div>
-          <span role="cell">{view.emptyLabel}</span><span role="cell">-</span><span role="cell">-</span>
+          <div class="file-name" role="cell" aria-colspan="4"><strong>{view.emptyLabel}</strong></div>
         </div>
       {/each}
       <div class="virtual-pad" use:cssVariables={virtualPadVariables(view.paddingBottom)}></div>

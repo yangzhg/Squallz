@@ -207,6 +207,19 @@ const linkPreviewItems: EntryDto[] = ([
   encoding: "utf-8",
 }));
 
+const longNamePreviewEntries: EntryDto[] = [
+  {
+    ...archivePreviewEntries[2],
+    path: "Quarterly financial report — consolidated statements and supporting documents.pdf",
+    display: "Quarterly financial report — consolidated statements and supporting documents.pdf",
+  },
+  {
+    ...archivePreviewEntries[2],
+    path: "reports/2026/第三季度/交付资料与财务归档/季度财务报告与附件汇总（已审核最终版本）.pdf",
+    display: "季度财务报告与附件汇总（已审核最终版本）.pdf",
+  },
+];
+
 export function readRuntimePreviews(params: URLSearchParams, pageSize: number): RuntimePreviews {
   if (!import.meta.env.DEV) return emptyRuntimePreviews;
 
@@ -430,9 +443,11 @@ function readArchivePreview(params: URLSearchParams, pageSize: number): ArchiveP
 
   const format = (params.get("previewFormat") ?? "zip").toLowerCase();
   const name = `product-backup.${format}`;
-  const entries = params.get("previewLinks") === "1"
-    ? [...archivePreviewEntries, ...linkPreviewItems]
-    : archivePreviewEntries;
+  const entries = [
+    ...archivePreviewEntries,
+    ...(params.get("previewLinks") === "1" ? linkPreviewItems : []),
+    ...(params.get("previewLongNames") === "1" ? longNamePreviewEntries : []),
+  ];
   const nestedItems = params.get("previewLinks") === "1"
     ? [...nestedPreviewItems, ...linkPreviewItems]
     : nestedPreviewItems;

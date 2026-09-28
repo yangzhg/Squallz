@@ -371,7 +371,7 @@
                 }}
               ></button>
               <span class="archive-entry-label">
-                <strong>{entry.name}</strong>
+                <strong title={entry.source?.path ?? entry.name}>{entry.name}</strong>
                 {#if entry.location}<small title={entry.source?.path}>{entry.location}</small>{/if}
               </span>
               {#if entry.source}
