@@ -325,6 +325,8 @@
   type AppearanceSetting = "mode" | "theme" | "density";
   type AppearanceSaveState = Exclude<SettingsSaveState, "dirty">;
   type ExtractDestinationMode = "smart" | "archive" | "same" | "choose";
+  type ExtractTaskDraft = Pick<Extract<JobSpec, { kind: "extract" }>,
+    "path" | "dest" | "selection" | "overwrite" | "symlinks" | "smart" | "encoding" | "verify_sfx">;
   type ExtractScope = "all" | "selection";
   type ExtractOverwriteMode = "ask" | "skip" | "overwrite" | "rename";
   type ExtractSymlinkMode = "preserve" | "skip" | "follow";
@@ -864,6 +866,11 @@
   let extractScope = $state<ExtractScope>("all");
   let extractSelectionSnapshot = $state<string[]>([]);
   let extractCustomDest = $state("");
+  let extractSmartBaseOverride = $state<string | null>(null);
+  let extractVerifySfx = $state(false);
+  let extractDraftArchive: { id: number; source: string } | null = null;
+  let pendingExtractTaskDraft: ExtractTaskDraft | null = null;
+  let extractReviewFocusPending = false;
   let extractOverwriteMode = $state<ExtractOverwriteMode>("ask");
   let extractSymlinkMode = $state<ExtractSymlinkMode>("preserve");
   let currentExtractOverwriteLabel = $derived(extractOverwriteLabel(extractOverwriteMode));
@@ -1308,6 +1315,7 @@
   });
 
   $effect(() => {
+    syncExtractDraftArchive();
     const current = currentArchive;
     if (screen !== "extract" || !current) {
       resetExtractPlanRequestState();
@@ -2128,6 +2136,8 @@
     if (preventCreateSubmissionNavigation(next)) return;
     if (preventConvertSubmissionNavigation(next)) return;
     if (next !== "create") createPrimaryFocusPending = false;
+    if (next !== "extract") extractReviewFocusPending = false;
+    if (next !== "password") pendingExtractTaskDraft = null;
     if (screen === "create" && next !== "create" && pendingCreateSubmission) {
       discardPendingCreatePlan();
       createOptionsValidationAttempted = false;
@@ -3541,6 +3551,7 @@
     const preset = archivePresetById(id);
     if (!preset || preset.kind !== "extract") return;
     selectedExtractPresetId = preset.id;
+    extractSmartBaseOverride = null;
     extractPresetDraftName = preset.label;
     if (preset.options.destination.layout === "smart") extractDestinationMode = "smart";
     else if (preset.options.destination.layout === "archive_folder") extractDestinationMode = "archive";
@@ -6026,15 +6037,17 @@
   async function openArchivePath(
     path: string,
     source: "dialog" | "open-file",
+    extractDraft: ExtractTaskDraft | null = null,
   ): Promise<boolean> {
     if (preventCreateSubmissionNavigation("browse")) return false;
+    pendingExtractTaskDraft = extractDraft;
     if (isPar2Path(path)) {
       openRecoverySet(path, null, source);
       return true;
     }
     const requestGeneration = ++archiveOpenGeneration;
     archiveOpenStatus = "opening";
-    const ok = await openArchiveStore(path);
+    const ok = await openArchiveStore(path, null, extractDraft?.encoding ?? null);
     if (requestGeneration !== archiveOpenGeneration) return true;
     archiveOpenStatus = "idle";
     if (ok) {
@@ -6047,6 +6060,7 @@
       showNotice(tr("gui.archive.password_needed", "Enter the archive password to continue."));
       return true;
     }
+    pendingExtractTaskDraft = null;
     if (archiveOpenError(path)?.key === "error.corrupt_archive") {
       recoverySourceMode = "selected";
       recoverySourceOverride = path;
@@ -6064,6 +6078,8 @@
   }
 
   function finishOpenedArchive(path: string, source: "dialog" | "open-file" | "password") {
+    const extractDraft = pendingExtractTaskDraft;
+    pendingExtractTaskDraft = null;
     rememberRecent(path);
     recordOperation({
       status: "info",
@@ -6074,6 +6090,7 @@
     recoverySourceOverride = null;
     recoveryPar2Override = null;
     clearEntryPreviewState();
+    if (extractDraft && sameFilePath(extractDraft.path, path) && restoreExtractTaskDraft(extractDraft)) return;
     setScreenRespectingJobQuestion("browse");
     showNotice(
       source === "password"
@@ -6149,6 +6166,7 @@
     sidecarCount = 1,
     sidecarSetCount = 1,
   ) {
+    pendingExtractTaskDraft = null;
     archiveOpenGeneration += 1;
     archiveOpenStatus = "idle";
     cancelArchivePasswordPrompt();
@@ -7276,7 +7294,12 @@
   function extractJobDestination(): string {
     if (!currentArchive) return openArchiveFirstLabel();
     if (extractDestinationMode !== "smart") return effectiveExtractDest();
-    return normalizedDefaultExtractDir(appliedDefaultExtractDir) ?? pathDir(currentArchive.path);
+    return extractSmartBase();
+  }
+
+  function extractSmartBase(): string {
+    return extractSmartBaseOverride ?? normalizedDefaultExtractDir(appliedDefaultExtractDir)
+      ?? (currentArchive ? pathDir(currentArchive.path) : openArchiveFirstLabel());
   }
 
   function sameFolderExtractDest(): string {
@@ -7688,9 +7711,8 @@
     if (mode === "same") return sameFolderExtractDest();
     if (mode === "choose") return chosenExtractDest();
     if (mode === "smart") {
-      const base = normalizedDefaultExtractDir(appliedDefaultExtractDir) ?? pathDir(currentArchive.path);
       return tr("gui.extract.smart_destination_value", "{base} · final folder chosen from archive contents")
-        .replace("{base}", base);
+        .replace("{base}", extractSmartBase());
     }
     return defaultExtractDest();
   }
@@ -7706,6 +7728,7 @@
     }
     markExtractPresetDraftTouched();
     extractDestinationMode = mode;
+    extractSmartBaseOverride = null;
   }
 
   function extractWorkspaceSurface(variant: ExtractWorkspaceVariant): ExtractWorkspaceSurface {
@@ -7724,6 +7747,9 @@
       title: variant === "modern"
         ? extractSafeTitle()
         : classicCommandLabel("Extract To"),
+      onReady: () => {
+        if (extractReviewFocusPending) focusExtractReview();
+      },
       start: {
         label: startLabel,
         disabled: Boolean(startBlockedReason),
@@ -7740,7 +7766,7 @@
       },
       destination: {
         label: extractDestinationFieldLabel(),
-        path: effectiveExtractDest(),
+        path: extractJobDestination(),
         choices: extractDestinationModes.map((mode) => ({
           id: mode,
           label: extractDestinationTitle(mode),
@@ -7757,6 +7783,9 @@
         line: archiveLine(),
         selection: extractSelectionLabel(),
         password: extractPasswordLabel(),
+        verification: extractVerifySfx
+          ? tr("gui.extract.verify_sfx", "The self-extractor payload will be verified before writing files.")
+          : null,
       },
       plan: {
         variant,
@@ -7857,6 +7886,7 @@
       if (typeof selected === "string") {
         markExtractPresetDraftTouched();
         extractCustomDest = selected;
+        extractSmartBaseOverride = null;
         extractDestinationMode = "choose";
         showNotice(tr("gui.extract.destination_selected", "Extract destination selected"));
       }
@@ -8128,15 +8158,38 @@
       showNotice(tr("gui.precondition.select_before_extract", "Select one or more entries before extracting them"));
       return;
     }
+    syncExtractDraftArchive();
     extractScope = scope;
     extractSelectionSnapshot = scope === "selection" ? [...(selection ?? [])] : [];
     setScreen("extract");
   }
 
   function extractJobPaths(): string[] | null {
-    return extractScope === "selection" && extractSelectionSnapshot.length > 0
+    return extractScope === "selection"
       ? [...extractSelectionSnapshot]
       : null;
+  }
+
+  function syncExtractDraftArchive(): void {
+    const current = currentArchive;
+    if ((extractDraftArchive?.id ?? null) === (current?.id ?? null)) return;
+    const sameSource = current && extractDraftArchive && sameFilePath(current.source, extractDraftArchive.source);
+    extractDraftArchive = current ? { id: current.id, source: current.source } : null;
+    extractSelectionSnapshot = [];
+    if (!sameSource) {
+      extractSmartBaseOverride = null;
+      extractVerifySfx = false;
+    }
+  }
+
+  function focusExtractReview(): void {
+    extractReviewFocusPending = true;
+    void tick().then(() => {
+      const heading = document.getElementById("extract-workspace-heading");
+      if (!extractReviewFocusPending || screen !== "extract" || blockingModalVisible() || !heading) return;
+      extractReviewFocusPending = false;
+      heading.focus();
+    });
   }
 
   function selectedJobPaths(): string[] | null {
@@ -9625,7 +9678,7 @@
   function extractSelectionLabel(): string {
     if (!currentArchive) return openArchiveFirstLabel();
     const count = extractJobPaths()?.length ?? 0;
-    return count > 0
+    return extractScope === "selection"
       ? tr("gui.selection.count_selected", "{count} selected").replace("{count}", count.toLocaleString())
       : tr("gui.selection.all_entries", "All entries");
   }
@@ -9700,6 +9753,9 @@
   function extractStartBlockedReason(): string {
     const archiveReason = extractArchiveRequiredReason();
     if (archiveReason) return archiveReason;
+    if (extractScope === "selection" && extractSelectionSnapshot.length === 0) {
+      return tr("gui.precondition.select_before_extract", "Select one or more entries before extracting them");
+    }
     if (extractPlanPhase === "blocked") return extractSpaceFailureLabel();
     if (extractPlanPhase === "error") return extractPlanErrorLabel();
     if (extractPlanPhase !== "ready") {
@@ -9725,7 +9781,7 @@
           : tr("gui.archive.single", "Single"),
       ],
       [tr("common.selection", "Selection"), selectedSummary()],
-      [extractDestinationFieldLabel(), effectiveExtractDest()],
+      [extractDestinationFieldLabel(), extractJobDestination()],
     ];
   }
 
@@ -9757,6 +9813,10 @@
       showNotice(tr("gui.precondition.open_before_extract", "Open an archive before extracting"));
       return;
     }
+    if (extractScope === "selection" && extractSelectionSnapshot.length === 0) {
+      showNotice(tr("gui.precondition.select_before_extract", "Select one or more entries before extracting them"));
+      return;
+    }
     if (extractPlanPhase === "loading") {
       showNotice(tr("gui.extract.plan_wait_before_start", "Wait for the extraction preview to finish"));
       return;
@@ -9777,6 +9837,7 @@
     const encoding = extractEncodingForJob();
     const overwrite = extractOverwriteMode;
     const symlinks = extractSymlinkMode;
+    const verifySfx = extractVerifySfx;
     const expectedPlanKey = extractPlanKey(
       current.id,
       current.source,
@@ -9809,7 +9870,8 @@
       extractPlanRequestKey !== expectedPlanKey ||
       currentPlanKey !== expectedPlanKey ||
       extractOverwriteMode !== overwrite ||
-      extractSymlinkMode !== symlinks
+      extractSymlinkMode !== symlinks ||
+      extractVerifySfx !== verifySfx
     ) {
       showNotice(tr(
         "gui.extract.plan_changed_before_start",
@@ -9842,7 +9904,7 @@
         smart,
         encoding,
         password: null,
-        verify_sfx: false,
+        verify_sfx: verifySfx,
         best_effort: false,
       },
       success,
@@ -12769,7 +12831,7 @@
     setTaskExpanded(task.id, !task.expanded);
   }
 
-  function reviewTask(task: TaskDialogModel): void {
+  async function reviewTask(task: TaskDialogModel): Promise<void> {
     if (taskWindowMode) return;
     let target = taskReviewScreen(task);
     if (target === "archiveInfo" && testTaskUsesRecoveryContext(task)) {
@@ -12779,12 +12841,61 @@
       target = "recovery";
     }
     if (!target) return;
+    if (target === "extract" && task.spec.kind === "extract") {
+      await reviewExtractTask(task);
+      return;
+    }
     if (target === "create" && task.spec.kind === "compress" && !restoreCreateTaskDraft(task.spec)) return;
     if (target === "recovery") adoptRecoveryTargetFromTask(task);
     setScreen(target);
-    void dismissTaskDialog(task).then(() => {
-      if (target === "create") focusCreatePrimaryAction();
-    });
+    await dismissTaskDialog(task);
+    if (target === "create") focusCreatePrimaryAction();
+  }
+
+  async function reviewExtractTask(task: TaskDialogModel): Promise<void> {
+    if (task.spec.kind !== "extract") return;
+    if (archiveOpenStatus === "opening") {
+      showNotice(tr("gui.extract.review.wait_for_open", "Wait for the current archive to finish opening, then review this task again."));
+      return;
+    }
+    if (preventCreateSubmissionNavigation("extract") || preventConvertSubmissionNavigation("extract") || focusBlockingTaskIfAny()) return;
+    const spec = task.spec;
+    const draft: ExtractTaskDraft = {
+      path: spec.path, dest: spec.dest, selection: spec.selection === null ? null : [...spec.selection],
+      overwrite: spec.overwrite, symlinks: spec.symlinks, smart: spec.smart,
+      encoding: spec.encoding, verify_sfx: spec.verify_sfx,
+    };
+    await dismissTaskDialog(task);
+    if (currentArchive && sameFilePath(currentArchive.source, draft.path)
+      && (currentArchive.encoding_override ?? null) === draft.encoding) {
+      pendingExtractTaskDraft = null;
+      restoreExtractTaskDraft(draft);
+      return;
+    }
+    await openArchivePath(draft.path, "open-file", draft);
+  }
+
+  function restoreExtractTaskDraft(draft: ExtractTaskDraft): boolean {
+    if (!currentArchive || !sameFilePath(currentArchive.source, draft.path)) return false;
+    resetExtractPlanRequestState();
+    markExtractPresetDraftTouched();
+    selectedExtractPresetId = null;
+    extractPresetDraftName = "";
+    extractPresetMutationState = "idle";
+    extractDraftArchive = { id: currentArchive.id, source: currentArchive.source };
+    extractScope = draft.selection === null ? "all" : "selection";
+    extractSelectionSnapshot = [...(draft.selection ?? [])];
+    extractDestinationMode = draft.smart ? "smart" : "choose";
+    extractCustomDest = draft.dest;
+    extractSmartBaseOverride = draft.smart ? draft.dest : null;
+    extractOverwriteMode = draft.overwrite;
+    extractSymlinkMode = draft.symlinks;
+    extractPresetEncodingLabel = null;
+    extractVerifySfx = draft.verify_sfx;
+    setScreenRespectingJobQuestion("extract");
+    focusExtractReview();
+    showNotice(tr("gui.extract.review.restored", "Archive, selection and settings restored. Review the refreshed write plan before extracting again."));
+    return true;
   }
 
   function createTaskFormat(spec: Extract<JobSpec, { kind: "compress" }>): CreateFormatId | null {
@@ -12958,6 +13069,7 @@
       showNotice(tr("gui.password.open_previous_rejected", "That password was rejected. Try again or return to the archive list."));
       return;
     }
+    pendingExtractTaskDraft = null;
     if (archiveOpenError(prompt.path)?.key === "error.corrupt_archive") {
       recoverySourceMode = "selected";
       recoverySourceOverride = prompt.path;
@@ -12987,6 +13099,7 @@
       return;
     }
     if (archivePasswordPrompt) {
+      pendingExtractTaskDraft = null;
       archiveOpenGeneration += 1;
       archiveOpenStatus = "idle";
       cancelArchivePasswordPrompt();
@@ -14144,7 +14257,7 @@
                   <div class="panel-title"><Icon name="archive" size={16} />{extractDestinationFieldLabel()}</div>
                   <div class="setting-callout">
                     <strong>{extractDestinationTitle(extractDestinationMode)}</strong>
-                    <span>{effectiveExtractDest()}</span>
+                    <span>{extractJobDestination()}</span>
                   </div>
                   <div class="settings-route-list">
                     <button class="settings-route-card" onclick={() => openExtractWorkspace("all")}>
@@ -14327,7 +14440,7 @@
             {/each}
           </div>
           {#if screen === "extract" || screen === "batch"}
-            <div class="encoding-chip accent"><Icon name="archive" size={14} />{tr("gui.extract.smart_on", "Smart extract on")}</div>
+            <div class="encoding-chip accent"><Icon name="archive" size={14} />{extractDestinationTitle(screen === "batch" ? "smart" : extractDestinationMode)}</div>
           {:else if screen === "password"}
             <div class="encoding-chip warning"><Icon name="lock" size={14} />{tr("gui.password.required", "Password required")}</div>
           {:else if screen === "conflict"}
@@ -14432,7 +14545,7 @@
                   <div class="classic-label">{tr("common.mode", "Mode")}</div>
                   <div class="classic-input accent">{extractDestinationTitle(extractDestinationMode)}</div>
                   <div class="classic-label">{tr("common.destination", "Destination")}</div>
-                  <div class="classic-input classic-copy-wrap">{effectiveExtractDest()}</div>
+                  <div class="classic-input classic-copy-wrap">{extractJobDestination()}</div>
                 </div>
               </aside>
             </div>

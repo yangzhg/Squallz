@@ -29,6 +29,7 @@ type PreviewTaskKind =
   | "recovery_cleanup_unconfirmed"
   | "recovery_cleanup_record"
   | "extract"
+  | "extract_failure"
   | "extract_unknown_current"
   | "extract_metadata"
   | "batch_extract_metadata"
@@ -432,6 +433,7 @@ function completedTaskParam(value: string | null): RuntimePreviews["completedTas
     value === "recovery_cleanup_unconfirmed" ||
     value === "recovery_cleanup_record" ||
     value === "extract" ||
+    value === "extract_failure" ||
     value === "extract_unknown_current" ||
     value === "extract_metadata" ||
     value === "batch_extract_metadata" ||
