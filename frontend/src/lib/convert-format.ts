@@ -1,4 +1,11 @@
-import { createFormats, type CreateFormatId } from "./ui-model";
+import { createFormatIds, createFormats, type CreateFormatId } from "./ui-model";
+
+export function convertTaskTargetFormat(destination: string): CreateFormatId | null {
+  const path = destination.toLowerCase();
+  if (path.endsWith(".swm")) return "wim";
+  return createFormatIds.find((format) => createFormats[format].extensions
+    .some((extension) => path.endsWith(`.${extension}`))) ?? null;
+}
 
 function normalizeFormat(value: string | null | undefined): string {
   return value?.trim().toLowerCase().replace(/^\./, "") ?? "";

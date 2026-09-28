@@ -25,7 +25,7 @@ function harness() {
   const component = readFileSync(new URL("../App.svelte", import.meta.url), "utf8");
   const source = ts.createSourceFile("App.ts", component.match(/<script lang="ts">([\s\S]*?)<\/script>/)[1],
     ts.ScriptTarget.Latest, true);
-  const names = ["reviewTask", "reviewExtractTask", "restoreExtractTaskDraft", "finishOpenedArchive",
+  const names = ["reviewTask", "reviewExtractTask", "reviewConvertTask", "reviewArchiveTask", "restoreExtractTaskDraft", "finishOpenedArchive",
     "openArchivePath", "extractJobPaths", "extractJobDestination", "extractSmartBase",
     "extractSelectionLabel", "extractStartBlockedReason", "submitExtractJob",
     "syncExtractDraftArchive", "cancelPasswordRequest", "submitPasswordRequest",
@@ -36,9 +36,9 @@ function harness() {
   const context = {
     calls, taskReviewScreen, taskWindowMode: false, currentArchive: archive(),
     screen: "browse", archiveOpenStatus: "idle", archiveOpenGeneration: 0,
-    extractReviewFocusPending: false, createPrimaryFocusPending: false,
+    extractReviewFocusPending: false, convertReviewFocusPending: false, createPrimaryFocusPending: false,
     pendingCreateSubmission: null, classicCreateSection: "general",
-    pendingExtractTaskDraft: null, extractDraftArchive: { id: 1, source: "/original/photos.zip" },
+    pendingArchiveTaskReview: null, extractDraftArchive: { id: 1, source: "/original/photos.zip" },
     extractScope: "all", extractSelectionSnapshot: [], extractCustomDest: "/unrelated/output",
     extractSmartBaseOverride: null, extractVerifySfx: false,
     extractDestinationMode: "same", extractOverwriteMode: "overwrite", extractSymlinkMode: "follow",
@@ -151,20 +151,20 @@ test("unlocking a failed task retries the password then restores only its non-se
   await run.reviewTask({ id: 8, state: "failed", spec: spec({ encoding: "gbk" }) });
   assert.equal(run.context.screen, "password");
   assert.equal(run.context.extractCustomDest, "/unrelated/output");
-  assert.equal("password" in run.context.pendingExtractTaskDraft, false);
-  assert.equal("expected_input_guard" in run.context.pendingExtractTaskDraft, false);
-  assert.equal("expected_destination" in run.context.pendingExtractTaskDraft, false);
+  assert.equal("password" in run.context.pendingArchiveTaskReview, false);
+  assert.equal("expected_input_guard" in run.context.pendingArchiveTaskReview, false);
+  assert.equal("expected_destination" in run.context.pendingArchiveTaskReview, false);
   run.context.jobPasswordValue = "wrong";
   await run.submitPasswordRequest();
   assert.equal(run.context.screen, "password");
-  assert.ok(run.context.pendingExtractTaskDraft);
+  assert.ok(run.context.pendingArchiveTaskReview);
   assert.equal(run.context.jobPasswordValue, "");
   run.context.jobPasswordValue = "correct";
   await run.submitPasswordRequest();
   assert.equal(run.context.screen, "extract");
   assert.equal(run.extractJobDestination(), "/original/output");
   assert.deepEqual(Array.from(run.extractJobPaths()), ["photos/", "notes.txt"]);
-  assert.equal(run.context.pendingExtractTaskDraft, null);
+  assert.equal(run.context.pendingArchiveTaskReview, null);
   assert.equal(run.context.jobPasswordValue, "");
   assert.equal(run.calls.some(([name]) => name === "submit"), false);
 });
@@ -191,11 +191,11 @@ test("cancelling, navigating away, or opening another archive drops a pending ex
     const run = harness();
     run.context.screen = "password";
     run.context.archivePasswordPrompt = { path: "/original/photos.zip", encoding: null };
-    run.context.pendingExtractTaskDraft = spec();
+    run.context.pendingArchiveTaskReview = { path: spec().path, encoding: null, restore: () => true };
     if (action === "cancel") run.cancelPasswordRequest();
     if (action === "navigate") run.setScreen("extract");
     if (action === "open") await run.openArchivePath("/another.zip", "open-file");
-    assert.equal(run.context.pendingExtractTaskDraft, null);
+    assert.equal(run.context.pendingArchiveTaskReview, null);
     assert.equal(run.context.extractCustomDest, "/unrelated/output");
   }
   const run = harness();
@@ -206,14 +206,14 @@ test("cancelling, navigating away, or opening another archive drops a pending ex
   run.context.openArchiveStore = () => new Promise((resolve) => { finishOpen = resolve; openStarted(); });
   const reviewing = run.reviewTask({ id: 8, state: "failed", spec: spec() });
   await opening;
-  assert.ok(run.context.pendingExtractTaskDraft);
+  assert.ok(run.context.pendingArchiveTaskReview);
   run.context.openArchiveStore = async (path) => { run.context.currentArchive = archive(path, 3); return true; };
   await run.openArchivePath("/another.zip", "open-file");
   finishOpen(true);
   await reviewing;
   assert.equal(run.context.screen, "browse");
   assert.equal(run.context.extractCustomDest, "/unrelated/output");
-  assert.equal(run.context.pendingExtractTaskDraft, null);
+  assert.equal(run.context.pendingArchiveTaskReview, null);
 });
 
 test("failed opens and busy navigation preserve the current draft; best-effort tasks retain recovery routing", async () => {
@@ -227,7 +227,7 @@ test("failed opens and busy navigation preserve the current draft; best-effort t
     await run.reviewTask({ id: 8, state: "failed", spec: spec() });
     assert.equal(run.context.extractCustomDest, "/unrelated/output");
     assert.equal(run.context.extractOverwriteMode, "overwrite");
-    assert.equal(run.context.pendingExtractTaskDraft, null);
+    assert.equal(run.context.pendingArchiveTaskReview, null);
     assert.equal(run.calls.some(([name]) => name === "submit" || name === "reset"), false);
   }
   const run = harness();
@@ -264,4 +264,52 @@ test("changing verification while rechecking the plan prevents submitting stale 
   await run.submitExtractJob();
   assert.equal(run.calls.some(([name]) => name === "submit"), false);
   assert.ok(run.calls.some(([name, text]) => name === "notice" && text.includes("settings changed")));
+});
+
+test("failed conversion review opens its source and returns to its session after password retry", async () => {
+  const run = harness();
+  const conversion = { kind: "convert", src: "/old/backup.7z", dest: "/out/backup.zip",
+    level: 4, src_encoding: "gbk", src_password: "old-source-password", dest_password: "old-output-password",
+    encrypt_names: false, split_size: 123456789, split_mode: "native", replace_existing: true, replacement_guard: "old-guard" };
+  let restored = null;
+  run.context.focusConvertReview = () => run.calls.push(["focus-convert"]);
+  run.context.loadConvertRouteForReview = async () => ({
+    canReviewTask: () => true,
+    syncArchive() {},
+    restoreTaskDraft: (draft) => { restored = draft; return true; },
+  });
+  run.context.openArchiveStore = async (path, password, encoding) => {
+    run.calls.push(["open", path, password, encoding]);
+    if (password !== "correct") {
+      run.context.archivePasswordPrompt = { path, encoding };
+      return false;
+    }
+    run.context.currentArchive = archive(path, 3, encoding);
+    run.context.archivePasswordPrompt = null;
+    return true;
+  };
+  await run.reviewTask({ id: 12, state: "failed", spec: conversion });
+  assert.equal(run.context.screen, "password");
+  assert.equal(restored, null);
+  assert.deepEqual(run.calls.find(([name]) => name === "open"), ["open", conversion.src, null, "gbk"]);
+  run.context.jobPasswordValue = "correct";
+  await run.submitPasswordRequest();
+  assert.equal(run.context.screen, "convert");
+  assert.equal(restored.dest, conversion.dest);
+  assert.equal(restored.level, 4);
+  assert.equal(restored.split_size, 123456789);
+  for (const key of ["src_password", "dest_password", "replace_existing", "replacement_guard"]) {
+    assert.equal(key in restored, false);
+  }
+  assert.equal(run.context.pendingArchiveTaskReview, null);
+  assert.ok(run.calls.some(([name]) => name === "focus-convert"));
+  assert.equal(run.calls.some(([name]) => name === "submit"), false);
+});
+
+test("a locked conversion session keeps its draft and task dialog without opening another archive", async () => {
+  const run = harness();
+  run.context.loadConvertRouteForReview = async () => ({ canReviewTask: () => false });
+  await run.reviewTask({ id: 12, state: "failed", spec: { kind: "convert", src: "/old/backup.7z" } });
+  assert.equal(run.calls.length, 0);
+  assert.equal(run.context.screen, "browse");
 });

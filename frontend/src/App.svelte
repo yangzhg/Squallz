@@ -149,6 +149,7 @@
   import type {
     ConvertRouteBridge,
     ConvertRouteHandle,
+    ConvertTaskDraft,
     ConvertRouteOwner,
     ConvertRouteStatus,
   } from "./lib/convert-route";
@@ -327,6 +328,7 @@
   type ExtractDestinationMode = "smart" | "archive" | "same" | "choose";
   type ExtractTaskDraft = Pick<Extract<JobSpec, { kind: "extract" }>,
     "path" | "dest" | "selection" | "overwrite" | "symlinks" | "smart" | "encoding" | "verify_sfx">;
+  type ArchiveTaskReview = { path: string; encoding: string | null; restore: () => boolean };
   type ExtractScope = "all" | "selection";
   type ExtractOverwriteMode = "ask" | "skip" | "overwrite" | "rename";
   type ExtractSymlinkMode = "preserve" | "skip" | "follow";
@@ -869,8 +871,9 @@
   let extractSmartBaseOverride = $state<string | null>(null);
   let extractVerifySfx = $state(false);
   let extractDraftArchive: { id: number; source: string } | null = null;
-  let pendingExtractTaskDraft: ExtractTaskDraft | null = null;
+  let pendingArchiveTaskReview: ArchiveTaskReview | null = null;
   let extractReviewFocusPending = false;
+  let convertReviewFocusPending = false;
   let extractOverwriteMode = $state<ExtractOverwriteMode>("ask");
   let extractSymlinkMode = $state<ExtractSymlinkMode>("preserve");
   let currentExtractOverwriteLabel = $derived(extractOverwriteLabel(extractOverwriteMode));
@@ -2137,7 +2140,8 @@
     if (preventConvertSubmissionNavigation(next)) return;
     if (next !== "create") createPrimaryFocusPending = false;
     if (next !== "extract") extractReviewFocusPending = false;
-    if (next !== "password") pendingExtractTaskDraft = null;
+    if (next !== "convert") convertReviewFocusPending = false;
+    if (next !== "password") pendingArchiveTaskReview = null;
     if (screen === "create" && next !== "create" && pendingCreateSubmission) {
       discardPendingCreatePlan();
       createOptionsValidationAttempted = false;
@@ -6037,17 +6041,17 @@
   async function openArchivePath(
     path: string,
     source: "dialog" | "open-file",
-    extractDraft: ExtractTaskDraft | null = null,
+    review: ArchiveTaskReview | null = null,
   ): Promise<boolean> {
     if (preventCreateSubmissionNavigation("browse")) return false;
-    pendingExtractTaskDraft = extractDraft;
+    pendingArchiveTaskReview = review;
     if (isPar2Path(path)) {
       openRecoverySet(path, null, source);
       return true;
     }
     const requestGeneration = ++archiveOpenGeneration;
     archiveOpenStatus = "opening";
-    const ok = await openArchiveStore(path, null, extractDraft?.encoding ?? null);
+    const ok = await openArchiveStore(path, null, review?.encoding ?? null);
     if (requestGeneration !== archiveOpenGeneration) return true;
     archiveOpenStatus = "idle";
     if (ok) {
@@ -6060,7 +6064,7 @@
       showNotice(tr("gui.archive.password_needed", "Enter the archive password to continue."));
       return true;
     }
-    pendingExtractTaskDraft = null;
+    pendingArchiveTaskReview = null;
     if (archiveOpenError(path)?.key === "error.corrupt_archive") {
       recoverySourceMode = "selected";
       recoverySourceOverride = path;
@@ -6078,8 +6082,8 @@
   }
 
   function finishOpenedArchive(path: string, source: "dialog" | "open-file" | "password") {
-    const extractDraft = pendingExtractTaskDraft;
-    pendingExtractTaskDraft = null;
+    const review = pendingArchiveTaskReview;
+    pendingArchiveTaskReview = null;
     rememberRecent(path);
     recordOperation({
       status: "info",
@@ -6090,7 +6094,7 @@
     recoverySourceOverride = null;
     recoveryPar2Override = null;
     clearEntryPreviewState();
-    if (extractDraft && sameFilePath(extractDraft.path, path) && restoreExtractTaskDraft(extractDraft)) return;
+    if (review && sameFilePath(review.path, path) && review.restore()) return;
     setScreenRespectingJobQuestion("browse");
     showNotice(
       source === "password"
@@ -6166,7 +6170,7 @@
     sidecarCount = 1,
     sidecarSetCount = 1,
   ) {
-    pendingExtractTaskDraft = null;
+    pendingArchiveTaskReview = null;
     archiveOpenGeneration += 1;
     archiveOpenStatus = "idle";
     cancelArchivePasswordPrompt();
@@ -12845,6 +12849,10 @@
       await reviewExtractTask(task);
       return;
     }
+    if (target === "convert" && task.spec.kind === "convert") {
+      await reviewConvertTask(task);
+      return;
+    }
     if (target === "create" && task.spec.kind === "compress" && !restoreCreateTaskDraft(task.spec)) return;
     if (target === "recovery") adoptRecoveryTargetFromTask(task);
     setScreen(target);
@@ -12854,25 +12862,75 @@
 
   async function reviewExtractTask(task: TaskDialogModel): Promise<void> {
     if (task.spec.kind !== "extract") return;
-    if (archiveOpenStatus === "opening") {
-      showNotice(tr("gui.extract.review.wait_for_open", "Wait for the current archive to finish opening, then review this task again."));
-      return;
-    }
-    if (preventCreateSubmissionNavigation("extract") || preventConvertSubmissionNavigation("extract") || focusBlockingTaskIfAny()) return;
     const spec = task.spec;
     const draft: ExtractTaskDraft = {
       path: spec.path, dest: spec.dest, selection: spec.selection === null ? null : [...spec.selection],
       overwrite: spec.overwrite, symlinks: spec.symlinks, smart: spec.smart,
       encoding: spec.encoding, verify_sfx: spec.verify_sfx,
     };
-    await dismissTaskDialog(task);
-    if (currentArchive && sameFilePath(currentArchive.source, draft.path)
-      && (currentArchive.encoding_override ?? null) === draft.encoding) {
-      pendingExtractTaskDraft = null;
-      restoreExtractTaskDraft(draft);
+    await reviewArchiveTask(task, "extract", {
+      path: draft.path, encoding: draft.encoding, restore: () => restoreExtractTaskDraft(draft),
+    });
+  }
+
+  async function loadConvertRouteForReview(): Promise<ConvertRouteHandle | null> {
+    try {
+      const { convertSessionFor } = await import("./lib/convert-session.svelte");
+      return convertSessionFor(convertRouteOwner, convertRouteBridge);
+    } catch {
+      showNotice(tr("gui.convert.review.load_failed", "Could not load conversion settings. Try reviewing this task again."));
+      return null;
+    }
+  }
+
+  async function reviewConvertTask(task: TaskDialogModel): Promise<void> {
+    if (task.spec.kind !== "convert") return;
+    const spec = task.spec;
+    const draft: ConvertTaskDraft = {
+      src: spec.src, dest: spec.dest, level: spec.level, src_encoding: spec.src_encoding,
+      encrypt_names: spec.encrypt_names, split_size: spec.split_size, split_mode: spec.split_mode,
+    };
+    const session = await loadConvertRouteForReview();
+    if (!session || !session.canReviewTask(draft)) return;
+    convertRouteHandle = session;
+    session.syncArchive(currentArchive);
+    await reviewArchiveTask(task, "convert", {
+      path: draft.src,
+      encoding: draft.src_encoding,
+      restore: () => {
+        if (!session.restoreTaskDraft(draft)) return false;
+        setScreenRespectingJobQuestion("convert");
+        focusConvertReview();
+        showNotice(tr("gui.convert.review.restored", "Archive and settings restored. Passwords were cleared. Review protection and confirm the output location before converting again."));
+        return true;
+      },
+    });
+  }
+
+  function focusConvertReview(): void {
+    convertReviewFocusPending = true;
+    void tick().then(() => {
+      const heading = document.getElementById("convert-workspace-heading");
+      if (!convertReviewFocusPending || screen !== "convert" || blockingModalVisible() || !heading) return;
+      convertReviewFocusPending = false;
+      heading.focus();
+    });
+  }
+
+  async function reviewArchiveTask(task: TaskDialogModel, target: "extract" | "convert", review: ArchiveTaskReview): Promise<void> {
+    if (archiveOpenStatus === "opening") {
+      showNotice(tr("gui.task.review.wait_for_open", "Wait for the current archive to finish opening, then review this task again."));
       return;
     }
-    await openArchivePath(draft.path, "open-file", draft);
+    if (preventCreateSubmissionNavigation(target) || preventConvertSubmissionNavigation(target) || focusBlockingTaskIfAny()) return;
+    await dismissTaskDialog(task);
+    if (currentArchive && sameFilePath(currentArchive.source, review.path)
+      && (currentArchive.encoding_override ?? null) === review.encoding) {
+      pendingArchiveTaskReview = null;
+      review.restore();
+      return;
+    }
+    await openArchivePath(review.path, "open-file", review);
   }
 
   function restoreExtractTaskDraft(draft: ExtractTaskDraft): boolean {
@@ -13069,7 +13127,7 @@
       showNotice(tr("gui.password.open_previous_rejected", "That password was rejected. Try again or return to the archive list."));
       return;
     }
-    pendingExtractTaskDraft = null;
+    pendingArchiveTaskReview = null;
     if (archiveOpenError(prompt.path)?.key === "error.corrupt_archive") {
       recoverySourceMode = "selected";
       recoverySourceOverride = prompt.path;
@@ -13099,7 +13157,7 @@
       return;
     }
     if (archivePasswordPrompt) {
-      pendingExtractTaskDraft = null;
+      pendingArchiveTaskReview = null;
       archiveOpenGeneration += 1;
       archiveOpenStatus = "idle";
       cancelArchivePasswordPrompt();
@@ -13544,6 +13602,9 @@
   }
 
   const convertRouteBridge: ConvertRouteBridge = {
+    onReady: () => {
+      if (convertReviewFocusPending) focusConvertReview();
+    },
     getArchive: () => currentArchive,
     tr,
     tError: (error) => isErrorDto(error) ? tError(error) : String(error),

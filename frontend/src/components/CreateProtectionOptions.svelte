@@ -146,11 +146,11 @@
     {#if passwordError}
       <small id={passwordErrorId} class="create-option-error" role="status">{passwordError}</small>
     {/if}
-    <label class="create-option-check" class:disabled={disabled || !canEncryptNames || password.length === 0} title={disabledReason}>
+    <label class="create-option-check" class:disabled={disabled || !canEncryptNames || (password.length === 0 && !encryptNames)} title={disabledReason}>
       <input
         type="checkbox"
         checked={encryptNames}
-        disabled={disabled || !canEncryptNames || password.length === 0}
+        disabled={disabled || !canEncryptNames || (password.length === 0 && !encryptNames)}
         onchange={(event) => onEncryptNamesChange((event.currentTarget as HTMLInputElement).checked)}
       />
       <span>{tr("gui.create.encrypt_file_names", "Encrypt file names")} · {nameEncryptionCapability}</span>

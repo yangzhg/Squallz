@@ -1,7 +1,7 @@
 import { tick } from "svelte";
 import type { ConvertWorkspaceSurface } from "../components/ConvertWorkspace.svelte";
 import { fat32CompatibleSplitSizeBytes, resolveSplitSizeBytes } from "./archive-output-options";
-import { ensureConvertOutputExtension, sourceMatchesConvertTarget, suggestedConvertTargetFormat } from "./convert-format";
+import { convertTaskTargetFormat, ensureConvertOutputExtension, sourceMatchesConvertTarget, suggestedConvertTargetFormat } from "./convert-format";
 import { desktopDirname, sameDesktopPath } from "./desktop-path";
 import { basename as pathBaseName, dirname as pathDir, formatBytes } from "./format";
 import { ipc, isErrorDto, type ArchiveInfo, type CreateDestinationInspectionDto, type CreatePlanDto, type DiskSpaceDto, type ErrorDto, type JobSpec } from "./ipc";
@@ -11,6 +11,7 @@ import type {
   ConvertRouteBridge,
   ConvertRouteHandle,
   ConvertRouteOwner,
+  ConvertTaskDraft,
   ConvertWorkspaceVariant,
 } from "./convert-route";
 import {
@@ -97,6 +98,8 @@ export class ConvertSession implements ConvertRouteHandle {
   private splitMode = $state<CreateSplitMode>("generic");
   private customSplitAmount = $state("100");
   private customSplitUnit = $state<CreateSplitUnit>("mib");
+  private exactSplitSize = $state<string | null>(null);
+  private suggestedDestination = $state<string | null>(null);
   private validationAttempted = $state(false);
   private advancedOpen = $state(false);
   private plan = $state<CreatePlanDto | null>(null);
@@ -210,6 +213,7 @@ export class ConvertSession implements ConvertRouteHandle {
       this.splitPreset,
       this.customSplitAmount,
       this.customSplitUnit,
+      this.exactSplitSize,
     );
   }
 
@@ -220,6 +224,15 @@ export class ConvertSession implements ConvertRouteHandle {
   }
 
   private defaultDestination(format: CreateFormatId = this.targetFormat): string {
+    if (this.suggestedDestination) {
+      const extension = this.outputExtension(format);
+      const original = this.suggestedDestination;
+      const suffix = [...createFormatIds.flatMap((id) => createFormats[id].extensions), "swm"]
+        .sort((a, b) => b.length - a.length)
+        .find((value) => original.toLowerCase().endsWith(`.${value}`));
+      if (suffix && (extension === "swm" ? suffix === "swm" : createFormats[format].extensions.includes(suffix))) return original;
+      return suffix ? `${original.slice(0, -suffix.length)}${extension}` : original;
+    }
     const archive = this.archive();
     if (!archive) return this.openArchiveLabel();
     const base = this.bridge.archiveStemName(archive.name);
@@ -315,6 +328,9 @@ export class ConvertSession implements ConvertRouteHandle {
   }
 
   private passwordError(): string {
+    if (this.canEncryptData() && this.encryptNames && this.password.length === 0) {
+      return this.tr("gui.convert.password_required", "Enter a new destination password, or turn off file name encryption.");
+    }
     if (!this.canEncryptData() || this.password.length === 0) return "";
     if (this.passwordConfirmation.length === 0) {
       return this.tr("gui.convert.confirm_password_required", "Confirm the destination password before starting");
@@ -354,11 +370,13 @@ export class ConvertSession implements ConvertRouteHandle {
     this.password = "";
     this.passwordConfirmation = "";
     this.passwordVisible = false;
-    this.encryptNames = false;
   }
 
   private resetOutputOptions(): void {
     this.clearPassword();
+    this.encryptNames = false;
+    this.exactSplitSize = null;
+    this.suggestedDestination = null;
     this.splitPreset = "none";
     this.splitMode = "generic";
     this.customSplitAmount = "100";
@@ -874,6 +892,47 @@ export class ConvertSession implements ConvertRouteHandle {
     return false;
   }
 
+  canReviewTask(draft: ConvertTaskDraft): boolean {
+    const locked = this.lockedReason();
+    if (locked) {
+      this.bridge.showNotice(locked);
+      return false;
+    }
+    if (!convertTaskTargetFormat(draft.dest)) {
+      this.bridge.showNotice(this.tr("gui.convert.review.format_unavailable", "This task's format is not available in the conversion screen. Your current settings were kept."));
+      return false;
+    }
+    return true;
+  }
+
+  restoreTaskDraft(draft: ConvertTaskDraft): boolean {
+    if (!this.canReviewTask(draft)) return false;
+    const archive = this.bridge.getArchive();
+    if (!archive || !sameDesktopPath(archive.source, draft.src, this.bridge.platform())
+      || (archive.encoding_override ?? null) !== draft.src_encoding) return false;
+    const format = convertTaskTargetFormat(draft.dest);
+    if (!format) return false;
+    this.syncArchive(archive);
+    this.resetPreflight(true);
+    this.resetOutputOptions();
+    this.targetFormat = format;
+    this.profile = "custom";
+    this.customLevel = draft.level;
+    this.customLevelError = "";
+    this.suggestedDestination = draft.dest;
+    this.splitPreset = draft.split_size === null ? "none" : "custom";
+    this.splitMode = draft.split_mode;
+    this.exactSplitSize = draft.split_size === null ? null : String(draft.split_size);
+    if (draft.split_size !== null) {
+      this.customSplitUnit = draft.split_size >= 1024 ** 3 ? "gib" : "mib";
+      this.customSplitAmount = String(Number((draft.split_size / (this.customSplitUnit === "gib" ? 1024 ** 3 : 1024 ** 2)).toPrecision(9)));
+    }
+    this.encryptNames = draft.encrypt_names;
+    this.validationAttempted = draft.encrypt_names;
+    this.advancedOpen = true;
+    return true;
+  }
+
   leave(): void {
     const request = this.activeRequest();
     this.resetPreflight(true);
@@ -980,8 +1039,10 @@ export class ConvertSession implements ConvertRouteHandle {
           if (this.busy() || this.pending) return;
           this.targetFormat = format;
           if (this.nativeSplitKind(format) === null) this.splitMode = "generic";
-          if (!this.canEncryptData(format)) this.clearPassword();
-          else if (!this.canEncryptNames(format)) this.encryptNames = false;
+          if (!this.canEncryptData(format)) {
+            this.clearPassword();
+          }
+          if (!this.canEncryptNames(format)) this.encryptNames = false;
           this.validationAttempted = false;
         },
       })),
@@ -1079,6 +1140,7 @@ export class ConvertSession implements ConvertRouteHandle {
         },
         onSplitPresetChange: (preset) => {
           this.splitPreset = preset;
+          this.exactSplitSize = null;
           if (preset === "none") this.splitMode = "generic";
           this.validationAttempted = false;
         },
@@ -1092,10 +1154,12 @@ export class ConvertSession implements ConvertRouteHandle {
         },
         onCustomSplitAmountInput: (value) => {
           this.customSplitAmount = value;
+          this.exactSplitSize = null;
           this.validationAttempted = false;
         },
         onCustomSplitUnitChange: (unit) => {
           this.customSplitUnit = unit;
+          this.exactSplitSize = null;
           this.validationAttempted = false;
         },
       },

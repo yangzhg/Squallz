@@ -2,6 +2,9 @@ import type { ArchiveInfo, JobSpec } from "./ipc";
 
 export type ConvertWorkspaceVariant = "modern" | "classic";
 
+export type ConvertTaskDraft = Pick<Extract<JobSpec, { kind: "convert" }>,
+  "src" | "dest" | "level" | "src_encoding" | "encrypt_names" | "split_size" | "split_mode">;
+
 export type ConvertPreflightEvent = Readonly<{
   request_id?: string;
   phase?: string;
@@ -17,6 +20,8 @@ export type ConvertRouteStatus = Readonly<{
 }>;
 
 export interface ConvertRouteHandle {
+  canReviewTask: (draft: ConvertTaskDraft) => boolean;
+  restoreTaskDraft: (draft: ConvertTaskDraft) => boolean;
   canLeave: () => boolean;
   leave: () => void;
   syncArchive: (archive: ArchiveInfo | null) => void;
@@ -26,6 +31,7 @@ export interface ConvertRouteHandle {
 }
 
 export interface ConvertRouteBridge {
+  onReady?: () => void;
   getArchive: () => ArchiveInfo | null;
   tr: (key: string, fallback: string) => string;
   tError: (error: unknown) => string;

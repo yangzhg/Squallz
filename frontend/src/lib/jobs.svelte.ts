@@ -1275,6 +1275,8 @@ type PreviewTaskKind =
   | "compress_split"
   | "compress_sfx"
   | "compress_sfx_failure"
+  | "convert_failure"
+  | "convert_encrypted_failure"
   | "recovery_cleanup_ready"
   | "recovery_cleanup_unconfirmed"
   | "recovery_cleanup_record"
@@ -1325,6 +1327,17 @@ function isRecoveryCleanupPreview(kind: PreviewTaskKind): boolean {
 }
 
 function previewTaskSpec(kind: PreviewTaskKind): JobSpec {
+  if (kind === "convert_failure" || kind === "convert_encrypted_failure") {
+    const encrypted = kind === "convert_encrypted_failure";
+    return {
+      kind: "convert",
+      src: `${sampleRoot}/product-backup.zip`,
+      dest: `${sampleOutputRoot}/Reviewed backup.${encrypted ? "7z" : "zip"}`,
+      level: 4, src_encoding: null, src_password: null, dest_password: null,
+      encrypt_names: encrypted, split_size: 123456789,
+      split_mode: encrypted ? "generic" : "native", replace_existing: false, replacement_guard: null,
+    };
+  }
   if (isUpdatePreview(kind)) {
     return {
       kind: "update",
@@ -1816,6 +1829,8 @@ function previewTaskOffset(kind: PreviewTaskKind): number {
   if (kind === "recovery_cleanup_record") return 20;
   if (kind === "extract") return 2;
   if (kind === "extract_failure") return 24;
+  if (kind === "convert_failure") return 25;
+  if (kind === "convert_encrypted_failure") return 26;
   if (kind === "extract_unknown_current") return 4;
   if (kind === "test") return 5;
   if (kind === "checksum") return 6;
@@ -1830,7 +1845,8 @@ function installTaskPreview(kind: PreviewTaskKind, state: Extract<JobStateName, 
 
   const spec = previewTaskSpec(kind);
   const progress = previewProgress(kind, state);
-  const previewState = kind === "compress_failure" || kind === "compress_sfx_failure" || kind === "extract_failure" || isRecoveryCleanupPreview(kind)
+  const previewState = kind === "compress_failure" || kind === "compress_sfx_failure" || kind === "extract_failure"
+    || kind === "convert_failure" || kind === "convert_encrypted_failure" || isRecoveryCleanupPreview(kind)
     ? "failed"
     : state;
   const target = isRecoveryCleanupPreview(kind)
@@ -1844,6 +1860,8 @@ function installTaskPreview(kind: PreviewTaskKind, state: Extract<JobStateName, 
     `${sampleOutputRoot}/.squallz-par2-repair-8f3d4a9e1c7b2d5f.json`;
   const error: ErrorDto = kind === "compress_failure"
     ? { key: "error.io", params: { detail: "Could not write the archive output" }, detail: "Could not write the archive output" }
+    : kind === "convert_failure" || kind === "convert_encrypted_failure"
+    ? { key: "error.io", params: { detail: "Could not write the converted archive" }, detail: "Could not write the converted archive" }
     : kind === "extract_failure"
     ? { key: "error.io", params: { detail: "Could not write the extracted file" }, detail: "Could not write the extracted file" }
     : isRecoveryCleanupPreview(kind)

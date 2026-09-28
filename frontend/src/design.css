@@ -6096,6 +6096,7 @@ select option {
 .create-side-panel {
   min-width: 0;
   display: grid;
+  align-self: start;
   gap: 12px;
 }
 

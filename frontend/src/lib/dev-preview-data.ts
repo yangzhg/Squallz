@@ -25,6 +25,8 @@ type PreviewTaskKind =
   | "compress_split"
   | "compress_sfx"
   | "compress_sfx_failure"
+  | "convert_failure"
+  | "convert_encrypted_failure"
   | "recovery_cleanup_ready"
   | "recovery_cleanup_unconfirmed"
   | "recovery_cleanup_record"
@@ -429,6 +431,8 @@ function completedTaskParam(value: string | null): RuntimePreviews["completedTas
     value === "compress_split" ||
     value === "compress_sfx" ||
     value === "compress_sfx_failure" ||
+    value === "convert_failure" ||
+    value === "convert_encrypted_failure" ||
     value === "recovery_cleanup_ready" ||
     value === "recovery_cleanup_unconfirmed" ||
     value === "recovery_cleanup_record" ||
