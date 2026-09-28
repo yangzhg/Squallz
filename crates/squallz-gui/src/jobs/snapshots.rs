@@ -23,6 +23,29 @@ pub enum JobInteraction {
     Password,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(tag = "kind", content = "prompt", rename_all = "snake_case")]
+pub enum JobQuestion {
+    Conflict(crate::dto::AskConflictEvent),
+    Password(crate::dto::AskPasswordEvent),
+}
+
+impl JobQuestion {
+    pub(super) fn interaction(&self) -> JobInteraction {
+        match self {
+            Self::Conflict(_) => JobInteraction::Conflict,
+            Self::Password(_) => JobInteraction::Password,
+        }
+    }
+
+    pub(super) fn version(&self) -> u64 {
+        match self {
+            Self::Conflict(prompt) => prompt.version,
+            Self::Password(prompt) => prompt.version,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct JobProgressSnapshot {
     pub done: u64,
@@ -70,6 +93,7 @@ pub struct JobStateSnapshot {
     pub error: Option<ErrorDto>,
     pub result: Option<serde_json::Value>,
     pub interaction: Option<JobInteraction>,
+    pub question: Option<JobQuestion>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -95,7 +119,7 @@ struct StoredJobSnapshot {
     progress: JobProgressSnapshot,
     error: Option<ErrorDto>,
     result: Option<serde_json::Value>,
-    interaction: Option<JobInteraction>,
+    question: Option<JobQuestion>,
     dismissed_by: HashSet<String>,
 }
 
@@ -171,7 +195,7 @@ impl JobSnapshotStore {
                 progress: JobProgressSnapshot::default(),
                 error: None,
                 result: None,
-                interaction: None,
+                question: None,
                 dismissed_by: HashSet::new(),
             },
         );
@@ -212,7 +236,7 @@ impl JobSnapshotStore {
         }
         if entering_terminal {
             let record = self.jobs.get_mut(&id)?;
-            record.interaction = None;
+            record.question = None;
             self.terminal_order.push_back(id);
             self.prune_terminal();
         }
@@ -238,21 +262,28 @@ impl JobSnapshotStore {
         Some(version)
     }
 
-    pub(super) fn set_interaction(
-        &mut self,
-        id: u64,
-        interaction: Option<JobInteraction>,
-    ) -> Option<u64> {
+    pub(super) fn ask(&mut self, id: u64, mut question: JobQuestion) -> Option<JobQuestion> {
         let current = self.jobs.get(&id)?;
-        if current.interaction == interaction
-            || (is_terminal_snapshot_state(&current.state) && interaction.is_some())
-        {
+        if is_terminal_snapshot_state(&current.state) {
             return None;
         }
         let version = self.next_revision();
+        match &mut question {
+            JobQuestion::Conflict(prompt) => prompt.version = version,
+            JobQuestion::Password(prompt) => prompt.version = version,
+        }
         let record = self.jobs.get_mut(&id)?;
         record.version = version;
-        record.interaction = interaction;
+        record.question = Some(question.clone());
+        Some(question)
+    }
+
+    pub(super) fn clear_question(&mut self, id: u64) -> Option<u64> {
+        self.jobs.get(&id)?.question.as_ref()?;
+        let version = self.next_revision();
+        let record = self.jobs.get_mut(&id)?;
+        record.version = version;
+        record.question = None;
         Some(version)
     }
 
@@ -446,7 +477,10 @@ fn snapshot_for_requester(record: &StoredJobSnapshot, requester: &str) -> JobSta
         progress: record.progress.clone(),
         error: record.error.clone(),
         result: record.result.clone(),
-        interaction: record.interaction,
+        interaction: record.question.as_ref().map(JobQuestion::interaction),
+        question: (record.owner_window.as_deref() == Some(requester))
+            .then(|| record.question.clone())
+            .flatten(),
     }
 }
 

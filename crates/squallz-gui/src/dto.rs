@@ -842,6 +842,8 @@ pub struct StateEvent {
 #[derive(Debug, Clone, Serialize)]
 pub struct AskConflictEvent {
     pub id: u64,
+    /// Identity of this pending question, unchanged by progress updates.
+    pub version: u64,
     /// Existing file (absolute path)
     pub existing_path: String,
     pub existing_size: u64,
@@ -856,6 +858,8 @@ pub struct AskConflictEvent {
 #[derive(Debug, Clone, Serialize)]
 pub struct AskPasswordEvent {
     pub id: u64,
+    /// Identity of this pending question, unchanged by progress updates.
+    pub version: u64,
     /// Archive file name (dialog hint)
     pub name: String,
     /// Whether the previous attempt was wrong (true) or none was set

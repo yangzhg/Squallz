@@ -408,6 +408,7 @@ export interface JobSnapshot {
   error: ErrorDto | null;
   result: Record<string, unknown> | null;
   interaction: JobInteraction | null;
+  question: JobQuestion | null;
 }
 
 export interface JobSnapshotsDelta {
@@ -430,6 +431,7 @@ export interface OperationAuditRecord {
 
 export interface AskConflictEvent {
   id: number;
+  version: number;
   existing_path: string;
   existing_size: number;
   existing_modified: number | null;
@@ -440,9 +442,14 @@ export interface AskConflictEvent {
 
 export interface AskPasswordEvent {
   id: number;
+  version: number;
   name: string;
   wrong: boolean;
 }
+
+export type JobQuestion =
+  | { kind: "password"; prompt: AskPasswordEvent }
+  | { kind: "conflict"; prompt: AskConflictEvent };
 
 export interface PasswordBookStatus {
   available: boolean;
@@ -825,10 +832,10 @@ export const ipc = {
   moveJobBefore: (id: number, beforeId: number | null) =>
     invoke<void>("move_job_before", { id, beforeId }),
   cancelJob: (id: number) => invoke<void>("cancel_job", { id }),
-  answerConflict: (id: number, decision: string, applyAll: boolean) =>
-    invoke<void>("answer_conflict", { id, decision, applyAll }),
-  answerPassword: (id: number, password: string | null) =>
-    invoke<void>("answer_password", { id, password }),
+  answerConflict: (id: number, questionVersion: number, decision: string, applyAll: boolean) =>
+    invoke<void>("answer_conflict", { id, questionVersion, decision, applyAll }),
+  answerPassword: (id: number, questionVersion: number, password: string | null) =>
+    invoke<void>("answer_password", { id, questionVersion, password }),
   archivePasswordStatus: (path: string) =>
     invoke<PasswordBookStatus>("archive_password_status", { path }),
   rememberArchivePassword: (path: string, password: string, encoding?: string | null) =>

@@ -1736,10 +1736,11 @@ pub fn answer_conflict(
     window: WebviewWindow,
     jobs: State<'_, Arc<JobManager>>,
     id: u64,
+    question_version: u64,
     decision: String,
     apply_all: bool,
 ) -> Result<(), ErrorDto> {
-    jobs.answer_conflict_for_window(window.label(), id, decision, apply_all)
+    jobs.answer_conflict_for_window(window.label(), id, question_version, decision, apply_all)
 }
 
 /// Answers a `job://ask-password` prompt (`None` = the user cancelled).
@@ -1748,9 +1749,10 @@ pub fn answer_password(
     window: WebviewWindow,
     jobs: State<'_, Arc<JobManager>>,
     id: u64,
+    question_version: u64,
     password: Option<String>,
 ) -> Result<(), ErrorDto> {
-    jobs.answer_password_for_window(window.label(), id, password)
+    jobs.answer_password_for_window(window.label(), id, question_version, password)
 }
 
 /// Persistent password-book status for one archive path.

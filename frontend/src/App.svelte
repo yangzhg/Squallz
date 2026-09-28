@@ -580,7 +580,7 @@
   let archivePasswordPrompt = $derived(openPasswordPrompt());
   let activePasswordPromptIdentity = $derived(
     jobPasswordPrompt
-      ? `job:${jobPasswordPrompt.id}`
+      ? `job:${jobPasswordPrompt.id}:${jobPasswordPrompt.version}`
       : archivePasswordPrompt
         ? `archive:${archivePasswordPrompt.path}`
         : null,
@@ -589,7 +589,7 @@
   let jobConflictPrompt = $derived(pendingConflict());
   let activeConflictPromptIdentity = $derived(
     jobConflictPrompt
-      ? `${jobConflictPrompt.id}:${jobConflictPrompt.incoming_path}`
+      ? `${jobConflictPrompt.id}:${jobConflictPrompt.version}`
       : null,
   );
   let previousConflictPromptIdentity: string | null = null;
@@ -12113,6 +12113,8 @@
       origin: "app",
       ownedByRequester: true,
       interaction: null,
+      question: null,
+      answeredQuestionVersion: 0,
       state: "submitting",
       queuePosition: null,
       queueWaitReason: null,

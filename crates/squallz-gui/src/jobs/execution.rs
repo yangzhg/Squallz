@@ -33,7 +33,7 @@ use crate::state::AppState;
 
 use super::progress::BatchProgressSink;
 use super::redact_format_error_path;
-use super::snapshots::{JobInteraction, JobSnapshotStore};
+use super::snapshots::{JobQuestion, JobSnapshotStore};
 use super::source_cleanup::{
     prepare_source_cleanup, SourceCleanup, SourceCleanupResult, SourceCleanupStatus,
 };
@@ -194,14 +194,12 @@ impl ConflictResolver for GuiConflictResolver {
             return Self::apply(&decision, existing);
         }
         let meta = std::fs::symlink_metadata(existing).ok();
-        let _ = lock_unpoisoned(&self.snapshots)
-            .set_interaction(self.gui_id, Some(JobInteraction::Conflict));
         self.bridge.prepare(self.gui_id);
-        emit(
-            &*self.events,
-            EV_ASK_CONFLICT,
-            &AskConflictEvent {
+        let question = lock_unpoisoned(&self.snapshots).ask(
+            self.gui_id,
+            JobQuestion::Conflict(AskConflictEvent {
                 id: self.gui_id,
+                version: 0,
                 existing_path: existing.to_string_lossy().into_owned(),
                 existing_size: metadata_len_or_zero(meta.as_ref()),
                 existing_modified: meta
@@ -215,11 +213,16 @@ impl ConflictResolver for GuiConflictResolver {
                     .modified
                     .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                     .map(|d| d.as_secs()),
-            },
+            }),
         );
+        let Some(JobQuestion::Conflict(prompt)) = question else {
+            self.bridge.wait(self.gui_id, &|| true);
+            return ConflictDecision::Abort;
+        };
+        emit(&*self.events, EV_ASK_CONFLICT, &prompt);
         let cancelled = || self.cancel_flag.load(Ordering::Relaxed);
         let answer = self.bridge.wait(self.gui_id, &cancelled);
-        let _ = lock_unpoisoned(&self.snapshots).set_interaction(self.gui_id, None);
+        let _ = lock_unpoisoned(&self.snapshots).clear_question(self.gui_id);
         match answer {
             Some(AskAnswer::Conflict {
                 decision,
@@ -331,21 +334,24 @@ impl JobContext<'_> {
                         .filter(|name| !name.is_empty())
                         .map(str::to_owned)
                         .unwrap_or_else(|| path_file_name_or_empty(archive));
-                    let _ = lock_unpoisoned(snapshots)
-                        .set_interaction(gui_id, Some(JobInteraction::Password));
                     bridge.prepare(gui_id);
-                    emit(
-                        &**events,
-                        EV_ASK_PASSWORD,
-                        &AskPasswordEvent {
+                    let question = lock_unpoisoned(snapshots).ask(
+                        gui_id,
+                        JobQuestion::Password(AskPasswordEvent {
                             id: gui_id,
+                            version: 0,
                             name,
                             wrong: matches!(e, FormatError::WrongPassword),
-                        },
+                        }),
                     );
+                    let Some(JobQuestion::Password(prompt)) = question else {
+                        bridge.wait(gui_id, &|| true);
+                        return Err(FormatError::Cancelled);
+                    };
+                    emit(&**events, EV_ASK_PASSWORD, &prompt);
                     let cancelled = || ctl.is_cancelled() || cancel_flag.load(Ordering::Relaxed);
                     let answer = bridge.wait(gui_id, &cancelled);
-                    let _ = lock_unpoisoned(snapshots).set_interaction(gui_id, None);
+                    let _ = lock_unpoisoned(snapshots).clear_question(gui_id);
                     match answer {
                         Some(AskAnswer::Password(Some(pw))) => {
                             current = Some(Password::new(pw));

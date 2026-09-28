@@ -8,6 +8,7 @@ import {
   type ErrorDto,
   type JobInteraction,
   type JobOrigin,
+  type JobQuestion,
   type JobSnapshot,
   type JobSnapshotsDelta,
   type JobSpec,
@@ -23,6 +24,7 @@ import {
   shouldApplyFullSnapshot,
   shouldApplySnapshotProgress,
   shouldApplySnapshotState,
+  snapshotQuestion,
 } from "./job-snapshot";
 import { t, tFallback } from "./i18n.svelte";
 import { jobTitleFor } from "./job-title";
@@ -63,6 +65,8 @@ export interface Task {
   origin: JobOrigin;
   ownedByRequester: boolean;
   interaction: JobInteraction | null;
+  question: JobQuestion | null;
+  answeredQuestionVersion: number;
   state: JobStateName;
   queuePosition: number | null;
   queueWaitReason: QueueWaitReason | null;
@@ -104,8 +108,6 @@ export function jobSupportsPause(spec: JobSpec): boolean {
 
 const store = $state({
   tasks: [] as Task[],
-  conflict: null as AskConflictEvent | null,
-  password: null as AskPasswordEvent | null,
 });
 
 const pendingStates = new Map<number, StateEvent>();
@@ -222,6 +224,8 @@ export async function submitJob(spec: JobSpec): Promise<number> {
       origin: "app",
       ownedByRequester: true,
       interaction: null,
+      question: null,
+      answeredQuestionVersion: 0,
       state: "queued",
       queuePosition: null,
       queueWaitReason: null,
@@ -282,8 +286,8 @@ function runTerminalEffects(task: Task, previousState: JobStateName): void {
 }
 
 function clearPendingQuestions(id: number): void {
-  if (store.conflict?.id === id) store.conflict = null;
-  if (store.password?.id === id) store.password = null;
+  const task = find(id);
+  if (task) task.question = null;
 }
 
 function errorNeedsInspection(error: ErrorDto | null): boolean {
@@ -1105,6 +1109,8 @@ function taskFromSnapshot(snapshot: JobSnapshot): Task {
     origin: snapshot.origin,
     ownedByRequester: snapshot.owned_by_requester,
     interaction: snapshot.interaction,
+    question: snapshotQuestion(snapshot, 0),
+    answeredQuestionVersion: 0,
     state: snapshot.state,
     queuePosition: snapshot.queue_position,
     queueWaitReason: snapshot.queue_wait_reason,
@@ -1152,6 +1158,7 @@ function applySnapshot(snapshot: JobSnapshot): void {
   task.origin = snapshot.origin;
   task.ownedByRequester = snapshot.owned_by_requester;
   task.interaction = snapshot.interaction;
+  task.question = snapshotQuestion(snapshot, task.answeredQuestionVersion, task.question);
   task.state = snapshot.state;
   task.queuePosition = snapshot.queue_position;
   task.queueWaitReason = snapshot.queue_wait_reason;
@@ -1222,6 +1229,15 @@ async function reconcileSnapshotFeed(stopped: () => boolean): Promise<void> {
   }
 }
 
+async function refreshQuestionTask(id: number): Promise<void> {
+  try {
+    const snapshot = await ipc.jobSnapshot(id);
+    if (snapshot && !locallyDismissed.has(id)) applySnapshot(snapshot);
+  } catch {
+    // The snapshot feed retries automatically if a wake-up races a reload.
+  }
+}
+
 /** Wires this window's job event listeners once at startup. */
 export async function initJobEvents(): Promise<() => void> {
   const listen = await currentWebviewWindowListener();
@@ -1231,10 +1247,10 @@ export async function initJobEvents(): Promise<() => void> {
     cleanup.push(await listen<ProgressEvent>("job://progress", (e) => onProgress(e.payload)));
     cleanup.push(await listen<StateEvent>("job://state", (e) => onState(e.payload)));
     cleanup.push(await listen<AskConflictEvent>("job://ask-conflict", (e) => {
-      store.conflict = e.payload;
+      void refreshQuestionTask(e.payload.id);
     }));
     cleanup.push(await listen<AskPasswordEvent>("job://ask-password", (e) => {
-      store.password = e.payload;
+      void refreshQuestionTask(e.payload.id);
     }));
     void reconcileSnapshotFeed(() => stopped);
   } catch (error) {
@@ -1823,6 +1839,8 @@ function installTaskPreview(kind: PreviewTaskKind, state: Extract<JobStateName, 
     origin: "app",
     ownedByRequester: true,
     interaction: null,
+    question: null,
+    answeredQuestionVersion: 0,
     state: previewState,
     queuePosition: null,
     queueWaitReason: null,
@@ -1887,6 +1905,8 @@ export function installTaskQueuePreview(
       origin: "app",
       ownedByRequester: true,
       interaction: null,
+      question: null,
+      answeredQuestionVersion: 0,
       state: "queued",
       queuePosition: index + 1,
       queueWaitReason: index === 0 ? waitReason : "queue_order",
@@ -2054,31 +2074,42 @@ export async function clearFinished(ids: readonly number[]): Promise<boolean> {
 /* ---- Conflict modal ---- */
 
 export function pendingConflict(): AskConflictEvent | null {
-  return store.conflict;
+  for (const task of store.tasks) {
+    if (task.question?.kind === "conflict") return task.question.prompt;
+  }
+  return null;
 }
 
 export function answerConflict(decision: string, applyAll: boolean): void {
-  const c = store.conflict;
+  const c = pendingConflict();
   if (!c) return;
-  store.conflict = null;
-  void ipc.answerConflict(c.id, decision, applyAll).catch(() => {
-    pushToast({ kind: "warning", title: t("gui.task.answer_failed") });
-  });
+  answerQuestion(c, () => ipc.answerConflict(c.id, c.version, decision, applyAll));
 }
 
 /* ---- Password modal for running jobs ---- */
 
 export function pendingPassword(): AskPasswordEvent | null {
-  return store.password;
+  for (const task of store.tasks) {
+    if (task.question?.kind === "password") return task.question.prompt;
+  }
+  return null;
 }
 
 export function answerPassword(password: string | null): void {
-  const p = store.password;
+  const p = pendingPassword();
   if (!p) return;
-  store.password = null;
-  void ipc.answerPassword(p.id, password).catch(() => {
+  answerQuestion(p, () => ipc.answerPassword(p.id, p.version, password));
+}
+
+function answerQuestion(prompt: AskPasswordEvent | AskConflictEvent, send: () => Promise<void>): void {
+  const task = find(prompt.id);
+  if (!task) return;
+  task.answeredQuestionVersion = prompt.version;
+  task.question = null;
+  void send().catch(() => {
+    if (task.answeredQuestionVersion === prompt.version) task.answeredQuestionVersion = 0;
     pushToast({ kind: "warning", title: t("gui.task.answer_failed") });
-  });
+  }).finally(() => refreshQuestionTask(prompt.id));
 }
 
 /** Localized error text for a failed task row. */

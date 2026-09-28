@@ -885,33 +885,36 @@ impl JobManager {
         &self,
         requester: &str,
         gui_id: u64,
+        question_version: u64,
         decision: String,
         apply_all: bool,
     ) -> Result<(), ErrorDto> {
-        self.ensure_exact_owner_interaction(requester, gui_id, JobInteraction::Conflict)?;
-        if !self.bridge.answer(
+        self.answer_question(
+            requester,
             gui_id,
+            question_version,
+            JobInteraction::Conflict,
             AskAnswer::Conflict {
                 decision,
                 apply_all,
             },
-        ) {
-            return Err(job_unavailable_error());
-        }
-        Ok(())
+        )
     }
 
     pub fn answer_password_for_window(
         &self,
         requester: &str,
         gui_id: u64,
+        question_version: u64,
         password: Option<String>,
     ) -> Result<(), ErrorDto> {
-        self.ensure_exact_owner_interaction(requester, gui_id, JobInteraction::Password)?;
-        if !self.bridge.answer(gui_id, AskAnswer::Password(password)) {
-            return Err(job_unavailable_error());
-        }
-        Ok(())
+        self.answer_question(
+            requester,
+            gui_id,
+            question_version,
+            JobInteraction::Password,
+            AskAnswer::Password(password),
+        )
     }
 
     /// Releases a native window and cancels every non-terminal job it owns.
@@ -1018,19 +1021,27 @@ impl JobManager {
         }
     }
 
-    fn ensure_exact_owner_interaction(
+    fn answer_question(
         &self,
         requester: &str,
         gui_id: u64,
+        question_version: u64,
         interaction: JobInteraction,
+        answer: AskAnswer,
     ) -> Result<(), ErrorDto> {
         self.ensure_exact_owner(requester, gui_id)?;
-        let current = lock_unpoisoned(&self.snapshots).snapshot(requester, gui_id);
-        if current.is_some_and(|snapshot| snapshot.interaction == Some(interaction)) {
-            Ok(())
-        } else {
-            Err(job_unavailable_error())
+        let mut snapshots = lock_unpoisoned(&self.snapshots);
+        let question = snapshots
+            .snapshot(requester, gui_id)
+            .and_then(|snapshot| snapshot.question);
+        if !question.is_some_and(|question| {
+            question.interaction() == interaction && question.version() == question_version
+        }) || !self.bridge.answer(gui_id, answer)
+        {
+            return Err(job_unavailable_error());
         }
+        snapshots.clear_question(gui_id);
+        Ok(())
     }
 
     fn cleanup_terminal_queue_slots(&self) {

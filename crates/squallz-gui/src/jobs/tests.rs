@@ -724,8 +724,19 @@ fn snapshot_controls_use_requester_scope_and_owner_event_sink() {
     let owner_snapshot = manager.snapshot_for_window("task-owner", id).unwrap();
     assert!(owner_snapshot.owned_by_requester);
     assert_eq!(owner_snapshot.interaction, Some(JobInteraction::Password));
+    let question_version = owner_snapshot.question.as_ref().unwrap().version();
+    let restored = manager.snapshots_for_window("task-owner", None);
+    let question = serde_json::to_value(&restored.upserts[0].question).unwrap();
+    assert_eq!(question["kind"], "password");
+    assert_eq!(
+        question["prompt"]["name"],
+        archive.file_name().unwrap().to_str().unwrap()
+    );
+    assert_eq!(question["prompt"]["wrong"], false);
+    assert_eq!(question["prompt"]["version"], question_version);
     let main_snapshot = manager.snapshot_for_window("main", id).unwrap();
     assert!(!main_snapshot.owned_by_requester);
+    assert!(main_snapshot.question.is_none());
     assert_eq!(main_snapshot.origin, JobOrigin::FileManager);
     let denied = manager.snapshot_for_window("task-other", id).unwrap_err();
     assert_eq!(denied.key, "error.other");
@@ -738,20 +749,20 @@ fn snapshot_controls_use_requester_scope_and_owner_event_sink() {
     manager.resume_for_window("main", id).unwrap();
     assert_eq!(
         manager
-            .answer_password_for_window("main", id, None)
+            .answer_password_for_window("main", id, question_version, None)
             .unwrap_err()
             .key,
         "error.other"
     );
     assert_eq!(
         manager
-            .answer_conflict_for_window("task-owner", id, "skip".into(), false)
+            .answer_conflict_for_window("task-owner", id, question_version, "skip".into(), false)
             .unwrap_err()
             .key,
         "error.other"
     );
     manager
-        .answer_password_for_window("task-owner", id, None)
+        .answer_password_for_window("task-owner", id, question_version, None)
         .unwrap();
     wait_for_state(
         &owner_sink,
@@ -761,7 +772,7 @@ fn snapshot_controls_use_requester_scope_and_owner_event_sink() {
     );
     assert_eq!(
         manager
-            .answer_password_for_window("task-owner", id, None)
+            .answer_password_for_window("task-owner", id, question_version, None)
             .unwrap_err()
             .key,
         "error.other"
@@ -771,6 +782,7 @@ fn snapshot_controls_use_requester_scope_and_owner_event_sink() {
     let terminal = manager.snapshot_for_window("main", id).unwrap();
     assert_eq!(terminal.state, "cancelled");
     assert_eq!(terminal.interaction, None);
+    assert!(terminal.question.is_none());
     let states = owner_sink.events.lock().unwrap().clone();
     assert_eq!(
         states_of(&states, id),
@@ -793,11 +805,17 @@ fn snapshot_controls_use_requester_scope_and_owner_event_sink() {
 fn conflict_answers_require_the_owner_and_current_prompt_type() {
     let dir = temp_dir("snapshot-conflict-answer");
     let archive = dir.join("conflict.zip");
-    std::fs::write(&archive, build_stored_zip(&[(b"same.txt", b"new bytes")])).unwrap();
+    std::fs::write(
+        &archive,
+        build_stored_zip(&[(b"same.txt", b"new bytes"), (b"next.txt", b"next bytes")]),
+    )
+    .unwrap();
     let output = dir.join("output");
     std::fs::create_dir_all(&output).unwrap();
     let existing = output.join("same.txt");
     std::fs::write(&existing, b"original bytes").unwrap();
+    let next_existing = output.join("next.txt");
+    std::fs::write(&next_existing, b"keep next file").unwrap();
 
     let manager = JobManager::new();
     let state = Arc::new(AppState::new());
@@ -836,27 +854,82 @@ fn conflict_answers_require_the_owner_and_current_prompt_type() {
             .interaction,
         Some(JobInteraction::Conflict)
     );
+    let restored = manager.snapshots_for_window("task-conflict-owner", None);
+    let question = restored.upserts[0].question.as_ref().unwrap();
+    let question_version = question.version();
+    let serialized = serde_json::to_value(question).unwrap();
+    assert_eq!(serialized["kind"], "conflict");
+    assert_eq!(serialized["prompt"]["incoming_path"], "same.txt");
+    assert_eq!(serialized["prompt"]["existing_size"], 14);
+    assert!(manager
+        .snapshot_for_window("main", id)
+        .unwrap()
+        .question
+        .is_none());
     assert_eq!(
         manager
-            .answer_password_for_window("task-conflict-owner", id, None)
+            .answer_password_for_window("task-conflict-owner", id, question_version, None)
             .unwrap_err()
             .key,
         "error.other"
     );
     assert_eq!(
         manager
-            .answer_conflict_for_window("main", id, "skip".into(), false)
+            .answer_conflict_for_window("main", id, question_version, "skip".into(), false)
             .unwrap_err()
             .key,
         "error.other"
     );
     manager
-        .answer_conflict_for_window("task-conflict-owner", id, "skip".into(), false)
+        .answer_conflict_for_window(
+            "task-conflict-owner",
+            id,
+            question_version,
+            "skip".into(),
+            false,
+        )
+        .unwrap();
+    wait_for_event(
+        &owner_sink,
+        std::time::Duration::from_secs(2),
+        |(name, payload)| {
+            name == EV_ASK_CONFLICT && payload["id"] == id && payload["incoming_path"] == "next.txt"
+        },
+    );
+    let next_question = manager
+        .snapshot_for_window("task-conflict-owner", id)
+        .unwrap()
+        .question
+        .unwrap();
+    assert!(next_question.version() > question_version);
+    assert!(manager
+        .answer_conflict_for_window(
+            "task-conflict-owner",
+            id,
+            question_version,
+            "overwrite".into(),
+            true,
+        )
+        .is_err());
+    manager
+        .answer_conflict_for_window(
+            "task-conflict-owner",
+            id,
+            next_question.version(),
+            "skip".into(),
+            false,
+        )
         .unwrap();
     wait_for_state(&owner_sink, id, "done", std::time::Duration::from_secs(2));
     assert_eq!(
         manager
-            .answer_conflict_for_window("task-conflict-owner", id, "skip".into(), false)
+            .answer_conflict_for_window(
+                "task-conflict-owner",
+                id,
+                question_version,
+                "skip".into(),
+                false
+            )
             .unwrap_err()
             .key,
         "error.other"
@@ -865,7 +938,9 @@ fn conflict_answers_require_the_owner_and_current_prompt_type() {
 
     let terminal = manager.snapshot_for_window("main", id).unwrap();
     assert_eq!(terminal.interaction, None);
+    assert!(terminal.question.is_none());
     assert_eq!(std::fs::read(existing).unwrap(), b"original bytes");
+    assert_eq!(std::fs::read(next_existing).unwrap(), b"keep next file");
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -2631,6 +2706,12 @@ fn extract_nested_job_prompts_separately_for_outer_and_inner_passwords() {
     );
 
     wait_for_password_prompt_count(&sink, id, 1);
+    let outer_question_version = manager
+        .snapshot_for_window("main", id)
+        .unwrap()
+        .question
+        .unwrap()
+        .version();
     {
         let recorded = sink.events.lock().unwrap();
         let first = recorded
@@ -2640,10 +2721,25 @@ fn extract_nested_job_prompts_separately_for_outer_and_inner_passwords() {
         assert_eq!(first.1["name"], outer_name);
     }
     manager
-        .answer_password_for_window("main", id, Some("outer-secret".into()))
+        .answer_password_for_window(
+            "main",
+            id,
+            outer_question_version,
+            Some("outer-secret".into()),
+        )
         .unwrap();
 
     wait_for_password_prompt_count(&sink, id, 2);
+    let inner_question_version = manager
+        .snapshot_for_window("main", id)
+        .unwrap()
+        .question
+        .unwrap()
+        .version();
+    assert!(inner_question_version > outer_question_version);
+    assert!(manager
+        .answer_password_for_window("main", id, outer_question_version, None)
+        .is_err());
     {
         let recorded = sink.events.lock().unwrap();
         let prompts = recorded
@@ -2653,7 +2749,12 @@ fn extract_nested_job_prompts_separately_for_outer_and_inner_passwords() {
         assert_eq!(prompts[1].1["name"], inner_name);
     }
     manager
-        .answer_password_for_window("main", id, Some("inner-secret".into()))
+        .answer_password_for_window(
+            "main",
+            id,
+            inner_question_version,
+            Some("inner-secret".into()),
+        )
         .unwrap();
     manager.wait_idle();
 
