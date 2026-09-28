@@ -711,11 +711,31 @@ pub enum JobSpec {
     },
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct JobSnapshotDescription {
+    pub spec: JobSpec,
+    pub output_password_required: bool,
+}
+
 impl JobSpec {
     /// Returns the task description that may be mirrored to another app
     /// window. Credentials never cross that boundary; non-secret options
     /// continue to describe the operation that actually ran.
-    pub(crate) fn redacted_for_snapshot(&self) -> Self {
+    pub(crate) fn redacted_for_snapshot(&self) -> JobSnapshotDescription {
+        let output_password_required = match self {
+            Self::Compress {
+                password,
+                encrypt_names,
+                ..
+            } => password.is_some() || *encrypt_names,
+            Self::Convert {
+                dest_password,
+                encrypt_names,
+                ..
+            } => dest_password.is_some() || *encrypt_names,
+            Self::ExportSqz { dest_password, .. } => dest_password.is_some(),
+            _ => false,
+        };
         let mut redacted = self.clone();
         match &mut redacted {
             Self::Compress {
@@ -779,7 +799,10 @@ impl JobSpec {
             | Self::ChecksumCheck { .. }
             | Self::DuplicateScan { .. } => {}
         }
-        redacted
+        JobSnapshotDescription {
+            spec: redacted,
+            output_password_required,
+        }
     }
 }
 
@@ -1487,7 +1510,7 @@ mod tests {
         let specs = vec![
             serde_json::json!({
                 "kind": "compress", "inputs": ["source"], "dest": "archive.7z",
-                "level": 5, "password": secret, "encrypt_names": true,
+                "level": 5, "password": secret, "encrypt_names": false,
                 "split_size": null, "split_mode": "generic", "excludes": [],
                 "content_policy": "keep_all_files", "sqz_inner_format": null,
                 "sfx_target": null, "completion": "none",
@@ -1521,7 +1544,7 @@ mod tests {
             serde_json::json!({
                 "kind": "convert", "src": "source.7z", "dest": "dest.7z",
                 "level": 5, "src_encoding": null, "src_password": secret,
-                "dest_password": secret, "encrypt_names": true,
+                "dest_password": secret, "encrypt_names": false,
                 "split_size": null, "split_mode": "generic",
                 "replace_existing": true, "replacement_guard": replacement_guard.clone()
             }),
@@ -1545,14 +1568,55 @@ mod tests {
         for value in specs {
             let encrypt_names = value.get("encrypt_names").cloned();
             let spec: JobSpec = serde_json::from_value(value).expect("valid credential job spec");
-            let redacted = serde_json::to_value(spec.redacted_for_snapshot())
-                .expect("redacted job spec serializes");
+            let description = spec.redacted_for_snapshot();
+            assert_eq!(
+                description.output_password_required,
+                matches!(
+                    spec,
+                    JobSpec::Compress { .. } | JobSpec::Convert { .. } | JobSpec::ExportSqz { .. }
+                )
+            );
+            let redacted =
+                serde_json::to_value(description.spec).expect("redacted job spec serializes");
             assert!(!redacted.to_string().contains(secret));
             assert!(!redacted.to_string().contains("sqcg1_"));
             assert!(!redacted.to_string().contains("sqeg1_"));
             if let Some(expected) = encrypt_names {
                 assert_eq!(redacted["encrypt_names"], expected);
             }
+        }
+    }
+
+    #[test]
+    fn source_password_does_not_imply_output_encryption() {
+        for (dest_password, encrypt_names, required) in [
+            (None, false, false),
+            (Some("output-password".to_owned()), false, true),
+            (None, true, true),
+        ] {
+            let spec = JobSpec::Convert {
+                src: "source.7z".to_owned(),
+                dest: "output.7z".to_owned(),
+                level: 5,
+                src_encoding: None,
+                src_password: Some("source-password".to_owned()),
+                dest_password,
+                encrypt_names,
+                split_size: None,
+                split_mode: squallz_core::api::SplitOutputMode::Generic,
+                replace_existing: false,
+                replacement_guard: None,
+            };
+            let description = spec.redacted_for_snapshot();
+            assert_eq!(description.output_password_required, required);
+            assert!(matches!(
+                description.spec,
+                JobSpec::Convert {
+                    src_password: None,
+                    dest_password: None,
+                    ..
+                }
+            ));
         }
     }
 

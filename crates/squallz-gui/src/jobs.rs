@@ -17,7 +17,9 @@ use squallz_core::{
 
 use crate::audit::{self, OperationAudit, OperationAuditRecord};
 use crate::bridge::{AskAnswer, AskBridge};
-use crate::dto::{ErrorDto, JobSpec, SettingsDto, SfxCreateCapabilityDto, StateEvent};
+use crate::dto::{
+    ErrorDto, JobSnapshotDescription, JobSpec, SettingsDto, SfxCreateCapabilityDto, StateEvent,
+};
 use crate::events::{emit, EventSink, EV_STATE};
 use crate::source_cleanup_journal::SourceCleanupJournal;
 use crate::state::{AppState, ResolvedArchiveSource};
@@ -201,7 +203,7 @@ struct ManagedJob {
 
 struct PreparedJob {
     execution_spec: JobSpec,
-    snapshot_spec: JobSpec,
+    snapshot: JobSnapshotDescription,
     _source_leases: Vec<ResolvedArchiveSource>,
     redactions: Vec<(String, String)>,
 }
@@ -304,10 +306,9 @@ impl PreparedJob {
             }
             _ => {}
         }
-        snapshot_spec = snapshot_spec.redacted_for_snapshot();
         Ok(Self {
             execution_spec,
-            snapshot_spec,
+            snapshot: snapshot_spec.redacted_for_snapshot(),
             _source_leases: source_leases,
             redactions,
         })
@@ -569,7 +570,7 @@ impl JobManager {
         settings: SettingsDto,
     ) -> Result<u64, FormatError> {
         let prepared = PreparedJob::new(&state, owner_window.as_deref(), &spec)?;
-        let spec = prepared.snapshot_spec;
+        let spec = prepared.snapshot.spec.clone();
         self.cleanup_terminal_queue_slots();
         let gui_id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let bridge = Arc::clone(&self.bridge);
@@ -593,7 +594,7 @@ impl JobManager {
             lock_unpoisoned(&self.snapshots).insert_with_resources(
                 gui_id,
                 owner_window,
-                spec.redacted_for_snapshot(),
+                prepared.snapshot,
                 "cancelled",
                 job_resources,
                 stream_buffer_limit_bytes,
@@ -603,7 +604,7 @@ impl JobManager {
         let queued_version = lock_unpoisoned(&self.snapshots).insert_with_resources(
             gui_id,
             owner_window.clone(),
-            spec.redacted_for_snapshot(),
+            prepared.snapshot,
             "queued",
             job_resources,
             stream_buffer_limit_bytes,

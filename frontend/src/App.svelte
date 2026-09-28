@@ -196,6 +196,7 @@
   import { pushToast, removeToastByKey } from "./lib/toasts.svelte";
   import { isNewSourceCleanupRecoveryGeneration } from "./lib/source-cleanup";
   import { currentWebviewWindowListener } from "./lib/tauri-events";
+  import { outputPasswordRequired } from "./lib/job-snapshot";
   import { previewSystemOpenRequiresConfirmation } from "./lib/preview-presentation";
   import {
     previewResponseIsCurrent,
@@ -899,7 +900,7 @@
   let extractPresetDraftName = $state("");
   let createPresetMutationState = $state<ArchivePresetMutationState>("idle");
   let extractPresetMutationState = $state<ArchivePresetMutationState>("idle");
-  let createPresetCredentialIntent = $state<"none" | "prompt">("none");
+  let createEncryptionEnabled = $state(false);
   let createPresetSfxTarget = $state<PresetSfxTarget>("current_platform");
   let createPresetSqzInnerFormat = $state<PresetSqzInnerFormat>("sqz");
   let createPresetSplitSizeBytes = $state<string | null>(null);
@@ -2865,6 +2866,14 @@
       showNotice(tr("gui.create.sfx_zip_only_notice", "Turn off self-extracting output before choosing another format"));
       return;
     }
+    if (createEncryptionEnabled && !createFormats[next].can_encrypt_data) {
+      showNotice(tr("gui.create.encryption_format_change", "Turn off file content encryption before choosing a format that cannot encrypt files."));
+      return;
+    }
+    if (createEncryptNames && !createFormats[next].can_encrypt_names) {
+      showNotice(tr("gui.create.name_encryption_format_change", "Turn off file name encryption before choosing a format that cannot hide names."));
+      return;
+    }
     markCreatePresetDraftTouched();
     activeCreateFormat = next;
     if (nativeSplitKind(next, createSfxEnabled) === null) createSplitMode = "generic";
@@ -2890,20 +2899,24 @@
     createPasswordConfirmation = "";
     createPasswordVisible = false;
     createEncryptNames = false;
-    createPresetCredentialIntent = "none";
+    createEncryptionEnabled = false;
   }
 
   function updateCreatePassword(value: string) {
     markCreatePresetDraftTouched();
-    const hadPassword = createPassword.length > 0;
     createPassword = value;
-    createOptionsValidationAttempted = false;
-    if (value.length > 0) createPresetCredentialIntent = "prompt";
+    if (value.length > 0) createEncryptionEnabled = true;
+    createOptionsValidationAttempted = value.length === 0 && createEncryptionEnabled;
     if (value.length === 0) {
       createPasswordConfirmation = "";
-      createEncryptNames = false;
-      if (hadPassword) createPresetCredentialIntent = "none";
     }
+  }
+
+  function updateCreateEncryptionEnabled(enabled: boolean) {
+    markCreatePresetDraftTouched();
+    createEncryptionEnabled = enabled && createPasswordDataAvailable();
+    if (!createEncryptionEnabled) clearCreatePasswordFields();
+    createOptionsValidationAttempted = createEncryptionEnabled;
   }
 
   function updateCreatePasswordConfirmation(value: string) {
@@ -2914,7 +2927,7 @@
 
   function updateCreateEncryptNames(enabled: boolean) {
     markCreatePresetDraftTouched();
-    createEncryptNames = enabled && createNameEncryptionAvailable() && createPassword.length > 0;
+    createEncryptNames = enabled && createNameEncryptionAvailable() && createEncryptionEnabled;
   }
 
   function updateCreateSplitPreset(preset: CreateSplitPreset) {
@@ -2960,6 +2973,10 @@
   }
 
   function updateCreateSfxEnabled(enabled: boolean) {
+    if (enabled && createEncryptNames) {
+      showNotice(tr("gui.create.name_encryption_format_change", "Turn off file name encryption before choosing a format that cannot hide names."));
+      return;
+    }
     if (enabled && !sfxCreateCapabilityReady) {
       showNotice(tr("gui.create.sfx_capability_loading", "Checking self-extracting support"));
       return;
@@ -3035,8 +3052,8 @@
 
   function createPasswordValidationMessage(): string {
     if (!createPasswordDataAvailable()) return "";
-    if (createPresetCredentialIntent === "prompt" && createPassword.length === 0) {
-      return tr("gui.presets.password_required", "Enter the password this preset should use for this archive");
+    if (createEncryptionEnabled && createPassword.length === 0) {
+      return tr("gui.create.password_required", "Enter an archive password, or turn off file content encryption.");
     }
     if (createPassword.length === 0) return "";
     if (createPasswordConfirmation.length === 0) {
@@ -3066,7 +3083,8 @@
 
   function visibleCreatePasswordError(): string {
     const error = createPasswordValidationMessage();
-    return createOptionsValidationAttempted || createPasswordConfirmation.length > 0 ? error : "";
+    return createOptionsValidationAttempted || createPasswordConfirmation.length > 0
+      || (createEncryptionEnabled && createPassword.length === 0) ? error : "";
   }
 
   function visibleCreateSplitError(): string {
@@ -3081,10 +3099,17 @@
       : createSfxEnabled && (activeCreateFormat !== "zip" || createSplitPreset !== "none")
         ? tr("gui.create.sfx_requires_zip", "Self-extracting output requires a single ZIP payload")
         : "";
-    const error = createPasswordValidationMessage() || createSplitValidationMessage() || sfxError;
+    const passwordError = createPasswordValidationMessage();
+    const splitError = createSplitValidationMessage();
+    const error = passwordError || splitError || sfxError;
     if (!error) return true;
     createAdvancedOpen = true;
+    classicCreateSection = passwordError || sfxError ? "security" : "volumes";
     showNotice(error);
+    void tick().then(() => {
+      if (screen !== "create" || !createOptionsValidationAttempted || blockingModalVisible()) return;
+      document.querySelector<HTMLInputElement>(".create-option-input[aria-invalid='true']")?.focus();
+    });
     return false;
   }
 
@@ -3099,7 +3124,6 @@
     if (!validateCreateOptions()) return null;
     const format = activeCreateFormat;
     const password = createFormats[format].can_encrypt_data && createPassword.length > 0 ? createPassword : null;
-    const selectedPreset = selectedCreateArchivePreset();
     const splitSize = createSplitSizeBytes();
     const splitMode = splitSize === null ? "generic" : createSplitMode;
     const outputExtension = archiveOutputExtension(
@@ -3128,8 +3152,8 @@
       postSuccess: createPostSuccess,
       testAfterCreate: effectiveCreateTestAfterCreate(),
       defaultCreateDir: normalizedDefaultCreateDir(appliedDefaultCreateDir),
-      restoreCredentialPrompt: Boolean(selectedPreset && selectedPreset.options.credential.kind !== "none"),
-      restoreEncryptNames: selectedPreset?.options.encrypt_names ?? false,
+      restoreCredentialPrompt: createEncryptionEnabled,
+      restoreEncryptNames: createEncryptNames,
     };
   }
 
@@ -3277,7 +3301,7 @@
   function currentCreateArchivePresetOptions(): CreateArchivePresetOptions {
     const splitSize = createSplitSizeBytes();
     const credential: CreateArchivePresetOptions["credential"] =
-      createPresetCredentialIntent === "prompt" || createPassword.length > 0
+      createEncryptionEnabled
         ? { kind: "prompt" }
         : { kind: "none" };
     return {
@@ -3527,7 +3551,7 @@
     activeCreateProfile = "custom";
     customCreateLevel = preset.options.level;
     customCreateLevelError = "";
-    createPresetCredentialIntent = preset.options.credential.kind === "none" ? "none" : "prompt";
+    createEncryptionEnabled = preset.options.credential.kind !== "none";
     createPassword = "";
     createPasswordConfirmation = "";
     createPasswordVisible = false;
@@ -8686,7 +8710,7 @@
     if (createPassword.length > 0) {
       return tr("gui.create.setup.password_on", "Password on");
     }
-    if (createPresetCredentialIntent === "prompt") {
+    if (createEncryptionEnabled) {
       return tr("gui.create.setup.password_required", "Password required");
     }
     return tr("gui.create.setup.no_password", "No password");
@@ -9065,6 +9089,7 @@
         password: createPassword,
         passwordConfirmation: createPasswordConfirmation,
         passwordVisible: createPasswordVisible,
+        encryptionEnabled: createEncryptionEnabled,
         encryptNames: createEncryptNames,
         canEncryptData: createPasswordDataAvailable(),
         canEncryptNames: createNameEncryptionAvailable(),
@@ -9086,6 +9111,7 @@
         onPasswordInput: updateCreatePassword,
         onPasswordConfirmationInput: updateCreatePasswordConfirmation,
         onPasswordVisibleChange: (visible) => (createPasswordVisible = visible),
+        onEncryptionEnabledChange: updateCreateEncryptionEnabled,
         onEncryptNamesChange: updateCreateEncryptNames,
         onSplitPresetChange: updateCreateSplitPreset,
         onSplitModeChange: updateCreateSplitMode,
@@ -9267,7 +9293,7 @@
   function resetCreateCredentialsAfterPlan(pending: PendingCreateSubmission | null) {
     clearCreatePasswordFields();
     if (pending?.restoreCredentialPrompt) {
-      createPresetCredentialIntent = "prompt";
+      createEncryptionEnabled = true;
       createEncryptNames = pending.restoreEncryptNames;
     }
   }
@@ -12278,6 +12304,7 @@
       id: null,
       version: 0,
       spec: submittingJobSpec,
+      outputPasswordRequired: outputPasswordRequired(submittingJobSpec),
       title: titleForJobSpec(submittingJobSpec),
       origin: "app",
       ownedByRequester: true,
@@ -12897,7 +12924,7 @@
       await reviewConvertTask(task);
       return;
     }
-    if (target === "create" && task.spec.kind === "compress" && !restoreCreateTaskDraft(task.spec)) return;
+    if (target === "create" && task.spec.kind === "compress" && !restoreCreateTaskDraft(task.spec, task.outputPasswordRequired)) return;
     if (target === "recovery") adoptRecoveryTargetFromTask(task);
     setScreen(target);
     await dismissTaskDialog(task);
@@ -12933,6 +12960,7 @@
     const draft: ConvertTaskDraft = {
       src: spec.src, dest: spec.dest, level: spec.level, src_encoding: spec.src_encoding,
       encrypt_names: spec.encrypt_names, split_size: spec.split_size, split_mode: spec.split_mode,
+      outputPasswordRequired: task.outputPasswordRequired,
     };
     const session = await loadConvertRouteForReview();
     if (!session || !session.canReviewTask(draft)) return;
@@ -13008,7 +13036,7 @@
       createFormats[format].extensions.some((extension) => path.endsWith(`.${extension}`))) ?? null;
   }
 
-  function restoreCreateTaskDraft(spec: Extract<JobSpec, { kind: "compress" }>): boolean {
+  function restoreCreateTaskDraft(spec: Extract<JobSpec, { kind: "compress" }>, passwordRequired: boolean): boolean {
     if (createSourcesLocked()) {
       showNotice(createSourcesLockedReason());
       return false;
@@ -13038,7 +13066,7 @@
     customCreateLevelError = "";
     clearCreatePasswordFields();
     createEncryptNames = spec.encrypt_names;
-    createPresetCredentialIntent = spec.encrypt_names || spec.password ? "prompt" : "none";
+    createEncryptionEnabled = passwordRequired || spec.encrypt_names;
     applyPresetVolumeMode(spec.split_size === null
       ? { kind: "single" }
       : { kind: "split", size_bytes: String(spec.split_size) });
@@ -13056,7 +13084,7 @@
     createTestAfterCreate = spec.test_after_create;
     normalizeUnsupportedCreatePostSuccess(false);
     normalizeUnsupportedCreateCompletion(false);
-    createOptionsValidationAttempted = false;
+    createOptionsValidationAttempted = createEncryptionEnabled;
     classicCreateSection = "general";
     createAdvancedOpen = true;
     showNotice(tr("gui.create.review.restored", "Sources and settings restored. Passwords were cleared. Review the options and confirm the output location before starting again."));

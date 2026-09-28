@@ -3,7 +3,9 @@ import type { ArchiveInfo, JobSpec } from "./ipc";
 export type ConvertWorkspaceVariant = "modern" | "classic";
 
 export type ConvertTaskDraft = Pick<Extract<JobSpec, { kind: "convert" }>,
-  "src" | "dest" | "level" | "src_encoding" | "encrypt_names" | "split_size" | "split_mode">;
+  "src" | "dest" | "level" | "src_encoding" | "encrypt_names" | "split_size" | "split_mode"> & {
+    outputPasswordRequired: boolean;
+  };
 
 export type ConvertPreflightEvent = Readonly<{
   request_id?: string;

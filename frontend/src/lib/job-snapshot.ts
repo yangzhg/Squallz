@@ -1,6 +1,14 @@
-import type { JobQuestion, JobSnapshot, StateEvent } from "./ipc";
+import type { JobQuestion, JobSnapshot, JobSpec, StateEvent } from "./ipc";
 
 export type SnapshotState = StateEvent["state"];
+
+/** Capture output protection before credentials are removed from a task. */
+export function outputPasswordRequired(spec: JobSpec): boolean {
+  if (spec.kind === "compress") return spec.password !== null || spec.encrypt_names;
+  if (spec.kind === "convert") return spec.dest_password !== null || spec.encrypt_names;
+  if (spec.kind === "export_sqz") return spec.dest_password !== null;
+  return false;
+}
 
 export function isTerminalSnapshotState(state: SnapshotState): boolean {
   return state === "done" || state === "failed" || state === "cancelled";

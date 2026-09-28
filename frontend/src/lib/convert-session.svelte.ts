@@ -93,6 +93,7 @@ export class ConvertSession implements ConvertRouteHandle {
   private password = $state("");
   private passwordConfirmation = $state("");
   private passwordVisible = $state(false);
+  private encryptionEnabled = $state(false);
   private encryptNames = $state(false);
   private splitPreset = $state<CreateSplitPreset>("none");
   private splitMode = $state<CreateSplitMode>("generic");
@@ -328,8 +329,8 @@ export class ConvertSession implements ConvertRouteHandle {
   }
 
   private passwordError(): string {
-    if (this.canEncryptData() && this.encryptNames && this.password.length === 0) {
-      return this.tr("gui.convert.password_required", "Enter a new destination password, or turn off file name encryption.");
+    if (this.canEncryptData() && this.encryptionEnabled && this.password.length === 0) {
+      return this.tr("gui.convert.password_required", "Enter a new destination password, or turn off file content encryption.");
     }
     if (!this.canEncryptData() || this.password.length === 0) return "";
     if (this.passwordConfirmation.length === 0) {
@@ -358,7 +359,8 @@ export class ConvertSession implements ConvertRouteHandle {
 
   private visiblePasswordError(): string {
     const error = this.passwordError();
-    return this.validationAttempted || this.passwordConfirmation.length > 0 ? error : "";
+    return this.validationAttempted || this.passwordConfirmation.length > 0
+      || (this.encryptionEnabled && this.password.length === 0) ? error : "";
   }
 
   private visibleSplitError(): string {
@@ -374,6 +376,7 @@ export class ConvertSession implements ConvertRouteHandle {
 
   private resetOutputOptions(): void {
     this.clearPassword();
+    this.encryptionEnabled = false;
     this.encryptNames = false;
     this.exactSplitSize = null;
     this.suggestedDestination = null;
@@ -460,6 +463,10 @@ export class ConvertSession implements ConvertRouteHandle {
     if (!error) return true;
     this.advancedOpen = true;
     this.bridge.showNotice(error);
+    void tick().then(() => {
+      if (typeof document === "undefined" || !this.validationAttempted || this.busy() || this.pending) return;
+      document.querySelector<HTMLInputElement>(".modern-convert .create-option-input[aria-invalid='true'], .classic-convert .create-option-input[aria-invalid='true']")?.focus();
+    });
     return false;
   }
 
@@ -928,7 +935,8 @@ export class ConvertSession implements ConvertRouteHandle {
       this.customSplitAmount = String(Number((draft.split_size / (this.customSplitUnit === "gib" ? 1024 ** 3 : 1024 ** 2)).toPrecision(9)));
     }
     this.encryptNames = draft.encrypt_names;
-    this.validationAttempted = draft.encrypt_names;
+    this.encryptionEnabled = draft.outputPasswordRequired || draft.encrypt_names;
+    this.validationAttempted = this.encryptionEnabled;
     this.advancedOpen = true;
     return true;
   }
@@ -1037,6 +1045,14 @@ export class ConvertSession implements ConvertRouteHandle {
         ariaLabel: labelWithReason(createFormats[format].label, lockedReason),
         onSelect: () => {
           if (this.busy() || this.pending) return;
+          if (this.encryptionEnabled && !this.canEncryptData(format)) {
+            this.bridge.showNotice(this.tr("gui.create.encryption_format_change", "Turn off file content encryption before choosing a format that cannot encrypt files."));
+            return;
+          }
+          if (this.encryptNames && !this.canEncryptNames(format)) {
+            this.bridge.showNotice(this.tr("gui.create.name_encryption_format_change", "Turn off file name encryption before choosing a format that cannot hide names."));
+            return;
+          }
           this.targetFormat = format;
           if (this.nativeSplitKind(format) === null) this.splitMode = "generic";
           if (!this.canEncryptData(format)) {
@@ -1102,6 +1118,7 @@ export class ConvertSession implements ConvertRouteHandle {
         password: this.password,
         passwordConfirmation: this.passwordConfirmation,
         passwordVisible: this.passwordVisible,
+        encryptionEnabled: this.encryptionEnabled,
         encryptNames: this.encryptNames,
         canEncryptData: this.canEncryptData(),
         canEncryptNames: this.canEncryptNames(),
@@ -1124,10 +1141,10 @@ export class ConvertSession implements ConvertRouteHandle {
         tr: (key, fallback) => this.tr(key, fallback),
         onPasswordInput: (value) => {
           this.password = value;
-          this.validationAttempted = false;
+          if (value) this.encryptionEnabled = true;
+          this.validationAttempted = !value && this.encryptionEnabled;
           if (!value) {
             this.passwordConfirmation = "";
-            this.encryptNames = false;
           }
         },
         onPasswordConfirmationInput: (value) => {
@@ -1135,8 +1152,16 @@ export class ConvertSession implements ConvertRouteHandle {
           this.validationAttempted = false;
         },
         onPasswordVisibleChange: (visible) => (this.passwordVisible = visible),
+        onEncryptionEnabledChange: (enabled) => {
+          this.encryptionEnabled = enabled && this.canEncryptData();
+          if (!this.encryptionEnabled) {
+            this.clearPassword();
+            this.encryptNames = false;
+          }
+          this.validationAttempted = this.encryptionEnabled;
+        },
         onEncryptNamesChange: (enabled) => {
-          this.encryptNames = enabled && this.canEncryptNames() && this.password.length > 0;
+          this.encryptNames = enabled && this.canEncryptNames() && this.encryptionEnabled;
         },
         onSplitPresetChange: (preset) => {
           this.splitPreset = preset;

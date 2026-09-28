@@ -2599,6 +2599,19 @@ fn completed_jobs_are_written_to_backend_audit_log() {
     assert_eq!(recent[0].state, "done");
     assert!(recent[0].detail.contains("audited.zip"));
     assert!(!recent[0].detail.contains("audit-password"));
+    let snapshot = manager.snapshot(id).unwrap();
+    assert!(snapshot.output_password_required);
+    assert!(!serde_json::to_string(&snapshot)
+        .unwrap()
+        .contains("audit-password"));
+    assert!(matches!(
+        snapshot.spec,
+        JobSpec::Compress {
+            password: None,
+            encrypt_names: false,
+            ..
+        }
+    ));
     assert!(std::fs::read_to_string(audit_path)
         .unwrap()
         .contains("\"kind\":\"compress\""));
@@ -3141,6 +3154,10 @@ fn convert_job_reports_split_output_set() {
     assert_eq!(snapshot.state, "done");
     let result = snapshot.result.as_ref().unwrap();
     assert_eq!(result["operation"], "convert");
+    assert!(snapshot.output_password_required);
+    assert!(!serde_json::to_string(&snapshot)
+        .unwrap()
+        .contains("destination secret"));
     assert_eq!(result["split"], true);
     assert!(result["volume_count"]
         .as_u64()

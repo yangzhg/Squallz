@@ -11,6 +11,7 @@ function snapshot(id, version, kind = "password") {
         incoming_modified: null };
   return {
     id, version, spec: { kind: "test", path: `/archives/archive-${id}.zip`, password: null },
+    output_password_required: false,
     origin: "app", owned_by_requester: true, state: "running", queue_position: null,
     queue_wait_reason: null, cpu_threads: 1, stream_buffer_limit_bytes: null,
     progress: { done: 0, total: 100, current: "", current_done: 0, current_total: 0,

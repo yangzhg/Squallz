@@ -34,16 +34,21 @@ function harness() {
     "createSuggestedOutputPath", "createSaveDefaultPathForDraft", "createArchiveNameForOutput",
     "captureCreateRunDraft", "archiveOutputExtension", "submitCreateInputs", "beginCreatePreflight",
     "askCreateDestination", "normalizeCreateDestinationForDraft", "createSaveFiltersForDraft",
-    "resolveCreateDestination", "createOutputPreview", "createArchivePreviewName"];
+    "resolveCreateDestination", "createOutputPreview", "createArchivePreviewName",
+    "createPasswordValidationMessage", "validateCreateOptions", "updateCreatePassword",
+    "updateCreatePasswordConfirmation", "updateCreateEncryptionEnabled", "chooseCreateFormat",
+    "activeCreateFormatData", "updateCreateEncryptNames", "updateCreateSfxEnabled",
+    "resetCreateCredentialsAfterPlan"];
   const declarations = source.statements.filter((node) =>
     ts.isFunctionDeclaration(node) && names.includes(node.name?.text));
   const calls = [];
   const context = {
     ...model, ...paths, ...sources, taskReviewScreen,
-    taskWindowMode: false, createSources: [{ path: "/unrelated", kind: "folder" }],
+    taskWindowMode: false, screen: "create", blockingModalVisible: () => false,
+    createSources: [{ path: "/unrelated", kind: "folder" }],
     selectedCreateSourcePaths: ["/unrelated"], createSourcePickerBusy: null,
     createPassword: "unrelated-secret", createPasswordConfirmation: "unrelated-secret",
-    createPasswordVisible: true, createEncryptNames: true, createPresetCredentialIntent: "prompt",
+    createPasswordVisible: true, createEncryptNames: true, createEncryptionEnabled: true,
     selectedCreatePresetId: "unrelated-preset", createPresetDraftName: "Unrelated",
     createPresetMutationState: "saved", createPresetDraftTouched: false,
     activeCreateFormat: "7z", activeCreateProfile: "maximum", customCreateLevel: 9,
@@ -67,7 +72,10 @@ function harness() {
     createPreflightBusy: () => false, createSourcesLocked: () => false, createSourcesLockedReason: () => "Busy",
     createConfigurationPending: () => false, createConfigurationPendingMessage: () => "Loading",
     normalizeUnsupportedCreatePostSuccess() {}, normalizeUnsupportedCreateCompletion() {},
-    resetCreateCredentialsAfterPlan() {}, validateCreateOptions: () => true,
+    resetCreateCredentialsAfterPlan() {}, createSplitValidationMessage: () => "",
+    createPasswordDataAvailable: () => model.createFormats[context.activeCreateFormat].can_encrypt_data,
+    createNameEncryptionAvailable: () => model.createFormats[context.activeCreateFormat].can_encrypt_names,
+    persistCreateFormat() {}, recordOperation() {}, nativeSplitKind: (format) => format === "zip" ? "zip" : null,
     createCompressionLevel: () => context.customCreateLevel,
     selectedCreateArchivePreset: () => null, createSplitSizeBytes: () => Number(context.createPresetSplitSizeBytes) || null,
     createExcludeRules: () => context.createExcludeText.split("\n"),
@@ -131,6 +139,49 @@ test("reviewing a failed creation restores its sources and options without resta
   assert.equal(draft.classicCreateSection, "general");
   assert.equal(run.calls.filter(([name]) => name === "plan").length, 0);
   assert.ok(run.calls.some(([name, screen]) => name === "screen" && screen === "create"));
+});
+
+test("reviewing an encrypted ZIP requires a new password and keeps protection across edits and discarded plans", async () => {
+  const run = harness();
+  await run.reviewTask({ id: 9, state: "failed", spec: taskSpec(), outputPasswordRequired: true });
+  assert.equal(run.context.createEncryptionEnabled, true);
+  assert.equal(run.context.createPassword, "");
+  assert.equal(run.context.createEncryptNames, false);
+  assert.equal(run.captureCreateRunDraft(), null);
+  run.chooseCreateFormat("tar.zst");
+  assert.equal(run.context.activeCreateFormat, "zip");
+  run.updateCreatePassword("replacement");
+  run.updateCreatePasswordConfirmation("different");
+  assert.equal(run.captureCreateRunDraft(), null);
+  run.updateCreatePasswordConfirmation("replacement");
+  const draft = run.captureCreateRunDraft();
+  assert.equal(draft.password, "replacement");
+  assert.equal(draft.restoreCredentialPrompt, true);
+  run.resetCreateCredentialsAfterPlan(draft);
+  assert.equal(run.context.createPassword, "");
+  assert.equal(run.context.createEncryptionEnabled, true);
+  assert.equal(run.captureCreateRunDraft(), null);
+  run.updateCreatePassword("replacement");
+  run.updateCreatePassword("");
+  assert.equal(run.captureCreateRunDraft(), null);
+  run.updateCreateEncryptionEnabled(false);
+  assert.equal(run.captureCreateRunDraft().password, null);
+  run.chooseCreateFormat("tar.zst");
+  assert.equal(run.context.activeCreateFormat, "tar.zst");
+});
+
+test("restored name encryption is not silently removed by choosing ZIP or a self-extractor", () => {
+  const run = harness();
+  run.restoreCreateTaskDraft(taskSpec({ dest: "/secure.7z", encrypt_names: true }), true);
+  run.chooseCreateFormat("zip");
+  run.updateCreateSfxEnabled(true);
+  assert.equal(run.context.activeCreateFormat, "7z");
+  assert.equal(run.context.createSfxEnabled, false);
+  run.updateCreateEncryptNames(false);
+  assert.equal(run.context.createEncryptionEnabled, true);
+  assert.equal(run.captureCreateRunDraft(), null);
+  run.chooseCreateFormat("zip");
+  assert.equal(run.context.activeCreateFormat, "zip");
 });
 
 test("restored creation chooses the destination again and checks sources, space and current overwrite permission", async () => {

@@ -8,6 +8,7 @@
     password,
     passwordConfirmation,
     passwordVisible,
+    encryptionEnabled,
     encryptNames,
     canEncryptData,
     canEncryptNames,
@@ -31,6 +32,7 @@
     onPasswordInput,
     onPasswordConfirmationInput,
     onPasswordVisibleChange,
+    onEncryptionEnabledChange,
     onEncryptNamesChange,
     onSplitPresetChange,
     onSplitModeChange,
@@ -42,6 +44,7 @@
     password: string;
     passwordConfirmation: string;
     passwordVisible: boolean;
+    encryptionEnabled: boolean;
     encryptNames: boolean;
     canEncryptData: boolean;
     canEncryptNames: boolean;
@@ -65,6 +68,7 @@
     onPasswordInput: (value: string) => void;
     onPasswordConfirmationInput: (value: string) => void;
     onPasswordVisibleChange: (visible: boolean) => void;
+    onEncryptionEnabledChange: (enabled: boolean) => void;
     onEncryptNamesChange: (enabled: boolean) => void;
     onSplitPresetChange: (preset: CreateSplitPreset) => void;
     onSplitModeChange: (mode: CreateSplitMode) => void;
@@ -102,6 +106,15 @@
 
 {#snippet passwordFields()}
   {#if canEncryptData}
+    <label class="create-option-check" class:disabled={disabled} title={disabledReason}>
+      <input
+        type="checkbox"
+        checked={encryptionEnabled}
+        disabled={disabled}
+        onchange={(event) => onEncryptionEnabledChange((event.currentTarget as HTMLInputElement).checked)}
+      />
+      <span>{tr("gui.create.encrypt_file_contents", "Encrypt file contents")}</span>
+    </label>
     <label class="create-option-field">
       <span>{tr("gui.create.password", "Password")}</span>
       <div class="secure-input-row">
@@ -114,6 +127,7 @@
           title={disabledReason}
           aria-label={disabledReason ? `${tr("gui.create.archive_password", "Archive password")} · ${disabledReason}` : tr("gui.create.archive_password", "Archive password")}
           aria-invalid={passwordError ? "true" : "false"}
+          aria-required={encryptionEnabled}
           aria-describedby={passwordError ? passwordErrorId : undefined}
           oninput={(event) => onPasswordInput((event.currentTarget as HTMLInputElement).value)}
         />
@@ -139,6 +153,7 @@
         title={disabledReason}
         aria-label={disabledReason ? `${tr("gui.create.confirm_archive_password", "Confirm archive password")} · ${disabledReason}` : tr("gui.create.confirm_archive_password", "Confirm archive password")}
         aria-invalid={passwordError ? "true" : "false"}
+        aria-required={encryptionEnabled}
         aria-describedby={passwordError ? passwordErrorId : undefined}
         oninput={(event) => onPasswordConfirmationInput((event.currentTarget as HTMLInputElement).value)}
       />
@@ -146,11 +161,11 @@
     {#if passwordError}
       <small id={passwordErrorId} class="create-option-error" role="status">{passwordError}</small>
     {/if}
-    <label class="create-option-check" class:disabled={disabled || !canEncryptNames || (password.length === 0 && !encryptNames)} title={disabledReason}>
+    <label class="create-option-check" class:disabled={disabled || !canEncryptNames || !encryptionEnabled} title={disabledReason}>
       <input
         type="checkbox"
         checked={encryptNames}
-        disabled={disabled || !canEncryptNames || (password.length === 0 && !encryptNames)}
+        disabled={disabled || !canEncryptNames || !encryptionEnabled}
         onchange={(event) => onEncryptNamesChange((event.currentTarget as HTMLInputElement).checked)}
       />
       <span>{tr("gui.create.encrypt_file_names", "Encrypt file names")} · {nameEncryptionCapability}</span>

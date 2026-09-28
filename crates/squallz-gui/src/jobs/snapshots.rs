@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 use squallz_core::{JobResources, QueueWaitReason};
 
-use crate::dto::{ErrorDto, JobSpec};
+use crate::dto::{ErrorDto, JobSnapshotDescription, JobSpec};
 
 const MAX_TERMINAL_SNAPSHOTS: usize = 100;
 const MAX_SNAPSHOT_CHANGES: usize = 512;
@@ -82,6 +82,7 @@ pub struct JobStateSnapshot {
     pub id: u64,
     pub version: u64,
     pub spec: JobSpec,
+    pub output_password_required: bool,
     pub origin: JobOrigin,
     pub owned_by_requester: bool,
     pub state: String,
@@ -108,7 +109,7 @@ pub struct JobSnapshotDelta {
 struct StoredJobSnapshot {
     id: u64,
     version: u64,
-    spec: JobSpec,
+    description: JobSnapshotDescription,
     origin: JobOrigin,
     owner_window: Option<String>,
     state: String,
@@ -161,14 +162,21 @@ impl JobSnapshotStore {
         spec: JobSpec,
         state: &str,
     ) -> u64 {
-        self.insert_with_resources(id, owner_window, spec, state, JobResources::default(), None)
+        self.insert_with_resources(
+            id,
+            owner_window,
+            spec.redacted_for_snapshot(),
+            state,
+            JobResources::default(),
+            None,
+        )
     }
 
     pub(super) fn insert_with_resources(
         &mut self,
         id: u64,
         owner_window: Option<String>,
-        spec: JobSpec,
+        description: JobSnapshotDescription,
         state: &str,
         resources: JobResources,
         stream_buffer_limit_bytes: Option<u64>,
@@ -184,7 +192,7 @@ impl JobSnapshotStore {
             StoredJobSnapshot {
                 id,
                 version,
-                spec,
+                description,
                 origin,
                 owner_window,
                 state: state.to_owned(),
@@ -466,7 +474,8 @@ fn snapshot_for_requester(record: &StoredJobSnapshot, requester: &str) -> JobSta
     JobStateSnapshot {
         id: record.id,
         version: record.version,
-        spec: record.spec.clone(),
+        spec: record.description.spec.clone(),
+        output_password_required: record.description.output_password_required,
         origin: record.origin,
         owned_by_requester: record.owner_window.as_deref() == Some(requester),
         state: record.state.clone(),
@@ -510,7 +519,7 @@ mod tests {
         let owner_version = store.insert_with_resources(
             2,
             Some("task-owner".into()),
-            checksum_job(Path::new("task-input")),
+            checksum_job(Path::new("task-input")).redacted_for_snapshot(),
             "queued",
             JobResources::new(3),
             Some(512 * 1024 * 1024),

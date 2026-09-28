@@ -12,7 +12,8 @@ const originalArchive = { id: 1, path: "/original/photos.7z", source: "/original
   encoding_override: "gbk" };
 function draft(overrides = {}) {
   return { src: originalArchive.source, dest: "/output/Original.ZIP", src_encoding: "gbk",
-    level: 4, encrypt_names: false, split_size: 123456789, split_mode: "native", ...overrides };
+    level: 4, encrypt_names: false, outputPasswordRequired: false,
+    split_size: 123456789, split_mode: "native", ...overrides };
 }
 
 function harness(t) {
@@ -144,6 +145,33 @@ test("unsupported formats and a different source leave the current conversion dr
   }
 });
 
+test("restored data encryption blocks plaintext conversion until the user explicitly turns it off", async (t) => {
+  const { session, calls } = harness(t);
+  assert.equal(session.restoreTaskDraft(draft({ outputPasswordRequired: true })), true);
+  session.surface("modern").start.onSelect();
+  await Promise.resolve();
+  assert.equal(calls.some(([name]) => name === "save"), false, "redacted passwords must not silently disable encryption");
+  assert.equal(session.surface("classic").protection.encryptionEnabled, true);
+  session.surface("classic").protection.onPasswordInput("new-password");
+  session.surface("classic").protection.onPasswordConfirmationInput("new-password");
+  session.leave();
+  assert.equal(session.surface("modern").protection.password, "");
+  assert.equal(session.surface("modern").protection.encryptionEnabled, true);
+  session.surface("modern").formats.find((item) => item.id === "tar.zst").onSelect();
+  assert.equal(session.surface("modern").formats.find((item) => item.selected).id, "zip");
+  session.surface("modern").protection.onPasswordInput("replacement");
+  session.surface("modern").protection.onPasswordConfirmationInput("replacement");
+  session.surface("modern").protection.onPasswordInput("");
+  session.surface("modern").start.onSelect();
+  await Promise.resolve();
+  assert.equal(calls.some(([name]) => name === "save"), false);
+  session.surface("modern").protection.onEncryptionEnabledChange(false);
+  assert.equal(session.surface("modern").protection.encryptionEnabled, false);
+  session.surface("modern").start.onSelect();
+  await waitFor(() => session.surface("modern").review !== null);
+  assert.equal(calls.find(([name]) => name === "plan")[1].dest_password, null);
+});
+
 test("restored name encryption requires a new password or an explicit opt-out and survives leaving", async (t) => {
   const { session, calls } = harness(t);
   assert.equal(session.restoreTaskDraft(draft({ dest: "/output/secure.7z", split_mode: "generic", encrypt_names: true })), true);
@@ -168,5 +196,7 @@ test("restored name encryption requires a new password or an explicit opt-out an
   session.surface("modern").review.onCancel();
   session.surface("modern").protection.onEncryptNamesChange(false);
   assert.equal(session.surface("modern").protection.encryptNames, false);
+  assert.match(session.surface("modern").protection.passwordError, /new destination password/);
+  session.surface("modern").protection.onEncryptionEnabledChange(false);
   assert.equal(session.surface("modern").protection.passwordError, "");
 });

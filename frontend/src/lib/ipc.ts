@@ -403,6 +403,7 @@ export interface JobSnapshot {
   id: number;
   version: number;
   spec: JobSpec;
+  output_password_required: boolean;
   origin: JobOrigin;
   owned_by_requester: boolean;
   state: StateEvent["state"];

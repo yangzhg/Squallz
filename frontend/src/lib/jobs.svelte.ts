@@ -21,6 +21,7 @@ import { errorSummary } from "./error-presentation";
 import {
   isTerminalSnapshotState,
   localSubmissionPromotion,
+  outputPasswordRequired,
   shouldApplyFullSnapshot,
   shouldApplySnapshotProgress,
   shouldApplySnapshotState,
@@ -61,6 +62,7 @@ export interface Task {
   /** Last backend version applied to this task. */
   version: number;
   spec: JobSpec;
+  outputPasswordRequired: boolean;
   title: string;
   origin: JobOrigin;
   ownedByRequester: boolean;
@@ -220,6 +222,7 @@ export async function submitJob(spec: JobSpec): Promise<number> {
       id,
       version: 0,
       spec: redactedSpec(spec),
+      outputPasswordRequired: outputPasswordRequired(spec),
       title: titleFor(spec),
       origin: "app",
       ownedByRequester: true,
@@ -1105,6 +1108,7 @@ function taskFromSnapshot(snapshot: JobSnapshot): Task {
     id: snapshot.id,
     version: snapshot.version,
     spec: snapshot.spec,
+    outputPasswordRequired: snapshot.output_password_required,
     title: titleFor(snapshot.spec),
     origin: snapshot.origin,
     ownedByRequester: snapshot.owned_by_requester,
@@ -1154,6 +1158,7 @@ function applySnapshot(snapshot: JobSnapshot): void {
   const previousState = task.state;
   task.version = snapshot.version;
   task.spec = snapshot.spec;
+  task.outputPasswordRequired = snapshot.output_password_required;
   task.title = titleFor(snapshot.spec);
   task.origin = snapshot.origin;
   task.ownedByRequester = snapshot.owned_by_requester;
@@ -1931,6 +1936,7 @@ function installTaskPreview(kind: PreviewTaskKind, state: Extract<JobStateName, 
     question: null,
     answeredQuestionVersion: 0,
     state: previewState,
+    outputPasswordRequired: kind === "compress_failure" || kind === "convert_failure" || kind === "convert_encrypted_failure",
     queuePosition: null,
     queueWaitReason: null,
     cpuThreads: kind.startsWith("compress") ? 8 : 1,
@@ -2028,6 +2034,7 @@ export function installTaskQueuePreview(
       answeredQuestionVersion: 0,
       state: "queued",
       queuePosition: index + 1,
+      outputPasswordRequired: outputPasswordRequired(spec),
       queueWaitReason: index === 0 ? waitReason : "queue_order",
       cpuThreads: index === 0 && waitReason === "cpu_budget" ? 8 : 1,
       streamBufferLimitBytes: kind === "compress" ? 512 * 1024 * 1024 : null,
