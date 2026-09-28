@@ -10,6 +10,7 @@
 
 <script lang="ts">
   import Icon from "./Icon.svelte";
+  import DeferredViewError from "./DeferredViewError.svelte";
   import type { SettingsWorkspaceProps } from "./SettingsWorkspace.svelte";
 
   let {
@@ -45,15 +46,6 @@
   </section>
 {:then Workspace}
   <Workspace {...workspace} />
-{:catch}
-  <section class="deferred-workspace-state danger" role="alert">
-    <Icon name="alert-triangle" size={20} />
-    <div>
-      <strong>{failureTitle}</strong>
-      <span>{failureBody}</span>
-    </div>
-    <button type="button" class="primary-lite" onclick={retry}>
-      <Icon name="rotate-cw" size={15} />{retryLabel}
-    </button>
-  </section>
+{:catch error}
+  <DeferredViewError {error} title={failureTitle} body={failureBody} {retryLabel} onRetry={retry} />
 {/await}

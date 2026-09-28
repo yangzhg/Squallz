@@ -1,5 +1,6 @@
 <script lang="ts" module>
   import type { EntryDto } from "../lib/ipc";
+  import type { AppActionAvailability } from "../lib/app-actions";
 
   type Translate = (key: string, fallback: string) => string;
 
@@ -12,7 +13,7 @@
     ratio: string;
     modified: string;
     crc: string;
-    method: string;
+    encoding: string;
     attr: string;
     source?: EntryDto;
     virtualIndex?: number;
@@ -38,7 +39,6 @@
         format: string;
         summary: string;
         dirs: readonly string[];
-        readOnly: boolean;
         canGoUp: boolean;
       };
       actions: {
@@ -46,9 +46,7 @@
         renameDisabledReason: string;
         deleteDisabledReason: string;
         moveDisabledReason: string;
-        canRenameSelection: boolean;
-        hasSelection: boolean;
-        canPreviewSelection: boolean;
+        enabled: AppActionAvailability;
         previewBusy: boolean;
         previewDisabledReason: string;
         previewLabel: string;
@@ -58,16 +56,7 @@
         extractSelectedLabel: string;
         nestedPreview: boolean;
       };
-      workbench: {
-        renameTarget: string;
-        renameStatus: string;
-        moveTarget: string;
-        normalizedMoveTarget: string;
-        moveTargetPresets: readonly string[];
-        moveStatus: string;
-        newFolderName: string;
-        newFolderStatus: string;
-      };
+      selectedSummary: string;
       conflict: {
         count: number;
         readyCount: number;
@@ -110,12 +99,6 @@
     onPreviewSelection: () => void;
     onOpenNestedPreview: () => void;
     onExtractNestedPreview: () => void;
-    onRenameTargetChange: (value: string) => void;
-    onCommitRenameTarget: () => void;
-    onMoveTargetChange: (value: string) => void;
-    onCommitMoveTarget: (target?: string) => void;
-    onNewFolderChange: (value: string) => void;
-    onCommitNewFolder: () => void;
     onCancelMoveConflict: () => void;
     onSubmitMoveReadyOnly: () => void;
     onSubmitMoveKeepBoth: () => void;
@@ -129,7 +112,7 @@
     onActivateEntry: (entry: ModernBrowserEntry) => void;
     onEntryKeydown: (event: KeyboardEvent, entry: ModernBrowserEntry) => void;
     onOpenEntryContext: (event: MouseEvent, entry: ModernBrowserEntry) => void;
-    onToggleEntrySelection: (entry: ModernBrowserEntry) => void;
+    onToggleEntrySelection: (entry: ModernBrowserEntry, event: MouseEvent) => void;
     onToggleAllEntries: () => void;
     onPreviewEntry: (entry: ModernBrowserEntry) => void;
   }
@@ -160,12 +143,6 @@
     onPreviewSelection,
     onOpenNestedPreview,
     onExtractNestedPreview,
-    onRenameTargetChange,
-    onCommitRenameTarget,
-    onMoveTargetChange,
-    onCommitMoveTarget,
-    onNewFolderChange,
-    onCommitNewFolder,
     onCancelMoveConflict,
     onSubmitMoveReadyOnly,
     onSubmitMoveKeepBoth,
@@ -217,7 +194,6 @@
       <div class="archive-lid"></div>
       <div class="archive-core">
         <span>{view.archive.format}</span>
-        <i></i>
       </div>
     </div>
     <div class="archive-summary">
@@ -226,35 +202,33 @@
       <p>{view.archive.summary}</p>
     </div>
     <div class="summary-actions">
-      <button class="primary large" title={view.actions.extractDestinationHint} onclick={onExtractAll}>
+      <button class="primary large" disabled={!view.actions.enabled.extract_all} title={view.actions.extractDestinationHint} onclick={onExtractAll}>
         <Icon name="archive" size={17} />{view.actions.extractAllLabel}
       </button>
-      {#if view.actions.hasSelection}
-        <button class="ghost large" title={view.actions.extractDestinationHint} onclick={onExtractSelection}>
-          <Icon name="archive" size={17} />{view.actions.extractSelectedLabel}
-        </button>
-      {/if}
+      <button class="ghost large" disabled={!view.actions.enabled.extract_selection} title={view.actions.extractDestinationHint} onclick={onExtractSelection}>
+        <Icon name="archive" size={17} />{view.actions.extractSelectedLabel}
+      </button>
       <button
         class="ghost large"
-        disabled={view.archive.readOnly}
+        disabled={!view.actions.enabled.add_files}
         title={view.actions.mutationDisabledReason}
         onclick={onAddFiles}
       ><Icon name="file" size={17} />{tr("gui.action.add_files", "Add files")}</button>
       <button
         class="ghost large"
-        disabled={view.archive.readOnly}
+        disabled={Boolean(view.actions.mutationDisabledReason)}
         title={view.actions.mutationDisabledReason}
         onclick={onOpenRecovery}
       ><Icon name="shield-alert" size={17} />{tr("gui.action.protect", "Protect")}</button>
-      <button class="ghost large" onclick={onConvert}>
+      <button class="ghost large" disabled={!view.actions.enabled.convert_archive} onclick={onConvert}>
         <Icon name="repeat" size={17} />{tr("gui.action.convert", "Convert")}
       </button>
-      <button class="ghost large" onclick={onOpenInfo}>
+      <button class="ghost large" disabled={!view.actions.enabled.archive_info} onclick={onOpenInfo}>
         <Icon name="info" size={17} />{tr("gui.archive.info", "Info")}
       </button>
       <button
         class="ghost large"
-        disabled={!view.actions.canRenameSelection}
+        disabled={!view.actions.enabled.rename_entry}
         title={view.actions.renameDisabledReason}
         aria-label={labelWithDisabledReason(
           tr("gui.action.rename_selected", "Rename selected"),
@@ -264,7 +238,7 @@
       ><Icon name="repeat" size={17} />{tr("gui.action.rename_selected", "Rename selected")}</button>
       <button
         class="ghost large"
-        disabled={Boolean(view.actions.mutationDisabledReason) || !view.actions.hasSelection}
+        disabled={!view.actions.enabled.delete_entries}
         title={view.actions.deleteDisabledReason}
         aria-label={labelWithDisabledReason(
           tr("gui.action.delete_selected", "Delete selected"),
@@ -274,7 +248,7 @@
       ><Icon name="x-circle" size={17} />{tr("gui.action.delete_selected", "Delete selected")}</button>
       <button
         class="ghost large"
-        disabled={Boolean(view.actions.mutationDisabledReason) || !view.actions.hasSelection}
+        disabled={!view.actions.enabled.move_entries}
         title={view.actions.moveDisabledReason}
         aria-label={labelWithDisabledReason(
           tr("gui.action.move_selected", "Move selected"),
@@ -284,13 +258,13 @@
       ><Icon name="repeat" size={17} />{tr("gui.action.move_selected", "Move selected")}</button>
       <button
         class="ghost large"
-        disabled={view.archive.readOnly}
+        disabled={!view.actions.enabled.new_folder}
         title={view.actions.mutationDisabledReason}
         onclick={onCreateFolder}
       ><Icon name="folder-open" size={17} />{tr("gui.action.new_folder", "New folder")}</button>
       <button
         class="ghost large"
-        disabled={!view.actions.canPreviewSelection}
+        disabled={!view.actions.enabled.preview_entry}
         aria-busy={view.actions.previewBusy}
         title={view.actions.previewDisabledReason}
         aria-label={labelWithDisabledReason(
@@ -310,65 +284,10 @@
     </div>
   </div>
 
-  {#if view.actions.hasSelection}
-    <div class="workbench-strip">
-      <div class="update-safety-strip" aria-label={tr("gui.update.safety_summary", "Archive update safety summary")}>
-        <span><Icon name="check-circle" size={14} />{tr("gui.update.selection_scoped", "Selection-scoped updates")}</span>
-        <span><Icon name="list" size={14} />{tr("gui.update.target_review", "Review rename and move targets first")}</span>
-        <span><Icon name="archive" size={14} />{tr("gui.update.format_boundaries", "Write-capable formats only")}</span>
-      </div>
-      <label>
-        <span>{tr("gui.action.rename_target", "Rename target")}</span>
-        <input
-          aria-label={tr("gui.rename.target_name", "Rename target name")}
-          value={view.workbench.renameTarget}
-          disabled={!view.actions.canRenameSelection}
-          title={view.actions.canRenameSelection ? "" : tr("gui.precondition.select_one_file", "Select exactly one file")}
-          oninput={(event) => onRenameTargetChange(event.currentTarget.value)}
-          onblur={onCommitRenameTarget}
-        />
-      </label>
-      <label>
-        <span>{tr("gui.action.move_target", "Move target")}</span>
-        <input
-          aria-label={tr("gui.move.target_folder", "Move target folder")}
-          value={view.workbench.moveTarget}
-          disabled={view.archive.readOnly || !view.actions.hasSelection}
-          title={view.actions.moveDisabledReason}
-          oninput={(event) => onMoveTargetChange(event.currentTarget.value)}
-          onblur={() => onCommitMoveTarget()}
-        />
-      </label>
-      <small>{view.workbench.renameStatus}</small>
-      <div class="move-target-presets compact" aria-label={tr("gui.move.target_presets", "Move target presets")}>
-        {#each view.workbench.moveTargetPresets as target}
-          <button
-            class:active={view.workbench.normalizedMoveTarget === target}
-            disabled={view.archive.readOnly || !view.actions.hasSelection}
-            onclick={() => onCommitMoveTarget(target)}
-          >{target}</button>
-        {/each}
-      </div>
-      <small>{view.workbench.moveStatus}</small>
-      <label>
-        <span>{tr("gui.action.new_folder", "New folder")}</span>
-        <input
-          aria-label={tr("gui.new_folder.name", "New folder name")}
-          value={view.workbench.newFolderName}
-          disabled={view.archive.readOnly}
-          title={view.actions.mutationDisabledReason}
-          oninput={(event) => onNewFolderChange(event.currentTarget.value)}
-          onblur={onCommitNewFolder}
-        />
-      </label>
-      <small class="workbench-note">{view.workbench.newFolderStatus}</small>
-    </div>
-  {:else}
-    <div class="workbench-strip empty-workbench-strip">
-      <span>{tr("gui.selection.select_entries_hint", "Select entries to open, rename, move, or extract.")}</span>
-      <small>{tr("gui.preview.keyboard_hint", "Space or Return opens the focused item")}</small>
-    </div>
-  {/if}
+  <div class="workbench-strip empty-workbench-strip">
+    <span>{view.selectedSummary}</span>
+    <small>{tr("gui.preview.keyboard_hint", "Space or Return opens the focused item")}</small>
+  </div>
 
   {#if view.conflict}
     <div class="move-conflict-review" role="dialog" aria-label={tr("gui.move.conflicts", "Move target conflicts")} tabindex="-1">
@@ -479,6 +398,7 @@
     </div>
     <span role="status" aria-live="polite">{view.filterStatus}</span>
   </div>
+  <p class="archive-selection-hint">{tr("gui.selection.range_hint", "Shift-click to select a range · ⌘/Ctrl-click to select individual entries")}</p>
   <div
     class="modern-table"
     role="table"
@@ -545,7 +465,7 @@
               disabled={!entry.source || view.selection.busy}
               onclick={(event) => {
                 event.stopPropagation();
-                onToggleEntrySelection(entry);
+                onToggleEntrySelection(entry, event);
               }}
             ></button>
             <span
@@ -553,21 +473,28 @@
               class:type-folder={entry.type === "folder"}
               class:type-locked={entry.type === "locked"}
               class:type-warning={entry.type === "warning"}
+              role="img"
+              aria-label={entry.attr}
+              title={entry.attr}
             >
-              {entry.type === "folder"
-                ? "DIR"
-                : entry.type === "pdf"
-                  ? "PDF"
-                  : entry.type === "sheet"
-                    ? "XLS"
-                    : entry.type === "locked"
-                      ? "AES"
+              {#if entry.type === "locked"}
+                <Icon name="lock" size={14} />
+              {:else if entry.source?.entry_type === "symlink" || entry.source?.entry_type === "hardlink"}
+                <Icon name="link" size={14} />
+              {:else}
+                {entry.type === "folder"
+                  ? "DIR"
+                  : entry.type === "pdf"
+                    ? "PDF"
+                    : entry.type === "sheet"
+                      ? "XLS"
                       : entry.type === "warning"
                         ? "TXT"
                         : "FILE"}
+              {/if}
             </span>
             <span class="archive-entry-label">
-              <strong>{entry.name}</strong>
+              <strong title={entry.source?.path ?? entry.name}>{entry.name}</strong>
               {#if entry.location}<small title={entry.source?.path}>{entry.location}</small>{/if}
             </span>
             {#if entry.source}
@@ -590,8 +517,7 @@
         </div>
       {:else}
         <div class="modern-row empty-row" role="row" aria-rowindex="2">
-          <div class="file-name" role="cell"><strong>{view.emptyLabel}</strong></div>
-          <span role="cell">{view.emptyLabel}</span><span role="cell">-</span><span role="cell">-</span>
+          <div class="file-name" role="cell" aria-colspan="4"><strong>{view.emptyLabel}</strong></div>
         </div>
       {/each}
       <div class="virtual-pad" use:cssVariables={virtualPadVariables(view.paddingBottom)}></div>

@@ -8,15 +8,21 @@ import {
   type ArchiveInfo,
   type EntryDto,
   type ErrorDto,
+  type Page,
 } from "./ipc";
 import { t, tError } from "./i18n.svelte";
 import { pushToast, removeToastByKey } from "./toasts.svelte";
 
 export const PAGE_SIZE = 500;
 export type PasswordBookStatusState = "idle" | "checking" | "ready" | "error";
-export type SelectAllRowsResult = "selected" | "stale" | "failed";
+export type RowSelectionResult = "selected" | "stale" | "failed";
+type ArchiveViewWindow = { start: number; end: number };
+type ArchiveRefreshStatus = "idle" | "refreshing" | "error";
+type SelectionAnchor = { index: number; generation: number };
 const ARCHIVE_BROWSE_ERROR_TOAST_KEY = "archive-browse-error";
-const SELECT_ALL_PAGE_CONCURRENCY = 4;
+const ARCHIVE_REFRESH_ERROR_TOAST_KEY = "archive-refresh-error";
+const ARCHIVE_DIRECTORY_CHANGED_TOAST_KEY = "archive-directory-changed";
+const SELECTION_PAGE_CONCURRENCY = 4;
 
 type ValidationArchiveCallKind = "openArchive" | "listEntries" | "searchEntries";
 type ValidationArchiveCallCounters = Record<ValidationArchiveCallKind, number>;
@@ -64,8 +70,9 @@ const store = $state({
   selected: new Set<string>(),
   /** Selection was expanded across the complete current directory or search result. */
   selectedAllCurrentRows: false,
-  /** Invalidates a pending full-selection request after any later selection change. */
+  /** Invalidates pending selection requests after any later selection change. */
   selectionGeneration: 0,
+  selectionAnchor: null as SelectionAnchor | null,
   /** Dev preview-only full row tree used to exercise folder navigation without IPC. */
   previewRows: null as EntryDto[] | null,
   selectedSize: 0,
@@ -73,12 +80,16 @@ const store = $state({
   generation: 0,
   /** Most recent failure while listing a directory or searching the archive. */
   browseError: null as ErrorDto | null,
+  refreshStatus: "idle" as ArchiveRefreshStatus,
   /** The current archive was opened with a user-entered password. */
   sessionPasswordKnown: false,
   /** User-selected archive-wide file-name encoding. */
   encodingOverride: null as string | null,
   /** Pending open that needs a password (drives the password dialog) */
-  passwordPrompt: null as { path: string; wrong: boolean; encoding: string | null } | null,
+  passwordPrompt: null as {
+    path: string; wrong: boolean; encoding: string | null;
+    visibleWindow?: () => ArchiveViewWindow;
+  } | null,
   /** Most recent structured non-password failure, bound to the attempted path. */
   openError: null as { path: string; error: ErrorDto } | null,
   /** Invalidates superseded open requests before they can publish state. */
@@ -189,6 +200,10 @@ export function archiveBrowseError(): ErrorDto | null {
   return store.browseError;
 }
 
+export function archiveRefreshStatus(): ArchiveRefreshStatus {
+  return store.refreshStatus;
+}
+
 /** Whether the current UI session knows this archive used a password. */
 export function archiveHasSessionPassword(): boolean {
   return store.sessionPasswordKnown;
@@ -220,6 +235,17 @@ export async function openArchive(
   password?: string | null,
   encoding?: string | null,
 ): Promise<boolean> {
+  const visibleWindow = store.passwordPrompt?.path === path ? store.passwordPrompt.visibleWindow : undefined;
+  clearArchiveRefreshStatus();
+  return performArchiveOpen(path, password ?? null, encoding ?? null, visibleWindow);
+}
+
+async function performArchiveOpen(
+  path: string,
+  password: string | null,
+  encoding: string | null,
+  visibleWindow?: () => ArchiveViewWindow,
+): Promise<boolean> {
   cancelActiveArchiveOpenRequest();
   const requestId = nextArchiveOpenRequestId();
   pendingArchiveOpenRequestId = requestId;
@@ -227,6 +253,11 @@ export async function openArchive(
   const retryingPrompt = store.passwordPrompt?.path === path;
   if (!retryingPrompt) store.passwordPrompt = null;
   store.openError = null;
+  const previousId = store.info?.id;
+  if (visibleWindow) {
+    store.refreshStatus = "refreshing";
+    removeToastByKey(ARCHIVE_REFRESH_ERROR_TOAST_KEY);
+  }
   let pendingInfo: ArchiveInfo | null = null;
   try {
     const hadSessionPassword =
@@ -234,8 +265,8 @@ export async function openArchive(
     markValidationArchiveCall("openArchive");
     const info = await ipc.openArchive(
       path,
-      password ?? null,
-      encoding ?? null,
+      password,
+      encoding,
       requestId,
     );
     pendingInfo = info;
@@ -244,52 +275,68 @@ export async function openArchive(
       pendingInfo = null;
       return false;
     }
-    markValidationArchiveCall("listEntries");
-    const page = await ipc.listEntries(info.id, 0, "", null, PAGE_SIZE);
-    if (requestGeneration !== store.openGeneration) {
+    const view = await loadOpenedArchiveView(info.id, requestGeneration, visibleWindow);
+    if (!view || requestGeneration !== store.openGeneration) {
       void ipc.closeArchive(info.id);
       pendingInfo = null;
       return false;
     }
     if (store.info) void ipc.closeArchive(store.info.id);
     store.info = info;
-    store.dirs = [];
+    store.dirs = view.dirs;
     cancelFilterReload();
-    store.filter = "";
+    store.filter = view.filter;
     store.filterPending = false;
     store.previewRows = null;
     clearBrowseError();
+    clearArchiveRefreshStatus();
     store.generation += 1;
-    store.pages = new Map([[0, page.items]]);
+    store.pages = view.pages;
     store.loading = new Set();
-    store.total = page.total;
+    store.total = view.total;
     store.sessionPasswordKnown = password != null || hadSessionPassword;
     store.encodingOverride = info.encoding_override ?? encoding ?? null;
     store.passwordPrompt = null;
     store.openError = null;
     clearPasswordBookStatus();
     clearSelection();
+    reportArchiveDirectoryChange(view.requestedDirs, view.dirs);
     pendingInfo = null;
     if (!info.read_only) refreshArchivePasswordBookStatusInBackground(info.path);
     return true;
   } catch (e) {
     if (pendingInfo) void ipc.closeArchive(pendingInfo.id);
     if (requestGeneration !== store.openGeneration) return false;
+    if (isErrorDto(e) && (e.key === "error.password_required" || e.key === "error.wrong_password")) {
+      store.passwordPrompt = {
+        path,
+        wrong: e.key === "error.wrong_password" || password != null,
+        encoding,
+        visibleWindow,
+      };
+      return false;
+    }
+    store.passwordPrompt = null;
+    if (visibleWindow) {
+      store.refreshStatus = "error";
+      pushToast({
+        key: ARCHIVE_REFRESH_ERROR_TOAST_KEY,
+        kind: "danger",
+        title: t("gui.archive.refresh_failed"),
+        body: isErrorDto(e) ? tError(e) : t("gui.archive.open_failed_generic"),
+        action: {
+          label: t("gui.error.retry"),
+          run: () => store.info?.id === previousId
+            ? performArchiveOpen(path, password, encoding, visibleWindow)
+            : false,
+        },
+      });
+      return false;
+    }
     if (isErrorDto(e)) {
-      if (e.key === "error.password_required" || e.key === "error.wrong_password") {
-        store.openError = null;
-        store.passwordPrompt = {
-          path,
-          wrong: e.key === "error.wrong_password" || password != null,
-          encoding: encoding ?? null,
-        };
-        return false;
-      }
-      store.passwordPrompt = null;
       store.openError = { path, error: e };
       pushToast({ kind: "danger", title: tError(e) });
     } else {
-      store.passwordPrompt = null;
       store.openError = {
         path,
         error: { key: "error.unknown", params: {}, detail: "" },
@@ -302,6 +349,85 @@ export async function openArchive(
       pendingArchiveOpenRequestId = null;
     }
   }
+}
+
+function viewPages(window: ArchiveViewWindow, total: number): number[] {
+  const count = Math.max(1, window.end - window.start);
+  const start = Math.max(0, Math.min(window.start, total - count));
+  const end = Math.max(start, Math.min(total - 1, start + count - 1));
+  const first = Math.floor(start / PAGE_SIZE);
+  const last = Math.floor(end / PAGE_SIZE);
+  return Array.from({ length: last - first + 1 }, (_, index) => first + index);
+}
+
+/** Loads the current browse context and visible pages before publishing them together. */
+async function loadOpenedArchiveView(
+  id: number,
+  requestGeneration: number,
+  visibleWindow?: () => ArchiveViewWindow,
+) {
+  while (requestGeneration === store.openGeneration) {
+    const generation = store.generation;
+    const requestedDirs = visibleWindow ? [...store.dirs] : [];
+    const filter = visibleWindow ? store.filter : "";
+    try {
+      const dirs = requestedDirs.length ? await resolveArchiveDirs(id, requestedDirs) : requestedDirs;
+      if (requestGeneration !== store.openGeneration) return null;
+      if (visibleWindow && generation !== store.generation) continue;
+      const prefix = dirs.length ? `${dirs.join("/")}/` : "";
+      const window = visibleWindow?.() ?? { start: 0, end: PAGE_SIZE };
+      const readPage = async (page: number): Promise<Page> => {
+        if (filter.trim()) {
+          const result = await searchArchivePage(id, page, filter.trim(), generation + 1);
+          if (result) return result;
+          throw { key: "error.cancelled", params: {}, detail: "" } satisfies ErrorDto;
+        }
+        markValidationArchiveCall("listEntries");
+        return ipc.listEntries(id, page, prefix, null, PAGE_SIZE);
+      };
+      const first = await readPage(Math.max(0, Math.floor(window.start / PAGE_SIZE)));
+      if (requestGeneration !== store.openGeneration) return null;
+      if (visibleWindow && generation !== store.generation) continue;
+      const pages = viewPages(window, first.total);
+      const loaded = await Promise.all(pages.map((page) => page === first.page ? first : readPage(page)));
+      if (requestGeneration !== store.openGeneration) return null;
+      if (visibleWindow && (
+        generation !== store.generation ||
+        viewPages(visibleWindow(), first.total).some((page) => !pages.includes(page))
+      )) continue;
+      return {
+        requestedDirs, dirs, filter, total: first.total,
+        pages: new Map(loaded.map((page) => [page.page, page.items])),
+      };
+    } catch (error) {
+      if (requestGeneration !== store.openGeneration) return null;
+      if (visibleWindow && generation !== store.generation) continue;
+      throw error;
+    }
+  }
+  return null;
+}
+
+async function resolveArchiveDirs(id: number, dirs: string[]): Promise<string[]> {
+  const prefix = await ipc.resolveArchiveDirectory(id, `${dirs.join("/")}/`);
+  return prefix.split("/").filter(Boolean);
+}
+
+function reportArchiveDirectoryChange(previous: string[], current: string[]): void {
+  if (previous.join("/") === current.join("/")) return;
+  pushToast({
+    key: ARCHIVE_DIRECTORY_CHANGED_TOAST_KEY,
+    kind: "warning",
+    title: t("gui.archive.folder_unavailable", {
+      folder: previous.join("/"),
+      parent: current.join("/") || t("gui.list.archive_root"),
+    }),
+  });
+}
+
+function clearArchiveRefreshStatus(): void {
+  store.refreshStatus = "idle";
+  removeToastByKey(ARCHIVE_REFRESH_ERROR_TOAST_KEY);
 }
 
 /** Adopts an archive that was already opened by an archive command. */
@@ -328,6 +454,7 @@ export async function adoptOpenedArchive(info: ArchiveInfo): Promise<boolean> {
   store.filterPending = false;
   store.previewRows = null;
   clearBrowseError();
+  clearArchiveRefreshStatus();
   store.generation += 1;
   store.pages = new Map([[0, page.items]]);
   store.loading = new Set();
@@ -348,6 +475,7 @@ export function cancelPendingArchiveOpen(): void {
   store.openGeneration += 1;
   store.passwordPrompt = null;
   store.openError = null;
+  clearArchiveRefreshStatus();
 }
 
 /** Dismisses the open-time password prompt. */
@@ -388,30 +516,16 @@ function clearPasswordBookStatus(): void {
 export async function reopenWithEncoding(encoding: string | null): Promise<boolean> {
   const current = store.info;
   if (!current) return false;
-  const dirs = [...store.dirs];
-  const filter = store.filter;
-  const ok = await openArchive(current.source, null, encoding);
-  if (!ok) return false;
-  store.dirs = dirs;
-  store.filter = filter;
-  await reload();
-  clearSelection();
-  return true;
+  return performArchiveOpen(current.source, null, encoding, () => ({ start: 0, end: PAGE_SIZE }));
 }
 
 /** Reopens the current archive after an in-place update and refreshes rows. */
-export async function refreshCurrentArchive(): Promise<boolean> {
+export async function refreshCurrentArchive(
+  visibleWindow: () => ArchiveViewWindow = () => ({ start: 0, end: PAGE_SIZE }),
+): Promise<boolean> {
   const current = store.info;
   if (!current) return false;
-  const dirs = [...store.dirs];
-  const filter = store.filter;
-  const ok = await openArchive(current.source, null, store.encodingOverride);
-  if (!ok) return false;
-  store.dirs = dirs;
-  store.filter = filter;
-  await reload();
-  clearSelection();
-  return true;
+  return performArchiveOpen(current.source, null, store.encodingOverride, visibleWindow);
 }
 
 export async function refreshArchivePasswordBookStatus(path = store.info?.path): Promise<void> {
@@ -497,6 +611,8 @@ async function reload(): Promise<void> {
   }
   store.filterPending = true;
   const generation = ++store.generation;
+  const id = store.info.id;
+  const previousDirs = [...store.dirs];
   clearBrowseError();
   store.pages = new Map();
   store.loading = new Set();
@@ -510,10 +626,22 @@ async function reload(): Promise<void> {
       return;
     }
     const query = store.filter.trim();
-    const page = query
-      ? await searchArchivePage(store.info.id, 0, query, generation)
-      : await listArchiveLevelPage(store.info.id, 0, generation);
+    let page = query
+      ? await searchArchivePage(id, 0, query, generation)
+      : await listArchiveLevelPage(id, 0, generation);
     if (generation !== store.generation || page === null) return;
+    if (!query && page.total === 0 && previousDirs.length) {
+      const dirs = await resolveArchiveDirs(id, previousDirs);
+      if (generation !== store.generation) return;
+      if (dirs.join("/") !== previousDirs.join("/")) {
+        markValidationArchiveCall("listEntries");
+        page = await ipc.listEntries(id, 0, dirs.length ? `${dirs.join("/")}/` : "", null, PAGE_SIZE);
+        if (generation !== store.generation) return;
+        store.dirs = dirs;
+        clearSelection();
+        reportArchiveDirectoryChange(previousDirs, dirs);
+      }
+    }
     store.pages = new Map([[0, page.items]]);
     store.total = page.total;
   } catch (error) {
@@ -636,6 +764,7 @@ async function searchArchivePage(id: number, page: number, query: string, genera
 function clearBrowseError(): void {
   store.browseError = null;
   removeToastByKey(ARCHIVE_BROWSE_ERROR_TOAST_KEY);
+  removeToastByKey(ARCHIVE_DIRECTORY_CHANGED_TOAST_KEY);
 }
 
 function publishBrowseError(error: unknown, generation: number): void {
@@ -666,6 +795,7 @@ export async function enterDir(name: string): Promise<void> {
 
 /** Enters a directory from an archive-wide search result. */
 export async function enterDirPath(path: string): Promise<void> {
+  clearSelection();
   store.dirs = path
     .replaceAll("\\", "/")
     .replace(/^\/+|\/+$/g, "")
@@ -679,6 +809,7 @@ export async function enterDirPath(path: string): Promise<void> {
 
 /** Jumps to a breadcrumb level (`-1` = archive root). */
 export async function gotoBreadcrumb(level: number): Promise<void> {
+  clearSelection();
   store.dirs = store.dirs.slice(0, level + 1);
   cancelFilterReload();
   store.filter = "";
@@ -689,6 +820,7 @@ export async function gotoBreadcrumb(level: number): Promise<void> {
 /** Goes one level up (Cmd+↑). */
 export async function goUp(): Promise<void> {
   if (store.dirs.length === 0) return;
+  clearSelection();
   store.dirs.pop();
   cancelFilterReload();
   store.filter = "";
@@ -729,7 +861,34 @@ function selectionCoversLoadedCurrentRows(selected: ReadonlySet<string>): boolea
   return true;
 }
 
-export function toggleSelect(row: EntryDto): void {
+function selectionRowIndex(row: EntryDto, index?: number): number | null {
+  if (
+    index !== undefined && Number.isInteger(index) && index >= 0 && index < store.total
+    && store.pages.get(Math.floor(index / PAGE_SIZE))?.[index % PAGE_SIZE]?.path === row.path
+  ) return index;
+  for (const [pageNumber, rows] of store.pages) {
+    const offset = rows.findIndex((entry) => entry.path === row.path);
+    if (offset >= 0) return pageNumber * PAGE_SIZE + offset;
+  }
+  return null;
+}
+
+function setSelectionAnchor(row: EntryDto, index?: number): void {
+  const rowIndex = selectionRowIndex(row, index);
+  store.selectionAnchor = rowIndex === null ? null : { index: rowIndex, generation: store.generation };
+}
+
+/** Replaces the selection with a single row and starts a new range anchor. */
+export function selectRow(row: EntryDto, index?: number): void {
+  if (store.filterPending) return;
+  store.selectionGeneration += 1;
+  store.selected = new Set([row.path]);
+  store.selectedSize = row.size;
+  store.selectedAllCurrentRows = selectionCoversLoadedCurrentRows(store.selected);
+  setSelectionAnchor(row, index);
+}
+
+export function toggleSelect(row: EntryDto, index?: number): void {
   if (store.filterPending) return;
   store.selectionGeneration += 1;
   const selected = new Set(store.selected);
@@ -742,6 +901,7 @@ export function toggleSelect(row: EntryDto): void {
   }
   store.selected = selected;
   store.selectedAllCurrentRows = selectionCoversLoadedCurrentRows(selected);
+  setSelectionAnchor(row, index);
 }
 
 export function clearSelection(): void {
@@ -749,6 +909,7 @@ export function clearSelection(): void {
   store.selected = new Set();
   store.selectedAllCurrentRows = false;
   store.selectedSize = 0;
+  store.selectionAnchor = null;
 }
 
 /** Selects every row already cached for the current level. */
@@ -770,24 +931,55 @@ export function selectAllLoaded(): void {
   store.selectedSize = selectedSize;
 }
 
-/**
- * Selects the complete current directory or archive-wide search result without
- * retaining every fetched page in the WebView.
- */
+/** Selects the current directory or search result using bounded page batches. */
 export async function selectAllRows(
   onProgress?: (loaded: number, total: number) => void,
-): Promise<SelectAllRowsResult> {
+): Promise<RowSelectionResult> {
+  return selectRowsInRange(0, store.total - 1, false, null, onProgress);
+}
+
+/** Extends from the last directly selected row, including uncached pages. */
+export async function selectRangeTo(
+  row: EntryDto,
+  index?: number,
+  additive = false,
+  onProgress?: (loaded: number, total: number) => void,
+): Promise<RowSelectionResult> {
+  if (store.filterPending) return "stale";
+  const target = selectionRowIndex(row, index);
+  if (target === null) return "stale";
+  const anchor = store.selectionAnchor?.generation === store.generation
+    ? store.selectionAnchor
+    : { index: target, generation: store.generation };
+  return selectRowsInRange(
+    Math.min(anchor.index, target), Math.max(anchor.index, target), additive, anchor, onProgress,
+  );
+}
+
+/** Publishes the complete selection atomically; fetched pages stay transient. */
+async function selectRowsInRange(
+  first: number,
+  last: number,
+  additive: boolean,
+  anchor: SelectionAnchor | null,
+  onProgress?: (loaded: number, total: number) => void,
+): Promise<RowSelectionResult> {
   const info = store.info;
   if (!info || store.filterPending) return "stale";
 
   const generation = store.generation;
-  const selectionGeneration = store.selectionGeneration;
+  const selectionGeneration = ++store.selectionGeneration;
   const query = store.filter.trim();
   const dirPrefix = currentPrefix();
   const total = store.total;
-  const selected = new Set<string>();
-  let selectedSize = 0;
+  const rangeCount = last - first + 1;
+  const coversAll = (first === 0 && last === total - 1)
+    || (additive && store.selectedAllCurrentRows);
+  const selected = new Set<string>(additive ? store.selected : []);
+  let selectedSize = additive ? store.selectedSize : 0;
   let loaded = 0;
+  const isCurrent = () => generation === store.generation
+    && selectionGeneration === store.selectionGeneration;
 
   const addRows = (rows: readonly EntryDto[]) => {
     for (const row of rows) {
@@ -796,69 +988,65 @@ export async function selectAllRows(
       selectedSize += row.size;
     }
     loaded += rows.length;
-    onProgress?.(Math.min(loaded, total), total);
+    onProgress?.(loaded, rangeCount);
   };
 
-  const previewRows = previewRowsForCurrentLevel();
-  if (previewRows) {
-    if (
-      generation !== store.generation
-      || selectionGeneration !== store.selectionGeneration
-    ) return "stale";
-    addRows(previewRows);
-    store.selected = selected;
-    store.selectedAllCurrentRows = true;
-    store.selectedSize = selectedSize;
-    store.selectionGeneration += 1;
-    return "selected";
-  }
-
-  const pageCount = Math.ceil(total / PAGE_SIZE);
+  onProgress?.(0, rangeCount);
+  if (!isCurrent()) return "stale";
   try {
-    if (!query) {
-      await ipc.cancelArchiveSearch(info.id, generation);
-    }
-    for (let start = 0; start < pageCount; start += SELECT_ALL_PAGE_CONCURRENCY) {
-      const pageNumbers = Array.from(
-        { length: Math.min(SELECT_ALL_PAGE_CONCURRENCY, pageCount - start) },
-        (_, index) => start + index,
-      );
-      const pages = await Promise.all(
-        pageNumbers.map(async (pageNumber) => {
-          const cached = store.pages.get(pageNumber);
-          if (cached) return { total, page: pageNumber, items: cached };
-          if (query) {
-            markValidationArchiveCall("searchEntries");
-            return ipc.searchEntries(info.id, pageNumber, query, PAGE_SIZE, generation);
-          }
-          markValidationArchiveCall("listEntries");
-          return ipc.listEntries(info.id, pageNumber, dirPrefix, null, PAGE_SIZE);
-        }),
-      );
-      if (
-        generation !== store.generation
-        || selectionGeneration !== store.selectionGeneration
-      ) return "stale";
-      for (const page of pages) {
-        if (page === null || page.total !== total) return "stale";
-        addRows(page.items);
+    const previewRows = previewRowsForCurrentLevel();
+    if (previewRows) {
+      addRows(previewRows.slice(first, last + 1));
+    } else {
+      const lastPage = Math.floor(last / PAGE_SIZE);
+      let cancelledSearch = false;
+      for (let start = Math.floor(first / PAGE_SIZE); start <= lastPage; start += SELECTION_PAGE_CONCURRENCY) {
+        if (!isCurrent()) return "stale";
+        const pageNumbers = Array.from(
+          { length: Math.min(SELECTION_PAGE_CONCURRENCY, lastPage - start + 1) },
+          (_, index) => start + index,
+        );
+        if (!query && !cancelledSearch && pageNumbers.some((page) => !store.pages.has(page))) {
+          await ipc.cancelArchiveSearch(info.id, generation);
+          cancelledSearch = true;
+          if (!isCurrent()) return "stale";
+        }
+        const pages = await Promise.all(
+          pageNumbers.map(async (pageNumber) => {
+            const cached = store.pages.get(pageNumber);
+            if (cached) return { total, page: pageNumber, items: cached };
+            if (query) {
+              markValidationArchiveCall("searchEntries");
+              return ipc.searchEntries(info.id, pageNumber, query, PAGE_SIZE, generation);
+            }
+            markValidationArchiveCall("listEntries");
+            return ipc.listEntries(info.id, pageNumber, dirPrefix, null, PAGE_SIZE);
+          }),
+        );
+        if (!isCurrent()) return "stale";
+        for (let index = 0; index < pages.length; index += 1) {
+          const page = pages[index];
+          if (page === null || page.total !== total) return "stale";
+          const offset = pageNumbers[index] * PAGE_SIZE;
+          const startOffset = Math.max(first - offset, 0);
+          const endOffset = Math.min(last + 1 - offset, PAGE_SIZE, total - offset);
+          const pageRows = page.items.slice(startOffset, endOffset);
+          if (pageRows.length !== endOffset - startOffset) return "failed";
+          addRows(pageRows);
+          if (!isCurrent()) return "stale";
+        }
       }
     }
   } catch {
-    return generation === store.generation
-      && selectionGeneration === store.selectionGeneration
-      ? "failed"
-      : "stale";
+    return isCurrent() ? "failed" : "stale";
   }
 
-  if (
-    generation !== store.generation
-    || selectionGeneration !== store.selectionGeneration
-    || loaded < total
-  ) return "stale";
+  if (!isCurrent()) return "stale";
+  if (loaded !== rangeCount) return "failed";
   store.selected = selected;
-  store.selectedAllCurrentRows = true;
+  store.selectedAllCurrentRows = coversAll || selectionCoversLoadedCurrentRows(selected);
   store.selectedSize = selectedSize;
+  store.selectionAnchor = anchor;
   store.selectionGeneration += 1;
   return "selected";
 }
@@ -908,8 +1096,10 @@ export function installArchivePreview(
   store.selected = new Set(options?.selected ?? []);
   store.selectedAllCurrentRows = false;
   store.selectionGeneration += 1;
+  store.selectionAnchor = null;
   store.previewRows = options?.previewRows ?? null;
   clearBrowseError();
+  clearArchiveRefreshStatus();
   store.selectedSize =
     options?.selectedSize ??
     rows

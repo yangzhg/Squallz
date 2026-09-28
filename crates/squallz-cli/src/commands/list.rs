@@ -2,10 +2,11 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::time::UNIX_EPOCH;
 
 use serde_json::{json, Value};
-use squallz_core::api::{ArchiveStructureStatus, EntryMeta, EntryType, OpenOptions, Password};
+use squallz_core::api::{
+    unix_seconds, ArchiveStructureStatus, EntryMeta, EntryType, OpenOptions, Password,
+};
 use squallz_core::{fold_archive_search_path, fold_archive_search_query, rank_folded_archive_path};
 
 use super::reports::print_pretty_json;
@@ -392,10 +393,7 @@ pub(crate) fn entry_json(e: &EntryMeta) -> Value {
         "link_target": link_target,
         "size": e.size,
         "compressed_size": e.compressed_size,
-        "modified": e
-            .modified
-            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-            .map(|d| d.as_secs()),
+        "modified": e.modified.and_then(unix_seconds),
         "unix_mode": e.unix_mode,
         "crc32": e.crc32,
         "encrypted": e.encrypted,
@@ -519,7 +517,7 @@ mod tests {
         assert_eq!(value["path"], "link");
         assert_eq!(value["type"], "symlink");
         assert_eq!(value["link_target"], "target.txt");
-        assert!(value["modified"].is_null());
+        assert_eq!(value["modified"], -1);
         assert_eq!(value["unix_mode"], 0o120777);
         assert_eq!(value["crc32"], 0x1234_ABCDu32);
         assert_eq!(value["encrypted"], true);

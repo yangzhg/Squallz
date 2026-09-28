@@ -64,13 +64,13 @@ pub(crate) fn create_nested_job_workspace() -> Result<PreviewWorkspace, FormatEr
     Ok(PreviewWorkspace::create_in(&std::env::temp_dir())?)
 }
 
-fn copy_with_limit<R: Read, W: Write>(
+fn copy_with_limit<R: Read + ?Sized, W: Write>(
     reader: &mut R,
     writer: &mut W,
     max_bytes: u64,
 ) -> Result<u64, FormatError> {
     let written = {
-        let mut limited = reader.by_ref().take(max_bytes);
+        let mut limited = (&mut *reader).take(max_bytes);
         io::copy(&mut limited, writer)?
     };
     let mut probe = [0_u8; 1];
@@ -98,8 +98,12 @@ pub(crate) fn write_archive_entry_limited<W: Write>(
         encoding_override: encoding.map(str::to_owned),
     };
     let mut outer = state.engine.open(outer_path, &open_opts)?;
-    let mut entry = outer.read_entry(&EntryPath::from_utf8(entry_path))?;
-    copy_with_limit(&mut entry, writer, max_bytes)
+    let mut written = 0;
+    outer.read_entry(&EntryPath::from_utf8(entry_path), &mut |entry| {
+        written = copy_with_limit(entry, writer, max_bytes)?;
+        Ok(())
+    })?;
+    Ok(written)
 }
 
 pub(crate) fn extract_nested_archive_to_temp_limited(
@@ -147,7 +151,7 @@ fn find_nested_entry(
     )))
 }
 
-fn copy_nested_entry_with_limits<R: Read, W: Write>(
+fn copy_nested_entry_with_limits<R: Read + ?Sized, W: Write>(
     reader: &mut R,
     writer: &mut W,
     meta: &EntryMeta,
@@ -210,7 +214,9 @@ pub(crate) fn extract_nested_archive_to_temp_for_job(
         password: password.cloned(),
         encoding_override: encoding.map(str::to_owned),
     };
-    let mut outer = state.engine.open(outer_path, &open_opts)?;
+    let mut outer = state
+        .engine
+        .open_with_control(outer_path, &open_opts, ctl)?;
     let meta = find_nested_entry(outer.as_mut(), entry_path, ctl)?;
     let (limits, writable) = nested_temp_limits(workspace, limits)?;
     if meta.size > limits.max_output_bytes {
@@ -223,9 +229,11 @@ pub(crate) fn extract_nested_archive_to_temp_for_job(
             ))
         });
     }
-    let mut entry = outer.read_entry(&meta.path)?;
     let mut temp = create_nested_temp_file(entry_path, workspace)?;
-    copy_nested_entry_with_limits(&mut entry, temp.as_file_mut(), &meta, limits, progress, ctl)?;
+    outer.read_entry(&meta.path, &mut |entry| {
+        copy_nested_entry_with_limits(entry, temp.as_file_mut(), &meta, limits, progress, ctl)?;
+        Ok(())
+    })?;
     ctl.checkpoint()?;
     temp.as_file_mut().flush()?;
     Ok(temp.into_temp_path())
@@ -351,6 +359,83 @@ mod tests {
             Err(FormatError::ResourceLimitExceeded(_))
         ));
         assert_eq!(oversized_output, b"1234");
+    }
+
+    #[test]
+    fn sevenz_preview_limit_and_nested_cancellation_stop_before_later_corruption() {
+        use squallz_core::api::{CompressionLevel, CreateOptions, NoProgress};
+        use std::io::{Seek, SeekFrom};
+
+        let root = tempfile::tempdir().unwrap();
+        let input = root.path().join("inner.bin");
+        let outer = root.path().join("outer.7z");
+        let size = 1024 * 1024;
+        std::fs::write(&input, vec![b'x'; size]).unwrap();
+        let state = AppState::new();
+        state
+            .engine
+            .create(
+                &outer,
+                &[input],
+                &CreateOptions {
+                    level: CompressionLevel::Store,
+                    ..CreateOptions::default()
+                },
+                &NoProgress,
+                &ControlToken::default(),
+            )
+            .unwrap();
+        // COPY payload begins after the fixed 7z signature header. Damage
+        // beyond either consumer's stopping point must not be read eagerly.
+        let mut archive = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&outer)
+            .unwrap();
+        archive.seek(SeekFrom::Start(32 + size as u64 - 1)).unwrap();
+        archive.write_all(b"y").unwrap();
+        drop(archive);
+
+        let mut output = Vec::new();
+        let result =
+            write_archive_entry_limited(&state, &outer, "inner.bin", None, None, &mut output, 32);
+        assert!(
+            matches!(result, Err(FormatError::ResourceLimitExceeded(_))),
+            "{result:?}"
+        );
+        assert_eq!(output, vec![b'x'; 32]);
+
+        let workspace = create_nested_job_workspace().unwrap();
+        let workspace_files = std::fs::read_dir(workspace.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<HashSet<_>>();
+        let ctl = ControlToken::new();
+        let progress = CancelAfterFirstChunk {
+            ctl: Arc::clone(&ctl),
+            samples: Mutex::new(Vec::new()),
+        };
+        let result = extract_nested_archive_to_temp_for_job(
+            &state,
+            &outer,
+            "inner.bin",
+            None,
+            None,
+            workspace.path(),
+            SafetyLimits::default(),
+            &progress,
+            &ctl,
+        );
+        assert!(matches!(result, Err(FormatError::Cancelled)), "{result:?}");
+        let remaining_files = std::fs::read_dir(workspace.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<HashSet<_>>();
+        assert_eq!(remaining_files, workspace_files);
+        let samples = progress.samples.lock().unwrap();
+        assert_eq!(samples.len(), 2);
+        assert_eq!(samples[0], (0, size as u64));
+        assert!((1..=NESTED_COPY_BUFFER_BYTES as u64).contains(&samples[1].0));
+        assert_eq!(samples[1].1, size as u64);
     }
 
     #[test]

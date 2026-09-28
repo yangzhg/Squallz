@@ -11,6 +11,17 @@ use crate::error::FormatError;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ProgressPhase {
+    /// Opening and inspecting an archive before entry processing can begin.
+    /// No overall byte total is available for this phase.
+    ArchiveOpen,
+    /// Testing the archive's entry contents.
+    ArchiveTest,
+    /// Streaming archive entries into a different archive format.
+    ArchiveConvert,
+    /// Materializing the selected archive entries.
+    ExtractEntries,
+    /// Restoring directory times and permissions after all descendants.
+    ExtractMetadata,
     /// Loading source metadata or preparing private recovery inputs.
     RecoveryPrepare,
     /// Checking protected files and recovery blocks.

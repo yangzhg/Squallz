@@ -283,12 +283,16 @@ impl ArchiveReader for TarArchiveReader {
         }
     }
 
-    fn read_entry(&mut self, path: &EntryPath) -> Result<Box<dyn Read + '_>, FormatError> {
+    fn read_entry(
+        &mut self,
+        path: &EntryPath,
+        consume: &mut dyn FnMut(&mut dyn Read) -> Result<(), FormatError>,
+    ) -> Result<(), FormatError> {
         let archive = self.rebuild()?;
         for item in archive.entries()? {
-            let entry = item?;
+            let mut entry = item?;
             if entry.path_bytes().as_ref() == path.raw.as_slice() {
-                return Ok(Box::new(entry));
+                return consume(&mut entry);
             }
         }
         Err(FormatError::Other(format!("entry not found: {path}")))
@@ -331,7 +335,7 @@ impl ArchiveReader for TarArchiveReader {
         } else {
             0
         };
-        let mut sink = ExtractSink::new(dest, opts, total)?;
+        let mut sink = ExtractSink::new(dest, opts, total, progress)?;
         let archive = self.rebuild()?;
         for item in archive.entries()? {
             let mut entry = item?;
@@ -360,7 +364,7 @@ impl ArchiveReader for TarArchiveReader {
             }
         }
         self.validate_stream_end(ctl)?;
-        Ok(sink.finish_with_report(progress))
+        sink.finish_with_report(progress, ctl)
     }
 
     fn test_summary(

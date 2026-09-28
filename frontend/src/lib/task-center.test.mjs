@@ -7,7 +7,7 @@ test("deferred component loaders cache success and retry failed imports", async 
   const server = await createTestServer();
 
   try {
-    const { createDeferredComponentLoader } = await server.ssrLoadModule(
+    const { createDeferredComponentLoader, DeferredComponentLoadError } = await server.ssrLoadModule(
       "/src/lib/deferred-component.ts",
     );
     let calls = 0;
@@ -17,12 +17,52 @@ test("deferred component loaders cache success and retry failed imports", async 
       return { default: "ready" };
     });
 
-    await assert.rejects(loader.load(), /chunk unavailable/);
-    await assert.rejects(loader.load(), /chunk unavailable/);
+    const first = loader.load();
+    assert.equal(loader.retry(), first);
+    await assert.rejects(first, (error) => {
+      assert.ok(error instanceof DeferredComponentLoadError);
+      assert.equal(error.cause.message, "chunk unavailable");
+      assert.equal(error.retryFailed, false);
+      return true;
+    });
+    assert.equal(loader.load(), first);
     assert.equal(calls, 1);
     assert.equal(await loader.retry(), "ready");
     assert.equal(await loader.load(), "ready");
+    assert.equal(await loader.retry(), "ready");
     assert.equal(calls, 2);
+  } finally {
+    await server.close();
+  }
+});
+
+test("repeated view failures offer window recovery without duplicating pending requests", async () => {
+  const server = await createTestServer();
+  try {
+    const { createDeferredComponentLoader } = await server.ssrLoadModule("/src/lib/deferred-component.ts");
+    let calls = 0;
+    let finish;
+    const loader = createDeferredComponentLoader(() => {
+      calls += 1;
+      if (calls === 1) throw new Error("synchronous failure");
+      return new Promise((resolve, reject) => { finish = { resolve, reject }; });
+    });
+    await assert.rejects(loader.load(), { retryFailed: false });
+    const retry = loader.retry();
+    assert.equal(loader.load(), retry);
+    assert.equal(loader.retry(), retry);
+    await Promise.resolve();
+    finish.reject(new TypeError("cached module failure"));
+    await assert.rejects(retry, { retryFailed: true });
+    assert.equal(calls, 2);
+
+    const recovered = loader.retry();
+    assert.equal(loader.retry(), recovered);
+    await Promise.resolve();
+    finish.resolve({ default: "recovered" });
+    assert.equal(await recovered, "recovered");
+    assert.equal(loader.retry(), recovered);
+    assert.equal(calls, 3);
   } finally {
     await server.close();
   }

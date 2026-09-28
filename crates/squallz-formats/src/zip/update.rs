@@ -5,20 +5,24 @@
 //! entries stay encrypted without needing the password). Added files are
 //! compressed with the usual create options.
 
-use std::collections::{HashMap, HashSet};
 use std::io::{Read, Seek, SeekFrom};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use squallz_format_api::{
     ArchiveWriter, ControlToken, CreateOptions, EntryMeta, EntryPath, FormatError,
-    PreparedUpdateAdditions, ProgressSink, ReadSeek, UpdateOp, WriteSeek,
+    PreparedUpdateAdditions, ProgressSink, ReadSeek, UpdateOp, UpdateOptions, WriteSeek,
 };
 use zip::ZipArchive;
 
+use super::encoding::decode_entry_name;
 use super::error::map_zip_error;
 use super::writer::ZipArchiveWriter;
+use delete::Deletions;
+
+mod delete;
+mod plan;
+mod selection;
 
 /// Extra bytes included in the early space estimate for central-directory
 /// growth and compression overhead on incompressible additions.
@@ -54,8 +58,7 @@ struct EngineAdditions<'a>(&'a mut dyn PreparedUpdateAdditions);
 struct PreparedRewrite<'a> {
     archive: ZipArchive<RawCopySource<'a>>,
     raw_copy: RawCopyTracker,
-    deletes: Option<GlobSet>,
-    renames: HashMap<String, String>,
+    plan: plan::UpdatePlan,
 }
 
 #[derive(Clone, Default)]
@@ -186,7 +189,7 @@ pub(super) fn rewrite_archive(
     output: Box<dyn WriteSeek>,
     ops: &[UpdateOp],
     additions: &mut dyn PreparedUpdateAdditions,
-    opts: &CreateOptions,
+    opts: &UpdateOptions,
     progress: &dyn ProgressSink,
     ctl: &ControlToken,
 ) -> Result<(), FormatError> {
@@ -207,24 +210,30 @@ fn rewrite_archive_impl(
     output: Box<dyn WriteSeek>,
     ops: &[UpdateOp],
     additions: &mut impl AdditionSet,
-    opts: &CreateOptions,
+    opts: &UpdateOptions,
     progress: &dyn ProgressSink,
     ctl: &ControlToken,
 ) -> Result<(), FormatError> {
     let PreparedRewrite {
         mut archive,
         raw_copy,
-        deletes,
-        renames,
-    } = prepare_update(source, ops, additions, progress, ctl)?;
+        plan,
+    } = prepare_update(
+        source,
+        ops,
+        additions,
+        opts.encoding_override.as_deref(),
+        progress,
+        ctl,
+    )?;
     rewrite(
         &mut archive,
         &raw_copy,
         output,
-        &deletes,
-        &renames,
+        &plan.deletes,
+        &plan,
         additions,
-        opts,
+        &opts.create,
         progress,
         ctl,
     )
@@ -234,15 +243,11 @@ fn prepare_update<'a>(
     source: Box<dyn ReadSeek>,
     ops: &[UpdateOp],
     additions: &impl AdditionSet,
+    encoding: Option<&str>,
     progress: &'a dyn ProgressSink,
     ctl: &'a ControlToken,
 ) -> Result<PreparedRewrite<'a>, FormatError> {
     ctl.checkpoint()?;
-    let deletes = build_path_set(ops.iter().filter_map(|op| match op {
-        UpdateOp::Delete { pattern } => Some(pattern.as_str()),
-        _ => None,
-    }))?;
-    let renames = build_rename_map(ops);
     let raw_copy = RawCopyTracker::default();
     let source = RawCopySource {
         inner: source,
@@ -254,14 +259,11 @@ fn prepare_update<'a>(
         ZipArchive::new(source).map_err(|error| map_controlled_zip_error(error, ctl))?;
     ctl.checkpoint()?;
 
-    // Update targets must be deterministic: no missing rename sources, no
-    // accidental overwrite, and no duplicate targets in the same operation.
-    validate_update_plan(&mut archive, &deletes, &renames, additions, ctl)?;
+    let plan = plan::prepare(&mut archive, ops, additions, encoding, ctl)?;
     Ok(PreparedRewrite {
         archive,
         raw_copy,
-        deletes,
-        renames,
+        plan,
     })
 }
 
@@ -271,8 +273,8 @@ fn rewrite(
     archive: &mut ZipArchive<RawCopySource<'_>>,
     raw_copy: &RawCopyTracker,
     output: Box<dyn WriteSeek>,
-    deletes: &Option<GlobSet>,
-    renames: &HashMap<String, String>,
+    deletes: &Deletions,
+    plan: &plan::UpdatePlan,
     additions: &mut impl AdditionSet,
     opts: &CreateOptions,
     progress: &dyn ProgressSink,
@@ -288,9 +290,7 @@ fn rewrite(
         let file = archive
             .by_index_raw(index)
             .map_err(|error| map_controlled_zip_error(error, ctl))?;
-        let name = String::from_utf8_lossy(file.name_raw());
-        let key = name.trim_end_matches('/');
-        if !deletes.as_ref().is_some_and(|set| set.is_match(key)) {
+        if !deletes.matches(&decode_entry_name(file.name_raw(), plan.encoding)) {
             copied_total = copied_total.saturating_add(file.compressed_size());
         }
     }
@@ -302,15 +302,13 @@ fn rewrite(
         let file = archive
             .by_index_raw(i)
             .map_err(|error| map_controlled_zip_error(error, ctl))?;
-        let name = String::from_utf8_lossy(file.name_raw()).into_owned();
-        let key = name.trim_end_matches('/').to_string();
         let compressed = file.compressed_size();
-        let path = EntryPath::from_utf8(name.clone());
+        let path = decode_entry_name(file.name_raw(), plan.encoding);
         progress.on_progress(done, total, &path);
-        if deletes.as_ref().is_some_and(|set| set.is_match(&key)) {
+        if deletes.matches(&path) {
             continue; // dropped entry
         }
-        let rename_to = renames.get(&name).or_else(|| renames.get(&key));
+        let rename_to = plan.renames.get(file.name_raw());
         raw_copy.begin(path.clone(), done, total, compressed);
         let result = writer.raw_copy(file, rename_to.map(String::as_str));
         let copied = raw_copy.finish();
@@ -395,136 +393,6 @@ impl AdditionSet for EngineAdditions<'_> {
         self.0
             .add_entry(index, writer, progress, ctl, completed_bytes, total_bytes)
     }
-}
-
-/// Compiles path globs. Each pattern is expanded the same way as the
-/// engine-side `PathFilter` so that bare names match at any depth and matched
-/// directories prune their subtree.
-fn build_path_set<'a>(
-    patterns: impl Iterator<Item = &'a str>,
-) -> Result<Option<GlobSet>, FormatError> {
-    let patterns: Vec<&str> = patterns.collect();
-    if patterns.is_empty() {
-        return Ok(None);
-    }
-    let mut builder = GlobSetBuilder::new();
-    for pattern in patterns {
-        let p = pattern.trim_end_matches('/');
-        let mut variants = vec![p.to_owned(), format!("{p}/**")];
-        if !p.contains('/') {
-            variants.push(format!("**/{p}"));
-            variants.push(format!("**/{p}/**"));
-        }
-        for variant in variants {
-            let glob = GlobBuilder::new(&variant)
-                .literal_separator(true)
-                .build()
-                .map_err(|e| {
-                    FormatError::Other(format!("invalid glob pattern '{pattern}': {e}"))
-                })?;
-            builder.add(glob);
-        }
-    }
-    let set = builder
-        .build()
-        .map_err(|e| FormatError::Other(format!("invalid glob pattern set: {e}")))?;
-    Ok(Some(set))
-}
-
-/// Maps old entry names to new ones.
-fn build_rename_map(ops: &[UpdateOp]) -> HashMap<String, String> {
-    ops.iter()
-        .filter_map(|op| match op {
-            UpdateOp::Rename { from, to } => Some((from.display.clone(), to.display.clone())),
-            _ => None,
-        })
-        .collect()
-}
-
-/// Rejects update plans that would silently overwrite or duplicate entries.
-fn validate_update_plan<R: Read + Seek>(
-    archive: &mut ZipArchive<R>,
-    deletes: &Option<GlobSet>,
-    renames: &HashMap<String, String>,
-    additions: &impl AdditionSet,
-    ctl: &ControlToken,
-) -> Result<(), FormatError> {
-    ctl.checkpoint()?;
-    let mut names: Vec<(String, String)> = Vec::with_capacity(archive.len());
-    let mut exact_names = HashSet::with_capacity(archive.len());
-    let mut existing = HashSet::new();
-    for i in 0..archive.len() {
-        ctl.checkpoint()?;
-        let file = archive
-            .by_index_raw(i)
-            .map_err(|error| map_controlled_zip_error(error, ctl))?;
-        let name = String::from_utf8_lossy(file.name_raw()).into_owned();
-        let key = archive_key(&name);
-        existing.insert(key.clone());
-        exact_names.insert(name.clone());
-        names.push((name, key));
-    }
-    for from in renames.keys() {
-        ctl.checkpoint()?;
-        let from_key = archive_key(from);
-        let found = exact_names.contains(from) || existing.contains(&from_key);
-        if !found {
-            return Err(FormatError::Other(format!(
-                "rename source not found in archive: {from}"
-            )));
-        }
-    }
-    let mut removed = HashSet::new();
-    for (name, key) in &names {
-        ctl.checkpoint()?;
-        if deletes.as_ref().is_some_and(|set| set.is_match(key))
-            || renames.contains_key(name)
-            || renames.contains_key(key)
-        {
-            removed.insert(key.clone());
-        }
-    }
-    let mut produced = HashMap::new();
-    for target in renames.values() {
-        ctl.checkpoint()?;
-        validate_update_target(target, &existing, &removed, &mut produced)?;
-    }
-    for index in 0..additions.len() {
-        ctl.checkpoint()?;
-        let meta = addition_meta(additions, index)?;
-        validate_update_target(&meta.path.display, &existing, &removed, &mut produced)?;
-    }
-    ctl.checkpoint()?;
-    Ok(())
-}
-
-fn validate_update_target(
-    target: &str,
-    existing: &HashSet<String>,
-    removed: &HashSet<String>,
-    produced: &mut HashMap<String, String>,
-) -> Result<(), FormatError> {
-    let key = archive_key(target);
-    if key.is_empty() {
-        return Err(FormatError::Other(
-            "update target path cannot be empty".into(),
-        ));
-    }
-    if existing.contains(&key) && !removed.contains(&key) {
-        return Err(FormatError::Other(format!(
-            "update target already exists in archive: {target}"
-        )));
-    }
-    if let Some(previous) = produced.insert(key, target.to_string()) {
-        return Err(FormatError::Other(format!(
-            "duplicate update target in archive: {previous} and {target}"
-        )));
-    }
-    Ok(())
-}
-
-fn archive_key(name: &str) -> String {
-    name.trim_end_matches('/').to_string()
 }
 
 #[cfg(test)]
@@ -678,6 +546,7 @@ mod tests {
             Box::new(source),
             &[],
             &additions,
+            None,
             &progress,
             control.as_ref(),
         );
@@ -725,7 +594,7 @@ mod tests {
             Box::new(output),
             &[],
             &mut additions,
-            &CreateOptions::default(),
+            &UpdateOptions::default(),
             &squallz_format_api::NoProgress,
             &control,
         );

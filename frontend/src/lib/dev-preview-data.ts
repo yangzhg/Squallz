@@ -19,6 +19,7 @@ export interface ArchivePreview {
 }
 
 type PreviewTaskKind =
+  | "archive_open"
   | "compress"
   | "compress_split"
   | "compress_sfx"
@@ -28,6 +29,8 @@ type PreviewTaskKind =
   | "recovery_cleanup_record"
   | "extract"
   | "extract_unknown_current"
+  | "extract_metadata"
+  | "batch_extract_metadata"
   | "batch_extract"
   | "test"
   | "checksum"
@@ -189,6 +192,42 @@ const nestedPreviewItems: EntryDto[] = [
     crc: null,
     encrypted: false,
     encoding: "utf-8",
+  },
+];
+
+const linkPreviewItems: EntryDto[] = ([
+  { path: "report-link", display: "report-link", entry_type: "symlink", encrypted: false },
+  { path: "report-copy", display: "report-copy", entry_type: "hardlink", encrypted: false },
+  { path: "private-link", display: "private-link", entry_type: "symlink", encrypted: true },
+] satisfies Pick<EntryDto, "path" | "display" | "entry_type" | "encrypted">[]).map((entry) => ({
+  ...entry,
+  size: 15,
+  compressed: 15,
+  modified: 1781199120,
+  crc: null,
+  encoding: "utf-8",
+}));
+
+const historicalTimePreviewEntries: EntryDto[] = import.meta.env.DEV ? ([
+  ["Correspondence 1900.pdf", -2_208_943_800],
+  ["Lunar mission 1969.pdf", -14_182_980],
+  ["Archive index 1970.txt", 0],
+  ["Undated manuscript.txt", null],
+  ["Uncertain manuscript.txt", Number.MAX_SAFE_INTEGER],
+] satisfies [string, number | null][]).map(([name, modified]) => ({
+  ...archivePreviewEntries[2], path: name, display: name, modified,
+})) : [];
+
+const longNamePreviewEntries: EntryDto[] = [
+  {
+    ...archivePreviewEntries[2],
+    path: "Quarterly financial report — consolidated statements and supporting documents.pdf",
+    display: "Quarterly financial report — consolidated statements and supporting documents.pdf",
+  },
+  {
+    ...archivePreviewEntries[2],
+    path: "reports/2026/第三季度/交付资料与财务归档/季度财务报告与附件汇总（已审核最终版本）.pdf",
+    display: "季度财务报告与附件汇总（已审核最终版本）.pdf",
   },
 ];
 
@@ -382,6 +421,7 @@ function readIntegrationDiagnosticsPreview(params: URLSearchParams): Integration
 
 function completedTaskParam(value: string | null): RuntimePreviews["completedTask"] {
   if (
+    value === "archive_open" ||
     value === "compress" ||
     value === "compress_split" ||
     value === "compress_sfx" ||
@@ -391,6 +431,8 @@ function completedTaskParam(value: string | null): RuntimePreviews["completedTas
     value === "recovery_cleanup_record" ||
     value === "extract" ||
     value === "extract_unknown_current" ||
+    value === "extract_metadata" ||
+    value === "batch_extract_metadata" ||
     value === "batch_extract" ||
     value === "test" ||
     value === "checksum" ||
@@ -413,12 +455,23 @@ function readArchivePreview(params: URLSearchParams, pageSize: number): ArchiveP
 
   const format = (params.get("previewFormat") ?? "zip").toLowerCase();
   const name = `product-backup.${format}`;
+  const entries = [
+    ...archivePreviewEntries,
+    ...(params.get("previewLinks") === "1" ? linkPreviewItems : []),
+    ...(params.get("previewLongNames") === "1" ? longNamePreviewEntries : []),
+    ...(params.get("previewHistoricalTimes") === "1" ? historicalTimePreviewEntries : []),
+  ];
+  const nestedItems = params.get("previewLinks") === "1"
+    ? [...nestedPreviewItems, ...linkPreviewItems]
+    : nestedPreviewItems;
   const selected = listParam(params, "previewSelected", ",");
   const largeEntryCount = numericParam(params, "previewLargeEntries", 0);
   const pages = largeEntryCount > 0 ? largePreviewPages(largeEntryCount, pageSize) : null;
-  const rows = pages?.get(0) ?? archivePreviewEntries;
-  const previewRows = pages ? undefined : archivePreviewEntries;
-  const total = largeEntryCount > 0 ? largeEntryCount : archivePreviewEntries.length;
+  const rows = pages?.get(0) ?? entries.filter(
+    (entry) => !entry.path.replace(/\/+$/g, "").includes("/"),
+  );
+  const previewRows = pages ? undefined : entries;
+  const total = largeEntryCount > 0 ? largeEntryCount : rows.length;
 
   return {
     info: {
@@ -431,7 +484,7 @@ function readArchivePreview(params: URLSearchParams, pageSize: number): ArchiveP
       structure: params.get("previewRecoveredZip") === "1"
         ? "zip_local_headers_recovered"
         : "complete",
-      entry_count: total,
+      entry_count: largeEntryCount > 0 ? largeEntryCount : entries.length,
       volumes: null,
       non_utf8_name_count: 0,
       garbled_count: 0,
@@ -448,9 +501,9 @@ function readArchivePreview(params: URLSearchParams, pageSize: number): ArchiveP
           outer_path: `${sampleArchiveRoot}/${name}`,
           entry_path: "locked-secrets.7z",
           format: "7z",
-          entry_count: nestedPreviewItems.length,
+          entry_count: nestedItems.length,
           truncated: false,
-          items: nestedPreviewItems,
+          items: nestedItems,
         }
       : null,
   };

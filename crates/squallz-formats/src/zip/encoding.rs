@@ -17,16 +17,21 @@ use squallz_format_api::EntryPath;
 /// `"shift_jis"`); otherwise the encoding is guessed from the concatenated
 /// non-UTF-8 name bytes. Returns `None` when every name is valid UTF-8 and
 /// no detection is needed.
-pub(super) fn resolve_fallback_encoding(
-    raw_names: &[Vec<u8>],
+pub(super) fn resolve_fallback_encoding<I, B>(
+    raw_names: I,
     override_label: Option<&str>,
-) -> Option<&'static Encoding> {
+) -> Option<&'static Encoding>
+where
+    I: IntoIterator<Item = B>,
+    B: AsRef<[u8]>,
+{
     if let Some(encoding) = override_encoding(override_label) {
         return Some(encoding);
     }
     let mut detector = EncodingDetector::new(Iso2022JpDetection::Deny);
     let mut fed_any = false;
     for name in raw_names {
+        let name = name.as_ref();
         if std::str::from_utf8(name).is_err() {
             detector.feed(name, false);
             fed_any = true;

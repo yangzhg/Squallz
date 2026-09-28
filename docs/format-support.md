@@ -131,6 +131,85 @@ Executable archive boundary:
 - Self-extractors never run archived programs or scripts automatically. See
   `docs/SELF_EXTRACTING.md` for the versioned layout and trust boundary.
 
+## ZIP modification times
+
+The built-in ZIP reader prefers NTFS UTC modification timestamps (100 ns
+precision), then signed Info-ZIP extended Unix timestamps, then DOS local time.
+DOS-only timestamps use the host's historical time-zone rules and have two-second
+precision. A repeated daylight-saving hour resolves to the earlier instant; a
+nonexistent local time remains unknown. A DOS-only archive has no source time
+zone, so the original instant cannot be recovered after a cross-zone transfer.
+
+Creation writes local DOS time plus NTFS UTC metadata, and an Info-ZIP UTC field
+where signed 32-bit seconds can represent it. Dates outside 1980–2107 retain UTC
+metadata when an extra field can represent them; their DOS field uses the format
+default. Zero NTFS timestamps mean unknown. Raw-copy updates and renames retain
+NTFS and Info-ZIP modification times. When the central directory is unreadable,
+local-header recovery uses the same timestamp precedence for browsing,
+extraction and conversion. It reads the standard 32-byte NTFS time field and
+complete Info-ZIP time fields, skips invalid field contents and stops parsing
+extra fields at a broken length boundary. Unavailable UTC metadata falls back to
+valid local DOS time; otherwise the modification time remains unknown. The
+source still reports its damaged central directory until readable entries are
+written to a new archive.
+
+References: [PKWARE APPNOTE, sections 4.4.6 and 4.5.5](https://pkware.cachefly.net/webdocs/casestudies/APPNOTE.TXT)
+and [Info-ZIP extra-field specification](https://libzip.org/specifications/extrafld.txt).
+
+## Extracted metadata
+
+The built-in 7z reader recognizes symbolic links stored with the Unix attribute
+extension by 7-Zip/p7zip. Link targets are decoded with CRC verification and a
+65,535-byte limit; malformed, empty or non-UTF-8 targets are rejected. Listing
+reads only blocks containing accessible link targets, draining preceding solid
+entries with a fixed buffer. Encrypted targets remain unavailable until a
+password is supplied, while the link type and encryption status remain visible.
+Extraction uses the shared link policies, conflict handling and atomic
+publication. A skipped link needs no password unless another selected entry
+requires its encrypted block. The streaming Follow policy can only copy a
+regular target already extracted into the destination; forward references,
+unselected targets and unresolved links are reported as skipped. Windows
+reparse-point payloads and 7z link creation remain unsupported.
+
+The shared extraction sink restores known modification times for regular files
+and explicit directory entries. Precision and representable dates depend on the
+archive format and destination filesystem. Missing timestamps are left to the
+filesystem. Files receive their metadata through the open staging handle before
+publication. Failed reads or cancellation before a file is committed leave its
+existing target unchanged, as do skipped conflicts. A timestamp-setting failure
+is an extraction error, including in best-effort mode; previously completed
+entries can remain on disk.
+
+Directories receive timestamps and optional Unix permissions after their
+descendants finish, deepest first. This allows read-only archived directories to
+receive their contents. Names that resolve to the same physical directory use
+the last selected directory entry's metadata. Restoration uses bound directory
+handles, rejects symlinks/reparse points and verifies the original directory identity. Directory
+handles require read/search access; a directory that cannot be safely reopened
+causes extraction to fail. Cancellation or failure before finalization can leave
+directory metadata unrestored. Permission restoration retains its best-effort
+policy and can be disabled independently of modification-time restoration.
+
+Hard links share the extracted target's timestamp. When materialized as copies,
+hard links retain the target entry's timestamp and followed symbolic links use
+their own known timestamp, falling back to the target's. Preserved symbolic links
+receive their own known modification time through a handle opened without
+following the target, before the staged link is published. Dangling links are
+supported; the target's timestamps are never changed. Unknown modification times
+are left to the filesystem. Linux link-time restoration requires kernel 5.8 or
+later for [descriptor-bound `utimensat`](https://man7.org/linux/man-pages/man2/utimensat.2.html);
+older kernels report an extraction
+error before publishing that link. This does not restore ownership, ACLs,
+extended attributes, creation or access times.
+
+When no replacement was requested, preserved symbolic links are published by
+moving the staged link itself with the platform's atomic no-replace operation.
+This retains file, directory and dangling links without following their targets.
+A competing destination is left unchanged. Cleanup after failed publication
+operates on the staged link itself. Windows still requires permission to create
+symbolic links; the existing skipped-link report applies when that permission is
+unavailable.
+
 ## Cross-Platform Route
 
 Squallz must not rely on macOS `/usr/bin/bsdtar`, Linux distribution tools, or a

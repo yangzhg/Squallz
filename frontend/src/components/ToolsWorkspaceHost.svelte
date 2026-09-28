@@ -21,6 +21,7 @@
 
 <script lang="ts">
   import Icon from "./Icon.svelte";
+  import DeferredViewError from "./DeferredViewError.svelte";
 
   let {
     surface,
@@ -77,34 +78,22 @@
   {/if}
 {:then Workspace}
   <Workspace {surface} />
-{:catch}
+{:catch error}
   {#if surface.variant === "modern"}
     <div class={modernClass}>
-      <section class="deferred-workspace-state danger" role="alert">
-        <Icon name="alert-triangle" size={20} />
-        <div>
-          <strong>{failureTitle}</strong>
-          <span>{surface.tr("gui.tools.workspace_load_failed_body", "Your selected archive, target, and options were not changed. Retry loading this workspace.")}</span>
-        </div>
-        <button type="button" class="primary-lite" onclick={retry}>
-          <Icon name="rotate-cw" size={15} />{surface.tr("gui.tools.workspace_retry", "Retry")}
-        </button>
-      </section>
+      <DeferredViewError
+        {error} title={failureTitle}
+        body={surface.tr("gui.tools.workspace_load_failed_body", "Your selected archive, target, and options were not changed. Retry loading this workspace.")}
+        retryLabel={surface.tr("gui.tools.workspace_retry", "Retry")} onRetry={retry}
+      />
     </div>
   {:else}
-    <div class="classic-dialog-body" class:with-archive-return={surface.archiveReturn.visible}>
-      <section class="classic-extract-sheet">
-        <div class="deferred-workspace-state danger" role="alert">
-          <Icon name="alert-triangle" size={20} />
-          <div>
-            <strong>{failureTitle}</strong>
-            <span>{surface.tr("gui.tools.workspace_load_failed_body", "Your selected archive, target, and options were not changed. Retry loading this workspace.")}</span>
-          </div>
-          <button type="button" class="classic-primary" onclick={retry}>
-            <Icon name="rotate-cw" size={15} />{surface.tr("gui.tools.workspace_retry", "Retry")}
-          </button>
-        </div>
-      </section>
+    <div class="classic-dialog-body">
+      <DeferredViewError
+        {error} title={failureTitle}
+        body={surface.tr("gui.tools.workspace_load_failed_body", "Your selected archive, target, and options were not changed. Retry loading this workspace.")}
+        retryLabel={surface.tr("gui.tools.workspace_retry", "Retry")} onRetry={retry} classic
+      />
     </div>
   {/if}
 {/await}

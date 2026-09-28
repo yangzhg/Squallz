@@ -17,7 +17,7 @@ use squallz_format_api::{
 use zip::read::ZipFile;
 use zip::{ZipArchive, ZipReadOptions};
 
-use super::datetime::from_zip_datetime;
+use super::datetime::{local_modified_time, modified_time};
 use super::encoding::{decode_entry_name, resolve_fallback_encoding};
 use super::error::map_zip_error;
 
@@ -171,7 +171,7 @@ impl ZipArchiveReader {
             },
             size: file.size(),
             compressed_size: Some(file.compressed_size()),
-            modified: file.last_modified().map(from_zip_datetime),
+            modified: modified_time(file.last_modified(), file.extra_data_fields()),
             unix_mode: file.unix_mode(),
             crc32: Some(file.crc32()),
             encrypted: file.encrypted(),
@@ -417,12 +417,16 @@ impl ArchiveReader for LocalZipArchiveReader {
         Ok(())
     }
 
-    fn read_entry(&mut self, path: &EntryPath) -> Result<Box<dyn Read + '_>, FormatError> {
+    fn read_entry(
+        &mut self,
+        path: &EntryPath,
+        consume: &mut dyn FnMut(&mut dyn Read) -> Result<(), FormatError>,
+    ) -> Result<(), FormatError> {
         let idx = *self
             .index_by_raw
             .get(&path.raw)
             .ok_or_else(|| FormatError::Other(format!("entry not found: {path}")))?;
-        self.read_entry_at(idx)
+        consume(self.read_entry_at(idx)?.as_mut())
     }
 
     fn test_summary(
@@ -560,6 +564,11 @@ fn scan_local_headers(
         }
         let flags = u16::from_le_bytes([fixed[6], fixed[7]]);
         let method = u16::from_le_bytes([fixed[8], fixed[9]]);
+        let dos = zip::DateTime::try_from_msdos(
+            u16::from_le_bytes([fixed[12], fixed[13]]),
+            u16::from_le_bytes([fixed[10], fixed[11]]),
+        )
+        .ok();
         let crc = u32::from_le_bytes([fixed[14], fixed[15], fixed[16], fixed[17]]);
         let compressed_size = u32::from_le_bytes([fixed[18], fixed[19], fixed[20], fixed[21]]);
         let size = u32::from_le_bytes([fixed[22], fixed[23], fixed[24], fixed[25]]);
@@ -614,6 +623,7 @@ fn scan_local_headers(
             compressed_size,
             size,
             data_offset,
+            local_modified_time(dos, &extra),
         ));
         offset = next_offset;
     }
@@ -621,7 +631,7 @@ fn scan_local_headers(
     Ok(candidates
         .into_iter()
         .map(
-            |(raw_name, flags, method, crc, compressed_size, size, data_offset)| {
+            |(raw_name, flags, method, crc, compressed_size, size, data_offset, modified)| {
                 let path = decode_entry_name(&raw_name, fallback);
                 let is_dir = path.display.ends_with('/');
                 LocalZipEntry {
@@ -634,7 +644,7 @@ fn scan_local_headers(
                         },
                         size,
                         compressed_size: Some(compressed_size),
-                        modified: None,
+                        modified,
                         unix_mode: None,
                         crc32: Some(crc),
                         encrypted: flags & 0x01 != 0,
@@ -860,12 +870,16 @@ impl ArchiveReader for ZipArchiveReader {
         Ok(())
     }
 
-    fn read_entry(&mut self, path: &EntryPath) -> Result<Box<dyn Read + '_>, FormatError> {
+    fn read_entry(
+        &mut self,
+        path: &EntryPath,
+        consume: &mut dyn FnMut(&mut dyn Read) -> Result<(), FormatError>,
+    ) -> Result<(), FormatError> {
         let idx = *self
             .index_by_raw
             .get(&path.raw)
             .ok_or_else(|| FormatError::Other(format!("entry not found: {path}")))?;
-        Ok(Box::new(self.open_entry(idx)?))
+        consume(&mut self.open_entry(idx)?)
     }
 
     fn test_summary(

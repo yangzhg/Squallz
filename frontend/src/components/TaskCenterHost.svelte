@@ -12,6 +12,7 @@
 
 <script lang="ts">
   import Icon from "./Icon.svelte";
+  import DeferredViewError from "./DeferredViewError.svelte";
   import { cssVariables } from "../lib/css-variables";
 
   let {
@@ -52,29 +53,26 @@
         <strong id="task-center-loading-title">{loadingTitle}</strong>
         <span>{loadingBody}</span>
       </div>
+      <div class="deferred-workspace-actions">
+        <button type="button" onclick={surface.onClose}>{closeLabel}</button>
+      </div>
     </section>
   </aside>
 {:then TaskCenter}
   <TaskCenter {...surface} />
-{:catch}
+{:catch error}
   <aside
     id="squallz-task-center"
     class={`${surface.rootClass} task-surface-shell`}
     use:cssVariables={surface.rootVariables ?? {}}
     aria-labelledby="task-center-load-failed-title"
   >
-    <section class="deferred-workspace-state task-surface-deferred danger" role="alert">
-      <Icon name="alert-triangle" size={20} />
-      <div>
-        <strong id="task-center-load-failed-title">{failureTitle}</strong>
-        <span>{failureBody}</span>
-      </div>
-      <div class="deferred-workspace-actions">
-        <button type="button" onclick={surface.onClose}>{closeLabel}</button>
-        <button type="button" class="primary-lite" onclick={retry}>
-          <Icon name="rotate-cw" size={15} />{retryLabel}
-        </button>
-      </div>
-    </section>
+    <DeferredViewError
+      {error} title={failureTitle} body={failureBody} {retryLabel} onRetry={retry}
+      titleId="task-center-load-failed-title" class="task-surface-deferred"
+      recovery={{ taskCenter: true }}
+    >
+      <button type="button" onclick={surface.onClose}>{closeLabel}</button>
+    </DeferredViewError>
   </aside>
 {/await}

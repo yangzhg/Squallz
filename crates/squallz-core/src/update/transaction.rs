@@ -7,8 +7,8 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::api::{
-    ArchiveFormat, ControlToken, CreateOptions, EntryPath, FormatError, PreparedUpdateAdditions,
-    ProgressPhase, ProgressSink, UpdateOp,
+    ArchiveFormat, ControlToken, EntryPath, FormatError, PreparedUpdateAdditions, ProgressPhase,
+    ProgressSink, UpdateOp, UpdateOptions,
 };
 use crate::archive_path::{checked_path_component, is_canonical_process_sequence};
 use crate::destination_guard::{
@@ -147,7 +147,7 @@ pub(super) fn run(
     requested_target: &Path,
     ops: &[UpdateOp],
     additions: &mut dyn PreparedUpdateAdditions,
-    opts: &CreateOptions,
+    opts: &UpdateOptions,
     progress: &dyn ProgressSink,
     ctl: &ControlToken,
 ) -> Result<(), FormatError> {
@@ -183,7 +183,7 @@ pub(super) fn run(
     let source = bind_source(&target)?;
     let addition_bytes = addition_bytes(additions)?;
     let required =
-        format.estimate_update_staging_bytes(source.state.bytes(), addition_bytes, opts)?;
+        format.estimate_update_staging_bytes(source.state.bytes(), addition_bytes, &opts.create)?;
     if fs4::available_space(parent_or_current(&target))? < required {
         return Err(FormatError::DiskFull);
     }

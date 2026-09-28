@@ -12,7 +12,7 @@ use std::process::Command;
 use common::{command_exists, engine, TempDir};
 use squallz_core::api::{
     ControlToken, CreateOptions, EntryPath, EntryType, ExtractOptions, ExtractReport, FormatError,
-    NoProgress, OpenOptions, OverwritePolicy, Password,
+    NoProgress, OpenOptions, OverwritePolicy, Password, SymlinkPolicy,
 };
 
 fn build_tree(root: &Path) {
@@ -376,6 +376,213 @@ fn sevenz_interop_with_system_7zip() {
 }
 
 #[test]
+fn sevenz_external_symlinks_keep_types_targets_times_and_skip_policy() {
+    let Some(bin) = system_7z() else {
+        eprintln!("skipping: no system 7zz/7z on PATH");
+        return;
+    };
+    let dir = TempDir::new("7z-external-links");
+    let source = dir.path().join("source");
+    build_tree(&source);
+    let links = [
+        ("file-link", "a.txt"),
+        ("dir-link", "sub"),
+        ("dangling", "missing"),
+    ];
+    for (name, target) in links {
+        std::os::unix::fs::symlink(target, source.join(name)).unwrap();
+    }
+    let engine = engine();
+    for solid in ["-ms=on", "-ms=off"] {
+        let archive = dir.path().join(format!("{solid}.7z"));
+        let create = Command::new(bin)
+            .args(["a", "-snl", solid])
+            .arg(&archive)
+            .arg(".")
+            .current_dir(&source)
+            .output()
+            .unwrap();
+        assert!(create.status.success());
+        let entries = engine.list(&archive, &OpenOptions::default()).unwrap();
+        for (name, target) in links {
+            let meta = entries.iter().find(|e| e.path.display == name).unwrap();
+            assert_eq!(
+                meta.entry_type,
+                EntryType::Symlink {
+                    target: target.as_bytes().to_vec()
+                }
+            );
+        }
+        for best_effort in [false, true] {
+            for symlinks in [SymlinkPolicy::Preserve, SymlinkPolicy::Skip] {
+                let out = dir
+                    .path()
+                    .join(format!("{solid}-{best_effort}-{symlinks:?}"));
+                let report = engine
+                    .extract_with_report(
+                        &archive,
+                        &out,
+                        None,
+                        &OpenOptions::default(),
+                        &ExtractOptions {
+                            symlinks,
+                            best_effort,
+                            ..extract_opts()
+                        },
+                        &NoProgress,
+                        &ControlToken::new(),
+                    )
+                    .unwrap();
+                assert_eq!(report.failed, 0);
+                assert_eq!(report.selected_entries, entries.len() as u64);
+                assert_eq!(
+                    report.skipped,
+                    if symlinks == SymlinkPolicy::Skip {
+                        3
+                    } else {
+                        0
+                    }
+                );
+                assert_eq!(
+                    fs::read(out.join("a.txt")).unwrap(),
+                    fs::read(source.join("a.txt")).unwrap()
+                );
+                assert_eq!(fs::read(out.join("sub/b.bin")).unwrap(), vec![42; 50_000]);
+                for (name, target) in links {
+                    if symlinks == SymlinkPolicy::Skip {
+                        assert!(fs::symlink_metadata(out.join(name)).is_err());
+                    } else {
+                        assert_eq!(fs::read_link(out.join(name)).unwrap(), Path::new(target));
+                        let archived = entries.iter().find(|e| e.path.display == name).unwrap();
+                        assert_eq!(
+                            Some(
+                                fs::symlink_metadata(out.join(name))
+                                    .unwrap()
+                                    .modified()
+                                    .unwrap()
+                            ),
+                            archived.modified
+                        );
+                    }
+                }
+            }
+        }
+        let selected = dir.path().join(format!("{solid}-selected"));
+        let report = engine
+            .extract_with_report(
+                &archive,
+                &selected,
+                Some(&[EntryPath::from_utf8("file-link")]),
+                &OpenOptions::default(),
+                &extract_opts(),
+                &NoProgress,
+                &ControlToken::new(),
+            )
+            .unwrap();
+        assert_eq!(report.created, 1);
+        assert_eq!(report.selected_entries, 1);
+        assert_eq!(
+            fs::read_link(selected.join("file-link")).unwrap(),
+            Path::new("a.txt")
+        );
+        assert!(!selected.join("a.txt").exists());
+    }
+}
+
+#[test]
+fn sevenz_encrypted_symlink_targets_require_a_valid_password() {
+    let Some(bin) = system_7z() else {
+        eprintln!("skipping: no system 7zz/7z on PATH");
+        return;
+    };
+    let dir = TempDir::new("7z-encrypted-links");
+    std::os::unix::fs::symlink("missing", dir.path().join("link")).unwrap();
+    let archive = dir.path().join("encrypted.7z");
+    let create = Command::new(bin)
+        .args(["a", "-snl", "-mhe=off", "-ptest-fixture"])
+        .arg(&archive)
+        .arg("link")
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(create.status.success());
+    let engine = engine();
+    let listed = engine.list(&archive, &OpenOptions::default()).unwrap();
+    assert!(listed[0].encrypted);
+    assert_eq!(
+        listed[0].entry_type,
+        EntryType::Symlink { target: Vec::new() }
+    );
+    let skipped = dir.path().join("skipped");
+    let report = engine
+        .extract_with_report(
+            &archive,
+            &skipped,
+            None,
+            &OpenOptions::default(),
+            &ExtractOptions {
+                symlinks: SymlinkPolicy::Skip,
+                ..extract_opts()
+            },
+            &NoProgress,
+            &ControlToken::new(),
+        )
+        .unwrap();
+    assert_eq!(report.skipped, 1);
+    assert_eq!(report.created, 0);
+    assert_eq!(fs::read_dir(skipped).unwrap().count(), 0);
+    for password in [None, Some("incorrect"), Some("test-fixture")] {
+        let opts = OpenOptions {
+            password: password.map(Password::new),
+            ..OpenOptions::default()
+        };
+        for best_effort in [false, true] {
+            let out = dir
+                .path()
+                .join(format!("out-{}-{best_effort}", password.is_some()));
+            let result = engine.extract_with_report(
+                &archive,
+                &out,
+                None,
+                &opts,
+                &ExtractOptions {
+                    best_effort,
+                    ..extract_opts()
+                },
+                &NoProgress,
+                &ControlToken::new(),
+            );
+            match password {
+                None => assert!(
+                    matches!(result, Err(FormatError::PasswordRequired)),
+                    "{result:?}"
+                ),
+                Some("incorrect") => assert!(
+                    matches!(result, Err(FormatError::WrongPassword)),
+                    "{result:?}"
+                ),
+                Some(_) => {
+                    assert_eq!(result.unwrap().created, 1);
+                    assert_eq!(
+                        fs::read_link(out.join("link")).unwrap(),
+                        Path::new("missing")
+                    );
+                }
+            }
+        }
+        if password == Some("test-fixture") {
+            let listed = engine.list(&archive, &opts).unwrap();
+            assert_eq!(
+                listed[0].entry_type,
+                EntryType::Symlink {
+                    target: b"missing".to_vec()
+                }
+            );
+        }
+    }
+}
+
+#[test]
 fn sevenz_solid_stream_drains_unselected_and_conflicting_entries() {
     let Some(bin) = system_7z() else {
         eprintln!("skipping: no system 7zz/7z on PATH");
@@ -647,6 +854,7 @@ fn sevenz_mixed_archive_keeps_encryption_and_error_classification_per_block() {
     fs::create_dir_all(&source).unwrap();
     fs::write(source.join("secret.txt"), SECRET).unwrap();
     fs::write(source.join("plain.txt"), PLAIN).unwrap();
+    std::os::unix::fs::symlink("plain.txt", source.join("plain-link")).unwrap();
     let archive = dir.path().join("mixed.7z");
     let encrypted_create = Command::new(bin)
         .args(["a", "-t7z", "-m0=Copy", "-ms=off", "-psecret", "-y"])
@@ -661,9 +869,9 @@ fn sevenz_mixed_archive_keeps_encryption_and_error_classification_per_block() {
         String::from_utf8_lossy(&encrypted_create.stderr)
     );
     let plain_append = Command::new(bin)
-        .args(["a", "-t7z", "-m0=Copy", "-ms=off", "-y"])
+        .args(["a", "-t7z", "-m0=Copy", "-ms=off", "-snl", "-y"])
         .arg(&archive)
-        .arg("plain.txt")
+        .args(["plain.txt", "plain-link"])
         .current_dir(&source)
         .output()
         .unwrap();
@@ -696,6 +904,37 @@ fn sevenz_mixed_archive_keeps_encryption_and_error_classification_per_block() {
         .expect("COPY block contains the plain marker");
     bytes[plain_offset] ^= 0x5a;
     fs::write(&archive, bytes).unwrap();
+
+    // Browsing the plain link neither decrypts the secret block nor reads
+    // the damaged, unrelated plain file. Selecting it has the same scope.
+    let listed = engine().list(&archive, &OpenOptions::default()).unwrap();
+    let link = listed
+        .iter()
+        .find(|entry| entry.path.display == "plain-link")
+        .unwrap();
+    assert_eq!(
+        link.entry_type,
+        EntryType::Symlink {
+            target: b"plain.txt".to_vec()
+        }
+    );
+    let links_out = dir.path().join("links-only");
+    engine()
+        .extract(
+            &archive,
+            &links_out,
+            Some(std::slice::from_ref(&link.path)),
+            &OpenOptions::default(),
+            &extract_opts(),
+            &NoProgress,
+            &ControlToken::default(),
+        )
+        .unwrap();
+    assert_eq!(
+        fs::read_link(links_out.join("plain-link")).unwrap(),
+        Path::new("plain.txt")
+    );
+    assert_eq!(fs::read_dir(links_out).unwrap().count(), 1);
 
     let out = dir.path().join("out");
     fs::create_dir_all(&out).unwrap();

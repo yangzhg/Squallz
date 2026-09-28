@@ -29,8 +29,8 @@ const TASK_WINDOW_LABEL_PREFIX: &str = "task-";
 #[cfg(test)]
 const TASK_WINDOW_CAPABILITY_PATTERN: &str = "task-*";
 const TASK_WINDOW_TITLE: &str = "Squallz Task";
-const TASK_WINDOW_INNER_SIZE: (f64, f64) = (780.0, 560.0);
-const TASK_WINDOW_MIN_INNER_SIZE: (f64, f64) = (620.0, 420.0);
+const TASK_WINDOW_INNER_SIZE: (f64, f64) = (680.0, 360.0);
+const TASK_WINDOW_MIN_INNER_SIZE: (f64, f64) = (540.0, 320.0);
 const TASK_WINDOW_INDEX: &str = "index.html";
 const TASK_WINDOW_QUERY_MODE: &str = "taskWindow";
 const TASK_WINDOW_QUERY_MODE_VALUE: &str = "1";
@@ -717,7 +717,6 @@ mod tests {
             "core:window:allow-unminimize",
             "core:window:allow-set-focus",
             "core:window:allow-close",
-            "opener:allow-open-path",
             "opener:allow-reveal-item-in-dir",
         ] {
             assert!(permissions.iter().any(|permission| permission == required));
@@ -733,6 +732,9 @@ mod tests {
         assert!(!permissions
             .iter()
             .any(|permission| permission == "core:window:allow-hide"));
+        assert!(!permissions
+            .iter()
+            .any(|permission| permission == "opener:allow-open-path"));
     }
 
     #[test]

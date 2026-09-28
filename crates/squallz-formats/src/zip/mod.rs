@@ -23,7 +23,8 @@ use std::path::{Path, PathBuf};
 use squallz_format_api::{
     ArchiveFormat, ArchiveReader, ArchiveSourceSet, ArchiveWriter, ControlToken, CreateOptions,
     FormatCapabilities, FormatError, NativeVolumeLimits, NativeVolumeWriter, OpenOptions,
-    PhysicalFileIdentity, PreparedUpdateAdditions, ProgressSink, ReadSeek, UpdateOp, WriteSeek,
+    PhysicalFileIdentity, PreparedUpdateAdditions, ProgressSink, ReadSeek, UpdateOp, UpdateOptions,
+    WriteSeek,
 };
 #[cfg(feature = "process-backend")]
 use squallz_format_api::{
@@ -248,7 +249,7 @@ impl ArchiveFormat for ZipFormat {
         output: Box<dyn WriteSeek>,
         ops: &[UpdateOp],
         additions: &mut dyn PreparedUpdateAdditions,
-        opts: &CreateOptions,
+        opts: &UpdateOptions,
         progress: &dyn ProgressSink,
         ctl: &ControlToken,
     ) -> Result<(), FormatError> {
@@ -421,8 +422,12 @@ impl ArchiveReader for SplitZipArchiveReader {
         Ok(())
     }
 
-    fn read_entry(&mut self, path: &EntryPath) -> Result<Box<dyn Read + '_>, FormatError> {
-        self.read_entry_with_control(path, &self.control)
+    fn read_entry(
+        &mut self,
+        path: &EntryPath,
+        consume: &mut dyn FnMut(&mut dyn Read) -> Result<(), FormatError>,
+    ) -> Result<(), FormatError> {
+        consume(self.read_entry_with_control(path, &self.control)?.as_mut())
     }
 
     fn test_summary(
@@ -523,13 +528,12 @@ mod tests {
         assert_eq!(entries[0].path.display, "payload.txt");
 
         let mut contents = Vec::new();
-        {
-            let mut entry = reader
-                .read_entry(&entries[0].path)
-                .expect("open SFX ZIP payload entry");
-            std::io::Read::read_to_end(&mut entry, &mut contents)
-                .expect("read SFX ZIP payload entry");
-        }
+        reader
+            .read_entry(&entries[0].path, &mut |entry| {
+                entry.read_to_end(&mut contents)?;
+                Ok(())
+            })
+            .expect("read SFX ZIP payload entry");
         assert_eq!(contents, b"SFX payload");
 
         let report = reader

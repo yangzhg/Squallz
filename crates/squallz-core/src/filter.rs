@@ -1,6 +1,4 @@
-//! Glob-based entry-path filtering, shared by `CreateOptions.excludes`
-//! (compression input pruning) and `sqz extract --include` (selective
-//! extraction).
+//! Glob filtering for compression input pruning and selective extraction.
 
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 

@@ -7821,6 +7821,232 @@ fn update_add_delete_rename_through_the_cli() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+#[test]
+fn update_literal_deletion_matches_between_cli_and_batch() {
+    for batch in [false, true] {
+        let dir = temp_dir("update-literal-deletion");
+        for name in [
+            "notes.txt",
+            "nested/notes.txt",
+            "drop[1].txt",
+            "drop1.txt",
+            "logs/drop.txt",
+            "nested/logs/keep.txt",
+            "nested/work.tmp",
+        ] {
+            let path = dir.join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, name.as_bytes()).unwrap();
+        }
+        let archive = dir.join("out.zip");
+        let created = run(sqz()
+            .arg("compress")
+            .args(
+                ["notes.txt", "nested", "drop[1].txt", "drop1.txt", "logs"]
+                    .map(|path| dir.join(path)),
+            )
+            .arg("-o")
+            .arg(&archive));
+        assert!(created.status.success(), "{}", stderr(&created));
+        let selected = ["notes.txt", "drop[1].txt", "logs/"];
+        let output = if batch {
+            let script = dir.join("delete.json");
+            std::fs::write(&script, serde_json::to_vec(&serde_json::json!({
+                "jobs": [{ "kind": "update", "archive": "out.zip", "delete_entries": selected, "delete": ["*.tmp"] }]
+            })).unwrap()).unwrap();
+            run(sqz().arg("batch").arg(&script).arg("--json"))
+        } else {
+            let mut command = sqz();
+            command
+                .arg("update")
+                .arg(&archive)
+                .args(["--delete", "*.tmp", "--json"]);
+            for path in selected {
+                command.args(["--delete-entry", path]);
+            }
+            run(&mut command)
+        };
+        assert!(output.status.success(), "{}", stderr(&output));
+        let report = stdout_json(&output);
+        assert_eq!(
+            if batch {
+                &report["jobs"][0]["result"]["operations"]
+            } else {
+                &report["operations"]
+            },
+            4
+        );
+        let mut paths = listed_paths(&archive);
+        paths.sort();
+        assert_eq!(
+            paths,
+            [
+                "drop1.txt",
+                "nested/",
+                "nested/logs/",
+                "nested/logs/keep.txt",
+                "nested/notes.txt"
+            ]
+        );
+        assert!(run(sqz().arg("test").arg(&archive).arg("--json"))
+            .status
+            .success());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[test]
+fn update_literal_deletion_rejects_missing_paths_atomically() {
+    let dir = temp_dir("update-delete-missing-cli");
+    let root = sample_tree(&dir);
+    let archive = dir.join("out.zip");
+    assert!(
+        run(sqz().arg("compress").arg(&root).arg("-o").arg(&archive))
+            .status
+            .success()
+    );
+    let before = std::fs::read(&archive).unwrap();
+    for path in ["", "missing.txt", "project/sub", "project/a.txt/"] {
+        let output = run(sqz().arg("update").arg(&archive).args([
+            "--delete-entry",
+            "project/a.txt",
+            "--delete-entry",
+            path,
+            "--json",
+        ]));
+        assert!(!output.status.success(), "{path}: {}", stdout(&output));
+        assert_eq!(std::fs::read(&archive).unwrap(), before, "{path}");
+    }
+    for language in ["en-US", "zh-CN"] {
+        let output = run(sqz().args(["--lang", language, "update", "--help"]));
+        assert!(output.status.success());
+        assert!(stdout(&output).contains("--delete-entry"));
+        assert!(stdout(&output).contains("--encoding"));
+        assert!(stdout(&output).contains(if language == "en-US" {
+            "literal archive path"
+        } else {
+            "完整字面路径"
+        }));
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn update_edits_legacy_entries_in_cli_and_batch() {
+    for (batch, action, destination) in [
+        (false, None, "你[1].txt"),
+        (true, None, "你[1].txt"),
+        (false, Some("--rename"), "renamed.txt"),
+        (false, Some("--move"), "folder/renamed.txt"),
+        (true, Some("--rename"), "renamed.txt"),
+    ] {
+        let dir = temp_dir("update-preserve-legacy-cli");
+        std::fs::write(dir.join("first.txt"), b"retained contents").unwrap();
+        std::fs::write(dir.join("drop.txt"), b"remove me").unwrap();
+        let archive = dir.join("legacy.zip");
+        let created = run(sqz()
+            .arg("compress")
+            .arg(dir.join("first.txt"))
+            .arg(dir.join("drop.txt"))
+            .arg("-o")
+            .arg(&archive));
+        assert!(created.status.success(), "{}", stderr(&created));
+        let mut bytes = std::fs::read(&archive).unwrap();
+        let offsets: Vec<_> = bytes
+            .windows(9)
+            .enumerate()
+            .filter_map(|(index, bytes)| (bytes == b"first.txt").then_some(index))
+            .collect();
+        assert_eq!(offsets.len(), 2);
+        for offset in offsets {
+            bytes[offset..offset + 9].copy_from_slice(b"\xc4\xe3[1].txt");
+        }
+        std::fs::write(&archive, bytes).unwrap();
+        let updated = if batch {
+            let script = dir.join("update.json");
+            let rename =
+                action.map(|_| serde_json::json!({"from": "你[1].txt", "to": destination}));
+            std::fs::write(&script, serde_json::to_vec(&serde_json::json!({
+                "jobs": [{ "kind": "update", "archive": "legacy.zip", "delete_entries": ["drop.txt"], "encoding": "gbk", "rename": rename.into_iter().collect::<Vec<_>>() }]
+            })).unwrap()).unwrap();
+            run(sqz().arg("batch").arg(&script).arg("--json"))
+        } else {
+            let mut command = sqz();
+            command.arg("update").arg(&archive).args([
+                "--delete-entry",
+                "drop.txt",
+                "--encoding",
+                "gbk",
+                "--json",
+            ]);
+            if let Some(action) = action {
+                command.arg(action).arg(format!("你[1].txt={destination}"));
+            }
+            run(&mut command)
+        };
+        assert!(updated.status.success(), "{}", stderr(&updated));
+        let listed = run(sqz()
+            .arg("list")
+            .arg(&archive)
+            .args(["--encoding", "gbk", "--json"]));
+        assert!(listed.status.success(), "{}", stderr(&listed));
+        let entries = stdout_json(&listed);
+        assert_eq!(entries.as_array().unwrap().len(), 1);
+        assert_eq!(entries[0]["path"], destination);
+        let output = dir.join("extracted");
+        let extracted = run(sqz()
+            .arg("extract")
+            .arg(&archive)
+            .arg("-d")
+            .arg(&output)
+            .args(["--encoding", "gbk", "--json"]));
+        assert!(extracted.status.success(), "{}", stderr(&extracted));
+        assert_eq!(
+            std::fs::read(output.join(destination)).unwrap(),
+            b"retained contents"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[test]
+fn update_moves_and_renames_complete_directory_trees_through_the_cli() {
+    let dir = temp_dir("update-directory-cli");
+    let root = sample_tree(&dir);
+    let archive = dir.join("out.zip");
+    let created = run(sqz().arg("compress").arg(&root).arg("-o").arg(&archive));
+    assert!(created.status.success(), "{}", stderr(&created));
+    for arguments in [
+        vec!["--mkdir", "archive/"],
+        vec!["--move", "project/sub/=archive/sub/"],
+        vec!["--rename", "archive/=资料/"],
+    ] {
+        let out = run(sqz()
+            .arg("update")
+            .arg(&archive)
+            .args(arguments)
+            .arg("--json"));
+        assert!(out.status.success(), "{}", stderr(&out));
+    }
+    let out = run(sqz().arg("list").arg(&archive).arg("--json"));
+    assert!(out.status.success(), "{}", stderr(&out));
+    let entries: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
+    let paths: Vec<_> = entries
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry["path"].as_str().unwrap())
+        .collect();
+    assert!(paths.contains(&"资料/sub/b.txt"), "{paths:?}");
+    assert!(paths.contains(&"project/a.txt"), "{paths:?}");
+    assert!(!paths
+        .iter()
+        .any(|path| path.starts_with("project/sub/") || path.starts_with("archive/")));
+    let out = run(sqz().arg("test").arg(&archive).arg("--json"));
+    assert!(out.status.success(), "{}", stderr(&out));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 #[cfg(unix)]
 #[test]
 fn recovery_commands_bridge_to_external_par2_tool() {

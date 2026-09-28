@@ -2,6 +2,7 @@
 // crates/squallz-gui/src/dto.rs — keep the two files in sync.
 
 import { invoke } from "@tauri-apps/api/core";
+import type { NativeMenuSnapshot } from "./native-menu";
 
 export interface ErrorDto {
   key: string;
@@ -31,6 +32,7 @@ export interface EntryDto {
   entry_type: "file" | "dir" | "symlink" | "hardlink" | "other";
   size: number;
   compressed: number | null;
+  /** Signed Unix seconds, rounded down; null when unavailable. */
   modified: number | null;
   crc: number | null;
   encrypted: boolean;
@@ -306,7 +308,9 @@ export type JobSpec =
       kind: "update";
       path: string;
       add: string[];
+      /** Literal selected paths; directories retain their trailing slash. */
       delete: string[];
+      encoding: string | null;
       rename: Array<{ from: string; to: string }>;
       mkdir: string[];
       excludes: string[];
@@ -333,6 +337,11 @@ export type JobSpec =
     };
 
 export type ProgressPhase =
+  | "archive_open"
+  | "archive_test"
+  | "archive_convert"
+  | "extract_entries"
+  | "extract_metadata"
   | "recovery_prepare"
   | "recovery_verify"
   | "recovery_process"
@@ -405,6 +414,7 @@ export interface JobSnapshot {
   error: ErrorDto | null;
   result: Record<string, unknown> | null;
   interaction: JobInteraction | null;
+  question: JobQuestion | null;
 }
 
 export interface JobSnapshotsDelta {
@@ -427,19 +437,27 @@ export interface OperationAuditRecord {
 
 export interface AskConflictEvent {
   id: number;
+  version: number;
   existing_path: string;
   existing_size: number;
+  /** Signed Unix seconds, rounded down; null when unavailable. */
   existing_modified: number | null;
   incoming_path: string;
   incoming_size: number;
+  /** Signed Unix seconds, rounded down; null when unavailable. */
   incoming_modified: number | null;
 }
 
 export interface AskPasswordEvent {
   id: number;
+  version: number;
   name: string;
   wrong: boolean;
 }
+
+export type JobQuestion =
+  | { kind: "password"; prompt: AskPasswordEvent }
+  | { kind: "conflict"; prompt: AskConflictEvent };
 
 export interface PasswordBookStatus {
   available: boolean;
@@ -679,6 +697,7 @@ function invokeSettingsOperation<T>(command: string, args: Record<string, unknow
 }
 
 export const ipc = {
+  updateNativeMenu: (snapshot: NativeMenuSnapshot) => invoke<void>("update_native_menu", { snapshot }),
   openArchive: (
     path: string,
     password: string | null,
@@ -692,6 +711,8 @@ export const ipc = {
   recordValidationEvent: (event: string, payload: Record<string, unknown>) =>
     invoke<void>("record_validation_event", { event, payload }),
   takeValidationDropPaths: () => invoke<string[]>("take_validation_drop_paths"),
+  resolveArchiveDirectory: (id: number, dirPrefix: string) =>
+    invoke<string>("resolve_archive_directory", { id, dirPrefix }),
   listEntries: (
     id: number,
     page: number,
@@ -805,6 +826,7 @@ export const ipc = {
   getMacosSfxPublisherStatus: () =>
     invoke<MacosSfxPublisherStatusDto>("get_macos_sfx_publisher_status"),
   jobSnapshot: (id: number) => invoke<JobSnapshot | null>("job_snapshot", { id }),
+  openJobOutput: (id: number) => invoke<void>("open_job_output", { id }),
   jobSnapshots: (since: number | null) =>
     invoke<JobSnapshotsDelta>("job_snapshots", { since }),
   dismissJobSnapshots: (ids: number[]) =>
@@ -818,10 +840,10 @@ export const ipc = {
   moveJobBefore: (id: number, beforeId: number | null) =>
     invoke<void>("move_job_before", { id, beforeId }),
   cancelJob: (id: number) => invoke<void>("cancel_job", { id }),
-  answerConflict: (id: number, decision: string, applyAll: boolean) =>
-    invoke<void>("answer_conflict", { id, decision, applyAll }),
-  answerPassword: (id: number, password: string | null) =>
-    invoke<void>("answer_password", { id, password }),
+  answerConflict: (id: number, questionVersion: number, decision: string, applyAll: boolean) =>
+    invoke<void>("answer_conflict", { id, questionVersion, decision, applyAll }),
+  answerPassword: (id: number, questionVersion: number, password: string | null) =>
+    invoke<void>("answer_password", { id, questionVersion, password }),
   archivePasswordStatus: (path: string) =>
     invoke<PasswordBookStatus>("archive_password_status", { path }),
   rememberArchivePassword: (path: string, password: string, encoding?: string | null) =>

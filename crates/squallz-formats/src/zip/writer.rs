@@ -8,10 +8,10 @@ use squallz_format_api::{
     ArchiveWriter, CompressionLevel, ControlToken, CreateOptions, EntryMeta, EntryType,
     FormatError, Password, WriteSeek,
 };
-use zip::write::SimpleFileOptions;
+use zip::write::FullFileOptions;
 use zip::{AesMode, CompressionMethod, ZipWriter, ZIP64_BYTES_THR};
 
-use super::datetime::to_zip_datetime;
+use super::datetime::{add_timestamps, to_zip_datetime};
 use super::error::map_zip_error;
 
 const WRITE_CHUNK: usize = 64 * 1024;
@@ -59,9 +59,9 @@ impl ZipArchiveWriter {
     }
 
     /// Base options shared by every entry kind.
-    fn base_options(&self, meta: &EntryMeta) -> SimpleFileOptions {
+    fn base_options(&self, meta: &EntryMeta) -> Result<FullFileOptions<'static>, FormatError> {
         let (method, level) = zip_compression_method_and_level(self.level);
-        let mut options = SimpleFileOptions::default()
+        let mut options = FullFileOptions::default()
             .compression_method(method)
             .compression_level(level)
             // ZIP64 for entries at or above the 4 GiB headroom threshold.
@@ -69,10 +69,13 @@ impl ZipArchiveWriter {
         if let Some(mode) = meta.unix_mode {
             options = options.unix_permissions(zip_unix_permissions(mode));
         }
-        if let Some(dt) = meta.modified.and_then(to_zip_datetime) {
-            options = options.last_modified_time(dt);
+        if let Some(modified) = meta.modified {
+            if let Some(dt) = to_zip_datetime(modified) {
+                options = options.last_modified_time(dt);
+            }
+            add_timestamps(&mut options, modified).map_err(map_zip_error)?;
         }
-        options
+        Ok(options)
     }
 
     fn copy_entry_data(&mut self, data: &mut dyn Read) -> Result<(), FormatError> {
@@ -119,7 +122,7 @@ impl ArchiveWriter for ZipArchiveWriter {
     ) -> Result<(), FormatError> {
         // Entries we create are always named in UTF-8 (raw == display).
         let name = meta.path.display.clone();
-        let options = self.base_options(meta);
+        let options = self.base_options(meta)?;
         match &meta.entry_type {
             EntryType::Dir => {
                 // No point encrypting zero-byte directory markers; some

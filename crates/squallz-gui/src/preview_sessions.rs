@@ -8,10 +8,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use squallz_core::api::FormatError;
-use tempfile::{Builder, TempPath};
 
 use crate::nested::{write_archive_entry_limited, PREVIEW_ENTRY_TOO_LARGE_DETAIL};
-use crate::preview_workspace::PreviewWorkspace;
+use crate::preview_workspace::{PreviewFile, PreviewWorkspace};
 use crate::state::AppState;
 use squallz_core::lock_unpoisoned;
 
@@ -19,7 +18,6 @@ pub(crate) const MAX_PREVIEW_ENTRY_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_PREVIEW_RESOURCE_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_ACTIVE_PREVIEW_RESOURCES: usize = 8;
 const MAX_RETAINED_EXTERNAL_SESSIONS: usize = 64;
-const MAX_PREVIEW_EXTENSION_BYTES: usize = 16;
 const PREVIEW_ACTIVE_CAPACITY_DETAIL: &str = "preview active-session capacity is full";
 const PREVIEW_RETAINED_CAPACITY_DETAIL: &str = "preview external-file capacity is full";
 const PREVIEW_STORAGE_CAPACITY_DETAIL: &str = "preview temporary-file storage is full";
@@ -73,7 +71,7 @@ pub(crate) struct PreparedPreview {
 
 struct PreviewSession {
     owner: String,
-    file: TempPath,
+    file: PreviewFile,
     size: u64,
     sequence: u64,
     sticky_external_pin: bool,
@@ -241,13 +239,8 @@ impl PreviewSessionManager {
         encoding: Option<&str>,
     ) -> Result<PreparedPreview, FormatError> {
         let reservation = self.reserve(owner)?;
-        let suffix = safe_preview_suffix(entry_path);
         let display_name = preview_display_name(entry_path);
-        let mut pending = Builder::new()
-            .prefix("entry-")
-            .suffix(&suffix)
-            .tempfile_in(reservation.workspace_path()?)?;
-        set_private_file_permissions(pending.as_file())?;
+        let (file, mut pending) = reservation.create_preview_file(&display_name)?;
 
         let size = write_archive_entry_limited(
             state,
@@ -255,19 +248,19 @@ impl PreviewSessionManager {
             entry_path,
             password,
             encoding,
-            pending.as_file_mut(),
+            &mut pending,
             MAX_PREVIEW_ENTRY_BYTES,
         )?;
-        pending.as_file_mut().flush()?;
+        pending.flush()?;
+        drop(pending);
 
-        let path = pending.path().to_path_buf();
-        let id = preview_id_from_path(&path)?;
+        let id = file.id().to_owned();
         let sequence = self.shared.next_sequence.fetch_add(1, Ordering::Relaxed);
         reservation.into_session(
             id.clone(),
             PreviewSession {
                 owner: owner.to_owned(),
-                file: pending.into_temp_path(),
+                file,
                 size,
                 sequence,
                 sticky_external_pin: false,
@@ -283,7 +276,7 @@ impl PreviewSessionManager {
     }
 
     pub fn path_for_external_use(&self, id: &str, owner: &str) -> Result<PathBuf, FormatError> {
-        let path = {
+        let (root, path) = {
             let mut resources = lock_unpoisoned(&self.shared.resources);
             if resources.closing {
                 return Err(session_unavailable());
@@ -298,9 +291,12 @@ impl PreviewSessionManager {
             }
             let session = session_for_owner_mut(&mut resources.sessions, id, owner)?;
             session.pending_external_uses = session.pending_external_uses.saturating_add(1);
-            session.file.to_path_buf()
+            (
+                session.file.root_path().to_path_buf(),
+                session.file.path().to_path_buf(),
+            )
         };
-        match validate_session_path(self.workspace_path()?, &path) {
+        match validate_session_path(&root, &path) {
             Ok(path) => Ok(path),
             Err(error) => {
                 self.external_use_finished(id, owner, false);
@@ -416,14 +412,6 @@ impl PreviewSessionManager {
         }
     }
 
-    fn workspace_path(&self) -> Result<&Path, FormatError> {
-        self.shared
-            .workspace
-            .as_ref()
-            .map(PreviewWorkspace::path)
-            .ok_or_else(preview_unavailable)
-    }
-
     #[cfg(test)]
     pub(crate) fn root_path(&self) -> Option<&Path> {
         self.shared.workspace.as_ref().map(PreviewWorkspace::path)
@@ -431,6 +419,18 @@ impl PreviewSessionManager {
 }
 
 impl PreviewResourceReservation {
+    fn create_preview_file(
+        &self,
+        display_name: &str,
+    ) -> Result<(PreviewFile, fs::File), FormatError> {
+        self.shared
+            .workspace
+            .as_ref()
+            .ok_or_else(preview_unavailable)?
+            .create_preview_file(display_name)
+            .map_err(FormatError::from)
+    }
+
     pub(crate) fn workspace_path(&self) -> Result<&Path, FormatError> {
         self.shared
             .workspace
@@ -566,33 +566,6 @@ fn close_session_file(session: PreviewSession) -> Result<(), FormatError> {
     session.file.close().map_err(FormatError::from)
 }
 
-fn preview_id_from_path(path: &Path) -> Result<String, FormatError> {
-    match path.file_name().and_then(|name| name.to_str()) {
-        Some(name) if !name.is_empty() => Ok(name.to_owned()),
-        _ => Err(FormatError::Other(
-            "preview session identifier is unavailable".to_owned(),
-        )),
-    }
-}
-
-fn safe_preview_suffix(entry_path: &str) -> String {
-    let basename = entry_path.rsplit(['/', '\\']).next().unwrap_or_default();
-    let extension = match Path::new(basename)
-        .extension()
-        .and_then(|value| value.to_str())
-    {
-        Some(extension)
-            if !extension.is_empty()
-                && extension.len() <= MAX_PREVIEW_EXTENSION_BYTES
-                && extension.chars().all(|ch| ch.is_ascii_alphanumeric()) =>
-        {
-            extension.to_ascii_lowercase()
-        }
-        _ => return String::new(),
-    };
-    format!(".{extension}")
-}
-
 fn preview_display_name(entry_path: &str) -> String {
     entry_path
         .rsplit(['/', '\\'])
@@ -602,6 +575,7 @@ fn preview_display_name(entry_path: &str) -> String {
 }
 
 fn validate_session_path(root: &Path, path: &Path) -> Result<PathBuf, FormatError> {
+    squallz_core::open_directory_no_follow(root)?;
     let metadata = fs::symlink_metadata(path)?;
     if !metadata.file_type().is_file() {
         return Err(session_unavailable());
@@ -612,17 +586,6 @@ fn validate_session_path(root: &Path, path: &Path) -> Result<PathBuf, FormatErro
         return Err(session_unavailable());
     }
     Ok(canonical_path)
-}
-
-#[cfg(unix)]
-fn set_private_file_permissions(file: &fs::File) -> io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    file.set_permissions(fs::Permissions::from_mode(0o600))
-}
-
-#[cfg(not(unix))]
-fn set_private_file_permissions(_file: &fs::File) -> io::Result<()> {
-    Ok(())
 }
 
 #[cfg(test)]
@@ -637,25 +600,22 @@ mod tests {
 
     fn insert_test_session(manager: &PreviewSessionManager, owner: &str) -> (String, PathBuf) {
         let reservation = manager.reserve(owner).expect("capacity should be reserved");
-        let mut pending = Builder::new()
-            .prefix("entry-")
-            .suffix(".txt")
-            .tempfile_in(available_root(manager))
+        let (file, mut pending) = reservation
+            .create_preview_file("说明.txt")
             .expect("preview file should be created");
-        set_private_file_permissions(pending.as_file())
-            .expect("preview file permissions should be private");
         pending
             .write_all(b"preview")
             .expect("preview fixture should be written");
-        let path = pending.path().to_path_buf();
-        let id = preview_id_from_path(&path).expect("preview ID should be available");
+        drop(pending);
+        let path = file.path().to_path_buf();
+        let id = file.id().to_owned();
         let sequence = manager.shared.next_sequence.fetch_add(1, Ordering::Relaxed);
         reservation
             .into_session(
                 id.clone(),
                 PreviewSession {
                     owner: owner.to_owned(),
-                    file: pending.into_temp_path(),
+                    file,
                     size: 7,
                     sequence,
                     sticky_external_pin: false,
@@ -665,14 +625,6 @@ mod tests {
             )
             .expect("preview session should be inserted");
         (id, path)
-    }
-
-    #[test]
-    fn preview_suffix_keeps_only_a_short_safe_extension() {
-        assert_eq!(safe_preview_suffix("docs/report.PDF"), ".pdf");
-        assert_eq!(safe_preview_suffix("../image.bad/ext"), "");
-        assert_eq!(safe_preview_suffix("name.no-dashes"), "");
-        assert_eq!(safe_preview_suffix("name.thisextensionistoolong"), "");
     }
 
     #[test]
@@ -691,12 +643,14 @@ mod tests {
     #[test]
     fn session_ids_do_not_expose_the_entry_name_or_temp_root() {
         let manager = PreviewSessionManager::new().expect("preview manager should initialize");
-        let pending = Builder::new()
-            .prefix("entry-")
-            .suffix(".pdf")
-            .tempfile_in(available_root(&manager))
+        let reservation = manager
+            .reserve("main")
+            .expect("capacity should be reserved");
+        let (file, pending) = reservation
+            .create_preview_file("confidential.pdf")
             .expect("preview file should be created");
-        let id = preview_id_from_path(pending.path()).expect("preview ID should be available");
+        drop(pending);
+        let id = file.id();
 
         assert!(!id.contains("confidential"));
         assert!(!id.contains('/'));
@@ -825,6 +779,34 @@ mod tests {
         assert!(path.exists());
         assert!(manager.release(&id, "main").expect("owner release"));
         assert!(!path.exists());
+        assert!(!path.parent().expect("preview directory").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn external_open_rejects_preview_file_and_directory_symlinks() {
+        let base = tempfile::tempdir().expect("test base");
+        let manager = PreviewSessionManager::new_in(base.path()).expect("preview manager");
+        let (id, path) = insert_test_session(&manager, "main");
+        let outside = base.path().join("outside.txt");
+        fs::write(&outside, b"outside").expect("outside fixture");
+        fs::remove_file(&path).expect("remove preview fixture");
+        std::os::unix::fs::symlink(&outside, &path).expect("replace preview with symlink");
+        assert!(manager.path_for_external_use(&id, "main").is_err());
+        assert!(manager.release(&id, "main").is_err());
+        assert_eq!(fs::read(&outside).expect("outside remains"), b"outside");
+
+        let (id, path) = insert_test_session(&manager, "main");
+        let root = path.parent().expect("preview directory");
+        let moved = base.path().join("moved");
+        fs::rename(root, &moved).expect("move preview directory");
+        std::os::unix::fs::symlink(&moved, root).expect("replace preview directory with symlink");
+        assert!(manager.path_for_external_use(&id, "main").is_err());
+        assert!(manager.release(&id, "main").is_err());
+        assert_eq!(
+            fs::read(moved.join("说明.txt")).expect("moved file remains"),
+            b"preview"
+        );
     }
 
     #[test]
@@ -865,19 +847,19 @@ mod tests {
         let reservation = manager
             .reserve("main")
             .expect("capacity should be reserved");
-        let pending = Builder::new()
-            .prefix("entry-")
-            .tempfile_in(available_root(&manager))
+        let (file, pending) = reservation
+            .create_preview_file("说明.txt")
             .expect("preview file should be created");
-        let path = pending.path().to_path_buf();
-        let id = preview_id_from_path(&path).expect("preview ID should be available");
+        drop(pending);
+        let path = file.path().to_path_buf();
+        let id = file.id().to_owned();
 
         assert_eq!(manager.release_window("main"), 0);
         let result = reservation.into_session(
             id,
             PreviewSession {
                 owner: "main".to_owned(),
-                file: pending.into_temp_path(),
+                file,
                 size: 0,
                 sequence: 1,
                 sticky_external_pin: false,
@@ -916,6 +898,12 @@ mod tests {
         assert_eq!(mode, 0o700);
 
         let (_id, path) = insert_test_session(&manager, "main");
+        let entry_root_mode = fs::metadata(path.parent().expect("preview directory"))
+            .expect("preview directory metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(entry_root_mode, 0o700);
         let file_mode = fs::metadata(path)
             .expect("preview file metadata")
             .permissions()

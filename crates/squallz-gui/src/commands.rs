@@ -442,6 +442,19 @@ pub fn take_validation_drop_paths() -> Vec<String> {
     paths
 }
 
+/// Finds the closest existing directory in this window's opened archive.
+#[tauri::command]
+pub fn resolve_archive_directory(
+    window: WebviewWindow,
+    state: State<'_, Arc<AppState>>,
+    id: u64,
+    dir_prefix: String,
+) -> Result<String, ErrorDto> {
+    state
+        .resolve_archive_directory_for_window(window.label(), id, &dir_prefix)
+        .map_err(ErrorDto::from)
+}
+
 /// Pages one directory level of an opened archive (500/page by default).
 #[tauri::command]
 pub fn list_entries(
@@ -1618,6 +1631,19 @@ pub fn job_snapshot(
 }
 
 #[tauri::command]
+pub fn open_job_output(
+    app: AppHandle,
+    window: WebviewWindow,
+    jobs: State<'_, Arc<JobManager>>,
+    id: u64,
+) -> Result<(), ErrorDto> {
+    let path = jobs.openable_output_for_window(window.label(), id)?;
+    app.opener()
+        .open_path(path.to_string_lossy().into_owned(), None::<String>)
+        .map_err(|_| ErrorDto::other("cannot open task output"))
+}
+
+#[tauri::command]
 pub fn job_snapshots(
     window: WebviewWindow,
     jobs: State<'_, Arc<JobManager>>,
@@ -1710,10 +1736,11 @@ pub fn answer_conflict(
     window: WebviewWindow,
     jobs: State<'_, Arc<JobManager>>,
     id: u64,
+    question_version: u64,
     decision: String,
     apply_all: bool,
 ) -> Result<(), ErrorDto> {
-    jobs.answer_conflict_for_window(window.label(), id, decision, apply_all)
+    jobs.answer_conflict_for_window(window.label(), id, question_version, decision, apply_all)
 }
 
 /// Answers a `job://ask-password` prompt (`None` = the user cancelled).
@@ -1722,9 +1749,10 @@ pub fn answer_password(
     window: WebviewWindow,
     jobs: State<'_, Arc<JobManager>>,
     id: u64,
+    question_version: u64,
     password: Option<String>,
 ) -> Result<(), ErrorDto> {
-    jobs.answer_password_for_window(window.label(), id, password)
+    jobs.answer_password_for_window(window.label(), id, question_version, password)
 }
 
 /// Persistent password-book status for one archive path.
@@ -3618,6 +3646,7 @@ mod tests {
         let preview_path = sessions
             .path_for_external_use(&preview.preview_id, "test-window")
             .unwrap();
+        assert_eq!(preview_path.file_name().unwrap(), "note.txt");
         assert_eq!(std::fs::read(preview_path).unwrap(), b"preview me");
 
         sessions.cleanup();

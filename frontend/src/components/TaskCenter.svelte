@@ -16,6 +16,7 @@
     taskKindLabel,
     taskOutcomeStateLabel,
     taskOutcomeStateTone,
+    taskOverallProgressIndeterminate,
     taskPauseButtonLabel,
     taskProgressPercent,
     taskProgressSummary,
@@ -369,7 +370,7 @@
           <small class={`state-${tone}`}>{taskState(task)}</small>
         </header>
 
-        {#if (task.state === "running" || task.state === "paused") && task.total > 0}
+        {#if (task.state === "running" || task.state === "paused") && task.total > 0 && !taskOverallProgressIndeterminate(task)}
           <div class="task-center-progress-line">
             <progress
               class="task-center-progress"

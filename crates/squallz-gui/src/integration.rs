@@ -4464,7 +4464,7 @@ mod linux_file_manager_tests {
     fn wait_for_log_contains(path: &Path, needle: &str) -> String {
         for _ in 0..300 {
             if let Ok(contents) = fs::read_to_string(path) {
-                if contents.contains(needle) {
+                if contents.ends_with('\n') && contents.contains(needle) {
                     return contents;
                 }
             }

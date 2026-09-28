@@ -1,10 +1,12 @@
 //! `sqz update`: append/delete/rename entries of an existing archive
-//! (temp-file rewrite + atomic replacement happens in the format layer).
+//! (core owns the temporary rewrite and atomic replacement).
 
 use std::path::{Path, PathBuf};
 
 use serde_json::json;
-use squallz_core::api::{CompressionLevel, CreateOptions, EntryPath, Password, UpdateOp};
+use squallz_core::api::{
+    CompressionLevel, CreateOptions, EntryPath, EntrySelection, Password, UpdateOp, UpdateOptions,
+};
 
 use super::reports::print_pretty_json;
 use crate::args::resource_options;
@@ -22,6 +24,8 @@ pub fn run(
     add: Vec<PathBuf>,
     mkdir: Vec<String>,
     delete: Vec<String>,
+    delete_entries: Vec<String>,
+    encoding: Option<String>,
     rename: Vec<(String, String)>,
     move_entries: Vec<(String, String)>,
     excludes: Vec<String>,
@@ -35,6 +39,7 @@ pub fn run(
     let add_count = add.len();
     let mkdir_count = mkdir.len();
     let delete_count = delete.len();
+    let delete_entry_count = delete_entries.len();
     let rename_count = rename.len();
     let move_count = move_entries.len();
     let exclude_count = excludes.len();
@@ -54,28 +59,39 @@ pub fn run(
     for pattern in delete {
         ops.push(UpdateOp::Delete { pattern });
     }
+    ops.extend(
+        delete_entries
+            .into_iter()
+            .map(|path| UpdateOp::DeleteEntry {
+                path: EntrySelection::Display(path),
+            }),
+    );
     for (from, to) in rename {
         ops.push(UpdateOp::Rename {
-            from: EntryPath::from_utf8(from),
+            from: EntrySelection::Display(from),
             to: EntryPath::from_utf8(to),
         });
     }
     for (from, to) in move_entries {
         ops.push(UpdateOp::Rename {
-            from: EntryPath::from_utf8(from),
+            from: EntrySelection::Display(from),
             to: EntryPath::from_utf8(to),
         });
     }
 
-    let opts = CreateOptions {
-        level: CompressionLevel::from_numeric(level),
-        password: password.map(Password::new),
-        encrypt_filenames: encrypt_names,
-        excludes,
-        resources: resource_options(threads, memory_limit),
-        ..CreateOptions::default()
+    let opts = UpdateOptions {
+        encoding_override: encoding,
+        create: CreateOptions {
+            level: CompressionLevel::from_numeric(level),
+            password: password.map(Password::new),
+            encrypt_filenames: encrypt_names,
+            excludes,
+            resources: resource_options(threads, memory_limit),
+            ..CreateOptions::default()
+        },
     };
-    let operation_count = ops.len();
+    let operation_count =
+        add_count + mkdir_count + delete_count + delete_entry_count + rename_count + move_count;
     let progress = CliProgress::new_for_operation(
         ctx.quiet,
         ctx.verbose,
@@ -117,7 +133,7 @@ pub fn run(
                     touched_count(
                         add_count,
                         mkdir_count,
-                        delete_count,
+                        delete_count.saturating_add(delete_entry_count),
                         rename_count,
                         move_count,
                     ),
@@ -147,6 +163,11 @@ pub fn run(
                     ctx.loc.t("cli.update.delete_patterns"),
                     delete_count.to_string(),
                     ctx.loc.t("cli.update.detail.delete_patterns"),
+                ]),
+                ModernTableRow::new(vec![
+                    ctx.loc.t("cli.update.delete_entries"),
+                    delete_entry_count.to_string(),
+                    ctx.loc.t("cli.update.detail.delete_entries"),
                 ]),
                 ModernTableRow::new(vec![
                     ctx.loc.t("cli.update.rename_entries"),

@@ -102,6 +102,84 @@ fn zip_to_7z_and_back() {
 }
 
 #[test]
+fn sevenz_conversion_cancellation_and_corruption_preserve_existing_outputs() {
+    use squallz_core::api::{CompressionLevel, EntryPath, ProgressSink};
+    use std::io::{Seek, SeekFrom, Write};
+
+    struct CancelOnProgress<'a>(&'a ControlToken);
+    impl ProgressSink for CancelOnProgress<'_> {
+        fn on_progress(&self, done: u64, _total: u64, _current: &EntryPath) {
+            if done > 0 {
+                self.0.cancel();
+            }
+        }
+    }
+    let tmp = TempDir::new("convert-7z-stream-failure");
+    let input = tmp.path().join("file.bin");
+    let source = tmp.path().join("source.7z");
+    let size = 1024 * 1024;
+    fs::write(&input, vec![b'x'; size]).unwrap();
+    engine()
+        .create(
+            &source,
+            &[input],
+            &CreateOptions {
+                level: CompressionLevel::Store,
+                ..CreateOptions::default()
+            },
+            &NoProgress,
+            &ControlToken::default(),
+        )
+        .unwrap();
+    let mut archive = fs::OpenOptions::new().write(true).open(&source).unwrap();
+    archive.seek(SeekFrom::Start(32 + size as u64 - 1)).unwrap();
+    archive.write_all(b"y").unwrap();
+    drop(archive);
+
+    for extension in ["zip", "gz"] {
+        let destination = tmp.path().join(format!("output.{extension}"));
+        for cancel in [true, false] {
+            fs::write(&destination, b"original output").unwrap();
+            let guard = inspect_create_destination(&destination, CreateArtifactKind::Archive)
+                .unwrap()
+                .guard
+                .unwrap();
+            let ctl = ControlToken::default();
+            let cancelling = CancelOnProgress(&ctl);
+            let progress: &dyn ProgressSink = if cancel { &cancelling } else { &NoProgress };
+            let error = engine()
+                .convert_with_policy(
+                    &source,
+                    &destination,
+                    &OpenOptions::default(),
+                    &CreateOptions::default(),
+                    CreateCommitPolicy::ReplaceIfUnchanged(guard),
+                    progress,
+                    &ctl,
+                )
+                .unwrap_err();
+            if cancel {
+                assert!(
+                    matches!(error, FormatError::Cancelled),
+                    "{extension}: {error:?}"
+                );
+            } else {
+                assert!(
+                    matches!(error, FormatError::Io(_) | FormatError::CorruptArchive(_)),
+                    "{extension}: {error:?}"
+                );
+            }
+            assert_eq!(fs::read(&destination).unwrap(), b"original output");
+            assert!(!fs::read_dir(tmp.path()).unwrap().any(|entry| entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .contains(".convert-")));
+        }
+    }
+}
+
+#[test]
 fn zip_to_tar_gz_and_back() {
     let tmp = TempDir::new("convert-zip-targz");
     let zip = make_archive(tmp.path(), "src.zip");

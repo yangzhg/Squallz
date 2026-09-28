@@ -2,6 +2,7 @@
   import { onMount, tick } from "svelte";
   import ArchiveStartState from "./components/ArchiveStartState.svelte";
   import ArchiveReturnStrip from "./components/ArchiveReturnStrip.svelte";
+  import ArchiveEntryEditor from "./components/ArchiveEntryEditor.svelte";
   import AppIcon from "./components/AppIcon.svelte";
   import ClassicArchiveBrowserHost from "./components/ClassicArchiveBrowserHost.svelte";
   import type { ClassicArchiveBrowserSurfaceProps } from "./components/ClassicArchiveBrowserHost.svelte";
@@ -51,12 +52,17 @@
     recordOperation,
   } from "./lib/history.svelte";
   import { copyTextToClipboard } from "./lib/clipboard";
+  import { archiveEditPathIssue, archiveSelectionRoots, normalizeArchivePath } from "./lib/archive-editing";
+  import { appActionAvailability, appActionForShortcut, dispatchAppAction, isTextEditingTarget, type AppAction } from "./lib/app-actions";
+  import { connectNativeMenu, type NativeMenuConnection } from "./lib/native-menu";
+  import { trapModalFocus } from "./lib/modal-focus";
   import type { UpdateCheckPreview } from "./lib/app-update.svelte";
   import {
     adoptOpenedArchive,
     allRowsLoaded,
     archive,
     archiveBrowseError,
+    archiveRefreshStatus,
     archiveOpenError,
     archiveHasSessionPassword,
     archivePasswordBookStatus,
@@ -85,11 +91,14 @@
     prefetchAround,
     rowAt,
     selectAllRows,
+    selectRangeTo,
+    selectRow,
     selectedPaths,
     selectedSize,
     setFilter,
     toggleSelect,
     totalRows,
+    type RowSelectionResult,
   } from "./lib/archive.svelte";
   import {
     archiveNameWithoutVolumeSuffix,
@@ -134,6 +143,7 @@
     basename as pathBaseName,
     dirname as pathDir,
     formatBytes,
+    formatModified,
     parseDelimitedRules,
   } from "./lib/format";
   import type {
@@ -165,6 +175,7 @@
   } from "./lib/create-sources";
   import { platformTrashName } from "./lib/platform-labels";
   import { cssVariables, type CssVariableMap } from "./lib/css-variables";
+  import { readWindowRecovery } from "./lib/window-recovery";
   import {
     buildExternalTaskJobSpec,
     externalOpenAction,
@@ -180,7 +191,7 @@
     type TaskWindowSubmitTransition,
   } from "./lib/task-window";
   import { allFormats, loadFormats } from "./lib/formats.svelte";
-  import { currentLang, listBundledLanguages, loadLocale, t, tError } from "./lib/i18n.svelte";
+  import { currentLang, i18nReady, listBundledLanguages, loadLocale, t, tError } from "./lib/i18n.svelte";
   import { pushToast, removeToastByKey } from "./lib/toasts.svelte";
   import { isNewSourceCleanupRecoveryGeneration } from "./lib/source-cleanup";
   import { currentWebviewWindowListener } from "./lib/tauri-events";
@@ -277,7 +288,6 @@
     createProfileIds,
     createProfiles,
     defaultCustomAccent,
-    moveTargetPresets,
     nav,
     paletteIds,
     quickActions,
@@ -474,7 +484,7 @@
     ratio: string;
     modified: string;
     crc: string;
-    method: string;
+    encoding: string;
     attr: string;
     source?: EntryDto;
     virtualIndex?: number;
@@ -529,6 +539,7 @@
   };
 
   const params = new URLSearchParams(window.location.search);
+  const windowRecovery = readWindowRecovery(params);
   const modeParam = params.get("mode");
   const defaultExtractDirParam = params.get("defaultExtractDir");
   const initialMode: Mode | null = modeParam === "classic" || modeParam === "modern" ? modeParam : null;
@@ -570,7 +581,7 @@
   let archivePasswordPrompt = $derived(openPasswordPrompt());
   let activePasswordPromptIdentity = $derived(
     jobPasswordPrompt
-      ? `job:${jobPasswordPrompt.id}`
+      ? `job:${jobPasswordPrompt.id}:${jobPasswordPrompt.version}`
       : archivePasswordPrompt
         ? `archive:${archivePasswordPrompt.path}`
         : null,
@@ -579,16 +590,16 @@
   let jobConflictPrompt = $derived(pendingConflict());
   let activeConflictPromptIdentity = $derived(
     jobConflictPrompt
-      ? `${jobConflictPrompt.id}:${jobConflictPrompt.incoming_path}`
+      ? `${jobConflictPrompt.id}:${jobConflictPrompt.version}`
       : null,
   );
   let previousConflictPromptIdentity: string | null = null;
-  let taskDialogTaskId = $state<number | null>(null);
+  let taskDialogTaskId = $state<number | null>(windowRecovery.taskId ?? null);
   let taskDialogDismissedId = $state<number | null>(null);
   let macosSfxPublisherTask = $state<TaskDialogModel | null>(null);
   let LoadedMacosSfxPublisher = $state<MacosSfxPublisherComponentType | null>(null);
   let macosSfxPublisherLoad: Promise<MacosSfxPublisherComponentType> | null = null;
-  let taskCenterOpen = $state(false);
+  let taskCenterOpen = $state(windowRecovery.taskCenter ?? false);
   let taskCenterSelectedTaskId = $state<number | null>(null);
   let taskCenterFocusTaskId = $state<number | null>(null);
   let taskCenterReturnFocus: HTMLElement | null = null;
@@ -663,32 +674,6 @@
     else storage.removeItem(previewLanguageKey);
   }
 
-  const windowsReservedBaseNames = new Set([
-    "CON",
-    "PRN",
-    "AUX",
-    "NUL",
-    "CONIN$",
-    "CONOUT$",
-    "COM1",
-    "COM2",
-    "COM3",
-    "COM4",
-    "COM5",
-    "COM6",
-    "COM7",
-    "COM8",
-    "COM9",
-    "LPT1",
-    "LPT2",
-    "LPT3",
-    "LPT4",
-    "LPT5",
-    "LPT6",
-    "LPT7",
-    "LPT8",
-    "LPT9",
-  ]);
   const paletteParam = params.get("palette");
   const hasPaletteOverride = isPaletteId(paletteParam);
   const themeParam = params.get("theme");
@@ -905,7 +890,7 @@
   let extractPresetDraftTouched = false;
   let archiveOpenStatus = $state<"idle" | "opening">("idle");
   let archiveOpenGeneration = 0;
-  let archiveSelectAllProgress = $state<{ loaded: number; total: number } | null>(null);
+  let archiveSelectionProgress = $state<{ loaded: number; total: number } | null>(null);
   let recoveryPickerStatus = $state<"idle" | "archive" | "par2">("idle");
   let recoverySourceMode = $state<"none" | "current" | "selected">(
     runtimePreviews.archive ? "current" : "none",
@@ -1009,9 +994,12 @@
   let previewRequestGeneration = 0;
   let previewActionGeneration = 0;
   let entryPreviewPreparationTail: Promise<void> = Promise.resolve();
-  let renameTargetName = $state("renamed.txt");
+  let renameTargetName = $state("");
   let moveTargetDir = $state("moved/");
-  let newFolderName = $state("New Folder");
+  let newFolderName = $state("");
+  type ArchiveEditKind = "rename" | "move" | "new-folder";
+  let archiveEditKind = $state<ArchiveEditKind | null>(null);
+  let archiveEditReturnFocus: HTMLElement | null = null;
   let moveConflictReview = $state<MoveConflictReview | null>(null);
   let historyRows = $derived(operationHistory());
   let activePopover = $state<"quickActions" | null>(null);
@@ -1142,6 +1130,15 @@
   });
 
   $effect(() => {
+    currentArchive?.id;
+    archiveDirs.join("\u0000");
+    const source = selectedRenameSource();
+    renameTargetName = source ? pathBaseName(source.replace(/\/+$/g, "")) : "";
+    archiveEditKind = null;
+    moveConflictReview = null;
+  });
+
+  $effect(() => {
     if (jobPasswordPrompt) {
       setScreen("password");
     } else if (jobConflictPrompt) {
@@ -1252,6 +1249,15 @@
     if (!activeTaskPreview) return;
     const id = installActiveTaskPreview(activeTaskPreview);
     if (id === null) return;
+    const surface = params.get("previewTaskSurface");
+    if (surface === "panel" || surface === "center") {
+      taskDialogTaskId = null;
+      taskDialogDismissedId = id;
+      taskCenterOpen = true;
+      taskCenterSelectedTaskId = surface === "panel" ? id : null;
+      taskCenterFocusTaskId = id;
+      return;
+    }
     taskDialogTaskId = id;
     taskDialogDismissedId = null;
   });
@@ -1334,13 +1340,164 @@
     discardQueuedExtractPlan();
   });
 
-  function isTextEditingTarget(target: EventTarget | null): boolean {
-    if (!(target instanceof HTMLElement)) return false;
-    return target.isContentEditable
-      || target instanceof HTMLInputElement
-      || target instanceof HTMLTextAreaElement
-      || target instanceof HTMLSelectElement;
+  let nativeMenuConnection = $state<NativeMenuConnection | null>(null);
+  let textEditingFocused = $state(false);
+  let taskCenterFocused = $state(false);
+  let reconnectNativeMenu: (() => Promise<void>) | null = null;
+  function appActionContext() {
+    return {
+      blocked: modeSelectionBlocked || blockingModalVisible(),
+      taskWindow: taskWindowMode,
+      opening: archiveOpenStatus === "opening",
+      archive: Boolean(currentArchive),
+      writable: !archiveMutationDisabledReason(),
+      browsing: screen === "browse",
+      selectionBusy: Boolean(archiveSelectionBusyReason()),
+      hasSelection: hasArchiveSelection(),
+      canRename: canRenameSelection(),
+      canPreview: canPreviewEntrySelection(),
+      canSelectAll: !archiveSelectionControl().disabled,
+      hasParent: canGoUpArchive(),
+      textSelection: textEditingFocused || taskCenterFocused,
+      taskCenterAvailable: !modeSelectionBlocked && !blockingModalVisible(),
+    };
   }
+  const availableAppActions = $derived(appActionAvailability(appActionContext()));
+
+  type PreviewActionTarget = { path: string; type: EntryDto["entry_type"] };
+
+  function contextualAppActions(target: PreviewActionTarget) {
+    return appActionAvailability({
+      ...appActionContext(),
+      canPreview: !previewBusy() && previewPolicyFor(target.path, target.type).kind !== "none",
+    });
+  }
+
+  function appActionEnabled(action: AppAction): boolean {
+    return availableAppActions[action];
+  }
+
+  async function runAppAction(action: string, previewTarget?: PreviewActionTarget): Promise<boolean> {
+    try {
+      return await dispatchAppAction(action, previewTarget ? contextualAppActions(previewTarget) : availableAppActions, {
+        open_archive: openArchiveFromDialog,
+        create_archive: () => setScreen("create"),
+        extract_all: () => openExtractWorkspace("all"),
+        extract_selection: () => openExtractWorkspace("selection"),
+        add_files: submitAddToArchiveJob,
+        new_folder: () => openArchiveEditor("new-folder"),
+        rename_entry: () => openArchiveEditor("rename"),
+        move_entries: () => openArchiveEditor("move"),
+        delete_entries: submitDeleteSelectedJob,
+        preview_entry: () => submitPreviewEntry(previewTarget?.path, previewTarget?.type),
+        copy_entries: submitCopyOutSelectedJob,
+        test_archive: submitTestJob,
+        convert_archive: () => setScreen("convert"),
+        archive_info: () => setScreen("archiveInfo"),
+        search_archive: () => {
+          closeQuickActions(false);
+          archiveSearchInput?.focus();
+          archiveSearchInput?.select();
+        },
+        go_up: goArchiveUp,
+        task_center: () => openTaskCenter(document.activeElement instanceof HTMLElement ? document.activeElement : null),
+        select_all: () => {
+          if (!isTextEditingTarget(document.activeElement) && !taskWindowMode && !modeSelectionBlocked
+            && !blockingModalVisible() && !document.activeElement?.closest("#squallz-task-center")
+            && screen === "browse" && currentArchive) {
+            closeQuickActions(false);
+            return selectAllArchiveEntries();
+          }
+          const target = document.activeElement;
+          if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) target.select();
+          else document.execCommand("selectAll");
+        },
+        settings: () => setScreen("settingsGeneral"),
+      });
+    } catch (error) {
+      pushToast({
+        key: "app-action-failed",
+        kind: "danger",
+        title: t("gui.native_menu.action_failed"),
+        body: isErrorDto(error) ? tError(error) : undefined,
+      });
+      return false;
+    }
+  }
+
+  function nativeMenuSnapshot() {
+    return {
+      language: currentLang(),
+      enabled: Object.entries(availableAppActions).filter(([, enabled]) => enabled).map(([id]) => id as AppAction),
+    };
+  }
+
+  function reportNativeMenuFailure(): void {
+    pushToast({
+      key: "native-menu-unavailable",
+      kind: "warning",
+      title: t("gui.native_menu.unavailable"),
+      action: {
+        label: t("gui.error.retry"),
+        run: async () => {
+          if (nativeMenuConnection) nativeMenuConnection.publish(nativeMenuSnapshot(), true);
+          else await reconnectNativeMenu?.();
+        },
+      },
+    });
+  }
+
+  onMount(() => {
+    let disposed = false;
+    let connecting = false;
+    let focusUpdateQueued = false;
+    const syncTextFocus = () => {
+      if (focusUpdateQueued) return;
+      focusUpdateQueued = true;
+      // Removing a focused control can fire focusout during a Svelte DOM update.
+      queueMicrotask(() => {
+        focusUpdateQueued = false;
+        if (!disposed) {
+          textEditingFocused = isTextEditingTarget(document.activeElement);
+          taskCenterFocused = Boolean(document.activeElement?.closest("#squallz-task-center"));
+        }
+      });
+    };
+    const connect = async () => {
+      if (disposed || connecting || nativeMenuConnection) return;
+      connecting = true;
+      try {
+        const connection = await connectNativeMenu(
+          (action) => { if (!disposed) void runAppAction(action); },
+          () => { if (!disposed) reportNativeMenuFailure(); },
+          () => { if (!disposed) removeToastByKey("native-menu-unavailable"); },
+        );
+        if (disposed) connection?.dispose();
+        else nativeMenuConnection = connection;
+      } catch {
+        if (!disposed) reportNativeMenuFailure();
+      } finally {
+        connecting = false;
+      }
+    };
+    reconnectNativeMenu = connect;
+    syncTextFocus();
+    document.addEventListener("focusin", syncTextFocus);
+    document.addEventListener("focusout", syncTextFocus);
+    void connect();
+    return () => {
+      disposed = true;
+      reconnectNativeMenu = null;
+      nativeMenuConnection?.dispose();
+      nativeMenuConnection = null;
+      document.removeEventListener("focusin", syncTextFocus);
+      document.removeEventListener("focusout", syncTextFocus);
+    };
+  });
+
+  $effect(() => {
+    if (i18nReady()) nativeMenuConnection?.publish(nativeMenuSnapshot());
+  });
 
   onMount(() => {
     const media = window.matchMedia("(prefers-color-scheme: dark)");
@@ -1781,35 +1938,16 @@
     };
 
     const onKeyDown = (event: KeyboardEvent) => {
-      if (modeSelectionBlocked) return;
-      if (
-        (event.metaKey || event.ctrlKey) &&
-        event.key.toLowerCase() === "f" &&
-        screen === "browse" &&
-        currentArchive &&
-        !taskWindowMode
-      ) {
-        event.preventDefault();
-        closeQuickActions(false);
-        archiveSearchInput?.focus();
-        archiveSearchInput?.select();
-        return;
+      if (!nativeMenuConnection) {
+        const action = appActionForShortcut(event, activePlatform);
+        if (action && appActionEnabled(action)) {
+          if (action === "select_all" && isTextEditingTarget(event.target)) return;
+          event.preventDefault();
+          void runAppAction(action);
+          return;
+        }
       }
-      if (
-        (event.metaKey || event.ctrlKey) &&
-        !event.altKey &&
-        !event.shiftKey &&
-        event.key.toLowerCase() === "a" &&
-        screen === "browse" &&
-        currentArchive &&
-        !taskWindowMode &&
-        !isTextEditingTarget(event.target)
-      ) {
-        event.preventDefault();
-        closeQuickActions(false);
-        void selectAllArchiveEntries();
-        return;
-      }
+      if (modeSelectionBlocked || archiveEditKind !== null) return;
       if (event.key === "Escape") {
         if (activePopover === "quickActions") {
           event.preventDefault();
@@ -1844,7 +1982,9 @@
         !refreshedUpdateJobs.has(task.id)
       ) {
         refreshedUpdateJobs.add(task.id);
-        void refreshCurrentArchive().then((ok) => {
+        void refreshCurrentArchive(() => browseVirtualWindow(
+          mode === "classic" ? CLASSIC_ROW_HEIGHT : MODERN_ROW_HEIGHT,
+        )).then((ok) => {
           if (ok) showNotice(tr("gui.archive.list_refreshed", "Archive list refreshed"));
         });
       }
@@ -1946,40 +2086,13 @@
     setScreen("settingsGeneral");
   }
 
-  function firstRunFocusableElements(): HTMLElement[] {
-    if (!firstRunPanel) return [];
-    return Array.from(
-      firstRunPanel.querySelectorAll<HTMLElement>(
-        'button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [href], [tabindex]:not([tabindex="-1"])',
-      ),
-    ).filter((element) => !element.hasAttribute("hidden"));
-  }
-
   function onFirstRunKeydown(event: KeyboardEvent): void {
     if (event.key === "Escape") {
       event.preventDefault();
       event.stopPropagation();
       return;
     }
-    if (event.key !== "Tab") return;
-    const focusable = firstRunFocusableElements();
-    if (focusable.length === 0) {
-      event.preventDefault();
-      firstRunPanel?.focus();
-      return;
-    }
-    const first = focusable[0];
-    const last = focusable[focusable.length - 1];
-    if (document.activeElement === firstRunPanel) {
-      event.preventDefault();
-      (event.shiftKey ? last : first).focus();
-    } else if (event.shiftKey && document.activeElement === first) {
-      event.preventDefault();
-      last.focus();
-    } else if (!event.shiftKey && document.activeElement === last) {
-      event.preventDefault();
-      first.focus();
-    }
+    trapModalFocus(event, firstRunPanel);
   }
 
   function preventCreateSubmissionNavigation(next: Screen): boolean {
@@ -2238,9 +2351,29 @@
     closeQuickActions();
   }
 
+  function navigationAction(next: Screen): AppAction | undefined {
+    if (next === "extract") return "extract_all";
+    if (next === "create") return "create_archive";
+    if (next === "settingsGeneral") return "settings";
+    return undefined;
+  }
+
+  function navigationDisabled(next: Screen): boolean {
+    const action = navigationAction(next);
+    return action ? !appActionEnabled(action) : false;
+  }
+
+  function navigationDisabledReason(next: Screen): string {
+    if (next === "extract" && navigationDisabled(next)) {
+      return archiveSelectionBusyReason() || archiveActionTitle(hasArchiveOpen());
+    }
+    return "";
+  }
+
   function navigateToScreen(next: Screen) {
-    if (next === "extract") {
-      openExtractWorkspace("all");
+    const action = navigationAction(next);
+    if (action) {
+      void runAppAction(action);
       return;
     }
     setScreen(next);
@@ -4308,7 +4441,6 @@
   }
 
   function classicArchiveBrowserSurface(): ClassicArchiveBrowserSurfaceProps {
-    const workbenchVisible = Boolean(currentArchive && hasArchiveSelection());
     const rows = browseEntries(CLASSIC_ROW_HEIGHT).map((entry) => ({
       ...entry,
       selected: isEntrySelected(entry),
@@ -4331,7 +4463,6 @@
           ? `${archiveFormat()} · ${archiveEntryCountLabel(currentArchive.entry_count)}`
           : openArchiveFirstLabel(),
         archiveOpen: Boolean(currentArchive),
-        archiveReadOnly: Boolean(currentArchive?.read_only),
         openArchiveFirst: openArchiveFirstLabel(),
         selection: archiveSelectionControl(),
         preview: {
@@ -4345,28 +4476,12 @@
           busy: previewBusy(),
           entry: entryPreview,
           failed: Boolean(entryPreviewFailure),
-          canPreview: canPreviewEntrySelection(),
+          canPreview: appActionEnabled("preview_entry"),
           actionLabel: previewLabel,
           actionIcon: previewActionIcon(),
           disabledReason: previewDisabledReason,
           ariaLabel: labelWithDisabledReason(previewLabel, previewDisabledReason),
         },
-        rename: {
-          visible: canRenameSelection(),
-          value: renameTargetName,
-          status: renameTargetStatus(),
-        },
-        move: {
-          visible: hasArchiveSelection(),
-          value: moveTargetDir,
-          status: moveTargetStatus(),
-          disabledReason: archiveMutationDisabledReason(),
-        },
-        newFolder: {
-          value: newFolderName,
-          status: workbenchVisible ? newFolderStatus() : "",
-        },
-        workbenchVisible,
         selectedSummary: selectedSummary(),
         conflict: moveConflictReview
           ? {
@@ -4396,19 +4511,7 @@
         if (opened) clearEntryPreviewState();
       }),
       onRevealPreview: () => void revealEntryPreview(),
-      onPreviewSelection: () => void submitPreviewEntry(),
-      onRenameTargetChange: (value) => {
-        renameTargetName = value;
-      },
-      onCommitRenameTarget: () => commitRenameTargetName(),
-      onMoveTargetChange: (value) => {
-        moveTargetDir = value;
-      },
-      onCommitMoveTarget: () => commitMoveTargetDir(),
-      onNewFolderChange: (value) => {
-        newFolderName = value;
-      },
-      onCommitNewFolder: () => commitNewFolderName(),
+      onPreviewSelection: () => void runAppAction("preview_entry"),
       onCancelMoveConflict: () => {
         moveConflictReview = null;
       },
@@ -4419,8 +4522,8 @@
       onActivateEntry: (entry) => void activateEntry(entry),
       onEntryKeydown: (event, entry) => onEntryKeydown(event, entry),
       onOpenEntryContext: (event, entry) => openEntryContext(event, entry),
-      onToggleEntrySelection: (entry) => toggleEntrySelection(entry),
-      onToggleAllEntries: toggleLoadedArchiveEntries,
+      onToggleEntrySelection: (entry, event) => toggleEntrySelection(entry, event),
+      onToggleAllEntries: toggleAllArchiveEntries,
       onPreviewEntry: (entry) => previewDisplayEntry(entry),
     };
   }
@@ -4444,7 +4547,6 @@
         : "eye",
     }));
     const mutationDisabledReason = archiveMutationDisabledReason();
-    const hasSelection = hasArchiveSelection();
     const previewLabel = previewActionLabel();
     const previewDisabledReason = previewSelectedDisabledReason();
     return {
@@ -4454,36 +4556,24 @@
           format: archiveFormat(),
           summary: archiveSummary(),
           dirs: archiveDirs,
-          readOnly: archive.read_only,
-          canGoUp: canGoUpArchive(),
+          canGoUp: appActionEnabled("go_up"),
         },
         actions: {
           mutationDisabledReason,
           renameDisabledReason: renameSelectedDisabledReason(),
           deleteDisabledReason: deleteSelectedDisabledReason(),
           moveDisabledReason: moveSelectedDisabledReason(),
-          canRenameSelection: canRenameSelection(),
-          hasSelection,
-          canPreviewSelection: canPreviewEntrySelection(),
+          enabled: availableAppActions,
           previewBusy: previewBusy(),
           previewDisabledReason,
           previewLabel,
           previewIcon: previewActionIcon(),
-          extractDestinationHint: extractDestinationHint(),
+          extractDestinationHint: archiveSelectionBusyReason() || extractDestinationHint(),
           extractAllLabel: extractAllToLabel(),
           extractSelectedLabel: extractSelectedToLabel(),
           nestedPreview: Boolean(nestedPreview),
         },
-        workbench: {
-          renameTarget: renameTargetName,
-          renameStatus: renameTargetStatus(),
-          moveTarget: moveTargetDir,
-          normalizedMoveTarget: normalizeMoveTargetDir(moveTargetDir),
-          moveTargetPresets,
-          moveStatus: moveTargetStatus(),
-          newFolderName,
-          newFolderStatus: hasSelection ? newFolderStatus() : "",
-        },
+        selectedSummary: selectedSummary(),
         conflict: moveConflictReview
           ? {
               count: moveConflictCount(),
@@ -4506,33 +4596,21 @@
       },
       tr,
       onOpenBreadcrumb: (index) => void openArchiveBreadcrumb(index),
-      onGoUp: () => void goArchiveUp(),
+      onGoUp: () => void runAppAction("go_up"),
       onOpenRoot: () => void openArchiveBreadcrumb(-1),
-      onExtractAll: () => openExtractWorkspace("all"),
-      onExtractSelection: () => openExtractWorkspace("selection"),
-      onAddFiles: () => void submitAddToArchiveJob(),
+      onExtractAll: () => void runAppAction("extract_all"),
+      onExtractSelection: () => void runAppAction("extract_selection"),
+      onAddFiles: () => void runAppAction("add_files"),
       onOpenRecovery: openCurrentArchiveRecoveryConfiguration,
-      onConvert: () => setScreen("convert"),
-      onOpenInfo: () => setScreen("archiveInfo"),
-      onRenameSelection: () => void submitRenameSelectedJob(),
-      onDeleteSelection: () => void submitDeleteSelectedJob(),
-      onMoveSelection: () => void submitMoveSelectedJob(),
-      onCreateFolder: () => void submitNewFolderJob(),
-      onPreviewSelection: () => void submitPreviewEntry(),
+      onConvert: () => void runAppAction("convert_archive"),
+      onOpenInfo: () => void runAppAction("archive_info"),
+      onRenameSelection: () => void runAppAction("rename_entry"),
+      onDeleteSelection: () => void runAppAction("delete_entries"),
+      onMoveSelection: () => void runAppAction("move_entries"),
+      onCreateFolder: () => void runAppAction("new_folder"),
+      onPreviewSelection: () => void runAppAction("preview_entry"),
       onOpenNestedPreview: () => void openNestedPreviewArchive(),
       onExtractNestedPreview: () => void extractNestedPreviewArchive(),
-      onRenameTargetChange: (value) => {
-        renameTargetName = value;
-      },
-      onCommitRenameTarget: () => commitRenameTargetName(),
-      onMoveTargetChange: (value) => {
-        moveTargetDir = value;
-      },
-      onCommitMoveTarget: (target) => commitMoveTargetDir(target),
-      onNewFolderChange: (value) => {
-        newFolderName = value;
-      },
-      onCommitNewFolder: () => commitNewFolderName(),
       onCancelMoveConflict: () => {
         moveConflictReview = null;
       },
@@ -4550,8 +4628,8 @@
       onActivateEntry: (entry) => void activateEntry(entry),
       onEntryKeydown: (event, entry) => onEntryKeydown(event, entry),
       onOpenEntryContext: (event, entry) => openEntryContext(event, entry),
-      onToggleEntrySelection: (entry) => toggleEntrySelection(entry),
-      onToggleAllEntries: toggleLoadedArchiveEntries,
+      onToggleEntrySelection: (entry, event) => toggleEntrySelection(entry, event),
+      onToggleAllEntries: toggleAllArchiveEntries,
       onPreviewEntry: (entry) => previewDisplayEntry(entry),
     };
   }
@@ -4599,19 +4677,15 @@
           busy: previewBusy(),
           failed: Boolean(entryPreviewFailure),
           entry: entryPreview,
-          canPreview: canPreviewEntrySelection(),
+          canPreview: appActionEnabled("preview_entry"),
           actionLabel: previewActionLabel(),
           actionIcon: previewActionIcon(),
           disabledReason: previewSelectedDisabledReason(),
         },
-        canRename: canRenameSelection(),
-        renameTarget: renameTargetName,
-        renameStatus: renameTargetStatus(),
-        canMove: hasArchiveSelection(),
-        moveTarget: moveTargetDir,
-        normalizedMoveTarget: normalizeMoveTargetDir(moveTargetDir),
-        moveTargetPresets,
-        moveStatus: moveTargetStatus(),
+        canRename: appActionEnabled("rename_entry"),
+        canMove: appActionEnabled("move_entries"),
+        canTest: appActionEnabled("test_archive"),
+        canCopyOut: appActionEnabled("copy_entries"),
         archive: currentArchive
           ? {
               format: archiveFormat(),
@@ -4640,14 +4714,12 @@
         if (opened) clearEntryPreviewState();
       }),
       onRevealPreview: () => void revealEntryPreview(),
-      onPreviewSelection: () => void submitPreviewEntry(),
-      onRenameTargetChange: (value) => (renameTargetName = value),
-      onCommitRenameTarget: commitRenameTargetName,
-      onMoveTargetChange: (value) => (moveTargetDir = value),
-      onCommitMoveTarget: (target) => commitMoveTargetDir(target),
+      onPreviewSelection: () => void runAppAction("preview_entry"),
+      onRenameSelection: () => void runAppAction("rename_entry"),
+      onMoveSelection: () => void runAppAction("move_entries"),
       onOpenRecovery: openRecoveryConfiguration,
-      onTestArchive: () => void submitTestJob(),
-      onCopyOutSelection: () => void submitCopyOutSelectedJob(),
+      onTestArchive: () => void runAppAction("test_archive"),
+      onCopyOutSelection: () => void runAppAction("copy_entries"),
     };
   }
 
@@ -5578,6 +5650,8 @@
   }
 
   function archiveFilterStatus(): string {
+    const refreshStatus = archiveRefreshStatusLabel();
+    if (refreshStatus) return refreshStatus;
     if (archiveBrowseError()) {
       return filterText().trim()
         ? tr("gui.list.search_failed", "Search could not be completed")
@@ -6172,17 +6246,6 @@
     );
   }
 
-  function formatModified(value: number | null): string {
-    if (value == null) return "-";
-    const date = new Date(value * 1000);
-    const year = date.getFullYear();
-    const month = String(date.getMonth() + 1).padStart(2, "0");
-    const day = String(date.getDate()).padStart(2, "0");
-    const hour = String(date.getHours()).padStart(2, "0");
-    const minute = String(date.getMinutes()).padStart(2, "0");
-    return `${year}-${month}-${day} ${hour}:${minute}`;
-  }
-
   function entryType(row: EntryDto): string {
     if (row.entry_type === "dir") return "folder";
     if (row.encrypted) return "locked";
@@ -6221,7 +6284,7 @@
       ratio,
       modified: formatModified(row.modified),
       crc: row.crc == null ? "" : row.crc.toString(16).toUpperCase().padStart(8, "0"),
-      method: row.encrypted ? "AES" : row.encoding === "utf-8" ? "" : row.encoding.toUpperCase(),
+      encoding: row.encoding.toUpperCase(),
       attr: entryAttributeLabel(row),
       source: row,
     };
@@ -6245,7 +6308,10 @@
     if (!currentArchive) return { start: 0, end: total, top: 0, bottom: 0 };
     const viewport = Math.max(browseViewportHeight || 360, rowHeight * 6);
     const visibleRows = Math.ceil(viewport / rowHeight);
-    const rawStart = Math.floor(browseScrollTop / rowHeight);
+    const rawStart = Math.min(
+      Math.floor(browseScrollTop / rowHeight),
+      Math.max(0, total - visibleRows),
+    );
     const start = Math.max(0, rawStart - VIRTUAL_OVERSCAN_ROWS);
     const end = Math.min(total, start + visibleRows + VIRTUAL_OVERSCAN_ROWS * 2);
     return {
@@ -6446,8 +6512,7 @@
       return;
     }
     const preservePreview = entryPreviewForPath(entry.source.path) !== null;
-    clearSelection();
-    toggleSelect(entry.source);
+    selectRow(entry.source, entry.virtualIndex);
     if (!preservePreview) clearEntryPreviewState();
   }
 
@@ -6460,13 +6525,17 @@
     );
   }
 
-  function toggleEntrySelection(entry: DisplayEntry) {
+  function toggleEntrySelection(entry: DisplayEntry, event?: MouseEvent) {
     if (!entry.source) return;
     if (archiveSelectionBusyReason()) {
       showNotice(archiveSelectionBusyReason());
       return;
     }
-    toggleSelect(entry.source);
+    if (event?.shiftKey) {
+      void selectEntry(entry, event);
+      return;
+    }
+    toggleSelect(entry.source, entry.virtualIndex);
     if (!entryPreviewForPath(entry.source.path)) clearEntryPreviewState();
     recordValidationEvent("frontend.entry.selection_toggle", {
       path: entry.source.path,
@@ -6489,23 +6558,30 @@
     return {
       checked,
       mixed,
-      disabled: total === 0 || filterPending() || archiveSelectAllProgress !== null,
+      disabled: total === 0 || filterPending() || Boolean(busyLabel),
       label,
       busy: Boolean(busyLabel),
       busyLabel,
     };
   }
 
-  function selectAllProgressLabel(loaded: number, total: number): string {
+  function selectionProgressLabel(loaded: number, total: number): string {
     return tr("gui.selection.selecting", "Selecting {loaded} of {total}…")
       .replace("{loaded}", loaded.toLocaleString())
       .replace("{total}", total.toLocaleString());
   }
 
   function archiveSelectionBusyReason(): string {
-    return archiveSelectAllProgress
-      ? selectAllProgressLabel(archiveSelectAllProgress.loaded, archiveSelectAllProgress.total)
-      : "";
+    return archiveSelectionProgress
+      ? selectionProgressLabel(archiveSelectionProgress.loaded, archiveSelectionProgress.total)
+      : archiveRefreshStatusLabel();
+  }
+
+  function archiveRefreshStatusLabel(): string {
+    const status = archiveRefreshStatus();
+    if (status === "refreshing") return tr("gui.archive.refreshing", "Refreshing archive contents…");
+    if (status === "error") return tr("gui.archive.refresh_failed", "Could not refresh the archive. Retry to see the latest files.");
+    return "";
   }
 
   function blockSelectionScopedAction(): boolean {
@@ -6515,34 +6591,45 @@
     return true;
   }
 
+  async function runArchiveSelection(
+    operation: (onProgress: (loaded: number, total: number) => void) => Promise<RowSelectionResult>,
+    successLabel: () => string,
+  ): Promise<boolean> {
+    archiveSelectionProgress = { loaded: 0, total: totalRows() };
+    const updateProgress = (loaded: number, total: number) => {
+      archiveSelectionProgress = { loaded, total };
+      showNotice(selectionProgressLabel(loaded, total));
+    };
+    const result = await operation(updateProgress);
+    archiveSelectionProgress = null;
+    if (result === "failed") {
+      showNotice(tr("gui.selection.failed", "Could not complete the selection. Your previous selection was kept. Try again."));
+      return false;
+    }
+    if (result === "stale") {
+      showNotice(tr("gui.selection.stale", "The view or selection changed. The pending selection was cancelled."));
+      return false;
+    }
+    showNotice(successLabel());
+    return true;
+  }
+
   async function selectAllArchiveEntries() {
     const control = archiveSelectionControl();
     if (control.disabled || control.checked) return;
-    archiveSelectAllProgress = { loaded: 0, total: totalRows() };
-    const updateProgress = (loaded: number, total: number) => {
-      archiveSelectAllProgress = { loaded, total };
-      showNotice(selectAllProgressLabel(loaded, total));
-    };
-    updateProgress(0, totalRows());
-    const result = await selectAllRows(updateProgress);
-    archiveSelectAllProgress = null;
-    if (result === "failed") {
-      showNotice(tr("gui.selection.select_all_failed", "Could not select every entry. Try again."));
-      return;
-    }
-    if (result === "stale") {
-      showNotice(tr("gui.selection.select_all_stale", "Selection changed before every entry could be selected."));
-      return;
-    }
+    const selected = await runArchiveSelection(
+      selectAllRows,
+      () => tr("gui.selection.all_selected", "All entries selected"),
+    );
+    if (!selected) return;
     clearEntryPreviewState();
     recordValidationEvent("frontend.entry.selection_all", {
       selected_count: selectedPaths().size,
       total_count: totalRows(),
     });
-    showNotice(tr("gui.selection.all_selected", "All entries selected"));
   }
 
-  function toggleLoadedArchiveEntries() {
+  function toggleAllArchiveEntries() {
     const control = archiveSelectionControl();
     if (control.disabled) return;
     if (control.checked) {
@@ -6557,23 +6644,32 @@
     void selectAllArchiveEntries();
   }
 
-  function selectEntry(entry: DisplayEntry, event?: MouseEvent | KeyboardEvent) {
+  async function selectEntry(entry: DisplayEntry, event?: MouseEvent | KeyboardEvent) {
     if (!entry.source) return;
     if (archiveSelectionBusyReason()) {
       showNotice(archiveSelectionBusyReason());
       return;
     }
-    if (event?.metaKey || event?.ctrlKey) {
-      toggleSelect(entry.source);
+    const additive = Boolean(event?.metaKey || event?.ctrlKey);
+    if (event?.shiftKey) {
+      const row = entry.source;
+      const selected = await runArchiveSelection(
+        (onProgress) => selectRangeTo(row, entry.virtualIndex, additive, onProgress),
+        () => tr("gui.selection.count_selected", "{count} selected")
+          .replace("{count}", selectedPaths().size.toLocaleString()),
+      );
+      if (!selected) return;
+    } else if (additive) {
+      toggleSelect(entry.source, entry.virtualIndex);
     } else {
-      clearSelection();
-      toggleSelect(entry.source);
+      selectRow(entry.source, entry.virtualIndex);
     }
     if (!entryPreviewForPath(entry.source.path)) clearEntryPreviewState();
     recordValidationEvent("frontend.entry.select", {
       path: entry.source.path,
       selected_count: selectedPaths().size,
       multi: Boolean(event?.metaKey || event?.ctrlKey),
+      range: Boolean(event?.shiftKey),
     });
   }
 
@@ -6589,6 +6685,7 @@
       await openArchiveDirectoryEntry(entry.source.path);
       return;
     }
+    if (blockSelectionScopedAction()) return;
     if (archiveLikePath(entry.source.path) && currentArchive) {
       await openNestedArchiveEntry(
         currentArchive.source,
@@ -6608,7 +6705,6 @@
     if (!canGoUpArchive()) return;
     const targetDirectory = archiveDirs.slice(0, -1).join("/");
     clearEntryPreviewState();
-    clearSelection();
     await goUp();
     if (archiveBrowseError() || archiveDirs.join("/") !== targetDirectory) return;
     browseScrollTop = 0;
@@ -6622,7 +6718,6 @@
     if (!currentArchive) return;
     const targetDirectory = archiveDirs.slice(0, level + 1).join("/");
     clearEntryPreviewState();
-    clearSelection();
     await gotoBreadcrumb(level);
     if (archiveBrowseError() || archiveDirs.join("/") !== targetDirectory) return;
     browseScrollTop = 0;
@@ -6633,12 +6728,14 @@
   }
 
   function showEntryContextAt(x: number, y: number, entry: DisplayEntry) {
-    if (
-      !archiveSelectionBusyReason()
-      && entry.source
-      && !selectedPaths().has(entry.source.path)
-    ) {
-      toggleSelect(entry.source);
+    const busyReason = archiveSelectionBusyReason();
+    if (busyReason) {
+      closeEntryContext();
+      showNotice(busyReason);
+      return;
+    }
+    if (entry.source && !selectedPaths().has(entry.source.path)) {
+      selectOnlyEntry(entry);
     }
     closeQuickActions(false);
     const viewportPadding = 12;
@@ -6649,7 +6746,7 @@
       y: Math.max(viewportPadding, Math.min(y, window.innerHeight - menuHeight - viewportPadding)),
       name: entry.name,
       path: entry.source?.path ?? null,
-      canRename: Boolean(entry.source && entry.source.entry_type !== "dir"),
+      canRename: Boolean(entry.source),
       isDir: entry.source?.entry_type === "dir",
     };
   }
@@ -6667,26 +6764,20 @@
     const contextPath = entryContext?.path ?? null;
     const contextIsDir = entryContext?.isDir === true;
     closeEntryContext();
-    if (action === "extract") {
-      openExtractWorkspace("selection");
-    } else if (action === "delete") {
-      await submitDeleteSelectedJob();
-    } else if (action === "rename") {
-      await submitRenameSelectedJob();
-    } else if (action === "move") {
-      await submitMoveSelectedJob();
-    } else if (action === "preview") {
-      await submitPreviewEntry(contextPath, contextIsDir ? "dir" : undefined);
-    } else {
-      await submitTestJob();
-    }
+    const actions: Record<typeof action, AppAction> = {
+      extract: "extract_selection", delete: "delete_entries", rename: "rename_entry",
+      move: "move_entries", preview: "preview_entry", test: "test_archive",
+    };
+    await runAppAction(actions[action], action === "preview" && contextPath
+      ? { path: contextPath, type: contextIsDir ? "dir" : "file" } : undefined);
   }
 
   function onEntryKeydown(event: KeyboardEvent, entry: DisplayEntry) {
     if (event.target !== event.currentTarget) return;
+    if (event.metaKey || event.ctrlKey || event.altKey || event.isComposing) return;
     if (
       archiveSelectionBusyReason()
-      && ["Delete", "Backspace", "e", "E", "m", "M"].includes(event.key)
+      && ["Delete", "Backspace", "e", "E", "m", "M", "F2"].includes(event.key)
     ) {
       event.preventDefault();
       showNotice(archiveSelectionBusyReason());
@@ -6702,22 +6793,20 @@
       }
     } else if (event.key === "Backspace" && selectedPaths().size === 0) {
       event.preventDefault();
-      void goArchiveUp();
+      void runAppAction("go_up");
     } else if (event.key === "Delete" || event.key === "Backspace") {
       event.preventDefault();
-      void submitDeleteSelectedJob();
-    } else if ((event.metaKey || event.altKey) && event.key === "ArrowUp") {
-      event.preventDefault();
-      void goArchiveUp();
+      if (!event.repeat) void runAppAction("delete_entries");
     } else if (event.key === "e" || event.key === "E") {
       event.preventDefault();
       if (entry.source && !selectedPaths().has(entry.source.path)) {
         selectOnlyEntry(entry);
       }
-      openExtractWorkspace("selection");
-    } else if (event.key === "m" || event.key === "M") {
+      void runAppAction("extract_selection");
+    } else if (event.key === "m" || event.key === "M" || event.key === "F2") {
       event.preventDefault();
-      void submitMoveSelectedJob();
+      if (entry.source && !selectedPaths().has(entry.source.path)) selectOnlyEntry(entry);
+      if (!event.repeat) void tick().then(() => runAppAction(event.key === "F2" ? "rename_entry" : "move_entries"));
     } else if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
       event.preventDefault();
       const target = event.currentTarget instanceof HTMLElement ? event.currentTarget : null;
@@ -7721,13 +7810,13 @@
         detail: currentArchive ? archiveWarningText() : openArchiveFirstLabel(),
       },
       test: {
-        disabled: Boolean(archiveRequiredReason),
+        disabled: !appActionEnabled("test_archive"),
         title: archiveRequiredReason,
         ariaLabel: labelWithDisabledReason(
           tr("gui.extract.test_first", "Test first"),
           archiveRequiredReason,
         ),
-        onSelect: () => void submitTestJob(),
+        onSelect: () => void runAppAction("test_archive"),
       },
     };
   }
@@ -8030,7 +8119,7 @@
   }
 
   function selectedJobPaths(): string[] | null {
-    if (archiveSelectAllProgress) return null;
+    if (archiveSelectionBusyReason()) return null;
     const selected = [...selectedPaths()];
     return selected.length > 0 ? selected : null;
   }
@@ -8041,13 +8130,15 @@
 
   function archiveMutationDisabledReason(): string {
     if (!currentArchive) return openArchiveFirstLabel();
+    const refreshing = archiveRefreshStatusLabel();
+    if (refreshing) return refreshing;
     return currentArchive.read_only
       ? tr("gui.archive.nested_read_only", "Nested archives are read-only. Extract or convert to save changes.")
       : "";
   }
 
   function hasArchiveSelection(): boolean {
-    return hasArchiveOpen() && !archiveSelectAllProgress && selectedPaths().size > 0;
+    return hasArchiveOpen() && !archiveSelectionBusyReason() && selectedPaths().size > 0;
   }
 
   function canRenameSelection(): boolean {
@@ -8128,7 +8219,7 @@
   }
 
   function canPreviewEntrySelection(): boolean {
-    return !archiveSelectAllProgress && selectedPreviewPolicy().kind !== "none" && !previewBusy();
+    return !archiveSelectionBusyReason() && selectedPreviewPolicy().kind !== "none" && !previewBusy();
   }
 
   function renameSelectedDisabledReason(): string {
@@ -8136,7 +8227,7 @@
     if (readOnly) return readOnly;
     return canRenameSelection()
       ? ""
-      : tr("gui.precondition.select_one_before_rename", "Select exactly one file entry before renaming");
+      : tr("gui.precondition.select_one_before_rename", "Select exactly one file or folder before renaming");
   }
 
   function deleteSelectedDisabledReason(): string {
@@ -8163,6 +8254,8 @@
   }
 
   function previewSelectedDisabledReason(): string {
+    const selectionBusy = archiveSelectionBusyReason();
+    if (selectionBusy) return selectionBusy;
     if (previewBusy()) return tr("gui.preview.loading", "Preparing item");
     return selectedPreviewPolicy().disabledReason;
   }
@@ -9108,32 +9201,13 @@
     showNotice(message);
   }
 
-  function selectedDeletePatterns(): string[] {
-    return [...selectedPaths()].map((path) => path.endsWith("/") ? path.slice(0, -1) : path);
-  }
-
-  function renameTargetForPath(path: string): string {
-    const clean = path.endsWith("/") ? path.slice(0, -1) : path;
-    const slash = clean.lastIndexOf("/");
-    const dir = slash >= 0 ? `${clean.slice(0, slash + 1)}` : "";
-    const base = slash >= 0 ? clean.slice(slash + 1) : clean;
-    const dot = base.lastIndexOf(".");
-    if (dot > 0) return `${dir}${base.slice(0, dot)}-renamed${base.slice(dot)}`;
-    return `${dir}${base}-renamed`;
+  function selectedDeletePaths(): string[] {
+    return archiveSelectionRoots(selectedPaths());
   }
 
   function selectedRenameSource(): string | null {
-    const selected = [...selectedPaths()].filter((path) => !path.endsWith("/"));
+    const selected = [...selectedPaths()];
     return selected.length === 1 ? selected[0] : null;
-  }
-
-  function normalizeArchiveFilePath(value: string, fallback: string): string {
-    const parts = value
-      .replaceAll("\\", "/")
-      .split("/")
-      .map((part) => part.trim())
-      .filter((part) => part.length > 0 && part !== "." && part !== "..");
-    return parts.length === 0 ? fallback : parts.join("/");
   }
 
   function archiveEntryExtension(path: string): string {
@@ -9143,65 +9217,54 @@
     return base.slice(dot);
   }
 
-  function windowsUnsafeArchiveSegment(path: string): string | null {
-    const segments = path
-      .replaceAll("\\", "/")
-      .split("/")
-      .map((part) => part.trim())
-      .filter(Boolean);
-    for (const segment of segments) {
-      if (/[<>:"|?*\u0000-\u001F]/u.test(segment)) {
-        return `"${segment}" contains Windows-invalid characters`;
-      }
-      if (/[. ]$/u.test(segment)) {
-        return `"${segment}" ends with a space or dot`;
-      }
-      const windowsName = segment.replace(/[. ]+$/u, "");
-      const stem = windowsName.split(".")[0]?.toUpperCase() ?? "";
-      if (windowsReservedBaseNames.has(stem)) {
-        return `"${segment}" is reserved on Windows`;
-      }
-    }
-    return null;
+  function archiveEditPathProblem(path: string, allowRoot = false): string {
+    const issue = archiveEditPathIssue(path, allowRoot);
+    if (!issue) return "";
+    if (issue.kind === "empty") return tr("gui.edit.path_empty", "Enter an archive path.");
+    if (issue.kind === "parent") return tr("gui.edit.path_parent", "Parent references (..) are not allowed. Enter a path inside the archive.");
+    if (issue.kind === "characters") return tr("gui.edit.path_characters", "{name} contains characters that cannot be used on Windows.").replace("{name}", issue.segment);
+    if (issue.kind === "trailing") return tr("gui.edit.path_trailing", "{name} ends with a space or dot. Choose a portable name.").replace("{name}", issue.segment);
+    return tr("gui.edit.path_reserved", "{name} is reserved on Windows. Choose another name.").replace("{name}", issue.segment);
   }
 
   function renameTargetIssue(source: string, target: string): RenameTargetIssue {
-    const unsafeSegment = windowsUnsafeArchiveSegment(target);
+    const unsafeSegment = archiveEditPathProblem(target);
     if (unsafeSegment) {
       return { blocking: unsafeSegment, warning: null };
+    }
+    if (source.endsWith("/")) {
+      return target.startsWith(source)
+        ? { blocking: tr("gui.move.inside_source", "Choose a destination outside the selected folder."), warning: null }
+        : { blocking: null, warning: null };
     }
     const sourceExt = archiveEntryExtension(source);
     const targetExt = archiveEntryExtension(target);
     if (sourceExt.toLowerCase() !== targetExt.toLowerCase()) {
-      const from = sourceExt || "no extension";
-      const to = targetExt || "no extension";
-      return { blocking: null, warning: `Extension changes ${from} -> ${to}` };
+      const from = sourceExt || tr("gui.rename.no_extension", "no extension");
+      const to = targetExt || tr("gui.rename.no_extension", "no extension");
+      return { blocking: null, warning: tr("gui.rename.extension_change", "Extension changes {from} → {to}").replace("{from}", from).replace("{to}", to) };
     }
     return { blocking: null, warning: null };
   }
 
   function normalizeRenameTargetName(value = renameTargetName, source = selectedRenameSource()): string {
-    const fallback = source ? renameTargetForPath(source) : "renamed.txt";
     const trimmed = value.trim();
+    const path = normalizeArchivePath(trimmed);
+    if (!path) return "";
     if (!source || trimmed.includes("/") || trimmed.includes("\\")) {
-      return normalizeArchiveFilePath(trimmed, fallback);
+      return source?.endsWith("/") ? `${path}/` : path;
     }
     const cleanSource = source.endsWith("/") ? source.slice(0, -1) : source;
     const slash = cleanSource.lastIndexOf("/");
     const dir = slash >= 0 ? `${cleanSource.slice(0, slash + 1)}` : "";
-    return `${dir}${normalizeArchiveFilePath(trimmed, pathBaseName(fallback))}`;
-  }
-
-  function commitRenameTargetName(value = renameTargetName) {
-    renameTargetName = normalizeRenameTargetName(value);
+    return `${dir}${path}${source.endsWith("/") ? "/" : ""}`;
   }
 
   function renameTargetStatus(): string {
-    const selected = [...selectedPaths()].filter((path) => !path.endsWith("/"));
-    const target = normalizeRenameTargetName();
     if (!currentArchive) return openArchiveFirstLabel();
-    if (selected.length !== 1) return tr("gui.rename.select_one_file", "Select exactly one file to rename");
-    const from = selected[0];
+    const from = selectedRenameSource();
+    if (from === null) return tr("gui.rename.select_one_entry", "Select exactly one file or folder to rename");
+    const target = normalizeRenameTargetName();
     if (target === from) return tr("gui.rename.target_must_differ", "Rename target must differ from source");
     if (archivePathSet().has(target)) return tr("gui.new_folder.already_exists", "Already exists: {folder}").replace("{folder}", target);
     const issue = renameTargetIssue(from, target);
@@ -9211,18 +9274,8 @@
   }
 
   function normalizeMoveTargetDir(value = moveTargetDir): string {
-    const parts = value
-      .replaceAll("\\", "/")
-      .split("/")
-      .map((part) => part.trim())
-      .filter((part) => part.length > 0 && part !== "." && part !== "..");
-    if (parts.length === 0) return "moved/";
-    return `${parts.join("/")}/`;
-  }
-
-  function commitMoveTargetDir(value = moveTargetDir) {
-    moveTargetDir = normalizeMoveTargetDir(value);
-    moveConflictReview = null;
+    const path = normalizeArchivePath(value);
+    return path ? `${path}/` : "";
   }
 
   function moveTargetForPath(path: string, targetDir = normalizeMoveTargetDir()): string {
@@ -9253,7 +9306,7 @@
   }
 
   function buildMovePlan(targetDir = normalizeMoveTargetDir()): MovePlanItem[] {
-    const selected = [...selectedPaths()];
+    const selected = archiveSelectionRoots(selectedPaths());
     const existing = archivePathSet();
     const targetCounts = new Map<string, number>();
     for (const from of selected) {
@@ -9308,38 +9361,54 @@
   function moveTargetStatus(): string {
     const targetDir = normalizeMoveTargetDir();
     if (!currentArchive) return openArchiveFirstLabel();
+    const problem = moveTargetProblem(targetDir);
+    if (problem) return problem;
+    const targetLabel = targetDir || "/";
     const selected = selectedPaths().size;
     if (selected === 0) {
-      return tr("gui.move.select_entries_to_move_into", "Select entries to move into {target}").replace("{target}", targetDir);
+      return tr("gui.move.select_entries_to_move_into", "Select entries to move into {target}").replace("{target}", targetLabel);
     }
     const conflicts = moveTargetConflictCount();
     if (conflicts > 0) {
       return tr("gui.move.target_conflicts", "{count} target conflicts in {target}")
         .replace("{count}", conflicts.toLocaleString())
-        .replace("{target}", targetDir);
+        .replace("{target}", targetLabel);
     }
     return tr("gui.move.selected_to_target", "{count} selected -> {target}")
       .replace("{count}", selected.toLocaleString())
-      .replace("{target}", targetDir) + archiveConflictCoverageNote();
+      .replace("{target}", targetLabel) + archiveConflictCoverageNote();
+  }
+
+  function moveTargetProblem(targetDir: string): string {
+    const problem = archiveEditPathProblem(targetDir, true);
+    if (problem) return problem;
+    for (const source of archiveSelectionRoots(selectedPaths())) {
+      if (source.endsWith("/") && targetDir.startsWith(source)) {
+        return tr("gui.move.inside_source", "Choose a destination outside the selected folder.");
+      }
+      if (moveTargetForPath(source, targetDir) === source) {
+        return tr("gui.move.same_location", "An entry is already in this folder. Choose another destination.");
+      }
+    }
+    return "";
   }
 
   function normalizeNewFolderPath(value = newFolderName): string {
-    const parts = value
-      .replaceAll("\\", "/")
-      .split("/")
-      .map((part) => part.trim())
-      .filter((part) => part.length > 0 && part !== "." && part !== "..");
-    const name = parts.length === 0 ? "New Folder" : parts.join("/");
-    return `${name}/`;
+    const input = value.trim().replaceAll("\\", "/");
+    const name = normalizeArchivePath(input, tr("gui.new_folder.default_name", "New Folder"));
+    const parent = input.startsWith("/") ? "" : archiveDirs.join("/");
+    return `${parent ? `${parent}/` : ""}${name}/`;
   }
 
   function commitNewFolderName(value = newFolderName) {
-    newFolderName = normalizeNewFolderPath(value);
+    newFolderName = value.trim().replaceAll("\\", "/");
   }
 
   function newFolderStatus(): string {
     const folder = normalizeNewFolderPath();
     if (!currentArchive) return openArchiveFirstLabel();
+    const problem = archiveEditPathProblem(folder);
+    if (problem) return problem;
     if (findLoadedRow(folder) || findLoadedRow(folder.slice(0, -1))) {
       return tr("gui.new_folder.already_exists", "Already exists: {folder}").replace("{folder}", folder);
     }
@@ -9488,8 +9557,7 @@
       showNotice(tr("gui.preview.extract_unavailable", "Return to the entry and select Extract instead."));
       return;
     }
-    clearSelection();
-    toggleSelect(row);
+    selectRow(row);
     clearEntryPreviewState();
     openExtractWorkspace("selection");
   }
@@ -9643,7 +9711,13 @@
       return true;
     } catch (error) {
       if (isJobSubmitBlocked(error)) return false;
-      showNotice(tr("gui.job.requires_desktop_service_after_success_label", "{label} requires the desktop service").replace("{label}", success));
+      pushToast({
+        kind: "danger",
+        title: tr("gui.job.submit_failed", "Could not queue the task"),
+        body: isErrorDto(error)
+          ? tError(error)
+          : tr("gui.job.submit_unavailable", "Check that the Squallz desktop service is available, then try again."),
+      });
       return false;
     }
   }
@@ -10761,6 +10835,7 @@
       await submitJob({
         kind: "update",
         path: currentArchive.source,
+        encoding: currentArchive.encoding_override,
         add,
         delete: [],
         rename: [],
@@ -10795,8 +10870,8 @@
       showNotice(readOnly);
       return;
     }
-    const patterns = selectedDeletePatterns();
-    if (patterns.length === 0) {
+    const paths = selectedDeletePaths();
+    if (paths.length === 0) {
       showNotice(tr("gui.precondition.select_entries_before_delete", "Select entries before deleting"));
       return;
     }
@@ -10804,8 +10879,9 @@
       {
         kind: "update",
         path: currentArchive.source,
+        encoding: currentArchive.encoding_override,
         add: [],
-        delete: patterns,
+        delete: paths,
         rename: [],
         mkdir: [],
         excludes: [],
@@ -10813,9 +10889,9 @@
         password: null,
         level: 6,
       },
-      (patterns.length === 1
+      (paths.length === 1
         ? tr("gui.delete.operation_queued", "1 delete operation queued")
-        : tr("gui.delete.operations_queued", "{count} delete operations queued").replace("{count}", patterns.length.toLocaleString())),
+        : tr("gui.delete.operations_queued", "{count} delete operations queued").replace("{count}", paths.length.toLocaleString())),
       tr("gui.precondition.open_before_delete", "Open an archive before deleting entries"),
     );
     if (queued) {
@@ -10823,10 +10899,64 @@
         status: "queued",
         title: tr("gui.delete.queued", "Delete entries queued"),
         detail: tr("gui.delete.entries_from_archive", "{count} entries from {archive}")
-          .replace("{count}", patterns.length.toLocaleString())
+          .replace("{count}", paths.length.toLocaleString())
           .replace("{archive}", archiveTitle()),
       });
     }
+  }
+
+  function openArchiveEditor(kind: ArchiveEditKind) {
+    const reason = kind === "rename" ? renameSelectedDisabledReason()
+      : kind === "move" ? moveSelectedDisabledReason() : archiveMutationDisabledReason();
+    if (!currentArchive || reason) {
+      showNotice(reason || openArchiveFirstLabel());
+      return;
+    }
+    archiveEditReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    setScreen("browse");
+    moveConflictReview = null;
+    if (kind === "rename") renameTargetName = pathBaseName(selectedRenameSource()?.replace(/\/+$/g, "") ?? "");
+    if (kind === "new-folder") newFolderName = "";
+    archiveEditKind = kind;
+  }
+
+  function closeArchiveEditor() {
+    archiveEditKind = null;
+    const target = archiveEditReturnFocus;
+    archiveEditReturnFocus = null;
+    void tick().then(() => {
+      if (!blockingModalVisible() && target?.isConnected && !target.closest("[inert]")) target.focus({ preventScroll: true });
+    });
+  }
+
+  function archiveEditorFields(kind: ArchiveEditKind) {
+    if (kind === "rename") return {
+      title: tr("gui.action.rename_selected", "Rename selected"),
+      label: tr("gui.rename.target_name", "Rename target name"),
+      value: renameTargetName,
+      status: renameTargetStatus(),
+      onChange: (value: string) => { renameTargetName = value; },
+      onSubmit: submitRenameSelectedJob,
+    };
+    if (kind === "move") return {
+      title: tr("gui.action.move_selected", "Move selected"),
+      label: tr("gui.move.target_folder", "Move target folder"),
+      value: moveTargetDir,
+      status: moveTargetStatus(),
+      hint: tr("gui.move.path_hint", "Destination paths start at the archive root. Use / to move to the root."),
+      onChange: (value: string) => { moveTargetDir = value; },
+      onSubmit: submitMoveSelectedJob,
+    };
+    return {
+      title: tr("gui.action.new_folder", "New folder"),
+      label: tr("gui.new_folder.name", "New folder name"),
+      value: newFolderName,
+      placeholder: tr("gui.new_folder.default_name", "New Folder"),
+      status: newFolderStatus(),
+      hint: tr("gui.new_folder.path_hint", "Created in the current folder. Start with / to use the archive root."),
+      onChange: (value: string) => { newFolderName = value; },
+      onSubmit: submitNewFolderJob,
+    };
   }
 
   async function submitRenameSelectedJob() {
@@ -10840,12 +10970,11 @@
       showNotice(readOnly);
       return;
     }
-    const selected = [...selectedPaths()].filter((path) => !path.endsWith("/"));
-    if (selected.length !== 1) {
-      showNotice(tr("gui.precondition.select_one_before_rename", "Select exactly one file entry before renaming"));
+    const from = selectedRenameSource();
+    if (from === null) {
+      showNotice(tr("gui.precondition.select_one_before_rename", "Select exactly one file or folder before renaming"));
       return;
     }
-    const from = selected[0];
     const to = normalizeRenameTargetName(renameTargetName, from);
     renameTargetName = to;
     if (to === from) {
@@ -10865,6 +10994,7 @@
       {
         kind: "update",
         path: currentArchive.source,
+        encoding: currentArchive.encoding_override,
         add: [],
         delete: [],
         rename: [{ from, to }],
@@ -10878,6 +11008,7 @@
       tr("gui.precondition.open_before_rename", "Open an archive before renaming entries"),
     );
     if (queued) {
+      closeArchiveEditor();
       recordOperation({
         status: "queued",
         title: tr("gui.rename.queued", "Rename entry queued"),
@@ -10889,7 +11020,7 @@
   async function submitMoveSelectedJob() {
     if (blockSelectionScopedAction()) return;
     const targetDir = normalizeMoveTargetDir();
-    moveTargetDir = targetDir;
+    moveTargetDir = targetDir || "/";
     if (!currentArchive) {
       showNotice(tr("gui.precondition.open_before_move", "Open an archive before moving entries"));
       return;
@@ -10904,10 +11035,16 @@
       showNotice(tr("gui.precondition.select_entries_before_move", "Select entries before moving"));
       return;
     }
+    const problem = moveTargetProblem(targetDir);
+    if (problem) {
+      showNotice(problem);
+      return;
+    }
     const plan = buildMovePlan(targetDir);
     const conflicts = plan.filter((item) => item.conflict);
     if (conflicts.length > 0) {
       moveConflictReview = { targetDir, items: plan };
+      closeArchiveEditor();
       showNotice(tr("gui.move.review_conflicts", "Review {count} move target conflicts").replace("{count}", conflicts.length.toLocaleString()));
       return;
     }
@@ -10933,10 +11070,11 @@
       {
         kind: "update",
         path: currentArchive.source,
+        encoding: currentArchive.encoding_override,
         add: [],
         delete: [],
         rename,
-        mkdir: [targetDir],
+        mkdir: [],
         excludes: [],
         content_policy: "keep_all_files",
         password: null,
@@ -10949,12 +11087,13 @@
     );
     if (queued) {
       moveConflictReview = null;
+      closeArchiveEditor();
       recordOperation({
         status: "queued",
         title: tr("gui.move.queued", "Move entries queued"),
         detail: tr("gui.move.entries_to_target", "{count} entries to {target}")
           .replace("{count}", rename.length.toLocaleString())
-          .replace("{target}", targetDir),
+          .replace("{target}", targetDir || "/"),
       });
     }
   }
@@ -10980,7 +11119,7 @@
 
   async function submitNewFolderJob() {
     const folder = normalizeNewFolderPath();
-    newFolderName = folder;
+    commitNewFolderName();
     if (!currentArchive) {
       showNotice(tr("gui.precondition.open_before_new_folder", "Open an archive before creating a folder"));
       return;
@@ -10991,6 +11130,11 @@
       return;
     }
     const existing = archivePathSet();
+    const problem = archiveEditPathProblem(folder);
+    if (problem) {
+      showNotice(problem);
+      return;
+    }
     if (existing.has(folder) || existing.has(folder.slice(0, -1))) {
       showNotice(tr("gui.new_folder.already_exists", "Already exists: {folder}").replace("{folder}", folder));
       return;
@@ -10999,6 +11143,7 @@
       {
         kind: "update",
         path: currentArchive.source,
+        encoding: currentArchive.encoding_override,
         add: [],
         delete: [],
         rename: [],
@@ -11012,6 +11157,7 @@
       tr("gui.precondition.open_before_new_folder", "Open an archive before creating a folder"),
     );
     if (queued) {
+      closeArchiveEditor();
       recordOperation({
         status: "queued",
         title: tr("gui.new_folder.queued", "New folder queued"),
@@ -11059,6 +11205,7 @@
       await openArchiveDirectoryEntry(entryPath);
       return;
     }
+    if (blockSelectionScopedAction()) return;
     previewOriginEntryPath = entryPath;
     previewOriginVirtualIndex = virtualIndex;
     if (archiveLikePath(entryPath)) {
@@ -11965,6 +12112,8 @@
       origin: "app",
       ownedByRequester: true,
       interaction: null,
+      question: null,
+      answeredQuestionVersion: 0,
       state: "submitting",
       queuePosition: null,
       queueWaitReason: null,
@@ -12036,6 +12185,7 @@
   }
 
   function openTaskCenter(source: HTMLElement | null = null): void {
+    if (!appActionEnabled("task_center") || taskCenterOpen) return;
     taskCenterReturnFocus = source;
     taskCenterFocusTaskId = null;
     taskCenterSelectedTaskId = null;
@@ -12105,7 +12255,11 @@
   }
 
   function blockingModalVisible(): boolean {
-    return taskDialogVisible() || macosSfxPublisherTask !== null;
+    return taskDialogVisible() || macosSfxPublisherTask !== null || archiveEditKind !== null;
+  }
+
+  function taskCenterVisible(): boolean {
+    return !taskWindowMode && taskCenterOpen && !blockingModalVisible() && !modeSelectionBlocked;
   }
 
   function loadMacosSfxPublisher(): Promise<MacosSfxPublisherComponentType> {
@@ -12157,7 +12311,8 @@
   function taskDialogSurface(task: TaskDialogModel): TaskProgressDialogSurfaceProps {
     return {
       task,
-      rootClass: `task-modal-overlay design-root platform-${activePlatform} palette-${activePalette} theme-${activeTheme} density-${activeDensityChoice}`,
+      presentation: taskWindowMode ? "window" : "dialog",
+      rootClass: `${taskWindowMode ? "task-window-surface" : "task-modal-overlay"} design-root platform-${activePlatform} palette-${activePalette} theme-${activeTheme} density-${activeDensityChoice}`,
       rootVariables: customPaletteVariables(),
       copyFeedback: taskChecksumCopyFeedback(task),
       copyFeedbackTone: taskChecksumCopyFeedbackTone(task),
@@ -12570,7 +12725,7 @@
 
   async function openTaskOutput(task: TaskDialogModel): Promise<void> {
     const outputPath = taskOutputPath(task);
-    if (!outputPath || !taskOutputCanOpen(task)) return;
+    if (task.id === null || task.state !== "done" || !outputPath || !taskOutputCanOpen(task)) return;
     if (task.spec.kind === "compress") {
       if (await openArchivePath(outputPath, "open-file")) {
         await dismissTaskDialog(task);
@@ -12578,15 +12733,14 @@
       return;
     }
     try {
-      const { openPath } = await import("@tauri-apps/plugin-opener");
-      await openPath(outputPath);
+      await ipc.openJobOutput(task.id);
       showNotice(
         taskOutputIsFolder(task)
           ? tr("gui.task.output_folder_opened", "Output folder opened")
           : tr("gui.task.output_opened", "Output opened"),
       );
     } catch {
-      showNotice(tr("gui.task.open_output_failed", "Cannot open the task output"));
+      showNotice(tr("gui.task.open_output_failed", "Cannot open the task output. Try revealing it in your file manager, or check that it still exists."));
     }
   }
 
@@ -13270,46 +13424,30 @@
     return "browse";
   }
 
+  function classicCommandAction(label: string): AppAction | undefined {
+    const actions: Record<string, AppAction> = {
+      Add: "add_files",
+      "Extract To": selectedPaths().size > 0 ? "extract_selection" : "extract_all",
+      Test: "test_archive",
+      View: "preview_entry",
+      Delete: "delete_entries",
+      Rename: "rename_entry",
+      Move: "move_entries",
+      "New Folder": "new_folder",
+      Convert: "convert_archive",
+      Info: "archive_info",
+    };
+    return actions[label];
+  }
+
   function handleClassicCommand(label: string) {
-    if (label === "Add") {
-      void submitAddToArchiveJob();
-      return;
-    }
-    if (label === "Extract To") {
-      const selectionBusyReason = archiveSelectionBusyReason();
-      if (selectionBusyReason) {
-        showNotice(selectionBusyReason);
-        return;
-      }
-      openExtractWorkspace(hasArchiveSelection() ? "selection" : "all");
-      return;
-    }
-    if (label === "Test") {
-      void submitTestJob();
+    const action = classicCommandAction(label);
+    if (action) {
+      void runAppAction(action);
       return;
     }
     if (label === "Protect") {
       openRecoveryConfiguration();
-      return;
-    }
-    if (label === "View") {
-      void submitPreviewEntry();
-      return;
-    }
-    if (label === "Delete") {
-      void submitDeleteSelectedJob();
-      return;
-    }
-    if (label === "Rename") {
-      void submitRenameSelectedJob();
-      return;
-    }
-    if (label === "Move") {
-      void submitMoveSelectedJob();
-      return;
-    }
-    if (label === "New Folder") {
-      void submitNewFolderJob();
       return;
     }
     if (label === "Checksum") {
@@ -13320,33 +13458,25 @@
       setScreen("duplicates");
       return;
     }
-    if (label === "Convert") {
-      setScreen("convert");
-      return;
-    }
-    if (label === "Info") {
-      setScreen("archiveInfo");
-      return;
-    }
     setScreen(screenForCommand(label));
   }
 
   function classicCommandDisabled(label: string): boolean {
-    if (currentArchive?.read_only && ["Add", "Protect", "Delete", "Rename", "Move", "New Folder"].includes(label)) return true;
-    if (label === "Checksum" || label === "Duplicates" || label === "Info" || label === "Protect") return false;
-    if (label === "Extract To" && archiveSelectionBusyReason()) return true;
-    if (label === "Rename") return !canRenameSelection();
-    if (label === "Move" || label === "Delete") return !hasArchiveSelection();
-    if (label === "View") return !canPreviewEntrySelection();
+    const action = classicCommandAction(label);
+    if (action) return !appActionEnabled(action);
+    if (label === "Protect") return Boolean(currentArchive && archiveMutationDisabledReason());
+    if (label === "Checksum" || label === "Duplicates") return false;
     return !hasArchiveOpen();
   }
 
   function classicCommandDisabledTitle(label: string): string {
+    if (!classicCommandDisabled(label)) return "";
+    const refreshStatus = archiveRefreshStatusLabel();
+    if (refreshStatus) return refreshStatus;
     if (label === "Extract To") {
       const selectionBusyReason = archiveSelectionBusyReason();
       if (selectionBusyReason) return selectionBusyReason;
     }
-    if (!classicCommandDisabled(label)) return "";
     if (!currentArchive) {
       if (label === "Add") return tr("gui.precondition.open_before_add", "Open an archive before adding files");
       if (label === "Extract To") return tr("gui.precondition.open_before_extract", "Open an archive before extracting");
@@ -13365,7 +13495,7 @@
       return openArchiveFirstLabel();
     }
     if (currentArchive.read_only) return archiveMutationDisabledReason();
-    if (label === "Rename") return tr("gui.precondition.select_one_before_rename", "Select exactly one file entry before renaming");
+    if (label === "Rename") return tr("gui.precondition.select_one_before_rename", "Select exactly one file or folder before renaming");
     if (label === "Move") return tr("gui.precondition.select_entries_before_move", "Select entries before moving");
     if (label === "Delete") return tr("gui.precondition.select_entries_before_delete", "Select entries before deleting");
     if (label === "View") return tr("gui.preview.select_one", "Select one entry to open or preview");
@@ -13430,13 +13560,40 @@
   }
 </script>
 
-{#if !modeSelectionBlocked}
-  <ToastHost
-    rootClass={`themed-root palette-${activePalette} theme-${activeTheme}`}
-    rootVariables={customPaletteVariables()}
-    blocked={blockingModalVisible()}
-  />
-{/if}
+<div class:task-center-layout={taskCenterVisible()}>
+  {#if !modeSelectionBlocked}
+    <ToastHost
+      rootClass={`themed-root palette-${activePalette} theme-${activeTheme}`}
+      rootVariables={customPaletteVariables()}
+      blocked={blockingModalVisible()}
+    />
+  {/if}
+
+  {#if taskCenterVisible()}
+    {@const selectedTask = taskCenterSelectedTask()}
+    {#if selectedTask}
+      <TaskProgressDialogHost
+        surface={taskCenterDetailSurface(selectedTask)}
+        loadingTitle={tr("gui.task_surface.loading", "Loading task view")}
+        loadingBody={tr("gui.task_surface.loading_body", "Preparing live progress, results, and task controls.")}
+        failureTitle={tr("gui.task_surface.load_failed", "Task view could not be loaded")}
+        failureBody={tr("gui.task_surface.load_failed_body", "The task is still safe. Retry loading its progress and controls.")}
+        retryLabel={tr("gui.task_surface.retry", "Retry view")}
+        backLabel={tr("gui.task.back_to_tasks", "Back to tasks")}
+      />
+    {:else}
+      <TaskCenterHost
+        surface={taskCenterSurface()}
+        loadingTitle={tr("gui.task_surface.center_loading", "Loading task center")}
+        loadingBody={tr("gui.task_surface.center_loading_body", "Preparing recent tasks and the shared queue.")}
+        failureTitle={tr("gui.task_surface.center_load_failed", "Task center could not be loaded")}
+        failureBody={tr("gui.task_surface.center_load_failed_body", "Your tasks are unchanged. Retry loading the task center.")}
+        retryLabel={tr("gui.task_surface.retry", "Retry view")}
+        closeLabel={tr("gui.task_center.close", "Close task center")}
+      />
+    {/if}
+  {/if}
+</div>
 
 {#if appNotice && (!firstRunRequired || taskWindowMode)}
   <div
@@ -13462,43 +13619,22 @@
   />
 {/if}
 
-{#if taskDialogVisible() && !macosSfxPublisherTask}
+{#snippet taskProgressSurface(task: TaskDialogModel)}
+  <TaskProgressDialogHost
+    surface={taskDialogSurface(task)}
+    loadingTitle={tr("gui.task_surface.loading", "Loading task view")}
+    loadingBody={tr("gui.task_surface.loading_body", "Preparing live progress, results, and task controls.")}
+    failureTitle={tr("gui.task_surface.load_failed", "Task view could not be loaded")}
+    failureBody={tr("gui.task_surface.load_failed_body", "The task is still safe. Retry loading its progress and controls.")}
+    retryLabel={tr("gui.task_surface.retry", "Retry view")}
+    backLabel={tr("gui.task.back_to_tasks", "Back to tasks")}
+  />
+{/snippet}
+
+{#if !taskWindowMode && taskDialogVisible() && !macosSfxPublisherTask}
   {@const task = taskDialogTask()}
   {#if task}
-    <TaskProgressDialogHost
-      surface={taskDialogSurface(task)}
-      loadingTitle={tr("gui.task_surface.loading", "Loading task view")}
-      loadingBody={tr("gui.task_surface.loading_body", "Preparing live progress, results, and task controls.")}
-      failureTitle={tr("gui.task_surface.load_failed", "Task view could not be loaded")}
-      failureBody={tr("gui.task_surface.load_failed_body", "The task is still safe. Retry loading its progress and controls.")}
-      retryLabel={tr("gui.task_surface.retry", "Retry view")}
-      backLabel={tr("gui.task.back_to_tasks", "Back to tasks")}
-    />
-  {/if}
-{/if}
-
-{#if !taskWindowMode && taskCenterOpen && !blockingModalVisible() && !modeSelectionBlocked}
-  {@const selectedTask = taskCenterSelectedTask()}
-  {#if selectedTask}
-    <TaskProgressDialogHost
-      surface={taskCenterDetailSurface(selectedTask)}
-      loadingTitle={tr("gui.task_surface.loading", "Loading task view")}
-      loadingBody={tr("gui.task_surface.loading_body", "Preparing live progress, results, and task controls.")}
-      failureTitle={tr("gui.task_surface.load_failed", "Task view could not be loaded")}
-      failureBody={tr("gui.task_surface.load_failed_body", "The task is still safe. Retry loading its progress and controls.")}
-      retryLabel={tr("gui.task_surface.retry", "Retry view")}
-      backLabel={tr("gui.task.back_to_tasks", "Back to tasks")}
-    />
-  {:else}
-    <TaskCenterHost
-      surface={taskCenterSurface()}
-      loadingTitle={tr("gui.task_surface.center_loading", "Loading task center")}
-      loadingBody={tr("gui.task_surface.center_loading_body", "Preparing recent tasks and the shared queue.")}
-      failureTitle={tr("gui.task_surface.center_load_failed", "Task center could not be loaded")}
-      failureBody={tr("gui.task_surface.center_load_failed_body", "Your tasks are unchanged. Retry loading the task center.")}
-      retryLabel={tr("gui.task_surface.retry", "Retry view")}
-      closeLabel={tr("gui.task_center.close", "Close task center")}
-    />
+    {@render taskProgressSurface(task)}
   {/if}
 {/if}
 
@@ -13510,6 +13646,16 @@
     role="status"
     aria-hidden={blockingModalVisible() ? "true" : undefined}
   >{dropStatusLabel()}</div>
+{/if}
+
+{#if !taskWindowMode && archiveEditKind && !taskDialogVisible() && !macosSfxPublisherTask}
+  <ArchiveEntryEditor
+    {...archiveEditorFields(archiveEditKind)}
+    rootClass={`archive-editor-overlay design-root platform-${activePlatform} palette-${activePalette} theme-${activeTheme} density-${activeDensityChoice}`}
+    rootVariables={customPaletteVariables()}
+    cancelLabel={tr("common.cancel", "Cancel")}
+    onClose={closeArchiveEditor}
+  />
 {/if}
 
 {#if entryContext}
@@ -13526,12 +13672,12 @@
       <span>{tr("gui.context.selection_actions", "Selection actions")}</span>
       <strong>{entryContext.name}</strong>
     </div>
-    <button role="menuitem" disabled={!currentArchive || Boolean(archiveSelectAllProgress)} title={archiveSelectionBusyReason() || (currentArchive ? "" : openArchiveFirstLabel())} onclick={() => void runEntryContextAction("extract")}><Icon name="archive" size={15} />{actionLabel("Extract selected")}</button>
-    <button role="menuitem" disabled={Boolean(archiveMutationDisabledReason()) || !hasArchiveSelection()} title={deleteSelectedDisabledReason()} onclick={() => void runEntryContextAction("delete")}><Icon name="x-circle" size={15} />{actionLabel("Delete selected")}</button>
-    <button role="menuitem" disabled={!entryContext.canRename || !canRenameSelection()} title={entryContext.canRename && canRenameSelection() ? "" : tr("gui.precondition.select_one_file", "Select exactly one file")} onclick={() => void runEntryContextAction("rename")}><Icon name="repeat" size={15} />{actionLabel("Rename selected")}</button>
-    <button role="menuitem" disabled={Boolean(archiveMutationDisabledReason()) || !hasArchiveSelection()} title={moveSelectedDisabledReason()} onclick={() => void runEntryContextAction("move")}><Icon name="repeat" size={15} />{actionLabel("Move selected")}</button>
-    <button role="menuitem" disabled={!entryContext.path} title={entryContext.path ? previewActionLabel(entryContext.path, entryContext.isDir ? "dir" : "file") : tr("gui.preview.select_one", "Select one entry to open or preview")} onclick={() => void runEntryContextAction("preview")}><Icon name={previewActionIcon(entryContext.path, entryContext.isDir ? "dir" : "file")} size={15} />{previewActionLabel(entryContext.path, entryContext.isDir ? "dir" : "file")}</button>
-    <button role="menuitem" disabled={!currentArchive} title={currentArchive ? "" : openArchiveFirstLabel()} onclick={() => void runEntryContextAction("test")}><Icon name="shield-alert" size={15} />{actionLabel("Test archive")}</button>
+    <button role="menuitem" disabled={!appActionEnabled("extract_selection")} title={archiveSelectionBusyReason() || (currentArchive ? "" : openArchiveFirstLabel())} onclick={() => void runEntryContextAction("extract")}><Icon name="archive" size={15} />{actionLabel("Extract selected")}</button>
+    <button role="menuitem" disabled={!appActionEnabled("delete_entries")} title={deleteSelectedDisabledReason()} onclick={() => void runEntryContextAction("delete")}><Icon name="x-circle" size={15} />{actionLabel("Delete selected")}</button>
+    <button role="menuitem" disabled={!entryContext.canRename || !appActionEnabled("rename_entry")} title={renameSelectedDisabledReason()} onclick={() => void runEntryContextAction("rename")}><Icon name="repeat" size={15} />{actionLabel("Rename selected")}</button>
+    <button role="menuitem" disabled={!appActionEnabled("move_entries")} title={moveSelectedDisabledReason()} onclick={() => void runEntryContextAction("move")}><Icon name="repeat" size={15} />{actionLabel("Move selected")}</button>
+    <button role="menuitem" disabled={!entryContext.path || !contextualAppActions({ path: entryContext.path, type: entryContext.isDir ? "dir" : "file" }).preview_entry} title={entryContext.path ? previewActionLabel(entryContext.path, entryContext.isDir ? "dir" : "file") : tr("gui.preview.select_one", "Select one entry to open or preview")} onclick={() => void runEntryContextAction("preview")}><Icon name={previewActionIcon(entryContext.path, entryContext.isDir ? "dir" : "file")} size={15} />{previewActionLabel(entryContext.path, entryContext.isDir ? "dir" : "file")}</button>
+    <button role="menuitem" disabled={!appActionEnabled("test_archive")} title={currentArchive ? "" : openArchiveFirstLabel()} onclick={() => void runEntryContextAction("test")}><Icon name="shield-alert" size={15} />{actionLabel("Test archive")}</button>
   </div>
 {/if}
 
@@ -13617,14 +13763,18 @@
     class={`design-root task-window-root platform-${activePlatform} palette-${activePalette} theme-${activeTheme} density-${activeDensityChoice}`}
     use:cssVariables={customPaletteVariables()}
     aria-label={tr("gui.external_task.window_label", "Squallz task window")}
-    aria-hidden={blockingModalVisible() ? "true" : undefined}
-    inert={blockingModalVisible()}
+    aria-hidden={macosSfxPublisherTask ? "true" : undefined}
+    inert={macosSfxPublisherTask !== null}
   >
-    {#if !blockingModalVisible()}
+    {#if taskDialogVisible()}
+      {@const task = taskDialogTask()}
+      {#if task}
+        {@render taskProgressSurface(task)}
+      {/if}
+    {:else}
       <section class="task-window-empty" role="status">
         <AppIcon size={42} title="Squallz" />
         <div>
-          <span class="eyebrow">{tr("gui.external_task.eyebrow", "Squallz task")}</span>
           <h1>{taskWindowShellTitleCopy}</h1>
           <p>{taskWindowShellCopy}</p>
         </div>
@@ -13646,10 +13796,10 @@
           {#if isSettingsScreen()}
             <button onclick={() => setScreen("browse")}><Icon name="archive" size={16} />{tr("gui.settings.back_to_archives", "Archives")}</button>
           {:else}
-            <button aria-busy={archiveOpenStatus === "opening"} onclick={() => void openArchiveFromDialog()}><Icon name="folder-open" size={16} />{archiveOpenStatus === "opening" ? toolbarLabel("Opening") : toolbarLabel("Open")}</button>
-            <button onclick={() => setScreen("create")}><Icon name="sparkles" size={16} />{toolbarLabel("Create")}</button>
+            <button disabled={!appActionEnabled("open_archive")} aria-busy={archiveOpenStatus === "opening"} onclick={() => void runAppAction("open_archive")}><Icon name="folder-open" size={16} />{archiveOpenStatus === "opening" ? toolbarLabel("Opening") : toolbarLabel("Open")}</button>
+            <button disabled={!appActionEnabled("create_archive")} onclick={() => void runAppAction("create_archive")}><Icon name="sparkles" size={16} />{toolbarLabel("Create")}</button>
             <button onclick={() => openRecoveryConfiguration()}><Icon name="shield-alert" size={16} />{tr("gui.recovery.title", "Recovery")}</button>
-            <button class="primary" disabled={!currentArchive} title={archiveActionTitle(hasArchiveOpen())} onclick={() => openExtractWorkspace("all")}><Icon name="archive" size={16} />{toolbarLabel("Extract")}</button>
+            <button class="primary" disabled={!appActionEnabled("extract_all")} title={archiveSelectionBusyReason() || archiveActionTitle(hasArchiveOpen())} onclick={() => void runAppAction("extract_all")}><Icon name="archive" size={16} />{toolbarLabel("Extract")}</button>
             <button
               bind:this={quickActionButton}
               class="icon-only"
@@ -13683,7 +13833,7 @@
             <span>{tr("gui.quick.subtitle", "Jump without changing layout")}</span>
           </div>
           {#each quickActions as action}
-            <button onclick={() => chooseQuickAction(action.screen)}>
+            <button disabled={navigationDisabled(action.screen)} title={navigationDisabledReason(action.screen)} onclick={() => chooseQuickAction(action.screen)}>
               <Icon name={action.icon} size={15} />
               <span><strong>{quickActionLabel(action.label)}</strong><small>{quickActionDetail(action.label, action.detail)}</small></span>
             </button>
@@ -13701,6 +13851,8 @@
           <div class="sidebar-section">
             {#each nav as item}
               <button
+                disabled={navigationDisabled(screenForNav(item[1]))}
+                title={navigationDisabledReason(screenForNav(item[1]))}
                 class:current={(screen === "recent" && item[1] === "Recent") || (screen === "browse" && item[1] === "Archives") || (screen === "create" && item[1] === "Create") || ((screen === "extract" || screen === "batch" || screen === "password" || screen === "conflict") && item[1] === "Extract") || (screen === "convert" && item[1] === "Convert") || (screen === "checksum" && item[1] === "Checksum") || (screen === "duplicates" && item[1] === "Duplicates") || (screen === "recovery" && item[1] === "Recovery") || (isSettingsScreen() && item[1] === "Settings")}
                 onclick={() => navigateToScreen(screenForNav(item[1]))}
               >
@@ -13754,7 +13906,7 @@
                   <h1>{tr("gui.recent.title", "Recent archives")}</h1>
                   <p>{tr("gui.recent.subtitle", "Reopen recent archives. Squallz stores paths only, never archive contents.")}</p>
                 </div>
-                <button class="primary sheet-action" onclick={() => void openArchiveFromDialog()}><Icon name="folder-open" size={17} />{archiveOpenStatus === "opening" ? toolbarLabel("Opening") : toolbarLabel("Open")}</button>
+                <button class="primary sheet-action" disabled={!appActionEnabled("open_archive")} onclick={() => void runAppAction("open_archive")}><Icon name="folder-open" size={17} />{archiveOpenStatus === "opening" ? toolbarLabel("Opening") : toolbarLabel("Open")}</button>
               </div>
 
               <div class="create-grid">
@@ -13765,7 +13917,7 @@
                     {#each recentFiles() as path}
                       <div><span>{pathBaseName(path) || path}</span><span>{path}</span><button onclick={() => void openArchivePath(path, "dialog")}>{tr("gui.recent.reopen", "Reopen")}</button></div>
                     {:else}
-                      <div><span>{tr("gui.recent.none", "No recent archives")}</span><span>{tr("gui.recent.open_to_start", "Open an archive to start this list.")}</span><button onclick={() => void openArchiveFromDialog()}>{toolbarLabel("Open")}</button></div>
+                      <div><span>{tr("gui.recent.none", "No recent archives")}</span><span>{tr("gui.recent.open_to_start", "Open an archive to start this list.")}</span><button disabled={!appActionEnabled("open_archive")} onclick={() => void runAppAction("open_archive")}>{toolbarLabel("Open")}</button></div>
                     {/each}
                   </div>
                 </section>
@@ -13905,8 +14057,8 @@
 	                openLabel={archiveOpenStatus === "opening" ? toolbarLabel("Opening") : toolbarLabel("Open")}
 	                createLabel={toolbarLabel("Create")}
 	                openBusy={archiveOpenStatus === "opening"}
-	                onOpen={() => void openArchiveFromDialog()}
-	                onCreate={() => setScreen("create")}
+	                onOpen={() => void runAppAction("open_archive")}
+	                onCreate={() => void runAppAction("create_archive")}
 		              />
 		            {/if}
 	            </div>
@@ -13938,10 +14090,11 @@
         </div>
         <div class="classic-top-actions">
           <button
+            disabled={!appActionEnabled("open_archive")}
             aria-busy={archiveOpenStatus === "opening"}
             aria-label={archiveOpenStatus === "opening" ? toolbarLabel("Opening") : toolbarLabel("Open")}
             title={archiveOpenStatus === "opening" ? toolbarLabel("Opening") : toolbarLabel("Open")}
-            onclick={() => void openArchiveFromDialog()}
+            onclick={() => void runAppAction("open_archive")}
           >
             <Icon name="folder-open" size={15} />
             <span class="classic-action-label">{archiveOpenStatus === "opening" ? toolbarLabel("Opening") : toolbarLabel("Open")}</span>
@@ -13949,7 +14102,8 @@
           <button
             aria-label={tr("gui.classic.new_archive", "New archive")}
             title={tr("gui.classic.new_archive", "New archive")}
-            onclick={() => setScreen("create")}
+            disabled={!appActionEnabled("create_archive")}
+            onclick={() => void runAppAction("create_archive")}
           >
             <Icon name="archive" size={15} />
             <span class="classic-action-label">{tr("gui.classic.new_archive", "New archive")}</span>
@@ -13990,7 +14144,8 @@
           <button
             aria-label={navLabel("Settings")}
             title={navLabel("Settings")}
-            onclick={() => setScreen("settingsGeneral")}
+            disabled={!appActionEnabled("settings")}
+            onclick={() => void runAppAction("settings")}
           >
             <Icon name="settings" size={15} />
             <span class="classic-action-label">{navLabel("Settings")}</span>
@@ -14016,16 +14171,15 @@
         {#if !classicArchiveStartVisible()}
           <div
             class="classic-pathrow"
-            class:has-move={screen === "browse" && hasArchiveSelection()}
             class:empty-address={!currentArchive}
           >
           <div class="classic-path-navigation" aria-label={tr("gui.nav.archive_navigation", "Archive navigation")}>
             <button
               class="path-button"
-              disabled={!canGoUpArchive()}
+              disabled={!appActionEnabled("go_up")}
               aria-label={tr("gui.nav.up", "Up one level")}
               title={tr("gui.nav.up", "Up one level")}
-              onclick={() => void goArchiveUp()}
+              onclick={() => void runAppAction("go_up")}
             ><Icon name="chevron-up" size={14} /><span>{tr("gui.nav.up_short", "Up")}</span></button>
             <button
               class="path-button"
@@ -14041,12 +14195,6 @@
               <i>/</i><button type="button" title={dir} onclick={() => void openArchiveBreadcrumb(index)}>{dir}</button>
             {/each}
           </div>
-          {#if screen === "browse" && hasArchiveSelection()}
-            <label class="classic-path-move">
-              <span>{actionLabel("Move to")}</span>
-              <input aria-label={tr("gui.move.classic_target_folder", "Classic move target folder")} bind:value={moveTargetDir} onblur={() => commitMoveTargetDir()} />
-            </label>
-          {/if}
           {#if screen === "extract" || screen === "batch"}
             <div class="encoding-chip accent"><Icon name="archive" size={14} />{tr("gui.extract.smart_on", "Smart extract on")}</div>
           {:else if screen === "password"}
@@ -14110,7 +14258,7 @@
             <span>{tr("gui.quick.close_hint", "Esc or outside click closes")}</span>
           </div>
           {#each quickActions as action}
-            <button onclick={() => chooseQuickAction(action.screen)}>
+            <button disabled={navigationDisabled(action.screen)} title={navigationDisabledReason(action.screen)} onclick={() => chooseQuickAction(action.screen)}>
               <Icon name={action.icon} size={15} />
               <span><strong>{quickActionLabel(action.label)}</strong><small>{quickActionDetail(action.label, action.detail)}</small></span>
             </button>
@@ -14238,8 +14386,8 @@
               openLabel={archiveOpenStatus === "opening" ? toolbarLabel("Opening") : toolbarLabel("Open")}
               createLabel={tr("gui.classic.create_archive", "Create archive")}
               openBusy={archiveOpenStatus === "opening"}
-              onOpen={() => void openArchiveFromDialog()}
-              onCreate={() => setScreen("create")}
+              onOpen={() => void runAppAction("open_archive")}
+              onCreate={() => void runAppAction("create_archive")}
             />
           </div>
         {:else}

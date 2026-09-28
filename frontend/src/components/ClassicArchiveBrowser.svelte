@@ -12,7 +12,7 @@
     ratio: string;
     modified: string;
     crc: string;
-    method: string;
+    encoding: string;
     attr: string;
     source?: EntryDto;
     virtualIndex?: number;
@@ -35,7 +35,6 @@
       archiveTitle: string;
       archiveFormatSummary: string;
       archiveOpen: boolean;
-      archiveReadOnly: boolean;
       openArchiveFirst: string;
       selection: {
         checked: boolean;
@@ -62,22 +61,6 @@
         disabledReason: string;
         ariaLabel: string;
       };
-      rename: {
-        visible: boolean;
-        value: string;
-        status: string;
-      };
-      move: {
-        visible: boolean;
-        value: string;
-        status: string;
-        disabledReason: string;
-      };
-      newFolder: {
-        value: string;
-        status: string;
-      };
-      workbenchVisible: boolean;
       selectedSummary: string;
       conflict: {
         count: number;
@@ -104,12 +87,6 @@
     onOpenPreview: () => void;
     onRevealPreview: () => void;
     onPreviewSelection: () => void;
-    onRenameTargetChange: (value: string) => void;
-    onCommitRenameTarget: () => void;
-    onMoveTargetChange: (value: string) => void;
-    onCommitMoveTarget: () => void;
-    onNewFolderChange: (value: string) => void;
-    onCommitNewFolder: () => void;
     onCancelMoveConflict: () => void;
     onSubmitMoveReadyOnly: () => void;
     onSubmitMoveKeepBoth: () => void;
@@ -118,7 +95,7 @@
     onActivateEntry: (entry: ClassicBrowserEntry) => void;
     onEntryKeydown: (event: KeyboardEvent, entry: ClassicBrowserEntry) => void;
     onOpenEntryContext: (event: MouseEvent, entry: ClassicBrowserEntry) => void;
-    onToggleEntrySelection: (entry: ClassicBrowserEntry) => void;
+    onToggleEntrySelection: (entry: ClassicBrowserEntry, event: MouseEvent) => void;
     onToggleAllEntries: () => void;
     onPreviewEntry: (entry: ClassicBrowserEntry) => void;
   }
@@ -142,12 +119,6 @@
     onOpenPreview,
     onRevealPreview,
     onPreviewSelection,
-    onRenameTargetChange,
-    onCommitRenameTarget,
-    onMoveTargetChange,
-    onCommitMoveTarget,
-    onNewFolderChange,
-    onCommitNewFolder,
     onCancelMoveConflict,
     onSubmitMoveReadyOnly,
     onSubmitMoveKeepBoth,
@@ -160,6 +131,12 @@
     onToggleAllEntries,
     onPreviewEntry,
   }: ClassicArchiveBrowserProps = $props();
+
+  let table: HTMLDivElement | undefined = $state();
+
+  $effect(() => {
+    if (view.totalRows === 0 && table) table.scrollLeft = 0;
+  });
 
   let previewActive = $derived(
     Boolean(
@@ -256,34 +233,6 @@
         ><Icon name={view.preview.actionIcon} size={13} />{view.preview.actionLabel}</button>
       {/if}
     </div>
-    {#if view.rename.visible}
-      <div class="tree-note move-tree-note">
-        <strong>{tr("gui.action.rename_target", "Rename target")}</strong>
-        <input
-          class="classic-input"
-          aria-label={tr("gui.rename.classic_target_name", "Classic rename target name")}
-          value={view.rename.value}
-          oninput={(event) => onRenameTargetChange(event.currentTarget.value)}
-          onblur={() => onCommitRenameTarget()}
-        />
-        <small>{view.rename.status}</small>
-      </div>
-    {/if}
-    {#if view.move.visible}
-      <div class="tree-note move-tree-note">
-        <strong>{tr("gui.action.move_target", "Move target")}</strong>
-        <input
-          class="classic-input"
-          aria-label={tr("gui.move.classic_target_folder", "Classic move target folder")}
-          value={view.move.value}
-          disabled={view.archiveReadOnly}
-          title={view.move.disabledReason}
-          oninput={(event) => onMoveTargetChange(event.currentTarget.value)}
-          onblur={() => onCommitMoveTarget()}
-        />
-        <small>{view.move.status}</small>
-      </div>
-    {/if}
   </aside>
 
   <section class="classic-table-wrap">
@@ -295,53 +244,14 @@
           onRepair={onOpenRecovery}
         />
       {/if}
-      {#if view.workbenchVisible}
-        <div class="classic-workbench-strip">
-          <label>
-            <span>{tr("gui.action.rename_to", "Rename to")}</span>
-            <input
-              aria-label={tr("gui.rename.classic_table_target_name", "Classic table rename target name")}
-              value={view.rename.value}
-              disabled={!view.rename.visible}
-              title={view.rename.visible ? "" : tr("gui.precondition.select_one_file", "Select exactly one file")}
-              oninput={(event) => onRenameTargetChange(event.currentTarget.value)}
-              onblur={() => onCommitRenameTarget()}
-            />
-          </label>
-          <label>
-            <span>{tr("gui.action.move_to", "Move to")}</span>
-            <input
-              aria-label={tr("gui.move.classic_table_target_folder", "Classic table move target folder")}
-              value={view.move.value}
-              disabled={view.archiveReadOnly}
-              title={view.move.disabledReason}
-              oninput={(event) => onMoveTargetChange(event.currentTarget.value)}
-              onblur={() => onCommitMoveTarget()}
-            />
-          </label>
-          <label>
-            <span>{tr("gui.action.new_folder", "New folder")}</span>
-            <input
-              aria-label={tr("gui.new_folder.classic_name", "Classic new folder name")}
-              value={view.newFolder.value}
-              disabled={view.archiveReadOnly}
-              title={view.move.disabledReason}
-              oninput={(event) => onNewFolderChange(event.currentTarget.value)}
-              onblur={() => onCommitNewFolder()}
-            />
-          </label>
-          <small>{view.rename.status} · {view.move.status} · {view.newFolder.status}</small>
-        </div>
-      {:else}
-        <div class="classic-workbench-strip empty-workbench-strip">
-          <span>{view.archiveOpen ? view.selectedSummary : view.openArchiveFirst}</span>
-          <small>
-            {view.archiveOpen
-              ? tr("gui.preview.keyboard_hint", "Space or Return opens the focused item")
-              : tr("gui.classic.empty_workbench_hint", "Archive editing controls appear after an archive is open.")}
-          </small>
-        </div>
-      {/if}
+      <div class="classic-workbench-strip empty-workbench-strip">
+        <span>{view.archiveOpen ? view.selectedSummary : view.openArchiveFirst}</span>
+        <small>
+          {view.archiveOpen
+            ? tr("gui.preview.keyboard_hint", "Space or Return opens the focused item")
+            : tr("gui.classic.empty_workbench_hint", "Archive editing controls appear after an archive is open.")}
+        </small>
+      </div>
       {#if view.conflict}
         <div
           class="classic-move-conflict-review"
@@ -381,8 +291,10 @@
         </div>
       {/if}
     </div>
+    <p class="archive-selection-hint">{tr("gui.selection.range_hint", "Shift-click to select a range · ⌘/Ctrl-click to select individual entries")}</p>
     <div
       class="classic-table"
+      bind:this={table}
       role="table"
       aria-label={tr("gui.table.archive", "Archive table")}
       aria-rowcount={Math.max(view.totalRows + 1, 2)}
@@ -410,7 +322,7 @@
         <span role="columnheader">{tr("gui.table.ratio", "Ratio")}</span>
         <span role="columnheader">{tr("gui.table.modified", "Modified")}</span>
         <span role="columnheader">{tr("gui.table.crc", "CRC")}</span>
-        <span role="columnheader">{tr("gui.table.method", "Method")}</span>
+        <span role="columnheader">{tr("gui.table.filename_encoding", "Name encoding")}</span>
         <span role="columnheader">{tr("gui.table.attr", "Attr")}</span>
       </div>
       <div
@@ -455,11 +367,11 @@
                 disabled={!entry.source || view.selection.busy}
                 onclick={(event) => {
                   event.stopPropagation();
-                  onToggleEntrySelection(entry);
+                  onToggleEntrySelection(entry, event);
                 }}
               ></button>
               <span class="archive-entry-label">
-                <strong>{entry.name}</strong>
+                <strong title={entry.source?.path ?? entry.name}>{entry.name}</strong>
                 {#if entry.location}<small title={entry.source?.path}>{entry.location}</small>{/if}
               </span>
               {#if entry.source}
@@ -481,8 +393,8 @@
             <span role="cell">{entry.ratio}</span>
             <span role="cell">{entry.modified}</span>
             <span role="cell">{entry.crc}</span>
-            <span role="cell">{entry.method}</span>
-            <span role="cell">{entry.attr}</span>
+            <span role="cell">{entry.encoding}</span>
+            <span role="cell" title={entry.attr}>{entry.attr}</span>
           </div>
         {:else}
           <div class="classic-row empty-row" role="row" aria-rowindex="2">

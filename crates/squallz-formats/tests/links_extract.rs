@@ -9,6 +9,7 @@ mod common;
 use std::fs;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, UNIX_EPOCH};
 
 use common::{engine, TempDir};
 use squallz_core::api::{
@@ -39,6 +40,14 @@ fn linked_tree(dir: &Path) -> PathBuf {
     let root = dir.join("tree");
     fs::create_dir_all(&root).unwrap();
     fs::write(root.join("data.txt"), b"link target content").unwrap();
+    fs::File::options()
+        .write(true)
+        .open(root.join("data.txt"))
+        .unwrap()
+        .set_times(
+            fs::FileTimes::new().set_modified(UNIX_EPOCH + Duration::from_secs(1_714_979_291)),
+        )
+        .unwrap();
     std::os::unix::fs::symlink("data.txt", root.join("link.txt")).unwrap();
     std::os::unix::fs::symlink("link.txt", root.join("chain.txt")).unwrap();
     std::os::unix::fs::symlink("missing.txt", root.join("dangling")).unwrap();
@@ -64,6 +73,7 @@ fn zip_follow_materializes_content_copies() {
 
     let out = tmp.path().join("out");
     extract_with(&archive, &out, SymlinkPolicy::Follow);
+    let archived = engine().list(&archive, &OpenOptions::default()).unwrap();
 
     // Direct and chained links become regular files with the target bytes.
     for name in ["tree/link.txt", "tree/chain.txt"] {
@@ -71,6 +81,13 @@ fn zip_follow_materializes_content_copies() {
         let meta = fs::symlink_metadata(&path).unwrap();
         assert!(meta.is_file(), "{name} must be a regular file");
         assert_eq!(fs::read(&path).unwrap(), b"link target content");
+        let expected = archived
+            .iter()
+            .find(|entry| entry.path.display == name)
+            .unwrap()
+            .modified
+            .unwrap();
+        assert_eq!(meta.modified().unwrap(), expected);
     }
     // Dangling and escaping targets are skipped, not errors.
     assert!(fs::symlink_metadata(out.join("tree/dangling")).is_err());
@@ -119,6 +136,13 @@ fn preserve_policy_still_creates_symlinks() {
     extract_with(&archive, &out, SymlinkPolicy::Preserve);
     let meta = fs::symlink_metadata(out.join("tree/link.txt")).unwrap();
     assert!(meta.file_type().is_symlink());
+    assert_eq!(
+        fs::metadata(out.join("tree/data.txt"))
+            .unwrap()
+            .modified()
+            .unwrap(),
+        UNIX_EPOCH + Duration::from_secs(1_714_979_291)
+    );
 }
 
 /// Handcrafts a tar containing tree/original.txt plus a *hardlink* entry
@@ -130,6 +154,7 @@ fn hardlink_tar(path: &Path, content: &[u8]) {
     header.set_entry_type(tar::EntryType::Regular);
     header.set_mode(0o644);
     header.set_size(content.len() as u64);
+    header.set_mtime(1_714_979_291);
     builder
         .append_data(&mut header, "tree/original.txt", content)
         .unwrap();
@@ -137,6 +162,7 @@ fn hardlink_tar(path: &Path, content: &[u8]) {
     link.set_entry_type(tar::EntryType::Link);
     link.set_mode(0o644);
     link.set_size(0);
+    link.set_mtime(1_000_000_000);
     builder
         .append_link(&mut link, "tree/alias.txt", "tree/original.txt")
         .unwrap();
@@ -160,6 +186,42 @@ fn tar_hardlink_restores_as_hard_link() {
         b"shared inode content"
     );
     assert_eq!(a.ino(), b.ino(), "must share one inode");
+    assert_eq!(
+        a.modified().unwrap(),
+        UNIX_EPOCH + Duration::from_secs(1_714_979_291)
+    );
+    assert_eq!(b.modified().unwrap(), a.modified().unwrap());
+}
+
+#[test]
+fn default_driver_hardlink_copy_inherits_target_time() {
+    let tmp = TempDir::new("hardlink-copy-time");
+    let archive = tmp.path().join("hard.tar");
+    hardlink_tar(&archive, b"fallback content");
+    let engine = engine();
+    let mut reader = engine.open(&archive, &OpenOptions::default()).unwrap();
+    let out = tmp.path().join("out");
+    squallz_format_api::extract_entries(
+        &mut *reader,
+        &out,
+        Some(&[squallz_format_api::EntryPath::from_utf8("tree/alias.txt")]),
+        &ExtractOptions::default(),
+        &NoProgress,
+        &ControlToken::default(),
+    )
+    .unwrap();
+    assert!(!out.join("tree/original.txt").exists());
+    assert_eq!(
+        fs::read(out.join("tree/alias.txt")).unwrap(),
+        b"fallback content"
+    );
+    assert_eq!(
+        fs::metadata(out.join("tree/alias.txt"))
+            .unwrap()
+            .modified()
+            .unwrap(),
+        UNIX_EPOCH + Duration::from_secs(1_714_979_291)
+    );
 }
 
 /// When the hardlink's target is excluded from the extraction, tar's

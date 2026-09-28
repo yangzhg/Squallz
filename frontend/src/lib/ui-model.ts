@@ -182,8 +182,6 @@ export const createFormats: Record<CreateFormatId, CreateFormat> = {
   },
 };
 
-export const moveTargetPresets = ["moved/", "reports/", "screenshots/"];
-
 export const nav = [
   ["archive", "Recent"],
   ["folder-open", "Archives"],

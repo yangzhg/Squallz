@@ -724,8 +724,19 @@ fn snapshot_controls_use_requester_scope_and_owner_event_sink() {
     let owner_snapshot = manager.snapshot_for_window("task-owner", id).unwrap();
     assert!(owner_snapshot.owned_by_requester);
     assert_eq!(owner_snapshot.interaction, Some(JobInteraction::Password));
+    let question_version = owner_snapshot.question.as_ref().unwrap().version();
+    let restored = manager.snapshots_for_window("task-owner", None);
+    let question = serde_json::to_value(&restored.upserts[0].question).unwrap();
+    assert_eq!(question["kind"], "password");
+    assert_eq!(
+        question["prompt"]["name"],
+        archive.file_name().unwrap().to_str().unwrap()
+    );
+    assert_eq!(question["prompt"]["wrong"], false);
+    assert_eq!(question["prompt"]["version"], question_version);
     let main_snapshot = manager.snapshot_for_window("main", id).unwrap();
     assert!(!main_snapshot.owned_by_requester);
+    assert!(main_snapshot.question.is_none());
     assert_eq!(main_snapshot.origin, JobOrigin::FileManager);
     let denied = manager.snapshot_for_window("task-other", id).unwrap_err();
     assert_eq!(denied.key, "error.other");
@@ -738,20 +749,20 @@ fn snapshot_controls_use_requester_scope_and_owner_event_sink() {
     manager.resume_for_window("main", id).unwrap();
     assert_eq!(
         manager
-            .answer_password_for_window("main", id, None)
+            .answer_password_for_window("main", id, question_version, None)
             .unwrap_err()
             .key,
         "error.other"
     );
     assert_eq!(
         manager
-            .answer_conflict_for_window("task-owner", id, "skip".into(), false)
+            .answer_conflict_for_window("task-owner", id, question_version, "skip".into(), false)
             .unwrap_err()
             .key,
         "error.other"
     );
     manager
-        .answer_password_for_window("task-owner", id, None)
+        .answer_password_for_window("task-owner", id, question_version, None)
         .unwrap();
     wait_for_state(
         &owner_sink,
@@ -761,7 +772,7 @@ fn snapshot_controls_use_requester_scope_and_owner_event_sink() {
     );
     assert_eq!(
         manager
-            .answer_password_for_window("task-owner", id, None)
+            .answer_password_for_window("task-owner", id, question_version, None)
             .unwrap_err()
             .key,
         "error.other"
@@ -771,6 +782,7 @@ fn snapshot_controls_use_requester_scope_and_owner_event_sink() {
     let terminal = manager.snapshot_for_window("main", id).unwrap();
     assert_eq!(terminal.state, "cancelled");
     assert_eq!(terminal.interaction, None);
+    assert!(terminal.question.is_none());
     let states = owner_sink.events.lock().unwrap().clone();
     assert_eq!(
         states_of(&states, id),
@@ -793,14 +805,49 @@ fn snapshot_controls_use_requester_scope_and_owner_event_sink() {
 fn conflict_answers_require_the_owner_and_current_prompt_type() {
     let dir = temp_dir("snapshot-conflict-answer");
     let archive = dir.join("conflict.zip");
-    std::fs::write(&archive, build_stored_zip(&[(b"same.txt", b"new bytes")])).unwrap();
+    let inputs = dir.join("inputs");
+    std::fs::create_dir_all(&inputs).unwrap();
+    let epoch = std::time::UNIX_EPOCH;
+    let incoming_time = epoch - std::time::Duration::from_secs(1);
+    let existing_time = epoch - std::time::Duration::from_secs(2);
+    for (name, data, modified) in [
+        ("same.txt", b"new bytes".as_slice(), incoming_time),
+        ("next.txt", b"next bytes".as_slice(), epoch),
+    ] {
+        let path = inputs.join(name);
+        std::fs::write(&path, data).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(modified))
+            .unwrap();
+    }
+    let state = Arc::new(AppState::new());
+    state
+        .engine
+        .create(
+            &archive,
+            &[inputs.join("same.txt"), inputs.join("next.txt")],
+            &CreateOptions::default(),
+            &squallz_core::api::NoProgress,
+            &squallz_core::api::ControlToken::new(),
+        )
+        .unwrap();
     let output = dir.join("output");
     std::fs::create_dir_all(&output).unwrap();
     let existing = output.join("same.txt");
     std::fs::write(&existing, b"original bytes").unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&existing)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(existing_time))
+        .unwrap();
+    let next_existing = output.join("next.txt");
+    std::fs::write(&next_existing, b"keep next file").unwrap();
 
     let manager = JobManager::new();
-    let state = Arc::new(AppState::new());
     let owner_sink = Arc::new(TestSink::default());
     let owner_events: Arc<dyn EventSink> = owner_sink.clone();
     let id = manager.submit_for_test_window(
@@ -836,36 +883,103 @@ fn conflict_answers_require_the_owner_and_current_prompt_type() {
             .interaction,
         Some(JobInteraction::Conflict)
     );
+    let restored = manager.snapshots_for_window("task-conflict-owner", None);
+    let question = restored.upserts[0].question.as_ref().unwrap();
+    let question_version = question.version();
+    let serialized = serde_json::to_value(question).unwrap();
+    assert_eq!(serialized["kind"], "conflict");
+    assert_eq!(serialized["prompt"]["incoming_path"], "same.txt");
+    assert_eq!(serialized["prompt"]["existing_size"], 14);
+    assert_eq!(serialized["prompt"]["existing_modified"], -2);
+    assert_eq!(serialized["prompt"]["incoming_modified"], -1);
+    assert!(manager
+        .snapshot_for_window("main", id)
+        .unwrap()
+        .question
+        .is_none());
     assert_eq!(
         manager
-            .answer_password_for_window("task-conflict-owner", id, None)
+            .answer_password_for_window("task-conflict-owner", id, question_version, None)
             .unwrap_err()
             .key,
         "error.other"
     );
     assert_eq!(
         manager
-            .answer_conflict_for_window("main", id, "skip".into(), false)
+            .answer_conflict_for_window("main", id, question_version, "skip".into(), false)
             .unwrap_err()
             .key,
         "error.other"
     );
     manager
-        .answer_conflict_for_window("task-conflict-owner", id, "skip".into(), false)
+        .answer_conflict_for_window(
+            "task-conflict-owner",
+            id,
+            question_version,
+            "skip".into(),
+            false,
+        )
+        .unwrap();
+    wait_for_event(
+        &owner_sink,
+        std::time::Duration::from_secs(2),
+        |(name, payload)| {
+            name == EV_ASK_CONFLICT && payload["id"] == id && payload["incoming_path"] == "next.txt"
+        },
+    );
+    let next_question = manager
+        .snapshot_for_window("task-conflict-owner", id)
+        .unwrap()
+        .question
+        .unwrap();
+    assert!(next_question.version() > question_version);
+    assert_eq!(
+        serde_json::to_value(&next_question).unwrap()["prompt"]["incoming_modified"],
+        0
+    );
+    assert!(manager
+        .answer_conflict_for_window(
+            "task-conflict-owner",
+            id,
+            question_version,
+            "overwrite".into(),
+            true,
+        )
+        .is_err());
+    manager
+        .answer_conflict_for_window(
+            "task-conflict-owner",
+            id,
+            next_question.version(),
+            "skip".into(),
+            false,
+        )
         .unwrap();
     wait_for_state(&owner_sink, id, "done", std::time::Duration::from_secs(2));
     assert_eq!(
         manager
-            .answer_conflict_for_window("task-conflict-owner", id, "skip".into(), false)
+            .answer_conflict_for_window(
+                "task-conflict-owner",
+                id,
+                question_version,
+                "skip".into(),
+                false
+            )
             .unwrap_err()
             .key,
         "error.other"
     );
     manager.wait_idle();
+    assert_eq!(
+        std::fs::metadata(&existing).unwrap().modified().unwrap(),
+        existing_time
+    );
 
     let terminal = manager.snapshot_for_window("main", id).unwrap();
     assert_eq!(terminal.interaction, None);
+    assert!(terminal.question.is_none());
     assert_eq!(std::fs::read(existing).unwrap(), b"original bytes");
+    assert_eq!(std::fs::read(next_existing).unwrap(), b"keep next file");
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -1352,6 +1466,11 @@ fn compress_then_extract_round_trip() {
     assert_eq!(extract_result["counts"]["renamed"], 0);
     assert_eq!(extract_result["counts"]["failed"], 0);
     assert_eq!(extract_result["counts"]["output_bytes"], 13);
+    assert_eq!(
+        manager.openable_output_for_window("main", id2).unwrap(),
+        out
+    );
+    assert!(manager.openable_output_for_window("main", id1).is_err());
     let events = sink.events.lock().unwrap();
     assert_eq!(states_of(&events, id1), vec!["queued", "running", "done"]);
     assert_eq!(states_of(&events, id2), vec!["queued", "running", "done"]);
@@ -1798,6 +1917,10 @@ fn batch_extract_runs_multiple_archives_as_one_job() {
     );
     assert_eq!(result["structure"], "zip_local_headers_recovered");
     assert_eq!(result["recovered_archives"], 1);
+    assert_eq!(
+        manager.openable_output_for_window("main", id).unwrap(),
+        out_a
+    );
     assert!(events.iter().any(|(name, payload)| name == EV_PROGRESS
         && payload["id"] == id
         && payload["total"].as_u64().unwrap_or(0) == 2 * BATCH_PROGRESS_SCALE));
@@ -2622,6 +2745,12 @@ fn extract_nested_job_prompts_separately_for_outer_and_inner_passwords() {
     );
 
     wait_for_password_prompt_count(&sink, id, 1);
+    let outer_question_version = manager
+        .snapshot_for_window("main", id)
+        .unwrap()
+        .question
+        .unwrap()
+        .version();
     {
         let recorded = sink.events.lock().unwrap();
         let first = recorded
@@ -2631,10 +2760,25 @@ fn extract_nested_job_prompts_separately_for_outer_and_inner_passwords() {
         assert_eq!(first.1["name"], outer_name);
     }
     manager
-        .answer_password_for_window("main", id, Some("outer-secret".into()))
+        .answer_password_for_window(
+            "main",
+            id,
+            outer_question_version,
+            Some("outer-secret".into()),
+        )
         .unwrap();
 
     wait_for_password_prompt_count(&sink, id, 2);
+    let inner_question_version = manager
+        .snapshot_for_window("main", id)
+        .unwrap()
+        .question
+        .unwrap()
+        .version();
+    assert!(inner_question_version > outer_question_version);
+    assert!(manager
+        .answer_password_for_window("main", id, outer_question_version, None)
+        .is_err());
     {
         let recorded = sink.events.lock().unwrap();
         let prompts = recorded
@@ -2644,7 +2788,12 @@ fn extract_nested_job_prompts_separately_for_outer_and_inner_passwords() {
         assert_eq!(prompts[1].1["name"], inner_name);
     }
     manager
-        .answer_password_for_window("main", id, Some("inner-secret".into()))
+        .answer_password_for_window(
+            "main",
+            id,
+            inner_question_version,
+            Some("inner-secret".into()),
+        )
         .unwrap();
     manager.wait_idle();
 
@@ -2921,6 +3070,10 @@ fn convert_job_round_trip_through_queue() {
     manager.wait_idle();
 
     assert!(sevenz.exists());
+    assert_eq!(
+        manager.openable_output_for_window("main", id).unwrap(),
+        sevenz
+    );
     let entries = AppState::new()
         .engine
         .list(&sevenz, &OpenOptions::default())
@@ -3740,6 +3893,7 @@ fn update_job_deletes_selected_entry() {
             path: archive.to_string_lossy().into_owned(),
             add: vec![],
             delete: vec!["data/drop.txt".into()],
+            encoding: None,
             rename: vec![],
             mkdir: vec![],
             excludes: vec![],
@@ -3758,7 +3912,239 @@ fn update_job_deletes_selected_entry() {
         .unwrap();
     assert!(entries.iter().any(|e| e.path.display == "data/keep.txt"));
     assert!(!entries.iter().any(|e| e.path.display == "data/drop.txt"));
+    assert_eq!(
+        manager.openable_output_for_window("main", id).unwrap(),
+        archive
+    );
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn update_job_deletes_only_literal_selected_paths() {
+    let dir = temp_dir("update-delete-literal");
+    for name in [
+        "notes.txt",
+        "folder/notes.txt",
+        "data/drop[1].txt",
+        "data/drop1.txt",
+        "logs/drop.txt",
+        "folder/logs/keep.txt",
+        "logstash/keep.txt",
+    ] {
+        let path = dir.join(name);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, name.as_bytes()).unwrap();
+    }
+    let archive = dir.join("out.zip");
+    let state = Arc::new(AppState::new());
+    let inputs = ["notes.txt", "folder", "data", "logs", "logstash"].map(|name| dir.join(name));
+    state
+        .engine
+        .create(
+            &archive,
+            &inputs,
+            &CreateOptions::default(),
+            &squallz_core::api::NoProgress,
+            &ControlToken::new(),
+        )
+        .unwrap();
+
+    let manager = JobManager::new();
+    let sink = Arc::new(TestSink::default());
+    let events: Arc<dyn EventSink> = sink.clone();
+    let id = manager.submit(
+        Arc::clone(&state),
+        events,
+        JobSpec::Update {
+            path: archive.to_string_lossy().into_owned(),
+            add: vec![],
+            delete: vec![
+                "notes.txt".into(),
+                "data/drop[1].txt".into(),
+                "logs/".into(),
+            ],
+            encoding: None,
+            rename: vec![],
+            mkdir: vec![],
+            excludes: vec![],
+            content_policy: squallz_core::CreateContentPolicy::KeepAllFiles,
+            password: None,
+            level: 5,
+        },
+        SettingsDto::default(),
+    );
+    manager.wait_idle();
+    assert_eq!(
+        states_of(&sink.events.lock().unwrap(), id),
+        vec!["queued", "running", "done"]
+    );
+    let mut names = state
+        .engine
+        .list(&archive, &OpenOptions::default())
+        .unwrap()
+        .into_iter()
+        .map(|entry| entry.path.display)
+        .collect::<Vec<_>>();
+    names.sort();
+    assert_eq!(
+        names,
+        [
+            "data/",
+            "data/drop1.txt",
+            "folder/",
+            "folder/logs/",
+            "folder/logs/keep.txt",
+            "folder/notes.txt",
+            "logstash/",
+            "logstash/keep.txt",
+        ]
+    );
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn update_job_resolves_display_names_and_rejects_ambiguous_or_missing_selection() {
+    for rename_selected in [false, true] {
+        for (source_name, raw_name, selected, expected_state) in [
+            (
+                "first.txt",
+                &[0xc4, 0xe3, b'[', b'1', b']', b'.', b't', b'x', b't'][..],
+                "你[1].txt",
+                "done",
+            ),
+            (
+                "first.txt",
+                &[0xc4, 0xe3, b'[', b'1', b']', b'.', b't', b'x', b't'][..],
+                "nested/first.txt",
+                "done",
+            ),
+            (
+                "nested/first.txt",
+                &b"///////first.txt"[..],
+                "first.txt",
+                "failed",
+            ),
+            ("first.txt", &b"first.txt"[..], "missing.txt", "failed"),
+        ] {
+            let dir = temp_dir("update-delete-displayed");
+            fs::create_dir_all(dir.join("nested")).unwrap();
+            fs::write(dir.join("first.txt"), b"root content").unwrap();
+            fs::write(dir.join("nested/first.txt"), b"nested content").unwrap();
+            let archive = dir.join("out.zip");
+            let state = Arc::new(AppState::new());
+            state
+                .engine
+                .create(
+                    &archive,
+                    &[dir.join("first.txt"), dir.join("nested")],
+                    &CreateOptions::default(),
+                    &squallz_core::api::NoProgress,
+                    &ControlToken::new(),
+                )
+                .unwrap();
+            let mut bytes = fs::read(&archive).unwrap();
+            assert_eq!(source_name.len(), raw_name.len());
+            let offsets: Vec<_> = bytes
+                .windows(source_name.len())
+                .enumerate()
+                .filter_map(|(offset, name)| (name == source_name.as_bytes()).then_some(offset))
+                .collect();
+            // The root name is also a suffix of the nested entry; leave that
+            // suffix untouched when replacing only the root header names.
+            let offsets: Vec<_> = offsets
+                .into_iter()
+                .filter(|offset| *offset == 0 || bytes[offset - 1] != b'/')
+                .collect();
+            assert_eq!(offsets.len(), 2);
+            for offset in offsets {
+                bytes[offset..offset + raw_name.len()].copy_from_slice(raw_name);
+            }
+            fs::write(&archive, &bytes).unwrap();
+            let manager = JobManager::new();
+            let sink = Arc::new(TestSink::default());
+            let events: Arc<dyn EventSink> = sink.clone();
+            let id = manager.submit(
+                Arc::clone(&state),
+                events,
+                JobSpec::Update {
+                    path: archive.to_string_lossy().into_owned(),
+                    add: vec![],
+                    delete: if rename_selected {
+                        vec![]
+                    } else {
+                        vec![selected.into()]
+                    },
+                    encoding: Some("gbk".into()),
+                    rename: if rename_selected {
+                        vec![crate::dto::RenameSpec {
+                            from: selected.into(),
+                            to: "renamed.txt".into(),
+                        }]
+                    } else {
+                        vec![]
+                    },
+                    mkdir: vec![],
+                    excludes: vec![],
+                    content_policy: squallz_core::CreateContentPolicy::KeepAllFiles,
+                    password: None,
+                    level: 5,
+                },
+                SettingsDto::default(),
+            );
+            manager.wait_idle();
+            assert_eq!(
+                states_of(&sink.events.lock().unwrap(), id),
+                ["queued", "running", expected_state]
+            );
+            if expected_state == "failed" {
+                assert_eq!(fs::read(&archive).unwrap(), bytes);
+            } else {
+                let mut names: Vec<_> = state
+                    .engine
+                    .list(
+                        &archive,
+                        &OpenOptions {
+                            encoding_override: Some("gbk".into()),
+                            ..OpenOptions::default()
+                        },
+                    )
+                    .unwrap()
+                    .into_iter()
+                    .map(|entry| entry.path.display)
+                    .collect();
+                names.sort();
+                let expected = match (rename_selected, selected == "nested/first.txt") {
+                    (false, false) => vec!["nested/", "nested/first.txt"],
+                    (false, true) => vec!["nested/", "你[1].txt"],
+                    (true, false) => vec!["nested/", "nested/first.txt", "renamed.txt"],
+                    (true, true) => vec!["nested/", "renamed.txt", "你[1].txt"],
+                };
+                assert_eq!(names, expected);
+                if selected == "nested/first.txt" {
+                    let entries = state
+                        .engine
+                        .list(
+                            &archive,
+                            &OpenOptions {
+                                encoding_override: Some("gbk".into()),
+                                ..OpenOptions::default()
+                            },
+                        )
+                        .unwrap();
+                    assert_eq!(
+                        entries
+                            .iter()
+                            .find(|entry| entry.path.display == "你[1].txt")
+                            .unwrap()
+                            .path
+                            .raw,
+                        raw_name
+                    );
+                }
+            }
+            fs::remove_dir_all(dir).unwrap();
+        }
+    }
 }
 
 #[test]
@@ -3801,6 +4187,7 @@ fn update_job_add_directory_applies_content_policy_and_explicit_excludes() {
             path: archive.to_string_lossy().into_owned(),
             add: vec![extra.to_string_lossy().into_owned()],
             delete: vec![],
+            encoding: None,
             rename: vec![],
             mkdir: vec![],
             excludes: vec!["node_modules".into(), "*.tmp".into()],
@@ -3966,7 +4353,7 @@ fn checksum_check_job_reports_manifest_mismatch() {
 }
 
 #[test]
-fn update_job_creates_empty_directory_entry() {
+fn update_job_creates_directory_and_moves_a_subtree_into_it() {
     let dir = temp_dir("update-mkdir");
     let seed = dir.join("seed");
     std::fs::create_dir_all(&seed).unwrap();
@@ -3984,6 +4371,18 @@ fn update_job_creates_empty_directory_entry() {
         )
         .unwrap();
 
+    let mut bytes = std::fs::read(&archive).unwrap();
+    let offsets: Vec<_> = bytes
+        .windows(4)
+        .enumerate()
+        .filter_map(|(index, name)| (name == b"seed").then_some(index))
+        .collect();
+    assert_eq!(offsets.len(), 4);
+    for offset in offsets {
+        bytes[offset..offset + 4].copy_from_slice(b"\xc4\xe3\xba\xc3");
+    }
+    std::fs::write(&archive, bytes).unwrap();
+
     let manager = JobManager::new();
     let sink = Arc::new(TestSink::default());
     let events: Arc<dyn EventSink> = sink.clone();
@@ -3994,6 +4393,7 @@ fn update_job_creates_empty_directory_entry() {
             path: archive.to_string_lossy().into_owned(),
             add: vec![],
             delete: vec![],
+            encoding: Some("gbk".into()),
             rename: vec![],
             mkdir: vec!["new-folder".into()],
             excludes: vec![],
@@ -4014,6 +4414,48 @@ fn update_job_creates_empty_directory_entry() {
         .map(|e| e.path.display)
         .collect();
     assert!(names.iter().any(|name| name == "new-folder/"));
+    let move_sink = Arc::new(TestSink::default());
+    let move_events: Arc<dyn EventSink> = move_sink.clone();
+    let move_id = manager.submit(
+        Arc::clone(&state),
+        Arc::clone(&move_events),
+        JobSpec::Update {
+            path: archive.to_string_lossy().into_owned(),
+            add: vec![],
+            delete: vec![],
+            encoding: Some("gbk".into()),
+            mkdir: vec![],
+            excludes: vec![],
+            rename: vec![crate::dto::RenameSpec {
+                from: "你好/".into(),
+                to: "new-folder/你好/".into(),
+            }],
+            content_policy: squallz_core::CreateContentPolicy::KeepAllFiles,
+            password: None,
+            level: 5,
+        },
+        SettingsDto::default(),
+    );
+    manager.wait_idle();
+    assert_eq!(
+        states_of(&move_sink.events.lock().unwrap(), move_id),
+        vec!["queued", "running", "done"]
+    );
+    let names: Vec<_> = state
+        .engine
+        .list(&archive, &OpenOptions::default())
+        .unwrap()
+        .into_iter()
+        .map(|entry| entry.path.display)
+        .collect();
+    assert!(
+        names.iter().any(|name| name == "new-folder/你好/base.txt"),
+        "{names:?}"
+    );
+    assert!(
+        !names.iter().any(|name| name.starts_with("你好/")),
+        "{names:?}"
+    );
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -4048,6 +4490,7 @@ fn update_job_reports_target_conflict_as_failed() {
             path: archive.to_string_lossy().into_owned(),
             add: vec![],
             delete: vec![],
+            encoding: None,
             rename: vec![crate::dto::RenameSpec {
                 from: "seed/a.txt".into(),
                 to: "seed/b.txt".into(),

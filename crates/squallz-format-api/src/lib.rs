@@ -1,4 +1,4 @@
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 //! squallz-format-api: unified abstractions for the format layer.
 //!
 //! Design principles:
@@ -20,6 +20,7 @@
 mod entry;
 mod error;
 mod extract;
+mod file_ops;
 mod links;
 mod options;
 mod progress;
@@ -27,17 +28,18 @@ mod registry;
 mod safety;
 mod traits;
 
-pub use entry::{EntryMeta, EntryPath, EntryType};
+pub use entry::{unix_seconds, EntryMeta, EntryPath, EntryType};
 pub use error::FormatError;
 pub use extract::{
     empty_extract_report, extract_entries, extract_entries_with_report, ExtractReport, ExtractSink,
 };
+pub use file_ops::{atomic_replace_file, move_path_no_replace};
 pub use options::{
     BoundedProblemLog, CompressionLevel, ConflictDecision, ConflictResolver, CreateOptions,
-    ExtractOptions, ExtractProblemReporter, FormatCapabilities, FormatCreateBudget, OpenOptions,
-    OverwritePolicy, Password, ProblemPreview, RecoverySummary, ResourceOptions, SafetyLimits,
-    SplitOutputMode, SqzCreateOptions, SqzInnerFormat, SymlinkPolicy, TestSummary, UpdateOp,
-    EXTRACT_PROBLEM_PREVIEW_LIMIT, TEST_PROBLEM_PREVIEW_LIMIT,
+    EntrySelection, ExtractOptions, ExtractProblemReporter, FormatCapabilities, FormatCreateBudget,
+    OpenOptions, OverwritePolicy, Password, ProblemPreview, RecoverySummary, ResourceOptions,
+    SafetyLimits, SplitOutputMode, SqzCreateOptions, SqzInnerFormat, SymlinkPolicy, TestSummary,
+    UpdateOp, UpdateOptions, EXTRACT_PROBLEM_PREVIEW_LIMIT, TEST_PROBLEM_PREVIEW_LIMIT,
 };
 pub use progress::{ControlToken, NoProgress, ProgressPhase, ProgressSink};
 pub use registry::{split_volume_name, Detected, FormatInfo, FormatKind, FormatRegistry};

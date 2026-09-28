@@ -20,9 +20,12 @@ use crate::entry::{EntryMeta, EntryPath, EntryType};
 use crate::error::FormatError;
 use crate::links::LinkResolver;
 use crate::options::{ConflictDecision, ExtractOptions, OverwritePolicy, SymlinkPolicy};
-use crate::progress::{ControlToken, ProgressSink};
+use crate::progress::{ControlToken, ProgressPhase, ProgressSink};
 use crate::safety::{crosses_created_symlink, sanitize_entry_path, LimitsAccountant};
 use crate::traits::ArchiveReader;
+
+mod metadata;
+use metadata::{restore_file, restore_symlink, DeferredDirectories};
 
 /// Entry outcomes from a completed extraction.
 ///
@@ -116,6 +119,14 @@ fn create_pending_value<T>(
 struct PendingOutput {
     path: Option<PathBuf>,
     file: Option<fs::File>,
+    kind: PendingOutputKind,
+}
+
+enum PendingOutputKind {
+    File,
+    SymbolicLink,
+    #[cfg(windows)]
+    DirectorySymbolicLink,
 }
 
 /// Empty destination placeholder used to keep a no-replace decision valid
@@ -160,6 +171,7 @@ impl PendingOutput {
         Ok(Self {
             path: Some(path),
             file: Some(file),
+            kind: PendingOutputKind::File,
         })
     }
 
@@ -168,6 +180,7 @@ impl PendingOutput {
         Ok(Self {
             path: Some(path),
             file: None,
+            kind: PendingOutputKind::File,
         })
     }
 
@@ -182,6 +195,7 @@ impl PendingOutput {
         Ok(Some(Self {
             path: Some(path),
             file: None,
+            kind: PendingOutputKind::SymbolicLink,
         }))
     }
 
@@ -202,6 +216,11 @@ impl PendingOutput {
             Ok((path, ())) => Ok(Some(Self {
                 path: Some(path),
                 file: None,
+                kind: if target_is_dir {
+                    PendingOutputKind::DirectorySymbolicLink
+                } else {
+                    PendingOutputKind::SymbolicLink
+                },
             })),
             Err(FormatError::Io(error)) if is_windows_symlink_privilege_error(&error) => Ok(None),
             Err(error) => Err(error),
@@ -223,7 +242,7 @@ impl PendingOutput {
             .ok_or_else(|| FormatError::Other("extraction staging file is closed".into()))
     }
 
-    fn path(&self) -> Result<&Path, FormatError> {
+    fn staged_path(&self) -> Result<&Path, FormatError> {
         self.path
             .as_deref()
             .ok_or_else(|| FormatError::Other("extraction staging path is unavailable".into()))
@@ -246,12 +265,13 @@ impl PendingOutput {
         rename: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
     ) -> Result<(), FormatError> {
         self.file.take();
-        let staged = self
-            .path
-            .as_deref()
-            .ok_or_else(|| FormatError::Other("extraction staging path is unavailable".into()))?;
+        let staged = self.staged_path()?;
         if replace_existing {
             rename(staged, target)?;
+        } else if !matches!(self.kind, PendingOutputKind::File) {
+            // Hard-link APIs may follow a source symlink; move the staged
+            // link itself without replacing a concurrently created target.
+            crate::move_path_no_replace(staged, target)?;
         } else {
             match hard_link(staged, target) {
                 Ok(()) => fs::remove_file(staged)?,
@@ -278,7 +298,15 @@ impl Drop for PendingOutput {
     fn drop(&mut self) {
         self.file.take();
         if let Some(path) = self.path.take() {
-            let _ = fs::remove_file(path);
+            match self.kind {
+                #[cfg(windows)]
+                PendingOutputKind::DirectorySymbolicLink => {
+                    let _ = fs::remove_dir(path);
+                }
+                _ => {
+                    let _ = fs::remove_file(path);
+                }
+            }
         }
     }
 }
@@ -309,6 +337,9 @@ pub struct ExtractSink<'o> {
     /// Conflict decision retained for each path returned by `file_target`
     /// until the staged output is committed.
     pending_outputs: HashMap<PathBuf, ResolvedOutput>,
+    /// Only explicit directory entries carry archive metadata. Restore it
+    /// after all descendants, without keeping a descriptor for each entry.
+    directories: Option<DeferredDirectories>,
     done: u64,
     total: u64,
     report: ExtractReport,
@@ -316,9 +347,15 @@ pub struct ExtractSink<'o> {
 
 impl<'o> ExtractSink<'o> {
     /// Creates the destination directory and starts an accounting run.
-    pub fn new(dest: &Path, opts: &'o ExtractOptions, total: u64) -> Result<Self, FormatError> {
+    pub fn new(
+        dest: &Path,
+        opts: &'o ExtractOptions,
+        total: u64,
+        progress: &dyn ProgressSink,
+    ) -> Result<Self, FormatError> {
         fs::create_dir_all(dest)?;
         let canonical_dest = dest.canonicalize()?;
+        progress.on_phase(ProgressPhase::ExtractEntries, true);
         Ok(Self {
             dest: dest.to_path_buf(),
             canonical_dest,
@@ -327,6 +364,7 @@ impl<'o> ExtractSink<'o> {
             created_symlinks: HashSet::new(),
             materialized_files: HashMap::new(),
             pending_outputs: HashMap::new(),
+            directories: None,
             done: 0,
             total,
             report: ExtractReport {
@@ -460,7 +498,7 @@ impl<'o> ExtractSink<'o> {
             }
         }
         ctl.checkpoint()?;
-        restore_permissions(pending.path()?, meta, self.opts);
+        restore_file(pending.file_mut()?, meta, self.opts)?;
         pending.commit(out_path, resolved.replace_existing)?;
         self.record_materialized_file(meta, out_path);
         self.record_materialization(resolved.materialization, written);
@@ -537,7 +575,7 @@ impl<'o> ExtractSink<'o> {
             }
         }
         ctl.checkpoint()?;
-        restore_permissions(pending.path()?, meta, self.opts);
+        restore_file(pending.file_mut()?, meta, self.opts)?;
         pending.commit(out_path, resolved.replace_existing)?;
         self.record_materialized_file(meta, out_path);
         self.record_materialization(resolved.materialization, written);
@@ -599,7 +637,16 @@ impl<'o> ExtractSink<'o> {
         match &meta.entry_type {
             EntryType::Dir => {
                 ensure_directory_inside(&self.canonical_dest, &target)?;
-                restore_permissions(&target, meta, self.opts);
+                if meta.modified.is_some()
+                    || (cfg!(unix) && self.opts.restore_permissions && meta.unix_mode.is_some())
+                {
+                    if self.directories.is_none() {
+                        self.directories = Some(DeferredDirectories::new(&self.canonical_dest)?);
+                    }
+                    if let Some(directories) = &mut self.directories {
+                        directories.record(&rel, meta)?;
+                    }
+                }
                 self.report.directories = self.report.directories.saturating_add(1);
             }
             EntryType::Symlink { target: link } => match self.opts.symlinks {
@@ -622,6 +669,7 @@ impl<'o> ExtractSink<'o> {
                         meta,
                         link,
                         self.opts,
+                        ctl,
                     )? {
                         Some(materialization) => {
                             self.created_symlinks.insert(rel);
@@ -715,7 +763,11 @@ impl<'o> ExtractSink<'o> {
                 }
             }
             ctl.checkpoint()?;
-            restore_permissions(pending.path()?, meta, self.opts);
+            // A followed link becomes an independent file. Match the
+            // two-pass driver when the link itself has no timestamp.
+            let mut copied_meta = meta.clone();
+            copied_meta.modified = meta.modified.or_else(|| src_meta.modified().ok());
+            restore_file(pending.file_mut()?, &copied_meta, self.opts)?;
             pending.commit(&resolved.path, resolved.replace_existing)?;
         }
         self.record_materialized_file(meta, &resolved.path);
@@ -724,20 +776,34 @@ impl<'o> ExtractSink<'o> {
         Ok(())
     }
 
-    /// Final 100% progress report.
-    pub fn finish(self, progress: &dyn ProgressSink) {
-        self.finish_with_report(progress);
+    /// Restores deferred directory metadata and reports completion.
+    pub fn finish(
+        self,
+        progress: &dyn ProgressSink,
+        ctl: &ControlToken,
+    ) -> Result<(), FormatError> {
+        self.finish_with_report(progress, ctl).map(drop)
     }
 
     /// Finishes progress reporting and returns the completed outcome counts.
-    pub fn finish_with_report(self, progress: &dyn ProgressSink) -> ExtractReport {
+    pub fn finish_with_report(
+        mut self,
+        progress: &dyn ProgressSink,
+        ctl: &ControlToken,
+    ) -> Result<ExtractReport, FormatError> {
+        ctl.checkpoint()?;
+        if let Some(directories) = self.directories.take() {
+            progress.on_phase(ProgressPhase::ExtractMetadata, true);
+            directories.finish(self.opts, ctl, |path| progress.on_progress(0, 0, path))?;
+        }
+        ctl.checkpoint()?;
         let total = if self.total == 0 {
             self.done
         } else {
             self.total
         };
         progress.on_progress(total, total, &EntryPath::from_utf8(""));
-        self.report
+        Ok(self.report)
     }
 
     /// Records a selected entry that an optimized best-effort reader could
@@ -839,7 +905,7 @@ pub fn extract_entries_with_report<R: ArchiveReader + ?Sized>(
         .filter(|m| selected(m) && matches!(m.entry_type, EntryType::File))
         .map(|m| m.size)
         .sum();
-    let mut sink = ExtractSink::new(dest, opts, total)?;
+    let mut sink = ExtractSink::new(dest, opts, total, progress)?;
     // Out paths of files extracted so far, for hardlink reuse.
     let mut extracted: std::collections::HashMap<Vec<u8>, std::path::PathBuf> =
         std::collections::HashMap::new();
@@ -848,21 +914,27 @@ pub fn extract_entries_with_report<R: ArchiveReader + ?Sized>(
         match &meta.entry_type {
             EntryType::File => {
                 if let Some(out_path) = sink.file_target(meta, progress, ctl)? {
-                    let mut data = match reader.read_entry(&meta.path) {
-                        Ok(data) => data,
-                        Err(e) if opts.best_effort && best_effort_recoverable(&e) => {
+                    let mut wrote = false;
+                    let mut started = false;
+                    let result = reader.read_entry(&meta.path, &mut |data| {
+                        started = true;
+                        wrote = if opts.best_effort {
+                            sink.write_file_best_effort(meta, &out_path, data, progress, ctl)?
+                        } else {
+                            sink.write_file(meta, &out_path, data, progress, ctl)?;
+                            true
+                        };
+                        Ok(())
+                    });
+                    match result {
+                        Ok(()) => {}
+                        Err(e) if !started && opts.best_effort && best_effort_recoverable(&e) => {
                             sink.abandon_file_target(&out_path);
                             sink.record_problem(&meta.path, &e);
                             continue;
                         }
                         Err(e) => return Err(e),
-                    };
-                    let wrote = if opts.best_effort {
-                        sink.write_file_best_effort(meta, &out_path, &mut *data, progress, ctl)?
-                    } else {
-                        sink.write_file(meta, &out_path, &mut *data, progress, ctl)?;
-                        true
-                    };
+                    }
                     if wrote {
                         extracted.insert(meta.path.raw.clone(), out_path);
                     }
@@ -895,7 +967,7 @@ pub fn extract_entries_with_report<R: ArchiveReader + ?Sized>(
             _ => sink.write_meta_entry(meta, progress, ctl)?,
         }
     }
-    Ok(sink.finish_with_report(progress))
+    sink.finish_with_report(progress, ctl)
 }
 
 /// Writes the content of `target` (a file entry) at the link entry's own
@@ -916,25 +988,34 @@ fn materialize_link<R: ArchiveReader + ?Sized>(
         entry_type: EntryType::File,
         size: target.size,
         compressed_size: target.compressed_size,
-        modified: link.modified.or(target.modified),
+        modified: if matches!(link.entry_type, EntryType::Hardlink { .. }) {
+            target.modified
+        } else {
+            link.modified.or(target.modified)
+        },
         unix_mode: target.unix_mode,
         crc32: target.crc32,
         encrypted: target.encrypted,
     };
     if let Some(out_path) = sink.file_target(&meta, progress, ctl)? {
-        let mut data = match reader.read_entry(&target.path) {
-            Ok(data) => data,
-            Err(e) if sink.opts.best_effort && best_effort_recoverable(&e) => {
+        let mut started = false;
+        let result = reader.read_entry(&target.path, &mut |data| {
+            started = true;
+            if sink.opts.best_effort {
+                sink.write_file_best_effort(&meta, &out_path, data, progress, ctl)?;
+            } else {
+                sink.write_file(&meta, &out_path, data, progress, ctl)?;
+            }
+            Ok(())
+        });
+        match result {
+            Ok(()) => {}
+            Err(e) if !started && sink.opts.best_effort && best_effort_recoverable(&e) => {
                 sink.abandon_file_target(&out_path);
                 sink.record_problem(&link.path, &e);
                 return Ok(());
             }
             Err(e) => return Err(e),
-        };
-        if sink.opts.best_effort {
-            sink.write_file_best_effort(&meta, &out_path, &mut *data, progress, ctl)?;
-        } else {
-            sink.write_file(&meta, &out_path, &mut *data, progress, ctl)?;
         }
     }
     Ok(())
@@ -1114,10 +1195,12 @@ fn create_symlink_entry(
     meta: &EntryMeta,
     link: &[u8],
     opts: &ExtractOptions,
+    ctl: &ControlToken,
 ) -> Result<Option<Materialization>, FormatError> {
     let Some(resolved) = resolve_conflict_path(target, meta, opts)? else {
         return Ok(None);
     };
+    ctl.checkpoint()?;
     ensure_parent_inside(canonical_dest, &resolved.path)?;
     let link_target = PathBuf::from(String::from_utf8_lossy(link).into_owned());
     #[cfg(windows)]
@@ -1135,6 +1218,8 @@ fn create_symlink_entry(
     let Some(pending) = PendingOutput::symlink(&link_target, &resolved.path, target_is_dir)? else {
         return Ok(None);
     };
+    restore_symlink(pending.staged_path()?, &resolved.path, meta.modified)?;
+    ctl.checkpoint()?;
     pending.commit(&resolved.path, resolved.replace_existing)?;
     Ok(Some(resolved.materialization))
 }
@@ -1144,22 +1229,6 @@ fn is_windows_symlink_privilege_error(error: &std::io::Error) -> bool {
     error.kind() == std::io::ErrorKind::PermissionDenied || error.raw_os_error() == Some(1314)
 }
 
-/// Restores Unix permission bits (masked to 0o7777) when requested.
-#[cfg(unix)]
-fn restore_permissions(path: &Path, meta: &EntryMeta, opts: &ExtractOptions) {
-    use std::os::unix::fs::PermissionsExt;
-    if !opts.restore_permissions {
-        return;
-    }
-    if let Some(mode) = meta.unix_mode {
-        // Best effort: permission failures must not abort extraction.
-        let _ = fs::set_permissions(path, fs::Permissions::from_mode(mode & 0o7777));
-    }
-}
-
-#[cfg(not(unix))]
-fn restore_permissions(_path: &Path, _meta: &EntryMeta, _opts: &ExtractOptions) {}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1167,6 +1236,11 @@ mod tests {
     use crate::{NoProgress, TestSummary};
     use std::io::Cursor;
     use std::sync::Arc;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    fn archived_time() -> SystemTime {
+        UNIX_EPOCH + Duration::from_secs(1_714_979_291)
+    }
 
     fn temp_dir(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -1221,7 +1295,6 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
     fn directory_meta(path: &str) -> EntryMeta {
         EntryMeta {
             path: EntryPath::from_utf8(path),
@@ -1233,6 +1306,263 @@ mod tests {
             crc32: None,
             encrypted: false,
         }
+    }
+
+    #[test]
+    fn directory_times_follow_children_and_last_entry_even_with_aliases() {
+        let root = temp_dir("directory-times");
+        let opts = ExtractOptions::default();
+        let ctl = ControlToken::default();
+        let mut sink = ExtractSink::new(&root, &opts, 3, &NoProgress).unwrap();
+        let mut parent = directory_meta("folder");
+        parent.modified = Some(UNIX_EPOCH);
+        let mut child = directory_meta("folder/child");
+        child.modified = Some(archived_time() + Duration::from_secs(10));
+        for meta in [&parent, &child] {
+            sink.write_meta_entry(meta, &NoProgress, &ctl).unwrap();
+        }
+        parent.modified = Some(archived_time());
+        // On case-insensitive filesystems these names identify one directory.
+        // Its last archive entry must win regardless of lexical sort order.
+        if root.join("FOLDER").is_dir() {
+            parent.path = EntryPath::from_utf8("FOLDER");
+        }
+        sink.write_meta_entry(&parent, &NoProgress, &ctl).unwrap();
+        let mut file = file_meta("folder/child/report.txt");
+        file.modified = Some(archived_time() + Duration::from_secs(20));
+        let out = sink.file_target(&file, &NoProgress, &ctl).unwrap().unwrap();
+        sink.write_file(&file, &out, &mut Cursor::new(b"new"), &NoProgress, &ctl)
+            .unwrap();
+        sink.finish(&NoProgress, &ctl).unwrap();
+
+        for meta in [&parent, &child, &file] {
+            let path = root.join(&meta.path.display);
+            assert_eq!(
+                fs::metadata(path).unwrap().modified().unwrap(),
+                meta.modified.unwrap()
+            );
+        }
+        assert_eq!(fs::read(out).unwrap(), b"new");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_only_directory_permissions_are_deferred_and_optional() {
+        use std::os::unix::fs::PermissionsExt;
+        for restore_permissions in [true, false] {
+            let root = temp_dir(&format!("readonly-directories-{restore_permissions}"));
+            let opts = ExtractOptions {
+                restore_permissions,
+                ..ExtractOptions::default()
+            };
+            let ctl = ControlToken::default();
+            let mut sink = ExtractSink::new(&root, &opts, 3, &NoProgress).unwrap();
+            for name in ["folder", "folder/child"] {
+                let mut meta = directory_meta(name);
+                meta.modified = Some(archived_time());
+                meta.unix_mode = Some(0o500);
+                sink.write_meta_entry(&meta, &NoProgress, &ctl).unwrap();
+                assert_ne!(
+                    fs::metadata(root.join(name)).unwrap().permissions().mode() & 0o200,
+                    0
+                );
+            }
+            let mut file = file_meta("folder/child/report.txt");
+            file.modified = Some(archived_time());
+            file.unix_mode = Some(0o400);
+            let out = sink.file_target(&file, &NoProgress, &ctl).unwrap().unwrap();
+            sink.write_file(&file, &out, &mut Cursor::new(b"new"), &NoProgress, &ctl)
+                .unwrap();
+            sink.finish(&NoProgress, &ctl).unwrap();
+            assert_eq!(fs::read(&out).unwrap(), b"new");
+            for name in ["folder", "folder/child", "folder/child/report.txt"] {
+                let path = root.join(name);
+                let actual = fs::metadata(&path).unwrap();
+                assert_eq!(actual.modified().unwrap(), archived_time());
+                assert_eq!(
+                    actual.permissions().mode() & 0o200 == 0,
+                    restore_permissions
+                );
+                // Restore traversal/write access for cleanup, parent first.
+                fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+            }
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn directory_replacement_is_not_given_archived_metadata() {
+        let root = temp_dir("directory-replacement");
+        let opts = ExtractOptions::default();
+        let ctl = ControlToken::default();
+        let mut sink = ExtractSink::new(&root, &opts, 0, &NoProgress).unwrap();
+        let mut meta = directory_meta("folder");
+        meta.modified = Some(archived_time());
+        sink.write_meta_entry(&meta, &NoProgress, &ctl).unwrap();
+        fs::rename(root.join("folder"), root.join("original")).unwrap();
+        fs::create_dir(root.join("folder")).unwrap();
+        let before = fs::metadata(root.join("folder"))
+            .unwrap()
+            .modified()
+            .unwrap();
+
+        let error = sink.finish(&NoProgress, &ctl).unwrap_err();
+        assert!(error.is_destination_changed(), "{error:?}");
+        assert_eq!(
+            fs::metadata(root.join("folder"))
+                .unwrap()
+                .modified()
+                .unwrap(),
+            before
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn deferred_metadata_never_follows_replaced_directory_or_ancestor() {
+        for name in ["folder", "folder/child"] {
+            let root = temp_dir(&format!("directory-symlink-{}", name.replace('/', "-")));
+            let destination = root.join("out");
+            let outside = root.join("outside");
+            fs::create_dir_all(outside.join("child")).unwrap();
+            let opts = ExtractOptions::default();
+            let ctl = ControlToken::default();
+            let mut sink = ExtractSink::new(&destination, &opts, 0, &NoProgress).unwrap();
+            let mut meta = directory_meta(name);
+            meta.modified = Some(archived_time());
+            sink.write_meta_entry(&meta, &NoProgress, &ctl).unwrap();
+            fs::rename(destination.join("folder"), destination.join("original")).unwrap();
+            std::os::unix::fs::symlink(&outside, destination.join("folder")).unwrap();
+            let before: Vec<_> = [&outside, &outside.join("child")]
+                .into_iter()
+                .map(|path| fs::metadata(path).unwrap().modified().unwrap())
+                .collect();
+
+            assert!(sink.finish(&NoProgress, &ctl).is_err());
+            for (path, expected) in [&outside, &outside.join("child")].into_iter().zip(before) {
+                assert_eq!(fs::metadata(path).unwrap().modified().unwrap(), expected);
+            }
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn directory_finalization_reports_a_separate_cancellable_phase() {
+        #[derive(Debug, PartialEq)]
+        enum Event {
+            Phase(ProgressPhase, bool),
+            Progress(u64, u64, String),
+        }
+        #[derive(Default)]
+        struct Events(std::sync::Mutex<Vec<Event>>);
+        impl ProgressSink for Events {
+            fn on_phase(&self, phase: ProgressPhase, interruptible: bool) {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push(Event::Phase(phase, interruptible));
+            }
+            fn on_progress(&self, done: u64, total: u64, current: &EntryPath) {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push(Event::Progress(done, total, current.display.clone()));
+            }
+        }
+        for has_directory in [false, true] {
+            let root = temp_dir(&format!("directory-phase-{has_directory}"));
+            let opts = ExtractOptions::default();
+            let ctl = ControlToken::default();
+            let events = Events::default();
+            let mut sink = ExtractSink::new(&root, &opts, 3, &events).unwrap();
+            if has_directory {
+                let mut directory = directory_meta("folder");
+                directory.modified = Some(archived_time());
+                sink.write_meta_entry(&directory, &events, &ctl).unwrap();
+            }
+            let file = file_meta("report.txt");
+            let out = sink.file_target(&file, &events, &ctl).unwrap().unwrap();
+            sink.write_file(&file, &out, &mut Cursor::new(b"new"), &events, &ctl)
+                .unwrap();
+            let report = sink.finish_with_report(&events, &ctl).unwrap();
+            assert_eq!(report.output_bytes, 3);
+            let recorded = events.0.lock().unwrap();
+            assert_eq!(
+                recorded.first(),
+                Some(&Event::Phase(ProgressPhase::ExtractEntries, true))
+            );
+            let metadata = recorded
+                .iter()
+                .position(|event| *event == Event::Phase(ProgressPhase::ExtractMetadata, true));
+            if has_directory {
+                assert_eq!(
+                    &recorded[metadata.unwrap()..],
+                    &[
+                        Event::Phase(ProgressPhase::ExtractMetadata, true),
+                        Event::Progress(0, 0, "folder".into()),
+                        Event::Progress(3, 3, String::new()),
+                    ]
+                );
+                assert_eq!(
+                    fs::metadata(root.join("folder"))
+                        .unwrap()
+                        .modified()
+                        .unwrap(),
+                    archived_time()
+                );
+            } else {
+                assert_eq!(metadata, None);
+                assert_eq!(recorded.last(), Some(&Event::Progress(3, 3, String::new())));
+            }
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn cancellation_during_directory_finalization_prevents_metadata_and_completion() {
+        struct CancelOnDirectory {
+            ctl: ControlToken,
+            events: std::sync::Mutex<Vec<(u64, u64, EntryPath)>>,
+        }
+        impl ProgressSink for CancelOnDirectory {
+            fn on_progress(&self, done: u64, total: u64, current: &EntryPath) {
+                self.events
+                    .lock()
+                    .unwrap()
+                    .push((done, total, current.clone()));
+                self.ctl.cancel();
+            }
+        }
+        let root = temp_dir("directory-cancel");
+        let opts = ExtractOptions::default();
+        let ctl = ControlToken::default();
+        let mut sink = ExtractSink::new(&root, &opts, 0, &NoProgress).unwrap();
+        let mut meta = directory_meta("folder");
+        meta.modified = Some(archived_time());
+        sink.write_meta_entry(&meta, &NoProgress, &ctl).unwrap();
+        let before = fs::metadata(root.join("folder"))
+            .unwrap()
+            .modified()
+            .unwrap();
+        let progress = CancelOnDirectory {
+            ctl: ctl.clone(),
+            events: Default::default(),
+        };
+        assert!(matches!(
+            sink.finish(&progress, &ctl),
+            Err(FormatError::Cancelled)
+        ));
+        assert_eq!(*progress.events.lock().unwrap(), [(0, 0, meta.path)]);
+        assert_eq!(
+            fs::metadata(root.join("folder"))
+                .unwrap()
+                .modified()
+                .unwrap(),
+            before
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     fn extract_temp_paths(dir: &Path) -> Vec<PathBuf> {
@@ -1271,7 +1601,11 @@ mod tests {
             panic!("an explicitly empty selection must not list the archive")
         }
 
-        fn read_entry(&mut self, _path: &EntryPath) -> Result<Box<dyn Read + '_>, FormatError> {
+        fn read_entry(
+            &mut self,
+            _path: &EntryPath,
+            _consume: &mut dyn FnMut(&mut dyn Read) -> Result<(), FormatError>,
+        ) -> Result<(), FormatError> {
             panic!("an explicitly empty selection must not read an entry")
         }
 
@@ -1293,7 +1627,11 @@ mod tests {
             Box::new(self.entries.clone().into_iter().map(Ok))
         }
 
-        fn read_entry(&mut self, _path: &EntryPath) -> Result<Box<dyn Read + '_>, FormatError> {
+        fn read_entry(
+            &mut self,
+            _path: &EntryPath,
+            _consume: &mut dyn FnMut(&mut dyn Read) -> Result<(), FormatError>,
+        ) -> Result<(), FormatError> {
             panic!("dangling link tests must not read file content")
         }
 
@@ -1422,14 +1760,16 @@ mod tests {
         let root = temp_dir("hardlink-preexisting-source");
         fs::write(root.join("preexisting.txt"), b"private").unwrap();
         let opts = ExtractOptions::default();
-        let mut sink = ExtractSink::new(&root, &opts, 0).unwrap();
+        let mut sink = ExtractSink::new(&root, &opts, 0, &NoProgress).unwrap();
         let meta = hardlink_meta("copied.txt", "preexisting.txt");
 
         sink.write_meta_entry(&meta, &NoProgress, &ControlToken::default())
             .unwrap();
 
         assert!(!root.join("copied.txt").exists());
-        let report = sink.finish_with_report(&NoProgress);
+        let report = sink
+            .finish_with_report(&NoProgress, &ControlToken::default())
+            .unwrap();
         assert_eq!(report.selected_entries, 1);
         assert_eq!(report.skipped, 1);
         assert_eq!(report.created + report.replaced + report.renamed, 0);
@@ -1444,7 +1784,7 @@ mod tests {
             symlinks: SymlinkPolicy::Follow,
             ..ExtractOptions::default()
         };
-        let mut sink = ExtractSink::new(&root, &opts, 0).unwrap();
+        let mut sink = ExtractSink::new(&root, &opts, 0, &NoProgress).unwrap();
         let mut meta = dangling_symlink_meta("copied.txt");
         meta.entry_type = EntryType::Symlink {
             target: b"preexisting.txt".to_vec(),
@@ -1454,7 +1794,9 @@ mod tests {
             .unwrap();
 
         assert!(!root.join("copied.txt").exists());
-        let report = sink.finish_with_report(&NoProgress);
+        let report = sink
+            .finish_with_report(&NoProgress, &ControlToken::default())
+            .unwrap();
         assert_eq!(report.selected_entries, 1);
         assert_eq!(report.skipped, 1);
         assert_eq!(report.output_bytes, 0);
@@ -1472,7 +1814,7 @@ mod tests {
         fs::write(outside.join("secret.txt"), b"private").unwrap();
         std::os::unix::fs::symlink(&outside, destination.join("escape")).unwrap();
         let opts = ExtractOptions::default();
-        let mut sink = ExtractSink::new(&destination, &opts, 0).unwrap();
+        let mut sink = ExtractSink::new(&destination, &opts, 0, &NoProgress).unwrap();
         let meta = hardlink_meta("copied.txt", "escape/secret.txt");
 
         sink.write_meta_entry(&meta, &NoProgress, &ControlToken::default())
@@ -1480,7 +1822,9 @@ mod tests {
 
         assert!(!destination.join("copied.txt").exists());
         assert_eq!(fs::read(outside.join("secret.txt")).unwrap(), b"private");
-        let report = sink.finish_with_report(&NoProgress);
+        let report = sink
+            .finish_with_report(&NoProgress, &ControlToken::default())
+            .unwrap();
         assert_eq!(report.skipped, 1);
         fs::remove_dir_all(&root).unwrap();
     }
@@ -1494,8 +1838,9 @@ mod tests {
             symlinks: SymlinkPolicy::Follow,
             ..ExtractOptions::default()
         };
-        let mut sink = ExtractSink::new(&root, &opts, 3).unwrap();
-        let source_meta = file_meta("source.txt");
+        let mut sink = ExtractSink::new(&root, &opts, 3, &NoProgress).unwrap();
+        let mut source_meta = file_meta("source.txt");
+        source_meta.modified = Some(archived_time());
         let source_output = sink
             .file_target(&source_meta, &NoProgress, &ControlToken::default())
             .unwrap()
@@ -1510,7 +1855,8 @@ mod tests {
         .unwrap();
         assert_eq!(source_output, root.join("source (1).txt"));
 
-        let hardlink = hardlink_meta("hard.txt", "source.txt");
+        let mut hardlink = hardlink_meta("hard.txt", "source.txt");
+        hardlink.modified = Some(UNIX_EPOCH);
         sink.write_meta_entry(&hardlink, &NoProgress, &ControlToken::default())
             .unwrap();
         let mut followed = dangling_symlink_meta("followed.txt");
@@ -1523,7 +1869,15 @@ mod tests {
         assert_eq!(fs::read(root.join("source.txt")).unwrap(), b"old");
         assert_eq!(fs::read(root.join("hard.txt")).unwrap(), b"new");
         assert_eq!(fs::read(root.join("followed.txt")).unwrap(), b"new");
-        let report = sink.finish_with_report(&NoProgress);
+        for name in ["source (1).txt", "hard.txt", "followed.txt"] {
+            assert_eq!(
+                fs::metadata(root.join(name)).unwrap().modified().unwrap(),
+                archived_time()
+            );
+        }
+        let report = sink
+            .finish_with_report(&NoProgress, &ControlToken::default())
+            .unwrap();
         assert_eq!(report.selected_entries, 3);
         assert_eq!(report.renamed, 1);
         assert_eq!(report.created, 2);
@@ -1535,13 +1889,18 @@ mod tests {
     fn skipped_file_is_not_available_as_single_pass_link_provenance() {
         let root = temp_dir("link-skipped-provenance");
         fs::write(root.join("source.txt"), b"old").unwrap();
+        let original_modified = fs::metadata(root.join("source.txt"))
+            .unwrap()
+            .modified()
+            .unwrap();
         let opts = ExtractOptions {
             overwrite: OverwritePolicy::Skip,
             symlinks: SymlinkPolicy::Follow,
             ..ExtractOptions::default()
         };
-        let mut sink = ExtractSink::new(&root, &opts, 3).unwrap();
-        let source_meta = file_meta("source.txt");
+        let mut sink = ExtractSink::new(&root, &opts, 3, &NoProgress).unwrap();
+        let mut source_meta = file_meta("source.txt");
+        source_meta.modified = Some(archived_time());
 
         assert!(sink
             .file_target(&source_meta, &NoProgress, &ControlToken::default())
@@ -1552,7 +1911,16 @@ mod tests {
             .unwrap();
 
         assert!(!root.join("hard.txt").exists());
-        let report = sink.finish_with_report(&NoProgress);
+        assert_eq!(
+            fs::metadata(root.join("source.txt"))
+                .unwrap()
+                .modified()
+                .unwrap(),
+            original_modified
+        );
+        let report = sink
+            .finish_with_report(&NoProgress, &ControlToken::default())
+            .unwrap();
         assert_eq!(report.selected_entries, 2);
         assert_eq!(report.skipped, 2);
         assert_eq!(report.created + report.replaced + report.renamed, 0);
@@ -1563,7 +1931,7 @@ mod tests {
     fn single_pass_hardlink_provenance_keeps_distinct_raw_entry_names() {
         let root = temp_dir("link-raw-provenance");
         let opts = ExtractOptions::default();
-        let mut sink = ExtractSink::new(&root, &opts, 6).unwrap();
+        let mut sink = ExtractSink::new(&root, &opts, 6, &NoProgress).unwrap();
         let mut first = file_meta("first.txt");
         first.path = EntryPath::from_raw(vec![0x80], "first.txt".into(), "legacy");
         let mut second = file_meta("second.txt");
@@ -1599,7 +1967,7 @@ mod tests {
         let outside = root.join("outside.txt");
         fs::write(&outside, b"outside").unwrap();
         let opts = ExtractOptions::default();
-        let mut sink = ExtractSink::new(&root, &opts, 3).unwrap();
+        let mut sink = ExtractSink::new(&root, &opts, 3, &NoProgress).unwrap();
         let source_meta = file_meta("source.txt");
         let source = sink
             .file_target(&source_meta, &NoProgress, &ControlToken::default())
@@ -1701,8 +2069,9 @@ mod tests {
             overwrite: OverwritePolicy::Overwrite,
             ..ExtractOptions::default()
         };
-        let mut sink = ExtractSink::new(&dir, &opts, 3).unwrap();
-        let meta = file_meta("note.txt");
+        let mut sink = ExtractSink::new(&dir, &opts, 3, &NoProgress).unwrap();
+        let mut meta = file_meta("note.txt");
+        meta.modified = Some(archived_time());
         let out = sink
             .file_target(&meta, &NoProgress, &ControlToken::default())
             .unwrap()
@@ -1719,8 +2088,14 @@ mod tests {
         .unwrap();
 
         assert_eq!(fs::read(&target).unwrap(), b"new");
+        assert_eq!(
+            fs::metadata(&target).unwrap().modified().unwrap(),
+            archived_time()
+        );
         assert!(extract_temp_paths(&dir).is_empty());
-        let report = sink.finish_with_report(&NoProgress);
+        let report = sink
+            .finish_with_report(&NoProgress, &ControlToken::default())
+            .unwrap();
         assert_eq!(report.destination, dir);
         assert_eq!(report.selected_entries, 1);
         assert_eq!(report.replaced, 1);
@@ -1734,12 +2109,14 @@ mod tests {
         let dir = temp_dir("atomic-read-failure");
         let target = dir.join("note.txt");
         fs::write(&target, b"old").unwrap();
+        let original_modified = fs::metadata(&target).unwrap().modified().unwrap();
         let opts = ExtractOptions {
             overwrite: OverwritePolicy::Overwrite,
             ..ExtractOptions::default()
         };
-        let mut sink = ExtractSink::new(&dir, &opts, 3).unwrap();
-        let meta = file_meta("note.txt");
+        let mut sink = ExtractSink::new(&dir, &opts, 3, &NoProgress).unwrap();
+        let mut meta = file_meta("note.txt");
+        meta.modified = Some(archived_time());
         let out = sink
             .file_target(&meta, &NoProgress, &ControlToken::default())
             .unwrap()
@@ -1759,6 +2136,10 @@ mod tests {
 
         assert!(matches!(error, FormatError::Io(_)), "{error:?}");
         assert_eq!(fs::read(&target).unwrap(), b"old");
+        assert_eq!(
+            fs::metadata(&target).unwrap().modified().unwrap(),
+            original_modified
+        );
         assert!(extract_temp_paths(&dir).is_empty());
         fs::remove_dir_all(&dir).unwrap();
     }
@@ -1768,12 +2149,14 @@ mod tests {
         let dir = temp_dir("atomic-cancel");
         let target = dir.join("note.txt");
         fs::write(&target, b"old").unwrap();
+        let original_modified = fs::metadata(&target).unwrap().modified().unwrap();
         let opts = ExtractOptions {
             overwrite: OverwritePolicy::Overwrite,
             ..ExtractOptions::default()
         };
-        let mut sink = ExtractSink::new(&dir, &opts, 3).unwrap();
-        let meta = file_meta("note.txt");
+        let mut sink = ExtractSink::new(&dir, &opts, 3, &NoProgress).unwrap();
+        let mut meta = file_meta("note.txt");
+        meta.modified = Some(archived_time());
         let ctl = ControlToken::new();
         let out = sink.file_target(&meta, &NoProgress, &ctl).unwrap().unwrap();
         ctl.cancel();
@@ -1783,6 +2166,10 @@ mod tests {
 
         assert!(matches!(error, FormatError::Cancelled), "{error:?}");
         assert_eq!(fs::read(&target).unwrap(), b"old");
+        assert_eq!(
+            fs::metadata(&target).unwrap().modified().unwrap(),
+            original_modified
+        );
         assert!(extract_temp_paths(&dir).is_empty());
         fs::remove_dir_all(&dir).unwrap();
     }
@@ -1800,7 +2187,7 @@ mod tests {
             },
             ..ExtractOptions::default()
         };
-        let mut sink = ExtractSink::new(&dir, &opts, 3).unwrap();
+        let mut sink = ExtractSink::new(&dir, &opts, 3, &NoProgress).unwrap();
         let meta = file_meta("note.txt");
         let out = sink
             .file_target(&meta, &NoProgress, &ControlToken::default())
@@ -1836,7 +2223,7 @@ mod tests {
             },
             ..ExtractOptions::default()
         };
-        let mut sink = ExtractSink::new(&dir, &opts, 1).unwrap();
+        let mut sink = ExtractSink::new(&dir, &opts, 1, &NoProgress).unwrap();
         let mut meta = file_meta("expanded.txt");
         meta.size = 1;
         meta.compressed_size = Some(1024);
@@ -1873,7 +2260,7 @@ mod tests {
             overwrite: OverwritePolicy::Skip,
             ..ExtractOptions::default()
         };
-        let mut sink = ExtractSink::new(&dir, &opts, 3).unwrap();
+        let mut sink = ExtractSink::new(&dir, &opts, 3, &NoProgress).unwrap();
         let meta = file_meta("note.txt");
         let out = sink
             .file_target(&meta, &NoProgress, &ControlToken::default())
@@ -1899,7 +2286,9 @@ mod tests {
         }
         assert_eq!(fs::read(&target).unwrap(), b"racer");
         assert!(extract_temp_paths(&dir).is_empty());
-        let report = sink.finish_with_report(&NoProgress);
+        let report = sink
+            .finish_with_report(&NoProgress, &ControlToken::default())
+            .unwrap();
         assert_eq!(report.selected_entries, 1);
         assert_eq!(report.created, 0);
         assert_eq!(report.replaced, 0);
@@ -1918,7 +2307,7 @@ mod tests {
             best_effort: true,
             ..ExtractOptions::default()
         };
-        let mut sink = ExtractSink::new(&dir, &opts, 3).unwrap();
+        let mut sink = ExtractSink::new(&dir, &opts, 3, &NoProgress).unwrap();
         let meta = file_meta("note.txt");
         let out = sink
             .file_target(&meta, &NoProgress, &ControlToken::default())
@@ -1954,7 +2343,7 @@ mod tests {
             best_effort: true,
             ..ExtractOptions::default()
         };
-        let mut sink = ExtractSink::new(&dir, &opts, 3).unwrap();
+        let mut sink = ExtractSink::new(&dir, &opts, 3, &NoProgress).unwrap();
         let meta = file_meta("note.txt");
         let out = sink
             .file_target(&meta, &NoProgress, &ControlToken::default())
@@ -1977,7 +2366,9 @@ mod tests {
         assert!(!wrote);
         assert_eq!(fs::read(&target).unwrap(), b"old");
         assert!(extract_temp_paths(&dir).is_empty());
-        let report = sink.finish_with_report(&NoProgress);
+        let report = sink
+            .finish_with_report(&NoProgress, &ControlToken::default())
+            .unwrap();
         assert_eq!(report.selected_entries, 1);
         assert_eq!(report.failed, 1);
         assert_eq!(report.created + report.replaced + report.renamed, 0);
@@ -1992,7 +2383,7 @@ mod tests {
             best_effort: true,
             ..ExtractOptions::default()
         };
-        let mut sink = ExtractSink::new(&dir, &opts, 3).unwrap();
+        let mut sink = ExtractSink::new(&dir, &opts, 3, &NoProgress).unwrap();
         let meta = file_meta("note.txt");
         let out = sink
             .file_target(&meta, &NoProgress, &ControlToken::default())
@@ -2007,7 +2398,9 @@ mod tests {
         );
 
         assert!(sink.pending_outputs.is_empty());
-        let report = sink.finish_with_report(&NoProgress);
+        let report = sink
+            .finish_with_report(&NoProgress, &ControlToken::default())
+            .unwrap();
         assert_eq!(report.selected_entries, 1);
         assert_eq!(report.failed, 1);
         assert_eq!(report.skipped, 0);
@@ -2024,7 +2417,7 @@ mod tests {
         fs::create_dir_all(&outside).unwrap();
         std::os::unix::fs::symlink(&outside, destination.join("escape")).unwrap();
         let opts = ExtractOptions::default();
-        let mut sink = ExtractSink::new(&destination, &opts, 0).unwrap();
+        let mut sink = ExtractSink::new(&destination, &opts, 0, &NoProgress).unwrap();
         let meta = directory_meta("escape/new/leaf");
 
         let error = sink
@@ -2047,7 +2440,7 @@ mod tests {
             overwrite: OverwritePolicy::Overwrite,
             ..ExtractOptions::default()
         };
-        let mut sink = ExtractSink::new(&dir, &opts, 3).unwrap();
+        let mut sink = ExtractSink::new(&dir, &opts, 3, &NoProgress).unwrap();
         let meta = file_meta("note.txt");
         let out = sink
             .file_target(&meta, &NoProgress, &ControlToken::default())
@@ -2080,7 +2473,7 @@ mod tests {
             overwrite: OverwritePolicy::Overwrite,
             ..ExtractOptions::default()
         };
-        let mut sink = ExtractSink::new(&dir, &opts, 3).unwrap();
+        let mut sink = ExtractSink::new(&dir, &opts, 3, &NoProgress).unwrap();
         let meta = file_meta("note.txt");
         let out = sink
             .file_target(&meta, &NoProgress, &ControlToken::default())
@@ -2125,6 +2518,182 @@ mod tests {
         assert_eq!(fs::read(&target).unwrap(), b"old");
         assert!(extract_temp_paths(&dir).is_empty());
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn preserved_symlinks_restore_their_own_times_and_keep_conflicting_outputs() {
+        let dir = temp_dir("symlink-metadata");
+        fs::write(dir.join("source.txt"), b"source contents").unwrap();
+        fs::create_dir(dir.join("source-dir")).unwrap();
+        let target_times = ["source.txt", "source-dir"]
+            .map(|name| fs::metadata(dir.join(name)).unwrap().modified().unwrap());
+        let expected = archived_time() + Duration::from_nanos(123_456_700);
+        for (index, policy) in [
+            OverwritePolicy::Skip,
+            OverwritePolicy::Overwrite,
+            OverwritePolicy::RenameBoth,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let opts = ExtractOptions {
+                overwrite: policy,
+                ..ExtractOptions::default()
+            };
+            let mut sink = ExtractSink::new(&dir, &opts, 0, &NoProgress).unwrap();
+            for (source_index, source) in ["source.txt", "source-dir", "missing"]
+                .into_iter()
+                .enumerate()
+            {
+                for conflict in [false, true] {
+                    let name = format!("link-{index}-{source_index}-{conflict}");
+                    let target = dir.join(&name);
+                    let before = conflict.then(|| {
+                        fs::write(&target, b"existing contents").unwrap();
+                        fs::metadata(&target).unwrap().modified().unwrap()
+                    });
+                    let mut meta = dangling_symlink_meta(&name);
+                    meta.entry_type = EntryType::Symlink {
+                        target: source.as_bytes().to_vec(),
+                    };
+                    meta.modified = Some(expected);
+                    sink.write_meta_entry(&meta, &NoProgress, &ControlToken::default())
+                        .unwrap();
+                    if conflict && policy == OverwritePolicy::Skip {
+                        assert_eq!(fs::read(&target).unwrap(), b"existing contents");
+                        assert_eq!(
+                            fs::metadata(&target).unwrap().modified().unwrap(),
+                            before.unwrap()
+                        );
+                        continue;
+                    }
+                    let published = if conflict && policy == OverwritePolicy::RenameBoth {
+                        assert_eq!(fs::read(&target).unwrap(), b"existing contents");
+                        assert_eq!(
+                            fs::metadata(&target).unwrap().modified().unwrap(),
+                            before.unwrap()
+                        );
+                        dir.join(format!("{name} (1)"))
+                    } else {
+                        target
+                    };
+                    let metadata = fs::symlink_metadata(&published).unwrap();
+                    assert!(metadata.file_type().is_symlink());
+                    assert_eq!(metadata.modified().unwrap(), expected);
+                    assert_eq!(fs::read_link(published).unwrap(), Path::new(source));
+                }
+            }
+            sink.finish(&NoProgress, &ControlToken::default()).unwrap();
+        }
+        for (name, before) in ["source.txt", "source-dir"].into_iter().zip(target_times) {
+            assert_eq!(
+                fs::metadata(dir.join(name)).unwrap().modified().unwrap(),
+                before
+            );
+        }
+        assert_eq!(
+            fs::read(dir.join("source.txt")).unwrap(),
+            b"source contents"
+        );
+        assert!(extract_temp_paths(&dir).is_empty());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn symlink_cancellation_after_progress_keeps_existing_output() {
+        struct CancelOnEntry(ControlToken);
+        impl ProgressSink for CancelOnEntry {
+            fn on_progress(&self, _: u64, _: u64, _: &EntryPath) {
+                self.0.cancel();
+            }
+        }
+        let dir = temp_dir("symlink-metadata-cancel");
+        let target = dir.join("link");
+        fs::write(&target, b"existing contents").unwrap();
+        let before = fs::metadata(&target).unwrap().modified().unwrap();
+        let opts = ExtractOptions {
+            overwrite: OverwritePolicy::Overwrite,
+            ..ExtractOptions::default()
+        };
+        let mut sink = ExtractSink::new(&dir, &opts, 0, &NoProgress).unwrap();
+        let mut meta = dangling_symlink_meta("link");
+        meta.modified = Some(archived_time());
+        let ctl = ControlToken::default();
+        let result = sink.write_meta_entry(&meta, &CancelOnEntry(ctl.clone()), &ctl);
+        assert!(matches!(result, Err(FormatError::Cancelled)));
+        assert_eq!(fs::read(&target).unwrap(), b"existing contents");
+        assert_eq!(fs::metadata(&target).unwrap().modified().unwrap(), before);
+        assert!(extract_temp_paths(&dir).is_empty());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn symlink_publication_preserves_links_when_hard_links_follow_the_source() {
+        let dir = temp_dir("publish-symlink-as-link");
+        fs::write(dir.join("source.txt"), b"source contents").unwrap();
+        fs::create_dir(dir.join("source-dir")).unwrap();
+        fs::write(dir.join("source-dir/keep.txt"), b"keep directory contents").unwrap();
+        for (index, (source, directory)) in [
+            ("source.txt", false),
+            ("source-dir", true),
+            ("missing.txt", false),
+            ("missing-dir", true),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let target = dir.join(format!("link-{index}"));
+            let pending = PendingOutput::symlink(Path::new(source), &target, directory)
+                .unwrap()
+                .expect("symlink creation permission is required for this test");
+            pending
+                .commit_using(
+                    &target,
+                    false,
+                    // CreateHardLink on Windows follows the source symlink.
+                    |from, to| fs::hard_link(from.canonicalize()?, to),
+                    |from, to| fs::rename(from, to),
+                )
+                .unwrap();
+            assert!(fs::symlink_metadata(&target)
+                .unwrap()
+                .file_type()
+                .is_symlink());
+            assert_eq!(fs::read_link(&target).unwrap(), Path::new(source));
+        }
+        assert_eq!(
+            fs::read(dir.join("source.txt")).unwrap(),
+            b"source contents"
+        );
+        assert_eq!(
+            fs::read(dir.join("source-dir/keep.txt")).unwrap(),
+            b"keep directory contents"
+        );
+        assert!(extract_temp_paths(&dir).is_empty());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn symlink_publication_preserves_a_late_conflict_and_cleans_staging() {
+        let dir = temp_dir("publish-symlink-conflict");
+        for directory in [false, true] {
+            let target = dir.join(format!("link-{directory}"));
+            let pending = PendingOutput::symlink(Path::new("missing"), &target, directory)
+                .unwrap()
+                .expect("symlink creation permission is required for this test");
+            fs::write(&target, b"competing output").unwrap();
+            let error = pending.commit(&target, false).unwrap_err();
+            assert!(
+                matches!(error, FormatError::Io(ref error) if error.kind() == std::io::ErrorKind::AlreadyExists)
+            );
+            assert_eq!(fs::read(&target).unwrap(), b"competing output");
+            assert!(extract_temp_paths(&dir).is_empty());
+        }
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[cfg(unix)]
@@ -2194,7 +2763,7 @@ mod tests {
             overwrite: OverwritePolicy::Overwrite,
             ..ExtractOptions::default()
         };
-        let mut sink = ExtractSink::new(&dir, &opts, 3).unwrap();
+        let mut sink = ExtractSink::new(&dir, &opts, 3, &NoProgress).unwrap();
         let meta = file_meta("note.txt");
         let ctl = ControlToken::new();
         let out = sink.file_target(&meta, &NoProgress, &ctl).unwrap().unwrap();

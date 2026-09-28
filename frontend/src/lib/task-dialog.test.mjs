@@ -902,6 +902,40 @@ test("SFX result and recovery details use the durable single-backup contract", a
   }
 });
 
+test("archive opening hides stale byte counters and transitions to entry work", async () => {
+  const server = await createTestServer();
+  try {
+    const { loadLocale } = await server.ssrLoadModule("/src/lib/i18n.svelte.ts");
+    const dialog = await server.ssrLoadModule("/src/lib/task-dialog.ts");
+    for (const [locale, opening, archiveLabel] of [
+      ["en-US", "Reading archive", "Current archive"],
+      ["zh-CN", "正在读取压缩包", "当前压缩包"],
+    ]) {
+      await loadLocale(locale);
+      const task = sfxTask({ state: "running", phase: "archive_open", current: "backup.sqz", currentDone: 500, currentTotal: 500, speed: 500, result: null });
+      assert.equal(dialog.taskOverallProgressBadge(task), opening);
+      assert.equal(dialog.taskCurrentSectionLabel(task), archiveLabel);
+      assert.equal(dialog.taskCurrentLabel(task), "backup.sqz");
+      assert.equal(dialog.taskOverallProgressIndeterminate(task), true);
+      assert.equal(dialog.taskProgressPercent(task), 0);
+      assert.equal(dialog.hasTaskCurrentProgress(task), false);
+      assert.equal(dialog.taskCurrentProgressSummary(task), opening);
+      assert.doesNotMatch(dialog.taskProgressSummary(task), /100%|\/s|500/u);
+      assert.equal(dialog.taskPhaseControlNoticeVisible(task), false);
+      for (const phase of ["archive_test", "archive_convert", "extract_entries"]) {
+        const active = { ...task, phase, done: 25, total: 100 };
+        assert.equal(dialog.taskOverallProgressBadge(active), "25%");
+        assert.equal(dialog.taskOverallProgressIndeterminate(active), false);
+      }
+      const cancelled = { ...task, state: "cancelled" };
+      assert.equal(dialog.taskOverallProgressBadge(cancelled), dialog.taskStateLabel("cancelled"));
+      assert.equal(dialog.taskOverallProgressBadge({ ...task, state: "paused" }), dialog.taskStateLabel("paused"));
+    }
+  } finally {
+    await server.close();
+  }
+});
+
 test("task questions keep empty passwords pending and normalize conflict scope", async () => {
   const server = await createTestServer();
 

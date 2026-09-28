@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use squallz_core::api::PhysicalFileIdentity;
+use squallz_core::api::{check_windows_portability, PhysicalFileIdentity};
 use squallz_core::{
     open_directory_no_follow, open_regular_file_no_follow, open_regular_file_no_follow_read_write,
     physical_file_identity, physical_path_identity,
@@ -24,6 +24,8 @@ const OWNER_RECORD_VERSION: &str = "squallz-preview-v1";
 const MAX_OWNER_RECORD_BYTES: u64 = 512;
 const MAX_REGISTRY_ENTRIES: usize = 1_024;
 const MAX_WORKSPACE_ENTRIES: usize = 256;
+const MAX_PREVIEW_NAME_BYTES: usize = 255;
+const MAX_PREVIEW_EXTENSION_BYTES: usize = 16;
 static REGISTRY_MUTEX: Mutex<()> = Mutex::new(());
 static NEXT_WORKSPACE: AtomicU64 = AtomicU64::new(0);
 
@@ -31,6 +33,7 @@ static NEXT_WORKSPACE: AtomicU64 = AtomicU64::new(0);
 struct WorkspaceRecord {
     workspace: String,
     token: String,
+    file_name: Option<String>,
 }
 
 impl WorkspaceRecord {
@@ -38,15 +41,21 @@ impl WorkspaceRecord {
         Self {
             workspace,
             token: format!("{nanos:032x}{sequence:016x}"),
+            file_name: None,
         }
     }
 
     fn bytes(&self) -> Vec<u8> {
-        format!(
+        let mut text = format!(
             "{OWNER_RECORD_VERSION}\n{}\n{}\n",
             self.workspace, self.token
-        )
-        .into_bytes()
+        );
+        if let Some(name) = &self.file_name {
+            text.push_str("file=");
+            text.push_str(name);
+            text.push('\n');
+        }
+        text.into_bytes()
     }
 
     fn parse(bytes: &[u8], expected_workspace: &str) -> Option<Self> {
@@ -57,8 +66,17 @@ impl WorkspaceRecord {
         }
         let workspace = lines.next()?;
         let token = lines.next()?;
-        if !lines.next()?.is_empty()
-            || lines.next().is_some()
+        let file_name = match lines.next()? {
+            "" => None,
+            line => {
+                let name = line.strip_prefix("file=")?;
+                if !safe_preview_name(name) || !lines.next()?.is_empty() {
+                    return None;
+                }
+                Some(name.to_owned())
+            }
+        };
+        if lines.next().is_some()
             || workspace != expected_workspace
             || !valid_workspace_name(workspace)
             || token.len() != 48
@@ -72,7 +90,40 @@ impl WorkspaceRecord {
         Some(Self {
             workspace: workspace.to_owned(),
             token: token.to_owned(),
+            file_name,
         })
+    }
+
+    fn allows_plaintext(&self, name: &OsStr) -> bool {
+        match &self.file_name {
+            Some(expected) => name == OsStr::new(expected),
+            None => plaintext_name_allowed(name),
+        }
+    }
+}
+
+/// An externally opened file owns its directory so duplicate archive names
+/// can retain their basename without sharing storage or cleanup ownership.
+pub(crate) struct PreviewFile {
+    workspace: PreviewWorkspace,
+    path: PathBuf,
+}
+
+impl PreviewFile {
+    pub(crate) fn id(&self) -> &str {
+        &self.workspace.record.workspace
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub(crate) fn root_path(&self) -> &Path {
+        self.workspace.path()
+    }
+
+    pub(crate) fn close(self) -> io::Result<()> {
+        self.workspace.try_cleanup()
     }
 }
 
@@ -86,6 +137,10 @@ pub(crate) struct PreviewWorkspace {
 
 impl PreviewWorkspace {
     pub(crate) fn create_in(base: &Path) -> io::Result<Self> {
+        Self::create(base, None)
+    }
+
+    fn create(base: &Path, file_name: Option<String>) -> io::Result<Self> {
         let _process_guard = lock_unpoisoned(&REGISTRY_MUTEX);
         let registry = base.join(REGISTRY_NAME);
         create_or_verify_private_directory(&registry)?;
@@ -107,7 +162,8 @@ impl PreviewWorkspace {
                 Err(error) => return Err(error),
             };
             fs4::FileExt::lock(&owner)?;
-            let record = WorkspaceRecord::new(workspace, sequence, nanos);
+            let mut record = WorkspaceRecord::new(workspace, sequence, nanos);
+            record.file_name = file_name;
             write_record(&mut owner, &record)?;
             verify_private_file_binding(&owner_path, &owner)?;
             create_private_directory(&path)?;
@@ -131,26 +187,49 @@ impl PreviewWorkspace {
         &self.path
     }
 
+    pub(crate) fn create_preview_file(
+        &self,
+        display_name: &str,
+    ) -> io::Result<(PreviewFile, File)> {
+        let base = self
+            .registry
+            .parent()
+            .ok_or_else(|| io::Error::other("preview registry has no parent"))?;
+        let name = preview_file_name(display_name);
+        let workspace = Self::create(base, Some(name.clone()))?;
+        let path = workspace.path.join(name);
+        let file = create_private_file(&path)?;
+        verify_private_file_binding(&path, &file)?;
+        Ok((PreviewFile { workspace, path }, file))
+    }
+
     pub(crate) fn cleanup(&self) {
+        let _ = self.try_cleanup();
+    }
+
+    fn try_cleanup(&self) -> io::Result<()> {
         let _process_guard = lock_unpoisoned(&REGISTRY_MUTEX);
-        let Ok(sweep_lock) = open_or_create_private_lock_file(&self.registry.join(SWEEP_LOCK_NAME))
-        else {
-            return;
+        let sweep_lock = open_or_create_private_lock_file(&self.registry.join(SWEEP_LOCK_NAME))?;
+        fs4::FileExt::lock(&sweep_lock)?;
+        let mut owner_guard = lock_unpoisoned(&self.owner);
+        let Some(owner) = owner_guard.as_ref() else {
+            return Ok(());
         };
-        if fs4::FileExt::lock(&sweep_lock).is_err() {
-            return;
+        let owner_identity = physical_file_identity(owner)?;
+        if !cleanup_owned_workspace(&self.path, &self.record)? {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "preview workspace ownership could not be verified",
+            ));
         }
-        let Some(owner) = lock_unpoisoned(&self.owner).take() else {
-            return;
-        };
-        let owner_identity = physical_file_identity(&owner).ok();
-        let cleaned = cleanup_owned_workspace(&self.path, &self.record).unwrap_or(false);
-        drop(owner);
-        if cleaned {
-            if let Some(identity) = owner_identity {
-                let _ = remove_private_file_if_bound(&self.owner_path, identity);
-            }
+        drop(owner_guard.take());
+        if !remove_private_file_if_bound(&self.owner_path, owner_identity)? {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "preview owner identity changed",
+            ));
         }
+        Ok(())
     }
 }
 
@@ -232,7 +311,7 @@ fn cleanup_owned_workspace(workspace: &Path, record: &WorkspaceRecord) -> io::Re
             };
             marker_matches = bytes == expected_marker;
             marker_identity = Some(identity);
-        } else if plaintext_name_allowed(&name) {
+        } else if record.allows_plaintext(&name) {
             if !is_private_regular_metadata(&fs::symlink_metadata(entry.path())?) {
                 return Ok(false);
             }
@@ -250,7 +329,7 @@ fn cleanup_owned_workspace(workspace: &Path, record: &WorkspaceRecord) -> io::Re
         if name == OsStr::new(MARKER_NAME) {
             continue;
         }
-        if !plaintext_name_allowed(&name) || !remove_private_regular_file(&entry.path())? {
+        if !record.allows_plaintext(&name) || !remove_private_regular_file(&entry.path())? {
             return Ok(false);
         }
     }
@@ -398,6 +477,35 @@ fn plaintext_name_allowed(name: &OsStr) -> bool {
             .as_bytes()
             .iter()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
+fn safe_preview_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= MAX_PREVIEW_NAME_BYTES
+        && name != "."
+        && name != ".."
+        && !name.eq_ignore_ascii_case(MARKER_NAME)
+        && !name.contains(['/', '\\'])
+        && !name.chars().any(char::is_control)
+        && check_windows_portability(name).is_ok()
+}
+
+fn preview_file_name(display_name: &str) -> String {
+    if safe_preview_name(display_name) {
+        return display_name.to_owned();
+    }
+    let extension = Path::new(display_name)
+        .extension()
+        .and_then(OsStr::to_str)
+        .filter(|extension| {
+            !extension.is_empty()
+                && extension.len() <= MAX_PREVIEW_EXTENSION_BYTES
+                && extension.bytes().all(|byte| byte.is_ascii_alphanumeric())
+        });
+    match extension {
+        Some(extension) => format!("preview.{}", extension.to_ascii_lowercase()),
+        None => "preview".to_owned(),
+    }
 }
 
 fn create_or_verify_private_directory(path: &Path) -> io::Result<()> {
@@ -645,6 +753,150 @@ mod tests {
     }
 
     #[test]
+    fn preview_names_keep_portable_basenames_and_use_safe_fallbacks() {
+        for name in [
+            "说明.txt",
+            "Annual report.PDF",
+            "résumé.md",
+            "name.no-dashes",
+        ] {
+            assert_eq!(preview_file_name(name), name);
+        }
+        for (name, expected) in [
+            ("", "preview"),
+            (".", "preview"),
+            ("..", "preview"),
+            ("../outside.txt", "preview.txt"),
+            (r"..\outside.txt", "preview.txt"),
+            ("C:outside.txt", "preview.txt"),
+            ("NUL.txt", "preview.txt"),
+            ("CON", "preview"),
+            ("bad\nname.txt", "preview.txt"),
+            ("bad\0name.txt", "preview.txt"),
+            ("bad?.PDF", "preview.pdf"),
+            ("bad?.no-dashes", "preview"),
+            ("bad?.thisextensionistoolong", "preview"),
+            ("trailing.", "preview"),
+            ("trailing ", "preview"),
+            (MARKER_NAME, "preview"),
+            (".SQUALLZ-PREVIEW", "preview"),
+        ] {
+            assert_eq!(preview_file_name(name), expected, "{name:?}");
+            assert!(safe_preview_name(expected));
+        }
+        assert_eq!(
+            preview_file_name(&format!("{}.txt", "中".repeat(100))),
+            "preview.txt"
+        );
+    }
+
+    #[test]
+    fn named_records_roundtrip_and_reject_unsafe_cleanup_targets() {
+        let mut record = WorkspaceRecord::new("workspace-1-2-3".to_owned(), 2, 3);
+        assert_eq!(
+            WorkspaceRecord::parse(&record.bytes(), &record.workspace),
+            Some(record.clone())
+        );
+        record.file_name = Some(format!("{}.txt", "x".repeat(251)));
+        assert!(record.bytes().len() as u64 <= MAX_OWNER_RECORD_BYTES);
+        assert_eq!(
+            WorkspaceRecord::parse(&record.bytes(), &record.workspace),
+            Some(record.clone())
+        );
+        record.file_name = Some("说明.txt".to_owned());
+        assert_eq!(
+            WorkspaceRecord::parse(&record.bytes(), &record.workspace),
+            Some(record.clone())
+        );
+        assert!(record.allows_plaintext(OsStr::new("说明.txt")));
+        assert!(!record.allows_plaintext(OsStr::new("entry-other.txt")));
+
+        for name in [
+            "../outside",
+            r"..\outside",
+            "/outside",
+            "NUL",
+            MARKER_NAME,
+            "a\nb",
+        ] {
+            record.file_name = Some(name.to_owned());
+            assert!(WorkspaceRecord::parse(&record.bytes(), &record.workspace).is_none());
+        }
+        record.file_name = Some("说明.txt".to_owned());
+        let mut extended = record.bytes();
+        extended.extend_from_slice(b"file=another.txt\n");
+        assert!(WorkspaceRecord::parse(&extended, &record.workspace).is_none());
+    }
+
+    #[test]
+    fn identical_preview_basenames_have_independent_storage_and_cleanup() -> io::Result<()> {
+        let base = tempfile::tempdir()?;
+        let parent = PreviewWorkspace::create_in(base.path())?;
+        let (first, mut first_writer) = parent.create_preview_file("说明.txt")?;
+        let (second, mut second_writer) = parent.create_preview_file("说明.txt")?;
+        first_writer.write_all(b"first")?;
+        second_writer.write_all(b"second")?;
+        drop((first_writer, second_writer));
+
+        assert_eq!(first.path().file_name(), Some(OsStr::new("说明.txt")));
+        assert_eq!(second.path().file_name(), Some(OsStr::new("说明.txt")));
+        assert_ne!(first.id(), second.id());
+        assert_ne!(first.root_path(), second.root_path());
+        let first_root = first.root_path().to_path_buf();
+        first.close()?;
+        assert!(!first_root.exists());
+        assert_eq!(fs::read(second.path())?, b"second");
+        assert!(parent.path().exists());
+        let second_root = second.root_path().to_path_buf();
+        second.close()?;
+        assert!(!second_root.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn named_cleanup_rejects_unknown_members_without_deleting_owned_content() -> io::Result<()> {
+        let base = tempfile::tempdir()?;
+        let parent = PreviewWorkspace::create_in(base.path())?;
+        let (preview, mut writer) = parent.create_preview_file("说明.txt")?;
+        writer.write_all(b"preview")?;
+        drop(writer);
+        let path = preview.path().to_path_buf();
+        let root = preview.root_path().to_path_buf();
+        let owner = preview.workspace.owner_path.clone();
+        let unrelated = root.join("entry-unrelated.txt");
+        write_private_test_file(&unrelated, b"do not remove")?;
+        assert!(preview.close().is_err());
+
+        let replacement = PreviewWorkspace::create_in(base.path())?;
+        assert_eq!(fs::read(&unrelated)?, b"do not remove");
+        assert_eq!(fs::read(path)?, b"preview");
+        assert!(root.exists());
+        assert!(owner.exists());
+        drop(replacement);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn named_cleanup_does_not_follow_a_replaced_preview_symlink() -> io::Result<()> {
+        let base = tempfile::tempdir()?;
+        let parent = PreviewWorkspace::create_in(base.path())?;
+        let (preview, writer) = parent.create_preview_file("说明.txt")?;
+        drop(writer);
+        let path = preview.path().to_path_buf();
+        let outside = base.path().join("outside.txt");
+        fs::write(&outside, b"outside")?;
+        fs::remove_file(&path)?;
+        std::os::unix::fs::symlink(&outside, &path)?;
+        assert!(preview.close().is_err());
+        let replacement = PreviewWorkspace::create_in(base.path())?;
+        assert!(path.symlink_metadata()?.file_type().is_symlink());
+        assert_eq!(fs::read(outside)?, b"outside");
+        drop(replacement);
+        Ok(())
+    }
+
+    #[test]
     fn live_workspace_is_not_reclaimed_by_another_instance() {
         let base = tempfile::tempdir().expect("test base should initialize");
         let first =
@@ -775,13 +1027,18 @@ mod tests {
             &workspace.path.join("nested-crash.zip"),
             b"private nested archive",
         )?;
+        let (preview, mut writer) = workspace.create_preview_file("说明.txt")?;
+        writer.write_all(b"private named preview")?;
+        writer.sync_all()?;
+        drop(writer);
         let workspace_name = workspace
             .path
             .file_name()
             .and_then(OsStr::to_str)
             .ok_or_else(|| io::Error::other("preview workspace name is not UTF-8"))?;
-        write_private_test_file(&base.join("worker.ready"), workspace_name.as_bytes())?;
-        wait_for_forced_termination(&workspace)
+        let ready = format!("{workspace_name}\n{}", preview.id());
+        write_private_test_file(&base.join("worker.ready"), ready.as_bytes())?;
+        wait_for_forced_termination(&(workspace, preview))
     }
 
     #[test]
@@ -794,16 +1051,28 @@ mod tests {
 
         let mut worker = CrashWorker::spawn(base.path())?;
         worker.wait_until_ready(&ready)?;
-        let workspace_name = String::from_utf8(fs::read(&ready)?)?;
+        let names = String::from_utf8(fs::read(&ready)?)?;
+        let (workspace_name, preview_name) = names
+            .split_once('\n')
+            .ok_or_else(|| io::Error::other("crash worker did not report both workspaces"))?;
         let registry = base.path().join(REGISTRY_NAME);
-        let crashed_workspace = registry.join(&workspace_name);
+        let crashed_workspace = registry.join(workspace_name);
         let crashed_owner = registry.join(format!("{workspace_name}{OWNER_SUFFIX}"));
+        let crashed_preview = registry.join(preview_name);
+        let preview_owner = registry.join(format!("{preview_name}{OWNER_SUFFIX}"));
         assert!(crashed_workspace.join("nested-crash.zip").is_file());
         assert!(crashed_owner.is_file());
+        assert_eq!(
+            fs::read(crashed_preview.join("说明.txt"))?,
+            b"private named preview"
+        );
+        assert!(preview_owner.is_file());
 
         let live_probe = PreviewWorkspace::create_in(base.path())?;
         assert!(crashed_workspace.exists());
         assert!(crashed_owner.exists());
+        assert!(crashed_preview.exists());
+        assert!(preview_owner.exists());
         drop(live_probe);
 
         let status = worker.force_kill_and_wait()?;
@@ -815,6 +1084,8 @@ mod tests {
         let replacement = PreviewWorkspace::create_in(base.path())?;
         assert!(!crashed_workspace.exists());
         assert!(!crashed_owner.exists());
+        assert!(!crashed_preview.exists());
+        assert!(!preview_owner.exists());
         assert_eq!(fs::read(&adjacent)?, b"do not touch");
         drop(replacement);
         Ok(())

@@ -57,13 +57,9 @@
         kind: "archive";
         preview: EntryPreviewView;
         canRename: boolean;
-        renameTarget: string;
-        renameStatus: string;
         canMove: boolean;
-        moveTarget: string;
-        normalizedMoveTarget: string;
-        moveTargetPresets: readonly string[];
-        moveStatus: string;
+        canTest: boolean;
+        canCopyOut: boolean;
         archive: ArchiveSummaryView | null;
         openArchiveFirst: string;
         archiveActionDisabledReason: string;
@@ -82,10 +78,8 @@
     onOpenPreview: () => void;
     onRevealPreview: () => void;
     onPreviewSelection: () => void;
-    onRenameTargetChange: (value: string) => void;
-    onCommitRenameTarget: () => void;
-    onMoveTargetChange: (value: string) => void;
-    onCommitMoveTarget: (target?: string) => void;
+    onRenameSelection: () => void;
+    onMoveSelection: () => void;
     onOpenRecovery: () => void;
     onTestArchive: () => void;
     onCopyOutSelection: () => void;
@@ -107,10 +101,8 @@
     onOpenPreview,
     onRevealPreview,
     onPreviewSelection,
-    onRenameTargetChange,
-    onCommitRenameTarget,
-    onMoveTargetChange,
-    onCommitMoveTarget,
+    onRenameSelection,
+    onMoveSelection,
     onOpenRecovery,
     onTestArchive,
     onCopyOutSelection,
@@ -223,7 +215,12 @@
       <div class="nested-preview-list">
         {#each view.preview.nested.rows as item}
           <div>
-            <span>{item.entry_type === "dir" ? "DIR" : "FILE"}</span>
+            {#if item.entry_type === "symlink" || item.entry_type === "hardlink"}
+              {@const label = (item.entry_type === "symlink" ? tr("gui.attr.symlink", "Symbolic link") : tr("gui.attr.hardlink", "Hard link")) + (item.encrypted ? ` · ${tr("gui.attr.encrypted", "Encrypted")}` : "")}
+              <span role="img" aria-label={label} title={label}><Icon name={item.encrypted ? "lock" : "link"} size={14} /></span>
+            {:else}
+              <span>{item.entry_type === "dir" ? "DIR" : "FILE"}</span>
+            {/if}
             <strong>{item.display}</strong>
             <small>{formatBytes(item.size)}</small>
           </div>
@@ -265,52 +262,14 @@
     {/if}
   </div>
 
-  {#if view.canRename}
-    <div class="inspector-block move-target-block">
-      <span class="block-label">{tr("gui.action.rename_target", "Rename target")}</span>
-      <input
-        class="move-target-input"
-        aria-label={tr("gui.rename.target_name", "Rename target name")}
-        value={view.renameTarget}
-        oninput={(event) => onRenameTargetChange(event.currentTarget.value)}
-        onblur={() => onCommitRenameTarget()}
-      />
-      <p>{view.renameStatus}</p>
-    </div>
-  {/if}
-
-  {#if view.canMove}
-    <div class="inspector-block move-target-block">
-      <span class="block-label">{tr("gui.action.move_target", "Move target")}</span>
-      <input
-        class="move-target-input"
-        aria-label={tr("gui.move.target_folder", "Move target folder")}
-        value={view.moveTarget}
-        oninput={(event) => onMoveTargetChange(event.currentTarget.value)}
-        onblur={() => onCommitMoveTarget()}
-      />
-      <div class="move-target-presets" aria-label={tr("gui.move.target_presets", "Move target presets")}>
-        {#each view.moveTargetPresets as target}
-          <button class:active={view.normalizedMoveTarget === target} onclick={() => onCommitMoveTarget(target)}>{target}</button>
-        {/each}
+  {#if view.canRename || view.canMove}
+    <div class="inspector-block">
+      <div class="inline-actions">
+        <button disabled={!view.canRename} onclick={onRenameSelection}>{tr("gui.action.rename_selected", "Rename selected")}</button>
+        <button disabled={!view.canMove} onclick={onMoveSelection}>{tr("gui.action.move_selected", "Move selected")}</button>
       </div>
-      <p>{view.moveStatus}</p>
     </div>
   {/if}
-
-  <div class="inspector-block">
-    <span class="block-label">{tr("gui.inspector.health", "Health")}</span>
-    <div class="health-score">
-      <strong>{view.archive ? tr("gui.state.ready", "Ready") : tr("gui.state.idle", "Idle")}</strong>
-      <span>{view.archive ? tr("gui.archive.zip_slip_guard_on", "Zip Slip guard on") : view.openArchiveFirst}</span>
-    </div>
-    <progress
-      class="meter meter-progress"
-      value={view.archive ? 84 : 0}
-      max="100"
-      aria-label={tr("gui.inspector.health", "Health")}
-    ></progress>
-  </div>
 
   <div class="inspector-block">
     <span class="block-label">{tr("gui.inspector.archive", "Archive")}</span>
@@ -334,7 +293,7 @@
         onclick={onOpenRecovery}
       >{tr("gui.action.protect", "Protect")}</button>
       <button
-        disabled={!view.archive}
+        disabled={!view.canTest}
         title={view.archiveActionDisabledReason}
         aria-label={view.archiveActionDisabledReason ? `${tr("gui.action.test_archive", "Test archive")} — ${view.archiveActionDisabledReason}` : tr("gui.action.test_archive", "Test archive")}
         onclick={onTestArchive}
@@ -355,7 +314,7 @@
         onclick={onPreviewSelection}
       >{view.preview.actionLabel}</button>
       <button
-        disabled={Boolean(view.copyOutDisabledReason)}
+        disabled={!view.canCopyOut}
         title={view.copyOutDisabledReason}
         aria-label={view.copyOutDisabledReason ? `${tr("gui.action.copy_out", "Copy out")} — ${view.copyOutDisabledReason}` : tr("gui.action.copy_out", "Copy out")}
         onclick={onCopyOutSelection}

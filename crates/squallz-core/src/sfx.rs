@@ -2200,8 +2200,12 @@ mod tests {
             Box::new(std::iter::empty())
         }
 
-        fn read_entry(&mut self, _path: &EntryPath) -> Result<Box<dyn Read + '_>, FormatError> {
-            Ok(Box::new(Cursor::new(self.bytes.clone())))
+        fn read_entry(
+            &mut self,
+            _path: &EntryPath,
+            consume: &mut dyn FnMut(&mut dyn Read) -> Result<(), FormatError>,
+        ) -> Result<(), FormatError> {
+            consume(&mut Cursor::new(&self.bytes))
         }
 
         fn test_summary(
@@ -2471,9 +2475,10 @@ mod tests {
             Ok(mut reader) => {
                 let mut opened = Vec::new();
                 reader
-                    .read_entry(&EntryPath::from_utf8("payload"))
-                    .unwrap()
-                    .read_to_end(&mut opened)
+                    .read_entry(&EntryPath::from_utf8("payload"), &mut |entry| {
+                        entry.read_to_end(&mut opened)?;
+                        Ok(())
+                    })
                     .unwrap();
                 assert_eq!(opened, original);
                 assert_ne!(opened, replacement);

@@ -640,8 +640,12 @@ impl ArchiveReader for SevenZipArchiveReader {
         Ok(())
     }
 
-    fn read_entry(&mut self, path: &EntryPath) -> Result<Box<dyn Read + '_>, FormatError> {
-        self.read_entry_with_control(path, &self.control)
+    fn read_entry(
+        &mut self,
+        path: &EntryPath,
+        consume: &mut dyn FnMut(&mut dyn Read) -> Result<(), FormatError>,
+    ) -> Result<(), FormatError> {
+        consume(self.read_entry_with_control(path, &self.control)?.as_mut())
     }
 
     fn test_summary(
@@ -1887,7 +1891,6 @@ Packed Size = 4096
     #[cfg(unix)]
     #[test]
     fn sevenzip_stream_bridge_reads_without_entry_argument() {
-        use std::io::Read;
         use std::os::unix::fs::PermissionsExt;
 
         let _guard = env_lock();
@@ -1954,9 +1957,10 @@ exit 2
 
         let mut payload = String::new();
         reader
-            .read_entry(&entries[0].path)
-            .unwrap()
-            .read_to_string(&mut payload)
+            .read_entry(&entries[0].path, &mut |entry| {
+                entry.read_to_string(&mut payload)?;
+                Ok(())
+            })
             .unwrap();
         assert_eq!(payload, "stream payload");
 
@@ -1972,7 +1976,6 @@ exit 2
     #[cfg(unix)]
     #[test]
     fn sevenzip_bridge_uses_tool_for_listing_testing_and_entry_streams() {
-        use std::io::Read;
         use std::os::unix::fs::PermissionsExt;
 
         let _guard = env_lock();
@@ -2062,17 +2065,19 @@ exit 2
 
         let mut hello = String::new();
         reader
-            .read_entry(&entries[1].path)
-            .unwrap()
-            .read_to_string(&mut hello)
+            .read_entry(&entries[1].path, &mut |entry| {
+                entry.read_to_string(&mut hello)?;
+                Ok(())
+            })
             .unwrap();
         assert_eq!(hello, "hello from 7z bridge payload");
 
         let mut dash = String::new();
         reader
-            .read_entry(&entries[2].path)
-            .unwrap()
-            .read_to_string(&mut dash)
+            .read_entry(&entries[2].path, &mut |entry| {
+                entry.read_to_string(&mut dash)?;
+                Ok(())
+            })
             .unwrap();
         assert_eq!(dash, "dash entry content");
 

@@ -40,8 +40,8 @@
 | rpassword | 7.5.4 | Apache-2.0 | 活跃（conradkleinespel） | TTY 密码交互输入 |
 | ctrlc | 3.5.2 | MIT OR Apache-2.0 | 活跃（Detegr） | Ctrl-C → ControlToken.cancel() |
 | tokio | 1.52.3 | MIT | 活跃（Tokio 官方） | `squallz-cli` 直接依赖：用 current-thread runtime 执行共享的 `sqz check-update` 异步请求，并在等待期间响应 ControlToken / Ctrl-C 取消；不启动后台更新任务 |
-| winapi-util | 0.1.11 | Unlicense OR MIT | 活跃（BurntSushi） | Windows 目录和文件的卷序列号、文件 ID 查询，用于分卷工作空间及 RAR 邻卷路径绑定 |
-| libc | 0.2.186 | MIT OR Apache-2.0 | 活跃（rust-lang） | macOS 目标卷大小写语义查询（squallz-core） |
+| winapi-util | 0.1.11 | Unlicense OR MIT | 活跃（BurntSushi） | Windows 目录和文件的卷序列号、文件 ID 查询，用于分卷工作空间、RAR 邻卷路径绑定及共享解压目录元数据恢复 |
+| libc | 0.2.186 | MIT OR Apache-2.0 | 活跃（rust-lang） | macOS 目标卷大小写语义查询（squallz-core）；Apple 平台打开链接自身的 O_SYMLINK 常量（squallz-format-api） |
 
 ## 关键传递依赖
 
@@ -68,6 +68,7 @@
 | brotli | 8.0.3 | BSD-3-Clause/MIT | 活跃（dropbox 系，现 brotli 官方推荐 Rust 实现） | brotli 编解码（纯 Rust） |
 | tar | 0.4.46 | MIT OR Apache-2.0 | 活跃（rust-lang 官方系，alexcrichton） | tar 读写（纯 Rust） |
 | sevenz-rust2 | 0.21.0 | Apache-2.0 | 活跃（hasenbanck 接管的 sevenz-rust 继任仓库） | 7z 读写（含 AES-256 与 header 加密，纯 Rust） |
+| chrono | 0.4.45 | MIT OR Apache-2.0 | chronotope 维护；复用工作区已锁定版本 | ZIP DOS 本地时间与 UTC 转换，使用平台时区规则；clock 特性复用已锁定的 iana-time-zone 0.1.65（MIT OR Apache-2.0） |
 | crc32fast | 1.5.0 | MIT OR Apache-2.0 | 活跃 | 7z test 的 CRC 对拍（此前已是 zip 传递依赖） |
 
 ## 关键传递依赖
@@ -97,8 +98,8 @@ NUL 结尾路径副本，系统调用不保留指针，未知结果保守按不�
 | 依赖 | 版本（锁定） | 许可证 | 维护状态 | 用途 |
 | ---- | ---- | ---- | ---- | ---- |
 | fs4 | 1.1.0 | MIT OR Apache-2.0 | 活跃（al8n，fs2 的维护继任 fork，rustix 后端无 libc） | 磁盘剩余空间预检（squallz-core 分卷切割、squallz-formats ZIP update） |
-| rustix | 1.1.4 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | 活跃（Bytecode Alliance） | macOS、Apple 平台与 Linux 上的内核原子 no-replace rename；RAR 邻卷 no-follow/non-blocking 打开 |
-| windows-sys | 0.61.2 | MIT OR Apache-2.0 | 活跃（Microsoft windows-rs） | Windows `MoveFileExW` 原子 no-replace 移动；flags 固定为 0，不启用覆盖或跨卷复制 |
+| rustix | 1.1.4 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | 活跃（Bytecode Alliance） | core 与共享解压复用 macOS、Apple 平台和 Linux 的内核原子 no-replace rename；RAR 邻卷 no-follow/non-blocking 打开；共享解压通过不跟随目标的目录及链接句柄恢复元数据 |
+| windows-sys | 0.61.2 | MIT OR Apache-2.0 | 活跃（Microsoft windows-rs） | core 与共享解压复用 Windows `MoveFileExW`：no-replace 移动使用 flags 0，文件替换使用 REPLACE_EXISTING / WRITE_THROUGH，均不启用跨卷复制；共享解压目录句柄的访问、共享及 reparse-point 标志 |
 
 注：globset（已登记）同时作为 squallz-formats 的直接依赖
 （ZIP update 的 --delete glob 匹配），版本与许可证不变。
@@ -211,15 +212,19 @@ WIM 样本矩阵、平台包归属、GPL/LGPL 源码与替换义务、以及用�
 SQZ 恢复路径引入旧 `parking_lot 0.11` / `instant` advisory 链；当前关键传递依赖为 `libm` /
 `lru` / `hashbrown` / `ahash` / `smallvec` / `spin`，均满足宽松许可证白名单。
 
-## 本地 patched 传递依赖
+## 本地修正的依赖
 
 | 依赖 | 版本（锁定） | 许可证 | 维护状态 | 引入原因 / 退出条件 |
 | ---- | ---- | ---- | ---- | ---- |
 | urlpattern | 0.3.0（`third_party/urlpattern-0.3.0-squallz`） | MIT | 上游 `urlpattern` 已有 0.6.x；当前 Tauri 2.11.x 仍经 `tauri-utils` 约束到 0.3.x | 供应链处置：本地 patch 保持 0.3 API，并把 `unic-ucd-ident` 替换为 `unicode-ident`，移除 rust-unic advisory 链；Tauri 升级到不依赖 rust-unic 的 urlpattern 后删除 patch |
+| zip | 8.6.0（`third_party/zip-8.6.0-squallz`） | MIT | 保持上游公开 API、依赖和功能开关 | raw copy 按原始字节保存名称，保留加密标志、数据描述符、平台文件属性和 UTC 修改时间；上游稳定版本具备等价行为并通过名称/加密/属性/时间/ZIP64 回归后移除本地 patch |
 
 `third_party/urlpattern-0.3.0-squallz` 来源为 crates.io `urlpattern` 0.3.0，保留原 MIT
 许可证文件与源码结构；Squallz 只改 manifest 与 tokenizer identifier 判断依赖，不改变公开 API。
 该 patch 的目的不是 fork 长期维护，而是避免正式发布前锁定到已停止维护的 rust-unic 依赖链。
+
+`zip` 修正以 crates.io 8.6.0 发布包为基线，保留 MIT 许可证；来源校验值、修改范围和验证入口见
+`third_party/zip-8.6.0-squallz/PATCHES.md`。主工作区与独立 fuzz crate 使用同一份实现。
 
 ## Linux-only Tauri GTK3 RustSec 处置
 

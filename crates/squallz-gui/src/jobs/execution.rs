@@ -7,10 +7,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use squallz_core::api::{
-    ArchiveSourceSet, ArchiveStructureStatus, BoundedProblemLog, CompressionLevel,
+    unix_seconds, ArchiveSourceSet, ArchiveStructureStatus, BoundedProblemLog, CompressionLevel,
     ConflictDecision, ConflictResolver, ControlToken, CreateOptions, EntryMeta, EntryPath,
-    ExtractProblemReporter, ExtractReport, FormatError, OpenOptions, OverwritePolicy, Password,
-    ProblemPreview, ProgressPhase, ProgressSink, RecoverySummary, SymlinkPolicy, UpdateOp,
+    EntrySelection, ExtractProblemReporter, ExtractReport, FormatError, OpenOptions,
+    OverwritePolicy, Password, ProblemPreview, ProgressPhase, ProgressSink, RecoverySummary,
+    SymlinkPolicy, UpdateOp, UpdateOptions,
 };
 use squallz_core::{
     create_destination_has_conflict, is_plain_sqz_path, is_sqz_archive_path, is_zip_family_path,
@@ -32,7 +33,7 @@ use crate::state::AppState;
 
 use super::progress::BatchProgressSink;
 use super::redact_format_error_path;
-use super::snapshots::{JobInteraction, JobSnapshotStore};
+use super::snapshots::{JobQuestion, JobSnapshotStore};
 use super::source_cleanup::{
     prepare_source_cleanup, SourceCleanup, SourceCleanupResult, SourceCleanupStatus,
 };
@@ -193,32 +194,31 @@ impl ConflictResolver for GuiConflictResolver {
             return Self::apply(&decision, existing);
         }
         let meta = std::fs::symlink_metadata(existing).ok();
-        let _ = lock_unpoisoned(&self.snapshots)
-            .set_interaction(self.gui_id, Some(JobInteraction::Conflict));
         self.bridge.prepare(self.gui_id);
-        emit(
-            &*self.events,
-            EV_ASK_CONFLICT,
-            &AskConflictEvent {
+        let question = lock_unpoisoned(&self.snapshots).ask(
+            self.gui_id,
+            JobQuestion::Conflict(AskConflictEvent {
                 id: self.gui_id,
+                version: 0,
                 existing_path: existing.to_string_lossy().into_owned(),
                 existing_size: metadata_len_or_zero(meta.as_ref()),
                 existing_modified: meta
                     .as_ref()
                     .and_then(|m| m.modified().ok())
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_secs()),
+                    .and_then(unix_seconds),
                 incoming_path: incoming.path.display.clone(),
                 incoming_size: incoming.size,
-                incoming_modified: incoming
-                    .modified
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_secs()),
-            },
+                incoming_modified: incoming.modified.and_then(unix_seconds),
+            }),
         );
+        let Some(JobQuestion::Conflict(prompt)) = question else {
+            self.bridge.wait(self.gui_id, &|| true);
+            return ConflictDecision::Abort;
+        };
+        emit(&*self.events, EV_ASK_CONFLICT, &prompt);
         let cancelled = || self.cancel_flag.load(Ordering::Relaxed);
         let answer = self.bridge.wait(self.gui_id, &cancelled);
-        let _ = lock_unpoisoned(&self.snapshots).set_interaction(self.gui_id, None);
+        let _ = lock_unpoisoned(&self.snapshots).clear_question(self.gui_id);
         match answer {
             Some(AskAnswer::Conflict {
                 decision,
@@ -330,21 +330,24 @@ impl JobContext<'_> {
                         .filter(|name| !name.is_empty())
                         .map(str::to_owned)
                         .unwrap_or_else(|| path_file_name_or_empty(archive));
-                    let _ = lock_unpoisoned(snapshots)
-                        .set_interaction(gui_id, Some(JobInteraction::Password));
                     bridge.prepare(gui_id);
-                    emit(
-                        &**events,
-                        EV_ASK_PASSWORD,
-                        &AskPasswordEvent {
+                    let question = lock_unpoisoned(snapshots).ask(
+                        gui_id,
+                        JobQuestion::Password(AskPasswordEvent {
                             id: gui_id,
+                            version: 0,
                             name,
                             wrong: matches!(e, FormatError::WrongPassword),
-                        },
+                        }),
                     );
+                    let Some(JobQuestion::Password(prompt)) = question else {
+                        bridge.wait(gui_id, &|| true);
+                        return Err(FormatError::Cancelled);
+                    };
+                    emit(&**events, EV_ASK_PASSWORD, &prompt);
                     let cancelled = || ctl.is_cancelled() || cancel_flag.load(Ordering::Relaxed);
                     let answer = bridge.wait(gui_id, &cancelled);
-                    let _ = lock_unpoisoned(snapshots).set_interaction(gui_id, None);
+                    let _ = lock_unpoisoned(snapshots).clear_question(gui_id);
                     match answer {
                         Some(AskAnswer::Password(Some(pw))) => {
                             current = Some(Password::new(pw));
@@ -1447,6 +1450,7 @@ impl JobContext<'_> {
                 path,
                 add,
                 delete,
+                encoding,
                 rename,
                 mkdir,
                 excludes,
@@ -1469,14 +1473,12 @@ impl JobContext<'_> {
                         path: EntryPath::from_utf8(dir.clone()),
                     });
                 }
-                for pattern in delete {
-                    ops.push(UpdateOp::Delete {
-                        pattern: pattern.clone(),
-                    });
-                }
+                ops.extend(delete.iter().map(|path| UpdateOp::DeleteEntry {
+                    path: EntrySelection::Display(path.clone()),
+                }));
                 for item in rename {
                     ops.push(UpdateOp::Rename {
-                        from: EntryPath::from_utf8(item.from.clone()),
+                        from: EntrySelection::Display(item.from.clone()),
                         to: EntryPath::from_utf8(item.to.clone()),
                     });
                 }
@@ -1485,17 +1487,20 @@ impl JobContext<'_> {
                         "no archive update operations".into(),
                     ));
                 }
-                let opts = CreateOptions {
-                    level: CompressionLevel::from_numeric(*level),
-                    password: password.as_deref().map(Password::new),
-                    resources: settings.resource_options(),
-                    excludes: content_policy.resolve_excludes(excludes),
-                    ..CreateOptions::default()
+                let opts = UpdateOptions {
+                    encoding_override: encoding.clone(),
+                    create: CreateOptions {
+                        level: CompressionLevel::from_numeric(*level),
+                        password: password.as_deref().map(Password::new),
+                        resources: settings.resource_options(),
+                        excludes: content_policy.resolve_excludes(excludes),
+                        ..CreateOptions::default()
+                    },
                 };
                 state.engine.update(&archive, &ops, &opts, sink, ctl)?;
                 Ok(Some(serde_json::json!({
                     "archive": archive.to_string_lossy(),
-                    "operations": ops.len(),
+                    "operations": add.len() + delete.len() + rename.len() + mkdir.len(),
                 })))
             }
             JobSpec::Checksum {

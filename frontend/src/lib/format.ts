@@ -1,4 +1,3 @@
-// Formatting helpers: sizes (IEC 1024, one decimal), dates, ETA and
 // Shared formatting helpers for dates, byte counts, and middle-ellipsis paths.
 
 const UNITS = ["B", "KB", "MB", "GB", "TB"];
@@ -21,14 +20,14 @@ export function formatSpeed(bps: number): string {
   return `${formatBytes(bps)}/s`;
 }
 
-/** `YYYY-MM-DD HH:mm`, year omitted within the current year. */
-export function formatDate(unixSeconds: number | null): string {
-  if (unixSeconds == null) return "--";
+/** Full local modification date; accepts signed Unix seconds, including zero. */
+export function formatModified(unixSeconds: number | null): string {
+  if (unixSeconds == null || !Number.isFinite(unixSeconds)) return "-";
   const d = new Date(unixSeconds * 1000);
+  if (!Number.isFinite(d.getTime())) return "-";
   const pad = (x: number) => String(x).padStart(2, "0");
   const md = `${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
   const hm = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
-  if (d.getFullYear() === new Date().getFullYear()) return `${md} ${hm}`;
   return `${d.getFullYear()}-${md} ${hm}`;
 }
 

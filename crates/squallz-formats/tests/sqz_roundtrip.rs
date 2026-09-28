@@ -676,6 +676,77 @@ fn sqz_custom_recovery_percent_controls_payload_parity_shards() {
 }
 
 #[test]
+fn sqz_repaired_inner_profiles_support_repeated_reads_and_extraction() {
+    let tmp = TempDir::new("sqz-repaired-inner-profiles");
+    let input = tmp.path().join("payload.bin");
+    let original = recovery_payload(3);
+    fs::write(&input, &original).unwrap();
+    let eng = engine();
+    let ctl = ControlToken::new();
+    for inner_format in [
+        SqzInnerFormat::Zip,
+        SqzInnerFormat::Tar,
+        SqzInnerFormat::SevenZip,
+        SqzInnerFormat::Zstd,
+    ] {
+        let archive = tmp.path().join(format!("{inner_format}.sqz"));
+        eng.create(
+            &archive,
+            std::slice::from_ref(&input),
+            &CreateOptions {
+                sqz: SqzCreateOptions {
+                    inner_format,
+                    ..SqzCreateOptions::default()
+                },
+                ..CreateOptions::default()
+            },
+            &NoProgress,
+            &ctl,
+        )
+        .unwrap();
+        let mut bytes = fs::read(&archive).unwrap();
+        let descriptor_len = u64::from_le_bytes(bytes[40..48].try_into().unwrap()) as usize;
+        bytes[64 + descriptor_len] ^= 0xA5;
+        fs::write(&archive, bytes).unwrap();
+        let opts = OpenOptions::default();
+        let mut reader = eng.open(&archive, &opts).unwrap();
+        let entries = reader.entries().collect::<Result<Vec<_>, _>>().unwrap();
+        assert_eq!(entries.len(), 1, "{inner_format}");
+        for _ in 0..2 {
+            let mut content = Vec::new();
+            reader
+                .read_entry(&entries[0].path, &mut |data| {
+                    data.read_to_end(&mut content)?;
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(content, original, "{inner_format}");
+        }
+        let report = reader.test_summary(&NoProgress, &ctl).unwrap();
+        assert!(report.is_ok(), "{inner_format}: {report:?}");
+        let recovery = report.recovery.unwrap();
+        assert_eq!(recovery.repaired_blocks, 1, "{inner_format}");
+        assert_eq!(recovery.unrepaired_blocks, 0, "{inner_format}");
+        let out = tmp.path().join(format!("out-{inner_format}"));
+        eng.extract(
+            &archive,
+            &out,
+            None,
+            &opts,
+            &ExtractOptions::default(),
+            &NoProgress,
+            &ctl,
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read(out.join("payload.bin")).unwrap(),
+            original,
+            "{inner_format}"
+        );
+    }
+}
+
+#[test]
 fn sqz_create_plan_covers_recovery_larger_than_generic_slack() {
     let tmp = TempDir::new("sqz-plan-large-recovery");
     let input = tmp.path().join("large.bin");

@@ -7,7 +7,6 @@ mod progress;
 mod prompt;
 
 use std::ffi::OsString;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -230,9 +229,11 @@ fn validate_encrypted_entries(
         .filter(|entry| entry.encrypted && !matches!(entry.entry_type, EntryType::Dir))
     {
         ctl.checkpoint()?;
-        let mut stream = reader.read_entry(&entry.path)?;
-        let mut byte = [0u8; 1];
-        let _ = stream.read(&mut byte)?;
+        reader.read_entry(&entry.path, &mut |stream| {
+            let mut byte = [0u8; 1];
+            let _ = stream.read(&mut byte)?;
+            Ok(())
+        })?;
     }
     Ok(())
 }
@@ -374,7 +375,7 @@ fn render_error(error: &FormatError, loc: &Localizer, json: bool) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Cursor;
+    use std::io::{Cursor, Read};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use squallz_core::api::{EntryPath, NoProgress, TestSummary};
@@ -390,8 +391,12 @@ mod tests {
             Box::new(std::iter::empty())
         }
 
-        fn read_entry(&mut self, _path: &EntryPath) -> Result<Box<dyn Read + '_>, FormatError> {
-            Ok(Box::new(Cursor::new(Vec::<u8>::new())))
+        fn read_entry(
+            &mut self,
+            _path: &EntryPath,
+            consume: &mut dyn FnMut(&mut dyn Read) -> Result<(), FormatError>,
+        ) -> Result<(), FormatError> {
+            consume(&mut Cursor::new(Vec::<u8>::new()))
         }
 
         fn extract_with_report(
