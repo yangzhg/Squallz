@@ -416,9 +416,11 @@ function readArchivePreview(params: URLSearchParams, pageSize: number): ArchiveP
   const selected = listParam(params, "previewSelected", ",");
   const largeEntryCount = numericParam(params, "previewLargeEntries", 0);
   const pages = largeEntryCount > 0 ? largePreviewPages(largeEntryCount, pageSize) : null;
-  const rows = pages?.get(0) ?? archivePreviewEntries;
+  const rows = pages?.get(0) ?? archivePreviewEntries.filter(
+    (entry) => !entry.path.replace(/\/+$/g, "").includes("/"),
+  );
   const previewRows = pages ? undefined : archivePreviewEntries;
-  const total = largeEntryCount > 0 ? largeEntryCount : archivePreviewEntries.length;
+  const total = largeEntryCount > 0 ? largeEntryCount : rows.length;
 
   return {
     info: {
@@ -431,7 +433,7 @@ function readArchivePreview(params: URLSearchParams, pageSize: number): ArchiveP
       structure: params.get("previewRecoveredZip") === "1"
         ? "zip_local_headers_recovered"
         : "complete",
-      entry_count: total,
+      entry_count: largeEntryCount > 0 ? largeEntryCount : archivePreviewEntries.length,
       volumes: null,
       non_utf8_name_count: 0,
       garbled_count: 0,

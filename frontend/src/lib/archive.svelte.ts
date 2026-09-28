@@ -14,9 +14,10 @@ import { pushToast, removeToastByKey } from "./toasts.svelte";
 
 export const PAGE_SIZE = 500;
 export type PasswordBookStatusState = "idle" | "checking" | "ready" | "error";
-export type SelectAllRowsResult = "selected" | "stale" | "failed";
+export type RowSelectionResult = "selected" | "stale" | "failed";
+type SelectionAnchor = { index: number; generation: number };
 const ARCHIVE_BROWSE_ERROR_TOAST_KEY = "archive-browse-error";
-const SELECT_ALL_PAGE_CONCURRENCY = 4;
+const SELECTION_PAGE_CONCURRENCY = 4;
 
 type ValidationArchiveCallKind = "openArchive" | "listEntries" | "searchEntries";
 type ValidationArchiveCallCounters = Record<ValidationArchiveCallKind, number>;
@@ -64,8 +65,9 @@ const store = $state({
   selected: new Set<string>(),
   /** Selection was expanded across the complete current directory or search result. */
   selectedAllCurrentRows: false,
-  /** Invalidates a pending full-selection request after any later selection change. */
+  /** Invalidates pending selection requests after any later selection change. */
   selectionGeneration: 0,
+  selectionAnchor: null as SelectionAnchor | null,
   /** Dev preview-only full row tree used to exercise folder navigation without IPC. */
   previewRows: null as EntryDto[] | null,
   selectedSize: 0,
@@ -666,6 +668,7 @@ export async function enterDir(name: string): Promise<void> {
 
 /** Enters a directory from an archive-wide search result. */
 export async function enterDirPath(path: string): Promise<void> {
+  clearSelection();
   store.dirs = path
     .replaceAll("\\", "/")
     .replace(/^\/+|\/+$/g, "")
@@ -679,6 +682,7 @@ export async function enterDirPath(path: string): Promise<void> {
 
 /** Jumps to a breadcrumb level (`-1` = archive root). */
 export async function gotoBreadcrumb(level: number): Promise<void> {
+  clearSelection();
   store.dirs = store.dirs.slice(0, level + 1);
   cancelFilterReload();
   store.filter = "";
@@ -689,6 +693,7 @@ export async function gotoBreadcrumb(level: number): Promise<void> {
 /** Goes one level up (Cmd+↑). */
 export async function goUp(): Promise<void> {
   if (store.dirs.length === 0) return;
+  clearSelection();
   store.dirs.pop();
   cancelFilterReload();
   store.filter = "";
@@ -729,7 +734,34 @@ function selectionCoversLoadedCurrentRows(selected: ReadonlySet<string>): boolea
   return true;
 }
 
-export function toggleSelect(row: EntryDto): void {
+function selectionRowIndex(row: EntryDto, index?: number): number | null {
+  if (
+    index !== undefined && Number.isInteger(index) && index >= 0 && index < store.total
+    && store.pages.get(Math.floor(index / PAGE_SIZE))?.[index % PAGE_SIZE]?.path === row.path
+  ) return index;
+  for (const [pageNumber, rows] of store.pages) {
+    const offset = rows.findIndex((entry) => entry.path === row.path);
+    if (offset >= 0) return pageNumber * PAGE_SIZE + offset;
+  }
+  return null;
+}
+
+function setSelectionAnchor(row: EntryDto, index?: number): void {
+  const rowIndex = selectionRowIndex(row, index);
+  store.selectionAnchor = rowIndex === null ? null : { index: rowIndex, generation: store.generation };
+}
+
+/** Replaces the selection with a single row and starts a new range anchor. */
+export function selectRow(row: EntryDto, index?: number): void {
+  if (store.filterPending) return;
+  store.selectionGeneration += 1;
+  store.selected = new Set([row.path]);
+  store.selectedSize = row.size;
+  store.selectedAllCurrentRows = selectionCoversLoadedCurrentRows(store.selected);
+  setSelectionAnchor(row, index);
+}
+
+export function toggleSelect(row: EntryDto, index?: number): void {
   if (store.filterPending) return;
   store.selectionGeneration += 1;
   const selected = new Set(store.selected);
@@ -742,6 +774,7 @@ export function toggleSelect(row: EntryDto): void {
   }
   store.selected = selected;
   store.selectedAllCurrentRows = selectionCoversLoadedCurrentRows(selected);
+  setSelectionAnchor(row, index);
 }
 
 export function clearSelection(): void {
@@ -749,6 +782,7 @@ export function clearSelection(): void {
   store.selected = new Set();
   store.selectedAllCurrentRows = false;
   store.selectedSize = 0;
+  store.selectionAnchor = null;
 }
 
 /** Selects every row already cached for the current level. */
@@ -770,24 +804,55 @@ export function selectAllLoaded(): void {
   store.selectedSize = selectedSize;
 }
 
-/**
- * Selects the complete current directory or archive-wide search result without
- * retaining every fetched page in the WebView.
- */
+/** Selects the current directory or search result using bounded page batches. */
 export async function selectAllRows(
   onProgress?: (loaded: number, total: number) => void,
-): Promise<SelectAllRowsResult> {
+): Promise<RowSelectionResult> {
+  return selectRowsInRange(0, store.total - 1, false, null, onProgress);
+}
+
+/** Extends from the last directly selected row, including uncached pages. */
+export async function selectRangeTo(
+  row: EntryDto,
+  index?: number,
+  additive = false,
+  onProgress?: (loaded: number, total: number) => void,
+): Promise<RowSelectionResult> {
+  if (store.filterPending) return "stale";
+  const target = selectionRowIndex(row, index);
+  if (target === null) return "stale";
+  const anchor = store.selectionAnchor?.generation === store.generation
+    ? store.selectionAnchor
+    : { index: target, generation: store.generation };
+  return selectRowsInRange(
+    Math.min(anchor.index, target), Math.max(anchor.index, target), additive, anchor, onProgress,
+  );
+}
+
+/** Publishes the complete selection atomically; fetched pages stay transient. */
+async function selectRowsInRange(
+  first: number,
+  last: number,
+  additive: boolean,
+  anchor: SelectionAnchor | null,
+  onProgress?: (loaded: number, total: number) => void,
+): Promise<RowSelectionResult> {
   const info = store.info;
   if (!info || store.filterPending) return "stale";
 
   const generation = store.generation;
-  const selectionGeneration = store.selectionGeneration;
+  const selectionGeneration = ++store.selectionGeneration;
   const query = store.filter.trim();
   const dirPrefix = currentPrefix();
   const total = store.total;
-  const selected = new Set<string>();
-  let selectedSize = 0;
+  const rangeCount = last - first + 1;
+  const coversAll = (first === 0 && last === total - 1)
+    || (additive && store.selectedAllCurrentRows);
+  const selected = new Set<string>(additive ? store.selected : []);
+  let selectedSize = additive ? store.selectedSize : 0;
   let loaded = 0;
+  const isCurrent = () => generation === store.generation
+    && selectionGeneration === store.selectionGeneration;
 
   const addRows = (rows: readonly EntryDto[]) => {
     for (const row of rows) {
@@ -796,69 +861,65 @@ export async function selectAllRows(
       selectedSize += row.size;
     }
     loaded += rows.length;
-    onProgress?.(Math.min(loaded, total), total);
+    onProgress?.(loaded, rangeCount);
   };
 
-  const previewRows = previewRowsForCurrentLevel();
-  if (previewRows) {
-    if (
-      generation !== store.generation
-      || selectionGeneration !== store.selectionGeneration
-    ) return "stale";
-    addRows(previewRows);
-    store.selected = selected;
-    store.selectedAllCurrentRows = true;
-    store.selectedSize = selectedSize;
-    store.selectionGeneration += 1;
-    return "selected";
-  }
-
-  const pageCount = Math.ceil(total / PAGE_SIZE);
+  onProgress?.(0, rangeCount);
+  if (!isCurrent()) return "stale";
   try {
-    if (!query) {
-      await ipc.cancelArchiveSearch(info.id, generation);
-    }
-    for (let start = 0; start < pageCount; start += SELECT_ALL_PAGE_CONCURRENCY) {
-      const pageNumbers = Array.from(
-        { length: Math.min(SELECT_ALL_PAGE_CONCURRENCY, pageCount - start) },
-        (_, index) => start + index,
-      );
-      const pages = await Promise.all(
-        pageNumbers.map(async (pageNumber) => {
-          const cached = store.pages.get(pageNumber);
-          if (cached) return { total, page: pageNumber, items: cached };
-          if (query) {
-            markValidationArchiveCall("searchEntries");
-            return ipc.searchEntries(info.id, pageNumber, query, PAGE_SIZE, generation);
-          }
-          markValidationArchiveCall("listEntries");
-          return ipc.listEntries(info.id, pageNumber, dirPrefix, null, PAGE_SIZE);
-        }),
-      );
-      if (
-        generation !== store.generation
-        || selectionGeneration !== store.selectionGeneration
-      ) return "stale";
-      for (const page of pages) {
-        if (page === null || page.total !== total) return "stale";
-        addRows(page.items);
+    const previewRows = previewRowsForCurrentLevel();
+    if (previewRows) {
+      addRows(previewRows.slice(first, last + 1));
+    } else {
+      const lastPage = Math.floor(last / PAGE_SIZE);
+      let cancelledSearch = false;
+      for (let start = Math.floor(first / PAGE_SIZE); start <= lastPage; start += SELECTION_PAGE_CONCURRENCY) {
+        if (!isCurrent()) return "stale";
+        const pageNumbers = Array.from(
+          { length: Math.min(SELECTION_PAGE_CONCURRENCY, lastPage - start + 1) },
+          (_, index) => start + index,
+        );
+        if (!query && !cancelledSearch && pageNumbers.some((page) => !store.pages.has(page))) {
+          await ipc.cancelArchiveSearch(info.id, generation);
+          cancelledSearch = true;
+          if (!isCurrent()) return "stale";
+        }
+        const pages = await Promise.all(
+          pageNumbers.map(async (pageNumber) => {
+            const cached = store.pages.get(pageNumber);
+            if (cached) return { total, page: pageNumber, items: cached };
+            if (query) {
+              markValidationArchiveCall("searchEntries");
+              return ipc.searchEntries(info.id, pageNumber, query, PAGE_SIZE, generation);
+            }
+            markValidationArchiveCall("listEntries");
+            return ipc.listEntries(info.id, pageNumber, dirPrefix, null, PAGE_SIZE);
+          }),
+        );
+        if (!isCurrent()) return "stale";
+        for (let index = 0; index < pages.length; index += 1) {
+          const page = pages[index];
+          if (page === null || page.total !== total) return "stale";
+          const offset = pageNumbers[index] * PAGE_SIZE;
+          const startOffset = Math.max(first - offset, 0);
+          const endOffset = Math.min(last + 1 - offset, PAGE_SIZE, total - offset);
+          const pageRows = page.items.slice(startOffset, endOffset);
+          if (pageRows.length !== endOffset - startOffset) return "failed";
+          addRows(pageRows);
+          if (!isCurrent()) return "stale";
+        }
       }
     }
   } catch {
-    return generation === store.generation
-      && selectionGeneration === store.selectionGeneration
-      ? "failed"
-      : "stale";
+    return isCurrent() ? "failed" : "stale";
   }
 
-  if (
-    generation !== store.generation
-    || selectionGeneration !== store.selectionGeneration
-    || loaded < total
-  ) return "stale";
+  if (!isCurrent()) return "stale";
+  if (loaded !== rangeCount) return "failed";
   store.selected = selected;
-  store.selectedAllCurrentRows = true;
+  store.selectedAllCurrentRows = coversAll || selectionCoversLoadedCurrentRows(selected);
   store.selectedSize = selectedSize;
+  store.selectionAnchor = anchor;
   store.selectionGeneration += 1;
   return "selected";
 }
@@ -908,6 +969,7 @@ export function installArchivePreview(
   store.selected = new Set(options?.selected ?? []);
   store.selectedAllCurrentRows = false;
   store.selectionGeneration += 1;
+  store.selectionAnchor = null;
   store.previewRows = options?.previewRows ?? null;
   clearBrowseError();
   store.selectedSize =

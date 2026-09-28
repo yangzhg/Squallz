@@ -118,7 +118,7 @@
     onActivateEntry: (entry: ClassicBrowserEntry) => void;
     onEntryKeydown: (event: KeyboardEvent, entry: ClassicBrowserEntry) => void;
     onOpenEntryContext: (event: MouseEvent, entry: ClassicBrowserEntry) => void;
-    onToggleEntrySelection: (entry: ClassicBrowserEntry) => void;
+    onToggleEntrySelection: (entry: ClassicBrowserEntry, event: MouseEvent) => void;
     onToggleAllEntries: () => void;
     onPreviewEntry: (entry: ClassicBrowserEntry) => void;
   }
@@ -381,6 +381,7 @@
         </div>
       {/if}
     </div>
+    <p class="archive-selection-hint">{tr("gui.selection.range_hint", "Shift-click to select a range · ⌘/Ctrl-click to select individual entries")}</p>
     <div
       class="classic-table"
       role="table"
@@ -455,7 +456,7 @@
                 disabled={!entry.source || view.selection.busy}
                 onclick={(event) => {
                   event.stopPropagation();
-                  onToggleEntrySelection(entry);
+                  onToggleEntrySelection(entry, event);
                 }}
               ></button>
               <span class="archive-entry-label">

@@ -85,11 +85,14 @@
     prefetchAround,
     rowAt,
     selectAllRows,
+    selectRangeTo,
+    selectRow,
     selectedPaths,
     selectedSize,
     setFilter,
     toggleSelect,
     totalRows,
+    type RowSelectionResult,
   } from "./lib/archive.svelte";
   import {
     archiveNameWithoutVolumeSuffix,
@@ -905,7 +908,7 @@
   let extractPresetDraftTouched = false;
   let archiveOpenStatus = $state<"idle" | "opening">("idle");
   let archiveOpenGeneration = 0;
-  let archiveSelectAllProgress = $state<{ loaded: number; total: number } | null>(null);
+  let archiveSelectionProgress = $state<{ loaded: number; total: number } | null>(null);
   let recoveryPickerStatus = $state<"idle" | "archive" | "par2">("idle");
   let recoverySourceMode = $state<"none" | "current" | "selected">(
     runtimePreviews.archive ? "current" : "none",
@@ -4419,8 +4422,8 @@
       onActivateEntry: (entry) => void activateEntry(entry),
       onEntryKeydown: (event, entry) => onEntryKeydown(event, entry),
       onOpenEntryContext: (event, entry) => openEntryContext(event, entry),
-      onToggleEntrySelection: (entry) => toggleEntrySelection(entry),
-      onToggleAllEntries: toggleLoadedArchiveEntries,
+      onToggleEntrySelection: (entry, event) => toggleEntrySelection(entry, event),
+      onToggleAllEntries: toggleAllArchiveEntries,
       onPreviewEntry: (entry) => previewDisplayEntry(entry),
     };
   }
@@ -4550,8 +4553,8 @@
       onActivateEntry: (entry) => void activateEntry(entry),
       onEntryKeydown: (event, entry) => onEntryKeydown(event, entry),
       onOpenEntryContext: (event, entry) => openEntryContext(event, entry),
-      onToggleEntrySelection: (entry) => toggleEntrySelection(entry),
-      onToggleAllEntries: toggleLoadedArchiveEntries,
+      onToggleEntrySelection: (entry, event) => toggleEntrySelection(entry, event),
+      onToggleAllEntries: toggleAllArchiveEntries,
       onPreviewEntry: (entry) => previewDisplayEntry(entry),
     };
   }
@@ -6446,8 +6449,7 @@
       return;
     }
     const preservePreview = entryPreviewForPath(entry.source.path) !== null;
-    clearSelection();
-    toggleSelect(entry.source);
+    selectRow(entry.source, entry.virtualIndex);
     if (!preservePreview) clearEntryPreviewState();
   }
 
@@ -6460,13 +6462,17 @@
     );
   }
 
-  function toggleEntrySelection(entry: DisplayEntry) {
+  function toggleEntrySelection(entry: DisplayEntry, event?: MouseEvent) {
     if (!entry.source) return;
     if (archiveSelectionBusyReason()) {
       showNotice(archiveSelectionBusyReason());
       return;
     }
-    toggleSelect(entry.source);
+    if (event?.shiftKey) {
+      void selectEntry(entry, event);
+      return;
+    }
+    toggleSelect(entry.source, entry.virtualIndex);
     if (!entryPreviewForPath(entry.source.path)) clearEntryPreviewState();
     recordValidationEvent("frontend.entry.selection_toggle", {
       path: entry.source.path,
@@ -6489,22 +6495,22 @@
     return {
       checked,
       mixed,
-      disabled: total === 0 || filterPending() || archiveSelectAllProgress !== null,
+      disabled: total === 0 || filterPending() || archiveSelectionProgress !== null,
       label,
       busy: Boolean(busyLabel),
       busyLabel,
     };
   }
 
-  function selectAllProgressLabel(loaded: number, total: number): string {
+  function selectionProgressLabel(loaded: number, total: number): string {
     return tr("gui.selection.selecting", "Selecting {loaded} of {total}…")
       .replace("{loaded}", loaded.toLocaleString())
       .replace("{total}", total.toLocaleString());
   }
 
   function archiveSelectionBusyReason(): string {
-    return archiveSelectAllProgress
-      ? selectAllProgressLabel(archiveSelectAllProgress.loaded, archiveSelectAllProgress.total)
+    return archiveSelectionProgress
+      ? selectionProgressLabel(archiveSelectionProgress.loaded, archiveSelectionProgress.total)
       : "";
   }
 
@@ -6515,34 +6521,45 @@
     return true;
   }
 
+  async function runArchiveSelection(
+    operation: (onProgress: (loaded: number, total: number) => void) => Promise<RowSelectionResult>,
+    successLabel: () => string,
+  ): Promise<boolean> {
+    archiveSelectionProgress = { loaded: 0, total: totalRows() };
+    const updateProgress = (loaded: number, total: number) => {
+      archiveSelectionProgress = { loaded, total };
+      showNotice(selectionProgressLabel(loaded, total));
+    };
+    const result = await operation(updateProgress);
+    archiveSelectionProgress = null;
+    if (result === "failed") {
+      showNotice(tr("gui.selection.failed", "Could not complete the selection. Your previous selection was kept. Try again."));
+      return false;
+    }
+    if (result === "stale") {
+      showNotice(tr("gui.selection.stale", "The view or selection changed. The pending selection was cancelled."));
+      return false;
+    }
+    showNotice(successLabel());
+    return true;
+  }
+
   async function selectAllArchiveEntries() {
     const control = archiveSelectionControl();
     if (control.disabled || control.checked) return;
-    archiveSelectAllProgress = { loaded: 0, total: totalRows() };
-    const updateProgress = (loaded: number, total: number) => {
-      archiveSelectAllProgress = { loaded, total };
-      showNotice(selectAllProgressLabel(loaded, total));
-    };
-    updateProgress(0, totalRows());
-    const result = await selectAllRows(updateProgress);
-    archiveSelectAllProgress = null;
-    if (result === "failed") {
-      showNotice(tr("gui.selection.select_all_failed", "Could not select every entry. Try again."));
-      return;
-    }
-    if (result === "stale") {
-      showNotice(tr("gui.selection.select_all_stale", "Selection changed before every entry could be selected."));
-      return;
-    }
+    const selected = await runArchiveSelection(
+      selectAllRows,
+      () => tr("gui.selection.all_selected", "All entries selected"),
+    );
+    if (!selected) return;
     clearEntryPreviewState();
     recordValidationEvent("frontend.entry.selection_all", {
       selected_count: selectedPaths().size,
       total_count: totalRows(),
     });
-    showNotice(tr("gui.selection.all_selected", "All entries selected"));
   }
 
-  function toggleLoadedArchiveEntries() {
+  function toggleAllArchiveEntries() {
     const control = archiveSelectionControl();
     if (control.disabled) return;
     if (control.checked) {
@@ -6557,23 +6574,32 @@
     void selectAllArchiveEntries();
   }
 
-  function selectEntry(entry: DisplayEntry, event?: MouseEvent | KeyboardEvent) {
+  async function selectEntry(entry: DisplayEntry, event?: MouseEvent | KeyboardEvent) {
     if (!entry.source) return;
     if (archiveSelectionBusyReason()) {
       showNotice(archiveSelectionBusyReason());
       return;
     }
-    if (event?.metaKey || event?.ctrlKey) {
-      toggleSelect(entry.source);
+    const additive = Boolean(event?.metaKey || event?.ctrlKey);
+    if (event?.shiftKey) {
+      const row = entry.source;
+      const selected = await runArchiveSelection(
+        (onProgress) => selectRangeTo(row, entry.virtualIndex, additive, onProgress),
+        () => tr("gui.selection.count_selected", "{count} selected")
+          .replace("{count}", selectedPaths().size.toLocaleString()),
+      );
+      if (!selected) return;
+    } else if (additive) {
+      toggleSelect(entry.source, entry.virtualIndex);
     } else {
-      clearSelection();
-      toggleSelect(entry.source);
+      selectRow(entry.source, entry.virtualIndex);
     }
     if (!entryPreviewForPath(entry.source.path)) clearEntryPreviewState();
     recordValidationEvent("frontend.entry.select", {
       path: entry.source.path,
       selected_count: selectedPaths().size,
       multi: Boolean(event?.metaKey || event?.ctrlKey),
+      range: Boolean(event?.shiftKey),
     });
   }
 
@@ -6608,7 +6634,6 @@
     if (!canGoUpArchive()) return;
     const targetDirectory = archiveDirs.slice(0, -1).join("/");
     clearEntryPreviewState();
-    clearSelection();
     await goUp();
     if (archiveBrowseError() || archiveDirs.join("/") !== targetDirectory) return;
     browseScrollTop = 0;
@@ -6622,7 +6647,6 @@
     if (!currentArchive) return;
     const targetDirectory = archiveDirs.slice(0, level + 1).join("/");
     clearEntryPreviewState();
-    clearSelection();
     await gotoBreadcrumb(level);
     if (archiveBrowseError() || archiveDirs.join("/") !== targetDirectory) return;
     browseScrollTop = 0;
@@ -6633,12 +6657,14 @@
   }
 
   function showEntryContextAt(x: number, y: number, entry: DisplayEntry) {
-    if (
-      !archiveSelectionBusyReason()
-      && entry.source
-      && !selectedPaths().has(entry.source.path)
-    ) {
-      toggleSelect(entry.source);
+    const busyReason = archiveSelectionBusyReason();
+    if (busyReason) {
+      closeEntryContext();
+      showNotice(busyReason);
+      return;
+    }
+    if (entry.source && !selectedPaths().has(entry.source.path)) {
+      selectOnlyEntry(entry);
     }
     closeQuickActions(false);
     const viewportPadding = 12;
@@ -8030,7 +8056,7 @@
   }
 
   function selectedJobPaths(): string[] | null {
-    if (archiveSelectAllProgress) return null;
+    if (archiveSelectionProgress) return null;
     const selected = [...selectedPaths()];
     return selected.length > 0 ? selected : null;
   }
@@ -8047,7 +8073,7 @@
   }
 
   function hasArchiveSelection(): boolean {
-    return hasArchiveOpen() && !archiveSelectAllProgress && selectedPaths().size > 0;
+    return hasArchiveOpen() && !archiveSelectionProgress && selectedPaths().size > 0;
   }
 
   function canRenameSelection(): boolean {
@@ -8128,7 +8154,7 @@
   }
 
   function canPreviewEntrySelection(): boolean {
-    return !archiveSelectAllProgress && selectedPreviewPolicy().kind !== "none" && !previewBusy();
+    return !archiveSelectionProgress && selectedPreviewPolicy().kind !== "none" && !previewBusy();
   }
 
   function renameSelectedDisabledReason(): string {
@@ -9123,8 +9149,8 @@
   }
 
   function selectedRenameSource(): string | null {
-    const selected = [...selectedPaths()].filter((path) => !path.endsWith("/"));
-    return selected.length === 1 ? selected[0] : null;
+    const selected = [...selectedPaths()];
+    return selected.length === 1 && !selected[0].endsWith("/") ? selected[0] : null;
   }
 
   function normalizeArchiveFilePath(value: string, fallback: string): string {
@@ -9197,11 +9223,10 @@
   }
 
   function renameTargetStatus(): string {
-    const selected = [...selectedPaths()].filter((path) => !path.endsWith("/"));
-    const target = normalizeRenameTargetName();
     if (!currentArchive) return openArchiveFirstLabel();
-    if (selected.length !== 1) return tr("gui.rename.select_one_file", "Select exactly one file to rename");
-    const from = selected[0];
+    const from = selectedRenameSource();
+    if (from === null) return tr("gui.rename.select_one_file", "Select exactly one file to rename");
+    const target = normalizeRenameTargetName();
     if (target === from) return tr("gui.rename.target_must_differ", "Rename target must differ from source");
     if (archivePathSet().has(target)) return tr("gui.new_folder.already_exists", "Already exists: {folder}").replace("{folder}", target);
     const issue = renameTargetIssue(from, target);
@@ -9488,8 +9513,7 @@
       showNotice(tr("gui.preview.extract_unavailable", "Return to the entry and select Extract instead."));
       return;
     }
-    clearSelection();
-    toggleSelect(row);
+    selectRow(row);
     clearEntryPreviewState();
     openExtractWorkspace("selection");
   }
@@ -10840,12 +10864,11 @@
       showNotice(readOnly);
       return;
     }
-    const selected = [...selectedPaths()].filter((path) => !path.endsWith("/"));
-    if (selected.length !== 1) {
+    const from = selectedRenameSource();
+    if (from === null) {
       showNotice(tr("gui.precondition.select_one_before_rename", "Select exactly one file entry before renaming"));
       return;
     }
-    const from = selected[0];
     const to = normalizeRenameTargetName(renameTargetName, from);
     renameTargetName = to;
     if (to === from) {
@@ -13530,7 +13553,7 @@
       <span>{tr("gui.context.selection_actions", "Selection actions")}</span>
       <strong>{entryContext.name}</strong>
     </div>
-    <button role="menuitem" disabled={!currentArchive || Boolean(archiveSelectAllProgress)} title={archiveSelectionBusyReason() || (currentArchive ? "" : openArchiveFirstLabel())} onclick={() => void runEntryContextAction("extract")}><Icon name="archive" size={15} />{actionLabel("Extract selected")}</button>
+    <button role="menuitem" disabled={!currentArchive || Boolean(archiveSelectionProgress)} title={archiveSelectionBusyReason() || (currentArchive ? "" : openArchiveFirstLabel())} onclick={() => void runEntryContextAction("extract")}><Icon name="archive" size={15} />{actionLabel("Extract selected")}</button>
     <button role="menuitem" disabled={Boolean(archiveMutationDisabledReason()) || !hasArchiveSelection()} title={deleteSelectedDisabledReason()} onclick={() => void runEntryContextAction("delete")}><Icon name="x-circle" size={15} />{actionLabel("Delete selected")}</button>
     <button role="menuitem" disabled={!entryContext.canRename || !canRenameSelection()} title={entryContext.canRename && canRenameSelection() ? "" : tr("gui.precondition.select_one_file", "Select exactly one file")} onclick={() => void runEntryContextAction("rename")}><Icon name="repeat" size={15} />{actionLabel("Rename selected")}</button>
     <button role="menuitem" disabled={Boolean(archiveMutationDisabledReason()) || !hasArchiveSelection()} title={moveSelectedDisabledReason()} onclick={() => void runEntryContextAction("move")}><Icon name="repeat" size={15} />{actionLabel("Move selected")}</button>

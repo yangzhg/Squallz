@@ -110,6 +110,7 @@
   --classic-commandbar-scroll-cue-width: 28px;
   --archive-filter-bar-height: 42px;
   --archive-list-head-height: 34px;
+  --archive-list-min-height: 300px;
   --archive-table-min-width: 628px;
   --archive-filter-field-min-width: 210px;
   --archive-filter-field-max-width: 360px;
@@ -3896,9 +3897,10 @@ select option {
   height: 100%;
   min-height: 0;
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-rows: max-content minmax(var(--archive-list-min-height), 1fr);
   gap: 12px;
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
 }
 
 .archive-top,
@@ -10531,7 +10533,7 @@ input.secure-input {
   min-height: 0;
   height: 100%;
   display: grid;
-  grid-template-rows: auto var(--archive-filter-bar-height) minmax(0, 1fr);
+  grid-template-rows: auto var(--archive-filter-bar-height) auto minmax(0, 1fr);
   overflow: hidden;
   border: 1px solid var(--color-border-default);
   border-radius: 14px;
@@ -10641,6 +10643,18 @@ input.secure-input {
   white-space: nowrap;
 }
 
+.archive-selection-hint {
+  min-width: 0;
+  margin: 0;
+  padding: var(--space-xs) var(--space-md);
+  border-bottom: var(--border-width-control) solid var(--color-border-muted);
+  color: var(--color-text-secondary);
+  background: var(--color-surface-raised);
+  font-size: var(--type-control);
+  line-height: var(--type-control-line);
+  overflow-wrap: anywhere;
+}
+
 .list-head,
 .modern-row {
   display: grid;
@@ -10672,6 +10686,12 @@ input.secure-input {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.modern-row,
+.classic-row {
+  -webkit-user-select: none;
+  user-select: none;
 }
 
 .modern-row {
@@ -12159,7 +12179,7 @@ select.classic-input:focus {
   min-width: 0;
   min-height: 0;
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-rows: auto auto minmax(0, 1fr);
   overflow: hidden;
   background: var(--color-surface);
 }

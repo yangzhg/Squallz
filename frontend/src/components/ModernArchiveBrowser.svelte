@@ -129,7 +129,7 @@
     onActivateEntry: (entry: ModernBrowserEntry) => void;
     onEntryKeydown: (event: KeyboardEvent, entry: ModernBrowserEntry) => void;
     onOpenEntryContext: (event: MouseEvent, entry: ModernBrowserEntry) => void;
-    onToggleEntrySelection: (entry: ModernBrowserEntry) => void;
+    onToggleEntrySelection: (entry: ModernBrowserEntry, event: MouseEvent) => void;
     onToggleAllEntries: () => void;
     onPreviewEntry: (entry: ModernBrowserEntry) => void;
   }
@@ -479,6 +479,7 @@
     </div>
     <span role="status" aria-live="polite">{view.filterStatus}</span>
   </div>
+  <p class="archive-selection-hint">{tr("gui.selection.range_hint", "Shift-click to select a range · ⌘/Ctrl-click to select individual entries")}</p>
   <div
     class="modern-table"
     role="table"
@@ -545,7 +546,7 @@
               disabled={!entry.source || view.selection.busy}
               onclick={(event) => {
                 event.stopPropagation();
-                onToggleEntrySelection(entry);
+                onToggleEntrySelection(entry, event);
               }}
             ></button>
             <span
