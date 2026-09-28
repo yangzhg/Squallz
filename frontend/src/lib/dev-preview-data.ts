@@ -21,6 +21,7 @@ export interface ArchivePreview {
 type PreviewTaskKind =
   | "archive_open"
   | "compress"
+  | "compress_failure"
   | "compress_split"
   | "compress_sfx"
   | "compress_sfx_failure"
@@ -423,6 +424,7 @@ function completedTaskParam(value: string | null): RuntimePreviews["completedTas
   if (
     value === "archive_open" ||
     value === "compress" ||
+    value === "compress_failure" ||
     value === "compress_split" ||
     value === "compress_sfx" ||
     value === "compress_sfx_failure" ||

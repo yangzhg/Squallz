@@ -383,6 +383,7 @@
     sfxEnabled: boolean;
     sfxTarget: PlatformKind | null;
     outputExtension: string;
+    suggestedDestination: string | null;
     destination: Readonly<{
       base: CreateDestinationBase;
       existing_output: OverwritePolicy;
@@ -913,6 +914,7 @@
   let createSources = $state<CreateSourceRoot[]>([]);
   let selectedCreateSourcePaths = $state<string[]>([]);
   let createSourcePickerBusy = $state<"files" | "folder" | null>(null);
+  let createPrimaryFocusPending = false;
   let createSourceInputs = $derived(createSourcePaths(createSources));
   let classicCreateSection = $state<ClassicCreateSection>("general");
   let dragActive = $state(false);
@@ -940,6 +942,7 @@
   let createCustomSplitUnit = $state<CreateSplitUnit>("mib");
   let createContentPolicy = $state<CreateContentPolicy>("cross_platform_clean");
   let createDestinationBase = $state<CreateDestinationBase>("ask");
+  let createSuggestedDestination = $state<string | null>(null);
   let createOverwritePolicy = $state<OverwritePolicy>("ask");
   let createCompletion = $state<CreateCompletionAction>("none");
   let createPostSuccess = $state<PostSuccessAction>("keep_source");
@@ -2124,6 +2127,7 @@
   function setScreen(next: Screen) {
     if (preventCreateSubmissionNavigation(next)) return;
     if (preventConvertSubmissionNavigation(next)) return;
+    if (next !== "create") createPrimaryFocusPending = false;
     if (screen === "create" && next !== "create" && pendingCreateSubmission) {
       discardPendingCreatePlan();
       createOptionsValidationAttempted = false;
@@ -3065,6 +3069,9 @@
     const selectedPreset = selectedCreateArchivePreset();
     const splitSize = createSplitSizeBytes();
     const splitMode = splitSize === null ? "generic" : createSplitMode;
+    const outputExtension = archiveOutputExtension(
+      format, splitSize, splitMode, createSfxEnabled, sfxCreateCapability.extension,
+    );
     return {
       format,
       profile: activeCreateProfile,
@@ -3078,13 +3085,8 @@
       sqzInnerFormat: format === "sqz" ? createPresetSqzInnerFormat : null,
       sfxEnabled: createSfxEnabled,
       sfxTarget: createSfxEnabled ? resolvedPresetSfxTarget(createPresetSfxTarget) : null,
-      outputExtension: archiveOutputExtension(
-        format,
-        splitSize,
-        splitMode,
-        createSfxEnabled,
-        sfxCreateCapability.extension,
-      ),
+      outputExtension,
+      suggestedDestination: createSuggestedOutputPath(format, outputExtension),
       destination: {
         base: createDestinationBase,
         existing_output: createOverwritePolicy,
@@ -3486,6 +3488,7 @@
     }
     invalidateCreatePreflightResult();
     selectedCreatePresetId = preset.id;
+    createSuggestedDestination = null;
     createPresetDraftName = preset.label;
     activeCreateFormat = preset.options.format;
     activeCreateProfile = "custom";
@@ -3857,17 +3860,12 @@
     return `${base}.${outputExtension}`;
   }
 
-  function createArchivePreviewName(base = "archive"): string {
-    return createArchiveNameForOutput(
-      base,
-      archiveOutputExtension(
-        activeCreateFormat,
-        createSplitSizeBytes(),
-        createSplitMode,
-        createSfxEnabled,
-        sfxCreateCapability.extension,
-      ),
+  function createArchivePreviewName(base = createOutputPreviewBase()): string {
+    const extension = archiveOutputExtension(
+      activeCreateFormat, createSplitSizeBytes(), createSplitMode, createSfxEnabled, sfxCreateCapability.extension,
     );
+    const suggested = createDestinationBase === "ask" ? createSuggestedOutputPath(activeCreateFormat, extension) : null;
+    return suggested ? desktopBasename(suggested, platformKind()) : createArchiveNameForOutput(base, extension);
   }
 
   function joinFolderPath(folder: string, name: string): string {
@@ -3893,6 +3891,12 @@
   function createOutputPreview(base = createOutputPreviewBase()): string {
     const name = createArchivePreviewName(base);
     if (createDestinationBase === "ask") {
+      const suggested = createSuggestedOutputPath(activeCreateFormat, archiveOutputExtension(
+        activeCreateFormat, createSplitSizeBytes(), createSplitMode, createSfxEnabled, sfxCreateCapability.extension,
+      ));
+      if (suggested) {
+        return tr("gui.create.output.preview_confirm", "Confirm location when starting · {path}").replace("{path}", suggested);
+      }
       return tr("gui.create.output.preview_ask", "Choose location when starting · {name}").replace("{name}", name);
     }
     if (createDestinationBase === "default_directory") {
@@ -3908,9 +3912,23 @@
   }
 
   function createSaveDefaultPathForDraft(input: string, base: string, draft: CreateRunDraft): string {
+    if (draft.suggestedDestination) return draft.suggestedDestination;
     return joinFolderPath(
       desktopDirname(input, platformKind()),
       createArchiveNameForOutput(base, draft.outputExtension),
+    );
+  }
+
+  function createSuggestedOutputPath(format: CreateFormatId, outputExtension: string): string | null {
+    const path = createSuggestedDestination;
+    if (!path) return null;
+    const extensions = outputExtension === createFormats[format].extension
+      ? createFormats[format].extensions
+      : [outputExtension];
+    if (extensions.some((extension) => path.toLowerCase().endsWith(`.${extension}`))) return path;
+    return joinFolderPath(
+      desktopDirname(path, platformKind()),
+      createArchiveNameForOutput(archiveStemName(desktopBasename(path, platformKind())), outputExtension),
     );
   }
 
@@ -7000,6 +7018,7 @@
   function clearCreateSources(): void {
     createSources = [];
     selectedCreateSourcePaths = [];
+    createSuggestedDestination = null;
   }
 
   function createSourceKindLabel(kind: CreateSourceKind): string {
@@ -8736,6 +8755,9 @@
 
     return {
       tr,
+      onReady: () => {
+        if (createPrimaryFocusPending) focusCreatePrimaryAction();
+      },
       sources: {
         ariaLabel: tr("gui.create.sources.aria", "Items to archive"),
         heading: tr("gui.create.sources.heading", "Items to archive"),
@@ -8868,7 +8890,7 @@
       setupSummary: {
         variant,
         ariaLabel: tr("gui.create.setup.aria", "Current create setup"),
-        eyebrow: tr("gui.create.setup.eyebrow", "Before choosing sources"),
+        eyebrow: tr("gui.create.setup.eyebrow", "Before creating"),
         heading: tr("gui.create.setup.heading", "What Squallz will create"),
         items: createSetupSummaryItems(),
       },
@@ -9075,7 +9097,7 @@
         : tr("gui.create.measuring_input_bytes", "Measuring input bytes...");
     }
     if (createPreflightPhase === "blocked" && lastCreatePlan?.entries === 0) return tr("gui.create.no_entries_after_excludes", "No entries after excludes");
-    if (!lastCreatePlan) return tr("gui.create.input_estimate_pending", "Input estimate pending source selection");
+    if (!lastCreatePlan) return tr("gui.create.input_estimate_pending", "Input estimate awaiting preflight");
     return tr("gui.create.estimate_status", "{size} input · {entries} entries · {excludes}")
       .replace("{size}", formatBytes(lastCreatePlan.total_bytes))
       .replace("{entries}", lastCreatePlan.entries.toLocaleString())
@@ -9179,7 +9201,13 @@
   }
 
   function focusCreatePrimaryAction() {
-    void tick().then(() => createPrimaryAction()?.focus());
+    createPrimaryFocusPending = true;
+    void tick().then(() => {
+      const action = createPrimaryAction();
+      if (!createPrimaryFocusPending || screen !== "create" || blockingModalVisible() || !action) return;
+      createPrimaryFocusPending = false;
+      action.focus();
+    });
   }
 
   function discardPendingCreatePlan(restoreFocus = false) {
@@ -12751,9 +12779,75 @@
       target = "recovery";
     }
     if (!target) return;
+    if (target === "create" && task.spec.kind === "compress" && !restoreCreateTaskDraft(task.spec)) return;
     if (target === "recovery") adoptRecoveryTargetFromTask(task);
     setScreen(target);
-    void dismissTaskDialog(task);
+    void dismissTaskDialog(task).then(() => {
+      if (target === "create") focusCreatePrimaryAction();
+    });
+  }
+
+  function createTaskFormat(spec: Extract<JobSpec, { kind: "compress" }>): CreateFormatId | null {
+    if (spec.sfx_target) return "zip";
+    const path = spec.dest.toLowerCase();
+    if (path.endsWith(".swm")) return "wim";
+    return createFormatIds.find((format) =>
+      createFormats[format].extensions.some((extension) => path.endsWith(`.${extension}`))) ?? null;
+  }
+
+  function restoreCreateTaskDraft(spec: Extract<JobSpec, { kind: "compress" }>): boolean {
+    if (createSourcesLocked()) {
+      showNotice(createSourcesLockedReason());
+      return false;
+    }
+    if (createConfigurationPending()) {
+      showNotice(createConfigurationPendingMessage());
+      return false;
+    }
+    const format = createTaskFormat(spec);
+    if (!format) {
+      showNotice(tr("gui.create.review.format_unavailable", "This task's format is not available in the create screen. Your current settings were kept."));
+      return false;
+    }
+    if (spec.sfx_target && (!sfxCreateCapability.available || spec.sfx_target !== sfxCreateCapability.target)) {
+      showNotice(tr("gui.create.review.sfx_unavailable", "This device cannot recreate this self-extractor. Your current settings were kept."));
+      return false;
+    }
+    markCreatePresetDraftTouched();
+    selectedCreatePresetId = null;
+    createPresetDraftName = "";
+    createPresetMutationState = "idle";
+    createSources = mergeCreateSources([], spec.inputs.map((path) => ({ path, kind: "unknown" })), platformKind());
+    selectedCreateSourcePaths = [];
+    activeCreateFormat = format;
+    activeCreateProfile = "custom";
+    customCreateLevel = spec.level;
+    customCreateLevelError = "";
+    clearCreatePasswordFields();
+    createEncryptNames = spec.encrypt_names;
+    createPresetCredentialIntent = spec.encrypt_names || spec.password ? "prompt" : "none";
+    applyPresetVolumeMode(spec.split_size === null
+      ? { kind: "single" }
+      : { kind: "split", size_bytes: String(spec.split_size) });
+    createSplitMode = spec.split_mode;
+    createContentPolicy = spec.content_policy;
+    createExcludeText = spec.excludes.join("\n");
+    createSfxEnabled = spec.sfx_target !== null;
+    createPresetSfxTarget = spec.sfx_target ?? "current_platform";
+    createPresetSqzInnerFormat = spec.sqz_inner_format ?? "sqz";
+    createDestinationBase = "ask";
+    createOverwritePolicy = "ask";
+    createSuggestedDestination = spec.dest;
+    createCompletion = spec.completion;
+    createPostSuccess = spec.post_success;
+    createTestAfterCreate = spec.test_after_create;
+    normalizeUnsupportedCreatePostSuccess(false);
+    normalizeUnsupportedCreateCompletion(false);
+    createOptionsValidationAttempted = false;
+    classicCreateSection = "general";
+    createAdvancedOpen = true;
+    showNotice(tr("gui.create.review.restored", "Sources and settings restored. Passwords were cleared. Review the options and confirm the output location before starting again."));
+    return true;
   }
 
   async function openTaskOutput(task: TaskDialogModel): Promise<void> {
@@ -14441,7 +14535,7 @@
 
       <footer class="classic-statusbar">
         {#if screen === "create"}
-          <span>{lastCreatePlan ? tr("gui.create.source_files_count", "{count} source files").replace("{count}", lastCreatePlan.files.toLocaleString()) : tr("gui.create.source_files_pending", "Source files pending")}</span>
+          <span>{lastCreatePlan ? tr("gui.create.source_files_count", "{count} source files").replace("{count}", lastCreatePlan.files.toLocaleString()) : tr("gui.create.source_files_pending", "Source files awaiting checks")}</span>
           <span>{createSfxEnabled ? createSfxOutputLabel() : activeCreateFormatData().label} · {createMethodLabel()}</span>
           <span>{createSplitCapability()} · {createRecoveryCapability()}</span>
           <strong>{diskPreflightStatusbar()}</strong>

@@ -24,6 +24,7 @@
   }
 
   export interface CreateWorkspaceSurface {
+    onReady?: () => void;
     tr: (key: string, fallback: string) => string;
     sources: CreateSourceListSurface;
     profiles: CreateWorkspaceChoice[];
@@ -92,6 +93,7 @@
 </script>
 
 <script lang="ts">
+  import { onMount } from "svelte";
   import ArchivePresetPicker from "./ArchivePresetPicker.svelte";
   import CreateContentPolicyOptions from "./CreateContentPolicyOptions.svelte";
   import CreateOutputOptions from "./CreateOutputOptions.svelte";
@@ -110,6 +112,7 @@
     variant: CreateWorkspaceVariant;
     surface: CreateWorkspaceSurface;
   } = $props();
+  onMount(() => surface.onReady?.());
 </script>
 
 {#if variant === "modern"}

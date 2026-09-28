@@ -1271,6 +1271,7 @@ export function tasks(): Task[] {
 type PreviewTaskKind =
   | "archive_open"
   | "compress"
+  | "compress_failure"
   | "compress_split"
   | "compress_sfx"
   | "compress_sfx_failure"
@@ -1338,26 +1339,26 @@ function previewTaskSpec(kind: PreviewTaskKind): JobSpec {
       level: 5,
     };
   }
-  if (kind === "compress" || kind === "compress_split" || kind === "compress_sfx" || kind === "compress_sfx_failure") {
+  if (kind === "compress" || kind === "compress_failure" || kind === "compress_split" || kind === "compress_sfx" || kind === "compress_sfx_failure") {
     const sfx = kind === "compress_sfx" || kind === "compress_sfx_failure";
     return {
       kind: "compress",
       inputs: [`${sampleRoot}/reports`, `${sampleRoot}/photos`],
       dest: sfx ? `${sampleOutputRoot}/Installer.app` : `${sampleOutputRoot}/product-backup.zip`,
-      level: 5,
+      level: kind === "compress_failure" ? 4 : 5,
       password: null,
       encrypt_names: false,
-      split_size: kind === "compress_split" ? 8 * 1024 * 1024 : null,
-      split_mode: "generic",
-      excludes: [],
-      content_policy: "keep_all_files",
+      split_size: kind === "compress_failure" ? 123456789 : kind === "compress_split" ? 8 * 1024 * 1024 : null,
+      split_mode: kind === "compress_failure" ? "native" : "generic",
+      excludes: kind === "compress_failure" ? ["*.bak", "cache/**"] : [],
+      content_policy: kind === "compress_failure" ? "custom" : "keep_all_files",
       sqz_inner_format: null,
       sfx_target: sfx ? "macos" : null,
       replace_existing: kind !== "compress",
       replacement_guard: null,
       completion: "none",
       post_success: "keep_source",
-      test_after_create: false,
+      test_after_create: kind === "compress_failure",
     };
   }
   if (kind === "extract" || kind === "extract_unknown_current" || kind === "extract_metadata") {
@@ -1732,7 +1733,7 @@ function previewProgress(kind: PreviewTaskKind, state: Extract<JobStateName, "do
       speed: 0,
     };
   }
-  if (kind === "compress" || kind === "compress_split" || kind === "compress_sfx" || kind === "compress_sfx_failure") {
+  if (kind === "compress" || kind === "compress_failure" || kind === "compress_split" || kind === "compress_sfx" || kind === "compress_sfx_failure") {
     const total = kind === "compress_split" ? 92_760_416 : kind === "compress" ? 24_000_000 : 48_000_000;
     return {
       done: state === "done" ? total : Math.floor(total * 0.4),
@@ -1808,6 +1809,7 @@ function previewTaskOffset(kind: PreviewTaskKind): number {
   if (kind === "compress_split") return 8;
   if (kind === "compress_sfx") return 9;
   if (kind === "compress_sfx_failure") return 10;
+  if (kind === "compress_failure") return 21;
   if (kind === "recovery_cleanup_ready") return 18;
   if (kind === "recovery_cleanup_unconfirmed") return 19;
   if (kind === "recovery_cleanup_record") return 20;
@@ -1826,7 +1828,7 @@ function installTaskPreview(kind: PreviewTaskKind, state: Extract<JobStateName, 
 
   const spec = previewTaskSpec(kind);
   const progress = previewProgress(kind, state);
-  const previewState = kind === "compress_sfx_failure" || isRecoveryCleanupPreview(kind)
+  const previewState = kind === "compress_failure" || kind === "compress_sfx_failure" || isRecoveryCleanupPreview(kind)
     ? "failed"
     : state;
   const target = isRecoveryCleanupPreview(kind)
@@ -1838,7 +1840,9 @@ function installTaskPreview(kind: PreviewTaskKind, state: Extract<JobStateName, 
     `${sampleOutputRoot}/.product-backup.repaired.zip.sqz-par2-repair-940018-1.work`;
   const recoveryJournal =
     `${sampleOutputRoot}/.squallz-par2-repair-8f3d4a9e1c7b2d5f.json`;
-  const error: ErrorDto = isRecoveryCleanupPreview(kind)
+  const error: ErrorDto = kind === "compress_failure"
+    ? { key: "error.io", params: { detail: "Could not write the archive output" }, detail: "Could not write the archive output" }
+    : isRecoveryCleanupPreview(kind)
     ? {
       key: kind === "recovery_cleanup_ready"
         ? "error.recovery_cleanup_output_ready"
