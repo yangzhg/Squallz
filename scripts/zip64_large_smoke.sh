@@ -88,8 +88,8 @@ Status: $status
 
 This gate runs the ignored ZIP64 5 GiB Store-mode round-trip test explicitly.
 It validates that Squallz can stream-write a ZIP64 entry larger than 4 GiB,
-reopen it, read the entry back without materializing it in memory, and clean up
-the generated temporary archive.
+raw-copy it through an atomic rename update, fully read both versions without
+materializing them in memory, and clean up the generated temporary archive.
 
 ## Inputs
 

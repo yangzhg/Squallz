@@ -1594,8 +1594,8 @@ fn local_header_fallback_reports_crc_mismatch() {
     assert!(skipped[0].contains("CRC mismatch"), "{skipped:?}");
 }
 
-/// ZIP64 large-file path: stream 5 GiB of zeros in Store mode and read it
-/// back. Run explicitly: `scripts/zip64_large_smoke.sh`.
+/// ZIP64 large-file path: stream 5 GiB of zeros, raw-copy an update and
+/// verify both archives. Run explicitly: `scripts/zip64_large_smoke.sh`.
 #[test]
 #[ignore]
 fn zip64_store_5gib_roundtrip() {
@@ -1633,22 +1633,39 @@ fn zip64_store_5gib_roundtrip() {
     writer.finish().unwrap();
     assert!(fs::metadata(&archive).unwrap().len() > SIZE);
 
-    // Read back: metadata sees the true size, streaming returns every byte.
-    let src = fs::File::open(&archive).unwrap();
-    let mut reader = format.open(Box::new(src), &OpenOptions::default()).unwrap();
-    let entries: Vec<EntryMeta> = reader.entries().collect::<Result<_, _>>().unwrap();
-    assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].size, SIZE);
-    let mut stream = reader.read_entry(&entries[0].path).unwrap();
-    let mut remaining = 0u64;
-    let mut buf = vec![0u8; 1024 * 1024];
-    loop {
-        let n = stream.read(&mut buf).unwrap();
-        if n == 0 {
-            break;
+    for name in ["zeros.bin", "大文件.bin"] {
+        if name != "zeros.bin" {
+            engine()
+                .update(
+                    &archive,
+                    &[squallz_format_api::UpdateOp::Rename {
+                        from: EntryPath::from_utf8("zeros.bin"),
+                        to: EntryPath::from_utf8(name),
+                    }],
+                    &CreateOptions::default(),
+                    &NoProgress,
+                    &ControlToken::new(),
+                )
+                .unwrap();
         }
-        assert!(buf[..n].iter().all(|&b| b == 0));
-        remaining += n as u64;
+        let src = fs::File::open(&archive).unwrap();
+        let mut reader = format.open(Box::new(src), &OpenOptions::default()).unwrap();
+        let entries: Vec<EntryMeta> = reader.entries().collect::<Result<_, _>>().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].path.display, name);
+        assert_eq!(entries[0].size, SIZE);
+        assert_eq!(entries[0].compressed_size, Some(SIZE));
+        let mut stream = reader.read_entry(&entries[0].path).unwrap();
+        let mut remaining = 0u64;
+        let mut buf = vec![0u8; 1024 * 1024];
+        loop {
+            let n = stream.read(&mut buf).unwrap();
+            if n == 0 {
+                break;
+            }
+            assert!(buf[..n].iter().all(|&b| b == 0));
+            remaining += n as u64;
+        }
+        assert_eq!(remaining, SIZE);
     }
-    assert_eq!(remaining, SIZE);
 }

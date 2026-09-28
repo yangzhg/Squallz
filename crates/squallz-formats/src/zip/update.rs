@@ -5,7 +5,6 @@
 //! entries stay encrypted without needing the password). Added files are
 //! compressed with the usual create options.
 
-use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -16,6 +15,7 @@ use squallz_format_api::{
 };
 use zip::ZipArchive;
 
+use super::encoding::decode_entry_name;
 use super::error::map_zip_error;
 use super::writer::ZipArchiveWriter;
 use delete::Deletions;
@@ -58,7 +58,7 @@ struct PreparedRewrite<'a> {
     archive: ZipArchive<RawCopySource<'a>>,
     raw_copy: RawCopyTracker,
     deletes: Deletions,
-    renames: HashMap<String, String>,
+    plan: plan::UpdatePlan,
 }
 
 #[derive(Clone, Default)]
@@ -218,14 +218,14 @@ fn rewrite_archive_impl(
         mut archive,
         raw_copy,
         deletes,
-        renames,
+        plan,
     } = prepare_update(source, ops, additions, progress, ctl)?;
     rewrite(
         &mut archive,
         &raw_copy,
         output,
         &deletes,
-        &renames,
+        &plan,
         additions,
         opts,
         progress,
@@ -253,12 +253,12 @@ fn prepare_update<'a>(
         ZipArchive::new(source).map_err(|error| map_controlled_zip_error(error, ctl))?;
     ctl.checkpoint()?;
 
-    let renames = plan::prepare(&mut archive, ops, &mut deletes, additions, ctl)?;
+    let plan = plan::prepare(&mut archive, ops, &mut deletes, additions, ctl)?;
     Ok(PreparedRewrite {
         archive,
         raw_copy,
         deletes,
-        renames,
+        plan,
     })
 }
 
@@ -269,7 +269,7 @@ fn rewrite(
     raw_copy: &RawCopyTracker,
     output: Box<dyn WriteSeek>,
     deletes: &Deletions,
-    renames: &HashMap<String, String>,
+    plan: &plan::UpdatePlan,
     additions: &mut impl AdditionSet,
     opts: &CreateOptions,
     progress: &dyn ProgressSink,
@@ -297,15 +297,13 @@ fn rewrite(
         let file = archive
             .by_index_raw(i)
             .map_err(|error| map_controlled_zip_error(error, ctl))?;
-        let name = String::from_utf8_lossy(file.name_raw()).into_owned();
-        let key = name.trim_end_matches('/').to_string();
         let compressed = file.compressed_size();
-        let path = EntryPath::from_utf8(name.clone());
+        let path = decode_entry_name(file.name_raw(), plan.encoding);
         progress.on_progress(done, total, &path);
         if deletes.matches(file.name_raw()) {
             continue; // dropped entry
         }
-        let rename_to = renames.get(&name).or_else(|| renames.get(&key));
+        let rename_to = plan.renames.get(file.name_raw());
         raw_copy.begin(path.clone(), done, total, compressed);
         let result = writer.raw_copy(file, rename_to.map(String::as_str));
         let copied = raw_copy.finish();

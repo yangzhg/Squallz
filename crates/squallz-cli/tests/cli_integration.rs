@@ -7932,6 +7932,71 @@ fn update_literal_deletion_rejects_missing_paths_atomically() {
 }
 
 #[test]
+fn update_literal_deletion_preserves_legacy_entries_in_cli_and_batch() {
+    for batch in [false, true] {
+        let dir = temp_dir("update-preserve-legacy-cli");
+        std::fs::write(dir.join("first.txt"), b"retained contents").unwrap();
+        std::fs::write(dir.join("drop.txt"), b"remove me").unwrap();
+        let archive = dir.join("legacy.zip");
+        let created = run(sqz()
+            .arg("compress")
+            .arg(dir.join("first.txt"))
+            .arg(dir.join("drop.txt"))
+            .arg("-o")
+            .arg(&archive));
+        assert!(created.status.success(), "{}", stderr(&created));
+        let mut bytes = std::fs::read(&archive).unwrap();
+        let offsets: Vec<_> = bytes
+            .windows(9)
+            .enumerate()
+            .filter_map(|(index, bytes)| (bytes == b"first.txt").then_some(index))
+            .collect();
+        assert_eq!(offsets.len(), 2);
+        for offset in offsets {
+            bytes[offset..offset + 9].copy_from_slice(b"\xc4\xe3[1].txt");
+        }
+        std::fs::write(&archive, bytes).unwrap();
+        let updated = if batch {
+            let script = dir.join("update.json");
+            std::fs::write(&script, serde_json::to_vec(&serde_json::json!({
+                "jobs": [{ "kind": "update", "archive": "legacy.zip", "delete_entries": ["drop.txt"], "encoding": "gbk" }]
+            })).unwrap()).unwrap();
+            run(sqz().arg("batch").arg(&script).arg("--json"))
+        } else {
+            run(sqz().arg("update").arg(&archive).args([
+                "--delete-entry",
+                "drop.txt",
+                "--encoding",
+                "gbk",
+                "--json",
+            ]))
+        };
+        assert!(updated.status.success(), "{}", stderr(&updated));
+        let listed = run(sqz()
+            .arg("list")
+            .arg(&archive)
+            .args(["--encoding", "gbk", "--json"]));
+        assert!(listed.status.success(), "{}", stderr(&listed));
+        let entries = stdout_json(&listed);
+        assert_eq!(entries.as_array().unwrap().len(), 1);
+        assert_eq!(entries[0]["path"], "你[1].txt");
+        let output = dir.join("extracted");
+        let extracted = run(sqz()
+            .arg("extract")
+            .arg(&archive)
+            .arg("-d")
+            .arg(&output)
+            .args(["--encoding", "gbk", "--json"]));
+        assert!(extracted.status.success(), "{}", stderr(&extracted));
+        assert_eq!(
+            std::fs::read(output.join("你[1].txt")).unwrap(),
+            b"retained contents"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[test]
 fn update_moves_and_renames_complete_directory_trees_through_the_cli() {
     let dir = temp_dir("update-directory-cli");
     let root = sample_tree(&dir);

@@ -151,8 +151,8 @@ macOS 辅助文件：`.DS_Store`、`._*` 和 `__MACOSX`；普通隐藏文件（�
 CLI 对应 `sqz update archive.zip --delete-entry 'notes.txt' --delete-entry 'reports[1]/'`。
 旧编码名称使用与 `list` 相同的 `encoding`（CLI 为 `--encoding`）解析。显示路径不唯一时
 拒绝精确删除；匹配成功后使用原始名称字节执行，不将解码后的名称写回归档。
-若更新后仍需保留非 UTF-8 名称，当前 ZIP 更新会明确失败并保留原包。请先用 `convert`
-配合同样的 `encoding` 保存为 UTF-8 命名的 ZIP，再编辑；不会静默重编码保留的文件名。
+未重命名的 ZIP 条目保留原始名称字节和压缩载荷，包括旧编码名称、加密条目、目录和符号链接。
+新增名称使用 UTF-8；更新继续采用临时文件和原子替换，失败时保留原包。
 
 `delete` 按 glob 匹配，对应 CLI 的 `--delete`：例如 `"delete": ["*.log"]`
 会删除各层目录匹配的日志文件，匹配目录时包含其子树。需要精确删除时使用 `delete_entries`。

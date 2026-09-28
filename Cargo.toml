@@ -16,6 +16,7 @@ members = [
 exclude = [
     "fuzz",
     "third_party/urlpattern-0.3.0-squallz",
+    "third_party/zip-8.6.0-squallz",
 ]
 
 [workspace.package]
@@ -39,6 +40,7 @@ sys-locale = "0.3"
 
 [patch.crates-io]
 urlpattern = { path = "third_party/urlpattern-0.3.0-squallz" }
+zip = { path = "third_party/zip-8.6.0-squallz" }
 
 [profile.release]
 lto = "thin"

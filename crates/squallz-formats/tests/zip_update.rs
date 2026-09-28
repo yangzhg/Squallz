@@ -5,6 +5,7 @@
 mod common;
 
 use std::fs;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -36,7 +37,6 @@ fn base_archive(dir: &Path, password: Option<&str>) -> PathBuf {
 }
 
 fn named_archive(dir: &Path, names: &[&str]) -> PathBuf {
-    use std::io::Write;
     let archive = dir.join("named.zip");
     let mut writer = zip::ZipWriter::new(fs::File::create(&archive).unwrap());
     for name in names {
@@ -50,6 +50,406 @@ fn named_archive(dir: &Path, names: &[&str]) -> PathBuf {
     }
     writer.finish().unwrap();
     archive
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct RawEntrySnapshot {
+    name: Vec<u8>,
+    payload: Vec<u8>,
+    size: u64,
+    crc32: u32,
+    encrypted: bool,
+    compression: zip::CompressionMethod,
+    unix_mode: Option<u32>,
+}
+
+fn raw_entry_snapshots(path: &Path) -> Vec<RawEntrySnapshot> {
+    let mut headers = fs::File::open(path).unwrap();
+    let mut archive = zip::ZipArchive::new(fs::File::open(path).unwrap()).unwrap();
+    (0..archive.len())
+        .map(|index| {
+            let mut entry = archive.by_index_raw(index).unwrap();
+            headers.seek(SeekFrom::Start(entry.header_start())).unwrap();
+            let mut header = [0; 30];
+            headers.read_exact(&mut header).unwrap();
+            let flags = u16::from_le_bytes([header[6], header[7]]);
+            let length = u16::from_le_bytes([header[26], header[27]]);
+            let mut local_name = vec![0; usize::from(length)];
+            headers.read_exact(&mut local_name).unwrap();
+            assert_eq!(
+                local_name,
+                entry.name_raw(),
+                "local and central names differ"
+            );
+            if std::str::from_utf8(entry.name_raw()).is_err() {
+                assert_eq!(flags & 0x800, 0, "legacy name must not be marked UTF-8");
+            }
+            let mut snapshot = RawEntrySnapshot {
+                name: entry.name_raw().to_vec(),
+                payload: Vec::new(),
+                size: entry.size(),
+                crc32: entry.crc32(),
+                encrypted: entry.encrypted(),
+                compression: entry.compression(),
+                unix_mode: entry.unix_mode(),
+            };
+            entry.read_to_end(&mut snapshot.payload).unwrap();
+            snapshot
+        })
+        .collect()
+}
+
+#[test]
+fn update_retains_zipcrypto_payload_and_password_check() {
+    use zip::unstable::write::FileOptionsExt;
+
+    let tmp = TempDir::new("update-zipcrypto-copy");
+    let archive = tmp.path().join("encrypted.zip");
+    let mut writer = zip::ZipWriter::new(fs::File::create(&archive).unwrap());
+    let options = zip::write::SimpleFileOptions::default()
+        .with_deprecated_encryption(b"test password")
+        .unwrap();
+    writer.start_file("keep.txt", options).unwrap();
+    writer.write_all(b"encrypted contents").unwrap();
+    writer.start_file("drop.txt", options).unwrap();
+    writer.write_all(b"remove me").unwrap();
+    writer.finish().unwrap();
+    let mut before = raw_entry_snapshots(&archive);
+    before.retain(|entry| entry.name == b"keep.txt");
+    run_update(
+        &archive,
+        &[UpdateOp::DeleteEntry {
+            path: EntryPath::from_utf8("drop.txt"),
+        }],
+        &CreateOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(raw_entry_snapshots(&archive), before);
+    let mut reader = zip::ZipArchive::new(fs::File::open(&archive).unwrap()).unwrap();
+    let mut contents = Vec::new();
+    reader
+        .by_index_decrypt(0, b"test password")
+        .unwrap()
+        .read_to_end(&mut contents)
+        .unwrap();
+    assert_eq!(contents, b"encrypted contents");
+    let wrong_password = reader
+        .by_index_decrypt(0, b"wrong password")
+        .and_then(|mut file| {
+            std::io::copy(&mut file, &mut std::io::sink()).map_err(zip::result::ZipError::Io)
+        });
+    assert!(wrong_password.is_err());
+    if command_exists("unzip") {
+        let output = Command::new("unzip")
+            .args(["-P", "test password", "-t"])
+            .arg(&archive)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
+}
+
+#[test]
+fn update_preserves_mixed_raw_names_without_lossy_identity_collisions() {
+    let tmp = TempDir::new("update-mixed-names");
+    let archive = tmp.path().join("mixed.zip");
+    let names = [
+        vec![0xff, b'.', b't', b'x', b't'],
+        vec![0xfe, b'.', b't', b'x', b't'],
+        encoding_rs::GBK
+            .encode("压缩资料中文文件名称.txt")
+            .0
+            .into_owned(),
+        encoding_rs::SHIFT_JIS
+            .encode("日本語のファイル名.txt")
+            .0
+            .into_owned(),
+        encoding_rs::BIG5
+            .encode("傳統中文檔案名稱.txt")
+            .0
+            .into_owned(),
+        "UTF-8资料.txt".as_bytes().to_vec(),
+        b"drop.txt".to_vec(),
+    ];
+    let entries: Vec<_> = names
+        .iter()
+        .enumerate()
+        .map(|(index, name)| RawZipEntry {
+            name: name.clone(),
+            data: format!("contents {index}").into_bytes(),
+        })
+        .collect();
+    fs::write(&archive, build_stored_zip(&entries)).unwrap();
+    let mut expected = raw_entry_snapshots(&archive);
+    expected.retain(|entry| entry.name != b"drop.txt");
+    expected[0].name = b"renamed.txt".to_vec();
+    run_update(
+        &archive,
+        &[
+            UpdateOp::DeleteEntry {
+                path: EntryPath::from_utf8("drop.txt"),
+            },
+            UpdateOp::Rename {
+                from: EntryPath::from_raw(names[0].clone(), "unreadable.txt".into(), "utf-8"),
+                to: EntryPath::from_utf8("renamed.txt"),
+            },
+        ],
+        &CreateOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(raw_entry_snapshots(&archive), expected);
+    assert_unzip_t(&archive);
+}
+
+#[test]
+fn update_renames_legacy_subtrees_to_utf8_and_keeps_other_names() {
+    let tmp = TempDir::new("update-legacy-subtree");
+    let archive = tmp.path().join("legacy.zip");
+    let names = [
+        "压缩资料目录/",
+        "压缩资料目录/中文文件名称.txt",
+        "压缩资料目录/sub/子文件.txt",
+        "保留原始名称.txt",
+    ];
+    let entries: Vec<_> = names
+        .iter()
+        .map(|name| RawZipEntry {
+            name: encoding_rs::GBK.encode(name).0.into_owned(),
+            data: if name.ends_with('/') {
+                Vec::new()
+            } else {
+                b"contents".to_vec()
+            },
+        })
+        .collect();
+    fs::write(&archive, build_stored_zip(&entries)).unwrap();
+    let mut expected = raw_entry_snapshots(&archive);
+    for (entry, name) in expected.iter_mut().zip(names) {
+        if let Some(suffix) = name.strip_prefix("压缩资料目录/") {
+            entry.name = format!("新的目录/{suffix}").into_bytes();
+        }
+    }
+    let from = EntryPath::from_raw(entries[0].name.clone(), names[0].into(), "GBK");
+    let before = fs::read(&archive).unwrap();
+    for target in ["压缩资料目录/", "压缩资料目录/inside/"] {
+        assert!(run_update(
+            &archive,
+            &[UpdateOp::Rename {
+                from: from.clone(),
+                to: EntryPath::from_utf8(target)
+            }],
+            &CreateOptions::default()
+        )
+        .is_err());
+        assert_eq!(fs::read(&archive).unwrap(), before);
+    }
+    run_update(
+        &archive,
+        &[UpdateOp::Rename {
+            from,
+            to: EntryPath::from_utf8("新的目录/"),
+        }],
+        &CreateOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(raw_entry_snapshots(&archive), expected);
+    assert_unzip_t(&archive);
+}
+
+#[test]
+fn update_rejects_legacy_display_name_collisions_and_undecodable_renames() {
+    let tmp = TempDir::new("update-legacy-conflicts");
+    let archive = tmp.path().join("legacy.zip");
+    let displayed = "压缩文件中文名称测试.txt";
+    let entries = [
+        RawZipEntry {
+            name: encoding_rs::GBK.encode(displayed).0.into_owned(),
+            data: b"keep".to_vec(),
+        },
+        RawZipEntry {
+            name: b"move.txt".to_vec(),
+            data: b"move".to_vec(),
+        },
+    ];
+    let before = build_stored_zip(&entries);
+    fs::write(&archive, &before).unwrap();
+    let error = run_update(
+        &archive,
+        &[UpdateOp::Rename {
+            from: EntryPath::from_utf8("move.txt"),
+            to: EntryPath::from_utf8(displayed),
+        }],
+        &CreateOptions::default(),
+    )
+    .unwrap_err();
+    assert_other_contains(error, "already exists");
+    assert_eq!(fs::read(&archive).unwrap(), before);
+    let before = build_stored_zip(&[RawZipEntry {
+        name: b"folder/\xff.txt".to_vec(),
+        data: b"invalid name".to_vec(),
+    }]);
+    fs::write(&archive, &before).unwrap();
+    let error = run_update(
+        &archive,
+        &[UpdateOp::Rename {
+            from: EntryPath::from_raw(b"folder/".to_vec(), "folder/".into(), "GBK"),
+            to: EntryPath::from_utf8("target/"),
+        }],
+        &CreateOptions::default(),
+    )
+    .unwrap_err();
+    assert!(matches!(error, FormatError::Unsupported(message) if message.contains("encoding")));
+    assert_eq!(fs::read(&archive).unwrap(), before);
+    assert_no_update_temp(tmp.path());
+}
+
+#[test]
+fn raw_copy_touch_preserves_legacy_names_and_applies_metadata() {
+    let tmp = TempDir::new("raw-copy-touch");
+    let archive = tmp.path().join("source.zip");
+    let output = tmp.path().join("touched.zip");
+    let name = encoding_rs::GBK.encode("中文名称.txt").0.into_owned();
+    fs::write(
+        &archive,
+        build_stored_zip(&[RawZipEntry {
+            name: name.clone(),
+            data: b"unchanged contents".to_vec(),
+        }]),
+    )
+    .unwrap();
+    let mut reader = zip::ZipArchive::new(fs::File::open(&archive).unwrap()).unwrap();
+    let mut writer = zip::ZipWriter::new(fs::File::create(&output).unwrap());
+    let modified = zip::DateTime::from_date_and_time(2026, 9, 28, 12, 30, 0).unwrap();
+    writer
+        .raw_copy_file_touch(reader.by_index_raw(0).unwrap(), modified, Some(0o600))
+        .unwrap();
+    writer.finish().unwrap();
+    let mut reader = zip::ZipArchive::new(fs::File::open(&output).unwrap()).unwrap();
+    let file = reader.by_index_raw(0).unwrap();
+    assert_eq!(file.name_raw(), name);
+    assert_eq!(file.unix_mode(), Some(0o100600));
+    assert_eq!(file.last_modified(), Some(modified));
+    let mut expected = raw_entry_snapshots(&archive);
+    expected[0].unix_mode = Some(0o100600);
+    assert_eq!(raw_entry_snapshots(&output), expected);
+    assert_unzip_t(&output);
+}
+
+#[test]
+fn update_preserves_encrypted_legacy_names_and_payloads() {
+    use zip::unstable::write::FileOptionsExt;
+
+    for (aes, large_file) in [(false, false), (true, false), (false, true), (true, true)] {
+        let tmp = TempDir::new("update-encrypted-legacy");
+        let archive = tmp.path().join("legacy.zip");
+        let displayed = "压缩文件中文名称测试.txt";
+        let raw_name = encoding_rs::GBK.encode(displayed).0.into_owned();
+        let mut writer = zip::ZipWriter::new(fs::File::create(&archive).unwrap());
+        let options = zip::write::SimpleFileOptions::default().large_file(large_file);
+        let options = if aes {
+            options.with_aes_encryption(zip::AesMode::Aes256, "test password")
+        } else {
+            options
+                .with_deprecated_encryption(b"test password")
+                .unwrap()
+        };
+        writer
+            .start_file("x".repeat(raw_name.len()), options)
+            .unwrap();
+        writer.write_all(b"encrypted contents").unwrap();
+        writer.start_file("drop.txt", options).unwrap();
+        writer.write_all(b"remove me").unwrap();
+        writer.finish().unwrap();
+        let offsets = {
+            let mut reader = zip::ZipArchive::new(fs::File::open(&archive).unwrap()).unwrap();
+            let file = reader.by_index_raw(0).unwrap();
+            [file.header_start() + 30, file.central_header_start() + 46]
+        };
+        let mut headers = fs::OpenOptions::new().write(true).open(&archive).unwrap();
+        for offset in offsets {
+            headers.seek(SeekFrom::Start(offset)).unwrap();
+            headers.write_all(&raw_name).unwrap();
+        }
+        drop(headers);
+        let mut expected = raw_entry_snapshots(&archive);
+        expected.retain(|entry| entry.name == raw_name);
+        run_update(
+            &archive,
+            &[UpdateOp::DeleteEntry {
+                path: EntryPath::from_utf8("drop.txt"),
+            }],
+            &CreateOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(raw_entry_snapshots(&archive), expected);
+        let options = OpenOptions {
+            encoding_override: Some("gbk".into()),
+            password: Some(Password::new("test password")),
+        };
+        let entries = engine().list(&archive, &options).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].path.display, displayed);
+        assert_eq!(entries[0].path.raw, raw_name);
+        assert!(entries[0].encrypted);
+        let mut reader = engine().open(&archive, &options).unwrap();
+        let mut contents = Vec::new();
+        reader
+            .read_entry(&entries[0].path)
+            .unwrap()
+            .read_to_end(&mut contents)
+            .unwrap();
+        assert_eq!(contents, b"encrypted contents");
+    }
+}
+
+#[test]
+fn update_preserves_unix_types_and_permissions() {
+    let tmp = TempDir::new("update-entry-attributes");
+    let archive = tmp.path().join("attributes.zip");
+    let mut writer = zip::ZipWriter::new(fs::File::create(&archive).unwrap());
+    writer
+        .add_directory(
+            "bin/",
+            zip::write::SimpleFileOptions::default().unix_permissions(0o750),
+        )
+        .unwrap();
+    writer
+        .start_file(
+            "bin/run",
+            zip::write::SimpleFileOptions::default().unix_permissions(0o755),
+        )
+        .unwrap();
+    writer.write_all(b"program contents").unwrap();
+    writer
+        .add_symlink(
+            "link",
+            "bin/run",
+            zip::write::SimpleFileOptions::default().unix_permissions(0o777),
+        )
+        .unwrap();
+    writer.finish().unwrap();
+    let mut expected = raw_entry_snapshots(&archive);
+    expected[2].name = b"renamed-link".to_vec();
+    run_update(
+        &archive,
+        &[UpdateOp::Rename {
+            from: EntryPath::from_utf8("link"),
+            to: EntryPath::from_utf8("renamed-link"),
+        }],
+        &CreateOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(raw_entry_snapshots(&archive), expected);
+    let entries = engine().list(&archive, &OpenOptions::default()).unwrap();
+    assert!(
+        matches!(&entries.iter().find(|entry| entry.path.display == "renamed-link").unwrap().entry_type,
+        squallz_core::api::EntryType::Symlink { target } if target == b"bin/run")
+    );
+    assert_unzip_t(&archive);
 }
 
 const LARGE_RAW_COPY_ENTRY: &str = "raw-copy/large.bin";
@@ -1230,14 +1630,15 @@ fn update_preserves_unflagged_utf8_names() {
 }
 
 #[test]
-fn update_cannot_silently_reencode_retained_legacy_names() {
+fn update_preserves_retained_legacy_names() {
     let tmp = TempDir::new("update-retained-legacy");
     let archive = tmp.path().join("legacy.zip");
     let (name, _, errors) = encoding_rs::GBK.encode("压缩文件中文名称测试.txt");
     assert!(!errors);
+    let name = name.into_owned();
     let before = build_stored_zip(&[
         RawZipEntry {
-            name: name.into_owned(),
+            name: name.clone(),
             data: b"keep me".to_vec(),
         },
         RawZipEntry {
@@ -1246,16 +1647,29 @@ fn update_cannot_silently_reencode_retained_legacy_names() {
         },
     ]);
     fs::write(&archive, &before).unwrap();
-    let error = run_update(
+    run_update(
         &archive,
         &[UpdateOp::DeleteEntry {
             path: EntryPath::from_utf8("drop.txt"),
         }],
         &CreateOptions::default(),
     )
-    .unwrap_err();
-    assert!(matches!(error, FormatError::Unsupported(message) if message.contains("entry names")));
-    assert_eq!(fs::read(&archive).unwrap(), before);
+    .unwrap();
+    let mut reader = zip::ZipArchive::new(fs::File::open(&archive).unwrap()).unwrap();
+    assert_eq!(reader.len(), 1);
+    assert_eq!(reader.by_index_raw(0).unwrap().name_raw(), name);
+    let entries = engine()
+        .list(
+            &archive,
+            &OpenOptions {
+                encoding_override: Some("gbk".into()),
+                ..OpenOptions::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(entries[0].path.display, "压缩文件中文名称测试.txt");
+    assert_eq!(entries[0].path.raw, name);
+    assert_unzip_t(&archive);
     assert_no_update_temp(tmp.path());
 }
 

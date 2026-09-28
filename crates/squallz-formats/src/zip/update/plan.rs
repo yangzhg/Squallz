@@ -4,11 +4,17 @@ use std::io::{Read, Seek};
 use squallz_format_api::{sanitize_entry_path, ControlToken, EntryPath, FormatError, UpdateOp};
 use zip::ZipArchive;
 
+use super::super::encoding::{decode_entry_name, resolve_fallback_encoding};
 use super::{addition_meta, map_controlled_zip_error, AdditionSet, Deletions};
 
+pub(super) struct UpdatePlan {
+    pub(super) renames: HashMap<Vec<u8>, String>,
+    pub(super) encoding: Option<&'static encoding_rs::Encoding>,
+}
+
 struct ArchiveName {
-    raw: String,
-    key: String,
+    raw: Vec<u8>,
+    key: Vec<u8>,
     directory: bool,
     deleted: bool,
 }
@@ -16,39 +22,50 @@ struct ArchiveName {
 struct Rename {
     target: String,
     directory: bool,
+    encoding: Option<&'static encoding_rs::Encoding>,
 }
 
 #[derive(Default)]
 struct Namespace {
-    files: HashSet<String>,
-    directories: HashSet<String>,
-    entries: HashSet<String>,
+    files: HashSet<Vec<u8>>,
+    directories: HashSet<Vec<u8>>,
+    entries: HashSet<Vec<u8>>,
 }
 
 impl Namespace {
-    fn insert(&mut self, key: &str, directory: bool) {
+    fn insert(&mut self, key: &[u8], directory: bool) {
         self.entries.insert(key.to_owned());
         if directory {
             self.directories.insert(key.to_owned());
         } else {
             self.files.insert(key.to_owned());
         }
-        self.directories.extend(parents(key).map(str::to_owned));
+        self.directories.extend(parents(key).map(<[u8]>::to_vec));
     }
 
-    fn contains(&self, key: &str) -> bool {
+    fn contains(&self, key: &[u8]) -> bool {
         self.files.contains(key) || self.directories.contains(key)
     }
 
-    fn blocks(&self, key: &str, directory: bool) -> bool {
+    fn blocks(&self, key: &[u8], directory: bool) -> bool {
         self.files.contains(key)
             || (!directory && self.directories.contains(key))
             || parents(key).any(|parent| self.files.contains(parent))
     }
 }
 
-fn parents(path: &str) -> impl Iterator<Item = &str> {
-    path.match_indices('/').map(|(index, _)| &path[..index])
+fn parents(path: &[u8]) -> impl Iterator<Item = &[u8]> {
+    path.iter()
+        .enumerate()
+        .filter_map(|(index, byte)| (*byte == b'/').then_some(&path[..index]))
+}
+
+fn path_key(path: &[u8]) -> &[u8] {
+    let end = path
+        .iter()
+        .rposition(|byte| *byte != b'/')
+        .map_or(0, |index| index + 1);
+    &path[..end]
 }
 
 fn safe_target(path: &str) -> Result<String, FormatError> {
@@ -69,7 +86,7 @@ pub(super) fn prepare<R: Read + Seek>(
     deletes: &mut Deletions,
     additions: &impl AdditionSet,
     ctl: &ControlToken,
-) -> Result<HashMap<String, String>, FormatError> {
+) -> Result<UpdatePlan, FormatError> {
     let mut names = Vec::with_capacity(archive.len());
     let mut original = Namespace::default();
     for index in 0..archive.len() {
@@ -77,16 +94,11 @@ pub(super) fn prepare<R: Read + Seek>(
         let file = archive
             .by_index_raw(index)
             .map_err(|error| map_controlled_zip_error(error, ctl))?;
-        let raw = String::from_utf8_lossy(file.name_raw()).into_owned();
-        let key = raw.trim_end_matches('/').to_owned();
+        let raw = file.name_raw().to_vec();
+        let key = path_key(&raw).to_vec();
         let directory = file.is_dir();
         deletes.observe(file.name_raw());
         let deleted = deletes.matches(file.name_raw());
-        if !deleted && std::str::from_utf8(file.name_raw()).is_err() {
-            return Err(FormatError::Unsupported(
-                "ZIP update cannot preserve non-UTF-8 entry names; convert the archive to a UTF-8 ZIP before editing".into(),
-            ));
-        }
         original.insert(&key, directory);
         names.push(ArchiveName {
             raw,
@@ -96,17 +108,18 @@ pub(super) fn prepare<R: Read + Seek>(
         });
     }
     deletes.validate()?;
+    let fallback_encoding = resolve_fallback_encoding(names.iter().map(|name| &name.raw), None);
 
-    let mut requested = HashMap::<String, Rename>::new();
+    let mut requested = HashMap::<Vec<u8>, Rename>::new();
     let mut destinations = HashSet::new();
     for op in ops {
         ctl.checkpoint()?;
         let UpdateOp::Rename { from, to } = op else {
             continue;
         };
-        let source = from.display.trim_end_matches('/');
+        let source = path_key(&from.raw);
         let directory = original.directories.contains(source);
-        if !original.contains(source) || (from.display.ends_with('/') && !directory) {
+        if !original.contains(source) || (from.raw.ends_with(b"/") && !directory) {
             return Err(FormatError::Other(format!(
                 "rename source not found in archive: {from}"
             )));
@@ -117,7 +130,16 @@ pub(super) fn prepare<R: Read + Seek>(
             )));
         }
         let target = safe_target(&to.display)?;
-        if source == target || (directory && target.starts_with(&format!("{source}/"))) {
+        let source_display = from.display.trim_end_matches('/');
+        if source == target.as_bytes()
+            || source_display == target
+            || (directory
+                && (target.starts_with(&format!("{source_display}/"))
+                    || target
+                        .as_bytes()
+                        .strip_prefix(source)
+                        .is_some_and(|suffix| suffix.starts_with(b"/"))))
+        {
             return Err(FormatError::Other(format!(
                 "rename target must be outside the source: {from} -> {to}"
             )));
@@ -133,7 +155,19 @@ pub(super) fn prepare<R: Read + Seek>(
             )));
         }
         if requested
-            .insert(source.to_owned(), Rename { target, directory })
+            .insert(
+                source.to_owned(),
+                Rename {
+                    target,
+                    directory,
+                    encoding: if from.encoding.eq_ignore_ascii_case("utf-8") {
+                        fallback_encoding
+                    } else {
+                        encoding_rs::Encoding::for_label(from.encoding.as_bytes())
+                            .or(fallback_encoding)
+                    },
+                },
+            )
             .is_some()
         {
             return Err(FormatError::Other(format!(
@@ -145,7 +179,8 @@ pub(super) fn prepare<R: Read + Seek>(
         ctl.checkpoint()?;
         if parents(source).any(|parent| requested.get(parent).is_some_and(|item| item.directory)) {
             return Err(FormatError::Other(format!(
-                "overlapping rename sources: {source}"
+                "overlapping rename sources: {}",
+                String::from_utf8_lossy(source)
             )));
         }
     }
@@ -166,6 +201,25 @@ pub(super) fn prepare<R: Read + Seek>(
         });
         if let Some((source, request)) = source {
             let suffix = &name.key[source.len()..];
+            let suffix = match std::str::from_utf8(suffix) {
+                Ok(suffix) => std::borrow::Cow::Borrowed(suffix),
+                Err(_) => {
+                    let encoding = request.encoding.ok_or_else(|| {
+                        FormatError::Unsupported(
+                            "renaming this directory requires an unambiguous entry-name encoding"
+                                .into(),
+                        )
+                    })?;
+                    let (suffix, errors) = encoding.decode_without_bom_handling(suffix);
+                    if errors {
+                        return Err(FormatError::Unsupported(
+                            "renaming this directory requires an unambiguous entry-name encoding"
+                                .into(),
+                        ));
+                    }
+                    suffix
+                }
+            };
             let target = format!("{}{suffix}", request.target);
             let target = safe_target(&target)?;
             renames.insert(
@@ -174,11 +228,15 @@ pub(super) fn prepare<R: Read + Seek>(
             );
         } else {
             retained.insert(&name.key, name.directory);
+            let display = decode_entry_name(&name.raw, fallback_encoding).display;
+            if display.as_bytes() != name.raw {
+                retained.insert(path_key(display.as_bytes()), name.directory);
+            }
         }
     }
     for request in requested.values().filter(|item| item.directory) {
         ctl.checkpoint()?;
-        if retained.contains(&request.target) {
+        if retained.contains(request.target.as_bytes()) {
             return Err(FormatError::Other(format!(
                 "update target already exists in archive: {}",
                 request.target
@@ -204,7 +262,10 @@ pub(super) fn prepare<R: Read + Seek>(
         )?;
     }
     ctl.checkpoint()?;
-    Ok(renames)
+    Ok(UpdatePlan {
+        renames,
+        encoding: fallback_encoding,
+    })
 }
 
 fn validate_target(
@@ -214,16 +275,16 @@ fn validate_target(
     produced: &mut Namespace,
 ) -> Result<(), FormatError> {
     let key = safe_target(target)?;
-    if retained.contains(&key) || retained.blocks(&key, directory) {
+    if retained.contains(key.as_bytes()) || retained.blocks(key.as_bytes(), directory) {
         return Err(FormatError::Other(format!(
             "update target already exists in archive: {target}"
         )));
     }
-    if produced.entries.contains(&key) || produced.blocks(&key, directory) {
+    if produced.entries.contains(key.as_bytes()) || produced.blocks(key.as_bytes(), directory) {
         return Err(FormatError::Other(format!(
             "duplicate update target in archive: {target}"
         )));
     }
-    produced.insert(&key, directory);
+    produced.insert(key.as_bytes(), directory);
     Ok(())
 }

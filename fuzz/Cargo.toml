@@ -13,6 +13,9 @@ libfuzzer-sys = "0.4"
 squallz-format-api = { path = "../crates/squallz-format-api", version = "0.2.0" }
 squallz-formats = { path = "../crates/squallz-formats", version = "0.2.0" }
 
+[patch.crates-io]
+zip = { path = "../third_party/zip-8.6.0-squallz" }
+
 [[bin]]
 name = "zip_reader"
 path = "fuzz_targets/zip_reader.rs"

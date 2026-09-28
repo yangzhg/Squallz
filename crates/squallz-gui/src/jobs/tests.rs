@@ -3872,6 +3872,12 @@ fn update_job_resolves_display_names_and_rejects_ambiguous_or_missing_selection(
             "done",
         ),
         (
+            "first.txt",
+            &[0xc4, 0xe3, b'[', b'1', b']', b'.', b't', b'x', b't'][..],
+            "nested/first.txt",
+            "done",
+        ),
+        (
             "nested/first.txt",
             &b"///////first.txt"[..],
             "first.txt",
@@ -3943,13 +3949,42 @@ fn update_job_resolves_display_names_and_rejects_ambiguous_or_missing_selection(
         } else {
             let mut names: Vec<_> = state
                 .engine
-                .list(&archive, &OpenOptions::default())
+                .list(
+                    &archive,
+                    &OpenOptions {
+                        encoding_override: Some("gbk".into()),
+                        ..OpenOptions::default()
+                    },
+                )
                 .unwrap()
                 .into_iter()
                 .map(|entry| entry.path.display)
                 .collect();
             names.sort();
-            assert_eq!(names, ["nested/", "nested/first.txt"]);
+            if selected == "nested/first.txt" {
+                assert_eq!(names, ["nested/", "你[1].txt"]);
+                let entries = state
+                    .engine
+                    .list(
+                        &archive,
+                        &OpenOptions {
+                            encoding_override: Some("gbk".into()),
+                            ..OpenOptions::default()
+                        },
+                    )
+                    .unwrap();
+                assert_eq!(
+                    entries
+                        .iter()
+                        .find(|entry| entry.path.display == "你[1].txt")
+                        .unwrap()
+                        .path
+                        .raw,
+                    raw_name
+                );
+            } else {
+                assert_eq!(names, ["nested/", "nested/first.txt"]);
+            }
         }
         fs::remove_dir_all(dir).unwrap();
     }
