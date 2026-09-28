@@ -133,7 +133,9 @@ impl CliProgress {
         let phase = state.phase;
         let interruptible = state.interruptible;
         let recovery_phase = is_recovery_progress_phase(phase);
-        let (done, total) = if phase.is_some() && !interruptible && !recovery_phase {
+        let (done, total) = if (phase.is_some() && !interruptible && !recovery_phase)
+            || phase == Some(ProgressPhase::ExtractMetadata)
+        {
             (0, 0)
         } else {
             (done, total)
@@ -298,6 +300,16 @@ fn render_progress_line(
     accent: AccentArg,
     snapshot: ProgressFrame<'_>,
 ) -> String {
+    let snapshot = if snapshot.phase == Some(ProgressPhase::ExtractMetadata) {
+        ProgressFrame {
+            done: 0,
+            total: 0,
+            speed: 0,
+            ..snapshot
+        }
+    } else {
+        snapshot
+    };
     if style.is_modern() {
         return render_modern_progress_line(color, accent, snapshot);
     }
@@ -831,6 +843,9 @@ fn modern_operator_cue(
     total: u64,
     explicit_phase: Option<ProgressPhase>,
 ) -> &'static str {
+    if explicit_phase == Some(ProgressPhase::ExtractMetadata) {
+        return "restore dates and permissions";
+    }
     if is_recovery_progress_phase(explicit_phase) {
         return match explicit_phase {
             Some(ProgressPhase::RecoveryPrepare) => "prepare recovery inputs",
@@ -892,6 +907,8 @@ fn modern_operator_cue(
 
 fn modern_explicit_phase_signal(phase: Option<ProgressPhase>) -> &'static str {
     match phase {
+        Some(ProgressPhase::ExtractEntries) => "archive extraction · byte progress",
+        Some(ProgressPhase::ExtractMetadata) => "folder dates and permissions",
         Some(
             ProgressPhase::RecoveryPrepare
             | ProgressPhase::RecoveryVerify
@@ -1048,6 +1065,7 @@ fn modern_next_phase(
 }
 
 fn explicit_phase_stages(phase: ProgressPhase) -> &'static [&'static str] {
+    const EXTRACT_STAGES: &[&str] = &["EXTRACT", "FINALIZE"];
     const RECOVERY_STAGES: &[&str] = &["PREPARE", "VERIFY", "PROCESS", "FINALIZE"];
     const SPLIT_OUTPUT_STAGES: &[&str] = &["SPLIT", "PUBLISH", "CLEANUP"];
     const OUTPUT_STAGES: &[&str] = &["RECOVER", "VERIFY", "PUBLISH", "CLEANUP"];
@@ -1055,6 +1073,7 @@ fn explicit_phase_stages(phase: ProgressPhase) -> &'static [&'static str] {
     const FALLBACK_STAGES: &[&str] = &["WORK"];
 
     match phase {
+        ProgressPhase::ExtractEntries | ProgressPhase::ExtractMetadata => EXTRACT_STAGES,
         ProgressPhase::RecoveryPrepare
         | ProgressPhase::RecoveryVerify
         | ProgressPhase::RecoveryProcess
@@ -1075,6 +1094,8 @@ fn explicit_phase_stages(phase: ProgressPhase) -> &'static [&'static str] {
 
 fn progress_phase_label(phase: ProgressPhase) -> &'static str {
     match phase {
+        ProgressPhase::ExtractEntries => "EXTRACT",
+        ProgressPhase::ExtractMetadata => "FINALIZE",
         ProgressPhase::RecoveryPrepare => "PREPARE",
         ProgressPhase::RecoveryVerify => "VERIFY",
         ProgressPhase::RecoveryProcess => "PROCESS",
@@ -1602,6 +1623,24 @@ mod tests {
             ),
             "write physical volume set"
         );
+    }
+
+    #[test]
+    fn extraction_finalization_does_not_reuse_finished_byte_progress() {
+        let mut frame = progress_frame("extract", 100, 100, "reports/folder", 64, 1, 0);
+        frame.phase = Some(ProgressPhase::ExtractMetadata);
+        for style in [OutputStyleArg::Classic, OutputStyleArg::Modern] {
+            let line = render_progress_line(style, false, AccentArg::Ocean, frame);
+            assert!(line.contains("FINALIZE"));
+            assert!(line.contains("reports/folder"));
+            assert!(!line.contains("100%"));
+            assert!(!line.contains("/s"));
+            assert!(!line.contains("EXTRACT · DONE"));
+            assert!(!line.contains("EXTRACT · SAFE"));
+        }
+        let modern = render_progress_line(OutputStyleArg::Modern, false, AccentArg::Ocean, frame);
+        assert!(modern.contains("EXTRACT · RUN"));
+        assert!(modern.contains("restore dates and permissions"));
     }
 
     #[test]

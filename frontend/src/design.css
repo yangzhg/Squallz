@@ -2867,6 +2867,7 @@ select option {
   min-height: 0;
   overflow: auto;
   display: grid;
+  align-content: start;
   gap: var(--task-modal-gap);
   padding-right: var(--space-xs);
   overscroll-behavior: contain;
@@ -3634,10 +3635,6 @@ select option {
 
 .task-window-surface .task-modal-head h2 {
   margin: 0;
-}
-
-.task-window-surface .task-modal-body {
-  align-content: start;
 }
 
 .task-window-surface .task-modal-actions {

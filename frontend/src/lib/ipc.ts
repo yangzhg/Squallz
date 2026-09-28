@@ -336,6 +336,8 @@ export type JobSpec =
     };
 
 export type ProgressPhase =
+  | "extract_entries"
+  | "extract_metadata"
   | "recovery_prepare"
   | "recovery_verify"
   | "recovery_process"

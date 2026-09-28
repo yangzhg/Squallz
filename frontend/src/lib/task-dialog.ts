@@ -114,13 +114,18 @@ export function taskOutcomeStateTone(task: TaskDialogModel): string {
 }
 
 export function taskProgressPercent(task: TaskDialogModel): number {
+  if (isRestoringDirectories(task)) return 0;
   if (task.total > 0) return Math.min(100, Math.round((task.done / task.total) * 100));
   if (task.state === "done") return 100;
   return 0;
 }
 
 export function taskOverallProgressIndeterminate(task: TaskDialogModel): boolean {
-  return isTaskActiveState(task.state) && task.total === 0;
+  return isTaskActiveState(task.state) && (task.total === 0 || isRestoringDirectories(task));
+}
+
+function isRestoringDirectories(task: TaskDialogModel): boolean {
+  return isTaskActiveState(task.state) && task.phase === "extract_metadata";
 }
 
 function isRecoveryProgressPhase(task: TaskDialogModel): boolean {
@@ -131,6 +136,8 @@ function isRecoveryProgressPhase(task: TaskDialogModel): boolean {
 }
 
 export function taskProgressPhaseLabel(task: TaskDialogModel): string | null {
+  if (task.phase === "extract_entries") return tr("gui.task.phase.extract_entries", "Extracting files");
+  if (task.phase === "extract_metadata") return tr("gui.task.phase.extract_metadata", "Restoring folder information");
   if (task.phase === "recovery_prepare") return tr("gui.task.phase.recovery_prepare", "Preparing recovery data");
   if (task.phase === "recovery_verify") return tr("gui.task.phase.recovery_verify", "Verifying protected data");
   if (task.phase === "recovery_process") return tr("gui.task.phase.recovery_process", "Processing recovery blocks");
@@ -166,7 +173,7 @@ export function taskOverallProgressBadge(task: TaskDialogModel): string {
     return taskOutcomeStateLabel(task);
   }
   const phase = isTaskActiveState(task.state) ? taskProgressPhaseLabel(task) : null;
-  if (phase && task.total === 0 && isTaskProgressingState(task.state)) return phase;
+  if (phase && (task.total === 0 || isRestoringDirectories(task)) && isTaskProgressingState(task.state)) return phase;
   if (task.total > 0 || task.state === "done") return `${taskProgressPercent(task)}%`;
   if (isTaskProgressingState(task.state) && task.scanEntries != null) {
     return tr("gui.task.scan_badge", "Scanning");
@@ -178,7 +185,7 @@ export function taskOverallProgressBadge(task: TaskDialogModel): string {
 }
 
 export function hasTaskCurrentProgress(task: TaskDialogModel): boolean {
-  return task.currentTotal > 0;
+  return task.currentTotal > 0 && !isRestoringDirectories(task);
 }
 
 export function taskCurrentSectionVisible(task: TaskDialogModel): boolean {
@@ -208,13 +215,16 @@ export function taskProgressSummary(task: TaskDialogModel): string {
     return t("gui.task.progress_scan", { count: task.scanEntries });
   }
   const phase = isTaskActiveState(task.state) ? taskProgressPhaseLabel(task) : null;
+  if (isRestoringDirectories(task)) {
+    return tr("gui.task.extract_metadata_detail", "Restoring folder modification dates and permissions.");
+  }
   if (phase && task.total > 0 && isRecoveryProgressPhase(task)) {
     return t("gui.task.recovery_phase_progress_known", {
       phase,
       percent: taskProgressPercent(task),
     });
   }
-  if (phase && task.total > 0) {
+  if (phase && task.total > 0 && task.spec.kind !== "batch_extract") {
     return t("gui.task.phase_progress_known", {
       phase,
       percent: taskProgressPercent(task),
@@ -223,7 +233,7 @@ export function taskProgressSummary(task: TaskDialogModel): string {
       speed: taskSpeedLabel(task),
     });
   }
-  if (phase) {
+  if (phase && task.spec.kind !== "batch_extract") {
     return t("gui.task.phase_progress_pending", { phase });
   }
   if (task.spec.kind === "batch_extract") {
@@ -256,6 +266,7 @@ export function taskProgressSummary(task: TaskDialogModel): string {
 
 export function taskCurrentSectionLabel(task: TaskDialogModel): string {
   if (!isTaskActiveState(task.state)) return tr("gui.task.last_item", "Last item");
+  if (isRestoringDirectories(task)) return tr("gui.task.current_folder", "Current folder");
   if (task.scanEntries != null) return tr("gui.task.current_input", "Current input");
   return tr("gui.task.current_file", "Current file");
 }

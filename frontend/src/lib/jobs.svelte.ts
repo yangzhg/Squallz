@@ -1278,6 +1278,8 @@ type PreviewTaskKind =
   | "recovery_cleanup_record"
   | "extract"
   | "extract_unknown_current"
+  | "extract_metadata"
+  | "batch_extract_metadata"
   | "batch_extract"
   | "test"
   | "checksum"
@@ -1291,6 +1293,7 @@ type PreviewTaskKind =
   | "update_commit";
 
 function previewPhase(kind: PreviewTaskKind): ProgressPhase | null {
+  if (kind === "extract_metadata" || kind === "batch_extract_metadata") return "extract_metadata";
   if (kind === "recovery_protect") return "recovery_finalize";
   if (isRecoveryCleanupPreview(kind)) return "recovery_finalize";
   if (isRecoveryPreview(kind)) return "recovery_verify";
@@ -1354,7 +1357,7 @@ function previewTaskSpec(kind: PreviewTaskKind): JobSpec {
       test_after_create: false,
     };
   }
-  if (kind === "extract" || kind === "extract_unknown_current") {
+  if (kind === "extract" || kind === "extract_unknown_current" || kind === "extract_metadata") {
     return {
       kind: "extract",
       path: `${sampleRoot}/product-backup.zip`,
@@ -1488,7 +1491,7 @@ function previewTaskResult(kind: PreviewTaskKind): Record<string, unknown> {
       stderr: "damage found",
     };
   }
-  if (kind === "batch_extract") {
+  if (kind === "batch_extract" || kind === "batch_extract_metadata") {
     return {
       operation: "batch_extract",
       archives: 2,
@@ -1501,7 +1504,7 @@ function previewTaskResult(kind: PreviewTaskKind): Record<string, unknown> {
       ],
     };
   }
-  if (kind === "extract" || kind === "extract_unknown_current") {
+  if (kind === "extract" || kind === "extract_unknown_current" || kind === "extract_metadata") {
     const problems = Array.from(
       { length: 20 },
       (_, index) => `damaged/item-${String(index + 1).padStart(2, "0")}.bin: checksum mismatch`,
@@ -1633,7 +1636,7 @@ function previewRevealPath(kind: PreviewTaskKind): string | null {
   if (kind === "compress") return `${sampleOutputRoot}/product-backup.zip`;
   if (kind === "compress_split") return `${sampleOutputRoot}/product-backup.zip.001`;
   if (kind === "compress_sfx") return `${sampleOutputRoot}/Installer.app`;
-  if (kind === "extract" || kind === "extract_unknown_current") return `${sampleOutputRoot}/product-backup`;
+  if (kind === "extract" || kind === "extract_unknown_current" || kind === "extract_metadata") return `${sampleOutputRoot}/product-backup`;
   if (kind === "test") return null;
   if (kind === "checksum") return `${sampleRoot}/photos`;
   if (kind === "checksum_check") return `${sampleRoot}/photos/SHA256SUMS`;
@@ -1641,6 +1644,17 @@ function previewRevealPath(kind: PreviewTaskKind): string | null {
 }
 
 function previewProgress(kind: PreviewTaskKind, state: Extract<JobStateName, "done" | "running">) {
+  if (kind === "extract_metadata" || kind === "batch_extract_metadata") {
+    const batch = kind === "batch_extract_metadata";
+    return {
+      done: batch ? (state === "done" ? 2000 : 1000) : state === "done" ? 48_000_000 : 0,
+      total: batch ? 2000 : state === "done" ? 48_000_000 : 0,
+      current: state === "done" ? "" : `${batch ? "photos.7z: " : ""}project/design/客户交付/September release/resources`,
+      currentDone: 0,
+      currentTotal: 0,
+      speed: 0,
+    };
+  }
   if (kind === "recovery_protect") {
     return {
       done: state === "done" ? 1 : 0,
@@ -1763,6 +1777,8 @@ function previewProgress(kind: PreviewTaskKind, state: Extract<JobStateName, "do
 }
 
 function previewTaskOffset(kind: PreviewTaskKind): number {
+  if (kind === "extract_metadata") return 21;
+  if (kind === "batch_extract_metadata") return 22;
   if (kind === "recovery_protect") return 17;
   if (kind === "update_scan") return 11;
   if (kind === "update_verify") return 12;

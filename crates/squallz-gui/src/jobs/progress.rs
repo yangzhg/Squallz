@@ -82,6 +82,7 @@ impl<'a> BatchProgressSink<'a> {
     }
 
     pub(super) fn start_archive(&self, index: usize, archive: String) {
+        self.inner.on_phase(ProgressPhase::ExtractEntries, true);
         {
             let mut state = lock_unpoisoned(&self.state);
             state.index = index as u64;
@@ -312,7 +313,10 @@ impl<'a> EmitProgress<'a> {
             w.latest = Some(snapshot);
             return;
         }
-        if scanned_entries.is_some() || percentage_phase {
+        if scanned_entries.is_some()
+            || percentage_phase
+            || w.phase.as_deref() == Some("extract_metadata")
+        {
             w.speed = 0;
             w.last_done = 0;
         } else {
@@ -406,6 +410,8 @@ impl ProgressSink for EmitProgress<'_> {
 
 fn progress_phase_name(phase: ProgressPhase) -> Option<&'static str> {
     match phase {
+        ProgressPhase::ExtractEntries => Some("extract_entries"),
+        ProgressPhase::ExtractMetadata => Some("extract_metadata"),
         ProgressPhase::RecoveryPrepare => Some("recovery_prepare"),
         ProgressPhase::RecoveryVerify => Some("recovery_verify"),
         ProgressPhase::RecoveryProcess => Some("recovery_process"),
@@ -471,6 +477,18 @@ mod tests {
 
         for (phase, name, interruptible, counts) in [
             (
+                ProgressPhase::ExtractEntries,
+                "extract_entries",
+                true,
+                (25, 100),
+            ),
+            (
+                ProgressPhase::ExtractMetadata,
+                "extract_metadata",
+                true,
+                (25, 100),
+            ),
+            (
                 ProgressPhase::UpdateVerify,
                 "update_verify",
                 true,
@@ -493,6 +511,8 @@ mod tests {
             ),
         ] {
             progress.on_phase(phase, interruptible);
+            lock_unpoisoned(&progress.inner).last_emit -=
+                std::time::Duration::from_millis(PROGRESS_THROTTLE_MS as u64);
             progress.on_progress(25, 100, &entry);
             progress.flush();
             let snapshot = lock_unpoisoned(&snapshots).snapshot("main", 1).unwrap();
@@ -502,11 +522,58 @@ mod tests {
                 counts,
                 "{name}"
             );
-            if !interruptible {
+            if !interruptible || phase == ProgressPhase::ExtractMetadata {
                 assert_eq!(snapshot.progress.speed, 0, "{name}");
             }
             assert_eq!(snapshot.progress.interruptible, interruptible, "{name}");
         }
+    }
+
+    #[test]
+    fn next_archive_resumes_entry_progress_after_directory_finalization() {
+        let snapshots = Arc::new(Mutex::new(JobSnapshotStore::default()));
+        lock_unpoisoned(&snapshots).insert(
+            1,
+            Some("main".into()),
+            checksum_job(std::path::Path::new("input.bin")),
+            "running",
+        );
+        let progress = EmitProgress::new(
+            1,
+            Arc::new(TestSink::default()),
+            Arc::clone(&snapshots),
+            &squallz_core::api::NoProgress,
+            &[],
+        );
+        let batch = BatchProgressSink::new(&progress, 2);
+        batch.start_archive(0, "first.zip".into());
+        batch.on_phase(ProgressPhase::ExtractMetadata, true);
+        batch.on_progress(0, 0, &EntryPath::from_utf8("folder"));
+        progress.flush();
+        let snapshot = lock_unpoisoned(&snapshots).snapshot("main", 1).unwrap();
+        assert_eq!(snapshot.progress.phase.as_deref(), Some("extract_metadata"));
+        assert_eq!(snapshot.progress.current, "first.zip: folder");
+        assert_eq!(snapshot.progress.speed, 0);
+        assert!(snapshot.progress.interruptible);
+
+        batch.finish_archive(0, "first.zip".into());
+        batch.start_archive(1, "second.zip".into());
+        batch.on_entry_progress(50, 100, &EntryPath::from_utf8("report.txt"), 5, 10);
+        progress.flush();
+        let snapshot = lock_unpoisoned(&snapshots).snapshot("main", 1).unwrap();
+        assert_eq!(snapshot.progress.phase.as_deref(), Some("extract_entries"));
+        assert_eq!(
+            (snapshot.progress.done, snapshot.progress.total),
+            (1500, 2000)
+        );
+        assert_eq!(
+            (
+                snapshot.progress.current_done,
+                snapshot.progress.current_total
+            ),
+            (5, 10)
+        );
+        assert_eq!(snapshot.progress.current, "second.zip: report.txt");
     }
 
     #[test]

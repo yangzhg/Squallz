@@ -442,7 +442,7 @@ impl ArchiveReader for SevenZArchiveReader {
         let entry_plans = build_entry_read_plans(self.inner.archive(), wanted.as_ref())?;
         let mut remaining_selected =
             build_remaining_selected_by_block(self.inner.archive(), &entry_plans, wanted.as_ref())?;
-        let mut sink = ExtractSink::new(dest, opts, total)?;
+        let mut sink = ExtractSink::new(dest, opts, total, progress)?;
         let mut failure: Option<FormatError> = None;
         let backend_result = self.inner.for_each_entries(|entry, reader| {
             // The backend may continue with a later non-solid block after

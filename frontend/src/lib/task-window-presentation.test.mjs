@@ -105,6 +105,64 @@ test("window task views render one task heading and retain progress, results and
   }
 });
 
+test("all task surfaces show folder finalization without finished byte bars", async () => {
+  const server = await createTestServer();
+  try {
+    const { render } = await server.ssrLoadModule("svelte/server");
+    const { default: TaskProgressDialog } = await server.ssrLoadModule("/src/components/TaskProgressDialog.svelte");
+    const { default: TaskCenter } = await server.ssrLoadModule("/src/components/TaskCenter.svelte");
+    const { loadLocale } = await server.ssrLoadModule("/src/lib/i18n.svelte.ts");
+    const helpers = await server.ssrLoadModule("/src/lib/task-dialog.ts");
+    const { surface } = taskSurface(false);
+    for (const [locale, phase, currentLabel] of [
+      ["en-US", "Restoring folder information", "Current folder"],
+      ["zh-CN", "正在恢复文件夹信息", "当前文件夹"],
+    ]) {
+      await loadLocale(locale);
+      for (const kind of ["extract", "batch_extract"]) {
+        const task = { ...extractTask("running"), phase: "extract_metadata", done: 100, total: 100,
+          current: "reports/客户交付", currentDone: 10, currentTotal: 10,
+          spec: kind === "extract" ? extractTask("running").spec : { kind, items: [{ path: "first.zip" }, { path: "second.zip" }] },
+        };
+        assert.equal(helpers.taskOverallProgressBadge(task), phase);
+        assert.equal(helpers.taskOverallProgressIndeterminate(task), true);
+        assert.equal(helpers.taskCurrentSectionLabel(task), currentLabel);
+        assert.equal(helpers.hasTaskCurrentProgress(task), false);
+        assert.doesNotMatch(helpers.taskProgressSummary(task), /100%|\/s|100 B/u);
+        for (const presentation of ["dialog", "panel", "window"]) {
+          const { body } = render(TaskProgressDialog, { props: { ...surface, presentation, task } });
+          assert.ok(body.includes(phase));
+          assert.ok(body.includes(currentLabel));
+          assert.match(body, /reports\/客户交付/u);
+          assert.equal((body.match(/<progress\b/gu) ?? []).length, 1);
+          assert.doesNotMatch(body.match(/<progress\b[^>]*>/u)?.[0] ?? "", /\bvalue=/u);
+          assert.doesNotMatch(body, /100%|100 B|disabled/u);
+        }
+        const paused = { ...task, state: "paused" };
+        assert.equal(helpers.taskOverallProgressIndeterminate(paused), true);
+        assert.doesNotMatch(helpers.taskOverallProgressBadge(paused), /100%/u);
+        const done = { ...task, state: "done" };
+        assert.equal(helpers.taskOverallProgressBadge(done), "100%");
+        assert.equal(helpers.taskOverallProgressIndeterminate(done), false);
+        const next = { ...task, phase: "extract_entries", done: 50 };
+        assert.equal(helpers.taskOverallProgressBadge(next), "50%");
+        assert.equal(helpers.hasTaskCurrentProgress(next), true);
+        if (kind === "batch_extract") assert.doesNotMatch(helpers.taskProgressSummary(next), / B|\/s/u);
+        for (const row of [task, paused, next]) {
+          const { body } = render(TaskCenter, { props: {
+            tasks: [{ ...row, queueMoveIntent: null }], rootClass: "task-center",
+          } });
+          assert.ok(body.includes(helpers.taskProgressSummary(row)));
+          if (row.phase === "extract_metadata") assert.doesNotMatch(body, /<progress\b|\d+%|disabled/u);
+          else assert.match(body, /value="50"/u);
+        }
+      }
+    }
+  } finally {
+    await server.close();
+  }
+});
+
 test("main-window task dialogs keep modal semantics and their task heading context", async () => {
   const server = await createTestServer();
   try {

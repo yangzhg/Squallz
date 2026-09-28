@@ -331,7 +331,7 @@ impl ArchiveReader for TarArchiveReader {
         } else {
             0
         };
-        let mut sink = ExtractSink::new(dest, opts, total)?;
+        let mut sink = ExtractSink::new(dest, opts, total, progress)?;
         let archive = self.rebuild()?;
         for item in archive.entries()? {
             let mut entry = item?;

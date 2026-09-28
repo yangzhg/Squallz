@@ -20,7 +20,7 @@ use crate::entry::{EntryMeta, EntryPath, EntryType};
 use crate::error::FormatError;
 use crate::links::LinkResolver;
 use crate::options::{ConflictDecision, ExtractOptions, OverwritePolicy, SymlinkPolicy};
-use crate::progress::{ControlToken, ProgressSink};
+use crate::progress::{ControlToken, ProgressPhase, ProgressSink};
 use crate::safety::{crosses_created_symlink, sanitize_entry_path, LimitsAccountant};
 use crate::traits::ArchiveReader;
 
@@ -316,9 +316,15 @@ pub struct ExtractSink<'o> {
 
 impl<'o> ExtractSink<'o> {
     /// Creates the destination directory and starts an accounting run.
-    pub fn new(dest: &Path, opts: &'o ExtractOptions, total: u64) -> Result<Self, FormatError> {
+    pub fn new(
+        dest: &Path,
+        opts: &'o ExtractOptions,
+        total: u64,
+        progress: &dyn ProgressSink,
+    ) -> Result<Self, FormatError> {
         fs::create_dir_all(dest)?;
         let canonical_dest = dest.canonicalize()?;
+        progress.on_phase(ProgressPhase::ExtractEntries, true);
         Ok(Self {
             dest: dest.to_path_buf(),
             canonical_dest,
@@ -755,9 +761,8 @@ impl<'o> ExtractSink<'o> {
     ) -> Result<ExtractReport, FormatError> {
         ctl.checkpoint()?;
         if let Some(directories) = self.directories.take() {
-            directories.finish(self.opts, ctl, |path| {
-                progress.on_progress(self.done, self.total, path)
-            })?;
+            progress.on_phase(ProgressPhase::ExtractMetadata, true);
+            directories.finish(self.opts, ctl, |path| progress.on_progress(0, 0, path))?;
         }
         ctl.checkpoint()?;
         let total = if self.total == 0 {
@@ -868,7 +873,7 @@ pub fn extract_entries_with_report<R: ArchiveReader + ?Sized>(
         .filter(|m| selected(m) && matches!(m.entry_type, EntryType::File))
         .map(|m| m.size)
         .sum();
-    let mut sink = ExtractSink::new(dest, opts, total)?;
+    let mut sink = ExtractSink::new(dest, opts, total, progress)?;
     // Out paths of files extracted so far, for hardlink reuse.
     let mut extracted: std::collections::HashMap<Vec<u8>, std::path::PathBuf> =
         std::collections::HashMap::new();
@@ -1261,7 +1266,7 @@ mod tests {
         let root = temp_dir("directory-times");
         let opts = ExtractOptions::default();
         let ctl = ControlToken::default();
-        let mut sink = ExtractSink::new(&root, &opts, 3).unwrap();
+        let mut sink = ExtractSink::new(&root, &opts, 3, &NoProgress).unwrap();
         let mut parent = directory_meta("folder");
         parent.modified = Some(UNIX_EPOCH);
         let mut child = directory_meta("folder/child");
@@ -1305,7 +1310,7 @@ mod tests {
                 ..ExtractOptions::default()
             };
             let ctl = ControlToken::default();
-            let mut sink = ExtractSink::new(&root, &opts, 3).unwrap();
+            let mut sink = ExtractSink::new(&root, &opts, 3, &NoProgress).unwrap();
             for name in ["folder", "folder/child"] {
                 let mut meta = directory_meta(name);
                 meta.modified = Some(archived_time());
@@ -1344,7 +1349,7 @@ mod tests {
         let root = temp_dir("directory-replacement");
         let opts = ExtractOptions::default();
         let ctl = ControlToken::default();
-        let mut sink = ExtractSink::new(&root, &opts, 0).unwrap();
+        let mut sink = ExtractSink::new(&root, &opts, 0, &NoProgress).unwrap();
         let mut meta = directory_meta("folder");
         meta.modified = Some(archived_time());
         sink.write_meta_entry(&meta, &NoProgress, &ctl).unwrap();
@@ -1377,7 +1382,7 @@ mod tests {
             fs::create_dir_all(outside.join("child")).unwrap();
             let opts = ExtractOptions::default();
             let ctl = ControlToken::default();
-            let mut sink = ExtractSink::new(&destination, &opts, 0).unwrap();
+            let mut sink = ExtractSink::new(&destination, &opts, 0, &NoProgress).unwrap();
             let mut meta = directory_meta(name);
             meta.modified = Some(archived_time());
             sink.write_meta_entry(&meta, &NoProgress, &ctl).unwrap();
@@ -1397,21 +1402,96 @@ mod tests {
     }
 
     #[test]
+    fn directory_finalization_reports_a_separate_cancellable_phase() {
+        #[derive(Debug, PartialEq)]
+        enum Event {
+            Phase(ProgressPhase, bool),
+            Progress(u64, u64, String),
+        }
+        #[derive(Default)]
+        struct Events(std::sync::Mutex<Vec<Event>>);
+        impl ProgressSink for Events {
+            fn on_phase(&self, phase: ProgressPhase, interruptible: bool) {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push(Event::Phase(phase, interruptible));
+            }
+            fn on_progress(&self, done: u64, total: u64, current: &EntryPath) {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push(Event::Progress(done, total, current.display.clone()));
+            }
+        }
+        for has_directory in [false, true] {
+            let root = temp_dir(&format!("directory-phase-{has_directory}"));
+            let opts = ExtractOptions::default();
+            let ctl = ControlToken::default();
+            let events = Events::default();
+            let mut sink = ExtractSink::new(&root, &opts, 3, &events).unwrap();
+            if has_directory {
+                let mut directory = directory_meta("folder");
+                directory.modified = Some(archived_time());
+                sink.write_meta_entry(&directory, &events, &ctl).unwrap();
+            }
+            let file = file_meta("report.txt");
+            let out = sink.file_target(&file, &events, &ctl).unwrap().unwrap();
+            sink.write_file(&file, &out, &mut Cursor::new(b"new"), &events, &ctl)
+                .unwrap();
+            let report = sink.finish_with_report(&events, &ctl).unwrap();
+            assert_eq!(report.output_bytes, 3);
+            let recorded = events.0.lock().unwrap();
+            assert_eq!(
+                recorded.first(),
+                Some(&Event::Phase(ProgressPhase::ExtractEntries, true))
+            );
+            let metadata = recorded
+                .iter()
+                .position(|event| *event == Event::Phase(ProgressPhase::ExtractMetadata, true));
+            if has_directory {
+                assert_eq!(
+                    &recorded[metadata.unwrap()..],
+                    &[
+                        Event::Phase(ProgressPhase::ExtractMetadata, true),
+                        Event::Progress(0, 0, "folder".into()),
+                        Event::Progress(3, 3, String::new()),
+                    ]
+                );
+                assert_eq!(
+                    fs::metadata(root.join("folder"))
+                        .unwrap()
+                        .modified()
+                        .unwrap(),
+                    archived_time()
+                );
+            } else {
+                assert_eq!(metadata, None);
+                assert_eq!(recorded.last(), Some(&Event::Progress(3, 3, String::new())));
+            }
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
     fn cancellation_during_directory_finalization_prevents_metadata_and_completion() {
         struct CancelOnDirectory {
             ctl: ControlToken,
-            events: std::sync::Mutex<Vec<EntryPath>>,
+            events: std::sync::Mutex<Vec<(u64, u64, EntryPath)>>,
         }
         impl ProgressSink for CancelOnDirectory {
-            fn on_progress(&self, _done: u64, _total: u64, current: &EntryPath) {
-                self.events.lock().unwrap().push(current.clone());
+            fn on_progress(&self, done: u64, total: u64, current: &EntryPath) {
+                self.events
+                    .lock()
+                    .unwrap()
+                    .push((done, total, current.clone()));
                 self.ctl.cancel();
             }
         }
         let root = temp_dir("directory-cancel");
         let opts = ExtractOptions::default();
         let ctl = ControlToken::default();
-        let mut sink = ExtractSink::new(&root, &opts, 0).unwrap();
+        let mut sink = ExtractSink::new(&root, &opts, 0, &NoProgress).unwrap();
         let mut meta = directory_meta("folder");
         meta.modified = Some(archived_time());
         sink.write_meta_entry(&meta, &NoProgress, &ctl).unwrap();
@@ -1427,7 +1507,7 @@ mod tests {
             sink.finish(&progress, &ctl),
             Err(FormatError::Cancelled)
         ));
-        assert_eq!(*progress.events.lock().unwrap(), [meta.path]);
+        assert_eq!(*progress.events.lock().unwrap(), [(0, 0, meta.path)]);
         assert_eq!(
             fs::metadata(root.join("folder"))
                 .unwrap()
@@ -1625,7 +1705,7 @@ mod tests {
         let root = temp_dir("hardlink-preexisting-source");
         fs::write(root.join("preexisting.txt"), b"private").unwrap();
         let opts = ExtractOptions::default();
-        let mut sink = ExtractSink::new(&root, &opts, 0).unwrap();
+        let mut sink = ExtractSink::new(&root, &opts, 0, &NoProgress).unwrap();
         let meta = hardlink_meta("copied.txt", "preexisting.txt");
 
         sink.write_meta_entry(&meta, &NoProgress, &ControlToken::default())
@@ -1649,7 +1729,7 @@ mod tests {
             symlinks: SymlinkPolicy::Follow,
             ..ExtractOptions::default()
         };
-        let mut sink = ExtractSink::new(&root, &opts, 0).unwrap();
+        let mut sink = ExtractSink::new(&root, &opts, 0, &NoProgress).unwrap();
         let mut meta = dangling_symlink_meta("copied.txt");
         meta.entry_type = EntryType::Symlink {
             target: b"preexisting.txt".to_vec(),
@@ -1679,7 +1759,7 @@ mod tests {
         fs::write(outside.join("secret.txt"), b"private").unwrap();
         std::os::unix::fs::symlink(&outside, destination.join("escape")).unwrap();
         let opts = ExtractOptions::default();
-        let mut sink = ExtractSink::new(&destination, &opts, 0).unwrap();
+        let mut sink = ExtractSink::new(&destination, &opts, 0, &NoProgress).unwrap();
         let meta = hardlink_meta("copied.txt", "escape/secret.txt");
 
         sink.write_meta_entry(&meta, &NoProgress, &ControlToken::default())
@@ -1703,7 +1783,7 @@ mod tests {
             symlinks: SymlinkPolicy::Follow,
             ..ExtractOptions::default()
         };
-        let mut sink = ExtractSink::new(&root, &opts, 3).unwrap();
+        let mut sink = ExtractSink::new(&root, &opts, 3, &NoProgress).unwrap();
         let mut source_meta = file_meta("source.txt");
         source_meta.modified = Some(archived_time());
         let source_output = sink
@@ -1763,7 +1843,7 @@ mod tests {
             symlinks: SymlinkPolicy::Follow,
             ..ExtractOptions::default()
         };
-        let mut sink = ExtractSink::new(&root, &opts, 3).unwrap();
+        let mut sink = ExtractSink::new(&root, &opts, 3, &NoProgress).unwrap();
         let mut source_meta = file_meta("source.txt");
         source_meta.modified = Some(archived_time());
 
@@ -1796,7 +1876,7 @@ mod tests {
     fn single_pass_hardlink_provenance_keeps_distinct_raw_entry_names() {
         let root = temp_dir("link-raw-provenance");
         let opts = ExtractOptions::default();
-        let mut sink = ExtractSink::new(&root, &opts, 6).unwrap();
+        let mut sink = ExtractSink::new(&root, &opts, 6, &NoProgress).unwrap();
         let mut first = file_meta("first.txt");
         first.path = EntryPath::from_raw(vec![0x80], "first.txt".into(), "legacy");
         let mut second = file_meta("second.txt");
@@ -1832,7 +1912,7 @@ mod tests {
         let outside = root.join("outside.txt");
         fs::write(&outside, b"outside").unwrap();
         let opts = ExtractOptions::default();
-        let mut sink = ExtractSink::new(&root, &opts, 3).unwrap();
+        let mut sink = ExtractSink::new(&root, &opts, 3, &NoProgress).unwrap();
         let source_meta = file_meta("source.txt");
         let source = sink
             .file_target(&source_meta, &NoProgress, &ControlToken::default())
@@ -1934,7 +2014,7 @@ mod tests {
             overwrite: OverwritePolicy::Overwrite,
             ..ExtractOptions::default()
         };
-        let mut sink = ExtractSink::new(&dir, &opts, 3).unwrap();
+        let mut sink = ExtractSink::new(&dir, &opts, 3, &NoProgress).unwrap();
         let mut meta = file_meta("note.txt");
         meta.modified = Some(archived_time());
         let out = sink
@@ -1979,7 +2059,7 @@ mod tests {
             overwrite: OverwritePolicy::Overwrite,
             ..ExtractOptions::default()
         };
-        let mut sink = ExtractSink::new(&dir, &opts, 3).unwrap();
+        let mut sink = ExtractSink::new(&dir, &opts, 3, &NoProgress).unwrap();
         let mut meta = file_meta("note.txt");
         meta.modified = Some(archived_time());
         let out = sink
@@ -2019,7 +2099,7 @@ mod tests {
             overwrite: OverwritePolicy::Overwrite,
             ..ExtractOptions::default()
         };
-        let mut sink = ExtractSink::new(&dir, &opts, 3).unwrap();
+        let mut sink = ExtractSink::new(&dir, &opts, 3, &NoProgress).unwrap();
         let mut meta = file_meta("note.txt");
         meta.modified = Some(archived_time());
         let ctl = ControlToken::new();
@@ -2052,7 +2132,7 @@ mod tests {
             },
             ..ExtractOptions::default()
         };
-        let mut sink = ExtractSink::new(&dir, &opts, 3).unwrap();
+        let mut sink = ExtractSink::new(&dir, &opts, 3, &NoProgress).unwrap();
         let meta = file_meta("note.txt");
         let out = sink
             .file_target(&meta, &NoProgress, &ControlToken::default())
@@ -2088,7 +2168,7 @@ mod tests {
             },
             ..ExtractOptions::default()
         };
-        let mut sink = ExtractSink::new(&dir, &opts, 1).unwrap();
+        let mut sink = ExtractSink::new(&dir, &opts, 1, &NoProgress).unwrap();
         let mut meta = file_meta("expanded.txt");
         meta.size = 1;
         meta.compressed_size = Some(1024);
@@ -2125,7 +2205,7 @@ mod tests {
             overwrite: OverwritePolicy::Skip,
             ..ExtractOptions::default()
         };
-        let mut sink = ExtractSink::new(&dir, &opts, 3).unwrap();
+        let mut sink = ExtractSink::new(&dir, &opts, 3, &NoProgress).unwrap();
         let meta = file_meta("note.txt");
         let out = sink
             .file_target(&meta, &NoProgress, &ControlToken::default())
@@ -2172,7 +2252,7 @@ mod tests {
             best_effort: true,
             ..ExtractOptions::default()
         };
-        let mut sink = ExtractSink::new(&dir, &opts, 3).unwrap();
+        let mut sink = ExtractSink::new(&dir, &opts, 3, &NoProgress).unwrap();
         let meta = file_meta("note.txt");
         let out = sink
             .file_target(&meta, &NoProgress, &ControlToken::default())
@@ -2208,7 +2288,7 @@ mod tests {
             best_effort: true,
             ..ExtractOptions::default()
         };
-        let mut sink = ExtractSink::new(&dir, &opts, 3).unwrap();
+        let mut sink = ExtractSink::new(&dir, &opts, 3, &NoProgress).unwrap();
         let meta = file_meta("note.txt");
         let out = sink
             .file_target(&meta, &NoProgress, &ControlToken::default())
@@ -2248,7 +2328,7 @@ mod tests {
             best_effort: true,
             ..ExtractOptions::default()
         };
-        let mut sink = ExtractSink::new(&dir, &opts, 3).unwrap();
+        let mut sink = ExtractSink::new(&dir, &opts, 3, &NoProgress).unwrap();
         let meta = file_meta("note.txt");
         let out = sink
             .file_target(&meta, &NoProgress, &ControlToken::default())
@@ -2282,7 +2362,7 @@ mod tests {
         fs::create_dir_all(&outside).unwrap();
         std::os::unix::fs::symlink(&outside, destination.join("escape")).unwrap();
         let opts = ExtractOptions::default();
-        let mut sink = ExtractSink::new(&destination, &opts, 0).unwrap();
+        let mut sink = ExtractSink::new(&destination, &opts, 0, &NoProgress).unwrap();
         let meta = directory_meta("escape/new/leaf");
 
         let error = sink
@@ -2305,7 +2385,7 @@ mod tests {
             overwrite: OverwritePolicy::Overwrite,
             ..ExtractOptions::default()
         };
-        let mut sink = ExtractSink::new(&dir, &opts, 3).unwrap();
+        let mut sink = ExtractSink::new(&dir, &opts, 3, &NoProgress).unwrap();
         let meta = file_meta("note.txt");
         let out = sink
             .file_target(&meta, &NoProgress, &ControlToken::default())
@@ -2338,7 +2418,7 @@ mod tests {
             overwrite: OverwritePolicy::Overwrite,
             ..ExtractOptions::default()
         };
-        let mut sink = ExtractSink::new(&dir, &opts, 3).unwrap();
+        let mut sink = ExtractSink::new(&dir, &opts, 3, &NoProgress).unwrap();
         let meta = file_meta("note.txt");
         let out = sink
             .file_target(&meta, &NoProgress, &ControlToken::default())
@@ -2452,7 +2532,7 @@ mod tests {
             overwrite: OverwritePolicy::Overwrite,
             ..ExtractOptions::default()
         };
-        let mut sink = ExtractSink::new(&dir, &opts, 3).unwrap();
+        let mut sink = ExtractSink::new(&dir, &opts, 3, &NoProgress).unwrap();
         let meta = file_meta("note.txt");
         let ctl = ControlToken::new();
         let out = sink.file_target(&meta, &NoProgress, &ctl).unwrap().unwrap();
