@@ -4087,15 +4087,6 @@ select option {
   font-weight: var(--font-weight-medium);
 }
 
-.archive-core i {
-  position: absolute;
-  width: 28px;
-  height: 4px;
-  bottom: 12px;
-  border-radius: 99px;
-  background: var(--color-surface-raised);
-}
-
 .archive-summary {
   min-width: 0;
 }
@@ -12450,12 +12441,6 @@ select.classic-input:focus {
 
   .archive-workspace:not(.no-archive) .archive-core span {
     font-size: var(--type-control);
-  }
-
-  .archive-workspace:not(.no-archive) .archive-core i {
-    width: 22px;
-    height: 3px;
-    bottom: 9px;
   }
 
   .archive-workspace:not(.no-archive) .archive-summary h1 {

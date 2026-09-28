@@ -194,7 +194,6 @@
       <div class="archive-lid"></div>
       <div class="archive-core">
         <span>{view.archive.format}</span>
-        <i></i>
       </div>
     </div>
     <div class="archive-summary">
