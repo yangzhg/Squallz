@@ -4,14 +4,14 @@ mod common;
 
 use std::fs;
 use std::io::{Cursor, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use common::{command_exists, engine, TempDir};
 use squallz_format_api::{
-    ControlToken, CreateOptions, Detected, EntryMeta, EntryPath, EntrySelection, EntryType,
-    ExtractOptions, NoProgress, OpenOptions, UpdateOp, UpdateOptions,
+    ArchiveStructureStatus, ControlToken, CreateOptions, Detected, EntryMeta, EntryPath,
+    EntrySelection, EntryType, ExtractOptions, NoProgress, OpenOptions, UpdateOp, UpdateOptions,
 };
 use zip::write::FullFileOptions;
 
@@ -24,6 +24,10 @@ fn instant(seconds: i64) -> SystemTime {
 }
 
 fn create_with_time(path: &Path, modified: SystemTime) {
+    create_with_times(path, &[("report.txt", modified)]);
+}
+
+fn create_with_times(path: &Path, entries: &[(&str, SystemTime)]) {
     let Some(Detected::Archive(format)) = squallz_formats::registry().detect_by_name("test.zip")
     else {
         panic!("ZIP format missing");
@@ -34,21 +38,29 @@ fn create_with_time(path: &Path, modified: SystemTime) {
             &CreateOptions::default(),
         )
         .unwrap();
-    writer
-        .add_entry(
-            &EntryMeta {
-                path: EntryPath::from_utf8("report.txt"),
-                entry_type: EntryType::File,
-                size: 7,
-                compressed_size: None,
-                modified: Some(modified),
-                unix_mode: None,
-                crc32: None,
-                encrypted: false,
-            },
-            Some(&mut Cursor::new(b"payload")),
-        )
-        .unwrap();
+    for &(name, modified) in entries {
+        let is_dir = name.ends_with('/');
+        let mut data = Cursor::new(b"payload");
+        writer
+            .add_entry(
+                &EntryMeta {
+                    path: EntryPath::from_utf8(name),
+                    entry_type: if is_dir {
+                        EntryType::Dir
+                    } else {
+                        EntryType::File
+                    },
+                    size: if is_dir { 0 } else { 7 },
+                    compressed_size: None,
+                    modified: Some(modified),
+                    unix_mode: None,
+                    crc32: None,
+                    encrypted: false,
+                },
+                if is_dir { None } else { Some(&mut data) },
+            )
+            .unwrap();
+    }
     writer.finish().unwrap();
 }
 
@@ -63,6 +75,24 @@ fn read_time(path: &Path) -> Option<SystemTime> {
     let entries = engine().list(path, &OpenOptions::default()).unwrap();
     assert_eq!(entries.len(), 1);
     entries[0].modified
+}
+
+fn recovered_copy(path: &Path) -> PathBuf {
+    let bytes = fs::read(path).unwrap();
+    // These fixtures have tiny known payloads without ZIP signatures.
+    let central = bytes.windows(4).position(|w| w == b"PK\x01\x02").unwrap();
+    let recovered = path.with_extension("recovered.zip");
+    fs::write(&recovered, &bytes[..central]).unwrap();
+    let (_, structure) = engine()
+        .list_with_structure(&recovered, &OpenOptions::default())
+        .unwrap();
+    assert_eq!(structure, ArchiveStructureStatus::ZipLocalHeadersRecovered);
+    recovered
+}
+
+fn assert_time_with_recovery(path: &Path, expected: Option<SystemTime>) {
+    assert_eq!(read_time(path), expected);
+    assert_eq!(read_time(&recovered_copy(path)), expected);
 }
 
 #[test]
@@ -83,7 +113,7 @@ fn utc_metadata_survives_creation_and_raw_copy_rename() {
         (instant(4_354_819_200), instant(4_354_819_200)),
     ] {
         create_with_time(&archive, original);
-        assert_eq!(read_time(&archive), Some(expected));
+        assert_time_with_recovery(&archive, Some(expected));
         engine()
             .update(
                 &archive,
@@ -96,7 +126,7 @@ fn utc_metadata_survives_creation_and_raw_copy_rename() {
                 &ControlToken::new(),
             )
             .unwrap();
-        assert_eq!(read_time(&archive), Some(expected));
+        assert_time_with_recovery(&archive, Some(expected));
     }
 }
 
@@ -128,7 +158,7 @@ fn ntfs_precedes_unix_and_zero_ntfs_falls_back_to_signed_unix() {
             } else {
                 instant(1_714_979_291) + Duration::from_nanos(123_456_700)
             };
-            assert_eq!(read_time(&archive), Some(expected));
+            assert_time_with_recovery(&archive, Some(expected));
         }
     }
 }
@@ -180,7 +210,7 @@ fn dos_timestamps_use_historical_local_timezone() {
         let dos = zip::DateTime::from_date_and_time(2024, month, 15, 12, 0, 0).unwrap();
         write_fixture(&archive, FullFileOptions::default().last_modified_time(dos));
         let expected = instant(wall_seconds - offset);
-        assert_eq!(read_time(&archive), Some(expected));
+        assert_time_with_recovery(&archive, Some(expected));
         create_with_time(&archive, expected);
         let mut reader = zip::ZipArchive::new(fs::File::open(&archive).unwrap()).unwrap();
         assert_eq!(reader.by_index_raw(0).unwrap().last_modified(), Some(dos));
@@ -193,10 +223,96 @@ fn dos_timestamps_use_historical_local_timezone() {
         {
             let dos = zip::DateTime::from_date_and_time(2024, month, day, hour, 30, 0).unwrap();
             write_fixture(&archive, FullFileOptions::default().last_modified_time(dos));
-            assert_eq!(read_time(&archive), expected);
+            assert_time_with_recovery(&archive, expected);
         }
         create_with_time(&archive, instant(1_730_629_800)); // Second 01:30.
-        assert_eq!(read_time(&archive), Some(instant(1_730_629_800)));
+        assert_time_with_recovery(&archive, Some(instant(1_730_629_800)));
+    }
+}
+
+#[test]
+fn recovered_file_and_directory_times_survive_extraction_and_conversion() {
+    let tmp = TempDir::new("timestamps-recovered");
+    let file_time = instant(1_714_979_291) + Duration::from_nanos(123_456_700);
+    let dir_time = instant(1_705_320_001);
+    let archive = tmp.path().join("original.zip");
+    create_with_times(
+        &archive,
+        &[
+            ("documents/", dir_time),
+            ("documents/report.txt", file_time),
+        ],
+    );
+    let recovered = recovered_copy(&archive);
+    let outcome = engine()
+        .test_summary_with_structure(
+            &recovered,
+            &OpenOptions::default(),
+            &NoProgress,
+            &ControlToken::new(),
+        )
+        .unwrap();
+    assert_eq!(
+        outcome.structure,
+        ArchiveStructureStatus::ZipLocalHeadersRecovered
+    );
+    assert_eq!(outcome.payload_problem_count(), 0);
+    assert!(!outcome.summary.is_ok());
+
+    let converted = tmp.path().join("converted.zip");
+    engine()
+        .convert(
+            &recovered,
+            &converted,
+            &OpenOptions::default(),
+            &CreateOptions::default(),
+            &NoProgress,
+            &ControlToken::new(),
+        )
+        .unwrap();
+    for (path, structure, folder) in [
+        (
+            &recovered,
+            ArchiveStructureStatus::ZipLocalHeadersRecovered,
+            "recovered",
+        ),
+        (&converted, ArchiveStructureStatus::Complete, "converted"),
+    ] {
+        let (entries, actual_structure) = engine()
+            .list_with_structure(path, &OpenOptions::default())
+            .unwrap();
+        assert_eq!(actual_structure, structure);
+        assert_eq!(entries.len(), 2);
+        for entry in entries {
+            let expected = match entry.path.display.as_str() {
+                "documents/" => dir_time,
+                "documents/report.txt" => file_time,
+                other => panic!("unexpected entry {other}"),
+            };
+            assert_eq!(entry.modified, Some(expected));
+        }
+        let dest = tmp.path().join(folder);
+        engine()
+            .extract(
+                path,
+                &dest,
+                None,
+                &OpenOptions::default(),
+                &ExtractOptions::default(),
+                &NoProgress,
+                &ControlToken::new(),
+            )
+            .unwrap();
+        assert_eq!(
+            fs::read(dest.join("documents/report.txt")).unwrap(),
+            b"payload"
+        );
+        for (name, expected) in [("documents", dir_time), ("documents/report.txt", file_time)] {
+            assert_eq!(
+                fs::metadata(dest.join(name)).unwrap().modified().unwrap(),
+                expected
+            );
+        }
     }
 }
 
@@ -230,28 +346,33 @@ fn interop_infozip_and_unzip_preserve_modification_instant() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(read_time(&archive), Some(expected));
-
-    let extracted = tmp.path().join("squallz-extracted");
-    engine()
-        .extract(
-            &archive,
-            &extracted,
-            None,
-            &OpenOptions::default(),
-            &ExtractOptions::default(),
-            &NoProgress,
-            &ControlToken::default(),
-        )
-        .unwrap();
-    assert_eq!(fs::read(extracted.join("report.txt")).unwrap(), b"payload");
-    assert_eq!(
-        fs::metadata(extracted.join("report.txt"))
-            .unwrap()
-            .modified()
-            .unwrap(),
-        expected
-    );
+    let recovered = recovered_copy(&archive);
+    for (path, folder) in [
+        (&archive, "squallz-extracted"),
+        (&recovered, "squallz-recovered"),
+    ] {
+        assert_eq!(read_time(path), Some(expected));
+        let extracted = tmp.path().join(folder);
+        engine()
+            .extract(
+                path,
+                &extracted,
+                None,
+                &OpenOptions::default(),
+                &ExtractOptions::default(),
+                &NoProgress,
+                &ControlToken::default(),
+            )
+            .unwrap();
+        assert_eq!(fs::read(extracted.join("report.txt")).unwrap(), b"payload");
+        assert_eq!(
+            fs::metadata(extracted.join("report.txt"))
+                .unwrap()
+                .modified()
+                .unwrap(),
+            expected
+        );
+    }
 
     let ours = tmp.path().join("ours.zip");
     engine()
@@ -263,26 +384,39 @@ fn interop_infozip_and_unzip_preserve_modification_instant() {
             &ControlToken::new(),
         )
         .unwrap();
-    let dest = tmp.path().join("extracted");
-    let output = Command::new("unzip")
-        .arg("-q")
-        .arg(&ours)
-        .arg("-d")
-        .arg(&dest)
-        .env("TZ", "UTC")
-        .output()
+    let converted = tmp.path().join("converted.zip");
+    engine()
+        .convert(
+            &recovered,
+            &converted,
+            &OpenOptions::default(),
+            &CreateOptions::default(),
+            &NoProgress,
+            &ControlToken::new(),
+        )
         .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert_eq!(fs::read(dest.join("report.txt")).unwrap(), b"payload");
-    assert_eq!(
-        fs::metadata(dest.join("report.txt"))
-            .unwrap()
-            .modified()
-            .unwrap(),
-        expected
-    );
+    for (path, folder) in [(&ours, "extracted"), (&converted, "converted-extracted")] {
+        let dest = tmp.path().join(folder);
+        let output = Command::new("unzip")
+            .arg("-q")
+            .arg(path)
+            .arg("-d")
+            .arg(&dest)
+            .env("TZ", "UTC")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(fs::read(dest.join("report.txt")).unwrap(), b"payload");
+        assert_eq!(
+            fs::metadata(dest.join("report.txt"))
+                .unwrap()
+                .modified()
+                .unwrap(),
+            expected
+        );
+    }
 }

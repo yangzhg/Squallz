@@ -143,9 +143,15 @@ zone, so the original instant cannot be recovered after a cross-zone transfer.
 Creation writes local DOS time plus NTFS UTC metadata, and an Info-ZIP UTC field
 where signed 32-bit seconds can represent it. Dates outside 1980–2107 retain UTC
 metadata when an extra field can represent them; their DOS field uses the format
-default. Zero NTFS timestamps mean unknown. Raw-copy
-updates and renames retain NTFS and Info-ZIP modification times. Central-directory
-recovery currently does not restore timestamps from local headers.
+default. Zero NTFS timestamps mean unknown. Raw-copy updates and renames retain
+NTFS and Info-ZIP modification times. When the central directory is unreadable,
+local-header recovery uses the same timestamp precedence for browsing,
+extraction and conversion. It reads the standard 32-byte NTFS time field and
+complete Info-ZIP time fields, skips invalid field contents and stops parsing
+extra fields at a broken length boundary. Unavailable UTC metadata falls back to
+valid local DOS time; otherwise the modification time remains unknown. The
+source still reports its damaged central directory until readable entries are
+written to a new archive.
 
 References: [PKWARE APPNOTE, sections 4.4.6 and 4.5.5](https://pkware.cachefly.net/webdocs/casestudies/APPNOTE.TXT)
 and [Info-ZIP extra-field specification](https://libzip.org/specifications/extrafld.txt).
