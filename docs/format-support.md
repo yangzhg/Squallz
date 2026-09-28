@@ -174,8 +174,14 @@ policy and can be disabled independently of modification-time restoration.
 Hard links share the extracted target's timestamp. When materialized as copies,
 hard links retain the target entry's timestamp and followed symbolic links use
 their own known timestamp, falling back to the target's. Preserved symbolic links
-do not yet restore link timestamps and never set the target's timestamp. This
-does not restore ownership, ACLs, extended attributes, creation or access times.
+receive their own known modification time through a handle opened without
+following the target, before the staged link is published. Dangling links are
+supported; the target's timestamps are never changed. Unknown modification times
+are left to the filesystem. Linux link-time restoration requires kernel 5.8 or
+later for [descriptor-bound `utimensat`](https://man7.org/linux/man-pages/man2/utimensat.2.html);
+older kernels report an extraction
+error before publishing that link. This does not restore ownership, ACLs,
+extended attributes, creation or access times.
 
 When no replacement was requested, preserved symbolic links are published by
 moving the staged link itself with the platform's atomic no-replace operation.

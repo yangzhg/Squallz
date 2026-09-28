@@ -14,7 +14,7 @@ use squallz_format_api::{
 };
 
 #[test]
-fn file_and_directory_times_survive_all_shared_extraction_paths() {
+fn entry_times_survive_all_supported_shared_extraction_paths() {
     let tmp = TempDir::new("extract-metadata");
     for extension in ["zip", "tar", "7z", "sqz"] {
         let archive = tmp.path().join(format!("archive.{extension}"));
@@ -34,7 +34,7 @@ fn file_and_directory_times_survive_all_shared_extraction_paths() {
         } else {
             0
         };
-        let entries: Vec<_> = ["folder", "folder/child", "folder/child/report.txt"]
+        let mut entries: Vec<_> = ["folder", "folder/child", "folder/child/report.txt"]
             .into_iter()
             .enumerate()
             .map(|(index, name)| EntryMeta {
@@ -52,6 +52,25 @@ fn file_and_directory_times_survive_all_shared_extraction_paths() {
                 encrypted: false,
             })
             .collect();
+        if extension != "7z" {
+            for (name, target) in [
+                ("folder/child/link.txt", "report.txt"),
+                ("folder/dangling", "missing"),
+            ] {
+                entries.push(EntryMeta {
+                    path: EntryPath::from_utf8(name),
+                    entry_type: EntryType::Symlink {
+                        target: target.as_bytes().to_vec(),
+                    },
+                    size: 0,
+                    compressed_size: None,
+                    modified: Some(UNIX_EPOCH + Duration::new(1_714_979_300, precision)),
+                    unix_mode: Some(0o777),
+                    crc32: None,
+                    encrypted: false,
+                });
+            }
+        }
         for meta in &entries {
             let mut payload = Cursor::new(b"payload");
             let data = matches!(meta.entry_type, EntryType::File)
@@ -76,12 +95,16 @@ fn file_and_directory_times_survive_all_shared_extraction_paths() {
                     &ControlToken::default(),
                 )
                 .unwrap();
-            assert_eq!(report.created, 1, "{extension}");
+            assert_eq!(
+                report.created,
+                if extension == "7z" { 1 } else { 3 },
+                "{extension}"
+            );
             assert_eq!(report.directories, 2, "{extension}");
             assert_eq!(report.failed, 0, "{extension}");
             for meta in &entries {
                 assert_eq!(
-                    fs::metadata(destination.join(&meta.path.display))
+                    fs::symlink_metadata(destination.join(&meta.path.display))
                         .unwrap()
                         .modified()
                         .unwrap(),
@@ -89,6 +112,17 @@ fn file_and_directory_times_survive_all_shared_extraction_paths() {
                     "{extension}: {}",
                     meta.path
                 );
+                if let EntryType::Symlink { target } = &meta.entry_type {
+                    let path = destination.join(&meta.path.display);
+                    assert!(fs::symlink_metadata(&path)
+                        .unwrap()
+                        .file_type()
+                        .is_symlink());
+                    assert_eq!(
+                        fs::read_link(path).unwrap().to_str().unwrap().as_bytes(),
+                        target
+                    );
+                }
             }
             assert_eq!(
                 fs::read(destination.join("folder/child/report.txt")).unwrap(),

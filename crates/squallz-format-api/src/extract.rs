@@ -25,7 +25,7 @@ use crate::safety::{crosses_created_symlink, sanitize_entry_path, LimitsAccounta
 use crate::traits::ArchiveReader;
 
 mod metadata;
-use metadata::{restore_file, DeferredDirectories};
+use metadata::{restore_file, restore_symlink, DeferredDirectories};
 
 /// Entry outcomes from a completed extraction.
 ///
@@ -242,6 +242,12 @@ impl PendingOutput {
             .ok_or_else(|| FormatError::Other("extraction staging file is closed".into()))
     }
 
+    fn staged_path(&self) -> Result<&Path, FormatError> {
+        self.path
+            .as_deref()
+            .ok_or_else(|| FormatError::Other("extraction staging path is unavailable".into()))
+    }
+
     fn commit(self, target: &Path, replace_existing: bool) -> Result<(), FormatError> {
         self.commit_using(
             target,
@@ -259,10 +265,7 @@ impl PendingOutput {
         rename: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
     ) -> Result<(), FormatError> {
         self.file.take();
-        let staged = self
-            .path
-            .as_deref()
-            .ok_or_else(|| FormatError::Other("extraction staging path is unavailable".into()))?;
+        let staged = self.staged_path()?;
         if replace_existing {
             rename(staged, target)?;
         } else if !matches!(self.kind, PendingOutputKind::File) {
@@ -666,6 +669,7 @@ impl<'o> ExtractSink<'o> {
                         meta,
                         link,
                         self.opts,
+                        ctl,
                     )? {
                         Some(materialization) => {
                             self.created_symlinks.insert(rel);
@@ -1180,10 +1184,12 @@ fn create_symlink_entry(
     meta: &EntryMeta,
     link: &[u8],
     opts: &ExtractOptions,
+    ctl: &ControlToken,
 ) -> Result<Option<Materialization>, FormatError> {
     let Some(resolved) = resolve_conflict_path(target, meta, opts)? else {
         return Ok(None);
     };
+    ctl.checkpoint()?;
     ensure_parent_inside(canonical_dest, &resolved.path)?;
     let link_target = PathBuf::from(String::from_utf8_lossy(link).into_owned());
     #[cfg(windows)]
@@ -1201,6 +1207,8 @@ fn create_symlink_entry(
     let Some(pending) = PendingOutput::symlink(&link_target, &resolved.path, target_is_dir)? else {
         return Ok(None);
     };
+    restore_symlink(pending.staged_path()?, &resolved.path, meta.modified)?;
+    ctl.checkpoint()?;
     pending.commit(&resolved.path, resolved.replace_existing)?;
     Ok(Some(resolved.materialization))
 }
@@ -2491,6 +2499,115 @@ mod tests {
         assert_eq!(fs::read(&target).unwrap(), b"old");
         assert!(extract_temp_paths(&dir).is_empty());
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn preserved_symlinks_restore_their_own_times_and_keep_conflicting_outputs() {
+        let dir = temp_dir("symlink-metadata");
+        fs::write(dir.join("source.txt"), b"source contents").unwrap();
+        fs::create_dir(dir.join("source-dir")).unwrap();
+        let target_times = ["source.txt", "source-dir"]
+            .map(|name| fs::metadata(dir.join(name)).unwrap().modified().unwrap());
+        let expected = archived_time() + Duration::from_nanos(123_456_700);
+        for (index, policy) in [
+            OverwritePolicy::Skip,
+            OverwritePolicy::Overwrite,
+            OverwritePolicy::RenameBoth,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let opts = ExtractOptions {
+                overwrite: policy,
+                ..ExtractOptions::default()
+            };
+            let mut sink = ExtractSink::new(&dir, &opts, 0, &NoProgress).unwrap();
+            for (source_index, source) in ["source.txt", "source-dir", "missing"]
+                .into_iter()
+                .enumerate()
+            {
+                for conflict in [false, true] {
+                    let name = format!("link-{index}-{source_index}-{conflict}");
+                    let target = dir.join(&name);
+                    let before = conflict.then(|| {
+                        fs::write(&target, b"existing contents").unwrap();
+                        fs::metadata(&target).unwrap().modified().unwrap()
+                    });
+                    let mut meta = dangling_symlink_meta(&name);
+                    meta.entry_type = EntryType::Symlink {
+                        target: source.as_bytes().to_vec(),
+                    };
+                    meta.modified = Some(expected);
+                    sink.write_meta_entry(&meta, &NoProgress, &ControlToken::default())
+                        .unwrap();
+                    if conflict && policy == OverwritePolicy::Skip {
+                        assert_eq!(fs::read(&target).unwrap(), b"existing contents");
+                        assert_eq!(
+                            fs::metadata(&target).unwrap().modified().unwrap(),
+                            before.unwrap()
+                        );
+                        continue;
+                    }
+                    let published = if conflict && policy == OverwritePolicy::RenameBoth {
+                        assert_eq!(fs::read(&target).unwrap(), b"existing contents");
+                        assert_eq!(
+                            fs::metadata(&target).unwrap().modified().unwrap(),
+                            before.unwrap()
+                        );
+                        dir.join(format!("{name} (1)"))
+                    } else {
+                        target
+                    };
+                    let metadata = fs::symlink_metadata(&published).unwrap();
+                    assert!(metadata.file_type().is_symlink());
+                    assert_eq!(metadata.modified().unwrap(), expected);
+                    assert_eq!(fs::read_link(published).unwrap(), Path::new(source));
+                }
+            }
+            sink.finish(&NoProgress, &ControlToken::default()).unwrap();
+        }
+        for (name, before) in ["source.txt", "source-dir"].into_iter().zip(target_times) {
+            assert_eq!(
+                fs::metadata(dir.join(name)).unwrap().modified().unwrap(),
+                before
+            );
+        }
+        assert_eq!(
+            fs::read(dir.join("source.txt")).unwrap(),
+            b"source contents"
+        );
+        assert!(extract_temp_paths(&dir).is_empty());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn symlink_cancellation_after_progress_keeps_existing_output() {
+        struct CancelOnEntry(ControlToken);
+        impl ProgressSink for CancelOnEntry {
+            fn on_progress(&self, _: u64, _: u64, _: &EntryPath) {
+                self.0.cancel();
+            }
+        }
+        let dir = temp_dir("symlink-metadata-cancel");
+        let target = dir.join("link");
+        fs::write(&target, b"existing contents").unwrap();
+        let before = fs::metadata(&target).unwrap().modified().unwrap();
+        let opts = ExtractOptions {
+            overwrite: OverwritePolicy::Overwrite,
+            ..ExtractOptions::default()
+        };
+        let mut sink = ExtractSink::new(&dir, &opts, 0, &NoProgress).unwrap();
+        let mut meta = dangling_symlink_meta("link");
+        meta.modified = Some(archived_time());
+        let ctl = ControlToken::default();
+        let result = sink.write_meta_entry(&meta, &CancelOnEntry(ctl.clone()), &ctl);
+        assert!(matches!(result, Err(FormatError::Cancelled)));
+        assert_eq!(fs::read(&target).unwrap(), b"existing contents");
+        assert_eq!(fs::metadata(&target).unwrap().modified().unwrap(), before);
+        assert!(extract_temp_paths(&dir).is_empty());
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[cfg(any(unix, windows))]
