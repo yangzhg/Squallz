@@ -3590,6 +3590,7 @@ select option {
   display: block;
 }
 
+.task-modal-body:focus-visible,
 .task-result-detail-list .scrollable:focus-visible {
   outline: 0;
   box-shadow: inset 0 0 0 var(--border-width-focus) var(--color-focus-ring);

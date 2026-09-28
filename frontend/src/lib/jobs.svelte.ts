@@ -1510,7 +1510,9 @@ function previewTaskResult(kind: PreviewTaskKind): Record<string, unknown> {
   if (kind === "extract" || kind === "extract_unknown_current" || kind === "extract_metadata") {
     const problems = Array.from(
       { length: 20 },
-      (_, index) => `damaged/item-${String(index + 1).padStart(2, "0")}.bin: checksum mismatch`,
+      (_, index) => index === 0
+        ? `reports/${"annual-reports-and-supporting-documents/".repeat(6)}final  report.pdf: checksum mismatch\nThe file could not be recovered from this archive.`
+        : `damaged/item-${String(index + 1).padStart(2, "0")}.bin: checksum mismatch`,
     );
     return {
       operation: "extract",

@@ -540,13 +540,14 @@ test("SFX result and recovery details use the durable single-backup contract", a
     assert.ok(extractRows.some((row) => row.label === "Data written" && row.value === "12.0 MB"));
     assert.ok(extractRows.some((row) => row.label === "Problem 1" && row.value.includes("CRC mismatch")));
 
+    const longProblem = `reports/${"annual-reports/".repeat(20)}final  report.pdf: checksum mismatch\nTry another copy of this archive.`;
     const boundedProblems = {
       ...extracted,
       result: {
         ...extracted.result,
         problems: Array.from(
           { length: 20 },
-          (_, index) => `damaged/item-${index + 1}.bin: checksum mismatch`,
+          (_, index) => index === 0 ? longProblem : `damaged/item-${index + 1}.bin: checksum mismatch`,
         ),
         problems_total: 30,
         problems_truncated: true,
@@ -559,11 +560,13 @@ test("SFX result and recovery details use the durable single-backup contract", a
     const boundedRows = taskResultDetailRows(boundedProblems);
     assert.equal(
       boundedRows.filter((row) => row.label.startsWith("Problem ")).length,
-      6,
+      20,
     );
+    assert.equal(boundedRows.find((row) => row.label === "Problem 1").value, longProblem);
+    assert.ok(boundedRows.some((row) => row.label === "Problem 20" && row.value.includes("item-20.bin")));
     assert.ok(
       boundedRows.some(
-        (row) => row.label === "More problems" && row.value === "24 more not shown",
+        (row) => row.label === "More problems" && row.value === "10 more not shown",
       ),
     );
 
@@ -601,13 +604,24 @@ test("SFX result and recovery details use the durable single-backup contract", a
     );
     assert.equal(
       boundedTestRows.filter((row) => row.label.startsWith("Problem ")).length,
-      6,
+      20,
     );
     assert.ok(
       boundedTestRows.some(
-        (row) => row.label === "More problems" && row.value === "24 more not shown",
+        (row) => row.label === "More problems" && row.value === "10 more not shown",
       ),
     );
+    const completeTestRows = taskResultDetailRows({
+      ...boundedTest,
+      result: {
+        ...boundedTest.result,
+        problems: boundedTest.result.problems.slice(0, 7),
+        problems_total: 7,
+        problems_truncated: false,
+      },
+    });
+    assert.equal(completeTestRows.filter((row) => row.label.startsWith("Problem ")).length, 7);
+    assert.equal(completeTestRows.some((row) => row.label === "More problems"), false);
 
     const recoveredZipTest = {
       ...boundedTest,

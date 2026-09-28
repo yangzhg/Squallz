@@ -194,7 +194,11 @@
 
   function scrollResultList(event: KeyboardEvent): void {
     const target = event.currentTarget;
-    if (!(target instanceof HTMLElement)) return;
+    if (
+      !(target instanceof HTMLElement)
+      || event.target !== target
+      || event.altKey || event.ctrlKey || event.metaKey
+    ) return;
     if (target.scrollHeight <= target.clientHeight) return;
     const lineStep = target.clientHeight / 4;
     let nextTop: number;
@@ -260,7 +264,14 @@
       <strong class={`task-modal-state state-${displayedTaskTone()}`}>{displayedTaskState()}</strong>
     </header>
 
-    <div class="task-modal-body">
+    <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions (focusable scroll region) -->
+    <div
+      class="task-modal-body"
+      role="region"
+      aria-label={tr("gui.task_center.details", "Details")}
+      tabindex="0"
+      onkeydown={scrollResultList}
+    >
     {#if !isTaskActiveState(task.state)}
       <section
         class="task-result-callout"

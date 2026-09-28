@@ -597,15 +597,9 @@ function resultDetailValue(value: unknown): string {
   }
 }
 
-function compactResultDetail(value: unknown): string {
-  const text = resultDetailValue(value).replace(/\s+/g, " ").trim();
-  return text.length > 180 ? `${text.slice(0, 177)}...` : text;
-}
-
 function appendProblems(rows: TaskResultDetailRow[], task: TaskDialogModel): void {
   const problems = resultProblemMessages(task.result);
-  const displayed = problems.slice(0, 6);
-  for (const [index, problem] of displayed.entries()) {
+  for (const [index, problem] of problems.entries()) {
     const localizedProblem = task.spec.kind === "test"
       && index === 0
       && task.result?.structure === "zip_local_headers_recovered"
@@ -614,7 +608,7 @@ function appendProblems(rows: TaskResultDetailRow[], task: TaskDialogModel): voi
         "ZIP central directory is missing or unreadable; entries were recovered from local headers",
       )
       : problem;
-    const value = compactResultDetail(localizedProblem);
+    const value = resultDetailValue(localizedProblem);
     if (value) {
       rows.push({
         label: t("gui.task.result_problem_n", { index: index + 1 }),
@@ -623,7 +617,7 @@ function appendProblems(rows: TaskResultDetailRow[], task: TaskDialogModel): voi
     }
   }
   const total = resultProblemTotal(task.result);
-  const omitted = Math.max(0, total - displayed.length);
+  const omitted = Math.max(0, total - problems.length);
   if (omitted > 0) {
     rows.push({
       label: tr("gui.task.result_more_problems", "More problems"),
