@@ -1,6 +1,7 @@
 <script lang="ts" module>
   import type { EntryDto } from "../lib/ipc";
   import type { AppActionAvailability } from "../lib/app-actions";
+  import type { ArchiveBrowseRecoveryState } from "./ArchiveBrowseRecovery.svelte";
 
   type Translate = (key: string, fallback: string) => string;
 
@@ -64,6 +65,7 @@
         items: readonly MoveConflictItem[];
       } | null;
       structureWarning: string | null;
+      recovery: ArchiveBrowseRecoveryState;
       encodingWarning: string | null;
       totalRows: number;
       filterText: string;
@@ -90,6 +92,7 @@
     onExtractSelection: () => void;
     onAddFiles: () => void;
     onOpenRecovery: () => void;
+    onRetryBrowse: () => void;
     onConvert: () => void;
     onOpenInfo: () => void;
     onRenameSelection: () => void;
@@ -122,6 +125,7 @@
   import { onMount, tick } from "svelte";
   import Icon from "./Icon.svelte";
   import ArchiveStructureWarning from "./ArchiveStructureWarning.svelte";
+  import ArchiveBrowseRecovery from "./ArchiveBrowseRecovery.svelte";
   import { cssVariables, type CssVariableMap } from "../lib/css-variables";
 
   let {
@@ -134,6 +138,7 @@
     onExtractSelection,
     onAddFiles,
     onOpenRecovery,
+    onRetryBrowse,
     onConvert,
     onOpenInfo,
     onRenameSelection,
@@ -301,9 +306,12 @@
         <p>
           {tr("gui.move.ready_without_renaming", "{count} entries are ready to move without changing names.")
             .replace("{count}", String(view.conflict.readyCount))}
+          {tr("gui.move.shown_conflicts", "Showing {shown} of {count} conflicts; your choice applies to the whole selection.")
+            .replace("{shown}", String(view.conflict.items.length)).replace("{count}", String(view.conflict.count))}
         </p>
       </div>
-      <div class="move-conflict-list">
+      <!-- svelte-ignore a11y_no_noninteractive_tabindex (focusable scroll region) -->
+      <div class="move-conflict-list" role="region" aria-label={tr("gui.move.conflicts", "Move target conflicts")} tabindex="0">
         {#each view.conflict.items as item}
           <div>
             <strong>{item.from}</strong>
@@ -398,7 +406,10 @@
     </div>
     <span role="status" aria-live="polite">{view.filterStatus}</span>
   </div>
-  <p class="archive-selection-hint">{tr("gui.selection.range_hint", "Shift-click to select a range · ⌘/Ctrl-click to select individual entries")}</p>
+  <div class="archive-list-feedback">
+    <ArchiveBrowseRecovery state={view.recovery} retryLabel={tr("gui.error.retry", "Retry")} onRetry={onRetryBrowse} />
+    <p class="archive-selection-hint">{tr("gui.selection.range_hint", "Shift-click to select a range · ⌘/Ctrl-click to select individual entries")}</p>
+  </div>
   <div
     class="modern-table"
     role="table"

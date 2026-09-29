@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, tick } from "svelte";
+  import { onMount, tick, untrack } from "svelte";
   import ArchiveStartState from "./components/ArchiveStartState.svelte";
   import ArchiveReturnStrip from "./components/ArchiveReturnStrip.svelte";
   import ArchiveEntryEditor from "./components/ArchiveEntryEditor.svelte";
@@ -29,12 +29,11 @@
   } from "./components/SettingsWorkspace.svelte";
   import TaskCenterHost from "./components/TaskCenterHost.svelte";
   import type { TaskCenterSurfaceProps } from "./components/TaskCenterHost.svelte";
-  import TaskInteractionWorkspaceHost from "./components/TaskInteractionWorkspaceHost.svelte";
+  import PasswordWorkspaceHost from "./components/PasswordWorkspaceHost.svelte";
   import type {
-    TaskInteractionWorkspaceKind,
-    TaskInteractionWorkspaceSurface,
-    TaskInteractionWorkspaceVariant,
-  } from "./components/TaskInteractionWorkspaceHost.svelte";
+    PasswordWorkspaceSurface,
+    PasswordWorkspaceVariant,
+  } from "./components/PasswordWorkspaceHost.svelte";
   import TaskProgressDialogHost from "./components/TaskProgressDialogHost.svelte";
   import type { TaskProgressDialogSurfaceProps } from "./components/TaskProgressDialogHost.svelte";
   import type MacosSfxPublisherComponent from "./components/MacosSfxPublisher.svelte";
@@ -42,6 +41,7 @@
   import ToolsWorkspaceHost from "./components/ToolsWorkspaceHost.svelte";
   import type {
     BatchWorkspaceSurface,
+    ArchiveUpdateWorkspaceSurface,
     ChecksumResultKind,
     ChecksumWorkspaceSurface,
     DuplicatesWorkspaceSurface,
@@ -64,8 +64,13 @@
     archiveBrowseError,
     archiveRefreshStatus,
     archiveOpenError,
-    archiveHasSessionPassword,
     archivePasswordBookStatus,
+    archivePasswordSave,
+    archivePasswordSaveBusy,
+    archiveEncoding,
+    rememberArchivePassword,
+    cancelArchivePasswordSave,
+    clearArchivePasswordSave,
     allCurrentRowsSelected,
     cancelPasswordPrompt as cancelArchivePasswordPrompt,
     clearSelection,
@@ -84,6 +89,7 @@
     openPasswordPrompt,
     reopenWithEncoding,
     refreshCurrentArchive,
+    retryArchiveBrowse,
     refreshArchivePasswordBookStatus,
     recentFiles,
     rememberRecent,
@@ -122,6 +128,7 @@
     type EntryPreviewDto,
     type EntryDto,
     type ErrorDto,
+    type NestedArchivePasswords,
     type JobSpec,
     type ArchivePresetDocument,
     type ExtractArchivePresetOptions,
@@ -137,6 +144,8 @@
   } from "./lib/ipc";
   import {
     previewSampleForEntry,
+    nestedPasswordPreviewSample,
+    preparedNestedPreviewRows,
     readRuntimePreviews,
   } from "./lib/dev-preview-data";
   import {
@@ -149,6 +158,7 @@
   import type {
     ConvertRouteBridge,
     ConvertRouteHandle,
+    ConvertTaskDraft,
     ConvertRouteOwner,
     ConvertRouteStatus,
   } from "./lib/convert-route";
@@ -175,7 +185,7 @@
   } from "./lib/create-sources";
   import { platformTrashName } from "./lib/platform-labels";
   import { cssVariables, type CssVariableMap } from "./lib/css-variables";
-  import { readWindowRecovery } from "./lib/window-recovery";
+  import { readWindowRecovery, rememberWindowRecovery, reloadWindow } from "./lib/window-recovery";
   import {
     buildExternalTaskJobSpec,
     externalOpenAction,
@@ -183,6 +193,8 @@
   } from "./lib/external-tasks";
   import {
     taskWindowLaunchStateFromParams,
+    taskWindowRecoveryState,
+    taskWindowTask,
     taskWindowShellMessage,
     taskWindowShellTitle,
     taskWindowSubmitFailureStatus,
@@ -195,11 +207,17 @@
   import { pushToast, removeToastByKey } from "./lib/toasts.svelte";
   import { isNewSourceCleanupRecoveryGeneration } from "./lib/source-cleanup";
   import { currentWebviewWindowListener } from "./lib/tauri-events";
+  import { outputPasswordRequired } from "./lib/job-snapshot";
+  import { batchExtractJob, reviewBatchExtract, type BatchExtractDraft } from "./lib/batch-extract";
+  import { readBatchExtractResult } from "./lib/batch-extract-result";
+  import { nestedExtractJob, reviewNestedExtract, type NestedExtractDraft } from "./lib/nested-extract";
+  import { ArchiveUpdateReview } from "./lib/archive-update.svelte";
   import { previewSystemOpenRequiresConfirmation } from "./lib/preview-presentation";
   import {
     previewResponseIsCurrent,
     type PreviewResponseIdentity,
   } from "./lib/preview-response";
+  import { createPreviewPasswordFlow } from "./lib/preview-password.svelte";
   import {
     activeTask,
     answerConflict as answerJobConflict,
@@ -207,12 +225,14 @@
     cancelTask,
     clearFinished,
     initJobEvents,
+    jobSnapshotStatus,
     pauseTask,
     pendingConflict,
     pendingPassword,
     resumeTask,
     installActiveTaskPreview,
     installCompletedTaskPreview,
+    previewTaskSpecForReview,
     installTaskQueuePreview,
     moveTaskBefore,
     moveTaskEarlier,
@@ -242,7 +262,11 @@
     normalizeTaskConflictAnswer,
     taskPasswordReady,
     taskChecksumResultText,
-    taskFailureReviewScreen,
+    taskDuplicateGroups,
+    taskOutcomeNeedsAttention,
+    taskOutcomeStateLabel,
+    taskStatusUnavailable,
+    taskReviewScreen,
     taskOutputCanOpen,
     taskOutputIsFolder,
     taskOutputPath,
@@ -324,6 +348,9 @@
   type AppearanceSetting = "mode" | "theme" | "density";
   type AppearanceSaveState = Exclude<SettingsSaveState, "dirty">;
   type ExtractDestinationMode = "smart" | "archive" | "same" | "choose";
+  type ExtractTaskDraft = Pick<Extract<JobSpec, { kind: "extract" }>,
+    "path" | "dest" | "selection" | "overwrite" | "symlinks" | "smart" | "encoding" | "verify_sfx">;
+  type ArchiveTaskReview = { path: string; encoding: string | null; restore: () => boolean };
   type ExtractScope = "all" | "selection";
   type ExtractOverwriteMode = "ask" | "skip" | "overwrite" | "rename";
   type ExtractSymlinkMode = "preserve" | "skip" | "follow";
@@ -382,6 +409,7 @@
     sfxEnabled: boolean;
     sfxTarget: PlatformKind | null;
     outputExtension: string;
+    suggestedDestination: string | null;
     destination: Readonly<{
       base: CreateDestinationBase;
       existing_output: OverwritePolicy;
@@ -459,6 +487,8 @@
     keepBothTo: string | null;
   };
   type MoveConflictReview = {
+    archiveId: number;
+    generation: number;
     targetDir: string;
     items: MovePlanItem[];
   };
@@ -488,13 +518,6 @@
     attr: string;
     source?: EntryDto;
     virtualIndex?: number;
-  };
-  type BatchArchiveRow = {
-    name: string;
-    format: string;
-    entries: string;
-    target: string;
-    state: string;
   };
   type EntryContext = {
     x: number;
@@ -530,7 +553,7 @@
     outerSource: string;
     outerDisplayPath: string;
     message: string;
-    retryAction: "preview" | "open";
+    retryAction: "preview" | "open" | "extract";
   };
   type ValidationWindow = Window & {
     __squallzValidationSetScreen?: (next: Screen) => boolean;
@@ -575,24 +598,31 @@
   let currentArchive = $derived(archive());
   let archiveDirs = $derived(currentDirs());
   let passwordBookStatus = $derived(archivePasswordBookStatus());
+  let passwordSaveState = $derived(archivePasswordSave());
   let jobRows = $derived(tasks());
   let activeCurrentTask = $derived(activeTask());
   let jobPasswordPrompt = $derived(pendingPassword());
+  const previewPasswordFlow = createPreviewPasswordFlow(ipc.cancelEntryPreview);
+  let previewPasswordPrompt = $derived(previewPasswordFlow.prompt);
   let archivePasswordPrompt = $derived(openPasswordPrompt());
-  let activePasswordPromptIdentity = $derived(
-    jobPasswordPrompt
-      ? `job:${jobPasswordPrompt.id}:${jobPasswordPrompt.version}`
-      : archivePasswordPrompt
-        ? `archive:${archivePasswordPrompt.path}`
+  let activeJobPasswordPromptIdentity = $derived(
+    jobPasswordPrompt ? `${jobPasswordPrompt.id}:${jobPasswordPrompt.version}` : null,
+  );
+  let previousJobPasswordPromptIdentity: string | null = null;
+  let activeWorkspacePasswordPromptIdentity = $derived(
+    archivePasswordPrompt
+      ? `archive:${archivePasswordPrompt.path}`
+      : previewPasswordPrompt
+        ? `preview:${previewPasswordPrompt.id}`
         : null,
   );
-  let previousPasswordPromptIdentity: string | null = null;
+  let previousWorkspacePasswordPromptIdentity: string | null = null;
   let jobConflictPrompt = $derived(pendingConflict());
-  let activeConflictPromptIdentity = $derived(
-    jobConflictPrompt
-      ? `${jobConflictPrompt.id}:${jobConflictPrompt.version}`
-      : null,
-  );
+  let activeConflictPromptIdentity = $derived.by(() => {
+    const prompt = jobConflictPrompt ?? jobRows.find((task) =>
+      task.ownedByRequester && task.question?.kind === "conflict")?.question?.prompt;
+    return prompt ? `${prompt.id}:${prompt.version}` : null;
+  });
   let previousConflictPromptIdentity: string | null = null;
   let taskDialogTaskId = $state<number | null>(windowRecovery.taskId ?? null);
   let taskDialogDismissedId = $state<number | null>(null);
@@ -611,16 +641,27 @@
   let taskWindowMode = $derived(taskWindowLaunchState.mode);
   let modeSelectionBlocked = $derived(!taskWindowMode && uiModeChoice() === null);
   let taskWindowPendingAction = $derived(taskWindowLaunchState.pendingAction);
-  let taskWindowShellTitleCopy = $derived(taskWindowShellTitle(taskWindowLaunchState, tr));
-  let taskWindowShellCopy = $derived(taskWindowShellMessage(taskWindowLaunchState, tr));
+  let displayedTaskWindowState = $derived(
+    initialTaskWindowLaunchState.mode && !initialTaskWindowLaunch && taskWindowLaunchState.status === "waiting"
+      ? taskWindowRecoveryState(jobSnapshotStatus()) : taskWindowLaunchState,
+  );
+  let taskWindowShellTitleCopy = $derived(taskWindowShellTitle(displayedTaskWindowState, tr));
+  let taskWindowShellCopy = $derived(taskWindowShellMessage(displayedTaskWindowState, tr));
   let jobSubmitInFlight = $state(false);
   let submittingJobSpec = $state<JobSpec | null>(null);
   let jobPasswordValue = $state("");
   let standalonePasswordInput = $state<HTMLInputElement | null>(null);
   let standalonePasswordFocusedInput: HTMLInputElement | null = null;
-  let passwordSubmissionAttempted = $state(false);
-  let passwordSubmissionError = $derived(
-    passwordSubmissionAttempted && !taskPasswordReady(jobPasswordValue)
+  let jobPasswordSubmissionAttempted = $state(false);
+  let jobPasswordSubmissionError = $derived(
+    jobPasswordSubmissionAttempted && !taskPasswordReady(jobPasswordValue)
+      ? tr("gui.password.empty_error", "Enter a password to continue.")
+      : null,
+  );
+  let workspacePasswordValue = $state("");
+  let workspacePasswordSubmissionAttempted = $state(false);
+  let workspacePasswordSubmissionError = $derived(
+    workspacePasswordSubmissionAttempted && !taskPasswordReady(workspacePasswordValue)
       ? tr("gui.password.empty_error", "Enter a password to continue.")
       : null,
   );
@@ -635,6 +676,10 @@
   const sourceCleanupBusyToastKey = "source-cleanup-recovery-busy";
   let checksumResultPanel = $state<HTMLElement | null>(null);
   let checksumCheckResultPanel = $state<HTMLElement | null>(null);
+  let checksumReportTaskIds = $state<Partial<Record<ChecksumResultKind, number>>>({});
+  let duplicateReportTaskId = $state<number | null>(null);
+  let duplicateReportPanel = $state<HTMLElement | null>(null);
+  let duplicateReportFocusPending = false;
   let checksumCopyFeedbackKind = $state<"checksum" | "checksum_check" | "task" | null>(null);
   let checksumCopyFeedbackTaskId = $state<number | null>(null);
   let checksumCopyFeedbackMessage = $state<string | null>(null);
@@ -861,6 +906,15 @@
   let extractScope = $state<ExtractScope>("all");
   let extractSelectionSnapshot = $state<string[]>([]);
   let extractCustomDest = $state("");
+  let extractSmartBaseOverride = $state<string | null>(null);
+  let extractVerifySfx = $state(false);
+  let extractDraftArchive: { id: number; source: string } | null = null;
+  let pendingArchiveTaskReview: ArchiveTaskReview | null = null;
+  let extractReviewFocusPending = false;
+  let convertReviewFocusPending = false;
+  let taskReviewRequestGeneration = 0;
+  let pendingTaskReviewId = $state<number | null>(null);
+  let archiveAddPending = $state(false);
   let extractOverwriteMode = $state<ExtractOverwriteMode>("ask");
   let extractSymlinkMode = $state<ExtractSymlinkMode>("preserve");
   let currentExtractOverwriteLabel = $derived(extractOverwriteLabel(extractOverwriteMode));
@@ -882,7 +936,7 @@
   let extractPresetDraftName = $state("");
   let createPresetMutationState = $state<ArchivePresetMutationState>("idle");
   let extractPresetMutationState = $state<ArchivePresetMutationState>("idle");
-  let createPresetCredentialIntent = $state<"none" | "prompt">("none");
+  let createEncryptionEnabled = $state(false);
   let createPresetSfxTarget = $state<PresetSfxTarget>("current_platform");
   let createPresetSqzInnerFormat = $state<PresetSqzInnerFormat>("sqz");
   let createPresetSplitSizeBytes = $state<string | null>(null);
@@ -890,6 +944,8 @@
   let extractPresetDraftTouched = false;
   let archiveOpenStatus = $state<"idle" | "opening">("idle");
   let archiveOpenGeneration = 0;
+  let archivePickerRequest: number | null = null;
+  let archivePasswordAttempt = 0;
   let archiveSelectionProgress = $state<{ loaded: number; total: number } | null>(null);
   let recoveryPickerStatus = $state<"idle" | "archive" | "par2">("idle");
   let recoverySourceMode = $state<"none" | "current" | "selected">(
@@ -899,7 +955,20 @@
   let recoveryPar2Override = $state<string | null>(null);
   let recoveryRedundancyDraft = $state("10");
   let openDialogModulePromise: Promise<DialogModule> | null = null;
-  let batchArchivePaths = $state<string[]>(runtimePreviews.batchPaths);
+  let batchDraft = $state<BatchExtractDraft | null>(null);
+  let nestedExtractDraft = $state<NestedExtractDraft | null>(null);
+  let nestedExtractSubmissionPending = $state(false);
+  let nestedExtractPickerBusy = $state(false);
+  let nestedExtractPickerRequest = 0;
+  let nestedExtractDraftGeneration = 0;
+  let nestedExtractReviewFocusPending = false;
+  const archiveUpdateReview = new ArchiveUpdateReview();
+  let archiveUpdateReviewFocusPending = false;
+  let batchSubmissionPending = $state(false);
+  let batchPickerBusy = $state(false);
+  let batchPickerRequest = 0;
+  let batchDraftGeneration = 0;
+  let batchReviewFocusPending = false;
   let checksumPath = $state(runtimePreviews.checksumPath);
   let checksumManifestPath = $state(runtimePreviews.checksumManifestPath);
   let checksumAlgorithm = $state<ChecksumAlgorithmId>("sha256");
@@ -911,6 +980,7 @@
   let createSources = $state<CreateSourceRoot[]>([]);
   let selectedCreateSourcePaths = $state<string[]>([]);
   let createSourcePickerBusy = $state<"files" | "folder" | null>(null);
+  let createPrimaryFocusPending = false;
   let createSourceInputs = $derived(createSourcePaths(createSources));
   let classicCreateSection = $state<ClassicCreateSection>("general");
   let dragActive = $state(false);
@@ -938,6 +1008,7 @@
   let createCustomSplitUnit = $state<CreateSplitUnit>("mib");
   let createContentPolicy = $state<CreateContentPolicy>("cross_platform_clean");
   let createDestinationBase = $state<CreateDestinationBase>("ask");
+  let createSuggestedDestination = $state<string | null>(null);
   let createOverwritePolicy = $state<OverwritePolicy>("ask");
   let createCompletion = $state<CreateCompletionAction>("none");
   let createPostSuccess = $state<PostSuccessAction>("keep_source");
@@ -999,11 +1070,19 @@
   let newFolderName = $state("");
   type ArchiveEditKind = "rename" | "move" | "new-folder";
   let archiveEditKind = $state<ArchiveEditKind | null>(null);
+  let archiveEditContext = $state<{
+    source: string; encoding: string | null; generation: number; id: number;
+    directory: string; paths: Set<string>;
+  } | null>(null);
+  let archiveEditChecking = $state(false);
+  let archiveEditError = $state<string | null>(null);
+  let archiveEditSession = 0;
   let archiveEditReturnFocus: HTMLElement | null = null;
   let moveConflictReview = $state<MoveConflictReview | null>(null);
   let historyRows = $derived(operationHistory());
   let activePopover = $state<"quickActions" | null>(null);
   let archiveSearchInput = $state<HTMLInputElement | null>(null);
+  let retryingArchiveId = $state<number | null>(null);
   let classicArchiveAddress = $state<HTMLDivElement | null>(null);
   let quickActionButton = $state<HTMLButtonElement | null>(null);
   let quickActionPopover = $state<HTMLDivElement | null>(null);
@@ -1130,40 +1209,55 @@
   });
 
   $effect(() => {
-    currentArchive?.id;
-    archiveDirs.join("\u0000");
-    const source = selectedRenameSource();
-    renameTargetName = source ? pathBaseName(source.replace(/\/+$/g, "")) : "";
-    archiveEditKind = null;
-    moveConflictReview = null;
+    const path = currentArchive?.path;
+    if (screen !== "passwordBook" && screen !== "password") return;
+    if (path) untrack(() => { void refreshArchivePasswordBookStatus(path).catch(() => undefined); });
   });
 
   $effect(() => {
-    if (jobPasswordPrompt) {
-      setScreen("password");
-    } else if (jobConflictPrompt) {
-      setScreen("conflict");
-    } else if (archivePasswordPrompt) {
-      setScreen("password");
+    currentArchive?.id;
+    archiveDirs.join("\u0000");
+    const selected = [...selectedPaths()];
+    untrack(() => {
+      if (archiveEditKind !== null) return;
+      const source = selected.length === 1 ? selected[0] : null;
+      renameTargetName = source ? pathBaseName(source.replace(/\/+$/g, "")) : "";
+      archiveEditError = null;
+      moveConflictReview = null;
+    });
+  });
+
+  $effect(() => {
+    if (archivePasswordPrompt || previewPasswordPrompt) {
+      untrack(() => setScreen("password"));
     }
   });
 
   $effect(() => {
-    const identity = activePasswordPromptIdentity;
-    if (identity === previousPasswordPromptIdentity) return;
-    previousPasswordPromptIdentity = identity;
+    const identity = activeJobPasswordPromptIdentity;
+    if (identity === previousJobPasswordPromptIdentity) return;
+    previousJobPasswordPromptIdentity = identity;
     jobPasswordValue = "";
-    passwordSubmissionAttempted = false;
+    jobPasswordSubmissionAttempted = false;
   });
 
   $effect(() => {
-    const promptPath = archivePasswordPrompt?.path ?? null;
+    const identity = activeWorkspacePasswordPromptIdentity;
+    if (identity === previousWorkspacePasswordPromptIdentity) return;
+    previousWorkspacePasswordPromptIdentity = identity;
+    workspacePasswordValue = "";
+    workspacePasswordSubmissionAttempted = false;
+  });
+
+  $effect(() => {
+    const promptIdentity = activeWorkspacePasswordPromptIdentity;
     const input = standalonePasswordInput;
     const ready =
-      promptPath !== null &&
+      promptIdentity !== null &&
       jobPasswordPrompt === null &&
       screen === "password" &&
       archiveOpenStatus === "idle" &&
+      !previewPasswordPrompt?.busy &&
       !modeSelectionBlocked &&
       !blockingModalVisible() &&
       !taskWindowMode &&
@@ -1178,10 +1272,11 @@
       if (
         standalonePasswordFocusedInput === input &&
         standalonePasswordInput === input &&
-        archivePasswordPrompt?.path === promptPath &&
+        activeWorkspacePasswordPromptIdentity === promptIdentity &&
         jobPasswordPrompt === null &&
         screen === "password" &&
         archiveOpenStatus === "idle" &&
+        !previewPasswordPrompt?.busy &&
         !modeSelectionBlocked &&
         !blockingModalVisible() &&
         !taskWindowMode
@@ -1199,17 +1294,22 @@
   });
 
   $effect(() => {
+    if (taskWindowMode) {
+      if (taskDialogTaskId === null && taskWindowLaunchState.status !== "waiting") return;
+      const task = taskWindowTask(jobRows, taskDialogTaskId);
+      if (!task) return;
+      taskDialogTaskId = task.id;
+      taskDialogDismissedId = null;
+      rememberWindowRecovery({ taskWindow: true, taskId: task.id });
+      return;
+    }
     const questionTaskId = jobPasswordPrompt?.id ?? jobConflictPrompt?.id ?? null;
     if (questionTaskId !== null) {
+      rememberTaskWorkspaceFocus();
       taskDialogTaskId = questionTaskId;
       taskDialogDismissedId = null;
       return;
     }
-    if (!taskWindowMode) return;
-    const active = blockingTask();
-    if (!active) return;
-    taskDialogTaskId = active.id;
-    taskDialogDismissedId = null;
   });
 
   $effect(() => {
@@ -1238,7 +1338,7 @@
   $effect(() => {
     const completedTask = runtimePreviews.completedTask;
     if (!completedTask) return;
-    const id = installCompletedTaskPreview(completedTask);
+    const id = installCompletedTaskPreview(completedTask, params.has("previewChecksumHistory") || params.has("previewDuplicateHistory"));
     if (id === null) return;
     taskDialogTaskId = id;
     taskDialogDismissedId = null;
@@ -1247,7 +1347,7 @@
   $effect(() => {
     const activeTaskPreview = runtimePreviews.activeTask;
     if (!activeTaskPreview) return;
-    const id = installActiveTaskPreview(activeTaskPreview);
+    const id = installActiveTaskPreview(activeTaskPreview, import.meta.env.DEV && params.has("previewStatusUnavailable"));
     if (id === null) return;
     const surface = params.get("previewTaskSurface");
     if (surface === "panel" || surface === "center") {
@@ -1303,6 +1403,7 @@
   });
 
   $effect(() => {
+    syncExtractDraftArchive();
     const current = currentArchive;
     if (screen !== "extract" || !current) {
       resetExtractPlanRequestState();
@@ -1349,6 +1450,7 @@
       blocked: modeSelectionBlocked || blockingModalVisible(),
       taskWindow: taskWindowMode,
       opening: archiveOpenStatus === "opening",
+      addingFiles: archiveAddPending,
       archive: Boolean(currentArchive),
       writable: !archiveMutationDisabledReason(),
       browsing: screen === "browse",
@@ -1947,7 +2049,7 @@
           return;
         }
       }
-      if (modeSelectionBlocked || archiveEditKind !== null) return;
+      if (modeSelectionBlocked || archiveEditorVisible()) return;
       if (event.key === "Escape") {
         if (activePopover === "quickActions") {
           event.preventDefault();
@@ -1973,23 +2075,28 @@
   });
 
   $effect(() => {
-    for (const task of jobRows) {
-      if (
-        task.spec.kind === "update" &&
-        task.state === "done" &&
-        archiveOpenStatus === "idle" &&
-        currentArchive?.path === task.spec.path &&
-        !refreshedUpdateJobs.has(task.id)
-      ) {
-        refreshedUpdateJobs.add(task.id);
-        void refreshCurrentArchive(() => browseVirtualWindow(
-          mode === "classic" ? CLASSIC_ROW_HEIGHT : MODERN_ROW_HEIGHT,
-        )).then((ok) => {
-          if (ok) showNotice(tr("gui.archive.list_refreshed", "Archive list refreshed"));
-        });
-      }
-    }
+    if (!currentArchive || archiveOpenStatus !== "idle" || archivePasswordPrompt
+      || archiveRefreshStatus() === "refreshing") return;
+    const path = currentArchive.path;
+    const completed = pendingArchiveUpdateJobs();
+    if (completed.length === 0) return;
+    for (const task of completed) refreshedUpdateJobs.add(task.id);
+    untrack(() => {
+      void refreshCurrentArchive(() => browseVirtualWindow(
+        mode === "classic" ? CLASSIC_ROW_HEIGHT : MODERN_ROW_HEIGHT,
+      )).then((ok) => {
+        if (ok && currentArchive?.path === path && archiveRefreshStatus() === "idle"
+          && pendingArchiveUpdateJobs().length === 0) {
+          showNotice(tr("gui.archive.list_refreshed", "Archive list refreshed"));
+        }
+      });
+    });
   });
+
+  function pendingArchiveUpdateJobs() {
+    return jobRows.filter((task) => task.spec.kind === "update" && task.state === "done"
+      && currentArchive?.path === task.spec.path && !refreshedUpdateJobs.has(task.id));
+  }
 
   function syncUrl(nextMode: Mode = mode) {
     const url = new URL(window.location.href);
@@ -2122,6 +2229,37 @@
   function setScreen(next: Screen) {
     if (preventCreateSubmissionNavigation(next)) return;
     if (preventConvertSubmissionNavigation(next)) return;
+    if (next !== screen) dismissArchivePicker();
+    if (screen !== "password" && next !== screen && (next !== "password" || !previewPasswordPrompt)) {
+      clearEntryPreviewState();
+    }
+    if (screen === "password" && next !== "password") {
+      dismissArchivePasswordRequest();
+      if (previewPasswordPrompt) clearEntryPreviewState();
+      workspacePasswordValue = "";
+      workspacePasswordSubmissionAttempted = false;
+    }
+    cancelTaskReview();
+    if (next !== "updateReview") {
+      archiveUpdateReviewFocusPending = false;
+      archiveUpdateReview.cancelSourceChoice();
+    }
+    if (next !== "nestedExtract") {
+      nestedExtractReviewFocusPending = false;
+      nestedExtractDraftGeneration += 1;
+      nestedExtractPickerRequest += 1;
+      nestedExtractPickerBusy = false;
+    }
+    if (next !== "batch") {
+      batchReviewFocusPending = false;
+      batchPickerRequest += 1;
+      batchPickerBusy = false;
+    }
+    if (next !== "create") createPrimaryFocusPending = false;
+    if (next !== "extract") extractReviewFocusPending = false;
+    if (next !== "convert") convertReviewFocusPending = false;
+    if (next !== "duplicates") duplicateReportFocusPending = false;
+    if (next !== "password") pendingArchiveTaskReview = null;
     if (screen === "create" && next !== "create" && pendingCreateSubmission) {
       discardPendingCreatePlan();
       createOptionsValidationAttempted = false;
@@ -2143,18 +2281,6 @@
     });
   }
 
-  function setScreenRespectingJobQuestion(fallback: Screen) {
-    if (jobPasswordPrompt) {
-      setScreen("password");
-      return;
-    }
-    if (jobConflictPrompt) {
-      setScreen("conflict");
-      return;
-    }
-    setScreen(fallback);
-  }
-
   async function showClassicCreateSection(section: ClassicCreateSection, targetId: string): Promise<void> {
     classicCreateSection = section;
     await tick();
@@ -2169,6 +2295,20 @@
     if (!panel) return;
     panel.scrollIntoView({ block: "nearest", inline: "nearest" });
     panel.focus({ preventScroll: true });
+  }
+
+  async function focusDuplicateReportPanel(): Promise<void> {
+    duplicateReportFocusPending = true;
+    await tick();
+    if (screen !== "duplicates" || !duplicateReportPanel || blockingModalVisible()) return;
+    duplicateReportFocusPending = false;
+    duplicateReportPanel.scrollIntoView({ block: "start", inline: "nearest" });
+    duplicateReportPanel.focus({ preventScroll: true });
+  }
+
+  function registerDuplicateReportPanel(node: HTMLElement | null): void {
+    duplicateReportPanel = node;
+    if (node && duplicateReportFocusPending) void focusDuplicateReportPanel();
   }
 
   $effect(() => {
@@ -2188,15 +2328,8 @@
     };
   });
 
-  function cancelConflictPrompt() {
-    if (jobConflictPrompt) {
-      answerConflictDecision("abort", false);
-    } else {
-      setScreen("extract");
-    }
-  }
-
   function handleWorkflowEscape(): boolean {
+    if (modeSelectionBlocked || blockingModalVisible() || document.activeElement?.closest("#squallz-task-center")) return false;
     if (screen === "browse" && (previewBusy() || nestedPreview || entryPreview || entryPreviewFailure)) {
       clearEntryPreviewState();
       return true;
@@ -2207,10 +2340,6 @@
     }
     if (screen === "password") {
       cancelPasswordRequest();
-      return true;
-    }
-    if (screen === "conflict") {
-      cancelConflictPrompt();
       return true;
     }
     return false;
@@ -2826,6 +2955,14 @@
       showNotice(tr("gui.create.sfx_zip_only_notice", "Turn off self-extracting output before choosing another format"));
       return;
     }
+    if (createEncryptionEnabled && !createFormats[next].can_encrypt_data) {
+      showNotice(tr("gui.create.encryption_format_change", "Turn off file content encryption before choosing a format that cannot encrypt files."));
+      return;
+    }
+    if (createEncryptNames && !createFormats[next].can_encrypt_names) {
+      showNotice(tr("gui.create.name_encryption_format_change", "Turn off file name encryption before choosing a format that cannot hide names."));
+      return;
+    }
     markCreatePresetDraftTouched();
     activeCreateFormat = next;
     if (nativeSplitKind(next, createSfxEnabled) === null) createSplitMode = "generic";
@@ -2851,20 +2988,24 @@
     createPasswordConfirmation = "";
     createPasswordVisible = false;
     createEncryptNames = false;
-    createPresetCredentialIntent = "none";
+    createEncryptionEnabled = false;
   }
 
   function updateCreatePassword(value: string) {
     markCreatePresetDraftTouched();
-    const hadPassword = createPassword.length > 0;
     createPassword = value;
-    createOptionsValidationAttempted = false;
-    if (value.length > 0) createPresetCredentialIntent = "prompt";
+    if (value.length > 0) createEncryptionEnabled = true;
+    createOptionsValidationAttempted = value.length === 0 && createEncryptionEnabled;
     if (value.length === 0) {
       createPasswordConfirmation = "";
-      createEncryptNames = false;
-      if (hadPassword) createPresetCredentialIntent = "none";
     }
+  }
+
+  function updateCreateEncryptionEnabled(enabled: boolean) {
+    markCreatePresetDraftTouched();
+    createEncryptionEnabled = enabled && createPasswordDataAvailable();
+    if (!createEncryptionEnabled) clearCreatePasswordFields();
+    createOptionsValidationAttempted = createEncryptionEnabled;
   }
 
   function updateCreatePasswordConfirmation(value: string) {
@@ -2875,7 +3016,7 @@
 
   function updateCreateEncryptNames(enabled: boolean) {
     markCreatePresetDraftTouched();
-    createEncryptNames = enabled && createNameEncryptionAvailable() && createPassword.length > 0;
+    createEncryptNames = enabled && createNameEncryptionAvailable() && createEncryptionEnabled;
   }
 
   function updateCreateSplitPreset(preset: CreateSplitPreset) {
@@ -2921,6 +3062,10 @@
   }
 
   function updateCreateSfxEnabled(enabled: boolean) {
+    if (enabled && createEncryptNames) {
+      showNotice(tr("gui.create.name_encryption_format_change", "Turn off file name encryption before choosing a format that cannot hide names."));
+      return;
+    }
     if (enabled && !sfxCreateCapabilityReady) {
       showNotice(tr("gui.create.sfx_capability_loading", "Checking self-extracting support"));
       return;
@@ -2996,8 +3141,8 @@
 
   function createPasswordValidationMessage(): string {
     if (!createPasswordDataAvailable()) return "";
-    if (createPresetCredentialIntent === "prompt" && createPassword.length === 0) {
-      return tr("gui.presets.password_required", "Enter the password this preset should use for this archive");
+    if (createEncryptionEnabled && createPassword.length === 0) {
+      return tr("gui.create.password_required", "Enter an archive password, or turn off file content encryption.");
     }
     if (createPassword.length === 0) return "";
     if (createPasswordConfirmation.length === 0) {
@@ -3027,7 +3172,8 @@
 
   function visibleCreatePasswordError(): string {
     const error = createPasswordValidationMessage();
-    return createOptionsValidationAttempted || createPasswordConfirmation.length > 0 ? error : "";
+    return createOptionsValidationAttempted || createPasswordConfirmation.length > 0
+      || (createEncryptionEnabled && createPassword.length === 0) ? error : "";
   }
 
   function visibleCreateSplitError(): string {
@@ -3042,10 +3188,17 @@
       : createSfxEnabled && (activeCreateFormat !== "zip" || createSplitPreset !== "none")
         ? tr("gui.create.sfx_requires_zip", "Self-extracting output requires a single ZIP payload")
         : "";
-    const error = createPasswordValidationMessage() || createSplitValidationMessage() || sfxError;
+    const passwordError = createPasswordValidationMessage();
+    const splitError = createSplitValidationMessage();
+    const error = passwordError || splitError || sfxError;
     if (!error) return true;
     createAdvancedOpen = true;
+    classicCreateSection = passwordError || sfxError ? "security" : "volumes";
     showNotice(error);
+    void tick().then(() => {
+      if (screen !== "create" || !createOptionsValidationAttempted || blockingModalVisible()) return;
+      document.querySelector<HTMLInputElement>(".create-option-input[aria-invalid='true']")?.focus();
+    });
     return false;
   }
 
@@ -3060,9 +3213,11 @@
     if (!validateCreateOptions()) return null;
     const format = activeCreateFormat;
     const password = createFormats[format].can_encrypt_data && createPassword.length > 0 ? createPassword : null;
-    const selectedPreset = selectedCreateArchivePreset();
     const splitSize = createSplitSizeBytes();
     const splitMode = splitSize === null ? "generic" : createSplitMode;
+    const outputExtension = archiveOutputExtension(
+      format, splitSize, splitMode, createSfxEnabled, sfxCreateCapability.extension,
+    );
     return {
       format,
       profile: activeCreateProfile,
@@ -3076,13 +3231,8 @@
       sqzInnerFormat: format === "sqz" ? createPresetSqzInnerFormat : null,
       sfxEnabled: createSfxEnabled,
       sfxTarget: createSfxEnabled ? resolvedPresetSfxTarget(createPresetSfxTarget) : null,
-      outputExtension: archiveOutputExtension(
-        format,
-        splitSize,
-        splitMode,
-        createSfxEnabled,
-        sfxCreateCapability.extension,
-      ),
+      outputExtension,
+      suggestedDestination: createSuggestedOutputPath(format, outputExtension),
       destination: {
         base: createDestinationBase,
         existing_output: createOverwritePolicy,
@@ -3091,8 +3241,8 @@
       postSuccess: createPostSuccess,
       testAfterCreate: effectiveCreateTestAfterCreate(),
       defaultCreateDir: normalizedDefaultCreateDir(appliedDefaultCreateDir),
-      restoreCredentialPrompt: Boolean(selectedPreset && selectedPreset.options.credential.kind !== "none"),
-      restoreEncryptNames: selectedPreset?.options.encrypt_names ?? false,
+      restoreCredentialPrompt: createEncryptionEnabled,
+      restoreEncryptNames: createEncryptNames,
     };
   }
 
@@ -3240,7 +3390,7 @@
   function currentCreateArchivePresetOptions(): CreateArchivePresetOptions {
     const splitSize = createSplitSizeBytes();
     const credential: CreateArchivePresetOptions["credential"] =
-      createPresetCredentialIntent === "prompt" || createPassword.length > 0
+      createEncryptionEnabled
         ? { kind: "prompt" }
         : { kind: "none" };
     return {
@@ -3484,12 +3634,13 @@
     }
     invalidateCreatePreflightResult();
     selectedCreatePresetId = preset.id;
+    createSuggestedDestination = null;
     createPresetDraftName = preset.label;
     activeCreateFormat = preset.options.format;
     activeCreateProfile = "custom";
     customCreateLevel = preset.options.level;
     customCreateLevelError = "";
-    createPresetCredentialIntent = preset.options.credential.kind === "none" ? "none" : "prompt";
+    createEncryptionEnabled = preset.options.credential.kind !== "none";
     createPassword = "";
     createPasswordConfirmation = "";
     createPasswordVisible = false;
@@ -3536,6 +3687,7 @@
     const preset = archivePresetById(id);
     if (!preset || preset.kind !== "extract") return;
     selectedExtractPresetId = preset.id;
+    extractSmartBaseOverride = null;
     extractPresetDraftName = preset.label;
     if (preset.options.destination.layout === "smart") extractDestinationMode = "smart";
     else if (preset.options.destination.layout === "archive_folder") extractDestinationMode = "archive";
@@ -3855,17 +4007,12 @@
     return `${base}.${outputExtension}`;
   }
 
-  function createArchivePreviewName(base = "archive"): string {
-    return createArchiveNameForOutput(
-      base,
-      archiveOutputExtension(
-        activeCreateFormat,
-        createSplitSizeBytes(),
-        createSplitMode,
-        createSfxEnabled,
-        sfxCreateCapability.extension,
-      ),
+  function createArchivePreviewName(base = createOutputPreviewBase()): string {
+    const extension = archiveOutputExtension(
+      activeCreateFormat, createSplitSizeBytes(), createSplitMode, createSfxEnabled, sfxCreateCapability.extension,
     );
+    const suggested = createDestinationBase === "ask" ? createSuggestedOutputPath(activeCreateFormat, extension) : null;
+    return suggested ? desktopBasename(suggested, platformKind()) : createArchiveNameForOutput(base, extension);
   }
 
   function joinFolderPath(folder: string, name: string): string {
@@ -3891,6 +4038,12 @@
   function createOutputPreview(base = createOutputPreviewBase()): string {
     const name = createArchivePreviewName(base);
     if (createDestinationBase === "ask") {
+      const suggested = createSuggestedOutputPath(activeCreateFormat, archiveOutputExtension(
+        activeCreateFormat, createSplitSizeBytes(), createSplitMode, createSfxEnabled, sfxCreateCapability.extension,
+      ));
+      if (suggested) {
+        return tr("gui.create.output.preview_confirm", "Confirm location when starting · {path}").replace("{path}", suggested);
+      }
       return tr("gui.create.output.preview_ask", "Choose location when starting · {name}").replace("{name}", name);
     }
     if (createDestinationBase === "default_directory") {
@@ -3906,9 +4059,23 @@
   }
 
   function createSaveDefaultPathForDraft(input: string, base: string, draft: CreateRunDraft): string {
+    if (draft.suggestedDestination) return draft.suggestedDestination;
     return joinFolderPath(
       desktopDirname(input, platformKind()),
       createArchiveNameForOutput(base, draft.outputExtension),
+    );
+  }
+
+  function createSuggestedOutputPath(format: CreateFormatId, outputExtension: string): string | null {
+    const path = createSuggestedDestination;
+    if (!path) return null;
+    const extensions = outputExtension === createFormats[format].extension
+      ? createFormats[format].extensions
+      : [outputExtension];
+    if (extensions.some((extension) => path.toLowerCase().endsWith(`.${extension}`))) return path;
+    return joinFolderPath(
+      desktopDirname(path, platformKind()),
+      createArchiveNameForOutput(archiveStemName(desktopBasename(path, platformKind())), outputExtension),
     );
   }
 
@@ -4429,6 +4596,14 @@
       passwordBookDetailLabel,
       passwordBookRefreshDisabledReason,
       passwordBookStatusState: passwordBookStatus.state,
+      passwordSaveState,
+      passwordBookArchiveId: currentArchive?.id ?? null,
+      passwordBookCanSave: Boolean(currentArchive && !currentArchive.read_only && passwordBookStatus.state === "ready" && passwordBookStatus.available),
+      passwordBookSaved: passwordBookStatus.saved === true,
+      savePasswordBook: (password) => currentArchive
+        ? rememberArchivePassword(currentArchive.path, password, archiveEncoding()) : Promise.resolve(false),
+      cancelPasswordBookSave: cancelArchivePasswordSave,
+      clearPasswordBookSave: clearArchivePasswordSave,
       refreshPasswordBookPanel,
       currentArchiveName,
       formatRegistry: registryFormats(),
@@ -4441,6 +4616,7 @@
   }
 
   function classicArchiveBrowserSurface(): ClassicArchiveBrowserSurfaceProps {
+    const recovery = archiveBrowseRecoveryState();
     const rows = browseEntries(CLASSIC_ROW_HEIGHT).map((entry) => ({
       ...entry,
       selected: isEntrySelected(entry),
@@ -4492,16 +4668,18 @@
             }
           : null,
         structureWarning: archiveStructureWarningText(),
+        recovery,
         totalRows: currentArchive ? totalRows() : 0,
         rows,
         paddingTop: browsePaddingTop(CLASSIC_ROW_HEIGHT),
         paddingBottom: browsePaddingBottom(CLASSIC_ROW_HEIGHT),
         emptyName: currentArchive ? noEntriesLabel() : openArchiveFirstLabel(),
-        emptyStatus: currentArchive ? archiveFilterStatus() : noEntriesLabel(),
+        emptyStatus: recovery ? "" : currentArchive ? archiveFilterStatus() : noEntriesLabel(),
       },
       tr,
       onOpenRoot: () => void openArchiveBreadcrumb(-1),
       onOpenRecovery: openCurrentArchiveRecoveryConfiguration,
+      onRetryBrowse: () => void retryArchiveContents(),
       onOpenNestedPreview: () => void openNestedPreviewArchive(),
       onExtractNestedPreview: () => void extractNestedPreviewArchive(),
       onClearPreview: (restoreEntryFocus) => clearEntryPreviewState(restoreEntryFocus),
@@ -4529,6 +4707,7 @@
   }
 
   function modernArchiveBrowserSurface(): ModernArchiveBrowserSurfaceProps {
+    const recovery = archiveBrowseRecoveryState();
     const archive = currentArchive;
     if (!archive) {
       throw new Error("Modern archive browser requires an open archive");
@@ -4583,11 +4762,12 @@
             }
           : null,
         structureWarning: archiveStructureWarningText(),
+        recovery,
         encodingWarning: hasEncodingWarning() ? archiveWarningText() : null,
         totalRows: totalRows(),
         filterText: filterText(),
         filterPending: filterPending(),
-        filterStatus: archiveFilterStatus(),
+        filterStatus: recovery ? "" : archiveFilterStatus(),
         selection: archiveSelectionControl(),
         rows,
         paddingTop: browsePaddingTop(MODERN_ROW_HEIGHT),
@@ -4602,6 +4782,7 @@
       onExtractSelection: () => void runAppAction("extract_selection"),
       onAddFiles: () => void runAppAction("add_files"),
       onOpenRecovery: openCurrentArchiveRecoveryConfiguration,
+      onRetryBrowse: () => void retryArchiveContents(),
       onConvert: () => void runAppAction("convert_archive"),
       onOpenInfo: () => void runAppAction("archive_info"),
       onRenameSelection: () => void runAppAction("rename_entry"),
@@ -4636,21 +4817,7 @@
 
   function modernInspectorSurface(): ModernInspectorSurfaceProps {
     let view: ModernInspectorSurfaceProps["view"];
-    if (screen === "batch") {
-      view = {
-        kind: "batch",
-        ready: batchReadyCount(),
-        archives: batchReviewArchives().length,
-        percent: batchReadyPercent(),
-      };
-    } else if (screen === "password") {
-      view = {
-        kind: "password",
-        secretStore: secretStoreLabel(),
-      };
-    } else if (screen === "conflict") {
-      view = { kind: "conflict" };
-    } else if (screen === "recovery") {
+    if (screen === "recovery") {
       view = {
         kind: "recovery",
         tone: recoveryResultTone(),
@@ -5612,18 +5779,6 @@
     return tr(`gui.create.format.${formatId}.note`, createFormats[formatId].note);
   }
 
-  function batchArchiveStateLabel(state: string): string {
-    return tr(`gui.batch.state.${labelKey(state)}`, state);
-  }
-
-  function conflictDecisionLabel(decision: string): string {
-    if (decision === "Keep both") return tr("gui.conflict.rename", "Keep both");
-    if (decision === "Ask") return tr("gui.extract.overwrite.ask", "Ask");
-    if (decision === "Replace") return tr("gui.conflict.overwrite", "Replace");
-    if (decision === "Choose") return tr("gui.conflict.choose", "Choose");
-    return decision;
-  }
-
   function noArchiveLabel(): string {
     return tr("gui.empty.no_archive_short", "No archive open");
   }
@@ -5886,14 +6041,29 @@
     openRecoveryConfiguration("current");
   }
 
+  function dismissArchivePicker() {
+    if (archivePickerRequest === null) return;
+    if (archivePickerRequest === archiveOpenGeneration) {
+      archiveOpenGeneration += 1;
+      archiveOpenStatus = "idle";
+    }
+    archivePickerRequest = null;
+  }
+
   async function openArchiveFromDialog() {
     if (archiveOpenStatus === "opening") return;
     if (preventCreateSubmissionNavigation("browse")) return;
+    dismissArchivePasswordRequest();
+    clearEntryPreviewState();
     const requestGeneration = ++archiveOpenGeneration;
+    archivePickerRequest = requestGeneration;
+    const isCurrent = () => archivePickerRequest === requestGeneration && archiveOpenGeneration === requestGeneration;
     archiveOpenStatus = "opening";
     showNotice(tr("gui.archive.opening_picker", "Opening file picker..."));
+    let selected: string | string[] | null = null;
     try {
       const { open } = await getDialogModule();
+      if (!isCurrent()) return;
       // An unfiltered macOS dialog keeps arbitrary numbered volumes selectable.
       const filters: OpenDialogOptions["filters"] = platformKind() === "macos"
         ? undefined
@@ -5913,22 +6083,27 @@
             },
             { name: tr("gui.recovery.par2_files", "PAR2 recovery files"), extensions: ["par2"] },
           ];
-      const selected = await openNativeDialog("archive.open", open, {
+      selected = await openNativeDialog("archive.open", open, {
         title: tr("gui.archive.open_dialog_title", "Open archive"),
         multiple: false,
         directory: false,
         filters,
       });
-      const path = Array.isArray(selected) ? selected[0] : selected;
-      if (typeof path === "string") {
-        await openArchivePath(path, "dialog");
-      } else {
-        showNotice(tr("gui.archive.open_cancelled", "Open archive cancelled."));
-      }
+      if (!isCurrent()) return;
     } catch {
-      showNotice(tr("gui.archive.open_requires_desktop_dialog", "Open archive requires the desktop file dialog"));
+      if (isCurrent()) showNotice(tr("gui.archive.open_requires_desktop_dialog", "Open archive requires the desktop file dialog"));
+      return;
     } finally {
-      if (requestGeneration === archiveOpenGeneration) archiveOpenStatus = "idle";
+      if (isCurrent()) {
+        archivePickerRequest = null;
+        archiveOpenStatus = "idle";
+      }
+    }
+    const path = Array.isArray(selected) ? selected[0] : selected;
+    if (typeof path === "string") {
+      await openArchivePath(path, "dialog");
+    } else {
+      showNotice(tr("gui.archive.open_cancelled", "Open archive cancelled."));
     }
   }
 
@@ -5936,7 +6111,7 @@
     const validPaths = paths.filter((item) => typeof item === "string" && item.length > 0);
     const path = validPaths[0];
     if (!path) return;
-    batchArchivePaths = validPaths;
+    if (!setBatchArchivePaths(validPaths)) return;
     await openArchivePath(path, source);
     if (validPaths.length > 1) {
       showNotice(tr("gui.archive.opened_first_more_batch", "Opened first archive · {count} more ready for batch extract").replace("{count}", String(validPaths.length - 1)));
@@ -5961,6 +6136,9 @@
     }
 
     applyTaskWindowSubmitTransition(taskWindowSubmitTransition(action, "starting", tr));
+    taskDialogTaskId = null;
+    taskDialogDismissedId = null;
+    rememberWindowRecovery({ taskWindow: true });
     let resolvedSpec: JobSpec | null;
     try {
       resolvedSpec = await ipc.resolveExternalTaskJob(
@@ -6006,15 +6184,20 @@
   async function openArchivePath(
     path: string,
     source: "dialog" | "open-file",
+    review: ArchiveTaskReview | null = null,
   ): Promise<boolean> {
     if (preventCreateSubmissionNavigation("browse")) return false;
+    dismissArchivePicker();
+    dismissArchivePasswordRequest();
+    clearEntryPreviewState();
+    pendingArchiveTaskReview = review;
     if (isPar2Path(path)) {
       openRecoverySet(path, null, source);
       return true;
     }
     const requestGeneration = ++archiveOpenGeneration;
     archiveOpenStatus = "opening";
-    const ok = await openArchiveStore(path);
+    const ok = await openArchiveStore(path, null, review?.encoding ?? null);
     if (requestGeneration !== archiveOpenGeneration) return true;
     archiveOpenStatus = "idle";
     if (ok) {
@@ -6023,15 +6206,16 @@
     }
     const passwordPrompt = openPasswordPrompt();
     if (passwordPrompt?.path === path) {
-      setScreenRespectingJobQuestion("password");
+      setScreen("password");
       showNotice(tr("gui.archive.password_needed", "Enter the archive password to continue."));
       return true;
     }
+    pendingArchiveTaskReview = null;
     if (archiveOpenError(path)?.key === "error.corrupt_archive") {
       recoverySourceMode = "selected";
       recoverySourceOverride = path;
       recoveryPar2Override = null;
-      setScreenRespectingJobQuestion("recovery");
+      setScreen("recovery");
       showNotice(
         tr("gui.recovery.open_failed_routed", "{name} could not be opened. It is ready for recovery checks.")
           .replace("{name}", pathBaseName(path)),
@@ -6044,6 +6228,8 @@
   }
 
   function finishOpenedArchive(path: string, source: "dialog" | "open-file" | "password") {
+    const review = pendingArchiveTaskReview;
+    pendingArchiveTaskReview = null;
     rememberRecent(path);
     recordOperation({
       status: "info",
@@ -6054,7 +6240,8 @@
     recoverySourceOverride = null;
     recoveryPar2Override = null;
     clearEntryPreviewState();
-    setScreenRespectingJobQuestion("browse");
+    if (review && sameFilePath(review.path, path) && review.restore()) return;
+    setScreen("browse");
     showNotice(
       source === "password"
         ? tr("gui.archive.unlocked", "Archive unlocked")
@@ -6129,13 +6316,16 @@
     sidecarCount = 1,
     sidecarSetCount = 1,
   ) {
+    dismissArchivePicker();
+    clearEntryPreviewState();
+    pendingArchiveTaskReview = null;
     archiveOpenGeneration += 1;
     archiveOpenStatus = "idle";
     cancelArchivePasswordPrompt();
     recoveryPar2Override = sidecar;
     recoverySourceOverride = archivePath;
     recoverySourceMode = archivePath ? "selected" : "none";
-    setScreenRespectingJobQuestion("recovery");
+    setScreen("recovery");
     let notice: string;
     if (sidecarSetCount > 1) {
       notice = tr(
@@ -6474,11 +6664,13 @@
         (archivePath
           ? previewSampleForEntry(archivePath, entryPath)
           : null) ??
-        (await ipc.previewArchiveEntry(
-          archiveSource,
+        (await runPreviewWithPassword(
+          requestGeneration,
+          archivePath ?? archiveSource,
           entryPath,
-          null,
-          archiveEncodingForJob(),
+          (passwords, requestId) => ipc.previewArchiveEntry(
+            archiveSource, entryPath, passwords.outer, archiveEncodingForJob(), requestId,
+          ),
         ))
       );
     } finally {
@@ -6487,7 +6679,9 @@
   }
 
   function clearEntryPreviewState(restoreEntryFocus = false) {
+    previewPasswordFlow.cancel();
     const preview = entryPreview;
+    const inner = nestedPreview;
     const originEntryPath = previewOriginEntryPath;
     const originVirtualIndex = previewOriginVirtualIndex;
     previewRequestGeneration += 1;
@@ -6500,6 +6694,7 @@
     previewPhase = "idle";
     previewTargetName = "";
     if (preview) void disposeEntryPreview(preview.preview_id);
+    if (inner) void ipc.closeArchive(inner.archive.id).catch(() => undefined);
     if (restoreEntryFocus && originVirtualIndex !== null) {
       queueMicrotask(() => void focusArchiveRow(originVirtualIndex, originEntryPath));
     }
@@ -6582,6 +6777,34 @@
     if (status === "refreshing") return tr("gui.archive.refreshing", "Refreshing archive contents…");
     if (status === "error") return tr("gui.archive.refresh_failed", "Could not refresh the archive. Retry to see the latest files.");
     return "";
+  }
+
+  function archiveBrowseRecoveryState() {
+    if (!currentArchive) return null;
+    const status = archiveRefreshStatus();
+    const retrying = retryingArchiveId === currentArchive.id;
+    if (status === "idle" && !archiveBrowseError() && !retrying) return null;
+    return { message: archiveFilterStatus(), busy: status === "refreshing" || retrying };
+  }
+
+  async function retryArchiveContents(): Promise<void> {
+    const current = currentArchive;
+    if (!current || retryingArchiveId === current.id
+      || (archiveRefreshStatus() !== "error" && !archiveBrowseError())) return;
+    const generation = archiveOpenGeneration;
+    const trigger = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    retryingArchiveId = current.id;
+    try {
+      await retryArchiveBrowse();
+    } finally {
+      if (retryingArchiveId === current.id) retryingArchiveId = null;
+    }
+    await tick();
+    if (generation !== archiveOpenGeneration || currentArchive?.source !== current.source
+      || retryingArchiveId !== null || screen !== "browse" || blockingModalVisible() || modeSelectionBlocked) return;
+    if (document.activeElement !== document.body && document.activeElement !== trigger) return;
+    if (trigger?.isConnected) trigger.focus({ preventScroll: true });
+    else archiveSearchInput?.focus({ preventScroll: true });
   }
 
   function blockSelectionScopedAction(): boolean {
@@ -6865,50 +7088,99 @@
     return dot > 0 ? name.slice(dot + 1).toUpperCase() : "ARCHIVE";
   }
 
-  function batchReviewArchives(): BatchArchiveRow[] {
-    if (batchArchivePaths.length === 0) {
-      if (currentArchive) {
-        return [{
-          name: currentArchive.name,
-          format: archiveFormat(),
-          entries: currentArchive.entry_count.toLocaleString(),
-          target: effectiveExtractDest(),
-          state: "Ready",
-        }];
-      }
-      return [];
+  function newBatchExtractDraft(paths: readonly string[]): BatchExtractDraft {
+    return { overwrite: "ask", symlinks: "preserve", smart: true,
+      items: uniqueNonEmptyPaths([...paths]).map((path) => ({ path,
+        displayPath: currentArchive?.source === path ? currentArchive.path : path,
+        dest: normalizedDefaultExtractDir(appliedDefaultExtractDir) ?? pathDir(currentArchive?.source === path ? currentArchive.path : path),
+        encoding: currentArchive && sameFilePath(currentArchive.source, path) ? archiveEncodingForJob() : null,
+        best_effort: false,
+      })) };
+  }
+
+  function effectiveBatchDraft(): BatchExtractDraft {
+    return batchDraft ?? newBatchExtractDraft(runtimePreviews.batchPaths.length > 0
+      ? runtimePreviews.batchPaths : currentArchive ? [currentArchive.source] : []);
+  }
+
+  function batchDraftLocked(): boolean {
+    return batchSubmissionPending || batchPickerBusy;
+  }
+
+  function setBatchArchivePaths(paths: readonly string[]): boolean {
+    if (batchDraftLocked()) {
+      showNotice(tr("gui.batch.wait_for_current", "Finish the current selection or submission before reviewing another batch."));
+      return false;
     }
-    return batchArchivePaths.map((path) => {
-      const isCurrent = currentArchive?.path === path;
-      return {
-        name: pathBaseName(path),
-        format: isCurrent ? archiveFormat() : archiveFormatFromPath(path),
-        entries: isCurrent
-          ? currentArchive.entry_count.toLocaleString()
-          : tr("gui.batch.state.pending", "Pending"),
-        target: extractDestForPath(path),
-        state: isCurrent ? "Ready" : "Ready to start",
-      };
+    batchDraftGeneration += 1;
+    batchDraft = newBatchExtractDraft(paths);
+    return true;
+  }
+
+  function updateBatchDraft(update: (draft: BatchExtractDraft) => BatchExtractDraft): void {
+    if (batchDraftLocked()) return;
+    batchDraftGeneration += 1;
+    batchDraft = update(effectiveBatchDraft());
+  }
+
+  function removeBatchItem(index: number): void {
+    updateBatchDraft((draft) => ({ ...draft, items: draft.items.filter((_, itemIndex) => itemIndex !== index) }));
+    void tick().then(() => {
+      if (screen !== "batch") return;
+      (document.getElementById(`batch-remove-${Math.min(index, effectiveBatchDraft().items.length - 1)}`)
+        ?? document.getElementById("batch-workspace-heading"))?.focus();
     });
   }
 
-  function batchReviewWarningCount(): number {
-    return batchReviewArchives().filter((item) => item.state.toLowerCase().includes("password")).length;
+  async function chooseBatchPaths(index: number | null = null): Promise<void> {
+    if (screen !== "batch" || batchDraftLocked()) return;
+    const draft = effectiveBatchDraft();
+    if (index !== null && !draft.items[index]) return;
+    const generation = batchDraftGeneration;
+    const request = ++batchPickerRequest;
+    const isCurrent = () => request === batchPickerRequest
+      && generation === batchDraftGeneration && screen === "batch";
+    batchPickerBusy = true;
+    try {
+      const { open } = await getDialogModule();
+      if (!isCurrent()) return;
+      const selected = await openNativeDialog(index === null ? "batch.sources" : "batch.destination", open, {
+        title: index === null ? tr("gui.batch.add_archives", "Add archives") : tr("gui.batch.choose_destination", "Choose destination"),
+        multiple: index === null, directory: index !== null,
+        defaultPath: index === null ? undefined : draft.items[index]?.dest,
+      });
+      if (!isCurrent()) return;
+      if (!selected) {
+        showNotice(tr("gui.batch.selection_cancelled", "Selection cancelled · the current batch was kept"));
+        return;
+      }
+      const paths = Array.isArray(selected) ? selected : [selected];
+      if (index === null) {
+        const additions = newBatchExtractDraft(paths).items.filter((item) =>
+          !draft.items.some((existing) => sameFilePath(existing.path, item.path)));
+        batchDraft = { ...draft, items: [...draft.items, ...additions] };
+        if (additions.length === 0) showNotice(tr("gui.batch.already_added", "Those archives are already in the batch."));
+      } else if (paths[0]) {
+        batchDraft = { ...draft, items: draft.items.map((item, itemIndex) => itemIndex === index ? { ...item, dest: paths[0] } : item) };
+      }
+      batchDraftGeneration += 1;
+    } catch {
+      if (isCurrent()) showNotice(index === null
+        ? tr("gui.batch.picker_unavailable", "Could not open the file chooser. Try again, or drag archives into the window.")
+        : tr("gui.batch.destination_picker_unavailable", "Could not open the folder chooser. Try again, or edit the destination in the list."));
+    } finally {
+      if (request === batchPickerRequest) batchPickerBusy = false;
+    }
   }
 
-  function batchReadyCount(): number {
-    return batchReviewArchives().length - batchReviewWarningCount();
-  }
-
-  function batchReadyPercent(): number {
-    const total = batchReviewArchives().length;
-    return total === 0 ? 0 : Math.round((batchReadyCount() / total) * 100);
-  }
-
-  function batchWarningLabel(): string {
-    if (batchReviewArchives().length === 0) return openArchiveFirstLabel();
-    const count = batchReviewWarningCount();
-    return tr("gui.batch.passwords_required_count", "{count} passwords required").replace("{count}", count.toLocaleString());
+  function focusBatchReview(): void {
+    batchReviewFocusPending = true;
+    void tick().then(() => {
+      const heading = document.getElementById("batch-workspace-heading");
+      if (!batchReviewFocusPending || screen !== "batch" || blockingModalVisible() || !heading) return;
+      batchReviewFocusPending = false;
+      heading.focus();
+    });
   }
 
   function appendCreateSources(
@@ -6998,6 +7270,7 @@
   function clearCreateSources(): void {
     createSources = [];
     selectedCreateSourcePaths = [];
+    createSuggestedDestination = null;
   }
 
   function createSourceKindLabel(kind: CreateSourceKind): string {
@@ -7030,7 +7303,7 @@
   function dropStatusLabel(): string {
     if (dragActive) return tr("gui.drop.active", "Drop archives to open, or files and folders to create an archive");
     if (lastDropKind === "archives") {
-      return tr("gui.drop.archives_ready", "{count} dropped archives ready").replace("{count}", String(batchArchivePaths.length));
+      return tr("gui.drop.archives_ready", "{count} dropped archives ready").replace("{count}", String(effectiveBatchDraft().items.length));
     }
     if (lastDropKind === "create") {
       return tr("gui.drop.create_ready", "{count} dropped items ready to archive").replace("{count}", String(createSources.length));
@@ -7209,7 +7482,7 @@
         create_count: 0,
       });
       lastDropKind = "archives";
-      batchArchivePaths = archivePaths;
+      if (!setBatchArchivePaths(archivePaths)) return;
       if (archivePaths.length === 1) {
         await openArchivePath(archivePaths[0], "open-file");
       } else {
@@ -7255,7 +7528,12 @@
   function extractJobDestination(): string {
     if (!currentArchive) return openArchiveFirstLabel();
     if (extractDestinationMode !== "smart") return effectiveExtractDest();
-    return normalizedDefaultExtractDir(appliedDefaultExtractDir) ?? pathDir(currentArchive.path);
+    return extractSmartBase();
+  }
+
+  function extractSmartBase(): string {
+    return extractSmartBaseOverride ?? normalizedDefaultExtractDir(appliedDefaultExtractDir)
+      ?? (currentArchive ? pathDir(currentArchive.path) : openArchiveFirstLabel());
   }
 
   function sameFolderExtractDest(): string {
@@ -7305,7 +7583,7 @@
   ): ExtractPlanPreflightDto | null {
     const preview = runtimePreviews.archive;
     if (!preview || !currentArchive) return null;
-    const allEntries = preview.previewRows ?? preview.rows;
+    const allEntries = preparedNestedPreviewRows(params, currentArchive.source) ?? preview.previewRows ?? preview.rows;
     const selectedEntries = allEntries.filter((entry) => previewEntryMatchesSelection(entry, selection));
     const layout = smart && previewExtractWraps(allEntries) ? "wrap_in_folder" : "direct";
     const destination = layout === "wrap_in_folder"
@@ -7667,9 +7945,8 @@
     if (mode === "same") return sameFolderExtractDest();
     if (mode === "choose") return chosenExtractDest();
     if (mode === "smart") {
-      const base = normalizedDefaultExtractDir(appliedDefaultExtractDir) ?? pathDir(currentArchive.path);
       return tr("gui.extract.smart_destination_value", "{base} · final folder chosen from archive contents")
-        .replace("{base}", base);
+        .replace("{base}", extractSmartBase());
     }
     return defaultExtractDest();
   }
@@ -7685,6 +7962,7 @@
     }
     markExtractPresetDraftTouched();
     extractDestinationMode = mode;
+    extractSmartBaseOverride = null;
   }
 
   function extractWorkspaceSurface(variant: ExtractWorkspaceVariant): ExtractWorkspaceSurface {
@@ -7703,6 +7981,9 @@
       title: variant === "modern"
         ? extractSafeTitle()
         : classicCommandLabel("Extract To"),
+      onReady: () => {
+        if (extractReviewFocusPending) focusExtractReview();
+      },
       start: {
         label: startLabel,
         disabled: Boolean(startBlockedReason),
@@ -7719,7 +8000,7 @@
       },
       destination: {
         label: extractDestinationFieldLabel(),
-        path: effectiveExtractDest(),
+        path: extractJobDestination(),
         choices: extractDestinationModes.map((mode) => ({
           id: mode,
           label: extractDestinationTitle(mode),
@@ -7736,6 +8017,9 @@
         line: archiveLine(),
         selection: extractSelectionLabel(),
         password: extractPasswordLabel(),
+        verification: extractVerifySfx
+          ? tr("gui.extract.verify_sfx", "The self-extractor payload will be verified before writing files.")
+          : null,
       },
       plan: {
         variant,
@@ -7836,6 +8120,7 @@
       if (typeof selected === "string") {
         markExtractPresetDraftTouched();
         extractCustomDest = selected;
+        extractSmartBaseOverride = null;
         extractDestinationMode = "choose";
         showNotice(tr("gui.extract.destination_selected", "Extract destination selected"));
       }
@@ -7877,10 +8162,6 @@
 
   function extractDestForPath(path: string): string {
     return extractDestInDefaultFolder(pathDir(path), pathBaseName(path));
-  }
-
-  function nestedExtractDest(outerDisplayPath: string, entryPath: string): string {
-    return extractDestInDefaultFolder(pathDir(outerDisplayPath), pathBaseName(entryPath));
   }
 
   function defaultSqzExportDest(): string {
@@ -8107,15 +8388,38 @@
       showNotice(tr("gui.precondition.select_before_extract", "Select one or more entries before extracting them"));
       return;
     }
+    syncExtractDraftArchive();
     extractScope = scope;
     extractSelectionSnapshot = scope === "selection" ? [...(selection ?? [])] : [];
     setScreen("extract");
   }
 
   function extractJobPaths(): string[] | null {
-    return extractScope === "selection" && extractSelectionSnapshot.length > 0
+    return extractScope === "selection"
       ? [...extractSelectionSnapshot]
       : null;
+  }
+
+  function syncExtractDraftArchive(): void {
+    const current = currentArchive;
+    if ((extractDraftArchive?.id ?? null) === (current?.id ?? null)) return;
+    const sameSource = current && extractDraftArchive && sameFilePath(current.source, extractDraftArchive.source);
+    extractDraftArchive = current ? { id: current.id, source: current.source } : null;
+    extractSelectionSnapshot = [];
+    if (!sameSource) {
+      extractSmartBaseOverride = null;
+      extractVerifySfx = false;
+    }
+  }
+
+  function focusExtractReview(): void {
+    extractReviewFocusPending = true;
+    void tick().then(() => {
+      const heading = document.getElementById("extract-workspace-heading");
+      if (!extractReviewFocusPending || screen !== "extract" || blockingModalVisible() || !heading) return;
+      extractReviewFocusPending = false;
+      heading.focus();
+    });
   }
 
   function selectedJobPaths(): string[] | null {
@@ -8589,7 +8893,7 @@
     if (createPassword.length > 0) {
       return tr("gui.create.setup.password_on", "Password on");
     }
-    if (createPresetCredentialIntent === "prompt") {
+    if (createEncryptionEnabled) {
       return tr("gui.create.setup.password_required", "Password required");
     }
     return tr("gui.create.setup.no_password", "No password");
@@ -8734,6 +9038,9 @@
 
     return {
       tr,
+      onReady: () => {
+        if (createPrimaryFocusPending) focusCreatePrimaryAction();
+      },
       sources: {
         ariaLabel: tr("gui.create.sources.aria", "Items to archive"),
         heading: tr("gui.create.sources.heading", "Items to archive"),
@@ -8866,7 +9173,7 @@
       setupSummary: {
         variant,
         ariaLabel: tr("gui.create.setup.aria", "Current create setup"),
-        eyebrow: tr("gui.create.setup.eyebrow", "Before choosing sources"),
+        eyebrow: tr("gui.create.setup.eyebrow", "Before creating"),
         heading: tr("gui.create.setup.heading", "What Squallz will create"),
         items: createSetupSummaryItems(),
       },
@@ -8965,6 +9272,7 @@
         password: createPassword,
         passwordConfirmation: createPasswordConfirmation,
         passwordVisible: createPasswordVisible,
+        encryptionEnabled: createEncryptionEnabled,
         encryptNames: createEncryptNames,
         canEncryptData: createPasswordDataAvailable(),
         canEncryptNames: createNameEncryptionAvailable(),
@@ -8986,6 +9294,7 @@
         onPasswordInput: updateCreatePassword,
         onPasswordConfirmationInput: updateCreatePasswordConfirmation,
         onPasswordVisibleChange: (visible) => (createPasswordVisible = visible),
+        onEncryptionEnabledChange: updateCreateEncryptionEnabled,
         onEncryptNamesChange: updateCreateEncryptNames,
         onSplitPresetChange: updateCreateSplitPreset,
         onSplitModeChange: updateCreateSplitMode,
@@ -9073,7 +9382,7 @@
         : tr("gui.create.measuring_input_bytes", "Measuring input bytes...");
     }
     if (createPreflightPhase === "blocked" && lastCreatePlan?.entries === 0) return tr("gui.create.no_entries_after_excludes", "No entries after excludes");
-    if (!lastCreatePlan) return tr("gui.create.input_estimate_pending", "Input estimate pending source selection");
+    if (!lastCreatePlan) return tr("gui.create.input_estimate_pending", "Input estimate awaiting preflight");
     return tr("gui.create.estimate_status", "{size} input · {entries} entries · {excludes}")
       .replace("{size}", formatBytes(lastCreatePlan.total_bytes))
       .replace("{entries}", lastCreatePlan.entries.toLocaleString())
@@ -9167,7 +9476,7 @@
   function resetCreateCredentialsAfterPlan(pending: PendingCreateSubmission | null) {
     clearCreatePasswordFields();
     if (pending?.restoreCredentialPrompt) {
-      createPresetCredentialIntent = "prompt";
+      createEncryptionEnabled = true;
       createEncryptNames = pending.restoreEncryptNames;
     }
   }
@@ -9177,7 +9486,13 @@
   }
 
   function focusCreatePrimaryAction() {
-    void tick().then(() => createPrimaryAction()?.focus());
+    createPrimaryFocusPending = true;
+    void tick().then(() => {
+      const action = createPrimaryAction();
+      if (!createPrimaryFocusPending || screen !== "create" || blockingModalVisible() || !action) return;
+      createPrimaryFocusPending = false;
+      action.focus();
+    });
   }
 
   function discardPendingCreatePlan(restoreFocus = false) {
@@ -9206,7 +9521,7 @@
   }
 
   function selectedRenameSource(): string | null {
-    const selected = [...selectedPaths()];
+    const selected = [...archiveEditSelectedPaths()];
     return selected.length === 1 ? selected[0] : null;
   }
 
@@ -9222,7 +9537,7 @@
     if (!issue) return "";
     if (issue.kind === "empty") return tr("gui.edit.path_empty", "Enter an archive path.");
     if (issue.kind === "parent") return tr("gui.edit.path_parent", "Parent references (..) are not allowed. Enter a path inside the archive.");
-    if (issue.kind === "characters") return tr("gui.edit.path_characters", "{name} contains characters that cannot be used on Windows.").replace("{name}", issue.segment);
+    if (issue.kind === "characters") return tr("gui.edit.path_characters", "{name} contains characters that cannot be used on Windows. Remove them or choose another name.").replace("{name}", issue.segment);
     if (issue.kind === "trailing") return tr("gui.edit.path_trailing", "{name} ends with a space or dot. Choose a portable name.").replace("{name}", issue.segment);
     return tr("gui.edit.path_reserved", "{name} is reserved on Windows. Choose another name.").replace("{name}", issue.segment);
   }
@@ -9265,12 +9580,11 @@
     const from = selectedRenameSource();
     if (from === null) return tr("gui.rename.select_one_entry", "Select exactly one file or folder to rename");
     const target = normalizeRenameTargetName();
-    if (target === from) return tr("gui.rename.target_must_differ", "Rename target must differ from source");
-    if (archivePathSet().has(target)) return tr("gui.new_folder.already_exists", "Already exists: {folder}").replace("{folder}", target);
+    if (target === from) return tr("gui.rename.target_must_differ", "The name is unchanged. Enter a different name or path.");
     const issue = renameTargetIssue(from, target);
     if (issue.blocking) return tr("gui.rename.blocked_reason", "Blocked: {reason}").replace("{reason}", issue.blocking);
-    if (issue.warning) return `${issue.warning} · ${from} -> ${target}`;
-    return `${from} -> ${target}${archiveConflictCoverageNote()}`;
+    return `${issue.warning ? `${issue.warning} · ` : ""}${from} -> ${target}`
+      + tr("gui.edit.destination_check_suffix", " · destination will be checked before queuing");
   }
 
   function normalizeMoveTargetDir(value = moveTargetDir): string {
@@ -9285,58 +9599,6 @@
     return `${targetDir}${base}${isDir ? "/" : ""}`;
   }
 
-  function uniqueArchiveTarget(path: string, reserved: Set<string>): string {
-    const isDir = path.endsWith("/");
-    const clean = isDir ? path.slice(0, -1) : path;
-    const slash = clean.lastIndexOf("/");
-    const dir = slash >= 0 ? `${clean.slice(0, slash + 1)}` : "";
-    const base = slash >= 0 ? clean.slice(slash + 1) : clean;
-    const dot = !isDir ? base.lastIndexOf(".") : -1;
-    const stem = dot > 0 ? base.slice(0, dot) : base;
-    const ext = dot > 0 ? base.slice(dot) : "";
-    for (let copy = 1; copy < 1000; copy += 1) {
-      const suffix = copy === 1 ? " copy" : ` copy ${copy}`;
-      const candidate = `${dir}${stem}${suffix}${ext}${isDir ? "/" : ""}`;
-      if (!reserved.has(candidate)) {
-        reserved.add(candidate);
-        return candidate;
-      }
-    }
-    return `${dir}${stem} copy ${Date.now()}${ext}${isDir ? "/" : ""}`;
-  }
-
-  function buildMovePlan(targetDir = normalizeMoveTargetDir()): MovePlanItem[] {
-    const selected = archiveSelectionRoots(selectedPaths());
-    const existing = archivePathSet();
-    const targetCounts = new Map<string, number>();
-    for (const from of selected) {
-      const to = moveTargetForPath(from, targetDir);
-      targetCounts.set(to, (targetCounts.get(to) ?? 0) + 1);
-    }
-    const reserved = new Set(existing);
-    for (const from of selected) {
-      reserved.add(moveTargetForPath(from, targetDir));
-    }
-    return selected.map((from) => {
-      const to = moveTargetForPath(from, targetDir);
-      const duplicate = (targetCounts.get(to) ?? 0) > 1;
-      const exists = existing.has(to);
-      const conflict = exists || duplicate;
-      const reason = exists
-        ? tr("gui.move.target_already_exists", "Target already exists")
-        : duplicate
-          ? tr("gui.move.duplicate_target_name", "Multiple selected entries share this target name")
-          : null;
-      return {
-        from,
-        to,
-        conflict,
-        reason,
-        keepBothTo: conflict ? uniqueArchiveTarget(to, reserved) : null,
-      };
-    });
-  }
-
   function moveConflictCount(): number {
     return moveConflictReview?.items.filter((item) => item.conflict).length ?? 0;
   }
@@ -9349,40 +9611,26 @@
     return moveConflictReview?.items.filter((item) => item.conflict).slice(0, 5) ?? [];
   }
 
-  function moveTargetConflictCount(): number {
-    if (!currentArchive || selectedPaths().size === 0) return 0;
-    return buildMovePlan().filter((item) => item.conflict).length;
-  }
-
-  function archiveConflictCoverageNote(): string {
-    return allRowsLoaded() ? "" : tr("gui.archive.full_validated_when_queued_suffix", " · full archive validated when task starts");
-  }
-
   function moveTargetStatus(): string {
     const targetDir = normalizeMoveTargetDir();
     if (!currentArchive) return openArchiveFirstLabel();
     const problem = moveTargetProblem(targetDir);
     if (problem) return problem;
     const targetLabel = targetDir || "/";
-    const selected = selectedPaths().size;
+    const selected = archiveEditSelectedPaths().size;
     if (selected === 0) {
       return tr("gui.move.select_entries_to_move_into", "Select entries to move into {target}").replace("{target}", targetLabel);
     }
-    const conflicts = moveTargetConflictCount();
-    if (conflicts > 0) {
-      return tr("gui.move.target_conflicts", "{count} target conflicts in {target}")
-        .replace("{count}", conflicts.toLocaleString())
-        .replace("{target}", targetLabel);
-    }
     return tr("gui.move.selected_to_target", "{count} selected -> {target}")
       .replace("{count}", selected.toLocaleString())
-      .replace("{target}", targetLabel) + archiveConflictCoverageNote();
+      .replace("{target}", targetLabel)
+      + tr("gui.move.check_before_submit", " · all target names will be checked before moving");
   }
 
   function moveTargetProblem(targetDir: string): string {
     const problem = archiveEditPathProblem(targetDir, true);
     if (problem) return problem;
-    for (const source of archiveSelectionRoots(selectedPaths())) {
+    for (const source of archiveSelectionRoots(archiveEditSelectedPaths())) {
       if (source.endsWith("/") && targetDir.startsWith(source)) {
         return tr("gui.move.inside_source", "Choose a destination outside the selected folder.");
       }
@@ -9396,7 +9644,7 @@
   function normalizeNewFolderPath(value = newFolderName): string {
     const input = value.trim().replaceAll("\\", "/");
     const name = normalizeArchivePath(input, tr("gui.new_folder.default_name", "New Folder"));
-    const parent = input.startsWith("/") ? "" : archiveDirs.join("/");
+    const parent = input.startsWith("/") ? "" : archiveEditContext?.directory ?? archiveDirs.join("/");
     return `${parent ? `${parent}/` : ""}${name}/`;
   }
 
@@ -9409,22 +9657,8 @@
     if (!currentArchive) return openArchiveFirstLabel();
     const problem = archiveEditPathProblem(folder);
     if (problem) return problem;
-    if (findLoadedRow(folder) || findLoadedRow(folder.slice(0, -1))) {
-      return tr("gui.new_folder.already_exists", "Already exists: {folder}").replace("{folder}", folder);
-    }
-    return allRowsLoaded()
-      ? tr("gui.new_folder.ready_to_create", "Ready to create {folder}").replace("{folder}", folder)
-      : tr("gui.new_folder.loaded_rows_clear", "Loaded rows are clear for {folder} · full archive validated when task starts").replace("{folder}", folder);
-  }
-
-  function archivePathSet(): Set<string> {
-    const paths = new Set<string>();
-    for (const entry of loadedRows()) {
-      const path = entry.path;
-      paths.add(path);
-      paths.add(path.endsWith("/") ? path.slice(0, -1) : `${path}/`);
-    }
-    return paths;
+    return tr("gui.new_folder.create_path", "Create {folder}").replace("{folder}", folder)
+      + tr("gui.edit.destination_check_suffix", " · destination will be checked before queuing");
   }
 
   function archiveLikePath(path: string): boolean {
@@ -9444,7 +9678,7 @@
     if (!currentArchive) return openArchiveFirstLabel();
     if (previewPhase === "nested") return tr("gui.preview.loading", "Preparing item");
     if (!nestedPreview) return tr("gui.preview.no_nested", "Preview");
-    return `${pathBaseName(nestedPreview.entry_path)} · ${nestedPreview.format.toUpperCase()}`;
+    return `${pathBaseName(nestedPreview.entry_path)} · ${nestedPreview.archive.format.toUpperCase()}`;
   }
 
   function nestedPreviewSubtitle(): string {
@@ -9455,7 +9689,7 @@
     }
     if (!nestedPreview) return tr("gui.preview.select_file", "Select an item, then choose Open or Preview.");
     return tr("gui.preview.nested_entries", "{count} entries{suffix}")
-      .replace("{count}", nestedPreview.entry_count.toLocaleString())
+      .replace("{count}", nestedPreview.archive.entry_count.toLocaleString())
       .replace("{suffix}", nestedPreview.truncated ? tr("gui.preview.first_200_shown_suffix", " · first 200 shown") : "");
   }
 
@@ -9521,8 +9755,8 @@
     const failure = entryPreviewFailure;
     if (!failure) return;
     if (failure.policyKind === "nested") {
-      if (failure.retryAction === "open") {
-        void openNestedArchiveEntry(failure.outerSource, failure.entryPath);
+      if (failure.retryAction !== "preview") {
+        void openNestedArchiveEntry(failure.outerSource, failure.entryPath, previewOriginVirtualIndex, failure.retryAction);
       } else {
         void submitPreviewNestedArchive(failure.entryPath, previewOriginVirtualIndex);
       }
@@ -9539,12 +9773,12 @@
     const failure = entryPreviewFailure;
     if (!failure) return;
     if (failure.policyKind === "nested") {
-      const queued = await submitNestedExtract(
+      const prepared = prepareNestedExtract(
         failure.outerSource,
         failure.outerDisplayPath,
         failure.entryPath,
       );
-      if (queued) clearEntryPreviewState();
+      if (prepared) clearEntryPreviewState();
       return;
     }
     const selectionBusyReason = archiveSelectionBusyReason();
@@ -9560,6 +9794,28 @@
     selectRow(row);
     clearEntryPreviewState();
     openExtractWorkspace("selection");
+  }
+
+  async function runPreviewWithPassword<T>(
+    requestGeneration: number,
+    outerDisplayPath: string,
+    entryPath: string,
+    operation: (passwords: NestedArchivePasswords, requestId: string) => Promise<T>,
+  ): Promise<T | null> {
+    try {
+      return await previewPasswordFlow.run({
+        outerName: pathBaseName(outerDisplayPath),
+        innerName: pathBaseName(entryPath),
+        isCurrent: () => requestGeneration === previewRequestGeneration,
+      }, operation);
+    } finally {
+      if (
+        requestGeneration === previewRequestGeneration && screen === "password" &&
+        !jobPasswordPrompt && !jobConflictPrompt && !archivePasswordPrompt
+      ) {
+        setScreen("browse");
+      }
+    }
   }
 
   function previewFailureMessage(
@@ -9595,7 +9851,7 @@
   function extractSelectionLabel(): string {
     if (!currentArchive) return openArchiveFirstLabel();
     const count = extractJobPaths()?.length ?? 0;
-    return count > 0
+    return extractScope === "selection"
       ? tr("gui.selection.count_selected", "{count} selected").replace("{count}", count.toLocaleString())
       : tr("gui.selection.all_entries", "All entries");
   }
@@ -9670,6 +9926,9 @@
   function extractStartBlockedReason(): string {
     const archiveReason = extractArchiveRequiredReason();
     if (archiveReason) return archiveReason;
+    if (extractScope === "selection" && extractSelectionSnapshot.length === 0) {
+      return tr("gui.precondition.select_before_extract", "Select one or more entries before extracting them");
+    }
     if (extractPlanPhase === "blocked") return extractSpaceFailureLabel();
     if (extractPlanPhase === "error") return extractPlanErrorLabel();
     if (extractPlanPhase !== "ready") {
@@ -9695,29 +9954,41 @@
           : tr("gui.archive.single", "Single"),
       ],
       [tr("common.selection", "Selection"), selectedSummary()],
-      [extractDestinationFieldLabel(), effectiveExtractDest()],
+      [extractDestinationFieldLabel(), extractJobDestination()],
     ];
   }
 
-  async function submitCurrentArchiveJob(spec: JobSpec, success: string, missing: string): Promise<boolean> {
+  async function submitCurrentArchiveJob(
+    spec: JobSpec,
+    success: string,
+    missing: string,
+    onFailure?: (message: string) => void,
+  ): Promise<boolean> {
     if (!currentArchive) {
-      showNotice(missing);
+      if (onFailure) onFailure(missing);
+      else showNotice(missing);
       return false;
     }
-    if (focusBlockingTaskIfAny()) return false;
+    const blocked = focusBlockingTaskIfAny();
+    if (blocked) {
+      onFailure?.(jobSubmitBlockedMessage(new JobSubmitBlockedError(blocked)));
+      return false;
+    }
     try {
       await submitJob(spec);
       showNotice(success);
       return true;
     } catch (error) {
-      if (isJobSubmitBlocked(error)) return false;
-      pushToast({
-        kind: "danger",
-        title: tr("gui.job.submit_failed", "Could not queue the task"),
-        body: isErrorDto(error)
-          ? tError(error)
-          : tr("gui.job.submit_unavailable", "Check that the Squallz desktop service is available, then try again."),
-      });
+      if (isJobSubmitBlocked(error)) {
+        onFailure?.(jobSubmitBlockedMessage(error));
+        return false;
+      }
+      const title = tr("gui.job.submit_failed", "Could not queue the task");
+      const body = isErrorDto(error)
+        ? tError(error)
+        : tr("gui.job.submit_unavailable", "Check that the Squallz desktop service is available, then try again.");
+      if (onFailure) onFailure(`${title} · ${body}`);
+      else pushToast({ kind: "danger", title, body });
       return false;
     }
   }
@@ -9725,6 +9996,10 @@
   async function submitExtractJob() {
     if (!currentArchive) {
       showNotice(tr("gui.precondition.open_before_extract", "Open an archive before extracting"));
+      return;
+    }
+    if (extractScope === "selection" && extractSelectionSnapshot.length === 0) {
+      showNotice(tr("gui.precondition.select_before_extract", "Select one or more entries before extracting them"));
       return;
     }
     if (extractPlanPhase === "loading") {
@@ -9747,6 +10022,7 @@
     const encoding = extractEncodingForJob();
     const overwrite = extractOverwriteMode;
     const symlinks = extractSymlinkMode;
+    const verifySfx = extractVerifySfx;
     const expectedPlanKey = extractPlanKey(
       current.id,
       current.source,
@@ -9779,7 +10055,8 @@
       extractPlanRequestKey !== expectedPlanKey ||
       currentPlanKey !== expectedPlanKey ||
       extractOverwriteMode !== overwrite ||
-      extractSymlinkMode !== symlinks
+      extractSymlinkMode !== symlinks ||
+      extractVerifySfx !== verifySfx
     ) {
       showNotice(tr(
         "gui.extract.plan_changed_before_start",
@@ -9812,7 +10089,7 @@
         smart,
         encoding,
         password: null,
-        verify_sfx: false,
+        verify_sfx: verifySfx,
         best_effort: false,
       },
       success,
@@ -9873,63 +10150,71 @@
   }
 
   async function startBatchExtract() {
-    const paths = batchArchivePaths.length > 0
-      ? batchArchivePaths
-      : currentArchive
-        ? [currentArchive.source]
-        : [];
-    if (paths.length === 0) {
+    if (batchDraftLocked()) return;
+    const draft = effectiveBatchDraft();
+    if (draft.items.length === 0) {
       showNotice(tr("gui.batch.open_archives_before_start", "Open archives before starting batch extract"));
       return;
     }
+    const invalid = draft.items.findIndex((item) => !item.dest.trim());
+    if (invalid !== -1) {
+      showNotice(tr("gui.batch.destination_required", "Choose a destination for every archive."));
+      document.getElementById(`batch-destination-${invalid}`)?.focus();
+      return;
+    }
     if (focusBlockingTaskIfAny()) return;
+    const spec = batchExtractJob(draft);
+    batchSubmissionPending = true;
     try {
-      await submitJob({
-        kind: "batch_extract",
-        items: paths.map((path) => ({
-          path,
-          dest: currentArchive?.source === path ? defaultExtractDest() : extractDestForPath(path),
-          encoding: currentArchive?.source === path ? archiveEncodingForJob() : null,
-          password: null,
-          best_effort: false,
-        })),
-        overwrite: "ask",
-        symlinks: "preserve",
-        smart: true,
-      });
-      showNotice(tr("gui.batch.extract_job_queued", "{count} archives added as one task").replace("{count}", paths.length.toLocaleString()));
+      await submitJob(spec);
+      showNotice(tr("gui.batch.extract_job_queued", "{count} archives added as one task").replace("{count}", spec.items.length.toLocaleString()));
       recordOperation({
         status: "queued",
         title: tr("gui.batch.extract_queued", "Batch extract queued"),
-        detail: tr("gui.batch.archive_count", "{count} archives").replace("{count}", paths.length.toLocaleString()),
+        detail: tr("gui.batch.archive_count", "Archives: {count}").replace("{count}", spec.items.length.toLocaleString()),
       });
     } catch (error) {
       if (isJobSubmitBlocked(error)) return;
-      showNotice(tr("gui.batch.requires_desktop_service", "Batch extract requires the desktop service"));
+      showNotice(isErrorDto(error) ? tError(error) : tr("gui.batch.requires_desktop_service", "Batch extract requires the desktop service"));
+    } finally {
+      batchSubmissionPending = false;
     }
   }
 
   function batchWorkspaceSurface(variant: ToolsWorkspaceVariant): BatchWorkspaceSurface {
+    const draft = effectiveBatchDraft();
     return {
       kind: "batch",
+      mode: "batch",
       variant,
       title: tr("gui.screen.batch", "Batch Extract Review"),
       tr,
       archiveReturn: toolsArchiveReturnSurface(variant),
-      rows: batchReviewArchives().map((row) => ({
-        name: row.name,
-        format: row.format,
-        entries: row.entries,
-        target: row.target,
-        state: batchArchiveStateLabel(row.state),
-        warning: row.state === "Needs password",
+      onReady: () => { if (batchReviewFocusPending) focusBatchReview(); },
+      locked: batchDraftLocked(),
+      submitting: batchSubmissionPending,
+      smart: draft.smart,
+      onSmartChange: (smart) => updateBatchDraft((value) => ({ ...value, smart })),
+      overwrite: draft.overwrite,
+      overwriteChoices: extractOverwriteModes.map((id) => ({ id, label: extractOverwriteLabel(id) })),
+      onOverwriteChange: (overwrite) => updateBatchDraft((value) => ({ ...value, overwrite })),
+      symlinks: draft.symlinks,
+      symlinkChoices: extractSymlinkModes.map((id) => ({ id, label: extractSymlinkLabel(id) })),
+      onSymlinksChange: (symlinks) => updateBatchDraft((value) => ({ ...value, symlinks })),
+      rows: draft.items.map((item, index) => ({
+        id: `${index}:${item.path}`, path: item.displayPath, name: pathBaseName(item.displayPath),
+        format: archiveFormatFromPath(item.displayPath), target: item.dest,
+        encoding: item.encoding ?? tr("gui.extract.encoding.auto", "Auto-detect"),
+        bestEffort: item.best_effort,
+        onBestEffortChange: null,
+        onTargetInput: (dest) => updateBatchDraft((value) => ({ ...value,
+          items: value.items.map((row, i) => i === index ? { ...row, dest } : row) })),
+        onChooseTarget: () => void chooseBatchPaths(index),
+        onRemove: () => removeBatchItem(index),
       })),
-      warningLabel: batchWarningLabel(),
-      emptyLabel: openArchiveFirstLabel(),
       actions: {
         onStart: () => void startBatchExtract(),
-        onBack: () => setScreen("extract"),
-        onResolvePassword: () => setScreen("password"),
+        onAdd: () => void chooseBatchPaths(),
       },
     };
   }
@@ -9946,10 +10231,20 @@
   }
 
   function checksumWorkspaceSurface(variant: ToolsWorkspaceVariant): ChecksumWorkspaceSurface {
+    const calculation = selectedChecksumTask("checksum");
+    const verification = selectedChecksumTask("checksum_check");
+    const reportContext = (task: Task | null) => {
+      if (task?.spec.kind !== "checksum" && task?.spec.kind !== "checksum_check") return null;
+      return {
+        sources: task.spec.kind === "checksum" ? task.spec.inputs : [task.spec.manifest],
+        algorithm: checksumAlgorithmLabel(task.spec.algorithm),
+      };
+    };
+    const reportState = (task: Task | null) => task ? taskOutcomeStateLabel(task) : taskStateLabel(null);
     const checksumRows = checksumItems("checksum").slice(0, 20).map((item) => {
       const path = checksumItemText(item, "path");
       return {
-        name: pathBaseName(path) || path,
+        name: path,
         size: formatBytes(checksumItemNumber(item, "size")),
         digest: checksumItemText(item, "digest"),
         status: checksumItemStatus(item),
@@ -9958,7 +10253,7 @@
     const verificationRows = checksumItems("checksum_check").slice(0, 20).map((item) => {
       const path = checksumItemText(item, "path");
       return {
-        name: pathBaseName(path) || path,
+        name: path,
         expected: checksumItemText(item, "expected"),
         actual: checksumItemText(item, "actual") || checksumItemText(item, "error"),
         status: checksumItemStatus(item),
@@ -10001,15 +10296,30 @@
       },
       manifestLabel: checksumManifestLabel(),
       result: {
+        kind: "checksum",
+        context: reportContext(calculation),
+        totalRows: checksumItems("checksum").length,
+        summary: [
+          { label: tr("gui.checksum.hashed_files", "Files hashed"), value: checksumResultNumber("checksum", "files_hashed").toLocaleString() },
+          { label: tr("gui.checksum.hashed_bytes", "Bytes hashed"), value: formatBytes(checksumResultNumber("checksum", "bytes_hashed")) },
+        ],
         rows: checksumRows,
-        state: taskStateLabel(latestChecksumTask("checksum")?.state),
+        state: reportState(calculation),
         feedback: checksumCopyFeedbackFor("checksum"),
         feedbackDanger: checksumCopyFeedbackToneFor("checksum") === "danger",
         onCopy: () => void copyChecksumResults("checksum"),
       },
       verification: {
+        kind: "checksum_check",
+        context: reportContext(verification),
+        totalRows: checksumItems("checksum_check").length,
+        summary: [
+          { label: tr("gui.checksum.passed", "Passed"), value: checksumResultNumber("checksum_check", "passed").toLocaleString() },
+          { label: tr("gui.checksum.failed", "Failed"), value: checksumResultNumber("checksum_check", "failed").toLocaleString() },
+          { label: tr("gui.checksum.checked", "Checked"), value: checksumResultNumber("checksum_check", "checked").toLocaleString() },
+        ],
         rows: verificationRows,
-        state: taskStateLabel(latestChecksumTask("checksum_check")?.state),
+        state: reportState(verification),
         feedback: checksumCopyFeedbackFor("checksum_check"),
         feedbackDanger: checksumCopyFeedbackToneFor("checksum_check") === "danger",
         onCopy: () => void copyChecksumResults("checksum_check"),
@@ -10035,7 +10345,7 @@
   }
 
   function duplicatesWorkspaceSurface(variant: ToolsWorkspaceVariant): DuplicatesWorkspaceSurface {
-    const duplicateGroups = duplicateResultNumber("duplicate_groups");
+    const task = selectedDuplicateScanTask();
 
     return {
       kind: "duplicates",
@@ -10060,18 +10370,33 @@
           .replace("{count}", String(duplicateExcludeRules().length)),
         onInput: (value) => (duplicateExcludeText = value),
       },
-      metrics: {
-        filesScanned: duplicateResultNumber("files_scanned").toLocaleString(),
-        bytesScanned: formatBytes(duplicateResultNumber("bytes_scanned")),
-        candidateFiles: duplicateResultNumber("candidate_files").toLocaleString(),
-        hashedBytes: formatBytes(duplicateResultNumber("hashed_bytes")),
-        duplicateFiles: duplicateResultNumber("duplicate_files").toLocaleString(),
-        duplicateGroups: duplicateGroups.toLocaleString(),
-        reclaimable: formatBytes(duplicateResultNumber("reclaimable_bytes")),
-        taskState: taskStateLabel(latestDuplicateScanTask()?.state),
-        reviewState: duplicateGroups > 0
-          ? tr("gui.duplicates.review_only", "Review only")
-          : tr("gui.duplicates.clean", "Clean"),
+      report: {
+        taskId: task?.id ?? null,
+        state: task ? taskOutcomeStateLabel(task) : taskStateLabel(null),
+        context: task?.spec.kind === "duplicate_scan" ? {
+          sources: task.spec.inputs,
+          minimumSize: formatBytes(task.spec.min_size),
+          excludes: task.spec.excludes,
+        } : null,
+        summary: [
+          { label: tr("gui.duplicates.files_scanned", "Files scanned"), value: duplicateResultLabel("files_scanned") },
+          { label: tr("gui.duplicates.bytes_scanned", "Bytes scanned"), value: duplicateResultLabel("bytes_scanned", true) },
+          { label: tr("gui.duplicates.candidates_hashed", "Candidates hashed"), value: duplicateResultLabel("candidate_files") },
+          { label: tr("gui.duplicates.hashed_bytes", "Bytes hashed"), value: duplicateResultLabel("hashed_bytes", true) },
+          { label: tr("gui.duplicates.groups", "Groups"), value: duplicateResultLabel("duplicate_groups") },
+          { label: tr("gui.duplicates.files", "Files"), value: duplicateResultLabel("duplicate_files") },
+          { label: tr("gui.duplicates.reclaimable", "Reclaimable"), value: duplicateResultLabel("reclaimable_bytes", true) },
+        ],
+        groups: taskDuplicateGroups(task),
+        emptyMessage: !task
+          ? tr("gui.duplicates.report_empty", "Choose a folder and start a scan to find duplicate files.")
+          : task.state === "done" && task.result?.duplicate_groups === 0
+            && Array.isArray(task.result.groups) && task.result.groups.length === 0
+            ? tr("gui.duplicates.report_clean", "No duplicate files were found within this scan's size and exclude rules.")
+            : task.state === "queued" || task.state === "running" || task.state === "paused"
+              ? tr("gui.duplicates.report_pending", "The report will appear when this scan finishes. Follow its progress in the task center.")
+              : tr("gui.duplicates.report_unavailable", "No complete report is available for this scan. Open its task details to review the outcome, or run a new scan."),
+        onMount: registerDuplicateReportPanel,
       },
       actions: {
         onChooseFolder: () => void chooseDuplicateScanFolder(),
@@ -10109,7 +10434,10 @@
     return checksumManifestPath.trim() || tr("gui.checksum.choose_manifest_prompt", "Choose a checksum manifest");
   }
 
-  function latestChecksumTask(kind: "checksum" | "checksum_check"): Task | null {
+  function selectedChecksumTask(kind: "checksum" | "checksum_check"): Task | null {
+    const selectedId = checksumReportTaskIds[kind];
+    const selected = jobRows.find((task) => task.id === selectedId && task.spec.kind === kind);
+    if (selected) return selected;
     for (let index = jobRows.length - 1; index >= 0; index -= 1) {
       const task = jobRows[index];
       if (task.spec.kind === kind) return task;
@@ -10118,12 +10446,12 @@
   }
 
   function checksumResultNumber(kind: "checksum" | "checksum_check", key: string): number {
-    const value = latestChecksumTask(kind)?.result?.[key];
+    const value = selectedChecksumTask(kind)?.result?.[key];
     return typeof value === "number" && Number.isFinite(value) ? value : 0;
   }
 
   function checksumItems(kind: "checksum" | "checksum_check"): Record<string, unknown>[] {
-    const items = latestChecksumTask(kind)?.result?.items;
+    const items = selectedChecksumTask(kind)?.result?.items;
     if (!Array.isArray(items)) return [];
     return items.filter((item): item is Record<string, unknown> => item !== null && typeof item === "object" && !Array.isArray(item));
   }
@@ -10164,7 +10492,7 @@
   }
 
   async function copyChecksumResults(kind: "checksum" | "checksum_check") {
-    await copyChecksumText(checksumResultText(kind), kind);
+    await copyChecksumText(checksumResultText(kind), kind, selectedChecksumTask(kind)?.id ?? null);
   }
 
   async function copyTaskChecksumResults(task: TaskDialogModel) {
@@ -10275,12 +10603,13 @@
     }
     if (focusBlockingTaskIfAny()) return;
     try {
-      await submitJob({
+      const id = await submitJob({
         kind: "checksum",
         inputs: [target],
         excludes: checksumExcludeRules(),
         algorithm: checksumAlgorithm,
       });
+      checksumReportTaskIds.checksum = id;
       showNotice(tr("gui.checksum.queued", "Checksum added to queue"));
       recordOperation({
         status: "queued",
@@ -10301,11 +10630,12 @@
     }
     if (focusBlockingTaskIfAny()) return;
     try {
-      await submitJob({
+      const id = await submitJob({
         kind: "checksum_check",
         manifest,
         algorithm: checksumAlgorithm,
       });
+      checksumReportTaskIds.checksum_check = id;
       showNotice(tr("gui.checksum.verification_queued", "Checksum verification added to queue"));
       recordOperation({
         status: "queued",
@@ -10333,7 +10663,9 @@
     return target ? pathBaseName(target) || target : tr("gui.duplicates.no_folder_selected", "No folder selected");
   }
 
-  function latestDuplicateScanTask(): Task | null {
+  function selectedDuplicateScanTask(): Task | null {
+    const selected = jobRows.find((task) => task.id === duplicateReportTaskId && task.spec.kind === "duplicate_scan");
+    if (selected) return selected;
     for (let index = jobRows.length - 1; index >= 0; index -= 1) {
       const task = jobRows[index];
       if (task.spec.kind === "duplicate_scan") return task;
@@ -10341,9 +10673,14 @@
     return null;
   }
 
-  function duplicateResultNumber(key: string): number {
-    const value = latestDuplicateScanTask()?.result?.[key];
-    return typeof value === "number" && Number.isFinite(value) ? value : 0;
+  function duplicateResultNumber(key: string): number | null {
+    const value = selectedDuplicateScanTask()?.result?.[key];
+    return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
+  }
+
+  function duplicateResultLabel(key: string, bytes = false): string {
+    const value = duplicateResultNumber(key);
+    return value === null ? "—" : bytes ? formatBytes(value) : value.toLocaleString();
   }
 
   function duplicateExcludeRules(): string[] {
@@ -10415,12 +10752,13 @@
     }
     if (focusBlockingTaskIfAny()) return;
     try {
-      await submitJob({
+      const id = await submitJob({
         kind: "duplicate_scan",
         inputs: [target],
         excludes: duplicateExcludeRules(),
         min_size: Math.max(0, Math.floor(duplicateMinSize)),
       });
+      duplicateReportTaskId = id;
       showNotice(tr("gui.duplicates.queued", "Duplicate scan added to queue"));
       recordOperation({
         status: "queued",
@@ -10810,6 +11148,7 @@
   }
 
   async function submitAddToArchiveJob() {
+    if (archiveAddPending) return;
     if (!currentArchive) {
       showNotice(tr("gui.precondition.open_before_add", "Open an archive before adding files"));
       return;
@@ -10820,42 +11159,69 @@
       return;
     }
     if (focusBlockingTaskIfAny()) return;
+    const { id, source: path, encoding_override: encoding } = currentArchive;
+    const generation = archiveOpenGeneration;
+    const content_policy = createContentPolicy;
+    const excludes = content_policy === "custom" ? [...createExcludeRules()] : [];
+    const level = createCompressionLevel();
+    const profile = createProfileLabel(activeCreateProfile);
+    const canAddToOriginalArchive = () => {
+      if (generation !== archiveOpenGeneration || archiveOpenStatus === "opening"
+        || currentArchive?.id !== id || currentArchive.source !== path
+        || currentArchive.encoding_override !== encoding) {
+        showNotice(tr("gui.add.archive_changed", "The archive changed while choosing files. No files were added. Open the intended archive and choose the files again."));
+        return false;
+      }
+      const reason = archiveMutationDisabledReason();
+      if (reason) showNotice(reason);
+      return !reason;
+    };
+    archiveAddPending = true;
     try {
-      const { open } = await getDialogModule();
-      const selected = await openNativeDialog("archive.add-files", open, {
-        title: tr("gui.add.choose_files_to_add", "Choose files to add"),
-        multiple: true,
-        directory: false,
-      });
+      let selected: string | string[] | null;
+      try {
+        const { open } = await getDialogModule();
+        if (!canAddToOriginalArchive()) return;
+        selected = await openNativeDialog("archive.add-files", open, {
+          title: tr("gui.add.choose_files_to_add", "Choose files to add"),
+          multiple: true,
+          directory: false,
+        });
+      } catch {
+        showNotice(tr("gui.add.picker_failed", "Could not open the file chooser. Try adding files again."));
+        return;
+      }
+      if (!canAddToOriginalArchive()) return;
       const add = Array.isArray(selected) ? selected : selected ? [selected] : [];
       if (add.length === 0) {
         showNotice(tr("gui.add.cancelled", "Add files cancelled"));
         return;
       }
-      await submitJob({
+      const queued = await submitCurrentArchiveJob({
         kind: "update",
-        path: currentArchive.source,
-        encoding: currentArchive.encoding_override,
+        path,
+        encoding,
         add,
         delete: [],
         rename: [],
         mkdir: [],
-        excludes: createContentPolicy === "custom" ? createExcludeRules() : [],
-        content_policy: createContentPolicy,
+        excludes,
+        content_policy,
         password: null,
-        level: createCompressionLevel(),
-      });
-      showNotice(tr("gui.add.operations_queued", "{count} add operations queued").replace("{count}", add.length.toLocaleString()));
+        level,
+      },
+      tr("gui.add.operations_queued", "{count} add operations queued").replace("{count}", add.length.toLocaleString()),
+      tr("gui.precondition.open_before_add", "Open an archive before adding files"));
+      if (!queued) return;
       recordOperation({
         status: "queued",
         title: tr("gui.add.queued", "Add files queued"),
         detail: tr("gui.add.items_profile", "{count} items · {profile}")
           .replace("{count}", add.length.toLocaleString())
-          .replace("{profile}", createProfileLabel(activeCreateProfile)),
+          .replace("{profile}", profile),
       });
-    } catch (error) {
-      if (isJobSubmitBlocked(error)) return;
-      showNotice(tr("gui.add.requires_desktop_dialog", "Add files requires the desktop file dialog"));
+    } finally {
+      archiveAddPending = false;
     }
   }
 
@@ -10913,6 +11279,14 @@
       return;
     }
     archiveEditReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    archiveEditSession += 1;
+    archiveEditError = null;
+    archiveEditChecking = false;
+    archiveEditContext = {
+      source: currentArchive.source, encoding: currentArchive.encoding_override,
+      generation: archiveOpenGeneration, id: currentArchive.id,
+      directory: archiveDirs.join("/"), paths: new Set(selectedPaths()),
+    };
     setScreen("browse");
     moveConflictReview = null;
     if (kind === "rename") renameTargetName = pathBaseName(selectedRenameSource()?.replace(/\/+$/g, "") ?? "");
@@ -10922,44 +11296,174 @@
 
   function closeArchiveEditor() {
     archiveEditKind = null;
+    archiveEditContext = null;
+    archiveEditSession += 1;
+    archiveEditChecking = false;
+    archiveEditError = null;
     const target = archiveEditReturnFocus;
     archiveEditReturnFocus = null;
     void tick().then(() => {
-      if (!blockingModalVisible() && target?.isConnected && !target.closest("[inert]")) target.focus({ preventScroll: true });
+      if (blockingModalVisible() || (document.activeElement !== document.body && document.activeElement !== target)) return;
+      const focus = target?.isConnected && !target.matches(":disabled") && !target.closest("[inert]")
+        ? target : archiveSearchInput;
+      if (focus?.isConnected && !focus.closest("[inert]")) focus.focus({ preventScroll: true });
     });
   }
 
   function archiveEditorFields(kind: ArchiveEditKind) {
+    const blocked = archiveEditorBlockedReason();
+    const feedback = {
+      cancelWhileSubmitting: archiveEditChecking,
+      error: archiveEditError || (archiveRefreshStatus() === "idle" ? blocked : null),
+      disabled: Boolean(blocked),
+      recovery: archiveEditContext && currentArchive?.source === archiveEditContext.source
+        && archiveRefreshStatus() !== "idle" ? archiveBrowseRecoveryState() : null,
+      retryLabel: tr("gui.error.retry", "Retry"),
+      onRetry: retryArchiveContents,
+      submittingLabel: archiveEditChecking
+        ? kind === "move" ? tr("gui.move.checking_targets", "Checking move targets…")
+          : tr("gui.edit.checking_targets", "Checking archive paths…")
+        : tr("gui.task_center.submitting", "Adding to the queue…"),
+    };
     if (kind === "rename") return {
+      ...feedback,
       title: tr("gui.action.rename_selected", "Rename selected"),
       label: tr("gui.rename.target_name", "Rename target name"),
       value: renameTargetName,
       status: renameTargetStatus(),
-      onChange: (value: string) => { renameTargetName = value; },
+      onChange: (value: string) => { renameTargetName = value; archiveEditError = null; },
       onSubmit: submitRenameSelectedJob,
     };
     if (kind === "move") return {
+      ...feedback,
       title: tr("gui.action.move_selected", "Move selected"),
       label: tr("gui.move.target_folder", "Move target folder"),
       value: moveTargetDir,
       status: moveTargetStatus(),
       hint: tr("gui.move.path_hint", "Destination paths start at the archive root. Use / to move to the root."),
-      onChange: (value: string) => { moveTargetDir = value; },
+      onChange: (value: string) => { moveTargetDir = value; archiveEditError = null; },
       onSubmit: submitMoveSelectedJob,
     };
     return {
+      ...feedback,
       title: tr("gui.action.new_folder", "New folder"),
       label: tr("gui.new_folder.name", "New folder name"),
       value: newFolderName,
       placeholder: tr("gui.new_folder.default_name", "New Folder"),
       status: newFolderStatus(),
       hint: tr("gui.new_folder.path_hint", "Created in the current folder. Start with / to use the archive root."),
-      onChange: (value: string) => { newFolderName = value; },
+      onChange: (value: string) => { newFolderName = value; archiveEditError = null; },
       onSubmit: submitNewFolderJob,
     };
   }
 
+  function archiveEditSubmissionFailure(): ((message: string) => void) | undefined {
+    if (archiveEditKind === null) return undefined;
+    const session = archiveEditSession;
+    archiveEditError = null;
+    return (message) => {
+      if (archiveEditKind !== null && archiveEditSession === session) archiveEditError = message;
+    };
+  }
+
+  function showArchiveEditError(message: string) {
+    if (archiveEditKind !== null) archiveEditError = message;
+    else showNotice(message);
+  }
+
+  function archiveEditSelectedPaths(): Set<string> {
+    return archiveEditKind && archiveEditContext ? archiveEditContext.paths : selectedPaths();
+  }
+
+  function archiveEditorBlockedReason(): string {
+    const context = archiveEditContext;
+    if (!context) return "";
+    if (!currentArchive || archiveOpenStatus !== "idle" || currentArchive.source !== context.source
+      || currentArchive.encoding_override !== context.encoding || archiveOpenGeneration !== context.generation) {
+      return tr("gui.edit.archive_changed", "The archive changed. Your text is kept. Cancel and reopen the editor for the intended archive.");
+    }
+    return archiveMutationDisabledReason();
+  }
+
+  async function validateArchiveEditContext(): Promise<boolean> {
+    const context = archiveEditContext;
+    if (!context) return true;
+    const blocked = archiveEditorBlockedReason();
+    if (blocked) { archiveEditError = blocked; return false; }
+    const archive = currentArchive;
+    if (!archive) return false;
+    if (archive.id === context.id) return true;
+    const session = archiveEditSession;
+    const paths = archiveEditKind === "new-folder"
+      ? newFolderName.trim().replaceAll("\\", "/").startsWith("/") || !context.directory ? [] : [`${context.directory}/`]
+      : archiveSelectionRoots(context.paths);
+    archiveEditChecking = true;
+    archiveEditError = null;
+    try {
+      const missing = paths.length ? await ipc.missingArchivePaths(archive.id, paths) : [];
+      if (archiveEditSession !== session || archiveEditContext !== context) return false;
+      if (currentArchive?.id !== archive.id || archiveEditorBlockedReason()) {
+        archiveEditError = tr("gui.edit.check_changed", "The archive changed while checking. Your text is kept. Try again.");
+        return false;
+      }
+      if (missing.length) {
+        archiveEditError = tr("gui.edit.items_missing", "These original items no longer exist: {paths}. Your text is kept. Cancel and select the intended items again.")
+          .replace("{paths}", missing.join(", "));
+        return false;
+      }
+      return true;
+    } catch (error) {
+      if (archiveEditSession === session) archiveEditError = tr("gui.edit.check_failed", "Could not check the original items. Your text is kept. Try again.")
+        + (isErrorDto(error) ? ` ${tError(error)}` : "");
+      return false;
+    } finally {
+      if (archiveEditSession === session) archiveEditChecking = false;
+    }
+  }
+
+  function archiveEditCheckIsCurrent(session: number, id: number | undefined): boolean {
+    if (session !== archiveEditSession) return false;
+    const blocked = archiveEditorBlockedReason();
+    if (currentArchive?.id === id && !blocked) return true;
+    archiveEditError = blocked || tr("gui.edit.check_changed", "The archive changed while checking. Your text is kept. Try again.");
+    return false;
+  }
+
+  async function validateArchiveEditTarget(target: string, currentTarget: () => string): Promise<boolean> {
+    const session = archiveEditSession;
+    const id = currentArchive?.id;
+    if (id === undefined) return false;
+    archiveEditChecking = true;
+    archiveEditError = null;
+    try {
+      const inspection = await ipc.inspectArchiveTarget(id, target);
+      if (!archiveEditCheckIsCurrent(session, id) || currentTarget() !== target) return false;
+      if (inspection.blocked_parent) {
+        archiveEditError = tr("gui.edit.parent_is_file", "{path} is a file and cannot be used as a parent folder. Choose a different path.")
+          .replace("{path}", inspection.blocked_parent);
+        return false;
+      }
+      if (inspection.exists) {
+        archiveEditError = tr("gui.edit.target_exists", "{path} already exists. Choose a different name or path.").replace("{path}", target);
+        return false;
+      }
+      return true;
+    } catch (error) {
+      if (archiveEditCheckIsCurrent(session, id) && currentTarget() === target) {
+        archiveEditError = tr("gui.edit.target_check_failed", "Could not check the destination. Your text is kept. Try again.")
+          + (isErrorDto(error) ? ` ${tError(error)}` : "");
+      }
+      return false;
+    } finally {
+      if (archiveEditSession === session) archiveEditChecking = false;
+    }
+  }
+
   async function submitRenameSelectedJob() {
+    if (archiveEditChecking) return;
+    const session = archiveEditSession;
+    const id = currentArchive?.id;
+    if (!await validateArchiveEditContext() || !archiveEditCheckIsCurrent(session, id)) return;
     if (blockSelectionScopedAction()) return;
     if (!currentArchive) {
       showNotice(tr("gui.precondition.open_before_rename", "Open an archive before renaming entries"));
@@ -10976,20 +11480,17 @@
       return;
     }
     const to = normalizeRenameTargetName(renameTargetName, from);
-    renameTargetName = to;
     if (to === from) {
-      showNotice(tr("gui.rename.target_must_differ", "Rename target must differ from source"));
-      return;
-    }
-    if (archivePathSet().has(to)) {
-      showNotice(tr("gui.rename.target_already_exists", "Rename target already exists: {target}").replace("{target}", to));
+      showArchiveEditError(tr("gui.rename.target_must_differ", "The name is unchanged. Enter a different name or path."));
       return;
     }
     const issue = renameTargetIssue(from, to);
     if (issue.blocking) {
-      showNotice(tr("gui.rename.target_blocked", "Rename target blocked: {reason}").replace("{reason}", issue.blocking));
+      showArchiveEditError(issue.blocking);
       return;
     }
+    if (!await validateArchiveEditTarget(to, () => normalizeRenameTargetName(renameTargetName, from))
+      || !archiveEditCheckIsCurrent(session, id)) return;
     const queued = await submitCurrentArchiveJob(
       {
         kind: "update",
@@ -11006,6 +11507,7 @@
       },
       tr("gui.rename.queued_notice", "Rename queued: {from} -> {to}").replace("{from}", from).replace("{to}", to),
       tr("gui.precondition.open_before_rename", "Open an archive before renaming entries"),
+      archiveEditSubmissionFailure(),
     );
     if (queued) {
       closeArchiveEditor();
@@ -11018,9 +11520,12 @@
   }
 
   async function submitMoveSelectedJob() {
+    if (archiveEditChecking) return;
+    const session = archiveEditSession;
+    const id = currentArchive?.id;
+    if (!await validateArchiveEditContext() || !archiveEditCheckIsCurrent(session, id)) return;
     if (blockSelectionScopedAction()) return;
     const targetDir = normalizeMoveTargetDir();
-    moveTargetDir = targetDir || "/";
     if (!currentArchive) {
       showNotice(tr("gui.precondition.open_before_move", "Open an archive before moving entries"));
       return;
@@ -11030,29 +11535,67 @@
       showNotice(readOnly);
       return;
     }
-    const selected = [...selectedPaths()];
+    const selected = [...archiveEditSelectedPaths()];
     if (selected.length === 0) {
       showNotice(tr("gui.precondition.select_entries_before_move", "Select entries before moving"));
       return;
     }
     const problem = moveTargetProblem(targetDir);
     if (problem) {
-      showNotice(problem);
+      showArchiveEditError(problem);
       return;
     }
-    const plan = buildMovePlan(targetDir);
-    const conflicts = plan.filter((item) => item.conflict);
-    if (conflicts.length > 0) {
-      moveConflictReview = { targetDir, items: plan };
-      closeArchiveEditor();
-      showNotice(tr("gui.move.review_conflicts", "Review {count} move target conflicts").replace("{count}", conflicts.length.toLocaleString()));
-      return;
+    archiveEditChecking = true;
+    archiveEditError = null;
+    try {
+      const checked = await ipc.planArchiveMove(currentArchive.id, archiveSelectionRoots(archiveEditSelectedPaths()), targetDir);
+      if (!archiveEditCheckIsCurrent(session, id)) return;
+      if (normalizeMoveTargetDir() !== targetDir) return;
+      if (checked.missing_sources.length) {
+        archiveEditError = tr("gui.edit.items_missing", "These original items no longer exist: {paths}. Your text is kept. Cancel and select the intended items again.")
+          .replace("{paths}", checked.missing_sources.join(", "));
+        return;
+      }
+      if (checked.blocked_parent) {
+        archiveEditError = tr("gui.edit.parent_is_file", "{path} is a file and cannot be used as a parent folder. Choose a different path.")
+          .replace("{path}", checked.blocked_parent);
+        return;
+      }
+      const plan: MovePlanItem[] = checked.items.map((item) => ({
+        from: item.from, to: item.to, conflict: item.conflict !== null,
+        reason: item.conflict === "existing_target"
+          ? tr("gui.move.target_already_exists", "Target already exists")
+          : item.conflict === "duplicate_target"
+            ? tr("gui.move.duplicate_target_name", "Multiple selected entries share this target name") : null,
+        keepBothTo: item.keep_both_to,
+      }));
+      const conflicts = plan.filter((item) => item.conflict);
+      if (conflicts.length > 0) {
+        moveConflictReview = { archiveId: currentArchive.id, generation: archiveOpenGeneration, targetDir, items: plan };
+        closeArchiveEditor();
+        showNotice(tr("gui.move.review_conflicts", "Review {count} move target conflicts").replace("{count}", conflicts.length.toLocaleString()));
+        return;
+      }
+      archiveEditChecking = false;
+      await submitMovePlan(plan.map(({ from, to }) => ({ from, to })), targetDir);
+    } catch (error) {
+      if (!archiveEditCheckIsCurrent(session, id)) return;
+      if (normalizeMoveTargetDir() !== targetDir) return;
+      archiveEditError = tr("gui.move.check_failed", "Could not check move targets. Your destination is kept. Try again.")
+        + (isErrorDto(error) ? ` ${tError(error)}` : "");
+    } finally {
+      if (archiveEditSession === session) archiveEditChecking = false;
     }
-    await submitMovePlan(plan.map(({ from, to }) => ({ from, to })), targetDir);
   }
 
   async function submitMovePlan(rename: Array<{ from: string; to: string }>, targetDir: string) {
     if (blockSelectionScopedAction()) return;
+    if (moveConflictReview && (currentArchive?.id !== moveConflictReview.archiveId
+      || archiveOpenGeneration !== moveConflictReview.generation || archiveOpenStatus !== "idle")) {
+      moveConflictReview = null;
+      showNotice(tr("gui.move.review_changed", "The archive changed. Select the items and check the move targets again."));
+      return;
+    }
     if (!currentArchive) {
       showNotice(tr("gui.precondition.open_before_move", "Open an archive before moving entries"));
       return;
@@ -11084,6 +11627,7 @@
         ? tr("gui.move.operation_queued", "1 move operation queued")
         : tr("gui.move.operations_queued", "{count} move operations queued").replace("{count}", rename.length.toLocaleString())),
       tr("gui.precondition.open_before_move", "Open an archive before moving entries"),
+      archiveEditSubmissionFailure(),
     );
     if (queued) {
       moveConflictReview = null;
@@ -11118,8 +11662,11 @@
   }
 
   async function submitNewFolderJob() {
+    if (archiveEditChecking) return;
+    const session = archiveEditSession;
+    const id = currentArchive?.id;
+    if (!await validateArchiveEditContext() || !archiveEditCheckIsCurrent(session, id)) return;
     const folder = normalizeNewFolderPath();
-    commitNewFolderName();
     if (!currentArchive) {
       showNotice(tr("gui.precondition.open_before_new_folder", "Open an archive before creating a folder"));
       return;
@@ -11129,16 +11676,14 @@
       showNotice(readOnly);
       return;
     }
-    const existing = archivePathSet();
     const problem = archiveEditPathProblem(folder);
     if (problem) {
-      showNotice(problem);
+      showArchiveEditError(problem);
       return;
     }
-    if (existing.has(folder) || existing.has(folder.slice(0, -1))) {
-      showNotice(tr("gui.new_folder.already_exists", "Already exists: {folder}").replace("{folder}", folder));
-      return;
-    }
+    commitNewFolderName();
+    if (!await validateArchiveEditTarget(folder, () => normalizeNewFolderPath())
+      || !archiveEditCheckIsCurrent(session, id)) return;
     const queued = await submitCurrentArchiveJob(
       {
         kind: "update",
@@ -11155,6 +11700,7 @@
       },
       tr("gui.new_folder.queued_notice", "New folder queued: {folder}").replace("{folder}", folder),
       tr("gui.precondition.open_before_new_folder", "Open an archive before creating a folder"),
+      archiveEditSubmissionFailure(),
     );
     if (queued) {
       closeArchiveEditor();
@@ -11330,31 +11876,36 @@
     try {
       await waitForPreviewFeedbackFrame();
       if (requestGeneration !== previewRequestGeneration) return;
-      const preparedPreview = await ipc.previewNestedArchive(
-        archiveSource,
+      const preparedPreview = await runPreviewWithPassword(
+        requestGeneration,
+        archiveDisplayPath,
         entryPath,
-        null,
-        archiveEncodingForJob(),
+        async (passwords, requestId) => nestedPasswordPreviewSample(params, archiveSource, entryPath, passwords)
+          ?? ipc.previewNestedArchive(archiveSource, entryPath, passwords, archiveEncodingForJob(), requestId),
       );
-      if (requestGeneration !== previewRequestGeneration) return;
+      if (!preparedPreview) return;
+      if (requestGeneration !== previewRequestGeneration) {
+        void ipc.closeArchive(preparedPreview.archive.id).catch(() => undefined);
+        return;
+      }
       nestedPreview = preparedPreview;
       entryPreview = null;
       entryPreviewFailure = null;
       recordValidationEvent("frontend.entry.nested_preview_loaded", {
         entry_path: entryPath,
-        entry_count: nestedPreview.entry_count,
-        format: nestedPreview.format,
+        entry_count: nestedPreview.archive.entry_count,
+        format: nestedPreview.archive.format,
       });
       showNotice(
         tr("gui.preview.nested_loaded", "Nested preview loaded · {count} entries").replace(
           "{count}",
-          nestedPreview.entry_count.toLocaleString(),
+          nestedPreview.archive.entry_count.toLocaleString(),
         ),
       );
       recordOperation({
         status: "info",
         title: tr("gui.preview.nested_operation_title", "Nested archive previewed"),
-        detail: `${pathBaseName(entryPath)} · ${nestedPreview.format.toUpperCase()}`,
+        detail: `${pathBaseName(entryPath)} · ${nestedPreview.archive.format.toUpperCase()}`,
       });
     } catch (error) {
       if (requestGeneration !== previewRequestGeneration) return;
@@ -11546,32 +12097,51 @@
     outerPath: string,
     entryPath: string,
     virtualIndex: number | null = previewOriginVirtualIndex,
+    intent: "open" | "extract" = "open",
   ) {
+    if (intent === "extract" && (preventCreateSubmissionNavigation("extract")
+      || preventConvertSubmissionNavigation("extract") || focusBlockingTaskIfAny())) return;
+    const initialScreen = screen;
+    const initialScreenGeneration = taskReviewRequestGeneration;
+    const prepared = nestedPreview?.outer_path === outerPath && nestedPreview.entry_path === entryPath
+      ? nestedPreview.archive : null;
+    if (prepared) nestedPreview = null;
     clearEntryPreviewState();
     previewOriginEntryPath = entryPath;
     previewOriginVirtualIndex = virtualIndex;
     const requestGeneration = ++previewRequestGeneration;
+    const isCurrent = () => requestGeneration === previewRequestGeneration
+      && (intent !== "extract" || (screen === initialScreen
+        && (!prepared || initialScreenGeneration === taskReviewRequestGeneration)));
     const encoding = currentArchive?.source === outerPath ? archiveEncodingForJob() : null;
     previewPhase = "nested";
     previewTargetName = pathBaseName(entryPath);
     try {
       await waitForPreviewFeedbackFrame();
-      if (requestGeneration !== previewRequestGeneration) return;
-      const info = await ipc.openNestedArchive(
-        outerPath,
+      if (!isCurrent()) {
+        if (prepared) void ipc.closeArchive(prepared.id).catch(() => undefined);
+        return;
+      }
+      const info = prepared ?? await runPreviewWithPassword(
+        requestGeneration,
+        currentArchive?.path ?? outerPath,
         entryPath,
-        null,
-        encoding,
+        (passwords, requestId) => ipc.openNestedArchive(outerPath, entryPath, passwords, encoding, requestId),
       );
-      if (requestGeneration !== previewRequestGeneration) {
+      if (!info) return;
+      if (!isCurrent()) {
         void ipc.closeArchive(info.id).catch(() => undefined);
         return;
       }
-      if (!await adoptOpenedArchive(info)) return;
+      if (!await adoptOpenedArchive(info, isCurrent)) return;
       recoverySourceMode = "current";
       recoverySourceOverride = null;
       recoveryPar2Override = null;
       clearEntryPreviewState();
+      if (intent === "extract") {
+        openExtractWorkspace("all");
+        focusExtractReview();
+      }
       showNotice(tr("gui.preview.opened_nested_archive", "Opened nested archive · {name}").replace("{name}", info.name));
       recordOperation({
         status: "done",
@@ -11579,7 +12149,7 @@
         detail: `${pathBaseName(entryPath)} -> ${info.name}`,
       });
     } catch (error) {
-      if (requestGeneration !== previewRequestGeneration) return;
+      if (!isCurrent()) return;
       const failurePolicy = previewPolicyFor(entryPath, entryTypeForPath(entryPath));
       const outerDisplayPath = currentArchive?.source === outerPath
         ? currentArchive.path
@@ -11598,7 +12168,7 @@
         outerSource: outerPath,
         outerDisplayPath,
         message,
-        retryAction: "open",
+        retryAction: intent,
       };
       showNotice(message);
     } finally {
@@ -11618,38 +12188,138 @@
     await openNestedArchiveEntry(preview.outer_path, preview.entry_path);
   }
 
-  async function submitNestedExtract(
+  function nestedExtractDraftLocked(): boolean {
+    return nestedExtractSubmissionPending || nestedExtractPickerBusy;
+  }
+
+  function updateNestedExtractDraft(update: (draft: NestedExtractDraft) => NestedExtractDraft): void {
+    if (!nestedExtractDraft || nestedExtractDraftLocked()) return;
+    nestedExtractDraft = update(nestedExtractDraft);
+    nestedExtractDraftGeneration += 1;
+  }
+
+  function restoreNestedExtractDraft(draft: NestedExtractDraft): boolean {
+    if (nestedExtractDraftLocked()) {
+      showNotice(tr("gui.nested_extract.wait_for_current", "Finish the current selection or submission before reviewing another inner archive."));
+      return false;
+    }
+    if (preventCreateSubmissionNavigation("nestedExtract") || preventConvertSubmissionNavigation("nestedExtract") || focusBlockingTaskIfAny()) return false;
+    nestedExtractDraft = draft;
+    nestedExtractDraftGeneration += 1;
+    setScreen("nestedExtract");
+    focusNestedExtractReview();
+    return true;
+  }
+
+  function focusNestedExtractReview(): void {
+    nestedExtractReviewFocusPending = true;
+    void tick().then(() => {
+      const heading = document.getElementById("batch-workspace-heading");
+      if (!nestedExtractReviewFocusPending || screen !== "nestedExtract" || blockingModalVisible() || !heading) return;
+      nestedExtractReviewFocusPending = false;
+      heading.focus();
+    });
+  }
+
+  function prepareNestedExtract(
     outerSource: string,
     outerDisplayPath: string,
     entryPath: string,
-  ): Promise<boolean> {
-    if (focusBlockingTaskIfAny()) return false;
+  ): boolean {
+    return restoreNestedExtractDraft(reviewNestedExtract({
+      kind: "extract_nested", outer_path: outerSource, entry_path: entryPath,
+      dest: normalizedDefaultExtractDir(appliedDefaultExtractDir) ?? pathDir(outerDisplayPath),
+      overwrite: "ask", symlinks: "preserve", smart: true,
+      encoding: currentArchive?.source === outerSource ? archiveEncodingForJob() : null,
+      password: null, best_effort: false,
+    }, outerDisplayPath));
+  }
+
+  async function chooseNestedExtractDestination(): Promise<void> {
+    const draft = nestedExtractDraft;
+    if (!draft || screen !== "nestedExtract" || nestedExtractDraftLocked()) return;
+    const generation = nestedExtractDraftGeneration;
+    const request = ++nestedExtractPickerRequest;
+    const isCurrent = () => request === nestedExtractPickerRequest
+      && generation === nestedExtractDraftGeneration && screen === "nestedExtract";
+    nestedExtractPickerBusy = true;
     try {
-      const dest = nestedExtractDest(outerDisplayPath, entryPath);
-      await submitJob({
-        kind: "extract_nested",
-        outer_path: outerSource,
-        entry_path: entryPath,
-        dest,
-        overwrite: "ask",
-        symlinks: "preserve",
-        smart: true,
-        encoding: currentArchive?.source === outerSource ? archiveEncodingForJob() : null,
-        password: null,
-        best_effort: false,
+      const { open } = await getDialogModule();
+      if (!isCurrent()) return;
+      const selected = await openNativeDialog("nested-extract.destination", open, {
+        title: tr("gui.batch.choose_destination", "Choose destination"),
+        multiple: false, directory: true, defaultPath: draft.dest,
       });
-      showNotice(tr("gui.preview.extract_nested_queued", "Nested extract added to queue · {name}").replace("{name}", pathBaseName(entryPath)));
+      if (!isCurrent()) return;
+      const path = Array.isArray(selected) ? selected[0] : selected;
+      if (path) {
+        nestedExtractDraft = { ...draft, dest: path };
+        nestedExtractDraftGeneration += 1;
+      } else {
+        showNotice(tr("gui.nested_extract.selection_cancelled", "Selection cancelled · your extraction settings were kept"));
+      }
+    } catch {
+      if (isCurrent()) {
+        showNotice(tr("gui.batch.destination_picker_unavailable", "Could not open the folder chooser. Try again, or edit the destination in the list."));
+      }
+    } finally {
+      if (request === nestedExtractPickerRequest) nestedExtractPickerBusy = false;
+    }
+  }
+
+  async function startNestedExtract(): Promise<boolean> {
+    const draft = nestedExtractDraft;
+    if (!draft || nestedExtractDraftLocked()) return false;
+    if (!draft.dest.trim()) {
+      showNotice(tr("gui.nested_extract.destination_required", "Choose a destination for this inner archive."));
+      document.getElementById("batch-destination-0")?.focus();
+      return false;
+    }
+    if (focusBlockingTaskIfAny()) return false;
+    nestedExtractSubmissionPending = true;
+    try {
+      await submitJob(nestedExtractJob(draft));
+      showNotice(tr("gui.preview.extract_nested_queued", "Nested extract added to queue · {name}").replace("{name}", pathBaseName(draft.entry_path)));
       recordOperation({
         status: "queued",
         title: tr("gui.preview.nested_extract_queued_operation_title", "Nested archive extract queued"),
-        detail: `${pathBaseName(entryPath)} -> ${pathBaseName(dest)}`,
+        detail: `${pathBaseName(draft.entry_path)} -> ${pathBaseName(draft.dest)}`,
       });
       return true;
     } catch (error) {
       if (isJobSubmitBlocked(error)) return false;
-      showNotice(tr("gui.preview.extract_nested_requires_desktop_service", "Could not extract this inner archive. Check that its format and password are supported."));
+      showNotice(isErrorDto(error) ? tError(error) : tr("gui.nested_extract.submit_failed", "Could not start extraction. Try again; your settings were kept."));
       return false;
+    } finally {
+      nestedExtractSubmissionPending = false;
     }
+  }
+
+  function nestedExtractWorkspaceSurface(variant: ToolsWorkspaceVariant): BatchWorkspaceSurface {
+    const draft = nestedExtractDraft;
+    return {
+      kind: "batch", mode: "nested", variant, title: tr("gui.nested_extract.title", "Extract inner archive"), tr,
+      archiveReturn: toolsArchiveReturnSurface(variant),
+      onReady: () => { if (nestedExtractReviewFocusPending) focusNestedExtractReview(); },
+      locked: nestedExtractDraftLocked(), submitting: nestedExtractSubmissionPending,
+      smart: draft?.smart ?? true,
+      onSmartChange: (smart) => updateNestedExtractDraft((value) => ({ ...value, smart })),
+      overwrite: draft?.overwrite ?? "ask",
+      overwriteChoices: extractOverwriteModes.map((id) => ({ id, label: extractOverwriteLabel(id) })),
+      onOverwriteChange: (overwrite) => updateNestedExtractDraft((value) => ({ ...value, overwrite })),
+      symlinks: draft?.symlinks ?? "preserve",
+      symlinkChoices: extractSymlinkModes.map((id) => ({ id, label: extractSymlinkLabel(id) })),
+      onSymlinksChange: (symlinks) => updateNestedExtractDraft((value) => ({ ...value, symlinks })),
+      rows: draft ? [{
+        id: "inner-archive", path: `${draft.outerDisplayPath} › ${draft.entry_path}`,
+        name: pathBaseName(draft.entry_path), format: archiveFormatFromPath(draft.entry_path), target: draft.dest,
+        encoding: draft.encoding ?? tr("gui.extract.encoding.auto", "Auto-detect"), bestEffort: draft.best_effort,
+        onBestEffortChange: (best_effort) => updateNestedExtractDraft((value) => ({ ...value, best_effort })),
+        onTargetInput: (dest) => updateNestedExtractDraft((value) => ({ ...value, dest })),
+        onChooseTarget: () => void chooseNestedExtractDestination(), onRemove: null,
+      }] : [],
+      actions: { onStart: () => void startNestedExtract(), onAdd: draft ? null : () => setScreen("browse") },
+    };
   }
 
   async function extractNestedPreviewArchive() {
@@ -11658,10 +12328,7 @@
       showNotice(tr("gui.preview.preview_nested_before_extract", "Preview a nested archive before extracting it"));
       return;
     }
-    const outerDisplayPath = currentArchive?.source === preview.outer_path
-      ? currentArchive.path
-      : preview.outer_path;
-    await submitNestedExtract(preview.outer_path, outerDisplayPath, preview.entry_path);
+    await openNestedArchiveEntry(preview.outer_path, preview.entry_path, previewOriginVirtualIndex, "extract");
   }
 
   async function repairFilenameEncoding(encoding = "gbk") {
@@ -12108,11 +12775,14 @@
       id: null,
       version: 0,
       spec: submittingJobSpec,
+      outputPasswordRequired: outputPasswordRequired(submittingJobSpec),
       title: titleForJobSpec(submittingJobSpec),
       origin: "app",
       ownedByRequester: true,
       interaction: null,
       question: null,
+      actionFailure: null,
+      statusStale: false,
       answeredQuestionVersion: 0,
       state: "submitting",
       queuePosition: null,
@@ -12145,7 +12815,7 @@
     const failed = jobRows.find((task) => task.state === "failed");
     const task = activeCurrentTask ?? failed ?? null;
     if (!task) return tr("gui.state.ready", "Ready");
-    return `${titleForJobSpec(task.spec)} · ${taskStateLabel(task.state)}`;
+    return `${titleForJobSpec(task.spec)} · ${taskOutcomeStateLabel(task)}`;
   }
 
   function taskCenterSelectedTask(): Task | null {
@@ -12162,6 +12832,8 @@
   }
 
   function taskCenterSummaryLabel(): string {
+    const unconfirmed = jobRows.find(taskStatusUnavailable);
+    if (unconfirmed) return taskOutcomeStateLabel(unconfirmed);
     const counts = taskCenterCounts(jobRows);
     if (counts.attention > 0) {
       return tr("gui.task_center.summary_attention", "{count} need attention")
@@ -12186,7 +12858,7 @@
 
   function openTaskCenter(source: HTMLElement | null = null): void {
     if (!appActionEnabled("task_center") || taskCenterOpen) return;
-    taskCenterReturnFocus = source;
+    rememberTaskWorkspaceFocus(source ?? document.activeElement);
     taskCenterFocusTaskId = null;
     taskCenterSelectedTaskId = null;
     taskCenterOpen = true;
@@ -12194,26 +12866,44 @@
   }
 
   function closeTaskCenter(): void {
-    const returnFocus = taskCenterReturnFocus;
+    cancelTaskReview();
     taskCenterOpen = false;
     taskCenterSelectedTaskId = null;
     taskCenterFocusTaskId = null;
+    restoreTaskWorkspaceFocus();
+  }
+
+  function rememberTaskWorkspaceFocus(source: Element | null = document.activeElement): void {
+    if (taskWindowMode || taskDialogVisible()) return;
+    if (source instanceof HTMLElement && source !== document.body
+      && !source.closest("#squallz-task-center, .task-modal-overlay")) {
+      taskCenterReturnFocus = source;
+    }
+  }
+
+  function restoreTaskWorkspaceFocus(): void {
+    const returnFocus = taskCenterReturnFocus;
+    const returnScreen = screen;
     taskCenterReturnFocus = null;
     void tick().then(() => {
-      if (returnFocus?.isConnected) {
-        returnFocus.focus();
-        return;
+      if (taskWindowMode || taskCenterOpen || blockingModalVisible() || modeSelectionBlocked || screen !== returnScreen) return;
+      if (returnFocus?.isConnected && !returnFocus.closest("[inert]") && !returnFocus.matches(":disabled")) {
+        returnFocus.focus({ preventScroll: true });
+        if (document.activeElement === returnFocus) return;
       }
-      if (screen === "create") createPrimaryAction()?.focus();
+      const fallback = screen === "create" ? createPrimaryAction() : document.querySelector<HTMLElement>(".task-center-trigger");
+      fallback?.focus({ preventScroll: true });
     });
   }
 
   function openTaskCenterDetails(task: Task): void {
+    cancelTaskReview();
     taskCenterFocusTaskId = task.id;
     taskCenterSelectedTaskId = task.id;
   }
 
   function returnToTaskCenter(task: TaskDialogModel): void {
+    cancelTaskReview();
     taskCenterSelectedTaskId = null;
     taskCenterFocusTaskId = task.id;
   }
@@ -12240,11 +12930,15 @@
   function taskDialogTask(): TaskDialogModel | null {
     const submitting = submittingTaskModel();
     if (taskWindowMode && submitting) return submitting;
+    if (taskWindowMode) {
+      if (taskDialogTaskId === null && taskWindowLaunchState.status !== "waiting") return null;
+      return taskWindowTask(jobRows, taskDialogTaskId);
+    }
     if (taskDialogTaskId !== null) {
       const remembered = jobRows.find((task) => task.id === taskDialogTaskId);
       if (remembered) return remembered;
     }
-    return taskWindowMode ? blockingTask() : null;
+    return null;
   }
 
   function taskDialogVisible(): boolean {
@@ -12254,8 +12948,12 @@
     return taskDialogDismissedId !== task.id;
   }
 
+  function archiveEditorVisible(): boolean {
+    return screen === "browse" && archiveEditKind !== null && !archivePasswordPrompt && !previewPasswordPrompt;
+  }
+
   function blockingModalVisible(): boolean {
-    return taskDialogVisible() || macosSfxPublisherTask !== null || archiveEditKind !== null;
+    return taskDialogVisible() || macosSfxPublisherTask !== null || archiveEditorVisible();
   }
 
   function taskCenterVisible(): boolean {
@@ -12309,6 +13007,8 @@
   }
 
   function taskDialogSurface(task: TaskDialogModel): TaskProgressDialogSurfaceProps {
+    const passwordPrompt = jobPasswordPrompt?.id === task.id ? jobPasswordPrompt : null;
+    const conflictPrompt = jobConflictPrompt?.id === task.id ? jobConflictPrompt : null;
     return {
       task,
       presentation: taskWindowMode ? "window" : "dialog",
@@ -12318,12 +13018,13 @@
       copyFeedbackTone: taskChecksumCopyFeedbackTone(task),
       passwordQuestion: taskPasswordQuestion(task),
       passwordValue: jobPasswordValue,
-      passwordError: passwordSubmissionError,
+      passwordError: jobPasswordSubmissionError,
       conflictQuestion: taskConflictQuestion(task),
       conflictApplyAll,
       taskOutputPath,
       taskRevealOutputLabel,
       taskWindowMode,
+      reviewPending: pendingTaskReviewId === task.id,
       macosSfxPublishingAvailable: activePlatform === "macos",
       onPause: pauseCurrentTask,
       onResume: resumeCurrentTask,
@@ -12331,20 +13032,26 @@
       onCopyChecksumResults: copyTaskChecksumResults,
       onOpenOutput: openTaskOutput,
       onPublishMacosSfx: openMacosSfxPublisher,
-      onReviewFailure: reviewFailedTask,
+      onReviewTask: prepareTaskReview,
       onToggleDetails: toggleTaskDetails,
       onViewResults: viewTaskResults,
       onRevealOutput: revealTaskOutput,
       onDismiss: dismissTaskDialog,
-      onPasswordValueChange: (value) => (jobPasswordValue = value),
-      onSubmitPassword: submitPasswordRequest,
-      onCancelPassword: cancelPasswordRequest,
-      onConflictApplyAllChange: (applyAll) => (conflictApplyAll = applyAll),
-      onAnswerConflict: answerConflictDecision,
+      onPasswordValueChange: (value) => {
+        if (isCurrentTaskPasswordPrompt(passwordPrompt)) jobPasswordValue = value;
+      },
+      onSubmitPassword: () => submitTaskPasswordRequest(passwordPrompt),
+      onCancelPassword: () => cancelTaskPasswordRequest(passwordPrompt),
+      onConflictApplyAllChange: (applyAll) => {
+        if (isCurrentTaskConflictPrompt(conflictPrompt)) conflictApplyAll = applyAll;
+      },
+      onAnswerConflict: (decision, applyAll) => answerConflictDecision(conflictPrompt, decision, applyAll),
     };
   }
 
   function taskCenterDetailSurface(task: TaskDialogModel): TaskProgressDialogSurfaceProps {
+    const passwordPrompt = jobPasswordPrompt?.id === task.id ? jobPasswordPrompt : null;
+    const conflictPrompt = jobConflictPrompt?.id === task.id ? jobConflictPrompt : null;
     return {
       task,
       rootId: "squallz-task-center",
@@ -12356,6 +13063,7 @@
       taskOutputPath,
       taskRevealOutputLabel,
       taskWindowMode: false,
+      reviewPending: pendingTaskReviewId === task.id,
       macosSfxPublishingAvailable: activePlatform === "macos",
       onPause: pauseCurrentTask,
       onResume: resumeCurrentTask,
@@ -12363,16 +13071,20 @@
       onCopyChecksumResults: copyTaskChecksumResults,
       onOpenOutput: openTaskOutput,
       onPublishMacosSfx: openMacosSfxPublisher,
-      onReviewFailure: reviewFailedTask,
+      onReviewTask: prepareTaskReview,
       onToggleDetails: toggleTaskDetails,
       onViewResults: viewTaskResults,
       onRevealOutput: revealTaskOutput,
       onDismiss: returnToTaskCenter,
-      onPasswordValueChange: (value) => (jobPasswordValue = value),
-      onSubmitPassword: submitPasswordRequest,
-      onCancelPassword: cancelPasswordRequest,
-      onConflictApplyAllChange: (applyAll) => (conflictApplyAll = applyAll),
-      onAnswerConflict: answerConflictDecision,
+      onPasswordValueChange: (value) => {
+        if (isCurrentTaskPasswordPrompt(passwordPrompt)) jobPasswordValue = value;
+      },
+      onSubmitPassword: () => submitTaskPasswordRequest(passwordPrompt),
+      onCancelPassword: () => cancelTaskPasswordRequest(passwordPrompt),
+      onConflictApplyAllChange: (applyAll) => {
+        if (isCurrentTaskConflictPrompt(conflictPrompt)) conflictApplyAll = applyAll;
+      },
+      onAnswerConflict: (decision, applyAll) => answerConflictDecision(conflictPrompt, decision, applyAll),
     };
   }
 
@@ -12395,55 +13107,25 @@
     };
   }
 
-  function taskInteractionWorkspaceSurface(
-    variant: TaskInteractionWorkspaceVariant,
-    kind: TaskInteractionWorkspaceKind,
-  ): TaskInteractionWorkspaceSurface {
-    if (kind === "password") {
-      const forgetDisabledReason = passwordBookForgetDisabledReason();
-      return {
-        kind,
-        variant,
-        tr,
-        active: Boolean(jobPasswordPrompt || archivePasswordPrompt),
-        name: passwordPromptName(),
-        detail: passwordPromptDetail(),
-        sessionDetail: passwordSessionDetail(),
-        failureDetail: passwordFailureDetail(),
-        secretStoreLabel: secretStoreLabel(),
-        value: jobPasswordValue,
-        busy: archiveOpenStatus === "opening",
-        error: passwordSubmissionError,
-        forgetVisible: Boolean(jobPasswordPrompt),
-        forgetDisabledReason,
-        forgetAriaLabel: labelWithDisabledReason(
-          tr("gui.settings.password_book.forget_current", "Forget current archive"),
-          forgetDisabledReason,
-        ),
-        onInputMount: (input) => (standalonePasswordInput = input),
-        onValueChange: (value) => (jobPasswordValue = value),
-        onSubmit: submitPasswordRequest,
-        onCancel: cancelPasswordRequest,
-        onForget: forgetPasswordBookPanel,
-        onBack: () => setScreen("browse"),
-      };
-    }
+  function passwordWorkspaceSurface(variant: PasswordWorkspaceVariant): PasswordWorkspaceSurface {
     return {
-      kind,
       variant,
       tr,
-      active: Boolean(jobConflictPrompt),
-      title: conflictPromptTitle(),
-      detail: conflictPromptDetail(),
-      rows: conflictRowsView().map((row) => ({
-        ...row,
-        decision: conflictDecisionLabel(row.decision),
-      })),
-      applyAll: conflictApplyAll,
-      onApplyAllChange: (value) => (conflictApplyAll = value),
-      onAnswer: answerConflictDecision,
-      onCancel: cancelConflictPrompt,
-      onBack: () => setScreen("extract"),
+      active: Boolean(archivePasswordPrompt || previewPasswordPrompt),
+      name: passwordPromptName(),
+      detail: passwordPromptDetail(),
+      sessionDetail: passwordSessionDetail(),
+      failureDetail: passwordFailureDetail(),
+      secretStoreLabel: secretStoreLabel(),
+      value: workspacePasswordValue,
+      busy: archiveOpenStatus === "opening" || Boolean(previewPasswordPrompt?.busy),
+      rejected: Boolean(archivePasswordPrompt?.wrong || previewPasswordPrompt?.wrong),
+      error: workspacePasswordSubmissionError,
+      onInputMount: (input) => (standalonePasswordInput = input),
+      onValueChange: (value) => (workspacePasswordValue = value),
+      onSubmit: submitPasswordRequest,
+      onCancel: cancelPasswordRequest,
+      onBack: () => setScreen("browse"),
     };
   }
 
@@ -12454,9 +13136,11 @@
       jobPasswordPrompt?.id !== task.id
     ) return null;
     return {
-      name: passwordPromptName(),
-      detail: passwordPromptDetail(),
-      sessionDetail: passwordSessionDetail(),
+      name: jobPasswordPrompt.name,
+      detail: jobPasswordPrompt.wrong
+        ? tr("gui.password.previous_rejected", "Previous password was rejected. Try again or cancel this job.")
+        : tr("gui.password.task_paused", "This task is waiting for the archive password."),
+      sessionDetail: tr("gui.password.session_only_separate_book", "Used for this archive in the current app session. Save it separately in Password Book."),
     };
   }
 
@@ -12466,14 +13150,16 @@
       !isTaskActiveState(task.state) ||
       jobConflictPrompt?.id !== task.id
     ) return null;
-    const row = conflictRowsView()[0];
-    return row
-      ? { path: row.path, existing: row.existing, incoming: row.incoming }
-      : null;
+    return {
+      path: jobConflictPrompt.incoming_path,
+      existing: `${formatBytes(jobConflictPrompt.existing_size)} · ${formatModified(jobConflictPrompt.existing_modified)}`,
+      incoming: `${formatBytes(jobConflictPrompt.incoming_size)} · ${formatModified(jobConflictPrompt.incoming_modified)}`,
+    };
   }
 
   function openTaskDialog(task: Task | null = blockingTask()): void {
     if (!task) return;
+    rememberTaskWorkspaceFocus();
     taskDialogTaskId = task.id;
     taskDialogDismissedId = null;
   }
@@ -12499,15 +13185,17 @@
   }
 
   async function dismissTaskDialog(task: TaskDialogModel): Promise<void> {
+    cancelTaskReview();
     if (task.id === null) return;
     if (isTaskActiveState(task.state)) return;
+    if (taskWindowMode && await closeNativeTaskWindow()) return;
+    taskDialogDismissedId = task.id;
+    taskDialogTaskId = null;
     if (!taskWindowMode && taskCenterSelectedTaskId === task.id) {
       closeTaskCenter();
       return;
     }
-    if (taskWindowMode && await closeNativeTaskWindow()) return;
-    taskDialogDismissedId = task.id;
-    taskDialogTaskId = null;
+    if (!taskWindowMode && !taskCenterOpen) restoreTaskWorkspaceFocus();
   }
 
   function isJobSubmitBlocked(error: unknown): boolean {
@@ -12540,6 +13228,12 @@
     if (blockReason) {
       throw new JobSubmitBlockedError(blockReason);
     }
+    const previousTaskCenter = taskWindowMode ? null : {
+      open: taskCenterOpen,
+      selectedTaskId: taskCenterSelectedTaskId,
+      focusTaskId: taskCenterFocusTaskId,
+      navigationGeneration: taskReviewRequestGeneration,
+    };
     jobSubmitInFlight = true;
     submittingJobSpec = spec;
     if (taskWindowMode) {
@@ -12547,14 +13241,7 @@
       taskDialogDismissedId = null;
     } else {
       if (taskCenterReturnFocus === null) {
-        const focused = document.activeElement;
-        if (
-          focused instanceof HTMLElement &&
-          focused !== document.body &&
-          !focused.closest("#squallz-task-center")
-        ) {
-          taskCenterReturnFocus = focused;
-        }
+        rememberTaskWorkspaceFocus();
       }
       taskCenterFocusTaskId = null;
       taskCenterSelectedTaskId = null;
@@ -12572,30 +13259,51 @@
       if (taskWindowMode) {
         taskDialogTaskId = id;
         taskDialogDismissedId = null;
+        rememberWindowRecovery({ taskWindow: true, taskId: id });
       }
       return id;
+    } catch (error) {
+      if (previousTaskCenter
+        && previousTaskCenter.navigationGeneration === taskReviewRequestGeneration
+        && taskCenterOpen && taskCenterSelectedTaskId === null && taskCenterFocusTaskId === null) {
+        taskCenterOpen = previousTaskCenter.open;
+        taskCenterSelectedTaskId = previousTaskCenter.selectedTaskId;
+        taskCenterFocusTaskId = previousTaskCenter.focusTaskId;
+        if (!previousTaskCenter.open && !taskDialogVisible()) {
+          const focused = document.activeElement;
+          if (!focused || focused === document.body || focused.closest("#squallz-task-center")) {
+            restoreTaskWorkspaceFocus();
+          } else {
+            taskCenterReturnFocus = null;
+          }
+        }
+      }
+      throw error;
     } finally {
       jobSubmitInFlight = false;
       submittingJobSpec = null;
     }
   }
 
-  function cancelCurrentTask(task: TaskDialogModel): void {
+  async function cancelCurrentTask(task: TaskDialogModel): Promise<void> {
     if (task.id === null) return;
-    cancelTask(task.id);
-    showNotice(tr("gui.task.cancel_requested", "Cancel requested"));
+    if (await cancelTask(task.id) && task.controlIntent === "cancel") {
+      showNotice(tr("gui.task.cancel_requested", "Cancel requested"));
+    }
   }
 
-  function pauseCurrentTask(task: TaskDialogModel): void {
+  async function pauseCurrentTask(task: TaskDialogModel): Promise<void> {
     if (task.id === null) return;
-    pauseTask(task.id);
-    showNotice(tr("gui.task.pause_requested", "Pause requested"));
+    if (await pauseTask(task.id) && task.controlIntent === "pause") {
+      showNotice(tr("gui.task.pause_requested", "Pause requested"));
+    }
   }
 
-  function resumeCurrentTask(task: TaskDialogModel): void {
+  async function resumeCurrentTask(task: TaskDialogModel): Promise<void> {
     if (task.id === null) return;
-    resumeTask(task.id);
-    showNotice(tr("gui.task.resume_requested", "Resume requested"));
+    if (await resumeTask(task.id) && task.controlIntent === "resume") {
+      showNotice(tr("gui.task.resume_requested", "Resume requested"));
+    }
   }
 
   function moveQueuedTaskEarlier(task: Task): void {
@@ -12617,7 +13325,7 @@
     return t("gui.task.show_in_file_manager", { fileManager: fileManagerLabel() });
   }
 
-  function adoptRecoveryTargetFromTask(task: TaskDialogModel): void {
+  function adoptRecoveryTargetFromTask(task: TaskDialogModel, displayedSpec: JobSpec = task.spec): boolean {
     let source: string | null = null;
     let sidecar: string | null | undefined;
     switch (task.spec.kind) {
@@ -12637,7 +13345,7 @@
         sidecar = null;
         break;
       case "extract":
-        if (!task.spec.best_effort) return;
+        if (!task.spec.best_effort) return false;
         source = task.spec.path;
         sidecar = recoverySourcePath() && sameFilePath(recoverySourcePath() ?? "", source)
           ? undefined
@@ -12650,19 +13358,27 @@
           : null;
         break;
       default:
-        return;
+        return false;
     }
-    if (!source) return;
+    if (!source) return false;
+    const displayedSource = "path" in displayedSpec ? displayedSpec.path
+      : "src" in displayedSpec ? displayedSpec.src : source;
+    const matchesCurrentSource = Boolean(currentArchive && sameFilePath(currentArchive.source, source));
+    if (source !== displayedSource && !matchesCurrentSource) {
+      showNotice(tr("gui.task.review.source_unavailable", "Could not restore this task's source. Reopen the original archive (and its inner archive, if needed), then start a new task. Your current settings were kept."));
+      return false;
+    }
     const preserveSelectedSource = Boolean(
       recoverySourceMode === "selected" &&
       recoverySourceOverride &&
       sameFilePath(recoverySourceOverride, source),
     );
-    recoverySourceMode = !preserveSelectedSource && currentArchive && sameFilePath(currentArchive.path, source)
+    recoverySourceMode = matchesCurrentSource || (!preserveSelectedSource && currentArchive && sameFilePath(currentArchive.path, source))
       ? "current"
       : "selected";
     recoverySourceOverride = recoverySourceMode === "selected" ? source : null;
     if (sidecar !== undefined) recoveryPar2Override = sidecar;
+    return true;
   }
 
   function testTaskUsesRecoveryContext(task: TaskDialogModel): boolean {
@@ -12675,14 +13391,10 @@
     ) {
       return true;
     }
-    return !currentArchive || !sameFilePath(currentArchive.path, task.spec.path);
+    return !currentArchive || (!sameFilePath(currentArchive.source, task.spec.path) && !sameFilePath(currentArchive.path, task.spec.path));
   }
 
   function viewTaskResults(task: TaskDialogModel): void {
-    if (testTaskUsesRecoveryContext(task)) {
-      if (task.id !== null) setTaskExpanded(task.id, true);
-      return;
-    }
     if (taskHasInlineResults(task)) {
       if (task.id !== null) setTaskExpanded(task.id, !task.expanded);
       return;
@@ -12695,12 +13407,17 @@
       if (task.id !== null) setTaskExpanded(task.id, true);
       return;
     }
-    if (target === "recovery") adoptRecoveryTargetFromTask(task);
+    if (target === "recovery" && !adoptRecoveryTargetFromTask(task)) return;
+    if (task.id !== null && (task.spec.kind === "checksum" || task.spec.kind === "checksum_check")) {
+      checksumReportTaskIds[task.spec.kind] = task.id;
+    }
+    if (task.id !== null && task.spec.kind === "duplicate_scan") duplicateReportTaskId = task.id;
     setScreen(target);
     void dismissTaskDialog(task);
     if (target === "checksum") {
       void focusChecksumResultPanel(task.spec.kind === "checksum_check" ? "checksum_check" : "checksum");
     }
+    if (target === "duplicates") void focusDuplicateReportPanel();
   }
 
   function toggleTaskDetails(task: TaskDialogModel): void {
@@ -12708,9 +13425,35 @@
     setTaskExpanded(task.id, !task.expanded);
   }
 
-  function reviewFailedTask(task: TaskDialogModel): void {
+  function cancelTaskReview(): void {
+    taskReviewRequestGeneration += 1;
+    pendingTaskReviewId = null;
+  }
+
+  async function prepareTaskReview(task: TaskDialogModel): Promise<void> {
+    if (taskWindowMode || task.id === null || pendingTaskReviewId === task.id || !taskReviewScreen(task)) return;
+    const generation = ++taskReviewRequestGeneration;
+    pendingTaskReviewId = task.id;
+    const initialScreen = screen;
+    const initialArchive = currentArchive?.id ?? null;
+    const isCurrent = () => generation === taskReviewRequestGeneration
+      && screen === initialScreen && (currentArchive?.id ?? null) === initialArchive;
+    try {
+      const spec = previewTaskSpecForReview(task.id) ?? await ipc.reviewJobSpec(task.id);
+      if (!isCurrent()) return;
+      if (spec.kind !== task.spec.kind) throw new Error("Task kind changed");
+      await reviewTask({ ...task, spec }, task.spec);
+    } catch {
+      if (!isCurrent()) return;
+      showNotice(tr("gui.task.review.source_unavailable", "Could not restore this task's source. Reopen the original archive (and its inner archive, if needed), then start a new task. Your current settings were kept."));
+    } finally {
+      if (generation === taskReviewRequestGeneration) pendingTaskReviewId = null;
+    }
+  }
+
+  async function reviewTask(task: TaskDialogModel, displayedSpec: JobSpec = task.spec): Promise<void> {
     if (taskWindowMode) return;
-    let target = taskFailureReviewScreen(task);
+    let target = taskReviewScreen(task);
     if (target === "archiveInfo" && testTaskUsesRecoveryContext(task)) {
       target = "recovery";
     }
@@ -12718,9 +13461,274 @@
       target = "recovery";
     }
     if (!target) return;
-    if (target === "recovery") adoptRecoveryTargetFromTask(task);
+    if (target === "updateReview" && task.spec.kind === "update" && displayedSpec.kind === "update") {
+      if (preventCreateSubmissionNavigation(target) || preventConvertSubmissionNavigation(target) || focusBlockingTaskIfAny()) return;
+      if (!archiveUpdateReview.restore(task.spec, displayedSpec.path)) {
+        showNotice(tr("gui.update_review.wait", "Wait for the current changes to finish submitting before reviewing another task."));
+        return;
+      }
+      setScreen(target);
+      await dismissTaskDialog(task);
+      focusArchiveUpdateReview();
+      return;
+    }
+    if (target === "nestedExtract" && task.spec.kind === "extract_nested" && displayedSpec.kind === "extract_nested") {
+      if (!restoreNestedExtractDraft(reviewNestedExtract(task.spec, displayedSpec.outer_path))) return;
+      await dismissTaskDialog(task);
+      focusNestedExtractReview();
+      showNotice(tr("gui.nested_extract.review_restored", "Inner archive and extraction settings restored. Some files may already exist; review the destination and conflict policy before starting again. Passwords will be requested when needed."));
+      return;
+    }
+    if (target === "batch" && task.spec.kind === "batch_extract") {
+      if (batchDraftLocked()) {
+        showNotice(tr("gui.batch.wait_for_current", "Finish the current selection or submission before reviewing another batch."));
+        return;
+      }
+      if (preventCreateSubmissionNavigation(target) || preventConvertSubmissionNavigation(target) || focusBlockingTaskIfAny()) return;
+      const outcome = readBatchExtractResult(task.result);
+      const failedCount = task.state === "done" ? outcome.reviewCount : 0;
+      const failures = task.state === "done" ? outcome.reviewFailures : null;
+      const draft = reviewBatchExtract(task.spec, failures, failedCount, platformKind(),
+        displayedSpec.kind === "batch_extract" ? displayedSpec : task.spec);
+      if (!draft) {
+        showNotice(tr("gui.batch.review_unavailable", "The report cannot identify the failed archives unambiguously. Select the archives again; your current batch was kept."));
+        return;
+      }
+      batchDraftGeneration += 1;
+      batchDraft = draft;
+      setScreen(target);
+      await dismissTaskDialog(task);
+      focusBatchReview();
+      showNotice(task.state === "done"
+        ? tr("gui.batch.review_failed_restored", "Archives with failures were restored. They will be processed from the beginning; review existing output and conflict policies. Passwords will be requested when needed.")
+        : tr("gui.batch.review_restored", "Batch inputs and policies restored. Some files may already exist; review conflicts before starting again. Passwords will be requested when needed."));
+      return;
+    }
+    if (target === "extract" && task.spec.kind === "extract") {
+      await reviewExtractTask(task);
+      return;
+    }
+    if (target === "convert" && task.spec.kind === "convert") {
+      await reviewConvertTask(task);
+      return;
+    }
+    if (target === "create" && task.spec.kind === "compress" && !restoreCreateTaskDraft(task.spec, task.outputPasswordRequired)) return;
+    if (target === "recovery" && !adoptRecoveryTargetFromTask(task, displayedSpec)) return;
     setScreen(target);
-    void dismissTaskDialog(task);
+    await dismissTaskDialog(task);
+    if (target === "create") focusCreatePrimaryAction();
+  }
+
+  function focusArchiveUpdateReview(): void {
+    archiveUpdateReviewFocusPending = true;
+    void tick().then(() => {
+      const heading = document.getElementById("update-review-heading");
+      if (!archiveUpdateReviewFocusPending || screen !== "updateReview" || blockingModalVisible() || !heading) return;
+      archiveUpdateReviewFocusPending = false;
+      heading.focus();
+    });
+  }
+
+  async function submitArchiveUpdateReview(): Promise<void> {
+    if (focusBlockingTaskIfAny()) return;
+    try {
+      if (await archiveUpdateReview.submit(submitJob)) {
+        showNotice(tr("gui.update_review.queued", "Selected archive changes added to the queue"));
+      }
+    } catch (error) {
+      if (isJobSubmitBlocked(error)) return;
+      pushToast({ kind: "danger", title: tr("gui.job.submit_failed", "Could not queue the task"),
+        body: isErrorDto(error) ? tError(error) : tr("gui.job.submit_unavailable", "Check that the Squallz desktop service is available, then try again.") });
+    }
+  }
+
+  async function chooseArchiveUpdateSource(id: number, kind: "file" | "folder"): Promise<void> {
+    if (screen !== "updateReview") return;
+    const path = archiveUpdateReview.draft?.operations.find((row) => row.id === id)?.value;
+    await archiveUpdateReview.chooseSource(id, async (isCurrent) => {
+      const { open } = await getDialogModule();
+      if (!isCurrent() || screen !== "updateReview") return null;
+      const selected = await openNativeDialog("update-review.source", open, {
+        title: kind === "folder" ? tr("gui.update_review.choose_folder", "Choose folder…") : tr("gui.update_review.choose_file", "Choose file…"),
+        multiple: false, directory: kind === "folder", defaultPath: path || undefined,
+      });
+      return Array.isArray(selected) ? selected[0] ?? null : selected;
+    });
+  }
+
+  function archiveUpdateWorkspaceSurface(variant: ToolsWorkspaceVariant): ArchiveUpdateWorkspaceSurface {
+    return { kind: "update", variant, title: tr("gui.update_review.title", "Review archive changes"), tr,
+      archiveReturn: { ...toolsArchiveReturnSurface(variant), visible: Boolean(currentArchive) }, review: archiveUpdateReview,
+      policyLabel: createContentPolicyLabel,
+      onReady: () => { if (archiveUpdateReviewFocusPending) focusArchiveUpdateReview(); },
+      onChooseSource: chooseArchiveUpdateSource,
+      onSubmit: submitArchiveUpdateReview, onOpenTasks: () => openTaskCenter() };
+  }
+
+  async function reviewExtractTask(task: TaskDialogModel): Promise<void> {
+    if (task.spec.kind !== "extract") return;
+    const spec = task.spec;
+    const draft: ExtractTaskDraft = {
+      path: spec.path, dest: spec.dest, selection: spec.selection === null ? null : [...spec.selection],
+      overwrite: spec.overwrite, symlinks: spec.symlinks, smart: spec.smart,
+      encoding: spec.encoding, verify_sfx: spec.verify_sfx,
+    };
+    await reviewArchiveTask(task, "extract", {
+      path: draft.path, encoding: draft.encoding, restore: () => restoreExtractTaskDraft(draft),
+    });
+  }
+
+  async function loadConvertRouteForReview(): Promise<ConvertRouteHandle> {
+    const { convertSessionFor } = await import("./lib/convert-session.svelte");
+    return convertSessionFor(convertRouteOwner, convertRouteBridge);
+  }
+
+  async function reviewConvertTask(task: TaskDialogModel): Promise<void> {
+    if (task.spec.kind !== "convert") return;
+    const generation = taskReviewRequestGeneration;
+    const initialScreen = screen;
+    const initialArchive = currentArchive?.id ?? null;
+    const isCurrent = () => generation === taskReviewRequestGeneration
+      && screen === initialScreen && (currentArchive?.id ?? null) === initialArchive;
+    const spec = task.spec;
+    const draft: ConvertTaskDraft = {
+      src: spec.src, dest: spec.dest, level: spec.level, src_encoding: spec.src_encoding,
+      encrypt_names: spec.encrypt_names, split_size: spec.split_size, split_mode: spec.split_mode,
+      outputPasswordRequired: task.outputPasswordRequired,
+    };
+    let session: ConvertRouteHandle;
+    try {
+      session = await loadConvertRouteForReview();
+    } catch {
+      if (isCurrent()) showNotice(tr("gui.convert.review.load_failed", "Could not load conversion settings. Try reviewing this task again."));
+      return;
+    }
+    if (!isCurrent() || !session.canReviewTask(draft)) return;
+    convertRouteHandle = session;
+    session.syncArchive(currentArchive);
+    await reviewArchiveTask(task, "convert", {
+      path: draft.src,
+      encoding: draft.src_encoding,
+      restore: () => {
+        if (!session.restoreTaskDraft(draft)) return false;
+        setScreen("convert");
+        focusConvertReview();
+        showNotice(tr("gui.convert.review.restored", "Archive and settings restored. Passwords were cleared. Review protection and confirm the output location before converting again."));
+        return true;
+      },
+    });
+  }
+
+  function focusConvertReview(): void {
+    convertReviewFocusPending = true;
+    void tick().then(() => {
+      const heading = document.getElementById("convert-workspace-heading");
+      if (!convertReviewFocusPending || screen !== "convert" || blockingModalVisible() || !heading) return;
+      convertReviewFocusPending = false;
+      heading.focus();
+    });
+  }
+
+  async function reviewArchiveTask(task: TaskDialogModel, target: "extract" | "convert", review: ArchiveTaskReview): Promise<void> {
+    if (archiveOpenStatus === "opening") {
+      showNotice(tr("gui.task.review.wait_for_open", "Wait for the current archive to finish opening, then review this task again."));
+      return;
+    }
+    if (preventCreateSubmissionNavigation(target) || preventConvertSubmissionNavigation(target) || focusBlockingTaskIfAny()) return;
+    await dismissTaskDialog(task);
+    if (currentArchive && sameFilePath(currentArchive.source, review.path)
+      && (currentArchive.encoding_override ?? null) === review.encoding) {
+      pendingArchiveTaskReview = null;
+      review.restore();
+      return;
+    }
+    await openArchivePath(review.path, "open-file", review);
+  }
+
+  function restoreExtractTaskDraft(draft: ExtractTaskDraft): boolean {
+    if (!currentArchive || !sameFilePath(currentArchive.source, draft.path)) return false;
+    resetExtractPlanRequestState();
+    markExtractPresetDraftTouched();
+    selectedExtractPresetId = null;
+    extractPresetDraftName = "";
+    extractPresetMutationState = "idle";
+    extractDraftArchive = { id: currentArchive.id, source: currentArchive.source };
+    extractScope = draft.selection === null ? "all" : "selection";
+    extractSelectionSnapshot = [...(draft.selection ?? [])];
+    extractDestinationMode = draft.smart ? "smart" : "choose";
+    extractCustomDest = draft.dest;
+    extractSmartBaseOverride = draft.smart ? draft.dest : null;
+    extractOverwriteMode = draft.overwrite;
+    extractSymlinkMode = draft.symlinks;
+    extractPresetEncodingLabel = null;
+    extractVerifySfx = draft.verify_sfx;
+    setScreen("extract");
+    focusExtractReview();
+    showNotice(tr("gui.extract.review.restored", "Archive, selection and settings restored. Review the refreshed write plan before extracting again."));
+    return true;
+  }
+
+  function createTaskFormat(spec: Extract<JobSpec, { kind: "compress" }>): CreateFormatId | null {
+    if (spec.sfx_target) return "zip";
+    const path = spec.dest.toLowerCase();
+    if (path.endsWith(".swm")) return "wim";
+    return createFormatIds.find((format) =>
+      createFormats[format].extensions.some((extension) => path.endsWith(`.${extension}`))) ?? null;
+  }
+
+  function restoreCreateTaskDraft(spec: Extract<JobSpec, { kind: "compress" }>, passwordRequired: boolean): boolean {
+    if (createSourcesLocked()) {
+      showNotice(createSourcesLockedReason());
+      return false;
+    }
+    if (createConfigurationPending()) {
+      showNotice(createConfigurationPendingMessage());
+      return false;
+    }
+    const format = createTaskFormat(spec);
+    if (!format) {
+      showNotice(tr("gui.create.review.format_unavailable", "This task's format is not available in the create screen. Your current settings were kept."));
+      return false;
+    }
+    if (spec.sfx_target && (!sfxCreateCapability.available || spec.sfx_target !== sfxCreateCapability.target)) {
+      showNotice(tr("gui.create.review.sfx_unavailable", "This device cannot recreate this self-extractor. Your current settings were kept."));
+      return false;
+    }
+    markCreatePresetDraftTouched();
+    selectedCreatePresetId = null;
+    createPresetDraftName = "";
+    createPresetMutationState = "idle";
+    createSources = mergeCreateSources([], spec.inputs.map((path) => ({ path, kind: "unknown" })), platformKind());
+    selectedCreateSourcePaths = [];
+    activeCreateFormat = format;
+    activeCreateProfile = "custom";
+    customCreateLevel = spec.level;
+    customCreateLevelError = "";
+    clearCreatePasswordFields();
+    createEncryptNames = spec.encrypt_names;
+    createEncryptionEnabled = passwordRequired || spec.encrypt_names;
+    applyPresetVolumeMode(spec.split_size === null
+      ? { kind: "single" }
+      : { kind: "split", size_bytes: String(spec.split_size) });
+    createSplitMode = spec.split_mode;
+    createContentPolicy = spec.content_policy;
+    createExcludeText = spec.excludes.join("\n");
+    createSfxEnabled = spec.sfx_target !== null;
+    createPresetSfxTarget = spec.sfx_target ?? "current_platform";
+    createPresetSqzInnerFormat = spec.sqz_inner_format ?? "sqz";
+    createDestinationBase = "ask";
+    createOverwritePolicy = "ask";
+    createSuggestedDestination = spec.dest;
+    createCompletion = spec.completion;
+    createPostSuccess = spec.post_success;
+    createTestAfterCreate = spec.test_after_create;
+    normalizeUnsupportedCreatePostSuccess(false);
+    normalizeUnsupportedCreateCompletion(false);
+    createOptionsValidationAttempted = createEncryptionEnabled;
+    classicCreateSection = "general";
+    createAdvancedOpen = true;
+    showNotice(tr("gui.create.review.restored", "Sources and settings restored. Passwords were cleared. Review the options and confirm the output location before starting again."));
+    return true;
   }
 
   async function openTaskOutput(task: TaskDialogModel): Promise<void> {
@@ -12755,75 +13763,98 @@
   }
 
   function passwordPromptName(): string {
-    return jobPasswordPrompt?.name
-      ?? (archivePasswordPrompt ? pathBaseName(archivePasswordPrompt.path) : null)
+    return (archivePasswordPrompt ? pathBaseName(archivePasswordPrompt.path) : null)
+      ?? previewPasswordPrompt?.name
       ?? tr("gui.password.no_prompt", "No password prompt");
   }
 
   function passwordPromptDetail(): string {
-    if (jobPasswordPrompt) {
-      return jobPasswordPrompt.wrong
-        ? tr("gui.password.previous_rejected", "Previous password was rejected. Try again or cancel this job.")
-        : tr("gui.password.task_paused", "This task is waiting for the archive password.");
-    }
     if (archivePasswordPrompt) {
       return archivePasswordPrompt.wrong
         ? tr("gui.password.open_previous_rejected", "That password was rejected. Try again or return to the archive list.")
         : tr("gui.password.archive_waiting", "Enter the password to open this archive.");
     }
+    if (previewPasswordPrompt) {
+      if (previewPasswordPrompt.wrong) return tr("gui.preview.password_rejected", "That password was rejected. Try again or cancel opening this item.");
+      return previewPasswordPrompt.scope === "inner"
+        ? tr("gui.preview.inner_password", "Enter the inner archive password to continue opening this item.")
+        : tr("gui.preview.outer_password", "Enter the archive password to read this item.");
+    }
     return tr("gui.password.no_prompt_pending", "No password request is active.");
   }
 
   function passwordSessionDetail(): string {
-    return jobPasswordPrompt
-      ? tr("gui.password.session_only_separate_book", "Session only for this job; saved passwords use the separate Password Book flow")
-      : tr("gui.password.open_session_only", "Used only to open this archive in the current app session.");
+    if (previewPasswordPrompt && !archivePasswordPrompt) {
+      return tr("gui.preview.password_session", "Used for this operation and the opened archive in this app session. Not saved to Password Book.");
+    }
+    return tr("gui.password.open_session_only", "Used for this archive in the current app session.");
   }
 
   function passwordFailureDetail(): string {
-    return jobPasswordPrompt
-      ? tr("gui.password.return_to_prompt", "Return to prompt, do not fail whole batch")
-      : tr("gui.password.open_return_to_prompt", "Stay on this prompt so you can retry or cancel.");
+    return tr("gui.password.open_return_to_prompt", "Stay on this prompt so you can retry or cancel.");
   }
 
-  function jobQuestionReturnScreen(promptId: number): Screen {
-    const task = jobRows.find((item) => item.id === promptId);
-    return recoverySubmissionPending ||
-      recoveryContextTaskIds.has(promptId) ||
-      (task?.spec.kind === "extract" && task.spec.best_effort)
-      ? "recovery"
-      : "extract";
+  function isCurrentTaskPasswordPrompt(prompt: typeof jobPasswordPrompt): boolean {
+    return prompt !== null && jobPasswordPrompt?.id === prompt.id && jobPasswordPrompt.version === prompt.version;
   }
 
-  async function submitPasswordRequest() {
-    if (!jobPasswordPrompt && !archivePasswordPrompt) {
+  async function submitTaskPasswordRequest(prompt: typeof jobPasswordPrompt) {
+    if (!prompt || !isCurrentTaskPasswordPrompt(prompt)) {
       showNotice(tr("gui.password.no_prompt_pending", "No password request is active."));
       return;
     }
-    passwordSubmissionAttempted = true;
+    jobPasswordSubmissionAttempted = true;
     if (!taskPasswordReady(jobPasswordValue)) return;
-    passwordSubmissionAttempted = false;
-    if (jobPasswordPrompt) {
-      const promptId = jobPasswordPrompt.id;
-      const returnScreen = jobQuestionReturnScreen(promptId);
-      answerJobPassword(jobPasswordValue);
-      jobPasswordValue = "";
-      setScreen(returnScreen);
-      returnTaskQuestionToCenter(promptId);
-      showNotice(tr("gui.password.sent_to_task", "Password sent to task"));
+    jobPasswordSubmissionAttempted = false;
+    const promptId = prompt.id;
+    const answer = answerJobPassword(jobPasswordValue);
+    jobPasswordValue = "";
+    if (!await answer) return;
+    showNotice(tr("gui.password.sent_to_task", "Password sent to task"));
+    if (jobPasswordPrompt || jobConflictPrompt) return;
+    returnTaskQuestionToCenter(promptId);
+  }
+
+  async function cancelTaskPasswordRequest(prompt: typeof jobPasswordPrompt) {
+    if (!prompt || !isCurrentTaskPasswordPrompt(prompt)) return;
+    jobPasswordSubmissionAttempted = false;
+    jobPasswordValue = "";
+    const promptId = prompt.id;
+    if (!await answerJobPassword(null)) return;
+    showNotice(tr("gui.password.prompt_cancelled", "Password prompt cancelled"));
+    if (jobPasswordPrompt || jobConflictPrompt) return;
+    returnTaskQuestionToCenter(promptId);
+  }
+
+  async function submitPasswordRequest() {
+    if (!archivePasswordPrompt && !previewPasswordPrompt) {
+      showNotice(tr("gui.password.no_prompt_pending", "No password request is active."));
+      return;
+    }
+    workspacePasswordSubmissionAttempted = true;
+    if (!taskPasswordReady(workspacePasswordValue)) return;
+    workspacePasswordSubmissionAttempted = false;
+    if (!archivePasswordPrompt && previewPasswordPrompt) {
+      if (previewPasswordFlow.answer(workspacePasswordValue)) workspacePasswordValue = "";
       return;
     }
     const prompt = archivePasswordPrompt;
     if (!prompt) return;
     if (archiveOpenStatus === "opening") return;
-    const requestGeneration = ++archiveOpenGeneration;
+    const requestGeneration = prompt.refresh ? archiveOpenGeneration : ++archiveOpenGeneration;
+    const attempt = ++archivePasswordAttempt;
     standalonePasswordFocusedInput = null;
     archiveOpenStatus = "opening";
-    const ok = await openArchiveStore(prompt.path, jobPasswordValue, prompt.encoding);
-    if (requestGeneration !== archiveOpenGeneration) return;
+    const ok = await openArchiveStore(prompt.path, workspacePasswordValue, prompt.encoding);
+    if (requestGeneration !== archiveOpenGeneration || attempt !== archivePasswordAttempt) return;
     archiveOpenStatus = "idle";
-    jobPasswordValue = "";
+    workspacePasswordValue = "";
     if (ok) {
+      if (prompt.refresh) {
+        setScreen("browse");
+        showNotice(tr("gui.archive.unlocked", "Archive unlocked"));
+        return;
+      }
       finishOpenedArchive(prompt.path, "password");
       return;
     }
@@ -12831,11 +13862,16 @@
       showNotice(tr("gui.password.open_previous_rejected", "That password was rejected. Try again or return to the archive list."));
       return;
     }
+    if (prompt.refresh) {
+      setScreen("browse");
+      return;
+    }
+    pendingArchiveTaskReview = null;
     if (archiveOpenError(prompt.path)?.key === "error.corrupt_archive") {
       recoverySourceMode = "selected";
       recoverySourceOverride = prompt.path;
       recoveryPar2Override = null;
-      setScreenRespectingJobQuestion("recovery");
+      setScreen("recovery");
       showNotice(
         tr("gui.recovery.open_failed_routed", "{name} could not be opened. It is ready for recovery checks.")
           .replace("{name}", pathBaseName(prompt.path)),
@@ -12843,52 +13879,37 @@
       return;
     }
     if (!archiveOpenError(prompt.path)) return;
-    setScreenRespectingJobQuestion("browse");
+    setScreen("browse");
     showNotice(archiveOpenFailureNotice(prompt.path));
   }
 
-  function cancelPasswordRequest() {
-    passwordSubmissionAttempted = false;
-    if (jobPasswordPrompt) {
-      const promptId = jobPasswordPrompt.id;
-      const returnScreen = jobQuestionReturnScreen(promptId);
-      answerJobPassword(null);
-      showNotice(tr("gui.password.prompt_cancelled", "Password prompt cancelled"));
-      jobPasswordValue = "";
-      setScreen(returnScreen);
-      returnTaskQuestionToCenter(promptId);
-      return;
+  function dismissArchivePasswordRequest() {
+    const prompt = archivePasswordPrompt;
+    if (!prompt) return;
+    pendingArchiveTaskReview = null;
+    archivePasswordAttempt += 1;
+    if (!prompt.refresh) archiveOpenGeneration += 1;
+    archiveOpenStatus = "idle";
+    workspacePasswordValue = "";
+    workspacePasswordSubmissionAttempted = false;
+    cancelArchivePasswordPrompt();
+  }
+
+  async function cancelPasswordRequest() {
+    workspacePasswordSubmissionAttempted = false;
+    if (previewPasswordPrompt && !archivePasswordPrompt) {
+      clearEntryPreviewState(true);
+      showNotice(tr("gui.preview.password_cancelled", "Item opening cancelled. The archive is unchanged."));
     }
     if (archivePasswordPrompt) {
-      archiveOpenGeneration += 1;
-      archiveOpenStatus = "idle";
-      cancelArchivePasswordPrompt();
-      showNotice(tr("gui.password.archive_open_cancelled", "Archive opening cancelled."));
+      const refreshing = archivePasswordPrompt.refresh;
+      dismissArchivePasswordRequest();
+      showNotice(refreshing
+        ? tr("gui.archive.refresh_cancelled", "Refresh cancelled. Retry before editing the archive.")
+        : tr("gui.password.archive_open_cancelled", "Archive opening cancelled."));
     }
-    jobPasswordValue = "";
+    workspacePasswordValue = "";
     setScreen("browse");
-  }
-
-  function conflictRowsView() {
-    if (!jobConflictPrompt) return [];
-    return [
-      {
-        path: jobConflictPrompt.incoming_path,
-        existing: `${formatBytes(jobConflictPrompt.existing_size)} · ${formatModified(jobConflictPrompt.existing_modified)}`,
-        incoming: `${formatBytes(jobConflictPrompt.incoming_size)} · ${formatModified(jobConflictPrompt.incoming_modified)}`,
-        decision: tr("gui.conflict.choose", "Choose"),
-      },
-    ];
-  }
-
-  function conflictPromptTitle(): string {
-    if (jobConflictPrompt) return tr("gui.conflict.one_item_exists", "1 item already exists");
-    return tr("gui.conflict.no_prompt", "No conflict prompt");
-  }
-
-  function conflictPromptDetail(): string {
-    if (jobConflictPrompt) return tr("gui.conflict.task_paused", "This task is waiting for your conflict choice.");
-    return tr("gui.conflict.real_job_pauses_on_overwrite", "Extract tasks pause here only when a file conflict needs your choice.");
   }
 
   function latestRecoveryReportTask(): Task | null {
@@ -13043,7 +14064,8 @@
         ? tr("gui.recovery.damage_exceeds_capacity", "Damage exceeds available recovery data")
         : tr("gui.recovery.verification_did_not_pass", "Verification did not pass");
     }
-    return taskStateLabel(latestRecoveryReportTask()?.state);
+    const task = latestRecoveryReportTask();
+    return task ? taskOutcomeStateLabel(task) : taskStateLabel(null);
   }
 
   function recoveryRedundancyLabel(): string {
@@ -13164,17 +14186,20 @@
     extractReadable: () => void submitBestEffortExtractJob(),
   };
 
-  function answerConflictDecision(decision: TaskConflictDecision, applyAll: boolean) {
-    if (!jobConflictPrompt) {
+  function isCurrentTaskConflictPrompt(prompt: typeof jobConflictPrompt): boolean {
+    return prompt !== null && jobConflictPrompt?.id === prompt.id && jobConflictPrompt.version === prompt.version;
+  }
+
+  async function answerConflictDecision(prompt: typeof jobConflictPrompt, decision: TaskConflictDecision, applyAll: boolean) {
+    if (!prompt || !isCurrentTaskConflictPrompt(prompt)) {
       showNotice(tr("gui.conflict.no_prompt_pending", "No conflict request is active"));
       return;
     }
     const answer = normalizeTaskConflictAnswer(decision, applyAll);
-    const promptId = jobConflictPrompt.id;
-    const returnScreen = jobQuestionReturnScreen(promptId);
-    answerJobConflict(answer.decision, answer.applyAll);
+    const promptId = prompt.id;
+    if (!await answerJobConflict(answer.decision, answer.applyAll)) return;
     if (answer.decision === "abort") {
-      showNotice(tr("gui.conflict.extraction_cancelled", "Extraction cancelled"));
+      showNotice(tr("gui.task.cancel_requested", "Cancel requested"));
     } else {
       showNotice(
         answer.applyAll
@@ -13182,8 +14207,8 @@
           : tr("gui.conflict.decision_sent", "Conflict decision sent to task"),
       );
     }
+    if (jobPasswordPrompt || jobConflictPrompt) return;
     conflictApplyAll = false;
-    setScreen(returnScreen);
     returnTaskQuestionToCenter(promptId);
   }
 
@@ -13205,10 +14230,14 @@
     if (!currentArchive) return noArchiveLabel();
     if (currentArchive.read_only) return tr("gui.settings.password_book.unavailable_status", "Unavailable");
     if (passwordBookStatus.state === "checking") return tr("gui.settings.password_book.checking", "Checking");
-    if (passwordBookStatus.state !== "ready") return tr("gui.settings.password_book.not_checked", "Not checked");
-    return passwordBookStatus.saved
+    const saved = passwordBookStatus.saved === null
+      ? tr("gui.settings.password_book.saved_unknown", "Saved status unknown")
+      : passwordBookStatus.saved
       ? tr("gui.settings.password_book.saved_status", "Saved")
       : tr("gui.settings.password_book.not_saved_status", "Not saved");
+    return passwordBookStatus.session
+      ? `${tr("gui.settings.password_book.session_available", "Available in this session")} · ${saved}`
+      : saved;
   }
 
   function passwordBookDetailLabel(): string {
@@ -13230,23 +14259,27 @@
     }
     return passwordBookStatus.saved
       ? tr("gui.settings.password_book.current_has_saved_entry", "Current archive has a saved secret-store entry")
-      : tr("gui.settings.password_book.prompt_or_save_after_unlock", "Prompt or save after unlocking this archive");
+      : tr("gui.settings.password_book.prompt_or_save_after_unlock", "Enter this archive’s password below to verify and save it.");
   }
 
   function passwordBookForgetDisabledReason(): string {
+    if (archivePasswordSaveBusy()) return tr("gui.settings.password_book.wait_for_save", "Wait for verification to finish or cancel it.");
     if (!currentArchive) return openArchiveFirstLabel();
     if (currentArchive.read_only) {
       return tr("gui.settings.password_book.nested_unavailable", "Extract the inner archive before saving or checking its password.");
     }
-    if (archiveHasSessionPassword()) return "";
     if (passwordBookStatus.state === "checking") {
       return tr("gui.settings.password_book.wait_for_status", "Wait for the password status check to finish");
     }
+    if (passwordBookStatus.session) return "";
     if (passwordBookStatus.state === "error") {
       return tr("gui.settings.password_book.refresh_after_failure", "Refresh password status before forgetting it");
     }
     if (passwordBookStatus.state !== "ready") {
       return tr("gui.settings.password_book.refresh_before_forgetting", "Check password status before forgetting it");
+    }
+    if (passwordBookStatus.saved === null) {
+      return tr("gui.settings.password_book.refresh_after_failure", "Refresh password status before forgetting it");
     }
     if (!passwordBookStatus.saved) {
       return tr("gui.settings.password_book.no_saved_entry", "The current archive has no stored password");
@@ -13255,6 +14288,7 @@
   }
 
   function passwordBookRefreshDisabledReason(): string {
+    if (archivePasswordSaveBusy()) return tr("gui.settings.password_book.wait_for_save", "Wait for verification to finish or cancel it.");
     if (!currentArchive) return openArchiveFirstLabel();
     if (currentArchive.read_only) {
       return tr("gui.settings.password_book.nested_unavailable", "Extract the inner archive before saving or checking its password.");
@@ -13288,10 +14322,7 @@
       return;
     }
 
-    const ok = await forgetCurrentArchivePassword();
-    showNotice(ok
-      ? tr("gui.settings.password_book.current_password_forgotten", "Current archive password forgotten")
-      : tr("gui.settings.password_book.could_not_forget_current", "Could not forget current archive password"));
+    await forgetCurrentArchivePassword();
   }
 
   function showNotice(message: string) {
@@ -13304,6 +14335,9 @@
   }
 
   const convertRouteBridge: ConvertRouteBridge = {
+    onReady: () => {
+      if (convertReviewFocusPending) focusConvertReview();
+    },
     getArchive: () => currentArchive,
     tr,
     tError: (error) => isErrorDto(error) ? tError(error) : String(error),
@@ -13358,11 +14392,15 @@
   }
 
   function checksumCopyFeedbackFor(kind: "checksum" | "checksum_check"): string | null {
-    return checksumCopyFeedbackKind === kind ? checksumCopyFeedbackMessage : null;
+    return checksumCopyFeedbackKind === kind && checksumCopyFeedbackTaskId === selectedChecksumTask(kind)?.id
+      ? checksumCopyFeedbackMessage
+      : null;
   }
 
   function checksumCopyFeedbackToneFor(kind: "checksum" | "checksum_check"): "success" | "danger" | null {
-    return checksumCopyFeedbackKind === kind ? checksumCopyFeedbackTone : null;
+    return checksumCopyFeedbackKind === kind && checksumCopyFeedbackTaskId === selectedChecksumTask(kind)?.id
+      ? checksumCopyFeedbackTone
+      : null;
   }
 
   function taskChecksumCopyFeedback(task: TaskDialogModel): string | null {
@@ -13471,6 +14509,7 @@
 
   function classicCommandDisabledTitle(label: string): string {
     if (!classicCommandDisabled(label)) return "";
+    if (label === "View") return previewSelectedDisabledReason();
     const refreshStatus = archiveRefreshStatusLabel();
     if (refreshStatus) return refreshStatus;
     if (label === "Extract To") {
@@ -13482,7 +14521,6 @@
       if (label === "Extract To") return tr("gui.precondition.open_before_extract", "Open an archive before extracting");
       if (label === "Test") return tr("gui.precondition.open_before_test", "Open an archive before testing");
       if (label === "Protect") return tr("gui.precondition.open_before_protect", "Open an archive before protecting");
-      if (label === "View") return tr("gui.preview.open_archive_first", "Open an archive before opening or previewing entries");
       if (label === "Delete") return tr("gui.precondition.open_before_delete", "Open an archive before deleting entries");
       if (label === "Rename") return tr("gui.precondition.open_before_rename", "Open an archive before renaming entries");
       if (label === "Move") return tr("gui.precondition.open_before_move", "Open an archive before moving entries");
@@ -13498,7 +14536,6 @@
     if (label === "Rename") return tr("gui.precondition.select_one_before_rename", "Select exactly one file or folder before renaming");
     if (label === "Move") return tr("gui.precondition.select_entries_before_move", "Select entries before moving");
     if (label === "Delete") return tr("gui.precondition.select_entries_before_delete", "Select entries before deleting");
-    if (label === "View") return tr("gui.preview.select_one", "Select one entry to open or preview");
     return "";
   }
 
@@ -13543,10 +14580,11 @@
     if (screen === "extract") return tr("gui.screen.extract", "Extract");
     if (screen === "convert") return tr("gui.screen.convert", "Convert Archive");
     if (screen === "batch") return tr("gui.screen.batch", "Batch Extract Review");
+    if (screen === "nestedExtract") return tr("gui.nested_extract.title", "Extract inner archive");
+    if (screen === "updateReview") return tr("gui.update_review.title", "Review archive changes");
     if (screen === "checksum") return tr("gui.screen.checksum", "Checksum");
     if (screen === "duplicates") return tr("gui.screen.duplicates", "Duplicate Finder");
     if (screen === "password") return tr("gui.screen.password", "Password Required");
-    if (screen === "conflict") return tr("gui.screen.conflict", "Conflict Handling");
     if (screen === "recovery") return tr("gui.screen.recovery", "Recovery");
     if (screen === "archiveInfo") return tr("gui.screen.archive_info", "Archive Info");
     if (screen === "integration") return tr("gui.screen.integration", "Formats & Integration");
@@ -13648,7 +14686,7 @@
   >{dropStatusLabel()}</div>
 {/if}
 
-{#if !taskWindowMode && archiveEditKind && !taskDialogVisible() && !macosSfxPublisherTask}
+{#if !taskWindowMode && archiveEditKind && archiveEditorVisible() && !taskDialogVisible() && !macosSfxPublisherTask}
   <ArchiveEntryEditor
     {...archiveEditorFields(archiveEditKind)}
     rootClass={`archive-editor-overlay design-root platform-${activePlatform} palette-${activePalette} theme-${activeTheme} density-${activeDensityChoice}`}
@@ -13778,6 +14816,13 @@
           <h1>{taskWindowShellTitleCopy}</h1>
           <p>{taskWindowShellCopy}</p>
         </div>
+        {#if displayedTaskWindowState.status === "reconnect-error" || displayedTaskWindowState.status === "task-unavailable"}
+          <div class="task-window-empty-actions">
+            <button class="primary-lite" type="button" onclick={() => reloadWindow({ taskWindow: true, taskId: taskDialogTaskId })}>
+              <Icon name="rotate-cw" size={15} />{tr("gui.external_task.reconnect_action", "Retry connection")}
+            </button>
+          </div>
+        {/if}
       </section>
     {/if}
   </main>
@@ -13845,7 +14890,7 @@
         class="modern-shell"
         class:settings-shell={isSettingsScreen()}
         class:no-archive-shell={screen === "browse" && !currentArchive}
-        class:no-inspector-shell={screen === "recent" || screen === "convert" || screen === "create" || screen === "extract"}
+        class:no-inspector-shell={screen === "recent" || screen === "convert" || screen === "create" || screen === "extract" || screen === "duplicates" || screen === "batch" || screen === "nestedExtract" || screen === "updateReview" || screen === "password"}
       >
         <aside class="modern-sidebar" aria-label={tr("gui.aria.navigation", "Navigation")}>
           <div class="sidebar-section">
@@ -13853,7 +14898,7 @@
               <button
                 disabled={navigationDisabled(screenForNav(item[1]))}
                 title={navigationDisabledReason(screenForNav(item[1]))}
-                class:current={(screen === "recent" && item[1] === "Recent") || (screen === "browse" && item[1] === "Archives") || (screen === "create" && item[1] === "Create") || ((screen === "extract" || screen === "batch" || screen === "password" || screen === "conflict") && item[1] === "Extract") || (screen === "convert" && item[1] === "Convert") || (screen === "checksum" && item[1] === "Checksum") || (screen === "duplicates" && item[1] === "Duplicates") || (screen === "recovery" && item[1] === "Recovery") || (isSettingsScreen() && item[1] === "Settings")}
+                class:current={(screen === "recent" && item[1] === "Recent") || ((screen === "browse" || screen === "updateReview") && item[1] === "Archives") || (screen === "create" && item[1] === "Create") || ((screen === "extract" || screen === "batch" || screen === "nestedExtract" || screen === "password") && item[1] === "Extract") || (screen === "convert" && item[1] === "Convert") || (screen === "checksum" && item[1] === "Checksum") || (screen === "duplicates" && item[1] === "Duplicates") || (screen === "recovery" && item[1] === "Recovery") || (isSettingsScreen() && item[1] === "Settings")}
                 onclick={() => navigateToScreen(screenForNav(item[1]))}
               >
                 <Icon name={item[0]} size={16} />
@@ -13970,17 +15015,17 @@
             />
           {:else if screen === "batch"}
             <ToolsWorkspaceHost surface={batchWorkspaceSurface("modern")} />
+          {:else if screen === "nestedExtract"}
+            <ToolsWorkspaceHost surface={nestedExtractWorkspaceSurface("modern")} />
+          {:else if screen === "updateReview"}
+            <ToolsWorkspaceHost surface={archiveUpdateWorkspaceSurface("modern")} />
           {:else if screen === "checksum"}
             <ToolsWorkspaceHost surface={checksumWorkspaceSurface("modern")} />
           {:else if screen === "duplicates"}
             <ToolsWorkspaceHost surface={duplicatesWorkspaceSurface("modern")} />
           {:else if screen === "password"}
-            <TaskInteractionWorkspaceHost
-              surface={taskInteractionWorkspaceSurface("modern", "password")}
-            />
-          {:else if screen === "conflict"}
-            <TaskInteractionWorkspaceHost
-              surface={taskInteractionWorkspaceSurface("modern", "conflict")}
+            <PasswordWorkspaceHost
+              surface={passwordWorkspaceSurface("modern")}
             />
           {:else if screen === "recovery"}
             <RecoveryWorkspaceHost
@@ -14013,7 +15058,7 @@
                   <div class="panel-title"><Icon name="archive" size={16} />{extractDestinationFieldLabel()}</div>
                   <div class="setting-callout">
                     <strong>{extractDestinationTitle(extractDestinationMode)}</strong>
-                    <span>{effectiveExtractDest()}</span>
+                    <span>{extractJobDestination()}</span>
                   </div>
                   <div class="settings-route-list">
                     <button class="settings-route-card" onclick={() => openExtractWorkspace("all")}>
@@ -14065,7 +15110,7 @@
 	          {/if}
         </section>
 
-        {#if !isSettingsScreen() && screen !== "recent" && screen !== "convert" && screen !== "create" && screen !== "extract" && (screen !== "browse" || currentArchive)}
+        {#if !isSettingsScreen() && screen !== "recent" && screen !== "convert" && screen !== "create" && screen !== "extract" && screen !== "duplicates" && screen !== "batch" && screen !== "nestedExtract" && screen !== "updateReview" && screen !== "password" && (screen !== "browse" || currentArchive)}
           <ModernInspectorHost
             surface={modernInspectorSurface()}
             ariaLabel={tr("gui.aria.archive_inspector", "Archive inspector")}
@@ -14195,12 +15240,10 @@
               <i>/</i><button type="button" title={dir} onclick={() => void openArchiveBreadcrumb(index)}>{dir}</button>
             {/each}
           </div>
-          {#if screen === "extract" || screen === "batch"}
-            <div class="encoding-chip accent"><Icon name="archive" size={14} />{tr("gui.extract.smart_on", "Smart extract on")}</div>
+          {#if screen === "extract" || screen === "batch" || screen === "nestedExtract"}
+            <div class="encoding-chip accent"><Icon name="archive" size={14} />{screen === "nestedExtract" ? tr("gui.nested_extract.title", "Extract inner archive") : screen === "batch" ? tr("gui.batch.title", "Batch Extract") : extractDestinationTitle(extractDestinationMode)}</div>
           {:else if screen === "password"}
             <div class="encoding-chip warning"><Icon name="lock" size={14} />{tr("gui.password.required", "Password required")}</div>
-          {:else if screen === "conflict"}
-            <div class="encoding-chip warning"><Icon name="alert-triangle" size={14} />{jobConflictPrompt ? tr("gui.conflict.review", "Conflict review") : tr("gui.conflict.none", "No conflicts")}</div>
           {:else if screen === "recovery"}
             <div class="encoding-chip accent"><Icon name="shield-alert" size={14} />{recoverySourceName() ?? tr("gui.recovery.no_archive_selected", "No archive selected")}</div>
           {:else if screen === "checksum"}
@@ -14301,7 +15344,7 @@
                   <div class="classic-label">{tr("common.mode", "Mode")}</div>
                   <div class="classic-input accent">{extractDestinationTitle(extractDestinationMode)}</div>
                   <div class="classic-label">{tr("common.destination", "Destination")}</div>
-                  <div class="classic-input classic-copy-wrap">{effectiveExtractDest()}</div>
+                  <div class="classic-input classic-copy-wrap">{extractJobDestination()}</div>
                 </div>
               </aside>
             </div>
@@ -14343,17 +15386,17 @@
         />
       {:else if screen === "batch"}
         <ToolsWorkspaceHost surface={batchWorkspaceSurface("classic")} />
+      {:else if screen === "nestedExtract"}
+        <ToolsWorkspaceHost surface={nestedExtractWorkspaceSurface("classic")} />
+      {:else if screen === "updateReview"}
+        <ToolsWorkspaceHost surface={archiveUpdateWorkspaceSurface("classic")} />
       {:else if screen === "checksum"}
         <ToolsWorkspaceHost surface={checksumWorkspaceSurface("classic")} />
       {:else if screen === "duplicates"}
         <ToolsWorkspaceHost surface={duplicatesWorkspaceSurface("classic")} />
       {:else if screen === "password"}
-        <TaskInteractionWorkspaceHost
-          surface={taskInteractionWorkspaceSurface("classic", "password")}
-        />
-      {:else if screen === "conflict"}
-        <TaskInteractionWorkspaceHost
-          surface={taskInteractionWorkspaceSurface("classic", "conflict")}
+        <PasswordWorkspaceHost
+          surface={passwordWorkspaceSurface("classic")}
         />
       {:else if screen === "recovery"}
         <div class="classic-dialog-body" class:with-archive-return={showArchiveReturnBar()}>
@@ -14404,7 +15447,7 @@
 
       <footer class="classic-statusbar">
         {#if screen === "create"}
-          <span>{lastCreatePlan ? tr("gui.create.source_files_count", "{count} source files").replace("{count}", lastCreatePlan.files.toLocaleString()) : tr("gui.create.source_files_pending", "Source files pending")}</span>
+          <span>{lastCreatePlan ? tr("gui.create.source_files_count", "{count} source files").replace("{count}", lastCreatePlan.files.toLocaleString()) : tr("gui.create.source_files_pending", "Source files awaiting checks")}</span>
           <span>{createSfxEnabled ? createSfxOutputLabel() : activeCreateFormatData().label} · {createMethodLabel()}</span>
           <span>{createSplitCapability()} · {createRecoveryCapability()}</span>
           <strong>{diskPreflightStatusbar()}</strong>
@@ -14425,31 +15468,34 @@
           <span title={extractScopeStatus}>{extractScopeStatus}</span>
           <span title={extractConflictStatus}>{extractConflictCompactStatus}</span>
           <strong title={extractDestinationStatus}>{extractDestinationStatus}</strong>
+        {:else if screen === "updateReview"}
+          <span>{tr("gui.update_review.title", "Review archive changes")}</span>
+          <strong>{tr("gui.update_review.count", "{count} changes selected").replace("{count}", String(archiveUpdateReview.selectedCount()))}</strong>
+        {:else if screen === "nestedExtract"}
+          <span>{tr("gui.nested_extract.title", "Extract inner archive")}</span>
+          <span>{nestedExtractDraft ? pathBaseName(nestedExtractDraft.entry_path) : tr("gui.nested_extract.empty", "No inner archive selected")}</span>
+          <span>{extractOverwriteLabel(nestedExtractDraft?.overwrite ?? "ask")}</span>
+          <strong>{tr("gui.batch.check_at_start", "Archives are checked when the task starts")}</strong>
         {:else if screen === "batch"}
           <span>{tr("gui.batch.title", "Batch Extract")}</span>
-          <span>{tr("gui.batch.status_counts", "{archives} archives · {ready} ready").replace("{archives}", String(batchReviewArchives().length)).replace("{ready}", String(batchReadyCount()))}</span>
-          <span>{batchWarningLabel()}</span>
-          <strong>{tr("gui.batch.status_ready_rule", "Ready archives can continue; blocked archive waits")}</strong>
+          <span>{tr("gui.batch.archive_count", "Archives: {count}").replace("{count}", String(effectiveBatchDraft().items.length))}</span>
+          <span>{extractOverwriteLabel(effectiveBatchDraft().overwrite)}</span>
+          <strong>{tr("gui.batch.check_at_start", "Archives are checked when the task starts")}</strong>
         {:else if screen === "checksum"}
           <span>{tr("gui.screen.checksum", "Checksum")}</span>
           <span>{tr("gui.status.target", "Target: {target}").replace("{target}", checksumTargetName())}</span>
           <span>{tr("gui.checksum.status_algorithm_excludes", "{algorithm} · {count} excludes").replace("{algorithm}", checksumAlgorithmLabel(checksumAlgorithm)).replace("{count}", String(checksumExcludeRules().length))}</span>
-          <strong>{tr("gui.checksum.status_failed_latest", "{count} failed in latest manifest check").replace("{count}", checksumResultNumber("checksum_check", "failed").toLocaleString())}</strong>
+          <strong>{tr("gui.checksum.status_failed_report", "{count} failed in this manifest report").replace("{count}", checksumResultNumber("checksum_check", "failed").toLocaleString())}</strong>
         {:else if screen === "duplicates"}
           <span>{tr("gui.screen.duplicates", "Duplicate Finder")}</span>
           <span>{tr("gui.status.target", "Target: {target}").replace("{target}", duplicateScanTargetName())}</span>
           <span>{tr("gui.duplicates.status_min_excludes", "Min: {min} · {count} excludes").replace("{min}", formatBytes(duplicateMinSize)).replace("{count}", String(duplicateExcludeRules().length))}</span>
-          <strong>{tr("gui.duplicates.status_groups_reclaimable", "{groups} groups · {size} reclaimable").replace("{groups}", duplicateResultNumber("duplicate_groups").toLocaleString()).replace("{size}", formatBytes(duplicateResultNumber("reclaimable_bytes")))}</strong>
+          <strong>{tr("gui.duplicates.status_groups_reclaimable", "{groups} groups · {size} reclaimable").replace("{groups}", duplicateResultLabel("duplicate_groups")).replace("{size}", duplicateResultLabel("reclaimable_bytes", true))}</strong>
         {:else if screen === "password"}
           <span>{tr("gui.screen.password", "Password Required")}</span>
           <span>{passwordPromptName()}</span>
           <span>{tr("gui.password.keychain_opt_in_short", "{secretStore} opt-in only").replace("{secretStore}", secretStoreLabel())}</span>
           <strong>{tr("gui.password.no_plaintext_storage", "No plaintext password stored in settings or task status")}</strong>
-	        {:else if screen === "conflict"}
-	          <span>{tr("gui.screen.conflict", "Conflict Handling")}</span>
-	          <span>{jobConflictPrompt ? tr("gui.conflict.existing_files_loaded", "Existing files loaded") : tr("gui.conflict.no_prompt", "No conflict prompt")}</span>
-	          <span>{tr("gui.conflict.default_ask_before_replace", "Default: ask before replace")}</span>
-	          <strong>{jobConflictPrompt ? tr("gui.conflict.silent_overwrite_disabled", "Silent overwrite disabled") : tr("gui.conflict.no_active_request", "No conflict request is active")}</strong>
 	        {:else if screen === "recovery"}
 	          <span>{tr("gui.recovery.status_par2_sidecar", "Recovery: PAR2 sidecar")}</span>
 	          <span>{recoverySourceName() ?? tr("gui.recovery.no_archive_selected", "No archive selected")}</span>

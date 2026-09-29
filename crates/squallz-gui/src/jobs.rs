@@ -17,7 +17,9 @@ use squallz_core::{
 
 use crate::audit::{self, OperationAudit, OperationAuditRecord};
 use crate::bridge::{AskAnswer, AskBridge};
-use crate::dto::{ErrorDto, JobSpec, SettingsDto, SfxCreateCapabilityDto, StateEvent};
+use crate::dto::{
+    ErrorDto, JobSnapshotDescription, JobSpec, SettingsDto, SfxCreateCapabilityDto, StateEvent,
+};
 use crate::events::{emit, EventSink, EV_STATE};
 use crate::source_cleanup_journal::SourceCleanupJournal;
 use crate::state::{AppState, ResolvedArchiveSource};
@@ -38,7 +40,7 @@ pub(crate) use execution::{
 use progress::EmitProgress;
 
 #[cfg(test)]
-mod test_support;
+pub(crate) mod test_support;
 
 use snapshots::{job_unavailable_error, JobSnapshotStore};
 pub use snapshots::{JobInteraction, JobSnapshotDelta, JobStateSnapshot};
@@ -201,7 +203,7 @@ struct ManagedJob {
 
 struct PreparedJob {
     execution_spec: JobSpec,
-    snapshot_spec: JobSpec,
+    snapshot: JobSnapshotDescription,
     _source_leases: Vec<ResolvedArchiveSource>,
     redactions: Vec<(String, String)>,
 }
@@ -304,10 +306,11 @@ impl PreparedJob {
             }
             _ => {}
         }
-        snapshot_spec = snapshot_spec.redacted_for_snapshot();
+        let mut snapshot = snapshot_spec.redacted_for_snapshot();
+        snapshot.review_spec = spec.redacted_for_snapshot().spec;
         Ok(Self {
             execution_spec,
-            snapshot_spec,
+            snapshot,
             _source_leases: source_leases,
             redactions,
         })
@@ -569,7 +572,7 @@ impl JobManager {
         settings: SettingsDto,
     ) -> Result<u64, FormatError> {
         let prepared = PreparedJob::new(&state, owner_window.as_deref(), &spec)?;
-        let spec = prepared.snapshot_spec;
+        let spec = prepared.snapshot.spec.clone();
         self.cleanup_terminal_queue_slots();
         let gui_id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let bridge = Arc::clone(&self.bridge);
@@ -593,7 +596,7 @@ impl JobManager {
             lock_unpoisoned(&self.snapshots).insert_with_resources(
                 gui_id,
                 owner_window,
-                spec.redacted_for_snapshot(),
+                prepared.snapshot,
                 "cancelled",
                 job_resources,
                 stream_buffer_limit_bytes,
@@ -603,7 +606,7 @@ impl JobManager {
         let queued_version = lock_unpoisoned(&self.snapshots).insert_with_resources(
             gui_id,
             owner_window.clone(),
-            spec.redacted_for_snapshot(),
+            prepared.snapshot,
             "queued",
             job_resources,
             stream_buffer_limit_bytes,
@@ -1107,6 +1110,21 @@ impl JobManager {
         self.cleanup_terminal_queue_slots();
         self.sync_queue_positions();
         lock_unpoisoned(&self.snapshots).delta(requester, since)
+    }
+
+    pub fn review_spec_for_window(
+        &self,
+        state: &AppState,
+        requester: &str,
+        gui_id: u64,
+    ) -> Result<JobSpec, ErrorDto> {
+        let spec = lock_unpoisoned(&self.snapshots)
+            .review_spec(requester, gui_id)
+            .ok_or_else(job_unavailable_error)?;
+        // Resolve source ownership and lifetime again. A display path must never
+        // replace an expired handle, even if a file with that name now exists.
+        PreparedJob::new(state, Some(requester), &spec).map_err(ErrorDto::from)?;
+        Ok(spec)
     }
 
     pub fn dismiss_snapshots_for_window(

@@ -1,5 +1,6 @@
 import { tFallback } from "./i18n.svelte";
 import { readCreateResult } from "./create-result";
+import { readBatchExtractResult } from "./batch-extract-result";
 import type { Task } from "./jobs.svelte";
 import { recoveryResultOk } from "./recovery-result";
 import type { Screen } from "./ui-model";
@@ -83,6 +84,21 @@ export function isTaskActiveState(state: string | null | undefined): boolean {
     || state === "pausing";
 }
 
+export function taskNeedsInput(task: TaskDialogModel): boolean {
+  return isTaskActiveState(task.state) && task.controlIntent !== "cancel" && task.interaction !== null;
+}
+
+export function taskStatusUnavailable(task: TaskDialogModel): boolean {
+  return Boolean(task.statusStale) && isTaskActiveState(task.state);
+}
+
+export function taskOutcomeStateLabel(task: TaskDialogModel): string {
+  if (taskStatusUnavailable(task)) return tFallback("gui.task.status_unavailable", "Status unavailable");
+  return taskOutcomeNeedsAttention(task)
+    ? tFallback("gui.task.state.needs_attention", "Needs attention")
+    : taskStateLabel(task.state);
+}
+
 export function sourceCleanupResult(task: TaskDialogModel): SourceCleanupResult | null {
   const raw = task.result?.source_cleanup;
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
@@ -101,7 +117,8 @@ export function taskOutcomeNeedsAttention(task: TaskDialogModel): boolean {
     return task.result?.ok === false;
   }
   if (task.spec.kind === "batch_extract") {
-    return Number(task.result?.failed ?? 0) > 0
+    const outcome = readBatchExtractResult(task.result);
+    return outcome.reviewCount > 0 || outcome.skippedEntries > 0
       || extractResultNeedsAttention(task.result);
   }
   if (task.spec.kind === "extract" || task.spec.kind === "extract_nested") {
@@ -130,6 +147,24 @@ export function taskChecksumItems(task: TaskDialogModel): Record<string, unknown
     (item): item is Record<string, unknown> =>
       item !== null && typeof item === "object" && !Array.isArray(item),
   );
+}
+
+export interface DuplicateGroupSummary {
+  hash: string;
+  size: number;
+  paths: string[];
+}
+
+export function taskDuplicateGroups(task: TaskDialogModel | null): DuplicateGroupSummary[] {
+  const groups = task?.spec.kind === "duplicate_scan" ? task.result?.groups : null;
+  if (!Array.isArray(groups)) return [];
+  return groups.flatMap((group) => {
+    if (!group || typeof group !== "object" || typeof group.hash !== "string"
+      || typeof group.size !== "number" || !Number.isFinite(group.size) || group.size < 0
+      || !Array.isArray(group.paths)) return [];
+    const paths = group.paths.filter((path: unknown): path is string => typeof path === "string");
+    return paths.length < 2 ? [] : [{ hash: group.hash, size: group.size, paths }];
+  });
 }
 
 export function checksumItemText(item: Record<string, unknown>, key: string): string {
@@ -193,9 +228,11 @@ export function taskResultScreen(task: TaskDialogModel): TaskResultScreen | null
 export function taskHasInlineResults(task: TaskDialogModel): boolean {
   return (
     task.spec.kind === "compress"
+    || task.spec.kind === "batch_extract"
     || task.spec.kind === "convert"
     || task.spec.kind === "publish_macos_sfx"
     || task.spec.kind === "protect"
+    || task.spec.kind === "test"
     || (
       (task.spec.kind === "extract" || task.spec.kind === "extract_nested")
       && readExtractResultCounts(task.result) !== null
@@ -203,8 +240,17 @@ export function taskHasInlineResults(task: TaskDialogModel): boolean {
   ) && task.result !== null;
 }
 
-export function taskFailureReviewScreen(task: TaskDialogModel): Screen | null {
-  if (task.state !== "failed") return null;
+export function taskReviewScreen(task: TaskDialogModel): Screen | null {
+  if (task.state === "done" && task.spec.kind === "extract_nested" && (readExtractResultCounts(task.result)?.failed ?? 0) > 0) {
+    return "nestedExtract";
+  }
+  if (task.state === "done" && task.spec.kind === "batch_extract" && readBatchExtractResult(task.result).reviewCount > 0) {
+    return "batch";
+  }
+  if (task.state === "done" && task.spec.kind === "test" && task.result?.ok === false) {
+    return "recovery";
+  }
+  if (task.state !== "failed" && task.state !== "cancelled") return null;
   switch (task.spec.kind) {
     case "compress":
       return "create";
@@ -213,10 +259,14 @@ export function taskFailureReviewScreen(task: TaskDialogModel): Screen | null {
     case "batch_extract":
       return "batch";
     case "extract_nested":
+      return "nestedExtract";
     case "update":
-      return "browse";
+      return "updateReview";
     case "convert":
       return "convert";
+  }
+  if (task.state !== "failed") return null;
+  switch (task.spec.kind) {
     case "checksum":
     case "checksum_check":
       return "checksum";

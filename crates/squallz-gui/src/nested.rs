@@ -10,6 +10,7 @@ use squallz_core::api::{
 };
 use tempfile::{Builder, NamedTempFile, TempPath};
 
+use crate::password_cache::PasswordAttempt;
 use crate::preview_workspace::PreviewWorkspace;
 use crate::state::AppState;
 
@@ -82,6 +83,20 @@ fn copy_with_limit<R: Read + ?Sized, W: Write>(
     Ok(written)
 }
 
+pub(crate) struct PreparedEntry {
+    pub size: u64,
+    password: Option<(PasswordAttempt, Password)>,
+}
+
+impl PreparedEntry {
+    pub(crate) fn remember_password(&self, state: &AppState, control: &ControlToken) {
+        if let Some((attempt, password)) = &self.password {
+            state.remember_password(attempt, password.expose(), control);
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn write_archive_entry_limited<W: Write>(
     state: &AppState,
     outer_path: &Path,
@@ -90,22 +105,37 @@ pub(crate) fn write_archive_entry_limited<W: Write>(
     encoding: Option<&str>,
     writer: &mut W,
     max_bytes: u64,
-) -> Result<u64, FormatError> {
+    control: &ControlToken,
+) -> Result<PreparedEntry, FormatError> {
+    let attempt = password.and_then(|_| state.password_attempt(outer_path, control));
     let open_opts = OpenOptions {
         password: password
             .map(Password::new)
             .or_else(|| state.password_for(outer_path)),
         encoding_override: encoding.map(str::to_owned),
     };
-    let mut outer = state.engine.open(outer_path, &open_opts)?;
     let mut written = 0;
-    outer.read_entry(&EntryPath::from_utf8(entry_path), &mut |entry| {
-        written = copy_with_limit(entry, writer, max_bytes)?;
-        Ok(())
-    })?;
-    Ok(written)
+    let verified = state.engine.read_entry_verifying_password(
+        outer_path,
+        &EntryPath::from_utf8(entry_path),
+        &open_opts,
+        control,
+        &mut |entry| {
+            written = copy_with_limit(entry, writer, max_bytes)?;
+            Ok(())
+        },
+    )?;
+    Ok(PreparedEntry {
+        size: written,
+        password: if verified {
+            attempt.zip(open_opts.password)
+        } else {
+            None
+        },
+    })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn extract_nested_archive_to_temp_limited(
     state: &AppState,
     outer_path: &Path,
@@ -114,9 +144,10 @@ pub(crate) fn extract_nested_archive_to_temp_limited(
     encoding: Option<&str>,
     workspace: &Path,
     max_bytes: u64,
-) -> Result<(TempPath, u64), FormatError> {
+    control: &ControlToken,
+) -> Result<(TempPath, PreparedEntry), FormatError> {
     let mut temp = create_nested_temp_file(entry_path, workspace)?;
-    let size = write_archive_entry_limited(
+    let prepared = write_archive_entry_limited(
         state,
         outer_path,
         entry_path,
@@ -124,9 +155,10 @@ pub(crate) fn extract_nested_archive_to_temp_limited(
         encoding,
         temp.as_file_mut(),
         max_bytes,
+        control,
     )?;
     temp.as_file_mut().flush()?;
-    Ok((temp.into_temp_path(), size))
+    Ok((temp.into_temp_path(), prepared))
 }
 
 fn normalized_entry_name(path: &str) -> String {
@@ -244,6 +276,73 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
     use std::sync::{Arc, Mutex};
+
+    struct WriteAction<F: FnMut()> {
+        action: F,
+    }
+
+    impl<F: FnMut()> Write for WriteAction<F> {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            (self.action)();
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn preview_read_cancellation_and_forget_prevent_password_publication() {
+        use squallz_core::api::{CreateOptions, NoProgress};
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("secret.txt");
+        fs::write(&file, vec![b'x'; 128 * 1024]).unwrap();
+        let path = dir.path().join("secret.zip");
+        let state = AppState::new();
+        state
+            .engine
+            .create(
+                &path,
+                &[file],
+                &CreateOptions {
+                    password: Some(Password::new("secret")),
+                    ..CreateOptions::default()
+                },
+                &NoProgress,
+                &ControlToken::default(),
+            )
+            .unwrap();
+        for cancel in [false, true] {
+            let control = ControlToken::default();
+            let mut writer = WriteAction {
+                action: || {
+                    if cancel {
+                        control.cancel();
+                    } else {
+                        state.forget_password(&path);
+                    }
+                },
+            };
+            let result = write_archive_entry_limited(
+                &state,
+                &path,
+                "secret.txt",
+                Some("secret"),
+                None,
+                &mut writer,
+                256 * 1024,
+                &control,
+            );
+            if cancel {
+                assert!(matches!(result, Err(FormatError::Cancelled)));
+            } else {
+                let prepared = result.unwrap();
+                assert_eq!(prepared.size, 128 * 1024);
+                prepared.remember_password(&state, &control);
+            }
+            assert!(state.password_for(&path).is_none());
+        }
+    }
 
     struct CancelAfterFirstChunk {
         ctl: Arc<ControlToken>,
@@ -396,11 +495,20 @@ mod tests {
         drop(archive);
 
         let mut output = Vec::new();
-        let result =
-            write_archive_entry_limited(&state, &outer, "inner.bin", None, None, &mut output, 32);
+        let result = write_archive_entry_limited(
+            &state,
+            &outer,
+            "inner.bin",
+            None,
+            None,
+            &mut output,
+            32,
+            &ControlToken::default(),
+        );
         assert!(
             matches!(result, Err(FormatError::ResourceLimitExceeded(_))),
-            "{result:?}"
+            "{:?}",
+            result.err()
         );
         assert_eq!(output, vec![b'x'; 32]);
 

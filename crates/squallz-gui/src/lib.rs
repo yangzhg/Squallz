@@ -13,6 +13,7 @@ mod jobs;
 mod native_menu;
 mod nested;
 mod open_files;
+mod password_cache;
 mod preview_sessions;
 mod preview_workspace;
 mod secrets;
@@ -89,6 +90,9 @@ pub fn run() {
             commands::take_validation_drop_paths,
             commands::list_entries,
             commands::resolve_archive_directory,
+            commands::missing_archive_paths,
+            commands::plan_archive_move,
+            commands::inspect_archive_target,
             commands::search_entries,
             commands::cancel_archive_search,
             commands::get_formats,
@@ -114,6 +118,7 @@ pub fn run() {
             commands::remove_integration_changes,
             commands::preview_nested_archive,
             commands::preview_archive_entry,
+            commands::cancel_entry_preview,
             commands::open_preview_session,
             commands::reveal_preview_session,
             commands::release_preview_session,
@@ -122,6 +127,7 @@ pub fn run() {
             commands::get_macos_sfx_publisher_status,
             commands::submit_job,
             commands::job_snapshot,
+            commands::review_job_spec,
             commands::open_job_output,
             commands::job_snapshots,
             commands::dismiss_job_snapshots,
@@ -136,6 +142,7 @@ pub fn run() {
             commands::answer_password,
             commands::archive_password_status,
             commands::remember_archive_password,
+            commands::cancel_password_save,
             commands::forget_archive_password,
             commands::take_open_files,
             commands::open_file_listener_ready,

@@ -2279,6 +2279,103 @@ fn cancel_password_prompt_reports_cancelled_without_poll_delay() {
 }
 
 #[test]
+fn successful_password_jobs_remember_only_when_not_forgotten_during_the_prompt() {
+    for forget in [false, true] {
+        let dir = temp_dir(if forget {
+            "forget-running-password"
+        } else {
+            "remember-verified-password"
+        });
+        let state = Arc::new(AppState::new());
+        let archive = create_password_protected_zip(&dir, &state);
+        let manager = JobManager::new();
+        let sink = Arc::new(TestSink::default());
+        let events: Arc<dyn EventSink> = sink.clone();
+        let id = manager.submit_for_test_window(
+            "main".into(),
+            Arc::clone(&state),
+            events,
+            password_test_job(&archive),
+            SettingsDto::default(),
+        );
+        wait_for_password_prompt(&sink, id);
+        if forget {
+            state.forget_password(&archive);
+        }
+        let version = manager
+            .snapshot_for_window("main", id)
+            .unwrap()
+            .question
+            .unwrap()
+            .version();
+        manager
+            .answer_password_for_window("main", id, version, Some("secret".into()))
+            .unwrap();
+        wait_for_state(&sink, id, "done", std::time::Duration::from_secs(2));
+        manager.wait_idle();
+        assert_eq!(
+            done_result(&sink.events.lock().unwrap(), id).unwrap()["ok"],
+            true
+        );
+        assert_eq!(state.password_for(&archive).is_some(), !forget);
+        fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[test]
+fn skipping_the_encrypted_entry_after_a_prompt_does_not_validate_the_answer() {
+    let dir = temp_dir("skip-unverified-password");
+    let state = Arc::new(AppState::new());
+    let archive = create_password_protected_zip(&dir, &state);
+    let output = dir.join("out");
+    let manager = JobManager::new();
+    let sink = Arc::new(TestSink::default());
+    let events: Arc<dyn EventSink> = sink.clone();
+    let id = manager.submit_for_test_window(
+        "main".into(),
+        Arc::clone(&state),
+        events,
+        JobSpec::Extract {
+            path: archive.to_string_lossy().into_owned(),
+            dest: output.to_string_lossy().into_owned(),
+            expected_destination: None,
+            expected_input_guard: None,
+            selection: None,
+            overwrite: squallz_core::api::OverwritePolicy::Skip,
+            symlinks: squallz_core::api::SymlinkPolicy::Preserve,
+            smart: false,
+            encoding: None,
+            password: None,
+            verify_sfx: false,
+            best_effort: false,
+        },
+        SettingsDto::default(),
+    );
+    wait_for_password_prompt(&sink, id);
+    // Another operation fills the destination while the password question is
+    // open. The retry must skip it without treating that as successful decryption.
+    fs::create_dir_all(output.join("secret-src")).unwrap();
+    let existing = output.join("secret-src/secret.txt");
+    fs::write(&existing, b"keep this file").unwrap();
+    let version = manager
+        .snapshot_for_window("main", id)
+        .unwrap()
+        .question
+        .unwrap()
+        .version();
+    manager
+        .answer_password_for_window("main", id, version, Some("wrong".into()))
+        .unwrap();
+    wait_for_state(&sink, id, "done", std::time::Duration::from_secs(2));
+    manager.wait_idle();
+    let result = done_result(&sink.events.lock().unwrap(), id).unwrap();
+    assert_eq!(result["counts"]["skipped"], 1);
+    assert_eq!(fs::read(existing).unwrap(), b"keep this file");
+    assert!(state.password_for(&archive).is_none());
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn releasing_window_cancels_password_wait_and_advances_other_owner() {
     let dir = temp_dir("release-password-owner");
     let state = Arc::new(AppState::new());
@@ -2599,6 +2696,19 @@ fn completed_jobs_are_written_to_backend_audit_log() {
     assert_eq!(recent[0].state, "done");
     assert!(recent[0].detail.contains("audited.zip"));
     assert!(!recent[0].detail.contains("audit-password"));
+    let snapshot = manager.snapshot(id).unwrap();
+    assert!(snapshot.output_password_required);
+    assert!(!serde_json::to_string(&snapshot)
+        .unwrap()
+        .contains("audit-password"));
+    assert!(matches!(
+        snapshot.spec,
+        JobSpec::Compress {
+            password: None,
+            encrypt_names: false,
+            ..
+        }
+    ));
     assert!(std::fs::read_to_string(audit_path)
         .unwrap()
         .contains("\"kind\":\"compress\""));
@@ -2935,6 +3045,8 @@ fn queued_opaque_nested_source_stays_leased_and_never_reaches_public_state() {
             display_path.clone(),
             "displayed-outer.zip".into(),
             squallz_core::api::SafetyLimits::default().max_entries,
+            None,
+            &ControlToken::default(),
         )
         .unwrap();
 
@@ -2954,6 +3066,39 @@ fn queued_opaque_nested_source_stays_leased_and_never_reaches_public_state() {
         password: None,
         best_effort: false,
     };
+    let prepared = PreparedJob::new(&state, Some("lease-test"), &nested_job).unwrap();
+    let review_id = 99_000;
+    lock_unpoisoned(&manager.snapshots).insert_with_resources(
+        review_id,
+        Some("lease-test".into()),
+        prepared.snapshot.clone(),
+        "failed",
+        JobResources::default(),
+        None,
+    );
+    drop(prepared);
+    let review = manager
+        .review_spec_for_window(&state, "lease-test", review_id)
+        .unwrap();
+    match review {
+        JobSpec::ExtractNested {
+            outer_path,
+            entry_path,
+            password,
+            ..
+        } => {
+            assert_eq!(outer_path, archive.source);
+            assert_eq!(entry_path, inner_name);
+            assert!(password.is_none());
+        }
+        _ => panic!("expected the original nested extraction"),
+    }
+    assert!(manager
+        .review_spec_for_window(&state, "main", review_id)
+        .is_err());
+    assert!(manager
+        .review_spec_for_window(&state, "other-window", review_id)
+        .is_err());
     let next_id = manager.next_id.load(Ordering::Relaxed);
     let foreign_error = manager
         .submit_for_window(
@@ -2986,6 +3131,10 @@ fn queued_opaque_nested_source_stays_leased_and_never_reaches_public_state() {
         SettingsDto::default(),
     );
     state.close_archive_for_window("lease-test", archive.id);
+    std::fs::write(&display_path, b"a different file with the displayed name").unwrap();
+    assert!(manager
+        .review_spec_for_window(&state, "lease-test", review_id)
+        .is_err());
 
     assert_eq!(manager.snapshot(id).unwrap().state, "queued");
     assert!(physical_path.exists());
@@ -3141,6 +3290,10 @@ fn convert_job_reports_split_output_set() {
     assert_eq!(snapshot.state, "done");
     let result = snapshot.result.as_ref().unwrap();
     assert_eq!(result["operation"], "convert");
+    assert!(snapshot.output_password_required);
+    assert!(!serde_json::to_string(&snapshot)
+        .unwrap()
+        .contains("destination secret"));
     assert_eq!(result["split"], true);
     assert!(result["volume_count"]
         .as_u64()
@@ -4637,6 +4790,66 @@ fn extract_job_best_effort_reports_skipped_entries() {
     assert_eq!(result["counts"]["failed"], 1);
     assert!(result["problems"][0].as_str().unwrap().contains("bad.txt"));
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn batch_best_effort_preserves_entry_failures_in_completed_outputs() {
+    let dir = temp_dir("batch-best-effort");
+    let damaged = dir.join("damaged.zip");
+    let good = dir.join("good.zip");
+    let payload = b"broken bytes";
+    let mut bytes = build_stored_zip(&[(b"bad.txt", payload), (b"good.txt", b"safe bytes")]);
+    bytes[30 + b"bad.txt".len()] ^= 0xFF;
+    std::fs::write(&damaged, bytes).unwrap();
+    std::fs::write(&good, build_stored_zip(&[(b"complete.txt", b"complete")])).unwrap();
+    let manager = JobManager::new();
+    let state = Arc::new(AppState::new());
+    let sink = Arc::new(TestSink::default());
+    let events: Arc<dyn EventSink> = sink.clone();
+    let id = manager.submit(
+        state,
+        events,
+        JobSpec::BatchExtract {
+            items: [(&damaged, "damaged-output"), (&good, "good-output")]
+                .into_iter()
+                .map(|(path, name)| BatchExtractItem {
+                    path: path.to_string_lossy().into_owned(),
+                    dest: dir.join(name).to_string_lossy().into_owned(),
+                    encoding: None,
+                    password: None,
+                    best_effort: true,
+                })
+                .collect(),
+            overwrite: squallz_core::api::OverwritePolicy::Skip,
+            symlinks: squallz_core::api::SymlinkPolicy::Preserve,
+            smart: false,
+        },
+        SettingsDto::default(),
+    );
+    manager.wait_idle();
+    let events = sink.events.lock().unwrap().clone();
+    assert_eq!(states_of(&events, id), vec!["queued", "running", "done"]);
+    let result = done_result(&events, id).unwrap();
+    assert_eq!(result["extracted"], 2);
+    assert_eq!(result["failed"], 0);
+    assert_eq!(result["outputs"][0]["counts"]["created"], 1);
+    assert_eq!(result["outputs"][0]["counts"]["failed"], 1);
+    assert_eq!(
+        result["outputs"][0]["archive"],
+        damaged.to_string_lossy().as_ref()
+    );
+    assert_eq!(result["outputs"][0]["problems_total"], 1);
+    assert_eq!(result["outputs"][1]["counts"]["failed"], 0);
+    assert_eq!(
+        std::fs::read(dir.join("damaged-output/good.txt")).unwrap(),
+        b"safe bytes"
+    );
+    assert!(!dir.join("damaged-output/bad.txt").exists());
+    assert_eq!(
+        std::fs::read(dir.join("good-output/complete.txt")).unwrap(),
+        b"complete"
+    );
+    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]

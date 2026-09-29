@@ -1,8 +1,10 @@
 import { basename as pathBaseName, formatBytes } from "./format";
 import { errorSummary } from "./error-presentation";
+import { BATCH_PROGRESS_SCALE, isErrorDto } from "./ipc";
 import { t, tFallback } from "./i18n.svelte";
 import { jobTitleFor } from "./job-title";
 import { readCreateResult } from "./create-result";
+import { batchExtractEntrySummary, batchExtractResultSummary, readBatchExtractResult } from "./batch-extract-result";
 import {
   readRecoveryProtectionResult,
   recoveryResultBoolean,
@@ -29,15 +31,17 @@ import {
   sourceCleanupResult,
   taskChecksumItems,
   taskChecksumResultText,
-  taskFailureReviewScreen,
+  taskReviewScreen,
   taskHasInlineResults,
   taskOutcomeNeedsAttention,
+  taskOutcomeStateLabel,
   taskOutputCanOpen,
   taskOutputIsFolder,
   taskOutputPath,
   taskPasswordReady,
   taskResultScreen,
   taskStateLabel,
+  taskStatusUnavailable,
   type SourceCleanupResult,
   type TaskConflictAnswer,
   type TaskConflictDecision,
@@ -55,15 +59,17 @@ export {
   normalizeTaskConflictAnswer,
   taskChecksumItems,
   taskChecksumResultText,
-  taskFailureReviewScreen,
+  taskReviewScreen,
   taskHasInlineResults,
   taskOutcomeNeedsAttention,
+  taskOutcomeStateLabel,
   taskOutputCanOpen,
   taskOutputIsFolder,
   taskOutputPath,
   taskPasswordReady,
   taskResultScreen,
   taskStateLabel,
+  taskStatusUnavailable,
   type TaskConflictAnswer,
   type TaskConflictDecision,
   type TaskDialogModel,
@@ -81,10 +87,25 @@ export function tr(key: string, fallback: string): string {
   return tFallback(key, fallback);
 }
 
-export function isTaskProgressingState(state: string | null | undefined): boolean {
-  return state === "submitting" || state === "running" || state === "pausing";
+export function taskProgressActive(task: TaskDialogModel): boolean {
+  return !taskStatusUnavailable(task) && !task.interaction
+    && (task.state === "submitting" || task.state === "running");
 }
 
+function taskProgressStateLabel(task: TaskDialogModel): string {
+  if (taskStatusUnavailable(task)) return taskOutcomeStateLabel(task);
+  if (task.state === "running") {
+    if (task.interaction === "password") return tr("gui.task_center.password_waiting", "Waiting for a password");
+    if (task.interaction === "conflict") return tr("gui.task_center.conflict_waiting", "Waiting for a file decision");
+  }
+  return taskOutcomeStateLabel(task);
+}
+
+function withWaitingState(task: TaskDialogModel, progress: string): string {
+  return isTaskActiveState(task.state) && !taskProgressActive(task)
+    ? t("gui.task.progress_waiting", { progress, state: taskProgressStateLabel(task) })
+    : progress;
+}
 
 function sourceCleanupStatusLabel(status: string): string {
   if (status === "completed") {
@@ -102,20 +123,24 @@ function sourceCleanupStatusLabel(status: string): string {
   return tr("gui.task.source_cleanup.unknown", "Could not confirm where the originals were left");
 }
 
-export function taskOutcomeStateLabel(task: TaskDialogModel): string {
-  return taskOutcomeNeedsAttention(task)
-    ? tr("gui.task.state.needs_attention", "Needs attention")
-    : taskStateLabel(task.state);
-}
-
 export function taskOutcomeStateTone(task: TaskDialogModel): string {
+  if (taskStatusUnavailable(task)) return "warning";
   if (task.state === "failed") return "failed";
   return taskOutcomeNeedsAttention(task) ? "warning" : task.state;
 }
 
+export function taskStatusUnavailableMessage(): string {
+  return tr("gui.task.status_unavailable_detail", "Status updates were interrupted. Showing the last received progress and reconnecting automatically. The task may still be running.");
+}
+
 export function taskProgressPercent(task: TaskDialogModel): number {
   if (isIndeterminatePhase(task)) return 0;
-  if (task.total > 0) return Math.min(100, Math.round((task.done / task.total) * 100));
+  if (task.total > 0) {
+    const percent = task.spec.kind === "batch_extract"
+      ? Math.floor((task.done * 100) / task.total)
+      : Math.round((task.done / task.total) * 100);
+    return Math.min(100, percent);
+  }
   if (task.state === "done") return 100;
   return 0;
 }
@@ -177,16 +202,16 @@ export function taskOverallProgressBadge(task: TaskDialogModel): string {
   if (task.state === "failed" || task.state === "cancelled") {
     return taskOutcomeStateLabel(task);
   }
-  if (isTaskActiveState(task.state) && !isTaskProgressingState(task.state)) {
-    return taskOutcomeStateLabel(task);
+  if (isTaskActiveState(task.state) && !taskProgressActive(task)) {
+    return taskProgressStateLabel(task);
   }
   const phase = isTaskActiveState(task.state) ? taskProgressPhaseLabel(task) : null;
-  if (phase && (task.total === 0 || isIndeterminatePhase(task)) && isTaskProgressingState(task.state)) return phase;
+  if (phase && (task.total === 0 || isIndeterminatePhase(task)) && taskProgressActive(task)) return phase;
   if (task.total > 0 || task.state === "done") return `${taskProgressPercent(task)}%`;
-  if (isTaskProgressingState(task.state) && task.scanEntries != null) {
+  if (taskProgressActive(task) && task.scanEntries != null) {
     return tr("gui.task.scan_badge", "Scanning");
   }
-  if (isTaskProgressingState(task.state)) {
+  if (taskProgressActive(task)) {
     return tr("gui.task.current_progress_pending_badge", "In progress");
   }
   return taskOutcomeStateLabel(task);
@@ -212,7 +237,9 @@ export function taskCurrentProgressPercent(task: TaskDialogModel): number {
 }
 
 function taskSpeedLabel(task: TaskDialogModel): string {
-  return task.speed > 0 ? t("gui.task.speed_per_second", { speed: formatBytes(task.speed) }) : taskOutcomeStateLabel(task);
+  return taskProgressActive(task) && task.speed > 0
+    ? t("gui.task.speed_per_second", { speed: formatBytes(task.speed) })
+    : taskProgressStateLabel(task);
 }
 
 export function taskProgressSummary(task: TaskDialogModel): string {
@@ -220,20 +247,20 @@ export function taskProgressSummary(task: TaskDialogModel): string {
     return tr("gui.task.progress_submitting", "Opening the progress window before archive execution starts");
   }
   if (task.scanEntries != null) {
-    return t("gui.task.progress_scan", { count: task.scanEntries });
+    return withWaitingState(task, t("gui.task.progress_scan", { count: task.scanEntries }));
   }
   const phase = isTaskActiveState(task.state) ? taskProgressPhaseLabel(task) : null;
   if (isTaskActiveState(task.state) && task.phase === "archive_open") {
-    return tr("gui.task.archive_open_detail", "Reading archive information before processing its contents.");
+    return withWaitingState(task, tr("gui.task.archive_open_detail", "Reading archive information before processing its contents."));
   }
   if (isRestoringDirectories(task)) {
-    return tr("gui.task.extract_metadata_detail", "Restoring folder modification dates and permissions.");
+    return withWaitingState(task, tr("gui.task.extract_metadata_detail", "Restoring folder modification dates and permissions."));
   }
   if (phase && task.total > 0 && isRecoveryProgressPhase(task)) {
-    return t("gui.task.recovery_phase_progress_known", {
+    return withWaitingState(task, t("gui.task.recovery_phase_progress_known", {
       phase,
       percent: taskProgressPercent(task),
-    });
+    }));
   }
   if (phase && task.total > 0 && task.spec.kind !== "batch_extract") {
     return t("gui.task.phase_progress_known", {
@@ -245,18 +272,21 @@ export function taskProgressSummary(task: TaskDialogModel): string {
     });
   }
   if (phase && task.spec.kind !== "batch_extract") {
-    return t("gui.task.phase_progress_pending", { phase });
+    return withWaitingState(task, t("gui.task.phase_progress_pending", { phase }));
   }
   if (task.spec.kind === "batch_extract") {
-    const total = Math.max(1, task.spec.items.length);
+    if (task.total === 0 && task.state !== "done") return taskProgressStateLabel(task);
+    const total = Math.max(1, task.state === "done"
+      ? Number(task.result?.archives ?? task.spec.items.length)
+      : Math.floor(task.total / BATCH_PROGRESS_SCALE));
     const done = task.state === "done"
-      ? Number(task.result?.extracted ?? total)
-      : Math.min(total, Math.floor((taskProgressPercent(task) / 100) * total));
-    return t("gui.task.progress_batch_extract", {
+      ? total
+      : Math.min(total, Math.floor(task.done / BATCH_PROGRESS_SCALE));
+    return withWaitingState(task, t("gui.task.progress_batch_extract", {
       percent: taskProgressPercent(task),
       done,
       total,
-    });
+    }));
   }
   if (task.total > 0) {
     return t("gui.task.progress_known", {
@@ -276,7 +306,7 @@ export function taskProgressSummary(task: TaskDialogModel): string {
 }
 
 export function taskCurrentSectionLabel(task: TaskDialogModel): string {
-  if (!isTaskActiveState(task.state)) return tr("gui.task.last_item", "Last item");
+  if (taskStatusUnavailable(task) || !isTaskActiveState(task.state)) return tr("gui.task.last_item", "Last item");
   if (task.phase === "archive_open") return tr("gui.task.current_archive", "Current archive");
   if (isRestoringDirectories(task)) return tr("gui.task.current_folder", "Current folder");
   if (task.scanEntries != null) return tr("gui.task.current_input", "Current input");
@@ -284,6 +314,7 @@ export function taskCurrentSectionLabel(task: TaskDialogModel): string {
 }
 
 export function taskCurrentLabel(task: TaskDialogModel): string {
+  if (!task.current && !taskProgressActive(task)) return taskProgressStateLabel(task);
   if (!task.current && isTaskActiveState(task.state) && task.phase === "archive_open") {
     return tr("gui.task.phase.archive_open", "Reading archive");
   }
@@ -291,8 +322,8 @@ export function taskCurrentLabel(task: TaskDialogModel): string {
 }
 
 export function taskCurrentProgressBadge(task: TaskDialogModel): string {
-  if (isTaskActiveState(task.state) && !isTaskProgressingState(task.state)) {
-    return taskOutcomeStateLabel(task);
+  if (isTaskActiveState(task.state) && !taskProgressActive(task)) {
+    return taskProgressStateLabel(task);
   }
   if (hasTaskCurrentProgress(task)) return `${taskCurrentProgressPercent(task)}%`;
   if (!isTaskActiveState(task.state)) return taskOutcomeStateLabel(task);
@@ -309,29 +340,27 @@ export function taskCurrentProgressSummary(task: TaskDialogModel): string {
   if (task.state === "submitting") {
     return tr("gui.task.current_submitting", "Preparing the first item");
   }
-  if (!isTaskProgressingState(task.state)) {
-    if (isTaskActiveState(task.state)) return taskStateLabel(task.state);
-    if (task.current) {
-      if (task.state === "done") {
-        return taskOutcomeNeedsAttention(task)
-          ? tr("gui.task.finished_with_issues", "Finished with issues")
-          : tr("gui.task.current_progress_completed_short", "Complete");
+  if (!taskProgressActive(task)) {
+    if (task.state === "done") {
+      if (!task.current) return tr("gui.task.current_progress_completed", "Task finished.");
+      return taskOutcomeNeedsAttention(task)
+        ? tr("gui.task.finished_with_issues", "Finished with issues")
+        : tr("gui.task.current_progress_completed_short", "Complete");
+    }
+    if (!hasTaskCurrentProgress(task)) return taskProgressStateLabel(task);
+  } else {
+    if (task.scanEntries != null) {
+      return t("gui.task.current_scan_named", { name: taskCurrentLabel(task) });
+    }
+    if (task.phase === "archive_open") {
+      return tr("gui.task.phase.archive_open", "Reading archive");
+    }
+    if (!hasTaskCurrentProgress(task)) {
+      if (task.current) {
+        return t("gui.task.current_progress_pending_named", { name: taskCurrentLabel(task) });
       }
-      return taskStateLabel(task.state);
+      return tr("gui.task.current_progress_pending", "Preparing the current item.");
     }
-    return tr("gui.task.current_progress_completed", "Task finished.");
-  }
-  if (task.scanEntries != null) {
-    return t("gui.task.current_scan_named", { name: taskCurrentLabel(task) });
-  }
-  if (task.phase === "archive_open") {
-    return tr("gui.task.phase.archive_open", "Reading archive");
-  }
-  if (!hasTaskCurrentProgress(task)) {
-    if (task.current) {
-      return t("gui.task.current_progress_pending_named", { name: taskCurrentLabel(task) });
-    }
-    return tr("gui.task.current_progress_pending", "Preparing the current item.");
   }
   return t("gui.task.current_progress_known", {
     name: taskCurrentLabel(task),
@@ -364,6 +393,25 @@ export function taskDialogEyebrow(task: TaskDialogModel): string {
 
 export function taskControlCalloutVisible(task: TaskDialogModel): boolean {
   return task.controlIntent !== null;
+}
+
+export function taskActionFailureMessage(task: TaskDialogModel): string | null {
+  if (!isTaskActiveState(task.state)) return null;
+  if (task.actionFailure === "pause") {
+    return tr("gui.task.pause_failed_detail", "Could not pause the task. Check its current status and try again.");
+  }
+  if (task.actionFailure === "resume") {
+    return tr("gui.task.resume_failed_detail", "Could not resume the task. Check its current status and try again.");
+  }
+  if (task.actionFailure === "cancel") {
+    return task.interaction
+      ? tr("gui.task.question_cancel_failed", "Could not cancel the task. Try again or answer the current prompt.")
+      : tr("gui.task.cancel_failed_detail", "Could not cancel the task. Check its current status and try again.");
+  }
+  if (task.actionFailure === "answer") {
+    return tr("gui.task.answer_failed_detail", "The task has not confirmed your response. Check its current prompt and try again.");
+  }
+  return null;
 }
 
 export function taskPhaseControlNoticeVisible(task: TaskDialogModel): boolean {
@@ -597,15 +645,9 @@ function resultDetailValue(value: unknown): string {
   }
 }
 
-function compactResultDetail(value: unknown): string {
-  const text = resultDetailValue(value).replace(/\s+/g, " ").trim();
-  return text.length > 180 ? `${text.slice(0, 177)}...` : text;
-}
-
 function appendProblems(rows: TaskResultDetailRow[], task: TaskDialogModel): void {
   const problems = resultProblemMessages(task.result);
-  const displayed = problems.slice(0, 6);
-  for (const [index, problem] of displayed.entries()) {
+  for (const [index, problem] of problems.entries()) {
     const localizedProblem = task.spec.kind === "test"
       && index === 0
       && task.result?.structure === "zip_local_headers_recovered"
@@ -614,7 +656,7 @@ function appendProblems(rows: TaskResultDetailRow[], task: TaskDialogModel): voi
         "ZIP central directory is missing or unreadable; entries were recovered from local headers",
       )
       : problem;
-    const value = compactResultDetail(localizedProblem);
+    const value = resultDetailValue(localizedProblem);
     if (value) {
       rows.push({
         label: t("gui.task.result_problem_n", { index: index + 1 }),
@@ -623,7 +665,7 @@ function appendProblems(rows: TaskResultDetailRow[], task: TaskDialogModel): voi
     }
   }
   const total = resultProblemTotal(task.result);
-  const omitted = Math.max(0, total - displayed.length);
+  const omitted = Math.max(0, total - problems.length);
   if (omitted > 0) {
     rows.push({
       label: tr("gui.task.result_more_problems", "More problems"),
@@ -742,13 +784,7 @@ export function taskResultDetailRows(task: TaskDialogModel): TaskResultDetailRow
     }
     return rows;
   }
-  if (task.state === "cancelled") {
-    rows.push({
-      label: tr("common.status", "Status"),
-      value: tr("gui.task.result_cancelled", "The task was cancelled"),
-    });
-    return rows;
-  }
+  if (task.state === "cancelled") return rows;
 
   if (task.spec.kind === "publish_macos_sfx") {
     const output = String(task.result?.primary_output ?? task.spec.output);
@@ -1060,27 +1096,46 @@ export function taskResultDetailRows(task: TaskDialogModel): TaskResultDetailRow
   if (task.spec.kind === "batch_extract") {
     const archives = resultNumber(task, "archives");
     const selectedArchives = resultNumber(task, "selected_archives");
+    const outcome = readBatchExtractResult(task.result);
     rows.push(
       {
-        label: tr("gui.task.result_extracted", "Extracted"),
-        value: resultNumber(task, "extracted").toLocaleString(),
+        label: tr("gui.task.batch_complete_archives", "Fully extracted archives"),
+        value: outcome.completeArchives.toLocaleString(),
+      },
+      {
+        label: tr("gui.task.batch_incomplete_archives", "Incomplete archives"),
+        value: outcome.incompleteArchives.toLocaleString(),
       },
       {
         label: tr("gui.task.result_archives", "Archives"),
         value: archives.toLocaleString(),
       },
       {
-        label: tr("gui.task.result_failed_count", "Failed"),
+        label: tr("gui.task.batch_failed_archives", "Failed archives"),
         value: resultNumber(task, "failed").toLocaleString(),
       },
     );
     if (selectedArchives > archives) {
-      rows.splice(2, 0, {
+      rows.splice(3, 0, {
         label: tr("gui.task.result_selected_files", "Selected files"),
         value: selectedArchives.toLocaleString(),
       });
     }
     appendArchiveStructureWarning(rows, task);
+    for (const failure of outcome.failures) {
+      if (!failure || typeof failure !== "object" || !("archive" in failure) || typeof failure.archive !== "string") continue;
+      const error = "error" in failure && isErrorDto(failure.error) ? failure.error : null;
+      rows.push({ label: tr("common.archive", "Archive"), value: `${failure.archive}\n${errorSummary(error)}` });
+    }
+    for (const output of outcome.incompleteOutputs) {
+      const counts = readExtractResultCounts(output);
+      if (!counts) continue;
+      rows.push({
+        label: tr("common.archive", "Archive"),
+        value: `${String(output.archive ?? "")}\n${batchExtractEntrySummary(counts.failed, counts.skipped)}`,
+      });
+      appendProblems(rows, { ...task, result: output });
+    }
   }
 
   if (task.revealPath) {
@@ -1127,12 +1182,13 @@ export function taskErrorDetailsActionLabel(task: TaskDialogModel): string {
     : tr("gui.task.show_error_details", "Show error details");
 }
 
-export function taskFailureReviewAvailable(task: TaskDialogModel, taskWindowMode: boolean): boolean {
-  return !taskWindowMode && taskFailureReviewScreen(task) !== null;
+export function taskReviewAvailable(task: TaskDialogModel, taskWindowMode: boolean): boolean {
+  return !taskWindowMode && taskReviewScreen(task) !== null;
 }
 
-export function taskFailureReviewActionLabel(task: TaskDialogModel): string {
-  const target = taskFailureReviewScreen(task);
+export function taskReviewActionLabel(task: TaskDialogModel): string {
+  const target = taskReviewScreen(task);
+  if (target === "batch" && task.state === "done") return tr("gui.batch.review_failed", "Review failed archives");
   if (target === "recovery") return tr("gui.task.open_recovery", "Open Recovery");
   if (target === "browse") return tr("gui.task.return_to_archive", "Return to archive");
   return tr("gui.task.review_settings", "Review task settings");
@@ -1260,6 +1316,14 @@ function taskFailureNextStepDetail(task: TaskDialogModel): string {
 }
 
 export function taskNextStepDetail(task: TaskDialogModel, taskWindowMode: boolean): string {
+  if (task.state === "cancelled") {
+    if (taskReviewScreen(task)) {
+      return taskWindowMode
+        ? tr("gui.task.next_step_cancelled_window", "Review this task in the main Squallz window before starting again. The new task starts from the beginning; check any existing output first.")
+        : tr("gui.task.next_step_cancelled_review", "Review the original sources and settings before starting again. The new task starts from the beginning; check any existing output first.");
+    }
+    return tr("gui.task.next_step_cancelled", "The task has stopped. Check any files already written before starting another operation.");
+  }
   if (task.state === "failed") {
     const detail = taskFailureNextStepDetail(task);
     return taskWindowMode
@@ -1269,6 +1333,20 @@ export function taskNextStepDetail(task: TaskDialogModel, taskWindowMode: boolea
         { detail },
       )
       : detail;
+  }
+  if (task.state === "done" && task.spec.kind === "test") {
+    if (task.result?.ok === false) {
+      return taskWindowMode
+        ? tr("gui.task.next_step_test_failed_window", "Review the test report. To check repair options, open Recovery in the main Squallz window and choose the tested archive.")
+        : tr("gui.task.next_step_test_failed", "Review the test report, then open Recovery to check repair options for this archive.");
+    }
+    return tr("gui.task.next_step_window_results", "Review the result details in this window, then close it.");
+  }
+  if (task.spec.kind === "batch_extract") {
+    const outcome = readBatchExtractResult(task.result);
+    if (outcome.reviewCount > 0 || outcome.skippedEntries > 0) {
+      return tr("gui.task.next_step_batch_attention", "Review the extraction results and existing output. Archives with failures can be reviewed in the main window before starting again; they will be processed from the beginning.");
+    }
   }
   if (isRecoveryDiagnosticTask(task) && recoveryResultOk(task.result) === false) {
     if (task.spec.kind === "repair_recovery") {
@@ -1436,16 +1514,7 @@ export function taskDialogResultSummary(task: TaskDialogModel): string {
     return t("gui.task.result_extract", { completed, skipped, failed });
   }
   if (task.spec.kind === "batch_extract") {
-    const extracted = Number(task.result?.extracted ?? 0);
-    const total = Number(task.result?.archives ?? task.spec.items.length);
-    const selected = Number(task.result?.selected_archives ?? total);
-    const failed = Number(task.result?.failed ?? 0);
-    return t(
-      selected > total
-        ? "gui.task.result_batch_extract_grouped"
-        : "gui.task.result_batch_extract",
-      { extracted, total, selected, failed },
-    );
+    return batchExtractResultSummary(task.result, task.spec.items.length);
   }
   if (task.spec.kind === "protect") {
     const fallback = task.spec.recovery ?? `${task.spec.path}.par2`;

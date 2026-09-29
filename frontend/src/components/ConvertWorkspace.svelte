@@ -513,7 +513,7 @@
     <div class="sheet-head">
       <div>
         <span class="eyebrow">{surface.tr("gui.convert.eyebrow", "Archive / Convert")}</span>
-        <h1>{surface.tr("gui.convert.title", "Convert archive")}</h1>
+        <h1 id="convert-workspace-heading" tabindex="-1">{surface.tr("gui.convert.title", "Convert archive")}</h1>
         <p>{surface.tr("gui.convert.subtitle", "Choose the output format, compression, protection, and volume layout. Squallz converts without modifying the source.")}</p>
       </div>
       <button
@@ -623,7 +623,7 @@
     <section class="classic-extract-sheet classic-convert">
       <header>
         <div>
-          <h1>{surface.tr("gui.convert.title", "Convert archive")}</h1>
+          <h1 id="convert-workspace-heading" tabindex="-1">{surface.tr("gui.convert.title", "Convert archive")}</h1>
           <p>{surface.tr("gui.convert.classic_intro", "Choose the target format, compression, protection, and volume layout before saving the converted archive.")}</p>
         </div>
         <button

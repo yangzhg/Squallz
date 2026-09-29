@@ -83,6 +83,9 @@ test("SFX result and recovery details use the durable single-backup contract", a
       taskHasInlineResults,
       taskKindLabel,
       taskResultAvailableForSurface,
+      taskReviewScreen,
+      taskReviewAvailable,
+      taskReviewActionLabel,
     } = await server.ssrLoadModule("/src/lib/task-dialog.ts");
     const { taskCanPublishMacosSfx } = await server.ssrLoadModule(
       "/src/lib/macos-sfx-publish.ts",
@@ -540,13 +543,14 @@ test("SFX result and recovery details use the durable single-backup contract", a
     assert.ok(extractRows.some((row) => row.label === "Data written" && row.value === "12.0 MB"));
     assert.ok(extractRows.some((row) => row.label === "Problem 1" && row.value.includes("CRC mismatch")));
 
+    const longProblem = `reports/${"annual-reports/".repeat(20)}final  report.pdf: checksum mismatch\nTry another copy of this archive.`;
     const boundedProblems = {
       ...extracted,
       result: {
         ...extracted.result,
         problems: Array.from(
           { length: 20 },
-          (_, index) => `damaged/item-${index + 1}.bin: checksum mismatch`,
+          (_, index) => index === 0 ? longProblem : `damaged/item-${index + 1}.bin: checksum mismatch`,
         ),
         problems_total: 30,
         problems_truncated: true,
@@ -559,11 +563,13 @@ test("SFX result and recovery details use the durable single-backup contract", a
     const boundedRows = taskResultDetailRows(boundedProblems);
     assert.equal(
       boundedRows.filter((row) => row.label.startsWith("Problem ")).length,
-      6,
+      20,
     );
+    assert.equal(boundedRows.find((row) => row.label === "Problem 1").value, longProblem);
+    assert.ok(boundedRows.some((row) => row.label === "Problem 20" && row.value.includes("item-20.bin")));
     assert.ok(
       boundedRows.some(
-        (row) => row.label === "More problems" && row.value === "24 more not shown",
+        (row) => row.label === "More problems" && row.value === "10 more not shown",
       ),
     );
 
@@ -593,6 +599,22 @@ test("SFX result and recovery details use the durable single-backup contract", a
       taskDialogResultSummary(boundedTest),
       "Archive test found 30 problem(s)",
     );
+    assert.equal(taskHasInlineResults(boundedTest), true);
+    assert.equal(taskResultActionLabel(boundedTest), "Hide results");
+    assert.equal(taskResultActionLabel({ ...boundedTest, expanded: false }), "View results");
+    assert.equal(taskReviewScreen(boundedTest), "recovery");
+    assert.equal(taskReviewAvailable(boundedTest, false), true);
+    assert.equal(taskReviewAvailable(boundedTest, true), false);
+    assert.equal(taskReviewActionLabel(boundedTest), "Open Recovery");
+    assert.match(taskNextStepDetail(boundedTest, false), /open Recovery/u);
+    assert.match(taskNextStepDetail(boundedTest, true), /main Squallz window/u);
+    const passedTest = { ...boundedTest, result: { ...boundedTest.result, ok: true, problems: [], problems_total: 0 } };
+    assert.equal(taskHasInlineResults(passedTest), true);
+    assert.equal(taskReviewScreen(passedTest), null);
+    assert.equal(taskNextStepDetail(passedTest, false), "Review the result details in this window, then close it.");
+    assert.equal(taskReviewScreen({ ...boundedTest, state: "running" }), null);
+    assert.equal(taskReviewScreen({ ...boundedTest, state: "cancelled" }), null);
+    assert.equal(taskReviewScreen({ ...boundedTest, state: "failed", error: { key: "error.corrupt_archive" } }), "recovery");
     const boundedTestRows = taskResultDetailRows(boundedTest);
     assert.ok(
       boundedTestRows.some(
@@ -601,13 +623,24 @@ test("SFX result and recovery details use the durable single-backup contract", a
     );
     assert.equal(
       boundedTestRows.filter((row) => row.label.startsWith("Problem ")).length,
-      6,
+      20,
     );
     assert.ok(
       boundedTestRows.some(
-        (row) => row.label === "More problems" && row.value === "24 more not shown",
+        (row) => row.label === "More problems" && row.value === "10 more not shown",
       ),
     );
+    const completeTestRows = taskResultDetailRows({
+      ...boundedTest,
+      result: {
+        ...boundedTest.result,
+        problems: boundedTest.result.problems.slice(0, 7),
+        problems_total: 7,
+        problems_truncated: false,
+      },
+    });
+    assert.equal(completeTestRows.filter((row) => row.label.startsWith("Problem ")).length, 7);
+    assert.equal(completeTestRows.some((row) => row.label === "More problems"), false);
 
     const recoveredZipTest = {
       ...boundedTest,
@@ -713,11 +746,31 @@ test("SFX result and recovery details use the durable single-backup contract", a
     };
     assert.equal(
       taskDialogResultSummary(groupedBatch),
-      "Selected files 2 → archives 1 · 1 extracted · 0 failed",
+      "Selected files 2 → archives 1 · 1 extracted · 0 incomplete · 0 archives failed",
     );
     const groupedRows = taskResultDetailRows(groupedBatch);
     assert.ok(groupedRows.some((row) => row.label === "Archives" && row.value === "1"));
     assert.ok(groupedRows.some((row) => row.label === "Selected files" && row.value === "2"));
+    assert.equal(taskProgressSummary(groupedBatch), "100% · 1/1 archives");
+    assert.equal(taskProgressSummary({ ...groupedBatch, result: { archives: 3, extracted: 2, failed: 1 } }), "100% · 3/3 archives");
+    const partialBatch = { ...groupedBatch, result: { ...groupedBatch.result, outputs: [
+      { archive: "damaged.zip", counts: { failed: 2, skipped: 1 }, problems: ["bad.txt: CRC mismatch"], problems_total: 2 },
+    ] } };
+    assert.equal(taskOutcomeNeedsAttention(partialBatch), true);
+    assert.equal(taskReviewScreen(partialBatch), "batch");
+    assert.equal(taskHasInlineResults(partialBatch), true);
+    assert.match(taskDialogResultSummary(partialBatch), /0 archives failed.*2 entries failed.*1 entries skipped/);
+    const partialRows = taskResultDetailRows(partialBatch);
+    assert.ok(partialRows.some((row) => row.value.includes("damaged.zip") && /2 entries failed/.test(row.value)));
+    assert.ok(partialRows.some((row) => row.value.includes("bad.txt: CRC mismatch")));
+    assert.ok(partialRows.some((row) => row.label === "More problems"));
+    assert.match(taskNextStepDetail(partialBatch, false), /from the beginning/);
+    const skippedBatch = { ...partialBatch, result: { ...partialBatch.result, outputs: [
+      { archive: "skipped.zip", counts: { failed: 0, skipped: 3 } },
+    ] } };
+    assert.equal(taskOutcomeNeedsAttention(skippedBatch), true);
+    assert.equal(taskReviewScreen(skippedBatch), null);
+    assert.match(taskDialogResultSummary(skippedBatch), /3 entries skipped/);
 
     const recoveredBatch = {
       ...groupedBatch,
@@ -784,6 +837,28 @@ test("SFX result and recovery details use the durable single-backup contract", a
     assert.equal(taskCurrentProgressBadge(scanning), "Scanning");
     assert.equal(taskCurrentProgressSource(scanning), "scan-entry");
     const cancelledScan = { ...scanning, state: "cancelled" };
+    assert.equal(taskReviewScreen(cancelledScan), "create");
+    assert.match(taskNextStepDetail(cancelledScan, false), /Review the original sources and settings/);
+    assert.doesNotMatch(taskNextStepDetail(cancelledScan, false), /sign|notariz|distribut/i);
+    for (const [kind, target] of [["compress", "create"], ["extract", "extract"], ["convert", "convert"],
+      ["batch_extract", "batch"], ["extract_nested", "nestedExtract"], ["update", "updateReview"]]) {
+      const cancelled = { ...cancelledScan, spec: { ...cancelledScan.spec, kind } };
+      assert.equal(taskReviewScreen(cancelled), target);
+      assert.equal(taskReviewAvailable(cancelled, false), true);
+      assert.equal(taskReviewAvailable(cancelled, true), false);
+      assert.equal(taskReviewActionLabel(cancelled), "Review task settings");
+      assert.match(taskNextStepDetail(cancelled, false), /from the beginning.*existing output/);
+      assert.match(taskNextStepDetail(cancelled, true), /main Squallz window/);
+      for (const state of ["queued", "running", "paused", "done"]) {
+        assert.equal(taskReviewScreen({ ...cancelled, state }), null);
+      }
+    }
+    for (const kind of ["test", "checksum", "checksum_check", "duplicate_scan", "protect", "publish_macos_sfx", "repair_zip", "repair_sqz", "export_sqz", "verify_recovery", "repair_recovery"]) {
+      const cancelled = { ...cancelledScan, spec: { ...cancelledScan.spec, kind } };
+      assert.equal(taskReviewAvailable(cancelled, false), false);
+      assert.match(taskNextStepDetail(cancelled, false), /task has stopped/);
+      assert.doesNotMatch(taskNextStepDetail(cancelled, true), /sign|notariz|distribut|finished report/i);
+    }
     assert.equal(taskOverallProgressIndeterminate(cancelledScan), false);
     assert.equal(taskOverallProgressBadge(cancelledScan), "Cancelled");
     assert.equal(taskCurrentSectionVisible(cancelledScan), true);
@@ -931,6 +1006,39 @@ test("archive opening hides stale byte counters and transitions to entry work", 
       assert.equal(dialog.taskOverallProgressBadge(cancelled), dialog.taskStateLabel("cancelled"));
       assert.equal(dialog.taskOverallProgressBadge({ ...task, state: "paused" }), dialog.taskStateLabel("paused"));
     }
+  } finally {
+    await server.close();
+  }
+});
+
+test("batch progress counts grouped archives without rounding unfinished work into completion", async () => {
+  const server = await createTestServer();
+  try {
+    const { loadLocale } = await server.ssrLoadModule("/src/lib/i18n.svelte.ts");
+    const dialog = await server.ssrLoadModule("/src/lib/task-dialog.ts");
+    await loadLocale("en-US");
+    const batch = sfxTask({ state: "running", result: null, phase: "extract_entries", done: 999, total: 2000,
+      spec: { kind: "batch_extract", items: [{ path: "a.zip.001" }, { path: "a.zip.002" }, { path: "b.zip" }] },
+      current: "a.zip: report.txt", currentDone: 100, currentTotal: 100 });
+    assert.equal(dialog.taskTitleLabel(batch), "Batch extract");
+    assert.equal(dialog.taskProgressSummary(batch), "49% · 0/2 archives");
+    assert.equal(dialog.taskProgressSummary({ ...batch, done: 1000 }), "50% · 1/2 archives");
+    assert.equal(dialog.taskProgressSummary({ ...batch, done: 1999 }), "99% · 1/2 archives");
+    assert.equal(dialog.taskProgressSummary({ ...batch, done: 2000 }), "100% · 2/2 archives");
+    assert.equal(dialog.taskProgressPercent({ ...batch, done: 580, total: 1000 }), 58);
+    assert.equal(dialog.taskCurrentProgressBadge(batch), "100%");
+    assert.match(dialog.taskCurrentProgressSummary(batch), /100 B \/ 100 B/);
+    for (const state of ["paused", "cancelled", "failed"]) {
+      const stopped = { ...batch, state, done: 1500 };
+      assert.match(dialog.taskProgressSummary(stopped), /75% · 1\/2 archives/);
+    }
+    for (const state of ["queued", "running", "paused", "cancelled", "failed"]) {
+      const unknown = { ...batch, state, phase: null, done: 0, total: 0 };
+      assert.doesNotMatch(dialog.taskProgressSummary(unknown), /%|\d+\/\d+/);
+    }
+    await loadLocale("zh-CN");
+    assert.equal(dialog.taskTitleLabel(batch), "批量解压");
+    assert.equal(dialog.taskProgressSummary(batch), "49% · 0/2 个压缩包");
   } finally {
     await server.close();
   }

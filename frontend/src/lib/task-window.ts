@@ -5,6 +5,7 @@ import {
   type ExternalOpenAction,
 } from "./external-tasks";
 import type { JobSpec } from "./ipc";
+import type { JobSnapshotStatus, Task } from "./jobs.svelte";
 
 export const taskWindowQuery = {
   mode: "taskWindow",
@@ -35,7 +36,29 @@ export type TaskWindowShellStatus =
   | "no-selection"
   | "preset-error"
   | "requires-desktop-service"
+  | "reconnecting"
+  | "reconnect-error"
+  | "task-unavailable"
   | "busy";
+
+export function taskWindowTask<T extends Pick<Task, "id" | "state" | "ownedByRequester">>(
+  tasks: T[],
+  rememberedId: number | null,
+): T | null {
+  if (rememberedId !== null) {
+    return tasks.find((task) => task.id === rememberedId && task.ownedByRequester) ?? null;
+  }
+  let latest: T | null = null;
+  for (const task of tasks) {
+    if (task.ownedByRequester && (!latest || task.id > latest.id)) latest = task;
+  }
+  return latest;
+}
+
+export function taskWindowRecoveryState(connection: JobSnapshotStatus): TaskWindowLaunchState {
+  return taskWindowShellStatusState(null, connection === "loading" ? "reconnecting"
+    : connection === "ready" ? "task-unavailable" : "reconnect-error");
+}
 
 export interface TaskWindowSubmitTransition {
   state: TaskWindowLaunchState;
@@ -132,6 +155,12 @@ export function taskWindowShellTitle(
   translate: TaskWindowTranslate,
 ): string {
   switch (state.status) {
+    case "reconnecting":
+      return translate("gui.external_task.title_reconnecting", "Reconnecting to your task");
+    case "reconnect-error":
+      return translate("gui.external_task.title_reconnect_error", "Task connection unavailable");
+    case "task-unavailable":
+      return translate("gui.external_task.title_task_unavailable", "Task unavailable");
     case "starting":
       return taskWindowActionStatusMessage(
         "gui.external_task.title_starting_action",
@@ -177,6 +206,12 @@ export function taskWindowShellMessage(
   translate: TaskWindowTranslate,
 ): string {
   switch (state.status) {
+    case "reconnecting":
+      return translate("gui.external_task.reconnecting", "Loading this window's task and its latest result.");
+    case "reconnect-error":
+      return translate("gui.external_task.reconnect_error", "The task status could not be loaded. Retry to reconnect to the existing task.");
+    case "task-unavailable":
+      return translate("gui.external_task.task_unavailable", "No task is available for this window. If it never started, launch it again from your file manager; otherwise check the output folder.");
     case "starting":
       return taskWindowActionStatusMessage(
         "gui.external_task.starting_action",
@@ -221,6 +256,9 @@ export function taskWindowSubmitNotice(
     case "waiting":
     case "starting":
     case "busy":
+    case "reconnecting":
+    case "reconnect-error":
+    case "task-unavailable":
       return null;
   }
 }

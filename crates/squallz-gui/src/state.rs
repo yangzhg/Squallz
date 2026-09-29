@@ -15,11 +15,12 @@ use squallz_core::api::{
 };
 use squallz_core::{
     collect_volume_set_with_control, fold_archive_search_path, fold_archive_search_query,
-    rank_folded_archive_path, Engine,
+    rank_folded_archive_path, ArchiveListing, Engine,
 };
 use tempfile::TempPath;
 
 use crate::dto::{ArchiveInfo, EntryDto, Page};
+use crate::password_cache::{PasswordAttempt, SessionPasswords};
 use crate::preview_sessions::{PreviewResourceLease, PreviewResourceReservation};
 use squallz_core::lock_unpoisoned;
 
@@ -138,6 +139,13 @@ pub struct CachedArchive {
 struct OwnedArchiveTemp {
     _file: TempPath,
     _lease: PreviewResourceLease,
+    passwords: Arc<SessionPasswords>,
+}
+
+impl Drop for OwnedArchiveTemp {
+    fn drop(&mut self) {
+        self.passwords.forget(&self._file);
+    }
 }
 
 struct PendingOwnedArchiveTemp {
@@ -196,9 +204,7 @@ pub struct AppState {
     pub engine: Engine,
     archives: Mutex<ArchiveRegistry>,
     next_id: AtomicU64,
-    /// Session password cache: archive path → password (zeroized on drop and
-    /// cleared when the app exits).
-    passwords: Mutex<HashMap<PathBuf, Password>>,
+    passwords: Arc<SessionPasswords>,
 }
 
 impl AppState {
@@ -208,7 +214,7 @@ impl AppState {
             engine: Engine::new(squallz_formats::registry()),
             archives: Mutex::new(ArchiveRegistry::default()),
             next_id: AtomicU64::new(1),
-            passwords: Mutex::new(HashMap::new()),
+            passwords: Arc::new(SessionPasswords::default()),
         }
     }
 
@@ -365,6 +371,8 @@ impl AppState {
         display_path: String,
         display_name: String,
         max_entries: u64,
+        password: Option<&str>,
+        control: &ControlToken,
     ) -> Result<ArchiveInfo, FormatError> {
         let path = temp.to_path_buf();
         let owned_temp = PendingOwnedArchiveTemp {
@@ -372,14 +380,13 @@ impl AppState {
             reservation,
             size,
         };
-        let control = ControlToken::default();
         self.open_archive_inner(
             Some(owner_window),
             &path,
-            None,
+            password,
             None,
             max_entries,
-            &control,
+            control,
             ArchiveIdentity {
                 display_path,
                 display_name: Some(display_name),
@@ -402,13 +409,20 @@ impl AppState {
     ) -> Result<ArchiveInfo, FormatError> {
         control.checkpoint()?;
         self.ensure_owner_active(owner_window)?;
+        let password_attempt = password.and_then(|_| self.password_attempt(path, control));
         let open_opts = OpenOptions {
             password: password
                 .map(Password::new)
                 .or_else(|| self.password_for(path)),
             encoding_override: encoding.map(str::to_owned),
         };
-        let (format, entries, native_source_set, structure) = self
+        let ArchiveListing {
+            format,
+            entries,
+            source_set: native_source_set,
+            structure,
+            password_verified,
+        } = self
             .engine
             .list_with_format_source_set_and_structure_with_entry_limit_and_control(
                 path,
@@ -441,6 +455,7 @@ impl AppState {
             ArchiveBacking::Pending(pending) => Some(Arc::new(OwnedArchiveTemp {
                 _file: pending.file,
                 _lease: pending.reservation.into_lease(pending.size)?,
+                passwords: Arc::clone(&self.passwords),
             })),
             ArchiveBacking::Shared(owned) => Some(owned),
             ArchiveBacking::Persistent => None,
@@ -478,8 +493,10 @@ impl AppState {
         drop(registry);
         // Remember a freshly supplied, proven-good password only after the
         // owner-bound handle has been published successfully.
-        if let Some(pw) = password {
-            self.remember_password(path, pw);
+        if password_verified {
+            if let (Some(pw), Some(attempt)) = (password, password_attempt.as_ref()) {
+                self.remember_password(attempt, pw, control);
+            }
         }
         let info = ArchiveInfo {
             id,
@@ -532,6 +549,30 @@ impl AppState {
 
     pub(crate) fn close_archive_for_window(&self, owner_window: &str, id: u64) {
         self.close_archive_for_owner(Some(owner_window), id);
+    }
+
+    pub(crate) fn preview_entries_for_window(
+        &self,
+        owner_window: &str,
+        id: u64,
+        limit: usize,
+    ) -> Result<Vec<EntryDto>, FormatError> {
+        let archive = self.archive_for_owner(id, Some(owner_window))?;
+        Ok(archive
+            .entries
+            .iter()
+            .take(limit)
+            .map(|meta| {
+                let path = normalized_entry_path(meta);
+                let name = path
+                    .trim_end_matches('/')
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(&path)
+                    .to_owned();
+                EntryDto::from_meta(meta, path, name)
+            })
+            .collect())
     }
 
     fn close_archive_for_owner(&self, owner_window: Option<&str>, id: u64) {
@@ -610,6 +651,50 @@ impl AppState {
         filter: Option<&str>,
     ) -> Result<Page, FormatError> {
         self.list_entries_for_owner(Some(owner_window), id, page, page_size, dir_prefix, filter)
+    }
+
+    pub(crate) fn missing_archive_paths_for_window(
+        &self,
+        owner_window: &str,
+        id: u64,
+        paths: &[String],
+    ) -> Result<Vec<String>, FormatError> {
+        let archive = self.archive_for_owner(id, Some(owner_window))?;
+        Ok(paths
+            .iter()
+            .filter(|path| !archive_path_exists(&archive, path))
+            .cloned()
+            .collect())
+    }
+
+    pub(crate) fn plan_archive_move_for_window(
+        &self,
+        owner_window: &str,
+        id: u64,
+        paths: &[String],
+        target_dir: &str,
+    ) -> Result<squallz_core::ArchiveMovePlan, FormatError> {
+        let archive = self.archive_for_owner(id, Some(owner_window))?;
+        squallz_core::plan_archive_moves(
+            paths,
+            target_dir,
+            |path| archive_path_exists(&archive, path),
+            &ControlToken::new(),
+        )
+    }
+
+    pub(crate) fn inspect_archive_target_for_window(
+        &self,
+        owner_window: &str,
+        id: u64,
+        target: &str,
+    ) -> Result<squallz_core::ArchiveTargetInspection, FormatError> {
+        let archive = self.archive_for_owner(id, Some(owner_window))?;
+        squallz_core::inspect_archive_target(
+            target,
+            |path| archive_path_exists(&archive, path),
+            &ControlToken::new(),
+        )
     }
 
     fn list_entries_for_owner(
@@ -714,6 +799,7 @@ impl AppState {
         let archives = {
             let mut registry = lock_unpoisoned(&self.archives);
             registry.released_windows.insert(owner_window.to_owned());
+            self.passwords.invalidate_pending();
             let ids = registry
                 .archives
                 .iter()
@@ -733,6 +819,7 @@ impl AppState {
 
     /// Prevents late archive-handle publication while shutdown is beginning.
     pub fn begin_shutdown(&self) {
+        self.passwords.shutdown();
         let mut registry = lock_unpoisoned(&self.archives);
         registry.shutting_down = true;
         cancel_archive_searches(registry.archives.values());
@@ -741,6 +828,7 @@ impl AppState {
     /// Drains every browse handle after queued jobs have released their
     /// private source pins and before the preview workspace is removed.
     pub fn shutdown(&self) -> usize {
+        self.passwords.shutdown();
         let archives = {
             let mut registry = lock_unpoisoned(&self.archives);
             registry.shutting_down = true;
@@ -756,7 +844,7 @@ impl AppState {
 
     /// Session password for a path, if one was proven good earlier.
     pub fn password_for(&self, path: &Path) -> Option<Password> {
-        lock_unpoisoned(&self.passwords).get(path).cloned()
+        self.passwords.get(&self.engine, path)
     }
 
     /// Verifies a password without adding another opened archive handle.
@@ -765,32 +853,45 @@ impl AppState {
         path: &Path,
         password: &str,
         encoding: Option<&str>,
-    ) -> Result<(), FormatError> {
+        limits: SafetyLimits,
+        control: &ControlToken,
+    ) -> Result<bool, FormatError> {
         let open_opts = OpenOptions {
             password: Some(Password::new(password)),
             encoding_override: encoding.map(str::to_owned),
         };
-        self.engine.list(path, &open_opts).map(|_| ())
+        self.engine
+            .verify_password(path, &open_opts, limits, control)
     }
 
-    /// Caches a working password for the session (zeroized on exit).
-    pub fn remember_password(&self, path: &Path, password: &str) {
-        lock_unpoisoned(&self.passwords).insert(path.to_path_buf(), Password::new(password));
+    pub(crate) fn password_attempt(
+        &self,
+        path: &Path,
+        control: &ControlToken,
+    ) -> Option<PasswordAttempt> {
+        self.passwords.begin(&self.engine, path, control)
+    }
+
+    /// Call only after successful decryption, using the attempt captured
+    /// before that work. Forgetting or source replacement prevents publication.
+    pub(crate) fn remember_password(
+        &self,
+        attempt: &PasswordAttempt,
+        password: &str,
+        control: &ControlToken,
+    ) {
+        self.passwords
+            .remember(&self.engine, attempt, password, control);
     }
 
     /// Removes a session password, used when the user forgets a saved secret.
     pub fn forget_password(&self, path: &Path) {
-        lock_unpoisoned(&self.passwords).remove(path);
+        self.passwords.forget(path);
     }
 
     #[cfg(test)]
     pub(crate) fn cached_password_paths(&self) -> Vec<PathBuf> {
-        let mut paths = lock_unpoisoned(&self.passwords)
-            .keys()
-            .cloned()
-            .collect::<Vec<_>>();
-        paths.sort();
-        paths
+        self.passwords.paths()
     }
 }
 
@@ -1116,20 +1217,32 @@ fn archive_directory_exists(archive: &CachedArchive, prefix: &str) -> bool {
     if prefix.is_empty() || archive.levels.contains_key(prefix) {
         return true;
     }
-    // Empty directories have a row in their parent, but no level of their own.
-    let path = prefix.trim_end_matches('/');
+    archive_path_exists(archive, prefix)
+}
+
+/// Looks up an exact displayed path in the existing directory index.
+fn archive_path_exists(archive: &CachedArchive, full_path: &str) -> bool {
+    if full_path.is_empty() {
+        return true;
+    }
+    let is_dir = full_path.ends_with('/');
+    let path = full_path.strip_suffix('/').unwrap_or(full_path);
     let (parent, name) = path.rsplit_once('/').map_or(("", path), |(parent, name)| {
-        (&prefix[..parent.len() + 1], name)
+        (&full_path[..parent.len() + 1], name)
     });
     let Some(rows) = archive.levels.get(parent) else {
         return false;
     };
     let folded = name.to_lowercase();
-    let start = rows
-        .partition_point(|row| row.is_dir() && row.name(&archive.entries).to_lowercase() < folded);
+    let start = rows.partition_point(|row| {
+        (row.is_dir() && !is_dir)
+            || (row.is_dir() == is_dir && row.name(&archive.entries).to_lowercase() < folded)
+    });
     rows[start..]
         .iter()
-        .take_while(|row| row.is_dir() && row.name(&archive.entries).to_lowercase() == folded)
+        .take_while(|row| {
+            row.is_dir() == is_dir && row.name(&archive.entries).to_lowercase() == folded
+        })
         .any(|row| row.name(&archive.entries) == name)
 }
 
@@ -1347,6 +1460,205 @@ mod tests {
             search_generation: AtomicU64::new(generation),
             _owned_temp: None,
         }
+    }
+
+    #[test]
+    fn archive_path_checks_use_exact_names_types_and_unloaded_directory_rows() {
+        let mut empty = file_meta("empty/", 0);
+        empty.entry_type = EntryType::Dir;
+        let mut entries = (0..1200)
+            .map(|index| file_meta(&format!("docs/item-{index:04}.txt"), 1))
+            .collect::<Vec<_>>();
+        entries.extend([empty, file_meta("docs/Case.txt", 1), file_meta("plain", 1)]);
+        let archive = cached_archive(entries, 0);
+        for path in [
+            "",
+            "docs/",
+            "empty/",
+            "plain",
+            "docs/Case.txt",
+            "docs/item-1199.txt",
+        ] {
+            assert!(archive_path_exists(&archive, path), "{path}");
+        }
+        for path in [
+            "docs",
+            "empty",
+            "docs/case.txt",
+            "docs/Case.txt/",
+            "missing/",
+            "docs/item-1200.txt",
+        ] {
+            assert!(!archive_path_exists(&archive, path), "{path}");
+        }
+    }
+
+    #[test]
+    fn move_preflight_checks_unloaded_names_and_preserves_zip_contents() {
+        let dir = temp_dir("move-full-index");
+        let mut names = vec![
+            "from/report.txt".to_owned(),
+            "destination/report.txt".to_owned(),
+            "destination/report copy.txt".to_owned(),
+        ];
+        names.extend((2..=1200).map(|index| format!("destination/report copy {index}.txt")));
+        let zip = make_zip(&dir, &names.iter().map(String::as_str).collect::<Vec<_>>());
+        let state = AppState::new();
+        let archive = state
+            .open_archive_for_window("move-window", &zip, None, None)
+            .unwrap();
+        let page = state
+            .list_entries_for_window("move-window", archive.id, 0, 10, "src/from/", None)
+            .unwrap();
+        assert_eq!(page.items.len(), 1);
+        let paths = vec![page.items[0].path.clone()];
+        assert!(state
+            .plan_archive_move_for_window("other-window", archive.id, &paths, "src/destination/")
+            .is_err());
+        let plan = state
+            .plan_archive_move_for_window("move-window", archive.id, &paths, "src/destination/")
+            .unwrap();
+        assert_eq!(plan.items.len(), 1);
+        assert_eq!(
+            plan.items[0].conflict,
+            Some(squallz_core::ArchiveMoveConflict::ExistingTarget)
+        );
+        let target = plan.items[0].keep_both_to.as_deref().unwrap();
+        assert_eq!(target, "src/destination/report copy 1201.txt");
+        let engine = Engine::new(squallz_formats::registry());
+        engine
+            .update(
+                &zip,
+                &[squallz_core::api::UpdateOp::Rename {
+                    from: squallz_core::api::EntrySelection::Display(paths[0].clone()),
+                    to: EntryPath::from_utf8(target),
+                }],
+                &squallz_core::api::UpdateOptions::default(),
+                &NoProgress,
+                &ControlToken::new(),
+            )
+            .unwrap();
+        let extracted = dir.join("extracted");
+        engine
+            .extract(
+                &zip,
+                &extracted,
+                None,
+                &OpenOptions::default(),
+                &squallz_core::api::ExtractOptions::default(),
+                &NoProgress,
+                &ControlToken::new(),
+            )
+            .unwrap();
+        assert_eq!(
+            std::fs::read(extracted.join(target)).unwrap(),
+            b"from/report.txt"
+        );
+        for name in &names[1..] {
+            assert_eq!(
+                std::fs::read(extracted.join("src").join(name)).unwrap(),
+                name.as_bytes()
+            );
+        }
+        assert!(!extracted.join(&paths[0]).exists());
+        state.close_archive_for_window("move-window", archive.id);
+        assert!(state
+            .plan_archive_move_for_window("move-window", archive.id, &paths, "src/destination/")
+            .is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn edit_target_inspection_covers_unloaded_entries_and_real_folder_rename_updates() {
+        let dir = temp_dir("edit-target-index");
+        let mut names = vec![
+            "source.txt".to_owned(),
+            "blocked".to_owned(),
+            "implicit/child.txt".to_owned(),
+        ];
+        names.extend((0..1000).map(|index| format!("docs/item-{index:04}.txt")));
+        let zip = make_zip(&dir, &names.iter().map(String::as_str).collect::<Vec<_>>());
+        let state = AppState::new();
+        let archive = state
+            .open_archive_for_window("edit-window", &zip, None, None)
+            .unwrap();
+        let page = state
+            .list_entries_for_window("edit-window", archive.id, 0, 500, "src/docs/", None)
+            .unwrap();
+        assert_eq!(page.items.len(), 500);
+        assert!(page
+            .items
+            .iter()
+            .all(|item| item.path != "src/docs/item-0999.txt"));
+        let inspect = |path| {
+            state
+                .inspect_archive_target_for_window("edit-window", archive.id, path)
+                .unwrap()
+        };
+        for path in [
+            "src/docs/item-0999.txt",
+            "src/docs/item-0999.txt/",
+            "src/implicit",
+            "src/implicit/",
+        ] {
+            assert!(inspect(path).exists, "{path}");
+        }
+        assert_eq!(
+            inspect("src/blocked/child/").blocked_parent.as_deref(),
+            Some("src/blocked")
+        );
+        assert!(!inspect("src/new-folder/").exists);
+        assert!(!inspect("src/new-folder/renamed.txt").exists);
+        assert!(state
+            .inspect_archive_target_for_window("other-window", archive.id, "src/new-folder/")
+            .is_err());
+        let engine = Engine::new(squallz_formats::registry());
+        engine
+            .update(
+                &zip,
+                &[
+                    squallz_core::api::UpdateOp::AddDir {
+                        path: EntryPath::from_utf8("src/new-folder/"),
+                    },
+                    squallz_core::api::UpdateOp::Rename {
+                        from: squallz_core::api::EntrySelection::Display("src/source.txt".into()),
+                        to: EntryPath::from_utf8("src/new-folder/renamed.txt"),
+                    },
+                ],
+                &squallz_core::api::UpdateOptions::default(),
+                &NoProgress,
+                &ControlToken::new(),
+            )
+            .unwrap();
+        let extracted = dir.join("extracted");
+        engine
+            .extract(
+                &zip,
+                &extracted,
+                None,
+                &OpenOptions::default(),
+                &squallz_core::api::ExtractOptions::default(),
+                &NoProgress,
+                &ControlToken::new(),
+            )
+            .unwrap();
+        assert!(extracted.join("src/new-folder").is_dir());
+        assert_eq!(
+            std::fs::read(extracted.join("src/new-folder/renamed.txt")).unwrap(),
+            b"source.txt"
+        );
+        assert!(!extracted.join("src/source.txt").exists());
+        for name in &names[1..] {
+            assert_eq!(
+                std::fs::read(extracted.join("src").join(name)).unwrap(),
+                name.as_bytes()
+            );
+        }
+        state.close_archive_for_window("edit-window", archive.id);
+        assert!(state
+            .inspect_archive_target_for_window("edit-window", archive.id, "src/new-folder/")
+            .is_err());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -1766,6 +2078,27 @@ mod tests {
         assert_eq!(
             unavailable,
             state
+                .missing_archive_paths_for_window("window-b", first.id, &["src/".to_owned()])
+                .unwrap_err()
+                .to_string()
+        );
+        assert_eq!(
+            state
+                .missing_archive_paths_for_window(
+                    "window-a",
+                    first.id,
+                    &[
+                        "src/".to_owned(),
+                        "src/nested/".to_owned(),
+                        "missing".to_owned()
+                    ],
+                )
+                .unwrap(),
+            vec!["missing"]
+        );
+        assert_eq!(
+            unavailable,
+            state
                 .resolve_archive_directory_for_window("window-b", first.id, "src/nested/")
                 .unwrap_err()
                 .to_string()
@@ -1938,7 +2271,58 @@ mod tests {
     }
 
     #[test]
-    fn cache_locks_recover_after_poison() {
+    fn readable_directory_does_not_prove_a_supplied_password() {
+        let dir = temp_dir("unverified-session-password");
+        let archive = make_zip(&dir, &["report.txt"]);
+        let state = AppState::new();
+        state
+            .open_archive(&archive, Some("unverified"), None)
+            .unwrap();
+        assert!(state.password_for(&archive).is_none());
+        let source = dir.join("private.txt");
+        std::fs::write(&source, b"encrypted payload").unwrap();
+        for format in ["zip", "7z"] {
+            let encrypted = dir.join(format!("data-encrypted.{format}"));
+            state
+                .engine
+                .create(
+                    &encrypted,
+                    std::slice::from_ref(&source),
+                    &CreateOptions {
+                        password: Some(Password::new("secret")),
+                        encrypt_filenames: false,
+                        ..CreateOptions::default()
+                    },
+                    &NoProgress,
+                    &ControlToken::default(),
+                )
+                .unwrap();
+            for password in ["wrong", "secret"] {
+                state
+                    .open_archive(&encrypted, Some(password), None)
+                    .unwrap();
+                assert!(state.password_for(&encrypted).is_none());
+            }
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn replacing_an_archive_invalidates_its_session_password() {
+        let dir = temp_dir("replaced-session-password");
+        let archive = make_header_encrypted_7z(&dir);
+        let state = AppState::new();
+        state.open_archive(&archive, Some("secret"), None).unwrap();
+        assert!(state.password_for(&archive).is_some());
+        let replacement = dir.join("replacement.7z");
+        std::fs::copy(&archive, &replacement).unwrap();
+        std::fs::rename(replacement, &archive).unwrap();
+        assert!(state.password_for(&archive).is_none());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn archive_cache_lock_recovers_after_poison() {
         let state = std::sync::Arc::new(AppState::new());
 
         let archive_state = std::sync::Arc::clone(&state);
@@ -1950,22 +2334,6 @@ mod tests {
         .is_err());
         assert!(state.list_entries(404, 0, 10, "", None).is_err());
         state.close_archive(404);
-
-        let password_state = std::sync::Arc::clone(&state);
-        assert!(std::thread::spawn(move || {
-            let _guard = password_state.passwords.lock().unwrap();
-            panic!("poison password cache");
-        })
-        .join()
-        .is_err());
-        let archive = PathBuf::from("/tmp/squallz-poison-password.7z");
-        state.remember_password(&archive, "secret");
-        assert_eq!(
-            state.password_for(&archive).as_ref().map(Password::expose),
-            Some("secret")
-        );
-        state.forget_password(&archive);
-        assert!(state.password_for(&archive).is_none());
     }
 
     #[test]

@@ -10,6 +10,8 @@ export interface ErrorDto {
   detail: string;
 }
 
+export type NestedArchivePasswords = { outer: string | null; inner: string | null };
+
 export interface ArchiveInfo {
   id: number;
   path: string;
@@ -43,6 +45,22 @@ export interface Page {
   total: number;
   page: number;
   items: EntryDto[];
+}
+
+export interface ArchiveMovePlanDto {
+  items: Array<{
+    from: string;
+    to: string;
+    conflict: "existing_target" | "duplicate_target" | null;
+    keep_both_to: string | null;
+  }>;
+  missing_sources: string[];
+  blocked_parent: string | null;
+}
+
+export interface ArchiveTargetInspectionDto {
+  exists: boolean;
+  blocked_parent: string | null;
 }
 
 export interface FormatDto {
@@ -158,8 +176,7 @@ export interface CreateDestination {
 export interface NestedArchivePreviewDto {
   outer_path: string;
   entry_path: string;
-  format: string;
-  entry_count: number;
+  archive: ArchiveInfo;
   truncated: boolean;
   items: EntryDto[];
 }
@@ -361,6 +378,9 @@ export type ProgressPhase =
   | "sfx_publish_notarize"
   | "sfx_publish_finalize";
 
+// Batch totals use this many work units per grouped archive; entry counters remain bytes.
+export const BATCH_PROGRESS_SCALE = 1_000;
+
 export interface ProgressEvent {
   id: number;
   version: number;
@@ -403,6 +423,7 @@ export interface JobSnapshot {
   id: number;
   version: number;
   spec: JobSpec;
+  output_password_required: boolean;
   origin: JobOrigin;
   owned_by_requester: boolean;
   state: StateEvent["state"];
@@ -460,8 +481,10 @@ export type JobQuestion =
   | { kind: "conflict"; prompt: AskConflictEvent };
 
 export interface PasswordBookStatus {
+  session: boolean;
   available: boolean;
-  saved: boolean;
+  saved: boolean | null;
+  error: ErrorDto | null;
 }
 
 export interface LanguageDto {
@@ -713,6 +736,12 @@ export const ipc = {
   takeValidationDropPaths: () => invoke<string[]>("take_validation_drop_paths"),
   resolveArchiveDirectory: (id: number, dirPrefix: string) =>
     invoke<string>("resolve_archive_directory", { id, dirPrefix }),
+  missingArchivePaths: (id: number, paths: string[]) =>
+    invoke<string[]>("missing_archive_paths", { id, paths }),
+  planArchiveMove: (id: number, paths: string[], targetDir: string) =>
+    invoke<ArchiveMovePlanDto>("plan_archive_move", { id, paths, targetDir }),
+  inspectArchiveTarget: (id: number, target: string) =>
+    invoke<ArchiveTargetInspectionDto>("inspect_archive_target", { id, target }),
   listEntries: (
     id: number,
     page: number,
@@ -781,26 +810,30 @@ export const ipc = {
   previewNestedArchive: (
     outerPath: string,
     entryPath: string,
-    password?: string | null,
-    encoding?: string | null,
+    passwords: NestedArchivePasswords,
+    encoding: string | null,
+    requestId: string,
   ) =>
     invoke<NestedArchivePreviewDto>("preview_nested_archive", {
       outerPath,
       entryPath,
-      password,
+      passwords,
       encoding,
+      requestId,
     }),
   previewArchiveEntry: (
     outerPath: string,
     entryPath: string,
-    password?: string | null,
-    encoding?: string | null,
+    password: string | null,
+    encoding: string | null,
+    requestId: string,
   ) =>
     invoke<EntryPreviewDto>("preview_archive_entry", {
       outerPath,
       entryPath,
       password,
       encoding,
+      requestId,
     }),
   openPreviewSession: (previewId: string) =>
     invoke<void>("open_preview_session", { previewId }),
@@ -808,17 +841,21 @@ export const ipc = {
     invoke<void>("reveal_preview_session", { previewId }),
   releasePreviewSession: (previewId: string) =>
     invoke<boolean>("release_preview_session", { previewId }),
+  cancelEntryPreview: (requestId: string) =>
+    invoke<void>("cancel_entry_preview", { requestId }),
   openNestedArchive: (
     outerPath: string,
     entryPath: string,
-    password?: string | null,
-    encoding?: string | null,
+    passwords: NestedArchivePasswords,
+    encoding: string | null,
+    requestId: string,
   ) =>
     invoke<ArchiveInfo>("open_nested_archive", {
       outerPath,
       entryPath,
-      password,
+      passwords,
       encoding,
+      requestId,
     }),
   submitJob: (spec: JobSpec) => invoke<number>("submit_job", { spec }),
   getSfxCreateCapability: () =>
@@ -826,6 +863,7 @@ export const ipc = {
   getMacosSfxPublisherStatus: () =>
     invoke<MacosSfxPublisherStatusDto>("get_macos_sfx_publisher_status"),
   jobSnapshot: (id: number) => invoke<JobSnapshot | null>("job_snapshot", { id }),
+  reviewJobSpec: (id: number) => invoke<JobSpec>("review_job_spec", { id }),
   openJobOutput: (id: number) => invoke<void>("open_job_output", { id }),
   jobSnapshots: (since: number | null) =>
     invoke<JobSnapshotsDelta>("job_snapshots", { since }),
@@ -846,8 +884,10 @@ export const ipc = {
     invoke<void>("answer_password", { id, questionVersion, password }),
   archivePasswordStatus: (path: string) =>
     invoke<PasswordBookStatus>("archive_password_status", { path }),
-  rememberArchivePassword: (path: string, password: string, encoding?: string | null) =>
-    invoke<PasswordBookStatus>("remember_archive_password", { path, password, encoding }),
+  rememberArchivePassword: (path: string, password: string, encoding: string | null, requestId: string) =>
+    invoke<PasswordBookStatus>("remember_archive_password", { path, password, encoding, requestId }),
+  cancelPasswordSave: (requestId: string) =>
+    invoke<void>("cancel_password_save", { requestId }),
   forgetArchivePassword: (path: string) =>
     invoke<PasswordBookStatus>("forget_archive_password", { path }),
   isValidationSession: () => invoke<boolean>("is_validation_session"),

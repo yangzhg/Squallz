@@ -5,8 +5,62 @@ import type {
   IntegrationStatusDto,
   IntegrationSystemDiagnosticsDto,
   NestedArchivePreviewDto,
+  NestedArchivePasswords,
   QueueWaitReason,
+  PasswordBookStatus,
 } from "./ipc";
+
+const passwordBookPreviewRequests = new Map<string, () => void>();
+let passwordBookPreviewStatus: PasswordBookStatus | null = null;
+
+export function readPasswordBookPreview(params: URLSearchParams): PasswordBookStatus | null {
+  if (!import.meta.env.DEV || params.get("previewPasswordBook") !== "1") return null;
+  if (!passwordBookPreviewStatus) {
+    const state = params.get("passwordBookState");
+    const locked = state === "locked";
+    const unavailable = state === "unavailable";
+    passwordBookPreviewStatus = {
+      session: ["session", "locked", "unavailable", "saved"].includes(state ?? ""),
+      available: !unavailable,
+      saved: locked || unavailable ? null : state === "saved",
+      error: locked ? { key: "error.secret_store", params: {}, detail: "" } : null,
+    };
+  }
+  return { ...passwordBookPreviewStatus };
+}
+
+export function forgetPasswordBookPreview(params: URLSearchParams): PasswordBookStatus | null {
+  const status = readPasswordBookPreview(params);
+  if (!status) return null;
+  passwordBookPreviewStatus = { ...status, session: false, saved: status.error || !status.available ? null : false };
+  return { ...passwordBookPreviewStatus };
+}
+
+export function savePasswordBookPreview(params: URLSearchParams, requestId: string, password: string): Promise<PasswordBookStatus> | null {
+  if (!import.meta.env.DEV || params.get("previewPasswordBook") !== "1") return null;
+  const valid = password === "book-preview";
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      passwordBookPreviewRequests.delete(requestId);
+      if (valid) {
+        passwordBookPreviewStatus = { session: true, available: true, saved: true, error: null };
+        resolve({ ...passwordBookPreviewStatus });
+      }
+      else reject({ key: "error.wrong_password", params: {}, detail: "" });
+    }, 1800);
+    passwordBookPreviewRequests.set(requestId, () => {
+      clearTimeout(timer);
+      passwordBookPreviewRequests.delete(requestId);
+      reject({ key: "error.cancelled", params: {}, detail: "" });
+    });
+  });
+}
+
+export function cancelPasswordBookPreview(params: URLSearchParams, requestId: string): boolean {
+  if (!import.meta.env.DEV || params.get("previewPasswordBook") !== "1") return false;
+  passwordBookPreviewRequests.get(requestId)?.();
+  return true;
+}
 
 export interface ArchivePreview {
   info: ArchiveInfo;
@@ -18,20 +72,70 @@ export interface ArchivePreview {
   nestedPreview: NestedArchivePreviewDto | null;
 }
 
+export function nestedPasswordPreviewSample(
+  params: URLSearchParams,
+  outerSource: string,
+  entryPath: string,
+  passwords: NestedArchivePasswords,
+): NestedArchivePreviewDto | null {
+  if (!import.meta.env.DEV || params.get("previewEntryPassword") !== "1") return null;
+  for (const scope of ["outer", "inner"] as const) {
+    if (passwords[scope] !== `${scope}-preview`) {
+      throw {
+        key: passwords[scope] ? "error.wrong_password" : "error.password_required",
+        params: { password_scope: scope }, detail: "",
+      };
+    }
+  }
+  return {
+    outer_path: outerSource, entry_path: entryPath,
+    archive: nestedPreviewArchiveInfo(outerSource, entryPath, nestedPreviewItems.length),
+    truncated: false, items: nestedPreviewItems,
+  };
+}
+
+function nestedPreviewArchiveInfo(outerSource: string, entryPath: string, count: number): ArchiveInfo {
+  return {
+    id: 9002, source: "archive://9002", path: `${outerSource} › ${entryPath}`,
+    name: entryPath.split("/").at(-1) ?? entryPath, format: "7z", structure: "complete",
+    read_only: true, entry_count: count, volumes: null,
+    non_utf8_name_count: 0, garbled_count: 0, suggested_encoding: null, encoding_override: null,
+  };
+}
+
+export function preparedNestedPreviewRows(params: URLSearchParams, source: string): EntryDto[] | null {
+  if (!import.meta.env.DEV || source !== "archive://9002") return null;
+  if (params.get("previewEntryPassword") === "1") return nestedPreviewItems;
+  return readArchivePreview(params, 500)?.nestedPreview?.items ?? null;
+}
+
 type PreviewTaskKind =
   | "archive_open"
   | "compress"
+  | "compress_failure"
   | "compress_split"
   | "compress_sfx"
   | "compress_sfx_failure"
+  | "convert_failure"
+  | "convert_encrypted_failure"
+  | "duplicate_scan"
+  | "duplicate_scan_clean"
+  | "duplicate_scan_failure"
   | "recovery_cleanup_ready"
   | "recovery_cleanup_unconfirmed"
   | "recovery_cleanup_record"
   | "extract"
+  | "extract_failure"
+  | "extract_password"
+  | "extract_conflict"
+  | "extract_nested_failure"
+  | "update_failure"
   | "extract_unknown_current"
   | "extract_metadata"
   | "batch_extract_metadata"
   | "batch_extract"
+  | "batch_extract_partial"
+  | "batch_extract_failure"
   | "test"
   | "checksum"
   | "checksum_check"
@@ -423,17 +527,26 @@ function completedTaskParam(value: string | null): RuntimePreviews["completedTas
   if (
     value === "archive_open" ||
     value === "compress" ||
+    value === "compress_failure" ||
     value === "compress_split" ||
     value === "compress_sfx" ||
     value === "compress_sfx_failure" ||
+    value === "convert_failure" ||
+    value === "convert_encrypted_failure" ||
+    value === "duplicate_scan" || value === "duplicate_scan_clean" || value === "duplicate_scan_failure" ||
     value === "recovery_cleanup_ready" ||
     value === "recovery_cleanup_unconfirmed" ||
     value === "recovery_cleanup_record" ||
     value === "extract" ||
+    value === "extract_failure" ||
+    value === "extract_password" || value === "extract_conflict" ||
+    value === "extract_nested_failure" ||
+    value === "update_failure" ||
     value === "extract_unknown_current" ||
     value === "extract_metadata" ||
     value === "batch_extract_metadata" ||
     value === "batch_extract" ||
+    value === "batch_extract_partial" || value === "batch_extract_failure" ||
     value === "test" ||
     value === "checksum" ||
     value === "checksum_check" ||
@@ -454,16 +567,18 @@ function readArchivePreview(params: URLSearchParams, pageSize: number): ArchiveP
   if (params.get("previewArchive") !== "1") return null;
 
   const format = (params.get("previewFormat") ?? "zip").toLowerCase();
-  const name = `product-backup.${format}`;
+  const name = params.get("previewArchiveName") || `product-backup.${format}`;
   const entries = [
     ...archivePreviewEntries,
     ...(params.get("previewLinks") === "1" ? linkPreviewItems : []),
     ...(params.get("previewLongNames") === "1" ? longNamePreviewEntries : []),
     ...(params.get("previewHistoricalTimes") === "1" ? historicalTimePreviewEntries : []),
   ];
-  const nestedItems = params.get("previewLinks") === "1"
-    ? [...nestedPreviewItems, ...linkPreviewItems]
-    : nestedPreviewItems;
+  const nestedItems = [
+    ...nestedPreviewItems,
+    ...(params.get("previewLinks") === "1" ? linkPreviewItems : []),
+    ...(params.get("previewLongNames") === "1" ? longNamePreviewEntries : []),
+  ];
   const selected = listParam(params, "previewSelected", ",");
   const largeEntryCount = numericParam(params, "previewLargeEntries", 0);
   const pages = largeEntryCount > 0 ? largePreviewPages(largeEntryCount, pageSize) : null;
@@ -500,8 +615,7 @@ function readArchivePreview(params: URLSearchParams, pageSize: number): ArchiveP
       ? {
           outer_path: `${sampleArchiveRoot}/${name}`,
           entry_path: "locked-secrets.7z",
-          format: "7z",
-          entry_count: nestedItems.length,
+          archive: nestedPreviewArchiveInfo(`${sampleArchiveRoot}/${name}`, "locked-secrets.7z", nestedItems.length),
           truncated: false,
           items: nestedItems,
         }

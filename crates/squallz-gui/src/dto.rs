@@ -6,7 +6,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 use squallz_core::api::{
-    unix_seconds, EntryMeta, EntryType, FormatError, OverwritePolicy, ResourceOptions,
+    unix_seconds, EntryMeta, EntryType, FormatError, OverwritePolicy, Password, ResourceOptions,
     SafetyLimits, SplitOutputMode, SymlinkPolicy,
 };
 use squallz_core::{
@@ -39,6 +39,58 @@ pub struct ErrorDto {
     pub params: HashMap<String, String>,
     /// Log-only detail (English), shown only in the details expander
     pub detail: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ArchiveTargetInspectionDto {
+    pub exists: bool,
+    pub blocked_parent: Option<String>,
+}
+
+impl From<squallz_core::ArchiveTargetInspection> for ArchiveTargetInspectionDto {
+    fn from(inspection: squallz_core::ArchiveTargetInspection) -> Self {
+        Self {
+            exists: inspection.exists,
+            blocked_parent: inspection.blocked_parent,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ArchiveMovePlanDto {
+    pub items: Vec<ArchiveMoveItemDto>,
+    pub missing_sources: Vec<String>,
+    pub blocked_parent: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ArchiveMoveItemDto {
+    pub from: String,
+    pub to: String,
+    pub conflict: Option<&'static str>,
+    pub keep_both_to: Option<String>,
+}
+
+impl From<squallz_core::ArchiveMovePlan> for ArchiveMovePlanDto {
+    fn from(plan: squallz_core::ArchiveMovePlan) -> Self {
+        Self {
+            missing_sources: plan.missing_sources,
+            blocked_parent: plan.blocked_parent,
+            items: plan
+                .items
+                .into_iter()
+                .map(|item| ArchiveMoveItemDto {
+                    from: item.from,
+                    to: item.to,
+                    conflict: item.conflict.map(|conflict| match conflict {
+                        squallz_core::ArchiveMoveConflict::ExistingTarget => "existing_target",
+                        squallz_core::ArchiveMoveConflict::DuplicateTarget => "duplicate_target",
+                    }),
+                    keep_both_to: item.keep_both_to,
+                })
+                .collect(),
+        }
+    }
 }
 
 impl From<&FormatError> for ErrorDto {
@@ -499,13 +551,27 @@ pub struct CreateDestinationInspectionDto {
     pub guard: Option<CreateDestinationGuard>,
 }
 
+/// Independent credentials for materializing an entry and reading its archive.
+#[derive(Default, Deserialize)]
+pub struct NestedArchivePasswords {
+    #[serde(default, deserialize_with = "deserialize_archive_password")]
+    pub outer: Option<Password>,
+    #[serde(default, deserialize_with = "deserialize_archive_password")]
+    pub inner: Option<Password>,
+}
+
+fn deserialize_archive_password<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Password>, D::Error> {
+    Option::<String>::deserialize(deserializer).map(|password| password.map(Password::new))
+}
+
 /// One-level preview of an archive stored as an entry inside another archive.
 #[derive(Debug, Clone, Serialize)]
 pub struct NestedArchivePreviewDto {
     pub outer_path: String,
     pub entry_path: String,
-    pub format: String,
-    pub entry_count: usize,
+    pub archive: ArchiveInfo,
     pub truncated: bool,
     pub items: Vec<EntryDto>,
 }
@@ -711,11 +777,33 @@ pub enum JobSpec {
     },
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct JobSnapshotDescription {
+    pub spec: JobSpec,
+    /// Window-scoped source handles for explicit review, never serialized in snapshots.
+    pub review_spec: JobSpec,
+    pub output_password_required: bool,
+}
+
 impl JobSpec {
     /// Returns the task description that may be mirrored to another app
     /// window. Credentials never cross that boundary; non-secret options
     /// continue to describe the operation that actually ran.
-    pub(crate) fn redacted_for_snapshot(&self) -> Self {
+    pub(crate) fn redacted_for_snapshot(&self) -> JobSnapshotDescription {
+        let output_password_required = match self {
+            Self::Compress {
+                password,
+                encrypt_names,
+                ..
+            } => password.is_some() || *encrypt_names,
+            Self::Convert {
+                dest_password,
+                encrypt_names,
+                ..
+            } => dest_password.is_some() || *encrypt_names,
+            Self::ExportSqz { dest_password, .. } => dest_password.is_some(),
+            _ => false,
+        };
         let mut redacted = self.clone();
         match &mut redacted {
             Self::Compress {
@@ -779,7 +867,11 @@ impl JobSpec {
             | Self::ChecksumCheck { .. }
             | Self::DuplicateScan { .. } => {}
         }
-        redacted
+        JobSnapshotDescription {
+            review_spec: redacted.clone(),
+            spec: redacted,
+            output_password_required,
+        }
     }
 }
 
@@ -806,6 +898,7 @@ pub struct ProgressEvent {
     pub id: u64,
     /// Global snapshot revision for stale-event rejection.
     pub version: u64,
+    /// Bytes, or 1,000 work units per grouped archive for batch extraction.
     pub done: u64,
     /// 0 = unknown total (indeterminate progress bar)
     pub total: u64,
@@ -817,7 +910,7 @@ pub struct ProgressEvent {
     /// Entries prepared during an input scan. Omitted for byte progress.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scanned_entries: Option<u64>,
-    /// Smoothed throughput in bytes/second
+    /// Smoothed throughput in bytes/second; 0 for batch work units.
     pub speed: u64,
 }
 
@@ -866,10 +959,13 @@ pub struct AskPasswordEvent {
 /// Current archive password-book state.
 #[derive(Debug, Clone, Serialize)]
 pub struct PasswordBookStatusDto {
+    /// Whether a verified password still matches the current archive source.
+    pub session: bool,
     /// Whether a persistent secret store is available on this platform/session.
     pub available: bool,
-    /// Whether this archive has a password saved in the persistent store.
-    pub saved: bool,
+    /// `None` when the persistent store could not be checked.
+    pub saved: Option<bool>,
+    pub error: Option<ErrorDto>,
 }
 
 /// One installed desktop/file-manager integration action.
@@ -1487,7 +1583,7 @@ mod tests {
         let specs = vec![
             serde_json::json!({
                 "kind": "compress", "inputs": ["source"], "dest": "archive.7z",
-                "level": 5, "password": secret, "encrypt_names": true,
+                "level": 5, "password": secret, "encrypt_names": false,
                 "split_size": null, "split_mode": "generic", "excludes": [],
                 "content_policy": "keep_all_files", "sqz_inner_format": null,
                 "sfx_target": null, "completion": "none",
@@ -1521,7 +1617,7 @@ mod tests {
             serde_json::json!({
                 "kind": "convert", "src": "source.7z", "dest": "dest.7z",
                 "level": 5, "src_encoding": null, "src_password": secret,
-                "dest_password": secret, "encrypt_names": true,
+                "dest_password": secret, "encrypt_names": false,
                 "split_size": null, "split_mode": "generic",
                 "replace_existing": true, "replacement_guard": replacement_guard.clone()
             }),
@@ -1545,14 +1641,59 @@ mod tests {
         for value in specs {
             let encrypt_names = value.get("encrypt_names").cloned();
             let spec: JobSpec = serde_json::from_value(value).expect("valid credential job spec");
-            let redacted = serde_json::to_value(spec.redacted_for_snapshot())
-                .expect("redacted job spec serializes");
+            let description = spec.redacted_for_snapshot();
+            let review = serde_json::to_string(&description.review_spec).unwrap();
+            assert!(!review.contains(secret));
+            assert!(!review.contains("sqcg1_"));
+            assert!(!review.contains("sqeg1_"));
+            assert_eq!(
+                description.output_password_required,
+                matches!(
+                    spec,
+                    JobSpec::Compress { .. } | JobSpec::Convert { .. } | JobSpec::ExportSqz { .. }
+                )
+            );
+            let redacted =
+                serde_json::to_value(description.spec).expect("redacted job spec serializes");
             assert!(!redacted.to_string().contains(secret));
             assert!(!redacted.to_string().contains("sqcg1_"));
             assert!(!redacted.to_string().contains("sqeg1_"));
             if let Some(expected) = encrypt_names {
                 assert_eq!(redacted["encrypt_names"], expected);
             }
+        }
+    }
+
+    #[test]
+    fn source_password_does_not_imply_output_encryption() {
+        for (dest_password, encrypt_names, required) in [
+            (None, false, false),
+            (Some("output-password".to_owned()), false, true),
+            (None, true, true),
+        ] {
+            let spec = JobSpec::Convert {
+                src: "source.7z".to_owned(),
+                dest: "output.7z".to_owned(),
+                level: 5,
+                src_encoding: None,
+                src_password: Some("source-password".to_owned()),
+                dest_password,
+                encrypt_names,
+                split_size: None,
+                split_mode: squallz_core::api::SplitOutputMode::Generic,
+                replace_existing: false,
+                replacement_guard: None,
+            };
+            let description = spec.redacted_for_snapshot();
+            assert_eq!(description.output_password_required, required);
+            assert!(matches!(
+                description.spec,
+                JobSpec::Convert {
+                    src_password: None,
+                    dest_password: None,
+                    ..
+                }
+            ));
         }
     }
 

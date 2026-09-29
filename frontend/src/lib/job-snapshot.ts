@@ -1,6 +1,14 @@
-import type { JobQuestion, JobSnapshot, StateEvent } from "./ipc";
+import type { JobQuestion, JobSnapshot, JobSpec, StateEvent } from "./ipc";
 
 export type SnapshotState = StateEvent["state"];
+
+/** Capture output protection before credentials are removed from a task. */
+export function outputPasswordRequired(spec: JobSpec): boolean {
+  if (spec.kind === "compress") return spec.password !== null || spec.encrypt_names;
+  if (spec.kind === "convert") return spec.dest_password !== null || spec.encrypt_names;
+  if (spec.kind === "export_sqz") return spec.dest_password !== null;
+  return false;
+}
 
 export function isTerminalSnapshotState(state: SnapshotState): boolean {
   return state === "done" || state === "failed" || state === "cancelled";
@@ -8,12 +16,11 @@ export function isTerminalSnapshotState(state: SnapshotState): boolean {
 
 export function snapshotQuestion(
   snapshot: Pick<JobSnapshot, "owned_by_requester" | "state" | "question">,
-  answeredVersion: number,
   current: JobQuestion | null = null,
 ): JobQuestion | null {
   const question = snapshot.question;
   if (!snapshot.owned_by_requester || isTerminalSnapshotState(snapshot.state)
-    || !question || question.prompt.version <= answeredVersion) return null;
+    || !question) return null;
   // Progress and queue updates must not reset the active form or its focus.
   return current?.prompt.version === question.prompt.version ? current : question;
 }
@@ -29,11 +36,14 @@ export function shouldApplySnapshotState(
 }
 
 export function shouldApplySnapshotProgress(
-  currentVersion: number,
+  progressVersion: number,
   currentState: SnapshotState,
   incomingVersion: number,
+  stateVersion: number,
 ): boolean {
-  return incomingVersion > currentVersion && !isTerminalSnapshotState(currentState);
+  // A delayed pre-terminal measurement may fill missing progress without changing the outcome.
+  return incomingVersion > progressVersion
+    && (!isTerminalSnapshotState(currentState) || incomingVersion < stateVersion);
 }
 
 export function shouldApplyFullSnapshot(

@@ -62,8 +62,8 @@ pub(super) fn deterministic_payload(len: usize) -> Vec<u8> {
 
 /// Buffering event sink for tests.
 #[derive(Default)]
-pub(super) struct TestSink {
-    pub(super) events: StdMutex<Vec<(String, serde_json::Value)>>,
+pub(crate) struct TestSink {
+    pub(crate) events: StdMutex<Vec<(String, serde_json::Value)>>,
 }
 
 impl EventSink for TestSink {

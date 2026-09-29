@@ -13,6 +13,7 @@ export interface AppActionContext {
   blocked: boolean;
   taskWindow: boolean;
   opening: boolean;
+  addingFiles: boolean;
   archive: boolean;
   writable: boolean;
   browsing: boolean;
@@ -37,7 +38,7 @@ export function appActionAvailability(context: AppActionContext): AppActionAvail
     create_archive: available,
     extract_all: archive && !context.selectionBusy,
     extract_selection: selection,
-    add_files: mutable,
+    add_files: mutable && !context.addingFiles,
     new_folder: mutable,
     rename_entry: mutable && context.canRename,
     move_entries: mutable && selection,

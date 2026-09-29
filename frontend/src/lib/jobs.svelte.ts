@@ -2,6 +2,7 @@
 // status text, and conflict/password prompts.
 
 import {
+  BATCH_PROGRESS_SCALE,
   ipc,
   type AskConflictEvent,
   type AskPasswordEvent,
@@ -21,6 +22,7 @@ import { errorSummary } from "./error-presentation";
 import {
   isTerminalSnapshotState,
   localSubmissionPromotion,
+  outputPasswordRequired,
   shouldApplyFullSnapshot,
   shouldApplySnapshotProgress,
   shouldApplySnapshotState,
@@ -31,6 +33,7 @@ import { jobTitleFor } from "./job-title";
 import { pushToast } from "./toasts.svelte";
 import { basename, formatBytes } from "./format";
 import { readCreateResult } from "./create-result";
+import { batchExtractResultSummary, readBatchExtractResult } from "./batch-extract-result";
 import { openCreatedOutputWithFallback } from "./create-completion";
 import { recordOperation, type OperationStatus } from "./history.svelte";
 import {
@@ -61,11 +64,16 @@ export interface Task {
   /** Last backend version applied to this task. */
   version: number;
   spec: JobSpec;
+  outputPasswordRequired: boolean;
   title: string;
   origin: JobOrigin;
   ownedByRequester: boolean;
   interaction: JobInteraction | null;
+  /** Last owned backend prompt, retained while an answer or cancellation is pending. */
   question: JobQuestion | null;
+  actionFailure: TaskControlIntent | "answer" | null;
+  /** The last known state is retained while snapshot synchronization is unavailable. */
+  statusStale: boolean;
   answeredQuestionVersion: number;
   state: JobStateName;
   queuePosition: number | null;
@@ -106,12 +114,17 @@ export function jobSupportsPause(spec: JobSpec): boolean {
     && spec.kind !== "repair_recovery";
 }
 
+export type JobSnapshotStatus = "loading" | "ready" | "unavailable";
+
 const store = $state({
   tasks: [] as Task[],
+  snapshotStatus: "loading" as JobSnapshotStatus,
 });
 
 const pendingStates = new Map<number, StateEvent>();
 const pendingProgress = new Map<number, ProgressEvent>();
+// Partial events can arrive out of order; a full snapshot advances both boundaries.
+const eventVersions = new WeakMap<Task, { state: number; progress: number }>();
 const MAX_PENDING_EVENTS = 128;
 const locallyDismissed = new Set<number>();
 let snapshotRevision: number | null = null;
@@ -177,7 +190,18 @@ function find(id: number): Task | undefined {
   return store.tasks.find((task) => task.id === id);
 }
 
-function rememberPending<T>(pending: Map<number, T>, id: number, event: T): void {
+function taskEventVersions(task: Task): { state: number; progress: number } {
+  let versions = eventVersions.get(task);
+  if (!versions) {
+    versions = { state: task.version, progress: task.version };
+    eventVersions.set(task, versions);
+  }
+  return versions;
+}
+
+function rememberPending<T extends { version: number }>(pending: Map<number, T>, id: number, event: T): void {
+  const previous = pending.get(id);
+  if (previous && previous.version >= event.version) return;
   pending.set(id, event);
   while (pending.size > MAX_PENDING_EVENTS) {
     const oldest = pending.keys().next().value;
@@ -220,11 +244,14 @@ export async function submitJob(spec: JobSpec): Promise<number> {
       id,
       version: 0,
       spec: redactedSpec(spec),
+      outputPasswordRequired: outputPasswordRequired(spec),
       title: titleFor(spec),
       origin: "app",
       ownedByRequester: true,
       interaction: null,
       question: null,
+      actionFailure: null,
+      statusStale: store.snapshotStatus === "unavailable",
       answeredQuestionVersion: 0,
       state: "queued",
       queuePosition: null,
@@ -287,7 +314,11 @@ function runTerminalEffects(task: Task, previousState: JobStateName): void {
 
 function clearPendingQuestions(id: number): void {
   const task = find(id);
-  if (task) task.question = null;
+  if (task) {
+    task.question = null;
+    task.interaction = null;
+    task.actionFailure = null;
+  }
 }
 
 function errorNeedsInspection(error: ErrorDto | null): boolean {
@@ -303,10 +334,14 @@ function onState(ev: StateEvent): void {
     if (!locallyDismissed.has(ev.id)) rememberPending(pendingStates, ev.id, ev);
     return;
   }
-  if (!shouldApplySnapshotState(task.version, task.state, ev.version, ev.state)) return;
+  const versions = taskEventVersions(task);
+  if (!shouldApplySnapshotState(versions.state, task.state, ev.version, ev.state)) return;
+  versions.state = ev.version;
   const previousState = task.state;
-  task.version = ev.version;
+  task.version = Math.max(task.version, ev.version);
   task.state = ev.state;
+  if (ev.state !== previousState) task.actionFailure = null;
+  if (ev.state !== "running") task.speed = 0;
   task.error = ev.error ?? null;
   if (ev.result !== undefined) {
     task.result = (ev.result as Record<string, unknown> | null) ?? null;
@@ -317,11 +352,14 @@ function onState(ev: StateEvent): void {
   if (
     isTerminalSnapshotState(ev.state) ||
     (ev.state === "paused" && task.controlIntent === "pause") ||
-    (ev.state === "running" && task.controlIntent === "resume")
+    ((ev.state === "running" || ev.state === "queued") && task.controlIntent === "resume")
   ) {
     task.controlIntent = null;
   }
-  if (isTerminalSnapshotState(ev.state)) clearPendingQuestions(ev.id);
+  if (isTerminalSnapshotState(ev.state)) {
+    task.statusStale = false;
+    clearPendingQuestions(ev.id);
+  }
   runTerminalEffects(task, previousState);
 }
 
@@ -439,11 +477,12 @@ function terminalHistoryStatus(task: Task): Extract<OperationStatus, "done" | "f
   if (task.state === "failed") return "failed";
   if (task.spec.kind === "test" && task.result?.ok === false) return "failed";
   if (task.spec.kind === "checksum_check" && task.result?.ok === false) return "failed";
-  if (task.spec.kind === "batch_extract" && Number(task.result?.failed ?? 0) > 0) return "failed";
-  if (
-    task.spec.kind === "batch_extract"
-    && extractResultHasRecoveredZipStructure(task.result)
-  ) return "info";
+  if (task.spec.kind === "batch_extract") {
+    const outcome = readBatchExtractResult(task.result);
+    if (outcome.failedArchives > 0) return "failed";
+    if (outcome.reviewCount > 0 || outcome.skippedEntries > 0
+      || extractResultHasRecoveredZipStructure(task.result)) return "info";
+  }
   if (
     (task.spec.kind === "extract" || task.spec.kind === "extract_nested") &&
     extractResultNeedsAttention(task.result)
@@ -589,6 +628,9 @@ function createIntegrityDetail(task: Task): string | null {
 }
 
 function taskHistoryDetail(task: Task, status: Extract<OperationStatus, "done" | "failed" | "info">): string {
+  if (task.state === "done" && task.spec.kind === "batch_extract") {
+    return cleanHistoryDetail(batchExtractResultSummary(task.result, task.spec.items.length));
+  }
   if (status === "failed") {
     if (task.spec.kind === "test" && task.result?.ok === false) {
       const problems = resultProblemTotal(task.result);
@@ -647,18 +689,7 @@ function taskHistoryDetail(task: Task, status: Extract<OperationStatus, "done" |
       );
     }
     case "batch_extract": {
-      const extracted = Number(task.result?.extracted ?? 0);
-      const total = Number(task.result?.archives ?? spec.items.length);
-      const selected = Number(task.result?.selected_archives ?? total);
-      const failed = Number(task.result?.failed ?? 0);
-      return cleanHistoryDetail(
-        t(
-          selected > total
-            ? "gui.task.history.batch_extract_grouped"
-            : "gui.task.history.batch_extract",
-          { extracted, total, selected, failed },
-        ),
-      );
+      return cleanHistoryDetail(batchExtractResultSummary(task.result, spec.items.length));
     }
     case "extract_nested": {
       const dest = String(task.result?.dest ?? spec.dest);
@@ -749,8 +780,7 @@ function taskHistoryDetail(task: Task, status: Extract<OperationStatus, "done" |
 function finishToast(task: Task): void {
   const spec = task.spec;
   if (spec.kind === "batch_extract") {
-    const extracted = Number(task.result?.extracted ?? 0);
-    const failed = Number(task.result?.failed ?? 0);
+    const outcome = readBatchExtractResult(task.result);
     const outputs = Array.isArray(task.result?.outputs) ? task.result.outputs : [];
     const firstOutput = outputs[0];
     const firstDest = typeof firstOutput === "object" && firstOutput && "dest" in firstOutput
@@ -762,8 +792,8 @@ function finishToast(task: Task): void {
     }
     const recoveredStructure = extractResultHasRecoveredZipStructure(task.result);
     const toast = {
-      kind: failed > 0 || recoveredStructure ? "warning" : "success",
-      title: t("gui.toast.batch_extract_done", { extracted, failed }),
+      kind: outcome.reviewCount > 0 || outcome.skippedEntries > 0 || recoveredStructure ? "warning" : "success",
+      title: batchExtractResultSummary(task.result, spec.items.length),
       body: recoveredStructure
         ? t("gui.archive.zip_local_headers_recovered")
         : undefined,
@@ -1074,29 +1104,34 @@ function onProgress(ev: ProgressEvent): void {
     if (!locallyDismissed.has(ev.id)) rememberPending(pendingProgress, ev.id, ev);
     return;
   }
-  if (!shouldApplySnapshotProgress(task.version, task.state, ev.version)) return;
-  task.version = ev.version;
+  const versions = taskEventVersions(task);
+  if (!shouldApplySnapshotProgress(versions.progress, task.state, ev.version, versions.state)) return;
+  versions.progress = ev.version;
+  task.version = Math.max(task.version, ev.version);
   task.done = ev.done;
   task.total = ev.total;
   task.current = ev.current;
   task.currentDone = ev.current_done ?? 0;
   task.currentTotal = ev.current_total ?? 0;
   task.scanEntries = ev.scanned_entries ?? null;
-  task.speed = ev.speed;
+  const measuredBeforeState = ev.version < versions.state;
+  task.speed = task.statusStale || (measuredBeforeState && task.state !== "running") ? 0 : ev.speed;
   task.phase = ev.phase ?? null;
   task.interruptible = ev.interruptible ?? true;
 }
 
 function replayPending(id: number): void {
   const state = pendingStates.get(id);
-  if (state) {
-    pendingStates.delete(id);
-    onState(state);
-  }
   const progress = pendingProgress.get(id);
-  if (progress) {
-    pendingProgress.delete(id);
+  pendingStates.delete(id);
+  pendingProgress.delete(id);
+  if (state && progress && progress.version < state.version) {
+    // Retain the last measured progress before a newer terminal state freezes it.
     onProgress(progress);
+    onState(state);
+  } else {
+    if (state) onState(state);
+    if (progress) onProgress(progress);
   }
 }
 
@@ -1105,11 +1140,14 @@ function taskFromSnapshot(snapshot: JobSnapshot): Task {
     id: snapshot.id,
     version: snapshot.version,
     spec: snapshot.spec,
+    outputPasswordRequired: snapshot.output_password_required,
     title: titleFor(snapshot.spec),
     origin: snapshot.origin,
     ownedByRequester: snapshot.owned_by_requester,
     interaction: snapshot.interaction,
-    question: snapshotQuestion(snapshot, 0),
+    question: snapshotQuestion(snapshot),
+    actionFailure: null,
+    statusStale: store.snapshotStatus === "unavailable" && !isTerminalSnapshotState(snapshot.state),
     answeredQuestionVersion: 0,
     state: snapshot.state,
     queuePosition: snapshot.queue_position,
@@ -1122,7 +1160,7 @@ function taskFromSnapshot(snapshot: JobSnapshot): Task {
     currentDone: snapshot.progress.current_done,
     currentTotal: snapshot.progress.current_total,
     scanEntries: snapshot.progress.scanned_entries ?? null,
-    speed: snapshot.progress.speed,
+    speed: store.snapshotStatus === "unavailable" ? 0 : snapshot.progress.speed,
     phase: snapshot.progress.phase ?? null,
     interruptible: snapshot.progress.interruptible ?? true,
     pausable: jobSupportsPause(snapshot.spec),
@@ -1153,12 +1191,16 @@ function applySnapshot(snapshot: JobSnapshot): void {
 
   const previousState = task.state;
   task.version = snapshot.version;
+  eventVersions.set(task, { state: snapshot.version, progress: snapshot.version });
   task.spec = snapshot.spec;
+  task.outputPasswordRequired = snapshot.output_password_required;
   task.title = titleFor(snapshot.spec);
   task.origin = snapshot.origin;
   task.ownedByRequester = snapshot.owned_by_requester;
   task.interaction = snapshot.interaction;
-  task.question = snapshotQuestion(snapshot, task.answeredQuestionVersion, task.question);
+  const question = snapshotQuestion(snapshot, task.question);
+  if (question !== task.question || snapshot.state !== previousState) task.actionFailure = null;
+  task.question = question;
   task.state = snapshot.state;
   task.queuePosition = snapshot.queue_position;
   task.queueWaitReason = snapshot.queue_wait_reason;
@@ -1170,7 +1212,7 @@ function applySnapshot(snapshot: JobSnapshot): void {
   task.currentDone = snapshot.progress.current_done;
   task.currentTotal = snapshot.progress.current_total;
   task.scanEntries = snapshot.progress.scanned_entries ?? null;
-  task.speed = snapshot.progress.speed;
+  task.speed = task.statusStale ? 0 : snapshot.progress.speed;
   task.phase = snapshot.progress.phase ?? null;
   task.interruptible = snapshot.progress.interruptible ?? true;
   task.error = snapshot.error;
@@ -1181,11 +1223,14 @@ function applySnapshot(snapshot: JobSnapshot): void {
   if (
     isTerminalSnapshotState(snapshot.state) ||
     (snapshot.state === "paused" && task.controlIntent === "pause") ||
-    (snapshot.state === "running" && task.controlIntent === "resume")
+    ((snapshot.state === "running" || snapshot.state === "queued") && task.controlIntent === "resume")
   ) {
     task.controlIntent = null;
   }
-  if (isTerminalSnapshotState(snapshot.state)) clearPendingQuestions(snapshot.id);
+  if (isTerminalSnapshotState(snapshot.state)) {
+    task.statusStale = false;
+    clearPendingQuestions(snapshot.id);
+  }
   runTerminalEffects(task, previousState);
 }
 
@@ -1214,14 +1259,28 @@ function waitForSnapshotPoll(delayMs: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, delayMs));
 }
 
+function setSnapshotStatus(status: JobSnapshotStatus): void {
+  store.snapshotStatus = status;
+  for (const task of store.tasks) {
+    // Development previews have no live task feed of their own.
+    if (import.meta.env.DEV && !task.snapshotSeen && !task.localEffects) continue;
+    task.statusStale = status === "unavailable" && !isTerminalSnapshotState(task.state);
+    if (task.statusStale) task.speed = 0;
+  }
+}
+
 async function reconcileSnapshotFeed(stopped: () => boolean): Promise<void> {
   while (!stopped()) {
     try {
       const generation = snapshotGeneration;
       const delta = await ipc.jobSnapshots(snapshotRevision);
       if (stopped()) return;
-      if (generation === snapshotGeneration) applySnapshotDelta(delta);
+      if (generation === snapshotGeneration) {
+        applySnapshotDelta(delta);
+        setSnapshotStatus("ready");
+      }
     } catch {
+      if (!stopped()) setSnapshotStatus("unavailable");
       // Native startup and shutdown can briefly race the WebView. The next
       // bounded poll requests the same revision again.
     }
@@ -1240,10 +1299,10 @@ async function refreshQuestionTask(id: number): Promise<void> {
 
 /** Wires this window's job event listeners once at startup. */
 export async function initJobEvents(): Promise<() => void> {
-  const listen = await currentWebviewWindowListener();
   const cleanup: Array<() => void> = [];
   let stopped = false;
   try {
+    const listen = await currentWebviewWindowListener();
     cleanup.push(await listen<ProgressEvent>("job://progress", (e) => onProgress(e.payload)));
     cleanup.push(await listen<StateEvent>("job://state", (e) => onState(e.payload)));
     cleanup.push(await listen<AskConflictEvent>("job://ask-conflict", (e) => {
@@ -1252,12 +1311,13 @@ export async function initJobEvents(): Promise<() => void> {
     cleanup.push(await listen<AskPasswordEvent>("job://ask-password", (e) => {
       void refreshQuestionTask(e.payload.id);
     }));
-    void reconcileSnapshotFeed(() => stopped);
-  } catch (error) {
-    stopped = true;
+  } catch {
+    setSnapshotStatus("unavailable");
     for (const dispose of cleanup) dispose();
-    throw error;
+    cleanup.length = 0;
   }
+  // Snapshots remain authoritative when native event listeners cannot start.
+  void reconcileSnapshotFeed(() => stopped);
   return () => {
     stopped = true;
     for (const dispose of cleanup) dispose();
@@ -1268,20 +1328,37 @@ export function tasks(): Task[] {
   return store.tasks;
 }
 
+export function jobSnapshotStatus(): JobSnapshotStatus {
+  return store.snapshotStatus;
+}
+
 type PreviewTaskKind =
   | "archive_open"
   | "compress"
+  | "compress_failure"
   | "compress_split"
   | "compress_sfx"
   | "compress_sfx_failure"
+  | "convert_failure"
+  | "convert_encrypted_failure"
+  | "duplicate_scan"
+  | "duplicate_scan_clean"
+  | "duplicate_scan_failure"
   | "recovery_cleanup_ready"
   | "recovery_cleanup_unconfirmed"
   | "recovery_cleanup_record"
   | "extract"
+  | "extract_failure"
+  | "extract_password"
+  | "extract_conflict"
+  | "extract_nested_failure"
+  | "update_failure"
   | "extract_unknown_current"
   | "extract_metadata"
   | "batch_extract_metadata"
   | "batch_extract"
+  | "batch_extract_partial"
+  | "batch_extract_failure"
   | "test"
   | "checksum"
   | "checksum_check"
@@ -1323,6 +1400,43 @@ function isRecoveryCleanupPreview(kind: PreviewTaskKind): boolean {
 }
 
 function previewTaskSpec(kind: PreviewTaskKind): JobSpec {
+  if (kind === "update_failure") {
+    return { kind: "update", path: `${sampleRoot}/客户交付/Quarterly delivery with complete project history.zip`,
+      add: [`${sampleRoot}/Revised documents/完整项目说明.txt`], mkdir: ["交付文档/审核记录/"],
+      delete: ["Previous versions/旧资料[1].txt"],
+      rename: [{ from: "Previous versions/Design assets with a complete descriptive name.pdf", to: "交付文档/Design assets with a complete descriptive name.pdf" }],
+      encoding: "gbk", content_policy: "custom", excludes: ["*.bak", ".DS_Store"], level: 3, password: null };
+  }
+  if (kind === "extract_nested_failure") {
+    return { kind: "extract_nested", outer_path: `${sampleRoot}/Quarterly delivery with complete project history.zip`,
+      entry_path: "客户交付与设计资料/Previous versions/Design assets with a complete descriptive name.7z",
+      dest: `${sampleOutputRoot}/客户交付/Reviewed inner archive`, overwrite: "rename", symlinks: "skip",
+      smart: false, encoding: "gbk", password: null, best_effort: true };
+  }
+  if (kind === "batch_extract_partial" || kind === "batch_extract_failure") {
+    return { kind: "batch_extract", overwrite: "rename", symlinks: "skip", smart: false,
+      items: [
+        { path: `${sampleRoot}/Quarterly reports/季度归档与设计资料/Customer delivery with a complete descriptive name.zip`,
+          dest: `${sampleOutputRoot}/客户交付/Quarterly reports`, encoding: "gbk", password: null, best_effort: true },
+        { path: `${sampleRoot}/finished-photos.7z`, dest: `${sampleOutputRoot}/Photos`, encoding: null, password: null, best_effort: false },
+        { path: `${sampleRoot}/logs.tar`, dest: `${sampleOutputRoot}/Logs`, encoding: null, password: null, best_effort: false },
+      ] };
+  }
+  if (kind === "duplicate_scan" || kind === "duplicate_scan_clean" || kind === "duplicate_scan_failure") {
+    return { kind: "duplicate_scan", inputs: [`${sampleRoot}/${kind === "duplicate_scan_clean" ? "Inbox" : "Archive review"}`],
+      excludes: ["cache"], min_size: 1024 };
+  }
+  if (kind === "convert_failure" || kind === "convert_encrypted_failure") {
+    const encrypted = kind === "convert_encrypted_failure";
+    return {
+      kind: "convert",
+      src: `${sampleRoot}/product-backup.zip`,
+      dest: `${sampleOutputRoot}/Reviewed backup.${encrypted ? "7z" : "zip"}`,
+      level: 4, src_encoding: null, src_password: null, dest_password: null,
+      encrypt_names: encrypted, split_size: 123456789,
+      split_mode: encrypted ? "generic" : "native", replace_existing: false, replacement_guard: null,
+    };
+  }
   if (isUpdatePreview(kind)) {
     return {
       kind: "update",
@@ -1338,38 +1452,38 @@ function previewTaskSpec(kind: PreviewTaskKind): JobSpec {
       level: 5,
     };
   }
-  if (kind === "compress" || kind === "compress_split" || kind === "compress_sfx" || kind === "compress_sfx_failure") {
+  if (kind === "compress" || kind === "compress_failure" || kind === "compress_split" || kind === "compress_sfx" || kind === "compress_sfx_failure") {
     const sfx = kind === "compress_sfx" || kind === "compress_sfx_failure";
     return {
       kind: "compress",
       inputs: [`${sampleRoot}/reports`, `${sampleRoot}/photos`],
       dest: sfx ? `${sampleOutputRoot}/Installer.app` : `${sampleOutputRoot}/product-backup.zip`,
-      level: 5,
+      level: kind === "compress_failure" ? 4 : 5,
       password: null,
       encrypt_names: false,
-      split_size: kind === "compress_split" ? 8 * 1024 * 1024 : null,
-      split_mode: "generic",
-      excludes: [],
-      content_policy: "keep_all_files",
+      split_size: kind === "compress_failure" ? 123456789 : kind === "compress_split" ? 8 * 1024 * 1024 : null,
+      split_mode: kind === "compress_failure" ? "native" : "generic",
+      excludes: kind === "compress_failure" ? ["*.bak", "cache/**"] : [],
+      content_policy: kind === "compress_failure" ? "custom" : "keep_all_files",
       sqz_inner_format: null,
       sfx_target: sfx ? "macos" : null,
       replace_existing: kind !== "compress",
       replacement_guard: null,
       completion: "none",
       post_success: "keep_source",
-      test_after_create: false,
+      test_after_create: kind === "compress_failure",
     };
   }
-  if (kind === "extract" || kind === "extract_unknown_current" || kind === "extract_metadata") {
+  if (kind === "extract" || kind === "extract_failure" || kind === "extract_password" || kind === "extract_conflict" || kind === "extract_unknown_current" || kind === "extract_metadata") {
     return {
       kind: "extract",
       path: `${sampleRoot}/product-backup.zip`,
-      dest: `${sampleOutputRoot}/product-backup`,
+      dest: kind === "extract_failure" ? `${sampleOutputRoot}/Reviewed files` : `${sampleOutputRoot}/product-backup`,
       expected_destination: null,
       expected_input_guard: null,
-      selection: null,
-      overwrite: "ask",
-      symlinks: "preserve",
+      selection: kind === "extract_failure" ? ["reports/", "Launch plan.pdf"] : null,
+      overwrite: kind === "extract_failure" ? "rename" : "ask",
+      symlinks: kind === "extract_failure" ? "skip" : "preserve",
       smart: true,
       encoding: null,
       password: null,
@@ -1404,7 +1518,9 @@ function previewTaskSpec(kind: PreviewTaskKind): JobSpec {
   if (kind === "test" || kind === "archive_open") {
     return {
       kind: "test",
-      path: `${sampleRoot}/product-backup.zip`,
+      path: kind === "test"
+        ? `${sampleRoot}/inspection/damaged-backup.zip`
+        : `${sampleRoot}/product-backup.zip`,
       encoding: null,
       password: null,
     };
@@ -1449,6 +1565,29 @@ function previewTaskSpec(kind: PreviewTaskKind): JobSpec {
 }
 
 function previewTaskResult(kind: PreviewTaskKind): Record<string, unknown> {
+  if (kind === "batch_extract_partial") {
+    const spec = previewTaskSpec(kind);
+    if (spec.kind === "batch_extract") {
+      return { operation: "batch_extract", archives: 3, selected_archives: 3, collapsed_volumes: 0,
+        extracted: 1, failed: 2,
+        outputs: [{ archive: spec.items[1].path, dest: spec.items[1].dest }],
+        failures: [spec.items[0], spec.items[2]].map((item) => ({ archive: item.path,
+          error: { key: "error.io", params: { detail: "Could not write the extracted file" }, detail: "Could not write the extracted file" } })),
+      };
+    }
+  }
+  if (kind === "duplicate_scan" || kind === "duplicate_scan_clean") {
+    const groups = kind === "duplicate_scan_clean" ? [] : Array.from({ length: 25 }, (_, index) => {
+      const paths = Array.from({ length: index === 0 ? 60 : 2 }, (_, copy) =>
+        `${sampleRoot}/Archive review/Project ${index + 1}/Copy ${copy + 1}/季度归档与设计资料/Final presentation with a descriptive file name.pdf`);
+      return { hash: (index + 1).toString(16).padStart(64, "0"), hash_algorithm: "blake3", size: 2048,
+        count: paths.length, reclaimable_bytes: (paths.length - 1) * 2048, paths };
+    });
+    const count = groups.reduce((total, group) => total + group.paths.length, 0);
+    return { operation: "duplicates", hash_algorithm: "blake3", input_count: 1, min_size: 1024,
+      files_scanned: count + 4, bytes_scanned: (count + 4) * 2048, candidate_files: count, hashed_bytes: count * 2048,
+      duplicate_groups: groups.length, duplicate_files: count, reclaimable_bytes: (count - groups.length) * 2048, groups };
+  }
   if (isUpdatePreview(kind)) return { operation: "update" };
   if (kind === "recovery_protect") {
     const recovery = `${sampleOutputRoot}/product-backup.zip.par2`;
@@ -1510,7 +1649,9 @@ function previewTaskResult(kind: PreviewTaskKind): Record<string, unknown> {
   if (kind === "extract" || kind === "extract_unknown_current" || kind === "extract_metadata") {
     const problems = Array.from(
       { length: 20 },
-      (_, index) => `damaged/item-${String(index + 1).padStart(2, "0")}.bin: checksum mismatch`,
+      (_, index) => index === 0
+        ? `reports/${"annual-reports-and-supporting-documents/".repeat(6)}final  report.pdf: checksum mismatch\nThe file could not be recovered from this archive.`
+        : `damaged/item-${String(index + 1).padStart(2, "0")}.bin: checksum mismatch`,
     );
     return {
       operation: "extract",
@@ -1633,6 +1774,8 @@ function previewTaskResult(kind: PreviewTaskKind): Record<string, unknown> {
 }
 
 function previewRevealPath(kind: PreviewTaskKind): string | null {
+  if (kind === "batch_extract_partial") return `${sampleOutputRoot}/Photos`;
+  if (kind === "duplicate_scan" || kind === "duplicate_scan_clean" || kind === "duplicate_scan_failure") return null;
   if (isUpdatePreview(kind)) return `${sampleRoot}/product-backup.zip`;
   if (kind === "recovery_protect") return `${sampleOutputRoot}/product-backup.zip.par2`;
   if (isRecoveryPreview(kind)) return null;
@@ -1647,6 +1790,13 @@ function previewRevealPath(kind: PreviewTaskKind): string | null {
 }
 
 function previewProgress(kind: PreviewTaskKind, state: Extract<JobStateName, "done" | "running">) {
+  if (kind === "batch_extract_partial" || kind === "batch_extract_failure") {
+    return { done: 3, total: 3, current: "", currentDone: 0, currentTotal: 0, speed: 0 };
+  }
+  if (kind === "duplicate_scan" || kind === "duplicate_scan_clean" || kind === "duplicate_scan_failure") {
+    const bytes = state === "done" ? (kind === "duplicate_scan_clean" ? 4 : 112) * 2048 : 0;
+    return { done: bytes, total: bytes, current: "", currentDone: 0, currentTotal: 0, speed: 0 };
+  }
   if (kind === "archive_open") {
     return {
       done: 0,
@@ -1710,12 +1860,12 @@ function previewProgress(kind: PreviewTaskKind, state: Extract<JobStateName, "do
   }
   if (kind === "batch_extract") {
     return {
-      done: state === "done" ? 2 : 1,
-      total: 2,
+      done: (state === "done" ? 2 : 1) * BATCH_PROGRESS_SCALE,
+      total: 2 * BATCH_PROGRESS_SCALE,
       current: "photos/IMG_2042.dng",
       currentDone: state === "done" ? 3_200_000 : 1_280_000,
       currentTotal: 3_200_000,
-      speed: state === "running" ? 18_400_000 : 0,
+      speed: 0,
     };
   }
   if (isRecoveryPreview(kind)) {
@@ -1728,7 +1878,7 @@ function previewProgress(kind: PreviewTaskKind, state: Extract<JobStateName, "do
       speed: 0,
     };
   }
-  if (kind === "compress" || kind === "compress_split" || kind === "compress_sfx" || kind === "compress_sfx_failure") {
+  if (kind === "compress" || kind === "compress_failure" || kind === "compress_split" || kind === "compress_sfx" || kind === "compress_sfx_failure") {
     const total = kind === "compress_split" ? 92_760_416 : kind === "compress" ? 24_000_000 : 48_000_000;
     return {
       done: state === "done" ? total : Math.floor(total * 0.4),
@@ -1790,6 +1940,12 @@ function previewProgress(kind: PreviewTaskKind, state: Extract<JobStateName, "do
 }
 
 function previewTaskOffset(kind: PreviewTaskKind): number {
+  if (kind === "extract_password") return 34;
+  if (kind === "extract_conflict") return 35;
+  if (kind === "update_failure") return 33;
+  if (kind === "extract_nested_failure") return 32;
+  if (kind === "batch_extract_partial") return 30;
+  if (kind === "batch_extract_failure") return 31;
   if (kind === "archive_open") return 23;
   if (kind === "extract_metadata") return 21;
   if (kind === "batch_extract_metadata") return 22;
@@ -1804,15 +1960,28 @@ function previewTaskOffset(kind: PreviewTaskKind): number {
   if (kind === "compress_split") return 8;
   if (kind === "compress_sfx") return 9;
   if (kind === "compress_sfx_failure") return 10;
+  if (kind === "compress_failure") return 21;
   if (kind === "recovery_cleanup_ready") return 18;
   if (kind === "recovery_cleanup_unconfirmed") return 19;
   if (kind === "recovery_cleanup_record") return 20;
   if (kind === "extract") return 2;
+  if (kind === "extract_failure") return 24;
+  if (kind === "convert_failure") return 25;
+  if (kind === "convert_encrypted_failure") return 26;
+  if (kind === "duplicate_scan") return 27;
+  if (kind === "duplicate_scan_clean") return 28;
+  if (kind === "duplicate_scan_failure") return 29;
   if (kind === "extract_unknown_current") return 4;
   if (kind === "test") return 5;
   if (kind === "checksum") return 6;
   if (kind === "checksum_check") return 7;
   return 3;
+}
+
+const previewReviewSpecs = new Map<number, JobSpec>();
+
+export function previewTaskSpecForReview(id: number): JobSpec | null {
+  return import.meta.env.DEV ? previewReviewSpecs.get(id) ?? null : null;
 }
 
 function installTaskPreview(kind: PreviewTaskKind, state: Extract<JobStateName, "done" | "running">): number | null {
@@ -1821,8 +1990,11 @@ function installTaskPreview(kind: PreviewTaskKind, state: Extract<JobStateName, 
   if (find(id)) return id;
 
   const spec = previewTaskSpec(kind);
+  previewReviewSpecs.set(id, redactedSpec(spec));
   const progress = previewProgress(kind, state);
-  const previewState = kind === "compress_sfx_failure" || isRecoveryCleanupPreview(kind)
+  const previewState = kind === "compress_failure" || kind === "compress_sfx_failure" || kind === "extract_failure"
+    || kind === "convert_failure" || kind === "convert_encrypted_failure" || kind === "duplicate_scan_failure"
+    || kind === "batch_extract_failure" || kind === "extract_nested_failure" || kind === "update_failure" || isRecoveryCleanupPreview(kind)
     ? "failed"
     : state;
   const target = isRecoveryCleanupPreview(kind)
@@ -1834,7 +2006,17 @@ function installTaskPreview(kind: PreviewTaskKind, state: Extract<JobStateName, 
     `${sampleOutputRoot}/.product-backup.repaired.zip.sqz-par2-repair-940018-1.work`;
   const recoveryJournal =
     `${sampleOutputRoot}/.squallz-par2-repair-8f3d4a9e1c7b2d5f.json`;
-  const error: ErrorDto = isRecoveryCleanupPreview(kind)
+  const error: ErrorDto = kind === "compress_failure"
+    ? { key: "error.io", params: { detail: "Could not write the archive output" }, detail: "Could not write the archive output" }
+    : kind === "update_failure"
+    ? { key: "error.io", params: { detail: "Could not replace the archive" }, detail: "Could not replace the archive" }
+    : kind === "duplicate_scan_failure"
+    ? { key: "error.io", params: { detail: "Could not read the scan folder" }, detail: "Could not read the scan folder" }
+    : kind === "convert_failure" || kind === "convert_encrypted_failure"
+    ? { key: "error.io", params: { detail: "Could not write the converted archive" }, detail: "Could not write the converted archive" }
+    : kind === "extract_failure" || kind === "batch_extract_failure" || kind === "extract_nested_failure"
+    ? { key: "error.io", params: { detail: "Could not write the extracted file" }, detail: "Could not write the extracted file" }
+    : isRecoveryCleanupPreview(kind)
     ? {
       key: kind === "recovery_cleanup_ready"
         ? "error.recovery_cleanup_output_ready"
@@ -1861,6 +2043,15 @@ function installTaskPreview(kind: PreviewTaskKind, state: Extract<JobStateName, 
       detail: `SFX replacement requires manual recovery. Inspect target ${target} and the listed transaction paths.`,
     };
 
+  const question: JobQuestion | null = state !== "running" ? null
+    : kind === "extract_password"
+    ? { kind: "password", prompt: { id, version: 1, name: "product-backup.zip", wrong: false } }
+    : kind === "extract_conflict"
+    ? { kind: "conflict", prompt: { id, version: 1,
+      existing_path: `${sampleOutputRoot}/product-backup/reports/Launch plan.pdf`, existing_size: 4096000,
+      existing_modified: 1781190000, incoming_path: "reports/Launch plan.pdf", incoming_size: 5120000,
+      incoming_modified: 1781276400 } }
+    : null;
   store.tasks.push({
     id,
     version: 0,
@@ -1868,10 +2059,13 @@ function installTaskPreview(kind: PreviewTaskKind, state: Extract<JobStateName, 
     title: titleFor(spec),
     origin: "app",
     ownedByRequester: true,
-    interaction: null,
-    question: null,
+    interaction: question?.kind ?? null,
+    question,
+    actionFailure: null,
+    statusStale: false,
     answeredQuestionVersion: 0,
     state: previewState,
+    outputPasswordRequired: kind === "compress_failure" || kind === "convert_failure" || kind === "convert_encrypted_failure",
     queuePosition: null,
     queueWaitReason: null,
     cpuThreads: kind.startsWith("compress") ? 8 : 1,
@@ -1899,12 +2093,48 @@ function installTaskPreview(kind: PreviewTaskKind, state: Extract<JobStateName, 
   return id;
 }
 
-export function installCompletedTaskPreview(kind: PreviewTaskKind): number | null {
-  return installTaskPreview(kind, "done");
+export function installCompletedTaskPreview(kind: PreviewTaskKind, includeReportHistory = false): number | null {
+  const id = installTaskPreview(kind, "done");
+  if (!import.meta.env.DEV || !includeReportHistory || id === null) return id;
+  if (kind === "duplicate_scan") {
+    installTaskPreview("duplicate_scan_clean", "done");
+    return id;
+  }
+  const previous = find(id);
+  if (!previous || (kind !== "checksum" && kind !== "checksum_check") || find(id + 2000)) return id;
+  const source = `${sampleRoot}/current-release`;
+  const spec: JobSpec = kind === "checksum"
+    ? { kind, inputs: [source], excludes: [], algorithm: "sha512" }
+    : { kind, manifest: `${source}/SHA512SUMS`, algorithm: "sha512" };
+  const digest = "ab".repeat(64);
+  store.tasks.push({
+    ...previous,
+    id: id + 2000,
+    spec,
+    title: titleFor(spec),
+    done: 64,
+    total: 64,
+    current: "release.txt",
+    currentDone: 64,
+    currentTotal: 64,
+    revealPath: source,
+    result: kind === "checksum"
+      ? { operation: kind, algorithm: "sha512", files_hashed: 1, bytes_hashed: 64,
+        items: [{ path: `${source}/release.txt`, digest, size: 64 }] }
+      : { operation: kind, ok: false, checked: 1, passed: 0, failed: 1,
+        items: [{ path: `${source}/release.txt`, expected: digest, actual: "cd".repeat(64), ok: false }] },
+  });
+  return id;
 }
 
-export function installActiveTaskPreview(kind: PreviewTaskKind): number | null {
-  return installTaskPreview(kind, "running");
+export function installActiveTaskPreview(kind: PreviewTaskKind, statusUnavailable = false): number | null {
+  const id = installTaskPreview(kind, "running");
+  const task = id === null ? null : find(id);
+  if (task && statusUnavailable) {
+    task.statusStale = true;
+    task.speed = 0;
+  }
+  return id;
 }
 
 export function installTaskQueuePreview(
@@ -1936,9 +2166,12 @@ export function installTaskQueuePreview(
       ownedByRequester: true,
       interaction: null,
       question: null,
+      actionFailure: null,
+      statusStale: false,
       answeredQuestionVersion: 0,
       state: "queued",
       queuePosition: index + 1,
+      outputPasswordRequired: outputPasswordRequired(spec),
       queueWaitReason: index === 0 ? waitReason : "queue_order",
       cpuThreads: index === 0 && waitReason === "cpu_budget" ? 8 : 1,
       streamBufferLimitBytes: kind === "compress" ? 512 * 1024 * 1024 : null,
@@ -1987,31 +2220,40 @@ export function runningCount(): number {
   ).length;
 }
 
+const controlRequests = new WeakMap<Task, object>();
+
 async function requestTaskControl(
   id: number,
   intent: TaskControlIntent,
   request: () => Promise<void>,
-): Promise<void> {
+): Promise<boolean> {
   const task = find(id);
-  if (task) task.controlIntent = intent;
+  if (!task || isTerminalSnapshotState(task.state) || task.controlIntent === "cancel"
+    || (task.controlIntent !== null && intent !== "cancel")) return false;
+  const token = {};
+  controlRequests.set(task, token);
+  task.controlIntent = intent;
+  task.actionFailure = null;
   try {
     await request();
+    return controlRequests.get(task) === token;
   } catch {
     const current = find(id);
-    if (current?.controlIntent === intent) current.controlIntent = null;
-    pushToast({
-      kind: "warning",
-      title: t("gui.task.control_failed"),
-    });
+    if (current !== task || controlRequests.get(task) !== token || task.controlIntent !== intent) return false;
+    task.controlIntent = null;
+    task.actionFailure = intent;
+    return false;
+  } finally {
+    if (controlRequests.get(task) === token) controlRequests.delete(task);
   }
 }
 
-export function pauseTask(id: number): void {
-  void requestTaskControl(id, "pause", () => ipc.pauseJob(id));
+export function pauseTask(id: number): Promise<boolean> {
+  return requestTaskControl(id, "pause", () => ipc.pauseJob(id));
 }
 
-export function resumeTask(id: number): void {
-  void requestTaskControl(id, "resume", () => ipc.resumeJob(id));
+export function resumeTask(id: number): Promise<boolean> {
+  return requestTaskControl(id, "resume", () => ipc.resumeJob(id));
 }
 
 async function requestQueueMove(
@@ -2059,10 +2301,8 @@ export function setTaskExpanded(id: number, expanded: boolean): void {
   if (task) task.expanded = expanded;
 }
 
-export function cancelTask(id: number): void {
-  // Cancelling also dismisses an open question modal of this job.
-  clearPendingQuestions(id);
-  void requestTaskControl(id, "cancel", () => ipc.cancelJob(id));
+export function cancelTask(id: number): Promise<boolean> {
+  return requestTaskControl(id, "cancel", () => ipc.cancelJob(id));
 }
 
 export function retryTask(task: Task): void {
@@ -2103,43 +2343,61 @@ export async function clearFinished(ids: readonly number[]): Promise<boolean> {
 
 /* ---- Conflict modal ---- */
 
-export function pendingConflict(): AskConflictEvent | null {
+function pendingQuestion(kind: JobQuestion["kind"]): JobQuestion | null {
   for (const task of store.tasks) {
-    if (task.question?.kind === "conflict") return task.question.prompt;
+    const question = task.question;
+    if (task.ownedByRequester && !isTerminalSnapshotState(task.state)
+      && task.controlIntent !== "cancel" && question?.kind === kind
+      && question.prompt.version > task.answeredQuestionVersion) return question;
   }
   return null;
 }
 
-export function answerConflict(decision: string, applyAll: boolean): void {
+export function pendingConflict(): AskConflictEvent | null {
+  const question = pendingQuestion("conflict");
+  return question?.kind === "conflict" ? question.prompt : null;
+}
+
+export async function answerConflict(decision: string, applyAll: boolean): Promise<boolean> {
   const c = pendingConflict();
-  if (!c) return;
-  answerQuestion(c, () => ipc.answerConflict(c.id, c.version, decision, applyAll));
+  if (!c) return false;
+  return answerQuestion(c, () => ipc.answerConflict(c.id, c.version, decision, applyAll));
 }
 
 /* ---- Password modal for running jobs ---- */
 
 export function pendingPassword(): AskPasswordEvent | null {
-  for (const task of store.tasks) {
-    if (task.question?.kind === "password") return task.question.prompt;
-  }
-  return null;
+  const question = pendingQuestion("password");
+  return question?.kind === "password" ? question.prompt : null;
 }
 
-export function answerPassword(password: string | null): void {
+export async function answerPassword(password: string | null): Promise<boolean> {
   const p = pendingPassword();
-  if (!p) return;
-  answerQuestion(p, () => ipc.answerPassword(p.id, p.version, password));
+  if (!p) return false;
+  return answerQuestion(p, () => ipc.answerPassword(p.id, p.version, password));
 }
 
-function answerQuestion(prompt: AskPasswordEvent | AskConflictEvent, send: () => Promise<void>): void {
+async function answerQuestion(prompt: AskPasswordEvent | AskConflictEvent, send: () => Promise<void>): Promise<boolean> {
   const task = find(prompt.id);
-  if (!task) return;
+  if (!task) return false;
+  // Keep the authoritative question until the backend clears or replaces it.
+  // Hiding a pending answer must not discard the retry path if IPC fails.
   task.answeredQuestionVersion = prompt.version;
-  task.question = null;
-  void send().catch(() => {
+  task.actionFailure = null;
+  try {
+    await send();
+    return true;
+  } catch {
     if (task.answeredQuestionVersion === prompt.version) task.answeredQuestionVersion = 0;
-    pushToast({ kind: "warning", title: t("gui.task.answer_failed") });
-  }).finally(() => refreshQuestionTask(prompt.id));
+    if (task.question?.prompt.version === prompt.version) {
+      task.actionFailure = "answer";
+    } else {
+      pushToast({ kind: "warning", title: t("gui.task.answer_failed"), body: t("gui.task.answer_failed_detail") });
+    }
+    return false;
+  } finally {
+    void refreshQuestionTask(prompt.id);
+  }
 }
 
 /** Localized error text for a failed task row. */

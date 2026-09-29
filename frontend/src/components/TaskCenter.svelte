@@ -3,6 +3,7 @@
   import Icon from "./Icon.svelte";
   import { cssVariables, type CssVariableMap } from "../lib/css-variables";
   import type { Task } from "../lib/jobs.svelte";
+  import { taskNeedsInput } from "../lib/task-model";
   import {
     taskCenterCounts,
     taskCenterRows,
@@ -11,11 +12,14 @@
     type TaskQueueDropEdge,
   } from "../lib/task-center";
   import {
+    taskActionFailureMessage,
     taskCancelButtonLabel,
     taskDialogResultSummary,
     taskKindLabel,
     taskOutcomeStateLabel,
     taskOutcomeStateTone,
+    taskStatusUnavailable,
+    taskStatusUnavailableMessage,
     taskOverallProgressIndeterminate,
     taskPauseButtonLabel,
     taskProgressPercent,
@@ -77,6 +81,8 @@
   let dragHandle: HTMLElement | null = null;
 
   function countSummary(): string {
+    const unconfirmed = tasks.find(taskStatusUnavailable);
+    if (unconfirmed) return taskOutcomeStateLabel(unconfirmed);
     if (counts.attention > 0) {
       return tr("gui.task_center.summary_attention", "{count} need attention")
         .replace("{count}", counts.attention.toLocaleString());
@@ -126,6 +132,7 @@
   }
 
   function interactionDetail(task: Task): string | null {
+    if (!taskNeedsInput(task)) return null;
     if (task.interaction === "password") {
       return task.ownedByRequester
         ? tr("gui.task_center.password_waiting", "Waiting for a password")
@@ -148,21 +155,24 @@
   }
 
   function taskState(task: Task): string {
-    return task.interaction === null
+    if (taskStatusUnavailable(task)) return taskOutcomeStateLabel(task);
+    if (task.controlIntent === "cancel") return taskCancelButtonLabel(task);
+    return !taskNeedsInput(task)
       ? taskOutcomeStateLabel(task)
       : tr("gui.task_center.needs_input", "Needs input");
   }
 
   function taskTone(task: Task): string {
-    return task.interaction === null ? taskOutcomeStateTone(task) : "warning";
+    return taskNeedsInput(task) ? "warning" : taskOutcomeStateTone(task);
   }
 
   function taskCurrentItem(task: Task): string | null {
     if (!task.current) return null;
-    const key = task.state === "done" || task.state === "failed" || task.state === "cancelled"
+    const last = taskStatusUnavailable(task) || task.state === "done" || task.state === "failed" || task.state === "cancelled";
+    const key = last
       ? "gui.task_center.last_item"
       : "gui.task_center.current_item";
-    const fallback = task.state === "done" || task.state === "failed" || task.state === "cancelled"
+    const fallback = last
       ? "Last: {name}"
       : "Current: {name}";
     return tr(key, fallback)
@@ -305,10 +315,17 @@
     <span class:attention={counts.attention > 0}><b>{counts.attention}</b>{tr("gui.task_center.attention", "Attention")}</span>
   </div>
 
-  <p class="task-center-scope-note">
-    <Icon name="info" size={14} />
-    {tr("gui.task_center.scope", "App and file-manager tasks share one queue. Drag waiting tasks to reorder; arrow buttons remain available.")}
-  </p>
+  {#if tasks.some(taskStatusUnavailable)}
+    <section class="task-status-notice" role="status">
+      <Icon name="alert-triangle" size={16} />
+      <p>{taskStatusUnavailableMessage()}</p>
+    </section>
+  {:else}
+    <p class="task-center-scope-note">
+      <Icon name="info" size={14} />
+      {tr("gui.task_center.scope", "App and file-manager tasks share one queue. Drag waiting tasks to reorder; arrow buttons remain available.")}
+    </p>
+  {/if}
 
   <div class="task-center-list" aria-label={tr("gui.task_center.list", "Tasks in this window")}>
     {#if submittingTask}
@@ -391,6 +408,9 @@
         {/if}
         {#if taskCurrentItem(task)}
           <span class="task-center-current">{taskCurrentItem(task)}</span>
+        {/if}
+        {#if taskActionFailureMessage(task)}
+          <p class="task-action-error" role="alert">{taskActionFailureMessage(task)}</p>
         {/if}
 
         <div

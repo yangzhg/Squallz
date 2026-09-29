@@ -9,12 +9,20 @@ import {
   type EntryDto,
   type ErrorDto,
   type Page,
+  type PasswordBookStatus,
 } from "./ipc";
 import { t, tError } from "./i18n.svelte";
 import { pushToast, removeToastByKey } from "./toasts.svelte";
+import { cancelPasswordBookPreview, readPasswordBookPreview, savePasswordBookPreview, forgetPasswordBookPreview, preparedNestedPreviewRows } from "./dev-preview-data";
 
 export const PAGE_SIZE = 500;
 export type PasswordBookStatusState = "idle" | "checking" | "ready" | "error";
+export interface PasswordSaveState {
+  phase: "idle" | "verifying" | "cancelling" | "saved" | "cancelled" | "error";
+  requestId?: string;
+  error?: ErrorDto;
+  cancelFailed?: boolean;
+}
 export type RowSelectionResult = "selected" | "stale" | "failed";
 type ArchiveViewWindow = { start: number; end: number };
 type ArchiveRefreshStatus = "idle" | "refreshing" | "error";
@@ -81,13 +89,11 @@ const store = $state({
   /** Most recent failure while listing a directory or searching the archive. */
   browseError: null as ErrorDto | null,
   refreshStatus: "idle" as ArchiveRefreshStatus,
-  /** The current archive was opened with a user-entered password. */
-  sessionPasswordKnown: false,
   /** User-selected archive-wide file-name encoding. */
   encodingOverride: null as string | null,
   /** Pending open that needs a password (drives the password dialog) */
   passwordPrompt: null as {
-    path: string; wrong: boolean; encoding: string | null;
+    path: string; wrong: boolean; encoding: string | null; refresh: boolean;
     visibleWindow?: () => ArchiveViewWindow;
   } | null,
   /** Most recent structured non-password failure, bound to the attempted path. */
@@ -97,13 +103,16 @@ const store = $state({
   passwordBookGeneration: 0,
   passwordBookState: "idle" as PasswordBookStatusState,
   passwordBookAvailable: false,
-  passwordBookSaved: false,
+  passwordBookSaved: null as boolean | null,
+  passwordBookSession: null as boolean | null,
+  passwordSave: { phase: "idle" } as PasswordSaveState,
 });
 
 let filterTimer: ReturnType<typeof setTimeout> | undefined;
 const pageRequests = new Map<number, { generation: number; promise: Promise<void> }>();
 let pendingArchiveOpenRequestId: string | null = null;
 let archiveOpenRequestSequence = 0;
+let pendingRefreshRetry: (() => Promise<boolean>) | null = null;
 
 function cancelFilterReload(): void {
   if (filterTimer !== undefined) clearTimeout(filterTimer);
@@ -187,7 +196,7 @@ export function selectedSize(): number {
   return store.selectedSize;
 }
 
-export function openPasswordPrompt(): { path: string; wrong: boolean; encoding: string | null } | null {
+export function openPasswordPrompt(): { path: string; wrong: boolean; encoding: string | null; refresh: boolean } | null {
   return store.passwordPrompt;
 }
 
@@ -204,21 +213,53 @@ export function archiveRefreshStatus(): ArchiveRefreshStatus {
   return store.refreshStatus;
 }
 
-/** Whether the current UI session knows this archive used a password. */
-export function archiveHasSessionPassword(): boolean {
-  return store.sessionPasswordKnown;
-}
-
 export function archivePasswordBookStatus(): {
   state: PasswordBookStatusState;
   available: boolean;
-  saved: boolean;
+  saved: boolean | null;
+  session: boolean | null;
 } {
   return {
     state: store.passwordBookState,
     available: store.passwordBookAvailable,
     saved: store.passwordBookSaved,
+    session: store.passwordBookSession,
   };
+}
+
+export function archivePasswordSave(): PasswordSaveState {
+  return store.passwordSave;
+}
+
+export function archivePasswordSaveBusy(): boolean {
+  return store.passwordSave.phase === "verifying" || store.passwordSave.phase === "cancelling";
+}
+
+async function cancelPasswordSaveRequest(requestId: string): Promise<void> {
+  if (import.meta.env.DEV && typeof window !== "undefined"
+    && cancelPasswordBookPreview(new URLSearchParams(window.location.search), requestId)) return;
+  await ipc.cancelPasswordSave(requestId);
+}
+
+export async function cancelArchivePasswordSave(): Promise<void> {
+  const requestId = store.passwordSave.requestId;
+  if (!requestId || !archivePasswordSaveBusy()) return;
+  store.passwordSave = { phase: "cancelling", requestId };
+  try {
+    await cancelPasswordSaveRequest(requestId);
+    // The save response decides the outcome, including a write already in progress.
+  } catch {
+    if (store.passwordSave.requestId === requestId && archivePasswordSaveBusy()) {
+      store.passwordSave = { phase: "verifying", requestId, cancelFailed: true };
+    }
+  }
+}
+
+export function clearArchivePasswordSave(): void {
+  if (store.passwordSave.phase === "idle") return;
+  const requestId = archivePasswordSaveBusy() ? store.passwordSave.requestId : undefined;
+  store.passwordSave = { phase: "idle" };
+  if (requestId) void cancelPasswordSaveRequest(requestId).catch(() => undefined);
 }
 
 /** Active archive-wide name encoding override, if the user selected one. */
@@ -260,8 +301,6 @@ async function performArchiveOpen(
   }
   let pendingInfo: ArchiveInfo | null = null;
   try {
-    const hadSessionPassword =
-      store.info?.source === path && store.sessionPasswordKnown;
     markValidationArchiveCall("openArchive");
     const info = await ipc.openArchive(
       path,
@@ -294,7 +333,6 @@ async function performArchiveOpen(
     store.pages = view.pages;
     store.loading = new Set();
     store.total = view.total;
-    store.sessionPasswordKnown = password != null || hadSessionPassword;
     store.encodingOverride = info.encoding_override ?? encoding ?? null;
     store.passwordPrompt = null;
     store.openError = null;
@@ -312,13 +350,14 @@ async function performArchiveOpen(
         path,
         wrong: e.key === "error.wrong_password" || password != null,
         encoding,
+        refresh: visibleWindow !== undefined,
         visibleWindow,
       };
       return false;
     }
     store.passwordPrompt = null;
     if (visibleWindow) {
-      store.refreshStatus = "error";
+      const retry = retainArchiveRefreshRetry(path, encoding, visibleWindow, previousId);
       pushToast({
         key: ARCHIVE_REFRESH_ERROR_TOAST_KEY,
         kind: "danger",
@@ -326,9 +365,7 @@ async function performArchiveOpen(
         body: isErrorDto(e) ? tError(e) : t("gui.archive.open_failed_generic"),
         action: {
           label: t("gui.error.retry"),
-          run: () => store.info?.id === previousId
-            ? performArchiveOpen(path, password, encoding, visibleWindow)
-            : false,
+          run: retry,
         },
       });
       return false;
@@ -349,6 +386,22 @@ async function performArchiveOpen(
       pendingArchiveOpenRequestId = null;
     }
   }
+}
+
+function retainArchiveRefreshRetry(
+  path: string,
+  encoding: string | null,
+  visibleWindow: () => ArchiveViewWindow,
+  previousId: number | undefined,
+): () => Promise<boolean> {
+  store.refreshStatus = "error";
+  const retry: () => Promise<boolean> = () => pendingRefreshRetry === retry
+    && store.info?.id === previousId && store.refreshStatus === "error"
+    && pendingArchiveOpenRequestId === null
+    ? performArchiveOpen(path, null, encoding, visibleWindow)
+    : Promise.resolve(false);
+  pendingRefreshRetry = retry;
+  return retry;
 }
 
 function viewPages(window: ArchiveViewWindow, total: number): number[] {
@@ -426,40 +479,49 @@ function reportArchiveDirectoryChange(previous: string[], current: string[]): vo
 }
 
 function clearArchiveRefreshStatus(): void {
+  pendingRefreshRetry = null;
   store.refreshStatus = "idle";
   removeToastByKey(ARCHIVE_REFRESH_ERROR_TOAST_KEY);
 }
 
-/** Adopts an archive that was already opened by an archive command. */
-export async function adoptOpenedArchive(info: ArchiveInfo): Promise<boolean> {
-  cancelActiveArchiveOpenRequest();
-  const requestGeneration = ++store.openGeneration;
-  let page: Awaited<ReturnType<typeof ipc.listEntries>>;
-  try {
-    markValidationArchiveCall("listEntries");
-    page = await ipc.listEntries(info.id, 0, "", null, PAGE_SIZE);
-  } catch (error) {
-    void ipc.closeArchive(info.id);
-    throw error;
-  }
-  if (requestGeneration !== store.openGeneration) {
+/** Publishes an opened archive only while its initiating action is still current. */
+export async function adoptOpenedArchive(info: ArchiveInfo, isCurrent: () => boolean): Promise<boolean> {
+  if (!isCurrent()) {
     void ipc.closeArchive(info.id);
     return false;
   }
-  if (store.info && store.info.id !== info.id) void ipc.closeArchive(store.info.id);
+  cancelActiveArchiveOpenRequest();
+  const requestGeneration = ++store.openGeneration;
+  const previewRows = import.meta.env.DEV && typeof window !== "undefined"
+    ? preparedNestedPreviewRows(new URLSearchParams(window.location.search), info.source) : null;
+  let page: Awaited<ReturnType<typeof ipc.listEntries>>;
+  try {
+    markValidationArchiveCall("listEntries");
+    const rootRows = previewRows?.filter((row) => !row.path.replace(/\/+$/g, "").includes("/"));
+    page = rootRows ? { items: rootRows.slice(0, PAGE_SIZE), total: rootRows.length, page: 0 }
+      : await ipc.listEntries(info.id, 0, "", null, PAGE_SIZE);
+  } catch (error) {
+    void ipc.closeArchive(info.id);
+    if (requestGeneration !== store.openGeneration || !isCurrent()) return false;
+    throw error;
+  }
+  if (requestGeneration !== store.openGeneration || !isCurrent()) {
+    void ipc.closeArchive(info.id);
+    return false;
+  }
+  if (store.info && store.info.id !== info.id) void ipc.closeArchive(store.info.id).catch(() => undefined);
   store.info = info;
   store.dirs = [];
   cancelFilterReload();
   store.filter = "";
   store.filterPending = false;
-  store.previewRows = null;
+  store.previewRows = previewRows;
   clearBrowseError();
   clearArchiveRefreshStatus();
   store.generation += 1;
   store.pages = new Map([[0, page.items]]);
   store.loading = new Set();
   store.total = page.total;
-  store.sessionPasswordKnown = false;
   store.encodingOverride = info.encoding_override ?? null;
   store.passwordPrompt = null;
   store.openError = null;
@@ -478,9 +540,13 @@ export function cancelPendingArchiveOpen(): void {
   clearArchiveRefreshStatus();
 }
 
-/** Dismisses the open-time password prompt. */
+/** Dismisses the password request while keeping an interrupted refresh retryable. */
 export function cancelPasswordPrompt(): void {
+  const prompt = store.passwordPrompt;
   cancelPendingArchiveOpen();
+  if (prompt?.visibleWindow) {
+    retainArchiveRefreshRetry(prompt.path, prompt.encoding, prompt.visibleWindow, store.info?.id);
+  }
 }
 
 export function closeArchive(): void {
@@ -497,7 +563,6 @@ export function closeArchive(): void {
   store.total = 0;
   store.previewRows = null;
   clearBrowseError();
-  store.sessionPasswordKnown = false;
   store.encodingOverride = null;
   store.passwordPrompt = null;
   store.openError = null;
@@ -506,10 +571,19 @@ export function closeArchive(): void {
 }
 
 function clearPasswordBookStatus(): void {
+  clearArchivePasswordSave();
   store.passwordBookGeneration += 1;
   store.passwordBookState = "idle";
   store.passwordBookAvailable = false;
-  store.passwordBookSaved = false;
+  store.passwordBookSaved = null;
+  store.passwordBookSession = null;
+}
+
+function applyPasswordBookStatus(status: PasswordBookStatus): void {
+  store.passwordBookAvailable = status.available;
+  store.passwordBookSaved = status.saved;
+  store.passwordBookSession = status.session;
+  store.passwordBookState = status.error ? "error" : "ready";
 }
 
 /** Reopens the current archive with a user-selected file-name encoding. */
@@ -533,21 +607,25 @@ export async function refreshArchivePasswordBookStatus(path = store.info?.path):
     clearPasswordBookStatus();
     return;
   }
-  if (store.info?.path !== path) return;
+  if (store.info?.path !== path || archivePasswordSaveBusy()) return;
   const generation = ++store.passwordBookGeneration;
   store.passwordBookState = "checking";
+  let status: PasswordBookStatus;
   try {
-    const status = await ipc.archivePasswordStatus(path);
-    if (store.info?.path !== path || store.passwordBookGeneration !== generation) return;
-    store.passwordBookAvailable = status.available;
-    store.passwordBookSaved = status.saved;
-    store.passwordBookState = "ready";
+    const preview = import.meta.env.DEV && typeof window !== "undefined"
+      ? readPasswordBookPreview(new URLSearchParams(window.location.search)) : null;
+    status = preview ?? await ipc.archivePasswordStatus(path);
   } catch (error) {
     if (store.info?.path === path && store.passwordBookGeneration === generation) {
       store.passwordBookState = "error";
+      store.passwordBookSaved = null;
+      store.passwordBookSession = null;
     }
     throw error;
   }
+  if (store.info?.path !== path || store.passwordBookGeneration !== generation) return;
+  applyPasswordBookStatus(status);
+  if (status.error) throw status.error;
 }
 
 function refreshArchivePasswordBookStatusInBackground(path: string): void {
@@ -559,45 +637,72 @@ export async function rememberArchivePassword(
   password: string,
   encoding?: string | null,
 ): Promise<boolean> {
+  const current = store.info;
+  if (!password || !current || current.path !== path || current.read_only
+    || store.passwordBookState !== "ready" || !store.passwordBookAvailable || archivePasswordSaveBusy()) return false;
+  const requestId = nextArchiveOpenRequestId();
+  const isCurrent = () => store.info?.id === current.id && store.info?.path === path
+    && store.passwordSave.requestId === requestId;
+  const generation = ++store.passwordBookGeneration;
+  store.passwordSave = { phase: "verifying", requestId };
   try {
-    const status = await ipc.rememberArchivePassword(path, password, encoding ?? null);
-    if (store.info?.path === path) {
+    const preview = import.meta.env.DEV && typeof window !== "undefined"
+      ? savePasswordBookPreview(new URLSearchParams(window.location.search), requestId, password) : null;
+    const status = await (preview ?? ipc.rememberArchivePassword(path, password, encoding ?? null, requestId));
+    if (store.info?.id === current.id && store.info?.path === path && store.passwordBookGeneration === generation) {
       store.passwordBookGeneration += 1;
-      store.passwordBookAvailable = status.available;
-      store.passwordBookSaved = status.saved;
-      store.passwordBookState = "ready";
+      applyPasswordBookStatus(status);
     }
-    pushToast({ kind: "success", title: t("gui.password.saved") });
+    if (!isCurrent()) return false;
+    store.passwordSave = { phase: "saved", requestId };
     return true;
   } catch (e) {
-    if (isErrorDto(e)) {
-      pushToast({ kind: "danger", title: tError(e), detail: e.detail });
-    } else {
-      pushToast({ kind: "danger", title: String(e) });
-    }
+    if (!isCurrent()) return false;
+    store.passwordSave = isErrorDto(e) && e.key === "error.cancelled"
+      ? { phase: "cancelled", requestId }
+      : { phase: "error", requestId, error: isErrorDto(e) ? e : { key: "gui.settings.password_book.save_failed", params: {}, detail: "" } };
     return false;
   }
 }
 
 export async function forgetCurrentArchivePassword(): Promise<boolean> {
-  const path = store.info?.path;
-  if (!path || store.info?.read_only) return false;
+  const current = store.info;
+  if (!current || current.read_only || archivePasswordSaveBusy() || store.passwordBookState === "checking") return false;
+  const { path, id } = current;
+  const toastKey = `archive-password-forget:${id}`;
+  const generation = ++store.passwordBookGeneration;
+  store.passwordBookState = "checking";
+  clearArchivePasswordSave();
   try {
-    const status = await ipc.forgetArchivePassword(path);
+    const preview = import.meta.env.DEV && typeof window !== "undefined"
+      ? forgetPasswordBookPreview(new URLSearchParams(window.location.search)) : null;
+    const status = preview ?? await ipc.forgetArchivePassword(path);
+    if (store.info?.id !== id || store.passwordBookGeneration !== generation) return false;
     if (store.info?.path === path) {
-      store.sessionPasswordKnown = false;
       store.passwordBookGeneration += 1;
-      store.passwordBookAvailable = status.available;
-      store.passwordBookSaved = status.saved;
-      store.passwordBookState = "ready";
+      applyPasswordBookStatus(status);
     }
-    pushToast({ kind: "success", title: t("gui.password.forgotten") });
+    if (status.saved !== false || status.error) {
+      pushToast({
+        key: toastKey,
+        kind: "warning",
+        title: t("gui.password.session_forgotten"),
+        body: t("gui.password.saved_forget_unconfirmed"),
+        persistent: true,
+      });
+      return false;
+    }
+    pushToast({ key: toastKey, kind: "success", title: t("gui.password.forgotten") });
     return true;
   } catch (e) {
+    if (store.info?.id !== id || store.passwordBookGeneration !== generation) return false;
+    store.passwordBookState = "error";
+    store.passwordBookSaved = null;
+    store.passwordBookSession = null;
     if (isErrorDto(e)) {
-      pushToast({ kind: "danger", title: tError(e), detail: e.detail });
+      pushToast({ key: toastKey, kind: "danger", title: tError(e), detail: e.detail });
     } else {
-      pushToast({ kind: "danger", title: String(e) });
+      pushToast({ key: toastKey, kind: "danger", title: String(e) });
     }
     return false;
   }
@@ -781,9 +886,13 @@ function publishBrowseError(error: unknown, generation: number): void {
   });
 }
 
-/** Retries the current directory listing or archive-wide search. */
+/** Retries a failed reopen, directory listing, or archive-wide search. */
 export async function retryArchiveBrowse(): Promise<void> {
   if (!store.info) return;
+  if (store.refreshStatus === "error") {
+    await pendingRefreshRetry?.();
+    return;
+  }
   store.filterPending = true;
   await reload();
 }
@@ -1083,6 +1192,7 @@ export function installArchivePreview(
     previewRows?: EntryDto[];
   },
 ): void {
+  clearArchivePasswordSave();
   store.openGeneration += 1;
   installValidationArchiveCallCounters();
   store.info = info;
@@ -1107,7 +1217,6 @@ export function installArchivePreview(
       .reduce((sum, row) => sum + row.size, 0);
   store.selectedAllCurrentRows = selectionCoversLoadedCurrentRows(store.selected);
   store.generation += 1;
-  store.sessionPasswordKnown = false;
   store.encodingOverride = info.encoding_override;
   store.passwordPrompt = null;
   store.openError = null;
@@ -1115,4 +1224,5 @@ export function installArchivePreview(
   store.passwordBookState = "ready";
   store.passwordBookAvailable = true;
   store.passwordBookSaved = false;
+  store.passwordBookSession = false;
 }

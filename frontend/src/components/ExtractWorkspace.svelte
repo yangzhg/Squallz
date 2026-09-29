@@ -18,6 +18,7 @@
   }
 
   export interface ExtractWorkspaceSurface {
+    onReady?: () => void;
     tr: (key: string, fallback: string) => string;
     title: string;
     start: {
@@ -44,6 +45,7 @@
       line: string;
       selection: string;
       password: string;
+      verification: string | null;
     };
     plan: ComponentProps<ExtractPlanSummaryComponent>;
     preset: ComponentProps<ArchivePresetPickerComponent>;
@@ -69,6 +71,7 @@
 </script>
 
 <script lang="ts">
+  import { onMount } from "svelte";
   import ArchivePresetPicker from "./ArchivePresetPicker.svelte";
   import ExtractPlanSummary from "./ExtractPlanSummary.svelte";
   import Icon from "./Icon.svelte";
@@ -80,6 +83,7 @@
     variant: ExtractWorkspaceVariant;
     surface: ExtractWorkspaceSurface;
   } = $props();
+  onMount(() => surface.onReady?.());
 </script>
 
 {#if variant === "modern"}
@@ -87,7 +91,7 @@
     <div class="sheet-head">
       <div>
         <span class="eyebrow">{surface.tr("gui.extract.eyebrow", "Extract")}</span>
-        <h1>{surface.title}</h1>
+        <h1 id="extract-workspace-heading" tabindex="-1">{surface.title}</h1>
         <p>{surface.tr("gui.extract.safe_subtitle", "Review the destination, folder layout, conflicts, password, and safety limits before extracting.")}</p>
       </div>
       <button
@@ -188,6 +192,7 @@
             <span>{surface.tr("gui.extract.blocked_conditions", "Blocked conditions")}</span>
             <strong>{surface.tr("gui.extract.safety_guards_on", "Zip Slip + bomb guards on")}</strong>
             <p>{surface.tr("gui.extract.blocked_conditions_body", "Path traversal, case collision, reserved Windows names, and symlink escapes stop the job before writing.")}</p>
+            {#if surface.archive.verification}<p>{surface.archive.verification}</p>{/if}
           </div>
         </div>
 
@@ -207,7 +212,7 @@
     <section class="classic-extract-sheet classic-extract">
       <header>
         <div>
-          <h1>{surface.title}</h1>
+          <h1 id="extract-workspace-heading" tabindex="-1">{surface.title}</h1>
           <p>{surface.tr("gui.extract.classic_subtitle", "Choose the final folder, preview smart extract behavior, and review conflicts before writing files.")}</p>
         </div>
         <div class="classic-button-row">
@@ -226,7 +231,7 @@
         <section class="classic-extract-form">
           <h2>{surface.tr("gui.batch.destination", "Destination")}</h2>
           <div class="classic-form-grid compact">
-            <div class="classic-label">{surface.tr("gui.batch.destination", "Destination")}</div>
+            <div class="classic-label">{surface.destination.label}</div>
             <div class="classic-input accent classic-extract-destination-path">{surface.destination.path}</div>
             <div class="classic-label">{surface.tr("common.mode", "Mode")}</div>
             <div class="classic-segments">
@@ -247,6 +252,10 @@
             <div class="classic-input accent classic-copy-wrap">{surface.archive.selection}</div>
             <div class="classic-label">{surface.tr("gui.extract.password", "Password")}</div>
             <div class="classic-input classic-copy-wrap">{surface.archive.password}</div>
+            {#if surface.archive.verification}
+              <div class="classic-label">{surface.tr("gui.extract.verification", "Verification")}</div>
+              <div class="classic-input classic-copy-wrap">{surface.archive.verification}</div>
+            {/if}
             <div class="classic-label">{surface.tr("gui.extract.conflicts", "Conflicts")}</div>
             <div class="classic-segments">
               {#each surface.overwrite.choices as choice (choice.id)}

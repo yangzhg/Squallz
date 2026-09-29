@@ -13,12 +13,12 @@ use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, EventTarget, Manager, State, WebviewWindow};
 use tauri_plugin_opener::OpenerExt;
 
+#[cfg(test)]
+use squallz_core::api::NoProgress;
 use squallz_core::api::{
     ControlToken, Detected, FormatError, FormatKind, OpenOptions, OverwritePolicy, Password,
-    ProgressSink, SymlinkPolicy,
+    ProgressSink, SafetyLimits, SymlinkPolicy,
 };
-#[cfg(test)]
-use squallz_core::api::{NoProgress, SafetyLimits};
 use squallz_core::{
     create_destination_has_conflict as core_create_destination_has_conflict,
     find_available_create_destination as core_find_available_create_destination,
@@ -31,15 +31,16 @@ use squallz_i18n::Localizer;
 
 use crate::audit::{OperationAudit, OperationAuditRecord};
 use crate::create_preflight::{
-    DestinationInspectionProgress, PreflightRequestKind, PreflightRequests,
+    DestinationInspectionProgress, PreflightRequestKind, PreflightRequestLease, PreflightRequests,
 };
 use crate::dto::{
-    normalize_performance_stream_buffer_limit, ArchiveInfo, BatchExtractItem,
-    CreateDestinationInspectionDto, CreateEstimateDto, CreatePlanDto, DiskSpaceDto, EntryDto,
-    EntryPreviewDto, ErrorDto, ExternalTaskActionDto, ExtractPlanPreflightDto, FormatDto,
-    IntegrationApplyResultDto, IntegrationRemoveResultDto, IntegrationStatusDto,
-    IntegrationSystemDiagnosticsDto, JobSpec, LanguageDto, LocaleTable, NestedArchivePreviewDto,
-    Page, PasswordBookStatusDto, SettingsDto, SfxCreateCapabilityDto,
+    normalize_performance_stream_buffer_limit, ArchiveInfo, ArchiveMovePlanDto,
+    ArchiveTargetInspectionDto, BatchExtractItem, CreateDestinationInspectionDto,
+    CreateEstimateDto, CreatePlanDto, DiskSpaceDto, EntryPreviewDto, ErrorDto,
+    ExternalTaskActionDto, ExtractPlanPreflightDto, FormatDto, IntegrationApplyResultDto,
+    IntegrationRemoveResultDto, IntegrationStatusDto, IntegrationSystemDiagnosticsDto, JobSpec,
+    LanguageDto, LocaleTable, NestedArchivePasswords, NestedArchivePreviewDto, Page,
+    PasswordBookStatusDto, SettingsDto, SfxCreateCapabilityDto,
 };
 use crate::events::EventSink;
 use crate::integration;
@@ -54,7 +55,7 @@ use crate::preview_sessions::{
 };
 use crate::secrets::{SecretStore, SharedSecretStore};
 use crate::settings::SettingsStore;
-use crate::state::{normalized_entry_path, AppState, DEFAULT_PAGE_SIZE};
+use crate::state::{AppState, DEFAULT_PAGE_SIZE};
 use crate::validation_trace;
 use serde_json::json;
 
@@ -247,18 +248,25 @@ fn open_archive_source_resolving_password_with_entry_limit_and_control(
 }
 
 fn archive_password_status_impl(
+    state: &AppState,
     secrets: &dyn SecretStore,
     path: &Path,
-) -> Result<PasswordBookStatusDto, ErrorDto> {
+) -> PasswordBookStatusDto {
     let available = secrets.is_available();
-    let saved = if available {
-        secrets
-            .has_archive_password(path)
-            .map_err(|error| ErrorDto::secret_store(error.to_string()))?
+    let (saved, error) = if available {
+        match secrets.has_archive_password(path) {
+            Ok(saved) => (Some(saved), None),
+            Err(error) => (None, Some(ErrorDto::secret_store(error.to_string()))),
+        }
     } else {
-        false
+        (None, None)
     };
-    Ok(PasswordBookStatusDto { available, saved })
+    PasswordBookStatusDto {
+        session: state.password_for(path).is_some(),
+        available,
+        saved,
+        error,
+    }
 }
 
 fn remember_archive_password_impl(
@@ -267,22 +275,39 @@ fn remember_archive_password_impl(
     path: &Path,
     password: &str,
     encoding: Option<&str>,
+    limits: SafetyLimits,
+    request: &PreflightRequestLease,
 ) -> Result<PasswordBookStatusDto, ErrorDto> {
+    let control = request.control();
+    control.checkpoint().map_err(ErrorDto::from)?;
+    let password_attempt = state.password_attempt(path, &control);
     if !secrets.is_available() {
         return Err(ErrorDto::secret_store(
             "persistent secret storage is not available on this platform",
         ));
     }
-    state
-        .verify_password(path, password, encoding)
-        .map_err(ErrorDto::from)?;
+    if !state
+        .verify_password(path, password, encoding, limits, &control)
+        .map_err(ErrorDto::from)?
+    {
+        return Err(ErrorDto {
+            key: "error.password_not_verifiable".to_owned(),
+            params: HashMap::new(),
+            detail: String::new(),
+        });
+    }
+    request.begin_commit().map_err(ErrorDto::from)?;
     secrets
         .set_archive_password(path, password)
         .map_err(|error| ErrorDto::secret_store(error.to_string()))?;
-    state.remember_password(path, password);
+    if let Some(attempt) = password_attempt.as_ref() {
+        state.remember_password(attempt, password, &control);
+    }
     Ok(PasswordBookStatusDto {
+        session: state.password_for(path).is_some(),
         available: true,
-        saved: true,
+        saved: Some(true),
+        error: None,
     })
 }
 
@@ -290,15 +315,23 @@ fn forget_archive_password_impl(
     state: &AppState,
     secrets: &dyn SecretStore,
     path: &Path,
-) -> Result<PasswordBookStatusDto, ErrorDto> {
+) -> PasswordBookStatusDto {
     state.forget_password(path);
-    secrets
-        .delete_archive_password(path)
-        .map_err(|error| ErrorDto::secret_store(error.to_string()))?;
-    Ok(PasswordBookStatusDto {
-        available: secrets.is_available(),
-        saved: false,
-    })
+    let available = secrets.is_available();
+    let (saved, error) = if available {
+        match secrets.delete_archive_password(path) {
+            Ok(()) => (Some(false), None),
+            Err(error) => (None, Some(ErrorDto::secret_store(error.to_string()))),
+        }
+    } else {
+        (None, None)
+    };
+    PasswordBookStatusDto {
+        session: false,
+        available,
+        saved,
+        error,
+    }
 }
 
 /// Opens an archive and caches its entry list. `PasswordRequired` comes
@@ -476,6 +509,63 @@ pub fn list_entries(
             filter.as_deref(),
         )
         .map_err(ErrorDto::from)
+}
+
+/// Checks draft targets against the current window's complete archive index.
+#[tauri::command]
+pub async fn missing_archive_paths(
+    window: WebviewWindow,
+    state: State<'_, Arc<AppState>>,
+    id: u64,
+    paths: Vec<String>,
+) -> Result<Vec<String>, ErrorDto> {
+    let state = Arc::clone(state.inner());
+    let owner_window = window.label().to_owned();
+    tauri::async_runtime::spawn_blocking(move || {
+        state.missing_archive_paths_for_window(&owner_window, id, &paths)
+    })
+    .await
+    .map_err(|error| ErrorDto::other(format!("archive path check failed: {error}")))?
+    .map_err(ErrorDto::from)
+}
+
+/// Checks a proposed rename or folder path against the complete archive index.
+#[tauri::command]
+pub async fn inspect_archive_target(
+    window: WebviewWindow,
+    state: State<'_, Arc<AppState>>,
+    id: u64,
+    target: String,
+) -> Result<ArchiveTargetInspectionDto, ErrorDto> {
+    let state = Arc::clone(state.inner());
+    let owner_window = window.label().to_owned();
+    tauri::async_runtime::spawn_blocking(move || {
+        state.inspect_archive_target_for_window(&owner_window, id, &target)
+    })
+    .await
+    .map_err(|error| ErrorDto::other(format!("archive target check failed: {error}")))?
+    .map(ArchiveTargetInspectionDto::from)
+    .map_err(ErrorDto::from)
+}
+
+/// Plans moves using the complete index, without transferring directory pages.
+#[tauri::command]
+pub async fn plan_archive_move(
+    window: WebviewWindow,
+    state: State<'_, Arc<AppState>>,
+    id: u64,
+    paths: Vec<String>,
+    target_dir: String,
+) -> Result<ArchiveMovePlanDto, ErrorDto> {
+    let state = Arc::clone(state.inner());
+    let owner_window = window.label().to_owned();
+    tauri::async_runtime::spawn_blocking(move || {
+        state.plan_archive_move_for_window(&owner_window, id, &paths, &target_dir)
+    })
+    .await
+    .map_err(|error| ErrorDto::other(format!("archive move check failed: {error}")))?
+    .map(ArchiveMovePlanDto::from)
+    .map_err(ErrorDto::from)
 }
 
 /// Pages archive-wide, case-insensitive path matches for an opened archive.
@@ -1076,26 +1166,6 @@ pub fn remove_integration_changes(
         .map_err(|e| ErrorDto::other(format!("cannot remove desktop integrations: {e}")))
 }
 
-fn format_label_from_name(state: &AppState, name: &str) -> String {
-    match state.engine.registry().detect_by_name(name) {
-        Some(detected) => detected_format_label(detected),
-        None => "archive".to_owned(),
-    }
-}
-
-fn detected_format_label(detected: Detected) -> String {
-    match detected {
-        Detected::Archive(format) => format.id().to_owned(),
-        Detected::Compressed {
-            compressor,
-            inner_archive,
-        } => match inner_archive {
-            Some(inner) => format!("{}.{}", inner.id(), compressor.id()),
-            None => compressor.id().to_owned(),
-        },
-    }
-}
-
 fn entry_base_name(path: &str) -> String {
     let trimmed = path.trim_end_matches('/');
     let base = match trimmed.rsplit('/').next() {
@@ -1178,61 +1248,59 @@ fn preview_error_dto_with_paths(error: FormatError, replacements: &[(&Path, &str
     dto
 }
 
+fn preview_password_error(mut error: ErrorDto, scope: &str) -> ErrorDto {
+    if matches!(
+        error.key.as_str(),
+        "error.password_required" | "error.wrong_password"
+    ) {
+        error
+            .params
+            .insert("password_scope".to_owned(), scope.to_owned());
+    }
+    error
+}
+
+#[allow(clippy::too_many_arguments)]
 fn preview_nested_archive_impl(
     state: &AppState,
     sessions: &PreviewSessionManager,
     owner: &str,
     outer_source: &str,
     entry_path: &str,
-    password: Option<&str>,
+    passwords: &NestedArchivePasswords,
     encoding: Option<&str>,
+    max_entries: u64,
+    control: &ControlToken,
 ) -> Result<NestedArchivePreviewDto, ErrorDto> {
-    let outer = state
-        .resolve_archive_source(outer_source, Some(owner))
-        .map_err(preview_error_dto)?;
-    let reservation = sessions.reserve(owner).map_err(preview_error_dto)?;
-    let workspace = reservation.workspace_path().map_err(preview_error_dto)?;
-    let (temp, _) = extract_nested_archive_to_temp_limited(
+    let archive = open_nested_archive_impl(
         state,
-        outer.path(),
+        sessions,
+        owner,
+        outer_source,
         entry_path,
-        password,
+        passwords,
         encoding,
-        workspace,
-        MAX_PREVIEW_ENTRY_BYTES,
-    )
-    .map_err(|error| {
-        preview_error_dto_with_paths(error, &[(outer.path(), outer.display_path())])
-    })?;
-    let temp_path = temp.to_path_buf();
-    let nested_display_path = nested_archive_display_path(outer.display_path(), entry_path);
-    let entries = state
-        .engine
-        .list(temp.as_ref(), &OpenOptions::default())
-        .map_err(|error| {
-            preview_error_dto_with_paths(
-                error,
-                &[
-                    (outer.path(), outer.display_path()),
-                    (&temp_path, nested_display_path.as_str()),
-                ],
-            )
-        })?;
-    let entry_count = entries.len();
-    let items = entries
-        .iter()
-        .take(NESTED_PREVIEW_LIMIT)
-        .map(|meta| {
-            let normalized = normalized_entry_path(meta);
-            EntryDto::from_meta(meta, normalized.clone(), entry_base_name(&normalized))
-        })
-        .collect();
+        max_entries,
+        control,
+    )?;
+    let items = state
+        .preview_entries_for_window(owner, archive.id, NESTED_PREVIEW_LIMIT)
+        .and_then(|items| {
+            control.checkpoint()?;
+            Ok(items)
+        });
+    let items = match items {
+        Ok(items) => items,
+        Err(error) => {
+            state.close_archive_for_window(owner, archive.id);
+            return Err(preview_error_dto(error));
+        }
+    };
     Ok(NestedArchivePreviewDto {
         outer_path: outer_source.to_owned(),
         entry_path: entry_path.to_owned(),
-        format: format_label_from_name(state, entry_path),
-        entry_count,
-        truncated: entry_count > NESTED_PREVIEW_LIMIT,
+        truncated: archive.entry_count > NESTED_PREVIEW_LIMIT,
+        archive,
         items,
     })
 }
@@ -1341,6 +1409,7 @@ pub fn release_preview_session(
         .map_err(preview_error_dto)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn preview_archive_entry_impl(
     state: &AppState,
     sessions: &PreviewSessionManager,
@@ -1349,12 +1418,22 @@ fn preview_archive_entry_impl(
     entry_path: &str,
     password: Option<&str>,
     encoding: Option<&str>,
+    control: &ControlToken,
 ) -> Result<EntryPreviewDto, ErrorDto> {
+    control.checkpoint().map_err(preview_error_dto)?;
     let outer = state
         .resolve_archive_source(outer_source, Some(owner))
         .map_err(preview_error_dto)?;
     let prepared = sessions
-        .prepare_archive_entry(owner, state, outer.path(), entry_path, password, encoding)
+        .prepare_archive_entry(
+            owner,
+            state,
+            outer.path(),
+            entry_path,
+            password,
+            encoding,
+            control,
+        )
         .map_err(|error| {
             preview_error_dto_with_paths(error, &[(outer.path(), outer.display_path())])
         })?;
@@ -1377,18 +1456,24 @@ fn operation_history_file_name(path: &Path) -> &str {
 
 /// Reads an archive entry as another archive and returns its first rows.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn preview_nested_archive(
     window: WebviewWindow,
     state: State<'_, Arc<AppState>>,
     sessions: State<'_, Arc<PreviewSessionManager>>,
+    requests: State<'_, Arc<PreflightRequests>>,
+    settings: State<'_, Arc<SettingsStore>>,
     outer_path: String,
     entry_path: String,
-    password: Option<String>,
+    passwords: NestedArchivePasswords,
     encoding: Option<String>,
+    request_id: String,
 ) -> Result<NestedArchivePreviewDto, ErrorDto> {
     let state = Arc::clone(state.inner());
     let sessions = Arc::clone(sessions.inner());
     let owner = window.label().to_owned();
+    let request = requests.begin_request(PreflightRequestKind::EntryPreview, &owner, &request_id);
+    let max_entries = settings.get().safety_limits().max_entries;
     tauri::async_runtime::spawn_blocking(move || {
         preview_nested_archive_impl(
             &state,
@@ -1396,8 +1481,10 @@ pub async fn preview_nested_archive(
             &owner,
             &outer_path,
             &entry_path,
-            password.as_deref(),
+            &passwords,
             encoding.as_deref(),
+            max_entries,
+            &request.control(),
         )
     })
     .await
@@ -1406,18 +1493,23 @@ pub async fn preview_nested_archive(
 
 /// Extracts one archive entry to a temporary file for local preview/reveal.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn preview_archive_entry(
     window: WebviewWindow,
     state: State<'_, Arc<AppState>>,
     sessions: State<'_, Arc<PreviewSessionManager>>,
+    requests: State<'_, Arc<PreflightRequests>>,
     outer_path: String,
     entry_path: String,
     password: Option<String>,
     encoding: Option<String>,
+    request_id: String,
 ) -> Result<EntryPreviewDto, ErrorDto> {
     let state = Arc::clone(state.inner());
     let sessions = Arc::clone(sessions.inner());
     let owner = window.label().to_owned();
+    let request = requests.begin_request(PreflightRequestKind::EntryPreview, &owner, &request_id);
+    let password = password.map(Password::new);
     let trace_extension = preview_trace_extension(Path::new(&entry_path));
     tauri::async_runtime::spawn_blocking(move || {
         let result = preview_archive_entry_impl(
@@ -1426,8 +1518,9 @@ pub async fn preview_archive_entry(
             &owner,
             &outer_path,
             &entry_path,
-            password.as_deref(),
+            password.as_ref().map(Password::expose),
             encoding.as_deref(),
+            &request.control(),
         );
         match &result {
             Ok(preview) => validation_trace::trace(
@@ -1459,49 +1552,62 @@ fn open_nested_archive_impl(
     owner: &str,
     outer_source: &str,
     entry_path: &str,
-    password: Option<&str>,
+    passwords: &NestedArchivePasswords,
     encoding: Option<&str>,
     max_entries: u64,
+    control: &ControlToken,
 ) -> Result<ArchiveInfo, ErrorDto> {
+    control.checkpoint().map_err(preview_error_dto)?;
     let outer = state
         .resolve_archive_source(outer_source, Some(owner))
         .map_err(preview_error_dto)?;
     let reservation = sessions.reserve(owner).map_err(preview_error_dto)?;
     let workspace = reservation.workspace_path().map_err(preview_error_dto)?;
-    let (temp, size) = extract_nested_archive_to_temp_limited(
+    let (temp, prepared) = extract_nested_archive_to_temp_limited(
         state,
         outer.path(),
         entry_path,
-        password,
+        passwords.outer.as_ref().map(Password::expose),
         encoding,
         workspace,
         MAX_PREVIEW_ENTRY_BYTES,
+        control,
     )
     .map_err(|error| {
-        preview_error_dto_with_paths(error, &[(outer.path(), outer.display_path())])
+        preview_password_error(
+            preview_error_dto_with_paths(error, &[(outer.path(), outer.display_path())]),
+            "outer",
+        )
     })?;
     let display_name = entry_base_name(entry_path);
     let display_path = nested_archive_display_path(outer.display_path(), entry_path);
     let temp_path = temp.to_path_buf();
-    state
+    let info = state
         .open_archive_with_owned_temp_and_entry_limit(
             owner,
             temp,
             reservation,
-            size,
+            prepared.size,
             display_path.clone(),
             display_name,
             max_entries,
+            passwords.inner.as_ref().map(Password::expose),
+            control,
         )
         .map_err(|error| {
-            preview_error_dto_with_paths(
-                error,
-                &[
-                    (outer.path(), outer.display_path()),
-                    (&temp_path, display_path.as_str()),
-                ],
+            preview_password_error(
+                preview_error_dto_with_paths(
+                    error,
+                    &[
+                        (outer.path(), outer.display_path()),
+                        (&temp_path, display_path.as_str()),
+                    ],
+                ),
+                "inner",
             )
-        })
+        })?;
+    prepared.remember_password(state, control);
+    Ok(info)
 }
 
 /// Extracts an archive entry to a persistent temp file and opens it as the
@@ -1512,16 +1618,19 @@ pub async fn open_nested_archive(
     window: WebviewWindow,
     state: State<'_, Arc<AppState>>,
     sessions: State<'_, Arc<PreviewSessionManager>>,
+    requests: State<'_, Arc<PreflightRequests>>,
     settings: State<'_, Arc<SettingsStore>>,
     outer_path: String,
     entry_path: String,
-    password: Option<String>,
+    passwords: NestedArchivePasswords,
     encoding: Option<String>,
+    request_id: String,
 ) -> Result<ArchiveInfo, ErrorDto> {
     let state = Arc::clone(state.inner());
     let sessions = Arc::clone(sessions.inner());
     let max_entries = settings.get().safety_limits().max_entries;
     let owner = window.label().to_owned();
+    let request = requests.begin_request(PreflightRequestKind::EntryPreview, &owner, &request_id);
     let trace_extension = preview_trace_extension(Path::new(&entry_path));
     tauri::async_runtime::spawn_blocking(move || {
         let result = open_nested_archive_impl(
@@ -1530,9 +1639,10 @@ pub async fn open_nested_archive(
             &owner,
             &outer_path,
             &entry_path,
-            password.as_deref(),
+            &passwords,
             encoding.as_deref(),
             max_entries,
+            &request.control(),
         );
         match &result {
             Ok(info) => validation_trace::trace(
@@ -1555,6 +1665,19 @@ pub async fn open_nested_archive(
     })
     .await
     .map_err(|e| ErrorDto::other(format!("nested open task failed: {e}")))?
+}
+
+#[tauri::command]
+pub fn cancel_entry_preview(
+    window: WebviewWindow,
+    requests: State<'_, Arc<PreflightRequests>>,
+    request_id: String,
+) {
+    requests.cancel(
+        PreflightRequestKind::EntryPreview,
+        window.label(),
+        &request_id,
+    );
 }
 
 /// Reports whether this installation contains its host SFX template.
@@ -1628,6 +1751,16 @@ pub fn job_snapshot(
     id: u64,
 ) -> Option<JobStateSnapshot> {
     jobs.snapshot_for_window(window.label(), id).ok()
+}
+
+#[tauri::command]
+pub fn review_job_spec(
+    window: WebviewWindow,
+    state: State<'_, Arc<AppState>>,
+    jobs: State<'_, Arc<JobManager>>,
+    id: u64,
+) -> Result<JobSpec, ErrorDto> {
+    jobs.review_spec_for_window(&state, window.label(), id)
 }
 
 #[tauri::command]
@@ -1755,42 +1888,72 @@ pub fn answer_password(
     jobs.answer_password_for_window(window.label(), id, question_version, password)
 }
 
-/// Persistent password-book status for one archive path.
+/// Verified session and persistent password status for one archive path.
 #[tauri::command]
 pub async fn archive_password_status(
+    state: State<'_, Arc<AppState>>,
     secrets: State<'_, SharedSecretStore>,
     path: String,
 ) -> Result<PasswordBookStatusDto, ErrorDto> {
+    let state = Arc::clone(state.inner());
     let secrets = Arc::clone(secrets.inner());
     tauri::async_runtime::spawn_blocking(move || {
-        archive_password_status_impl(secrets.as_ref(), Path::new(&path))
+        archive_password_status_impl(state.as_ref(), secrets.as_ref(), Path::new(&path))
     })
     .await
-    .map_err(|error| ErrorDto::other(format!("password-book status task failed: {error}")))?
+    .map_err(|error| ErrorDto::other(format!("password-book status task failed: {error}")))
 }
 
 /// Verifies and saves the current archive password in the platform store.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)] // Tauri state and window-scoped save request.
 pub async fn remember_archive_password(
+    window: WebviewWindow,
     state: State<'_, Arc<AppState>>,
     secrets: State<'_, SharedSecretStore>,
+    settings: State<'_, Arc<SettingsStore>>,
+    requests: State<'_, Arc<PreflightRequests>>,
     path: String,
     password: String,
     encoding: Option<String>,
+    request_id: String,
 ) -> Result<PasswordBookStatusDto, ErrorDto> {
     let state = Arc::clone(state.inner());
     let secrets = Arc::clone(secrets.inner());
+    let limits = settings.get().safety_limits();
+    let request = requests.begin_request(
+        PreflightRequestKind::PasswordSave,
+        window.label(),
+        &request_id,
+    );
+    let password = Password::new(password);
     tauri::async_runtime::spawn_blocking(move || {
         remember_archive_password_impl(
             state.as_ref(),
             secrets.as_ref(),
             Path::new(&path),
-            &password,
+            password.expose(),
             encoding.as_deref(),
+            limits,
+            &request,
         )
     })
     .await
     .map_err(|error| ErrorDto::other(format!("password-book save task failed: {error}")))?
+}
+
+/// Requests cancellation while this window's password verification is active.
+#[tauri::command]
+pub fn cancel_password_save(
+    window: WebviewWindow,
+    requests: State<'_, Arc<PreflightRequests>>,
+    request_id: String,
+) {
+    requests.cancel(
+        PreflightRequestKind::PasswordSave,
+        window.label(),
+        &request_id,
+    );
 }
 
 /// Forgets the current archive password from both Keychain and session cache.
@@ -1806,7 +1969,7 @@ pub async fn forget_archive_password(
         forget_archive_password_impl(state.as_ref(), secrets.as_ref(), Path::new(&path))
     })
     .await
-    .map_err(|error| ErrorDto::other(format!("password-book forget task failed: {error}")))?
+    .map_err(|error| ErrorDto::other(format!("password-book forget task failed: {error}")))
 }
 
 /// Returns file paths that were opened by the OS before the frontend drained
@@ -2575,14 +2738,14 @@ mod tests {
         apply_accent_palette, apply_general_options, archive_password_status_impl,
         bound_create_preset, bound_extract_preset, create_destination_has_conflict,
         disk_space_preflight, export_operation_history_impl, forget_archive_password_impl,
-        format_label_from_name, inspect_create_destination_impl,
-        inspect_create_destination_impl_with_progress, open_archive_resolving_password,
-        open_archive_source_resolving_password, open_nested_archive_impl, plan_convert_impl,
-        plan_extract_impl, preview_archive_entry_impl, preview_nested_archive_impl,
-        preview_trace_payload, remember_archive_password_impl, requested_page_size,
-        resolve_external_task_job_impl, unique_create_destination_path, valid_accent_palette,
-        valid_hex_color, MAX_ARCHIVE_PAGE_SIZE,
+        inspect_create_destination_impl, inspect_create_destination_impl_with_progress,
+        open_archive_resolving_password, open_archive_source_resolving_password,
+        open_nested_archive_impl, plan_convert_impl, plan_extract_impl, preview_archive_entry_impl,
+        preview_nested_archive_impl, preview_trace_payload, remember_archive_password_impl,
+        requested_page_size, resolve_external_task_job_impl, unique_create_destination_path,
+        valid_accent_palette, valid_hex_color, MAX_ARCHIVE_PAGE_SIZE,
     };
+    use crate::create_preflight::{PreflightRequestKind, PreflightRequests};
     use crate::dto::{ErrorDto, ExternalTaskActionDto, JobSpec, SettingsDto};
     use crate::secrets::{tests::MemorySecretStore, tests::ReadFailingSecretStore, SecretStore};
     use crate::state::{AppState, DEFAULT_PAGE_SIZE};
@@ -2884,15 +3047,26 @@ mod tests {
     }
 
     #[test]
-    fn format_label_from_name_uses_detected_format_or_archive_fallback() {
+    fn nested_preview_uses_the_content_format_instead_of_the_entry_suffix() {
         let state = AppState::new();
-
-        assert_eq!(format_label_from_name(&state, "sample.zip"), "zip");
-        assert_eq!(format_label_from_name(&state, "backup.tar.zst"), "tar.zstd");
-        assert_eq!(
-            format_label_from_name(&state, "unknown.squallz-test"),
-            "archive"
-        );
+        let dir = temp_dir("preview-format");
+        let outer = make_outer_archive_with_renamed_zip(&state, &dir, "inner.7z");
+        let sessions = PreviewSessionManager::new().unwrap();
+        let preview = preview_nested_archive_impl(
+            &state,
+            &sessions,
+            "test-window",
+            &outer.to_string_lossy(),
+            "inner.7z",
+            &Default::default(),
+            None,
+            SafetyLimits::default().max_entries,
+            &ControlToken::default(),
+        )
+        .unwrap();
+        assert_eq!(preview.archive.format, "zip");
+        state.close_archive_for_window("test-window", preview.archive.id);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -3495,19 +3669,407 @@ mod tests {
             "test-window",
             &outer.to_string_lossy(),
             "inner.zip",
+            &Default::default(),
             None,
-            None,
+            SafetyLimits::default().max_entries,
+            &ControlToken::default(),
         )
         .unwrap();
         assert_eq!(preview.entry_path, "inner.zip");
-        assert_eq!(preview.format, "zip");
+        assert_eq!(preview.archive.format, "zip");
         assert!(!preview.truncated);
         assert!(preview
             .items
             .iter()
             .any(|entry| entry.path == "inner-src/hello.txt"));
-
+        state.close_archive_for_window("test-window", preview.archive.id);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn nested_passwords_unlock_each_layer_and_keep_the_opened_source_readable() {
+        let dir = temp_dir("nested-passwords");
+        let state = Arc::new(AppState::new());
+        let inner = make_header_encrypted_7z(&dir);
+        let outer = dir.join("outer.zip");
+        state
+            .engine
+            .create(
+                &outer,
+                &[inner],
+                &CreateOptions {
+                    password: Some(Password::new("outer-secret")),
+                    ..CreateOptions::default()
+                },
+                &NoProgress,
+                &ControlToken::default(),
+            )
+            .unwrap();
+        // ZIP names are readable before the data password has been supplied.
+        assert_eq!(
+            state
+                .engine
+                .list(&outer, &OpenOptions::default())
+                .unwrap()
+                .len(),
+            1
+        );
+        let sessions = PreviewSessionManager::new().unwrap();
+        let source = outer.to_string_lossy();
+        let mut passwords = super::NestedArchivePasswords::default();
+        for (outer_password, inner_password, key, scope) in [
+            (None, None, "error.password_required", "outer"),
+            (Some("incorrect"), None, "error.wrong_password", "outer"),
+            (
+                Some("outer-secret"),
+                None,
+                "error.password_required",
+                "inner",
+            ),
+            (
+                Some("outer-secret"),
+                Some("incorrect"),
+                "error.wrong_password",
+                "inner",
+            ),
+        ] {
+            passwords.outer = outer_password.map(Password::new);
+            passwords.inner = inner_password.map(Password::new);
+            let preview_error = preview_nested_archive_impl(
+                &state,
+                &sessions,
+                "test-window",
+                &source,
+                "secret.7z",
+                &passwords,
+                None,
+                SafetyLimits::default().max_entries,
+                &ControlToken::default(),
+            )
+            .unwrap_err();
+            let open_error = open_nested_archive_impl(
+                &state,
+                &sessions,
+                "test-window",
+                &source,
+                "secret.7z",
+                &passwords,
+                None,
+                SafetyLimits::default().max_entries,
+                &ControlToken::default(),
+            )
+            .unwrap_err();
+            for error in [preview_error, open_error] {
+                assert_eq!(error.key, key);
+                assert_eq!(
+                    error.params.get("password_scope").map(String::as_str),
+                    Some(scope)
+                );
+                assert_error_hides_private_path(&error, sessions.root_path().unwrap(), None);
+                assert!(!serde_json::to_string(&error)
+                    .unwrap()
+                    .contains("outer-secret"));
+            }
+        }
+        passwords.inner = Some(Password::new("secret"));
+        let preview = preview_nested_archive_impl(
+            &state,
+            &sessions,
+            "test-window",
+            &source,
+            "secret.7z",
+            &passwords,
+            None,
+            SafetyLimits::default().max_entries,
+            &ControlToken::default(),
+        )
+        .unwrap();
+        assert!(preview
+            .items
+            .iter()
+            .any(|entry| entry.path == "secret-src/secret.txt"));
+        let info = preview.archive;
+        assert!(state.password_for(&outer).is_some());
+        let physical = state
+            .resolve_archive_source(&info.source, Some("test-window"))
+            .unwrap()
+            .path()
+            .to_path_buf();
+        assert!(state.password_for(&physical).is_some());
+        let entry = preview_archive_entry_impl(
+            &state,
+            &sessions,
+            "test-window",
+            &info.source,
+            "secret-src/secret.txt",
+            None,
+            None,
+            &ControlToken::default(),
+        )
+        .unwrap();
+        let path = sessions
+            .path_for_external_use(&entry.preview_id, "test-window")
+            .unwrap();
+        assert_eq!(std::fs::read(path).unwrap(), b"classified");
+        sessions.external_use_failed(&entry.preview_id, "test-window");
+        assert!(sessions.release(&entry.preview_id, "test-window").unwrap());
+
+        // The normal extraction workflow reuses this verified inner source,
+        // including preflight, cancellation, conflict review and retry.
+        let destination = dir.join("output");
+        let output_file = destination.join("secret-src/secret.txt");
+        std::fs::create_dir_all(output_file.parent().unwrap()).unwrap();
+        std::fs::write(&output_file, b"keep until confirmed").unwrap();
+        let plan = plan_extract_impl(
+            &state,
+            "test-window",
+            &info.source,
+            &info.path,
+            &destination,
+            None,
+            true,
+            None,
+            SafetyLimits::default().max_entries,
+            &ControlToken::default(),
+        )
+        .unwrap();
+        assert_eq!(plan.plan.files, 1);
+        let spec = JobSpec::Extract {
+            path: info.source.clone(),
+            dest: destination.to_string_lossy().into_owned(),
+            expected_destination: Some(plan.plan.destination),
+            expected_input_guard: Some(plan.input_guard),
+            selection: None,
+            overwrite: OverwritePolicy::Ask,
+            symlinks: SymlinkPolicy::Preserve,
+            smart: true,
+            encoding: None,
+            password: None,
+            verify_sfx: false,
+            best_effort: false,
+        };
+        let manager = super::JobManager::new();
+        let sink = Arc::new(crate::jobs::test_support::TestSink::default());
+        let submit = || {
+            manager
+                .submit_for_window(
+                    "test-window".into(),
+                    Arc::clone(&state),
+                    sink.clone(),
+                    spec.clone(),
+                    SettingsDto::default(),
+                )
+                .unwrap()
+        };
+        let await_conflict = |id| {
+            let start = std::time::Instant::now();
+            loop {
+                let snapshot = manager.snapshot_for_window("test-window", id).unwrap();
+                if let Some((_, prompt)) =
+                    sink.events.lock().unwrap().iter().find(|(event, value)| {
+                        event == crate::events::EV_ASK_CONFLICT && value["id"] == id
+                    })
+                {
+                    return prompt["version"].as_u64().unwrap();
+                }
+                if start.elapsed() > std::time::Duration::from_secs(3)
+                    || matches!(snapshot.state.as_str(), "done" | "failed" | "cancelled")
+                {
+                    manager.cancel_for_window("test-window", id).unwrap();
+                    panic!("extraction did not reach the destination conflict");
+                }
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+        };
+        let cancelled = submit();
+        await_conflict(cancelled);
+        manager.cancel_for_window("test-window", cancelled).unwrap();
+        manager.wait_idle();
+        assert_eq!(
+            std::fs::read(&output_file).unwrap(),
+            b"keep until confirmed"
+        );
+        let review = manager
+            .review_spec_for_window(&state, "test-window", cancelled)
+            .unwrap();
+        assert!(
+            matches!(review, JobSpec::Extract { path, password: None, .. } if path == info.source)
+        );
+
+        let id = submit();
+        let version = await_conflict(id);
+        state.close_archive_for_window("test-window", info.id);
+        assert!(physical.exists());
+        assert!(state.password_for(&physical).is_some());
+        manager
+            .answer_conflict_for_window("test-window", id, version, "overwrite".into(), false)
+            .unwrap();
+        manager.wait_idle();
+        assert_eq!(
+            manager
+                .snapshot_for_window("test-window", id)
+                .unwrap()
+                .state,
+            "done"
+        );
+        assert_eq!(std::fs::read(&output_file).unwrap(), b"classified");
+        let events = sink.events.lock().unwrap();
+        assert!(!events
+            .iter()
+            .any(|(event, _)| event == crate::events::EV_ASK_PASSWORD));
+        let visible = serde_json::to_string(&*events).unwrap();
+        assert!(!visible.contains(&physical.to_string_lossy().to_string()));
+        assert!(!visible.contains(&info.source));
+        assert!(!visible.contains("outer-secret"));
+        assert!(!physical.exists());
+        assert_eq!(state.cached_password_paths(), vec![outer.clone()]);
+        assert_eq!(sessions.release_window("test-window"), 0);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn encrypted_entry_preview_retries_without_leaving_a_failed_session() {
+        let dir = temp_dir("entry-password");
+        let state = AppState::new();
+        let file = dir.join("report.txt");
+        std::fs::write(&file, b"report contents").unwrap();
+        let second = dir.join("second.txt");
+        std::fs::write(&second, b"second report").unwrap();
+        let outer = dir.join("outer.zip");
+        state
+            .engine
+            .create(
+                &outer,
+                &[file, second],
+                &CreateOptions {
+                    password: Some(Password::new("entry-secret")),
+                    ..CreateOptions::default()
+                },
+                &NoProgress,
+                &ControlToken::default(),
+            )
+            .unwrap();
+        let sessions = PreviewSessionManager::new().unwrap();
+        for (password, key) in [
+            (None, "error.password_required"),
+            (Some("incorrect"), "error.wrong_password"),
+        ] {
+            let error = preview_archive_entry_impl(
+                &state,
+                &sessions,
+                "test-window",
+                &outer.to_string_lossy(),
+                "report.txt",
+                password,
+                None,
+                &ControlToken::default(),
+            )
+            .unwrap_err();
+            assert_eq!(error.key, key);
+        }
+        let entry = preview_archive_entry_impl(
+            &state,
+            &sessions,
+            "test-window",
+            &outer.to_string_lossy(),
+            "report.txt",
+            Some("entry-secret"),
+            None,
+            &ControlToken::default(),
+        )
+        .unwrap();
+        let path = sessions
+            .path_for_external_use(&entry.preview_id, "test-window")
+            .unwrap();
+        assert_eq!(std::fs::read(path).unwrap(), b"report contents");
+        sessions.external_use_failed(&entry.preview_id, "test-window");
+        assert!(sessions.release(&entry.preview_id, "test-window").unwrap());
+        assert!(state.password_for(&outer).is_some());
+        let status = archive_password_status_impl(&state, &MemorySecretStore::new(), &outer);
+        assert!(status.session);
+        assert_eq!(status.saved, Some(false));
+        let next = preview_archive_entry_impl(
+            &state,
+            &sessions,
+            "test-window",
+            &outer.to_string_lossy(),
+            "second.txt",
+            None,
+            None,
+            &ControlToken::default(),
+        )
+        .unwrap();
+        let path = sessions
+            .path_for_external_use(&next.preview_id, "test-window")
+            .unwrap();
+        assert_eq!(std::fs::read(path).unwrap(), b"second report");
+        sessions.external_use_failed(&next.preview_id, "test-window");
+        assert!(sessions.release(&next.preview_id, "test-window").unwrap());
+        state.forget_password(&outer);
+        assert_eq!(
+            preview_archive_entry_impl(
+                &state,
+                &sessions,
+                "test-window",
+                &outer.to_string_lossy(),
+                "report.txt",
+                None,
+                None,
+                &ControlToken::default(),
+            )
+            .unwrap_err()
+            .key,
+            "error.password_required"
+        );
+        assert_eq!(sessions.release_window("test-window"), 0);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn cancelled_preview_requests_do_not_publish_resources_or_credentials() {
+        let dir = temp_dir("cancelled-previews");
+        let state = AppState::new();
+        let outer = make_nested_zip_archive(&state, &dir);
+        let sessions = PreviewSessionManager::new().unwrap();
+        let requests = Arc::new(PreflightRequests::default());
+        let root_entries = || {
+            std::fs::read_dir(sessions.root_path().unwrap())
+                .unwrap()
+                .count()
+        };
+        let original = root_entries();
+        requests.cancel(PreflightRequestKind::EntryPreview, "test-window", "request");
+        let request =
+            requests.begin_request(PreflightRequestKind::EntryPreview, "test-window", "request");
+        let control = request.control();
+        let ordinary = preview_archive_entry_impl(
+            &state,
+            &sessions,
+            "test-window",
+            &outer.to_string_lossy(),
+            "inner.zip",
+            None,
+            None,
+            &control,
+        )
+        .unwrap_err();
+        let nested = preview_nested_archive_impl(
+            &state,
+            &sessions,
+            "test-window",
+            &outer.to_string_lossy(),
+            "inner.zip",
+            &Default::default(),
+            None,
+            SafetyLimits::default().max_entries,
+            &control,
+        )
+        .unwrap_err();
+        assert_eq!(ordinary.key, "error.cancelled");
+        assert_eq!(nested.key, "error.cancelled");
+        assert_eq!(root_entries(), original);
+        assert!(state.cached_password_paths().is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -3524,8 +4086,10 @@ mod tests {
             "test-window",
             &outer.to_string_lossy(),
             "mystery.bin",
+            &Default::default(),
             None,
-            None,
+            SafetyLimits::default().max_entries,
+            &ControlToken::default(),
         )
         .unwrap_err();
         assert_eq!(preview_error.key, "error.unsupported");
@@ -3537,9 +4101,10 @@ mod tests {
             "test-window",
             &outer.to_string_lossy(),
             "mystery.bin",
-            None,
+            &Default::default(),
             None,
             SafetyLimits::default().max_entries,
+            &ControlToken::default(),
         )
         .unwrap_err();
         assert_eq!(open_error.key, "error.unsupported");
@@ -3560,9 +4125,10 @@ mod tests {
             "test-window",
             &outer.to_string_lossy(),
             "inner.blob",
-            None,
+            &Default::default(),
             None,
             SafetyLimits::default().max_entries,
+            &ControlToken::default(),
         )
         .unwrap();
         let resolved = state
@@ -3581,6 +4147,7 @@ mod tests {
             "inner-src/hello.txt",
             None,
             None,
+            &ControlToken::default(),
         )
         .unwrap_err();
         assert_eq!(preview_error.key, "error.unsupported");
@@ -3630,6 +4197,7 @@ mod tests {
             "src/note.txt",
             None,
             None,
+            &ControlToken::default(),
         )
         .unwrap();
         assert_eq!(preview.entry_path, "src/note.txt");
@@ -3682,6 +4250,7 @@ mod tests {
             "src/pixel.png",
             None,
             None,
+            &ControlToken::default(),
         )
         .unwrap();
         let preview_path = sessions
@@ -3712,9 +4281,10 @@ mod tests {
             "test-window",
             &outer.to_string_lossy(),
             "inner.zip",
-            None,
+            &Default::default(),
             None,
             SafetyLimits::default().max_entries,
+            &ControlToken::default(),
         )
         .unwrap();
         assert_eq!(info.format, "zip");
@@ -3795,9 +4365,10 @@ mod tests {
             "test-window",
             &outer.to_string_lossy(),
             "inner.zip",
-            None,
+            &Default::default(),
             None,
             SafetyLimits::default().max_entries,
+            &ControlToken::default(),
         )
         .unwrap();
         let destination = dir.join("nested-plan-output");
@@ -3851,9 +4422,10 @@ mod tests {
             "released-window",
             &outer.to_string_lossy(),
             "inner.zip",
-            None,
+            &Default::default(),
             None,
             SafetyLimits::default().max_entries,
+            &ControlToken::default(),
         )
         .unwrap();
         let source = state
@@ -3889,9 +4461,10 @@ mod tests {
                 owner,
                 &outer.to_string_lossy(),
                 "inner.zip",
-                None,
+                &Default::default(),
                 None,
                 SafetyLimits::default().max_entries,
+                &ControlToken::default(),
             )
             .unwrap();
             let source = state
@@ -3921,9 +4494,10 @@ mod tests {
             "test-window",
             &outer.to_string_lossy(),
             "inner.zip",
-            None,
+            &Default::default(),
             None,
             SafetyLimits::default().max_entries,
+            &ControlToken::default(),
         )
         .unwrap();
         let source = state
@@ -3977,9 +4551,10 @@ mod tests {
                         "test-window",
                         &outer.to_string_lossy(),
                         "inner.zip",
-                        None,
+                        &Default::default(),
                         None,
                         SafetyLimits::default().max_entries,
+                        &ControlToken::default(),
                     )
                     .unwrap()
                 })
@@ -4076,12 +4651,21 @@ mod tests {
         let state = AppState::new();
         let secrets = MemorySecretStore::new();
 
-        let initial = archive_password_status_impl(&secrets, &archive).unwrap();
+        let initial = archive_password_status_impl(&state, &secrets, &archive);
         assert!(initial.available);
-        assert!(!initial.saved);
+        assert_eq!(initial.saved, Some(false));
+        assert!(!initial.session);
 
-        let err =
-            remember_archive_password_impl(&state, &secrets, &archive, "wrong", None).unwrap_err();
+        let err = remember_archive_password_impl(
+            &state,
+            &secrets,
+            &archive,
+            "wrong",
+            None,
+            SafetyLimits::default(),
+            &password_save_request(),
+        )
+        .unwrap_err();
         assert_ne!(
             err.key, "error.other",
             "wrong passwords must come from engine validation"
@@ -4089,14 +4673,22 @@ mod tests {
         assert!(!secrets.has_archive_password(&archive).unwrap());
         assert!(state.password_for(&archive).is_none());
 
-        let saved =
-            remember_archive_password_impl(&state, &secrets, &archive, "secret", None).unwrap();
+        let saved = remember_archive_password_impl(
+            &state,
+            &secrets,
+            &archive,
+            "secret",
+            None,
+            SafetyLimits::default(),
+            &password_save_request(),
+        )
+        .unwrap();
         assert!(saved.available);
-        assert!(saved.saved);
-        assert!(
-            archive_password_status_impl(&secrets, &archive)
-                .unwrap()
-                .saved
+        assert_eq!(saved.saved, Some(true));
+        assert!(saved.session);
+        assert_eq!(
+            archive_password_status_impl(&state, &secrets, &archive).saved,
+            Some(true)
         );
         assert_eq!(
             secrets
@@ -4111,26 +4703,188 @@ mod tests {
             Some("secret")
         );
 
-        let forgotten = forget_archive_password_impl(&state, &secrets, &archive).unwrap();
+        let forgotten = forget_archive_password_impl(&state, &secrets, &archive);
         assert!(forgotten.available);
-        assert!(!forgotten.saved);
-        assert!(
-            !archive_password_status_impl(&secrets, &archive)
-                .unwrap()
-                .saved
+        assert_eq!(forgotten.saved, Some(false));
+        assert!(!forgotten.session);
+        assert_eq!(
+            archive_password_status_impl(&state, &secrets, &archive).saved,
+            Some(false)
         );
         assert!(state.password_for(&archive).is_none());
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    fn password_save_request() -> crate::create_preflight::PreflightRequestLease {
+        Arc::new(crate::create_preflight::PreflightRequests::default()).begin_anonymous_request(
+            crate::create_preflight::PreflightRequestKind::PasswordSave,
+            "test-window",
+        )
+    }
+
     #[test]
-    fn password_book_status_reports_secret_store_failures() {
-        let error = archive_password_status_impl(
-            &ReadFailingSecretStore,
-            Path::new("/tmp/locked-password-book.7z"),
+    fn cancelled_password_save_preserves_existing_credentials() {
+        let dir = temp_dir("password-book-cancel");
+        let archive = make_header_encrypted_7z(&dir);
+        let state = AppState::new();
+        let secrets = MemorySecretStore::new();
+        secrets.insert(archive.clone(), "saved");
+        let request = password_save_request();
+        request.control().cancel();
+        let error = remember_archive_password_impl(
+            &state,
+            &secrets,
+            &archive,
+            "secret",
+            None,
+            SafetyLimits::default(),
+            &request,
         )
         .unwrap_err();
+        assert_eq!(error.key, "error.cancelled");
+        assert_eq!(
+            secrets
+                .get_archive_password(&archive)
+                .unwrap()
+                .as_ref()
+                .map(Password::expose),
+            Some("saved")
+        );
+        assert!(state.password_for(&archive).is_none());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn password_book_checks_zip_content_before_saving_or_replacing_a_secret() {
+        let dir = temp_dir("password-book-zip");
+        let state = AppState::new();
+        let secrets = MemorySecretStore::new();
+        let source = dir.join("report.txt");
+        std::fs::write(&source, b"private report").unwrap();
+        for encrypted in [false, true] {
+            let archive = dir.join(if encrypted {
+                "encrypted.zip"
+            } else {
+                "plain.zip"
+            });
+            state
+                .engine
+                .create(
+                    &archive,
+                    std::slice::from_ref(&source),
+                    &CreateOptions {
+                        password: encrypted.then(|| Password::new("correct")),
+                        ..CreateOptions::default()
+                    },
+                    &NoProgress,
+                    &ControlToken::default(),
+                )
+                .unwrap();
+            // Both ZIP directories are readable even with the wrong password.
+            assert_eq!(
+                state
+                    .engine
+                    .list(
+                        &archive,
+                        &OpenOptions {
+                            password: Some(Password::new("wrong")),
+                            ..OpenOptions::default()
+                        }
+                    )
+                    .unwrap()
+                    .len(),
+                1
+            );
+            let error = remember_archive_password_impl(
+                &state,
+                &secrets,
+                &archive,
+                "wrong",
+                None,
+                SafetyLimits::default(),
+                &password_save_request(),
+            )
+            .unwrap_err();
+            assert_eq!(
+                error.key,
+                if encrypted {
+                    "error.wrong_password"
+                } else {
+                    "error.password_not_verifiable"
+                }
+            );
+            assert!(!secrets.has_archive_password(&archive).unwrap());
+            assert!(state.password_for(&archive).is_none());
+            if !encrypted {
+                continue;
+            }
+            let error = remember_archive_password_impl(
+                &state,
+                &secrets,
+                &archive,
+                "correct",
+                None,
+                SafetyLimits {
+                    max_output_bytes: 1,
+                    ..SafetyLimits::default()
+                },
+                &password_save_request(),
+            )
+            .unwrap_err();
+            assert_eq!(error.key, "error.resource_limit");
+            assert!(!secrets.has_archive_password(&archive).unwrap());
+            assert!(state.password_for(&archive).is_none());
+            assert_eq!(
+                remember_archive_password_impl(
+                    &state,
+                    &secrets,
+                    &archive,
+                    "correct",
+                    None,
+                    SafetyLimits::default(),
+                    &password_save_request(),
+                )
+                .unwrap()
+                .saved,
+                Some(true)
+            );
+            assert!(remember_archive_password_impl(
+                &state,
+                &secrets,
+                &archive,
+                "wrong",
+                None,
+                SafetyLimits::default(),
+                &password_save_request(),
+            )
+            .is_err());
+            assert_eq!(
+                secrets
+                    .get_archive_password(&archive)
+                    .unwrap()
+                    .as_ref()
+                    .map(Password::expose),
+                Some("correct")
+            );
+            assert_eq!(
+                state.password_for(&archive).as_ref().map(Password::expose),
+                Some("correct")
+            );
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn password_book_status_reports_secret_store_failures() {
+        let status = archive_password_status_impl(
+            &AppState::new(),
+            &ReadFailingSecretStore,
+            Path::new("/tmp/locked-password-book.7z"),
+        );
+        assert_eq!(status.saved, None);
+        assert!(!status.session);
+        let error = status.error.unwrap();
 
         assert_eq!(error.key, "error.secret_store");
         assert!(error.params.is_empty());
@@ -4139,15 +4893,87 @@ mod tests {
 
     #[test]
     fn forgetting_always_clears_the_session_password_when_persistent_delete_fails() {
-        let path = Path::new("/tmp/locked-password-book.7z");
+        let dir = temp_dir("forget-password-book");
+        let archive = make_header_encrypted_7z(&dir);
+        let path = archive.as_path();
         let state = AppState::new();
-        state.remember_password(path, "session secret");
+        state.open_archive(path, Some("secret"), None).unwrap();
 
-        let error = forget_archive_password_impl(&state, &ReadFailingSecretStore, path)
-            .expect_err("persistent delete must still be reported");
+        let status = archive_password_status_impl(&state, &ReadFailingSecretStore, path);
+        assert!(status.session);
+        assert_eq!(status.saved, None);
+        assert!(status.error.is_some());
+        let forgotten = forget_archive_password_impl(&state, &ReadFailingSecretStore, path);
+        assert!(!forgotten.session);
+        assert_eq!(forgotten.saved, None);
+        let error = forgotten
+            .error
+            .expect("persistent delete must still be reported");
 
         assert_eq!(error.key, "error.secret_store");
         assert!(state.password_for(path).is_none());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn password_book_status_rechecks_the_source_without_discarding_saved_credentials() {
+        let dir = temp_dir("password-status-source");
+        let archive = make_header_encrypted_7z(&dir);
+        let state = AppState::new();
+        let secrets = MemorySecretStore::new();
+        secrets.insert(archive.clone(), "secret");
+        state.open_archive(&archive, Some("secret"), None).unwrap();
+        assert!(archive_password_status_impl(&state, &secrets, &archive).session);
+        std::fs::write(&archive, b"changed archive").unwrap();
+        let changed = archive_password_status_impl(&state, &secrets, &archive);
+        assert!(!changed.session);
+        assert_eq!(changed.saved, Some(true));
+        assert!(changed.error.is_none());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn password_book_unavailable_store_still_reports_and_forgets_session_passwords() {
+        struct UnavailableStore;
+        impl SecretStore for UnavailableStore {
+            fn is_available(&self) -> bool {
+                false
+            }
+            fn get_archive_password(
+                &self,
+                _: &Path,
+            ) -> Result<Option<Password>, crate::secrets::SecretStoreError> {
+                panic!("unavailable store must not be read");
+            }
+            fn set_archive_password(
+                &self,
+                _: &Path,
+                _: &str,
+            ) -> Result<(), crate::secrets::SecretStoreError> {
+                panic!("unavailable store must not be written");
+            }
+            fn delete_archive_password(
+                &self,
+                _: &Path,
+            ) -> Result<(), crate::secrets::SecretStoreError> {
+                panic!("unavailable store must not be accessed for deletion");
+            }
+        }
+        let dir = temp_dir("password-status-unavailable");
+        let archive = make_header_encrypted_7z(&dir);
+        let state = AppState::new();
+        state.open_archive(&archive, Some("secret"), None).unwrap();
+        let status = archive_password_status_impl(&state, &UnavailableStore, &archive);
+        assert!(status.session);
+        assert!(!status.available);
+        assert_eq!(status.saved, None);
+        let forgotten = forget_archive_password_impl(&state, &UnavailableStore, &archive);
+        assert!(!forgotten.session);
+        assert!(!forgotten.available);
+        assert_eq!(forgotten.saved, None);
+        assert!(forgotten.error.is_none());
+        assert!(state.password_for(&archive).is_none());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

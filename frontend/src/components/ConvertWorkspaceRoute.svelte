@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount } from "svelte";
   import ConvertWorkspace from "./ConvertWorkspace.svelte";
   import { convertSessionFor } from "../lib/convert-session.svelte";
   import type {
@@ -19,6 +20,7 @@
 
   let session = $derived(convertSessionFor(owner, bridge));
   let surface = $derived(session.surface(variant));
+  onMount(() => bridge.onReady?.());
 
   $effect(() => {
     bridge.register(session);

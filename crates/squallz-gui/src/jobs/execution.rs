@@ -299,6 +299,7 @@ impl JobContext<'_> {
         archive: &Path,
         display_name: Option<&str>,
         explicit: Option<&str>,
+        verified_result: impl Fn(&R) -> bool,
         mut f: impl FnMut(Option<&Password>) -> Result<R, FormatError>,
     ) -> Result<R, FormatError> {
         let Self {
@@ -311,6 +312,7 @@ impl JobContext<'_> {
             gui_id,
             ..
         } = *self;
+        let password_attempt = state.password_attempt(archive, ctl);
         let mut current = explicit
             .map(Password::new)
             .or_else(|| state.password_for(archive));
@@ -318,9 +320,9 @@ impl JobContext<'_> {
         loop {
             match f(current.as_ref()) {
                 Ok(r) => {
-                    if prompted {
-                        if let Some(pw) = &current {
-                            state.remember_password(archive, pw.expose());
+                    if prompted && verified_result(&r) {
+                        if let (Some(pw), Some(attempt)) = (&current, password_attempt.as_ref()) {
+                            state.remember_password(attempt, pw.expose(), ctl);
                         }
                     }
                     return Ok(r);
@@ -478,8 +480,14 @@ impl JobContext<'_> {
         };
         let archive = archive.to_path_buf();
         let dest = dest.to_path_buf();
-        let (plan, report, structure) =
-            self.with_password(&archive, Some(archive_display_name), password, |pw| {
+        let (plan, report, structure) = self.with_password(
+            &archive,
+            Some(archive_display_name),
+            password,
+            |(_, report, _): &(ExtractPlan, ExtractReport, ArchiveStructureStatus)| {
+                report.failed == 0 && report.skipped == 0
+            },
+            |pw| {
                 let open = OpenOptions {
                     password: pw.cloned(),
                     encoding_override: encoding.map(str::to_owned),
@@ -508,7 +516,8 @@ impl JobContext<'_> {
                             _ => Ok(()),
                         },
                     )
-            })?;
+            },
+        )?;
         let result = extract_result_json(
             plan,
             report,
@@ -1134,6 +1143,7 @@ impl JobContext<'_> {
                     &outer,
                     Some(&outer_display_name),
                     password.as_deref(),
+                    |_| true,
                     |resolved_password| {
                         extract_nested_archive_to_temp_for_job(
                             state,
@@ -1182,8 +1192,12 @@ impl JobContext<'_> {
                     _ => path.as_str(),
                 };
                 let display_name = batch_archive_label(Path::new(display_path));
-                let outcome =
-                    self.with_password(&archive, Some(&display_name), password.as_deref(), |pw| {
+                let outcome = self.with_password(
+                    &archive,
+                    Some(&display_name),
+                    password.as_deref(),
+                    |outcome: &squallz_core::ArchiveTestOutcome| outcome.payload_is_ok(),
+                    |pw| {
                         let open = OpenOptions {
                             password: pw.cloned(),
                             encoding_override: encoding.clone(),
@@ -1191,7 +1205,8 @@ impl JobContext<'_> {
                         state
                             .engine
                             .test_summary_with_structure(&archive, &open, sink, ctl)
-                    })?;
+                    },
+                )?;
                 let structure = outcome.structure;
                 let report = outcome.into_summary();
                 let ok = report.is_ok();
@@ -1234,6 +1249,7 @@ impl JobContext<'_> {
                     &src_path,
                     Some(&display_name),
                     src_password.as_deref(),
+                    |_| true,
                     |pw| {
                         let open = OpenOptions {
                             password: pw.cloned(),

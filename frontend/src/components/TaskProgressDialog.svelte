@@ -4,17 +4,19 @@
   import { cssVariables, type CssVariableMap } from "../lib/css-variables";
   import { trapModalFocus } from "../lib/modal-focus";
   import type { TaskConflictDecision, TaskDialogModel } from "../lib/task-dialog";
+  import { taskNeedsInput } from "../lib/task-model";
   import {
     checksumItemStatus,
     checksumItemText,
     hasTaskCurrentProgress,
     isTaskActiveState,
-    isTaskProgressingState,
+    taskProgressActive,
     taskCancelButtonLabel,
     taskChecksumItems,
     taskControlCalloutDetail,
     taskControlCalloutTitle,
     taskControlCalloutVisible,
+    taskActionFailureMessage,
     taskCurrentLabel,
     taskCurrentProgressBadge,
     taskCurrentProgressPercent,
@@ -26,15 +28,17 @@
     taskDialogResultSummary,
     taskErrorDetailsActionLabel,
     taskErrorDetailsAvailable,
-    taskFailureReviewActionLabel,
-    taskFailureReviewAvailable,
-    taskFailureReviewScreen,
+    taskReviewActionLabel,
+    taskReviewAvailable,
+    taskReviewScreen,
     taskTitleLabel,
     taskNextStepDetail,
     taskOpenOutputLabel,
     taskOutcomeNeedsAttention,
     taskOutcomeStateLabel,
     taskOutcomeStateTone,
+    taskStatusUnavailable,
+    taskStatusUnavailableMessage,
     taskOverallProgressBadge,
     taskOverallProgressIndeterminate,
     taskOverallProgressLabel,
@@ -83,6 +87,7 @@
     conflictQuestion = null,
     conflictApplyAll = false,
     presentation = "dialog",
+    reviewPending = false,
     taskOutputPath,
     taskRevealOutputLabel,
     taskWindowMode,
@@ -93,7 +98,7 @@
     onCopyChecksumResults,
     onOpenOutput,
     onPublishMacosSfx,
-    onReviewFailure,
+    onReviewTask,
     onToggleDetails,
     onViewResults,
     onRevealOutput,
@@ -116,6 +121,7 @@
     conflictQuestion?: ConflictQuestion | null;
     conflictApplyAll?: boolean;
     presentation?: "dialog" | "panel" | "window";
+    reviewPending?: boolean;
     taskOutputPath: (task: TaskDialogModel) => string | null;
     taskRevealOutputLabel: () => string;
     taskWindowMode: boolean;
@@ -126,7 +132,7 @@
     onCopyChecksumResults: TaskAsyncAction;
     onOpenOutput: TaskAsyncAction;
     onPublishMacosSfx: TaskAsyncAction;
-    onReviewFailure: TaskAction;
+    onReviewTask: TaskAction;
     onToggleDetails: TaskAction;
     onViewResults: TaskAction;
     onRevealOutput: TaskAsyncAction;
@@ -144,6 +150,8 @@
   let errorDetailsId = $derived(taskElementId("error-details"));
   let createDetailsId = $derived(taskElementId("create-details"));
   let passwordErrorId = $derived(taskElementId("password-error"));
+  let actionFailure = $derived(taskActionFailureMessage(task));
+  let passwordFeedback = $derived(passwordError || actionFailure);
 
   function taskElementId(suffix: string): string {
     const taskId = task.id === null ? "submitting" : task.id.toString();
@@ -151,13 +159,15 @@
   }
 
   function displayedTaskState(): string {
-    return task.interaction === null
+    if (taskStatusUnavailable(task)) return taskOutcomeStateLabel(task);
+    if (task.controlIntent === "cancel") return taskCancelButtonLabel(task);
+    return !taskNeedsInput(task)
       ? taskOutcomeStateLabel(task)
       : tr("gui.task_center.needs_input", "Needs input");
   }
 
   function displayedTaskTone(): string {
-    return task.interaction === null ? taskOutcomeStateTone(task) : "warning";
+    return taskNeedsInput(task) ? "warning" : taskOutcomeStateTone(task);
   }
 
   function resultIconName(): string {
@@ -194,7 +204,11 @@
 
   function scrollResultList(event: KeyboardEvent): void {
     const target = event.currentTarget;
-    if (!(target instanceof HTMLElement)) return;
+    if (
+      !(target instanceof HTMLElement)
+      || event.target !== target
+      || event.altKey || event.ctrlKey || event.metaKey
+    ) return;
     if (target.scrollHeight <= target.clientHeight) return;
     const lineStep = target.clientHeight / 4;
     let nextTop: number;
@@ -241,7 +255,7 @@
     class="task-modal-card"
     data-task-state={task.state}
     data-task-outcome={displayedTaskTone()}
-    data-task-active={isTaskProgressingState(task.state) ? "true" : "false"}
+    data-task-active={taskProgressActive(task) ? "true" : "false"}
     role={presentation === "dialog" ? "dialog" : "region"}
     aria-modal={presentation === "dialog" ? "true" : undefined}
     aria-labelledby={titleId}
@@ -260,7 +274,14 @@
       <strong class={`task-modal-state state-${displayedTaskTone()}`}>{displayedTaskState()}</strong>
     </header>
 
-    <div class="task-modal-body">
+    <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions (focusable scroll region) -->
+    <div
+      class="task-modal-body"
+      role="region"
+      aria-label={tr("gui.task_center.details", "Details")}
+      tabindex="0"
+      onkeydown={scrollResultList}
+    >
     {#if !isTaskActiveState(task.state)}
       <section
         class="task-result-callout"
@@ -285,13 +306,20 @@
       </section>
     {/if}
 
-    {#if task.interaction !== null && !passwordQuestion && !conflictQuestion}
+    {#if taskNeedsInput(task) && !passwordQuestion && !conflictQuestion}
       <section class="task-control-callout task-interaction-callout attention" aria-live="polite">
         <Icon name={task.interaction === "password" ? "lock" : "alert-triangle"} size={16} />
         <div>
           <strong>{interactionTitle()}</strong>
           <span>{interactionDetail()}</span>
         </div>
+      </section>
+    {/if}
+
+    {#if taskStatusUnavailable(task)}
+      <section class="task-status-notice" role="status">
+        <Icon name="alert-triangle" size={16} />
+        <p>{taskStatusUnavailableMessage()}</p>
       </section>
     {/if}
 
@@ -321,12 +349,12 @@
             autocomplete="current-password"
             aria-label={tr("gui.password.archive_password", "Archive password")}
             aria-invalid={passwordError ? "true" : undefined}
-            aria-describedby={passwordError ? passwordErrorId : undefined}
+            aria-describedby={passwordFeedback ? passwordErrorId : undefined}
             oninput={(event) => onPasswordValueChange(event.currentTarget.value)}
           />
         </label>
-        {#if passwordError}
-          <small id={passwordErrorId} class="task-question-error" role="alert">{passwordError}</small>
+        {#if passwordFeedback}
+          <small id={passwordErrorId} class="task-question-error" role="alert">{passwordFeedback}</small>
         {/if}
         <p class="task-question-note"><Icon name="info" size={14} />{passwordQuestion.sessionDetail}</p>
         <footer class="task-question-actions">
@@ -348,6 +376,9 @@
           <span><b>{tr("gui.conflict.existing", "Existing")}</b>{conflictQuestion.existing}</span>
           <span><b>{tr("gui.conflict.incoming", "Incoming")}</b>{conflictQuestion.incoming}</span>
         </div>
+        {#if actionFailure}
+          <p class="task-question-error" role="alert">{actionFailure}</p>
+        {/if}
         <label class="conflict-apply-all">
           <input
             type="checkbox"
@@ -372,12 +403,14 @@
           <strong>{taskOverallProgressBadge(task)}</strong>
         </div>
         {#if taskOverallProgressIndeterminate(task)}
-          <progress
-            data-task-progress="overall"
-            data-task-progress-source={task.scanEntries != null ? "scan-entry" : "pending"}
-            max="100"
-            aria-label={taskProgressSummary(task)}
-          ></progress>
+          {#if taskProgressActive(task)}
+            <progress
+              data-task-progress="overall"
+              data-task-progress-source={task.scanEntries != null ? "scan-entry" : "pending"}
+              max="100"
+              aria-label={taskProgressSummary(task)}
+            ></progress>
+          {/if}
         {:else}
           <progress
             data-task-progress="overall"
@@ -412,7 +445,7 @@
           {:else}
             <div
               class="task-current-pending"
-              class:active={isTaskProgressingState(task.state)}
+              class:active={taskProgressActive(task)}
               data-task-progress-source={taskCurrentProgressSource(task)}
               aria-live="polite"
             >
@@ -514,6 +547,9 @@
 
     {#if !passwordQuestion && !conflictQuestion}
     <footer class="task-modal-actions">
+      {#if actionFailure}
+        <p class="task-action-error" role="alert">{actionFailure}</p>
+      {/if}
       {#if task.state === "submitting"}
         <button type="button" disabled>
           <Icon name="hourglass" size={15} />{tr("gui.task.starting", "Starting...")}
@@ -545,7 +581,7 @@
           {@const outputCanOpen = taskOutputCanOpen(task) && !(taskWindowMode && task.spec.kind === "compress")}
           {@const sfxPublishAvailable = macosSfxPublishingAvailable && taskCanPublishMacosSfx(task)}
           {@const primaryActionAvailable = outputCanOpen || sfxPublishAvailable}
-          {@const failureReviewAvailable = taskFailureReviewAvailable(task, taskWindowMode)}
+          {@const reviewAvailable = taskReviewAvailable(task, taskWindowMode)}
           {#if sfxPublishAvailable}
             <button class="primary" type="button" onclick={() => void onPublishMacosSfx(task)}>
               <Icon name="shield-check" size={15} />{tr("gui.task.publish_macos_sfx", "Publish for macOS")}
@@ -556,14 +592,14 @@
               <Icon name={taskOutputIsFolder(task) ? "folder-open" : "external-link"} size={15} />{taskOpenOutputLabel(task)}
             </button>
           {/if}
-          {#if failureReviewAvailable}
-            <button class={primaryActionAvailable ? "primary-lite" : "primary"} type="button" onclick={() => onReviewFailure(task)}>
-              <Icon name={taskFailureReviewScreen(task) === "recovery" ? "shield-alert" : "settings"} size={15} />{taskFailureReviewActionLabel(task)}
+          {#if reviewAvailable}
+            <button class={primaryActionAvailable ? "primary-lite" : "primary"} type="button" disabled={reviewPending} aria-busy={reviewPending} onclick={() => onReviewTask(task)}>
+              <Icon name={taskReviewScreen(task) === "recovery" ? "shield-alert" : "settings"} size={15} />{reviewPending ? tr("gui.task.review.preparing", "Preparing review…") : taskReviewActionLabel(task)}
             </button>
           {/if}
           {#if taskResultAvailableForSurface(task, taskWindowMode)}
             <button
-              class={primaryActionAvailable ? undefined : "primary"}
+              class={primaryActionAvailable || reviewAvailable ? undefined : "primary"}
               type="button"
               aria-expanded={taskHasInlineResults(task) ? task.expanded : undefined}
               aria-controls={taskHasInlineResults(task) ? createDetailsId : undefined}

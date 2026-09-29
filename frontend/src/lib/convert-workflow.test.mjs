@@ -515,10 +515,15 @@ test("convert lazy sessions isolate roots and preserve only non-sensitive drafts
       ipc.cancelCreateDestinationInspection = async (requestId) => {
         cancelledRequests.push(requestId);
       };
+      assert.equal(other.surface("modern").protection.encryptionEnabled, true);
+      other.surface("modern").protection.onPasswordInput("replacement-after-cancel");
+      other.surface("modern").protection.onPasswordConfirmationInput("replacement-after-cancel");
       other.surface("modern").start.onSelect();
       await waitFor(() => activeRequestId !== null);
       const leavingRequestId = activeRequestId;
       other.leave();
+      assert.equal(other.surface("modern").protection.password, "");
+      assert.equal(other.surface("modern").protection.encryptionEnabled, true);
       assert.deepEqual(cancelledRequests, [cancelledRequestId, leavingRequestId]);
       resolveInspection({ conflict: false, guard: null });
       await new Promise((resolve) => setTimeout(resolve, 0));

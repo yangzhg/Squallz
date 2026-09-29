@@ -33,19 +33,6 @@
 
   export type ModernInspectorView =
     | {
-        kind: "batch";
-        ready: number;
-        archives: number;
-        percent: number;
-      }
-    | {
-        kind: "password";
-        secretStore: string;
-      }
-    | {
-        kind: "conflict";
-      }
-    | {
         kind: "recovery";
         tone: string;
         title: string;
@@ -119,58 +106,7 @@
   );
 </script>
 
-{#if view.kind === "batch"}
-  <div class="inspector-block">
-    <span class="block-label">{tr("gui.batch.readiness", "Batch readiness")}</span>
-    <div class="health-score"><strong>{view.ready} / {view.archives}</strong><span>{tr("gui.state.ready", "Ready")}</span></div>
-    <progress
-      class="meter meter-progress"
-      value={view.percent}
-      max="100"
-      aria-label={tr("gui.batch.readiness", "Batch readiness")}
-    ></progress>
-    <p>{view.archives === 0 ? tr("gui.archive.open_first", "Open an archive first") : tr("gui.batch.ready_continue_hint", "Ready archives can continue without global failure.")}</p>
-  </div>
-  <div class="inspector-block">
-    <span class="block-label">{tr("gui.batch.policy", "Batch policy")}</span>
-    <dl>
-      <div><dt>{tr("gui.batch.targets", "Targets")}</dt><dd>{tr("gui.batch.per_archive", "Per archive")}</dd></div>
-      <div><dt>{tr("gui.extract.conflicts", "Conflicts")}</dt><dd>{tr("gui.extract.overwrite.ask", "Ask")}</dd></div>
-      <div><dt>{tr("gui.batch.passwords", "Passwords")}</dt><dd>{tr("gui.batch.per_archive", "Per archive")}</dd></div>
-      <div><dt>RAR</dt><dd>{tr("gui.format.extract_only", "Extract only")}</dd></div>
-    </dl>
-  </div>
-{:else if view.kind === "password"}
-  <div class="inspector-block">
-    <span class="block-label">{tr("gui.password.boundary", "Password boundary")}</span>
-    <strong>{tr("gui.password.no_plaintext_persistence", "No plaintext persistence")}</strong>
-    <p>{tr("gui.password.saved_boundary_body", "Saved passwords stay behind the system secret-store boundary; task status and settings only show status.")}</p>
-  </div>
-  <div class="inspector-block">
-    <span class="block-label">{tr("gui.password.fallback_order", "Fallback order")}</span>
-    <dl>
-      <div><dt>{tr("gui.password.manual", "Manual")}</dt><dd>{tr("gui.priority.first", "First")}</dd></div>
-      <div><dt>{tr("gui.password.session", "Session")}</dt><dd>{tr("gui.priority.second", "Second")}</dd></div>
-      <div><dt>{view.secretStore}</dt><dd>{tr("gui.priority.third", "Third")}</dd></div>
-      <div><dt>{tr("gui.password.logs", "Logs")}</dt><dd>{tr("gui.priority.never", "Never")}</dd></div>
-    </dl>
-  </div>
-{:else if view.kind === "conflict"}
-  <div class="inspector-block">
-    <span class="block-label">{tr("gui.extract.conflict_policy", "Conflict policy")}</span>
-    <div class="health-score"><strong>3</strong><span>{tr("gui.conflict.items", "items")}</span></div>
-    <p>{tr("gui.conflict.policy_body", "Decisions can apply per file or to the remaining conflict set; default is never silent overwrite.")}</p>
-  </div>
-  <div class="inspector-block">
-    <span class="block-label">{tr("gui.conflict.available_actions", "Available actions")}</span>
-    <dl>
-      <div><dt>{tr("gui.conflict.overwrite", "Overwrite")}</dt><dd>{tr("gui.conflict.explicit", "Explicit")}</dd></div>
-      <div><dt>{tr("gui.conflict.skip", "Skip")}</dt><dd>{tr("gui.conflict.safe", "Safe")}</dd></div>
-      <div><dt>{tr("gui.conflict.rename", "Keep Both")}</dt><dd>{tr("gui.conflict.renames", "Renames")}</dd></div>
-      <div><dt>{tr("gui.conflict.compare", "Compare")}</dt><dd>{tr("gui.conflict.metadata", "Metadata")}</dd></div>
-    </dl>
-  </div>
-{:else if view.kind === "recovery"}
+{#if view.kind === "recovery"}
   <div class="inspector-block">
     <span class="block-label">{tr("gui.recovery.repair_math", "Repair math")}</span>
     <div class={`health-score recovery-health-score tone-${view.tone}`}>
@@ -190,7 +126,7 @@
   </div>
 {:else}
   <div
-    class="inspector-block nested-preview-block"
+    class="inspector-block nested-preview-block entry-preview-panel"
     class:preview-sheet-active={previewActive}
     data-preview-policy={view.preview.policyKind}
     data-preview-code={view.preview.policyCode}
@@ -209,47 +145,46 @@
         ><Icon name="x" size={14} /></button>
       {/if}
     </div>
-    {#if view.preview.nested}
-      <strong>{view.preview.nested.title}</strong>
-      <p>{view.preview.nested.subtitle}</p>
-      <div class="nested-preview-list">
-        {#each view.preview.nested.rows as item}
-          <div>
-            {#if item.entry_type === "symlink" || item.entry_type === "hardlink"}
-              {@const label = (item.entry_type === "symlink" ? tr("gui.attr.symlink", "Symbolic link") : tr("gui.attr.hardlink", "Hard link")) + (item.encrypted ? ` · ${tr("gui.attr.encrypted", "Encrypted")}` : "")}
-              <span role="img" aria-label={label} title={label}><Icon name={item.encrypted ? "lock" : "link"} size={14} /></span>
-            {:else}
-              <span>{item.entry_type === "dir" ? "DIR" : "FILE"}</span>
-            {/if}
-            <strong>{item.display}</strong>
-            <small>{formatBytes(item.size)}</small>
-          </div>
-        {/each}
-      </div>
-      <div class="inline-actions">
-        <button onclick={onOpenNestedPreview}><Icon name="folder-open" size={14} />{tr("gui.action.open_nested", "Open")}</button>
-        <button onclick={onExtractNestedPreview}><Icon name="archive" size={14} />{tr("gui.action.extract_nested", "Extract")}</button>
-      </div>
-    {:else}
-      <strong>{view.preview.title}</strong>
-      <p>{view.preview.subtitle}</p>
-      {#if view.preview.busy}
+    <div class="entry-preview-body">
+      {#if view.preview.nested}
+        <strong>{view.preview.nested.title}</strong>
+        <p>{view.preview.nested.subtitle}</p>
+        <div class="nested-preview-list">
+          {#each view.preview.nested.rows as item}
+            <div>
+              {#if item.entry_type === "symlink" || item.entry_type === "hardlink"}
+                {@const label = (item.entry_type === "symlink" ? tr("gui.attr.symlink", "Symbolic link") : tr("gui.attr.hardlink", "Hard link")) + (item.encrypted ? ` · ${tr("gui.attr.encrypted", "Encrypted")}` : "")}
+                <span role="img" aria-label={label} title={label}><Icon name={item.encrypted ? "lock" : "link"} size={14} /></span>
+              {:else}
+                <span>{item.entry_type === "dir" ? "DIR" : "FILE"}</span>
+              {/if}
+              <strong>{item.display}</strong>
+              <small>{formatBytes(item.size)}</small>
+            </div>
+          {/each}
+        </div>
+      {:else if view.preview.busy}
         <div class="preview-loading" role="status" aria-live="polite">
           <span>{tr("gui.preview.loading", "Preparing item")}</span>
           <small>{view.preview.subtitle}</small>
         </div>
-      {:else if view.preview.failed}
-        <div class="inline-actions">
+      {:else}
+        <strong>{view.preview.title}</strong>
+        <p>{view.preview.subtitle}</p>
+      {/if}
+    </div>
+    {#if view.preview.nested || !view.preview.busy}
+      <div class="inline-actions entry-preview-actions">
+        {#if view.preview.nested}
+          <button onclick={onOpenNestedPreview}><Icon name="folder-open" size={14} />{tr("gui.action.open_nested", "Open")}</button>
+          <button onclick={onExtractNestedPreview}><Icon name="archive" size={14} />{tr("gui.action.extract_nested", "Extract")}</button>
+        {:else if view.preview.failed}
           <button onclick={onRetryPreview}><Icon name="rotate-cw" size={14} />{tr("gui.preview.retry", "Retry")}</button>
           <button onclick={onExtractPreviewFailure}><Icon name="archive" size={14} />{tr("gui.preview.extract_instead", "Extract instead")}</button>
-        </div>
-      {:else if view.preview.entry}
-        <div class="inline-actions">
+        {:else if view.preview.entry}
           <button class="preview-system-action" onclick={onOpenPreview}><Icon name="external-link" size={14} />{tr("gui.action.open_preview", "Open")}</button>
           <button onclick={onRevealPreview}><Icon name="folder-open" size={14} />{tr("gui.toast.reveal", "Reveal")}</button>
-        </div>
-      {:else}
-        <div class="inline-actions">
+        {:else}
           <button
             disabled={!view.preview.canPreview}
             aria-busy={view.preview.busy}
@@ -257,8 +192,8 @@
             aria-label={view.preview.disabledReason ? `${view.preview.actionLabel} — ${view.preview.disabledReason}` : view.preview.actionLabel}
             onclick={onPreviewSelection}
           ><Icon name={view.preview.actionIcon} size={14} />{view.preview.actionLabel}</button>
-        </div>
-      {/if}
+        {/if}
+      </div>
     {/if}
   </div>
 
