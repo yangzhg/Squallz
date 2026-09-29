@@ -486,6 +486,8 @@
     keepBothTo: string | null;
   };
   type MoveConflictReview = {
+    archiveId: number;
+    generation: number;
     targetDir: string;
     items: MovePlanItem[];
   };
@@ -9579,59 +9581,6 @@
     return `${targetDir}${base}${isDir ? "/" : ""}`;
   }
 
-  function uniqueArchiveTarget(path: string, reserved: Set<string>, nextCopyNumbers: Map<string, number>): string {
-    const isDir = path.endsWith("/");
-    const clean = isDir ? path.slice(0, -1) : path;
-    const slash = clean.lastIndexOf("/");
-    const dir = slash >= 0 ? `${clean.slice(0, slash + 1)}` : "";
-    const base = slash >= 0 ? clean.slice(slash + 1) : clean;
-    const dot = !isDir ? base.lastIndexOf(".") : -1;
-    const stem = dot > 0 ? base.slice(0, dot) : base;
-    const ext = dot > 0 ? base.slice(dot) : "";
-    for (let copy = nextCopyNumbers.get(path) ?? 1; ; copy += 1) {
-      const suffix = copy === 1 ? " copy" : ` copy ${copy}`;
-      const candidate = `${dir}${stem}${suffix}${ext}${isDir ? "/" : ""}`;
-      if (!reserved.has(candidate)) {
-        reserved.add(candidate);
-        nextCopyNumbers.set(path, copy + 1);
-        return candidate;
-      }
-    }
-  }
-
-  function buildMovePlan(targetDir = normalizeMoveTargetDir()): MovePlanItem[] {
-    const selected = archiveSelectionRoots(archiveEditSelectedPaths());
-    const existing = archivePathSet();
-    const targetCounts = new Map<string, number>();
-    for (const from of selected) {
-      const to = moveTargetForPath(from, targetDir);
-      targetCounts.set(to, (targetCounts.get(to) ?? 0) + 1);
-    }
-    const reserved = new Set(existing);
-    const nextCopyNumbers = new Map<string, number>();
-    for (const from of selected) {
-      reserved.add(moveTargetForPath(from, targetDir));
-    }
-    return selected.map((from) => {
-      const to = moveTargetForPath(from, targetDir);
-      const duplicate = (targetCounts.get(to) ?? 0) > 1;
-      const exists = existing.has(to);
-      const conflict = exists || duplicate;
-      const reason = exists
-        ? tr("gui.move.target_already_exists", "Target already exists")
-        : duplicate
-          ? tr("gui.move.duplicate_target_name", "Multiple selected entries share this target name")
-          : null;
-      return {
-        from,
-        to,
-        conflict,
-        reason,
-        keepBothTo: conflict ? uniqueArchiveTarget(to, reserved, nextCopyNumbers) : null,
-      };
-    });
-  }
-
   function moveConflictCount(): number {
     return moveConflictReview?.items.filter((item) => item.conflict).length ?? 0;
   }
@@ -9642,11 +9591,6 @@
 
   function visibleMoveConflictItems(): MovePlanItem[] {
     return moveConflictReview?.items.filter((item) => item.conflict).slice(0, 5) ?? [];
-  }
-
-  function moveTargetConflictCount(): number {
-    if (!currentArchive || archiveEditSelectedPaths().size === 0) return 0;
-    return buildMovePlan().filter((item) => item.conflict).length;
   }
 
   function archiveConflictCoverageNote(): string {
@@ -9663,15 +9607,10 @@
     if (selected === 0) {
       return tr("gui.move.select_entries_to_move_into", "Select entries to move into {target}").replace("{target}", targetLabel);
     }
-    const conflicts = moveTargetConflictCount();
-    if (conflicts > 0) {
-      return tr("gui.move.target_conflicts", "{count} target conflicts in {target}")
-        .replace("{count}", conflicts.toLocaleString())
-        .replace("{target}", targetLabel);
-    }
     return tr("gui.move.selected_to_target", "{count} selected -> {target}")
       .replace("{count}", selected.toLocaleString())
-      .replace("{target}", targetLabel) + archiveConflictCoverageNote();
+      .replace("{target}", targetLabel)
+      + tr("gui.move.check_before_submit", " · all target names will be checked before moving");
   }
 
   function moveTargetProblem(targetDir: string): string {
@@ -11374,6 +11313,7 @@
   function archiveEditorFields(kind: ArchiveEditKind) {
     const blocked = archiveEditorBlockedReason();
     const feedback = {
+      cancelWhileSubmitting: archiveEditChecking,
       error: archiveEditError || (archiveRefreshStatus() === "idle" ? blocked : null),
       disabled: Boolean(blocked),
       recovery: archiveEditContext && currentArchive?.source === archiveEditContext.source
@@ -11381,7 +11321,8 @@
       retryLabel: tr("gui.error.retry", "Retry"),
       onRetry: retryArchiveContents,
       submittingLabel: archiveEditChecking
-        ? tr("gui.edit.checking_targets", "Checking the original items…")
+        ? kind === "move" ? tr("gui.move.checking_targets", "Checking move targets…")
+          : tr("gui.edit.checking_targets", "Checking the original items…")
         : tr("gui.task_center.submitting", "Adding to the queue…"),
     };
     if (kind === "rename") return {
@@ -11546,6 +11487,7 @@
   }
 
   async function submitMoveSelectedJob() {
+    if (archiveEditChecking) return;
     const session = archiveEditSession;
     const id = currentArchive?.id;
     if (!await validateArchiveEditContext() || !archiveEditCheckIsCurrent(session, id)) return;
@@ -11571,19 +11513,57 @@
       showNotice(problem);
       return;
     }
-    const plan = buildMovePlan(targetDir);
-    const conflicts = plan.filter((item) => item.conflict);
-    if (conflicts.length > 0) {
-      moveConflictReview = { targetDir, items: plan };
-      closeArchiveEditor();
-      showNotice(tr("gui.move.review_conflicts", "Review {count} move target conflicts").replace("{count}", conflicts.length.toLocaleString()));
-      return;
+    archiveEditChecking = true;
+    archiveEditError = null;
+    try {
+      const checked = await ipc.planArchiveMove(currentArchive.id, archiveSelectionRoots(archiveEditSelectedPaths()), targetDir);
+      if (!archiveEditCheckIsCurrent(session, id)) return;
+      if (normalizeMoveTargetDir() !== targetDir) return;
+      if (checked.missing_sources.length) {
+        archiveEditError = tr("gui.edit.items_missing", "These original items no longer exist: {paths}. Your text is kept. Cancel and select the intended items again.")
+          .replace("{paths}", checked.missing_sources.join(", "));
+        return;
+      }
+      if (checked.blocked_parent) {
+        archiveEditError = tr("gui.move.parent_is_file", "{path} is a file, so it cannot contain moved items. Choose another destination folder.")
+          .replace("{path}", checked.blocked_parent);
+        return;
+      }
+      const plan: MovePlanItem[] = checked.items.map((item) => ({
+        from: item.from, to: item.to, conflict: item.conflict !== null,
+        reason: item.conflict === "existing_target"
+          ? tr("gui.move.target_already_exists", "Target already exists")
+          : item.conflict === "duplicate_target"
+            ? tr("gui.move.duplicate_target_name", "Multiple selected entries share this target name") : null,
+        keepBothTo: item.keep_both_to,
+      }));
+      const conflicts = plan.filter((item) => item.conflict);
+      if (conflicts.length > 0) {
+        moveConflictReview = { archiveId: currentArchive.id, generation: archiveOpenGeneration, targetDir, items: plan };
+        closeArchiveEditor();
+        showNotice(tr("gui.move.review_conflicts", "Review {count} move target conflicts").replace("{count}", conflicts.length.toLocaleString()));
+        return;
+      }
+      archiveEditChecking = false;
+      await submitMovePlan(plan.map(({ from, to }) => ({ from, to })), targetDir);
+    } catch (error) {
+      if (!archiveEditCheckIsCurrent(session, id)) return;
+      if (normalizeMoveTargetDir() !== targetDir) return;
+      archiveEditError = tr("gui.move.check_failed", "Could not check move targets. Your destination is kept. Try again.")
+        + (isErrorDto(error) ? ` ${tError(error)}` : "");
+    } finally {
+      if (archiveEditSession === session) archiveEditChecking = false;
     }
-    await submitMovePlan(plan.map(({ from, to }) => ({ from, to })), targetDir);
   }
 
   async function submitMovePlan(rename: Array<{ from: string; to: string }>, targetDir: string) {
     if (blockSelectionScopedAction()) return;
+    if (moveConflictReview && (currentArchive?.id !== moveConflictReview.archiveId
+      || archiveOpenGeneration !== moveConflictReview.generation || archiveOpenStatus !== "idle")) {
+      moveConflictReview = null;
+      showNotice(tr("gui.move.review_changed", "The archive changed. Select the items and check the move targets again."));
+      return;
+    }
     if (!currentArchive) {
       showNotice(tr("gui.precondition.open_before_move", "Open an archive before moving entries"));
       return;

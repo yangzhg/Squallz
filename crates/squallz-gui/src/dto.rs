@@ -41,6 +41,43 @@ pub struct ErrorDto {
     pub detail: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct ArchiveMovePlanDto {
+    pub items: Vec<ArchiveMoveItemDto>,
+    pub missing_sources: Vec<String>,
+    pub blocked_parent: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ArchiveMoveItemDto {
+    pub from: String,
+    pub to: String,
+    pub conflict: Option<&'static str>,
+    pub keep_both_to: Option<String>,
+}
+
+impl From<squallz_core::ArchiveMovePlan> for ArchiveMovePlanDto {
+    fn from(plan: squallz_core::ArchiveMovePlan) -> Self {
+        Self {
+            missing_sources: plan.missing_sources,
+            blocked_parent: plan.blocked_parent,
+            items: plan
+                .items
+                .into_iter()
+                .map(|item| ArchiveMoveItemDto {
+                    from: item.from,
+                    to: item.to,
+                    conflict: item.conflict.map(|conflict| match conflict {
+                        squallz_core::ArchiveMoveConflict::ExistingTarget => "existing_target",
+                        squallz_core::ArchiveMoveConflict::DuplicateTarget => "duplicate_target",
+                    }),
+                    keep_both_to: item.keep_both_to,
+                })
+                .collect(),
+        }
+    }
+}
+
 impl From<&FormatError> for ErrorDto {
     fn from(e: &FormatError) -> Self {
         let msg = error_message(e);

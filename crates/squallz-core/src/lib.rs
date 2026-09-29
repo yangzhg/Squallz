@@ -81,6 +81,9 @@ pub use sfx::{
     SFX_CLI_STUB_MARKER, SFX_GUI_STUB_MARKER,
 };
 pub use stored_os_string::StoredOsString;
+pub use update::move_plan::{
+    plan_archive_moves, ArchiveMoveConflict, ArchiveMoveItem, ArchiveMovePlan,
+};
 pub use volumes::{collect_volume_set, collect_volume_set_with_control, VolumeSet};
 
 use std::fs::{self, File};

@@ -306,6 +306,8 @@
         <p>
           {tr("gui.move.ready_without_renaming", "{count} entries are ready to move without changing names.")
             .replace("{count}", String(view.conflict.readyCount))}
+          {tr("gui.move.shown_conflicts", "Showing {shown} of {count} conflicts; your choice applies to the whole selection.")
+            .replace("{shown}", String(view.conflict.items.length)).replace("{count}", String(view.conflict.count))}
         </p>
       </div>
       <!-- svelte-ignore a11y_no_noninteractive_tabindex (focusable scroll region) -->

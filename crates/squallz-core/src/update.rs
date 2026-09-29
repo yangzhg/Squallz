@@ -12,6 +12,7 @@ use crate::inputs::{collect_prepared_input_as, PreparedInputItem};
 use crate::CreateDestinationGuard;
 use crate::PathFilter;
 
+pub(crate) mod move_plan;
 mod transaction;
 
 pub(crate) struct PreparedAdditions {

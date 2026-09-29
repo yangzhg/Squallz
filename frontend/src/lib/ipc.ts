@@ -47,6 +47,17 @@ export interface Page {
   items: EntryDto[];
 }
 
+export interface ArchiveMovePlanDto {
+  items: Array<{
+    from: string;
+    to: string;
+    conflict: "existing_target" | "duplicate_target" | null;
+    keep_both_to: string | null;
+  }>;
+  missing_sources: string[];
+  blocked_parent: string | null;
+}
+
 export interface FormatDto {
   id: string;
   extensions: string[];
@@ -719,6 +730,8 @@ export const ipc = {
     invoke<string>("resolve_archive_directory", { id, dirPrefix }),
   missingArchivePaths: (id: number, paths: string[]) =>
     invoke<string[]>("missing_archive_paths", { id, paths }),
+  planArchiveMove: (id: number, paths: string[], targetDir: string) =>
+    invoke<ArchiveMovePlanDto>("plan_archive_move", { id, paths, targetDir }),
   listEntries: (
     id: number,
     page: number,

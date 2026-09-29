@@ -7,7 +7,7 @@
   let {
     title, label, value, placeholder = "", status, hint = "", cancelLabel, submittingLabel, error = null,
     rootClass, rootVariables, onChange, onSubmit, onClose,
-    disabled = false, recovery = null, retryLabel, onRetry,
+    disabled = false, recovery = null, retryLabel, onRetry, cancelWhileSubmitting = false,
   }: {
     title: string;
     label: string;
@@ -19,6 +19,7 @@
     submittingLabel: string;
     error?: string | null;
     disabled?: boolean;
+    cancelWhileSubmitting?: boolean;
     recovery?: ArchiveBrowseRecoveryState;
     retryLabel: string;
     onRetry: () => Promise<void>;
@@ -65,7 +66,7 @@
     if (event.key === "Escape") {
       event.preventDefault();
       event.stopPropagation();
-      if (!submitting) onClose();
+      if (!submitting || cancelWhileSubmitting) onClose();
     } else {
       trapModalFocus(event, panel);
     }
@@ -109,7 +110,7 @@
       {/if}
       <p id={`${id}-hint`} class="archive-editor-hint">{hint}</p>
       <footer class="archive-editor-actions">
-        <button type="button" disabled={submitting} onclick={onClose}>{cancelLabel}</button>
+        <button type="button" disabled={submitting && !cancelWhileSubmitting} onclick={onClose}>{cancelLabel}</button>
         <button class="primary" type="submit" disabled={submitting || disabled}>{submitting ? submittingLabel : title}</button>
       </footer>
     </form>

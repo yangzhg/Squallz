@@ -20,7 +20,7 @@ async function loadEditing(overrides = {}) {
   const source = ts.createSourceFile("App.ts", script, ts.ScriptTarget.Latest, true);
   const names = new Set([
     "normalizeNewFolderPath", "commitNewFolderName", "submitNewFolderJob", "archivePathSet",
-    "normalizeMoveTargetDir", "submitMovePlan", "buildMovePlan", "moveTargetForPath", "uniqueArchiveTarget",
+    "normalizeMoveTargetDir", "submitMovePlan", "moveTargetForPath",
     "archiveEditPathProblem", "moveTargetProblem", "submitMoveSelectedJob", "submitMoveKeepBoth",
     "normalizeRenameTargetName", "selectedRenameSource", "renameTargetIssue", "archiveEntryExtension",
     "submitRenameSelectedJob", "selectedDeletePaths", "submitDeleteSelectedJob", "submitCurrentArchiveJob",
@@ -61,11 +61,10 @@ async function loadEditing(overrides = {}) {
     archiveEditKind: null,
     archiveEditContext: null,
     archiveEditChecking: false,
-    ipc: { missingArchivePaths: async () => [] },
     archiveEditSession: 0,
     archiveEditError: null,
     archiveEditReturnFocus: null,
-    closeArchiveEditor: () => { closed.push(true); context.archiveEditKind = null; context.archiveEditContext = null; context.archiveEditSession += 1; },
+    closeArchiveEditor: () => { closed.push(true); context.archiveEditKind = null; context.archiveEditContext = null; context.archiveEditChecking = false; context.archiveEditSession += 1; },
     renameSelectedDisabledReason: () => "",
     moveSelectedDisabledReason: () => "",
     openArchiveFirstLabel: () => "Open an archive first",
@@ -88,7 +87,15 @@ async function loadEditing(overrides = {}) {
     $effect: (callback) => callback(), untrack: (callback) => callback(),
     ...overrides,
   };
-  const handlers = vm.runInNewContext(`${outputText}\n({ normalizeNewFolderPath, commitNewFolderName, submitNewFolderJob, normalizeMoveTargetDir, submitMoveSelectedJob, submitMoveKeepBoth, submitMovePlan, buildMovePlan, normalizeRenameTargetName, submitRenameSelectedJob, submitDeleteSelectedJob, openArchiveEditor, submitAddToArchiveJob, JobSubmitBlockedError })`, context);
+  context.ipc = {
+    missingArchivePaths: async () => [],
+    planArchiveMove: async (_id, paths, target) => ({ missing_sources: [], blocked_parent: null,
+      items: paths.map((from) => ({ from, to: target + from.replace(/\/$/, "").split("/").at(-1) + (from.endsWith("/") ? "/" : ""),
+        conflict: null, keep_both_to: null })),
+    }),
+    ...overrides.ipc,
+  };
+  const handlers = vm.runInNewContext(`${outputText}\n({ normalizeNewFolderPath, commitNewFolderName, submitNewFolderJob, normalizeMoveTargetDir, submitMoveSelectedJob, submitMoveKeepBoth, submitMovePlan, normalizeRenameTargetName, submitRenameSelectedJob, submitDeleteSelectedJob, openArchiveEditor, submitAddToArchiveJob, JobSubmitBlockedError })`, context);
   const reset = source.statements.find((node) => ts.isExpressionStatement(node)
     && node.getText(source).startsWith("$effect(") && node.getText(source).includes('archiveDirs.join("\\u0000")')
     && node.getText(source).includes("renameTargetName"));
@@ -326,6 +333,32 @@ test("moving entries does not try to recreate the destination directory", async 
   assert.equal(editing.submitted[0].rename, rename);
 });
 
+test("move confirmation uses the complete archive plan even when target rows are unloaded", async () => {
+  const checks = [];
+  const editing = await loadEditing({
+    loadedRows: () => [{ path: "docs/a.txt", entry_type: "file" }],
+    ipc: {
+      missingArchivePaths: async () => [],
+      planArchiveMove: async (id, paths, targetDir) => {
+        checks.push([id, [...paths], targetDir]);
+        return { missing_sources: [], blocked_parent: null, items: [{
+          from: "docs/a.txt", to: "destination/a.txt", conflict: "existing_target",
+          keep_both_to: "destination/a copy 3.txt",
+        }] };
+      },
+    },
+  });
+  editing.openArchiveEditor("move");
+  await editing.submitMoveSelectedJob();
+  assert.equal(editing.submitted.length, 0, "unloaded conflicts must be reviewed before queuing");
+  assert.deepEqual(checks, [[17, ["docs/a.txt"], "destination/"]]);
+  assert.equal(editing.context.moveConflictReview.items[0].keepBothTo, "destination/a copy 3.txt");
+  await editing.submitMoveKeepBoth();
+  assert.deepEqual(JSON.parse(JSON.stringify(editing.submitted[0].rename)), [{
+    from: "docs/a.txt", to: "destination/a copy 3.txt",
+  }]);
+});
+
 test("an archive-root move keeps the root destination", async () => {
   const editing = await loadEditing({ moveTargetDir: "/" });
   assert.equal(editing.normalizeMoveTargetDir(), "");
@@ -335,7 +368,8 @@ test("moving a selected directory does not separately flatten its selected child
   const editing = await loadEditing({
     selectedPaths: () => new Set(["docs/", "docs/a.txt", "docs/sub/", "docs/sub/b.txt", "other.txt"]),
   });
-  assert.deepEqual(Array.from(editing.buildMovePlan(), ({ from, to }) => [from, to]), [
+  await editing.submitMoveSelectedJob();
+  assert.deepEqual(Array.from(editing.submitted[0].rename, ({ from, to }) => [from, to]), [
     ["docs/", "destination/docs/"],
     ["other.txt", "destination/other.txt"],
   ]);
@@ -361,30 +395,67 @@ test("unsafe folder and move inputs are explained without queuing altered paths"
   }
 });
 
-test("large same-name moves reserve a distinct keep-both target for every source", async () => {
-  const selected = new Set(Array.from({ length: 1_100 }, (_, index) => `day-${index}/report.txt`));
-  selected.add("other/report copy 1000.txt");
-  const existing = ["destination/report copy.txt", "destination/report copy 2.txt"];
-  const editing = await loadEditing({
-    selectedPaths: () => selected,
-    loadedRows: () => existing.map((path) => ({ path, entry_type: "file" })),
-    Date: { now: () => 123456789 },
-  });
-  const plan = editing.buildMovePlan();
-  const destinations = plan.map((item) => item.keepBothTo ?? item.to);
-  assert.equal(plan.length, selected.size);
-  assert.equal(plan.filter((item) => item.conflict).length, 1_100);
-  assert.equal(new Set(destinations).size, selected.size);
-  assert.ok(destinations.every((path) => !existing.includes(path)));
-  assert.equal(destinations[0], "destination/report copy 3.txt");
-  assert.equal(destinations.at(-1), "destination/report copy 1000.txt", "an original target keeps its name");
-  assert.deepEqual(JSON.parse(JSON.stringify(editing.buildMovePlan())), JSON.parse(JSON.stringify(plan)), "reviewing again gives stable names");
-  await editing.submitMoveSelectedJob();
-  assert.equal(editing.submitted.length, 0, "conflicts require a decision before submission");
-  await editing.submitMoveKeepBoth();
-  assert.equal(editing.submitted.length, 1);
-  assert.deepEqual(Array.from(editing.submitted[0].rename, (item) => item.to), Array.from(destinations));
-  assert.equal(editing.context.moveConflictReview, null);
+test("move check failures, missing sources and blocked parents keep the destination for retry", async () => {
+  for (const result of ["failure", "missing", "parent"]) {
+    const editing = await loadEditing({ ipc: { planArchiveMove: async () => {
+      if (result === "failure") throw new Error("unavailable");
+      return { items: [], missing_sources: result === "missing" ? ["docs/a.txt"] : [],
+        blocked_parent: result === "parent" ? "destination" : null };
+    } } });
+    editing.openArchiveEditor("move");
+    await editing.submitMoveSelectedJob();
+    assert.equal(editing.submitted.length, 0);
+    assert.equal(editing.context.archiveEditKind, "move");
+    assert.equal(editing.context.moveTargetDir, "destination/");
+    assert.equal(editing.context.archiveEditChecking, false);
+    assert.match(editing.context.archiveEditError, result === "failure" ? /Try again/ : result === "missing" ? /no longer exist/ : /Choose another destination/);
+    editing.context.ipc.planArchiveMove = async () => ({ missing_sources: [], blocked_parent: null,
+      items: [{ from: "docs/a.txt", to: "destination/a.txt", conflict: null, keep_both_to: null }] });
+    await editing.submitMoveSelectedJob();
+    assert.equal(editing.submitted.length, 1);
+  }
+});
+
+test("late move checks cannot queue or replace a changed archive or newer editor", async () => {
+  for (const change of ["close", "new-editor", "refresh", "open", "destination"]) {
+    for (const fail of [false, true]) {
+      let finish, reject;
+      const editing = await loadEditing({ ipc: { planArchiveMove: () => new Promise((resolve, fail) => { finish = resolve; reject = fail; }) } });
+      editing.openArchiveEditor("move");
+      const pending = editing.submitMoveSelectedJob();
+      await new Promise(setImmediate);
+      assert.equal(editing.context.archiveEditChecking, true);
+      await editing.submitMoveSelectedJob();
+      if (change === "close") editing.context.closeArchiveEditor();
+      if (change === "new-editor") { editing.openArchiveEditor("rename"); editing.context.archiveEditError = "new error"; }
+      if (change === "refresh") editing.context.currentArchive = { ...editing.context.currentArchive, id: 18 };
+      if (change === "open") editing.context.archiveOpenGeneration++;
+      if (change === "destination") editing.context.moveTargetDir = "different/";
+      if (fail) reject(new Error("unavailable"));
+      else finish({ missing_sources: [], blocked_parent: null, items: [{ from: "docs/a.txt", to: "destination/a.txt", conflict: null, keep_both_to: null }] });
+      await pending;
+      assert.equal(editing.submitted.length, 0, `${change}, failure=${fail}`);
+      assert.equal(editing.context.moveConflictReview, null);
+      assert.equal(editing.context.archiveEditChecking, false);
+      if (change === "new-editor") assert.equal(editing.context.archiveEditError, "new error");
+      if (change === "close" || change === "destination") assert.equal(editing.context.archiveEditError, null);
+    }
+  }
+});
+
+test("a confirmed move plan cannot follow an archive refresh or reopen", async () => {
+  for (const change of ["id", "generation", "opening"]) {
+    const editing = await loadEditing();
+    editing.context.moveConflictReview = { archiveId: 17, generation: 0, targetDir: "destination/",
+      items: [{ from: "docs/a.txt", to: "destination/a.txt", conflict: true, keepBothTo: "destination/a copy.txt" }] };
+    if (change === "id") editing.context.currentArchive.id = 18;
+    if (change === "generation") editing.context.archiveOpenGeneration++;
+    if (change === "opening") editing.context.archiveOpenStatus = "opening";
+    await editing.submitMoveKeepBoth();
+    assert.equal(editing.submitted.length, 0);
+    assert.equal(editing.context.moveConflictReview, null);
+    assert.match(editing.notices[0], /archive changed/);
+  }
 });
 
 test("moves into the selected subtree or the same folder do not become keep-both operations", async () => {

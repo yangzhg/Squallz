@@ -667,6 +667,22 @@ impl AppState {
             .collect())
     }
 
+    pub(crate) fn plan_archive_move_for_window(
+        &self,
+        owner_window: &str,
+        id: u64,
+        paths: &[String],
+        target_dir: &str,
+    ) -> Result<squallz_core::ArchiveMovePlan, FormatError> {
+        let archive = self.archive_for_owner(id, Some(owner_window))?;
+        squallz_core::plan_archive_moves(
+            paths,
+            target_dir,
+            |path| archive_path_exists(&archive, path),
+            &ControlToken::new(),
+        )
+    }
+
     fn list_entries_for_owner(
         &self,
         owner_window: Option<&str>,
@@ -1461,6 +1477,81 @@ mod tests {
         ] {
             assert!(!archive_path_exists(&archive, path), "{path}");
         }
+    }
+
+    #[test]
+    fn move_preflight_checks_unloaded_names_and_preserves_zip_contents() {
+        let dir = temp_dir("move-full-index");
+        let mut names = vec![
+            "from/report.txt".to_owned(),
+            "destination/report.txt".to_owned(),
+            "destination/report copy.txt".to_owned(),
+        ];
+        names.extend((2..=1200).map(|index| format!("destination/report copy {index}.txt")));
+        let zip = make_zip(&dir, &names.iter().map(String::as_str).collect::<Vec<_>>());
+        let state = AppState::new();
+        let archive = state
+            .open_archive_for_window("move-window", &zip, None, None)
+            .unwrap();
+        let page = state
+            .list_entries_for_window("move-window", archive.id, 0, 10, "src/from/", None)
+            .unwrap();
+        assert_eq!(page.items.len(), 1);
+        let paths = vec![page.items[0].path.clone()];
+        assert!(state
+            .plan_archive_move_for_window("other-window", archive.id, &paths, "src/destination/")
+            .is_err());
+        let plan = state
+            .plan_archive_move_for_window("move-window", archive.id, &paths, "src/destination/")
+            .unwrap();
+        assert_eq!(plan.items.len(), 1);
+        assert_eq!(
+            plan.items[0].conflict,
+            Some(squallz_core::ArchiveMoveConflict::ExistingTarget)
+        );
+        let target = plan.items[0].keep_both_to.as_deref().unwrap();
+        assert_eq!(target, "src/destination/report copy 1201.txt");
+        let engine = Engine::new(squallz_formats::registry());
+        engine
+            .update(
+                &zip,
+                &[squallz_core::api::UpdateOp::Rename {
+                    from: squallz_core::api::EntrySelection::Display(paths[0].clone()),
+                    to: EntryPath::from_utf8(target),
+                }],
+                &squallz_core::api::UpdateOptions::default(),
+                &NoProgress,
+                &ControlToken::new(),
+            )
+            .unwrap();
+        let extracted = dir.join("extracted");
+        engine
+            .extract(
+                &zip,
+                &extracted,
+                None,
+                &OpenOptions::default(),
+                &squallz_core::api::ExtractOptions::default(),
+                &NoProgress,
+                &ControlToken::new(),
+            )
+            .unwrap();
+        assert_eq!(
+            std::fs::read(extracted.join(target)).unwrap(),
+            b"from/report.txt"
+        );
+        for name in &names[1..] {
+            assert_eq!(
+                std::fs::read(extracted.join("src").join(name)).unwrap(),
+                name.as_bytes()
+            );
+        }
+        assert!(!extracted.join(&paths[0]).exists());
+        state.close_archive_for_window("move-window", archive.id);
+        assert!(state
+            .plan_archive_move_for_window("move-window", archive.id, &paths, "src/destination/")
+            .is_err());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

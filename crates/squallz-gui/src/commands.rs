@@ -34,7 +34,7 @@ use crate::create_preflight::{
     DestinationInspectionProgress, PreflightRequestKind, PreflightRequestLease, PreflightRequests,
 };
 use crate::dto::{
-    normalize_performance_stream_buffer_limit, ArchiveInfo, BatchExtractItem,
+    normalize_performance_stream_buffer_limit, ArchiveInfo, ArchiveMovePlanDto, BatchExtractItem,
     CreateDestinationInspectionDto, CreateEstimateDto, CreatePlanDto, DiskSpaceDto,
     EntryPreviewDto, ErrorDto, ExternalTaskActionDto, ExtractPlanPreflightDto, FormatDto,
     IntegrationApplyResultDto, IntegrationRemoveResultDto, IntegrationStatusDto,
@@ -525,6 +525,26 @@ pub async fn missing_archive_paths(
     })
     .await
     .map_err(|error| ErrorDto::other(format!("archive path check failed: {error}")))?
+    .map_err(ErrorDto::from)
+}
+
+/// Plans moves using the complete index, without transferring directory pages.
+#[tauri::command]
+pub async fn plan_archive_move(
+    window: WebviewWindow,
+    state: State<'_, Arc<AppState>>,
+    id: u64,
+    paths: Vec<String>,
+    target_dir: String,
+) -> Result<ArchiveMovePlanDto, ErrorDto> {
+    let state = Arc::clone(state.inner());
+    let owner_window = window.label().to_owned();
+    tauri::async_runtime::spawn_blocking(move || {
+        state.plan_archive_move_for_window(&owner_window, id, &paths, &target_dir)
+    })
+    .await
+    .map_err(|error| ErrorDto::other(format!("archive move check failed: {error}")))?
+    .map(ArchiveMovePlanDto::from)
     .map_err(ErrorDto::from)
 }
 
