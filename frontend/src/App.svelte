@@ -2224,6 +2224,9 @@
     if (preventCreateSubmissionNavigation(next)) return;
     if (preventConvertSubmissionNavigation(next)) return;
     if (next !== screen) dismissArchivePicker();
+    if (screen !== "password" && next !== screen && (next !== "password" || !previewPasswordPrompt)) {
+      clearEntryPreviewState();
+    }
     if (screen === "password" && next !== "password") {
       dismissArchivePasswordRequest();
       if (previewPasswordPrompt) clearEntryPreviewState();
