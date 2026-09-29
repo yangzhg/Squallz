@@ -25,13 +25,13 @@ test("both password layouts retain labelled input, error context, cancellation a
   const server = await createTestServer();
   try {
     const { render } = await server.ssrLoadModule("svelte/server");
-    const { default: Workspace } = await server.ssrLoadModule("/src/components/TaskInteractionWorkspace.svelte");
+    const { default: Workspace } = await server.ssrLoadModule("/src/components/PasswordWorkspace.svelte");
     const { loadLocale, tFallback, t } = await server.ssrLoadModule("/src/lib/i18n.svelte.ts");
     for (const language of ["en-US", "zh-CN"]) {
       await loadLocale(language);
       for (const variant of ["modern", "classic"]) {
         const surface = {
-          kind: "password", variant, tr: tFallback, active: true,
+          variant, tr: tFallback, active: true,
           name: "Quarterly archives & supporting documents.7z", detail: "Awaiting the inner archive",
           sessionDetail: "Used for this archive in this session", failureDetail: "Retry or cancel",
           secretStoreLabel: "Keychain", value: "", busy: false, rejected: false, error: t("gui.password.empty_error"),

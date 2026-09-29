@@ -29,7 +29,7 @@ function harness() {
     "openArchivePath", "extractJobPaths", "extractJobDestination", "extractSmartBase",
     "extractSelectionLabel", "extractStartBlockedReason", "submitExtractJob",
     "syncExtractDraftArchive", "cancelPasswordRequest", "submitPasswordRequest",
-    "setScreen", "setScreenRespectingJobQuestion", "effectiveExtractDest", "sameFolderExtractDest",
+    "setScreen", "effectiveExtractDest", "sameFolderExtractDest",
     "extractEncodingForJob", "archiveEncodingForJob", "extractEncodingLabel"];
   const declarations = source.statements.filter((node) => ts.isFunctionDeclaration(node) && names.includes(node.name?.text));
   const calls = [];

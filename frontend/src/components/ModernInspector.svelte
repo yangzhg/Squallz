@@ -33,9 +33,6 @@
 
   export type ModernInspectorView =
     | {
-        kind: "conflict";
-      }
-    | {
         kind: "recovery";
         tone: string;
         title: string;
@@ -109,22 +106,7 @@
   );
 </script>
 
-{#if view.kind === "conflict"}
-  <div class="inspector-block">
-    <span class="block-label">{tr("gui.extract.conflict_policy", "Conflict policy")}</span>
-    <div class="health-score"><strong>3</strong><span>{tr("gui.conflict.items", "items")}</span></div>
-    <p>{tr("gui.conflict.policy_body", "Decisions can apply per file or to the remaining conflict set; default is never silent overwrite.")}</p>
-  </div>
-  <div class="inspector-block">
-    <span class="block-label">{tr("gui.conflict.available_actions", "Available actions")}</span>
-    <dl>
-      <div><dt>{tr("gui.conflict.overwrite", "Overwrite")}</dt><dd>{tr("gui.conflict.explicit", "Explicit")}</dd></div>
-      <div><dt>{tr("gui.conflict.skip", "Skip")}</dt><dd>{tr("gui.conflict.safe", "Safe")}</dd></div>
-      <div><dt>{tr("gui.conflict.rename", "Keep Both")}</dt><dd>{tr("gui.conflict.renames", "Renames")}</dd></div>
-      <div><dt>{tr("gui.conflict.compare", "Compare")}</dt><dd>{tr("gui.conflict.metadata", "Metadata")}</dd></div>
-    </dl>
-  </div>
-{:else if view.kind === "recovery"}
+{#if view.kind === "recovery"}
   <div class="inspector-block">
     <span class="block-label">{tr("gui.recovery.repair_math", "Repair math")}</span>
     <div class={`health-score recovery-health-score tone-${view.tone}`}>

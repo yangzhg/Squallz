@@ -454,7 +454,7 @@ test("failed answers survive a failed refresh and never revive a cleared or newe
   });
 });
 
-test("question actions report success and leave the prompt only after acknowledgement", async () => {
+test("question actions preserve the workspace and report success only after acknowledgement", async () => {
   const app = readFileSync(new URL("../App.svelte", import.meta.url), "utf8");
   const source = ts.createSourceFile("App.ts", app.match(/<script lang="ts">([\s\S]*?)<\/script>/)[1], ts.ScriptTarget.Latest, true);
   const names = ["submitPasswordRequest", "cancelPasswordRequest", "answerConflictDecision"];
@@ -470,7 +470,7 @@ test("question actions report success and leave the prompt only after acknowledg
         jobPasswordPrompt: action === "answerConflictDecision" ? null : { id: 1, version: 10 },
         jobConflictPrompt: action === "answerConflictDecision" ? { id: 1, version: 10 } : null,
         archivePasswordPrompt: null, jobPasswordValue: "temporary-secret", passwordSubmissionAttempted: false,
-        conflictApplyAll: true, jobQuestionReturnScreen: () => "extract", taskPasswordReady: (value) => value.length > 0,
+        conflictApplyAll: true, taskPasswordReady: (value) => value.length > 0,
         normalizeTaskConflictAnswer: (decision, applyAll) => ({ decision, applyAll }),
         setScreen: (screen) => calls.push(["screen", screen]),
         returnTaskQuestionToCenter: (id) => calls.push(["center", id]),
@@ -492,7 +492,47 @@ test("question actions report success and leave the prompt only after acknowledg
       await request;
       if (outcome === "failure") assert.deepEqual(calls, []);
       else if (outcome === "next-question") assert.deepEqual(calls.map(([kind]) => kind), ["notice"]);
-      else assert.deepEqual(calls.map(([kind]) => kind), ["notice", "screen", "center"]);
+      else assert.deepEqual(calls.map(([kind]) => kind), ["notice", "center"]);
+    }
+  }
+});
+
+test("job questions open the shared task surface without navigating or discarding a draft", () => {
+  const app = readFileSync(new URL("../App.svelte", import.meta.url), "utf8");
+  const source = ts.createSourceFile("App.ts", app.match(/<script lang="ts">([\s\S]*?)<\/script>/)[1], ts.ScriptTarget.Latest, true);
+  const effects = source.statements.filter((node) =>
+    ts.isExpressionStatement(node) && ts.isCallExpression(node.expression) &&
+    node.expression.expression.getText(source) === "$effect"
+  );
+  const routing = effects.find((node) => node.getText(source).includes("setScreen(\"password\")"));
+  const dialog = effects.find((node) => node.getText(source).includes("const questionTaskId"));
+  assert.ok(routing && dialog);
+  const { outputText } = ts.transpileModule([routing, dialog].map((node) => node.getText(source)).join("\n"), {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
+  });
+  for (const screen of ["browse", "create", "recovery"]) {
+    for (const kind of ["password", "conflict"]) {
+      const draft = { output: "unfinished-archive.zip" };
+      const context = {
+        screen, pendingCreateSubmission: draft,
+        jobPasswordPrompt: kind === "password" ? { id: 8 } : null,
+        jobConflictPrompt: kind === "conflict" ? { id: 9 } : null,
+        archivePasswordPrompt: null, previewPasswordPrompt: null,
+        taskWindowMode: false, taskDialogTaskId: null, taskDialogDismissedId: 8,
+        $effect: (effect) => effect(),
+        setScreen: (next) => { context.screen = next; context.pendingCreateSubmission = null; },
+      };
+      vm.runInNewContext(outputText, context);
+      assert.equal(context.screen, screen);
+      assert.equal(context.pendingCreateSubmission, draft);
+      assert.equal(context.taskDialogTaskId, kind === "password" ? 8 : 9);
+      assert.equal(context.taskDialogDismissedId, null);
+      for (const prompt of ["archivePasswordPrompt", "previewPasswordPrompt"]) {
+        context[prompt] = { name: "opening.zip" };
+        vm.runInNewContext(outputText, context);
+        assert.equal(context.screen, "password", "archive opening retains its password workspace beneath the task dialog");
+        context[prompt] = null;
+      }
     }
   }
 });

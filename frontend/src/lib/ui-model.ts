@@ -18,7 +18,6 @@ export type Screen =
   | "checksum"
   | "duplicates"
   | "password"
-  | "conflict"
   | "recovery"
   | "archiveInfo"
   | "integration"
@@ -84,7 +83,6 @@ export const screenIds: Screen[] = [
   "checksum",
   "duplicates",
   "password",
-  "conflict",
   "recovery",
   "archiveInfo",
   "integration",

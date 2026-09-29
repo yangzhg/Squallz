@@ -368,6 +368,13 @@ test("cancelling and terminal task surfaces do not ask for input from a stale in
           } }).body;
           assert.ok(response.includes(tFallback("gui.task.answer_failed_detail")));
           assert.match(response, /class="task-question-error" role="alert"/);
+          if (interaction === "conflict") {
+            for (const label of locale === "zh-CN"
+              ? ["1 个条目已存在", "已有文件", "压缩包内", "将本次决定应用到剩余冲突", "取消解压", "跳过", "覆盖", "保留两者"]
+              : ["1 item already exists", "Existing file", "In archive", "Apply this decision to remaining conflicts", "Cancel extraction", "Skip", "Replace", "Keep Both"]
+            ) assert.ok(response.includes(label), `${presentation} conflict request includes ${label}`);
+            assert.equal((response.match(/class="task-question-card"/g) ?? []).length, 1);
+          }
         }
       }
     }

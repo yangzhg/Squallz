@@ -29,12 +29,11 @@
   } from "./components/SettingsWorkspace.svelte";
   import TaskCenterHost from "./components/TaskCenterHost.svelte";
   import type { TaskCenterSurfaceProps } from "./components/TaskCenterHost.svelte";
-  import TaskInteractionWorkspaceHost from "./components/TaskInteractionWorkspaceHost.svelte";
+  import PasswordWorkspaceHost from "./components/PasswordWorkspaceHost.svelte";
   import type {
-    TaskInteractionWorkspaceKind,
-    TaskInteractionWorkspaceSurface,
-    TaskInteractionWorkspaceVariant,
-  } from "./components/TaskInteractionWorkspaceHost.svelte";
+    PasswordWorkspaceSurface,
+    PasswordWorkspaceVariant,
+  } from "./components/PasswordWorkspaceHost.svelte";
   import TaskProgressDialogHost from "./components/TaskProgressDialogHost.svelte";
   import type { TaskProgressDialogSurfaceProps } from "./components/TaskProgressDialogHost.svelte";
   import type MacosSfxPublisherComponent from "./components/MacosSfxPublisher.svelte";
@@ -1199,11 +1198,7 @@
   });
 
   $effect(() => {
-    if (jobPasswordPrompt) {
-      setScreen("password");
-    } else if (jobConflictPrompt) {
-      setScreen("conflict");
-    } else if (archivePasswordPrompt || previewPasswordPrompt) {
+    if (archivePasswordPrompt || previewPasswordPrompt) {
       setScreen("password");
     }
   });
@@ -2225,18 +2220,6 @@
     });
   }
 
-  function setScreenRespectingJobQuestion(fallback: Screen) {
-    if (jobPasswordPrompt) {
-      setScreen("password");
-      return;
-    }
-    if (jobConflictPrompt) {
-      setScreen("conflict");
-      return;
-    }
-    setScreen(fallback);
-  }
-
   async function showClassicCreateSection(section: ClassicCreateSection, targetId: string): Promise<void> {
     classicCreateSection = section;
     await tick();
@@ -2284,14 +2267,6 @@
     };
   });
 
-  function cancelConflictPrompt() {
-    if (jobConflictPrompt) {
-      answerConflictDecision("abort", false);
-    } else {
-      setScreen("extract");
-    }
-  }
-
   function handleWorkflowEscape(): boolean {
     if (screen === "browse" && (previewBusy() || nestedPreview || entryPreview || entryPreviewFailure)) {
       clearEntryPreviewState();
@@ -2303,10 +2278,6 @@
     }
     if (screen === "password") {
       cancelPasswordRequest();
-      return true;
-    }
-    if (screen === "conflict") {
-      cancelConflictPrompt();
       return true;
     }
     return false;
@@ -4778,9 +4749,7 @@
 
   function modernInspectorSurface(): ModernInspectorSurfaceProps {
     let view: ModernInspectorSurfaceProps["view"];
-    if (screen === "conflict") {
-      view = { kind: "conflict" };
-    } else if (screen === "recovery") {
+    if (screen === "recovery") {
       view = {
         kind: "recovery",
         tone: recoveryResultTone(),
@@ -5742,14 +5711,6 @@
     return tr(`gui.create.format.${formatId}.note`, createFormats[formatId].note);
   }
 
-  function conflictDecisionLabel(decision: string): string {
-    if (decision === "Keep both") return tr("gui.conflict.rename", "Keep both");
-    if (decision === "Ask") return tr("gui.extract.overwrite.ask", "Ask");
-    if (decision === "Replace") return tr("gui.conflict.overwrite", "Replace");
-    if (decision === "Choose") return tr("gui.conflict.choose", "Choose");
-    return decision;
-  }
-
   function noArchiveLabel(): string {
     return tr("gui.empty.no_archive_short", "No archive open");
   }
@@ -6154,7 +6115,7 @@
     }
     const passwordPrompt = openPasswordPrompt();
     if (passwordPrompt?.path === path) {
-      setScreenRespectingJobQuestion("password");
+      setScreen("password");
       showNotice(tr("gui.archive.password_needed", "Enter the archive password to continue."));
       return true;
     }
@@ -6163,7 +6124,7 @@
       recoverySourceMode = "selected";
       recoverySourceOverride = path;
       recoveryPar2Override = null;
-      setScreenRespectingJobQuestion("recovery");
+      setScreen("recovery");
       showNotice(
         tr("gui.recovery.open_failed_routed", "{name} could not be opened. It is ready for recovery checks.")
           .replace("{name}", pathBaseName(path)),
@@ -6189,7 +6150,7 @@
     recoveryPar2Override = null;
     clearEntryPreviewState();
     if (review && sameFilePath(review.path, path) && review.restore()) return;
-    setScreenRespectingJobQuestion("browse");
+    setScreen("browse");
     showNotice(
       source === "password"
         ? tr("gui.archive.unlocked", "Archive unlocked")
@@ -6271,7 +6232,7 @@
     recoveryPar2Override = sidecar;
     recoverySourceOverride = archivePath;
     recoverySourceMode = archivePath ? "selected" : "none";
-    setScreenRespectingJobQuestion("recovery");
+    setScreen("recovery");
     let notice: string;
     if (sidecarSetCount > 1) {
       notice = tr(
@@ -12872,56 +12833,33 @@
     };
   }
 
-  function taskInteractionWorkspaceSurface(
-    variant: TaskInteractionWorkspaceVariant,
-    kind: TaskInteractionWorkspaceKind,
-  ): TaskInteractionWorkspaceSurface {
-    if (kind === "password") {
-      const forgetDisabledReason = passwordBookForgetDisabledReason();
-      return {
-        kind,
-        variant,
-        tr,
-        active: Boolean(jobPasswordPrompt || archivePasswordPrompt || previewPasswordPrompt),
-        name: passwordPromptName(),
-        detail: passwordPromptDetail(),
-        sessionDetail: passwordSessionDetail(),
-        failureDetail: passwordFailureDetail(),
-        secretStoreLabel: secretStoreLabel(),
-        value: jobPasswordValue,
-        busy: archiveOpenStatus === "opening" || Boolean(previewPasswordPrompt?.busy),
-        rejected: Boolean(jobPasswordPrompt?.wrong || archivePasswordPrompt?.wrong || previewPasswordPrompt?.wrong),
-        error: passwordSubmissionError,
-        forgetVisible: Boolean(jobPasswordPrompt),
-        forgetDisabledReason,
-        forgetAriaLabel: labelWithDisabledReason(
-          tr("gui.settings.password_book.forget_current", "Forget current archive"),
-          forgetDisabledReason,
-        ),
-        onInputMount: (input) => (standalonePasswordInput = input),
-        onValueChange: (value) => (jobPasswordValue = value),
-        onSubmit: submitPasswordRequest,
-        onCancel: cancelPasswordRequest,
-        onForget: forgetPasswordBookPanel,
-        onBack: () => setScreen("browse"),
-      };
-    }
+  function passwordWorkspaceSurface(variant: PasswordWorkspaceVariant): PasswordWorkspaceSurface {
+    const forgetDisabledReason = passwordBookForgetDisabledReason();
     return {
-      kind,
       variant,
       tr,
-      active: Boolean(jobConflictPrompt),
-      title: conflictPromptTitle(),
-      detail: conflictPromptDetail(),
-      rows: conflictRowsView().map((row) => ({
-        ...row,
-        decision: conflictDecisionLabel(row.decision),
-      })),
-      applyAll: conflictApplyAll,
-      onApplyAllChange: (value) => (conflictApplyAll = value),
-      onAnswer: answerConflictDecision,
-      onCancel: cancelConflictPrompt,
-      onBack: () => setScreen("extract"),
+      active: Boolean(jobPasswordPrompt || archivePasswordPrompt || previewPasswordPrompt),
+      name: passwordPromptName(),
+      detail: passwordPromptDetail(),
+      sessionDetail: passwordSessionDetail(),
+      failureDetail: passwordFailureDetail(),
+      secretStoreLabel: secretStoreLabel(),
+      value: jobPasswordValue,
+      busy: archiveOpenStatus === "opening" || Boolean(previewPasswordPrompt?.busy),
+      rejected: Boolean(jobPasswordPrompt?.wrong || archivePasswordPrompt?.wrong || previewPasswordPrompt?.wrong),
+      error: passwordSubmissionError,
+      forgetVisible: Boolean(jobPasswordPrompt),
+      forgetDisabledReason,
+      forgetAriaLabel: labelWithDisabledReason(
+        tr("gui.settings.password_book.forget_current", "Forget current archive"),
+        forgetDisabledReason,
+      ),
+      onInputMount: (input) => (standalonePasswordInput = input),
+      onValueChange: (value) => (jobPasswordValue = value),
+      onSubmit: submitPasswordRequest,
+      onCancel: cancelPasswordRequest,
+      onForget: forgetPasswordBookPanel,
+      onBack: () => setScreen("browse"),
     };
   }
 
@@ -12944,10 +12882,11 @@
       !isTaskActiveState(task.state) ||
       jobConflictPrompt?.id !== task.id
     ) return null;
-    const row = conflictRowsView()[0];
-    return row
-      ? { path: row.path, existing: row.existing, incoming: row.incoming }
-      : null;
+    return {
+      path: jobConflictPrompt.incoming_path,
+      existing: `${formatBytes(jobConflictPrompt.existing_size)} · ${formatModified(jobConflictPrompt.existing_modified)}`,
+      incoming: `${formatBytes(jobConflictPrompt.incoming_size)} · ${formatModified(jobConflictPrompt.incoming_modified)}`,
+    };
   }
 
   function openTaskDialog(task: Task | null = blockingTask()): void {
@@ -13356,7 +13295,7 @@
       encoding: draft.src_encoding,
       restore: () => {
         if (!session.restoreTaskDraft(draft)) return false;
-        setScreenRespectingJobQuestion("convert");
+        setScreen("convert");
         focusConvertReview();
         showNotice(tr("gui.convert.review.restored", "Archive and settings restored. Passwords were cleared. Review protection and confirm the output location before converting again."));
         return true;
@@ -13407,7 +13346,7 @@
     extractSymlinkMode = draft.symlinks;
     extractPresetEncodingLabel = null;
     extractVerifySfx = draft.verify_sfx;
-    setScreenRespectingJobQuestion("extract");
+    setScreen("extract");
     focusExtractReview();
     showNotice(tr("gui.extract.review.restored", "Archive, selection and settings restored. Review the refreshed write plan before extracting again."));
     return true;
@@ -13549,15 +13488,6 @@
       : tr("gui.password.open_return_to_prompt", "Stay on this prompt so you can retry or cancel.");
   }
 
-  function jobQuestionReturnScreen(promptId: number): Screen {
-    const task = jobRows.find((item) => item.id === promptId);
-    return recoverySubmissionPending ||
-      recoveryContextTaskIds.has(promptId) ||
-      (task?.spec.kind === "extract" && task.spec.best_effort)
-      ? "recovery"
-      : "extract";
-  }
-
   async function submitPasswordRequest() {
     if (!jobPasswordPrompt && !archivePasswordPrompt && !previewPasswordPrompt) {
       showNotice(tr("gui.password.no_prompt_pending", "No password request is active."));
@@ -13568,13 +13498,11 @@
     passwordSubmissionAttempted = false;
     if (jobPasswordPrompt) {
       const promptId = jobPasswordPrompt.id;
-      const returnScreen = jobQuestionReturnScreen(promptId);
       const answer = answerJobPassword(jobPasswordValue);
       jobPasswordValue = "";
       if (!await answer) return;
       showNotice(tr("gui.password.sent_to_task", "Password sent to task"));
       if (jobPasswordPrompt || jobConflictPrompt) return;
-      setScreen(returnScreen);
       returnTaskQuestionToCenter(promptId);
       return;
     }
@@ -13605,7 +13533,7 @@
       recoverySourceMode = "selected";
       recoverySourceOverride = prompt.path;
       recoveryPar2Override = null;
-      setScreenRespectingJobQuestion("recovery");
+      setScreen("recovery");
       showNotice(
         tr("gui.recovery.open_failed_routed", "{name} could not be opened. It is ready for recovery checks.")
           .replace("{name}", pathBaseName(prompt.path)),
@@ -13613,7 +13541,7 @@
       return;
     }
     if (!archiveOpenError(prompt.path)) return;
-    setScreenRespectingJobQuestion("browse");
+    setScreen("browse");
     showNotice(archiveOpenFailureNotice(prompt.path));
   }
 
@@ -13621,13 +13549,11 @@
     passwordSubmissionAttempted = false;
     if (jobPasswordPrompt) {
       const promptId = jobPasswordPrompt.id;
-      const returnScreen = jobQuestionReturnScreen(promptId);
       const answer = answerJobPassword(null);
       jobPasswordValue = "";
       if (!await answer) return;
       showNotice(tr("gui.password.prompt_cancelled", "Password prompt cancelled"));
       if (jobPasswordPrompt || jobConflictPrompt) return;
-      setScreen(returnScreen);
       returnTaskQuestionToCenter(promptId);
       return;
     }
@@ -13644,28 +13570,6 @@
     }
     jobPasswordValue = "";
     setScreen("browse");
-  }
-
-  function conflictRowsView() {
-    if (!jobConflictPrompt) return [];
-    return [
-      {
-        path: jobConflictPrompt.incoming_path,
-        existing: `${formatBytes(jobConflictPrompt.existing_size)} · ${formatModified(jobConflictPrompt.existing_modified)}`,
-        incoming: `${formatBytes(jobConflictPrompt.incoming_size)} · ${formatModified(jobConflictPrompt.incoming_modified)}`,
-        decision: tr("gui.conflict.choose", "Choose"),
-      },
-    ];
-  }
-
-  function conflictPromptTitle(): string {
-    if (jobConflictPrompt) return tr("gui.conflict.one_item_exists", "1 item already exists");
-    return tr("gui.conflict.no_prompt", "No conflict prompt");
-  }
-
-  function conflictPromptDetail(): string {
-    if (jobConflictPrompt) return tr("gui.conflict.task_paused", "This task is waiting for your conflict choice.");
-    return tr("gui.conflict.real_job_pauses_on_overwrite", "Extract tasks pause here only when a file conflict needs your choice.");
   }
 
   function latestRecoveryReportTask(): Task | null {
@@ -13949,7 +13853,6 @@
     }
     const answer = normalizeTaskConflictAnswer(decision, applyAll);
     const promptId = jobConflictPrompt.id;
-    const returnScreen = jobQuestionReturnScreen(promptId);
     if (!await answerJobConflict(answer.decision, answer.applyAll)) return;
     if (answer.decision === "abort") {
       showNotice(tr("gui.task.cancel_requested", "Cancel requested"));
@@ -13962,7 +13865,6 @@
     }
     if (jobPasswordPrompt || jobConflictPrompt) return;
     conflictApplyAll = false;
-    setScreen(returnScreen);
     returnTaskQuestionToCenter(promptId);
   }
 
@@ -14339,7 +14241,6 @@
     if (screen === "checksum") return tr("gui.screen.checksum", "Checksum");
     if (screen === "duplicates") return tr("gui.screen.duplicates", "Duplicate Finder");
     if (screen === "password") return tr("gui.screen.password", "Password Required");
-    if (screen === "conflict") return tr("gui.screen.conflict", "Conflict Handling");
     if (screen === "recovery") return tr("gui.screen.recovery", "Recovery");
     if (screen === "archiveInfo") return tr("gui.screen.archive_info", "Archive Info");
     if (screen === "integration") return tr("gui.screen.integration", "Formats & Integration");
@@ -14653,7 +14554,7 @@
               <button
                 disabled={navigationDisabled(screenForNav(item[1]))}
                 title={navigationDisabledReason(screenForNav(item[1]))}
-                class:current={(screen === "recent" && item[1] === "Recent") || ((screen === "browse" || screen === "updateReview") && item[1] === "Archives") || (screen === "create" && item[1] === "Create") || ((screen === "extract" || screen === "batch" || screen === "nestedExtract" || screen === "password" || screen === "conflict") && item[1] === "Extract") || (screen === "convert" && item[1] === "Convert") || (screen === "checksum" && item[1] === "Checksum") || (screen === "duplicates" && item[1] === "Duplicates") || (screen === "recovery" && item[1] === "Recovery") || (isSettingsScreen() && item[1] === "Settings")}
+                class:current={(screen === "recent" && item[1] === "Recent") || ((screen === "browse" || screen === "updateReview") && item[1] === "Archives") || (screen === "create" && item[1] === "Create") || ((screen === "extract" || screen === "batch" || screen === "nestedExtract" || screen === "password") && item[1] === "Extract") || (screen === "convert" && item[1] === "Convert") || (screen === "checksum" && item[1] === "Checksum") || (screen === "duplicates" && item[1] === "Duplicates") || (screen === "recovery" && item[1] === "Recovery") || (isSettingsScreen() && item[1] === "Settings")}
                 onclick={() => navigateToScreen(screenForNav(item[1]))}
               >
                 <Icon name={item[0]} size={16} />
@@ -14779,12 +14680,8 @@
           {:else if screen === "duplicates"}
             <ToolsWorkspaceHost surface={duplicatesWorkspaceSurface("modern")} />
           {:else if screen === "password"}
-            <TaskInteractionWorkspaceHost
-              surface={taskInteractionWorkspaceSurface("modern", "password")}
-            />
-          {:else if screen === "conflict"}
-            <TaskInteractionWorkspaceHost
-              surface={taskInteractionWorkspaceSurface("modern", "conflict")}
+            <PasswordWorkspaceHost
+              surface={passwordWorkspaceSurface("modern")}
             />
           {:else if screen === "recovery"}
             <RecoveryWorkspaceHost
@@ -15003,8 +14900,6 @@
             <div class="encoding-chip accent"><Icon name="archive" size={14} />{screen === "nestedExtract" ? tr("gui.nested_extract.title", "Extract inner archive") : screen === "batch" ? tr("gui.batch.title", "Batch Extract") : extractDestinationTitle(extractDestinationMode)}</div>
           {:else if screen === "password"}
             <div class="encoding-chip warning"><Icon name="lock" size={14} />{tr("gui.password.required", "Password required")}</div>
-          {:else if screen === "conflict"}
-            <div class="encoding-chip warning"><Icon name="alert-triangle" size={14} />{jobConflictPrompt ? tr("gui.conflict.review", "Conflict review") : tr("gui.conflict.none", "No conflicts")}</div>
           {:else if screen === "recovery"}
             <div class="encoding-chip accent"><Icon name="shield-alert" size={14} />{recoverySourceName() ?? tr("gui.recovery.no_archive_selected", "No archive selected")}</div>
           {:else if screen === "checksum"}
@@ -15156,12 +15051,8 @@
       {:else if screen === "duplicates"}
         <ToolsWorkspaceHost surface={duplicatesWorkspaceSurface("classic")} />
       {:else if screen === "password"}
-        <TaskInteractionWorkspaceHost
-          surface={taskInteractionWorkspaceSurface("classic", "password")}
-        />
-      {:else if screen === "conflict"}
-        <TaskInteractionWorkspaceHost
-          surface={taskInteractionWorkspaceSurface("classic", "conflict")}
+        <PasswordWorkspaceHost
+          surface={passwordWorkspaceSurface("classic")}
         />
       {:else if screen === "recovery"}
         <div class="classic-dialog-body" class:with-archive-return={showArchiveReturnBar()}>
@@ -15261,11 +15152,6 @@
           <span>{passwordPromptName()}</span>
           <span>{tr("gui.password.keychain_opt_in_short", "{secretStore} opt-in only").replace("{secretStore}", secretStoreLabel())}</span>
           <strong>{tr("gui.password.no_plaintext_storage", "No plaintext password stored in settings or task status")}</strong>
-	        {:else if screen === "conflict"}
-	          <span>{tr("gui.screen.conflict", "Conflict Handling")}</span>
-	          <span>{jobConflictPrompt ? tr("gui.conflict.existing_files_loaded", "Existing files loaded") : tr("gui.conflict.no_prompt", "No conflict prompt")}</span>
-	          <span>{tr("gui.conflict.default_ask_before_replace", "Default: ask before replace")}</span>
-	          <strong>{jobConflictPrompt ? tr("gui.conflict.silent_overwrite_disabled", "Silent overwrite disabled") : tr("gui.conflict.no_active_request", "No conflict request is active")}</strong>
 	        {:else if screen === "recovery"}
 	          <span>{tr("gui.recovery.status_par2_sidecar", "Recovery: PAR2 sidecar")}</span>
 	          <span>{recoverySourceName() ?? tr("gui.recovery.no_archive_selected", "No archive selected")}</span>
