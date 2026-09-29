@@ -115,6 +115,7 @@ pub fn run() {
             commands::remove_integration_changes,
             commands::preview_nested_archive,
             commands::preview_archive_entry,
+            commands::cancel_entry_preview,
             commands::open_preview_session,
             commands::reveal_preview_session,
             commands::release_preview_session,

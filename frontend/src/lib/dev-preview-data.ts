@@ -61,8 +61,18 @@ export function nestedPasswordPreviewSample(
     }
   }
   return {
-    outer_path: outerSource, entry_path: entryPath, format: "7z",
-    entry_count: nestedPreviewItems.length, truncated: false, items: nestedPreviewItems,
+    outer_path: outerSource, entry_path: entryPath,
+    archive: nestedPreviewArchiveInfo(outerSource, entryPath, nestedPreviewItems.length),
+    truncated: false, items: nestedPreviewItems,
+  };
+}
+
+function nestedPreviewArchiveInfo(outerSource: string, entryPath: string, count: number): ArchiveInfo {
+  return {
+    id: 9002, source: "archive://9002", path: `${outerSource} › ${entryPath}`,
+    name: entryPath.split("/").at(-1) ?? entryPath, format: "7z", structure: "complete",
+    read_only: true, entry_count: count, volumes: null,
+    non_utf8_name_count: 0, garbled_count: 0, suggested_encoding: null, encoding_override: null,
   };
 }
 
@@ -572,8 +582,7 @@ function readArchivePreview(params: URLSearchParams, pageSize: number): ArchiveP
       ? {
           outer_path: `${sampleArchiveRoot}/${name}`,
           entry_path: "locked-secrets.7z",
-          format: "7z",
-          entry_count: nestedItems.length,
+          archive: nestedPreviewArchiveInfo(`${sampleArchiveRoot}/${name}`, "locked-secrets.7z", nestedItems.length),
           truncated: false,
           items: nestedItems,
         }

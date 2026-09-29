@@ -160,8 +160,7 @@ export interface CreateDestination {
 export interface NestedArchivePreviewDto {
   outer_path: string;
   entry_path: string;
-  format: string;
-  entry_count: number;
+  archive: ArchiveInfo;
   truncated: boolean;
   items: EntryDto[];
 }
@@ -785,25 +784,29 @@ export const ipc = {
     outerPath: string,
     entryPath: string,
     passwords: NestedArchivePasswords,
-    encoding?: string | null,
+    encoding: string | null,
+    requestId: string,
   ) =>
     invoke<NestedArchivePreviewDto>("preview_nested_archive", {
       outerPath,
       entryPath,
       passwords,
       encoding,
+      requestId,
     }),
   previewArchiveEntry: (
     outerPath: string,
     entryPath: string,
-    password?: string | null,
-    encoding?: string | null,
+    password: string | null,
+    encoding: string | null,
+    requestId: string,
   ) =>
     invoke<EntryPreviewDto>("preview_archive_entry", {
       outerPath,
       entryPath,
       password,
       encoding,
+      requestId,
     }),
   openPreviewSession: (previewId: string) =>
     invoke<void>("open_preview_session", { previewId }),
@@ -811,17 +814,21 @@ export const ipc = {
     invoke<void>("reveal_preview_session", { previewId }),
   releasePreviewSession: (previewId: string) =>
     invoke<boolean>("release_preview_session", { previewId }),
+  cancelEntryPreview: (requestId: string) =>
+    invoke<void>("cancel_entry_preview", { requestId }),
   openNestedArchive: (
     outerPath: string,
     entryPath: string,
     passwords: NestedArchivePasswords,
-    encoding?: string | null,
+    encoding: string | null,
+    requestId: string,
   ) =>
     invoke<ArchiveInfo>("open_nested_archive", {
       outerPath,
       entryPath,
       passwords,
       encoding,
+      requestId,
     }),
   submitJob: (spec: JobSpec) => invoke<number>("submit_job", { spec }),
   getSfxCreateCapability: () =>

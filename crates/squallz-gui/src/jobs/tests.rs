@@ -3046,6 +3046,7 @@ fn queued_opaque_nested_source_stays_leased_and_never_reaches_public_state() {
             "displayed-outer.zip".into(),
             squallz_core::api::SafetyLimits::default().max_entries,
             None,
+            &ControlToken::default(),
         )
         .unwrap();
 

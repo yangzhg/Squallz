@@ -12,7 +12,8 @@ async function withFlow(run) {
   const server = await createTestServer();
   try {
     const { createPreviewPasswordFlow } = await server.ssrLoadModule("/src/lib/preview-password.svelte.ts");
-    await run(createPreviewPasswordFlow());
+    const cancellations = [];
+    await run(createPreviewPasswordFlow(async (id) => { cancellations.push(id); }), cancellations);
   } finally {
     await server.close();
   }
@@ -94,5 +95,27 @@ test("late successful handles are returned for cleanup, while non-password error
     flow.answer("unused");
     assert.equal(await pending, null);
     assert.equal(flow.prompt, null);
+  });
+});
+
+test("cancelling sends only the active request id and each password retry has its own id", async () => {
+  await withFlow(async (flow, cancellations) => {
+    const ids = [];
+    let finish;
+    const pending = flow.run(context, async (passwords, requestId) => {
+      ids.push(requestId);
+      if (!passwords.outer) throw passwordError("outer");
+      return new Promise((resolve) => { finish = resolve; });
+    });
+    await nextTurn();
+    assert.equal(cancellations.length, 0);
+    flow.answer("answer");
+    await nextTurn();
+    assert.notEqual(ids[0], ids[1]);
+    flow.cancel();
+    flow.cancel();
+    assert.deepEqual(cancellations, [ids[1]]);
+    finish({ id: 12 });
+    assert.deepEqual(await pending, { id: 12 });
   });
 });

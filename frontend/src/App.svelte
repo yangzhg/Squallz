@@ -599,7 +599,7 @@
   let jobRows = $derived(tasks());
   let activeCurrentTask = $derived(activeTask());
   let jobPasswordPrompt = $derived(pendingPassword());
-  const previewPasswordFlow = createPreviewPasswordFlow();
+  const previewPasswordFlow = createPreviewPasswordFlow(ipc.cancelEntryPreview);
   let previewPasswordPrompt = $derived(previewPasswordFlow.prompt);
   let archivePasswordPrompt = $derived(openPasswordPrompt());
   let activePasswordPromptIdentity = $derived(
@@ -6613,8 +6613,8 @@
           requestGeneration,
           archivePath ?? archiveSource,
           entryPath,
-          (passwords) => ipc.previewArchiveEntry(
-            archiveSource, entryPath, passwords.outer, archiveEncodingForJob(),
+          (passwords, requestId) => ipc.previewArchiveEntry(
+            archiveSource, entryPath, passwords.outer, archiveEncodingForJob(), requestId,
           ),
         ))
       );
@@ -6626,6 +6626,7 @@
   function clearEntryPreviewState(restoreEntryFocus = false) {
     previewPasswordFlow.cancel();
     const preview = entryPreview;
+    const inner = nestedPreview;
     const originEntryPath = previewOriginEntryPath;
     const originVirtualIndex = previewOriginVirtualIndex;
     previewRequestGeneration += 1;
@@ -6638,6 +6639,7 @@
     previewPhase = "idle";
     previewTargetName = "";
     if (preview) void disposeEntryPreview(preview.preview_id);
+    if (inner) void ipc.closeArchive(inner.archive.id).catch(() => undefined);
     if (restoreEntryFocus && originVirtualIndex !== null) {
       queueMicrotask(() => void focusArchiveRow(originVirtualIndex, originEntryPath));
     }
@@ -9669,7 +9671,7 @@
     if (!currentArchive) return openArchiveFirstLabel();
     if (previewPhase === "nested") return tr("gui.preview.loading", "Preparing item");
     if (!nestedPreview) return tr("gui.preview.no_nested", "Preview");
-    return `${pathBaseName(nestedPreview.entry_path)} · ${nestedPreview.format.toUpperCase()}`;
+    return `${pathBaseName(nestedPreview.entry_path)} · ${nestedPreview.archive.format.toUpperCase()}`;
   }
 
   function nestedPreviewSubtitle(): string {
@@ -9680,7 +9682,7 @@
     }
     if (!nestedPreview) return tr("gui.preview.select_file", "Select an item, then choose Open or Preview.");
     return tr("gui.preview.nested_entries", "{count} entries{suffix}")
-      .replace("{count}", nestedPreview.entry_count.toLocaleString())
+      .replace("{count}", nestedPreview.archive.entry_count.toLocaleString())
       .replace("{suffix}", nestedPreview.truncated ? tr("gui.preview.first_200_shown_suffix", " · first 200 shown") : "");
   }
 
@@ -9791,7 +9793,7 @@
     requestGeneration: number,
     outerDisplayPath: string,
     entryPath: string,
-    operation: (passwords: NestedArchivePasswords) => Promise<T>,
+    operation: (passwords: NestedArchivePasswords, requestId: string) => Promise<T>,
   ): Promise<T | null> {
     try {
       return await previewPasswordFlow.run({
@@ -11679,29 +11681,32 @@
         requestGeneration,
         archiveDisplayPath,
         entryPath,
-        async (passwords) => nestedPasswordPreviewSample(params, archiveSource, entryPath, passwords)
-          ?? ipc.previewNestedArchive(archiveSource, entryPath, passwords, archiveEncodingForJob()),
+        async (passwords, requestId) => nestedPasswordPreviewSample(params, archiveSource, entryPath, passwords)
+          ?? ipc.previewNestedArchive(archiveSource, entryPath, passwords, archiveEncodingForJob(), requestId),
       );
       if (!preparedPreview) return;
-      if (requestGeneration !== previewRequestGeneration) return;
+      if (requestGeneration !== previewRequestGeneration) {
+        void ipc.closeArchive(preparedPreview.archive.id).catch(() => undefined);
+        return;
+      }
       nestedPreview = preparedPreview;
       entryPreview = null;
       entryPreviewFailure = null;
       recordValidationEvent("frontend.entry.nested_preview_loaded", {
         entry_path: entryPath,
-        entry_count: nestedPreview.entry_count,
-        format: nestedPreview.format,
+        entry_count: nestedPreview.archive.entry_count,
+        format: nestedPreview.archive.format,
       });
       showNotice(
         tr("gui.preview.nested_loaded", "Nested preview loaded · {count} entries").replace(
           "{count}",
-          nestedPreview.entry_count.toLocaleString(),
+          nestedPreview.archive.entry_count.toLocaleString(),
         ),
       );
       recordOperation({
         status: "info",
         title: tr("gui.preview.nested_operation_title", "Nested archive previewed"),
-        detail: `${pathBaseName(entryPath)} · ${nestedPreview.format.toUpperCase()}`,
+        detail: `${pathBaseName(entryPath)} · ${nestedPreview.archive.format.toUpperCase()}`,
       });
     } catch (error) {
       if (requestGeneration !== previewRequestGeneration) return;
@@ -11894,6 +11899,9 @@
     entryPath: string,
     virtualIndex: number | null = previewOriginVirtualIndex,
   ) {
+    const prepared = nestedPreview?.outer_path === outerPath && nestedPreview.entry_path === entryPath
+      ? nestedPreview.archive : null;
+    if (prepared) nestedPreview = null;
     clearEntryPreviewState();
     previewOriginEntryPath = entryPath;
     previewOriginVirtualIndex = virtualIndex;
@@ -11903,12 +11911,15 @@
     previewTargetName = pathBaseName(entryPath);
     try {
       await waitForPreviewFeedbackFrame();
-      if (requestGeneration !== previewRequestGeneration) return;
-      const info = await runPreviewWithPassword(
+      if (requestGeneration !== previewRequestGeneration) {
+        if (prepared) void ipc.closeArchive(prepared.id).catch(() => undefined);
+        return;
+      }
+      const info = prepared ?? await runPreviewWithPassword(
         requestGeneration,
         currentArchive?.path ?? outerPath,
         entryPath,
-        (passwords) => ipc.openNestedArchive(outerPath, entryPath, passwords, encoding),
+        (passwords, requestId) => ipc.openNestedArchive(outerPath, entryPath, passwords, encoding, requestId),
       );
       if (!info) return;
       if (requestGeneration !== previewRequestGeneration) {

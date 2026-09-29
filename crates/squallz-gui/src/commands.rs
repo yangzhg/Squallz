@@ -35,7 +35,7 @@ use crate::create_preflight::{
 };
 use crate::dto::{
     normalize_performance_stream_buffer_limit, ArchiveInfo, BatchExtractItem,
-    CreateDestinationInspectionDto, CreateEstimateDto, CreatePlanDto, DiskSpaceDto, EntryDto,
+    CreateDestinationInspectionDto, CreateEstimateDto, CreatePlanDto, DiskSpaceDto,
     EntryPreviewDto, ErrorDto, ExternalTaskActionDto, ExtractPlanPreflightDto, FormatDto,
     IntegrationApplyResultDto, IntegrationRemoveResultDto, IntegrationStatusDto,
     IntegrationSystemDiagnosticsDto, JobSpec, LanguageDto, LocaleTable, NestedArchivePasswords,
@@ -54,7 +54,7 @@ use crate::preview_sessions::{
 };
 use crate::secrets::{SecretStore, SharedSecretStore};
 use crate::settings::SettingsStore;
-use crate::state::{normalized_entry_path, AppState, DEFAULT_PAGE_SIZE};
+use crate::state::{AppState, DEFAULT_PAGE_SIZE};
 use crate::validation_trace;
 use serde_json::json;
 
@@ -1091,26 +1091,6 @@ pub fn remove_integration_changes(
         .map_err(|e| ErrorDto::other(format!("cannot remove desktop integrations: {e}")))
 }
 
-fn format_label_from_name(state: &AppState, name: &str) -> String {
-    match state.engine.registry().detect_by_name(name) {
-        Some(detected) => detected_format_label(detected),
-        None => "archive".to_owned(),
-    }
-}
-
-fn detected_format_label(detected: Detected) -> String {
-    match detected {
-        Detected::Archive(format) => format.id().to_owned(),
-        Detected::Compressed {
-            compressor,
-            inner_archive,
-        } => match inner_archive {
-            Some(inner) => format!("{}.{}", inner.id(), compressor.id()),
-            None => compressor.id().to_owned(),
-        },
-    }
-}
-
 fn entry_base_name(path: &str) -> String {
     let trimmed = path.trim_end_matches('/');
     let base = match trimmed.rsplit('/').next() {
@@ -1205,6 +1185,7 @@ fn preview_password_error(mut error: ErrorDto, scope: &str) -> ErrorDto {
     error
 }
 
+#[allow(clippy::too_many_arguments)]
 fn preview_nested_archive_impl(
     state: &AppState,
     sessions: &PreviewSessionManager,
@@ -1213,65 +1194,38 @@ fn preview_nested_archive_impl(
     entry_path: &str,
     passwords: &NestedArchivePasswords,
     encoding: Option<&str>,
+    max_entries: u64,
+    control: &ControlToken,
 ) -> Result<NestedArchivePreviewDto, ErrorDto> {
-    let outer = state
-        .resolve_archive_source(outer_source, Some(owner))
-        .map_err(preview_error_dto)?;
-    let reservation = sessions.reserve(owner).map_err(preview_error_dto)?;
-    let workspace = reservation.workspace_path().map_err(preview_error_dto)?;
-    let (temp, _) = extract_nested_archive_to_temp_limited(
+    let archive = open_nested_archive_impl(
         state,
-        outer.path(),
+        sessions,
+        owner,
+        outer_source,
         entry_path,
-        passwords.outer.as_deref(),
+        passwords,
         encoding,
-        workspace,
-        MAX_PREVIEW_ENTRY_BYTES,
-    )
-    .map_err(|error| {
-        preview_password_error(
-            preview_error_dto_with_paths(error, &[(outer.path(), outer.display_path())]),
-            "outer",
-        )
-    })?;
-    let temp_path = temp.to_path_buf();
-    let nested_display_path = nested_archive_display_path(outer.display_path(), entry_path);
-    let entries = state
-        .engine
-        .list(
-            temp.as_ref(),
-            &OpenOptions {
-                password: passwords.inner.as_deref().map(Password::new),
-                ..OpenOptions::default()
-            },
-        )
-        .map_err(|error| {
-            preview_password_error(
-                preview_error_dto_with_paths(
-                    error,
-                    &[
-                        (outer.path(), outer.display_path()),
-                        (&temp_path, nested_display_path.as_str()),
-                    ],
-                ),
-                "inner",
-            )
-        })?;
-    let entry_count = entries.len();
-    let items = entries
-        .iter()
-        .take(NESTED_PREVIEW_LIMIT)
-        .map(|meta| {
-            let normalized = normalized_entry_path(meta);
-            EntryDto::from_meta(meta, normalized.clone(), entry_base_name(&normalized))
-        })
-        .collect();
+        max_entries,
+        control,
+    )?;
+    let items = state
+        .preview_entries_for_window(owner, archive.id, NESTED_PREVIEW_LIMIT)
+        .and_then(|items| {
+            control.checkpoint()?;
+            Ok(items)
+        });
+    let items = match items {
+        Ok(items) => items,
+        Err(error) => {
+            state.close_archive_for_window(owner, archive.id);
+            return Err(preview_error_dto(error));
+        }
+    };
     Ok(NestedArchivePreviewDto {
         outer_path: outer_source.to_owned(),
         entry_path: entry_path.to_owned(),
-        format: format_label_from_name(state, entry_path),
-        entry_count,
-        truncated: entry_count > NESTED_PREVIEW_LIMIT,
+        truncated: archive.entry_count > NESTED_PREVIEW_LIMIT,
+        archive,
         items,
     })
 }
@@ -1380,6 +1334,7 @@ pub fn release_preview_session(
         .map_err(preview_error_dto)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn preview_archive_entry_impl(
     state: &AppState,
     sessions: &PreviewSessionManager,
@@ -1388,12 +1343,22 @@ fn preview_archive_entry_impl(
     entry_path: &str,
     password: Option<&str>,
     encoding: Option<&str>,
+    control: &ControlToken,
 ) -> Result<EntryPreviewDto, ErrorDto> {
+    control.checkpoint().map_err(preview_error_dto)?;
     let outer = state
         .resolve_archive_source(outer_source, Some(owner))
         .map_err(preview_error_dto)?;
     let prepared = sessions
-        .prepare_archive_entry(owner, state, outer.path(), entry_path, password, encoding)
+        .prepare_archive_entry(
+            owner,
+            state,
+            outer.path(),
+            entry_path,
+            password,
+            encoding,
+            control,
+        )
         .map_err(|error| {
             preview_error_dto_with_paths(error, &[(outer.path(), outer.display_path())])
         })?;
@@ -1416,18 +1381,24 @@ fn operation_history_file_name(path: &Path) -> &str {
 
 /// Reads an archive entry as another archive and returns its first rows.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn preview_nested_archive(
     window: WebviewWindow,
     state: State<'_, Arc<AppState>>,
     sessions: State<'_, Arc<PreviewSessionManager>>,
+    requests: State<'_, Arc<PreflightRequests>>,
+    settings: State<'_, Arc<SettingsStore>>,
     outer_path: String,
     entry_path: String,
     passwords: NestedArchivePasswords,
     encoding: Option<String>,
+    request_id: String,
 ) -> Result<NestedArchivePreviewDto, ErrorDto> {
     let state = Arc::clone(state.inner());
     let sessions = Arc::clone(sessions.inner());
     let owner = window.label().to_owned();
+    let request = requests.begin_request(PreflightRequestKind::EntryPreview, &owner, &request_id);
+    let max_entries = settings.get().safety_limits().max_entries;
     tauri::async_runtime::spawn_blocking(move || {
         preview_nested_archive_impl(
             &state,
@@ -1437,6 +1408,8 @@ pub async fn preview_nested_archive(
             &entry_path,
             &passwords,
             encoding.as_deref(),
+            max_entries,
+            &request.control(),
         )
     })
     .await
@@ -1445,18 +1418,23 @@ pub async fn preview_nested_archive(
 
 /// Extracts one archive entry to a temporary file for local preview/reveal.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn preview_archive_entry(
     window: WebviewWindow,
     state: State<'_, Arc<AppState>>,
     sessions: State<'_, Arc<PreviewSessionManager>>,
+    requests: State<'_, Arc<PreflightRequests>>,
     outer_path: String,
     entry_path: String,
     password: Option<String>,
     encoding: Option<String>,
+    request_id: String,
 ) -> Result<EntryPreviewDto, ErrorDto> {
     let state = Arc::clone(state.inner());
     let sessions = Arc::clone(sessions.inner());
     let owner = window.label().to_owned();
+    let request = requests.begin_request(PreflightRequestKind::EntryPreview, &owner, &request_id);
+    let password = password.map(Password::new);
     let trace_extension = preview_trace_extension(Path::new(&entry_path));
     tauri::async_runtime::spawn_blocking(move || {
         let result = preview_archive_entry_impl(
@@ -1465,8 +1443,9 @@ pub async fn preview_archive_entry(
             &owner,
             &outer_path,
             &entry_path,
-            password.as_deref(),
+            password.as_ref().map(Password::expose),
             encoding.as_deref(),
+            &request.control(),
         );
         match &result {
             Ok(preview) => validation_trace::trace(
@@ -1501,20 +1480,23 @@ fn open_nested_archive_impl(
     passwords: &NestedArchivePasswords,
     encoding: Option<&str>,
     max_entries: u64,
+    control: &ControlToken,
 ) -> Result<ArchiveInfo, ErrorDto> {
+    control.checkpoint().map_err(preview_error_dto)?;
     let outer = state
         .resolve_archive_source(outer_source, Some(owner))
         .map_err(preview_error_dto)?;
     let reservation = sessions.reserve(owner).map_err(preview_error_dto)?;
     let workspace = reservation.workspace_path().map_err(preview_error_dto)?;
-    let (temp, size) = extract_nested_archive_to_temp_limited(
+    let (temp, prepared) = extract_nested_archive_to_temp_limited(
         state,
         outer.path(),
         entry_path,
-        passwords.outer.as_deref(),
+        passwords.outer.as_ref().map(Password::expose),
         encoding,
         workspace,
         MAX_PREVIEW_ENTRY_BYTES,
+        control,
     )
     .map_err(|error| {
         preview_password_error(
@@ -1525,16 +1507,17 @@ fn open_nested_archive_impl(
     let display_name = entry_base_name(entry_path);
     let display_path = nested_archive_display_path(outer.display_path(), entry_path);
     let temp_path = temp.to_path_buf();
-    state
+    let info = state
         .open_archive_with_owned_temp_and_entry_limit(
             owner,
             temp,
             reservation,
-            size,
+            prepared.size,
             display_path.clone(),
             display_name,
             max_entries,
-            passwords.inner.as_deref(),
+            passwords.inner.as_ref().map(Password::expose),
+            control,
         )
         .map_err(|error| {
             preview_password_error(
@@ -1547,7 +1530,9 @@ fn open_nested_archive_impl(
                 ),
                 "inner",
             )
-        })
+        })?;
+    prepared.remember_password(state, control);
+    Ok(info)
 }
 
 /// Extracts an archive entry to a persistent temp file and opens it as the
@@ -1558,16 +1543,19 @@ pub async fn open_nested_archive(
     window: WebviewWindow,
     state: State<'_, Arc<AppState>>,
     sessions: State<'_, Arc<PreviewSessionManager>>,
+    requests: State<'_, Arc<PreflightRequests>>,
     settings: State<'_, Arc<SettingsStore>>,
     outer_path: String,
     entry_path: String,
     passwords: NestedArchivePasswords,
     encoding: Option<String>,
+    request_id: String,
 ) -> Result<ArchiveInfo, ErrorDto> {
     let state = Arc::clone(state.inner());
     let sessions = Arc::clone(sessions.inner());
     let max_entries = settings.get().safety_limits().max_entries;
     let owner = window.label().to_owned();
+    let request = requests.begin_request(PreflightRequestKind::EntryPreview, &owner, &request_id);
     let trace_extension = preview_trace_extension(Path::new(&entry_path));
     tauri::async_runtime::spawn_blocking(move || {
         let result = open_nested_archive_impl(
@@ -1579,6 +1567,7 @@ pub async fn open_nested_archive(
             &passwords,
             encoding.as_deref(),
             max_entries,
+            &request.control(),
         );
         match &result {
             Ok(info) => validation_trace::trace(
@@ -1601,6 +1590,19 @@ pub async fn open_nested_archive(
     })
     .await
     .map_err(|e| ErrorDto::other(format!("nested open task failed: {e}")))?
+}
+
+#[tauri::command]
+pub fn cancel_entry_preview(
+    window: WebviewWindow,
+    requests: State<'_, Arc<PreflightRequests>>,
+    request_id: String,
+) {
+    requests.cancel(
+        PreflightRequestKind::EntryPreview,
+        window.label(),
+        &request_id,
+    );
 }
 
 /// Reports whether this installation contains its host SFX template.
@@ -2659,14 +2661,14 @@ mod tests {
         apply_accent_palette, apply_general_options, archive_password_status_impl,
         bound_create_preset, bound_extract_preset, create_destination_has_conflict,
         disk_space_preflight, export_operation_history_impl, forget_archive_password_impl,
-        format_label_from_name, inspect_create_destination_impl,
-        inspect_create_destination_impl_with_progress, open_archive_resolving_password,
-        open_archive_source_resolving_password, open_nested_archive_impl, plan_convert_impl,
-        plan_extract_impl, preview_archive_entry_impl, preview_nested_archive_impl,
-        preview_trace_payload, remember_archive_password_impl, requested_page_size,
-        resolve_external_task_job_impl, unique_create_destination_path, valid_accent_palette,
-        valid_hex_color, MAX_ARCHIVE_PAGE_SIZE,
+        inspect_create_destination_impl, inspect_create_destination_impl_with_progress,
+        open_archive_resolving_password, open_archive_source_resolving_password,
+        open_nested_archive_impl, plan_convert_impl, plan_extract_impl, preview_archive_entry_impl,
+        preview_nested_archive_impl, preview_trace_payload, remember_archive_password_impl,
+        requested_page_size, resolve_external_task_job_impl, unique_create_destination_path,
+        valid_accent_palette, valid_hex_color, MAX_ARCHIVE_PAGE_SIZE,
     };
+    use crate::create_preflight::{PreflightRequestKind, PreflightRequests};
     use crate::dto::{ErrorDto, ExternalTaskActionDto, JobSpec, SettingsDto};
     use crate::secrets::{tests::MemorySecretStore, tests::ReadFailingSecretStore, SecretStore};
     use crate::state::{AppState, DEFAULT_PAGE_SIZE};
@@ -2968,15 +2970,26 @@ mod tests {
     }
 
     #[test]
-    fn format_label_from_name_uses_detected_format_or_archive_fallback() {
+    fn nested_preview_uses_the_content_format_instead_of_the_entry_suffix() {
         let state = AppState::new();
-
-        assert_eq!(format_label_from_name(&state, "sample.zip"), "zip");
-        assert_eq!(format_label_from_name(&state, "backup.tar.zst"), "tar.zstd");
-        assert_eq!(
-            format_label_from_name(&state, "unknown.squallz-test"),
-            "archive"
-        );
+        let dir = temp_dir("preview-format");
+        let outer = make_outer_archive_with_renamed_zip(&state, &dir, "inner.7z");
+        let sessions = PreviewSessionManager::new().unwrap();
+        let preview = preview_nested_archive_impl(
+            &state,
+            &sessions,
+            "test-window",
+            &outer.to_string_lossy(),
+            "inner.7z",
+            &Default::default(),
+            None,
+            SafetyLimits::default().max_entries,
+            &ControlToken::default(),
+        )
+        .unwrap();
+        assert_eq!(preview.archive.format, "zip");
+        state.close_archive_for_window("test-window", preview.archive.id);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -3581,16 +3594,18 @@ mod tests {
             "inner.zip",
             &Default::default(),
             None,
+            SafetyLimits::default().max_entries,
+            &ControlToken::default(),
         )
         .unwrap();
         assert_eq!(preview.entry_path, "inner.zip");
-        assert_eq!(preview.format, "zip");
+        assert_eq!(preview.archive.format, "zip");
         assert!(!preview.truncated);
         assert!(preview
             .items
             .iter()
             .any(|entry| entry.path == "inner-src/hello.txt"));
-
+        state.close_archive_for_window("test-window", preview.archive.id);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -3641,8 +3656,8 @@ mod tests {
                 "inner",
             ),
         ] {
-            passwords.outer = outer_password.map(str::to_owned);
-            passwords.inner = inner_password.map(str::to_owned);
+            passwords.outer = outer_password.map(Password::new);
+            passwords.inner = inner_password.map(Password::new);
             let preview_error = preview_nested_archive_impl(
                 &state,
                 &sessions,
@@ -3651,6 +3666,8 @@ mod tests {
                 "secret.7z",
                 &passwords,
                 None,
+                SafetyLimits::default().max_entries,
+                &ControlToken::default(),
             )
             .unwrap_err();
             let open_error = open_nested_archive_impl(
@@ -3662,6 +3679,7 @@ mod tests {
                 &passwords,
                 None,
                 SafetyLimits::default().max_entries,
+                &ControlToken::default(),
             )
             .unwrap_err();
             for error in [preview_error, open_error] {
@@ -3676,7 +3694,7 @@ mod tests {
                     .contains("outer-secret"));
             }
         }
-        passwords.inner = Some("secret".into());
+        passwords.inner = Some(Password::new("secret"));
         let preview = preview_nested_archive_impl(
             &state,
             &sessions,
@@ -3685,23 +3703,22 @@ mod tests {
             "secret.7z",
             &passwords,
             None,
+            SafetyLimits::default().max_entries,
+            &ControlToken::default(),
         )
         .unwrap();
         assert!(preview
             .items
             .iter()
             .any(|entry| entry.path == "secret-src/secret.txt"));
-        let info = open_nested_archive_impl(
-            &state,
-            &sessions,
-            "test-window",
-            &source,
-            "secret.7z",
-            &passwords,
-            None,
-            SafetyLimits::default().max_entries,
-        )
-        .unwrap();
+        let info = preview.archive;
+        assert!(state.password_for(&outer).is_some());
+        let physical = state
+            .resolve_archive_source(&info.source, Some("test-window"))
+            .unwrap()
+            .path()
+            .to_path_buf();
+        assert!(state.password_for(&physical).is_some());
         let entry = preview_archive_entry_impl(
             &state,
             &sessions,
@@ -3710,6 +3727,7 @@ mod tests {
             "secret-src/secret.txt",
             None,
             None,
+            &ControlToken::default(),
         )
         .unwrap();
         let path = sessions
@@ -3719,6 +3737,8 @@ mod tests {
         sessions.external_use_failed(&entry.preview_id, "test-window");
         assert!(sessions.release(&entry.preview_id, "test-window").unwrap());
         state.close_archive_for_window("test-window", info.id);
+        assert!(!physical.exists());
+        assert_eq!(state.cached_password_paths(), vec![outer.clone()]);
         assert_eq!(sessions.release_window("test-window"), 0);
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -3729,12 +3749,14 @@ mod tests {
         let state = AppState::new();
         let file = dir.join("report.txt");
         std::fs::write(&file, b"report contents").unwrap();
+        let second = dir.join("second.txt");
+        std::fs::write(&second, b"second report").unwrap();
         let outer = dir.join("outer.zip");
         state
             .engine
             .create(
                 &outer,
-                &[file],
+                &[file, second],
                 &CreateOptions {
                     password: Some(Password::new("entry-secret")),
                     ..CreateOptions::default()
@@ -3756,6 +3778,7 @@ mod tests {
                 "report.txt",
                 password,
                 None,
+                &ControlToken::default(),
             )
             .unwrap_err();
             assert_eq!(error.key, key);
@@ -3768,6 +3791,7 @@ mod tests {
             "report.txt",
             Some("entry-secret"),
             None,
+            &ControlToken::default(),
         )
         .unwrap();
         let path = sessions
@@ -3776,7 +3800,88 @@ mod tests {
         assert_eq!(std::fs::read(path).unwrap(), b"report contents");
         sessions.external_use_failed(&entry.preview_id, "test-window");
         assert!(sessions.release(&entry.preview_id, "test-window").unwrap());
+        assert!(state.password_for(&outer).is_some());
+        let next = preview_archive_entry_impl(
+            &state,
+            &sessions,
+            "test-window",
+            &outer.to_string_lossy(),
+            "second.txt",
+            None,
+            None,
+            &ControlToken::default(),
+        )
+        .unwrap();
+        let path = sessions
+            .path_for_external_use(&next.preview_id, "test-window")
+            .unwrap();
+        assert_eq!(std::fs::read(path).unwrap(), b"second report");
+        sessions.external_use_failed(&next.preview_id, "test-window");
+        assert!(sessions.release(&next.preview_id, "test-window").unwrap());
+        state.forget_password(&outer);
+        assert_eq!(
+            preview_archive_entry_impl(
+                &state,
+                &sessions,
+                "test-window",
+                &outer.to_string_lossy(),
+                "report.txt",
+                None,
+                None,
+                &ControlToken::default(),
+            )
+            .unwrap_err()
+            .key,
+            "error.password_required"
+        );
         assert_eq!(sessions.release_window("test-window"), 0);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn cancelled_preview_requests_do_not_publish_resources_or_credentials() {
+        let dir = temp_dir("cancelled-previews");
+        let state = AppState::new();
+        let outer = make_nested_zip_archive(&state, &dir);
+        let sessions = PreviewSessionManager::new().unwrap();
+        let requests = Arc::new(PreflightRequests::default());
+        let root_entries = || {
+            std::fs::read_dir(sessions.root_path().unwrap())
+                .unwrap()
+                .count()
+        };
+        let original = root_entries();
+        requests.cancel(PreflightRequestKind::EntryPreview, "test-window", "request");
+        let request =
+            requests.begin_request(PreflightRequestKind::EntryPreview, "test-window", "request");
+        let control = request.control();
+        let ordinary = preview_archive_entry_impl(
+            &state,
+            &sessions,
+            "test-window",
+            &outer.to_string_lossy(),
+            "inner.zip",
+            None,
+            None,
+            &control,
+        )
+        .unwrap_err();
+        let nested = preview_nested_archive_impl(
+            &state,
+            &sessions,
+            "test-window",
+            &outer.to_string_lossy(),
+            "inner.zip",
+            &Default::default(),
+            None,
+            SafetyLimits::default().max_entries,
+            &control,
+        )
+        .unwrap_err();
+        assert_eq!(ordinary.key, "error.cancelled");
+        assert_eq!(nested.key, "error.cancelled");
+        assert_eq!(root_entries(), original);
+        assert!(state.cached_password_paths().is_empty());
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -3796,6 +3901,8 @@ mod tests {
             "mystery.bin",
             &Default::default(),
             None,
+            SafetyLimits::default().max_entries,
+            &ControlToken::default(),
         )
         .unwrap_err();
         assert_eq!(preview_error.key, "error.unsupported");
@@ -3810,6 +3917,7 @@ mod tests {
             &Default::default(),
             None,
             SafetyLimits::default().max_entries,
+            &ControlToken::default(),
         )
         .unwrap_err();
         assert_eq!(open_error.key, "error.unsupported");
@@ -3833,6 +3941,7 @@ mod tests {
             &Default::default(),
             None,
             SafetyLimits::default().max_entries,
+            &ControlToken::default(),
         )
         .unwrap();
         let resolved = state
@@ -3851,6 +3960,7 @@ mod tests {
             "inner-src/hello.txt",
             None,
             None,
+            &ControlToken::default(),
         )
         .unwrap_err();
         assert_eq!(preview_error.key, "error.unsupported");
@@ -3900,6 +4010,7 @@ mod tests {
             "src/note.txt",
             None,
             None,
+            &ControlToken::default(),
         )
         .unwrap();
         assert_eq!(preview.entry_path, "src/note.txt");
@@ -3952,6 +4063,7 @@ mod tests {
             "src/pixel.png",
             None,
             None,
+            &ControlToken::default(),
         )
         .unwrap();
         let preview_path = sessions
@@ -3985,6 +4097,7 @@ mod tests {
             &Default::default(),
             None,
             SafetyLimits::default().max_entries,
+            &ControlToken::default(),
         )
         .unwrap();
         assert_eq!(info.format, "zip");
@@ -4068,6 +4181,7 @@ mod tests {
             &Default::default(),
             None,
             SafetyLimits::default().max_entries,
+            &ControlToken::default(),
         )
         .unwrap();
         let destination = dir.join("nested-plan-output");
@@ -4124,6 +4238,7 @@ mod tests {
             &Default::default(),
             None,
             SafetyLimits::default().max_entries,
+            &ControlToken::default(),
         )
         .unwrap();
         let source = state
@@ -4162,6 +4277,7 @@ mod tests {
                 &Default::default(),
                 None,
                 SafetyLimits::default().max_entries,
+                &ControlToken::default(),
             )
             .unwrap();
             let source = state
@@ -4194,6 +4310,7 @@ mod tests {
             &Default::default(),
             None,
             SafetyLimits::default().max_entries,
+            &ControlToken::default(),
         )
         .unwrap();
         let source = state
@@ -4250,6 +4367,7 @@ mod tests {
                         &Default::default(),
                         None,
                         SafetyLimits::default().max_entries,
+                        &ControlToken::default(),
                     )
                     .unwrap()
                 })

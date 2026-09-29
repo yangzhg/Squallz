@@ -139,6 +139,13 @@ pub struct CachedArchive {
 struct OwnedArchiveTemp {
     _file: TempPath,
     _lease: PreviewResourceLease,
+    passwords: Arc<SessionPasswords>,
+}
+
+impl Drop for OwnedArchiveTemp {
+    fn drop(&mut self) {
+        self.passwords.forget(&self._file);
+    }
 }
 
 struct PendingOwnedArchiveTemp {
@@ -197,7 +204,7 @@ pub struct AppState {
     pub engine: Engine,
     archives: Mutex<ArchiveRegistry>,
     next_id: AtomicU64,
-    passwords: SessionPasswords,
+    passwords: Arc<SessionPasswords>,
 }
 
 impl AppState {
@@ -207,7 +214,7 @@ impl AppState {
             engine: Engine::new(squallz_formats::registry()),
             archives: Mutex::new(ArchiveRegistry::default()),
             next_id: AtomicU64::new(1),
-            passwords: SessionPasswords::default(),
+            passwords: Arc::new(SessionPasswords::default()),
         }
     }
 
@@ -365,6 +372,7 @@ impl AppState {
         display_name: String,
         max_entries: u64,
         password: Option<&str>,
+        control: &ControlToken,
     ) -> Result<ArchiveInfo, FormatError> {
         let path = temp.to_path_buf();
         let owned_temp = PendingOwnedArchiveTemp {
@@ -372,14 +380,13 @@ impl AppState {
             reservation,
             size,
         };
-        let control = ControlToken::default();
         self.open_archive_inner(
             Some(owner_window),
             &path,
             password,
             None,
             max_entries,
-            &control,
+            control,
             ArchiveIdentity {
                 display_path,
                 display_name: Some(display_name),
@@ -448,6 +455,7 @@ impl AppState {
             ArchiveBacking::Pending(pending) => Some(Arc::new(OwnedArchiveTemp {
                 _file: pending.file,
                 _lease: pending.reservation.into_lease(pending.size)?,
+                passwords: Arc::clone(&self.passwords),
             })),
             ArchiveBacking::Shared(owned) => Some(owned),
             ArchiveBacking::Persistent => None,
@@ -541,6 +549,30 @@ impl AppState {
 
     pub(crate) fn close_archive_for_window(&self, owner_window: &str, id: u64) {
         self.close_archive_for_owner(Some(owner_window), id);
+    }
+
+    pub(crate) fn preview_entries_for_window(
+        &self,
+        owner_window: &str,
+        id: u64,
+        limit: usize,
+    ) -> Result<Vec<EntryDto>, FormatError> {
+        let archive = self.archive_for_owner(id, Some(owner_window))?;
+        Ok(archive
+            .entries
+            .iter()
+            .take(limit)
+            .map(|meta| {
+                let path = normalized_entry_path(meta);
+                let name = path
+                    .trim_end_matches('/')
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(&path)
+                    .to_owned();
+                EntryDto::from_meta(meta, path, name)
+            })
+            .collect())
     }
 
     fn close_archive_for_owner(&self, owner_window: Option<&str>, id: u64) {

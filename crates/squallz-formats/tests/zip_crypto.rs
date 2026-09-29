@@ -9,8 +9,8 @@ use std::process::Command;
 
 use common::{command_exists, engine, TempDir};
 use squallz_format_api::{
-    ControlToken, CreateOptions, ExtractOptions, FormatError, NoProgress, OpenOptions, Password,
-    SafetyLimits,
+    ControlToken, CreateOptions, EntryPath, ExtractOptions, FormatError, NoProgress, OpenOptions,
+    Password, SafetyLimits,
 };
 
 fn open_with(password: Option<&str>) -> OpenOptions {
@@ -148,6 +148,47 @@ fn password_verification_checks_the_smallest_encrypted_entry_through_its_authent
     let eng = engine();
     let options = open_with(Some("correct"));
     let control = ControlToken::default();
+    let small = EntryPath::from_utf8("small.bin");
+    assert!(!eng
+        .read_entry_verifying_password(
+            &archive,
+            &EntryPath::from_utf8("public.txt"),
+            &options,
+            &control,
+            &mut |reader| {
+                std::io::copy(reader, &mut std::io::sink())?;
+                Ok(())
+            },
+        )
+        .unwrap());
+    assert!(!eng
+        .read_entry_verifying_password(&archive, &small, &options, &control, &mut |reader| {
+            reader.read_exact(&mut [0; 8])?;
+            Ok(())
+        },)
+        .unwrap());
+    assert!(eng
+        .read_entry_verifying_password(&archive, &small, &options, &control, &mut |reader| {
+            std::io::copy(reader, &mut std::io::sink())?;
+            Ok(())
+        },)
+        .unwrap());
+    let interrupted = ControlToken::default();
+    assert!(matches!(
+        eng.read_entry_verifying_password(
+            &archive,
+            &small,
+            &options,
+            &interrupted,
+            &mut |reader| {
+                reader.read_exact(&mut [0; 8])?;
+                interrupted.cancel();
+                std::io::copy(reader, &mut std::io::sink())?;
+                Ok(())
+            },
+        ),
+        Err(FormatError::Cancelled)
+    ));
     let limits = SafetyLimits {
         max_output_bytes: 70_000,
         ..SafetyLimits::default()
@@ -202,6 +243,12 @@ fn password_verification_checks_the_smallest_encrypted_entry_through_its_authent
     );
     assert!(eng
         .verify_password(&archive, &options, limits, &control)
+        .is_err());
+    assert!(eng
+        .read_entry_verifying_password(&archive, &small, &options, &control, &mut |reader| {
+            std::io::copy(reader, &mut std::io::sink())?;
+            Ok(())
+        },)
         .is_err());
 }
 

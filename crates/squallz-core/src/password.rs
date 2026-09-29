@@ -1,12 +1,55 @@
+use std::io::{self, Read};
 use std::path::Path;
 
 use crate::api::{
-    ControlToken, EntryMeta, FormatError, LimitsAccountant, OpenOptions, SafetyLimits,
+    ControlToken, EntryMeta, EntryPath, FormatError, LimitsAccountant, OpenOptions, SafetyLimits,
 };
 use crate::controlled_io::controlled_result;
 use crate::Engine;
 
 impl Engine {
+    /// Reads an entry and reports whether this read verified the supplied
+    /// password. Only a complete, unambiguous encrypted entry is proof;
+    /// successful prefix reads and unencrypted entries return `false`.
+    pub fn read_entry_verifying_password(
+        &self,
+        path: &Path,
+        entry: &EntryPath,
+        opts: &OpenOptions,
+        control: &ControlToken,
+        consume: &mut dyn FnMut(&mut dyn Read) -> Result<(), FormatError>,
+    ) -> Result<bool, FormatError> {
+        let mut archive = self.open_with_control(path, opts, control)?;
+        let mut matches = 0;
+        let mut encrypted = false;
+        if opts.password.is_some() {
+            for candidate in archive.entries() {
+                control.checkpoint()?;
+                let candidate = candidate?;
+                if candidate.path.raw == entry.raw || candidate.path.display == entry.display {
+                    matches += 1;
+                    encrypted = candidate.encrypted;
+                    if matches > 1 {
+                        break;
+                    }
+                }
+            }
+        }
+        let mut reached_end = false;
+        let result = archive.read_entry(entry, &mut |reader| {
+            let mut reader = EntryReadTracker {
+                reader,
+                control,
+                reached_end: false,
+            };
+            consume(&mut reader)?;
+            reached_end = reader.reached_end;
+            Ok(())
+        });
+        controlled_result(control, result)?;
+        Ok(matches == 1 && encrypted && reached_end)
+    }
+
     /// Verifies a supplied password against encrypted headers or one complete
     /// encrypted entry. A readable, unencrypted directory is not proof that a
     /// password works. Returns `false` when no unambiguous encrypted content
@@ -118,5 +161,24 @@ impl Engine {
         }
         control.checkpoint()?;
         Ok(verified)
+    }
+}
+
+struct EntryReadTracker<'a> {
+    reader: &'a mut dyn Read,
+    control: &'a ControlToken,
+    reached_end: bool,
+}
+
+impl Read for EntryReadTracker<'_> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        if buffer.is_empty() {
+            return Ok(0);
+        }
+        self.control.checkpoint().map_err(io::Error::other)?;
+        let length = buffer.len().min(64 * 1024);
+        let count = self.reader.read(&mut buffer[..length])?;
+        self.reached_end |= count == 0;
+        Ok(count)
     }
 }

@@ -9,13 +9,18 @@ type PreviewPasswordPrompt = {
   busy: boolean;
 };
 
-export function createPreviewPasswordFlow() {
+export function createPreviewPasswordFlow(cancelRequest: (requestId: string) => Promise<void>) {
   let prompt = $state<PreviewPasswordPrompt | null>(null);
   let generation = 0;
   let nextPromptId = 0;
   let resolveAnswer: ((value: string | null) => void) | null = null;
+  let activeRequestId: string | null = null;
+  let requestSequence = 0;
 
   function cancel() {
+    const requestId = activeRequestId;
+    activeRequestId = null;
+    if (requestId) void cancelRequest(requestId).catch(() => undefined);
     generation += 1;
     const resolve = resolveAnswer;
     resolveAnswer = null;
@@ -36,7 +41,7 @@ export function createPreviewPasswordFlow() {
     },
     async run<T>(
       context: { outerName: string; innerName: string; isCurrent: () => boolean },
-      operation: (passwords: NestedArchivePasswords) => Promise<T>,
+      operation: (passwords: NestedArchivePasswords, requestId: string) => Promise<T>,
     ): Promise<T | null> {
       cancel();
       const requestGeneration = generation;
@@ -45,8 +50,15 @@ export function createPreviewPasswordFlow() {
       try {
         while (current()) {
           try {
-            // The caller still receives a late successful handle so it can release it.
-            return await operation(passwords);
+            const requestId = globalThis.crypto?.randomUUID?.()
+              ?? `preview-${Date.now()}-${++requestSequence}`;
+            activeRequestId = requestId;
+            try {
+              // The caller receives a late successful handle so it can release it.
+              return await operation(passwords, requestId);
+            } finally {
+              if (activeRequestId === requestId) activeRequestId = null;
+            }
           } catch (error) {
             if (!current()) return null;
             if (!isErrorDto(error) || !["error.password_required", "error.wrong_password"].includes(error.key)) throw error;

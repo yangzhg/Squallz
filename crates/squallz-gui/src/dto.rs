@@ -6,7 +6,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 use squallz_core::api::{
-    unix_seconds, EntryMeta, EntryType, FormatError, OverwritePolicy, ResourceOptions,
+    unix_seconds, EntryMeta, EntryType, FormatError, OverwritePolicy, Password, ResourceOptions,
     SafetyLimits, SplitOutputMode, SymlinkPolicy,
 };
 use squallz_core::{
@@ -502,8 +502,16 @@ pub struct CreateDestinationInspectionDto {
 /// Independent credentials for materializing an entry and reading its archive.
 #[derive(Default, Deserialize)]
 pub struct NestedArchivePasswords {
-    pub outer: Option<String>,
-    pub inner: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_archive_password")]
+    pub outer: Option<Password>,
+    #[serde(default, deserialize_with = "deserialize_archive_password")]
+    pub inner: Option<Password>,
+}
+
+fn deserialize_archive_password<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Password>, D::Error> {
+    Option::<String>::deserialize(deserializer).map(|password| password.map(Password::new))
 }
 
 /// One-level preview of an archive stored as an entry inside another archive.
@@ -511,8 +519,7 @@ pub struct NestedArchivePasswords {
 pub struct NestedArchivePreviewDto {
     pub outer_path: String,
     pub entry_path: String,
-    pub format: String,
-    pub entry_count: usize,
+    pub archive: ArchiveInfo,
     pub truncated: bool,
     pub items: Vec<EntryDto>,
 }

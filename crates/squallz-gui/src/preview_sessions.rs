@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use squallz_core::api::FormatError;
+use squallz_core::api::{ControlToken, FormatError};
 
 use crate::nested::{write_archive_entry_limited, PREVIEW_ENTRY_TOO_LARGE_DETAIL};
 use crate::preview_workspace::{PreviewFile, PreviewWorkspace};
@@ -229,6 +229,7 @@ impl PreviewSessionManager {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn prepare_archive_entry(
         &self,
         owner: &str,
@@ -237,12 +238,13 @@ impl PreviewSessionManager {
         entry_path: &str,
         password: Option<&str>,
         encoding: Option<&str>,
+        control: &ControlToken,
     ) -> Result<PreparedPreview, FormatError> {
         let reservation = self.reserve(owner)?;
         let display_name = preview_display_name(entry_path);
         let (file, mut pending) = reservation.create_preview_file(&display_name)?;
 
-        let size = write_archive_entry_limited(
+        let prepared = write_archive_entry_limited(
             state,
             outer_path,
             entry_path,
@@ -250,9 +252,11 @@ impl PreviewSessionManager {
             encoding,
             &mut pending,
             MAX_PREVIEW_ENTRY_BYTES,
+            control,
         )?;
         pending.flush()?;
         drop(pending);
+        control.checkpoint()?;
 
         let id = file.id().to_owned();
         let sequence = self.shared.next_sequence.fetch_add(1, Ordering::Relaxed);
@@ -261,17 +265,18 @@ impl PreviewSessionManager {
             PreviewSession {
                 owner: owner.to_owned(),
                 file,
-                size,
+                size: prepared.size,
                 sequence,
                 sticky_external_pin: false,
                 pending_external_uses: 0,
                 release_requested: false,
             },
         )?;
+        prepared.remember_password(state, control);
         Ok(PreparedPreview {
             id,
             display_name,
-            size,
+            size: prepared.size,
         })
     }
 

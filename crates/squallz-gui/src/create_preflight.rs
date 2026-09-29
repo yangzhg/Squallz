@@ -32,6 +32,7 @@ pub(crate) enum PreflightRequestKind {
     ExtractPlan,
     OpenArchive,
     PasswordSave,
+    EntryPreview,
 }
 
 /// Owns cancellation tokens for preflight requests. The request kind, window

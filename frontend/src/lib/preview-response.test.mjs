@@ -34,6 +34,7 @@ async function withNestedOpen(run) {
     const closed = [];
     ipc.closeArchive = async (id) => { closed.push(id); };
     ipc.cancelArchiveOpen = async () => {};
+    ipc.cancelEntryPreview = async () => {};
     ipc.cancelArchiveSearch = async () => {};
     ipc.releasePreviewSession = async () => true;
     ipc.openNestedArchive = async () => archiveInfo(2, "inner.zip");
@@ -44,7 +45,7 @@ async function withNestedOpen(run) {
     const component = readFileSync(new URL("../App.svelte", import.meta.url), "utf8");
     const source = ts.createSourceFile("App.ts", component.match(/<script lang="ts">([\s\S]*?)<\/script>/)[1], ts.ScriptTarget.Latest, true);
     const { createPreviewPasswordFlow } = await server.ssrLoadModule("/src/lib/preview-password.svelte.ts");
-    const names = ["openNestedArchiveEntry", "runPreviewWithPassword", "clearEntryPreviewState", "selectOnlyEntry", "submitPasswordRequest", "cancelPasswordRequest", "passwordPromptDetail", "submitPreviewEntry", "prepareEntryPreviewSerially", "disposeEntryPreview"];
+    const names = ["openNestedArchiveEntry", "runPreviewWithPassword", "clearEntryPreviewState", "selectOnlyEntry", "submitPasswordRequest", "cancelPasswordRequest", "passwordPromptDetail", "submitPreviewEntry", "submitPreviewNestedArchive", "prepareEntryPreviewSerially", "disposeEntryPreview"];
     const declarations = names.map((name) => {
       const declaration = source.statements.find((node) => ts.isFunctionDeclaration(node) && node.name?.text === name);
       assert.ok(declaration, name);
@@ -54,7 +55,7 @@ async function withNestedOpen(run) {
     const operations = [];
     const context = {
       ipc, adoptOpenedArchive: archive.adoptOpenedArchive,
-      previewPasswordFlow: createPreviewPasswordFlow(), screen: "browse",
+      previewPasswordFlow: createPreviewPasswordFlow(ipc.cancelEntryPreview), screen: "browse",
       jobPasswordPrompt: null, jobConflictPrompt: null, archivePasswordPrompt: null,
       jobPasswordValue: "", passwordSubmissionAttempted: false,
       taskPasswordReady: (value) => value.length > 0, focusArchiveRow: async () => {},
@@ -67,6 +68,7 @@ async function withNestedOpen(run) {
       previewRequestGeneration: 0, previewActionGeneration: 0,
       nestedPreview: null, entryPreview: null, entryPreviewFailure: null,
       previewPhase: "idle", previewTargetName: "",
+      params: new URLSearchParams(), nestedPasswordPreviewSample: () => null,
       recoverySourceMode: "file", recoverySourceOverride: "/previous.zip", recoveryPar2Override: "/previous.par2",
       waitForPreviewFeedbackFrame: async () => {}, archiveEncodingForJob: () => null,
       entryTypeForPath: () => "file", previewPolicyFor: () => ({ kind: "nested" }),
@@ -274,4 +276,58 @@ test("late system-open responses cannot revive a dismissed or replaced preview",
   } finally {
     await server.close();
   }
+});
+
+test("opening a nested preview adopts its existing handle without another extraction or password request", async () => {
+  await withNestedOpen(async ({ app, archive, ipc, page, context, closed }) => {
+    context.nestedPreview = {
+      outer_path: "/archives/outer.zip", entry_path: "inner.zip",
+      archive: archiveInfo(2, "inner.zip"), items: [], truncated: false,
+    };
+    ipc.openNestedArchive = async () => { assert.fail("the prepared archive must be reused"); };
+    page.resolve({ items: [outerRows[1]], total: 1, page: 0 });
+    await app.openNestedArchiveEntry("/archives/outer.zip", "inner.zip");
+    assert.equal(archive.archive().id, 2);
+    assert.equal(context.nestedPreview, null);
+    assert.equal(context.previewPasswordPrompt, null);
+    assert.deepEqual(closed, [1]);
+  });
+});
+
+test("dismissing a nested preview releases it once and cancellation during adoption releases the transferred handle", async () => {
+  for (const duringAdoption of [false, true]) {
+    await withNestedOpen(async ({ app, archive, page, pageRequested, context, closed }) => {
+      context.nestedPreview = {
+        outer_path: "/archives/outer.zip", entry_path: "inner.zip",
+        archive: archiveInfo(2, "inner.zip"), items: [], truncated: false,
+      };
+      let opening;
+      if (duringAdoption) {
+        opening = app.openNestedArchiveEntry("/archives/outer.zip", "inner.zip");
+        await pageRequested.promise;
+      }
+      app.clearEntryPreviewState();
+      app.clearEntryPreviewState();
+      page.resolve({ items: [], total: 0, page: 0 });
+      await opening;
+      assert.equal(archive.archive().id, 1);
+      assert.deepEqual(closed, [2]);
+    });
+  }
+});
+
+test("a late nested preview releases the prepared archive after dismissal", async () => {
+  await withNestedOpen(async ({ app, archive, ipc, context, closed }) => {
+    const pending = deferred();
+    const requested = deferred();
+    ipc.previewNestedArchive = async () => { requested.resolve(); return pending.promise; };
+    const previewing = app.submitPreviewNestedArchive("inner.zip", 0);
+    await requested.promise;
+    app.clearEntryPreviewState();
+    pending.resolve({ outer_path: "/archives/outer.zip", entry_path: "inner.zip", archive: archiveInfo(2, "inner.zip"), items: [], truncated: false });
+    await previewing;
+    assert.equal(archive.archive().id, 1);
+    assert.equal(context.nestedPreview, null);
+    assert.deepEqual(closed, [2]);
+  });
 });
