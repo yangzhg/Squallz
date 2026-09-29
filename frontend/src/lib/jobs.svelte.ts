@@ -123,6 +123,8 @@ const store = $state({
 
 const pendingStates = new Map<number, StateEvent>();
 const pendingProgress = new Map<number, ProgressEvent>();
+// Partial events can arrive out of order; a full snapshot advances both boundaries.
+const eventVersions = new WeakMap<Task, { state: number; progress: number }>();
 const MAX_PENDING_EVENTS = 128;
 const locallyDismissed = new Set<number>();
 let snapshotRevision: number | null = null;
@@ -186,6 +188,15 @@ export function titleFor(spec: JobSpec): string {
 
 function find(id: number): Task | undefined {
   return store.tasks.find((task) => task.id === id);
+}
+
+function taskEventVersions(task: Task): { state: number; progress: number } {
+  let versions = eventVersions.get(task);
+  if (!versions) {
+    versions = { state: task.version, progress: task.version };
+    eventVersions.set(task, versions);
+  }
+  return versions;
 }
 
 function rememberPending<T extends { version: number }>(pending: Map<number, T>, id: number, event: T): void {
@@ -323,9 +334,11 @@ function onState(ev: StateEvent): void {
     if (!locallyDismissed.has(ev.id)) rememberPending(pendingStates, ev.id, ev);
     return;
   }
-  if (!shouldApplySnapshotState(task.version, task.state, ev.version, ev.state)) return;
+  const versions = taskEventVersions(task);
+  if (!shouldApplySnapshotState(versions.state, task.state, ev.version, ev.state)) return;
+  versions.state = ev.version;
   const previousState = task.state;
-  task.version = ev.version;
+  task.version = Math.max(task.version, ev.version);
   task.state = ev.state;
   if (ev.state !== previousState) task.actionFailure = null;
   if (ev.state !== "running") task.speed = 0;
@@ -1091,15 +1104,18 @@ function onProgress(ev: ProgressEvent): void {
     if (!locallyDismissed.has(ev.id)) rememberPending(pendingProgress, ev.id, ev);
     return;
   }
-  if (!shouldApplySnapshotProgress(task.version, task.state, ev.version)) return;
-  task.version = ev.version;
+  const versions = taskEventVersions(task);
+  if (!shouldApplySnapshotProgress(versions.progress, task.state, ev.version, versions.state)) return;
+  versions.progress = ev.version;
+  task.version = Math.max(task.version, ev.version);
   task.done = ev.done;
   task.total = ev.total;
   task.current = ev.current;
   task.currentDone = ev.current_done ?? 0;
   task.currentTotal = ev.current_total ?? 0;
   task.scanEntries = ev.scanned_entries ?? null;
-  task.speed = task.statusStale ? 0 : ev.speed;
+  const measuredBeforeState = ev.version < versions.state;
+  task.speed = task.statusStale || (measuredBeforeState && task.state !== "running") ? 0 : ev.speed;
   task.phase = ev.phase ?? null;
   task.interruptible = ev.interruptible ?? true;
 }
@@ -1175,6 +1191,7 @@ function applySnapshot(snapshot: JobSnapshot): void {
 
   const previousState = task.state;
   task.version = snapshot.version;
+  eventVersions.set(task, { state: snapshot.version, progress: snapshot.version });
   task.spec = snapshot.spec;
   task.outputPasswordRequired = snapshot.output_password_required;
   task.title = titleFor(snapshot.spec);

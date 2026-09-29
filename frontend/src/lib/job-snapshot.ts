@@ -36,11 +36,14 @@ export function shouldApplySnapshotState(
 }
 
 export function shouldApplySnapshotProgress(
-  currentVersion: number,
+  progressVersion: number,
   currentState: SnapshotState,
   incomingVersion: number,
+  stateVersion: number,
 ): boolean {
-  return incomingVersion > currentVersion && !isTerminalSnapshotState(currentState);
+  // A delayed pre-terminal measurement may fill missing progress without changing the outcome.
+  return incomingVersion > progressVersion
+    && (!isTerminalSnapshotState(currentState) || incomingVersion < stateVersion);
 }
 
 export function shouldApplyFullSnapshot(
