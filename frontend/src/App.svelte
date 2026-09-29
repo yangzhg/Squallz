@@ -197,6 +197,7 @@
   import { isNewSourceCleanupRecoveryGeneration } from "./lib/source-cleanup";
   import { currentWebviewWindowListener } from "./lib/tauri-events";
   import { outputPasswordRequired } from "./lib/job-snapshot";
+  import { batchExtractJob, reviewBatchExtract, type BatchExtractDraft } from "./lib/batch-extract";
   import { previewSystemOpenRequiresConfirmation } from "./lib/preview-presentation";
   import {
     previewResponseIsCurrent,
@@ -496,13 +497,6 @@
     attr: string;
     source?: EntryDto;
     virtualIndex?: number;
-  };
-  type BatchArchiveRow = {
-    name: string;
-    format: string;
-    entries: string;
-    target: string;
-    state: string;
   };
   type EntryContext = {
     x: number;
@@ -917,7 +911,11 @@
   let recoveryPar2Override = $state<string | null>(null);
   let recoveryRedundancyDraft = $state("10");
   let openDialogModulePromise: Promise<DialogModule> | null = null;
-  let batchArchivePaths = $state<string[]>(runtimePreviews.batchPaths);
+  let batchDraft = $state<BatchExtractDraft | null>(null);
+  let batchSubmissionPending = $state(false);
+  let batchPickerBusy = $state(false);
+  let batchDraftGeneration = 0;
+  let batchReviewFocusPending = false;
   let checksumPath = $state(runtimePreviews.checksumPath);
   let checksumManifestPath = $state(runtimePreviews.checksumManifestPath);
   let checksumAlgorithm = $state<ChecksumAlgorithmId>("sha256");
@@ -4714,14 +4712,7 @@
 
   function modernInspectorSurface(): ModernInspectorSurfaceProps {
     let view: ModernInspectorSurfaceProps["view"];
-    if (screen === "batch") {
-      view = {
-        kind: "batch",
-        ready: batchReadyCount(),
-        archives: batchReviewArchives().length,
-        percent: batchReadyPercent(),
-      };
-    } else if (screen === "password") {
+    if (screen === "password") {
       view = {
         kind: "password",
         secretStore: secretStoreLabel(),
@@ -5690,10 +5681,6 @@
     return tr(`gui.create.format.${formatId}.note`, createFormats[formatId].note);
   }
 
-  function batchArchiveStateLabel(state: string): string {
-    return tr(`gui.batch.state.${labelKey(state)}`, state);
-  }
-
   function conflictDecisionLabel(decision: string): string {
     if (decision === "Keep both") return tr("gui.conflict.rename", "Keep both");
     if (decision === "Ask") return tr("gui.extract.overwrite.ask", "Ask");
@@ -6014,7 +6001,7 @@
     const validPaths = paths.filter((item) => typeof item === "string" && item.length > 0);
     const path = validPaths[0];
     if (!path) return;
-    batchArchivePaths = validPaths;
+    if (!setBatchArchivePaths(validPaths)) return;
     await openArchivePath(path, source);
     if (validPaths.length > 1) {
       showNotice(tr("gui.archive.opened_first_more_batch", "Opened first archive · {count} more ready for batch extract").replace("{count}", String(validPaths.length - 1)));
@@ -6950,50 +6937,93 @@
     return dot > 0 ? name.slice(dot + 1).toUpperCase() : "ARCHIVE";
   }
 
-  function batchReviewArchives(): BatchArchiveRow[] {
-    if (batchArchivePaths.length === 0) {
-      if (currentArchive) {
-        return [{
-          name: currentArchive.name,
-          format: archiveFormat(),
-          entries: currentArchive.entry_count.toLocaleString(),
-          target: effectiveExtractDest(),
-          state: "Ready",
-        }];
-      }
-      return [];
+  function newBatchExtractDraft(paths: readonly string[]): BatchExtractDraft {
+    return { overwrite: "ask", symlinks: "preserve", smart: true,
+      items: uniqueNonEmptyPaths([...paths]).map((path) => ({ path,
+        dest: normalizedDefaultExtractDir(appliedDefaultExtractDir) ?? pathDir(path),
+        encoding: currentArchive && sameFilePath(currentArchive.source, path) ? archiveEncodingForJob() : null,
+        best_effort: false,
+      })) };
+  }
+
+  function effectiveBatchDraft(): BatchExtractDraft {
+    return batchDraft ?? newBatchExtractDraft(runtimePreviews.batchPaths.length > 0
+      ? runtimePreviews.batchPaths : currentArchive ? [currentArchive.source] : []);
+  }
+
+  function batchDraftLocked(): boolean {
+    return batchSubmissionPending || batchPickerBusy;
+  }
+
+  function setBatchArchivePaths(paths: readonly string[]): boolean {
+    if (batchDraftLocked()) {
+      showNotice(tr("gui.batch.wait_for_current", "Finish the current selection or submission before reviewing another batch."));
+      return false;
     }
-    return batchArchivePaths.map((path) => {
-      const isCurrent = currentArchive?.path === path;
-      return {
-        name: pathBaseName(path),
-        format: isCurrent ? archiveFormat() : archiveFormatFromPath(path),
-        entries: isCurrent
-          ? currentArchive.entry_count.toLocaleString()
-          : tr("gui.batch.state.pending", "Pending"),
-        target: extractDestForPath(path),
-        state: isCurrent ? "Ready" : "Ready to start",
-      };
+    batchDraftGeneration += 1;
+    batchDraft = newBatchExtractDraft(paths);
+    return true;
+  }
+
+  function updateBatchDraft(update: (draft: BatchExtractDraft) => BatchExtractDraft): void {
+    if (batchDraftLocked()) return;
+    batchDraftGeneration += 1;
+    batchDraft = update(effectiveBatchDraft());
+  }
+
+  function removeBatchItem(index: number): void {
+    updateBatchDraft((draft) => ({ ...draft, items: draft.items.filter((_, itemIndex) => itemIndex !== index) }));
+    void tick().then(() => {
+      if (screen !== "batch") return;
+      (document.getElementById(`batch-remove-${Math.min(index, effectiveBatchDraft().items.length - 1)}`)
+        ?? document.getElementById("batch-workspace-heading"))?.focus();
     });
   }
 
-  function batchReviewWarningCount(): number {
-    return batchReviewArchives().filter((item) => item.state.toLowerCase().includes("password")).length;
+  async function chooseBatchPaths(index: number | null = null): Promise<void> {
+    if (batchDraftLocked()) return;
+    const draft = effectiveBatchDraft();
+    const generation = batchDraftGeneration;
+    batchPickerBusy = true;
+    try {
+      const { open } = await getDialogModule();
+      const selected = await openNativeDialog(index === null ? "batch.sources" : "batch.destination", open, {
+        title: index === null ? tr("gui.batch.add_archives", "Add archives") : tr("gui.batch.choose_destination", "Choose destination"),
+        multiple: index === null, directory: index !== null,
+        defaultPath: index === null ? undefined : draft.items[index]?.dest,
+      });
+      if (generation !== batchDraftGeneration || screen !== "batch") return;
+      if (!selected) {
+        showNotice(tr("gui.batch.selection_cancelled", "Selection cancelled · the current batch was kept"));
+        return;
+      }
+      const paths = Array.isArray(selected) ? selected : [selected];
+      if (index === null) {
+        const additions = newBatchExtractDraft(paths).items.filter((item) =>
+          !draft.items.some((existing) => sameFilePath(existing.path, item.path)));
+        batchDraft = { ...draft, items: [...draft.items, ...additions] };
+        if (additions.length === 0) showNotice(tr("gui.batch.already_added", "Those archives are already in the batch."));
+      } else if (paths[0]) {
+        batchDraft = { ...draft, items: draft.items.map((item, itemIndex) => itemIndex === index ? { ...item, dest: paths[0] } : item) };
+      }
+      batchDraftGeneration += 1;
+    } catch {
+      showNotice(index === null
+        ? tr("gui.batch.picker_unavailable", "Could not open the file chooser. Try again, or drag archives into the window.")
+        : tr("gui.batch.destination_picker_unavailable", "Could not open the folder chooser. Try again, or edit the destination in the list."));
+    } finally {
+      batchPickerBusy = false;
+    }
   }
 
-  function batchReadyCount(): number {
-    return batchReviewArchives().length - batchReviewWarningCount();
-  }
-
-  function batchReadyPercent(): number {
-    const total = batchReviewArchives().length;
-    return total === 0 ? 0 : Math.round((batchReadyCount() / total) * 100);
-  }
-
-  function batchWarningLabel(): string {
-    if (batchReviewArchives().length === 0) return openArchiveFirstLabel();
-    const count = batchReviewWarningCount();
-    return tr("gui.batch.passwords_required_count", "{count} passwords required").replace("{count}", count.toLocaleString());
+  function focusBatchReview(): void {
+    batchReviewFocusPending = true;
+    void tick().then(() => {
+      const heading = document.getElementById("batch-workspace-heading");
+      if (!batchReviewFocusPending || screen !== "batch" || blockingModalVisible() || !heading) return;
+      batchReviewFocusPending = false;
+      heading.focus();
+    });
   }
 
   function appendCreateSources(
@@ -7116,7 +7146,7 @@
   function dropStatusLabel(): string {
     if (dragActive) return tr("gui.drop.active", "Drop archives to open, or files and folders to create an archive");
     if (lastDropKind === "archives") {
-      return tr("gui.drop.archives_ready", "{count} dropped archives ready").replace("{count}", String(batchArchivePaths.length));
+      return tr("gui.drop.archives_ready", "{count} dropped archives ready").replace("{count}", String(effectiveBatchDraft().items.length));
     }
     if (lastDropKind === "create") {
       return tr("gui.drop.create_ready", "{count} dropped items ready to archive").replace("{count}", String(createSources.length));
@@ -7295,7 +7325,7 @@
         create_count: 0,
       });
       lastDropKind = "archives";
-      batchArchivePaths = archivePaths;
+      if (!setBatchArchivePaths(archivePaths)) return;
       if (archivePaths.length === 1) {
         await openArchivePath(archivePaths[0], "open-file");
       } else {
@@ -10014,63 +10044,69 @@
   }
 
   async function startBatchExtract() {
-    const paths = batchArchivePaths.length > 0
-      ? batchArchivePaths
-      : currentArchive
-        ? [currentArchive.source]
-        : [];
-    if (paths.length === 0) {
+    if (batchDraftLocked()) return;
+    const draft = effectiveBatchDraft();
+    if (draft.items.length === 0) {
       showNotice(tr("gui.batch.open_archives_before_start", "Open archives before starting batch extract"));
       return;
     }
+    const invalid = draft.items.findIndex((item) => !item.dest.trim());
+    if (invalid !== -1) {
+      showNotice(tr("gui.batch.destination_required", "Choose a destination for every archive."));
+      document.getElementById(`batch-destination-${invalid}`)?.focus();
+      return;
+    }
     if (focusBlockingTaskIfAny()) return;
+    const spec = batchExtractJob(draft);
+    batchSubmissionPending = true;
     try {
-      await submitJob({
-        kind: "batch_extract",
-        items: paths.map((path) => ({
-          path,
-          dest: currentArchive?.source === path ? defaultExtractDest() : extractDestForPath(path),
-          encoding: currentArchive?.source === path ? archiveEncodingForJob() : null,
-          password: null,
-          best_effort: false,
-        })),
-        overwrite: "ask",
-        symlinks: "preserve",
-        smart: true,
-      });
-      showNotice(tr("gui.batch.extract_job_queued", "{count} archives added as one task").replace("{count}", paths.length.toLocaleString()));
+      await submitJob(spec);
+      showNotice(tr("gui.batch.extract_job_queued", "{count} archives added as one task").replace("{count}", spec.items.length.toLocaleString()));
       recordOperation({
         status: "queued",
         title: tr("gui.batch.extract_queued", "Batch extract queued"),
-        detail: tr("gui.batch.archive_count", "{count} archives").replace("{count}", paths.length.toLocaleString()),
+        detail: tr("gui.batch.archive_count", "Archives: {count}").replace("{count}", spec.items.length.toLocaleString()),
       });
     } catch (error) {
       if (isJobSubmitBlocked(error)) return;
-      showNotice(tr("gui.batch.requires_desktop_service", "Batch extract requires the desktop service"));
+      showNotice(isErrorDto(error) ? tError(error) : tr("gui.batch.requires_desktop_service", "Batch extract requires the desktop service"));
+    } finally {
+      batchSubmissionPending = false;
     }
   }
 
   function batchWorkspaceSurface(variant: ToolsWorkspaceVariant): BatchWorkspaceSurface {
+    const draft = effectiveBatchDraft();
     return {
       kind: "batch",
       variant,
       title: tr("gui.screen.batch", "Batch Extract Review"),
       tr,
       archiveReturn: toolsArchiveReturnSurface(variant),
-      rows: batchReviewArchives().map((row) => ({
-        name: row.name,
-        format: row.format,
-        entries: row.entries,
-        target: row.target,
-        state: batchArchiveStateLabel(row.state),
-        warning: row.state === "Needs password",
+      onReady: () => { if (batchReviewFocusPending) focusBatchReview(); },
+      locked: batchDraftLocked(),
+      submitting: batchSubmissionPending,
+      smart: draft.smart,
+      onSmartChange: (smart) => updateBatchDraft((value) => ({ ...value, smart })),
+      overwrite: draft.overwrite,
+      overwriteChoices: extractOverwriteModes.map((id) => ({ id, label: extractOverwriteLabel(id) })),
+      onOverwriteChange: (overwrite) => updateBatchDraft((value) => ({ ...value, overwrite })),
+      symlinks: draft.symlinks,
+      symlinkChoices: extractSymlinkModes.map((id) => ({ id, label: extractSymlinkLabel(id) })),
+      onSymlinksChange: (symlinks) => updateBatchDraft((value) => ({ ...value, symlinks })),
+      rows: draft.items.map((item, index) => ({
+        id: `${index}:${item.path}`, path: item.path, name: pathBaseName(item.path),
+        format: archiveFormatFromPath(item.path), target: item.dest,
+        encoding: item.encoding ?? tr("gui.extract.encoding.auto", "Auto-detect"),
+        bestEffort: item.best_effort,
+        onTargetInput: (dest) => updateBatchDraft((value) => ({ ...value,
+          items: value.items.map((row, i) => i === index ? { ...row, dest } : row) })),
+        onChooseTarget: () => void chooseBatchPaths(index),
+        onRemove: () => removeBatchItem(index),
       })),
-      warningLabel: batchWarningLabel(),
-      emptyLabel: openArchiveFirstLabel(),
       actions: {
         onStart: () => void startBatchExtract(),
-        onBack: () => setScreen("extract"),
-        onResolvePassword: () => setScreen("password"),
+        onAdd: () => void chooseBatchPaths(),
       },
     };
   }
@@ -12916,6 +12952,29 @@
       target = "recovery";
     }
     if (!target) return;
+    if (target === "batch" && task.spec.kind === "batch_extract") {
+      if (batchDraftLocked()) {
+        showNotice(tr("gui.batch.wait_for_current", "Finish the current selection or submission before reviewing another batch."));
+        return;
+      }
+      if (preventCreateSubmissionNavigation(target) || preventConvertSubmissionNavigation(target) || focusBlockingTaskIfAny()) return;
+      const failedCount = task.state === "done" ? Number(task.result?.failed) : 0;
+      const failures = task.state === "done" ? (Array.isArray(task.result?.failures) ? task.result.failures : []) : null;
+      const draft = reviewBatchExtract(task.spec, failures, failedCount, platformKind());
+      if (!draft) {
+        showNotice(tr("gui.batch.review_unavailable", "The report cannot identify the failed archives unambiguously. Select the archives again; your current batch was kept."));
+        return;
+      }
+      batchDraftGeneration += 1;
+      batchDraft = draft;
+      setScreen(target);
+      await dismissTaskDialog(task);
+      focusBatchReview();
+      showNotice(task.state === "done"
+        ? tr("gui.batch.review_failed_restored", "Only failed archives were restored. Review destinations and policies; passwords will be requested when needed.")
+        : tr("gui.batch.review_restored", "Batch inputs and policies restored. Some files may already exist; review conflicts before starting again. Passwords will be requested when needed."));
+      return;
+    }
     if (target === "extract" && task.spec.kind === "extract") {
       await reviewExtractTask(task);
       return;
@@ -14222,7 +14281,7 @@
         class="modern-shell"
         class:settings-shell={isSettingsScreen()}
         class:no-archive-shell={screen === "browse" && !currentArchive}
-        class:no-inspector-shell={screen === "recent" || screen === "convert" || screen === "create" || screen === "extract" || screen === "duplicates"}
+        class:no-inspector-shell={screen === "recent" || screen === "convert" || screen === "create" || screen === "extract" || screen === "duplicates" || screen === "batch"}
       >
         <aside class="modern-sidebar" aria-label={tr("gui.aria.navigation", "Navigation")}>
           <div class="sidebar-section">
@@ -14442,7 +14501,7 @@
 	          {/if}
         </section>
 
-        {#if !isSettingsScreen() && screen !== "recent" && screen !== "convert" && screen !== "create" && screen !== "extract" && screen !== "duplicates" && (screen !== "browse" || currentArchive)}
+        {#if !isSettingsScreen() && screen !== "recent" && screen !== "convert" && screen !== "create" && screen !== "extract" && screen !== "duplicates" && screen !== "batch" && (screen !== "browse" || currentArchive)}
           <ModernInspectorHost
             surface={modernInspectorSurface()}
             ariaLabel={tr("gui.aria.archive_inspector", "Archive inspector")}
@@ -14573,7 +14632,7 @@
             {/each}
           </div>
           {#if screen === "extract" || screen === "batch"}
-            <div class="encoding-chip accent"><Icon name="archive" size={14} />{extractDestinationTitle(screen === "batch" ? "smart" : extractDestinationMode)}</div>
+            <div class="encoding-chip accent"><Icon name="archive" size={14} />{screen === "batch" ? tr("gui.batch.title", "Batch Extract") : extractDestinationTitle(extractDestinationMode)}</div>
           {:else if screen === "password"}
             <div class="encoding-chip warning"><Icon name="lock" size={14} />{tr("gui.password.required", "Password required")}</div>
           {:else if screen === "conflict"}
@@ -14804,9 +14863,9 @@
           <strong title={extractDestinationStatus}>{extractDestinationStatus}</strong>
         {:else if screen === "batch"}
           <span>{tr("gui.batch.title", "Batch Extract")}</span>
-          <span>{tr("gui.batch.status_counts", "{archives} archives · {ready} ready").replace("{archives}", String(batchReviewArchives().length)).replace("{ready}", String(batchReadyCount()))}</span>
-          <span>{batchWarningLabel()}</span>
-          <strong>{tr("gui.batch.status_ready_rule", "Ready archives can continue; blocked archive waits")}</strong>
+          <span>{tr("gui.batch.archive_count", "Archives: {count}").replace("{count}", String(effectiveBatchDraft().items.length))}</span>
+          <span>{extractOverwriteLabel(effectiveBatchDraft().overwrite)}</span>
+          <strong>{tr("gui.batch.check_at_start", "Archives are checked when the task starts")}</strong>
         {:else if screen === "checksum"}
           <span>{tr("gui.screen.checksum", "Checksum")}</span>
           <span>{tr("gui.status.target", "Target: {target}").replace("{target}", checksumTargetName())}</span>

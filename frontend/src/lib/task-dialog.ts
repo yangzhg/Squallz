@@ -1127,6 +1127,7 @@ export function taskReviewAvailable(task: TaskDialogModel, taskWindowMode: boole
 
 export function taskReviewActionLabel(task: TaskDialogModel): string {
   const target = taskReviewScreen(task);
+  if (target === "batch" && task.state === "done") return tr("gui.batch.review_failed", "Review failed archives");
   if (target === "recovery") return tr("gui.task.open_recovery", "Open Recovery");
   if (target === "browse") return tr("gui.task.return_to_archive", "Return to archive");
   return tr("gui.task.review_settings", "Review task settings");

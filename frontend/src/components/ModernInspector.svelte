@@ -33,12 +33,6 @@
 
   export type ModernInspectorView =
     | {
-        kind: "batch";
-        ready: number;
-        archives: number;
-        percent: number;
-      }
-    | {
         kind: "password";
         secretStore: string;
       }
@@ -119,28 +113,7 @@
   );
 </script>
 
-{#if view.kind === "batch"}
-  <div class="inspector-block">
-    <span class="block-label">{tr("gui.batch.readiness", "Batch readiness")}</span>
-    <div class="health-score"><strong>{view.ready} / {view.archives}</strong><span>{tr("gui.state.ready", "Ready")}</span></div>
-    <progress
-      class="meter meter-progress"
-      value={view.percent}
-      max="100"
-      aria-label={tr("gui.batch.readiness", "Batch readiness")}
-    ></progress>
-    <p>{view.archives === 0 ? tr("gui.archive.open_first", "Open an archive first") : tr("gui.batch.ready_continue_hint", "Ready archives can continue without global failure.")}</p>
-  </div>
-  <div class="inspector-block">
-    <span class="block-label">{tr("gui.batch.policy", "Batch policy")}</span>
-    <dl>
-      <div><dt>{tr("gui.batch.targets", "Targets")}</dt><dd>{tr("gui.batch.per_archive", "Per archive")}</dd></div>
-      <div><dt>{tr("gui.extract.conflicts", "Conflicts")}</dt><dd>{tr("gui.extract.overwrite.ask", "Ask")}</dd></div>
-      <div><dt>{tr("gui.batch.passwords", "Passwords")}</dt><dd>{tr("gui.batch.per_archive", "Per archive")}</dd></div>
-      <div><dt>RAR</dt><dd>{tr("gui.format.extract_only", "Extract only")}</dd></div>
-    </dl>
-  </div>
-{:else if view.kind === "password"}
+{#if view.kind === "password"}
   <div class="inspector-block">
     <span class="block-label">{tr("gui.password.boundary", "Password boundary")}</span>
     <strong>{tr("gui.password.no_plaintext_persistence", "No plaintext persistence")}</strong>

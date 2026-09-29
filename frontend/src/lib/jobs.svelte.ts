@@ -1294,6 +1294,8 @@ type PreviewTaskKind =
   | "extract_metadata"
   | "batch_extract_metadata"
   | "batch_extract"
+  | "batch_extract_partial"
+  | "batch_extract_failure"
   | "test"
   | "checksum"
   | "checksum_check"
@@ -1335,6 +1337,15 @@ function isRecoveryCleanupPreview(kind: PreviewTaskKind): boolean {
 }
 
 function previewTaskSpec(kind: PreviewTaskKind): JobSpec {
+  if (kind === "batch_extract_partial" || kind === "batch_extract_failure") {
+    return { kind: "batch_extract", overwrite: "rename", symlinks: "skip", smart: false,
+      items: [
+        { path: `${sampleRoot}/Quarterly reports/季度归档与设计资料/Customer delivery with a complete descriptive name.zip`,
+          dest: `${sampleOutputRoot}/客户交付/Quarterly reports`, encoding: "gbk", password: null, best_effort: true },
+        { path: `${sampleRoot}/finished-photos.7z`, dest: `${sampleOutputRoot}/Photos`, encoding: null, password: null, best_effort: false },
+        { path: `${sampleRoot}/logs.tar`, dest: `${sampleOutputRoot}/Logs`, encoding: null, password: null, best_effort: false },
+      ] };
+  }
   if (kind === "duplicate_scan" || kind === "duplicate_scan_clean" || kind === "duplicate_scan_failure") {
     return { kind: "duplicate_scan", inputs: [`${sampleRoot}/${kind === "duplicate_scan_clean" ? "Inbox" : "Archive review"}`],
       excludes: ["cache"], min_size: 1024 };
@@ -1478,6 +1489,17 @@ function previewTaskSpec(kind: PreviewTaskKind): JobSpec {
 }
 
 function previewTaskResult(kind: PreviewTaskKind): Record<string, unknown> {
+  if (kind === "batch_extract_partial") {
+    const spec = previewTaskSpec(kind);
+    if (spec.kind === "batch_extract") {
+      return { operation: "batch_extract", archives: 3, selected_archives: 3, collapsed_volumes: 0,
+        extracted: 1, failed: 2,
+        outputs: [{ archive: spec.items[1].path, dest: spec.items[1].dest }],
+        failures: [spec.items[0], spec.items[2]].map((item) => ({ archive: item.path,
+          error: { key: "error.io", params: { detail: "Could not write the extracted file" }, detail: "Could not write the extracted file" } })),
+      };
+    }
+  }
   if (kind === "duplicate_scan" || kind === "duplicate_scan_clean") {
     const groups = kind === "duplicate_scan_clean" ? [] : Array.from({ length: 25 }, (_, index) => {
       const paths = Array.from({ length: index === 0 ? 60 : 2 }, (_, copy) =>
@@ -1676,6 +1698,7 @@ function previewTaskResult(kind: PreviewTaskKind): Record<string, unknown> {
 }
 
 function previewRevealPath(kind: PreviewTaskKind): string | null {
+  if (kind === "batch_extract_partial") return `${sampleOutputRoot}/Photos`;
   if (kind === "duplicate_scan" || kind === "duplicate_scan_clean" || kind === "duplicate_scan_failure") return null;
   if (isUpdatePreview(kind)) return `${sampleRoot}/product-backup.zip`;
   if (kind === "recovery_protect") return `${sampleOutputRoot}/product-backup.zip.par2`;
@@ -1691,6 +1714,9 @@ function previewRevealPath(kind: PreviewTaskKind): string | null {
 }
 
 function previewProgress(kind: PreviewTaskKind, state: Extract<JobStateName, "done" | "running">) {
+  if (kind === "batch_extract_partial" || kind === "batch_extract_failure") {
+    return { done: 3, total: 3, current: "", currentDone: 0, currentTotal: 0, speed: 0 };
+  }
   if (kind === "duplicate_scan" || kind === "duplicate_scan_clean" || kind === "duplicate_scan_failure") {
     const bytes = state === "done" ? (kind === "duplicate_scan_clean" ? 4 : 112) * 2048 : 0;
     return { done: bytes, total: bytes, current: "", currentDone: 0, currentTotal: 0, speed: 0 };
@@ -1838,6 +1864,8 @@ function previewProgress(kind: PreviewTaskKind, state: Extract<JobStateName, "do
 }
 
 function previewTaskOffset(kind: PreviewTaskKind): number {
+  if (kind === "batch_extract_partial") return 30;
+  if (kind === "batch_extract_failure") return 31;
   if (kind === "archive_open") return 23;
   if (kind === "extract_metadata") return 21;
   if (kind === "batch_extract_metadata") return 22;
@@ -1878,7 +1906,8 @@ function installTaskPreview(kind: PreviewTaskKind, state: Extract<JobStateName, 
   const spec = previewTaskSpec(kind);
   const progress = previewProgress(kind, state);
   const previewState = kind === "compress_failure" || kind === "compress_sfx_failure" || kind === "extract_failure"
-    || kind === "convert_failure" || kind === "convert_encrypted_failure" || kind === "duplicate_scan_failure" || isRecoveryCleanupPreview(kind)
+    || kind === "convert_failure" || kind === "convert_encrypted_failure" || kind === "duplicate_scan_failure"
+    || kind === "batch_extract_failure" || isRecoveryCleanupPreview(kind)
     ? "failed"
     : state;
   const target = isRecoveryCleanupPreview(kind)
@@ -1896,7 +1925,7 @@ function installTaskPreview(kind: PreviewTaskKind, state: Extract<JobStateName, 
     ? { key: "error.io", params: { detail: "Could not read the scan folder" }, detail: "Could not read the scan folder" }
     : kind === "convert_failure" || kind === "convert_encrypted_failure"
     ? { key: "error.io", params: { detail: "Could not write the converted archive" }, detail: "Could not write the converted archive" }
-    : kind === "extract_failure"
+    : kind === "extract_failure" || kind === "batch_extract_failure"
     ? { key: "error.io", params: { detail: "Could not write the extracted file" }, detail: "Could not write the extracted file" }
     : isRecoveryCleanupPreview(kind)
     ? {

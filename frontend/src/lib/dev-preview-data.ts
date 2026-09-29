@@ -39,6 +39,8 @@ type PreviewTaskKind =
   | "extract_metadata"
   | "batch_extract_metadata"
   | "batch_extract"
+  | "batch_extract_partial"
+  | "batch_extract_failure"
   | "test"
   | "checksum"
   | "checksum_check"
@@ -446,6 +448,7 @@ function completedTaskParam(value: string | null): RuntimePreviews["completedTas
     value === "extract_metadata" ||
     value === "batch_extract_metadata" ||
     value === "batch_extract" ||
+    value === "batch_extract_partial" || value === "batch_extract_failure" ||
     value === "test" ||
     value === "checksum" ||
     value === "checksum_check" ||

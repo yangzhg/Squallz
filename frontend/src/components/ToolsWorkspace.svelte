@@ -1,6 +1,7 @@
 <script lang="ts" module>
   import type { ChecksumAlgorithmId } from "../lib/ui-model";
   import type { DuplicateReportSurface } from "./DuplicateReport.svelte";
+  import type { OverwritePolicy, SymlinkPolicy } from "../lib/ipc";
 
   export type ToolsWorkspaceKind = "batch" | "checksum" | "duplicates";
   export type ToolsWorkspaceVariant = "modern" | "classic";
@@ -132,20 +133,32 @@
     title: string;
     tr: Tr;
     archiveReturn: ArchiveReturnSurface;
+    onReady: () => void;
+    locked: boolean;
+    submitting: boolean;
+    smart: boolean;
+    onSmartChange: (value: boolean) => void;
+    overwrite: OverwritePolicy;
+    overwriteChoices: Array<{ id: OverwritePolicy; label: string }>;
+    onOverwriteChange: (value: OverwritePolicy) => void;
+    symlinks: SymlinkPolicy;
+    symlinkChoices: Array<{ id: SymlinkPolicy; label: string }>;
+    onSymlinksChange: (value: SymlinkPolicy) => void;
     rows: Array<{
+      id: string;
+      path: string;
       name: string;
       format: string;
-      entries: string;
       target: string;
-      state: string;
-      warning: boolean;
+      encoding: string;
+      bestEffort: boolean;
+      onTargetInput: (value: string) => void;
+      onChooseTarget: () => void;
+      onRemove: () => void;
     }>;
-    warningLabel: string;
-    emptyLabel: string;
     actions: {
       onStart: () => void;
-      onBack: () => void;
-      onResolvePassword: () => void;
+      onAdd: () => void;
     };
   }
 
@@ -160,6 +173,7 @@
   import ChecksumAlgorithmPicker from "./ChecksumAlgorithmPicker.svelte";
   import ExcludeRulesEditor from "./ExcludeRulesEditor.svelte";
   import DuplicateReport from "./DuplicateReport.svelte";
+  import BatchExtractWorkspace from "./BatchExtractWorkspace.svelte";
   import Icon from "./Icon.svelte";
 
   let {
@@ -594,91 +608,5 @@
     </div>
   {/if}
 {:else}
-  {#if surface.variant === "modern"}
-    <div class="batch-view modern-batch">
-      <div class="sheet-head">
-        <div>
-          <span class="eyebrow">{surface.tr("gui.batch.review", "Batch extract review")}</span>
-          <h1>{surface.tr("gui.batch.review_count_title", "Review {count} archives before extraction").replace("{count}", String(surface.rows.length))}</h1>
-          <p>{surface.tr("gui.batch.review_subtitle", "Every target folder is previewed before work starts. Password or volume issues block only the affected archive.")}</p>
-        </div>
-        <button
-          class="primary sheet-action"
-          disabled={surface.rows.length === 0}
-          title={surface.rows.length === 0 ? surface.emptyLabel : ""}
-          onclick={surface.actions.onStart}
-        ><Icon name="archive" size={17} />{surface.tr("gui.batch.start_batch", "Start batch")}</button>
-      </div>
-      <div class="batch-summary-strip">
-        <div><span>{surface.tr("gui.batch.target_rule", "Target rule")}</span><strong>{surface.tr("gui.batch.each_archive_folder", "Each archive folder")}</strong></div>
-        <div><span>{surface.tr("gui.extract.smart_mode", "Smart extract")}</span><strong>{surface.tr("common.on", "On")}</strong></div>
-        <div><span>{surface.tr("gui.extract.conflicts", "Conflicts")}</span><strong>{surface.tr("gui.batch.ask_before_replace", "Ask before replace")}</strong></div>
-        <div><span>{surface.tr("gui.batch.warnings", "Warnings")}</span><strong>{surface.warningLabel}</strong></div>
-      </div>
-      <div class="batch-card-list">
-        {#each surface.rows as row}
-          <section class:warning={row.warning} class="batch-card">
-            <div>
-              <strong>{row.name}</strong>
-              <span>{row.format} · {surface.tr("gui.archive.entry_count", "{count} entries").replace("{count}", row.entries)}</span>
-            </div>
-            <div><span>{surface.tr("common.target", "Target")}</span><strong>{row.target}</strong></div>
-            <em>{row.state}</em>
-          </section>
-        {:else}
-          <section class="batch-card">
-            <div>
-              <strong>{surface.emptyLabel}</strong>
-              <span>{surface.tr("gui.batch.no_archives_queued", "No archives selected")}</span>
-            </div>
-            <div><span>{surface.tr("common.target", "Target")}</span><strong>-</strong></div>
-            <em>{surface.tr("gui.task.idle", "Idle")}</em>
-          </section>
-        {/each}
-      </div>
-    </div>
-  {:else}
-    <div class="classic-dialog-body">
-      <section class="classic-extract-sheet classic-batch">
-        <header>
-          <div>
-            <h1>{surface.tr("gui.batch.review", "Batch Extract Review")}</h1>
-            <p>{surface.tr("gui.batch.classic_subtitle", "Review every archive, target folder, password state, and blocked item before tasks start.")}</p>
-          </div>
-          <div class="classic-button-row">
-            <button onclick={surface.actions.onBack}>{surface.tr("gui.nav.back", "Back")}</button>
-            <button class="classic-primary" disabled={surface.rows.length === 0} onclick={surface.actions.onStart}>{surface.tr("gui.batch.start_batch", "Start batch")}</button>
-          </div>
-        </header>
-
-        <div class="classic-batch-grid">
-          <section>
-            <h2>{surface.tr("gui.nav.archives", "Archives")}</h2>
-            <div class="classic-batch-table">
-              <div><b>{surface.tr("gui.inspector.archive", "Archive")}</b><b>{surface.tr("common.format", "Format")}</b><b>{surface.tr("gui.table.entries", "Entries")}</b><b>{surface.tr("common.target", "Target")}</b><b>{surface.tr("common.status", "Status")}</b></div>
-              {#each surface.rows as row}
-                <div class:warning={row.warning}>
-                  <strong>{row.name}</strong><span>{row.format}</span><span>{row.entries}</span><span>{row.target}</span><em>{row.state}</em>
-                </div>
-              {:else}
-                <div>
-                  <strong>{surface.emptyLabel}</strong><span>-</span><span>0</span><span>-</span><em>{surface.tr("gui.batch.no_archives_queued", "No archives selected")}</em>
-                </div>
-              {/each}
-            </div>
-          </section>
-          <aside>
-            <h2>{surface.tr("gui.batch.policy", "Batch policy")}</h2>
-            <div class="classic-form-grid compact no-pad">
-              <div class="classic-label">{surface.tr("gui.batch.target_rule", "Target rule")}</div><div class="classic-input accent">{surface.tr("gui.batch.each_archive_folder", "Each archive folder")}</div>
-              <div class="classic-label">{surface.tr("gui.extract.smart_mode", "Smart extract")}</div><div class="classic-input">{surface.tr("gui.batch.smart_per_archive", "On · per archive root analysis")}</div>
-              <div class="classic-label">{surface.tr("gui.extract.conflicts", "Conflicts")}</div><div class="classic-input">{surface.tr("gui.batch.ask_before_replace", "Ask before replace")}</div>
-              <div class="classic-label">{surface.tr("gui.batch.failure_mode", "Failure mode")}</div><div class="classic-input accent">{surface.tr("gui.batch.continue_ready_hold_blocked", "Continue ready archives, hold blocked archive")}</div>
-            </div>
-            <button class="classic-color-route" onclick={surface.actions.onResolvePassword}><Icon name="lock" size={15} />{surface.tr("gui.batch.resolve_missing_password", "Resolve missing password")}</button>
-          </aside>
-        </div>
-      </section>
-    </div>
-  {/if}
+  <BatchExtractWorkspace {surface} />
 {/if}

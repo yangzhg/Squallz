@@ -7720,66 +7720,170 @@ select option {
   white-space: nowrap;
 }
 
-.batch-summary-strip {
-  padding: 10px;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-}
-
-.batch-card-list {
+.batch-workspace {
+  display: flex;
+  flex-direction: column;
   min-height: 0;
-  display: grid;
-  gap: 10px;
-  margin-top: 12px;
+  min-width: 0;
+  gap: var(--space-lg);
+  padding: var(--space-lg);
   overflow: auto;
 }
 
-.batch-card {
-  min-height: 64px;
-  display: grid;
-  grid-template-columns: minmax(190px, 1fr) minmax(220px, 1.15fr) 112px;
-  gap: 12px;
+.classic-batch-workspace {
+  height: calc(100% - var(--classic-titlebar-height) - var(--classic-commandbar-height) - var(--classic-pathrow-height) - var(--classic-statusbar-height));
+  background: var(--color-surface-raised);
+}
+
+.batch-workspace-header,
+.batch-source-header,
+.batch-workspace-actions,
+.batch-destination-control {
+  display: flex;
   align-items: center;
-  padding: 12px;
-  border: 1px solid var(--color-border-default);
-  border-radius: 12px;
+  gap: var(--space-sm);
+}
+
+.batch-workspace-header,
+.batch-source-header {
+  justify-content: space-between;
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+
+.batch-workspace-header > div,
+.batch-source-identity {
+  min-width: 0;
+}
+
+.batch-workspace-header h1 {
+  margin: 0;
+  font-size: var(--type-page-title);
+  line-height: var(--type-page-title-line);
+}
+
+.batch-workspace-header p,
+.batch-workspace-hint,
+.batch-empty-state p,
+.batch-source-path {
+  margin: 0;
+  color: var(--color-text-secondary);
+  font-size: var(--type-control);
+  line-height: var(--type-body-line);
+  overflow-wrap: anywhere;
+}
+
+.batch-workspace-actions {
+  flex-wrap: wrap;
+}
+
+.batch-workspace button {
+  min-height: var(--control-height);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-xs);
+  padding: var(--space-xs) var(--control-padding-inline);
+  flex-shrink: 0;
+}
+
+.batch-workspace button.primary {
+  border: var(--border-width-control) solid var(--button-primary-border);
+  border-radius: var(--control-radius);
+  background: var(--button-primary-bg);
+  color: var(--button-primary-fg);
+  box-shadow: var(--control-primary-shadow);
+}
+
+.batch-workspace button.primary:hover:not(:disabled) {
+  background: var(--button-primary-bg-hover);
+  color: var(--button-primary-fg-hover);
+  box-shadow: var(--control-primary-hover-shadow);
+}
+
+.batch-input {
+  width: 100%;
+  min-width: 0;
+  min-height: var(--control-height);
+  padding: var(--space-xs) var(--control-padding-inline);
+  border: var(--border-width-control) solid var(--input-border);
+  border-radius: var(--control-radius);
+  background: var(--input-bg);
+  color: var(--input-fg);
+  font: inherit;
+  font-size: var(--type-control);
+}
+
+.batch-policy-controls {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, var(--content-policy-option-min-width)), 1fr));
+  gap: var(--space-md);
+  align-items: end;
+}
+
+.batch-policy-field,
+.batch-source-identity {
+  display: grid;
+  gap: var(--space-xs);
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+
+.batch-source-identity {
+  flex: 1;
+}
+
+.batch-policy-field > span,
+.batch-destination-field,
+.batch-source-identity span {
+  color: var(--color-text-secondary);
+  font-size: var(--type-control);
+  line-height: var(--type-control-line);
+}
+
+.batch-smart-option {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  min-height: var(--control-height);
+}
+
+.batch-smart-option input {
+  width: var(--check-control-size);
+  height: var(--check-control-size);
+  margin: 0;
+  accent-color: var(--color-accent);
+}
+
+.batch-source-list {
+  display: grid;
+  gap: var(--space-md);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.batch-source-card {
+  display: grid;
+  gap: var(--space-sm);
+  min-width: 0;
+  padding: var(--space-md);
+  border: var(--border-width-control) solid var(--color-border-default);
+  border-radius: var(--radius-card);
   background: var(--color-surface-overlay);
 }
 
-.batch-card.warning {
-  border-color: var(--color-warning-border);
-  background: var(--color-warning-bg);
-}
-
-.batch-card strong,
-.batch-card span,
-.batch-card em {
-  display: block;
+.batch-destination-control input {
+  flex: 1;
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
-.batch-card span {
-  margin-top: 3px;
-  color: var(--color-text-secondary);
-  font-size: var(--type-control);
-}
-
-.batch-card em {
-  justify-self: end;
-  padding: 5px 8px;
-  border-radius: 999px;
-  background: var(--color-accent-bg);
-  color: var(--color-accent-fg);
-  font-size: var(--type-control);
-  font-style: normal;
-  font-weight: var(--font-weight-medium);
-}
-
-.batch-card.warning em {
-  background: var(--color-warning-bg);
-  color: var(--color-warning-fg);
+.batch-empty-state {
+  display: grid;
+  justify-items: center;
+  gap: var(--space-md);
+  padding: calc(var(--space-lg) * 2) var(--space-lg);
+  text-align: center;
 }
 
 .password-view,

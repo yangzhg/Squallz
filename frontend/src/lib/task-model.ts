@@ -223,6 +223,9 @@ export function taskHasInlineResults(task: TaskDialogModel): boolean {
 }
 
 export function taskReviewScreen(task: TaskDialogModel): Screen | null {
+  if (task.state === "done" && task.spec.kind === "batch_extract" && Number(task.result?.failed) > 0) {
+    return "batch";
+  }
   if (task.state === "done" && task.spec.kind === "test" && task.result?.ok === false) {
     return "recovery";
   }
