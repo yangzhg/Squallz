@@ -204,6 +204,46 @@ test("deferred task views retain their window surface while the component loads"
   }
 });
 
+test("cancelling and terminal task surfaces do not ask for input from a stale interaction", async () => {
+  const server = await createTestServer();
+  try {
+    const { render } = await server.ssrLoadModule("svelte/server");
+    const { default: TaskProgressDialog } = await server.ssrLoadModule("/src/components/TaskProgressDialog.svelte");
+    const { loadLocale, tFallback } = await server.ssrLoadModule("/src/lib/i18n.svelte.ts");
+    const { taskCenterCounts } = await server.ssrLoadModule("/src/lib/task-center.ts");
+    const { surface } = taskSurface(false);
+    for (const locale of ["en-US", "zh-CN"]) {
+      await loadLocale(locale);
+      for (const presentation of ["dialog", "panel", "window"]) {
+        for (const interaction of ["password", "conflict"]) {
+          const cancelling = { ...extractTask("running"), interaction, controlIntent: "cancel" };
+          const pending = render(TaskProgressDialog, { props: { ...surface, presentation, task: cancelling } }).body;
+          assert.ok(pending.includes(tFallback("gui.task.cancelling")));
+          assert.doesNotMatch(pending, /task-interaction-callout/);
+          assert.ok(!pending.includes(tFallback("gui.task_center.needs_input")));
+          assert.equal(taskCenterCounts([cancelling]).attention, 0);
+          const terminal = { ...cancelling, state: "cancelled", controlIntent: null };
+          const finished = render(TaskProgressDialog, { props: { ...surface, presentation, task: terminal } }).body;
+          assert.ok(finished.includes(tFallback("gui.task.state.cancelled")));
+          assert.doesNotMatch(finished, /task-interaction-callout/);
+          assert.ok(!finished.includes(tFallback("gui.task_center.needs_input")));
+          assert.equal(taskCenterCounts([terminal]).attention, 0);
+          const failedAnswer = { ...extractTask("running"), interaction, questionFailure: "answer" };
+          const response = render(TaskProgressDialog, { props: {
+            ...surface, presentation, task: failedAnswer,
+            passwordQuestion: interaction === "password" ? { name: "reports.zip", detail: "", sessionDetail: "" } : null,
+            conflictQuestion: interaction === "conflict" ? { path: "reports.txt", existing: "8 B", incoming: "12 B" } : null,
+          } }).body;
+          assert.ok(response.includes(tFallback("gui.task.answer_failed_detail")));
+          assert.match(response, /class="task-question-error" role="alert"/);
+        }
+      }
+    }
+  } finally {
+    await server.close();
+  }
+});
+
 test("window task surfaces fill their host and keep scrollable content inside the window", () => {
   const css = readFileSync(new URL("../design.css", import.meta.url), "utf8");
   const rules = parseCss(css).children.filter((node) => node.type === "Rule");

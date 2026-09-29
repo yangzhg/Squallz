@@ -83,6 +83,10 @@ export function isTaskActiveState(state: string | null | undefined): boolean {
     || state === "pausing";
 }
 
+export function taskNeedsInput(task: TaskDialogModel): boolean {
+  return isTaskActiveState(task.state) && task.controlIntent !== "cancel" && task.interaction !== null;
+}
+
 export function sourceCleanupResult(task: TaskDialogModel): SourceCleanupResult | null {
   const raw = task.result?.source_cleanup;
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;

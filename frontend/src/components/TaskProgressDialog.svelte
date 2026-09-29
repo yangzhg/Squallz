@@ -4,6 +4,7 @@
   import { cssVariables, type CssVariableMap } from "../lib/css-variables";
   import { trapModalFocus } from "../lib/modal-focus";
   import type { TaskConflictDecision, TaskDialogModel } from "../lib/task-dialog";
+  import { taskNeedsInput } from "../lib/task-model";
   import {
     checksumItemStatus,
     checksumItemText,
@@ -15,6 +16,7 @@
     taskControlCalloutDetail,
     taskControlCalloutTitle,
     taskControlCalloutVisible,
+    taskQuestionFailureMessage,
     taskCurrentLabel,
     taskCurrentProgressBadge,
     taskCurrentProgressPercent,
@@ -144,6 +146,8 @@
   let errorDetailsId = $derived(taskElementId("error-details"));
   let createDetailsId = $derived(taskElementId("create-details"));
   let passwordErrorId = $derived(taskElementId("password-error"));
+  let questionFailure = $derived(taskQuestionFailureMessage(task));
+  let passwordFeedback = $derived(passwordError || questionFailure);
 
   function taskElementId(suffix: string): string {
     const taskId = task.id === null ? "submitting" : task.id.toString();
@@ -151,13 +155,14 @@
   }
 
   function displayedTaskState(): string {
-    return task.interaction === null
+    if (task.controlIntent === "cancel") return taskCancelButtonLabel(task);
+    return !taskNeedsInput(task)
       ? taskOutcomeStateLabel(task)
       : tr("gui.task_center.needs_input", "Needs input");
   }
 
   function displayedTaskTone(): string {
-    return task.interaction === null ? taskOutcomeStateTone(task) : "warning";
+    return taskNeedsInput(task) ? "warning" : taskOutcomeStateTone(task);
   }
 
   function resultIconName(): string {
@@ -296,7 +301,7 @@
       </section>
     {/if}
 
-    {#if task.interaction !== null && !passwordQuestion && !conflictQuestion}
+    {#if taskNeedsInput(task) && !passwordQuestion && !conflictQuestion}
       <section class="task-control-callout task-interaction-callout attention" aria-live="polite">
         <Icon name={task.interaction === "password" ? "lock" : "alert-triangle"} size={16} />
         <div>
@@ -332,12 +337,12 @@
             autocomplete="current-password"
             aria-label={tr("gui.password.archive_password", "Archive password")}
             aria-invalid={passwordError ? "true" : undefined}
-            aria-describedby={passwordError ? passwordErrorId : undefined}
+            aria-describedby={passwordFeedback ? passwordErrorId : undefined}
             oninput={(event) => onPasswordValueChange(event.currentTarget.value)}
           />
         </label>
-        {#if passwordError}
-          <small id={passwordErrorId} class="task-question-error" role="alert">{passwordError}</small>
+        {#if passwordFeedback}
+          <small id={passwordErrorId} class="task-question-error" role="alert">{passwordFeedback}</small>
         {/if}
         <p class="task-question-note"><Icon name="info" size={14} />{passwordQuestion.sessionDetail}</p>
         <footer class="task-question-actions">
@@ -359,6 +364,9 @@
           <span><b>{tr("gui.conflict.existing", "Existing")}</b>{conflictQuestion.existing}</span>
           <span><b>{tr("gui.conflict.incoming", "Incoming")}</b>{conflictQuestion.incoming}</span>
         </div>
+        {#if questionFailure}
+          <p class="task-question-error" role="alert">{questionFailure}</p>
+        {/if}
         <label class="conflict-apply-all">
           <input
             type="checkbox"

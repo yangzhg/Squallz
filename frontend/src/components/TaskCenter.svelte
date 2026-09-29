@@ -3,6 +3,7 @@
   import Icon from "./Icon.svelte";
   import { cssVariables, type CssVariableMap } from "../lib/css-variables";
   import type { Task } from "../lib/jobs.svelte";
+  import { taskNeedsInput } from "../lib/task-model";
   import {
     taskCenterCounts,
     taskCenterRows,
@@ -126,6 +127,7 @@
   }
 
   function interactionDetail(task: Task): string | null {
+    if (!taskNeedsInput(task)) return null;
     if (task.interaction === "password") {
       return task.ownedByRequester
         ? tr("gui.task_center.password_waiting", "Waiting for a password")
@@ -148,13 +150,14 @@
   }
 
   function taskState(task: Task): string {
-    return task.interaction === null
+    if (task.controlIntent === "cancel") return taskCancelButtonLabel(task);
+    return !taskNeedsInput(task)
       ? taskOutcomeStateLabel(task)
       : tr("gui.task_center.needs_input", "Needs input");
   }
 
   function taskTone(task: Task): string {
-    return task.interaction === null ? taskOutcomeStateTone(task) : "warning";
+    return taskNeedsInput(task) ? "warning" : taskOutcomeStateTone(task);
   }
 
   function taskCurrentItem(task: Task): string | null {

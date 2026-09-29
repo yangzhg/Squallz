@@ -594,11 +594,11 @@
   );
   let previousPasswordPromptIdentity: string | null = null;
   let jobConflictPrompt = $derived(pendingConflict());
-  let activeConflictPromptIdentity = $derived(
-    jobConflictPrompt
-      ? `${jobConflictPrompt.id}:${jobConflictPrompt.version}`
-      : null,
-  );
+  let activeConflictPromptIdentity = $derived.by(() => {
+    const prompt = jobConflictPrompt ?? jobRows.find((task) =>
+      task.ownedByRequester && task.question?.kind === "conflict")?.question?.prompt;
+    return prompt ? `${prompt.id}:${prompt.version}` : null;
+  });
   let previousConflictPromptIdentity: string | null = null;
   let taskDialogTaskId = $state<number | null>(windowRecovery.taskId ?? null);
   let taskDialogDismissedId = $state<number | null>(null);
@@ -12489,6 +12489,7 @@
       ownedByRequester: true,
       interaction: null,
       question: null,
+      questionFailure: null,
       answeredQuestionVersion: 0,
       state: "submitting",
       queuePosition: null,
@@ -13456,11 +13457,13 @@
     if (jobPasswordPrompt) {
       const promptId = jobPasswordPrompt.id;
       const returnScreen = jobQuestionReturnScreen(promptId);
-      answerJobPassword(jobPasswordValue);
+      const answer = answerJobPassword(jobPasswordValue);
       jobPasswordValue = "";
+      if (!await answer) return;
+      showNotice(tr("gui.password.sent_to_task", "Password sent to task"));
+      if (jobPasswordPrompt || jobConflictPrompt) return;
       setScreen(returnScreen);
       returnTaskQuestionToCenter(promptId);
-      showNotice(tr("gui.password.sent_to_task", "Password sent to task"));
       return;
     }
     const prompt = archivePasswordPrompt;
@@ -13498,14 +13501,16 @@
     showNotice(archiveOpenFailureNotice(prompt.path));
   }
 
-  function cancelPasswordRequest() {
+  async function cancelPasswordRequest() {
     passwordSubmissionAttempted = false;
     if (jobPasswordPrompt) {
       const promptId = jobPasswordPrompt.id;
       const returnScreen = jobQuestionReturnScreen(promptId);
-      answerJobPassword(null);
-      showNotice(tr("gui.password.prompt_cancelled", "Password prompt cancelled"));
+      const answer = answerJobPassword(null);
       jobPasswordValue = "";
+      if (!await answer) return;
+      showNotice(tr("gui.password.prompt_cancelled", "Password prompt cancelled"));
+      if (jobPasswordPrompt || jobConflictPrompt) return;
       setScreen(returnScreen);
       returnTaskQuestionToCenter(promptId);
       return;
@@ -13816,7 +13821,7 @@
     extractReadable: () => void submitBestEffortExtractJob(),
   };
 
-  function answerConflictDecision(decision: TaskConflictDecision, applyAll: boolean) {
+  async function answerConflictDecision(decision: TaskConflictDecision, applyAll: boolean) {
     if (!jobConflictPrompt) {
       showNotice(tr("gui.conflict.no_prompt_pending", "No conflict request is active"));
       return;
@@ -13824,9 +13829,9 @@
     const answer = normalizeTaskConflictAnswer(decision, applyAll);
     const promptId = jobConflictPrompt.id;
     const returnScreen = jobQuestionReturnScreen(promptId);
-    answerJobConflict(answer.decision, answer.applyAll);
+    if (!await answerJobConflict(answer.decision, answer.applyAll)) return;
     if (answer.decision === "abort") {
-      showNotice(tr("gui.conflict.extraction_cancelled", "Extraction cancelled"));
+      showNotice(tr("gui.task.cancel_requested", "Cancel requested"));
     } else {
       showNotice(
         answer.applyAll
@@ -13834,6 +13839,7 @@
           : tr("gui.conflict.decision_sent", "Conflict decision sent to task"),
       );
     }
+    if (jobPasswordPrompt || jobConflictPrompt) return;
     conflictApplyAll = false;
     setScreen(returnScreen);
     returnTaskQuestionToCenter(promptId);

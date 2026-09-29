@@ -67,7 +67,9 @@ export interface Task {
   origin: JobOrigin;
   ownedByRequester: boolean;
   interaction: JobInteraction | null;
+  /** Last owned backend prompt, retained while an answer or cancellation is pending. */
   question: JobQuestion | null;
+  questionFailure: "answer" | "cancel" | null;
   answeredQuestionVersion: number;
   state: JobStateName;
   queuePosition: number | null;
@@ -228,6 +230,7 @@ export async function submitJob(spec: JobSpec): Promise<number> {
       ownedByRequester: true,
       interaction: null,
       question: null,
+      questionFailure: null,
       answeredQuestionVersion: 0,
       state: "queued",
       queuePosition: null,
@@ -290,7 +293,11 @@ function runTerminalEffects(task: Task, previousState: JobStateName): void {
 
 function clearPendingQuestions(id: number): void {
   const task = find(id);
-  if (task) task.question = null;
+  if (task) {
+    task.question = null;
+    task.interaction = null;
+    task.questionFailure = null;
+  }
 }
 
 function errorNeedsInspection(error: ErrorDto | null): boolean {
@@ -1113,7 +1120,8 @@ function taskFromSnapshot(snapshot: JobSnapshot): Task {
     origin: snapshot.origin,
     ownedByRequester: snapshot.owned_by_requester,
     interaction: snapshot.interaction,
-    question: snapshotQuestion(snapshot, 0),
+    question: snapshotQuestion(snapshot),
+    questionFailure: null,
     answeredQuestionVersion: 0,
     state: snapshot.state,
     queuePosition: snapshot.queue_position,
@@ -1163,7 +1171,9 @@ function applySnapshot(snapshot: JobSnapshot): void {
   task.origin = snapshot.origin;
   task.ownedByRequester = snapshot.owned_by_requester;
   task.interaction = snapshot.interaction;
-  task.question = snapshotQuestion(snapshot, task.answeredQuestionVersion, task.question);
+  const question = snapshotQuestion(snapshot, task.question);
+  if (question !== task.question) task.questionFailure = null;
+  task.question = question;
   task.state = snapshot.state;
   task.queuePosition = snapshot.queue_position;
   task.queueWaitReason = snapshot.queue_wait_reason;
@@ -1290,6 +1300,8 @@ type PreviewTaskKind =
   | "recovery_cleanup_record"
   | "extract"
   | "extract_failure"
+  | "extract_password"
+  | "extract_conflict"
   | "extract_nested_failure"
   | "update_failure"
   | "extract_unknown_current"
@@ -1413,7 +1425,7 @@ function previewTaskSpec(kind: PreviewTaskKind): JobSpec {
       test_after_create: kind === "compress_failure",
     };
   }
-  if (kind === "extract" || kind === "extract_failure" || kind === "extract_unknown_current" || kind === "extract_metadata") {
+  if (kind === "extract" || kind === "extract_failure" || kind === "extract_password" || kind === "extract_conflict" || kind === "extract_unknown_current" || kind === "extract_metadata") {
     return {
       kind: "extract",
       path: `${sampleRoot}/product-backup.zip`,
@@ -1879,6 +1891,8 @@ function previewProgress(kind: PreviewTaskKind, state: Extract<JobStateName, "do
 }
 
 function previewTaskOffset(kind: PreviewTaskKind): number {
+  if (kind === "extract_password") return 34;
+  if (kind === "extract_conflict") return 35;
   if (kind === "update_failure") return 33;
   if (kind === "extract_nested_failure") return 32;
   if (kind === "batch_extract_partial") return 30;
@@ -1980,6 +1994,15 @@ function installTaskPreview(kind: PreviewTaskKind, state: Extract<JobStateName, 
       detail: `SFX replacement requires manual recovery. Inspect target ${target} and the listed transaction paths.`,
     };
 
+  const question: JobQuestion | null = state !== "running" ? null
+    : kind === "extract_password"
+    ? { kind: "password", prompt: { id, version: 1, name: "product-backup.zip", wrong: false } }
+    : kind === "extract_conflict"
+    ? { kind: "conflict", prompt: { id, version: 1,
+      existing_path: `${sampleOutputRoot}/product-backup/reports/Launch plan.pdf`, existing_size: 4096000,
+      existing_modified: 1781190000, incoming_path: "reports/Launch plan.pdf", incoming_size: 5120000,
+      incoming_modified: 1781276400 } }
+    : null;
   store.tasks.push({
     id,
     version: 0,
@@ -1987,8 +2010,9 @@ function installTaskPreview(kind: PreviewTaskKind, state: Extract<JobStateName, 
     title: titleFor(spec),
     origin: "app",
     ownedByRequester: true,
-    interaction: null,
-    question: null,
+    interaction: question?.kind ?? null,
+    question,
+    questionFailure: null,
     answeredQuestionVersion: 0,
     state: previewState,
     outputPasswordRequired: kind === "compress_failure" || kind === "convert_failure" || kind === "convert_encrypted_failure",
@@ -2086,6 +2110,7 @@ export function installTaskQueuePreview(
       ownedByRequester: true,
       interaction: null,
       question: null,
+      questionFailure: null,
       answeredQuestionVersion: 0,
       state: "queued",
       queuePosition: index + 1,
@@ -2144,12 +2169,21 @@ async function requestTaskControl(
   request: () => Promise<void>,
 ): Promise<void> {
   const task = find(id);
-  if (task) task.controlIntent = intent;
+  if (!task || isTerminalSnapshotState(task.state) || task.controlIntent === "cancel"
+    || (task.controlIntent !== null && intent !== "cancel")) return;
+  task.controlIntent = intent;
+  if (intent === "cancel") task.questionFailure = null;
   try {
     await request();
   } catch {
     const current = find(id);
-    if (current?.controlIntent === intent) current.controlIntent = null;
+    if (current?.controlIntent === intent) {
+      current.controlIntent = null;
+      if (intent === "cancel" && current.question) {
+        current.questionFailure = "cancel";
+        return;
+      }
+    }
     pushToast({
       kind: "warning",
       title: t("gui.task.control_failed"),
@@ -2211,8 +2245,6 @@ export function setTaskExpanded(id: number, expanded: boolean): void {
 }
 
 export function cancelTask(id: number): void {
-  // Cancelling also dismisses an open question modal of this job.
-  clearPendingQuestions(id);
   void requestTaskControl(id, "cancel", () => ipc.cancelJob(id));
 }
 
@@ -2254,43 +2286,61 @@ export async function clearFinished(ids: readonly number[]): Promise<boolean> {
 
 /* ---- Conflict modal ---- */
 
-export function pendingConflict(): AskConflictEvent | null {
+function pendingQuestion(kind: JobQuestion["kind"]): JobQuestion | null {
   for (const task of store.tasks) {
-    if (task.question?.kind === "conflict") return task.question.prompt;
+    const question = task.question;
+    if (task.ownedByRequester && !isTerminalSnapshotState(task.state)
+      && task.controlIntent !== "cancel" && question?.kind === kind
+      && question.prompt.version > task.answeredQuestionVersion) return question;
   }
   return null;
 }
 
-export function answerConflict(decision: string, applyAll: boolean): void {
+export function pendingConflict(): AskConflictEvent | null {
+  const question = pendingQuestion("conflict");
+  return question?.kind === "conflict" ? question.prompt : null;
+}
+
+export async function answerConflict(decision: string, applyAll: boolean): Promise<boolean> {
   const c = pendingConflict();
-  if (!c) return;
-  answerQuestion(c, () => ipc.answerConflict(c.id, c.version, decision, applyAll));
+  if (!c) return false;
+  return answerQuestion(c, () => ipc.answerConflict(c.id, c.version, decision, applyAll));
 }
 
 /* ---- Password modal for running jobs ---- */
 
 export function pendingPassword(): AskPasswordEvent | null {
-  for (const task of store.tasks) {
-    if (task.question?.kind === "password") return task.question.prompt;
-  }
-  return null;
+  const question = pendingQuestion("password");
+  return question?.kind === "password" ? question.prompt : null;
 }
 
-export function answerPassword(password: string | null): void {
+export async function answerPassword(password: string | null): Promise<boolean> {
   const p = pendingPassword();
-  if (!p) return;
-  answerQuestion(p, () => ipc.answerPassword(p.id, p.version, password));
+  if (!p) return false;
+  return answerQuestion(p, () => ipc.answerPassword(p.id, p.version, password));
 }
 
-function answerQuestion(prompt: AskPasswordEvent | AskConflictEvent, send: () => Promise<void>): void {
+async function answerQuestion(prompt: AskPasswordEvent | AskConflictEvent, send: () => Promise<void>): Promise<boolean> {
   const task = find(prompt.id);
-  if (!task) return;
+  if (!task) return false;
+  // Keep the authoritative question until the backend clears or replaces it.
+  // Hiding a pending answer must not discard the retry path if IPC fails.
   task.answeredQuestionVersion = prompt.version;
-  task.question = null;
-  void send().catch(() => {
+  task.questionFailure = null;
+  try {
+    await send();
+    return true;
+  } catch {
     if (task.answeredQuestionVersion === prompt.version) task.answeredQuestionVersion = 0;
-    pushToast({ kind: "warning", title: t("gui.task.answer_failed") });
-  }).finally(() => refreshQuestionTask(prompt.id));
+    if (task.question?.prompt.version === prompt.version) {
+      task.questionFailure = "answer";
+    } else {
+      pushToast({ kind: "warning", title: t("gui.task.answer_failed"), body: t("gui.task.answer_failed_detail") });
+    }
+    return false;
+  } finally {
+    void refreshQuestionTask(prompt.id);
+  }
 }
 
 /** Localized error text for a failed task row. */

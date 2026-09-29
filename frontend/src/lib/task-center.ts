@@ -1,5 +1,5 @@
 import type { Task } from "./jobs.svelte";
-import { taskOutcomeNeedsAttention } from "./task-model";
+import { taskNeedsInput, taskOutcomeNeedsAttention } from "./task-model";
 
 export interface TaskCenterCounts {
   active: number;
@@ -40,11 +40,11 @@ function isTerminal(task: Task): boolean {
 }
 
 function needsAttention(task: Task): boolean {
-  return task.interaction !== null || task.state === "failed" || taskOutcomeNeedsAttention(task);
+  return taskNeedsInput(task) || task.state === "failed" || taskOutcomeNeedsAttention(task);
 }
 
 function rowPriority(task: Task): number {
-  if (task.interaction !== null) return 0;
+  if (taskNeedsInput(task)) return 0;
   if (needsAttention(task)) return 1;
   if (task.state === "running") return 2;
   if (task.state === "paused") return 3;

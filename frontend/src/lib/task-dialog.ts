@@ -366,6 +366,16 @@ export function taskControlCalloutVisible(task: TaskDialogModel): boolean {
   return task.controlIntent !== null;
 }
 
+export function taskQuestionFailureMessage(task: TaskDialogModel): string | null {
+  if (task.questionFailure === "cancel") {
+    return tr("gui.task.question_cancel_failed", "Could not cancel the task. Try again or answer the current prompt.");
+  }
+  if (task.questionFailure === "answer") {
+    return tr("gui.task.answer_failed_detail", "The task has not confirmed your response. Check its current prompt and try again.");
+  }
+  return null;
+}
+
 export function taskPhaseControlNoticeVisible(task: TaskDialogModel): boolean {
   return isTaskActiveState(task.state) && !task.interruptible;
 }
