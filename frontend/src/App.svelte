@@ -1284,6 +1284,7 @@
     }
     const questionTaskId = jobPasswordPrompt?.id ?? jobConflictPrompt?.id ?? null;
     if (questionTaskId !== null) {
+      rememberTaskWorkspaceFocus();
       taskDialogTaskId = questionTaskId;
       taskDialogDismissedId = null;
       return;
@@ -2285,6 +2286,7 @@
   });
 
   function handleWorkflowEscape(): boolean {
+    if (modeSelectionBlocked || blockingModalVisible() || document.activeElement?.closest("#squallz-task-center")) return false;
     if (screen === "browse" && (previewBusy() || nestedPreview || entryPreview || entryPreviewFailure)) {
       clearEntryPreviewState();
       return true;
@@ -12634,7 +12636,7 @@
 
   function openTaskCenter(source: HTMLElement | null = null): void {
     if (!appActionEnabled("task_center") || taskCenterOpen) return;
-    taskCenterReturnFocus = source;
+    rememberTaskWorkspaceFocus(source ?? document.activeElement);
     taskCenterFocusTaskId = null;
     taskCenterSelectedTaskId = null;
     taskCenterOpen = true;
@@ -12643,17 +12645,32 @@
 
   function closeTaskCenter(): void {
     taskReviewRequestGeneration += 1;
-    const returnFocus = taskCenterReturnFocus;
     taskCenterOpen = false;
     taskCenterSelectedTaskId = null;
     taskCenterFocusTaskId = null;
+    restoreTaskWorkspaceFocus();
+  }
+
+  function rememberTaskWorkspaceFocus(source: Element | null = document.activeElement): void {
+    if (taskWindowMode || taskDialogVisible()) return;
+    if (source instanceof HTMLElement && source !== document.body
+      && !source.closest("#squallz-task-center, .task-modal-overlay")) {
+      taskCenterReturnFocus = source;
+    }
+  }
+
+  function restoreTaskWorkspaceFocus(): void {
+    const returnFocus = taskCenterReturnFocus;
+    const returnScreen = screen;
     taskCenterReturnFocus = null;
     void tick().then(() => {
-      if (returnFocus?.isConnected) {
-        returnFocus.focus();
-        return;
+      if (taskWindowMode || taskCenterOpen || blockingModalVisible() || modeSelectionBlocked || screen !== returnScreen) return;
+      if (returnFocus?.isConnected && !returnFocus.closest("[inert]") && !returnFocus.matches(":disabled")) {
+        returnFocus.focus({ preventScroll: true });
+        if (document.activeElement === returnFocus) return;
       }
-      if (screen === "create") createPrimaryAction()?.focus();
+      const fallback = screen === "create" ? createPrimaryAction() : document.querySelector<HTMLElement>(".task-center-trigger");
+      fallback?.focus({ preventScroll: true });
     });
   }
 
@@ -12914,6 +12931,7 @@
 
   function openTaskDialog(task: Task | null = blockingTask()): void {
     if (!task) return;
+    rememberTaskWorkspaceFocus();
     taskDialogTaskId = task.id;
     taskDialogDismissedId = null;
   }
@@ -12942,13 +12960,14 @@
     taskReviewRequestGeneration += 1;
     if (task.id === null) return;
     if (isTaskActiveState(task.state)) return;
+    if (taskWindowMode && await closeNativeTaskWindow()) return;
+    taskDialogDismissedId = task.id;
+    taskDialogTaskId = null;
     if (!taskWindowMode && taskCenterSelectedTaskId === task.id) {
       closeTaskCenter();
       return;
     }
-    if (taskWindowMode && await closeNativeTaskWindow()) return;
-    taskDialogDismissedId = task.id;
-    taskDialogTaskId = null;
+    if (!taskWindowMode && !taskCenterOpen) restoreTaskWorkspaceFocus();
   }
 
   function isJobSubmitBlocked(error: unknown): boolean {
@@ -12988,14 +13007,7 @@
       taskDialogDismissedId = null;
     } else {
       if (taskCenterReturnFocus === null) {
-        const focused = document.activeElement;
-        if (
-          focused instanceof HTMLElement &&
-          focused !== document.body &&
-          !focused.closest("#squallz-task-center")
-        ) {
-          taskCenterReturnFocus = focused;
-        }
+        rememberTaskWorkspaceFocus();
       }
       taskCenterFocusTaskId = null;
       taskCenterSelectedTaskId = null;

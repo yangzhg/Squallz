@@ -16,6 +16,7 @@ function harness() {
     reviewTask:async(task,displayed)=>calls.push(["restore",task.spec,displayed]),
     showNotice:(message)=>calls.push(["notice",message]),tr:(_key,fallback)=>fallback,
     taskCenterReturnFocus:null,taskCenterOpen:true,taskCenterSelectedTaskId:7,taskCenterFocusTaskId:null,
+    restoreTaskWorkspaceFocus:()=>{},
     tick:()=>Promise.resolve(),sameFilePath:(left,right)=>left===right,
     recoverySourceMode:"none",recoverySourceOverride:null,recoveryPar2Override:null,
     recoverySourcePath:()=>null,recoveryContextTaskIds:new Set(),

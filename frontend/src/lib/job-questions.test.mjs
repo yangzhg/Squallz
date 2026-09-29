@@ -577,6 +577,7 @@ test("job questions open the shared task surface without navigating or discardin
         jobConflictPrompt: kind === "conflict" ? { id: 9 } : null,
         archivePasswordPrompt: null, previewPasswordPrompt: null,
         taskWindowMode: false, taskDialogTaskId: null, taskDialogDismissedId: 8,
+        rememberTaskWorkspaceFocus: () => {},
         $effect: (effect) => effect(),
         setScreen: (next) => { context.screen = next; context.pendingCreateSubmission = null; },
       };
