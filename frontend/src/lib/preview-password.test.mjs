@@ -21,6 +21,53 @@ async function withFlow(run) {
 
 const context = { outerName: "outer.zip", innerName: "inner.7z", isCurrent: () => true };
 
+test("both password layouts retain labelled input, error context, cancellation and optional password management", async () => {
+  const server = await createTestServer();
+  try {
+    const { render } = await server.ssrLoadModule("svelte/server");
+    const { default: Workspace } = await server.ssrLoadModule("/src/components/TaskInteractionWorkspace.svelte");
+    const { loadLocale, tFallback, t } = await server.ssrLoadModule("/src/lib/i18n.svelte.ts");
+    for (const language of ["en-US", "zh-CN"]) {
+      await loadLocale(language);
+      for (const variant of ["modern", "classic"]) {
+        const surface = {
+          kind: "password", variant, tr: tFallback, active: true,
+          name: "Quarterly archives & supporting documents.7z", detail: "Awaiting the inner archive",
+          sessionDetail: "Used for this archive in this session", failureDetail: "Retry or cancel",
+          secretStoreLabel: "Keychain", value: "", busy: false, rejected: false, error: t("gui.password.empty_error"),
+          forgetVisible: true, forgetDisabledReason: "", forgetAriaLabel: t("gui.settings.password_book.forget_current"),
+          onInputMount() {}, onValueChange() {}, onSubmit() {}, onCancel() {}, onForget() {}, onBack() {},
+        };
+        const body = render(Workspace, { props: { surface } }).body;
+        assert.equal((body.match(/<input\b/g) ?? []).length, 1);
+        const input = body.match(/<input\b[^>]*>/)[0];
+        assert.match(input, /type="password"/);
+        assert.match(input, /aria-invalid="true"/);
+        for (const id of input.match(/aria-describedby="([^"]+)"/)[1].split(" ")) {
+          assert.ok(body.includes(`id="${id}"`), `${variant} describes input with ${id}`);
+        }
+        assert.ok(body.includes(t("gui.settings.password_book.forget_current")));
+        assert.match(body, /<details\b[^>]*><summary/);
+        assert.match(body, /Quarterly archives &amp; supporting documents\.7z/);
+        const rejected = render(Workspace, { props: { surface: { ...surface, rejected: true, error: null } } }).body;
+        assert.match(rejected, /<input\b[^>]*aria-invalid="true"/);
+        assert.match(rejected, /<p\b[^>]*id="password-request-detail"[^>]*role="alert"/);
+        const busy = render(Workspace, { props: { surface: { ...surface, busy: true, error: null } } }).body;
+        assert.match(busy, /<input\b[^>]*disabled/);
+        assert.match(busy, /<button\b[^>]*type="submit"[^>]*aria-busy="true"[^>]*disabled/);
+        assert.ok(busy.includes(t("gui.password.unlocking")));
+        assert.match(busy, new RegExp(`<button type="button">${t("common.cancel")}</button>`));
+        const empty = render(Workspace, { props: { surface: { ...surface, active: false } } }).body;
+        assert.doesNotMatch(empty, /<input\b|<form\b/);
+        assert.ok(empty.includes(t("gui.nav.back_to_archive")));
+        assert.doesNotMatch(empty, /gui\.[a-z_.]+/);
+      }
+    }
+  } finally {
+    await server.close();
+  }
+});
+
 test("preview prompts for distinct passwords, retries only the rejected layer, and forgets inputs", async () => {
   await withFlow(async (flow) => {
     const attempts = [];

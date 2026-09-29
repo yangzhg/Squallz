@@ -18,6 +18,7 @@
     secretStoreLabel: string;
     value: string;
     busy: boolean;
+    rejected: boolean;
     error: string | null;
     forgetVisible: boolean;
     forgetDisabledReason: string;
@@ -85,70 +86,83 @@
   }
 </script>
 
-{#if surface.kind === "password" && surface.variant === "modern"}
-  <div class="password-view modern-password">
-    <div class="sheet-head compact-head">
-      <div>
-        {#if surface.active}
-          <span class="eyebrow">{surface.tr("gui.password.required", "Password required")}</span>
-          <h1>{surface.tr("gui.password.unlock_name", "Unlock {name}").replace("{name}", surface.name)}</h1>
-          <p id="password-detail-modern" role="status">{surface.detail}</p>
-        {:else}
-          <span class="eyebrow">{surface.tr("gui.password.empty_eyebrow", "Password")}</span>
-          <h1>{surface.tr("gui.password.empty_title", "Password entry")}</h1>
-          <p>{surface.tr("gui.password.empty_detail", "Squallz asks here only when an archive or task needs a password.")}</p>
-        {/if}
-      </div>
-    </div>
-    {#if surface.active}
-      <form
-        class="modal-preview password-sheet"
-        onsubmit={(event) => {
-          event.preventDefault();
-          void surface.onSubmit();
-        }}
-      >
+{#if surface.kind === "password"}
+  <div class="password-workspace" class:classic-dialog-body={surface.variant === "classic"}>
+    <section class="password-request" aria-labelledby="password-request-title">
+      <header class="password-request-header">
         <div class="password-lock"><Icon name="lock" size={24} /></div>
         <div>
-          <span class="secure-label">{surface.tr("gui.password.password", "Password")}</span>
-          <input
-            use:registerPasswordInput
-            class="secure-input"
-            type="password"
-            value={surface.value}
-            disabled={surface.busy}
-            autocomplete="current-password"
-            aria-label={surface.tr("gui.password.archive_password", "Archive password")}
-            aria-invalid={surface.error ? "true" : undefined}
-            aria-describedby={surface.error ? "password-detail-modern password-error-modern" : "password-detail-modern"}
-            oninput={updatePassword}
-          />
-          {#if surface.error}
-            <small id="password-error-modern" class="password-inline-error" role="alert">{surface.error}</small>
+          {#if surface.active}
+            <span class="eyebrow">{surface.tr("gui.password.required", "Password required")}</span>
+            <h1 id="password-request-title">{surface.name}</h1>
+          {:else}
+            <span class="eyebrow">{surface.tr("gui.password.empty_eyebrow", "Password")}</span>
+            <h1 id="password-request-title">{surface.tr("gui.password.empty_title", "Password entry")}</h1>
           {/if}
         </div>
-        <div class="check-row"><Icon name="info" size={14} />{surface.sessionDetail}</div>
-        <div class="password-policy">
-          <strong>{surface.tr("gui.password.security_boundary", "Security boundary")}</strong>
-          <span>{surface.tr("gui.password.manual_wins_body", "Manual password wins over saved password. Failed saved passwords fall back to this prompt.")}</span>
+      </header>
+      {#if surface.active}
+        <form
+          class="password-request-form"
+          onsubmit={(event) => {
+            event.preventDefault();
+            void surface.onSubmit();
+          }}
+        >
+          <div class="password-request-body">
+            <p id="password-request-detail" class:password-inline-error={surface.rejected} role={surface.rejected ? "alert" : "status"}>{surface.detail}</p>
+            <label class="password-request-field">
+              <span class="secure-label">{surface.tr("gui.password.password", "Password")}</span>
+              <input
+                use:registerPasswordInput
+                class="secure-input"
+                type="password"
+                value={surface.value}
+                disabled={surface.busy}
+                autocomplete="current-password"
+                aria-label={surface.tr("gui.password.archive_password", "Archive password")}
+                aria-invalid={surface.error || surface.rejected ? "true" : undefined}
+                aria-describedby={surface.error ? "password-request-detail password-request-session password-request-error" : "password-request-detail password-request-session"}
+                oninput={updatePassword}
+              />
+            </label>
+            {#if surface.error}
+              <small id="password-request-error" class="password-inline-error" role="alert">{surface.error}</small>
+            {/if}
+            <p id="password-request-session" class="password-request-session"><Icon name="info" size={14} /><span>{surface.sessionDetail}</span></p>
+            <details class="password-request-details">
+              <summary>{surface.tr("gui.password.handling_details", "How passwords are handled")}</summary>
+              <p>{surface.tr("gui.password.prompt_boundary_body", "Unlock only the archive that requested credentials. No password is written to logs, settings, or task status.")}</p>
+              <dl>
+                <div><dt>{surface.tr("gui.password.fallback", "Fallback")}</dt><dd>{surface.tr("gui.password.manual_wins_body", "Manual input takes priority, followed by the session password, then the saved password. Rejected saved passwords return to this prompt.")}</dd></div>
+                <div><dt>{surface.tr("gui.password.on_failure", "On failure")}</dt><dd>{surface.failureDetail}</dd></div>
+                <div><dt>{surface.tr("gui.password.session", "Session")}</dt><dd>{surface.tr("gui.password.session_zeroize", "Session cache: cleared on exit or when forgotten.")}</dd></div>
+                <div><dt>{surface.secretStoreLabel}</dt><dd>{surface.tr("gui.password.secret_store_supplies_directly", "Squallz shows only their status; archive operations retrieve saved passwords when needed.")} {surface.tr("gui.password.keychain_opt_in", "{secretStore}: opt-in, per archive account.").replace("{secretStore}", surface.secretStoreLabel)}</dd></div>
+              </dl>
+            </details>
+          </div>
+          <footer class="modal-actions password-request-actions">
+            <button type="button" onclick={surface.onCancel}>{surface.tr("common.cancel", "Cancel")}</button>
+            {#if surface.forgetVisible}
+              <button type="button" disabled={Boolean(surface.forgetDisabledReason)} title={surface.forgetDisabledReason}
+                aria-label={surface.forgetAriaLabel} onclick={() => void surface.onForget()}
+              >{surface.tr("gui.settings.password_book.forget_current", "Forget current archive")}</button>
+            {/if}
+            <button class="primary-lite" class:classic-primary={surface.variant === "classic"} type="submit" aria-busy={surface.busy} disabled={surface.busy}>
+              {surface.busy ? surface.tr("gui.password.unlocking", "Unlocking…") : surface.tr("gui.password.unlock_continue", "Unlock and continue")}
+            </button>
+          </footer>
+        </form>
+      {:else}
+        <div class="password-request-body">
+          <p>{surface.tr("gui.password.no_active_request", "No password request is active")}</p>
+          <p>{surface.tr("gui.password.no_active_request_body", "Password entry appears when opening an encrypted archive or when an extract or test task asks for credentials.")}</p>
         </div>
-        <div class="modal-actions">
-          <button type="button" onclick={surface.onCancel}>{surface.tr("common.cancel", "Cancel")}</button>
-          <button class="primary-lite" type="submit" aria-busy={surface.busy} disabled={surface.busy}>{surface.tr("gui.password.unlock_continue", "Unlock and continue")}</button>
-        </div>
-      </form>
-    {:else}
-      <div class="modal-preview empty-task-state">
-        <div class="password-lock"><Icon name="lock" size={24} /></div>
-        <div>
-          <strong>{surface.tr("gui.password.no_active_request", "No password request is active")}</strong>
-          <span>{surface.tr("gui.password.no_active_request_body", "Password entry appears when opening an encrypted archive or when an extract or test task asks for credentials.")}</span>
-        </div>
-        <div class="modal-actions">
+        <footer class="modal-actions password-request-actions">
           <button onclick={surface.onBack}>{surface.tr("gui.nav.back_to_archive", "Back to archive")}</button>
-        </div>
-      </div>
-    {/if}
+        </footer>
+      {/if}
+    </section>
   </div>
 {:else if surface.kind === "conflict" && surface.variant === "modern"}
   <div class="conflict-view modern-conflict">
@@ -190,95 +204,6 @@
         </div>
       </div>
     {/if}
-  </div>
-{:else if surface.kind === "password"}
-  <div class="classic-dialog-body">
-    <section class="classic-extract-sheet classic-password">
-      <header>
-        <div>
-          {#if surface.active}
-            <h1>{surface.tr("gui.screen.password", "Password Required")}</h1>
-            <p>{surface.tr("gui.password.prompt_boundary_body", "Unlock only the archive that requested credentials. No password is written to logs, settings, or task status.")}</p>
-          {:else}
-            <h1>{surface.tr("gui.password.empty_title", "Password entry")}</h1>
-            <p>{surface.tr("gui.password.empty_detail", "Squallz asks here only when an archive or task needs a password.")}</p>
-          {/if}
-        </div>
-        {#if surface.active}
-          <button class="classic-primary" type="submit" form="classic-password-request" aria-busy={surface.busy} disabled={surface.busy}>{surface.tr("gui.password.unlock", "Unlock")}</button>
-        {:else}
-          <button onclick={surface.onBack}>{surface.tr("gui.nav.back_to_archive", "Back to archive")}</button>
-        {/if}
-      </header>
-
-      {#if surface.active}
-        <form
-          id="classic-password-request"
-          class="classic-password-grid"
-          onsubmit={(event) => {
-            event.preventDefault();
-            void surface.onSubmit();
-          }}
-        >
-          <section class="classic-password-panel">
-            <h2>{surface.name}</h2>
-            <p id="password-detail-classic" role="status">{surface.detail}</p>
-            <div class="classic-form-grid compact">
-              <div class="classic-label">{surface.tr("gui.password.password", "Password")}</div>
-              <div class="classic-password-field">
-                <input
-                  use:registerPasswordInput
-                  class="classic-input password-obscured"
-                  type="password"
-                  value={surface.value}
-                  disabled={surface.busy}
-                  autocomplete="current-password"
-                  aria-label={surface.tr("gui.password.archive_password", "Archive password")}
-                  aria-invalid={surface.error ? "true" : undefined}
-                  aria-describedby={surface.error ? "password-detail-classic password-error-classic" : "password-detail-classic"}
-                  oninput={updatePassword}
-                />
-                {#if surface.error}
-                  <small id="password-error-classic" class="password-inline-error" role="alert">{surface.error}</small>
-                {/if}
-              </div>
-              <div class="classic-label">{surface.tr("gui.password.remember_short", "Remember")}</div><div class="classic-input classic-copy-wrap">{surface.sessionDetail}</div>
-              <div class="classic-label">{surface.tr("gui.password.fallback", "Fallback")}</div><div class="classic-input classic-copy-wrap">{surface.tr("gui.password.manual_overrides_saved", "Manual input overrides saved password")}</div>
-              <div class="classic-label">{surface.tr("gui.password.on_failure", "On failure")}</div><div class="classic-input accent classic-copy-wrap">{surface.failureDetail}</div>
-            </div>
-            <div class="classic-extract-actions">
-              <button type="button" onclick={surface.onCancel}>{surface.tr("common.cancel", "Cancel")}</button>
-              {#if surface.forgetVisible}
-                <button
-                  type="button"
-                  disabled={Boolean(surface.forgetDisabledReason)}
-                  title={surface.forgetDisabledReason}
-                  aria-label={surface.forgetAriaLabel}
-                  onclick={() => void surface.onForget()}
-                >{surface.tr("gui.settings.password_book.forget_current", "Forget current archive")}</button>
-              {/if}
-            </div>
-          </section>
-          <aside class="classic-password-panel">
-            <h2>{surface.tr("gui.password.security_boundary", "Security boundary")}</h2>
-            <div class="classic-mode-note no-margin">
-              <strong>{surface.tr("gui.password.frontend_never_owns_saved", "Saved passwords stay in the system secret store.")}</strong>
-              <span>{surface.tr("gui.password.secret_store_supplies_directly", "Squallz shows only their status; archive operations retrieve saved passwords when needed.")}</span>
-            </div>
-            <div class="repair-log">
-              <span>{surface.tr("gui.password.manual_transient", "Manual password: user-entered, transient.")}</span>
-              <span>{surface.tr("gui.password.session_zeroize", "Session cache: cleared on exit or when forgotten.")}</span>
-              <span>{surface.tr("gui.password.keychain_opt_in", "{secretStore}: opt-in, per archive account.").replace("{secretStore}", surface.secretStoreLabel)}</span>
-            </div>
-          </aside>
-        </form>
-      {:else}
-        <div class="classic-mode-note classic-task-empty">
-          <strong>{surface.tr("gui.password.no_active_request", "No password request is active")}</strong>
-          <span>{surface.tr("gui.password.no_active_request_body", "Password entry appears when opening an encrypted archive or when an extract or test task asks for credentials.")}</span>
-        </div>
-      {/if}
-    </section>
   </div>
 {:else}
   <div class="classic-dialog-body">

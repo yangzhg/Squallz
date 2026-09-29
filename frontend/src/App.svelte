@@ -4778,12 +4778,7 @@
 
   function modernInspectorSurface(): ModernInspectorSurfaceProps {
     let view: ModernInspectorSurfaceProps["view"];
-    if (screen === "password") {
-      view = {
-        kind: "password",
-        secretStore: secretStoreLabel(),
-      };
-    } else if (screen === "conflict") {
+    if (screen === "conflict") {
       view = { kind: "conflict" };
     } else if (screen === "recovery") {
       view = {
@@ -12895,6 +12890,7 @@
         secretStoreLabel: secretStoreLabel(),
         value: jobPasswordValue,
         busy: archiveOpenStatus === "opening" || Boolean(previewPasswordPrompt?.busy),
+        rejected: Boolean(jobPasswordPrompt?.wrong || archivePasswordPrompt?.wrong || previewPasswordPrompt?.wrong),
         error: passwordSubmissionError,
         forgetVisible: Boolean(jobPasswordPrompt),
         forgetDisabledReason,
@@ -13543,8 +13539,8 @@
       return tr("gui.preview.password_session", "Used for this operation and the opened archive in this app session. Not saved to Password Book.");
     }
     return jobPasswordPrompt
-      ? tr("gui.password.session_only_separate_book", "Session only for this job; saved passwords use the separate Password Book flow")
-      : tr("gui.password.open_session_only", "Used only to open this archive in the current app session.");
+      ? tr("gui.password.session_only_separate_book", "Used for this archive in the current app session. Save it separately in Password Book.")
+      : tr("gui.password.open_session_only", "Used for this archive in the current app session.");
   }
 
   function passwordFailureDetail(): string {
@@ -14650,7 +14646,7 @@
         class="modern-shell"
         class:settings-shell={isSettingsScreen()}
         class:no-archive-shell={screen === "browse" && !currentArchive}
-        class:no-inspector-shell={screen === "recent" || screen === "convert" || screen === "create" || screen === "extract" || screen === "duplicates" || screen === "batch" || screen === "nestedExtract" || screen === "updateReview"}
+        class:no-inspector-shell={screen === "recent" || screen === "convert" || screen === "create" || screen === "extract" || screen === "duplicates" || screen === "batch" || screen === "nestedExtract" || screen === "updateReview" || screen === "password"}
       >
         <aside class="modern-sidebar" aria-label={tr("gui.aria.navigation", "Navigation")}>
           <div class="sidebar-section">
@@ -14874,7 +14870,7 @@
 	          {/if}
         </section>
 
-        {#if !isSettingsScreen() && screen !== "recent" && screen !== "convert" && screen !== "create" && screen !== "extract" && screen !== "duplicates" && screen !== "batch" && screen !== "nestedExtract" && screen !== "updateReview" && (screen !== "browse" || currentArchive)}
+        {#if !isSettingsScreen() && screen !== "recent" && screen !== "convert" && screen !== "create" && screen !== "extract" && screen !== "duplicates" && screen !== "batch" && screen !== "nestedExtract" && screen !== "updateReview" && screen !== "password" && (screen !== "browse" || currentArchive)}
           <ModernInspectorHost
             surface={modernInspectorSurface()}
             ariaLabel={tr("gui.aria.archive_inspector", "Archive inspector")}

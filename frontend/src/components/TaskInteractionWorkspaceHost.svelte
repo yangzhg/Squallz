@@ -31,12 +31,12 @@
   let workspace = $state(workspaceLoader.load());
   let modernClass = $derived(
     surface.kind === "password"
-      ? "password-view modern-password"
+      ? "password-workspace"
       : "conflict-view modern-conflict",
   );
   let classicClass = $derived(
     surface.kind === "password"
-      ? "classic-extract-sheet classic-password"
+      ? "password-request"
       : "classic-extract-sheet classic-conflict",
   );
 
@@ -57,7 +57,7 @@
       </section>
     </div>
   {:else}
-    <div class="classic-dialog-body">
+    <div class="classic-dialog-body" class:password-workspace={surface.kind === "password"}>
       <section class={classicClass}>
         <div class="deferred-workspace-state" role="status" aria-live="polite" aria-busy="true">
           <Icon name="hourglass" size={20} />
@@ -81,7 +81,7 @@
       />
     </div>
   {:else}
-    <div class="classic-dialog-body">
+    <div class="classic-dialog-body" class:password-workspace={surface.kind === "password"}>
       <DeferredViewError
         {error} title={surface.tr("gui.task_surface.load_failed", "Task view could not be loaded")}
         body={surface.tr("gui.task_surface.load_failed_body", "The task is still safe. Retry loading its progress and controls.")}

@@ -33,10 +33,6 @@
 
   export type ModernInspectorView =
     | {
-        kind: "password";
-        secretStore: string;
-      }
-    | {
         kind: "conflict";
       }
     | {
@@ -113,22 +109,7 @@
   );
 </script>
 
-{#if view.kind === "password"}
-  <div class="inspector-block">
-    <span class="block-label">{tr("gui.password.boundary", "Password boundary")}</span>
-    <strong>{tr("gui.password.no_plaintext_persistence", "No plaintext persistence")}</strong>
-    <p>{tr("gui.password.saved_boundary_body", "Saved passwords stay behind the system secret-store boundary; task status and settings only show status.")}</p>
-  </div>
-  <div class="inspector-block">
-    <span class="block-label">{tr("gui.password.fallback_order", "Fallback order")}</span>
-    <dl>
-      <div><dt>{tr("gui.password.manual", "Manual")}</dt><dd>{tr("gui.priority.first", "First")}</dd></div>
-      <div><dt>{tr("gui.password.session", "Session")}</dt><dd>{tr("gui.priority.second", "Second")}</dd></div>
-      <div><dt>{view.secretStore}</dt><dd>{tr("gui.priority.third", "Third")}</dd></div>
-      <div><dt>{tr("gui.password.logs", "Logs")}</dt><dd>{tr("gui.priority.never", "Never")}</dd></div>
-    </dl>
-  </div>
-{:else if view.kind === "conflict"}
+{#if view.kind === "conflict"}
   <div class="inspector-block">
     <span class="block-label">{tr("gui.extract.conflict_policy", "Conflict policy")}</span>
     <div class="health-score"><strong>3</strong><span>{tr("gui.conflict.items", "items")}</span></div>

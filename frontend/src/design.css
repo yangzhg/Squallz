@@ -12,6 +12,7 @@
   --space-lg: 16px;
   --control-height: 32px;
   --password-book-panel-width: 780px;
+  --password-request-width: 600px;
   --control-height-compact: 28px;
   --control-icon-size: 22px;
   --control-radius: 7px;
@@ -3041,19 +3042,6 @@ select option {
   font-weight: var(--font-weight-medium);
 }
 
-.secure-input[aria-invalid="true"],
-.classic-input[aria-invalid="true"] {
-  border-color: var(--color-danger-border);
-  background: var(--color-danger-bg);
-  color: var(--color-danger-fg);
-}
-
-.secure-input[aria-invalid="true"]:focus,
-.classic-input[aria-invalid="true"]:focus {
-  border-color: var(--color-danger-fg);
-  box-shadow: var(--danger-focus-shadow);
-}
-
 .task-question-note {
   min-width: 0;
   margin: 0;
@@ -4651,7 +4639,6 @@ select option {
 .create-sheet,
 .extract-view,
 .batch-view,
-.password-view,
 .conflict-view,
 .settings-view,
 .integration-view,
@@ -7522,9 +7509,7 @@ select option {
 }
 
 .path-decision strong,
-.path-decision p,
-.password-policy strong,
-.password-policy span {
+.path-decision p {
   display: block;
 }
 
@@ -7974,7 +7959,6 @@ textarea.operation-input {
   text-align: center;
 }
 
-.password-view,
 .conflict-view {
   justify-content: center;
 }
@@ -7984,13 +7968,143 @@ textarea.operation-input {
   margin-inline: auto;
 }
 
-.password-sheet {
-  width: min(560px, 100%);
+.password-workspace {
+  min-height: 0;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+}
+
+.password-workspace:not(.classic-dialog-body) {
+  height: 100%;
+}
+
+.password-request {
+  width: min(var(--password-request-width), 100%);
+  max-height: 100%;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: var(--border-width-control) solid var(--color-border-default);
+  border-radius: var(--radius-panel);
+  background: var(--color-surface-raised);
+  box-shadow: var(--shadow-surface);
+}
+
+.password-request-header {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: var(--space-md);
+  padding: var(--space-lg);
+  border-bottom: var(--border-width-control) solid var(--color-divider);
+}
+
+.password-request-header > div:last-child {
+  min-width: 0;
+}
+
+.password-request-header .password-lock {
+  flex: none;
+}
+
+.password-request h1 {
+  margin: var(--space-xs) 0 0;
+  overflow-wrap: anywhere;
+  font-size: var(--type-title);
+  line-height: var(--type-title-line);
+}
+
+.password-request-form {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.password-request-body {
+  min-height: 0;
   display: grid;
-  gap: 13px;
-  align-self: center;
-  margin: 0 auto;
-  padding: 18px;
+  align-content: start;
+  gap: var(--space-md);
+  padding: var(--space-lg);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.password-request :is(p, dt, dd) {
+  margin: 0;
+  overflow-wrap: anywhere;
+  font-size: var(--type-control);
+  line-height: var(--type-control-line);
+}
+
+.password-request :is(p, dd):not(.password-inline-error) {
+  color: var(--color-text-secondary);
+}
+
+.password-request-field {
+  min-width: 0;
+}
+
+.password-request-session {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-sm);
+}
+
+.password-request-session > svg {
+  flex: none;
+  margin-top: var(--border-width-control);
+}
+
+.password-request-details > summary {
+  cursor: pointer;
+  color: var(--color-text-secondary);
+  font-size: var(--type-control);
+  line-height: var(--type-control-line);
+}
+
+.password-request-details > summary:hover {
+  color: var(--color-accent);
+}
+
+.password-request-details > summary:focus-visible {
+  outline: var(--border-width-focus) solid var(--color-accent);
+  outline-offset: var(--space-xs);
+  border-radius: var(--control-radius);
+}
+
+.password-request-details > p {
+  margin-top: var(--space-md);
+}
+
+.password-request-details dl {
+  display: grid;
+  gap: var(--space-md);
+  margin: var(--space-md) 0 0;
+}
+
+.password-request-details dl > div {
+  display: grid;
+  gap: var(--space-xs);
+}
+
+.password-request-details dt {
+  font-weight: var(--font-weight-medium);
+}
+
+.password-request-actions {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-items: center;
+  gap: var(--space-sm);
+  margin: 0;
+  padding: var(--space-md) var(--space-lg);
+  border-top: var(--border-width-control) solid var(--color-divider);
 }
 
 .empty-task-state {
@@ -8058,20 +8172,6 @@ textarea.operation-input {
 input.secure-input {
   display: block;
   outline: none;
-}
-
-.password-policy {
-  padding: 11px;
-  border: 1px solid var(--color-border-default);
-  border-radius: 10px;
-  background: var(--color-surface-raised);
-}
-
-.password-policy span {
-  margin-top: 4px;
-  color: var(--color-text-secondary);
-  font-size: var(--type-control);
-  line-height: var(--type-control-line);
 }
 
 .modal-actions {
@@ -12351,7 +12451,6 @@ select.classic-input:focus {
 
 .classic-extract-grid,
 .classic-batch-grid,
-.classic-password-grid,
 .classic-conflict-grid {
   height: calc(100% - 70px);
   min-height: 0;
@@ -12372,16 +12471,10 @@ select.classic-input:focus {
   grid-template-columns: minmax(0, 1fr) 310px;
 }
 
-.classic-password-grid {
-  grid-template-columns: minmax(0, 1fr) 330px;
-  align-items: start;
-}
-
 .classic-extract-form,
 .classic-extract-preview,
 .classic-batch-grid section,
 .classic-batch-grid aside,
-.classic-password-panel,
 .classic-conflict-grid section,
 .classic-conflict-grid aside {
   min-width: 0;
@@ -12530,21 +12623,6 @@ select.classic-input:focus {
 
 .classic-batch-table > div.warning em {
   color: var(--color-warning-fg);
-}
-
-.classic-password-panel .repair-log {
-  margin-top: 12px;
-}
-
-.password-obscured {
-  font-size: var(--type-metric);
-  letter-spacing: 3px;
-}
-
-.classic-password-field {
-  min-width: 0;
-  display: grid;
-  gap: var(--space-xs);
 }
 
 .classic-input.danger {
@@ -13233,7 +13311,6 @@ select.classic-input:focus {
   .create-sheet,
   .extract-view,
   .batch-view,
-  .password-view,
   .conflict-view,
   .settings-view,
   .integration-view,
@@ -13423,7 +13500,6 @@ select.classic-input:focus {
 
   .classic-extract-grid,
   .classic-batch-grid,
-  .classic-password-grid,
   .classic-conflict-grid {
     grid-template-columns: minmax(0, 1fr);
     grid-auto-rows: max-content;
@@ -13439,7 +13515,6 @@ select.classic-input:focus {
   .classic-extract-preview,
   .classic-batch-grid section,
   .classic-batch-grid aside,
-  .classic-password-panel,
   .classic-conflict-grid section,
   .classic-conflict-grid aside {
     min-height: auto;
@@ -14579,7 +14654,6 @@ select.classic-input:focus {
   .classic-extract-preview,
   .classic-batch-grid section,
   .classic-batch-grid aside,
-  .classic-password-panel,
   .classic-conflict-grid section,
   .classic-conflict-grid aside,
   .classic-preview-table,
@@ -14685,6 +14759,17 @@ select.classic-input:focus {
 .design-root :is(input, textarea, select, button):focus-visible {
   outline: 0;
   box-shadow: 0 0 0 3px var(--color-focus-ring);
+}
+
+.design-root input:is(.secure-input, .classic-input)[aria-invalid="true"]:not(:disabled) {
+  border-color: var(--color-danger-border);
+  background: var(--color-danger-bg);
+  color: var(--color-danger-fg);
+}
+
+.design-root input:is(.secure-input, .classic-input)[aria-invalid="true"]:not(:disabled):focus {
+  border-color: var(--color-danger-fg);
+  box-shadow: var(--danger-focus-shadow);
 }
 
 .design-root :is(.archive-filter-field, .classic-search):focus-within {
