@@ -4,11 +4,13 @@
 mod common;
 
 use std::fs;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::process::Command;
 
 use common::{command_exists, engine, TempDir};
 use squallz_format_api::{
     ControlToken, CreateOptions, ExtractOptions, FormatError, NoProgress, OpenOptions, Password,
+    SafetyLimits,
 };
 
 fn open_with(password: Option<&str>) -> OpenOptions {
@@ -43,6 +45,28 @@ fn aes256_roundtrip_and_password_errors() {
     let entries = eng.list(&archive, &open_with(None)).unwrap();
     assert_eq!(entries.len(), 1);
     assert!(entries[0].encrypted);
+
+    assert!(matches!(
+        eng.verify_password(&archive, &open_with(None), SafetyLimits::default(), &ctl),
+        Err(FormatError::PasswordRequired)
+    ));
+    assert!(matches!(
+        eng.verify_password(
+            &archive,
+            &open_with(Some("wrong password")),
+            SafetyLimits::default(),
+            &ctl
+        ),
+        Err(FormatError::WrongPassword)
+    ));
+    assert!(eng
+        .verify_password(
+            &archive,
+            &open_with(Some("correct horse")),
+            SafetyLimits::default(),
+            &ctl
+        )
+        .unwrap());
 
     // Extracting without a password reports PasswordRequired.
     let err = eng
@@ -103,6 +127,82 @@ fn aes256_roundtrip_and_password_errors() {
         )
         .unwrap();
     assert!(report.is_ok(), "problems: {:?}", report.problems);
+}
+
+#[test]
+fn password_verification_checks_the_smallest_encrypted_entry_through_its_authentication_tag() {
+    let tmp = TempDir::new("password-verification");
+    let archive = tmp.path().join("mixed.zip");
+    let mut writer = zip::ZipWriter::new(fs::File::create(&archive).unwrap());
+    let options =
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    writer.start_file("public.txt", options).unwrap();
+    writer.write_all(b"hello").unwrap();
+    let encrypted = options.with_aes_encryption(zip::AesMode::Aes256, "correct");
+    writer.start_file("large.bin", encrypted).unwrap();
+    writer.write_all(&vec![1; 100_000]).unwrap();
+    writer.start_file("small.bin", encrypted).unwrap();
+    writer.write_all(&vec![2; 70_000]).unwrap();
+    writer.finish().unwrap();
+
+    let eng = engine();
+    let options = open_with(Some("correct"));
+    let control = ControlToken::default();
+    let limits = SafetyLimits {
+        max_output_bytes: 70_000,
+        ..SafetyLimits::default()
+    };
+    assert!(eng
+        .verify_password(&archive, &options, limits, &control)
+        .unwrap());
+    for limits in [
+        SafetyLimits {
+            max_output_bytes: 69_999,
+            ..limits
+        },
+        SafetyLimits {
+            max_entries: 2,
+            ..limits
+        },
+    ] {
+        assert!(matches!(
+            eng.verify_password(&archive, &options, limits, &control),
+            Err(FormatError::ResourceLimitExceeded(_))
+        ));
+    }
+    let cancelled = ControlToken::default();
+    cancelled.cancel();
+    assert!(matches!(
+        eng.verify_password(&archive, &options, limits, &cancelled),
+        Err(FormatError::Cancelled)
+    ));
+
+    let mut raw = zip::ZipArchive::new(fs::File::open(&archive).unwrap()).unwrap();
+    let entry = raw.by_index_raw(2).unwrap();
+    let tag_end = entry.data_start().unwrap() + entry.compressed_size() - 1;
+    drop(entry);
+    drop(raw);
+    let mut file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&archive)
+        .unwrap();
+    file.seek(SeekFrom::Start(tag_end)).unwrap();
+    let mut byte = [0_u8];
+    file.read_exact(&mut byte).unwrap();
+    byte[0] ^= 1;
+    file.seek(SeekFrom::Start(tag_end)).unwrap();
+    file.write_all(&byte).unwrap();
+    drop(file);
+    // The directory and password verifier remain intact; only the final
+    // authentication tag fails, after all decoded bytes have been consumed.
+    assert_eq!(
+        eng.list(&archive, &OpenOptions::default()).unwrap().len(),
+        3
+    );
+    assert!(eng
+        .verify_password(&archive, &options, limits, &control)
+        .is_err());
 }
 
 #[test]
@@ -227,6 +327,23 @@ fn zipcrypto_legacy_archive_is_readable() {
     let ctl = ControlToken::new();
     let entries = eng.list(&archive, &open_with(None)).unwrap();
     assert!(entries[0].encrypted);
+
+    assert!(eng
+        .verify_password(
+            &archive,
+            &open_with(Some("oldpass")),
+            SafetyLimits::default(),
+            &ctl
+        )
+        .unwrap());
+    assert!(eng
+        .verify_password(
+            &archive,
+            &open_with(Some("incorrect")),
+            SafetyLimits::default(),
+            &ctl
+        )
+        .is_err());
 
     // No password → PasswordRequired.
     let err = eng

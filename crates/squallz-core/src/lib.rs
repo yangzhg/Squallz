@@ -27,6 +27,7 @@ mod filter;
 mod inputs;
 mod layout;
 mod output_set;
+mod password;
 mod presets;
 mod queue;
 mod sfx;

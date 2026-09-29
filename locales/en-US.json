@@ -129,6 +129,7 @@
   "error.corrupt_archive": "Corrupt archive: {detail}",
   "error.password_required": "A password is required",
   "error.wrong_password": "Wrong password",
+  "error.password_not_verifiable": "No unambiguous encrypted content was found to verify this password. Check that the archive is encrypted and its entries have distinct names, then try again.",
   "error.cancelled": "Operation cancelled",
   "error.path_traversal": "Path traversal entry detected (Zip Slip): {path}",
   "error.symlink_breakout": "Symlink breakout write detected: {path}",

@@ -13,12 +13,12 @@ use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, EventTarget, Manager, State, WebviewWindow};
 use tauri_plugin_opener::OpenerExt;
 
+#[cfg(test)]
+use squallz_core::api::NoProgress;
 use squallz_core::api::{
     ControlToken, Detected, FormatError, FormatKind, OpenOptions, OverwritePolicy, Password,
-    ProgressSink, SymlinkPolicy,
+    ProgressSink, SafetyLimits, SymlinkPolicy,
 };
-#[cfg(test)]
-use squallz_core::api::{NoProgress, SafetyLimits};
 use squallz_core::{
     create_destination_has_conflict as core_create_destination_has_conflict,
     find_available_create_destination as core_find_available_create_destination,
@@ -267,15 +267,23 @@ fn remember_archive_password_impl(
     path: &Path,
     password: &str,
     encoding: Option<&str>,
+    limits: SafetyLimits,
 ) -> Result<PasswordBookStatusDto, ErrorDto> {
     if !secrets.is_available() {
         return Err(ErrorDto::secret_store(
             "persistent secret storage is not available on this platform",
         ));
     }
-    state
-        .verify_password(path, password, encoding)
-        .map_err(ErrorDto::from)?;
+    if !state
+        .verify_password(path, password, encoding, limits)
+        .map_err(ErrorDto::from)?
+    {
+        return Err(ErrorDto {
+            key: "error.password_not_verifiable".to_owned(),
+            params: HashMap::new(),
+            detail: String::new(),
+        });
+    }
     secrets
         .set_archive_password(path, password)
         .map_err(|error| ErrorDto::secret_store(error.to_string()))?;
@@ -1815,12 +1823,14 @@ pub async fn archive_password_status(
 pub async fn remember_archive_password(
     state: State<'_, Arc<AppState>>,
     secrets: State<'_, SharedSecretStore>,
+    settings: State<'_, Arc<SettingsStore>>,
     path: String,
     password: String,
     encoding: Option<String>,
 ) -> Result<PasswordBookStatusDto, ErrorDto> {
     let state = Arc::clone(state.inner());
     let secrets = Arc::clone(secrets.inner());
+    let limits = settings.get().safety_limits();
     tauri::async_runtime::spawn_blocking(move || {
         remember_archive_password_impl(
             state.as_ref(),
@@ -1828,6 +1838,7 @@ pub async fn remember_archive_password(
             Path::new(&path),
             &password,
             encoding.as_deref(),
+            limits,
         )
     })
     .await
@@ -4307,8 +4318,15 @@ mod tests {
         assert!(initial.available);
         assert!(!initial.saved);
 
-        let err =
-            remember_archive_password_impl(&state, &secrets, &archive, "wrong", None).unwrap_err();
+        let err = remember_archive_password_impl(
+            &state,
+            &secrets,
+            &archive,
+            "wrong",
+            None,
+            SafetyLimits::default(),
+        )
+        .unwrap_err();
         assert_ne!(
             err.key, "error.other",
             "wrong passwords must come from engine validation"
@@ -4316,8 +4334,15 @@ mod tests {
         assert!(!secrets.has_archive_password(&archive).unwrap());
         assert!(state.password_for(&archive).is_none());
 
-        let saved =
-            remember_archive_password_impl(&state, &secrets, &archive, "secret", None).unwrap();
+        let saved = remember_archive_password_impl(
+            &state,
+            &secrets,
+            &archive,
+            "secret",
+            None,
+            SafetyLimits::default(),
+        )
+        .unwrap();
         assert!(saved.available);
         assert!(saved.saved);
         assert!(
@@ -4349,6 +4374,121 @@ mod tests {
         assert!(state.password_for(&archive).is_none());
 
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn password_book_checks_zip_content_before_saving_or_replacing_a_secret() {
+        let dir = temp_dir("password-book-zip");
+        let state = AppState::new();
+        let secrets = MemorySecretStore::new();
+        let source = dir.join("report.txt");
+        std::fs::write(&source, b"private report").unwrap();
+        for encrypted in [false, true] {
+            let archive = dir.join(if encrypted {
+                "encrypted.zip"
+            } else {
+                "plain.zip"
+            });
+            state
+                .engine
+                .create(
+                    &archive,
+                    std::slice::from_ref(&source),
+                    &CreateOptions {
+                        password: encrypted.then(|| Password::new("correct")),
+                        ..CreateOptions::default()
+                    },
+                    &NoProgress,
+                    &ControlToken::default(),
+                )
+                .unwrap();
+            // Both ZIP directories are readable even with the wrong password.
+            assert_eq!(
+                state
+                    .engine
+                    .list(
+                        &archive,
+                        &OpenOptions {
+                            password: Some(Password::new("wrong")),
+                            ..OpenOptions::default()
+                        }
+                    )
+                    .unwrap()
+                    .len(),
+                1
+            );
+            let error = remember_archive_password_impl(
+                &state,
+                &secrets,
+                &archive,
+                "wrong",
+                None,
+                SafetyLimits::default(),
+            )
+            .unwrap_err();
+            assert_eq!(
+                error.key,
+                if encrypted {
+                    "error.wrong_password"
+                } else {
+                    "error.password_not_verifiable"
+                }
+            );
+            assert!(!secrets.has_archive_password(&archive).unwrap());
+            assert!(state.password_for(&archive).is_none());
+            if !encrypted {
+                continue;
+            }
+            let error = remember_archive_password_impl(
+                &state,
+                &secrets,
+                &archive,
+                "correct",
+                None,
+                SafetyLimits {
+                    max_output_bytes: 1,
+                    ..SafetyLimits::default()
+                },
+            )
+            .unwrap_err();
+            assert_eq!(error.key, "error.resource_limit");
+            assert!(!secrets.has_archive_password(&archive).unwrap());
+            assert!(state.password_for(&archive).is_none());
+            assert!(
+                remember_archive_password_impl(
+                    &state,
+                    &secrets,
+                    &archive,
+                    "correct",
+                    None,
+                    SafetyLimits::default(),
+                )
+                .unwrap()
+                .saved
+            );
+            assert!(remember_archive_password_impl(
+                &state,
+                &secrets,
+                &archive,
+                "wrong",
+                None,
+                SafetyLimits::default(),
+            )
+            .is_err());
+            assert_eq!(
+                secrets
+                    .get_archive_password(&archive)
+                    .unwrap()
+                    .as_ref()
+                    .map(Password::expose),
+                Some("correct")
+            );
+            assert_eq!(
+                state.password_for(&archive).as_ref().map(Password::expose),
+                Some("correct")
+            );
+        }
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

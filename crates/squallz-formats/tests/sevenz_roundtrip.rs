@@ -12,7 +12,7 @@ use std::process::Command;
 use common::{command_exists, engine, TempDir};
 use squallz_core::api::{
     ControlToken, CreateOptions, EntryPath, EntryType, ExtractOptions, ExtractReport, FormatError,
-    NoProgress, OpenOptions, OverwritePolicy, Password, SymlinkPolicy,
+    NoProgress, OpenOptions, OverwritePolicy, Password, SafetyLimits, SymlinkPolicy,
 };
 
 fn build_tree(root: &Path) {
@@ -156,6 +156,28 @@ fn sevenz_encrypted_content_requires_password() {
     let entries = engine.list(&archive, &OpenOptions::default()).unwrap();
     assert!(entries.iter().any(|e| e.path.display == "tree/a.txt"));
     assert!(entries.iter().any(|e| e.encrypted));
+    assert!(engine
+        .verify_password(
+            &archive,
+            &OpenOptions {
+                password: Some(Password::new("correct horse")),
+                ..OpenOptions::default()
+            },
+            SafetyLimits::default(),
+            &ctl
+        )
+        .unwrap());
+    assert!(engine
+        .verify_password(
+            &archive,
+            &OpenOptions {
+                password: Some(Password::new("wrong")),
+                ..OpenOptions::default()
+            },
+            SafetyLimits::default(),
+            &ctl
+        )
+        .is_err());
     let out = dir.path().join("nopw");
     let err = engine
         .extract(
@@ -239,6 +261,57 @@ fn sevenz_encrypted_content_requires_password() {
 }
 
 #[test]
+fn password_verification_does_not_accept_a_plain_duplicate_as_encryption_proof() {
+    use sevenz_rust2::encoder_options::AesEncoderOptions;
+    use sevenz_rust2::{ArchiveEntry, ArchiveWriter, EncoderConfiguration, EncoderMethod};
+    use std::io::Cursor;
+
+    let dir = TempDir::new("7z-password-duplicate");
+    let archive = dir.path().join("duplicate.7z");
+    let mut writer = ArchiveWriter::new(fs::File::create(&archive).unwrap()).unwrap();
+    writer.set_encrypt_header(false);
+    writer.set_content_methods(vec![
+        AesEncoderOptions::new("secret".into()).into(),
+        EncoderConfiguration::new(EncoderMethod::COPY),
+    ]);
+    writer
+        .push_archive_entry(
+            ArchiveEntry::new_file("same.txt"),
+            Some(Cursor::new(b"secret")),
+        )
+        .unwrap();
+    writer.set_content_methods(vec![EncoderConfiguration::new(EncoderMethod::COPY)]);
+    writer
+        .push_archive_entry(
+            ArchiveEntry::new_file("same.txt"),
+            Some(Cursor::new(b"public")),
+        )
+        .unwrap();
+    writer.finish().unwrap();
+
+    let engine = engine();
+    let entries = engine.list(&archive, &OpenOptions::default()).unwrap();
+    assert_eq!(entries.len(), 2);
+    assert!(entries[0].encrypted);
+    assert!(!entries[1].encrypted);
+    // Name-based reading resolves the last entry, whose content does not
+    // prove either password despite the earlier encrypted metadata.
+    for password in ["wrong", "secret"] {
+        assert!(!engine
+            .verify_password(
+                &archive,
+                &OpenOptions {
+                    password: Some(Password::new(password)),
+                    ..OpenOptions::default()
+                },
+                SafetyLimits::default(),
+                &ControlToken::default()
+            )
+            .unwrap());
+    }
+}
+
+#[test]
 fn sevenz_encrypted_header_requires_password_to_list() {
     let dir = TempDir::new("7z-header");
     let root = dir.path().join("tree");
@@ -269,6 +342,18 @@ fn sevenz_encrypted_header_requires_password_to_list() {
     };
     let entries = engine.list(&archive, &open).unwrap();
     assert!(entries.iter().any(|e| e.path.display == "tree/a.txt"));
+    // Encrypted headers provide proof without reading any payload bytes.
+    assert!(engine
+        .verify_password(
+            &archive,
+            &open,
+            SafetyLimits {
+                max_output_bytes: 0,
+                ..SafetyLimits::default()
+            },
+            &ctl
+        )
+        .unwrap());
 }
 
 #[cfg(unix)]
