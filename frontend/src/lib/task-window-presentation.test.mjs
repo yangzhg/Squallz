@@ -129,6 +129,18 @@ test("waiting task surfaces retain measured progress without rates or processing
         assert.equal(body.includes(helpers.taskReviewActionLabel(cancelled)), !taskWindowMode);
         assert.doesNotMatch(body, /data-task-active="true"/u);
       }
+      const partialBatch = { ...extractTask("done"), expanded: true,
+        spec: { kind: "batch_extract", items: [{ path: "damaged.zip" }] },
+        result: { archives: 1, extracted: 1, failed: 0, outputs: [
+          { archive: "damaged.zip", counts: { failed: 1, skipped: 0 }, problems: ["bad.txt: CRC mismatch"] },
+        ] } };
+      for (const presentation of ["dialog", "panel", "window"]) {
+        const taskWindowMode = presentation === "window";
+        const body = render(TaskProgressDialog, { props: { ...surface, presentation, taskWindowMode, task: partialBatch } }).body;
+        assert.ok(body.includes(helpers.taskDialogResultSummary(partialBatch)));
+        assert.ok(body.includes("bad.txt: CRC mismatch"));
+        assert.equal(body.includes(helpers.taskReviewActionLabel(partialBatch)), !taskWindowMode);
+      }
     }
   } finally {
     await server.close();

@@ -4793,6 +4793,66 @@ fn extract_job_best_effort_reports_skipped_entries() {
 }
 
 #[test]
+fn batch_best_effort_preserves_entry_failures_in_completed_outputs() {
+    let dir = temp_dir("batch-best-effort");
+    let damaged = dir.join("damaged.zip");
+    let good = dir.join("good.zip");
+    let payload = b"broken bytes";
+    let mut bytes = build_stored_zip(&[(b"bad.txt", payload), (b"good.txt", b"safe bytes")]);
+    bytes[30 + b"bad.txt".len()] ^= 0xFF;
+    std::fs::write(&damaged, bytes).unwrap();
+    std::fs::write(&good, build_stored_zip(&[(b"complete.txt", b"complete")])).unwrap();
+    let manager = JobManager::new();
+    let state = Arc::new(AppState::new());
+    let sink = Arc::new(TestSink::default());
+    let events: Arc<dyn EventSink> = sink.clone();
+    let id = manager.submit(
+        state,
+        events,
+        JobSpec::BatchExtract {
+            items: [(&damaged, "damaged-output"), (&good, "good-output")]
+                .into_iter()
+                .map(|(path, name)| BatchExtractItem {
+                    path: path.to_string_lossy().into_owned(),
+                    dest: dir.join(name).to_string_lossy().into_owned(),
+                    encoding: None,
+                    password: None,
+                    best_effort: true,
+                })
+                .collect(),
+            overwrite: squallz_core::api::OverwritePolicy::Skip,
+            symlinks: squallz_core::api::SymlinkPolicy::Preserve,
+            smart: false,
+        },
+        SettingsDto::default(),
+    );
+    manager.wait_idle();
+    let events = sink.events.lock().unwrap().clone();
+    assert_eq!(states_of(&events, id), vec!["queued", "running", "done"]);
+    let result = done_result(&events, id).unwrap();
+    assert_eq!(result["extracted"], 2);
+    assert_eq!(result["failed"], 0);
+    assert_eq!(result["outputs"][0]["counts"]["created"], 1);
+    assert_eq!(result["outputs"][0]["counts"]["failed"], 1);
+    assert_eq!(
+        result["outputs"][0]["archive"],
+        damaged.to_string_lossy().as_ref()
+    );
+    assert_eq!(result["outputs"][0]["problems_total"], 1);
+    assert_eq!(result["outputs"][1]["counts"]["failed"], 0);
+    assert_eq!(
+        std::fs::read(dir.join("damaged-output/good.txt")).unwrap(),
+        b"safe bytes"
+    );
+    assert!(!dir.join("damaged-output/bad.txt").exists());
+    assert_eq!(
+        std::fs::read(dir.join("good-output/complete.txt")).unwrap(),
+        b"complete"
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn test_job_keeps_exact_problem_total_with_bounded_messages() {
     let dir = temp_dir("test-bounded-problems");
     let archive = dir.join("damaged.zip");

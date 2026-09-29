@@ -1,5 +1,6 @@
 import { tFallback } from "./i18n.svelte";
 import { readCreateResult } from "./create-result";
+import { readBatchExtractResult } from "./batch-extract-result";
 import type { Task } from "./jobs.svelte";
 import { recoveryResultOk } from "./recovery-result";
 import type { Screen } from "./ui-model";
@@ -116,7 +117,8 @@ export function taskOutcomeNeedsAttention(task: TaskDialogModel): boolean {
     return task.result?.ok === false;
   }
   if (task.spec.kind === "batch_extract") {
-    return Number(task.result?.failed ?? 0) > 0
+    const outcome = readBatchExtractResult(task.result);
+    return outcome.reviewCount > 0 || outcome.skippedEntries > 0
       || extractResultNeedsAttention(task.result);
   }
   if (task.spec.kind === "extract" || task.spec.kind === "extract_nested") {
@@ -226,6 +228,7 @@ export function taskResultScreen(task: TaskDialogModel): TaskResultScreen | null
 export function taskHasInlineResults(task: TaskDialogModel): boolean {
   return (
     task.spec.kind === "compress"
+    || task.spec.kind === "batch_extract"
     || task.spec.kind === "convert"
     || task.spec.kind === "publish_macos_sfx"
     || task.spec.kind === "protect"
@@ -241,7 +244,7 @@ export function taskReviewScreen(task: TaskDialogModel): Screen | null {
   if (task.state === "done" && task.spec.kind === "extract_nested" && (readExtractResultCounts(task.result)?.failed ?? 0) > 0) {
     return "nestedExtract";
   }
-  if (task.state === "done" && task.spec.kind === "batch_extract" && Number(task.result?.failed) > 0) {
+  if (task.state === "done" && task.spec.kind === "batch_extract" && readBatchExtractResult(task.result).reviewCount > 0) {
     return "batch";
   }
   if (task.state === "done" && task.spec.kind === "test" && task.result?.ok === false) {

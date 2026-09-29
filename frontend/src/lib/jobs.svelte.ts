@@ -32,6 +32,7 @@ import { jobTitleFor } from "./job-title";
 import { pushToast } from "./toasts.svelte";
 import { basename, formatBytes } from "./format";
 import { readCreateResult } from "./create-result";
+import { batchExtractResultSummary, readBatchExtractResult } from "./batch-extract-result";
 import { openCreatedOutputWithFallback } from "./create-completion";
 import { recordOperation, type OperationStatus } from "./history.svelte";
 import {
@@ -460,11 +461,12 @@ function terminalHistoryStatus(task: Task): Extract<OperationStatus, "done" | "f
   if (task.state === "failed") return "failed";
   if (task.spec.kind === "test" && task.result?.ok === false) return "failed";
   if (task.spec.kind === "checksum_check" && task.result?.ok === false) return "failed";
-  if (task.spec.kind === "batch_extract" && Number(task.result?.failed ?? 0) > 0) return "failed";
-  if (
-    task.spec.kind === "batch_extract"
-    && extractResultHasRecoveredZipStructure(task.result)
-  ) return "info";
+  if (task.spec.kind === "batch_extract") {
+    const outcome = readBatchExtractResult(task.result);
+    if (outcome.failedArchives > 0) return "failed";
+    if (outcome.reviewCount > 0 || outcome.skippedEntries > 0
+      || extractResultHasRecoveredZipStructure(task.result)) return "info";
+  }
   if (
     (task.spec.kind === "extract" || task.spec.kind === "extract_nested") &&
     extractResultNeedsAttention(task.result)
@@ -610,6 +612,9 @@ function createIntegrityDetail(task: Task): string | null {
 }
 
 function taskHistoryDetail(task: Task, status: Extract<OperationStatus, "done" | "failed" | "info">): string {
+  if (task.state === "done" && task.spec.kind === "batch_extract") {
+    return cleanHistoryDetail(batchExtractResultSummary(task.result, task.spec.items.length));
+  }
   if (status === "failed") {
     if (task.spec.kind === "test" && task.result?.ok === false) {
       const problems = resultProblemTotal(task.result);
@@ -668,18 +673,7 @@ function taskHistoryDetail(task: Task, status: Extract<OperationStatus, "done" |
       );
     }
     case "batch_extract": {
-      const extracted = Number(task.result?.extracted ?? 0);
-      const total = Number(task.result?.archives ?? spec.items.length);
-      const selected = Number(task.result?.selected_archives ?? total);
-      const failed = Number(task.result?.failed ?? 0);
-      return cleanHistoryDetail(
-        t(
-          selected > total
-            ? "gui.task.history.batch_extract_grouped"
-            : "gui.task.history.batch_extract",
-          { extracted, total, selected, failed },
-        ),
-      );
+      return cleanHistoryDetail(batchExtractResultSummary(task.result, spec.items.length));
     }
     case "extract_nested": {
       const dest = String(task.result?.dest ?? spec.dest);
@@ -770,8 +764,7 @@ function taskHistoryDetail(task: Task, status: Extract<OperationStatus, "done" |
 function finishToast(task: Task): void {
   const spec = task.spec;
   if (spec.kind === "batch_extract") {
-    const extracted = Number(task.result?.extracted ?? 0);
-    const failed = Number(task.result?.failed ?? 0);
+    const outcome = readBatchExtractResult(task.result);
     const outputs = Array.isArray(task.result?.outputs) ? task.result.outputs : [];
     const firstOutput = outputs[0];
     const firstDest = typeof firstOutput === "object" && firstOutput && "dest" in firstOutput
@@ -783,8 +776,8 @@ function finishToast(task: Task): void {
     }
     const recoveredStructure = extractResultHasRecoveredZipStructure(task.result);
     const toast = {
-      kind: failed > 0 || recoveredStructure ? "warning" : "success",
-      title: t("gui.toast.batch_extract_done", { extracted, failed }),
+      kind: outcome.reviewCount > 0 || outcome.skippedEntries > 0 || recoveredStructure ? "warning" : "success",
+      title: batchExtractResultSummary(task.result, spec.items.length),
       body: recoveredStructure
         ? t("gui.archive.zip_local_headers_recovered")
         : undefined,

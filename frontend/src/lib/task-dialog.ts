@@ -1,8 +1,10 @@
 import { basename as pathBaseName, formatBytes } from "./format";
 import { errorSummary } from "./error-presentation";
+import { isErrorDto } from "./ipc";
 import { t, tFallback } from "./i18n.svelte";
 import { jobTitleFor } from "./job-title";
 import { readCreateResult } from "./create-result";
+import { batchExtractEntrySummary, batchExtractResultSummary, readBatchExtractResult } from "./batch-extract-result";
 import {
   readRecoveryProtectionResult,
   recoveryResultBoolean,
@@ -268,9 +270,11 @@ export function taskProgressSummary(task: TaskDialogModel): string {
     return withWaitingState(task, t("gui.task.phase_progress_pending", { phase }));
   }
   if (task.spec.kind === "batch_extract") {
-    const total = Math.max(1, task.spec.items.length);
+    const total = Math.max(1, task.state === "done"
+      ? Number(task.result?.archives ?? task.spec.items.length)
+      : task.spec.items.length);
     const done = task.state === "done"
-      ? Number(task.result?.extracted ?? total)
+      ? total
       : Math.min(total, Math.floor((taskProgressPercent(task) / 100) * total));
     return withWaitingState(task, t("gui.task.progress_batch_extract", {
       percent: taskProgressPercent(task),
@@ -1102,27 +1106,46 @@ export function taskResultDetailRows(task: TaskDialogModel): TaskResultDetailRow
   if (task.spec.kind === "batch_extract") {
     const archives = resultNumber(task, "archives");
     const selectedArchives = resultNumber(task, "selected_archives");
+    const outcome = readBatchExtractResult(task.result);
     rows.push(
       {
-        label: tr("gui.task.result_extracted", "Extracted"),
-        value: resultNumber(task, "extracted").toLocaleString(),
+        label: tr("gui.task.batch_complete_archives", "Fully extracted archives"),
+        value: outcome.completeArchives.toLocaleString(),
+      },
+      {
+        label: tr("gui.task.batch_incomplete_archives", "Incomplete archives"),
+        value: outcome.incompleteArchives.toLocaleString(),
       },
       {
         label: tr("gui.task.result_archives", "Archives"),
         value: archives.toLocaleString(),
       },
       {
-        label: tr("gui.task.result_failed_count", "Failed"),
+        label: tr("gui.task.batch_failed_archives", "Failed archives"),
         value: resultNumber(task, "failed").toLocaleString(),
       },
     );
     if (selectedArchives > archives) {
-      rows.splice(2, 0, {
+      rows.splice(3, 0, {
         label: tr("gui.task.result_selected_files", "Selected files"),
         value: selectedArchives.toLocaleString(),
       });
     }
     appendArchiveStructureWarning(rows, task);
+    for (const failure of outcome.failures) {
+      if (!failure || typeof failure !== "object" || !("archive" in failure) || typeof failure.archive !== "string") continue;
+      const error = "error" in failure && isErrorDto(failure.error) ? failure.error : null;
+      rows.push({ label: tr("common.archive", "Archive"), value: `${failure.archive}\n${errorSummary(error)}` });
+    }
+    for (const output of outcome.incompleteOutputs) {
+      const counts = readExtractResultCounts(output);
+      if (!counts) continue;
+      rows.push({
+        label: tr("common.archive", "Archive"),
+        value: `${String(output.archive ?? "")}\n${batchExtractEntrySummary(counts.failed, counts.skipped)}`,
+      });
+      appendProblems(rows, { ...task, result: output });
+    }
   }
 
   if (task.revealPath) {
@@ -1329,6 +1352,12 @@ export function taskNextStepDetail(task: TaskDialogModel, taskWindowMode: boolea
     }
     return tr("gui.task.next_step_window_results", "Review the result details in this window, then close it.");
   }
+  if (task.spec.kind === "batch_extract") {
+    const outcome = readBatchExtractResult(task.result);
+    if (outcome.reviewCount > 0 || outcome.skippedEntries > 0) {
+      return tr("gui.task.next_step_batch_attention", "Review the extraction results and existing output. Archives with failures can be reviewed in the main window before starting again; they will be processed from the beginning.");
+    }
+  }
   if (isRecoveryDiagnosticTask(task) && recoveryResultOk(task.result) === false) {
     if (task.spec.kind === "repair_recovery") {
       return tr(
@@ -1495,16 +1524,7 @@ export function taskDialogResultSummary(task: TaskDialogModel): string {
     return t("gui.task.result_extract", { completed, skipped, failed });
   }
   if (task.spec.kind === "batch_extract") {
-    const extracted = Number(task.result?.extracted ?? 0);
-    const total = Number(task.result?.archives ?? task.spec.items.length);
-    const selected = Number(task.result?.selected_archives ?? total);
-    const failed = Number(task.result?.failed ?? 0);
-    return t(
-      selected > total
-        ? "gui.task.result_batch_extract_grouped"
-        : "gui.task.result_batch_extract",
-      { extracted, total, selected, failed },
-    );
+    return batchExtractResultSummary(task.result, task.spec.items.length);
   }
   if (task.spec.kind === "protect") {
     const fallback = task.spec.recovery ?? `${task.spec.path}.par2`;

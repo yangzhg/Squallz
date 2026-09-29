@@ -209,6 +209,7 @@
   import { currentWebviewWindowListener } from "./lib/tauri-events";
   import { outputPasswordRequired } from "./lib/job-snapshot";
   import { batchExtractJob, reviewBatchExtract, type BatchExtractDraft } from "./lib/batch-extract";
+  import { readBatchExtractResult } from "./lib/batch-extract-result";
   import { nestedExtractJob, reviewNestedExtract, type NestedExtractDraft } from "./lib/nested-extract";
   import { ArchiveUpdateReview } from "./lib/archive-update.svelte";
   import { previewSystemOpenRequiresConfirmation } from "./lib/preview-presentation";
@@ -13473,8 +13474,9 @@
         return;
       }
       if (preventCreateSubmissionNavigation(target) || preventConvertSubmissionNavigation(target) || focusBlockingTaskIfAny()) return;
-      const failedCount = task.state === "done" ? Number(task.result?.failed) : 0;
-      const failures = task.state === "done" ? (Array.isArray(task.result?.failures) ? task.result.failures : []) : null;
+      const outcome = readBatchExtractResult(task.result);
+      const failedCount = task.state === "done" ? outcome.reviewCount : 0;
+      const failures = task.state === "done" ? outcome.reviewFailures : null;
       const draft = reviewBatchExtract(task.spec, failures, failedCount, platformKind(),
         displayedSpec.kind === "batch_extract" ? displayedSpec : task.spec);
       if (!draft) {
@@ -13487,7 +13489,7 @@
       await dismissTaskDialog(task);
       focusBatchReview();
       showNotice(task.state === "done"
-        ? tr("gui.batch.review_failed_restored", "Only failed archives were restored. Review destinations and policies; passwords will be requested when needed.")
+        ? tr("gui.batch.review_failed_restored", "Archives with failures were restored. They will be processed from the beginning; review existing output and conflict policies. Passwords will be requested when needed.")
         : tr("gui.batch.review_restored", "Batch inputs and policies restored. Some files may already exist; review conflicts before starting again. Passwords will be requested when needed."));
       return;
     }

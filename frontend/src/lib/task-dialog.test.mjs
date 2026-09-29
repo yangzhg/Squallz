@@ -746,11 +746,31 @@ test("SFX result and recovery details use the durable single-backup contract", a
     };
     assert.equal(
       taskDialogResultSummary(groupedBatch),
-      "Selected files 2 → archives 1 · 1 extracted · 0 failed",
+      "Selected files 2 → archives 1 · 1 extracted · 0 incomplete · 0 archives failed",
     );
     const groupedRows = taskResultDetailRows(groupedBatch);
     assert.ok(groupedRows.some((row) => row.label === "Archives" && row.value === "1"));
     assert.ok(groupedRows.some((row) => row.label === "Selected files" && row.value === "2"));
+    assert.equal(taskProgressSummary(groupedBatch), "100% · 1/1 archives");
+    assert.equal(taskProgressSummary({ ...groupedBatch, result: { archives: 3, extracted: 2, failed: 1 } }), "100% · 3/3 archives");
+    const partialBatch = { ...groupedBatch, result: { ...groupedBatch.result, outputs: [
+      { archive: "damaged.zip", counts: { failed: 2, skipped: 1 }, problems: ["bad.txt: CRC mismatch"], problems_total: 2 },
+    ] } };
+    assert.equal(taskOutcomeNeedsAttention(partialBatch), true);
+    assert.equal(taskReviewScreen(partialBatch), "batch");
+    assert.equal(taskHasInlineResults(partialBatch), true);
+    assert.match(taskDialogResultSummary(partialBatch), /0 archives failed.*2 entries failed.*1 entries skipped/);
+    const partialRows = taskResultDetailRows(partialBatch);
+    assert.ok(partialRows.some((row) => row.value.includes("damaged.zip") && /2 entries failed/.test(row.value)));
+    assert.ok(partialRows.some((row) => row.value.includes("bad.txt: CRC mismatch")));
+    assert.ok(partialRows.some((row) => row.label === "More problems"));
+    assert.match(taskNextStepDetail(partialBatch, false), /from the beginning/);
+    const skippedBatch = { ...partialBatch, result: { ...partialBatch.result, outputs: [
+      { archive: "skipped.zip", counts: { failed: 0, skipped: 3 } },
+    ] } };
+    assert.equal(taskOutcomeNeedsAttention(skippedBatch), true);
+    assert.equal(taskReviewScreen(skippedBatch), null);
+    assert.match(taskDialogResultSummary(skippedBatch), /3 entries skipped/);
 
     const recoveredBatch = {
       ...groupedBatch,

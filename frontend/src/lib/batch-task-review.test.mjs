@@ -9,6 +9,7 @@ const server = await createTestServer();
 test.after(() => server.close());
 const { taskReviewScreen } = await server.ssrLoadModule("/src/lib/task-model.ts");
 const { batchExtractJob, reviewBatchExtract } = await server.ssrLoadModule("/src/lib/batch-extract.ts");
+const { readBatchExtractResult } = await server.ssrLoadModule("/src/lib/batch-extract-result.ts");
 const { sameDesktopPath, desktopBasename, desktopDirname } = await server.ssrLoadModule("/src/lib/desktop-path.ts");
 
 function spec() {
@@ -44,7 +45,7 @@ function harness() {
     pathBaseName: (path) => desktopBasename(path,"macos"),
     archiveFormatFromPath: (path) => path.split(".").at(-1).toUpperCase(),
     archiveEncodingForJob: () => "shift_jis", platformKind: () => "macos",
-    tr: (_key, fallback) => fallback, batchExtractJob, reviewBatchExtract, taskReviewScreen,
+    tr: (_key, fallback) => fallback, batchExtractJob, reviewBatchExtract, taskReviewScreen, readBatchExtractResult,
     preventCreateSubmissionNavigation: () => false, preventConvertSubmissionNavigation: () => false,
     focusBlockingTaskIfAny: () => false,
     setScreen: (screen) => { context.screen=screen; calls.push(["screen",screen]); },
@@ -72,6 +73,8 @@ test("partially successful batches expose a review action for failed archives", 
     result: { failed: 1, extracted: 2 } }), "batch");
   assert.equal(taskReviewScreen({ state: "done", spec: { kind: "batch_extract" },
     result: { failed: 0, extracted: 3 } }), null);
+  assert.equal(taskReviewScreen({ state: "done", spec: { kind: "batch_extract" },
+    result: { failed: 0, extracted: 3, outputs: [{ archive: "damaged.zip", counts: { failed: 1 } }] } }), "batch");
 });
 
 for (const state of ["failed", "cancelled"]) {
@@ -123,6 +126,30 @@ test("partial success restores only identified failures and ambiguous results pr
   assert.equal(reviewBatchExtract(windows,[{archive:"c:/sources/a.zip"}],1,"windows").items.length,1);
   assert.equal(reviewBatchExtract(windows,[{archive:"c:/sources/a.zip"}],1,"linux"),null);
   assert.equal(run.calls.some(([name])=>name==="submit"),false);
+});
+
+test("best-effort batches restore only archives with failed entries or archive failures", async () => {
+  const run = harness();
+  const job = spec();
+  const result = { failed: 1, failures: [{ archive: job.items[2].path }], outputs: [
+    { archive: job.items[0].path, counts: { failed: 2, skipped: 1 } },
+    { archive: job.items[1].path, counts: { failed: 0, skipped: 1 } },
+  ] };
+  await run.reviewTask({ state: "done", spec: job, result });
+  assert.deepEqual(Array.from(run.context.batchDraft.items, (item) => item.path), [job.items[0].path, job.items[2].path]);
+  assert.equal(run.calls.some(([name]) => name === "submit"), false);
+  assert.match(run.calls.at(-1)[1], /from the beginning/);
+  await run.startBatchExtract();
+  const submitted = run.calls.find(([name]) => name === "submit")[1];
+  assert.deepEqual(submitted.items.map((item) => item.path), [job.items[0].path, job.items[2].path]);
+  assert.ok(submitted.items.every((item) => item.password === null));
+  const saved = plain(run.context.batchDraft);
+  await run.reviewTask({ state: "done", spec: job, result: { failed: 0, outputs: [
+    { archive: job.items[0].path, counts: { failed: 1 } },
+    { archive: job.items[0].path, counts: { failed: 1 } },
+  ] } });
+  assert.deepEqual(plain(run.context.batchDraft), saved);
+  assert.match(run.calls.at(-1)[1], /cannot identify/);
 });
 
 test("new batches use the displayed smart base and an explicitly empty list never falls back to the current archive", async () => {
