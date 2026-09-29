@@ -1362,6 +1362,7 @@
   "gui.task.waiting_for_engine": "正在准备进度",
   "gui.task.progress_submitting": "正在打开进度窗口",
   "gui.task.progress_known": "{percent}% · {done} / {total} · {speed}",
+  "gui.task.progress_waiting": "{progress} · {state}",
   "gui.task.phase_progress_known": "{phase} · {percent}% · {done} / {total} · {speed}",
   "gui.task.recovery_phase_progress_known": "{phase} · {percent}%",
   "gui.task.phase_progress_pending": "{phase} · 当前阶段没有可用的字节进度",

@@ -232,6 +232,9 @@ impl JobSnapshotStore {
             let record = self.jobs.get_mut(&id)?;
             record.version = version;
             record.state = state.to_owned();
+            if state != "running" {
+                record.progress.speed = 0;
+            }
             record.error = error;
             record.result = result;
             if state != "queued" {
@@ -258,15 +261,22 @@ impl JobSnapshotStore {
         self.set_state(id, state, None, None)
     }
 
-    pub(super) fn set_progress(&mut self, id: u64, progress: JobProgressSnapshot) -> Option<u64> {
+    pub(super) fn set_progress(
+        &mut self,
+        id: u64,
+        progress: &mut JobProgressSnapshot,
+    ) -> Option<u64> {
         let current = self.jobs.get(&id)?;
-        if is_terminal_snapshot_state(&current.state) || current.progress == progress {
+        if current.state != "running" || current.question.is_some() {
+            progress.speed = 0;
+        }
+        if is_terminal_snapshot_state(&current.state) || current.progress == *progress {
             return None;
         }
         let version = self.next_revision();
         let record = self.jobs.get_mut(&id)?;
         record.version = version;
-        record.progress = progress;
+        record.progress = progress.clone();
         Some(version)
     }
 
@@ -283,6 +293,7 @@ impl JobSnapshotStore {
         let record = self.jobs.get_mut(&id)?;
         record.version = version;
         record.question = Some(question.clone());
+        record.progress.speed = 0;
         Some(question)
     }
 
@@ -516,6 +527,78 @@ mod tests {
     use std::path::Path;
 
     #[test]
+    fn waiting_and_stopped_jobs_clear_speed_without_losing_progress() {
+        let mut store = JobSnapshotStore::default();
+        store.insert(
+            1,
+            Some("task-owner".into()),
+            checksum_job(Path::new("input")),
+            "running",
+        );
+        let progress = JobProgressSnapshot {
+            done: 40,
+            total: 100,
+            current: "report.txt".into(),
+            current_done: 4,
+            current_total: 10,
+            speed: 64,
+            ..JobProgressSnapshot::default()
+        };
+        store.set_progress(1, &mut progress.clone()).unwrap();
+        store
+            .ask(
+                1,
+                JobQuestion::Password(crate::dto::AskPasswordEvent {
+                    id: 1,
+                    version: 0,
+                    name: "reports.zip".into(),
+                    wrong: false,
+                }),
+            )
+            .unwrap();
+        for viewer in ["main", "task-owner"] {
+            let waiting = store.snapshot(viewer, 1).unwrap();
+            assert_eq!(waiting.progress.speed, 0);
+            assert_eq!(waiting.progress.done, 40);
+            assert_eq!(waiting.progress.current_done, 4);
+        }
+        let mut late_progress = JobProgressSnapshot {
+            done: 41,
+            ..progress.clone()
+        };
+        store.set_progress(1, &mut late_progress).unwrap();
+        assert_eq!(
+            late_progress.speed, 0,
+            "live events use the same speed as the snapshot"
+        );
+        assert_eq!(store.snapshot("main", 1).unwrap().progress.speed, 0);
+        assert_eq!(store.snapshot("main", 1).unwrap().progress.done, 41);
+        store.clear_question(1).unwrap();
+        assert_eq!(store.snapshot("main", 1).unwrap().progress.speed, 0);
+        store.set_progress(1, &mut progress.clone()).unwrap();
+        assert_eq!(store.snapshot("main", 1).unwrap().progress.speed, 64);
+        store.set_state(1, "paused", None, None).unwrap();
+        assert_eq!(store.snapshot("main", 1).unwrap().progress.speed, 0);
+        store
+            .set_progress(
+                1,
+                &mut JobProgressSnapshot {
+                    done: 42,
+                    ..progress.clone()
+                },
+            )
+            .unwrap();
+        assert_eq!(store.snapshot("main", 1).unwrap().progress.speed, 0);
+        store.set_state(1, "running", None, None).unwrap();
+        assert_eq!(store.snapshot("main", 1).unwrap().progress.speed, 0);
+        store.set_progress(1, &mut progress.clone()).unwrap();
+        store.set_state(1, "done", None, None).unwrap();
+        let finished = store.snapshot("main", 1).unwrap();
+        assert_eq!(finished.progress.speed, 0);
+        assert_eq!(finished.progress.current, "report.txt");
+    }
+
+    #[test]
     fn snapshot_store_scopes_jobs_and_tracks_deltas() {
         let mut store = JobSnapshotStore::default();
         let main_version = store.insert(
@@ -553,7 +636,7 @@ mod tests {
         let progress_version = store
             .set_progress(
                 2,
-                JobProgressSnapshot {
+                &mut JobProgressSnapshot {
                     done: 4,
                     total: 10,
                     current: "payload.bin".into(),
@@ -577,7 +660,7 @@ mod tests {
         assert!(done_version > progress_version);
         assert!(store.set_state(2, "running", None, None).is_none());
         assert!(store
-            .set_progress(2, JobProgressSnapshot::default())
+            .set_progress(2, &mut JobProgressSnapshot::default())
             .is_none());
         assert_eq!(store.snapshot("main", 2).unwrap().state, "done");
         assert!(store.review_spec("main", 2).is_some());
@@ -750,7 +833,7 @@ mod tests {
             store
                 .set_progress(
                     1,
-                    JobProgressSnapshot {
+                    &mut JobProgressSnapshot {
                         done,
                         total: MAX_SNAPSHOT_CHANGES as u64 + 1,
                         ..JobProgressSnapshot::default()

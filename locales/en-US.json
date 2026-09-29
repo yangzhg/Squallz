@@ -1362,6 +1362,7 @@
   "gui.task.waiting_for_engine": "Preparing progress",
   "gui.task.progress_submitting": "Opening the progress window",
   "gui.task.progress_known": "{percent}% · {done} / {total} · {speed}",
+  "gui.task.progress_waiting": "{progress} · {state}",
   "gui.task.phase_progress_known": "{phase} · {percent}% · {done} / {total} · {speed}",
   "gui.task.recovery_phase_progress_known": "{phase} · {percent}%",
   "gui.task.phase_progress_pending": "{phase} · byte progress is not available for this phase",

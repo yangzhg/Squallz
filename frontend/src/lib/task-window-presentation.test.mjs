@@ -71,6 +71,60 @@ function extractTask(state) {
   };
 }
 
+test("waiting task surfaces retain measured progress without rates or processing animation", async () => {
+  const server = await createTestServer();
+  try {
+    const { render } = await server.ssrLoadModule("svelte/server");
+    const { default: TaskProgressDialog } = await server.ssrLoadModule("/src/components/TaskProgressDialog.svelte");
+    const { default: TaskCenter } = await server.ssrLoadModule("/src/components/TaskCenter.svelte");
+    const { loadLocale } = await server.ssrLoadModule("/src/lib/i18n.svelte.ts");
+    const helpers = await server.ssrLoadModule("/src/lib/task-dialog.ts");
+    const { surface } = taskSurface(false);
+    for (const [locale, passwordLabel, conflictLabel, pausedLabel] of [
+      ["en-US", "Waiting for a password", "Waiting for a file decision", "Paused"],
+      ["zh-CN", "正在等待密码", "正在等待文件冲突处理", "已暂停"],
+    ]) {
+      await loadLocale(locale);
+      for (const [state, interaction, label] of [
+        ["running", "password", passwordLabel],
+        ["running", "conflict", conflictLabel],
+        ["paused", null, pausedLabel],
+      ]) {
+        const task = { ...extractTask(state), interaction };
+        assert.equal(helpers.taskOverallProgressBadge(task), label);
+        assert.equal(helpers.taskCurrentProgressBadge(task), label);
+        assert.ok(helpers.taskProgressSummary(task).includes(label));
+        assert.match(helpers.taskProgressSummary(task), /40%.*40 B \/ 100 B/u);
+        assert.match(helpers.taskCurrentProgressSummary(task), /report.txt.*4 B \/ 10 B/u);
+        assert.doesNotMatch(helpers.taskProgressSummary(task), /\/s|\/秒/u);
+        for (const presentation of ["dialog", "panel", "window"]) {
+          const { body } = render(TaskProgressDialog, { props: { ...surface, presentation, task } });
+          assert.match(body, /data-task-active="false"/u);
+          assert.match(body, /value="40"/u);
+          assert.doesNotMatch(body, /\d+ B\/(?:s|秒)/u);
+          const unknown = { ...task, total: 0, currentTotal: 0, phase: "archive_open" };
+          const pending = render(TaskProgressDialog, { props: { ...surface, presentation, task: unknown } }).body;
+          assert.doesNotMatch(pending, /<progress\b|task-current-pending active/u);
+          assert.ok(pending.includes(label));
+        }
+        const row = render(TaskCenter, { props: { tasks: [{ ...task, queueMoveIntent: null }], rootClass: "task-center" } }).body;
+        assert.ok(row.includes(helpers.taskProgressSummary(task)));
+        const batch = { ...task, spec: { kind: "batch_extract", items: [{ path: "a.zip" }, { path: "b.zip" }] } };
+        assert.ok(helpers.taskProgressSummary(batch).includes(label));
+        assert.ok(helpers.taskProgressSummary({ ...task, scanEntries: 37 }).includes(label));
+      }
+      const running = render(TaskProgressDialog, { props: { ...surface, task: extractTask("running") } }).body;
+      assert.match(running, /data-task-active="true"/u);
+      assert.match(helpers.taskProgressSummary(extractTask("running")), /10 B\/(?:s|秒)/u);
+      for (const state of ["done", "failed", "cancelled"]) {
+        assert.doesNotMatch(helpers.taskProgressSummary(extractTask(state)), /\/s|\/秒/u);
+      }
+    }
+  } finally {
+    await server.close();
+  }
+});
+
 test("window task views render one task heading and retain progress, results and input", async () => {
   const server = await createTestServer();
   try {

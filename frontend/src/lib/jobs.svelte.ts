@@ -317,6 +317,7 @@ function onState(ev: StateEvent): void {
   const previousState = task.state;
   task.version = ev.version;
   task.state = ev.state;
+  if (ev.state !== "running") task.speed = 0;
   task.error = ev.error ?? null;
   if (ev.result !== undefined) {
     task.result = (ev.result as Record<string, unknown> | null) ?? null;

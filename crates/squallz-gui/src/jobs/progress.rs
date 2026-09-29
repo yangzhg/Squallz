@@ -238,7 +238,7 @@ impl<'a> EmitProgress<'a> {
         } else {
             speed
         };
-        let progress = JobProgressSnapshot {
+        let mut progress = JobProgressSnapshot {
             done: snapshot.done,
             total: snapshot.total,
             current: snapshot.current,
@@ -249,8 +249,7 @@ impl<'a> EmitProgress<'a> {
             phase: snapshot.phase,
             interruptible: snapshot.interruptible,
         };
-        let Some(version) =
-            lock_unpoisoned(&self.snapshots).set_progress(self.id, progress.clone())
+        let Some(version) = lock_unpoisoned(&self.snapshots).set_progress(self.id, &mut progress)
         else {
             return;
         };

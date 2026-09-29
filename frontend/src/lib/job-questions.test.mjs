@@ -109,6 +109,30 @@ test("reconnecting restores every pending question without replaying prompt even
   }
 });
 
+test("pause and resume events do not restore an old transfer rate", async () => {
+  await withQuestionFeed(async ({ jobs, records, emit }) => {
+    const record = records[0];
+    record.interaction = null;
+    record.question = null;
+    record.version = 12;
+    record.progress = { ...record.progress, done: 40, speed: 64 };
+    await emit("job://ask-password", { id: 1 });
+    await until(() => jobs.tasks()[0].version === 12);
+    const task = jobs.tasks()[0];
+    assert.equal(task.speed, 64);
+    await emit("job://state", { id: 1, version: 13, state: "paused" });
+    assert.equal(task.speed, 0);
+    assert.equal(task.done, 40);
+    await emit("job://state", { id: 1, version: 14, state: "running" });
+    assert.equal(task.speed, 0);
+    await emit("job://progress", { id: 1, version: 15, ...record.progress, done: 50, speed: 80 });
+    assert.equal(task.speed, 80);
+    assert.equal(task.done, 50);
+    await emit("job://state", { id: 1, version: 16, state: "cancelled" });
+    assert.equal(task.speed, 0);
+  });
+});
+
 test("snapshot questions enforce ownership and terminal state while preserving form identity", async () => {
   const server = await createTestServer();
   try {

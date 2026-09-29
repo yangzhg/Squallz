@@ -10,7 +10,7 @@
     checksumItemText,
     hasTaskCurrentProgress,
     isTaskActiveState,
-    isTaskProgressingState,
+    taskProgressActive,
     taskCancelButtonLabel,
     taskChecksumItems,
     taskControlCalloutDetail,
@@ -250,7 +250,7 @@
     class="task-modal-card"
     data-task-state={task.state}
     data-task-outcome={displayedTaskTone()}
-    data-task-active={isTaskProgressingState(task.state) ? "true" : "false"}
+    data-task-active={taskProgressActive(task) ? "true" : "false"}
     role={presentation === "dialog" ? "dialog" : "region"}
     aria-modal={presentation === "dialog" ? "true" : undefined}
     aria-labelledby={titleId}
@@ -391,12 +391,14 @@
           <strong>{taskOverallProgressBadge(task)}</strong>
         </div>
         {#if taskOverallProgressIndeterminate(task)}
-          <progress
-            data-task-progress="overall"
-            data-task-progress-source={task.scanEntries != null ? "scan-entry" : "pending"}
-            max="100"
-            aria-label={taskProgressSummary(task)}
-          ></progress>
+          {#if taskProgressActive(task)}
+            <progress
+              data-task-progress="overall"
+              data-task-progress-source={task.scanEntries != null ? "scan-entry" : "pending"}
+              max="100"
+              aria-label={taskProgressSummary(task)}
+            ></progress>
+          {/if}
         {:else}
           <progress
             data-task-progress="overall"
@@ -431,7 +433,7 @@
           {:else}
             <div
               class="task-current-pending"
-              class:active={isTaskProgressingState(task.state)}
+              class:active={taskProgressActive(task)}
               data-task-progress-source={taskCurrentProgressSource(task)}
               aria-live="polite"
             >

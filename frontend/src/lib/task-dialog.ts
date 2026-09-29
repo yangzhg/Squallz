@@ -81,10 +81,24 @@ export function tr(key: string, fallback: string): string {
   return tFallback(key, fallback);
 }
 
-export function isTaskProgressingState(state: string | null | undefined): boolean {
-  return state === "submitting" || state === "running" || state === "pausing";
+export function taskProgressActive(task: TaskDialogModel): boolean {
+  return !task.interaction
+    && (task.state === "submitting" || task.state === "running");
 }
 
+function taskProgressStateLabel(task: TaskDialogModel): string {
+  if (task.state === "running") {
+    if (task.interaction === "password") return tr("gui.task_center.password_waiting", "Waiting for a password");
+    if (task.interaction === "conflict") return tr("gui.task_center.conflict_waiting", "Waiting for a file decision");
+  }
+  return taskOutcomeStateLabel(task);
+}
+
+function withWaitingState(task: TaskDialogModel, progress: string): string {
+  return isTaskActiveState(task.state) && !taskProgressActive(task)
+    ? t("gui.task.progress_waiting", { progress, state: taskProgressStateLabel(task) })
+    : progress;
+}
 
 function sourceCleanupStatusLabel(status: string): string {
   if (status === "completed") {
@@ -177,16 +191,16 @@ export function taskOverallProgressBadge(task: TaskDialogModel): string {
   if (task.state === "failed" || task.state === "cancelled") {
     return taskOutcomeStateLabel(task);
   }
-  if (isTaskActiveState(task.state) && !isTaskProgressingState(task.state)) {
-    return taskOutcomeStateLabel(task);
+  if (isTaskActiveState(task.state) && !taskProgressActive(task)) {
+    return taskProgressStateLabel(task);
   }
   const phase = isTaskActiveState(task.state) ? taskProgressPhaseLabel(task) : null;
-  if (phase && (task.total === 0 || isIndeterminatePhase(task)) && isTaskProgressingState(task.state)) return phase;
+  if (phase && (task.total === 0 || isIndeterminatePhase(task)) && taskProgressActive(task)) return phase;
   if (task.total > 0 || task.state === "done") return `${taskProgressPercent(task)}%`;
-  if (isTaskProgressingState(task.state) && task.scanEntries != null) {
+  if (taskProgressActive(task) && task.scanEntries != null) {
     return tr("gui.task.scan_badge", "Scanning");
   }
-  if (isTaskProgressingState(task.state)) {
+  if (taskProgressActive(task)) {
     return tr("gui.task.current_progress_pending_badge", "In progress");
   }
   return taskOutcomeStateLabel(task);
@@ -212,7 +226,9 @@ export function taskCurrentProgressPercent(task: TaskDialogModel): number {
 }
 
 function taskSpeedLabel(task: TaskDialogModel): string {
-  return task.speed > 0 ? t("gui.task.speed_per_second", { speed: formatBytes(task.speed) }) : taskOutcomeStateLabel(task);
+  return taskProgressActive(task) && task.speed > 0
+    ? t("gui.task.speed_per_second", { speed: formatBytes(task.speed) })
+    : taskProgressStateLabel(task);
 }
 
 export function taskProgressSummary(task: TaskDialogModel): string {
@@ -220,20 +236,20 @@ export function taskProgressSummary(task: TaskDialogModel): string {
     return tr("gui.task.progress_submitting", "Opening the progress window before archive execution starts");
   }
   if (task.scanEntries != null) {
-    return t("gui.task.progress_scan", { count: task.scanEntries });
+    return withWaitingState(task, t("gui.task.progress_scan", { count: task.scanEntries }));
   }
   const phase = isTaskActiveState(task.state) ? taskProgressPhaseLabel(task) : null;
   if (isTaskActiveState(task.state) && task.phase === "archive_open") {
-    return tr("gui.task.archive_open_detail", "Reading archive information before processing its contents.");
+    return withWaitingState(task, tr("gui.task.archive_open_detail", "Reading archive information before processing its contents."));
   }
   if (isRestoringDirectories(task)) {
-    return tr("gui.task.extract_metadata_detail", "Restoring folder modification dates and permissions.");
+    return withWaitingState(task, tr("gui.task.extract_metadata_detail", "Restoring folder modification dates and permissions."));
   }
   if (phase && task.total > 0 && isRecoveryProgressPhase(task)) {
-    return t("gui.task.recovery_phase_progress_known", {
+    return withWaitingState(task, t("gui.task.recovery_phase_progress_known", {
       phase,
       percent: taskProgressPercent(task),
-    });
+    }));
   }
   if (phase && task.total > 0 && task.spec.kind !== "batch_extract") {
     return t("gui.task.phase_progress_known", {
@@ -245,18 +261,18 @@ export function taskProgressSummary(task: TaskDialogModel): string {
     });
   }
   if (phase && task.spec.kind !== "batch_extract") {
-    return t("gui.task.phase_progress_pending", { phase });
+    return withWaitingState(task, t("gui.task.phase_progress_pending", { phase }));
   }
   if (task.spec.kind === "batch_extract") {
     const total = Math.max(1, task.spec.items.length);
     const done = task.state === "done"
       ? Number(task.result?.extracted ?? total)
       : Math.min(total, Math.floor((taskProgressPercent(task) / 100) * total));
-    return t("gui.task.progress_batch_extract", {
+    return withWaitingState(task, t("gui.task.progress_batch_extract", {
       percent: taskProgressPercent(task),
       done,
       total,
-    });
+    }));
   }
   if (task.total > 0) {
     return t("gui.task.progress_known", {
@@ -284,6 +300,7 @@ export function taskCurrentSectionLabel(task: TaskDialogModel): string {
 }
 
 export function taskCurrentLabel(task: TaskDialogModel): string {
+  if (!task.current && !taskProgressActive(task)) return taskProgressStateLabel(task);
   if (!task.current && isTaskActiveState(task.state) && task.phase === "archive_open") {
     return tr("gui.task.phase.archive_open", "Reading archive");
   }
@@ -291,8 +308,8 @@ export function taskCurrentLabel(task: TaskDialogModel): string {
 }
 
 export function taskCurrentProgressBadge(task: TaskDialogModel): string {
-  if (isTaskActiveState(task.state) && !isTaskProgressingState(task.state)) {
-    return taskOutcomeStateLabel(task);
+  if (isTaskActiveState(task.state) && !taskProgressActive(task)) {
+    return taskProgressStateLabel(task);
   }
   if (hasTaskCurrentProgress(task)) return `${taskCurrentProgressPercent(task)}%`;
   if (!isTaskActiveState(task.state)) return taskOutcomeStateLabel(task);
@@ -309,8 +326,16 @@ export function taskCurrentProgressSummary(task: TaskDialogModel): string {
   if (task.state === "submitting") {
     return tr("gui.task.current_submitting", "Preparing the first item");
   }
-  if (!isTaskProgressingState(task.state)) {
-    if (isTaskActiveState(task.state)) return taskStateLabel(task.state);
+  if (!taskProgressActive(task)) {
+    if (isTaskActiveState(task.state)) {
+      return hasTaskCurrentProgress(task)
+        ? t("gui.task.current_progress_known", {
+          name: taskCurrentLabel(task),
+          done: formatBytes(taskCurrentProgressDone(task)),
+          total: formatBytes(task.currentTotal),
+        })
+        : taskProgressStateLabel(task);
+    }
     if (task.current) {
       if (task.state === "done") {
         return taskOutcomeNeedsAttention(task)
