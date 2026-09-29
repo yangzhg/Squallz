@@ -13,7 +13,7 @@ import {
 } from "./ipc";
 import { t, tError } from "./i18n.svelte";
 import { pushToast, removeToastByKey } from "./toasts.svelte";
-import { cancelPasswordBookPreview, readPasswordBookPreview, savePasswordBookPreview, forgetPasswordBookPreview } from "./dev-preview-data";
+import { cancelPasswordBookPreview, readPasswordBookPreview, savePasswordBookPreview, forgetPasswordBookPreview, preparedNestedPreviewRows } from "./dev-preview-data";
 
 export const PAGE_SIZE = 500;
 export type PasswordBookStatusState = "idle" | "checking" | "ready" | "error";
@@ -475,10 +475,14 @@ export async function adoptOpenedArchive(info: ArchiveInfo, isCurrent: () => boo
   }
   cancelActiveArchiveOpenRequest();
   const requestGeneration = ++store.openGeneration;
+  const previewRows = import.meta.env.DEV && typeof window !== "undefined"
+    ? preparedNestedPreviewRows(new URLSearchParams(window.location.search), info.source) : null;
   let page: Awaited<ReturnType<typeof ipc.listEntries>>;
   try {
     markValidationArchiveCall("listEntries");
-    page = await ipc.listEntries(info.id, 0, "", null, PAGE_SIZE);
+    const rootRows = previewRows?.filter((row) => !row.path.replace(/\/+$/g, "").includes("/"));
+    page = rootRows ? { items: rootRows.slice(0, PAGE_SIZE), total: rootRows.length, page: 0 }
+      : await ipc.listEntries(info.id, 0, "", null, PAGE_SIZE);
   } catch (error) {
     void ipc.closeArchive(info.id);
     if (requestGeneration !== store.openGeneration || !isCurrent()) return false;
@@ -488,13 +492,13 @@ export async function adoptOpenedArchive(info: ArchiveInfo, isCurrent: () => boo
     void ipc.closeArchive(info.id);
     return false;
   }
-  if (store.info && store.info.id !== info.id) void ipc.closeArchive(store.info.id);
+  if (store.info && store.info.id !== info.id) void ipc.closeArchive(store.info.id).catch(() => undefined);
   store.info = info;
   store.dirs = [];
   cancelFilterReload();
   store.filter = "";
   store.filterPending = false;
-  store.previewRows = null;
+  store.previewRows = previewRows;
   clearBrowseError();
   clearArchiveRefreshStatus();
   store.generation += 1;

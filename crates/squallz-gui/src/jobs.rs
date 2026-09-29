@@ -40,7 +40,7 @@ pub(crate) use execution::{
 use progress::EmitProgress;
 
 #[cfg(test)]
-mod test_support;
+pub(crate) mod test_support;
 
 use snapshots::{job_unavailable_error, JobSnapshotStore};
 pub use snapshots::{JobInteraction, JobSnapshotDelta, JobStateSnapshot};

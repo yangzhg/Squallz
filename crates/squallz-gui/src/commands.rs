@@ -3631,7 +3631,7 @@ mod tests {
     #[test]
     fn nested_passwords_unlock_each_layer_and_keep_the_opened_source_readable() {
         let dir = temp_dir("nested-passwords");
-        let state = AppState::new();
+        let state = Arc::new(AppState::new());
         let inner = make_header_encrypted_7z(&dir);
         let outer = dir.join("outer.zip");
         state
@@ -3755,7 +3755,114 @@ mod tests {
         assert_eq!(std::fs::read(path).unwrap(), b"classified");
         sessions.external_use_failed(&entry.preview_id, "test-window");
         assert!(sessions.release(&entry.preview_id, "test-window").unwrap());
+
+        // The normal extraction workflow reuses this verified inner source,
+        // including preflight, cancellation, conflict review and retry.
+        let destination = dir.join("output");
+        let output_file = destination.join("secret-src/secret.txt");
+        std::fs::create_dir_all(output_file.parent().unwrap()).unwrap();
+        std::fs::write(&output_file, b"keep until confirmed").unwrap();
+        let plan = plan_extract_impl(
+            &state,
+            "test-window",
+            &info.source,
+            &info.path,
+            &destination,
+            None,
+            true,
+            None,
+            SafetyLimits::default().max_entries,
+            &ControlToken::default(),
+        )
+        .unwrap();
+        assert_eq!(plan.plan.files, 1);
+        let spec = JobSpec::Extract {
+            path: info.source.clone(),
+            dest: destination.to_string_lossy().into_owned(),
+            expected_destination: Some(plan.plan.destination),
+            expected_input_guard: Some(plan.input_guard),
+            selection: None,
+            overwrite: OverwritePolicy::Ask,
+            symlinks: SymlinkPolicy::Preserve,
+            smart: true,
+            encoding: None,
+            password: None,
+            verify_sfx: false,
+            best_effort: false,
+        };
+        let manager = super::JobManager::new();
+        let sink = Arc::new(crate::jobs::test_support::TestSink::default());
+        let submit = || {
+            manager
+                .submit_for_window(
+                    "test-window".into(),
+                    Arc::clone(&state),
+                    sink.clone(),
+                    spec.clone(),
+                    SettingsDto::default(),
+                )
+                .unwrap()
+        };
+        let await_conflict = |id| {
+            let start = std::time::Instant::now();
+            loop {
+                let snapshot = manager.snapshot_for_window("test-window", id).unwrap();
+                if let Some((_, prompt)) =
+                    sink.events.lock().unwrap().iter().find(|(event, value)| {
+                        event == crate::events::EV_ASK_CONFLICT && value["id"] == id
+                    })
+                {
+                    return prompt["version"].as_u64().unwrap();
+                }
+                if start.elapsed() > std::time::Duration::from_secs(3)
+                    || matches!(snapshot.state.as_str(), "done" | "failed" | "cancelled")
+                {
+                    manager.cancel_for_window("test-window", id).unwrap();
+                    panic!("extraction did not reach the destination conflict");
+                }
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+        };
+        let cancelled = submit();
+        await_conflict(cancelled);
+        manager.cancel_for_window("test-window", cancelled).unwrap();
+        manager.wait_idle();
+        assert_eq!(
+            std::fs::read(&output_file).unwrap(),
+            b"keep until confirmed"
+        );
+        let review = manager
+            .review_spec_for_window(&state, "test-window", cancelled)
+            .unwrap();
+        assert!(
+            matches!(review, JobSpec::Extract { path, password: None, .. } if path == info.source)
+        );
+
+        let id = submit();
+        let version = await_conflict(id);
         state.close_archive_for_window("test-window", info.id);
+        assert!(physical.exists());
+        assert!(state.password_for(&physical).is_some());
+        manager
+            .answer_conflict_for_window("test-window", id, version, "overwrite".into(), false)
+            .unwrap();
+        manager.wait_idle();
+        assert_eq!(
+            manager
+                .snapshot_for_window("test-window", id)
+                .unwrap()
+                .state,
+            "done"
+        );
+        assert_eq!(std::fs::read(&output_file).unwrap(), b"classified");
+        let events = sink.events.lock().unwrap();
+        assert!(!events
+            .iter()
+            .any(|(event, _)| event == crate::events::EV_ASK_PASSWORD));
+        let visible = serde_json::to_string(&*events).unwrap();
+        assert!(!visible.contains(&physical.to_string_lossy().to_string()));
+        assert!(!visible.contains(&info.source));
+        assert!(!visible.contains("outer-secret"));
         assert!(!physical.exists());
         assert_eq!(state.cached_password_paths(), vec![outer.clone()]);
         assert_eq!(sessions.release_window("test-window"), 0);

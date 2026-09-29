@@ -103,6 +103,12 @@ function nestedPreviewArchiveInfo(outerSource: string, entryPath: string, count:
   };
 }
 
+export function preparedNestedPreviewRows(params: URLSearchParams, source: string): EntryDto[] | null {
+  if (!import.meta.env.DEV || source !== "archive://9002") return null;
+  if (params.get("previewEntryPassword") === "1") return nestedPreviewItems;
+  return readArchivePreview(params, 500)?.nestedPreview?.items ?? null;
+}
+
 type PreviewTaskKind =
   | "archive_open"
   | "compress"
