@@ -67,6 +67,130 @@ async function withArchive(run, options = {}) {
   }
 }
 
+async function updateRefreshEffect(archive, jobs) {
+  const app = await readFile(new URL("../App.svelte", import.meta.url), "utf8");
+  const source = ts.createSourceFile("App.ts", app.match(/<script lang="ts">([\s\S]*?)<\/script>/u)[1], ts.ScriptTarget.Latest, true);
+  const effect = source.statements.find((node) => ts.isExpressionStatement(node)
+    && node.getText(source).startsWith("$effect(") && node.getText(source).includes("refreshedUpdateJobs"));
+  assert.ok(effect);
+  const helpers = source.statements.filter((node) => ts.isFunctionDeclaration(node) && node.name?.text === "pendingArchiveUpdateJobs");
+  const { outputText } = ts.transpileModule([...helpers, effect].map((node) => node.getText(source)).join("\n"), {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
+  });
+  const pending = [];
+  const notices = [];
+  const context = {
+    jobRows: jobs, archiveOpenStatus: "idle", refreshedUpdateJobs: new Set(),
+    get currentArchive() { return archive.archive(); },
+    get archivePasswordPrompt() { return archive.openPasswordPrompt(); },
+    archiveRefreshStatus: archive.archiveRefreshStatus,
+    refreshCurrentArchive: (window) => {
+      const result = archive.refreshCurrentArchive(window);
+      pending.push(result);
+      return result;
+    },
+    mode: "modern", CLASSIC_ROW_HEIGHT: 32, MODERN_ROW_HEIGHT: 40,
+    browseVirtualWindow: () => ({ start: 0, end: 20 }),
+    showNotice: (notice) => notices.push(notice), tr: (_key, fallback) => fallback,
+    $effect: (callback) => callback(), untrack: (callback) => callback(),
+  };
+  vm.createContext(context);
+  return { context, pending, notices, run: () => vm.runInContext(outputText, context) };
+}
+
+function completedUpdate(id, path = "/tmp/refresh.zip") {
+  return { id, state: "done", spec: { kind: "update", path } };
+}
+
+test("completed updates from one snapshot reopen the current archive only once", async () => {
+  await withArchive(async ({ archive, ipc, pendingOpen }) => {
+    const run = await updateRefreshEffect(archive, [
+      completedUpdate(1), completedUpdate(2), completedUpdate(3),
+      completedUpdate(4, "/tmp/other.zip"),
+      { ...completedUpdate(5), state: "running" },
+      { id: 6, state: "done", spec: { kind: "test", path: "/tmp/refresh.zip" } },
+    ]);
+    const cancelled = [];
+    ipc.cancelArchiveOpen = async (id) => { cancelled.push(id); };
+    run.run();
+    assert.equal(run.pending.length, 1);
+    assert.deepEqual([...run.context.refreshedUpdateJobs], [1, 2, 3]);
+    assert.equal(cancelled.length, 0);
+    pendingOpen.resolve(info(2));
+    await run.pending[0];
+    run.run();
+    assert.equal(run.pending.length, 1, "a snapshot replay cannot refresh the same updates again");
+    assert.equal(run.notices.length, 1);
+  });
+});
+
+test("updates completed during a refresh wait and share one follow-up read", async () => {
+  await withArchive(async ({ archive, ipc, pendingOpen }) => {
+    const run = await updateRefreshEffect(archive, [completedUpdate(1)]);
+    const cancelled = [];
+    ipc.cancelArchiveOpen = async (id) => { cancelled.push(id); };
+    run.run();
+    run.context.jobRows.push(completedUpdate(2), completedUpdate(3));
+    run.run();
+    assert.equal(run.pending.length, 1, "later updates must not interrupt the first read");
+    assert.equal(cancelled.length, 0);
+    pendingOpen.resolve(info(2));
+    await run.pending[0];
+    assert.equal(run.notices.length, 0, "completion feedback waits for the latest updates to be read");
+    ipc.openArchive = async () => info(3);
+    run.run();
+    await run.pending[1];
+    assert.equal(run.pending.length, 2);
+    assert.equal(archive.archive().id, 3);
+    assert.deepEqual([...run.context.refreshedUpdateJobs], [1, 2, 3]);
+    assert.equal(run.notices.length, 1);
+  });
+});
+
+test("completed updates wait for an encoding change and refresh using its accepted encoding", async () => {
+  await withArchive(async ({ archive, ipc, pendingOpen }) => {
+    const run = await updateRefreshEffect(archive, [completedUpdate(1)]);
+    const changing = archive.reopenWithEncoding("shift_jis");
+    run.run();
+    assert.equal(run.pending.length, 0);
+    assert.equal(run.context.refreshedUpdateJobs.size, 0);
+    pendingOpen.resolve({ ...info(2), encoding_override: "shift_jis" });
+    await changing;
+    ipc.openArchive = async (_path, _password, encoding) => {
+      assert.equal(encoding, "shift_jis");
+      return { ...info(3), encoding_override: encoding };
+    };
+    run.run();
+    await run.pending[0];
+    assert.equal(archive.archiveEncoding(), "shift_jis");
+  });
+});
+
+test("failed automatic refreshes stay retryable without looping or refreshing another archive", async () => {
+  await withArchive(async ({ archive, ipc, pendingOpen }) => {
+    const run = await updateRefreshEffect(archive, [completedUpdate(1), completedUpdate(2)]);
+    run.context.archiveOpenStatus = "opening";
+    run.run();
+    assert.equal(run.pending.length, 0);
+    run.context.archiveOpenStatus = "idle";
+    run.run();
+    pendingOpen.reject({ key: "error.io", params: {}, detail: "read failed" });
+    await run.pending[0];
+    run.run();
+    assert.equal(run.pending.length, 1);
+    assert.equal(archive.archiveRefreshStatus(), "error");
+    assert.equal(run.notices.length, 0);
+    ipc.openArchive = async () => info(2);
+    await archive.retryArchiveBrowse();
+    assert.equal(archive.archiveRefreshStatus(), "idle");
+    run.context.jobRows.push(completedUpdate(3));
+    archive.installArchivePreview({ ...info(3), path: "/tmp/other.zip", source: "/tmp/other.zip" }, [row("other.txt")]);
+    run.run();
+    assert.equal(run.pending.length, 1);
+    assert.equal(run.context.refreshedUpdateJobs.has(3), false);
+  });
+});
+
 test("refresh prepares the displayed directory before replacing its rows and archive handle", async () => {
   await withArchive(async ({ archive, ipc, closed, requests, pendingOpen }) => {
     const pendingPage = deferred();

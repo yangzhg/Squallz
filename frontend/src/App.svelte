@@ -2059,23 +2059,28 @@
   });
 
   $effect(() => {
-    for (const task of jobRows) {
-      if (
-        task.spec.kind === "update" &&
-        task.state === "done" &&
-        archiveOpenStatus === "idle" &&
-        currentArchive?.path === task.spec.path &&
-        !refreshedUpdateJobs.has(task.id)
-      ) {
-        refreshedUpdateJobs.add(task.id);
-        void refreshCurrentArchive(() => browseVirtualWindow(
-          mode === "classic" ? CLASSIC_ROW_HEIGHT : MODERN_ROW_HEIGHT,
-        )).then((ok) => {
-          if (ok) showNotice(tr("gui.archive.list_refreshed", "Archive list refreshed"));
-        });
-      }
-    }
+    if (!currentArchive || archiveOpenStatus !== "idle" || archivePasswordPrompt
+      || archiveRefreshStatus() === "refreshing") return;
+    const path = currentArchive.path;
+    const completed = pendingArchiveUpdateJobs();
+    if (completed.length === 0) return;
+    for (const task of completed) refreshedUpdateJobs.add(task.id);
+    untrack(() => {
+      void refreshCurrentArchive(() => browseVirtualWindow(
+        mode === "classic" ? CLASSIC_ROW_HEIGHT : MODERN_ROW_HEIGHT,
+      )).then((ok) => {
+        if (ok && currentArchive?.path === path && archiveRefreshStatus() === "idle"
+          && pendingArchiveUpdateJobs().length === 0) {
+          showNotice(tr("gui.archive.list_refreshed", "Archive list refreshed"));
+        }
+      });
+    });
   });
+
+  function pendingArchiveUpdateJobs() {
+    return jobRows.filter((task) => task.spec.kind === "update" && task.state === "done"
+      && currentArchive?.path === task.spec.path && !refreshedUpdateJobs.has(task.id));
+  }
 
   function syncUrl(nextMode: Mode = mode) {
     const url = new URL(window.location.href);
