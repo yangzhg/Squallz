@@ -9579,7 +9579,7 @@
     return `${targetDir}${base}${isDir ? "/" : ""}`;
   }
 
-  function uniqueArchiveTarget(path: string, reserved: Set<string>): string {
+  function uniqueArchiveTarget(path: string, reserved: Set<string>, nextCopyNumbers: Map<string, number>): string {
     const isDir = path.endsWith("/");
     const clean = isDir ? path.slice(0, -1) : path;
     const slash = clean.lastIndexOf("/");
@@ -9588,15 +9588,15 @@
     const dot = !isDir ? base.lastIndexOf(".") : -1;
     const stem = dot > 0 ? base.slice(0, dot) : base;
     const ext = dot > 0 ? base.slice(dot) : "";
-    for (let copy = 1; copy < 1000; copy += 1) {
+    for (let copy = nextCopyNumbers.get(path) ?? 1; ; copy += 1) {
       const suffix = copy === 1 ? " copy" : ` copy ${copy}`;
       const candidate = `${dir}${stem}${suffix}${ext}${isDir ? "/" : ""}`;
       if (!reserved.has(candidate)) {
         reserved.add(candidate);
+        nextCopyNumbers.set(path, copy + 1);
         return candidate;
       }
     }
-    return `${dir}${stem} copy ${Date.now()}${ext}${isDir ? "/" : ""}`;
   }
 
   function buildMovePlan(targetDir = normalizeMoveTargetDir()): MovePlanItem[] {
@@ -9608,6 +9608,7 @@
       targetCounts.set(to, (targetCounts.get(to) ?? 0) + 1);
     }
     const reserved = new Set(existing);
+    const nextCopyNumbers = new Map<string, number>();
     for (const from of selected) {
       reserved.add(moveTargetForPath(from, targetDir));
     }
@@ -9626,7 +9627,7 @@
         to,
         conflict,
         reason,
-        keepBothTo: conflict ? uniqueArchiveTarget(to, reserved) : null,
+        keepBothTo: conflict ? uniqueArchiveTarget(to, reserved, nextCopyNumbers) : null,
       };
     });
   }

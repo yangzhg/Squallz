@@ -285,7 +285,8 @@
                 .replace("{target}", view.conflict.targetDir)}
             </span>
           </header>
-          <div class="classic-move-conflict-table">
+          <!-- svelte-ignore a11y_no_noninteractive_tabindex (focusable scroll region) -->
+          <div class="classic-move-conflict-table" role="region" aria-label={tr("gui.move.conflicts", "Move target conflicts")} tabindex="0">
             <div>
               <b>{tr("common.source", "Source")}</b>
               <b>{tr("gui.move.existing_target", "Existing target")}</b>

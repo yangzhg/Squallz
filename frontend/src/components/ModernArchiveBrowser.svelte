@@ -308,7 +308,8 @@
             .replace("{count}", String(view.conflict.readyCount))}
         </p>
       </div>
-      <div class="move-conflict-list">
+      <!-- svelte-ignore a11y_no_noninteractive_tabindex (focusable scroll region) -->
+      <div class="move-conflict-list" role="region" aria-label={tr("gui.move.conflicts", "Move target conflicts")} tabindex="0">
         {#each view.conflict.items as item}
           <div>
             <strong>{item.from}</strong>

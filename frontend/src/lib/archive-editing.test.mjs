@@ -21,7 +21,7 @@ async function loadEditing(overrides = {}) {
   const names = new Set([
     "normalizeNewFolderPath", "commitNewFolderName", "submitNewFolderJob", "archivePathSet",
     "normalizeMoveTargetDir", "submitMovePlan", "buildMovePlan", "moveTargetForPath", "uniqueArchiveTarget",
-    "archiveEditPathProblem", "moveTargetProblem", "submitMoveSelectedJob",
+    "archiveEditPathProblem", "moveTargetProblem", "submitMoveSelectedJob", "submitMoveKeepBoth",
     "normalizeRenameTargetName", "selectedRenameSource", "renameTargetIssue", "archiveEntryExtension",
     "submitRenameSelectedJob", "selectedDeletePaths", "submitDeleteSelectedJob", "submitCurrentArchiveJob",
     "openArchiveEditor", "submitAddToArchiveJob", "archiveEditSubmissionFailure", "jobSubmitBlockedMessage",
@@ -88,7 +88,7 @@ async function loadEditing(overrides = {}) {
     $effect: (callback) => callback(), untrack: (callback) => callback(),
     ...overrides,
   };
-  const handlers = vm.runInNewContext(`${outputText}\n({ normalizeNewFolderPath, commitNewFolderName, submitNewFolderJob, normalizeMoveTargetDir, submitMoveSelectedJob, submitMovePlan, buildMovePlan, normalizeRenameTargetName, submitRenameSelectedJob, submitDeleteSelectedJob, openArchiveEditor, submitAddToArchiveJob, JobSubmitBlockedError })`, context);
+  const handlers = vm.runInNewContext(`${outputText}\n({ normalizeNewFolderPath, commitNewFolderName, submitNewFolderJob, normalizeMoveTargetDir, submitMoveSelectedJob, submitMoveKeepBoth, submitMovePlan, buildMovePlan, normalizeRenameTargetName, submitRenameSelectedJob, submitDeleteSelectedJob, openArchiveEditor, submitAddToArchiveJob, JobSubmitBlockedError })`, context);
   const reset = source.statements.find((node) => ts.isExpressionStatement(node)
     && node.getText(source).startsWith("$effect(") && node.getText(source).includes('archiveDirs.join("\\u0000")')
     && node.getText(source).includes("renameTargetName"));
@@ -359,6 +359,32 @@ test("unsafe folder and move inputs are explained without queuing altered paths"
     assert.equal(editing.submitted.length, 0, value);
     assert.equal(editing.notices.length, 2, value);
   }
+});
+
+test("large same-name moves reserve a distinct keep-both target for every source", async () => {
+  const selected = new Set(Array.from({ length: 1_100 }, (_, index) => `day-${index}/report.txt`));
+  selected.add("other/report copy 1000.txt");
+  const existing = ["destination/report copy.txt", "destination/report copy 2.txt"];
+  const editing = await loadEditing({
+    selectedPaths: () => selected,
+    loadedRows: () => existing.map((path) => ({ path, entry_type: "file" })),
+    Date: { now: () => 123456789 },
+  });
+  const plan = editing.buildMovePlan();
+  const destinations = plan.map((item) => item.keepBothTo ?? item.to);
+  assert.equal(plan.length, selected.size);
+  assert.equal(plan.filter((item) => item.conflict).length, 1_100);
+  assert.equal(new Set(destinations).size, selected.size);
+  assert.ok(destinations.every((path) => !existing.includes(path)));
+  assert.equal(destinations[0], "destination/report copy 3.txt");
+  assert.equal(destinations.at(-1), "destination/report copy 1000.txt", "an original target keeps its name");
+  assert.deepEqual(JSON.parse(JSON.stringify(editing.buildMovePlan())), JSON.parse(JSON.stringify(plan)), "reviewing again gives stable names");
+  await editing.submitMoveSelectedJob();
+  assert.equal(editing.submitted.length, 0, "conflicts require a decision before submission");
+  await editing.submitMoveKeepBoth();
+  assert.equal(editing.submitted.length, 1);
+  assert.deepEqual(Array.from(editing.submitted[0].rename, (item) => item.to), Array.from(destinations));
+  assert.equal(editing.context.moveConflictReview, null);
 });
 
 test("moves into the selected subtree or the same folder do not become keep-both operations", async () => {
