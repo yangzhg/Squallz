@@ -36,7 +36,7 @@ function harness() {
   const context = {
     calls, taskReviewScreen, taskWindowMode: false, currentArchive: archive(),
     screen: "browse", archiveOpenStatus: "idle", archiveOpenGeneration: 0,
-    taskReviewRequestGeneration: 0,
+    taskReviewRequestGeneration: 0, nestedExtractDraftGeneration: 0, nestedExtractReviewFocusPending: false,
     extractReviewFocusPending: false, convertReviewFocusPending: false, createPrimaryFocusPending: false,
     pendingCreateSubmission: null, classicCreateSection: "general",
     pendingArchiveTaskReview: null, extractDraftArchive: { id: 1, source: "/original/photos.zip" },

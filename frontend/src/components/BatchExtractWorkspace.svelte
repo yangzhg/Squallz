@@ -16,24 +16,32 @@
   <header class="batch-workspace-header">
     <div>
       <h1 id="batch-workspace-heading" tabindex="-1">{surface.title}</h1>
-      <p>{surface.tr("gui.batch.archive_count", "Archives: {count}").replace("{count}", surface.rows.length.toLocaleString())}</p>
+      <p>{surface.mode === "nested"
+        ? surface.tr("gui.nested_extract.scope", "Extract all contents of the inner archive")
+        : surface.tr("gui.batch.archive_count", "Archives: {count}").replace("{count}", surface.rows.length.toLocaleString())}</p>
     </div>
     <div class="batch-workspace-actions">
-      <button class="secondary-lite" disabled={surface.locked} onclick={surface.actions.onAdd}>
-        <Icon name="folder-open" size={16} />{surface.tr("gui.batch.add_archives", "Add archives")}
-      </button>
+      {#if surface.actions.onAdd}
+        <button class="secondary-lite" disabled={surface.locked} onclick={surface.actions.onAdd}>
+          <Icon name="folder-open" size={16} />{surface.mode === "nested"
+            ? surface.tr("gui.archive.back_to_current", "Back to current archive")
+            : surface.tr("gui.batch.add_archives", "Add archives")}
+        </button>
+      {/if}
       <button class="primary" disabled={surface.locked || surface.rows.length === 0} onclick={surface.actions.onStart}>
         <Icon name="archive" size={16} />{surface.submitting
           ? surface.tr("gui.task_center.submitting", "Adding to the queue…")
+          : surface.mode === "nested" ? surface.tr("gui.extract.start", "Extract")
           : surface.tr("gui.batch.start_batch", "Start batch")}
       </button>
     </div>
   </header>
+  <div class="batch-workspace-body">
   {#if surface.rows.length === 0}
     <div class="batch-empty-state">
       <Icon name="archive" size={32} />
-      <strong>{surface.tr("gui.batch.no_archives_queued", "No archives selected")}</strong>
-      <p>{surface.tr("gui.batch.empty_hint", "Add archives, review their destinations, then start extraction.")}</p>
+      <strong>{surface.mode === "nested" ? surface.tr("gui.nested_extract.empty", "No inner archive selected") : surface.tr("gui.batch.no_archives_queued", "No archives selected")}</strong>
+      <p>{surface.mode === "nested" ? surface.tr("gui.nested_extract.empty_hint", "Select an archive inside the current archive, then choose Extract in its preview.") : surface.tr("gui.batch.empty_hint", "Add archives, review their destinations, then start extraction.")}</p>
     </div>
   {:else}
     <div class="batch-policy-controls">
@@ -57,7 +65,11 @@
         </select>
       </label>
     </div>
-    <p class="batch-workspace-hint" id="batch-destination-hint">{surface.smart
+    <p class="batch-workspace-hint" id="batch-destination-hint">{surface.mode === "nested"
+      ? surface.smart
+        ? surface.tr("gui.nested_extract.smart_destination_hint", "Smart extract uses this destination as a base folder. A subfolder is added only when the inner archive contents need one.")
+        : surface.tr("gui.nested_extract.direct_destination_hint", "All contents of the inner archive are extracted directly into this destination folder.")
+      : surface.smart
       ? surface.tr("gui.batch.smart_destination_hint", "Smart extract uses each destination as a base folder. A subfolder is added only when the archive contents need one.")
       : surface.tr("gui.batch.direct_destination_hint", "Each archive is extracted directly into its destination folder.")}</p>
     <ol class="batch-source-list">
@@ -66,13 +78,17 @@
           <div class="batch-source-header">
             <div class="batch-source-identity">
               <strong>{row.name}</strong>
-              <span>{row.format} · {surface.tr("gui.batch.encoding", "Encoding: {encoding}").replace("{encoding}", row.encoding)}</span>
-              {#if row.bestEffort}<span>{surface.tr("gui.batch.best_effort", "Best-effort extraction enabled")}</span>{/if}
+              <span>{row.format} · {(surface.mode === "nested"
+                ? surface.tr("gui.nested_extract.outer_encoding", "Outer archive encoding: {encoding}")
+                : surface.tr("gui.batch.encoding", "Encoding: {encoding}")).replace("{encoding}", row.encoding)}</span>
+              {#if row.bestEffort && !row.onBestEffortChange}<span>{surface.tr("gui.batch.best_effort", "Best-effort extraction enabled")}</span>{/if}
             </div>
-            <button class="secondary-lite" id={`batch-remove-${index}`} disabled={surface.locked}
-              aria-label={surface.tr("gui.batch.remove_archive", "Remove {name}").replace("{name}", row.name)} onclick={row.onRemove}>
-              <Icon name="x" size={16} />{surface.tr("gui.batch.remove", "Remove")}
-            </button>
+            {#if row.onRemove}
+              <button class="secondary-lite" id={`batch-remove-${index}`} disabled={surface.locked}
+                aria-label={surface.tr("gui.batch.remove_archive", "Remove {name}").replace("{name}", row.name)} onclick={row.onRemove}>
+                <Icon name="x" size={16} />{surface.tr("gui.batch.remove", "Remove")}
+              </button>
+            {/if}
           </div>
           <p class="batch-source-path">{row.path}</p>
           <label class="batch-destination-field" for={`batch-destination-${index}`}>
@@ -88,9 +104,19 @@
               <Icon name="folder" size={16} />{surface.tr("gui.compress.browse", "Browse…")}
             </button>
           </div>
+          {#if row.onBestEffortChange}
+            <label class="batch-smart-option">
+              <input type="checkbox" checked={row.bestEffort} disabled={surface.locked}
+                onchange={(event) => row.onBestEffortChange?.(event.currentTarget.checked)} />
+              <span>{surface.tr("gui.nested_extract.best_effort", "Continue extracting readable files if some entries are damaged")}</span>
+            </label>
+          {/if}
         </li>
       {/each}
     </ol>
-    <p class="batch-workspace-hint">{surface.tr("gui.batch.execution_hint", "Archives are checked when the task starts. Passwords are requested when needed. If an archive fails, the remaining archives continue.")}</p>
+    <p class="batch-workspace-hint">{surface.mode === "nested"
+      ? surface.tr("gui.nested_extract.execution_hint", "The outer archive is opened first. The inner archive and destination are checked before extraction. Each archive's password is requested separately when needed.")
+      : surface.tr("gui.batch.execution_hint", "Archives are checked when the task starts. Passwords are requested when needed. If an archive fails, the remaining archives continue.")}</p>
   {/if}
+  </div>
 </div>

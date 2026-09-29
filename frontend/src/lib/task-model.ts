@@ -223,6 +223,9 @@ export function taskHasInlineResults(task: TaskDialogModel): boolean {
 }
 
 export function taskReviewScreen(task: TaskDialogModel): Screen | null {
+  if (task.state === "done" && task.spec.kind === "extract_nested" && (readExtractResultCounts(task.result)?.failed ?? 0) > 0) {
+    return "nestedExtract";
+  }
   if (task.state === "done" && task.spec.kind === "batch_extract" && Number(task.result?.failed) > 0) {
     return "batch";
   }
@@ -238,6 +241,7 @@ export function taskReviewScreen(task: TaskDialogModel): Screen | null {
     case "batch_extract":
       return "batch";
     case "extract_nested":
+      return "nestedExtract";
     case "update":
       return "browse";
     case "convert":

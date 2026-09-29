@@ -13,6 +13,7 @@ export type Screen =
   | "extract"
   | "convert"
   | "batch"
+  | "nestedExtract"
   | "checksum"
   | "duplicates"
   | "password"
@@ -77,6 +78,7 @@ export const screenIds: Screen[] = [
   "extract",
   "convert",
   "batch",
+  "nestedExtract",
   "checksum",
   "duplicates",
   "password",

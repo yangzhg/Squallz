@@ -129,6 +129,7 @@
 
   export interface BatchWorkspaceSurface {
     kind: "batch";
+    mode: "batch" | "nested";
     variant: ToolsWorkspaceVariant;
     title: string;
     tr: Tr;
@@ -152,13 +153,14 @@
       target: string;
       encoding: string;
       bestEffort: boolean;
+      onBestEffortChange: ((value: boolean) => void) | null;
       onTargetInput: (value: string) => void;
       onChooseTarget: () => void;
-      onRemove: () => void;
+      onRemove: (() => void) | null;
     }>;
     actions: {
       onStart: () => void;
-      onAdd: () => void;
+      onAdd: (() => void) | null;
     };
   }
 

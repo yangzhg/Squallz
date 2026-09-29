@@ -7727,7 +7727,21 @@ select option {
   min-width: 0;
   gap: var(--space-lg);
   padding: var(--space-lg);
+  overflow: hidden;
+}
+
+.batch-workspace-body {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  gap: var(--space-lg);
   overflow: auto;
+}
+
+.batch-workspace-header {
+  flex-shrink: 0;
 }
 
 .classic-batch-workspace {

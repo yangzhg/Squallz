@@ -1290,6 +1290,7 @@ type PreviewTaskKind =
   | "recovery_cleanup_record"
   | "extract"
   | "extract_failure"
+  | "extract_nested_failure"
   | "extract_unknown_current"
   | "extract_metadata"
   | "batch_extract_metadata"
@@ -1337,6 +1338,12 @@ function isRecoveryCleanupPreview(kind: PreviewTaskKind): boolean {
 }
 
 function previewTaskSpec(kind: PreviewTaskKind): JobSpec {
+  if (kind === "extract_nested_failure") {
+    return { kind: "extract_nested", outer_path: `${sampleRoot}/Quarterly delivery with complete project history.zip`,
+      entry_path: "客户交付与设计资料/Previous versions/Design assets with a complete descriptive name.7z",
+      dest: `${sampleOutputRoot}/客户交付/Reviewed inner archive`, overwrite: "rename", symlinks: "skip",
+      smart: false, encoding: "gbk", password: null, best_effort: true };
+  }
   if (kind === "batch_extract_partial" || kind === "batch_extract_failure") {
     return { kind: "batch_extract", overwrite: "rename", symlinks: "skip", smart: false,
       items: [
@@ -1864,6 +1871,7 @@ function previewProgress(kind: PreviewTaskKind, state: Extract<JobStateName, "do
 }
 
 function previewTaskOffset(kind: PreviewTaskKind): number {
+  if (kind === "extract_nested_failure") return 32;
   if (kind === "batch_extract_partial") return 30;
   if (kind === "batch_extract_failure") return 31;
   if (kind === "archive_open") return 23;
@@ -1914,7 +1922,7 @@ function installTaskPreview(kind: PreviewTaskKind, state: Extract<JobStateName, 
   const progress = previewProgress(kind, state);
   const previewState = kind === "compress_failure" || kind === "compress_sfx_failure" || kind === "extract_failure"
     || kind === "convert_failure" || kind === "convert_encrypted_failure" || kind === "duplicate_scan_failure"
-    || kind === "batch_extract_failure" || isRecoveryCleanupPreview(kind)
+    || kind === "batch_extract_failure" || kind === "extract_nested_failure" || isRecoveryCleanupPreview(kind)
     ? "failed"
     : state;
   const target = isRecoveryCleanupPreview(kind)
@@ -1932,7 +1940,7 @@ function installTaskPreview(kind: PreviewTaskKind, state: Extract<JobStateName, 
     ? { key: "error.io", params: { detail: "Could not read the scan folder" }, detail: "Could not read the scan folder" }
     : kind === "convert_failure" || kind === "convert_encrypted_failure"
     ? { key: "error.io", params: { detail: "Could not write the converted archive" }, detail: "Could not write the converted archive" }
-    : kind === "extract_failure" || kind === "batch_extract_failure"
+    : kind === "extract_failure" || kind === "batch_extract_failure" || kind === "extract_nested_failure"
     ? { key: "error.io", params: { detail: "Could not write the extracted file" }, detail: "Could not write the extracted file" }
     : isRecoveryCleanupPreview(kind)
     ? {

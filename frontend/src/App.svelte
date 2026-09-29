@@ -198,6 +198,7 @@
   import { currentWebviewWindowListener } from "./lib/tauri-events";
   import { outputPasswordRequired } from "./lib/job-snapshot";
   import { batchExtractJob, reviewBatchExtract, type BatchExtractDraft } from "./lib/batch-extract";
+  import { nestedExtractJob, reviewNestedExtract, type NestedExtractDraft } from "./lib/nested-extract";
   import { previewSystemOpenRequiresConfirmation } from "./lib/preview-presentation";
   import {
     previewResponseIsCurrent,
@@ -914,6 +915,11 @@
   let recoveryRedundancyDraft = $state("10");
   let openDialogModulePromise: Promise<DialogModule> | null = null;
   let batchDraft = $state<BatchExtractDraft | null>(null);
+  let nestedExtractDraft = $state<NestedExtractDraft | null>(null);
+  let nestedExtractSubmissionPending = $state(false);
+  let nestedExtractPickerBusy = $state(false);
+  let nestedExtractDraftGeneration = 0;
+  let nestedExtractReviewFocusPending = false;
   let batchSubmissionPending = $state(false);
   let batchPickerBusy = $state(false);
   let batchDraftGeneration = 0;
@@ -2144,6 +2150,10 @@
     if (preventCreateSubmissionNavigation(next)) return;
     if (preventConvertSubmissionNavigation(next)) return;
     taskReviewRequestGeneration += 1;
+    if (next !== "nestedExtract") {
+      nestedExtractReviewFocusPending = false;
+      nestedExtractDraftGeneration += 1;
+    }
     if (next !== "create") createPrimaryFocusPending = false;
     if (next !== "extract") extractReviewFocusPending = false;
     if (next !== "convert") convertReviewFocusPending = false;
@@ -8011,10 +8021,6 @@
     return extractDestInDefaultFolder(pathDir(path), pathBaseName(path));
   }
 
-  function nestedExtractDest(outerDisplayPath: string, entryPath: string): string {
-    return extractDestInDefaultFolder(pathDir(outerDisplayPath), pathBaseName(entryPath));
-  }
-
   function defaultSqzExportDest(): string {
     const source = recoverySourcePath();
     if (!source) return openArchiveFirstLabel();
@@ -9705,12 +9711,12 @@
     const failure = entryPreviewFailure;
     if (!failure) return;
     if (failure.policyKind === "nested") {
-      const queued = await submitNestedExtract(
+      const prepared = prepareNestedExtract(
         failure.outerSource,
         failure.outerDisplayPath,
         failure.entryPath,
       );
-      if (queued) clearEntryPreviewState();
+      if (prepared) clearEntryPreviewState();
       return;
     }
     const selectionBusyReason = archiveSelectionBusyReason();
@@ -10083,6 +10089,7 @@
     const draft = effectiveBatchDraft();
     return {
       kind: "batch",
+      mode: "batch",
       variant,
       title: tr("gui.screen.batch", "Batch Extract Review"),
       tr,
@@ -10103,6 +10110,7 @@
         format: archiveFormatFromPath(item.displayPath), target: item.dest,
         encoding: item.encoding ?? tr("gui.extract.encoding.auto", "Auto-detect"),
         bestEffort: item.best_effort,
+        onBestEffortChange: null,
         onTargetInput: (dest) => updateBatchDraft((value) => ({ ...value,
           items: value.items.map((row, i) => i === index ? { ...row, dest } : row) })),
         onChooseTarget: () => void chooseBatchPaths(index),
@@ -11854,38 +11862,134 @@
     await openNestedArchiveEntry(preview.outer_path, preview.entry_path);
   }
 
-  async function submitNestedExtract(
+  function nestedExtractDraftLocked(): boolean {
+    return nestedExtractSubmissionPending || nestedExtractPickerBusy;
+  }
+
+  function updateNestedExtractDraft(update: (draft: NestedExtractDraft) => NestedExtractDraft): void {
+    if (!nestedExtractDraft || nestedExtractDraftLocked()) return;
+    nestedExtractDraft = update(nestedExtractDraft);
+    nestedExtractDraftGeneration += 1;
+  }
+
+  function restoreNestedExtractDraft(draft: NestedExtractDraft): boolean {
+    if (nestedExtractDraftLocked()) {
+      showNotice(tr("gui.nested_extract.wait_for_current", "Finish the current selection or submission before reviewing another inner archive."));
+      return false;
+    }
+    if (preventCreateSubmissionNavigation("nestedExtract") || preventConvertSubmissionNavigation("nestedExtract") || focusBlockingTaskIfAny()) return false;
+    nestedExtractDraft = draft;
+    nestedExtractDraftGeneration += 1;
+    setScreen("nestedExtract");
+    focusNestedExtractReview();
+    return true;
+  }
+
+  function focusNestedExtractReview(): void {
+    nestedExtractReviewFocusPending = true;
+    void tick().then(() => {
+      const heading = document.getElementById("batch-workspace-heading");
+      if (!nestedExtractReviewFocusPending || screen !== "nestedExtract" || blockingModalVisible() || !heading) return;
+      nestedExtractReviewFocusPending = false;
+      heading.focus();
+    });
+  }
+
+  function prepareNestedExtract(
     outerSource: string,
     outerDisplayPath: string,
     entryPath: string,
-  ): Promise<boolean> {
-    if (focusBlockingTaskIfAny()) return false;
+  ): boolean {
+    return restoreNestedExtractDraft(reviewNestedExtract({
+      kind: "extract_nested", outer_path: outerSource, entry_path: entryPath,
+      dest: normalizedDefaultExtractDir(appliedDefaultExtractDir) ?? pathDir(outerDisplayPath),
+      overwrite: "ask", symlinks: "preserve", smart: true,
+      encoding: currentArchive?.source === outerSource ? archiveEncodingForJob() : null,
+      password: null, best_effort: false,
+    }, outerDisplayPath));
+  }
+
+  async function chooseNestedExtractDestination(): Promise<void> {
+    const draft = nestedExtractDraft;
+    if (!draft || nestedExtractDraftLocked()) return;
+    const generation = nestedExtractDraftGeneration;
+    nestedExtractPickerBusy = true;
     try {
-      const dest = nestedExtractDest(outerDisplayPath, entryPath);
-      await submitJob({
-        kind: "extract_nested",
-        outer_path: outerSource,
-        entry_path: entryPath,
-        dest,
-        overwrite: "ask",
-        symlinks: "preserve",
-        smart: true,
-        encoding: currentArchive?.source === outerSource ? archiveEncodingForJob() : null,
-        password: null,
-        best_effort: false,
+      const { open } = await getDialogModule();
+      const selected = await openNativeDialog("nested-extract.destination", open, {
+        title: tr("gui.batch.choose_destination", "Choose destination"),
+        multiple: false, directory: true, defaultPath: draft.dest,
       });
-      showNotice(tr("gui.preview.extract_nested_queued", "Nested extract added to queue · {name}").replace("{name}", pathBaseName(entryPath)));
+      if (generation !== nestedExtractDraftGeneration || screen !== "nestedExtract") return;
+      const path = Array.isArray(selected) ? selected[0] : selected;
+      if (path) {
+        nestedExtractDraft = { ...draft, dest: path };
+        nestedExtractDraftGeneration += 1;
+      } else {
+        showNotice(tr("gui.nested_extract.selection_cancelled", "Selection cancelled · your extraction settings were kept"));
+      }
+    } catch {
+      if (generation === nestedExtractDraftGeneration && screen === "nestedExtract") {
+        showNotice(tr("gui.batch.destination_picker_unavailable", "Could not open the folder chooser. Try again, or edit the destination in the list."));
+      }
+    } finally {
+      nestedExtractPickerBusy = false;
+    }
+  }
+
+  async function startNestedExtract(): Promise<boolean> {
+    const draft = nestedExtractDraft;
+    if (!draft || nestedExtractDraftLocked()) return false;
+    if (!draft.dest.trim()) {
+      showNotice(tr("gui.nested_extract.destination_required", "Choose a destination for this inner archive."));
+      document.getElementById("batch-destination-0")?.focus();
+      return false;
+    }
+    if (focusBlockingTaskIfAny()) return false;
+    nestedExtractSubmissionPending = true;
+    try {
+      await submitJob(nestedExtractJob(draft));
+      showNotice(tr("gui.preview.extract_nested_queued", "Nested extract added to queue · {name}").replace("{name}", pathBaseName(draft.entry_path)));
       recordOperation({
         status: "queued",
         title: tr("gui.preview.nested_extract_queued_operation_title", "Nested archive extract queued"),
-        detail: `${pathBaseName(entryPath)} -> ${pathBaseName(dest)}`,
+        detail: `${pathBaseName(draft.entry_path)} -> ${pathBaseName(draft.dest)}`,
       });
       return true;
     } catch (error) {
       if (isJobSubmitBlocked(error)) return false;
-      showNotice(tr("gui.preview.extract_nested_requires_desktop_service", "Could not extract this inner archive. Check that its format and password are supported."));
+      showNotice(isErrorDto(error) ? tError(error) : tr("gui.nested_extract.submit_failed", "Could not start extraction. Try again; your settings were kept."));
       return false;
+    } finally {
+      nestedExtractSubmissionPending = false;
     }
+  }
+
+  function nestedExtractWorkspaceSurface(variant: ToolsWorkspaceVariant): BatchWorkspaceSurface {
+    const draft = nestedExtractDraft;
+    return {
+      kind: "batch", mode: "nested", variant, title: tr("gui.nested_extract.title", "Extract inner archive"), tr,
+      archiveReturn: toolsArchiveReturnSurface(variant),
+      onReady: () => { if (nestedExtractReviewFocusPending) focusNestedExtractReview(); },
+      locked: nestedExtractDraftLocked(), submitting: nestedExtractSubmissionPending,
+      smart: draft?.smart ?? true,
+      onSmartChange: (smart) => updateNestedExtractDraft((value) => ({ ...value, smart })),
+      overwrite: draft?.overwrite ?? "ask",
+      overwriteChoices: extractOverwriteModes.map((id) => ({ id, label: extractOverwriteLabel(id) })),
+      onOverwriteChange: (overwrite) => updateNestedExtractDraft((value) => ({ ...value, overwrite })),
+      symlinks: draft?.symlinks ?? "preserve",
+      symlinkChoices: extractSymlinkModes.map((id) => ({ id, label: extractSymlinkLabel(id) })),
+      onSymlinksChange: (symlinks) => updateNestedExtractDraft((value) => ({ ...value, symlinks })),
+      rows: draft ? [{
+        id: "inner-archive", path: `${draft.outerDisplayPath} › ${draft.entry_path}`,
+        name: pathBaseName(draft.entry_path), format: archiveFormatFromPath(draft.entry_path), target: draft.dest,
+        encoding: draft.encoding ?? tr("gui.extract.encoding.auto", "Auto-detect"), bestEffort: draft.best_effort,
+        onBestEffortChange: (best_effort) => updateNestedExtractDraft((value) => ({ ...value, best_effort })),
+        onTargetInput: (dest) => updateNestedExtractDraft((value) => ({ ...value, dest })),
+        onChooseTarget: () => void chooseNestedExtractDestination(), onRemove: null,
+      }] : [],
+      actions: { onStart: () => void startNestedExtract(), onAdd: draft ? null : () => setScreen("browse") },
+    };
   }
 
   async function extractNestedPreviewArchive() {
@@ -11897,7 +12001,7 @@
     const outerDisplayPath = currentArchive?.source === preview.outer_path
       ? currentArchive.path
       : preview.outer_path;
-    await submitNestedExtract(preview.outer_path, outerDisplayPath, preview.entry_path);
+    prepareNestedExtract(preview.outer_path, outerDisplayPath, preview.entry_path);
   }
 
   async function repairFilenameEncoding(encoding = "gbk") {
@@ -12986,6 +13090,13 @@
       target = "recovery";
     }
     if (!target) return;
+    if (target === "nestedExtract" && task.spec.kind === "extract_nested" && displayedSpec.kind === "extract_nested") {
+      if (!restoreNestedExtractDraft(reviewNestedExtract(task.spec, displayedSpec.outer_path))) return;
+      await dismissTaskDialog(task);
+      focusNestedExtractReview();
+      showNotice(tr("gui.nested_extract.review_restored", "Inner archive and extraction settings restored. Some files may already exist; review the destination and conflict policy before starting again. Passwords will be requested when needed."));
+      return;
+    }
     if (target === "batch" && task.spec.kind === "batch_extract") {
       if (batchDraftLocked()) {
         showNotice(tr("gui.batch.wait_for_current", "Finish the current selection or submission before reviewing another batch."));
@@ -14014,6 +14125,7 @@
     if (screen === "extract") return tr("gui.screen.extract", "Extract");
     if (screen === "convert") return tr("gui.screen.convert", "Convert Archive");
     if (screen === "batch") return tr("gui.screen.batch", "Batch Extract Review");
+    if (screen === "nestedExtract") return tr("gui.nested_extract.title", "Extract inner archive");
     if (screen === "checksum") return tr("gui.screen.checksum", "Checksum");
     if (screen === "duplicates") return tr("gui.screen.duplicates", "Duplicate Finder");
     if (screen === "password") return tr("gui.screen.password", "Password Required");
@@ -14316,7 +14428,7 @@
         class="modern-shell"
         class:settings-shell={isSettingsScreen()}
         class:no-archive-shell={screen === "browse" && !currentArchive}
-        class:no-inspector-shell={screen === "recent" || screen === "convert" || screen === "create" || screen === "extract" || screen === "duplicates" || screen === "batch"}
+        class:no-inspector-shell={screen === "recent" || screen === "convert" || screen === "create" || screen === "extract" || screen === "duplicates" || screen === "batch" || screen === "nestedExtract"}
       >
         <aside class="modern-sidebar" aria-label={tr("gui.aria.navigation", "Navigation")}>
           <div class="sidebar-section">
@@ -14324,7 +14436,7 @@
               <button
                 disabled={navigationDisabled(screenForNav(item[1]))}
                 title={navigationDisabledReason(screenForNav(item[1]))}
-                class:current={(screen === "recent" && item[1] === "Recent") || (screen === "browse" && item[1] === "Archives") || (screen === "create" && item[1] === "Create") || ((screen === "extract" || screen === "batch" || screen === "password" || screen === "conflict") && item[1] === "Extract") || (screen === "convert" && item[1] === "Convert") || (screen === "checksum" && item[1] === "Checksum") || (screen === "duplicates" && item[1] === "Duplicates") || (screen === "recovery" && item[1] === "Recovery") || (isSettingsScreen() && item[1] === "Settings")}
+                class:current={(screen === "recent" && item[1] === "Recent") || (screen === "browse" && item[1] === "Archives") || (screen === "create" && item[1] === "Create") || ((screen === "extract" || screen === "batch" || screen === "nestedExtract" || screen === "password" || screen === "conflict") && item[1] === "Extract") || (screen === "convert" && item[1] === "Convert") || (screen === "checksum" && item[1] === "Checksum") || (screen === "duplicates" && item[1] === "Duplicates") || (screen === "recovery" && item[1] === "Recovery") || (isSettingsScreen() && item[1] === "Settings")}
                 onclick={() => navigateToScreen(screenForNav(item[1]))}
               >
                 <Icon name={item[0]} size={16} />
@@ -14441,6 +14553,8 @@
             />
           {:else if screen === "batch"}
             <ToolsWorkspaceHost surface={batchWorkspaceSurface("modern")} />
+          {:else if screen === "nestedExtract"}
+            <ToolsWorkspaceHost surface={nestedExtractWorkspaceSurface("modern")} />
           {:else if screen === "checksum"}
             <ToolsWorkspaceHost surface={checksumWorkspaceSurface("modern")} />
           {:else if screen === "duplicates"}
@@ -14536,7 +14650,7 @@
 	          {/if}
         </section>
 
-        {#if !isSettingsScreen() && screen !== "recent" && screen !== "convert" && screen !== "create" && screen !== "extract" && screen !== "duplicates" && screen !== "batch" && (screen !== "browse" || currentArchive)}
+        {#if !isSettingsScreen() && screen !== "recent" && screen !== "convert" && screen !== "create" && screen !== "extract" && screen !== "duplicates" && screen !== "batch" && screen !== "nestedExtract" && (screen !== "browse" || currentArchive)}
           <ModernInspectorHost
             surface={modernInspectorSurface()}
             ariaLabel={tr("gui.aria.archive_inspector", "Archive inspector")}
@@ -14666,8 +14780,8 @@
               <i>/</i><button type="button" title={dir} onclick={() => void openArchiveBreadcrumb(index)}>{dir}</button>
             {/each}
           </div>
-          {#if screen === "extract" || screen === "batch"}
-            <div class="encoding-chip accent"><Icon name="archive" size={14} />{screen === "batch" ? tr("gui.batch.title", "Batch Extract") : extractDestinationTitle(extractDestinationMode)}</div>
+          {#if screen === "extract" || screen === "batch" || screen === "nestedExtract"}
+            <div class="encoding-chip accent"><Icon name="archive" size={14} />{screen === "nestedExtract" ? tr("gui.nested_extract.title", "Extract inner archive") : screen === "batch" ? tr("gui.batch.title", "Batch Extract") : extractDestinationTitle(extractDestinationMode)}</div>
           {:else if screen === "password"}
             <div class="encoding-chip warning"><Icon name="lock" size={14} />{tr("gui.password.required", "Password required")}</div>
           {:else if screen === "conflict"}
@@ -14814,6 +14928,8 @@
         />
       {:else if screen === "batch"}
         <ToolsWorkspaceHost surface={batchWorkspaceSurface("classic")} />
+      {:else if screen === "nestedExtract"}
+        <ToolsWorkspaceHost surface={nestedExtractWorkspaceSurface("classic")} />
       {:else if screen === "checksum"}
         <ToolsWorkspaceHost surface={checksumWorkspaceSurface("classic")} />
       {:else if screen === "duplicates"}
@@ -14896,6 +15012,11 @@
           <span title={extractScopeStatus}>{extractScopeStatus}</span>
           <span title={extractConflictStatus}>{extractConflictCompactStatus}</span>
           <strong title={extractDestinationStatus}>{extractDestinationStatus}</strong>
+        {:else if screen === "nestedExtract"}
+          <span>{tr("gui.nested_extract.title", "Extract inner archive")}</span>
+          <span>{nestedExtractDraft ? pathBaseName(nestedExtractDraft.entry_path) : tr("gui.nested_extract.empty", "No inner archive selected")}</span>
+          <span>{extractOverwriteLabel(nestedExtractDraft?.overwrite ?? "ask")}</span>
+          <strong>{tr("gui.batch.check_at_start", "Archives are checked when the task starts")}</strong>
         {:else if screen === "batch"}
           <span>{tr("gui.batch.title", "Batch Extract")}</span>
           <span>{tr("gui.batch.archive_count", "Archives: {count}").replace("{count}", String(effectiveBatchDraft().items.length))}</span>
