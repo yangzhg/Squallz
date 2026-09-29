@@ -1,5 +1,6 @@
 <script lang="ts" module>
   import type { EntryDto, EntryPreviewDto } from "../lib/ipc";
+  import type { ArchiveBrowseRecoveryState } from "./ArchiveBrowseRecovery.svelte";
 
   type Translate = (key: string, fallback: string) => string;
 
@@ -69,6 +70,7 @@
         items: readonly MoveConflictItem[];
       } | null;
       structureWarning: string | null;
+      recovery: ArchiveBrowseRecoveryState;
       totalRows: number;
       rows: readonly ClassicBrowserEntry[];
       paddingTop: number;
@@ -79,6 +81,7 @@
     tr: Translate;
     onOpenRoot: () => void;
     onOpenRecovery: () => void;
+    onRetryBrowse: () => void;
     onOpenNestedPreview: () => void;
     onExtractNestedPreview: () => void;
     onClearPreview: (restoreEntryFocus?: boolean) => void;
@@ -104,6 +107,7 @@
 <script lang="ts">
   import Icon from "./Icon.svelte";
   import ArchiveStructureWarning from "./ArchiveStructureWarning.svelte";
+  import ArchiveBrowseRecovery from "./ArchiveBrowseRecovery.svelte";
   import { cssVariables } from "../lib/css-variables";
 
   let {
@@ -111,6 +115,7 @@
     tr,
     onOpenRoot,
     onOpenRecovery,
+    onRetryBrowse,
     onOpenNestedPreview,
     onExtractNestedPreview,
     onClearPreview,
@@ -247,6 +252,7 @@
 
   <section class="classic-table-wrap">
     <div class="classic-table-header">
+      <ArchiveBrowseRecovery state={view.recovery} retryLabel={tr("gui.error.retry", "Retry")} onRetry={onRetryBrowse} />
       {#if view.structureWarning}
         <ArchiveStructureWarning
           message={view.structureWarning}

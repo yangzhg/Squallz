@@ -1807,6 +1807,33 @@ select option {
   color: var(--color-danger-fg);
 }
 
+.archive-browse-recovery {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: var(--space-sm) var(--space-md);
+  border: var(--border-width-control) solid var(--color-danger-border);
+  border-radius: var(--radius-card);
+  background: var(--color-danger-bg);
+  color: var(--color-danger-fg);
+}
+
+.archive-browse-recovery.busy {
+  border-color: var(--color-info-border);
+  background: var(--color-info-bg);
+  color: var(--color-info-fg);
+}
+
+.archive-browse-recovery > span {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.archive-browse-recovery > :is(svg, button) {
+  flex-shrink: 0;
+}
+
 .archive-editor-hint:empty {
   display: none;
 }

@@ -300,6 +300,46 @@ test("filename encoding changes reuse atomic refresh", async () => {
   });
 });
 
+test("retry remains available after dismissing a refresh notification and retains the requested encoding", async () => {
+  await withArchive(async ({ archive, ipc, toasts, pendingOpen }) => {
+    const reopening = archive.reopenWithEncoding("shift_jis");
+    pendingOpen.reject({ key: "error.io", params: {}, detail: "read failed" });
+    assert.equal(await reopening, false);
+    toasts.removeToastByKey("archive-refresh-error");
+    assert.equal(archive.archiveRefreshStatus(), "error");
+    assert.equal(archive.archiveEncoding(), "gbk", "the old view remains usable until replacement succeeds");
+    ipc.openArchive = async (path, _password, encoding) => {
+      assert.equal(path, "/tmp/refresh.zip");
+      assert.equal(encoding, "shift_jis");
+      return { ...info(2), encoding_override: encoding };
+    };
+    await archive.retryArchiveBrowse();
+    assert.equal(archive.archiveRefreshStatus(), "idle");
+    assert.equal(archive.archive().id, 2);
+    assert.equal(archive.archiveEncoding(), "shift_jis");
+    assert.deepEqual(archive.currentDirs(), ["docs"]);
+    assert.equal(archive.rowAt(0)?.path, "docs/new.txt");
+  });
+});
+
+test("a dismissed refresh retry cannot supersede a newer archive open", async () => {
+  await withArchive(async ({ archive, ipc, toasts, pendingOpen }) => {
+    const refreshing = archive.refreshCurrentArchive();
+    pendingOpen.reject({ key: "error.io", params: {}, detail: "read failed" });
+    await refreshing;
+    const oldRetry = toasts.toasts().find((toast) => toast.key === "archive-refresh-error").action.run;
+    const pendingNew = deferred();
+    let opens = 0;
+    ipc.openArchive = () => { opens += 1; return pendingNew.promise; };
+    const opening = archive.openArchive("/tmp/new.zip");
+    assert.equal(await oldRetry(), false);
+    assert.equal(opens, 1);
+    pendingNew.resolve({ ...info(3), path: "/tmp/new.zip", source: "/tmp/new.zip" });
+    assert.equal(await opening, true);
+    assert.equal(archive.archive().id, 3);
+  });
+});
+
 test("refresh leaves a missing folder at its nearest surviving parent", async () => {
   await withArchive(async ({ archive, ipc, requests, toasts, pendingOpen }) => {
     ipc.resolveArchiveDirectory = async (id, prefix) => {
@@ -398,4 +438,22 @@ test("virtual rows stay within the updated list when its size shrinks below the 
     assert.ok(window.top <= total * 40);
     assert.equal(window.top + (window.end - window.start) * 40 + window.bottom, total * 40);
   }
+});
+
+test("the shared browse recovery view exposes an alert and a disabled retry while loading", async () => {
+  const server = await createTestServer();
+  try {
+    const { render } = await server.ssrLoadModule("svelte/server");
+    const { default: Recovery } = await server.ssrLoadModule("/src/components/ArchiveBrowseRecovery.svelte");
+    const props = { state: { message: "Could not refresh the archive", busy: false }, retryLabel: "Retry", onRetry() {} };
+    const failed = render(Recovery, { props }).body;
+    assert.match(failed, /role="alert"/u);
+    assert.match(failed, /<button[^>]*>Retry<\/button>/u);
+    assert.doesNotMatch(failed, /disabled|style=/u);
+    const loading = render(Recovery, { props: { ...props, state: { message: "Refreshing archive contents…", busy: true } } }).body;
+    assert.match(loading, /role="status"/u);
+    assert.match(loading, /disabled="" aria-busy="true"/u);
+    assert.match(loading, /Refreshing archive contents/u);
+    assert.doesNotMatch(render(Recovery, { props: { ...props, state: null } }).body, /<button/u);
+  } finally { await server.close(); }
 });

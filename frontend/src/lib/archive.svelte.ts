@@ -112,6 +112,7 @@ let filterTimer: ReturnType<typeof setTimeout> | undefined;
 const pageRequests = new Map<number, { generation: number; promise: Promise<void> }>();
 let pendingArchiveOpenRequestId: string | null = null;
 let archiveOpenRequestSequence = 0;
+let pendingRefreshRetry: (() => Promise<boolean>) | null = null;
 
 function cancelFilterReload(): void {
   if (filterTimer !== undefined) clearTimeout(filterTimer);
@@ -356,6 +357,12 @@ async function performArchiveOpen(
     store.passwordPrompt = null;
     if (visibleWindow) {
       store.refreshStatus = "error";
+      const retry: () => Promise<boolean> = () => pendingRefreshRetry === retry
+        && store.info?.id === previousId && store.refreshStatus === "error"
+        && pendingArchiveOpenRequestId === null
+        ? performArchiveOpen(path, password, encoding, visibleWindow)
+        : Promise.resolve(false);
+      pendingRefreshRetry = retry;
       pushToast({
         key: ARCHIVE_REFRESH_ERROR_TOAST_KEY,
         kind: "danger",
@@ -363,9 +370,7 @@ async function performArchiveOpen(
         body: isErrorDto(e) ? tError(e) : t("gui.archive.open_failed_generic"),
         action: {
           label: t("gui.error.retry"),
-          run: () => store.info?.id === previousId
-            ? performArchiveOpen(path, password, encoding, visibleWindow)
-            : false,
+          run: retry,
         },
       });
       return false;
@@ -463,6 +468,7 @@ function reportArchiveDirectoryChange(previous: string[], current: string[]): vo
 }
 
 function clearArchiveRefreshStatus(): void {
+  pendingRefreshRetry = null;
   store.refreshStatus = "idle";
   removeToastByKey(ARCHIVE_REFRESH_ERROR_TOAST_KEY);
 }
@@ -865,9 +871,13 @@ function publishBrowseError(error: unknown, generation: number): void {
   });
 }
 
-/** Retries the current directory listing or archive-wide search. */
+/** Retries a failed reopen, directory listing, or archive-wide search. */
 export async function retryArchiveBrowse(): Promise<void> {
   if (!store.info) return;
+  if (store.refreshStatus === "error") {
+    await pendingRefreshRetry?.();
+    return;
+  }
   store.filterPending = true;
   await reload();
 }

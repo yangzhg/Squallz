@@ -89,6 +89,7 @@
     openPasswordPrompt,
     reopenWithEncoding,
     refreshCurrentArchive,
+    retryArchiveBrowse,
     refreshArchivePasswordBookStatus,
     recentFiles,
     rememberRecent,
@@ -1068,6 +1069,7 @@
   let historyRows = $derived(operationHistory());
   let activePopover = $state<"quickActions" | null>(null);
   let archiveSearchInput = $state<HTMLInputElement | null>(null);
+  let retryingArchiveId = $state<number | null>(null);
   let classicArchiveAddress = $state<HTMLDivElement | null>(null);
   let quickActionButton = $state<HTMLButtonElement | null>(null);
   let quickActionPopover = $state<HTMLDivElement | null>(null);
@@ -4576,6 +4578,7 @@
   }
 
   function classicArchiveBrowserSurface(): ClassicArchiveBrowserSurfaceProps {
+    const recovery = archiveBrowseRecoveryState();
     const rows = browseEntries(CLASSIC_ROW_HEIGHT).map((entry) => ({
       ...entry,
       selected: isEntrySelected(entry),
@@ -4627,16 +4630,18 @@
             }
           : null,
         structureWarning: archiveStructureWarningText(),
+        recovery,
         totalRows: currentArchive ? totalRows() : 0,
         rows,
         paddingTop: browsePaddingTop(CLASSIC_ROW_HEIGHT),
         paddingBottom: browsePaddingBottom(CLASSIC_ROW_HEIGHT),
         emptyName: currentArchive ? noEntriesLabel() : openArchiveFirstLabel(),
-        emptyStatus: currentArchive ? archiveFilterStatus() : noEntriesLabel(),
+        emptyStatus: recovery ? "" : currentArchive ? archiveFilterStatus() : noEntriesLabel(),
       },
       tr,
       onOpenRoot: () => void openArchiveBreadcrumb(-1),
       onOpenRecovery: openCurrentArchiveRecoveryConfiguration,
+      onRetryBrowse: () => void retryArchiveContents(),
       onOpenNestedPreview: () => void openNestedPreviewArchive(),
       onExtractNestedPreview: () => void extractNestedPreviewArchive(),
       onClearPreview: (restoreEntryFocus) => clearEntryPreviewState(restoreEntryFocus),
@@ -4664,6 +4669,7 @@
   }
 
   function modernArchiveBrowserSurface(): ModernArchiveBrowserSurfaceProps {
+    const recovery = archiveBrowseRecoveryState();
     const archive = currentArchive;
     if (!archive) {
       throw new Error("Modern archive browser requires an open archive");
@@ -4718,11 +4724,12 @@
             }
           : null,
         structureWarning: archiveStructureWarningText(),
+        recovery,
         encodingWarning: hasEncodingWarning() ? archiveWarningText() : null,
         totalRows: totalRows(),
         filterText: filterText(),
         filterPending: filterPending(),
-        filterStatus: archiveFilterStatus(),
+        filterStatus: recovery ? "" : archiveFilterStatus(),
         selection: archiveSelectionControl(),
         rows,
         paddingTop: browsePaddingTop(MODERN_ROW_HEIGHT),
@@ -4737,6 +4744,7 @@
       onExtractSelection: () => void runAppAction("extract_selection"),
       onAddFiles: () => void runAppAction("add_files"),
       onOpenRecovery: openCurrentArchiveRecoveryConfiguration,
+      onRetryBrowse: () => void retryArchiveContents(),
       onConvert: () => void runAppAction("convert_archive"),
       onOpenInfo: () => void runAppAction("archive_info"),
       onRenameSelection: () => void runAppAction("rename_entry"),
@@ -6706,6 +6714,34 @@
     if (status === "refreshing") return tr("gui.archive.refreshing", "Refreshing archive contents…");
     if (status === "error") return tr("gui.archive.refresh_failed", "Could not refresh the archive. Retry to see the latest files.");
     return "";
+  }
+
+  function archiveBrowseRecoveryState() {
+    if (!currentArchive) return null;
+    const status = archiveRefreshStatus();
+    const retrying = retryingArchiveId === currentArchive.id;
+    if (status === "idle" && !archiveBrowseError() && !retrying) return null;
+    return { message: archiveFilterStatus(), busy: status === "refreshing" || retrying };
+  }
+
+  async function retryArchiveContents(): Promise<void> {
+    const current = currentArchive;
+    if (!current || retryingArchiveId === current.id
+      || (archiveRefreshStatus() !== "error" && !archiveBrowseError())) return;
+    const generation = archiveOpenGeneration;
+    const trigger = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    retryingArchiveId = current.id;
+    try {
+      await retryArchiveBrowse();
+    } finally {
+      if (retryingArchiveId === current.id) retryingArchiveId = null;
+    }
+    await tick();
+    if (generation !== archiveOpenGeneration || currentArchive?.source !== current.source
+      || retryingArchiveId !== null || screen !== "browse" || blockingModalVisible() || modeSelectionBlocked) return;
+    if (document.activeElement !== document.body && document.activeElement !== trigger) return;
+    if (trigger?.isConnected) trigger.focus({ preventScroll: true });
+    else archiveSearchInput?.focus({ preventScroll: true });
   }
 
   function blockSelectionScopedAction(): boolean {
