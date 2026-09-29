@@ -26,12 +26,15 @@ function harness() {
   const component = readFileSync(new URL("../App.svelte", import.meta.url), "utf8");
   const source = ts.createSourceFile("App.ts", component.match(/<script lang="ts">([\s\S]*?)<\/script>/)[1], ts.ScriptTarget.Latest, true);
   const names = ["reviewTask", "newBatchExtractDraft", "effectiveBatchDraft", "batchDraftLocked", "setBatchArchivePaths",
-    "updateBatchDraft", "removeBatchItem", "chooseBatchPaths", "startBatchExtract", "batchWorkspaceSurface"];
+    "updateBatchDraft", "removeBatchItem", "chooseBatchPaths", "startBatchExtract", "batchWorkspaceSurface", "setScreen"];
   const declarations = source.statements.filter((node) => ts.isFunctionDeclaration(node) && names.includes(node.name?.text));
   const calls = [];
   const context = {
     batchDraft: null, batchSubmissionPending: false, batchPickerBusy: false,
-    batchDraftGeneration: 0, batchReviewFocusPending: false,
+    batchDraftGeneration: 0, batchReviewFocusPending: false, batchPickerRequest: 0,
+    nestedExtractPickerBusy: false, nestedExtractPickerRequest: 0, nestedExtractDraftGeneration: 0,
+    archiveUpdateReview: { cancelSourceChoice() {} }, taskReviewRequestGeneration: 0,
+    dismissArchivePicker() {}, clearEntryPreviewState() {}, syncUrl() {},
     screen: "browse", taskWindowMode: false, runtimePreviews: {batchPaths:[]},
     currentArchive: {source:"/unrelated/current.zip"}, appliedDefaultExtractDir: "",
     uniqueNonEmptyPaths: (paths) => [...new Set(paths.filter(Boolean))],
@@ -48,7 +51,7 @@ function harness() {
     dismissTaskDialog: async () => { calls.push(["dismiss"]); },
     focusBatchReview: () => { calls.push(["focus"]); },
     showNotice: (message) => calls.push(["notice",message]), recordOperation() {},
-    document: {getElementById:(id) => id.endsWith("--1") ? null : ({focus:() => calls.push(["focus-field",id])})},
+    document: {documentElement:{},body:{},querySelectorAll:()=>[],getElementById:(id) => id.endsWith("--1") ? null : ({focus:() => calls.push(["focus-field",id])})},
     tick: async () => {},
     submitJob: async (job) => { calls.push(["submit",plain(job)]); return 99; },
     isJobSubmitBlocked: () => false, isErrorDto: () => false, tError: () => "error",
@@ -202,6 +205,45 @@ test("native selection adds without duplication, changes the chosen destination 
   await pending;
   assert.deepEqual(plain(run.context.batchDraft),saved);
   assert.equal(run.context.batchPickerBusy,false);
+});
+
+test("leaving batch review abandons loading and open choosers without unlocking a newer choice", async () => {
+  for (const index of [null, 1]) {
+    for (const phase of ["loading", "choosing"]) {
+      for (const outcome of ["selected", "cancelled", "failed"]) {
+        const run = harness(); await run.reviewTask({state:"failed",spec:spec()});
+        const saved = plain(run.context.batchDraft);
+        let finish, fail, started;
+        const ready = new Promise(resolve => { started = resolve; });
+        const oldResult = new Promise((resolve, reject) => { finish = resolve; fail = reject; });
+        let opened = 0;
+        run.context.getDialogModule = phase === "loading" ? () => { started(); return oldResult; }
+          : async () => ({open:async()=>null});
+        run.context.openNativeDialog = () => { opened++; started(); return oldResult; };
+        const oldChoice = run.chooseBatchPaths(index); await ready;
+        assert.equal(run.context.batchPickerBusy, true);
+        run.setScreen("settingsGeneral"); run.setScreen("batch");
+        assert.equal(run.context.batchPickerBusy, false, "navigation must release the abandoned chooser");
+        let completeNew;
+        run.context.getDialogModule = async () => ({open:async()=>null});
+        run.context.openNativeDialog = () => { opened++; return new Promise(resolve => { completeNew = resolve; }); };
+        const newChoice = run.chooseBatchPaths(index);
+        await new Promise(resolve => setImmediate(resolve));
+        const noticeCount = run.calls.filter(([kind]) => kind === "notice").length;
+        if (outcome === "failed") fail(new Error("late dialog failure"));
+        else finish(phase === "loading" ? {open:async()=>"/stale"} : outcome === "cancelled" ? null : ["/stale"]);
+        await oldChoice;
+        assert.equal(opened, phase === "loading" ? 1 : 2, "abandoned module loads must not open a dialog");
+        assert.deepEqual(plain(run.context.batchDraft), saved);
+        assert.equal(run.context.batchPickerBusy, true, "old completion must not unlock the new chooser");
+        assert.equal(run.calls.filter(([kind]) => kind === "notice").length, noticeCount);
+        completeNew(index === null ? ["/new/archive.zip"] : "/new/destination"); await newChoice;
+        assert.equal(run.context.batchPickerBusy, false);
+        if (index === null) assert.equal(run.context.batchDraft.items.at(-1).path, "/new/archive.zip");
+        else assert.equal(run.context.batchDraft.items[index].dest, "/new/destination");
+      }
+    }
+  }
 });
 
 test("both layouts show editable targets and honest checks in both languages without dropping full source paths", async () => {

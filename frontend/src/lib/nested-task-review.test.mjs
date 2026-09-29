@@ -22,12 +22,15 @@ function harness() {
   const component = readFileSync(new URL("../App.svelte", import.meta.url), "utf8");
   const source = ts.createSourceFile("App.ts", component.match(/<script lang="ts">([\s\S]*?)<\/script>/)[1], ts.ScriptTarget.Latest, true);
   const names = ["reviewTask", "nestedExtractDraftLocked", "updateNestedExtractDraft", "restoreNestedExtractDraft",
-    "prepareNestedExtract", "chooseNestedExtractDestination", "startNestedExtract", "nestedExtractWorkspaceSurface"];
+    "prepareNestedExtract", "chooseNestedExtractDestination", "startNestedExtract", "nestedExtractWorkspaceSurface", "setScreen"];
   const declarations = source.statements.filter((node) => ts.isFunctionDeclaration(node) && names.includes(node.name?.text));
   const calls = [];
   const context = {
     nestedExtractDraft: null, nestedExtractSubmissionPending: false, nestedExtractPickerBusy: false,
-    nestedExtractDraftGeneration: 0, nestedExtractReviewFocusPending: false,
+    nestedExtractDraftGeneration: 0, nestedExtractReviewFocusPending: false, nestedExtractPickerRequest: 0,
+    batchPickerRequest: 0, batchPickerBusy: false,
+    archiveUpdateReview: { cancelSourceChoice() {} }, taskReviewRequestGeneration: 0,
+    dismissArchivePicker() {}, clearEntryPreviewState() {}, syncUrl() {}, tick: async () => {},
     screen: "browse", taskWindowMode: false, appliedDefaultExtractDir: "",
     currentArchive: { source: "/unrelated/current.zip" },
     nestedExtractJob, reviewNestedExtract, taskReviewScreen,
@@ -39,7 +42,7 @@ function harness() {
     setScreen: (screen) => { context.screen = screen; calls.push(["screen", screen]); },
     dismissTaskDialog: async () => calls.push(["dismiss"]), focusNestedExtractReview: () => calls.push(["focus"]),
     showNotice: (message) => calls.push(["notice", message]), recordOperation() {},
-    document: { getElementById: (id) => ({ focus: () => calls.push(["focus-field", id]) }) },
+    document: { documentElement:{},body:{},querySelectorAll:()=>[],getElementById: (id) => ({ focus: () => calls.push(["focus-field", id]) }) },
     submitJob: async (job) => { calls.push(["submit", plain(job)]); return 99; },
     isJobSubmitBlocked: () => false, isErrorDto: () => false, tError: () => "error",
     toolsArchiveReturnSurface: () => ({ visible: false }),
@@ -138,6 +141,41 @@ test("destination selection preserves cancellation and ignores responses after l
   finish("/stale"); await pending;
   assert.equal(run.context.nestedExtractDraft.dest, "/picked");
   assert.equal(run.context.nestedExtractPickerBusy, false);
+});
+
+test("navigation invalidates an inner destination chooser before opening and preserves newer requests", async () => {
+  for (const phase of ["loading", "choosing"]) {
+    for (const outcome of ["selected", "cancelled", "failed"]) {
+      const run = harness(); await restore(run);
+      const saved = plain(run.context.nestedExtractDraft);
+      let finish, fail, started;
+      const ready = new Promise(resolve => { started = resolve; });
+      const oldResult = new Promise((resolve, reject) => { finish = resolve; fail = reject; });
+      let opened = 0;
+      run.context.getDialogModule = phase === "loading" ? () => { started(); return oldResult; }
+        : async () => ({open:async()=>null});
+      run.context.openNativeDialog = () => { opened++; started(); return oldResult; };
+      const oldChoice = run.chooseNestedExtractDestination(); await ready;
+      run.setScreen("settingsGeneral"); run.setScreen("nestedExtract");
+      assert.equal(run.context.nestedExtractPickerBusy, false);
+      let completeNew;
+      run.context.getDialogModule = async () => ({open:async()=>null});
+      run.context.openNativeDialog = () => { opened++; return new Promise(resolve => { completeNew = resolve; }); };
+      const newChoice = run.chooseNestedExtractDestination();
+      await new Promise(resolve => setImmediate(resolve));
+      const noticeCount = run.calls.filter(([kind]) => kind === "notice").length;
+      if (outcome === "failed") fail(new Error("late dialog failure"));
+      else finish(phase === "loading" ? {open:async()=>"/stale"} : outcome === "cancelled" ? null : "/stale");
+      await oldChoice;
+      assert.equal(opened, phase === "loading" ? 1 : 2);
+      assert.deepEqual(plain(run.context.nestedExtractDraft), saved);
+      assert.equal(run.context.nestedExtractPickerBusy, true);
+      assert.equal(run.calls.filter(([kind]) => kind === "notice").length, noticeCount);
+      completeNew("/new/destination"); await newChoice;
+      assert.equal(run.context.nestedExtractDraft.dest, "/new/destination");
+      assert.equal(run.context.nestedExtractPickerBusy, false);
+    }
+  }
 });
 
 test("shared review layout presents the inner source, outer encoding and real options in both languages", async () => {

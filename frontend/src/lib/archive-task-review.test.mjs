@@ -44,6 +44,7 @@ function harness() {
     taskReviewRequestGeneration: 0, nestedExtractDraftGeneration: 0, nestedExtractReviewFocusPending: false,
     archiveUpdateReviewFocusPending: false,
     archiveUpdateReview: { cancelSourceChoice() {} },
+    batchPickerRequest: 0, nestedExtractPickerRequest: 0,
     extractReviewFocusPending: false, convertReviewFocusPending: false, createPrimaryFocusPending: false,
     pendingCreateSubmission: null, classicCreateSection: "general",
     pendingArchiveTaskReview: null, extractDraftArchive: { id: 1, source: "/original/photos.zip" },

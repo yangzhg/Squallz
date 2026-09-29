@@ -62,6 +62,7 @@ async function withNestedOpen(run) {
       archiveOpenGeneration: 0, archiveOpenStatus: "idle", archivePasswordAttempt: 0,
       archivePickerRequest: null, cancelArchivePasswordPrompt: archive.cancelPasswordPrompt,
       archiveUpdateReview: { cancelSourceChoice() {} },
+      batchPickerRequest: 0, nestedExtractPickerRequest: 0,
       recordValidationRenderReady: () => {},
       isPar2Path: () => false, openArchiveStore: archive.openArchive,
       finishOpenedArchive: () => { context.screen = "browse"; },

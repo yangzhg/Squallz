@@ -957,12 +957,14 @@
   let nestedExtractDraft = $state<NestedExtractDraft | null>(null);
   let nestedExtractSubmissionPending = $state(false);
   let nestedExtractPickerBusy = $state(false);
+  let nestedExtractPickerRequest = 0;
   let nestedExtractDraftGeneration = 0;
   let nestedExtractReviewFocusPending = false;
   const archiveUpdateReview = new ArchiveUpdateReview();
   let archiveUpdateReviewFocusPending = false;
   let batchSubmissionPending = $state(false);
   let batchPickerBusy = $state(false);
+  let batchPickerRequest = 0;
   let batchDraftGeneration = 0;
   let batchReviewFocusPending = false;
   let checksumPath = $state(runtimePreviews.checksumPath);
@@ -2243,6 +2245,13 @@
     if (next !== "nestedExtract") {
       nestedExtractReviewFocusPending = false;
       nestedExtractDraftGeneration += 1;
+      nestedExtractPickerRequest += 1;
+      nestedExtractPickerBusy = false;
+    }
+    if (next !== "batch") {
+      batchReviewFocusPending = false;
+      batchPickerRequest += 1;
+      batchPickerBusy = false;
     }
     if (next !== "create") createPrimaryFocusPending = false;
     if (next !== "extract") extractReviewFocusPending = false;
@@ -7122,18 +7131,23 @@
   }
 
   async function chooseBatchPaths(index: number | null = null): Promise<void> {
-    if (batchDraftLocked()) return;
+    if (screen !== "batch" || batchDraftLocked()) return;
     const draft = effectiveBatchDraft();
+    if (index !== null && !draft.items[index]) return;
     const generation = batchDraftGeneration;
+    const request = ++batchPickerRequest;
+    const isCurrent = () => request === batchPickerRequest
+      && generation === batchDraftGeneration && screen === "batch";
     batchPickerBusy = true;
     try {
       const { open } = await getDialogModule();
+      if (!isCurrent()) return;
       const selected = await openNativeDialog(index === null ? "batch.sources" : "batch.destination", open, {
         title: index === null ? tr("gui.batch.add_archives", "Add archives") : tr("gui.batch.choose_destination", "Choose destination"),
         multiple: index === null, directory: index !== null,
         defaultPath: index === null ? undefined : draft.items[index]?.dest,
       });
-      if (generation !== batchDraftGeneration || screen !== "batch") return;
+      if (!isCurrent()) return;
       if (!selected) {
         showNotice(tr("gui.batch.selection_cancelled", "Selection cancelled · the current batch was kept"));
         return;
@@ -7149,11 +7163,11 @@
       }
       batchDraftGeneration += 1;
     } catch {
-      showNotice(index === null
+      if (isCurrent()) showNotice(index === null
         ? tr("gui.batch.picker_unavailable", "Could not open the file chooser. Try again, or drag archives into the window.")
         : tr("gui.batch.destination_picker_unavailable", "Could not open the folder chooser. Try again, or edit the destination in the list."));
     } finally {
-      batchPickerBusy = false;
+      if (request === batchPickerRequest) batchPickerBusy = false;
     }
   }
 
@@ -12221,16 +12235,20 @@
 
   async function chooseNestedExtractDestination(): Promise<void> {
     const draft = nestedExtractDraft;
-    if (!draft || nestedExtractDraftLocked()) return;
+    if (!draft || screen !== "nestedExtract" || nestedExtractDraftLocked()) return;
     const generation = nestedExtractDraftGeneration;
+    const request = ++nestedExtractPickerRequest;
+    const isCurrent = () => request === nestedExtractPickerRequest
+      && generation === nestedExtractDraftGeneration && screen === "nestedExtract";
     nestedExtractPickerBusy = true;
     try {
       const { open } = await getDialogModule();
+      if (!isCurrent()) return;
       const selected = await openNativeDialog("nested-extract.destination", open, {
         title: tr("gui.batch.choose_destination", "Choose destination"),
         multiple: false, directory: true, defaultPath: draft.dest,
       });
-      if (generation !== nestedExtractDraftGeneration || screen !== "nestedExtract") return;
+      if (!isCurrent()) return;
       const path = Array.isArray(selected) ? selected[0] : selected;
       if (path) {
         nestedExtractDraft = { ...draft, dest: path };
@@ -12239,11 +12257,11 @@
         showNotice(tr("gui.nested_extract.selection_cancelled", "Selection cancelled · your extraction settings were kept"));
       }
     } catch {
-      if (generation === nestedExtractDraftGeneration && screen === "nestedExtract") {
+      if (isCurrent()) {
         showNotice(tr("gui.batch.destination_picker_unavailable", "Could not open the folder chooser. Try again, or edit the destination in the list."));
       }
     } finally {
-      nestedExtractPickerBusy = false;
+      if (request === nestedExtractPickerRequest) nestedExtractPickerBusy = false;
     }
   }
 
