@@ -13037,6 +13037,12 @@
     if (blockReason) {
       throw new JobSubmitBlockedError(blockReason);
     }
+    const previousTaskCenter = taskWindowMode ? null : {
+      open: taskCenterOpen,
+      selectedTaskId: taskCenterSelectedTaskId,
+      focusTaskId: taskCenterFocusTaskId,
+      navigationGeneration: taskReviewRequestGeneration,
+    };
     jobSubmitInFlight = true;
     submittingJobSpec = spec;
     if (taskWindowMode) {
@@ -13065,6 +13071,23 @@
         rememberWindowRecovery({ taskWindow: true, taskId: id });
       }
       return id;
+    } catch (error) {
+      if (previousTaskCenter
+        && previousTaskCenter.navigationGeneration === taskReviewRequestGeneration
+        && taskCenterOpen && taskCenterSelectedTaskId === null && taskCenterFocusTaskId === null) {
+        taskCenterOpen = previousTaskCenter.open;
+        taskCenterSelectedTaskId = previousTaskCenter.selectedTaskId;
+        taskCenterFocusTaskId = previousTaskCenter.focusTaskId;
+        if (!previousTaskCenter.open && !taskDialogVisible()) {
+          const focused = document.activeElement;
+          if (!focused || focused === document.body || focused.closest("#squallz-task-center")) {
+            restoreTaskWorkspaceFocus();
+          } else {
+            taskCenterReturnFocus = null;
+          }
+        }
+      }
+      throw error;
     } finally {
       jobSubmitInFlight = false;
       submittingJobSpec = null;
