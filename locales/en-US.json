@@ -1420,7 +1420,7 @@
   "gui.task.kind.checksum_check": "Verify checksum",
   "gui.task.kind.duplicate_scan": "Duplicate scan",
   "gui.task.job.extract": "Extract {name}",
-  "gui.task.job.batch_extract": "Extract {count} archives",
+  "gui.task.job.batch_extract": "Batch extract",
   "gui.task.job.compress": "Compress {name}",
   "gui.task.job.create_sfx": "Create self-extractor {name}",
   "gui.task.job.publish_macos_sfx": "Publish {name}",

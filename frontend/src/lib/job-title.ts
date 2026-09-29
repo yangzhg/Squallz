@@ -26,7 +26,7 @@ export function jobTitleFor(spec: JobSpec): string {
     case "extract":
       return translate("gui.task.job.extract", "Extract {name}", { name: basename(spec.path) });
     case "batch_extract":
-      return translate("gui.task.job.batch_extract", "Extract {count} archives", { count: spec.items.length });
+      return translate("gui.task.job.batch_extract", "Batch extract", {});
     case "extract_nested":
       return translate("gui.task.job.extract", "Extract {name}", { name: basename(spec.entry_path) });
     case "test":

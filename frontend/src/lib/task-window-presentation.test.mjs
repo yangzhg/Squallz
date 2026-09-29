@@ -111,8 +111,15 @@ test("waiting task surfaces retain measured progress without rates or processing
         }
         const row = render(TaskCenter, { props: { tasks: [{ ...task, queueMoveIntent: null }], rootClass: "task-center" } }).body;
         assert.ok(row.includes(helpers.taskProgressSummary(task)));
-        const batch = { ...task, spec: { kind: "batch_extract", items: [{ path: "a.zip" }, { path: "b.zip" }] } };
+        const batch = { ...task, done: 1500, total: 2000, spec: { kind: "batch_extract", items: [{ path: "a.zip.001" }, { path: "a.zip.002" }, { path: "b.zip" }] } };
         assert.ok(helpers.taskProgressSummary(batch).includes(label));
+        assert.match(helpers.taskProgressSummary(batch), /75%.*1\/2/u);
+        for (const presentation of ["dialog", "panel", "window"]) {
+          const body = render(TaskProgressDialog, { props: { ...surface, presentation, task: batch } }).body;
+          assert.match(body, /75%.*1\/2/u);
+          assert.ok(body.includes(label));
+          assert.doesNotMatch(body, /\d+ B\/(?:s|秒)/u);
+        }
         assert.ok(helpers.taskProgressSummary({ ...task, scanEntries: 37 }).includes(label));
       }
       const running = render(TaskProgressDialog, { props: { ...surface, task: extractTask("running") } }).body;

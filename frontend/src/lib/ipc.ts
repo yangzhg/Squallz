@@ -378,6 +378,9 @@ export type ProgressPhase =
   | "sfx_publish_notarize"
   | "sfx_publish_finalize";
 
+// Batch totals use this many work units per grouped archive; entry counters remain bytes.
+export const BATCH_PROGRESS_SCALE = 1_000;
+
 export interface ProgressEvent {
   id: number;
   version: number;

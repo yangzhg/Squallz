@@ -1420,7 +1420,7 @@
   "gui.task.kind.checksum_check": "验证校验和",
   "gui.task.kind.duplicate_scan": "重复扫描",
   "gui.task.job.extract": "解压 {name}",
-  "gui.task.job.batch_extract": "解压 {count} 个压缩包",
+  "gui.task.job.batch_extract": "批量解压",
   "gui.task.job.compress": "压缩 {name}",
   "gui.task.job.create_sfx": "创建自解压文件 {name}",
   "gui.task.job.publish_macos_sfx": "发布 {name}",

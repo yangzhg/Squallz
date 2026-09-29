@@ -56,6 +56,7 @@ struct JobProgressEvent {
     interruptible: bool,
 }
 
+/// Work units per grouped archive in GUI progress events; also declared in frontend ipc.ts.
 pub(super) const BATCH_PROGRESS_SCALE: u64 = 1_000;
 
 pub(super) struct BatchProgressSink<'a> {
@@ -125,10 +126,9 @@ impl ProgressSink for BatchProgressSink<'_> {
     ) {
         let state = lock_unpoisoned(&self.state);
         let archive_done = if total > 0 {
-            match done.saturating_mul(BATCH_PROGRESS_SCALE).checked_div(total) {
-                Some(value) => value.min(BATCH_PROGRESS_SCALE),
-                None => 0,
-            }
+            // Only finish_archive may complete this archive, after extraction and metadata.
+            ((u128::from(done) * u128::from(BATCH_PROGRESS_SCALE)) / u128::from(total))
+                .min(u128::from(BATCH_PROGRESS_SCALE - 1)) as u64
         } else {
             0
         };
@@ -592,6 +592,14 @@ mod tests {
         );
         let batch = BatchProgressSink::new(&progress, 2);
         batch.start_archive(0, "first.zip".into());
+        batch.on_entry_progress(100, 100, &EntryPath::from_utf8("last.txt"), 100, 100);
+        progress.flush();
+        let snapshot = lock_unpoisoned(&snapshots).snapshot("main", 1).unwrap();
+        assert_eq!(
+            (snapshot.progress.done, snapshot.progress.total),
+            (999, 2000)
+        );
+        assert_eq!(snapshot.progress.current_done, 100);
         batch.on_phase(ProgressPhase::ExtractMetadata, true);
         batch.on_progress(0, 0, &EntryPath::from_utf8("folder"));
         progress.flush();
@@ -602,6 +610,12 @@ mod tests {
         assert!(snapshot.progress.interruptible);
 
         batch.finish_archive(0, "first.zip".into());
+        progress.flush();
+        let snapshot = lock_unpoisoned(&snapshots).snapshot("main", 1).unwrap();
+        assert_eq!(
+            (snapshot.progress.done, snapshot.progress.total),
+            (1000, 2000)
+        );
         batch.start_archive(1, "second.zip".into());
         batch.on_phase(ProgressPhase::ArchiveOpen, true);
         batch.on_progress(0, 0, &EntryPath::from_utf8("second.zip"));
@@ -633,6 +647,36 @@ mod tests {
             (5, 10)
         );
         assert_eq!(snapshot.progress.current, "second.zip: report.txt");
+        batch.on_entry_progress(
+            u64::MAX / 2,
+            u64::MAX,
+            &EntryPath::from_utf8("large.bin"),
+            0,
+            0,
+        );
+        progress.flush();
+        let snapshot = lock_unpoisoned(&snapshots).snapshot("main", 1).unwrap();
+        assert_eq!(snapshot.progress.done, 1499);
+        batch.on_entry_progress(u64::MAX, u64::MAX, &EntryPath::from_utf8("large.bin"), 0, 0);
+        progress.flush();
+        assert_eq!(
+            lock_unpoisoned(&snapshots)
+                .snapshot("main", 1)
+                .unwrap()
+                .progress
+                .done,
+            1999
+        );
+        batch.finish_archive(1, "second.zip".into());
+        progress.flush();
+        assert_eq!(
+            lock_unpoisoned(&snapshots)
+                .snapshot("main", 1)
+                .unwrap()
+                .progress
+                .done,
+            2000
+        );
     }
 
     #[test]

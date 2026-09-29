@@ -898,6 +898,7 @@ pub struct ProgressEvent {
     pub id: u64,
     /// Global snapshot revision for stale-event rejection.
     pub version: u64,
+    /// Bytes, or 1,000 work units per grouped archive for batch extraction.
     pub done: u64,
     /// 0 = unknown total (indeterminate progress bar)
     pub total: u64,
@@ -909,7 +910,7 @@ pub struct ProgressEvent {
     /// Entries prepared during an input scan. Omitted for byte progress.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scanned_entries: Option<u64>,
-    /// Smoothed throughput in bytes/second
+    /// Smoothed throughput in bytes/second; 0 for batch work units.
     pub speed: u64,
 }
 

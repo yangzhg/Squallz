@@ -2,6 +2,7 @@
 // status text, and conflict/password prompts.
 
 import {
+  BATCH_PROGRESS_SCALE,
   ipc,
   type AskConflictEvent,
   type AskPasswordEvent,
@@ -1838,12 +1839,12 @@ function previewProgress(kind: PreviewTaskKind, state: Extract<JobStateName, "do
   }
   if (kind === "batch_extract") {
     return {
-      done: state === "done" ? 2 : 1,
-      total: 2,
+      done: (state === "done" ? 2 : 1) * BATCH_PROGRESS_SCALE,
+      total: 2 * BATCH_PROGRESS_SCALE,
       current: "photos/IMG_2042.dng",
       currentDone: state === "done" ? 3_200_000 : 1_280_000,
       currentTotal: 3_200_000,
-      speed: state === "running" ? 18_400_000 : 0,
+      speed: 0,
     };
   }
   if (isRecoveryPreview(kind)) {

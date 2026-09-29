@@ -1,6 +1,6 @@
 import { basename as pathBaseName, formatBytes } from "./format";
 import { errorSummary } from "./error-presentation";
-import { isErrorDto } from "./ipc";
+import { BATCH_PROGRESS_SCALE, isErrorDto } from "./ipc";
 import { t, tFallback } from "./i18n.svelte";
 import { jobTitleFor } from "./job-title";
 import { readCreateResult } from "./create-result";
@@ -135,7 +135,12 @@ export function taskStatusUnavailableMessage(): string {
 
 export function taskProgressPercent(task: TaskDialogModel): number {
   if (isIndeterminatePhase(task)) return 0;
-  if (task.total > 0) return Math.min(100, Math.round((task.done / task.total) * 100));
+  if (task.total > 0) {
+    const percent = task.spec.kind === "batch_extract"
+      ? Math.floor((task.done * 100) / task.total)
+      : Math.round((task.done / task.total) * 100);
+    return Math.min(100, percent);
+  }
   if (task.state === "done") return 100;
   return 0;
 }
@@ -270,12 +275,13 @@ export function taskProgressSummary(task: TaskDialogModel): string {
     return withWaitingState(task, t("gui.task.phase_progress_pending", { phase }));
   }
   if (task.spec.kind === "batch_extract") {
+    if (task.total === 0 && task.state !== "done") return taskProgressStateLabel(task);
     const total = Math.max(1, task.state === "done"
       ? Number(task.result?.archives ?? task.spec.items.length)
-      : task.spec.items.length);
+      : Math.floor(task.total / BATCH_PROGRESS_SCALE));
     const done = task.state === "done"
       ? total
-      : Math.min(total, Math.floor((taskProgressPercent(task) / 100) * total));
+      : Math.min(total, Math.floor(task.done / BATCH_PROGRESS_SCALE));
     return withWaitingState(task, t("gui.task.progress_batch_extract", {
       percent: taskProgressPercent(task),
       done,

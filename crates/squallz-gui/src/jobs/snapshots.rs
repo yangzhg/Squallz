@@ -267,7 +267,10 @@ impl JobSnapshotStore {
         progress: &mut JobProgressSnapshot,
     ) -> Option<u64> {
         let current = self.jobs.get(&id)?;
-        if current.state != "running" || current.question.is_some() {
+        if current.state != "running"
+            || current.question.is_some()
+            || matches!(current.description.spec, JobSpec::BatchExtract { .. })
+        {
             progress.speed = 0;
         }
         if is_terminal_snapshot_state(&current.state) || current.progress == *progress {
@@ -596,6 +599,22 @@ mod tests {
         let finished = store.snapshot("main", 1).unwrap();
         assert_eq!(finished.progress.speed, 0);
         assert_eq!(finished.progress.current, "report.txt");
+        store.insert(
+            2,
+            Some("task-owner".into()),
+            JobSpec::BatchExtract {
+                items: Vec::new(),
+                overwrite: squallz_core::api::OverwritePolicy::Skip,
+                symlinks: squallz_core::api::SymlinkPolicy::Skip,
+                smart: false,
+            },
+            "running",
+        );
+        let mut batch_progress = progress.clone();
+        store.set_progress(2, &mut batch_progress).unwrap();
+        assert_eq!(batch_progress.speed, 0);
+        assert_eq!(batch_progress.current_done, 4);
+        assert_eq!(store.snapshot("main", 2).unwrap().progress, batch_progress);
     }
 
     #[test]
