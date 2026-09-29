@@ -1631,6 +1631,16 @@ pub fn job_snapshot(
 }
 
 #[tauri::command]
+pub fn review_job_spec(
+    window: WebviewWindow,
+    state: State<'_, Arc<AppState>>,
+    jobs: State<'_, Arc<JobManager>>,
+    id: u64,
+) -> Result<JobSpec, ErrorDto> {
+    jobs.review_spec_for_window(&state, window.label(), id)
+}
+
+#[tauri::command]
 pub fn open_job_output(
     app: AppHandle,
     window: WebviewWindow,

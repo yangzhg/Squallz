@@ -714,6 +714,8 @@ pub enum JobSpec {
 #[derive(Debug, Clone)]
 pub(crate) struct JobSnapshotDescription {
     pub spec: JobSpec,
+    /// Window-scoped source handles for explicit review, never serialized in snapshots.
+    pub review_spec: JobSpec,
     pub output_password_required: bool,
 }
 
@@ -800,6 +802,7 @@ impl JobSpec {
             | Self::DuplicateScan { .. } => {}
         }
         JobSnapshotDescription {
+            review_spec: redacted.clone(),
             spec: redacted,
             output_password_required,
         }
@@ -1569,6 +1572,10 @@ mod tests {
             let encrypt_names = value.get("encrypt_names").cloned();
             let spec: JobSpec = serde_json::from_value(value).expect("valid credential job spec");
             let description = spec.redacted_for_snapshot();
+            let review = serde_json::to_string(&description.review_spec).unwrap();
+            assert!(!review.contains(secret));
+            assert!(!review.contains("sqcg1_"));
+            assert!(!review.contains("sqeg1_"));
             assert_eq!(
                 description.output_password_required,
                 matches!(

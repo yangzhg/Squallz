@@ -827,6 +827,7 @@ export const ipc = {
   getMacosSfxPublisherStatus: () =>
     invoke<MacosSfxPublisherStatusDto>("get_macos_sfx_publisher_status"),
   jobSnapshot: (id: number) => invoke<JobSnapshot | null>("job_snapshot", { id }),
+  reviewJobSpec: (id: number) => invoke<JobSpec>("review_job_spec", { id }),
   openJobOutput: (id: number) => invoke<void>("open_job_output", { id }),
   jobSnapshots: (since: number | null) =>
     invoke<JobSnapshotsDelta>("job_snapshots", { since }),

@@ -1820,6 +1820,7 @@
   "gui.notify.failed.title": "任务失败",
   "gui.notify.batch_done": "{count} 个任务已完成",
   "gui.batch.title": "批量解压",
+  "gui.task.review.source_unavailable": "无法恢复此任务的来源。请重新打开原压缩包（必要时进入内层压缩包），再发起新任务。当前设置已保留。",
   "gui.batch.add_archives": "添加压缩包",
   "gui.batch.already_added": "这些压缩包已在批量列表中。",
   "gui.batch.selection_cancelled": "已取消选择 · 当前批量设置已保留",

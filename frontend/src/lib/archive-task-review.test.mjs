@@ -36,6 +36,7 @@ function harness() {
   const context = {
     calls, taskReviewScreen, taskWindowMode: false, currentArchive: archive(),
     screen: "browse", archiveOpenStatus: "idle", archiveOpenGeneration: 0,
+    taskReviewRequestGeneration: 0,
     extractReviewFocusPending: false, convertReviewFocusPending: false, createPrimaryFocusPending: false,
     pendingCreateSubmission: null, classicCreateSection: "general",
     pendingArchiveTaskReview: null, extractDraftArchive: { id: 1, source: "/original/photos.zip" },
@@ -79,7 +80,7 @@ function harness() {
     },
     submitCurrentArchiveJob: async (job) => { calls.push(["submit", job]); return true; },
     archiveTitle: () => context.currentArchive?.name, taskPasswordReady: (value) => Boolean(value),
-    adoptRecoveryTargetFromTask: (task) => calls.push(["recovery", task.spec.path]),
+    adoptRecoveryTargetFromTask: (task) => { calls.push(["recovery", task.spec.path]); return true; },
   };
   const { outputText } = ts.transpileModule(declarations.map((node) => node.getText(source)).join("\n"), {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },

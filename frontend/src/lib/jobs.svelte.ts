@@ -1898,12 +1898,19 @@ function previewTaskOffset(kind: PreviewTaskKind): number {
   return 3;
 }
 
+const previewReviewSpecs = new Map<number, JobSpec>();
+
+export function previewTaskSpecForReview(id: number): JobSpec | null {
+  return import.meta.env.DEV ? previewReviewSpecs.get(id) ?? null : null;
+}
+
 function installTaskPreview(kind: PreviewTaskKind, state: Extract<JobStateName, "done" | "running">): number | null {
   if (!import.meta.env.DEV) return null;
   const id = 940_000 + (state === "running" ? 100 : 0) + previewTaskOffset(kind);
   if (find(id)) return id;
 
   const spec = previewTaskSpec(kind);
+  previewReviewSpecs.set(id, redactedSpec(spec));
   const progress = previewProgress(kind, state);
   const previewState = kind === "compress_failure" || kind === "compress_sfx_failure" || kind === "extract_failure"
     || kind === "convert_failure" || kind === "convert_encrypted_failure" || kind === "duplicate_scan_failure"

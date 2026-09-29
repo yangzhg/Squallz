@@ -135,6 +135,26 @@ test("new batches use the displayed smart base and an explicitly empty list neve
   assert.ok(run.calls.some(([name,id])=>name==="focus-field"&&id==="batch-workspace-heading"));
 });
 
+test("batch review matches displayed failures while submitting the original opaque source", async () => {
+  const run=harness();
+  const displayed=spec();
+  const actual={...displayed,items:displayed.items.map((item,index)=>({...item,path:`squallz-archive://${index+1}`}))};
+  await run.reviewTask({state:"done",spec:actual,result:{failed:1,failures:[{archive:displayed.items[0].path}]}},displayed);
+  const surface=run.batchWorkspaceSurface("modern");
+  assert.equal(surface.rows.length,1);
+  assert.equal(surface.rows[0].path,displayed.items[0].path);
+  assert.equal(surface.rows[0].name,"完整文件名.zip");
+  await run.startBatchExtract();
+  const submitted=run.calls.find(([name])=>name==="submit")[1];
+  assert.equal(submitted.items[0].path,"squallz-archive://1");
+  assert.equal("displayPath" in submitted.items[0],false);
+  run.context.currentArchive={source:"squallz-archive://8",path:"/Archives/outer.zip › inner.zip"};
+  run.context.appliedDefaultExtractDir="";
+  run.setBatchArchivePaths([run.context.currentArchive.source]);
+  assert.equal(run.effectiveBatchDraft().items[0].dest,"/Archives");
+  assert.equal(run.batchWorkspaceSurface("classic").rows[0].path,run.context.currentArchive.path);
+});
+
 test("submission locks a batch against edits, duplicate submits and incoming selections; errors preserve its draft", async () => {
   const run=harness();
   await run.reviewTask({state:"failed",spec:spec()});

@@ -21,7 +21,7 @@ function taskSurface(taskWindowMode) {
   const callbacks = Object.fromEntries([
     "taskOutputPath", "taskRevealOutputLabel", "pauseCurrentTask", "resumeCurrentTask",
     "cancelCurrentTask", "copyTaskChecksumResults", "openTaskOutput", "openMacosSfxPublisher",
-    "reviewTask", "toggleTaskDetails", "viewTaskResults", "revealTaskOutput",
+    "prepareTaskReview", "toggleTaskDetails", "viewTaskResults", "revealTaskOutput",
     "dismissTaskDialog", "submitPasswordRequest", "cancelPasswordRequest", "answerConflictDecision",
   ].map((name) => [name, () => {}]));
   const surface = vm.runInNewContext(`${outputText}\ntaskDialogSurface`, {

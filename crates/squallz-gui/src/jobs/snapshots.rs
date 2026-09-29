@@ -352,6 +352,14 @@ impl JobSnapshotStore {
             .map(|record| snapshot_for_requester(record, requester))
     }
 
+    pub(super) fn review_spec(&self, requester: &str, id: u64) -> Option<JobSpec> {
+        self.jobs
+            .get(&id)
+            .filter(|record| stored_snapshot_visible_to(record, requester))
+            .filter(|record| is_terminal_snapshot_state(&record.state))
+            .map(|record| record.description.review_spec.clone())
+    }
+
     pub(super) fn delta(&self, requester: &str, since: Option<u64>) -> JobSnapshotDelta {
         let reset = match since {
             None => true,
@@ -540,6 +548,7 @@ mod tests {
         assert!(owner.upserts[0].owned_by_requester);
         assert_eq!(owner.upserts[0].origin, JobOrigin::FileManager);
         assert!(store.delta("task-other", None).upserts.is_empty());
+        assert!(store.review_spec("task-owner", 2).is_none());
 
         let progress_version = store
             .set_progress(
@@ -571,6 +580,9 @@ mod tests {
             .set_progress(2, JobProgressSnapshot::default())
             .is_none());
         assert_eq!(store.snapshot("main", 2).unwrap().state, "done");
+        assert!(store.review_spec("main", 2).is_some());
+        assert!(store.review_spec("task-owner", 2).is_some());
+        assert!(store.review_spec("task-other", 2).is_none());
 
         let denied = store.dismiss("task-other", &[2]).unwrap_err();
         assert_eq!(denied.key, "error.other");
@@ -582,6 +594,8 @@ mod tests {
         assert!(removed.upserts.is_empty());
         assert_eq!(removed.removed, vec![2]);
         assert!(store.snapshot("task-owner", 2).is_none());
+        assert!(store.review_spec("task-owner", 2).is_none());
+        assert!(store.review_spec("main", 2).is_some());
         assert!(store.snapshot("main", 2).is_some());
         assert!(store.delta("task-owner", None).upserts.is_empty());
         let main_after_owner_dismiss = store.delta("main", Some(main_baseline));

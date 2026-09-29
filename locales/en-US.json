@@ -1820,6 +1820,7 @@
   "gui.notify.failed.title": "Task Failed",
   "gui.notify.batch_done": "{count} tasks finished",
   "gui.batch.title": "Batch Extract",
+  "gui.task.review.source_unavailable": "Could not restore this task's source. Reopen the original archive (and its inner archive, if needed), then start a new task. Your current settings were kept.",
   "gui.batch.add_archives": "Add archives",
   "gui.batch.already_added": "Those archives are already in the batch.",
   "gui.batch.selection_cancelled": "Selection cancelled · the current batch was kept",

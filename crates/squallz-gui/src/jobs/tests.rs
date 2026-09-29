@@ -2967,6 +2967,39 @@ fn queued_opaque_nested_source_stays_leased_and_never_reaches_public_state() {
         password: None,
         best_effort: false,
     };
+    let prepared = PreparedJob::new(&state, Some("lease-test"), &nested_job).unwrap();
+    let review_id = 99_000;
+    lock_unpoisoned(&manager.snapshots).insert_with_resources(
+        review_id,
+        Some("lease-test".into()),
+        prepared.snapshot.clone(),
+        "failed",
+        JobResources::default(),
+        None,
+    );
+    drop(prepared);
+    let review = manager
+        .review_spec_for_window(&state, "lease-test", review_id)
+        .unwrap();
+    match review {
+        JobSpec::ExtractNested {
+            outer_path,
+            entry_path,
+            password,
+            ..
+        } => {
+            assert_eq!(outer_path, archive.source);
+            assert_eq!(entry_path, inner_name);
+            assert!(password.is_none());
+        }
+        _ => panic!("expected the original nested extraction"),
+    }
+    assert!(manager
+        .review_spec_for_window(&state, "main", review_id)
+        .is_err());
+    assert!(manager
+        .review_spec_for_window(&state, "other-window", review_id)
+        .is_err());
     let next_id = manager.next_id.load(Ordering::Relaxed);
     let foreign_error = manager
         .submit_for_window(
@@ -2999,6 +3032,10 @@ fn queued_opaque_nested_source_stays_leased_and_never_reaches_public_state() {
         SettingsDto::default(),
     );
     state.close_archive_for_window("lease-test", archive.id);
+    std::fs::write(&display_path, b"a different file with the displayed name").unwrap();
+    assert!(manager
+        .review_spec_for_window(&state, "lease-test", review_id)
+        .is_err());
 
     assert_eq!(manager.snapshot(id).unwrap().state, "queued");
     assert!(physical_path.exists());

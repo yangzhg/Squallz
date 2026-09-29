@@ -216,6 +216,7 @@
     resumeTask,
     installActiveTaskPreview,
     installCompletedTaskPreview,
+    previewTaskSpecForReview,
     installTaskQueuePreview,
     moveTaskBefore,
     moveTaskEarlier,
@@ -873,6 +874,7 @@
   let pendingArchiveTaskReview: ArchiveTaskReview | null = null;
   let extractReviewFocusPending = false;
   let convertReviewFocusPending = false;
+  let taskReviewRequestGeneration = 0;
   let extractOverwriteMode = $state<ExtractOverwriteMode>("ask");
   let extractSymlinkMode = $state<ExtractSymlinkMode>("preserve");
   let currentExtractOverwriteLabel = $derived(extractOverwriteLabel(extractOverwriteMode));
@@ -2141,6 +2143,7 @@
   function setScreen(next: Screen) {
     if (preventCreateSubmissionNavigation(next)) return;
     if (preventConvertSubmissionNavigation(next)) return;
+    taskReviewRequestGeneration += 1;
     if (next !== "create") createPrimaryFocusPending = false;
     if (next !== "extract") extractReviewFocusPending = false;
     if (next !== "convert") convertReviewFocusPending = false;
@@ -6940,7 +6943,8 @@
   function newBatchExtractDraft(paths: readonly string[]): BatchExtractDraft {
     return { overwrite: "ask", symlinks: "preserve", smart: true,
       items: uniqueNonEmptyPaths([...paths]).map((path) => ({ path,
-        dest: normalizedDefaultExtractDir(appliedDefaultExtractDir) ?? pathDir(path),
+        displayPath: currentArchive?.source === path ? currentArchive.path : path,
+        dest: normalizedDefaultExtractDir(appliedDefaultExtractDir) ?? pathDir(currentArchive?.source === path ? currentArchive.path : path),
         encoding: currentArchive && sameFilePath(currentArchive.source, path) ? archiveEncodingForJob() : null,
         best_effort: false,
       })) };
@@ -10095,8 +10099,8 @@
       symlinkChoices: extractSymlinkModes.map((id) => ({ id, label: extractSymlinkLabel(id) })),
       onSymlinksChange: (symlinks) => updateBatchDraft((value) => ({ ...value, symlinks })),
       rows: draft.items.map((item, index) => ({
-        id: `${index}:${item.path}`, path: item.path, name: pathBaseName(item.path),
-        format: archiveFormatFromPath(item.path), target: item.dest,
+        id: `${index}:${item.path}`, path: item.displayPath, name: pathBaseName(item.displayPath),
+        format: archiveFormatFromPath(item.displayPath), target: item.dest,
         encoding: item.encoding ?? tr("gui.extract.encoding.auto", "Auto-detect"),
         bestEffort: item.best_effort,
         onTargetInput: (dest) => updateBatchDraft((value) => ({ ...value,
@@ -12427,6 +12431,7 @@
   }
 
   function closeTaskCenter(): void {
+    taskReviewRequestGeneration += 1;
     const returnFocus = taskCenterReturnFocus;
     taskCenterOpen = false;
     taskCenterSelectedTaskId = null;
@@ -12442,11 +12447,13 @@
   }
 
   function openTaskCenterDetails(task: Task): void {
+    taskReviewRequestGeneration += 1;
     taskCenterFocusTaskId = task.id;
     taskCenterSelectedTaskId = task.id;
   }
 
   function returnToTaskCenter(task: TaskDialogModel): void {
+    taskReviewRequestGeneration += 1;
     taskCenterSelectedTaskId = null;
     taskCenterFocusTaskId = task.id;
   }
@@ -12564,7 +12571,7 @@
       onCopyChecksumResults: copyTaskChecksumResults,
       onOpenOutput: openTaskOutput,
       onPublishMacosSfx: openMacosSfxPublisher,
-      onReviewTask: reviewTask,
+      onReviewTask: prepareTaskReview,
       onToggleDetails: toggleTaskDetails,
       onViewResults: viewTaskResults,
       onRevealOutput: revealTaskOutput,
@@ -12596,7 +12603,7 @@
       onCopyChecksumResults: copyTaskChecksumResults,
       onOpenOutput: openTaskOutput,
       onPublishMacosSfx: openMacosSfxPublisher,
-      onReviewTask: reviewTask,
+      onReviewTask: prepareTaskReview,
       onToggleDetails: toggleTaskDetails,
       onViewResults: viewTaskResults,
       onRevealOutput: revealTaskOutput,
@@ -12732,6 +12739,7 @@
   }
 
   async function dismissTaskDialog(task: TaskDialogModel): Promise<void> {
+    taskReviewRequestGeneration += 1;
     if (task.id === null) return;
     if (isTaskActiveState(task.state)) return;
     if (!taskWindowMode && taskCenterSelectedTaskId === task.id) {
@@ -12850,7 +12858,7 @@
     return t("gui.task.show_in_file_manager", { fileManager: fileManagerLabel() });
   }
 
-  function adoptRecoveryTargetFromTask(task: TaskDialogModel): void {
+  function adoptRecoveryTargetFromTask(task: TaskDialogModel, displayedSpec: JobSpec = task.spec): boolean {
     let source: string | null = null;
     let sidecar: string | null | undefined;
     switch (task.spec.kind) {
@@ -12870,7 +12878,7 @@
         sidecar = null;
         break;
       case "extract":
-        if (!task.spec.best_effort) return;
+        if (!task.spec.best_effort) return false;
         source = task.spec.path;
         sidecar = recoverySourcePath() && sameFilePath(recoverySourcePath() ?? "", source)
           ? undefined
@@ -12883,19 +12891,27 @@
           : null;
         break;
       default:
-        return;
+        return false;
     }
-    if (!source) return;
+    if (!source) return false;
+    const displayedSource = "path" in displayedSpec ? displayedSpec.path
+      : "src" in displayedSpec ? displayedSpec.src : source;
+    const matchesCurrentSource = Boolean(currentArchive && sameFilePath(currentArchive.source, source));
+    if (source !== displayedSource && !matchesCurrentSource) {
+      showNotice(tr("gui.task.review.source_unavailable", "Could not restore this task's source. Reopen the original archive (and its inner archive, if needed), then start a new task. Your current settings were kept."));
+      return false;
+    }
     const preserveSelectedSource = Boolean(
       recoverySourceMode === "selected" &&
       recoverySourceOverride &&
       sameFilePath(recoverySourceOverride, source),
     );
-    recoverySourceMode = !preserveSelectedSource && currentArchive && sameFilePath(currentArchive.path, source)
+    recoverySourceMode = matchesCurrentSource || (!preserveSelectedSource && currentArchive && sameFilePath(currentArchive.path, source))
       ? "current"
       : "selected";
     recoverySourceOverride = recoverySourceMode === "selected" ? source : null;
     if (sidecar !== undefined) recoveryPar2Override = sidecar;
+    return true;
   }
 
   function testTaskUsesRecoveryContext(task: TaskDialogModel): boolean {
@@ -12908,7 +12924,7 @@
     ) {
       return true;
     }
-    return !currentArchive || !sameFilePath(currentArchive.path, task.spec.path);
+    return !currentArchive || (!sameFilePath(currentArchive.source, task.spec.path) && !sameFilePath(currentArchive.path, task.spec.path));
   }
 
   function viewTaskResults(task: TaskDialogModel): void {
@@ -12924,7 +12940,7 @@
       if (task.id !== null) setTaskExpanded(task.id, true);
       return;
     }
-    if (target === "recovery") adoptRecoveryTargetFromTask(task);
+    if (target === "recovery" && !adoptRecoveryTargetFromTask(task)) return;
     if (task.id !== null && (task.spec.kind === "checksum" || task.spec.kind === "checksum_check")) {
       checksumReportTaskIds[task.spec.kind] = task.id;
     }
@@ -12942,7 +12958,25 @@
     setTaskExpanded(task.id, !task.expanded);
   }
 
-  async function reviewTask(task: TaskDialogModel): Promise<void> {
+  async function prepareTaskReview(task: TaskDialogModel): Promise<void> {
+    if (taskWindowMode || task.id === null || !taskReviewScreen(task)) return;
+    const generation = ++taskReviewRequestGeneration;
+    const initialScreen = screen;
+    const initialArchive = currentArchive?.id ?? null;
+    const isCurrent = () => generation === taskReviewRequestGeneration
+      && screen === initialScreen && (currentArchive?.id ?? null) === initialArchive;
+    try {
+      const spec = previewTaskSpecForReview(task.id) ?? await ipc.reviewJobSpec(task.id);
+      if (!isCurrent()) return;
+      if (spec.kind !== task.spec.kind) throw new Error("Task kind changed");
+      await reviewTask({ ...task, spec }, task.spec);
+    } catch {
+      if (!isCurrent()) return;
+      showNotice(tr("gui.task.review.source_unavailable", "Could not restore this task's source. Reopen the original archive (and its inner archive, if needed), then start a new task. Your current settings were kept."));
+    }
+  }
+
+  async function reviewTask(task: TaskDialogModel, displayedSpec: JobSpec = task.spec): Promise<void> {
     if (taskWindowMode) return;
     let target = taskReviewScreen(task);
     if (target === "archiveInfo" && testTaskUsesRecoveryContext(task)) {
@@ -12960,7 +12994,8 @@
       if (preventCreateSubmissionNavigation(target) || preventConvertSubmissionNavigation(target) || focusBlockingTaskIfAny()) return;
       const failedCount = task.state === "done" ? Number(task.result?.failed) : 0;
       const failures = task.state === "done" ? (Array.isArray(task.result?.failures) ? task.result.failures : []) : null;
-      const draft = reviewBatchExtract(task.spec, failures, failedCount, platformKind());
+      const draft = reviewBatchExtract(task.spec, failures, failedCount, platformKind(),
+        displayedSpec.kind === "batch_extract" ? displayedSpec : task.spec);
       if (!draft) {
         showNotice(tr("gui.batch.review_unavailable", "The report cannot identify the failed archives unambiguously. Select the archives again; your current batch was kept."));
         return;
@@ -12984,7 +13019,7 @@
       return;
     }
     if (target === "create" && task.spec.kind === "compress" && !restoreCreateTaskDraft(task.spec, task.outputPasswordRequired)) return;
-    if (target === "recovery") adoptRecoveryTargetFromTask(task);
+    if (target === "recovery" && !adoptRecoveryTargetFromTask(task, displayedSpec)) return;
     setScreen(target);
     await dismissTaskDialog(task);
     if (target === "create") focusCreatePrimaryAction();

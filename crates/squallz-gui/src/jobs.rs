@@ -306,9 +306,11 @@ impl PreparedJob {
             }
             _ => {}
         }
+        let mut snapshot = snapshot_spec.redacted_for_snapshot();
+        snapshot.review_spec = spec.redacted_for_snapshot().spec;
         Ok(Self {
             execution_spec,
-            snapshot: snapshot_spec.redacted_for_snapshot(),
+            snapshot,
             _source_leases: source_leases,
             redactions,
         })
@@ -1108,6 +1110,21 @@ impl JobManager {
         self.cleanup_terminal_queue_slots();
         self.sync_queue_positions();
         lock_unpoisoned(&self.snapshots).delta(requester, since)
+    }
+
+    pub fn review_spec_for_window(
+        &self,
+        state: &AppState,
+        requester: &str,
+        gui_id: u64,
+    ) -> Result<JobSpec, ErrorDto> {
+        let spec = lock_unpoisoned(&self.snapshots)
+            .review_spec(requester, gui_id)
+            .ok_or_else(job_unavailable_error)?;
+        // Resolve source ownership and lifetime again. A display path must never
+        // replace an expired handle, even if a file with that name now exists.
+        PreparedJob::new(state, Some(requester), &spec).map_err(ErrorDto::from)?;
+        Ok(spec)
     }
 
     pub fn dismiss_snapshots_for_window(
