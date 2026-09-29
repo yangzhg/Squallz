@@ -34,12 +34,13 @@ use crate::create_preflight::{
     DestinationInspectionProgress, PreflightRequestKind, PreflightRequestLease, PreflightRequests,
 };
 use crate::dto::{
-    normalize_performance_stream_buffer_limit, ArchiveInfo, ArchiveMovePlanDto, BatchExtractItem,
-    CreateDestinationInspectionDto, CreateEstimateDto, CreatePlanDto, DiskSpaceDto,
-    EntryPreviewDto, ErrorDto, ExternalTaskActionDto, ExtractPlanPreflightDto, FormatDto,
-    IntegrationApplyResultDto, IntegrationRemoveResultDto, IntegrationStatusDto,
-    IntegrationSystemDiagnosticsDto, JobSpec, LanguageDto, LocaleTable, NestedArchivePasswords,
-    NestedArchivePreviewDto, Page, PasswordBookStatusDto, SettingsDto, SfxCreateCapabilityDto,
+    normalize_performance_stream_buffer_limit, ArchiveInfo, ArchiveMovePlanDto,
+    ArchiveTargetInspectionDto, BatchExtractItem, CreateDestinationInspectionDto,
+    CreateEstimateDto, CreatePlanDto, DiskSpaceDto, EntryPreviewDto, ErrorDto,
+    ExternalTaskActionDto, ExtractPlanPreflightDto, FormatDto, IntegrationApplyResultDto,
+    IntegrationRemoveResultDto, IntegrationStatusDto, IntegrationSystemDiagnosticsDto, JobSpec,
+    LanguageDto, LocaleTable, NestedArchivePasswords, NestedArchivePreviewDto, Page,
+    PasswordBookStatusDto, SettingsDto, SfxCreateCapabilityDto,
 };
 use crate::events::EventSink;
 use crate::integration;
@@ -525,6 +526,25 @@ pub async fn missing_archive_paths(
     })
     .await
     .map_err(|error| ErrorDto::other(format!("archive path check failed: {error}")))?
+    .map_err(ErrorDto::from)
+}
+
+/// Checks a proposed rename or folder path against the complete archive index.
+#[tauri::command]
+pub async fn inspect_archive_target(
+    window: WebviewWindow,
+    state: State<'_, Arc<AppState>>,
+    id: u64,
+    target: String,
+) -> Result<ArchiveTargetInspectionDto, ErrorDto> {
+    let state = Arc::clone(state.inner());
+    let owner_window = window.label().to_owned();
+    tauri::async_runtime::spawn_blocking(move || {
+        state.inspect_archive_target_for_window(&owner_window, id, &target)
+    })
+    .await
+    .map_err(|error| ErrorDto::other(format!("archive target check failed: {error}")))?
+    .map(ArchiveTargetInspectionDto::from)
     .map_err(ErrorDto::from)
 }
 

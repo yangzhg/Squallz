@@ -683,6 +683,20 @@ impl AppState {
         )
     }
 
+    pub(crate) fn inspect_archive_target_for_window(
+        &self,
+        owner_window: &str,
+        id: u64,
+        target: &str,
+    ) -> Result<squallz_core::ArchiveTargetInspection, FormatError> {
+        let archive = self.archive_for_owner(id, Some(owner_window))?;
+        squallz_core::inspect_archive_target(
+            target,
+            |path| archive_path_exists(&archive, path),
+            &ControlToken::new(),
+        )
+    }
+
     fn list_entries_for_owner(
         &self,
         owner_window: Option<&str>,
@@ -1550,6 +1564,99 @@ mod tests {
         state.close_archive_for_window("move-window", archive.id);
         assert!(state
             .plan_archive_move_for_window("move-window", archive.id, &paths, "src/destination/")
+            .is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn edit_target_inspection_covers_unloaded_entries_and_real_folder_rename_updates() {
+        let dir = temp_dir("edit-target-index");
+        let mut names = vec![
+            "source.txt".to_owned(),
+            "blocked".to_owned(),
+            "implicit/child.txt".to_owned(),
+        ];
+        names.extend((0..1000).map(|index| format!("docs/item-{index:04}.txt")));
+        let zip = make_zip(&dir, &names.iter().map(String::as_str).collect::<Vec<_>>());
+        let state = AppState::new();
+        let archive = state
+            .open_archive_for_window("edit-window", &zip, None, None)
+            .unwrap();
+        let page = state
+            .list_entries_for_window("edit-window", archive.id, 0, 500, "src/docs/", None)
+            .unwrap();
+        assert_eq!(page.items.len(), 500);
+        assert!(page
+            .items
+            .iter()
+            .all(|item| item.path != "src/docs/item-0999.txt"));
+        let inspect = |path| {
+            state
+                .inspect_archive_target_for_window("edit-window", archive.id, path)
+                .unwrap()
+        };
+        for path in [
+            "src/docs/item-0999.txt",
+            "src/docs/item-0999.txt/",
+            "src/implicit",
+            "src/implicit/",
+        ] {
+            assert!(inspect(path).exists, "{path}");
+        }
+        assert_eq!(
+            inspect("src/blocked/child/").blocked_parent.as_deref(),
+            Some("src/blocked")
+        );
+        assert!(!inspect("src/new-folder/").exists);
+        assert!(!inspect("src/new-folder/renamed.txt").exists);
+        assert!(state
+            .inspect_archive_target_for_window("other-window", archive.id, "src/new-folder/")
+            .is_err());
+        let engine = Engine::new(squallz_formats::registry());
+        engine
+            .update(
+                &zip,
+                &[
+                    squallz_core::api::UpdateOp::AddDir {
+                        path: EntryPath::from_utf8("src/new-folder/"),
+                    },
+                    squallz_core::api::UpdateOp::Rename {
+                        from: squallz_core::api::EntrySelection::Display("src/source.txt".into()),
+                        to: EntryPath::from_utf8("src/new-folder/renamed.txt"),
+                    },
+                ],
+                &squallz_core::api::UpdateOptions::default(),
+                &NoProgress,
+                &ControlToken::new(),
+            )
+            .unwrap();
+        let extracted = dir.join("extracted");
+        engine
+            .extract(
+                &zip,
+                &extracted,
+                None,
+                &OpenOptions::default(),
+                &squallz_core::api::ExtractOptions::default(),
+                &NoProgress,
+                &ControlToken::new(),
+            )
+            .unwrap();
+        assert!(extracted.join("src/new-folder").is_dir());
+        assert_eq!(
+            std::fs::read(extracted.join("src/new-folder/renamed.txt")).unwrap(),
+            b"source.txt"
+        );
+        assert!(!extracted.join("src/source.txt").exists());
+        for name in &names[1..] {
+            assert_eq!(
+                std::fs::read(extracted.join("src").join(name)).unwrap(),
+                name.as_bytes()
+            );
+        }
+        state.close_archive_for_window("edit-window", archive.id);
+        assert!(state
+            .inspect_archive_target_for_window("edit-window", archive.id, "src/new-folder/")
             .is_err());
         std::fs::remove_dir_all(dir).unwrap();
     }

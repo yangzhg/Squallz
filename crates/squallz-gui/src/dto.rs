@@ -42,6 +42,21 @@ pub struct ErrorDto {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct ArchiveTargetInspectionDto {
+    pub exists: bool,
+    pub blocked_parent: Option<String>,
+}
+
+impl From<squallz_core::ArchiveTargetInspection> for ArchiveTargetInspectionDto {
+    fn from(inspection: squallz_core::ArchiveTargetInspection) -> Self {
+        Self {
+            exists: inspection.exists,
+            blocked_parent: inspection.blocked_parent,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct ArchiveMovePlanDto {
     pub items: Vec<ArchiveMoveItemDto>,
     pub missing_sources: Vec<String>,

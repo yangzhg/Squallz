@@ -9562,11 +9562,10 @@
     if (from === null) return tr("gui.rename.select_one_entry", "Select exactly one file or folder to rename");
     const target = normalizeRenameTargetName();
     if (target === from) return tr("gui.rename.target_must_differ", "Rename target must differ from source");
-    if (archivePathSet().has(target)) return tr("gui.new_folder.already_exists", "Already exists: {folder}").replace("{folder}", target);
     const issue = renameTargetIssue(from, target);
     if (issue.blocking) return tr("gui.rename.blocked_reason", "Blocked: {reason}").replace("{reason}", issue.blocking);
-    if (issue.warning) return `${issue.warning} · ${from} -> ${target}`;
-    return `${from} -> ${target}${archiveConflictCoverageNote()}`;
+    return `${issue.warning ? `${issue.warning} · ` : ""}${from} -> ${target}`
+      + tr("gui.edit.destination_check_suffix", " · destination will be checked before queuing");
   }
 
   function normalizeMoveTargetDir(value = moveTargetDir): string {
@@ -9591,10 +9590,6 @@
 
   function visibleMoveConflictItems(): MovePlanItem[] {
     return moveConflictReview?.items.filter((item) => item.conflict).slice(0, 5) ?? [];
-  }
-
-  function archiveConflictCoverageNote(): string {
-    return allRowsLoaded() ? "" : tr("gui.archive.full_validated_when_queued_suffix", " · full archive validated when task starts");
   }
 
   function moveTargetStatus(): string {
@@ -9643,22 +9638,8 @@
     if (!currentArchive) return openArchiveFirstLabel();
     const problem = archiveEditPathProblem(folder);
     if (problem) return problem;
-    if (findLoadedRow(folder) || findLoadedRow(folder.slice(0, -1))) {
-      return tr("gui.new_folder.already_exists", "Already exists: {folder}").replace("{folder}", folder);
-    }
-    return allRowsLoaded()
-      ? tr("gui.new_folder.ready_to_create", "Ready to create {folder}").replace("{folder}", folder)
-      : tr("gui.new_folder.loaded_rows_clear", "Loaded rows are clear for {folder} · full archive validated when task starts").replace("{folder}", folder);
-  }
-
-  function archivePathSet(): Set<string> {
-    const paths = new Set<string>();
-    for (const entry of loadedRows()) {
-      const path = entry.path;
-      paths.add(path);
-      paths.add(path.endsWith("/") ? path.slice(0, -1) : `${path}/`);
-    }
-    return paths;
+    return tr("gui.new_folder.create_path", "Create {folder}").replace("{folder}", folder)
+      + tr("gui.edit.destination_check_suffix", " · destination will be checked before queuing");
   }
 
   function archiveLikePath(path: string): boolean {
@@ -11322,7 +11303,7 @@
       onRetry: retryArchiveContents,
       submittingLabel: archiveEditChecking
         ? kind === "move" ? tr("gui.move.checking_targets", "Checking move targets…")
-          : tr("gui.edit.checking_targets", "Checking the original items…")
+          : tr("gui.edit.checking_targets", "Checking archive paths…")
         : tr("gui.task_center.submitting", "Adding to the queue…"),
     };
     if (kind === "rename") return {
@@ -11424,7 +11405,38 @@
     return false;
   }
 
+  async function validateArchiveEditTarget(target: string, currentTarget: () => string): Promise<boolean> {
+    const session = archiveEditSession;
+    const id = currentArchive?.id;
+    if (id === undefined) return false;
+    archiveEditChecking = true;
+    archiveEditError = null;
+    try {
+      const inspection = await ipc.inspectArchiveTarget(id, target);
+      if (!archiveEditCheckIsCurrent(session, id) || currentTarget() !== target) return false;
+      if (inspection.blocked_parent) {
+        archiveEditError = tr("gui.edit.parent_is_file", "{path} is a file and cannot be used as a parent folder. Choose a different path.")
+          .replace("{path}", inspection.blocked_parent);
+        return false;
+      }
+      if (inspection.exists) {
+        archiveEditError = tr("gui.edit.target_exists", "{path} already exists. Choose a different name or path.").replace("{path}", target);
+        return false;
+      }
+      return true;
+    } catch (error) {
+      if (archiveEditCheckIsCurrent(session, id) && currentTarget() === target) {
+        archiveEditError = tr("gui.edit.target_check_failed", "Could not check the destination. Your text is kept. Try again.")
+          + (isErrorDto(error) ? ` ${tError(error)}` : "");
+      }
+      return false;
+    } finally {
+      if (archiveEditSession === session) archiveEditChecking = false;
+    }
+  }
+
   async function submitRenameSelectedJob() {
+    if (archiveEditChecking) return;
     const session = archiveEditSession;
     const id = currentArchive?.id;
     if (!await validateArchiveEditContext() || !archiveEditCheckIsCurrent(session, id)) return;
@@ -11444,13 +11456,8 @@
       return;
     }
     const to = normalizeRenameTargetName(renameTargetName, from);
-    renameTargetName = to;
     if (to === from) {
       showNotice(tr("gui.rename.target_must_differ", "Rename target must differ from source"));
-      return;
-    }
-    if (archivePathSet().has(to)) {
-      showNotice(tr("gui.rename.target_already_exists", "Rename target already exists: {target}").replace("{target}", to));
       return;
     }
     const issue = renameTargetIssue(from, to);
@@ -11458,6 +11465,8 @@
       showNotice(tr("gui.rename.target_blocked", "Rename target blocked: {reason}").replace("{reason}", issue.blocking));
       return;
     }
+    if (!await validateArchiveEditTarget(to, () => normalizeRenameTargetName(renameTargetName, from))
+      || !archiveEditCheckIsCurrent(session, id)) return;
     const queued = await submitCurrentArchiveJob(
       {
         kind: "update",
@@ -11525,7 +11534,7 @@
         return;
       }
       if (checked.blocked_parent) {
-        archiveEditError = tr("gui.move.parent_is_file", "{path} is a file, so it cannot contain moved items. Choose another destination folder.")
+        archiveEditError = tr("gui.edit.parent_is_file", "{path} is a file and cannot be used as a parent folder. Choose a different path.")
           .replace("{path}", checked.blocked_parent);
         return;
       }
@@ -11630,6 +11639,7 @@
   }
 
   async function submitNewFolderJob() {
+    if (archiveEditChecking) return;
     const session = archiveEditSession;
     const id = currentArchive?.id;
     if (!await validateArchiveEditContext() || !archiveEditCheckIsCurrent(session, id)) return;
@@ -11644,16 +11654,13 @@
       showNotice(readOnly);
       return;
     }
-    const existing = archivePathSet();
     const problem = archiveEditPathProblem(folder);
     if (problem) {
       showNotice(problem);
       return;
     }
-    if (existing.has(folder) || existing.has(folder.slice(0, -1))) {
-      showNotice(tr("gui.new_folder.already_exists", "Already exists: {folder}").replace("{folder}", folder));
-      return;
-    }
+    if (!await validateArchiveEditTarget(folder, () => normalizeNewFolderPath())
+      || !archiveEditCheckIsCurrent(session, id)) return;
     const queued = await submitCurrentArchiveJob(
       {
         kind: "update",

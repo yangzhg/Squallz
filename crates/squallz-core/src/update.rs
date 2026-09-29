@@ -13,6 +13,7 @@ use crate::CreateDestinationGuard;
 use crate::PathFilter;
 
 pub(crate) mod move_plan;
+pub(crate) mod target;
 mod transaction;
 
 pub(crate) struct PreparedAdditions {

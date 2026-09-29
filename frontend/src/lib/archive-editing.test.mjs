@@ -19,7 +19,7 @@ async function loadEditing(overrides = {}) {
   assert.ok(script);
   const source = ts.createSourceFile("App.ts", script, ts.ScriptTarget.Latest, true);
   const names = new Set([
-    "normalizeNewFolderPath", "commitNewFolderName", "submitNewFolderJob", "archivePathSet",
+    "normalizeNewFolderPath", "commitNewFolderName", "submitNewFolderJob", "validateArchiveEditTarget",
     "normalizeMoveTargetDir", "submitMovePlan", "moveTargetForPath",
     "archiveEditPathProblem", "moveTargetProblem", "submitMoveSelectedJob", "submitMoveKeepBoth",
     "normalizeRenameTargetName", "selectedRenameSource", "renameTargetIssue", "archiveEntryExtension",
@@ -89,6 +89,7 @@ async function loadEditing(overrides = {}) {
   };
   context.ipc = {
     missingArchivePaths: async () => [],
+    inspectArchiveTarget: async () => ({ exists: false, blocked_parent: null }),
     planArchiveMove: async (_id, paths, target) => ({ missing_sources: [], blocked_parent: null,
       items: paths.map((from) => ({ from, to: target + from.replace(/\/$/, "").split("/").at(-1) + (from.endsWith("/") ? "/" : ""),
         conflict: null, keep_both_to: null })),
@@ -198,6 +199,88 @@ test("new folders are created inside the displayed archive directory", async () 
   const editing = await loadEditing();
   await editing.submitNewFolderJob();
   assert.deepEqual(Array.from(editing.submitted[0].mkdir), ["docs/计划/"]);
+});
+
+test("rename and new-folder submission check unloaded target names before queuing", async () => {
+  for (const [kind, action, value, target] of [
+    ["rename", "submitRenameSelectedJob", "existing.txt", "docs/existing.txt"],
+    ["new-folder", "submitNewFolderJob", "/unloaded/reports", "unloaded/reports/"],
+  ]) {
+    const checks = [];
+    const editing = await loadEditing({ ipc: { inspectArchiveTarget: async (id, path) => {
+      checks.push([id, path]);
+      return { exists: true, blocked_parent: null };
+    } } });
+    editing.openArchiveEditor(kind);
+    const field = kind === "rename" ? "renameTargetName" : "newFolderName";
+    editing.context[field] = value;
+    await editing[action]();
+    assert.equal(editing.submitted.length, 0, kind);
+    assert.deepEqual(checks, [[17, target]]);
+    assert.equal(editing.context[field], value);
+    assert.equal(editing.context.archiveEditKind, kind);
+    assert.match(editing.context.archiveEditError, /already exists.*Choose/);
+  }
+});
+
+test("destination failures and parent files retain both edit forms for a corrected retry", async () => {
+  for (const [kind, action] of [["rename", "submitRenameSelectedJob"], ["new-folder", "submitNewFolderJob"]]) {
+    for (const failure of ["unavailable", "parent"]) {
+      const editing = await loadEditing({ ipc: { inspectArchiveTarget: async () => {
+        if (failure === "unavailable") throw new Error("unavailable");
+        return { exists: false, blocked_parent: "blocked" };
+      } } });
+      editing.openArchiveEditor(kind);
+      const field = kind === "rename" ? "renameTargetName" : "newFolderName";
+      editing.context[field] = "/blocked/target";
+      await editing[action]();
+      assert.equal(editing.submitted.length, 0);
+      assert.equal(editing.context[field], "/blocked/target");
+      assert.equal(editing.context.archiveEditKind, kind);
+      assert.equal(editing.context.archiveEditChecking, false);
+      assert.match(editing.context.archiveEditError, failure === "unavailable" ? /Could not check.*Try again/ : /blocked.*parent folder.*different path/);
+      editing.context[field] = "/available/target";
+      editing.context.ipc.inspectArchiveTarget = async () => ({ exists: false, blocked_parent: null });
+      await editing[action]();
+      assert.equal(editing.submitted.length, 1);
+      assert.equal(editing.context.archiveEditError, null);
+      assert.equal(editing.context.archiveEditKind, null);
+    }
+  }
+});
+
+test("late destination checks cannot queue edits after cancellation, refresh or changed text", async () => {
+  for (const [kind, action] of [["rename", "submitRenameSelectedJob"], ["new-folder", "submitNewFolderJob"]]) {
+    for (const change of ["cancel", "refresh", "new-editor", "text"]) {
+      for (const failure of [false, true]) {
+        let resolve, reject;
+        let calls = 0;
+        const editing = await loadEditing({ ipc: { inspectArchiveTarget: () => {
+          calls++;
+          return new Promise((yes, no) => { resolve = yes; reject = no; });
+        } } });
+        editing.openArchiveEditor(kind);
+        const field = kind === "rename" ? "renameTargetName" : "newFolderName";
+        editing.context[field] = "new-name";
+        const pending = editing[action]();
+        await new Promise(setImmediate);
+        assert.equal(editing.context.archiveEditChecking, true);
+        await editing[action]();
+        assert.equal(calls, 1);
+        if (change === "cancel") editing.context.closeArchiveEditor();
+        if (change === "refresh") editing.context.currentArchive = { ...editing.context.currentArchive, id: 18 };
+        if (change === "new-editor") { editing.openArchiveEditor("move"); editing.context.archiveEditError = "new error"; }
+        if (change === "text") editing.context[field] = "another-name";
+        if (failure) reject(new Error("unavailable"));
+        else resolve({ exists: false, blocked_parent: null });
+        await pending;
+        assert.equal(editing.submitted.length, 0, `${kind}: ${change}, failure=${failure}`);
+        assert.equal(editing.context.archiveEditChecking, false);
+        if (change === "new-editor") assert.equal(editing.context.archiveEditError, "new error");
+        if (change === "cancel" || change === "text") assert.equal(editing.context.archiveEditError, null);
+      }
+    }
+  }
 });
 
 test("adding files never follows an archive switch while the native picker is pending", async () => {
@@ -408,7 +491,7 @@ test("move check failures, missing sources and blocked parents keep the destinat
     assert.equal(editing.context.archiveEditKind, "move");
     assert.equal(editing.context.moveTargetDir, "destination/");
     assert.equal(editing.context.archiveEditChecking, false);
-    assert.match(editing.context.archiveEditError, result === "failure" ? /Try again/ : result === "missing" ? /no longer exist/ : /Choose another destination/);
+    assert.match(editing.context.archiveEditError, result === "failure" ? /Try again/ : result === "missing" ? /no longer exist/ : /Choose a different path/);
     editing.context.ipc.planArchiveMove = async () => ({ missing_sources: [], blocked_parent: null,
       items: [{ from: "docs/a.txt", to: "destination/a.txt", conflict: null, keep_both_to: null }] });
     await editing.submitMoveSelectedJob();

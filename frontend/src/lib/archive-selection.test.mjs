@@ -55,7 +55,7 @@ async function loadSelectionHandlers(archive, overrides = {}) {
   return vm.runInNewContext(`${outputText}\n({ selectEntry, selectOnlyEntry, showEntryContextAt, toggleEntrySelection, submitDeleteSelectedJob, canRenameSelection, submitRenameSelectedJob, context: () => entryContext })`, {
     ...archive,
     archiveSelectionRoots,
-    archiveEditKind: null, archiveEditContext: null, archiveEditSession: 0,
+    archiveEditKind: null, archiveEditContext: null, archiveEditSession: 0, archiveEditChecking: false,
     archiveSelectionBusyReason: () => "",
     entryPreviewForPath: () => null,
     clearEntryPreviewState: () => {},

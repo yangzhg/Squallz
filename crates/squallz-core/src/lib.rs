@@ -84,6 +84,7 @@ pub use stored_os_string::StoredOsString;
 pub use update::move_plan::{
     plan_archive_moves, ArchiveMoveConflict, ArchiveMoveItem, ArchiveMovePlan,
 };
+pub use update::target::{inspect_archive_target, ArchiveTargetInspection};
 pub use volumes::{collect_volume_set, collect_volume_set_with_control, VolumeSet};
 
 use std::fs::{self, File};

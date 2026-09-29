@@ -58,6 +58,11 @@ export interface ArchiveMovePlanDto {
   blocked_parent: string | null;
 }
 
+export interface ArchiveTargetInspectionDto {
+  exists: boolean;
+  blocked_parent: string | null;
+}
+
 export interface FormatDto {
   id: string;
   extensions: string[];
@@ -732,6 +737,8 @@ export const ipc = {
     invoke<string[]>("missing_archive_paths", { id, paths }),
   planArchiveMove: (id: number, paths: string[], targetDir: string) =>
     invoke<ArchiveMovePlanDto>("plan_archive_move", { id, paths, targetDir }),
+  inspectArchiveTarget: (id: number, target: string) =>
+    invoke<ArchiveTargetInspectionDto>("inspect_archive_target", { id, target }),
   listEntries: (
     id: number,
     page: number,

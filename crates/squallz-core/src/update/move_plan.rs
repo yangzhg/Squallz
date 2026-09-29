@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::api::{sanitize_entry_path, ControlToken, EntryPath, FormatError};
+use super::target::{blocked_parent, occupied, validate_target};
+use crate::api::{ControlToken, FormatError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArchiveMoveConflict {
@@ -71,13 +72,10 @@ pub fn plan_archive_moves(
             keep_both_to: None,
         });
     }
-    for (index, _) in target_dir.match_indices('/') {
-        ctl.checkpoint()?;
-        let parent = &target_dir[..index];
-        if exists(parent) {
-            plan.blocked_parent = Some(parent.into());
-            break;
-        }
+    plan.blocked_parent = blocked_parent(target_dir, &exists, ctl)?;
+    let directory_key = target_dir.trim_end_matches('/');
+    if plan.blocked_parent.is_none() && !directory_key.is_empty() && exists(directory_key) {
+        plan.blocked_parent = Some(directory_key.into());
     }
     if !plan.missing_sources.is_empty() || plan.blocked_parent.is_some() {
         plan.items.clear();
@@ -136,23 +134,6 @@ pub fn plan_archive_moves(
         }
     }
     Ok(plan)
-}
-
-fn occupied(key: &str, exists: &impl Fn(&str) -> bool) -> bool {
-    exists(key) || exists(&format!("{key}/"))
-}
-
-fn validate_target(path: &str) -> Result<(), FormatError> {
-    let relative = sanitize_entry_path(&EntryPath::from_utf8(path))?;
-    let canonical = relative
-        .components()
-        .map(|part| part.as_os_str().to_string_lossy())
-        .collect::<Vec<_>>()
-        .join("/");
-    if canonical != path.trim_end_matches('/') || canonical.is_empty() {
-        return Err(FormatError::UnsafeFileName(path.into()));
-    }
-    Ok(())
 }
 
 #[cfg(test)]

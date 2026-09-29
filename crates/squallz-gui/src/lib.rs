@@ -92,6 +92,7 @@ pub fn run() {
             commands::resolve_archive_directory,
             commands::missing_archive_paths,
             commands::plan_archive_move,
+            commands::inspect_archive_target,
             commands::search_entries,
             commands::cancel_archive_search,
             commands::get_formats,
