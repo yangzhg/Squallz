@@ -14,7 +14,7 @@ before(async () => {
 after(async () => server?.close());
 
 const browsing = {
-  blocked: false, taskWindow: false, opening: false, archive: true, writable: true,
+  blocked: false, taskWindow: false, opening: false, addingFiles: false, archive: true, writable: true,
   browsing: true, selectionBusy: false, hasSelection: true, canRename: true,
   canPreview: true, canSelectAll: true, hasParent: true, textSelection: false,
   taskCenterAvailable: true,
@@ -38,6 +38,16 @@ test("read-only archives retain reading actions and task windows cannot act on a
     const isolated = actions.appActionAvailability({ ...browsing, ...override });
     assert.deepEqual(Object.keys(isolated).filter((id) => isolated[id]), ["select_all"]);
   }
+});
+
+test("a pending add request disables the shared add action while archive navigation stays available", async () => {
+  const available = actions.appActionAvailability({ ...browsing, addingFiles: true });
+  assert.equal(available.add_files, false);
+  assert.equal(available.open_archive, true);
+  assert.equal(available.go_up, true);
+  assert.equal(await actions.dispatchAppAction("add_files", available, {
+    add_files: () => assert.fail("a duplicate add action was dispatched"),
+  }), false);
 });
 
 test("an action received after selection or modal state changes is rejected before execution", async () => {

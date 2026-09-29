@@ -876,6 +876,7 @@
   let extractReviewFocusPending = false;
   let convertReviewFocusPending = false;
   let taskReviewRequestGeneration = 0;
+  let archiveAddPending = $state(false);
   let extractOverwriteMode = $state<ExtractOverwriteMode>("ask");
   let extractSymlinkMode = $state<ExtractSymlinkMode>("preserve");
   let currentExtractOverwriteLabel = $derived(extractOverwriteLabel(extractOverwriteMode));
@@ -1376,6 +1377,7 @@
       blocked: modeSelectionBlocked || blockingModalVisible(),
       taskWindow: taskWindowMode,
       opening: archiveOpenStatus === "opening",
+      addingFiles: archiveAddPending,
       archive: Boolean(currentArchive),
       writable: !archiveMutationDisabledReason(),
       browsing: screen === "browse",
@@ -11054,6 +11056,7 @@
   }
 
   async function submitAddToArchiveJob() {
+    if (archiveAddPending) return;
     if (!currentArchive) {
       showNotice(tr("gui.precondition.open_before_add", "Open an archive before adding files"));
       return;
@@ -11064,42 +11067,69 @@
       return;
     }
     if (focusBlockingTaskIfAny()) return;
+    const { id, source: path, encoding_override: encoding } = currentArchive;
+    const generation = archiveOpenGeneration;
+    const content_policy = createContentPolicy;
+    const excludes = content_policy === "custom" ? [...createExcludeRules()] : [];
+    const level = createCompressionLevel();
+    const profile = createProfileLabel(activeCreateProfile);
+    const canAddToOriginalArchive = () => {
+      if (generation !== archiveOpenGeneration || archiveOpenStatus === "opening"
+        || currentArchive?.id !== id || currentArchive.source !== path
+        || currentArchive.encoding_override !== encoding) {
+        showNotice(tr("gui.add.archive_changed", "The archive changed while choosing files. No files were added. Open the intended archive and choose the files again."));
+        return false;
+      }
+      const reason = archiveMutationDisabledReason();
+      if (reason) showNotice(reason);
+      return !reason;
+    };
+    archiveAddPending = true;
     try {
-      const { open } = await getDialogModule();
-      const selected = await openNativeDialog("archive.add-files", open, {
-        title: tr("gui.add.choose_files_to_add", "Choose files to add"),
-        multiple: true,
-        directory: false,
-      });
+      let selected: string | string[] | null;
+      try {
+        const { open } = await getDialogModule();
+        if (!canAddToOriginalArchive()) return;
+        selected = await openNativeDialog("archive.add-files", open, {
+          title: tr("gui.add.choose_files_to_add", "Choose files to add"),
+          multiple: true,
+          directory: false,
+        });
+      } catch {
+        showNotice(tr("gui.add.picker_failed", "Could not open the file chooser. Try adding files again."));
+        return;
+      }
+      if (!canAddToOriginalArchive()) return;
       const add = Array.isArray(selected) ? selected : selected ? [selected] : [];
       if (add.length === 0) {
         showNotice(tr("gui.add.cancelled", "Add files cancelled"));
         return;
       }
-      await submitJob({
+      const queued = await submitCurrentArchiveJob({
         kind: "update",
-        path: currentArchive.source,
-        encoding: currentArchive.encoding_override,
+        path,
+        encoding,
         add,
         delete: [],
         rename: [],
         mkdir: [],
-        excludes: createContentPolicy === "custom" ? createExcludeRules() : [],
-        content_policy: createContentPolicy,
+        excludes,
+        content_policy,
         password: null,
-        level: createCompressionLevel(),
-      });
-      showNotice(tr("gui.add.operations_queued", "{count} add operations queued").replace("{count}", add.length.toLocaleString()));
+        level,
+      },
+      tr("gui.add.operations_queued", "{count} add operations queued").replace("{count}", add.length.toLocaleString()),
+      tr("gui.precondition.open_before_add", "Open an archive before adding files"));
+      if (!queued) return;
       recordOperation({
         status: "queued",
         title: tr("gui.add.queued", "Add files queued"),
         detail: tr("gui.add.items_profile", "{count} items · {profile}")
           .replace("{count}", add.length.toLocaleString())
-          .replace("{profile}", createProfileLabel(activeCreateProfile)),
+          .replace("{profile}", profile),
       });
-    } catch (error) {
-      if (isJobSubmitBlocked(error)) return;
-      showNotice(tr("gui.add.requires_desktop_dialog", "Add files requires the desktop file dialog"));
+    } finally {
+      archiveAddPending = false;
     }
   }
 

@@ -24,7 +24,7 @@ async function loadEditing(overrides = {}) {
     "archiveEditPathProblem", "moveTargetProblem", "submitMoveSelectedJob",
     "normalizeRenameTargetName", "selectedRenameSource", "renameTargetIssue", "archiveEntryExtension",
     "submitRenameSelectedJob", "selectedDeletePaths", "submitDeleteSelectedJob", "submitCurrentArchiveJob",
-    "openArchiveEditor",
+    "openArchiveEditor", "submitAddToArchiveJob",
   ]);
   const declarations = source.statements.filter(
     (node) => ts.isFunctionDeclaration(node) && names.has(node.name?.text),
@@ -40,6 +40,16 @@ async function loadEditing(overrides = {}) {
   const context = {
     ...helpers,
     currentArchive: { id: 17, source: "/tmp/archive-editing.zip", encoding_override: "gbk" },
+    archiveOpenGeneration: 0,
+    archiveOpenStatus: "idle",
+    archiveAddPending: false,
+    createContentPolicy: "custom",
+    createExcludeRules: () => ["*.bak"],
+    createCompressionLevel: () => 8,
+    activeCreateProfile: "custom",
+    createProfileLabel: (value) => value,
+    getDialogModule: async () => ({ open: async () => ["/inputs/资料.txt"] }),
+    openNativeDialog: async (_kind, open, options) => open(options),
     archiveTitle: () => "archive-editing.zip",
     archiveDirs: ["docs"],
     newFolderName: "计划",
@@ -70,7 +80,7 @@ async function loadEditing(overrides = {}) {
     submitJob: async (spec) => { submitted.push(spec); return 1; },
     ...overrides,
   };
-  const handlers = vm.runInNewContext(`${outputText}\n({ normalizeNewFolderPath, commitNewFolderName, submitNewFolderJob, normalizeMoveTargetDir, submitMoveSelectedJob, submitMovePlan, buildMovePlan, normalizeRenameTargetName, submitRenameSelectedJob, submitDeleteSelectedJob, openArchiveEditor })`, context);
+  const handlers = vm.runInNewContext(`${outputText}\n({ normalizeNewFolderPath, commitNewFolderName, submitNewFolderJob, normalizeMoveTargetDir, submitMoveSelectedJob, submitMovePlan, buildMovePlan, normalizeRenameTargetName, submitRenameSelectedJob, submitDeleteSelectedJob, openArchiveEditor, submitAddToArchiveJob })`, context);
   return { ...handlers, submitted, notices, toasts, closed, context };
 }
 
@@ -78,6 +88,92 @@ test("new folders are created inside the displayed archive directory", async () 
   const editing = await loadEditing();
   await editing.submitNewFolderJob();
   assert.deepEqual(Array.from(editing.submitted[0].mkdir), ["docs/计划/"]);
+});
+
+test("adding files never follows an archive switch while the native picker is pending", async () => {
+  for (const change of ["switch", "close", "reopen", "opening", "encoding", "read-only", "refresh"]) {
+    const editing = await loadEditing();
+    let select;
+    editing.context.getDialogModule = async () => ({ open: () => new Promise((resolve) => { select = resolve; }) });
+    const pending = editing.submitAddToArchiveJob();
+    await new Promise(setImmediate);
+    if (change === "switch") editing.context.currentArchive = { id: 18, source: "/other.zip", encoding_override: null };
+    if (change === "close") editing.context.currentArchive = null;
+    if (change === "reopen") editing.context.currentArchive = { ...editing.context.currentArchive, id: 18 };
+    if (change === "opening") editing.context.archiveOpenGeneration++;
+    if (change === "encoding") editing.context.currentArchive.encoding_override = "shift_jis";
+    if (change === "read-only" || change === "refresh") editing.context.archiveMutationDisabledReason = () => change;
+    select(["/inputs/资料.txt"]);
+    await pending;
+    assert.equal(editing.submitted.length, 0, change);
+    assert.ok(editing.notices.length > 0, change);
+    assert.equal(editing.context.archiveAddPending, false);
+  }
+});
+
+test("archive changes before dialog loading finishes prevent an obsolete picker", async () => {
+  const editing = await loadEditing();
+  let loaded;
+  let opened = 0;
+  editing.context.getDialogModule = () => new Promise((resolve) => { loaded = resolve; });
+  const pending = editing.submitAddToArchiveJob();
+  editing.context.archiveOpenGeneration++;
+  loaded({ open: async () => { opened++; return ["/inputs/资料.txt"]; } });
+  await pending;
+  assert.equal(opened, 0);
+  assert.equal(editing.submitted.length, 0);
+});
+
+test("adding files captures settings once and rejects duplicate selection and submission", async () => {
+  const operations = [];
+  const editing = await loadEditing({ recordOperation: (operation) => operations.push(operation) });
+  let select;
+  let submitted;
+  let opened = 0;
+  editing.context.getDialogModule = async () => ({ open: () => { opened++; return new Promise((resolve) => { select = resolve; }); } });
+  editing.context.submitJob = (spec) => { editing.submitted.push(spec); return new Promise((resolve) => { submitted = resolve; }); };
+  const pending = editing.submitAddToArchiveJob();
+  await new Promise(setImmediate);
+  assert.equal(editing.context.archiveAddPending, true);
+  await editing.submitAddToArchiveJob();
+  assert.equal(opened, 1);
+  editing.context.createContentPolicy = "keep_all_files";
+  editing.context.createCompressionLevel = () => 0;
+  editing.context.createExcludeRules = () => ["*.txt"];
+  editing.context.activeCreateProfile = "fast";
+  select(["/inputs/资料.txt"]);
+  await new Promise(setImmediate);
+  await editing.submitAddToArchiveJob();
+  assert.equal(editing.submitted.length, 1);
+  assert.deepEqual(JSON.parse(JSON.stringify(editing.submitted[0])), {
+    kind: "update", path: "/tmp/archive-editing.zip", encoding: "gbk", add: ["/inputs/资料.txt"],
+    delete: [], rename: [], mkdir: [], excludes: ["*.bak"], content_policy: "custom", password: null, level: 8,
+  });
+  submitted(1); await pending;
+  assert.equal(editing.context.archiveAddPending, false);
+  assert.equal(operations.length, 1);
+  assert.match(operations[0].detail, /custom/);
+});
+
+test("add cancellation, picker failure, and submission errors release the action and report their actual cause", async () => {
+  for (const failure of ["cancel", "picker", "submit", "blocked", "error-dto"]) {
+    const operations = [];
+    const editing = await loadEditing({ recordOperation: (operation) => operations.push(operation) });
+    if (failure === "cancel") editing.context.getDialogModule = async () => ({ open: async () => null });
+    if (failure === "picker") editing.context.getDialogModule = async () => { throw new Error("unavailable"); };
+    if (failure === "blocked") editing.context.isJobSubmitBlocked = () => true;
+    if (["submit", "blocked", "error-dto"].includes(failure)) {
+      editing.context.submitJob = async () => { throw failure === "error-dto" ? { key: "error.io", params: {} } : new Error("offline"); };
+    }
+    await editing.submitAddToArchiveJob();
+    assert.equal(editing.context.archiveAddPending, false);
+    assert.equal(operations.length, 0);
+    if (failure === "cancel") assert.match(editing.notices.at(-1), /cancelled/);
+    if (failure === "picker") assert.match(editing.notices.at(-1), /file (dialog|chooser)/);
+    if (failure === "submit") assert.match(editing.toasts.at(-1).body, /desktop service/);
+    if (failure === "error-dto") assert.equal(editing.toasts.at(-1).body, "error.io");
+    if (failure === "blocked") assert.equal(editing.toasts.length, 0);
+  }
 });
 
 test("deleting selected entries preserves literal paths and directory boundaries", async () => {
