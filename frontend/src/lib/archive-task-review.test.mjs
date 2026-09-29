@@ -72,6 +72,7 @@ function harness() {
       calls.push(["open", path, password, encoding]); context.currentArchive = archive(path, 2, encoding); return true;
     },
     cancelArchivePasswordPrompt: () => { context.archivePasswordPrompt = null; },
+    previewPasswordPrompt: null,
     rememberRecent() {}, recordOperation() {}, clearEntryPreviewState() {}, recordValidationRenderReady() {},
     extractPlanKey: (...parts) => JSON.stringify(parts),
     requestExtractPlan: async (...parts) => {

@@ -499,6 +499,13 @@ pub struct CreateDestinationInspectionDto {
     pub guard: Option<CreateDestinationGuard>,
 }
 
+/// Independent credentials for materializing an entry and reading its archive.
+#[derive(Default, Deserialize)]
+pub struct NestedArchivePasswords {
+    pub outer: Option<String>,
+    pub inner: Option<String>,
+}
+
 /// One-level preview of an archive stored as an entry inside another archive.
 #[derive(Debug, Clone, Serialize)]
 pub struct NestedArchivePreviewDto {

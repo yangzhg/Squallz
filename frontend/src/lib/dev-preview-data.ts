@@ -5,6 +5,7 @@ import type {
   IntegrationStatusDto,
   IntegrationSystemDiagnosticsDto,
   NestedArchivePreviewDto,
+  NestedArchivePasswords,
   QueueWaitReason,
 } from "./ipc";
 
@@ -16,6 +17,27 @@ export interface ArchivePreview {
   selected: string[];
   pages?: Map<number, EntryDto[]>;
   nestedPreview: NestedArchivePreviewDto | null;
+}
+
+export function nestedPasswordPreviewSample(
+  params: URLSearchParams,
+  outerSource: string,
+  entryPath: string,
+  passwords: NestedArchivePasswords,
+): NestedArchivePreviewDto | null {
+  if (!import.meta.env.DEV || params.get("previewEntryPassword") !== "1") return null;
+  for (const scope of ["outer", "inner"] as const) {
+    if (passwords[scope] !== `${scope}-preview`) {
+      throw {
+        key: passwords[scope] ? "error.wrong_password" : "error.password_required",
+        params: { password_scope: scope }, detail: "",
+      };
+    }
+  }
+  return {
+    outer_path: outerSource, entry_path: entryPath, format: "7z",
+    entry_count: nestedPreviewItems.length, truncated: false, items: nestedPreviewItems,
+  };
 }
 
 type PreviewTaskKind =

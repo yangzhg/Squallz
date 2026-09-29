@@ -10,6 +10,8 @@ export interface ErrorDto {
   detail: string;
 }
 
+export type NestedArchivePasswords = { outer: string | null; inner: string | null };
+
 export interface ArchiveInfo {
   id: number;
   path: string;
@@ -782,13 +784,13 @@ export const ipc = {
   previewNestedArchive: (
     outerPath: string,
     entryPath: string,
-    password?: string | null,
+    passwords: NestedArchivePasswords,
     encoding?: string | null,
   ) =>
     invoke<NestedArchivePreviewDto>("preview_nested_archive", {
       outerPath,
       entryPath,
-      password,
+      passwords,
       encoding,
     }),
   previewArchiveEntry: (
@@ -812,13 +814,13 @@ export const ipc = {
   openNestedArchive: (
     outerPath: string,
     entryPath: string,
-    password?: string | null,
+    passwords: NestedArchivePasswords,
     encoding?: string | null,
   ) =>
     invoke<ArchiveInfo>("open_nested_archive", {
       outerPath,
       entryPath,
-      password,
+      passwords,
       encoding,
     }),
   submitJob: (spec: JobSpec) => invoke<number>("submit_job", { spec }),

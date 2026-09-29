@@ -92,7 +92,7 @@
         {#if surface.active}
           <span class="eyebrow">{surface.tr("gui.password.required", "Password required")}</span>
           <h1>{surface.tr("gui.password.unlock_name", "Unlock {name}").replace("{name}", surface.name)}</h1>
-          <p>{surface.detail}</p>
+          <p id="password-detail-modern" role="status">{surface.detail}</p>
         {:else}
           <span class="eyebrow">{surface.tr("gui.password.empty_eyebrow", "Password")}</span>
           <h1>{surface.tr("gui.password.empty_title", "Password entry")}</h1>
@@ -120,7 +120,7 @@
             autocomplete="current-password"
             aria-label={surface.tr("gui.password.archive_password", "Archive password")}
             aria-invalid={surface.error ? "true" : undefined}
-            aria-describedby={surface.error ? "password-error-modern" : undefined}
+            aria-describedby={surface.error ? "password-detail-modern password-error-modern" : "password-detail-modern"}
             oninput={updatePassword}
           />
           {#if surface.error}
@@ -222,6 +222,7 @@
         >
           <section class="classic-password-panel">
             <h2>{surface.name}</h2>
+            <p id="password-detail-classic" role="status">{surface.detail}</p>
             <div class="classic-form-grid compact">
               <div class="classic-label">{surface.tr("gui.password.password", "Password")}</div>
               <div class="classic-password-field">
@@ -234,7 +235,7 @@
                   autocomplete="current-password"
                   aria-label={surface.tr("gui.password.archive_password", "Archive password")}
                   aria-invalid={surface.error ? "true" : undefined}
-                  aria-describedby={surface.error ? "password-error-classic" : undefined}
+                  aria-describedby={surface.error ? "password-detail-classic password-error-classic" : "password-detail-classic"}
                   oninput={updatePassword}
                 />
                 {#if surface.error}

@@ -43,7 +43,8 @@ async function withNestedOpen(run) {
     archive.installArchivePreview(archiveInfo(1), outerRows, { selected: ["inner.zip"] });
     const component = readFileSync(new URL("../App.svelte", import.meta.url), "utf8");
     const source = ts.createSourceFile("App.ts", component.match(/<script lang="ts">([\s\S]*?)<\/script>/)[1], ts.ScriptTarget.Latest, true);
-    const names = ["openNestedArchiveEntry", "clearEntryPreviewState", "selectOnlyEntry"];
+    const { createPreviewPasswordFlow } = await server.ssrLoadModule("/src/lib/preview-password.svelte.ts");
+    const names = ["openNestedArchiveEntry", "runPreviewWithPassword", "clearEntryPreviewState", "selectOnlyEntry", "submitPasswordRequest", "cancelPasswordRequest", "passwordPromptDetail", "submitPreviewEntry", "prepareEntryPreviewSerially", "disposeEntryPreview"];
     const declarations = names.map((name) => {
       const declaration = source.statements.find((node) => ts.isFunctionDeclaration(node) && node.name?.text === name);
       assert.ok(declaration, name);
@@ -53,6 +54,15 @@ async function withNestedOpen(run) {
     const operations = [];
     const context = {
       ipc, adoptOpenedArchive: archive.adoptOpenedArchive,
+      previewPasswordFlow: createPreviewPasswordFlow(), screen: "browse",
+      jobPasswordPrompt: null, jobConflictPrompt: null, archivePasswordPrompt: null,
+      jobPasswordValue: "", passwordSubmissionAttempted: false,
+      taskPasswordReady: (value) => value.length > 0, focusArchiveRow: async () => {},
+      queueMicrotask,
+      entryPreviewPreparationTail: Promise.resolve(), previewSampleForEntry: () => null,
+      archiveLikePath: (path) => path.endsWith(".zip"), blockSelectionScopedAction: () => false,
+      previewEntryDisplayName: (path) => path.split("/").at(-1), recordValidationEvent: () => {},
+      setScreen: (next) => { context.screen = next; },
       previewOriginEntryPath: null, previewOriginVirtualIndex: null,
       previewRequestGeneration: 0, previewActionGeneration: 0,
       nestedPreview: null, entryPreview: null, entryPreviewFailure: null,
@@ -67,6 +77,7 @@ async function withNestedOpen(run) {
       tr: (_key, fallback) => fallback,
     };
     Object.defineProperty(context, "currentArchive", { get: () => archive.archive() });
+    Object.defineProperty(context, "previewPasswordPrompt", { get: () => context.previewPasswordFlow.prompt });
     const { outputText } = ts.transpileModule(declarations.join("\n"), {
       compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
     });
@@ -76,6 +87,90 @@ async function withNestedOpen(run) {
     await server.close();
   }
 }
+
+test("an encrypted ordinary file resumes preparation and opens only after its password succeeds", async () => {
+  await withNestedOpen(async ({ app, archive, ipc, context }) => {
+    const prepared = { preview_id: "file-preview", outer_path: "/archives/outer.zip", entry_path: "notes.txt", display_name: "notes.txt", size: 10, archive_like: false };
+    const opened = [];
+    const released = [];
+    ipc.previewArchiveEntry = async (_source, _entry, password) => {
+      if (password !== "entry-password") throw { key: "error.password_required", params: {}, detail: "" };
+      return prepared;
+    };
+    ipc.releasePreviewSession = async (id) => { released.push(id); return true; };
+    context.openEntryPreview = async (entry) => { opened.push(entry.preview_id); return true; };
+    const opening = app.submitPreviewEntry("notes.txt", "file", 1);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(context.previewPasswordPrompt.name, "outer.zip");
+    assert.deepEqual(opened, []);
+    context.screen = "password";
+    context.jobPasswordValue = "entry-password";
+    await app.submitPasswordRequest();
+    await opening;
+    assert.deepEqual(opened, ["file-preview"]);
+    assert.deepEqual(released, ["file-preview"]);
+    assert.equal(context.screen, "browse");
+    assert.equal(context.entryPreviewFailure, null);
+    assert.equal(context.jobPasswordValue, "");
+    assert.equal(archive.archive().id, 1);
+  });
+});
+
+test("nested opening resumes through the shared password form with separate layer credentials", async () => {
+  await withNestedOpen(async ({ app, archive, ipc, page, context }) => {
+    const attempts = [];
+    ipc.openNestedArchive = async (_source, _entry, passwords) => {
+      attempts.push({ ...passwords });
+      const scope = passwords.outer !== "outer-password" ? "outer" : passwords.inner !== "inner-password" ? "inner" : null;
+      if (scope) throw { key: passwords[scope] ? "error.wrong_password" : "error.password_required", params: { password_scope: scope }, detail: "" };
+      return archiveInfo(2, "inner.zip");
+    };
+    page.resolve({ items: [outerRows[1]], total: 1, page: 0 });
+    const opening = app.openNestedArchiveEntry("/archives/outer.zip", "inner.zip", 0);
+    await new Promise((resolve) => setImmediate(resolve));
+    context.screen = "password";
+    assert.match(app.passwordPromptDetail(), /archive password to read/);
+    for (const [password, nextScope] of [["outer-password", "inner"], ["wrong-password", "inner"], ["inner-password", null]]) {
+      assert.equal(archive.archive().id, 1);
+      context.jobPasswordValue = password;
+      await app.submitPasswordRequest();
+      assert.equal(context.jobPasswordValue, "");
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(context.previewPasswordPrompt?.scope ?? null, nextScope);
+      if (password === "wrong-password") assert.match(app.passwordPromptDetail(), /rejected/);
+    }
+    await opening;
+    assert.equal(archive.archive().id, 2);
+    assert.equal(context.screen, "browse");
+    assert.equal(attempts.length, 4);
+    assert.equal(attempts[2].outer, "outer-password");
+    assert.equal(context.entryPreviewFailure, null);
+  });
+});
+
+test("cancelling during password verification preserves the outer archive and releases the late inner handle", async () => {
+  await withNestedOpen(async ({ app, archive, ipc, context, closed }) => {
+    const verified = deferred();
+    ipc.openNestedArchive = async (_source, _entry, passwords) => {
+      if (!passwords.outer) throw { key: "error.password_required", params: {}, detail: "" };
+      return verified.promise;
+    };
+    const opening = app.openNestedArchiveEntry("/archives/outer.zip", "inner.zip", 0);
+    await new Promise((resolve) => setImmediate(resolve));
+    context.screen = "password";
+    context.jobPasswordValue = "outer-password";
+    await app.submitPasswordRequest();
+    await app.cancelPasswordRequest();
+    verified.resolve(archiveInfo(2, "inner.zip"));
+    await opening;
+    assert.equal(context.previewPasswordPrompt, null);
+    assert.equal(context.jobPasswordValue, "");
+    assert.equal(context.screen, "browse");
+    assert.equal(archive.archive().id, 1);
+    assert.deepEqual(closed, [2]);
+    assert.equal(context.entryPreviewFailure, null);
+  });
+});
 
 test("closing or selecting another item during nested listing prevents late navigation and errors", async () => {
   for (const action of ["close", "select"]) {

@@ -365,6 +365,7 @@ impl AppState {
         display_path: String,
         display_name: String,
         max_entries: u64,
+        password: Option<&str>,
     ) -> Result<ArchiveInfo, FormatError> {
         let path = temp.to_path_buf();
         let owned_temp = PendingOwnedArchiveTemp {
@@ -376,7 +377,7 @@ impl AppState {
         self.open_archive_inner(
             Some(owner_window),
             &path,
-            None,
+            password,
             None,
             max_entries,
             &control,

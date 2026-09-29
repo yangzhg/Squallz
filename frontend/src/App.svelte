@@ -123,6 +123,7 @@
     type EntryPreviewDto,
     type EntryDto,
     type ErrorDto,
+    type NestedArchivePasswords,
     type JobSpec,
     type ArchivePresetDocument,
     type ExtractArchivePresetOptions,
@@ -138,6 +139,7 @@
   } from "./lib/ipc";
   import {
     previewSampleForEntry,
+    nestedPasswordPreviewSample,
     readRuntimePreviews,
   } from "./lib/dev-preview-data";
   import {
@@ -208,6 +210,7 @@
     previewResponseIsCurrent,
     type PreviewResponseIdentity,
   } from "./lib/preview-response";
+  import { createPreviewPasswordFlow } from "./lib/preview-password.svelte";
   import {
     activeTask,
     answerConflict as answerJobConflict,
@@ -589,13 +592,17 @@
   let jobRows = $derived(tasks());
   let activeCurrentTask = $derived(activeTask());
   let jobPasswordPrompt = $derived(pendingPassword());
+  const previewPasswordFlow = createPreviewPasswordFlow();
+  let previewPasswordPrompt = $derived(previewPasswordFlow.prompt);
   let archivePasswordPrompt = $derived(openPasswordPrompt());
   let activePasswordPromptIdentity = $derived(
     jobPasswordPrompt
       ? `job:${jobPasswordPrompt.id}:${jobPasswordPrompt.version}`
       : archivePasswordPrompt
         ? `archive:${archivePasswordPrompt.path}`
-        : null,
+        : previewPasswordPrompt
+          ? `preview:${previewPasswordPrompt.id}`
+          : null,
   );
   let previousPasswordPromptIdentity: string | null = null;
   let jobConflictPrompt = $derived(pendingConflict());
@@ -1183,7 +1190,7 @@
       setScreen("password");
     } else if (jobConflictPrompt) {
       setScreen("conflict");
-    } else if (archivePasswordPrompt) {
+    } else if (archivePasswordPrompt || previewPasswordPrompt) {
       setScreen("password");
     }
   });
@@ -1197,13 +1204,14 @@
   });
 
   $effect(() => {
-    const promptPath = archivePasswordPrompt?.path ?? null;
+    const promptIdentity = activePasswordPromptIdentity;
     const input = standalonePasswordInput;
     const ready =
-      promptPath !== null &&
+      promptIdentity !== null &&
       jobPasswordPrompt === null &&
       screen === "password" &&
       archiveOpenStatus === "idle" &&
+      !previewPasswordPrompt?.busy &&
       !modeSelectionBlocked &&
       !blockingModalVisible() &&
       !taskWindowMode &&
@@ -1218,10 +1226,11 @@
       if (
         standalonePasswordFocusedInput === input &&
         standalonePasswordInput === input &&
-        archivePasswordPrompt?.path === promptPath &&
+        activePasswordPromptIdentity === promptIdentity &&
         jobPasswordPrompt === null &&
         screen === "password" &&
         archiveOpenStatus === "idle" &&
+        !previewPasswordPrompt?.busy &&
         !modeSelectionBlocked &&
         !blockingModalVisible() &&
         !taskWindowMode
@@ -2168,6 +2177,9 @@
   function setScreen(next: Screen) {
     if (preventCreateSubmissionNavigation(next)) return;
     if (preventConvertSubmissionNavigation(next)) return;
+    if (screen === "password" && next !== "password" && previewPasswordPrompt) {
+      clearEntryPreviewState();
+    }
     taskReviewRequestGeneration += 1;
     if (next !== "updateReview") archiveUpdateReviewFocusPending = false;
     if (next !== "nestedExtract") {
@@ -6582,11 +6594,13 @@
         (archivePath
           ? previewSampleForEntry(archivePath, entryPath)
           : null) ??
-        (await ipc.previewArchiveEntry(
-          archiveSource,
+        (await runPreviewWithPassword(
+          requestGeneration,
+          archivePath ?? archiveSource,
           entryPath,
-          null,
-          archiveEncodingForJob(),
+          (passwords) => ipc.previewArchiveEntry(
+            archiveSource, entryPath, passwords.outer, archiveEncodingForJob(),
+          ),
         ))
       );
     } finally {
@@ -6595,6 +6609,7 @@
   }
 
   function clearEntryPreviewState(restoreEntryFocus = false) {
+    previewPasswordFlow.cancel();
     const preview = entryPreview;
     const originEntryPath = previewOriginEntryPath;
     const originVirtualIndex = previewOriginVirtualIndex;
@@ -9757,6 +9772,28 @@
     openExtractWorkspace("selection");
   }
 
+  async function runPreviewWithPassword<T>(
+    requestGeneration: number,
+    outerDisplayPath: string,
+    entryPath: string,
+    operation: (passwords: NestedArchivePasswords) => Promise<T>,
+  ): Promise<T | null> {
+    try {
+      return await previewPasswordFlow.run({
+        outerName: pathBaseName(outerDisplayPath),
+        innerName: pathBaseName(entryPath),
+        isCurrent: () => requestGeneration === previewRequestGeneration,
+      }, operation);
+    } finally {
+      if (
+        requestGeneration === previewRequestGeneration && screen === "password" &&
+        !jobPasswordPrompt && !jobConflictPrompt && !archivePasswordPrompt
+      ) {
+        setScreen("browse");
+      }
+    }
+  }
+
   function previewFailureMessage(
     error: unknown,
     nested: boolean,
@@ -11623,12 +11660,14 @@
     try {
       await waitForPreviewFeedbackFrame();
       if (requestGeneration !== previewRequestGeneration) return;
-      const preparedPreview = await ipc.previewNestedArchive(
-        archiveSource,
+      const preparedPreview = await runPreviewWithPassword(
+        requestGeneration,
+        archiveDisplayPath,
         entryPath,
-        null,
-        archiveEncodingForJob(),
+        async (passwords) => nestedPasswordPreviewSample(params, archiveSource, entryPath, passwords)
+          ?? ipc.previewNestedArchive(archiveSource, entryPath, passwords, archiveEncodingForJob()),
       );
+      if (!preparedPreview) return;
       if (requestGeneration !== previewRequestGeneration) return;
       nestedPreview = preparedPreview;
       entryPreview = null;
@@ -11850,12 +11889,13 @@
     try {
       await waitForPreviewFeedbackFrame();
       if (requestGeneration !== previewRequestGeneration) return;
-      const info = await ipc.openNestedArchive(
-        outerPath,
+      const info = await runPreviewWithPassword(
+        requestGeneration,
+        currentArchive?.path ?? outerPath,
         entryPath,
-        null,
-        encoding,
+        (passwords) => ipc.openNestedArchive(outerPath, entryPath, passwords, encoding),
       );
+      if (!info) return;
       if (requestGeneration !== previewRequestGeneration) {
         void ipc.closeArchive(info.id).catch(() => undefined);
         return;
@@ -12806,14 +12846,14 @@
         kind,
         variant,
         tr,
-        active: Boolean(jobPasswordPrompt || archivePasswordPrompt),
+        active: Boolean(jobPasswordPrompt || archivePasswordPrompt || previewPasswordPrompt),
         name: passwordPromptName(),
         detail: passwordPromptDetail(),
         sessionDetail: passwordSessionDetail(),
         failureDetail: passwordFailureDetail(),
         secretStoreLabel: secretStoreLabel(),
         value: jobPasswordValue,
-        busy: archiveOpenStatus === "opening",
+        busy: archiveOpenStatus === "opening" || Boolean(previewPasswordPrompt?.busy),
         error: passwordSubmissionError,
         forgetVisible: Boolean(jobPasswordPrompt),
         forgetDisabledReason,
@@ -13433,6 +13473,7 @@
   function passwordPromptName(): string {
     return jobPasswordPrompt?.name
       ?? (archivePasswordPrompt ? pathBaseName(archivePasswordPrompt.path) : null)
+      ?? previewPasswordPrompt?.name
       ?? tr("gui.password.no_prompt", "No password prompt");
   }
 
@@ -13447,10 +13488,19 @@
         ? tr("gui.password.open_previous_rejected", "That password was rejected. Try again or return to the archive list.")
         : tr("gui.password.archive_waiting", "Enter the password to open this archive.");
     }
+    if (previewPasswordPrompt) {
+      if (previewPasswordPrompt.wrong) return tr("gui.preview.password_rejected", "That password was rejected. Try again or cancel opening this item.");
+      return previewPasswordPrompt.scope === "inner"
+        ? tr("gui.preview.inner_password", "Enter the inner archive password to continue opening this item.")
+        : tr("gui.preview.outer_password", "Enter the archive password to read this item.");
+    }
     return tr("gui.password.no_prompt_pending", "No password request is active.");
   }
 
   function passwordSessionDetail(): string {
+    if (previewPasswordPrompt && !jobPasswordPrompt && !archivePasswordPrompt) {
+      return tr("gui.preview.password_session", "Used for this operation and the opened archive in this app session. Not saved to Password Book.");
+    }
     return jobPasswordPrompt
       ? tr("gui.password.session_only_separate_book", "Session only for this job; saved passwords use the separate Password Book flow")
       : tr("gui.password.open_session_only", "Used only to open this archive in the current app session.");
@@ -13472,7 +13522,7 @@
   }
 
   async function submitPasswordRequest() {
-    if (!jobPasswordPrompt && !archivePasswordPrompt) {
+    if (!jobPasswordPrompt && !archivePasswordPrompt && !previewPasswordPrompt) {
       showNotice(tr("gui.password.no_prompt_pending", "No password request is active."));
       return;
     }
@@ -13489,6 +13539,10 @@
       if (jobPasswordPrompt || jobConflictPrompt) return;
       setScreen(returnScreen);
       returnTaskQuestionToCenter(promptId);
+      return;
+    }
+    if (!archivePasswordPrompt && previewPasswordPrompt) {
+      if (previewPasswordFlow.answer(jobPasswordValue)) jobPasswordValue = "";
       return;
     }
     const prompt = archivePasswordPrompt;
@@ -13539,6 +13593,10 @@
       setScreen(returnScreen);
       returnTaskQuestionToCenter(promptId);
       return;
+    }
+    if (previewPasswordPrompt && !archivePasswordPrompt) {
+      clearEntryPreviewState(true);
+      showNotice(tr("gui.preview.password_cancelled", "Item opening cancelled. The archive is unchanged."));
     }
     if (archivePasswordPrompt) {
       pendingArchiveTaskReview = null;

@@ -38,8 +38,8 @@ use crate::dto::{
     CreateDestinationInspectionDto, CreateEstimateDto, CreatePlanDto, DiskSpaceDto, EntryDto,
     EntryPreviewDto, ErrorDto, ExternalTaskActionDto, ExtractPlanPreflightDto, FormatDto,
     IntegrationApplyResultDto, IntegrationRemoveResultDto, IntegrationStatusDto,
-    IntegrationSystemDiagnosticsDto, JobSpec, LanguageDto, LocaleTable, NestedArchivePreviewDto,
-    Page, PasswordBookStatusDto, SettingsDto, SfxCreateCapabilityDto,
+    IntegrationSystemDiagnosticsDto, JobSpec, LanguageDto, LocaleTable, NestedArchivePasswords,
+    NestedArchivePreviewDto, Page, PasswordBookStatusDto, SettingsDto, SfxCreateCapabilityDto,
 };
 use crate::events::EventSink;
 use crate::integration;
@@ -1178,13 +1178,25 @@ fn preview_error_dto_with_paths(error: FormatError, replacements: &[(&Path, &str
     dto
 }
 
+fn preview_password_error(mut error: ErrorDto, scope: &str) -> ErrorDto {
+    if matches!(
+        error.key.as_str(),
+        "error.password_required" | "error.wrong_password"
+    ) {
+        error
+            .params
+            .insert("password_scope".to_owned(), scope.to_owned());
+    }
+    error
+}
+
 fn preview_nested_archive_impl(
     state: &AppState,
     sessions: &PreviewSessionManager,
     owner: &str,
     outer_source: &str,
     entry_path: &str,
-    password: Option<&str>,
+    passwords: &NestedArchivePasswords,
     encoding: Option<&str>,
 ) -> Result<NestedArchivePreviewDto, ErrorDto> {
     let outer = state
@@ -1196,26 +1208,38 @@ fn preview_nested_archive_impl(
         state,
         outer.path(),
         entry_path,
-        password,
+        passwords.outer.as_deref(),
         encoding,
         workspace,
         MAX_PREVIEW_ENTRY_BYTES,
     )
     .map_err(|error| {
-        preview_error_dto_with_paths(error, &[(outer.path(), outer.display_path())])
+        preview_password_error(
+            preview_error_dto_with_paths(error, &[(outer.path(), outer.display_path())]),
+            "outer",
+        )
     })?;
     let temp_path = temp.to_path_buf();
     let nested_display_path = nested_archive_display_path(outer.display_path(), entry_path);
     let entries = state
         .engine
-        .list(temp.as_ref(), &OpenOptions::default())
+        .list(
+            temp.as_ref(),
+            &OpenOptions {
+                password: passwords.inner.as_deref().map(Password::new),
+                ..OpenOptions::default()
+            },
+        )
         .map_err(|error| {
-            preview_error_dto_with_paths(
-                error,
-                &[
-                    (outer.path(), outer.display_path()),
-                    (&temp_path, nested_display_path.as_str()),
-                ],
+            preview_password_error(
+                preview_error_dto_with_paths(
+                    error,
+                    &[
+                        (outer.path(), outer.display_path()),
+                        (&temp_path, nested_display_path.as_str()),
+                    ],
+                ),
+                "inner",
             )
         })?;
     let entry_count = entries.len();
@@ -1383,7 +1407,7 @@ pub async fn preview_nested_archive(
     sessions: State<'_, Arc<PreviewSessionManager>>,
     outer_path: String,
     entry_path: String,
-    password: Option<String>,
+    passwords: NestedArchivePasswords,
     encoding: Option<String>,
 ) -> Result<NestedArchivePreviewDto, ErrorDto> {
     let state = Arc::clone(state.inner());
@@ -1396,7 +1420,7 @@ pub async fn preview_nested_archive(
             &owner,
             &outer_path,
             &entry_path,
-            password.as_deref(),
+            &passwords,
             encoding.as_deref(),
         )
     })
@@ -1459,7 +1483,7 @@ fn open_nested_archive_impl(
     owner: &str,
     outer_source: &str,
     entry_path: &str,
-    password: Option<&str>,
+    passwords: &NestedArchivePasswords,
     encoding: Option<&str>,
     max_entries: u64,
 ) -> Result<ArchiveInfo, ErrorDto> {
@@ -1472,13 +1496,16 @@ fn open_nested_archive_impl(
         state,
         outer.path(),
         entry_path,
-        password,
+        passwords.outer.as_deref(),
         encoding,
         workspace,
         MAX_PREVIEW_ENTRY_BYTES,
     )
     .map_err(|error| {
-        preview_error_dto_with_paths(error, &[(outer.path(), outer.display_path())])
+        preview_password_error(
+            preview_error_dto_with_paths(error, &[(outer.path(), outer.display_path())]),
+            "outer",
+        )
     })?;
     let display_name = entry_base_name(entry_path);
     let display_path = nested_archive_display_path(outer.display_path(), entry_path);
@@ -1492,14 +1519,18 @@ fn open_nested_archive_impl(
             display_path.clone(),
             display_name,
             max_entries,
+            passwords.inner.as_deref(),
         )
         .map_err(|error| {
-            preview_error_dto_with_paths(
-                error,
-                &[
-                    (outer.path(), outer.display_path()),
-                    (&temp_path, display_path.as_str()),
-                ],
+            preview_password_error(
+                preview_error_dto_with_paths(
+                    error,
+                    &[
+                        (outer.path(), outer.display_path()),
+                        (&temp_path, display_path.as_str()),
+                    ],
+                ),
+                "inner",
             )
         })
 }
@@ -1515,7 +1546,7 @@ pub async fn open_nested_archive(
     settings: State<'_, Arc<SettingsStore>>,
     outer_path: String,
     entry_path: String,
-    password: Option<String>,
+    passwords: NestedArchivePasswords,
     encoding: Option<String>,
 ) -> Result<ArchiveInfo, ErrorDto> {
     let state = Arc::clone(state.inner());
@@ -1530,7 +1561,7 @@ pub async fn open_nested_archive(
             &owner,
             &outer_path,
             &entry_path,
-            password.as_deref(),
+            &passwords,
             encoding.as_deref(),
             max_entries,
         );
@@ -3505,7 +3536,7 @@ mod tests {
             "test-window",
             &outer.to_string_lossy(),
             "inner.zip",
-            None,
+            &Default::default(),
             None,
         )
         .unwrap();
@@ -3518,6 +3549,192 @@ mod tests {
             .any(|entry| entry.path == "inner-src/hello.txt"));
 
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn nested_passwords_unlock_each_layer_and_keep_the_opened_source_readable() {
+        let dir = temp_dir("nested-passwords");
+        let state = AppState::new();
+        let inner = make_header_encrypted_7z(&dir);
+        let outer = dir.join("outer.zip");
+        state
+            .engine
+            .create(
+                &outer,
+                &[inner],
+                &CreateOptions {
+                    password: Some(Password::new("outer-secret")),
+                    ..CreateOptions::default()
+                },
+                &NoProgress,
+                &ControlToken::default(),
+            )
+            .unwrap();
+        // ZIP names are readable before the data password has been supplied.
+        assert_eq!(
+            state
+                .engine
+                .list(&outer, &OpenOptions::default())
+                .unwrap()
+                .len(),
+            1
+        );
+        let sessions = PreviewSessionManager::new().unwrap();
+        let source = outer.to_string_lossy();
+        let mut passwords = super::NestedArchivePasswords::default();
+        for (outer_password, inner_password, key, scope) in [
+            (None, None, "error.password_required", "outer"),
+            (Some("incorrect"), None, "error.wrong_password", "outer"),
+            (
+                Some("outer-secret"),
+                None,
+                "error.password_required",
+                "inner",
+            ),
+            (
+                Some("outer-secret"),
+                Some("incorrect"),
+                "error.wrong_password",
+                "inner",
+            ),
+        ] {
+            passwords.outer = outer_password.map(str::to_owned);
+            passwords.inner = inner_password.map(str::to_owned);
+            let preview_error = preview_nested_archive_impl(
+                &state,
+                &sessions,
+                "test-window",
+                &source,
+                "secret.7z",
+                &passwords,
+                None,
+            )
+            .unwrap_err();
+            let open_error = open_nested_archive_impl(
+                &state,
+                &sessions,
+                "test-window",
+                &source,
+                "secret.7z",
+                &passwords,
+                None,
+                SafetyLimits::default().max_entries,
+            )
+            .unwrap_err();
+            for error in [preview_error, open_error] {
+                assert_eq!(error.key, key);
+                assert_eq!(
+                    error.params.get("password_scope").map(String::as_str),
+                    Some(scope)
+                );
+                assert_error_hides_private_path(&error, sessions.root_path().unwrap(), None);
+                assert!(!serde_json::to_string(&error)
+                    .unwrap()
+                    .contains("outer-secret"));
+            }
+        }
+        passwords.inner = Some("secret".into());
+        let preview = preview_nested_archive_impl(
+            &state,
+            &sessions,
+            "test-window",
+            &source,
+            "secret.7z",
+            &passwords,
+            None,
+        )
+        .unwrap();
+        assert!(preview
+            .items
+            .iter()
+            .any(|entry| entry.path == "secret-src/secret.txt"));
+        let info = open_nested_archive_impl(
+            &state,
+            &sessions,
+            "test-window",
+            &source,
+            "secret.7z",
+            &passwords,
+            None,
+            SafetyLimits::default().max_entries,
+        )
+        .unwrap();
+        let entry = preview_archive_entry_impl(
+            &state,
+            &sessions,
+            "test-window",
+            &info.source,
+            "secret-src/secret.txt",
+            None,
+            None,
+        )
+        .unwrap();
+        let path = sessions
+            .path_for_external_use(&entry.preview_id, "test-window")
+            .unwrap();
+        assert_eq!(std::fs::read(path).unwrap(), b"classified");
+        sessions.external_use_failed(&entry.preview_id, "test-window");
+        assert!(sessions.release(&entry.preview_id, "test-window").unwrap());
+        state.close_archive_for_window("test-window", info.id);
+        assert_eq!(sessions.release_window("test-window"), 0);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn encrypted_entry_preview_retries_without_leaving_a_failed_session() {
+        let dir = temp_dir("entry-password");
+        let state = AppState::new();
+        let file = dir.join("report.txt");
+        std::fs::write(&file, b"report contents").unwrap();
+        let outer = dir.join("outer.zip");
+        state
+            .engine
+            .create(
+                &outer,
+                &[file],
+                &CreateOptions {
+                    password: Some(Password::new("entry-secret")),
+                    ..CreateOptions::default()
+                },
+                &NoProgress,
+                &ControlToken::default(),
+            )
+            .unwrap();
+        let sessions = PreviewSessionManager::new().unwrap();
+        for (password, key) in [
+            (None, "error.password_required"),
+            (Some("incorrect"), "error.wrong_password"),
+        ] {
+            let error = preview_archive_entry_impl(
+                &state,
+                &sessions,
+                "test-window",
+                &outer.to_string_lossy(),
+                "report.txt",
+                password,
+                None,
+            )
+            .unwrap_err();
+            assert_eq!(error.key, key);
+        }
+        let entry = preview_archive_entry_impl(
+            &state,
+            &sessions,
+            "test-window",
+            &outer.to_string_lossy(),
+            "report.txt",
+            Some("entry-secret"),
+            None,
+        )
+        .unwrap();
+        let path = sessions
+            .path_for_external_use(&entry.preview_id, "test-window")
+            .unwrap();
+        assert_eq!(std::fs::read(path).unwrap(), b"report contents");
+        sessions.external_use_failed(&entry.preview_id, "test-window");
+        assert!(sessions.release(&entry.preview_id, "test-window").unwrap());
+        assert_eq!(sessions.release_window("test-window"), 0);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -3534,7 +3751,7 @@ mod tests {
             "test-window",
             &outer.to_string_lossy(),
             "mystery.bin",
-            None,
+            &Default::default(),
             None,
         )
         .unwrap_err();
@@ -3547,7 +3764,7 @@ mod tests {
             "test-window",
             &outer.to_string_lossy(),
             "mystery.bin",
-            None,
+            &Default::default(),
             None,
             SafetyLimits::default().max_entries,
         )
@@ -3570,7 +3787,7 @@ mod tests {
             "test-window",
             &outer.to_string_lossy(),
             "inner.blob",
-            None,
+            &Default::default(),
             None,
             SafetyLimits::default().max_entries,
         )
@@ -3722,7 +3939,7 @@ mod tests {
             "test-window",
             &outer.to_string_lossy(),
             "inner.zip",
-            None,
+            &Default::default(),
             None,
             SafetyLimits::default().max_entries,
         )
@@ -3805,7 +4022,7 @@ mod tests {
             "test-window",
             &outer.to_string_lossy(),
             "inner.zip",
-            None,
+            &Default::default(),
             None,
             SafetyLimits::default().max_entries,
         )
@@ -3861,7 +4078,7 @@ mod tests {
             "released-window",
             &outer.to_string_lossy(),
             "inner.zip",
-            None,
+            &Default::default(),
             None,
             SafetyLimits::default().max_entries,
         )
@@ -3899,7 +4116,7 @@ mod tests {
                 owner,
                 &outer.to_string_lossy(),
                 "inner.zip",
-                None,
+                &Default::default(),
                 None,
                 SafetyLimits::default().max_entries,
             )
@@ -3931,7 +4148,7 @@ mod tests {
             "test-window",
             &outer.to_string_lossy(),
             "inner.zip",
-            None,
+            &Default::default(),
             None,
             SafetyLimits::default().max_entries,
         )
@@ -3987,7 +4204,7 @@ mod tests {
                         "test-window",
                         &outer.to_string_lossy(),
                         "inner.zip",
-                        None,
+                        &Default::default(),
                         None,
                         SafetyLimits::default().max_entries,
                     )
