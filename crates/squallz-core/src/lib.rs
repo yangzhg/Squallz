@@ -439,6 +439,17 @@ impl Source {
     }
 }
 
+/// Metadata collected for browsing, including whether opening encrypted
+/// headers actually verified the supplied password. Listing plaintext names
+/// in a data-encrypted archive does not verify its password.
+pub struct ArchiveListing {
+    pub format: String,
+    pub entries: Vec<EntryMeta>,
+    pub source_set: Option<api::ArchiveSourceSet>,
+    pub structure: ArchiveStructureStatus,
+    pub password_verified: bool,
+}
+
 struct OpenedArchive {
     format: String,
     reader: Box<dyn ArchiveReader>,
@@ -864,7 +875,7 @@ impl Engine {
             max_entries,
             control,
         )
-        .map(|(format, entries, source_set, _)| (format, entries, source_set))
+        .map(|listing| (listing.format, listing.entries, listing.source_set))
     }
 
     /// Lists entries while retaining the reader's explicit structural state.
@@ -874,22 +885,43 @@ impl Engine {
         opts: &OpenOptions,
         max_entries: u64,
         control: &ControlToken,
-    ) -> Result<
-        (
-            String,
-            Vec<EntryMeta>,
-            Option<api::ArchiveSourceSet>,
-            ArchiveStructureStatus,
-        ),
-        FormatError,
-    > {
+    ) -> Result<ArchiveListing, FormatError> {
         control.checkpoint()?;
+        let source = opts
+            .password
+            .as_ref()
+            .and_then(|_| self.inspect_archive_source_state(path, control).ok());
+        let password_required = if opts.password.is_some() {
+            let without_password = OpenOptions {
+                password: None,
+                encoding_override: opts.encoding_override.clone(),
+            };
+            match self.open_identified_with_control(path, &without_password, control) {
+                Ok(_) => false,
+                Err(FormatError::PasswordRequired | FormatError::WrongPassword) => true,
+                Err(error) => return Err(error),
+            }
+        } else {
+            false
+        };
+        // Supplied credentials can reveal encrypted metadata such as symlink
+        // targets even when the entry names themselves are readable without them.
         let opened = self.open_identified_with_control(path, opts, control)?;
         let source_set = opened.native_source_set().cloned();
         let structure = opened.reader.structure_status();
         let OpenedArchive { format, reader, .. } = opened;
         let entries = collect_consumed_reader_entries(reader, max_entries, control)?;
-        Ok((format, entries, source_set, structure))
+        let password_verified = password_required
+            && source.is_some()
+            && self.inspect_archive_source_state(path, control).ok() == source;
+        control.checkpoint()?;
+        Ok(ArchiveListing {
+            format,
+            entries,
+            source_set,
+            structure,
+            password_verified,
+        })
     }
 
     /// Lists entries.
@@ -909,7 +941,7 @@ impl Engine {
             SafetyLimits::default().max_entries,
             &ControlToken::default(),
         )
-        .map(|(_, entries, _, structure)| (entries, structure))
+        .map(|listing| (listing.entries, listing.structure))
     }
 
     /// Lists entries while checking the shared pause/cancellation token

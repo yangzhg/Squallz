@@ -15,11 +15,12 @@ use squallz_core::api::{
 };
 use squallz_core::{
     collect_volume_set_with_control, fold_archive_search_path, fold_archive_search_query,
-    rank_folded_archive_path, Engine,
+    rank_folded_archive_path, ArchiveListing, Engine,
 };
 use tempfile::TempPath;
 
 use crate::dto::{ArchiveInfo, EntryDto, Page};
+use crate::password_cache::{PasswordAttempt, SessionPasswords};
 use crate::preview_sessions::{PreviewResourceLease, PreviewResourceReservation};
 use squallz_core::lock_unpoisoned;
 
@@ -196,9 +197,7 @@ pub struct AppState {
     pub engine: Engine,
     archives: Mutex<ArchiveRegistry>,
     next_id: AtomicU64,
-    /// Session password cache: archive path → password (zeroized on drop and
-    /// cleared when the app exits).
-    passwords: Mutex<HashMap<PathBuf, Password>>,
+    passwords: SessionPasswords,
 }
 
 impl AppState {
@@ -208,7 +207,7 @@ impl AppState {
             engine: Engine::new(squallz_formats::registry()),
             archives: Mutex::new(ArchiveRegistry::default()),
             next_id: AtomicU64::new(1),
-            passwords: Mutex::new(HashMap::new()),
+            passwords: SessionPasswords::default(),
         }
     }
 
@@ -403,13 +402,20 @@ impl AppState {
     ) -> Result<ArchiveInfo, FormatError> {
         control.checkpoint()?;
         self.ensure_owner_active(owner_window)?;
+        let password_attempt = password.and_then(|_| self.password_attempt(path, control));
         let open_opts = OpenOptions {
             password: password
                 .map(Password::new)
                 .or_else(|| self.password_for(path)),
             encoding_override: encoding.map(str::to_owned),
         };
-        let (format, entries, native_source_set, structure) = self
+        let ArchiveListing {
+            format,
+            entries,
+            source_set: native_source_set,
+            structure,
+            password_verified,
+        } = self
             .engine
             .list_with_format_source_set_and_structure_with_entry_limit_and_control(
                 path,
@@ -479,8 +485,10 @@ impl AppState {
         drop(registry);
         // Remember a freshly supplied, proven-good password only after the
         // owner-bound handle has been published successfully.
-        if let Some(pw) = password {
-            self.remember_password(path, pw);
+        if password_verified {
+            if let (Some(pw), Some(attempt)) = (password, password_attempt.as_ref()) {
+                self.remember_password(attempt, pw, control);
+            }
         }
         let info = ArchiveInfo {
             id,
@@ -715,6 +723,7 @@ impl AppState {
         let archives = {
             let mut registry = lock_unpoisoned(&self.archives);
             registry.released_windows.insert(owner_window.to_owned());
+            self.passwords.invalidate_pending();
             let ids = registry
                 .archives
                 .iter()
@@ -734,6 +743,7 @@ impl AppState {
 
     /// Prevents late archive-handle publication while shutdown is beginning.
     pub fn begin_shutdown(&self) {
+        self.passwords.shutdown();
         let mut registry = lock_unpoisoned(&self.archives);
         registry.shutting_down = true;
         cancel_archive_searches(registry.archives.values());
@@ -742,6 +752,7 @@ impl AppState {
     /// Drains every browse handle after queued jobs have released their
     /// private source pins and before the preview workspace is removed.
     pub fn shutdown(&self) -> usize {
+        self.passwords.shutdown();
         let archives = {
             let mut registry = lock_unpoisoned(&self.archives);
             registry.shutting_down = true;
@@ -757,7 +768,7 @@ impl AppState {
 
     /// Session password for a path, if one was proven good earlier.
     pub fn password_for(&self, path: &Path) -> Option<Password> {
-        lock_unpoisoned(&self.passwords).get(path).cloned()
+        self.passwords.get(&self.engine, path)
     }
 
     /// Verifies a password without adding another opened archive handle.
@@ -777,24 +788,34 @@ impl AppState {
             .verify_password(path, &open_opts, limits, control)
     }
 
-    /// Caches a working password for the session (zeroized on exit).
-    pub fn remember_password(&self, path: &Path, password: &str) {
-        lock_unpoisoned(&self.passwords).insert(path.to_path_buf(), Password::new(password));
+    pub(crate) fn password_attempt(
+        &self,
+        path: &Path,
+        control: &ControlToken,
+    ) -> Option<PasswordAttempt> {
+        self.passwords.begin(&self.engine, path, control)
+    }
+
+    /// Call only after successful decryption, using the attempt captured
+    /// before that work. Forgetting or source replacement prevents publication.
+    pub(crate) fn remember_password(
+        &self,
+        attempt: &PasswordAttempt,
+        password: &str,
+        control: &ControlToken,
+    ) {
+        self.passwords
+            .remember(&self.engine, attempt, password, control);
     }
 
     /// Removes a session password, used when the user forgets a saved secret.
     pub fn forget_password(&self, path: &Path) {
-        lock_unpoisoned(&self.passwords).remove(path);
+        self.passwords.forget(path);
     }
 
     #[cfg(test)]
     pub(crate) fn cached_password_paths(&self) -> Vec<PathBuf> {
-        let mut paths = lock_unpoisoned(&self.passwords)
-            .keys()
-            .cloned()
-            .collect::<Vec<_>>();
-        paths.sort();
-        paths
+        self.passwords.paths()
     }
 }
 
@@ -1942,7 +1963,58 @@ mod tests {
     }
 
     #[test]
-    fn cache_locks_recover_after_poison() {
+    fn readable_directory_does_not_prove_a_supplied_password() {
+        let dir = temp_dir("unverified-session-password");
+        let archive = make_zip(&dir, &["report.txt"]);
+        let state = AppState::new();
+        state
+            .open_archive(&archive, Some("unverified"), None)
+            .unwrap();
+        assert!(state.password_for(&archive).is_none());
+        let source = dir.join("private.txt");
+        std::fs::write(&source, b"encrypted payload").unwrap();
+        for format in ["zip", "7z"] {
+            let encrypted = dir.join(format!("data-encrypted.{format}"));
+            state
+                .engine
+                .create(
+                    &encrypted,
+                    std::slice::from_ref(&source),
+                    &CreateOptions {
+                        password: Some(Password::new("secret")),
+                        encrypt_filenames: false,
+                        ..CreateOptions::default()
+                    },
+                    &NoProgress,
+                    &ControlToken::default(),
+                )
+                .unwrap();
+            for password in ["wrong", "secret"] {
+                state
+                    .open_archive(&encrypted, Some(password), None)
+                    .unwrap();
+                assert!(state.password_for(&encrypted).is_none());
+            }
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn replacing_an_archive_invalidates_its_session_password() {
+        let dir = temp_dir("replaced-session-password");
+        let archive = make_header_encrypted_7z(&dir);
+        let state = AppState::new();
+        state.open_archive(&archive, Some("secret"), None).unwrap();
+        assert!(state.password_for(&archive).is_some());
+        let replacement = dir.join("replacement.7z");
+        std::fs::copy(&archive, &replacement).unwrap();
+        std::fs::rename(replacement, &archive).unwrap();
+        assert!(state.password_for(&archive).is_none());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn archive_cache_lock_recovers_after_poison() {
         let state = std::sync::Arc::new(AppState::new());
 
         let archive_state = std::sync::Arc::clone(&state);
@@ -1954,22 +2026,6 @@ mod tests {
         .is_err());
         assert!(state.list_entries(404, 0, 10, "", None).is_err());
         state.close_archive(404);
-
-        let password_state = std::sync::Arc::clone(&state);
-        assert!(std::thread::spawn(move || {
-            let _guard = password_state.passwords.lock().unwrap();
-            panic!("poison password cache");
-        })
-        .join()
-        .is_err());
-        let archive = PathBuf::from("/tmp/squallz-poison-password.7z");
-        state.remember_password(&archive, "secret");
-        assert_eq!(
-            state.password_for(&archive).as_ref().map(Password::expose),
-            Some("secret")
-        );
-        state.forget_password(&archive);
-        assert!(state.password_for(&archive).is_none());
     }
 
     #[test]

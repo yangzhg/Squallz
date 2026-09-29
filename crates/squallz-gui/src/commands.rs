@@ -272,6 +272,7 @@ fn remember_archive_password_impl(
 ) -> Result<PasswordBookStatusDto, ErrorDto> {
     let control = request.control();
     control.checkpoint().map_err(ErrorDto::from)?;
+    let password_attempt = state.password_attempt(path, &control);
     if !secrets.is_available() {
         return Err(ErrorDto::secret_store(
             "persistent secret storage is not available on this platform",
@@ -291,7 +292,9 @@ fn remember_archive_password_impl(
     secrets
         .set_archive_password(path, password)
         .map_err(|error| ErrorDto::secret_store(error.to_string()))?;
-    state.remember_password(path, password);
+    if let Some(attempt) = password_attempt.as_ref() {
+        state.remember_password(attempt, password, &control);
+    }
     Ok(PasswordBookStatusDto {
         available: true,
         saved: true,
@@ -4580,15 +4583,18 @@ mod tests {
 
     #[test]
     fn forgetting_always_clears_the_session_password_when_persistent_delete_fails() {
-        let path = Path::new("/tmp/locked-password-book.7z");
+        let dir = temp_dir("forget-password-book");
+        let archive = make_header_encrypted_7z(&dir);
+        let path = archive.as_path();
         let state = AppState::new();
-        state.remember_password(path, "session secret");
+        state.open_archive(path, Some("secret"), None).unwrap();
 
         let error = forget_archive_password_impl(&state, &ReadFailingSecretStore, path)
             .expect_err("persistent delete must still be reported");
 
         assert_eq!(error.key, "error.secret_store");
         assert!(state.password_for(path).is_none());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

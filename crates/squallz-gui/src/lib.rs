@@ -13,6 +13,7 @@ mod jobs;
 mod native_menu;
 mod nested;
 mod open_files;
+mod password_cache;
 mod preview_sessions;
 mod preview_workspace;
 mod secrets;

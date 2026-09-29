@@ -2279,6 +2279,103 @@ fn cancel_password_prompt_reports_cancelled_without_poll_delay() {
 }
 
 #[test]
+fn successful_password_jobs_remember_only_when_not_forgotten_during_the_prompt() {
+    for forget in [false, true] {
+        let dir = temp_dir(if forget {
+            "forget-running-password"
+        } else {
+            "remember-verified-password"
+        });
+        let state = Arc::new(AppState::new());
+        let archive = create_password_protected_zip(&dir, &state);
+        let manager = JobManager::new();
+        let sink = Arc::new(TestSink::default());
+        let events: Arc<dyn EventSink> = sink.clone();
+        let id = manager.submit_for_test_window(
+            "main".into(),
+            Arc::clone(&state),
+            events,
+            password_test_job(&archive),
+            SettingsDto::default(),
+        );
+        wait_for_password_prompt(&sink, id);
+        if forget {
+            state.forget_password(&archive);
+        }
+        let version = manager
+            .snapshot_for_window("main", id)
+            .unwrap()
+            .question
+            .unwrap()
+            .version();
+        manager
+            .answer_password_for_window("main", id, version, Some("secret".into()))
+            .unwrap();
+        wait_for_state(&sink, id, "done", std::time::Duration::from_secs(2));
+        manager.wait_idle();
+        assert_eq!(
+            done_result(&sink.events.lock().unwrap(), id).unwrap()["ok"],
+            true
+        );
+        assert_eq!(state.password_for(&archive).is_some(), !forget);
+        fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[test]
+fn skipping_the_encrypted_entry_after_a_prompt_does_not_validate_the_answer() {
+    let dir = temp_dir("skip-unverified-password");
+    let state = Arc::new(AppState::new());
+    let archive = create_password_protected_zip(&dir, &state);
+    let output = dir.join("out");
+    let manager = JobManager::new();
+    let sink = Arc::new(TestSink::default());
+    let events: Arc<dyn EventSink> = sink.clone();
+    let id = manager.submit_for_test_window(
+        "main".into(),
+        Arc::clone(&state),
+        events,
+        JobSpec::Extract {
+            path: archive.to_string_lossy().into_owned(),
+            dest: output.to_string_lossy().into_owned(),
+            expected_destination: None,
+            expected_input_guard: None,
+            selection: None,
+            overwrite: squallz_core::api::OverwritePolicy::Skip,
+            symlinks: squallz_core::api::SymlinkPolicy::Preserve,
+            smart: false,
+            encoding: None,
+            password: None,
+            verify_sfx: false,
+            best_effort: false,
+        },
+        SettingsDto::default(),
+    );
+    wait_for_password_prompt(&sink, id);
+    // Another operation fills the destination while the password question is
+    // open. The retry must skip it without treating that as successful decryption.
+    fs::create_dir_all(output.join("secret-src")).unwrap();
+    let existing = output.join("secret-src/secret.txt");
+    fs::write(&existing, b"keep this file").unwrap();
+    let version = manager
+        .snapshot_for_window("main", id)
+        .unwrap()
+        .question
+        .unwrap()
+        .version();
+    manager
+        .answer_password_for_window("main", id, version, Some("wrong".into()))
+        .unwrap();
+    wait_for_state(&sink, id, "done", std::time::Duration::from_secs(2));
+    manager.wait_idle();
+    let result = done_result(&sink.events.lock().unwrap(), id).unwrap();
+    assert_eq!(result["counts"]["skipped"], 1);
+    assert_eq!(fs::read(existing).unwrap(), b"keep this file");
+    assert!(state.password_for(&archive).is_none());
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn releasing_window_cancels_password_wait_and_advances_other_owner() {
     let dir = temp_dir("release-password-owner");
     let state = Arc::new(AppState::new());
