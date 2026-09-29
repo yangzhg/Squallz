@@ -341,36 +341,26 @@ export function taskCurrentProgressSummary(task: TaskDialogModel): string {
     return tr("gui.task.current_submitting", "Preparing the first item");
   }
   if (!taskProgressActive(task)) {
-    if (isTaskActiveState(task.state)) {
-      return hasTaskCurrentProgress(task)
-        ? t("gui.task.current_progress_known", {
-          name: taskCurrentLabel(task),
-          done: formatBytes(taskCurrentProgressDone(task)),
-          total: formatBytes(task.currentTotal),
-        })
-        : taskProgressStateLabel(task);
+    if (task.state === "done") {
+      if (!task.current) return tr("gui.task.current_progress_completed", "Task finished.");
+      return taskOutcomeNeedsAttention(task)
+        ? tr("gui.task.finished_with_issues", "Finished with issues")
+        : tr("gui.task.current_progress_completed_short", "Complete");
     }
-    if (task.current) {
-      if (task.state === "done") {
-        return taskOutcomeNeedsAttention(task)
-          ? tr("gui.task.finished_with_issues", "Finished with issues")
-          : tr("gui.task.current_progress_completed_short", "Complete");
+    if (!hasTaskCurrentProgress(task)) return taskProgressStateLabel(task);
+  } else {
+    if (task.scanEntries != null) {
+      return t("gui.task.current_scan_named", { name: taskCurrentLabel(task) });
+    }
+    if (task.phase === "archive_open") {
+      return tr("gui.task.phase.archive_open", "Reading archive");
+    }
+    if (!hasTaskCurrentProgress(task)) {
+      if (task.current) {
+        return t("gui.task.current_progress_pending_named", { name: taskCurrentLabel(task) });
       }
-      return taskStateLabel(task.state);
+      return tr("gui.task.current_progress_pending", "Preparing the current item.");
     }
-    return tr("gui.task.current_progress_completed", "Task finished.");
-  }
-  if (task.scanEntries != null) {
-    return t("gui.task.current_scan_named", { name: taskCurrentLabel(task) });
-  }
-  if (task.phase === "archive_open") {
-    return tr("gui.task.phase.archive_open", "Reading archive");
-  }
-  if (!hasTaskCurrentProgress(task)) {
-    if (task.current) {
-      return t("gui.task.current_progress_pending_named", { name: taskCurrentLabel(task) });
-    }
-    return tr("gui.task.current_progress_pending", "Preparing the current item.");
   }
   return t("gui.task.current_progress_known", {
     name: taskCurrentLabel(task),
@@ -794,13 +784,7 @@ export function taskResultDetailRows(task: TaskDialogModel): TaskResultDetailRow
     }
     return rows;
   }
-  if (task.state === "cancelled") {
-    rows.push({
-      label: tr("common.status", "Status"),
-      value: tr("gui.task.result_cancelled", "The task was cancelled"),
-    });
-    return rows;
-  }
+  if (task.state === "cancelled") return rows;
 
   if (task.spec.kind === "publish_macos_sfx") {
     const output = String(task.result?.primary_output ?? task.spec.output);

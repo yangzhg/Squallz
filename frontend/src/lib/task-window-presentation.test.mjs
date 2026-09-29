@@ -128,10 +128,33 @@ test("waiting task surfaces retain measured progress without rates or processing
       for (const state of ["done", "failed", "cancelled"]) {
         assert.doesNotMatch(helpers.taskProgressSummary(extractTask(state)), /\/s|\/秒/u);
       }
-      const cancelled = extractTask("cancelled");
+      for (const state of ["failed", "cancelled"]) {
+        const stopped = { ...extractTask(state), current: "reports/客户交付/Quarterly financial report.pdf" };
+        const summary = `${stopped.current} · 4 B / 10 B`;
+        assert.equal(helpers.taskCurrentProgressSummary(stopped), summary);
+        assert.equal(helpers.taskCurrentProgressPercent(stopped), 40);
+        for (const presentation of ["dialog", "panel", "window"]) {
+          const body = render(TaskProgressDialog, { props: { ...surface, presentation, task: stopped } }).body;
+          assert.ok(body.includes(summary));
+          assert.ok(body.includes(helpers.taskCurrentSectionLabel(stopped)));
+          assert.match(body, /data-task-active="false"/u);
+          assert.doesNotMatch(body, /\d+ B\/(?:s|秒)/u);
+          const unknown = { ...stopped, phase: "archive_open", currentDone: 0, currentTotal: 0 };
+          const pending = render(TaskProgressDialog, { props: { ...surface, presentation, task: unknown } }).body;
+          assert.ok(pending.includes(stopped.current));
+          assert.doesNotMatch(pending, /data-task-progress="current-file"|task-current-pending active/u);
+        }
+        const empty = { ...stopped, current: "", currentDone: 0, currentTotal: 0 };
+        assert.equal(helpers.taskCurrentSectionVisible(empty), false);
+        assert.equal(helpers.taskCurrentProgressSummary(empty), helpers.taskStateLabel(state));
+      }
+      const cancelled = { ...extractTask("cancelled"), expanded: true };
+      assert.deepEqual(helpers.taskResultDetailRows(cancelled), []);
       for (const presentation of ["dialog", "panel", "window"]) {
         const taskWindowMode = presentation === "window";
         const body = render(TaskProgressDialog, { props: { ...surface, presentation, taskWindowMode, task: cancelled } }).body;
+        assert.doesNotMatch(body, /class="task-result-details"/u);
+        assert.ok(body.includes(helpers.taskDialogResultSummary(cancelled)));
         assert.ok(body.includes(helpers.taskNextStepDetail(cancelled, taskWindowMode)));
         assert.equal(body.includes(helpers.taskReviewActionLabel(cancelled)), !taskWindowMode);
         assert.doesNotMatch(body, /data-task-active="true"/u);
