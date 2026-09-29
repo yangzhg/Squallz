@@ -67,6 +67,12 @@
     archiveOpenError,
     archiveHasSessionPassword,
     archivePasswordBookStatus,
+    archivePasswordSave,
+    archivePasswordSaveBusy,
+    archiveEncoding,
+    rememberArchivePassword,
+    cancelArchivePasswordSave,
+    clearArchivePasswordSave,
     allCurrentRowsSelected,
     cancelPasswordPrompt as cancelArchivePasswordPrompt,
     clearSelection,
@@ -589,6 +595,7 @@
   let currentArchive = $derived(archive());
   let archiveDirs = $derived(currentDirs());
   let passwordBookStatus = $derived(archivePasswordBookStatus());
+  let passwordSaveState = $derived(archivePasswordSave());
   let jobRows = $derived(tasks());
   let activeCurrentTask = $derived(activeTask());
   let jobPasswordPrompt = $derived(pendingPassword());
@@ -4550,6 +4557,14 @@
       passwordBookDetailLabel,
       passwordBookRefreshDisabledReason,
       passwordBookStatusState: passwordBookStatus.state,
+      passwordSaveState,
+      passwordBookArchiveId: currentArchive?.id ?? null,
+      passwordBookCanSave: Boolean(currentArchive && !currentArchive.read_only && passwordBookStatus.state === "ready" && passwordBookStatus.available),
+      passwordBookSaved: passwordBookStatus.saved,
+      savePasswordBook: (password) => currentArchive
+        ? rememberArchivePassword(currentArchive.path, password, archiveEncoding()) : Promise.resolve(false),
+      cancelPasswordBookSave: cancelArchivePasswordSave,
+      clearPasswordBookSave: clearArchivePasswordSave,
       refreshPasswordBookPanel,
       currentArchiveName,
       formatRegistry: registryFormats(),
@@ -13972,18 +13987,19 @@
     }
     return passwordBookStatus.saved
       ? tr("gui.settings.password_book.current_has_saved_entry", "Current archive has a saved secret-store entry")
-      : tr("gui.settings.password_book.prompt_or_save_after_unlock", "Prompt or save after unlocking this archive");
+      : tr("gui.settings.password_book.prompt_or_save_after_unlock", "Enter this archive’s password below to verify and save it.");
   }
 
   function passwordBookForgetDisabledReason(): string {
+    if (archivePasswordSaveBusy()) return tr("gui.settings.password_book.wait_for_save", "Wait for verification to finish or cancel it.");
     if (!currentArchive) return openArchiveFirstLabel();
     if (currentArchive.read_only) {
       return tr("gui.settings.password_book.nested_unavailable", "Extract the inner archive before saving or checking its password.");
     }
-    if (archiveHasSessionPassword()) return "";
     if (passwordBookStatus.state === "checking") {
       return tr("gui.settings.password_book.wait_for_status", "Wait for the password status check to finish");
     }
+    if (archiveHasSessionPassword()) return "";
     if (passwordBookStatus.state === "error") {
       return tr("gui.settings.password_book.refresh_after_failure", "Refresh password status before forgetting it");
     }
@@ -13997,6 +14013,7 @@
   }
 
   function passwordBookRefreshDisabledReason(): string {
+    if (archivePasswordSaveBusy()) return tr("gui.settings.password_book.wait_for_save", "Wait for verification to finish or cancel it.");
     if (!currentArchive) return openArchiveFirstLabel();
     if (currentArchive.read_only) {
       return tr("gui.settings.password_book.nested_unavailable", "Extract the inner archive before saving or checking its password.");

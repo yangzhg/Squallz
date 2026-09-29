@@ -12,9 +12,16 @@ import {
 } from "./ipc";
 import { t, tError } from "./i18n.svelte";
 import { pushToast, removeToastByKey } from "./toasts.svelte";
+import { cancelPasswordBookPreview, savePasswordBookPreview } from "./dev-preview-data";
 
 export const PAGE_SIZE = 500;
 export type PasswordBookStatusState = "idle" | "checking" | "ready" | "error";
+export interface PasswordSaveState {
+  phase: "idle" | "verifying" | "cancelling" | "saved" | "cancelled" | "error";
+  requestId?: string;
+  error?: ErrorDto;
+  cancelFailed?: boolean;
+}
 export type RowSelectionResult = "selected" | "stale" | "failed";
 type ArchiveViewWindow = { start: number; end: number };
 type ArchiveRefreshStatus = "idle" | "refreshing" | "error";
@@ -98,6 +105,7 @@ const store = $state({
   passwordBookState: "idle" as PasswordBookStatusState,
   passwordBookAvailable: false,
   passwordBookSaved: false,
+  passwordSave: { phase: "idle" } as PasswordSaveState,
 });
 
 let filterTimer: ReturnType<typeof setTimeout> | undefined;
@@ -219,6 +227,41 @@ export function archivePasswordBookStatus(): {
     available: store.passwordBookAvailable,
     saved: store.passwordBookSaved,
   };
+}
+
+export function archivePasswordSave(): PasswordSaveState {
+  return store.passwordSave;
+}
+
+export function archivePasswordSaveBusy(): boolean {
+  return store.passwordSave.phase === "verifying" || store.passwordSave.phase === "cancelling";
+}
+
+async function cancelPasswordSaveRequest(requestId: string): Promise<void> {
+  if (import.meta.env.DEV && typeof window !== "undefined"
+    && cancelPasswordBookPreview(new URLSearchParams(window.location.search), requestId)) return;
+  await ipc.cancelPasswordSave(requestId);
+}
+
+export async function cancelArchivePasswordSave(): Promise<void> {
+  const requestId = store.passwordSave.requestId;
+  if (!requestId || !archivePasswordSaveBusy()) return;
+  store.passwordSave = { phase: "cancelling", requestId };
+  try {
+    await cancelPasswordSaveRequest(requestId);
+    // The save response decides the outcome, including a write already in progress.
+  } catch {
+    if (store.passwordSave.requestId === requestId && archivePasswordSaveBusy()) {
+      store.passwordSave = { phase: "verifying", requestId, cancelFailed: true };
+    }
+  }
+}
+
+export function clearArchivePasswordSave(): void {
+  if (store.passwordSave.phase === "idle") return;
+  const requestId = archivePasswordSaveBusy() ? store.passwordSave.requestId : undefined;
+  store.passwordSave = { phase: "idle" };
+  if (requestId) void cancelPasswordSaveRequest(requestId).catch(() => undefined);
 }
 
 /** Active archive-wide name encoding override, if the user selected one. */
@@ -511,6 +554,7 @@ export function closeArchive(): void {
 }
 
 function clearPasswordBookStatus(): void {
+  clearArchivePasswordSave();
   store.passwordBookGeneration += 1;
   store.passwordBookState = "idle";
   store.passwordBookAvailable = false;
@@ -538,7 +582,7 @@ export async function refreshArchivePasswordBookStatus(path = store.info?.path):
     clearPasswordBookStatus();
     return;
   }
-  if (store.info?.path !== path) return;
+  if (store.info?.path !== path || archivePasswordSaveBusy()) return;
   const generation = ++store.passwordBookGeneration;
   store.passwordBookState = "checking";
   try {
@@ -564,31 +608,47 @@ export async function rememberArchivePassword(
   password: string,
   encoding?: string | null,
 ): Promise<boolean> {
+  const current = store.info;
+  if (!password || !current || current.path !== path || current.read_only
+    || store.passwordBookState !== "ready" || !store.passwordBookAvailable || archivePasswordSaveBusy()) return false;
+  const requestId = nextArchiveOpenRequestId();
+  const isCurrent = () => store.info?.id === current.id && store.info?.path === path
+    && store.passwordSave.requestId === requestId;
+  const generation = ++store.passwordBookGeneration;
+  store.passwordSave = { phase: "verifying", requestId };
   try {
-    const status = await ipc.rememberArchivePassword(path, password, encoding ?? null);
-    if (store.info?.path === path) {
+    const preview = import.meta.env.DEV && typeof window !== "undefined"
+      ? savePasswordBookPreview(new URLSearchParams(window.location.search), requestId, password) : null;
+    const status = await (preview ?? ipc.rememberArchivePassword(path, password, encoding ?? null, requestId));
+    if (store.info?.id === current.id && store.info?.path === path && store.passwordBookGeneration === generation) {
       store.passwordBookGeneration += 1;
       store.passwordBookAvailable = status.available;
       store.passwordBookSaved = status.saved;
       store.passwordBookState = "ready";
+      store.sessionPasswordKnown = true;
     }
-    pushToast({ kind: "success", title: t("gui.password.saved") });
+    if (!isCurrent()) return false;
+    store.passwordSave = { phase: "saved", requestId };
     return true;
   } catch (e) {
-    if (isErrorDto(e)) {
-      pushToast({ kind: "danger", title: tError(e), detail: e.detail });
-    } else {
-      pushToast({ kind: "danger", title: String(e) });
-    }
+    if (!isCurrent()) return false;
+    store.passwordSave = isErrorDto(e) && e.key === "error.cancelled"
+      ? { phase: "cancelled", requestId }
+      : { phase: "error", requestId, error: isErrorDto(e) ? e : { key: "gui.settings.password_book.save_failed", params: {}, detail: "" } };
     return false;
   }
 }
 
 export async function forgetCurrentArchivePassword(): Promise<boolean> {
-  const path = store.info?.path;
-  if (!path || store.info?.read_only) return false;
+  const current = store.info;
+  if (!current || current.read_only || archivePasswordSaveBusy() || store.passwordBookState === "checking") return false;
+  const { path, id } = current;
+  const generation = ++store.passwordBookGeneration;
+  store.passwordBookState = "checking";
+  clearArchivePasswordSave();
   try {
     const status = await ipc.forgetArchivePassword(path);
+    if (store.info?.id !== id || store.passwordBookGeneration !== generation) return false;
     if (store.info?.path === path) {
       store.sessionPasswordKnown = false;
       store.passwordBookGeneration += 1;
@@ -599,6 +659,8 @@ export async function forgetCurrentArchivePassword(): Promise<boolean> {
     pushToast({ kind: "success", title: t("gui.password.forgotten") });
     return true;
   } catch (e) {
+    if (store.info?.id !== id || store.passwordBookGeneration !== generation) return false;
+    store.passwordBookState = "error";
     if (isErrorDto(e)) {
       pushToast({ kind: "danger", title: tError(e), detail: e.detail });
     } else {
@@ -1088,6 +1150,7 @@ export function installArchivePreview(
     previewRows?: EntryDto[];
   },
 ): void {
+  clearArchivePasswordSave();
   store.openGeneration += 1;
   installValidationArchiveCallCounters();
   store.info = info;

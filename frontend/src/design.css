@@ -11,6 +11,7 @@
   --space-md: 12px;
   --space-lg: 16px;
   --control-height: 32px;
+  --password-book-panel-width: 780px;
   --control-height-compact: 28px;
   --control-icon-size: 22px;
   --control-radius: 7px;
@@ -8966,8 +8967,109 @@ input.secure-input {
   word-break: normal;
 }
 
-.settings-metric-grid,
-.password-book-grid {
+.password-book-layout {
+  display: block;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+}
+
+.password-book-panel {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: var(--password-book-panel-width);
+  display: grid;
+  gap: var(--space-lg);
+  overflow: visible;
+}
+
+.password-book-context,
+.password-book-form {
+  display: grid;
+  min-width: 0;
+  gap: var(--space-sm);
+}
+
+.password-book-panel :is(p, strong, span, label, summary) {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.password-book-panel p {
+  margin: 0;
+  font-size: var(--type-control);
+  line-height: var(--type-control-line);
+}
+
+.password-book-context > strong {
+  font-size: var(--type-title);
+  color: var(--color-text-primary);
+}
+
+.password-book-context > span,
+.password-book-details > p,
+.password-book-form > #password-book-help {
+  font-size: var(--type-control);
+  color: var(--color-text-secondary);
+}
+
+.password-book-actions,
+.password-book-status {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+}
+
+.password-book-actions > button {
+  min-height: var(--control-height);
+  gap: var(--space-sm);
+}
+
+.password-book-panel .settings-actions-row {
+  margin: 0;
+}
+
+.password-book-status:empty {
+  display: none;
+}
+
+.password-book-details {
+  min-width: 0;
+  border-top: var(--border-width-control) solid var(--color-border-default);
+  padding-top: var(--space-md);
+}
+
+.password-book-details > summary {
+  cursor: pointer;
+  color: var(--color-text-secondary);
+}
+
+.password-book-details > summary:hover {
+  color: var(--color-text-primary);
+}
+
+.password-book-details > summary:focus-visible {
+  outline: var(--border-width-focus) solid var(--color-accent);
+  outline-offset: var(--border-width-focus);
+  border-radius: var(--control-radius);
+}
+
+.password-book-details > :not(summary) {
+  margin-top: var(--space-md);
+}
+
+.password-book-details > .limits-table {
+  overflow-x: auto;
+}
+
+.password-book-details .limits-table :is(span, strong) {
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+}
+
+.settings-metric-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 10px;
@@ -8978,8 +9080,7 @@ input.secure-input {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
-.settings-metric-grid div,
-.password-book-grid div {
+.settings-metric-grid div {
   min-width: 0;
   padding: 12px;
   border: 1px solid var(--color-border-default);
@@ -8989,30 +9090,24 @@ input.secure-input {
 
 .settings-metric-grid span,
 .settings-metric-grid strong,
-.settings-metric-grid small,
-.password-book-grid span,
-.password-book-grid strong,
-.password-book-grid small {
+.settings-metric-grid small {
   display: block;
 }
 
-.settings-metric-grid span,
-.password-book-grid span {
+.settings-metric-grid span {
   color: var(--color-text-secondary);
   font-size: var(--type-control);
   font-weight: var(--font-weight-medium);
   text-transform: uppercase;
 }
 
-.settings-metric-grid strong,
-.password-book-grid strong {
+.settings-metric-grid strong {
   margin-top: 5px;
   color: var(--color-text-primary);
   font-size: var(--type-metric);
 }
 
-.settings-metric-grid small,
-.password-book-grid small {
+.settings-metric-grid small {
   margin-top: 4px;
   color: var(--color-text-secondary);
   font-size: var(--type-control);
@@ -13207,8 +13302,7 @@ select.classic-input:focus {
 
   .extract-plan-metrics,
   .batch-summary-strip,
-  .settings-metric-grid,
-  .password-book-grid {
+  .settings-metric-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
@@ -14515,7 +14609,6 @@ select.classic-input:focus {
   .number-field,
   .number-field input,
   .settings-metric-grid div,
-  .password-book-grid div,
   .level-control,
   .checksum-result-panel,
   .task-checksum-result,

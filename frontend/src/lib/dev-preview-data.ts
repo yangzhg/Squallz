@@ -7,7 +7,33 @@ import type {
   NestedArchivePreviewDto,
   NestedArchivePasswords,
   QueueWaitReason,
+  PasswordBookStatus,
 } from "./ipc";
+
+const passwordBookPreviewRequests = new Map<string, () => void>();
+
+export function savePasswordBookPreview(params: URLSearchParams, requestId: string, password: string): Promise<PasswordBookStatus> | null {
+  if (!import.meta.env.DEV || params.get("previewPasswordBook") !== "1") return null;
+  const valid = password === "book-preview";
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      passwordBookPreviewRequests.delete(requestId);
+      if (valid) resolve({ available: true, saved: true });
+      else reject({ key: "error.wrong_password", params: {}, detail: "" });
+    }, 1800);
+    passwordBookPreviewRequests.set(requestId, () => {
+      clearTimeout(timer);
+      passwordBookPreviewRequests.delete(requestId);
+      reject({ key: "error.cancelled", params: {}, detail: "" });
+    });
+  });
+}
+
+export function cancelPasswordBookPreview(params: URLSearchParams, requestId: string): boolean {
+  if (!import.meta.env.DEV || params.get("previewPasswordBook") !== "1") return false;
+  passwordBookPreviewRequests.get(requestId)?.();
+  return true;
+}
 
 export interface ArchivePreview {
   info: ArchiveInfo;
@@ -498,7 +524,7 @@ function readArchivePreview(params: URLSearchParams, pageSize: number): ArchiveP
   if (params.get("previewArchive") !== "1") return null;
 
   const format = (params.get("previewFormat") ?? "zip").toLowerCase();
-  const name = `product-backup.${format}`;
+  const name = params.get("previewArchiveName") || `product-backup.${format}`;
   const entries = [
     ...archivePreviewEntries,
     ...(params.get("previewLinks") === "1" ? linkPreviewItems : []),

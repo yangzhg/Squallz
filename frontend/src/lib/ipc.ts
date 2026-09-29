@@ -850,8 +850,10 @@ export const ipc = {
     invoke<void>("answer_password", { id, questionVersion, password }),
   archivePasswordStatus: (path: string) =>
     invoke<PasswordBookStatus>("archive_password_status", { path }),
-  rememberArchivePassword: (path: string, password: string, encoding?: string | null) =>
-    invoke<PasswordBookStatus>("remember_archive_password", { path, password, encoding }),
+  rememberArchivePassword: (path: string, password: string, encoding: string | null, requestId: string) =>
+    invoke<PasswordBookStatus>("remember_archive_password", { path, password, encoding, requestId }),
+  cancelPasswordSave: (requestId: string) =>
+    invoke<void>("cancel_password_save", { requestId }),
   forgetArchivePassword: (path: string) =>
     invoke<PasswordBookStatus>("forget_archive_password", { path }),
   isValidationSession: () => invoke<boolean>("is_validation_session"),

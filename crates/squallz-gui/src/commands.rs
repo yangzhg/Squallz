@@ -31,7 +31,7 @@ use squallz_i18n::Localizer;
 
 use crate::audit::{OperationAudit, OperationAuditRecord};
 use crate::create_preflight::{
-    DestinationInspectionProgress, PreflightRequestKind, PreflightRequests,
+    DestinationInspectionProgress, PreflightRequestKind, PreflightRequestLease, PreflightRequests,
 };
 use crate::dto::{
     normalize_performance_stream_buffer_limit, ArchiveInfo, BatchExtractItem,
@@ -268,14 +268,17 @@ fn remember_archive_password_impl(
     password: &str,
     encoding: Option<&str>,
     limits: SafetyLimits,
+    request: &PreflightRequestLease,
 ) -> Result<PasswordBookStatusDto, ErrorDto> {
+    let control = request.control();
+    control.checkpoint().map_err(ErrorDto::from)?;
     if !secrets.is_available() {
         return Err(ErrorDto::secret_store(
             "persistent secret storage is not available on this platform",
         ));
     }
     if !state
-        .verify_password(path, password, encoding, limits)
+        .verify_password(path, password, encoding, limits, &control)
         .map_err(ErrorDto::from)?
     {
         return Err(ErrorDto {
@@ -284,6 +287,7 @@ fn remember_archive_password_impl(
             detail: String::new(),
         });
     }
+    request.begin_commit().map_err(ErrorDto::from)?;
     secrets
         .set_archive_password(path, password)
         .map_err(|error| ErrorDto::secret_store(error.to_string()))?;
@@ -1820,29 +1824,54 @@ pub async fn archive_password_status(
 
 /// Verifies and saves the current archive password in the platform store.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)] // Tauri state and window-scoped save request.
 pub async fn remember_archive_password(
+    window: WebviewWindow,
     state: State<'_, Arc<AppState>>,
     secrets: State<'_, SharedSecretStore>,
     settings: State<'_, Arc<SettingsStore>>,
+    requests: State<'_, Arc<PreflightRequests>>,
     path: String,
     password: String,
     encoding: Option<String>,
+    request_id: String,
 ) -> Result<PasswordBookStatusDto, ErrorDto> {
     let state = Arc::clone(state.inner());
     let secrets = Arc::clone(secrets.inner());
     let limits = settings.get().safety_limits();
+    let request = requests.begin_request(
+        PreflightRequestKind::PasswordSave,
+        window.label(),
+        &request_id,
+    );
+    let password = Password::new(password);
     tauri::async_runtime::spawn_blocking(move || {
         remember_archive_password_impl(
             state.as_ref(),
             secrets.as_ref(),
             Path::new(&path),
-            &password,
+            password.expose(),
             encoding.as_deref(),
             limits,
+            &request,
         )
     })
     .await
     .map_err(|error| ErrorDto::other(format!("password-book save task failed: {error}")))?
+}
+
+/// Requests cancellation while this window's password verification is active.
+#[tauri::command]
+pub fn cancel_password_save(
+    window: WebviewWindow,
+    requests: State<'_, Arc<PreflightRequests>>,
+    request_id: String,
+) {
+    requests.cancel(
+        PreflightRequestKind::PasswordSave,
+        window.label(),
+        &request_id,
+    );
 }
 
 /// Forgets the current archive password from both Keychain and session cache.
@@ -4325,6 +4354,7 @@ mod tests {
             "wrong",
             None,
             SafetyLimits::default(),
+            &password_save_request(),
         )
         .unwrap_err();
         assert_ne!(
@@ -4341,6 +4371,7 @@ mod tests {
             "secret",
             None,
             SafetyLimits::default(),
+            &password_save_request(),
         )
         .unwrap();
         assert!(saved.available);
@@ -4374,6 +4405,45 @@ mod tests {
         assert!(state.password_for(&archive).is_none());
 
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn password_save_request() -> crate::create_preflight::PreflightRequestLease {
+        Arc::new(crate::create_preflight::PreflightRequests::default()).begin_anonymous_request(
+            crate::create_preflight::PreflightRequestKind::PasswordSave,
+            "test-window",
+        )
+    }
+
+    #[test]
+    fn cancelled_password_save_preserves_existing_credentials() {
+        let dir = temp_dir("password-book-cancel");
+        let archive = make_header_encrypted_7z(&dir);
+        let state = AppState::new();
+        let secrets = MemorySecretStore::new();
+        secrets.insert(archive.clone(), "saved");
+        let request = password_save_request();
+        request.control().cancel();
+        let error = remember_archive_password_impl(
+            &state,
+            &secrets,
+            &archive,
+            "secret",
+            None,
+            SafetyLimits::default(),
+            &request,
+        )
+        .unwrap_err();
+        assert_eq!(error.key, "error.cancelled");
+        assert_eq!(
+            secrets
+                .get_archive_password(&archive)
+                .unwrap()
+                .as_ref()
+                .map(Password::expose),
+            Some("saved")
+        );
+        assert!(state.password_for(&archive).is_none());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -4424,6 +4494,7 @@ mod tests {
                 "wrong",
                 None,
                 SafetyLimits::default(),
+                &password_save_request(),
             )
             .unwrap_err();
             assert_eq!(
@@ -4449,6 +4520,7 @@ mod tests {
                     max_output_bytes: 1,
                     ..SafetyLimits::default()
                 },
+                &password_save_request(),
             )
             .unwrap_err();
             assert_eq!(error.key, "error.resource_limit");
@@ -4462,6 +4534,7 @@ mod tests {
                     "correct",
                     None,
                     SafetyLimits::default(),
+                    &password_save_request(),
                 )
                 .unwrap()
                 .saved
@@ -4473,6 +4546,7 @@ mod tests {
                 "wrong",
                 None,
                 SafetyLimits::default(),
+                &password_save_request(),
             )
             .is_err());
             assert_eq!(

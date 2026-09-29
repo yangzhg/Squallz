@@ -767,13 +767,14 @@ impl AppState {
         password: &str,
         encoding: Option<&str>,
         limits: SafetyLimits,
+        control: &ControlToken,
     ) -> Result<bool, FormatError> {
         let open_opts = OpenOptions {
             password: Some(Password::new(password)),
             encoding_override: encoding.map(str::to_owned),
         };
         self.engine
-            .verify_password(path, &open_opts, limits, &ControlToken::default())
+            .verify_password(path, &open_opts, limits, control)
     }
 
     /// Caches a working password for the session (zeroized on exit).

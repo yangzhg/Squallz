@@ -7,7 +7,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::json;
-use squallz_core::api::{ControlToken, EntryPath, ProgressSink};
+use squallz_core::api::{ControlToken, EntryPath, FormatError, ProgressSink};
 
 use crate::events::EventSink;
 use squallz_core::lock_unpoisoned;
@@ -31,6 +31,7 @@ pub(crate) enum PreflightRequestKind {
     ConvertPlan,
     ExtractPlan,
     OpenArchive,
+    PasswordSave,
 }
 
 /// Owns cancellation tokens for preflight requests. The request kind, window
@@ -206,6 +207,11 @@ impl PreflightRequests {
         let token = {
             let mut registry = lock_unpoisoned(&self.registry);
             let token = registry.active.get(&key).cloned();
+            if let Some(token) = &token {
+                // Serialize cancellation with the boundary before a request
+                // publishes an irreversible result.
+                token.cancel();
+            }
             if token.is_none()
                 && !registry.shutting_down
                 && !registry.released_windows.contains(owner)
@@ -215,12 +221,7 @@ impl PreflightRequests {
             }
             token
         };
-        if let Some(token) = token {
-            token.cancel();
-            true
-        } else {
-            false
-        }
+        token.is_some()
     }
 
     #[cfg(test)]
@@ -323,6 +324,26 @@ impl PreflightRequestLease {
     pub(crate) fn control(&self) -> Arc<ControlToken> {
         Arc::clone(&self.token)
     }
+
+    /// Ends cancellable work before publishing its result. The lease still
+    /// tracks the worker so shutdown waits for the publication to finish.
+    pub(crate) fn begin_commit(&self) -> Result<(), FormatError> {
+        let key = (self.owner.clone(), self.kind, self.request_id.clone());
+        let mut registry = lock_unpoisoned(&self.requests.registry);
+        if registry.shutting_down
+            || registry.released_windows.contains(&self.owner)
+            || self.token.is_cancelled()
+            || !registry
+                .active
+                .get(&key)
+                .is_some_and(|current| Arc::ptr_eq(current, &self.token))
+        {
+            return Err(FormatError::Cancelled);
+        }
+        registry.active.remove(&key);
+        registry.remember_completed(key);
+        Ok(())
+    }
 }
 
 impl Drop for PreflightRequestLease {
@@ -411,6 +432,41 @@ impl ProgressSink for DestinationInspectionProgress {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cancelled_or_released_requests_cannot_begin_commit() {
+        let requests = Arc::new(PreflightRequests::default());
+        let kind = PreflightRequestKind::PasswordSave;
+        requests.cancel(kind, "main", "early");
+        let early = requests.begin_request(kind, "main", "early");
+        assert!(matches!(early.begin_commit(), Err(FormatError::Cancelled)));
+        let active = requests.begin_request(kind, "main", "active");
+        requests.cancel(kind, "main", "active");
+        assert!(matches!(active.begin_commit(), Err(FormatError::Cancelled)));
+        let closed = requests.begin_request(kind, "main", "closed");
+        requests.release_window("main");
+        assert!(matches!(closed.begin_commit(), Err(FormatError::Cancelled)));
+    }
+
+    #[test]
+    fn commit_finishes_despite_late_cancel_and_remains_inflight_until_drop() {
+        let requests = Arc::new(PreflightRequests::default());
+        let kind = PreflightRequestKind::PasswordSave;
+        let request = requests.begin_request(kind, "main", "save");
+        request.begin_commit().unwrap();
+        assert!(!requests.cancel(kind, "main", "save"));
+        assert_eq!(requests.release_window("main"), 0);
+        assert_eq!(requests.cancel_all(), 0);
+        assert!(!request.control().is_cancelled());
+        assert!(matches!(
+            request.begin_commit(),
+            Err(FormatError::Cancelled)
+        ));
+        assert_eq!(lock_unpoisoned(&requests.registry).inflight.len(), 1);
+        drop(request);
+        assert!(lock_unpoisoned(&requests.registry).inflight.is_empty());
+        requests.wait_idle();
+    }
 
     #[derive(Default)]
     struct RecordingEvents {

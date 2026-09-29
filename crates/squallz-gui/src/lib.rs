@@ -137,6 +137,7 @@ pub fn run() {
             commands::answer_password,
             commands::archive_password_status,
             commands::remember_archive_password,
+            commands::cancel_password_save,
             commands::forget_archive_password,
             commands::take_open_files,
             commands::open_file_listener_ready,

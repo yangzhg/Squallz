@@ -16,6 +16,7 @@
     Screen,
   } from "../lib/ui-model";
   import type { UiMode } from "../lib/uiMode.svelte";
+  import type { PasswordSaveState } from "../lib/archive.svelte";
 
   export type SettingsScreen = Extract<
     Screen,
@@ -151,6 +152,13 @@
     passwordBookDetailLabel: () => string;
     passwordBookRefreshDisabledReason: () => string;
     passwordBookStatusState: string;
+    passwordSaveState: PasswordSaveState;
+    passwordBookArchiveId: number | null;
+    passwordBookCanSave: boolean;
+    passwordBookSaved: boolean;
+    savePasswordBook: (password: string) => Promise<boolean>;
+    cancelPasswordBookSave: () => Promise<void>;
+    clearPasswordBookSave: () => void;
     refreshPasswordBookPanel: () => void | Promise<void>;
     currentArchiveName: () => string;
     formatRegistry: FormatDto[];
@@ -163,7 +171,8 @@
 </script>
 
 <script lang="ts">
-  import { untrack } from "svelte";
+  import { onDestroy, tick, untrack } from "svelte";
+  import { tError } from "../lib/i18n.svelte";
   import Icon from "./Icon.svelte";
   import IntegrationHealthPanel from "./IntegrationHealthPanel.svelte";
   import SettingsSaveAction from "./SettingsSaveAction.svelte";
@@ -289,6 +298,13 @@
     passwordBookDetailLabel,
     passwordBookRefreshDisabledReason,
     passwordBookStatusState,
+    passwordSaveState,
+    passwordBookArchiveId,
+    passwordBookCanSave,
+    passwordBookSaved,
+    savePasswordBook,
+    cancelPasswordBookSave,
+    clearPasswordBookSave,
     refreshPasswordBookPanel,
     currentArchiveName,
     formatRegistry,
@@ -298,6 +314,50 @@
     showMacosIntegrationDiagnostics,
     onNotice,
   }: SettingsWorkspaceProps = $props();
+
+  let passwordValue = $state("");
+  let passwordInput = $state<HTMLInputElement | null>(null);
+  let passwordEmptyError = $state(false);
+  let passwordFormGeneration = 0;
+  const passwordFormIdentity = $derived(screen === "passwordBook" ? `password-book:${passwordBookArchiveId}` : null);
+  let passwordSaveBusy = $derived(passwordSaveState.phase === "verifying" || passwordSaveState.phase === "cancelling");
+  let passwordSaveError = $derived(passwordEmptyError
+    ? tr("gui.password.empty_error", "Enter a password to continue.")
+    : passwordSaveState.error?.key === "error.wrong_password"
+      ? tr("gui.password.wrong", "Wrong password. Please try again.")
+      : passwordSaveState.error ? tError(passwordSaveState.error) : "");
+
+  $effect(() => {
+    // Clear sensitive input and invalidate work when this settings surface changes.
+    void passwordFormIdentity;
+    untrack(() => {
+      passwordValue = "";
+      passwordEmptyError = false;
+      passwordFormGeneration += 1;
+      clearPasswordBookSave();
+    });
+  });
+
+  onDestroy(() => {
+    passwordFormGeneration += 1;
+    clearPasswordBookSave();
+  });
+
+  async function submitPasswordBook(event: SubmitEvent): Promise<void> {
+    event.preventDefault();
+    if (passwordSaveBusy || !passwordBookCanSave) return;
+    passwordEmptyError = passwordValue.length === 0;
+    if (passwordEmptyError) {
+      passwordInput?.focus();
+      return;
+    }
+    const generation = passwordFormGeneration;
+    const pending = savePasswordBook(passwordValue);
+    passwordValue = "";
+    const saved = await pending;
+    await tick();
+    if (!saved && screen === "passwordBook" && generation === passwordFormGeneration) passwordInput?.focus();
+  }
 
   const featuredFormatIds = ["zip", "7z", "sqz", "tar.zst", "wim", "rar", "dmg", "iso"];
   const longTailBridgeFormatIds = new Set([
@@ -1957,7 +2017,7 @@
       <div>
         <span class="eyebrow">{tr("gui.settings.password_book.eyebrow", "Settings / Password Book")}</span>
         <h1>{tr("gui.settings.password_book.title", "Saved archive passwords")}</h1>
-        <p>{tr("gui.settings.password_book.subtitle", "Squallz stores saved archive passwords only through the system secret store boundary.")}</p>
+        <p>{tr("gui.settings.password_book.subtitle", "Save a verified password in your system password store for the next time you open this archive.")}</p>
       </div>
       <button
         class="sheet-action"
@@ -1971,16 +2031,53 @@
       ><Icon name="lock" size={17} />{tr("gui.settings.password_book.forget_current", "Forget current archive")}</button>
     </div>
 
-    <div class="settings-layout">
-      <section class="settings-main-panel">
-        <div class="password-book-grid">
-          <div><span>{tr("gui.settings.password_book.secret_store", "Secret store")}</span><strong>{passwordBookSecretStoreLabel()}</strong><small>{tr("gui.settings.password_book.secret_store_detail", "{platform} uses {secretStore} when it is available").replace("{platform}", platformNameLabel()).replace("{secretStore}", secretStoreLabel())}</small></div>
-          <div><span>{tr("gui.settings.password_book.current_archive", "Current archive")}</span><strong>{passwordBookCurrentLabel()}</strong><small>{passwordBookDetailLabel()}</small></div>
-          <div><span>{tr("gui.settings.password_book.saved_secret_access", "Saved secret access")}</span><strong>{tr("gui.settings.password_book.status_only", "Status only")}</strong><small>{tr("gui.settings.password_book.saved_secret_never_returns", "Saved secret values never return to the interface")}</small></div>
+    <div class="password-book-layout">
+      <section class="settings-main-panel password-book-panel" aria-label={tr("gui.settings.password_book.current_archive", "Current archive")}>
+        <div class="password-book-context">
+          <span>{tr("gui.settings.password_book.current_archive", "Current archive")}</span>
+          <strong>{currentArchiveName()}</strong>
+          {#if passwordBookArchiveId !== null}<span>{passwordBookCurrentLabel()}</span>{/if}
+          <p id="password-book-detail">{passwordBookDetailLabel()}</p>
         </div>
+        {#if passwordBookCanSave}
+          <form class="password-book-form" onsubmit={submitPasswordBook}>
+            <label for="password-book-value">{tr("gui.settings.password_book.password_label", "Archive password")}</label>
+            <input id="password-book-value" class="secure-input" type="password" autocomplete="current-password"
+              bind:this={passwordInput} bind:value={passwordValue} disabled={passwordSaveBusy}
+              aria-invalid={Boolean(passwordSaveError)} aria-describedby={passwordSaveError ? "password-book-error password-book-help" : "password-book-help"}
+              oninput={() => { passwordEmptyError = false; if (!passwordSaveBusy) clearPasswordBookSave(); }} />
+            <p id="password-book-help">{tr("gui.settings.password_book.verify_help", "The password is checked before saving. This may take a while for large or solid archives.")}</p>
+            <div class="password-book-actions">
+              <button class="primary-lite" type="submit" disabled={passwordSaveBusy} aria-busy={passwordSaveBusy}>
+                <Icon name="lock" size={17} />
+                {passwordBookSaved ? tr("gui.settings.password_book.replace_password", "Verify and replace") : tr("gui.settings.password_book.save_password", "Verify and save")}
+              </button>
+              {#if passwordSaveBusy}
+                <button class="secondary-lite" type="button" disabled={passwordSaveState.phase === "cancelling"} onclick={() => void cancelPasswordBookSave()}>{tr("gui.common.cancel", "Cancel")}</button>
+              {/if}
+            </div>
+            {#if passwordSaveError}
+              <p class="password-inline-error" id="password-book-error" role="alert">{passwordSaveError}</p>
+            {/if}
+            {#if passwordSaveState.cancelFailed}
+              <p class="password-inline-error" role="alert">{tr("gui.settings.password_book.cancel_failed", "Could not request cancellation. Try Cancel again or wait for the result.")}</p>
+            {/if}
+            <div class="password-book-status" role="status" aria-live="polite" aria-atomic="true">
+              {#if passwordSaveState.phase === "verifying"}
+                <Icon name="hourglass" size={17} /><span>{tr("gui.settings.password_book.verifying", "Verifying password and saving…")}</span>
+              {:else if passwordSaveState.phase === "cancelling"}
+                <Icon name="hourglass" size={17} /><span>{tr("gui.settings.password_book.cancelling", "Cancellation requested. Waiting for the save result…")}</span>
+              {:else if passwordSaveState.phase === "saved"}
+                <Icon name="check" size={17} /><span>{tr("gui.password.saved", "Password saved in the system password store")}</span>
+              {:else if passwordSaveState.phase === "cancelled"}
+                <span>{tr("gui.settings.password_book.save_cancelled", "Verification cancelled. The saved password has not changed.")}</span>
+              {/if}
+            </div>
+          </form>
+        {/if}
         <div class="settings-actions-row">
           <button
-            class="primary-lite"
+            class="secondary-lite"
             disabled={Boolean(passwordBookRefreshDisabledReason())}
             aria-busy={passwordBookStatusState === "checking"}
             title={passwordBookRefreshDisabledReason()}
@@ -1990,18 +2087,22 @@
             )}
             onclick={() => void refreshPasswordBookPanel()}
           >{tr("gui.settings.password_book.refresh_status", "Refresh status")}</button>
-          <span>{currentArchiveName()}</span>
+          <span>{secretStoreLabel()} · {passwordBookSecretStoreLabel()}</span>
         </div>
-        <div class="limits-table">
+        <details class="password-book-details">
+          <summary>{tr("gui.settings.password_book.how_passwords_work", "How saved passwords work")}</summary>
+          <p>{tr("gui.settings.password_book.secret_store_detail", "{platform} uses {secretStore} when it is available").replace("{platform}", platformNameLabel()).replace("{secretStore}", secretStoreLabel())}</p>
+          <div class="limits-table">
           <div><b>{tr("gui.settings.password_book.source", "Source")}</b><b>{tr("gui.settings.password_book.priority", "Priority")}</b><b>{tr("gui.settings.password_book.stored_where", "Stored where")}</b><b>{tr("gui.settings.password_book.failure_behavior", "Failure behavior")}</b></div>
           <div><span>{tr("gui.settings.password_book.manual_prompt", "Manual prompt")}</span><span>1</span><span>{tr("gui.settings.password_book.transient_input", "Transient input")}</span><strong>{tr("gui.settings.password_book.retry_prompt", "Retry prompt")}</strong></div>
           <div><span>{tr("gui.settings.password_book.session_cache", "Session cache")}</span><span>2</span><span>{tr("gui.settings.password_book.process_memory", "Process memory")}</span><strong>{tr("gui.settings.password_book.cleared_on_exit", "Cleared when Squallz exits")}</strong></div>
           <div><span>{secretStoreLabel()}</span><span>3</span><span>{tr("gui.settings.password_book.system_secret_store", "System secret store")}</span><strong>{tr("gui.settings.password_book.fallback_prompt", "Fallback to prompt")}</strong></div>
-        </div>
+          </div>
         <div class="setting-callout">
           <strong>{tr("gui.settings.password_book.no_plaintext_storage_title", "Saved passwords stay out of app files and logs")}</strong>
           <span>{tr("gui.settings.password_book.no_plaintext_storage_body", "Squallz never displays or exports saved password material.")}</span>
         </div>
+        </details>
       </section>
     </div>
   </div>
