@@ -117,6 +117,7 @@ async function passwordRefreshActions(archive) {
     workspacePasswordSubmissionAttempted: false, standalonePasswordFocusedInput: null,
     archiveOpenStatus: "idle", archiveOpenGeneration: 7, archivePasswordAttempt: 0,
     archivePickerRequest: null,
+    archiveUpdateReview: { cancelSourceChoice() {} },
     archiveEditKind: "rename", renameTargetName: "kept.txt",
     archiveEditContext: { source: info().source, encoding: "gbk", generation: 7, id: 1 },
     taskDialogVisible: () => false, macosSfxPublisherTask: null,

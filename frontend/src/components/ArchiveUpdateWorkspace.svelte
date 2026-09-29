@@ -24,7 +24,7 @@
   function issueLabel(issue: UpdateIssue): string {
     if (issue.kind === "selection") return surface.tr("gui.update_review.select", "Select at least one change to apply.");
     if (issue.kind === "level") return surface.tr("gui.update_review.level_invalid", "Enter a whole compression level from 0 to 9.");
-    if (issue.kind === "unchanged") return surface.tr("gui.rename.target_must_differ", "Rename target must differ from source");
+    if (issue.kind === "unchanged") return surface.tr("gui.rename.target_must_differ", "The name is unchanged. Enter a different name or path.");
     if (issue.kind === "path") return surface.tr("gui.update_review.path_invalid", "Use a path inside the archive without parent references (..) or reserved file names and characters.");
     return surface.tr("gui.update_review.path_empty", "Enter a path for this change.");
   }
@@ -37,6 +37,23 @@
     visibleCount = Math.max(visibleCount, index + 1);
     await tick();
     document.getElementById(review.issue.field)?.focus();
+  }
+
+  async function chooseSource(id: number, kind: "file" | "folder") {
+    const trigger = document.activeElement instanceof HTMLButtonElement ? document.activeElement : null;
+    await surface.onChooseSource(id, kind);
+    await tick();
+    if (trigger?.isConnected && !trigger.disabled && document.activeElement === document.body) {
+      trigger.focus({ preventScroll: true });
+    }
+  }
+
+  function sourceFeedback(id: number): string {
+    if (review.sourcePicking === id) return surface.tr("gui.update_review.source_choosing", "Choose a replacement source in the file dialog.");
+    if (review.sourceFeedback?.id !== id) return "";
+    if (review.sourceFeedback.kind === "failed") return surface.tr("gui.update_review.source_failed", "Could not open the chooser. The source was kept. Try again or edit the path here.");
+    if (review.sourceFeedback.kind === "cancelled") return surface.tr("gui.update_review.source_cancelled", "Selection cancelled. The source was kept.");
+    return surface.tr("gui.update_review.source_selected", "Source replaced. Review the changes before applying them.");
   }
 </script>
 
@@ -56,7 +73,7 @@
           <Icon name="archive" size={16} />{surface.archiveReturn.actionLabel}
         </button>
       {/if}
-      <button class="primary" disabled={review.pending || review.selectedCount() === 0} onclick={submit}>
+      <button class="primary" disabled={review.pending || review.sourcePicking !== null || review.selectedCount() === 0} onclick={submit}>
         <Icon name="check" size={16} />{review.pending ? surface.tr("gui.task_center.submitting", "Adding to the queue…") : surface.tr("gui.update_review.apply", "Apply selected changes")}
       </button>
     </div>
@@ -69,7 +86,7 @@
         {#each draft.operations.slice(0, visibleCount) as row (row.id)}
           <li class="operation-card">
             <label class="operation-toggle">
-              <input type="checkbox" checked={row.enabled} disabled={review.pending}
+              <input type="checkbox" checked={row.enabled} disabled={review.pending || review.sourcePicking === row.id}
                 aria-label={`${operationLabel(row.kind)} · ${row.source || row.value}`}
                 onchange={(event) => review.editOperation(row.id, {enabled:event.currentTarget.checked})} />
               <strong>{operationLabel(row.kind)}</strong>
@@ -77,11 +94,11 @@
             {#if row.source}<p class="operation-path">{row.source}</p>{/if}
             {#if row.kind !== "delete"}
               <label class="operation-field" for={`update-operation-${row.id}`}>
-                <span>{row.kind === "add" ? surface.tr("gui.update_review.source", "File to add") : surface.tr("gui.update_review.target", "Path inside archive")}</span>
+                <span>{row.kind === "add" ? surface.tr("gui.update_review.source", "File or folder to add") : surface.tr("gui.update_review.target", "Path inside archive")}</span>
                 {#if row.kind === "add"}
                   <textarea class="operation-input" id={`update-operation-${row.id}`} rows="2" value={row.value}
-                    disabled={review.pending || !row.enabled} aria-invalid={review.issue?.field === `update-operation-${row.id}`}
-                    aria-describedby={review.issue?.field === `update-operation-${row.id}` ? "update-review-error" : undefined}
+                    disabled={review.pending || review.sourcePicking === row.id || !row.enabled} aria-invalid={review.issue?.field === `update-operation-${row.id}`}
+                    aria-describedby={[review.issue?.field === `update-operation-${row.id}` ? "update-review-error" : "", sourceFeedback(row.id) ? `update-source-feedback-${row.id}` : ""].filter(Boolean).join(" ") || undefined}
                     spellcheck={false} oninput={(event) => review.editOperation(row.id, {value:event.currentTarget.value})}></textarea>
                 {:else}
                   <input class="operation-input" id={`update-operation-${row.id}`} value={row.value}
@@ -90,6 +107,20 @@
                     spellcheck={false} oninput={(event) => review.editOperation(row.id, {value:event.currentTarget.value})} />
                 {/if}
               </label>
+              {#if row.kind === "add"}
+                <div class="operation-workspace-actions">
+                  <button class="secondary-lite" disabled={review.pending || review.sourcePicking !== null || !row.enabled} onclick={() => void chooseSource(row.id, "file")}>
+                    <Icon name="file" size={16} />{surface.tr("gui.update_review.choose_file", "Choose file…")}
+                  </button>
+                  <button class="secondary-lite" disabled={review.pending || review.sourcePicking !== null || !row.enabled} onclick={() => void chooseSource(row.id, "folder")}>
+                    <Icon name="folder" size={16} />{surface.tr("gui.update_review.choose_folder", "Choose folder…")}
+                  </button>
+                </div>
+                {#if sourceFeedback(row.id)}
+                  <p id={`update-source-feedback-${row.id}`} class={review.sourceFeedback?.id === row.id && review.sourceFeedback.kind === "failed" ? "update-review-error" : "operation-workspace-hint"}
+                    role={review.sourceFeedback?.id === row.id && review.sourceFeedback.kind === "failed" ? "alert" : "status"}>{sourceFeedback(row.id)}</p>
+                {/if}
+              {/if}
             {/if}
           </li>
         {/each}

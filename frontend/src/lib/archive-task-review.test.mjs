@@ -43,6 +43,7 @@ function harness() {
     openNativeDialog: async (_kind, open, options) => open(options), platformKind: () => "macos",
     taskReviewRequestGeneration: 0, nestedExtractDraftGeneration: 0, nestedExtractReviewFocusPending: false,
     archiveUpdateReviewFocusPending: false,
+    archiveUpdateReview: { cancelSourceChoice() {} },
     extractReviewFocusPending: false, convertReviewFocusPending: false, createPrimaryFocusPending: false,
     pendingCreateSubmission: null, classicCreateSection: "general",
     pendingArchiveTaskReview: null, extractDraftArchive: { id: 1, source: "/original/photos.zip" },

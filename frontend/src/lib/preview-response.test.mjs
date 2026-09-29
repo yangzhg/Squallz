@@ -61,6 +61,7 @@ async function withNestedOpen(run) {
       document: { documentElement: {}, body: {}, querySelectorAll: () => [] },
       archiveOpenGeneration: 0, archiveOpenStatus: "idle", archivePasswordAttempt: 0,
       archivePickerRequest: null, cancelArchivePasswordPrompt: archive.cancelPasswordPrompt,
+      archiveUpdateReview: { cancelSourceChoice() {} },
       recordValidationRenderReady: () => {},
       isPar2Path: () => false, openArchiveStore: archive.openArchive,
       finishOpenedArchive: () => { context.screen = "browse"; },

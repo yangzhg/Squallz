@@ -173,6 +173,7 @@
     tr: Tr;
     archiveReturn: ArchiveReturnSurface;
     review: ArchiveUpdateReview;
+    onChooseSource: (id: number, kind: "file" | "folder") => Promise<void>;
     policyLabel: (policy: CreateContentPolicy) => string;
     onReady: () => void;
     onSubmit: () => Promise<void>;

@@ -27,9 +27,13 @@ export class ArchiveUpdateReview {
   draft = $state<UpdateDraft | null>(null);
   pending = $state(false);
   issue = $state<UpdateIssue | null>(null);
+  sourcePicking = $state<number | null>(null);
+  sourceFeedback = $state<{ id: number; kind: "selected" | "cancelled" | "failed" } | null>(null);
+  private sourceRequest = 0;
 
   restore(spec: UpdateJob, displayPath: string): boolean {
     if (this.pending) return false;
+    this.cancelSourceChoice();
     const operations: UpdateOperation[] = [];
     const add = (kind: UpdateOperation["kind"], source: string, value: string) => {
       operations.push({ id: operations.length, kind, source, value, enabled: true });
@@ -46,8 +50,42 @@ export class ArchiveUpdateReview {
 
   editOperation(id: number, change: { value?: string; enabled?: boolean }): void {
     if (!this.draft || this.pending) return;
+    if (this.sourcePicking === id) this.cancelSourceChoice();
+    if (this.sourceFeedback?.id === id) this.sourceFeedback = null;
     this.draft.operations = this.draft.operations.map((row) => row.id === id ? { ...row, ...change } : row);
     this.issue = null;
+  }
+
+  cancelSourceChoice(): void {
+    this.sourceRequest += 1;
+    this.sourcePicking = null;
+    this.sourceFeedback = null;
+  }
+
+  async chooseSource(id: number, choose: (isCurrent: () => boolean) => Promise<string | null>): Promise<void> {
+    const draft = this.draft;
+    const row = draft?.operations.find((item) => item.id === id);
+    if (!draft || !row || row.kind !== "add" || !row.enabled || this.pending || this.sourcePicking !== null) return;
+    const request = ++this.sourceRequest;
+    const isCurrent = () => request === this.sourceRequest && this.draft === draft
+      && draft.operations.find((item) => item.id === id) === row;
+    this.sourcePicking = id;
+    this.sourceFeedback = null;
+    try {
+      const selected = await choose(isCurrent);
+      if (!isCurrent()) return;
+      if (selected === null) {
+        this.sourceFeedback = { id, kind: "cancelled" };
+        return;
+      }
+      draft.operations = draft.operations.map((item) => item.id === id ? { ...item, value: selected } : item);
+      this.issue = null;
+      this.sourceFeedback = { id, kind: "selected" };
+    } catch {
+      if (isCurrent()) this.sourceFeedback = { id, kind: "failed" };
+    } finally {
+      if (request === this.sourceRequest) this.sourcePicking = null;
+    }
   }
 
   editSettings(change: Partial<Pick<UpdateDraft, "encoding" | "level" | "contentPolicy">>): void {
@@ -69,7 +107,7 @@ export class ArchiveUpdateReview {
 
   async submit(submitJob: (spec: JobSpec) => Promise<unknown>): Promise<boolean> {
     const draft = this.draft;
-    if (!draft || this.pending) return false;
+    if (!draft || this.pending || this.sourcePicking !== null) return false;
     const rows = draft.operations.filter((row) => row.enabled);
     this.issue = null;
     if (!rows.length) this.issue = { field: "update-review-heading", kind: "selection" };

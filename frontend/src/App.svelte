@@ -2236,7 +2236,10 @@
       workspacePasswordSubmissionAttempted = false;
     }
     taskReviewRequestGeneration += 1;
-    if (next !== "updateReview") archiveUpdateReviewFocusPending = false;
+    if (next !== "updateReview") {
+      archiveUpdateReviewFocusPending = false;
+      archiveUpdateReview.cancelSourceChoice();
+    }
     if (next !== "nestedExtract") {
       nestedExtractReviewFocusPending = false;
       nestedExtractDraftGeneration += 1;
@@ -13508,11 +13511,26 @@
     }
   }
 
+  async function chooseArchiveUpdateSource(id: number, kind: "file" | "folder"): Promise<void> {
+    if (screen !== "updateReview") return;
+    const path = archiveUpdateReview.draft?.operations.find((row) => row.id === id)?.value;
+    await archiveUpdateReview.chooseSource(id, async (isCurrent) => {
+      const { open } = await getDialogModule();
+      if (!isCurrent() || screen !== "updateReview") return null;
+      const selected = await openNativeDialog("update-review.source", open, {
+        title: kind === "folder" ? tr("gui.update_review.choose_folder", "Choose folder…") : tr("gui.update_review.choose_file", "Choose file…"),
+        multiple: false, directory: kind === "folder", defaultPath: path || undefined,
+      });
+      return Array.isArray(selected) ? selected[0] ?? null : selected;
+    });
+  }
+
   function archiveUpdateWorkspaceSurface(variant: ToolsWorkspaceVariant): ArchiveUpdateWorkspaceSurface {
     return { kind: "update", variant, title: tr("gui.update_review.title", "Review archive changes"), tr,
       archiveReturn: { ...toolsArchiveReturnSurface(variant), visible: Boolean(currentArchive) }, review: archiveUpdateReview,
       policyLabel: createContentPolicyLabel,
       onReady: () => { if (archiveUpdateReviewFocusPending) focusArchiveUpdateReview(); },
+      onChooseSource: chooseArchiveUpdateSource,
       onSubmit: submitArchiveUpdateReview, onOpenTasks: () => openTaskCenter() };
   }
 

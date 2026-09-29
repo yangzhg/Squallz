@@ -18,10 +18,12 @@ const spec = () => ({ kind: "update", path: "/original/历史归档.zip", encodi
 function handlers(review) {
   const app = readFileSync(new URL("../App.svelte", import.meta.url), "utf8");
   const source = ts.createSourceFile("App.ts", app.match(/<script lang="ts">([\s\S]*?)<\/script>/)[1], ts.ScriptTarget.Latest, true);
-  const names = ["reviewTask", "submitArchiveUpdateReview"];
+  const names = ["reviewTask", "submitArchiveUpdateReview", "chooseArchiveUpdateSource"];
   const functions = source.statements.filter((node) => ts.isFunctionDeclaration(node) && names.includes(node.name?.text));
   const calls = [];
   const context = { taskWindowMode:false, archiveUpdateReview:review, taskReviewScreen,
+    screen:"updateReview", getDialogModule:async()=>({open:async()=>null}),
+    openNativeDialog:async(kind,open,options)=>{calls.push(["picker",kind,options]);return open(options);},
     preventCreateSubmissionNavigation:()=>false, preventConvertSubmissionNavigation:()=>false,
     focusBlockingTaskIfAny:()=>false, setScreen:(screen)=>calls.push(["screen",screen]),
     dismissTaskDialog:async()=>calls.push(["dismiss"]), focusArchiveUpdateReview:()=>calls.push(["focus"]),
@@ -106,6 +108,90 @@ test("navigation guards and task windows do not replace an existing update draft
   }
 });
 
+test("source selection replaces only its add operation and submits the chosen literal path",async()=>{
+  for(const kind of ["file","folder"]){
+    const review=new ArchiveUpdateReview();review.restore(spec(),"Original.zip");
+    const before=plain(review.draft);const run=handlers(review);
+    const selected=kind==="file"?"/revised/资料\n完整.txt":"/revised/交付文件夹";
+    run.context.getDialogModule=async()=>({open:async()=>selected});
+    await run.chooseArchiveUpdateSource(0,kind);
+    assert.deepEqual(plain(review.draft),{...before,operations:before.operations.map(row=>row.id===0?{...row,value:selected}:row)});
+    assert.deepEqual(plain(review.sourceFeedback),{id:0,kind:"selected"});
+    assert.equal(run.calls[0][2].multiple,false);
+    assert.equal(run.calls[0][2].directory,kind==="folder");
+    assert.equal(run.calls[0][2].defaultPath,spec().add[0]);
+    await run.submitArchiveUpdateReview();
+    assert.deepEqual(run.calls.find(([kind])=>kind==="submit")[1],{...spec(),password:null,add:[selected]});
+  }
+});
+
+test("cancelled or failed source choices keep the draft and allow retry; disabled rows never choose",async()=>{
+  const review=new ArchiveUpdateReview();review.restore(spec(),"Original.zip");
+  const before=plain(review.draft);
+  for(const failure of [false,true]){
+    await review.chooseSource(0,async()=>{if(failure)throw new Error("unavailable");return null;});
+    assert.deepEqual(plain(review.draft),before);
+    assert.equal(review.sourceFeedback.kind,failure?"failed":"cancelled");
+    assert.equal(review.sourcePicking,null);
+  }
+  review.editOperation(0,{enabled:false});
+  let unavailableCalls=0;
+  for(const id of [0,1,2,99])await review.chooseSource(id,async()=>{unavailableCalls++;return "/wrong";});
+  assert.equal(unavailableCalls,0,"unavailable operations must not open the chooser");
+  review.editOperation(0,{enabled:true});
+  await review.chooseSource(0,async()=>"/corrected");
+  assert.equal(review.draft.operations[0].value,"/corrected");
+  review.editOperation(0,{value:"/manually edited"});
+  assert.equal(review.sourceFeedback,null);
+});
+
+test("pending source choices cannot submit, overlap, or replace newer drafts and edits",async()=>{
+  for(const change of ["cancel","restore","edit","disable"]){
+    for(const fails of [false,true]){
+      const review=new ArchiveUpdateReview();review.restore(spec(),"Original.zip");
+      let resolve,reject;
+      const pending=review.chooseSource(0,()=>new Promise((yes,no)=>{resolve=yes;reject=no;}));
+      assert.equal(review.sourcePicking,0);
+      assert.equal(await review.submit(async()=>assert.fail("submitted with a pending source")),false);
+      let duplicateCalls=0;
+      await review.chooseSource(0,async()=>{duplicateCalls++;return "/duplicate";});
+      assert.equal(duplicateCalls,0);
+      if(change==="cancel")review.cancelSourceChoice();
+      if(change==="restore")review.restore({...spec(),path:"/new.zip",add:["/new-source"]},"New.zip");
+      if(change==="edit")review.editOperation(0,{value:"/edited"});
+      if(change==="disable")review.editOperation(0,{enabled:false});
+      const expected=plain(review.draft);
+      if(fails)reject(new Error("late"));else resolve("/late");
+      await pending;
+      assert.deepEqual(plain(review.draft),expected);
+      assert.equal(review.sourceFeedback,null);
+      assert.equal(review.sourcePicking,null);
+    }
+  }
+  const review=new ArchiveUpdateReview();review.restore(spec(),"Original.zip");
+  const run=handlers(review);let loaded;
+  run.context.getDialogModule=()=>new Promise(resolve=>{loaded=resolve;});
+  const pending=run.chooseArchiveUpdateSource(0,"file");
+  review.cancelSourceChoice();run.context.screen="browse";
+  loaded({open:async()=>assert.fail("stale chooser opened")});await pending;
+  assert.deepEqual(run.calls,[]);
+  let release;
+  const submitting=review.submit(()=>new Promise(resolve=>{release=resolve;}));
+  let submittingCalls=0;
+  await review.chooseSource(0,async()=>{submittingCalls++;return "/during-submit";});
+  assert.equal(submittingCalls,0);
+  release(1);await submitting;
+  let oldResult,newResult;
+  const oldChoice=review.chooseSource(0,()=>new Promise(resolve=>{oldResult=resolve;}));
+  review.cancelSourceChoice();
+  const newChoice=review.chooseSource(0,()=>new Promise(resolve=>{newResult=resolve;}));
+  oldResult("/old");await oldChoice;
+  assert.equal(review.sourcePicking,0,"old completion must not unlock the newer chooser");
+  assert.equal(review.sourceFeedback,null);
+  newResult("/new");await newChoice;
+  assert.equal(review.draft.operations[0].value,"/new");
+});
+
 test("both layouts expose the original archive, every operation type, empty state, and localized actions",async()=>{
   const {render}=await server.ssrLoadModule("svelte/server");
   const {default:Workspace}=await server.ssrLoadModule("/src/components/ToolsWorkspace.svelte");
@@ -115,12 +201,14 @@ test("both layouts expose the original archive, every operation type, empty stat
     await loadLocale(locale);
     for(const variant of ["modern","classic"]){
       const surface={kind:"update",variant,title:tFallback("gui.update_review.title"),tr:tFallback,review,
-        archiveReturn:{visible:false},policyLabel:()=>"",onReady(){},onSubmit:async()=>{},onOpenTasks(){}};
+        archiveReturn:{visible:false},policyLabel:()=>"",onReady(){},onSubmit:async()=>{},onChooseSource:async()=>{},onOpenTasks(){}};
       const {body}=render(Workspace,{props:{surface}});
       assert.ok(body.includes("Shown/完整外层路径.zip"));
       assert.ok(body.includes("old[1]/*.txt"));assert.ok(body.includes("literal\\file.txt"));
       assert.ok(body.includes(tFallback("gui.update_review.hint")));
       assert.ok(body.includes('id="update-operation-4"'));
+      assert.ok(body.includes(tFallback("gui.update_review.choose_file")));
+      assert.ok(body.includes(tFallback("gui.update_review.choose_folder")));
       assert.doesNotMatch(body,/old-secret|\/original\/历史归档|style=|gui\.update_review\./);
       const empty=render(Workspace,{props:{surface:{...surface,review:new ArchiveUpdateReview()}}}).body;
       assert.ok(empty.includes(tFallback("gui.update_review.empty_hint")));
