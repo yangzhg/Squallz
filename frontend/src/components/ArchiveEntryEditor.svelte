@@ -2,10 +2,12 @@
   import { onMount, tick } from "svelte";
   import { cssVariables, type CssVariableMap } from "../lib/css-variables";
   import { trapModalFocus } from "../lib/modal-focus";
+  import ArchiveBrowseRecovery, { type ArchiveBrowseRecoveryState } from "./ArchiveBrowseRecovery.svelte";
 
   let {
     title, label, value, placeholder = "", status, hint = "", cancelLabel, submittingLabel, error = null,
     rootClass, rootVariables, onChange, onSubmit, onClose,
+    disabled = false, recovery = null, retryLabel, onRetry,
   }: {
     title: string;
     label: string;
@@ -16,6 +18,10 @@
     cancelLabel: string;
     submittingLabel: string;
     error?: string | null;
+    disabled?: boolean;
+    recovery?: ArchiveBrowseRecoveryState;
+    retryLabel: string;
+    onRetry: () => Promise<void>;
     rootClass: string;
     rootVariables: CssVariableMap;
     onChange: (value: string) => void;
@@ -35,7 +41,7 @@
 
   async function submit(event: SubmitEvent) {
     event.preventDefault();
-    if (submitting) return;
+    if (submitting || disabled) return;
     submitting = true;
     try {
       await onSubmit();
@@ -44,6 +50,15 @@
       await tick();
       if (input?.isConnected && !input.disabled) input.focus({ preventScroll: true });
     }
+  }
+
+  async function retry() {
+    const trigger = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    await onRetry();
+    await tick();
+    if (!input?.isConnected || (document.activeElement !== document.body && document.activeElement !== trigger)) return;
+    if (trigger?.isConnected) trigger.focus({ preventScroll: true });
+    else input.focus({ preventScroll: true });
   }
 
   function onKeydown(event: KeyboardEvent) {
@@ -81,11 +96,13 @@
           autocomplete="off"
           spellcheck={false}
           disabled={submitting}
-          aria-describedby={`${id}-status ${id}-hint`}
+          aria-describedby={recovery ? `${id}-recovery ${id}-hint` : `${id}-status ${id}-hint`}
           oninput={(event) => onChange(event.currentTarget.value)}
         />
       </label>
-      {#if error && !submitting}
+      {#if recovery}
+        <div id={`${id}-recovery`}><ArchiveBrowseRecovery state={recovery} {retryLabel} onRetry={() => void retry()} /></div>
+      {:else if error && !submitting}
         <p id={`${id}-status`} class="archive-editor-status error" role="alert">{error}</p>
       {:else}
         <p id={`${id}-status`} class="archive-editor-status" role="status">{submitting ? submittingLabel : status}</p>
@@ -93,7 +110,7 @@
       <p id={`${id}-hint`} class="archive-editor-hint">{hint}</p>
       <footer class="archive-editor-actions">
         <button type="button" disabled={submitting} onclick={onClose}>{cancelLabel}</button>
-        <button class="primary" type="submit" disabled={submitting}>{submitting ? submittingLabel : title}</button>
+        <button class="primary" type="submit" disabled={submitting || disabled}>{submitting ? submittingLabel : title}</button>
       </footer>
     </form>
   </div>

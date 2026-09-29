@@ -510,6 +510,24 @@ pub fn list_entries(
         .map_err(ErrorDto::from)
 }
 
+/// Checks draft targets against the current window's complete archive index.
+#[tauri::command]
+pub async fn missing_archive_paths(
+    window: WebviewWindow,
+    state: State<'_, Arc<AppState>>,
+    id: u64,
+    paths: Vec<String>,
+) -> Result<Vec<String>, ErrorDto> {
+    let state = Arc::clone(state.inner());
+    let owner_window = window.label().to_owned();
+    tauri::async_runtime::spawn_blocking(move || {
+        state.missing_archive_paths_for_window(&owner_window, id, &paths)
+    })
+    .await
+    .map_err(|error| ErrorDto::other(format!("archive path check failed: {error}")))?
+    .map_err(ErrorDto::from)
+}
+
 /// Pages archive-wide, case-insensitive path matches for an opened archive.
 #[tauri::command]
 pub async fn search_entries(

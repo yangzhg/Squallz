@@ -90,6 +90,7 @@ pub fn run() {
             commands::take_validation_drop_paths,
             commands::list_entries,
             commands::resolve_archive_directory,
+            commands::missing_archive_paths,
             commands::search_entries,
             commands::cancel_archive_search,
             commands::get_formats,

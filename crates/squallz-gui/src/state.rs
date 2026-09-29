@@ -653,6 +653,20 @@ impl AppState {
         self.list_entries_for_owner(Some(owner_window), id, page, page_size, dir_prefix, filter)
     }
 
+    pub(crate) fn missing_archive_paths_for_window(
+        &self,
+        owner_window: &str,
+        id: u64,
+        paths: &[String],
+    ) -> Result<Vec<String>, FormatError> {
+        let archive = self.archive_for_owner(id, Some(owner_window))?;
+        Ok(paths
+            .iter()
+            .filter(|path| !archive_path_exists(&archive, path))
+            .cloned()
+            .collect())
+    }
+
     fn list_entries_for_owner(
         &self,
         owner_window: Option<&str>,
@@ -1173,20 +1187,32 @@ fn archive_directory_exists(archive: &CachedArchive, prefix: &str) -> bool {
     if prefix.is_empty() || archive.levels.contains_key(prefix) {
         return true;
     }
-    // Empty directories have a row in their parent, but no level of their own.
-    let path = prefix.trim_end_matches('/');
+    archive_path_exists(archive, prefix)
+}
+
+/// Looks up an exact displayed path in the existing directory index.
+fn archive_path_exists(archive: &CachedArchive, full_path: &str) -> bool {
+    if full_path.is_empty() {
+        return true;
+    }
+    let is_dir = full_path.ends_with('/');
+    let path = full_path.strip_suffix('/').unwrap_or(full_path);
     let (parent, name) = path.rsplit_once('/').map_or(("", path), |(parent, name)| {
-        (&prefix[..parent.len() + 1], name)
+        (&full_path[..parent.len() + 1], name)
     });
     let Some(rows) = archive.levels.get(parent) else {
         return false;
     };
     let folded = name.to_lowercase();
-    let start = rows
-        .partition_point(|row| row.is_dir() && row.name(&archive.entries).to_lowercase() < folded);
+    let start = rows.partition_point(|row| {
+        (row.is_dir() && !is_dir)
+            || (row.is_dir() == is_dir && row.name(&archive.entries).to_lowercase() < folded)
+    });
     rows[start..]
         .iter()
-        .take_while(|row| row.is_dir() && row.name(&archive.entries).to_lowercase() == folded)
+        .take_while(|row| {
+            row.is_dir() == is_dir && row.name(&archive.entries).to_lowercase() == folded
+        })
         .any(|row| row.name(&archive.entries) == name)
 }
 
@@ -1403,6 +1429,37 @@ mod tests {
             search_cache: Mutex::new(SearchCache::default()),
             search_generation: AtomicU64::new(generation),
             _owned_temp: None,
+        }
+    }
+
+    #[test]
+    fn archive_path_checks_use_exact_names_types_and_unloaded_directory_rows() {
+        let mut empty = file_meta("empty/", 0);
+        empty.entry_type = EntryType::Dir;
+        let mut entries = (0..1200)
+            .map(|index| file_meta(&format!("docs/item-{index:04}.txt"), 1))
+            .collect::<Vec<_>>();
+        entries.extend([empty, file_meta("docs/Case.txt", 1), file_meta("plain", 1)]);
+        let archive = cached_archive(entries, 0);
+        for path in [
+            "",
+            "docs/",
+            "empty/",
+            "plain",
+            "docs/Case.txt",
+            "docs/item-1199.txt",
+        ] {
+            assert!(archive_path_exists(&archive, path), "{path}");
+        }
+        for path in [
+            "docs",
+            "empty",
+            "docs/case.txt",
+            "docs/Case.txt/",
+            "missing/",
+            "docs/item-1200.txt",
+        ] {
+            assert!(!archive_path_exists(&archive, path), "{path}");
         }
     }
 
@@ -1820,6 +1877,27 @@ mod tests {
             .list_entries_for_window("window-b", first.id, 0, 10, "", None)
             .unwrap_err()
             .to_string();
+        assert_eq!(
+            unavailable,
+            state
+                .missing_archive_paths_for_window("window-b", first.id, &["src/".to_owned()])
+                .unwrap_err()
+                .to_string()
+        );
+        assert_eq!(
+            state
+                .missing_archive_paths_for_window(
+                    "window-a",
+                    first.id,
+                    &[
+                        "src/".to_owned(),
+                        "src/nested/".to_owned(),
+                        "missing".to_owned()
+                    ],
+                )
+                .unwrap(),
+            vec!["missing"]
+        );
         assert_eq!(
             unavailable,
             state

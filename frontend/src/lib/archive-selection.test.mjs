@@ -43,6 +43,7 @@ async function loadSelectionHandlers(archive, overrides = {}) {
     "selectEntry", "selectOnlyEntry", "showEntryContextAt", "runArchiveSelection", "toggleEntrySelection",
     "submitDeleteSelectedJob", "selectedDeletePaths", "closeEntryContext",
     "selectedRenameSource", "canRenameSelection", "hasArchiveSelection", "hasArchiveOpen", "submitRenameSelectedJob",
+    "archiveEditSelectedPaths", "archiveEditorBlockedReason", "validateArchiveEditContext", "archiveEditCheckIsCurrent",
   ]);
   const declarations = source.statements.filter(
     (node) => ts.isFunctionDeclaration(node) && names.has(node.name?.text),
@@ -54,6 +55,7 @@ async function loadSelectionHandlers(archive, overrides = {}) {
   return vm.runInNewContext(`${outputText}\n({ selectEntry, selectOnlyEntry, showEntryContextAt, toggleEntrySelection, submitDeleteSelectedJob, canRenameSelection, submitRenameSelectedJob, context: () => entryContext })`, {
     ...archive,
     archiveSelectionRoots,
+    archiveEditKind: null, archiveEditContext: null, archiveEditSession: 0,
     archiveSelectionBusyReason: () => "",
     entryPreviewForPath: () => null,
     clearEntryPreviewState: () => {},

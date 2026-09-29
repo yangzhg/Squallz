@@ -1062,6 +1062,11 @@
   let newFolderName = $state("");
   type ArchiveEditKind = "rename" | "move" | "new-folder";
   let archiveEditKind = $state<ArchiveEditKind | null>(null);
+  let archiveEditContext = $state<{
+    source: string; encoding: string | null; generation: number; id: number;
+    directory: string; paths: Set<string>;
+  } | null>(null);
+  let archiveEditChecking = $state(false);
   let archiveEditError = $state<string | null>(null);
   let archiveEditSession = 0;
   let archiveEditReturnFocus: HTMLElement | null = null;
@@ -1204,11 +1209,14 @@
   $effect(() => {
     currentArchive?.id;
     archiveDirs.join("\u0000");
-    const source = selectedRenameSource();
-    renameTargetName = source ? pathBaseName(source.replace(/\/+$/g, "")) : "";
-    archiveEditKind = null;
-    archiveEditError = null;
-    moveConflictReview = null;
+    const selected = [...selectedPaths()];
+    untrack(() => {
+      if (archiveEditKind !== null) return;
+      const source = selected.length === 1 ? selected[0] : null;
+      renameTargetName = source ? pathBaseName(source.replace(/\/+$/g, "")) : "";
+      archiveEditError = null;
+      moveConflictReview = null;
+    });
   });
 
   $effect(() => {
@@ -9458,7 +9466,7 @@
   }
 
   function selectedRenameSource(): string | null {
-    const selected = [...selectedPaths()];
+    const selected = [...archiveEditSelectedPaths()];
     return selected.length === 1 ? selected[0] : null;
   }
 
@@ -9558,7 +9566,7 @@
   }
 
   function buildMovePlan(targetDir = normalizeMoveTargetDir()): MovePlanItem[] {
-    const selected = archiveSelectionRoots(selectedPaths());
+    const selected = archiveSelectionRoots(archiveEditSelectedPaths());
     const existing = archivePathSet();
     const targetCounts = new Map<string, number>();
     for (const from of selected) {
@@ -9602,7 +9610,7 @@
   }
 
   function moveTargetConflictCount(): number {
-    if (!currentArchive || selectedPaths().size === 0) return 0;
+    if (!currentArchive || archiveEditSelectedPaths().size === 0) return 0;
     return buildMovePlan().filter((item) => item.conflict).length;
   }
 
@@ -9616,7 +9624,7 @@
     const problem = moveTargetProblem(targetDir);
     if (problem) return problem;
     const targetLabel = targetDir || "/";
-    const selected = selectedPaths().size;
+    const selected = archiveEditSelectedPaths().size;
     if (selected === 0) {
       return tr("gui.move.select_entries_to_move_into", "Select entries to move into {target}").replace("{target}", targetLabel);
     }
@@ -9634,7 +9642,7 @@
   function moveTargetProblem(targetDir: string): string {
     const problem = archiveEditPathProblem(targetDir, true);
     if (problem) return problem;
-    for (const source of archiveSelectionRoots(selectedPaths())) {
+    for (const source of archiveSelectionRoots(archiveEditSelectedPaths())) {
       if (source.endsWith("/") && targetDir.startsWith(source)) {
         return tr("gui.move.inside_source", "Choose a destination outside the selected folder.");
       }
@@ -9648,7 +9656,7 @@
   function normalizeNewFolderPath(value = newFolderName): string {
     const input = value.trim().replaceAll("\\", "/");
     const name = normalizeArchivePath(input, tr("gui.new_folder.default_name", "New Folder"));
-    const parent = input.startsWith("/") ? "" : archiveDirs.join("/");
+    const parent = input.startsWith("/") ? "" : archiveEditContext?.directory ?? archiveDirs.join("/");
     return `${parent ? `${parent}/` : ""}${name}/`;
   }
 
@@ -11299,6 +11307,12 @@
     archiveEditReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     archiveEditSession += 1;
     archiveEditError = null;
+    archiveEditChecking = false;
+    archiveEditContext = {
+      source: currentArchive.source, encoding: currentArchive.encoding_override,
+      generation: archiveOpenGeneration, id: currentArchive.id,
+      directory: archiveDirs.join("/"), paths: new Set(selectedPaths()),
+    };
     setScreen("browse");
     moveConflictReview = null;
     if (kind === "rename") renameTargetName = pathBaseName(selectedRenameSource()?.replace(/\/+$/g, "") ?? "");
@@ -11308,18 +11322,32 @@
 
   function closeArchiveEditor() {
     archiveEditKind = null;
+    archiveEditContext = null;
+    archiveEditSession += 1;
+    archiveEditChecking = false;
     archiveEditError = null;
     const target = archiveEditReturnFocus;
     archiveEditReturnFocus = null;
     void tick().then(() => {
-      if (!blockingModalVisible() && target?.isConnected && !target.closest("[inert]")) target.focus({ preventScroll: true });
+      if (blockingModalVisible() || (document.activeElement !== document.body && document.activeElement !== target)) return;
+      const focus = target?.isConnected && !target.matches(":disabled") && !target.closest("[inert]")
+        ? target : archiveSearchInput;
+      if (focus?.isConnected && !focus.closest("[inert]")) focus.focus({ preventScroll: true });
     });
   }
 
   function archiveEditorFields(kind: ArchiveEditKind) {
+    const blocked = archiveEditorBlockedReason();
     const feedback = {
-      error: archiveEditError,
-      submittingLabel: tr("gui.task_center.submitting", "Adding to the queue…"),
+      error: archiveEditError || (archiveRefreshStatus() === "idle" ? blocked : null),
+      disabled: Boolean(blocked),
+      recovery: archiveEditContext && currentArchive?.source === archiveEditContext.source
+        && archiveRefreshStatus() !== "idle" ? archiveBrowseRecoveryState() : null,
+      retryLabel: tr("gui.error.retry", "Retry"),
+      onRetry: retryArchiveContents,
+      submittingLabel: archiveEditChecking
+        ? tr("gui.edit.checking_targets", "Checking the original items…")
+        : tr("gui.task_center.submitting", "Adding to the queue…"),
     };
     if (kind === "rename") return {
       ...feedback,
@@ -11362,7 +11390,68 @@
     };
   }
 
+  function archiveEditSelectedPaths(): Set<string> {
+    return archiveEditKind && archiveEditContext ? archiveEditContext.paths : selectedPaths();
+  }
+
+  function archiveEditorBlockedReason(): string {
+    const context = archiveEditContext;
+    if (!context) return "";
+    if (!currentArchive || archiveOpenStatus !== "idle" || currentArchive.source !== context.source
+      || currentArchive.encoding_override !== context.encoding || archiveOpenGeneration !== context.generation) {
+      return tr("gui.edit.archive_changed", "The archive changed. Your text is kept. Cancel and reopen the editor for the intended archive.");
+    }
+    return archiveMutationDisabledReason();
+  }
+
+  async function validateArchiveEditContext(): Promise<boolean> {
+    const context = archiveEditContext;
+    if (!context) return true;
+    const blocked = archiveEditorBlockedReason();
+    if (blocked) { archiveEditError = blocked; return false; }
+    const archive = currentArchive;
+    if (!archive) return false;
+    if (archive.id === context.id) return true;
+    const session = archiveEditSession;
+    const paths = archiveEditKind === "new-folder"
+      ? newFolderName.trim().replaceAll("\\", "/").startsWith("/") || !context.directory ? [] : [`${context.directory}/`]
+      : archiveSelectionRoots(context.paths);
+    archiveEditChecking = true;
+    archiveEditError = null;
+    try {
+      const missing = paths.length ? await ipc.missingArchivePaths(archive.id, paths) : [];
+      if (archiveEditSession !== session || archiveEditContext !== context) return false;
+      if (currentArchive?.id !== archive.id || archiveEditorBlockedReason()) {
+        archiveEditError = tr("gui.edit.check_changed", "The archive changed while checking. Your text is kept. Try again.");
+        return false;
+      }
+      if (missing.length) {
+        archiveEditError = tr("gui.edit.items_missing", "These original items no longer exist: {paths}. Your text is kept. Cancel and select the intended items again.")
+          .replace("{paths}", missing.join(", "));
+        return false;
+      }
+      return true;
+    } catch (error) {
+      if (archiveEditSession === session) archiveEditError = tr("gui.edit.check_failed", "Could not check the original items. Your text is kept. Try again.")
+        + (isErrorDto(error) ? ` ${tError(error)}` : "");
+      return false;
+    } finally {
+      if (archiveEditSession === session) archiveEditChecking = false;
+    }
+  }
+
+  function archiveEditCheckIsCurrent(session: number, id: number | undefined): boolean {
+    if (session !== archiveEditSession) return false;
+    const blocked = archiveEditorBlockedReason();
+    if (currentArchive?.id === id && !blocked) return true;
+    archiveEditError = blocked || tr("gui.edit.check_changed", "The archive changed while checking. Your text is kept. Try again.");
+    return false;
+  }
+
   async function submitRenameSelectedJob() {
+    const session = archiveEditSession;
+    const id = currentArchive?.id;
+    if (!await validateArchiveEditContext() || !archiveEditCheckIsCurrent(session, id)) return;
     if (blockSelectionScopedAction()) return;
     if (!currentArchive) {
       showNotice(tr("gui.precondition.open_before_rename", "Open an archive before renaming entries"));
@@ -11422,6 +11511,9 @@
   }
 
   async function submitMoveSelectedJob() {
+    const session = archiveEditSession;
+    const id = currentArchive?.id;
+    if (!await validateArchiveEditContext() || !archiveEditCheckIsCurrent(session, id)) return;
     if (blockSelectionScopedAction()) return;
     const targetDir = normalizeMoveTargetDir();
     moveTargetDir = targetDir || "/";
@@ -11434,7 +11526,7 @@
       showNotice(readOnly);
       return;
     }
-    const selected = [...selectedPaths()];
+    const selected = [...archiveEditSelectedPaths()];
     if (selected.length === 0) {
       showNotice(tr("gui.precondition.select_entries_before_move", "Select entries before moving"));
       return;
@@ -11523,6 +11615,9 @@
   }
 
   async function submitNewFolderJob() {
+    const session = archiveEditSession;
+    const id = currentArchive?.id;
+    if (!await validateArchiveEditContext() || !archiveEditCheckIsCurrent(session, id)) return;
     const folder = normalizeNewFolderPath();
     commitNewFolderName();
     if (!currentArchive) {

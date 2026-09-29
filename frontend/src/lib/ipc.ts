@@ -717,6 +717,8 @@ export const ipc = {
   takeValidationDropPaths: () => invoke<string[]>("take_validation_drop_paths"),
   resolveArchiveDirectory: (id: number, dirPrefix: string) =>
     invoke<string>("resolve_archive_directory", { id, dirPrefix }),
+  missingArchivePaths: (id: number, paths: string[]) =>
+    invoke<string[]>("missing_archive_paths", { id, paths }),
   listEntries: (
     id: number,
     page: number,
