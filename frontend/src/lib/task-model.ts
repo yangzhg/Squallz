@@ -87,6 +87,17 @@ export function taskNeedsInput(task: TaskDialogModel): boolean {
   return isTaskActiveState(task.state) && task.controlIntent !== "cancel" && task.interaction !== null;
 }
 
+export function taskStatusUnavailable(task: TaskDialogModel): boolean {
+  return Boolean(task.statusStale) && isTaskActiveState(task.state);
+}
+
+export function taskOutcomeStateLabel(task: TaskDialogModel): string {
+  if (taskStatusUnavailable(task)) return tFallback("gui.task.status_unavailable", "Status unavailable");
+  return taskOutcomeNeedsAttention(task)
+    ? tFallback("gui.task.state.needs_attention", "Needs attention")
+    : taskStateLabel(task.state);
+}
+
 export function sourceCleanupResult(task: TaskDialogModel): SourceCleanupResult | null {
   const raw = task.result?.source_cleanup;
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;

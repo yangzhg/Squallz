@@ -254,6 +254,8 @@
     taskChecksumResultText,
     taskDuplicateGroups,
     taskOutcomeNeedsAttention,
+    taskOutcomeStateLabel,
+    taskStatusUnavailable,
     taskReviewScreen,
     taskOutputCanOpen,
     taskOutputIsFolder,
@@ -1289,7 +1291,7 @@
   $effect(() => {
     const activeTaskPreview = runtimePreviews.activeTask;
     if (!activeTaskPreview) return;
-    const id = installActiveTaskPreview(activeTaskPreview);
+    const id = installActiveTaskPreview(activeTaskPreview, import.meta.env.DEV && params.has("previewStatusUnavailable"));
     if (id === null) return;
     const surface = params.get("previewTaskSurface");
     if (surface === "panel" || surface === "center") {
@@ -10165,9 +10167,7 @@
         algorithm: checksumAlgorithmLabel(task.spec.algorithm),
       };
     };
-    const reportState = (task: Task | null) => task && taskOutcomeNeedsAttention(task)
-      ? tr("gui.task.state.needs_attention", "Needs attention")
-      : taskStateLabel(task?.state);
+    const reportState = (task: Task | null) => task ? taskOutcomeStateLabel(task) : taskStateLabel(null);
     const checksumRows = checksumItems("checksum").slice(0, 20).map((item) => {
       const path = checksumItemText(item, "path");
       return {
@@ -10299,7 +10299,7 @@
       },
       report: {
         taskId: task?.id ?? null,
-        state: taskStateLabel(task?.state),
+        state: task ? taskOutcomeStateLabel(task) : taskStateLabel(null),
         context: task?.spec.kind === "duplicate_scan" ? {
           sources: task.spec.inputs,
           minimumSize: formatBytes(task.spec.min_size),
@@ -12504,6 +12504,7 @@
       interaction: null,
       question: null,
       actionFailure: null,
+      statusStale: false,
       answeredQuestionVersion: 0,
       state: "submitting",
       queuePosition: null,
@@ -12536,7 +12537,7 @@
     const failed = jobRows.find((task) => task.state === "failed");
     const task = activeCurrentTask ?? failed ?? null;
     if (!task) return tr("gui.state.ready", "Ready");
-    return `${titleForJobSpec(task.spec)} · ${taskStateLabel(task.state)}`;
+    return `${titleForJobSpec(task.spec)} · ${taskOutcomeStateLabel(task)}`;
   }
 
   function taskCenterSelectedTask(): Task | null {
@@ -12553,6 +12554,8 @@
   }
 
   function taskCenterSummaryLabel(): string {
+    const unconfirmed = jobRows.find(taskStatusUnavailable);
+    if (unconfirmed) return taskOutcomeStateLabel(unconfirmed);
     const counts = taskCenterCounts(jobRows);
     if (counts.attention > 0) {
       return tr("gui.task_center.summary_attention", "{count} need attention")
@@ -13722,7 +13725,8 @@
         ? tr("gui.recovery.damage_exceeds_capacity", "Damage exceeds available recovery data")
         : tr("gui.recovery.verification_did_not_pass", "Verification did not pass");
     }
-    return taskStateLabel(latestRecoveryReportTask()?.state);
+    const task = latestRecoveryReportTask();
+    return task ? taskOutcomeStateLabel(task) : taskStateLabel(null);
   }
 
   function recoveryRedundancyLabel(): string {

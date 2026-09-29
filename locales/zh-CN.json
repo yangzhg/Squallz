@@ -1211,6 +1211,8 @@
   "gui.task.pause_failed_detail": "未能暂停任务，请检查当前状态后重试。",
   "gui.task.resume_failed_detail": "未能继续任务，请检查当前状态后重试。",
   "gui.task.cancel_failed_detail": "未能取消任务，请检查当前状态后重试。",
+  "gui.task.status_unavailable": "状态待确认",
+  "gui.task.status_unavailable_detail": "任务状态同步中断，当前显示上次收到的进度，正在自动重连。任务可能仍在执行。",
   "gui.task.queue_move_failed": "无法调整队列顺序",
   "gui.task.answer_failed": "未能提交回复",
   "gui.task.answer_failed_detail": "任务尚未确认收到回复，请检查当前提示后重试。",

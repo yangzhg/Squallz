@@ -18,6 +18,8 @@
     taskKindLabel,
     taskOutcomeStateLabel,
     taskOutcomeStateTone,
+    taskStatusUnavailable,
+    taskStatusUnavailableMessage,
     taskOverallProgressIndeterminate,
     taskPauseButtonLabel,
     taskProgressPercent,
@@ -79,6 +81,8 @@
   let dragHandle: HTMLElement | null = null;
 
   function countSummary(): string {
+    const unconfirmed = tasks.find(taskStatusUnavailable);
+    if (unconfirmed) return taskOutcomeStateLabel(unconfirmed);
     if (counts.attention > 0) {
       return tr("gui.task_center.summary_attention", "{count} need attention")
         .replace("{count}", counts.attention.toLocaleString());
@@ -151,6 +155,7 @@
   }
 
   function taskState(task: Task): string {
+    if (taskStatusUnavailable(task)) return taskOutcomeStateLabel(task);
     if (task.controlIntent === "cancel") return taskCancelButtonLabel(task);
     return !taskNeedsInput(task)
       ? taskOutcomeStateLabel(task)
@@ -163,10 +168,11 @@
 
   function taskCurrentItem(task: Task): string | null {
     if (!task.current) return null;
-    const key = task.state === "done" || task.state === "failed" || task.state === "cancelled"
+    const last = taskStatusUnavailable(task) || task.state === "done" || task.state === "failed" || task.state === "cancelled";
+    const key = last
       ? "gui.task_center.last_item"
       : "gui.task_center.current_item";
-    const fallback = task.state === "done" || task.state === "failed" || task.state === "cancelled"
+    const fallback = last
       ? "Last: {name}"
       : "Current: {name}";
     return tr(key, fallback)
@@ -309,10 +315,17 @@
     <span class:attention={counts.attention > 0}><b>{counts.attention}</b>{tr("gui.task_center.attention", "Attention")}</span>
   </div>
 
-  <p class="task-center-scope-note">
-    <Icon name="info" size={14} />
-    {tr("gui.task_center.scope", "App and file-manager tasks share one queue. Drag waiting tasks to reorder; arrow buttons remain available.")}
-  </p>
+  {#if tasks.some(taskStatusUnavailable)}
+    <section class="task-status-notice" role="status">
+      <Icon name="alert-triangle" size={16} />
+      <p>{taskStatusUnavailableMessage()}</p>
+    </section>
+  {:else}
+    <p class="task-center-scope-note">
+      <Icon name="info" size={14} />
+      {tr("gui.task_center.scope", "App and file-manager tasks share one queue. Drag waiting tasks to reorder; arrow buttons remain available.")}
+    </p>
+  {/if}
 
   <div class="task-center-list" aria-label={tr("gui.task_center.list", "Tasks in this window")}>
     {#if submittingTask}

@@ -151,6 +151,71 @@ test("snapshot connection failures preserve tasks and recover after a successful
   });
 });
 
+test("unavailable status retains progress and questions without reviving an old rate on reconnect", async () => {
+  await withQuestionFeed(async ({ jobs, ipc, records, emit, server }) => {
+    const helpers = await server.ssrLoadModule("/src/lib/task-dialog.ts");
+    Object.assign(records[1], { version: 12, question: null, interaction: null });
+    Object.assign(records[1].progress, { done: 40, speed: 64 });
+    await emit("job://ask-conflict", { id: 2 });
+    await until(() => jobs.tasks()[1].version === 12);
+    const task = jobs.tasks()[1];
+    const question = jobs.pendingPassword();
+    assert.equal(task.speed, 64);
+    ipc.jobSnapshots = async () => { throw new Error("status unavailable"); };
+    await until(() => jobs.jobSnapshotStatus() === "unavailable");
+    assert.equal(task.statusStale, true);
+    assert.equal(task.done, 40);
+    assert.equal(task.speed, 0);
+    assert.equal(jobs.pendingPassword(), question);
+    assert.equal(helpers.taskProgressActive(task), false);
+    await emit("job://progress", { id: 2, version: 13, ...records[1].progress, done: 50, speed: 80 });
+    assert.equal(task.done, 50);
+    assert.equal(task.speed, 0, "progress events do not conceal the interrupted status feed");
+    ipc.jobSnapshots = async () => ({ revision: 13, reset: false, upserts: [], removed: [] });
+    await until(() => jobs.jobSnapshotStatus() === "ready");
+    assert.equal(jobs.tasks()[1], task);
+    assert.equal(jobs.pendingPassword(), question);
+    assert.equal(task.statusStale, false);
+    assert.equal(task.speed, 0, "an empty delta does not make an old speed current");
+    await emit("job://progress", { id: 2, version: 14, ...records[1].progress, done: 60, speed: 96 });
+    assert.equal(task.speed, 96);
+    assert.equal(helpers.taskProgressActive(task), true);
+    ipc.jobSnapshots = async () => { throw new Error("status unavailable"); };
+    await until(() => jobs.jobSnapshotStatus() === "unavailable");
+    await emit("job://state", { id: 2, version: 15, state: "done", result: { ok: true } });
+    assert.equal(helpers.taskOutcomeStateLabel(task), helpers.taskStateLabel("done"));
+    assert.equal(task.statusStale, false, "a terminal event still confirms the result");
+  });
+});
+
+test("snapshot polling continues when native event listeners fail to initialize", async () => {
+  const server = await createTestServer();
+  const previousWindow = globalThis.window;
+  globalThis.window = { crypto: webcrypto };
+  let dispose;
+  try {
+    const { mockIPC, mockWindows } = await server.ssrLoadModule("@tauri-apps/api/mocks");
+    mockWindows("main");
+    mockIPC(() => { throw new Error("event listener unavailable"); });
+    const jobs = await server.ssrLoadModule("/src/lib/jobs.svelte.ts");
+    const { ipc } = await server.ssrLoadModule("/src/lib/ipc.ts");
+    const record = { ...snapshot(1, 10), question: null, interaction: null };
+    ipc.jobSnapshots = async () => ({ revision: record.version, reset: true, upserts: [structuredClone(record)], removed: [] });
+    dispose = await jobs.initJobEvents();
+    await until(() => jobs.tasks().length === 1);
+    assert.equal(jobs.jobSnapshotStatus(), "ready");
+    assert.equal(jobs.tasks()[0].statusStale, false);
+    record.state = "paused";
+    record.version += 1;
+    await until(() => jobs.tasks()[0].state === "paused");
+    assert.equal(jobs.tasks()[0].version, 11, "the fallback remains a live authoritative feed");
+  } finally {
+    dispose?.();
+    await server.close();
+    globalThis.window = previousWindow;
+  }
+});
+
 test("snapshot questions enforce ownership and terminal state while preserving form identity", async () => {
   const server = await createTestServer();
   try {

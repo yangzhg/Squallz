@@ -32,12 +32,14 @@ import {
   taskReviewScreen,
   taskHasInlineResults,
   taskOutcomeNeedsAttention,
+  taskOutcomeStateLabel,
   taskOutputCanOpen,
   taskOutputIsFolder,
   taskOutputPath,
   taskPasswordReady,
   taskResultScreen,
   taskStateLabel,
+  taskStatusUnavailable,
   type SourceCleanupResult,
   type TaskConflictAnswer,
   type TaskConflictDecision,
@@ -58,12 +60,14 @@ export {
   taskReviewScreen,
   taskHasInlineResults,
   taskOutcomeNeedsAttention,
+  taskOutcomeStateLabel,
   taskOutputCanOpen,
   taskOutputIsFolder,
   taskOutputPath,
   taskPasswordReady,
   taskResultScreen,
   taskStateLabel,
+  taskStatusUnavailable,
   type TaskConflictAnswer,
   type TaskConflictDecision,
   type TaskDialogModel,
@@ -82,11 +86,12 @@ export function tr(key: string, fallback: string): string {
 }
 
 export function taskProgressActive(task: TaskDialogModel): boolean {
-  return !task.interaction
+  return !taskStatusUnavailable(task) && !task.interaction
     && (task.state === "submitting" || task.state === "running");
 }
 
 function taskProgressStateLabel(task: TaskDialogModel): string {
+  if (taskStatusUnavailable(task)) return taskOutcomeStateLabel(task);
   if (task.state === "running") {
     if (task.interaction === "password") return tr("gui.task_center.password_waiting", "Waiting for a password");
     if (task.interaction === "conflict") return tr("gui.task_center.conflict_waiting", "Waiting for a file decision");
@@ -116,15 +121,14 @@ function sourceCleanupStatusLabel(status: string): string {
   return tr("gui.task.source_cleanup.unknown", "Could not confirm where the originals were left");
 }
 
-export function taskOutcomeStateLabel(task: TaskDialogModel): string {
-  return taskOutcomeNeedsAttention(task)
-    ? tr("gui.task.state.needs_attention", "Needs attention")
-    : taskStateLabel(task.state);
-}
-
 export function taskOutcomeStateTone(task: TaskDialogModel): string {
+  if (taskStatusUnavailable(task)) return "warning";
   if (task.state === "failed") return "failed";
   return taskOutcomeNeedsAttention(task) ? "warning" : task.state;
+}
+
+export function taskStatusUnavailableMessage(): string {
+  return tr("gui.task.status_unavailable_detail", "Status updates were interrupted. Showing the last received progress and reconnecting automatically. The task may still be running.");
 }
 
 export function taskProgressPercent(task: TaskDialogModel): number {
@@ -292,7 +296,7 @@ export function taskProgressSummary(task: TaskDialogModel): string {
 }
 
 export function taskCurrentSectionLabel(task: TaskDialogModel): string {
-  if (!isTaskActiveState(task.state)) return tr("gui.task.last_item", "Last item");
+  if (taskStatusUnavailable(task) || !isTaskActiveState(task.state)) return tr("gui.task.last_item", "Last item");
   if (task.phase === "archive_open") return tr("gui.task.current_archive", "Current archive");
   if (isRestoringDirectories(task)) return tr("gui.task.current_folder", "Current folder");
   if (task.scanEntries != null) return tr("gui.task.current_input", "Current input");

@@ -1211,6 +1211,8 @@
   "gui.task.pause_failed_detail": "Could not pause the task. Check its current status and try again.",
   "gui.task.resume_failed_detail": "Could not resume the task. Check its current status and try again.",
   "gui.task.cancel_failed_detail": "Could not cancel the task. Check its current status and try again.",
+  "gui.task.status_unavailable": "Status unavailable",
+  "gui.task.status_unavailable_detail": "Status updates were interrupted. Showing the last received progress and reconnecting automatically. The task may still be running.",
   "gui.task.queue_move_failed": "Could not change the queue order",
   "gui.task.answer_failed": "Could not send the response",
   "gui.task.answer_failed_detail": "The task has not confirmed your response. Check its current prompt and try again.",

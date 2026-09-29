@@ -3763,6 +3763,30 @@ select option {
   background: var(--color-surface-raised);
 }
 
+.task-status-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-sm);
+  padding: var(--space-sm) var(--space-md);
+  border: var(--border-width-control) solid var(--color-warning-border);
+  border-radius: var(--control-radius);
+  background: var(--color-warning-bg);
+  color: var(--color-warning-fg);
+}
+
+.task-status-notice svg {
+  flex-shrink: 0;
+}
+
+.design-root .task-status-notice p {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--color-warning-fg);
+  font-size: var(--type-control);
+  line-height: var(--type-control-line);
+}
+
 .task-control-callout.attention {
   border-color: var(--color-warning-border);
   background: var(--color-warning-bg);
@@ -15273,7 +15297,7 @@ select.classic-input:focus {
   color: var(--color-text-primary);
 }
 
-.design-root :is(p, small, .classic-property-sheet p, .classic-recovery-sheet p, .classic-extract-sheet p, .settings-route-card small, .destination-grid span, .batch-card span, .path-decision p):not(:where(.task-action-error, .task-question-error, .password-inline-error)) {
+.design-root :is(p, small, .classic-property-sheet p, .classic-recovery-sheet p, .classic-extract-sheet p, .settings-route-card small, .destination-grid span, .batch-card span, .path-decision p):not(:where(.task-action-error, .task-question-error, .password-inline-error, .task-status-notice p)) {
   color: var(--color-text-secondary);
 }
 

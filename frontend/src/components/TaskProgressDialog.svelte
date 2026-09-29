@@ -37,6 +37,8 @@
     taskOutcomeNeedsAttention,
     taskOutcomeStateLabel,
     taskOutcomeStateTone,
+    taskStatusUnavailable,
+    taskStatusUnavailableMessage,
     taskOverallProgressBadge,
     taskOverallProgressIndeterminate,
     taskOverallProgressLabel,
@@ -155,6 +157,7 @@
   }
 
   function displayedTaskState(): string {
+    if (taskStatusUnavailable(task)) return taskOutcomeStateLabel(task);
     if (task.controlIntent === "cancel") return taskCancelButtonLabel(task);
     return !taskNeedsInput(task)
       ? taskOutcomeStateLabel(task)
@@ -308,6 +311,13 @@
           <strong>{interactionTitle()}</strong>
           <span>{interactionDetail()}</span>
         </div>
+      </section>
+    {/if}
+
+    {#if taskStatusUnavailable(task)}
+      <section class="task-status-notice" role="status">
+        <Icon name="alert-triangle" size={16} />
+        <p>{taskStatusUnavailableMessage()}</p>
       </section>
     {/if}
 

@@ -159,6 +159,50 @@ test("control failures stay visible and actionable across task surfaces", async 
   }
 });
 
+test("interrupted status keeps measured progress and inputs without presenting live activity", async () => {
+  const server = await createTestServer();
+  try {
+    const { render } = await server.ssrLoadModule("svelte/server");
+    const { default: TaskProgressDialog } = await server.ssrLoadModule("/src/components/TaskProgressDialog.svelte");
+    const { default: TaskCenter } = await server.ssrLoadModule("/src/components/TaskCenter.svelte");
+    const { loadLocale } = await server.ssrLoadModule("/src/lib/i18n.svelte.ts");
+    const helpers = await server.ssrLoadModule("/src/lib/task-dialog.ts");
+    const { surface } = taskSurface(false);
+    for (const locale of ["en-US", "zh-CN"]) {
+      await loadLocale(locale);
+      const task = { ...extractTask("running"), statusStale: true };
+      const label = helpers.taskOutcomeStateLabel(task);
+      const detail = helpers.taskStatusUnavailableMessage();
+      assert.notEqual(label, helpers.taskStateLabel("running"));
+      for (const presentation of ["dialog", "panel", "window"]) {
+        const body = render(TaskProgressDialog, { props: { ...surface, presentation, task } }).body;
+        assert.ok(body.includes(label));
+        assert.ok(body.includes(detail));
+        assert.match(body, /data-task-active="false"/u);
+        assert.match(body, /value="40"/u);
+        assert.match(body, /report.txt.*4 B \/ 10 B/u);
+        assert.doesNotMatch(body, /10 B\/(?:s|秒)/u);
+        const pending = render(TaskProgressDialog, { props: { ...surface, presentation,
+          task: { ...task, total: 0, currentTotal: 0, phase: "archive_open" } } }).body;
+        assert.doesNotMatch(pending, /<progress\b|task-current-pending active/u);
+        const waiting = render(TaskProgressDialog, { props: { ...surface, presentation,
+          task: { ...task, interaction: "password" },
+          passwordQuestion: { name: "reports.zip", detail: "", sessionDetail: "" }, passwordValue: "" } }).body;
+        assert.match(waiting, /type="password"/u);
+        assert.ok(waiting.includes(detail));
+        const done = render(TaskProgressDialog, { props: { ...surface, presentation, task: { ...task, state: "done" } } }).body;
+        assert.ok(!done.includes(detail), "confirmed results remain visible during a later outage");
+      }
+      const row = render(TaskCenter, { props: { tasks: [{ ...task, queueMoveIntent: null }], rootClass: "task-center" } }).body;
+      assert.ok(row.includes(detail));
+      assert.ok(row.includes(label));
+      assert.doesNotMatch(row, /10 B\/(?:s|秒)/u);
+    }
+  } finally {
+    await server.close();
+  }
+});
+
 test("window task views render one task heading and retain progress, results and input", async () => {
   const server = await createTestServer();
   try {

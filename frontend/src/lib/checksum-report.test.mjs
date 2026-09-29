@@ -111,6 +111,8 @@ test("both workspace styles show the selected manifest report and full result pa
     const { render } = await server.ssrLoadModule("svelte/server");
     const { default: ToolsWorkspace } = await server.ssrLoadModule("/src/components/ToolsWorkspace.svelte");
     const { loadLocale, tFallback } = await server.ssrLoadModule("/src/lib/i18n.svelte.ts");
+    const { taskOutcomeStateLabel } = await server.ssrLoadModule("/src/lib/task-model.ts");
+    harness.context.taskOutcomeStateLabel = taskOutcomeStateLabel;
     for (const locale of ["en-US", "zh-CN"]) {
       await loadLocale(locale);
       harness.context.tr = tFallback;

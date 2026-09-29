@@ -70,6 +70,8 @@ export interface Task {
   /** Last owned backend prompt, retained while an answer or cancellation is pending. */
   question: JobQuestion | null;
   actionFailure: TaskControlIntent | "answer" | null;
+  /** The last known state is retained while snapshot synchronization is unavailable. */
+  statusStale: boolean;
   answeredQuestionVersion: number;
   state: JobStateName;
   queuePosition: number | null;
@@ -234,6 +236,7 @@ export async function submitJob(spec: JobSpec): Promise<number> {
       interaction: null,
       question: null,
       actionFailure: null,
+      statusStale: store.snapshotStatus === "unavailable",
       answeredQuestionVersion: 0,
       state: "queued",
       queuePosition: null,
@@ -336,7 +339,10 @@ function onState(ev: StateEvent): void {
   ) {
     task.controlIntent = null;
   }
-  if (isTerminalSnapshotState(ev.state)) clearPendingQuestions(ev.id);
+  if (isTerminalSnapshotState(ev.state)) {
+    task.statusStale = false;
+    clearPendingQuestions(ev.id);
+  }
   runTerminalEffects(task, previousState);
 }
 
@@ -1097,7 +1103,7 @@ function onProgress(ev: ProgressEvent): void {
   task.currentDone = ev.current_done ?? 0;
   task.currentTotal = ev.current_total ?? 0;
   task.scanEntries = ev.scanned_entries ?? null;
-  task.speed = ev.speed;
+  task.speed = task.statusStale ? 0 : ev.speed;
   task.phase = ev.phase ?? null;
   task.interruptible = ev.interruptible ?? true;
 }
@@ -1127,6 +1133,7 @@ function taskFromSnapshot(snapshot: JobSnapshot): Task {
     interaction: snapshot.interaction,
     question: snapshotQuestion(snapshot),
     actionFailure: null,
+    statusStale: store.snapshotStatus === "unavailable" && !isTerminalSnapshotState(snapshot.state),
     answeredQuestionVersion: 0,
     state: snapshot.state,
     queuePosition: snapshot.queue_position,
@@ -1139,7 +1146,7 @@ function taskFromSnapshot(snapshot: JobSnapshot): Task {
     currentDone: snapshot.progress.current_done,
     currentTotal: snapshot.progress.current_total,
     scanEntries: snapshot.progress.scanned_entries ?? null,
-    speed: snapshot.progress.speed,
+    speed: store.snapshotStatus === "unavailable" ? 0 : snapshot.progress.speed,
     phase: snapshot.progress.phase ?? null,
     interruptible: snapshot.progress.interruptible ?? true,
     pausable: jobSupportsPause(snapshot.spec),
@@ -1190,7 +1197,7 @@ function applySnapshot(snapshot: JobSnapshot): void {
   task.currentDone = snapshot.progress.current_done;
   task.currentTotal = snapshot.progress.current_total;
   task.scanEntries = snapshot.progress.scanned_entries ?? null;
-  task.speed = snapshot.progress.speed;
+  task.speed = task.statusStale ? 0 : snapshot.progress.speed;
   task.phase = snapshot.progress.phase ?? null;
   task.interruptible = snapshot.progress.interruptible ?? true;
   task.error = snapshot.error;
@@ -1205,7 +1212,10 @@ function applySnapshot(snapshot: JobSnapshot): void {
   ) {
     task.controlIntent = null;
   }
-  if (isTerminalSnapshotState(snapshot.state)) clearPendingQuestions(snapshot.id);
+  if (isTerminalSnapshotState(snapshot.state)) {
+    task.statusStale = false;
+    clearPendingQuestions(snapshot.id);
+  }
   runTerminalEffects(task, previousState);
 }
 
@@ -1234,6 +1244,16 @@ function waitForSnapshotPoll(delayMs: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, delayMs));
 }
 
+function setSnapshotStatus(status: JobSnapshotStatus): void {
+  store.snapshotStatus = status;
+  for (const task of store.tasks) {
+    // Development previews have no live task feed of their own.
+    if (import.meta.env.DEV && !task.snapshotSeen && !task.localEffects) continue;
+    task.statusStale = status === "unavailable" && !isTerminalSnapshotState(task.state);
+    if (task.statusStale) task.speed = 0;
+  }
+}
+
 async function reconcileSnapshotFeed(stopped: () => boolean): Promise<void> {
   while (!stopped()) {
     try {
@@ -1242,10 +1262,10 @@ async function reconcileSnapshotFeed(stopped: () => boolean): Promise<void> {
       if (stopped()) return;
       if (generation === snapshotGeneration) {
         applySnapshotDelta(delta);
-        store.snapshotStatus = "ready";
+        setSnapshotStatus("ready");
       }
     } catch {
-      if (!stopped()) store.snapshotStatus = "unavailable";
+      if (!stopped()) setSnapshotStatus("unavailable");
       // Native startup and shutdown can briefly race the WebView. The next
       // bounded poll requests the same revision again.
     }
@@ -1276,13 +1296,13 @@ export async function initJobEvents(): Promise<() => void> {
     cleanup.push(await listen<AskPasswordEvent>("job://ask-password", (e) => {
       void refreshQuestionTask(e.payload.id);
     }));
-    void reconcileSnapshotFeed(() => stopped);
-  } catch (error) {
-    stopped = true;
-    store.snapshotStatus = "unavailable";
+  } catch {
+    setSnapshotStatus("unavailable");
     for (const dispose of cleanup) dispose();
-    throw error;
+    cleanup.length = 0;
   }
+  // Snapshots remain authoritative when native event listeners cannot start.
+  void reconcileSnapshotFeed(() => stopped);
   return () => {
     stopped = true;
     for (const dispose of cleanup) dispose();
@@ -2027,6 +2047,7 @@ function installTaskPreview(kind: PreviewTaskKind, state: Extract<JobStateName, 
     interaction: question?.kind ?? null,
     question,
     actionFailure: null,
+    statusStale: false,
     answeredQuestionVersion: 0,
     state: previewState,
     outputPasswordRequired: kind === "compress_failure" || kind === "convert_failure" || kind === "convert_encrypted_failure",
@@ -2091,8 +2112,14 @@ export function installCompletedTaskPreview(kind: PreviewTaskKind, includeReport
   return id;
 }
 
-export function installActiveTaskPreview(kind: PreviewTaskKind): number | null {
-  return installTaskPreview(kind, "running");
+export function installActiveTaskPreview(kind: PreviewTaskKind, statusUnavailable = false): number | null {
+  const id = installTaskPreview(kind, "running");
+  const task = id === null ? null : find(id);
+  if (task && statusUnavailable) {
+    task.statusStale = true;
+    task.speed = 0;
+  }
+  return id;
 }
 
 export function installTaskQueuePreview(
@@ -2125,6 +2152,7 @@ export function installTaskQueuePreview(
       interaction: null,
       question: null,
       actionFailure: null,
+      statusStale: false,
       answeredQuestionVersion: 0,
       state: "queued",
       queuePosition: index + 1,

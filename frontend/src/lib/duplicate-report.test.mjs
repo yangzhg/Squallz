@@ -7,7 +7,7 @@ import { createTestServer } from "../../tests/runtime.mjs";
 
 const server = await createTestServer();
 test.after(() => server.close());
-const { taskDuplicateGroups, taskHasInlineResults, taskResultScreen } = await server.ssrLoadModule("/src/lib/task-model.ts");
+const { taskDuplicateGroups, taskHasInlineResults, taskResultScreen, taskOutcomeStateLabel } = await server.ssrLoadModule("/src/lib/task-model.ts");
 
 function harness() {
   const component = readFileSync(new URL("../App.svelte", import.meta.url), "utf8");
@@ -19,7 +19,7 @@ function harness() {
     duplicateMinSize: 1048576, duplicateMinSizeError: "", duplicateExcludeText: "cache",
     duplicateScanTarget: () => "/new-scan", duplicateScanTargetName: () => "new-scan", duplicateScanTargetLabel: () => "/new-scan",
     duplicateExcludeRules: () => ["cache"], focusBlockingTaskIfAny: () => false,
-    taskDuplicateGroups, taskHasInlineResults, taskResultScreen,
+    taskDuplicateGroups, taskHasInlineResults, taskResultScreen, taskOutcomeStateLabel,
     setScreen() {}, dismissTaskDialog() {}, focusDuplicateReportPanel() {},
     registerDuplicateReportPanel() {}, showNotice() {}, recordOperation() {},
     toolsArchiveReturnSurface: () => ({visible:false}), updateDuplicateMinSizeFromInput() {},
