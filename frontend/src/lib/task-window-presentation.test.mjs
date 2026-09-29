@@ -27,6 +27,7 @@ function taskSurface(taskWindowMode) {
   const surface = vm.runInNewContext(`${outputText}\ntaskDialogSurface`, {
     ...callbacks,
     taskWindowMode,
+    pendingTaskReviewId: null,
     activePlatform: "macos",
     activePalette: "ocean",
     activeTheme: "dark",

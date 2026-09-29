@@ -21,7 +21,7 @@ function spec() {
 function harness() {
   const component = readFileSync(new URL("../App.svelte", import.meta.url), "utf8");
   const source = ts.createSourceFile("App.ts", component.match(/<script lang="ts">([\s\S]*?)<\/script>/)[1], ts.ScriptTarget.Latest, true);
-  const names = ["reviewTask", "nestedExtractDraftLocked", "updateNestedExtractDraft", "restoreNestedExtractDraft",
+  const names = ["cancelTaskReview", "reviewTask", "nestedExtractDraftLocked", "updateNestedExtractDraft", "restoreNestedExtractDraft",
     "prepareNestedExtract", "chooseNestedExtractDestination", "startNestedExtract", "nestedExtractWorkspaceSurface", "setScreen"];
   const declarations = source.statements.filter((node) => ts.isFunctionDeclaration(node) && names.includes(node.name?.text));
   const calls = [];

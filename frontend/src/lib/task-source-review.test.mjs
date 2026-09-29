@@ -7,10 +7,10 @@ import ts from "typescript";
 function harness() {
   const component=readFileSync(new URL("../App.svelte",import.meta.url),"utf8");
   const source=ts.createSourceFile("App.ts",component.match(/<script lang="ts">([\s\S]*?)<\/script>/)[1],ts.ScriptTarget.Latest,true);
-  const names=["prepareTaskReview","closeTaskCenter","openTaskCenterDetails","returnToTaskCenter","adoptRecoveryTargetFromTask","testTaskUsesRecoveryContext"];
+  const names=["cancelTaskReview","prepareTaskReview","closeTaskCenter","openTaskCenterDetails","returnToTaskCenter","adoptRecoveryTargetFromTask","testTaskUsesRecoveryContext"];
   const declarations=source.statements.filter((node)=>ts.isFunctionDeclaration(node)&&names.includes(node.name?.text));
   const calls=[];
-  const context={taskWindowMode:false,taskReviewRequestGeneration:0,screen:"browse",currentArchive:{id:1},
+  const context={taskWindowMode:false,taskReviewRequestGeneration:0,pendingTaskReviewId:null,screen:"browse",currentArchive:{id:1},
     taskReviewScreen:()=>"extract",previewTaskSpecForReview:()=>null,
     ipc:{reviewJobSpec:async(id)=>{calls.push(["resolve",id]);return {kind:"extract",path:`squallz-archive://${id}`};}},
     reviewTask:async(task,displayed)=>calls.push(["restore",task.spec,displayed]),
@@ -66,6 +66,34 @@ test("a later review, navigation or archive change invalidates a pending source 
     assert.equal(restores.length,action==="review"?1:0);
     if(restores.length)assert.equal(restores[0][1].path,"/next.zip");
   }
+});
+
+test("review loading rejects duplicate clicks and only releases its own pending state",async()=>{
+  const run=harness();const waiting=new Map();
+  run.context.ipc.reviewJobSpec=(id)=>{
+    run.calls.push(["resolve",id]);
+    return new Promise((resolve,reject)=>waiting.set(id,{resolve,reject}));
+  };
+  const first=run.review(task());
+  assert.equal(run.context.pendingTaskReviewId,7);
+  await run.review(task());
+  assert.deepEqual(run.calls,[["resolve",7]],"repeated clicks do not duplicate the source lookup");
+  const second=run.review(task(8));
+  waiting.get(7).resolve({kind:"extract",path:"/older.zip"});
+  await first;
+  assert.equal(run.context.pendingTaskReviewId,8,"old cleanup cannot clear the newer loading state");
+  waiting.get(8).reject(new Error("source unavailable"));
+  await second;
+  assert.equal(run.context.pendingTaskReviewId,null);
+  assert.equal(run.calls.some(([kind])=>kind==="restore"),false);
+  const retry=run.review(task(8));
+  assert.equal(run.context.pendingTaskReviewId,8);
+  run.api.returnToTaskCenter(task(8));
+  assert.equal(run.context.pendingTaskReviewId,null,"returning to tasks immediately cancels the loading UI");
+  const count=run.calls.length;
+  waiting.get(8).reject(new Error("late failure"));
+  await retry;
+  assert.equal(run.calls.length,count,"cancelled review failures stay silent");
 });
 
 test("recovery uses the current inner archive without exposing its handle or selecting a displayed path as a file",()=>{

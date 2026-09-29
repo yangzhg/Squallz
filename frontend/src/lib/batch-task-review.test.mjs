@@ -26,7 +26,7 @@ const plain = (value) => JSON.parse(JSON.stringify(value));
 function harness() {
   const component = readFileSync(new URL("../App.svelte", import.meta.url), "utf8");
   const source = ts.createSourceFile("App.ts", component.match(/<script lang="ts">([\s\S]*?)<\/script>/)[1], ts.ScriptTarget.Latest, true);
-  const names = ["reviewTask", "newBatchExtractDraft", "effectiveBatchDraft", "batchDraftLocked", "setBatchArchivePaths",
+  const names = ["cancelTaskReview", "reviewTask", "newBatchExtractDraft", "effectiveBatchDraft", "batchDraftLocked", "setBatchArchivePaths",
     "updateBatchDraft", "removeBatchItem", "chooseBatchPaths", "startBatchExtract", "batchWorkspaceSurface", "setScreen"];
   const declarations = source.statements.filter((node) => ts.isFunctionDeclaration(node) && names.includes(node.name?.text));
   const calls = [];

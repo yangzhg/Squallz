@@ -8,7 +8,7 @@ function harness() {
   const app = readFileSync(new URL("../App.svelte", import.meta.url), "utf8");
   const source = ts.createSourceFile("App.ts", app.match(/<script lang="ts">([\s\S]*?)<\/script>/)[1], ts.ScriptTarget.Latest, true);
   const actions = ["openTaskCenter", "closeTaskCenter", "openTaskCenterDetails", "returnToTaskCenter", "dismissTaskDialog", "returnTaskQuestionToCenter", "handleWorkflowEscape", "submitJob"];
-  const names = [...actions, "rememberTaskWorkspaceFocus", "restoreTaskWorkspaceFocus"];
+  const names = [...actions, "cancelTaskReview", "rememberTaskWorkspaceFocus", "restoreTaskWorkspaceFocus"];
   const declarations = source.statements.filter((node) => ts.isFunctionDeclaration(node) && names.includes(node.name?.text));
   const questionEffect = source.statements.find((node) => ts.isExpressionStatement(node)
     && node.getText(source).startsWith("$effect(") && node.getText(source).includes("const questionTaskId"));

@@ -1329,6 +1329,7 @@
   "gui.task.error.unsafe_archive": "Squallz blocked unsafe archive content",
   "gui.task.error.resource_limit": "The task exceeded a safety limit",
   "gui.task.review_settings": "Review task settings",
+  "gui.task.review.preparing": "Preparing review…",
   "gui.task.review.wait_for_open": "Wait for the current archive to finish opening, then review this task again.",
   "gui.convert.review.load_failed": "Could not load conversion settings. Try reviewing this task again.",
   "gui.convert.review.format_unavailable": "This task's format is not available in the conversion screen. Your current settings were kept.",

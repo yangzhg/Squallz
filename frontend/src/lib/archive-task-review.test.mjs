@@ -25,7 +25,7 @@ function harness() {
   const component = readFileSync(new URL("../App.svelte", import.meta.url), "utf8");
   const source = ts.createSourceFile("App.ts", component.match(/<script lang="ts">([\s\S]*?)<\/script>/)[1],
     ts.ScriptTarget.Latest, true);
-  const names = ["reviewTask", "reviewExtractTask", "reviewConvertTask", "reviewArchiveTask", "restoreExtractTaskDraft", "finishOpenedArchive",
+  const names = ["cancelTaskReview", "reviewTask", "reviewExtractTask", "reviewConvertTask", "reviewArchiveTask", "restoreExtractTaskDraft", "finishOpenedArchive",
     "openArchivePath", "openArchiveFromDialog", "dismissArchivePicker", "extractJobPaths", "extractJobDestination", "extractSmartBase",
     "extractSelectionLabel", "extractStartBlockedReason", "submitExtractJob",
     "syncExtractDraftArchive", "cancelPasswordRequest", "submitPasswordRequest", "dismissArchivePasswordRequest",
@@ -489,4 +489,54 @@ test("a locked conversion session keeps its draft and task dialog without openin
   await run.reviewTask({ id: 12, state: "failed", spec: { kind: "convert", src: "/old/backup.7z" } });
   assert.equal(run.calls.length, 0);
   assert.equal(run.context.screen, "browse");
+});
+
+test("leaving a conversion review during route loading preserves the newer workspace", async () => {
+  for (const action of ["navigation", "archive", "later-review"]) {
+    for (const outcome of ["ready", "failed"]) {
+      const run = harness();
+      const loading = deferred();
+      run.context.focusConvertReview = () => run.calls.push(["focus-convert"]);
+      run.context.loadConvertRouteForReview = () => loading.promise;
+      const pending = run.reviewTask({ id: 12, state: "failed", spec: {
+        kind: "convert", src: "/old/backup.7z", dest: "/out/backup.zip", src_encoding: null,
+      } });
+      if (action === "navigation") {
+        run.setScreen("settingsGeneral");
+        run.setScreen("browse");
+      }
+      if (action === "archive") run.context.currentArchive = archive("/newer.zip", 9);
+      if (action === "later-review") await run.reviewTask({ id: 13, state: "failed", spec: spec() });
+      const screen = run.context.screen;
+      const callCount = run.calls.length;
+      if (outcome === "failed") loading.reject(new Error("route unavailable"));
+      else loading.resolve({
+        canReviewTask: () => { run.calls.push(["can-review"]); return true; },
+        syncArchive: () => run.calls.push(["sync"]),
+        restoreTaskDraft: () => { run.calls.push(["restore"]); return true; },
+      });
+      await pending;
+      assert.equal(run.context.screen, screen);
+      assert.equal(run.calls.length, callCount, "stale loading must not open archives, replace settings or report errors");
+    }
+  }
+});
+
+test("a current conversion loading failure keeps the task available for another review", async () => {
+  const run = harness();
+  run.context.loadConvertRouteForReview = async () => { throw new Error("route unavailable"); };
+  const task = { id: 12, state: "failed", spec: {
+    kind: "convert", src: "/old/backup.7z", dest: "/out/backup.zip", src_encoding: null,
+  } };
+  await run.reviewTask(task);
+  assert.equal(run.context.screen, "browse");
+  assert.equal(run.calls.length, 1);
+  assert.match(run.calls[0][1], /Could not load conversion settings/);
+  run.context.focusConvertReview = () => {};
+  run.context.loadConvertRouteForReview = async () => ({
+    canReviewTask: () => true, syncArchive() {}, restoreTaskDraft: () => true,
+  });
+  await run.reviewTask(task);
+  assert.equal(run.context.screen, "convert");
+  assert.equal(run.context.currentArchive.path, task.spec.src);
 });

@@ -913,6 +913,7 @@
   let extractReviewFocusPending = false;
   let convertReviewFocusPending = false;
   let taskReviewRequestGeneration = 0;
+  let pendingTaskReviewId = $state<number | null>(null);
   let archiveAddPending = $state(false);
   let extractOverwriteMode = $state<ExtractOverwriteMode>("ask");
   let extractSymlinkMode = $state<ExtractSymlinkMode>("preserve");
@@ -2238,7 +2239,7 @@
       workspacePasswordValue = "";
       workspacePasswordSubmissionAttempted = false;
     }
-    taskReviewRequestGeneration += 1;
+    cancelTaskReview();
     if (next !== "updateReview") {
       archiveUpdateReviewFocusPending = false;
       archiveUpdateReview.cancelSourceChoice();
@@ -12865,7 +12866,7 @@
   }
 
   function closeTaskCenter(): void {
-    taskReviewRequestGeneration += 1;
+    cancelTaskReview();
     taskCenterOpen = false;
     taskCenterSelectedTaskId = null;
     taskCenterFocusTaskId = null;
@@ -12896,13 +12897,13 @@
   }
 
   function openTaskCenterDetails(task: Task): void {
-    taskReviewRequestGeneration += 1;
+    cancelTaskReview();
     taskCenterFocusTaskId = task.id;
     taskCenterSelectedTaskId = task.id;
   }
 
   function returnToTaskCenter(task: TaskDialogModel): void {
-    taskReviewRequestGeneration += 1;
+    cancelTaskReview();
     taskCenterSelectedTaskId = null;
     taskCenterFocusTaskId = task.id;
   }
@@ -13023,6 +13024,7 @@
       taskOutputPath,
       taskRevealOutputLabel,
       taskWindowMode,
+      reviewPending: pendingTaskReviewId === task.id,
       macosSfxPublishingAvailable: activePlatform === "macos",
       onPause: pauseCurrentTask,
       onResume: resumeCurrentTask,
@@ -13061,6 +13063,7 @@
       taskOutputPath,
       taskRevealOutputLabel,
       taskWindowMode: false,
+      reviewPending: pendingTaskReviewId === task.id,
       macosSfxPublishingAvailable: activePlatform === "macos",
       onPause: pauseCurrentTask,
       onResume: resumeCurrentTask,
@@ -13182,7 +13185,7 @@
   }
 
   async function dismissTaskDialog(task: TaskDialogModel): Promise<void> {
-    taskReviewRequestGeneration += 1;
+    cancelTaskReview();
     if (task.id === null) return;
     if (isTaskActiveState(task.state)) return;
     if (taskWindowMode && await closeNativeTaskWindow()) return;
@@ -13422,9 +13425,15 @@
     setTaskExpanded(task.id, !task.expanded);
   }
 
+  function cancelTaskReview(): void {
+    taskReviewRequestGeneration += 1;
+    pendingTaskReviewId = null;
+  }
+
   async function prepareTaskReview(task: TaskDialogModel): Promise<void> {
-    if (taskWindowMode || task.id === null || !taskReviewScreen(task)) return;
+    if (taskWindowMode || task.id === null || pendingTaskReviewId === task.id || !taskReviewScreen(task)) return;
     const generation = ++taskReviewRequestGeneration;
+    pendingTaskReviewId = task.id;
     const initialScreen = screen;
     const initialArchive = currentArchive?.id ?? null;
     const isCurrent = () => generation === taskReviewRequestGeneration
@@ -13437,6 +13446,8 @@
     } catch {
       if (!isCurrent()) return;
       showNotice(tr("gui.task.review.source_unavailable", "Could not restore this task's source. Reopen the original archive (and its inner archive, if needed), then start a new task. Your current settings were kept."));
+    } finally {
+      if (generation === taskReviewRequestGeneration) pendingTaskReviewId = null;
     }
   }
 
@@ -13567,26 +13578,32 @@
     });
   }
 
-  async function loadConvertRouteForReview(): Promise<ConvertRouteHandle | null> {
-    try {
-      const { convertSessionFor } = await import("./lib/convert-session.svelte");
-      return convertSessionFor(convertRouteOwner, convertRouteBridge);
-    } catch {
-      showNotice(tr("gui.convert.review.load_failed", "Could not load conversion settings. Try reviewing this task again."));
-      return null;
-    }
+  async function loadConvertRouteForReview(): Promise<ConvertRouteHandle> {
+    const { convertSessionFor } = await import("./lib/convert-session.svelte");
+    return convertSessionFor(convertRouteOwner, convertRouteBridge);
   }
 
   async function reviewConvertTask(task: TaskDialogModel): Promise<void> {
     if (task.spec.kind !== "convert") return;
+    const generation = taskReviewRequestGeneration;
+    const initialScreen = screen;
+    const initialArchive = currentArchive?.id ?? null;
+    const isCurrent = () => generation === taskReviewRequestGeneration
+      && screen === initialScreen && (currentArchive?.id ?? null) === initialArchive;
     const spec = task.spec;
     const draft: ConvertTaskDraft = {
       src: spec.src, dest: spec.dest, level: spec.level, src_encoding: spec.src_encoding,
       encrypt_names: spec.encrypt_names, split_size: spec.split_size, split_mode: spec.split_mode,
       outputPasswordRequired: task.outputPasswordRequired,
     };
-    const session = await loadConvertRouteForReview();
-    if (!session || !session.canReviewTask(draft)) return;
+    let session: ConvertRouteHandle;
+    try {
+      session = await loadConvertRouteForReview();
+    } catch {
+      if (isCurrent()) showNotice(tr("gui.convert.review.load_failed", "Could not load conversion settings. Try reviewing this task again."));
+      return;
+    }
+    if (!isCurrent() || !session.canReviewTask(draft)) return;
     convertRouteHandle = session;
     session.syncArchive(currentArchive);
     await reviewArchiveTask(task, "convert", {

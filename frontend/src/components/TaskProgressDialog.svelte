@@ -87,6 +87,7 @@
     conflictQuestion = null,
     conflictApplyAll = false,
     presentation = "dialog",
+    reviewPending = false,
     taskOutputPath,
     taskRevealOutputLabel,
     taskWindowMode,
@@ -120,6 +121,7 @@
     conflictQuestion?: ConflictQuestion | null;
     conflictApplyAll?: boolean;
     presentation?: "dialog" | "panel" | "window";
+    reviewPending?: boolean;
     taskOutputPath: (task: TaskDialogModel) => string | null;
     taskRevealOutputLabel: () => string;
     taskWindowMode: boolean;
@@ -591,8 +593,8 @@
             </button>
           {/if}
           {#if reviewAvailable}
-            <button class={primaryActionAvailable ? "primary-lite" : "primary"} type="button" onclick={() => onReviewTask(task)}>
-              <Icon name={taskReviewScreen(task) === "recovery" ? "shield-alert" : "settings"} size={15} />{taskReviewActionLabel(task)}
+            <button class={primaryActionAvailable ? "primary-lite" : "primary"} type="button" disabled={reviewPending} aria-busy={reviewPending} onclick={() => onReviewTask(task)}>
+              <Icon name={taskReviewScreen(task) === "recovery" ? "shield-alert" : "settings"} size={15} />{reviewPending ? tr("gui.task.review.preparing", "Preparing review…") : taskReviewActionLabel(task)}
             </button>
           {/if}
           {#if taskResultAvailableForSurface(task, taskWindowMode)}

@@ -1329,6 +1329,7 @@
   "gui.task.error.unsafe_archive": "Squallz 已拦截压缩包中的不安全内容",
   "gui.task.error.resource_limit": "任务超出了安全限制",
   "gui.task.review_settings": "检查任务设置",
+  "gui.task.review.preparing": "正在准备检查…",
   "gui.task.review.wait_for_open": "请等待当前压缩包打开完成，再检查此任务的设置。",
   "gui.convert.review.load_failed": "未能加载转换设置，请重新检查此任务。",
   "gui.convert.review.format_unavailable": "转换页面暂不支持该任务的格式，已保留当前设置。",
