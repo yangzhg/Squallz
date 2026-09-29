@@ -28,7 +28,7 @@ function harness() {
   const names = ["reviewTask", "reviewExtractTask", "reviewConvertTask", "reviewArchiveTask", "restoreExtractTaskDraft", "finishOpenedArchive",
     "openArchivePath", "extractJobPaths", "extractJobDestination", "extractSmartBase",
     "extractSelectionLabel", "extractStartBlockedReason", "submitExtractJob",
-    "syncExtractDraftArchive", "cancelPasswordRequest", "submitPasswordRequest",
+    "syncExtractDraftArchive", "cancelPasswordRequest", "submitPasswordRequest", "dismissArchivePasswordRequest",
     "isCurrentTaskPasswordPrompt", "submitTaskPasswordRequest", "cancelTaskPasswordRequest", "passwordWorkspaceSurface",
     "passwordPromptName", "passwordPromptDetail", "passwordSessionDetail", "passwordFailureDetail", "taskPasswordQuestion",
     "setScreen", "effectiveExtractDest", "sameFolderExtractDest",
@@ -281,11 +281,14 @@ test("cancelling, navigating away, or opening another archive drops a pending ex
     const run = harness();
     run.context.screen = "password";
     run.context.archivePasswordPrompt = { path: "/original/photos.zip", encoding: null };
+    run.context.workspacePasswordValue = "old-input";
     run.context.pendingArchiveTaskReview = { path: spec().path, encoding: null, restore: () => true };
     if (action === "cancel") run.cancelPasswordRequest();
     if (action === "navigate") run.setScreen("extract");
     if (action === "open") await run.openArchivePath("/another.zip", "open-file");
     assert.equal(run.context.pendingArchiveTaskReview, null);
+    assert.equal(run.context.archivePasswordPrompt, null);
+    assert.equal(run.context.workspacePasswordValue, "");
     assert.equal(run.context.extractCustomDest, "/unrelated/output");
   }
   const run = harness();

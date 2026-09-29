@@ -578,7 +578,7 @@ test("job questions open the shared task surface without navigating or discardin
         archivePasswordPrompt: null, previewPasswordPrompt: null,
         taskWindowMode: false, taskDialogTaskId: null, taskDialogDismissedId: 8,
         rememberTaskWorkspaceFocus: () => {},
-        $effect: (effect) => effect(),
+        $effect: (effect) => effect(), untrack: (callback) => callback(),
         setScreen: (next) => { context.screen = next; context.pendingCreateSubmission = null; },
       };
       vm.runInNewContext(outputText, context);

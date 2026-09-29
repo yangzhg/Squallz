@@ -105,7 +105,7 @@ function completedUpdate(id, path = "/tmp/refresh.zip") {
 async function passwordRefreshActions(archive) {
   const component = await readFile(new URL("../App.svelte", import.meta.url), "utf8");
   const source = ts.createSourceFile("App.ts", component.match(/<script lang="ts">([\s\S]*?)<\/script>/u)[1], ts.ScriptTarget.Latest, true);
-  const names = ["submitPasswordRequest", "cancelPasswordRequest", "archiveEditorVisible", "blockingModalVisible", "archiveEditorBlockedReason"];
+  const names = ["submitPasswordRequest", "cancelPasswordRequest", "dismissArchivePasswordRequest", "setScreen", "openArchivePath", "archiveEditorVisible", "blockingModalVisible", "archiveEditorBlockedReason"];
   const declarations = source.statements.filter((node) => ts.isFunctionDeclaration(node) && names.includes(node.name?.text));
   const { outputText } = ts.transpileModule(declarations.map((node) => node.getText(source)).join("\n"), {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
@@ -124,10 +124,64 @@ async function passwordRefreshActions(archive) {
     openArchiveStore: archive.openArchive, cancelArchivePasswordPrompt: archive.cancelPasswordPrompt,
     openPasswordPrompt: archive.openPasswordPrompt, archiveOpenError: archive.archiveOpenError,
     finishOpenedArchive: () => assert.fail("Refresh must not complete a new archive-open workflow"),
-    setScreen: (next) => { context.screen = next; }, showNotice: () => {}, tr: (_key, fallback) => fallback,
+    showNotice: () => {}, tr: (_key, fallback) => fallback,
+    preventCreateSubmissionNavigation: () => false, preventConvertSubmissionNavigation: () => false,
+    clearEntryPreviewState: () => {}, isPar2Path: () => false,
+    taskReviewRequestGeneration: 0, nestedExtractDraftGeneration: 0,
+    syncUrl: () => {}, tick: async () => {},
+    document: { documentElement: {}, body: {}, querySelectorAll: () => [] },
   };
-  return { context, ...vm.runInNewContext(`${outputText}\n({${names.join(",")}})`, context) };
+  return { context, ...vm.runInNewContext(`${outputText}\n({${declarations.map((node) => node.name.text).join(",")}})`, context) };
 }
+
+test("leaving a refresh password cancels its read and keeps the editor dormant until returning", async () => {
+  await withArchive(async ({ archive, ipc, pendingOpen, closed }) => {
+    const refreshing = archive.refreshCurrentArchive();
+    pendingOpen.reject({ key: "error.password_required", params: {}, detail: "" });
+    await refreshing;
+    const run = await passwordRefreshActions(archive);
+    const late = deferred();
+    const cancelled = [];
+    ipc.cancelArchiveOpen = async (id) => { cancelled.push(id); };
+    ipc.openArchive = () => late.promise;
+    const unlocking = run.submitPasswordRequest();
+    run.setScreen("settingsGeneral");
+    assert.equal(archive.openPasswordPrompt(), null);
+    assert.equal(cancelled.length, 1);
+    assert.equal(archive.archiveRefreshStatus(), "error");
+    assert.equal(run.context.workspacePasswordValue, "");
+    assert.equal(run.context.archiveOpenGeneration, 7, "navigation retains the original edit session");
+    assert.equal(run.archiveEditorVisible(), false, "the retained draft must not cover the chosen page");
+    late.resolve(info(2));
+    await unlocking;
+    assert.equal(run.context.screen, "settingsGeneral");
+    assert.equal(archive.archive().id, 1);
+    assert.deepEqual(closed, [2]);
+    run.setScreen("browse");
+    assert.equal(run.archiveEditorVisible(), true);
+    assert.equal(run.context.renameTargetName, "kept.txt");
+    assert.notEqual(run.archiveEditorBlockedReason(), "");
+  });
+});
+
+test("an explicit same-source open abandons password refresh intent and clears its input", async () => {
+  await withArchive(async ({ archive, ipc, pendingOpen }) => {
+    const refreshing = archive.refreshCurrentArchive();
+    pendingOpen.reject({ key: "error.password_required", params: {}, detail: "" });
+    await refreshing;
+    const run = await passwordRefreshActions(archive);
+    const next = deferred();
+    ipc.openArchive = () => next.promise;
+    run.context.finishOpenedArchive = () => { run.context.screen = "browse"; };
+    const opening = run.openArchivePath(info().source, "open-file");
+    assert.equal(archive.openPasswordPrompt(), null, "a replacement open cannot reuse the old password prompt");
+    assert.equal(run.context.workspacePasswordValue, "");
+    next.resolve(info(2));
+    await opening;
+    assert.deepEqual(archive.currentDirs(), [], "an explicit open uses its own initial view");
+    assert.notEqual(run.archiveEditorBlockedReason(), "", "old edit targets cannot follow a new open session");
+  });
+});
 
 test("refresh password attempts suspend the editor and resume its original session after unlocking", async () => {
   await withArchive(async ({ archive, ipc, pendingOpen }) => {

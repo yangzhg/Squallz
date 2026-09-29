@@ -1222,7 +1222,7 @@
 
   $effect(() => {
     if (archivePasswordPrompt || previewPasswordPrompt) {
-      setScreen("password");
+      untrack(() => setScreen("password"));
     }
   });
 
@@ -2222,8 +2222,11 @@
   function setScreen(next: Screen) {
     if (preventCreateSubmissionNavigation(next)) return;
     if (preventConvertSubmissionNavigation(next)) return;
-    if (screen === "password" && next !== "password" && previewPasswordPrompt) {
-      clearEntryPreviewState();
+    if (screen === "password" && next !== "password") {
+      dismissArchivePasswordRequest();
+      if (previewPasswordPrompt) clearEntryPreviewState();
+      workspacePasswordValue = "";
+      workspacePasswordSubmissionAttempted = false;
     }
     taskReviewRequestGeneration += 1;
     if (next !== "updateReview") archiveUpdateReviewFocusPending = false;
@@ -6143,6 +6146,8 @@
     review: ArchiveTaskReview | null = null,
   ): Promise<boolean> {
     if (preventCreateSubmissionNavigation("browse")) return false;
+    dismissArchivePasswordRequest();
+    clearEntryPreviewState();
     pendingArchiveTaskReview = review;
     if (isPar2Path(path)) {
       openRecoverySet(path, null, source);
@@ -12901,7 +12906,7 @@
   }
 
   function archiveEditorVisible(): boolean {
-    return archiveEditKind !== null && !archivePasswordPrompt && !previewPasswordPrompt;
+    return screen === "browse" && archiveEditKind !== null && !archivePasswordPrompt && !previewPasswordPrompt;
   }
 
   function blockingModalVisible(): boolean {
@@ -13803,6 +13808,18 @@
     showNotice(archiveOpenFailureNotice(prompt.path));
   }
 
+  function dismissArchivePasswordRequest() {
+    const prompt = archivePasswordPrompt;
+    if (!prompt) return;
+    pendingArchiveTaskReview = null;
+    archivePasswordAttempt += 1;
+    if (!prompt.refresh) archiveOpenGeneration += 1;
+    archiveOpenStatus = "idle";
+    workspacePasswordValue = "";
+    workspacePasswordSubmissionAttempted = false;
+    cancelArchivePasswordPrompt();
+  }
+
   async function cancelPasswordRequest() {
     workspacePasswordSubmissionAttempted = false;
     if (previewPasswordPrompt && !archivePasswordPrompt) {
@@ -13811,11 +13828,7 @@
     }
     if (archivePasswordPrompt) {
       const refreshing = archivePasswordPrompt.refresh;
-      pendingArchiveTaskReview = null;
-      archivePasswordAttempt += 1;
-      if (!refreshing) archiveOpenGeneration += 1;
-      archiveOpenStatus = "idle";
-      cancelArchivePasswordPrompt();
+      dismissArchivePasswordRequest();
       showNotice(refreshing
         ? tr("gui.archive.refresh_cancelled", "Refresh cancelled. Retry before editing the archive.")
         : tr("gui.password.archive_open_cancelled", "Archive opening cancelled."));
