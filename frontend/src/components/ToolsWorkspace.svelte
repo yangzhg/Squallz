@@ -2,8 +2,10 @@
   import type { ChecksumAlgorithmId } from "../lib/ui-model";
   import type { DuplicateReportSurface } from "./DuplicateReport.svelte";
   import type { OverwritePolicy, SymlinkPolicy } from "../lib/ipc";
+  import type { CreateContentPolicy } from "../lib/ipc";
+  import type { ArchiveUpdateReview } from "../lib/archive-update.svelte";
 
-  export type ToolsWorkspaceKind = "batch" | "checksum" | "duplicates";
+  export type ToolsWorkspaceKind = "batch" | "checksum" | "duplicates" | "update";
   export type ToolsWorkspaceVariant = "modern" | "classic";
   export type ChecksumResultKind = "checksum" | "checksum_check";
 
@@ -164,7 +166,21 @@
     };
   }
 
+  export interface ArchiveUpdateWorkspaceSurface {
+    kind: "update";
+    variant: ToolsWorkspaceVariant;
+    title: string;
+    tr: Tr;
+    archiveReturn: ArchiveReturnSurface;
+    review: ArchiveUpdateReview;
+    policyLabel: (policy: CreateContentPolicy) => string;
+    onReady: () => void;
+    onSubmit: () => Promise<void>;
+    onOpenTasks: () => void;
+  }
+
   export type ToolsWorkspaceSurface =
+    | ArchiveUpdateWorkspaceSurface
     | BatchWorkspaceSurface
     | ChecksumWorkspaceSurface
     | DuplicatesWorkspaceSurface;
@@ -176,6 +192,7 @@
   import ExcludeRulesEditor from "./ExcludeRulesEditor.svelte";
   import DuplicateReport from "./DuplicateReport.svelte";
   import BatchExtractWorkspace from "./BatchExtractWorkspace.svelte";
+  import ArchiveUpdateWorkspace from "./ArchiveUpdateWorkspace.svelte";
   import Icon from "./Icon.svelte";
 
   let {
@@ -609,6 +626,8 @@
       </section>
     </div>
   {/if}
+{:else if surface.kind === "update"}
+  <ArchiveUpdateWorkspace {surface} />
 {:else}
   <BatchExtractWorkspace {surface} />
 {/if}

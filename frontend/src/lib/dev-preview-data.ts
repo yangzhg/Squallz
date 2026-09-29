@@ -36,6 +36,7 @@ type PreviewTaskKind =
   | "extract"
   | "extract_failure"
   | "extract_nested_failure"
+  | "update_failure"
   | "extract_unknown_current"
   | "extract_metadata"
   | "batch_extract_metadata"
@@ -446,6 +447,7 @@ function completedTaskParam(value: string | null): RuntimePreviews["completedTas
     value === "extract" ||
     value === "extract_failure" ||
     value === "extract_nested_failure" ||
+    value === "update_failure" ||
     value === "extract_unknown_current" ||
     value === "extract_metadata" ||
     value === "batch_extract_metadata" ||

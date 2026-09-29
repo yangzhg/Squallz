@@ -7720,9 +7720,10 @@ select option {
   white-space: nowrap;
 }
 
-.batch-workspace {
+.operation-workspace {
   display: flex;
   flex-direction: column;
+  height: 100%;
   min-height: 0;
   min-width: 0;
   gap: var(--space-lg);
@@ -7730,7 +7731,7 @@ select option {
   overflow: hidden;
 }
 
-.batch-workspace-body {
+.operation-workspace-body {
   display: flex;
   flex: 1;
   flex-direction: column;
@@ -7740,46 +7741,64 @@ select option {
   overflow: auto;
 }
 
-.batch-workspace-header {
+.operation-workspace-header {
   flex-shrink: 0;
 }
 
-.classic-batch-workspace {
+.update-review-options > summary {
+  cursor: pointer;
+  font-size: var(--type-control);
+  padding-block: var(--space-sm);
+}
+
+.update-review-options > div {
+  margin-top: var(--space-md);
+}
+
+.update-review-error {
+  color: var(--color-danger-fg);
+  font-size: var(--type-control);
+  line-height: var(--type-body-line);
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.classic-operation-workspace {
   height: calc(100% - var(--classic-titlebar-height) - var(--classic-commandbar-height) - var(--classic-pathrow-height) - var(--classic-statusbar-height));
   background: var(--color-surface-raised);
 }
 
-.batch-workspace-header,
-.batch-source-header,
-.batch-workspace-actions,
-.batch-destination-control {
+.operation-workspace-header,
+.operation-card-header,
+.operation-workspace-actions,
+.operation-control {
   display: flex;
   align-items: center;
   gap: var(--space-sm);
 }
 
-.batch-workspace-header,
-.batch-source-header {
+.operation-workspace-header,
+.operation-card-header {
   justify-content: space-between;
   align-items: flex-start;
   flex-wrap: wrap;
 }
 
-.batch-workspace-header > div,
-.batch-source-identity {
+.operation-workspace-header > div,
+.operation-identity {
   min-width: 0;
 }
 
-.batch-workspace-header h1 {
+.operation-workspace-header h1 {
   margin: 0;
   font-size: var(--type-page-title);
   line-height: var(--type-page-title-line);
 }
 
-.batch-workspace-header p,
-.batch-workspace-hint,
-.batch-empty-state p,
-.batch-source-path {
+.operation-workspace-header p,
+.operation-workspace-hint,
+.operation-empty-state p,
+.operation-path {
   margin: 0;
   color: var(--color-text-secondary);
   font-size: var(--type-control);
@@ -7787,11 +7806,11 @@ select option {
   overflow-wrap: anywhere;
 }
 
-.batch-workspace-actions {
+.operation-workspace-actions {
   flex-wrap: wrap;
 }
 
-.batch-workspace button {
+.operation-workspace button {
   min-height: var(--control-height);
   display: inline-flex;
   align-items: center;
@@ -7801,7 +7820,7 @@ select option {
   flex-shrink: 0;
 }
 
-.batch-workspace button.primary {
+.operation-workspace button.primary {
   border: var(--border-width-control) solid var(--button-primary-border);
   border-radius: var(--control-radius);
   background: var(--button-primary-bg);
@@ -7809,13 +7828,13 @@ select option {
   box-shadow: var(--control-primary-shadow);
 }
 
-.batch-workspace button.primary:hover:not(:disabled) {
+.operation-workspace button.primary:hover:not(:disabled) {
   background: var(--button-primary-bg-hover);
   color: var(--button-primary-fg-hover);
   box-shadow: var(--control-primary-hover-shadow);
 }
 
-.batch-input {
+.operation-input {
   width: 100%;
   min-width: 0;
   min-height: var(--control-height);
@@ -7828,48 +7847,57 @@ select option {
   font-size: var(--type-control);
 }
 
-.batch-policy-controls {
+textarea.operation-input {
+  resize: vertical;
+  line-height: var(--type-body-line);
+}
+
+.operation-path {
+  white-space: pre-wrap;
+}
+
+.operation-policy-controls {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(min(100%, var(--content-policy-option-min-width)), 1fr));
   gap: var(--space-md);
   align-items: end;
 }
 
-.batch-policy-field,
-.batch-source-identity {
+.operation-field,
+.operation-identity {
   display: grid;
   gap: var(--space-xs);
   overflow-wrap: anywhere;
   min-width: 0;
 }
 
-.batch-source-identity {
+.operation-identity {
   flex: 1;
 }
 
-.batch-policy-field > span,
-.batch-destination-field,
-.batch-source-identity span {
+.operation-field > span,
+.operation-destination-field,
+.operation-identity span {
   color: var(--color-text-secondary);
   font-size: var(--type-control);
   line-height: var(--type-control-line);
 }
 
-.batch-smart-option {
+.operation-toggle {
   display: flex;
   align-items: center;
   gap: var(--space-sm);
   min-height: var(--control-height);
 }
 
-.batch-smart-option input {
+.operation-toggle input {
   width: var(--check-control-size);
   height: var(--check-control-size);
   margin: 0;
   accent-color: var(--color-accent);
 }
 
-.batch-source-list {
+.operation-list {
   display: grid;
   gap: var(--space-md);
   margin: 0;
@@ -7877,7 +7905,7 @@ select option {
   list-style: none;
 }
 
-.batch-source-card {
+.operation-card {
   display: grid;
   gap: var(--space-sm);
   min-width: 0;
@@ -7887,12 +7915,12 @@ select option {
   background: var(--color-surface-overlay);
 }
 
-.batch-destination-control input {
+.operation-control input {
   flex: 1;
   min-width: 0;
 }
 
-.batch-empty-state {
+.operation-empty-state {
   display: grid;
   justify-items: center;
   gap: var(--space-md);

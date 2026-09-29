@@ -5,6 +5,7 @@
   type ToolsWorkspaceComponent = typeof import("./ToolsWorkspace.svelte").default;
 
   export type {
+    ArchiveUpdateWorkspaceSurface,
     BatchWorkspaceSurface,
     ChecksumResultKind,
     ChecksumWorkspaceSurface,
@@ -40,7 +41,9 @@
       .replace("{tool}", surface.title),
   );
   let modernClass = $derived(
-    surface.kind === "batch"
+    surface.kind === "update"
+      ? "operation-workspace"
+      : surface.kind === "batch"
       ? "batch-view modern-batch"
       : surface.kind === "checksum"
         ? "settings-view modern-checksum"

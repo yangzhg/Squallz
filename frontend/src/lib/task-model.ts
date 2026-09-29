@@ -243,7 +243,7 @@ export function taskReviewScreen(task: TaskDialogModel): Screen | null {
     case "extract_nested":
       return "nestedExtract";
     case "update":
-      return "browse";
+      return "updateReview";
     case "convert":
       return "convert";
     case "checksum":

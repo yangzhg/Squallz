@@ -9,18 +9,18 @@
   onMount(() => surface.onReady());
 </script>
 
-<div class="batch-workspace" class:classic-batch-workspace={surface.variant === "classic"}>
+<div class="operation-workspace" class:classic-operation-workspace={surface.variant === "classic"}>
   {#if surface.archiveReturn.visible}
     <ArchiveReturnStrip {...surface.archiveReturn} />
   {/if}
-  <header class="batch-workspace-header">
+  <header class="operation-workspace-header">
     <div>
       <h1 id="batch-workspace-heading" tabindex="-1">{surface.title}</h1>
       <p>{surface.mode === "nested"
         ? surface.tr("gui.nested_extract.scope", "Extract all contents of the inner archive")
         : surface.tr("gui.batch.archive_count", "Archives: {count}").replace("{count}", surface.rows.length.toLocaleString())}</p>
     </div>
-    <div class="batch-workspace-actions">
+    <div class="operation-workspace-actions">
       {#if surface.actions.onAdd}
         <button class="secondary-lite" disabled={surface.locked} onclick={surface.actions.onAdd}>
           <Icon name="folder-open" size={16} />{surface.mode === "nested"
@@ -36,47 +36,47 @@
       </button>
     </div>
   </header>
-  <div class="batch-workspace-body">
+  <div class="operation-workspace-body">
   {#if surface.rows.length === 0}
-    <div class="batch-empty-state">
+    <div class="operation-empty-state">
       <Icon name="archive" size={32} />
       <strong>{surface.mode === "nested" ? surface.tr("gui.nested_extract.empty", "No inner archive selected") : surface.tr("gui.batch.no_archives_queued", "No archives selected")}</strong>
       <p>{surface.mode === "nested" ? surface.tr("gui.nested_extract.empty_hint", "Select an archive inside the current archive, then choose Extract in its preview.") : surface.tr("gui.batch.empty_hint", "Add archives, review their destinations, then start extraction.")}</p>
     </div>
   {:else}
-    <div class="batch-policy-controls">
-      <label class="batch-smart-option">
+    <div class="operation-policy-controls">
+      <label class="operation-toggle">
         <input type="checkbox" checked={surface.smart} disabled={surface.locked}
           onchange={(event) => surface.onSmartChange(event.currentTarget.checked)} />
         <span>{surface.tr("gui.batch.mode_smart", "Smart extract")}</span>
       </label>
-      <label class="batch-policy-field">
+      <label class="operation-field">
         <span>{surface.tr("gui.batch.overwrite", "Conflicts")}</span>
-        <select class="batch-input" value={surface.overwrite} disabled={surface.locked}
+        <select class="operation-input" value={surface.overwrite} disabled={surface.locked}
           onchange={(event) => surface.onOverwriteChange(event.currentTarget.value as OverwritePolicy)}>
           {#each surface.overwriteChoices as choice}<option value={choice.id}>{choice.label}</option>{/each}
         </select>
       </label>
-      <label class="batch-policy-field">
+      <label class="operation-field">
         <span>{surface.tr("gui.extract.symlinks", "Symbolic links")}</span>
-        <select class="batch-input" value={surface.symlinks} disabled={surface.locked}
+        <select class="operation-input" value={surface.symlinks} disabled={surface.locked}
           onchange={(event) => surface.onSymlinksChange(event.currentTarget.value as SymlinkPolicy)}>
           {#each surface.symlinkChoices as choice}<option value={choice.id}>{choice.label}</option>{/each}
         </select>
       </label>
     </div>
-    <p class="batch-workspace-hint" id="batch-destination-hint">{surface.mode === "nested"
+    <p class="operation-workspace-hint" id="batch-destination-hint">{surface.mode === "nested"
       ? surface.smart
         ? surface.tr("gui.nested_extract.smart_destination_hint", "Smart extract uses this destination as a base folder. A subfolder is added only when the inner archive contents need one.")
         : surface.tr("gui.nested_extract.direct_destination_hint", "All contents of the inner archive are extracted directly into this destination folder.")
       : surface.smart
       ? surface.tr("gui.batch.smart_destination_hint", "Smart extract uses each destination as a base folder. A subfolder is added only when the archive contents need one.")
       : surface.tr("gui.batch.direct_destination_hint", "Each archive is extracted directly into its destination folder.")}</p>
-    <ol class="batch-source-list">
+    <ol class="operation-list">
       {#each surface.rows as row, index (row.id)}
-        <li class="batch-source-card">
-          <div class="batch-source-header">
-            <div class="batch-source-identity">
+        <li class="operation-card">
+          <div class="operation-card-header">
+            <div class="operation-identity">
               <strong>{row.name}</strong>
               <span>{row.format} · {(surface.mode === "nested"
                 ? surface.tr("gui.nested_extract.outer_encoding", "Outer archive encoding: {encoding}")
@@ -90,12 +90,12 @@
               </button>
             {/if}
           </div>
-          <p class="batch-source-path">{row.path}</p>
-          <label class="batch-destination-field" for={`batch-destination-${index}`}>
+          <p class="operation-path">{row.path}</p>
+          <label class="operation-destination-field" for={`batch-destination-${index}`}>
             {surface.tr("gui.batch.destination", "Destination")}
           </label>
-          <div class="batch-destination-control">
-            <input class="batch-input" id={`batch-destination-${index}`} value={row.target}
+          <div class="operation-control">
+            <input class="operation-input" id={`batch-destination-${index}`} value={row.target}
               aria-label={surface.tr("gui.batch.destination_for", "Destination for {name}").replace("{name}", row.name)}
               aria-describedby="batch-destination-hint" disabled={surface.locked}
               oninput={(event) => row.onTargetInput(event.currentTarget.value)} />
@@ -105,7 +105,7 @@
             </button>
           </div>
           {#if row.onBestEffortChange}
-            <label class="batch-smart-option">
+            <label class="operation-toggle">
               <input type="checkbox" checked={row.bestEffort} disabled={surface.locked}
                 onchange={(event) => row.onBestEffortChange?.(event.currentTarget.checked)} />
               <span>{surface.tr("gui.nested_extract.best_effort", "Continue extracting readable files if some entries are damaged")}</span>
@@ -114,7 +114,7 @@
         </li>
       {/each}
     </ol>
-    <p class="batch-workspace-hint">{surface.mode === "nested"
+    <p class="operation-workspace-hint">{surface.mode === "nested"
       ? surface.tr("gui.nested_extract.execution_hint", "The outer archive is opened first. The inner archive and destination are checked before extraction. Each archive's password is requested separately when needed.")
       : surface.tr("gui.batch.execution_hint", "Archives are checked when the task starts. Passwords are requested when needed. If an archive fails, the remaining archives continue.")}</p>
   {/if}

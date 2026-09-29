@@ -42,6 +42,7 @@
   import ToolsWorkspaceHost from "./components/ToolsWorkspaceHost.svelte";
   import type {
     BatchWorkspaceSurface,
+    ArchiveUpdateWorkspaceSurface,
     ChecksumResultKind,
     ChecksumWorkspaceSurface,
     DuplicatesWorkspaceSurface,
@@ -199,6 +200,7 @@
   import { outputPasswordRequired } from "./lib/job-snapshot";
   import { batchExtractJob, reviewBatchExtract, type BatchExtractDraft } from "./lib/batch-extract";
   import { nestedExtractJob, reviewNestedExtract, type NestedExtractDraft } from "./lib/nested-extract";
+  import { ArchiveUpdateReview } from "./lib/archive-update.svelte";
   import { previewSystemOpenRequiresConfirmation } from "./lib/preview-presentation";
   import {
     previewResponseIsCurrent,
@@ -921,6 +923,8 @@
   let nestedExtractPickerBusy = $state(false);
   let nestedExtractDraftGeneration = 0;
   let nestedExtractReviewFocusPending = false;
+  const archiveUpdateReview = new ArchiveUpdateReview();
+  let archiveUpdateReviewFocusPending = false;
   let batchSubmissionPending = $state(false);
   let batchPickerBusy = $state(false);
   let batchDraftGeneration = 0;
@@ -2152,6 +2156,7 @@
     if (preventCreateSubmissionNavigation(next)) return;
     if (preventConvertSubmissionNavigation(next)) return;
     taskReviewRequestGeneration += 1;
+    if (next !== "updateReview") archiveUpdateReviewFocusPending = false;
     if (next !== "nestedExtract") {
       nestedExtractReviewFocusPending = false;
       nestedExtractDraftGeneration += 1;
@@ -13120,6 +13125,17 @@
       target = "recovery";
     }
     if (!target) return;
+    if (target === "updateReview" && task.spec.kind === "update" && displayedSpec.kind === "update") {
+      if (preventCreateSubmissionNavigation(target) || preventConvertSubmissionNavigation(target) || focusBlockingTaskIfAny()) return;
+      if (!archiveUpdateReview.restore(task.spec, displayedSpec.path)) {
+        showNotice(tr("gui.update_review.wait", "Wait for the current changes to finish submitting before reviewing another task."));
+        return;
+      }
+      setScreen(target);
+      await dismissTaskDialog(task);
+      focusArchiveUpdateReview();
+      return;
+    }
     if (target === "nestedExtract" && task.spec.kind === "extract_nested" && displayedSpec.kind === "extract_nested") {
       if (!restoreNestedExtractDraft(reviewNestedExtract(task.spec, displayedSpec.outer_path))) return;
       await dismissTaskDialog(task);
@@ -13164,6 +13180,37 @@
     setScreen(target);
     await dismissTaskDialog(task);
     if (target === "create") focusCreatePrimaryAction();
+  }
+
+  function focusArchiveUpdateReview(): void {
+    archiveUpdateReviewFocusPending = true;
+    void tick().then(() => {
+      const heading = document.getElementById("update-review-heading");
+      if (!archiveUpdateReviewFocusPending || screen !== "updateReview" || blockingModalVisible() || !heading) return;
+      archiveUpdateReviewFocusPending = false;
+      heading.focus();
+    });
+  }
+
+  async function submitArchiveUpdateReview(): Promise<void> {
+    if (focusBlockingTaskIfAny()) return;
+    try {
+      if (await archiveUpdateReview.submit(submitJob)) {
+        showNotice(tr("gui.update_review.queued", "Selected archive changes added to the queue"));
+      }
+    } catch (error) {
+      if (isJobSubmitBlocked(error)) return;
+      pushToast({ kind: "danger", title: tr("gui.job.submit_failed", "Could not queue the task"),
+        body: isErrorDto(error) ? tError(error) : tr("gui.job.submit_unavailable", "Check that the Squallz desktop service is available, then try again.") });
+    }
+  }
+
+  function archiveUpdateWorkspaceSurface(variant: ToolsWorkspaceVariant): ArchiveUpdateWorkspaceSurface {
+    return { kind: "update", variant, title: tr("gui.update_review.title", "Review archive changes"), tr,
+      archiveReturn: { ...toolsArchiveReturnSurface(variant), visible: Boolean(currentArchive) }, review: archiveUpdateReview,
+      policyLabel: createContentPolicyLabel,
+      onReady: () => { if (archiveUpdateReviewFocusPending) focusArchiveUpdateReview(); },
+      onSubmit: submitArchiveUpdateReview, onOpenTasks: () => openTaskCenter() };
   }
 
   async function reviewExtractTask(task: TaskDialogModel): Promise<void> {
@@ -14156,6 +14203,7 @@
     if (screen === "convert") return tr("gui.screen.convert", "Convert Archive");
     if (screen === "batch") return tr("gui.screen.batch", "Batch Extract Review");
     if (screen === "nestedExtract") return tr("gui.nested_extract.title", "Extract inner archive");
+    if (screen === "updateReview") return tr("gui.update_review.title", "Review archive changes");
     if (screen === "checksum") return tr("gui.screen.checksum", "Checksum");
     if (screen === "duplicates") return tr("gui.screen.duplicates", "Duplicate Finder");
     if (screen === "password") return tr("gui.screen.password", "Password Required");
@@ -14458,7 +14506,7 @@
         class="modern-shell"
         class:settings-shell={isSettingsScreen()}
         class:no-archive-shell={screen === "browse" && !currentArchive}
-        class:no-inspector-shell={screen === "recent" || screen === "convert" || screen === "create" || screen === "extract" || screen === "duplicates" || screen === "batch" || screen === "nestedExtract"}
+        class:no-inspector-shell={screen === "recent" || screen === "convert" || screen === "create" || screen === "extract" || screen === "duplicates" || screen === "batch" || screen === "nestedExtract" || screen === "updateReview"}
       >
         <aside class="modern-sidebar" aria-label={tr("gui.aria.navigation", "Navigation")}>
           <div class="sidebar-section">
@@ -14466,7 +14514,7 @@
               <button
                 disabled={navigationDisabled(screenForNav(item[1]))}
                 title={navigationDisabledReason(screenForNav(item[1]))}
-                class:current={(screen === "recent" && item[1] === "Recent") || (screen === "browse" && item[1] === "Archives") || (screen === "create" && item[1] === "Create") || ((screen === "extract" || screen === "batch" || screen === "nestedExtract" || screen === "password" || screen === "conflict") && item[1] === "Extract") || (screen === "convert" && item[1] === "Convert") || (screen === "checksum" && item[1] === "Checksum") || (screen === "duplicates" && item[1] === "Duplicates") || (screen === "recovery" && item[1] === "Recovery") || (isSettingsScreen() && item[1] === "Settings")}
+                class:current={(screen === "recent" && item[1] === "Recent") || ((screen === "browse" || screen === "updateReview") && item[1] === "Archives") || (screen === "create" && item[1] === "Create") || ((screen === "extract" || screen === "batch" || screen === "nestedExtract" || screen === "password" || screen === "conflict") && item[1] === "Extract") || (screen === "convert" && item[1] === "Convert") || (screen === "checksum" && item[1] === "Checksum") || (screen === "duplicates" && item[1] === "Duplicates") || (screen === "recovery" && item[1] === "Recovery") || (isSettingsScreen() && item[1] === "Settings")}
                 onclick={() => navigateToScreen(screenForNav(item[1]))}
               >
                 <Icon name={item[0]} size={16} />
@@ -14585,6 +14633,8 @@
             <ToolsWorkspaceHost surface={batchWorkspaceSurface("modern")} />
           {:else if screen === "nestedExtract"}
             <ToolsWorkspaceHost surface={nestedExtractWorkspaceSurface("modern")} />
+          {:else if screen === "updateReview"}
+            <ToolsWorkspaceHost surface={archiveUpdateWorkspaceSurface("modern")} />
           {:else if screen === "checksum"}
             <ToolsWorkspaceHost surface={checksumWorkspaceSurface("modern")} />
           {:else if screen === "duplicates"}
@@ -14680,7 +14730,7 @@
 	          {/if}
         </section>
 
-        {#if !isSettingsScreen() && screen !== "recent" && screen !== "convert" && screen !== "create" && screen !== "extract" && screen !== "duplicates" && screen !== "batch" && screen !== "nestedExtract" && (screen !== "browse" || currentArchive)}
+        {#if !isSettingsScreen() && screen !== "recent" && screen !== "convert" && screen !== "create" && screen !== "extract" && screen !== "duplicates" && screen !== "batch" && screen !== "nestedExtract" && screen !== "updateReview" && (screen !== "browse" || currentArchive)}
           <ModernInspectorHost
             surface={modernInspectorSurface()}
             ariaLabel={tr("gui.aria.archive_inspector", "Archive inspector")}
@@ -14960,6 +15010,8 @@
         <ToolsWorkspaceHost surface={batchWorkspaceSurface("classic")} />
       {:else if screen === "nestedExtract"}
         <ToolsWorkspaceHost surface={nestedExtractWorkspaceSurface("classic")} />
+      {:else if screen === "updateReview"}
+        <ToolsWorkspaceHost surface={archiveUpdateWorkspaceSurface("classic")} />
       {:else if screen === "checksum"}
         <ToolsWorkspaceHost surface={checksumWorkspaceSurface("classic")} />
       {:else if screen === "duplicates"}
@@ -15042,6 +15094,9 @@
           <span title={extractScopeStatus}>{extractScopeStatus}</span>
           <span title={extractConflictStatus}>{extractConflictCompactStatus}</span>
           <strong title={extractDestinationStatus}>{extractDestinationStatus}</strong>
+        {:else if screen === "updateReview"}
+          <span>{tr("gui.update_review.title", "Review archive changes")}</span>
+          <strong>{tr("gui.update_review.count", "{count} changes selected").replace("{count}", String(archiveUpdateReview.selectedCount()))}</strong>
         {:else if screen === "nestedExtract"}
           <span>{tr("gui.nested_extract.title", "Extract inner archive")}</span>
           <span>{nestedExtractDraft ? pathBaseName(nestedExtractDraft.entry_path) : tr("gui.nested_extract.empty", "No inner archive selected")}</span>

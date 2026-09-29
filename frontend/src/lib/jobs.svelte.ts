@@ -1291,6 +1291,7 @@ type PreviewTaskKind =
   | "extract"
   | "extract_failure"
   | "extract_nested_failure"
+  | "update_failure"
   | "extract_unknown_current"
   | "extract_metadata"
   | "batch_extract_metadata"
@@ -1338,6 +1339,13 @@ function isRecoveryCleanupPreview(kind: PreviewTaskKind): boolean {
 }
 
 function previewTaskSpec(kind: PreviewTaskKind): JobSpec {
+  if (kind === "update_failure") {
+    return { kind: "update", path: `${sampleRoot}/客户交付/Quarterly delivery with complete project history.zip`,
+      add: [`${sampleRoot}/Revised documents/完整项目说明.txt`], mkdir: ["交付文档/审核记录/"],
+      delete: ["Previous versions/旧资料[1].txt"],
+      rename: [{ from: "Previous versions/Design assets with a complete descriptive name.pdf", to: "交付文档/Design assets with a complete descriptive name.pdf" }],
+      encoding: "gbk", content_policy: "custom", excludes: ["*.bak", ".DS_Store"], level: 3, password: null };
+  }
   if (kind === "extract_nested_failure") {
     return { kind: "extract_nested", outer_path: `${sampleRoot}/Quarterly delivery with complete project history.zip`,
       entry_path: "客户交付与设计资料/Previous versions/Design assets with a complete descriptive name.7z",
@@ -1871,6 +1879,7 @@ function previewProgress(kind: PreviewTaskKind, state: Extract<JobStateName, "do
 }
 
 function previewTaskOffset(kind: PreviewTaskKind): number {
+  if (kind === "update_failure") return 33;
   if (kind === "extract_nested_failure") return 32;
   if (kind === "batch_extract_partial") return 30;
   if (kind === "batch_extract_failure") return 31;
@@ -1922,7 +1931,7 @@ function installTaskPreview(kind: PreviewTaskKind, state: Extract<JobStateName, 
   const progress = previewProgress(kind, state);
   const previewState = kind === "compress_failure" || kind === "compress_sfx_failure" || kind === "extract_failure"
     || kind === "convert_failure" || kind === "convert_encrypted_failure" || kind === "duplicate_scan_failure"
-    || kind === "batch_extract_failure" || kind === "extract_nested_failure" || isRecoveryCleanupPreview(kind)
+    || kind === "batch_extract_failure" || kind === "extract_nested_failure" || kind === "update_failure" || isRecoveryCleanupPreview(kind)
     ? "failed"
     : state;
   const target = isRecoveryCleanupPreview(kind)
@@ -1936,6 +1945,8 @@ function installTaskPreview(kind: PreviewTaskKind, state: Extract<JobStateName, 
     `${sampleOutputRoot}/.squallz-par2-repair-8f3d4a9e1c7b2d5f.json`;
   const error: ErrorDto = kind === "compress_failure"
     ? { key: "error.io", params: { detail: "Could not write the archive output" }, detail: "Could not write the archive output" }
+    : kind === "update_failure"
+    ? { key: "error.io", params: { detail: "Could not replace the archive" }, detail: "Could not replace the archive" }
     : kind === "duplicate_scan_failure"
     ? { key: "error.io", params: { detail: "Could not read the scan folder" }, detail: "Could not read the scan folder" }
     : kind === "convert_failure" || kind === "convert_encrypted_failure"
