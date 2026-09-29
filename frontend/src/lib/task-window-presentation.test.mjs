@@ -121,6 +121,14 @@ test("waiting task surfaces retain measured progress without rates or processing
       for (const state of ["done", "failed", "cancelled"]) {
         assert.doesNotMatch(helpers.taskProgressSummary(extractTask(state)), /\/s|\/秒/u);
       }
+      const cancelled = extractTask("cancelled");
+      for (const presentation of ["dialog", "panel", "window"]) {
+        const taskWindowMode = presentation === "window";
+        const body = render(TaskProgressDialog, { props: { ...surface, presentation, taskWindowMode, task: cancelled } }).body;
+        assert.ok(body.includes(helpers.taskNextStepDetail(cancelled, taskWindowMode)));
+        assert.equal(body.includes(helpers.taskReviewActionLabel(cancelled)), !taskWindowMode);
+        assert.doesNotMatch(body, /data-task-active="true"/u);
+      }
     }
   } finally {
     await server.close();

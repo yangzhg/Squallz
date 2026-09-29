@@ -174,9 +174,10 @@ test("a current archive picker preserves selection, cancellation, and failure fe
   }
 });
 
-test("failed extraction review restores its selection and policies instead of reusing the current draft", async () => {
+for (const state of ["failed", "cancelled"]) {
+test(`${state} extraction review restores its selection and policies instead of reusing the current draft`, async () => {
   const run = harness();
-  await run.reviewTask({ id: 8, state: "failed", spec: spec() });
+  await run.reviewTask({ id: 8, state, spec: spec() });
   await Promise.resolve();
   assert.deepEqual(Array.from(run.extractJobPaths() ?? []), ["photos/", "notes.txt"]);
   assert.equal(run.extractJobDestination(), "/original/output");
@@ -201,6 +202,7 @@ test("failed extraction review restores its selection and policies instead of re
   assert.equal(submitted.symlinks, "skip");
   assert.deepEqual(Array.from(submitted.selection), ["photos/", "notes.txt"]);
 });
+}
 
 test("review reopens the original archive with its encoding and preserves direct output and SFX verification", async () => {
   const run = harness();
@@ -439,7 +441,8 @@ test("changing verification while rechecking the plan prevents submitting stale 
   assert.ok(run.calls.some(([name, text]) => name === "notice" && text.includes("settings changed")));
 });
 
-test("failed conversion review opens its source and returns to its session after password retry", async () => {
+for (const state of ["failed", "cancelled"]) {
+test(`${state} conversion review opens its source and returns to its session after password retry`, async () => {
   const run = harness();
   const conversion = { kind: "convert", src: "/old/backup.7z", dest: "/out/backup.zip",
     level: 4, src_encoding: "gbk", src_password: "old-source-password", dest_password: "old-output-password",
@@ -461,7 +464,7 @@ test("failed conversion review opens its source and returns to its session after
     run.context.archivePasswordPrompt = null;
     return true;
   };
-  await run.reviewTask({ id: 12, state: "failed", spec: conversion });
+  await run.reviewTask({ id: 12, state, spec: conversion });
   assert.equal(run.context.screen, "password");
   assert.equal(restored, null);
   assert.deepEqual(run.calls.find(([name]) => name === "open"), ["open", conversion.src, null, "gbk"]);
@@ -478,6 +481,7 @@ test("failed conversion review opens its source and returns to its session after
   assert.ok(run.calls.some(([name]) => name === "focus-convert"));
   assert.equal(run.calls.some(([name]) => name === "submit"), false);
 });
+}
 
 test("a locked conversion session keeps its draft and task dialog without opening another archive", async () => {
   const run = harness();

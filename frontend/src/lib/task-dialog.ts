@@ -1303,6 +1303,14 @@ function taskFailureNextStepDetail(task: TaskDialogModel): string {
 }
 
 export function taskNextStepDetail(task: TaskDialogModel, taskWindowMode: boolean): string {
+  if (task.state === "cancelled") {
+    if (taskReviewScreen(task)) {
+      return taskWindowMode
+        ? tr("gui.task.next_step_cancelled_window", "Review this task in the main Squallz window before starting again. The new task starts from the beginning; check any existing output first.")
+        : tr("gui.task.next_step_cancelled_review", "Review the original sources and settings before starting again. The new task starts from the beginning; check any existing output first.");
+    }
+    return tr("gui.task.next_step_cancelled", "The task has stopped. Check any files already written before starting another operation.");
+  }
   if (task.state === "failed") {
     const detail = taskFailureNextStepDetail(task);
     return taskWindowMode

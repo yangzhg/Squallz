@@ -74,9 +74,10 @@ test("partially successful batches expose a review action for failed archives", 
     result: { failed: 0, extracted: 3 } }), null);
 });
 
-test("failed batch review restores original nonsecret settings; edits are exactly what is submitted", async () => {
+for (const state of ["failed", "cancelled"]) {
+test(`${state} batch review restores original nonsecret settings; edits are exactly what is submitted`, async () => {
   const run = harness();
-  await run.reviewTask({state:"failed",spec:spec(),result:null});
+  await run.reviewTask({state,spec:spec(),result:null});
   assert.equal(run.context.screen,"batch");
   assert.equal(run.calls.some(([name]) => name === "submit"),false);
   let surface = run.batchWorkspaceSurface("modern");
@@ -103,6 +104,7 @@ test("failed batch review restores original nonsecret settings; edits are exactl
   assert.ok(submitted.items.every((item)=>item.password===null));
   assert.equal("password" in run.context.batchDraft.items[0],false);
 });
+}
 
 test("partial success restores only identified failures and ambiguous results preserve the current draft", async () => {
   const run = harness();

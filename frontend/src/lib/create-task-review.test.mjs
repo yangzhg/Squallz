@@ -109,9 +109,10 @@ function harness() {
   return vm.runInNewContext(`${outputText}\n({${declarations.map((node) => node.name.text).join(",")}, context:globalThis, calls})`, context);
 }
 
-test("reviewing a failed creation restores its sources and options without restarting it", () => {
+for (const state of ["failed", "cancelled"]) {
+test(`reviewing a ${state} creation restores its sources and options without restarting it`, async () => {
   const run = harness();
-  run.reviewTask({ id: 8, state: "failed", spec: taskSpec() });
+  await run.reviewTask({ id: 8, state, spec: taskSpec() });
   const draft = run.context;
   assert.deepEqual(Array.from(draft.createSources, (source) => source.path), ["/original/reports", "/original/photos"]);
   assert.equal(draft.activeCreateFormat, "zip");
@@ -140,10 +141,12 @@ test("reviewing a failed creation restores its sources and options without resta
   assert.equal(run.calls.filter(([name]) => name === "plan").length, 0);
   assert.ok(run.calls.some(([name, screen]) => name === "screen" && screen === "create"));
 });
+}
 
-test("reviewing an encrypted ZIP requires a new password and keeps protection across edits and discarded plans", async () => {
+for (const state of ["failed", "cancelled"]) {
+test(`reviewing a ${state} encrypted ZIP requires a new password and keeps protection across edits and discarded plans`, async () => {
   const run = harness();
-  await run.reviewTask({ id: 9, state: "failed", spec: taskSpec(), outputPasswordRequired: true });
+  await run.reviewTask({ id: 9, state, spec: taskSpec(), outputPasswordRequired: true });
   assert.equal(run.context.createEncryptionEnabled, true);
   assert.equal(run.context.createPassword, "");
   assert.equal(run.context.createEncryptNames, false);
@@ -169,6 +172,7 @@ test("reviewing an encrypted ZIP requires a new password and keeps protection ac
   run.chooseCreateFormat("tar.zst");
   assert.equal(run.context.activeCreateFormat, "tar.zst");
 });
+}
 
 test("restored name encryption is not silently removed by choosing ZIP or a self-extractor", () => {
   const run = harness();
@@ -184,10 +188,11 @@ test("restored name encryption is not silently removed by choosing ZIP or a self
   assert.equal(run.context.activeCreateFormat, "zip");
 });
 
-test("restored creation chooses the destination again and checks sources, space and current overwrite permission", async () => {
+for (const state of ["failed", "cancelled"]) {
+test(`restored ${state} creation chooses the destination again and checks sources, space and current overwrite permission`, async () => {
   const run = harness();
   const spec = taskSpec();
-  run.reviewTask({ id: 8, state: "failed", spec });
+  await run.reviewTask({ id: 8, state, spec });
   assert.match(run.createOutputPreview(), /Confirm location when starting.*\/output\/backup.zip/);
   assert.equal(run.createArchivePreviewName(), "backup.zip");
   await run.submitCreateInputs(spec.inputs, "dialog");
@@ -203,6 +208,7 @@ test("restored creation chooses the destination again and checks sources, space 
   assert.equal(pending.spec.split_mode, "native");
   assert.equal(run.context.createPreflightPhase, "reviewing");
 });
+}
 
 test("creation review respects format variants, current platform capability and an in-progress draft", () => {
   for (const [dest, expected] of [["a.zip", "zip"], ["a.7Z", "7z"], ["a.sqz", "sqz"],

@@ -817,6 +817,28 @@ test("SFX result and recovery details use the durable single-backup contract", a
     assert.equal(taskCurrentProgressBadge(scanning), "Scanning");
     assert.equal(taskCurrentProgressSource(scanning), "scan-entry");
     const cancelledScan = { ...scanning, state: "cancelled" };
+    assert.equal(taskReviewScreen(cancelledScan), "create");
+    assert.match(taskNextStepDetail(cancelledScan, false), /Review the original sources and settings/);
+    assert.doesNotMatch(taskNextStepDetail(cancelledScan, false), /sign|notariz|distribut/i);
+    for (const [kind, target] of [["compress", "create"], ["extract", "extract"], ["convert", "convert"],
+      ["batch_extract", "batch"], ["extract_nested", "nestedExtract"], ["update", "updateReview"]]) {
+      const cancelled = { ...cancelledScan, spec: { ...cancelledScan.spec, kind } };
+      assert.equal(taskReviewScreen(cancelled), target);
+      assert.equal(taskReviewAvailable(cancelled, false), true);
+      assert.equal(taskReviewAvailable(cancelled, true), false);
+      assert.equal(taskReviewActionLabel(cancelled), "Review task settings");
+      assert.match(taskNextStepDetail(cancelled, false), /from the beginning.*existing output/);
+      assert.match(taskNextStepDetail(cancelled, true), /main Squallz window/);
+      for (const state of ["queued", "running", "paused", "done"]) {
+        assert.equal(taskReviewScreen({ ...cancelled, state }), null);
+      }
+    }
+    for (const kind of ["test", "checksum", "checksum_check", "duplicate_scan", "protect", "publish_macos_sfx", "repair_zip", "repair_sqz", "export_sqz", "verify_recovery", "repair_recovery"]) {
+      const cancelled = { ...cancelledScan, spec: { ...cancelledScan.spec, kind } };
+      assert.equal(taskReviewAvailable(cancelled, false), false);
+      assert.match(taskNextStepDetail(cancelled, false), /task has stopped/);
+      assert.doesNotMatch(taskNextStepDetail(cancelled, true), /sign|notariz|distribut|finished report/i);
+    }
     assert.equal(taskOverallProgressIndeterminate(cancelledScan), false);
     assert.equal(taskOverallProgressBadge(cancelledScan), "Cancelled");
     assert.equal(taskCurrentSectionVisible(cancelledScan), true);

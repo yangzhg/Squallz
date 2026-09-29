@@ -36,10 +36,11 @@ function handlers(review) {
   return {...vm.runInNewContext(`${outputText}\n({${names.join(",")}})`,context),context,calls};
 }
 
-test("failed updates restore their original operations without submitting or inheriting the current archive",async()=>{
+for (const state of ["failed", "cancelled"]) {
+test(`${state} updates restore their original operations without submitting or inheriting the current archive`,async()=>{
   const review=new ArchiveUpdateReview(); const run=handlers(review);
   const original=spec();
-  await run.reviewTask({state:"failed",spec:original},{...original,path:"Displayed archive.zip"});
+  await run.reviewTask({state,spec:original},{...original,path:"Displayed archive.zip"});
   assert.deepEqual(run.calls,[["screen","updateReview"],["dismiss"],["focus"]]);
   assert.equal(review.draft.displayPath,"Displayed archive.zip");
   assert.equal(review.draft.path,original.path);
@@ -51,6 +52,7 @@ test("failed updates restore their original operations without submitting or inh
   assert.equal(review.draft.operations[0].value,"/input/资料\n完整.txt");
   assert.deepEqual(plain(review.draft.excludes),["*.bak",".DS_Store"]);
 });
+}
 
 test("edits and deselection submit exactly the reviewed values while preserving literal deletion targets",async()=>{
   const review=new ArchiveUpdateReview();review.restore(spec(),"Original.zip");

@@ -80,7 +80,7 @@
   </header>
   <div class="operation-workspace-body">
     {#if draft}
-      <p class="operation-workspace-hint">{surface.tr("gui.update_review.hint", "These changes modify this archive. Review every selected operation; the archive may have changed since the failed task. Entries and conflicts are checked again before writing. Passwords are requested when needed.")}</p>
+      <p class="operation-workspace-hint">{surface.tr("gui.update_review.hint", "These changes modify this archive. Review every selected operation; the archive may have changed since the original task. Entries and conflicts are checked again before writing. Passwords are requested when needed.")}</p>
       {#if review.issue}<p id="update-review-error" class="update-review-error" role="alert">{issueLabel(review.issue)}</p>{/if}
       <ol class="operation-list">
         {#each draft.operations.slice(0, visibleCount) as row (row.id)}
@@ -166,7 +166,7 @@
       <div class="operation-empty-state">
         <Icon name="archive" size={32} />
         <strong>{surface.tr("gui.update_review.empty", "No archive changes to review")}</strong>
-        <p>{surface.tr("gui.update_review.empty_hint", "Open a failed archive update in the task center and choose Review task settings.")}</p>
+        <p>{surface.tr("gui.update_review.empty_hint", "Open a failed or cancelled archive update in the task center and choose Review task settings.")}</p>
         <button class="secondary-lite" onclick={surface.onOpenTasks}>{surface.tr("gui.task_center.title", "Task center")}</button>
       </div>
     {/if}

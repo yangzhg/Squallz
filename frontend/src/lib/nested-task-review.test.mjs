@@ -56,16 +56,17 @@ function harness() {
   return { ...vm.runInNewContext(`${outputText}\n({${names.join(",")}})`, context), context, calls };
 }
 
-async function restore(run) {
+async function restore(run, state = "failed") {
   const job = spec();
-  await run.reviewTask({ state: "failed", spec: job }, { ...job, outer_path: "/Archives/外层归档.zip" });
+  await run.reviewTask({ state, spec: job }, { ...job, outer_path: "/Archives/外层归档.zip" });
 }
 
-test("failed inner extraction restores the exact source and nonsecret settings into an editable review", async () => {
+for (const state of ["failed", "cancelled"]) {
+test(`${state} inner extraction restores the exact source and nonsecret settings into an editable review`, async () => {
   assert.equal(taskReviewScreen({state:"done",spec:spec(),result:{counts:{created:2,failed:1}}}),"nestedExtract");
   assert.equal(taskReviewScreen({state:"done",spec:spec(),result:{counts:{created:3,failed:0}}}),null);
   const run = harness();
-  await restore(run);
+  await restore(run, state);
   assert.equal(run.context.screen, "nestedExtract");
   assert.equal(run.calls.some(([name]) => name === "submit"), false);
   const surface = run.nestedExtractWorkspaceSurface("modern");
@@ -85,6 +86,7 @@ test("failed inner extraction restores the exact source and nonsecret settings i
   assert.equal("password" in run.context.nestedExtractDraft, false);
   assert.equal("outerDisplayPath" in submitted, false);
 });
+}
 
 test("preview extraction first reviews a smart base directory without pre-adding the inner archive name", () => {
   const run = harness();

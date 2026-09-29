@@ -247,7 +247,7 @@ export function taskReviewScreen(task: TaskDialogModel): Screen | null {
   if (task.state === "done" && task.spec.kind === "test" && task.result?.ok === false) {
     return "recovery";
   }
-  if (task.state !== "failed") return null;
+  if (task.state !== "failed" && task.state !== "cancelled") return null;
   switch (task.spec.kind) {
     case "compress":
       return "create";
@@ -261,6 +261,9 @@ export function taskReviewScreen(task: TaskDialogModel): Screen | null {
       return "updateReview";
     case "convert":
       return "convert";
+  }
+  if (task.state !== "failed") return null;
+  switch (task.spec.kind) {
     case "checksum":
     case "checksum_check":
       return "checksum";
