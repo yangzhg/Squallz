@@ -11860,7 +11860,7 @@
         void ipc.closeArchive(info.id).catch(() => undefined);
         return;
       }
-      if (!await adoptOpenedArchive(info)) return;
+      if (!await adoptOpenedArchive(info, () => requestGeneration === previewRequestGeneration)) return;
       recoverySourceMode = "current";
       recoverySourceOverride = null;
       recoveryPar2Override = null;

@@ -430,8 +430,12 @@ function clearArchiveRefreshStatus(): void {
   removeToastByKey(ARCHIVE_REFRESH_ERROR_TOAST_KEY);
 }
 
-/** Adopts an archive that was already opened by an archive command. */
-export async function adoptOpenedArchive(info: ArchiveInfo): Promise<boolean> {
+/** Publishes an opened archive only while its initiating action is still current. */
+export async function adoptOpenedArchive(info: ArchiveInfo, isCurrent: () => boolean): Promise<boolean> {
+  if (!isCurrent()) {
+    void ipc.closeArchive(info.id);
+    return false;
+  }
   cancelActiveArchiveOpenRequest();
   const requestGeneration = ++store.openGeneration;
   let page: Awaited<ReturnType<typeof ipc.listEntries>>;
@@ -440,9 +444,10 @@ export async function adoptOpenedArchive(info: ArchiveInfo): Promise<boolean> {
     page = await ipc.listEntries(info.id, 0, "", null, PAGE_SIZE);
   } catch (error) {
     void ipc.closeArchive(info.id);
+    if (requestGeneration !== store.openGeneration || !isCurrent()) return false;
     throw error;
   }
-  if (requestGeneration !== store.openGeneration) {
+  if (requestGeneration !== store.openGeneration || !isCurrent()) {
     void ipc.closeArchive(info.id);
     return false;
   }
