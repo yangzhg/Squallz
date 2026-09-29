@@ -3,6 +3,7 @@ import { taskWindowModeFromParams, taskWindowQuery } from "./task-window";
 export interface WindowRecoveryContext {
   taskId?: number | null;
   taskCenter?: boolean;
+  taskWindow?: boolean;
 }
 
 const taskIdParam = "recoveryTask";
@@ -19,7 +20,7 @@ export function readWindowRecovery(params: URLSearchParams): WindowRecoveryConte
 export function windowRecoveryUrl(currentUrl: string, context: WindowRecoveryContext): string {
   const url = new URL(currentUrl);
   const params = url.searchParams;
-  if (taskWindowModeFromParams(params)) params.set(taskWindowQuery.mode, taskWindowQuery.modeValue);
+  if (context.taskWindow || taskWindowModeFromParams(params)) params.set(taskWindowQuery.mode, taskWindowQuery.modeValue);
   // External task parameters are a launch request, never a route to replay.
   params.delete(taskWindowQuery.action);
   params.delete(taskWindowQuery.path);
@@ -33,7 +34,11 @@ export function windowRecoveryUrl(currentUrl: string, context: WindowRecoveryCon
   return url.href;
 }
 
-export function reloadWindow(context: WindowRecoveryContext): void {
+export function rememberWindowRecovery(context: WindowRecoveryContext): void {
   window.history.replaceState(window.history.state, "", windowRecoveryUrl(window.location.href, context));
+}
+
+export function reloadWindow(context: WindowRecoveryContext): void {
+  rememberWindowRecovery(context);
   window.location.reload();
 }

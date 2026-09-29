@@ -177,7 +177,7 @@
   } from "./lib/create-sources";
   import { platformTrashName } from "./lib/platform-labels";
   import { cssVariables, type CssVariableMap } from "./lib/css-variables";
-  import { readWindowRecovery } from "./lib/window-recovery";
+  import { readWindowRecovery, rememberWindowRecovery, reloadWindow } from "./lib/window-recovery";
   import {
     buildExternalTaskJobSpec,
     externalOpenAction,
@@ -185,6 +185,8 @@
   } from "./lib/external-tasks";
   import {
     taskWindowLaunchStateFromParams,
+    taskWindowRecoveryState,
+    taskWindowTask,
     taskWindowShellMessage,
     taskWindowShellTitle,
     taskWindowSubmitFailureStatus,
@@ -213,6 +215,7 @@
     cancelTask,
     clearFinished,
     initJobEvents,
+    jobSnapshotStatus,
     pauseTask,
     pendingConflict,
     pendingPassword,
@@ -617,8 +620,12 @@
   let taskWindowMode = $derived(taskWindowLaunchState.mode);
   let modeSelectionBlocked = $derived(!taskWindowMode && uiModeChoice() === null);
   let taskWindowPendingAction = $derived(taskWindowLaunchState.pendingAction);
-  let taskWindowShellTitleCopy = $derived(taskWindowShellTitle(taskWindowLaunchState, tr));
-  let taskWindowShellCopy = $derived(taskWindowShellMessage(taskWindowLaunchState, tr));
+  let displayedTaskWindowState = $derived(
+    initialTaskWindowLaunchState.mode && !initialTaskWindowLaunch && taskWindowLaunchState.status === "waiting"
+      ? taskWindowRecoveryState(jobSnapshotStatus()) : taskWindowLaunchState,
+  );
+  let taskWindowShellTitleCopy = $derived(taskWindowShellTitle(displayedTaskWindowState, tr));
+  let taskWindowShellCopy = $derived(taskWindowShellMessage(displayedTaskWindowState, tr));
   let jobSubmitInFlight = $state(false);
   let submittingJobSpec = $state<JobSpec | null>(null);
   let jobPasswordValue = $state("");
@@ -1230,17 +1237,21 @@
   });
 
   $effect(() => {
+    if (taskWindowMode) {
+      if (taskDialogTaskId === null && taskWindowLaunchState.status !== "waiting") return;
+      const task = taskWindowTask(jobRows, taskDialogTaskId);
+      if (!task) return;
+      taskDialogTaskId = task.id;
+      taskDialogDismissedId = null;
+      rememberWindowRecovery({ taskWindow: true, taskId: task.id });
+      return;
+    }
     const questionTaskId = jobPasswordPrompt?.id ?? jobConflictPrompt?.id ?? null;
     if (questionTaskId !== null) {
       taskDialogTaskId = questionTaskId;
       taskDialogDismissedId = null;
       return;
     }
-    if (!taskWindowMode) return;
-    const active = blockingTask();
-    if (!active) return;
-    taskDialogTaskId = active.id;
-    taskDialogDismissedId = null;
   });
 
   $effect(() => {
@@ -6046,6 +6057,9 @@
     }
 
     applyTaskWindowSubmitTransition(taskWindowSubmitTransition(action, "starting", tr));
+    taskDialogTaskId = null;
+    taskDialogDismissedId = null;
+    rememberWindowRecovery({ taskWindow: true });
     let resolvedSpec: JobSpec | null;
     try {
       resolvedSpec = await ipc.resolveExternalTaskJob(
@@ -12620,11 +12634,15 @@
   function taskDialogTask(): TaskDialogModel | null {
     const submitting = submittingTaskModel();
     if (taskWindowMode && submitting) return submitting;
+    if (taskWindowMode) {
+      if (taskDialogTaskId === null && taskWindowLaunchState.status !== "waiting") return null;
+      return taskWindowTask(jobRows, taskDialogTaskId);
+    }
     if (taskDialogTaskId !== null) {
       const remembered = jobRows.find((task) => task.id === taskDialogTaskId);
       if (remembered) return remembered;
     }
-    return taskWindowMode ? blockingTask() : null;
+    return null;
   }
 
   function taskDialogVisible(): boolean {
@@ -12953,6 +12971,7 @@
       if (taskWindowMode) {
         taskDialogTaskId = id;
         taskDialogDismissedId = null;
+        rememberWindowRecovery({ taskWindow: true, taskId: id });
       }
       return id;
     } finally {
@@ -14445,6 +14464,13 @@
           <h1>{taskWindowShellTitleCopy}</h1>
           <p>{taskWindowShellCopy}</p>
         </div>
+        {#if displayedTaskWindowState.status === "reconnect-error" || displayedTaskWindowState.status === "task-unavailable"}
+          <div class="task-window-empty-actions">
+            <button class="primary-lite" type="button" onclick={() => reloadWindow({ taskWindow: true, taskId: taskDialogTaskId })}>
+              <Icon name="rotate-cw" size={15} />{tr("gui.external_task.reconnect_action", "Retry connection")}
+            </button>
+          </div>
+        {/if}
       </section>
     {/if}
   </main>

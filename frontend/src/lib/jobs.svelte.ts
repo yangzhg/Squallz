@@ -110,8 +110,11 @@ export function jobSupportsPause(spec: JobSpec): boolean {
     && spec.kind !== "repair_recovery";
 }
 
+export type JobSnapshotStatus = "loading" | "ready" | "unavailable";
+
 const store = $state({
   tasks: [] as Task[],
+  snapshotStatus: "loading" as JobSnapshotStatus,
 });
 
 const pendingStates = new Map<number, StateEvent>();
@@ -1236,8 +1239,12 @@ async function reconcileSnapshotFeed(stopped: () => boolean): Promise<void> {
       const generation = snapshotGeneration;
       const delta = await ipc.jobSnapshots(snapshotRevision);
       if (stopped()) return;
-      if (generation === snapshotGeneration) applySnapshotDelta(delta);
+      if (generation === snapshotGeneration) {
+        applySnapshotDelta(delta);
+        store.snapshotStatus = "ready";
+      }
     } catch {
+      if (!stopped()) store.snapshotStatus = "unavailable";
       // Native startup and shutdown can briefly race the WebView. The next
       // bounded poll requests the same revision again.
     }
@@ -1256,10 +1263,10 @@ async function refreshQuestionTask(id: number): Promise<void> {
 
 /** Wires this window's job event listeners once at startup. */
 export async function initJobEvents(): Promise<() => void> {
-  const listen = await currentWebviewWindowListener();
   const cleanup: Array<() => void> = [];
   let stopped = false;
   try {
+    const listen = await currentWebviewWindowListener();
     cleanup.push(await listen<ProgressEvent>("job://progress", (e) => onProgress(e.payload)));
     cleanup.push(await listen<StateEvent>("job://state", (e) => onState(e.payload)));
     cleanup.push(await listen<AskConflictEvent>("job://ask-conflict", (e) => {
@@ -1271,6 +1278,7 @@ export async function initJobEvents(): Promise<() => void> {
     void reconcileSnapshotFeed(() => stopped);
   } catch (error) {
     stopped = true;
+    store.snapshotStatus = "unavailable";
     for (const dispose of cleanup) dispose();
     throw error;
   }
@@ -1282,6 +1290,10 @@ export async function initJobEvents(): Promise<() => void> {
 
 export function tasks(): Task[] {
   return store.tasks;
+}
+
+export function jobSnapshotStatus(): JobSnapshotStatus {
+  return store.snapshotStatus;
 }
 
 type PreviewTaskKind =

@@ -133,6 +133,24 @@ test("pause and resume events do not restore an old transfer rate", async () => 
   });
 });
 
+test("snapshot connection failures preserve tasks and recover after a successful poll", async () => {
+  await withQuestionFeed(async ({ jobs, ipc, server }) => {
+    const { taskWindowRecoveryState } = await server.ssrLoadModule("/src/lib/task-window.ts");
+    assert.equal(taskWindowRecoveryState("loading").status, "reconnecting");
+    assert.equal(jobs.jobSnapshotStatus(), "ready");
+    const prompt = jobs.pendingPassword();
+    ipc.jobSnapshots = async () => { throw new Error("connection unavailable"); };
+    await until(() => jobs.jobSnapshotStatus() === "unavailable");
+    assert.equal(taskWindowRecoveryState(jobs.jobSnapshotStatus()).status, "reconnect-error");
+    assert.equal(jobs.tasks().length, 2);
+    assert.equal(jobs.pendingPassword(), prompt);
+    ipc.jobSnapshots = async () => ({ revision: 11, reset: false, upserts: [], removed: [] });
+    await until(() => jobs.jobSnapshotStatus() === "ready");
+    assert.equal(taskWindowRecoveryState(jobs.jobSnapshotStatus()).status, "task-unavailable");
+    assert.equal(jobs.pendingPassword(), prompt);
+  });
+});
+
 test("snapshot questions enforce ownership and terminal state while preserving form identity", async () => {
   const server = await createTestServer();
   try {

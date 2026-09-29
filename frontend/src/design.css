@@ -3727,6 +3727,20 @@ select option {
   line-height: var(--type-title-line);
 }
 
+.task-window-empty-actions {
+  grid-column: 2;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+}
+
+.task-window-empty-actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-sm);
+  min-height: var(--control-height);
+}
+
 .task-window-empty p {
   margin: 0;
   color: var(--color-text-secondary);
