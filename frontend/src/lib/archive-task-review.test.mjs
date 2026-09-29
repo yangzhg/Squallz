@@ -37,7 +37,7 @@ function harness() {
   const calls = [];
   const context = {
     calls, taskReviewScreen, taskWindowMode: false, currentArchive: archive(),
-    screen: "browse", archiveOpenStatus: "idle", archiveOpenGeneration: 0,
+    screen: "browse", archiveOpenStatus: "idle", archiveOpenGeneration: 0, archivePasswordAttempt: 0,
     taskReviewRequestGeneration: 0, nestedExtractDraftGeneration: 0, nestedExtractReviewFocusPending: false,
     archiveUpdateReviewFocusPending: false,
     extractReviewFocusPending: false, convertReviewFocusPending: false, createPrimaryFocusPending: false,

@@ -93,7 +93,7 @@ const store = $state({
   encodingOverride: null as string | null,
   /** Pending open that needs a password (drives the password dialog) */
   passwordPrompt: null as {
-    path: string; wrong: boolean; encoding: string | null;
+    path: string; wrong: boolean; encoding: string | null; refresh: boolean;
     visibleWindow?: () => ArchiveViewWindow;
   } | null,
   /** Most recent structured non-password failure, bound to the attempted path. */
@@ -196,7 +196,7 @@ export function selectedSize(): number {
   return store.selectedSize;
 }
 
-export function openPasswordPrompt(): { path: string; wrong: boolean; encoding: string | null } | null {
+export function openPasswordPrompt(): { path: string; wrong: boolean; encoding: string | null; refresh: boolean } | null {
   return store.passwordPrompt;
 }
 
@@ -350,19 +350,14 @@ async function performArchiveOpen(
         path,
         wrong: e.key === "error.wrong_password" || password != null,
         encoding,
+        refresh: visibleWindow !== undefined,
         visibleWindow,
       };
       return false;
     }
     store.passwordPrompt = null;
     if (visibleWindow) {
-      store.refreshStatus = "error";
-      const retry: () => Promise<boolean> = () => pendingRefreshRetry === retry
-        && store.info?.id === previousId && store.refreshStatus === "error"
-        && pendingArchiveOpenRequestId === null
-        ? performArchiveOpen(path, password, encoding, visibleWindow)
-        : Promise.resolve(false);
-      pendingRefreshRetry = retry;
+      const retry = retainArchiveRefreshRetry(path, encoding, visibleWindow, previousId);
       pushToast({
         key: ARCHIVE_REFRESH_ERROR_TOAST_KEY,
         kind: "danger",
@@ -391,6 +386,22 @@ async function performArchiveOpen(
       pendingArchiveOpenRequestId = null;
     }
   }
+}
+
+function retainArchiveRefreshRetry(
+  path: string,
+  encoding: string | null,
+  visibleWindow: () => ArchiveViewWindow,
+  previousId: number | undefined,
+): () => Promise<boolean> {
+  store.refreshStatus = "error";
+  const retry: () => Promise<boolean> = () => pendingRefreshRetry === retry
+    && store.info?.id === previousId && store.refreshStatus === "error"
+    && pendingArchiveOpenRequestId === null
+    ? performArchiveOpen(path, null, encoding, visibleWindow)
+    : Promise.resolve(false);
+  pendingRefreshRetry = retry;
+  return retry;
 }
 
 function viewPages(window: ArchiveViewWindow, total: number): number[] {
@@ -529,9 +540,13 @@ export function cancelPendingArchiveOpen(): void {
   clearArchiveRefreshStatus();
 }
 
-/** Dismisses the open-time password prompt. */
+/** Dismisses the password request while keeping an interrupted refresh retryable. */
 export function cancelPasswordPrompt(): void {
+  const prompt = store.passwordPrompt;
   cancelPendingArchiveOpen();
+  if (prompt?.visibleWindow) {
+    retainArchiveRefreshRetry(prompt.path, prompt.encoding, prompt.visibleWindow, store.info?.id);
+  }
 }
 
 export function closeArchive(): void {

@@ -940,6 +940,7 @@
   let extractPresetDraftTouched = false;
   let archiveOpenStatus = $state<"idle" | "opening">("idle");
   let archiveOpenGeneration = 0;
+  let archivePasswordAttempt = 0;
   let archiveSelectionProgress = $state<{ loaded: number; total: number } | null>(null);
   let recoveryPickerStatus = $state<"idle" | "archive" | "par2">("idle");
   let recoverySourceMode = $state<"none" | "current" | "selected">(
@@ -2041,7 +2042,7 @@
           return;
         }
       }
-      if (modeSelectionBlocked || archiveEditKind !== null) return;
+      if (modeSelectionBlocked || archiveEditorVisible()) return;
       if (event.key === "Escape") {
         if (activePopover === "quickActions") {
           event.preventDefault();
@@ -12899,8 +12900,12 @@
     return taskDialogDismissedId !== task.id;
   }
 
+  function archiveEditorVisible(): boolean {
+    return archiveEditKind !== null && !archivePasswordPrompt && !previewPasswordPrompt;
+  }
+
   function blockingModalVisible(): boolean {
-    return taskDialogVisible() || macosSfxPublisherTask !== null || archiveEditKind !== null;
+    return taskDialogVisible() || macosSfxPublisherTask !== null || archiveEditorVisible();
   }
 
   function taskCenterVisible(): boolean {
@@ -13756,19 +13761,29 @@
     const prompt = archivePasswordPrompt;
     if (!prompt) return;
     if (archiveOpenStatus === "opening") return;
-    const requestGeneration = ++archiveOpenGeneration;
+    const requestGeneration = prompt.refresh ? archiveOpenGeneration : ++archiveOpenGeneration;
+    const attempt = ++archivePasswordAttempt;
     standalonePasswordFocusedInput = null;
     archiveOpenStatus = "opening";
     const ok = await openArchiveStore(prompt.path, workspacePasswordValue, prompt.encoding);
-    if (requestGeneration !== archiveOpenGeneration) return;
+    if (requestGeneration !== archiveOpenGeneration || attempt !== archivePasswordAttempt) return;
     archiveOpenStatus = "idle";
     workspacePasswordValue = "";
     if (ok) {
+      if (prompt.refresh) {
+        setScreen("browse");
+        showNotice(tr("gui.archive.unlocked", "Archive unlocked"));
+        return;
+      }
       finishOpenedArchive(prompt.path, "password");
       return;
     }
     if (openPasswordPrompt()?.path === prompt.path) {
       showNotice(tr("gui.password.open_previous_rejected", "That password was rejected. Try again or return to the archive list."));
+      return;
+    }
+    if (prompt.refresh) {
+      setScreen("browse");
       return;
     }
     pendingArchiveTaskReview = null;
@@ -13795,11 +13810,15 @@
       showNotice(tr("gui.preview.password_cancelled", "Item opening cancelled. The archive is unchanged."));
     }
     if (archivePasswordPrompt) {
+      const refreshing = archivePasswordPrompt.refresh;
       pendingArchiveTaskReview = null;
-      archiveOpenGeneration += 1;
+      archivePasswordAttempt += 1;
+      if (!refreshing) archiveOpenGeneration += 1;
       archiveOpenStatus = "idle";
       cancelArchivePasswordPrompt();
-      showNotice(tr("gui.password.archive_open_cancelled", "Archive opening cancelled."));
+      showNotice(refreshing
+        ? tr("gui.archive.refresh_cancelled", "Refresh cancelled. Retry before editing the archive.")
+        : tr("gui.password.archive_open_cancelled", "Archive opening cancelled."));
     }
     workspacePasswordValue = "";
     setScreen("browse");
@@ -14579,7 +14598,7 @@
   >{dropStatusLabel()}</div>
 {/if}
 
-{#if !taskWindowMode && archiveEditKind && !taskDialogVisible() && !macosSfxPublisherTask}
+{#if !taskWindowMode && archiveEditKind && archiveEditorVisible() && !taskDialogVisible() && !macosSfxPublisherTask}
   <ArchiveEntryEditor
     {...archiveEditorFields(archiveEditKind)}
     rootClass={`archive-editor-overlay design-root platform-${activePlatform} palette-${activePalette} theme-${activeTheme} density-${activeDensityChoice}`}

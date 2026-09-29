@@ -2813,6 +2813,7 @@
   "gui.archive.list_refreshed": "Archive list refreshed",
   "gui.archive.refreshing": "Refreshing archive contents…",
   "gui.archive.refresh_failed": "Could not refresh the archive. Retry to see the latest files.",
+  "gui.archive.refresh_cancelled": "Refresh cancelled. Retry before editing the archive.",
   "gui.archive.folder_unavailable": "The folder {folder} is no longer available. Showing {parent}.",
   "gui.native_menu.file": "File",
   "gui.native_menu.edit": "Edit",

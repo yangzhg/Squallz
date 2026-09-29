@@ -102,6 +102,128 @@ function completedUpdate(id, path = "/tmp/refresh.zip") {
   return { id, state: "done", spec: { kind: "update", path } };
 }
 
+async function passwordRefreshActions(archive) {
+  const component = await readFile(new URL("../App.svelte", import.meta.url), "utf8");
+  const source = ts.createSourceFile("App.ts", component.match(/<script lang="ts">([\s\S]*?)<\/script>/u)[1], ts.ScriptTarget.Latest, true);
+  const names = ["submitPasswordRequest", "cancelPasswordRequest", "archiveEditorVisible", "blockingModalVisible", "archiveEditorBlockedReason"];
+  const declarations = source.statements.filter((node) => ts.isFunctionDeclaration(node) && names.includes(node.name?.text));
+  const { outputText } = ts.transpileModule(declarations.map((node) => node.getText(source)).join("\n"), {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
+  });
+  const context = {
+    get currentArchive() { return archive.archive(); },
+    get archivePasswordPrompt() { return archive.openPasswordPrompt(); },
+    previewPasswordPrompt: null, screen: "password", workspacePasswordValue: "correct",
+    workspacePasswordSubmissionAttempted: false, standalonePasswordFocusedInput: null,
+    archiveOpenStatus: "idle", archiveOpenGeneration: 7, archivePasswordAttempt: 0,
+    archiveEditKind: "rename", renameTargetName: "kept.txt",
+    archiveEditContext: { source: info().source, encoding: "gbk", generation: 7, id: 1 },
+    taskDialogVisible: () => false, macosSfxPublisherTask: null,
+    taskPasswordReady: (value) => value.length > 0,
+    archiveMutationDisabledReason: () => archive.archiveRefreshStatus() === "idle" ? "" : "Refresh required",
+    openArchiveStore: archive.openArchive, cancelArchivePasswordPrompt: archive.cancelPasswordPrompt,
+    openPasswordPrompt: archive.openPasswordPrompt, archiveOpenError: archive.archiveOpenError,
+    finishOpenedArchive: () => assert.fail("Refresh must not complete a new archive-open workflow"),
+    setScreen: (next) => { context.screen = next; }, showNotice: () => {}, tr: (_key, fallback) => fallback,
+  };
+  return { context, ...vm.runInNewContext(`${outputText}\n({${names.join(",")}})`, context) };
+}
+
+test("refresh password attempts suspend the editor and resume its original session after unlocking", async () => {
+  await withArchive(async ({ archive, ipc, pendingOpen }) => {
+    const refreshing = archive.refreshCurrentArchive();
+    pendingOpen.reject({ key: "error.password_required", params: {}, detail: "" });
+    await refreshing;
+    const run = await passwordRefreshActions(archive);
+    assert.equal(archive.openPasswordPrompt().refresh, true);
+    assert.equal(run.blockingModalVisible(), false, "the editor must not make the password form inert");
+    ipc.openArchive = async () => { throw { key: "error.wrong_password", params: {}, detail: "" }; };
+    await run.submitPasswordRequest();
+    assert.equal(run.context.archiveOpenGeneration, 7);
+    assert.equal(run.context.workspacePasswordValue, "");
+    assert.equal(run.context.screen, "password");
+    assert.equal(run.archiveEditorVisible(), false);
+    ipc.openArchive = async () => info(2);
+    run.context.workspacePasswordValue = "correct";
+    await run.submitPasswordRequest();
+    assert.equal(run.context.archiveOpenGeneration, 7);
+    assert.equal(run.context.screen, "browse");
+    assert.equal(run.archiveEditorVisible(), true);
+    assert.equal(run.archiveEditorBlockedReason(), "");
+    assert.equal(run.context.renameTargetName, "kept.txt");
+    assert.deepEqual(archive.currentDirs(), ["docs"]);
+  });
+});
+
+test("cancelling an in-flight refresh password keeps retry and rejects the late attempt", async () => {
+  await withArchive(async ({ archive, ipc, pendingOpen, closed }) => {
+    const refreshing = archive.refreshCurrentArchive();
+    pendingOpen.reject({ key: "error.password_required", params: {}, detail: "" });
+    await refreshing;
+    const run = await passwordRefreshActions(archive);
+    const late = deferred();
+    ipc.openArchive = () => late.promise;
+    const unlocking = run.submitPasswordRequest();
+    await run.cancelPasswordRequest();
+    assert.equal(run.context.archiveOpenGeneration, 7);
+    assert.equal(run.archiveEditorVisible(), true);
+    assert.equal(archive.archiveRefreshStatus(), "error");
+    assert.notEqual(run.archiveEditorBlockedReason(), "", "old rows cannot become editable after cancellation");
+    ipc.openArchive = async (_path, password, encoding) => {
+      assert.equal(password, null, "retry must not retain the previous password input");
+      assert.equal(encoding, "gbk");
+      throw { key: "error.password_required", params: {}, detail: "" };
+    };
+    await archive.retryArchiveBrowse();
+    run.context.screen = "password";
+    run.context.workspacePasswordValue = "new attempt";
+    late.resolve(info(2));
+    await unlocking;
+    assert.equal(run.context.workspacePasswordValue, "new attempt");
+    assert.equal(run.context.screen, "password");
+    assert.equal(archive.archive().id, 1);
+    assert.deepEqual(closed, [2]);
+    assert.equal(archive.openPasswordPrompt().refresh, true);
+    ipc.openArchive = async () => info(3);
+    await run.submitPasswordRequest();
+    assert.equal(run.archiveEditorBlockedReason(), "");
+    assert.equal(archive.archive().id, 3);
+  });
+});
+
+test("a listing failure after a refresh password returns to the retryable editor", async () => {
+  await withArchive(async ({ archive, ipc, pendingOpen }) => {
+    const refreshing = archive.refreshCurrentArchive();
+    pendingOpen.reject({ key: "error.password_required", params: {}, detail: "" });
+    await refreshing;
+    const run = await passwordRefreshActions(archive);
+    ipc.openArchive = async () => info(2);
+    ipc.listEntries = async () => { throw { key: "error.io", params: {}, detail: "" }; };
+    await run.submitPasswordRequest();
+    assert.equal(run.context.screen, "browse");
+    assert.equal(run.archiveEditorVisible(), true);
+    assert.equal(archive.archiveRefreshStatus(), "error");
+    assert.equal(archive.archive().id, 1);
+    assert.equal(run.context.workspacePasswordValue, "");
+  });
+});
+
+test("cancelled refresh retries cannot replace a later archive open", async () => {
+  await withArchive(async ({ archive, ipc, pendingOpen }) => {
+    const refreshing = archive.refreshCurrentArchive();
+    pendingOpen.reject({ key: "error.password_required", params: {}, detail: "" });
+    await refreshing;
+    archive.cancelPasswordPrompt();
+    let calls = 0;
+    ipc.openArchive = async () => { calls += 1; return { ...info(2), source: "/other.zip", path: "/other.zip" }; };
+    await archive.openArchive("/other.zip");
+    await archive.retryArchiveBrowse();
+    assert.equal(calls, 1);
+    assert.equal(archive.archive().source, "/other.zip");
+    assert.equal(archive.archiveRefreshStatus(), "idle");
+  });
+});
+
 test("completed updates from one snapshot reopen the current archive only once", async () => {
   await withArchive(async ({ archive, ipc, pendingOpen }) => {
     const run = await updateRefreshEffect(archive, [

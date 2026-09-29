@@ -2813,6 +2813,7 @@
   "gui.archive.list_refreshed": "压缩包列表已刷新",
   "gui.archive.refreshing": "正在刷新归档内容…",
   "gui.archive.refresh_failed": "归档内容未能刷新，请重试以查看最新文件。",
+  "gui.archive.refresh_cancelled": "已取消刷新。请重试刷新后再编辑归档。",
   "gui.archive.folder_unavailable": "文件夹“{folder}”已不存在，已返回“{parent}”。",
   "gui.native_menu.file": "文件",
   "gui.native_menu.edit": "编辑",
