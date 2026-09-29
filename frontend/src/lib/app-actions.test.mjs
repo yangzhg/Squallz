@@ -90,26 +90,66 @@ test("checkbox focus permits archive select-all without taking text editing away
   assert.equal(available.select_all, true);
 });
 
-async function entryHandlers(overrides = {}) {
+async function appHandlers(overrides = {}, names = ["onEntryKeydown", "runEntryContextAction"]) {
   const component = await readFile(new URL("../App.svelte", import.meta.url), "utf8");
   const script = component.match(/<script lang="ts">([\s\S]*?)<\/script>/)?.[1];
   assert.ok(script);
   const source = ts.createSourceFile("App.ts", script, ts.ScriptTarget.Latest, true);
-  const names = new Set(["onEntryKeydown", "runEntryContextAction"]);
-  const functions = source.statements.filter((node) => ts.isFunctionDeclaration(node) && names.has(node.name?.text));
+  const functions = source.statements.filter((node) => ts.isFunctionDeclaration(node) && names.includes(node.name?.text));
   const { outputText } = ts.transpileModule(functions.map((node) => node.getText(source)).join("\n"), {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
   });
-  return vm.runInNewContext(`${outputText}\n({ onEntryKeydown, runEntryContextAction })`, {
+  return vm.runInNewContext(`${outputText}\n({ ${names.join(", ")} })`, {
     archiveSelectionBusyReason: () => "",
     tick: () => Promise.resolve(),
     ...overrides,
   });
 }
 
+test("classic read-only preview uses the same selection and preparation hints as entry actions", async () => {
+  const state = { selected: false, preparing: false, selectionBusy: "" };
+  const calls = [];
+  const app = await appHandlers({
+    currentArchive: { read_only: true },
+    selectedPaths: () => new Set(state.selected ? ["inner-readme.txt"] : []),
+    appActionEnabled: (action) => actions.appActionAvailability({
+      ...browsing, writable: false, hasSelection: state.selected,
+      canPreview: state.selected && !state.preparing, selectionBusy: Boolean(state.selectionBusy),
+    })[action],
+    archiveRefreshStatusLabel: () => "",
+    archiveMutationDisabledReason: () => "Read-only archive",
+    archiveSelectionBusyReason: () => state.selectionBusy,
+    selectedPreviewPolicy: () => ({ disabledReason: state.selected ? "" : "Select one entry" }),
+    previewBusy: () => state.preparing,
+    tr: (_key, fallback) => fallback,
+    runAppAction: async (action) => { calls.push(action); },
+  }, ["classicCommandAction", "classicCommandDisabled", "classicCommandDisabledTitle", "handleClassicCommand", "previewSelectedDisabledReason"]);
+  assert.equal(app.classicCommandDisabled("View"), true);
+  assert.equal(app.classicCommandDisabledTitle("View"), "Select one entry");
+  state.selected = true;
+  for (const label of ["View", "Extract To", "Test", "Convert"]) {
+    assert.equal(app.classicCommandDisabled(label), false, label);
+    assert.equal(app.classicCommandDisabledTitle(label), "", label);
+  }
+  app.handleClassicCommand("View");
+  app.handleClassicCommand("Extract To");
+  assert.deepEqual(calls, ["preview_entry", "extract_selection"]);
+  state.preparing = true;
+  assert.equal(app.classicCommandDisabled("View"), true);
+  assert.equal(app.classicCommandDisabledTitle("View"), "Preparing item");
+  state.selectionBusy = "Refreshing selection";
+  assert.equal(app.classicCommandDisabledTitle("View"), state.selectionBusy);
+  state.selectionBusy = "";
+  state.preparing = false;
+  for (const label of ["Add", "Delete", "Rename", "Move", "New Folder"]) {
+    assert.equal(app.classicCommandDisabled(label), true, label);
+    assert.equal(app.classicCommandDisabledTitle(label), "Read-only archive", label);
+  }
+});
+
 test("row handling leaves modified E and M to the shared shortcut dispatcher", async () => {
   const dispatched = [];
-  const handlers = await entryHandlers({
+  const handlers = await appHandlers({
     selectedPaths: () => new Set(["file.txt"]),
     runAppAction: async (action) => dispatched.push(action),
   });
@@ -131,7 +171,7 @@ test("context preview keeps the clicked entry while group operations keep their 
     closeEntryContext: () => { context.entryContext = null; },
     runAppAction: async (action, target) => { dispatched.push({ action, target }); },
   };
-  const handlers = await entryHandlers(context);
+  const handlers = await appHandlers(context);
   await handlers.runEntryContextAction("preview");
   assert.equal(dispatched[0].action, "preview_entry");
   assert.equal(dispatched[0].target.path, "selected-group/clicked.txt");

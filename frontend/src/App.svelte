@@ -14263,6 +14263,7 @@
 
   function classicCommandDisabledTitle(label: string): string {
     if (!classicCommandDisabled(label)) return "";
+    if (label === "View") return previewSelectedDisabledReason();
     const refreshStatus = archiveRefreshStatusLabel();
     if (refreshStatus) return refreshStatus;
     if (label === "Extract To") {
@@ -14274,7 +14275,6 @@
       if (label === "Extract To") return tr("gui.precondition.open_before_extract", "Open an archive before extracting");
       if (label === "Test") return tr("gui.precondition.open_before_test", "Open an archive before testing");
       if (label === "Protect") return tr("gui.precondition.open_before_protect", "Open an archive before protecting");
-      if (label === "View") return tr("gui.preview.open_archive_first", "Open an archive before opening or previewing entries");
       if (label === "Delete") return tr("gui.precondition.open_before_delete", "Open an archive before deleting entries");
       if (label === "Rename") return tr("gui.precondition.open_before_rename", "Open an archive before renaming entries");
       if (label === "Move") return tr("gui.precondition.open_before_move", "Open an archive before moving entries");
@@ -14290,7 +14290,6 @@
     if (label === "Rename") return tr("gui.precondition.select_one_before_rename", "Select exactly one file or folder before renaming");
     if (label === "Move") return tr("gui.precondition.select_entries_before_move", "Select entries before moving");
     if (label === "Delete") return tr("gui.precondition.select_entries_before_delete", "Select entries before deleting");
-    if (label === "View") return tr("gui.preview.select_one", "Select one entry to open or preview");
     return "";
   }
 
