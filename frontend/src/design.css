@@ -11452,7 +11452,46 @@ dd {
   flex: 0 0 auto;
 }
 
+.entry-preview-panel {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  gap: var(--space-sm);
+}
+
+.entry-preview-body {
+  min-width: 0;
+  min-height: 0;
+  overflow-wrap: anywhere;
+}
+
+.entry-preview-panel .entry-preview-body :is(strong, em, small) {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.entry-preview-body > :first-child {
+  margin-top: 0;
+}
+
+.entry-preview-body > :last-child {
+  margin-bottom: 0;
+}
+
+.entry-preview-actions {
+  display: flex;
+  flex-wrap: wrap;
+  flex-shrink: 0;
+  gap: var(--space-sm);
+}
+
+.nested-tree-note .entry-preview-actions > button {
+  margin-top: 0;
+}
+
 .preview-panel-heading {
+  flex-shrink: 0;
   min-width: 0;
   display: flex;
   align-items: center;
@@ -12484,6 +12523,8 @@ select.classic-input:focus {
 }
 
 .classic-tree {
+  min-height: 0;
+  overflow: auto;
   padding: 9px;
   border-right: 1px solid var(--color-border-default);
   background: var(--color-surface-raised);
@@ -12992,8 +13033,8 @@ select.classic-input:focus {
     display: none;
   }
 
-  .modern-inspector:has(.preview-sheet-active) {
-    display: block;
+  .design-root :is(.modern-inspector, .classic-tree):has(.preview-sheet-active) {
+    display: flex;
     position: absolute;
     right: var(--preview-sheet-inset);
     bottom: var(--preview-sheet-inset);
@@ -13007,21 +13048,34 @@ select.classic-input:focus {
       var(--preview-sheet-max-height),
       calc(100vh - var(--preview-sheet-viewport-reserve))
     );
-    overflow: auto;
-    padding: var(--space-sm);
+    overflow: hidden;
+    padding: 0;
     border: var(--border-width-control) solid var(--color-border-default);
     border-radius: var(--radius-panel);
     background: var(--color-surface-raised);
     box-shadow: var(--shadow-popover);
   }
 
-  .modern-inspector:has(.preview-sheet-active) > :not(.preview-sheet-active) {
+  :is(.modern-inspector, .classic-tree):has(.preview-sheet-active) > :not(.preview-sheet-active) {
     display: none;
   }
 
-  .modern-inspector:has(.preview-sheet-active) .preview-sheet-active {
+  .design-root :is(.modern-inspector, .classic-tree) > .entry-preview-panel.preview-sheet-active {
+    width: 100%;
     margin: 0;
     padding: var(--space-md);
+    border: 0;
+    background: transparent;
+    box-shadow: none;
+  }
+
+  .preview-sheet-active > .entry-preview-body {
+    overflow: auto;
+    overscroll-behavior: contain;
+  }
+
+  .nested-tree-note.preview-sheet-active .entry-preview-actions > button {
+    width: auto;
   }
 
   .classic-title span {
@@ -13330,35 +13384,11 @@ select.classic-input:focus {
     display: none;
   }
 
-  .classic-tree:has(.preview-sheet-active) {
-    display: block;
-    position: absolute;
-    right: var(--preview-sheet-inset);
-    bottom: calc(var(--classic-statusbar-height) + var(--space-sm));
-    left: auto;
-    z-index: var(--layer-preview-sheet);
-    width: min(
-      var(--preview-sheet-max-width),
-      calc(100% - var(--preview-sheet-inset) - var(--preview-sheet-inset))
-    );
+  .design-root .classic-tree:has(.preview-sheet-active) {
     max-height: min(
       var(--preview-sheet-max-height),
-      calc(100vh - var(--preview-sheet-viewport-reserve))
+      calc(100% - var(--preview-sheet-inset) - var(--preview-sheet-inset))
     );
-    overflow: auto;
-    padding: var(--space-sm);
-    border: var(--border-width-control) solid var(--color-border-default);
-    border-radius: var(--radius-panel);
-    background: var(--color-bg-sidebar);
-    box-shadow: var(--shadow-popover);
-  }
-
-  .classic-tree:has(.preview-sheet-active) > :not(.preview-sheet-active) {
-    display: none;
-  }
-
-  .classic-tree:has(.preview-sheet-active) .preview-sheet-active {
-    margin: 0;
   }
 
   .classic-body {

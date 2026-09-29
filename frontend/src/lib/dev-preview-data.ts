@@ -483,9 +483,11 @@ function readArchivePreview(params: URLSearchParams, pageSize: number): ArchiveP
     ...(params.get("previewLongNames") === "1" ? longNamePreviewEntries : []),
     ...(params.get("previewHistoricalTimes") === "1" ? historicalTimePreviewEntries : []),
   ];
-  const nestedItems = params.get("previewLinks") === "1"
-    ? [...nestedPreviewItems, ...linkPreviewItems]
-    : nestedPreviewItems;
+  const nestedItems = [
+    ...nestedPreviewItems,
+    ...(params.get("previewLinks") === "1" ? linkPreviewItems : []),
+    ...(params.get("previewLongNames") === "1" ? longNamePreviewEntries : []),
+  ];
   const selected = listParam(params, "previewSelected", ",");
   const largeEntryCount = numericParam(params, "previewLargeEntries", 0);
   const pages = largeEntryCount > 0 ? largePreviewPages(largeEntryCount, pageSize) : null;

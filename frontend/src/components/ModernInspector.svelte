@@ -163,7 +163,7 @@
   </div>
 {:else}
   <div
-    class="inspector-block nested-preview-block"
+    class="inspector-block nested-preview-block entry-preview-panel"
     class:preview-sheet-active={previewActive}
     data-preview-policy={view.preview.policyKind}
     data-preview-code={view.preview.policyCode}
@@ -182,47 +182,46 @@
         ><Icon name="x" size={14} /></button>
       {/if}
     </div>
-    {#if view.preview.nested}
-      <strong>{view.preview.nested.title}</strong>
-      <p>{view.preview.nested.subtitle}</p>
-      <div class="nested-preview-list">
-        {#each view.preview.nested.rows as item}
-          <div>
-            {#if item.entry_type === "symlink" || item.entry_type === "hardlink"}
-              {@const label = (item.entry_type === "symlink" ? tr("gui.attr.symlink", "Symbolic link") : tr("gui.attr.hardlink", "Hard link")) + (item.encrypted ? ` · ${tr("gui.attr.encrypted", "Encrypted")}` : "")}
-              <span role="img" aria-label={label} title={label}><Icon name={item.encrypted ? "lock" : "link"} size={14} /></span>
-            {:else}
-              <span>{item.entry_type === "dir" ? "DIR" : "FILE"}</span>
-            {/if}
-            <strong>{item.display}</strong>
-            <small>{formatBytes(item.size)}</small>
-          </div>
-        {/each}
-      </div>
-      <div class="inline-actions">
-        <button onclick={onOpenNestedPreview}><Icon name="folder-open" size={14} />{tr("gui.action.open_nested", "Open")}</button>
-        <button onclick={onExtractNestedPreview}><Icon name="archive" size={14} />{tr("gui.action.extract_nested", "Extract")}</button>
-      </div>
-    {:else}
-      <strong>{view.preview.title}</strong>
-      <p>{view.preview.subtitle}</p>
-      {#if view.preview.busy}
+    <div class="entry-preview-body">
+      {#if view.preview.nested}
+        <strong>{view.preview.nested.title}</strong>
+        <p>{view.preview.nested.subtitle}</p>
+        <div class="nested-preview-list">
+          {#each view.preview.nested.rows as item}
+            <div>
+              {#if item.entry_type === "symlink" || item.entry_type === "hardlink"}
+                {@const label = (item.entry_type === "symlink" ? tr("gui.attr.symlink", "Symbolic link") : tr("gui.attr.hardlink", "Hard link")) + (item.encrypted ? ` · ${tr("gui.attr.encrypted", "Encrypted")}` : "")}
+                <span role="img" aria-label={label} title={label}><Icon name={item.encrypted ? "lock" : "link"} size={14} /></span>
+              {:else}
+                <span>{item.entry_type === "dir" ? "DIR" : "FILE"}</span>
+              {/if}
+              <strong>{item.display}</strong>
+              <small>{formatBytes(item.size)}</small>
+            </div>
+          {/each}
+        </div>
+      {:else if view.preview.busy}
         <div class="preview-loading" role="status" aria-live="polite">
           <span>{tr("gui.preview.loading", "Preparing item")}</span>
           <small>{view.preview.subtitle}</small>
         </div>
-      {:else if view.preview.failed}
-        <div class="inline-actions">
+      {:else}
+        <strong>{view.preview.title}</strong>
+        <p>{view.preview.subtitle}</p>
+      {/if}
+    </div>
+    {#if view.preview.nested || !view.preview.busy}
+      <div class="inline-actions entry-preview-actions">
+        {#if view.preview.nested}
+          <button onclick={onOpenNestedPreview}><Icon name="folder-open" size={14} />{tr("gui.action.open_nested", "Open")}</button>
+          <button onclick={onExtractNestedPreview}><Icon name="archive" size={14} />{tr("gui.action.extract_nested", "Extract")}</button>
+        {:else if view.preview.failed}
           <button onclick={onRetryPreview}><Icon name="rotate-cw" size={14} />{tr("gui.preview.retry", "Retry")}</button>
           <button onclick={onExtractPreviewFailure}><Icon name="archive" size={14} />{tr("gui.preview.extract_instead", "Extract instead")}</button>
-        </div>
-      {:else if view.preview.entry}
-        <div class="inline-actions">
+        {:else if view.preview.entry}
           <button class="preview-system-action" onclick={onOpenPreview}><Icon name="external-link" size={14} />{tr("gui.action.open_preview", "Open")}</button>
           <button onclick={onRevealPreview}><Icon name="folder-open" size={14} />{tr("gui.toast.reveal", "Reveal")}</button>
-        </div>
-      {:else}
-        <div class="inline-actions">
+        {:else}
           <button
             disabled={!view.preview.canPreview}
             aria-busy={view.preview.busy}
@@ -230,8 +229,8 @@
             aria-label={view.preview.disabledReason ? `${view.preview.actionLabel} — ${view.preview.disabledReason}` : view.preview.actionLabel}
             onclick={onPreviewSelection}
           ><Icon name={view.preview.actionIcon} size={14} />{view.preview.actionLabel}</button>
-        </div>
-      {/if}
+        {/if}
+      </div>
     {/if}
   </div>
 
