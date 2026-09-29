@@ -458,12 +458,12 @@ test("question actions preserve the workspace and report success only after ackn
   const app = readFileSync(new URL("../App.svelte", import.meta.url), "utf8");
   const source = ts.createSourceFile("App.ts", app.match(/<script lang="ts">([\s\S]*?)<\/script>/)[1], ts.ScriptTarget.Latest, true);
   const names = ["submitTaskPasswordRequest", "cancelTaskPasswordRequest", "answerConflictDecision"];
-  const declarations = source.statements.filter((node) => ts.isFunctionDeclaration(node) && [...names, "isCurrentTaskPasswordPrompt"].includes(node.name?.text));
+  const declarations = source.statements.filter((node) => ts.isFunctionDeclaration(node) && [...names, "isCurrentTaskPasswordPrompt", "isCurrentTaskConflictPrompt"].includes(node.name?.text));
   const { outputText } = ts.transpileModule(declarations.map((node) => node.getText(source)).join("\n"), {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
   });
   for (const action of names) {
-    for (const outcome of ["failure", "accepted", "next-question"]) {
+    for (const outcome of ["failure", "accepted", "next-password", "next-conflict"]) {
       const calls = [];
       let finish;
       const context = {
@@ -485,16 +485,72 @@ test("question actions preserve the workspace and report success only after ackn
       context.answerJobConflict = answer;
       const handlers = vm.runInNewContext(`${outputText}\n({${names.join(",")}})`, context);
       const request = action === "answerConflictDecision"
-        ? handlers[action]("overwrite", true)
+        ? handlers[action](context.jobConflictPrompt, "overwrite", true)
         : handlers[action](context.jobPasswordPrompt);
       assert.deepEqual(calls, [], "an unacknowledged answer cannot report success");
       if (action !== "answerConflictDecision") assert.equal(context.jobPasswordValue, "");
-      if (outcome === "next-question") context.jobPasswordPrompt = { id: 2, version: 11 };
+      if (outcome === "next-password") context.jobPasswordPrompt = { id: 2, version: 11 };
+      if (outcome === "next-conflict") context.jobConflictPrompt = { id: 1, version: 11 };
       finish(outcome !== "failure");
       await request;
       if (outcome === "failure") assert.deepEqual(calls, []);
-      else if (outcome === "next-question") assert.deepEqual(calls.map(([kind]) => kind), ["notice"]);
+      else if (outcome.startsWith("next-")) {
+        assert.deepEqual(calls.map(([kind]) => kind), ["notice"]);
+        assert.equal(context.conflictApplyAll, true, "a late acknowledgement preserves the current question's choice");
+      }
       else assert.deepEqual(calls.map(([kind]) => kind), ["notice", "center"]);
+    }
+  }
+});
+
+test("conflict controls answer only the question shown by their task surface", async () => {
+  const app = readFileSync(new URL("../App.svelte", import.meta.url), "utf8");
+  const source = ts.createSourceFile("App.ts", app.match(/<script lang="ts">([\s\S]*?)<\/script>/)[1], ts.ScriptTarget.Latest, true);
+  const names = ["taskDialogSurface", "taskCenterDetailSurface", "answerConflictDecision", "isCurrentTaskConflictPrompt"];
+  const declarations = source.statements.filter((node) => ts.isFunctionDeclaration(node) && names.includes(node.name?.text));
+  const { outputText } = ts.transpileModule(declarations.map((node) => node.getText(source)).join("\n"), {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
+  });
+  for (const surfaceName of ["taskDialogSurface", "taskCenterDetailSurface"]) {
+    for (const decision of ["overwrite", "skip", "rename", "abort"]) {
+      const answers = [];
+      const context = {
+        ...Object.fromEntries([
+          "taskOutputPath", "taskRevealOutputLabel", "pauseCurrentTask", "resumeCurrentTask", "cancelCurrentTask",
+          "copyTaskChecksumResults", "openTaskOutput", "openMacosSfxPublisher", "prepareTaskReview", "toggleTaskDetails",
+          "viewTaskResults", "revealTaskOutput", "dismissTaskDialog", "returnToTaskCenter", "returnTaskQuestionToCenter",
+          "taskChecksumCopyFeedback", "taskChecksumCopyFeedbackTone", "taskPasswordQuestion", "taskConflictQuestion", "showNotice",
+        ].map((name) => [name, () => null])),
+        taskWindowMode: false, activePlatform: "macos", activePalette: "ocean", activeTheme: "dark", activeDensityChoice: "comfortable",
+        customPaletteVariables: () => ({}), tr: (_key, fallback) => fallback,
+        jobPasswordPrompt: null, jobPasswordValue: "", jobPasswordSubmissionError: null,
+        jobConflictPrompt: { id: 1, version: 10 }, conflictApplyAll: false,
+        normalizeTaskConflictAnswer: (decision, applyAll) => ({ decision, applyAll }),
+        answerJobConflict: async (decision, applyAll) => {
+          answers.push([context.jobConflictPrompt.id, context.jobConflictPrompt.version, decision, applyAll]);
+          return true;
+        },
+      };
+      const surface = vm.runInNewContext(`${outputText}\n${surfaceName}`, context);
+      const shown = surface({ id: 1 });
+      const unrelated = surface({ id: 2 });
+      const applyAll = decision !== "abort";
+      for (const prompt of [{ id: 1, version: 11 }, { id: 2, version: 10 }, null]) {
+        context.jobConflictPrompt = prompt;
+        await shown.onAnswerConflict(decision, applyAll);
+        assert.deepEqual(answers, [], "an old decision cannot answer a later question");
+        shown.onConflictApplyAllChange(true);
+        assert.equal(context.conflictApplyAll, false, "an old checkbox cannot change a later question");
+      }
+      context.jobConflictPrompt = { id: 1, version: 10 };
+      unrelated.onConflictApplyAllChange(true);
+      await unrelated.onAnswerConflict(decision, applyAll);
+      assert.equal(context.conflictApplyAll, false, "another task cannot change this question");
+      assert.deepEqual(answers, []);
+      shown.onConflictApplyAllChange(applyAll);
+      assert.equal(context.conflictApplyAll, applyAll);
+      await shown.onAnswerConflict(decision, applyAll);
+      assert.deepEqual(answers, [[1, 10, decision, applyAll]], "the displayed question remains actionable after an equivalent snapshot");
     }
   }
 });

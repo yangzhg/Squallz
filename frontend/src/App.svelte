@@ -12765,6 +12765,7 @@
 
   function taskDialogSurface(task: TaskDialogModel): TaskProgressDialogSurfaceProps {
     const passwordPrompt = jobPasswordPrompt?.id === task.id ? jobPasswordPrompt : null;
+    const conflictPrompt = jobConflictPrompt?.id === task.id ? jobConflictPrompt : null;
     return {
       task,
       presentation: taskWindowMode ? "window" : "dialog",
@@ -12797,13 +12798,16 @@
       },
       onSubmitPassword: () => submitTaskPasswordRequest(passwordPrompt),
       onCancelPassword: () => cancelTaskPasswordRequest(passwordPrompt),
-      onConflictApplyAllChange: (applyAll) => (conflictApplyAll = applyAll),
-      onAnswerConflict: answerConflictDecision,
+      onConflictApplyAllChange: (applyAll) => {
+        if (isCurrentTaskConflictPrompt(conflictPrompt)) conflictApplyAll = applyAll;
+      },
+      onAnswerConflict: (decision, applyAll) => answerConflictDecision(conflictPrompt, decision, applyAll),
     };
   }
 
   function taskCenterDetailSurface(task: TaskDialogModel): TaskProgressDialogSurfaceProps {
     const passwordPrompt = jobPasswordPrompt?.id === task.id ? jobPasswordPrompt : null;
+    const conflictPrompt = jobConflictPrompt?.id === task.id ? jobConflictPrompt : null;
     return {
       task,
       rootId: "squallz-task-center",
@@ -12832,8 +12836,10 @@
       },
       onSubmitPassword: () => submitTaskPasswordRequest(passwordPrompt),
       onCancelPassword: () => cancelTaskPasswordRequest(passwordPrompt),
-      onConflictApplyAllChange: (applyAll) => (conflictApplyAll = applyAll),
-      onAnswerConflict: answerConflictDecision,
+      onConflictApplyAllChange: (applyAll) => {
+        if (isCurrentTaskConflictPrompt(conflictPrompt)) conflictApplyAll = applyAll;
+      },
+      onAnswerConflict: (decision, applyAll) => answerConflictDecision(conflictPrompt, decision, applyAll),
     };
   }
 
@@ -13865,13 +13871,17 @@
     extractReadable: () => void submitBestEffortExtractJob(),
   };
 
-  async function answerConflictDecision(decision: TaskConflictDecision, applyAll: boolean) {
-    if (!jobConflictPrompt) {
+  function isCurrentTaskConflictPrompt(prompt: typeof jobConflictPrompt): boolean {
+    return prompt !== null && jobConflictPrompt?.id === prompt.id && jobConflictPrompt.version === prompt.version;
+  }
+
+  async function answerConflictDecision(prompt: typeof jobConflictPrompt, decision: TaskConflictDecision, applyAll: boolean) {
+    if (!prompt || !isCurrentTaskConflictPrompt(prompt)) {
       showNotice(tr("gui.conflict.no_prompt_pending", "No conflict request is active"));
       return;
     }
     const answer = normalizeTaskConflictAnswer(decision, applyAll);
-    const promptId = jobConflictPrompt.id;
+    const promptId = prompt.id;
     if (!await answerJobConflict(answer.decision, answer.applyAll)) return;
     if (answer.decision === "abort") {
       showNotice(tr("gui.task.cancel_requested", "Cancel requested"));

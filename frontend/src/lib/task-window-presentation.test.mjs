@@ -37,6 +37,7 @@ function taskSurface(taskWindowMode) {
     taskPasswordQuestion: () => null,
     taskConflictQuestion: () => null,
     jobPasswordPrompt: null, jobPasswordValue: "",
+    jobConflictPrompt: null,
     isCurrentTaskPasswordPrompt: () => false,
     jobPasswordSubmissionError: null,
     conflictApplyAll: false,
