@@ -69,7 +69,7 @@ export interface Task {
   interaction: JobInteraction | null;
   /** Last owned backend prompt, retained while an answer or cancellation is pending. */
   question: JobQuestion | null;
-  questionFailure: "answer" | "cancel" | null;
+  actionFailure: TaskControlIntent | "answer" | null;
   answeredQuestionVersion: number;
   state: JobStateName;
   queuePosition: number | null;
@@ -233,7 +233,7 @@ export async function submitJob(spec: JobSpec): Promise<number> {
       ownedByRequester: true,
       interaction: null,
       question: null,
-      questionFailure: null,
+      actionFailure: null,
       answeredQuestionVersion: 0,
       state: "queued",
       queuePosition: null,
@@ -299,7 +299,7 @@ function clearPendingQuestions(id: number): void {
   if (task) {
     task.question = null;
     task.interaction = null;
-    task.questionFailure = null;
+    task.actionFailure = null;
   }
 }
 
@@ -320,6 +320,7 @@ function onState(ev: StateEvent): void {
   const previousState = task.state;
   task.version = ev.version;
   task.state = ev.state;
+  if (ev.state !== previousState) task.actionFailure = null;
   if (ev.state !== "running") task.speed = 0;
   task.error = ev.error ?? null;
   if (ev.result !== undefined) {
@@ -331,7 +332,7 @@ function onState(ev: StateEvent): void {
   if (
     isTerminalSnapshotState(ev.state) ||
     (ev.state === "paused" && task.controlIntent === "pause") ||
-    (ev.state === "running" && task.controlIntent === "resume")
+    ((ev.state === "running" || ev.state === "queued") && task.controlIntent === "resume")
   ) {
     task.controlIntent = null;
   }
@@ -1125,7 +1126,7 @@ function taskFromSnapshot(snapshot: JobSnapshot): Task {
     ownedByRequester: snapshot.owned_by_requester,
     interaction: snapshot.interaction,
     question: snapshotQuestion(snapshot),
-    questionFailure: null,
+    actionFailure: null,
     answeredQuestionVersion: 0,
     state: snapshot.state,
     queuePosition: snapshot.queue_position,
@@ -1176,7 +1177,7 @@ function applySnapshot(snapshot: JobSnapshot): void {
   task.ownedByRequester = snapshot.owned_by_requester;
   task.interaction = snapshot.interaction;
   const question = snapshotQuestion(snapshot, task.question);
-  if (question !== task.question) task.questionFailure = null;
+  if (question !== task.question || snapshot.state !== previousState) task.actionFailure = null;
   task.question = question;
   task.state = snapshot.state;
   task.queuePosition = snapshot.queue_position;
@@ -1200,7 +1201,7 @@ function applySnapshot(snapshot: JobSnapshot): void {
   if (
     isTerminalSnapshotState(snapshot.state) ||
     (snapshot.state === "paused" && task.controlIntent === "pause") ||
-    (snapshot.state === "running" && task.controlIntent === "resume")
+    ((snapshot.state === "running" || snapshot.state === "queued") && task.controlIntent === "resume")
   ) {
     task.controlIntent = null;
   }
@@ -2025,7 +2026,7 @@ function installTaskPreview(kind: PreviewTaskKind, state: Extract<JobStateName, 
     ownedByRequester: true,
     interaction: question?.kind ?? null,
     question,
-    questionFailure: null,
+    actionFailure: null,
     answeredQuestionVersion: 0,
     state: previewState,
     outputPasswordRequired: kind === "compress_failure" || kind === "convert_failure" || kind === "convert_encrypted_failure",
@@ -2123,7 +2124,7 @@ export function installTaskQueuePreview(
       ownedByRequester: true,
       interaction: null,
       question: null,
-      questionFailure: null,
+      actionFailure: null,
       answeredQuestionVersion: 0,
       state: "queued",
       queuePosition: index + 1,
@@ -2176,40 +2177,40 @@ export function runningCount(): number {
   ).length;
 }
 
+const controlRequests = new WeakMap<Task, object>();
+
 async function requestTaskControl(
   id: number,
   intent: TaskControlIntent,
   request: () => Promise<void>,
-): Promise<void> {
+): Promise<boolean> {
   const task = find(id);
   if (!task || isTerminalSnapshotState(task.state) || task.controlIntent === "cancel"
-    || (task.controlIntent !== null && intent !== "cancel")) return;
+    || (task.controlIntent !== null && intent !== "cancel")) return false;
+  const token = {};
+  controlRequests.set(task, token);
   task.controlIntent = intent;
-  if (intent === "cancel") task.questionFailure = null;
+  task.actionFailure = null;
   try {
     await request();
+    return controlRequests.get(task) === token;
   } catch {
     const current = find(id);
-    if (current?.controlIntent === intent) {
-      current.controlIntent = null;
-      if (intent === "cancel" && current.question) {
-        current.questionFailure = "cancel";
-        return;
-      }
-    }
-    pushToast({
-      kind: "warning",
-      title: t("gui.task.control_failed"),
-    });
+    if (current !== task || controlRequests.get(task) !== token || task.controlIntent !== intent) return false;
+    task.controlIntent = null;
+    task.actionFailure = intent;
+    return false;
+  } finally {
+    if (controlRequests.get(task) === token) controlRequests.delete(task);
   }
 }
 
-export function pauseTask(id: number): void {
-  void requestTaskControl(id, "pause", () => ipc.pauseJob(id));
+export function pauseTask(id: number): Promise<boolean> {
+  return requestTaskControl(id, "pause", () => ipc.pauseJob(id));
 }
 
-export function resumeTask(id: number): void {
-  void requestTaskControl(id, "resume", () => ipc.resumeJob(id));
+export function resumeTask(id: number): Promise<boolean> {
+  return requestTaskControl(id, "resume", () => ipc.resumeJob(id));
 }
 
 async function requestQueueMove(
@@ -2257,8 +2258,8 @@ export function setTaskExpanded(id: number, expanded: boolean): void {
   if (task) task.expanded = expanded;
 }
 
-export function cancelTask(id: number): void {
-  void requestTaskControl(id, "cancel", () => ipc.cancelJob(id));
+export function cancelTask(id: number): Promise<boolean> {
+  return requestTaskControl(id, "cancel", () => ipc.cancelJob(id));
 }
 
 export function retryTask(task: Task): void {
@@ -2339,14 +2340,14 @@ async function answerQuestion(prompt: AskPasswordEvent | AskConflictEvent, send:
   // Keep the authoritative question until the backend clears or replaces it.
   // Hiding a pending answer must not discard the retry path if IPC fails.
   task.answeredQuestionVersion = prompt.version;
-  task.questionFailure = null;
+  task.actionFailure = null;
   try {
     await send();
     return true;
   } catch {
     if (task.answeredQuestionVersion === prompt.version) task.answeredQuestionVersion = 0;
     if (task.question?.prompt.version === prompt.version) {
-      task.questionFailure = "answer";
+      task.actionFailure = "answer";
     } else {
       pushToast({ kind: "warning", title: t("gui.task.answer_failed"), body: t("gui.task.answer_failed_detail") });
     }

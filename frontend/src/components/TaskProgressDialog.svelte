@@ -16,7 +16,7 @@
     taskControlCalloutDetail,
     taskControlCalloutTitle,
     taskControlCalloutVisible,
-    taskQuestionFailureMessage,
+    taskActionFailureMessage,
     taskCurrentLabel,
     taskCurrentProgressBadge,
     taskCurrentProgressPercent,
@@ -146,8 +146,8 @@
   let errorDetailsId = $derived(taskElementId("error-details"));
   let createDetailsId = $derived(taskElementId("create-details"));
   let passwordErrorId = $derived(taskElementId("password-error"));
-  let questionFailure = $derived(taskQuestionFailureMessage(task));
-  let passwordFeedback = $derived(passwordError || questionFailure);
+  let actionFailure = $derived(taskActionFailureMessage(task));
+  let passwordFeedback = $derived(passwordError || actionFailure);
 
   function taskElementId(suffix: string): string {
     const taskId = task.id === null ? "submitting" : task.id.toString();
@@ -364,8 +364,8 @@
           <span><b>{tr("gui.conflict.existing", "Existing")}</b>{conflictQuestion.existing}</span>
           <span><b>{tr("gui.conflict.incoming", "Incoming")}</b>{conflictQuestion.incoming}</span>
         </div>
-        {#if questionFailure}
-          <p class="task-question-error" role="alert">{questionFailure}</p>
+        {#if actionFailure}
+          <p class="task-question-error" role="alert">{actionFailure}</p>
         {/if}
         <label class="conflict-apply-all">
           <input
@@ -535,6 +535,9 @@
 
     {#if !passwordQuestion && !conflictQuestion}
     <footer class="task-modal-actions">
+      {#if actionFailure}
+        <p class="task-action-error" role="alert">{actionFailure}</p>
+      {/if}
       {#if task.state === "submitting"}
         <button type="button" disabled>
           <Icon name="hourglass" size={15} />{tr("gui.task.starting", "Starting...")}

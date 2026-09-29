@@ -391,11 +391,20 @@ export function taskControlCalloutVisible(task: TaskDialogModel): boolean {
   return task.controlIntent !== null;
 }
 
-export function taskQuestionFailureMessage(task: TaskDialogModel): string | null {
-  if (task.questionFailure === "cancel") {
-    return tr("gui.task.question_cancel_failed", "Could not cancel the task. Try again or answer the current prompt.");
+export function taskActionFailureMessage(task: TaskDialogModel): string | null {
+  if (!isTaskActiveState(task.state)) return null;
+  if (task.actionFailure === "pause") {
+    return tr("gui.task.pause_failed_detail", "Could not pause the task. Check its current status and try again.");
   }
-  if (task.questionFailure === "answer") {
+  if (task.actionFailure === "resume") {
+    return tr("gui.task.resume_failed_detail", "Could not resume the task. Check its current status and try again.");
+  }
+  if (task.actionFailure === "cancel") {
+    return task.interaction
+      ? tr("gui.task.question_cancel_failed", "Could not cancel the task. Try again or answer the current prompt.")
+      : tr("gui.task.cancel_failed_detail", "Could not cancel the task. Check its current status and try again.");
+  }
+  if (task.actionFailure === "answer") {
     return tr("gui.task.answer_failed_detail", "The task has not confirmed your response. Check its current prompt and try again.");
   }
   return null;

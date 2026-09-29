@@ -125,6 +125,40 @@ test("waiting task surfaces retain measured progress without rates or processing
   }
 });
 
+test("control failures stay visible and actionable across task surfaces", async () => {
+  const server = await createTestServer();
+  try {
+    const { render } = await server.ssrLoadModule("svelte/server");
+    const { default: TaskProgressDialog } = await server.ssrLoadModule("/src/components/TaskProgressDialog.svelte");
+    const { default: TaskCenter } = await server.ssrLoadModule("/src/components/TaskCenter.svelte");
+    const { loadLocale } = await server.ssrLoadModule("/src/lib/i18n.svelte.ts");
+    const { surface } = taskSurface(false);
+    for (const [locale, labels] of [
+      ["en-US", ["Could not pause the task", "Could not resume the task", "Could not cancel the task"]],
+      ["zh-CN", ["未能暂停任务", "未能继续任务", "未能取消任务"]],
+    ]) {
+      await loadLocale(locale);
+      for (const [index, actionFailure] of ["pause", "resume", "cancel"].entries()) {
+        const task = { ...extractTask(actionFailure === "resume" ? "paused" : "running"), actionFailure };
+        for (const presentation of ["dialog", "panel", "window"]) {
+          const body = render(TaskProgressDialog, { props: { ...surface, presentation, task } }).body;
+          assert.match(body, /class="task-action-error" role="alert"/u);
+          assert.ok(body.includes(labels[index]));
+          assert.doesNotMatch(body, /<button[^>]*disabled/u, "the user can retry the control");
+          const finished = render(TaskProgressDialog, { props: { ...surface, presentation,
+            task: { ...task, state: "done" } } }).body;
+          assert.ok(!finished.includes(labels[index]), "a completed task never carries an obsolete control failure");
+        }
+        const body = render(TaskCenter, { props: { tasks: [{ ...task, queueMoveIntent: null }], rootClass: "task-center" } }).body;
+        assert.match(body, /class="task-action-error" role="alert"/u);
+        assert.ok(body.includes(labels[index]));
+      }
+    }
+  } finally {
+    await server.close();
+  }
+});
+
 test("window task views render one task heading and retain progress, results and input", async () => {
   const server = await createTestServer();
   try {
@@ -282,7 +316,7 @@ test("cancelling and terminal task surfaces do not ask for input from a stale in
           assert.doesNotMatch(finished, /task-interaction-callout/);
           assert.ok(!finished.includes(tFallback("gui.task_center.needs_input")));
           assert.equal(taskCenterCounts([terminal]).attention, 0);
-          const failedAnswer = { ...extractTask("running"), interaction, questionFailure: "answer" };
+          const failedAnswer = { ...extractTask("running"), interaction, actionFailure: "answer" };
           const response = render(TaskProgressDialog, { props: {
             ...surface, presentation, task: failedAnswer,
             passwordQuestion: interaction === "password" ? { name: "reports.zip", detail: "", sessionDetail: "" } : null,

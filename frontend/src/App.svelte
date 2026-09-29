@@ -12503,7 +12503,7 @@
       ownedByRequester: true,
       interaction: null,
       question: null,
-      questionFailure: null,
+      actionFailure: null,
       answeredQuestionVersion: 0,
       state: "submitting",
       queuePosition: null,
@@ -12980,22 +12980,25 @@
     }
   }
 
-  function cancelCurrentTask(task: TaskDialogModel): void {
+  async function cancelCurrentTask(task: TaskDialogModel): Promise<void> {
     if (task.id === null) return;
-    cancelTask(task.id);
-    showNotice(tr("gui.task.cancel_requested", "Cancel requested"));
+    if (await cancelTask(task.id) && task.controlIntent === "cancel") {
+      showNotice(tr("gui.task.cancel_requested", "Cancel requested"));
+    }
   }
 
-  function pauseCurrentTask(task: TaskDialogModel): void {
+  async function pauseCurrentTask(task: TaskDialogModel): Promise<void> {
     if (task.id === null) return;
-    pauseTask(task.id);
-    showNotice(tr("gui.task.pause_requested", "Pause requested"));
+    if (await pauseTask(task.id) && task.controlIntent === "pause") {
+      showNotice(tr("gui.task.pause_requested", "Pause requested"));
+    }
   }
 
-  function resumeCurrentTask(task: TaskDialogModel): void {
+  async function resumeCurrentTask(task: TaskDialogModel): Promise<void> {
     if (task.id === null) return;
-    resumeTask(task.id);
-    showNotice(tr("gui.task.resume_requested", "Resume requested"));
+    if (await resumeTask(task.id) && task.controlIntent === "resume") {
+      showNotice(tr("gui.task.resume_requested", "Resume requested"));
+    }
   }
 
   function moveQueuedTaskEarlier(task: Task): void {

@@ -12,6 +12,7 @@
     type TaskQueueDropEdge,
   } from "../lib/task-center";
   import {
+    taskActionFailureMessage,
     taskCancelButtonLabel,
     taskDialogResultSummary,
     taskKindLabel,
@@ -394,6 +395,9 @@
         {/if}
         {#if taskCurrentItem(task)}
           <span class="task-center-current">{taskCurrentItem(task)}</span>
+        {/if}
+        {#if taskActionFailureMessage(task)}
+          <p class="task-action-error" role="alert">{taskActionFailureMessage(task)}</p>
         {/if}
 
         <div

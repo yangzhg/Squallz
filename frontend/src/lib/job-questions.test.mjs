@@ -196,6 +196,111 @@ async function withQuestionFeed(run) {
   }
 }
 
+test("resuming into the queue releases controls through both events and snapshots", async () => {
+  await withQuestionFeed(async ({ jobs, ipc, records, emit }) => {
+    ipc.resumeJob = async () => {};
+    for (const [index, delivery] of ["event", "snapshot"].entries()) {
+      const id = index + 1;
+      await emit("job://state", { id, version: 20, state: "paused" });
+      jobs.resumeTask(id);
+      const task = jobs.tasks().find((item) => item.id === id);
+      assert.equal(task.controlIntent, "resume");
+      if (delivery === "event") {
+        await emit("job://state", { id, version: 21, state: "queued" });
+      } else {
+        Object.assign(records[index], { version: 21, state: "queued", interaction: null, question: null });
+        await emit("job://ask-password", { id });
+        await until(() => task.version === 21);
+      }
+      assert.equal(task.state, "queued");
+      assert.equal(task.controlIntent, null, "a resumed task may still wait for a worker");
+      let cancelled = false;
+      ipc.cancelJob = async () => { cancelled = true; };
+      jobs.cancelTask(id);
+      assert.equal(cancelled, true);
+    }
+  });
+});
+
+test("late control failures cannot clear a newer request or report a completed request as failed", async () => {
+  await withQuestionFeed(async ({ jobs, ipc, emit, server }) => {
+    const notices = await server.ssrLoadModule("/src/lib/toasts.svelte.ts");
+    try {
+      const failures = [];
+      ipc.pauseJob = () => new Promise((_, reject) => { failures.push(reject); });
+      const first = jobs.pauseTask(1);
+      await emit("job://state", { id: 1, version: 20, state: "paused" });
+      await emit("job://state", { id: 1, version: 21, state: "running" });
+      const next = jobs.pauseTask(1);
+      const task = jobs.tasks()[0];
+      assert.equal(task.controlIntent, "pause");
+      failures[0](new Error("late response failure"));
+      await first;
+      assert.equal(task.controlIntent, "pause", "the new pause remains pending");
+      assert.equal(notices.toasts().length, 0);
+      await emit("job://state", { id: 1, version: 22, state: "paused" });
+      failures[1](new Error("response lost after confirmation"));
+      await next;
+      assert.equal(task.controlIntent, null);
+      assert.equal(notices.toasts().length, 0, "the authoritative state already confirmed the request");
+
+      let rejectResume;
+      ipc.resumeJob = () => new Promise((_, reject) => { rejectResume = reject; });
+      const resume = jobs.resumeTask(1);
+      ipc.cancelJob = async () => {};
+      jobs.cancelTask(1);
+      rejectResume(new Error("late resume failure"));
+      await resume;
+      assert.equal(task.controlIntent, "cancel");
+      assert.equal(notices.toasts().length, 0, "cancellation supersedes the old request");
+
+      const failedPause = jobs.pauseTask(2);
+      failures[2](new Error("current request failed"));
+      assert.equal(await failedPause, false);
+      assert.equal(jobs.tasks()[1].controlIntent, null, "a current failure releases controls for retry");
+      assert.equal(jobs.tasks()[1].actionFailure, "pause");
+      assert.equal(notices.toasts().length, 0, "the error is presented with its task, not behind a modal");
+      let retryAccepted;
+      ipc.pauseJob = () => new Promise((resolve) => { retryAccepted = resolve; });
+      const retry = jobs.pauseTask(2);
+      assert.equal(jobs.tasks()[1].actionFailure, null, "retry clears the old inline error immediately");
+      retryAccepted();
+      assert.equal(await retry, true);
+      await emit("job://state", { id: 2, version: 20, state: "paused" });
+      assert.equal(jobs.tasks()[1].controlIntent, null);
+    } finally {
+      for (const toast of [...notices.toasts()]) notices.dismissToast(toast.id);
+    }
+  });
+});
+
+test("task control notices wait for acceptance and do not outlive the pending action", async () => {
+  const app = readFileSync(new URL("../App.svelte", import.meta.url), "utf8");
+  const source = ts.createSourceFile("App.ts", app.match(/<script lang="ts">([\s\S]*?)<\/script>/)[1], ts.ScriptTarget.Latest, true);
+  const actions = [["pauseCurrentTask", "pauseTask", "pause"], ["resumeCurrentTask", "resumeTask", "resume"], ["cancelCurrentTask", "cancelTask", "cancel"]];
+  const declarations = source.statements.filter((node) => ts.isFunctionDeclaration(node) && actions.some(([name]) => node.name?.text === name));
+  const { outputText } = ts.transpileModule(declarations.map((node) => node.getText(source)).join("\n"), {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
+  });
+  for (const [handler, control, intent] of actions) {
+    for (const outcome of ["accepted", "failed", "confirmed", "superseded"]) {
+      let finish;
+      const notices = [];
+      const task = { id: 1, controlIntent: intent };
+      const context = { [control]: () => new Promise((resolve) => { finish = resolve; }),
+        showNotice: (message) => notices.push(message), tr: (_key, fallback) => fallback };
+      const run = vm.runInNewContext(`${outputText}\n${handler}`, context);
+      const request = run(task);
+      assert.deepEqual(notices, [], "the IPC request is still pending");
+      if (outcome === "confirmed") task.controlIntent = null;
+      if (outcome === "superseded") task.controlIntent = "another action";
+      finish(outcome !== "failed");
+      await request;
+      assert.equal(notices.length, outcome === "accepted" ? 1 : 0);
+    }
+  }
+});
+
 test("rejected cancellation restores password and conflict inputs without a new snapshot revision", async () => {
   await withQuestionFeed(async ({ jobs, ipc, polls }) => {
     for (const [id, pending] of [[1, jobs.pendingPassword], [2, jobs.pendingConflict]]) {
@@ -208,7 +313,7 @@ test("rejected cancellation restores password and conflict inputs without a new 
       reject(new Error("service unavailable"));
       await until(() => jobs.tasks().find((task) => task.id === id).controlIntent === null);
       assert.equal(pending(), original, "the still-unanswered prompt must remain recoverable");
-      assert.equal(jobs.tasks().find((task) => task.id === id).questionFailure, "cancel");
+      assert.equal(jobs.tasks().find((task) => task.id === id).actionFailure, "cancel");
       const before = polls();
       await until(() => polls() > before);
       assert.equal(pending(), original, "an empty delta cannot recover a discarded prompt");
@@ -238,7 +343,7 @@ test("cancellation keeps inputs unavailable through snapshot refreshes and ignor
     assert.equal(task.question, null);
     assert.equal(task.interaction, null, "a terminal event immediately removes Needs input");
     assert.equal(task.controlIntent, null);
-    assert.equal(task.questionFailure, null);
+    assert.equal(task.actionFailure, null);
     const { taskCenterCounts } = await server.ssrLoadModule("/src/lib/task-center.ts");
     assert.equal(taskCenterCounts([task]).attention, 0);
   });
@@ -257,7 +362,7 @@ test("failed answers survive a failed refresh and never revive a cleared or newe
       assert.equal(pending(), null);
       await until(() => jobs.tasks().find((task) => task.id === id).answeredQuestionVersion === 0);
       assert.equal(pending(), original, "restore input even when the follow-up read fails");
-      assert.equal(jobs.tasks().find((task) => task.id === id).questionFailure, "answer");
+      assert.equal(jobs.tasks().find((task) => task.id === id).actionFailure, "answer");
       assert.doesNotMatch(JSON.stringify(jobs.tasks()), /temporary-secret/);
     }
 
@@ -269,11 +374,11 @@ test("failed answers survive a failed refresh and never revive a cleared or newe
     ipc.jobSnapshot = async (id) => structuredClone(records.find((record) => record.id === id));
     await emit("job://ask-password", records[0].question.prompt);
     await until(() => jobs.pendingPassword()?.version === 12);
-    assert.equal(jobs.tasks()[0].questionFailure, null);
+    assert.equal(jobs.tasks()[0].actionFailure, null);
     reject(new Error("late answer failure"));
     await until(() => jobs.tasks()[0].answeredQuestionVersion === 0);
     assert.equal(jobs.pendingPassword().version, 12);
-    assert.equal(jobs.tasks()[0].questionFailure, null, "an old failure cannot annotate a newer prompt");
+    assert.equal(jobs.tasks()[0].actionFailure, null, "an old failure cannot annotate a newer prompt");
 
     jobs.answerPassword("temporary-secret");
     await emit("job://state", { id: 1, version: 13, state: "done", error: null });

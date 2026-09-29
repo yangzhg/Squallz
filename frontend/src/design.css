@@ -3026,6 +3026,9 @@ select option {
 }
 
 .task-question-error,
+.task-action-error,
+.task-center-row > .task-action-error,
+.task-modal-actions > .task-action-error,
 .password-inline-error {
   display: block;
   min-width: 0;
@@ -3839,6 +3842,10 @@ select option {
   justify-content: flex-end;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+.task-modal-actions > .task-action-error {
+  flex-basis: 100%;
 }
 
 .task-modal-actions button {
@@ -15266,7 +15273,7 @@ select.classic-input:focus {
   color: var(--color-text-primary);
 }
 
-.design-root :is(p, small, .classic-property-sheet p, .classic-recovery-sheet p, .classic-extract-sheet p, .settings-route-card small, .destination-grid span, .batch-card span, .path-decision p) {
+.design-root :is(p, small, .classic-property-sheet p, .classic-recovery-sheet p, .classic-extract-sheet p, .settings-route-card small, .destination-grid span, .batch-card span, .path-decision p):not(:where(.task-action-error, .task-question-error, .password-inline-error)) {
   color: var(--color-text-secondary);
 }
 
