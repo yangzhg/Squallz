@@ -13,7 +13,8 @@ const info = (id = 1, read_only = false) => ({
   format: "zip", entry_count: 1, read_only, encoding_override: null,
   volumes: null, non_utf8_name_count: 0, garbled_count: 0, suggested_encoding: null,
 });
-const saved = { available: true, saved: true };
+const saved = { session: true, available: true, saved: true, error: null };
+const empty = { session: false, available: true, saved: false, error: null };
 const wrong = { key: "error.wrong_password", params: {}, detail: "" };
 const cancelled = { key: "error.cancelled", params: {}, detail: "" };
 
@@ -24,6 +25,7 @@ async function withBook(run) {
     const { ipc } = await server.ssrLoadModule("/src/lib/ipc.ts");
     const requests = [];
     const cancellations = [];
+    ipc.archivePasswordStatus = async () => empty;
     ipc.cancelPasswordSave = async (id) => { cancellations.push(id); };
     ipc.rememberArchivePassword = (...args) => {
       const result = deferred();
@@ -55,7 +57,7 @@ test("Password Book verifies once, reports failures, and preserves saved credent
   assert.equal(await retry, true);
   assert.equal(book.archivePasswordSave().phase, "saved");
   assert.equal(book.archivePasswordBookStatus().saved, true);
-  assert.equal(book.archiveHasSessionPassword(), true);
+  assert.equal(book.archivePasswordBookStatus().session, true);
   const replacement = save("wrong");
   requests[2].reject(wrong);
   assert.equal(await replacement, false);
@@ -121,7 +123,7 @@ test("only a ready, writable archive can save; refresh and forget cannot race ve
   book.installArchivePreview(info(1, true), []);
   assert.equal(await save(), false);
   book.installArchivePreview(info(), []);
-  ipc.archivePasswordStatus = async () => ({ available: false, saved: false });
+  ipc.archivePasswordStatus = async () => ({ session: false, available: false, saved: null, error: null });
   await book.refreshArchivePasswordBookStatus();
   assert.equal(await save(), false);
   book.installArchivePreview(info(), []);
@@ -130,11 +132,64 @@ test("only a ready, writable archive can save; refresh and forget cannot race ve
   ipc.archivePasswordStatus = () => refresh.promise;
   const checking = book.refreshArchivePasswordBookStatus();
   assert.equal(await save(), false);
-  refresh.resolve({ available: true, saved: false });
+  refresh.resolve(empty);
   await checking;
   const first = save();
   ipc.archivePasswordStatus = () => { assert.fail("refresh must wait for verification"); };
   await book.refreshArchivePasswordBookStatus();
   requests[0].resolve(saved);
   await first;
+}));
+
+test("status refresh observes newly cached and invalidated passwords, ignoring older responses", () => withBook(async ({ book, ipc }) => {
+  ipc.archivePasswordStatus = async () => ({ ...empty, session: true });
+  await book.refreshArchivePasswordBookStatus();
+  assert.equal(book.archivePasswordBookStatus().session, true);
+  const previous = deferred();
+  ipc.archivePasswordStatus = () => previous.promise;
+  const checking = book.refreshArchivePasswordBookStatus();
+  ipc.archivePasswordStatus = async () => empty;
+  await book.refreshArchivePasswordBookStatus();
+  previous.resolve(saved);
+  await checking;
+  assert.equal(book.archivePasswordBookStatus().session, false);
+  assert.equal(book.archivePasswordBookStatus().saved, false);
+  const oldArchive = deferred();
+  ipc.archivePasswordStatus = () => oldArchive.promise;
+  const oldCheck = book.refreshArchivePasswordBookStatus();
+  book.installArchivePreview(info(2), []);
+  oldArchive.resolve(saved);
+  await oldCheck;
+  assert.equal(book.archivePasswordBookStatus().session, false);
+}));
+
+test("system-store failure preserves confirmed session status, while transport failure makes it unknown", () => withBook(async ({ book, ipc }) => {
+  const failure = { key: "error.secret_store", params: {}, detail: "locked" };
+  ipc.archivePasswordStatus = async () => ({ session: true, available: true, saved: null, error: failure });
+  await assert.rejects(book.refreshArchivePasswordBookStatus(), (error) => error === failure);
+  assert.deepEqual(book.archivePasswordBookStatus(), { state: "error", available: true, saved: null, session: true });
+  ipc.archivePasswordStatus = async () => { throw new Error("disconnected"); };
+  await assert.rejects(book.refreshArchivePasswordBookStatus(), /disconnected/);
+  assert.equal(book.archivePasswordBookStatus().session, null);
+  assert.equal(book.archivePasswordBookStatus().saved, null);
+}));
+
+test("forget reports partial system-store failure and permits session clearing without a store", () => withBook(async ({ book, ipc }) => {
+  for (const available of [false, true]) {
+    const error = available ? { key: "error.secret_store", params: {}, detail: "locked" } : null;
+    ipc.archivePasswordStatus = async () => ({ session: true, available, saved: null, error });
+    await book.refreshArchivePasswordBookStatus().catch(() => {});
+    ipc.forgetArchivePassword = async () => ({ session: false, available, saved: null, error });
+    assert.equal(await book.forgetCurrentArchivePassword(), false, "persistent removal is unconfirmed");
+    assert.equal(book.archivePasswordBookStatus().session, false);
+    assert.equal(book.archivePasswordBookStatus().saved, null);
+  }
+  ipc.archivePasswordStatus = async () => ({ ...saved, session: false });
+  await book.refreshArchivePasswordBookStatus();
+  ipc.forgetArchivePassword = async () => empty;
+  assert.equal(await book.forgetCurrentArchivePassword(), true);
+  assert.equal(book.archivePasswordBookStatus().saved, false);
+  ipc.forgetArchivePassword = async () => { throw new Error("disconnected"); };
+  assert.equal(await book.forgetCurrentArchivePassword(), false);
+  assert.equal(book.archivePasswordBookStatus().session, null);
 }));

@@ -462,8 +462,10 @@ export type JobQuestion =
   | { kind: "conflict"; prompt: AskConflictEvent };
 
 export interface PasswordBookStatus {
+  session: boolean;
   available: boolean;
-  saved: boolean;
+  saved: boolean | null;
+  error: ErrorDto | null;
 }
 
 export interface LanguageDto {

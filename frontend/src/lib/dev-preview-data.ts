@@ -11,6 +11,30 @@ import type {
 } from "./ipc";
 
 const passwordBookPreviewRequests = new Map<string, () => void>();
+let passwordBookPreviewStatus: PasswordBookStatus | null = null;
+
+export function readPasswordBookPreview(params: URLSearchParams): PasswordBookStatus | null {
+  if (!import.meta.env.DEV || params.get("previewPasswordBook") !== "1") return null;
+  if (!passwordBookPreviewStatus) {
+    const state = params.get("passwordBookState");
+    const locked = state === "locked";
+    const unavailable = state === "unavailable";
+    passwordBookPreviewStatus = {
+      session: ["session", "locked", "unavailable", "saved"].includes(state ?? ""),
+      available: !unavailable,
+      saved: locked || unavailable ? null : state === "saved",
+      error: locked ? { key: "error.secret_store", params: {}, detail: "" } : null,
+    };
+  }
+  return { ...passwordBookPreviewStatus };
+}
+
+export function forgetPasswordBookPreview(params: URLSearchParams): PasswordBookStatus | null {
+  const status = readPasswordBookPreview(params);
+  if (!status) return null;
+  passwordBookPreviewStatus = { ...status, session: false, saved: status.error || !status.available ? null : false };
+  return { ...passwordBookPreviewStatus };
+}
 
 export function savePasswordBookPreview(params: URLSearchParams, requestId: string, password: string): Promise<PasswordBookStatus> | null {
   if (!import.meta.env.DEV || params.get("previewPasswordBook") !== "1") return null;
@@ -18,7 +42,10 @@ export function savePasswordBookPreview(params: URLSearchParams, requestId: stri
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       passwordBookPreviewRequests.delete(requestId);
-      if (valid) resolve({ available: true, saved: true });
+      if (valid) {
+        passwordBookPreviewStatus = { session: true, available: true, saved: true, error: null };
+        resolve({ ...passwordBookPreviewStatus });
+      }
       else reject({ key: "error.wrong_password", params: {}, detail: "" });
     }, 1800);
     passwordBookPreviewRequests.set(requestId, () => {

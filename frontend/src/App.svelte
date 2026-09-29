@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, tick } from "svelte";
+  import { onMount, tick, untrack } from "svelte";
   import ArchiveStartState from "./components/ArchiveStartState.svelte";
   import ArchiveReturnStrip from "./components/ArchiveReturnStrip.svelte";
   import ArchiveEntryEditor from "./components/ArchiveEntryEditor.svelte";
@@ -65,7 +65,6 @@
     archiveBrowseError,
     archiveRefreshStatus,
     archiveOpenError,
-    archiveHasSessionPassword,
     archivePasswordBookStatus,
     archivePasswordSave,
     archivePasswordSaveBusy,
@@ -1181,6 +1180,12 @@
   $effect(() => {
     const current = currentArchive;
     convertRouteHandle?.syncArchive(current);
+  });
+
+  $effect(() => {
+    const path = currentArchive?.path;
+    if (screen !== "passwordBook" && screen !== "password") return;
+    if (path) untrack(() => { void refreshArchivePasswordBookStatus(path).catch(() => undefined); });
   });
 
   $effect(() => {
@@ -4560,7 +4565,7 @@
       passwordSaveState,
       passwordBookArchiveId: currentArchive?.id ?? null,
       passwordBookCanSave: Boolean(currentArchive && !currentArchive.read_only && passwordBookStatus.state === "ready" && passwordBookStatus.available),
-      passwordBookSaved: passwordBookStatus.saved,
+      passwordBookSaved: passwordBookStatus.saved === true,
       savePasswordBook: (password) => currentArchive
         ? rememberArchivePassword(currentArchive.path, password, archiveEncoding()) : Promise.resolve(false),
       cancelPasswordBookSave: cancelArchivePasswordSave,
@@ -13973,10 +13978,14 @@
     if (!currentArchive) return noArchiveLabel();
     if (currentArchive.read_only) return tr("gui.settings.password_book.unavailable_status", "Unavailable");
     if (passwordBookStatus.state === "checking") return tr("gui.settings.password_book.checking", "Checking");
-    if (passwordBookStatus.state !== "ready") return tr("gui.settings.password_book.not_checked", "Not checked");
-    return passwordBookStatus.saved
+    const saved = passwordBookStatus.saved === null
+      ? tr("gui.settings.password_book.saved_unknown", "Saved status unknown")
+      : passwordBookStatus.saved
       ? tr("gui.settings.password_book.saved_status", "Saved")
       : tr("gui.settings.password_book.not_saved_status", "Not saved");
+    return passwordBookStatus.session
+      ? `${tr("gui.settings.password_book.session_available", "Available in this session")} · ${saved}`
+      : saved;
   }
 
   function passwordBookDetailLabel(): string {
@@ -14010,12 +14019,15 @@
     if (passwordBookStatus.state === "checking") {
       return tr("gui.settings.password_book.wait_for_status", "Wait for the password status check to finish");
     }
-    if (archiveHasSessionPassword()) return "";
+    if (passwordBookStatus.session) return "";
     if (passwordBookStatus.state === "error") {
       return tr("gui.settings.password_book.refresh_after_failure", "Refresh password status before forgetting it");
     }
     if (passwordBookStatus.state !== "ready") {
       return tr("gui.settings.password_book.refresh_before_forgetting", "Check password status before forgetting it");
+    }
+    if (passwordBookStatus.saved === null) {
+      return tr("gui.settings.password_book.refresh_after_failure", "Refresh password status before forgetting it");
     }
     if (!passwordBookStatus.saved) {
       return tr("gui.settings.password_book.no_saved_entry", "The current archive has no stored password");
@@ -14058,10 +14070,7 @@
       return;
     }
 
-    const ok = await forgetCurrentArchivePassword();
-    showNotice(ok
-      ? tr("gui.settings.password_book.current_password_forgotten", "Current archive password forgotten")
-      : tr("gui.settings.password_book.could_not_forget_current", "Could not forget current archive password"));
+    await forgetCurrentArchivePassword();
   }
 
   function showNotice(message: string) {

@@ -48,7 +48,7 @@ async function withArchive(run, options = {}) {
     ipc.closeArchive = async (id) => { closed.push(id); };
     ipc.cancelArchiveOpen = async () => {};
     ipc.cancelArchiveSearch = async () => {};
-    ipc.archivePasswordStatus = async () => ({ available: true, saved: false });
+    ipc.archivePasswordStatus = async () => ({ session: false, available: true, saved: false, error: null });
     ipc.resolveArchiveDirectory = async (_id, prefix) => prefix;
     ipc.listEntries = async (id, page, prefix) => {
       requests.push({ id, page, prefix });
@@ -282,7 +282,7 @@ test("refresh password retry preserves the browse context and selected filename 
     };
     assert.equal(await archive.openArchive("/tmp/refresh.zip", "test-only-password", "gbk"), true);
     assert.deepEqual(archive.currentDirs(), ["docs"]);
-    assert.equal(archive.archiveHasSessionPassword(), true);
+    assert.equal(archive.archivePasswordBookStatus().session, false, "typing a password does not prove it was cached");
     assert.equal(archive.openPasswordPrompt(), null);
   });
 });

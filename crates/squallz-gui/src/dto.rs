@@ -906,10 +906,13 @@ pub struct AskPasswordEvent {
 /// Current archive password-book state.
 #[derive(Debug, Clone, Serialize)]
 pub struct PasswordBookStatusDto {
+    /// Whether a verified password still matches the current archive source.
+    pub session: bool,
     /// Whether a persistent secret store is available on this platform/session.
     pub available: bool,
-    /// Whether this archive has a password saved in the persistent store.
-    pub saved: bool,
+    /// `None` when the persistent store could not be checked.
+    pub saved: Option<bool>,
+    pub error: Option<ErrorDto>,
 }
 
 /// One installed desktop/file-manager integration action.

@@ -247,18 +247,25 @@ fn open_archive_source_resolving_password_with_entry_limit_and_control(
 }
 
 fn archive_password_status_impl(
+    state: &AppState,
     secrets: &dyn SecretStore,
     path: &Path,
-) -> Result<PasswordBookStatusDto, ErrorDto> {
+) -> PasswordBookStatusDto {
     let available = secrets.is_available();
-    let saved = if available {
-        secrets
-            .has_archive_password(path)
-            .map_err(|error| ErrorDto::secret_store(error.to_string()))?
+    let (saved, error) = if available {
+        match secrets.has_archive_password(path) {
+            Ok(saved) => (Some(saved), None),
+            Err(error) => (None, Some(ErrorDto::secret_store(error.to_string()))),
+        }
     } else {
-        false
+        (None, None)
     };
-    Ok(PasswordBookStatusDto { available, saved })
+    PasswordBookStatusDto {
+        session: state.password_for(path).is_some(),
+        available,
+        saved,
+        error,
+    }
 }
 
 fn remember_archive_password_impl(
@@ -296,8 +303,10 @@ fn remember_archive_password_impl(
         state.remember_password(attempt, password, &control);
     }
     Ok(PasswordBookStatusDto {
+        session: state.password_for(path).is_some(),
         available: true,
-        saved: true,
+        saved: Some(true),
+        error: None,
     })
 }
 
@@ -305,15 +314,23 @@ fn forget_archive_password_impl(
     state: &AppState,
     secrets: &dyn SecretStore,
     path: &Path,
-) -> Result<PasswordBookStatusDto, ErrorDto> {
+) -> PasswordBookStatusDto {
     state.forget_password(path);
-    secrets
-        .delete_archive_password(path)
-        .map_err(|error| ErrorDto::secret_store(error.to_string()))?;
-    Ok(PasswordBookStatusDto {
-        available: secrets.is_available(),
-        saved: false,
-    })
+    let available = secrets.is_available();
+    let (saved, error) = if available {
+        match secrets.delete_archive_password(path) {
+            Ok(()) => (Some(false), None),
+            Err(error) => (None, Some(ErrorDto::secret_store(error.to_string()))),
+        }
+    } else {
+        (None, None)
+    };
+    PasswordBookStatusDto {
+        session: false,
+        available,
+        saved,
+        error,
+    }
 }
 
 /// Opens an archive and caches its entry list. `PasswordRequired` comes
@@ -1813,18 +1830,20 @@ pub fn answer_password(
     jobs.answer_password_for_window(window.label(), id, question_version, password)
 }
 
-/// Persistent password-book status for one archive path.
+/// Verified session and persistent password status for one archive path.
 #[tauri::command]
 pub async fn archive_password_status(
+    state: State<'_, Arc<AppState>>,
     secrets: State<'_, SharedSecretStore>,
     path: String,
 ) -> Result<PasswordBookStatusDto, ErrorDto> {
+    let state = Arc::clone(state.inner());
     let secrets = Arc::clone(secrets.inner());
     tauri::async_runtime::spawn_blocking(move || {
-        archive_password_status_impl(secrets.as_ref(), Path::new(&path))
+        archive_password_status_impl(state.as_ref(), secrets.as_ref(), Path::new(&path))
     })
     .await
-    .map_err(|error| ErrorDto::other(format!("password-book status task failed: {error}")))?
+    .map_err(|error| ErrorDto::other(format!("password-book status task failed: {error}")))
 }
 
 /// Verifies and saves the current archive password in the platform store.
@@ -1892,7 +1911,7 @@ pub async fn forget_archive_password(
         forget_archive_password_impl(state.as_ref(), secrets.as_ref(), Path::new(&path))
     })
     .await
-    .map_err(|error| ErrorDto::other(format!("password-book forget task failed: {error}")))?
+    .map_err(|error| ErrorDto::other(format!("password-book forget task failed: {error}")))
 }
 
 /// Returns file paths that were opened by the OS before the frontend drained
@@ -3801,6 +3820,9 @@ mod tests {
         sessions.external_use_failed(&entry.preview_id, "test-window");
         assert!(sessions.release(&entry.preview_id, "test-window").unwrap());
         assert!(state.password_for(&outer).is_some());
+        let status = archive_password_status_impl(&state, &MemorySecretStore::new(), &outer);
+        assert!(status.session);
+        assert_eq!(status.saved, Some(false));
         let next = preview_archive_entry_impl(
             &state,
             &sessions,
@@ -4464,9 +4486,10 @@ mod tests {
         let state = AppState::new();
         let secrets = MemorySecretStore::new();
 
-        let initial = archive_password_status_impl(&secrets, &archive).unwrap();
+        let initial = archive_password_status_impl(&state, &secrets, &archive);
         assert!(initial.available);
-        assert!(!initial.saved);
+        assert_eq!(initial.saved, Some(false));
+        assert!(!initial.session);
 
         let err = remember_archive_password_impl(
             &state,
@@ -4496,11 +4519,11 @@ mod tests {
         )
         .unwrap();
         assert!(saved.available);
-        assert!(saved.saved);
-        assert!(
-            archive_password_status_impl(&secrets, &archive)
-                .unwrap()
-                .saved
+        assert_eq!(saved.saved, Some(true));
+        assert!(saved.session);
+        assert_eq!(
+            archive_password_status_impl(&state, &secrets, &archive).saved,
+            Some(true)
         );
         assert_eq!(
             secrets
@@ -4515,13 +4538,13 @@ mod tests {
             Some("secret")
         );
 
-        let forgotten = forget_archive_password_impl(&state, &secrets, &archive).unwrap();
+        let forgotten = forget_archive_password_impl(&state, &secrets, &archive);
         assert!(forgotten.available);
-        assert!(!forgotten.saved);
-        assert!(
-            !archive_password_status_impl(&secrets, &archive)
-                .unwrap()
-                .saved
+        assert_eq!(forgotten.saved, Some(false));
+        assert!(!forgotten.session);
+        assert_eq!(
+            archive_password_status_impl(&state, &secrets, &archive).saved,
+            Some(false)
         );
         assert!(state.password_for(&archive).is_none());
 
@@ -4647,7 +4670,7 @@ mod tests {
             assert_eq!(error.key, "error.resource_limit");
             assert!(!secrets.has_archive_password(&archive).unwrap());
             assert!(state.password_for(&archive).is_none());
-            assert!(
+            assert_eq!(
                 remember_archive_password_impl(
                     &state,
                     &secrets,
@@ -4658,7 +4681,8 @@ mod tests {
                     &password_save_request(),
                 )
                 .unwrap()
-                .saved
+                .saved,
+                Some(true)
             );
             assert!(remember_archive_password_impl(
                 &state,
@@ -4688,11 +4712,14 @@ mod tests {
 
     #[test]
     fn password_book_status_reports_secret_store_failures() {
-        let error = archive_password_status_impl(
+        let status = archive_password_status_impl(
+            &AppState::new(),
             &ReadFailingSecretStore,
             Path::new("/tmp/locked-password-book.7z"),
-        )
-        .unwrap_err();
+        );
+        assert_eq!(status.saved, None);
+        assert!(!status.session);
+        let error = status.error.unwrap();
 
         assert_eq!(error.key, "error.secret_store");
         assert!(error.params.is_empty());
@@ -4707,11 +4734,80 @@ mod tests {
         let state = AppState::new();
         state.open_archive(path, Some("secret"), None).unwrap();
 
-        let error = forget_archive_password_impl(&state, &ReadFailingSecretStore, path)
-            .expect_err("persistent delete must still be reported");
+        let status = archive_password_status_impl(&state, &ReadFailingSecretStore, path);
+        assert!(status.session);
+        assert_eq!(status.saved, None);
+        assert!(status.error.is_some());
+        let forgotten = forget_archive_password_impl(&state, &ReadFailingSecretStore, path);
+        assert!(!forgotten.session);
+        assert_eq!(forgotten.saved, None);
+        let error = forgotten
+            .error
+            .expect("persistent delete must still be reported");
 
         assert_eq!(error.key, "error.secret_store");
         assert!(state.password_for(path).is_none());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn password_book_status_rechecks_the_source_without_discarding_saved_credentials() {
+        let dir = temp_dir("password-status-source");
+        let archive = make_header_encrypted_7z(&dir);
+        let state = AppState::new();
+        let secrets = MemorySecretStore::new();
+        secrets.insert(archive.clone(), "secret");
+        state.open_archive(&archive, Some("secret"), None).unwrap();
+        assert!(archive_password_status_impl(&state, &secrets, &archive).session);
+        std::fs::write(&archive, b"changed archive").unwrap();
+        let changed = archive_password_status_impl(&state, &secrets, &archive);
+        assert!(!changed.session);
+        assert_eq!(changed.saved, Some(true));
+        assert!(changed.error.is_none());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn password_book_unavailable_store_still_reports_and_forgets_session_passwords() {
+        struct UnavailableStore;
+        impl SecretStore for UnavailableStore {
+            fn is_available(&self) -> bool {
+                false
+            }
+            fn get_archive_password(
+                &self,
+                _: &Path,
+            ) -> Result<Option<Password>, crate::secrets::SecretStoreError> {
+                panic!("unavailable store must not be read");
+            }
+            fn set_archive_password(
+                &self,
+                _: &Path,
+                _: &str,
+            ) -> Result<(), crate::secrets::SecretStoreError> {
+                panic!("unavailable store must not be written");
+            }
+            fn delete_archive_password(
+                &self,
+                _: &Path,
+            ) -> Result<(), crate::secrets::SecretStoreError> {
+                panic!("unavailable store must not be accessed for deletion");
+            }
+        }
+        let dir = temp_dir("password-status-unavailable");
+        let archive = make_header_encrypted_7z(&dir);
+        let state = AppState::new();
+        state.open_archive(&archive, Some("secret"), None).unwrap();
+        let status = archive_password_status_impl(&state, &UnavailableStore, &archive);
+        assert!(status.session);
+        assert!(!status.available);
+        assert_eq!(status.saved, None);
+        let forgotten = forget_archive_password_impl(&state, &UnavailableStore, &archive);
+        assert!(!forgotten.session);
+        assert!(!forgotten.available);
+        assert_eq!(forgotten.saved, None);
+        assert!(forgotten.error.is_none());
+        assert!(state.password_for(&archive).is_none());
         std::fs::remove_dir_all(dir).unwrap();
     }
 
