@@ -188,7 +188,9 @@ function find(id: number): Task | undefined {
   return store.tasks.find((task) => task.id === id);
 }
 
-function rememberPending<T>(pending: Map<number, T>, id: number, event: T): void {
+function rememberPending<T extends { version: number }>(pending: Map<number, T>, id: number, event: T): void {
+  const previous = pending.get(id);
+  if (previous && previous.version >= event.version) return;
   pending.set(id, event);
   while (pending.size > MAX_PENDING_EVENTS) {
     const oldest = pending.keys().next().value;
@@ -1104,14 +1106,16 @@ function onProgress(ev: ProgressEvent): void {
 
 function replayPending(id: number): void {
   const state = pendingStates.get(id);
-  if (state) {
-    pendingStates.delete(id);
-    onState(state);
-  }
   const progress = pendingProgress.get(id);
-  if (progress) {
-    pendingProgress.delete(id);
+  pendingStates.delete(id);
+  pendingProgress.delete(id);
+  if (state && progress && progress.version < state.version) {
+    // Retain the last measured progress before a newer terminal state freezes it.
     onProgress(progress);
+    onState(state);
+  } else {
+    if (state) onState(state);
+    if (progress) onProgress(progress);
   }
 }
 
