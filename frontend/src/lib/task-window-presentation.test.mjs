@@ -22,7 +22,7 @@ function taskSurface(taskWindowMode) {
     "taskOutputPath", "taskRevealOutputLabel", "pauseCurrentTask", "resumeCurrentTask",
     "cancelCurrentTask", "copyTaskChecksumResults", "openTaskOutput", "openMacosSfxPublisher",
     "prepareTaskReview", "toggleTaskDetails", "viewTaskResults", "revealTaskOutput",
-    "dismissTaskDialog", "submitPasswordRequest", "cancelPasswordRequest", "answerConflictDecision",
+    "dismissTaskDialog", "submitTaskPasswordRequest", "cancelTaskPasswordRequest", "answerConflictDecision",
   ].map((name) => [name, () => {}]));
   const surface = vm.runInNewContext(`${outputText}\ntaskDialogSurface`, {
     ...callbacks,
@@ -36,8 +36,9 @@ function taskSurface(taskWindowMode) {
     taskChecksumCopyFeedbackTone: () => null,
     taskPasswordQuestion: () => null,
     taskConflictQuestion: () => null,
-    jobPasswordValue: "",
-    passwordSubmissionError: null,
+    jobPasswordPrompt: null, jobPasswordValue: "",
+    isCurrentTaskPasswordPrompt: () => false,
+    jobPasswordSubmissionError: null,
     conflictApplyAll: false,
   })({ id: 42 });
   return { surface, callbacks };

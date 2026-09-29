@@ -62,7 +62,7 @@ async function withNestedOpen(run) {
       focusExtractReview: () => { context.extractFocused = true; },
       previewPasswordFlow: createPreviewPasswordFlow(ipc.cancelEntryPreview), screen: "browse",
       jobPasswordPrompt: null, jobConflictPrompt: null, archivePasswordPrompt: null,
-      jobPasswordValue: "", passwordSubmissionAttempted: false,
+      workspacePasswordValue: "", workspacePasswordSubmissionAttempted: false,
       taskPasswordReady: (value) => value.length > 0, focusArchiveRow: async () => {},
       queueMicrotask,
       entryPreviewPreparationTail: Promise.resolve(), previewSampleForEntry: () => null,
@@ -111,14 +111,14 @@ test("an encrypted ordinary file resumes preparation and opens only after its pa
     assert.equal(context.previewPasswordPrompt.name, "outer.zip");
     assert.deepEqual(opened, []);
     context.screen = "password";
-    context.jobPasswordValue = "entry-password";
+    context.workspacePasswordValue = "entry-password";
     await app.submitPasswordRequest();
     await opening;
     assert.deepEqual(opened, ["file-preview"]);
     assert.deepEqual(released, ["file-preview"]);
     assert.equal(context.screen, "browse");
     assert.equal(context.entryPreviewFailure, null);
-    assert.equal(context.jobPasswordValue, "");
+    assert.equal(context.workspacePasswordValue, "");
     assert.equal(archive.archive().id, 1);
   });
 });
@@ -139,9 +139,9 @@ test("nested opening resumes through the shared password form with separate laye
     assert.match(app.passwordPromptDetail(), /archive password to read/);
     for (const [password, nextScope] of [["outer-password", "inner"], ["wrong-password", "inner"], ["inner-password", null]]) {
       assert.equal(archive.archive().id, 1);
-      context.jobPasswordValue = password;
+      context.workspacePasswordValue = password;
       await app.submitPasswordRequest();
-      assert.equal(context.jobPasswordValue, "");
+      assert.equal(context.workspacePasswordValue, "");
       await new Promise((resolve) => setImmediate(resolve));
       assert.equal(context.previewPasswordPrompt?.scope ?? null, nextScope);
       if (password === "wrong-password") assert.match(app.passwordPromptDetail(), /rejected/);
@@ -165,13 +165,13 @@ test("cancelling during password verification preserves the outer archive and re
     const opening = app.openNestedArchiveEntry("/archives/outer.zip", "inner.zip", 0);
     await new Promise((resolve) => setImmediate(resolve));
     context.screen = "password";
-    context.jobPasswordValue = "outer-password";
+    context.workspacePasswordValue = "outer-password";
     await app.submitPasswordRequest();
     await app.cancelPasswordRequest();
     verified.resolve(archiveInfo(2, "inner.zip"));
     await opening;
     assert.equal(context.previewPasswordPrompt, null);
-    assert.equal(context.jobPasswordValue, "");
+    assert.equal(context.workspacePasswordValue, "");
     assert.equal(context.screen, "browse");
     assert.equal(archive.archive().id, 1);
     assert.deepEqual(closed, [2]);

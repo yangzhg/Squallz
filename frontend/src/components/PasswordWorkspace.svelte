@@ -16,14 +16,10 @@
     busy: boolean;
     rejected: boolean;
     error: string | null;
-    forgetVisible: boolean;
-    forgetDisabledReason: string;
-    forgetAriaLabel: string;
     onInputMount: (input: HTMLInputElement | null) => void;
     onValueChange: (value: string) => void;
     onSubmit: () => void | Promise<void>;
     onCancel: () => void;
-    onForget: () => void | Promise<void>;
     onBack: () => void;
   }
 </script>
@@ -108,11 +104,6 @@
         </div>
         <footer class="modal-actions password-request-actions">
           <button type="button" onclick={surface.onCancel}>{surface.tr("common.cancel", "Cancel")}</button>
-          {#if surface.forgetVisible}
-            <button type="button" disabled={Boolean(surface.forgetDisabledReason)} title={surface.forgetDisabledReason}
-              aria-label={surface.forgetAriaLabel} onclick={() => void surface.onForget()}
-            >{surface.tr("gui.settings.password_book.forget_current", "Forget current archive")}</button>
-          {/if}
           <button class="primary-lite" class:classic-primary={surface.variant === "classic"} type="submit" aria-busy={surface.busy} disabled={surface.busy}>
             {surface.busy ? surface.tr("gui.password.unlocking", "Unlocking…") : surface.tr("gui.password.unlock_continue", "Unlock and continue")}
           </button>

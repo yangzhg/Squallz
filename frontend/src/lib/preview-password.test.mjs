@@ -21,7 +21,7 @@ async function withFlow(run) {
 
 const context = { outerName: "outer.zip", innerName: "inner.7z", isCurrent: () => true };
 
-test("both password layouts retain labelled input, error context, cancellation and optional password management", async () => {
+test("both password layouts retain labelled input, error context, cancellation and session guidance", async () => {
   const server = await createTestServer();
   try {
     const { render } = await server.ssrLoadModule("svelte/server");
@@ -35,8 +35,7 @@ test("both password layouts retain labelled input, error context, cancellation a
           name: "Quarterly archives & supporting documents.7z", detail: "Awaiting the inner archive",
           sessionDetail: "Used for this archive in this session", failureDetail: "Retry or cancel",
           secretStoreLabel: "Keychain", value: "", busy: false, rejected: false, error: t("gui.password.empty_error"),
-          forgetVisible: true, forgetDisabledReason: "", forgetAriaLabel: t("gui.settings.password_book.forget_current"),
-          onInputMount() {}, onValueChange() {}, onSubmit() {}, onCancel() {}, onForget() {}, onBack() {},
+          onInputMount() {}, onValueChange() {}, onSubmit() {}, onCancel() {}, onBack() {},
         };
         const body = render(Workspace, { props: { surface } }).body;
         assert.equal((body.match(/<input\b/g) ?? []).length, 1);
@@ -46,7 +45,6 @@ test("both password layouts retain labelled input, error context, cancellation a
         for (const id of input.match(/aria-describedby="([^"]+)"/)[1].split(" ")) {
           assert.ok(body.includes(`id="${id}"`), `${variant} describes input with ${id}`);
         }
-        assert.ok(body.includes(t("gui.settings.password_book.forget_current")));
         assert.match(body, /<details\b[^>]*><summary/);
         assert.match(body, /Quarterly archives &amp; supporting documents\.7z/);
         const rejected = render(Workspace, { props: { surface: { ...surface, rejected: true, error: null } } }).body;

@@ -29,6 +29,8 @@ function harness() {
     "openArchivePath", "extractJobPaths", "extractJobDestination", "extractSmartBase",
     "extractSelectionLabel", "extractStartBlockedReason", "submitExtractJob",
     "syncExtractDraftArchive", "cancelPasswordRequest", "submitPasswordRequest",
+    "isCurrentTaskPasswordPrompt", "submitTaskPasswordRequest", "cancelTaskPasswordRequest", "passwordWorkspaceSurface",
+    "passwordPromptName", "passwordPromptDetail", "passwordSessionDetail", "passwordFailureDetail", "taskPasswordQuestion",
     "setScreen", "effectiveExtractDest", "sameFolderExtractDest",
     "extractEncodingForJob", "archiveEncodingForJob", "extractEncodingLabel"];
   const declarations = source.statements.filter((node) => ts.isFunctionDeclaration(node) && names.includes(node.name?.text));
@@ -48,8 +50,10 @@ function harness() {
     extractPresetMutationState: "saved", extractPresetDraftTouched: false,
     extractPlan: { destination: "/old/checked", input_guard: "old-guard" }, extractPlanPhase: "ready",
     extractPlanRequestKey: "old-plan", appliedDefaultExtractDir: "/unrelated/default",
-    jobPasswordPrompt: null, jobConflictPrompt: null, archivePasswordPrompt: null, jobPasswordValue: "",
-    passwordSubmissionAttempted: false, standalonePasswordFocusedInput: null,
+    jobPasswordPrompt: null, jobConflictPrompt: null, archivePasswordPrompt: null, workspacePasswordValue: "",
+    workspacePasswordSubmissionAttempted: false, standalonePasswordFocusedInput: null,
+    workspacePasswordSubmissionError: null, secretStoreLabel: () => "Keychain",
+    isTaskActiveState: (state) => state === "running",
     recoverySourceMode: "current", recoverySourceOverride: null, recoveryPar2Override: null,
     tr: (_key, fallback) => fallback,
     sameFilePath: (a, b) => a === b, pathBaseName: (path) => path.split("/").at(-1),
@@ -157,18 +161,18 @@ test("unlocking a failed task retries the password then restores only its non-se
   assert.equal("password" in run.context.pendingArchiveTaskReview, false);
   assert.equal("expected_input_guard" in run.context.pendingArchiveTaskReview, false);
   assert.equal("expected_destination" in run.context.pendingArchiveTaskReview, false);
-  run.context.jobPasswordValue = "wrong";
+  run.context.workspacePasswordValue = "wrong";
   await run.submitPasswordRequest();
   assert.equal(run.context.screen, "password");
   assert.ok(run.context.pendingArchiveTaskReview);
-  assert.equal(run.context.jobPasswordValue, "");
-  run.context.jobPasswordValue = "correct";
+  assert.equal(run.context.workspacePasswordValue, "");
+  run.context.workspacePasswordValue = "correct";
   await run.submitPasswordRequest();
   assert.equal(run.context.screen, "extract");
   assert.equal(run.extractJobDestination(), "/original/output");
   assert.deepEqual(Array.from(run.extractJobPaths()), ["photos/", "notes.txt"]);
   assert.equal(run.context.pendingArchiveTaskReview, null);
-  assert.equal(run.context.jobPasswordValue, "");
+  assert.equal(run.context.workspacePasswordValue, "");
   assert.equal(run.calls.some(([name]) => name === "submit"), false);
 });
 
@@ -187,6 +191,89 @@ test("a different decoding reopens the same archive, while a same-source reload 
   run.syncExtractDraftArchive();
   assert.equal(run.context.extractVerifySfx, false);
   assert.equal(run.context.extractSmartBaseOverride, null);
+});
+
+test("an archive unlock response cannot clear a password being entered for a background task", async () => {
+  const run = harness();
+  run.context.archivePasswordPrompt = { path: "/opening.zip", encoding: null, wrong: false };
+  run.context.workspacePasswordValue = "archive-input";
+  let finish;
+  run.context.openArchiveStore = () => new Promise((resolve) => { finish = resolve; });
+  const opening = run.submitPasswordRequest();
+  run.context.jobPasswordPrompt = { id: 8, version: 12, name: "background.zip", wrong: false };
+  run.context.jobPasswordValue = "task-input";
+  finish(false);
+  await opening;
+  assert.equal(run.context.jobPasswordValue, "task-input");
+  assert.equal(run.context.workspacePasswordValue, "");
+});
+
+test("overlapping task and archive or preview prompts keep their labels and answers separate", async () => {
+  for (const source of ["archive", "preview"]) {
+    const run = harness();
+    const context = run.context;
+    if (source === "archive") context.archivePasswordPrompt = { path: "/opening.zip", encoding: null, wrong: true };
+    else context.previewPasswordPrompt = { id: 3, name: "inner.7z", scope: "inner", wrong: true, busy: false };
+    context.jobPasswordPrompt = { id: 8, version: 12, name: "background.zip", wrong: false };
+    context.jobPasswordValue = "task-input";
+    context.workspacePasswordValue = "workspace-input";
+    const workspace = run.passwordWorkspaceSurface("modern");
+    assert.equal(workspace.name, source === "archive" ? "opening.zip" : "inner.7z");
+    assert.equal(workspace.rejected, true);
+    assert.match(workspace.detail, /rejected/);
+    assert.equal(workspace.value, "workspace-input");
+    const taskQuestion = run.taskPasswordQuestion({ id: 8, state: "running" });
+    assert.equal(taskQuestion.name, "background.zip");
+    assert.match(taskQuestion.detail, /waiting/);
+    workspace.onValueChange("workspace-retry");
+    assert.equal(context.jobPasswordValue, "task-input");
+    const answers = [];
+    context.openArchiveStore = async (_path, value) => { answers.push(["archive", value]); return false; };
+    context.previewPasswordFlow = { answer: (value) => { answers.push(["preview", value]); return true; } };
+    context.answerJobPassword = async (value) => { answers.push(["task", value]); context.jobPasswordPrompt = null; return true; };
+    context.returnTaskQuestionToCenter = () => {};
+    await workspace.onSubmit();
+    assert.deepEqual(answers, [[source, "workspace-retry"]]);
+    assert.equal(context.jobPasswordValue, "task-input");
+    assert.equal(context.workspacePasswordValue, "");
+    workspace.onValueChange("workspace-next");
+    await run.submitTaskPasswordRequest(run.context.jobPasswordPrompt);
+    assert.deepEqual(answers.at(-1), ["task", "task-input"]);
+    assert.equal(context.workspacePasswordValue, "workspace-next");
+    assert.equal(context.jobPasswordValue, "");
+  }
+});
+
+test("a dismissed task password callback cannot submit or cancel an archive password request", async () => {
+  const run = harness();
+  const prompt = { path: "/opening.zip", encoding: null, wrong: false };
+  run.context.archivePasswordPrompt = prompt;
+  run.context.workspacePasswordValue = "workspace-input";
+  run.context.workspacePasswordSubmissionAttempted = true;
+  run.context.screen = "password";
+  await run.submitTaskPasswordRequest(run.context.jobPasswordPrompt);
+  await run.cancelTaskPasswordRequest(null);
+  assert.equal(run.context.archivePasswordPrompt, prompt);
+  assert.equal(run.context.workspacePasswordValue, "workspace-input");
+  assert.equal(run.context.workspacePasswordSubmissionAttempted, true);
+  assert.equal(run.context.screen, "password");
+  assert.equal(run.calls.some(([kind]) => kind === "open"), false);
+});
+
+test("stale task password actions cannot answer a newer task or a newer attempt", async () => {
+  const stale = { id: 8, version: 12, name: "previous.zip", wrong: false };
+  for (const next of [{ ...stale, id: 9 }, { ...stale, version: 13, wrong: true }]) {
+    const run = harness();
+    const answers = [];
+    run.context.jobPasswordPrompt = next;
+    run.context.jobPasswordValue = "new-task-input";
+    run.context.answerJobPassword = async (value) => { answers.push(value); return true; };
+    await run.submitTaskPasswordRequest(stale);
+    await run.cancelTaskPasswordRequest(stale);
+    assert.deepEqual(answers, []);
+    assert.equal(run.context.jobPasswordValue, "new-task-input");
+    assert.equal(run.context.jobPasswordPrompt, next);
+  }
 });
 
 test("cancelling, navigating away, or opening another archive drops a pending extraction review", async () => {
@@ -295,7 +382,7 @@ test("failed conversion review opens its source and returns to its session after
   assert.equal(run.context.screen, "password");
   assert.equal(restored, null);
   assert.deepEqual(run.calls.find(([name]) => name === "open"), ["open", conversion.src, null, "gbk"]);
-  run.context.jobPasswordValue = "correct";
+  run.context.workspacePasswordValue = "correct";
   await run.submitPasswordRequest();
   assert.equal(run.context.screen, "convert");
   assert.equal(restored.dest, conversion.dest);

@@ -601,16 +601,18 @@
   const previewPasswordFlow = createPreviewPasswordFlow(ipc.cancelEntryPreview);
   let previewPasswordPrompt = $derived(previewPasswordFlow.prompt);
   let archivePasswordPrompt = $derived(openPasswordPrompt());
-  let activePasswordPromptIdentity = $derived(
-    jobPasswordPrompt
-      ? `job:${jobPasswordPrompt.id}:${jobPasswordPrompt.version}`
-      : archivePasswordPrompt
-        ? `archive:${archivePasswordPrompt.path}`
-        : previewPasswordPrompt
-          ? `preview:${previewPasswordPrompt.id}`
-          : null,
+  let activeJobPasswordPromptIdentity = $derived(
+    jobPasswordPrompt ? `${jobPasswordPrompt.id}:${jobPasswordPrompt.version}` : null,
   );
-  let previousPasswordPromptIdentity: string | null = null;
+  let previousJobPasswordPromptIdentity: string | null = null;
+  let activeWorkspacePasswordPromptIdentity = $derived(
+    archivePasswordPrompt
+      ? `archive:${archivePasswordPrompt.path}`
+      : previewPasswordPrompt
+        ? `preview:${previewPasswordPrompt.id}`
+        : null,
+  );
+  let previousWorkspacePasswordPromptIdentity: string | null = null;
   let jobConflictPrompt = $derived(pendingConflict());
   let activeConflictPromptIdentity = $derived.by(() => {
     const prompt = jobConflictPrompt ?? jobRows.find((task) =>
@@ -646,9 +648,16 @@
   let jobPasswordValue = $state("");
   let standalonePasswordInput = $state<HTMLInputElement | null>(null);
   let standalonePasswordFocusedInput: HTMLInputElement | null = null;
-  let passwordSubmissionAttempted = $state(false);
-  let passwordSubmissionError = $derived(
-    passwordSubmissionAttempted && !taskPasswordReady(jobPasswordValue)
+  let jobPasswordSubmissionAttempted = $state(false);
+  let jobPasswordSubmissionError = $derived(
+    jobPasswordSubmissionAttempted && !taskPasswordReady(jobPasswordValue)
+      ? tr("gui.password.empty_error", "Enter a password to continue.")
+      : null,
+  );
+  let workspacePasswordValue = $state("");
+  let workspacePasswordSubmissionAttempted = $state(false);
+  let workspacePasswordSubmissionError = $derived(
+    workspacePasswordSubmissionAttempted && !taskPasswordReady(workspacePasswordValue)
       ? tr("gui.password.empty_error", "Enter a password to continue.")
       : null,
   );
@@ -1204,15 +1213,23 @@
   });
 
   $effect(() => {
-    const identity = activePasswordPromptIdentity;
-    if (identity === previousPasswordPromptIdentity) return;
-    previousPasswordPromptIdentity = identity;
+    const identity = activeJobPasswordPromptIdentity;
+    if (identity === previousJobPasswordPromptIdentity) return;
+    previousJobPasswordPromptIdentity = identity;
     jobPasswordValue = "";
-    passwordSubmissionAttempted = false;
+    jobPasswordSubmissionAttempted = false;
   });
 
   $effect(() => {
-    const promptIdentity = activePasswordPromptIdentity;
+    const identity = activeWorkspacePasswordPromptIdentity;
+    if (identity === previousWorkspacePasswordPromptIdentity) return;
+    previousWorkspacePasswordPromptIdentity = identity;
+    workspacePasswordValue = "";
+    workspacePasswordSubmissionAttempted = false;
+  });
+
+  $effect(() => {
+    const promptIdentity = activeWorkspacePasswordPromptIdentity;
     const input = standalonePasswordInput;
     const ready =
       promptIdentity !== null &&
@@ -1234,7 +1251,7 @@
       if (
         standalonePasswordFocusedInput === input &&
         standalonePasswordInput === input &&
-        activePasswordPromptIdentity === promptIdentity &&
+        activeWorkspacePasswordPromptIdentity === promptIdentity &&
         jobPasswordPrompt === null &&
         screen === "password" &&
         archiveOpenStatus === "idle" &&
@@ -12747,6 +12764,7 @@
   }
 
   function taskDialogSurface(task: TaskDialogModel): TaskProgressDialogSurfaceProps {
+    const passwordPrompt = jobPasswordPrompt?.id === task.id ? jobPasswordPrompt : null;
     return {
       task,
       presentation: taskWindowMode ? "window" : "dialog",
@@ -12756,7 +12774,7 @@
       copyFeedbackTone: taskChecksumCopyFeedbackTone(task),
       passwordQuestion: taskPasswordQuestion(task),
       passwordValue: jobPasswordValue,
-      passwordError: passwordSubmissionError,
+      passwordError: jobPasswordSubmissionError,
       conflictQuestion: taskConflictQuestion(task),
       conflictApplyAll,
       taskOutputPath,
@@ -12774,15 +12792,18 @@
       onViewResults: viewTaskResults,
       onRevealOutput: revealTaskOutput,
       onDismiss: dismissTaskDialog,
-      onPasswordValueChange: (value) => (jobPasswordValue = value),
-      onSubmitPassword: submitPasswordRequest,
-      onCancelPassword: cancelPasswordRequest,
+      onPasswordValueChange: (value) => {
+        if (isCurrentTaskPasswordPrompt(passwordPrompt)) jobPasswordValue = value;
+      },
+      onSubmitPassword: () => submitTaskPasswordRequest(passwordPrompt),
+      onCancelPassword: () => cancelTaskPasswordRequest(passwordPrompt),
       onConflictApplyAllChange: (applyAll) => (conflictApplyAll = applyAll),
       onAnswerConflict: answerConflictDecision,
     };
   }
 
   function taskCenterDetailSurface(task: TaskDialogModel): TaskProgressDialogSurfaceProps {
+    const passwordPrompt = jobPasswordPrompt?.id === task.id ? jobPasswordPrompt : null;
     return {
       task,
       rootId: "squallz-task-center",
@@ -12806,9 +12827,11 @@
       onViewResults: viewTaskResults,
       onRevealOutput: revealTaskOutput,
       onDismiss: returnToTaskCenter,
-      onPasswordValueChange: (value) => (jobPasswordValue = value),
-      onSubmitPassword: submitPasswordRequest,
-      onCancelPassword: cancelPasswordRequest,
+      onPasswordValueChange: (value) => {
+        if (isCurrentTaskPasswordPrompt(passwordPrompt)) jobPasswordValue = value;
+      },
+      onSubmitPassword: () => submitTaskPasswordRequest(passwordPrompt),
+      onCancelPassword: () => cancelTaskPasswordRequest(passwordPrompt),
       onConflictApplyAllChange: (applyAll) => (conflictApplyAll = applyAll),
       onAnswerConflict: answerConflictDecision,
     };
@@ -12834,31 +12857,23 @@
   }
 
   function passwordWorkspaceSurface(variant: PasswordWorkspaceVariant): PasswordWorkspaceSurface {
-    const forgetDisabledReason = passwordBookForgetDisabledReason();
     return {
       variant,
       tr,
-      active: Boolean(jobPasswordPrompt || archivePasswordPrompt || previewPasswordPrompt),
+      active: Boolean(archivePasswordPrompt || previewPasswordPrompt),
       name: passwordPromptName(),
       detail: passwordPromptDetail(),
       sessionDetail: passwordSessionDetail(),
       failureDetail: passwordFailureDetail(),
       secretStoreLabel: secretStoreLabel(),
-      value: jobPasswordValue,
+      value: workspacePasswordValue,
       busy: archiveOpenStatus === "opening" || Boolean(previewPasswordPrompt?.busy),
-      rejected: Boolean(jobPasswordPrompt?.wrong || archivePasswordPrompt?.wrong || previewPasswordPrompt?.wrong),
-      error: passwordSubmissionError,
-      forgetVisible: Boolean(jobPasswordPrompt),
-      forgetDisabledReason,
-      forgetAriaLabel: labelWithDisabledReason(
-        tr("gui.settings.password_book.forget_current", "Forget current archive"),
-        forgetDisabledReason,
-      ),
+      rejected: Boolean(archivePasswordPrompt?.wrong || previewPasswordPrompt?.wrong),
+      error: workspacePasswordSubmissionError,
       onInputMount: (input) => (standalonePasswordInput = input),
-      onValueChange: (value) => (jobPasswordValue = value),
+      onValueChange: (value) => (workspacePasswordValue = value),
       onSubmit: submitPasswordRequest,
       onCancel: cancelPasswordRequest,
-      onForget: forgetPasswordBookPanel,
       onBack: () => setScreen("browse"),
     };
   }
@@ -12870,9 +12885,11 @@
       jobPasswordPrompt?.id !== task.id
     ) return null;
     return {
-      name: passwordPromptName(),
-      detail: passwordPromptDetail(),
-      sessionDetail: passwordSessionDetail(),
+      name: jobPasswordPrompt.name,
+      detail: jobPasswordPrompt.wrong
+        ? tr("gui.password.previous_rejected", "Previous password was rejected. Try again or cancel this job.")
+        : tr("gui.password.task_paused", "This task is waiting for the archive password."),
+      sessionDetail: tr("gui.password.session_only_separate_book", "Used for this archive in the current app session. Save it separately in Password Book."),
     };
   }
 
@@ -13447,18 +13464,12 @@
   }
 
   function passwordPromptName(): string {
-    return jobPasswordPrompt?.name
-      ?? (archivePasswordPrompt ? pathBaseName(archivePasswordPrompt.path) : null)
+    return (archivePasswordPrompt ? pathBaseName(archivePasswordPrompt.path) : null)
       ?? previewPasswordPrompt?.name
       ?? tr("gui.password.no_prompt", "No password prompt");
   }
 
   function passwordPromptDetail(): string {
-    if (jobPasswordPrompt) {
-      return jobPasswordPrompt.wrong
-        ? tr("gui.password.previous_rejected", "Previous password was rejected. Try again or cancel this job.")
-        : tr("gui.password.task_paused", "This task is waiting for the archive password.");
-    }
     if (archivePasswordPrompt) {
       return archivePasswordPrompt.wrong
         ? tr("gui.password.open_previous_rejected", "That password was rejected. Try again or return to the archive list.")
@@ -13474,40 +13485,58 @@
   }
 
   function passwordSessionDetail(): string {
-    if (previewPasswordPrompt && !jobPasswordPrompt && !archivePasswordPrompt) {
+    if (previewPasswordPrompt && !archivePasswordPrompt) {
       return tr("gui.preview.password_session", "Used for this operation and the opened archive in this app session. Not saved to Password Book.");
     }
-    return jobPasswordPrompt
-      ? tr("gui.password.session_only_separate_book", "Used for this archive in the current app session. Save it separately in Password Book.")
-      : tr("gui.password.open_session_only", "Used for this archive in the current app session.");
+    return tr("gui.password.open_session_only", "Used for this archive in the current app session.");
   }
 
   function passwordFailureDetail(): string {
-    return jobPasswordPrompt
-      ? tr("gui.password.return_to_prompt", "Return to prompt, do not fail whole batch")
-      : tr("gui.password.open_return_to_prompt", "Stay on this prompt so you can retry or cancel.");
+    return tr("gui.password.open_return_to_prompt", "Stay on this prompt so you can retry or cancel.");
   }
 
-  async function submitPasswordRequest() {
-    if (!jobPasswordPrompt && !archivePasswordPrompt && !previewPasswordPrompt) {
+  function isCurrentTaskPasswordPrompt(prompt: typeof jobPasswordPrompt): boolean {
+    return prompt !== null && jobPasswordPrompt?.id === prompt.id && jobPasswordPrompt.version === prompt.version;
+  }
+
+  async function submitTaskPasswordRequest(prompt: typeof jobPasswordPrompt) {
+    if (!prompt || !isCurrentTaskPasswordPrompt(prompt)) {
       showNotice(tr("gui.password.no_prompt_pending", "No password request is active."));
       return;
     }
-    passwordSubmissionAttempted = true;
+    jobPasswordSubmissionAttempted = true;
     if (!taskPasswordReady(jobPasswordValue)) return;
-    passwordSubmissionAttempted = false;
-    if (jobPasswordPrompt) {
-      const promptId = jobPasswordPrompt.id;
-      const answer = answerJobPassword(jobPasswordValue);
-      jobPasswordValue = "";
-      if (!await answer) return;
-      showNotice(tr("gui.password.sent_to_task", "Password sent to task"));
-      if (jobPasswordPrompt || jobConflictPrompt) return;
-      returnTaskQuestionToCenter(promptId);
+    jobPasswordSubmissionAttempted = false;
+    const promptId = prompt.id;
+    const answer = answerJobPassword(jobPasswordValue);
+    jobPasswordValue = "";
+    if (!await answer) return;
+    showNotice(tr("gui.password.sent_to_task", "Password sent to task"));
+    if (jobPasswordPrompt || jobConflictPrompt) return;
+    returnTaskQuestionToCenter(promptId);
+  }
+
+  async function cancelTaskPasswordRequest(prompt: typeof jobPasswordPrompt) {
+    if (!prompt || !isCurrentTaskPasswordPrompt(prompt)) return;
+    jobPasswordSubmissionAttempted = false;
+    jobPasswordValue = "";
+    const promptId = prompt.id;
+    if (!await answerJobPassword(null)) return;
+    showNotice(tr("gui.password.prompt_cancelled", "Password prompt cancelled"));
+    if (jobPasswordPrompt || jobConflictPrompt) return;
+    returnTaskQuestionToCenter(promptId);
+  }
+
+  async function submitPasswordRequest() {
+    if (!archivePasswordPrompt && !previewPasswordPrompt) {
+      showNotice(tr("gui.password.no_prompt_pending", "No password request is active."));
       return;
     }
+    workspacePasswordSubmissionAttempted = true;
+    if (!taskPasswordReady(workspacePasswordValue)) return;
+    workspacePasswordSubmissionAttempted = false;
     if (!archivePasswordPrompt && previewPasswordPrompt) {
-      if (previewPasswordFlow.answer(jobPasswordValue)) jobPasswordValue = "";
+      if (previewPasswordFlow.answer(workspacePasswordValue)) workspacePasswordValue = "";
       return;
     }
     const prompt = archivePasswordPrompt;
@@ -13516,10 +13545,10 @@
     const requestGeneration = ++archiveOpenGeneration;
     standalonePasswordFocusedInput = null;
     archiveOpenStatus = "opening";
-    const ok = await openArchiveStore(prompt.path, jobPasswordValue, prompt.encoding);
+    const ok = await openArchiveStore(prompt.path, workspacePasswordValue, prompt.encoding);
     if (requestGeneration !== archiveOpenGeneration) return;
     archiveOpenStatus = "idle";
-    jobPasswordValue = "";
+    workspacePasswordValue = "";
     if (ok) {
       finishOpenedArchive(prompt.path, "password");
       return;
@@ -13546,17 +13575,7 @@
   }
 
   async function cancelPasswordRequest() {
-    passwordSubmissionAttempted = false;
-    if (jobPasswordPrompt) {
-      const promptId = jobPasswordPrompt.id;
-      const answer = answerJobPassword(null);
-      jobPasswordValue = "";
-      if (!await answer) return;
-      showNotice(tr("gui.password.prompt_cancelled", "Password prompt cancelled"));
-      if (jobPasswordPrompt || jobConflictPrompt) return;
-      returnTaskQuestionToCenter(promptId);
-      return;
-    }
+    workspacePasswordSubmissionAttempted = false;
     if (previewPasswordPrompt && !archivePasswordPrompt) {
       clearEntryPreviewState(true);
       showNotice(tr("gui.preview.password_cancelled", "Item opening cancelled. The archive is unchanged."));
@@ -13568,7 +13587,7 @@
       cancelArchivePasswordPrompt();
       showNotice(tr("gui.password.archive_open_cancelled", "Archive opening cancelled."));
     }
-    jobPasswordValue = "";
+    workspacePasswordValue = "";
     setScreen("browse");
   }
 

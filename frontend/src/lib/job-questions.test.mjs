@@ -457,8 +457,8 @@ test("failed answers survive a failed refresh and never revive a cleared or newe
 test("question actions preserve the workspace and report success only after acknowledgement", async () => {
   const app = readFileSync(new URL("../App.svelte", import.meta.url), "utf8");
   const source = ts.createSourceFile("App.ts", app.match(/<script lang="ts">([\s\S]*?)<\/script>/)[1], ts.ScriptTarget.Latest, true);
-  const names = ["submitPasswordRequest", "cancelPasswordRequest", "answerConflictDecision"];
-  const declarations = source.statements.filter((node) => ts.isFunctionDeclaration(node) && names.includes(node.name?.text));
+  const names = ["submitTaskPasswordRequest", "cancelTaskPasswordRequest", "answerConflictDecision"];
+  const declarations = source.statements.filter((node) => ts.isFunctionDeclaration(node) && [...names, "isCurrentTaskPasswordPrompt"].includes(node.name?.text));
   const { outputText } = ts.transpileModule(declarations.map((node) => node.getText(source)).join("\n"), {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
   });
@@ -469,7 +469,7 @@ test("question actions preserve the workspace and report success only after ackn
       const context = {
         jobPasswordPrompt: action === "answerConflictDecision" ? null : { id: 1, version: 10 },
         jobConflictPrompt: action === "answerConflictDecision" ? { id: 1, version: 10 } : null,
-        archivePasswordPrompt: null, jobPasswordValue: "temporary-secret", passwordSubmissionAttempted: false,
+        archivePasswordPrompt: null, jobPasswordValue: "temporary-secret", jobPasswordSubmissionAttempted: false,
         conflictApplyAll: true, taskPasswordReady: (value) => value.length > 0,
         normalizeTaskConflictAnswer: (decision, applyAll) => ({ decision, applyAll }),
         setScreen: (screen) => calls.push(["screen", screen]),
@@ -484,7 +484,9 @@ test("question actions preserve the workspace and report success only after ackn
       context.answerJobPassword = answer;
       context.answerJobConflict = answer;
       const handlers = vm.runInNewContext(`${outputText}\n({${names.join(",")}})`, context);
-      const request = handlers[action]("overwrite", true);
+      const request = action === "answerConflictDecision"
+        ? handlers[action]("overwrite", true)
+        : handlers[action](context.jobPasswordPrompt);
       assert.deepEqual(calls, [], "an unacknowledged answer cannot report success");
       if (action !== "answerConflictDecision") assert.equal(context.jobPasswordValue, "");
       if (outcome === "next-question") context.jobPasswordPrompt = { id: 2, version: 11 };
