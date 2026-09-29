@@ -1803,6 +1803,10 @@ select option {
   color: var(--color-text-secondary);
 }
 
+.archive-editor-status.error {
+  color: var(--color-danger-fg);
+}
+
 .archive-editor-hint:empty {
   display: none;
 }
@@ -15364,7 +15368,7 @@ select.classic-input:focus {
   color: var(--color-text-primary);
 }
 
-.design-root :is(p, small, .classic-property-sheet p, .classic-recovery-sheet p, .classic-extract-sheet p, .settings-route-card small, .destination-grid span, .batch-card span, .path-decision p):not(:where(.task-action-error, .task-question-error, .password-inline-error, .task-status-notice p)) {
+.design-root :is(p, small, .classic-property-sheet p, .classic-recovery-sheet p, .classic-extract-sheet p, .settings-route-card small, .destination-grid span, .batch-card span, .path-decision p):not(:where(.task-action-error, .task-question-error, .archive-editor-status.error, .password-inline-error, .task-status-notice p)) {
   color: var(--color-text-secondary);
 }
 

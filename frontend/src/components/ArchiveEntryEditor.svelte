@@ -1,10 +1,10 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, tick } from "svelte";
   import { cssVariables, type CssVariableMap } from "../lib/css-variables";
   import { trapModalFocus } from "../lib/modal-focus";
 
   let {
-    title, label, value, placeholder = "", status, hint = "", cancelLabel,
+    title, label, value, placeholder = "", status, hint = "", cancelLabel, submittingLabel, error = null,
     rootClass, rootVariables, onChange, onSubmit, onClose,
   }: {
     title: string;
@@ -14,6 +14,8 @@
     status: string;
     hint?: string;
     cancelLabel: string;
+    submittingLabel: string;
+    error?: string | null;
     rootClass: string;
     rootVariables: CssVariableMap;
     onChange: (value: string) => void;
@@ -39,6 +41,8 @@
       await onSubmit();
     } finally {
       submitting = false;
+      await tick();
+      if (input?.isConnected && !input.disabled) input.focus({ preventScroll: true });
     }
   }
 
@@ -81,11 +85,15 @@
           oninput={(event) => onChange(event.currentTarget.value)}
         />
       </label>
-      <p id={`${id}-status`} class="archive-editor-status" role="status">{status}</p>
+      {#if error && !submitting}
+        <p id={`${id}-status`} class="archive-editor-status error" role="alert">{error}</p>
+      {:else}
+        <p id={`${id}-status`} class="archive-editor-status" role="status">{submitting ? submittingLabel : status}</p>
+      {/if}
       <p id={`${id}-hint`} class="archive-editor-hint">{hint}</p>
       <footer class="archive-editor-actions">
         <button type="button" disabled={submitting} onclick={onClose}>{cancelLabel}</button>
-        <button class="primary" type="submit" disabled={submitting}>{title}</button>
+        <button class="primary" type="submit" disabled={submitting}>{submitting ? submittingLabel : title}</button>
       </footer>
     </form>
   </div>

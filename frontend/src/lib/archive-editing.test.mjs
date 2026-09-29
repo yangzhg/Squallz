@@ -24,10 +24,11 @@ async function loadEditing(overrides = {}) {
     "archiveEditPathProblem", "moveTargetProblem", "submitMoveSelectedJob",
     "normalizeRenameTargetName", "selectedRenameSource", "renameTargetIssue", "archiveEntryExtension",
     "submitRenameSelectedJob", "selectedDeletePaths", "submitDeleteSelectedJob", "submitCurrentArchiveJob",
-    "openArchiveEditor", "submitAddToArchiveJob",
+    "openArchiveEditor", "submitAddToArchiveJob", "archiveEditSubmissionFailure", "jobSubmitBlockedMessage",
   ]);
   const declarations = source.statements.filter(
-    (node) => ts.isFunctionDeclaration(node) && names.has(node.name?.text),
+    (node) => (ts.isFunctionDeclaration(node) && names.has(node.name?.text))
+      || (ts.isClassDeclaration(node) && node.name?.text === "JobSubmitBlockedError"),
   );
   const { outputText } = ts.transpileModule(
     declarations.map((node) => node.getText(source)).join("\n"),
@@ -57,6 +58,8 @@ async function loadEditing(overrides = {}) {
     moveTargetDir: "destination/",
     moveConflictReview: null,
     archiveEditKind: null,
+    archiveEditSession: 0,
+    archiveEditError: null,
     archiveEditReturnFocus: null,
     closeArchiveEditor: () => { closed.push(true); context.archiveEditKind = null; },
     renameSelectedDisabledReason: () => "",
@@ -80,7 +83,7 @@ async function loadEditing(overrides = {}) {
     submitJob: async (spec) => { submitted.push(spec); return 1; },
     ...overrides,
   };
-  const handlers = vm.runInNewContext(`${outputText}\n({ normalizeNewFolderPath, commitNewFolderName, submitNewFolderJob, normalizeMoveTargetDir, submitMoveSelectedJob, submitMovePlan, buildMovePlan, normalizeRenameTargetName, submitRenameSelectedJob, submitDeleteSelectedJob, openArchiveEditor, submitAddToArchiveJob })`, context);
+  const handlers = vm.runInNewContext(`${outputText}\n({ normalizeNewFolderPath, commitNewFolderName, submitNewFolderJob, normalizeMoveTargetDir, submitMoveSelectedJob, submitMovePlan, buildMovePlan, normalizeRenameTargetName, submitRenameSelectedJob, submitDeleteSelectedJob, openArchiveEditor, submitAddToArchiveJob, JobSubmitBlockedError })`, context);
   return { ...handlers, submitted, notices, toasts, closed, context };
 }
 
@@ -315,22 +318,80 @@ test("read-only edit entrypoints are blocked and failed submissions retain the f
   assert.equal(failed.closed.length, 0);
 });
 
+test("archive edit submission failures are shown in the current form and retry clears them", async () => {
+  for (const [kind, action] of [["rename", "submitRenameSelectedJob"], ["move", "submitMoveSelectedJob"], ["new-folder", "submitNewFolderJob"]]) {
+    const editing = await loadEditing({ submitJob: async () => { throw new Error("unavailable"); } });
+    editing.openArchiveEditor(kind);
+    if (kind === "rename") editing.context.renameTargetName = "renamed.txt";
+    if (kind === "new-folder") editing.context.newFolderName = "Plans";
+    await editing[action]();
+    assert.equal(editing.context.archiveEditKind, kind);
+    assert.match(editing.context.archiveEditError, /Could not queue the task.*try again/u);
+    assert.equal(editing.toasts.length, 0, "modal errors cannot depend on a notification hidden beneath the editor");
+    editing.context.submitJob = async (spec) => { editing.submitted.push(spec); return 1; };
+    await editing[action]();
+    assert.equal(editing.context.archiveEditError, null);
+    assert.equal(editing.closed.length, 1);
+    assert.equal(editing.submitted.length, 1);
+  }
+});
+
+test("an obsolete edit submission cannot put its failure in a newly opened form", async () => {
+  const editing = await loadEditing();
+  let fail;
+  editing.context.submitJob = () => new Promise((_resolve, reject) => { fail = reject; });
+  editing.openArchiveEditor("rename");
+  editing.context.renameTargetName = "renamed.txt";
+  const pending = editing.submitRenameSelectedJob();
+  editing.context.closeArchiveEditor();
+  editing.openArchiveEditor("rename");
+  fail(new Error("late failure"));
+  await pending;
+  assert.equal(editing.context.archiveEditKind, "rename");
+  assert.equal(editing.context.archiveEditError, null);
+  assert.equal(editing.toasts.length, 0);
+});
+
+test("archive editor feedback retains backend errors and explains blocked submissions", async () => {
+  for (const failure of ["backend", "blocked-before", "blocked-during"]) {
+    const editing = await loadEditing();
+    editing.openArchiveEditor("new-folder");
+    editing.context.newFolderName = "Plans";
+    if (failure === "backend") editing.context.submitJob = async () => { throw { key: "error.io", params: {}, detail: "Write unavailable" }; };
+    if (failure === "blocked-before") editing.context.focusBlockingTaskIfAny = () => "starting";
+    if (failure === "blocked-during") {
+      editing.context.isJobSubmitBlocked = (error) => error instanceof editing.JobSubmitBlockedError;
+      editing.context.submitJob = async () => { throw new editing.JobSubmitBlockedError("starting"); };
+    }
+    await editing.submitNewFolderJob();
+    assert.match(editing.context.archiveEditError, failure === "backend" ? /error.io/u : /previous task.*queue/u);
+    assert.equal(editing.context.newFolderName, "Plans");
+    assert.equal(editing.submitted.length, 0);
+    assert.equal(editing.closed.length, 0);
+    assert.equal(editing.toasts.length, 0);
+  }
+});
+
 test("the shared archive editor renders one named modal form", async () => {
   const server = await createTestServer();
   try {
     const { render } = await server.ssrLoadModule("svelte/server");
     const { default: Editor } = await server.ssrLoadModule("/src/components/ArchiveEntryEditor.svelte");
-    const { body } = render(Editor, { props: {
+    const props = {
       title: "Rename selected", label: "Rename target name", value: "资料", status: "reports/ -> 资料/",
-      cancelLabel: "Cancel", rootClass: "archive-editor-overlay design-root", rootVariables: {},
+      cancelLabel: "Cancel", submittingLabel: "Adding to the queue…", rootClass: "archive-editor-overlay design-root", rootVariables: {},
       onChange: () => {}, onSubmit: async () => {}, onClose: () => {},
-    } });
+    };
+    const { body } = render(Editor, { props });
     assert.match(body, /role="dialog" aria-modal="true"/u);
     assert.equal((body.match(/<form\b/gu) ?? []).length, 1);
     assert.equal((body.match(/<input\b/gu) ?? []).length, 1);
     assert.match(body, /role="status"/u);
     assert.match(body, /type="submit"/u);
     assert.doesNotMatch(body, /style=/u);
+    const failed = render(Editor, { props: { ...props, error: "Could not queue the task. Try again." } }).body;
+    assert.match(failed, /role="alert">Could not queue the task\. Try again\./u);
+    assert.doesNotMatch(failed, /reports\/ -&gt; 资料\//u, "failure replaces the ready status");
   } finally { await server.close(); }
 });
 

@@ -1061,6 +1061,8 @@
   let newFolderName = $state("");
   type ArchiveEditKind = "rename" | "move" | "new-folder";
   let archiveEditKind = $state<ArchiveEditKind | null>(null);
+  let archiveEditError = $state<string | null>(null);
+  let archiveEditSession = 0;
   let archiveEditReturnFocus: HTMLElement | null = null;
   let moveConflictReview = $state<MoveConflictReview | null>(null);
   let historyRows = $derived(operationHistory());
@@ -1203,6 +1205,7 @@
     const source = selectedRenameSource();
     renameTargetName = source ? pathBaseName(source.replace(/\/+$/g, "")) : "";
     archiveEditKind = null;
+    archiveEditError = null;
     moveConflictReview = null;
   });
 
@@ -9932,25 +9935,37 @@
     ];
   }
 
-  async function submitCurrentArchiveJob(spec: JobSpec, success: string, missing: string): Promise<boolean> {
+  async function submitCurrentArchiveJob(
+    spec: JobSpec,
+    success: string,
+    missing: string,
+    onFailure?: (message: string) => void,
+  ): Promise<boolean> {
     if (!currentArchive) {
-      showNotice(missing);
+      if (onFailure) onFailure(missing);
+      else showNotice(missing);
       return false;
     }
-    if (focusBlockingTaskIfAny()) return false;
+    const blocked = focusBlockingTaskIfAny();
+    if (blocked) {
+      onFailure?.(jobSubmitBlockedMessage(new JobSubmitBlockedError(blocked)));
+      return false;
+    }
     try {
       await submitJob(spec);
       showNotice(success);
       return true;
     } catch (error) {
-      if (isJobSubmitBlocked(error)) return false;
-      pushToast({
-        kind: "danger",
-        title: tr("gui.job.submit_failed", "Could not queue the task"),
-        body: isErrorDto(error)
-          ? tError(error)
-          : tr("gui.job.submit_unavailable", "Check that the Squallz desktop service is available, then try again."),
-      });
+      if (isJobSubmitBlocked(error)) {
+        onFailure?.(jobSubmitBlockedMessage(error));
+        return false;
+      }
+      const title = tr("gui.job.submit_failed", "Could not queue the task");
+      const body = isErrorDto(error)
+        ? tError(error)
+        : tr("gui.job.submit_unavailable", "Check that the Squallz desktop service is available, then try again.");
+      if (onFailure) onFailure(`${title} · ${body}`);
+      else pushToast({ kind: "danger", title, body });
       return false;
     }
   }
@@ -11241,6 +11256,8 @@
       return;
     }
     archiveEditReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    archiveEditSession += 1;
+    archiveEditError = null;
     setScreen("browse");
     moveConflictReview = null;
     if (kind === "rename") renameTargetName = pathBaseName(selectedRenameSource()?.replace(/\/+$/g, "") ?? "");
@@ -11250,6 +11267,7 @@
 
   function closeArchiveEditor() {
     archiveEditKind = null;
+    archiveEditError = null;
     const target = archiveEditReturnFocus;
     archiveEditReturnFocus = null;
     void tick().then(() => {
@@ -11258,32 +11276,48 @@
   }
 
   function archiveEditorFields(kind: ArchiveEditKind) {
+    const feedback = {
+      error: archiveEditError,
+      submittingLabel: tr("gui.task_center.submitting", "Adding to the queue…"),
+    };
     if (kind === "rename") return {
+      ...feedback,
       title: tr("gui.action.rename_selected", "Rename selected"),
       label: tr("gui.rename.target_name", "Rename target name"),
       value: renameTargetName,
       status: renameTargetStatus(),
-      onChange: (value: string) => { renameTargetName = value; },
+      onChange: (value: string) => { renameTargetName = value; archiveEditError = null; },
       onSubmit: submitRenameSelectedJob,
     };
     if (kind === "move") return {
+      ...feedback,
       title: tr("gui.action.move_selected", "Move selected"),
       label: tr("gui.move.target_folder", "Move target folder"),
       value: moveTargetDir,
       status: moveTargetStatus(),
       hint: tr("gui.move.path_hint", "Destination paths start at the archive root. Use / to move to the root."),
-      onChange: (value: string) => { moveTargetDir = value; },
+      onChange: (value: string) => { moveTargetDir = value; archiveEditError = null; },
       onSubmit: submitMoveSelectedJob,
     };
     return {
+      ...feedback,
       title: tr("gui.action.new_folder", "New folder"),
       label: tr("gui.new_folder.name", "New folder name"),
       value: newFolderName,
       placeholder: tr("gui.new_folder.default_name", "New Folder"),
       status: newFolderStatus(),
       hint: tr("gui.new_folder.path_hint", "Created in the current folder. Start with / to use the archive root."),
-      onChange: (value: string) => { newFolderName = value; },
+      onChange: (value: string) => { newFolderName = value; archiveEditError = null; },
       onSubmit: submitNewFolderJob,
+    };
+  }
+
+  function archiveEditSubmissionFailure(): ((message: string) => void) | undefined {
+    if (archiveEditKind === null) return undefined;
+    const session = archiveEditSession;
+    archiveEditError = null;
+    return (message) => {
+      if (archiveEditKind !== null && archiveEditSession === session) archiveEditError = message;
     };
   }
 
@@ -11334,6 +11368,7 @@
       },
       tr("gui.rename.queued_notice", "Rename queued: {from} -> {to}").replace("{from}", from).replace("{to}", to),
       tr("gui.precondition.open_before_rename", "Open an archive before renaming entries"),
+      archiveEditSubmissionFailure(),
     );
     if (queued) {
       closeArchiveEditor();
@@ -11412,6 +11447,7 @@
         ? tr("gui.move.operation_queued", "1 move operation queued")
         : tr("gui.move.operations_queued", "{count} move operations queued").replace("{count}", rename.length.toLocaleString())),
       tr("gui.precondition.open_before_move", "Open an archive before moving entries"),
+      archiveEditSubmissionFailure(),
     );
     if (queued) {
       moveConflictReview = null;
@@ -11483,6 +11519,7 @@
       },
       tr("gui.new_folder.queued_notice", "New folder queued: {folder}").replace("{folder}", folder),
       tr("gui.precondition.open_before_new_folder", "Open an archive before creating a folder"),
+      archiveEditSubmissionFailure(),
     );
     if (queued) {
       closeArchiveEditor();
