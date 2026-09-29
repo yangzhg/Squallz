@@ -940,6 +940,7 @@
   let extractPresetDraftTouched = false;
   let archiveOpenStatus = $state<"idle" | "opening">("idle");
   let archiveOpenGeneration = 0;
+  let archivePickerRequest: number | null = null;
   let archivePasswordAttempt = 0;
   let archiveSelectionProgress = $state<{ loaded: number; total: number } | null>(null);
   let recoveryPickerStatus = $state<"idle" | "archive" | "par2">("idle");
@@ -2222,6 +2223,7 @@
   function setScreen(next: Screen) {
     if (preventCreateSubmissionNavigation(next)) return;
     if (preventConvertSubmissionNavigation(next)) return;
+    if (next !== screen) dismissArchivePicker();
     if (screen === "password" && next !== "password") {
       dismissArchivePasswordRequest();
       if (previewPasswordPrompt) clearEntryPreviewState();
@@ -6020,14 +6022,29 @@
     openRecoveryConfiguration("current");
   }
 
+  function dismissArchivePicker() {
+    if (archivePickerRequest === null) return;
+    if (archivePickerRequest === archiveOpenGeneration) {
+      archiveOpenGeneration += 1;
+      archiveOpenStatus = "idle";
+    }
+    archivePickerRequest = null;
+  }
+
   async function openArchiveFromDialog() {
     if (archiveOpenStatus === "opening") return;
     if (preventCreateSubmissionNavigation("browse")) return;
+    dismissArchivePasswordRequest();
+    clearEntryPreviewState();
     const requestGeneration = ++archiveOpenGeneration;
+    archivePickerRequest = requestGeneration;
+    const isCurrent = () => archivePickerRequest === requestGeneration && archiveOpenGeneration === requestGeneration;
     archiveOpenStatus = "opening";
     showNotice(tr("gui.archive.opening_picker", "Opening file picker..."));
+    let selected: string | string[] | null = null;
     try {
       const { open } = await getDialogModule();
+      if (!isCurrent()) return;
       // An unfiltered macOS dialog keeps arbitrary numbered volumes selectable.
       const filters: OpenDialogOptions["filters"] = platformKind() === "macos"
         ? undefined
@@ -6047,22 +6064,27 @@
             },
             { name: tr("gui.recovery.par2_files", "PAR2 recovery files"), extensions: ["par2"] },
           ];
-      const selected = await openNativeDialog("archive.open", open, {
+      selected = await openNativeDialog("archive.open", open, {
         title: tr("gui.archive.open_dialog_title", "Open archive"),
         multiple: false,
         directory: false,
         filters,
       });
-      const path = Array.isArray(selected) ? selected[0] : selected;
-      if (typeof path === "string") {
-        await openArchivePath(path, "dialog");
-      } else {
-        showNotice(tr("gui.archive.open_cancelled", "Open archive cancelled."));
-      }
+      if (!isCurrent()) return;
     } catch {
-      showNotice(tr("gui.archive.open_requires_desktop_dialog", "Open archive requires the desktop file dialog"));
+      if (isCurrent()) showNotice(tr("gui.archive.open_requires_desktop_dialog", "Open archive requires the desktop file dialog"));
+      return;
     } finally {
-      if (requestGeneration === archiveOpenGeneration) archiveOpenStatus = "idle";
+      if (isCurrent()) {
+        archivePickerRequest = null;
+        archiveOpenStatus = "idle";
+      }
+    }
+    const path = Array.isArray(selected) ? selected[0] : selected;
+    if (typeof path === "string") {
+      await openArchivePath(path, "dialog");
+    } else {
+      showNotice(tr("gui.archive.open_cancelled", "Open archive cancelled."));
     }
   }
 
@@ -6146,6 +6168,7 @@
     review: ArchiveTaskReview | null = null,
   ): Promise<boolean> {
     if (preventCreateSubmissionNavigation("browse")) return false;
+    dismissArchivePicker();
     dismissArchivePasswordRequest();
     clearEntryPreviewState();
     pendingArchiveTaskReview = review;
@@ -6274,6 +6297,8 @@
     sidecarCount = 1,
     sidecarSetCount = 1,
   ) {
+    dismissArchivePicker();
+    clearEntryPreviewState();
     pendingArchiveTaskReview = null;
     archiveOpenGeneration += 1;
     archiveOpenStatus = "idle";

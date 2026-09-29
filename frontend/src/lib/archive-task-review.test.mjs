@@ -26,7 +26,7 @@ function harness() {
   const source = ts.createSourceFile("App.ts", component.match(/<script lang="ts">([\s\S]*?)<\/script>/)[1],
     ts.ScriptTarget.Latest, true);
   const names = ["reviewTask", "reviewExtractTask", "reviewConvertTask", "reviewArchiveTask", "restoreExtractTaskDraft", "finishOpenedArchive",
-    "openArchivePath", "extractJobPaths", "extractJobDestination", "extractSmartBase",
+    "openArchivePath", "openArchiveFromDialog", "dismissArchivePicker", "extractJobPaths", "extractJobDestination", "extractSmartBase",
     "extractSelectionLabel", "extractStartBlockedReason", "submitExtractJob",
     "syncExtractDraftArchive", "cancelPasswordRequest", "submitPasswordRequest", "dismissArchivePasswordRequest",
     "isCurrentTaskPasswordPrompt", "submitTaskPasswordRequest", "cancelTaskPasswordRequest", "passwordWorkspaceSurface",
@@ -38,6 +38,9 @@ function harness() {
   const context = {
     calls, taskReviewScreen, taskWindowMode: false, currentArchive: archive(),
     screen: "browse", archiveOpenStatus: "idle", archiveOpenGeneration: 0, archivePasswordAttempt: 0,
+    archivePickerRequest: null,
+    getDialogModule: async () => ({ open: async () => null }),
+    openNativeDialog: async (_kind, open, options) => open(options), platformKind: () => "macos",
     taskReviewRequestGeneration: 0, nestedExtractDraftGeneration: 0, nestedExtractReviewFocusPending: false,
     archiveUpdateReviewFocusPending: false,
     extractReviewFocusPending: false, convertReviewFocusPending: false, createPrimaryFocusPending: false,
@@ -93,6 +96,81 @@ function harness() {
   });
   return vm.runInNewContext(`${outputText}\n({${declarations.map((node) => node.name.text).join(",")},context:globalThis,calls})`,context);
 }
+
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+
+test("a superseded archive picker cannot replace a newer open or its feedback", async () => {
+  for (const outcome of ["selected", "cancelled", "failed"]) {
+    const run = harness();
+    const picker = deferred();
+    const started = deferred();
+    run.context.openNativeDialog = () => { started.resolve(); return picker.promise; };
+    const choosing = run.openArchiveFromDialog();
+    await started.promise;
+    const opened = deferred();
+    run.context.openArchiveStore = async (path) => {
+      run.calls.push(["open", path]);
+      if (path === "/newer.zip") await opened.promise;
+      return false;
+    };
+    const opening = run.openArchivePath("/newer.zip", "open-file");
+    const noticeCount = run.calls.filter(([kind]) => kind === "notice").length;
+    if (outcome === "failed") picker.reject(new Error("dialog unavailable"));
+    else picker.resolve(outcome === "selected" ? "/older.zip" : null);
+    await choosing;
+    assert.deepEqual(run.calls.filter(([kind]) => kind === "open"), [["open", "/newer.zip"]]);
+    assert.equal(run.calls.filter(([kind]) => kind === "notice").length, noticeCount);
+    assert.equal(run.context.archiveOpenStatus, "opening", "old picker cleanup cannot finish the newer read");
+    opened.resolve();
+    await opening;
+    assert.equal(run.context.archiveOpenStatus, "idle");
+  }
+});
+
+test("navigation abandons a waiting picker even after returning to its original page", async () => {
+  for (const phase of ["loading", "choosing"]) {
+    const run = harness();
+    const pending = deferred();
+    const started = deferred();
+    let dialogs = 0;
+    if (phase === "loading") run.context.getDialogModule = () => { started.resolve(); return pending.promise; };
+    run.context.openNativeDialog = () => { dialogs += 1; started.resolve(); return pending.promise; };
+    const choosing = run.openArchiveFromDialog();
+    await started.promise;
+    run.setScreen("settingsGeneral");
+    assert.equal(run.context.archiveOpenStatus, "idle");
+    run.setScreen("browse");
+    const noticeCount = run.calls.filter(([kind]) => kind === "notice").length;
+    pending.resolve(phase === "loading" ? { open: async () => "/older.zip" } : "/older.zip");
+    await choosing;
+    assert.equal(dialogs, phase === "loading" ? 0 : 1);
+    assert.equal(run.calls.some(([kind]) => kind === "open"), false);
+    assert.equal(run.calls.filter(([kind]) => kind === "notice").length, noticeCount);
+    assert.equal(run.context.screen, "browse");
+  }
+});
+
+test("a current archive picker preserves selection, cancellation, and failure feedback", async () => {
+  for (const outcome of ["selected", "cancelled", "failed"]) {
+    const run = harness();
+    run.context.openNativeDialog = async (_kind, _open, options) => {
+      assert.equal(options.multiple, false);
+      assert.equal(options.filters, undefined, "macOS still accepts arbitrary numbered volumes");
+      if (outcome === "failed") throw new Error("dialog unavailable");
+      return outcome === "selected" ? ["/chosen.zip"] : null;
+    };
+    await run.openArchiveFromDialog();
+    assert.equal(run.context.archiveOpenStatus, "idle");
+    assert.equal(run.context.archivePickerRequest, null);
+    if (outcome === "selected") assert.equal(run.context.currentArchive.path, "/chosen.zip");
+    else assert.match(run.calls.at(-1)[1], outcome === "cancelled" ? /cancelled/ : /desktop file dialog/);
+  }
+});
 
 test("failed extraction review restores its selection and policies instead of reusing the current draft", async () => {
   const run = harness();

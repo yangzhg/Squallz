@@ -105,7 +105,7 @@ function completedUpdate(id, path = "/tmp/refresh.zip") {
 async function passwordRefreshActions(archive) {
   const component = await readFile(new URL("../App.svelte", import.meta.url), "utf8");
   const source = ts.createSourceFile("App.ts", component.match(/<script lang="ts">([\s\S]*?)<\/script>/u)[1], ts.ScriptTarget.Latest, true);
-  const names = ["submitPasswordRequest", "cancelPasswordRequest", "dismissArchivePasswordRequest", "setScreen", "openArchivePath", "archiveEditorVisible", "blockingModalVisible", "archiveEditorBlockedReason"];
+  const names = ["submitPasswordRequest", "cancelPasswordRequest", "dismissArchivePasswordRequest", "dismissArchivePicker", "setScreen", "openArchivePath", "archiveEditorVisible", "blockingModalVisible", "archiveEditorBlockedReason"];
   const declarations = source.statements.filter((node) => ts.isFunctionDeclaration(node) && names.includes(node.name?.text));
   const { outputText } = ts.transpileModule(declarations.map((node) => node.getText(source)).join("\n"), {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
@@ -116,6 +116,7 @@ async function passwordRefreshActions(archive) {
     previewPasswordPrompt: null, screen: "password", workspacePasswordValue: "correct",
     workspacePasswordSubmissionAttempted: false, standalonePasswordFocusedInput: null,
     archiveOpenStatus: "idle", archiveOpenGeneration: 7, archivePasswordAttempt: 0,
+    archivePickerRequest: null,
     archiveEditKind: "rename", renameTargetName: "kept.txt",
     archiveEditContext: { source: info().source, encoding: "gbk", generation: 7, id: 1 },
     taskDialogVisible: () => false, macosSfxPublisherTask: null,

@@ -46,7 +46,7 @@ async function withNestedOpen(run) {
     const component = readFileSync(new URL("../App.svelte", import.meta.url), "utf8");
     const source = ts.createSourceFile("App.ts", component.match(/<script lang="ts">([\s\S]*?)<\/script>/)[1], ts.ScriptTarget.Latest, true);
     const { createPreviewPasswordFlow } = await server.ssrLoadModule("/src/lib/preview-password.svelte.ts");
-    const names = ["openNestedArchiveEntry", "extractNestedPreviewArchive", "retryEntryPreview", "runPreviewWithPassword", "clearEntryPreviewState", "selectOnlyEntry", "submitPasswordRequest", "cancelPasswordRequest", "dismissArchivePasswordRequest", "openArchivePath", "passwordPromptDetail", "submitPreviewEntry", "submitPreviewNestedArchive", "prepareEntryPreviewSerially", "disposeEntryPreview"];
+    const names = ["openNestedArchiveEntry", "extractNestedPreviewArchive", "retryEntryPreview", "runPreviewWithPassword", "clearEntryPreviewState", "selectOnlyEntry", "submitPasswordRequest", "cancelPasswordRequest", "dismissArchivePasswordRequest", "dismissArchivePicker", "openArchivePath", "openRecoverySet", "passwordPromptDetail", "submitPreviewEntry", "submitPreviewNestedArchive", "prepareEntryPreviewSerially", "disposeEntryPreview"];
     const declarations = names.map((name) => {
       const declaration = source.statements.find((node) => ts.isFunctionDeclaration(node) && node.name?.text === name);
       assert.ok(declaration, name);
@@ -58,6 +58,8 @@ async function withNestedOpen(run) {
       ipc, adoptOpenedArchive: archive.adoptOpenedArchive,
       taskReviewRequestGeneration: 0,
       archiveOpenGeneration: 0, archiveOpenStatus: "idle", archivePasswordAttempt: 0,
+      archivePickerRequest: null, cancelArchivePasswordPrompt: archive.cancelPasswordPrompt,
+      recordValidationRenderReady: () => {},
       isPar2Path: () => false, openArchiveStore: archive.openArchive,
       finishOpenedArchive: () => { context.screen = "browse"; },
       preventCreateSubmissionNavigation: () => false, preventConvertSubmissionNavigation: () => false,
@@ -213,6 +215,32 @@ test("opening another archive immediately cancels a protected preview and releas
       assert.equal(context.screen, "browse");
       assert.equal(archive.archive().id, 3);
       assert.deepEqual(closed.sort(), verifying ? [1, 2] : [1]);
+    });
+  }
+});
+
+test("opening a recovery sidecar cancels a preparing preview and preserves the chosen recovery source", async () => {
+  for (const result of ["success", "password", "failure"]) {
+    await withNestedOpen(async ({ app, archive, ipc, context, closed, cancelledPreviews, page }) => {
+      const pending = deferred();
+      const started = deferred();
+      ipc.openNestedArchive = () => { started.resolve(); return pending.promise; };
+      const opening = app.openNestedArchiveEntry("/archives/outer.zip", "inner.zip", 0);
+      await started.promise;
+      app.openRecoverySet("/recovery/photos.par2", "/recovery/photos.zip", "open-file");
+      assert.equal(cancelledPreviews.length, 1);
+      assert.equal(context.previewPhase, "idle");
+      if (result === "success") pending.resolve(archiveInfo(2, "inner.zip"));
+      else pending.reject({ key: result === "password" ? "error.password_required" : "error.io", params: {}, detail: "" });
+      page.resolve({ items: [], total: 0, page: 0 });
+      await opening;
+      assert.equal(context.screen, "recovery");
+      assert.equal(context.recoverySourceOverride, "/recovery/photos.zip");
+      assert.equal(context.recoveryPar2Override, "/recovery/photos.par2");
+      assert.equal(context.previewPasswordPrompt, null);
+      assert.equal(context.entryPreviewFailure, null);
+      assert.equal(archive.archive().id, 1);
+      assert.deepEqual(closed, result === "success" ? [2] : []);
     });
   }
 });
