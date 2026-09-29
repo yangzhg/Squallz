@@ -24,7 +24,7 @@ async function loadEditing(overrides = {}) {
     "archiveEditPathProblem", "moveTargetProblem", "submitMoveSelectedJob", "submitMoveKeepBoth",
     "normalizeRenameTargetName", "selectedRenameSource", "renameTargetIssue", "archiveEntryExtension",
     "submitRenameSelectedJob", "selectedDeletePaths", "submitDeleteSelectedJob", "submitCurrentArchiveJob",
-    "openArchiveEditor", "submitAddToArchiveJob", "archiveEditSubmissionFailure", "jobSubmitBlockedMessage",
+    "openArchiveEditor", "submitAddToArchiveJob", "archiveEditSubmissionFailure", "showArchiveEditError", "jobSubmitBlockedMessage",
     "archiveEditSelectedPaths", "archiveEditorBlockedReason", "validateArchiveEditContext", "archiveEditCheckIsCurrent",
   ]);
   const declarations = source.statements.filter(
@@ -469,12 +469,22 @@ test("folder input commits do not add the parent twice and support an explicit a
 });
 
 test("unsafe folder and move inputs are explained without queuing altered paths", async () => {
-  for (const value of ["../escape", "safe/../escape", "NUL", "folder/file?.txt", "folder. /child"]) {
-    const editing = await loadEditing({ newFolderName: value, moveTargetDir: value });
-    await editing.submitNewFolderJob();
-    await editing.submitMoveSelectedJob();
-    assert.equal(editing.submitted.length, 0, value);
-    assert.equal(editing.notices.length, 2, value);
+  for (const [kind, action, field] of [["new-folder", "submitNewFolderJob", "newFolderName"], ["move", "submitMoveSelectedJob", "moveTargetDir"]]) {
+    for (const value of ["../escape", "safe/../escape", "  safe\\..\\escape  ", "NUL", "folder/file?.txt", "folder. /child"]) {
+      const editing = await loadEditing();
+      editing.openArchiveEditor(kind);
+      editing.context[field] = value;
+      await editing[action]();
+      assert.equal(editing.submitted.length, 0, value);
+      assert.equal(editing.notices.length, 0, "input errors belong in the active editor");
+      assert.match(editing.context.archiveEditError, /Enter|Choose|Remove/);
+      assert.equal(editing.context[field], value, "invalid input stays intact for correction");
+      assert.equal(editing.context.archiveEditKind, kind);
+      editing.context[field] = "corrected";
+      await editing[action]();
+      assert.equal(editing.submitted.length, 1);
+      assert.equal(editing.context.archiveEditError, null);
+    }
   }
 });
 
@@ -544,10 +554,13 @@ test("a confirmed move plan cannot follow an archive refresh or reopen", async (
 test("moves into the selected subtree or the same folder do not become keep-both operations", async () => {
   for (const [source, destination] of [["docs/", "docs/sub/"], ["docs/a.txt", "docs/"]]) {
     const editing = await loadEditing({ selectedPaths: () => new Set([source]), moveTargetDir: destination });
+    editing.openArchiveEditor("move");
     await editing.submitMoveSelectedJob();
     assert.equal(editing.submitted.length, 0);
     assert.equal(editing.context.moveConflictReview, null);
-    assert.equal(editing.notices.length, 1);
+    assert.equal(editing.notices.length, 0);
+    assert.match(editing.context.archiveEditError, /Choose/);
+    assert.equal(editing.context.moveTargetDir, destination);
   }
 });
 
@@ -562,10 +575,19 @@ test("directory rename submits one subtree mapping and keeps the current parent"
 
 test("empty, unchanged, unsafe, or descendant rename targets do not queue updates", async () => {
   for (const value of ["", "reports", "../escape", "docs/reports/inside", "docs/NUL"]) {
-    const editing = await loadEditing({ selectedPaths: () => new Set(["docs/reports/"]), renameTargetName: value });
+    const editing = await loadEditing({ selectedPaths: () => new Set(["docs/reports/"]) });
+    editing.openArchiveEditor("rename");
+    editing.context.renameTargetName = value;
     await editing.submitRenameSelectedJob();
     assert.equal(editing.submitted.length, 0, value);
-    assert.equal(editing.notices.length, 1, value);
+    assert.equal(editing.notices.length, 0, value);
+    assert.match(editing.context.archiveEditError, /Enter|Choose/);
+    assert.equal(editing.context.renameTargetName, value);
+    assert.equal(editing.context.archiveEditKind, "rename");
+    editing.context.renameTargetName = "updated";
+    await editing.submitRenameSelectedJob();
+    assert.equal(editing.submitted.length, 1);
+    assert.equal(editing.context.archiveEditError, null);
   }
 });
 

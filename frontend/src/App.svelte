@@ -9518,7 +9518,7 @@
     if (!issue) return "";
     if (issue.kind === "empty") return tr("gui.edit.path_empty", "Enter an archive path.");
     if (issue.kind === "parent") return tr("gui.edit.path_parent", "Parent references (..) are not allowed. Enter a path inside the archive.");
-    if (issue.kind === "characters") return tr("gui.edit.path_characters", "{name} contains characters that cannot be used on Windows.").replace("{name}", issue.segment);
+    if (issue.kind === "characters") return tr("gui.edit.path_characters", "{name} contains characters that cannot be used on Windows. Remove them or choose another name.").replace("{name}", issue.segment);
     if (issue.kind === "trailing") return tr("gui.edit.path_trailing", "{name} ends with a space or dot. Choose a portable name.").replace("{name}", issue.segment);
     return tr("gui.edit.path_reserved", "{name} is reserved on Windows. Choose another name.").replace("{name}", issue.segment);
   }
@@ -9561,7 +9561,7 @@
     const from = selectedRenameSource();
     if (from === null) return tr("gui.rename.select_one_entry", "Select exactly one file or folder to rename");
     const target = normalizeRenameTargetName();
-    if (target === from) return tr("gui.rename.target_must_differ", "Rename target must differ from source");
+    if (target === from) return tr("gui.rename.target_must_differ", "The name is unchanged. Enter a different name or path.");
     const issue = renameTargetIssue(from, target);
     if (issue.blocking) return tr("gui.rename.blocked_reason", "Blocked: {reason}").replace("{reason}", issue.blocking);
     return `${issue.warning ? `${issue.warning} · ` : ""}${from} -> ${target}`
@@ -11347,6 +11347,11 @@
     };
   }
 
+  function showArchiveEditError(message: string) {
+    if (archiveEditKind !== null) archiveEditError = message;
+    else showNotice(message);
+  }
+
   function archiveEditSelectedPaths(): Set<string> {
     return archiveEditKind && archiveEditContext ? archiveEditContext.paths : selectedPaths();
   }
@@ -11457,12 +11462,12 @@
     }
     const to = normalizeRenameTargetName(renameTargetName, from);
     if (to === from) {
-      showNotice(tr("gui.rename.target_must_differ", "Rename target must differ from source"));
+      showArchiveEditError(tr("gui.rename.target_must_differ", "The name is unchanged. Enter a different name or path."));
       return;
     }
     const issue = renameTargetIssue(from, to);
     if (issue.blocking) {
-      showNotice(tr("gui.rename.target_blocked", "Rename target blocked: {reason}").replace("{reason}", issue.blocking));
+      showArchiveEditError(issue.blocking);
       return;
     }
     if (!await validateArchiveEditTarget(to, () => normalizeRenameTargetName(renameTargetName, from))
@@ -11502,7 +11507,6 @@
     if (!await validateArchiveEditContext() || !archiveEditCheckIsCurrent(session, id)) return;
     if (blockSelectionScopedAction()) return;
     const targetDir = normalizeMoveTargetDir();
-    moveTargetDir = targetDir || "/";
     if (!currentArchive) {
       showNotice(tr("gui.precondition.open_before_move", "Open an archive before moving entries"));
       return;
@@ -11519,7 +11523,7 @@
     }
     const problem = moveTargetProblem(targetDir);
     if (problem) {
-      showNotice(problem);
+      showArchiveEditError(problem);
       return;
     }
     archiveEditChecking = true;
@@ -11644,7 +11648,6 @@
     const id = currentArchive?.id;
     if (!await validateArchiveEditContext() || !archiveEditCheckIsCurrent(session, id)) return;
     const folder = normalizeNewFolderPath();
-    commitNewFolderName();
     if (!currentArchive) {
       showNotice(tr("gui.precondition.open_before_new_folder", "Open an archive before creating a folder"));
       return;
@@ -11656,9 +11659,10 @@
     }
     const problem = archiveEditPathProblem(folder);
     if (problem) {
-      showNotice(problem);
+      showArchiveEditError(problem);
       return;
     }
+    commitNewFolderName();
     if (!await validateArchiveEditTarget(folder, () => normalizeNewFolderPath())
       || !archiveEditCheckIsCurrent(session, id)) return;
     const queued = await submitCurrentArchiveJob(
