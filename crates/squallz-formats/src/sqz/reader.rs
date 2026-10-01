@@ -5,8 +5,8 @@ use std::time::{Duration, SystemTime};
 
 use squallz_format_api::{
     ArchiveFormat, ArchiveReader, BoundedProblemLog, Compressor, ControlToken, EntryMeta,
-    EntryPath, EntryType, FormatError, OpenOptions, ProgressSink, ReadSeek, RecoverySummary,
-    StreamFactory, TestSummary, TEST_PROBLEM_PREVIEW_LIMIT,
+    EntryPath, EntryStreamConsumer, EntryType, FormatError, OpenOptions, ProgressSink, ReadSeek,
+    RecoverySummary, StreamFactory, TestSummary, TEST_PROBLEM_PREVIEW_LIMIT,
 };
 
 use crate::{sevenz::SevenZFormat, tar::TarFormat, zip::ZipFormat};
@@ -401,6 +401,18 @@ impl ArchiveReader for SqzArchiveReader {
         match self {
             SqzArchiveReader::EntrySet(reader) => reader.read_entry(path, consume),
             SqzArchiveReader::Inner { reader, .. } => reader.read_entry(path, consume),
+        }
+    }
+
+    fn read_entries(
+        &mut self,
+        entries: &[EntryMeta],
+        consume: &mut EntryStreamConsumer<'_>,
+        ctl: &ControlToken,
+    ) -> Result<(), FormatError> {
+        match self {
+            SqzArchiveReader::EntrySet(reader) => reader.read_entries(entries, consume, ctl),
+            SqzArchiveReader::Inner { reader, .. } => reader.read_entries(entries, consume, ctl),
         }
     }
 

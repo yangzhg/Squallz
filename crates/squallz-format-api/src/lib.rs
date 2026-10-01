@@ -46,6 +46,7 @@ pub use registry::{split_volume_name, Detected, FormatInfo, FormatKind, FormatRe
 pub use safety::{check_windows_portability, sanitize_entry_path, LimitsAccountant};
 pub use traits::{
     ArchiveFormat, ArchiveReader, ArchiveSourceSet, ArchiveStructureStatus, ArchiveWriter,
-    CompressSink, Compressor, NativeVolumeBudget, NativeVolumeLimits, NativeVolumeWriter,
-    PhysicalFileIdentity, PreparedUpdateAdditions, ReadSeek, StreamFactory, WriteSeek,
+    CompressSink, Compressor, EntryStreamConsumer, NativeVolumeBudget, NativeVolumeLimits,
+    NativeVolumeWriter, PhysicalFileIdentity, PreparedUpdateAdditions, ReadSeek, StreamFactory,
+    WriteSeek,
 };

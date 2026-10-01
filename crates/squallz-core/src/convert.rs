@@ -332,20 +332,27 @@ fn copy_entries(
         .map(|m| m.size)
         .sum();
     let mut done = 0u64;
-    for meta in metas {
-        ctl.checkpoint()?;
-        progress.on_entry_progress(done, total, &meta.path, 0, meta.size);
-        // The destination decides about encryption itself; compressed size
-        // and CRC are recomputed by the destination writer.
-        let out_meta = EntryMeta {
-            compressed_size: None,
-            crc32: None,
-            encrypted: opts.password.is_some(),
-            ..meta.clone()
-        };
-        match meta.entry_type {
-            EntryType::File => {
-                reader.read_entry(&meta.path, &mut |data| {
+    reader.read_entries(
+        metas,
+        &mut |meta, data| {
+            ctl.checkpoint()?;
+            progress.on_entry_progress(done, total, &meta.path, 0, meta.size);
+            // The destination decides about encryption itself; compressed size
+            // and CRC are recomputed by the destination writer.
+            let out_meta = EntryMeta {
+                compressed_size: None,
+                crc32: None,
+                encrypted: opts.password.is_some(),
+                ..meta.clone()
+            };
+            match meta.entry_type {
+                EntryType::File => {
+                    let data = data.ok_or_else(|| {
+                        FormatError::CorruptArchive(format!(
+                            "file entry without data: {}",
+                            meta.path
+                        ))
+                    })?;
                     let mut data =
                         ProgressRead::new(data, progress, ctl, &meta.path, done, total, meta.size);
                     sink.add_entry(&out_meta, Some(&mut data)).map_err(|e| {
@@ -354,13 +361,16 @@ fn copy_entries(
                         } else {
                             e
                         }
-                    })
-                })?;
-                done += meta.size;
+                    })?;
+                    done += meta.size;
+                }
+                _ => sink.add_entry(&out_meta, None)?,
             }
-            _ => sink.add_entry(&out_meta, None)?,
-        }
-    }
+            Ok(())
+        },
+        ctl,
+    )?;
+    ctl.checkpoint()?;
     progress.on_progress(total, total, &EntryPath::from_utf8(""));
     sink.finish()
 }

@@ -32,6 +32,93 @@ impl std::io::Seek for CountedSource {
 }
 
 #[test]
+fn solid_entries_are_read_once_with_their_own_metadata() {
+    use sevenz_rust2::SourceReader;
+    use std::sync::atomic::Ordering;
+
+    let mut writer = ArchiveWriter::new(Cursor::new(Vec::new())).unwrap();
+    writer.set_content_methods(vec![EncoderConfiguration::new(EncoderMethod::COPY)]);
+    writer
+        .push_archive_entry(
+            ArchiveEntry::new_directory("empty-dir"),
+            None::<Cursor<Vec<u8>>>,
+        )
+        .unwrap();
+    writer
+        .push_archive_entries(
+            (0..4)
+                .map(|index| ArchiveEntry::new_file(&format!("file-{index}")))
+                .collect(),
+            (0..4)
+                .map(|index| SourceReader::new(std::io::repeat(b'a' + index).take(1024 * 1024)))
+                .collect(),
+        )
+        .unwrap();
+    writer
+        .push_archive_entry(
+            ArchiveEntry::new_file("empty-file"),
+            None::<Cursor<Vec<u8>>>,
+        )
+        .unwrap();
+    let bytes = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut reader = SevenZArchiveReader::open(
+        Box::new(CountedSource {
+            inner: Cursor::new(writer.finish().unwrap().into_inner()),
+            bytes: bytes.clone(),
+            cancel_after: None,
+        }),
+        &OpenOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(reader.inner.archive().blocks.len(), 1);
+    let entries = reader.entries().collect::<Result<Vec<_>, _>>().unwrap();
+    bytes.store(0, Ordering::Relaxed);
+    let mut visited = HashSet::new();
+    reader
+        .read_entries(
+            &entries,
+            &mut |meta, data| {
+                assert!(visited.insert(meta.path.display.clone()));
+                match meta.path.display.as_str() {
+                    "empty-dir" => {
+                        assert!(matches!(meta.entry_type, EntryType::Dir));
+                        assert!(data.is_none());
+                    }
+                    "empty-file" => {
+                        assert!(matches!(meta.entry_type, EntryType::File));
+                        assert_eq!(data.unwrap().read(&mut [0])?, 0);
+                    }
+                    name => {
+                        let index = name.strip_prefix("file-").unwrap().parse::<u8>().unwrap();
+                        assert_eq!(meta.size, 1024 * 1024);
+                        let data = data.unwrap();
+                        let mut buffer = [0; 64 * 1024];
+                        let mut read = 0;
+                        loop {
+                            let count = data.read(&mut buffer)?;
+                            if count == 0 {
+                                break;
+                            }
+                            assert!(buffer[..count].iter().all(|byte| *byte == b'a' + index));
+                            read += count;
+                        }
+                        assert_eq!(read, meta.size as usize);
+                    }
+                }
+                Ok(())
+            },
+            &ControlToken::default(),
+        )
+        .unwrap();
+    assert_eq!(visited.len(), entries.len());
+    assert!(
+        bytes.load(Ordering::Relaxed) <= 4 * 1024 * 1024 + 64 * 1024,
+        "the source must not be decoded again for preceding entries: {} bytes read",
+        bytes.load(Ordering::Relaxed)
+    );
+}
+
+#[test]
 fn entry_prefix_does_not_decode_the_complete_file() {
     let mut writer = ArchiveWriter::new(Cursor::new(Vec::new())).unwrap();
     writer.set_content_methods(vec![EncoderConfiguration::new(EncoderMethod::COPY)]);
@@ -112,6 +199,155 @@ fn entry_prefix_does_not_decode_the_complete_file() {
 }
 
 #[test]
+fn complete_entry_reads_preserve_duplicate_names_drain_tails_and_check_crc() {
+    use sevenz_rust2::SourceReader;
+
+    let mut writer = ArchiveWriter::new(Cursor::new(Vec::new())).unwrap();
+    writer.set_content_methods(vec![EncoderConfiguration::new(EncoderMethod::COPY)]);
+    writer
+        .push_archive_entries(
+            vec![
+                ArchiveEntry::new_file("same"),
+                ArchiveEntry::new_file("same"),
+            ],
+            vec![
+                SourceReader::new(std::io::repeat(b'a').take(4096)),
+                SourceReader::new(std::io::repeat(b'b').take(4096)),
+            ],
+        )
+        .unwrap();
+    let original = writer.finish().unwrap().into_inner();
+    for corrupt in [false, true] {
+        let mut bytes = original.clone();
+        if corrupt {
+            bytes[32 + 4096 - 1] ^= 1;
+        }
+        let mut reader =
+            SevenZArchiveReader::open(Box::new(Cursor::new(bytes)), &OpenOptions::default())
+                .unwrap();
+        let entries = reader.entries().collect::<Result<Vec<_>, _>>().unwrap();
+        let mut calls = 0;
+        let result = reader.read_entries(
+            &entries,
+            &mut |meta, data| {
+                assert_eq!(meta.path.display, "same");
+                let mut prefix = [0; 16];
+                data.unwrap().read_exact(&mut prefix)?;
+                assert_eq!(prefix, [b'a' + calls; 16]);
+                calls += 1;
+                Ok(())
+            },
+            &ControlToken::default(),
+        );
+        if corrupt {
+            assert!(matches!(
+                result,
+                Err(FormatError::Io(_) | FormatError::CorruptArchive(_))
+            ));
+            assert_eq!(calls, 1, "a damaged tail must stop before the next entry");
+        } else {
+            result.unwrap();
+            assert_eq!(calls, 2);
+        }
+    }
+}
+
+#[test]
+fn complete_entry_reads_preserve_password_errors_and_stop_after_consumer_failure() {
+    use sevenz_rust2::encoder_options::AesEncoderOptions;
+    use squallz_format_api::Password;
+    use std::sync::atomic::Ordering;
+
+    let mut writer = ArchiveWriter::new(Cursor::new(Vec::new())).unwrap();
+    writer.set_content_methods(vec![
+        AesEncoderOptions::new("entry-test-password".into()).into(),
+        EncoderConfiguration::new(EncoderMethod::COPY),
+    ]);
+    writer.set_encrypt_header(false);
+    for name in ["first", "later"] {
+        writer
+            .push_archive_entry(
+                ArchiveEntry::new_file(name),
+                Some(std::io::repeat(b'x').take(1024 * 1024)),
+            )
+            .unwrap();
+    }
+    let archive = writer.finish().unwrap().into_inner();
+    for password in [None, Some("incorrect"), Some("entry-test-password")] {
+        let bytes = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut reader = SevenZArchiveReader::open(
+            Box::new(CountedSource {
+                inner: Cursor::new(archive.clone()),
+                bytes: bytes.clone(),
+                cancel_after: None,
+            }),
+            &OpenOptions {
+                password: password.map(Password::new),
+                ..OpenOptions::default()
+            },
+        )
+        .unwrap();
+        let entries = reader.entries().collect::<Result<Vec<_>, _>>().unwrap();
+        let result = reader.read_entries(
+            &entries,
+            &mut |_, data| {
+                assert_eq!(
+                    std::io::copy(data.unwrap(), &mut std::io::sink())?,
+                    1024 * 1024
+                );
+                Ok(())
+            },
+            &ControlToken::default(),
+        );
+        match password {
+            None => assert!(
+                matches!(result, Err(FormatError::PasswordRequired)),
+                "{result:?}"
+            ),
+            Some("incorrect") => assert!(
+                matches!(result, Err(FormatError::WrongPassword)),
+                "{result:?}"
+            ),
+            _ => {
+                result.unwrap();
+                for cancel in [false, true] {
+                    bytes.store(0, Ordering::Relaxed);
+                    let ctl = ControlToken::default();
+                    let mut calls = 0;
+                    let result = reader.read_entries(
+                        &entries,
+                        &mut |_, data| {
+                            calls += 1;
+                            data.unwrap().read_exact(&mut [0; 16])?;
+                            if cancel {
+                                ctl.cancel();
+                                Ok(())
+                            } else {
+                                Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied)
+                                    .into())
+                            }
+                        },
+                        &ctl,
+                    );
+                    if cancel {
+                        assert!(matches!(result, Err(FormatError::Cancelled)), "{result:?}");
+                    } else {
+                        assert!(
+                            matches!(result, Err(FormatError::Io(error)) if error.kind() == std::io::ErrorKind::PermissionDenied)
+                        );
+                    }
+                    assert_eq!(calls, 1, "a failed consumer must not visit later blocks");
+                    assert!(
+                        bytes.load(Ordering::Relaxed) < 64 * 1024,
+                        "failed consumers must not drain data or decode later blocks"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn entry_stream_checks_crc_when_consumed_completely() {
     let mut writer = ArchiveWriter::new(Cursor::new(Vec::new())).unwrap();
     writer.set_content_methods(vec![EncoderConfiguration::new(EncoderMethod::COPY)]);
@@ -141,6 +377,72 @@ fn entry_stream_checks_crc_when_consumed_completely() {
         result,
         Err(FormatError::Io(_)) | Err(FormatError::CorruptArchive(_))
     ));
+}
+
+#[test]
+fn compressed_entry_prefix_and_cancellation_do_not_read_the_complete_solid_block() {
+    use sevenz_rust2::SourceReader;
+    use std::sync::atomic::Ordering;
+
+    let mut seed = 0x6b8b4567u32;
+    let content: Vec<_> = (0..4 * 1024 * 1024)
+        .map(|_| {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            seed as u8
+        })
+        .collect();
+    let mut writer = ArchiveWriter::new(Cursor::new(Vec::new())).unwrap();
+    writer.set_content_methods(vec![EncoderConfiguration::new(EncoderMethod::LZMA2)]);
+    writer
+        .push_archive_entries(
+            vec![
+                ArchiveEntry::new_file("large"),
+                ArchiveEntry::new_file("next"),
+            ],
+            vec![
+                SourceReader::new(Cursor::new(&content[..])),
+                SourceReader::new(Cursor::new(&b"next"[..])),
+            ],
+        )
+        .unwrap();
+    let archive = writer.finish().unwrap().into_inner();
+    assert!(archive.len() > 1024 * 1024);
+    for cancel in [false, true] {
+        let ctl = ControlToken::default();
+        let bytes = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut reader = SevenZArchiveReader::open_controlled(
+            Box::new(CountedSource {
+                inner: Cursor::new(archive.clone()),
+                bytes: bytes.clone(),
+                cancel_after: None,
+            }),
+            &OpenOptions::default(),
+            &ctl,
+        )
+        .unwrap();
+        bytes.store(0, Ordering::Relaxed);
+        let mut prefix = [0; 16];
+        let result = reader.read_entry(&EntryPath::from_utf8("large"), &mut |data| {
+            data.read_exact(&mut prefix)?;
+            if cancel {
+                ctl.cancel();
+            }
+            Ok(())
+        });
+        assert_eq!(prefix, content[..16]);
+        if cancel {
+            assert!(matches!(result, Err(FormatError::Cancelled)), "{result:?}");
+        } else {
+            result.unwrap();
+        }
+        assert!(
+            bytes.load(Ordering::Relaxed) < 256 * 1024,
+            "a compressed prefix must not read the complete solid block: {} bytes",
+            bytes.load(Ordering::Relaxed)
+        );
+    }
 }
 
 #[test]

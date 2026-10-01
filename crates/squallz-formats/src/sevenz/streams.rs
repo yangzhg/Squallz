@@ -6,23 +6,24 @@ use std::io::Read;
 use sevenz_rust2::{Archive, ArchiveEntry, BlockDecoder, Error, Password};
 use squallz_format_api::ReadSeek;
 
+// The parallel LZMA2 decoder buffers complete reset intervals, which can span
+// the whole solid block. The incremental decoder keeps reads and cancellation
+// bounded without materializing the block before its first byte is consumed.
+const DECODER_THREADS: u32 = 1;
+
 pub(super) struct EntryStreams {
     source: Box<dyn ReadSeek>,
     archive: Archive,
     password: Password,
-    threads: u32,
 }
 
 impl EntryStreams {
     pub(super) fn new(mut source: Box<dyn ReadSeek>, password: Password) -> Result<Self, Error> {
         let archive = Archive::read(&mut source, &password)?;
-        let threads =
-            std::thread::available_parallelism().map_or(1, |count| count.get().min(256) as u32);
         Ok(Self {
             source,
             archive,
             password,
-            threads,
         })
     }
 
@@ -87,14 +88,19 @@ impl EntryStreams {
                 }
                 continue;
             }
-            BlockDecoder::new(
-                self.threads,
+            let complete = BlockDecoder::new(
+                DECODER_THREADS,
                 index,
                 &self.archive,
                 &self.password,
                 &mut self.source,
             )
             .for_each_entries(&mut each)?;
+            // A complete archive visit stops globally. Selected-block visits
+            // use false to skip the remainder of only the current block.
+            if !complete && blocks.is_none() && include_metadata {
+                return Ok(());
+            }
         }
         if include_metadata {
             for (index, entry) in self.archive.files.iter().enumerate() {

@@ -93,6 +93,242 @@ fn make_hardlink_tar(path: &Path) {
     builder.finish().unwrap();
 }
 
+const SOLID_ENTRY_BYTES: usize = 256 * 1024;
+
+fn make_solid_sevenz(path: &Path) {
+    use sevenz_rust2::{
+        ArchiveEntry, ArchiveWriter, EncoderConfiguration, EncoderMethod, SourceReader,
+    };
+    use std::io::{Cursor, Read};
+    use std::time::{Duration, UNIX_EPOCH};
+
+    let modified = UNIX_EPOCH + Duration::from_secs(1_714_979_291);
+    let entry = |name: &str, mode: u32| {
+        let mut entry = if mode & 0o170000 == 0o040000 {
+            ArchiveEntry::new_directory(name)
+        } else {
+            ArchiveEntry::new_file(name)
+        };
+        entry.has_windows_attributes = true;
+        entry.windows_attributes = 0x8000 | (mode << 16);
+        entry.has_last_modified_date = true;
+        entry.last_modified_date = sevenz_rust2::NtTime::try_from(modified).unwrap();
+        entry
+    };
+    let mut writer = ArchiveWriter::new(fs::File::create(path).unwrap()).unwrap();
+    writer.set_content_methods(vec![EncoderConfiguration::new(EncoderMethod::COPY)]);
+    for name in ["tree", "tree/empty-dir"] {
+        writer
+            .push_archive_entry(entry(name, 0o040750), None::<Cursor<Vec<u8>>>)
+            .unwrap();
+    }
+    let sources: Vec<Box<dyn Read>> = vec![
+        Box::new(std::io::repeat(b'a').take(SOLID_ENTRY_BYTES as u64)),
+        Box::new(Cursor::new(b"first.bin")),
+        Box::new(std::io::repeat(b'b').take(SOLID_ENTRY_BYTES as u64)),
+    ];
+    writer
+        .push_archive_entries(
+            vec![
+                entry("tree/first.bin", 0o100640),
+                entry("tree/link", 0o120777),
+                entry("tree/second.bin", 0o100600),
+            ],
+            sources.into_iter().map(SourceReader::new).collect(),
+        )
+        .unwrap();
+    writer
+        .push_archive_entry(entry("tree/empty-file", 0o100644), None::<Cursor<Vec<u8>>>)
+        .unwrap();
+    writer.finish().unwrap();
+}
+
+#[test]
+fn solid_sevenz_conversion_preserves_contents_metadata_and_progress_including_split_outputs() {
+    use squallz_core::api::{CompressionLevel, EntryPath, EntryType, ProgressPhase, ProgressSink};
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Mutex,
+    };
+
+    #[derive(Default)]
+    struct ProgressRecorder {
+        converting: AtomicBool,
+        events: Mutex<Vec<(u64, u64)>>,
+    }
+    impl ProgressSink for ProgressRecorder {
+        fn on_phase(&self, phase: ProgressPhase, _interruptible: bool) {
+            self.converting
+                .store(phase == ProgressPhase::ArchiveConvert, Ordering::Relaxed);
+        }
+        fn on_progress(&self, done: u64, total: u64, _current: &EntryPath) {
+            if self.converting.load(Ordering::Relaxed) {
+                self.events.lock().unwrap().push((done, total));
+            }
+        }
+    }
+    let tmp = TempDir::new("convert-solid-7z");
+    let source = tmp.path().join("source.7z");
+    make_solid_sevenz(&source);
+    let original = engine().list(&source, &OpenOptions::default()).unwrap();
+    assert_eq!(original.len(), 6);
+    for split_size in [None, Some(128 * 1024)] {
+        let destination = tmp.path().join(if split_size.is_some() {
+            "split.zip"
+        } else {
+            "output.zip"
+        });
+        let progress = ProgressRecorder::default();
+        let report = engine()
+            .convert_with_report(
+                &source,
+                &destination,
+                &OpenOptions::default(),
+                &CreateOptions {
+                    level: CompressionLevel::Store,
+                    split_size,
+                    ..CreateOptions::default()
+                },
+                &progress,
+                &ControlToken::default(),
+            )
+            .unwrap();
+        if split_size.is_some() {
+            assert!(report.outputs.len() > 1);
+            assert_eq!(report.split_volume_count, Some(report.outputs.len()));
+            assert!(report
+                .outputs
+                .iter()
+                .all(|path| fs::metadata(path).unwrap().len() <= 128 * 1024));
+        }
+        let entries = engine()
+            .list(&report.primary_output, &OpenOptions::default())
+            .unwrap();
+        assert_eq!(entries.len(), original.len());
+        for before in &original {
+            let name = before
+                .path
+                .normalized_display(matches!(before.entry_type, EntryType::Dir));
+            let after = entries
+                .iter()
+                .find(|entry| entry.path.display == name)
+                .unwrap();
+            assert_eq!(after.entry_type, before.entry_type, "{name}");
+            assert_eq!(after.modified, before.modified, "{name}");
+            assert_eq!(
+                after.unix_mode.map(|mode| mode & 0o7777),
+                before.unix_mode.map(|mode| mode & 0o7777),
+                "{name}"
+            );
+        }
+        let out = tmp.path().join(if split_size.is_some() {
+            "split-out"
+        } else {
+            "out"
+        });
+        engine()
+            .extract(
+                &report.primary_output,
+                &out,
+                None,
+                &OpenOptions::default(),
+                &ExtractOptions::default(),
+                &NoProgress,
+                &ControlToken::default(),
+            )
+            .unwrap();
+        assert_eq!(
+            fs::read(out.join("tree/first.bin")).unwrap(),
+            vec![b'a'; SOLID_ENTRY_BYTES]
+        );
+        assert_eq!(
+            fs::read(out.join("tree/second.bin")).unwrap(),
+            vec![b'b'; SOLID_ENTRY_BYTES]
+        );
+        assert!(out.join("tree/empty-dir").is_dir());
+        assert!(fs::read(out.join("tree/empty-file")).unwrap().is_empty());
+        #[cfg(unix)]
+        assert_eq!(
+            fs::read_link(out.join("tree/link")).unwrap(),
+            Path::new("first.bin")
+        );
+        let events = progress.events.lock().unwrap();
+        let total = (2 * SOLID_ENTRY_BYTES) as u64;
+        assert!(events.len() > 4);
+        assert!(events
+            .iter()
+            .all(|(done, expected)| *expected == total && *done <= total));
+        assert!(events.windows(2).all(|pair| pair[0].0 <= pair[1].0));
+        assert!(events
+            .iter()
+            .any(|(done, _)| *done > SOLID_ENTRY_BYTES as u64 && *done < total));
+        assert_eq!(events.last(), Some(&(total, total)));
+    }
+}
+
+#[test]
+fn solid_sevenz_late_corruption_and_cancellation_preserve_the_existing_output() {
+    use squallz_core::api::{EntryPath, ProgressSink};
+    use std::io::{Seek, SeekFrom, Write};
+
+    struct CancelOnSecondFile<'a>(&'a ControlToken);
+    impl ProgressSink for CancelOnSecondFile<'_> {
+        fn on_progress(&self, done: u64, _total: u64, _current: &EntryPath) {
+            if done > SOLID_ENTRY_BYTES as u64 {
+                self.0.cancel();
+            }
+        }
+    }
+    let tmp = TempDir::new("convert-solid-7z-failure");
+    let source = tmp.path().join("source.7z");
+    make_solid_sevenz(&source);
+    let mut archive = fs::OpenOptions::new().write(true).open(&source).unwrap();
+    archive
+        .seek(SeekFrom::Start(
+            (32 + 2 * SOLID_ENTRY_BYTES + b"first.bin".len() - 1) as u64,
+        ))
+        .unwrap();
+    archive.write_all(b"c").unwrap();
+    drop(archive);
+    let destination = tmp.path().join("output.zip");
+    for cancel in [true, false] {
+        fs::write(&destination, b"original output").unwrap();
+        let guard = inspect_create_destination(&destination, CreateArtifactKind::Archive)
+            .unwrap()
+            .guard
+            .unwrap();
+        let ctl = ControlToken::default();
+        let cancelling = CancelOnSecondFile(&ctl);
+        let progress: &dyn ProgressSink = if cancel { &cancelling } else { &NoProgress };
+        let result = engine().convert_with_policy(
+            &source,
+            &destination,
+            &OpenOptions::default(),
+            &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceIfUnchanged(guard),
+            progress,
+            &ctl,
+        );
+        if cancel {
+            assert!(matches!(result, Err(FormatError::Cancelled)), "{result:?}");
+        } else {
+            assert!(
+                matches!(
+                    result,
+                    Err(FormatError::Io(_) | FormatError::CorruptArchive(_))
+                ),
+                "{result:?}"
+            );
+        }
+        assert_eq!(fs::read(&destination).unwrap(), b"original output");
+        assert_eq!(
+            fs::read_dir(tmp.path()).unwrap().count(),
+            2,
+            "failed conversions must remove their staging artifacts"
+        );
+    }
+}
+
 #[test]
 fn zip_to_7z_and_back() {
     let tmp = TempDir::new("convert-zip-7z");

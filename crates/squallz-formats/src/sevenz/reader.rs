@@ -1,6 +1,6 @@
-//! 7Z read side: entry listing, single-entry reads, single-pass extraction
-//! and integrity testing. Solid blocks force sequential decoding, so
-//! extraction and testing stream every entry exactly once through
+//! 7Z read side: entry listing, single-entry reads, single-pass conversion,
+//! extraction and integrity testing. Solid blocks force sequential decoding,
+//! so complete archive operations stream every entry exactly once through
 //! `for_each_entries`; `read_entry` (preview path) decodes up to the
 //! requested file.
 
@@ -12,8 +12,8 @@ use std::time::SystemTime;
 use sevenz_rust2::ArchiveEntry;
 use squallz_format_api::{
     empty_extract_report, ArchiveReader, BoundedProblemLog, ControlToken, EntryMeta, EntryPath,
-    EntryType, ExtractOptions, ExtractReport, ExtractSink, FormatError, OpenOptions, ProgressSink,
-    ReadSeek, SymlinkPolicy, TestSummary, TEST_PROBLEM_PREVIEW_LIMIT,
+    EntryStreamConsumer, EntryType, ExtractOptions, ExtractReport, ExtractSink, FormatError,
+    OpenOptions, ProgressSink, ReadSeek, SymlinkPolicy, TestSummary, TEST_PROBLEM_PREVIEW_LIMIT,
 };
 
 use super::streams::EntryStreams;
@@ -494,6 +494,26 @@ fn classify_entry_read_error(
     }
 }
 
+fn consume_entry_data(
+    reader: &mut dyn Read,
+    ctl: &ControlToken,
+    encrypted: bool,
+    password_supplied: bool,
+    consume: &mut dyn FnMut(&mut dyn Read) -> Result<(), FormatError>,
+) -> Result<(), FormatError> {
+    let mut tracked = ReadErrorTracker {
+        inner: reader,
+        failed: false,
+        control: ctl,
+    };
+    let result = consume(&mut tracked);
+    if tracked.failed {
+        result.map_err(|error| classify_entry_read_error(error, encrypted, password_supplied))
+    } else {
+        result
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn write_entry(
     sink: &mut ExtractSink<'_>,
@@ -504,17 +524,13 @@ fn write_entry(
     ctl: &ControlToken,
     password_supplied: bool,
 ) -> Result<(), FormatError> {
-    let mut tracked = ReadErrorTracker {
-        inner: reader,
-        failed: false,
-        control: ctl,
-    };
-    let result = sink.write_file(meta, out_path, &mut tracked, progress, ctl);
-    if tracked.failed {
-        result.map_err(|error| classify_entry_read_error(error, meta.encrypted, password_supplied))
-    } else {
-        result
-    }
+    consume_entry_data(
+        reader,
+        ctl,
+        meta.encrypted,
+        password_supplied,
+        &mut |data| sink.write_file(meta, out_path, data, progress, ctl),
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -587,19 +603,7 @@ impl ArchiveReader for SevenZArchiveReader {
                             return Ok(true);
                         }
                         found = true;
-                        let mut tracked = ReadErrorTracker {
-                            inner: reader,
-                            failed: false,
-                            control: ctl,
-                        };
-                        let result = consume(&mut tracked);
-                        if tracked.failed {
-                            result.map_err(|error| {
-                                classify_entry_read_error(error, encrypted, password_supplied)
-                            })?;
-                        } else {
-                            result?;
-                        }
+                        consume_entry_data(reader, ctl, encrypted, password_supplied, consume)?;
                         Ok(false)
                     })();
                     match result {
@@ -623,6 +627,92 @@ impl ArchiveReader for SevenZArchiveReader {
         })?;
         if !found {
             return Err(map_7z_error(sevenz_rust2::Error::FileNotFound));
+        }
+        Ok(())
+    }
+
+    fn read_entries(
+        &mut self,
+        entries: &[EntryMeta],
+        consume: &mut EntryStreamConsumer<'_>,
+        ctl: &ControlToken,
+    ) -> Result<(), FormatError> {
+        ctl.checkpoint()?;
+        let archive = self.inner.archive();
+        if entries.len() != archive.files.len() {
+            return Err(FormatError::Other(
+                "7z entry listing does not match the reader".into(),
+            ));
+        }
+        for (meta, entry) in entries.iter().zip(&archive.files) {
+            ctl.checkpoint()?;
+            let same_type = match meta.entry_type {
+                EntryType::Symlink { .. } => is_symlink(entry),
+                EntryType::Dir => entry.is_directory() && !is_symlink(entry),
+                EntryType::File => !entry.is_directory() && !is_symlink(entry),
+                _ => false,
+            };
+            if meta.path.raw != entry.name().as_bytes() || meta.size != entry.size() || !same_type {
+                return Err(FormatError::Other(
+                    "7z entry listing does not match the reader".into(),
+                ));
+            }
+        }
+        let plans = build_entry_read_plans(archive, None)?;
+        let password_supplied = self.password_supplied;
+        let mut visited = 0;
+        let mut failure = None;
+        let result = self.inner.for_each_entries(|entry, data| {
+            let result = (|| {
+                ctl.checkpoint()?;
+                let plan = plans.get(&entry_identity(entry)).ok_or_else(|| {
+                    FormatError::CorruptArchive("7z entry is missing from its stream map".into())
+                })?;
+                let meta = &entries[plan.file_index];
+                if is_symlink(entry) {
+                    let target = read_symlink_target(data, ctl).map_err(|error| {
+                        classify_entry_read_error(error, plan.encrypted, password_supplied)
+                    })?;
+                    let mut resolved = meta.clone();
+                    resolved.entry_type = EntryType::Symlink { target };
+                    consume(&resolved, None)?;
+                } else {
+                    consume_entry_data(
+                        data,
+                        ctl,
+                        plan.encrypted,
+                        password_supplied,
+                        &mut |data| {
+                            if matches!(meta.entry_type, EntryType::File) {
+                                consume(meta, Some(data))?;
+                            } else {
+                                consume(meta, None)?;
+                            }
+                            drain_entry(data, ctl)
+                        },
+                    )?;
+                }
+                ctl.checkpoint()?;
+                visited += 1;
+                Ok(true)
+            })();
+            match result {
+                Ok(next) => Ok(next),
+                Err(error) => {
+                    failure = Some(error);
+                    Ok(false)
+                }
+            }
+        });
+        ctl.checkpoint()?;
+        if let Some(error) = failure {
+            return Err(error);
+        }
+        result.map_err(map_7z_error)?;
+        if visited != entries.len() {
+            return Err(FormatError::CorruptArchive(
+                "7z stream map did not visit every entry".into(),
+            ));
         }
         Ok(())
     }

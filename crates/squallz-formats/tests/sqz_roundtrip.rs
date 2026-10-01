@@ -722,6 +722,19 @@ fn sqz_repaired_inner_profiles_support_repeated_reads_and_extraction() {
                 .unwrap();
             assert_eq!(content, original, "{inner_format}");
         }
+        let mut streamed = Vec::new();
+        reader
+            .read_entries(
+                &entries,
+                &mut |meta, data| {
+                    assert_eq!(meta.path, entries[0].path);
+                    data.unwrap().read_to_end(&mut streamed)?;
+                    Ok(())
+                },
+                &ctl,
+            )
+            .unwrap();
+        assert_eq!(streamed, original, "{inner_format}");
         let report = reader.test_summary(&NoProgress, &ctl).unwrap();
         assert!(report.is_ok(), "{inner_format}: {report:?}");
         let recovery = report.recovery.unwrap();
