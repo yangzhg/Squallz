@@ -3537,7 +3537,7 @@
   "gui.copy_out.started_to_destination": "{action} · 目标位置：{destination}",
   "gui.checksum.route_from_info": "校验此压缩包或其他文件",
   "gui.selection.select_entries_hint": "选择条目后可打开、重命名、移动或解压。",
-  "gui.preview.keyboard_hint": "空格或回车打开焦点条目",
+  "gui.preview.keyboard_hint": "↑/↓ 移动焦点 · 按住 Shift 连选 · 空格或回车打开",
   "gui.aria.squallz_settings": "Squallz 设置",
   "gui.aria.modern_archive_browser": "Squallz 现代压缩包浏览器",
   "gui.aria.primary_actions": "主要操作",

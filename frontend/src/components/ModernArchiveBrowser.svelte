@@ -291,7 +291,7 @@
 
   <div class="workbench-strip empty-workbench-strip">
     <span>{view.selectedSummary}</span>
-    <small>{tr("gui.preview.keyboard_hint", "Space or Return opens the focused item")}</small>
+    <small>{tr("gui.preview.keyboard_hint", "↑/↓ moves between items · Shift extends selection · Space or Return opens")}</small>
   </div>
 
   {#if view.conflict}
@@ -453,7 +453,7 @@
           aria-rowindex={(entry.virtualIndex ?? 0) + 2}
           aria-selected={entry.selected}
           tabindex="0"
-          aria-keyshortcuts="Space Enter Backspace Meta+ArrowUp Alt+ArrowUp E"
+          aria-keyshortcuts="ArrowUp ArrowDown Home End PageUp PageDown Shift+ArrowUp Shift+ArrowDown Space Enter Backspace Meta+ArrowUp Alt+ArrowUp E"
           data-row-index={entry.virtualIndex ?? ""}
           onclick={(event) => onSelectEntry(entry, event)}
           ondblclick={(event) => {

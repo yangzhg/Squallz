@@ -3537,7 +3537,7 @@
   "gui.copy_out.started_to_destination": "{action} · destination: {destination}",
   "gui.checksum.route_from_info": "Verify this archive or another file",
   "gui.selection.select_entries_hint": "Select entries to open, rename, move, or extract.",
-  "gui.preview.keyboard_hint": "Space or Return opens the focused item",
+  "gui.preview.keyboard_hint": "↑/↓ moves between items · Shift extends selection · Space or Return opens",
   "gui.aria.squallz_settings": "Squallz settings",
   "gui.aria.modern_archive_browser": "Squallz Modern archive browser",
   "gui.aria.primary_actions": "Primary actions",

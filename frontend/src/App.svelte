@@ -53,6 +53,7 @@
   } from "./lib/history.svelte";
   import { copyTextToClipboard } from "./lib/clipboard";
   import { archiveEditPathIssue, archiveSelectionRoots, normalizeArchivePath } from "./lib/archive-editing";
+  import { archiveKeyboardTarget } from "./lib/archive-keyboard";
   import { appActionAvailability, appActionForShortcut, dispatchAppAction, isTextEditingTarget, type AppAction } from "./lib/app-actions";
   import { connectNativeMenu, type NativeMenuConnection } from "./lib/native-menu";
   import { trapModalFocus } from "./lib/modal-focus";
@@ -686,6 +687,7 @@
   let checksumCopyFeedbackTone = $state<"success" | "danger" | null>(null);
   let browseScrollTop = $state(0);
   let browseViewportHeight = $state(0);
+  let archiveKeyboardRequest = 0;
   const refreshedUpdateJobs = new Set<number>();
   const recoveryContextTaskIds = new Set<number>();
   let recoverySubmissionPending = $state(false);
@@ -6998,6 +7000,11 @@
   function onEntryKeydown(event: KeyboardEvent, entry: DisplayEntry) {
     if (event.target !== event.currentTarget) return;
     if (event.metaKey || event.ctrlKey || event.altKey || event.isComposing) return;
+    if (["ArrowUp", "ArrowDown", "Home", "End", "PageUp", "PageDown"].includes(event.key)) {
+      event.preventDefault();
+      void moveArchiveRow(event, entry);
+      return;
+    }
     if (
       archiveSelectionBusyReason()
       && ["Delete", "Backspace", "e", "E", "m", "M", "F2"].includes(event.key)
@@ -7036,6 +7043,39 @@
       const rect = target?.getBoundingClientRect();
       showEntryContextAt(rect ? rect.left + 24 : window.innerWidth / 2, rect ? rect.bottom - 2 : window.innerHeight / 2, entry);
     }
+  }
+
+  async function moveArchiveRow(event: KeyboardEvent, entry: DisplayEntry): Promise<void> {
+    if (!currentArchive || entry.virtualIndex === undefined || screen !== "browse") return;
+    const busyReason = archiveSelectionBusyReason();
+    if (busyReason) {
+      if (!event.repeat) showNotice(busyReason);
+      return;
+    }
+    const origin = event.currentTarget as HTMLElement;
+    const list = origin.closest<HTMLElement>("[data-virtual-list]");
+    if (!list) return;
+    const rowHeight = mode === "classic" ? CLASSIC_ROW_HEIGHT : MODERN_ROW_HEIGHT;
+    const index = archiveKeyboardTarget(event.key, entry.virtualIndex, totalRows(), list.clientHeight / rowHeight);
+    if (index === null) return;
+    const request = ++archiveKeyboardRequest;
+    const archiveId = currentArchive.id;
+    const listMode = mode;
+    const navigation = taskReviewRequestGeneration;
+    const previousSelection = selectedPaths();
+    const contextIsCurrent = () => request === archiveKeyboardRequest && screen === "browse"
+      && currentArchive?.id === archiveId && mode === listMode
+      && taskReviewRequestGeneration === navigation
+      && !blockingModalVisible() && !taskCenterOpen;
+    const isCurrent = () => contextIsCurrent() && document.activeElement === origin;
+    const row = await loadRowAt(index);
+    if (!row || !isCurrent() || selectedPaths() !== previousSelection) return;
+    // A keyboard range starts at the focused row even when Tab reached it without selecting it.
+    if (event.shiftKey && previousSelection.size === 0 && entry.source) selectRow(entry.source, entry.virtualIndex);
+    await selectEntry({ ...toDisplayEntry(row), virtualIndex: index }, event);
+    if (!isCurrent() || !selectedPaths().has(row.path)) return;
+    await focusArchiveRow(index, row.path, () => contextIsCurrent()
+      && (document.activeElement === origin || (!origin.isConnected && document.activeElement === document.body)));
   }
 
   function selectedSummary(): string {
@@ -12054,9 +12094,9 @@
     }
   }
 
-  async function focusArchiveRow(index: number, entryPath: string | null): Promise<void> {
+  async function focusArchiveRow(index: number, entryPath: string | null, canFocus: () => boolean = () => true): Promise<void> {
     if (screen !== "browse" || !currentArchive) return;
-    const archiveSource = currentArchive.source;
+    const archiveId = currentArchive.id;
     const directoryKey = archiveDirs.join("\u0000");
     const filterKey = filterText();
     const listMode = mode;
@@ -12064,33 +12104,29 @@
     const selector = `[data-row-index="${index}"]`;
     const contextIsCurrent = () => (
       screen === "browse" &&
-      currentArchive?.source === archiveSource &&
+      currentArchive?.id === archiveId &&
       archiveDirs.join("\u0000") === directoryKey &&
       filterText() === filterKey &&
-      mode === listMode
+      mode === listMode && canFocus()
     );
     const rowMatches = () => !entryPath || rowAt(index)?.path === entryPath;
 
     await tick();
     if (!contextIsCurrent()) return;
-    let list = document.querySelector<HTMLElement>(`[data-virtual-list="${listKind}"]`);
+    const list = document.querySelector<HTMLElement>(`[data-virtual-list="${listKind}"]`);
     if (!list) return;
-    let row = list.querySelector<HTMLElement>(selector);
-    if (!row) {
-      const rowHeight = listMode === "classic" ? CLASSIC_ROW_HEIGHT : MODERN_ROW_HEIGHT;
-      const centeredOffset = Math.max(0, (list.clientHeight - rowHeight) / 2);
-      const nextScrollTop = Math.max(0, index * rowHeight - centeredOffset);
+    const rowHeight = listMode === "classic" ? CLASSIC_ROW_HEIGHT : MODERN_ROW_HEIGHT;
+    const top = index * rowHeight;
+    const nextScrollTop = Math.max(0, Math.min(top, Math.max(list.scrollTop, top + rowHeight - list.clientHeight)));
+    if (nextScrollTop !== list.scrollTop) {
       list.scrollTop = nextScrollTop;
       browseScrollTop = nextScrollTop;
       browseViewportHeight = list.clientHeight;
-      await loadRowAt(index);
-      await tick();
-      if (!contextIsCurrent()) return;
-      list = document.querySelector<HTMLElement>(`[data-virtual-list="${listKind}"]`);
-      row = list?.querySelector<HTMLElement>(selector) ?? null;
     }
+    if (!await loadRowAt(index)) return;
+    await tick();
     if (!contextIsCurrent() || !rowMatches()) return;
-    row?.focus({ preventScroll: true });
+    list.querySelector<HTMLElement>(selector)?.focus({ preventScroll: true });
   }
 
   async function openNestedArchiveEntry(

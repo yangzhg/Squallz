@@ -264,7 +264,7 @@
         <span>{view.archiveOpen ? view.selectedSummary : view.openArchiveFirst}</span>
         <small>
           {view.archiveOpen
-            ? tr("gui.preview.keyboard_hint", "Space or Return opens the focused item")
+            ? tr("gui.preview.keyboard_hint", "↑/↓ moves between items · Shift extends selection · Space or Return opens")
             : tr("gui.classic.empty_workbench_hint", "Archive editing controls appear after an archive is open.")}
         </small>
       </div>
@@ -363,7 +363,7 @@
             aria-rowindex={(entry.virtualIndex ?? 0) + 2}
             aria-selected={entry.selected}
             tabindex="0"
-            aria-keyshortcuts="Space Enter Backspace Meta+ArrowUp Alt+ArrowUp E"
+            aria-keyshortcuts="ArrowUp ArrowDown Home End PageUp PageDown Shift+ArrowUp Shift+ArrowDown Space Enter Backspace Meta+ArrowUp Alt+ArrowUp E"
             data-row-index={entry.virtualIndex ?? ""}
             onclick={(event) => onSelectEntry(entry, event)}
             ondblclick={(event) => {
