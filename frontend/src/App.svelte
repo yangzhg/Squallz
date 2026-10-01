@@ -915,6 +915,7 @@
   let pendingArchiveTaskReview: ArchiveTaskReview | null = null;
   let extractReviewFocusPending = false;
   let convertReviewFocusPending = false;
+  let securitySettingsFocusPending = false;
   let taskReviewRequestGeneration = 0;
   let pendingTaskReviewId = $state<number | null>(null);
   let archiveAddPending = $state(false);
@@ -2276,6 +2277,7 @@
     if (next !== "create") createPrimaryFocusPending = false;
     if (next !== "extract") extractReviewFocusPending = false;
     if (next !== "convert") convertReviewFocusPending = false;
+    if (next !== "settingsSecurity") securitySettingsFocusPending = false;
     if (next !== "duplicates") duplicateReportFocusPending = false;
     if (next !== "password") pendingArchiveTaskReview = null;
     if (screen === "create" && next !== "create" && pendingCreateSubmission) {
@@ -4523,6 +4525,7 @@
     const selectedMode = uiModeChoice();
     return {
       screen: settingsScreen,
+      onReady: () => { if (securitySettingsFocusPending) focusSecuritySettings(); },
       tr,
       settingsSaveTarget,
       appearanceSaveState,
@@ -13469,6 +13472,10 @@
 
   async function prepareTaskReview(task: TaskDialogModel): Promise<void> {
     if (taskWindowMode || task.id === null || pendingTaskReviewId === task.id || !taskReviewScreen(task)) return;
+    if (taskReviewScreen(task) === "settingsSecurity") {
+      await reviewTask(task);
+      return;
+    }
     const generation = ++taskReviewRequestGeneration;
     pendingTaskReviewId = task.id;
     const initialScreen = screen;
@@ -13551,9 +13558,21 @@
     }
     if (target === "create" && task.spec.kind === "compress" && !restoreCreateTaskDraft(task.spec, task.outputPasswordRequired)) return;
     if (target === "recovery" && !adoptRecoveryTargetFromTask(task, displayedSpec)) return;
+    if (target === "settingsSecurity") securitySettingsFocusPending = true;
     setScreen(target);
     await dismissTaskDialog(task);
     if (target === "create") focusCreatePrimaryAction();
+    if (target === "settingsSecurity") focusSecuritySettings();
+  }
+
+  function focusSecuritySettings(): void {
+    securitySettingsFocusPending = true;
+    void tick().then(() => {
+      const input = document.getElementById("settings-security-max-entries");
+      if (!securitySettingsFocusPending || screen !== "settingsSecurity" || blockingModalVisible() || !input) return;
+      securitySettingsFocusPending = false;
+      input.focus();
+    });
   }
 
   function focusArchiveUpdateReview(): void {

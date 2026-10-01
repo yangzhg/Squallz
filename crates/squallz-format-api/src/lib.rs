@@ -26,6 +26,7 @@ mod options;
 mod progress;
 mod registry;
 mod safety;
+mod testing;
 mod traits;
 
 pub use entry::{unix_seconds, EntryMeta, EntryPath, EntryType};
@@ -44,6 +45,7 @@ pub use options::{
 pub use progress::{ControlToken, NoProgress, ProgressPhase, ProgressSink};
 pub use registry::{split_volume_name, Detected, FormatInfo, FormatKind, FormatRegistry};
 pub use safety::{check_windows_portability, sanitize_entry_path, LimitsAccountant};
+pub use testing::test_entry_data;
 pub use traits::{
     ArchiveFormat, ArchiveReader, ArchiveSourceSet, ArchiveStructureStatus, ArchiveWriter,
     CompressSink, Compressor, EntryStreamConsumer, NativeVolumeBudget, NativeVolumeLimits,

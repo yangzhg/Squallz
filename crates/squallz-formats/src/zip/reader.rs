@@ -155,10 +155,15 @@ impl ZipArchiveReader {
     /// entry content, so they are read here (they are tiny).
     fn meta_at(&mut self, idx: usize) -> Result<EntryMeta, FormatError> {
         let path = self.paths[idx].clone();
-        self.meta_at_with_path(idx, path)
+        self.meta_at_with_path(idx, path, true)
     }
 
-    fn meta_at_with_path(&mut self, idx: usize, path: EntryPath) -> Result<EntryMeta, FormatError> {
+    fn meta_at_with_path(
+        &mut self,
+        idx: usize,
+        path: EntryPath,
+        include_link_target: bool,
+    ) -> Result<EntryMeta, FormatError> {
         let file = self.archive.by_index_raw(idx).map_err(map_zip_error)?;
         let is_dir = file.is_dir();
         let is_symlink = file.is_symlink();
@@ -182,7 +187,11 @@ impl ZipArchiveReader {
             // encrypted symlink without a usable password fall back to an
             // empty target (extraction will surface PasswordRequired on
             // file entries anyway).
-            let target = self.symlink_target_or_empty(idx)?;
+            let target = if include_link_target {
+                self.symlink_target_or_empty(idx)?
+            } else {
+                Vec::new()
+            };
             meta.entry_type = EntryType::Symlink { target };
         }
         Ok(meta)
@@ -190,27 +199,24 @@ impl ZipArchiveReader {
 
     fn test_with_problem_recorder(
         &mut self,
-        limits: Option<&SafetyLimits>,
+        limits: &SafetyLimits,
         progress: &dyn ProgressSink,
         ctl: &ControlToken,
         mut record_problem: impl FnMut(String),
     ) -> Result<u64, FormatError> {
         let total: u64 = (0..self.archive.len())
             .filter_map(|i| self.archive.by_index_raw(i).ok().map(|f| f.size()))
-            .sum();
+            .fold(0, u64::saturating_add);
         let mut done = 0u64;
         let mut entries_tested = 0u64;
-        let mut accountant = limits.copied().map(LimitsAccountant::new);
+        let mut accountant = LimitsAccountant::new(*limits);
         for idx in 0..self.archive.len() {
             ctl.checkpoint()?;
             let path = self.paths[idx].clone();
-            let meta = if let Some(accountant) = &mut accountant {
-                let meta = self.meta_at(idx)?;
-                accountant.check_entry(&meta)?;
-                Some(meta)
-            } else {
-                None
-            };
+            // Test target bytes once through the guarded stream below. The
+            // browsing limit on materialized link targets does not apply here.
+            let meta = self.meta_at_with_path(idx, path.clone(), false)?;
+            accountant.check_entry(&meta)?;
             progress.on_progress(done, total, &path);
             entries_tested += 1;
             match self.open_entry(idx) {
@@ -229,15 +235,11 @@ impl ZipArchiveReader {
                         match file.read(&mut buf) {
                             Ok(0) => break,
                             Ok(n) => {
-                                if let (Some(accountant), Some(meta)) =
-                                    (&mut accountant, meta.as_ref())
-                                {
-                                    accountant.add_entry_output_bytes(
-                                        meta,
-                                        &mut entry_output_bytes,
-                                        n as u64,
-                                    )?;
-                                }
+                                accountant.add_entry_output_bytes(
+                                    &meta,
+                                    &mut entry_output_bytes,
+                                    n as u64,
+                                )?;
                                 done = done.saturating_add(n as u64);
                                 progress.on_progress(done, total, &path);
                             }
@@ -250,7 +252,7 @@ impl ZipArchiveReader {
                 }
             }
         }
-        progress.on_progress(total, total, &EntryPath::from_utf8(""));
+        progress.on_progress(done, done, &EntryPath::from_utf8(""));
         Ok(entries_tested)
     }
 }
@@ -291,7 +293,7 @@ impl LocalZipArchiveReader {
 
     fn test_with_problem_recorder(
         &mut self,
-        limits: Option<&SafetyLimits>,
+        limits: &SafetyLimits,
         progress: &dyn ProgressSink,
         ctl: &ControlToken,
         mut record_problem: impl FnMut(String),
@@ -301,16 +303,14 @@ impl LocalZipArchiveReader {
             .iter()
             .filter(|entry| matches!(entry.meta.entry_type, EntryType::File))
             .map(|entry| entry.meta.size)
-            .sum();
+            .fold(0, u64::saturating_add);
         let mut done = 0u64;
         let mut entries_tested = 0u64;
-        let mut accountant = limits.copied().map(LimitsAccountant::new);
+        let mut accountant = LimitsAccountant::new(*limits);
         let entries = self.entries.clone();
         for (idx, entry) in entries.into_iter().enumerate() {
             ctl.checkpoint()?;
-            if let Some(accountant) = &mut accountant {
-                accountant.check_entry(&entry.meta)?;
-            }
+            accountant.check_entry(&entry.meta)?;
             if !matches!(entry.meta.entry_type, EntryType::File) {
                 continue;
             }
@@ -325,13 +325,11 @@ impl LocalZipArchiveReader {
                         match data.read(&mut buf) {
                             Ok(0) => break,
                             Ok(n) => {
-                                if let Some(accountant) = &mut accountant {
-                                    accountant.add_entry_output_bytes(
-                                        &entry.meta,
-                                        &mut entry_output_bytes,
-                                        n as u64,
-                                    )?;
-                                }
+                                accountant.add_entry_output_bytes(
+                                    &entry.meta,
+                                    &mut entry_output_bytes,
+                                    n as u64,
+                                )?;
                                 done = done.saturating_add(n as u64);
                                 progress.on_progress(done, total, &entry.meta.path);
                             }
@@ -348,7 +346,7 @@ impl LocalZipArchiveReader {
                 Err(e) => record_problem(format!("{}: {e}", entry.meta.path)),
             }
         }
-        progress.on_progress(total, total, &EntryPath::from_utf8(""));
+        progress.on_progress(done, done, &EntryPath::from_utf8(""));
         Ok(entries_tested)
     }
 
@@ -431,30 +429,14 @@ impl ArchiveReader for LocalZipArchiveReader {
 
     fn test_summary(
         &mut self,
-        progress: &dyn ProgressSink,
-        ctl: &ControlToken,
-    ) -> Result<TestSummary, FormatError> {
-        let problems = BoundedProblemLog::new(TEST_PROBLEM_PREVIEW_LIMIT);
-        let entries_tested = self
-            .test_with_problem_recorder(None, progress, ctl, |problem| problems.record(problem))?;
-        Ok(TestSummary {
-            entries_tested,
-            problems: problems.snapshot(),
-            recovery: None,
-        })
-    }
-
-    fn test_summary_with_limits(
-        &mut self,
         limits: &SafetyLimits,
         progress: &dyn ProgressSink,
         ctl: &ControlToken,
     ) -> Result<TestSummary, FormatError> {
         let problems = BoundedProblemLog::new(TEST_PROBLEM_PREVIEW_LIMIT);
-        let entries_tested =
-            self.test_with_problem_recorder(Some(limits), progress, ctl, |problem| {
-                problems.record(problem)
-            })?;
+        let entries_tested = self.test_with_problem_recorder(limits, progress, ctl, |problem| {
+            problems.record(problem)
+        })?;
         Ok(TestSummary {
             entries_tested,
             problems: problems.snapshot(),
@@ -865,7 +847,7 @@ impl ArchiveReader for ZipArchiveReader {
         let paths = std::mem::take(&mut self.paths);
         self.index_by_raw = HashMap::new();
         for (idx, path) in paths.into_iter().enumerate() {
-            visitor(self.meta_at_with_path(idx, path)?)?;
+            visitor(self.meta_at_with_path(idx, path, true)?)?;
         }
         Ok(())
     }
@@ -884,30 +866,14 @@ impl ArchiveReader for ZipArchiveReader {
 
     fn test_summary(
         &mut self,
-        progress: &dyn ProgressSink,
-        ctl: &ControlToken,
-    ) -> Result<TestSummary, FormatError> {
-        let problems = BoundedProblemLog::new(TEST_PROBLEM_PREVIEW_LIMIT);
-        let entries_tested = self
-            .test_with_problem_recorder(None, progress, ctl, |problem| problems.record(problem))?;
-        Ok(TestSummary {
-            entries_tested,
-            problems: problems.snapshot(),
-            recovery: None,
-        })
-    }
-
-    fn test_summary_with_limits(
-        &mut self,
         limits: &SafetyLimits,
         progress: &dyn ProgressSink,
         ctl: &ControlToken,
     ) -> Result<TestSummary, FormatError> {
         let problems = BoundedProblemLog::new(TEST_PROBLEM_PREVIEW_LIMIT);
-        let entries_tested =
-            self.test_with_problem_recorder(Some(limits), progress, ctl, |problem| {
-                problems.record(problem)
-            })?;
+        let entries_tested = self.test_with_problem_recorder(limits, progress, ctl, |problem| {
+            problems.record(problem)
+        })?;
         Ok(TestSummary {
             entries_tested,
             problems: problems.snapshot(),
@@ -1012,6 +978,37 @@ mod tests {
     }
 
     #[test]
+    fn integrity_test_drains_symlinks_under_the_test_byte_limit() {
+        let target = vec![b'a'; 128 * 1024];
+        let bytes = deflated_symlink_archive(&target);
+        let mut reader = open(Box::new(Cursor::new(bytes)), &OpenOptions::default()).unwrap();
+        let result = reader.test_summary(
+            &SafetyLimits {
+                max_output_bytes: 64 * 1024,
+                ..SafetyLimits::default()
+            },
+            &NoProgress,
+            &ControlToken::default(),
+        );
+        assert!(
+            matches!(result, Err(FormatError::ResourceLimitExceeded(ref detail)) if detail.contains("output bytes")),
+            "{result:?}"
+        );
+        let report = reader
+            .test_summary(
+                &SafetyLimits {
+                    max_output_bytes: target.len() as u64,
+                    ..SafetyLimits::default()
+                },
+                &NoProgress,
+                &ControlToken::default(),
+            )
+            .unwrap();
+        assert!(report.is_ok(), "{report:?}");
+        assert_eq!(report.entries_tested, 1);
+    }
+
+    #[test]
     fn integrity_test_charges_observed_output_bytes() {
         let mut writer = ::zip::ZipWriter::new(Cursor::new(Vec::new()));
         writer
@@ -1055,7 +1052,7 @@ mod tests {
         };
 
         let error = reader
-            .test_summary_with_limits(&limits, &NoProgress, &ControlToken::default())
+            .test_summary(&limits, &NoProgress, &ControlToken::default())
             .expect_err("integrity test must enforce actual decoded bytes");
 
         assert!(matches!(error, FormatError::ResourceLimitExceeded(_)));

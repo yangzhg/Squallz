@@ -273,6 +273,7 @@ export function taskReviewScreen(task: TaskDialogModel): Screen | null {
     case "duplicate_scan":
       return "duplicates";
     case "test":
+      if (task.error?.key === "error.resource_limit") return "settingsSecurity";
       return task.error?.key === "error.corrupt_archive" ? "recovery" : "archiveInfo";
     case "export_sqz":
     case "protect":

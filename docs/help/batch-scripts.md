@@ -47,7 +47,7 @@ sqz batch batch.json --keep-going --json
 | `checksum` | 计算本地文件/目录校验和 | `inputs`, `algorithm`, `excludes` |
 | `checksum_check` | 校验 sha256sum 风格 manifest | `check`, `algorithm` |
 | `duplicates` | 扫描重复文件 | `inputs`, `excludes`, `min_size`, `fail_on_found` |
-| `test` | 完整性测试 | `archive`, `password`, `encoding` |
+| `test` | 完整性测试 | `archive`, `password`, `encoding`, `max_output_bytes`, `max_entries`, `max_compression_ratio` |
 | `extract` | 解压全部或匹配条目 | `archive`, `dest`, `includes`, `overwrite`, `symlinks`, `smart`, `best_effort`, `password`, `encoding`, `threads`, `memory_limit`, `max_output_bytes`, `max_entries`, `max_compression_ratio` |
 | `convert` | 流式转换归档格式 | `src`, `output`, `level`, `profile`, `password`, `out_password`, `encrypt_names`, `encoding`, `split`, `split_mode`, `threads`, `memory_limit` |
 | `update` | 添加、创建目录、删除、重命名或移动条目 | `archive`, `add`, `mkdir`, `delete`, `delete_entries`, `encoding`, `rename`, `content_policy`, `excludes`, `password`, `level`, `profile`, `threads`, `memory_limit` |
@@ -59,6 +59,14 @@ sqz batch batch.json --keep-going --json
 | `repair_recovery` | 用外置 PAR2 修复归档；单文件可写新文件，多文件或分卷集可写入全新目录 | `archive`, `output`, `output_dir`, `recovery_path` |
 
 `profile` 使用和 GUI 一致的产品语言：`fast`、`balanced`、`maximum`。显式 `level` 会覆盖 `profile`。
+
+`test` 与 `extract` 共用安全上限。`max_output_bytes` 为数字字节数，测试累计实际解码数据，
+即使不写出文件也计入；`max_entries` 包含目录等条目。默认分别为 256 GiB、1,000,000 条目
+及压缩比 2048。压缩比只在单条目超过 1 MiB 且格式提供压缩大小时检查，同时核对声明大小和
+实际解码字节。超限会以 `resource_limit_exceeded`、退出码 6 停止该 job，源归档保持不变；
+它不表示已确认归档损坏。仅对可信来源调整上限并显式发起新测试；`--keep-going` 可以继续
+运行脚本后续 job。
+
 设置 `split` 后，`split_mode` 默认为 `generic`，生成 `.001/.002/...` 连续字节分卷；
 ZIP 输出可设为 `native`，生成 `.z01/.z02/.../.zip`，并以最后的 `.zip` 作为主输出。
 其他格式选择 `native` 会明确失败，不会退回到另一种分卷布局。

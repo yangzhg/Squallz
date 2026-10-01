@@ -131,7 +131,13 @@ fn sqz_file_header_crc_damage_falls_back_to_footer() {
     let entries = eng.list(&damaged, &OpenOptions::default()).unwrap();
     assert!(entries.iter().any(|e| e.path.display == "project/a.txt"));
     let report = eng
-        .test_summary(&damaged, &OpenOptions::default(), &NoProgress, &ctl)
+        .test_summary(
+            &damaged,
+            &OpenOptions::default(),
+            &squallz_format_api::SafetyLimits::default(),
+            &NoProgress,
+            &ctl,
+        )
         .unwrap();
     assert!(report.is_ok(), "problems: {:?}", report.problems);
 
@@ -232,7 +238,13 @@ fn sqz_footer_magic_damage_recovers_from_recovery_scan() {
     let entries = eng.list(&damaged, &OpenOptions::default()).unwrap();
     assert!(entries.iter().any(|e| e.path.display == "project/a.txt"));
     let report = eng
-        .test_summary(&damaged, &OpenOptions::default(), &NoProgress, &ctl)
+        .test_summary(
+            &damaged,
+            &OpenOptions::default(),
+            &squallz_format_api::SafetyLimits::default(),
+            &NoProgress,
+            &ctl,
+        )
         .unwrap();
     assert!(report.is_ok(), "problems: {:?}", report.problems);
 
@@ -279,7 +291,13 @@ fn sqz_footer_crc_field_damage_recovers_from_recovery_scan() {
     let entries = eng.list(&damaged, &OpenOptions::default()).unwrap();
     assert!(entries.iter().any(|e| e.path.display == "project/a.txt"));
     let report = eng
-        .test_summary(&damaged, &OpenOptions::default(), &NoProgress, &ctl)
+        .test_summary(
+            &damaged,
+            &OpenOptions::default(),
+            &squallz_format_api::SafetyLimits::default(),
+            &NoProgress,
+            &ctl,
+        )
         .unwrap();
     assert!(report.is_ok(), "problems: {:?}", report.problems);
 
@@ -324,7 +342,13 @@ fn sqz_recovery_protection_trailer_damage_uses_intact_primary() {
     let entries = eng.list(&damaged, &OpenOptions::default()).unwrap();
     assert!(entries.iter().any(|e| e.path.display == "project/a.txt"));
     let report = eng
-        .test_summary(&damaged, &OpenOptions::default(), &NoProgress, &ctl)
+        .test_summary(
+            &damaged,
+            &OpenOptions::default(),
+            &squallz_format_api::SafetyLimits::default(),
+            &NoProgress,
+            &ctl,
+        )
         .unwrap();
     assert!(report.is_ok(), "problems: {:?}", report.problems);
 
@@ -436,7 +460,13 @@ fn sqz_roundtrip_create_list_extract_test() {
     }
 
     let report = eng
-        .test_summary(&archive, &OpenOptions::default(), &NoProgress, &ctl)
+        .test_summary(
+            &archive,
+            &OpenOptions::default(),
+            &squallz_format_api::SafetyLimits::default(),
+            &NoProgress,
+            &ctl,
+        )
         .unwrap();
     assert!(report.is_ok(), "problems: {:?}", report.problems);
     assert_eq!(report.entries_tested, entries.len() as u64);
@@ -531,7 +561,13 @@ fn sqz_recovery_section_self_protection_repairs_primary_damage() {
     let entries = eng.list(&damaged, &OpenOptions::default()).unwrap();
     assert!(entries.iter().any(|e| e.path.display == "project/a.txt"));
     let report = eng
-        .test_summary(&damaged, &OpenOptions::default(), &NoProgress, &ctl)
+        .test_summary(
+            &damaged,
+            &OpenOptions::default(),
+            &squallz_format_api::SafetyLimits::default(),
+            &NoProgress,
+            &ctl,
+        )
         .unwrap();
     assert!(report.is_ok(), "problems: {:?}", report.problems);
 
@@ -603,7 +639,13 @@ fn sqz_embedded_recovery_repairs_single_payload_block() {
     fs::write(&corrupt, bytes).unwrap();
 
     let report = eng
-        .test_summary(&corrupt, &OpenOptions::default(), &NoProgress, &ctl)
+        .test_summary(
+            &corrupt,
+            &OpenOptions::default(),
+            &squallz_format_api::SafetyLimits::default(),
+            &NoProgress,
+            &ctl,
+        )
         .unwrap();
     assert!(report.is_ok(), "problems: {:?}", report.problems);
     let recovery = report.recovery.as_ref().expect("SQZ recovery summary");
@@ -659,7 +701,13 @@ fn sqz_custom_recovery_percent_controls_payload_parity_shards() {
     fs::write(&corrupt, bytes).unwrap();
 
     let report = eng
-        .test_summary(&corrupt, &OpenOptions::default(), &NoProgress, &ctl)
+        .test_summary(
+            &corrupt,
+            &OpenOptions::default(),
+            &squallz_format_api::SafetyLimits::default(),
+            &NoProgress,
+            &ctl,
+        )
         .unwrap();
     assert!(!report.is_ok());
     let recovery = report.recovery.as_ref().expect("SQZ recovery summary");
@@ -735,7 +783,13 @@ fn sqz_repaired_inner_profiles_support_repeated_reads_and_extraction() {
             )
             .unwrap();
         assert_eq!(streamed, original, "{inner_format}");
-        let report = reader.test_summary(&NoProgress, &ctl).unwrap();
+        let report = reader
+            .test_summary(
+                &squallz_format_api::SafetyLimits::default(),
+                &NoProgress,
+                &ctl,
+            )
+            .unwrap();
         assert!(report.is_ok(), "{inner_format}: {report:?}");
         let recovery = report.recovery.unwrap();
         assert_eq!(recovery.repaired_blocks, 1, "{inner_format}");
@@ -914,7 +968,13 @@ fn sqz_embedded_recovery_reports_over_limit_payload_damage() {
     fs::write(&corrupt, bytes).unwrap();
 
     let report = eng
-        .test_summary(&corrupt, &OpenOptions::default(), &NoProgress, &ctl)
+        .test_summary(
+            &corrupt,
+            &OpenOptions::default(),
+            &squallz_format_api::SafetyLimits::default(),
+            &NoProgress,
+            &ctl,
+        )
         .unwrap();
     assert!(!report.is_ok());
     let recovery = report.recovery.as_ref().expect("SQZ recovery summary");

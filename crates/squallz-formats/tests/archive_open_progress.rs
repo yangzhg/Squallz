@@ -53,7 +53,13 @@ fn run_operation(
     let extract = ExtractOptions::default();
     match operation {
         "test" => engine
-            .test_summary(archive, &open, progress, control)
+            .test_summary(
+                archive,
+                &open,
+                &squallz_format_api::SafetyLimits::default(),
+                progress,
+                control,
+            )
             .map(|report| assert!(report.is_ok())),
         "extract" => engine.extract(
             archive,
@@ -160,6 +166,7 @@ fn archive_operations_report_opening_before_entry_work() {
                     .test_summary(
                         &destination,
                         &OpenOptions::default(),
+                        &squallz_format_api::SafetyLimits::default(),
                         &NoProgress,
                         &ControlToken::default()
                     )

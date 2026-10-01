@@ -11,7 +11,7 @@ use squallz_core::api::{
     ConflictDecision, ConflictResolver, ControlToken, CreateOptions, EntryMeta, EntryPath,
     EntrySelection, ExtractProblemReporter, ExtractReport, FormatError, OpenOptions,
     OverwritePolicy, Password, ProblemPreview, ProgressPhase, ProgressSink, RecoverySummary,
-    SymlinkPolicy, UpdateOp, UpdateOptions,
+    SafetyLimits, SymlinkPolicy, UpdateOp, UpdateOptions,
 };
 use squallz_core::{
     create_destination_has_conflict, is_plain_sqz_path, is_sqz_archive_path, is_zip_family_path,
@@ -783,6 +783,7 @@ fn test_created_archive(
     path: &Path,
     password: Option<&Password>,
     enabled: bool,
+    limits: &SafetyLimits,
     sink: &dyn ProgressSink,
     ctl: &ControlToken,
 ) -> Result<Option<u64>, FormatError> {
@@ -796,6 +797,7 @@ fn test_created_archive(
             password: password.cloned(),
             encoding_override: None,
         },
+        limits,
         sink,
         ctl,
     )?;
@@ -935,6 +937,7 @@ impl JobContext<'_> {
                         &report.primary_output,
                         request.options.password.as_ref(),
                         request.test_after_create,
+                        &settings.safety_limits(),
                         sink,
                         ctl,
                     )?;
@@ -989,6 +992,7 @@ impl JobContext<'_> {
                     &report.path,
                     request.options.password.as_ref(),
                     request.test_after_create,
+                    &settings.safety_limits(),
                     sink,
                     ctl,
                 )?;
@@ -1202,9 +1206,13 @@ impl JobContext<'_> {
                             password: pw.cloned(),
                             encoding_override: encoding.clone(),
                         };
-                        state
-                            .engine
-                            .test_summary_with_structure(&archive, &open, sink, ctl)
+                        state.engine.test_summary_with_structure(
+                            &archive,
+                            &open,
+                            &settings.safety_limits(),
+                            sink,
+                            ctl,
+                        )
                     },
                 )?;
                 let structure = outcome.structure;
@@ -1332,10 +1340,13 @@ impl JobContext<'_> {
                     resources: settings.resource_options(),
                     ..CreateOptions::default()
                 };
-                let test_report =
-                    state
-                        .engine
-                        .test_summary(&src_path, &OpenOptions::default(), sink, ctl)?;
+                let test_report = state.engine.test_summary(
+                    &src_path,
+                    &OpenOptions::default(),
+                    &settings.safety_limits(),
+                    sink,
+                    ctl,
+                )?;
                 if !test_report.is_ok() {
                     let detail = if test_report.problems.messages.is_empty() {
                         "archive integrity test failed".to_owned()
@@ -1374,6 +1385,7 @@ impl JobContext<'_> {
                 let source_test = state.engine.test_summary_with_structure(
                     &src_path,
                     &OpenOptions::default(),
+                    &settings.safety_limits(),
                     sink,
                     ctl,
                 )?;

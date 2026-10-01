@@ -615,6 +615,20 @@ test("SFX result and recovery details use the durable single-backup contract", a
     assert.equal(taskReviewScreen({ ...boundedTest, state: "running" }), null);
     assert.equal(taskReviewScreen({ ...boundedTest, state: "cancelled" }), null);
     assert.equal(taskReviewScreen({ ...boundedTest, state: "failed", error: { key: "error.corrupt_archive" } }), "recovery");
+    const limitedTest = {
+      ...boundedTest,
+      state: "failed",
+      result: null,
+      error: { key: "error.resource_limit", params: { detail: "output bytes exceed limit of 1" } },
+    };
+    assert.equal(taskReviewScreen(limitedTest), "settingsSecurity");
+    assert.equal(taskReviewActionLabel(limitedTest), "Open Security");
+    assert.equal(taskReviewAvailable(limitedTest, false), true);
+    assert.equal(taskReviewAvailable(limitedTest, true), false);
+    assert.match(taskNextStepDetail(limitedTest, false), /trusted archives.*Security.*new test/u);
+    assert.match(taskNextStepDetail(limitedTest, true), /main Squallz window/u);
+    assert.doesNotMatch(taskNextStepDetail(limitedTest, false), /Recovery|damaged/u);
+    assert.equal(taskReviewScreen({ ...limitedTest, error: { key: "error.wrong_password" } }), "archiveInfo");
     const boundedTestRows = taskResultDetailRows(boundedTest);
     assert.ok(
       boundedTestRows.some(

@@ -127,7 +127,7 @@ fn run_test(
         || progress.finish(),
         |password| {
             let mut reader = open_payload(engine, verified, password, ctl)?;
-            reader.test_summary_with_limits(&args.limits(), progress, ctl)
+            reader.test_summary(&args.limits(), progress, ctl)
         },
     )?;
     progress.finish();
@@ -413,6 +413,7 @@ mod tests {
 
         fn test_summary(
             &mut self,
+            _limits: &squallz_core::api::SafetyLimits,
             _progress: &dyn ProgressSink,
             _ctl: &ControlToken,
         ) -> Result<TestSummary, FormatError> {

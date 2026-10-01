@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use squallz_core::api::{OpenOptions, Password, TestSummary};
+use squallz_core::api::{OpenOptions, Password, SafetyLimits, TestSummary};
 
 use crate::commands::{
     reports::{
@@ -52,6 +52,7 @@ pub fn run(
     archive: PathBuf,
     password: Option<String>,
     encoding: Option<String>,
+    limits: SafetyLimits,
     json: bool,
 ) -> Result<(), CliError> {
     let progress = CliProgress::new_for_operation(
@@ -71,6 +72,7 @@ pub fn run(
                 password: pw.cloned(),
                 encoding_override: encoding.clone(),
             },
+            &limits,
             &progress,
             &ctx.ctl,
         )

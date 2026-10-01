@@ -174,14 +174,15 @@ impl ArchiveReader for SingleFileArchiveReader {
 
     fn test_summary(
         &mut self,
+        limits: &SafetyLimits,
         progress: &dyn ProgressSink,
         ctl: &ControlToken,
     ) -> Result<TestSummary, FormatError> {
-        // Reading to EOF drives the backend's integrity checks (gzip CRC32,
-        // xz check, zstd frame checksums). Default limits guard against
-        // bombs during the test itself.
+        // Reading to EOF drives gzip, xz and zstd integrity checks. Charge
+        // observed bytes because single streams may not declare an output size.
         let problems = BoundedProblemLog::new(TEST_PROBLEM_PREVIEW_LIMIT);
-        let mut accountant = crate::api::LimitsAccountant::new(SafetyLimits::default());
+        let mut accountant = crate::api::LimitsAccountant::new(*limits);
+        accountant.check_entry(&self.meta)?;
         let mut reader = (self.factory)()?;
         let mut buf = vec![0u8; 64 * 1024];
         let mut done = 0u64;
@@ -190,8 +191,7 @@ impl ArchiveReader for SingleFileArchiveReader {
             match reader.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
-                    accountant.add_output_bytes(n as u64)?;
-                    done += n as u64;
+                    accountant.add_entry_output_bytes(&self.meta, &mut done, n as u64)?;
                     progress.on_progress(done, 0, &self.meta.path);
                 }
                 Err(e) => {

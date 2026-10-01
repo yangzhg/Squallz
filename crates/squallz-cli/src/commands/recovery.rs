@@ -233,9 +233,13 @@ fn repair_sqz(
         );
     }
 
-    let source_report =
-        ctx.engine
-            .test_summary(&archive, &OpenOptions::default(), &NoProgress, &ctx.ctl)?;
+    let source_report = ctx.engine.test_summary(
+        &archive,
+        &OpenOptions::default(),
+        &squallz_core::api::SafetyLimits::default(),
+        &NoProgress,
+        &ctx.ctl,
+    )?;
     if !source_report.is_ok() {
         if json {
             let archive_path = archive.display().to_string();
@@ -350,6 +354,7 @@ fn repair_zip_rebuild(
     let source_test = ctx.engine.test_summary_with_structure(
         &archive,
         &OpenOptions::default(),
+        &squallz_core::api::SafetyLimits::default(),
         &NoProgress,
         &ctx.ctl,
     )?;

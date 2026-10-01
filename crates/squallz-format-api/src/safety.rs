@@ -97,7 +97,7 @@ fn windows_reserved_stem(component: &str) -> &str {
 }
 
 /// Tracks cumulative output bytes and entry counts against
-/// [`SafetyLimits`] during one extraction run.
+/// [`SafetyLimits`] during one extraction or integrity-test run.
 #[derive(Debug)]
 pub struct LimitsAccountant {
     limits: SafetyLimits,
@@ -140,7 +140,7 @@ impl LimitsAccountant {
         Ok(())
     }
 
-    /// Registers actually written output bytes; fails once the cumulative
+    /// Registers observed output bytes; fails once the cumulative
     /// total crosses `max_output_bytes`.
     pub fn add_output_bytes(&mut self, n: u64) -> Result<(), FormatError> {
         self.output_bytes = self.output_bytes.saturating_add(n);
@@ -180,7 +180,7 @@ impl LimitsAccountant {
         Ok(())
     }
 
-    /// Cumulative output bytes written so far.
+    /// Cumulative output bytes observed so far.
     pub fn output_bytes(&self) -> u64 {
         self.output_bytes
     }

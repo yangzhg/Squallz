@@ -371,6 +371,15 @@ fn localize_test_help_en(cmd: Command) -> Command {
         .mut_arg("archive", |arg| arg.help("Archive path."))
         .mut_arg("password", |arg| arg.help("Decryption password."))
         .mut_arg("encoding", |arg| arg.help("Entry-name encoding."))
+        .mut_arg("max_output_bytes", |arg| {
+            arg.help("Maximum total decoded size during testing (for example 1g or 500m).")
+        })
+        .mut_arg("max_entries", |arg| {
+            arg.help("Maximum number of tested entries.")
+        })
+        .mut_arg("max_compression_ratio", |arg| {
+            arg.help("Maximum decompressed-to-compressed ratio for a single entry.")
+        })
         .mut_arg("json", json_help_en)
 }
 
@@ -1277,6 +1286,15 @@ pub enum Cmd {
         /// 条目名编码
         #[arg(long)]
         encoding: Option<String>,
+        /// 测试时最大总解码字节数（支持 1g / 500m 等后缀）
+        #[arg(long, value_name = "SIZE", value_parser = parse_nonzero_size)]
+        max_output_bytes: Option<u64>,
+        /// 最大测试条目数
+        #[arg(long, value_name = "N", value_parser = parse_nonzero_u64)]
+        max_entries: Option<u64>,
+        /// 单条目最大解压/压缩比
+        #[arg(long, value_name = "N", value_parser = parse_nonzero_u32)]
+        max_compression_ratio: Option<u32>,
         /// 以 JSON 输出（机器可读）
         #[arg(long)]
         json: bool,

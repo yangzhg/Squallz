@@ -2040,6 +2040,89 @@ fn batch_keep_going_reports_failures_without_stopping() {
 }
 
 #[test]
+fn archive_test_honors_safety_overrides_and_an_explicit_retry() {
+    let dir = temp_dir("test-safety-limits");
+    let root = sample_tree(&dir);
+    let archive = dir.join("source.zip");
+    let created = run(sqz().arg("compress").arg(&root).arg("-o").arg(&archive));
+    assert!(created.status.success(), "stderr: {}", stderr(&created));
+    let original = std::fs::read(&archive).unwrap();
+
+    for (flag, value) in [("--max-output-bytes", "1"), ("--max-entries", "1")] {
+        let out = run(sqz()
+            .arg("test")
+            .arg(&archive)
+            .arg(flag)
+            .arg(value)
+            .arg("--json"));
+        assert_eq!(out.status.code(), Some(6), "{flag}: {}", stdout(&out));
+        let report = stdout_json(&out);
+        assert_eq!(report["ok"], false);
+        assert_eq!(report["error"]["kind"], "resource_limit_exceeded");
+        assert!(stderr(&out).trim().is_empty());
+        assert_eq!(std::fs::read(&archive).unwrap(), original);
+    }
+    let retry = run(sqz().arg("test").arg(&archive).args([
+        "--max-output-bytes",
+        "1m",
+        "--max-entries",
+        "10",
+        "--max-compression-ratio",
+        "4096",
+        "--json",
+    ]));
+    assert!(retry.status.success(), "stderr: {}", stderr(&retry));
+    assert_eq!(stdout_json(&retry)["ok"], true);
+    assert_eq!(std::fs::read(&archive).unwrap(), original);
+
+    for flag in [
+        "--max-output-bytes",
+        "--max-entries",
+        "--max-compression-ratio",
+    ] {
+        let out = run(sqz().arg("test").arg(&archive).arg(flag).arg("0"));
+        assert!(!out.status.success(), "{flag} must reject zero");
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn batch_test_honors_safety_limits_and_continues_with_an_explicit_retry() {
+    let dir = temp_dir("batch-test-safety-limits");
+    let root = sample_tree(&dir);
+    let archive = dir.join("source.zip");
+    let script = dir.join("batch.json");
+    let created = run(sqz().arg("compress").arg(&root).arg("-o").arg(&archive));
+    assert!(created.status.success(), "stderr: {}", stderr(&created));
+    let original = std::fs::read(&archive).unwrap();
+    let manifest = serde_json::json!({
+        "jobs": [
+            {"kind": "test", "archive": "source.zip", "max_output_bytes": 1},
+            {"kind": "test", "archive": "source.zip", "max_entries": 1},
+            {"kind": "test", "archive": "source.zip", "max_output_bytes": 1048576, "max_entries": 10, "max_compression_ratio": 4096}
+        ]
+    });
+    std::fs::write(&script, serde_json::to_string(&manifest).unwrap()).unwrap();
+    let out = run(sqz()
+        .arg("batch")
+        .arg(&script)
+        .args(["--keep-going", "--json"]));
+    assert_eq!(out.status.code(), Some(6), "stdout: {}", stdout(&out));
+    assert!(stderr(&out).trim().is_empty());
+    let report = stdout_json(&out);
+    assert_eq!(report["failed"], 2);
+    for index in [0, 1] {
+        assert_eq!(
+            report["jobs"][index]["error_kind"],
+            "resource_limit_exceeded"
+        );
+    }
+    assert_eq!(report["jobs"][2]["ok"], true);
+    assert_eq!(std::fs::read(&archive).unwrap(), original);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn batch_extract_honors_shared_safety_limits() {
     let dir = temp_dir("batch-safety-limits");
     let root = sample_tree(&dir);

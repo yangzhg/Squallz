@@ -3824,6 +3824,7 @@ fn split_sqz_source_jobs_accept_first_volume() {
         .test_summary(
             &repaired,
             &OpenOptions::default(),
+            &squallz_core::api::SafetyLimits::default(),
             &squallz_core::api::NoProgress,
             &ControlToken::new(),
         )
@@ -3889,6 +3890,7 @@ fn repair_sqz_job_rewrites_recovered_container() {
         .test_summary(
             &repaired,
             &OpenOptions::default(),
+            &squallz_core::api::SafetyLimits::default(),
             &squallz_core::api::NoProgress,
             &ControlToken::new(),
         )
@@ -3932,6 +3934,7 @@ fn repair_sqz_job_rewrites_recovered_container() {
         .test_summary(
             &damaged,
             &OpenOptions::default(),
+            &squallz_core::api::SafetyLimits::default(),
             &squallz_core::api::NoProgress,
             &ControlToken::new(),
         )
@@ -3991,6 +3994,7 @@ fn repair_sqz_job_rewrites_recovered_container() {
         .test_summary(
             &split_repaired,
             &OpenOptions::default(),
+            &squallz_core::api::SafetyLimits::default(),
             &squallz_core::api::NoProgress,
             &ControlToken::new(),
         )
@@ -4674,6 +4678,70 @@ fn update_job_reports_target_conflict_as_failed() {
     );
     assert_eq!(std::fs::read(&archive).unwrap(), before);
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn archive_test_job_uses_submitted_safety_limits() {
+    let dir = temp_dir("test-limits");
+    let archive = dir.join("limited.zip");
+    let bytes = build_stored_zip(&[(b"payload.txt", b"payload over one byte")]);
+    fs::write(&archive, &bytes).unwrap();
+    let manager = JobManager::new();
+    let state = Arc::new(AppState::new());
+    let sink = Arc::new(TestSink::default());
+    let events: Arc<dyn EventSink> = sink.clone();
+    let id = manager.submit(
+        state.clone(),
+        events,
+        JobSpec::Test {
+            path: archive.to_string_lossy().into_owned(),
+            encoding: None,
+            password: None,
+        },
+        SettingsDto {
+            safety_max_output_bytes: Some(1),
+            ..SettingsDto::default()
+        },
+    );
+    manager.wait_idle();
+    let events = sink.events.lock().unwrap();
+    let failure = events
+        .iter()
+        .find(|(name, value)| name == EV_STATE && value["id"] == id && value["state"] == "failed");
+    assert_eq!(
+        failure.and_then(|(_, value)| value["error"]["key"].as_str()),
+        Some("error.resource_limit"),
+        "archive tests must stop at the submitted output-byte limit"
+    );
+    assert_eq!(fs::read(&archive).unwrap(), bytes);
+    drop(events);
+    let retry_id = manager.submit(
+        state,
+        sink.clone(),
+        JobSpec::Test {
+            path: archive.to_string_lossy().into_owned(),
+            encoding: None,
+            password: None,
+        },
+        SettingsDto {
+            safety_max_output_bytes: Some(64),
+            ..SettingsDto::default()
+        },
+    );
+    assert_ne!(retry_id, id);
+    manager.wait_idle();
+    let events = sink.events.lock().unwrap();
+    let retried = events.iter().find(|(name, value)| {
+        name == EV_STATE && value["id"] == retry_id && value["state"] == "done"
+    });
+    assert_eq!(
+        retried.map(|(_, value)| &value["result"]["ok"]),
+        Some(&serde_json::Value::Bool(true)),
+        "an explicit new test uses its own raised safety limit"
+    );
+    assert_eq!(fs::read(&archive).unwrap(), bytes);
+    drop(events);
+    fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]

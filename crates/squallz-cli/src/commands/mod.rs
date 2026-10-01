@@ -808,8 +808,18 @@ pub fn dispatch(cmd: Cmd, ctx: &Ctx) -> Result<(), CliError> {
             archive,
             password,
             encoding,
+            max_output_bytes,
+            max_entries,
+            max_compression_ratio,
             json,
-        } => test::run(ctx, archive, password, encoding, json),
+        } => test::run(
+            ctx,
+            archive,
+            password,
+            encoding,
+            crate::args::safety_limits(max_output_bytes, max_entries, max_compression_ratio),
+            json,
+        ),
         Cmd::Info { json } => info::run(ctx, json),
     }
 }

@@ -5,8 +5,9 @@ use std::time::{Duration, SystemTime};
 
 use squallz_format_api::{
     ArchiveFormat, ArchiveReader, BoundedProblemLog, Compressor, ControlToken, EntryMeta,
-    EntryPath, EntryStreamConsumer, EntryType, FormatError, OpenOptions, ProgressSink, ReadSeek,
-    RecoverySummary, StreamFactory, TestSummary, TEST_PROBLEM_PREVIEW_LIMIT,
+    EntryPath, EntryStreamConsumer, EntryType, FormatError, LimitsAccountant, OpenOptions,
+    ProgressSink, ReadSeek, RecoverySummary, SafetyLimits, StreamFactory, TestSummary,
+    TEST_PROBLEM_PREVIEW_LIMIT,
 };
 
 use crate::{sevenz::SevenZFormat, tar::TarFormat, zip::ZipFormat};
@@ -241,6 +242,7 @@ impl EntrySetSqzReader {
 
     fn test_with_problem_recorder(
         &mut self,
+        limits: &SafetyLimits,
         progress: &dyn ProgressSink,
         ctl: &ControlToken,
         mut record_problem: impl FnMut(String),
@@ -250,12 +252,14 @@ impl EntrySetSqzReader {
             .iter()
             .filter(|record| matches!(record.meta.entry_type, EntryType::File))
             .map(|record| record.data_size)
-            .sum();
+            .fold(0, u64::saturating_add);
         let mut done = 0u64;
         let mut entries_tested = 0u64;
         let mut buffer = [0u8; VERIFY_CHUNK];
+        let mut accountant = LimitsAccountant::new(*limits);
         for record in self.records.clone() {
             ctl.checkpoint()?;
+            accountant.check_entry(&record.meta)?;
             entries_tested += 1;
             if !matches!(record.meta.entry_type, EntryType::File) {
                 progress.on_progress(done, total, &record.meta.path);
@@ -277,6 +281,7 @@ impl EntrySetSqzReader {
                 };
                 let mut hash = blake3::Hasher::new();
                 let mut crc = 0;
+                let mut entry_output_bytes = 0;
                 loop {
                     ctl.checkpoint()?;
                     let count = match data.read(&mut buffer) {
@@ -286,9 +291,14 @@ impl EntrySetSqzReader {
                     if count == 0 {
                         break;
                     }
+                    accountant.add_entry_output_bytes(
+                        &record.meta,
+                        &mut entry_output_bytes,
+                        count as u64,
+                    )?;
                     hash.update(&buffer[..count]);
                     crc = crc32c::crc32c_append(crc, &buffer[..count]);
-                    done += count as u64;
+                    done = done.saturating_add(count as u64);
                     progress.on_progress(done, total, &record.meta.path);
                 }
                 Ok::<_, FormatError>(
@@ -305,7 +315,9 @@ impl EntrySetSqzReader {
                         ));
                     }
                 }
-                Err(FormatError::Cancelled) => return Err(FormatError::Cancelled),
+                Err(error @ (FormatError::Cancelled | FormatError::ResourceLimitExceeded(_))) => {
+                    return Err(error)
+                }
                 Err(e) => record_problem(format!("{}: {e}", record.meta.path)),
             }
         }
@@ -360,13 +372,15 @@ impl ArchiveReader for EntrySetSqzReader {
 
     fn test_summary(
         &mut self,
+        limits: &SafetyLimits,
         progress: &dyn ProgressSink,
         ctl: &ControlToken,
     ) -> Result<TestSummary, FormatError> {
         let recovery = self.recovery.as_ref().map(|state| state.summary.clone());
         let problems = BoundedProblemLog::new(TEST_PROBLEM_PREVIEW_LIMIT);
-        let entries_tested =
-            self.test_with_problem_recorder(progress, ctl, |problem| problems.record(problem))?;
+        let entries_tested = self.test_with_problem_recorder(limits, progress, ctl, |problem| {
+            problems.record(problem)
+        })?;
         Ok(TestSummary {
             entries_tested,
             problems: problems.snapshot(),
@@ -418,16 +432,17 @@ impl ArchiveReader for SqzArchiveReader {
 
     fn test_summary(
         &mut self,
+        limits: &SafetyLimits,
         progress: &dyn ProgressSink,
         ctl: &ControlToken,
     ) -> Result<TestSummary, FormatError> {
         match self {
-            SqzArchiveReader::EntrySet(reader) => reader.test_summary(progress, ctl),
+            SqzArchiveReader::EntrySet(reader) => reader.test_summary(limits, progress, ctl),
             SqzArchiveReader::Inner {
                 reader,
                 outer_recovery,
             } => {
-                let mut report = reader.test_summary(progress, ctl)?;
+                let mut report = reader.test_summary(limits, progress, ctl)?;
                 if report.recovery.is_none() {
                     report.recovery = outer_recovery.clone();
                 }

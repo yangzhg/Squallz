@@ -248,6 +248,7 @@ fn recovered_file_and_directory_times_survive_extraction_and_conversion() {
         .test_summary_with_structure(
             &recovered,
             &OpenOptions::default(),
+            &squallz_format_api::SafetyLimits::default(),
             &NoProgress,
             &ControlToken::new(),
         )

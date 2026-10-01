@@ -200,7 +200,7 @@ export const settingsSections: ScreenAction[] = [
   { screen: "settingsGeneral", label: "General", icon: "settings", detail: "Startup, language, defaults" },
   { screen: "appearance", label: "Appearance", icon: "list", detail: "Display settings and interface mode" },
   { screen: "colors", label: "Colors", icon: "palette", detail: "Palettes and custom accent" },
-  { screen: "settingsSecurity", label: "Security", icon: "shield-alert", detail: "Safety limits and extraction guards" },
+  { screen: "settingsSecurity", label: "Security", icon: "shield-alert", detail: "Extraction and test limits" },
   { screen: "settingsPerformance", label: "Performance", icon: "hourglass", detail: "Workers, task flow, scale limits" },
   { screen: "passwordBook", label: "Password Book", icon: "lock", detail: "Secret-store status and saved archive secrets" },
   { screen: "integration", label: "Formats & Integration", icon: "archive", detail: "Archive capabilities and file-manager actions" },

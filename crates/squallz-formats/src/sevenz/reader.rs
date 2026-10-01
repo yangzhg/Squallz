@@ -13,7 +13,8 @@ use sevenz_rust2::ArchiveEntry;
 use squallz_format_api::{
     empty_extract_report, ArchiveReader, BoundedProblemLog, ControlToken, EntryMeta, EntryPath,
     EntryStreamConsumer, EntryType, ExtractOptions, ExtractReport, ExtractSink, FormatError,
-    OpenOptions, ProgressSink, ReadSeek, SymlinkPolicy, TestSummary, TEST_PROBLEM_PREVIEW_LIMIT,
+    LimitsAccountant, OpenOptions, ProgressSink, ReadSeek, SafetyLimits, SymlinkPolicy,
+    TestSummary, TEST_PROBLEM_PREVIEW_LIMIT,
 };
 
 use super::streams::EntryStreams;
@@ -142,14 +143,22 @@ impl SevenZArchiveReader {
 
     fn test_with_problem_recorder(
         &mut self,
+        limits: &SafetyLimits,
         progress: &dyn ProgressSink,
         ctl: &ControlToken,
         mut record_problem: impl FnMut(String),
     ) -> Result<u64, FormatError> {
-        let total: u64 = self.inner.archive().files.iter().map(|e| e.size()).sum();
+        let total: u64 = self
+            .inner
+            .archive()
+            .files
+            .iter()
+            .map(|e| e.size())
+            .fold(0, u64::saturating_add);
         let entry_plans = build_entry_read_plans(self.inner.archive(), None)?;
         let mut entries_tested = 0u64;
         let mut done = 0u64;
+        let mut accountant = LimitsAccountant::new(*limits);
         let mut cancelled = false;
         let mut mapping_failure = None;
         let password_supplied = self.password_supplied;
@@ -166,6 +175,11 @@ impl SevenZArchiveReader {
             };
             entries_tested += 1;
             let meta = meta_of(entry, plan.encrypted);
+            if let Err(error) = accountant.check_entry(&meta) {
+                mapping_failure = Some(error);
+                return Ok(false);
+            }
+            let mut entry_output_bytes = 0;
             let mut hasher = crc32fast::Hasher::new();
             let mut buf = vec![0u8; READ_CHUNK];
             loop {
@@ -176,8 +190,16 @@ impl SevenZArchiveReader {
                 match reader.read(&mut buf) {
                     Ok(0) => break,
                     Ok(n) => {
+                        if let Err(error) = accountant.add_entry_output_bytes(
+                            &meta,
+                            &mut entry_output_bytes,
+                            n as u64,
+                        ) {
+                            mapping_failure = Some(error);
+                            return Ok(false);
+                        }
                         hasher.update(&buf[..n]);
-                        done += n as u64;
+                        done = done.saturating_add(n as u64);
                         progress.on_progress(done, total, &meta.path);
                     }
                     Err(e) => {
@@ -212,7 +234,7 @@ impl SevenZArchiveReader {
         if cancelled {
             return Err(FormatError::Cancelled);
         }
-        progress.on_progress(total, total, &EntryPath::from_utf8(""));
+        progress.on_progress(done, done, &EntryPath::from_utf8(""));
         Ok(entries_tested)
     }
 }
@@ -939,12 +961,14 @@ impl ArchiveReader for SevenZArchiveReader {
 
     fn test_summary(
         &mut self,
+        limits: &SafetyLimits,
         progress: &dyn ProgressSink,
         ctl: &ControlToken,
     ) -> Result<TestSummary, FormatError> {
         let problems = BoundedProblemLog::new(TEST_PROBLEM_PREVIEW_LIMIT);
-        let entries_tested =
-            self.test_with_problem_recorder(progress, ctl, |problem| problems.record(problem))?;
+        let entries_tested = self.test_with_problem_recorder(limits, progress, ctl, |problem| {
+            problems.record(problem)
+        })?;
         Ok(TestSummary {
             entries_tested,
             problems: problems.snapshot(),

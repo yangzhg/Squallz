@@ -776,36 +776,15 @@ pub trait ArchiveReader: Send {
         ctl.checkpoint()
     }
 
-    /// Integrity test with an exact problem count and bounded diagnostic
-    /// preview.
+    /// Integrity test with explicit resource limits, an exact problem count,
+    /// and a bounded diagnostic preview. Readers charge observed output while
+    /// decoding; unsafe expansion and cancellation remain hard errors.
     fn test_summary(
-        &mut self,
-        progress: &dyn ProgressSink,
-        ctl: &ControlToken,
-    ) -> Result<TestSummary, FormatError>;
-
-    /// Integrity test with explicit decompression-bomb guardrails.
-    ///
-    /// The default implementation validates declared metadata before
-    /// forwarding to [`ArchiveReader::test_summary`]. Readers that stream
-    /// decoded contents should override this method and charge observed bytes
-    /// as they are read, because untrusted metadata can understate output.
-    fn test_summary_with_limits(
         &mut self,
         limits: &SafetyLimits,
         progress: &dyn ProgressSink,
         ctl: &ControlToken,
-    ) -> Result<TestSummary, FormatError> {
-        let mut accountant = LimitsAccountant::new(*limits);
-        for entry in self.entries() {
-            ctl.checkpoint()?;
-            let entry = entry?;
-            accountant.check_entry(&entry)?;
-            accountant.add_output_bytes(entry.size)?;
-        }
-        ctl.checkpoint()?;
-        self.test_summary(progress, ctl)
-    }
+    ) -> Result<TestSummary, FormatError>;
 }
 
 /// Write handle of an archive being created.

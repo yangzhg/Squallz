@@ -99,12 +99,21 @@ for the stable error kinds.
 
 ```sh
 sqz extract legacy.zip -d out --encoding gbk --max-output-bytes 2g
+sqz test archive.zip --max-output-bytes 2g --max-entries 100000 --max-compression-ratio 4096 --json
 sqz list archive.zip --encoding shift_jis
 sqz nested list outer.zip inner.7z --search "reports/2026"
 sqz extract archive.zip -d recovered --best-effort --json
 ```
 
-The safety limits are enforced by shared core code, not by a separate CLI-only extraction path.
+Extraction and integrity tests use the shared core safety limits. Tests count
+actual decoded bytes even when no files are written. `test` accepts
+`--max-output-bytes` (size suffixes such as `2g`), `--max-entries`, and
+`--max-compression-ratio`. Defaults are 256 GiB, 1,000,000 entries, and a ratio of
+2048. Ratio checks apply to entries larger than 1 MiB when their compressed size
+is known, and include observed output so understated metadata cannot bypass the
+check. Exceeding a limit exits with code 6 and `resource_limit_exceeded`, keeps
+the source unchanged, and does not declare the archive corrupt. Adjust limits
+only for trusted sources, then explicitly run a new test.
 `list --json`, `nested list --json`, and SFX JSON listings report `modified` as
 signed Unix seconds, rounded down to whole seconds. Zero is the Unix epoch;
 negative values preserve dates before 1970. `null` means the time is unavailable
@@ -135,7 +144,6 @@ same contract with `"output_dir": "repaired-set"`; `output`/`dest` and
 
 ```json
 {
-  "version": 1,
   "jobs": [
     { "kind": "compress", "inputs": ["project"], "output": "project.zip", "profile": "balanced" },
     { "kind": "test", "archive": "project.zip" },
@@ -238,12 +246,18 @@ ZIP 目标可用 `--split-mode native` 改为 `.z01/.z02/.../.zip`，WIM 目标�
 
 ```sh
 sqz extract legacy.zip -d out --encoding gbk --max-output-bytes 2g
+sqz test archive.zip --max-output-bytes 2g --max-entries 100000 --max-compression-ratio 4096 --json
 sqz list archive.zip --encoding shift_jis
 sqz nested list outer.zip inner.7z --search "reports/2026"
 sqz extract archive.zip -d recovered --best-effort --json
 ```
 
-这些安全限制由共享 core 执行，不是 CLI 单独实现的一条解压路径。
+解压和完整性测试共用 core 的安全上限。测试累计实际解码字节，即使不写出文件也计入。
+`test` 支持 `--max-output-bytes`（可用 `2g` 等后缀）、`--max-entries` 和
+`--max-compression-ratio`；默认分别为 256 GiB、1,000,000 条目和压缩比 2048。
+压缩比只在单条目超过 1 MiB 且格式提供压缩大小时检查，并同时核对实际解码字节，
+防止虚报大小绕过限制。超限以退出码 6 和 `resource_limit_exceeded` 停止，保留源归档，
+不代表已经确认归档损坏。仅对可信来源调整上限，再显式发起新的测试。
 `list --json`、`nested list --json` 与 SFX 的 JSON 列表将 `modified` 表示为有符号 Unix 秒，
 不足一秒的部分向下取整。0 表示 Unix epoch，负数保留 1970 年之前的时间；`null` 表示时间
 未知或超出有符号 64 位范围。列表的显示精度不改变解压和转换时保留的更精细时间。

@@ -201,6 +201,7 @@ fn run_create(
                 password: opts.password.clone(),
                 encoding_override: None,
             },
+            &squallz_core::api::SafetyLimits::default(),
             &verify_progress,
             &ctx.ctl,
         );

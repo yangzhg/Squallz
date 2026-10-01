@@ -1288,10 +1288,11 @@ impl Engine {
         &self,
         path: &Path,
         opts: &OpenOptions,
+        limits: &SafetyLimits,
         progress: &dyn ProgressSink,
         ctl: &ControlToken,
     ) -> Result<TestSummary, FormatError> {
-        self.test_summary_with_structure(path, opts, progress, ctl)
+        self.test_summary_with_structure(path, opts, limits, progress, ctl)
             .map(ArchiveTestOutcome::into_summary)
     }
 
@@ -1302,6 +1303,7 @@ impl Engine {
         &self,
         path: &Path,
         opts: &OpenOptions,
+        limits: &SafetyLimits,
         progress: &dyn ProgressSink,
         ctl: &ControlToken,
     ) -> Result<ArchiveTestOutcome, FormatError> {
@@ -1309,7 +1311,7 @@ impl Engine {
         let structure = reader.structure_status();
         progress.on_phase(ProgressPhase::ArchiveTest, true);
         ctl.checkpoint()?;
-        let mut summary = controlled_result(ctl, reader.test_summary(progress, ctl))?;
+        let mut summary = controlled_result(ctl, reader.test_summary(limits, progress, ctl))?;
         let payload_problem_count = summary.problems.total;
         add_structure_problem_to_summary(&mut summary, structure);
         Ok(ArchiveTestOutcome {
@@ -2867,6 +2869,7 @@ mod tests {
 
         fn test_summary(
             &mut self,
+            _limits: &api::SafetyLimits,
             _progress: &dyn ProgressSink,
             _ctl: &ControlToken,
         ) -> Result<TestSummary, FormatError> {

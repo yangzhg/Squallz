@@ -95,7 +95,11 @@ fn integrity_testing_cancels_after_a_chunk_without_reading_the_complete_entry() 
         recovery: None,
     };
     let control = ControlToken::default();
-    let result = reader.test_summary(&CancelAfterProgress(control.clone()), &control);
+    let result = reader.test_summary(
+        &squallz_format_api::SafetyLimits::default(),
+        &CancelAfterProgress(control.clone()),
+        &control,
+    );
     assert!(matches!(result, Err(FormatError::Cancelled)), "{result:?}");
     assert!(
         read_bytes.load(Ordering::Relaxed) <= VERIFY_CHUNK,
@@ -128,7 +132,11 @@ fn streamed_integrity_checks_both_hashes_and_reports_truncated_data() {
             recovery: None,
         };
         let result = reader
-            .test_summary(&NoProgress, &ControlToken::new())
+            .test_summary(
+                &squallz_format_api::SafetyLimits::default(),
+                &NoProgress,
+                &ControlToken::new(),
+            )
             .unwrap();
         assert_eq!(result.entries_tested, 1);
         assert_eq!(
@@ -172,7 +180,11 @@ fn streamed_integrity_retries_interrupted_reads() {
         recovery: None,
     };
     assert!(reader
-        .test_summary(&NoProgress, &ControlToken::new())
+        .test_summary(
+            &squallz_format_api::SafetyLimits::default(),
+            &NoProgress,
+            &ControlToken::new()
+        )
         .unwrap()
         .is_ok());
 }
@@ -273,7 +285,11 @@ fn recovered_entry_prefix_reads_only_requested_bytes_and_remains_reusable() {
         })
         .unwrap();
     assert!(reader
-        .test_summary(&NoProgress, &ControlToken::new())
+        .test_summary(
+            &squallz_format_api::SafetyLimits::default(),
+            &NoProgress,
+            &ControlToken::new()
+        )
         .unwrap()
         .is_ok());
 }
@@ -346,7 +362,11 @@ fn recovered_encrypted_inner_archives_remain_readable() {
             assert_eq!(restored, content, "{inner_format}");
         }
         let report = reader
-            .test_summary(&NoProgress, &ControlToken::new())
+            .test_summary(
+                &squallz_format_api::SafetyLimits::default(),
+                &NoProgress,
+                &ControlToken::new(),
+            )
             .unwrap();
         assert!(report.is_ok(), "{inner_format}: {report:?}");
         assert_eq!(report.recovery.unwrap().repaired_blocks, 1);
@@ -397,7 +417,11 @@ fn recovery_loading_uses_bounded_reads_for_healthy_and_damaged_archives() {
         )
         .unwrap();
         let report = reader
-            .test_summary(&NoProgress, &ControlToken::new())
+            .test_summary(
+                &squallz_format_api::SafetyLimits::default(),
+                &NoProgress,
+                &ControlToken::new(),
+            )
             .unwrap();
         assert!(report.is_ok(), "{damage}: {report:?}");
         assert_eq!(
@@ -502,7 +526,11 @@ fn footer_recovery_skips_false_candidates_and_finds_a_trailer_across_chunks() {
     let mut reader =
         SqzArchiveReader::open(Box::new(Cursor::new(bytes)), &OpenOptions::default()).unwrap();
     assert!(reader
-        .test_summary(&NoProgress, &ControlToken::new())
+        .test_summary(
+            &squallz_format_api::SafetyLimits::default(),
+            &NoProgress,
+            &ControlToken::new()
+        )
         .unwrap()
         .is_ok());
     let entries = reader.entries().collect::<Result<Vec<_>, _>>().unwrap();
