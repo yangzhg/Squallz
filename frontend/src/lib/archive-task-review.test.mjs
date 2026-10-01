@@ -106,6 +106,124 @@ function deferred() {
   return { promise, resolve, reject };
 }
 
+async function withArchiveStore(run, exercise) {
+  const store = await server.ssrLoadModule("/src/lib/archive.svelte.ts");
+  const { ipc } = await server.ssrLoadModule("/src/lib/ipc.ts");
+  const original = Object.fromEntries(["openArchive", "cancelArchiveOpen", "closeArchive", "listEntries"]
+    .map((name) => [name, ipc[name]]));
+  const pending = deferred();
+  const started = deferred();
+  const cancelled = [];
+  const closed = [];
+  ipc.openArchive = async (path, _password, encoding, requestId) => {
+    if (path === "/unrelated.zip") return { ...archive(path), read_only: true };
+    started.resolve({ path, encoding, requestId });
+    return pending.promise;
+  };
+  ipc.listEntries = async () => ({ page: 0, total: 0, items: [] });
+  ipc.cancelArchiveOpen = async (requestId) => { cancelled.push(requestId); };
+  ipc.closeArchive = async (id) => { closed.push(id); };
+  Object.defineProperties(run.context, {
+    currentArchive: { configurable: true, get: () => store.archive() },
+    archivePasswordPrompt: { configurable: true, get: () => store.openPasswordPrompt() },
+  });
+  run.context.openArchiveStore = store.openArchive;
+  run.context.cancelPendingArchiveOpen = store.cancelPendingArchiveOpen;
+  run.context.cancelArchivePasswordPrompt = store.cancelPasswordPrompt;
+  run.context.archiveOpenError = store.archiveOpenError;
+  try {
+    assert.equal(await store.openArchive("/unrelated.zip"), true);
+    await exercise({ store, ipc, pending, started, cancelled, closed });
+  } finally {
+    store.closeArchive();
+    Object.assign(ipc, original);
+  }
+}
+
+test("leaving a task review while its archive opens keeps the current workspace and releases a late handle", async () => {
+  for (const kind of ["extract", "convert"]) {
+    const run = harness();
+    run.context.loadConvertRouteForReview = async () => ({
+      canReviewTask: () => true, syncArchive() {}, restoreTaskDraft: () => { run.calls.push(["restore"]); return true; },
+    });
+    await withArchiveStore(run, async ({ store, pending, started, cancelled, closed }) => {
+      const reviewSpec = kind === "extract" ? spec() : {
+        kind, src: "/original/photos.zip", dest: "/out/photos.7z", src_encoding: null,
+      };
+      const reviewing = run.reviewTask({ id: 8, state: "failed", spec: reviewSpec });
+      const request = await started.promise;
+      assert.ok(run.context.pendingArchiveTaskReview);
+      run.setScreen("create");
+      pending.resolve({ ...archive(request.path, 2), read_only: true });
+      await reviewing;
+      assert.equal(run.context.screen, "create", "a late archive must not replace the page the user chose");
+      assert.equal(store.archive().source, "/unrelated.zip");
+      assert.equal(run.context.archiveOpenStatus, "idle");
+      assert.equal(run.context.pendingArchiveTaskReview, null);
+      assert.deepEqual(cancelled, [request.requestId]);
+      assert.deepEqual(closed, [2]);
+      assert.equal(run.context.extractCustomDest, "/unrelated/output");
+      assert.equal(run.calls.some(([name]) => name === "restore" || name === "submit" || name === "notice"), false);
+    });
+  }
+});
+
+test("returning to the original page cannot revive a dismissed open's password or corruption response", async () => {
+  for (const key of ["error.password_required", "error.corrupt_archive"]) {
+    const run = harness();
+    await withArchiveStore(run, async ({ store, pending, started, cancelled }) => {
+      const opening = run.openArchivePath("/old.zip", "open-file");
+      const request = await started.promise;
+      run.setScreen("settingsGeneral");
+      run.setScreen("browse");
+      pending.reject({ key, params: {}, detail: "" });
+      await opening;
+      assert.equal(run.context.screen, "browse");
+      assert.equal(store.archive().source, "/unrelated.zip");
+      assert.equal(store.openPasswordPrompt(), null);
+      assert.equal(store.archiveOpenError(), null);
+      assert.equal(run.context.archiveOpenStatus, "idle");
+      assert.deepEqual(cancelled, [request.requestId]);
+      assert.equal(run.calls.some(([name]) => name === "notice"), false);
+    });
+  }
+});
+
+test("leaving while the first page loads releases its handle without clearing a newer open's waiting state", async () => {
+  const run = harness();
+  await withArchiveStore(run, async ({ store, ipc, pending, started, cancelled, closed }) => {
+    const listing = deferred();
+    const listingStarted = deferred();
+    ipc.listEntries = async (id) => {
+      if (id === 2) { listingStarted.resolve(); return listing.promise; }
+      return { page: 0, total: 0, items: [] };
+    };
+    const reviewing = run.reviewTask({ id: 8, state: "failed", spec: spec() });
+    const request = await started.promise;
+    pending.resolve({ ...archive(request.path, 2), read_only: true });
+    await listingStarted.promise;
+    run.setScreen("settingsGeneral");
+    assert.equal(run.context.archiveOpenStatus, "idle");
+    assert.equal(store.archive().source, "/unrelated.zip");
+    const newer = deferred();
+    ipc.openArchive = () => newer.promise;
+    const opening = run.openArchivePath("/newer.zip", "open-file");
+    listing.resolve({ page: 0, total: 1, items: [{ path: "old.txt", entry_type: "file" }] });
+    await reviewing;
+    assert.equal(run.context.screen, "settingsGeneral");
+    assert.equal(run.context.archiveOpenStatus, "opening");
+    assert.equal(store.archive().source, "/unrelated.zip");
+    assert.deepEqual(cancelled, [request.requestId]);
+    assert.deepEqual(closed, [2]);
+    newer.resolve({ ...archive("/newer.zip", 3), read_only: true });
+    await opening;
+    assert.equal(run.context.screen, "browse");
+    assert.equal(run.context.archiveOpenStatus, "idle");
+    assert.equal(store.archive().source, "/newer.zip");
+    assert.equal(run.context.extractCustomDest, "/unrelated/output");
+  });
+});
+
 test("a superseded archive picker cannot replace a newer open or its feedback", async () => {
   for (const outcome of ["selected", "cancelled", "failed"]) {
     const run = harness();

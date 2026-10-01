@@ -36,7 +36,7 @@ function harness() {
     nestedExtractPickerBusy: false, nestedExtractPickerRequest: 0, nestedExtractDraftGeneration: 0,
     archiveUpdateReview: { cancelSourceChoice() {} }, taskReviewRequestGeneration: 0,
     dismissArchivePicker() {}, clearEntryPreviewState() {}, syncUrl() {},
-    screen: "browse", taskWindowMode: false, runtimePreviews: {batchPaths:[]},
+    screen: "browse", archiveOpenStatus: "idle", taskWindowMode: false, runtimePreviews: {batchPaths:[]},
     currentArchive: {source:"/unrelated/current.zip"}, appliedDefaultExtractDir: "",
     uniqueNonEmptyPaths: (paths) => [...new Set(paths.filter(Boolean))],
     normalizedDefaultExtractDir: (path) => path || null,

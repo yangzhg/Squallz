@@ -73,6 +73,7 @@
     cancelArchivePasswordSave,
     clearArchivePasswordSave,
     allCurrentRowsSelected,
+    cancelPendingArchiveOpen,
     cancelPasswordPrompt as cancelArchivePasswordPrompt,
     clearSelection,
     currentDirs,
@@ -2231,7 +2232,14 @@
   function setScreen(next: Screen) {
     if (preventCreateSubmissionNavigation(next)) return;
     if (preventConvertSubmissionNavigation(next)) return;
-    if (next !== screen) dismissArchivePicker();
+    if (next !== screen) {
+      dismissArchivePicker();
+      if (archiveOpenStatus === "opening" && !archivePasswordPrompt && next !== "password") {
+        archiveOpenGeneration += 1;
+        archiveOpenStatus = "idle";
+        cancelPendingArchiveOpen();
+      }
+    }
     if (screen !== "password" && next !== screen && (next !== "password" || !previewPasswordPrompt)) {
       clearEntryPreviewState();
     }

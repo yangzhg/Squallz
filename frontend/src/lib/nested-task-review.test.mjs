@@ -31,7 +31,7 @@ function harness() {
     batchPickerRequest: 0, batchPickerBusy: false,
     archiveUpdateReview: { cancelSourceChoice() {} }, taskReviewRequestGeneration: 0,
     dismissArchivePicker() {}, clearEntryPreviewState() {}, syncUrl() {}, tick: async () => {},
-    screen: "browse", taskWindowMode: false, appliedDefaultExtractDir: "",
+    screen: "browse", archiveOpenStatus: "idle", taskWindowMode: false, appliedDefaultExtractDir: "",
     currentArchive: { source: "/unrelated/current.zip" },
     nestedExtractJob, reviewNestedExtract, taskReviewScreen,
     normalizedDefaultExtractDir: (path) => path || null,
