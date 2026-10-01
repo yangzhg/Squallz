@@ -1082,6 +1082,13 @@
   let archiveEditSession = 0;
   let archiveEditReturnFocus: HTMLElement | null = null;
   let moveConflictReview = $state<MoveConflictReview | null>(null);
+  let moveConflictReturnFocus: HTMLElement | null = null;
+  let moveConflictView = $derived.by(() => {
+    const review = moveConflictReview;
+    if (!review) return null;
+    const items = review.items.filter((item) => item.conflict);
+    return { targetDir: review.targetDir, readyCount: review.items.length - items.length, items };
+  });
   let historyRows = $derived(operationHistory());
   let activePopover = $state<"quickActions" | null>(null);
   let archiveSearchInput = $state<HTMLInputElement | null>(null);
@@ -1227,6 +1234,7 @@
       renameTargetName = source ? pathBaseName(source.replace(/\/+$/g, "")) : "";
       archiveEditError = null;
       moveConflictReview = null;
+      moveConflictReturnFocus = null;
     });
   });
 
@@ -4669,14 +4677,7 @@
           ariaLabel: labelWithDisabledReason(previewLabel, previewDisabledReason),
         },
         selectedSummary: selectedSummary(),
-        conflict: moveConflictReview
-          ? {
-              count: moveConflictCount(),
-              readyCount: moveReadyCount(),
-              targetDir: moveConflictReview.targetDir,
-              items: visibleMoveConflictItems(),
-            }
-          : null,
+        conflict: moveConflictView,
         structureWarning: archiveStructureWarningText(),
         recovery,
         totalRows: currentArchive ? totalRows() : 0,
@@ -4700,9 +4701,7 @@
       }),
       onRevealPreview: () => void revealEntryPreview(),
       onPreviewSelection: () => void runAppAction("preview_entry"),
-      onCancelMoveConflict: () => {
-        moveConflictReview = null;
-      },
+      onCancelMoveConflict: cancelMoveConflict,
       onSubmitMoveReadyOnly: () => void submitMoveReadyOnly(),
       onSubmitMoveKeepBoth: () => void submitMoveKeepBoth(),
       onBrowseScroll: onBrowseVirtualScroll,
@@ -4763,14 +4762,7 @@
           nestedPreview: Boolean(nestedPreview),
         },
         selectedSummary: selectedSummary(),
-        conflict: moveConflictReview
-          ? {
-              count: moveConflictCount(),
-              readyCount: moveReadyCount(),
-              targetDir: moveConflictReview.targetDir,
-              items: visibleMoveConflictItems(),
-            }
-          : null,
+        conflict: moveConflictView,
         structureWarning: archiveStructureWarningText(),
         recovery,
         encodingWarning: hasEncodingWarning() ? archiveWarningText() : null,
@@ -4802,9 +4794,7 @@
       onPreviewSelection: () => void runAppAction("preview_entry"),
       onOpenNestedPreview: () => void openNestedPreviewArchive(),
       onExtractNestedPreview: () => void extractNestedPreviewArchive(),
-      onCancelMoveConflict: () => {
-        moveConflictReview = null;
-      },
+      onCancelMoveConflict: cancelMoveConflict,
       onSubmitMoveReadyOnly: () => void submitMoveReadyOnly(),
       onSubmitMoveKeepBoth: () => void submitMoveKeepBoth(),
       onRepairEncoding: () => void repairFilenameEncoding("gbk"),
@@ -9647,18 +9637,6 @@
     return `${targetDir}${base}${isDir ? "/" : ""}`;
   }
 
-  function moveConflictCount(): number {
-    return moveConflictReview?.items.filter((item) => item.conflict).length ?? 0;
-  }
-
-  function moveReadyCount(): number {
-    return moveConflictReview?.items.filter((item) => !item.conflict).length ?? 0;
-  }
-
-  function visibleMoveConflictItems(): MovePlanItem[] {
-    return moveConflictReview?.items.filter((item) => item.conflict).slice(0, 5) ?? [];
-  }
-
   function moveTargetStatus(): string {
     const targetDir = normalizeMoveTargetDir();
     if (!currentArchive) return openArchiveFirstLabel();
@@ -11337,6 +11315,7 @@
     };
     setScreen("browse");
     moveConflictReview = null;
+    moveConflictReturnFocus = null;
     if (kind === "rename") renameTargetName = pathBaseName(selectedRenameSource()?.replace(/\/+$/g, "") ?? "");
     if (kind === "new-folder") newFolderName = "";
     archiveEditKind = kind;
@@ -11350,12 +11329,23 @@
     archiveEditError = null;
     const target = archiveEditReturnFocus;
     archiveEditReturnFocus = null;
+    restoreArchiveEditFocus(target);
+  }
+
+  function restoreArchiveEditFocus(target: HTMLElement | null) {
     void tick().then(() => {
       if (blockingModalVisible() || (document.activeElement !== document.body && document.activeElement !== target)) return;
       const focus = target?.isConnected && !target.matches(":disabled") && !target.closest("[inert]")
         ? target : archiveSearchInput;
       if (focus?.isConnected && !focus.closest("[inert]")) focus.focus({ preventScroll: true });
     });
+  }
+
+  function cancelMoveConflict() {
+    const target = moveConflictReturnFocus;
+    moveConflictReview = null;
+    moveConflictReturnFocus = null;
+    restoreArchiveEditFocus(target);
   }
 
   function archiveEditorFields(kind: ArchiveEditKind) {
@@ -11619,9 +11609,9 @@
       }));
       const conflicts = plan.filter((item) => item.conflict);
       if (conflicts.length > 0) {
+        moveConflictReturnFocus = archiveEditReturnFocus;
         moveConflictReview = { archiveId: currentArchive.id, generation: archiveOpenGeneration, targetDir, items: plan };
         closeArchiveEditor();
-        showNotice(tr("gui.move.review_conflicts", "Review {count} move target conflicts").replace("{count}", conflicts.length.toLocaleString()));
         return;
       }
       archiveEditChecking = false;
@@ -11641,6 +11631,7 @@
     if (moveConflictReview && (currentArchive?.id !== moveConflictReview.archiveId
       || archiveOpenGeneration !== moveConflictReview.generation || archiveOpenStatus !== "idle")) {
       moveConflictReview = null;
+      moveConflictReturnFocus = null;
       showNotice(tr("gui.move.review_changed", "The archive changed. Select the items and check the move targets again."));
       return;
     }
@@ -11679,6 +11670,7 @@
     );
     if (queued) {
       moveConflictReview = null;
+      moveConflictReturnFocus = null;
       closeArchiveEditor();
       recordOperation({
         status: "queued",

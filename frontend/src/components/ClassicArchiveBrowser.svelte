@@ -1,6 +1,7 @@
 <script lang="ts" module>
   import type { EntryDto, EntryPreviewDto } from "../lib/ipc";
   import type { ArchiveBrowseRecoveryState } from "./ArchiveBrowseRecovery.svelte";
+  import type { MoveConflictReviewView } from "./MoveConflictReview.svelte";
 
   type Translate = (key: string, fallback: string) => string;
 
@@ -23,12 +24,6 @@
     selectionLabel: string;
     previewActionLabel: string;
     previewActionIcon: "external-link" | "folder-open" | "eye";
-  };
-
-  type MoveConflictItem = {
-    from: string;
-    to: string;
-    keepBothTo: string | null;
   };
 
   export interface ClassicArchiveBrowserProps {
@@ -63,12 +58,7 @@
         ariaLabel: string;
       };
       selectedSummary: string;
-      conflict: {
-        count: number;
-        readyCount: number;
-        targetDir: string;
-        items: readonly MoveConflictItem[];
-      } | null;
+      conflict: MoveConflictReviewView | null;
       structureWarning: string | null;
       recovery: ArchiveBrowseRecoveryState;
       totalRows: number;
@@ -108,6 +98,7 @@
   import Icon from "./Icon.svelte";
   import ArchiveStructureWarning from "./ArchiveStructureWarning.svelte";
   import ArchiveBrowseRecovery from "./ArchiveBrowseRecovery.svelte";
+  import MoveConflictReview from "./MoveConflictReview.svelte";
   import { cssVariables } from "../lib/css-variables";
 
   let {
@@ -269,45 +260,7 @@
         </small>
       </div>
       {#if view.conflict}
-        <div
-          class="classic-move-conflict-review"
-          role="dialog"
-          aria-label={tr("gui.move.conflicts", "Move target conflicts")}
-          tabindex="-1"
-        >
-          <header>
-            <strong>
-              {tr("gui.move.conflict_count", "{count} move conflicts").replace("{count}", String(view.conflict.count))}
-            </strong>
-            <span>
-              {tr("gui.move.ready_target", "{count} ready · target {target}")
-                .replace("{count}", String(view.conflict.readyCount))
-                .replace("{target}", view.conflict.targetDir)}
-              · {tr("gui.move.shown_conflicts", "Showing {shown} of {count} conflicts; your choice applies to the whole selection.")
-                .replace("{shown}", String(view.conflict.items.length)).replace("{count}", String(view.conflict.count))}
-            </span>
-          </header>
-          <!-- svelte-ignore a11y_no_noninteractive_tabindex (focusable scroll region) -->
-          <div class="classic-move-conflict-table" role="region" aria-label={tr("gui.move.conflicts", "Move target conflicts")} tabindex="0">
-            <div>
-              <b>{tr("common.source", "Source")}</b>
-              <b>{tr("gui.move.existing_target", "Existing target")}</b>
-              <b>{tr("gui.move.keep_both_target", "Keep both target")}</b>
-            </div>
-            {#each view.conflict.items as item}
-              <div><strong>{item.from}</strong><span>{item.to}</span><em>{item.keepBothTo}</em></div>
-            {/each}
-          </div>
-          <div class="classic-button-row compact-row">
-            <button onclick={onCancelMoveConflict}>{tr("gui.common.cancel", "Cancel")}</button>
-            <button disabled={view.conflict.readyCount === 0} onclick={onSubmitMoveReadyOnly}>
-              {tr("gui.move.ready_only", "Move ready only")}
-            </button>
-            <button class="classic-primary" onclick={onSubmitMoveKeepBoth}>
-              {tr("gui.move.keep_both_all", "Keep both and move all")}
-            </button>
-          </div>
-        </div>
+        <MoveConflictReview review={view.conflict} {tr} classic onCancel={onCancelMoveConflict} onReadyOnly={onSubmitMoveReadyOnly} onKeepBoth={onSubmitMoveKeepBoth} />
       {/if}
     </div>
     <p class="archive-selection-hint">{tr("gui.selection.range_hint", "Shift-click to select a range · ⌘/Ctrl-click to select individual entries")}</p>

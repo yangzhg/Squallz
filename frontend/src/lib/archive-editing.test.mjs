@@ -21,7 +21,7 @@ async function loadEditing(overrides = {}) {
   const names = new Set([
     "normalizeNewFolderPath", "commitNewFolderName", "submitNewFolderJob", "validateArchiveEditTarget",
     "normalizeMoveTargetDir", "submitMovePlan", "moveTargetForPath",
-    "archiveEditPathProblem", "moveTargetProblem", "submitMoveSelectedJob", "submitMoveKeepBoth",
+    "archiveEditPathProblem", "moveTargetProblem", "submitMoveSelectedJob", "submitMoveKeepBoth", "submitMoveReadyOnly",
     "normalizeRenameTargetName", "selectedRenameSource", "renameTargetIssue", "archiveEntryExtension",
     "submitRenameSelectedJob", "selectedDeletePaths", "submitDeleteSelectedJob", "submitCurrentArchiveJob",
     "openArchiveEditor", "submitAddToArchiveJob", "archiveEditSubmissionFailure", "showArchiveEditError", "jobSubmitBlockedMessage",
@@ -58,6 +58,7 @@ async function loadEditing(overrides = {}) {
     renameTargetName: "重命名",
     moveTargetDir: "destination/",
     moveConflictReview: null,
+    moveConflictReturnFocus: null,
     archiveEditKind: null,
     archiveEditContext: null,
     archiveEditChecking: false,
@@ -96,7 +97,7 @@ async function loadEditing(overrides = {}) {
     }),
     ...overrides.ipc,
   };
-  const handlers = vm.runInNewContext(`${outputText}\n({ normalizeNewFolderPath, commitNewFolderName, submitNewFolderJob, normalizeMoveTargetDir, submitMoveSelectedJob, submitMoveKeepBoth, submitMovePlan, normalizeRenameTargetName, submitRenameSelectedJob, submitDeleteSelectedJob, openArchiveEditor, submitAddToArchiveJob, JobSubmitBlockedError })`, context);
+  const handlers = vm.runInNewContext(`${outputText}\n({ normalizeNewFolderPath, commitNewFolderName, submitNewFolderJob, normalizeMoveTargetDir, submitMoveSelectedJob, submitMoveKeepBoth, submitMoveReadyOnly, submitMovePlan, normalizeRenameTargetName, submitRenameSelectedJob, submitDeleteSelectedJob, openArchiveEditor, submitAddToArchiveJob, JobSubmitBlockedError })`, context);
   const reset = source.statements.find((node) => ts.isExpressionStatement(node)
     && node.getText(source).startsWith("$effect(") && node.getText(source).includes('archiveDirs.join("\\u0000")')
     && node.getText(source).includes("renameTargetName"));
@@ -442,6 +443,67 @@ test("move confirmation uses the complete archive plan even when target rows are
   }]);
 });
 
+test("move review exposes every conflict and its decisions submit the complete selection", async () => {
+  const paths = Array.from({ length: 44 }, (_, index) => `docs/report-${index + 1}.txt`);
+  for (const action of ["submitMoveKeepBoth", "submitMoveReadyOnly"]) {
+    const editing = await loadEditing({
+      selectedPaths: () => new Set(paths),
+      ipc: { planArchiveMove: async (_id, sources, target) => ({ missing_sources: [], blocked_parent: null,
+        items: sources.map((from, index) => ({ from, to: target + from.split("/").at(-1),
+          conflict: index < 42 ? (index === 41 ? "duplicate_target" : "existing_target") : null,
+          keep_both_to: index < 42 ? target + `report-${index + 1} copy 2.txt` : null })),
+      }) },
+    });
+    editing.openArchiveEditor("move");
+    await editing.submitMoveSelectedJob();
+    const component = await readFile(new URL("../App.svelte", import.meta.url), "utf8");
+    const source = ts.createSourceFile("App.ts", component.match(/<script lang="ts">([\s\S]*?)<\/script>/)[1], ts.ScriptTarget.Latest, true);
+    const declaration = source.statements.filter(ts.isVariableStatement)
+      .flatMap((statement) => [...statement.declarationList.declarations])
+      .find((node) => node.name.getText(source) === "moveConflictView");
+    assert.ok(declaration, "the browser must receive the complete review independently of the visible page");
+    const view = vm.runInNewContext(ts.transpileModule(`(${declaration.initializer.arguments[0].getText(source)})()`,
+      { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, editing.context);
+    assert.equal(view.readyCount, 2);
+    assert.deepEqual([...view.items].map((item) => item.from), paths.slice(0, 42));
+    assert.match(view.items[41].reason, /Multiple selected entries/u);
+    assert.equal(editing.submitted.length, 0);
+    assert.equal(editing.notices.length, 0, "the focused review presents the decision without a notice covering its controls");
+    await editing[action]();
+    const rename = JSON.parse(JSON.stringify(editing.submitted[0].rename));
+    assert.deepEqual(rename, (action === "submitMoveKeepBoth" ? paths : paths.slice(42))
+      .map((from) => {
+        const index = paths.indexOf(from);
+        return { from, to: index < 42 ? `destination/report-${index + 1} copy 2.txt` : `destination/report-${index + 1}.txt` };
+      }));
+    assert.equal(editing.context.moveConflictReview, null);
+  }
+});
+
+test("a failed reviewed move keeps the full plan for an explicit retry", async () => {
+  const paths = Array.from({ length: 42 }, (_, index) => `docs/report-${index + 1}.txt`);
+  const editing = await loadEditing({ selectedPaths: () => new Set(paths),
+    submitJob: async () => { throw new Error("unavailable"); },
+    ipc: { planArchiveMove: async (_id, sources, target) => ({ missing_sources: [], blocked_parent: null,
+      items: sources.map((from) => ({ from, to: target + from.split("/").at(-1), conflict: "existing_target",
+        keep_both_to: target + from.split("/").at(-1).replace(".txt", " copy 2.txt") })),
+    }) },
+  });
+  editing.openArchiveEditor("move");
+  await editing.submitMoveSelectedJob();
+  const review = editing.context.moveConflictReview;
+  await editing.submitMoveKeepBoth();
+  assert.equal(editing.context.moveConflictReview, review);
+  assert.equal(editing.submitted.length, 0);
+  assert.equal(editing.toasts.length, 1);
+  assert.match(editing.toasts[0].body, /try again/u);
+  editing.context.submitJob = async (spec) => { editing.submitted.push(spec); return 1; };
+  await editing.submitMoveKeepBoth();
+  assert.equal(editing.submitted[0].rename.length, 42);
+  assert.equal(editing.submitted[0].rename[41].to, "destination/report-42 copy 2.txt");
+  assert.equal(editing.context.moveConflictReview, null);
+});
+
 test("an archive-root move keeps the root destination", async () => {
   const editing = await loadEditing({ moveTargetDir: "/" });
   assert.equal(editing.normalizeMoveTargetDir(), "");
@@ -700,6 +762,31 @@ test("the shared archive editor renders one named modal form", async () => {
     assert.match(refreshing, /Refreshing archive contents/u);
     assert.match(refreshing, /type="submit" disabled/u);
     assert.doesNotMatch(refreshing, /<input[^>]*disabled/u, "drafts remain editable while the archive refreshes");
+  } finally { await server.close(); }
+});
+
+test("move review renders a bounded, labelled path table in both browser modes", async () => {
+  const server = await createTestServer();
+  try {
+    const { render } = await server.ssrLoadModule("svelte/server");
+    const { default: Review } = await server.ssrLoadModule("/src/components/MoveConflictReview.svelte");
+    const items = Array.from({ length: 42 }, (_, index) => ({ from: `源目录/报告-${index + 1}.txt`,
+      reason: "Target already exists", to: `报告-${index + 1}.txt`, keepBothTo: `报告-${index + 1} copy 2.txt` }));
+    for (const classic of [false, true]) {
+      const { body } = render(Review, { props: { classic, review: { targetDir: "", readyCount: 0, items },
+        tr: (_key, fallback) => fallback, onCancel: () => {}, onReadyOnly: () => {}, onKeepBoth: () => {} } });
+      assert.match(body, /Move conflicts in \/: 42/u);
+      assert.match(body, /aria-rowcount="43"/u);
+      assert.equal((body.match(/<td\b/gu) ?? []).length, 75, "only one page enters the DOM");
+      assert.match(body, /Source<\/th>/u);
+      assert.match(body, /Requested target<\/th>/u);
+      assert.match(body, /Target when keeping both<\/th>/u);
+      assert.match(body, /Target already exists/u);
+      assert.match(body, /Conflicts 1–25 of 42/u);
+      assert.match(body, /disabled(?:="")?>Move items without conflicts/u);
+      assert.match(body, /Next page/u);
+      assert.doesNotMatch(body, /role="dialog"|style=/u);
+    }
   } finally { await server.close(); }
 });
 
