@@ -3936,6 +3936,7 @@ select option {
   height: auto;
   display: grid;
   grid-template-columns: 180px minmax(0, 1fr) 304px;
+  grid-template-rows: minmax(0, 1fr);
   overflow: hidden;
 }
 
@@ -3956,9 +3957,11 @@ select option {
 }
 
 .modern-sidebar {
+  min-height: 0;
   padding: 20px 14px;
   border-right: 1px solid var(--color-border-default);
   background: var(--color-surface-raised);
+  overflow: auto;
 }
 
 .sidebar-section {
@@ -7803,6 +7806,29 @@ select option {
   flex-shrink: 0;
 }
 
+.operation-page-controls {
+  display: flex;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-sm);
+}
+
+.operation-range {
+  margin: 0;
+  color: var(--color-text-secondary);
+  font-size: var(--type-control);
+  line-height: var(--type-control-line);
+  font-variant-numeric: tabular-nums;
+}
+
+.operation-pagination {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-xs);
+}
+
 .update-review-options > summary {
   cursor: pointer;
   font-size: var(--type-control);
@@ -7813,7 +7839,8 @@ select option {
   margin-top: var(--space-md);
 }
 
-.update-review-error {
+.update-review-error,
+.operation-field > .update-review-error {
   color: var(--color-danger-fg);
   font-size: var(--type-control);
   line-height: var(--type-body-line);
@@ -7903,6 +7930,14 @@ select option {
   color: var(--input-fg);
   font: inherit;
   font-size: var(--type-control);
+}
+
+.operation-input[aria-invalid="true"] {
+  border-color: var(--color-danger-border);
+}
+
+.operation-input[aria-invalid="true"]:focus-visible {
+  box-shadow: var(--danger-focus-shadow);
 }
 
 textarea.operation-input {

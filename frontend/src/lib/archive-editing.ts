@@ -1,5 +1,5 @@
 export type ArchiveEditPathIssue = {
-  kind: "empty" | "parent" | "characters" | "trailing" | "reserved";
+  kind: "empty" | "absolute" | "parent" | "characters" | "trailing" | "reserved";
   segment: string;
 };
 
@@ -12,6 +12,7 @@ export function normalizeArchivePath(value: string, fallback = ""): string {
 
 export function archiveEditPathIssue(path: string, allowRoot = false): ArchiveEditPathIssue | null {
   if (!path && !allowRoot) return { kind: "empty", segment: "" };
+  if (path.startsWith("/") || path.startsWith("\\")) return { kind: "absolute", segment: "" };
   for (const segment of path.replaceAll("\\", "/").split("/").filter(Boolean)) {
     if (segment === "..") return { kind: "parent", segment };
     if (/[<>:"|?*\u0000-\u001F]/u.test(segment)) return { kind: "characters", segment };

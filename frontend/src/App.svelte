@@ -9574,6 +9574,7 @@
     const issue = archiveEditPathIssue(path, allowRoot);
     if (!issue) return "";
     if (issue.kind === "empty") return tr("gui.edit.path_empty", "Enter an archive path.");
+    if (issue.kind === "absolute") return tr("gui.edit.path_absolute", "Enter a relative path inside the archive without a leading slash.");
     if (issue.kind === "parent") return tr("gui.edit.path_parent", "Parent references (..) are not allowed. Enter a path inside the archive.");
     if (issue.kind === "characters") return tr("gui.edit.path_characters", "{name} contains characters that cannot be used on Windows. Remove them or choose another name.").replace("{name}", issue.segment);
     if (issue.kind === "trailing") return tr("gui.edit.path_trailing", "{name} ends with a space or dot. Choose a portable name.").replace("{name}", issue.segment);

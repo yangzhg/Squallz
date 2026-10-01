@@ -2,17 +2,38 @@
   import { onMount, tick } from "svelte";
   import type { ArchiveUpdateWorkspaceSurface } from "./ToolsWorkspace.svelte";
   import type { CreateContentPolicy } from "../lib/ipc";
-  import type { UpdateOperation, UpdateIssue } from "../lib/archive-update.svelte";
+  import type { ArchiveUpdateReview, UpdateOperation, UpdateIssue } from "../lib/archive-update.svelte";
   import ExcludeRulesEditor from "./ExcludeRulesEditor.svelte";
   import Icon from "./Icon.svelte";
 
   let { surface }: { surface: ArchiveUpdateWorkspaceSurface } = $props();
-  let visibleCount = $state(50);
+  const pageSize = 50;
+  let pageSelection = $state.raw<{ draft: NonNullable<ArchiveUpdateReview["draft"]>; index: number } | null>(null);
   let advancedOpen = $state(false);
+  let heading = $state<HTMLHeadingElement | null>(null);
+  let body = $state<HTMLDivElement | null>(null);
   let review = $derived(surface.review);
   let draft = $derived(review.draft);
+  let pageCount = $derived(Math.ceil((draft?.operations.length ?? 0) / pageSize));
+  let page = $derived(pageSelection?.draft === draft && pageSelection
+    ? Math.min(pageSelection.index, Math.max(0, pageCount - 1)) : 0);
+  let start = $derived(page * pageSize);
+  let visibleOperations = $derived(draft?.operations.slice(start, start + pageSize) ?? []);
+  let range = $derived(surface.tr("gui.update_review.range", "Changes {start}–{end} of {count} · selections are kept across pages")
+    .replace("{start}", (start + 1).toLocaleString())
+    .replace("{end}", (start + visibleOperations.length).toLocaleString())
+    .replace("{count}", (draft?.operations.length ?? 0).toLocaleString()));
   const policies: CreateContentPolicy[] = ["keep_all_files", "cross_platform_clean", "custom"];
   onMount(() => surface.onReady());
+
+  $effect(() => {
+    const restoredDraft = draft;
+    pageSelection = null;
+    advancedOpen = false;
+    void tick().then(() => {
+      if (review.draft === restoredDraft && body?.isConnected) body.scrollTop = 0;
+    });
+  });
 
   function operationLabel(kind: UpdateOperation["kind"]): string {
     if (kind === "add") return surface.tr("gui.action.add_files", "Add files");
@@ -25,18 +46,32 @@
     if (issue.kind === "selection") return surface.tr("gui.update_review.select", "Select at least one change to apply.");
     if (issue.kind === "level") return surface.tr("gui.update_review.level_invalid", "Enter a whole compression level from 0 to 9.");
     if (issue.kind === "unchanged") return surface.tr("gui.rename.target_must_differ", "The name is unchanged. Enter a different name or path.");
-    if (issue.kind === "path") return surface.tr("gui.update_review.path_invalid", "Use a path inside the archive without parent references (..) or reserved file names and characters.");
+    if (issue.kind === "path") return surface.tr("gui.update_review.path_invalid", "Use a relative path inside the archive without a leading slash, parent references (..), or reserved file names and characters.");
     return surface.tr("gui.update_review.path_empty", "Enter a path for this change.");
   }
 
   async function submit() {
+    const submittedDraft = draft;
     await surface.onSubmit();
-    if (!review.issue) return;
-    if (review.issue.field === "update-level") advancedOpen = true;
-    const index = draft?.operations.findIndex((row) => `update-operation-${row.id}` === review.issue?.field) ?? -1;
-    visibleCount = Math.max(visibleCount, index + 1);
+    const issue = review.issue;
+    if (!issue || !submittedDraft || review.draft !== submittedDraft || !body?.isConnected) return;
+    if (issue.field === "update-level") advancedOpen = true;
+    const index = submittedDraft.operations.findIndex((row) => `update-operation-${row.id}` === issue.field);
+    if (index >= 0) pageSelection = { draft: submittedDraft, index: Math.floor(index / pageSize) };
     await tick();
-    document.getElementById(review.issue.field)?.focus();
+    if (review.draft === submittedDraft && body?.isConnected && review.issue === issue) {
+      document.getElementById(issue.field)?.focus();
+    }
+  }
+
+  async function changePage(next: number) {
+    const currentDraft = draft;
+    if (!currentDraft) return;
+    pageSelection = { draft: currentDraft, index: Math.max(0, Math.min(next, pageCount - 1)) };
+    await tick();
+    if (review.draft !== currentDraft || !body?.isConnected) return;
+    body.scrollTop = 0;
+    heading?.focus({ preventScroll: true });
   }
 
   async function chooseSource(id: number, kind: "file" | "folder") {
@@ -60,7 +95,7 @@
 <div class="operation-workspace" class:classic-operation-workspace={surface.variant === "classic"}>
   <header class="operation-workspace-header">
     <div>
-      <h1 id="update-review-heading" tabindex="-1">{surface.title}</h1>
+      <h1 id="update-review-heading" bind:this={heading} tabindex="-1">{surface.title}</h1>
       <p>{surface.tr("gui.update_review.count", "{count} changes selected").replace("{count}", String(review.selectedCount()))}</p>
       {#if draft}
         <p><strong>{surface.tr("gui.update_review.archive", "Archive to change")}</strong></p>
@@ -78,13 +113,24 @@
       </button>
     </div>
   </header>
-  <div class="operation-workspace-body">
+  {#if draft && pageCount > 1}
+    <div class="operation-page-controls">
+      <p id="update-review-range" class="operation-range" role="status">{range}</p>
+      <nav class="operation-pagination" aria-label={surface.tr("gui.update_review.pages", "Archive change pages")}>
+        <button type="button" class="secondary-lite" disabled={page === 0} onclick={() => void changePage(0)}>{surface.tr("gui.update_review.first_page", "First page")}</button>
+        <button type="button" class="secondary-lite" disabled={page === 0} onclick={() => void changePage(page - 1)}>{surface.tr("gui.update_review.previous_page", "Previous page")}</button>
+        <button type="button" class="secondary-lite" disabled={page === pageCount - 1} onclick={() => void changePage(page + 1)}>{surface.tr("gui.update_review.next_page", "Next page")}</button>
+        <button type="button" class="secondary-lite" disabled={page === pageCount - 1} onclick={() => void changePage(pageCount - 1)}>{surface.tr("gui.update_review.last_page", "Last page")}</button>
+      </nav>
+    </div>
+  {/if}
+  <div class="operation-workspace-body" bind:this={body}>
     {#if draft}
       <p class="operation-workspace-hint">{surface.tr("gui.update_review.hint", "These changes modify this archive. Review every selected operation; the archive may have changed since the original task. Entries and conflicts are checked again before writing. Passwords are requested when needed.")}</p>
-      {#if review.issue}<p id="update-review-error" class="update-review-error" role="alert">{issueLabel(review.issue)}</p>{/if}
-      <ol class="operation-list">
-        {#each draft.operations.slice(0, visibleCount) as row (row.id)}
-          <li class="operation-card">
+      {#if review.issue?.kind === "selection"}<p id="update-review-error" class="update-review-error" role="alert">{issueLabel(review.issue)}</p>{/if}
+      <ol class="operation-list" start={start + 1}>
+        {#each visibleOperations as row, index (row.id)}
+          <li class="operation-card" aria-posinset={start + index + 1} aria-setsize={draft.operations.length}>
             <label class="operation-toggle">
               <input type="checkbox" checked={row.enabled} disabled={review.pending || review.sourcePicking === row.id}
                 aria-label={`${operationLabel(row.kind)} · ${row.source || row.value}`}
@@ -107,6 +153,9 @@
                     spellcheck={false} oninput={(event) => review.editOperation(row.id, {value:event.currentTarget.value})} />
                 {/if}
               </label>
+              {#if review.issue?.field === `update-operation-${row.id}`}
+                <p id="update-review-error" class="update-review-error" role="alert">{issueLabel(review.issue)}</p>
+              {/if}
               {#if row.kind === "add"}
                 <div class="operation-workspace-actions">
                   <button class="secondary-lite" disabled={review.pending || review.sourcePicking !== null || !row.enabled} onclick={() => void chooseSource(row.id, "file")}>
@@ -125,9 +174,6 @@
           </li>
         {/each}
       </ol>
-      {#if draft.operations.length > visibleCount}
-        <button class="secondary-lite" onclick={() => visibleCount += 50}>{surface.tr("gui.update_review.more", "Show more changes")}</button>
-      {/if}
       <details class="update-review-options" bind:open={advancedOpen}>
         <summary>{surface.tr("gui.update_review.options", "Encoding and compression options")}</summary>
         <div class="operation-policy-controls">
@@ -143,6 +189,9 @@
               disabled={review.pending} aria-invalid={review.issue?.field === "update-level"}
               aria-describedby={review.issue?.field === "update-level" ? "update-review-error" : undefined}
               oninput={(event) => review.editSettings({level:event.currentTarget.value})} />
+            {#if review.issue?.field === "update-level"}
+              <span id="update-review-error" class="update-review-error" role="alert">{issueLabel(review.issue)}</span>
+            {/if}
           </label>
           <label class="operation-field">
             <span>{surface.tr("gui.create.content_policy.title", "Archive contents")}</span>

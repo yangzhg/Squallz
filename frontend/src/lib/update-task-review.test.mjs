@@ -36,6 +36,31 @@ function handlers(review) {
   return {...vm.runInNewContext(`${outputText}\n({${names.join(",")}})`,context),context,calls};
 }
 
+function workspaceHandlers(review, overrides = {}) {
+  const component = readFileSync(new URL("../components/ArchiveUpdateWorkspace.svelte", import.meta.url), "utf8");
+  const source = ts.createSourceFile("Workspace.ts", component.match(/<script lang="ts">([\s\S]*?)<\/script>/)[1], ts.ScriptTarget.Latest, true);
+  const functions = source.statements.filter((node) => ts.isFunctionDeclaration(node) && ["submit", "changePage"].includes(node.name?.text));
+  const reset = source.statements.find((node) => ts.isExpressionStatement(node)
+    && node.getText(source).startsWith("$effect(") && node.getText(source).includes("const restoredDraft = draft"));
+  assert.ok(reset);
+  const focused = [];
+  const submitted = [];
+  let restoreView;
+  const context = { review, draft: review.draft, pageSize: 50,
+    pageCount: Math.ceil(review.draft.operations.length / 50), pageSelection: null, advancedOpen: false,
+    body: { isConnected: true, scrollTop: 100 },
+    heading: { focus: () => focused.push("heading") }, tick: async () => {},
+    $effect: (effect) => { restoreView = effect; },
+    document: { getElementById: (id) => ({ focus: () => focused.push(id) }) },
+    surface: { onSubmit: () => review.submit(async (job) => { submitted.push(plain(job)); }) },
+    ...overrides };
+  const { outputText } = ts.transpileModule([...functions, reset].map((node) => node.getText(source)).join("\n"), {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
+  });
+  return { ...vm.runInNewContext(`${outputText}\n({submit,changePage})`, context), context, focused, submitted,
+    restoreView: () => restoreView() };
+}
+
 for (const state of ["failed", "cancelled"]) {
 test(`${state} updates restore their original operations without submitting or inheriting the current archive`,async()=>{
   const review=new ArchiveUpdateReview(); const run=handlers(review);
@@ -83,6 +108,122 @@ test("invalid fields and an empty selection never submit an implicit set of arch
   for(const row of review.draft.operations)review.editOperation(row.id,{enabled:false});
   assert.equal(await review.submit(async()=>assert.fail()),false);
   assert.equal(review.issue.kind,"selection");
+});
+
+test("absolute archive targets are rejected before queuing while literal sources remain intact", async () => {
+  for (const value of ["/outside/", "/", "\\outside\\", "//server/share/folder/", "\\\\server\\share\\folder\\"]) {
+    for (const id of [1, 4]) {
+      const review = new ArchiveUpdateReview();
+      review.restore(spec(), "Original.zip");
+      review.editOperation(id, { value });
+      assert.equal(await review.submit(async () => assert.fail("absolute target queued")), false, `${id}: ${value}`);
+      assert.deepEqual(plain(review.issue), { field: `update-operation-${id}`, kind: "path" });
+      assert.equal(review.draft.operations[id].value, value, "keep the invalid input for correction");
+    }
+  }
+  const review = new ArchiveUpdateReview();
+  review.restore(spec(), "Original.zip");
+  review.editOperation(1, { value: "交付//审核/" });
+  review.editOperation(4, { value: "交付\\完整说明.txt" });
+  let queued;
+  assert.equal(await review.submit(async (value) => { queued = plain(value); }), true);
+  assert.deepEqual(queued.add, spec().add);
+  assert.deepEqual(queued.delete, spec().delete);
+  assert.deepEqual(queued.mkdir, ["交付//审核/"]);
+  assert.deepEqual(queued.rename, [{ from: "versions/旧说明.txt", to: "交付\\完整说明.txt" }]);
+});
+
+test("a late invalid operation opens its page without expanding the whole batch or losing other selections", async () => {
+  const review = new ArchiveUpdateReview();
+  const original = { ...spec(), add: [spec().add[0]], delete: [spec().delete[1]],
+    mkdir: Array.from({ length: 4997 }, (_, index) => `folders/item-${index}/`),
+    rename: [{ from: "original.txt", to: "" }] };
+  review.restore(original, "Original.zip");
+  const before = plain(review.draft);
+  const run = workspaceHandlers(review);
+  await run.submit();
+  assert.equal(run.context.pageSelection.index, 99);
+  assert.equal(run.context.pageSelection.draft, review.draft);
+  assert.deepEqual(run.focused, ["update-operation-4999"]);
+  assert.deepEqual(plain(review.draft), before);
+  assert.deepEqual(run.submitted, []);
+
+  review.editOperation(4999, { value: "revised/完整说明.txt" });
+  review.editOperation(0, { enabled: false });
+  await run.changePage(0);
+  assert.equal(run.context.pageSelection.index, 0);
+  assert.equal(run.context.body.scrollTop, 0);
+  assert.equal(run.focused.at(-1), "heading");
+  await run.changePage(999);
+  assert.equal(run.context.pageSelection.index, 99);
+  await run.submit();
+  assert.equal(run.submitted.length, 1);
+  assert.deepEqual(run.submitted[0], { ...original, add: [], password: null,
+    rename: [{ from: "original.txt", to: "revised/完整说明.txt" }] });
+});
+
+test("validation focus stays within the current workspace and reveals compression errors", async () => {
+  const review = new ArchiveUpdateReview();
+  review.restore(spec(), "Original.zip");
+  review.editSettings({ level: "1.5" });
+  const run = workspaceHandlers(review);
+  await run.submit();
+  assert.equal(run.context.advancedOpen, true);
+  assert.deepEqual(run.focused, ["update-level"]);
+  run.context.tick = async () => { run.context.body.isConnected = false; };
+  await run.submit();
+  assert.deepEqual(run.focused, ["update-level"], "a removed workspace cannot focus a newer page");
+});
+
+test("a newly restored draft resets paging, options, and scroll without letting an old restoration move it", async () => {
+  const review = new ArchiveUpdateReview();
+  review.restore(spec(), "Original.zip");
+  const completions = [];
+  const run = workspaceHandlers(review, { tick: () => new Promise((resolve) => { completions.push(resolve); }) });
+  run.context.pageSelection = { draft: review.draft, index: 99 };
+  run.context.advancedOpen = true;
+  run.restoreView();
+  assert.equal(run.context.pageSelection, null);
+  assert.equal(run.context.advancedOpen, false);
+  review.restore({ ...spec(), path: "/another.zip" }, "Another.zip");
+  run.context.draft = review.draft;
+  completions.shift()();
+  await Promise.resolve();
+  assert.equal(run.context.body.scrollTop, 100, "an older draft cannot scroll a newer review");
+  run.restoreView();
+  completions.shift()();
+  await Promise.resolve();
+  assert.equal(run.context.body.scrollTop, 0);
+  assert.deepEqual(run.submitted, []);
+});
+
+test("large update reviews render one page, preserve list positions, and place errors beside their field", async () => {
+  const { render } = await server.ssrLoadModule("svelte/server");
+  const { default: Workspace } = await server.ssrLoadModule("/src/components/ToolsWorkspace.svelte");
+  const { loadLocale, tFallback } = await server.ssrLoadModule("/src/lib/i18n.svelte.ts");
+  const review = new ArchiveUpdateReview();
+  review.restore({ ...spec(), mkdir: Array.from({ length: 4995 }, (_, index) => `folders/item-${index}/`) }, "Original.zip");
+  review.editOperation(1, { value: "/outside/" });
+  await review.submit(async () => assert.fail("invalid batch queued"));
+  for (const locale of ["en-US", "zh-CN"]) {
+    await loadLocale(locale);
+    for (const variant of ["modern", "classic"]) {
+      const surface = { kind: "update", variant, title: tFallback("gui.update_review.title"), tr: tFallback, review,
+        archiveReturn: { visible: false }, policyLabel: () => "", onReady() {}, onSubmit: async () => {}, onChooseSource: async () => {}, onOpenTasks() {} };
+      const body = render(Workspace, { props: { surface } }).body;
+      assert.equal((body.match(/class="operation-card"/g) ?? []).length, 50);
+      assert.ok(body.includes('aria-setsize="4999"'));
+      assert.ok(body.includes('aria-posinset="50"'));
+      assert.ok(body.includes(tFallback("gui.update_review.last_page")));
+      assert.ok(body.includes(tFallback("gui.update_review.pages")));
+      const target = body.indexOf('id="update-operation-1"');
+      const error = body.indexOf('id="update-review-error"');
+      const next = body.indexOf('id="update-operation-2"');
+      assert.ok(target < error && error < next, "the explanation belongs to the invalid operation");
+      assert.equal((body.match(/id="update-review-error"/g) ?? []).length, 1);
+      assert.doesNotMatch(body, /style=|gui\.update_review\./);
+    }
+  }
 });
 
 test("pending updates reject edits, another review, and duplicate submission; failure retains the draft",async()=>{
