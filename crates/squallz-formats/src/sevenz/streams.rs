@@ -1,7 +1,7 @@
 //! Indexed block access keeps metadata reads out of unrelated solid blocks.
 
 use std::collections::HashSet;
-use std::io::Read;
+use std::io::{self, Read};
 
 use sevenz_rust2::{Archive, ArchiveEntry, BlockDecoder, Error, Password};
 use squallz_format_api::ReadSeek;
@@ -10,6 +10,33 @@ use squallz_format_api::ReadSeek;
 // the whole solid block. The incremental decoder keeps reads and cancellation
 // bounded without materializing the block before its first byte is consumed.
 const DECODER_THREADS: u32 = 1;
+
+struct EntrySizeReader<'r> {
+    inner: &'r mut dyn Read,
+    remaining: u64,
+}
+
+impl Read for EntrySizeReader<'_> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        if buffer.is_empty() {
+            return Ok(0);
+        }
+        let read = self.inner.read(buffer)?;
+        if read == 0 && self.remaining != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "7z entry stream ended before its declared size",
+            ));
+        }
+        self.remaining = self.remaining.checked_sub(read as u64).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "7z entry stream exceeded its declared size",
+            )
+        })?;
+        Ok(read)
+    }
+}
 
 pub(super) struct EntryStreams {
     source: Box<dyn ReadSeek>,
@@ -95,7 +122,13 @@ impl EntryStreams {
                 &self.password,
                 &mut self.source,
             )
-            .for_each_entries(&mut each)?;
+            .for_each_entries(&mut |entry, data| {
+                let mut checked = EntrySizeReader {
+                    inner: data,
+                    remaining: entry.size(),
+                };
+                each(entry, &mut checked)
+            })?;
             // A complete archive visit stops globally. Selected-block visits
             // use false to skip the remainder of only the current block.
             if !complete && blocks.is_none() && include_metadata {

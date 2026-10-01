@@ -330,6 +330,56 @@ fn solid_sevenz_late_corruption_and_cancellation_preserve_the_existing_output() 
 }
 
 #[test]
+fn sevenz_early_end_preserves_existing_conversion_outputs() {
+    use sevenz_rust2::{ArchiveEntry, ArchiveWriter, EncoderConfiguration, EncoderMethod};
+    use std::io::{Read, Seek, SeekFrom, Write};
+
+    let tmp = TempDir::new("convert-7z-early-end");
+    let source = tmp.path().join("source.7z");
+    let mut writer = ArchiveWriter::new(fs::File::create(&source).unwrap()).unwrap();
+    writer.set_content_methods(vec![EncoderConfiguration::new(EncoderMethod::LZMA2)]);
+    writer
+        .push_archive_entry(
+            ArchiveEntry::new_file("file.bin"),
+            Some(std::io::repeat(b'x').take(4096)),
+        )
+        .unwrap();
+    drop(writer.finish().unwrap());
+    let mut archive = fs::OpenOptions::new().write(true).open(&source).unwrap();
+    archive.seek(SeekFrom::Start(32)).unwrap();
+    archive.write_all(&[0]).unwrap();
+    drop(archive);
+    for extension in ["zip", "tar"] {
+        let destination = tmp.path().join(format!("output.{extension}"));
+        fs::write(&destination, b"original output").unwrap();
+        let guard = inspect_create_destination(&destination, CreateArtifactKind::Archive)
+            .unwrap()
+            .guard
+            .unwrap();
+        let error = engine()
+            .convert_with_policy(
+                &source,
+                &destination,
+                &OpenOptions::default(),
+                &CreateOptions::default(),
+                CreateCommitPolicy::ReplaceIfUnchanged(guard),
+                &NoProgress,
+                &ControlToken::default(),
+            )
+            .unwrap_err();
+        assert!(
+            matches!(error, FormatError::Io(ref error) if error.kind() == std::io::ErrorKind::UnexpectedEof)
+        );
+        assert_eq!(fs::read(&destination).unwrap(), b"original output");
+        assert!(!fs::read_dir(tmp.path()).unwrap().any(|entry| entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .contains(".convert-")));
+    }
+}
+
+#[test]
 fn zip_to_7z_and_back() {
     let tmp = TempDir::new("convert-zip-7z");
     let zip = make_archive(tmp.path(), "src.zip");

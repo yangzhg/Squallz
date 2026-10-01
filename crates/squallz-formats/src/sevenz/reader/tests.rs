@@ -199,6 +199,49 @@ fn entry_prefix_does_not_decode_the_complete_file() {
 }
 
 #[test]
+fn an_early_lzma2_end_never_completes_a_nonempty_entry() {
+    let mut writer = ArchiveWriter::new(Cursor::new(Vec::new())).unwrap();
+    writer.set_content_methods(vec![EncoderConfiguration::new(EncoderMethod::LZMA2)]);
+    writer
+        .push_archive_entry(
+            ArchiveEntry::new_file("file"),
+            Some(std::io::repeat(b'x').take(4096)),
+        )
+        .unwrap();
+    let mut bytes = writer.finish().unwrap().into_inner();
+    assert_ne!(bytes[32], 0);
+    bytes[32] = 0;
+    for complete in [false, true] {
+        let mut reader = SevenZArchiveReader::open(
+            Box::new(Cursor::new(bytes.clone())),
+            &OpenOptions::default(),
+        )
+        .unwrap();
+        let entries = reader.entries().collect::<Result<Vec<_>, _>>().unwrap();
+        assert_eq!(entries[0].size, 4096);
+        let result = if complete {
+            reader.read_entries(
+                &entries,
+                &mut |_, data| {
+                    std::io::copy(data.unwrap(), &mut std::io::sink())?;
+                    Ok(())
+                },
+                &ControlToken::default(),
+            )
+        } else {
+            reader.read_entry(&entries[0].path, &mut |data| {
+                std::io::copy(data, &mut std::io::sink())?;
+                Ok(())
+            })
+        };
+        assert!(
+            matches!(&result, Err(FormatError::Io(error)) if error.kind() == std::io::ErrorKind::UnexpectedEof),
+            "complete={complete}: an early end must fail before the declared bytes are copied: {result:?}"
+        );
+    }
+}
+
+#[test]
 fn complete_entry_reads_preserve_duplicate_names_drain_tails_and_check_crc() {
     use sevenz_rust2::SourceReader;
 
