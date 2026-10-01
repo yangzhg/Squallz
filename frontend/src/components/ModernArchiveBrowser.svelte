@@ -38,6 +38,7 @@
       };
       actions: {
         mutationDisabledReason: string;
+        testDisabledReason: string;
         renameDisabledReason: string;
         deleteDisabledReason: string;
         moveDisabledReason: string;
@@ -79,6 +80,7 @@
     onOpenRoot: () => void;
     onExtractAll: () => void;
     onExtractSelection: () => void;
+    onTestArchive: () => void;
     onAddFiles: () => void;
     onOpenRecovery: () => void;
     onRetryBrowse: () => void;
@@ -126,6 +128,7 @@
     onOpenRoot,
     onExtractAll,
     onExtractSelection,
+    onTestArchive,
     onAddFiles,
     onOpenRecovery,
     onRetryBrowse,
@@ -203,6 +206,16 @@
       <button class="ghost large" disabled={!view.actions.enabled.extract_selection} title={view.actions.extractDestinationHint} onclick={onExtractSelection}>
         <Icon name="archive" size={17} />{view.actions.extractSelectedLabel}
       </button>
+      <button
+        class="ghost large"
+        disabled={!view.actions.enabled.test_archive}
+        title={view.actions.testDisabledReason}
+        aria-label={labelWithDisabledReason(
+          tr("gui.action.test_archive", "Test archive"),
+          view.actions.testDisabledReason,
+        )}
+        onclick={onTestArchive}
+      ><Icon name="check-circle" size={17} />{tr("gui.action.test_archive", "Test archive")}</button>
       <button
         class="ghost large"
         disabled={!view.actions.enabled.add_files}

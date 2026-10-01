@@ -4751,6 +4751,7 @@
         },
         actions: {
           mutationDisabledReason,
+          testDisabledReason: testArchiveDisabledReason(),
           renameDisabledReason: renameSelectedDisabledReason(),
           deleteDisabledReason: deleteSelectedDisabledReason(),
           moveDisabledReason: moveSelectedDisabledReason(),
@@ -4785,6 +4786,7 @@
       onOpenRoot: () => void openArchiveBreadcrumb(-1),
       onExtractAll: () => void runAppAction("extract_all"),
       onExtractSelection: () => void runAppAction("extract_selection"),
+      onTestArchive: () => void runAppAction("test_archive"),
       onAddFiles: () => void runAppAction("add_files"),
       onOpenRecovery: openCurrentArchiveRecoveryConfiguration,
       onRetryBrowse: () => void retryArchiveContents(),
@@ -8644,6 +8646,12 @@
 
   function archiveActionTitle(enabled: boolean): string {
     return enabled ? "" : openArchiveFirstLabel();
+  }
+
+  function testArchiveDisabledReason(): string {
+    if (appActionEnabled("test_archive")) return "";
+    if (archiveOpenStatus === "opening") return toolbarLabel("Opening");
+    return currentArchive ? "" : tr("gui.precondition.open_before_test", "Open an archive before testing");
   }
 
   function createExcludeRules(): string[] {
@@ -15098,7 +15106,16 @@
                   <h1>{tr("gui.archive.info_title", "Archive information")}</h1>
                   <p>{tr("gui.archive.info_subtitle", "Archive, selection, destination, encoding, and volume details.")}</p>
                 </div>
-                <button class="sheet-action" onclick={() => setScreen("browse")}><Icon name="archive" size={17} />{tr("gui.nav.back_to_archive", "Back to archive")}</button>
+                <div class="sheet-action-row">
+                  <button class="sheet-action" onclick={() => setScreen("browse")}><Icon name="archive" size={17} />{tr("gui.nav.back_to_archive", "Back to archive")}</button>
+                  <button
+                    class="sheet-action"
+                    disabled={!appActionEnabled("test_archive")}
+                    title={testArchiveDisabledReason()}
+                    aria-label={labelWithDisabledReason(tr("gui.action.test_archive", "Test archive"), testArchiveDisabledReason())}
+                    onclick={() => void runAppAction("test_archive")}
+                  ><Icon name="check-circle" size={17} />{tr("gui.action.test_archive", "Test archive")}</button>
+                </div>
               </div>
 
               <div class="settings-layout">
@@ -15375,6 +15392,12 @@
               </div>
               <div class="classic-button-row">
                 <button onclick={() => setScreen("browse")}>{tr("gui.nav.back_to_archive", "Back to archive")}</button>
+                <button
+                  disabled={!appActionEnabled("test_archive")}
+                  title={testArchiveDisabledReason()}
+                  aria-label={labelWithDisabledReason(tr("gui.action.test_archive", "Test archive"), testArchiveDisabledReason())}
+                  onclick={() => void runAppAction("test_archive")}
+                >{tr("gui.action.test_archive", "Test archive")}</button>
                 <button
                   class="classic-primary"
                   disabled={Boolean(extractArchiveRequiredReason())}
