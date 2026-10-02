@@ -2,6 +2,7 @@
   import type { EntryDto, EntryPreviewDto } from "../lib/ipc";
   import type { ArchiveBrowseRecoveryState } from "./ArchiveBrowseRecovery.svelte";
   import type { MoveConflictReviewView } from "./MoveConflictReview.svelte";
+  import type { ArchiveEditingState } from "./ArchiveEditingStatus.svelte";
 
   type Translate = (key: string, fallback: string) => string;
 
@@ -58,6 +59,7 @@
         ariaLabel: string;
       };
       selectedSummary: string;
+      editingStatus: ArchiveEditingState | null;
       conflict: MoveConflictReviewView | null;
       structureWarning: string | null;
       recovery: ArchiveBrowseRecoveryState;
@@ -74,6 +76,7 @@
     onOpenRoot: () => void;
     onOpenRecovery: () => void;
     onRetryBrowse: () => void;
+    onRetryFormats: () => void;
     onOpenNestedPreview: () => void;
     onExtractNestedPreview: () => void;
     onClearPreview: (restoreEntryFocus?: boolean) => void;
@@ -100,6 +103,7 @@
   import Icon from "./Icon.svelte";
   import ArchiveStructureWarning from "./ArchiveStructureWarning.svelte";
   import ArchiveBrowseRecovery from "./ArchiveBrowseRecovery.svelte";
+  import ArchiveEditingStatus from "./ArchiveEditingStatus.svelte";
   import MoveConflictReview from "./MoveConflictReview.svelte";
   import { cssVariables } from "../lib/css-variables";
 
@@ -109,6 +113,7 @@
     onOpenRoot,
     onOpenRecovery,
     onRetryBrowse,
+    onRetryFormats,
     onOpenNestedPreview,
     onExtractNestedPreview,
     onClearPreview,
@@ -245,6 +250,9 @@
 
   <section class="classic-table-wrap">
     <div class="classic-table-header">
+      {#if view.editingStatus}
+        <ArchiveEditingStatus state={view.editingStatus} onRetry={onRetryFormats} />
+      {/if}
       <ArchiveBrowseRecovery state={view.recovery} retryLabel={tr("gui.error.retry", "Retry")} onRetry={onRetryBrowse} />
       {#if view.structureWarning}
         <ArchiveStructureWarning

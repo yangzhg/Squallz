@@ -1,5 +1,4 @@
-// Format capability cache (drives the compress dialog and drop-type
-// detection). Loaded once at startup from `get_formats`.
+// Registered format capabilities for editing, creation and drop-type detection.
 
 import {
   archiveNameWithoutVolumeSuffix,
@@ -8,23 +7,53 @@ import {
 } from "./archive-names";
 import { ipc, type FormatDto } from "./ipc";
 
+export type FormatRegistryStatus = "loading" | "ready" | "error";
+
 const store = $state({
   all: [] as FormatDto[],
   extensions: new Set<string>(),
+  status: "loading" as FormatRegistryStatus,
 });
+let loadingRequest: Promise<void> | null = null;
 
 function installFormats(formats: FormatDto[]): void {
-  store.all = formats;
+  if (!Array.isArray(formats) || formats.length === 0) {
+    throw new Error("Format capabilities are unavailable");
+  }
+  const ids = new Set<string>();
   const exts = new Set<string>();
-  for (const f of store.all) {
+  for (const f of formats) {
+    if (!f || typeof f.id !== "string" || !f.id || ids.has(f.id)
+      || typeof f.can_update !== "boolean") {
+      throw new Error("Format capabilities are invalid");
+    }
+    ids.add(f.id);
     for (const e of f.extensions) exts.add(e.toLowerCase());
   }
+  store.all = formats;
   store.extensions = exts;
 }
 
-/** Loads the registry once. */
-export async function loadFormats(): Promise<void> {
-  installFormats(await ipc.getFormats());
+/** Shares an in-flight read and keeps successful capabilities cached; failures can retry. */
+export function loadFormats(): Promise<void> {
+  if (loadingRequest) return loadingRequest;
+  if (store.status === "ready") return Promise.resolve();
+  store.status = "loading";
+  const request = Promise.resolve().then(() => ipc.getFormats()).then((formats) => {
+    installFormats(formats);
+    store.status = "ready";
+  }).catch((error: unknown) => {
+    store.status = "error";
+    throw error;
+  }).finally(() => {
+    if (loadingRequest === request) loadingRequest = null;
+  });
+  loadingRequest = request;
+  return request;
+}
+
+export function formatRegistryStatus(): FormatRegistryStatus {
+  return store.status;
 }
 
 export function allFormats(): FormatDto[] {

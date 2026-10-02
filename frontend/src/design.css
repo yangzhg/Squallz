@@ -4189,6 +4189,43 @@ select option {
   gap: var(--space-sm);
 }
 
+.archive-editing-status {
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: var(--space-sm) var(--control-padding-inline);
+  border: var(--border-width-control) solid var(--color-border-default);
+  border-radius: var(--radius-card);
+  background: var(--color-surface-raised);
+  color: var(--color-text-secondary);
+  font-size: var(--type-control);
+  line-height: var(--type-control-line);
+}
+
+.archive-editing-status > svg {
+  flex: none;
+}
+
+.archive-editing-status > span {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.archive-editing-status button {
+  flex: none;
+  max-width: 100%;
+  white-space: normal;
+}
+
+.classic-table-header .archive-editing-status {
+  border-width: 0;
+  border-bottom-width: var(--border-width-control);
+  border-radius: 0;
+}
+
 .archive-hero {
   display: grid;
   grid-template-columns: minmax(0, 1fr);

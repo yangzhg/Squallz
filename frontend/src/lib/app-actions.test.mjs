@@ -99,31 +99,48 @@ async function appHandlers(overrides = {}, names = ["onEntryKeydown", "runEntryC
   const { outputText } = ts.transpileModule(functions.map((node) => node.getText(source)).join("\n"), {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
   });
-  return vm.runInNewContext(`${outputText}\n({ ${names.join(", ")} })`, {
+  const context = {
     archiveSelectionBusyReason: () => "",
     tick: () => Promise.resolve(),
     ...overrides,
-  });
+  };
+  return { ...vm.runInNewContext(`${outputText}\n({ ${names.join(", ")} })`, context), context };
 }
 
-test("classic read-only preview uses the same selection and preparation hints as entry actions", async () => {
-  const state = { selected: false, preparing: false, selectionBusy: "" };
+test("archive editing checks the source and registered capabilities while reading and recovery stay available", async () => {
+  const state = { selected: false, preparing: false, selectionBusy: "", refresh: "", registry: "ready" };
+  const archive = { read_only: true, format: "zip", path: "/Samples/nested.zip" };
+  const formats = [{ id: "zip", can_update: true }, { id: "rar", can_update: false }];
   const calls = [];
+  const notices = [];
+  const availability = () => actions.appActionAvailability({
+    ...browsing, writable: !app.archiveMutationDisabledReason(), hasSelection: state.selected,
+    canRename: app.canRenameSelection(), canPreview: state.selected && !state.preparing,
+    selectionBusy: Boolean(state.selectionBusy),
+  });
   const app = await appHandlers({
-    currentArchive: { read_only: true },
+    currentArchive: archive,
+    formatRegistryStatus: () => state.registry,
+    allFormats: () => formats,
+    hasArchiveOpen: () => true,
+    hasArchiveSelection: () => state.selected && !state.selectionBusy,
+    selectedRenameSource: () => state.selected ? "inner-readme.txt" : null,
     selectedPaths: () => new Set(state.selected ? ["inner-readme.txt"] : []),
-    appActionEnabled: (action) => actions.appActionAvailability({
-      ...browsing, writable: false, hasSelection: state.selected,
-      canPreview: state.selected && !state.preparing, selectionBusy: Boolean(state.selectionBusy),
-    })[action],
-    archiveRefreshStatusLabel: () => "",
-    archiveMutationDisabledReason: () => "Read-only archive",
+    appActionEnabled: (action) => availability()[action],
+    archiveRefreshStatusLabel: () => state.refresh,
     archiveSelectionBusyReason: () => state.selectionBusy,
     selectedPreviewPolicy: () => ({ disabledReason: state.selected ? "" : "Select one entry" }),
     previewBusy: () => state.preparing,
     tr: (_key, fallback) => fallback,
-    runAppAction: async (action) => { calls.push(action); },
-  }, ["classicCommandAction", "classicCommandDisabled", "classicCommandDisabledTitle", "handleClassicCommand", "previewSelectedDisabledReason"]);
+    showNotice: (message) => notices.push(message),
+    blockSelectionScopedAction: () => false,
+    submitJob: () => assert.fail("an unsupported update was submitted"),
+    runAppAction: (action) => actions.dispatchAppAction(action, availability(), {
+      [action]: () => { calls.push(action); },
+    }),
+  }, ["classicCommandAction", "classicCommandDisabled", "classicCommandDisabledTitle", "handleClassicCommand", "previewSelectedDisabledReason",
+    "archiveSourceMutationDisabledReason", "archiveMutationDisabledReason", "archiveEditingStatus", "canRenameSelection",
+    "renameSelectedDisabledReason", "moveSelectedDisabledReason", "deleteSelectedDisabledReason", "openArchiveEditor", "submitDeleteSelectedJob"]);
   assert.equal(app.classicCommandDisabled("View"), true);
   assert.equal(app.classicCommandDisabledTitle("View"), "Select one entry");
   state.selected = true;
@@ -143,7 +160,118 @@ test("classic read-only preview uses the same selection and preparation hints as
   state.preparing = false;
   for (const label of ["Add", "Delete", "Rename", "Move", "New Folder"]) {
     assert.equal(app.classicCommandDisabled(label), true, label);
-    assert.equal(app.classicCommandDisabledTitle(label), "Read-only archive", label);
+    assert.equal(app.classicCommandDisabledTitle(label), "Nested archives are read-only. Extract or convert to save changes.", label);
+  }
+  assert.equal(app.classicCommandDisabled("Protect"), true);
+
+  archive.read_only = false;
+  archive.format = "rar";
+  assert.equal(app.archiveSourceMutationDisabledReason(), "");
+  assert.match(app.archiveMutationDisabledReason(), /does not support editing entries/u);
+  assert.equal(app.archiveEditingStatus().retryLabel, null);
+  for (const label of ["Add", "Delete", "Rename", "Move", "New Folder"]) {
+    assert.equal(app.classicCommandDisabled(label), true, label);
+    assert.match(app.classicCommandDisabledTitle(label), /does not support editing entries/u, label);
+    app.handleClassicCommand(label);
+  }
+  assert.deepEqual(calls, ["preview_entry", "extract_selection"]);
+  await app.submitDeleteSelectedJob();
+  app.openArchiveEditor("new-folder");
+  assert.equal(notices.length, 2);
+  assert.ok(notices.every((message) => message.includes("does not support editing entries")));
+  for (const label of ["Protect", "View", "Extract To", "Test", "Convert"]) {
+    assert.equal(app.classicCommandDisabled(label), false, label);
+  }
+
+  archive.format = "zip";
+  archive.path = "/Samples/application.jar";
+  for (const registry of ["loading", "error"]) {
+    state.registry = registry;
+    assert.notEqual(app.archiveMutationDisabledReason(), "");
+    assert.equal(app.archiveEditingStatus().pending, registry === "loading");
+    assert.equal(Boolean(app.archiveEditingStatus().retryLabel), registry === "error");
+    for (const label of ["Add", "Delete", "Rename", "Move", "New Folder"]) assert.equal(app.classicCommandDisabled(label), true, label);
+    for (const label of ["Protect", "Extract To", "Test", "Convert"]) assert.equal(app.classicCommandDisabled(label), false, label);
+  }
+  state.registry = "ready";
+  for (const label of ["Add", "Delete", "Rename", "Move", "New Folder"]) assert.equal(app.classicCommandDisabled(label), false, label);
+  assert.equal(app.archiveEditingStatus(), null);
+  state.selected = false;
+  assert.match(app.classicCommandDisabledTitle("Rename"), /Select exactly one/u);
+  state.selected = true;
+  state.selectionBusy = "Selecting entries";
+  assert.equal(app.canRenameSelection(), false);
+  state.selectionBusy = "";
+
+  archive.format = "tar.gzip";
+  assert.match(app.archiveMutationDisabledReason(), /Editing is unavailable/u);
+  assert.equal(app.archiveEditingStatus().retryLabel, null);
+  state.refresh = "Refreshing archive";
+  assert.equal(app.archiveMutationDisabledReason(), state.refresh);
+  assert.equal(app.archiveEditingStatus(), null);
+  assert.equal(app.classicCommandDisabledTitle("Protect"), state.refresh);
+  state.refresh = "";
+  archive.read_only = true;
+  state.registry = "error";
+  assert.match(app.archiveMutationDisabledReason(), /^Nested archives/u);
+  assert.equal(app.archiveEditingStatus().retryLabel, null);
+
+  for (const scenario of [
+    { name: "successful retry", target: "archive search" },
+    { name: "failed retry", target: "new retry button", failed: true },
+    { name: "user changed focus", target: null },
+    { name: "browse departure and return", target: null },
+    { name: "mode departure and return", target: null },
+    { name: "startup load", target: null },
+  ]) {
+    const focused = [];
+    const scope = { isConnected: true };
+    const document = { body: {}, activeElement: null, querySelector: () => null };
+    class Element {
+      constructor(name, status = null) { this.name = name; this.status = status; }
+      closest(selector) {
+        assert.equal(selector, ".archive-editing-status");
+        return this.status;
+      }
+      focus(options) {
+        assert.equal(options.preventScroll, true);
+        focused.push(this.name);
+        document.activeElement = this;
+      }
+    }
+    const origin = new Element("old retry button", { parentElement: scope });
+    const search = new Element("archive search");
+    const retryButton = new Element("new retry button");
+    document.activeElement = scenario.name === "startup load" ? document.body : origin;
+    let resolve;
+    let reject;
+    const loaded = new Promise((yes, no) => { resolve = yes; reject = no; });
+    const retry = await appHandlers({
+      document, HTMLElement: Element, currentArchive: { id: 17 }, archiveOpenGeneration: 0,
+      screen: "browse", mode: "modern", modeSelectionBlocked: false,
+      blockingModalVisible: () => false, archiveSearchInput: search, loadFormats: () => loaded,
+    }, ["retryArchiveFormats"]);
+    const pending = retry.retryArchiveFormats();
+    document.activeElement = document.body;
+    if (scenario.name === "user changed focus") {
+      document.activeElement = new Element("chosen action");
+    } else if (scenario.name === "browse departure and return") {
+      retry.context.screen = "recovery";
+      scope.isConnected = false;
+      retry.context.screen = "browse";
+    } else if (scenario.name === "mode departure and return") {
+      retry.context.mode = "classic";
+      scope.isConnected = false;
+      retry.context.mode = "modern";
+    }
+    if (scenario.failed) {
+      document.querySelector = () => retryButton;
+      reject(new Error("editing check failed"));
+    } else {
+      resolve();
+    }
+    await pending;
+    assert.deepEqual(focused, scenario.target ? [scenario.target] : [], scenario.name);
   }
 });
 

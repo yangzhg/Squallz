@@ -3,6 +3,7 @@
   import ArchiveStartState from "./components/ArchiveStartState.svelte";
   import ArchiveReturnStrip from "./components/ArchiveReturnStrip.svelte";
   import ArchiveEntryEditor from "./components/ArchiveEntryEditor.svelte";
+  import type { ArchiveEditingState } from "./components/ArchiveEditingStatus.svelte";
   import AppIcon from "./components/AppIcon.svelte";
   import ClassicArchiveBrowserHost from "./components/ClassicArchiveBrowserHost.svelte";
   import type { ClassicArchiveBrowserSurfaceProps } from "./components/ClassicArchiveBrowserHost.svelte";
@@ -204,7 +205,7 @@
     taskWindowSubmitTransition,
     type TaskWindowSubmitTransition,
   } from "./lib/task-window";
-  import { allFormats, loadFormats } from "./lib/formats.svelte";
+  import { allFormats, formatRegistryStatus, loadFormats } from "./lib/formats.svelte";
   import { currentLang, i18nReady, listBundledLanguages, loadLocale, t, tError } from "./lib/i18n.svelte";
   import { pushToast, removeToastByKey } from "./lib/toasts.svelte";
   import { isNewSourceCleanupRecoveryGeneration } from "./lib/source-cleanup";
@@ -1812,9 +1813,7 @@
   });
 
   onMount(() => {
-    void loadFormats().catch(() => {
-      // Dev preview uses the release-scope fallback below.
-    });
+    void retryArchiveFormats();
   });
 
   onMount(() => {
@@ -4779,6 +4778,7 @@
           ariaLabel: labelWithDisabledReason(previewLabel, previewDisabledReason),
         },
         selectedSummary: selectedSummary(),
+        editingStatus: archiveEditingStatus(),
         conflict: moveConflictView,
         structureWarning: archiveStructureWarningText(),
         recovery,
@@ -4795,6 +4795,7 @@
       onOpenRoot: () => void openArchiveBreadcrumb(-1),
       onOpenRecovery: openCurrentArchiveRecoveryConfiguration,
       onRetryBrowse: () => void retryArchiveContents(),
+      onRetryFormats: () => void retryArchiveFormats(),
       onOpenNestedPreview: () => void openNestedPreviewArchive(),
       onExtractNestedPreview: () => void extractNestedPreviewArchive(),
       onClearPreview: (restoreEntryFocus) => clearEntryPreviewState(restoreEntryFocus),
@@ -4868,6 +4869,7 @@
           nestedPreview: Boolean(nestedPreview),
         },
         selectedSummary: selectedSummary(),
+        editingStatus: archiveEditingStatus(),
         conflict: moveConflictView,
         structureWarning: archiveStructureWarningText(),
         recovery,
@@ -4894,6 +4896,7 @@
       onAddFiles: () => void runAppAction("add_files"),
       onOpenRecovery: openCurrentArchiveRecoveryConfiguration,
       onRetryBrowse: () => void retryArchiveContents(),
+      onRetryFormats: () => void retryArchiveFormats(),
       onConvert: () => void runAppAction("convert_archive"),
       onOpenInfo: () => void runAppAction("archive_info"),
       onRenameSelection: () => void runAppAction("rename_entry"),
@@ -8524,7 +8527,7 @@
   function recoveryProtectSourceDisabledReason(): string {
     if (!recoverySourcePath()) return tr("gui.recovery.choose_archive_before_protect", "Choose an archive before creating PAR2 recovery data.");
     if (!recoverySourceMatchesCurrentArchive()) return tr("gui.recovery.open_selected_before_protect", "Open this archive successfully before creating new recovery data.");
-    if (currentArchive?.read_only) return archiveMutationDisabledReason();
+    if (currentArchive?.read_only) return archiveSourceMutationDisabledReason();
     return "";
   }
 
@@ -8552,7 +8555,7 @@
   }
 
   function recoveryVerifyDisabledReason(): string {
-    if (recoverySourceMatchesCurrentArchive() && currentArchive?.read_only) return archiveMutationDisabledReason();
+    if (recoverySourceMatchesCurrentArchive() && currentArchive?.read_only) return archiveSourceMutationDisabledReason();
     return recoverySourcePath()
       ? ""
       : tr("gui.recovery.choose_archive_before_verify", "Choose the archive described by this PAR2 file.");
@@ -8560,7 +8563,7 @@
 
   function recoveryRepairPar2DisabledReason(): string {
     if (!recoverySourcePath()) return tr("gui.recovery.choose_archive_before_par2_repair", "Choose an archive before repairing with PAR2 data.");
-    if (recoverySourceMatchesCurrentArchive() && currentArchive?.read_only) return archiveMutationDisabledReason();
+    if (recoverySourceMatchesCurrentArchive() && currentArchive?.read_only) return archiveSourceMutationDisabledReason();
     const gate = recoveryRepairGate(recoveryReport());
     if (gate === "verify_first") {
       return tr("gui.recovery.verify_before_repair", "Verify this archive and PAR2 set before creating a repaired copy.");
@@ -8668,7 +8671,7 @@
     return currentArchive !== null;
   }
 
-  function archiveMutationDisabledReason(): string {
+  function archiveSourceMutationDisabledReason(): string {
     if (!currentArchive) return openArchiveFirstLabel();
     const refreshing = archiveRefreshStatusLabel();
     if (refreshing) return refreshing;
@@ -8677,12 +8680,68 @@
       : "";
   }
 
+  function archiveEditingStatus(): ArchiveEditingState | null {
+    if (!currentArchive || archiveRefreshStatusLabel()) return null;
+    if (currentArchive.read_only) {
+      return { message: archiveSourceMutationDisabledReason(), pending: false, retryLabel: null };
+    }
+    const status = formatRegistryStatus();
+    if (status === "loading") {
+      return {
+        message: tr("gui.archive.editing_loading", "Checking whether this archive supports editing…"),
+        pending: true,
+        retryLabel: null,
+      };
+    }
+    if (status === "error") {
+      return {
+        message: tr("gui.archive.editing_check_failed", "Editing support could not be checked. Retry, or extract or convert to make changes."),
+        pending: false,
+        retryLabel: tr("gui.archive.editing_retry", "Retry editing check"),
+      };
+    }
+    const format = allFormats().find((item) => item.id === currentArchive?.format);
+    if (format?.can_update === true) return null;
+    return {
+      message: format
+        ? tr("gui.archive.editing_unsupported", "This format does not support editing entries. Extract or convert to make changes.")
+        : tr("gui.archive.editing_unavailable", "Editing is unavailable for this archive. Extract or convert to make changes."),
+      pending: false,
+      retryLabel: null,
+    };
+  }
+
+  async function retryArchiveFormats(): Promise<void> {
+    const origin = document.activeElement;
+    const focusScope = origin instanceof HTMLElement ? origin.closest(".archive-editing-status")?.parentElement : null;
+    const archiveId = currentArchive?.id;
+    const generation = archiveOpenGeneration;
+    const requestScreen = screen;
+    const requestMode = mode;
+    try {
+      await loadFormats();
+    } catch {
+      // The registry state keeps editing disabled and exposes the retry action.
+    }
+    if (!focusScope) return;
+    await tick();
+    if (!focusScope.isConnected || currentArchive?.id !== archiveId || archiveOpenGeneration !== generation || screen !== requestScreen
+      || mode !== requestMode || blockingModalVisible() || modeSelectionBlocked
+      || (document.activeElement !== document.body && document.activeElement !== origin)) return;
+    const retryButton = document.querySelector<HTMLButtonElement>(".archive-editing-status button");
+    (retryButton ?? archiveSearchInput)?.focus({ preventScroll: true });
+  }
+
+  function archiveMutationDisabledReason(): string {
+    return archiveSourceMutationDisabledReason() || archiveEditingStatus()?.message || "";
+  }
+
   function hasArchiveSelection(): boolean {
     return hasArchiveOpen() && !archiveSelectionBusyReason() && selectedPaths().size > 0;
   }
 
   function canRenameSelection(): boolean {
-    return hasArchiveSelection() && !currentArchive?.read_only && selectedRenameSource() !== null;
+    return hasArchiveSelection() && !archiveMutationDisabledReason() && selectedRenameSource() !== null;
   }
 
   function entryExtension(entryPath: string): string {
@@ -14897,7 +14956,7 @@
   function classicCommandDisabled(label: string): boolean {
     const action = classicCommandAction(label);
     if (action) return !appActionEnabled(action);
-    if (label === "Protect") return Boolean(currentArchive && archiveMutationDisabledReason());
+    if (label === "Protect") return Boolean(currentArchive && archiveSourceMutationDisabledReason());
     if (label === "Checksum" || label === "Duplicates") return false;
     return !hasArchiveOpen();
   }
@@ -14927,10 +14986,11 @@
       }
       return openArchiveFirstLabel();
     }
-    if (currentArchive.read_only) return archiveMutationDisabledReason();
-    if (label === "Rename") return tr("gui.precondition.select_one_before_rename", "Select exactly one file or folder before renaming");
-    if (label === "Move") return tr("gui.precondition.select_entries_before_move", "Select entries before moving");
-    if (label === "Delete") return tr("gui.precondition.select_entries_before_delete", "Select entries before deleting");
+    if (label === "Protect") return archiveSourceMutationDisabledReason();
+    if (label === "Rename") return renameSelectedDisabledReason();
+    if (label === "Move") return moveSelectedDisabledReason();
+    if (label === "Delete") return deleteSelectedDisabledReason();
+    if (label === "Add" || label === "New Folder") return archiveMutationDisabledReason() || archiveSelectionBusyReason();
     return "";
   }
 

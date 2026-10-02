@@ -3,6 +3,7 @@
   import type { AppActionAvailability } from "../lib/app-actions";
   import type { ArchiveBrowseRecoveryState } from "./ArchiveBrowseRecovery.svelte";
   import type { MoveConflictReviewView } from "./MoveConflictReview.svelte";
+  import type { ArchiveEditingState } from "./ArchiveEditingStatus.svelte";
 
   type Translate = (key: string, fallback: string) => string;
 
@@ -54,6 +55,7 @@
         nestedPreview: boolean;
       };
       selectedSummary: string;
+      editingStatus: ArchiveEditingState | null;
       conflict: MoveConflictReviewView | null;
       structureWarning: string | null;
       recovery: ArchiveBrowseRecoveryState;
@@ -87,6 +89,7 @@
     onAddFiles: () => void;
     onOpenRecovery: () => void;
     onRetryBrowse: () => void;
+    onRetryFormats: () => void;
     onConvert: () => void;
     onOpenInfo: () => void;
     onRenameSelection: () => void;
@@ -121,6 +124,7 @@
   import Icon from "./Icon.svelte";
   import ArchiveStructureWarning from "./ArchiveStructureWarning.svelte";
   import ArchiveBrowseRecovery from "./ArchiveBrowseRecovery.svelte";
+  import ArchiveEditingStatus from "./ArchiveEditingStatus.svelte";
   import MoveConflictReview from "./MoveConflictReview.svelte";
   import { cssVariables, type CssVariableMap } from "../lib/css-variables";
 
@@ -136,6 +140,7 @@
     onAddFiles,
     onOpenRecovery,
     onRetryBrowse,
+    onRetryFormats,
     onConvert,
     onOpenInfo,
     onRenameSelection,
@@ -293,6 +298,10 @@
       </div>
     </details>
   </div>
+
+  {#if view.editingStatus}
+    <ArchiveEditingStatus state={view.editingStatus} onRetry={onRetryFormats} />
+  {/if}
 
   {#if view.conflict}
     <MoveConflictReview review={view.conflict} {tr} onCancel={onCancelMoveConflict} onReadyOnly={onSubmitMoveReadyOnly} onKeepBoth={onSubmitMoveKeepBoth} />
