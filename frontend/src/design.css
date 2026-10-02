@@ -13252,7 +13252,7 @@ select.classic-input:focus {
   .batch-view,
   .settings-view,
   .integration-view,
-  .recovery-view,
+  .modern-recovery,
   .appearance-view,
   .colors-view {
     height: auto;
