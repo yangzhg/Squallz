@@ -516,7 +516,22 @@ fn unsplit_conversion_replaces_without_hidden_backup_artifacts() {
 }
 
 #[test]
-fn explicit_conversion_policy_refuses_unapproved_or_changed_outputs() {
+fn conversion_policies_preserve_unapproved_changed_and_late_outputs() {
+    use squallz_core::api::{EntryPath, ProgressSink};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct LateOutput<'a> {
+        destination: &'a Path,
+        written: AtomicBool,
+    }
+    impl ProgressSink for LateOutput<'_> {
+        fn on_progress(&self, _done: u64, _total: u64, _current: &EntryPath) {
+            if !self.written.swap(true, Ordering::Relaxed) {
+                fs::write(self.destination, b"late output from another app").unwrap();
+            }
+        }
+    }
+
     let tmp = TempDir::new("convert-explicit-destination-policy");
     let source = make_archive(tmp.path(), "source.zip");
     let destination = tmp.path().join("converted.7z");
@@ -589,6 +604,61 @@ fn explicit_conversion_policy_refuses_unapproved_or_changed_outputs() {
             .filter(|entry| matches!(entry.entry_type, squallz_core::api::EntryType::File))
             .count(),
         2
+    );
+
+    let source_before = fs::read(&source).unwrap();
+    let repaired = tmp.path().join("repaired.zip");
+    let late = LateOutput {
+        destination: &repaired,
+        written: AtomicBool::new(false),
+    };
+    let error = engine()
+        .convert_with_atomic_replace(
+            &source,
+            &repaired,
+            &OpenOptions::default(),
+            &CreateOptions::default(),
+            &late,
+            &ctl,
+        )
+        .unwrap_err();
+    assert!(late.written.load(Ordering::Relaxed));
+    assert!(error.is_output_exists(), "{error:?}");
+    assert_eq!(
+        fs::read(&repaired).unwrap(),
+        b"late output from another app"
+    );
+    assert_eq!(fs::read(&source).unwrap(), source_before);
+    assert!(!fs::read_dir(tmp.path()).unwrap().any(|entry| entry
+        .unwrap()
+        .file_name()
+        .to_string_lossy()
+        .contains(".convert-")));
+
+    fs::remove_file(&repaired).unwrap();
+    assert!(!engine()
+        .convert_with_atomic_replace(
+            &source,
+            &repaired,
+            &OpenOptions::default(),
+            &CreateOptions::default(),
+            &NoProgress,
+            &ctl,
+        )
+        .unwrap());
+    assert_eq!(
+        engine()
+            .list(&repaired, &OpenOptions::default())
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.path.display)
+            .collect::<Vec<_>>(),
+        engine()
+            .list(&source, &OpenOptions::default())
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.path.display)
+            .collect::<Vec<_>>()
     );
 }
 

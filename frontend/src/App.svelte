@@ -698,7 +698,13 @@
   const refreshedUpdateJobs = new Set<number>();
   const recoveryContextTaskIds = new Set<number>();
   let recoverySubmissionPending = $state(false);
-  let outputAuthorizationPending = $state(false);
+  type RecoveryOutputKind = "export_sqz" | "repair_sqz" | "repair_zip" | "repair_recovery";
+  type RecoveryOutputPreparation = {
+    id: symbol;
+    context: string;
+    phase: "opening" | "choosing" | "checking" | "submitting";
+  };
+  let recoveryOutputPreparation = $state<RecoveryOutputPreparation | null>(null);
   let noticeTimer: ReturnType<typeof setTimeout> | null = null;
   let checksumCopyFeedbackTimer: ReturnType<typeof setTimeout> | null = null;
   const screenParam = params.get("screen");
@@ -1216,6 +1222,11 @@
     document.documentElement.dataset.theme = activeTheme;
     document.documentElement.dataset.palette = activePalette;
     document.documentElement.dataset.density = activeDensityChoice;
+  });
+
+  $effect(() => {
+    const request = recoveryOutputPreparation;
+    if (request && !isCurrentRecoveryOutputPreparation(request)) recoveryOutputPreparation = null;
   });
 
   $effect(() => {
@@ -1774,7 +1785,7 @@
   });
 
   onMount(() => () => {
-    dismissRecoveryPicker();
+    dismissRecoveryPreparation();
     clearChecksumCopyState();
     extractDestinationPicker = null;
     checksumResultFocusPending = null;
@@ -2268,7 +2279,7 @@
       checksumCopyRequest = null;
       extractDestinationPicker = null;
       dismissArchivePicker();
-      dismissRecoveryPicker();
+      dismissRecoveryPreparation();
       if (archiveOpenStatus === "opening" && !archivePasswordPrompt && next !== "password") {
         archiveOpenGeneration += 1;
         archiveOpenStatus = "idle";
@@ -4289,8 +4300,10 @@
       splitOutput: boolean,
     ) => Promise<CreateDestinationInspectionDto> = (candidate, splitOutput) =>
       inspectCreateDestinationForCreate(candidate, splitOutput, null),
+    isCurrent: () => boolean = () => true,
   ): Promise<AuthorizedArchiveOutput | null> {
     const inspection = await inspect(path, split);
+    if (!isCurrent()) return null;
     if (inspection.conflict !== (inspection.guard !== null)) {
       throw new CreateDestinationInspectionError();
     }
@@ -4314,6 +4327,7 @@
           cancelLabel: tr("gui.output.replace_existing.cancel", "Cancel"),
         },
       );
+      if (!isCurrent()) return null;
       if (!replaceExisting) return null;
     }
     return {
@@ -6076,7 +6090,7 @@
       par2Override: recoveryPar2Override,
     });
     if (route.sourceMode !== recoverySourceMode || route.sourceOverride !== recoverySourceOverride
-      || route.par2Override !== recoveryPar2Override) dismissRecoveryPicker();
+      || route.par2Override !== recoveryPar2Override) dismissRecoveryPreparation();
     recoverySourceMode = route.sourceMode;
     recoverySourceOverride = route.sourceOverride;
     recoveryPar2Override = route.par2Override;
@@ -6105,7 +6119,7 @@
   async function openArchiveFromDialog() {
     if (archiveOpenStatus === "opening") return;
     if (preventCreateSubmissionNavigation("browse")) return;
-    dismissRecoveryPicker();
+    dismissRecoveryPreparation();
     dismissArchivePasswordRequest();
     clearEntryPreviewState();
     const requestGeneration = ++archiveOpenGeneration;
@@ -6241,7 +6255,7 @@
   ): Promise<boolean> {
     if (preventCreateSubmissionNavigation("browse")) return false;
     extractDestinationPicker = null;
-    dismissRecoveryPicker();
+    dismissRecoveryPreparation();
     dismissArchivePicker();
     dismissArchivePasswordRequest();
     clearEntryPreviewState();
@@ -6267,7 +6281,7 @@
     }
     pendingArchiveTaskReview = null;
     if (archiveOpenError(path)?.key === "error.corrupt_archive") {
-      dismissRecoveryPicker();
+      dismissRecoveryPreparation();
       recoverySourceMode = "selected";
       recoverySourceOverride = path;
       recoveryPar2Override = null;
@@ -6292,7 +6306,7 @@
       title: tr("gui.archive.opened_operation", "Opened archive"),
       detail: pathBaseName(path),
     });
-    dismissRecoveryPicker();
+    dismissRecoveryPreparation();
     recoverySourceMode = "current";
     recoverySourceOverride = null;
     recoveryPar2Override = null;
@@ -6374,7 +6388,7 @@
     sidecarSetCount = 1,
   ) {
     dismissArchivePicker();
-    dismissRecoveryPicker();
+    dismissRecoveryPreparation();
     clearEntryPreviewState();
     pendingArchiveTaskReview = null;
     archiveOpenGeneration += 1;
@@ -6413,7 +6427,8 @@
     recordValidationRenderReady(`recovery-open:${source}`);
   }
 
-  function dismissRecoveryPicker(): void {
+  function dismissRecoveryPreparation(): void {
+    recoveryOutputPreparation = null;
     if (recoveryPickerStatus === "idle") return;
     recoveryPickerRequest += 1;
     recoveryPickerStatus = "idle";
@@ -6439,6 +6454,7 @@
         showNotice(tr("gui.recovery.archive_picker_cancelled", "Archive selection cancelled."));
         return;
       }
+      recoveryOutputPreparation = null;
       recoverySourceMode = "selected";
       recoverySourceOverride = path;
       showNotice(
@@ -6472,6 +6488,7 @@
         showNotice(tr("gui.recovery.par2_picker_cancelled", "PAR2 selection cancelled."));
         return;
       }
+      recoveryOutputPreparation = null;
       recoveryPar2Override = path;
       showNotice(
         tr("gui.recovery.par2_selected", "PAR2 file: {name}").replace("{name}", pathBaseName(path)),
@@ -6488,7 +6505,7 @@
       showNotice(tr("gui.recovery.no_current_archive", "No archive is currently open."));
       return;
     }
-    dismissRecoveryPicker();
+    dismissRecoveryPreparation();
     recoverySourceMode = "current";
     recoverySourceOverride = null;
     showNotice(
@@ -6502,7 +6519,7 @@
       showNotice(tr("gui.recovery.choose_archive_before_default_par2", "Choose an archive before using its default PAR2 file."));
       return;
     }
-    dismissRecoveryPicker();
+    dismissRecoveryPreparation();
     recoveryPar2Override = null;
     showNotice(
       tr("gui.recovery.using_default_par2", "Verify and Repair will look for {name} beside the archive.")
@@ -11092,20 +11109,47 @@
     }
   }
 
-  async function submitExportSqzJob() {
-    const disabledReason = recoverySqzExportDisabledReason();
+  function recoveryOutputContext(): string {
+    return JSON.stringify([
+      screen, mode, recoverySourceMode, recoverySourcePath(), recoverySourceForJob(),
+      recoveryPar2Override, recoverySourceMode === "current" ? archiveOpenGeneration : null,
+    ]);
+  }
+
+  function isCurrentRecoveryOutputPreparation(request: RecoveryOutputPreparation): boolean {
+    return recoveryOutputPreparation?.id === request.id
+      && request.context === recoveryOutputContext();
+  }
+
+  function recoveryOutputStatus(): string {
+    switch (recoveryOutputPreparation?.phase) {
+      case "opening":
+        return tr("gui.recovery.preparing_output", "Preparing output…");
+      case "choosing":
+        return tr("gui.recovery.choosing_output", "Choose where to save the output.");
+      case "checking":
+        return tr("gui.output.checking_existing", "Checking output…");
+      case "submitting":
+        return tr("gui.recovery.submitting_task", "Adding recovery task to queue…");
+      default:
+        return recoverySubmissionPending
+          ? tr("gui.recovery.submitting_task", "Adding recovery task to queue…")
+          : "";
+    }
+  }
+
+  async function submitRecoveryOutputJob(kind: RecoveryOutputKind) {
+    if (screen !== "recovery" || recoveryOutputPreparation || recoverySubmissionPending
+      || recoveryPickerStatus !== "idle") return;
     const source = recoverySourcePath();
     const jobSource = recoverySourceForJob();
-    if (disabledReason || !source || !jobSource) {
-      showNotice(disabledReason || tr("gui.recovery.choose_sqz_before_export", "Choose an SQZ archive before exporting."));
-      return;
-    }
-    if (outputAuthorizationPending || recoverySubmissionPending || focusBlockingTaskIfAny()) return;
-    outputAuthorizationPending = true;
-    recoverySubmissionPending = true;
-    try {
-      const { confirm, save } = await getDialogModule();
-      const dest = await saveNativeDialog("recovery.export-sqz", save, {
+    const outputDirectory = kind === "repair_recovery" && recoveryRepairUsesDirectory();
+    const extension = source ? archiveExtensionMatch(pathBaseName(source)) : null;
+    const plans = {
+      export_sqz: {
+        disabledReason: recoverySqzExportDisabledReason(),
+        missing: tr("gui.recovery.choose_sqz_before_export", "Choose an SQZ archive before exporting."),
+        operation: "recovery.export-sqz",
         title: tr("gui.recovery.export_sqz_as", "Export SQZ as"),
         defaultPath: defaultSqzExportDest(),
         filters: [
@@ -11114,131 +11158,155 @@
           { name: archiveOutputFilterName("tar.zst"), extensions: ["tar.zst", "tzst"] },
           { name: archiveOutputFilterName("tar"), extensions: ["tar"] },
         ],
-      });
-      if (!dest) {
-        showNotice(tr("gui.recovery.export_sqz_cancelled", "Export SQZ cancelled"));
-        return;
-      }
-      const authorization = await authorizeArchiveOutput(dest, confirm);
-      if (!authorization) {
-        showNotice(tr("gui.recovery.export_sqz_cancelled", "Export SQZ cancelled"));
-        return;
-      }
-      await submitJob({
-        kind: "export_sqz",
-        src: jobSource,
-        dest,
-        level: createCompressionLevel(),
-        dest_password: null,
-        replace_existing: authorization.replaceExisting,
-        replacement_guard: authorization.replacementGuard,
-      });
-      showNotice(tr("gui.recovery.sqz_export_queued", "SQZ export added to queue"));
-      recordOperation({
-        status: "queued",
-        title: tr("gui.recovery.sqz_export_queued", "SQZ export added to queue"),
-        detail: `${pathBaseName(source)} -> ${pathBaseName(dest)} · ${createProfileLabel(activeCreateProfile)}`,
-      });
-    } catch (error) {
-      if (isJobSubmitBlocked(error)) return;
-      if (createDestinationInspectionCancelled(error)) {
-        showNotice(tr("gui.recovery.export_sqz_cancelled", "Export SQZ cancelled"));
-      } else if (error instanceof CreateDestinationInspectionError) {
-        showNotice(
-          error.detail
-            ? tError(error.detail)
-            : tr("gui.output.inspect_failed", "Could not check the output. Review the destination and try again."),
-        );
-      } else {
-        showNotice(tr("gui.recovery.export_sqz_requires_desktop_service", "Export SQZ requires the desktop service"));
-      }
-    } finally {
-      outputAuthorizationPending = false;
-      recoverySubmissionPending = false;
-    }
-  }
-
-  async function submitRepairSqzJob() {
-    const disabledReason = recoverySqzRepairDisabledReason();
-    const source = recoverySourcePath();
-    const jobSource = recoverySourceForJob();
-    if (disabledReason || !source || !jobSource) {
-      showNotice(disabledReason || tr("gui.recovery.choose_sqz_before_repair", "Choose an SQZ archive or SQZ volume before repairing."));
-      return;
-    }
-    if (focusBlockingTaskIfAny()) return;
-    try {
-      const { save } = await getDialogModule();
-      const dest = await saveNativeDialog("recovery.repair-sqz", save, {
+        cancelled: tr("gui.recovery.export_sqz_cancelled", "Export SQZ cancelled"),
+        queued: tr("gui.recovery.sqz_export_queued", "SQZ export added to queue"),
+      },
+      repair_sqz: {
+        disabledReason: recoverySqzRepairDisabledReason(),
+        missing: tr("gui.recovery.choose_sqz_before_repair", "Choose an SQZ archive or SQZ volume before repairing."),
+        operation: "recovery.repair-sqz",
         title: tr("gui.recovery.repair_sqz_as", "Repair SQZ as"),
         defaultPath: defaultSqzRepairDest(),
         filters: [{ name: archiveOutputFilterName("sqz"), extensions: ["sqz"] }],
-      });
-      if (!dest) {
-        showNotice(tr("gui.recovery.repair_sqz_cancelled", "Repair SQZ cancelled"));
-        return;
-      }
-      if (sameFilePath(dest, source)) {
-        showNotice(tr("gui.recovery.repair_output_must_differ", "Choose a new file for the repaired copy. The source archive will not be overwritten."));
-        return;
-      }
-      await submitJob({
-        kind: "repair_sqz",
-        src: jobSource,
-        dest,
-        level: createCompressionLevel(),
-      });
-      showNotice(tr("gui.recovery.sqz_repair_queued", "SQZ repair added to queue"));
-      recordOperation({
-        status: "queued",
-        title: tr("gui.recovery.sqz_repair_queued", "SQZ repair added to queue"),
-        detail: `${pathBaseName(source)} -> ${pathBaseName(dest)}`,
-      });
-    } catch (error) {
-      if (isJobSubmitBlocked(error)) return;
-      showNotice(tr("gui.recovery.repair_sqz_requires_desktop_service", "Repair SQZ requires the desktop service"));
-    }
-  }
-
-  async function submitRepairZipJob() {
-    const disabledReason = recoveryZipDisabledReason();
-    const source = recoverySourcePath();
-    const jobSource = recoverySourceForJob();
-    if (disabledReason || !source || !jobSource) {
-      showNotice(disabledReason || tr("gui.recovery.choose_archive_before_zip_rebuild", "Choose a ZIP-family archive before rebuilding its index."));
-      return;
-    }
-    if (focusBlockingTaskIfAny()) return;
-    try {
-      const { save } = await getDialogModule();
-      const dest = await saveNativeDialog("recovery.rebuild-zip-index", save, {
+        cancelled: tr("gui.recovery.repair_sqz_cancelled", "Repair SQZ cancelled"),
+        queued: tr("gui.recovery.sqz_repair_queued", "SQZ repair added to queue"),
+      },
+      repair_zip: {
+        disabledReason: recoveryZipDisabledReason(),
+        missing: tr("gui.recovery.choose_archive_before_zip_rebuild", "Choose a ZIP-family archive before rebuilding its index."),
+        operation: "recovery.rebuild-zip-index",
         title: tr("gui.recovery.rebuild_zip_index_as", "Rebuild ZIP index as"),
         defaultPath: defaultZipRepairDest(),
         filters: [{ name: archiveOutputFilterName("zip"), extensions: ["zip"] }],
-      });
+        cancelled: tr("gui.recovery.zip_rebuild_cancelled", "ZIP index rebuild cancelled"),
+        queued: tr("gui.recovery.zip_rebuild_queued", "ZIP index rebuild added to queue"),
+      },
+      repair_recovery: {
+        disabledReason: recoveryRepairPar2DisabledReason(),
+        missing: tr("gui.recovery.choose_archive_before_par2_repair", "Choose an archive before repairing with PAR2 data."),
+        operation: "recovery.repair-par2",
+        title: tr("gui.recovery.repair_par2_as", "Repair with PAR2 as"),
+        defaultPath: defaultPar2RepairDest(),
+        filters: extension
+          ? [{
+              name: tr("gui.recovery.repaired_archive_filter", "Repaired archive"),
+              extensions: [extension],
+            }]
+          : [],
+        cancelled: tr("gui.recovery.repair_par2_cancelled", "PAR2 repair cancelled"),
+        queued: outputDirectory
+          ? tr("gui.recovery.par2_set_repair_queued", "PAR2 set repair added to queue")
+          : tr("gui.recovery.par2_repair_queued", "PAR2 repair added to queue"),
+      },
+    };
+    const plan = plans[kind];
+    if (plan.disabledReason || !source || !jobSource) {
+      showNotice(plan.disabledReason || plan.missing);
+      return;
+    }
+    if (focusBlockingTaskIfAny()) return;
+    const sidecar = recoveryPar2Override;
+    const directoryName = defaultPar2RepairDirectoryName();
+    const level = createCompressionLevel();
+    const profile = createProfileLabel(activeCreateProfile);
+    const request: RecoveryOutputPreparation = {
+      id: Symbol(), context: recoveryOutputContext(), phase: "opening",
+    };
+    recoveryOutputPreparation = request;
+    const isCurrent = () => isCurrentRecoveryOutputPreparation(request);
+    const setPhase = (phase: RecoveryOutputPreparation["phase"]) => {
+      if (recoveryOutputPreparation?.id === request.id) recoveryOutputPreparation.phase = phase;
+    };
+    const inspect = async (candidate: string, splitOutput: boolean) => {
+      try {
+        return await ipc.inspectCreateDestination(candidate, splitOutput, nextPreflightRequestId(), null);
+      } catch (error) {
+        throw new CreateDestinationInspectionError(error);
+      }
+    };
+    try {
+      const dialogs = await getDialogModule();
+      if (!isCurrent()) return;
+      setPhase("choosing");
+      let dest: string | null = null;
+      if (outputDirectory) {
+        const selected = await openNativeDialog("recovery.repair-par2-set-parent", dialogs.open, {
+          title: tr("gui.recovery.choose_repaired_set_parent", "Choose where to create the repaired set folder"),
+          defaultPath: pathDir(source),
+          multiple: false,
+          directory: true,
+        });
+        if (!isCurrent()) return;
+        if (typeof selected === "string") {
+          setPhase("checking");
+          dest = await ipc.uniqueCreateDestination(joinFolderPath(selected, directoryName), false);
+          if (!isCurrent()) return;
+        }
+      } else {
+        dest = await saveNativeDialog(plan.operation, dialogs.save, {
+          title: plan.title, defaultPath: plan.defaultPath, filters: plan.filters,
+        });
+        if (!isCurrent()) return;
+      }
       if (!dest) {
-        showNotice(tr("gui.recovery.zip_rebuild_cancelled", "ZIP index rebuild cancelled"));
+        showNotice(plan.cancelled);
         return;
       }
-      if (sameFilePath(dest, source)) {
+      if (kind !== "export_sqz" && (sameFilePath(dest, source) || sameFilePath(dest, jobSource))) {
         showNotice(tr("gui.recovery.repair_output_must_differ", "Choose a new file for the repaired copy. The source archive will not be overwritten."));
         return;
       }
-      await submitJob({
-        kind: "repair_zip",
-        src: jobSource,
-        dest,
-        level: createCompressionLevel(),
-      });
-      showNotice(tr("gui.recovery.zip_rebuild_queued", "ZIP index rebuild added to queue"));
+      setPhase("checking");
+      let authorization: AuthorizedArchiveOutput | null = null;
+      if (kind === "export_sqz") {
+        authorization = await authorizeArchiveOutput(dest, dialogs.confirm, false, inspect, isCurrent);
+        if (!isCurrent()) return;
+        if (!authorization) {
+          showNotice(plan.cancelled);
+          return;
+        }
+      } else {
+        const inspection = await inspect(dest, false);
+        if (!isCurrent()) return;
+        if (inspection.conflict) {
+          showNotice(tr("gui.recovery.repair_output_exists", "The destination already exists. Choose a different name or folder for the repaired copy; the existing output was kept."));
+          return;
+        }
+      }
+      let spec: JobSpec;
+      if (kind === "repair_recovery") {
+        spec = { kind, path: jobSource, output: dest, output_directory: outputDirectory, recovery: sidecar };
+      } else if (kind === "export_sqz") {
+        if (!authorization) return;
+        spec = {
+          kind, src: jobSource, dest, level, dest_password: null,
+          replace_existing: authorization.replaceExisting,
+          replacement_guard: authorization.replacementGuard,
+        };
+      } else {
+        spec = { kind, src: jobSource, dest, level };
+      }
+      setPhase("submitting");
+      await submitJob(spec);
       recordOperation({
         status: "queued",
-        title: tr("gui.recovery.zip_rebuild_queued", "ZIP index rebuild added to queue"),
-        detail: `${pathBaseName(source)} -> ${pathBaseName(dest)}`,
+        title: plan.queued,
+        detail: `${pathBaseName(source)} -> ${pathBaseName(dest)}${kind === "export_sqz" ? ` · ${profile}` : ""}`,
       });
+      if (isCurrent()) showNotice(plan.queued);
     } catch (error) {
-      if (isJobSubmitBlocked(error)) return;
-      showNotice(tr("gui.recovery.zip_rebuild_requires_desktop_service", "ZIP index rebuild requires the desktop service"));
+      if (!isCurrent() || isJobSubmitBlocked(error)) return;
+      if (createDestinationInspectionCancelled(error)) {
+        showNotice(plan.cancelled);
+      } else if (error instanceof CreateDestinationInspectionError) {
+        showNotice(error.detail
+          ? tError(error.detail)
+          : tr("gui.output.inspect_failed", "Could not check the output. Review the destination and try again."));
+      } else {
+        showNotice(tr("gui.recovery.output_preparation_failed", "Could not start this recovery task. Check the save location and try again."));
+      }
+    } finally {
+      if (recoveryOutputPreparation?.id === request.id) recoveryOutputPreparation = null;
     }
   }
 
@@ -11298,73 +11366,6 @@
     }
   }
 
-  async function submitRepairRecoveryJob() {
-    const disabledReason = recoveryRepairPar2DisabledReason();
-    const source = recoverySourcePath();
-    const jobSource = recoverySourceForJob();
-    if (disabledReason || !source || !jobSource) {
-      showNotice(disabledReason || tr("gui.recovery.choose_archive_before_par2_repair", "Choose an archive before repairing with PAR2 data."));
-      return;
-    }
-    if (focusBlockingTaskIfAny()) return;
-    try {
-      const dialogs = await getDialogModule();
-      const outputDirectory = recoveryRepairUsesDirectory();
-      let dest: string | null = null;
-      if (outputDirectory) {
-        const selected = await openNativeDialog("recovery.repair-par2-set-parent", dialogs.open, {
-          title: tr(
-            "gui.recovery.choose_repaired_set_parent",
-            "Choose where to create the repaired set folder",
-          ),
-          defaultPath: pathDir(source),
-          multiple: false,
-          directory: true,
-        });
-        if (typeof selected === "string") {
-          const proposed = joinFolderPath(selected, defaultPar2RepairDirectoryName());
-          dest = await ipc.uniqueCreateDestination(proposed, false);
-        }
-      } else {
-        const extension = archiveExtensionMatch(pathBaseName(source));
-        dest = await saveNativeDialog("recovery.repair-par2", dialogs.save, {
-          title: tr("gui.recovery.repair_par2_as", "Repair with PAR2 as"),
-          defaultPath: defaultPar2RepairDest(),
-          filters: extension ? [{ name: tr("gui.recovery.repaired_archive_filter", "Repaired archive"), extensions: [extension] }] : [],
-        });
-      }
-      if (!dest) {
-        showNotice(tr("gui.recovery.repair_par2_cancelled", "PAR2 repair cancelled"));
-        return;
-      }
-      if (sameFilePath(dest, source)) {
-        showNotice(tr("gui.recovery.repair_output_must_differ", "Choose a new file for the repaired copy. The source archive will not be overwritten."));
-        return;
-      }
-      await submitJob({
-        kind: "repair_recovery",
-        path: jobSource,
-        output: dest,
-        output_directory: outputDirectory,
-        recovery: recoveryPar2Override,
-      });
-      showNotice(
-        outputDirectory
-          ? tr("gui.recovery.par2_set_repair_queued", "PAR2 set repair added to queue")
-          : tr("gui.recovery.par2_repair_queued", "PAR2 repair added to queue"),
-      );
-      recordOperation({
-        status: "queued",
-        title: outputDirectory
-          ? tr("gui.recovery.par2_set_repair_queued", "PAR2 set repair added to queue")
-          : tr("gui.recovery.par2_repair_queued", "PAR2 repair added to queue"),
-        detail: `${pathBaseName(source)} -> ${pathBaseName(dest)}`,
-      });
-    } catch (error) {
-      if (isJobSubmitBlocked(error)) return;
-      showNotice(tr("gui.recovery.repair_par2_requires_desktop_service", "PAR2 repair requires the desktop service"));
-    }
-  }
 
   async function submitAddToArchiveJob() {
     if (archiveAddPending) return;
@@ -12368,7 +12369,7 @@
         return;
       }
       if (!await adoptOpenedArchive(info, isCurrent)) return;
-      dismissRecoveryPicker();
+      dismissRecoveryPreparation();
       recoverySourceMode = "current";
       recoverySourceOverride = null;
       recoveryPar2Override = null;
@@ -13616,7 +13617,7 @@
       recoverySourceOverride &&
       sameFilePath(recoverySourceOverride, source),
     );
-    dismissRecoveryPicker();
+    dismissRecoveryPreparation();
     recoverySourceMode = matchesCurrentSource || (!preserveSelectedSource && currentArchive && sameFilePath(currentArchive.path, source))
       ? "current"
       : "selected";
@@ -14140,7 +14141,7 @@
     }
     pendingArchiveTaskReview = null;
     if (archiveOpenError(prompt.path)?.key === "error.corrupt_archive") {
-      dismissRecoveryPicker();
+      dismissRecoveryPreparation();
       recoverySourceMode = "selected";
       recoverySourceOverride = prompt.path;
       recoveryPar2Override = null;
@@ -14350,6 +14351,8 @@
 
   function recoveryWorkspaceView(): RecoveryWorkspaceView {
     const source = recoverySourcePath();
+    const preparationMessage = recoveryOutputStatus();
+    const actionBusyReason = preparationMessage || recoveryPickerBusyReason();
     const protectSourceDisabledReason = recoveryProtectSourceDisabledReason();
     const protectDisabledReason = recoveryProtectDisabledReason();
     const resultAvailable = recoveryResultAvailable();
@@ -14396,7 +14399,8 @@
       usesDefaultPar2: source !== null && recoveryPar2Override === null,
       pickerBusy: recoveryPickerStatus !== "idle",
       pickerBusyReason: recoveryPickerBusyReason(),
-      testDisabledReason: recoveryTestDisabledReason(),
+      preparationMessage,
+      testDisabledReason: actionBusyReason || recoveryTestDisabledReason(),
       sourceName: recoverySourceName() ?? tr("gui.recovery.no_archive_selected", "No archive selected"),
       requestedRedundancy: protectSourceDisabledReason
         ? notAvailable
@@ -14429,15 +14433,13 @@
       beyondCapacity: recoveryBeyondCapacity(),
       formatWorkflowTitle,
       formatWorkflowBody,
-      protectDisabledReason,
-      verifyDisabledReason: recoveryVerifyDisabledReason(),
-      repairDisabledReason: recoveryRepairPar2DisabledReason(),
-      zipDisabledReason: recoveryZipDisabledReason(),
-      sqzRepairDisabledReason: recoverySqzRepairDisabledReason(),
-      sqzExportDisabledReason: outputAuthorizationPending || recoverySubmissionPending
-        ? tr("gui.output.checking_existing", "Checking output…")
-        : recoverySqzExportDisabledReason(),
-      bestEffortDisabledReason: recoveryBestEffortDisabledReason(),
+      protectDisabledReason: actionBusyReason || protectDisabledReason,
+      verifyDisabledReason: actionBusyReason || recoveryVerifyDisabledReason(),
+      repairDisabledReason: actionBusyReason || recoveryRepairPar2DisabledReason(),
+      zipDisabledReason: actionBusyReason || recoveryZipDisabledReason(),
+      sqzRepairDisabledReason: actionBusyReason || recoverySqzRepairDisabledReason(),
+      sqzExportDisabledReason: actionBusyReason || recoverySqzExportDisabledReason(),
+      bestEffortDisabledReason: actionBusyReason || recoveryBestEffortDisabledReason(),
       verifyRecommended: recoveryVerifyRecommended(),
       repairRecommended: recoveryRepairRecommended(),
     };
@@ -14452,10 +14454,10 @@
     setRedundancy: setRecoveryRedundancy,
     protect: () => void submitProtectJob(),
     verify: () => void submitVerifyRecoveryJob(),
-    repair: () => void submitRepairRecoveryJob(),
-    repairZip: () => void submitRepairZipJob(),
-    repairSqz: () => void submitRepairSqzJob(),
-    exportSqz: () => void submitExportSqzJob(),
+    repair: () => void submitRecoveryOutputJob("repair_recovery"),
+    repairZip: () => void submitRecoveryOutputJob("repair_zip"),
+    repairSqz: () => void submitRecoveryOutputJob("repair_sqz"),
+    exportSqz: () => void submitRecoveryOutputJob("export_sqz"),
     extractReadable: () => void submitBestEffortExtractJob(),
   };
 

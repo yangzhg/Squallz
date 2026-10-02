@@ -32,7 +32,7 @@ function harness() {
     "syncExtractDraftArchive", "cancelPasswordRequest", "submitPasswordRequest", "dismissArchivePasswordRequest",
     "isCurrentTaskPasswordPrompt", "submitTaskPasswordRequest", "cancelTaskPasswordRequest", "passwordWorkspaceSurface",
     "passwordPromptName", "passwordPromptDetail", "passwordSessionDetail", "passwordFailureDetail", "taskPasswordQuestion",
-    "setScreen", "preventTaskWorkspaceNavigation", "dismissRecoveryPicker", "effectiveExtractDest", "sameFolderExtractDest",
+    "setScreen", "preventTaskWorkspaceNavigation", "dismissRecoveryPreparation", "effectiveExtractDest", "sameFolderExtractDest",
     "extractEncodingForJob", "archiveEncodingForJob", "extractEncodingLabel"];
   const declarations = source.statements.filter((node) => ts.isFunctionDeclaration(node) && names.includes(node.name?.text));
   const calls = [];
@@ -41,7 +41,7 @@ function harness() {
     screen: "browse", archiveOpenStatus: "idle", archiveOpenGeneration: 0, archivePasswordAttempt: 0,
     createPreflightPhase: "idle", convertRouteHandle: null,
     archivePickerRequest: null,
-    recoveryPickerStatus: "idle", recoveryPickerRequest: 0,
+    recoveryPickerStatus: "idle", recoveryPickerRequest: 0, recoveryOutputPreparation: null,
     getDialogModule: async () => ({ open: async () => null }),
     openNativeDialog: async (_kind, open, options) => open(options), platformKind: () => "macos",
     taskReviewRequestGeneration: 0, nestedExtractDraftGeneration: 0, nestedExtractReviewFocusPending: false,

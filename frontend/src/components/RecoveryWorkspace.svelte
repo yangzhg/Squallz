@@ -164,6 +164,13 @@
     </div>
   </header>
 
+  {#if view.preparationMessage}
+    <div class="recovery-output-status" role="status" aria-live="polite">
+      <Icon name="folder-open" size={16} />
+      <span>{view.preparationMessage}</span>
+    </div>
+  {/if}
+
   <RecoveryTargetPicker
     {variant}
     archiveName={view.archiveName}

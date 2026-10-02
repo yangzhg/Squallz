@@ -1963,6 +1963,28 @@ fn batch_json_script_runs_workbench_archive_jobs() {
     let repaired_test = stdout_json(&run(sqz().arg("test").arg(&repaired_sqz).arg("--json")));
     assert_eq!(repaired_test["ok"], true);
 
+    let rebuilt_before = std::fs::read(&rebuilt).unwrap();
+    let repaired_before = std::fs::read(&repaired_sqz).unwrap();
+    let repairs = serde_json::json!({
+        "jobs": [
+            { "kind": "repair_zip", "archive": "source.zip", "output": "rebuilt.zip" },
+            { "kind": "repair_sqz", "archive": "container.sqz", "output": "repaired.sqz" }
+        ]
+    });
+    std::fs::write(&script, serde_json::to_string(&repairs).unwrap()).unwrap();
+    let out = run(sqz()
+        .arg("batch")
+        .arg(&script)
+        .args(["--keep-going", "--json"]));
+    assert_eq!(out.status.code(), Some(7), "stderr: {}", stderr(&out));
+    let report = stdout_json(&out);
+    assert_eq!(report["failed"], 2);
+    for job in report["jobs"].as_array().unwrap() {
+        assert_eq!(job["error"]["kind"], "output_exists");
+    }
+    assert_eq!(std::fs::read(&rebuilt).unwrap(), rebuilt_before);
+    assert_eq!(std::fs::read(&repaired_sqz).unwrap(), repaired_before);
+
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -4658,6 +4680,23 @@ fn repair_zip_rebuilds_missing_central_directory_through_cli() {
         "sample must not contain a central directory"
     );
 
+    std::fs::write(&repaired, b"keep unrelated output").unwrap();
+    let out = run(sqz()
+        .args(["--lang", "en-US", "repair"])
+        .arg(&archive)
+        .arg("-o")
+        .arg(&repaired)
+        .arg("--json"));
+    assert_json_error(
+        &out,
+        7,
+        "output_exists",
+        "output location is already occupied",
+    );
+    assert_eq!(std::fs::read(&repaired).unwrap(), b"keep unrelated output");
+    assert_eq!(std::fs::read(&archive).unwrap(), original);
+    std::fs::remove_file(&repaired).unwrap();
+
     let out = run(sqz()
         .args(["--lang", "en-US", "repair"])
         .arg(&archive)
@@ -4687,6 +4726,21 @@ fn repair_zip_rebuilds_missing_central_directory_through_cli() {
         "rebuilt ZIP must contain an end-of-central-directory record"
     );
 
+    let out = run(sqz()
+        .args(["--lang", "en-US", "repair"])
+        .arg(&archive)
+        .arg("-o")
+        .arg(&repaired)
+        .arg("--json"));
+    assert_json_error(
+        &out,
+        7,
+        "output_exists",
+        "output location is already occupied",
+    );
+    assert_eq!(std::fs::read(&repaired).unwrap(), rebuilt);
+    assert_eq!(std::fs::read(&archive).unwrap(), original);
+
     let out = run(sqz().arg("test").arg(&repaired).arg("--json"));
     assert!(out.status.success(), "test failed: {}", stderr(&out));
     let report: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("valid JSON");
@@ -4709,6 +4763,26 @@ fn repair_zip_rebuilds_missing_central_directory_through_cli() {
         "stderr: {}",
         stderr(&out)
     );
+
+    let out = run(sqz()
+        .arg("repair")
+        .arg(&archive)
+        .arg("-o")
+        .arg(&archive)
+        .arg("--json"));
+    assert!(
+        out.status.success(),
+        "in-place repair failed: {}",
+        stderr(&out)
+    );
+    assert_eq!(stdout_json(&out)["in_place"], true);
+    let out = run(sqz().arg("test").arg(&archive).arg("--json"));
+    assert!(
+        out.status.success(),
+        "in-place test failed: {}",
+        stderr(&out)
+    );
+    assert_eq!(stdout_json(&out)["ok"], true);
 
     std::fs::remove_dir_all(&dir).unwrap();
 }
@@ -7791,6 +7865,26 @@ fn repair_sqz_rewrites_recovered_container() {
     assert_eq!(report["recovery"]["repair_possible"], true);
 
     let repaired = dir.join("repaired.sqz");
+    let original = std::fs::read(&damaged).unwrap();
+    std::fs::write(&repaired, b"keep unrelated SQZ output").unwrap();
+    let out = run(sqz()
+        .args(["--lang", "en-US", "repair"])
+        .arg(&damaged)
+        .arg("-o")
+        .arg(&repaired)
+        .arg("--json"));
+    assert_json_error(
+        &out,
+        7,
+        "output_exists",
+        "output location is already occupied",
+    );
+    assert_eq!(
+        std::fs::read(&repaired).unwrap(),
+        b"keep unrelated SQZ output"
+    );
+    assert_eq!(std::fs::read(&damaged).unwrap(), original);
+    std::fs::remove_file(&repaired).unwrap();
     let out = run(sqz()
         .arg("repair")
         .arg(&damaged)
@@ -7810,6 +7904,22 @@ fn repair_sqz_rewrites_recovered_container() {
     assert_eq!(report["recovery"]["repair_possible"], true);
     assert_eq!(report["source"]["recovery"], report["recovery"]);
     assert!(repaired.is_file(), "repaired output missing");
+
+    let repaired_before = std::fs::read(&repaired).unwrap();
+    let out = run(sqz()
+        .args(["--lang", "en-US", "repair"])
+        .arg(&damaged)
+        .arg("-o")
+        .arg(&repaired)
+        .arg("--json"));
+    assert_json_error(
+        &out,
+        7,
+        "output_exists",
+        "output location is already occupied",
+    );
+    assert_eq!(std::fs::read(&repaired).unwrap(), repaired_before);
+    assert_eq!(std::fs::read(&damaged).unwrap(), original);
 
     let out = run(sqz().arg("test").arg(&repaired).arg("--json"));
     assert!(

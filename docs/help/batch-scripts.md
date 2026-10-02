@@ -71,6 +71,9 @@ sqz batch batch.json --keep-going --json
 ZIP 输出可设为 `native`，生成 `.z01/.z02/.../.zip`，并以最后的 `.zip` 作为主输出。
 其他格式选择 `native` 会明确失败，不会退回到另一种分卷布局。
 
+`repair_zip` 和 `repair_sqz` 的独立输出不覆盖已有或发布前出现的同名项目；该 job 会以
+`output_exists` 失败并保留已有内容，请改用新名称。`output` 指定源路径时采用原地原子替换。
+
 单文件 PAR2 恢复集的 `repair_recovery` 提供 `output` 时采用 no-replace。分卷或
 多文件恢复集提供 `output_dir` 时，会把 PAR2 精确描述的全部成员和嵌套路径发布到一个全新
 目录，源文件保持不变，PAR2 文件与后端临时产物不会进入输出。文件或目录输出位置已有项目，

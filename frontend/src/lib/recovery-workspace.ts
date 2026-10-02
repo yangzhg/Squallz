@@ -16,6 +16,7 @@ export type RecoveryWorkspaceView = Readonly<{
   usesDefaultPar2: boolean;
   pickerBusy: boolean;
   pickerBusyReason: string;
+  preparationMessage: string;
   testDisabledReason: string;
   sourceName: string;
   requestedRedundancy: string;

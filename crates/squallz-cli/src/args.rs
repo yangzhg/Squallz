@@ -620,7 +620,7 @@ fn localize_repair_help_en(cmd: Command) -> Command {
         .mut_arg("archive", |arg| arg.help("Original archive path."))
         .mut_arg("use_recovery", |arg| arg.help("Force external PAR2 recovery data."))
         .mut_arg("output", |arg| {
-            arg.help("Output file. Single-file .sqz repair can omit it for atomic in-place replacement; ZIP rebuild requires it. For a single-file PAR2 set, this creates a no-replace repair copy; omitting it repairs the source in place.")
+            arg.help("Output file. SQZ/ZIP repair fails if a separate output is already occupied or becomes occupied; choose a new name. Naming the source uses atomic in-place replacement. Single-file .sqz repair can omit it; ZIP rebuild requires it. For a single-file PAR2 set, this creates a no-replace repair copy; omitting it repairs the source in place.")
         })
         .mut_arg("output_dir", |arg| {
             arg.help("New output directory for every file described by a PAR2 set. Conflicts with --output and requires --use-recovery.")
@@ -1471,7 +1471,7 @@ pub enum Cmd {
         /// 强制使用外置 PAR2 恢复数据
         #[arg(long)]
         use_recovery: bool,
-        /// 输出路径（单文件 .sqz 省略时原地安全替换；ZIP rebuild 必填；单文件 PAR2 集指定输出时创建不覆盖已有项目的修复副本，省略时原地修复源文件）
+        /// 输出路径（SQZ/ZIP 独立输出已占用或修复期间出现同名项目时失败并保留已有内容，请改用新名称；指定源路径时原地原子替换，单文件 .sqz 可省略，ZIP rebuild 必填；单文件 PAR2 集指定输出时创建不覆盖已有项目的修复副本，省略时原地修复源文件）
         #[arg(short, long)]
         output: Option<PathBuf>,
         /// PAR2 多文件集的全新输出目录；与 --output 互斥且仅用于 --use-recovery

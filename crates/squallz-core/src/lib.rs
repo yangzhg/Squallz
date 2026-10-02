@@ -1874,8 +1874,9 @@ impl Engine {
     }
 
     /// Converts an archive and reports whether `src` and `dest` name the same
-    /// existing file. Conversion always commits from a same-directory staging
-    /// file with one atomic replacement.
+    /// existing file. Conversion commits from a same-directory staging file:
+    /// the source can be replaced atomically in place, while an independent
+    /// destination must remain unoccupied until publication.
     ///
     /// Split output is always rejected. Use [`Self::convert_with_report`] for
     /// split conversion so every committed and preserved artifact is visible
@@ -1899,7 +1900,20 @@ impl Engine {
             ));
         }
         let in_place = same_existing_path(src, dest);
-        self.convert(src, dest, open_opts, create_opts, progress, ctl)?;
+        let commit_policy = if in_place {
+            CreateCommitPolicy::ReplaceExisting
+        } else {
+            CreateCommitPolicy::NoReplace
+        };
+        self.convert_with_policy(
+            src,
+            dest,
+            open_opts,
+            create_opts,
+            commit_policy,
+            progress,
+            ctl,
+        )?;
         Ok(in_place)
     }
 

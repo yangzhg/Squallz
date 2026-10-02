@@ -39,6 +39,7 @@ async function withNestedOpen(run) {
     ipc.cancelArchiveSearch = async () => {};
     ipc.releasePreviewSession = async () => true;
     ipc.openNestedArchive = async () => archiveInfo(2, "inner.zip");
+    ipc.inspectCreateDestination = async () => ({ conflict: false, guard: null });
     const pageRequested = deferred();
     const page = deferred();
     ipc.listEntries = async () => { pageRequested.resolve(); return page.promise; };
@@ -46,10 +47,17 @@ async function withNestedOpen(run) {
     const component = readFileSync(new URL("../App.svelte", import.meta.url), "utf8");
     const source = ts.createSourceFile("App.ts", component.match(/<script lang="ts">([\s\S]*?)<\/script>/)[1], ts.ScriptTarget.Latest, true);
     const { createPreviewPasswordFlow } = await server.ssrLoadModule("/src/lib/preview-password.svelte.ts");
-    const { recoveryRouteForOpen } = await server.ssrLoadModule("/src/lib/recovery-result.ts");
+    const recoveryResults = await server.ssrLoadModule("/src/lib/recovery-result.ts");
     const names = ["cancelTaskReview", "openNestedArchiveEntry", "extractNestedPreviewArchive", "retryEntryPreview", "runPreviewWithPassword", "clearEntryPreviewState", "selectOnlyEntry", "submitPasswordRequest", "cancelPasswordRequest", "dismissArchivePasswordRequest", "dismissArchivePicker", "setScreen", "openArchivePath", "openRecoverySet", "passwordPromptDetail", "submitPreviewEntry", "submitPreviewNestedArchive", "prepareEntryPreviewSerially", "disposeEntryPreview",
       "chooseRecoveryArchive", "chooseRecoveryPar2", "useCurrentArchiveForRecovery", "useDefaultPar2ForRecovery",
-      "recoverySourcePath", "recoverySourceName", "openRecoveryConfiguration", "adoptRecoveryTargetFromTask", "dismissRecoveryPicker"];
+      "recoverySourcePath", "recoverySourceName", "openRecoveryConfiguration", "adoptRecoveryTargetFromTask", "dismissRecoveryPreparation",
+      "recoveryOutputContext", "isCurrentRecoveryOutputPreparation", "submitRecoveryOutputJob",
+      "recoverySourceForJob", "recoverySourceMatchesCurrentArchive", "recoveryPar2Path", "defaultRecoveryPath",
+      "recoverySourceIsSplit", "recoverySourceFormatId", "isRecoverySourceZipFamily", "isRecoverySourceSqz",
+      "recoveryZipDisabledReason", "recoverySqzRepairDisabledReason", "recoverySqzExportDisabledReason", "recoveryRepairPar2DisabledReason",
+      "recoveryRepairUsesDirectory", "recoveryReportNumber", "recoveryReport", "latestRecoveryReportTask",
+      "defaultSqzRepairDest", "defaultSqzExportDest", "defaultZipRepairDest", "defaultPar2RepairDest", "defaultPar2RepairDirectoryName",
+      "authorizeArchiveOutput", "saveNativeDialog", "openNativeDialog"];
     const declarations = names.map((name) => {
       const declaration = source.statements.find((node) => ts.isFunctionDeclaration(node) && node.name?.text === name);
       assert.ok(declaration, name);
@@ -58,7 +66,7 @@ async function withNestedOpen(run) {
     const notices = [];
     const operations = [];
     const context = {
-      ipc, adoptOpenedArchive: archive.adoptOpenedArchive,
+      ...recoveryResults, ipc, adoptOpenedArchive: archive.adoptOpenedArchive,
       taskReviewRequestGeneration: 0, nestedExtractDraftGeneration: 0,
       syncUrl: () => {}, tick: async () => {},
       document: { documentElement: {}, body: {}, querySelectorAll: () => [] },
@@ -87,10 +95,22 @@ async function withNestedOpen(run) {
       previewPhase: "idle", previewTargetName: "",
       params: new URLSearchParams(), nestedPasswordPreviewSample: () => null,
       recoverySourceMode: "selected", recoverySourceOverride: "/previous.zip", recoveryPar2Override: "/previous.par2",
-      recoveryPickerStatus: "idle", recoveryPickerRequest: 0,
-      recoveryRouteForOpen, sameFilePath: (left, right) => left === right,
+      recoveryPickerStatus: "idle", recoveryPickerRequest: 0, recoveryOutputPreparation: null,
+      recoverySubmissionPending: false, outputAuthorizationPending: false, mode: "modern", jobRows: [],
+      sameFilePath: (left, right) => left === right,
       getDialogModule: async () => ({ open: async () => null }),
-      openNativeDialog: async (_purpose, open, options) => open(options),
+      recordNativeDialogRequest: () => {},
+      nextPreflightRequestId: () => "recovery-output-check",
+      createDestinationInspectionCancelled: () => false, CreateDestinationInspectionError: class extends Error {},
+      isJobSubmitBlocked: () => false, tError: () => "Output check failed",
+      archiveMutationDisabledReason: () => "", openArchiveFirstLabel: () => "Open an archive",
+      createCompressionLevel: () => context.compressionLevel, compressionLevel: 2,
+      activeCreateProfile: "balanced", createProfileLabel: (profile) => profile,
+      archiveOutputFilterName: (format) => format,
+      archiveExtensionMatch: (name) => name.split(".").at(-1),
+      archiveStemName: (name) => name.replace(/\.[^.]+$/, ""),
+      pathDir: (path) => path.slice(0, path.lastIndexOf("/")),
+      joinFolderPath: (parent, child) => `${parent}/${child}`,
       waitForPreviewFeedbackFrame: async () => {}, archiveEncodingForJob: () => null,
       entryTypeForPath: () => "file", previewPolicyFor: () => ({ kind: "nested" }),
       previewFailureMessage: (_error, _nested, _key, fallback) => fallback,
@@ -419,6 +439,199 @@ test("opening a recovery sidecar cancels a preparing preview and preserves the c
     await opening;
     assert.equal(archive.archive().id, 3);
     assert.equal(context.screen, "browse");
+  });
+});
+
+test("recovery output preparation preserves one snapshot and discards superseded dialogs and checks", { timeout: 15_000 }, async () => {
+  await withNestedOpen(async ({ app, archive, ipc, context, notices, operations }) => {
+    const submitted = [];
+    const nativeRequests = [];
+    context.submitJob = async (spec) => { submitted.push(JSON.parse(JSON.stringify(spec))); return submitted.length; };
+    context.recordNativeDialogRequest = (purpose, options) => nativeRequests.push({ purpose, ...options });
+    const dialogs = { open: async () => null, save: async () => null, confirm: async () => true };
+    const prepare = (extension, sourceFileCount = 1) => {
+      const info = { ...archiveInfo(1, `A.${extension}`), format: extension };
+      archive.installArchivePreview(info, outerRows);
+      app.openRecoverySet(`${info.path}.par2`, info.path, "open-file");
+      context.jobRows = [{ id: 1, state: "done", spec: { kind: "verify_recovery", path: info.path, recovery: `${info.path}.par2` },
+        result: { operation: "verify", ok: false, source_file_count: sourceFileCount,
+          metrics: { repair_possible: true, blocks_needed: 1, recovery_blocks_available: 3 } } }];
+      context.getDialogModule = async () => dialogs;
+      ipc.inspectCreateDestination = async () => ({ conflict: false, guard: null });
+      context.compressionLevel = 2;
+      context.activeCreateProfile = "balanced";
+      dialogs.open = async () => null;
+      dialogs.save = async () => null;
+      dialogs.confirm = async () => true;
+      return info.path;
+    };
+    const savePending = () => {
+      const response = deferred();
+      const started = deferred();
+      dialogs.save = () => { started.resolve(); return response.promise; };
+      return { response, started };
+    };
+    const expectSilent = async (work, finish) => {
+      const noticeCount = notices.length;
+      const operationCount = operations.length;
+      const submittedCount = submitted.length;
+      finish();
+      await work;
+      assert.equal(submitted.length, submittedCount, "a superseded preparation must never queue a task");
+      assert.equal(notices.length, noticeCount, "late selection, cancellation and errors must not replace current feedback");
+      assert.equal(operations.length, operationCount);
+    };
+    const awaitStarted = (started, work, stage) => Promise.race([
+      started.promise,
+      work.then(() => { throw new Error(`${stage} did not start: ${notices.at(-1)}`); }),
+    ]);
+
+    prepare("zip");
+    const par2Save = savePending();
+    const par2Repair = app.submitRecoveryOutputJob("repair_recovery");
+    await awaitStarted(par2Save.started, par2Repair, "PAR2 save");
+    assert.equal(context.recoveryOutputPreparation.phase, "choosing");
+    app.openRecoverySet("/recovery/B.zip.par2", "/recovery/B.zip", "open-file");
+    assert.match(app.recoveryRepairPar2DisabledReason(), /Verify this archive/);
+    assert.equal(context.recoveryOutputPreparation, null);
+    await expectSilent(par2Repair, () => par2Save.response.resolve("/output/A.repaired.zip"));
+    assert.equal(context.recoveryPar2Override, "/recovery/B.zip.par2");
+
+    prepare("zip");
+    const zipSave = savePending();
+    const zipRepair = app.submitRecoveryOutputJob("repair_zip");
+    await awaitStarted(zipSave.started, zipRepair, "ZIP save");
+    app.setScreen("browse");
+    app.setScreen("recovery");
+    await expectSilent(zipRepair, () => zipSave.response.resolve("/output/A.rebuilt.zip"));
+    assert.equal(context.recoveryOutputPreparation, null, "leaving and returning must not revive the old request");
+
+    prepare("sqz");
+    const module = deferred();
+    const moduleStarted = deferred();
+    context.getDialogModule = () => { moduleStarted.resolve(); return module.promise; };
+    const sqzRepair = app.submitRecoveryOutputJob("repair_sqz");
+    await awaitStarted(moduleStarted, sqzRepair, "SQZ module");
+    const nativeCount = nativeRequests.length;
+    app.openRecoverySet("/recovery/B.sqz.par2", "/recovery/B.sqz", "open-file");
+    await expectSilent(sqzRepair, () => module.resolve(dialogs));
+    assert.equal(nativeRequests.length, nativeCount, "a superseded module load must not open a save dialog");
+
+    prepare("sqz");
+    app.useCurrentArchiveForRecovery();
+    const inspection = deferred();
+    const inspectionStarted = deferred();
+    const confirms = [];
+    dialogs.save = async () => "/output/A.zip";
+    dialogs.confirm = async (...args) => { confirms.push(args); return true; };
+    ipc.inspectCreateDestination = () => { inspectionStarted.resolve(); return inspection.promise; };
+    const exporting = app.submitRecoveryOutputJob("export_sqz");
+    await awaitStarted(inspectionStarted, exporting, "export inspection");
+    assert.equal(context.recoveryOutputPreparation.phase, "checking");
+    dialogs.open = async () => "/recovery/B.par2";
+    await app.chooseRecoveryPar2();
+    assert.equal(context.recoveryOutputPreparation, null, "an accepted source picker must cancel output preparation");
+    await expectSilent(exporting, () => inspection.resolve({ conflict: true, guard: { token: "existing-output" } }));
+    assert.equal(confirms.length, 0, "an obsolete inspection must not open an overwrite confirmation");
+
+    prepare("sqz");
+    app.useCurrentArchiveForRecovery();
+    const confirmation = deferred();
+    const confirmationStarted = deferred();
+    dialogs.save = async () => "/output/existing.zip";
+    ipc.inspectCreateDestination = async () => ({ conflict: true, guard: { token: "existing-output" } });
+    dialogs.confirm = () => { confirmationStarted.resolve(); return confirmation.promise; };
+    const awaitingConfirmation = app.submitRecoveryOutputJob("export_sqz");
+    await awaitStarted(confirmationStarted, awaitingConfirmation, "export confirmation");
+    app.openRecoverySet("/recovery/B.sqz.par2", "/recovery/B.sqz", "open-file");
+    await expectSilent(awaitingConfirmation, () => confirmation.resolve(true));
+    assert.equal(context.recoveryOutputPreparation, null, "late approval must not authorize a departed source");
+
+    prepare("zip");
+    dialogs.save = async () => "/output/existing.zip";
+    ipc.inspectCreateDestination = async () => ({ conflict: true, guard: { token: "existing-output" } });
+    const conflictNotices = notices.length;
+    await app.submitRecoveryOutputJob("repair_zip");
+    assert.equal(submitted.length, 0, "repair must keep an existing destination without queueing a task");
+    assert.equal(context.recoveryOutputPreparation, null);
+    assert.equal(notices.length, conflictNotices + 1);
+    assert.match(notices.at(-1), /already exists.*Choose a different name or folder/);
+
+    for (const kind of ["repair_sqz", "repair_zip", "repair_recovery", "export_sqz"]) {
+      const source = prepare(kind === "repair_sqz" || kind === "export_sqz" ? "sqz" : "zip");
+      if (kind === "export_sqz") app.useCurrentArchiveForRecovery();
+      const save = savePending();
+      const work = app.submitRecoveryOutputJob(kind);
+      await awaitStarted(save.started, work, `${kind} save`);
+      const request = context.recoveryOutputPreparation;
+      const nativeCount = nativeRequests.length;
+      await app.submitRecoveryOutputJob(kind);
+      assert.equal(context.recoveryOutputPreparation, request);
+      assert.equal(nativeRequests.length, nativeCount, "repeated submission must not open another chooser");
+      context.compressionLevel = 9;
+      context.activeCreateProfile = "fast";
+      app.openRecoveryConfiguration("preserve");
+      assert.equal(context.recoveryOutputPreparation, request, "an unchanged route must preserve preparation");
+      const destination = `/output/${kind}.${kind === "repair_sqz" ? "sqz" : "zip"}`;
+      save.response.resolve(destination);
+      await work;
+      assert.equal(context.recoveryOutputPreparation, null);
+      const spec = submitted.at(-1);
+      assert.equal(spec.kind, kind);
+      if (kind === "repair_recovery") {
+        assert.equal(spec.path, source);
+        assert.equal(spec.output, destination);
+        assert.equal(spec.output_directory, false);
+        assert.equal(spec.recovery, `${source}.par2`);
+      } else {
+        assert.equal(spec.src, source);
+        assert.equal(spec.dest, destination);
+        assert.equal(spec.level, 2, "later draft edits must not change the accepted operation snapshot");
+      }
+      if (kind === "export_sqz") {
+        assert.equal(spec.replace_existing, false);
+        assert.equal(spec.replacement_guard, null);
+        assert.match(operations.at(-1).detail, /balanced/);
+      }
+    }
+    assert.equal(submitted.length, 4, "each current operation must still queue exactly once");
+
+    prepare("zip");
+    const oldSave = savePending();
+    const oldRepair = app.submitRecoveryOutputJob("repair_zip");
+    await awaitStarted(oldSave.started, oldRepair, "old ZIP save");
+    app.openRecoverySet("/recovery/B.zip.par2", "/recovery/B.zip", "open-file");
+    const nextSave = savePending();
+    const nextRepair = app.submitRecoveryOutputJob("repair_zip");
+    await awaitStarted(nextSave.started, nextRepair, "replacement ZIP save");
+    const currentRequest = context.recoveryOutputPreparation;
+    await expectSilent(oldRepair, () => oldSave.response.reject(new Error("old chooser unavailable")));
+    assert.equal(context.recoveryOutputPreparation, currentRequest, "old finally must not release a newer request");
+    assert.equal(currentRequest.phase, "choosing");
+    nextSave.response.resolve(null);
+    await nextRepair;
+    assert.equal(context.recoveryOutputPreparation, null);
+    assert.match(notices.at(-1), /ZIP index rebuild cancelled/);
+
+    prepare("zip", 2);
+    const unique = deferred();
+    const uniqueStarted = deferred();
+    dialogs.open = async () => "/output";
+    ipc.uniqueCreateDestination = (proposed) => { uniqueStarted.resolve(proposed); return unique.promise; };
+    const setRepair = app.submitRecoveryOutputJob("repair_recovery");
+    assert.match(await awaitStarted(uniqueStarted, setRepair, "PAR2 unique destination"), /A/);
+    assert.equal(app.adoptRecoveryTargetFromTask({ spec: { kind: "repair_zip", src: "/recovery/B.zip" } }), true);
+    await expectSilent(setRepair, () => unique.resolve("/output/A.repaired"));
+    assert.equal(context.recoveryOutputPreparation, null);
+
+    prepare("zip");
+    context.getDialogModule = async () => { throw new Error("current chooser unavailable"); };
+    const noticeCount = notices.length;
+    await app.submitRecoveryOutputJob("repair_zip");
+    assert.equal(context.recoveryOutputPreparation, null);
+    assert.equal(submitted.length, 4);
+    assert.equal(notices.length, noticeCount + 1, "a current failure must retain its recovery feedback");
+    assert.match(notices.at(-1), /Check the save location and try again/);
   });
 });
 

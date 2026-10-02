@@ -29,6 +29,7 @@ function workspaceView(beyondCapacity, overrides = {}) {
     usesDefaultPar2: true,
     pickerBusy: false,
     pickerBusyReason: "",
+    preparationMessage: "",
     testDisabledReason: "",
     sourceName: "Archive.zip",
     requestedRedundancy: "10% requested redundancy",

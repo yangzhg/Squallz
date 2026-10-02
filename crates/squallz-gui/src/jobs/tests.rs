@@ -3647,8 +3647,8 @@ fn conversion_jobs_without_replace_permission_preserve_existing_outputs() {
         SettingsDto::default(),
     );
     let export_id = manager.submit(
-        state,
-        events,
+        Arc::clone(&state),
+        Arc::clone(&events),
         JobSpec::ExportSqz {
             src: sqz.to_string_lossy().into_owned(),
             dest: exported.to_string_lossy().into_owned(),
@@ -3659,14 +3659,39 @@ fn conversion_jobs_without_replace_permission_preserve_existing_outputs() {
         },
         SettingsDto::default(),
     );
+    let repair_zip_id = manager.submit(
+        Arc::clone(&state),
+        Arc::clone(&events),
+        JobSpec::RepairZip {
+            src: zip.to_string_lossy().into_owned(),
+            dest: exported.to_string_lossy().into_owned(),
+            level: 6,
+        },
+        SettingsDto::default(),
+    );
+    let repaired_sqz = dir.join("repaired.sqz");
+    std::fs::write(&repaired_sqz, b"keep SQZ repair output").unwrap();
+    let repair_sqz_id = manager.submit(
+        state,
+        events,
+        JobSpec::RepairSqz {
+            src: sqz.to_string_lossy().into_owned(),
+            dest: repaired_sqz.to_string_lossy().into_owned(),
+            level: 6,
+        },
+        SettingsDto::default(),
+    );
     manager.wait_idle();
 
     assert_eq!(std::fs::read(&converted).unwrap(), b"keep converted output");
     assert_eq!(std::fs::read(&exported).unwrap(), b"keep exported output");
-    assert_eq!(manager.snapshot(convert_id).unwrap().state, "failed");
-    assert_eq!(manager.snapshot(export_id).unwrap().state, "failed");
+    assert_eq!(
+        std::fs::read(&repaired_sqz).unwrap(),
+        b"keep SQZ repair output"
+    );
     let recorded_events = sink.events.lock().unwrap();
-    for id in [convert_id, export_id] {
+    for id in [convert_id, export_id, repair_zip_id, repair_sqz_id] {
+        assert_eq!(manager.snapshot(id).unwrap().state, "failed");
         assert_eq!(
             states_of(&recorded_events, id),
             vec!["queued", "running", "failed"]

@@ -7,7 +7,7 @@ import ts from "typescript";
 function harness() {
   const component=readFileSync(new URL("../App.svelte",import.meta.url),"utf8");
   const source=ts.createSourceFile("App.ts",component.match(/<script lang="ts">([\s\S]*?)<\/script>/)[1],ts.ScriptTarget.Latest,true);
-  const names=["cancelTaskReview","prepareTaskReview","closeTaskCenter","openTaskCenterDetails","returnToTaskCenter","adoptRecoveryTargetFromTask","testTaskUsesRecoveryContext","dismissRecoveryPicker"];
+  const names=["cancelTaskReview","prepareTaskReview","closeTaskCenter","openTaskCenterDetails","returnToTaskCenter","adoptRecoveryTargetFromTask","testTaskUsesRecoveryContext","dismissRecoveryPreparation"];
   const declarations=source.statements.filter((node)=>ts.isFunctionDeclaration(node)&&names.includes(node.name?.text));
   const calls=[];
   const context={taskWindowMode:false,taskReviewRequestGeneration:0,pendingTaskReviewId:null,screen:"browse",currentArchive:{id:1},
@@ -19,7 +19,7 @@ function harness() {
     restoreTaskWorkspaceFocus:()=>{},
     tick:()=>Promise.resolve(),sameFilePath:(left,right)=>left===right,
     recoverySourceMode:"none",recoverySourceOverride:null,recoveryPar2Override:null,
-    recoveryPickerStatus:"idle",recoveryPickerRequest:0,
+    recoveryPickerStatus:"idle",recoveryPickerRequest:0,recoveryOutputPreparation:null,
     recoverySourcePath:()=>null,recoveryContextTaskIds:new Set(),
   };
   const {outputText}=ts.transpileModule(declarations.map(node=>node.getText(source)).join("\n"),{
