@@ -40,7 +40,7 @@ function harness({ navigation = false } = {}) {
     "createPasswordValidationMessage", "validateCreateOptions", "updateCreatePassword",
     "updateCreatePasswordConfirmation", "updateCreateEncryptionEnabled", "chooseCreateFormat",
     "activeCreateFormatData", "updateCreateEncryptNames", "updateCreateSfxEnabled",
-    "resetCreateCredentialsAfterPlan", "preventCreateSubmissionNavigation", "preventConvertSubmissionNavigation", "preventTaskWorkspaceNavigation",
+    "resetCreateCredentialsAfterPlan", "preventCreateSubmissionNavigation", "preventConvertSubmissionNavigation", "preventTaskWorkspaceNavigation", "dismissRecoveryPicker",
     ...(navigation ? ["setScreen", "dismissTaskDialog", "closeTaskCenter", "cancelTaskReview", "adoptRecoveryTargetFromTask"] : [])];
   const declarations = source.statements.filter((node) =>
     ts.isFunctionDeclaration(node) && names.includes(node.name?.text));
@@ -113,6 +113,7 @@ function harness({ navigation = false } = {}) {
     securitySettingsFocusPending: false, focusSecuritySettings: () => calls.push(["focus-security"]),
     currentArchive: null, sameFilePath: (left, right) => left === right,
     recoverySourceMode: "selected", recoverySourceOverride: "/unrelated/recovery.zip", recoveryPar2Override: "/unrelated/recovery.par2",
+    recoveryPickerStatus: "idle", recoveryPickerRequest: 0,
     createOutputPreviewBase: () => "archive", createSfxOutputLabel: () => "Self-extractor",
     createSfxUnavailableMessage: () => "SFX unavailable",
   };

@@ -952,6 +952,7 @@
   let archivePasswordAttempt = 0;
   let archiveSelectionProgress = $state<{ loaded: number; total: number } | null>(null);
   let recoveryPickerStatus = $state<"idle" | "archive" | "par2">("idle");
+  let recoveryPickerRequest = 0;
   let recoverySourceMode = $state<"none" | "current" | "selected">(
     runtimePreviews.archive ? "current" : "none",
   );
@@ -1755,6 +1756,7 @@
   });
 
   onMount(() => () => {
+    dismissRecoveryPicker();
     createPreflightClosed = true;
     createPreflightCleanup?.();
     createPreflightCleanup = null;
@@ -2243,6 +2245,7 @@
     if (preventConvertSubmissionNavigation(next)) return;
     if (next !== screen) {
       dismissArchivePicker();
+      dismissRecoveryPicker();
       if (archiveOpenStatus === "opening" && !archivePasswordPrompt && next !== "password") {
         archiveOpenGeneration += 1;
         archiveOpenStatus = "idle";
@@ -6030,6 +6033,8 @@
       sourceOverride: recoverySourceOverride,
       par2Override: recoveryPar2Override,
     });
+    if (route.sourceMode !== recoverySourceMode || route.sourceOverride !== recoverySourceOverride
+      || route.par2Override !== recoveryPar2Override) dismissRecoveryPicker();
     recoverySourceMode = route.sourceMode;
     recoverySourceOverride = route.sourceOverride;
     recoveryPar2Override = route.par2Override;
@@ -6058,6 +6063,7 @@
   async function openArchiveFromDialog() {
     if (archiveOpenStatus === "opening") return;
     if (preventCreateSubmissionNavigation("browse")) return;
+    dismissRecoveryPicker();
     dismissArchivePasswordRequest();
     clearEntryPreviewState();
     const requestGeneration = ++archiveOpenGeneration;
@@ -6192,6 +6198,7 @@
     review: ArchiveTaskReview | null = null,
   ): Promise<boolean> {
     if (preventCreateSubmissionNavigation("browse")) return false;
+    dismissRecoveryPicker();
     dismissArchivePicker();
     dismissArchivePasswordRequest();
     clearEntryPreviewState();
@@ -6217,6 +6224,7 @@
     }
     pendingArchiveTaskReview = null;
     if (archiveOpenError(path)?.key === "error.corrupt_archive") {
+      dismissRecoveryPicker();
       recoverySourceMode = "selected";
       recoverySourceOverride = path;
       recoveryPar2Override = null;
@@ -6241,6 +6249,7 @@
       title: tr("gui.archive.opened_operation", "Opened archive"),
       detail: pathBaseName(path),
     });
+    dismissRecoveryPicker();
     recoverySourceMode = "current";
     recoverySourceOverride = null;
     recoveryPar2Override = null;
@@ -6322,6 +6331,7 @@
     sidecarSetCount = 1,
   ) {
     dismissArchivePicker();
+    dismissRecoveryPicker();
     clearEntryPreviewState();
     pendingArchiveTaskReview = null;
     archiveOpenGeneration += 1;
@@ -6360,17 +6370,27 @@
     recordValidationRenderReady(`recovery-open:${source}`);
   }
 
+  function dismissRecoveryPicker(): void {
+    if (recoveryPickerStatus === "idle") return;
+    recoveryPickerRequest += 1;
+    recoveryPickerStatus = "idle";
+  }
+
   async function chooseRecoveryArchive() {
-    if (recoveryPickerStatus !== "idle") return;
+    if (screen !== "recovery" || recoveryPickerStatus !== "idle") return;
+    const request = ++recoveryPickerRequest;
+    const isCurrent = () => request === recoveryPickerRequest && screen === "recovery";
     recoveryPickerStatus = "archive";
     showNotice(tr("gui.recovery.opening_archive_picker", "Choose the archive to inspect or repair."));
     try {
       const { open } = await getDialogModule();
+      if (!isCurrent()) return;
       const selected = await openNativeDialog("recovery.choose-archive", open, {
         title: tr("gui.recovery.choose_archive", "Choose archive"),
         multiple: false,
         directory: false,
       });
+      if (!isCurrent()) return;
       const path = Array.isArray(selected) ? selected[0] : selected;
       if (typeof path !== "string") {
         showNotice(tr("gui.recovery.archive_picker_cancelled", "Archive selection cancelled."));
@@ -6382,24 +6402,28 @@
         tr("gui.recovery.archive_selected", "Recovery target: {name}").replace("{name}", pathBaseName(path)),
       );
     } catch {
-      showNotice(tr("gui.recovery.archive_picker_unavailable", "Choosing a recovery target requires the desktop file dialog."));
+      if (isCurrent()) showNotice(tr("gui.recovery.archive_picker_unavailable", "Choosing a recovery target requires the desktop file dialog."));
     } finally {
-      recoveryPickerStatus = "idle";
+      if (isCurrent()) recoveryPickerStatus = "idle";
     }
   }
 
   async function chooseRecoveryPar2() {
-    if (recoveryPickerStatus !== "idle") return;
+    if (screen !== "recovery" || recoveryPickerStatus !== "idle") return;
+    const request = ++recoveryPickerRequest;
+    const isCurrent = () => request === recoveryPickerRequest && screen === "recovery";
     recoveryPickerStatus = "par2";
     showNotice(tr("gui.recovery.opening_par2_picker", "Choose a PAR2 recovery file."));
     try {
       const { open } = await getDialogModule();
+      if (!isCurrent()) return;
       const selected = await openNativeDialog("recovery.choose-par2", open, {
         title: tr("gui.recovery.choose_par2", "Choose PAR2 file"),
         multiple: false,
         directory: false,
         filters: [{ name: tr("gui.recovery.par2_files", "PAR2 recovery files"), extensions: ["par2"] }],
       });
+      if (!isCurrent()) return;
       const path = Array.isArray(selected) ? selected[0] : selected;
       if (typeof path !== "string") {
         showNotice(tr("gui.recovery.par2_picker_cancelled", "PAR2 selection cancelled."));
@@ -6410,9 +6434,9 @@
         tr("gui.recovery.par2_selected", "PAR2 file: {name}").replace("{name}", pathBaseName(path)),
       );
     } catch {
-      showNotice(tr("gui.recovery.par2_picker_unavailable", "Choosing PAR2 data requires the desktop file dialog."));
+      if (isCurrent()) showNotice(tr("gui.recovery.par2_picker_unavailable", "Choosing PAR2 data requires the desktop file dialog."));
     } finally {
-      recoveryPickerStatus = "idle";
+      if (isCurrent()) recoveryPickerStatus = "idle";
     }
   }
 
@@ -6421,6 +6445,7 @@
       showNotice(tr("gui.recovery.no_current_archive", "No archive is currently open."));
       return;
     }
+    dismissRecoveryPicker();
     recoverySourceMode = "current";
     recoverySourceOverride = null;
     showNotice(
@@ -6434,6 +6459,7 @@
       showNotice(tr("gui.recovery.choose_archive_before_default_par2", "Choose an archive before using its default PAR2 file."));
       return;
     }
+    dismissRecoveryPicker();
     recoveryPar2Override = null;
     showNotice(
       tr("gui.recovery.using_default_par2", "Verify and Repair will look for {name} beside the archive.")
@@ -12187,6 +12213,7 @@
         return;
       }
       if (!await adoptOpenedArchive(info, isCurrent)) return;
+      dismissRecoveryPicker();
       recoverySourceMode = "current";
       recoverySourceOverride = null;
       recoveryPar2Override = null;
@@ -13426,6 +13453,7 @@
       recoverySourceOverride &&
       sameFilePath(recoverySourceOverride, source),
     );
+    dismissRecoveryPicker();
     recoverySourceMode = matchesCurrentSource || (!preserveSelectedSource && currentArchive && sameFilePath(currentArchive.path, source))
       ? "current"
       : "selected";
@@ -13947,6 +13975,7 @@
     }
     pendingArchiveTaskReview = null;
     if (archiveOpenError(prompt.path)?.key === "error.corrupt_archive") {
+      dismissRecoveryPicker();
       recoverySourceMode = "selected";
       recoverySourceOverride = prompt.path;
       recoveryPar2Override = null;

@@ -21,7 +21,7 @@ function reportHarness({ navigation = false } = {}) {
     "viewTaskResults", "checksumCopyFeedbackFor", "checksumCopyFeedbackToneFor",
     "submitChecksumJob", "submitChecksumCheckJob", "checksumWorkspaceSurface",
     "checksumAlgorithmLabel", "checksumAlgorithmHint", "checksumItemNumber",
-    "preventCreateSubmissionNavigation", "preventTaskWorkspaceNavigation",
+    "preventCreateSubmissionNavigation", "preventTaskWorkspaceNavigation", "dismissRecoveryPicker",
     ...(navigation ? ["setScreen", "preventConvertSubmissionNavigation", "dismissTaskDialog",
       "closeTaskCenter", "cancelTaskReview", "adoptRecoveryTargetFromTask",
       "focusChecksumResultPanel", "focusDuplicateReportPanel"] : [])];
@@ -70,6 +70,7 @@ function reportHarness({ navigation = false } = {}) {
     currentArchive: null, sameFilePath: (left, right) => left === right,
     recoverySourceMode: "selected", recoverySourceOverride: "/previous/recovery.zip",
     recoveryPar2Override: "/previous/recovery.par2", duplicateReportTaskId: 9,
+    recoveryPickerStatus: "idle", recoveryPickerRequest: 0,
     duplicateReportFocusPending: false, createPrimaryFocusPending: true,
     extractReviewFocusPending: true, convertReviewFocusPending: true,
     securitySettingsFocusPending: true, archiveUpdateReviewFocusPending: true,

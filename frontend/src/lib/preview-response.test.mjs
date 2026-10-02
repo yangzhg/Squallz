@@ -46,7 +46,10 @@ async function withNestedOpen(run) {
     const component = readFileSync(new URL("../App.svelte", import.meta.url), "utf8");
     const source = ts.createSourceFile("App.ts", component.match(/<script lang="ts">([\s\S]*?)<\/script>/)[1], ts.ScriptTarget.Latest, true);
     const { createPreviewPasswordFlow } = await server.ssrLoadModule("/src/lib/preview-password.svelte.ts");
-    const names = ["cancelTaskReview", "openNestedArchiveEntry", "extractNestedPreviewArchive", "retryEntryPreview", "runPreviewWithPassword", "clearEntryPreviewState", "selectOnlyEntry", "submitPasswordRequest", "cancelPasswordRequest", "dismissArchivePasswordRequest", "dismissArchivePicker", "setScreen", "openArchivePath", "openRecoverySet", "passwordPromptDetail", "submitPreviewEntry", "submitPreviewNestedArchive", "prepareEntryPreviewSerially", "disposeEntryPreview"];
+    const { recoveryRouteForOpen } = await server.ssrLoadModule("/src/lib/recovery-result.ts");
+    const names = ["cancelTaskReview", "openNestedArchiveEntry", "extractNestedPreviewArchive", "retryEntryPreview", "runPreviewWithPassword", "clearEntryPreviewState", "selectOnlyEntry", "submitPasswordRequest", "cancelPasswordRequest", "dismissArchivePasswordRequest", "dismissArchivePicker", "setScreen", "openArchivePath", "openRecoverySet", "passwordPromptDetail", "submitPreviewEntry", "submitPreviewNestedArchive", "prepareEntryPreviewSerially", "disposeEntryPreview",
+      "chooseRecoveryArchive", "chooseRecoveryPar2", "useCurrentArchiveForRecovery", "useDefaultPar2ForRecovery",
+      "recoverySourcePath", "recoverySourceName", "openRecoveryConfiguration", "adoptRecoveryTargetFromTask", "dismissRecoveryPicker"];
     const declarations = names.map((name) => {
       const declaration = source.statements.find((node) => ts.isFunctionDeclaration(node) && node.name?.text === name);
       assert.ok(declaration, name);
@@ -83,7 +86,11 @@ async function withNestedOpen(run) {
       nestedPreview: null, entryPreview: null, entryPreviewFailure: null,
       previewPhase: "idle", previewTargetName: "",
       params: new URLSearchParams(), nestedPasswordPreviewSample: () => null,
-      recoverySourceMode: "file", recoverySourceOverride: "/previous.zip", recoveryPar2Override: "/previous.par2",
+      recoverySourceMode: "selected", recoverySourceOverride: "/previous.zip", recoveryPar2Override: "/previous.par2",
+      recoveryPickerStatus: "idle", recoveryPickerRequest: 0,
+      recoveryRouteForOpen, sameFilePath: (left, right) => left === right,
+      getDialogModule: async () => ({ open: async () => null }),
+      openNativeDialog: async (_purpose, open, options) => open(options),
       waitForPreviewFeedbackFrame: async () => {}, archiveEncodingForJob: () => null,
       entryTypeForPath: () => "file", previewPolicyFor: () => ({ kind: "nested" }),
       previewFailureMessage: (_error, _nested, _key, fallback) => fallback,
@@ -246,6 +253,173 @@ test("opening a recovery sidecar cancels a preparing preview and preserves the c
       assert.deepEqual(closed, result === "success" ? [2] : []);
     });
   }
+  await withNestedOpen(async ({ app, archive, ipc, page, context, notices, operations }) => {
+    const choose = (kind) => kind === "archive" ? app.chooseRecoveryArchive() : app.chooseRecoveryPar2();
+    const recovery = () => ({ screen: context.screen, mode: context.recoverySourceMode,
+      source: context.recoverySourceOverride, sidecar: context.recoveryPar2Override });
+    const begin = (kind, phase) => {
+      const pending = deferred();
+      const started = deferred();
+      const dialogs = [];
+      const open = async (options) => { dialogs.push(options); started.resolve(); return pending.promise; };
+      context.getDialogModule = phase === "loading"
+        ? () => { started.resolve(); return pending.promise; }
+        : async () => ({ open });
+      const choosing = choose(kind);
+      return { pending, started, dialogs, choosing };
+    };
+    const finish = (picker, kind, phase, result) => {
+      if (result === "failure") picker.pending.reject(new Error("dialog unavailable"));
+      else if (phase === "loading") picker.pending.resolve({ open: async (options) => {
+        picker.dialogs.push(options);
+        return result === "selected" ? `/late/old.${kind === "archive" ? "zip" : "par2"}` : null;
+      } });
+      else picker.pending.resolve(result === "selected" ? [`/late/old.${kind === "archive" ? "zip" : "par2"}`] : null);
+    };
+    const expectDiscarded = async (picker, kind, phase, result) => {
+      assert.equal(context.recoveryPickerStatus, "idle", "invalidating a picker must immediately release its busy state");
+      const kept = recovery();
+      const noticeCount = notices.length;
+      const operationCount = operations.length;
+      finish(picker, kind, phase, result);
+      await picker.choosing;
+      assert.deepEqual(recovery(), kept, `${kind} ${phase} must keep the newer recovery source after ${result}`);
+      assert.equal(context.recoveryPickerStatus, "idle");
+      assert.equal(picker.dialogs.length, phase === "loading" ? 0 : 1, "a dismissed module load must not open a native dialog");
+      assert.equal(notices.length, noticeCount, "a dismissed picker must not announce selection, cancellation or failure");
+      assert.equal(operations.length, operationCount);
+      assert.equal(context.entryPreviewFailure, null);
+      assert.equal(context.previewPasswordPrompt, null);
+      assert.equal(archive.archive().id, 1);
+    };
+    for (const kind of ["archive", "par2"]) {
+      for (const phase of ["loading", "choosing"]) {
+        for (const result of ["selected", "cancelled", "failure"]) {
+          app.openRecoverySet("/previous/photos.par2", "/previous/photos.zip", "open-file");
+          const picker = begin(kind, phase);
+          await picker.started.promise;
+          assert.equal(context.recoveryPickerStatus, kind);
+          app.setScreen("settingsGeneral");
+          await expectDiscarded(picker, kind, phase, result);
+          const request = context.recoveryPickerRequest;
+          const noticeCount = notices.length;
+          await choose(kind);
+          assert.equal(context.recoveryPickerRequest, request, "a callback from a departed recovery page must not start another picker");
+          assert.equal(notices.length, noticeCount);
+          assert.equal(picker.dialogs.length, phase === "loading" ? 0 : 1);
+        }
+      }
+      app.openRecoverySet("/previous/photos.par2", "/previous/photos.zip", "open-file");
+      const old = begin(kind, "choosing");
+      await old.started.promise;
+      app.setScreen("settingsGeneral");
+      app.setScreen("recovery");
+      await expectDiscarded(old, kind, "choosing", "selected");
+      for (const result of ["selected", "cancelled", "failure"]) {
+        app.openRecoverySet("/previous/photos.par2", "/previous/photos.zip", "open-file");
+        const picker = begin(kind, "choosing");
+        await picker.started.promise;
+        app.setScreen("recovery");
+        assert.equal(context.recoveryPickerStatus, kind);
+        const kept = recovery();
+        const noticeCount = notices.length;
+        finish(picker, kind, "choosing", result);
+        await picker.choosing;
+        assert.equal(context.recoveryPickerStatus, "idle");
+        assert.equal(notices.length, noticeCount + 1, "a current picker must preserve its outcome feedback");
+        if (result === "selected") {
+          assert.equal(kind === "archive" ? context.recoverySourceOverride : context.recoveryPar2Override,
+            `/late/old.${kind === "archive" ? "zip" : "par2"}`);
+          assert.equal(kind === "archive" ? context.recoveryPar2Override : context.recoverySourceOverride,
+            kind === "archive" ? kept.sidecar : kept.source);
+        } else assert.deepEqual(recovery(), kept);
+        assert.equal(picker.dialogs.length, 1);
+      }
+    }
+    for (const [action, kind] of [["new-set", "archive"], ["current-archive", "archive"], ["default-par2", "par2"]]) {
+      app.openRecoverySet("/previous/photos.par2", "/previous/photos.zip", "open-file");
+      const picker = begin(kind, "choosing");
+      await picker.started.promise;
+      if (action === "new-set") app.openRecoverySet("/new/photos.par2", "/new/photos.zip", "open-file");
+      else if (action === "current-archive") app.useCurrentArchiveForRecovery();
+      else app.useDefaultPar2ForRecovery();
+      await expectDiscarded(picker, kind, "choosing", "selected");
+    }
+    for (const [kind, result] of [["archive", "selected"], ["par2", "failure"]]) {
+      app.openRecoverySet("/previous/photos.par2", "/previous/photos.zip", "open-file");
+      const old = begin(kind, "choosing");
+      await old.started.promise;
+      app.openRecoverySet("/new/photos.par2", "/new/photos.zip", "open-file");
+      assert.equal(context.recoveryPickerStatus, "idle");
+      const nextKind = kind === "archive" ? "par2" : "archive";
+      const next = begin(nextKind, "choosing");
+      await next.started.promise;
+      const kept = recovery();
+      const noticeCount = notices.length;
+      finish(old, kind, "choosing", result);
+      await old.choosing;
+      assert.deepEqual(recovery(), kept);
+      assert.equal(context.recoveryPickerStatus, nextKind, "the old finally must not unlock the current picker");
+      assert.equal(notices.length, noticeCount);
+      next.pending.resolve(`/new/selected.${nextKind === "archive" ? "zip" : "par2"}`);
+      await next.choosing;
+      assert.equal(context.recoveryPickerStatus, "idle");
+      assert.equal(nextKind === "archive" ? context.recoverySourceOverride : context.recoveryPar2Override,
+        `/new/selected.${nextKind === "archive" ? "zip" : "par2"}`);
+    }
+    for (const [action, kind] of [["preserve-route", "archive"], ["current-route", "archive"],
+      ["missing-current", "archive"], ["missing-default", "par2"], ["unavailable-task", "par2"], ["valid-task", "archive"]]) {
+      app.openRecoverySet("/previous/photos.par2", "/previous/photos.zip", "open-file");
+      if (action === "current-route" || action === "missing-default") {
+        Object.assign(context, { recoverySourceMode: "none", recoverySourceOverride: null, recoveryPar2Override: null });
+      }
+      const picker = begin(kind, "choosing");
+      await picker.started.promise;
+      const request = context.recoveryPickerRequest;
+      if (action === "preserve-route" || action === "current-route") app.openRecoveryConfiguration("preserve");
+      else if (action === "missing-current") {
+        archive.closeArchive();
+        app.useCurrentArchiveForRecovery();
+        archive.installArchivePreview(archiveInfo(1), outerRows, { selected: ["inner.zip"] });
+      } else if (action === "missing-default") app.useDefaultPar2ForRecovery();
+      else if (action === "unavailable-task") {
+        assert.equal(app.adoptRecoveryTargetFromTask({ spec: { kind: "repair_zip", src: "squallz-archive://7" } },
+          { kind: "repair_zip", src: "/displayed/outer.zip" }), false);
+      } else {
+        assert.equal(app.adoptRecoveryTargetFromTask({ spec: { kind: "repair_recovery",
+          path: "/new/photos.zip", recovery: "/new/photos.par2" } }), true);
+      }
+      const cancelled = action === "current-route" || action === "valid-task";
+      assert.equal(context.recoveryPickerStatus, cancelled ? "idle" : kind);
+      assert.equal(context.recoveryPickerRequest, request + Number(cancelled));
+      const kept = recovery();
+      const noticeCount = notices.length;
+      finish(picker, kind, "choosing", "selected");
+      await picker.choosing;
+      assert.equal(context.recoveryPickerStatus, "idle");
+      if (cancelled) {
+        assert.deepEqual(recovery(), kept);
+        assert.equal(notices.length, noticeCount);
+        if (action === "current-route") assert.equal(context.recoverySourceMode, "current");
+      } else {
+        assert.equal(kind === "archive" ? context.recoverySourceOverride : context.recoveryPar2Override,
+          `/late/old.${kind === "archive" ? "zip" : "par2"}`);
+        assert.equal(notices.length, noticeCount + 1);
+      }
+    }
+    app.openRecoverySet("/previous/photos.par2", "/previous/photos.zip", "open-file");
+    const picker = begin("archive", "choosing");
+    await picker.started.promise;
+    const replacement = deferred();
+    ipc.openArchive = () => replacement.promise;
+    const opening = app.openArchivePath("/archives/replacement.zip", "open-file");
+    await expectDiscarded(picker, "archive", "choosing", "selected");
+    replacement.resolve(archiveInfo(3, "replacement.zip"));
+    page.resolve({ items: [], total: 0, page: 0 });
+    await opening;
+    assert.equal(archive.archive().id, 3);
+    assert.equal(context.screen, "browse");
+  });
 });
 
 test("leaving a workspace cancels preparation and discards late files, nested previews, passwords and errors", async () => {
