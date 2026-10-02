@@ -84,13 +84,18 @@ pub fn run(
 ) -> Result<(), CliError> {
     let dest = extract_dest_or_current(dest);
     let filter = PathFilter::new(&includes)?;
+    let progress = Arc::new(CliProgress::new_for_operation(ctx, json_output, "extract"));
 
     // `ask` needs an interactive stdin; otherwise degrade to skip + warning.
     let mut overwrite: OverwritePolicy = overwrite.into();
     let mut resolver: Option<Arc<dyn ConflictResolver>> = None;
     if overwrite == OverwritePolicy::Ask {
         if stdin_is_tty() {
-            resolver = Some(Arc::new(CliConflictResolver::new(Arc::clone(&ctx.loc))));
+            let prompt_progress = Arc::clone(&progress);
+            resolver = Some(Arc::new(CliConflictResolver::new(
+                Arc::clone(&ctx.loc),
+                Arc::new(move || prompt_progress.finish()),
+            )));
         } else {
             overwrite = OverwritePolicy::Skip;
             ctx.eprint_notice(ctx.loc.t("cli.overwrite.non_tty_skip"));
@@ -111,58 +116,54 @@ pub fn run(
         ..ExtractOptions::default()
     };
 
-    let progress = CliProgress::new_for_operation(
-        ctx.quiet,
-        ctx.verbose,
-        json_output,
-        ctx.output_style,
-        ctx.color,
-        ctx.accent,
-        "extract",
-    );
     let explicit = password.map(Password::new);
-    let result = with_password_retry(&ctx.loc, explicit.as_ref(), |pw| {
-        let open = OpenOptions {
-            password: pw.cloned(),
-            encoding_override: encoding.clone(),
-        };
-        let (plan, report, structure) = ctx
-            .engine
-            .plan_and_extract_with_report_and_structure_controlled(
-                &archive,
-                &dest,
-                &archive,
-                smart,
-                &open,
-                &x_opts,
-                &progress,
-                &ctx.ctl,
-                |entries, control| filter.select_entries(entries, control),
-                |_| Ok(()),
-            )?;
-        let no_match = !filter.is_empty() && plan.scope.entries == 0;
-        if smart {
-            match plan.layout {
-                SmartLayout::DirectExtract => {
-                    ctx.eprint_notice(ctx.loc.t("cli.extract.smart_direct"));
-                }
-                SmartLayout::WrapInFolder => {
-                    let folder = ctx.engine.archive_stem(&archive);
-                    let message = ctx
-                        .loc
-                        .format("cli.extract.smart_wrap", &[("folder", &folder)]);
-                    ctx.eprint_notice(&message);
-                }
-            }
-        }
-        Ok(ExtractRunOutcome {
-            plan,
-            report: (!no_match).then_some(report),
-            structure,
-        })
-    });
+    let result = with_password_retry(
+        &ctx.loc,
+        explicit.as_ref(),
+        || progress.finish(),
+        |pw| {
+            let open = OpenOptions {
+                password: pw.cloned(),
+                encoding_override: encoding.clone(),
+            };
+            let (plan, report, structure) = ctx
+                .engine
+                .plan_and_extract_with_report_and_structure_controlled(
+                    &archive,
+                    &dest,
+                    &archive,
+                    smart,
+                    &open,
+                    &x_opts,
+                    progress.as_ref(),
+                    &ctx.ctl,
+                    |entries, control| filter.select_entries(entries, control),
+                    |_| Ok(()),
+                )?;
+            let no_match = !filter.is_empty() && plan.scope.entries == 0;
+            Ok(ExtractRunOutcome {
+                plan,
+                report: (!no_match).then_some(report),
+                structure,
+            })
+        },
+    );
     progress.finish();
     let outcome = result?;
+    if smart {
+        match outcome.plan.layout {
+            SmartLayout::DirectExtract => {
+                ctx.eprint_notice(ctx.loc.t("cli.extract.smart_direct"));
+            }
+            SmartLayout::WrapInFolder => {
+                let folder = ctx.engine.archive_stem(&archive);
+                let message = ctx
+                    .loc
+                    .format("cli.extract.smart_wrap", &[("folder", &folder)]);
+                ctx.eprint_notice(&message);
+            }
+        }
+    }
     if outcome.structure == ArchiveStructureStatus::ZipLocalHeadersRecovered {
         ctx.eprint_problem(ctx.loc.t("cli.extract.zip_local_headers_recovered"));
     }

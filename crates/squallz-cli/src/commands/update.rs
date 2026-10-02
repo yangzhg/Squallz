@@ -92,15 +92,7 @@ pub fn run(
     };
     let operation_count =
         add_count + mkdir_count + delete_count + delete_entry_count + rename_count + move_count;
-    let progress = CliProgress::new_for_operation(
-        ctx.quiet,
-        ctx.verbose,
-        json_output,
-        ctx.output_style,
-        ctx.color,
-        ctx.accent,
-        "update",
-    );
+    let progress = CliProgress::new_for_operation(ctx, json_output, "update");
     let result = ctx
         .engine
         .update(&archive, &ops, &opts, &progress, &ctx.ctl);

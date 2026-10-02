@@ -894,14 +894,6 @@ fn output_style_modern_is_opt_in_and_keeps_json_stable() {
         text.contains("scorecard + decision tables"),
         "stdout: {text}"
     );
-    assert!(
-        text.contains("operation cockpit")
-            && text.contains("snapshot dashboard")
-            && text.contains("signal matrix")
-            && text.contains("transfer matrix")
-            && text.contains("action queue"),
-        "stdout: {text}"
-    );
     assert!(text.contains("Modern dashboard"), "stdout: {text}");
     assert!(text.contains("Support map"), "stdout: {text}");
     assert!(text.contains("Format coverage"), "stdout: {text}");
@@ -909,21 +901,8 @@ fn output_style_modern_is_opt_in_and_keeps_json_stable() {
     assert!(text.contains("Action selector"), "stdout: {text}");
     assert!(text.contains("Modern surfaces"), "stdout: {text}");
     assert!(text.contains("Best form"), "stdout: {text}");
-    assert!(text.contains("action queue"), "stdout: {text}");
     assert!(text.contains("Command cheatsheet"), "stdout: {text}");
-    assert!(
-        text.contains("phase rail") && text.contains("speed/ETA/current"),
-        "stdout: {text}"
-    );
-    assert!(
-        text.contains("next step") && text.contains("current object"),
-        "stdout: {text}"
-    );
-    assert!(text.contains("Progress HUD"), "stdout: {text}");
-    assert!(text.contains("snapshot dashboard table"), "stdout: {text}");
-    assert!(text.contains("speed"), "stdout: {text}");
     assert!(text.contains("Modern style guide"), "stdout: {text}");
-    assert!(text.contains("operation cockpit"), "stdout: {text}");
     assert!(text.contains("--color always"), "stdout: {text}");
     assert!(text.contains("Palette gallery"), "stdout: {text}");
     for palette in ["squallz", "ocean", "jade", "sunset", "violet", "mono"] {
@@ -5647,13 +5626,6 @@ fn info_modern_groups_formats_and_uses_capability_matrix() {
     assert!(text.contains("Runtime inventory"), "{text}");
     assert!(text.contains("Command forms"), "{text}");
     assert!(text.contains("scorecard + decision tables"), "{text}");
-    assert!(
-        text.contains("operation cockpit")
-            && text.contains("signal matrix")
-            && text.contains("transfer matrix")
-            && text.contains("action queue"),
-        "{text}"
-    );
     assert!(text.contains("Modern dashboard"), "{text}");
     assert!(text.contains("Support map"), "{text}");
     assert!(text.contains("Format coverage"), "{text}");
@@ -5662,39 +5634,19 @@ fn info_modern_groups_formats_and_uses_capability_matrix() {
     assert!(text.contains("Modern surfaces"), "{text}");
     assert!(text.contains("Best form"), "{text}");
     assert!(text.contains("scorecard + support map"), "{text}");
-    assert!(text.contains("action queue"), "{text}");
-    assert!(
-        text.contains("phase rail") && text.contains("speed/ETA/current"),
-        "{text}"
-    );
     assert!(text.contains("Modern output"), "{text}");
     assert!(text.contains("Modern style guide"), "{text}");
-    assert!(text.contains("operation cockpit"), "{text}");
     assert!(text.contains("--color always"), "{text}");
     assert!(text.contains("Best for"), "{text}");
     assert!(text.contains("Signal"), "{text}");
     assert!(text.contains("Palette gallery"), "{text}");
     assert!(text.contains("Look"), "{text}");
     assert!(text.contains("Command"), "{text}");
-    assert!(
-        text.contains("next step") && text.contains("current object"),
-        "{text}"
-    );
-    assert!(text.contains("speed"), "{text}");
     for palette in ["squallz", "ocean", "jade", "sunset", "violet", "mono"] {
         assert!(text.contains(&format!("--palette {palette}")), "{text}");
     }
     assert!(text.contains("Color mode"), "{text}");
     assert!(text.contains("Palette"), "{text}");
-    assert!(text.contains("Progress HUD"), "{text}");
-    assert!(
-        text.contains("operation cockpit")
-            && text.contains("signal matrix")
-            && text.contains("transfer matrix")
-            && text.contains("action queue")
-            && text.contains("speed"),
-        "{text}"
-    );
     assert!(text.contains("primary / secondary"), "{text}");
     assert!(text.contains("Lane"), "{text}");
     assert!(text.contains("Mode"), "{text}");

@@ -57,15 +57,7 @@ pub fn run(
     as_json: bool,
 ) -> Result<(), CliError> {
     if let Some(manifest) = check {
-        let progress = CliProgress::new_for_operation(
-            ctx.quiet,
-            ctx.verbose,
-            as_json,
-            ctx.output_style,
-            ctx.color,
-            ctx.accent,
-            "checksum",
-        );
+        let progress = CliProgress::new_for_operation(ctx, as_json, "checksum");
         let report = ctx
             .engine
             .verify_checksum_manifest_with_progress(&manifest, algorithm, &progress, &ctx.ctl);
@@ -85,15 +77,7 @@ pub fn run(
         };
     }
 
-    let progress = CliProgress::new_for_operation(
-        ctx.quiet,
-        ctx.verbose,
-        as_json,
-        ctx.output_style,
-        ctx.color,
-        ctx.accent,
-        "checksum",
-    );
+    let progress = CliProgress::new_for_operation(ctx, as_json, "checksum");
     let report = ctx
         .engine
         .checksum_files_with_progress(&inputs, &excludes, algorithm, &progress, &ctx.ctl);

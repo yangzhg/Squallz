@@ -27,28 +27,25 @@ pub fn run(
     limits: SafetyLimits,
     json: bool,
 ) -> Result<(), CliError> {
-    let progress = CliProgress::new_for_operation(
-        ctx.quiet,
-        ctx.verbose,
-        json,
-        ctx.output_style,
-        ctx.color,
-        ctx.accent,
-        "test",
-    );
+    let progress = CliProgress::new_for_operation(ctx, json, "test");
     let explicit = password.map(Password::new);
-    let outcome = with_password_retry(&ctx.loc, explicit.as_ref(), |pw| {
-        ctx.engine.test_summary_with_structure(
-            &archive,
-            &OpenOptions {
-                password: pw.cloned(),
-                encoding_override: encoding.clone(),
-            },
-            &limits,
-            &progress,
-            &ctx.ctl,
-        )
-    });
+    let outcome = with_password_retry(
+        &ctx.loc,
+        explicit.as_ref(),
+        || progress.finish(),
+        |pw| {
+            ctx.engine.test_summary_with_structure(
+                &archive,
+                &OpenOptions {
+                    password: pw.cloned(),
+                    encoding_override: encoding.clone(),
+                },
+                &limits,
+                &progress,
+                &ctx.ctl,
+            )
+        },
+    );
     progress.finish();
     if !json && matches!(&outcome, Err(FormatError::ResourceLimitExceeded(_))) {
         let limits_message = ctx.loc.format(

@@ -40,15 +40,7 @@ pub fn run(
     force: bool,
     json_output: bool,
 ) -> Result<(), CliError> {
-    let progress = CliProgress::new_for_operation(
-        ctx.quiet,
-        ctx.verbose,
-        json_output,
-        ctx.output_style,
-        ctx.color,
-        ctx.accent,
-        "convert",
-    );
+    let progress = CliProgress::new_for_operation(ctx, json_output, "convert");
     let destination_encrypted = out_password.is_some();
     let create_opts = CreateOptions {
         level: CompressionLevel::from_numeric(level),
@@ -73,21 +65,26 @@ pub fn run(
             }
         };
     let explicit = password.map(Password::new);
-    let result = with_password_retry(&ctx.loc, explicit.as_ref(), |pw| {
-        let open = OpenOptions {
-            password: pw.cloned(),
-            encoding_override: encoding.clone(),
-        };
-        ctx.engine.convert_with_report_policy(
-            &src,
-            &output,
-            &open,
-            &create_opts,
-            commit_policy,
-            &progress,
-            &ctx.ctl,
-        )
-    });
+    let result = with_password_retry(
+        &ctx.loc,
+        explicit.as_ref(),
+        || progress.finish(),
+        |pw| {
+            let open = OpenOptions {
+                password: pw.cloned(),
+                encoding_override: encoding.clone(),
+            };
+            ctx.engine.convert_with_report_policy(
+                &src,
+                &output,
+                &open,
+                &create_opts,
+                commit_policy,
+                &progress,
+                &ctx.ctl,
+            )
+        },
+    );
     progress.finish();
     let report = result?;
     if json_output {

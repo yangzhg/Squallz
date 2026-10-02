@@ -150,17 +150,7 @@ fn run_create(
     } else {
         "compress"
     };
-    let make_progress = || {
-        CliProgress::new_for_operation(
-            ctx.quiet,
-            ctx.verbose,
-            json_output,
-            ctx.output_style,
-            ctx.color,
-            ctx.accent,
-            progress_operation,
-        )
-    };
+    let make_progress = || CliProgress::new_for_operation(ctx, json_output, progress_operation);
     let opts = CreateOptions {
         level: CompressionLevel::from_numeric(level),
         password: password.map(Password::new),

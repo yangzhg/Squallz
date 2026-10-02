@@ -20,28 +20,11 @@ pub(super) fn run(
     json_output: bool,
 ) -> Result<(), CliError> {
     let resources = resource_options(None, memory_limit);
-    let preflight_progress = CliProgress::new_for_operation(
-        ctx.quiet,
-        ctx.verbose,
-        json_output,
-        ctx.output_style,
-        ctx.color,
-        ctx.accent,
-        "test",
-    );
-    let final_progress = CliProgress::new_for_operation(
-        ctx.quiet,
-        ctx.verbose,
-        json_output,
-        ctx.output_style,
-        ctx.color,
-        ctx.accent,
-        "test",
-    );
+    let preflight_progress = CliProgress::new_for_operation(ctx, json_output, "test");
+    let final_progress = CliProgress::new_for_operation(ctx, json_output, "test");
     let mut phase = |next| {
-        if next == MacosSfxPublishPhase::Sign {
-            preflight_progress.finish();
-        }
+        preflight_progress.finish();
+        final_progress.finish();
         if json_output {
             return;
         }

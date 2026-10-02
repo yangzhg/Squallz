@@ -116,17 +116,7 @@ fn create(
 ) -> Result<(), CliError> {
     let stub = resolve_stub(target, stub)?;
     let resources = resource_options(None, memory_limit);
-    let make_progress = || {
-        CliProgress::new_for_operation(
-            ctx.quiet,
-            ctx.verbose,
-            json_output,
-            ctx.output_style,
-            ctx.color,
-            ctx.accent,
-            "compress",
-        )
-    };
+    let make_progress = || CliProgress::new_for_operation(ctx, json_output, "compress");
     let inspection_progress = make_progress();
     let policy = match super::create_commit_policy(
         &output,
@@ -212,15 +202,7 @@ fn inspect(
     json_output: bool,
 ) -> Result<(), CliError> {
     let resources = resource_options(None, memory_limit);
-    let progress = CliProgress::new_for_operation(
-        ctx.quiet,
-        ctx.verbose,
-        json_output,
-        ctx.output_style,
-        ctx.color,
-        ctx.accent,
-        "test",
-    );
+    let progress = CliProgress::new_for_operation(ctx, json_output, "test");
     let info = verify_sfx_payload(&file, &resources, &progress, &ctx.ctl);
     progress.finish();
     let info = info?;
