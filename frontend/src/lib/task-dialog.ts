@@ -1264,6 +1264,12 @@ function taskFailureNextStepDetail(task: TaskDialogModel): string {
     );
   }
   if (key === "error.input_changed") {
+    if (task.spec.kind === "update") {
+      return tr(
+        "gui.task.failure.next_update_input_changed",
+        "Reopen the archive and select the intended items before applying changes again. These changes were not applied.",
+      );
+    }
     return tr(
       "gui.task.failure.next_input_changed",
       "Reopen the archive, review the selected files and destination, then start extraction again. Squallz did not extract anything.",

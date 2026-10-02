@@ -14,11 +14,15 @@ use crate::archive_path::{checked_path_component, is_canonical_process_sequence}
 use crate::destination_guard::{
     verify_destination_guard, verify_destination_guard_with_progress, verify_path_state_digest,
 };
+use crate::extract_guard::inspect_bound_archive_source_state;
 use crate::filesystem_identity::{
     file_identity, open_regular_file_no_follow, open_regular_file_no_follow_for_cleanup,
     path_identity, PathIdentity, RegularFileState,
 };
-use crate::{parent_or_current, sync_directory, CreateArtifactKind, CreateDestinationGuard};
+use crate::{
+    lock_unpoisoned, parent_or_current, sync_directory, ArchiveSourceState, ArchiveUpdateGuard,
+    CreateArtifactKind, CreateDestinationGuard,
+};
 
 const TRANSACTION_VERSION: u32 = 1;
 const JOURNAL_MAX_BYTES: usize = 16 * 1024;
@@ -148,6 +152,7 @@ pub(super) fn run(
     ops: &[UpdateOp],
     additions: &mut dyn PreparedUpdateAdditions,
     opts: &UpdateOptions,
+    source_guard: Option<&ArchiveUpdateGuard>,
     progress: &dyn ProgressSink,
     ctl: &ControlToken,
 ) -> Result<(), FormatError> {
@@ -181,6 +186,13 @@ pub(super) fn run(
     ctl.checkpoint()?;
 
     let source = bind_source(&target)?;
+    if let Some(guard) = source_guard {
+        let state = inspect_bound_archive_source_state(requested_target, &source.file, ctl)?;
+        if state != *lock_unpoisoned(&guard.state) {
+            return Err(FormatError::input_changed());
+        }
+        validate_source(&target, &source).map_err(|_| FormatError::input_changed())?;
+    }
     let addition_bytes = addition_bytes(additions)?;
     let required =
         format.estimate_update_staging_bytes(source.state.bytes(), addition_bytes, &opts.create)?;
@@ -278,6 +290,15 @@ pub(super) fn run(
     let commit_control = ControlToken::default();
     let installed_verification =
         resume_transaction(&transaction, Some(active_stage), progress, &commit_control)?;
+    // A missing new binding must not change the result of an already committed update.
+    let installed_source_state = source_guard.and_then(|_| {
+        published_source_state(
+            requested_target,
+            &transaction,
+            &installed_verification,
+            &commit_control,
+        )
+    });
     drop(stage);
     let completion = publish_completion(journal, &transaction)?;
     drop(source);
@@ -288,7 +309,26 @@ pub(super) fn run(
         Some(installed_verification),
         progress,
         &commit_control,
-    )
+    )?;
+    if let (Some(guard), Some(state)) = (source_guard, installed_source_state) {
+        *lock_unpoisoned(&guard.state) = state;
+    }
+    Ok(())
+}
+
+fn published_source_state(
+    requested_target: &Path,
+    transaction: &ResolvedTransaction,
+    installed: &VerifiedBoundFile,
+    ctl: &ControlToken,
+) -> Option<ArchiveSourceState> {
+    if !verified_bound_file_is_current(installed, &transaction.target, transaction.staging_identity)
+    {
+        return None;
+    }
+    let state = inspect_bound_archive_source_state(requested_target, &installed.file, ctl).ok()?;
+    verified_bound_file_is_current(installed, &transaction.target, transaction.staging_identity)
+        .then_some(state)
 }
 
 pub(super) fn commit_created_archive(

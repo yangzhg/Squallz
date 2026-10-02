@@ -21,7 +21,7 @@ struct DestinationChangedError {
 }
 
 #[derive(Debug, thiserror::Error)]
-#[error("archive input changed after extraction preflight")]
+#[error("archive input changed since it was opened or checked")]
 struct InputChangedError;
 
 /// Unified format-layer error. The CLI maps variants to exit codes, the GUI
@@ -170,12 +170,12 @@ impl FormatError {
     }
 
     /// Creates a contextual error for an archive source or selected scope
-    /// that no longer matches the extraction preflight.
+    /// that no longer matches the source the caller opened or checked.
     pub fn input_changed() -> Self {
         Self::Io(std::io::Error::other(InputChangedError))
     }
 
-    /// Whether this error represents a stale extraction input preflight.
+    /// Whether this error represents a stale archive source or selected scope.
     pub fn is_input_changed(&self) -> bool {
         let Self::Io(error) = self else {
             return false;
@@ -294,7 +294,7 @@ mod tests {
     }
 
     #[test]
-    fn extraction_input_changes_are_structured() {
+    fn archive_input_changes_are_structured() {
         let changed = FormatError::input_changed();
         let unrelated = FormatError::Io(std::io::Error::other(
             "archive input changed while reading metadata",

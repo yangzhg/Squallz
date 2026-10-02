@@ -746,6 +746,9 @@ pub enum JobSpec {
     /// Update an existing archive with append/delete/rename operations.
     Update {
         path: String,
+        /// Binds archive-list edits to the requesting window's opened source.
+        /// Explicit path-based updates leave this unset.
+        expected_archive_id: Option<u64>,
         add: Vec<String>,
         /// Literal selected paths; directories retain their trailing `/`.
         delete: Vec<String>,
@@ -822,9 +825,15 @@ impl JobSpec {
                 *password = None;
                 *expected_input_guard = None;
             }
-            Self::ExtractNested { password, .. }
-            | Self::Test { password, .. }
-            | Self::Update { password, .. } => {
+            Self::Update {
+                password,
+                expected_archive_id,
+                ..
+            } => {
+                *password = None;
+                *expected_archive_id = None;
+            }
+            Self::ExtractNested { password, .. } | Self::Test { password, .. } => {
                 *password = None;
             }
             Self::BatchExtract { items, .. } => {
@@ -1627,7 +1636,8 @@ mod tests {
                 "replace_existing": true, "replacement_guard": replacement_guard
             }),
             serde_json::json!({
-                "kind": "update", "path": "archive.7z", "add": [], "delete": [],
+                "kind": "update", "path": "archive.7z", "expected_archive_id": 17,
+                "add": [], "delete": [],
                 "rename": [], "mkdir": [], "excludes": [], "password": secret,
                 "content_policy": "keep_all_files", "level": 5
             }),

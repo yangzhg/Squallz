@@ -11,8 +11,8 @@ use std::sync::{Arc, Mutex};
 
 use squallz_core::api::{ControlToken, Detected, FormatError};
 use squallz_core::{
-    lock_unpoisoned, validate_sfx_template, Engine, JobId, JobQueue, JobResources, JobState,
-    SfxBuildOptions, SfxTarget,
+    lock_unpoisoned, validate_sfx_template, ArchiveUpdateGuard, Engine, JobId, JobQueue,
+    JobResources, JobState, SfxBuildOptions, SfxTarget,
 };
 
 use crate::audit::{self, OperationAudit, OperationAuditRecord};
@@ -206,6 +206,7 @@ struct PreparedJob {
     snapshot: JobSnapshotDescription,
     _source_leases: Vec<ResolvedArchiveSource>,
     redactions: Vec<(String, String)>,
+    update_guard: Option<Arc<ArchiveUpdateGuard>>,
 }
 
 impl PreparedJob {
@@ -218,6 +219,7 @@ impl PreparedJob {
         let mut snapshot_spec = spec.clone();
         let mut source_leases = Vec::new();
         let mut redactions = Vec::new();
+        let mut update_guard = None;
         match (&mut execution_spec, &mut snapshot_spec) {
             (JobSpec::Extract { path, .. }, JobSpec::Extract { path: shown, .. })
             | (JobSpec::Test { path, .. }, JobSpec::Test { path: shown, .. }) => {
@@ -279,7 +281,17 @@ impl PreparedJob {
                     &mut redactions,
                 )?;
             }
-            (JobSpec::Update { path, .. }, JobSpec::Update { path: shown, .. }) => {
+            (
+                JobSpec::Update {
+                    path,
+                    expected_archive_id,
+                    ..
+                },
+                JobSpec::Update { path: shown, .. },
+            ) => {
+                if let Some(id) = expected_archive_id {
+                    update_guard = Some(state.archive_update_guard(owner_window, *id, path)?);
+                }
                 resolve_job_source(
                     state,
                     owner_window,
@@ -313,6 +325,7 @@ impl PreparedJob {
             snapshot,
             _source_leases: source_leases,
             redactions,
+            update_guard,
         })
     }
 }
@@ -616,6 +629,7 @@ impl JobManager {
         let execution_spec = prepared.execution_spec;
         let source_leases = prepared._source_leases;
         let redactions = prepared.redactions;
+        let update_guard = prepared.update_guard;
         let queue_id = self.queue.submit_with_resources(
             Box::new(move |ctl, queue_sink| {
                 let _source_leases = source_leases;
@@ -644,6 +658,7 @@ impl JobManager {
                     snapshots: &snapshots,
                     sfx_template: sfx_template.as_deref(),
                     source_cleanup: &source_cleanup,
+                    update_guard: update_guard.as_deref(),
                 }
                 .run(&execution_spec, &spec);
                 sink.flush();

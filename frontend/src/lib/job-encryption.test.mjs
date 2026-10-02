@@ -3,7 +3,7 @@ import test from "node:test";
 import { webcrypto } from "node:crypto";
 import { createTestServer } from "../../tests/runtime.mjs";
 
-test("task registration and window snapshots retain output protection without retaining passwords", async () => {
+test("task records retain output protection while clearing credentials and execution authorization", async () => {
   const server = await createTestServer();
   const previousWindow = globalThis.window;
   globalThis.window = { crypto: webcrypto };
@@ -15,7 +15,8 @@ test("task registration and window snapshots retain output protection without re
     const jobs = await server.ssrLoadModule("/src/lib/jobs.svelte.ts");
     const { ipc } = await server.ssrLoadModule("/src/lib/ipc.ts");
     let nextId = 0;
-    ipc.submitJob = async () => ++nextId;
+    const submissions = [];
+    ipc.submitJob = async (spec) => { submissions.push(spec); return ++nextId; };
     const convert = { kind: "convert", src: "/source.7z", dest: "/output.zip", level: 5,
       src_encoding: null, src_password: "source-secret", dest_password: "output-secret",
       encrypt_names: false, split_size: null, split_mode: "generic",
@@ -28,12 +29,19 @@ test("task registration and window snapshots retain output protection without re
         password: "output-secret", encrypt_names: false, replacement_guard: "opaque-guard" }, true],
       [{ kind: "export_sqz", src: "/source.sqz", dest: "/output.zip", level: 5,
         dest_password: "output-secret", replacement_guard: "opaque-guard" }, true],
+      [{ kind: "update", path: "/source.zip", expected_archive_id: 987,
+        add: [], delete: ["report.txt"], rename: [], mkdir: [], encoding: null,
+        excludes: [], content_policy: "keep_all_files", password: "source-secret", level: 6 }, false],
     ];
     for (const [spec, required] of inputs) {
       const id = await jobs.submitJob(spec);
       const task = jobs.tasks().find((item) => item.id === id);
       assert.equal(task.outputPasswordRequired, required);
       assert.doesNotMatch(JSON.stringify(task), /source-secret|output-secret|opaque-guard/);
+      if (spec.kind === "update") {
+        assert.equal(submissions.at(-1).expected_archive_id, 987);
+        assert.equal(task.spec.expected_archive_id, null);
+      }
     }
     const snapshot = (id, required, version = 1) => ({
       id, version, spec: { ...convert, src_password: null, dest_password: null, replacement_guard: null },

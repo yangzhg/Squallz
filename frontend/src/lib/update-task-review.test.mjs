@@ -11,6 +11,7 @@ const { ArchiveUpdateReview } = await server.ssrLoadModule("/src/lib/archive-upd
 const { taskReviewScreen } = await server.ssrLoadModule("/src/lib/task-model.ts");
 const plain = (value) => JSON.parse(JSON.stringify(value));
 const spec = () => ({ kind: "update", path: "/original/历史归档.zip", encoding: "gbk", level: 3,
+  expected_archive_id: null,
   add: ["/input/资料\n完整.txt"], mkdir: ["交付/审核/"], delete: ["old[1]/*.txt", "literal\\file.txt"],
   rename: [{from:"versions/旧说明.txt",to:"交付/完整说明.txt"}],
   content_policy: "custom", excludes: ["*.bak", ".DS_Store"], password: "old-secret" });
@@ -64,15 +65,16 @@ function workspaceHandlers(review, overrides = {}) {
 for (const state of ["failed", "cancelled"]) {
 test(`${state} updates restore their original operations without submitting or inheriting the current archive`,async()=>{
   const review=new ArchiveUpdateReview(); const run=handlers(review);
-  const original=spec();
+  const original={...spec(), expected_archive_id: 123};
   await run.reviewTask({state,spec:original},{...original,path:"Displayed archive.zip"});
   assert.deepEqual(run.calls,[["screen","updateReview"],["dismiss"],["focus"]]);
   assert.equal(review.draft.displayPath,"Displayed archive.zip");
   assert.equal(review.draft.path,original.path);
   assert.equal("password" in review.draft,false);
+  assert.equal("expected_archive_id" in review.draft,false);
   assert.equal(taskReviewScreen({state:"done",spec:original}),null);
   await run.submitArchiveUpdateReview();
-  assert.deepEqual(run.calls.find(([kind])=>kind==="submit")[1],{...original,password:null});
+  assert.deepEqual(run.calls.find(([kind])=>kind==="submit")[1],{...original,password:null,expected_archive_id:null});
   original.add[0]="/changed"; original.rename[0].to="changed"; original.excludes.push("*");
   assert.equal(review.draft.operations[0].value,"/input/资料\n完整.txt");
   assert.deepEqual(plain(review.draft.excludes),["*.bak",".DS_Store"]);

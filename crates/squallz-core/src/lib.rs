@@ -85,6 +85,7 @@ pub use update::move_plan::{
     plan_archive_moves, ArchiveMoveConflict, ArchiveMoveItem, ArchiveMovePlan,
 };
 pub use update::target::{inspect_archive_target, ArchiveTargetInspection};
+pub use update::ArchiveUpdateGuard;
 pub use volumes::{collect_volume_set, collect_volume_set_with_control, VolumeSet};
 
 use std::fs::{self, File};
@@ -360,6 +361,29 @@ pub(crate) enum Source {
     Volumes { base: PathBuf, parts: VolumeSet },
 }
 
+struct OpenedSource {
+    stream: Box<dyn ReadSeek>,
+    identity: Option<api::PhysicalFileIdentity>,
+    binding: Option<OpenedSourceBinding>,
+}
+
+struct OpenedSourceBinding {
+    path: PathBuf,
+    file: File,
+    state: ArchiveSourceState,
+}
+
+impl OpenedSourceBinding {
+    fn verify(&self, control: &ControlToken) -> Result<ArchiveSourceState, FormatError> {
+        let state =
+            extract_guard::inspect_bound_archive_source_state(&self.path, &self.file, control)?;
+        if state != self.state {
+            return Err(FormatError::input_changed());
+        }
+        Ok(state)
+    }
+}
+
 impl Source {
     /// Resolves a path, expanding split volumes (any `x.zip.NNN` opens the
     /// whole gap-checked set).
@@ -381,12 +405,25 @@ impl Source {
     fn open_stream_with_identity(
         &self,
         control: &ControlToken,
-    ) -> Result<(Box<dyn ReadSeek>, Option<api::PhysicalFileIdentity>), FormatError> {
+    ) -> Result<OpenedSource, FormatError> {
         control.checkpoint()?;
         match self {
             Self::Single(path) => {
                 let file = File::open(path)?;
                 control.checkpoint()?;
+                let metadata = fs::symlink_metadata(path)?;
+                let binding = if metadata.is_file() && !path_entry_is_link_or_reparse(&metadata) {
+                    let held = file.try_clone()?;
+                    let state =
+                        extract_guard::inspect_bound_archive_source_state(path, &held, control)?;
+                    Some(OpenedSourceBinding {
+                        path: path.clone(),
+                        file: held,
+                        state,
+                    })
+                } else {
+                    None
+                };
                 #[cfg(any(unix, windows))]
                 let identity = filesystem_identity::file_identity(&file)
                     .ok()
@@ -395,12 +432,17 @@ impl Source {
                 #[cfg(not(any(unix, windows)))]
                 let identity = None;
                 control.checkpoint()?;
-                Ok((Box::new(file), identity))
+                Ok(OpenedSource {
+                    stream: Box::new(file),
+                    identity,
+                    binding,
+                })
             }
-            Self::Volumes { parts, .. } => Ok((
-                Box::new(MultiVolumeReader::open_with_control(parts, control)?),
-                None,
-            )),
+            Self::Volumes { parts, .. } => Ok(OpenedSource {
+                stream: Box::new(MultiVolumeReader::open_with_control(parts, control)?),
+                identity: None,
+                binding: None,
+            }),
         }
     }
 
@@ -450,6 +492,9 @@ pub struct ArchiveListing {
     pub format: String,
     pub entries: Vec<EntryMeta>,
     pub source_set: Option<api::ArchiveSourceSet>,
+    /// Physical single-file state bound to the actual reader and revalidated
+    /// after listing. Other source layouts remain browsable without this binding.
+    pub source_state: Option<ArchiveSourceState>,
     pub structure: ArchiveStructureStatus,
     pub password_verified: bool,
 }
@@ -458,6 +503,7 @@ struct OpenedArchive {
     format: String,
     reader: Box<dyn ArchiveReader>,
     generic_source_set: Option<api::ArchiveSourceSet>,
+    source_binding: Option<OpenedSourceBinding>,
 }
 
 impl OpenedArchive {
@@ -465,11 +511,21 @@ impl OpenedArchive {
         format: String,
         reader: Box<dyn ArchiveReader>,
         generic_source_set: Option<api::ArchiveSourceSet>,
+        source_binding: Option<OpenedSourceBinding>,
     ) -> Self {
+        let source_binding = if reader
+            .source_set()
+            .is_some_and(|source_set| source_set.members().len() > 1)
+        {
+            None
+        } else {
+            source_binding
+        };
         Self {
             format,
             reader,
             generic_source_set,
+            source_binding,
         }
     }
 
@@ -488,11 +544,16 @@ impl OpenedArchive {
         control: &ControlToken,
     ) -> Result<ArchiveSourceState, FormatError> {
         self.reader.verify_source_set(control)?;
-        let state = match self.effective_source_set() {
-            Some(source_set) => {
-                extract_guard::inspect_archive_source_state(source_set.members(), control)
-            }
-            None => extract_guard::inspect_archive_source_state(&[archive.to_path_buf()], control),
+        let state = match &self.source_binding {
+            Some(binding) => binding.verify(control),
+            None => match self.effective_source_set() {
+                Some(source_set) => {
+                    extract_guard::inspect_archive_source_state(source_set.members(), control)
+                }
+                None => {
+                    extract_guard::inspect_archive_source_state(&[archive.to_path_buf()], control)
+                }
+            },
         }?;
         self.reader.verify_source_set(control)?;
         Ok(state)
@@ -615,7 +676,11 @@ impl Engine {
             return Ok(Some(source_set));
         }
 
-        let (stream, source_identity) = source.open_stream_with_identity(control)?;
+        let OpenedSource {
+            stream,
+            identity: source_identity,
+            ..
+        } = source.open_stream_with_identity(control)?;
         let mut stream = ControlledReadSeek::boxed(stream, control);
         let (head, tail) = controlled_result(control, sniff_window(&mut *stream))?;
         let name = source
@@ -765,7 +830,7 @@ impl Engine {
                         control,
                         format.open_with_control(stream, opts, control),
                     )?;
-                    Ok(OpenedArchive::new("zip".to_owned(), reader, None))
+                    Ok(OpenedArchive::new("zip".to_owned(), reader, None, None))
                 }
                 _ => Err(FormatError::CorruptArchive(
                     "SFX payload is not a supported ZIP archive".into(),
@@ -774,7 +839,11 @@ impl Engine {
         }
         let source = Source::resolve_with_control(path, control)?;
         let generic_source_set = source.generic_source_set_with_control(control)?;
-        let (stream, source_identity) = source.open_stream_with_identity(control)?;
+        let OpenedSource {
+            stream,
+            identity: source_identity,
+            binding: source_binding,
+        } = source.open_stream_with_identity(control)?;
         let mut stream = ControlledReadSeek::boxed(stream, control);
         let (head, tail) = controlled_result(control, sniff_window(&mut *stream))?;
         let name = source
@@ -796,7 +865,12 @@ impl Engine {
                     None => f.open_with_control(stream, opts, control),
                 };
                 let reader = controlled_result(control, reader)?;
-                Ok(OpenedArchive::new(format, reader, generic_source_set))
+                Ok(OpenedArchive::new(
+                    format,
+                    reader,
+                    generic_source_set,
+                    source_binding,
+                ))
             }
             Some(api::Detected::Compressed {
                 compressor,
@@ -808,7 +882,12 @@ impl Engine {
                     let format = format!("{}.{}", archive.id(), compressor.id());
                     let factory = decompress_factory(stream, Arc::clone(&compressor), control);
                     let reader = controlled_result(control, archive.open_stream(factory, opts))?;
-                    Ok(OpenedArchive::new(format, reader, generic_source_set))
+                    Ok(OpenedArchive::new(
+                        format,
+                        reader,
+                        generic_source_set,
+                        source_binding,
+                    ))
                 }
                 // Plain single stream (x.gz): single-entry virtual
                 // archive named after the file minus the extension.
@@ -828,6 +907,7 @@ impl Engine {
                             hint,
                         )),
                         generic_source_set,
+                        source_binding,
                     ))
                 }
             },
@@ -913,8 +993,17 @@ impl Engine {
         let opened = self.open_identified_with_control(path, opts, control)?;
         let source_set = opened.native_source_set().cloned();
         let structure = opened.reader.structure_status();
-        let OpenedArchive { format, reader, .. } = opened;
+        let OpenedArchive {
+            format,
+            reader,
+            source_binding,
+            ..
+        } = opened;
         let entries = collect_consumed_reader_entries(reader, max_entries, control)?;
+        let source_state = source_binding
+            .as_ref()
+            .map(|binding| binding.verify(control))
+            .transpose()?;
         let password_verified = password_required
             && source.is_some()
             && self.inspect_archive_source_state(path, control).ok() == source;
@@ -923,6 +1012,7 @@ impl Engine {
             format,
             entries,
             source_set,
+            source_state,
             structure,
             password_verified,
         })
@@ -1621,6 +1711,34 @@ impl Engine {
         progress: &dyn ProgressSink,
         ctl: &ControlToken,
     ) -> Result<(), FormatError> {
+        self.update_with_source_guard(path, ops, opts, None, progress, ctl)
+    }
+
+    /// Applies updates only to the source bound to this archive view, advancing
+    /// the shared binding after each successful update.
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_guarded(
+        &self,
+        path: &Path,
+        ops: &[UpdateOp],
+        opts: &UpdateOptions,
+        source_guard: &ArchiveUpdateGuard,
+        progress: &dyn ProgressSink,
+        ctl: &ControlToken,
+    ) -> Result<(), FormatError> {
+        self.update_with_source_guard(path, ops, opts, Some(source_guard), progress, ctl)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn update_with_source_guard(
+        &self,
+        path: &Path,
+        ops: &[UpdateOp],
+        opts: &UpdateOptions,
+        source_guard: Option<&ArchiveUpdateGuard>,
+        progress: &dyn ProgressSink,
+        ctl: &ControlToken,
+    ) -> Result<(), FormatError> {
         let name = path
             .file_name()
             .and_then(|s| s.to_str())
@@ -1644,7 +1762,7 @@ impl Engine {
                         f.id()
                     )));
                 }
-                update::run_update_rewrite(f.as_ref(), path, ops, opts, progress, ctl)
+                update::run_update_rewrite(f.as_ref(), path, ops, opts, source_guard, progress, ctl)
             }
             _ => Err(FormatError::Unsupported(format!(
                 "updating this format is not supported: {name}"

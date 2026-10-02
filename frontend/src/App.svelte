@@ -11238,6 +11238,7 @@
       const queued = await submitCurrentArchiveJob({
         kind: "update",
         path,
+        expected_archive_id: id,
         encoding,
         add,
         delete: [],
@@ -11283,6 +11284,7 @@
       {
         kind: "update",
         path: currentArchive.source,
+        expected_archive_id: currentArchive.id,
         encoding: currentArchive.encoding_override,
         add: [],
         delete: paths,
@@ -11545,6 +11547,7 @@
       {
         kind: "update",
         path: currentArchive.source,
+        expected_archive_id: currentArchive.id,
         encoding: currentArchive.encoding_override,
         add: [],
         delete: [],
@@ -11664,6 +11667,7 @@
       {
         kind: "update",
         path: currentArchive.source,
+        expected_archive_id: currentArchive.id,
         encoding: currentArchive.encoding_override,
         add: [],
         delete: [],
@@ -11740,6 +11744,7 @@
       {
         kind: "update",
         path: currentArchive.source,
+        expected_archive_id: currentArchive.id,
         encoding: currentArchive.encoding_override,
         add: [],
         delete: [],

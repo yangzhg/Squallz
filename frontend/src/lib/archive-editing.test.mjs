@@ -119,6 +119,7 @@ test("refresh keeps rename text and checks the original selection before queuing
   assert.equal(editing.context.renameTargetName, "kept.txt");
   await editing.submitRenameSelectedJob();
   assert.deepEqual(checks, [[18, ["docs/a.txt"]]]);
+  assert.equal(editing.submitted[0].expected_archive_id, 18);
   assert.deepEqual(JSON.parse(JSON.stringify(editing.submitted[0].rename)), [{ from: "docs/a.txt", to: "docs/kept.txt" }]);
 });
 
@@ -129,6 +130,7 @@ test("move and new-folder drafts keep their original entries and parent after re
   moving.context.selectedPaths = () => new Set();
   moving.refreshEditor();
   await moving.submitMoveSelectedJob();
+  assert.equal(moving.submitted[0].expected_archive_id, 18);
   assert.deepEqual(JSON.parse(JSON.stringify(moving.submitted[0].rename)), [
     { from: "docs/", to: "destination/docs/" }, { from: "other.txt", to: "destination/other.txt" },
   ]);
@@ -139,6 +141,7 @@ test("move and new-folder drafts keep their original entries and parent after re
   folder.context.archiveDirs = [];
   folder.refreshEditor();
   await folder.submitNewFolderJob();
+  assert.equal(folder.submitted[0].expected_archive_id, 18);
   assert.deepEqual([...folder.submitted[0].mkdir], ["docs/Plans/"]);
 });
 
@@ -340,7 +343,7 @@ test("adding files captures settings once and rejects duplicate selection and su
   await editing.submitAddToArchiveJob();
   assert.equal(editing.submitted.length, 1);
   assert.deepEqual(JSON.parse(JSON.stringify(editing.submitted[0])), {
-    kind: "update", path: "/tmp/archive-editing.zip", encoding: "gbk", add: ["/inputs/资料.txt"],
+    kind: "update", path: "/tmp/archive-editing.zip", expected_archive_id: 17, encoding: "gbk", add: ["/inputs/资料.txt"],
     delete: [], rename: [], mkdir: [], excludes: ["*.bak"], content_policy: "custom", password: null, level: 8,
   });
   submitted(1); await pending;
@@ -379,6 +382,7 @@ test("deleting selected entries preserves literal paths and directory boundaries
   const job = editing.submitted[0];
   assert.equal(job.kind, "update");
   assert.equal(job.path, "/tmp/archive-editing.zip");
+  assert.equal(job.expected_archive_id, 17);
   assert.equal(job.encoding, "gbk");
   assert.deepEqual(Array.from(job.delete), ["notes.txt", "资料[1]/", "literal?.txt"]);
   assert.deepEqual(Array.from(job.rename), []);

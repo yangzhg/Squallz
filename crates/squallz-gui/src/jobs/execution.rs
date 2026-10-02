@@ -289,6 +289,7 @@ pub(super) struct JobContext<'a> {
     pub(super) snapshots: &'a Arc<Mutex<JobSnapshotStore>>,
     pub(super) sfx_template: Option<&'a Path>,
     pub(super) source_cleanup: &'a SourceCleanup,
+    pub(super) update_guard: Option<&'a squallz_core::ArchiveUpdateGuard>,
 }
 
 impl JobContext<'_> {
@@ -1476,6 +1477,7 @@ impl JobContext<'_> {
             }
             JobSpec::Update {
                 path,
+                expected_archive_id: _,
                 add,
                 delete,
                 encoding,
@@ -1525,7 +1527,13 @@ impl JobContext<'_> {
                         ..CreateOptions::default()
                     },
                 };
-                state.engine.update(&archive, &ops, &opts, sink, ctl)?;
+                if let Some(guard) = self.update_guard {
+                    state
+                        .engine
+                        .update_guarded(&archive, &ops, &opts, guard, sink, ctl)?;
+                } else {
+                    state.engine.update(&archive, &ops, &opts, sink, ctl)?;
+                }
                 Ok(Some(serde_json::json!({
                     "archive": archive.to_string_lossy(),
                     "operations": add.len() + delete.len() + rename.len() + mkdir.len(),

@@ -229,7 +229,10 @@ function redactedSpec(spec: JobSpec): JobSpec {
   if (spec.kind === "extract") {
     return { ...spec, password: null, expected_input_guard: null };
   }
-  if (spec.kind === "extract_nested" || spec.kind === "test" || spec.kind === "update") {
+  if (spec.kind === "update") {
+    return { ...spec, password: null, expected_archive_id: null };
+  }
+  if (spec.kind === "extract_nested" || spec.kind === "test") {
     return { ...spec, password: null };
   }
   return spec;
@@ -1402,6 +1405,7 @@ function isRecoveryCleanupPreview(kind: PreviewTaskKind): boolean {
 function previewTaskSpec(kind: PreviewTaskKind): JobSpec {
   if (kind === "update_failure") {
     return { kind: "update", path: `${sampleRoot}/客户交付/Quarterly delivery with complete project history.zip`,
+      expected_archive_id: null,
       add: [`${sampleRoot}/Revised documents/完整项目说明.txt`], mkdir: ["交付文档/审核记录/"],
       delete: ["Previous versions/旧资料[1].txt"],
       rename: [{ from: "Previous versions/Design assets with a complete descriptive name.pdf", to: "交付文档/Design assets with a complete descriptive name.pdf" }],
@@ -1441,6 +1445,7 @@ function previewTaskSpec(kind: PreviewTaskKind): JobSpec {
     return {
       kind: "update",
       path: `${sampleRoot}/product-backup.zip`,
+      expected_archive_id: null,
       encoding: null,
       add: [`${sampleRoot}/incoming-assets`],
       delete: [],

@@ -4021,6 +4021,259 @@ fn repair_sqz_job_rewrites_recovered_container() {
 }
 
 #[test]
+fn opened_archive_updates_reject_replacements_before_submit_and_while_queued() {
+    for while_queued in [false, true] {
+        let dir = temp_dir(if while_queued {
+            "opened-update-queued-replacement"
+        } else {
+            "opened-update-replacement"
+        });
+        let archive = dir.join("out.zip");
+        fs::write(
+            &archive,
+            build_stored_zip(&[(b"report.txt", b"original report")]),
+        )
+        .unwrap();
+        let state = Arc::new(AppState::new());
+        let opened = state
+            .open_archive_for_window("editor", &archive, None, None)
+            .unwrap();
+        let replacement_bytes = build_stored_zip(&[
+            (b"report.txt", b"replacement report"),
+            (b"keep.txt", b"replacement only"),
+        ]);
+        let replace = || {
+            let replacement = dir.join("replacement.zip");
+            fs::write(&replacement, &replacement_bytes).unwrap();
+            fs::remove_file(&archive).unwrap();
+            fs::rename(replacement, &archive).unwrap();
+        };
+        let manager = JobManager::new();
+        let sink = Arc::new(TestSink::default());
+        let events: Arc<dyn EventSink> = sink.clone();
+        let gate = if while_queued {
+            let (gate_tx, gate_rx) = std::sync::mpsc::channel::<()>();
+            let (started_tx, started_rx) = std::sync::mpsc::channel::<()>();
+            manager.queue.submit(Box::new(move |_ctl, _progress| {
+                started_tx.send(()).unwrap();
+                gate_rx
+                    .recv_timeout(std::time::Duration::from_secs(10))
+                    .unwrap();
+                Ok(())
+            }));
+            started_rx
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .unwrap();
+            Some(gate_tx)
+        } else {
+            replace();
+            None
+        };
+        let update = |expected_archive_id| JobSpec::Update {
+            path: archive.to_string_lossy().into_owned(),
+            expected_archive_id,
+            add: vec![],
+            delete: vec!["report.txt".into()],
+            encoding: None,
+            rename: vec![],
+            mkdir: vec![],
+            excludes: vec![],
+            content_policy: squallz_core::CreateContentPolicy::KeepAllFiles,
+            password: None,
+            level: 5,
+        };
+        let id = manager
+            .submit_for_window(
+                "editor".into(),
+                state.clone(),
+                events.clone(),
+                update(Some(opened.id)),
+                SettingsDto::default(),
+            )
+            .unwrap();
+        if let Some(gate) = gate {
+            assert_eq!(manager.snapshot(id).unwrap().state, "queued");
+            replace();
+            gate.send(()).unwrap();
+        }
+        manager.wait_idle();
+        let snapshot = manager.snapshot_for_window("editor", id).unwrap();
+        assert_eq!(snapshot.state, "failed");
+        assert_eq!(snapshot.error.unwrap().key, "error.input_changed");
+        assert_eq!(fs::read(&archive).unwrap(), replacement_bytes);
+
+        // An explicit path update retains its existing latest-file contract.
+        let path_id = manager
+            .submit_for_window(
+                "editor".into(),
+                state.clone(),
+                events.clone(),
+                update(None),
+                SettingsDto::default(),
+            )
+            .unwrap();
+        manager.wait_idle();
+        assert_eq!(
+            manager
+                .snapshot_for_window("editor", path_id)
+                .unwrap()
+                .state,
+            "done"
+        );
+        let entries = state
+            .engine
+            .list(&archive, &OpenOptions::default())
+            .unwrap();
+        assert!(!entries
+            .iter()
+            .any(|entry| entry.path.display == "report.txt"));
+        assert!(entries.iter().any(|entry| entry.path.display == "keep.txt"));
+
+        fs::write(&archive, &replacement_bytes).unwrap();
+        let refreshed = state
+            .open_archive_for_window("editor", &archive, None, None)
+            .unwrap();
+        let fresh_id = manager
+            .submit_for_window(
+                "editor".into(),
+                state.clone(),
+                events.clone(),
+                update(Some(refreshed.id)),
+                SettingsDto::default(),
+            )
+            .unwrap();
+        manager.wait_idle();
+        assert_eq!(
+            manager
+                .snapshot_for_window("editor", fresh_id)
+                .unwrap()
+                .state,
+            "done"
+        );
+        assert!(!state
+            .engine
+            .list(&archive, &OpenOptions::default())
+            .unwrap()
+            .iter()
+            .any(|entry| entry.path.display == "report.txt"));
+        fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[test]
+fn opened_archive_updates_share_successful_source_advances_and_enforce_ownership() {
+    let dir = temp_dir("opened-update-session");
+    let archive = dir.join("out.zip");
+    let original = build_stored_zip(&[(b"one.txt", b"one"), (b"two.txt", b"two")]);
+    fs::write(&archive, &original).unwrap();
+    let other = dir.join("other.zip");
+    fs::write(&other, &original).unwrap();
+    let state = Arc::new(AppState::new());
+    let opened = state
+        .open_archive_for_window("editor", &archive, None, None)
+        .unwrap();
+    let manager = JobManager::new();
+    let sink = Arc::new(TestSink::default());
+    let events: Arc<dyn EventSink> = sink.clone();
+    let update = |path: &Path, from: &str, to: &str| JobSpec::Update {
+        path: path.to_string_lossy().into_owned(),
+        expected_archive_id: Some(opened.id),
+        add: vec![],
+        delete: vec![],
+        encoding: None,
+        rename: vec![crate::dto::RenameSpec {
+            from: from.into(),
+            to: to.into(),
+        }],
+        mkdir: vec![],
+        excludes: vec![],
+        content_policy: squallz_core::CreateContentPolicy::KeepAllFiles,
+        password: None,
+        level: 5,
+    };
+    for (owner, path) in [
+        ("other-window", archive.as_path()),
+        ("editor", other.as_path()),
+    ] {
+        assert!(manager
+            .submit_for_window(
+                owner.into(),
+                state.clone(),
+                events.clone(),
+                update(path, "one.txt", "renamed.txt"),
+                SettingsDto::default(),
+            )
+            .is_err());
+    }
+    assert!(sink.events.lock().unwrap().is_empty());
+    assert_eq!(fs::read(&archive).unwrap(), original);
+    assert_eq!(fs::read(&other).unwrap(), original);
+
+    let (gate_tx, gate_rx) = std::sync::mpsc::channel::<()>();
+    let (started_tx, started_rx) = std::sync::mpsc::channel::<()>();
+    manager.queue.submit(Box::new(move |_ctl, _progress| {
+        started_tx.send(()).unwrap();
+        gate_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap();
+        Ok(())
+    }));
+    started_rx
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .unwrap();
+    let ids = [("one.txt", "first.txt"), ("two.txt", "second.txt")].map(|(from, to)| {
+        manager
+            .submit_for_window(
+                "editor".into(),
+                state.clone(),
+                events.clone(),
+                update(&archive, from, to),
+                SettingsDto::default(),
+            )
+            .unwrap()
+    });
+    for id in ids {
+        assert_eq!(
+            manager.snapshot_for_window("editor", id).unwrap().state,
+            "queued"
+        );
+    }
+    gate_tx.send(()).unwrap();
+    manager.wait_idle();
+    for id in ids {
+        let snapshot = manager.snapshot_for_window("editor", id).unwrap();
+        assert_eq!(snapshot.state, "done");
+        assert!(matches!(
+            snapshot.spec,
+            JobSpec::Update {
+                expected_archive_id: None,
+                ..
+            }
+        ));
+        assert!(matches!(
+            manager
+                .review_spec_for_window(&state, "editor", id)
+                .unwrap(),
+            JobSpec::Update {
+                expected_archive_id: None,
+                ..
+            }
+        ));
+    }
+    let entries = state
+        .engine
+        .list(&archive, &OpenOptions::default())
+        .unwrap();
+    assert!(entries
+        .iter()
+        .any(|entry| entry.path.display == "first.txt"));
+    assert!(entries
+        .iter()
+        .any(|entry| entry.path.display == "second.txt"));
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn update_job_deletes_selected_entry() {
     let dir = temp_dir("update-delete");
     let src = dir.join("data");
@@ -4048,6 +4301,7 @@ fn update_job_deletes_selected_entry() {
         Arc::clone(&events),
         JobSpec::Update {
             path: archive.to_string_lossy().into_owned(),
+            expected_archive_id: None,
             add: vec![],
             delete: vec!["data/drop.txt".into()],
             encoding: None,
@@ -4114,6 +4368,7 @@ fn update_job_deletes_only_literal_selected_paths() {
         events,
         JobSpec::Update {
             path: archive.to_string_lossy().into_owned(),
+            expected_archive_id: None,
             add: vec![],
             delete: vec![
                 "notes.txt".into(),
@@ -4225,6 +4480,7 @@ fn update_job_resolves_display_names_and_rejects_ambiguous_or_missing_selection(
                 events,
                 JobSpec::Update {
                     path: archive.to_string_lossy().into_owned(),
+                    expected_archive_id: None,
                     add: vec![],
                     delete: if rename_selected {
                         vec![]
@@ -4342,6 +4598,7 @@ fn update_job_add_directory_applies_content_policy_and_explicit_excludes() {
         Arc::clone(&events),
         JobSpec::Update {
             path: archive.to_string_lossy().into_owned(),
+            expected_archive_id: None,
             add: vec![extra.to_string_lossy().into_owned()],
             delete: vec![],
             encoding: None,
@@ -4548,6 +4805,7 @@ fn update_job_creates_directory_and_moves_a_subtree_into_it() {
         Arc::clone(&events),
         JobSpec::Update {
             path: archive.to_string_lossy().into_owned(),
+            expected_archive_id: None,
             add: vec![],
             delete: vec![],
             encoding: Some("gbk".into()),
@@ -4578,6 +4836,7 @@ fn update_job_creates_directory_and_moves_a_subtree_into_it() {
         Arc::clone(&move_events),
         JobSpec::Update {
             path: archive.to_string_lossy().into_owned(),
+            expected_archive_id: None,
             add: vec![],
             delete: vec![],
             encoding: Some("gbk".into()),
@@ -4645,6 +4904,7 @@ fn update_job_reports_target_conflict_as_failed() {
         Arc::clone(&events),
         JobSpec::Update {
             path: archive.to_string_lossy().into_owned(),
+            expected_archive_id: None,
             add: vec![],
             delete: vec![],
             encoding: None,

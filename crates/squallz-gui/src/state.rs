@@ -15,7 +15,7 @@ use squallz_core::api::{
 };
 use squallz_core::{
     collect_volume_set_with_control, fold_archive_search_path, fold_archive_search_query,
-    rank_folded_archive_path, ArchiveListing, Engine,
+    rank_folded_archive_path, ArchiveListing, ArchiveUpdateGuard, Engine,
 };
 use tempfile::TempPath;
 
@@ -121,6 +121,9 @@ pub struct CachedArchive {
     display_path: String,
     display_name: String,
     read_only: bool,
+    /// Shared by updates authorized from this opened source. Successful writes
+    /// advance its state while the core target lock is still held.
+    update_guard: Option<Arc<ArchiveUpdateGuard>>,
     /// All entries in archive order
     pub entries: Vec<EntryMeta>,
     /// Directory level → sorted rows ("" = root, otherwise `a/b/`)
@@ -420,6 +423,7 @@ impl AppState {
             format,
             entries,
             source_set: native_source_set,
+            source_state,
             structure,
             password_verified,
         } = self
@@ -450,6 +454,11 @@ impl AppState {
         let encoding = encoding_diagnostics(&entries, encoding, control)?;
 
         let levels = build_levels(&entries, control)?;
+        let update_guard = if identity.read_only {
+            None
+        } else {
+            source_state.map(|state| Arc::new(ArchiveUpdateGuard::new(state)))
+        };
         control.checkpoint()?;
         let owned_temp = match identity.backing {
             ArchiveBacking::Pending(pending) => Some(Arc::new(OwnedArchiveTemp {
@@ -483,6 +492,7 @@ impl AppState {
                 display_path: identity.display_path.clone(),
                 display_name: display_name.clone(),
                 read_only: identity.read_only,
+                update_guard,
                 entries,
                 levels,
                 search_cache: Mutex::new(SearchCache::default()),
@@ -539,6 +549,29 @@ impl AppState {
             display_path: archive.display_path.clone(),
             read_only: archive.read_only,
             _archive: Some(archive),
+        })
+    }
+
+    pub(crate) fn archive_update_guard(
+        &self,
+        owner_window: Option<&str>,
+        id: u64,
+        path: &str,
+    ) -> Result<Arc<ArchiveUpdateGuard>, FormatError> {
+        let archive = self.archive_for_owner(id, owner_window)?;
+        if archive.read_only {
+            return Err(FormatError::Unsupported(
+                "nested archives are read-only; extract or convert them to save changes".to_owned(),
+            ));
+        }
+        if archive.source_path != Path::new(path) {
+            return Err(FormatError::input_changed());
+        }
+        archive.update_guard.as_ref().cloned().ok_or_else(|| {
+            FormatError::Unsupported(
+                "archive source cannot be updated in place; extract or convert it to save changes"
+                    .to_owned(),
+            )
         })
     }
 
@@ -1454,6 +1487,7 @@ mod tests {
             display_path: "test.zip".to_owned(),
             display_name: "test.zip".to_owned(),
             read_only: false,
+            update_guard: None,
             entries,
             levels,
             search_cache: Mutex::new(SearchCache::default()),
@@ -2303,6 +2337,71 @@ mod tests {
                     .unwrap();
                 assert!(state.password_for(&encrypted).is_none());
             }
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn non_regular_sources_remain_browsable_without_authorizing_archive_updates() {
+        use squallz_core::{SfxBuildOptions, SfxTarget, SFX_GUI_STUB_MARKER};
+
+        let dir = temp_dir("update-non-regular-source");
+        let archive = make_zip(&dir, &["report.txt"]);
+        let state = AppState::new();
+        let template = dir.join("Template.app");
+        let executable = template.join("Contents/MacOS/squallz-gui");
+        std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        let mut stub = vec![0u8; 512];
+        stub[..4].copy_from_slice(&[0xcf, 0xfa, 0xed, 0xfe]);
+        stub[0x80..0x80 + SFX_GUI_STUB_MARKER.len()].copy_from_slice(&SFX_GUI_STUB_MARKER);
+        std::fs::write(executable, stub).unwrap();
+        std::fs::write(
+            template.join("Contents/Info.plist"),
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict>
+<key>CFBundleExecutable</key><string>squallz-gui</string>
+<key>LSMinimumSystemVersion</key><string>11.0</string>
+</dict></plist>
+"#,
+        )
+        .unwrap();
+        let app = dir.join("Package.app");
+        state
+            .engine
+            .create_sfx(
+                &template,
+                &archive,
+                &app,
+                &SfxBuildOptions {
+                    target: SfxTarget::Macos,
+                    ..SfxBuildOptions::default()
+                },
+                &NoProgress,
+                &ControlToken::new(),
+            )
+            .unwrap();
+        #[cfg(unix)]
+        let sources = {
+            let link = dir.join("linked.zip");
+            std::os::unix::fs::symlink(&archive, &link).unwrap();
+            vec![app, link]
+        };
+        #[cfg(not(unix))]
+        let sources = vec![app];
+        for source in sources {
+            let opened = state
+                .open_archive_for_window("editor", &source, None, None)
+                .unwrap();
+            assert_eq!(opened.format, "zip");
+            let page = state
+                .list_entries_for_window("editor", opened.id, 0, 10, "src/", None)
+                .unwrap();
+            assert_eq!(page.items.len(), 1);
+            assert_eq!(page.items[0].path, "src/report.txt");
+            let error = state
+                .archive_update_guard(Some("editor"), opened.id, source.to_str().unwrap())
+                .unwrap_err();
+            assert!(matches!(error, FormatError::Unsupported(_)));
         }
         std::fs::remove_dir_all(dir).unwrap();
     }
