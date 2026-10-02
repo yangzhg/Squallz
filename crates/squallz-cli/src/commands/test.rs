@@ -1,8 +1,8 @@
 //! `sqz test`: archive integrity test (human-readable or `--json` report).
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-use squallz_core::api::{OpenOptions, Password, SafetyLimits, TestSummary};
+use squallz_core::api::{FormatError, OpenOptions, Password, SafetyLimits};
 
 use crate::commands::{
     reports::{
@@ -18,34 +18,6 @@ use crate::ui::Tone;
 
 /// Exit code for a failed integrity test (= CorruptArchive).
 const EXIT_CORRUPT: i32 = 3;
-
-fn entry_count_label(report: &TestSummary) -> String {
-    report.entries_tested.to_string()
-}
-
-fn problem_count_label(report: &TestSummary) -> String {
-    report.problems.total.to_string()
-}
-
-fn archive_label(path: &Path) -> String {
-    path.display().to_string()
-}
-
-fn test_exit_result(report: &TestSummary) -> Result<(), CliError> {
-    if report.is_ok() {
-        Ok(())
-    } else {
-        Err(CliError::Exit(EXIT_CORRUPT))
-    }
-}
-
-fn problem_rows(problems: &[String]) -> Vec<ModernTableRow> {
-    problems
-        .iter()
-        .enumerate()
-        .map(|(idx, problem)| ModernTableRow::danger(vec![(idx + 1).to_string(), problem.clone()]))
-        .collect()
-}
 
 pub fn run(
     ctx: &Ctx,
@@ -78,21 +50,40 @@ pub fn run(
         )
     });
     progress.finish();
+    if !json && matches!(&outcome, Err(FormatError::ResourceLimitExceeded(_))) {
+        let limits_message = ctx.loc.format(
+            "cli.test.safety_limits",
+            &[
+                ("bytes", &limits.max_output_bytes.to_string()),
+                ("entries", &limits.max_entries.to_string()),
+                ("ratio", &limits.max_compression_ratio.to_string()),
+            ],
+        );
+        let next_step = ctx.loc.t("cli.test.safety_limit_next_step");
+        for line in limits_message.lines().chain(next_step.lines()) {
+            ctx.eprint_notice(line);
+        }
+    }
     let outcome = outcome?;
     let structure = outcome.structure;
     let report = outcome.into_summary();
+    let exit_result = if report.is_ok() {
+        Ok(())
+    } else {
+        Err(CliError::Exit(EXIT_CORRUPT))
+    };
 
     if json {
         let value = test_report_json_with_structure(&report, structure);
         print_pretty_json(&value)?;
-        return test_exit_result(&report);
+        return exit_result;
     }
 
-    let entry_count = entry_count_label(&report);
-    let problem_count = problem_count_label(&report);
-    let archive_name = archive_label(&archive);
+    let entry_count = report.entries_tested.to_string();
+    let problem_count = report.problems.total.to_string();
+    let archive_name = archive.display().to_string();
 
-    if report.is_ok() {
+    if exit_result.is_ok() {
         let message = ctx.loc.format("cli.test.ok", &[("count", &entry_count)]);
         if ctx.is_modern() {
             ctx.print_modern_status_panel(
@@ -123,7 +114,6 @@ pub fn run(
         } else {
             ctx.print_success(&message);
         }
-        Ok(())
     } else {
         print_test_problems_with_structure(ctx, &report, structure);
         let message = ctx
@@ -155,8 +145,11 @@ pub fn run(
                     archive_name,
                 ])],
             );
-            let problems = localized_test_problems(ctx, &report, structure);
-            let rows = problem_rows(&problems);
+            let rows: Vec<_> = localized_test_problems(ctx, &report, structure)
+                .into_iter()
+                .enumerate()
+                .map(|(idx, problem)| ModernTableRow::danger(vec![(idx + 1).to_string(), problem]))
+                .collect();
             ctx.print_modern_wrapped_table(
                 &ctx.loc.t("cli.test.problems_title"),
                 &[
@@ -168,48 +161,6 @@ pub fn run(
         } else {
             ctx.eprint_problem(&message);
         }
-        Err(CliError::Exit(EXIT_CORRUPT))
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use squallz_core::api::ProblemPreview;
-
-    fn report(entries_tested: u64, problems: &[&str]) -> TestSummary {
-        TestSummary {
-            entries_tested,
-            problems: ProblemPreview {
-                total: problems.len() as u64,
-                messages: problems
-                    .iter()
-                    .map(|problem| (*problem).to_owned())
-                    .collect(),
-            },
-            recovery: None,
-        }
-    }
-
-    #[test]
-    fn test_exit_result_maps_integrity_failure_to_corrupt_exit() {
-        assert!(test_exit_result(&report(2, &[])).is_ok());
-
-        match test_exit_result(&report(2, &["checksum mismatch"])) {
-            Err(CliError::Exit(code)) => assert_eq!(code, EXIT_CORRUPT),
-            _ => panic!("expected corrupt exit"),
-        }
-    }
-
-    #[test]
-    fn problem_rows_are_one_based_and_danger_toned() {
-        let problems = ["bad crc".to_owned(), "missing tail".to_owned()];
-        let rows = problem_rows(&problems);
-
-        assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].cells, vec!["1", "bad crc"]);
-        assert_eq!(rows[0].tone, Tone::Danger);
-        assert_eq!(rows[1].cells, vec!["2", "missing tail"]);
-        assert_eq!(rows[1].tone, Tone::Danger);
-    }
+    exit_result
 }

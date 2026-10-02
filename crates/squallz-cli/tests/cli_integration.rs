@@ -2062,6 +2062,99 @@ fn archive_test_honors_safety_overrides_and_an_explicit_retry() {
         assert!(stderr(&out).trim().is_empty());
         assert_eq!(std::fs::read(&archive).unwrap(), original);
     }
+    let defaults = squallz_core::api::SafetyLimits::default();
+    for (lang, style, quiet, flag) in [
+        ("en-US", "classic", false, "--max-output-bytes"),
+        ("en-US", "modern", true, "--max-entries"),
+        ("zh-CN", "classic", true, "--max-entries"),
+        ("zh-CN", "modern", false, "--max-output-bytes"),
+    ] {
+        let mut command = sqz();
+        command.args(["--lang", lang, "--style", style, "--color", "never"]);
+        if quiet {
+            command.arg("--quiet");
+        }
+        let out = run(command
+            .arg("test")
+            .arg(&archive)
+            .args(["--max-compression-ratio", "4096"])
+            .arg(flag)
+            .arg("1"));
+        assert_eq!(out.status.code(), Some(6), "{lang}/{style}/{flag}");
+        assert!(stdout(&out).trim().is_empty());
+        let text = stderr(&out);
+        let expected_bytes = if flag == "--max-output-bytes" {
+            1
+        } else {
+            defaults.max_output_bytes
+        };
+        let expected_entries = if flag == "--max-entries" {
+            1
+        } else {
+            defaults.max_entries
+        };
+        let (limits_label, trusted_hint, retry_hint, error_prefix) = if lang == "en-US" {
+            (
+                "Test limits:",
+                "trusted sources",
+                "rerun sqz test",
+                "Error: Resource limit exceeded:",
+            )
+        } else {
+            (
+                "测试限制：",
+                "来源可信",
+                "重新运行 sqz test",
+                "错误：超出资源限制：",
+            )
+        };
+        for expected in [
+            limits_label.to_owned(),
+            "sqz test --help".to_owned(),
+            trusted_hint.to_owned(),
+            retry_hint.to_owned(),
+        ] {
+            assert!(text.contains(&expected), "missing {expected}: {text}");
+        }
+        for option in [
+            format!("--max-output-bytes={expected_bytes}"),
+            format!("--max-entries={expected_entries}"),
+            "--max-compression-ratio=4096".to_owned(),
+        ] {
+            assert!(
+                text.lines()
+                    .any(|line| line.contains(&option) && line.matches("--max-").count() == 1),
+                "limit must appear on its own line: {text}"
+            );
+        }
+        assert!(!text.contains('�'), "invalid terminal control text: {text}");
+        assert!(
+            text.lines().last().unwrap().contains(error_prefix),
+            "original error must remain visible: {text}"
+        );
+        assert!(
+            !text.contains("cli.test."),
+            "untranslated test hint: {text}"
+        );
+        assert_eq!(std::fs::read(&archive).unwrap(), original);
+    }
+    let retry = run(sqz()
+        .args([
+            "--lang", "zh-CN", "--style", "modern", "--color", "never", "test",
+        ])
+        .arg(&archive)
+        .args([
+            "--max-output-bytes",
+            "1m",
+            "--max-entries",
+            "10",
+            "--max-compression-ratio",
+            "4096",
+        ]));
+    assert!(retry.status.success(), "stderr: {}", stderr(&retry));
+    assert!(stdout(&retry).contains("测试通过"));
+    assert!(stderr(&retry).trim().is_empty());
+    assert_eq!(std::fs::read(&archive).unwrap(), original);
     let retry = run(sqz().arg("test").arg(&archive).args([
         "--max-output-bytes",
         "1m",

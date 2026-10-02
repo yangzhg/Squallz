@@ -372,6 +372,8 @@
   "cli.test.result_title": "Integrity check passed",
   "cli.test.failed_title": "Integrity check failed",
   "cli.test.problems_title": "Problem details",
+  "cli.test.safety_limits": "Test limits:\n  --max-output-bytes={bytes} bytes\n  --max-entries={entries}\n  --max-compression-ratio={ratio}",
+  "cli.test.safety_limit_next_step": "See sqz test --help for limit options.\nFor trusted sources, adjust as appropriate and rerun sqz test.",
   "cli.recovery.done": "Recovery operation completed for {path}",
   "cli.recovery.protect.done": "Created recovery data {path}",
   "cli.recovery.verify.ok": "Recovery data verified: {path}",
