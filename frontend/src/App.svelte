@@ -910,6 +910,13 @@
   let extractScope = $state<ExtractScope>("all");
   let extractSelectionSnapshot = $state<string[]>([]);
   let extractCustomDest = $state("");
+  let extractDestinationPicker = $state.raw<{
+    archiveId: number;
+    source: string;
+    path: string;
+    screen: Screen;
+    selection: ReadonlySet<string> | null;
+  } | null>(null);
   let extractSmartBaseOverride = $state<string | null>(null);
   let extractVerifySfx = $state(false);
   let extractDraftArchive: { id: number; source: string } | null = null;
@@ -1758,6 +1765,7 @@
 
   onMount(() => () => {
     dismissRecoveryPicker();
+    extractDestinationPicker = null;
     checksumResultFocusPending = null;
     createPreflightClosed = true;
     createPreflightCleanup?.();
@@ -2246,6 +2254,7 @@
     if (preventCreateSubmissionNavigation(next)) return;
     if (preventConvertSubmissionNavigation(next)) return;
     if (next !== screen) {
+      extractDestinationPicker = null;
       dismissArchivePicker();
       dismissRecoveryPicker();
       if (archiveOpenStatus === "opening" && !archivePasswordPrompt && next !== "password") {
@@ -3721,6 +3730,7 @@
 
   function applyExtractPreset(id: string | null, announce = true) {
     if (!id) {
+      extractDestinationPicker = null;
       selectedExtractPresetId = null;
       extractPresetDraftName = "";
       extractPresetMutationState = "idle";
@@ -3728,6 +3738,7 @@
     }
     const preset = archivePresetById(id);
     if (!preset || preset.kind !== "extract") return;
+    extractDestinationPicker = null;
     selectedExtractPresetId = preset.id;
     extractSmartBaseOverride = null;
     extractPresetDraftName = preset.label;
@@ -6217,6 +6228,7 @@
     review: ArchiveTaskReview | null = null,
   ): Promise<boolean> {
     if (preventCreateSubmissionNavigation("browse")) return false;
+    extractDestinationPicker = null;
     dismissRecoveryPicker();
     dismissArchivePicker();
     dismissArchivePasswordRequest();
@@ -8044,10 +8056,11 @@
       showNotice(openArchiveFirstLabel());
       return;
     }
-    if (mode === "choose" && !extractCustomDest.trim()) {
+    if (mode === "choose") {
       await chooseExtractDestination();
       return;
     }
+    extractDestinationPicker = null;
     markExtractPresetDraftTouched();
     extractDestinationMode = mode;
     extractSmartBaseOverride = null;
@@ -8089,16 +8102,26 @@
       destination: {
         label: extractDestinationFieldLabel(),
         path: extractJobDestination(),
-        choices: extractDestinationModes.map((mode) => ({
-          id: mode,
-          label: extractDestinationTitle(mode),
-          detail: extractDestinationDetail(mode),
-          selected: extractDestinationMode === mode,
-          disabled: Boolean(archiveRequiredReason),
-          title: archiveRequiredReason,
-          ariaLabel: labelWithDisabledReason(extractDestinationTitle(mode), archiveRequiredReason),
-          onSelect: () => void selectExtractDestination(mode),
-        })),
+        choices: extractDestinationModes.map((mode) => {
+          const busy = mode === "choose" && extractDestinationPicker !== null;
+          const label = busy
+            ? tr("gui.extract.choosing_destination", "Choosing folder…")
+            : extractDestinationTitle(mode);
+          const reason = archiveRequiredReason || (busy
+            ? tr("gui.extract.destination_picker_wait", "Finish choosing a destination, or close the folder chooser.")
+            : "");
+          return {
+            id: mode,
+            label,
+            detail: busy ? reason : extractDestinationDetail(mode),
+            selected: extractDestinationMode === mode,
+            busy,
+            disabled: Boolean(reason),
+            title: reason,
+            ariaLabel: labelWithDisabledReason(label, reason),
+            onSelect: () => void selectExtractDestination(mode),
+          };
+        }),
       },
       archive: {
         title: archiveTitle(),
@@ -8158,6 +8181,7 @@
           label: extractOverwriteLabel(mode),
           detail: "",
           selected: extractOverwriteMode === mode,
+          busy: false,
           disabled: false,
           title: "",
           ariaLabel: extractOverwriteLabel(mode),
@@ -8171,6 +8195,7 @@
           label: extractSymlinkLabel(mode),
           detail: "",
           selected: extractSymlinkMode === mode,
+          busy: false,
           disabled: false,
           title: "",
           ariaLabel: extractSymlinkLabel(mode),
@@ -8193,27 +8218,60 @@
     };
   }
 
-  async function chooseExtractDestination() {
+  async function chooseExtractDestination(): Promise<boolean> {
     if (!currentArchive) {
       showNotice(openArchiveFirstLabel());
-      return;
+      return false;
     }
+    if (extractDestinationPicker) {
+      showNotice(tr("gui.extract.destination_picker_wait", "Finish choosing a destination, or close the folder chooser."));
+      return false;
+    }
+    const request = {
+      archiveId: currentArchive.id,
+      source: currentArchive.source,
+      path: currentArchive.path,
+      screen,
+      selection: screen === "browse" ? new Set(selectedPaths()) : null,
+    };
+    const defaultPath = extractCustomDest.trim() || extractJobDestination();
+    extractDestinationPicker = request;
+    const isCurrent = () => {
+      if (extractDestinationPicker !== request || screen !== request.screen
+        || currentArchive?.id !== request.archiveId || currentArchive.source !== request.source
+        || currentArchive.path !== request.path) return false;
+      if (!request.selection) return true;
+      const selection = selectedPaths();
+      return selection.size === request.selection.size
+        && [...request.selection].every((path) => selection.has(path));
+    };
     try {
       const { open } = await getDialogModule();
+      if (!isCurrent()) return false;
       const selected = await openNativeDialog("extract.destination", open, {
         title: tr("gui.extract.choose_destination_title", "Choose extract destination"),
         multiple: false,
         directory: true,
+        defaultPath,
       });
-      if (typeof selected === "string") {
+      if (!isCurrent()) return false;
+      if (typeof selected === "string" && selected.trim()) {
         markExtractPresetDraftTouched();
         extractCustomDest = selected;
         extractSmartBaseOverride = null;
         extractDestinationMode = "choose";
         showNotice(tr("gui.extract.destination_selected", "Extract destination selected"));
+        return true;
       }
+      showNotice(tr("gui.extract.destination_picker_cancelled", "Destination selection cancelled · the current destination was kept"));
+      return false;
     } catch {
-      showNotice(tr("gui.extract.destination_picker_requires_desktop_service", "Destination picker requires the desktop service"));
+      if (isCurrent()) {
+        showNotice(tr("gui.extract.destination_picker_requires_desktop_service", "Destination picker requires the desktop service"));
+      }
+      return false;
+    } finally {
+      if (extractDestinationPicker === request) extractDestinationPicker = null;
     }
   }
 
@@ -8476,6 +8534,7 @@
       showNotice(tr("gui.precondition.select_before_extract", "Select one or more entries before extracting them"));
       return;
     }
+    extractDestinationPicker = null;
     syncExtractDraftArchive();
     extractScope = scope;
     extractSelectionSnapshot = scope === "selection" ? [...(selection ?? [])] : [];
@@ -8491,6 +8550,7 @@
   function syncExtractDraftArchive(): void {
     const current = currentArchive;
     if ((extractDraftArchive?.id ?? null) === (current?.id ?? null)) return;
+    extractDestinationPicker = null;
     const sameSource = current && extractDraftArchive && sameFilePath(current.source, extractDraftArchive.source);
     extractDraftArchive = current ? { id: current.id, source: current.source } : null;
     extractSelectionSnapshot = [];
@@ -10009,6 +10069,9 @@
   function extractStartBlockedReason(): string {
     const archiveReason = extractArchiveRequiredReason();
     if (archiveReason) return archiveReason;
+    if (extractDestinationPicker) {
+      return tr("gui.extract.destination_picker_wait", "Finish choosing a destination, or close the folder chooser.");
+    }
     if (extractScope === "selection" && extractSelectionSnapshot.length === 0) {
       return tr("gui.precondition.select_before_extract", "Select one or more entries before extracting them");
     }
@@ -10081,6 +10144,10 @@
       showNotice(tr("gui.precondition.open_before_extract", "Open an archive before extracting"));
       return;
     }
+    if (extractDestinationPicker) {
+      showNotice(tr("gui.extract.destination_picker_wait", "Finish choosing a destination, or close the folder chooser."));
+      return;
+    }
     if (extractScope === "selection" && extractSelectionSnapshot.length === 0) {
       showNotice(tr("gui.precondition.select_before_extract", "Select one or more entries before extracting them"));
       return;
@@ -10094,8 +10161,16 @@
       return;
     }
     if (extractDestinationMode === "choose" && !extractCustomDest.trim()) {
-      await chooseExtractDestination();
-      if (!extractCustomDest.trim()) return;
+      const archive = currentArchive;
+      const origin = screen;
+      const scope = extractScope;
+      const selection = extractSelectionSnapshot;
+      const preset = selectedExtractPresetId;
+      if (!await chooseExtractDestination()) return;
+      if (currentArchive !== archive || screen !== origin || extractScope !== scope
+        || extractSelectionSnapshot !== selection || selectedExtractPresetId !== preset
+        || extractDestinationMode !== "choose" || !extractCustomDest.trim()
+        || extractDestinationPicker) return;
     }
     const current = currentArchive;
     if (!current || screen !== "extract") return;
@@ -10188,6 +10263,10 @@
   }
 
   async function submitCopyOutSelectedJob() {
+    if (extractDestinationPicker) {
+      showNotice(tr("gui.extract.destination_picker_wait", "Finish choosing a destination, or close the folder chooser."));
+      return;
+    }
     if (blockSelectionScopedAction()) return;
     const selection = selectedJobPaths();
     if (!currentArchive || !selection) {
@@ -10195,8 +10274,14 @@
       return;
     }
     if (extractDestinationMode === "choose" && !extractCustomDest.trim()) {
-      await chooseExtractDestination();
-      if (!extractCustomDest.trim()) return;
+      const archive = currentArchive;
+      const origin = screen;
+      if (!await chooseExtractDestination()) return;
+      const selected = selectedPaths();
+      if (currentArchive !== archive || screen !== origin || archiveSelectionBusyReason()
+        || selected.size !== selection.length || selection.some((path) => !selected.has(path))
+        || extractDestinationMode !== "choose" || !extractCustomDest.trim()
+        || extractDestinationPicker) return;
     }
     const destination = effectiveExtractDest();
     const jobDestination = extractJobDestination();
@@ -13776,6 +13861,7 @@
 
   function restoreExtractTaskDraft(draft: ExtractTaskDraft): boolean {
     if (!currentArchive || !sameFilePath(currentArchive.source, draft.path)) return false;
+    extractDestinationPicker = null;
     resetExtractPlanRequestState();
     markExtractPresetDraftTouched();
     selectedExtractPresetId = null;
