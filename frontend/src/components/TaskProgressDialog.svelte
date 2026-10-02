@@ -193,6 +193,12 @@
   }
 
   function onTaskCardKeydown(event: KeyboardEvent): void {
+    if (presentation === "panel" && event.key === "Escape" && !event.defaultPrevented) {
+      event.preventDefault();
+      event.stopPropagation();
+      void onDismiss(task);
+      return;
+    }
     if (presentation === "dialog") trapModalFocus(event, taskCard);
   }
 
@@ -572,7 +578,7 @@
             </button>
           {/if}
           {#if presentation === "panel"}
-            <button type="button" onclick={() => void onDismiss(task)}>
+            <button type="button" aria-keyshortcuts="Escape" onclick={() => void onDismiss(task)}>
               {tr("gui.task.back_to_tasks", "Back to tasks")}
             </button>
           {/if}
@@ -613,7 +619,7 @@
               <Icon name="folder-open" size={15} />{taskRevealOutputLabel()}
             </button>
           {/if}
-          <button type="button" onclick={() => void onDismiss(task)}>
+          <button type="button" aria-keyshortcuts={presentation === "panel" ? "Escape" : undefined} onclick={() => void onDismiss(task)}>
             {presentation === "panel"
               ? tr("gui.task.back_to_tasks", "Back to tasks")
               : tr("gui.task.close", "Close")}
