@@ -12369,6 +12369,7 @@
       let confirmed: boolean;
       try {
         const { confirm } = await getDialogModule();
+        if (!responseIsCurrent()) return false;
         confirmed = await confirm(
           tr(
             "gui.preview.risky_open_body",
@@ -12709,6 +12710,7 @@
       showNotice(tr("gui.encoding.open_before_repair", "Open an archive before repairing filename encoding"));
       return;
     }
+    clearEntryPreviewState();
     const ok = await reopenWithEncoding(encoding);
     if (ok) {
       markExtractPresetDraftTouched();

@@ -26,7 +26,7 @@ const outerRows = ["inner.zip", "notes.txt"].map((path) => ({
   modified: null, crc: null, encrypted: false, encoding: "utf-8",
 }));
 
-async function withNestedOpen(run) {
+async function withNestedOpen(run, { systemOpen = false } = {}) {
   const server = await createTestServer();
   try {
     const archive = await server.ssrLoadModule("/src/lib/archive.svelte.ts");
@@ -48,6 +48,10 @@ async function withNestedOpen(run) {
     const source = ts.createSourceFile("App.ts", component.match(/<script lang="ts">([\s\S]*?)<\/script>/)[1], ts.ScriptTarget.Latest, true);
     const { createPreviewPasswordFlow } = await server.ssrLoadModule("/src/lib/preview-password.svelte.ts");
     const recoveryResults = await server.ssrLoadModule("/src/lib/recovery-result.ts");
+    const systemOpenHelpers = systemOpen ? {
+      ...await server.ssrLoadModule("/src/lib/preview-response.ts"),
+      ...await server.ssrLoadModule("/src/lib/preview-presentation.ts"),
+    } : {};
     const names = ["cancelTaskReview", "openNestedArchiveEntry", "extractNestedPreviewArchive", "retryEntryPreview", "runPreviewWithPassword", "clearEntryPreviewState", "selectOnlyEntry", "submitPasswordRequest", "cancelPasswordRequest", "dismissArchivePasswordRequest", "dismissArchivePicker", "setScreen", "openArchivePath", "openRecoverySet", "passwordPromptDetail", "submitPreviewEntry", "submitPreviewNestedArchive", "prepareEntryPreviewSerially", "disposeEntryPreview",
       "chooseRecoveryArchive", "chooseRecoveryPar2", "useCurrentArchiveForRecovery", "useDefaultPar2ForRecovery",
       "recoverySourcePath", "recoverySourceName", "openRecoveryConfiguration", "adoptRecoveryTargetFromTask", "dismissRecoveryPreparation",
@@ -58,6 +62,7 @@ async function withNestedOpen(run) {
       "recoveryRepairUsesDirectory", "recoveryReportNumber", "recoveryReport", "latestRecoveryReportTask",
       "defaultSqzRepairDest", "defaultSqzExportDest", "defaultZipRepairDest", "defaultPar2RepairDest", "defaultPar2RepairDirectoryName",
       "authorizeArchiveOutput", "saveNativeDialog", "openNativeDialog"];
+    if (systemOpen) names.push("openEntryPreview", "repairFilenameEncoding");
     const declarations = names.map((name) => {
       const declaration = source.statements.find((node) => ts.isFunctionDeclaration(node) && node.name?.text === name);
       assert.ok(declaration, name);
@@ -66,7 +71,7 @@ async function withNestedOpen(run) {
     const notices = [];
     const operations = [];
     const context = {
-      ...recoveryResults, ipc, adoptOpenedArchive: archive.adoptOpenedArchive,
+      ...recoveryResults, ...systemOpenHelpers, ipc, adoptOpenedArchive: archive.adoptOpenedArchive,
       taskReviewRequestGeneration: 0, nestedExtractDraftGeneration: 0,
       syncUrl: () => {}, tick: async () => {},
       document: { documentElement: {}, body: {}, querySelectorAll: () => [] },
@@ -780,40 +785,133 @@ test("a late nested listing cannot replace a newer inner archive or clear its re
   });
 });
 
-test("late system-open responses cannot revive a dismissed or replaced preview", async () => {
-  const server = await createTestServer();
-
-  try {
-    const { previewResponseIsCurrent } = await server.ssrLoadModule(
-      "/src/lib/preview-response.ts",
-    );
-    const expected = {
-      previewGeneration: 7,
-      actionGeneration: 3,
-      previewId: "preview-a",
-      archiveSource: "/archives/a.zip",
+test("system opening discards expired preparation and responses while preserving current confirmations", async () => {
+  await withNestedOpen(async ({ app, archive, ipc, context, notices, page }) => {
+    const preview = {
+      preview_id: "prepared-command", outer_path: "/archives/outer.zip", entry_path: "fixture.command",
+      display_name: "fixture.command", size: 10, archive_like: false,
     };
+    const confirmations = [];
+    const opened = [];
+    const released = [];
+    ipc.releasePreviewSession = async (id) => { released.push(id); return true; };
+    ipc.archivePasswordStatus = async () => ({ session: false, available: true, saved: false, error: null });
+    context.reopenWithEncoding = archive.reopenWithEncoding;
+    context.markExtractPresetDraftTouched = () => {};
+    function prepare(entry = preview) {
+      app.clearEntryPreviewState();
+      archive.installArchivePreview(archiveInfo(1), outerRows, { selected: ["inner.zip"] });
+      context.screen = "browse";
+      context.entryPreview = { ...entry };
+      context.entryPreviewFailure = { message: "current feedback" };
+      context.previewPolicyFor = () => ({ kind: "system-file" });
+      notices.length = 0;
+      confirmations.length = 0;
+      opened.length = 0;
+      released.length = 0;
+      ipc.openPreviewSession = async (id) => { opened.push(id); };
+      return context.entryPreviewFailure;
+    }
+    const confirm = async (...args) => { confirmations.push(args); return true; };
+    async function repairEncoding() {
+      const generation = context.previewRequestGeneration;
+      const requests = [];
+      ipc.openArchive = async (path, password, encoding) => {
+        requests.push({ path, password, encoding });
+        return { ...archiveInfo(18), read_only: false, encoding_override: encoding };
+      };
+      const repairing = app.repairFilenameEncoding("gbk");
+      assert.equal(context.entryPreview, null, "encoding repair must dismiss the old prepared file before reopening");
+      assert.equal(context.previewRequestGeneration, generation + 1);
+      assert.deepEqual(released, [preview.preview_id]);
+      page.resolve({ items: outerRows, total: outerRows.length, page: 0 });
+      await repairing;
+      assert.deepEqual(requests, [{ path: preview.outer_path, password: null, encoding: "gbk" }]);
+      assert.equal(archive.archive().id, 18);
+      assert.equal(archive.archive().source, preview.outer_path, "encoding repair keeps the same source path");
+      assert.equal(archive.archive().encoding_override, "gbk");
+      assert.equal(archive.selectedPaths().size, 0);
+      assert.match(notices.at(-1), /reopened with GBK/u);
+    }
 
-    assert.equal(previewResponseIsCurrent(expected, expected), true);
-    assert.equal(
-      previewResponseIsCurrent(expected, { ...expected, previewGeneration: 8 }),
-      false,
-    );
-    assert.equal(
-      previewResponseIsCurrent(expected, { ...expected, actionGeneration: 4 }),
-      false,
-    );
-    assert.equal(
-      previewResponseIsCurrent(expected, { ...expected, previewId: "preview-b" }),
-      false,
-    );
-    assert.equal(
-      previewResponseIsCurrent(expected, { ...expected, archiveSource: "/archives/b.zip" }),
-      false,
-    );
-  } finally {
-    await server.close();
-  }
+    for (const change of ["cancel", "navigation", "archive", "selection", "encoding"]) {
+      prepare();
+      const module = deferred();
+      context.getDialogModule = () => module.promise;
+      const opening = app.openEntryPreview();
+      if (change === "cancel") app.clearEntryPreviewState();
+      if (change === "navigation") { app.setScreen("settingsGeneral"); app.setScreen("browse"); }
+      if (change === "archive") archive.installArchivePreview(archiveInfo(3, "replacement.zip"), outerRows);
+      if (change === "selection") app.selectOnlyEntry({ source: outerRows[1], virtualIndex: 1 });
+      if (change === "encoding") await repairEncoding();
+      const feedback = { message: "new feedback" };
+      context.entryPreviewFailure = feedback;
+      const noticeCount = notices.length;
+      module.resolve({ confirm });
+      assert.equal(await opening, false, change);
+      assert.equal(confirmations.length, 0, `${change}: an expired module must not invoke confirmation`);
+      assert.deepEqual(opened, [], change);
+      assert.equal(notices.length, noticeCount, change);
+      assert.equal(context.entryPreviewFailure, feedback, change);
+    }
+
+    for (const accepted of [true, false]) {
+      const feedback = prepare();
+      context.getDialogModule = async () => ({ confirm: async (...args) => { confirmations.push(args); return accepted; } });
+      assert.equal(await app.openEntryPreview(), accepted);
+      assert.equal(confirmations.length, 1);
+      assert.match(confirmations[0][0], /fixture.command/u);
+      assert.deepEqual(opened, accepted ? [preview.preview_id] : []);
+      assert.equal(context.entryPreviewFailure, accepted ? null : feedback);
+      assert.equal(notices.length, 1);
+      assert.match(notices[0], accepted ? /^Opened:/u : /was not opened/u);
+    }
+
+    for (const change of ["archive", "encoding"]) {
+      prepare();
+      const confirmation = deferred();
+      const confirmationStarted = deferred();
+      context.getDialogModule = async () => ({ confirm: (...args) => {
+        confirmations.push(args);
+        confirmationStarted.resolve();
+        return confirmation.promise;
+      } });
+      const awaitingConfirmation = app.openEntryPreview();
+      await confirmationStarted.promise;
+      if (change === "archive") archive.installArchivePreview(archiveInfo(3, "replacement.zip"), outerRows);
+      else await repairEncoding();
+      const changedSourceFeedback = { message: "replacement archive feedback" };
+      context.entryPreviewFailure = changedSourceFeedback;
+      const noticeCount = notices.length;
+      confirmation.resolve(true);
+      assert.equal(await awaitingConfirmation, false, change);
+      assert.equal(confirmations.length, 1, change);
+      assert.deepEqual(opened, [], "a late approval must not hand the expired file to the system");
+      assert.equal(notices.length, noticeCount, change);
+      assert.equal(context.entryPreviewFailure, changedSourceFeedback, change);
+    }
+
+    for (const result of ["success", "failure"]) {
+      prepare({ ...preview, entry_path: "notes.txt", display_name: "notes.txt" });
+      const response = deferred();
+      const requested = deferred();
+      context.getDialogModule = () => assert.fail("an ordinary file must not require confirmation");
+      ipc.openPreviewSession = (id) => { opened.push(id); requested.resolve(); return response.promise; };
+      const opening = app.openEntryPreview();
+      await requested.promise;
+      app.clearEntryPreviewState();
+      context.entryPreview = { ...preview, preview_id: "newer-preview" };
+      const feedback = { message: "newer preview feedback" };
+      context.entryPreviewFailure = feedback;
+      if (result === "success") response.resolve();
+      else response.reject(new Error("expired system-open failure"));
+      assert.equal(await opening, false, result);
+      assert.deepEqual(opened, [preview.preview_id], "an already submitted OS open cannot be withdrawn");
+      assert.deepEqual(notices, [], result);
+      assert.equal(context.entryPreview.preview_id, "newer-preview", result);
+      assert.equal(context.entryPreviewFailure, feedback, result);
+    }
+  }, { systemOpen: true });
 });
 
 test("opening a nested preview adopts its existing handle without another extraction or password request", async () => {
