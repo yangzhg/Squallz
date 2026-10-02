@@ -26,6 +26,10 @@ export interface PasswordSaveState {
 export type RowSelectionResult = "selected" | "stale" | "failed";
 type ArchiveViewWindow = { start: number; end: number };
 type ArchiveRefreshStatus = "idle" | "refreshing" | "error";
+type ArchiveEncodingReopenResult = {
+  status: "applied" | "failed" | "superseded";
+  isCurrent: () => boolean;
+};
 type SelectionAnchor = { index: number; generation: number };
 const ARCHIVE_BROWSE_ERROR_TOAST_KEY = "archive-browse-error";
 const ARCHIVE_REFRESH_ERROR_TOAST_KEY = "archive-refresh-error";
@@ -588,10 +592,19 @@ function applyPasswordBookStatus(status: PasswordBookStatus): void {
 }
 
 /** Reopens the current archive with a user-selected file-name encoding. */
-export async function reopenWithEncoding(encoding: string | null): Promise<boolean> {
+export async function reopenWithEncoding(encoding: string | null): Promise<ArchiveEncodingReopenResult> {
   const current = store.info;
-  if (!current) return false;
-  return performArchiveOpen(current.source, null, encoding, () => ({ start: 0, end: PAGE_SIZE }));
+  if (!current) {
+    const generation = store.openGeneration;
+    return { status: "failed", isCurrent: () => generation === store.openGeneration && store.info === null };
+  }
+  const reopening = performArchiveOpen(current.source, null, encoding, () => ({ start: 0, end: PAGE_SIZE }));
+  const generation = store.openGeneration;
+  const applied = await reopening;
+  const archiveId = applied ? store.info?.id : current.id;
+  const isCurrent = () => generation === store.openGeneration && archiveId === store.info?.id;
+  const status = !isCurrent() ? "superseded" : applied ? "applied" : "failed";
+  return { status, isCurrent };
 }
 
 /** Reopens the current archive after an in-place update and refreshes rows. */

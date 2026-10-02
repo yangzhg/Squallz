@@ -645,7 +645,9 @@ test("filename encoding changes reuse atomic refresh", async () => {
       assert.equal(encoding, "shift_jis");
       return { ...info(2), encoding_override: encoding };
     };
-    assert.equal(await archive.reopenWithEncoding("shift_jis"), true);
+    const reopened = await archive.reopenWithEncoding("shift_jis");
+    assert.equal(reopened.status, "applied");
+    assert.equal(reopened.isCurrent(), true);
     assert.equal(archive.archiveEncoding(), "shift_jis");
     assert.deepEqual(archive.currentDirs(), ["docs"]);
     assert.equal(archive.rowAt(0)?.path, "docs/new.txt");
@@ -656,7 +658,9 @@ test("retry remains available after dismissing a refresh notification and retain
   await withArchive(async ({ archive, ipc, toasts, pendingOpen }) => {
     const reopening = archive.reopenWithEncoding("shift_jis");
     pendingOpen.reject({ key: "error.io", params: {}, detail: "read failed" });
-    assert.equal(await reopening, false);
+    const result = await reopening;
+    assert.equal(result.status, "failed");
+    assert.equal(result.isCurrent(), true);
     toasts.removeToastByKey("archive-refresh-error");
     assert.equal(archive.archiveRefreshStatus(), "error");
     assert.equal(archive.archiveEncoding(), "gbk", "the old view remains usable until replacement succeeds");

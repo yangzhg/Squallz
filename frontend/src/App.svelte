@@ -976,6 +976,7 @@
   let archiveOpenStatus = $state<"idle" | "opening">("idle");
   let archiveOpenGeneration = 0;
   let archivePickerRequest: number | null = null;
+  let filenameEncodingRequest: { generation: number } | null = null;
   let archivePasswordAttempt = 0;
   let archiveSelectionProgress = $state<{ loaded: number; total: number } | null>(null);
   let recoveryPickerStatus = $state<"idle" | "archive" | "par2">("idle");
@@ -2227,6 +2228,7 @@
   }
 
   function setMode(next: Mode) {
+    if (next !== mode) filenameEncodingRequest = null;
     firstRunDropFeedback = null;
     trackAppearanceSave(
       "mode",
@@ -2291,6 +2293,7 @@
     if (preventCreateSubmissionNavigation(next)) return;
     if (preventConvertSubmissionNavigation(next)) return;
     if (next !== screen) {
+      filenameEncodingRequest = null;
       dismissCreatePreparation();
       checksumCopyRequest = null;
       extractDestinationPicker = null;
@@ -12711,7 +12714,13 @@
       return;
     }
     clearEntryPreviewState();
-    const ok = await reopenWithEncoding(encoding);
+    const request = { generation: archiveOpenGeneration };
+    filenameEncodingRequest = request;
+    const result = await reopenWithEncoding(encoding);
+    if (filenameEncodingRequest !== request) return;
+    filenameEncodingRequest = null;
+    if (request.generation !== archiveOpenGeneration || result.status === "superseded" || !result.isCurrent()) return;
+    const ok = result.status === "applied";
     if (ok) {
       markExtractPresetDraftTouched();
       extractPresetEncodingLabel = null;

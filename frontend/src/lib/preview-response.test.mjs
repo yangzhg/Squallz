@@ -62,7 +62,7 @@ async function withNestedOpen(run, { systemOpen = false } = {}) {
       "recoveryRepairUsesDirectory", "recoveryReportNumber", "recoveryReport", "latestRecoveryReportTask",
       "defaultSqzRepairDest", "defaultSqzExportDest", "defaultZipRepairDest", "defaultPar2RepairDest", "defaultPar2RepairDirectoryName",
       "authorizeArchiveOutput", "saveNativeDialog", "openNativeDialog"];
-    if (systemOpen) names.push("openEntryPreview", "repairFilenameEncoding");
+    if (systemOpen) names.push("openEntryPreview", "repairFilenameEncoding", "setMode");
     const declarations = names.map((name) => {
       const declaration = source.statements.find((node) => ts.isFunctionDeclaration(node) && node.name?.text === name);
       assert.ok(declaration, name);
@@ -76,6 +76,7 @@ async function withNestedOpen(run, { systemOpen = false } = {}) {
       syncUrl: () => {}, tick: async () => {},
       document: { documentElement: {}, body: {}, querySelectorAll: () => [] },
       archiveOpenGeneration: 0, archiveOpenStatus: "idle", archivePasswordAttempt: 0,
+      filenameEncodingRequest: null,
       archivePickerRequest: null, cancelArchivePasswordPrompt: archive.cancelPasswordPrompt,
       archiveUpdateReview: { cancelSourceChoice() {} },
       batchPickerRequest: 0, nestedExtractPickerRequest: 0,
@@ -785,8 +786,8 @@ test("a late nested listing cannot replace a newer inner archive or clear its re
   });
 });
 
-test("system opening discards expired preparation and responses while preserving current confirmations", async () => {
-  await withNestedOpen(async ({ app, archive, ipc, context, notices, page }) => {
+test("system opening and encoding repair keep preparation and feedback within the current context", async () => {
+  await withNestedOpen(async ({ app, archive, ipc, context, notices, closed }) => {
     const preview = {
       preview_id: "prepared-command", outer_path: "/archives/outer.zip", entry_path: "fixture.command",
       display_name: "fixture.command", size: 10, archive_like: false,
@@ -794,10 +795,13 @@ test("system opening discards expired preparation and responses while preserving
     const confirmations = [];
     const opened = [];
     const released = [];
+    let draftUpdates = 0;
     ipc.releasePreviewSession = async (id) => { released.push(id); return true; };
     ipc.archivePasswordStatus = async () => ({ session: false, available: true, saved: false, error: null });
     context.reopenWithEncoding = archive.reopenWithEncoding;
-    context.markExtractPresetDraftTouched = () => {};
+    context.markExtractPresetDraftTouched = () => { draftUpdates += 1; };
+    context.persistUiMode = (next) => { context.mode = next; return Promise.resolve(); };
+    context.trackAppearanceSave = () => {};
     function prepare(entry = preview) {
       app.clearEntryPreviewState();
       archive.installArchivePreview(archiveInfo(1), outerRows, { selected: ["inner.zip"] });
@@ -809,6 +813,9 @@ test("system opening discards expired preparation and responses while preserving
       confirmations.length = 0;
       opened.length = 0;
       released.length = 0;
+      closed.length = 0;
+      draftUpdates = 0;
+      context.extractPresetEncodingLabel = "current draft encoding";
       ipc.openPreviewSession = async (id) => { opened.push(id); };
       return context.entryPreviewFailure;
     }
@@ -820,17 +827,25 @@ test("system opening discards expired preparation and responses while preserving
         requests.push({ path, password, encoding });
         return { ...archiveInfo(18), read_only: false, encoding_override: encoding };
       };
+      ipc.listEntries = async (_id, pageNumber) => ({ items: outerRows, total: outerRows.length, page: pageNumber });
       const repairing = app.repairFilenameEncoding("gbk");
+      context.preventCreateSubmissionNavigation = () => true;
+      app.setScreen("settingsGeneral");
+      context.preventCreateSubmissionNavigation = () => false;
+      app.setScreen("browse");
+      app.setMode("modern");
       assert.equal(context.entryPreview, null, "encoding repair must dismiss the old prepared file before reopening");
       assert.equal(context.previewRequestGeneration, generation + 1);
       assert.deepEqual(released, [preview.preview_id]);
-      page.resolve({ items: outerRows, total: outerRows.length, page: 0 });
+      app.selectOnlyEntry({ source: outerRows[1], virtualIndex: 1 });
       await repairing;
       assert.deepEqual(requests, [{ path: preview.outer_path, password: null, encoding: "gbk" }]);
       assert.equal(archive.archive().id, 18);
       assert.equal(archive.archive().source, preview.outer_path, "encoding repair keeps the same source path");
       assert.equal(archive.archive().encoding_override, "gbk");
       assert.equal(archive.selectedPaths().size, 0);
+      assert.equal(draftUpdates, 1, "a current successful reopen updates its extract draft once");
+      assert.equal(context.extractPresetEncodingLabel, null);
       assert.match(notices.at(-1), /reopened with GBK/u);
     }
 
@@ -890,6 +905,74 @@ test("system opening discards expired preparation and responses while preserving
       assert.equal(notices.length, noticeCount, change);
       assert.equal(context.entryPreviewFailure, changedSourceFeedback, change);
     }
+
+    prepare();
+    ipc.openArchive = async () => { throw { key: "error.io", params: {}, detail: "" }; };
+    await app.repairFilenameEncoding("gbk");
+    assert.equal(archive.archive().id, 1, "a genuine encoding failure keeps the original archive");
+    assert.equal(archive.archiveRefreshStatus(), "error");
+    assert.equal(draftUpdates, 0);
+    assert.equal(context.extractPresetEncodingLabel, "current draft encoding");
+    assert.deepEqual(notices, ["Could not reopen archive with that encoding"]);
+
+    for (const change of ["other archive", "navigation ABA", "mode ABA", "same-source reopen"]) {
+      prepare();
+      const response = deferred();
+      const replacement = { ...archiveInfo(19, "replacement.zip"), read_only: false };
+      ipc.openArchive = async (path, _password, encoding) => path === replacement.source
+        ? replacement : encoding === "gbk" ? response.promise
+          : { ...archiveInfo(19), read_only: false, encoding_override: encoding };
+      ipc.listEntries = async (_id, pageNumber) => ({ items: outerRows, total: outerRows.length, page: pageNumber });
+      const repairing = app.repairFilenameEncoding("gbk");
+      if (change === "other archive") {
+        assert.equal(await archive.openArchive(replacement.source), true);
+      } else if (change === "navigation ABA") {
+        app.setScreen("settingsGeneral");
+        app.setScreen("browse");
+      } else if (change === "mode ABA") {
+        app.setMode("classic");
+        app.setMode("modern");
+      } else {
+        assert.equal(await archive.openArchive(preview.outer_path, null, "shift_jis"), true);
+      }
+      context.showNotice("new context feedback");
+      context.extractPresetEncodingLabel = "new context draft encoding";
+      const noticeCount = notices.length;
+      response.resolve({ ...archiveInfo(18), read_only: false, encoding_override: "gbk" });
+      await repairing;
+      if (change === "other archive" || change === "same-source reopen") {
+        assert.equal(archive.archive().id, 19, change);
+        assert.equal(archive.archive().source, change === "other archive" ? replacement.source : preview.outer_path, change);
+        assert.ok(closed.includes(18), "the actual store releases the discarded encoding result");
+      }
+      assert.equal(notices.length, noticeCount, `${change}: old encoding feedback must remain silent`);
+      assert.equal(notices.at(-1), "new context feedback", change);
+      assert.equal(draftUpdates, 0, change);
+      assert.equal(context.extractPresetEncodingLabel, "new context draft encoding", change);
+    }
+
+    prepare();
+    ipc.openArchive = async (_path, _password, encoding) => ({
+      ...archiveInfo(encoding === "gbk" ? 18 : 19), read_only: false, encoding_override: encoding,
+    });
+    context.reopenWithEncoding = async (...args) => {
+      const result = await archive.reopenWithEncoding(...args);
+      assert.equal(result.status, "applied");
+      assert.equal(result.isCurrent(), true, "the real encoding result initially owns its published archive");
+      assert.equal(archive.archive().id, 18);
+      assert.equal(await archive.openArchive(preview.outer_path, null, "shift_jis"), true);
+      assert.equal(result.isCurrent(), false, "a newer same-source open supersedes an already applied result");
+      context.showNotice("newer same-source feedback");
+      context.extractPresetEncodingLabel = "newer same-source draft encoding";
+      return result;
+    };
+    await app.repairFilenameEncoding("gbk");
+    assert.equal(archive.archive().id, 19);
+    assert.equal(archive.archive().encoding_override, "shift_jis");
+    assert.deepEqual(notices, ["newer same-source feedback"]);
+    assert.equal(draftUpdates, 0);
+    assert.equal(context.extractPresetEncodingLabel, "newer same-source draft encoding");
+    context.reopenWithEncoding = archive.reopenWithEncoding;
 
     for (const result of ["success", "failure"]) {
       prepare({ ...preview, entry_path: "notes.txt", display_name: "notes.txt" });
