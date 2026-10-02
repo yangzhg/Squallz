@@ -655,6 +655,7 @@
   "gui.archive.nested_read_only": "内层压缩包以只读方式打开。请先解压或转换后再保存修改。",
   "gui.archive.secure_archive": "安全压缩包",
   "gui.archive.info": "信息",
+  "gui.archive.more_actions": "更多操作",
   "gui.archive.info_title": "压缩包信息",
   "gui.archive.info_eyebrow": "压缩包 / 信息",
   "gui.archive.info_subtitle": "压缩包、所选条目、解压目标、编码和分卷详情。",

@@ -33,13 +33,19 @@
   } = $props();
 
   let component = $state(inspectorLoader.load());
+  let previewOpen = $derived(
+    surface.view.kind === "archive" && Boolean(
+      surface.view.preview.nested || surface.view.preview.busy ||
+      surface.view.preview.failed || surface.view.preview.entry,
+    ),
+  );
 
   function retry(): void {
     component = inspectorLoader.retry();
   }
 </script>
 
-<aside class="modern-inspector" aria-label={ariaLabel}>
+<aside class="modern-inspector" class:preview-open={previewOpen} aria-label={ariaLabel}>
   {#await component}
     <section class="deferred-workspace-state" role="status" aria-live="polite" aria-busy="true">
       <Icon name="hourglass" size={20} />

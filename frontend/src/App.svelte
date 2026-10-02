@@ -4856,6 +4856,7 @@
           renameDisabledReason: renameSelectedDisabledReason(),
           deleteDisabledReason: deleteSelectedDisabledReason(),
           moveDisabledReason: moveSelectedDisabledReason(),
+          copyOutDisabledReason: copyOutSelectedDisabledReason(),
           enabled: availableAppActions,
           previewBusy: previewBusy(),
           previewDisabledReason,
@@ -4898,6 +4899,7 @@
       onRenameSelection: () => void runAppAction("rename_entry"),
       onDeleteSelection: () => void runAppAction("delete_entries"),
       onMoveSelection: () => void runAppAction("move_entries"),
+      onCopyOutSelection: () => void runAppAction("copy_entries"),
       onCreateFolder: () => void runAppAction("new_folder"),
       onPreviewSelection: () => void runAppAction("preview_entry"),
       onOpenNestedPreview: () => void openNestedPreviewArchive(),
@@ -15281,6 +15283,7 @@
 
       <div
         class="modern-shell"
+        class:browse-shell={screen === "browse"}
         class:settings-shell={isSettingsScreen()}
         class:no-archive-shell={screen === "browse" && !currentArchive}
         class:no-inspector-shell={screen === "recent" || screen === "convert" || screen === "create" || screen === "extract" || screen === "duplicates" || screen === "batch" || screen === "nestedExtract" || screen === "updateReview" || screen === "password"}

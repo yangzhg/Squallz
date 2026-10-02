@@ -655,6 +655,7 @@
   "gui.archive.nested_read_only": "Nested archives are read-only. Extract or convert to save changes.",
   "gui.archive.secure_archive": "Secure archive",
   "gui.archive.info": "Info",
+  "gui.archive.more_actions": "More actions",
   "gui.archive.info_title": "Archive information",
   "gui.archive.info_eyebrow": "Archive / Info",
   "gui.archive.info_subtitle": "Archive, selection, destination, encoding, and volume details.",
