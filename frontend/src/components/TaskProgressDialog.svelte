@@ -81,6 +81,7 @@
     rootVariables = {},
     copyFeedback = null,
     copyFeedbackTone = null,
+    copyPending = false,
     passwordQuestion = null,
     passwordValue = "",
     passwordError = null,
@@ -115,6 +116,7 @@
     rootVariables?: CssVariableMap;
     copyFeedback?: string | null;
     copyFeedbackTone?: "success" | "danger" | null;
+    copyPending?: boolean;
     passwordQuestion?: PasswordQuestion | null;
     passwordValue?: string;
     passwordError?: string | null;
@@ -497,8 +499,8 @@
                 <small class="checksum-copy-status" class:danger={copyFeedbackTone === "danger"} role="status">{copyFeedback}</small>
               {/if}
             </div>
-            <button type="button" class="primary-lite" onclick={() => void onCopyChecksumResults(task)}>
-              <Icon name="list" size={14} />{tr("gui.checksum.copy_results", "Copy results")}
+            <button type="button" class="primary-lite" disabled={copyPending} aria-busy={copyPending} onclick={() => void onCopyChecksumResults(task)}>
+              <Icon name="list" size={14} />{copyPending ? tr("common.copying", "Copying…") : tr("gui.checksum.copy_results", "Copy results")}
             </button>
           </div>
           <div class="task-checksum-table">

@@ -523,6 +523,7 @@ test("conflict controls answer only the question shown by their task surface", a
         ].map((name) => [name, () => null])),
         taskWindowMode: false, activePlatform: "macos", activePalette: "ocean", activeTheme: "dark", activeDensityChoice: "comfortable",
         pendingTaskReviewId: null,
+        checksumCopyPending: () => false,
         customPaletteVariables: () => ({}), tr: (_key, fallback) => fallback,
         jobPasswordPrompt: null, jobPasswordValue: "", jobPasswordSubmissionError: null,
         jobConflictPrompt: { id: 1, version: 10 }, conflictApplyAll: false,

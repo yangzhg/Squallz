@@ -19,11 +19,14 @@ function reportHarness({ navigation = false } = {}) {
   const source = ts.createSourceFile("App.ts", script, ts.ScriptTarget.Latest, true);
   const names = ["selectedChecksumTask", "checksumItems", "checksumResultText", "checksumResultNumber",
     "viewTaskResults", "checksumCopyFeedbackFor", "checksumCopyFeedbackToneFor",
+    "copyChecksumText", "copyChecksumResults", "copyTaskChecksumResults", "showChecksumCopyFeedback",
+    "clearChecksumCopyState", "checksumCopyPending", "taskChecksumCopyFeedback", "taskChecksumCopyFeedbackTone",
     "submitChecksumJob", "submitChecksumCheckJob", "checksumWorkspaceSurface",
     "checksumAlgorithmLabel", "checksumAlgorithmHint", "checksumItemNumber",
     "preventCreateSubmissionNavigation", "preventTaskWorkspaceNavigation", "dismissRecoveryPicker",
     ...(navigation ? ["setScreen", "preventConvertSubmissionNavigation", "dismissTaskDialog",
-      "openTaskCenter", "closeTaskCenter", "cancelTaskReview", "adoptRecoveryTargetFromTask",
+      "openTaskCenter", "closeTaskCenter", "openTaskCenterDetails", "returnToTaskCenter",
+      "cancelTaskReview", "adoptRecoveryTargetFromTask",
       "focusChecksumResultPanel", "focusPendingChecksumResult", "focusDuplicateReportPanel"] : [])];
   const functions = names.map((name) => {
     const declaration = source.statements.find((node) =>
@@ -32,6 +35,8 @@ function reportHarness({ navigation = false } = {}) {
     return declaration.getText(source);
   }).join("\n");
   const calls = [];
+  const timers = new Map();
+  let nextTimer = 0;
   const document = { documentElement: {}, body: {}, activeElement: null, querySelectorAll: () => [] };
   document.activeElement = document.body;
   const panel = (name) => ({ isConnected: true, scrollIntoView() {}, focus() {
@@ -40,9 +45,14 @@ function reportHarness({ navigation = false } = {}) {
   } });
   const context = {
     ...taskModel,
+    timers,
     jobRows: [], checksumReportTaskIds: {}, taskWindowMode: false,
     checksumCopyFeedbackKind: "checksum", checksumCopyFeedbackTaskId: 1,
     checksumCopyFeedbackMessage: "Copied", checksumCopyFeedbackTone: "success",
+    checksumCopyRequest: null, checksumCopyFeedbackTimer: null,
+    setTimeout: (callback) => { const id = ++nextTimer; timers.set(id, callback); return id; },
+    clearTimeout: (id) => timers.delete(id),
+    copyTextToClipboard: async () => "copied",
     checksumManifestPath: "/new/SHA256SUMS", checksumAlgorithm: "sha256",
     checksumAlgorithms: ["sha256", "sha512"], checksumExcludeText: "",
     toolsArchiveReturnSurface: () => ({ visible: false }),
@@ -63,12 +73,13 @@ function reportHarness({ navigation = false } = {}) {
       context.jobRows.push({ id: 20, spec, result: null, state: "queued" });
       return 20;
     },
-    screen: "checksum", createPreflightPhase: "idle", convertRouteHandle: null,
+    screen: "checksum", mode: "modern", createPreflightPhase: "idle", convertRouteHandle: null,
     archiveOpenStatus: "idle", archivePasswordPrompt: null, previewPasswordPrompt: null,
     taskReviewRequestGeneration: 0, pendingTaskReviewId: null,
     taskCenterOpen: false, taskCenterSelectedTaskId: null, taskCenterFocusTaskId: null,
     activePopover: null, appActionEnabled: () => true, rememberTaskWorkspaceFocus() {},
     taskDialogTaskId: null, taskDialogDismissedId: null,
+    taskDialogTask: () => context.jobRows.find((task) => task.id === context.taskDialogTaskId) ?? null,
     archiveUpdateReview: { cancelSourceChoice() {} }, nestedExtractDraftGeneration: 0,
     nestedExtractPickerRequest: 0, batchPickerRequest: 0, pendingArchiveTaskReview: null,
     pendingCreateSubmission: null, dismissArchivePicker() {}, clearEntryPreviewState() {}, syncUrl() {},
@@ -122,6 +133,7 @@ test("checksum report navigation and copying stay bound to the selected task", a
   harness.viewTaskResults(context.jobRows[2]);
   assert.equal(harness.selectedChecksumTask("checksum_check").id, 3);
   assert.equal(harness.selectedChecksumTask("checksum").id, 1);
+  harness.showChecksumCopyFeedback("checksum", 1, "Copied", "success");
   assert.equal(harness.checksumCopyFeedbackFor("checksum"), "Copied");
   harness.viewTaskResults(context.jobRows[1]);
   assert.equal(harness.checksumCopyFeedbackFor("checksum"), null);
@@ -130,6 +142,149 @@ test("checksum report navigation and copying stay bound to the selected task", a
   assert.equal(harness.selectedChecksumTask("checksum").id, 20);
   assert.equal(harness.checksumResultText("checksum"), "");
   assert.equal(harness.selectedChecksumTask("checksum_check").id, 3);
+
+  const copyHarness = () => {
+    const run = reportHarness({ navigation: true });
+    const tasks = [checksumTask(1), checksumTask(2), checksumTask(3, "checksum_check")];
+    const writes = [];
+    run.context.jobRows.push(...tasks);
+    run.context.checksumReportTaskIds = { checksum: 1, checksum_check: 3 };
+    run.clearChecksumCopyState();
+    run.context.copyTextToClipboard = (text, isCurrent) => {
+      let resolve;
+      const promise = new Promise((done) => { resolve = done; });
+      writes.push({ text, isCurrent, resolve });
+      return promise;
+    };
+    return { run, tasks, writes };
+  };
+  {
+    const { run, tasks, writes } = copyHarness();
+    const old = run.copyChecksumResults("checksum");
+    assert.equal(writes[0].text, "digest-1  /run-1/report.txt");
+    assert.equal(writes[0].isCurrent(), true);
+    assert.equal(run.checksumCopyPending("checksum", 1), true);
+    assert.equal(run.calls.some(([name]) => name === "notice"), false, "waiting must not announce success");
+    run.viewTaskResults(tasks[1]);
+    assert.equal(writes[0].isCurrent(), false);
+    const newer = run.copyChecksumResults("checksum");
+    writes[1].resolve("copied");
+    await newer;
+    const timer = run.context.checksumCopyFeedbackTimer;
+    const noticeCount = run.calls.filter(([name]) => name === "notice").length;
+    assert.equal(run.checksumCopyFeedbackFor("checksum"), "Checksum results copied");
+    writes[0].resolve("failed");
+    await old;
+    assert.equal(run.checksumCopyFeedbackFor("checksum"), "Checksum results copied");
+    assert.equal(run.checksumCopyFeedbackToneFor("checksum"), "success");
+    assert.equal(run.context.checksumCopyFeedbackTimer, timer, "an old result must not replace the new feedback timer");
+    assert.equal(run.context.timers.has(timer), true);
+    assert.equal(run.calls.filter(([name]) => name === "notice").length, noticeCount);
+  }
+  {
+    const { run, tasks, writes } = copyHarness();
+    run.openTaskCenter();
+    run.openTaskCenterDetails(tasks[0]);
+    const old = run.copyTaskChecksumResults(tasks[0]);
+    assert.equal(run.checksumCopyPending("task", 1), true);
+    run.openTaskCenterDetails(tasks[1]);
+    const newer = run.copyTaskChecksumResults(tasks[1]);
+    writes[1].resolve("copied");
+    await newer;
+    const notices = run.calls.filter(([name]) => name === "notice").length;
+    writes[0].resolve("failed");
+    await old;
+    assert.equal(writes[0].isCurrent(), false);
+    assert.equal(run.taskChecksumCopyFeedback(tasks[1]), "Checksum results copied");
+    assert.equal(run.taskChecksumCopyFeedbackTone(tasks[1]), "success");
+    assert.equal(run.calls.filter(([name]) => name === "notice").length, notices);
+  }
+  {
+    const { run, writes } = copyHarness();
+    const old = run.copyChecksumResults("checksum");
+    const newer = run.copyChecksumResults("checksum_check");
+    assert.equal(writes[0].isCurrent(), false, "a different result kind must supersede the previous copy");
+    const owner = run.context.checksumCopyRequest;
+    writes[0].resolve("superseded");
+    await old;
+    assert.equal(run.context.checksumCopyRequest, owner, "old finally must not release a newer request");
+    assert.equal(run.checksumCopyPending("checksum_check", 3), true);
+    writes[1].resolve("copied");
+    await newer;
+    assert.equal(run.checksumCopyFeedbackFor("checksum_check"), "Checksum results copied");
+    assert.equal(run.checksumCopyFeedbackFor("checksum"), null);
+  }
+  {
+    const { run, writes } = copyHarness();
+    const old = run.copyChecksumResults("checksum");
+    const newer = run.copyChecksumResults("checksum");
+    assert.equal(writes[0].isCurrent(), false, "a new copy of the same task must still supersede the old request");
+    writes[1].resolve("copied");
+    await newer;
+    writes[0].resolve("failed");
+    await old;
+    assert.equal(run.checksumCopyFeedbackFor("checksum"), "Checksum results copied");
+  }
+  for (const leave of ["screen", "task-center", "task-back", "dialog-dismiss"]) {
+    const { run, tasks, writes } = copyHarness();
+    if (leave === "task-back") {
+      run.openTaskCenter();
+      run.openTaskCenterDetails(tasks[0]);
+    } else if (leave === "dialog-dismiss") run.context.taskDialogTaskId = tasks[0].id;
+    const fromTask = leave === "task-back" || leave === "dialog-dismiss";
+    const pending = fromTask
+      ? run.copyTaskChecksumResults(tasks[0]) : run.copyChecksumResults("checksum");
+    if (leave === "screen") { run.setScreen("browse"); run.setScreen("checksum"); }
+    else if (leave === "task-center") { run.openTaskCenter(); run.closeTaskCenter(); }
+    else if (leave === "task-back") { run.returnToTaskCenter(tasks[0]); run.openTaskCenterDetails(tasks[0]); }
+    else {
+      await run.dismissTaskDialog(tasks[0]);
+      run.context.taskDialogTaskId = tasks[0].id;
+      run.context.taskDialogDismissedId = null;
+    }
+    assert.equal(writes[0].isCurrent(), false, `${leave} must remain cancelled after returning to the same context`);
+    const notices = run.calls.filter(([name]) => name === "notice").length;
+    writes[0].resolve("copied");
+    await pending;
+    assert.equal(run.context.checksumCopyFeedbackMessage, null);
+    assert.equal(run.calls.filter(([name]) => name === "notice").length, notices);
+  }
+  for (const result of ["copied", "failed", "superseded"]) {
+    const { run, writes } = copyHarness();
+    const pending = run.copyChecksumResults("checksum");
+    writes[0].resolve(result);
+    await pending;
+    assert.equal(run.checksumCopyPending("checksum", 1), false);
+    assert.equal(run.checksumCopyFeedbackToneFor("checksum"), result === "copied" ? "success" : result === "failed" ? "danger" : null);
+    assert.equal(run.calls.filter(([name]) => name === "notice").length, result === "superseded" ? 0 : 1);
+  }
+  for (const taskWindowMode of [false, true]) {
+    const { run, tasks, writes } = copyHarness();
+    Object.assign(run.context, { taskWindowMode, taskDialogTaskId: tasks[0].id });
+    const pending = run.copyTaskChecksumResults(tasks[0]);
+    assert.equal(run.checksumCopyPending("task", tasks[0].id), true);
+    writes[0].resolve("copied");
+    await pending;
+    assert.equal(run.taskChecksumCopyFeedback(tasks[0]), "Checksum results copied",
+      "normal task dialog and independent window copying must remain available");
+  }
+  {
+    const { run, writes } = copyHarness();
+    const pending = run.copyChecksumResults("checksum");
+    run.context.mode = "classic";
+    assert.equal(writes[0].isCurrent(), false, "a copy must not retain the prior interface after switching modes");
+    writes[0].resolve("failed");
+    await pending;
+    assert.equal(run.calls.some(([name]) => name === "notice"), false);
+  }
+  {
+    const { run, writes } = copyHarness();
+    await run.copyChecksumText(" ", "checksum", 1);
+    assert.equal(writes.length, 0);
+    assert.equal(run.checksumCopyFeedbackFor("checksum"), "No checksum results to copy");
+    assert.equal(run.checksumCopyFeedbackToneFor("checksum"), "danger");
+    assert.equal(run.context.checksumCopyRequest, null);
+  }
 
   const openLazyReport = (kind) => {
     const run = reportHarness({ navigation: true });

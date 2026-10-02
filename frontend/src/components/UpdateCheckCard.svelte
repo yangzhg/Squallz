@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onDestroy } from "svelte";
   import packageInfo from "../../package.json";
   import {
     checkForSoftwareUpdates,
@@ -27,6 +28,15 @@
   let lastSuccessAt = $derived(updateCheckLastSuccessAt());
   let actionMessage = $state("");
   let actionFailed = $state(false);
+  let actionGeneration = 0;
+  let copyRequest = $state.raw<{ isCurrent: () => boolean } | null>(null);
+
+  onDestroy(() => { actionGeneration += 1; copyRequest = null; });
+
+  $effect(() => {
+    const request = copyRequest;
+    if (request && !request.isCurrent()) copyRequest = null;
+  });
 
   function currentVersion(): string {
     return result?.currentVersion ?? packageInfo.version;
@@ -168,6 +178,8 @@
   }
 
   async function checkForUpdates(): Promise<void> {
+    actionGeneration += 1;
+    copyRequest = null;
     actionMessage = "";
     actionFailed = false;
     await checkForSoftwareUpdates("manual", preview);
@@ -185,6 +197,10 @@
   }
 
   async function openUpdateUrl(url: string, kind: "download" | "release"): Promise<void> {
+    const generation = ++actionGeneration;
+    const source = result;
+    const isCurrent = () => actionGeneration === generation && result === source;
+    copyRequest = null;
     actionMessage = "";
     actionFailed = false;
     if (!trustedUpdateUrl(url, kind)) {
@@ -194,11 +210,14 @@
     }
     try {
       const { openUrl } = await import("@tauri-apps/plugin-opener");
+      if (!isCurrent()) return;
       await openUrl(url);
+      if (!isCurrent()) return;
       actionMessage = kind === "download"
         ? tr("gui.update.download_opened", "Opened the package download in your browser. Verify it before installing.")
         : tr("gui.update.release_opened", "Opened the Squallz release page in your browser.");
     } catch {
+      if (!isCurrent()) return;
       actionFailed = true;
       actionMessage = tr("gui.update.open_failed", "The verified Squallz release link could not be opened.");
     }
@@ -215,14 +234,26 @@
   }
 
   async function copyPackageSha256(): Promise<void> {
+    const generation = ++actionGeneration;
+    const source = result;
     const digest = result?.assetSha256 ?? "";
     actionMessage = "";
     actionFailed = false;
-    const copied = await copyTextToClipboard(digest);
-    actionFailed = !copied;
-    actionMessage = copied
-      ? tr("gui.update.sha256_copied", "SHA-256 copied.")
-      : tr("gui.update.sha256_copy_failed", "Could not copy the SHA-256.");
+    const isCurrent = (): boolean => copyRequest === request && result === source
+      && actionGeneration === generation;
+    const request = { isCurrent };
+    copyRequest = request;
+    try {
+      const outcome = await copyTextToClipboard(digest, isCurrent);
+      if (!isCurrent() || outcome === "superseded") return;
+      const copied = outcome === "copied";
+      actionFailed = !copied;
+      actionMessage = copied
+        ? tr("gui.update.sha256_copied", "SHA-256 copied.")
+        : tr("gui.update.sha256_copy_failed", "Could not copy the SHA-256.");
+    } finally {
+      if (copyRequest === request) copyRequest = null;
+    }
   }
 </script>
 
@@ -273,8 +304,8 @@
             <span>{tr("gui.update.sha256", "Package SHA-256")}</span>
             <code>{result.assetSha256}</code>
           </div>
-          <button type="button" class="secondary-lite" onclick={() => void copyPackageSha256()}>
-            <Icon name="copy" size={15} />{tr("gui.update.copy_sha256", "Copy SHA-256")}
+          <button type="button" class="secondary-lite" disabled={copyRequest !== null} aria-busy={copyRequest !== null} onclick={() => void copyPackageSha256()}>
+            <Icon name="copy" size={15} />{copyRequest ? tr("common.copying", "Copying…") : tr("gui.update.copy_sha256", "Copy SHA-256")}
           </button>
         </div>
       {/if}

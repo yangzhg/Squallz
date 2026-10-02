@@ -41,6 +41,7 @@
     state: string;
     feedback: string | null;
     feedbackDanger: boolean;
+    copyPending: boolean;
     onCopy: () => void;
   }
 
@@ -254,8 +255,8 @@
         {#if report.feedback}
           <span class="checksum-copy-status" class:danger={report.feedbackDanger} role="status">{report.feedback}</span>
         {/if}
-        <button type="button" class="primary-lite" disabled={report.rows.length === 0} onclick={report.onCopy}>
-          <Icon name="list" size={14} />{surface.tr("gui.checksum.copy_results", "Copy results")}
+        <button type="button" class="primary-lite" disabled={report.rows.length === 0 || report.copyPending} aria-busy={report.copyPending} onclick={report.onCopy}>
+          <Icon name="list" size={14} />{report.copyPending ? surface.tr("common.copying", "Copying…") : surface.tr("gui.checksum.copy_results", "Copy results")}
         </button>
       </div>
     </div>

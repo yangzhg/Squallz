@@ -687,6 +687,11 @@
   let checksumCopyFeedbackTaskId = $state<number | null>(null);
   let checksumCopyFeedbackMessage = $state<string | null>(null);
   let checksumCopyFeedbackTone = $state<"success" | "danger" | null>(null);
+  let checksumCopyRequest = $state.raw<{
+    kind: "checksum" | "checksum_check" | "task";
+    taskId: number | null;
+    isCurrent: () => boolean;
+  } | null>(null);
   let browseScrollTop = $state(0);
   let browseViewportHeight = $state(0);
   let archiveKeyboardRequest = 0;
@@ -1456,6 +1461,11 @@
     );
   });
 
+  $effect(() => {
+    const request = checksumCopyRequest;
+    if (request && !request.isCurrent()) checksumCopyRequest = null;
+  });
+
   onMount(() => () => {
     cancelActiveExtractPlan();
     extractPlanGeneration += 1;
@@ -1765,6 +1775,7 @@
 
   onMount(() => () => {
     dismissRecoveryPicker();
+    clearChecksumCopyState();
     extractDestinationPicker = null;
     checksumResultFocusPending = null;
     createPreflightClosed = true;
@@ -2254,6 +2265,7 @@
     if (preventCreateSubmissionNavigation(next)) return;
     if (preventConvertSubmissionNavigation(next)) return;
     if (next !== screen) {
+      checksumCopyRequest = null;
       extractDestinationPicker = null;
       dismissArchivePicker();
       dismissRecoveryPicker();
@@ -10475,6 +10487,7 @@
         state: reportState(calculation),
         feedback: checksumCopyFeedbackFor("checksum"),
         feedbackDanger: checksumCopyFeedbackToneFor("checksum") === "danger",
+        copyPending: checksumCopyPending("checksum", calculation?.id ?? null),
         onCopy: () => void copyChecksumResults("checksum"),
       },
       verification: {
@@ -10490,6 +10503,7 @@
         state: reportState(verification),
         feedback: checksumCopyFeedbackFor("checksum_check"),
         feedbackDanger: checksumCopyFeedbackToneFor("checksum_check") === "danger",
+        copyPending: checksumCopyPending("checksum_check", verification?.id ?? null),
         onCopy: () => void copyChecksumResults("checksum_check"),
       },
       actions: {
@@ -10638,27 +10652,62 @@
       .join("\n");
   }
 
-  async function writeClipboardText(text: string): Promise<boolean> {
-    return copyTextToClipboard(text);
-  }
-
   async function copyChecksumText(
     text: string,
     kind: "checksum" | "checksum_check" | "task",
     taskId: number | null = null,
   ) {
+    clearChecksumCopyState();
+    const origin = {
+      screen,
+      mode,
+      taskCenterOpen,
+      taskCenterSelectedTaskId,
+      taskDialogTaskId,
+      taskDialogDismissedId,
+    };
+    const isCurrent = (): boolean => {
+      if (checksumCopyRequest !== request || screen !== origin.screen || mode !== origin.mode
+        || taskCenterOpen !== origin.taskCenterOpen
+        || taskCenterSelectedTaskId !== origin.taskCenterSelectedTaskId
+        || taskDialogTaskId !== origin.taskDialogTaskId
+        || taskDialogDismissedId !== origin.taskDialogDismissedId) return false;
+      if (kind !== "task") return screen === "checksum" && (selectedChecksumTask(kind)?.id ?? null) === taskId;
+      if (taskWindowMode) return taskDialogTask()?.id === taskId;
+      return taskCenterOpen
+        ? taskCenterSelectedTaskId === taskId
+        : taskDialogTaskId === taskId && taskDialogDismissedId !== taskId;
+    };
+    const request = { kind, taskId, isCurrent };
+    checksumCopyRequest = request;
+    if (!isCurrent()) {
+      checksumCopyRequest = null;
+      return;
+    }
     if (!text.trim()) {
       const message = tr("gui.checksum.no_copyable_results", "No checksum results to copy");
       showNotice(message);
       showChecksumCopyFeedback(kind, taskId, message, "danger");
+      checksumCopyRequest = null;
       return;
     }
-    const ok = await writeClipboardText(text);
-    const message = ok
-      ? tr("gui.checksum.results_copied", "Checksum results copied")
-      : tr("gui.checksum.copy_failed", "Could not copy checksum results");
-    showNotice(message);
-    showChecksumCopyFeedback(kind, taskId, message, ok ? "success" : "danger");
+    try {
+      const result = await copyTextToClipboard(text, isCurrent);
+      if (!isCurrent() || result === "superseded") return;
+      const copied = result === "copied";
+      const message = copied
+        ? tr("gui.checksum.results_copied", "Checksum results copied")
+        : tr("gui.checksum.copy_failed", "Could not copy checksum results");
+      showNotice(message);
+      showChecksumCopyFeedback(kind, taskId, message, copied ? "success" : "danger");
+    } finally {
+      if (checksumCopyRequest === request) checksumCopyRequest = null;
+    }
+  }
+
+  function checksumCopyPending(kind: "checksum" | "checksum_check" | "task", taskId: number | null): boolean {
+    return checksumCopyRequest?.kind === kind && checksumCopyRequest.taskId === taskId
+      && checksumCopyRequest.isCurrent();
   }
 
   async function copyChecksumResults(kind: "checksum" | "checksum_check") {
@@ -13044,6 +13093,7 @@
 
   function openTaskCenter(source: HTMLElement | null = null): void {
     if (!appActionEnabled("task_center") || taskCenterOpen) return;
+    checksumCopyRequest = null;
     checksumResultFocusPending = null;
     rememberTaskWorkspaceFocus(source ?? document.activeElement);
     taskCenterFocusTaskId = null;
@@ -13053,6 +13103,7 @@
   }
 
   function closeTaskCenter(): void {
+    checksumCopyRequest = null;
     cancelTaskReview();
     taskCenterOpen = false;
     taskCenterSelectedTaskId = null;
@@ -13084,12 +13135,14 @@
   }
 
   function openTaskCenterDetails(task: Task): void {
+    checksumCopyRequest = null;
     cancelTaskReview();
     taskCenterFocusTaskId = task.id;
     taskCenterSelectedTaskId = task.id;
   }
 
   function returnToTaskCenter(task: TaskDialogModel): void {
+    checksumCopyRequest = null;
     cancelTaskReview();
     taskCenterSelectedTaskId = null;
     taskCenterFocusTaskId = task.id;
@@ -13203,6 +13256,7 @@
       rootVariables: customPaletteVariables(),
       copyFeedback: taskChecksumCopyFeedback(task),
       copyFeedbackTone: taskChecksumCopyFeedbackTone(task),
+      copyPending: checksumCopyPending("task", task.id),
       passwordQuestion: taskPasswordQuestion(task),
       passwordValue: jobPasswordValue,
       passwordError: jobPasswordSubmissionError,
@@ -13247,6 +13301,7 @@
       presentation: "panel",
       copyFeedback: taskChecksumCopyFeedback(task),
       copyFeedbackTone: taskChecksumCopyFeedbackTone(task),
+      copyPending: checksumCopyPending("task", task.id),
       taskOutputPath,
       taskRevealOutputLabel,
       taskWindowMode: false,
@@ -13375,6 +13430,7 @@
     cancelTaskReview();
     if (task.id === null) return;
     if (isTaskActiveState(task.state)) return;
+    checksumCopyRequest = null;
     if (taskWindowMode && await closeNativeTaskWindow()) return;
     taskDialogDismissedId = task.id;
     taskDialogTaskId = null;
@@ -13606,6 +13662,7 @@
     if (preventTaskWorkspaceNavigation(target)) return;
     if (target === "recovery" && !adoptRecoveryTargetFromTask(task)) return;
     if (task.id !== null && (task.spec.kind === "checksum" || task.spec.kind === "checksum_check")) {
+      checksumCopyRequest = null;
       checksumReportTaskIds[task.spec.kind] = task.id;
     }
     if (task.id !== null && task.spec.kind === "duplicate_scan") duplicateReportTaskId = task.id;
@@ -14587,6 +14644,16 @@
     },
   };
 
+  function clearChecksumCopyState(): void {
+    checksumCopyRequest = null;
+    if (checksumCopyFeedbackTimer) clearTimeout(checksumCopyFeedbackTimer);
+    checksumCopyFeedbackTimer = null;
+    checksumCopyFeedbackKind = null;
+    checksumCopyFeedbackTaskId = null;
+    checksumCopyFeedbackMessage = null;
+    checksumCopyFeedbackTone = null;
+  }
+
   function showChecksumCopyFeedback(
     kind: "checksum" | "checksum_check" | "task",
     taskId: number | null,
@@ -14598,13 +14665,7 @@
     checksumCopyFeedbackMessage = message;
     checksumCopyFeedbackTone = tone;
     if (checksumCopyFeedbackTimer) clearTimeout(checksumCopyFeedbackTimer);
-    checksumCopyFeedbackTimer = setTimeout(() => {
-      checksumCopyFeedbackKind = null;
-      checksumCopyFeedbackTaskId = null;
-      checksumCopyFeedbackMessage = null;
-      checksumCopyFeedbackTone = null;
-      checksumCopyFeedbackTimer = null;
-    }, 2600);
+    checksumCopyFeedbackTimer = setTimeout(clearChecksumCopyState, 2600);
   }
 
   function checksumCopyFeedbackFor(kind: "checksum" | "checksum_check"): string | null {
