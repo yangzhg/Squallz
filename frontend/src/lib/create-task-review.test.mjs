@@ -11,7 +11,9 @@ test.after(() => server.close());
 const model = await server.ssrLoadModule("/src/lib/ui-model.ts");
 const paths = await server.ssrLoadModule("/src/lib/desktop-path.ts");
 const sources = await server.ssrLoadModule("/src/lib/create-sources.ts");
-const { taskReviewScreen } = await server.ssrLoadModule("/src/lib/task-model.ts");
+const { taskReviewScreen, isTaskActiveState } = await server.ssrLoadModule("/src/lib/task-model.ts");
+const { convertSessionFor } = await server.ssrLoadModule("/src/lib/convert-session.svelte.ts");
+const { ipc } = await server.ssrLoadModule("/src/lib/ipc.ts");
 
 function taskSpec(overrides = {}) {
   return {
@@ -25,7 +27,7 @@ function taskSpec(overrides = {}) {
   };
 }
 
-function harness() {
+function harness({ navigation = false } = {}) {
   const component = readFileSync(new URL("../App.svelte", import.meta.url), "utf8");
   const source = ts.createSourceFile("App.ts",
     component.match(/<script lang="ts">([\s\S]*?)<\/script>/)[1], ts.ScriptTarget.Latest, true);
@@ -38,12 +40,13 @@ function harness() {
     "createPasswordValidationMessage", "validateCreateOptions", "updateCreatePassword",
     "updateCreatePasswordConfirmation", "updateCreateEncryptionEnabled", "chooseCreateFormat",
     "activeCreateFormatData", "updateCreateEncryptNames", "updateCreateSfxEnabled",
-    "resetCreateCredentialsAfterPlan"];
+    "resetCreateCredentialsAfterPlan", "preventCreateSubmissionNavigation", "preventConvertSubmissionNavigation",
+    ...(navigation ? ["setScreen", "dismissTaskDialog", "closeTaskCenter", "cancelTaskReview", "adoptRecoveryTargetFromTask"] : [])];
   const declarations = source.statements.filter((node) =>
     ts.isFunctionDeclaration(node) && names.includes(node.name?.text));
   const calls = [];
   const context = {
-    ...model, ...paths, ...sources, taskReviewScreen,
+    ...model, ...paths, ...sources, taskReviewScreen, isTaskActiveState,
     taskWindowMode: false, screen: "create", blockingModalVisible: () => false,
     createSources: [{ path: "/unrelated", kind: "folder" }],
     selectedCreateSourcePaths: ["/unrelated"], createSourcePickerBusy: null,
@@ -98,7 +101,18 @@ function harness() {
         workspace_budget_bytes: 20, system_temp_budget_bytes: 0, final_output_budget_bytes: 10 }; },
       checkDiskSpace: async (path, bytes) => { calls.push(["space", path, bytes]); return { ok: true }; },
     },
-    tick: async () => {}, document: { querySelector: () => ({ focus() {} }) },
+    tick: async () => {}, document: { documentElement: {}, body: {}, querySelectorAll: () => [], querySelector: () => ({ focus() {} }) },
+    convertRouteHandle: null, archiveOpenStatus: "idle", archivePasswordPrompt: null, previewPasswordPrompt: null,
+    taskReviewRequestGeneration: 0, pendingTaskReviewId: null,
+    taskCenterOpen: true, taskCenterSelectedTaskId: 8, taskCenterFocusTaskId: 8,
+    taskDialogTaskId: 8, taskDialogDismissedId: null,
+    archiveUpdateReview: { cancelSourceChoice() {} }, nestedExtractDraftGeneration: 0,
+    nestedExtractPickerRequest: 0, batchPickerRequest: 0, pendingArchiveTaskReview: null,
+    dismissArchivePicker() {}, clearEntryPreviewState() {}, syncUrl() {},
+    restoreTaskWorkspaceFocus: () => calls.push(["restore-focus"]),
+    securitySettingsFocusPending: false, focusSecuritySettings: () => calls.push(["focus-security"]),
+    currentArchive: null, sameFilePath: (left, right) => left === right,
+    recoverySourceMode: "selected", recoverySourceOverride: "/unrelated/recovery.zip", recoveryPar2Override: "/unrelated/recovery.par2",
     createOutputPreviewBase: () => "archive", createSfxOutputLabel: () => "Self-extractor",
     createSfxUnavailableMessage: () => "SFX unavailable",
   };
@@ -210,7 +224,7 @@ test(`restored ${state} creation chooses the destination again and checks source
 });
 }
 
-test("creation review respects format variants, current platform capability and an in-progress draft", () => {
+test("creation review respects format variants, current platform capability and an in-progress draft", async (t) => {
   for (const [dest, expected] of [["a.zip", "zip"], ["a.7Z", "7z"], ["a.sqz", "sqz"],
     ["a.tar.zst", "tar.zst"], ["a.TZST", "tar.zst"], ["a.wim", "wim"], ["a.swm", "wim"]]) {
     const run = harness();
@@ -241,6 +255,138 @@ test("creation review respects format variants, current platform capability and 
   const unsupported = harness();
   assert.equal(unsupported.restoreCreateTaskDraft(taskSpec({ dest: "/output/backup.tar" })), false);
   assert.equal(unsupported.context.createSources[0].path, "/unrelated");
+
+  const run = harness({ navigation: true });
+  const archive = { id: 1, path: "/current/photos.zip", source: "/current/photos.zip", name: "photos.zip",
+    format: "zip", entry_count: 3, garbled_count: 0, non_utf8_name_count: 0, encoding_override: null };
+  run.context.currentArchive = archive;
+  run.context.screen = "convert";
+  const original = { inspectCreateDestination: ipc.inspectCreateDestination,
+    cancelCreateDestinationInspection: ipc.cancelCreateDestinationInspection, planConvert: ipc.planConvert,
+    checkDiskSpace: ipc.checkDiskSpace, tempDir: ipc.tempDir };
+  let checks = 0;
+  let releaseInspection;
+  ipc.inspectCreateDestination = async () => ++checks === 2
+    ? new Promise((resolve) => { releaseInspection = resolve; })
+    : { conflict: false, guard: null };
+  ipc.cancelCreateDestinationInspection = async () => run.calls.push(["cancel-convert"]);
+  ipc.planConvert = async (spec) => ({ input_count: 1, entries: 3, files: 3, directories: 0,
+    symlinks: 0, total_bytes: 512, primary_output: spec.dest, output_budget_bytes: 700,
+    archive_output_budget_bytes: 700, final_output_budget_bytes: 700, workspace_budget_bytes: 1400,
+    system_temp_budget_bytes: 0, split_volume_count_budget: 1 });
+  ipc.checkDiskSpace = async (path, required_bytes) => ({ path, required_bytes, available_bytes: 10000, ok: true });
+  ipc.tempDir = async () => "/temporary";
+  const session = convertSessionFor({}, {
+    getArchive: () => archive, tr: run.context.tr, tError: () => "Read/write error", showNotice: run.context.showNotice,
+    ensurePreflightListener: async () => {}, getDialogModule: run.context.getDialogModule,
+    saveNativeDialog: async () => "/output/photos.7z",
+    submitJob: async (spec) => { run.calls.push(["convert-submit", spec]); return 42; },
+    focusBlockingTaskIfAny: () => false, isJobSubmitBlocked: () => false, jobSubmitBlockedMessage: () => "Busy",
+    recordQueuedOperation() {}, archiveStemName: run.context.archiveStemName, platform: run.context.platformKind,
+    prepareSubmitFocus() {}, shouldRestorePrimaryFocus: () => false, register() {},
+  });
+  t.after(() => {
+    session.dispose();
+    releaseInspection?.({ conflict: false, guard: null });
+    Object.assign(ipc, original);
+  });
+  run.context.convertRouteHandle = session;
+  session.syncArchive(archive);
+  session.surface("modern").start.onSelect();
+  const waitFor = async (predicate) => {
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      if (predicate()) return;
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    assert.fail("Conversion did not reach the expected state");
+  };
+  await waitFor(() => session.surface("modern").review !== null);
+  session.surface("modern").review.onConfirm();
+  await waitFor(() => Boolean(releaseInspection));
+  assert.equal(session.surface("modern").preflight.phase, "submitting");
+
+  const plain = (value) => JSON.parse(JSON.stringify(value));
+  const createDraft = () => {
+    const captured = run.captureCreateRunDraft();
+    assert.ok(captured);
+    const { password, ...options } = captured;
+    return plain({ sources: run.context.createSources,
+      selectedSources: run.context.selectedCreateSourcePaths, preset: run.context.selectedCreatePresetId,
+      touched: run.context.createPresetDraftTouched, advanced: run.context.createAdvancedOpen,
+      section: run.context.classicCreateSection, hasPassword: Boolean(password), options });
+  };
+  const draft = createDraft();
+  const reviewTargets = [
+    { id: 8, state: "failed", spec: taskSpec() },
+    { id: 8, state: "cancelled", spec: taskSpec() },
+    { id: 8, state: "failed", spec: { kind: "protect", path: "/original/recovery.zip" } },
+    { id: 8, state: "failed", spec: { kind: "test", path: archive.path }, error: { key: "error.resource_limit" } },
+  ];
+  for (const task of reviewTargets) {
+    await run.reviewTask(task);
+    assert.deepEqual(createDraft(), draft, `${task.state} ${task.spec.kind} must retain the create draft`);
+    assert.equal(run.context.screen, "convert");
+    assert.equal(run.context.taskCenterOpen, true);
+    assert.equal(run.context.taskCenterSelectedTaskId, 8);
+    assert.equal(run.context.taskCenterFocusTaskId, 8);
+    assert.equal(run.context.taskDialogTaskId, 8);
+    assert.equal(run.context.taskDialogDismissedId, null);
+    assert.equal(run.context.recoverySourceOverride, "/unrelated/recovery.zip");
+    assert.equal(run.context.recoveryPar2Override, "/unrelated/recovery.par2");
+    assert.equal(run.context.securitySettingsFocusPending, false);
+    assert.equal(session.surface("modern").preflight.phase, "submitting");
+    assert.equal(run.calls.some(([name]) => ["focus", "focus-security", "restore-focus", "convert-submit", "cancel-convert"].includes(name)), false);
+  }
+  assert.match(run.calls.at(-1)[1], /finishes adding this conversion/);
+  releaseInspection({ conflict: false, guard: null });
+  await waitFor(() => session.surface("modern").preflight.phase === "ready");
+  assert.equal(run.calls.filter(([name]) => name === "convert-submit").length, 1);
+
+  session.surface("modern").start.onSelect();
+  await waitFor(() => session.surface("modern").review !== null);
+  const conversion = plain(session.surface("modern"));
+  await run.reviewTask({ id: 8, state: "failed", spec: taskSpec({ dest: "/output/backup.tar" }) });
+  assert.deepEqual(plain(session.surface("modern")), conversion);
+  assert.deepEqual(createDraft(), draft);
+  assert.equal(run.context.screen, "convert");
+  assert.equal(run.context.taskCenterOpen, true);
+
+  await run.reviewTask({ id: 8, state: "failed", spec: taskSpec() });
+  assert.equal(run.context.screen, "create");
+  assert.equal(run.context.taskCenterOpen, false);
+  assert.equal(run.context.taskCenterSelectedTaskId, null);
+  assert.equal(run.context.taskDialogDismissedId, 8);
+  assert.deepEqual(Array.from(run.context.createSources, (source) => source.path), taskSpec().inputs);
+  assert.equal(session.surface("modern").preflight.phase, "idle");
+  assert.equal(session.surface("modern").review, null);
+  assert.equal(run.calls.filter(([name]) => name === "focus").length, 1);
+  assert.equal(run.calls.filter(([name]) => name === "convert-submit").length, 1);
+  assert.equal(run.calls.some(([name]) => name === "plan"), false);
+
+  run.context.createPreflightPhase = "submitting";
+  run.context.taskCenterOpen = true;
+  run.context.taskCenterSelectedTaskId = 8;
+  run.context.taskCenterFocusTaskId = 8;
+  run.context.taskDialogTaskId = 8;
+  run.context.taskDialogDismissedId = null;
+  const submittingDraft = createDraft();
+  for (const task of reviewTargets.slice(2)) {
+    const callsBeforeReview = run.calls.length;
+    await run.reviewTask(task);
+    assert.deepEqual(createDraft(), submittingDraft);
+    assert.equal(run.context.screen, "create");
+    assert.equal(run.context.createPreflightPhase, "submitting");
+    assert.equal(run.context.recoverySourceOverride, "/unrelated/recovery.zip");
+    assert.equal(run.context.recoveryPar2Override, "/unrelated/recovery.par2");
+    assert.equal(run.context.securitySettingsFocusPending, false);
+    assert.equal(run.context.taskCenterOpen, true);
+    assert.equal(run.context.taskCenterSelectedTaskId, 8);
+    assert.equal(run.context.taskCenterFocusTaskId, 8);
+    assert.equal(run.context.taskDialogTaskId, 8);
+    assert.equal(run.context.taskDialogDismissedId, null);
+    assert.equal(run.calls.slice(callsBeforeReview).some(([name]) => ["focus", "focus-security", "restore-focus", "convert-submit"].includes(name)), false);
+    assert.match(run.calls.at(-1)[1], /finishes adding this create task/);
+  }
 });
 
 test("edited formats adapt the original output suggestion and cancelled selection never creates a plan", async () => {

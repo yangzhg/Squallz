@@ -13569,6 +13569,10 @@
       await reviewConvertTask(task);
       return;
     }
+    if (screen === "create" && target !== "create" && createPreflightPhase === "submitting"
+      && preventCreateSubmissionNavigation(target)) return;
+    if (screen === "convert" && target !== "convert"
+      && convertRouteHandle && !convertRouteHandle.canLeave()) return;
     if (target === "create" && task.spec.kind === "compress" && !restoreCreateTaskDraft(task.spec, task.outputPasswordRequired)) return;
     if (target === "recovery" && !adoptRecoveryTargetFromTask(task, displayedSpec)) return;
     if (target === "settingsSecurity") securitySettingsFocusPending = true;
