@@ -679,6 +679,7 @@
   let checksumResultPanel = $state<HTMLElement | null>(null);
   let checksumCheckResultPanel = $state<HTMLElement | null>(null);
   let checksumReportTaskIds = $state<Partial<Record<ChecksumResultKind, number>>>({});
+  let checksumResultFocusPending: { kind: ChecksumResultKind; origin: Element | null } | null = null;
   let duplicateReportTaskId = $state<number | null>(null);
   let duplicateReportPanel = $state<HTMLElement | null>(null);
   let duplicateReportFocusPending = false;
@@ -1757,6 +1758,7 @@
 
   onMount(() => () => {
     dismissRecoveryPicker();
+    checksumResultFocusPending = null;
     createPreflightClosed = true;
     createPreflightCleanup?.();
     createPreflightCleanup = null;
@@ -2281,6 +2283,7 @@
     if (next !== "extract") extractReviewFocusPending = false;
     if (next !== "convert") convertReviewFocusPending = false;
     if (next !== "settingsSecurity") securitySettingsFocusPending = false;
+    if (next !== "checksum") checksumResultFocusPending = null;
     if (next !== "duplicates") duplicateReportFocusPending = false;
     if (next !== "password") pendingArchiveTaskReview = null;
     if (screen === "create" && next !== "create" && pendingCreateSubmission) {
@@ -2310,12 +2313,28 @@
     document.getElementById(targetId)?.scrollIntoView({ block: "start", inline: "nearest" });
   }
 
-  async function focusChecksumResultPanel(kind: "checksum" | "checksum_check" = "checksum"): Promise<void> {
+  async function focusChecksumResultPanel(kind: ChecksumResultKind = "checksum"): Promise<void> {
+    const request = { kind, origin: null as Element | null };
+    checksumResultFocusPending = request;
     await tick();
-    const panel = kind === "checksum_check"
-      ? checksumCheckResultPanel ?? checksumResultPanel
+    if (checksumResultFocusPending !== request) return;
+    request.origin = document.activeElement;
+    await focusPendingChecksumResult(request);
+  }
+
+  async function focusPendingChecksumResult(request: NonNullable<typeof checksumResultFocusPending>): Promise<void> {
+    await tick();
+    if (checksumResultFocusPending !== request || request.origin === null) return;
+    if (screen !== "checksum" || modeSelectionBlocked || taskCenterOpen || blockingModalVisible()
+      || (document.activeElement !== request.origin && document.activeElement !== document.body)) {
+      checksumResultFocusPending = null;
+      return;
+    }
+    const panel = request.kind === "checksum_check"
+      ? checksumCheckResultPanel
       : checksumResultPanel;
-    if (!panel) return;
+    if (!panel?.isConnected) return;
+    checksumResultFocusPending = null;
     panel.scrollIntoView({ block: "nearest", inline: "nearest" });
     panel.focus({ preventScroll: true });
   }
@@ -10404,6 +10423,8 @@
         } else {
           checksumCheckResultPanel = node;
         }
+        const request = checksumResultFocusPending;
+        if (node && request?.kind === kind) void focusPendingChecksumResult(request);
       },
     };
   }
@@ -12938,6 +12959,7 @@
 
   function openTaskCenter(source: HTMLElement | null = null): void {
     if (!appActionEnabled("task_center") || taskCenterOpen) return;
+    checksumResultFocusPending = null;
     rememberTaskWorkspaceFocus(source ?? document.activeElement);
     taskCenterFocusTaskId = null;
     taskCenterSelectedTaskId = null;

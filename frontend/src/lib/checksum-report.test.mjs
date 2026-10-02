@@ -23,8 +23,8 @@ function reportHarness({ navigation = false } = {}) {
     "checksumAlgorithmLabel", "checksumAlgorithmHint", "checksumItemNumber",
     "preventCreateSubmissionNavigation", "preventTaskWorkspaceNavigation", "dismissRecoveryPicker",
     ...(navigation ? ["setScreen", "preventConvertSubmissionNavigation", "dismissTaskDialog",
-      "closeTaskCenter", "cancelTaskReview", "adoptRecoveryTargetFromTask",
-      "focusChecksumResultPanel", "focusDuplicateReportPanel"] : [])];
+      "openTaskCenter", "closeTaskCenter", "cancelTaskReview", "adoptRecoveryTargetFromTask",
+      "focusChecksumResultPanel", "focusPendingChecksumResult", "focusDuplicateReportPanel"] : [])];
   const functions = names.map((name) => {
     const declaration = source.statements.find((node) =>
       ts.isFunctionDeclaration(node) && node.name?.text === name);
@@ -32,7 +32,12 @@ function reportHarness({ navigation = false } = {}) {
     return declaration.getText(source);
   }).join("\n");
   const calls = [];
-  const panel = (name) => ({ scrollIntoView() {}, focus: () => calls.push(["focus", name]) });
+  const document = { documentElement: {}, body: {}, activeElement: null, querySelectorAll: () => [] };
+  document.activeElement = document.body;
+  const panel = (name) => ({ isConnected: true, scrollIntoView() {}, focus() {
+    document.activeElement = this;
+    calls.push(["focus", name]);
+  } });
   const context = {
     ...taskModel,
     jobRows: [], checksumReportTaskIds: {}, taskWindowMode: false,
@@ -62,6 +67,7 @@ function reportHarness({ navigation = false } = {}) {
     archiveOpenStatus: "idle", archivePasswordPrompt: null, previewPasswordPrompt: null,
     taskReviewRequestGeneration: 0, pendingTaskReviewId: null,
     taskCenterOpen: false, taskCenterSelectedTaskId: null, taskCenterFocusTaskId: null,
+    activePopover: null, appActionEnabled: () => true, rememberTaskWorkspaceFocus() {},
     taskDialogTaskId: null, taskDialogDismissedId: null,
     archiveUpdateReview: { cancelSourceChoice() {} }, nestedExtractDraftGeneration: 0,
     nestedExtractPickerRequest: 0, batchPickerRequest: 0, pendingArchiveTaskReview: null,
@@ -71,13 +77,14 @@ function reportHarness({ navigation = false } = {}) {
     recoverySourceMode: "selected", recoverySourceOverride: "/previous/recovery.zip",
     recoveryPar2Override: "/previous/recovery.par2", duplicateReportTaskId: 9,
     recoveryPickerStatus: "idle", recoveryPickerRequest: 0,
+    checksumResultFocusPending: null, modeSelectionBlocked: false,
     duplicateReportFocusPending: false, createPrimaryFocusPending: true,
     extractReviewFocusPending: true, convertReviewFocusPending: true,
     securitySettingsFocusPending: true, archiveUpdateReviewFocusPending: true,
     nestedExtractReviewFocusPending: true, batchReviewFocusPending: true,
     checksumResultPanel: panel("checksum"), checksumCheckResultPanel: panel("checksum_check"),
     duplicateReportPanel: panel("duplicates"), blockingModalVisible: () => false,
-    tick: async () => {}, document: { documentElement: {}, body: {}, querySelectorAll: () => [] },
+    tick: async () => {}, document,
     setTaskExpanded: (id, expanded) => {
       calls.push(["expand", id, expanded]);
       const task = context.jobRows.find((row) => row.id === id);
@@ -102,6 +109,7 @@ function checksumTask(id, kind = "checksum") {
 }
 
 test("checksum report navigation and copying stay bound to the selected task", async (t) => {
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
   const harness = reportHarness();
   const { context } = harness;
   context.jobRows.push(checksumTask(1), checksumTask(2), checksumTask(3, "checksum_check"));
@@ -122,6 +130,75 @@ test("checksum report navigation and copying stay bound to the selected task", a
   assert.equal(harness.selectedChecksumTask("checksum").id, 20);
   assert.equal(harness.checksumResultText("checksum"), "");
   assert.equal(harness.selectedChecksumTask("checksum_check").id, 3);
+
+  const openLazyReport = (kind) => {
+    const run = reportHarness({ navigation: true });
+    const task = checksumTask(6, kind);
+    const panels = { checksum: run.context.checksumResultPanel, checksum_check: run.context.checksumCheckResultPanel };
+    Object.assign(run.context, {
+      screen: "browse", checksumResultPanel: null, checksumCheckResultPanel: null,
+      taskCenterOpen: true, taskCenterSelectedTaskId: task.id, taskDialogTaskId: task.id,
+    });
+    run.context.jobRows.push(task);
+    run.viewTaskResults(task);
+    return { run, panels, mount: run.checksumWorkspaceSurface("modern").onPanelMount };
+  };
+  for (const kind of ["checksum", "checksum_check"]) {
+    const { run, panels, mount } = openLazyReport(kind);
+    await settle();
+    assert.equal(run.context.screen, "checksum");
+    assert.equal(run.context.taskCenterOpen, false);
+    assert.equal(run.context.taskDialogTaskId, null);
+    assert.equal(run.context.document.activeElement, run.context.document.body);
+    if (kind === "checksum_check") {
+      mount("checksum", panels.checksum);
+      await settle();
+      assert.equal(run.context.document.activeElement, run.context.document.body, "the calculation panel must not consume verification focus");
+    }
+    mount(kind, panels[kind]);
+    await settle();
+    assert.equal(run.context.document.activeElement, panels[kind], "the selected report must receive focus when its panel becomes available");
+    const input = {};
+    run.context.document.activeElement = input;
+    mount(kind, null);
+    mount(kind, panels[kind]);
+    await settle();
+    assert.equal(run.context.document.activeElement, input, "a consumed focus request must not run again after remounting");
+    assert.deepEqual(run.calls.filter(([name]) => name === "focus"), [["focus", kind]]);
+  }
+  for (const change of ["leave-return", "user-focus", "task-center"]) {
+    const { run, panels, mount } = openLazyReport("checksum_check");
+    await settle();
+    const input = {};
+    if (change === "leave-return") {
+      run.setScreen("recovery");
+      run.setScreen("checksum");
+    } else if (change === "task-center") {
+      run.openTaskCenter();
+      assert.equal(run.context.taskCenterOpen, true);
+      run.closeTaskCenter();
+    } else run.context.document.activeElement = input;
+    mount("checksum_check", panels.checksum_check);
+    await settle();
+    assert.equal(run.context.document.activeElement, change === "user-focus" ? input : run.context.document.body,
+      "a late report must not steal focus after newer navigation, user interaction or task views");
+    assert.equal(run.calls.some(([name]) => name === "focus"), false);
+  }
+  {
+    const { run, panels, mount } = openLazyReport("checksum_check");
+    const newer = checksumTask(7);
+    run.context.jobRows.push(newer);
+    run.viewTaskResults(newer);
+    await settle();
+    mount("checksum_check", panels.checksum_check);
+    await settle();
+    assert.equal(run.context.document.activeElement, run.context.document.body);
+    mount("checksum", panels.checksum);
+    await settle();
+    assert.equal(run.context.document.activeElement, panels.checksum);
+    assert.equal(run.selectedChecksumTask("checksum").id, newer.id);
+    assert.deepEqual(run.calls.filter(([name]) => name === "focus"), [["focus", "checksum"]]);
+  }
 
   const run = reportHarness({ navigation: true });
   const archive = { id: 1, path: "/current/photos.zip", source: "/current/photos.zip", name: "photos.zip",
@@ -184,7 +261,6 @@ test("checksum report navigation and copying stay bound to the selected task", a
   assert.equal(session.surface("modern").preflight.phase, "submitting");
 
   const plain = (value) => JSON.parse(JSON.stringify(value));
-  const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
   const selectDetails = (task) => Object.assign(run.context, {
     taskCenterOpen: true, taskCenterSelectedTaskId: task.id, taskCenterFocusTaskId: task.id,
     taskDialogTaskId: task.id, taskDialogDismissedId: null, pendingTaskReviewId: task.id,
