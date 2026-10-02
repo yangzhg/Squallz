@@ -12,10 +12,12 @@ const { taskDuplicateGroups, taskHasInlineResults, taskResultScreen, taskOutcome
 function harness() {
   const component = readFileSync(new URL("../App.svelte", import.meta.url), "utf8");
   const source = ts.createSourceFile("App.ts", component.match(/<script lang="ts">([\s\S]*?)<\/script>/)[1], ts.ScriptTarget.Latest, true);
-  const names = ["viewTaskResults", "selectedDuplicateScanTask", "duplicateResultNumber", "duplicateResultLabel", "submitDuplicateScanJob", "duplicatesWorkspaceSurface"];
+  const names = ["viewTaskResults", "selectedDuplicateScanTask", "duplicateResultNumber", "duplicateResultLabel",
+    "submitDuplicateScanJob", "duplicatesWorkspaceSurface", "preventTaskWorkspaceNavigation", "preventCreateSubmissionNavigation"];
   const declarations = source.statements.filter((node) => ts.isFunctionDeclaration(node) && names.includes(node.name?.text));
   const context = {
     jobRows: [], duplicateReportTaskId: null, taskWindowMode: false,
+    screen: "duplicates", createPreflightPhase: "idle", convertRouteHandle: null,
     duplicateMinSize: 1048576, duplicateMinSizeError: "", duplicateExcludeText: "cache",
     duplicateScanTarget: () => "/new-scan", duplicateScanTargetName: () => "new-scan", duplicateScanTargetLabel: () => "/new-scan",
     duplicateExcludeRules: () => ["cache"], focusBlockingTaskIfAny: () => false,

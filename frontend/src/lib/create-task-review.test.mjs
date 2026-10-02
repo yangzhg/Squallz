@@ -40,7 +40,7 @@ function harness({ navigation = false } = {}) {
     "createPasswordValidationMessage", "validateCreateOptions", "updateCreatePassword",
     "updateCreatePasswordConfirmation", "updateCreateEncryptionEnabled", "chooseCreateFormat",
     "activeCreateFormatData", "updateCreateEncryptNames", "updateCreateSfxEnabled",
-    "resetCreateCredentialsAfterPlan", "preventCreateSubmissionNavigation", "preventConvertSubmissionNavigation",
+    "resetCreateCredentialsAfterPlan", "preventCreateSubmissionNavigation", "preventConvertSubmissionNavigation", "preventTaskWorkspaceNavigation",
     ...(navigation ? ["setScreen", "dismissTaskDialog", "closeTaskCenter", "cancelTaskReview", "adoptRecoveryTargetFromTask"] : [])];
   const declarations = source.statements.filter((node) =>
     ts.isFunctionDeclaration(node) && names.includes(node.name?.text));

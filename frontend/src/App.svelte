@@ -13447,6 +13447,14 @@
     return !currentArchive || (!sameFilePath(currentArchive.source, task.spec.path) && !sameFilePath(currentArchive.path, task.spec.path));
   }
 
+  function preventTaskWorkspaceNavigation(next: Screen): boolean {
+    if (screen === "create" && next !== "create" && createPreflightPhase === "submitting"
+      && preventCreateSubmissionNavigation(next)) return true;
+    if (screen === "convert" && next !== "convert"
+      && convertRouteHandle && !convertRouteHandle.canLeave()) return true;
+    return false;
+  }
+
   function viewTaskResults(task: TaskDialogModel): void {
     if (taskHasInlineResults(task)) {
       if (task.id !== null) setTaskExpanded(task.id, !task.expanded);
@@ -13460,6 +13468,7 @@
       if (task.id !== null) setTaskExpanded(task.id, true);
       return;
     }
+    if (preventTaskWorkspaceNavigation(target)) return;
     if (target === "recovery" && !adoptRecoveryTargetFromTask(task)) return;
     if (task.id !== null && (task.spec.kind === "checksum" || task.spec.kind === "checksum_check")) {
       checksumReportTaskIds[task.spec.kind] = task.id;
@@ -13569,10 +13578,7 @@
       await reviewConvertTask(task);
       return;
     }
-    if (screen === "create" && target !== "create" && createPreflightPhase === "submitting"
-      && preventCreateSubmissionNavigation(target)) return;
-    if (screen === "convert" && target !== "convert"
-      && convertRouteHandle && !convertRouteHandle.canLeave()) return;
+    if (preventTaskWorkspaceNavigation(target)) return;
     if (target === "create" && task.spec.kind === "compress" && !restoreCreateTaskDraft(task.spec, task.outputPasswordRequired)) return;
     if (target === "recovery" && !adoptRecoveryTargetFromTask(task, displayedSpec)) return;
     if (target === "settingsSecurity") securitySettingsFocusPending = true;

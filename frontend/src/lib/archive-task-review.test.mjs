@@ -31,13 +31,14 @@ function harness() {
     "syncExtractDraftArchive", "cancelPasswordRequest", "submitPasswordRequest", "dismissArchivePasswordRequest",
     "isCurrentTaskPasswordPrompt", "submitTaskPasswordRequest", "cancelTaskPasswordRequest", "passwordWorkspaceSurface",
     "passwordPromptName", "passwordPromptDetail", "passwordSessionDetail", "passwordFailureDetail", "taskPasswordQuestion",
-    "setScreen", "effectiveExtractDest", "sameFolderExtractDest",
+    "setScreen", "preventTaskWorkspaceNavigation", "effectiveExtractDest", "sameFolderExtractDest",
     "extractEncodingForJob", "archiveEncodingForJob", "extractEncodingLabel"];
   const declarations = source.statements.filter((node) => ts.isFunctionDeclaration(node) && names.includes(node.name?.text));
   const calls = [];
   const context = {
     calls, taskReviewScreen, taskWindowMode: false, currentArchive: archive(),
     screen: "browse", archiveOpenStatus: "idle", archiveOpenGeneration: 0, archivePasswordAttempt: 0,
+    createPreflightPhase: "idle", convertRouteHandle: null,
     archivePickerRequest: null,
     getDialogModule: async () => ({ open: async () => null }),
     openNativeDialog: async (_kind, open, options) => open(options), platformKind: () => "macos",
