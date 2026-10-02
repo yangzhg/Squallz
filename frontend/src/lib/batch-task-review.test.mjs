@@ -38,6 +38,7 @@ function harness() {
     dismissArchivePicker() {}, clearEntryPreviewState() {}, syncUrl() {},
     screen: "browse", archiveOpenStatus: "idle", taskWindowMode: false, runtimePreviews: {batchPaths:[]},
     recoveryPickerStatus: "idle", recoveryPickerRequest: 0, recoveryOutputPreparation: null,
+    dismissCreatePreparation() {},
     currentArchive: {source:"/unrelated/current.zip"}, appliedDefaultExtractDir: "",
     uniqueNonEmptyPaths: (paths) => [...new Set(paths.filter(Boolean))],
     normalizedDefaultExtractDir: (path) => path || null,

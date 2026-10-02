@@ -33,6 +33,7 @@ function harness() {
     dismissArchivePicker() {}, clearEntryPreviewState() {}, syncUrl() {}, tick: async () => {},
     screen: "browse", archiveOpenStatus: "idle", taskWindowMode: false, appliedDefaultExtractDir: "",
     recoveryPickerStatus: "idle", recoveryPickerRequest: 0, recoveryOutputPreparation: null,
+    dismissCreatePreparation() {},
     currentArchive: { source: "/unrelated/current.zip" },
     nestedExtractJob, reviewNestedExtract, taskReviewScreen,
     normalizedDefaultExtractDir: (path) => path || null,

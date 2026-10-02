@@ -42,6 +42,7 @@ function harness() {
     createPreflightPhase: "idle", convertRouteHandle: null,
     archivePickerRequest: null,
     recoveryPickerStatus: "idle", recoveryPickerRequest: 0, recoveryOutputPreparation: null,
+    dismissCreatePreparation() {},
     getDialogModule: async () => ({ open: async () => null }),
     openNativeDialog: async (_kind, open, options) => open(options), platformKind: () => "macos",
     taskReviewRequestGeneration: 0, nestedExtractDraftGeneration: 0, nestedExtractReviewFocusPending: false,

@@ -435,6 +435,13 @@
     restoreCredentialPrompt: boolean;
     restoreEncryptNames: boolean;
   }>;
+  type CreatePreparationOwner = Readonly<{
+    mode: Mode;
+    sources: CreateSourceRoot[];
+  }>;
+  type CreateSourcePicker = CreatePreparationOwner & Readonly<{
+    kind: "files" | "folder";
+  }>;
   class JobSubmitBlockedError extends Error {
     readonly reason: TaskSubmissionBlockReason;
 
@@ -1003,7 +1010,8 @@
   let duplicateExcludeText = $state(".git\nnode_modules\n.DS_Store");
   let createSources = $state<CreateSourceRoot[]>([]);
   let selectedCreateSourcePaths = $state<string[]>([]);
-  let createSourcePickerBusy = $state<"files" | "folder" | null>(null);
+  let createSourcePicker = $state.raw<CreateSourcePicker | null>(null);
+  let createOutputPreparation = $state.raw<CreatePreparationOwner | null>(null);
   let createPrimaryFocusPending = false;
   let createSourceInputs = $derived(createSourcePaths(createSources));
   let classicCreateSection = $state<ClassicCreateSection>("general");
@@ -1227,6 +1235,13 @@
   $effect(() => {
     const request = recoveryOutputPreparation;
     if (request && !isCurrentRecoveryOutputPreparation(request)) recoveryOutputPreparation = null;
+  });
+
+  $effect(() => {
+    const picker = createSourcePicker;
+    const output = createOutputPreparation;
+    if ((picker && !isCurrentCreateSourcePicker(picker))
+      || (output && !isCurrentCreateOutputPreparation(output))) dismissCreatePreparation();
   });
 
   $effect(() => {
@@ -1790,6 +1805,7 @@
     extractDestinationPicker = null;
     checksumResultFocusPending = null;
     createPreflightClosed = true;
+    dismissCreatePreparation();
     createPreflightCleanup?.();
     createPreflightCleanup = null;
     convertRouteHandle?.dispose();
@@ -2276,6 +2292,7 @@
     if (preventCreateSubmissionNavigation(next)) return;
     if (preventConvertSubmissionNavigation(next)) return;
     if (next !== screen) {
+      dismissCreatePreparation();
       checksumCopyRequest = null;
       extractDestinationPicker = null;
       dismissArchivePicker();
@@ -3675,8 +3692,8 @@
       if (announce) showNotice(tr("gui.presets.busy", "Wait for the current preflight to finish"));
       return;
     }
-    if (announce) markCreatePresetDraftTouched();
     if (!id) {
+      if (announce) markCreatePresetDraftTouched();
       selectedCreatePresetId = null;
       createPresetDraftName = "";
       createPresetMutationState = "idle";
@@ -3706,6 +3723,8 @@
         return;
       }
     }
+    dismissCreatePreparation();
+    if (announce) markCreatePresetDraftTouched();
     invalidateCreatePreflightResult();
     selectedCreatePresetId = preset.id;
     createSuggestedDestination = null;
@@ -4159,8 +4178,10 @@
     path: string,
     split: boolean,
     sfxTarget: PlatformKind | null,
+    isCurrent: () => boolean = () => true,
   ): Promise<CreateDestinationInspectionDto> {
     await ensureCreatePreflightListener();
+    if (!isCurrent()) throw new CreateDestinationInspectionError(undefined, true);
     const requestId = nextPreflightRequestId();
     createPreflightRequestId = requestId;
     createPreflightRequestKind = "destination";
@@ -4169,6 +4190,7 @@
     createPreflightCurrent = "";
     try {
       const inspection = await ipc.inspectCreateDestination(path, split, requestId, sfxTarget);
+      if (!isCurrent()) throw new CreateDestinationInspectionError(undefined, true);
       if (createPreflightRequestId === requestId && createPreflightCancelPending) {
         throw new CreateDestinationInspectionError(undefined, true);
       }
@@ -4208,16 +4230,24 @@
     ) return;
     createPreflightCancelPending = true;
     if (import.meta.env.DEV && requestId === previewDestinationRequestId) {
-      await new Promise((resolve) => window.setTimeout(resolve, 180));
-      finishCreatePreflightWithIssue(
-        "destination",
-        tr(
-          "gui.create.destination_check_cancelled",
-          "Output check cancelled · no archive was created",
-        ),
-        "cancelled",
-      );
-      focusCreatePrimaryAction();
+      const preparation: CreatePreparationOwner = { mode, sources: createSources };
+      createOutputPreparation = preparation;
+      const isCurrent = () => isCurrentCreateOutputPreparation(preparation);
+      try {
+        await new Promise((resolve) => window.setTimeout(resolve, 180));
+        if (!isCurrent() || createPreflightRequestId !== requestId || !createPreflightCancelPending) return;
+        finishCreatePreflightWithIssue(
+          "destination",
+          tr(
+            "gui.create.destination_check_cancelled",
+            "Output check cancelled · no archive was created",
+          ),
+          "cancelled",
+        );
+        await focusCreatePrimaryAction(() => isCurrent() && createPreflightPhase === "cancelled");
+      } finally {
+        if (createOutputPreparation === preparation) createOutputPreparation = null;
+      }
       return;
     }
     try {
@@ -4249,8 +4279,10 @@
     base: string,
     draft: CreateRunDraft,
     source: "dialog" | "drop",
+    isCurrent: () => boolean,
   ): Promise<ResolvedCreateDestination | null> {
     const { confirm, save } = await getDialogModule();
+    if (!isCurrent()) return null;
     const selected = await saveNativeDialog("create.save-archive", save, {
       title: source === "drop"
         ? tr("gui.create.save_dropped_items_as_archive", "Save dropped items as archive")
@@ -4258,13 +4290,16 @@
       defaultPath: createSaveDefaultPathForDraft(inputs[0], base, draft),
       filters: createSaveFiltersForDraft(draft),
     });
+    if (!isCurrent()) return null;
     if (!selected) return null;
     const path = normalizeCreateDestinationForDraft(selected, draft);
     const inspection = await inspectCreateDestinationForCreate(
       path,
       draft.splitSize !== null,
       draft.sfxTarget,
+      isCurrent,
     );
+    if (!isCurrent()) return null;
     if (inspection.conflict && inspection.guard === null) {
       throw new CreateDestinationInspectionError();
     }
@@ -4281,6 +4316,7 @@
           cancelLabel: tr("gui.create.replace_existing.cancel", "Cancel"),
         },
       );
+      if (!isCurrent()) return null;
       if (!replaceExisting) return null;
     }
     return {
@@ -4341,9 +4377,10 @@
     base: string,
     draft: CreateRunDraft,
     source: "dialog" | "drop",
+    isCurrent: () => boolean,
   ): Promise<ResolvedCreateDestination | null> {
     if (draft.destination.base === "ask") {
-      return askCreateDestination(inputs, base, draft, source);
+      return askCreateDestination(inputs, base, draft, source, isCurrent);
     }
 
     let folder: string | null;
@@ -4356,7 +4393,7 @@
             "The selected sources are in different folders. Choose where to save this archive.",
           ),
         );
-        return askCreateDestination(inputs, base, draft, source);
+        return askCreateDestination(inputs, base, draft, source, isCurrent);
       }
     } else {
       folder = draft.defaultCreateDir;
@@ -4367,7 +4404,7 @@
             "The default create folder is not set. Choose where to save this archive.",
           ),
         );
-        return askCreateDestination(inputs, base, draft, source);
+        return askCreateDestination(inputs, base, draft, source, isCurrent);
       }
     }
 
@@ -4381,21 +4418,24 @@
     );
     createPreflightCurrent = status;
     try {
+      const path = await ipc.uniqueCreateDestination(proposed, draft.splitSize !== null);
+      if (!isCurrent()) return null;
       return {
-        path: await ipc.uniqueCreateDestination(proposed, draft.splitSize !== null),
+        path,
         replaceExisting: false,
         replacementGuard: null,
         confirmLateConflict: false,
       };
     } catch {
+      if (!isCurrent()) return null;
       showNotice(
         draft.destination.base === "default_directory"
           ? tr("gui.create.output.default_folder_unavailable", "The default create folder is unavailable. Choose another location.")
           : tr("gui.create.output.source_folder_unavailable", "The source folder cannot be used for output. Choose another location."),
       );
-      return askCreateDestination(inputs, base, draft, source);
+      return askCreateDestination(inputs, base, draft, source, isCurrent);
     } finally {
-      if (createPreflightCurrent === status) createPreflightCurrent = "";
+      if (isCurrent() && createPreflightCurrent === status) createPreflightCurrent = "";
     }
   }
 
@@ -7317,11 +7357,16 @@
     kind: CreateSourceKind,
   ): { added: number; total: number } {
     const previousCount = createSources.length;
-    createSources = mergeCreateSources(
+    const merged = mergeCreateSources(
       createSources,
       paths.map((path) => ({ path, kind })),
       platformKind(),
     );
+    if (merged.length !== previousCount || merged.some((source, index) =>
+      source.path !== createSources[index]?.path || source.kind !== createSources[index]?.kind)) {
+      dismissCreatePreparation();
+      createSources = merged;
+    }
     return {
       added: createSources.length - previousCount,
       total: createSources.length,
@@ -7372,7 +7417,10 @@
   function removeCreateSourcePaths(paths: readonly string[]): number {
     if (createSourcesLocked() || paths.length === 0) return 0;
     const previousCount = createSources.length;
-    createSources = removeCreateSourcesByPaths(createSources, paths, platformKind());
+    const remaining = removeCreateSourcesByPaths(createSources, paths, platformKind());
+    if (remaining.length === previousCount) return 0;
+    dismissCreatePreparation();
+    createSources = remaining;
     selectedCreateSourcePaths = selectedCreateSourcePaths.filter(
       (selected) => !includesCreateSourcePath(paths, selected, platformKind()),
     );
@@ -7397,6 +7445,8 @@
   }
 
   function clearCreateSources(): void {
+    if (createSources.length === 0 && selectedCreateSourcePaths.length === 0 && createSuggestedDestination === null) return;
+    dismissCreatePreparation();
     createSources = [];
     selectedCreateSourcePaths = [];
     createSuggestedDestination = null;
@@ -7561,7 +7611,7 @@
       }
       return;
     }
-    if (createSourcePickerBusy) {
+    if (createSourcePicker) {
       showNotice(tr("gui.create.sources.finish_picker_before_drop", "Close the source picker before dropping other items"));
       return;
     }
@@ -8811,18 +8861,34 @@
     return ["selecting", "measuring", "checkingTemp", "choosingDest", "checkingDest", "submitting"].includes(createPreflightPhase);
   }
 
+  function isCurrentCreateSourcePicker(request: CreateSourcePicker): boolean {
+    return createSourcePicker === request && !createPreflightClosed && screen === "create"
+      && mode === request.mode && createSources === request.sources;
+  }
+
+  function isCurrentCreateOutputPreparation(request: CreatePreparationOwner): boolean {
+    return createOutputPreparation === request && !createPreflightClosed && screen === "create"
+      && mode === request.mode && createSources === request.sources;
+  }
+
+  function dismissCreatePreparation(): void {
+    createSourcePicker = null;
+    createPrimaryFocusPending = false;
+    if (createOutputPreparation) invalidateCreatePreflightResult();
+  }
+
   function createConfigurationPending(): boolean {
     return presetLoadState === "loading" || !sfxCreateCapabilityReady;
   }
 
   function createSourcesLocked(): boolean {
-    return createSourcePickerBusy !== null
+    return createSourcePicker !== null
       || createPreflightBusy()
       || pendingCreateSubmission !== null;
   }
 
   function createSourcesLockedReason(): string {
-    if (createSourcePickerBusy) {
+    if (createSourcePicker) {
       return tr("gui.create.sources.picker_open", "Finish choosing sources before changing the list");
     }
     if (createPreflightBusy()) {
@@ -8842,14 +8908,14 @@
 
   function createStartLabel(readyLabel: string): string {
     if (createConfigurationPending()) return tr("gui.create.preparing_settings", "Preparing settings");
-    if (createSourcePickerBusy) return tr("gui.create.sources.adding", "Adding sources");
+    if (createSourcePicker) return tr("gui.create.sources.adding", "Adding sources");
     if (createPreflightBusy()) return tr("gui.create.checking", "Checking");
     if (pendingCreateSubmission) return tr("gui.create.review_plan_below", "Review plan below");
     return readyLabel;
   }
 
   function createSourcePickerLabel(sourceKind: "files" | "folder"): string {
-    if (createSourcePickerBusy === sourceKind) {
+    if (createSourcePicker?.kind === sourceKind) {
       return sourceKind === "files"
         ? tr("gui.create.opening_file_picker", "Opening file picker...")
         : tr("gui.create.opening_folder_picker", "Opening folder picker...");
@@ -9266,14 +9332,14 @@
         addFiles: {
           label: createSourcePickerLabel("files"),
           disabled: createSourcesLocked(),
-          busy: createSourcePickerBusy === "files",
+          busy: createSourcePicker?.kind === "files",
           title: sourceLockedReason,
           onSelect: () => void submitCreateJob("files"),
         },
         addFolders: {
           label: createSourcePickerLabel("folder"),
           disabled: createSourcesLocked(),
-          busy: createSourcePickerBusy === "folder",
+          busy: createSourcePicker?.kind === "folder",
           title: sourceLockedReason,
           onSelect: () => void submitCreateJob("folder"),
         },
@@ -9615,6 +9681,8 @@
   }
 
   function beginCreatePreflight(draft: CreateRunDraft, phase: "selecting" | "choosingDest") {
+    dismissCreatePreparation();
+    createPrimaryFocusPending = false;
     createPresetDraftTouched = true;
     createPreflightPhase = phase;
     createPreflightScanned = 0;
@@ -9636,7 +9704,9 @@
   }
 
   function invalidateCreatePreflightResult() {
-    if (createPreflightBusy() || createPreflightPhase === "idle") return;
+    if (createPreflightBusy() && createOutputPreparation === null) return;
+    createOutputPreparation = null;
+    if (createPreflightPhase === "idle") return;
     const pending = pendingCreateSubmission;
     createPreflightPhase = "idle";
     createPreflightScanned = 0;
@@ -9668,14 +9738,13 @@
     return document.getElementById("create-primary-source-action");
   }
 
-  function focusCreatePrimaryAction() {
+  async function focusCreatePrimaryAction(isCurrent: () => boolean = () => true): Promise<void> {
     createPrimaryFocusPending = true;
-    void tick().then(() => {
-      const action = createPrimaryAction();
-      if (!createPrimaryFocusPending || screen !== "create" || blockingModalVisible() || !action) return;
-      createPrimaryFocusPending = false;
-      action.focus();
-    });
+    await tick();
+    const action = createPrimaryAction();
+    if (!isCurrent() || !createPrimaryFocusPending || screen !== "create" || blockingModalVisible() || !action) return;
+    createPrimaryFocusPending = false;
+    action.focus();
   }
 
   function discardPendingCreatePlan(restoreFocus = false) {
@@ -12585,20 +12654,25 @@
   }
 
   async function submitCreateJob(sourceKind: "files" | "folder") {
+    if (screen !== "create" || createPreflightClosed) return;
     if (focusBlockingTaskIfAny()) return;
     if (createSourcesLocked()) {
       showNotice(createSourcesLockedReason());
       return;
     }
-    createSourcePickerBusy = sourceKind;
+    const request: CreateSourcePicker = { kind: sourceKind, mode, sources: createSources };
+    createSourcePicker = request;
+    const isCurrent = () => isCurrentCreateSourcePicker(request);
     showNotice(sourceKind === "files" ? tr("gui.create.opening_file_picker", "Opening file picker...") : tr("gui.create.opening_folder_picker", "Opening folder picker..."));
     try {
       const { open } = await getDialogModule();
+      if (!isCurrent()) return;
       const selected = await openNativeDialog(`create.${sourceKind}`, open, {
         title: sourceKind === "files" ? tr("gui.create.choose_files_to_archive", "Choose files to archive") : tr("gui.create.choose_folder_to_archive", "Choose folder to archive"),
         multiple: true,
         directory: sourceKind === "folder",
       });
+      if (!isCurrent()) return;
       const inputs = Array.isArray(selected) ? selected : selected ? [selected] : [];
       if (inputs.length === 0) {
         showNotice(
@@ -12609,24 +12683,31 @@
         );
         return;
       }
+      createSourcePicker = null;
       showCreateSourcesAdded(
         appendCreateSources(inputs, sourceKind === "files" ? "file" : "folder"),
       );
     } catch {
+      if (!isCurrent()) return;
       showNotice(
         tr("gui.create.requires_desktop_dialog", "Create archive requires the desktop file dialog"),
       );
     } finally {
-      createSourcePickerBusy = null;
+      if (createSourcePicker === request) createSourcePicker = null;
     }
   }
 
   async function submitCreateInputs(inputs: string[], source: "dialog" | "drop", capturedDraft?: CreateRunDraft) {
+    if (screen !== "create" || createPreflightClosed) return;
+    if (createSourcePicker) {
+      showNotice(createSourcesLockedReason());
+      return;
+    }
     if (!capturedDraft && createConfigurationPending()) {
       showNotice(createConfigurationPendingMessage());
       return;
     }
-    if (!capturedDraft && createPreflightBusy()) {
+    if (createPreflightPhase === "submitting" || (!capturedDraft && createPreflightBusy())) {
       showNotice(tr("gui.create.preflight_already_running", "Create preflight already running"));
       return;
     }
@@ -12645,193 +12726,218 @@
       return;
     }
     beginCreatePreflight(draft, "choosingDest");
-    const base = normalizedInputs.length === 1
-      ? archiveBaseOrDefault(archiveStemName(desktopBasename(normalizedInputs[0], platformKind())))
-      : "archive";
-    let destination: ResolvedCreateDestination | null;
+    const request: CreatePreparationOwner = { mode, sources: createSources };
+    createOutputPreparation = request;
+    const isCurrent = () => isCurrentCreateOutputPreparation(request);
+    const artifactLabel = draft.sfxEnabled ? createSfxOutputLabel() : createFormats[draft.format].label;
     try {
-      destination = await resolveCreateDestination(normalizedInputs, base, draft, source);
-    } catch (error) {
-      if (createDestinationInspectionCancelled(error)) {
+      const base = normalizedInputs.length === 1
+        ? archiveBaseOrDefault(archiveStemName(desktopBasename(normalizedInputs[0], platformKind())))
+        : "archive";
+      let destination: ResolvedCreateDestination | null;
+      try {
+        destination = await resolveCreateDestination(normalizedInputs, base, draft, source, isCurrent);
+      } catch (error) {
+        if (!isCurrent()) return;
+        if (createDestinationInspectionCancelled(error)) {
+          finishCreatePreflightWithIssue(
+            "destination",
+            tr(
+              "gui.create.destination_check_cancelled",
+              "Output check cancelled · no archive was created",
+            ),
+            "cancelled",
+          );
+          await focusCreatePrimaryAction(isCurrent);
+          return;
+        }
         finishCreatePreflightWithIssue(
           "destination",
-          tr(
-            "gui.create.destination_check_cancelled",
-            "Output check cancelled · no archive was created",
-          ),
-          "cancelled",
+          error instanceof CreateDestinationInspectionError
+            ? error.detail
+              ? tError(error.detail)
+              : tr("gui.create.destination_recheck_failed", "Could not check the destination. Review it and try again.")
+            : tr("gui.create.save_dialog_requires_desktop_dialog", "Save dialog requires the desktop file dialog"),
         );
-        focusCreatePrimaryAction();
         return;
       }
-      finishCreatePreflightWithIssue(
-        "destination",
-        error instanceof CreateDestinationInspectionError
-          ? error.detail
-            ? tError(error.detail)
-            : tr("gui.create.destination_recheck_failed", "Could not check the destination. Review it and try again.")
-          : tr("gui.create.save_dialog_requires_desktop_dialog", "Save dialog requires the desktop file dialog"),
-      );
-      return;
-    }
-    if (!destination) {
-      finishCreatePreflightWithIssue(
-        "destination",
-        tr("gui.create.destination_selection_cancelled", "Destination selection cancelled · no archive was created"),
-        "cancelled",
-      );
-      return;
-    }
-    const { path: dest, replaceExisting, replacementGuard } = destination;
-    lastCreateDest = dest;
-    const spec: JobSpec = {
-      kind: "compress",
-      inputs: normalizedInputs,
-      dest,
-      level: draft.level,
-      password: draft.password,
-      encrypt_names: draft.encryptNames,
-      split_size: draft.splitSize,
-      split_mode: draft.splitMode,
-      excludes: [...draft.excludes],
-      content_policy: draft.contentPolicy,
-      sqz_inner_format: draft.sqzInnerFormat,
-      sfx_target: draft.sfxTarget,
-      replace_existing: replaceExisting,
-      replacement_guard: replacementGuard,
-      completion: draft.completion,
-      post_success: draft.postSuccess,
-      test_after_create: draft.testAfterCreate,
-    };
-
-    createPreflightPhase = "measuring";
-    await ensureCreatePreflightListener();
-    const preflightRequestId = nextPreflightRequestId();
-    createPreflightRequestId = preflightRequestId;
-    createPreflightRequestKind = "source";
-    createPreflightProcessedBytes = 0;
-    let plan: CreatePlanDto;
-    try {
-      plan = await ipc.planCreate(spec, preflightRequestId);
-    } catch {
-      finishCreatePreflightWithIssue(
-        "source",
-        tr(
-          "gui.create.check_excludes_or_permissions",
-          "Make sure the output is not selected as a source, then check exclude rules and permissions.",
-        ),
-      );
-      return;
-    } finally {
-      if (createPreflightRequestId === preflightRequestId) {
-        createPreflightRequestId = null;
-        createPreflightRequestKind = null;
+      if (!isCurrent()) return;
+      if (!destination) {
+        finishCreatePreflightWithIssue(
+          "destination",
+          tr("gui.create.destination_selection_cancelled", "Destination selection cancelled · no archive was created"),
+          "cancelled",
+        );
+        return;
       }
-    }
-    if (plan.entries === 0) {
+      const { path: dest, replaceExisting, replacementGuard } = destination;
+      lastCreateDest = dest;
+      const spec: JobSpec = {
+        kind: "compress",
+        inputs: normalizedInputs,
+        dest,
+        level: draft.level,
+        password: draft.password,
+        encrypt_names: draft.encryptNames,
+        split_size: draft.splitSize,
+        split_mode: draft.splitMode,
+        excludes: [...draft.excludes],
+        content_policy: draft.contentPolicy,
+        sqz_inner_format: draft.sqzInnerFormat,
+        sfx_target: draft.sfxTarget,
+        replace_existing: replaceExisting,
+        replacement_guard: replacementGuard,
+        completion: draft.completion,
+        post_success: draft.postSuccess,
+        test_after_create: draft.testAfterCreate,
+      };
+
+      createPreflightPhase = "measuring";
+      let preflightRequestId: string | null = null;
+      let plan: CreatePlanDto;
+      try {
+        await ensureCreatePreflightListener();
+        if (!isCurrent()) return;
+        preflightRequestId = nextPreflightRequestId();
+        createPreflightRequestId = preflightRequestId;
+        createPreflightRequestKind = "source";
+        createPreflightProcessedBytes = 0;
+        plan = await ipc.planCreate(spec, preflightRequestId);
+        if (!isCurrent()) return;
+      } catch {
+        if (!isCurrent()) return;
+        finishCreatePreflightWithIssue(
+          "source",
+          tr(
+            "gui.create.check_excludes_or_permissions",
+            "Make sure the output is not selected as a source, then check exclude rules and permissions.",
+          ),
+        );
+        return;
+      } finally {
+        if (preflightRequestId !== null && createPreflightRequestId === preflightRequestId) {
+          createPreflightRequestId = null;
+          createPreflightRequestKind = null;
+        }
+      }
+      if (plan.entries === 0) {
+        lastCreatePlan = plan;
+        lastDiskSpace = null;
+        lastTempDiskSpace = null;
+        lastSystemTempDiskSpace = null;
+        finishCreatePreflightWithIssue("source", tr("gui.create.no_entries_after_excludes", "No entries after excludes"));
+        return;
+      }
       lastCreatePlan = plan;
+      createPreflightScanned = plan.entries + plan.deduplicated_entries;
+      createPreflightCurrent = "";
       lastDiskSpace = null;
       lastTempDiskSpace = null;
       lastSystemTempDiskSpace = null;
-      finishCreatePreflightWithIssue("source", tr("gui.create.no_entries_after_excludes", "No entries after excludes"));
-      return;
-    }
-    lastCreatePlan = plan;
-    createPreflightScanned = plan.entries + plan.deduplicated_entries;
-    createPreflightCurrent = "";
-    lastDiskSpace = null;
-    lastTempDiskSpace = null;
-    lastSystemTempDiskSpace = null;
 
-    let tempDisk: DiskSpaceDto;
-    try {
-      createPreflightPhase = "checkingTemp";
-      tempDisk = await ipc.checkDiskSpace(desktopDirname(dest, platformKind()), plan.workspace_budget_bytes);
-    } catch {
-      finishCreatePreflightWithIssue(
-        "temp",
-        tr("gui.create.temp_preflight_requires_desktop_service", "Workspace check requires the desktop service"),
-      );
-      return;
-    }
-    lastTempDiskSpace = tempDisk;
-    if (!tempDisk.ok) {
-      finishCreatePreflightWithIssue(
-        "temp",
-        tr("gui.create.not_enough_temp_space", "Not enough destination space for the creation workspace · {available} available")
-          .replace("{available}", formatBytes(tempDisk.available_bytes)),
-      );
-      return;
-    }
-    if (plan.system_temp_budget_bytes > 0) {
-      let systemTempDisk: DiskSpaceDto;
+      let tempDisk: DiskSpaceDto;
       try {
-        const systemTempDir = await ipc.tempDir();
-        systemTempDisk = await ipc.checkDiskSpace(systemTempDir, plan.system_temp_budget_bytes);
+        createPreflightPhase = "checkingTemp";
+        tempDisk = await ipc.checkDiskSpace(desktopDirname(dest, platformKind()), plan.workspace_budget_bytes);
+        if (!isCurrent()) return;
       } catch {
+        if (!isCurrent()) return;
         finishCreatePreflightWithIssue(
           "temp",
           tr("gui.create.temp_preflight_requires_desktop_service", "Workspace check requires the desktop service"),
         );
         return;
       }
-      lastSystemTempDiskSpace = systemTempDisk;
-      if (!systemTempDisk.ok) {
+      lastTempDiskSpace = tempDisk;
+      if (!tempDisk.ok) {
         finishCreatePreflightWithIssue(
           "temp",
-          tr("gui.create.not_enough_system_temp_space", "Not enough space in the system temporary directory · {available} available")
-            .replace("{available}", formatBytes(systemTempDisk.available_bytes)),
+          tr("gui.create.not_enough_temp_space", "Not enough destination space for the creation workspace · {available} available")
+            .replace("{available}", formatBytes(tempDisk.available_bytes)),
         );
         return;
       }
-    }
+      if (plan.system_temp_budget_bytes > 0) {
+        let systemTempDisk: DiskSpaceDto;
+        try {
+          const systemTempDir = await ipc.tempDir();
+          if (!isCurrent()) return;
+          systemTempDisk = await ipc.checkDiskSpace(systemTempDir, plan.system_temp_budget_bytes);
+          if (!isCurrent()) return;
+        } catch {
+          if (!isCurrent()) return;
+          finishCreatePreflightWithIssue(
+            "temp",
+            tr("gui.create.temp_preflight_requires_desktop_service", "Workspace check requires the desktop service"),
+          );
+          return;
+        }
+        lastSystemTempDiskSpace = systemTempDisk;
+        if (!systemTempDisk.ok) {
+          finishCreatePreflightWithIssue(
+            "temp",
+            tr("gui.create.not_enough_system_temp_space", "Not enough space in the system temporary directory · {available} available")
+              .replace("{available}", formatBytes(systemTempDisk.available_bytes)),
+          );
+          return;
+        }
+      }
 
-    let disk: DiskSpaceDto;
-    try {
-      createPreflightPhase = "checkingDest";
-      disk = await ipc.checkDiskSpace(desktopDirname(dest, platformKind()), plan.final_output_budget_bytes);
-    } catch {
-      finishCreatePreflightWithIssue(
-        "destination",
-        tr("gui.create.destination_preflight_requires_desktop_service", "Destination disk preflight requires the desktop service"),
-      );
-      return;
-    }
-    lastDiskSpace = disk;
-    if (!disk.ok) {
-      finishCreatePreflightWithIssue(
-        "destination",
-        tr("gui.create.not_enough_destination_space", "Not enough free space in destination · {available} available")
-          .replace("{available}", formatBytes(disk.available_bytes)),
-      );
-      return;
-    }
+      let disk: DiskSpaceDto;
+      try {
+        createPreflightPhase = "checkingDest";
+        disk = await ipc.checkDiskSpace(desktopDirname(dest, platformKind()), plan.final_output_budget_bytes);
+        if (!isCurrent()) return;
+      } catch {
+        if (!isCurrent()) return;
+        finishCreatePreflightWithIssue(
+          "destination",
+          tr("gui.create.destination_preflight_requires_desktop_service", "Destination disk preflight requires the desktop service"),
+        );
+        return;
+      }
+      lastDiskSpace = disk;
+      if (!disk.ok) {
+        finishCreatePreflightWithIssue(
+          "destination",
+          tr("gui.create.not_enough_destination_space", "Not enough free space in destination · {available} available")
+            .replace("{available}", formatBytes(disk.available_bytes)),
+        );
+        return;
+      }
 
-    pendingCreateSubmission = {
-      spec,
-      source,
-      format: draft.format,
-      profile: draft.profile,
-      creatingSfx: draft.sfxEnabled,
-      artifactLabel: draft.sfxEnabled ? createSfxOutputLabel() : createFormats[draft.format].label,
-      splitSize: draft.splitSize,
-      confirmLateConflict: destination.confirmLateConflict,
-      restoreCredentialPrompt: draft.restoreCredentialPrompt,
-      restoreEncryptNames: draft.restoreEncryptNames,
-    };
-    createPreflightIssue = "";
-    createPreflightIssueStage = null;
-    createPreflightPhase = "reviewing";
-    showNotice(
-      plan.deduplicated_entries > 0
-        ? tr(
-          "gui.create.review_ready_overlap_notice",
-          "Checks complete · {count} repeated entries merged · review before creating",
-        ).replace("{count}", plan.deduplicated_entries.toLocaleString())
-        : tr("gui.create.review_ready_notice", "Checks complete · review before creating"),
-    );
-    await tick();
-    document.querySelector<HTMLElement>(".create-plan-review")?.focus({ preventScroll: false });
+      pendingCreateSubmission = {
+        spec,
+        source,
+        format: draft.format,
+        profile: draft.profile,
+        creatingSfx: draft.sfxEnabled,
+        artifactLabel,
+        splitSize: draft.splitSize,
+        confirmLateConflict: destination.confirmLateConflict,
+        restoreCredentialPrompt: draft.restoreCredentialPrompt,
+        restoreEncryptNames: draft.restoreEncryptNames,
+      };
+      createPreflightIssue = "";
+      createPreflightIssueStage = null;
+      createPreflightPhase = "reviewing";
+      showNotice(
+        plan.deduplicated_entries > 0
+          ? tr(
+            "gui.create.review_ready_overlap_notice",
+            "Checks complete · {count} repeated entries merged · review before creating",
+          ).replace("{count}", plan.deduplicated_entries.toLocaleString())
+          : tr("gui.create.review_ready_notice", "Checks complete · review before creating"),
+      );
+      await tick();
+      if (!isCurrent()) return;
+      document.querySelector<HTMLElement>(".create-plan-review")?.focus({ preventScroll: false });
+    } finally {
+      if (createOutputPreparation === request) {
+        if (!isCurrent()) dismissCreatePreparation();
+        else createOutputPreparation = null;
+      }
+    }
   }
 
   function createPlanConfirmLabel(): string {
@@ -13967,6 +14073,7 @@
       showNotice(tr("gui.create.review.sfx_unavailable", "This device cannot recreate this self-extractor. Your current settings were kept."));
       return false;
     }
+    dismissCreatePreparation();
     markCreatePresetDraftTouched();
     selectedCreatePresetId = null;
     createPresetDraftName = "";
