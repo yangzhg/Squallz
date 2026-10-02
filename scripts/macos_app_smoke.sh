@@ -7,7 +7,7 @@ if [[ "$APP" != /* ]]; then
   APP="$ROOT/$APP"
 fi
 EXE="$APP/Contents/MacOS/squallz-gui"
-SQZ="$APP/Contents/MacOS/sqz"
+SQZ="$APP/Contents/MacOS/sqz-sidecar"
 WORK="$ROOT/target/squallz-macos-smoke"
 HOME_DIR="$WORK/home"
 TRACE="$WORK/trace.jsonl"
@@ -549,7 +549,7 @@ archive file argument, isolated HOME, and a temporary trace file.
 - The app executable does not eagerly link unused CloudKit, CoreData, CoreImage,
   CoreText, or QuartzCore frameworks.
 - \`squallz-gui\` process starts from the bundle.
-- The app and bundled \`sqz\` CLI report the same version.
+- The app and bundled \`sqz-sidecar\` helper report the same version.
 - Frontend drains the OS open-file path and calls \`open_archive\` successfully.
 - First WebView content frame is the archive browser for the opened file, not
   the first-run chooser, an empty shell, a password/error page, or a generic

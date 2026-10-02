@@ -47,7 +47,7 @@
       "localization/en.lproj/InfoPlist.strings": "en.lproj/InfoPlist.strings",
       "localization/zh-Hans.lproj/InfoPlist.strings": "zh-Hans.lproj/InfoPlist.strings"
     },
-    "externalBin": ["../../target/release/sqz"],
+    "externalBin": ["../../target/release/sqz-sidecar"],
     "macOS": {
       "hardenedRuntime": true,
       "files": {

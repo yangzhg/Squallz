@@ -99,7 +99,7 @@ def extract_linux_sfx_runtime(template: Path, destination: Path) -> None:
 def release_binary_path(project_root: Path, platform: str, profile: str) -> Path:
     target = project_root / "target" / profile
     if platform in {"macos-arm64", "macos-x64"}:
-        return target / "bundle/macos/Squallz.app/Contents/MacOS/sqz"
+        return target / "bundle/macos/Squallz.app/Contents/MacOS/sqz-sidecar"
     if platform == "windows-x64":
         return target / "sqz.exe"
     if platform == "linux-x64":
@@ -359,20 +359,10 @@ def require_packaged_desktop_runtime(
             template,
             "windows",
         )
-        cli_candidates = (
-            install_root / "sqz.exe",
-            install_root / "resources/bin/sqz.exe",
-        )
-        packaged_cli = next(
-            (
-                path.resolve()
-                for path in cli_candidates
-                if path.is_file() and not path.is_symlink()
-            ),
-            None,
-        )
-        if packaged_cli is None:
+        packaged_cli = install_root / "sqz-sidecar.exe"
+        if not packaged_cli.is_file() or packaged_cli.is_symlink():
             raise SmokeError("Windows NSIS installation did not provide the packaged CLI")
+        packaged_cli = packaged_cli.resolve()
         gui_candidates = (
             install_root / "Squallz.exe",
             install_root / "squallz-gui.exe",

@@ -33,7 +33,7 @@ const BUNDLE_BASE_SLACK_BYTES: u64 = 1024 * 1024;
 const MIN_ALLOCATION_GRANULARITY: u64 = 4096;
 const ENTRY_METADATA_ALLOCATIONS: u64 = 2;
 const DESKTOP_QUICK_LOOK_EXTENSION: &str = "Contents/PlugIns/SquallzQuickLook.appex";
-const DESKTOP_CLI_SIDECAR: &str = "Contents/MacOS/sqz";
+const DESKTOP_CLI_SIDECAR: &str = "Contents/MacOS/sqz-sidecar";
 
 #[derive(Debug)]
 enum TemplateEntryKind {

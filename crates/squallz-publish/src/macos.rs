@@ -1151,7 +1151,7 @@ mod tests {
         fs::create_dir_all(&macos).unwrap();
         fs::create_dir_all(template.join("Contents/Resources")).unwrap();
         write_fake_macho(&macos.join("squallz-gui"), &SFX_GUI_STUB_MARKER);
-        write_fake_macho(&macos.join("sqz"), &SFX_CLI_STUB_MARKER);
+        write_fake_macho(&macos.join("sqz-sidecar"), &SFX_CLI_STUB_MARKER);
         fs::write(
             template.join("Contents/Info.plist"),
             r#"<?xml version="1.0" encoding="UTF-8"?>

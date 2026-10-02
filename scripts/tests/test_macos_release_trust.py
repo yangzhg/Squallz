@@ -1,4 +1,5 @@
 import json
+import plistlib
 import shutil
 import subprocess
 import sys
@@ -15,6 +16,7 @@ from scripts.macos_release_trust import (
     discover_macho,
     gatekeeper_accepts_notarized_developer_id,
     get_task_allow_enabled,
+    inspect_bundle,
     normalized_architecture,
     parse_codesign_details,
     parse_notary_evidence,
@@ -437,6 +439,8 @@ class MacosReleaseTrustTests(unittest.TestCase):
             resources.mkdir(parents=True)
             executable = macos / "squallz-gui"
             executable.write_bytes(b"\xcf\xfa\xed\xfe" + b"\0" * 16)
+            sidecar = macos / "sqz-sidecar"
+            sidecar.write_bytes(b"\xcf\xfa\xed\xfe" + b"\0" * 16)
             ordinary = resources / "readme.txt"
             ordinary.write_text("not executable", encoding="utf-8")
             link = resources / "linked-code"
@@ -444,7 +448,50 @@ class MacosReleaseTrustTests(unittest.TestCase):
 
             found = discover_macho(app)
 
-            self.assertEqual(found, [executable])
+            self.assertEqual(found, [executable, sidecar])
+
+    def test_bundle_inspection_requires_regular_macho_sidecar(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            app = root / "Squallz.app"
+            info = self.quick_look_host_info()
+            info.update(
+                CFBundleIdentifier="dev.squallz.desktop",
+                CFBundleExecutable="squallz-gui",
+                CFBundleShortVersionString="0.1.0",
+                CFBundleVersion="0.1.0",
+                LSMinimumSystemVersion="11.0",
+            )
+            executable = app / "Contents/MacOS/squallz-gui"
+            executable.parent.mkdir(parents=True)
+            executable.write_bytes(b"\xcf\xfa\xed\xfe" + b"\0" * 16)
+            executable.chmod(0o755)
+            (app / "Contents/Info.plist").write_bytes(plistlib.dumps(info))
+            extension = app / "Contents/PlugIns/SquallzQuickLook.appex"
+            quick_look = extension / "Contents/MacOS/SquallzQuickLook"
+            quick_look.parent.mkdir(parents=True)
+            quick_look.write_bytes(b"\xcf\xfa\xed\xfe" + b"\0" * 16)
+            quick_look.chmod(0o755)
+            (extension / "Contents/Info.plist").write_bytes(
+                plistlib.dumps(self.quick_look_info())
+            )
+            for localization in ("en.lproj", "zh-Hans.lproj"):
+                strings = extension / "Contents/Resources" / localization / "InfoPlist.strings"
+                strings.parent.mkdir(parents=True)
+                strings.write_text('"CFBundleDisplayName" = "Squallz";', encoding="utf-8")
+            sidecar = app / "Contents/MacOS/sqz-sidecar"
+            store = EvidenceStore(root / "evidence")
+            for invalid_kind in ("missing", "symlink", "not-macho"):
+                if invalid_kind == "symlink":
+                    sidecar.symlink_to(executable)
+                elif invalid_kind == "not-macho":
+                    sidecar.unlink()
+                    sidecar.write_bytes(b"not executable code")
+                    sidecar.chmod(0o755)
+                with self.subTest(kind=invalid_kind), self.assertRaisesRegex(
+                    TrustError, "required executable.*Contents/MacOS/sqz-sidecar"
+                ):
+                    inspect_bundle(app, frozenset({"arm64"}), store)
 
     def test_bundle_digest_detects_a_different_packaged_app(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -87,7 +87,7 @@ The package fields remain present and use `null` when no matching asset or
 verified metadata is available. All three normal statuses exit with code 0; a
 missing package for the current platform is also a successful discovery result.
 Windows and Linux resolve the standalone `sqz` package. On macOS, the published
-DMG is reported because it includes the bundled `sqz` binary.
+DMG is reported because it includes the desktop CLI helper.
 Ctrl-C exits with code 5. Network, rate-limit, or update-service availability
 errors exit with code 7; invalid release metadata or no stable release exits
 with code 1. JSON failures keep the common
@@ -237,7 +237,7 @@ ZIP 目标可用 `--split-mode native` 改为 `.z01/.z02/.../.zip`，WIM 目标�
 没有匹配附件或可信元数据时，软件包相关字段仍然存在，值为 `null`。三种正常状态都以
 0 退出；发现新版本但当前平台没有适配包也属于成功。Ctrl-C 以 5 退出；网络、限流或
 更新服务不可用以 7 退出。Windows 和 Linux 会匹配独立的 `sqz` 软件包；macOS 会返回
-包含 `sqz` 的正式 DMG。
+包含桌面 CLI 辅助程序的正式 DMG。
 发布元数据无效或没有稳定版以 1 退出。JSON 错误继续使用统一的
 `{"ok":false,"error":{"kind":"...","message":"...","exit_code":N}}`
 结构。稳定错误种类见[退出码说明](https://github.com/yangzhg/Squallz/blob/main/docs/exit-codes.md)。

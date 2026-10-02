@@ -142,7 +142,7 @@ class FakeDesktopBundle:
             packaged = destination / smoke.SFX_RESOURCE_TARGET
             make_executable(packaged, self.template.read_bytes())
             if self.include_windows_cli:
-                make_executable(destination / "sqz.exe")
+                make_executable(destination / "sqz-sidecar.exe")
             if self.include_windows_gui:
                 make_executable(destination / "Squallz.exe")
             make_executable(destination / "uninstall.exe")
@@ -618,10 +618,10 @@ class ReleaseBinarySmokeTests(unittest.TestCase):
             self.assertEqual(smoke.workspace_version(manifest), "1.2.3")
             cases = {
                 "macos-arm64": Path(
-                    "target/release/bundle/macos/Squallz.app/Contents/MacOS/sqz"
+                    "target/release/bundle/macos/Squallz.app/Contents/MacOS/sqz-sidecar"
                 ),
                 "macos-x64": Path(
-                    "target/release/bundle/macos/Squallz.app/Contents/MacOS/sqz"
+                    "target/release/bundle/macos/Squallz.app/Contents/MacOS/sqz-sidecar"
                 ),
                 "windows-x64": Path("target/release/sqz.exe"),
                 "linux-x64": Path("target/release/sqz"),
@@ -744,6 +744,14 @@ class ReleaseBinarySmokeTests(unittest.TestCase):
 
                 self.assertEqual(actual, artifact.resolve())
                 self.assertEqual(len(runner.commands), 3 if config_name == "windows" else 1)
+                if config_name == "windows":
+                    self.assertEqual(
+                        runner.commands[1],
+                        [
+                            str((root / "smoke/nsis-install/sqz-sidecar.exe").resolve()),
+                            "--version",
+                        ],
+                    )
 
     def test_windows_package_requires_the_installed_cli_and_desktop_app(self) -> None:
         cases = (

@@ -84,10 +84,10 @@ Package.app/
     Resources/squallz-sfx/manifest.v1
 ```
 
-The desktop-only `Contents/MacOS/sqz` sidecar and Quick Look extension are not
-copied into the self-extractor. The generated app runs the shared extraction
-task directly through its GUI runtime, so those components would only add size
-and unrelated system integration.
+The desktop-only `Contents/MacOS/sqz-sidecar` helper and Quick Look extension
+are not copied into the self-extractor. The generated app runs the shared
+extraction task directly through its GUI runtime, so those components would
+only add size and unrelated system integration.
 
 `manifest.v1` is a fixed 64-byte record. It contains the `SQZSFXB1` magic,
 version `1`, the payload length and the complete payload SHA-256. Reserved and
@@ -216,10 +216,11 @@ output. A later active path race can instead produce a recovery error with
 paths to inspect.
 
 When Windows/Linux host and target match, `sqz` uses the packaged
-`sqz-sfx.stub`; development or standalone builds must pass `--stub`. A
-packaged macOS `sqz` automatically finds its enclosing `Squallz.app`;
-development builds use `--stub Squallz.app`. The builder checks the executable
-format and the correct Squallz runtime marker before writing.
+`sqz-sfx.stub`; development or standalone builds must pass `--stub`. The macOS
+desktop app's `sqz-sidecar` helper automatically finds its enclosing
+`Squallz.app`; public `sqz` builds outside an app use `--stub Squallz.app`. The
+builder checks the executable format and the correct Squallz runtime marker
+before writing.
 
 Inspect and verify an artifact without executing it:
 
@@ -305,7 +306,7 @@ line.
   has no bundled SFX runtime. Windows and Linux packages remain explicitly
   marked as unsigned previews until their platform signing pipelines exist.
 - A signed macOS source app is accepted, but its outer signature is not copied.
-  The generated SFX omits the desktop CLI sidecar and Quick Look extension.
+  The generated SFX omits the `sqz-sidecar` helper and Quick Look extension.
   Sign the outer `.app` with hardened runtime and a secure timestamp, verify with
   `codesign --verify --deep --strict`, then notarize the distribution artifact.
   `sqz sfx publish-macos` automates this sequence for a separate output app

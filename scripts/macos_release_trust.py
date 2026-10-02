@@ -817,7 +817,7 @@ def inspect_bundle(
         raise TrustError("app bundle has no CFBundleExecutable")
     required = {
         Path("Contents/MacOS") / executable_name,
-        Path("Contents/MacOS/sqz"),
+        Path("Contents/MacOS/sqz-sidecar"),
         QUICK_LOOK_EXECUTABLE_RELATIVE,
     }
     for relative in required:
