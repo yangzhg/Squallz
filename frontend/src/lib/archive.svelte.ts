@@ -110,6 +110,7 @@ const store = $state({
 
 let filterTimer: ReturnType<typeof setTimeout> | undefined;
 const pageRequests = new Map<number, { generation: number; promise: Promise<void> }>();
+const failedPages = new Set<number>();
 let pendingArchiveOpenRequestId: string | null = null;
 let archiveOpenRequestSequence = 0;
 let pendingRefreshRetry: (() => Promise<boolean>) | null = null;
@@ -796,10 +797,11 @@ async function fetchPage(pageNo: number): Promise<void> {
     await pending.promise;
     return;
   }
+  if (store.browseError) return;
   const loading = store.loading;
   loading.add(pageNo);
   const promise = loadPage(pageNo, generation).catch((error) => {
-    publishBrowseError(error, generation);
+    publishBrowseError(error, generation, pageNo);
   });
   pageRequests.set(pageNo, { generation, promise });
   try {
@@ -868,12 +870,14 @@ async function searchArchivePage(id: number, page: number, query: string, genera
 
 function clearBrowseError(): void {
   store.browseError = null;
+  failedPages.clear();
   removeToastByKey(ARCHIVE_BROWSE_ERROR_TOAST_KEY);
   removeToastByKey(ARCHIVE_DIRECTORY_CHANGED_TOAST_KEY);
 }
 
-function publishBrowseError(error: unknown, generation: number): void {
+function publishBrowseError(error: unknown, generation: number, pageNo?: number): void {
   if (generation !== store.generation) return;
+  if (pageNo !== undefined) failedPages.add(pageNo);
   const browseError = isErrorDto(error)
     ? error
     : { key: "gui.error.other.title", params: {}, detail: "" };
@@ -891,6 +895,18 @@ export async function retryArchiveBrowse(): Promise<void> {
   if (!store.info) return;
   if (store.refreshStatus === "error") {
     await pendingRefreshRetry?.();
+    return;
+  }
+  if (failedPages.size > 0) {
+    const generation = store.generation;
+    await Promise.all([...failedPages].map((pageNo) => {
+      const pending = pageRequests.get(pageNo);
+      return pending?.generation === generation ? pending.promise : undefined;
+    }));
+    if (generation !== store.generation) return;
+    const pages = [...failedPages];
+    clearBrowseError();
+    await Promise.all(pages.map((pageNo) => fetchPage(pageNo)));
     return;
   }
   store.filterPending = true;

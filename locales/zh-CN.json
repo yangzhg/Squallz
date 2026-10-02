@@ -948,6 +948,7 @@
   "gui.list.current_folder_count": "当前文件夹共 {count} 项",
   "gui.list.browse_failed": "文件夹内容未能加载",
   "gui.list.loading_folder": "正在加载文件夹内容…",
+  "gui.list.loading_rows": "正在加载条目…",
   "gui.list.search_placeholder": "搜索整个压缩包",
   "gui.list.search_aria": "按完整路径搜索整个压缩包",
   "gui.list.search_shortcut": "搜索整个压缩包（⌘F / Ctrl+F）",

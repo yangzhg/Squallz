@@ -122,6 +122,8 @@
   --move-conflict-list-max-height: calc(var(--control-height) * 5);
   --archive-table-columns: minmax(260px, 1fr) 80px 80px 140px;
   --archive-row-height: 42px;
+  --archive-classic-row-height: 29px;
+  --archive-row-placeholder-width: 180px;
   --archive-filter-field-min-width: 210px;
   --archive-filter-field-max-width: 360px;
   --archive-entry-location-max-share: 44%;
@@ -11420,6 +11422,32 @@ input.secure-input {
   border-bottom: 0;
 }
 
+.archive-row-placeholder {
+  display: flex;
+  align-items: center;
+  box-sizing: border-box;
+  padding-inline: var(--space-md);
+  border-bottom: var(--border-width-control) solid var(--color-surface-inset);
+}
+
+.modern-row-placeholder {
+  height: var(--archive-row-height);
+}
+
+.classic-row-placeholder {
+  height: var(--archive-classic-row-height);
+  padding-inline: var(--control-padding-inline);
+  border-bottom-color: var(--color-divider);
+}
+
+.archive-row-placeholder.pending::before {
+  content: "";
+  width: var(--archive-row-placeholder-width);
+  height: var(--space-sm);
+  border-radius: var(--radius-pill);
+  background: var(--color-border-muted);
+}
+
 .modern-row.selected {
   background: var(--color-accent-bg);
 }
@@ -12894,7 +12922,7 @@ select.classic-input:focus {
 }
 
 .classic-row {
-  height: 29px;
+  height: var(--archive-classic-row-height);
   border-bottom: 1px solid var(--color-divider);
   color: var(--color-text-primary);
   font-size: var(--type-control);

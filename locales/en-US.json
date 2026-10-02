@@ -948,6 +948,7 @@
   "gui.list.current_folder_count": "{count} items in this folder",
   "gui.list.browse_failed": "Folder contents could not be loaded",
   "gui.list.loading_folder": "Loading folder contents…",
+  "gui.list.loading_rows": "Loading entries…",
   "gui.list.search_placeholder": "Search the entire archive",
   "gui.list.search_aria": "Search paths across the entire archive",
   "gui.list.search_shortcut": "Search the entire archive (⌘F / Ctrl+F)",

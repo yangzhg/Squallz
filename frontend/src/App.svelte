@@ -4737,7 +4737,7 @@
 
   function classicArchiveBrowserSurface(): ClassicArchiveBrowserSurfaceProps {
     const recovery = archiveBrowseRecoveryState();
-    const rows = browseEntries(CLASSIC_ROW_HEIGHT).map((entry) => ({
+    const rows = browseEntries(CLASSIC_ROW_HEIGHT).map((entry) => entry ? ({
       ...entry,
       selected: isEntrySelected(entry),
       previewing: isEntryPreviewActive(entry),
@@ -4749,7 +4749,7 @@
       previewActionIcon: entry.source
         ? previewActionIcon(entry.source.path, entry.source.entry_type)
         : "eye",
-    }));
+    }) : null);
     const previewLabel = previewActionLabel();
     const previewDisabledReason = previewSelectedDisabledReason();
     return {
@@ -4784,6 +4784,8 @@
         recovery,
         totalRows: currentArchive ? totalRows() : 0,
         rows,
+        startIndex: browseVirtualWindow(CLASSIC_ROW_HEIGHT).start,
+        rowsPending: !archiveBrowseError() && (filterPending() || rows.some((entry) => entry === null)),
         paddingTop: browsePaddingTop(CLASSIC_ROW_HEIGHT),
         paddingBottom: browsePaddingBottom(CLASSIC_ROW_HEIGHT),
         emptyName: currentArchive ? noEntriesLabel() : openArchiveFirstLabel(),
@@ -4823,7 +4825,7 @@
     if (!archive) {
       throw new Error("Modern archive browser requires an open archive");
     }
-    const rows = browseEntries(MODERN_ROW_HEIGHT).map((entry) => ({
+    const rows = browseEntries(MODERN_ROW_HEIGHT).map((entry) => entry ? ({
       ...entry,
       selected: isEntrySelected(entry),
       previewing: isEntryPreviewActive(entry),
@@ -4835,7 +4837,7 @@
       previewActionIcon: entry.source
         ? previewActionIcon(entry.source.path, entry.source.entry_type)
         : "eye",
-    }));
+    }) : null);
     const mutationDisabledReason = archiveMutationDisabledReason();
     const previewLabel = previewActionLabel();
     const previewDisabledReason = previewSelectedDisabledReason();
@@ -4875,6 +4877,8 @@
         filterStatus: recovery ? "" : archiveFilterStatus(),
         selection: archiveSelectionControl(),
         rows,
+        startIndex: browseVirtualWindow(MODERN_ROW_HEIGHT).start,
+        rowsPending: !archiveBrowseError() && (filterPending() || rows.some((entry) => entry === null)),
         paddingTop: browsePaddingTop(MODERN_ROW_HEIGHT),
         paddingBottom: browsePaddingBottom(MODERN_ROW_HEIGHT),
         emptyLabel: noEntriesLabel(),
@@ -6611,15 +6615,15 @@
     };
   }
 
-  function browseEntries(rowHeight = MODERN_ROW_HEIGHT): DisplayEntry[] {
+  function browseEntries(rowHeight = MODERN_ROW_HEIGHT): (DisplayEntry | null)[] {
     if (!currentArchive) return [];
     const window = browseVirtualWindow(rowHeight);
-    const rows: DisplayEntry[] = [];
+    const rows: (DisplayEntry | null)[] = [];
     prefetchAround(window.start);
     prefetchAround(Math.max(window.end - 1, 0));
     for (let index = window.start; index < window.end; index += 1) {
       const row = rowAt(index);
-      if (row) rows.push({ ...toDisplayEntry(row), virtualIndex: index });
+      rows.push(row ? { ...toDisplayEntry(row), virtualIndex: index } : null);
     }
     return rows;
   }
@@ -6915,7 +6919,10 @@
     const status = archiveRefreshStatus();
     const retrying = retryingArchiveId === currentArchive.id;
     if (status === "idle" && !archiveBrowseError() && !retrying) return null;
-    return { message: archiveFilterStatus(), busy: status === "refreshing" || retrying };
+    const message = retrying && status === "idle" && !archiveBrowseError()
+      ? tr("gui.list.loading_rows", "Loading entries…")
+      : archiveFilterStatus();
+    return { message, busy: status === "refreshing" || retrying };
   }
 
   async function retryArchiveContents(): Promise<void> {

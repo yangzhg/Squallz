@@ -62,7 +62,9 @@
       structureWarning: string | null;
       recovery: ArchiveBrowseRecoveryState;
       totalRows: number;
-      rows: readonly ClassicBrowserEntry[];
+      rows: readonly (ClassicBrowserEntry | null)[];
+      startIndex: number;
+      rowsPending: boolean;
       paddingTop: number;
       paddingBottom: number;
       emptyName: string;
@@ -253,8 +255,10 @@
       {/if}
       <div class="classic-workbench-strip empty-workbench-strip">
         <span>{view.archiveOpen ? view.selectedSummary : view.openArchiveFirst}</span>
-        <small>
-          {view.archiveOpen
+        <small role="status" aria-live="polite">
+          {view.rowsPending && !view.recovery
+            ? view.totalRows === 0 ? view.emptyName : tr("gui.list.loading_rows", "Loading entries…")
+            : view.archiveOpen
             ? tr("gui.preview.keyboard_hint", "↑/↓ moves between items · Shift extends selection · Space or Return opens")
             : tr("gui.classic.empty_workbench_hint", "Archive editing controls appear after an archive is open.")}
         </small>
@@ -269,6 +273,7 @@
       bind:this={table}
       role="table"
       aria-label={tr("gui.table.archive", "Archive table")}
+      aria-busy={view.rowsPending}
       aria-rowcount={Math.max(view.totalRows + 1, 2)}
       aria-keyshortcuts="Meta+A Control+A"
       data-total-rows={view.totalRows}
@@ -307,68 +312,73 @@
           class="virtual-pad"
           use:cssVariables={{ "--virtual-pad-height": `${view.paddingTop}px` }}
         ></div>
-        {#each view.rows as entry}
-          <div
-            class:selected={entry.selected}
-            class:previewing={entry.previewing}
-            class="classic-row"
-            role="row"
-            aria-rowindex={(entry.virtualIndex ?? 0) + 2}
-            aria-selected={entry.selected}
-            tabindex="0"
-            aria-keyshortcuts="ArrowUp ArrowDown Home End PageUp PageDown Shift+ArrowUp Shift+ArrowDown Space Enter Backspace Meta+ArrowUp Alt+ArrowUp E"
-            data-row-index={entry.virtualIndex ?? ""}
-            onclick={(event) => onSelectEntry(entry, event)}
-            ondblclick={(event) => {
-              if (event.target instanceof Element && event.target.closest("button, input")) return;
-              event.preventDefault();
-              onActivateEntry(entry);
-            }}
-            onkeydown={(event) => onEntryKeydown(event, entry)}
-            oncontextmenu={(event) => onOpenEntryContext(event, entry)}
-          >
-            <span class="table-name" role="cell">
-              <button
-                type="button"
-                class="row-select-toggle"
-                class:checked={entry.selected}
-                role="checkbox"
-                aria-checked={entry.selected}
-                aria-label={view.selection.busy ? view.selection.busyLabel : entry.selectionLabel}
-                title={view.selection.busy ? view.selection.busyLabel : entry.selectionLabel}
-                disabled={!entry.source || view.selection.busy}
-                onclick={(event) => {
-                  event.stopPropagation();
-                  onToggleEntrySelection(entry, event);
-                }}
-              ></button>
-              <span class="archive-entry-label">
-                <strong title={entry.source?.path ?? entry.name}>{entry.name}</strong>
-                {#if entry.location}<small title={entry.source?.path}>{entry.location}</small>{/if}
-              </span>
-              {#if entry.source}
+        {#each view.rows as entry, index (view.startIndex + index)}
+          {#if entry}
+            <div
+              class:selected={entry.selected}
+              class:previewing={entry.previewing}
+              class="classic-row"
+              role="row"
+              aria-rowindex={(entry.virtualIndex ?? 0) + 2}
+              aria-selected={entry.selected}
+              tabindex="0"
+              aria-keyshortcuts="ArrowUp ArrowDown Home End PageUp PageDown Shift+ArrowUp Shift+ArrowDown Space Enter Backspace Meta+ArrowUp Alt+ArrowUp E"
+              data-row-index={entry.virtualIndex ?? ""}
+              onclick={(event) => onSelectEntry(entry, event)}
+              ondblclick={(event) => {
+                if (event.target instanceof Element && event.target.closest("button, input")) return;
+                event.preventDefault();
+                onActivateEntry(entry);
+              }}
+              onkeydown={(event) => onEntryKeydown(event, entry)}
+              oncontextmenu={(event) => onOpenEntryContext(event, entry)}
+            >
+              <span class="table-name" role="cell">
                 <button
-                  class="row-preview-button compact"
-                  disabled={view.selection.busy}
-                  aria-busy={entry.previewBusy}
-                  title={view.selection.busy ? view.selection.busyLabel : entry.previewActionLabel}
-                  aria-label={`${view.selection.busy ? view.selection.busyLabel : entry.previewActionLabel} ${entry.name}`}
+                  type="button"
+                  class="row-select-toggle"
+                  class:checked={entry.selected}
+                  role="checkbox"
+                  aria-checked={entry.selected}
+                  aria-label={view.selection.busy ? view.selection.busyLabel : entry.selectionLabel}
+                  title={view.selection.busy ? view.selection.busyLabel : entry.selectionLabel}
+                  disabled={!entry.source || view.selection.busy}
                   onclick={(event) => {
                     event.stopPropagation();
-                    onPreviewEntry(entry);
+                    onToggleEntrySelection(entry, event);
                   }}
-                ><Icon name={entry.previewActionIcon} size={12} /></button>
-              {/if}
-            </span>
-            <span role="cell">{entry.size}</span>
-            <span role="cell">{entry.packed}</span>
-            <span role="cell">{entry.ratio}</span>
-            <span role="cell">{entry.modified}</span>
-            <span role="cell">{entry.crc}</span>
-            <span role="cell">{entry.encoding}</span>
-            <span role="cell" title={entry.attr}>{entry.attr}</span>
-          </div>
-        {:else}
+                ></button>
+                <span class="archive-entry-label">
+                  <strong title={entry.source?.path ?? entry.name}>{entry.name}</strong>
+                  {#if entry.location}<small title={entry.source?.path}>{entry.location}</small>{/if}
+                </span>
+                {#if entry.source}
+                  <button
+                    class="row-preview-button compact"
+                    disabled={view.selection.busy}
+                    aria-busy={entry.previewBusy}
+                    title={view.selection.busy ? view.selection.busyLabel : entry.previewActionLabel}
+                    aria-label={`${view.selection.busy ? view.selection.busyLabel : entry.previewActionLabel} ${entry.name}`}
+                    onclick={(event) => {
+                      event.stopPropagation();
+                      onPreviewEntry(entry);
+                    }}
+                  ><Icon name={entry.previewActionIcon} size={12} /></button>
+                {/if}
+              </span>
+              <span role="cell">{entry.size}</span>
+              <span role="cell">{entry.packed}</span>
+              <span role="cell">{entry.ratio}</span>
+              <span role="cell">{entry.modified}</span>
+              <span role="cell">{entry.crc}</span>
+              <span role="cell">{entry.encoding}</span>
+              <span role="cell" title={entry.attr}>{entry.attr}</span>
+            </div>
+          {:else}
+            <div class="archive-row-placeholder classic-row-placeholder" class:pending={view.rowsPending} aria-hidden="true"></div>
+          {/if}
+        {/each}
+        {#if view.totalRows === 0}
           <div class="classic-row empty-row" role="row" aria-rowindex="2">
             <span class="table-name" role="cell">{view.emptyName}</span>
             <span role="cell">{view.emptyStatus}</span>
@@ -379,7 +389,7 @@
             <span role="cell">-</span>
             <span role="cell">-</span>
           </div>
-        {/each}
+        {/if}
         <div
           class="virtual-pad"
           use:cssVariables={{ "--virtual-pad-height": `${view.paddingBottom}px` }}

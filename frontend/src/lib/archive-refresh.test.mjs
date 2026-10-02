@@ -370,6 +370,53 @@ test("failed automatic refreshes stay retryable without looping or refreshing an
     assert.equal(run.pending.length, 1);
     assert.equal(run.context.refreshedUpdateJobs.has(3), false);
   });
+  await withArchive(async ({ archive, ipc, requests }) => {
+    const cached = Array.from({ length: 500 }, (_, index) => row(`entry-${index}.txt`));
+    archive.installArchivePreview(info(), cached, { total: 1001 });
+    const failedPage = deferred();
+    const inFlightPage = deferred();
+    const retriedPage = deferred();
+    let attempts = 0;
+    ipc.listEntries = (id, page, prefix) => {
+      requests.push({ id, page, prefix });
+      if (page === 0) return Promise.resolve({ items: cached, total: 1001, page });
+      if (page === 2) return inFlightPage.promise;
+      attempts += 1;
+      return attempts === 1 ? failedPage.promise : retriedPage.promise;
+    };
+    assert.equal(archive.rowAt(500), null);
+    assert.equal(archive.rowAt(1000), null);
+    await until(() => requests.length === 2);
+    const failure = { key: "error.io", params: {}, detail: "page read failed" };
+    failedPage.reject(failure);
+    await until(() => archive.archiveBrowseError() !== null);
+    await new Promise((resolve) => setImmediate(resolve));
+    for (let render = 0; render < 3; render += 1) {
+      assert.equal(archive.rowAt(500), null);
+      archive.prefetchAround(500, 0);
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    assert.equal(requests.length, 2, "rendering failed page slots must not restart page reads");
+    assert.equal(archive.rowAt(0)?.path, "entry-0.txt", "cached rows remain available after another page fails");
+    inFlightPage.resolve({ items: [row("entry-1000.txt")], total: 1001, page: 2 });
+    await until(() => archive.rowAt(1000) !== null);
+    assert.equal(archive.rowAt(1000)?.path, "entry-1000.txt", "already-running page reads still populate the current cache");
+    assert.deepEqual(archive.archiveBrowseError(), failure);
+
+    archive.selectRow(cached[0], 0);
+    const retry = archive.retryArchiveBrowse();
+    assert.equal(archive.totalRows(), 1001, "retrying a missing page must keep the virtual list height");
+    assert.equal(archive.rowAt(0)?.path, "entry-0.txt");
+    assert.equal(archive.rowAt(1000)?.path, "entry-1000.txt");
+    assert.deepEqual([...archive.selectedPaths()], ["entry-0.txt"]);
+    await until(() => requests.length === 3);
+    assert.equal(archive.archiveBrowseError(), null);
+    retriedPage.resolve({ items: Array.from({ length: 500 }, (_, index) => row(`entry-${500 + index}.txt`)),
+      total: 1001, page: 1 });
+    await retry;
+    assert.equal(archive.rowAt(500)?.path, "entry-500.txt");
+    assert.deepEqual(requests.map(({ page }) => page), [1, 2, 1]);
+  });
 });
 
 test("refresh prepares the displayed directory before replacing its rows and archive handle", async () => {
@@ -727,7 +774,7 @@ test("navigation to a missing folder displays a real parent instead of a phantom
   });
 });
 
-test("virtual rows stay within the updated list when its size shrinks below the scroll offset", async () => {
+test("virtual rows keep cold and mixed page slots and clamp after the list shrinks", async () => {
   const component = await readFile(new URL("../App.svelte", import.meta.url), "utf8");
   const script = component.match(/<script lang="ts">([\s\S]*?)<\/script>/)?.[1];
   const source = ts.createSourceFile("App.ts", script, ts.ScriptTarget.Latest, true);
@@ -743,6 +790,98 @@ test("virtual rows stay within the updated list when its size shrinks below the 
     assert.ok(window.top <= total * 40);
     assert.equal(window.top + (window.end - window.start) * 40 + window.bottom, total * 40);
   }
+  const names = ["browseVirtualWindow", "browseEntries", "browsePaddingTop", "browsePaddingBottom", "toDisplayEntry"];
+  const helpers = source.statements.filter((node) => ts.isFunctionDeclaration(node) && names.includes(node.name?.text));
+  const surfaces = ["classicArchiveBrowserSurface", "modernArchiveBrowserSurface"].map((name) => {
+    const surface = source.statements.find((node) => ts.isFunctionDeclaration(node) && node.name?.text === name);
+    const rows = surface.body.statements.find((node) => ts.isVariableStatement(node)
+      && node.declarationList.declarations.some((item) => item.name.getText(source) === "rows"));
+    const result = surface.body.statements.find((node) => ts.isReturnStatement(node)).expression;
+    const view = result.properties.find((node) => node.name?.getText(source) === "view").initializer;
+    const fields = view.properties.filter((node) => ["rows", "startIndex", "rowsPending", "paddingTop", "paddingBottom"]
+      .includes(node.name?.getText(source)));
+    assert.equal(fields.length, 5);
+    return `function ${name}Rows() { ${rows.getText(source)} return { ${fields.map((node) => node.getText(source)).join(",")} }; }`;
+  });
+  const runtime = ts.transpileModule([...helpers.map((node) => node.getText(source)), ...surfaces].join("\n"), {
+    compilerOptions: { target: ts.ScriptTarget.ES2022 },
+  }).outputText;
+  await withArchive(async ({ archive, ipc, requests }) => {
+    const cached = Array.from({ length: 500 }, (_, index) => row(`entry-${index}.txt`));
+    archive.installArchivePreview(info(), cached, { total: 10_000 });
+    const pendingPages = new Map();
+    ipc.listEntries = (id, page, prefix) => {
+      requests.push({ id, page, prefix });
+      const pending = deferred();
+      pendingPages.set(page, pending);
+      return pending.promise;
+    };
+    const context = {
+      get currentArchive() { return archive.archive(); },
+      totalRows: archive.totalRows, rowAt: archive.rowAt, prefetchAround: archive.prefetchAround,
+      archiveBrowseError: archive.archiveBrowseError, filterPending: archive.filterPending, filterText: archive.filterText,
+      browseScrollTop: 0, browseViewportHeight: 420, MODERN_ROW_HEIGHT: 42, CLASSIC_ROW_HEIGHT: 29,
+      VIRTUAL_OVERSCAN_ROWS: 12, entryType: (entry) => entry.entry_type,
+      formatBytes: String, formatModified: () => "", entryAttributeLabel: () => "File",
+      tr: (_key, fallback) => fallback, isEntrySelected: () => false,
+      isEntryPreviewActive: () => false, isEntryPreviewBusy: () => false,
+      entrySelectionLabel: () => "Select", previewEntryActionLabel: () => "Preview", previewActionIcon: () => "eye",
+    };
+    const app = vm.runInNewContext(`${runtime}\n({browseVirtualWindow, classicArchiveBrowserSurfaceRows, modernArchiveBrowserSurfaceRows})`, context);
+    function checkSlots(surface, height, pending) {
+      const window = app.browseVirtualWindow(height);
+      const view = surface();
+      assert.equal(view.startIndex, window.start);
+      assert.equal(view.rows.length, window.end - window.start);
+      assert.equal(view.paddingTop + view.rows.length * height + view.paddingBottom, archive.totalRows() * height,
+        "loaded and missing rows must contribute the same fixed height");
+      assert.equal(view.rowsPending, pending);
+      view.rows.forEach((entry, slot) => {
+        if (entry) {
+          assert.equal(entry.virtualIndex, view.startIndex + slot);
+          assert.equal(entry.source.path, `entry-${entry.virtualIndex}.txt`);
+        }
+      });
+      return view;
+    }
+    for (const [surface, height] of [[app.classicArchiveBrowserSurfaceRows, 29], [app.modernArchiveBrowserSurfaceRows, 42]]) {
+      context.browseScrollTop = 500 * height;
+      const mixed = checkSlots(surface, height, true);
+      assert.equal(mixed.rows.filter(Boolean).length, 12, "cached rows must stay in their original slots");
+      assert.ok(mixed.rows.some((entry) => entry === null));
+      context.browseScrollTop = 10_000 * height;
+      const cold = checkSlots(surface, height, true);
+      assert.equal(cold.rows.filter(Boolean).length, 0);
+    }
+    await until(() => pendingPages.has(19) && pendingPages.has(1));
+    const loadedPage = Array.from({ length: 500 }, (_, index) => row(`entry-${500 + index}.txt`));
+    pendingPages.get(1).resolve({ items: loadedPage, total: 10_000, page: 1 });
+    await until(() => archive.rowAt(500) !== null);
+    for (const [surface, height] of [[app.classicArchiveBrowserSurfaceRows, 29], [app.modernArchiveBrowserSurfaceRows, 42]]) {
+      context.browseScrollTop = 500 * height;
+      assert.ok(checkSlots(surface, height, false).rows.every(Boolean));
+    }
+    pendingPages.get(19).reject({ key: "error.io", params: {}, detail: "page read failed" });
+    await until(() => archive.archiveBrowseError() !== null);
+    context.browseScrollTop = 10_000 * 42;
+    const failed = checkSlots(app.modernArchiveBrowserSurfaceRows, 42, false);
+    assert.ok(failed.rows.every((entry) => entry === null));
+    const retrying = archive.retryArchiveBrowse();
+    await until(() => requests.filter(({ page }) => page === 19).length === 2);
+    const retryView = checkSlots(app.modernArchiveBrowserSurfaceRows, 42, true);
+    assert.equal(retryView.startIndex, failed.startIndex);
+    pendingPages.get(19).resolve({ items: Array.from({ length: 500 }, (_, index) => row(`entry-${9500 + index}.txt`)),
+      total: 10_000, page: 19 });
+    await retrying;
+    assert.ok(checkSlots(app.modernArchiveBrowserSurfaceRows, 42, false).rows.every(Boolean));
+    archive.installArchivePreview(info(2), cached.slice(0, 25), { total: 25 });
+    assert.ok(checkSlots(app.modernArchiveBrowserSurfaceRows, 42, false).rows.every(Boolean));
+    assert.equal(archive.totalRows(), 25);
+    for (const [page, pending] of pendingPages) pending.resolve({ items: [row("stale.txt")], total: 10_000, page });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(archive.totalRows(), 25);
+    assert.equal(archive.archiveBrowseError(), null);
+  });
 });
 
 test("the shared browse recovery view exposes an alert and a disabled retry while loading", async () => {
