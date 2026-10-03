@@ -3425,7 +3425,7 @@
   }
 
   function clonePresetDocument(): ArchivePresetDocument | null {
-    return presetDocument ? structuredClone(presetDocument) : null;
+    return presetDocument ? $state.snapshot(presetDocument) : null;
   }
 
   function reconcilePresetSelections(document: ArchivePresetDocument) {
@@ -3472,18 +3472,17 @@
       return true;
     } catch (error) {
       setPresetMutationState(kind, "error");
-      if (isErrorDto(error) && error.key === "error.presets_conflict") {
+      const errorDto = isErrorDto(error) ? error : null;
+      if (errorDto?.key === "error.presets_conflict") {
         void ipc.getArchivePresets().then((latest) => {
           presetDocument = latest;
           presetLoadState = "ready";
           reconcilePresetSelections(latest);
         }).catch(() => undefined);
       }
-      showNotice(
-        isErrorDto(error)
-          ? tr(error.key, tr("gui.presets.failed", "Could not save"))
-          : tr("gui.presets.failed", "Could not save"),
-      );
+      const fallback = tr("gui.presets.failed", "Could not save");
+      const message = errorDto ? tError(errorDto) : fallback;
+      showNotice(message === errorDto?.key ? fallback : message);
       return false;
     }
   }
@@ -3494,68 +3493,78 @@
     return `user.${kind}.${random}`.slice(0, 64);
   }
 
-  async function saveCurrentCreatePresetAsNew() {
+  async function saveArchivePreset(kind: "create" | "extract", operation: "save_as" | "update") {
+    const selected = operation === "update"
+      ? kind === "create" ? selectedCreateArchivePreset() : selectedExtractArchivePreset()
+      : null;
     const next = clonePresetDocument();
     if (!next) {
-      showNotice(tr("gui.presets.load_failed", "Could not load presets. The preset file was not changed."));
+      if (operation === "save_as") {
+        showNotice(tr("gui.presets.load_failed", "Could not load presets. The preset file was not changed."));
+      }
       return;
     }
-    const validationError = createPresetSaveValidationMessage();
-    if (validationError) {
-      showNotice(validationError);
-      return;
+    if (operation === "update") {
+      if (!selected || selected.built_in) return;
+      if (kind === "create" && createPresetUpdateDisabledReason()) {
+        showNotice(createPresetUpdateDisabledReason());
+        return;
+      }
     }
-    const requested = normalizePresetName(createPresetDraftName);
+    if (kind === "create") {
+      const validationError = createPresetSaveValidationMessage();
+      if (validationError) {
+        showNotice(validationError);
+        return;
+      }
+    }
+    const draftName = kind === "create" ? createPresetDraftName : extractPresetDraftName;
+    const requested = normalizePresetName(draftName);
     if (!requested) {
       showNotice(tr("gui.presets.name_required", "Enter a preset name"));
       return;
     }
-    if (next.presets.length >= maxArchivePresets) {
-      showNotice(tr("gui.presets.limit", "Delete a preset before saving another one"));
-      return;
+    let name = requested;
+    let index = -1;
+    if (selected) {
+      if (presetNameExists(kind, name, selected.id)) {
+        showNotice(tr("gui.presets.name_in_use", "That preset name is already in use"));
+        return;
+      }
+      index = next.presets.findIndex((preset) => preset.id === selected.id);
+      if (index < 0) return;
+    } else {
+      if (next.presets.length >= maxArchivePresets) {
+        showNotice(tr("gui.presets.limit", "Delete a preset before saving another one"));
+        return;
+      }
+      name = uniquePresetName(kind, requested);
     }
-    const name = uniquePresetName("create", requested);
-    const id = newArchivePresetId("create");
-    next.presets.push({
-      kind: "create",
-      id,
-      label: name,
-      built_in: false,
-      options: currentCreateArchivePresetOptions(),
-    });
-    if (await persistPresetDocument("create", next, "gui.presets.operation_saved", "Preset saved", name)) {
-      selectedCreatePresetId = id;
-      createPresetDraftName = name;
-    }
-  }
-
-  async function saveCurrentExtractPresetAsNew() {
-    const next = clonePresetDocument();
-    if (!next) {
-      showNotice(tr("gui.presets.load_failed", "Could not load presets. The preset file was not changed."));
-      return;
-    }
-    const requested = normalizePresetName(extractPresetDraftName);
-    if (!requested) {
-      showNotice(tr("gui.presets.name_required", "Enter a preset name"));
-      return;
-    }
-    if (next.presets.length >= maxArchivePresets) {
-      showNotice(tr("gui.presets.limit", "Delete a preset before saving another one"));
-      return;
-    }
-    const name = uniquePresetName("extract", requested);
-    const id = newArchivePresetId("extract");
-    next.presets.push({
-      kind: "extract",
-      id,
-      label: name,
-      built_in: false,
-      options: currentExtractArchivePresetOptions(),
-    });
-    if (await persistPresetDocument("extract", next, "gui.presets.operation_saved", "Preset saved", name)) {
-      selectedExtractPresetId = id;
-      extractPresetDraftName = name;
+    const id = selected ? selected.id : newArchivePresetId(kind);
+    const preset: NamedArchivePreset = kind === "create"
+      ? {
+          kind: "create", id, label: name, built_in: false,
+          options: currentCreateArchivePresetOptions(),
+        }
+      : {
+          kind: "extract", id, label: name, built_in: false,
+          options: currentExtractArchivePresetOptions(),
+        };
+    if (selected) next.presets[index] = preset;
+    else next.presets.push(preset);
+    if (await persistPresetDocument(
+      kind, next,
+      operation === "update" ? "gui.presets.operation_updated" : "gui.presets.operation_saved",
+      operation === "update" ? "Preset updated" : "Preset saved",
+      name,
+    )) {
+      if (kind === "create") {
+        if (operation === "save_as") selectedCreatePresetId = id;
+        createPresetDraftName = name;
+      } else {
+        if (operation === "save_as") selectedExtractPresetId = id;
+        extractPresetDraftName = name;
+      }
     }
   }
 
@@ -3576,7 +3585,7 @@
   function createPresetUpdateDisabledReason(): string {
     const selected = selectedCreateArchivePreset();
     if (!selected) return "";
-    if (selected.built_in) return tr("gui.presets.built_in_read_only", "Built-in presets cannot be changed");
+    if (selected.built_in) return presetReadOnlyReason(selected);
     if (createPreflight.busy()) return tr("gui.presets.busy", "Wait for the current preflight to finish");
     if (
       presetDocument?.bindings.file_manager_create === selected.id &&
@@ -3587,58 +3596,10 @@
     return "";
   }
 
-  function presetDeleteDisabledReason(preset: NamedArchivePreset | null): string {
+  function presetReadOnlyReason(preset: NamedArchivePreset | null): string {
     return preset?.built_in
       ? tr("gui.presets.built_in_read_only", "Built-in presets cannot be changed")
       : "";
-  }
-
-  async function updateSelectedArchivePreset(kind: "create" | "extract") {
-    const selected = kind === "create" ? selectedCreateArchivePreset() : selectedExtractArchivePreset();
-    const next = clonePresetDocument();
-    if (!selected || !next || selected.built_in) return;
-    if (kind === "create" && createPresetUpdateDisabledReason()) {
-      showNotice(createPresetUpdateDisabledReason());
-      return;
-    }
-    if (kind === "create") {
-      const validationError = createPresetSaveValidationMessage();
-      if (validationError) {
-        showNotice(validationError);
-        return;
-      }
-    }
-    const draftName = kind === "create" ? createPresetDraftName : extractPresetDraftName;
-    const name = normalizePresetName(draftName);
-    if (!name) {
-      showNotice(tr("gui.presets.name_required", "Enter a preset name"));
-      return;
-    }
-    if (presetNameExists(kind, name, selected.id)) {
-      showNotice(tr("gui.presets.name_in_use", "That preset name is already in use"));
-      return;
-    }
-    const index = next.presets.findIndex((preset) => preset.id === selected.id);
-    if (index < 0) return;
-    next.presets[index] = kind === "create"
-      ? {
-          kind: "create",
-          id: selected.id,
-          label: name,
-          built_in: false,
-          options: currentCreateArchivePresetOptions(),
-        }
-      : {
-          kind: "extract",
-          id: selected.id,
-          label: name,
-          built_in: false,
-          options: currentExtractArchivePresetOptions(),
-        };
-    if (await persistPresetDocument(kind, next, "gui.presets.operation_updated", "Preset updated", name)) {
-      if (kind === "create") createPresetDraftName = name;
-      else extractPresetDraftName = name;
-    }
   }
 
   async function deleteSelectedArchivePreset(kind: "create" | "extract") {
@@ -6747,14 +6708,15 @@
         status: extractPresetStatus(),
         statusLabel: archivePresetStatusLabel(extractPresetStatus()),
         disabledReason: archivePresetPickerDisabledReason("extract"),
-        deleteDisabledReason: presetDeleteDisabledReason(selectedPreset),
+        updateDisabledReason: presetReadOnlyReason(selectedPreset),
+        deleteDisabledReason: presetReadOnlyReason(selectedPreset),
         isDefault: presetDocument?.bindings.app_default_extract === selectedExtractPresetId,
         isFileManagerDefault: presetDocument?.bindings.file_manager_extract === selectedExtractPresetId,
         tr,
         onSelect: (id) => applyExtractPreset(id),
         onDraftNameInput: (name) => (extractPresetDraftName = name),
-        onUpdate: () => void updateSelectedArchivePreset("extract"),
-        onSaveAs: () => void saveCurrentExtractPresetAsNew(),
+        onUpdate: () => void saveArchivePreset("extract", "update"),
+        onSaveAs: () => void saveArchivePreset("extract", "save_as"),
         onDelete: () => void deleteSelectedArchivePreset("extract"),
         onDefaultChange: (enabled) => void setArchivePresetBinding("extract", "app", enabled),
         onFileManagerDefaultChange: (enabled) => void setArchivePresetBinding("extract", "file_manager", enabled),
@@ -7974,15 +7936,15 @@
         statusLabel: archivePresetStatusLabel(createPresetStatus()),
         disabledReason: archivePresetPickerDisabledReason("create"),
         updateDisabledReason: createPresetUpdateDisabledReason(),
-        deleteDisabledReason: presetDeleteDisabledReason(createPreset),
+        deleteDisabledReason: presetReadOnlyReason(createPreset),
         fileManagerDisabledReason: createPresetFinderDisabledReason(),
         isDefault: presetDocument?.bindings.app_default_create === selectedCreatePresetId,
         isFileManagerDefault: presetDocument?.bindings.file_manager_create === selectedCreatePresetId,
         tr,
         onSelect: (id) => applyCreatePreset(id),
         onDraftNameInput: (name) => (createPresetDraftName = name),
-        onUpdate: () => void updateSelectedArchivePreset("create"),
-        onSaveAs: () => void saveCurrentCreatePresetAsNew(),
+        onUpdate: () => void saveArchivePreset("create", "update"),
+        onSaveAs: () => void saveArchivePreset("create", "save_as"),
         onDelete: () => void deleteSelectedArchivePreset("create"),
         onDefaultChange: (enabled) => void setArchivePresetBinding("create", "app", enabled),
         onFileManagerDefaultChange: (enabled) => void setArchivePresetBinding("create", "file_manager", enabled),

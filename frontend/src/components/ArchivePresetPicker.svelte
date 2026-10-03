@@ -227,7 +227,9 @@
           class:armed={deleteArmed}
           disabled={!selectedId || interactionDisabled || Boolean(deleteDisabledReason)}
           title={deleteDisabledReason}
-          aria-describedby={deleteDisabledReason ? deleteReasonId : undefined}
+          aria-describedby={deleteDisabledReason
+            ? deleteDisabledReason === updateDisabledReason ? updateReasonId : deleteReasonId
+            : undefined}
           onclick={requestDelete}
         >{deleteArmed ? tr("gui.presets.confirm_delete", "Delete this preset") : tr("common.delete", "Delete")}</button>
       </div>
@@ -235,7 +237,7 @@
       {#if updateDisabledReason || deleteDisabledReason || fileManagerDisabledReason}
         <div class="archive-preset-guidance" role="note">
           {#if updateDisabledReason}<p id={updateReasonId}>{updateDisabledReason}</p>{/if}
-          {#if deleteDisabledReason}<p id={deleteReasonId}>{deleteDisabledReason}</p>{/if}
+          {#if deleteDisabledReason && deleteDisabledReason !== updateDisabledReason}<p id={deleteReasonId}>{deleteDisabledReason}</p>{/if}
           {#if fileManagerDisabledReason}<p id={fileManagerReasonId}>{fileManagerDisabledReason}</p>{/if}
         </div>
       {/if}
