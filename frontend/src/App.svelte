@@ -413,11 +413,6 @@
     encrypt: string;
     note: string;
   };
-  type FormatCoverageRow = {
-    label: string;
-    value: string;
-    detail: string;
-  };
   type OpenFilesPayload = {
     paths: string[];
     action?: string | null;
@@ -2607,10 +2602,6 @@
     return id.toUpperCase();
   }
 
-  function formatIsExternal(format: FormatDto): boolean {
-    return format.id === "wim" || format.id === "rar" || longTailBridgeFormatIds.has(format.id);
-  }
-
   function formatStateLabel(format: FormatDto): string {
     if (format.id === "zip") return tr("gui.format.state.default", "Default");
     if (format.id === "sqz") return tr("gui.format.state.recovery_container", "Recovery container");
@@ -2698,32 +2689,6 @@
       .filter((card): card is FormatCapabilityCard => Boolean(card));
     const rest = cards.filter((card) => !featuredFormatIds.includes(card.id));
     return [...featured, ...rest].slice(0, 8);
-  }
-
-  function formatExamples(formats: FormatDto[], max = 7): string {
-    if (formats.length === 0) return tr("common.none", "None");
-    const sorted = formats
-      .slice()
-      .sort((a, b) => formatSortRank(a).localeCompare(formatSortRank(b)));
-    const shown = sorted.slice(0, max).map((format) => formatDisplayName(format.id));
-    const hidden = sorted.length - shown.length;
-    return hidden > 0 ? `${shown.join(", ")} +${hidden}` : shown.join(", ");
-  }
-
-  function formatCoverageRows(): FormatCoverageRow[] {
-    const formats = registryFormats();
-    const archives = formats.filter((format) => format.kind === "archive");
-    const packUnpack = archives.filter((format) => format.can_create && format.can_extract);
-    const unpackOnly = archives.filter((format) => !format.can_create && format.can_extract);
-    const codecs = formats.filter((format) => format.kind === "compressor");
-    const external = archives.filter((format) => formatIsExternal(format));
-    return [
-      { label: tr("gui.format.coverage.pack_unpack", "Pack / unpack"), value: String(packUnpack.length), detail: formatExamples(packUnpack) },
-      { label: tr("gui.format.coverage.unpack_only", "Unpack only"), value: String(unpackOnly.length), detail: formatExamples(unpackOnly) },
-      { label: tr("gui.format.coverage.stream_codecs", "Stream codecs"), value: String(codecs.length), detail: formatExamples(codecs, 6) },
-      { label: tr("gui.format.coverage.external_bridge", "External bridge"), value: String(external.length), detail: tr("gui.format.coverage.external_bridge_detail", "7zz/7z and wimlib boundaries stay visible") },
-      { label: tr("gui.format.coverage.recovery", "Recovery"), value: "3", detail: tr("gui.format.coverage.recovery_detail", "PAR2 sidecars, .sqz embedded, .sqz.rev sidecars") },
-    ];
   }
 
   function loadCreateProfile(): CreateProfileId {
@@ -4155,28 +4120,6 @@
     return historyRows.length > 0
       ? tr("gui.history.local_only", "Local history stored")
       : tr("gui.history.no_activity", "No operation history yet");
-  }
-
-  async function exportOperationAuditFromUi() {
-    try {
-      const { save } = await getDialogModule();
-      const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-      const dest = await saveNativeDialog("history.export-operation-audit", save, {
-        title: tr("gui.history.export_operation_audit", "Export task audit"),
-        defaultPath: `squallz-operation-audit-${stamp}.json`,
-        filters: [{ name: tr("gui.dialog.filter.json", "JSON"), extensions: ["json"] }],
-      });
-      if (!dest) return;
-      await ipc.exportOperationAudit(dest);
-      recordOperation({
-        status: "done",
-        title: tr("gui.history.operation_audit_exported", "Task audit exported"),
-        detail: tr("gui.history.sanitized_operation_audit", "Sanitized task audit"),
-      });
-      showNotice(tr("gui.history.operation_audit_exported", "Task audit exported"));
-    } catch {
-      showNotice(tr("gui.history.operation_audit_requires_desktop_service", "Task audit export requires the desktop service"));
-    }
   }
 
   function markSettingsDraft(section: PersistedSettingsSection) {
@@ -8452,12 +8395,6 @@
     return previewPolicyFor(selectedPreviewPath());
   }
 
-  function previewPolicyForFailure(): PreviewPolicy | null {
-    return entryPreviewFailure
-      ? previewPolicyFor(entryPreviewFailure.entryPath, entryPreviewFailure.entryType)
-      : null;
-  }
-
   function canPreviewEntrySelection(): boolean {
     return !archiveSelectionBusyReason() && selectedPreviewPolicy().kind !== "none" && !previewBusy();
   }
@@ -8555,11 +8492,6 @@
     markCreatePresetDraftTouched();
     createExcludeText = value;
     normalizeUnsupportedCreatePostSuccess();
-  }
-
-  function createExcludeCountLabel(): string {
-    const count = createExcludeRules().length;
-    return tr("gui.create.rule_count", "{count} rules").replace("{count}", count.toLocaleString());
   }
 
   function syncCreatePreflightContext(): void {
