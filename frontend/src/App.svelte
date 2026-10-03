@@ -5390,6 +5390,13 @@
     return entryPreview.entry_path === entryPath ? entryPreview : null;
   }
 
+  function hasPreparedPreviewForPath(entryPath: string): boolean {
+    return Boolean(entryPreviewForPath(entryPath) || (
+      currentArchive && nestedPreview?.outer_path === currentArchive.source
+      && nestedPreview.entry_path === entryPath
+    ));
+  }
+
   function isEntryPreviewActive(entry: DisplayEntry): boolean {
     if (
       !entry.source ||
@@ -5473,9 +5480,8 @@
       showNotice(archiveSelectionBusyReason());
       return;
     }
-    const preservePreview = entryPreviewForPath(entry.source.path) !== null;
     selectRow(entry.source, entry.virtualIndex);
-    if (!preservePreview) clearEntryPreviewState();
+    if (!hasPreparedPreviewForPath(entry.source.path)) clearEntryPreviewState();
   }
 
   function previewDisplayEntry(entry: DisplayEntry): void {
@@ -5498,7 +5504,7 @@
       return;
     }
     toggleSelect(entry.source, entry.virtualIndex);
-    if (!entryPreviewForPath(entry.source.path)) clearEntryPreviewState();
+    if (!hasPreparedPreviewForPath(entry.source.path)) clearEntryPreviewState();
     recordValidationEvent("frontend.entry.selection_toggle", {
       path: entry.source.path,
       selected: selectedPaths().has(entry.source.path),
@@ -5657,7 +5663,7 @@
     } else {
       selectRow(entry.source, entry.virtualIndex);
     }
-    if (!entryPreviewForPath(entry.source.path)) clearEntryPreviewState();
+    if (!hasPreparedPreviewForPath(entry.source.path)) clearEntryPreviewState();
     recordValidationEvent("frontend.entry.select", {
       path: entry.source.path,
       selected_count: selectedPaths().size,
@@ -13063,24 +13069,6 @@
             <Icon name="archive" size={15} />
             <span class="classic-action-label">{tr("gui.classic.new_archive", "New archive")}</span>
           </button>
-          {#if nestedPreview}
-            <button
-              aria-label={tr("gui.action.open_nested", "Open")}
-              title={tr("gui.action.open_nested", "Open")}
-              onclick={() => void openNestedPreviewArchive()}
-            >
-              <Icon name="folder-open" size={15} />
-              <span class="classic-action-label">{tr("gui.action.open_nested", "Open")}</span>
-            </button>
-            <button
-              aria-label={tr("gui.action.extract_nested", "Extract")}
-              title={tr("gui.action.extract_nested", "Extract")}
-              onclick={() => void extractNestedPreviewArchive()}
-            >
-              <Icon name="archive" size={15} />
-              <span class="classic-action-label">{tr("gui.action.extract_nested", "Extract")}</span>
-            </button>
-          {/if}
           <button
             class="task-center-trigger"
             class:attention={taskCenterHasAttention()}

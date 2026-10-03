@@ -41,6 +41,7 @@ async function loadSelectionHandlers(archive, overrides = {}) {
     "selectEntry", "selectOnlyEntry", "showEntryContextAt", "runArchiveSelection", "toggleEntrySelection",
     "submitDeleteSelectedJob", "selectedDeletePaths", "closeEntryContext",
     "selectedRenameSource", "canRenameSelection", "hasArchiveSelection", "hasArchiveOpen",
+    "entryPreviewForPath", "hasPreparedPreviewForPath",
   ]);
   const declarations = selectFunctions(source, names);
   const outputText = compileTestScript(declarations.map((node) => node.getText(source)).join("\n"));
@@ -48,7 +49,7 @@ async function loadSelectionHandlers(archive, overrides = {}) {
     ...archive,
     archiveSelectionRoots,
     archiveSelectionBusyReason: () => "",
-    entryPreviewForPath: () => null,
+    entryPreview: null, nestedPreview: null,
     clearEntryPreviewState: () => {},
     recordValidationEvent: () => {},
     closeQuickActions: () => {},
