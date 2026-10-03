@@ -25,13 +25,14 @@ use std::io::IsTerminal;
 use std::path::Path;
 use std::sync::Arc;
 
+use clap::{error::ErrorKind, CommandFactory};
 use squallz_core::api::{split_volume_name, ControlToken, Detected, FormatError, ProgressSink};
 use squallz_core::{
     inspect_create_destination_with_progress, CreateArtifactKind, CreateCommitPolicy, Engine,
 };
 use squallz_i18n::Localizer;
 
-use crate::args::{effective_compression_level, AccentArg, Cmd, ColorArg, OutputStyleArg};
+use crate::args::{effective_compression_level, AccentArg, Cli, Cmd, ColorArg, OutputStyleArg};
 use crate::errors::CliError;
 use crate::progress::fmt_bytes;
 use crate::ui::{self, Tone};
@@ -721,7 +722,9 @@ pub fn dispatch(cmd: Cmd, ctx: &Ctx) -> Result<(), CliError> {
             delete_entries,
             encoding,
             rename,
+            rename_to,
             move_entries,
+            move_to,
             excludes,
             content_policy,
             password,
@@ -731,27 +734,49 @@ pub fn dispatch(cmd: Cmd, ctx: &Ctx) -> Result<(), CliError> {
             threads,
             memory_limit,
             json,
-        } => update::run(
-            ctx,
-            archive,
-            add,
-            mkdir,
-            delete,
-            delete_entries,
-            encoding,
-            rename,
-            move_entries,
-            crate::content_policy::resolve_create_excludes(
-                content_policy.map(Into::into),
-                excludes,
-            ),
-            password,
-            encrypt_names,
-            effective_compression_level(level, profile),
-            threads,
-            memory_limit,
-            json,
-        ),
+        } => {
+            let mismatch = [
+                ("rename", "rename-to", rename.len(), rename_to.len()),
+                ("move", "move-to", move_entries.len(), move_to.len()),
+            ]
+            .into_iter()
+            .find(|(_, _, sources, destinations)| sources != destinations);
+            if let Some((source, destination, sources, destinations)) = mismatch {
+                let mut command = Cli::command();
+                command.build();
+                let message = format!(
+                    "--{source} and --{destination} must occur equally often ({sources} source paths, {destinations} destination paths)"
+                );
+                let error = match command.find_subcommand_mut("update") {
+                    Some(update) => update.error(ErrorKind::WrongNumberOfValues, message),
+                    None => command.error(ErrorKind::WrongNumberOfValues, message),
+                };
+                let code = error.exit_code();
+                let _ = error.print();
+                return Err(CliError::Exit(code));
+            }
+            update::run(
+                ctx,
+                archive,
+                add,
+                mkdir,
+                delete,
+                delete_entries,
+                encoding,
+                rename.into_iter().zip(rename_to).collect(),
+                move_entries.into_iter().zip(move_to).collect(),
+                crate::content_policy::resolve_create_excludes(
+                    content_policy.map(Into::into),
+                    excludes,
+                ),
+                password,
+                encrypt_names,
+                effective_compression_level(level, profile),
+                threads,
+                memory_limit,
+                json,
+            )
+        }
         Cmd::Protect {
             archive,
             redundancy,

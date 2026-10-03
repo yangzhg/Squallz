@@ -288,7 +288,9 @@ fn cli_surface_contract_help_tokens_are_stable() {
                 "--mkdir",
                 "--delete",
                 "--rename",
+                "--rename-to",
                 "--move",
+                "--move-to",
                 "--profile",
                 "--exclude",
                 "--content-policy",
@@ -621,7 +623,9 @@ fn output_style_modern_is_opt_in_and_keeps_json_stable() {
             "--mkdir",
             "docs/",
             "--move",
-            "project/sub/b.txt=docs/b.txt",
+            "project/sub/b.txt",
+            "--move-to",
+            "docs/b.txt",
         ])
         .arg(&archive));
     assert!(out.status.success(), "stderr: {}", stderr(&out));
@@ -8017,8 +8021,13 @@ fn update_add_delete_rename_through_the_cli() {
         .args(["--mkdir", "empty/reports/"])
         .args(["--delete", "*.tmp"])
         .args(["--exclude", "node_modules", "--exclude", "*.tmp"])
-        .args(["--rename", "project/a.txt=project/renamed.txt"])
-        .args(["--move", "project/sub/b.txt=moved/b.txt"])
+        .args([
+            "--rename",
+            "project/a.txt",
+            "--rename-to",
+            "project/renamed.txt",
+        ])
+        .args(["--move", "project/sub/b.txt", "--move-to", "moved/b.txt"])
         .arg("--json"));
     assert!(out.status.success(), "stderr: {}", stderr(&out));
     let report: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("valid JSON");
@@ -8057,6 +8066,183 @@ fn update_add_delete_rename_through_the_cli() {
     let out = run(sqz().arg("update").arg(&archive));
     assert!(!out.status.success());
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn update_path_pairs_preserve_literal_names_and_reject_incomplete_arguments() {
+    let dir = temp_dir("update-path-pairs");
+    let root = dir.join("Samples");
+    std::fs::create_dir(&root).unwrap();
+    let entries = [
+        ("a", "rename bystander"),
+        ("a=b name.txt", "rename selected"),
+        ("move", "move bystander"),
+        ("move=x y.txt", "move selected"),
+        ("plain.txt", "second rename"),
+        ("second move.txt", "second move"),
+    ];
+    for (name, payload) in entries {
+        std::fs::write(root.join(name), payload).unwrap();
+    }
+    for (name, payload) in [
+        ("-rename=a name.txt", "leading rename selected"),
+        ("-move=b name.txt", "leading move selected"),
+    ] {
+        std::fs::write(dir.join(name), payload).unwrap();
+    }
+    let archive = dir.join("paths.zip");
+    let created = run(sqz()
+        .arg("compress")
+        .arg(&root)
+        .arg(dir.join("-rename=a name.txt"))
+        .arg(dir.join("-move=b name.txt"))
+        .arg("-o")
+        .arg(&archive));
+    assert!(created.status.success(), "{}", stderr(&created));
+    let updated = run(sqz().arg("update").arg(&archive).args([
+        "--rename",
+        "Samples/a=b name.txt",
+        "--move",
+        "Samples/move=x y.txt",
+        "--rename",
+        "Samples/plain.txt",
+        "--move",
+        "Samples/second move.txt",
+        "--rename=-rename=a name.txt",
+        "--move=-move=b name.txt",
+        "--move-to",
+        "Folder name/moved=x y.txt",
+        "--rename-to",
+        "Samples/renamed=c name.txt",
+        "--move-to",
+        "Folder name/second=move.txt",
+        "--rename-to",
+        "Samples/ordinary=name space.txt",
+        "--rename-to=-renamed=c name.txt",
+        "--move-to=-moved=d name.txt",
+        "--json",
+    ]));
+    assert!(updated.status.success(), "{}", stderr(&updated));
+    assert_eq!(stdout_json(&updated)["operations"], 6);
+    let paths = listed_paths(&archive);
+    assert_eq!(paths.len(), 9, "{paths:?}");
+    assert!(paths.iter().any(|path| path == "Samples/"));
+    for path in [
+        "Samples/a=b name.txt",
+        "Samples/move=x y.txt",
+        "Samples/plain.txt",
+        "Samples/second move.txt",
+        "-rename=a name.txt",
+        "-move=b name.txt",
+    ] {
+        assert!(
+            !paths.iter().any(|actual| actual == path),
+            "{path}: {paths:?}"
+        );
+    }
+    let output = dir.join("extracted");
+    let extracted = run(sqz()
+        .arg("extract")
+        .arg(&archive)
+        .arg("--dest")
+        .arg(&output)
+        .arg("--json"));
+    assert!(extracted.status.success(), "{}", stderr(&extracted));
+    for (path, payload) in [
+        ("Samples/a", "rename bystander"),
+        ("Samples/move", "move bystander"),
+        ("Samples/renamed=c name.txt", "rename selected"),
+        ("Samples/ordinary=name space.txt", "second rename"),
+        ("Folder name/moved=x y.txt", "move selected"),
+        ("Folder name/second=move.txt", "second move"),
+        ("-renamed=c name.txt", "leading rename selected"),
+        ("-moved=d name.txt", "leading move selected"),
+    ] {
+        assert!(
+            paths.iter().any(|actual| actual == path),
+            "{path}: {paths:?}"
+        );
+        assert_eq!(
+            std::fs::read(output.join(path)).unwrap(),
+            payload.as_bytes()
+        );
+    }
+    let before = std::fs::read(&archive).unwrap();
+    for (option, target_option, other_option, other_target_option) in [
+        ("--rename", "--rename-to", "--move", "--move-to"),
+        ("--move", "--move-to", "--rename", "--rename-to"),
+    ] {
+        for values in [
+            vec![option],
+            vec![option, "Samples/a"],
+            vec![target_option, "Samples/target.txt"],
+            vec![option, "Samples/a", "--json"],
+            vec![option, "--json", target_option, "Samples/target.txt"],
+            vec![option, "Samples/a", target_option, "--json"],
+            vec![option, "", target_option, "Samples/target.txt", "--json"],
+            vec![option, "Samples/a", target_option, "", "--json"],
+            vec![
+                option,
+                "Samples/a",
+                target_option,
+                "Samples/target.txt",
+                "extra.txt",
+                "--json",
+            ],
+            vec![
+                option,
+                "Samples/a",
+                option,
+                "Samples/move",
+                target_option,
+                "Samples/target.txt",
+                "--json",
+            ],
+            vec![
+                option,
+                "Samples/a",
+                target_option,
+                "Samples/target.txt",
+                target_option,
+                "Samples/second-target.txt",
+                "--json",
+            ],
+            vec![
+                other_option,
+                "Samples/move",
+                other_target_option,
+                "Samples/other-target.txt",
+                option,
+                "Samples/a",
+                "--json",
+            ],
+            vec![
+                other_option,
+                "Samples/move",
+                other_target_option,
+                "Samples/other-target.txt",
+                option,
+                "Samples/a",
+                option,
+                "Samples/move",
+                target_option,
+                "Samples/target.txt",
+                "--json",
+            ],
+        ] {
+            let invalid = run(sqz().arg("update").arg(&archive).args(&values));
+            assert_eq!(
+                invalid.status.code(),
+                Some(2),
+                "{values:?}: {}{}",
+                stdout(&invalid),
+                stderr(&invalid)
+            );
+            assert!(!stderr(&invalid).trim().is_empty());
+            assert_eq!(std::fs::read(&archive).unwrap(), before, "{values:?}");
+        }
+    }
+    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
@@ -8160,6 +8346,10 @@ fn update_literal_deletion_rejects_missing_paths_atomically() {
         assert!(output.status.success());
         assert!(stdout(&output).contains("--delete-entry"));
         assert!(stdout(&output).contains("--encoding"));
+        assert!(stdout(&output).contains("--rename <FROM>"));
+        assert!(stdout(&output).contains("--rename-to <TO>"));
+        assert!(stdout(&output).contains("--move <FROM>"));
+        assert!(stdout(&output).contains("--move-to <TO>"));
         assert!(stdout(&output).contains(if language == "en-US" {
             "literal archive path"
         } else {
@@ -8218,7 +8408,12 @@ fn update_edits_legacy_entries_in_cli_and_batch() {
                 "--json",
             ]);
             if let Some(action) = action {
-                command.arg(action).arg(format!("你[1].txt={destination}"));
+                let target_option = if action == "--rename" {
+                    "--rename-to"
+                } else {
+                    "--move-to"
+                };
+                command.args([action, "你[1].txt", target_option, destination]);
             }
             run(&mut command)
         };
@@ -8256,8 +8451,8 @@ fn update_moves_and_renames_complete_directory_trees_through_the_cli() {
     assert!(created.status.success(), "{}", stderr(&created));
     for arguments in [
         vec!["--mkdir", "archive/"],
-        vec!["--move", "project/sub/=archive/sub/"],
-        vec!["--rename", "archive/=资料/"],
+        vec!["--move", "project/sub/", "--move-to", "archive/sub/"],
+        vec!["--rename", "archive/", "--rename-to", "资料/"],
     ] {
         let out = run(sqz()
             .arg("update")

@@ -523,10 +523,16 @@ fn localize_update_help_en(cmd: Command) -> Command {
             arg.help("Source entry-name encoding for selections, globs, renames and progress, such as gbk or shift_jis.")
         })
         .mut_arg("rename", |arg| {
-            arg.help("Rename an entry. Format: from=to. Can be repeated.")
+            arg.help("Source archive path to rename. Pair each occurrence with --rename-to. Can be repeated.")
+        })
+        .mut_arg("rename_to", |arg| {
+            arg.help("Destination archive path for --rename, paired in occurrence order. Can be repeated.")
         })
         .mut_arg("move_entries", |arg| {
-            arg.help("Move an entry to a new archive path. Format: from=to. Can be repeated.")
+            arg.help("Source archive path to move. Pair each occurrence with --move-to. Can be repeated.")
+        })
+        .mut_arg("move_to", |arg| {
+            arg.help("Destination archive path for --move, paired in occurrence order. Can be repeated.")
         })
         .mut_arg("excludes", exclude_help_en)
         .mut_arg("content_policy", content_policy_help_en)
@@ -752,16 +758,6 @@ pub fn parse_compression_level(s: &str) -> Result<u8, String> {
         Ok(value)
     } else {
         Err(format!("compression level '{s}' must be between 0 and 9"))
-    }
-}
-
-/// Parses an `old=new` rename specification.
-pub fn parse_rename(s: &str) -> Result<(String, String), String> {
-    match s.split_once('=') {
-        Some((from, to)) if !from.is_empty() && !to.is_empty() => {
-            Ok((from.to_string(), to.to_string()))
-        }
-        _ => Err(format!("expected from=to, got '{s}'")),
     }
 }
 
@@ -1399,12 +1395,22 @@ pub enum Cmd {
         /// 源条目名编码，用于选择、glob、重命名和进度显示（如 gbk / shift_jis）
         #[arg(long)]
         encoding: Option<String>,
-        /// 重命名条目（可多次，格式 from=to）
-        #[arg(long = "rename", value_name = "FROM=TO", value_parser = parse_rename)]
-        rename: Vec<(String, String)>,
-        /// 移动条目到新的压缩包内路径（可多次，格式 from=to）
-        #[arg(long = "move", value_name = "FROM=TO", value_parser = parse_rename)]
-        move_entries: Vec<(String, String)>,
+        /// 要重命名的源条目路径；每次均需配对 --rename-to（可多次）
+        #[arg(long = "rename", value_name = "FROM", num_args = 1, requires = "rename_to",
+              action = ArgAction::Append, value_parser = clap::builder::NonEmptyStringValueParser::new())]
+        rename: Vec<String>,
+        /// 重命名目标条目路径；按出现顺序与 --rename 配对（可多次）
+        #[arg(long = "rename-to", value_name = "TO", num_args = 1, requires = "rename",
+              action = ArgAction::Append, value_parser = clap::builder::NonEmptyStringValueParser::new())]
+        rename_to: Vec<String>,
+        /// 要移动的源条目路径；每次均需配对 --move-to（可多次）
+        #[arg(long = "move", value_name = "FROM", num_args = 1, requires = "move_to",
+              action = ArgAction::Append, value_parser = clap::builder::NonEmptyStringValueParser::new())]
+        move_entries: Vec<String>,
+        /// 移动目标条目路径；按出现顺序与 --move 配对（可多次）
+        #[arg(long = "move-to", value_name = "TO", num_args = 1, requires = "move_entries",
+              action = ArgAction::Append, value_parser = clap::builder::NonEmptyStringValueParser::new())]
+        move_to: Vec<String>,
         /// 追加本地目录时排除 glob 模式（可多次）
         #[arg(long = "exclude", value_name = "GLOB")]
         excludes: Vec<String>,

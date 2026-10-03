@@ -36,6 +36,19 @@
 | Runtime inventory | `sqz info --json` |
 | Strict diagnostics | `sqz doctor --strict` |
 
+`update --rename FROM --rename-to TO` and `update --move FROM --move-to TO`
+take the full source and destination archive paths with separate options. Each
+option takes one nonempty value. Repeat both options for multiple entries; for
+each operation type, source and destination counts must match and values pair
+by occurrence order.
+Quote paths containing spaces; equal signs are literal characters. For a path
+starting with `-`, attach its value to the option with `=`:
+
+```bash
+sqz update archive.zip --rename 'a=b name.txt' --rename-to 'renamed=c name.txt' --move 'folder/report.txt' --move-to 'reports/report.txt'
+sqz update archive.zip --rename='-source=name.txt' --rename-to='-target=name.txt'
+```
+
 `convert` and `export` refuse existing output files by default. Split conversion
 publishes and reports generic `.001/.002/...` by default; `--split-mode native`
 uses `.z01/.z02/.../.zip` for ZIP or `.swm`, `2.swm`, … for WIM. Split WIM
@@ -193,6 +206,16 @@ sqz batch batch.json --json
 | 创建可编辑预设 | `sqz preset clone builtin.create.cross-platform-7z user.create.portable --label "Portable"` |
 | 能力清单 | `sqz info --json` |
 | 严格诊断 | `sqz doctor --strict` |
+
+`update --rename FROM --rename-to TO` 和 `update --move FROM --move-to TO`
+使用独立选项指定归档内的完整来源路径和目标路径。每个选项接收一个非空值。修改多个
+条目时重复两种选项，每种操作的来源与目标数量必须相等，按各自出现次序配对。含空格的
+路径需加引号，等号按字面字符处理。路径以 `-` 开头时，用 `=` 将值附着在选项后：
+
+```bash
+sqz update archive.zip --rename 'a=b name.txt' --rename-to 'renamed=c name.txt' --move 'folder/report.txt' --move-to 'reports/report.txt'
+sqz update archive.zip --rename='-source=name.txt' --rename-to='-target=name.txt'
+```
 
 `convert` 和 `export` 默认拒绝已有输出。分卷转换默认发布并完整报告 `.001/.002/...`；
 ZIP 目标可用 `--split-mode native` 改为 `.z01/.z02/.../.zip`，WIM 目标则改为
