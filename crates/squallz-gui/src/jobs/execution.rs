@@ -7,11 +7,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use squallz_core::api::{
-    unix_seconds, ArchiveSourceSet, ArchiveStructureStatus, BoundedProblemLog, CompressionLevel,
-    ConflictDecision, ConflictResolver, ControlToken, CreateOptions, EntryMeta, EntryPath,
-    EntrySelection, ExtractProblemReporter, ExtractReport, FormatError, OpenOptions,
-    OverwritePolicy, Password, ProblemPreview, ProgressPhase, ProgressSink, RecoverySummary,
-    SafetyLimits, SymlinkPolicy, UpdateOp, UpdateOptions,
+    first_free_numbered_sibling_name, unix_seconds, ArchiveSourceSet, ArchiveStructureStatus,
+    BoundedProblemLog, CompressionLevel, ConflictDecision, ConflictResolver, ControlToken,
+    CreateOptions, EntryMeta, EntryPath, EntrySelection, ExtractProblemReporter, ExtractReport,
+    FormatError, OpenOptions, OverwritePolicy, Password, ProblemPreview, ProgressPhase,
+    ProgressSink, RecoverySummary, SafetyLimits, SymlinkPolicy, UpdateOp, UpdateOptions,
 };
 use squallz_core::{
     create_destination_has_conflict, is_sqz_archive_path, lock_unpoisoned, ArchiveRepairKind,
@@ -42,20 +42,6 @@ fn metadata_len_or_zero(meta: Option<&fs::Metadata>) -> u64 {
     match meta {
         Some(meta) => meta.len(),
         None => 0,
-    }
-}
-
-fn path_stem_or_empty(path: &Path) -> String {
-    match path.file_stem() {
-        Some(stem) => stem.to_string_lossy().into_owned(),
-        None => String::new(),
-    }
-}
-
-fn path_parent_or_empty(path: &Path) -> &Path {
-    match path.parent() {
-        Some(parent) => parent,
-        None => Path::new(""),
     }
 }
 
@@ -252,23 +238,16 @@ impl ExtractProblemReporter for ExtractProblemCollector {
     }
 }
 
-/// Picks the first free `name (n).ext` sibling (mirrors the engine's
-/// RenameBoth policy; the conflict dialog's Keep Both button).
+/// Keeps the GUI's process/time fallback when all numbered siblings are occupied.
 fn auto_renamed_name(existing: &Path) -> String {
-    let stem = path_stem_or_empty(existing);
-    let ext = existing
-        .extension()
-        .map(|e| e.to_string_lossy().into_owned());
-    let parent = path_parent_or_empty(existing);
-    for n in 1u32..=u32::MAX {
-        let name = match &ext {
-            Some(ext) => format!("{stem} ({n}).{ext}"),
-            None => format!("{stem} ({n})"),
-        };
-        if std::fs::symlink_metadata(parent.join(&name)).is_err() {
-            return name;
-        }
+    if let Some(name) = first_free_numbered_sibling_name(existing) {
+        return name;
     }
+    let stem = existing
+        .file_stem()
+        .map(|value| value.to_string_lossy())
+        .unwrap_or_default();
+    let ext = existing.extension().map(|value| value.to_string_lossy());
     let suffix = format!("{}-{}", std::process::id(), audit::now_millis());
     match &ext {
         Some(ext) => format!("{stem} ({suffix}).{ext}"),

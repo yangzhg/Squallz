@@ -2,6 +2,23 @@ use super::super::test_support::{compress_file_job, temp_dir};
 use super::*;
 
 #[test]
+fn keep_both_conflict_decision_uses_first_free_sibling_name() {
+    let dir = temp_dir("keep-both-decision");
+    let existing = dir.join("archive.tar.gz");
+    fs::write(&existing, b"original").unwrap();
+    fs::write(dir.join("archive.tar (1).gz"), b"older").unwrap();
+    fs::create_dir(dir.join("archive.tar (2).gz")).unwrap();
+
+    let ConflictDecision::Rename(name) = GuiConflictResolver::apply("rename", &existing) else {
+        panic!("Keep Both decision did not rename");
+    };
+    assert_eq!(name, "archive.tar (3).gz");
+    assert_eq!(fs::read(&existing).unwrap(), b"original");
+    assert_eq!(fs::read(dir.join("archive.tar (1).gz")).unwrap(), b"older");
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
 fn extract_result_keeps_problem_preview_separate_from_core_counts() {
     let destination = PathBuf::from("output/archive");
     let result = extract_result_json(

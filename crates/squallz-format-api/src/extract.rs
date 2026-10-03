@@ -1076,6 +1076,27 @@ fn resolve_conflict_path(
     }
 }
 
+/// Finds a numbered sibling name for an interactive Keep Both decision.
+///
+/// Returns `None` when every positive `u32` suffix is occupied. This is only a
+/// filesystem probe: the caller must still validate and materialize the output.
+pub fn first_free_numbered_sibling_name(target: &Path) -> Option<String> {
+    let parent = parent_or_empty(target);
+    let stem = file_stem_or_empty(target);
+    let ext = target.extension().map(|e| e.to_string_lossy());
+    for n in 1u32..=u32::MAX {
+        let name = match &ext {
+            Some(ext) => format!("{stem} ({n}).{ext}"),
+            None => format!("{stem} ({n})"),
+        };
+        // Dangling symlinks occupy a name; metadata errors defer to final checks.
+        if fs::symlink_metadata(parent.join(&name)).is_err() {
+            return Some(name);
+        }
+    }
+    None
+}
+
 /// Picks the first free `name (n).ext` sibling for [`OverwritePolicy::RenameBoth`].
 fn renamed_sibling(target: &Path) -> PathBuf {
     let parent = parent_or_empty(target);
@@ -2011,6 +2032,40 @@ mod tests {
         fs::write(dir.join("note (1).txt"), b"older").unwrap();
 
         assert_eq!(renamed_sibling(&target), dir.join("note (2).txt"));
+        assert_eq!(
+            first_free_numbered_sibling_name(&target).as_deref(),
+            Some("note (2).txt")
+        );
+        fs::create_dir(dir.join("note (2).txt")).unwrap();
+        assert_eq!(
+            first_free_numbered_sibling_name(&target).as_deref(),
+            Some("note (3).txt")
+        );
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink("missing-target", dir.join("note (3).txt")).unwrap();
+            assert_eq!(
+                first_free_numbered_sibling_name(&target).as_deref(),
+                Some("note (4).txt")
+            );
+            assert_eq!(renamed_sibling(&target), dir.join("note (4).txt"));
+            use std::os::unix::ffi::OsStrExt;
+            let raw = dir.join(std::ffi::OsStr::from_bytes(b"note-\xff.txt"));
+            assert_eq!(
+                first_free_numbered_sibling_name(&raw).as_deref(),
+                Some("note-\u{fffd} (1).txt")
+            );
+        }
+        for (name, expected) in [
+            (".hidden", ".hidden (1)"),
+            ("archive.tar.gz", "archive.tar (1).gz"),
+            ("trailing.", "trailing (1)."),
+        ] {
+            assert_eq!(
+                first_free_numbered_sibling_name(&dir.join(name)).as_deref(),
+                Some(expected)
+            );
+        }
         assert_eq!(parent_or_empty(Path::new("note.txt")), Path::new(""));
         assert_eq!(file_stem_or_empty(Path::new("/")), "");
 
