@@ -121,7 +121,7 @@ function completedUpdate(id, path = "/tmp/refresh.zip") {
 
 async function passwordRefreshActions(archive) {
   const source = await readSvelteScriptAsync(new URL("../App.svelte", import.meta.url), "App.ts");
-  const names = ["cancelTaskReview", "submitPasswordRequest", "cancelPasswordRequest", "dismissArchivePasswordRequest", "dismissArchivePicker", "dismissRecoveryPreparation", "setScreen", "openArchivePath", "archiveEditorVisible", "blockingModalVisible", "archiveEditorBlockedReason"];
+  const names = ["cancelTaskReview", "submitPasswordRequest", "cancelPasswordRequest", "dismissArchivePasswordRequest", "dismissArchivePicker", "dismissRecoveryPreparation", "setScreen", "openArchivePath", "archiveEditorVisible", "blockingModalVisible"];
   const declarations = selectFunctions(source, names);
   const outputText = compileTestScript(declarations.map((node) => node.getText(source)).join("\n"));
   const context = {
@@ -136,8 +136,7 @@ async function passwordRefreshActions(archive) {
     dismissArchiveAddPreparation() {},
     archiveUpdateReview: { cancelSourceChoice() {} },
     batchPickerRequest: 0, nestedExtractPickerRequest: 0,
-    archiveEditKind: "rename", renameTargetName: "kept.txt",
-    archiveEditContext: { source: info().source, encoding: "gbk", generation: 7, id: 1 },
+
     taskDialogVisible: () => false, macosSfxPublisherTask: null,
     taskPasswordReady: (value) => value.length > 0,
     archiveMutationDisabledReason: () => archive.archiveRefreshStatus() === "idle" ? "" : "Refresh required",
@@ -151,6 +150,18 @@ async function passwordRefreshActions(archive) {
     syncUrl: () => {}, tick: async () => {},
     document: { documentElement: {}, body: {}, querySelectorAll: () => [] },
   };
+  const server = await createTestServer();
+  try {
+    const { ArchiveEditSession } = await server.ssrLoadModule("/src/lib/archive-edit-session.svelte.ts");
+    context.archiveEdit = new ArchiveEditSession(() => ({
+      archive: archive.archive(), generation: context.archiveOpenGeneration,
+      opening: context.archiveOpenStatus !== "idle", directory: archive.currentDirs().join("/"),
+      selectedPaths: archive.selectedPaths(), mutationDisabledReason: context.archiveMutationDisabledReason(),
+    }), async () => assert.fail("password refresh must not queue an edit"), () => false,
+    { tr: context.tr, tError: (error) => error.key, emit() {} });
+    context.archiveEdit.open("rename");
+    context.archiveEdit.setTarget("kept.txt");
+  } finally { await server.close(); }
   return { context, ...vm.runInNewContext(`${outputText}\n({${declarations.map((node) => node.name.text).join(",")}})`, context) };
 }
 
@@ -179,8 +190,8 @@ test("leaving a refresh password cancels its read and keeps the editor dormant u
     assert.deepEqual(closed, [2]);
     run.setScreen("browse");
     assert.equal(run.archiveEditorVisible(), true);
-    assert.equal(run.context.renameTargetName, "kept.txt");
-    assert.notEqual(run.archiveEditorBlockedReason(), "");
+    assert.equal(run.context.archiveEdit.target, "kept.txt");
+    assert.notEqual(run.context.archiveEdit.blockedReason, "");
   });
 });
 
@@ -199,7 +210,7 @@ test("an explicit same-source open abandons password refresh intent and clears i
     next.resolve(info(2));
     await opening;
     assert.deepEqual(archive.currentDirs(), [], "an explicit open uses its own initial view");
-    assert.notEqual(run.archiveEditorBlockedReason(), "", "old edit targets cannot follow a new open session");
+    assert.notEqual(run.context.archiveEdit.blockedReason, "", "old edit targets cannot follow a new open session");
   });
 });
 
@@ -223,8 +234,8 @@ test("refresh password attempts suspend the editor and resume its original sessi
     assert.equal(run.context.archiveOpenGeneration, 7);
     assert.equal(run.context.screen, "browse");
     assert.equal(run.archiveEditorVisible(), true);
-    assert.equal(run.archiveEditorBlockedReason(), "");
-    assert.equal(run.context.renameTargetName, "kept.txt");
+    assert.equal(run.context.archiveEdit.blockedReason, "");
+    assert.equal(run.context.archiveEdit.target, "kept.txt");
     assert.deepEqual(archive.currentDirs(), ["docs"]);
   });
 });
@@ -242,7 +253,7 @@ test("cancelling an in-flight refresh password keeps retry and rejects the late 
     assert.equal(run.context.archiveOpenGeneration, 7);
     assert.equal(run.archiveEditorVisible(), true);
     assert.equal(archive.archiveRefreshStatus(), "error");
-    assert.notEqual(run.archiveEditorBlockedReason(), "", "old rows cannot become editable after cancellation");
+    assert.notEqual(run.context.archiveEdit.blockedReason, "", "old rows cannot become editable after cancellation");
     ipc.openArchive = async (_path, password, encoding) => {
       assert.equal(password, null, "retry must not retain the previous password input");
       assert.equal(encoding, "gbk");
@@ -260,7 +271,7 @@ test("cancelling an in-flight refresh password keeps retry and rejects the late 
     assert.equal(archive.openPasswordPrompt().refresh, true);
     ipc.openArchive = async () => info(3);
     await run.submitPasswordRequest();
-    assert.equal(run.archiveEditorBlockedReason(), "");
+    assert.equal(run.context.archiveEdit.blockedReason, "");
     assert.equal(archive.archive().id, 3);
   });
 });

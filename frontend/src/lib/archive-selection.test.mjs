@@ -29,9 +29,10 @@ function info(total) {
 
 async function loadSelectionHandlers(archive, overrides = {}) {
   const server = await createTestServer();
-  let archiveSelectionRoots;
+  let archiveSelectionRoots, ArchiveEditSession;
   try {
     ({ archiveSelectionRoots } = await server.ssrLoadModule("/src/lib/archive-editing.ts"));
+    ({ ArchiveEditSession } = await server.ssrLoadModule("/src/lib/archive-edit-session.svelte.ts"));
   } finally {
     await server.close();
   }
@@ -39,15 +40,13 @@ async function loadSelectionHandlers(archive, overrides = {}) {
   const names = new Set([
     "selectEntry", "selectOnlyEntry", "showEntryContextAt", "runArchiveSelection", "toggleEntrySelection",
     "submitDeleteSelectedJob", "selectedDeletePaths", "closeEntryContext",
-    "selectedRenameSource", "canRenameSelection", "hasArchiveSelection", "hasArchiveOpen", "submitRenameSelectedJob",
-    "archiveEditSelectedPaths", "archiveEditorBlockedReason", "validateArchiveEditContext", "archiveEditCheckIsCurrent",
+    "selectedRenameSource", "canRenameSelection", "hasArchiveSelection", "hasArchiveOpen",
   ]);
   const declarations = selectFunctions(source, names);
   const outputText = compileTestScript(declarations.map((node) => node.getText(source)).join("\n"));
-  return vm.runInNewContext(`${outputText}\n({ selectEntry, selectOnlyEntry, showEntryContextAt, toggleEntrySelection, submitDeleteSelectedJob, canRenameSelection, submitRenameSelectedJob, context: () => entryContext })`, {
+  const context = {
     ...archive,
     archiveSelectionRoots,
-    archiveEditKind: null, archiveEditContext: null, archiveEditSession: 0, archiveEditChecking: false,
     archiveSelectionBusyReason: () => "",
     entryPreviewForPath: () => null,
     clearEntryPreviewState: () => {},
@@ -65,7 +64,16 @@ async function loadSelectionHandlers(archive, overrides = {}) {
     entryContext: null,
     window: { innerWidth: 1280, innerHeight: 800 },
     ...overrides,
-  });
+  };
+  const edit = new ArchiveEditSession(() => ({
+    archive: archive.archive(), generation: 0, opening: false, directory: archive.currentDirs().join("/"),
+    selectedPaths: archive.selectedPaths(), mutationDisabledReason: context.archiveMutationDisabledReason(),
+  }), context.submitCurrentArchiveJob ?? (async () => assert.fail("an unexpected edit was queued")),
+  context.blockSelectionScopedAction, { tr: context.tr, tError: (error) => error.key,
+    emit: (effect) => { if (effect.kind === "notice") context.showNotice(effect.message); } });
+  return { ...vm.runInNewContext(`${outputText}\n({ selectEntry, selectOnlyEntry, showEntryContextAt, toggleEntrySelection, submitDeleteSelectedJob, canRenameSelection, context: () => entryContext })`, context),
+    submitRenameSelectedJob: () => { edit.open("rename"); return edit.submit(); },
+  };
 }
 
 function displayEntry(index) {

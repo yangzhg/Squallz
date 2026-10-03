@@ -53,7 +53,8 @@
     recordOperation,
   } from "./lib/history.svelte";
   import { copyTextToClipboard } from "./lib/clipboard";
-  import { archiveEditPathIssue, archiveSelectionRoots, normalizeArchivePath } from "./lib/archive-editing";
+  import { archiveSelectionRoots } from "./lib/archive-editing";
+  import { ArchiveEditSession, type ArchiveEditKind, type ArchiveEditOwner, type ArchiveMoveReview, type ArchiveEditEffect } from "./lib/archive-edit-session.svelte";
   import { archiveKeyboardTarget } from "./lib/archive-keyboard";
   import { appActionAvailability, appActionForShortcut, dispatchAppAction, isTextEditingTarget, type AppAction } from "./lib/app-actions";
   import { connectNativeMenu, type NativeMenuConnection } from "./lib/native-menu";
@@ -416,23 +417,6 @@
     label: string;
     value: string;
     detail: string;
-  };
-  type RenameTargetIssue = {
-    blocking: string | null;
-    warning: string | null;
-  };
-  type MovePlanItem = {
-    from: string;
-    to: string;
-    conflict: boolean;
-    reason: string | null;
-    keepBothTo: string | null;
-  };
-  type MoveConflictReview = {
-    archiveId: number;
-    generation: number;
-    targetDir: string;
-    items: MovePlanItem[];
   };
   type OpenFilesPayload = {
     paths: string[];
@@ -1020,27 +1004,18 @@
   let previewRequestGeneration = 0;
   let previewActionGeneration = 0;
   let entryPreviewPreparationTail: Promise<void> = Promise.resolve();
-  let renameTargetName = $state("");
-  let moveTargetDir = $state("moved/");
-  let newFolderName = $state("");
-  type ArchiveEditKind = "rename" | "move" | "new-folder";
-  let archiveEditKind = $state<ArchiveEditKind | null>(null);
-  let archiveEditContext = $state<{
-    source: string; encoding: string | null; generation: number; id: number;
-    directory: string; paths: Set<string>;
-  } | null>(null);
-  let archiveEditChecking = $state(false);
-  let archiveEditError = $state<string | null>(null);
-  let archiveEditSession = 0;
-  let archiveEditReturnFocus: HTMLElement | null = null;
-  let moveConflictReview = $state<MoveConflictReview | null>(null);
-  let moveConflictReturnFocus: HTMLElement | null = null;
-  let moveConflictView = $derived.by(() => {
-    const review = moveConflictReview;
-    if (!review) return null;
-    const items = review.items.filter((item) => item.conflict);
-    return { targetDir: review.targetDir, readyCount: review.items.length - items.length, items };
-  });
+  const archiveEdit = new ArchiveEditSession(
+    () => ({
+      archive: currentArchive, generation: archiveOpenGeneration, opening: archiveOpenStatus !== "idle",
+      directory: archiveDirs.join("/"), selectedPaths: selectedPaths(),
+      mutationDisabledReason: archiveMutationDisabledReason(),
+    }),
+    submitCurrentArchiveJob,
+    blockSelectionScopedAction,
+    { tr, tError, emit: applyArchiveEditEffect },
+  );
+  let archiveEditReturnFocus: { owner: ArchiveEditOwner; target: HTMLElement | null } | null = null;
+  let moveConflictReturnFocus: { owner: ArchiveMoveReview; target: HTMLElement | null } | null = null;
   let historyRows = $derived(operationHistory());
   let activePopover = $state<"quickActions" | null>(null);
   let archiveSearchInput = $state<HTMLInputElement | null>(null);
@@ -1196,15 +1171,8 @@
   $effect(() => {
     currentArchive?.id;
     archiveDirs.join("\u0000");
-    const selected = [...selectedPaths()];
-    untrack(() => {
-      if (archiveEditKind !== null) return;
-      const source = selected.length === 1 ? selected[0] : null;
-      renameTargetName = source ? pathBaseName(source.replace(/\/+$/g, "")) : "";
-      archiveEditError = null;
-      moveConflictReview = null;
-      moveConflictReturnFocus = null;
-    });
+    selectedPaths();
+    untrack(() => archiveEdit.browseContextChanged());
   });
 
   $effect(() => {
@@ -1736,6 +1704,9 @@
     preflightEventsClosed = true;
     createPrimaryFocusPending = null;
     createPreflight.dispose();
+    archiveEdit.dispose();
+    archiveEditReturnFocus = null;
+    moveConflictReturnFocus = null;
     createPreflightCleanup?.();
     createPreflightCleanup = null;
     convertRouteHandle?.dispose();
@@ -4443,7 +4414,7 @@
         },
         selectedSummary: selectedSummary(),
         editingStatus: archiveEditingStatus(),
-        conflict: moveConflictView,
+        conflict: archiveEdit.reviewView,
         structureWarning: archiveStructureWarningText(),
         recovery,
         totalRows: currentArchive ? totalRows() : 0,
@@ -4470,9 +4441,9 @@
       }),
       onRevealPreview: () => void revealEntryPreview(),
       onPreviewSelection: () => void runAppAction("preview_entry"),
-      onCancelMoveConflict: cancelMoveConflict,
-      onSubmitMoveReadyOnly: () => void submitMoveReadyOnly(),
-      onSubmitMoveKeepBoth: () => void submitMoveKeepBoth(),
+      onCancelMoveConflict: () => archiveEdit.cancelReview(),
+      onSubmitMoveReadyOnly: () => void archiveEdit.submitReviewedMove("ready-only"),
+      onSubmitMoveKeepBoth: () => void archiveEdit.submitReviewedMove("keep-both"),
       onBrowseScroll: onBrowseVirtualScroll,
       onSelectEntry: (entry, event) => selectEntry(entry, event),
       onActivateEntry: (entry) => void activateEntry(entry),
@@ -4534,7 +4505,7 @@
         },
         selectedSummary: selectedSummary(),
         editingStatus: archiveEditingStatus(),
-        conflict: moveConflictView,
+        conflict: archiveEdit.reviewView,
         structureWarning: archiveStructureWarningText(),
         recovery,
         encodingWarning: hasEncodingWarning() ? archiveWarningText() : null,
@@ -4571,9 +4542,9 @@
       onPreviewSelection: () => void runAppAction("preview_entry"),
       onOpenNestedPreview: () => void openNestedPreviewArchive(),
       onExtractNestedPreview: () => void extractNestedPreviewArchive(),
-      onCancelMoveConflict: cancelMoveConflict,
-      onSubmitMoveReadyOnly: () => void submitMoveReadyOnly(),
-      onSubmitMoveKeepBoth: () => void submitMoveKeepBoth(),
+      onCancelMoveConflict: () => archiveEdit.cancelReview(),
+      onSubmitMoveReadyOnly: () => void archiveEdit.submitReviewedMove("ready-only"),
+      onSubmitMoveKeepBoth: () => void archiveEdit.submitReviewedMove("keep-both"),
       onRepairEncoding: () => void repairFilenameEncoding("gbk"),
       onSearchInputMount: (input) => {
         archiveSearchInput = input;
@@ -9441,133 +9412,8 @@
   }
 
   function selectedRenameSource(): string | null {
-    const selected = [...archiveEditSelectedPaths()];
+    const selected = [...selectedPaths()];
     return selected.length === 1 ? selected[0] : null;
-  }
-
-  function archiveEntryExtension(path: string): string {
-    const base = pathBaseName(path.endsWith("/") ? path.slice(0, -1) : path);
-    const dot = base.lastIndexOf(".");
-    if (dot <= 0 || dot === base.length - 1) return "";
-    return base.slice(dot);
-  }
-
-  function archiveEditPathProblem(path: string, allowRoot = false): string {
-    const issue = archiveEditPathIssue(path, allowRoot);
-    if (!issue) return "";
-    if (issue.kind === "empty") return tr("gui.edit.path_empty", "Enter an archive path.");
-    if (issue.kind === "absolute") return tr("gui.edit.path_absolute", "Enter a relative path inside the archive without a leading slash.");
-    if (issue.kind === "parent") return tr("gui.edit.path_parent", "Parent references (..) are not allowed. Enter a path inside the archive.");
-    if (issue.kind === "characters") return tr("gui.edit.path_characters", "{name} contains characters that cannot be used on Windows. Remove them or choose another name.").replace("{name}", issue.segment);
-    if (issue.kind === "trailing") return tr("gui.edit.path_trailing", "{name} ends with a space or dot. Choose a portable name.").replace("{name}", issue.segment);
-    return tr("gui.edit.path_reserved", "{name} is reserved on Windows. Choose another name.").replace("{name}", issue.segment);
-  }
-
-  function renameTargetIssue(source: string, target: string): RenameTargetIssue {
-    const unsafeSegment = archiveEditPathProblem(target);
-    if (unsafeSegment) {
-      return { blocking: unsafeSegment, warning: null };
-    }
-    if (source.endsWith("/")) {
-      return target.startsWith(source)
-        ? { blocking: tr("gui.move.inside_source", "Choose a destination outside the selected folder."), warning: null }
-        : { blocking: null, warning: null };
-    }
-    const sourceExt = archiveEntryExtension(source);
-    const targetExt = archiveEntryExtension(target);
-    if (sourceExt.toLowerCase() !== targetExt.toLowerCase()) {
-      const from = sourceExt || tr("gui.rename.no_extension", "no extension");
-      const to = targetExt || tr("gui.rename.no_extension", "no extension");
-      return { blocking: null, warning: tr("gui.rename.extension_change", "Extension changes {from} → {to}").replace("{from}", from).replace("{to}", to) };
-    }
-    return { blocking: null, warning: null };
-  }
-
-  function normalizeRenameTargetName(value = renameTargetName, source = selectedRenameSource()): string {
-    const trimmed = value.trim();
-    const path = normalizeArchivePath(trimmed);
-    if (!path) return "";
-    if (!source || trimmed.includes("/") || trimmed.includes("\\")) {
-      return source?.endsWith("/") ? `${path}/` : path;
-    }
-    const cleanSource = source.endsWith("/") ? source.slice(0, -1) : source;
-    const slash = cleanSource.lastIndexOf("/");
-    const dir = slash >= 0 ? `${cleanSource.slice(0, slash + 1)}` : "";
-    return `${dir}${path}${source.endsWith("/") ? "/" : ""}`;
-  }
-
-  function renameTargetStatus(): string {
-    if (!currentArchive) return openArchiveFirstLabel();
-    const from = selectedRenameSource();
-    if (from === null) return tr("gui.rename.select_one_entry", "Select exactly one file or folder to rename");
-    const target = normalizeRenameTargetName();
-    if (target === from) return tr("gui.rename.target_must_differ", "The name is unchanged. Enter a different name or path.");
-    const issue = renameTargetIssue(from, target);
-    if (issue.blocking) return tr("gui.rename.blocked_reason", "Blocked: {reason}").replace("{reason}", issue.blocking);
-    return `${issue.warning ? `${issue.warning} · ` : ""}${from} -> ${target}`
-      + tr("gui.edit.destination_check_suffix", " · destination will be checked before queuing");
-  }
-
-  function normalizeMoveTargetDir(value = moveTargetDir): string {
-    const path = normalizeArchivePath(value);
-    return path ? `${path}/` : "";
-  }
-
-  function moveTargetForPath(path: string, targetDir = normalizeMoveTargetDir()): string {
-    const isDir = path.endsWith("/");
-    const clean = isDir ? path.slice(0, -1) : path;
-    const base = pathBaseName(clean);
-    return `${targetDir}${base}${isDir ? "/" : ""}`;
-  }
-
-  function moveTargetStatus(): string {
-    const targetDir = normalizeMoveTargetDir();
-    if (!currentArchive) return openArchiveFirstLabel();
-    const problem = moveTargetProblem(targetDir);
-    if (problem) return problem;
-    const targetLabel = targetDir || "/";
-    const selected = archiveEditSelectedPaths().size;
-    if (selected === 0) {
-      return tr("gui.move.select_entries_to_move_into", "Select entries to move into {target}").replace("{target}", targetLabel);
-    }
-    return tr("gui.move.selected_to_target", "{count} selected -> {target}")
-      .replace("{count}", selected.toLocaleString())
-      .replace("{target}", targetLabel)
-      + tr("gui.move.check_before_submit", " · all target names will be checked before moving");
-  }
-
-  function moveTargetProblem(targetDir: string): string {
-    const problem = archiveEditPathProblem(targetDir, true);
-    if (problem) return problem;
-    for (const source of archiveSelectionRoots(archiveEditSelectedPaths())) {
-      if (source.endsWith("/") && targetDir.startsWith(source)) {
-        return tr("gui.move.inside_source", "Choose a destination outside the selected folder.");
-      }
-      if (moveTargetForPath(source, targetDir) === source) {
-        return tr("gui.move.same_location", "An entry is already in this folder. Choose another destination.");
-      }
-    }
-    return "";
-  }
-
-  function normalizeNewFolderPath(value = newFolderName): string {
-    const input = value.trim().replaceAll("\\", "/");
-    const name = normalizeArchivePath(input, tr("gui.new_folder.default_name", "New Folder"));
-    const parent = input.startsWith("/") ? "" : archiveEditContext?.directory ?? archiveDirs.join("/");
-    return `${parent ? `${parent}/` : ""}${name}/`;
-  }
-
-  function commitNewFolderName(value = newFolderName) {
-    newFolderName = value.trim().replaceAll("\\", "/");
-  }
-
-  function newFolderStatus(): string {
-    const folder = normalizeNewFolderPath();
-    if (!currentArchive) return openArchiveFirstLabel();
-    const problem = archiveEditPathProblem(folder);
-    if (problem) return problem;
-    return tr("gui.new_folder.create_path", "Create {folder}").replace("{folder}", folder)
-      + tr("gui.edit.destination_check_suffix", " · destination will be checked before queuing");
   }
 
   function archiveLikePath(path: string): boolean {
@@ -11247,32 +11093,32 @@
       showNotice(reason || openArchiveFirstLabel());
       return;
     }
-    archiveEditReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    archiveEditSession += 1;
-    archiveEditError = null;
-    archiveEditChecking = false;
-    archiveEditContext = {
-      source: currentArchive.source, encoding: currentArchive.encoding_override,
-      generation: archiveOpenGeneration, id: currentArchive.id,
-      directory: archiveDirs.join("/"), paths: new Set(selectedPaths()),
+    const owner = archiveEdit.open(kind);
+    if (!owner) return;
+    archiveEditReturnFocus = {
+      owner, target: document.activeElement instanceof HTMLElement ? document.activeElement : null,
     };
     setScreen("browse");
-    moveConflictReview = null;
-    moveConflictReturnFocus = null;
-    if (kind === "rename") renameTargetName = pathBaseName(selectedRenameSource()?.replace(/\/+$/g, "") ?? "");
-    if (kind === "new-folder") newFolderName = "";
-    archiveEditKind = kind;
   }
 
-  function closeArchiveEditor() {
-    archiveEditKind = null;
-    archiveEditContext = null;
-    archiveEditSession += 1;
-    archiveEditChecking = false;
-    archiveEditError = null;
-    const target = archiveEditReturnFocus;
-    archiveEditReturnFocus = null;
-    restoreArchiveEditFocus(target);
+  function applyArchiveEditEffect(effect: ArchiveEditEffect) {
+    if (effect.kind === "notice") {
+      showNotice(effect.message);
+    } else if (effect.kind === "queued") {
+      recordOperation({ status: "queued", title: effect.title, detail: effect.detail });
+    } else if (effect.kind === "reviewCreated") {
+      const target = archiveEditReturnFocus?.owner === effect.editor ? archiveEditReturnFocus.target : null;
+      moveConflictReturnFocus = { owner: effect.review, target };
+    } else if (effect.kind === "editorClosed") {
+      if (archiveEditReturnFocus?.owner !== effect.owner) return;
+      const target = archiveEditReturnFocus.target;
+      archiveEditReturnFocus = null;
+      restoreArchiveEditFocus(target);
+    } else if (moveConflictReturnFocus?.owner === effect.review) {
+      const target = moveConflictReturnFocus.target;
+      moveConflictReturnFocus = null;
+      if (effect.restoreFocus) restoreArchiveEditFocus(target);
+    }
   }
 
   function restoreArchiveEditFocus(target: HTMLElement | null) {
@@ -11284,431 +11130,43 @@
     });
   }
 
-  function cancelMoveConflict() {
-    const target = moveConflictReturnFocus;
-    moveConflictReview = null;
-    moveConflictReturnFocus = null;
-    restoreArchiveEditFocus(target);
-  }
-
   function archiveEditorFields(kind: ArchiveEditKind) {
-    const blocked = archiveEditorBlockedReason();
+    const blocked = archiveEdit.blockedReason;
     const feedback = {
-      cancelWhileSubmitting: archiveEditChecking,
-      error: archiveEditError || (archiveRefreshStatus() === "idle" ? blocked : null),
+      cancelWhileSubmitting: archiveEdit.checking,
+      error: archiveEdit.error || (archiveRefreshStatus() === "idle" ? blocked : null),
       disabled: Boolean(blocked),
-      recovery: archiveEditContext && currentArchive?.source === archiveEditContext.source
+      recovery: archiveEdit.source && currentArchive?.source === archiveEdit.source
         && archiveRefreshStatus() !== "idle" ? archiveBrowseRecoveryState() : null,
       retryLabel: tr("gui.error.retry", "Retry"),
       onRetry: retryArchiveContents,
-      submittingLabel: archiveEditChecking
+      submittingLabel: archiveEdit.checking
         ? kind === "move" ? tr("gui.move.checking_targets", "Checking move targets…")
           : tr("gui.edit.checking_targets", "Checking archive paths…")
         : tr("gui.task_center.submitting", "Adding to the queue…"),
+      value: archiveEdit.target,
+      status: archiveEdit.status,
+      onChange: (value: string) => archiveEdit.setTarget(value),
+      onSubmit: () => archiveEdit.submit(),
     };
     if (kind === "rename") return {
       ...feedback,
       title: tr("gui.action.rename_selected", "Rename selected"),
       label: tr("gui.rename.target_name", "Rename target name"),
-      value: renameTargetName,
-      status: renameTargetStatus(),
-      onChange: (value: string) => { renameTargetName = value; archiveEditError = null; },
-      onSubmit: submitRenameSelectedJob,
     };
     if (kind === "move") return {
       ...feedback,
       title: tr("gui.action.move_selected", "Move selected"),
       label: tr("gui.move.target_folder", "Move target folder"),
-      value: moveTargetDir,
-      status: moveTargetStatus(),
       hint: tr("gui.move.path_hint", "Destination paths start at the archive root. Use / to move to the root."),
-      onChange: (value: string) => { moveTargetDir = value; archiveEditError = null; },
-      onSubmit: submitMoveSelectedJob,
     };
     return {
       ...feedback,
       title: tr("gui.action.new_folder", "New folder"),
       label: tr("gui.new_folder.name", "New folder name"),
-      value: newFolderName,
       placeholder: tr("gui.new_folder.default_name", "New Folder"),
-      status: newFolderStatus(),
       hint: tr("gui.new_folder.path_hint", "Created in the current folder. Start with / to use the archive root."),
-      onChange: (value: string) => { newFolderName = value; archiveEditError = null; },
-      onSubmit: submitNewFolderJob,
     };
-  }
-
-  function archiveEditSubmissionFailure(): ((message: string) => void) | undefined {
-    if (archiveEditKind === null) return undefined;
-    const session = archiveEditSession;
-    archiveEditError = null;
-    return (message) => {
-      if (archiveEditKind !== null && archiveEditSession === session) archiveEditError = message;
-    };
-  }
-
-  function archiveEditSubmissionSuccess(): () => void {
-    const session = archiveEditSession;
-    const review = moveConflictReview;
-    return () => {
-      if (moveConflictReview === review) {
-        moveConflictReview = null;
-        moveConflictReturnFocus = null;
-      }
-      if (archiveEditKind !== null && archiveEditSession === session) closeArchiveEditor();
-    };
-  }
-
-  function showArchiveEditError(message: string) {
-    if (archiveEditKind !== null) archiveEditError = message;
-    else showNotice(message);
-  }
-
-  function archiveEditSelectedPaths(): Set<string> {
-    return archiveEditKind && archiveEditContext ? archiveEditContext.paths : selectedPaths();
-  }
-
-  function archiveEditorBlockedReason(): string {
-    const context = archiveEditContext;
-    if (!context) return "";
-    if (!currentArchive || archiveOpenStatus !== "idle" || currentArchive.source !== context.source
-      || currentArchive.encoding_override !== context.encoding || archiveOpenGeneration !== context.generation) {
-      return tr("gui.edit.archive_changed", "The archive changed. Your text is kept. Cancel and reopen the editor for the intended archive.");
-    }
-    return archiveMutationDisabledReason();
-  }
-
-  async function validateArchiveEditContext(): Promise<boolean> {
-    const context = archiveEditContext;
-    if (!context) return true;
-    const blocked = archiveEditorBlockedReason();
-    if (blocked) { archiveEditError = blocked; return false; }
-    const archive = currentArchive;
-    if (!archive) return false;
-    if (archive.id === context.id) return true;
-    const session = archiveEditSession;
-    const paths = archiveEditKind === "new-folder"
-      ? newFolderName.trim().replaceAll("\\", "/").startsWith("/") || !context.directory ? [] : [`${context.directory}/`]
-      : archiveSelectionRoots(context.paths);
-    archiveEditChecking = true;
-    archiveEditError = null;
-    try {
-      const missing = paths.length ? await ipc.missingArchivePaths(archive.id, paths) : [];
-      if (archiveEditSession !== session || archiveEditContext !== context) return false;
-      if (currentArchive?.id !== archive.id || archiveEditorBlockedReason()) {
-        archiveEditError = tr("gui.edit.check_changed", "The archive changed while checking. Your text is kept. Try again.");
-        return false;
-      }
-      if (missing.length) {
-        archiveEditError = tr("gui.edit.items_missing", "These original items no longer exist: {paths}. Your text is kept. Cancel and select the intended items again.")
-          .replace("{paths}", missing.join(", "));
-        return false;
-      }
-      return true;
-    } catch (error) {
-      if (archiveEditSession === session) archiveEditError = tr("gui.edit.check_failed", "Could not check the original items. Your text is kept. Try again.")
-        + (isErrorDto(error) ? ` ${tError(error)}` : "");
-      return false;
-    } finally {
-      if (archiveEditSession === session) archiveEditChecking = false;
-    }
-  }
-
-  function archiveEditCheckIsCurrent(session: number, id: number | undefined): boolean {
-    if (session !== archiveEditSession) return false;
-    const blocked = archiveEditorBlockedReason();
-    if (currentArchive?.id === id && !blocked) return true;
-    archiveEditError = blocked || tr("gui.edit.check_changed", "The archive changed while checking. Your text is kept. Try again.");
-    return false;
-  }
-
-  async function validateArchiveEditTarget(target: string, currentTarget: () => string): Promise<boolean> {
-    const session = archiveEditSession;
-    const id = currentArchive?.id;
-    if (id === undefined) return false;
-    archiveEditChecking = true;
-    archiveEditError = null;
-    try {
-      const inspection = await ipc.inspectArchiveTarget(id, target);
-      if (!archiveEditCheckIsCurrent(session, id) || currentTarget() !== target) return false;
-      if (inspection.blocked_parent) {
-        archiveEditError = tr("gui.edit.parent_is_file", "{path} is a file and cannot be used as a parent folder. Choose a different path.")
-          .replace("{path}", inspection.blocked_parent);
-        return false;
-      }
-      if (inspection.exists) {
-        archiveEditError = tr("gui.edit.target_exists", "{path} already exists. Choose a different name or path.").replace("{path}", target);
-        return false;
-      }
-      return true;
-    } catch (error) {
-      if (archiveEditCheckIsCurrent(session, id) && currentTarget() === target) {
-        archiveEditError = tr("gui.edit.target_check_failed", "Could not check the destination. Your text is kept. Try again.")
-          + (isErrorDto(error) ? ` ${tError(error)}` : "");
-      }
-      return false;
-    } finally {
-      if (archiveEditSession === session) archiveEditChecking = false;
-    }
-  }
-
-  async function submitRenameSelectedJob() {
-    if (archiveEditChecking) return;
-    const session = archiveEditSession;
-    const id = currentArchive?.id;
-    if (!await validateArchiveEditContext() || !archiveEditCheckIsCurrent(session, id)) return;
-    if (blockSelectionScopedAction()) return;
-    if (!currentArchive) {
-      showNotice(tr("gui.precondition.open_before_rename", "Open an archive before renaming entries"));
-      return;
-    }
-    const readOnly = archiveMutationDisabledReason();
-    if (readOnly) {
-      showNotice(readOnly);
-      return;
-    }
-    const from = selectedRenameSource();
-    if (from === null) {
-      showNotice(tr("gui.precondition.select_one_before_rename", "Select exactly one file or folder before renaming"));
-      return;
-    }
-    const to = normalizeRenameTargetName(renameTargetName, from);
-    if (to === from) {
-      showArchiveEditError(tr("gui.rename.target_must_differ", "The name is unchanged. Enter a different name or path."));
-      return;
-    }
-    const issue = renameTargetIssue(from, to);
-    if (issue.blocking) {
-      showArchiveEditError(issue.blocking);
-      return;
-    }
-    if (!await validateArchiveEditTarget(to, () => normalizeRenameTargetName(renameTargetName, from))
-      || !archiveEditCheckIsCurrent(session, id)) return;
-    const onSuccess = archiveEditSubmissionSuccess();
-    const queued = await submitCurrentArchiveJob(
-      {
-        kind: "update",
-        path: currentArchive.source,
-        expected_archive_id: currentArchive.id,
-        encoding: currentArchive.encoding_override,
-        add: [],
-        delete: [],
-        rename: [{ from, to }],
-        mkdir: [],
-        excludes: [],
-        content_policy: "keep_all_files",
-        password: null,
-        level: 6,
-      },
-      tr("gui.rename.queued_notice", "Rename queued: {from} -> {to}").replace("{from}", from).replace("{to}", to),
-      tr("gui.precondition.open_before_rename", "Open an archive before renaming entries"),
-      archiveEditSubmissionFailure(),
-    );
-    if (queued) {
-      onSuccess();
-      recordOperation({
-        status: "queued",
-        title: tr("gui.rename.queued", "Rename entry queued"),
-        detail: `${from} -> ${to}`,
-      });
-    }
-  }
-
-  async function submitMoveSelectedJob() {
-    if (archiveEditChecking) return;
-    const session = archiveEditSession;
-    const id = currentArchive?.id;
-    if (!await validateArchiveEditContext() || !archiveEditCheckIsCurrent(session, id)) return;
-    if (blockSelectionScopedAction()) return;
-    const targetDir = normalizeMoveTargetDir();
-    if (!currentArchive) {
-      showNotice(tr("gui.precondition.open_before_move", "Open an archive before moving entries"));
-      return;
-    }
-    const readOnly = archiveMutationDisabledReason();
-    if (readOnly) {
-      showNotice(readOnly);
-      return;
-    }
-    const selected = [...archiveEditSelectedPaths()];
-    if (selected.length === 0) {
-      showNotice(tr("gui.precondition.select_entries_before_move", "Select entries before moving"));
-      return;
-    }
-    const problem = moveTargetProblem(targetDir);
-    if (problem) {
-      showArchiveEditError(problem);
-      return;
-    }
-    archiveEditChecking = true;
-    archiveEditError = null;
-    try {
-      const checked = await ipc.planArchiveMove(currentArchive.id, archiveSelectionRoots(archiveEditSelectedPaths()), targetDir);
-      if (!archiveEditCheckIsCurrent(session, id)) return;
-      if (normalizeMoveTargetDir() !== targetDir) return;
-      if (checked.missing_sources.length) {
-        archiveEditError = tr("gui.edit.items_missing", "These original items no longer exist: {paths}. Your text is kept. Cancel and select the intended items again.")
-          .replace("{paths}", checked.missing_sources.join(", "));
-        return;
-      }
-      if (checked.blocked_parent) {
-        archiveEditError = tr("gui.edit.parent_is_file", "{path} is a file and cannot be used as a parent folder. Choose a different path.")
-          .replace("{path}", checked.blocked_parent);
-        return;
-      }
-      const plan: MovePlanItem[] = checked.items.map((item) => ({
-        from: item.from, to: item.to, conflict: item.conflict !== null,
-        reason: item.conflict === "existing_target"
-          ? tr("gui.move.target_already_exists", "Target already exists")
-          : item.conflict === "duplicate_target"
-            ? tr("gui.move.duplicate_target_name", "Multiple selected entries share this target name") : null,
-        keepBothTo: item.keep_both_to,
-      }));
-      const conflicts = plan.filter((item) => item.conflict);
-      if (conflicts.length > 0) {
-        moveConflictReturnFocus = archiveEditReturnFocus;
-        moveConflictReview = { archiveId: currentArchive.id, generation: archiveOpenGeneration, targetDir, items: plan };
-        closeArchiveEditor();
-        return;
-      }
-      archiveEditChecking = false;
-      await submitMovePlan(plan.map(({ from, to }) => ({ from, to })), targetDir);
-    } catch (error) {
-      if (!archiveEditCheckIsCurrent(session, id)) return;
-      if (normalizeMoveTargetDir() !== targetDir) return;
-      archiveEditError = tr("gui.move.check_failed", "Could not check move targets. Your destination is kept. Try again.")
-        + (isErrorDto(error) ? ` ${tError(error)}` : "");
-    } finally {
-      if (archiveEditSession === session) archiveEditChecking = false;
-    }
-  }
-
-  async function submitMovePlan(rename: Array<{ from: string; to: string }>, targetDir: string) {
-    if (blockSelectionScopedAction()) return;
-    if (moveConflictReview && (currentArchive?.id !== moveConflictReview.archiveId
-      || archiveOpenGeneration !== moveConflictReview.generation || archiveOpenStatus !== "idle")) {
-      moveConflictReview = null;
-      moveConflictReturnFocus = null;
-      showNotice(tr("gui.move.review_changed", "The archive changed. Select the items and check the move targets again."));
-      return;
-    }
-    if (!currentArchive) {
-      showNotice(tr("gui.precondition.open_before_move", "Open an archive before moving entries"));
-      return;
-    }
-    const readOnly = archiveMutationDisabledReason();
-    if (readOnly) {
-      showNotice(readOnly);
-      return;
-    }
-    if (rename.length === 0) {
-      showNotice(tr("gui.move.no_non_conflicting_targets", "No non-conflicting move targets to submit"));
-      return;
-    }
-    const onSuccess = archiveEditSubmissionSuccess();
-    const queued = await submitCurrentArchiveJob(
-      {
-        kind: "update",
-        path: currentArchive.source,
-        expected_archive_id: currentArchive.id,
-        encoding: currentArchive.encoding_override,
-        add: [],
-        delete: [],
-        rename,
-        mkdir: [],
-        excludes: [],
-        content_policy: "keep_all_files",
-        password: null,
-        level: 6,
-      },
-      (rename.length === 1
-        ? tr("gui.move.operation_queued", "1 move operation queued")
-        : tr("gui.move.operations_queued", "{count} move operations queued").replace("{count}", rename.length.toLocaleString())),
-      tr("gui.precondition.open_before_move", "Open an archive before moving entries"),
-      archiveEditSubmissionFailure(),
-    );
-    if (queued) {
-      onSuccess();
-      recordOperation({
-        status: "queued",
-        title: tr("gui.move.queued", "Move entries queued"),
-        detail: tr("gui.move.entries_to_target", "{count} entries to {target}")
-          .replace("{count}", rename.length.toLocaleString())
-          .replace("{target}", targetDir || "/"),
-      });
-    }
-  }
-
-  async function submitMoveReadyOnly() {
-    const review = moveConflictReview;
-    if (!review) return;
-    const ready = review.items
-      .filter((item) => !item.conflict)
-      .map(({ from, to }) => ({ from, to }));
-    await submitMovePlan(ready, review.targetDir);
-  }
-
-  async function submitMoveKeepBoth() {
-    const review = moveConflictReview;
-    if (!review) return;
-    const rename = review.items.map((item) => ({
-      from: item.from,
-      to: item.conflict && item.keepBothTo ? item.keepBothTo : item.to,
-    }));
-    await submitMovePlan(rename, review.targetDir);
-  }
-
-  async function submitNewFolderJob() {
-    if (archiveEditChecking) return;
-    const session = archiveEditSession;
-    const id = currentArchive?.id;
-    if (!await validateArchiveEditContext() || !archiveEditCheckIsCurrent(session, id)) return;
-    const folder = normalizeNewFolderPath();
-    if (!currentArchive) {
-      showNotice(tr("gui.precondition.open_before_new_folder", "Open an archive before creating a folder"));
-      return;
-    }
-    const readOnly = archiveMutationDisabledReason();
-    if (readOnly) {
-      showNotice(readOnly);
-      return;
-    }
-    const problem = archiveEditPathProblem(folder);
-    if (problem) {
-      showArchiveEditError(problem);
-      return;
-    }
-    commitNewFolderName();
-    if (!await validateArchiveEditTarget(folder, () => normalizeNewFolderPath())
-      || !archiveEditCheckIsCurrent(session, id)) return;
-    const onSuccess = archiveEditSubmissionSuccess();
-    const queued = await submitCurrentArchiveJob(
-      {
-        kind: "update",
-        path: currentArchive.source,
-        expected_archive_id: currentArchive.id,
-        encoding: currentArchive.encoding_override,
-        add: [],
-        delete: [],
-        rename: [],
-        mkdir: [folder],
-        excludes: [],
-        content_policy: "keep_all_files",
-        password: null,
-        level: 6,
-      },
-      tr("gui.new_folder.queued_notice", "New folder queued: {folder}").replace("{folder}", folder),
-      tr("gui.precondition.open_before_new_folder", "Open an archive before creating a folder"),
-      archiveEditSubmissionFailure(),
-    );
-    if (queued) {
-      onSuccess();
-      recordOperation({
-        status: "queued",
-        title: tr("gui.new_folder.queued", "New folder queued"),
-        detail: folder,
-      });
-    }
   }
 
   async function openArchiveDirectoryEntry(entryPath: string) {
@@ -12663,7 +12121,7 @@
   }
 
   function archiveEditorVisible(): boolean {
-    return screen === "browse" && archiveEditKind !== null && !archivePasswordPrompt && !previewPasswordPrompt;
+    return screen === "browse" && archiveEdit.kind !== null && !archivePasswordPrompt && !previewPasswordPrompt;
   }
 
   function blockingModalVisible(): boolean {
@@ -14441,13 +13899,13 @@
   >{dropStatusLabel()}</div>
 {/if}
 
-{#if !taskWindowMode && archiveEditKind && archiveEditorVisible() && !taskDialogVisible() && !macosSfxPublisherTask}
+{#if !taskWindowMode && archiveEdit.kind && archiveEditorVisible() && !taskDialogVisible() && !macosSfxPublisherTask}
   <ArchiveEntryEditor
-    {...archiveEditorFields(archiveEditKind)}
+    {...archiveEditorFields(archiveEdit.kind)}
     rootClass={`archive-editor-overlay design-root platform-${activePlatform} palette-${activePalette} theme-${activeTheme} density-${activeDensityChoice}`}
     rootVariables={customPaletteVariables()}
     cancelLabel={tr("common.cancel", "Cancel")}
-    onClose={closeArchiveEditor}
+    onClose={() => archiveEdit.close()}
   />
 {/if}
 

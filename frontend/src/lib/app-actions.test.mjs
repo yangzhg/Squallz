@@ -7,9 +7,11 @@ import { compileTestScript, readSvelteScriptAsync, selectFunctions } from "../..
 
 let server;
 let actions;
+let ArchiveEditSession;
 before(async () => {
   server = await createTestServer();
   actions = await server.ssrLoadModule("/src/lib/app-actions.ts");
+  ({ ArchiveEditSession } = await server.ssrLoadModule("/src/lib/archive-edit-session.svelte.ts"));
 });
 after(async () => server?.close());
 
@@ -99,6 +101,13 @@ async function appHandlers(overrides = {}, names = ["onEntryKeydown", "runEntryC
     tick: () => Promise.resolve(),
     ...overrides,
   };
+  if (names.includes("openArchiveEditor")) {
+    context.archiveEdit = new ArchiveEditSession(() => ({
+      archive: context.currentArchive, generation: 0, opening: false, directory: "",
+      selectedPaths: context.selectedPaths(), mutationDisabledReason: context.archiveMutationDisabledReason(),
+    }), async () => assert.fail("admission tests must not queue an edit"), context.blockSelectionScopedAction,
+    { tr: context.tr, tError: (error) => error.key, emit() {} });
+  }
   return { ...vm.runInNewContext(`${outputText}\n({ ${names.join(", ")} })`, context), context };
 }
 
