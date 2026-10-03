@@ -2727,29 +2727,106 @@ fn update_rejects_target_conflicts_without_explicit_delete() {
 
 #[test]
 fn update_combined_add_delete_rename() {
-    let tmp = TempDir::new("update-combo");
-    let archive = base_archive(tmp.path(), None);
-    fs::write(tmp.path().join("fresh.txt"), b"fresh").unwrap();
-    let ops = vec![
-        UpdateOp::Add {
-            src: tmp.path().join("fresh.txt"),
-            dest: EntryPath::from_utf8("fresh.txt"),
-        },
-        UpdateOp::Delete {
-            pattern: "*.log".into(),
-        },
-        UpdateOp::Rename {
-            from: EntrySelection::Raw(EntryPath::from_utf8("project/sub/b.txt")),
-            to: EntryPath::from_utf8("project/sub/beta.txt"),
-        },
-    ];
-    run_update(&archive, &ops, &UpdateOptions::default()).unwrap();
-    let names = list_names(&archive, None);
-    assert!(names.contains(&"fresh.txt".to_string()));
-    assert!(names.contains(&"project/sub/beta.txt".to_string()));
-    assert!(!names.iter().any(|n| n.ends_with(".log")));
-    assert!(!names.contains(&"project/sub/b.txt".to_string()));
-    assert_unzip_t(&archive);
+    for comment in [
+        Vec::new(),
+        "归档说明：保留原始字节。".as_bytes().to_vec(),
+        b"\xff\xfe\0\x80".to_vec(),
+        vec![b'x'; usize::from(u16::MAX)],
+    ] {
+        let tmp = TempDir::new("update-combo");
+        let archive = base_archive(tmp.path(), None);
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&archive)
+            .unwrap();
+        let mut writer = zip::ZipWriter::new_append(file).unwrap();
+        writer
+            .set_raw_comment(comment.clone().into_boxed_slice())
+            .unwrap();
+        writer.finish().unwrap();
+        assert_eq!(
+            zip::ZipArchive::new(fs::File::open(&archive).unwrap())
+                .unwrap()
+                .comment(),
+            comment
+        );
+        let external_comment = command_exists("unzip").then(|| {
+            let output = Command::new("unzip")
+                .arg("-z")
+                .arg(&archive)
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            output.stdout
+        });
+        fs::write(tmp.path().join("fresh.txt"), b"fresh").unwrap();
+        let ops = vec![
+            UpdateOp::Add {
+                src: tmp.path().join("fresh.txt"),
+                dest: EntryPath::from_utf8("fresh.txt"),
+            },
+            UpdateOp::AddDir {
+                path: EntryPath::from_utf8("fresh-folder/"),
+            },
+            UpdateOp::Delete {
+                pattern: "*.log".into(),
+            },
+            UpdateOp::Rename {
+                from: EntrySelection::Raw(EntryPath::from_utf8("project/sub/b.txt")),
+                to: EntryPath::from_utf8("project/sub/beta.txt"),
+            },
+        ];
+        run_update(&archive, &ops, &UpdateOptions::default()).unwrap();
+        let names = list_names(&archive, None);
+        assert!(names.contains(&"fresh.txt".to_string()));
+        assert!(names.contains(&"fresh-folder/".to_string()));
+        assert!(names.contains(&"project/sub/beta.txt".to_string()));
+        assert!(!names.iter().any(|n| n.ends_with(".log")));
+        assert!(!names.contains(&"project/sub/b.txt".to_string()));
+        let mut updated = zip::ZipArchive::new(fs::File::open(&archive).unwrap()).unwrap();
+        assert_eq!(
+            updated.comment(),
+            comment,
+            "ZIP update changed archive comment bytes"
+        );
+        for (path, expected) in [
+            ("project/a.txt", b"alpha".as_slice()),
+            ("project/sub/beta.txt", b"bravo".as_slice()),
+            ("fresh.txt", b"fresh".as_slice()),
+        ] {
+            let mut payload = Vec::new();
+            updated
+                .by_name(path)
+                .unwrap()
+                .read_to_end(&mut payload)
+                .unwrap();
+            assert_eq!(payload, expected);
+            if external_comment.is_some() {
+                let output = Command::new("unzip")
+                    .arg("-p")
+                    .arg(&archive)
+                    .arg(path)
+                    .output()
+                    .unwrap();
+                assert!(output.status.success());
+                assert_eq!(output.stdout, expected);
+            }
+        }
+        assert_unzip_t(&archive);
+        if let Some(expected) = external_comment {
+            let output = Command::new("unzip")
+                .arg("-z")
+                .arg(&archive)
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            assert_eq!(
+                output.stdout, expected,
+                "unzip displayed a changed archive comment"
+            );
+        }
+    }
 }
 
 #[test]

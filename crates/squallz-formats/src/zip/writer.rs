@@ -26,6 +26,11 @@ pub(super) struct ZipArchiveWriter {
 }
 
 impl ZipArchiveWriter {
+    pub(super) fn set_raw_comment(&mut self, comment: &[u8]) -> Result<(), FormatError> {
+        let result = self.inner.set_raw_comment(comment.into());
+        controlled_zip_result(result, &self.control)
+    }
+
     /// Raw-copies an entry (opened with `by_index_raw`) from another
     /// archive: compressed data and encryption are carried over verbatim,
     /// optionally under a new name. Used by the update path.
