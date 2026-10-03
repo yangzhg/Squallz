@@ -130,6 +130,7 @@ function harness({ navigation = false, preparation = false, preview = false } = 
     archiveUpdateReview: { cancelSourceChoice() {} }, nestedExtractDraftGeneration: 0,
     nestedExtractPickerRequest: 0, batchPickerRequest: 0, pendingArchiveTaskReview: null,
     dismissArchivePicker() {}, clearEntryPreviewState() {}, syncUrl() {},
+    dismissArchiveAddPreparation() {},
     restoreTaskWorkspaceFocus: () => calls.push(["restore-focus"]),
     securitySettingsFocusPending: false, focusSecuritySettings: () => calls.push(["focus-security"]),
     currentArchive: null, sameFilePath: (left, right) => left === right,

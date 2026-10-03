@@ -103,6 +103,7 @@ async function withNestedOpen(run, { systemOpen = false } = {}) {
       recoverySourceMode: "selected", recoverySourceOverride: "/previous.zip", recoveryPar2Override: "/previous.par2",
       recoveryPickerStatus: "idle", recoveryPickerRequest: 0, recoveryOutputPreparation: null,
       dismissCreatePreparation() {},
+      dismissArchiveAddPreparation() {},
       recoverySubmissionPending: false, outputAuthorizationPending: false, mode: "modern", jobRows: [],
       sameFilePath: (left, right) => left === right,
       getDialogModule: async () => ({ open: async () => null }),

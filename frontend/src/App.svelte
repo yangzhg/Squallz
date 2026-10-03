@@ -945,7 +945,16 @@
   let securitySettingsFocusPending = false;
   let taskReviewRequestGeneration = 0;
   let pendingTaskReviewId = $state<number | null>(null);
-  let archiveAddPending = $state(false);
+  let archiveAddPreparation = $state.raw<{
+    screen: Screen;
+    mode: Mode;
+    generation: number;
+    id: number;
+    source: string;
+    encoding: string | null;
+    phase: "preparing" | "submitting";
+  } | null>(null);
+  let archiveAddPending = $derived(archiveAddPreparation !== null);
   let extractOverwriteMode = $state<ExtractOverwriteMode>("ask");
   let extractSymlinkMode = $state<ExtractSymlinkMode>("preserve");
   let currentExtractOverwriteLabel = $derived(extractOverwriteLabel(extractOverwriteMode));
@@ -1237,6 +1246,11 @@
   $effect(() => {
     const request = recoveryOutputPreparation;
     if (request && !isCurrentRecoveryOutputPreparation(request)) recoveryOutputPreparation = null;
+  });
+
+  $effect(() => {
+    const request = archiveAddPreparation;
+    if (request?.phase === "preparing" && !isCurrentArchiveAddPreparation(request)) dismissArchiveAddPreparation();
   });
 
   $effect(() => {
@@ -1802,6 +1816,7 @@
   });
 
   onMount(() => () => {
+    archiveAddPreparation = null;
     dismissRecoveryPreparation();
     clearChecksumCopyState();
     extractDestinationPicker = null;
@@ -2231,7 +2246,10 @@
   }
 
   function setMode(next: Mode) {
-    if (next !== mode) filenameEncodingRequest = null;
+    if (next !== mode) {
+      filenameEncodingRequest = null;
+      dismissArchiveAddPreparation();
+    }
     firstRunDropFeedback = null;
     trackAppearanceSave(
       "mode",
@@ -2297,6 +2315,7 @@
     if (preventConvertSubmissionNavigation(next)) return;
     if (next !== screen) {
       filenameEncodingRequest = null;
+      dismissArchiveAddPreparation();
       dismissCreatePreparation();
       checksumCopyRequest = null;
       extractDestinationPicker = null;
@@ -6174,6 +6193,7 @@
   async function openArchiveFromDialog() {
     if (archiveOpenStatus === "opening") return;
     if (preventCreateSubmissionNavigation("browse")) return;
+    dismissArchiveAddPreparation();
     dismissRecoveryPreparation();
     dismissArchivePasswordRequest();
     clearEntryPreviewState();
@@ -6309,6 +6329,7 @@
     review: ArchiveTaskReview | null = null,
   ): Promise<boolean> {
     if (preventCreateSubmissionNavigation("browse")) return false;
+    dismissArchiveAddPreparation();
     extractDestinationPicker = null;
     dismissRecoveryPreparation();
     dismissArchivePicker();
@@ -6442,6 +6463,7 @@
     sidecarCount = 1,
     sidecarSetCount = 1,
   ) {
+    dismissArchiveAddPreparation();
     dismissArchivePicker();
     dismissRecoveryPreparation();
     clearEntryPreviewState();
@@ -11510,6 +11532,17 @@
   }
 
 
+  function isCurrentArchiveAddPreparation(request: NonNullable<typeof archiveAddPreparation>): boolean {
+    return archiveAddPreparation === request && screen === request.screen && mode === request.mode
+      && archiveOpenGeneration === request.generation && archiveOpenStatus !== "opening"
+      && currentArchive?.id === request.id && currentArchive.source === request.source
+      && currentArchive.encoding_override === request.encoding;
+  }
+
+  function dismissArchiveAddPreparation(): void {
+    if (archiveAddPreparation?.phase === "preparing") archiveAddPreparation = null;
+  }
+
   async function submitAddToArchiveJob() {
     if (archiveAddPending) return;
     if (!currentArchive) {
@@ -11523,23 +11556,20 @@
     }
     if (focusBlockingTaskIfAny()) return;
     const { id, source: path, encoding_override: encoding } = currentArchive;
-    const generation = archiveOpenGeneration;
+    const request: NonNullable<typeof archiveAddPreparation> = {
+      screen, mode, generation: archiveOpenGeneration, id, source: path, encoding, phase: "preparing",
+    };
     const content_policy = createContentPolicy;
     const excludes = content_policy === "custom" ? [...createExcludeRules()] : [];
     const level = createCompressionLevel();
     const profile = createProfileLabel(activeCreateProfile);
     const canAddToOriginalArchive = () => {
-      if (generation !== archiveOpenGeneration || archiveOpenStatus === "opening"
-        || currentArchive?.id !== id || currentArchive.source !== path
-        || currentArchive.encoding_override !== encoding) {
-        showNotice(tr("gui.add.archive_changed", "The archive changed while choosing files. No files were added. Open the intended archive and choose the files again."));
-        return false;
-      }
+      if (!isCurrentArchiveAddPreparation(request)) return false;
       const reason = archiveMutationDisabledReason();
       if (reason) showNotice(reason);
       return !reason;
     };
-    archiveAddPending = true;
+    archiveAddPreparation = request;
     try {
       let selected: string | string[] | null;
       try {
@@ -11551,6 +11581,7 @@
           directory: false,
         });
       } catch {
+        if (!isCurrentArchiveAddPreparation(request)) return;
         showNotice(tr("gui.add.picker_failed", "Could not open the file chooser. Try adding files again."));
         return;
       }
@@ -11560,6 +11591,7 @@
         showNotice(tr("gui.add.cancelled", "Add files cancelled"));
         return;
       }
+      request.phase = "submitting";
       const queued = await submitCurrentArchiveJob({
         kind: "update",
         path,
@@ -11585,7 +11617,7 @@
           .replace("{profile}", profile),
       });
     } finally {
-      archiveAddPending = false;
+      if (archiveAddPreparation === request) archiveAddPreparation = null;
     }
   }
 
@@ -12480,6 +12512,7 @@
   ) {
     if (intent === "extract" && (preventCreateSubmissionNavigation("extract")
       || preventConvertSubmissionNavigation("extract") || focusBlockingTaskIfAny())) return;
+    dismissArchiveAddPreparation();
     const initialScreen = screen;
     const initialScreenGeneration = taskReviewRequestGeneration;
     const prepared = nestedPreview?.outer_path === outerPath && nestedPreview.entry_path === entryPath
@@ -12716,6 +12749,7 @@
       showNotice(tr("gui.encoding.open_before_repair", "Open an archive before repairing filename encoding"));
       return;
     }
+    dismissArchiveAddPreparation();
     clearEntryPreviewState();
     const request = { generation: archiveOpenGeneration };
     filenameEncodingRequest = request;

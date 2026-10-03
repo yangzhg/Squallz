@@ -5,6 +5,12 @@ import vm from "node:vm";
 import ts from "typescript";
 import { createTestServer } from "../../tests/runtime.mjs";
 
+function deferred() {
+  let resolve, reject;
+  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+
 async function loadEditing(overrides = {}) {
   const server = await createTestServer();
   let helpers;
@@ -26,6 +32,7 @@ async function loadEditing(overrides = {}) {
     "submitRenameSelectedJob", "selectedDeletePaths", "submitDeleteSelectedJob", "submitCurrentArchiveJob",
     "openArchiveEditor", "submitAddToArchiveJob", "archiveEditSubmissionFailure", "showArchiveEditError", "jobSubmitBlockedMessage",
     "archiveEditSelectedPaths", "archiveEditorBlockedReason", "validateArchiveEditContext", "archiveEditCheckIsCurrent",
+    "setScreen", "setMode", "openRecoverySet", "dismissArchivePicker", "isCurrentArchiveAddPreparation", "dismissArchiveAddPreparation",
   ]);
   const declarations = source.statements.filter(
     (node) => (ts.isFunctionDeclaration(node) && names.has(node.name?.text))
@@ -44,7 +51,14 @@ async function loadEditing(overrides = {}) {
     currentArchive: { id: 17, source: "/tmp/archive-editing.zip", encoding_override: "gbk" },
     archiveOpenGeneration: 0,
     archiveOpenStatus: "idle",
-    archiveAddPending: false,
+    archiveAddPreparation: null,
+    screen: "browse",
+    mode: "modern",
+    firstRunDropFeedback: null,
+    savedModeChoice: "modern",
+    persistUiMode: (next) => { context.mode = next; return Promise.resolve(true); },
+    trackAppearanceSave: (_section, _promise, _failure, saved) => saved(),
+    archivePickerRequest: null,
     createContentPolicy: "custom",
     createExcludeRules: () => ["*.bak"],
     createCompressionLevel: () => 8,
@@ -69,9 +83,45 @@ async function loadEditing(overrides = {}) {
     renameSelectedDisabledReason: () => "",
     moveSelectedDisabledReason: () => "",
     openArchiveFirstLabel: () => "Open an archive first",
-    document: { activeElement: null },
+    document: { activeElement: null, documentElement: {}, body: {}, querySelectorAll: () => [] },
     HTMLElement: class {},
-    setScreen: () => {},
+    preventCreateSubmissionNavigation: () => false,
+    preventConvertSubmissionNavigation: () => false,
+    filenameEncodingRequest: null,
+    checksumCopyRequest: null,
+    extractDestinationPicker: null,
+    archivePasswordPrompt: null,
+    previewPasswordPrompt: null,
+    dismissCreatePreparation: () => {},
+    dismissRecoveryPreparation: () => {},
+    cancelPendingArchiveOpen: () => {},
+    cancelArchivePasswordPrompt: () => {},
+    recordValidationRenderReady: () => {},
+    clearEntryPreviewState: () => {},
+    dismissArchivePasswordRequest: () => {},
+    cancelTaskReview: () => {},
+    archiveUpdateReviewFocusPending: false,
+    archiveUpdateReview: { cancelSourceChoice: () => {} },
+    nestedExtractReviewFocusPending: false,
+    nestedExtractDraftGeneration: 0,
+    nestedExtractPickerRequest: 0,
+    nestedExtractPickerBusy: false,
+    batchReviewFocusPending: false,
+    batchPickerRequest: 0,
+    batchPickerBusy: false,
+    createPrimaryFocusPending: false,
+    extractReviewFocusPending: false,
+    convertReviewFocusPending: false,
+    securitySettingsFocusPending: false,
+    checksumResultFocusPending: null,
+    duplicateReportFocusPending: false,
+    pendingArchiveTaskReview: null,
+    pendingCreateSubmission: null,
+    createOptionsValidationAttempted: false,
+    classicCreateSection: "general",
+    discardPendingCreatePlan: () => {},
+    syncUrl: () => {},
+    tick: async () => {},
     loadedRows: () => [{ path: "destination/", entry_type: "dir" }],
     selectedPaths: () => new Set(["docs/a.txt"]),
     pathBaseName: (path) => path.split("/").at(-1),
@@ -97,13 +147,29 @@ async function loadEditing(overrides = {}) {
     }),
     ...overrides.ipc,
   };
-  const handlers = vm.runInNewContext(`${outputText}\n({ normalizeNewFolderPath, commitNewFolderName, submitNewFolderJob, normalizeMoveTargetDir, submitMoveSelectedJob, submitMoveKeepBoth, submitMoveReadyOnly, submitMovePlan, normalizeRenameTargetName, submitRenameSelectedJob, submitDeleteSelectedJob, openArchiveEditor, submitAddToArchiveJob, JobSubmitBlockedError })`, context);
+  const addPending = source.statements.filter(ts.isVariableStatement)
+    .flatMap((statement) => [...statement.declarationList.declarations])
+    .find((node) => node.name.getText(source) === "archiveAddPending")?.initializer;
+  assert.ok(addPending && ts.isCallExpression(addPending));
+  assert.equal(addPending.expression.getText(source), "$derived");
+  const pendingExpression = ts.transpileModule(`(${addPending.arguments[0].getText(source)})`, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022 },
+  }).outputText;
+  Object.defineProperty(context, "archiveAddPending", {
+    get: () => vm.runInNewContext(pendingExpression, context),
+  });
+  const handlers = vm.runInNewContext(`${outputText}\n({ normalizeNewFolderPath, commitNewFolderName, submitNewFolderJob, normalizeMoveTargetDir, submitMoveSelectedJob, submitMoveKeepBoth, submitMoveReadyOnly, submitMovePlan, normalizeRenameTargetName, submitRenameSelectedJob, submitDeleteSelectedJob, openArchiveEditor, submitAddToArchiveJob, setScreen, setMode, openRecoverySet, isCurrentArchiveAddPreparation, dismissArchiveAddPreparation, JobSubmitBlockedError })`, context);
   const reset = source.statements.find((node) => ts.isExpressionStatement(node)
     && node.getText(source).startsWith("$effect(") && node.getText(source).includes('archiveDirs.join("\\u0000")')
     && node.getText(source).includes("renameTargetName"));
   assert.ok(reset);
+  const resetAdd = source.statements.find((node) => ts.isExpressionStatement(node)
+    && node.getText(source).startsWith("$effect(") && node.getText(source).includes("archiveAddPreparation")
+    && node.getText(source).includes("isCurrentArchiveAddPreparation"));
+  assert.ok(resetAdd);
   return { ...handlers, submitted, notices, toasts, closed, context,
     refreshEditor: () => vm.runInNewContext(ts.transpileModule(reset.getText(source), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, context),
+    refreshAddPreparation: () => vm.runInNewContext(ts.transpileModule(resetAdd.getText(source), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, context),
   };
 }
 
@@ -288,7 +354,7 @@ test("late destination checks cannot queue edits after cancellation, refresh or 
 });
 
 test("adding files never follows an archive switch while the native picker is pending", async () => {
-  for (const change of ["switch", "close", "reopen", "opening", "encoding", "read-only", "refresh"]) {
+  for (const change of ["switch", "close", "reopen", "opening", "encoding", "read-only", "refresh", "leave", "leave-return"]) {
     const editing = await loadEditing();
     let select;
     editing.context.getDialogModule = async () => ({ open: () => new Promise((resolve) => { select = resolve; }) });
@@ -300,25 +366,114 @@ test("adding files never follows an archive switch while the native picker is pe
     if (change === "opening") editing.context.archiveOpenGeneration++;
     if (change === "encoding") editing.context.currentArchive.encoding_override = "shift_jis";
     if (change === "read-only" || change === "refresh") editing.context.archiveMutationDisabledReason = () => change;
+    if (change === "leave" || change === "leave-return") {
+      editing.setScreen("settingsGeneral");
+      if (change === "leave-return") editing.setScreen("browse");
+    }
+    editing.refreshAddPreparation();
+    assert.equal(editing.context.archiveAddPending, change === "read-only" || change === "refresh",
+      `${change}: accepted source/navigation changes release preparing immediately`);
     select(["/inputs/资料.txt"]);
     await pending;
     assert.equal(editing.submitted.length, 0, change);
-    assert.ok(editing.notices.length > 0, change);
+    if (change === "read-only" || change === "refresh") assert.deepEqual(editing.notices, [change], change);
+    else assert.deepEqual(editing.notices, [], change);
     assert.equal(editing.context.archiveAddPending, false);
   }
 });
 
 test("archive changes before dialog loading finishes prevent an obsolete picker", async () => {
-  const editing = await loadEditing();
-  let loaded;
-  let opened = 0;
-  editing.context.getDialogModule = () => new Promise((resolve) => { loaded = resolve; });
-  const pending = editing.submitAddToArchiveJob();
-  editing.context.archiveOpenGeneration++;
-  loaded({ open: async () => { opened++; return ["/inputs/资料.txt"]; } });
-  await pending;
-  assert.equal(opened, 0);
-  assert.equal(editing.submitted.length, 0);
+  for (const change of ["archive", "leave", "leave-return", "mode-return"]) {
+    const editing = await loadEditing();
+    let loaded;
+    let opened = 0;
+    editing.context.getDialogModule = () => new Promise((resolve) => { loaded = resolve; });
+    const pending = editing.submitAddToArchiveJob();
+    if (change === "archive") editing.context.archiveOpenGeneration++;
+    else if (change === "mode-return") {
+      editing.setMode("classic");
+      editing.setMode("modern");
+    } else {
+      editing.setScreen("settingsGeneral");
+      if (change === "leave-return") editing.setScreen("browse");
+    }
+    loaded({ open: async () => { opened++; return ["/inputs/资料.txt"]; } });
+    await pending;
+    assert.equal(opened, 0, `${change}: the expired preparation must not open a chooser`);
+    assert.equal(editing.submitted.length, 0, change);
+    assert.equal(editing.context.archiveAddPending, false, change);
+    assert.deepEqual(editing.notices, [], change);
+  }
+
+  const recovery = await loadEditing({ screen: "recovery" });
+  const oldRecoveryModule = deferred();
+  const currentRecoveryModule = deferred();
+  let recoveryModules = 0;
+  let recoveryPickers = 0;
+  recovery.context.getDialogModule = () => ++recoveryModules === 1
+    ? oldRecoveryModule.promise : currentRecoveryModule.promise;
+  const obsoleteRecoveryAdd = recovery.submitAddToArchiveJob();
+  recovery.openRecoverySet("/inputs/new.par2", recovery.context.currentArchive.source, "open-file");
+  assert.equal(recovery.context.screen, "recovery");
+  assert.equal(recovery.context.archiveAddPending, false, "same-page recovery open must immediately release obsolete Add preparation without an effect flush");
+  const recoveryNotices = [...recovery.notices];
+  const currentRecoveryAdd = recovery.submitAddToArchiveJob();
+  const currentRecoveryOwner = recovery.context.archiveAddPreparation;
+  assert.equal(recoveryModules, 2);
+  oldRecoveryModule.resolve({ open: async () => { recoveryPickers++; return ["/inputs/old.txt"]; } });
+  await obsoleteRecoveryAdd;
+  assert.equal(recoveryPickers, 0);
+  assert.equal(recovery.submitted.length, 0);
+  assert.equal(recovery.context.archiveAddPreparation, currentRecoveryOwner, "obsolete recovery Add completion must retain the new owner");
+  assert.equal(recovery.context.archiveAddPending, true);
+  assert.deepEqual(recovery.notices, recoveryNotices);
+  currentRecoveryModule.resolve({ open: async () => { recoveryPickers++; return ["/inputs/current.txt"]; } });
+  await currentRecoveryAdd;
+  assert.equal(recoveryPickers, 1);
+  assert.equal(recovery.submitted.length, 1);
+  assert.deepEqual([...recovery.submitted[0].add], ["/inputs/current.txt"]);
+  assert.equal(recovery.submitted[0].expected_archive_id, 17);
+  assert.equal(recovery.context.archiveAddPending, false);
+
+  for (const phase of ["module", "chooser"]) {
+    for (const rejectOld of [false, true]) {
+      const editing = await loadEditing();
+      const old = deferred();
+      const latest = deferred();
+      let modules = 0;
+      let opened = 0;
+      editing.context.getDialogModule = () => {
+        modules++;
+        if (modules > 1) return latest.promise;
+        return phase === "module" ? old.promise : Promise.resolve({
+          open: () => { opened++; return old.promise; },
+        });
+      };
+      const stale = editing.submitAddToArchiveJob();
+      await new Promise(setImmediate);
+      editing.setScreen("settingsGeneral");
+      assert.equal(editing.context.archiveAddPending, false, `${phase}: navigation releases preparation`);
+      editing.setScreen("browse");
+      const current = editing.submitAddToArchiveJob();
+      assert.equal(modules, 2, `${phase}: a new request starts without waiting for old native work`);
+      assert.equal(editing.context.archiveAddPending, true);
+      if (rejectOld) old.reject(new Error("old chooser unavailable"));
+      else old.resolve(phase === "module"
+        ? { open: async () => { opened++; return ["/inputs/old.txt"]; } }
+        : ["/inputs/old.txt"]);
+      await stale;
+      assert.equal(editing.context.archiveAddPending, true, `${phase}: old finally must retain new preparation`);
+      assert.equal(opened, phase === "module" ? 0 : 1);
+      assert.equal(editing.submitted.length, 0);
+      assert.deepEqual(editing.notices, []);
+      assert.deepEqual(editing.toasts, []);
+      latest.resolve({ open: async () => { opened++; return ["/inputs/current.txt"]; } });
+      await current;
+      assert.equal(editing.context.archiveAddPending, false);
+      assert.equal(editing.submitted.length, 1);
+      assert.deepEqual([...editing.submitted[0].add], ["/inputs/current.txt"]);
+    }
+  }
 });
 
 test("adding files captures settings once and rejects duplicate selection and submission", async () => {
@@ -332,6 +487,13 @@ test("adding files captures settings once and rejects duplicate selection and su
   const pending = editing.submitAddToArchiveJob();
   await new Promise(setImmediate);
   assert.equal(editing.context.archiveAddPending, true);
+  editing.setScreen("browse");
+  editing.setMode("modern");
+  editing.context.preventConvertSubmissionNavigation = () => true;
+  editing.setScreen("settingsGeneral");
+  editing.context.preventConvertSubmissionNavigation = () => false;
+  assert.equal(editing.context.screen, "browse");
+  assert.equal(editing.context.archiveAddPending, true, "same-page and blocked navigation retain the current preparation");
   await editing.submitAddToArchiveJob();
   assert.equal(opened, 1);
   editing.context.createContentPolicy = "keep_all_files";
@@ -346,6 +508,11 @@ test("adding files captures settings once and rejects duplicate selection and su
     kind: "update", path: "/tmp/archive-editing.zip", expected_archive_id: 17, encoding: "gbk", add: ["/inputs/资料.txt"],
     delete: [], rename: [], mkdir: [], excludes: ["*.bak"], content_policy: "custom", password: null, level: 8,
   });
+  editing.setScreen("settingsGeneral");
+  assert.equal(editing.context.screen, "settingsGeneral");
+  editing.refreshAddPreparation();
+  assert.equal(editing.context.archiveAddPreparation.phase, "submitting");
+  assert.equal(editing.context.archiveAddPending, true, "an already submitted task retains its slot until the service settles");
   submitted(1); await pending;
   assert.equal(editing.context.archiveAddPending, false);
   assert.equal(operations.length, 1);
@@ -370,6 +537,30 @@ test("add cancellation, picker failure, and submission errors release the action
     if (failure === "submit") assert.match(editing.toasts.at(-1).body, /desktop service/);
     if (failure === "error-dto") assert.equal(editing.toasts.at(-1).body, "error.io");
     if (failure === "blocked") assert.equal(editing.toasts.length, 0);
+    editing.context.getDialogModule = async () => ({ open: async () => ["/inputs/retry.txt"] });
+    editing.context.isJobSubmitBlocked = () => false;
+    editing.context.submitJob = async (spec) => { editing.submitted.push(spec); return 1; };
+    await editing.submitAddToArchiveJob();
+    assert.equal(editing.submitted.length, 1, `${failure}: the released action permits an explicit retry`);
+    assert.equal(operations.length, 1);
+    assert.equal(editing.context.archiveAddPending, false);
+  }
+
+  for (const phase of ["module", "chooser"]) {
+    const editing = await loadEditing();
+    const pendingError = deferred();
+    editing.context.getDialogModule = () => phase === "module" ? pendingError.promise
+      : Promise.resolve({ open: () => pendingError.promise });
+    const pending = editing.submitAddToArchiveJob();
+    await new Promise(setImmediate);
+    editing.setScreen("settingsGeneral");
+    editing.setScreen("browse");
+    pendingError.reject(new Error("expired chooser failure"));
+    await pending;
+    assert.equal(editing.submitted.length, 0, phase);
+    assert.deepEqual(editing.notices, [], phase);
+    assert.deepEqual(editing.toasts, [], phase);
+    assert.equal(editing.context.archiveAddPending, false);
   }
 });
 

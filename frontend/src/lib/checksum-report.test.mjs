@@ -89,6 +89,7 @@ function reportHarness({ navigation = false } = {}) {
     recoveryPar2Override: "/previous/recovery.par2", duplicateReportTaskId: 9,
     recoveryPickerStatus: "idle", recoveryPickerRequest: 0, recoveryOutputPreparation: null,
     dismissCreatePreparation() {},
+    dismissArchiveAddPreparation() {},
     checksumResultFocusPending: null, modeSelectionBlocked: false,
     duplicateReportFocusPending: false, createPrimaryFocusPending: true,
     extractReviewFocusPending: true, convertReviewFocusPending: true,
