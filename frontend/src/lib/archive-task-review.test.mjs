@@ -10,16 +10,21 @@ test.after(() => server.close());
 const { taskReviewScreen } = await server.ssrLoadModule("/src/lib/task-model.ts");
 const { SettingsSession } = await server.ssrLoadModule("/src/lib/settings-session.svelte.ts");
 const { ExtractPlanSession } = await server.ssrLoadModule("/src/lib/extract-plan.svelte.ts");
+const { PreviewSession } = await server.ssrLoadModule("/src/lib/preview-session.svelte.ts");
 const { ipc } = await server.ssrLoadModule("/src/lib/ipc.ts");
-const originalPlanIpc = { planExtract: ipc.planExtract, cancelExtractPlan: ipc.cancelExtractPlan };
+const originalPlanIpc = { planExtract: ipc.planExtract, cancelExtractPlan: ipc.cancelExtractPlan, cancelEntryPreview: ipc.cancelEntryPreview };
 let planSessions = [];
+let previewSessions = [];
 test.beforeEach(() => {
   Object.assign(ipc, originalPlanIpc);
   ipc.cancelExtractPlan = async () => {};
+  ipc.cancelEntryPreview = async () => {};
   planSessions = [];
+  previewSessions = [];
 });
 test.afterEach(() => {
   for (const session of planSessions) session.dispose();
+  for (const session of previewSessions) session.dispose();
   Object.assign(ipc, originalPlanIpc);
 });
 
@@ -101,12 +106,14 @@ function harness() {
       calls.push(["open", path, password, encoding]); context.currentArchive = archive(path, 2, encoding); return true;
     },
     cancelArchivePasswordPrompt: () => { context.archivePasswordPrompt = null; },
-    previewPasswordPrompt: null,
-    rememberRecent() {}, recordOperation() {}, clearEntryPreviewState() {}, recordValidationRenderReady() {},
+    previewSession: new PreviewSession(),
+    rememberRecent() {}, recordOperation() {}, clearEntryPreviewState: () => context.previewSession.clear(), recordValidationRenderReady() {},
     submitCurrentArchiveJob: async (job) => { calls.push(["submit", job]); return true; },
     archiveTitle: () => context.currentArchive?.name, taskPasswordReady: (value) => Boolean(value),
     adoptRecoveryTargetFromTask: (task) => { calls.push(["recovery", task.spec.path]); return true; },
   };
+  Object.defineProperty(context, "previewPasswordPrompt", { get: () => context.previewSession.passwordPrompt });
+  previewSessions.push(context.previewSession);
   context.settingsSession = new SettingsSession({ platform: context.platformKind, tr: context.tr, emit() {} });
   context.settingsSession.applySnapshot(settingsDto({ default_extract_dir: "/unrelated/default" }),
     context.settingsSession.captureGenerations());
@@ -641,8 +648,19 @@ test("overlapping task and archive or preview prompts keep their labels and answ
   for (const source of ["archive", "preview"]) {
     const run = harness();
     const context = run.context;
+    const answers = [];
+    let previewing;
     if (source === "archive") context.archivePasswordPrompt = { path: "/opening.zip", encoding: null, wrong: true };
-    else context.previewPasswordPrompt = { id: 3, name: "inner.7z", scope: "inner", wrong: true, busy: false };
+    else {
+      const preparation = context.previewSession.beginPreparation({ outerSource: "/original/photos.zip",
+        outerDisplayPath: "/original/photos.zip", entryPath: "inner.7z", virtualIndex: null }, "nested", "inner.7z");
+      previewing = context.previewSession.runPreparation(preparation, { outerName: "photos.zip", innerName: "inner.7z" }, async (passwords) => {
+        if (!passwords.inner) throw { key: "error.wrong_password", params: { password_scope: "inner" }, detail: "" };
+        answers.push(["preview", passwords.inner]);
+        return true;
+      }).finally(() => context.previewSession.finishPreparation(preparation));
+      await new Promise((resolve) => setImmediate(resolve));
+    }
     context.jobPasswordPrompt = { id: 8, version: 12, name: "background.zip", wrong: false };
     context.jobPasswordValue = "task-input";
     context.workspacePasswordValue = "workspace-input";
@@ -656,12 +674,11 @@ test("overlapping task and archive or preview prompts keep their labels and answ
     assert.match(taskQuestion.detail, /waiting/);
     workspace.onValueChange("workspace-retry");
     assert.equal(context.jobPasswordValue, "task-input");
-    const answers = [];
     context.openArchiveStore = async (_path, value) => { answers.push(["archive", value]); return false; };
-    context.previewPasswordFlow = { answer: (value) => { answers.push(["preview", value]); return true; } };
     context.answerJobPassword = async (value) => { answers.push(["task", value]); context.jobPasswordPrompt = null; return true; };
     context.returnTaskQuestionToCenter = () => {};
     await workspace.onSubmit();
+    await previewing;
     assert.deepEqual(answers, [[source, "workspace-retry"]]);
     assert.equal(context.jobPasswordValue, "task-input");
     assert.equal(context.workspacePasswordValue, "");

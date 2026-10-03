@@ -29,10 +29,11 @@ function info(total) {
 
 async function loadSelectionHandlers(archive, overrides = {}) {
   const server = await createTestServer();
-  let archiveSelectionRoots, ArchiveEditSession;
+  let archiveSelectionRoots, ArchiveEditSession, PreviewSession;
   try {
     ({ archiveSelectionRoots } = await server.ssrLoadModule("/src/lib/archive-editing.ts"));
     ({ ArchiveEditSession } = await server.ssrLoadModule("/src/lib/archive-edit-session.svelte.ts"));
+    ({ PreviewSession } = await server.ssrLoadModule("/src/lib/preview-session.svelte.ts"));
   } finally {
     await server.close();
   }
@@ -49,8 +50,8 @@ async function loadSelectionHandlers(archive, overrides = {}) {
     ...archive,
     archiveSelectionRoots,
     archiveSelectionBusyReason: () => "",
-    entryPreview: null, nestedPreview: null,
-    clearEntryPreviewState: () => {},
+    previewSession: new PreviewSession(),
+    clearEntryPreviewState: () => context.previewSession.clear(),
     recordValidationEvent: () => {},
     closeQuickActions: () => {},
     blockSelectionScopedAction: () => false,

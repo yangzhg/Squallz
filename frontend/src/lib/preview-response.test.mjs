@@ -25,6 +25,38 @@ const outerRows = ["inner.zip", "notes.txt"].map((path) => ({
   modified: null, crc: null, encrypted: false, encoding: "utf-8",
 }));
 
+function previewOrigin(entryPath, outerSource = "/archives/outer.zip", virtualIndex = null) {
+  return { outerSource, outerDisplayPath: outerSource, entryPath, virtualIndex };
+}
+
+function previewFailure(message, entryPath = "notes.txt", outerSource = "/archives/outer.zip") {
+  return {
+    entryPath, entryType: "file", displayName: entryPath.split("/").at(-1),
+    policyKind: entryPath.endsWith(".zip") ? "nested" : "system-file",
+    outerSource, outerDisplayPath: outerSource, message, retryAction: "preview",
+  };
+}
+
+function installPreparedPreview(session, preview, failure = null) {
+  const nested = "archive" in preview;
+  const preparation = session.beginPreparation(previewOrigin(preview.entry_path, preview.outer_path),
+    nested ? "nested" : "entry", preview.display_name ?? preview.entry_path);
+  assert.ok(preparation);
+  assert.equal(nested ? session.acceptNested(preparation, preview) : session.acceptFile(preparation, preview), true);
+  if (failure) session.failPreparation(preparation, failure);
+  session.finishPreparation(preparation);
+  return preparation;
+}
+
+function installPreviewFailure(session, failure, { busy = false } = {}) {
+  const preparation = session.beginPreparation(previewOrigin(failure.entryPath, failure.outerSource),
+    "entry", failure.displayName);
+  assert.ok(preparation);
+  session.failPreparation(preparation, failure);
+  if (!busy) session.finishPreparation(preparation);
+  return session.failure;
+}
+
 async function withNestedOpen(run, { systemOpen = false } = {}) {
   const server = await createTestServer();
   try {
@@ -44,13 +76,10 @@ async function withNestedOpen(run, { systemOpen = false } = {}) {
     ipc.listEntries = async () => { pageRequested.resolve(); return page.promise; };
     archive.installArchivePreview(archiveInfo(1), outerRows, { selected: ["inner.zip"] });
     const source = readSvelteScript(new URL("../App.svelte", import.meta.url), "App.ts");
-    const { createPreviewPasswordFlow } = await server.ssrLoadModule("/src/lib/preview-password.svelte.ts");
+    const { PreviewSession } = await server.ssrLoadModule("/src/lib/preview-session.svelte.ts");
     const recoveryResults = await server.ssrLoadModule("/src/lib/recovery-result.ts");
-    const systemOpenHelpers = systemOpen ? {
-      ...await server.ssrLoadModule("/src/lib/preview-response.ts"),
-      ...await server.ssrLoadModule("/src/lib/preview-presentation.ts"),
-    } : {};
-    const names = ["clearNotice", "cancelTaskReview", "nestedArchiveAction", "extractNestedPreviewArchive", "retryEntryPreview", "runPreviewWithPassword", "clearEntryPreviewState", "entryPreviewForPath", "hasPreparedPreviewForPath", "selectOnlyEntry", "selectEntry", "toggleEntrySelection", "activateEntry", "submitPasswordRequest", "cancelPasswordRequest", "dismissArchivePasswordRequest", "dismissArchivePicker", "setScreen", "openArchivePath", "openRecoverySet", "passwordPromptDetail", "submitPreviewEntry", "prepareEntryPreviewSerially", "disposeEntryPreview",
+    const systemOpenHelpers = systemOpen ? await server.ssrLoadModule("/src/lib/preview-presentation.ts") : {};
+    const names = ["clearNotice", "cancelTaskReview", "nestedArchiveAction", "extractNestedPreviewArchive", "retryEntryPreview", "runPreviewWithPassword", "clearEntryPreviewState", "entryPreviewForPath", "hasPreparedPreviewForPath", "selectOnlyEntry", "selectEntry", "toggleEntrySelection", "activateEntry", "submitPasswordRequest", "cancelPasswordRequest", "dismissArchivePasswordRequest", "dismissArchivePicker", "setScreen", "openArchivePath", "openRecoverySet", "passwordPromptDetail", "submitPreviewEntry",
       "chooseRecoveryArchive", "chooseRecoveryPar2", "useCurrentArchiveForRecovery", "useDefaultPar2ForRecovery",
       "recoverySourcePath", "recoverySourceName", "openRecoveryConfiguration", "adoptRecoveryTargetFromTask", "dismissRecoveryPreparation",
       "recoveryOutputContext", "isCurrentRecoveryOutputPreparation", "submitRecoveryOutputJob",
@@ -82,18 +111,14 @@ async function withNestedOpen(run, { systemOpen = false } = {}) {
       focusBlockingTaskIfAny: () => false,
       openExtractWorkspace: (scope) => { context.extractScope = scope; app.setScreen("extract"); },
       focusExtractReview: () => { context.extractFocused = true; },
-      previewPasswordFlow: createPreviewPasswordFlow(ipc.cancelEntryPreview), screen: "browse",
+      previewSession: new PreviewSession(), screen: "browse",
       jobPasswordPrompt: null, jobConflictPrompt: null, archivePasswordPrompt: null,
       workspacePasswordValue: "", workspacePasswordSubmissionAttempted: false,
       taskPasswordReady: (value) => value.length > 0, focusArchiveRow: async () => {},
       queueMicrotask,
-      entryPreviewPreparationTail: Promise.resolve(), previewSampleForEntry: () => null,
+      previewSampleForEntry: () => null,
       archiveLikePath: (path) => path.endsWith(".zip"), blockSelectionScopedAction: () => false,
       previewEntryDisplayName: (path) => path.split("/").at(-1), recordValidationEvent: () => {},
-      previewOriginEntryPath: null, previewOriginVirtualIndex: null,
-      previewRequestGeneration: 0, previewActionGeneration: 0,
-      nestedPreview: null, entryPreview: null, entryPreviewFailure: null,
-      previewPhase: "idle", previewTargetName: "",
       params: new URLSearchParams(), nestedPasswordPreviewSample: () => null,
       recoverySourceMode: "selected", recoverySourceOverride: "/previous.zip", recoveryPar2Override: "/previous.par2",
       recoveryPickerStatus: "idle", recoveryPickerRequest: 0, recoveryOutputPreparation: null,
@@ -124,10 +149,23 @@ async function withNestedOpen(run, { systemOpen = false } = {}) {
       tr: (_key, fallback) => fallback,
     };
     Object.defineProperty(context, "currentArchive", { get: () => archive.archive() });
-    Object.defineProperty(context, "previewPasswordPrompt", { get: () => context.previewPasswordFlow.prompt });
+    Object.defineProperties(context, {
+      entryPreview: { get: () => context.previewSession.file },
+      nestedPreview: { get: () => context.previewSession.nested },
+      entryPreviewFailure: { get: () => context.previewSession.failure },
+      previewOriginEntryPath: { get: () => context.previewSession.origin?.entryPath ?? null },
+      previewOriginVirtualIndex: { get: () => context.previewSession.origin?.virtualIndex ?? null },
+      previewPhase: { get: () => context.previewSession.phase },
+      previewTargetName: { get: () => context.previewSession.targetName },
+      previewPasswordPrompt: { get: () => context.previewSession.passwordPrompt },
+    });
     const outputText = compileTestScript(declarations.join("\n"));
     const app = vm.runInNewContext(`${outputText}\n({${names.join(",")}})`, context);
-    await run({ app, archive, ipc, closed, cancelledPreviews, page, pageRequested, context, notices, operations });
+    try {
+      await run({ app, archive, ipc, closed, cancelledPreviews, page, pageRequested, context, notices, operations });
+    } finally {
+      context.previewSession.dispose();
+    }
   } finally {
     await server.close();
   }
@@ -653,7 +691,8 @@ test("recovery output preparation preserves one snapshot and discards superseded
 });
 
 test("leaving a workspace cancels preparation and discards late files, nested previews, passwords and errors", async () => {
-  for (const [kind, origin] of [["file", "browse"], ["preview", "browse"], ["open", "browse"], ["file", "recovery"]]) {
+  for (const [kind, origin, disposing] of [["file", "browse"], ["preview", "browse"], ["open", "browse"], ["file", "recovery"],
+    ["file", "browse", true], ["preview", "browse", true]]) {
     for (const result of ["success", "password", "failure"]) {
       await withNestedOpen(async ({ app, archive, ipc, context, closed, cancelledPreviews, notices, operations, page }) => {
         const pending = deferred();
@@ -676,7 +715,9 @@ test("leaving a workspace cancels preparation and discards late files, nested pr
         assert.equal(context.appNotice, null, "an admitted file or nested action clears older feedback");
         await started.promise;
         const target = origin === "recovery" ? "browse" : kind === "preview" ? "recovery" : "settingsGeneral";
+        if (disposing) context.previewSession.dispose();
         app.setScreen(target);
+        if (disposing) assert.equal(context.previewSession.beginPreparation(previewOrigin("notes.txt"), "entry", "notes.txt"), null);
         assert.equal(context.previewPhase, "idle");
         assert.equal(cancelledPreviews.length, 1);
         if (kind === "open") app.setScreen("browse");
@@ -709,7 +750,9 @@ test("navigation releases ready previews, but a repeated or blocked route keeps 
   await withNestedOpen(async ({ app, context, ipc, closed }) => {
     const released = [];
     ipc.releasePreviewSession = async (id) => { released.push(id); return true; };
-    context.entryPreview = { preview_id: "ready-file" };
+    installPreparedPreview(context.previewSession, {
+      preview_id: "ready-file", outer_path: "/archives/outer.zip", entry_path: "notes.txt", display_name: "notes.txt",
+    });
     app.setScreen("browse");
     assert.equal(context.entryPreview.preview_id, "ready-file");
     context.preventCreateSubmissionNavigation = () => true;
@@ -721,7 +764,9 @@ test("navigation releases ready previews, but a repeated or blocked route keeps 
     assert.equal(context.entryPreview, null);
     assert.deepEqual(released, ["ready-file"]);
     app.setScreen("browse");
-    context.nestedPreview = { archive: archiveInfo(2, "inner.zip") };
+    installPreparedPreview(context.previewSession, {
+      outer_path: "/archives/outer.zip", entry_path: "inner.zip", archive: archiveInfo(2, "inner.zip"), items: [], truncated: false,
+    });
     app.setScreen("recovery");
     assert.equal(context.nestedPreview, null);
     assert.deepEqual(closed, [2]);
@@ -821,12 +866,12 @@ test("system opening and encoding repair keep preparation and feedback within th
     context.markExtractPresetDraftTouched = () => { draftUpdates += 1; };
     context.persistUiMode = (next) => { context.mode = next; return Promise.resolve(); };
     context.trackAppearanceSave = () => {};
-    function prepare(entry = preview) {
+    let preparedRequest;
+    function prepare(entry = preview, failure = previewFailure("current feedback", entry.entry_path, entry.outer_path)) {
       app.clearEntryPreviewState();
       archive.installArchivePreview(archiveInfo(1), outerRows, { selected: ["inner.zip"] });
       context.screen = "browse";
-      context.entryPreview = { ...entry };
-      context.entryPreviewFailure = { message: "current feedback" };
+      preparedRequest = installPreparedPreview(context.previewSession, { ...entry }, failure);
       context.previewPolicyFor = () => ({ kind: "system-file" });
       notices.length = 0;
       confirmations.length = 0;
@@ -840,7 +885,7 @@ test("system opening and encoding repair keep preparation and feedback within th
     }
     const confirm = async (...args) => { confirmations.push(args); return true; };
     async function repairEncoding() {
-      const generation = context.previewRequestGeneration;
+      const preparation = preparedRequest;
       const requests = [];
       ipc.openArchive = async (path, password, encoding) => {
         requests.push({ path, password, encoding });
@@ -854,7 +899,7 @@ test("system opening and encoding repair keep preparation and feedback within th
       app.setScreen("browse");
       app.setMode("modern");
       assert.equal(context.entryPreview, null, "encoding repair must dismiss the old prepared file before reopening");
-      assert.equal(context.previewRequestGeneration, generation + 1);
+      assert.equal(context.previewSession.isCurrent(preparation), false, "encoding repair invalidates its prepared request");
       assert.deepEqual(released, [preview.preview_id]);
       app.selectOnlyEntry({ source: outerRows[1], virtualIndex: 1 });
       await repairing;
@@ -869,7 +914,7 @@ test("system opening and encoding repair keep preparation and feedback within th
     }
 
     for (const change of ["cancel", "navigation", "archive", "selection", "encoding"]) {
-      prepare();
+      const preparedFeedback = prepare(preview, previewFailure("new feedback", preview.entry_path));
       const module = deferred();
       context.getDialogModule = () => module.promise;
       const opening = app.openEntryPreview();
@@ -878,8 +923,8 @@ test("system opening and encoding repair keep preparation and feedback within th
       if (change === "archive") archive.installArchivePreview(archiveInfo(3, "replacement.zip"), outerRows);
       if (change === "selection") app.selectOnlyEntry({ source: outerRows[1], virtualIndex: 1 });
       if (change === "encoding") await repairEncoding();
-      const feedback = { message: "new feedback" };
-      context.entryPreviewFailure = feedback;
+      const feedback = change === "archive" ? preparedFeedback
+        : installPreviewFailure(context.previewSession, previewFailure("new feedback"));
       const noticeCount = notices.length;
       module.resolve({ confirm });
       assert.equal(await opening, false, change);
@@ -902,7 +947,7 @@ test("system opening and encoding repair keep preparation and feedback within th
     }
 
     for (const change of ["archive", "encoding"]) {
-      prepare();
+      const preparedFeedback = prepare(preview, previewFailure("replacement archive feedback", preview.entry_path));
       const confirmation = deferred();
       const confirmationStarted = deferred();
       context.getDialogModule = async () => ({ confirm: (...args) => {
@@ -914,8 +959,8 @@ test("system opening and encoding repair keep preparation and feedback within th
       await confirmationStarted.promise;
       if (change === "archive") archive.installArchivePreview(archiveInfo(3, "replacement.zip"), outerRows);
       else await repairEncoding();
-      const changedSourceFeedback = { message: "replacement archive feedback" };
-      context.entryPreviewFailure = changedSourceFeedback;
+      const changedSourceFeedback = change === "archive" ? preparedFeedback
+        : installPreviewFailure(context.previewSession, previewFailure("replacement archive feedback"));
       const noticeCount = notices.length;
       confirmation.resolve(true);
       assert.equal(await awaitingConfirmation, false, change);
@@ -1033,9 +1078,9 @@ test("system opening and encoding repair keep preparation and feedback within th
       const opening = app.openEntryPreview();
       await requested.promise;
       app.clearEntryPreviewState();
-      context.entryPreview = { ...preview, preview_id: "newer-preview" };
-      const feedback = { message: "newer preview feedback" };
-      context.entryPreviewFailure = feedback;
+      installPreparedPreview(context.previewSession, { ...preview, preview_id: "newer-preview" },
+        previewFailure("newer preview feedback", preview.entry_path));
+      const feedback = context.previewSession.failure;
       if (result === "success") response.resolve();
       else response.reject(new Error("expired system-open failure"));
       assert.equal(await opening, false, result);
@@ -1050,10 +1095,10 @@ test("system opening and encoding repair keep preparation and feedback within th
 test("opening a nested preview adopts its existing handle without another extraction or password request", async () => {
   for (const action of ["panel", "row", "click", "checkbox"]) {
     await withNestedOpen(async ({ app, archive, ipc, page, pageRequested, context, closed }) => {
-      context.nestedPreview = {
+      installPreparedPreview(context.previewSession, {
         outer_path: "/archives/outer.zip", entry_path: "inner.zip",
         archive: archiveInfo(2, "inner.zip"), items: [], truncated: false,
-      };
+      });
       ipc.openNestedArchive = async () => { assert.fail("the prepared archive must be reused"); };
       const row = { source: outerRows[0], virtualIndex: 0 };
       if (action === "click") await app.selectEntry(row);
@@ -1077,11 +1122,12 @@ test("opening a nested preview adopts its existing handle without another extrac
   }
   for (const mismatch of ["entry", "source", "failure"]) {
     await withNestedOpen(async ({ app, archive, context, closed }) => {
-      if (mismatch !== "failure") context.nestedPreview = {
-        outer_path: mismatch === "source" ? "/archives/other.zip" : "/archives/outer.zip",
-        entry_path: "inner.zip", archive: archiveInfo(2, "inner.zip"), items: [], truncated: false,
-      };
-      context.entryPreviewFailure = { entryPath: "inner.zip", message: "previous feedback" };
+      const source = mismatch === "source" ? "/archives/other.zip" : "/archives/outer.zip";
+      const failure = previewFailure("previous feedback", "inner.zip", source);
+      if (mismatch === "failure") installPreviewFailure(context.previewSession, failure);
+      else installPreparedPreview(context.previewSession, {
+        outer_path: source, entry_path: "inner.zip", archive: archiveInfo(2, "inner.zip"), items: [], truncated: false,
+      }, failure);
       const index = mismatch === "entry" ? 1 : 0;
       app.selectOnlyEntry({ source: outerRows[index], virtualIndex: index });
       assert.equal(archive.archive().id, 1, mismatch);
@@ -1095,10 +1141,10 @@ test("opening a nested preview adopts its existing handle without another extrac
 test("extracting a nested preview opens the shared extraction workspace with the verified source", async () => {
   await withNestedOpen(async ({ app, archive, ipc, page, context, closed }) => {
     const inner = { ...archiveInfo(2, "inner.zip"), source: "squallz-archive://2" };
-    context.nestedPreview = {
+    installPreparedPreview(context.previewSession, {
       outer_path: "/archives/outer.zip", entry_path: "inner.zip",
       archive: inner, items: [], truncated: false,
-    };
+    });
     ipc.openNestedArchive = async () => { assert.fail("do not extract the inner archive again"); };
     let addCancellations = 0;
     context.dismissArchiveAddPreparation = () => { addCancellations += 1; };
@@ -1129,10 +1175,10 @@ test("extracting a nested preview opens the shared extraction workspace with the
 test("leaving or dismissing during preview extraction keeps the current archive and releases the inner source", async () => {
   for (const action of ["leave", "leave-return", "dismiss"]) {
     await withNestedOpen(async ({ app, archive, page, pageRequested, context, closed }) => {
-      context.nestedPreview = {
+      installPreparedPreview(context.previewSession, {
         outer_path: "/archives/outer.zip", entry_path: "inner.zip",
         archive: archiveInfo(2, "inner.zip"), items: [], truncated: false,
-      };
+      });
       const extracting = app.extractNestedPreviewArchive();
       await pageRequested.promise;
       if (action === "leave") app.setScreen("settingsGeneral");
@@ -1150,10 +1196,10 @@ test("leaving or dismissing during preview extraction keeps the current archive 
 
 test("retrying a failed prepared listing preserves the extraction intent", async () => {
   await withNestedOpen(async ({ app, archive, ipc, page, context, closed }) => {
-    context.nestedPreview = {
+    installPreparedPreview(context.previewSession, {
       outer_path: "/archives/outer.zip", entry_path: "inner.zip",
       archive: archiveInfo(2, "inner.zip"), items: [], truncated: false,
-    };
+    });
     page.reject(new Error("list failed"));
     await app.extractNestedPreviewArchive();
     assert.equal(archive.archive().id, 1);
@@ -1172,23 +1218,27 @@ test("retrying a failed prepared listing preserves the extraction intent", async
 
 test("dismissing a nested preview releases it once and cancellation during adoption releases the transferred handle", async () => {
   for (const duringAdoption of [false, true]) {
-    await withNestedOpen(async ({ app, archive, page, pageRequested, context, closed }) => {
-      context.nestedPreview = {
-        outer_path: "/archives/outer.zip", entry_path: "inner.zip",
-        archive: archiveInfo(2, "inner.zip"), items: [], truncated: false,
-      };
-      let opening;
-      if (duringAdoption) {
-        opening = app.nestedArchiveAction("open", "/archives/outer.zip", "inner.zip");
-        await pageRequested.promise;
-      }
-      app.clearEntryPreviewState();
-      app.clearEntryPreviewState();
-      page.resolve({ items: [], total: 0, page: 0 });
-      await opening;
-      assert.equal(archive.archive().id, 1);
-      assert.deepEqual(closed, [2]);
-    });
+    for (const disposing of [false, true]) {
+      await withNestedOpen(async ({ app, archive, page, pageRequested, context, closed }) => {
+        installPreparedPreview(context.previewSession, {
+          outer_path: "/archives/outer.zip", entry_path: "inner.zip",
+          archive: archiveInfo(2, "inner.zip"), items: [], truncated: false,
+        });
+        let opening;
+        if (duringAdoption) {
+          opening = app.nestedArchiveAction("open", "/archives/outer.zip", "inner.zip");
+          await pageRequested.promise;
+        }
+        if (disposing) context.previewSession.dispose();
+        app.clearEntryPreviewState();
+        app.clearEntryPreviewState();
+        if (disposing) assert.equal(context.previewSession.beginPreparation(previewOrigin("inner.zip"), "nested", "inner.zip"), null);
+        page.resolve({ items: [], total: 0, page: 0 });
+        await opening;
+        assert.equal(archive.archive().id, 1);
+        assert.deepEqual(closed, [2]);
+      });
+    }
   }
 });
 
@@ -1219,10 +1269,7 @@ test("a late nested preview releases the prepared archive after dismissal", asyn
       assert.deepEqual(encodings, ["gbk", "big5"], "preview reads the current encoding for each password attempt");
       if (action === "same-row-selection") app.selectOnlyEntry({ source: outerRows[0], virtualIndex: 0 });
       else app.clearEntryPreviewState();
-      const feedback = { message: "newer preview feedback" };
-      context.entryPreviewFailure = feedback;
-      context.previewPhase = "entry";
-      context.previewTargetName = "notes.txt";
+      const feedback = installPreviewFailure(context.previewSession, previewFailure("newer preview feedback"), { busy: true });
       pending.resolve({ outer_path: "/archives/outer.zip", entry_path: "inner.zip", archive: archiveInfo(2, "inner.zip"), items: [], truncated: false });
       await previewing;
       assert.equal(archive.archive().id, 1);

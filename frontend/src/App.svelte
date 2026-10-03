@@ -143,7 +143,6 @@
     type NamedArchivePreset,
     type PostSuccessAction,
     type LanguageDto,
-    type NestedArchivePreviewDto,
     type SettingsDto,
     type SfxCreateCapabilityDto,
     type SourceCleanupRecoveryNotice,
@@ -232,11 +231,7 @@
   import { nestedExtractJob, reviewNestedExtract, type NestedExtractDraft } from "./lib/nested-extract";
   import { ArchiveUpdateReview } from "./lib/archive-update.svelte";
   import { previewSystemOpenRequiresConfirmation } from "./lib/preview-presentation";
-  import {
-    previewResponseIsCurrent,
-    type PreviewResponseIdentity,
-  } from "./lib/preview-response";
-  import { createPreviewPasswordFlow } from "./lib/preview-password.svelte";
+  import { PreviewSession, type PreviewPreparation } from "./lib/preview-session.svelte";
   import {
     activeTask,
     answerConflict as answerJobConflict,
@@ -424,7 +419,6 @@
     canRename: boolean;
     isDir: boolean;
   };
-  type PreviewPhase = "idle" | "entry" | "nested";
   type PreviewPolicyKind = "none" | "folder" | "nested" | "system-file";
   type PreviewPolicyCode =
     | "no_archive"
@@ -441,16 +435,6 @@
     label: string;
     code: PreviewPolicyCode;
     disabledReason: string;
-  };
-  type PreviewFailure = {
-    entryPath: string;
-    entryType: EntryDto["entry_type"] | null;
-    displayName: string;
-    policyKind: PreviewPolicyKind;
-    outerSource: string;
-    outerDisplayPath: string;
-    message: string;
-    retryAction: "preview" | "open" | "extract";
   };
   type ValidationWindow = Window & {
     __squallzValidationSetScreen?: (next: Screen) => boolean;
@@ -496,8 +480,8 @@
   let jobRows = $derived(tasks());
   let activeCurrentTask = $derived(activeTask());
   let jobPasswordPrompt = $derived(pendingPassword());
-  const previewPasswordFlow = createPreviewPasswordFlow(ipc.cancelEntryPreview);
-  let previewPasswordPrompt = $derived(previewPasswordFlow.prompt);
+  const previewSession = new PreviewSession();
+  let previewPasswordPrompt = $derived(previewSession.passwordPrompt);
   let archivePasswordPrompt = $derived(openPasswordPrompt());
   let activeJobPasswordPromptIdentity = $derived(
     jobPasswordPrompt ? `${jobPasswordPrompt.id}:${jobPasswordPrompt.version}` : null,
@@ -841,16 +825,13 @@
   let createPreflightCleanup: (() => void) | null = null;
   let createPreflightListenPromise: Promise<void> | null = null;
   let preflightEventsClosed = false;
-  let nestedPreview = $state<NestedArchivePreviewDto | null>(null);
-  let entryPreview = $state<EntryPreviewDto | null>(null);
-  let entryPreviewFailure = $state<PreviewFailure | null>(null);
-  let previewOriginEntryPath: string | null = null;
-  let previewOriginVirtualIndex: number | null = null;
-  let previewPhase = $state<PreviewPhase>("idle");
-  let previewTargetName = $state("");
-  let previewRequestGeneration = 0;
-  let previewActionGeneration = 0;
-  let entryPreviewPreparationTail: Promise<void> = Promise.resolve();
+  let nestedPreview = $derived(previewSession.nested);
+  let entryPreview = $derived(previewSession.file);
+  let entryPreviewFailure = $derived(previewSession.failure);
+  let previewOriginEntryPath = $derived(previewSession.origin?.entryPath ?? null);
+  let previewOriginVirtualIndex = $derived(previewSession.origin?.virtualIndex ?? null);
+  let previewPhase = $derived(previewSession.phase);
+  let previewTargetName = $derived(previewSession.targetName);
   const archiveEdit = new ArchiveEditSession(
     () => ({
       archive: currentArchive, generation: archiveOpenGeneration, opening: archiveOpenStatus !== "idle",
@@ -1421,7 +1402,17 @@
       },
     );
     browseScrollTop = 0;
-    nestedPreview = preview.nestedPreview;
+    if (preview.nestedPreview) {
+      const nested = preview.nestedPreview;
+      const preparation = previewSession.beginPreparation({
+        outerSource: nested.outer_path, outerDisplayPath: preview.info.path,
+        entryPath: nested.entry_path, virtualIndex: null,
+      }, "nested", pathBaseName(nested.entry_path));
+      if (preparation) {
+        previewSession.acceptNested(preparation, nested);
+        previewSession.finishPreparation(preparation);
+      }
+    }
   });
 
   onMount(() => {
@@ -1513,6 +1504,7 @@
     createPrimaryFocusPending = null;
     createPreflight.dispose();
     archiveEdit.dispose();
+    previewSession.dispose();
     archiveEditReturnFocus = null;
     moveConflictReturnFocus = null;
     createPreflightCleanup?.();
@@ -5381,20 +5373,12 @@
   }
 
   function entryPreviewForPath(entryPath: string): EntryPreviewDto | null {
-    if (
-      !currentArchive ||
-      (entryPreview?.outer_path !== currentArchive.source && entryPreview?.outer_path !== currentArchive.path)
-    ) {
-      return null;
-    }
-    return entryPreview.entry_path === entryPath ? entryPreview : null;
+    return currentArchive
+      ? previewSession.fileFor(currentArchive.source, currentArchive.path, entryPath) : null;
   }
 
   function hasPreparedPreviewForPath(entryPath: string): boolean {
-    return Boolean(entryPreviewForPath(entryPath) || (
-      currentArchive && nestedPreview?.outer_path === currentArchive.source
-      && nestedPreview.entry_path === entryPath
-    ));
+    return Boolean(currentArchive && previewSession.hasPrepared(currentArchive.source, currentArchive.path, entryPath));
   }
 
   function isEntryPreviewActive(entry: DisplayEntry): boolean {
@@ -5416,61 +5400,11 @@
     );
   }
 
-  async function disposeEntryPreview(previewId: string): Promise<void> {
-    await ipc.releasePreviewSession(previewId).catch(() => undefined);
-  }
-
-  async function prepareEntryPreviewSerially(
-    archiveSource: string,
-    archivePath: string | null,
-    entryPath: string,
-    requestGeneration: number,
-  ): Promise<EntryPreviewDto | null> {
-    const previous = entryPreviewPreparationTail;
-    let releaseSlot: () => void = () => undefined;
-    entryPreviewPreparationTail = new Promise<void>((resolve) => {
-      releaseSlot = resolve;
-    });
-    await previous;
-    try {
-      if (requestGeneration !== previewRequestGeneration) return null;
-      return (
-        (archivePath
-          ? previewSampleForEntry(archivePath, entryPath)
-          : null) ??
-        (await runPreviewWithPassword(
-          requestGeneration,
-          archivePath ?? archiveSource,
-          entryPath,
-          (passwords, requestId) => ipc.previewArchiveEntry(
-            archiveSource, entryPath, passwords.outer, archiveEncodingForJob(), requestId,
-          ),
-        ))
-      );
-    } finally {
-      releaseSlot();
-    }
-  }
-
   function clearEntryPreviewState(restoreEntryFocus = false) {
-    previewPasswordFlow.cancel();
-    const preview = entryPreview;
-    const inner = nestedPreview;
-    const originEntryPath = previewOriginEntryPath;
-    const originVirtualIndex = previewOriginVirtualIndex;
-    previewRequestGeneration += 1;
-    previewActionGeneration += 1;
-    nestedPreview = null;
-    entryPreview = null;
-    entryPreviewFailure = null;
-    previewOriginEntryPath = null;
-    previewOriginVirtualIndex = null;
-    previewPhase = "idle";
-    previewTargetName = "";
-    if (preview) void disposeEntryPreview(preview.preview_id);
-    if (inner) void ipc.closeArchive(inner.archive.id).catch(() => undefined);
-    if (restoreEntryFocus && originVirtualIndex !== null) {
-      queueMicrotask(() => void focusArchiveRow(originVirtualIndex, originEntryPath));
+    const origin = previewSession.clear();
+    if (restoreEntryFocus && origin && origin.virtualIndex !== null) {
+      const { virtualIndex, entryPath } = origin;
+      queueMicrotask(() => void focusArchiveRow(virtualIndex, entryPath));
     }
   }
 
@@ -8359,20 +8293,20 @@
   }
 
   async function runPreviewWithPassword<T>(
-    requestGeneration: number,
+    preparation: PreviewPreparation,
     outerDisplayPath: string,
     entryPath: string,
     operation: (passwords: NestedArchivePasswords, requestId: string) => Promise<T>,
+    options = { serial: false },
   ): Promise<T | null> {
     try {
-      return await previewPasswordFlow.run({
+      return await previewSession.runPreparation(preparation, {
         outerName: pathBaseName(outerDisplayPath),
         innerName: pathBaseName(entryPath),
-        isCurrent: () => requestGeneration === previewRequestGeneration,
-      }, operation);
+      }, operation, options);
     } finally {
       if (
-        requestGeneration === previewRequestGeneration && screen === "password" &&
+        previewSession.isCurrent(preparation) && screen === "password" &&
         !jobPasswordPrompt && !jobConflictPrompt && !archivePasswordPrompt
       ) {
         setScreen("browse");
@@ -9987,8 +9921,6 @@
       return;
     }
     if (blockSelectionScopedAction()) return;
-    previewOriginEntryPath = entryPath;
-    previewOriginVirtualIndex = virtualIndex;
     if (archiveLikePath(entryPath)) {
       await nestedArchiveAction("preview", currentArchive.source, entryPath, virtualIndex);
       return;
@@ -9996,50 +9928,40 @@
     clearNotice();
     const archivePath = currentArchive.path;
     const archiveSource = currentArchive.source;
+    const origin = { outerSource: archiveSource, outerDisplayPath: archivePath, entryPath, virtualIndex };
     const preparedEntry = entryPreviewForPath(entryPath);
     if (preparedEntry) {
-      previewPhase = "entry";
-      previewTargetName = preparedEntry.display_name;
+      const preparation = previewSession.beginPreparedFileOpen(preparedEntry, origin);
+      if (!preparation) return;
       const opened = await openEntryPreview(preparedEntry);
-      if (entryPreview?.preview_id === preparedEntry.preview_id) {
-        previewPhase = "idle";
-        previewTargetName = "";
-      }
+      previewSession.finishPreparation(preparation);
       if (opened) clearEntryPreviewState();
       return;
     }
-    clearEntryPreviewState();
-    previewOriginEntryPath = entryPath;
-    previewOriginVirtualIndex = virtualIndex;
-    const requestGeneration = ++previewRequestGeneration;
-    previewPhase = "entry";
-    previewTargetName = previewEntryDisplayName(entryPath);
+    const preparation = previewSession.beginPreparation(origin, "entry", previewEntryDisplayName(entryPath));
+    if (!preparation) return;
     recordValidationEvent("frontend.entry.preview_requested", {
       entry_path: entryPath,
     });
     try {
       await waitForPreviewFeedbackFrame();
-      if (requestGeneration !== previewRequestGeneration) return;
-      const preparedPreview = await prepareEntryPreviewSerially(
-        archiveSource,
+      if (!previewSession.isCurrent(preparation)) return;
+      const preparedPreview = await runPreviewWithPassword(
+        preparation,
         archivePath,
         entryPath,
-        requestGeneration,
+        async (passwords, requestId) => previewSampleForEntry(archivePath, entryPath)
+          ?? ipc.previewArchiveEntry(archiveSource, entryPath, passwords.outer, archiveEncodingForJob(), requestId),
+        { serial: true },
       );
       if (!preparedPreview) return;
-      if (requestGeneration !== previewRequestGeneration) {
-        void disposeEntryPreview(preparedPreview.preview_id);
-        return;
-      }
-      entryPreview = preparedPreview;
-      nestedPreview = null;
-      entryPreviewFailure = null;
+      if (!previewSession.acceptFile(preparation, preparedPreview)) return;
       recordValidationEvent("frontend.entry.preview_loaded", {
         entry_path: entryPath,
-        display_name: entryPreview.display_name,
+        display_name: preparedPreview.display_name,
       });
-      if (!await openEntryPreview(entryPreview)) return;
-      if (requestGeneration !== previewRequestGeneration) return;
+      if (!await openEntryPreview(preparedPreview)) return;
+      if (!previewSession.isCurrent(preparation)) return;
       recordOperation({
         status: "info",
         title: tr("gui.preview.operation_title", "Archive entry opened"),
@@ -10047,7 +9969,7 @@
       });
       clearEntryPreviewState();
     } catch (error) {
-      if (requestGeneration !== previewRequestGeneration) return;
+      if (!previewSession.isCurrent(preparation)) return;
       const failurePolicy = previewPolicyFor(entryPath, entryType ?? entryTypeForPath(entryPath));
       const message = previewFailureMessage(
         error,
@@ -10055,7 +9977,7 @@
         "gui.preview.failed",
         "Could not open this item",
       );
-      entryPreviewFailure = {
+      previewSession.failPreparation(preparation, {
         entryPath,
         entryType: entryType ?? entryTypeForPath(entryPath),
         displayName: previewEntryDisplayName(entryPath),
@@ -10064,16 +9986,13 @@
         outerDisplayPath: archivePath,
         message,
         retryAction: "preview",
-      };
+      });
       recordValidationEvent("frontend.entry.preview_failed", {
         entry_path: entryPath,
         policy_kind: failurePolicy.kind,
       });
     } finally {
-      if (requestGeneration === previewRequestGeneration) {
-        previewPhase = "idle";
-        previewTargetName = "";
-      }
+      previewSession.finishPreparation(preparation);
     }
   }
 
@@ -10105,20 +10024,16 @@
     if (action !== "preview") dismissArchiveAddPreparation();
     const initialScreen = screen;
     const initialScreenGeneration = taskReviewRequestGeneration;
-    const prepared = action !== "preview" && nestedPreview?.outer_path === outerPath && nestedPreview.entry_path === entryPath
-      ? nestedPreview.archive : null;
-    if (prepared) nestedPreview = null;
-    clearEntryPreviewState();
-    previewOriginEntryPath = entryPath;
-    previewOriginVirtualIndex = virtualIndex;
-    const requestGeneration = ++previewRequestGeneration;
-    const isCurrent = () => requestGeneration === previewRequestGeneration
-      && (action !== "extract" || (screen === initialScreen
-        && (!prepared || initialScreenGeneration === taskReviewRequestGeneration)));
+    const prepared = action !== "preview" ? previewSession.takeNested(outerPath, entryPath) : null;
     const archiveDisplayPath = currentArchive?.path ?? outerPath;
     const encoding = action !== "preview" && currentArchive?.source === outerPath ? archiveEncodingForJob() : null;
-    previewPhase = "nested";
-    previewTargetName = pathBaseName(entryPath);
+    const preparation = previewSession.beginPreparation({
+      outerSource: outerPath, outerDisplayPath: archiveDisplayPath, entryPath, virtualIndex,
+    }, "nested", pathBaseName(entryPath));
+    if (!preparation) return;
+    const isCurrent = () => previewSession.isCurrent(preparation)
+      && (action !== "extract" || (screen === initialScreen
+        && (!prepared || initialScreenGeneration === taskReviewRequestGeneration)));
     if (action === "preview") recordValidationEvent("frontend.entry.nested_preview_requested", {
       entry_path: entryPath,
     });
@@ -10129,27 +10044,21 @@
         return;
       }
       const result = action === "preview" ? await runPreviewWithPassword(
-          requestGeneration,
+          preparation,
           archiveDisplayPath,
           entryPath,
           async (passwords, requestId) => nestedPasswordPreviewSample(params, outerPath, entryPath, passwords)
             ?? ipc.previewNestedArchive(outerPath, entryPath, passwords, archiveEncodingForJob(), requestId),
         ) : prepared ?? await runPreviewWithPassword(
-          requestGeneration,
+          preparation,
           currentArchive?.path ?? outerPath,
           entryPath,
           (passwords, requestId) => ipc.openNestedArchive(outerPath, entryPath, passwords, encoding, requestId),
         );
       if (!result) return;
       const info = "archive" in result ? result.archive : result;
-      if (!isCurrent()) {
-        void ipc.closeArchive(info.id).catch(() => undefined);
-        return;
-      }
       if ("archive" in result) {
-        nestedPreview = result;
-        entryPreview = null;
-        entryPreviewFailure = null;
+        if (!previewSession.acceptNested(preparation, result)) return;
         recordValidationEvent("frontend.entry.nested_preview_loaded", {
           entry_path: entryPath,
           entry_count: info.entry_count,
@@ -10161,6 +10070,10 @@
           detail: `${pathBaseName(entryPath)} · ${info.format.toUpperCase()}`,
         });
       } else {
+        if (!isCurrent()) {
+          void ipc.closeArchive(info.id).catch(() => undefined);
+          return;
+        }
         if (!await adoptOpenedArchive(info, isCurrent)) return;
         dismissRecoveryPreparation();
         recoverySourceMode = "current";
@@ -10188,7 +10101,7 @@
         action === "preview" ? "Could not preview this nested archive"
           : "Could not open this inner archive. Preview it or extract it instead.",
       );
-      entryPreviewFailure = {
+      previewSession.failPreparation(preparation, {
         entryPath,
         entryType: entryTypeForPath(entryPath),
         displayName: pathBaseName(entryPath),
@@ -10198,12 +10111,9 @@
           : currentArchive?.source === outerPath ? currentArchive.path : outerPath,
         message,
         retryAction: action,
-      };
+      });
     } finally {
-      if (requestGeneration === previewRequestGeneration) {
-        previewPhase = "idle";
-        previewTargetName = "";
-      }
+      previewSession.finishPreparation(preparation);
     }
   }
 
@@ -10213,18 +10123,9 @@
       showNotice(tr("gui.preview.preview_first", "Open a file entry first"));
       return;
     }
-    const responseIdentity: PreviewResponseIdentity = {
-      previewGeneration: previewRequestGeneration,
-      actionGeneration: ++previewActionGeneration,
-      previewId: preview.preview_id,
-      archiveSource: currentArchive?.source ?? null,
-    };
-    const responseIsCurrent = () => previewResponseIsCurrent(responseIdentity, {
-      previewGeneration: previewRequestGeneration,
-      actionGeneration: previewActionGeneration,
-      previewId: entryPreview?.preview_id ?? null,
-      archiveSource: currentArchive?.source ?? null,
-    });
+    const action = previewSession.beginFileAction(preview, currentArchive?.source ?? null);
+    if (!action) return;
+    const responseIsCurrent = () => previewSession.fileActionIsCurrent(action, currentArchive?.source ?? null);
     try {
       await ipc.revealPreviewSession(preview.preview_id);
       if (!responseIsCurrent()) return;
@@ -10250,19 +10151,10 @@
     }
     // Preparation already cleared its previous feedback before waiting for the file.
     if (previewPhase === "idle") clearNotice();
-    const responseIdentity: PreviewResponseIdentity = {
-      previewGeneration: previewRequestGeneration,
-      actionGeneration: ++previewActionGeneration,
-      previewId: preview.preview_id,
-      archiveSource: currentArchive?.source ?? null,
-    };
+    const action = previewSession.beginFileAction(preview, currentArchive?.source ?? null);
+    if (!action) return false;
     const outerDisplayPath = currentArchive?.path ?? preview.outer_path;
-    const responseIsCurrent = () => previewResponseIsCurrent(responseIdentity, {
-      previewGeneration: previewRequestGeneration,
-      actionGeneration: previewActionGeneration,
-      previewId: entryPreview?.preview_id ?? null,
-      archiveSource: currentArchive?.source ?? null,
-    });
+    const responseIsCurrent = () => previewSession.fileActionIsCurrent(action, currentArchive?.source ?? null);
     if (previewSystemOpenRequiresConfirmation(preview.entry_path)) {
       let confirmed: boolean;
       try {
@@ -10302,7 +10194,7 @@
     try {
       await ipc.openPreviewSession(preview.preview_id);
       if (!responseIsCurrent()) return false;
-      entryPreviewFailure = null;
+      previewSession.completeFileAction(action, currentArchive?.source ?? null);
       showNotice(tr("gui.preview.opened_system", "Opened: {name}").replace("{name}", preview.display_name));
       return true;
     } catch (error) {
@@ -10314,7 +10206,7 @@
         "Could not open this item. Try again or extract it instead.",
       ).replace("{name}", preview.display_name);
       const entryType = entryTypeForPath(preview.entry_path);
-      entryPreviewFailure = {
+      previewSession.failFileAction(action, currentArchive?.source ?? null, {
         entryPath: preview.entry_path,
         entryType,
         displayName: preview.display_name,
@@ -10323,7 +10215,7 @@
         outerDisplayPath,
         message,
         retryAction: "preview",
-      };
+      });
       return false;
     }
   }
@@ -11736,7 +11628,7 @@
     if (!taskPasswordReady(workspacePasswordValue)) return;
     workspacePasswordSubmissionAttempted = false;
     if (!archivePasswordPrompt && previewPasswordPrompt) {
-      if (previewPasswordFlow.answer(workspacePasswordValue)) workspacePasswordValue = "";
+      if (previewSession.answerPassword(workspacePasswordValue)) workspacePasswordValue = "";
       return;
     }
     const prompt = archivePasswordPrompt;
