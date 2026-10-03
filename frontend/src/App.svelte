@@ -11775,6 +11775,18 @@
     };
   }
 
+  function archiveEditSubmissionSuccess(): () => void {
+    const session = archiveEditSession;
+    const review = moveConflictReview;
+    return () => {
+      if (moveConflictReview === review) {
+        moveConflictReview = null;
+        moveConflictReturnFocus = null;
+      }
+      if (archiveEditKind !== null && archiveEditSession === session) closeArchiveEditor();
+    };
+  }
+
   function showArchiveEditError(message: string) {
     if (archiveEditKind !== null) archiveEditError = message;
     else showNotice(message);
@@ -11900,6 +11912,7 @@
     }
     if (!await validateArchiveEditTarget(to, () => normalizeRenameTargetName(renameTargetName, from))
       || !archiveEditCheckIsCurrent(session, id)) return;
+    const onSuccess = archiveEditSubmissionSuccess();
     const queued = await submitCurrentArchiveJob(
       {
         kind: "update",
@@ -11920,7 +11933,7 @@
       archiveEditSubmissionFailure(),
     );
     if (queued) {
-      closeArchiveEditor();
+      onSuccess();
       recordOperation({
         status: "queued",
         title: tr("gui.rename.queued", "Rename entry queued"),
@@ -12020,6 +12033,7 @@
       showNotice(tr("gui.move.no_non_conflicting_targets", "No non-conflicting move targets to submit"));
       return;
     }
+    const onSuccess = archiveEditSubmissionSuccess();
     const queued = await submitCurrentArchiveJob(
       {
         kind: "update",
@@ -12042,9 +12056,7 @@
       archiveEditSubmissionFailure(),
     );
     if (queued) {
-      moveConflictReview = null;
-      moveConflictReturnFocus = null;
-      closeArchiveEditor();
+      onSuccess();
       recordOperation({
         status: "queued",
         title: tr("gui.move.queued", "Move entries queued"),
@@ -12097,6 +12109,7 @@
     commitNewFolderName();
     if (!await validateArchiveEditTarget(folder, () => normalizeNewFolderPath())
       || !archiveEditCheckIsCurrent(session, id)) return;
+    const onSuccess = archiveEditSubmissionSuccess();
     const queued = await submitCurrentArchiveJob(
       {
         kind: "update",
@@ -12117,7 +12130,7 @@
       archiveEditSubmissionFailure(),
     );
     if (queued) {
-      closeArchiveEditor();
+      onSuccess();
       recordOperation({
         status: "queued",
         title: tr("gui.new_folder.queued", "New folder queued"),
