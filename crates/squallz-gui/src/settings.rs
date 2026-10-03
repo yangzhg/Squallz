@@ -2,13 +2,17 @@
 //! (macOS: `~/Library/Application Support/Squallz/settings.json`).
 
 use std::ffi::OsString;
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use crate::dto::SettingsDto;
-use squallz_core::lock_unpoisoned;
+use squallz_core::{
+    api::PhysicalFileIdentity, lock_unpoisoned, physical_file_identity, physical_path_identity,
+    replace_file_atomically,
+};
 
 static SETTINGS_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -84,99 +88,95 @@ fn write_settings_atomically(path: &Path, contents: &[u8]) -> io::Result<()> {
     temp_name.push(file_name);
     temp_name.push(format!(".tmp-{}-{sequence}", std::process::id()));
     let temp_path = path.with_file_name(temp_name);
-    write_settings_with_temp_path(path, &temp_path, contents)
+    let mut temporary = SettingsTempFile::create(temp_path)?;
+    temporary.file.write_all(contents)?;
+    temporary.file.sync_all()?;
+    temporary.publish(path)
 }
 
-fn write_settings_with_temp_path(path: &Path, temp_path: &Path, contents: &[u8]) -> io::Result<()> {
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-
-    let mut temp_file = options.open(temp_path)?;
-    let write_result = temp_file
-        .write_all(contents)
-        .and_then(|()| temp_file.sync_all());
-    drop(temp_file);
-
-    if let Err(error) = write_result {
-        let _ = std::fs::remove_file(temp_path);
-        return Err(error);
-    }
-    if let Err(error) = replace_settings_file(temp_path, path) {
-        let _ = std::fs::remove_file(temp_path);
-        return Err(error);
-    }
-    Ok(())
+/// Holds the created file open through publication and only cleans up its own
+/// directory entry. Identity checks reject an observed path substitution;
+/// pathname replacement still assumes a trusted settings directory.
+struct SettingsTempFile {
+    path: PathBuf,
+    file: File,
+    identity: PhysicalFileIdentity,
+    cleanup: bool,
 }
 
-#[cfg(not(target_os = "windows"))]
-fn replace_settings_file(temp_path: &Path, path: &Path) -> io::Result<()> {
-    std::fs::rename(temp_path, path)
-}
+impl SettingsTempFile {
+    fn create(path: PathBuf) -> io::Result<Self> {
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            use windows_sys::Win32::Storage::FileSystem::{
+                FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ,
+            };
+            options
+                .share_mode(FILE_SHARE_READ | FILE_SHARE_DELETE)
+                .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+        }
 
-#[cfg(target_os = "windows")]
-fn replace_settings_file(temp_path: &Path, path: &Path) -> io::Result<()> {
-    use std::iter;
-    use std::os::windows::ffi::OsStrExt;
+        let file = options.open(&path)?;
+        // If identity capture fails, leave the unverified pathname untouched.
+        let identity = physical_file_identity(&file)?;
+        let temporary = Self {
+            path,
+            file,
+            identity,
+            cleanup: true,
+        };
+        temporary.verify_ownership()?;
+        Ok(temporary)
+    }
 
-    use windows_sys::Win32::Storage::FileSystem::{
-        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
-    };
-
-    fn wide_path(path: &Path) -> io::Result<Vec<u16>> {
-        let mut value: Vec<u16> = path.as_os_str().encode_wide().collect();
-        if value.contains(&0) {
+    fn verify_ownership(&self) -> io::Result<()> {
+        if physical_file_identity(&self.file)? != self.identity
+            || physical_path_identity(&self.path)? != self.identity
+        {
             return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "settings path contains a null character",
+                io::ErrorKind::InvalidData,
+                "settings temporary file changed before publication",
             ));
         }
-        value.extend(iter::once(0));
-        Ok(value)
+        Ok(())
     }
 
-    let temp_path = wide_path(temp_path)?;
-    let path = wide_path(path)?;
-    // SAFETY: both pointers reference live, null-terminated UTF-16 buffers for
-    // the duration of this synchronous Windows API call.
-    let replaced = unsafe {
-        MoveFileExW(
-            temp_path.as_ptr(),
-            path.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    };
-    if replaced == 0 {
-        Err(io::Error::last_os_error())
-    } else {
+    fn publish(mut self, destination: &Path) -> io::Result<()> {
+        self.verify_ownership()?;
+        replace_file_atomically(&self.path, destination)?;
+        self.cleanup = false;
         Ok(())
+    }
+}
+
+impl Drop for SettingsTempFile {
+    fn drop(&mut self) {
+        if self.cleanup
+            && physical_file_identity(&self.file).ok() == Some(self.identity)
+            && physical_path_identity(&self.path).ok() == Some(self.identity)
+        {
+            let _ = fs::remove_file(&self.path);
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{write_settings_atomically, write_settings_with_temp_path, SettingsStore};
-
-    fn temp_settings_path(name: &str) -> std::path::PathBuf {
-        let mut path = std::env::temp_dir();
-        path.push(format!(
-            "squallz-settings-{name}-{}-{}.json",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        path
-    }
+    use super::{write_settings_atomically, SettingsStore, SettingsTempFile};
+    use std::io::Write;
 
     #[test]
     fn settings_store_persists_updates_and_reloads() {
-        let path = temp_settings_path("persist");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
         let store = SettingsStore::load_from_path(Some(path.clone()));
 
         let saved = store
@@ -254,12 +254,32 @@ mod tests {
         assert_eq!(reloaded.resource_options().threads, Some(8));
         assert_eq!(reloaded.performance_parallel_jobs, Some(3));
 
-        let _ = std::fs::remove_file(path);
+        let start = std::sync::Barrier::new(2);
+        std::thread::scope(|scope| {
+            let appearance = scope.spawn(|| {
+                start.wait();
+                store.update(|settings| settings.theme = Some("light".into()))
+            });
+            let limits = scope.spawn(|| {
+                start.wait();
+                store.update(|settings| settings.safety_max_entries = Some(23))
+            });
+            appearance.join().unwrap().unwrap();
+            limits.join().unwrap().unwrap();
+        });
+        let current = store.get();
+        assert_eq!(current.theme.as_deref(), Some("light"));
+        assert_eq!(current.safety_max_entries, Some(23));
+        assert_eq!(
+            serde_json::to_value(SettingsStore::load_from_path(Some(path)).get()).unwrap(),
+            serde_json::to_value(current).unwrap()
+        );
     }
 
     #[test]
     fn settings_store_invalid_json_uses_defaults_then_overwrites() {
-        let path = temp_settings_path("invalid");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
         std::fs::write(&path, "{not valid json").unwrap();
 
         let store = SettingsStore::load_from_path(Some(path.clone()));
@@ -276,13 +296,12 @@ mod tests {
         let reloaded = SettingsStore::load_from_path(Some(path.clone())).get();
         assert_eq!(reloaded.ui_mode.as_deref(), Some("classic"));
         assert_eq!(reloaded.resource_options().threads, Some(3));
-
-        let _ = std::fs::remove_file(path);
     }
 
     #[test]
     fn settings_store_recovers_after_current_lock_poison() {
-        let path = temp_settings_path("poison");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
         let store = SettingsStore::load_from_path(Some(path.clone()));
 
         let poison = std::panic::catch_unwind(|| {
@@ -309,13 +328,12 @@ mod tests {
         let reloaded = SettingsStore::load_from_path(Some(path.clone())).get();
         assert_eq!(reloaded.theme.as_deref(), Some("dark"));
         assert_eq!(reloaded.resource_options().threads, Some(4));
-
-        let _ = std::fs::remove_file(path);
     }
 
     #[test]
     fn settings_store_reports_write_failure_without_publishing_snapshot() {
-        let parent = temp_settings_path("blocked-parent");
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path().join("blocked-parent");
         std::fs::write(&parent, b"not a directory").expect("blocked parent fixture");
         let store = SettingsStore::load_from_path(Some(parent.join("settings.json")));
 
@@ -323,34 +341,92 @@ mod tests {
 
         assert!(result.is_err());
         assert_eq!(store.get().theme, None);
-        let _ = std::fs::remove_file(parent);
+        assert_eq!(std::fs::read(&parent).unwrap(), b"not a directory");
+
+        let path = dir.path().join("settings.json");
+        let store = SettingsStore::load_from_path(Some(path.clone()));
+        let saved = store
+            .update(|settings| {
+                settings.theme = Some("light".into());
+                settings.performance_threads = Some(2);
+            })
+            .unwrap();
+        let original = std::fs::read(&path).unwrap();
+        let backup = dir.path().join("saved.json");
+        std::fs::rename(&path, &backup).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        let sentinel = path.join("keep");
+        std::fs::write(&sentinel, b"keep directory contents").unwrap();
+
+        let result = store.update(|settings| {
+            settings.theme = Some("dark".into());
+            settings.performance_threads = Some(4);
+        });
+        assert!(result.is_err(), "replacing a nonempty directory must fail");
+        assert_eq!(
+            serde_json::to_value(store.get()).unwrap(),
+            serde_json::to_value(saved).unwrap()
+        );
+        assert_eq!(std::fs::read(&backup).unwrap(), original);
+        assert_eq!(
+            std::fs::read(&sentinel).unwrap(),
+            b"keep directory contents"
+        );
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 3);
     }
 
     #[test]
     fn atomic_settings_write_failure_preserves_existing_file() {
-        let dir = temp_settings_path("atomic-preserve");
-        std::fs::create_dir_all(&dir).expect("settings fixture directory");
-        let path = dir.join("settings.json");
-        let temp_path = dir.join("blocked-temp");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let temp_path = dir.path().join("settings.tmp");
         let original = br#"{"theme":"light"}"#;
         std::fs::write(&path, original).expect("existing settings fixture");
         std::fs::create_dir(&temp_path).expect("blocked temp fixture");
 
-        let result = write_settings_with_temp_path(&path, &temp_path, br#"{"theme":"dark"}"#);
+        assert!(SettingsTempFile::create(temp_path.clone()).is_err());
+        assert!(temp_path.is_dir());
+        std::fs::remove_dir(&temp_path).unwrap();
+        std::fs::write(&temp_path, b"foreign candidate").unwrap();
+        assert!(SettingsTempFile::create(temp_path.clone()).is_err());
+        assert_eq!(std::fs::read(&temp_path).unwrap(), b"foreign candidate");
+        std::fs::remove_file(&temp_path).unwrap();
 
-        assert!(result.is_err());
+        let mut temporary = SettingsTempFile::create(temp_path.clone()).unwrap();
+        temporary.file.write_all(b"owned contents").unwrap();
+        temporary.file.sync_all().unwrap();
+        let retained = dir.path().join("retained.tmp");
+        std::fs::rename(&temp_path, &retained).unwrap();
+        std::fs::write(&temp_path, b"foreign replacement").unwrap();
+        assert!(temporary.publish(&path).is_err());
+        assert_eq!(std::fs::read(&temp_path).unwrap(), b"foreign replacement");
+        assert_eq!(std::fs::read(&retained).unwrap(), b"owned contents");
+
+        #[cfg(unix)]
+        {
+            let link_path = dir.path().join("link.tmp");
+            let temporary = SettingsTempFile::create(link_path.clone()).unwrap();
+            let retained_link = dir.path().join("retained-link.tmp");
+            std::fs::rename(&link_path, &retained_link).unwrap();
+            std::os::unix::fs::symlink(&temp_path, &link_path).unwrap();
+            assert!(temporary.publish(&path).is_err());
+            assert!(std::fs::symlink_metadata(&link_path)
+                .unwrap()
+                .file_type()
+                .is_symlink());
+            assert_eq!(std::fs::read(&temp_path).unwrap(), b"foreign replacement");
+            assert_eq!(std::fs::read(&retained_link).unwrap(), b"");
+        }
         assert_eq!(
             std::fs::read(&path).expect("existing settings remain readable"),
             original
         );
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
     fn atomic_settings_write_replaces_existing_file() {
-        let dir = temp_settings_path("atomic-replace");
-        std::fs::create_dir_all(&dir).expect("settings fixture directory");
-        let path = dir.join("settings.json");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
         std::fs::write(&path, br#"{"theme":"light"}"#).expect("existing settings fixture");
 
         write_settings_atomically(&path, br#"{"theme":"dark"}"#)
@@ -360,6 +436,27 @@ mod tests {
             std::fs::read(&path).expect("replacement settings remain readable"),
             br#"{"theme":"dark"}"#
         );
-        let _ = std::fs::remove_dir_all(dir);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+
+            let referent = dir.path().join("referent.json");
+            std::fs::rename(&path, &referent).unwrap();
+            std::os::unix::fs::symlink(&referent, &path).unwrap();
+            write_settings_atomically(&path, br#"{"theme":"light"}"#).unwrap();
+            assert!(std::fs::symlink_metadata(&path).unwrap().is_file());
+            assert_eq!(std::fs::read(&path).unwrap(), br#"{"theme":"light"}"#);
+            assert_eq!(std::fs::read(&referent).unwrap(), br#"{"theme":"dark"}"#);
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
+        }
     }
 }
