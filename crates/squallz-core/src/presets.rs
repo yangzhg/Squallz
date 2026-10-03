@@ -971,8 +971,7 @@ fn validate_preset_bindings(
 }
 
 fn read_document(path: &Path) -> Result<PresetDocument, PresetError> {
-    let source = readable_document_path(path);
-    let file = match File::open(&source) {
+    let file = match File::open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             return Ok(PresetDocument::seeded());
@@ -1009,20 +1008,6 @@ fn decode_document(bytes: &[u8]) -> Result<PresetDocument, PresetError> {
     Ok(document)
 }
 
-fn readable_document_path(path: &Path) -> PathBuf {
-    if path.exists() {
-        return path.to_path_buf();
-    }
-    #[cfg(target_os = "windows")]
-    {
-        let backup = sibling_artifact_path(path, "backup", None);
-        if backup.exists() {
-            return backup;
-        }
-    }
-    path.to_path_buf()
-}
-
 fn write_document_atomically(path: &Path, contents: &[u8]) -> io::Result<()> {
     let sequence = PRESET_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let temp_path = sibling_artifact_path(path, "tmp", Some(sequence));
@@ -1040,51 +1025,11 @@ fn write_document_atomically(path: &Path, contents: &[u8]) -> io::Result<()> {
         let _ = fs::remove_file(&temp_path);
         return Err(error);
     }
-    if let Err(error) = replace_document_file(&temp_path, path) {
+    if let Err(error) = crate::replace_file_atomically(&temp_path, path) {
         let _ = fs::remove_file(&temp_path);
         return Err(error);
     }
     crate::sync_directory(crate::parent_or_current(path))
-}
-
-#[cfg(not(target_os = "windows"))]
-fn replace_document_file(temp_path: &Path, path: &Path) -> io::Result<()> {
-    fs::rename(temp_path, path)
-}
-
-#[cfg(target_os = "windows")]
-fn replace_document_file(temp_path: &Path, path: &Path) -> io::Result<()> {
-    let backup_path = sibling_artifact_path(path, "backup", None);
-    prepare_windows_replacement(path, &backup_path)?;
-    let had_current = path.exists();
-    if had_current {
-        fs::rename(path, &backup_path)?;
-    }
-    match fs::rename(temp_path, path) {
-        Ok(()) => {
-            if had_current {
-                fs::remove_file(backup_path)?;
-            }
-            Ok(())
-        }
-        Err(error) => {
-            if had_current {
-                let _ = fs::rename(&backup_path, path);
-            }
-            Err(error)
-        }
-    }
-}
-
-#[cfg(any(test, target_os = "windows"))]
-fn prepare_windows_replacement(path: &Path, backup_path: &Path) -> io::Result<()> {
-    if backup_path.exists() && !path.exists() {
-        fs::rename(backup_path, path)?;
-    }
-    if backup_path.exists() {
-        fs::remove_file(backup_path)?;
-    }
-    Ok(())
 }
 
 fn sibling_artifact_path(path: &Path, tag: &str, sequence: Option<u64>) -> PathBuf {
@@ -1103,16 +1048,15 @@ fn sibling_artifact_path(path: &Path, tag: &str, sequence: Option<u64>) -> PathB
 #[cfg(test)]
 mod tests {
     use super::{
-        cross_platform_create_preset, decode_document, format_id, prepare_windows_replacement,
-        preset_id, preset_label, sibling_artifact_path, smart_extract_preset,
-        validate_create_preset, validate_extract_preset, ByteSize, CreateCompletionAction,
-        CreateContentPolicy, CreateCredential, CreateDestination, CreateDestinationBase,
-        CreateOutput, CreatePreset, ExtractCredential, ExtractDestination, ExtractDestinationBase,
-        ExtractLayout, ExtractPreset, FormatSpecificOptions, NamedPreset, OverwritePolicy,
-        PostSuccessAction, PresetCompressionLevel, PresetDocument, PresetError, PresetStore,
-        SqzInnerFormat, SymlinkPolicy, VolumeMode, BALANCED_CREATE_PRESET_ID,
-        CROSS_PLATFORM_CREATE_PRESET_ID, MAX_PRESET_FILE_BYTES, MAX_SPLIT_SIZE_BYTES,
-        MIN_SPLIT_SIZE_BYTES, PRESET_SCHEMA_VERSION,
+        cross_platform_create_preset, decode_document, format_id, preset_id, preset_label,
+        smart_extract_preset, validate_create_preset, validate_extract_preset,
+        write_document_atomically, ByteSize, CreateCompletionAction, CreateContentPolicy,
+        CreateCredential, CreateDestination, CreateDestinationBase, CreateOutput, CreatePreset,
+        ExtractCredential, ExtractDestination, ExtractDestinationBase, ExtractLayout,
+        ExtractPreset, FormatSpecificOptions, NamedPreset, OverwritePolicy, PostSuccessAction,
+        PresetCompressionLevel, PresetDocument, PresetError, PresetStore, SqzInnerFormat,
+        SymlinkPolicy, VolumeMode, BALANCED_CREATE_PRESET_ID, CROSS_PLATFORM_CREATE_PRESET_ID,
+        MAX_PRESET_FILE_BYTES, MAX_SPLIT_SIZE_BYTES, MIN_SPLIT_SIZE_BYTES, PRESET_SCHEMA_VERSION,
     };
 
     fn temp_path(name: &str) -> std::path::PathBuf {
@@ -1650,11 +1594,13 @@ mod tests {
     #[test]
     fn store_persists_with_revision_compare_and_swap() {
         let path = temp_path("cas");
+        let parent = path.parent().expect("test path should have parent");
         let store = PresetStore::new(&path);
         let initial = store
             .load()
             .expect("missing preset file should use defaults");
         assert_eq!(initial.revision, 0);
+        assert!(!path.exists());
 
         let mut replacement = initial.clone();
         replacement
@@ -1665,6 +1611,7 @@ mod tests {
             .expect("first update should persist");
         assert_eq!(saved.revision, 1);
         assert_eq!(store.load().expect("saved document should load"), saved);
+        let published = std::fs::read(&path).expect("read first published document");
 
         let stale = PresetDocument::seeded();
         assert!(matches!(
@@ -1674,7 +1621,53 @@ mod tests {
                 actual: 1
             })
         ));
-        let _ = std::fs::remove_dir_all(path.parent().expect("test path should have parent"));
+        assert_eq!(
+            std::fs::read(&path).expect("read document after stale update"),
+            published
+        );
+
+        let mut edited = saved.clone();
+        let custom = edited
+            .presets
+            .iter_mut()
+            .find(|preset| preset.id().as_str() == "user.create.portable")
+            .expect("find added preset");
+        *custom = custom_create("user.create.portable", "Portable revised");
+        let updated = store
+            .compare_and_swap(1, edited)
+            .expect("replace existing canonical document");
+        assert_eq!(updated.revision, 2);
+        assert_eq!(store.load().expect("replacement should load"), updated);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+
+        let canonical = std::fs::read(&path).expect("read replacement bytes");
+        let blocked = parent.join("blocked.json");
+        std::fs::create_dir(&blocked).expect("create nonempty destination directory");
+        let sentinel = blocked.join("sentinel.txt");
+        std::fs::write(&sentinel, b"retained directory contents").expect("write sentinel");
+        let children = || {
+            std::fs::read_dir(parent)
+                .expect("read case directory")
+                .map(|entry| entry.expect("read directory entry").file_name())
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+        let before = children();
+        write_document_atomically(&blocked, &canonical)
+            .expect_err("a file cannot replace a nonempty directory");
+        assert_eq!(children(), before, "failed publication cleans its stage");
+        assert_eq!(
+            std::fs::read(&sentinel).expect("read retained sentinel"),
+            b"retained directory contents"
+        );
+        let _ = std::fs::remove_dir_all(parent);
     }
 
     #[test]
@@ -1705,24 +1698,6 @@ mod tests {
                 .len(),
             MAX_PRESET_FILE_BYTES + 1
         );
-        let _ = std::fs::remove_dir_all(path.parent().expect("test path should have parent"));
-    }
-
-    #[test]
-    fn windows_replacement_recovers_a_lone_backup_before_cleanup() {
-        let path = temp_path("backup-recovery");
-        std::fs::create_dir_all(path.parent().expect("test path should have parent"))
-            .expect("create test directory");
-        let backup = sibling_artifact_path(&path, "backup", None);
-        std::fs::write(&backup, b"last-good-copy").expect("write backup fixture");
-
-        prepare_windows_replacement(&path, &backup).expect("recover lone backup");
-
-        assert_eq!(
-            std::fs::read(&path).expect("read recovered canonical file"),
-            b"last-good-copy"
-        );
-        assert!(!backup.exists());
         let _ = std::fs::remove_dir_all(path.parent().expect("test path should have parent"));
     }
 
