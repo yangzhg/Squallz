@@ -5,6 +5,7 @@ import ts from "typescript";
 
 import { createTestServer } from "../../tests/runtime.mjs";
 import { compileTestScript, readSvelteScript, selectFunctions } from "../../tests/source.mjs";
+import { settingsDto } from "../../tests/settings.mjs";
 
 const server = await createTestServer();
 test.after(() => server.close());
@@ -14,6 +15,7 @@ const sources = await server.ssrLoadModule("/src/lib/create-sources.ts");
 const { taskReviewScreen, isTaskActiveState } = await server.ssrLoadModule("/src/lib/task-model.ts");
 const { convertSessionFor } = await server.ssrLoadModule("/src/lib/convert-session.svelte.ts");
 const { CreatePreflightSession } = await server.ssrLoadModule("/src/lib/create-preflight.svelte.ts");
+const { SettingsSession } = await server.ssrLoadModule("/src/lib/settings-session.svelte.ts");
 const { ipc } = await server.ssrLoadModule("/src/lib/ipc.ts");
 const originalIpc = { ...ipc };
 test.after(() => Object.assign(ipc, originalIpc));
@@ -83,7 +85,7 @@ function harness({ navigation = false, preparation = false, preview = false } = 
     createSuggestedDestination: null,
     sfxCreateCapabilityReady: true,
     sfxCreateCapability: { target: "macos", available: true, extension: "app" },
-    appliedDefaultCreateDir: null, fat32CompatibleSplitSizeBytes: 4294967295,
+    fat32CompatibleSplitSizeBytes: 4294967295,
     bytesPerMiB: 1024 ** 2, bytesPerGiB: 1024 ** 3,
     tr: (_key, fallback) => fallback, platformKind: () => "macos",
     nextPreflightRequestId: () => `create-preflight-${++requestId}`,
@@ -100,7 +102,7 @@ function harness({ navigation = false, preparation = false, preview = false } = 
     createExcludeRules: () => context.createExcludeText.split("\n"),
     resolvedPresetSfxTarget: (target) => target === "current_platform" ? "macos" : target,
     effectiveCreateTestAfterCreate: () => context.createTestAfterCreate || context.createPostSuccess === "trash_source",
-    normalizedDefaultCreateDir: (value) => value, uniqueNonEmptyPaths: (inputs) => [...new Set(inputs)],
+    normalizedDefaultCreateDir: (value) => paths.normalizeDesktopFolder(value, "macos"), uniqueNonEmptyPaths: (inputs) => [...new Set(inputs)],
     focusBlockingTaskIfAny: () => false,
     archiveStemName: (value) => value.replace(/\.(?:tar\.zst|tzst|zip|7z|sqz|wim|swm|app|exe|run)$/i, ""),
     joinFolderPath: (folder, name) => paths.joinDesktopPath(folder, name, "macos"),
@@ -146,6 +148,8 @@ function harness({ navigation = false, preparation = false, preview = false } = 
     trackAppearanceSave() {}, persistUiMode: (next) => { context.mode = next; return Promise.resolve(); },
     presetDocument: null,
   };
+  context.settingsSession = new SettingsSession({ platform: context.platformKind, tr: context.tr, emit() {} });
+  context.settingsSession.applySnapshot(settingsDto(), context.settingsSession.captureGenerations());
   if (preparation) {
     context.document.querySelector = () => ({ focus() { calls.push(["review-focus"]); } });
     context.document.getElementById = () => ({ focus() { calls.push(["primary-focus"]); } });

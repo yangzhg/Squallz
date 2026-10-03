@@ -498,53 +498,61 @@ test("question actions preserve the workspace and report success only after ackn
 });
 
 test("conflict controls answer only the question shown by their task surface", async () => {
-  const source = readSvelteScript(new URL("../App.svelte", import.meta.url), "App.ts");
-  const names = ["taskDialogSurface", "taskCenterDetailSurface", "answerConflictDecision", "isCurrentTaskConflictPrompt"];
-  const declarations = selectFunctions(source, names);
-  const outputText = compileTestScript(declarations.map((node) => node.getText(source)).join("\n"));
-  for (const surfaceName of ["taskDialogSurface", "taskCenterDetailSurface"]) {
-    for (const decision of ["overwrite", "skip", "rename", "abort"]) {
-      const answers = [];
-      const context = {
-        ...Object.fromEntries([
-          "taskOutputPath", "taskRevealOutputLabel", "pauseCurrentTask", "resumeCurrentTask", "cancelCurrentTask",
-          "copyTaskChecksumResults", "openTaskOutput", "openMacosSfxPublisher", "prepareTaskReview", "toggleTaskDetails",
-          "viewTaskResults", "revealTaskOutput", "dismissTaskDialog", "returnToTaskCenter", "returnTaskQuestionToCenter",
-          "taskChecksumCopyFeedback", "taskChecksumCopyFeedbackTone", "taskPasswordQuestion", "taskConflictQuestion", "showNotice",
-        ].map((name) => [name, () => null])),
-        taskWindowMode: false, activePlatform: "macos", activePalette: "ocean", activeTheme: "dark", activeDensityChoice: "comfortable",
-        pendingTaskReviewId: null,
-        checksumCopyPending: () => false,
-        customPaletteVariables: () => ({}), tr: (_key, fallback) => fallback,
-        jobPasswordPrompt: null, jobPasswordValue: "", jobPasswordSubmissionError: null,
-        jobConflictPrompt: { id: 1, version: 10 }, conflictApplyAll: false,
-        normalizeTaskConflictAnswer: (decision, applyAll) => ({ decision, applyAll }),
-        answerJobConflict: async (decision, applyAll) => {
-          answers.push([context.jobConflictPrompt.id, context.jobConflictPrompt.version, decision, applyAll]);
-          return true;
-        },
-      };
-      const surface = vm.runInNewContext(`${outputText}\n${surfaceName}`, context);
-      const shown = surface({ id: 1 });
-      const unrelated = surface({ id: 2 });
-      const applyAll = decision !== "abort";
-      for (const prompt of [{ id: 1, version: 11 }, { id: 2, version: 10 }, null]) {
-        context.jobConflictPrompt = prompt;
+  const server = await createTestServer();
+  try {
+    const { SettingsSession } = await server.ssrLoadModule("/src/lib/settings-session.svelte.ts");
+    const source = readSvelteScript(new URL("../App.svelte", import.meta.url), "App.ts");
+    const names = ["taskDialogSurface", "taskCenterDetailSurface", "answerConflictDecision", "isCurrentTaskConflictPrompt"];
+    const declarations = selectFunctions(source, names);
+    const outputText = compileTestScript(declarations.map((node) => node.getText(source)).join("\n"));
+    for (const surfaceName of ["taskDialogSurface", "taskCenterDetailSurface"]) {
+      for (const decision of ["overwrite", "skip", "rename", "abort"]) {
+        const answers = [];
+        const context = {
+          ...Object.fromEntries([
+            "taskOutputPath", "taskRevealOutputLabel", "pauseCurrentTask", "resumeCurrentTask", "cancelCurrentTask",
+            "copyTaskChecksumResults", "openTaskOutput", "openMacosSfxPublisher", "prepareTaskReview", "toggleTaskDetails",
+            "viewTaskResults", "revealTaskOutput", "dismissTaskDialog", "returnToTaskCenter", "returnTaskQuestionToCenter",
+            "taskChecksumCopyFeedback", "taskChecksumCopyFeedbackTone", "taskPasswordQuestion", "taskConflictQuestion", "showNotice",
+          ].map((name) => [name, () => null])),
+          taskWindowMode: false, activePlatform: "macos", activeTheme: "dark", activeDensityChoice: "comfortable",
+          settingsSession: new SettingsSession({ platform: () => "macos", tr: (_key, fallback) => fallback, emit() {} },
+            { paletteOverride: "ocean" }),
+          pendingTaskReviewId: null,
+          checksumCopyPending: () => false,
+          customPaletteVariables: () => ({}), tr: (_key, fallback) => fallback,
+          jobPasswordPrompt: null, jobPasswordValue: "", jobPasswordSubmissionError: null,
+          jobConflictPrompt: { id: 1, version: 10 }, conflictApplyAll: false,
+          normalizeTaskConflictAnswer: (decision, applyAll) => ({ decision, applyAll }),
+          answerJobConflict: async (decision, applyAll) => {
+            answers.push([context.jobConflictPrompt.id, context.jobConflictPrompt.version, decision, applyAll]);
+            return true;
+          },
+        };
+        const surface = vm.runInNewContext(`${outputText}\n${surfaceName}`, context);
+        const shown = surface({ id: 1 });
+        const unrelated = surface({ id: 2 });
+        const applyAll = decision !== "abort";
+        for (const prompt of [{ id: 1, version: 11 }, { id: 2, version: 10 }, null]) {
+          context.jobConflictPrompt = prompt;
+          await shown.onAnswerConflict(decision, applyAll);
+          assert.deepEqual(answers, [], "an old decision cannot answer a later question");
+          shown.onConflictApplyAllChange(true);
+          assert.equal(context.conflictApplyAll, false, "an old checkbox cannot change a later question");
+        }
+        context.jobConflictPrompt = { id: 1, version: 10 };
+        unrelated.onConflictApplyAllChange(true);
+        await unrelated.onAnswerConflict(decision, applyAll);
+        assert.equal(context.conflictApplyAll, false, "another task cannot change this question");
+        assert.deepEqual(answers, []);
+        shown.onConflictApplyAllChange(applyAll);
+        assert.equal(context.conflictApplyAll, applyAll);
         await shown.onAnswerConflict(decision, applyAll);
-        assert.deepEqual(answers, [], "an old decision cannot answer a later question");
-        shown.onConflictApplyAllChange(true);
-        assert.equal(context.conflictApplyAll, false, "an old checkbox cannot change a later question");
+        assert.deepEqual(answers, [[1, 10, decision, applyAll]], "the displayed question remains actionable after an equivalent snapshot");
       }
-      context.jobConflictPrompt = { id: 1, version: 10 };
-      unrelated.onConflictApplyAllChange(true);
-      await unrelated.onAnswerConflict(decision, applyAll);
-      assert.equal(context.conflictApplyAll, false, "another task cannot change this question");
-      assert.deepEqual(answers, []);
-      shown.onConflictApplyAllChange(applyAll);
-      assert.equal(context.conflictApplyAll, applyAll);
-      await shown.onAnswerConflict(decision, applyAll);
-      assert.deepEqual(answers, [[1, 10, decision, applyAll]], "the displayed question remains actionable after an equivalent snapshot");
     }
+  } finally {
+    await server.close();
   }
 });
 

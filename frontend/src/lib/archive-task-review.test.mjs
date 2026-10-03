@@ -3,10 +3,12 @@ import test from "node:test";
 import vm from "node:vm";
 import { createTestServer } from "../../tests/runtime.mjs";
 import { compileTestScript, readSvelteScript, selectFunctions } from "../../tests/source.mjs";
+import { settingsDto } from "../../tests/settings.mjs";
 
 const server = await createTestServer();
 test.after(() => server.close());
 const { taskReviewScreen } = await server.ssrLoadModule("/src/lib/task-model.ts");
+const { SettingsSession } = await server.ssrLoadModule("/src/lib/settings-session.svelte.ts");
 
 function spec(overrides = {}) {
   return { kind: "extract", path: "/original/photos.zip", dest: "/original/output",
@@ -57,7 +59,7 @@ function harness() {
     extractPresetEncodingLabel: "gbk", selectedExtractPresetId: "old-preset", extractPresetDraftName: "Old",
     extractPresetMutationState: "saved", extractPresetDraftTouched: false,
     extractPlan: { destination: "/old/checked", input_guard: "old-guard" }, extractPlanPhase: "ready",
-    extractPlanRequestKey: "old-plan", appliedDefaultExtractDir: "/unrelated/default",
+    extractPlanRequestKey: "old-plan",
     jobPasswordPrompt: null, jobConflictPrompt: null, archivePasswordPrompt: null, workspacePasswordValue: "",
     workspacePasswordSubmissionAttempted: false, standalonePasswordFocusedInput: null,
     workspacePasswordSubmissionError: null, secretStoreLabel: () => "Keychain",
@@ -101,6 +103,9 @@ function harness() {
     archiveTitle: () => context.currentArchive?.name, taskPasswordReady: (value) => Boolean(value),
     adoptRecoveryTargetFromTask: (task) => { calls.push(["recovery", task.spec.path]); return true; },
   };
+  context.settingsSession = new SettingsSession({ platform: context.platformKind, tr: context.tr, emit() {} });
+  context.settingsSession.applySnapshot(settingsDto({ default_extract_dir: "/unrelated/default" }),
+    context.settingsSession.captureGenerations());
   const outputText = compileTestScript(declarations.map((node) => node.getText(source)).join("\n"));
   return vm.runInNewContext(`${outputText}\n({${declarations.map((node) => node.name.text).join(",")},context:globalThis,calls})`,context);
 }

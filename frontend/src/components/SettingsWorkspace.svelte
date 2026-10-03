@@ -1,5 +1,6 @@
 <script lang="ts" module>
   import type { CssVariableMap } from "../lib/css-variables";
+  import type { SettingsSession, SettingsSaveState, PersistedSettingsSection } from "../lib/settings-session.svelte";
   import type { UpdateCheckPreview } from "../lib/app-update.svelte";
   import type {
     FormatDto,
@@ -11,7 +12,6 @@
     DensityChoice,
     NumericSetting,
     Palette,
-    PaletteId,
     ResolvedTheme,
     Screen,
   } from "../lib/ui-model";
@@ -29,8 +29,6 @@
     | "integration"
   >;
 
-  export type SettingsSaveState = "saved" | "dirty" | "saving" | "session" | "error";
-  export type PersistedSettingsSection = "general" | "security" | "performance" | "colors";
 
   export interface AssociationRow {
     ext: string;
@@ -60,10 +58,10 @@
   }
 
   export interface SettingsWorkspaceProps {
+    settings: SettingsSession;
     onReady?: () => void;
     screen: SettingsScreen;
     tr: (key: string, fallback: string) => string;
-    settingsSaveTarget: PersistedSettingsSection | null;
     appearanceSaveState: Exclude<SettingsSaveState, "dirty">;
     modernModeSelected: boolean;
     classicModeSelected: boolean;
@@ -72,77 +70,13 @@
     setTheme: (theme: "system" | "light" | "dark") => void;
     activeDensityChoice: DensityChoice;
     setDensity: (density: DensityChoice) => void;
-    activePalette: PaletteId;
     activeTheme: ResolvedTheme;
-    customAccent: string;
-    customAccentInput: string;
-    customAccentValid: boolean;
-    customAccentSaveError: boolean;
-    accentContrastGuard: boolean;
-    colorsSaveState: SettingsSaveState;
-    colorSettingsDirty: boolean;
-    paletteApplyBlocked: boolean;
-    savePaletteSettings: () => void | Promise<void>;
-    setPalette: (palette: PaletteId) => void;
-    updateCustomAccent: (value: string, source: "color" | "hex") => void;
-    onCustomAccentHexInput: (event: Event) => void;
-    setAccentContrastGuard: (enabled: boolean) => void;
-    generalSaveState: SettingsSaveState;
-    generalSettingsDirty: boolean;
-    generalSettingsValidationError: string;
-    saveGeneralSettings: () => void | Promise<void>;
     availableLanguages: LanguageDto[];
-    generalLanguageChoice: string;
-    setGeneralLanguageChoice: (value: string) => void;
-    generalDefaultCreateDir: string;
-    setGeneralDefaultCreateDir: (value: string) => void;
-    defaultCreateFolderError: string;
     chooseDefaultCreateFolder: () => void | Promise<void>;
-    clearDefaultCreateFolder: () => void;
-    generalDefaultExtractDir: string;
-    setGeneralDefaultExtractDir: (value: string) => void;
-    defaultExtractFolderError: string;
     chooseDefaultExtractFolder: () => void | Promise<void>;
-    clearDefaultExtractFolder: () => void;
-    generalRevealAfterExtract: boolean;
-    setGeneralRevealAfterExtract: (value: boolean) => void;
-    generalAutomaticUpdateChecks: boolean;
-    setGeneralAutomaticUpdateChecks: (value: boolean) => void;
     fileManagerLabel: () => string;
     openWithLabel: () => string;
     updateCheckPreview: UpdateCheckPreview;
-    securitySaveState: SettingsSaveState;
-    safetySettingsDirty: boolean;
-    safetyValidationError: string;
-    saveSafetySettings: () => void | Promise<void>;
-    safetyMaxEntries: NumericSetting;
-    setSafetyMaxEntries: (value: NumericSetting) => void;
-    safetyMaxEntriesError: string;
-    safetyMaxOutputGiB: NumericSetting;
-    setSafetyMaxOutputGiB: (value: NumericSetting) => void;
-    safetyMaxOutputError: string;
-    safetyMaxCompressionRatio: NumericSetting;
-    setSafetyMaxCompressionRatio: (value: NumericSetting) => void;
-    safetyMaxCompressionRatioError: string;
-    resetSafetySettings: () => void;
-    settingsSnapshotLabel: string;
-    performanceSaveState: SettingsSaveState;
-    performanceSettingsDirty: boolean;
-    performanceValidationError: string;
-    savePerformanceSettings: () => void | Promise<void>;
-    performanceParallelJobs: NumericSetting;
-    setPerformanceParallelJobs: (value: NumericSetting) => void;
-    performanceParallelJobsError: string;
-    choosePerformanceParallelJobs: (value: NumericSetting) => void;
-    performanceThreads: NumericSetting;
-    setPerformanceThreads: (value: NumericSetting) => void;
-    performanceThreadsError: string;
-    choosePerformanceThreads: (value: NumericSetting) => void;
-    performanceMemoryKiB: NumericSetting;
-    setPerformanceMemoryKiB: (value: NumericSetting) => void;
-    performanceMemoryError: string;
-    choosePerformanceMemory: (value: NumericSetting) => void;
-    resetPerformanceSettings: () => void;
     passwordBookForgetDisabledReason: () => string;
     labelWithDisabledReason: (label: string, reason: string) => string;
     forgetPasswordBookPanel: () => void | Promise<void>;
@@ -207,10 +141,10 @@
   } from "../lib/ui-model";
 
   let {
+    settings,
     screen,
     onReady,
     tr,
-    settingsSaveTarget,
     appearanceSaveState,
     modernModeSelected,
     classicModeSelected,
@@ -219,77 +153,13 @@
     setTheme,
     activeDensityChoice,
     setDensity,
-    activePalette,
     activeTheme,
-    customAccent,
-    customAccentInput,
-    customAccentValid,
-    customAccentSaveError,
-    accentContrastGuard,
-    colorsSaveState,
-    colorSettingsDirty,
-    paletteApplyBlocked,
-    savePaletteSettings,
-    setPalette,
-    updateCustomAccent,
-    onCustomAccentHexInput,
-    setAccentContrastGuard,
-    generalSaveState,
-    generalSettingsDirty,
-    generalSettingsValidationError,
-    saveGeneralSettings,
     availableLanguages,
-    generalLanguageChoice,
-    setGeneralLanguageChoice,
-    generalDefaultCreateDir,
-    setGeneralDefaultCreateDir,
-    defaultCreateFolderError,
     chooseDefaultCreateFolder,
-    clearDefaultCreateFolder,
-    generalDefaultExtractDir,
-    setGeneralDefaultExtractDir,
-    defaultExtractFolderError,
     chooseDefaultExtractFolder,
-    clearDefaultExtractFolder,
-    generalRevealAfterExtract,
-    setGeneralRevealAfterExtract,
-    generalAutomaticUpdateChecks,
-    setGeneralAutomaticUpdateChecks,
     fileManagerLabel,
     openWithLabel,
     updateCheckPreview,
-    securitySaveState,
-    safetySettingsDirty,
-    safetyValidationError,
-    saveSafetySettings,
-    safetyMaxEntries,
-    setSafetyMaxEntries,
-    safetyMaxEntriesError,
-    safetyMaxOutputGiB,
-    setSafetyMaxOutputGiB,
-    safetyMaxOutputError,
-    safetyMaxCompressionRatio,
-    setSafetyMaxCompressionRatio,
-    safetyMaxCompressionRatioError,
-    resetSafetySettings,
-    settingsSnapshotLabel,
-    performanceSaveState,
-    performanceSettingsDirty,
-    performanceValidationError,
-    savePerformanceSettings,
-    performanceParallelJobs,
-    setPerformanceParallelJobs,
-    performanceParallelJobsError,
-    choosePerformanceParallelJobs,
-    performanceThreads,
-    setPerformanceThreads,
-    performanceThreadsError,
-    choosePerformanceThreads,
-    performanceMemoryKiB,
-    setPerformanceMemoryKiB,
-    performanceMemoryError,
-    choosePerformanceMemory,
-    resetPerformanceSettings,
     passwordBookForgetDisabledReason,
     labelWithDisabledReason,
     forgetPasswordBookPanel,
@@ -409,12 +279,12 @@
   let integrationUnavailable = $state(false);
   let integrationDiagnosticsUnavailable = $state(false);
   const customPaletteData = $derived<Palette>(
-    buildCustomPaletteData(customAccent, activeTheme, accentContrastGuard),
+    buildCustomPaletteData(settings.colors.accent, activeTheme, settings.colors.contrastGuard),
   );
   const activePaletteData = $derived<Palette>(
-    activePalette === "custom"
+    settings.colors.palette === "custom"
       ? customPaletteData
-      : palettes.find((palette) => palette.id === activePalette) ?? palettes[0],
+      : palettes.find((palette) => palette.id === settings.colors.palette) ?? palettes[0],
   );
   let integrationFinderActionsHealthy = $derived(integrationSnapshot?.health === "healthy");
 
@@ -1375,7 +1245,7 @@
     section: PersistedSettingsSection,
     state: SettingsSaveState,
   ): string {
-    return state !== "saved" && settingsSaveTarget !== null && settingsSaveTarget !== section
+    return state !== "saved" && settings.saveTarget !== null && settings.saveTarget !== section
       ? tr("gui.settings.save_in_progress", "Wait for the current save to finish")
       : settingsSaveStateLabel(state);
   }
@@ -1387,7 +1257,7 @@
   ): string {
     if (validationError) return validationError;
     if (!dirty) return tr("gui.settings.no_changes", "No changes to save");
-    if (settingsSaveTarget !== null && settingsSaveTarget !== section) {
+    if (settings.saveTarget !== null && settings.saveTarget !== section) {
       return tr("gui.settings.save_in_progress", "Wait for the current save to finish");
     }
     return "";
@@ -1414,13 +1284,13 @@
   }
 
   function customThemePreviewVariables(theme: ResolvedTheme): CssVariableMap {
-    return deriveCustomPaletteTokens(customAccent, theme, accentContrastGuard);
+    return deriveCustomPaletteTokens(settings.colors.accent, theme, settings.colors.contrastGuard);
   }
 
   function colorWheelCssVariables(): CssVariableMap {
     return {
       ...customThemePreviewVariables(activeTheme),
-      ...colorWheelVariablesForAccent(customAccent),
+      ...colorWheelVariablesForAccent(settings.colors.accent),
     };
   }
 
@@ -1430,8 +1300,8 @@
     const size = Math.min(rect.width, rect.height);
     const x = Math.max(0, Math.min(size, event.clientX - rect.left));
     const y = Math.max(0, Math.min(size, event.clientY - rect.top));
-    updateCustomAccent(
-      colorFromWheelPointForAccent(customAccent, x, y, size),
+    settings.updateCustomAccent(
+      colorFromWheelPointForAccent(settings.colors.accent, x, y, size),
       "color",
     );
   }
@@ -1471,7 +1341,7 @@
   }
 
   function onColorWheelKeydown(event: KeyboardEvent): void {
-    const hsl = colorWheelHslForAccent(customAccent);
+    const hsl = colorWheelHslForAccent(settings.colors.accent);
     const hueStep = event.shiftKey ? 12 : 4;
     const saturationStep = event.shiftKey ? 0.08 : 0.03;
     let next = hsl;
@@ -1493,14 +1363,18 @@
     }
 
     event.preventDefault();
-    updateCustomAccent(colorToHex(hslToRgb(next)), "color");
+    settings.updateCustomAccent(colorToHex(hslToRgb(next)), "color");
+  }
+
+  function onCustomAccentHexInput(event: Event): void {
+    settings.updateCustomAccent((event.currentTarget as HTMLInputElement).value, "hex");
   }
 
   function customAccentStatusLabel(): string {
-    if (!customAccentValid) {
+    if (!settings.customAccentValid) {
       return tr("gui.colors.invalid_hex", "Enter a valid #RRGGBB color");
     }
-    return accentContrastGuard
+    return settings.colors.contrastGuard
       ? tr("gui.colors.light_dark_auto", "Light and dark variants are generated automatically")
       : tr("gui.colors.direct_accent", "Direct accent preview · semantic colors stay locked");
   }
@@ -1582,17 +1456,17 @@
         <p>{tr("gui.colors.subtitle", "Choose a balanced preset or create a custom accent. Safety and status colors stay recognizable.")}</p>
       </div>
       <SettingsSaveAction
-        state={colorsSaveState}
-        statusLabel={settingsSaveStatusLabel("colors", colorsSaveState)}
+        state={settings.colorsSaveState}
+        statusLabel={settingsSaveStatusLabel("colors", settings.colorsSaveState)}
         actionLabel={tr("gui.colors.apply", "Apply theme colors")}
         savingLabel={tr("gui.settings.save_state.saving", "Saving…")}
         disabledReason={settingsSaveDisabledReason(
           "colors",
-          colorSettingsDirty,
-          paletteApplyBlocked ? tr("gui.colors.invalid_hex", "Enter a valid #RRGGBB color") : "",
+          settings.colorsDirty,
+          settings.paletteApplyBlocked ? tr("gui.colors.invalid_hex", "Enter a valid #RRGGBB color") : "",
         )}
         icon="sparkles"
-        onSave={() => void savePaletteSettings()}
+        onSave={() => void settings.saveColors()}
       />
     </div>
 
@@ -1602,9 +1476,9 @@
         <div class="palette-grid">
           {#each builtInPalettes as palette}
             <button
-              class:selected={palette.id === activePalette}
+              class:selected={palette.id === settings.colors.palette}
               class={`palette-card palette-${palette.id} theme-${activeTheme}`}
-              onclick={() => setPalette(palette.id)}
+              onclick={() => settings.setPalette(palette.id)}
             >
               <div class="palette-card-head">
                 <strong>{paletteName(palette)}</strong>
@@ -1625,10 +1499,10 @@
             <button
               type="button"
               class="color-wheel-button"
-              aria-label={`${tr("gui.colors.custom_accent_hue_wheel", "Custom accent hue wheel")} ${customAccent}`}
+              aria-label={`${tr("gui.colors.custom_accent_hue_wheel", "Custom accent hue wheel")} ${settings.colors.accent}`}
               aria-describedby="custom-color-status"
               aria-keyshortcuts="ArrowLeft ArrowRight ArrowUp ArrowDown Home End"
-              title={`${tr("gui.colors.custom_accent_hue_wheel", "Custom accent hue wheel")} ${customAccent}`}
+              title={`${tr("gui.colors.custom_accent_hue_wheel", "Custom accent hue wheel")} ${settings.colors.accent}`}
               onpointerdown={onColorWheelPointerDown}
               onpointermove={onColorWheelPointerMove}
               onpointerup={onColorWheelPointerEnd}
@@ -1641,10 +1515,10 @@
             </button>
           </div>
           <div class="custom-color-readout">
-            <strong>{customAccent}</strong>
+            <strong>{settings.colors.accent}</strong>
             <span>{tr("gui.colors.accent_preview", "Accent preview")}</span>
-            <button class:active={activePalette === "custom"} class="custom-select-button" onclick={() => setPalette("custom")}>
-              {activePalette === "custom" ? tr("common.current", "Current") : tr("gui.colors.use_custom", "Use custom")}
+            <button class:active={settings.colors.palette === "custom"} class="custom-select-button" onclick={() => settings.setPalette("custom")}>
+              {settings.colors.palette === "custom" ? tr("common.current", "Current") : tr("gui.colors.use_custom", "Use custom")}
             </button>
           </div>
         </div>
@@ -1652,34 +1526,34 @@
           <label>
             <span>{tr("gui.colors.hex_value", "Hex value")}</span>
             <input
-              class:invalid={!customAccentValid}
-              value={customAccentInput}
+              class:invalid={!settings.customAccentValid}
+              value={settings.colors.input}
               maxlength="7"
               spellcheck="false"
-              aria-invalid={!customAccentValid}
+              aria-invalid={!settings.customAccentValid}
               aria-label={tr("gui.colors.hex_value", "Hex value")}
               aria-describedby="custom-color-status"
               oninput={onCustomAccentHexInput}
             />
           </label>
-          <button onclick={() => updateCustomAccent(defaultCustomAccent, "color")}>{tr("gui.colors.reset_custom", "Reset")}</button>
+          <button onclick={() => settings.updateCustomAccent(defaultCustomAccent, "color")}>{tr("gui.colors.reset_custom", "Reset")}</button>
         </div>
         <div
           id="custom-color-status"
-          class:error={customAccentSaveError || !customAccentValid}
+          class:error={settings.colors.saveError || !settings.customAccentValid}
           class="custom-color-status"
           aria-live="polite"
         >{customAccentStatusLabel()}</div>
         <label class="settings-switch contrast-guard-toggle">
           <input
             type="checkbox"
-            checked={accentContrastGuard}
+            checked={settings.colors.contrastGuard}
             aria-label={tr("gui.colors.contrast_guard_toggle", "Contrast guard")}
             aria-describedby="contrast-guard-note"
-            title={accentContrastGuard ? tr("gui.colors.contrast_guard_enabled", "On · readable light/dark variants") : tr("gui.colors.contrast_guard_disabled", "Off · use accent more directly")}
-            onchange={(event) => setAccentContrastGuard(event.currentTarget.checked)}
+            title={settings.colors.contrastGuard ? tr("gui.colors.contrast_guard_enabled", "On · readable light/dark variants") : tr("gui.colors.contrast_guard_disabled", "Off · use accent more directly")}
+            onchange={(event) => settings.setAccentContrastGuard(event.currentTarget.checked)}
           />
-          <span>{accentContrastGuard ? tr("gui.colors.contrast_guard_enabled", "On · readable light/dark variants") : tr("gui.colors.contrast_guard_disabled", "Off · use accent more directly")}</span>
+          <span>{settings.colors.contrastGuard ? tr("gui.colors.contrast_guard_enabled", "On · readable light/dark variants") : tr("gui.colors.contrast_guard_disabled", "Off · use accent more directly")}</span>
         </label>
         <div class="theme-preview-pair">
           <div class="theme-preview custom-preview theme-light" use:cssVariables={customThemePreviewVariables("light")}>
@@ -1694,7 +1568,7 @@
           </div>
         </div>
         <div id="contrast-guard-note" class="contrast-note" aria-live="polite">
-          <strong>{accentContrastGuard ? tr("gui.colors.contrast_guard_on", "Contrast guard on") : tr("gui.colors.contrast_guard_off", "Contrast guard off")}</strong>
+          <strong>{settings.colors.contrastGuard ? tr("gui.colors.contrast_guard_on", "Contrast guard on") : tr("gui.colors.contrast_guard_off", "Contrast guard off")}</strong>
           <span>{tr("gui.colors.contrast_guard_body", "Error, warning, success, and recovery state colors stay semantic; custom accent only changes brand chrome and selection.")}</span>
         </div>
       </aside>
@@ -1709,17 +1583,17 @@
         <p>{tr("gui.settings.general.subtitle", "Choose the app language, default create and extraction folders, and what happens after extraction completes.")}</p>
       </div>
       <SettingsSaveAction
-        state={generalSaveState}
-        statusLabel={settingsSaveStatusLabel("general", generalSaveState)}
+        state={settings.generalSaveState}
+        statusLabel={settingsSaveStatusLabel("general", settings.generalSaveState)}
         actionLabel={tr("gui.settings.general.apply", "Apply general")}
         savingLabel={tr("gui.settings.save_state.saving", "Saving…")}
         disabledReason={settingsSaveDisabledReason(
           "general",
-          generalSettingsDirty,
-          generalSettingsValidationError,
+          settings.generalDirty,
+          settings.generalValidationError,
         )}
         icon="settings"
-        onSave={() => void saveGeneralSettings()}
+        onSave={() => void settings.saveGeneral()}
       />
     </div>
 
@@ -1731,9 +1605,9 @@
             <span>{tr("gui.settings.language", "Language")}</span>
             <select
               class="settings-select"
-              value={generalLanguageChoice}
+              value={settings.general.language}
               aria-label={tr("gui.settings.language.preference_label", "Language preference")}
-              onchange={(event) => setGeneralLanguageChoice(event.currentTarget.value)}
+              onchange={(event) => settings.setGeneral("language", event.currentTarget.value)}
             >
               <option value="">{tr("gui.settings.language.follow_system", "Follow system")}</option>
               {#each availableLanguages as language}
@@ -1746,21 +1620,21 @@
             <div class="settings-path-field">
               <div class="settings-path-control">
                 <input
-                  class:invalid={Boolean(defaultCreateFolderError)}
+                  class:invalid={Boolean(settings.defaultCreateFolderError)}
                   class="settings-path-input"
-                  value={generalDefaultCreateDir}
+                  value={settings.general.defaultCreateDir}
                   placeholder={tr("gui.settings.folder.ask_when_creating", "Ask when creating")}
                   aria-label={tr("gui.settings.folder.default_create", "Default create folder")}
-                  aria-invalid={Boolean(defaultCreateFolderError)}
-                  aria-describedby={defaultCreateFolderError ? "settings-default-create-folder-error" : undefined}
-                  oninput={(event) => setGeneralDefaultCreateDir(event.currentTarget.value)}
+                  aria-invalid={Boolean(settings.defaultCreateFolderError)}
+                  aria-describedby={settings.defaultCreateFolderError ? "settings-default-create-folder-error" : undefined}
+                  oninput={(event) => settings.setGeneral("defaultCreateDir", event.currentTarget.value)}
                 />
                 <button type="button" aria-label={tr("gui.settings.folder.choose_create", "Choose default create folder")} onclick={() => void chooseDefaultCreateFolder()}>
                   <Icon name="folder-open" size={15} />
                 </button>
-                <button type="button" class="settings-path-reset" onclick={clearDefaultCreateFolder}>{tr("gui.settings.folder.clear", "Clear")}</button>
+                <button type="button" class="settings-path-reset" onclick={() => settings.setGeneral("defaultCreateDir", "")}>{tr("gui.settings.folder.clear", "Clear")}</button>
               </div>
-              {#if defaultCreateFolderError}<small id="settings-default-create-folder-error" class="settings-field-error" role="status">{defaultCreateFolderError}</small>{/if}
+              {#if settings.defaultCreateFolderError}<small id="settings-default-create-folder-error" class="settings-field-error" role="status">{settings.defaultCreateFolderError}</small>{/if}
             </div>
           </div>
           <div class="setting-control-row folder-setting-row">
@@ -1768,21 +1642,21 @@
             <div class="settings-path-field">
               <div class="settings-path-control">
                 <input
-                  class:invalid={Boolean(defaultExtractFolderError)}
+                  class:invalid={Boolean(settings.defaultExtractFolderError)}
                   class="settings-path-input"
-                  value={generalDefaultExtractDir}
+                  value={settings.general.defaultExtractDir}
                   placeholder={tr("gui.settings.folder.next_to_archive", "Next to archive")}
                   aria-label={tr("gui.settings.folder.default_extract", "Default extract folder")}
-                  aria-invalid={Boolean(defaultExtractFolderError)}
-                  aria-describedby={defaultExtractFolderError ? "settings-default-extract-folder-error" : undefined}
-                  oninput={(event) => setGeneralDefaultExtractDir(event.currentTarget.value)}
+                  aria-invalid={Boolean(settings.defaultExtractFolderError)}
+                  aria-describedby={settings.defaultExtractFolderError ? "settings-default-extract-folder-error" : undefined}
+                  oninput={(event) => settings.setGeneral("defaultExtractDir", event.currentTarget.value)}
                 />
                 <button type="button" aria-label={tr("gui.settings.folder.choose", "Choose default extract folder")} onclick={() => void chooseDefaultExtractFolder()}>
                   <Icon name="folder-open" size={15} />
                 </button>
-                <button type="button" class="settings-path-reset" onclick={clearDefaultExtractFolder}>{tr("gui.settings.folder.default", "Default")}</button>
+                <button type="button" class="settings-path-reset" onclick={() => settings.setGeneral("defaultExtractDir", "")}>{tr("gui.settings.folder.default", "Default")}</button>
               </div>
-              {#if defaultExtractFolderError}<small id="settings-default-extract-folder-error" class="settings-field-error" role="status">{defaultExtractFolderError}</small>{/if}
+              {#if settings.defaultExtractFolderError}<small id="settings-default-extract-folder-error" class="settings-field-error" role="status">{settings.defaultExtractFolderError}</small>{/if}
             </div>
           </div>
           <div class="setting-control-row">
@@ -1790,11 +1664,11 @@
             <label class="settings-switch">
               <input
                 type="checkbox"
-                checked={generalRevealAfterExtract}
+                checked={settings.general.revealAfterExtract}
                 aria-label={tr("gui.settings.general.reveal_after_extract_aria", "Reveal extracted destination in {fileManager} after successful extract").replace("{fileManager}", fileManagerLabel())}
-                onchange={(event) => setGeneralRevealAfterExtract(event.currentTarget.checked)}
+                onchange={(event) => settings.setGeneral("revealAfterExtract", event.currentTarget.checked)}
               />
-              <span>{generalRevealAfterExtract ? tr("common.on", "On") : tr("common.off", "Off")} · {tr("gui.settings.general.reveal_after_extract_hint", "Show destination in {fileManager}").replace("{fileManager}", fileManagerLabel())}</span>
+              <span>{settings.general.revealAfterExtract ? tr("common.on", "On") : tr("common.off", "Off")} · {tr("gui.settings.general.reveal_after_extract_hint", "Show destination in {fileManager}").replace("{fileManager}", fileManagerLabel())}</span>
             </label>
           </div>
           <div class="setting-control-row">
@@ -1802,11 +1676,11 @@
             <label class="settings-switch">
               <input
                 type="checkbox"
-                checked={generalAutomaticUpdateChecks}
+                checked={settings.general.automaticUpdateChecks}
                 aria-label={tr("gui.settings.general.automatic_update_checks_aria", "Automatically check the stable release channel for updates")}
-                onchange={(event) => setGeneralAutomaticUpdateChecks(event.currentTarget.checked)}
+                onchange={(event) => settings.setGeneral("automaticUpdateChecks", event.currentTarget.checked)}
               />
-              <span>{generalAutomaticUpdateChecks ? tr("common.on", "On") : tr("common.off", "Off")} · {tr("gui.settings.general.automatic_update_checks_hint", "Check at most once every 24 hours")}</span>
+              <span>{settings.general.automaticUpdateChecks ? tr("common.on", "On") : tr("common.off", "Off")} · {tr("gui.settings.general.automatic_update_checks_hint", "Check at most once every 24 hours")}</span>
             </label>
           </div>
           <div><span>{tr("gui.settings.general.open_with_policy", "{openWith} policy").replace("{openWith}", openWithLabel())}</span><strong>{tr("gui.settings.general.open_with_value", "Candidate only, never steal defaults")}</strong></div>
@@ -1814,7 +1688,7 @@
         <UpdateCheckCard
           {tr}
           preview={updateCheckPreview}
-          automaticChecksEnabled={generalAutomaticUpdateChecks}
+          automaticChecksEnabled={settings.general.automaticUpdateChecks}
         />
         <div class="setting-callout">
           <strong>{tr("gui.settings.general.boundary_title", "Safety prompts stay visible")}</strong>
@@ -1832,76 +1706,76 @@
         <p>{tr("gui.settings.security.subtitle", "Limit entries and unpacked data during extraction and integrity tests.")}</p>
       </div>
       <SettingsSaveAction
-        state={securitySaveState}
-        statusLabel={settingsSaveStatusLabel("security", securitySaveState)}
+        state={settings.securitySaveState}
+        statusLabel={settingsSaveStatusLabel("security", settings.securitySaveState)}
         actionLabel={tr("gui.settings.security.save", "Save security")}
         savingLabel={tr("gui.settings.save_state.saving", "Saving…")}
-        disabledReason={settingsSaveDisabledReason("security", safetySettingsDirty, safetyValidationError)}
+        disabledReason={settingsSaveDisabledReason("security", settings.securityDirty, settings.securityValidationError)}
         icon="shield-alert"
-        onSave={() => void saveSafetySettings()}
+        onSave={() => void settings.saveSecurity()}
       />
     </div>
 
     <div class="settings-layout">
       <section class="settings-main-panel">
         <div class="settings-metric-grid">
-          <div class:invalid-setting={Boolean(safetyMaxEntriesError)}><span>{tr("gui.settings.security.max_entries", "Max entries")}</span><strong>{formattedDraftNumber(safetyMaxEntries)}</strong><small>{tr("gui.settings.captured_job_start", "Captured on submission")}</small></div>
-          <div class:invalid-setting={Boolean(safetyMaxOutputError)}><span>{tr("gui.settings.security.max_output", "Max output")}</span><strong>{formattedDraftNumber(safetyMaxOutputGiB)} GiB</strong><small>{tr("gui.settings.security.archive_bomb_guard", "Archive bomb guard")}</small></div>
-          <div class:invalid-setting={Boolean(safetyMaxCompressionRatioError)}><span>{tr("gui.settings.security.ratio_guard", "Ratio guard")}</span><strong>{formattedDraftNumber(safetyMaxCompressionRatio)}x</strong><small>{tr("gui.settings.security.ratio_hint_short", "Stops suspicious expansion")}</small></div>
+          <div class:invalid-setting={Boolean(settings.securityEntriesError)}><span>{tr("gui.settings.security.max_entries", "Max entries")}</span><strong>{formattedDraftNumber(settings.security.maxEntries)}</strong><small>{tr("gui.settings.captured_job_start", "Captured on submission")}</small></div>
+          <div class:invalid-setting={Boolean(settings.securityOutputError)}><span>{tr("gui.settings.security.max_output", "Max output")}</span><strong>{formattedDraftNumber(settings.security.maxOutputGiB)} GiB</strong><small>{tr("gui.settings.security.archive_bomb_guard", "Archive bomb guard")}</small></div>
+          <div class:invalid-setting={Boolean(settings.securityRatioError)}><span>{tr("gui.settings.security.ratio_guard", "Ratio guard")}</span><strong>{formattedDraftNumber(settings.security.maxCompressionRatio)}x</strong><small>{tr("gui.settings.security.ratio_hint_short", "Stops suspicious expansion")}</small></div>
         </div>
         <div class="settings-input-grid" aria-label={tr("common.safety_limits", "Safety limits")}>
           <label class="number-field">
             <span>{tr("gui.settings.security.max_entries", "Max entries")}</span>
             <input
               id="settings-security-max-entries"
-              class:invalid={Boolean(safetyMaxEntriesError)}
+              class:invalid={Boolean(settings.securityEntriesError)}
               type="number"
               min="1"
               max="10000000"
               step="1000"
-              value={safetyMaxEntries ?? ""}
-              aria-invalid={Boolean(safetyMaxEntriesError)}
-              aria-describedby={safetyMaxEntriesError ? "settings-security-max-entries-error" : undefined}
-              oninput={(event) => setSafetyMaxEntries(inputNumber(event))}
+              value={settings.security.maxEntries ?? ""}
+              aria-invalid={Boolean(settings.securityEntriesError)}
+              aria-describedby={settings.securityEntriesError ? "settings-security-max-entries-error" : undefined}
+              oninput={(event) => settings.setSecurity("maxEntries", inputNumber(event))}
             />
-            {#if safetyMaxEntriesError}<small id="settings-security-max-entries-error" class="settings-field-error" role="status">{safetyMaxEntriesError}</small>{/if}
+            {#if settings.securityEntriesError}<small id="settings-security-max-entries-error" class="settings-field-error" role="status">{settings.securityEntriesError}</small>{/if}
           </label>
           <label class="number-field">
             <span>{tr("gui.settings.security.max_output_gib", "Max output GiB")}</span>
             <input
               id="settings-security-max-output"
-              class:invalid={Boolean(safetyMaxOutputError)}
+              class:invalid={Boolean(settings.securityOutputError)}
               type="number"
               min="1"
               max="8192"
               step="1"
-              value={safetyMaxOutputGiB ?? ""}
-              aria-invalid={Boolean(safetyMaxOutputError)}
-              aria-describedby={safetyMaxOutputError ? "settings-security-max-output-error" : undefined}
-              oninput={(event) => setSafetyMaxOutputGiB(inputNumber(event))}
+              value={settings.security.maxOutputGiB ?? ""}
+              aria-invalid={Boolean(settings.securityOutputError)}
+              aria-describedby={settings.securityOutputError ? "settings-security-max-output-error" : undefined}
+              oninput={(event) => settings.setSecurity("maxOutputGiB", inputNumber(event))}
             />
-            {#if safetyMaxOutputError}<small id="settings-security-max-output-error" class="settings-field-error" role="status">{safetyMaxOutputError}</small>{/if}
+            {#if settings.securityOutputError}<small id="settings-security-max-output-error" class="settings-field-error" role="status">{settings.securityOutputError}</small>{/if}
           </label>
           <label class="number-field">
             <span>{tr("gui.settings.security.ratio_guard", "Ratio guard")}</span>
             <input
               id="settings-security-ratio"
-              class:invalid={Boolean(safetyMaxCompressionRatioError)}
+              class:invalid={Boolean(settings.securityRatioError)}
               type="number"
               min="1"
               max="100000"
               step="1"
-              value={safetyMaxCompressionRatio ?? ""}
-              aria-invalid={Boolean(safetyMaxCompressionRatioError)}
-              aria-describedby={safetyMaxCompressionRatioError ? "settings-security-ratio-error" : undefined}
-              oninput={(event) => setSafetyMaxCompressionRatio(inputNumber(event))}
+              value={settings.security.maxCompressionRatio ?? ""}
+              aria-invalid={Boolean(settings.securityRatioError)}
+              aria-describedby={settings.securityRatioError ? "settings-security-ratio-error" : undefined}
+              oninput={(event) => settings.setSecurity("maxCompressionRatio", inputNumber(event))}
             />
-            {#if safetyMaxCompressionRatioError}<small id="settings-security-ratio-error" class="settings-field-error" role="status">{safetyMaxCompressionRatioError}</small>{/if}
+            {#if settings.securityRatioError}<small id="settings-security-ratio-error" class="settings-field-error" role="status">{settings.securityRatioError}</small>{/if}
           </label>
         </div>
         <div class="settings-actions-row">
-          <button class="secondary-lite" onclick={resetSafetySettings}>{tr("gui.settings.reset_defaults", "Reset defaults")}</button>
-          <span>{settingsSnapshotLabel}</span>
+          <button class="secondary-lite" onclick={settings.resetSecurity}>{tr("gui.settings.reset_defaults", "Reset defaults")}</button>
+          <span>{settings.snapshotLabel}</span>
         </div>
         <div class="setting-callout">
           <strong>{tr("gui.settings.security.path_safety_always_on", "Path safety is always on")}</strong>
@@ -1919,97 +1793,97 @@
         <p>{tr("gui.settings.performance.subtitle", "Balance simultaneous tasks, encoder threads, and Squallz-owned stream buffers. Automatic scheduling stays within the available CPU budget.")}</p>
       </div>
       <SettingsSaveAction
-        state={performanceSaveState}
-        statusLabel={settingsSaveStatusLabel("performance", performanceSaveState)}
+        state={settings.performanceSaveState}
+        statusLabel={settingsSaveStatusLabel("performance", settings.performanceSaveState)}
         actionLabel={tr("gui.settings.performance.save", "Save performance")}
         savingLabel={tr("gui.settings.save_state.saving", "Saving…")}
-        disabledReason={settingsSaveDisabledReason("performance", performanceSettingsDirty, performanceValidationError)}
+        disabledReason={settingsSaveDisabledReason("performance", settings.performanceDirty, settings.performanceValidationError)}
         icon="hourglass"
-        onSave={() => void savePerformanceSettings()}
+        onSave={() => void settings.savePerformance()}
       />
     </div>
 
     <div class="settings-layout">
       <section class="settings-main-panel">
         <div class="settings-metric-grid performance-metric-grid">
-          <div class:invalid-setting={Boolean(performanceParallelJobsError)}><span>{tr("gui.settings.performance.parallel_tasks", "Parallel tasks")}</span><strong>{performanceParallelJobs === null ? tr("common.auto", "Auto") : formattedDraftNumber(performanceParallelJobs)}</strong><small>{tr("gui.settings.performance.parallel_tasks_hint", "CPU-aware queue limit")}</small></div>
-          <div class:invalid-setting={Boolean(performanceThreadsError)}><span>{tr("gui.settings.performance.workers", "Encoder threads")}</span><strong>{performanceThreads === null ? tr("common.auto", "Auto") : formattedDraftNumber(performanceThreads)}</strong><small>{tr("gui.settings.performance.workers_hint", "Per supported archive task")}</small></div>
-          <div class:invalid-setting={Boolean(performanceMemoryError)}><span>{tr("gui.settings.performance.stream_buffer", "Stream buffer")}</span><strong>{performanceMemoryKiB === null ? tr("common.auto", "Auto") : streamBufferKiBLabel(performanceMemoryKiB)}</strong><small>{tr("gui.settings.performance.copy_buffers", "Supported Squallz buffers")}</small></div>
+          <div class:invalid-setting={Boolean(settings.performanceParallelJobsError)}><span>{tr("gui.settings.performance.parallel_tasks", "Parallel tasks")}</span><strong>{settings.performance.parallelJobs === null ? tr("common.auto", "Auto") : formattedDraftNumber(settings.performance.parallelJobs)}</strong><small>{tr("gui.settings.performance.parallel_tasks_hint", "CPU-aware queue limit")}</small></div>
+          <div class:invalid-setting={Boolean(settings.performanceThreadsError)}><span>{tr("gui.settings.performance.workers", "Encoder threads")}</span><strong>{settings.performance.threads === null ? tr("common.auto", "Auto") : formattedDraftNumber(settings.performance.threads)}</strong><small>{tr("gui.settings.performance.workers_hint", "Per supported archive task")}</small></div>
+          <div class:invalid-setting={Boolean(settings.performanceMemoryError)}><span>{tr("gui.settings.performance.stream_buffer", "Stream buffer")}</span><strong>{settings.performance.memoryKiB === null ? tr("common.auto", "Auto") : streamBufferKiBLabel(settings.performance.memoryKiB)}</strong><small>{tr("gui.settings.performance.copy_buffers", "Supported Squallz buffers")}</small></div>
         </div>
         <div class="level-control settings-slider">
-          <div><strong>{tr("gui.settings.performance.parallel_tasks", "Parallel tasks")} · {performanceParallelJobs === null ? tr("common.auto", "Auto") : formattedDraftNumber(performanceParallelJobs)}</strong><span>{tr("gui.settings.performance.parallel_tasks_body", "Automatic scheduling uses one task per four logical CPU threads, up to four. Heavy automatic-thread jobs run alone; lighter tasks share spare capacity.")}</span></div>
+          <div><strong>{tr("gui.settings.performance.parallel_tasks", "Parallel tasks")} · {settings.performance.parallelJobs === null ? tr("common.auto", "Auto") : formattedDraftNumber(settings.performance.parallelJobs)}</strong><span>{tr("gui.settings.performance.parallel_tasks_body", "Automatic scheduling uses one task per four logical CPU threads, up to four. Heavy automatic-thread jobs run alone; lighter tasks share spare capacity.")}</span></div>
           <div class="mode-segments worker-segments" aria-label={tr("gui.settings.performance.parallel_tasks", "Parallel tasks")}>
-            <button class:active={performanceParallelJobs === null} aria-pressed={performanceParallelJobs === null} onclick={() => choosePerformanceParallelJobs(null)}>{tr("common.auto", "Auto")}</button>
-            <button class:active={performanceParallelJobs === 1} aria-pressed={performanceParallelJobs === 1} onclick={() => choosePerformanceParallelJobs(1)}>1</button>
-            <button class:active={performanceParallelJobs === 2} aria-pressed={performanceParallelJobs === 2} onclick={() => choosePerformanceParallelJobs(2)}>2</button>
-            <button class:active={performanceParallelJobs === 4} aria-pressed={performanceParallelJobs === 4} onclick={() => choosePerformanceParallelJobs(4)}>4</button>
+            <button class:active={settings.performance.parallelJobs === null} aria-pressed={settings.performance.parallelJobs === null} onclick={() => settings.setPerformance("parallelJobs", null)}>{tr("common.auto", "Auto")}</button>
+            <button class:active={settings.performance.parallelJobs === 1} aria-pressed={settings.performance.parallelJobs === 1} onclick={() => settings.setPerformance("parallelJobs", 1)}>1</button>
+            <button class:active={settings.performance.parallelJobs === 2} aria-pressed={settings.performance.parallelJobs === 2} onclick={() => settings.setPerformance("parallelJobs", 2)}>2</button>
+            <button class:active={settings.performance.parallelJobs === 4} aria-pressed={settings.performance.parallelJobs === 4} onclick={() => settings.setPerformance("parallelJobs", 4)}>4</button>
           </div>
           <label class="number-field worker-field">
             <span>{tr("gui.settings.performance.custom_parallel_jobs", "Custom parallel tasks")}</span>
             <input
               id="settings-performance-parallel-jobs"
-              class:invalid={Boolean(performanceParallelJobsError)}
+              class:invalid={Boolean(settings.performanceParallelJobsError)}
               type="number"
               min="1"
               max="8"
               step="1"
-              value={performanceParallelJobs ?? ""}
-              aria-invalid={Boolean(performanceParallelJobsError)}
-              aria-describedby={performanceParallelJobsError ? "settings-performance-parallel-jobs-error" : undefined}
-              oninput={(event) => setPerformanceParallelJobs(inputNumber(event))}
+              value={settings.performance.parallelJobs ?? ""}
+              aria-invalid={Boolean(settings.performanceParallelJobsError)}
+              aria-describedby={settings.performanceParallelJobsError ? "settings-performance-parallel-jobs-error" : undefined}
+              oninput={(event) => settings.setPerformance("parallelJobs", inputNumber(event))}
             />
-            {#if performanceParallelJobsError}<small id="settings-performance-parallel-jobs-error" class="settings-field-error" role="status">{performanceParallelJobsError}</small>{/if}
+            {#if settings.performanceParallelJobsError}<small id="settings-performance-parallel-jobs-error" class="settings-field-error" role="status">{settings.performanceParallelJobsError}</small>{/if}
           </label>
-          <div><strong>{tr("gui.settings.performance.worker_threads", "Encoder threads per task")} · {performanceThreads === null ? tr("common.auto", "Auto") : formattedDraftNumber(performanceThreads)}</strong><span>{tr("gui.settings.performance.worker_threads_body", "Multithreaded encoders honor the manual limit; Automatic gives them available CPU while single-thread formats reserve one thread.")}</span></div>
+          <div><strong>{tr("gui.settings.performance.worker_threads", "Encoder threads per task")} · {settings.performance.threads === null ? tr("common.auto", "Auto") : formattedDraftNumber(settings.performance.threads)}</strong><span>{tr("gui.settings.performance.worker_threads_body", "Multithreaded encoders honor the manual limit; Automatic gives them available CPU while single-thread formats reserve one thread.")}</span></div>
           <div class="mode-segments worker-segments" aria-label={tr("gui.settings.performance.worker_threads", "Worker threads")}>
-            <button class:active={performanceThreads === null} aria-pressed={performanceThreads === null} onclick={() => choosePerformanceThreads(null)}>{tr("common.auto", "Auto")}</button>
-            <button class:active={performanceThreads === 4} aria-pressed={performanceThreads === 4} onclick={() => choosePerformanceThreads(4)}>4</button>
-            <button class:active={performanceThreads === 8} aria-pressed={performanceThreads === 8} onclick={() => choosePerformanceThreads(8)}>8</button>
-            <button class:active={performanceThreads === 16} aria-pressed={performanceThreads === 16} onclick={() => choosePerformanceThreads(16)}>16</button>
+            <button class:active={settings.performance.threads === null} aria-pressed={settings.performance.threads === null} onclick={() => settings.setPerformance("threads", null)}>{tr("common.auto", "Auto")}</button>
+            <button class:active={settings.performance.threads === 4} aria-pressed={settings.performance.threads === 4} onclick={() => settings.setPerformance("threads", 4)}>4</button>
+            <button class:active={settings.performance.threads === 8} aria-pressed={settings.performance.threads === 8} onclick={() => settings.setPerformance("threads", 8)}>8</button>
+            <button class:active={settings.performance.threads === 16} aria-pressed={settings.performance.threads === 16} onclick={() => settings.setPerformance("threads", 16)}>16</button>
           </div>
           <label class="number-field worker-field">
             <span>{tr("gui.settings.performance.custom_threads", "Custom threads")}</span>
             <input
               id="settings-performance-threads"
-              class:invalid={Boolean(performanceThreadsError)}
+              class:invalid={Boolean(settings.performanceThreadsError)}
               type="number"
               min="1"
               max="64"
               step="1"
-              value={performanceThreads ?? ""}
-              aria-invalid={Boolean(performanceThreadsError)}
-              aria-describedby={performanceThreadsError ? "settings-performance-threads-error" : undefined}
-              oninput={(event) => setPerformanceThreads(inputNumber(event))}
+              value={settings.performance.threads ?? ""}
+              aria-invalid={Boolean(settings.performanceThreadsError)}
+              aria-describedby={settings.performanceThreadsError ? "settings-performance-threads-error" : undefined}
+              oninput={(event) => settings.setPerformance("threads", inputNumber(event))}
             />
-            {#if performanceThreadsError}<small id="settings-performance-threads-error" class="settings-field-error" role="status">{performanceThreadsError}</small>{/if}
+            {#if settings.performanceThreadsError}<small id="settings-performance-threads-error" class="settings-field-error" role="status">{settings.performanceThreadsError}</small>{/if}
           </label>
-          <div><strong>{tr("gui.settings.performance.stream_buffer_memory", "Stream buffer memory")} · {performanceMemoryKiB === null ? tr("common.auto", "Auto") : streamBufferKiBLabel(performanceMemoryKiB)}</strong><span>{tr("gui.settings.performance.stream_buffer_body", "Sets the 8–64 KiB cap for supported Squallz-owned copy buffers; format tools may keep their own buffers and dictionaries.")}</span></div>
+          <div><strong>{tr("gui.settings.performance.stream_buffer_memory", "Stream buffer memory")} · {settings.performance.memoryKiB === null ? tr("common.auto", "Auto") : streamBufferKiBLabel(settings.performance.memoryKiB)}</strong><span>{tr("gui.settings.performance.stream_buffer_body", "Sets the 8–64 KiB cap for supported Squallz-owned copy buffers; format tools may keep their own buffers and dictionaries.")}</span></div>
           <div class="mode-segments worker-segments" aria-label={tr("gui.settings.performance.stream_buffer_memory", "Stream buffer memory")}>
-            <button class:active={performanceMemoryKiB === null} aria-pressed={performanceMemoryKiB === null} onclick={() => choosePerformanceMemory(null)}>{tr("common.auto", "Auto")}</button>
-            <button class:active={performanceMemoryKiB === 8} aria-pressed={performanceMemoryKiB === 8} onclick={() => choosePerformanceMemory(8)}>{streamBufferKiBLabel(8)}</button>
-            <button class:active={performanceMemoryKiB === 16} aria-pressed={performanceMemoryKiB === 16} onclick={() => choosePerformanceMemory(16)}>{streamBufferKiBLabel(16)}</button>
-            <button class:active={performanceMemoryKiB === 32} aria-pressed={performanceMemoryKiB === 32} onclick={() => choosePerformanceMemory(32)}>{streamBufferKiBLabel(32)}</button>
-            <button class:active={performanceMemoryKiB === 64} aria-pressed={performanceMemoryKiB === 64} onclick={() => choosePerformanceMemory(64)}>{streamBufferKiBLabel(64)}</button>
+            <button class:active={settings.performance.memoryKiB === null} aria-pressed={settings.performance.memoryKiB === null} onclick={() => settings.setPerformance("memoryKiB", null)}>{tr("common.auto", "Auto")}</button>
+            <button class:active={settings.performance.memoryKiB === 8} aria-pressed={settings.performance.memoryKiB === 8} onclick={() => settings.setPerformance("memoryKiB", 8)}>{streamBufferKiBLabel(8)}</button>
+            <button class:active={settings.performance.memoryKiB === 16} aria-pressed={settings.performance.memoryKiB === 16} onclick={() => settings.setPerformance("memoryKiB", 16)}>{streamBufferKiBLabel(16)}</button>
+            <button class:active={settings.performance.memoryKiB === 32} aria-pressed={settings.performance.memoryKiB === 32} onclick={() => settings.setPerformance("memoryKiB", 32)}>{streamBufferKiBLabel(32)}</button>
+            <button class:active={settings.performance.memoryKiB === 64} aria-pressed={settings.performance.memoryKiB === 64} onclick={() => settings.setPerformance("memoryKiB", 64)}>{streamBufferKiBLabel(64)}</button>
           </div>
           <label class="number-field worker-field">
             <span>{tr("gui.settings.performance.custom_buffer_kib", "Custom buffer KiB")}</span>
             <input
               id="settings-performance-memory"
-              class:invalid={Boolean(performanceMemoryError)}
+              class:invalid={Boolean(settings.performanceMemoryError)}
               type="number"
               min="8"
               max="64"
               step="1"
-              value={performanceMemoryKiB ?? ""}
-              aria-invalid={Boolean(performanceMemoryError)}
-              aria-describedby={performanceMemoryError ? "settings-performance-memory-error" : undefined}
-              oninput={(event) => setPerformanceMemoryKiB(inputNumber(event))}
+              value={settings.performance.memoryKiB ?? ""}
+              aria-invalid={Boolean(settings.performanceMemoryError)}
+              aria-describedby={settings.performanceMemoryError ? "settings-performance-memory-error" : undefined}
+              oninput={(event) => settings.setPerformance("memoryKiB", inputNumber(event))}
             />
-            {#if performanceMemoryError}<small id="settings-performance-memory-error" class="settings-field-error" role="status">{performanceMemoryError}</small>{/if}
+            {#if settings.performanceMemoryError}<small id="settings-performance-memory-error" class="settings-field-error" role="status">{settings.performanceMemoryError}</small>{/if}
           </label>
           <div class="settings-actions-row">
-            <button class="secondary-lite" onclick={resetPerformanceSettings}>{tr("gui.settings.performance.use_auto", "Use auto")}</button>
-            <span>{settingsSnapshotLabel}</span>
+            <button class="secondary-lite" onclick={settings.resetPerformance}>{tr("gui.settings.performance.use_auto", "Use auto")}</button>
+            <span>{settings.snapshotLabel}</span>
           </div>
         </div>
       </section>

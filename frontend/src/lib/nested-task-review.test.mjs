@@ -3,12 +3,14 @@ import test from "node:test";
 import vm from "node:vm";
 import { createTestServer } from "../../tests/runtime.mjs";
 import { compileTestScript, readSvelteScript, selectFunctions } from "../../tests/source.mjs";
+import { settingsDto } from "../../tests/settings.mjs";
 
 const server = await createTestServer();
 test.after(() => server.close());
 const { taskReviewScreen } = await server.ssrLoadModule("/src/lib/task-model.ts");
 const { nestedExtractJob, reviewNestedExtract } = await server.ssrLoadModule("/src/lib/nested-extract.ts");
 const { desktopBasename, desktopDirname } = await server.ssrLoadModule("/src/lib/desktop-path.ts");
+const { SettingsSession } = await server.ssrLoadModule("/src/lib/settings-session.svelte.ts");
 const plain = (value) => JSON.parse(JSON.stringify(value));
 
 function spec() {
@@ -29,7 +31,7 @@ function harness() {
     batchPickerRequest: 0, batchPickerBusy: false,
     archiveUpdateReview: { cancelSourceChoice() {} }, taskReviewRequestGeneration: 0,
     dismissArchivePicker() {}, clearEntryPreviewState() {}, syncUrl() {}, tick: async () => {},
-    screen: "browse", archiveOpenStatus: "idle", taskWindowMode: false, appliedDefaultExtractDir: "",
+    screen: "browse", archiveOpenStatus: "idle", taskWindowMode: false,
     recoveryPickerStatus: "idle", recoveryPickerRequest: 0, recoveryOutputPreparation: null,
     dismissCreatePreparation() {}, syncCreatePreflightContext() {},
     dismissArchiveAddPreparation() {},
@@ -51,6 +53,8 @@ function harness() {
     extractSymlinkModes: ["preserve", "skip", "follow"], extractSymlinkLabel: (mode) => mode,
     getDialogModule: async () => ({ open: async () => null }), openNativeDialog: async (_key, open, options) => open(options),
   };
+  context.settingsSession = new SettingsSession({ platform: () => "macos", tr: context.tr, emit() {} });
+  context.settingsSession.applySnapshot(settingsDto(), context.settingsSession.captureGenerations());
   const outputText = compileTestScript(declarations.map((node) => node.getText(source)).join("\n"));
   return { ...vm.runInNewContext(`${outputText}\n({${names.join(",")}})`, context), context, calls };
 }
@@ -95,7 +99,9 @@ test("preview extraction first reviews a smart base directory without pre-adding
   assert.equal(run.context.nestedExtractDraft.encoding, "shift_jis");
   assert.equal(run.context.nestedExtractDraft.smart, true);
   assert.equal(run.calls.some(([name]) => name === "submit"), false);
-  run.context.appliedDefaultExtractDir = "/Preferred";
+  run.context.settingsSession.applySnapshot(settingsDto({ default_extract_dir: "/Preferred" }),
+    run.context.settingsSession.captureGenerations());
+  run.context.settingsSession.setGeneral("defaultExtractDir", "/not-applied");
   run.prepareNestedExtract("/another/outer.zip", "/another/outer.zip", "inner.zip");
   assert.equal(run.context.nestedExtractDraft.dest, "/Preferred");
   assert.equal(run.context.nestedExtractDraft.encoding, null);

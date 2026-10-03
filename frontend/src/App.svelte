@@ -1,5 +1,11 @@
 <script lang="ts">
   import { onMount, tick, untrack } from "svelte";
+  import {
+    SettingsSession,
+    isSettingsPersistenceFailure,
+    type SettingsEffect,
+    type SettingsSaveState,
+  } from "./lib/settings-session.svelte";
   import ArchiveStartState from "./components/ArchiveStartState.svelte";
   import ArchiveReturnStrip from "./components/ArchiveReturnStrip.svelte";
   import ArchiveEntryEditor from "./components/ArchiveEntryEditor.svelte";
@@ -311,10 +317,7 @@
     uiModeChoice,
     type UiMode,
   } from "./lib/uiMode.svelte";
-  import {
-    deriveCustomPaletteTokens,
-    normalizeHexColor,
-  } from "./lib/theme";
+  import { deriveCustomPaletteTokens } from "./lib/theme";
   import {
     checksumAlgorithms,
     classicCommands,
@@ -322,7 +325,6 @@
     createFormats,
     createProfileIds,
     createProfiles,
-    defaultCustomAccent,
     nav,
     paletteIds,
     quickActions,
@@ -337,7 +339,6 @@
     CreateSplitPreset,
     CreateSplitUnit,
     DensityChoice,
-    NumericSetting,
     PaletteId,
     ResolvedTheme,
     Screen,
@@ -352,9 +353,6 @@
   type NativeSplitKind = "zip" | "wim" | null;
   type MacosSfxPublisherComponentType = typeof MacosSfxPublisherComponent;
   type ThemeChoice = "system" | "light" | "dark";
-  type PersistedSettingsSection = "general" | "security" | "performance" | "colors";
-  type SettingsSaveOutcome = "idle" | "saved" | "session" | "error";
-  type SettingsSaveState = "saved" | "dirty" | "saving" | "session" | "error";
   type ArchivePresetMutationState = "idle" | "saving" | "error";
   type AppearanceSetting = "mode" | "theme" | "density";
   type AppearanceSaveState = Exclude<SettingsSaveState, "dirty">;
@@ -648,13 +646,6 @@
   const initialThemeChoice: ThemeChoice | null = isThemeChoice(themeParam) ? themeParam : null;
   const densityParam = params.get("density");
   const hasDensityOverride = isDensityChoice(densityParam);
-  let activePalette = $state<PaletteId>(
-    hasPaletteOverride ? paletteParam : "aqua",
-  );
-  let customAccent = $state(defaultCustomAccent);
-  let customAccentInput = $state(defaultCustomAccent);
-  let customAccentSaveError = $state(false);
-  let accentContrastGuard = $state(true);
   let activeThemeChoice = $state<ThemeChoice>(initialThemeChoice ?? "system");
   let activeDensityChoice = $state<DensityChoice>(hasDensityOverride ? densityParam : "standard");
   let savedModeChoice = $state<Mode | null>(initialMode);
@@ -681,6 +672,14 @@
           ? "saving"
           : "saved",
   );
+  const settingsSession = new SettingsSession({
+    platform: platformKind,
+    tr,
+    emit: applySettingsEffect,
+  }, {
+    paletteOverride: hasPaletteOverride ? paletteParam : null,
+    defaultExtractDir: defaultExtractDirParam,
+  });
   const initialPlatform = buildTargetPlatform();
   let activePlatform = $state<PlatformKind>(initialPlatform);
   let prefersDarkTheme = $state(
@@ -689,142 +688,13 @@
   let activeTheme = $derived<ResolvedTheme>(
     activeThemeChoice === "system" ? (prefersDarkTheme ? "dark" : "light") : activeThemeChoice,
   );
-  const bytesPerKiB = 1024;
   const bytesPerMiB = 1024 ** 2;
   const bytesPerGiB = 1024 ** 3;
-  const defaultSafety = {
-    maxOutputGiB: 256,
-    maxEntries: 1_000_000,
-    maxCompressionRatio: 2048,
-  };
   const extractDestinationModes: ExtractDestinationMode[] = ["smart", "archive", "same", "choose"];
   const extractOverwriteModes: ExtractOverwriteMode[] = ["ask", "skip", "overwrite", "rename"];
   const extractSymlinkModes: ExtractSymlinkMode[] = ["preserve", "skip", "follow"];
   const presetSqzInnerFormats: PresetSqzInnerFormat[] = ["sqz", "zip", "tar", "7z", "zstd"];
-  const numberFormatter = new Intl.NumberFormat("en-US");
-  let safetyMaxOutputGiB = $state<NumericSetting>(defaultSafety.maxOutputGiB);
-  let safetyMaxEntries = $state<NumericSetting>(defaultSafety.maxEntries);
-  let safetyMaxCompressionRatio = $state<NumericSetting>(defaultSafety.maxCompressionRatio);
-  let performanceParallelJobs = $state<NumericSetting>(null);
-  let performanceThreads = $state<NumericSetting>(null);
-  let performanceMemoryKiB = $state<NumericSetting>(null);
-  let settingsSnapshotLabel = $state(
-    tr("gui.settings.snapshot.defaults_active", "Saved settings · defaults"),
-  );
   let availableLanguages = $state<LanguageDto[]>([]);
-  let generalLanguageChoice = $state("");
-  let generalDefaultCreateDir = $state("");
-  let generalDefaultExtractDir = $state(defaultExtractDirParam?.trim() ?? "");
-  let appliedGeneralLanguageChoice = $state("");
-  let appliedDefaultCreateDir = $state("");
-  let appliedDefaultExtractDir = $state(defaultExtractDirParam?.trim() ?? "");
-  let generalRevealAfterExtract = $state(false);
-  let generalAutomaticUpdateChecks = $state(true);
-  let appliedGeneralRevealAfterExtract = $state(false);
-  let appliedGeneralAutomaticUpdateChecks = $state(true);
-  let savedAccentPalette = $state<PaletteId>("aqua");
-  let savedCustomAccent = $state(defaultCustomAccent);
-  let savedAccentContrastGuard = $state(true);
-  let savedGeneralLanguageChoice = $state("");
-  let savedGeneralDefaultCreateDir = $state("");
-  let savedGeneralDefaultExtractDir = $state(defaultExtractDirParam?.trim() ?? "");
-  let savedGeneralRevealAfterExtract = $state(false);
-  let savedGeneralAutomaticUpdateChecks = $state(true);
-  let savedSafetyMaxOutputGiB = $state<NumericSetting>(defaultSafety.maxOutputGiB);
-  let savedSafetyMaxEntries = $state<NumericSetting>(defaultSafety.maxEntries);
-  let savedSafetyMaxCompressionRatio = $state<NumericSetting>(defaultSafety.maxCompressionRatio);
-  let savedSafetyCustom = $state(false);
-  let savedPerformanceParallelJobs = $state<NumericSetting>(null);
-  let savedPerformanceThreads = $state<NumericSetting>(null);
-  let savedPerformanceMemoryKiB = $state<NumericSetting>(null);
-  let settingsSaveTarget = $state<PersistedSettingsSection | null>(null);
-  let settingsSaveOutcomes = $state<Record<PersistedSettingsSection, SettingsSaveOutcome>>({
-    general: "saved",
-    security: "saved",
-    performance: "saved",
-    colors: "saved",
-  });
-  const settingsDraftGenerations: Record<PersistedSettingsSection, number> = {
-    general: 0,
-    security: 0,
-    performance: 0,
-    colors: 0,
-  };
-  let defaultCreateFolderError = $derived(folderSettingValidationError(
-    generalDefaultCreateDir,
-    tr("gui.settings.folder.default_create", "Default create folder"),
-  ));
-  let defaultExtractFolderError = $derived(folderSettingValidationError(
-    generalDefaultExtractDir,
-    tr("gui.settings.folder.default_extract", "Default extract folder"),
-  ));
-  let generalSettingsValidationError = $derived(
-    defaultCreateFolderError || defaultExtractFolderError,
-  );
-  let generalSettingsDirty = $derived(
-    generalSettingsValidationError !== "" ||
-      generalLanguageChoice.trim() !== savedGeneralLanguageChoice ||
-      (normalizedDefaultCreateDir() ?? "") !== savedGeneralDefaultCreateDir ||
-      (normalizedDefaultExtractDir() ?? "") !== savedGeneralDefaultExtractDir ||
-      generalRevealAfterExtract !== savedGeneralRevealAfterExtract ||
-      generalAutomaticUpdateChecks !== savedGeneralAutomaticUpdateChecks ||
-      generalLanguageChoice.trim() !== appliedGeneralLanguageChoice ||
-      (normalizedDefaultCreateDir() ?? "") !== appliedDefaultCreateDir ||
-      (normalizedDefaultExtractDir() ?? "") !== appliedDefaultExtractDir ||
-      generalRevealAfterExtract !== appliedGeneralRevealAfterExtract ||
-      generalAutomaticUpdateChecks !== appliedGeneralAutomaticUpdateChecks,
-  );
-  let safetySettingsDirty = $derived(
-    safetyMaxOutputGiB !== savedSafetyMaxOutputGiB ||
-      safetyMaxEntries !== savedSafetyMaxEntries ||
-      safetyMaxCompressionRatio !== savedSafetyMaxCompressionRatio,
-  );
-  let performanceSettingsDirty = $derived(
-    performanceParallelJobs !== savedPerformanceParallelJobs ||
-      performanceThreads !== savedPerformanceThreads ||
-      performanceMemoryKiB !== savedPerformanceMemoryKiB,
-  );
-  let colorSettingsDirty = $derived(
-    activePalette !== savedAccentPalette ||
-      customAccentInput.trim().toUpperCase() !== savedCustomAccent ||
-      accentContrastGuard !== savedAccentContrastGuard,
-  );
-  let safetyMaxOutputError = $derived(requiredWholeSettingError(
-    safetyMaxOutputGiB,
-    1,
-    8192,
-    tr("gui.settings.security.max_output_gib", "Max output GiB"),
-  ));
-  let safetyMaxEntriesError = $derived(requiredWholeSettingError(
-    safetyMaxEntries,
-    1,
-    10_000_000,
-    tr("gui.settings.security.max_entries", "Max entries"),
-  ));
-  let safetyMaxCompressionRatioError = $derived(requiredWholeSettingError(
-    safetyMaxCompressionRatio,
-    1,
-    100_000,
-    tr("gui.settings.security.ratio_guard", "Ratio guard"),
-  ));
-  let performanceThreadsError = $derived(optionalWholeSettingError(
-    performanceThreads,
-    1,
-    64,
-    tr("gui.settings.performance.custom_threads", "Custom threads"),
-  ));
-  let performanceParallelJobsError = $derived(optionalWholeSettingError(
-    performanceParallelJobs,
-    1,
-    8,
-    tr("gui.settings.performance.custom_parallel_jobs", "Custom parallel tasks"),
-  ));
-  let performanceMemoryError = $derived(optionalWholeSettingError(
-    performanceMemoryKiB,
-    8,
-    64,
-    tr("gui.settings.performance.custom_buffer_kib", "Custom buffer KiB"),
-  ));
   let extractDestinationMode = $state<ExtractDestinationMode>("smart");
   let extractScope = $state<ExtractScope>("all");
   let extractSelectionSnapshot = $state<string[]>([]);
@@ -1091,12 +961,12 @@
   ];
 
   function customPaletteVariables(): CssVariableMap {
-    if (activePalette !== "custom") return {};
+    if (settingsSession.colors.palette !== "custom") return {};
     return customPaletteVariablesFor(activeTheme);
   }
 
   function customPaletteVariablesFor(theme: ResolvedTheme): CssVariableMap {
-    return deriveCustomPaletteTokens(customAccent, theme, accentContrastGuard);
+    return deriveCustomPaletteTokens(settingsSession.colors.accent, theme, settingsSession.colors.contrastGuard);
   }
 
   function entryContextCssVariables(context: EntryContext): CssVariableMap {
@@ -1106,22 +976,9 @@
       "--entry-context-top": `${context.y}px`,
     };
   }
-
-  const customAccentValid = $derived(normalizeHexColor(customAccentInput) !== null);
-  const paletteApplyBlocked = $derived(activePalette === "custom" && !customAccentValid);
-  let generalSaveState = $derived(settingsSaveState("general", generalSettingsDirty));
-  let securitySaveState = $derived(settingsSaveState("security", safetySettingsDirty));
-  let performanceSaveState = $derived(settingsSaveState("performance", performanceSettingsDirty));
-  let colorsSaveState = $derived(settingsSaveState("colors", colorSettingsDirty));
-  let safetyValidationError = $derived(
-    safetyMaxOutputError || safetyMaxEntriesError || safetyMaxCompressionRatioError,
-  );
-  let performanceValidationError = $derived(
-    performanceParallelJobsError || performanceThreadsError || performanceMemoryError,
-  );
   $effect(() => {
     document.documentElement.dataset.theme = activeTheme;
-    document.documentElement.dataset.palette = activePalette;
+    document.documentElement.dataset.palette = settingsSession.colors.palette;
     document.documentElement.dataset.density = activeDensityChoice;
   });
 
@@ -1816,7 +1673,7 @@
     }
 
     let cancelled = false;
-    const requestedDraftGenerations = { ...settingsDraftGenerations };
+    const requestedDraftGenerations = settingsSession.captureGenerations();
     const requestedAppearanceGenerations = { ...appearanceSaveGenerations };
     void ipc.getSettings()
       .then(async (settings) => {
@@ -1833,14 +1690,14 @@
         ) {
           activeThemeChoice = isThemeChoice(settings.theme) ? settings.theme : "system";
         }
-        applySettingsSnapshot(
+        applyAppearanceSettingsSnapshot(
           settings,
-          requestedDraftGenerations,
           appearanceSaveGenerations.density !== requestedAppearanceGenerations.density,
         );
+        settingsSession.applySnapshot(settings, requestedDraftGenerations);
         await loadLocale(settings.language).catch(() => undefined);
         if (cancelled) return;
-        updateSettingsSnapshotLabel();
+        settingsSession.updateSnapshotLabel();
         settingsStatus = initialMode ? "preview" : "ready";
         sourceCleanupRecoveryReady = true;
         startAutomaticUpdateCheck(settings.check_updates_automatically !== false);
@@ -1854,18 +1711,10 @@
           initUiMode(null);
         }
         const previewLanguage = storedPreviewLanguage();
-        const savedPreviewLanguage = previewLanguage ?? "";
-        savedGeneralLanguageChoice = savedPreviewLanguage;
-        appliedGeneralLanguageChoice = savedPreviewLanguage;
-        if (settingsDraftGenerations.general === requestedDraftGenerations.general) {
-          generalLanguageChoice = savedPreviewLanguage;
-        }
+        settingsSession.applyPreviewLanguage(previewLanguage, requestedDraftGenerations);
         await loadLocale(previewLanguage).catch(() => undefined);
         if (cancelled) return;
-        settingsSnapshotLabel = tr(
-          "gui.settings.snapshot.defaults_active",
-          "Saved settings · defaults",
-        );
+        settingsSession.setDefaultsSnapshotLabel();
         settingsStatus = "preview";
         sourceCleanupRecoveryReady = true;
       });
@@ -2061,7 +1910,7 @@
     const url = new URL(window.location.href);
     url.searchParams.set("mode", nextMode);
     url.searchParams.set("screen", screen);
-    url.searchParams.set("palette", activePalette);
+    url.searchParams.set("palette", settingsSession.colors.palette);
     url.searchParams.set("theme", activeThemeChoice);
     url.searchParams.set("density", activeDensityChoice);
     url.searchParams.delete("firstRun");
@@ -2118,7 +1967,7 @@
         appearanceSaveStates[setting] = isSettingsPersistenceFailure(error) ? "error" : "session";
         showNotice(
           isSettingsPersistenceFailure(error)
-            ? settingsPersistenceFailureLabel()
+            ? settingsSession.persistenceFailureLabel()
             : previewFailureLabel,
         );
       });
@@ -2375,57 +2224,6 @@
         createPreflightListenPromise = null;
       });
     return createPreflightListenPromise;
-  }
-
-  function setPalette(next: PaletteId) {
-    activePalette = next;
-    if (next === "custom") {
-      customAccentInput = normalizeHexColor(customAccentInput) ?? customAccent;
-      customAccentSaveError = false;
-    } else {
-      customAccentSaveError = false;
-    }
-    markSettingsDraft("colors");
-    syncUrl();
-  }
-
-  function updateCustomAccent(value: string, source: "color" | "hex") {
-    activePalette = "custom";
-    const normalized = normalizeHexColor(value);
-    if (normalized) {
-      customAccent = normalized;
-      customAccentInput = normalized;
-      customAccentSaveError = false;
-    } else if (source === "hex") {
-      customAccentInput = value.trim().toUpperCase();
-      customAccentSaveError = false;
-    }
-    markSettingsDraft("colors");
-    syncUrl();
-  }
-
-  function onCustomAccentHexInput(event: Event) {
-    updateCustomAccent((event.currentTarget as HTMLInputElement).value, "hex");
-  }
-
-  function customAccentForSave(): string | null {
-    const normalized = normalizeHexColor(customAccentInput);
-    if (activePalette === "custom") {
-      return normalized;
-    }
-    return normalizeHexColor(customAccent) ?? defaultCustomAccent;
-  }
-
-  function palettePayloadForSave(): { palette: PaletteId; customAccent: string; contrastGuard: boolean } | null {
-    const customAccentPayload = customAccentForSave();
-    if (!customAccentPayload) {
-      customAccentSaveError = true;
-      return null;
-    }
-    customAccent = customAccentPayload;
-    customAccentInput = customAccentPayload;
-    customAccentSaveError = false;
-    return { palette: activePalette, customAccent: customAccentPayload, contrastGuard: accentContrastGuard };
   }
 
   function setTheme(next: ThemeChoice) {
@@ -3198,7 +2996,7 @@
       completion: createCompletion,
       postSuccess: createPostSuccess,
       testAfterCreate: effectiveCreateTestAfterCreate(),
-      defaultCreateDir: normalizedDefaultCreateDir(appliedDefaultCreateDir),
+      defaultCreateDir: normalizedDefaultCreateDir(settingsSession.appliedGeneral.defaultCreateDir),
       restoreCredentialPrompt: createEncryptionEnabled,
       restoreEncryptNames: createEncryptNames,
     };
@@ -3999,7 +3797,7 @@
       return tr("gui.create.output.preview_ask", "Choose location when starting · {name}").replace("{name}", name);
     }
     if (createDestinationBase === "default_directory") {
-      const folder = normalizedDefaultCreateDir(appliedDefaultCreateDir);
+      const folder = normalizedDefaultCreateDir(settingsSession.appliedGeneral.defaultCreateDir);
       return folder
         ? joinFolderPath(folder, name)
         : tr("gui.create.output.preview_default_missing", "Default create folder is not set · Squallz will ask");
@@ -4122,71 +3920,6 @@
       : tr("gui.history.no_activity", "No operation history yet");
   }
 
-  function markSettingsDraft(section: PersistedSettingsSection) {
-    settingsDraftGenerations[section] += 1;
-    settingsSaveOutcomes[section] = "idle";
-  }
-
-  function setWorkspaceAccentContrastGuard(enabled: boolean) {
-    accentContrastGuard = enabled;
-    markSettingsDraft("colors");
-  }
-
-  function setWorkspaceGeneralLanguageChoice(value: string) {
-    generalLanguageChoice = value;
-    markSettingsDraft("general");
-  }
-
-  function setWorkspaceGeneralDefaultCreateDir(value: string) {
-    generalDefaultCreateDir = value;
-    markSettingsDraft("general");
-  }
-
-  function setWorkspaceGeneralDefaultExtractDir(value: string) {
-    generalDefaultExtractDir = value;
-    markSettingsDraft("general");
-  }
-
-  function setWorkspaceGeneralRevealAfterExtract(enabled: boolean) {
-    generalRevealAfterExtract = enabled;
-    markSettingsDraft("general");
-  }
-
-  function setWorkspaceGeneralAutomaticUpdateChecks(enabled: boolean) {
-    generalAutomaticUpdateChecks = enabled;
-    markSettingsDraft("general");
-  }
-
-  function setWorkspaceSafetyMaxEntries(value: NumericSetting) {
-    safetyMaxEntries = value;
-    markSettingsDraft("security");
-  }
-
-  function setWorkspaceSafetyMaxOutputGiB(value: NumericSetting) {
-    safetyMaxOutputGiB = value;
-    markSettingsDraft("security");
-  }
-
-  function setWorkspaceSafetyMaxCompressionRatio(value: NumericSetting) {
-    safetyMaxCompressionRatio = value;
-    markSettingsDraft("security");
-  }
-
-  function setWorkspacePerformanceThreads(value: NumericSetting) {
-    performanceThreads = value;
-    markSettingsDraft("performance");
-  }
-
-  function setWorkspacePerformanceParallelJobs(value: NumericSetting) {
-    performanceParallelJobs = value;
-    markSettingsDraft("performance");
-  }
-
-  function setWorkspacePerformanceMemoryKiB(value: NumericSetting) {
-    performanceMemoryKiB = value;
-    markSettingsDraft("performance");
-  }
-
   function isSettingsWorkspaceScreen(value: Screen): value is SettingsScreen {
     return value === "appearance"
       || value === "colors"
@@ -4203,7 +3936,7 @@
       screen: settingsScreen,
       onReady: () => { if (securitySettingsFocusPending) focusSecuritySettings(); },
       tr,
-      settingsSaveTarget,
+      settings: settingsSession,
       appearanceSaveState,
       modernModeSelected: selectedMode === "modern" || (selectedMode === null && mode === "modern"),
       classicModeSelected: selectedMode === "classic" || (selectedMode === null && mode === "classic"),
@@ -4212,77 +3945,13 @@
       setTheme,
       activeDensityChoice,
       setDensity,
-      activePalette,
       activeTheme,
-      customAccent,
-      customAccentInput,
-      customAccentValid,
-      customAccentSaveError,
-      accentContrastGuard,
-      colorsSaveState,
-      colorSettingsDirty,
-      paletteApplyBlocked,
-      savePaletteSettings,
-      setPalette,
-      updateCustomAccent,
-      onCustomAccentHexInput,
-      setAccentContrastGuard: setWorkspaceAccentContrastGuard,
-      generalSaveState,
-      generalSettingsDirty,
-      generalSettingsValidationError,
-      saveGeneralSettings,
       availableLanguages,
-      generalLanguageChoice,
-      setGeneralLanguageChoice: setWorkspaceGeneralLanguageChoice,
-      generalDefaultCreateDir,
-      setGeneralDefaultCreateDir: setWorkspaceGeneralDefaultCreateDir,
-      defaultCreateFolderError,
       chooseDefaultCreateFolder,
-      clearDefaultCreateFolder,
-      generalDefaultExtractDir,
-      setGeneralDefaultExtractDir: setWorkspaceGeneralDefaultExtractDir,
-      defaultExtractFolderError,
       chooseDefaultExtractFolder,
-      clearDefaultExtractFolder,
-      generalRevealAfterExtract,
-      setGeneralRevealAfterExtract: setWorkspaceGeneralRevealAfterExtract,
-      generalAutomaticUpdateChecks,
-      setGeneralAutomaticUpdateChecks: setWorkspaceGeneralAutomaticUpdateChecks,
       fileManagerLabel,
       openWithLabel,
       updateCheckPreview,
-      securitySaveState,
-      safetySettingsDirty,
-      safetyValidationError,
-      saveSafetySettings,
-      safetyMaxEntries,
-      setSafetyMaxEntries: setWorkspaceSafetyMaxEntries,
-      safetyMaxEntriesError,
-      safetyMaxOutputGiB,
-      setSafetyMaxOutputGiB: setWorkspaceSafetyMaxOutputGiB,
-      safetyMaxOutputError,
-      safetyMaxCompressionRatio,
-      setSafetyMaxCompressionRatio: setWorkspaceSafetyMaxCompressionRatio,
-      safetyMaxCompressionRatioError,
-      resetSafetySettings,
-      settingsSnapshotLabel,
-      performanceSaveState,
-      performanceSettingsDirty,
-      performanceValidationError,
-      savePerformanceSettings,
-      performanceParallelJobs,
-      setPerformanceParallelJobs: setWorkspacePerformanceParallelJobs,
-      performanceParallelJobsError,
-      choosePerformanceParallelJobs,
-      performanceThreads,
-      setPerformanceThreads: setWorkspacePerformanceThreads,
-      performanceThreadsError,
-      choosePerformanceThreads,
-      performanceMemoryKiB,
-      setPerformanceMemoryKiB: setWorkspacePerformanceMemoryKiB,
-      performanceMemoryError,
-      choosePerformanceMemory,
-      resetPerformanceSettings,
       passwordBookForgetDisabledReason,
       labelWithDisabledReason,
       forgetPasswordBookPanel,
@@ -4581,52 +4250,6 @@
     };
   }
 
-  function beginSettingsSave(section: PersistedSettingsSection): number | null {
-    if (settingsSaveTarget !== null) return null;
-    settingsSaveTarget = section;
-    settingsSaveOutcomes[section] = "idle";
-    return settingsDraftGenerations[section];
-  }
-
-  function finishSettingsSave(
-    section: PersistedSettingsSection,
-    generation: number,
-    outcome: SettingsSaveOutcome,
-  ) {
-    if (settingsSaveTarget === section) settingsSaveTarget = null;
-    settingsSaveOutcomes[section] =
-      settingsDraftGenerations[section] === generation || outcome !== "saved"
-        ? outcome
-        : "idle";
-  }
-
-  function settingsSaveState(
-    section: PersistedSettingsSection,
-    dirty: boolean,
-  ): SettingsSaveState {
-    if (settingsSaveTarget === section) return "saving";
-    const outcome = settingsSaveOutcomes[section];
-    if (dirty && outcome === "error") return "error";
-    if (dirty && outcome === "session") return "session";
-    return dirty ? "dirty" : "saved";
-  }
-
-  function applyPaletteSettingsSnapshot(settings: SettingsDto, preserveDraft = false) {
-    const palette = isPaletteId(settings.accent_palette) ? settings.accent_palette : "aqua";
-    const accent = normalizeHexColor(settings.custom_accent) ?? defaultCustomAccent;
-    const contrastGuard = settings.accent_contrast_guard !== false;
-    savedAccentPalette = palette;
-    savedCustomAccent = accent;
-    savedAccentContrastGuard = contrastGuard;
-    if (preserveDraft) return;
-    if (!hasPaletteOverride) activePalette = palette;
-    customAccent = accent;
-    customAccentInput = accent;
-    customAccentSaveError = false;
-    accentContrastGuard = contrastGuard;
-    settingsSaveOutcomes.colors = "saved";
-  }
-
   function applyAppearanceSettingsSnapshot(settings: SettingsDto, preserveDensity = false) {
     savedModeChoice =
       settings.ui_mode === "modern" || settings.ui_mode === "classic"
@@ -4639,32 +4262,6 @@
     if (!preserveDensity && !hasDensityOverride && isDensityChoice(settings.ui_density)) {
       activeDensityChoice = settings.ui_density;
     }
-  }
-
-  function applyGeneralSettingsSnapshot(settings: SettingsDto, preserveDraft = false) {
-    const language = settings.language ?? "";
-    const defaultCreateDir = normalizedDefaultCreateDir(settings.default_create_dir ?? "") ?? "";
-    const defaultExtractDir = normalizedDefaultExtractDir(settings.default_extract_dir ?? "") ?? "";
-    const revealAfterExtract = settings.reveal_after_extract === true;
-    const automaticUpdateChecks = settings.check_updates_automatically !== false;
-    savedGeneralLanguageChoice = language;
-    savedGeneralDefaultCreateDir = defaultCreateDir;
-    savedGeneralDefaultExtractDir = defaultExtractDir;
-    savedGeneralRevealAfterExtract = revealAfterExtract;
-    savedGeneralAutomaticUpdateChecks = automaticUpdateChecks;
-    appliedGeneralLanguageChoice = language;
-    appliedDefaultCreateDir = defaultCreateDir;
-    appliedDefaultExtractDir = defaultExtractDir;
-    appliedGeneralRevealAfterExtract = revealAfterExtract;
-    appliedGeneralAutomaticUpdateChecks = automaticUpdateChecks;
-    setRevealAfterExtractPreference(revealAfterExtract);
-    if (preserveDraft) return;
-    generalLanguageChoice = language;
-    generalDefaultCreateDir = defaultCreateDir;
-    generalDefaultExtractDir = defaultExtractDir;
-    generalRevealAfterExtract = revealAfterExtract;
-    generalAutomaticUpdateChecks = automaticUpdateChecks;
-    settingsSaveOutcomes.general = "saved";
   }
 
   async function runAutomaticUpdateCheck(generation: number): Promise<void> {
@@ -4727,381 +4324,6 @@
       if (automaticUpdateCheckTimer !== null) clearTimeout(automaticUpdateCheckTimer);
     };
   });
-
-  function safetyValuesFromSettings(settings: SettingsDto) {
-    return {
-      maxOutputGiB:
-        settings.safety_max_output_bytes && settings.safety_max_output_bytes > 0
-          ? Math.max(1, Math.round(settings.safety_max_output_bytes / bytesPerGiB))
-          : defaultSafety.maxOutputGiB,
-      maxEntries:
-        settings.safety_max_entries && settings.safety_max_entries > 0
-          ? settings.safety_max_entries
-          : defaultSafety.maxEntries,
-      maxCompressionRatio:
-        settings.safety_max_compression_ratio && settings.safety_max_compression_ratio > 0
-          ? settings.safety_max_compression_ratio
-          : defaultSafety.maxCompressionRatio,
-    };
-  }
-
-  function applySafetySettingsSnapshot(settings: SettingsDto, preserveDraft = false) {
-    const values = safetyValuesFromSettings(settings);
-    savedSafetyMaxOutputGiB = values.maxOutputGiB;
-    savedSafetyMaxEntries = values.maxEntries;
-    savedSafetyMaxCompressionRatio = values.maxCompressionRatio;
-    savedSafetyCustom = Boolean(
-      settings.safety_max_output_bytes ||
-        settings.safety_max_entries ||
-        settings.safety_max_compression_ratio,
-    );
-    if (preserveDraft) return;
-    safetyMaxOutputGiB = values.maxOutputGiB;
-    safetyMaxEntries = values.maxEntries;
-    safetyMaxCompressionRatio = values.maxCompressionRatio;
-    settingsSaveOutcomes.security = "saved";
-  }
-
-  function performanceValuesFromSettings(settings: SettingsDto) {
-    return {
-      parallelJobs:
-        settings.performance_parallel_jobs && settings.performance_parallel_jobs > 0
-          ? Math.min(settings.performance_parallel_jobs, 8)
-          : null,
-      threads:
-        settings.performance_threads && settings.performance_threads > 0
-          ? Math.min(settings.performance_threads, 64)
-          : null,
-      memoryKiB:
-        settings.performance_memory_limit_bytes && settings.performance_memory_limit_bytes > 0
-          ? wholeSetting(
-              Math.round(settings.performance_memory_limit_bytes / bytesPerKiB),
-              64,
-              8,
-              64,
-            )
-          : null,
-    };
-  }
-
-  function applyPerformanceSettingsSnapshot(settings: SettingsDto, preserveDraft = false) {
-    const values = performanceValuesFromSettings(settings);
-    savedPerformanceParallelJobs = values.parallelJobs;
-    savedPerformanceThreads = values.threads;
-    savedPerformanceMemoryKiB = values.memoryKiB;
-    if (preserveDraft) return;
-    performanceParallelJobs = values.parallelJobs;
-    performanceThreads = values.threads;
-    performanceMemoryKiB = values.memoryKiB;
-    settingsSaveOutcomes.performance = "saved";
-  }
-
-  function updateSettingsSnapshotLabel() {
-    const parallelLabel =
-      savedPerformanceParallelJobs === null
-        ? tr("gui.settings.snapshot.parallel_auto", "parallel auto")
-        : tr("gui.settings.snapshot.parallel_count", "{count} parallel")
-            .replace("{count}", String(savedPerformanceParallelJobs));
-    const workerLabel =
-      savedPerformanceThreads === null
-        ? tr("gui.settings.snapshot.workers_auto", "encoder threads auto")
-        : tr("gui.settings.snapshot.workers_count", "{count} encoder threads")
-            .replace("{count}", String(savedPerformanceThreads));
-    const memoryLabel =
-      savedPerformanceMemoryKiB === null
-        ? tr("gui.settings.snapshot.buffer_auto", "buffer auto")
-        : tr("gui.settings.snapshot.buffer_kib", "{count} KiB buffer")
-            .replace("{count}", formattedNumber(savedPerformanceMemoryKiB, 64));
-    settingsSnapshotLabel = tr(
-      "gui.settings.snapshot.summary",
-      "Saved settings · {safety} · {parallel} · {workers} · {buffer}",
-    )
-      .replace(
-        "{safety}",
-        savedSafetyCustom
-          ? tr("gui.settings.snapshot.custom_safety", "Custom safety")
-          : tr("gui.settings.snapshot.default_safety", "Default safety"),
-      )
-      .replace("{parallel}", parallelLabel)
-      .replace("{workers}", workerLabel)
-      .replace("{buffer}", memoryLabel);
-  }
-
-  function applySettingsSnapshot(
-    settings: SettingsDto,
-    requestedGenerations: Readonly<Record<PersistedSettingsSection, number>>,
-    preserveAppearance: boolean,
-  ) {
-    applyPaletteSettingsSnapshot(
-      settings,
-      settingsDraftGenerations.colors !== requestedGenerations.colors,
-    );
-    applyAppearanceSettingsSnapshot(settings, preserveAppearance);
-    applyGeneralSettingsSnapshot(
-      settings,
-      settingsDraftGenerations.general !== requestedGenerations.general,
-    );
-    applySafetySettingsSnapshot(
-      settings,
-      settingsDraftGenerations.security !== requestedGenerations.security,
-    );
-    applyPerformanceSettingsSnapshot(
-      settings,
-      settingsDraftGenerations.performance !== requestedGenerations.performance,
-    );
-    updateSettingsSnapshotLabel();
-  }
-
-  function wholeSetting(value: NumericSetting, fallback: number, min: number, max: number): number {
-    const numberValue = typeof value === "number" && Number.isFinite(value) ? value : fallback;
-    return Math.min(max, Math.max(min, Math.round(numberValue)));
-  }
-
-  function numericRangeMessage(label: string, min: number, max: number): string {
-    return tr("gui.settings.number.invalid_range", "{label} must be a whole number from {min} to {max}")
-      .replace("{label}", label)
-      .replace("{min}", numberFormatter.format(min))
-      .replace("{max}", numberFormatter.format(max));
-  }
-
-  function requiredWholeSettingError(
-    value: NumericSetting,
-    min: number,
-    max: number,
-    label: string,
-  ): string {
-    return typeof value !== "number" ||
-      !Number.isFinite(value) ||
-      !Number.isInteger(value) ||
-      value < min ||
-      value > max
-      ? numericRangeMessage(label, min, max)
-      : "";
-  }
-
-  function optionalWholeSettingError(
-    value: NumericSetting,
-    min: number,
-    max: number,
-    label: string,
-  ): string {
-    return value === null ? "" : requiredWholeSettingError(value, min, max, label);
-  }
-
-  function showNumericRangeNotice(label: string, min: number, max: number) {
-    showNotice(numericRangeMessage(label, min, max));
-  }
-
-  function validateRequiredWholeSetting(
-    value: NumericSetting,
-    min: number,
-    max: number,
-    label: string,
-  ): number | null {
-    if (
-      typeof value !== "number" ||
-      !Number.isFinite(value) ||
-      !Number.isInteger(value) ||
-      value < min ||
-      value > max
-    ) {
-      showNumericRangeNotice(label, min, max);
-      return null;
-    }
-    return value;
-  }
-
-  function validateOptionalWholeSetting(
-    value: NumericSetting,
-    min: number,
-    max: number,
-    label: string,
-  ): number | null | undefined {
-    if (value === null) return null;
-    return validateRequiredWholeSetting(value, min, max, label) ?? undefined;
-  }
-
-  function formattedNumber(value: NumericSetting, fallback: number): string {
-    return numberFormatter.format(wholeSetting(value, fallback, 1, Number.MAX_SAFE_INTEGER));
-  }
-
-  async function saveSafetySettings() {
-    const maxOutputGiB = validateRequiredWholeSetting(
-      safetyMaxOutputGiB,
-      1,
-      8192,
-      tr("gui.settings.security.max_output_gib", "Max output GiB"),
-    );
-    if (maxOutputGiB === null) return;
-    const maxEntries = validateRequiredWholeSetting(
-      safetyMaxEntries,
-      1,
-      10_000_000,
-      tr("gui.settings.security.max_entries", "Max entries"),
-    );
-    if (maxEntries === null) return;
-    const maxCompressionRatio = validateRequiredWholeSetting(
-      safetyMaxCompressionRatio,
-      1,
-      100_000,
-      tr("gui.settings.security.ratio_guard", "Ratio guard"),
-    );
-    if (maxCompressionRatio === null) return;
-    safetyMaxOutputGiB = maxOutputGiB;
-    safetyMaxEntries = maxEntries;
-    safetyMaxCompressionRatio = maxCompressionRatio;
-    const generation = beginSettingsSave("security");
-    if (generation === null) return;
-    const useDefaults =
-      maxOutputGiB === defaultSafety.maxOutputGiB &&
-      maxEntries === defaultSafety.maxEntries &&
-      maxCompressionRatio === defaultSafety.maxCompressionRatio;
-
-    try {
-      const settings = await ipc.setSafetyLimits(
-        useDefaults ? null : maxOutputGiB * bytesPerGiB,
-        useDefaults ? null : maxEntries,
-        useDefaults ? null : maxCompressionRatio,
-      );
-      applySafetySettingsSnapshot(
-        settings,
-        settingsDraftGenerations.security !== generation,
-      );
-      updateSettingsSnapshotLabel();
-      finishSettingsSave("security", generation, "saved");
-      showNotice(tr("gui.settings.security.saved", "Security settings saved"));
-    } catch (error) {
-      if (isSettingsPersistenceFailure(error)) {
-        finishSettingsSave("security", generation, "error");
-        showNotice(settingsPersistenceFailureLabel());
-      } else {
-        finishSettingsSave("security", generation, "error");
-        showNotice(
-          tr(
-            "gui.settings.apply_failed",
-            "Could not apply these settings. Try again from the desktop app.",
-          ),
-        );
-      }
-    }
-  }
-
-  function resetSafetySettings() {
-    safetyMaxOutputGiB = defaultSafety.maxOutputGiB;
-    safetyMaxEntries = defaultSafety.maxEntries;
-    safetyMaxCompressionRatio = defaultSafety.maxCompressionRatio;
-    markSettingsDraft("security");
-  }
-
-  function choosePerformanceThreads(next: NumericSetting) {
-    performanceThreads = next;
-    markSettingsDraft("performance");
-  }
-
-  function choosePerformanceParallelJobs(next: NumericSetting) {
-    performanceParallelJobs = next;
-    markSettingsDraft("performance");
-  }
-
-  function choosePerformanceMemory(next: NumericSetting) {
-    performanceMemoryKiB = next;
-    markSettingsDraft("performance");
-  }
-
-  async function savePerformanceSettings() {
-    const parallelJobs = validateOptionalWholeSetting(
-      performanceParallelJobs,
-      1,
-      8,
-      tr("gui.settings.performance.custom_parallel_jobs", "Custom parallel tasks"),
-    );
-    if (parallelJobs === undefined) return;
-    const threads = validateOptionalWholeSetting(
-      performanceThreads,
-      1,
-      64,
-      tr("gui.settings.performance.custom_threads", "Custom threads"),
-    );
-    if (threads === undefined) return;
-    const memoryKiB = validateOptionalWholeSetting(
-      performanceMemoryKiB,
-      8,
-      64,
-      tr("gui.settings.performance.custom_buffer_kib", "Custom buffer KiB"),
-    );
-    if (memoryKiB === undefined) return;
-    performanceParallelJobs = parallelJobs;
-    performanceThreads = threads;
-    performanceMemoryKiB = memoryKiB;
-    const generation = beginSettingsSave("performance");
-    if (generation === null) return;
-
-    try {
-      const settings = await ipc.setPerformanceOptions(
-        threads,
-        memoryKiB === null ? null : memoryKiB * bytesPerKiB,
-        parallelJobs,
-      );
-      applyPerformanceSettingsSnapshot(
-        settings,
-        settingsDraftGenerations.performance !== generation,
-      );
-      updateSettingsSnapshotLabel();
-      finishSettingsSave("performance", generation, "saved");
-      showNotice(tr("gui.settings.performance.saved", "Performance settings saved"));
-    } catch (error) {
-      if (isSettingsPersistenceFailure(error)) {
-        finishSettingsSave("performance", generation, "error");
-        showNotice(settingsPersistenceFailureLabel());
-      } else {
-        finishSettingsSave("performance", generation, "error");
-        showNotice(
-          tr(
-            "gui.settings.apply_failed",
-            "Could not apply these settings. Try again from the desktop app.",
-          ),
-        );
-      }
-    }
-  }
-
-  function resetPerformanceSettings() {
-    performanceParallelJobs = null;
-    performanceThreads = null;
-    performanceMemoryKiB = null;
-    markSettingsDraft("performance");
-  }
-
-  async function savePaletteSettings() {
-    const payload = palettePayloadForSave();
-    if (!payload) {
-      showNotice(tr("gui.colors.invalid_hex", "Enter a valid #RRGGBB color"));
-      return;
-    }
-    const generation = beginSettingsSave("colors");
-    if (generation === null) return;
-    try {
-      const settings = await ipc.setAccentPalette(payload.palette, payload.customAccent, payload.contrastGuard);
-      applyPaletteSettingsSnapshot(
-        settings,
-        settingsDraftGenerations.colors !== generation,
-      );
-      finishSettingsSave("colors", generation, "saved");
-      syncUrl();
-      showNotice(tr("gui.colors.saved", "Theme colors saved"));
-    } catch (error) {
-      finishSettingsSave(
-        "colors",
-        generation,
-        isSettingsPersistenceFailure(error) ? "error" : "session",
-      );
-      showNotice(
-        isSettingsPersistenceFailure(error)
-          ? settingsPersistenceFailureLabel()
-          : tr("gui.colors.saved_preview", "Theme colors apply to this session but were not saved"),
-      );
-    }
-  }
 
   function languageLabel(tag: string | null): string {
     if (!tag) return tr("gui.settings.language.follow_system", "Follow system");
@@ -5319,17 +4541,6 @@
     }
   }
 
-  function isSettingsPersistenceFailure(error: unknown): boolean {
-    return isErrorDto(error) && error.key === "error.settings_write";
-  }
-
-  function settingsPersistenceFailureLabel(): string {
-    return tr(
-      "gui.settings.save_failed",
-      "Could not save settings. Check disk access and try again.",
-    );
-  }
-
   function getDialogModule(): Promise<DialogModule> {
     if (!openDialogModulePromise) {
       openDialogModulePromise = import("@tauri-apps/plugin-dialog").catch((error) => {
@@ -5533,31 +4744,65 @@
     clearArchiveFilter();
   }
 
+  function applySettingsEffect(effect: SettingsEffect): void {
+    switch (effect.kind) {
+      case "notice":
+        showNotice(effect.message);
+        break;
+      case "generalApplied":
+        setRevealAfterExtractPreference(effect.revealAfterExtract);
+        break;
+      case "previewLanguage":
+        storePreviewLanguage(effect.language);
+        break;
+      case "generalSaved": {
+        const settings = effect.settings;
+        recordOperation({
+          status: "done",
+          title: tr("gui.settings.general.saved", "General settings saved"),
+          detail: tr(
+            "gui.settings.general.saved_detail",
+            "Language: {language} · Create folder: {createFolder} · Extract folder: {folder} · Reveal after extract {reveal} · Automatic update checks {updates}",
+          )
+            .replace("{language}", languageLabel(settings.language))
+            .replace("{createFolder}", defaultCreateFolderLabel(settings.default_create_dir ?? ""))
+            .replace("{folder}", defaultExtractFolderLabel(settings.default_extract_dir ?? ""))
+            .replace("{reveal}", settings.reveal_after_extract ? tr("common.on", "on") : tr("common.off", "off"))
+            .replace(
+              "{updates}",
+              settings.check_updates_automatically !== false
+                ? tr("common.on", "on")
+                : tr("common.off", "off"),
+            ),
+        });
+        break;
+      }
+      case "automaticUpdates":
+        startAutomaticUpdateCheck(effect.enabled);
+        break;
+      case "palettePreviewChanged":
+        syncUrl();
+        break;
+    }
+  }
+
   function normalizedFolderSetting(value: string): string | null {
     return normalizeDesktopFolder(value, platformKind());
   }
 
-  function folderSettingValidationError(value: string, label: string): string {
-    if (!value.trim() || normalizedFolderSetting(value)) return "";
-    return tr(
-      "gui.settings.folder.absolute_required",
-      "{name} must be an absolute folder path. Choose a folder or clear the field.",
-    ).replace("{name}", label);
-  }
-
-  function normalizedDefaultCreateDir(value: string = generalDefaultCreateDir): string | null {
+  function normalizedDefaultCreateDir(value: string = settingsSession.general.defaultCreateDir): string | null {
     return normalizedFolderSetting(value);
   }
 
-  function normalizedDefaultExtractDir(value: string = generalDefaultExtractDir): string | null {
+  function normalizedDefaultExtractDir(value: string = settingsSession.general.defaultExtractDir): string | null {
     return normalizedFolderSetting(value);
   }
 
-  function defaultCreateFolderLabel(value: string = generalDefaultCreateDir): string {
+  function defaultCreateFolderLabel(value: string = settingsSession.general.defaultCreateDir): string {
     return normalizedDefaultCreateDir(value) ?? tr("gui.settings.folder.ask_when_creating", "Ask when creating");
   }
 
-  function defaultExtractFolderLabel(value: string = generalDefaultExtractDir): string {
+  function defaultExtractFolderLabel(value: string = settingsSession.general.defaultExtractDir): string {
     return normalizedDefaultExtractDir(value) ?? tr("gui.settings.folder.next_to_archive", "Next to archive");
   }
 
@@ -5570,8 +4815,7 @@
         directory: true,
       });
       if (typeof selected === "string") {
-        generalDefaultExtractDir = selected;
-        markSettingsDraft("general");
+        settingsSession.setGeneral("defaultExtractDir", selected);
       }
     } catch {
       showNotice(tr("gui.settings.folder.picker_requires_desktop_service", "Folder picker requires the desktop service"));
@@ -5587,125 +4831,10 @@
         directory: true,
       });
       if (typeof selected === "string") {
-        generalDefaultCreateDir = selected;
-        markSettingsDraft("general");
+        settingsSession.setGeneral("defaultCreateDir", selected);
       }
     } catch {
       showNotice(tr("gui.settings.folder.picker_requires_desktop_service", "Folder picker requires the desktop service"));
-    }
-  }
-
-  function clearDefaultCreateFolder() {
-    generalDefaultCreateDir = "";
-    markSettingsDraft("general");
-  }
-
-  function clearDefaultExtractFolder() {
-    generalDefaultExtractDir = "";
-    markSettingsDraft("general");
-  }
-
-  async function saveGeneralSettings() {
-    if (generalSettingsValidationError) {
-      showNotice(generalSettingsValidationError);
-      return;
-    }
-    const nextLanguage = generalLanguageChoice.trim() || null;
-    const defaultCreateDir = normalizedDefaultCreateDir();
-    const defaultExtractDir = normalizedDefaultExtractDir();
-    const revealAfterExtract = generalRevealAfterExtract;
-    const automaticUpdateChecks = generalAutomaticUpdateChecks;
-    const previousAppliedLanguage = appliedGeneralLanguageChoice;
-    const requiresPersistence =
-      (nextLanguage ?? "") !== savedGeneralLanguageChoice ||
-      (defaultCreateDir ?? "") !== savedGeneralDefaultCreateDir ||
-      (defaultExtractDir ?? "") !== savedGeneralDefaultExtractDir ||
-      revealAfterExtract !== savedGeneralRevealAfterExtract ||
-      automaticUpdateChecks !== savedGeneralAutomaticUpdateChecks;
-    const generation = beginSettingsSave("general");
-    if (generation === null) return;
-    try {
-      const settings = await ipc.setGeneralOptions(
-        nextLanguage,
-        defaultCreateDir,
-        defaultExtractDir,
-        revealAfterExtract,
-        automaticUpdateChecks,
-      );
-      storePreviewLanguage(settings.language);
-      applyGeneralSettingsSnapshot(
-        settings,
-        settingsDraftGenerations.general !== generation,
-      );
-      await loadLocale(settings.language).catch(() => undefined);
-      updateSettingsSnapshotLabel();
-      finishSettingsSave("general", generation, "saved");
-      recordOperation({
-        status: "done",
-        title: tr("gui.settings.general.saved", "General settings saved"),
-        detail: tr(
-          "gui.settings.general.saved_detail",
-          "Language: {language} · Create folder: {createFolder} · Extract folder: {folder} · Reveal after extract {reveal} · Automatic update checks {updates}",
-        )
-          .replace("{language}", languageLabel(settings.language))
-          .replace("{createFolder}", defaultCreateFolderLabel(settings.default_create_dir ?? ""))
-          .replace("{folder}", defaultExtractFolderLabel(settings.default_extract_dir ?? ""))
-          .replace("{reveal}", settings.reveal_after_extract ? tr("common.on", "on") : tr("common.off", "off"))
-          .replace(
-            "{updates}",
-            settings.check_updates_automatically !== false
-              ? tr("common.on", "on")
-              : tr("common.off", "off"),
-          ),
-      });
-      showNotice(tr("gui.settings.general.saved", "General settings saved"));
-      startAutomaticUpdateCheck(settings.check_updates_automatically !== false);
-    } catch (error) {
-      if (isSettingsPersistenceFailure(error)) {
-        finishSettingsSave("general", generation, "error");
-        showNotice(settingsPersistenceFailureLabel());
-      } else {
-        let sessionApplied = false;
-        if (settingsDraftGenerations.general === generation) {
-          await loadLocale(nextLanguage).catch(() => undefined);
-          if (settingsDraftGenerations.general === generation) {
-            appliedGeneralLanguageChoice = nextLanguage ?? "";
-            appliedDefaultCreateDir = defaultCreateDir ?? "";
-            appliedDefaultExtractDir = defaultExtractDir ?? "";
-            appliedGeneralRevealAfterExtract = revealAfterExtract;
-            appliedGeneralAutomaticUpdateChecks = automaticUpdateChecks;
-            storePreviewLanguage(nextLanguage);
-            setRevealAfterExtractPreference(revealAfterExtract);
-            updateSettingsSnapshotLabel();
-            sessionApplied = true;
-            startAutomaticUpdateCheck(automaticUpdateChecks);
-          } else {
-            await loadLocale(previousAppliedLanguage || null).catch(() => undefined);
-            updateSettingsSnapshotLabel();
-          }
-        }
-        finishSettingsSave(
-          "general",
-          generation,
-          sessionApplied ? (requiresPersistence ? "session" : "saved") : "error",
-        );
-        showNotice(
-          sessionApplied
-            ? requiresPersistence
-              ? tr(
-                  "gui.settings.general.saved_preview",
-                  "General changes apply to this session but were not saved",
-                )
-              : tr(
-                  "gui.settings.general.matches_saved",
-                  "General settings now match the saved values",
-                )
-            : tr(
-                "gui.settings.previous_apply_failed",
-                "Earlier changes were not applied. Review the current draft and save again.",
-              ),
-        );
-      }
     }
   }
 
@@ -6854,7 +5983,7 @@
     return { overwrite: "ask", symlinks: "preserve", smart: true,
       items: uniqueNonEmptyPaths([...paths]).map((path) => ({ path,
         displayPath: currentArchive?.source === path ? currentArchive.path : path,
-        dest: normalizedDefaultExtractDir(appliedDefaultExtractDir) ?? pathDir(currentArchive?.source === path ? currentArchive.path : path),
+        dest: normalizedDefaultExtractDir(settingsSession.appliedGeneral.defaultExtractDir) ?? pathDir(currentArchive?.source === path ? currentArchive.path : path),
         encoding: currentArchive && sameFilePath(currentArchive.source, path) ? archiveEncodingForJob() : null,
         best_effort: false,
       })) };
@@ -7289,7 +6418,7 @@
   }
 
   function extractDestInDefaultFolder(fallbackParent: string, archiveName: string): string {
-    const parent = normalizedDefaultExtractDir(appliedDefaultExtractDir) ?? fallbackParent;
+    const parent = normalizedDefaultExtractDir(settingsSession.appliedGeneral.defaultExtractDir) ?? fallbackParent;
     const name = archiveStemName(archiveName);
     if (parent === "/") return `/${name}`;
     return `${parent}/${name}`;
@@ -7307,7 +6436,7 @@
   }
 
   function extractSmartBase(): string {
-    return extractSmartBaseOverride ?? normalizedDefaultExtractDir(appliedDefaultExtractDir)
+    return extractSmartBaseOverride ?? normalizedDefaultExtractDir(settingsSession.appliedGeneral.defaultExtractDir)
       ?? (currentArchive ? pathDir(currentArchive.path) : openArchiveFirstLabel());
   }
 
@@ -9091,7 +8220,7 @@
         testAfterCreate: effectiveCreateTestAfterCreate(),
         testAfterCreateRequired: createPostSuccess === "trash_source",
         outputPreview: createOutputPreview(),
-        defaultFolder: normalizedDefaultCreateDir(appliedDefaultCreateDir) ?? "",
+        defaultFolder: normalizedDefaultCreateDir(settingsSession.appliedGeneral.defaultCreateDir) ?? "",
         fileManager: fileManagerLabel(),
         trashName: trashNameLabel(),
         disabled: preflightBusy,
@@ -11616,7 +10745,7 @@
   ): boolean {
     return restoreNestedExtractDraft(reviewNestedExtract({
       kind: "extract_nested", outer_path: outerSource, entry_path: entryPath,
-      dest: normalizedDefaultExtractDir(appliedDefaultExtractDir) ?? pathDir(outerDisplayPath),
+      dest: normalizedDefaultExtractDir(settingsSession.appliedGeneral.defaultExtractDir) ?? pathDir(outerDisplayPath),
       overwrite: "ask", symlinks: "preserve", smart: true,
       encoding: currentArchive?.source === outerSource ? archiveEncodingForJob() : null,
       password: null, best_effort: false,
@@ -12116,7 +11245,7 @@
     return {
       task,
       presentation: taskWindowMode ? "window" : "dialog",
-      rootClass: `${taskWindowMode ? "task-window-surface" : "task-modal-overlay"} design-root platform-${activePlatform} palette-${activePalette} theme-${activeTheme} density-${activeDensityChoice}`,
+      rootClass: `${taskWindowMode ? "task-window-surface" : "task-modal-overlay"} design-root platform-${activePlatform} palette-${settingsSession.colors.palette} theme-${activeTheme} density-${activeDensityChoice}`,
       rootVariables: customPaletteVariables(),
       copyFeedback: taskChecksumCopyFeedback(task),
       copyFeedbackTone: taskChecksumCopyFeedbackTone(task),
@@ -12160,7 +11289,7 @@
     return {
       task,
       rootId: "squallz-task-center",
-      rootClass: `task-center-detail design-root platform-${activePlatform} palette-${activePalette} theme-${activeTheme} density-${activeDensityChoice}`,
+      rootClass: `task-center-detail design-root platform-${activePlatform} palette-${settingsSession.colors.palette} theme-${activeTheme} density-${activeDensityChoice}`,
       rootVariables: customPaletteVariables(),
       presentation: "panel",
       copyFeedback: taskChecksumCopyFeedback(task),
@@ -12198,7 +11327,7 @@
     return {
       tasks: jobRows,
       submittingTask: submittingTaskModel(),
-      rootClass: `task-center-panel design-root platform-${activePlatform} palette-${activePalette} theme-${activeTheme} density-${activeDensityChoice}`,
+      rootClass: `task-center-panel design-root platform-${activePlatform} palette-${settingsSession.colors.palette} theme-${activeTheme} density-${activeDensityChoice}`,
       rootVariables: customPaletteVariables(),
       focusTaskId: taskCenterFocusTaskId,
       onClose: closeTaskCenter,
@@ -13746,7 +12875,7 @@
 <div class:task-center-layout={taskCenterVisible()}>
   {#if !modeSelectionBlocked}
     <ToastHost
-      rootClass={`themed-root palette-${activePalette} theme-${activeTheme}`}
+      rootClass={`themed-root palette-${settingsSession.colors.palette} theme-${activeTheme}`}
       rootVariables={customPaletteVariables()}
       blocked={blockingModalVisible()}
     />
@@ -13780,7 +12909,7 @@
 
 {#if appNotice && (!firstRunRequired || taskWindowMode)}
   <div
-    class={`app-notice mode-${mode} themed-root palette-${activePalette} theme-${activeTheme}`}
+    class={`app-notice mode-${mode} themed-root palette-${settingsSession.colors.palette} theme-${activeTheme}`}
     use:cssVariables={customPaletteVariables()}
     role="status"
     aria-hidden={blockingModalVisible() ? "true" : undefined}
@@ -13790,7 +12919,7 @@
 {#if macosSfxPublisherTask && LoadedMacosSfxPublisher}
   <LoadedMacosSfxPublisher
     task={macosSfxPublisherTask}
-    rootClass={`sfx-publish-overlay design-root platform-${activePlatform} palette-${activePalette} theme-${activeTheme} density-${activeDensityChoice}`}
+    rootClass={`sfx-publish-overlay design-root platform-${activePlatform} palette-${settingsSession.colors.palette} theme-${activeTheme} density-${activeDensityChoice}`}
     rootVariables={customPaletteVariables()}
     platform={platformKind()}
     previewSkipSave={import.meta.env.DEV && params.has("previewSfxPublisher")}
@@ -13823,7 +12952,7 @@
 
 {#if (dragActive || lastDropKind !== "none") && !modeSelectionBlocked}
   <div
-    class={`drop-status mode-${mode} themed-root palette-${activePalette} theme-${activeTheme}`}
+    class={`drop-status mode-${mode} themed-root palette-${settingsSession.colors.palette} theme-${activeTheme}`}
     use:cssVariables={customPaletteVariables()}
     class:active={dragActive}
     role="status"
@@ -13834,7 +12963,7 @@
 {#if !taskWindowMode && archiveEdit.kind && archiveEditorVisible() && !taskDialogVisible() && !macosSfxPublisherTask}
   <ArchiveEntryEditor
     {...archiveEditorFields(archiveEdit.kind)}
-    rootClass={`archive-editor-overlay design-root platform-${activePlatform} palette-${activePalette} theme-${activeTheme} density-${activeDensityChoice}`}
+    rootClass={`archive-editor-overlay design-root platform-${activePlatform} palette-${settingsSession.colors.palette} theme-${activeTheme} density-${activeDensityChoice}`}
     rootVariables={customPaletteVariables()}
     cancelLabel={tr("common.cancel", "Cancel")}
     onClose={() => archiveEdit.close()}
@@ -13844,7 +12973,7 @@
 {#if entryContext}
   <div
     bind:this={entryContextMenu}
-    class={`entry-context-menu themed-root palette-${activePalette} theme-${activeTheme}`}
+    class={`entry-context-menu themed-root palette-${settingsSession.colors.palette} theme-${activeTheme}`}
     use:cssVariables={entryContextCssVariables(entryContext)}
     role="menu"
     aria-label={tr("gui.context.actions_for", "Actions for {name}").replace("{name}", entryContext.name)}
@@ -13866,7 +12995,7 @@
 
 {#if firstRunRequired && !taskWindowMode}
   <div
-    class={`first-run-overlay themed-root palette-${activePalette} theme-${activeTheme}`}
+    class={`first-run-overlay themed-root palette-${settingsSession.colors.palette} theme-${activeTheme}`}
     use:cssVariables={customPaletteVariables()}
     role="presentation"
     aria-hidden={blockingModalVisible() ? "true" : undefined}
@@ -13943,7 +13072,7 @@
 
 {#if taskWindowMode}
   <main
-    class={`design-root task-window-root platform-${activePlatform} palette-${activePalette} theme-${activeTheme} density-${activeDensityChoice}`}
+    class={`design-root task-window-root platform-${activePlatform} palette-${settingsSession.colors.palette} theme-${activeTheme} density-${activeDensityChoice}`}
     use:cssVariables={customPaletteVariables()}
     aria-label={tr("gui.external_task.window_label", "Squallz task window")}
     aria-hidden={macosSfxPublisherTask ? "true" : undefined}
@@ -13972,7 +13101,7 @@
     {/if}
   </main>
 {:else if mode === "modern" || isSettingsScreen()}
-  <main class={`design-root modern-root platform-${activePlatform} palette-${activePalette} theme-${activeTheme} density-${activeDensityChoice}`} use:cssVariables={customPaletteVariables()} class:drop-active={dragActive} aria-hidden={blockingModalVisible() || modeSelectionBlocked ? "true" : undefined} inert={blockingModalVisible() || modeSelectionBlocked}>
+  <main class={`design-root modern-root platform-${activePlatform} palette-${settingsSession.colors.palette} theme-${activeTheme} density-${activeDensityChoice}`} use:cssVariables={customPaletteVariables()} class:drop-active={dragActive} aria-hidden={blockingModalVisible() || modeSelectionBlocked ? "true" : undefined} inert={blockingModalVisible() || modeSelectionBlocked}>
     <section class="window modern-window" aria-label={isSettingsScreen() ? tr("gui.aria.squallz_settings", "Squallz settings") : tr("gui.aria.modern_archive_browser", "Squallz Modern archive browser")}>
       <header class="modern-titlebar" data-tauri-drag-region>
         <div class="brand-lockup">
@@ -14280,7 +13409,7 @@
     </section>
   </main>
 {:else}
-  <main class={`design-root classic-root platform-${activePlatform} palette-${activePalette} theme-${activeTheme} density-${activeDensityChoice}`} use:cssVariables={customPaletteVariables()} class:drop-active={dragActive} aria-hidden={blockingModalVisible() || modeSelectionBlocked ? "true" : undefined} inert={blockingModalVisible() || modeSelectionBlocked}>
+  <main class={`design-root classic-root platform-${activePlatform} palette-${settingsSession.colors.palette} theme-${activeTheme} density-${activeDensityChoice}`} use:cssVariables={customPaletteVariables()} class:drop-active={dragActive} aria-hidden={blockingModalVisible() || modeSelectionBlocked ? "true" : undefined} inert={blockingModalVisible() || modeSelectionBlocked}>
     <section class="window classic-window" aria-label={tr("gui.aria.classic_archive_browser", "Squallz Classic archive browser")}>
       <header class="classic-titlebar" data-tauri-drag-region>
         <div class="classic-title">

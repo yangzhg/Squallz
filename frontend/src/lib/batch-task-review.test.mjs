@@ -3,6 +3,7 @@ import test from "node:test";
 import vm from "node:vm";
 import { createTestServer } from "../../tests/runtime.mjs";
 import { compileTestScript, readSvelteScript, selectFunctions } from "../../tests/source.mjs";
+import { settingsDto } from "../../tests/settings.mjs";
 
 const server = await createTestServer();
 test.after(() => server.close());
@@ -10,6 +11,7 @@ const { taskReviewScreen } = await server.ssrLoadModule("/src/lib/task-model.ts"
 const { batchExtractJob, reviewBatchExtract } = await server.ssrLoadModule("/src/lib/batch-extract.ts");
 const { readBatchExtractResult } = await server.ssrLoadModule("/src/lib/batch-extract-result.ts");
 const { sameDesktopPath, desktopBasename, desktopDirname } = await server.ssrLoadModule("/src/lib/desktop-path.ts");
+const { SettingsSession } = await server.ssrLoadModule("/src/lib/settings-session.svelte.ts");
 
 function spec() {
   return { kind: "batch_extract", overwrite: "rename", symlinks: "skip", smart: false,
@@ -38,7 +40,7 @@ function harness() {
     recoveryPickerStatus: "idle", recoveryPickerRequest: 0, recoveryOutputPreparation: null,
     dismissCreatePreparation() {}, syncCreatePreflightContext() {},
     dismissArchiveAddPreparation() {},
-    currentArchive: {source:"/unrelated/current.zip"}, appliedDefaultExtractDir: "",
+    currentArchive: {source:"/unrelated/current.zip"},
     uniqueNonEmptyPaths: (paths) => [...new Set(paths.filter(Boolean))],
     normalizedDefaultExtractDir: (path) => path || null,
     sameFilePath: (a,b) => sameDesktopPath(a,b,"macos"),
@@ -63,6 +65,8 @@ function harness() {
     getDialogModule: async () => ({open:async () => null}),
     openNativeDialog: async (_key,open,options) => open(options),
   };
+  context.settingsSession = new SettingsSession({ platform: context.platformKind, tr: context.tr, emit() {} });
+  context.settingsSession.applySnapshot(settingsDto(), context.settingsSession.captureGenerations());
   const outputText = compileTestScript(declarations.map((node) => node.getText(source)).join("\n"));
   return {...vm.runInNewContext(`${outputText}\n({${names.join(",")}})`,context),context,calls};
 }
@@ -156,7 +160,9 @@ test("new batches use the displayed smart base and an explicitly empty list neve
   run.context.screen="batch";
   run.setBatchArchivePaths(["/inbox/backup.zip","/other/photos.7z"]);
   assert.deepEqual(Array.from(run.effectiveBatchDraft().items,(item)=>item.dest),["/inbox","/other"]);
-  run.context.appliedDefaultExtractDir="/preferred";
+  run.context.settingsSession.applySnapshot(settingsDto({ default_extract_dir: "/preferred" }),
+    run.context.settingsSession.captureGenerations());
+  run.context.settingsSession.setGeneral("defaultExtractDir", "/not-applied");
   run.setBatchArchivePaths(["/inbox/backup.zip"]);
   assert.equal(run.effectiveBatchDraft().items[0].dest,"/preferred");
   run.removeBatchItem(0);
@@ -180,7 +186,7 @@ test("batch review matches displayed failures while submitting the original opaq
   assert.equal(submitted.items[0].path,"squallz-archive://1");
   assert.equal("displayPath" in submitted.items[0],false);
   run.context.currentArchive={source:"squallz-archive://8",path:"/Archives/outer.zip › inner.zip"};
-  run.context.appliedDefaultExtractDir="";
+  run.context.settingsSession.applySnapshot(settingsDto(), run.context.settingsSession.captureGenerations());
   run.setBatchArchivePaths([run.context.currentArchive.source]);
   assert.equal(run.effectiveBatchDraft().items[0].dest,"/Archives");
   assert.equal(run.batchWorkspaceSurface("classic").rows[0].path,run.context.currentArchive.path);

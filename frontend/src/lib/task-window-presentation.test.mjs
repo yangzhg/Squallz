@@ -7,7 +7,8 @@ import { parseCss } from "svelte/compiler";
 import { createTestServer } from "../../tests/runtime.mjs";
 import { compileTestScript, readSvelteScript, selectFunctions } from "../../tests/source.mjs";
 
-function taskSurface(taskWindowMode) {
+async function taskSurface(taskWindowMode, server) {
+  const { SettingsSession } = await server.ssrLoadModule("/src/lib/settings-session.svelte.ts");
   const source = readSvelteScript(new URL("../App.svelte", import.meta.url), "App.ts");
   const [declaration] = selectFunctions(source, ["taskDialogSurface"]);
   assert.ok(declaration);
@@ -23,7 +24,8 @@ function taskSurface(taskWindowMode) {
     taskWindowMode,
     pendingTaskReviewId: null,
     activePlatform: "macos",
-    activePalette: "ocean",
+    settingsSession: new SettingsSession({ platform: () => "macos", tr: (_key, fallback) => fallback, emit() {} },
+      { paletteOverride: "ocean" }),
     activeTheme: "dark",
     activeDensityChoice: "comfortable",
     customPaletteVariables: () => ({}),
@@ -41,18 +43,23 @@ function taskSurface(taskWindowMode) {
   return { surface, callbacks };
 }
 
-test("task surfaces choose window or dialog presentation without changing task actions", () => {
-  for (const taskWindowMode of [true, false]) {
-    const { surface, callbacks } = taskSurface(taskWindowMode);
-    assert.equal(surface.presentation, taskWindowMode ? "window" : "dialog");
-    assert.ok(surface.rootClass.split(" ").includes(
-      taskWindowMode ? "task-window-surface" : "task-modal-overlay",
-    ));
-    assert.match(surface.rootClass, /platform-macos palette-ocean theme-dark/u);
-    assert.equal(surface.onPause, callbacks.pauseCurrentTask);
-    assert.equal(surface.onCancel, callbacks.cancelCurrentTask);
-    assert.equal(surface.onOpenOutput, callbacks.openTaskOutput);
-    assert.equal(surface.onDismiss, callbacks.dismissTaskDialog);
+test("task surfaces choose window or dialog presentation without changing task actions", async () => {
+  const server = await createTestServer();
+  try {
+    for (const taskWindowMode of [true, false]) {
+      const { surface, callbacks } = await taskSurface(taskWindowMode, server);
+      assert.equal(surface.presentation, taskWindowMode ? "window" : "dialog");
+      assert.ok(surface.rootClass.split(" ").includes(
+        taskWindowMode ? "task-window-surface" : "task-modal-overlay",
+      ));
+      assert.match(surface.rootClass, /platform-macos palette-ocean theme-dark/u);
+      assert.equal(surface.onPause, callbacks.pauseCurrentTask);
+      assert.equal(surface.onCancel, callbacks.cancelCurrentTask);
+      assert.equal(surface.onOpenOutput, callbacks.openTaskOutput);
+      assert.equal(surface.onDismiss, callbacks.dismissTaskDialog);
+    }
+  } finally {
+    await server.close();
   }
 });
 
@@ -77,7 +84,7 @@ test("waiting task surfaces retain measured progress without rates or processing
     const { default: TaskCenter } = await server.ssrLoadModule("/src/components/TaskCenter.svelte");
     const { loadLocale } = await server.ssrLoadModule("/src/lib/i18n.svelte.ts");
     const helpers = await server.ssrLoadModule("/src/lib/task-dialog.ts");
-    const { surface } = taskSurface(false);
+    const { surface } = await taskSurface(false, server);
     for (const [locale, passwordLabel, conflictLabel, pausedLabel] of [
       ["en-US", "Waiting for a password", "Waiting for a file decision", "Paused"],
       ["zh-CN", "正在等待密码", "正在等待文件冲突处理", "已暂停"],
@@ -180,7 +187,7 @@ test("control failures stay visible and actionable across task surfaces", async 
     const { default: TaskProgressDialog } = await server.ssrLoadModule("/src/components/TaskProgressDialog.svelte");
     const { default: TaskCenter } = await server.ssrLoadModule("/src/components/TaskCenter.svelte");
     const { loadLocale } = await server.ssrLoadModule("/src/lib/i18n.svelte.ts");
-    const { surface } = taskSurface(false);
+    const { surface } = await taskSurface(false, server);
     for (const [locale, labels] of [
       ["en-US", ["Could not pause the task", "Could not resume the task", "Could not cancel the task"]],
       ["zh-CN", ["未能暂停任务", "未能继续任务", "未能取消任务"]],
@@ -215,7 +222,7 @@ test("interrupted status keeps measured progress and inputs without presenting l
     const { default: TaskCenter } = await server.ssrLoadModule("/src/components/TaskCenter.svelte");
     const { loadLocale } = await server.ssrLoadModule("/src/lib/i18n.svelte.ts");
     const helpers = await server.ssrLoadModule("/src/lib/task-dialog.ts");
-    const { surface } = taskSurface(false);
+    const { surface } = await taskSurface(false, server);
     for (const locale of ["en-US", "zh-CN"]) {
       await loadLocale(locale);
       const task = { ...extractTask("running"), statusStale: true };
@@ -260,7 +267,7 @@ test("window task views render one task heading and retain progress, results and
     );
     const { loadLocale } = await server.ssrLoadModule("/src/lib/i18n.svelte.ts");
     await loadLocale("en-US");
-    const { surface } = taskSurface(true);
+    const { surface } = await taskSurface(true, server);
     for (const state of ["running", "paused", "done", "failed"]) {
       const { body } = render(TaskProgressDialog, { props: {
         ...surface, presentation: "window", task: extractTask(state),
@@ -293,7 +300,7 @@ test("all task surfaces show folder finalization without finished byte bars", as
     const { default: TaskCenter } = await server.ssrLoadModule("/src/components/TaskCenter.svelte");
     const { loadLocale } = await server.ssrLoadModule("/src/lib/i18n.svelte.ts");
     const helpers = await server.ssrLoadModule("/src/lib/task-dialog.ts");
-    const { surface } = taskSurface(false);
+    const { surface } = await taskSurface(false, server);
     for (const [locale, phase, currentLabel] of [
       ["en-US", "Restoring folder information", "Current folder"],
       ["zh-CN", "正在恢复文件夹信息", "当前文件夹"],
@@ -350,7 +357,7 @@ test("main-window task dialogs keep modal semantics and their task heading conte
     const { default: TaskProgressDialog } = await server.ssrLoadModule(
       "/src/components/TaskProgressDialog.svelte",
     );
-    const { surface } = taskSurface(false);
+    const { surface } = await taskSurface(false, server);
     const { body } = render(TaskProgressDialog, { props: { ...surface, task: extractTask("running") } });
     assert.match(body, /role="dialog" aria-modal="true"/u);
     assert.match(body, /task-modal-eyebrow/u);
@@ -366,7 +373,7 @@ test("deferred task views retain their window surface while the component loads"
     const { default: TaskProgressDialogHost } = await server.ssrLoadModule(
       "/src/components/TaskProgressDialogHost.svelte",
     );
-    const { surface } = taskSurface(true);
+    const { surface } = await taskSurface(true, server);
     const { body } = render(TaskProgressDialogHost, { props: {
       surface: { ...surface, task: extractTask("running") },
       loadingTitle: "Loading task view", loadingBody: "Preparing task controls",
@@ -391,7 +398,7 @@ test("cancelling and terminal task surfaces do not ask for input from a stale in
     const { default: TaskProgressDialog } = await server.ssrLoadModule("/src/components/TaskProgressDialog.svelte");
     const { loadLocale, tFallback } = await server.ssrLoadModule("/src/lib/i18n.svelte.ts");
     const { taskCenterCounts } = await server.ssrLoadModule("/src/lib/task-center.ts");
-    const { surface } = taskSurface(false);
+    const { surface } = await taskSurface(false, server);
     for (const locale of ["en-US", "zh-CN"]) {
       await loadLocale(locale);
       for (const presentation of ["dialog", "panel", "window"]) {
