@@ -2140,14 +2140,17 @@
     if (!currentArchive || archiveOpenStatus !== "idle" || archivePasswordPrompt
       || archiveRefreshStatus() === "refreshing") return;
     const path = currentArchive.path;
+    const generation = archiveOpenGeneration;
     const completed = pendingArchiveUpdateJobs();
     if (completed.length === 0) return;
     for (const task of completed) refreshedUpdateJobs.add(task.id);
     untrack(() => {
       void refreshCurrentArchive(() => browseVirtualWindow(
         mode === "classic" ? CLASSIC_ROW_HEIGHT : MODERN_ROW_HEIGHT,
-      )).then((ok) => {
-        if (ok && currentArchive?.path === path && archiveRefreshStatus() === "idle"
+      )).then((result) => {
+        if (result.status === "applied" && result.isCurrent()
+          && generation === archiveOpenGeneration && archiveOpenStatus === "idle"
+          && currentArchive?.path === path && archiveRefreshStatus() === "idle"
           && pendingArchiveUpdateJobs().length === 0) {
           showNotice(tr("gui.archive.list_refreshed", "Archive list refreshed"));
         }

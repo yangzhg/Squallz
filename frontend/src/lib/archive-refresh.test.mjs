@@ -73,17 +73,27 @@ async function updateRefreshEffect(archive, jobs) {
   const effect = source.statements.find((node) => ts.isExpressionStatement(node)
     && node.getText(source).startsWith("$effect(") && node.getText(source).includes("refreshedUpdateJobs"));
   assert.ok(effect);
-  const helpers = source.statements.filter((node) => ts.isFunctionDeclaration(node) && node.name?.text === "pendingArchiveUpdateJobs");
+  const names = new Set([
+    "pendingArchiveUpdateJobs", "openArchivePath", "finishOpenedArchive",
+    "openArchiveFromDialog", "dismissArchivePicker",
+  ]);
+  const helpers = source.statements.filter((node) => ts.isFunctionDeclaration(node) && names.has(node.name?.text));
+  assert.equal(helpers.length, names.size);
   const { outputText } = ts.transpileModule([...helpers, effect].map((node) => node.getText(source)).join("\n"), {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
   });
   const pending = [];
   const notices = [];
   const context = {
-    jobRows: jobs, archiveOpenStatus: "idle", refreshedUpdateJobs: new Set(),
+    jobRows: jobs, archiveOpenStatus: "idle", archiveOpenGeneration: 0,
+    archivePickerRequest: null, refreshedUpdateJobs: new Set(),
+    pendingArchiveTaskReview: null, extractDestinationPicker: null, screen: "browse",
+    recoverySourceMode: "current", recoverySourceOverride: null, recoveryPar2Override: null,
     get currentArchive() { return archive.archive(); },
     get archivePasswordPrompt() { return archive.openPasswordPrompt(); },
     archiveRefreshStatus: archive.archiveRefreshStatus,
+    openArchiveStore: archive.openArchive, openPasswordPrompt: archive.openPasswordPrompt,
+    archiveOpenError: archive.archiveOpenError,
     refreshCurrentArchive: (window) => {
       const result = archive.refreshCurrentArchive(window);
       pending.push(result);
@@ -91,6 +101,15 @@ async function updateRefreshEffect(archive, jobs) {
     },
     mode: "modern", CLASSIC_ROW_HEIGHT: 32, MODERN_ROW_HEIGHT: 40,
     browseVirtualWindow: () => ({ start: 0, end: 20 }),
+    preventCreateSubmissionNavigation: () => false,
+    dismissRecoveryPreparation() {}, dismissArchivePasswordRequest() {}, clearEntryPreviewState() {},
+    isPar2Path: () => false, rememberRecent() {}, recordOperation() {}, recordValidationRenderReady() {},
+    sameFilePath: (first, second) => first === second,
+    pathBaseName: (path) => path.split("/").at(-1),
+    setScreen: (screen) => { context.screen = screen; },
+    platformKind: () => "macos",
+    getDialogModule: async () => ({ open: async () => null }),
+    openNativeDialog: (_id, open, options) => open(options),
     showNotice: (notice) => notices.push(notice), tr: (_key, fallback) => fallback,
     $effect: (callback) => callback(), untrack: (callback) => callback(),
   };
@@ -303,6 +322,67 @@ test("completed updates from one snapshot reopen the current archive only once",
     assert.equal(run.pending.length, 1, "a snapshot replay cannot refresh the same updates again");
     assert.equal(run.notices.length, 1);
   });
+  for (const action of ["same-path open", "dialog module cancelled"]) {
+    await withArchive(async ({ archive, ipc, closed, pendingOpen }) => {
+      const run = await updateRefreshEffect(archive, [
+        completedUpdate(1), completedUpdate(2), completedUpdate(3),
+      ]);
+      const nextOpen = deferred();
+      const dialogModule = deferred();
+      let opening;
+      let pickerStarted;
+      let opens = 0;
+      ipc.openArchive = (_path, _password, encoding) => {
+        opens += 1;
+        if (opens === 1) return pendingOpen.promise;
+        assert.equal(encoding, "shift_jis");
+        return nextOpen.promise;
+      };
+      run.context.getDialogModule = () => dialogModule.promise;
+      ipc.closeArchive = async (id) => {
+        closed.push(id);
+        if (id === 1) queueMicrotask(() => {
+          if (action === "same-path open") {
+            opening = run.context.openArchivePath("/tmp/refresh.zip", "open-file", {
+              path: "/tmp/refresh.zip", encoding: "shift_jis", restore: () => false,
+            });
+          } else {
+            opening = run.context.openArchiveFromDialog();
+            pickerStarted = { generation: run.context.archiveOpenGeneration, status: run.context.archiveOpenStatus };
+            run.context.dismissArchivePicker();
+          }
+        });
+      };
+      run.run();
+      assert.equal(run.pending.length, 1);
+      pendingOpen.resolve(info(2));
+      try {
+        const result = await run.pending[0];
+        assert.equal(archive.archive().id, 2, "the newer action has not published its archive yet");
+        assert.equal(run.context.archiveOpenGeneration, action === "same-path open" ? 1 : 2,
+          "opening and cancellation retain a newer App generation even before the store starts");
+        assert.equal(run.context.archiveOpenStatus, action === "same-path open" ? "opening" : "idle");
+        if (action !== "same-path open") assert.deepEqual(pickerStarted, { generation: 1, status: "opening" });
+        assert.deepEqual([...run.notices], action === "same-path open" ? [] : ["Opening file picker..."],
+          `${action}: the previous refresh must not overwrite the newer opening feedback`);
+        assert.equal(opens, action === "same-path open" ? 2 : 1,
+          "the module-pending picker has not started a store open");
+        assert.equal(result.status, action === "same-path open" ? "superseded" : "applied");
+        assert.equal(result.isCurrent(), action !== "same-path open");
+      } finally {
+        nextOpen.resolve({ ...info(3), encoding_override: "shift_jis" });
+        dialogModule.resolve({ open: async () => null });
+        await opening;
+      }
+      assert.equal(run.context.archiveOpenStatus, "idle");
+      assert.equal(archive.archive().id, action === "same-path open" ? 3 : 2);
+      assert.deepEqual(run.notices, action === "same-path open"
+        ? ["Open-file archive loaded"]
+        : ["Opening file picker..."]);
+      run.run();
+      assert.equal(run.pending.length, 1, "the merged updates are not replayed after the newer action");
+    });
+  }
 });
 
 test("updates completed during a refresh wait and share one follow-up read", async () => {
@@ -436,7 +516,7 @@ test("refresh prepares the displayed directory before replacing its rows and arc
     assert.deepEqual([...archive.selectedPaths()], ["docs/old.txt"]);
     assert.deepEqual(closed, []);
     pendingPage.resolve({ items: [row("docs/new.txt")], total: 1, page: 0 });
-    assert.equal(await refreshing, true);
+    assert.equal((await refreshing).status, "applied");
     assert.equal(archive.archiveRefreshStatus(), "idle");
     assert.equal(archive.archive().id, 2);
     assert.deepEqual(archive.currentDirs(), ["docs"]);
@@ -451,7 +531,7 @@ test("navigation while reopening keeps the user's latest directory", async () =>
     const refreshing = archive.refreshCurrentArchive();
     await archive.enterDirPath("pictures/");
     pendingOpen.resolve(info(2));
-    assert.equal(await refreshing, true);
+    assert.equal((await refreshing).status, "applied");
     assert.deepEqual(archive.currentDirs(), ["pictures"]);
     assert.deepEqual(archive.loadedRows().map(({ path }) => path), ["pictures/new.txt"]);
   });
@@ -470,7 +550,7 @@ test("navigation during a refresh page request discards that page and reads the 
     await until(() => requests.some(({ id, prefix }) => id === 2 && prefix === "docs/"));
     await archive.enterDirPath("pictures/");
     pendingPage.resolve({ items: [row("docs/new.txt")], total: 1, page: 0 });
-    assert.equal(await refreshing, true);
+    assert.equal((await refreshing).status, "applied");
     assert.deepEqual(archive.currentDirs(), ["pictures"]);
     assert.deepEqual(archive.loadedRows().map(({ path }) => path), ["pictures/new.txt"]);
     assert.ok(requests.some(({ id, prefix }) => id === 2 && prefix === "pictures/"));
@@ -485,7 +565,7 @@ test("a failed refresh keeps the previous view and offers a full reopen retry", 
     };
     const refreshing = archive.refreshCurrentArchive();
     pendingOpen.resolve(info(2));
-    assert.equal(await refreshing, false);
+    assert.equal((await refreshing).status, "failed");
     assert.equal(archive.archiveRefreshStatus(), "error");
     assert.equal(archive.archive().id, 1);
     assert.deepEqual(archive.loadedRows().map(({ path }) => path), ["docs/old.txt"]);
@@ -515,7 +595,9 @@ test("a refresh never restores rows or reports success after the archive is clos
     await until(() => requests.length > 0);
     archive.closeArchive();
     pendingPage.resolve({ items: [row("docs/new.txt")], total: 1, page: 0 });
-    assert.equal(await refreshing, false);
+    const result = await refreshing;
+    assert.equal(result.status, "superseded");
+    assert.equal(result.isCurrent(), false);
     assert.equal(archive.archive(), null);
     assert.deepEqual(archive.loadedRows(), []);
     assert.deepEqual(closed.sort(), [1, 2]);
@@ -531,7 +613,7 @@ test("refresh replaces search results directly without clearing the query or loa
     };
     const refreshing = archive.refreshCurrentArchive();
     pendingOpen.resolve(info(2));
-    assert.equal(await refreshing, true);
+    assert.equal((await refreshing).status, "applied");
     assert.deepEqual(requests, []);
     assert.deepEqual(searches, [{ id: 2, page: 0, query: "new" }]);
     assert.equal(archive.filterText(), " new ");
@@ -554,7 +636,7 @@ test("large archive refresh loads only the visible pages and follows scrolling d
     assert.equal(requests[0].page, 8);
     visible = { start: 7_500, end: 7_540 };
     pendingPage.resolve();
-    assert.equal(await refreshing, true);
+    assert.equal((await refreshing).status, "applied");
     assert.equal(archive.rowAt(7_500)?.path, "docs/item-7500");
     assert.ok(archive.loadedRowCount() <= archive.PAGE_SIZE * 2);
     assert.equal(requests.some(({ page }) => page === 0), false);
@@ -569,7 +651,7 @@ test("refresh loads the last valid viewport when deletion shortens the list", as
     });
     const refreshing = archive.refreshCurrentArchive(() => ({ start: 1_000, end: 1_040 }));
     pendingOpen.resolve(info(2));
-    assert.equal(await refreshing, true);
+    assert.equal((await refreshing).status, "applied");
     assert.equal(archive.totalRows(), 25);
     assert.equal(archive.rowAt(24)?.path, "docs/item-24");
   }, { total: 2_000 });
@@ -589,7 +671,7 @@ test("a newer search replaces a pending refresh search, including its late failu
     await until(() => searches.length > 0);
     archive.setFilter("new");
     pendingSearch.reject({ key: "error.io", params: {}, detail: "obsolete error" });
-    assert.equal(await refreshing, true);
+    assert.equal((await refreshing).status, "applied");
     assert.equal(archive.filterText(), "new");
     assert.equal(archive.filterPending(), false);
     assert.deepEqual(searches, [{ id: 2, query: "old" }, { id: 2, query: "new" }]);
@@ -611,7 +693,9 @@ test("a newer archive supersedes a pending refresh and keeps its own view", asyn
     ipc.listEntries = async (_id, page) => ({ items: [row("other.txt")], total: 1, page });
     assert.equal(await archive.openArchive("/tmp/other.zip"), true);
     pendingPage.resolve({ items: [row("docs/new.txt")], total: 1, page: 0 });
-    assert.equal(await refreshing, false);
+    const result = await refreshing;
+    assert.equal(result.status, "superseded");
+    assert.equal(result.isCurrent(), false);
     assert.equal(archive.archive().id, 3);
     assert.deepEqual(archive.currentDirs(), []);
     assert.equal(archive.rowAt(0)?.path, "other.txt");
@@ -623,7 +707,7 @@ test("refresh password retry preserves the browse context and selected filename 
   await withArchive(async ({ archive, ipc, pendingOpen }) => {
     const refreshing = archive.refreshCurrentArchive();
     pendingOpen.reject({ key: "error.password_required", params: {}, detail: "" });
-    assert.equal(await refreshing, false);
+    assert.equal((await refreshing).status, "failed");
     assert.equal(archive.openPasswordPrompt().encoding, "gbk");
     assert.equal(archive.archive().id, 1);
     ipc.openArchive = async (path, password, encoding) => {
@@ -705,7 +789,7 @@ test("refresh leaves a missing folder at its nearest surviving parent", async ()
     };
     const refreshing = archive.refreshCurrentArchive();
     pendingOpen.resolve(info(2));
-    assert.equal(await refreshing, true);
+    assert.equal((await refreshing).status, "applied");
     assert.deepEqual(archive.currentDirs(), ["docs"]);
     assert.deepEqual(requests, [{ id: 2, page: 0, prefix: "docs/" }]);
     assert.equal(archive.rowAt(0)?.path, "docs/new.txt");
@@ -718,7 +802,7 @@ test("refresh preserves an existing empty folder", async () => {
     ipc.listEntries = async (_id, page) => ({ items: [], total: 0, page });
     const refreshing = archive.refreshCurrentArchive();
     pendingOpen.resolve(info(2));
-    assert.equal(await refreshing, true);
+    assert.equal((await refreshing).status, "applied");
     assert.deepEqual(archive.currentDirs(), ["docs"]);
     assert.equal(archive.totalRows(), 0);
     assert.equal(toasts.toasts().some((toast) => toast.key === "archive-directory-changed"), false);
@@ -734,7 +818,7 @@ test("a search keeps its query when its missing browsing folder is resolved", as
     };
     const refreshing = archive.refreshCurrentArchive();
     pendingOpen.resolve(info(2));
-    assert.equal(await refreshing, true);
+    assert.equal((await refreshing).status, "applied");
     assert.equal(archive.filterText(), "new");
     assert.deepEqual(archive.currentDirs(), []);
     assert.equal(archive.rowAt(0)?.path, "new.txt");
@@ -757,7 +841,7 @@ test("navigation supersedes a pending directory resolution", async () => {
     await until(() => resolving);
     await archive.enterDirPath("pictures/");
     pendingDirectory.resolve("");
-    assert.equal(await refreshing, true);
+    assert.equal((await refreshing).status, "applied");
     assert.deepEqual(archive.currentDirs(), ["pictures"]);
     assert.equal(archive.rowAt(0)?.path, "pictures/new.txt");
     assert.equal(toasts.toasts().some((toast) => toast.key === "archive-directory-changed"), false);
