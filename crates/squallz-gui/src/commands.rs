@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 use std::fs::{self, File};
-use std::io::{self, Write};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -29,7 +29,6 @@ use squallz_core::{
 };
 use squallz_i18n::Localizer;
 
-use crate::audit::{OperationAudit, OperationAuditRecord};
 use crate::create_preflight::{
     DestinationInspectionProgress, PreflightRequestKind, PreflightRequestLease, PreflightRequests,
 };
@@ -58,11 +57,9 @@ use crate::state::{AppState, DEFAULT_PAGE_SIZE};
 use crate::validation_trace;
 use serde_json::json;
 
-const HISTORY_EXPORT_MAX_BYTES: usize = 1024 * 1024;
 const PREFLIGHT_PROGRESS_INTERVAL: Duration = Duration::from_millis(120);
 const NESTED_PREVIEW_LIMIT: usize = 200;
 const MAX_ARCHIVE_PAGE_SIZE: usize = 2_000;
-const DEFAULT_OPERATION_AUDIT_LIMIT: usize = 80;
 const CREATE_DESTINATION_PROBE_ATTEMPTS: usize = 32;
 
 static CREATE_DESTINATION_PROBE_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -971,104 +968,6 @@ pub fn temp_dir() -> String {
     std::env::temp_dir().to_string_lossy().into_owned()
 }
 
-fn validate_operation_history_export(contents: &str) -> Result<(), FormatError> {
-    if contents.trim().is_empty() {
-        return Err(FormatError::Unsupported(
-            "operation history export is empty".into(),
-        ));
-    }
-    if contents.len() > HISTORY_EXPORT_MAX_BYTES {
-        return Err(FormatError::ResourceLimitExceeded(
-            "operation history export exceeds 1 MiB".into(),
-        ));
-    }
-    let value: serde_json::Value = serde_json::from_str(contents).map_err(|e| {
-        FormatError::Unsupported(format!("operation history export is not valid JSON: {e}"))
-    })?;
-    let records = value
-        .get("records")
-        .and_then(|records| records.as_array())
-        .ok_or_else(|| {
-            FormatError::Unsupported("operation history export missing records".into())
-        })?;
-    for record in records {
-        for field in ["id", "status", "title", "detail"] {
-            if !record.get(field).is_some_and(|value| value.is_string()) {
-                return Err(FormatError::Unsupported(format!(
-                    "operation history record missing string field {field}"
-                )));
-            }
-        }
-        if !record.get("time").is_some_and(|value| value.is_number()) {
-            return Err(FormatError::Unsupported(
-                "operation history record missing numeric field time".into(),
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn export_operation_history_impl(path: &Path, contents: &str) -> Result<(), FormatError> {
-    validate_operation_history_export(contents)?;
-    if path.is_dir() {
-        return Err(FormatError::Unsupported(format!(
-            "operation history export target is a directory: {}",
-            path.display()
-        )));
-    }
-    let parent = parent_or_current(path);
-    fs::create_dir_all(parent)?;
-    let file_name = operation_history_file_name(path);
-    let tmp = parent.join(format!(".{file_name}.part-{}", std::process::id()));
-    let write_result = (|| -> Result<(), FormatError> {
-        let mut file = File::create(&tmp)?;
-        file.write_all(contents.as_bytes())?;
-        file.sync_all()?;
-        match fs::rename(&tmp, path) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                fs::remove_file(path)?;
-                fs::rename(&tmp, path)?;
-                Ok(())
-            }
-            Err(e) => Err(e.into()),
-        }
-    })();
-    if write_result.is_err() {
-        let _ = fs::remove_file(&tmp);
-    }
-    write_result
-}
-
-/// Writes the sanitized local operation-history audit JSON selected by the
-/// frontend to a user-chosen file.
-#[tauri::command]
-pub fn export_operation_history(path: String, contents: String) -> Result<(), ErrorDto> {
-    export_operation_history_impl(Path::new(&path), &contents).map_err(ErrorDto::from)
-}
-
-/// Returns the backend-generated desktop operation audit, newest first.
-#[tauri::command]
-pub fn get_operation_audit(
-    audit: State<'_, Arc<OperationAudit>>,
-    limit: Option<usize>,
-) -> Vec<OperationAuditRecord> {
-    audit.recent(operation_audit_limit(limit))
-}
-
-fn operation_audit_limit(limit: Option<usize>) -> usize {
-    limit.unwrap_or(DEFAULT_OPERATION_AUDIT_LIMIT)
-}
-
-/// Exports the backend-generated operation audit to a user-selected JSON file.
-#[tauri::command]
-pub fn export_operation_audit(
-    audit: State<'_, Arc<OperationAudit>>,
-    path: String,
-) -> Result<(), ErrorDto> {
-    audit.export_json(Path::new(&path)).map_err(ErrorDto::from)
-}
-
 /// Installs the visible platform integration actions.
 #[tauri::command]
 pub fn apply_integration_changes(
@@ -1386,13 +1285,6 @@ fn preview_archive_entry_impl(
         size: prepared.size,
         archive_like: entry_is_archive_like(state, entry_path),
     })
-}
-
-fn operation_history_file_name(path: &Path) -> &str {
-    match path.file_name().and_then(|name| name.to_str()) {
-        Some(name) => name,
-        None => "operation-history.json",
-    }
 }
 
 /// Reads an archive entry as another archive and returns its first rows.
@@ -2660,8 +2552,8 @@ pub fn set_performance_options(
 mod tests {
     use crate::preview_sessions::PreviewSessionManager;
     use squallz_core::api::{
-        CompressionLevel, ControlToken, CreateOptions, EntryPath, ExtractOptions, FormatError,
-        NoProgress, OpenOptions, Password, ProgressSink, SafetyLimits,
+        CompressionLevel, ControlToken, CreateOptions, EntryPath, ExtractOptions, NoProgress,
+        OpenOptions, Password, ProgressSink, SafetyLimits,
     };
     use squallz_core::api::{OverwritePolicy, SymlinkPolicy};
     use squallz_core::{
@@ -2678,13 +2570,13 @@ mod tests {
     use super::{
         apply_accent_palette, apply_general_options, archive_password_status_impl,
         bound_create_preset, bound_extract_preset, create_destination_has_conflict,
-        disk_space_preflight, export_operation_history_impl, forget_archive_password_impl,
-        inspect_create_destination_impl, inspect_create_destination_impl_with_progress,
-        open_archive_resolving_password, open_archive_source_resolving_password,
-        open_nested_archive_impl, plan_convert_impl, plan_extract_impl, preview_archive_entry_impl,
-        preview_nested_archive_impl, preview_trace_payload, remember_archive_password_impl,
-        requested_page_size, resolve_external_task_job_impl, unique_create_destination_path,
-        valid_accent_palette, valid_hex_color, MAX_ARCHIVE_PAGE_SIZE,
+        disk_space_preflight, forget_archive_password_impl, inspect_create_destination_impl,
+        inspect_create_destination_impl_with_progress, open_archive_resolving_password,
+        open_archive_source_resolving_password, open_nested_archive_impl, plan_convert_impl,
+        plan_extract_impl, preview_archive_entry_impl, preview_nested_archive_impl,
+        preview_trace_payload, remember_archive_password_impl, requested_page_size,
+        resolve_external_task_job_impl, unique_create_destination_path, valid_accent_palette,
+        valid_hex_color, MAX_ARCHIVE_PAGE_SIZE,
     };
     use crate::create_preflight::{PreflightRequestKind, PreflightRequests};
     use crate::dto::{ErrorDto, ExternalTaskActionDto, JobSpec, SettingsDto};
@@ -3461,43 +3353,6 @@ mod tests {
         assert_eq!(error.key, "error.cancelled");
         assert!(progress.observed_bytes.load(Ordering::Relaxed) > 0);
         std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn export_operation_history_writes_sanitized_json() {
-        let dir = temp_dir("history-export");
-        let target = dir.join("history.json");
-        let contents = r#"{
-  "generatedAt": "2026-06-12T00:00:00.000Z",
-  "filter": "all",
-  "records": [
-    {
-      "id": "1",
-      "time": 1781199120000,
-      "status": "done",
-      "title": "Create archive queued",
-      "detail": "backup.zip"
-    }
-  ]
-}"#;
-
-        export_operation_history_impl(&target, contents).unwrap();
-        let written = std::fs::read_to_string(&target).unwrap();
-        assert!(written.contains("\"Create archive queued\""));
-
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn export_operation_history_rejects_invalid_payload() {
-        let dir = temp_dir("history-export-invalid");
-        let target = dir.join("history.json");
-        let err = export_operation_history_impl(&target, r#"{"records":[{"title":"missing"}]}"#)
-            .unwrap_err();
-        assert!(matches!(err, FormatError::Unsupported(_)), "{err:?}");
-        assert!(!target.exists());
-
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     fn make_nested_zip_archive(state: &AppState, dir: &Path) -> PathBuf {

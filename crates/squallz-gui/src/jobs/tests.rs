@@ -284,7 +284,7 @@ fn write_host_sfx_template(path: &Path) {
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 #[test]
 fn sfx_capability_distinguishes_missing_invalid_and_available_runtimes() {
-    let missing = JobManager::with_audit_and_template(Arc::new(OperationAudit::memory()), None);
+    let missing = JobManager::with_audit_and_template(Arc::new(OperationAudit::disabled()), None);
     let capability = missing.sfx_capability();
     assert!(!capability.available);
     assert_eq!(capability.status, "missing");
@@ -293,7 +293,7 @@ fn sfx_capability_distinguishes_missing_invalid_and_available_runtimes() {
     let invalid_path = dir.join("invalid-runtime");
     std::fs::write(&invalid_path, b"not an executable runtime").unwrap();
     let invalid =
-        JobManager::with_test_sfx_template(Arc::new(OperationAudit::memory()), invalid_path);
+        JobManager::with_test_sfx_template(Arc::new(OperationAudit::disabled()), invalid_path);
     let capability = invalid.sfx_capability();
     assert!(!capability.available);
     assert_eq!(capability.status, "invalid");
@@ -305,7 +305,7 @@ fn sfx_capability_distinguishes_missing_invalid_and_available_runtimes() {
     };
     write_host_sfx_template(&valid_path);
     let available =
-        JobManager::with_test_sfx_template(Arc::new(OperationAudit::memory()), valid_path);
+        JobManager::with_test_sfx_template(Arc::new(OperationAudit::disabled()), valid_path);
     let capability = available.sfx_capability();
     assert!(capability.available);
     assert_eq!(capability.status, "available");
@@ -1154,7 +1154,7 @@ fn partial_source_cleanup_keeps_successful_archive_job_done() {
     std::fs::write(&second, b"second").unwrap();
     let fake = Arc::new(FakeTrashAdapter::failing(&["second.txt"]));
     let manager =
-        JobManager::with_test_trash_adapter(Arc::new(OperationAudit::memory()), fake.clone());
+        JobManager::with_test_trash_adapter(Arc::new(OperationAudit::disabled()), fake.clone());
     let state = Arc::new(AppState::new());
     let sink = Arc::new(TestSink::default());
     let events: Arc<dyn EventSink> = sink;
@@ -1212,7 +1212,7 @@ fn failed_source_cleanup_keeps_successful_archive_job_done() {
     std::fs::write(&source, b"source").unwrap();
     let fake = Arc::new(FakeTrashAdapter::failing(&["source.txt"]));
     let manager =
-        JobManager::with_test_trash_adapter(Arc::new(OperationAudit::memory()), fake.clone());
+        JobManager::with_test_trash_adapter(Arc::new(OperationAudit::disabled()), fake.clone());
     let state = Arc::new(AppState::new());
     let sink = Arc::new(TestSink::default());
     let events: Arc<dyn EventSink> = sink;
@@ -1743,7 +1743,7 @@ fn create_sfx_job_uses_the_shared_queue_and_core() {
     let template = dir.join("Squallz.app");
     write_macos_sfx_template(&template);
     let output = dir.join("Notes.app");
-    let audit = Arc::new(OperationAudit::memory());
+    let audit = Arc::new(OperationAudit::disabled());
     let manager = JobManager::with_test_sfx_template(audit, template);
     let state = Arc::new(AppState::new());
     let sink = Arc::new(TestSink::default());
@@ -2658,7 +2658,7 @@ fn completed_jobs_are_written_to_backend_audit_log() {
     std::fs::write(src.join("hello.txt"), b"hello audit").unwrap();
     let zip = dir.join("audited.zip");
     let audit_path = dir.join("audit").join("operation-audit.jsonl");
-    let audit = Arc::new(OperationAudit::with_path(audit_path.clone(), 20));
+    let audit = Arc::new(OperationAudit::with_path(audit_path.clone()));
     let manager = JobManager::with_audit(Arc::clone(&audit));
     let state = Arc::new(AppState::new());
     let sink = Arc::new(TestSink::default());
@@ -2689,13 +2689,18 @@ fn completed_jobs_are_written_to_backend_audit_log() {
     );
     manager.wait_idle();
 
-    let recent = audit.recent(10);
-    assert_eq!(recent.len(), 1);
-    assert_eq!(recent[0].id, id);
-    assert_eq!(recent[0].kind, "compress");
-    assert_eq!(recent[0].state, "done");
-    assert!(recent[0].detail.contains("audited.zip"));
-    assert!(!recent[0].detail.contains("audit-password"));
+    let records = audit::read_audit_records(&audit_path);
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0]["id"], id);
+    assert_eq!(records[0]["kind"], "compress");
+    assert_eq!(records[0]["state"], "done");
+    assert!(records[0]["detail"]
+        .as_str()
+        .unwrap()
+        .contains("audited.zip"));
+    let written = std::fs::read_to_string(&audit_path).unwrap();
+    assert!(!written.contains("audit-password"));
+    assert!(!written.contains(src.to_string_lossy().as_ref()));
     let snapshot = manager.snapshot(id).unwrap();
     assert!(snapshot.output_password_required);
     assert!(!serde_json::to_string(&snapshot)
@@ -2709,9 +2714,6 @@ fn completed_jobs_are_written_to_backend_audit_log() {
             ..
         }
     ));
-    assert!(std::fs::read_to_string(audit_path)
-        .unwrap()
-        .contains("\"kind\":\"compress\""));
 
     std::fs::remove_dir_all(&dir).unwrap();
 }
@@ -3051,7 +3053,8 @@ fn queued_opaque_nested_source_stays_leased_and_never_reaches_public_state() {
         .unwrap();
 
     let blocker = create_password_protected_zip(&dir.join("blocker"), &state);
-    let manager = JobManager::new();
+    let audit_path = dir.join("operation-audit.jsonl");
+    let manager = JobManager::with_audit(Arc::new(OperationAudit::with_path(audit_path.clone())));
     let sink = Arc::new(TestSink::default());
     let events: Arc<dyn EventSink> = sink.clone();
     let out = dir.join("out");
@@ -3111,7 +3114,7 @@ fn queued_opaque_nested_source_stays_leased_and_never_reaches_public_state() {
         .unwrap_err();
     assert_eq!(foreign_error.to_string(), "archive is no longer available");
     assert_eq!(manager.next_id.load(Ordering::Relaxed), next_id);
-    assert!(manager.audit.recent(10).is_empty());
+    assert!(!audit_path.exists());
     assert!(sink.events.lock().unwrap().is_empty());
 
     let blocker_id = manager.submit_for_test_window(
@@ -3149,11 +3152,9 @@ fn queued_opaque_nested_source_stays_leased_and_never_reaches_public_state() {
     assert!(!physical_path.exists());
     let snapshot = serde_json::to_string(&manager.snapshot(id).unwrap()).unwrap();
     let events_json = serde_json::to_string(&*sink.events.lock().unwrap()).unwrap();
-    let audit = manager
-        .audit
-        .recent(10)
+    let audit = audit::read_audit_records(&audit_path)
         .into_iter()
-        .find(|record| record.id == id)
+        .find(|record| record["id"] == id)
         .unwrap();
     let audit_json = serde_json::to_string(&audit).unwrap();
     for private in [

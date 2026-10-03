@@ -40,7 +40,6 @@ const DEFAULT_NATIVE_DROP_DELAY_MS: u64 = 1_500;
 
 pub fn run() {
     validation_trace::mark_process_start();
-    let operation_audit = Arc::new(OperationAudit::load());
     let preset_store = match preset_store_path() {
         Ok(path) => Arc::new(PresetStore::new(path)),
         Err(error) => handle_startup_config_error(error),
@@ -54,7 +53,7 @@ pub fn run() {
     };
     let settings = Arc::new(SettingsStore::load());
     let jobs = Arc::new(JobManager::with_audit_and_settings(
-        Arc::clone(&operation_audit),
+        Arc::new(OperationAudit::persistent()),
         &settings.get(),
     ));
     let app = match tauri::Builder::default()
@@ -62,7 +61,6 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .manage(Arc::new(AppState::new()))
         .manage(jobs)
-        .manage(operation_audit)
         .manage(Arc::new(OpenFileRequests::default()))
         .manage(Arc::new(PreflightRequests::default()))
         .manage(preview_sessions)
@@ -108,9 +106,6 @@ pub fn run() {
             commands::cancel_create_destination_inspection,
             commands::create_destination_has_conflict,
             commands::temp_dir,
-            commands::export_operation_history,
-            commands::get_operation_audit,
-            commands::export_operation_audit,
             commands::apply_integration_changes,
             commands::get_integration_status,
             commands::get_system_integration_diagnostics,

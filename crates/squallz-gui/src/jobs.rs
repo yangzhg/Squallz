@@ -453,11 +453,11 @@ impl JobManager {
     pub fn new() -> Self {
         #[cfg(test)]
         {
-            Self::with_audit(Arc::new(OperationAudit::memory()))
+            Self::with_audit(Arc::new(OperationAudit::disabled()))
         }
         #[cfg(not(test))]
         {
-            Self::with_audit(Arc::new(OperationAudit::load()))
+            Self::with_audit(Arc::new(OperationAudit::persistent()))
         }
     }
 
