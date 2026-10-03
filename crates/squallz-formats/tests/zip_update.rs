@@ -2496,6 +2496,59 @@ fn update_rename_directory_moves_its_complete_subtree() {
         assert_eq!(data, b"bravo");
         assert_unzip_t(&archive);
     }
+
+    for names in [
+        &[
+            "a",
+            "a/",
+            "a/child.txt",
+            "a/nested/deep.txt",
+            "a-old/keep.txt",
+        ][..],
+        &[
+            "a/",
+            "a/child.txt",
+            "a/nested/deep.txt",
+            "a",
+            "a-old/keep.txt",
+        ][..],
+        &["a", "a/child.txt", "a/nested/deep.txt", "a-old/keep.txt"][..],
+    ] {
+        let tmp = TempDir::new("update-rename-file-directory");
+        let archive = named_archive(tmp.path(), names);
+        let mut expected = raw_entry_snapshots(&archive);
+        for entry in &mut expected {
+            if let Some(suffix) = entry.name.strip_prefix(b"a/") {
+                entry.name = [b"moved/".as_slice(), suffix].concat();
+            }
+        }
+        run_update(
+            &archive,
+            &[UpdateOp::Rename {
+                from: EntrySelection::Display("a/".into()),
+                to: EntryPath::from_utf8("moved/"),
+            }],
+            &UpdateOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(raw_entry_snapshots(&archive), expected, "{names:?}");
+        let mut reader = zip::ZipArchive::new(fs::File::open(&archive).unwrap()).unwrap();
+        for (name, original) in [
+            ("a", "a"),
+            ("moved/child.txt", "a/child.txt"),
+            ("moved/nested/deep.txt", "a/nested/deep.txt"),
+            ("a-old/keep.txt", "a-old/keep.txt"),
+        ] {
+            let mut payload = Vec::new();
+            reader
+                .by_name(name)
+                .unwrap()
+                .read_to_end(&mut payload)
+                .unwrap();
+            assert_eq!(payload, original.as_bytes(), "{name}");
+        }
+        assert_unzip_t(&archive);
+    }
 }
 
 #[test]
@@ -2564,6 +2617,35 @@ fn update_directory_rename_rejects_unsafe_or_ambiguous_plans_atomically() {
         );
         assert_eq!(fs::read(&archive).unwrap(), before, "{case:?}");
         assert_no_update_temp(tmp.path());
+    }
+
+    for names in [
+        &["a", "a/", "a/child.txt"][..],
+        &["a/", "a/child.txt", "a"][..],
+        &["a", "a/child.txt"][..],
+    ] {
+        let tmp = TempDir::new("update-rename-ambiguous-source");
+        let archive = named_archive(tmp.path(), names);
+        let before = fs::read(&archive).unwrap();
+        for from in [
+            EntrySelection::Display("a".into()),
+            EntrySelection::Raw(EntryPath::from_utf8("a")),
+        ] {
+            assert_other_contains(
+                run_update(
+                    &archive,
+                    &[UpdateOp::Rename {
+                        from,
+                        to: EntryPath::from_utf8("moved/"),
+                    }],
+                    &UpdateOptions::default(),
+                )
+                .unwrap_err(),
+                "ambiguous",
+            );
+            assert_eq!(fs::read(&archive).unwrap(), before, "{names:?}");
+            assert_no_update_temp(tmp.path());
+        }
     }
 }
 
