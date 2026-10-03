@@ -66,6 +66,32 @@ enum PendingRow {
     SynthesizedDir,
 }
 
+#[derive(Default)]
+struct PendingLevel {
+    directories: HashMap<Box<str>, PendingRow>,
+    files: HashMap<Box<str>, PendingRow>,
+}
+
+impl PendingLevel {
+    fn insert(&mut self, name: &str, row: PendingRow) {
+        let rows = match row {
+            PendingRow::SynthesizedDir | PendingRow::Entry { is_dir: true, .. } => {
+                &mut self.directories
+            }
+            PendingRow::Entry { is_dir: false, .. } => &mut self.files,
+        };
+        if let Some(existing) = rows.get_mut(name) {
+            if matches!(existing, PendingRow::SynthesizedDir)
+                && matches!(row, PendingRow::Entry { is_dir: true, .. })
+            {
+                *existing = row;
+            }
+        } else {
+            rows.insert(Box::from(name), row);
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 enum SearchSource {
     Entry(usize),
@@ -1029,26 +1055,19 @@ pub(crate) fn normalized_entry_path_ref(meta: &EntryMeta) -> Cow<'_, str> {
 }
 
 fn add_pending_row(
-    levels: &mut HashMap<String, HashMap<Box<str>, PendingRow>>,
+    levels: &mut HashMap<String, PendingLevel>,
     parent: &str,
     name: &str,
     row: PendingRow,
 ) {
     let Some(level) = levels.get_mut(parent) else {
-        let mut level = HashMap::new();
-        level.insert(Box::from(name), row);
+        let mut level = PendingLevel::default();
+        level.insert(name, row);
         levels.insert(parent.to_owned(), level);
         return;
     };
 
-    if let Some(existing) = level.get_mut(name) {
-        if matches!(existing, PendingRow::SynthesizedDir) && matches!(row, PendingRow::Entry { .. })
-        {
-            *existing = row;
-        }
-    } else {
-        level.insert(Box::from(name), row);
-    }
+    level.insert(name, row);
 }
 
 /// Builds the per-directory row index: every entry is attached to its parent
@@ -1058,7 +1077,7 @@ fn build_levels(
     entries: &[EntryMeta],
     control: &ControlToken,
 ) -> Result<HashMap<String, Vec<Row>>, FormatError> {
-    let mut levels: HashMap<String, HashMap<Box<str>, PendingRow>> = HashMap::new();
+    let mut levels: HashMap<String, PendingLevel> = HashMap::new();
     for (idx, meta) in entries.iter().enumerate() {
         control.checkpoint()?;
         let path = normalized_entry_path_ref(meta);
@@ -1089,10 +1108,11 @@ fn build_levels(
     }
 
     let mut indexed = HashMap::with_capacity(levels.len());
-    for (parent, rows) in levels {
+    for (parent, level) in levels {
         control.checkpoint()?;
-        let mut sortable = Vec::with_capacity(rows.len());
-        for (sequence, (name, pending)) in rows.into_iter().enumerate() {
+        let mut sortable = Vec::with_capacity(level.directories.len() + level.files.len());
+        let rows = level.directories.into_iter().chain(level.files);
+        for (sequence, (name, pending)) in rows.enumerate() {
             control.checkpoint()?;
             let folded_name = name.to_lowercase();
             let (is_dir, row) = match pending {
@@ -2594,5 +2614,75 @@ mod tests {
         assert_eq!(levels.get("").unwrap()[0].entry_index(), Some(1));
         assert_eq!(levels.get("a/").unwrap()[0].name(&metas), "b");
         assert_eq!(levels.get("a/b/").unwrap()[0].name(&metas), "c.txt");
+
+        for parent in ["", "outer/"] {
+            let file_path = format!("{parent}a");
+            let directory_path = format!("{parent}a/");
+            let child_path = format!("{parent}a/child.txt");
+            let mut directory = file_meta(&directory_path, 0);
+            directory.entry_type = EntryType::Dir;
+            directory.compressed_size = Some(23);
+            let mut duplicate_directory = directory.clone();
+            duplicate_directory.compressed_size = Some(99);
+            let entries = [
+                file_meta(&file_path, 7),
+                file_meta(&child_path, 11),
+                directory,
+                file_meta(&file_path, 99),
+                duplicate_directory,
+            ];
+            // Implicit and explicit directories must coexist with same-name
+            // files, regardless of archive order. Same-kind duplicates still
+            // retain the first real entry, including after synthesis.
+            for order in [
+                &[0, 1][..],
+                &[1, 0],
+                &[0, 2],
+                &[2, 0],
+                &[0, 1, 2],
+                &[0, 2, 1],
+                &[1, 0, 2],
+                &[1, 2, 0],
+                &[2, 0, 1],
+                &[2, 1, 0],
+                &[0, 3, 2, 4, 1],
+                &[1, 2, 4, 0, 3],
+            ] {
+                let archive = cached_archive(
+                    order.iter().map(|&index| entries[index].clone()).collect(),
+                    1,
+                );
+                let first = page_level(&archive, 0, 1, parent, None);
+                assert_eq!(first.total, 2, "parent={parent:?}, order={order:?}");
+                assert_eq!(first.items[0].path, directory_path);
+                assert_eq!(first.items[0].entry_type, "dir");
+                assert_eq!(first.items[0].compressed, order.contains(&2).then_some(23));
+                let second = page_level(&archive, 1, 1, parent, Some("A"));
+                assert_eq!(second.total, 2);
+                assert_eq!(second.items[0].path, file_path);
+                assert_eq!(second.items[0].entry_type, "file");
+                assert_eq!(second.items[0].size, 7);
+                assert!(archive_path_exists(&archive, &file_path));
+                assert!(archive_path_exists(&archive, &directory_path));
+
+                let children = page_level(&archive, 0, 10, &directory_path, None);
+                assert_eq!(children.total, usize::from(order.contains(&1)));
+                let mut expected_paths = vec![file_path.clone(), directory_path.clone()];
+                if order.contains(&1) {
+                    assert_eq!(children.items[0].path, child_path);
+                    expected_paths.push(child_path.clone());
+                }
+                let search = page_search(&archive, 0, 10, &file_path, 1).unwrap();
+                assert_eq!(search.total, expected_paths.len());
+                let mut paths = search
+                    .items
+                    .into_iter()
+                    .map(|row| row.path)
+                    .collect::<Vec<_>>();
+                paths.sort();
+                expected_paths.sort();
+                assert_eq!(paths, expected_paths);
+            }
+        }
     }
 }
