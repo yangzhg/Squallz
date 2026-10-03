@@ -35,12 +35,11 @@ use crate::create_preflight::{
 };
 use crate::dto::{
     normalize_performance_stream_buffer_limit, ArchiveInfo, ArchiveMovePlanDto,
-    ArchiveTargetInspectionDto, BatchExtractItem, CreateDestinationInspectionDto,
-    CreateEstimateDto, CreatePlanDto, DiskSpaceDto, EntryPreviewDto, ErrorDto,
-    ExternalTaskActionDto, ExtractPlanPreflightDto, FormatDto, IntegrationApplyResultDto,
-    IntegrationRemoveResultDto, IntegrationStatusDto, IntegrationSystemDiagnosticsDto, JobSpec,
-    LanguageDto, LocaleTable, NestedArchivePasswords, NestedArchivePreviewDto, Page,
-    PasswordBookStatusDto, SettingsDto, SfxCreateCapabilityDto,
+    ArchiveTargetInspectionDto, BatchExtractItem, CreateDestinationInspectionDto, CreatePlanDto,
+    DiskSpaceDto, EntryPreviewDto, ErrorDto, ExternalTaskActionDto, ExtractPlanPreflightDto,
+    FormatDto, IntegrationApplyResultDto, IntegrationRemoveResultDto, IntegrationStatusDto,
+    IntegrationSystemDiagnosticsDto, JobSpec, LanguageDto, LocaleTable, NestedArchivePasswords,
+    NestedArchivePreviewDto, Page, PasswordBookStatusDto, SettingsDto, SfxCreateCapabilityDto,
 };
 use crate::events::EventSink;
 use crate::integration;
@@ -669,66 +668,6 @@ pub fn get_formats(state: State<'_, Arc<AppState>>) -> Vec<FormatDto> {
 #[tauri::command]
 pub fn archive_stem(state: State<'_, Arc<AppState>>, path: String) -> String {
     state.engine.archive_stem(Path::new(&path))
-}
-
-/// Returns the input-only estimate exposed by older desktop clients.
-#[tauri::command]
-pub async fn estimate_create_inputs(
-    window: WebviewWindow,
-    state: State<'_, Arc<AppState>>,
-    inputs: Vec<String>,
-    excludes: Vec<String>,
-    destination: String,
-    split_output: bool,
-    request_id: String,
-) -> Result<CreateEstimateDto, ErrorDto> {
-    let state = Arc::clone(state.inner());
-    let events = TauriEvents::new(window.app_handle().clone(), &window);
-    let inputs: Vec<PathBuf> = inputs.into_iter().map(PathBuf::from).collect();
-    let destination = PathBuf::from(destination);
-    tauri::async_runtime::spawn_blocking(move || {
-        let mut last_emit = Instant::now() - PREFLIGHT_PROGRESS_INTERVAL;
-        let mut scanned_entries = 0usize;
-        let estimate = state
-            .engine
-            .estimate_create_inputs_for_output_with_progress(
-                &inputs,
-                &excludes,
-                &destination,
-                split_output,
-                |scanned, current| {
-                    scanned_entries = scanned;
-                    if scanned == 1
-                        || scanned.is_multiple_of(128)
-                        || last_emit.elapsed() >= PREFLIGHT_PROGRESS_INTERVAL
-                    {
-                        last_emit = Instant::now();
-                        events.emit_json(
-                            "create://preflight",
-                            json!({
-                                "request_id": request_id.as_str(),
-                                "phase": "scanning",
-                                "scanned": scanned,
-                                "current": current,
-                            }),
-                        );
-                    }
-                },
-            )
-            .map_err(ErrorDto::from)?;
-        events.emit_json(
-            "create://preflight",
-            json!({
-                "request_id": request_id.as_str(),
-                "phase": "done",
-                "scanned": scanned_entries,
-                "current": "",
-            }),
-        );
-        Ok(CreateEstimateDto::from(estimate))
-    })
-    .await
-    .map_err(|error| ErrorDto::other(format!("input estimate task failed: {error}")))?
 }
 
 /// Plans a frozen create job with the same options and output layout the

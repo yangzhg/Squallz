@@ -3343,6 +3343,41 @@ fn repair_zip_job_rebuilds_missing_central_directory() {
     let sink = Arc::new(TestSink::default());
     let events: Arc<dyn EventSink> = sink.clone();
 
+    let source_before = std::fs::read(&damaged).unwrap();
+    let limited_id = manager.submit(
+        Arc::clone(&state),
+        Arc::clone(&events),
+        JobSpec::RepairZip {
+            src: damaged.to_string_lossy().into_owned(),
+            dest: repaired.to_string_lossy().into_owned(),
+            level: 5,
+        },
+        SettingsDto {
+            safety_max_output_bytes: Some(1),
+            ..SettingsDto::default()
+        },
+    );
+    manager.wait_idle();
+    assert!(
+        !repaired.exists(),
+        "limited source verification must not rebuild"
+    );
+    assert_eq!(std::fs::read(&damaged).unwrap(), source_before);
+    {
+        let recorded_events = sink.events.lock().unwrap();
+        assert_eq!(
+            states_of(&recorded_events, limited_id),
+            vec!["queued", "running", "failed"]
+        );
+        let failure = recorded_events.iter().find(|(name, payload)| {
+            name == EV_STATE && payload["id"] == limited_id && payload["state"] == "failed"
+        });
+        assert_eq!(
+            failure.and_then(|(_, payload)| payload["error"]["key"].as_str()),
+            Some("error.resource_limit")
+        );
+    }
+
     let id = manager.submit(
         Arc::clone(&state),
         Arc::clone(&events),

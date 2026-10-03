@@ -97,7 +97,6 @@ pub fn run() {
             commands::cancel_archive_search,
             commands::get_formats,
             commands::archive_stem,
-            commands::estimate_create_inputs,
             commands::plan_create,
             commands::plan_convert,
             commands::cancel_convert_plan,

@@ -11,8 +11,8 @@ use squallz_core::api::{
 };
 use squallz_core::{
     ChecksumAlgorithm, CreateCompletionAction, CreateContentPolicy, CreateDestinationGuard,
-    CreateInputEstimate, CreatePlan, ExtractInputGuard, ExtractPlan, ExtractSpace,
-    PostSuccessAction, SfxRecoveryDetails, SfxTarget, SmartLayout, SqzInnerFormat,
+    CreatePlan, ExtractInputGuard, ExtractPlan, ExtractSpace, PostSuccessAction,
+    SfxRecoveryDetails, SfxTarget, SmartLayout, SqzInnerFormat,
 };
 use squallz_i18n::error_message;
 use squallz_recovery::RecoveryCleanupDetails;
@@ -399,32 +399,6 @@ pub struct CreatePlanDto {
     pub split_volume_count_budget: Option<u64>,
     pub workspace_budget_bytes: u64,
     pub system_temp_budget_bytes: u64,
-}
-
-/// Input scan summary returned by the lightweight create estimate command.
-#[derive(Debug, Clone, Serialize)]
-pub struct CreateEstimateDto {
-    pub input_count: usize,
-    pub entries: usize,
-    pub files: usize,
-    pub directories: usize,
-    pub symlinks: usize,
-    pub total_bytes: u64,
-    pub output_budget_bytes: u64,
-}
-
-impl From<CreateInputEstimate> for CreateEstimateDto {
-    fn from(value: CreateInputEstimate) -> Self {
-        Self {
-            input_count: value.input_count,
-            entries: value.entries,
-            files: value.files,
-            directories: value.directories,
-            symlinks: value.symlinks,
-            total_bytes: value.total_bytes,
-            output_budget_bytes: value.output_budget_bytes(),
-        }
-    }
 }
 
 impl From<CreatePlan> for CreatePlanDto {

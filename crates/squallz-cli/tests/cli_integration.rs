@@ -1989,6 +1989,66 @@ fn batch_json_script_runs_workbench_archive_jobs() {
     assert_eq!(std::fs::read(&rebuilt).unwrap(), rebuilt_before);
     assert_eq!(std::fs::read(&repaired_sqz).unwrap(), repaired_before);
 
+    let local_source = dir.join("missing-central.zip");
+    let local_rebuilt = dir.join("local-rebuilt.zip");
+    let local_bytes =
+        stored_zip_with_missing_central_directory(&[(b"rebuildable.txt", b"intact batch payload")]);
+    std::fs::write(&local_source, &local_bytes).unwrap();
+    let bad_source = dir.join("bad-payload.zip");
+    let bad_output = dir.join("must-not-exist.zip");
+    std::fs::write(
+        &bad_source,
+        stored_zip_with_missing_central_directory(&[(b"bad.txt", b"damaged batch payload")]),
+    )
+    .unwrap();
+    corrupt_stored_zip_payload(&bad_source, b"damaged batch payload");
+    let bad_before = std::fs::read(&bad_source).unwrap();
+    let damaged_repairs = serde_json::json!({
+        "jobs": [
+            { "kind": "repair_zip", "archive": "missing-central.zip", "output": "local-rebuilt.zip" },
+            { "kind": "repair_zip", "archive": "bad-payload.zip", "output": "must-not-exist.zip" }
+        ]
+    });
+    std::fs::write(&script, serde_json::to_string(&damaged_repairs).unwrap()).unwrap();
+    let out = run(sqz()
+        .arg("batch")
+        .arg(&script)
+        .args(["--keep-going", "--json"]));
+    assert_eq!(out.status.code(), Some(3), "stderr: {}", stderr(&out));
+    let report = stdout_json(&out);
+    assert_eq!(report["total"], 2);
+    assert_eq!(report["failed"], 1);
+    assert_eq!(report["jobs"][0]["ok"], true);
+    assert_eq!(report["jobs"][0]["result"]["in_place"], false);
+    assert_eq!(
+        report["jobs"][0]["result"]["source"]["structure"],
+        "zip_local_headers_recovered"
+    );
+    assert_eq!(report["jobs"][0]["result"]["source"]["entries_tested"], 1);
+    assert_eq!(report["jobs"][1]["ok"], false);
+    assert_eq!(report["jobs"][1]["error"]["kind"], "corrupt_archive");
+    assert!(!bad_output.exists());
+    assert_eq!(std::fs::read(&bad_source).unwrap(), bad_before);
+    assert_eq!(std::fs::read(&local_source).unwrap(), local_bytes);
+    let rebuilt_test = run(sqz().arg("test").arg(&local_rebuilt).arg("--json"));
+    assert!(
+        rebuilt_test.status.success(),
+        "stderr: {}",
+        stderr(&rebuilt_test)
+    );
+    assert_eq!(stdout_json(&rebuilt_test)["ok"], true);
+    let extracted = dir.join("local-rebuilt-files");
+    let out = run(sqz()
+        .arg("extract")
+        .arg(&local_rebuilt)
+        .arg("-d")
+        .arg(&extracted));
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    assert_eq!(
+        std::fs::read(extracted.join("rebuildable.txt")).unwrap(),
+        b"intact batch payload"
+    );
+
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -7369,6 +7429,31 @@ fn sqz_over_limit_payload_damage_fails_through_cli() {
                 .is_some_and(|text| text.contains("unrepaired SQZ recovery block damage"))),
         "report: {report}"
     );
+
+    let source_before = std::fs::read(&archive).unwrap();
+    let repair_output = dir.join("must-not-exist.sqz");
+    let out = run(sqz()
+        .arg("repair")
+        .arg(&archive)
+        .arg("-o")
+        .arg(&repair_output)
+        .arg("--json"));
+    assert_eq!(out.status.code(), Some(3), "stderr: {}", stderr(&out));
+    let repair_report = stdout_json(&out);
+    assert_eq!(repair_report["ok"], false);
+    assert_eq!(repair_report["operation"], "repair_sqz");
+    assert_eq!(repair_report["in_place"], false);
+    assert_eq!(repair_report["source"]["ok"], false);
+    assert_eq!(repair_report["source"]["recovery"], report["recovery"]);
+    assert_eq!(repair_report["recovery"], report["recovery"]);
+    assert_eq!(repair_report["problems"], report["problems"]);
+    assert_eq!(repair_report["problems_total"], report["problems_total"]);
+    assert_eq!(
+        repair_report["problems_truncated"],
+        report["problems_truncated"]
+    );
+    assert!(!repair_output.exists());
+    assert_eq!(std::fs::read(&archive).unwrap(), source_before);
 
     let out = run(sqz()
         .args(["--lang", "en-US", "extract"])

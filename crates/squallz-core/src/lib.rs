@@ -30,6 +30,7 @@ mod output_set;
 mod password;
 mod presets;
 mod queue;
+mod repair;
 mod sfx;
 mod stored_os_string;
 mod update;
@@ -73,6 +74,7 @@ pub use presets::{
 pub use queue::{
     Job, JobId, JobProgress, JobQueue, JobResources, JobState, QueueWaitReason, QueuedJobStatus,
 };
+pub use repair::{ArchiveRepairKind, ArchiveRepairOptions, ArchiveRepairOutcome};
 pub use sfx::{
     default_sfx_extract_destination, discover_packaged_sfx_runtime, inspect_sfx,
     macos_sfx_bundle_for_executable, sfx_recovery_details, validate_sfx_template,
