@@ -117,19 +117,28 @@ fn parse_u64(block: &BTreeMap<String, String>, key: &str) -> Result<Option<u64>,
 }
 
 fn infer_directory_entries(entries: &mut [EntryMeta]) {
-    let paths: Vec<String> = entries
-        .iter()
-        .map(|entry| entry.path.display.clone())
-        .collect();
-    for entry in entries {
-        if matches!(entry.entry_type, EntryType::Dir) {
+    let mut path_indices: Vec<usize> = (0..entries.len()).collect();
+    path_indices.sort_unstable_by(|&left, &right| {
+        entries[left].path.display.cmp(&entries[right].path.display)
+    });
+    // Only metadata changes below, so the sorted path index stays valid.
+    let mut prefix = String::new();
+    for index in 0..entries.len() {
+        if matches!(entries[index].entry_type, EntryType::Dir) {
             continue;
         }
-        let prefix = format!("{}/", entry.path.display.trim_end_matches('/'));
-        if paths.iter().any(|path| path.starts_with(&prefix)) {
-            entry.entry_type = EntryType::Dir;
-            entry.size = 0;
-            entry.compressed_size = None;
+        prefix.clear();
+        prefix.push_str(entries[index].path.display.trim_end_matches('/'));
+        prefix.push('/');
+        let position = path_indices
+            .partition_point(|&index| entries[index].path.display.as_str() < prefix.as_str());
+        if path_indices
+            .get(position)
+            .is_some_and(|&index| entries[index].path.display.starts_with(&prefix))
+        {
+            entries[index].entry_type = EntryType::Dir;
+            entries[index].size = 0;
+            entries[index].compressed_size = None;
         }
     }
 }
@@ -446,5 +455,39 @@ Packed Size = 4096
         assert_eq!(entries[3].size, 1);
         assert_eq!(entries[4].path.display, "duplicate.txt");
         assert_eq!(entries[4].size, 2);
+
+        let entries = read(
+            concat!(
+                "Path = self///\nSize = 7\nPacked Size = 9\n\n",
+                "Path = self-other\nSize = 3\n\n",
+                "Path = literal\\name\nSize = 5\nPacked Size = 4\n\n",
+                "Path = literal/name/child\nSize = 6",
+            )
+            .as_bytes(),
+        )
+        .unwrap()
+        .entries;
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.path.display.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "self///",
+                "self-other",
+                "literal\\name",
+                "literal/name/child"
+            ]
+        );
+        assert!(matches!(entries[0].entry_type, EntryType::Dir));
+        assert_eq!(entries[0].size, 0);
+        assert_eq!(entries[0].compressed_size, None);
+        for entry in &entries[1..] {
+            assert!(matches!(entry.entry_type, EntryType::File));
+        }
+        assert_eq!(entries[1].size, 3);
+        assert_eq!(entries[2].size, 5);
+        assert_eq!(entries[2].compressed_size, Some(4));
+        assert_eq!(entries[3].size, 6);
     }
 }

@@ -2915,21 +2915,6 @@ struct ManagedSplitOutputSnapshot {
     state_digest: [u8; 32],
 }
 
-#[cfg(test)]
-#[derive(Debug)]
-struct ManagedSplitBackup {
-    original: PathBuf,
-    backup: PathBuf,
-    identity: SplitPathIdentity,
-}
-
-#[cfg(test)]
-#[derive(Debug)]
-struct InstalledSplitOutput {
-    final_path: PathBuf,
-    identity: SplitPathIdentity,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SplitPathIdentity {
@@ -3785,6 +3770,19 @@ fn resume_split_transaction(
     transaction: &ResolvedSplitTransaction,
     open: &OpenSplitTransaction,
 ) -> Result<Vec<PreservedSplitOutput>, FormatError> {
+    resume_split_transaction_with(transaction, open, &mut |from, to| {
+        crate::move_path_no_replace(from, to)
+    })
+}
+
+fn resume_split_transaction_with<M>(
+    transaction: &ResolvedSplitTransaction,
+    open: &OpenSplitTransaction,
+    move_no_replace: &mut M,
+) -> Result<Vec<PreservedSplitOutput>, FormatError>
+where
+    M: FnMut(&Path, &Path) -> io::Result<()>,
+{
     ensure_open_split_transaction_binding(open)?;
     let output_identities = transaction
         .outputs
@@ -3799,7 +3797,7 @@ fn resume_split_transaction(
             (Some(original), None) if original == entry.identity => {
                 ensure_split_state_binding(&entry.original, entry.state_digest, "previous output")?;
                 ensure_open_split_transaction_binding(open)?;
-                if let Err(error) = crate::move_path_no_replace(&entry.original, &entry.backup) {
+                if let Err(error) = move_no_replace(&entry.original, &entry.backup) {
                     return Err(split_transaction_conflict(
                         &format!("the previous output could not be backed up: {error}"),
                         [&entry.original, &entry.backup],
@@ -3888,7 +3886,7 @@ fn resume_split_transaction(
                     "staged split output",
                 )?;
                 ensure_open_split_transaction_binding(open)?;
-                if let Err(error) = crate::move_path_no_replace(&entry.staged, &entry.final_path) {
+                if let Err(error) = move_no_replace(&entry.staged, &entry.final_path) {
                     return Err(split_transaction_conflict(
                         &format!("the staged output could not be installed: {error}"),
                         [&entry.staged, &entry.final_path],
@@ -4190,201 +4188,6 @@ where
     Ok(())
 }
 
-#[cfg(test)]
-fn commit_split_outputs_with<R, D>(
-    base: &Path,
-    staged: &[StagedSplitOutput],
-    include_recovery: bool,
-    move_no_replace: &mut R,
-    remove: &mut D,
-) -> Result<Vec<PathBuf>, FormatError>
-where
-    R: FnMut(&Path, &Path) -> io::Result<()>,
-    D: FnMut(&Path) -> io::Result<()>,
-{
-    if let Err(error) = validate_staged_split_outputs(staged) {
-        remove_staged_split_outputs_with(staged, remove);
-        return Err(error);
-    }
-
-    let managed = collect_managed_split_outputs(base, include_recovery)?;
-    let mut backups = Vec::with_capacity(managed.len());
-    for original in managed {
-        backups.push(ManagedSplitBackup {
-            backup: crate::sibling_temp_path(&original, "split-backup")?,
-            identity: split_path_identity(&original)?,
-            original,
-        });
-    }
-
-    for (backed_up, entry) in backups.iter().enumerate() {
-        if let Err(error) = move_no_replace(&entry.original, &entry.backup) {
-            let rollback_errors =
-                rollback_split_commit(&backups[..backed_up], &[], move_no_replace);
-            remove_staged_split_outputs_with(staged, remove);
-            return Err(split_commit_error(
-                "backing up the previous output set",
-                error,
-                rollback_errors,
-            ));
-        }
-        match split_path_identity(&entry.backup) {
-            Ok(identity) if identity == entry.identity => {}
-            Ok(_) => {
-                let mut rollback_errors = vec![format!(
-                    "backup identity changed at {}; preserved for manual recovery",
-                    entry.backup.display()
-                )];
-                rollback_errors.extend(rollback_split_commit(
-                    &backups[..=backed_up],
-                    &[],
-                    move_no_replace,
-                ));
-                remove_staged_split_outputs_with(staged, remove);
-                return Err(split_commit_error(
-                    "binding the previous output backup",
-                    io::Error::other("the moved backup no longer matches the original output"),
-                    rollback_errors,
-                ));
-            }
-            Err(error) => {
-                let mut rollback_errors = vec![format!(
-                    "could not bind backup identity at {}; preserved for manual recovery: {error}",
-                    entry.backup.display()
-                )];
-                rollback_errors.extend(rollback_split_commit(
-                    &backups[..=backed_up],
-                    &[],
-                    move_no_replace,
-                ));
-                remove_staged_split_outputs_with(staged, remove);
-                return Err(split_commit_error(
-                    "binding the previous output backup",
-                    error,
-                    rollback_errors,
-                ));
-            }
-        }
-    }
-
-    let mut installed = Vec::with_capacity(staged.len());
-    for output in staged {
-        let identity = match (
-            split_file_identity(&output.file),
-            split_path_identity(&output.part),
-        ) {
-            (Ok(file_identity), Ok(path_identity))
-                if file_identity == output.identity && path_identity == output.identity =>
-            {
-                output.identity
-            }
-            (Ok(_), Ok(_)) => {
-                let rollback_errors = rollback_split_commit(&backups, &installed, move_no_replace);
-                remove_staged_split_outputs_with(staged, remove);
-                return Err(split_commit_error(
-                    "binding a staged split output",
-                    io::Error::other("the staged split output was replaced after writing"),
-                    rollback_errors,
-                ));
-            }
-            (Err(error), _) | (_, Err(error)) => {
-                let rollback_errors = rollback_split_commit(&backups, &installed, move_no_replace);
-                remove_staged_split_outputs_with(staged, remove);
-                return Err(split_commit_error(
-                    "binding a staged split output",
-                    error,
-                    rollback_errors,
-                ));
-            }
-        };
-        if let Err(error) = move_no_replace(&output.part, &output.final_path) {
-            let rollback_errors = rollback_split_commit(&backups, &installed, move_no_replace);
-            remove_staged_split_outputs_with(staged, remove);
-            return Err(split_commit_error(
-                "installing the new output set",
-                error,
-                rollback_errors,
-            ));
-        }
-        installed.push(InstalledSplitOutput {
-            final_path: output.final_path.clone(),
-            identity,
-        });
-        match split_path_identity(&output.final_path) {
-            Ok(installed_identity) if installed_identity == identity => {}
-            Ok(_) => {
-                let mut rollback_errors = vec![format!(
-                    "installed output identity changed at {}; preserved for manual recovery",
-                    output.final_path.display()
-                )];
-                rollback_errors.extend(rollback_split_commit(
-                    &backups,
-                    &installed,
-                    move_no_replace,
-                ));
-                remove_staged_split_outputs_with(staged, remove);
-                return Err(split_commit_error(
-                    "binding an installed split output",
-                    io::Error::other("the installed output no longer matches its staged file"),
-                    rollback_errors,
-                ));
-            }
-            Err(error) => {
-                let mut rollback_errors = vec![format!(
-                    "could not bind installed output identity at {}; preserved for manual recovery: {error}",
-                    output.final_path.display()
-                )];
-                rollback_errors.extend(rollback_split_commit(
-                    &backups,
-                    &installed,
-                    move_no_replace,
-                ));
-                remove_staged_split_outputs_with(staged, remove);
-                return Err(split_commit_error(
-                    "binding an installed split output",
-                    error,
-                    rollback_errors,
-                ));
-            }
-        }
-    }
-
-    // Unlinking after an identity check would still leave a check/use race.
-    // Return only the transaction-owned paths whose identities remain bound.
-    let mut preserved = Vec::with_capacity(backups.len());
-    let mut recovery = Vec::with_capacity(backups.len());
-    let mut recovery_required = false;
-    for entry in &backups {
-        match split_path_identity(&entry.backup) {
-            Ok(identity) if identity == entry.identity => {
-                preserved.push(entry.backup.clone());
-                recovery.push(format!("{} (previous output)", entry.backup.display()));
-            }
-            Ok(_) => {
-                recovery_required = true;
-                recovery.push(format!(
-                    "{} (backup identity changed; competing entry left untouched)",
-                    entry.backup.display()
-                ));
-            }
-            Err(error) => {
-                recovery_required = true;
-                recovery.push(format!(
-                    "{} (backup identity could not be verified; path left untouched: {error})",
-                    entry.backup.display()
-                ));
-            }
-        }
-    }
-    if recovery_required {
-        return Err(FormatError::Io(io::Error::other(format!(
-            "the new split output set was installed, but one or more transaction backups require manual recovery; no path entry was removed or overwritten: {}",
-            recovery.join(", ")
-        ))));
-    }
-    Ok(preserved)
-}
-
 fn validate_staged_split_outputs(staged: &[StagedSplitOutput]) -> Result<(), FormatError> {
     for output in staged {
         let metadata = fs::symlink_metadata(&output.part)?;
@@ -4527,123 +4330,6 @@ fn split_file_identity(_file: &File) -> io::Result<SplitPathIdentity> {
         io::ErrorKind::Unsupported,
         "split output identity is unavailable on this platform",
     ))
-}
-
-#[cfg(test)]
-fn rollback_split_commit<R>(
-    backups: &[ManagedSplitBackup],
-    installed: &[InstalledSplitOutput],
-    move_no_replace: &mut R,
-) -> Vec<String>
-where
-    R: FnMut(&Path, &Path) -> io::Result<()>,
-{
-    let mut errors = Vec::new();
-    for output in installed.iter().rev() {
-        match split_path_identity(&output.final_path) {
-            Ok(identity) if identity == output.identity => {
-                let preserved = match crate::sibling_temp_path(
-                    &output.final_path,
-                    "split-rollback-preserved",
-                ) {
-                    Ok(path) => path,
-                    Err(error) => {
-                        errors.push(format!(
-                            "could not reserve a preservation path for {}; published output left in place: {error}",
-                            output.final_path.display()
-                        ));
-                        continue;
-                    }
-                };
-                if let Err(error) = move_no_replace(&output.final_path, &preserved) {
-                    errors.push(format!(
-                        "could not preserve published output {} at {}: {error}",
-                        output.final_path.display(),
-                        preserved.display()
-                    ));
-                    continue;
-                }
-                match split_path_identity(&preserved) {
-                    Ok(identity) if identity == output.identity => errors.push(format!(
-                        "published replacement output preserved at {}",
-                        preserved.display()
-                    )),
-                    Ok(_) => errors.push(format!(
-                        "published output changed during recovery; competing entry preserved at {}",
-                        preserved.display()
-                    )),
-                    Err(error) => errors.push(format!(
-                        "could not verify the entry preserved at {}: {error}",
-                        preserved.display()
-                    )),
-                }
-            }
-            Ok(_) => errors.push(format!(
-                "published output identity changed at {}; entry and previous backup were preserved",
-                output.final_path.display()
-            )),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => errors.push(format!(
-                "published output disappeared from {}; previous backup was preserved",
-                output.final_path.display()
-            )),
-            Err(error) => errors.push(format!(
-                "could not bind published output at {}; entry and previous backup were preserved: {error}",
-                output.final_path.display()
-            )),
-        }
-    }
-    for entry in backups.iter().rev() {
-        match split_path_identity(&entry.backup) {
-            Ok(identity) if identity == entry.identity => {
-                if let Err(error) = move_no_replace(&entry.backup, &entry.original) {
-                    errors.push(format!(
-                        "could not restore {} without replacing a competing entry; previous output preserved at {}: {error}",
-                        entry.original.display(),
-                        entry.backup.display()
-                    ));
-                    continue;
-                }
-                match split_path_identity(&entry.original) {
-                    Ok(identity) if identity == entry.identity => {}
-                    Ok(_) => errors.push(format!(
-                        "backup changed during recovery; competing entry preserved at {}",
-                        entry.original.display()
-                    )),
-                    Err(error) => errors.push(format!(
-                        "could not verify the restored output at {}: {error}",
-                        entry.original.display()
-                    )),
-                }
-            }
-            Ok(_) => errors.push(format!(
-                "backup identity changed at {}; preserved for manual recovery",
-                entry.backup.display()
-            )),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => errors.push(format!(
-                "previous output backup disappeared from {}",
-                entry.backup.display()
-            )),
-            Err(error) => errors.push(format!(
-                "could not bind previous output backup at {}; preserved for manual recovery: {error}",
-                entry.backup.display()
-            )),
-        }
-    }
-    errors
-}
-
-#[cfg(test)]
-fn split_commit_error(phase: &str, error: io::Error, rollback_errors: Vec<String>) -> FormatError {
-    if rollback_errors.is_empty() {
-        return FormatError::from(io::Error::new(
-            error.kind(),
-            format!("split output commit failed while {phase}: {error}"),
-        ));
-    }
-    FormatError::Io(io::Error::other(format!(
-        "split output commit failed while {phase}: {error}; rollback incomplete: {}",
-        rollback_errors.join("; ")
-    )))
 }
 
 fn remove_staged_split_outputs(staged: &[StagedSplitOutput]) -> Vec<String> {
@@ -4957,6 +4643,39 @@ mod tests {
     ) -> (PathBuf, File) {
         let (binding, file) = reserve_split_staging_file(final_path, staging_id).unwrap();
         (binding.path, file)
+    }
+
+    fn write_split_transaction_fixture(
+        base: &Path,
+        staged: &[StagedSplitOutput],
+    ) -> ResolvedSplitTransaction {
+        let transaction = ResolvedSplitTransaction {
+            base: base.to_path_buf(),
+            include_recovery: false,
+            backups: snapshot_managed_split_outputs(base, false)
+                .unwrap()
+                .into_iter()
+                .map(|entry| ResolvedSplitBackup {
+                    backup: crate::sibling_temp_path(&entry.path, "split-backup").unwrap(),
+                    original: entry.path,
+                    identity: entry.identity,
+                    state_digest: entry.state_digest,
+                })
+                .collect(),
+            outputs: staged
+                .iter()
+                .map(|output| ResolvedSplitOutput {
+                    staged: output.part.clone(),
+                    final_path: output.final_path.clone(),
+                    identity: split_file_identity(&output.file).unwrap(),
+                    state_digest: path_state_digest(&output.part).unwrap().unwrap(),
+                })
+                .collect(),
+        };
+        let record = split_transaction_record(base, &transaction).unwrap();
+        let resolved = resolve_split_transaction(base, &record).unwrap();
+        drop(write_split_transaction(base, record).unwrap());
+        resolved
     }
 
     #[test]
@@ -5344,8 +5063,8 @@ mod tests {
     }
 
     #[test]
-    fn split_commit_rolls_back_when_backing_up_an_existing_volume_fails() {
-        let dir = temp_dir("commit-backup-rollback");
+    fn split_transaction_preserves_and_recovers_a_failed_backup_move() {
+        let dir = temp_dir("transaction-backup-failure");
         let base = dir.join("archive.zip");
         let old_first = volume_path(&base, 1);
         let old_second = volume_path(&base, 2);
@@ -5356,33 +5075,74 @@ mod tests {
         std::fs::write(&old_stale, b"old stale").unwrap();
         let staged = staged_output_fixture(&base, &[b"new first", b"new second"]);
 
-        let blocked = old_second.clone();
-        let error = commit_split_outputs_with(
-            &base,
-            &staged,
-            false,
-            &mut |from, to| {
-                if from == blocked {
-                    return Err(io::Error::new(
-                        io::ErrorKind::PermissionDenied,
-                        "injected occupied output",
-                    ));
-                }
-                crate::move_path_no_replace(from, to)
-            },
-            &mut |path| std::fs::remove_file(path),
-        )
+        let transaction = write_split_transaction_fixture(&base, &staged);
+        let blocked = transaction
+            .backups
+            .iter()
+            .find(|entry| entry.original == old_second)
+            .unwrap();
+        let open = open_split_transaction(&base).unwrap().unwrap();
+        let mut failed = false;
+        let error = resume_split_transaction_with(&transaction, &open, &mut |from, to| {
+            if !failed && from == blocked.original.as_path() && to == blocked.backup.as_path() {
+                failed = true;
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "controlled previous-output backup failure",
+                ));
+            }
+            crate::move_path_no_replace(from, to)
+        })
         .unwrap_err();
+        assert!(failed, "the exact previous-output backup move did not run");
+        drop(open);
 
         assert!(error
             .to_string()
-            .contains("backing up the previous output set"));
-        assert_eq!(std::fs::read(&base).unwrap(), b"old unsplit");
-        assert_eq!(std::fs::read(&old_first).unwrap(), b"old first");
+            .contains("previous output could not be backed up"));
+        assert!(error.to_string().contains("manual recovery"));
+        assert!(!base.exists());
+        assert!(!old_first.exists());
         assert_eq!(std::fs::read(&old_second).unwrap(), b"old second");
         assert_eq!(std::fs::read(&old_stale).unwrap(), b"old stale");
+        let backups = split_backup_paths(&dir);
+        assert_eq!(backups.len(), 2);
+        assert_eq!(bound_transaction_backups(&transaction).len(), 2);
+        for output in &transaction.outputs {
+            assert_eq!(
+                split_path_identity(&output.staged).unwrap(),
+                output.identity
+            );
+            assert_eq!(
+                path_state_digest(&output.staged).unwrap(),
+                Some(output.state_digest)
+            );
+        }
+        assert!(split_transaction_journal_path(&base).unwrap().exists());
+
+        let preserved =
+            bind_preserved_split_outputs(recover_split_transaction(&base).unwrap()).unwrap();
+        assert_eq!(preserved.len(), 4);
+        let mut previous = preserved
+            .iter()
+            .map(|path| std::fs::read(path).unwrap())
+            .collect::<Vec<_>>();
+        previous.sort();
+        assert_eq!(
+            previous,
+            vec![
+                b"old first".to_vec(),
+                b"old second".to_vec(),
+                b"old stale".to_vec(),
+                b"old unsplit".to_vec(),
+            ]
+        );
+        assert_eq!(std::fs::read(&old_first).unwrap(), b"new first");
+        assert_eq!(std::fs::read(&old_second).unwrap(), b"new second");
+        assert!(!base.exists());
+        assert!(!old_stale.exists());
         assert!(!staged.iter().any(|output| output.part.exists()));
-        assert!(split_backup_paths(&dir).is_empty());
+        assert!(!split_transaction_journal_path(&base).unwrap().exists());
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -5574,8 +5334,8 @@ mod tests {
     }
 
     #[test]
-    fn split_commit_rolls_back_when_installing_a_later_volume_fails() {
-        let dir = temp_dir("commit-install-rollback");
+    fn split_transaction_preserves_and_recovers_a_failed_later_install() {
+        let dir = temp_dir("transaction-install-failure");
         let base = dir.join("archive.zip");
         let old_first = volume_path(&base, 1);
         let old_second = volume_path(&base, 2);
@@ -5586,64 +5346,83 @@ mod tests {
         std::fs::write(&old_stale, b"old stale").unwrap();
         let staged = staged_output_fixture(&base, &[b"new first", b"new second"]);
 
-        let blocked = staged[1].part.clone();
-        let error = commit_split_outputs_with(
-            &base,
-            &staged,
-            false,
-            &mut |from, to| {
-                if from == blocked {
-                    return Err(io::Error::new(
-                        io::ErrorKind::PermissionDenied,
-                        "injected install failure",
-                    ));
-                }
-                crate::move_path_no_replace(from, to)
-            },
-            &mut |path| std::fs::remove_file(path),
-        )
+        let transaction = write_split_transaction_fixture(&base, &staged);
+        let blocked = &transaction.outputs[1];
+        let open = open_split_transaction(&base).unwrap().unwrap();
+        let mut failed = false;
+        let error = resume_split_transaction_with(&transaction, &open, &mut |from, to| {
+            if !failed && from == blocked.staged.as_path() && to == blocked.final_path.as_path() {
+                failed = true;
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "controlled later-volume install failure",
+                ));
+            }
+            crate::move_path_no_replace(from, to)
+        })
         .unwrap_err();
+        assert!(failed, "the exact later-volume install move did not run");
+        drop(open);
 
-        assert!(error.to_string().contains("installing the new output set"));
-        assert_eq!(std::fs::read(&base).unwrap(), b"old unsplit");
-        assert_eq!(std::fs::read(&old_first).unwrap(), b"old first");
-        assert_eq!(std::fs::read(&old_second).unwrap(), b"old second");
-        assert_eq!(std::fs::read(&old_stale).unwrap(), b"old stale");
+        assert!(error
+            .to_string()
+            .contains("staged output could not be installed"));
+        assert!(error.to_string().contains("manual recovery"));
+        assert_eq!(std::fs::read(&old_first).unwrap(), b"new first");
+        assert_eq!(split_path_identity(&old_first).unwrap(), staged[0].identity);
+        assert!(!staged[0].part.exists());
+        assert_eq!(std::fs::read(&staged[1].part).unwrap(), b"new second");
+        assert!(!old_second.exists());
+        assert!(!base.exists());
+        assert!(!old_stale.exists());
+        assert_eq!(split_backup_paths(&dir).len(), 4);
+        assert_eq!(bound_transaction_backups(&transaction).len(), 4);
+        assert!(split_transaction_journal_path(&base).unwrap().exists());
+
+        let preserved =
+            bind_preserved_split_outputs(recover_split_transaction(&base).unwrap()).unwrap();
+        let mut previous = preserved
+            .iter()
+            .map(|path| std::fs::read(path).unwrap())
+            .collect::<Vec<_>>();
+        previous.sort();
+        assert_eq!(
+            previous,
+            vec![
+                b"old first".to_vec(),
+                b"old second".to_vec(),
+                b"old stale".to_vec(),
+                b"old unsplit".to_vec(),
+            ]
+        );
+        assert_eq!(std::fs::read(&old_first).unwrap(), b"new first");
+        assert_eq!(std::fs::read(&old_second).unwrap(), b"new second");
         assert!(!staged.iter().any(|output| output.part.exists()));
-        assert!(split_backup_paths(&dir).is_empty());
+        assert!(!split_transaction_journal_path(&base).unwrap().exists());
         std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
-    fn replace_split_rollback_preserves_an_output_replaced_after_install() {
-        let dir = temp_dir("replace-rollback-output-swap");
+    fn durable_split_recovery_preserves_a_rebound_installed_output() {
+        let dir = temp_dir("durable-installed-output-swap");
         let base = dir.join("archive.zip");
         let old_first = volume_path(&base, 1);
         std::fs::write(&old_first, b"old first").unwrap();
         let staged = staged_output_fixture(&base, &[b"new first", b"new second"]);
-        let blocked_install = staged[1].part.clone();
         let published_first = staged[0].final_path.clone();
+        let displaced = dir.join("displaced-installed-output");
+        let transaction = write_split_transaction_fixture(&base, &staged);
+        let backup = &transaction.backups[0].backup;
+        crate::move_path_no_replace(&old_first, backup).unwrap();
+        crate::move_path_no_replace(&staged[0].part, &published_first).unwrap();
+        crate::move_path_no_replace(&published_first, &displaced).unwrap();
+        std::fs::write(&published_first, b"competitor first").unwrap();
+        sync_directory(&dir).unwrap();
 
-        let error = commit_split_outputs_with(
-            &base,
-            &staged,
-            false,
-            &mut |from, to| {
-                if from == blocked_install {
-                    std::fs::remove_file(&published_first)?;
-                    std::fs::write(&published_first, b"competitor first")?;
-                    return Err(io::Error::new(
-                        io::ErrorKind::PermissionDenied,
-                        "injected later install failure",
-                    ));
-                }
-                crate::move_path_no_replace(from, to)
-            },
-            &mut |path| std::fs::remove_file(path),
-        )
-        .unwrap_err();
+        let error = recover_split_transaction(&base).unwrap_err();
 
         let backups = split_backup_paths(&dir);
+        assert!(error.to_string().contains("manual recovery"));
         assert!(error.to_string().contains("identity changed"));
         assert_eq!(
             std::fs::read(&published_first).unwrap(),
@@ -5651,47 +5430,11 @@ mod tests {
         );
         assert_eq!(backups.len(), 1);
         assert_eq!(std::fs::read(&backups[0]).unwrap(), b"old first");
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn replace_split_rollback_never_overwrites_a_late_restore_conflict() {
-        let dir = temp_dir("replace-rollback-restore-conflict");
-        let base = dir.join("archive.zip");
-        let old_first = volume_path(&base, 1);
-        std::fs::write(&old_first, b"old first").unwrap();
-        let staged = staged_output_fixture(&base, &[b"new first", b"new second"]);
-        let blocked_install = staged[1].part.clone();
-        let restore_target = old_first.clone();
-
-        let error = commit_split_outputs_with(
-            &base,
-            &staged,
-            false,
-            &mut |from, to| {
-                if from == blocked_install {
-                    return Err(io::Error::new(
-                        io::ErrorKind::PermissionDenied,
-                        "injected later install failure",
-                    ));
-                }
-                if from.to_string_lossy().contains("split-backup") && to == restore_target {
-                    std::fs::write(&restore_target, b"competitor first")?;
-                }
-                crate::move_path_no_replace(from, to)
-            },
-            &mut |path| std::fs::remove_file(path),
-        )
-        .unwrap_err();
-
-        let backups = split_backup_paths(&dir);
-        assert!(error
-            .to_string()
-            .contains("without replacing a competing entry"));
-        assert_eq!(std::fs::read(&restore_target).unwrap(), b"competitor first");
-        assert_eq!(backups.len(), 1);
-        assert_eq!(std::fs::read(&backups[0]).unwrap(), b"old first");
-        assert_eq!(split_rollback_preserved_paths(&dir).len(), 1);
+        assert_eq!(std::fs::read(&displaced).unwrap(), b"new first");
+        assert_eq!(std::fs::read(&staged[1].part).unwrap(), b"new second");
+        assert!(!staged[1].final_path.exists());
+        assert!(error.to_string().contains(&backup.display().to_string()));
+        assert!(split_transaction_journal_path(&base).unwrap().exists());
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -5731,42 +5474,6 @@ mod tests {
     }
 
     #[test]
-    fn split_commit_reports_when_the_filesystem_prevents_a_complete_rollback() {
-        let dir = temp_dir("commit-incomplete-rollback");
-        let base = dir.join("archive.zip");
-        let old_first = volume_path(&base, 1);
-        std::fs::write(&old_first, b"old first").unwrap();
-        let staged = staged_output_fixture(&base, &[b"new first", b"new second"]);
-        let blocked_install = staged[1].part.clone();
-        let blocked_preserve = staged[0].final_path.clone();
-
-        let error = commit_split_outputs_with(
-            &base,
-            &staged,
-            false,
-            &mut |from, to| {
-                if from == blocked_install
-                    || (from == blocked_preserve
-                        && to.to_string_lossy().contains("split-rollback-preserved"))
-                {
-                    return Err(io::Error::new(
-                        io::ErrorKind::PermissionDenied,
-                        "injected move failure",
-                    ));
-                }
-                crate::move_path_no_replace(from, to)
-            },
-            &mut |path| std::fs::remove_file(path),
-        )
-        .unwrap_err();
-
-        assert!(error.to_string().contains("rollback incomplete"));
-        assert_eq!(std::fs::read(&old_first).unwrap(), b"new first");
-        assert_eq!(split_backup_paths(&dir).len(), 1);
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
     fn split_commit_returns_preserved_transaction_backups_after_install() {
         let dir = temp_dir("commit-cleanup-debt");
         let base = dir.join("archive.zip");
@@ -5777,17 +5484,9 @@ mod tests {
         std::fs::write(&old_stale, b"old stale").unwrap();
         let staged = staged_output_fixture(&base, &[b"new first", b"new second"]);
 
-        let mut preserved = commit_split_outputs_with(
-            &base,
-            &staged,
-            false,
-            &mut |from, to| crate::move_path_no_replace(from, to),
-            &mut |path| {
-                if path.to_string_lossy().contains("split-backup") {
-                    panic!("transaction backups must not be removed by path");
-                }
-                std::fs::remove_file(path)
-            },
+        let managed = snapshot_managed_split_outputs(&base, false).unwrap();
+        let mut preserved = bind_preserved_split_outputs(
+            commit_split_outputs(&base, &staged, false, managed).unwrap(),
         )
         .unwrap();
 
@@ -5809,11 +5508,13 @@ mod tests {
         assert!(preserved
             .iter()
             .any(|path| std::fs::read(path).unwrap() == b"old stale"));
+        assert!(!staged.iter().any(|output| output.part.exists()));
+        assert!(!split_transaction_journal_path(&base).unwrap().exists());
         std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
-    fn split_commit_never_deletes_a_transaction_backup_replaced_before_cleanup() {
+    fn split_transaction_preserves_a_backup_replaced_after_install() {
         let dir = temp_dir("commit-cleanup-race");
         let base = dir.join("archive.zip");
         let old_first = volume_path(&base, 1);
@@ -5821,48 +5522,45 @@ mod tests {
         let staged = staged_output_fixture(&base, &[b"new first"]);
         let staged_part = staged[0].part.clone();
         let displaced_backup = dir.join("displaced-transaction-backup");
-        let mut transaction_backup = None;
+        let transaction = write_split_transaction_fixture(&base, &staged);
+        let transaction_backup = transaction.backups[0].backup.clone();
+        let open = open_split_transaction(&base).unwrap().unwrap();
+        let mut displaced = false;
 
-        let error = commit_split_outputs_with(
-            &base,
-            &staged,
-            false,
-            &mut |from, to| {
-                crate::move_path_no_replace(from, to)?;
-                if from == old_first {
-                    transaction_backup = Some(to.to_path_buf());
-                } else if from == staged_part {
-                    let backup = transaction_backup
-                        .as_ref()
-                        .ok_or_else(|| io::Error::other("transaction backup was not captured"))?;
-                    crate::move_path_no_replace(backup, &displaced_backup)?;
-                    std::fs::write(backup, b"competitor backup")?;
-                }
-                Ok(())
-            },
-            &mut |path| {
-                if path.to_string_lossy().contains("split-backup") {
-                    panic!("a replaceable backup path must never be deleted");
-                }
-                std::fs::remove_file(path)
-            },
-        )
+        let error = resume_split_transaction_with(&transaction, &open, &mut |from, to| {
+            crate::move_path_no_replace(from, to)?;
+            if !displaced && from == staged_part.as_path() && to == old_first.as_path() {
+                displaced = true;
+                crate::move_path_no_replace(&transaction_backup, &displaced_backup)?;
+                std::fs::write(&transaction_backup, b"competitor backup")?;
+            }
+            Ok(())
+        })
         .unwrap_err();
+        assert!(displaced, "the real staged-to-final move did not run");
+        drop(open);
 
-        let transaction_backup = transaction_backup.unwrap();
-        assert!(error.to_string().contains("backup identity changed"));
-        assert!(error.to_string().contains("competing entry left untouched"));
+        assert!(error
+            .to_string()
+            .contains("previous output backup identity changed"));
+        assert!(error
+            .to_string()
+            .contains("no competing path was removed or overwritten"));
         assert_eq!(std::fs::read(&old_first).unwrap(), b"new first");
         assert_eq!(
             std::fs::read(&transaction_backup).unwrap(),
             b"competitor backup"
         );
         assert_eq!(std::fs::read(&displaced_backup).unwrap(), b"old first");
+        assert_eq!(split_path_identity(&old_first).unwrap(), staged[0].identity);
+        assert!(!staged[0].part.exists());
+        assert!(split_transaction_journal_path(&base).unwrap().exists());
+        assert!(bound_transaction_backups(&transaction).is_empty());
         std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
-    fn split_commit_reports_a_transaction_backup_missing_before_return() {
+    fn split_transaction_preserves_a_backup_missing_after_install() {
         let dir = temp_dir("commit-backup-missing");
         let base = dir.join("archive.zip");
         let old_first = volume_path(&base, 1);
@@ -5870,37 +5568,36 @@ mod tests {
         let staged = staged_output_fixture(&base, &[b"new first"]);
         let staged_part = staged[0].part.clone();
         let displaced_backup = dir.join("displaced-transaction-backup");
-        let mut transaction_backup = None;
+        let transaction = write_split_transaction_fixture(&base, &staged);
+        let transaction_backup = transaction.backups[0].backup.clone();
+        let open = open_split_transaction(&base).unwrap().unwrap();
+        let mut displaced = false;
 
-        let error = commit_split_outputs_with(
-            &base,
-            &staged,
-            false,
-            &mut |from, to| {
-                crate::move_path_no_replace(from, to)?;
-                if from == old_first {
-                    transaction_backup = Some(to.to_path_buf());
-                } else if from == staged_part {
-                    let backup = transaction_backup
-                        .as_ref()
-                        .ok_or_else(|| io::Error::other("transaction backup was not captured"))?;
-                    crate::move_path_no_replace(backup, &displaced_backup)?;
-                }
-                Ok(())
-            },
-            &mut |path| std::fs::remove_file(path),
-        )
+        let error = resume_split_transaction_with(&transaction, &open, &mut |from, to| {
+            crate::move_path_no_replace(from, to)?;
+            if !displaced && from == staged_part.as_path() && to == old_first.as_path() {
+                displaced = true;
+                crate::move_path_no_replace(&transaction_backup, &displaced_backup)?;
+            }
+            Ok(())
+        })
         .unwrap_err();
+        assert!(displaced, "the real staged-to-final move did not run");
+        drop(open);
 
         assert!(error
             .to_string()
-            .contains("backup identity could not be verified"));
+            .contains("previous output backup is missing"));
         assert!(error
             .to_string()
-            .contains("no path entry was removed or overwritten"));
+            .contains("no competing path was removed or overwritten"));
         assert_eq!(std::fs::read(&old_first).unwrap(), b"new first");
         assert_eq!(std::fs::read(&displaced_backup).unwrap(), b"old first");
-        assert!(!transaction_backup.unwrap().exists());
+        assert!(!transaction_backup.exists());
+        assert_eq!(split_path_identity(&old_first).unwrap(), staged[0].identity);
+        assert!(!staged[0].part.exists());
+        assert!(split_transaction_journal_path(&base).unwrap().exists());
+        assert!(bound_transaction_backups(&transaction).is_empty());
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -6667,10 +6364,14 @@ mod tests {
         crate::move_path_no_replace(&final_path, &backup).unwrap();
         std::fs::write(&final_path, b"late competitor").unwrap();
         sync_directory(&dir).unwrap();
+        let competitor_identity = split_path_identity(&final_path).unwrap();
 
         let error = recover_split_transaction(&base).unwrap_err();
 
         assert!(error.to_string().contains("manual recovery"));
+        assert!(error
+            .to_string()
+            .contains("verified previous outputs currently remain at"));
         assert!(error
             .to_string()
             .contains(&final_path.display().to_string()));
@@ -6678,23 +6379,36 @@ mod tests {
         assert_eq!(std::fs::read(&final_path).unwrap(), b"late competitor");
         assert_eq!(std::fs::read(&backup).unwrap(), b"old output");
         assert_eq!(std::fs::read(&staged).unwrap(), b"new output");
+        assert_eq!(
+            split_path_identity(&final_path).unwrap(),
+            competitor_identity
+        );
+        assert_eq!(
+            split_path_identity(&backup).unwrap(),
+            transaction.backups[0].identity
+        );
+        assert_eq!(
+            path_state_digest(&backup).unwrap(),
+            Some(transaction.backups[0].state_digest)
+        );
+        assert_eq!(
+            split_path_identity(&staged).unwrap(),
+            transaction.outputs[0].identity
+        );
         assert!(split_transaction_journal_path(&base).unwrap().exists());
         std::fs::remove_dir_all(dir).unwrap();
     }
 
     fn staged_output_fixture(base: &Path, contents: &[&[u8]]) -> Vec<StagedSplitOutput> {
+        let staging_id = SplitStagingId::new();
         contents
             .iter()
             .enumerate()
             .map(|(index, contents)| {
                 let final_path = volume_path(base, index as u64 + 1);
-                let part = part_path(&final_path);
-                std::fs::write(&part, contents).unwrap();
-                let file = OpenOptions::new()
-                    .read(true)
-                    .write(true)
-                    .open(&part)
-                    .unwrap();
+                let (part, mut file) = reserve_test_split_staging_file(&final_path, staging_id);
+                file.write_all(contents).unwrap();
+                file.sync_all().unwrap();
                 let identity = split_file_identity(&file).unwrap();
                 StagedSplitOutput {
                     part,
@@ -6721,14 +6435,6 @@ mod tests {
             .unwrap()
             .map(|entry| entry.unwrap().path())
             .filter(|path| path.to_string_lossy().contains("split-backup"))
-            .collect()
-    }
-
-    fn split_rollback_preserved_paths(dir: &Path) -> Vec<PathBuf> {
-        std::fs::read_dir(dir)
-            .unwrap()
-            .map(|entry| entry.unwrap().path())
-            .filter(|path| path.to_string_lossy().contains("split-rollback-preserved"))
             .collect()
     }
 
