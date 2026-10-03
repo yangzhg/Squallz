@@ -6,6 +6,7 @@ import ts from "typescript";
 import { createTestServer } from "../../tests/runtime.mjs";
 import { compileTestScript, readSvelteScript, selectFunctions } from "../../tests/source.mjs";
 import { settingsDto } from "../../tests/settings.mjs";
+import { installCreateOptions } from "../../tests/create-options.mjs";
 
 const server = await createTestServer();
 test.after(() => server.close());
@@ -15,6 +16,7 @@ const sources = await server.ssrLoadModule("/src/lib/create-sources.ts");
 const { taskReviewScreen, isTaskActiveState } = await server.ssrLoadModule("/src/lib/task-model.ts");
 const { convertSessionFor } = await server.ssrLoadModule("/src/lib/convert-session.svelte.ts");
 const { CreatePreflightSession } = await server.ssrLoadModule("/src/lib/create-preflight.svelte.ts");
+const { CreateOptionsDraft } = await server.ssrLoadModule("/src/lib/create-options-draft.svelte.ts");
 const { SettingsSession } = await server.ssrLoadModule("/src/lib/settings-session.svelte.ts");
 const { ipc } = await server.ssrLoadModule("/src/lib/ipc.ts");
 const originalIpc = { ...ipc };
@@ -34,21 +36,22 @@ function taskSpec(overrides = {}) {
 
 function harness({ navigation = false, preparation = false, preview = false } = {}) {
   const source = readSvelteScript(new URL("../App.svelte", import.meta.url), "App.ts");
-  const names = ["reviewTask", "restoreCreateTaskDraft", "createTaskFormat", "applyPresetVolumeMode",
-    "invalidateCreatePreflightResult", "clearCreatePasswordFields", "markCreatePresetDraftTouched",
+  const names = ["reviewTask", "restoreCreateTaskDraft",
+    "invalidateCreatePreflightResult", "markCreatePresetDraftTouched", "editCreateOptions",
     "createSuggestedOutputPath", "createArchiveNameForOutput",
-    "captureCreateRunDraft", "archiveOutputExtension", "submitCreateInputs",
+    "captureCreateRunDraft", "submitCreateInputs",
     "createOutputPreview", "createArchivePreviewName",
-    "createPasswordValidationMessage", "validateCreateOptions", "updateCreatePassword",
-    "updateCreatePasswordConfirmation", "updateCreateEncryptionEnabled", "chooseCreateFormat",
-    "activeCreateFormatData", "updateCreateEncryptNames", "updateCreateSfxEnabled",
+    "validateCreateOptions", "chooseCreateFormat",
+    "activeCreateFormatData", "createDraftContext", "createDraftIssueMessage",
+    "announceCreateDraftNormalization", "currentCreateArchivePresetOptions", "createOptionsLockedReason",
+    "createTrashSourceDisabledReason", "createOpenCompletionDisabledReason", "createSplitSizeBytes",
     "resetCreateCredentialsAfterPlan", "preventCreateSubmissionNavigation", "preventConvertSubmissionNavigation", "preventTaskWorkspaceNavigation", "dismissRecoveryPreparation",
     "dismissCreatePreparation", "syncCreatePreflightContext", "applyCreatePreflightEffect", "clearCreateSources",
     "showCreateSourcesAdded", "createDestinationInspectionCancellable",
     "createSourcesLockedReason",
     ...(preparation ? ["submitCreateJob", "appendCreateSources",
       "discardPendingCreatePlan", "cancelCreatePlanReview", "confirmCreatePlan", "setMode",
-      "applyCreatePreset", "archivePresetById", "isCreateFormatId", "createPrimaryAction", "focusCreatePrimaryAction",
+      "applyCreatePreset", "applyDefaultCreatePresetWhenReady", "archivePresetById", "isCreateFormatId", "createPrimaryAction", "focusCreatePrimaryAction",
       "createPreflightPhaseLabel", "createPreflightStepState", "createPreflightStepStateLabel",
       "createPreflightCurrentDetail", "createDestinationPreflightDetail", "createDestinationInspectionCancelLabel",
       "createPreflightStageIssueSummary", "createPreflightSteps", "createEstimateStatusbar",
@@ -62,7 +65,7 @@ function harness({ navigation = false, preparation = false, preview = false } = 
   const calls = [];
   let requestId = 0;
   const context = {
-    ...model, ...paths, ...sources, taskReviewScreen, isTaskActiveState, CreatePreflightSession,
+    ...model, ...paths, ...sources, taskReviewScreen, isTaskActiveState, CreatePreflightSession, CreateOptionsDraft,
     taskWindowMode: false, screen: "create", mode: "modern", preflightEventsClosed: false,
     blockingModalVisible: () => false,
     runtimePreviews: { preflightScanned: 0, preflightCurrent: "", preflightDestinationBytes: preview ? 1024 : 0,
@@ -70,19 +73,9 @@ function harness({ navigation = false, preparation = false, preview = false } = 
     createSources: [{ path: "/unrelated", kind: "folder" }],
     selectedCreateSourcePaths: ["/unrelated"],
     createPrimaryFocusPending: null,
-    createPassword: "unrelated-secret", createPasswordConfirmation: "unrelated-secret",
-    createPasswordVisible: true, createEncryptNames: true, createEncryptionEnabled: true,
     selectedCreatePresetId: "unrelated-preset", createPresetDraftName: "Unrelated",
-    createPresetMutationState: "saved", createPresetDraftTouched: false,
-    activeCreateFormat: "7z", activeCreateProfile: "maximum", customCreateLevel: 9,
-    customCreateLevelError: "old-error", createSplitPreset: "none", createSplitMode: "generic",
-    createPresetSplitSizeBytes: null, createCustomSplitAmount: "100", createCustomSplitUnit: "mib",
-    createContentPolicy: "cross_platform_clean", createExcludeText: "old-rule",
-    createSfxEnabled: false, createPresetSfxTarget: "current_platform", createPresetSqzInnerFormat: "sqz",
-    createDestinationBase: "source_parent", createOverwritePolicy: "rename",
-    createCompletion: "none", createPostSuccess: "trash_source", createTestAfterCreate: false,
-    createOptionsValidationAttempted: true, createAdvancedOpen: false, classicCreateSection: "password",
-    createSuggestedDestination: null,
+    createPresetMutationState: "saved", createAdvancedOpen: false, classicCreateSection: "password",
+    createFormatParam: null, loadCreateFormat: () => "7z", loadCreateProfile: () => "maximum", loadCustomCreateLevel: () => 9,
     sfxCreateCapabilityReady: true,
     sfxCreateCapability: { target: "macos", available: true, extension: "app" },
     fat32CompatibleSplitSizeBytes: 4294967295,
@@ -92,16 +85,7 @@ function harness({ navigation = false, preparation = false, preview = false } = 
     setScreen: (screen) => calls.push(["screen", screen]), dismissTaskDialog: async () => { calls.push(["dismiss"]); },
     focusCreatePrimaryAction: () => calls.push(["focus"]), showNotice: (message) => calls.push(["notice", message]),
     createConfigurationPending: () => false, createConfigurationPendingMessage: () => "Loading",
-    normalizeUnsupportedCreatePostSuccess() {}, normalizeUnsupportedCreateCompletion() {},
-    resetCreateCredentialsAfterPlan() {}, createSplitValidationMessage: () => "",
-    createPasswordDataAvailable: () => model.createFormats[context.activeCreateFormat].can_encrypt_data,
-    createNameEncryptionAvailable: () => model.createFormats[context.activeCreateFormat].can_encrypt_names,
-    persistCreateFormat() {}, recordOperation() {}, nativeSplitKind: (format) => format === "zip" ? "zip" : null,
-    createCompressionLevel: () => context.customCreateLevel,
-    selectedCreateArchivePreset: () => null, createSplitSizeBytes: () => Number(context.createPresetSplitSizeBytes) || null,
-    createExcludeRules: () => context.createExcludeText.split("\n"),
-    resolvedPresetSfxTarget: (target) => target === "current_platform" ? "macos" : target,
-    effectiveCreateTestAfterCreate: () => context.createTestAfterCreate || context.createPostSuccess === "trash_source",
+    persistCreateFormat() {}, recordOperation() {},
     normalizedDefaultCreateDir: (value) => paths.normalizeDesktopFolder(value, "macos"), uniqueNonEmptyPaths: (inputs) => [...new Set(inputs)],
     focusBlockingTaskIfAny: () => false,
     archiveStemName: (value) => value.replace(/\.(?:tar\.zst|tzst|zip|7z|sqz|wim|swm|app|exe|run)$/i, ""),
@@ -150,6 +134,11 @@ function harness({ navigation = false, preparation = false, preview = false } = 
   };
   context.settingsSession = new SettingsSession({ platform: context.platformKind, tr: context.tr, emit() {} });
   context.settingsSession.applySnapshot(settingsDto(), context.settingsSession.captureGenerations());
+  const createOptions = installCreateOptions(source, context);
+  const initialContext = { capabilityReady: true, sfxCapability: context.sfxCreateCapability };
+  for (const [kind, value] of [["contentPolicy", "cross_platform_clean"], ["excludeText", "old-rule"],
+    ["password", "unrelated-secret"], ["passwordConfirmation", "unrelated-secret"],
+    ["passwordVisible", true], ["encryptNames", true]]) createOptions.edit({ kind, value }, initialContext, () => {});
   if (preparation) {
     context.document.querySelector = () => ({ focus() { calls.push(["review-focus"]); } });
     context.document.getElementById = () => ({ focus() { calls.push(["primary-focus"]); } });
@@ -166,6 +155,7 @@ function harness({ navigation = false, preparation = false, preview = false } = 
   context.calls = calls;
   const run = vm.runInNewContext(`${outputText}\n({${declarations.map((node) => node.name.text).join(",")}, createPreflight, context:globalThis, calls})`, context);
   context.createPreflight = run.createPreflight;
+  run.createOptions = createOptions;
   for (const method of ["inspectCreateDestination", "cancelCreateDestinationInspection", "uniqueCreateDestination",
     "planCreate", "checkDiskSpace", "tempDir"]) {
     ipc[method] = (...args) => context.ipc[method](...args);
@@ -183,16 +173,16 @@ test(`reviewing a ${state} creation restores its sources and options without res
   assert.equal(draft.activeCreateFormat, "zip");
   assert.equal(draft.activeCreateProfile, "custom");
   assert.equal(draft.customCreateLevel, 4);
-  assert.equal(draft.createPresetSplitSizeBytes, "123456789");
+  assert.equal(run.createOptions.state.exactSplitSizeBytes, "123456789");
   assert.equal(draft.createSplitMode, "native");
   assert.equal(draft.createContentPolicy, "custom");
   assert.equal(draft.createExcludeText, "*.bak\ncache/**");
   assert.equal(draft.createCompletion, "reveal_output");
   assert.equal(draft.createPostSuccess, "keep_source");
-  assert.equal(draft.createTestAfterCreate, true);
+  assert.equal(run.createOptions.state.testAfterCreate, true);
   assert.equal(draft.createSuggestedDestination, "/output/backup.zip");
   assert.equal(draft.createDestinationBase, "ask");
-  assert.equal(draft.createOverwritePolicy, "ask");
+  assert.equal(run.createOptions.state.overwritePolicy, "ask");
   assert.equal(draft.selectedCreatePresetId, null);
   assert.equal(draft.createPresetDraftTouched, true);
   assert.equal(draft.createPassword, "");
@@ -218,21 +208,42 @@ test(`reviewing a ${state} encrypted ZIP requires a new password and keeps prote
   assert.equal(run.captureCreateRunDraft(), null);
   run.chooseCreateFormat("tar.zst");
   assert.equal(run.context.activeCreateFormat, "zip");
-  run.updateCreatePassword("replacement");
-  run.updateCreatePasswordConfirmation("different");
+  run.editCreateOptions({ kind: "password", value: "replacement" });
+  run.editCreateOptions({ kind: "passwordConfirmation", value: "different" });
   assert.equal(run.captureCreateRunDraft(), null);
-  run.updateCreatePasswordConfirmation("replacement");
+  run.editCreateOptions({ kind: "passwordConfirmation", value: "replacement" });
   const draft = run.captureCreateRunDraft();
   assert.equal(draft.password, "replacement");
   assert.equal(draft.restoreCredentialPrompt, true);
+  const preset = run.currentCreateArchivePresetOptions();
+  assert.deepEqual(preset.credential, { kind: "prompt" });
+  assert.equal(Object.hasOwn(preset, "password"), false, "saved options contain intent, never a run password");
+  assert.equal(Object.hasOwn(preset, "split_mode"), false, "native layout belongs to the run contract");
+  preset.excludes.push("preset-only");
+  preset.destination.base = "source_parent";
+  draft.excludes.push("run-only");
+  draft.destination.base = "default_directory";
+  assert.deepEqual(run.createOptions.excludeRules, ["*.bak", "cache/**"]);
+  assert.equal(run.context.createDestinationBase, "ask", "both snapshots are detached from the editable options");
+  await run.submitCreateInputs(taskSpec().inputs, "dialog");
+  assert.equal(run.createPreflight.state.phase, "reviewing");
+  assert.equal(run.createPreflight.state.pending.spec.password, "replacement");
   run.resetCreateCredentialsAfterPlan(draft);
   assert.equal(run.context.createPassword, "");
   assert.equal(run.context.createEncryptionEnabled, true);
   assert.equal(run.captureCreateRunDraft(), null);
-  run.updateCreatePassword("replacement");
-  run.updateCreatePassword("");
+  run.editCreateOptions({ kind: "password", value: "replacement" });
+  assert.equal(run.context.createPassword, "replacement", "old plan cleanup runs before the new password edit");
+  assert.equal(run.createPreflight.state.pending, null);
+  run.editCreateOptions({ kind: "password", value: "" });
   assert.equal(run.captureCreateRunDraft(), null);
-  run.updateCreateEncryptionEnabled(false);
+  run.editCreateOptions({ kind: "password", value: "replacement" });
+  run.editCreateOptions({ kind: "passwordConfirmation", value: "replacement" });
+  await run.submitCreateInputs(taskSpec().inputs, "dialog");
+  assert.ok(run.createPreflight.state.pending);
+  run.editCreateOptions({ kind: "encryptionEnabled", value: false });
+  assert.equal(run.context.createEncryptionEnabled, false, "old plan intent cannot re-enable a newly disabled option");
+  assert.equal(run.createPreflight.state.pending, null);
   assert.equal(run.captureCreateRunDraft().password, null);
   run.chooseCreateFormat("tar.zst");
   assert.equal(run.context.activeCreateFormat, "tar.zst");
@@ -243,10 +254,10 @@ test("restored name encryption is not silently removed by choosing ZIP or a self
   const run = harness();
   run.restoreCreateTaskDraft(taskSpec({ dest: "/secure.7z", encrypt_names: true }), true);
   run.chooseCreateFormat("zip");
-  run.updateCreateSfxEnabled(true);
+  run.editCreateOptions({ kind: "sfxEnabled", value: true });
   assert.equal(run.context.activeCreateFormat, "7z");
   assert.equal(run.context.createSfxEnabled, false);
-  run.updateCreateEncryptNames(false);
+  run.editCreateOptions({ kind: "encryptNames", value: false });
   assert.equal(run.context.createEncryptionEnabled, true);
   assert.equal(run.captureCreateRunDraft(), null);
   run.chooseCreateFormat("zip");
@@ -286,7 +297,7 @@ test("creation review respects format variants, current platform capability and 
   const sfx = harness();
   assert.equal(sfx.restoreCreateTaskDraft(taskSpec({ dest: "/output/Installer.app", sfx_target: "macos", split_size: null })), true);
   assert.equal(sfx.context.createSfxEnabled, true);
-  assert.equal(sfx.context.createPresetSfxTarget, "macos");
+  assert.equal(sfx.createOptions.state.sfxTarget, "macos");
   assert.equal(sfx.context.activeCreateFormat, "zip");
   assert.equal(sfx.context.createSplitPreset, "none");
   assert.equal(sfx.captureCreateRunDraft().suggestedDestination, "/output/Installer.app");
@@ -299,9 +310,11 @@ test("creation review respects format variants, current platform capability and 
     const run = harness();
     await setup(run);
     const destination = run.createPreflight.state.destination;
+    const options = run.currentCreateArchivePresetOptions();
     run.reviewTask({ id: 8, state: "failed", spec: taskSpec({ sfx_target: "macos" }) });
     assert.equal(run.context.createSources[0].path, "/unrelated");
     assert.equal(run.createPreflight.state.destination, destination);
+    assert.deepEqual(run.currentCreateArchivePresetOptions(), options, "blocked restoration keeps every editable option");
     assert.equal(run.calls.some(([name]) => name === "screen" || name === "dismiss"), false);
   }
   const unsupported = harness();
@@ -453,7 +466,7 @@ test("edited formats adapt the original output suggestion and cancelled selectio
   const run = harness();
   run.restoreCreateTaskDraft(taskSpec({ dest: "/output/my.backup.TZST", split_size: null }));
   assert.equal(run.createSuggestedOutputPath("tar.zst", "tar.zst"), "/output/my.backup.TZST");
-  run.context.activeCreateFormat = "7z";
+  run.chooseCreateFormat("7z");
   assert.equal(run.captureCreateRunDraft().suggestedDestination, "/output/my.backup.7z");
   assert.equal(run.createSuggestedOutputPath("wim", "swm"), "/output/my.backup.swm");
   run.context.saveNativeDialog = async () => null;
@@ -484,7 +497,7 @@ function creationPreparation({ stop = null, pauseNewPlan = false, automaticDesti
   const run = harness({ navigation: true, preparation: true });
   run.context.taskCenterOpen = false;
   run.restoreCreateTaskDraft(taskSpec({ split_size: null }));
-  if (automaticDestination) run.context.createDestinationBase = "source_parent";
+  if (automaticDestination) run.editCreateOptions({ kind: "destinationBase", value: "source_parent" });
   const blocked = deferred();
   const newerPlan = deferred();
   let hit = false;
@@ -671,13 +684,18 @@ test("create source choosing retains new sources, ignores stale errors and clear
     pending.context.presetDocument = { presets: [{ id: "invalid", kind: "create", label: "Invalid",
       options: { format: "rar", output: { kind: "archive" } } },
     { id: "replacement", kind: "create", label: "Replacement", options: {
-      format: "zip", level: 2, credential: { kind: "none" }, encrypt_names: false,
-      volumes: { kind: "single" }, content_policy: "custom", excludes: ["*.tmp"],
+      format: "zip", level: 2, credential: { kind: "prompt" }, encrypt_names: false,
+      volumes: { kind: "split", size_bytes: "123456789" }, content_policy: "custom", excludes: ["*.tmp"],
       output: { kind: "archive" }, format_options: { kind: "none" },
-      destination: { base: "ask", existing_output: "ask" }, completion: "none", post_success: "keep_source", test_after_create: false,
-    } }] };
+      destination: { base: "source_parent", existing_output: "ask" }, completion: "open_in_squallz", post_success: "trash_source", test_after_create: false,
+    } }], bindings: { app_default_create: "replacement" } };
+    const optionsBeforeInvalidPreset = pending.currentCreateArchivePresetOptions();
     pending.applyCreatePreset("invalid", false);
     assert.equal(pending.createPreflight.state.picker, picker, "an unavailable preset keeps its owner");
+    assert.deepEqual(pending.currentCreateArchivePresetOptions(), optionsBeforeInvalidPreset);
+    pending.applyDefaultCreatePresetWhenReady();
+    assert.deepEqual(pending.currentCreateArchivePresetOptions(), optionsBeforeInvalidPreset, "a default cannot replace an already touched draft");
+    assert.equal(pending.createPreflight.state.picker, picker);
     if (change === "mode") {
       pending.setMode("classic");
       pending.syncCreatePreflightContext();
@@ -688,6 +706,19 @@ test("create source choosing retains new sources, ignores stale errors and clear
       pending.applyCreatePreset("replacement", false);
       assert.equal(pending.context.customCreateLevel, 2);
       assert.equal(pending.context.selectedCreatePresetId, "replacement");
+      assert.equal(pending.context.createSplitMode, "generic", "presets deliberately do not restore a run's native layout");
+      assert.equal(pending.createOptions.state.exactSplitSizeBytes, "123456789");
+      assert.equal(pending.currentCreateArchivePresetOptions().volumes.size_bytes, "123456789");
+      assert.equal(pending.createOptions.state.overwritePolicy, "rename", "applying a preset derives conflict handling from its base");
+      assert.equal(pending.context.createSuggestedDestination, null);
+      assert.equal(pending.context.createEncryptionEnabled, true);
+      assert.equal(pending.context.createPassword, "");
+      assert.equal(pending.context.createCompletion, "reveal_output");
+      assert.equal(pending.context.createPostSuccess, "keep_source");
+      const applied = pending.currentCreateArchivePresetOptions();
+      pending.applyCreatePreset(null, false);
+      assert.equal(pending.context.selectedCreatePresetId, null);
+      assert.deepEqual(pending.currentCreateArchivePresetOptions(), applied, "clearing a selection keeps its editable options");
     }
     assert.equal(pending.createPreflight.state.picker, null, `${change} ends the old chooser`);
     const retainedRoots = pending.context.createSources;

@@ -5,13 +5,13 @@ import ts from "typescript";
 import { proxy, snapshot } from "svelte/internal/client";
 import { createTestServer } from "../../tests/runtime.mjs";
 import { compileTestScript, readSvelteScript, selectFunctions } from "../../tests/source.mjs";
+import { installCreateOptions } from "../../tests/create-options.mjs";
 
 const server = await createTestServer();
 test.after(() => server.close());
 const { ipc, isErrorDto } = await server.ssrLoadModule("/src/lib/ipc.ts");
-const { createProfiles } = await server.ssrLoadModule("/src/lib/ui-model.ts");
-const outputOptions = await server.ssrLoadModule("/src/lib/archive-output-options.ts");
-const { parseDelimitedRules } = await server.ssrLoadModule("/src/lib/format.ts");
+const { CreateOptionsDraft } = await server.ssrLoadModule("/src/lib/create-options-draft.svelte.ts");
+const { createFormatIds } = await server.ssrLoadModule("/src/lib/ui-model.ts");
 const { loadLocale, tError, tFallback } = await server.ssrLoadModule("/src/lib/i18n.svelte.ts");
 const originalIpc = { saveArchivePresets: ipc.saveArchivePresets, getArchivePresets: ipc.getArchivePresets,
   getLocaleTable: ipc.getLocaleTable };
@@ -45,11 +45,14 @@ function controlledIpc() {
   return { writes, reads };
 }
 
+function contextFor(state) {
+  return { capabilityReady: state.sfxCreateCapabilityReady, sfxCapability: state.sfxCreateCapability };
+}
+
 function harness() {
   const source = readSvelteScript(new URL("../App.svelte", import.meta.url), "App.ts");
   const declarations = selectFunctions(source, [
-    "createProfileData", "createTrashSourceDisabledReason", "effectiveCreateTestAfterCreate",
-    "createSplitSizeBytes", "createSplitValidationMessage", "activeCreateProfileData", "createCompressionLevel",
+    "createTrashSourceDisabledReason", "createSplitValidationMessage", "createDraftIssueMessage",
     "archivePresetById", "currentCreateArchivePresetOptions", "currentExtractArchivePresetOptions",
     "normalizePresetName", "presetNameExists", "uniquePresetName", "createPresetSaveValidationMessage",
     "selectedCreateArchivePreset", "selectedExtractArchivePreset", "clonePresetDocument",
@@ -69,19 +72,14 @@ function harness() {
   const operations = [];
   let nextId = 0;
   const state = {
-    ipc, isErrorDto, tError, createProfiles, ...outputOptions, parseDelimitedRules, structuredClone, TextEncoder,
+    ipc, isErrorDto, tError, CreateOptionsDraft, createFormatIds, structuredClone, TextEncoder,
     $state: { snapshot },
     crypto: { randomUUID: () => `00000000-0000-0000-0000-${String(++nextId).padStart(12, "0")}` },
     tr: tFallback, trashNameLabel: () => "Trash",
     showNotice: (message) => notices.push(message), recordOperation: (operation) => operations.push(structuredClone(operation)),
     preflightBusy: false, createPreflight: { busy: () => state.preflightBusy },
-    activeCreateFormat: "sqz", activeCreateProfile: "custom", customCreateLevel: 7,
-    createEncryptionEnabled: false, createEncryptNames: false, createSplitPreset: "custom",
-    createCustomSplitAmount: "1.5", createCustomSplitUnit: "gib", createPresetSplitSizeBytes: null,
-    createSplitMode: "generic", createContentPolicy: "custom", createExcludeText: "*.cache; temporary/**\n*.cache",
-    createSfxEnabled: false, createPresetSfxTarget: "macos", createPresetSqzInnerFormat: "zip",
-    createDestinationBase: "default_directory", createOverwritePolicy: "rename", createCompletion: "reveal_output",
-    createPostSuccess: "keep_source", createTestAfterCreate: true,
+    createFormatParam: null, loadCreateFormat: () => "sqz", loadCreateProfile: () => "custom", loadCustomCreateLevel: () => 7,
+    sfxCreateCapabilityReady: true, sfxCreateCapability: { target: "macos", available: true, extension: "app" },
     extractDestinationMode: "smart", extractOverwriteMode: "rename", extractSymlinkMode: "preserve",
     extractPresetEncodingLabel: "gbk", currentArchive: { encoding_override: "shift_jis" },
     selectedCreatePresetId: "user.create.original", selectedExtractPresetId: "user.extract.original",
@@ -97,6 +95,13 @@ function harness() {
     get: () => presetDocument,
     set: (value) => { presetDocument = proxy(value); },
   });
+  const createOptions = installCreateOptions(source, state);
+  const context = { capabilityReady: true, sfxCapability: state.sfxCreateCapability };
+  for (const [kind, value] of [["splitPreset", "custom"], ["customSplitAmount", "1.5"], ["customSplitUnit", "gib"],
+    ["contentPolicy", "custom"], ["excludeText", "*.cache; temporary/**\n*.cache"], ["sqzInnerFormat", "zip"],
+    ["destinationBase", "default_directory"], ["completion", "reveal_output"], ["testAfterCreate", true]]) {
+    createOptions.edit({ kind, value }, context, () => {});
+  }
   const script = [...constants, ...declarations].map((node) => node.getText(source)).join("\n");
   const app = vm.runInNewContext(`${compileTestScript(script)}\n({saveArchivePreset,
     currentCreateArchivePresetOptions, currentExtractArchivePresetOptions, maxArchivePresets})`, state);
@@ -231,7 +236,7 @@ test("updating preserves preset identity and keeps SaveAs admission separate fro
   await app.saveArchivePreset("create", "update");
   state.extractPresetDraftName = " \n ";
   await app.saveArchivePreset("extract", "save_as");
-  state.createCustomSplitAmount = "0";
+  state.createOptions.edit({ kind: "customSplitAmount", value: "0" }, contextFor(state), () => {});
   for (const operation of ["update", "save_as"]) await app.saveArchivePreset("create", operation);
   assert.equal(writes.length, 1);
   assert.deepEqual(app.notices.slice(-4), ["That preset name is already in use", "Enter a preset name",
@@ -241,11 +246,11 @@ test("updating preserves preset identity and keeps SaveAs admission separate fro
     const index = state.presetDocument.presets.length;
     state.presetDocument.presets.push({ ...state.presetDocument.presets[0], id: `user.create.extra${index}`, label: `Extra ${index}` });
   }
-  state.createCustomSplitAmount = "1.5";
+  state.createOptions.edit({ kind: "customSplitAmount", value: "1.5" }, contextFor(state), () => {});
   await app.saveArchivePreset("create", "save_as");
   assert.equal(writes.length, 1);
   assert.equal(app.notices.at(-1), "Delete a preset before saving another one");
-  state.createCustomSplitAmount = "0";
+  state.createOptions.edit({ kind: "customSplitAmount", value: "0" }, contextFor(state), () => {});
   state.preflightBusy = true;
   state.extractPresetDraftName = "  Extract \n old ";
   state.extractDestinationMode = "choose";
@@ -263,14 +268,21 @@ test("updating preserves preset identity and keeps SaveAs admission separate fro
   assert.equal(state.selectedExtractPresetId, "user.extract.original");
   assert.equal(state.extractPresetDraftName, "Extract old", "updating may retain its own normalized name at the preset cap");
 
-  Object.assign(state, { preflightBusy: false, createSplitPreset: "none", activeCreateFormat: "zip",
-    createEncryptionEnabled: true, createSfxEnabled: true, createPresetDraftName: "  Updated create " });
+  state.preflightBusy = false;
+  state.createOptions.applyPreset({ ...app.currentCreateArchivePresetOptions(), format: "zip",
+    credential: { kind: "prompt" }, volumes: { kind: "single" }, output: { kind: "self_extracting", target: "macos" },
+    format_options: { kind: "none" } }, contextFor(state), () => {});
+  state.createOptions.edit({ kind: "password", value: "preset-runtime-secret" }, contextFor(state), () => {});
+  state.createOptions.edit({ kind: "passwordConfirmation", value: "preset-runtime-secret" }, contextFor(state), () => {});
+  state.createPresetDraftName = "  Updated create ";
   const updating = app.saveArchivePreset("create", "update");
   const updatedCreate = writes[2].document.presets.find((preset) => preset.id === "user.create.original");
   assert.equal(writes[2].document.presets.length, app.maxArchivePresets);
   assert.equal(updatedCreate.kind, "create");
   assert.equal(updatedCreate.built_in, false);
   assert.deepEqual(updatedCreate.options.credential, { kind: "prompt" });
+  assert.equal(Object.hasOwn(updatedCreate.options, "password"), false);
+  assert.equal(JSON.stringify(writes[2].document).includes("preset-runtime-secret"), false, "the persistence DTO never carries a run credential");
   assert.equal(updatedCreate.options.encrypt_names, false);
   assert.deepEqual(updatedCreate.options.volumes, { kind: "single" });
   assert.deepEqual(updatedCreate.options.output, { kind: "self_extracting", target: "macos" });

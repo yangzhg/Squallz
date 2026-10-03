@@ -7,6 +7,7 @@
     type SettingsSaveState,
   } from "./lib/settings-session.svelte";
   import { ExtractPlanSession, type ExtractPlanInput } from "./lib/extract-plan.svelte";
+  import { CreateOptionsDraft, type CreateDraftEdit, type CreateDraftChange, type CreateDraftIssue } from "./lib/create-options-draft.svelte";
   import ArchiveStartState from "./components/ArchiveStartState.svelte";
   import ArchiveReturnStrip from "./components/ArchiveReturnStrip.svelte";
   import ArchiveEntryEditor from "./components/ArchiveEntryEditor.svelte";
@@ -130,9 +131,7 @@
     isErrorDto,
     type ExtractPlanPreflightDto,
     type CreateArchivePresetOptions,
-    type CreateCompletionAction,
     type CreateContentPolicy,
-    type CreateDestinationBase,
     type CreateDestinationInspectionDto,
     type EntryPreviewDto,
     type EntryDto,
@@ -141,7 +140,6 @@
     type ArchivePresetDocument,
     type ExtractArchivePresetOptions,
     type NamedArchivePreset,
-    type PostSuccessAction,
     type LanguageDto,
     type SettingsDto,
     type SfxCreateCapabilityDto,
@@ -169,10 +167,6 @@
     ConvertRouteOwner,
     ConvertRouteStatus,
   } from "./lib/convert-route";
-  import {
-    fat32CompatibleSplitSizeBytes,
-    resolveSplitSizeBytes,
-  } from "./lib/archive-output-options";
   import {
     archiveBaseOrDefault,
     desktopBasename,
@@ -331,9 +325,6 @@
     ChecksumAlgorithmId,
     CreateFormatId,
     CreateProfileId,
-    CreateSplitMode,
-    CreateSplitPreset,
-    CreateSplitUnit,
     DensityChoice,
     PaletteId,
     ResolvedTheme,
@@ -346,7 +337,6 @@
   type SaveDialogOptions = NonNullable<Parameters<DialogModule["save"]>[0]>;
   type NativeDialogOptions = OpenDialogOptions | SaveDialogOptions;
   type PlatformKind = "macos" | "windows" | "linux";
-  type NativeSplitKind = "zip" | "wim" | null;
   type MacosSfxPublisherComponentType = typeof MacosSfxPublisherComponent;
   type ThemeChoice = "system" | "light" | "dark";
   type ArchivePresetMutationState = "idle" | "saving" | "error";
@@ -359,7 +349,6 @@
   type ExtractScope = "all" | "selection";
   type ExtractOverwriteMode = "ask" | "skip" | "overwrite" | "rename";
   type ExtractSymlinkMode = "preserve" | "skip" | "follow";
-  type PresetSfxTarget = Extract<CreateArchivePresetOptions["output"], { kind: "self_extracting" }>["target"];
   type PresetSqzInnerFormat = Extract<CreateArchivePresetOptions["format_options"], { kind: "sqz" }>["inner_format"];
   type ClassicCreateSection = "general" | "compression" | "content" | "security" | "volumes" | "recovery" | "preflight";
   type CreatePreflightStepState = "pending" | "active" | "ready" | "blocked" | "cancelled";
@@ -658,8 +647,6 @@
   let activeTheme = $derived<ResolvedTheme>(
     activeThemeChoice === "system" ? (prefersDarkTheme ? "dark" : "light") : activeThemeChoice,
   );
-  const bytesPerMiB = 1024 ** 2;
-  const bytesPerGiB = 1024 ** 3;
   const extractDestinationModes: ExtractDestinationMode[] = ["smart", "archive", "same", "choose"];
   const extractOverwriteModes: ExtractOverwriteMode[] = ["ask", "skip", "overwrite", "rename"];
   const extractSymlinkModes: ExtractSymlinkMode[] = ["preserve", "skip", "follow"];
@@ -712,11 +699,33 @@
   let extractPresetDraftName = $state("");
   let createPresetMutationState = $state<ArchivePresetMutationState>("idle");
   let extractPresetMutationState = $state<ArchivePresetMutationState>("idle");
-  let createEncryptionEnabled = $state(false);
-  let createPresetSfxTarget = $state<PresetSfxTarget>("current_platform");
-  let createPresetSqzInnerFormat = $state<PresetSqzInnerFormat>("sqz");
-  let createPresetSplitSizeBytes = $state<string | null>(null);
-  let createPresetDraftTouched = isCreateFormatId(createFormatParam);
+  const createOptions = new CreateOptionsDraft({
+    format: isCreateFormatId(createFormatParam) ? createFormatParam : loadCreateFormat(),
+    profile: loadCreateProfile(), customLevel: loadCustomCreateLevel(), touched: isCreateFormatId(createFormatParam),
+  });
+  let activeCreateFormat = $derived(createOptions.state.format);
+  let activeCreateProfile = $derived(createOptions.state.profile);
+  let customCreateLevel = $derived(createOptions.state.customLevel);
+  let customCreateLevelError = $derived(createOptions.state.customLevelInvalid ? customCreateLevelInvalidMessage() : "");
+  let createPassword = $derived(createOptions.state.password);
+  let createPasswordConfirmation = $derived(createOptions.state.passwordConfirmation);
+  let createPasswordVisible = $derived(createOptions.state.passwordVisible);
+  let createEncryptionEnabled = $derived(createOptions.state.encryptionEnabled);
+  let createEncryptNames = $derived(createOptions.state.encryptNames);
+  let createSplitPreset = $derived(createOptions.state.splitPreset);
+  let createSplitMode = $derived(createOptions.state.splitMode);
+  let createCustomSplitAmount = $derived(createOptions.state.customSplitAmount);
+  let createCustomSplitUnit = $derived(createOptions.state.customSplitUnit);
+  let createContentPolicy = $derived(createOptions.state.contentPolicy);
+  let createExcludeText = $derived(createOptions.state.excludeText);
+  let createSfxEnabled = $derived(createOptions.state.sfxEnabled);
+  let createPresetSqzInnerFormat = $derived(createOptions.state.sqzInnerFormat);
+  let createDestinationBase = $derived(createOptions.state.destinationBase);
+  let createSuggestedDestination = $derived(createOptions.state.suggestedDestination);
+  let createCompletion = $derived(createOptions.state.completion);
+  let createPostSuccess = $derived(createOptions.state.postSuccess);
+  let createOptionsValidationAttempted = $derived(createOptions.state.validationAttempted);
+  let createPresetDraftTouched = $derived(createOptions.state.touched);
   let extractPresetDraftTouched = false;
   let archiveOpenStatus = $state<"idle" | "opening">("idle");
   let archiveOpenGeneration = 0;
@@ -782,10 +791,6 @@
   let classicCreateSection = $state<ClassicCreateSection>("general");
   let dragActive = $state(false);
   let lastDropKind = $state<"none" | "archives" | "create" | "recovery">("none");
-  let customCreateLevel = $state(loadCustomCreateLevel());
-  let customCreateLevelError = $state("");
-  let activeCreateProfile = $state<CreateProfileId>(loadCreateProfile());
-  let activeCreateFormat = $state<CreateFormatId>(isCreateFormatId(createFormatParam) ? createFormatParam : loadCreateFormat());
   const convertRouteOwner: ConvertRouteOwner = {};
   let convertRouteHandle = $state<ConvertRouteHandle | null>(null);
   let convertRouteStatus = $derived<ConvertRouteStatus>(convertRouteHandle?.status() ?? {
@@ -795,24 +800,7 @@
     methodLabel: "-",
     destination: currentArchive?.path ?? openArchiveFirstLabel(),
   });
-  let createPassword = $state("");
-  let createPasswordConfirmation = $state("");
-  let createPasswordVisible = $state(false);
-  let createEncryptNames = $state(false);
-  let createSplitPreset = $state<CreateSplitPreset>("none");
-  let createSplitMode = $state<CreateSplitMode>("generic");
-  let createCustomSplitAmount = $state("100");
-  let createCustomSplitUnit = $state<CreateSplitUnit>("mib");
-  let createContentPolicy = $state<CreateContentPolicy>("cross_platform_clean");
-  let createDestinationBase = $state<CreateDestinationBase>("ask");
-  let createSuggestedDestination = $state<string | null>(null);
-  let createOverwritePolicy = $state<OverwritePolicy>("ask");
-  let createCompletion = $state<CreateCompletionAction>("none");
-  let createPostSuccess = $state<PostSuccessAction>("keep_source");
-  let createTestAfterCreate = $state(false);
-  let createOptionsValidationAttempted = $state(false);
   let createAdvancedOpen = $state(false);
-  let createSfxEnabled = $state(false);
   let sfxCreateCapability = $state<SfxCreateCapabilityDto>({
     target: initialPlatform,
     extension: initialPlatform === "macos" ? "app" : initialPlatform === "windows" ? "exe" : "run",
@@ -821,7 +809,6 @@
     requires_signing: true,
   });
   let sfxCreateCapabilityReady = $state(false);
-  let createExcludeText = $state("");
   let createPreflightCleanup: (() => void) | null = null;
   let createPreflightListenPromise: Promise<void> | null = null;
   let preflightEventsClosed = false;
@@ -1596,12 +1583,12 @@
       .then((capability) => {
         sfxCreateCapability = capability;
         sfxCreateCapabilityReady = true;
-        if (!capability.available) createSfxEnabled = false;
+        createOptions.acceptSfxCapability(capability.available);
         applyDefaultCreatePresetWhenReady();
       })
       .catch(() => {
         sfxCreateCapabilityReady = true;
-        createSfxEnabled = false;
+        createOptions.acceptSfxCapability(false);
         if (import.meta.env.DEV) {
           // Browser preview has no native capability service.
           applyDefaultCreatePresetWhenReady();
@@ -2039,7 +2026,7 @@
     if (next !== "password") pendingArchiveTaskReview = null;
     if (screen === "create" && next !== "create" && createPreflight.state.pending) {
       discardPendingCreatePlan();
-      createOptionsValidationAttempted = false;
+      createOptions.resetValidation();
     }
     if (next === "create" && screen !== "create") {
       classicCreateSection = "general";
@@ -2455,28 +2442,14 @@
     }
   }
 
-  function clampCreateLevel(value: number): number {
-    if (!Number.isFinite(value)) return 6;
-    return Math.min(9, Math.max(1, Math.round(value)));
-  }
-
   function customCreateLevelInvalidMessage(): string {
     return tr("gui.create.custom_level_invalid", "Use a compression level from 1 to 9");
-  }
-
-  function parseCustomCreateLevelInput(input: HTMLInputElement): number | null {
-    const raw = input.value.trim();
-    const next = Number(raw);
-    if (!raw || !Number.isFinite(next) || !Number.isInteger(next) || next < 1 || next > 9) {
-      return null;
-    }
-    return next;
   }
 
   function loadCustomCreateLevel(): number {
     try {
       const raw = window.localStorage.getItem("squallz.customCreateLevel");
-      return raw === null ? 6 : clampCreateLevel(Number(raw));
+      return raw === null ? 6 : Number(raw);
     } catch {
       return 6;
     }
@@ -2518,7 +2491,7 @@
   }
 
   function markCreatePresetDraftTouched() {
-    createPresetDraftTouched = true;
+    createOptions.touch();
     invalidateCreatePreflightResult();
   }
 
@@ -2526,120 +2499,88 @@
     extractPresetDraftTouched = true;
   }
 
-  function updateCreateContentPolicy(policy: CreateContentPolicy) {
-    if (policy === createContentPolicy) return;
-    markCreatePresetDraftTouched();
-    createContentPolicy = policy;
-    showNotice(
-      tr("gui.create.content_policy.changed", "Archive contents: {policy}")
-        .replace("{policy}", createContentPolicyLabel(policy)),
-    );
-    normalizeUnsupportedCreatePostSuccess();
+  function createDraftIssueMessage(issue: CreateDraftIssue, requestedTarget?: string): string {
+    switch (issue) {
+      case "options_locked": return createOptionsLockedReason();
+      case "format_unavailable": return tr("gui.presets.format_unavailable", "This preset uses a format that is not available in the create screen");
+      case "task_format_unavailable": return tr("gui.create.review.format_unavailable", "This task's format is not available in the create screen. Your current settings were kept.");
+      case "task_sfx_unavailable": return tr("gui.create.review.sfx_unavailable", "This device cannot recreate this self-extractor. Your current settings were kept.");
+      case "sfx_loading": return tr("gui.create.sfx_capability_loading", "Checking self-extracting support");
+      case "sfx_unavailable": return createSfxUnavailableMessage();
+      case "sfx_target_unavailable": return tr("gui.presets.sfx_target_unavailable", "This device cannot build the preset's {target} self-extractor").replace("{target}", requestedTarget ?? "");
+      case "sfx_zip_only": return tr("gui.create.sfx_zip_only_notice", "Turn off self-extracting output before choosing another format");
+      case "encryption_format_change": return tr("gui.create.encryption_format_change", "Turn off file content encryption before choosing a format that cannot encrypt files.");
+      case "name_encryption_format_change": return tr("gui.create.name_encryption_format_change", "Turn off file name encryption before choosing a format that cannot hide names.");
+      case "sfx_no_split": return tr("gui.create.sfx_no_split_notice", "Self-extracting output requires one complete ZIP payload");
+      case "native_layout_unavailable": return tr("gui.create.native_layout_unavailable", "Native volume layout is available for ZIP and WIM; self-extracting output must remain a single ZIP.");
+      case "trash_excluded": return tr("gui.create.output.source.trash_disabled_excludes", "Remove exclusion rules or choose Keep all files to move originals to {trash}").replace("{trash}", trashNameLabel());
+      case "completion_sfx": return tr("gui.create.output.completion.open_disabled_sfx", "Self-extracting outputs must be revealed and tested on their target system");
+      case "completion_split": return tr("gui.create.output.completion.open_disabled_split", "Split archives must stay together, so Squallz reveals the primary volume instead");
+      case "trash_test_required": return tr("gui.create.output.integrity.required_notice", "A full integrity test is required before originals can move to {trash}").replace("{trash}", trashNameLabel());
+      case "custom_level_invalid": return customCreateLevelInvalidMessage();
+      case "password_required": return tr("gui.create.password_required", "Enter an archive password, or turn off file content encryption.");
+      case "confirm_password_required": return tr("gui.create.confirm_password_required", "Confirm the archive password before starting");
+      case "passwords_do_not_match": return tr("gui.create.passwords_do_not_match", "The passwords do not match");
+      case "invalid_part_size": return tr("gui.create.invalid_part_size", "Enter a part size of at least 0.1 MiB");
+      case "native_zip_part_size_limit": return tr("gui.create.native_zip_part_size_limit", "Native ZIP parts cannot exceed 4 GiB − 1 byte");
+      case "sfx_requires_zip": return tr("gui.create.sfx_requires_zip", "Self-extracting output requires a single ZIP payload");
+    }
   }
 
-  function createTrashSourceDisabledReason(): string {
-    const excludesContent = createContentPolicy === "cross_platform_clean" ||
-      (createContentPolicy === "custom" && createExcludeRules().length > 0);
-    return excludesContent
-      ? tr(
-        "gui.create.output.source.trash_disabled_excludes",
-        "Remove exclusion rules or choose Keep all files to move originals to {trash}",
-      ).replace("{trash}", trashNameLabel())
-      : "";
+  function createDraftContext() {
+    return { capabilityReady: sfxCreateCapabilityReady, sfxCapability: sfxCreateCapability, locked: createPreflight.busy() };
   }
 
-  function normalizeUnsupportedCreatePostSuccess(announce = true): boolean {
-    const reason = createTrashSourceDisabledReason();
-    if (!reason || createPostSuccess !== "trash_source") return false;
-    createPostSuccess = "keep_source";
-    if (announce) {
-      showNotice(
-        tr(
-          "gui.create.output.source.changed_to_keep",
-          "Originals will stay in place · {reason}",
-        ).replace("{reason}", reason),
-      );
+  function announceCreateDraftNormalization(change: CreateDraftChange) {
+    if (change.postSuccessNormalized) {
+      showNotice(tr("gui.create.output.source.changed_to_keep", "Originals will stay in place · {reason}")
+        .replace("{reason}", createTrashSourceDisabledReason()));
+    }
+    if (change.completionNormalized) {
+      showNotice(tr("gui.create.output.completion.changed_to_reveal", "When finished changed to Reveal · {reason}")
+        .replace("{reason}", createOpenCompletionDisabledReason()));
+    }
+  }
+
+  function editCreateOptions(edit: CreateDraftEdit): boolean {
+    const change = createOptions.edit(edit, createDraftContext(), markCreatePresetDraftTouched);
+    if (change.issue) {
+      showNotice(createDraftIssueMessage(change.issue, change.requestedSfxTarget));
+      return false;
+    }
+    if (!change.changed) return false;
+    if (edit.kind === "contentPolicy") {
+      showNotice(tr("gui.create.content_policy.changed", "Archive contents: {policy}")
+        .replace("{policy}", createContentPolicyLabel(edit.value)));
+    }
+    announceCreateDraftNormalization(change);
+    if (edit.kind === "sfxEnabled") {
+      if (edit.value) persistCreateFormat("zip");
+      showNotice(edit.value
+        ? tr("gui.create.sfx_enabled_notice", "Self-extracting output enabled · ZIP payload · signing required")
+        : tr("gui.create.sfx_disabled_notice", "Standard archive output restored"));
+    } else if (edit.kind === "postSuccess" && edit.value === "trash_source") {
+      showNotice(tr("gui.create.output.source.trash_selected", "Originals will move to {trash} only after the new archive passes a full integrity test")
+        .replace("{trash}", trashNameLabel()));
     }
     return true;
   }
 
+  function createTrashSourceDisabledReason(): string {
+    return createOptions.trashExcluded ? createDraftIssueMessage("trash_excluded") : "";
+  }
+
   function createOpenCompletionDisabledReason(): string {
-    if (createSfxEnabled) {
-      return tr("gui.create.output.completion.open_disabled_sfx", "Self-extracting outputs must be revealed and tested on their target system");
-    }
-    if (createSplitSizeBytes() !== null) {
-      return tr("gui.create.output.completion.open_disabled_split", "Split archives must stay together, so Squallz reveals the primary volume instead");
-    }
-    return "";
-  }
-
-  function normalizeUnsupportedCreateCompletion(announce = true) {
-    const reason = createOpenCompletionDisabledReason();
-    if (!reason || createCompletion !== "open_in_squallz") return;
-    createCompletion = "reveal_output";
-    if (announce) {
-      showNotice(
-        tr("gui.create.output.completion.changed_to_reveal", "When finished changed to Reveal · {reason}")
-          .replace("{reason}", reason),
-      );
-    }
-  }
-
-  function updateCreateDestinationBase(value: CreateDestinationBase) {
-    if (value === createDestinationBase) return;
-    markCreatePresetDraftTouched();
-    createDestinationBase = value;
-    createOverwritePolicy = value === "ask" ? "ask" : "rename";
-  }
-
-  function updateCreateCompletion(value: CreateCompletionAction) {
-    if (value === "open_in_squallz" && createOpenCompletionDisabledReason()) {
-      showNotice(createOpenCompletionDisabledReason());
-      return;
-    }
-    if (value === createCompletion) return;
-    markCreatePresetDraftTouched();
-    createCompletion = value;
-  }
-
-  function updateCreatePostSuccess(value: PostSuccessAction) {
-    if (value === "trash_source" && createTrashSourceDisabledReason()) {
-      showNotice(createTrashSourceDisabledReason());
-      return;
-    }
-    if (value === createPostSuccess) return;
-    markCreatePresetDraftTouched();
-    createPostSuccess = value;
-    if (value === "trash_source") {
-      showNotice(
-        tr("gui.create.output.source.trash_selected", "Originals will move to {trash} only after the new archive passes a full integrity test")
-          .replace("{trash}", trashNameLabel()),
-      );
-    }
+    const restriction = createOptions.completionRestriction;
+    return restriction ? createDraftIssueMessage(restriction === "sfx" ? "completion_sfx" : "completion_split") : "";
   }
 
   function effectiveCreateTestAfterCreate(): boolean {
-    return createTestAfterCreate || createPostSuccess === "trash_source";
-  }
-
-  function updateCreateTestAfterCreate(value: boolean) {
-    if (createPostSuccess === "trash_source") {
-      showNotice(
-        tr(
-          "gui.create.output.integrity.required_notice",
-          "A full integrity test is required before originals can move to {trash}",
-        ).replace("{trash}", trashNameLabel()),
-      );
-      return;
-    }
-    if (value === createTestAfterCreate) return;
-    markCreatePresetDraftTouched();
-    createTestAfterCreate = value;
+    return createOptions.effectiveTestAfterCreate;
   }
 
   function chooseCreateProfile(next: CreateProfileId) {
-    markCreatePresetDraftTouched();
-    activeCreateProfile = next;
+    if (!editCreateOptions({ kind: "profile", value: next })) return;
     persistCreateProfile(next);
     const profile = createProfileData(next);
     recordOperation({
@@ -2655,145 +2596,15 @@
   }
 
   function chooseCreateFormat(next: CreateFormatId) {
-    if (createSfxEnabled && next !== "zip") {
-      showNotice(tr("gui.create.sfx_zip_only_notice", "Turn off self-extracting output before choosing another format"));
-      return;
-    }
-    if (createEncryptionEnabled && !createFormats[next].can_encrypt_data) {
-      showNotice(tr("gui.create.encryption_format_change", "Turn off file content encryption before choosing a format that cannot encrypt files."));
-      return;
-    }
-    if (createEncryptNames && !createFormats[next].can_encrypt_names) {
-      showNotice(tr("gui.create.name_encryption_format_change", "Turn off file name encryption before choosing a format that cannot hide names."));
-      return;
-    }
-    markCreatePresetDraftTouched();
-    activeCreateFormat = next;
-    if (nativeSplitKind(next, createSfxEnabled) === null) createSplitMode = "generic";
-    if (next === "sqz") createPresetSqzInnerFormat = "sqz";
+    if (!editCreateOptions({ kind: "format", value: next })) return;
     persistCreateFormat(next);
     const format = activeCreateFormatData();
-    if (!format.can_encrypt_data) {
-      clearCreatePasswordFields();
-    } else if (!format.can_encrypt_names) {
-      createEncryptNames = false;
-    }
-    createOptionsValidationAttempted = false;
     recordOperation({
       status: "info",
       title: tr("gui.create.format_selected_operation", "Create format selected"),
       detail: `${format.label} · .${format.extension}`,
     });
     showNotice(tr("gui.create.format_selected_notice", "{format} format selected").replace("{format}", format.label));
-  }
-
-  function clearCreatePasswordFields() {
-    createPassword = "";
-    createPasswordConfirmation = "";
-    createPasswordVisible = false;
-    createEncryptNames = false;
-    createEncryptionEnabled = false;
-  }
-
-  function updateCreatePassword(value: string) {
-    markCreatePresetDraftTouched();
-    createPassword = value;
-    if (value.length > 0) createEncryptionEnabled = true;
-    createOptionsValidationAttempted = value.length === 0 && createEncryptionEnabled;
-    if (value.length === 0) {
-      createPasswordConfirmation = "";
-    }
-  }
-
-  function updateCreateEncryptionEnabled(enabled: boolean) {
-    markCreatePresetDraftTouched();
-    createEncryptionEnabled = enabled && createPasswordDataAvailable();
-    if (!createEncryptionEnabled) clearCreatePasswordFields();
-    createOptionsValidationAttempted = createEncryptionEnabled;
-  }
-
-  function updateCreatePasswordConfirmation(value: string) {
-    markCreatePresetDraftTouched();
-    createPasswordConfirmation = value;
-    createOptionsValidationAttempted = false;
-  }
-
-  function updateCreateEncryptNames(enabled: boolean) {
-    markCreatePresetDraftTouched();
-    createEncryptNames = enabled && createNameEncryptionAvailable() && createEncryptionEnabled;
-  }
-
-  function updateCreateSplitPreset(preset: CreateSplitPreset) {
-    if (createSfxEnabled && preset !== "none") {
-      showNotice(tr("gui.create.sfx_no_split_notice", "Self-extracting output requires one complete ZIP payload"));
-      return;
-    }
-    markCreatePresetDraftTouched();
-    createPresetSplitSizeBytes = null;
-    createSplitPreset = preset;
-    if (preset === "none") createSplitMode = "generic";
-    createOptionsValidationAttempted = false;
-    normalizeUnsupportedCreateCompletion();
-  }
-
-  function updateCreateSplitMode(mode: CreateSplitMode) {
-    if (mode === "native" && nativeSplitKind(activeCreateFormat, createSfxEnabled) === null) {
-      showNotice(tr(
-        "gui.create.native_layout_unavailable",
-        "Native volume layout is available for ZIP and WIM; self-extracting output must remain a single ZIP.",
-      ));
-      return;
-    }
-    markCreatePresetDraftTouched();
-    createSplitMode = mode;
-    createOptionsValidationAttempted = false;
-  }
-
-  function updateCreateCustomSplitAmount(value: string) {
-    markCreatePresetDraftTouched();
-    createPresetSplitSizeBytes = null;
-    createCustomSplitAmount = value;
-    createOptionsValidationAttempted = false;
-    normalizeUnsupportedCreateCompletion();
-  }
-
-  function updateCreateCustomSplitUnit(unit: CreateSplitUnit) {
-    markCreatePresetDraftTouched();
-    createPresetSplitSizeBytes = null;
-    createCustomSplitUnit = unit;
-    createOptionsValidationAttempted = false;
-    normalizeUnsupportedCreateCompletion();
-  }
-
-  function updateCreateSfxEnabled(enabled: boolean) {
-    if (enabled && createEncryptNames) {
-      showNotice(tr("gui.create.name_encryption_format_change", "Turn off file name encryption before choosing a format that cannot hide names."));
-      return;
-    }
-    if (enabled && !sfxCreateCapabilityReady) {
-      showNotice(tr("gui.create.sfx_capability_loading", "Checking self-extracting support"));
-      return;
-    }
-    if (enabled && !sfxCreateCapability.available) {
-      showNotice(createSfxUnavailableMessage());
-      return;
-    }
-    markCreatePresetDraftTouched();
-    createSfxEnabled = enabled;
-    createPresetSfxTarget = "current_platform";
-    createOptionsValidationAttempted = false;
-    if (enabled) {
-      activeCreateFormat = "zip";
-      persistCreateFormat("zip");
-      createSplitPreset = "none";
-      createSplitMode = "generic";
-      createPresetSplitSizeBytes = null;
-      createEncryptNames = false;
-      normalizeUnsupportedCreateCompletion();
-      showNotice(tr("gui.create.sfx_enabled_notice", "Self-extracting output enabled · ZIP payload · signing required"));
-    } else {
-      showNotice(tr("gui.create.sfx_disabled_notice", "Standard archive output restored"));
-    }
   }
 
   function createSfxOutputLabel(): string {
@@ -2835,43 +2646,17 @@
   }
 
   function createSplitSizeBytes(): number | null {
-    return resolveSplitSizeBytes(
-      createSplitPreset,
-      createCustomSplitAmount,
-      createCustomSplitUnit,
-      createPresetSplitSizeBytes,
-    );
+    return createOptions.splitSize;
   }
 
   function createPasswordValidationMessage(): string {
-    if (!createPasswordDataAvailable()) return "";
-    if (createEncryptionEnabled && createPassword.length === 0) {
-      return tr("gui.create.password_required", "Enter an archive password, or turn off file content encryption.");
-    }
-    if (createPassword.length === 0) return "";
-    if (createPasswordConfirmation.length === 0) {
-      return tr("gui.create.confirm_password_required", "Confirm the archive password before starting");
-    }
-    if (createPassword !== createPasswordConfirmation) {
-      return tr("gui.create.passwords_do_not_match", "The passwords do not match");
-    }
-    return "";
+    const issue = createOptions.passwordIssue;
+    return issue ? createDraftIssueMessage(issue) : "";
   }
 
   function createSplitValidationMessage(): string {
-    const splitSize = createSplitSizeBytes();
-    if (createSplitPreset === "custom" && splitSize === null) {
-      return tr("gui.create.invalid_part_size", "Enter a part size of at least 0.1 MiB");
-    }
-    if (
-      activeCreateFormat === "zip"
-      && createSplitMode === "native"
-      && splitSize !== null
-      && splitSize > fat32CompatibleSplitSizeBytes
-    ) {
-      return tr("gui.create.native_zip_part_size_limit", "Native ZIP parts cannot exceed 4 GiB − 1 byte");
-    }
-    return "";
+    const issue = createOptions.splitIssue;
+    return issue ? createDraftIssueMessage(issue) : "";
   }
 
   function visibleCreatePasswordError(): string {
@@ -2886,19 +2671,11 @@
   }
 
   function validateCreateOptions(): boolean {
-    createOptionsValidationAttempted = true;
-    const sfxError = createSfxEnabled && !sfxCreateCapability.available
-      ? createSfxUnavailableMessage()
-      : createSfxEnabled && (activeCreateFormat !== "zip" || createSplitPreset !== "none")
-        ? tr("gui.create.sfx_requires_zip", "Self-extracting output requires a single ZIP payload")
-        : "";
-    const passwordError = createPasswordValidationMessage();
-    const splitError = createSplitValidationMessage();
-    const error = passwordError || splitError || sfxError;
-    if (!error) return true;
+    const issue = createOptions.validate(sfxCreateCapability);
+    if (!issue) return true;
     createAdvancedOpen = true;
-    classicCreateSection = passwordError || sfxError ? "security" : "volumes";
-    showNotice(error);
+    classicCreateSection = issue === "invalid_part_size" || issue === "native_zip_part_size_limit" ? "volumes" : "security";
+    showNotice(createDraftIssueMessage(issue));
     void tick().then(() => {
       if (screen !== "create" || !createOptionsValidationAttempted || blockingModalVisible()) return;
       document.querySelector<HTMLInputElement>(".create-option-input[aria-invalid='true']")?.focus();
@@ -2913,51 +2690,23 @@
   }
 
   function captureCreateRunDraft(): CreateRunDraft | null {
-    normalizeUnsupportedCreatePostSuccess();
+    if (createOptions.normalizePostSuccess()) {
+      announceCreateDraftNormalization({ changed: true, postSuccessNormalized: true });
+    }
     if (!validateCreateOptions()) return null;
-    const format = activeCreateFormat;
-    const password = createFormats[format].can_encrypt_data && createPassword.length > 0 ? createPassword : null;
-    const splitSize = createSplitSizeBytes();
-    const splitMode = splitSize === null ? "generic" : createSplitMode;
-    const outputExtension = archiveOutputExtension(
-      format, splitSize, splitMode, createSfxEnabled, sfxCreateCapability.extension,
-    );
-    return {
-      format,
-      profile: activeCreateProfile,
-      level: createCompressionLevel(),
-      password,
-      encryptNames: Boolean(password) && createEncryptNames && createFormats[format].can_encrypt_names,
-      splitSize,
-      splitMode,
-      contentPolicy: createContentPolicy,
-      excludes: createContentPolicy === "custom" ? [...createExcludeRules()] : [],
-      sqzInnerFormat: format === "sqz" ? createPresetSqzInnerFormat : null,
-      sfxEnabled: createSfxEnabled,
-      sfxTarget: createSfxEnabled ? resolvedPresetSfxTarget(createPresetSfxTarget) : null,
-      outputExtension,
-      suggestedDestination: createSuggestedOutputPath(format, outputExtension),
-      destination: {
-        base: createDestinationBase,
-        existing_output: createOverwritePolicy,
-      },
-      completion: createCompletion,
-      postSuccess: createPostSuccess,
-      testAfterCreate: effectiveCreateTestAfterCreate(),
+    return createOptions.snapshotRun({
+      sfxCapability: sfxCreateCapability,
+      suggestedDestination: createSuggestedOutputPath(activeCreateFormat, createOptions.outputExtension(sfxCreateCapability.extension)),
       defaultCreateDir: normalizedDefaultCreateDir(settingsSession.appliedGeneral.defaultCreateDir),
-      restoreCredentialPrompt: createEncryptionEnabled,
-      restoreEncryptNames: createEncryptNames,
-    };
+    });
   }
 
-  function updateCustomCreateLevel(value: number, commit = false) {
-    markCreatePresetDraftTouched();
-    const next = clampCreateLevel(value);
-    customCreateLevelError = "";
-    customCreateLevel = next;
+  function updateCustomCreateLevel(value: number | string, commit = false) {
+    const previousProfile = activeCreateProfile;
+    if (!editCreateOptions({ kind: "customLevel", value })) return;
+    const next = customCreateLevel;
     persistCustomCreateLevel(next);
-    if (activeCreateProfile !== "custom") {
-      activeCreateProfile = "custom";
+    if (previousProfile !== "custom") {
       persistCreateProfile("custom");
     }
     if (commit) {
@@ -2975,21 +2724,11 @@
 
   function updateCustomCreateLevelFromInput(event: Event, commit = false) {
     const input = event.currentTarget as HTMLInputElement;
-    const next = parseCustomCreateLevelInput(input);
-    if (next === null) {
-      customCreateLevelError = customCreateLevelInvalidMessage();
-      showNotice(customCreateLevelError);
-      return;
-    }
-    updateCustomCreateLevel(next, commit);
-  }
-
-  function activeCreateProfileData() {
-    return createProfileData(activeCreateProfile);
+    updateCustomCreateLevel(input.value, commit);
   }
 
   function createCompressionLevel(): number {
-    return activeCreateProfileData().level;
+    return createOptions.compressionLevel;
   }
 
   function archivePresetById(id: string | null): NamedArchivePreset | null {
@@ -3049,11 +2788,6 @@
     return tr("gui.create.content_policy.custom", "Custom rules");
   }
 
-  function selectPresetSqzInnerFormat(innerFormat: PresetSqzInnerFormat) {
-    markCreatePresetDraftTouched();
-    createPresetSqzInnerFormat = innerFormat;
-  }
-
   function createArchivePresetSummary(options: CreateArchivePresetOptions): string {
     let format = isCreateFormatId(options.format)
       ? createFormats[options.format].label
@@ -3092,35 +2826,7 @@
   }
 
   function currentCreateArchivePresetOptions(): CreateArchivePresetOptions {
-    const splitSize = createSplitSizeBytes();
-    const credential: CreateArchivePresetOptions["credential"] =
-      createEncryptionEnabled
-        ? { kind: "prompt" }
-        : { kind: "none" };
-    return {
-      format: activeCreateFormat,
-      level: createCompressionLevel(),
-      credential,
-      encrypt_names: credential.kind !== "none" && createEncryptNames,
-      volumes: splitSize === null
-        ? { kind: "single" }
-        : { kind: "split", size_bytes: String(splitSize) },
-      content_policy: createContentPolicy,
-      excludes: createContentPolicy === "custom" ? createExcludeRules() : [],
-      output: createSfxEnabled
-        ? { kind: "self_extracting", target: createPresetSfxTarget }
-        : { kind: "archive" },
-      format_options: activeCreateFormat === "sqz"
-        ? { kind: "sqz", inner_format: createPresetSqzInnerFormat }
-        : { kind: "none" },
-      destination: {
-        base: createDestinationBase,
-        existing_output: createOverwritePolicy,
-      },
-      completion: createCompletion,
-      post_success: createPostSuccess,
-      test_after_create: effectiveCreateTestAfterCreate(),
-    };
+    return createOptions.snapshotPreset();
   }
 
   function currentExtractArchivePresetOptions(): ExtractArchivePresetOptions {
@@ -3269,35 +2975,10 @@
     return "";
   }
 
-  function applyPresetVolumeMode(volumes: CreateArchivePresetOptions["volumes"]) {
-    createSplitMode = "generic";
-    if (volumes.kind === "single") {
-      createSplitPreset = "none";
-      createPresetSplitSizeBytes = null;
-      return;
-    }
-    const bytes = Number(volumes.size_bytes);
-    createPresetSplitSizeBytes = volumes.size_bytes;
-    if (bytes === 25 * bytesPerMiB) createSplitPreset = "25-mib";
-    else if (bytes === 100 * bytesPerMiB) createSplitPreset = "100-mib";
-    else if (bytes === 700 * bytesPerMiB) createSplitPreset = "700-mib";
-    else if (bytes === fat32CompatibleSplitSizeBytes) createSplitPreset = "4-gib";
-    else {
-      createSplitPreset = "custom";
-      createCustomSplitUnit = bytes >= bytesPerGiB ? "gib" : "mib";
-      const divisor = createCustomSplitUnit === "gib" ? bytesPerGiB : bytesPerMiB;
-      createCustomSplitAmount = String(Number((bytes / divisor).toPrecision(9)));
-    }
-  }
-
   function applyDefaultCreatePresetWhenReady() {
     if (!sfxCreateCapabilityReady || createPresetDraftTouched || !presetDocument) return;
     const presetId = presetDocument.bindings.app_default_create;
     if (presetId) applyCreatePreset(presetId, false);
-  }
-
-  function resolvedPresetSfxTarget(target: PresetSfxTarget): PlatformKind {
-    return target === "current_platform" ? sfxCreateCapability.target : target;
   }
 
   function applyCreatePreset(id: string | null, announce = true) {
@@ -3314,71 +2995,26 @@
     }
     const preset = archivePresetById(id);
     if (!preset || preset.kind !== "create") return;
-    if (!isCreateFormatId(preset.options.format)) {
-      showNotice(tr("gui.presets.format_unavailable", "This preset uses a format that is not available in the create screen"));
+    const change = createOptions.applyPreset(preset.options, createDraftContext(), () => {
+      dismissCreatePreparation();
+      if (announce) markCreatePresetDraftTouched();
+      invalidateCreatePreflightResult();
+    }, announce);
+    if (change.issue) {
+      showNotice(createDraftIssueMessage(change.issue, change.requestedSfxTarget));
       return;
     }
-    if (preset.options.output.kind === "self_extracting") {
-      if (!sfxCreateCapabilityReady) {
-        showNotice(tr("gui.create.sfx_capability_loading", "Checking self-extracting support"));
-        return;
-      }
-      if (!sfxCreateCapability.available) {
-        showNotice(createSfxUnavailableMessage());
-        return;
-      }
-      const requestedTarget = resolvedPresetSfxTarget(preset.options.output.target);
-      if (requestedTarget !== sfxCreateCapability.target) {
-        showNotice(
-          tr("gui.presets.sfx_target_unavailable", "This device cannot build the preset's {target} self-extractor")
-            .replace("{target}", requestedTarget),
-        );
-        return;
-      }
-    }
-    dismissCreatePreparation();
-    if (announce) markCreatePresetDraftTouched();
-    invalidateCreatePreflightResult();
     selectedCreatePresetId = preset.id;
-    createSuggestedDestination = null;
     createPresetDraftName = preset.label;
-    activeCreateFormat = preset.options.format;
-    activeCreateProfile = "custom";
-    customCreateLevel = preset.options.level;
-    customCreateLevelError = "";
-    createEncryptionEnabled = preset.options.credential.kind !== "none";
-    createPassword = "";
-    createPasswordConfirmation = "";
-    createPasswordVisible = false;
-    createEncryptNames = preset.options.encrypt_names;
-    applyPresetVolumeMode(preset.options.volumes);
-    createContentPolicy = preset.options.content_policy;
-    createExcludeText = preset.options.excludes.join("\n");
-    createSfxEnabled = preset.options.output.kind === "self_extracting";
-    createPresetSfxTarget = preset.options.output.kind === "self_extracting"
-      ? preset.options.output.target
-      : "current_platform";
-    createPresetSqzInnerFormat = preset.options.format_options.kind === "sqz"
-      ? preset.options.format_options.inner_format
-      : "sqz";
-    createDestinationBase = preset.options.destination.base;
-    createOverwritePolicy = preset.options.destination.base === "ask" ? "ask" : "rename";
-    createCompletion = preset.options.completion;
-    createPostSuccess = preset.options.post_success;
-    createTestAfterCreate = preset.options.test_after_create;
-    const postSuccessNormalized = normalizeUnsupportedCreatePostSuccess(false);
-    normalizeUnsupportedCreateCompletion(announce);
-    createOptionsValidationAttempted = false;
     createPresetMutationState = "idle";
     if (announce) {
+      // The completion change has its own feedback; source normalization is part of the applied notice.
+      announceCreateDraftNormalization({ ...change, postSuccessNormalized: false });
       showNotice(
-        postSuccessNormalized
-          ? tr(
-            "gui.create.output.source.preset_changed_to_keep",
-            "{name} applied · originals will stay in place because this preset excludes some content",
-          ).replace("{name}", archivePresetDisplayName(preset))
-          : tr("gui.presets.applied_notice", "{name} applied")
-            .replace("{name}", archivePresetDisplayName(preset)),
+        change.postSuccessNormalized
+          ? tr("gui.create.output.source.preset_changed_to_keep", "{name} applied · originals will stay in place because this preset excludes some content")
+            .replace("{name}", archivePresetDisplayName(preset))
+          : tr("gui.presets.applied_notice", "{name} applied").replace("{name}", archivePresetDisplayName(preset)),
       );
     }
   }
@@ -3652,34 +3288,12 @@
     );
   }
 
-  function nativeSplitKind(
-    formatId: CreateFormatId,
-    sfxEnabled = false,
-  ): NativeSplitKind {
-    if (sfxEnabled) return null;
-    return formatId === "zip" || formatId === "wim" ? formatId : null;
-  }
-
-  function archiveOutputExtension(
-    formatId: CreateFormatId,
-    splitSize: number | null,
-    splitMode: CreateSplitMode,
-    sfxEnabled = false,
-    sfxExtension = "",
-  ): string {
-    if (sfxEnabled) return sfxExtension;
-    if (formatId === "wim" && splitSize !== null && splitMode === "native") return "swm";
-    return createFormats[formatId].extension;
-  }
-
   function createArchiveNameForOutput(base: string, outputExtension: string): string {
     return `${base}.${outputExtension}`;
   }
 
   function createArchivePreviewName(base = createOutputPreviewBase()): string {
-    const extension = archiveOutputExtension(
-      activeCreateFormat, createSplitSizeBytes(), createSplitMode, createSfxEnabled, sfxCreateCapability.extension,
-    );
+    const extension = createOptions.outputExtension(sfxCreateCapability.extension);
     const suggested = createDestinationBase === "ask" ? createSuggestedOutputPath(activeCreateFormat, extension) : null;
     return suggested ? desktopBasename(suggested, platformKind()) : createArchiveNameForOutput(base, extension);
   }
@@ -3697,9 +3311,7 @@
   function createOutputPreview(base = createOutputPreviewBase()): string {
     const name = createArchivePreviewName(base);
     if (createDestinationBase === "ask") {
-      const suggested = createSuggestedOutputPath(activeCreateFormat, archiveOutputExtension(
-        activeCreateFormat, createSplitSizeBytes(), createSplitMode, createSfxEnabled, sfxCreateCapability.extension,
-      ));
+      const suggested = createSuggestedOutputPath(activeCreateFormat, createOptions.outputExtension(sfxCreateCapability.extension));
       if (suggested) {
         return tr("gui.create.output.preview_confirm", "Confirm location when starting · {path}").replace("{path}", suggested);
       }
@@ -6031,7 +5643,7 @@
     dismissCreatePreparation();
     createSources = [];
     selectedCreateSourcePaths = [];
-    createSuggestedDestination = null;
+    createOptions.clearSuggestedDestination();
     syncCreatePreflightContext();
   }
 
@@ -7298,13 +6910,7 @@
   }
 
   function createExcludeRules(): string[] {
-    return parseDelimitedRules(createExcludeText);
-  }
-
-  function updateCreateExcludeText(value: string) {
-    markCreatePresetDraftTouched();
-    createExcludeText = value;
-    normalizeUnsupportedCreatePostSuccess();
+    return createOptions.excludeRules;
   }
 
   function syncCreatePreflightContext(): void {
@@ -7826,7 +7432,7 @@
               disabled: preflightBusy,
               title: lockedReason,
               ariaLabel: labelWithDisabledReason(presetSqzInnerFormatLabel(innerFormat), lockedReason),
-              onSelect: () => selectPresetSqzInnerFormat(innerFormat),
+              onSelect: () => editCreateOptions({ kind: "sqzInnerFormat", value: innerFormat }),
             })),
           }
         : null,
@@ -7912,10 +7518,10 @@
         openDisabledReason: createOpenCompletionDisabledReason(),
         trashDisabledReason: createTrashSourceDisabledReason(),
         tr,
-        onDestinationChange: updateCreateDestinationBase,
-        onCompletionChange: updateCreateCompletion,
-        onPostSuccessChange: updateCreatePostSuccess,
-        onTestAfterCreateChange: updateCreateTestAfterCreate,
+        onDestinationChange: (value) => editCreateOptions({ kind: "destinationBase", value }),
+        onCompletionChange: (value) => editCreateOptions({ kind: "completion", value }),
+        onPostSuccessChange: (value) => editCreateOptions({ kind: "postSuccess", value }),
+        onTestAfterCreateChange: (value) => editCreateOptions({ kind: "testAfterCreate", value }),
       },
       content: {
         variant,
@@ -7926,8 +7532,8 @@
         disabled: preflightBusy,
         disabledReason: lockedReason,
         tr,
-        onChange: updateCreateContentPolicy,
-        onRulesInput: updateCreateExcludeText,
+        onChange: (value) => editCreateOptions({ kind: "contentPolicy", value }),
+        onRulesInput: (value) => editCreateOptions({ kind: "excludeText", value }),
       },
       recovery: {
         capability: createRecoveryCapability(),
@@ -7951,7 +7557,7 @@
           : ""),
         loading: !sfxCreateCapabilityReady,
         tr,
-        onEnabledChange: updateCreateSfxEnabled,
+        onEnabledChange: (value) => editCreateOptions({ kind: "sfxEnabled", value }),
       },
       protection: {
         variant,
@@ -7966,7 +7572,7 @@
         splitDisabled: createSfxEnabled,
         splitPreset: createSplitPreset,
         splitMode: createSplitMode,
-        nativeSplitKind: nativeSplitKind(activeCreateFormat, createSfxEnabled),
+        nativeSplitKind: createOptions.nativeSplitKind,
         customSplitAmount: createCustomSplitAmount,
         customSplitUnit: createCustomSplitUnit,
         passwordCapability: createPasswordCapability(),
@@ -7978,15 +7584,15 @@
         disabled: preflightBusy,
         disabledReason: lockedReason,
         tr,
-        onPasswordInput: updateCreatePassword,
-        onPasswordConfirmationInput: updateCreatePasswordConfirmation,
-        onPasswordVisibleChange: (visible) => (createPasswordVisible = visible),
-        onEncryptionEnabledChange: updateCreateEncryptionEnabled,
-        onEncryptNamesChange: updateCreateEncryptNames,
-        onSplitPresetChange: updateCreateSplitPreset,
-        onSplitModeChange: updateCreateSplitMode,
-        onCustomSplitAmountInput: updateCreateCustomSplitAmount,
-        onCustomSplitUnitChange: updateCreateCustomSplitUnit,
+        onPasswordInput: (value) => editCreateOptions({ kind: "password", value }),
+        onPasswordConfirmationInput: (value) => editCreateOptions({ kind: "passwordConfirmation", value }),
+        onPasswordVisibleChange: (value) => editCreateOptions({ kind: "passwordVisible", value }),
+        onEncryptionEnabledChange: (value) => editCreateOptions({ kind: "encryptionEnabled", value }),
+        onEncryptNamesChange: (value) => editCreateOptions({ kind: "encryptNames", value }),
+        onSplitPresetChange: (value) => editCreateOptions({ kind: "splitPreset", value }),
+        onSplitModeChange: (value) => editCreateOptions({ kind: "splitMode", value }),
+        onCustomSplitAmountInput: (value) => editCreateOptions({ kind: "customSplitAmount", value }),
+        onCustomSplitUnitChange: (value) => editCreateOptions({ kind: "customSplitUnit", value }),
       },
       showPreflight: preflight.phase !== "idle",
       preflight: {
@@ -8126,11 +7732,7 @@
   }
 
   function resetCreateCredentialsAfterPlan(pending: CreateCredentialIntent | null) {
-    clearCreatePasswordFields();
-    if (pending?.restoreCredentialPrompt) {
-      createEncryptionEnabled = true;
-      createEncryptNames = pending.restoreEncryptNames;
-    }
+    createOptions.resetCredentials(pending);
   }
 
   function createPrimaryAction(): HTMLElement | null {
@@ -10463,7 +10065,7 @@
       return;
     }
     if (focusBlockingTaskIfAny()) return;
-    createPresetDraftTouched = true;
+    createOptions.touch();
     createPrimaryFocusPending = null;
     syncCreatePreflightContext();
     await createPreflight.start(inputs, source, draft);
@@ -10481,7 +10083,7 @@
 
   function cancelCreatePlanReview(): void {
     if (!createPreflight.state.pending || createPreflight.busy()) return;
-    createOptionsValidationAttempted = false;
+    createOptions.resetValidation();
     createPreflight.cancelReview();
   }
 
@@ -10526,7 +10128,7 @@
           && document.activeElement.closest(".create-plan-review") !== null;
         clearCreateSources();
         resetCreateCredentialsAfterPlan(pending);
-        createOptionsValidationAttempted = false;
+        createOptions.resetValidation();
         showNotice(
           (pending.creatingSfx
             ? tr("gui.create.sfx_queued_notice", "Self-extractor added to queue · {size} input")
@@ -11459,14 +11061,6 @@
     return true;
   }
 
-  function createTaskFormat(spec: Extract<JobSpec, { kind: "compress" }>): CreateFormatId | null {
-    if (spec.sfx_target) return "zip";
-    const path = spec.dest.toLowerCase();
-    if (path.endsWith(".swm")) return "wim";
-    return createFormatIds.find((format) =>
-      createFormats[format].extensions.some((extension) => path.endsWith(`.${extension}`))) ?? null;
-  }
-
   function restoreCreateTaskDraft(spec: Extract<JobSpec, { kind: "compress" }>, passwordRequired: boolean): boolean {
     if (createPreflight.sourcesLocked()) {
       showNotice(createSourcesLockedReason());
@@ -11476,48 +11070,20 @@
       showNotice(createConfigurationPendingMessage());
       return false;
     }
-    const format = createTaskFormat(spec);
-    if (!format) {
-      showNotice(tr("gui.create.review.format_unavailable", "This task's format is not available in the create screen. Your current settings were kept."));
+    const change = createOptions.restoreTask(spec, passwordRequired, createDraftContext(), () => {
+      dismissCreatePreparation();
+      markCreatePresetDraftTouched();
+      selectedCreatePresetId = null;
+      createPresetDraftName = "";
+      createPresetMutationState = "idle";
+      createSources = mergeCreateSources([], spec.inputs.map((path) => ({ path, kind: "unknown" })), platformKind());
+      syncCreatePreflightContext();
+      selectedCreateSourcePaths = [];
+    });
+    if (change.issue) {
+      showNotice(createDraftIssueMessage(change.issue, change.requestedSfxTarget));
       return false;
     }
-    if (spec.sfx_target && (!sfxCreateCapability.available || spec.sfx_target !== sfxCreateCapability.target)) {
-      showNotice(tr("gui.create.review.sfx_unavailable", "This device cannot recreate this self-extractor. Your current settings were kept."));
-      return false;
-    }
-    dismissCreatePreparation();
-    markCreatePresetDraftTouched();
-    selectedCreatePresetId = null;
-    createPresetDraftName = "";
-    createPresetMutationState = "idle";
-    createSources = mergeCreateSources([], spec.inputs.map((path) => ({ path, kind: "unknown" })), platformKind());
-    syncCreatePreflightContext();
-    selectedCreateSourcePaths = [];
-    activeCreateFormat = format;
-    activeCreateProfile = "custom";
-    customCreateLevel = spec.level;
-    customCreateLevelError = "";
-    clearCreatePasswordFields();
-    createEncryptNames = spec.encrypt_names;
-    createEncryptionEnabled = passwordRequired || spec.encrypt_names;
-    applyPresetVolumeMode(spec.split_size === null
-      ? { kind: "single" }
-      : { kind: "split", size_bytes: String(spec.split_size) });
-    createSplitMode = spec.split_mode;
-    createContentPolicy = spec.content_policy;
-    createExcludeText = spec.excludes.join("\n");
-    createSfxEnabled = spec.sfx_target !== null;
-    createPresetSfxTarget = spec.sfx_target ?? "current_platform";
-    createPresetSqzInnerFormat = spec.sqz_inner_format ?? "sqz";
-    createDestinationBase = "ask";
-    createOverwritePolicy = "ask";
-    createSuggestedDestination = spec.dest;
-    createCompletion = spec.completion;
-    createPostSuccess = spec.post_success;
-    createTestAfterCreate = spec.test_after_create;
-    normalizeUnsupportedCreatePostSuccess(false);
-    normalizeUnsupportedCreateCompletion(false);
-    createOptionsValidationAttempted = createEncryptionEnabled;
     classicCreateSection = "general";
     createAdvancedOpen = true;
     showNotice(tr("gui.create.review.restored", "Sources and settings restored. Passwords were cleared. Review the options and confirm the output location before starting again."));
