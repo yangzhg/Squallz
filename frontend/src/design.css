@@ -11,6 +11,9 @@
   --space-md: 12px;
   --space-lg: 16px;
   --control-height: 32px;
+  --quick-popover-top: 58px;
+  --classic-quick-popover-top: 128px;
+  --quick-popover-bottom-inset: var(--space-sm);
   --password-book-panel-width: 780px;
   --password-request-width: 600px;
   --control-height-compact: 28px;
@@ -697,7 +700,10 @@ select option {
 .quick-popover {
   position: absolute;
   z-index: 30;
+  top: var(--quick-popover-top);
   width: 292px;
+  max-height: calc(100% - var(--quick-popover-top) - var(--quick-popover-bottom-inset));
+  overflow-y: auto;
   padding: 10px;
   border: 1px solid var(--popover-border);
   border-radius: 12px;
@@ -707,12 +713,12 @@ select option {
 }
 
 .modern-quick-popover {
-  top: 58px;
   right: 18px;
 }
 
 .classic-quick-popover {
-  top: 128px;
+  --quick-popover-top: var(--classic-quick-popover-top);
+  --quick-popover-bottom-inset: calc(var(--classic-statusbar-height) + var(--space-sm));
   right: 10px;
 }
 
@@ -11992,6 +11998,7 @@ dd {
 
 /* Classic */
 .classic-window {
+  overflow: clip;
   --classic-titlebar-height: 46px;
   --classic-commandbar-height: 68px;
   --classic-commandbar-padding-block: 6px;

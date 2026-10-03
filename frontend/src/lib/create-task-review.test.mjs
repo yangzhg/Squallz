@@ -11,9 +11,12 @@ test.after(() => server.close());
 const model = await server.ssrLoadModule("/src/lib/ui-model.ts");
 const paths = await server.ssrLoadModule("/src/lib/desktop-path.ts");
 const sources = await server.ssrLoadModule("/src/lib/create-sources.ts");
-const { taskReviewScreen, isTaskActiveState, applyCreateDestinationAuthorization } = await server.ssrLoadModule("/src/lib/task-model.ts");
+const { taskReviewScreen, isTaskActiveState } = await server.ssrLoadModule("/src/lib/task-model.ts");
 const { convertSessionFor } = await server.ssrLoadModule("/src/lib/convert-session.svelte.ts");
+const { CreatePreflightSession } = await server.ssrLoadModule("/src/lib/create-preflight.svelte.ts");
 const { ipc } = await server.ssrLoadModule("/src/lib/ipc.ts");
+const originalIpc = { ...ipc };
+test.after(() => Object.assign(ipc, originalIpc));
 
 function taskSpec(overrides = {}) {
   return {
@@ -33,44 +36,41 @@ function harness({ navigation = false, preparation = false, preview = false } = 
     component.match(/<script lang="ts">([\s\S]*?)<\/script>/)[1], ts.ScriptTarget.Latest, true);
   const names = ["reviewTask", "restoreCreateTaskDraft", "createTaskFormat", "applyPresetVolumeMode",
     "invalidateCreatePreflightResult", "clearCreatePasswordFields", "markCreatePresetDraftTouched",
-    "createSuggestedOutputPath", "createSaveDefaultPathForDraft", "createArchiveNameForOutput",
-    "captureCreateRunDraft", "archiveOutputExtension", "submitCreateInputs", "beginCreatePreflight",
-    "askCreateDestination", "normalizeCreateDestinationForDraft", "createSaveFiltersForDraft",
-    "resolveCreateDestination", "createOutputPreview", "createArchivePreviewName",
+    "createSuggestedOutputPath", "createArchiveNameForOutput",
+    "captureCreateRunDraft", "archiveOutputExtension", "submitCreateInputs",
+    "createOutputPreview", "createArchivePreviewName",
     "createPasswordValidationMessage", "validateCreateOptions", "updateCreatePassword",
     "updateCreatePasswordConfirmation", "updateCreateEncryptionEnabled", "chooseCreateFormat",
     "activeCreateFormatData", "updateCreateEncryptNames", "updateCreateSfxEnabled",
     "resetCreateCredentialsAfterPlan", "preventCreateSubmissionNavigation", "preventConvertSubmissionNavigation", "preventTaskWorkspaceNavigation", "dismissRecoveryPreparation",
-    "isCurrentCreateSourcePicker", "isCurrentCreateOutputPreparation", "dismissCreatePreparation",
-    ...(preparation ? ["submitCreateJob", "appendCreateSources", "showCreateSourcesAdded", "clearCreateSources",
-      "createPreflightBusy", "createSourcesLocked", "createDestinationInspectionCancellable",
-      "inspectCreateDestinationForCreate", "createDestinationInspectionCancelled", "cancelCreateDestinationInspection",
-      "finishCreatePreflightWithIssue", "discardPendingCreatePlan", "cancelCreatePlanReview",
-      "refreshConfirmedCreateDestination", "confirmCreatePlan", "commonCreateSourceParent", "setMode",
-      "applyCreatePreset", "archivePresetById", "isCreateFormatId", "createPrimaryAction", "focusCreatePrimaryAction"] : []),
+    "dismissCreatePreparation", "syncCreatePreflightContext", "applyCreatePreflightEffect", "clearCreateSources",
+    "showCreateSourcesAdded", "createDestinationInspectionCancellable",
+    "createSourcesLockedReason",
+    ...(preparation ? ["submitCreateJob", "appendCreateSources",
+      "discardPendingCreatePlan", "cancelCreatePlanReview", "confirmCreatePlan", "setMode",
+      "applyCreatePreset", "archivePresetById", "isCreateFormatId", "createPrimaryAction", "focusCreatePrimaryAction",
+      "createPreflightPhaseLabel", "createPreflightStepState", "createPreflightStepStateLabel",
+      "createPreflightCurrentDetail", "createDestinationPreflightDetail", "createDestinationInspectionCancelLabel",
+      "createPreflightStageIssueSummary", "createPreflightSteps", "createEstimateStatusbar",
+      "diskPreflightStatusbar", "tempPreflightStatusbar"] : []),
     ...(navigation ? ["setScreen", "dismissTaskDialog", "closeTaskCenter", "cancelTaskReview", "adoptRecoveryTargetFromTask"] : [])];
   const declarations = source.statements.filter((node) =>
-    (ts.isFunctionDeclaration(node) && names.includes(node.name?.text))
-    || (ts.isClassDeclaration(node) && node.name?.text === "CreateDestinationInspectionError"));
-  const preparationEffect = preparation ? source.statements.find((node) =>
-    ts.isExpressionStatement(node) && ts.isCallExpression(node.expression)
-    && node.expression.expression.getText(source) === "$effect"
-    && node.expression.arguments[0]?.getText(source).includes("isCurrentCreateSourcePicker")) : null;
-  const previewDeclaration = source.statements.find((node) => ts.isVariableStatement(node)
+    ts.isFunctionDeclaration(node) && names.includes(node.name?.text));
+  const sessionDeclaration = source.statements.find((node) => ts.isVariableStatement(node)
     && node.declarationList.declarations.some((declaration) =>
-      ts.isIdentifier(declaration.name) && declaration.name.text === "previewDestinationRequestId"));
+      ts.isIdentifier(declaration.name) && declaration.name.text === "createPreflight"));
+  assert.ok(sessionDeclaration, "App constructs the shared create preflight session");
   const calls = [];
+  let requestId = 0;
   const context = {
-    ...model, ...paths, ...sources, taskReviewScreen, isTaskActiveState, applyCreateDestinationAuthorization,
-    taskWindowMode: false, screen: "create", mode: "modern", blockingModalVisible: () => false,
-    runtimePreviews: { preflightDestinationBytes: preview ? 1024 : 0 },
+    ...model, ...paths, ...sources, taskReviewScreen, isTaskActiveState, CreatePreflightSession,
+    taskWindowMode: false, screen: "create", mode: "modern", preflightEventsClosed: false,
+    blockingModalVisible: () => false,
+    runtimePreviews: { preflightScanned: 0, preflightCurrent: "", preflightDestinationBytes: preview ? 1024 : 0,
+      preflightDestinationCurrent: "" },
     createSources: [{ path: "/unrelated", kind: "folder" }],
     selectedCreateSourcePaths: ["/unrelated"],
-    createSourcePicker: null, createOutputPreparation: null, createPreflightClosed: false,
-    createPreflightScanned: 0, createPreflightCurrent: "", createPreflightRequestId: null,
-    createPreflightRequestKind: null, createPreflightProcessedBytes: 0, createPreflightCancelPending: false,
-    createPreflightIssueStage: null,
-    createPrimaryFocusPending: false,
+    createPrimaryFocusPending: null,
     createPassword: "unrelated-secret", createPasswordConfirmation: "unrelated-secret",
     createPasswordVisible: true, createEncryptNames: true, createEncryptionEnabled: true,
     selectedCreatePresetId: "unrelated-preset", createPresetDraftName: "Unrelated",
@@ -83,17 +83,15 @@ function harness({ navigation = false, preparation = false, preview = false } = 
     createDestinationBase: "source_parent", createOverwritePolicy: "rename",
     createCompletion: "none", createPostSuccess: "trash_source", createTestAfterCreate: false,
     createOptionsValidationAttempted: true, createAdvancedOpen: false, classicCreateSection: "password",
-    createSuggestedDestination: null, createPreflightPhase: "blocked", createPreflightIssue: "old-error",
-    pendingCreateSubmission: null, lastCreatePlan: {}, lastCreateDest: "/unrelated.zip",
-    lastDiskSpace: {}, lastTempDiskSpace: {}, lastSystemTempDiskSpace: {},
+    createSuggestedDestination: null,
     sfxCreateCapabilityReady: true,
     sfxCreateCapability: { target: "macos", available: true, extension: "app" },
     appliedDefaultCreateDir: null, fat32CompatibleSplitSizeBytes: 4294967295,
     bytesPerMiB: 1024 ** 2, bytesPerGiB: 1024 ** 3,
     tr: (_key, fallback) => fallback, platformKind: () => "macos",
+    nextPreflightRequestId: () => `create-preflight-${++requestId}`,
     setScreen: (screen) => calls.push(["screen", screen]), dismissTaskDialog: async () => { calls.push(["dismiss"]); },
     focusCreatePrimaryAction: () => calls.push(["focus"]), showNotice: (message) => calls.push(["notice", message]),
-    createPreflightBusy: () => false, createSourcesLocked: () => false, createSourcesLockedReason: () => "Busy",
     createConfigurationPending: () => false, createConfigurationPendingMessage: () => "Loading",
     normalizeUnsupportedCreatePostSuccess() {}, normalizeUnsupportedCreateCompletion() {},
     resetCreateCredentialsAfterPlan() {}, createSplitValidationMessage: () => "",
@@ -106,21 +104,24 @@ function harness({ navigation = false, preparation = false, preview = false } = 
     resolvedPresetSfxTarget: (target) => target === "current_platform" ? "macos" : target,
     effectiveCreateTestAfterCreate: () => context.createTestAfterCreate || context.createPostSuccess === "trash_source",
     normalizedDefaultCreateDir: (value) => value, uniqueNonEmptyPaths: (inputs) => [...new Set(inputs)],
-    focusBlockingTaskIfAny: () => false, createDraftExcludeCount: (draft) => draft.excludes.length,
-    archiveBaseOrDefault: (value) => value || "archive",
+    focusBlockingTaskIfAny: () => false,
     archiveStemName: (value) => value.replace(/\.(?:tar\.zst|tzst|zip|7z|sqz|wim|swm|app|exe|run)$/i, ""),
     joinFolderPath: (folder, name) => paths.joinDesktopPath(folder, name, "macos"),
-    createFormatFilterName: (format) => format,
     getDialogModule: async () => ({ save() {}, confirm: async () => { calls.push(["confirm"]); return true; } }),
+    openNativeDialog: async () => null,
     saveNativeDialog: async (_purpose, _save, options) => { calls.push(["save", options]); return options.defaultPath; },
-    inspectCreateDestinationForCreate: async (path) => {
-      calls.push(["inspect", path]); return { conflict: true, guard: "fresh-authorization" };
-    },
-    ensureCreatePreflightListener: async () => {}, nextPreflightRequestId: () => "fresh-plan",
+    ensureCreatePreflightListener: async () => {},
     ipc: {
+      inspectCreateDestination: async (path) => {
+        calls.push(["inspect", path]); return { conflict: true, guard: "fresh-authorization" };
+      },
+      cancelCreateDestinationInspection: async () => {},
+      uniqueCreateDestination: async (path) => path,
       planCreate: async (spec) => { calls.push(["plan", spec]); return { entries: 2, deduplicated_entries: 0,
+        primary_output: spec.dest, total_bytes: 512,
         workspace_budget_bytes: 20, system_temp_budget_bytes: 0, final_output_budget_bytes: 10 }; },
       checkDiskSpace: async (path, bytes) => { calls.push(["space", path, bytes]); return { ok: true }; },
+      tempDir: async () => "/temporary",
     },
     tick: async () => {}, document: { documentElement: {}, body: {}, querySelectorAll: () => [], querySelector: () => ({ focus() {} }) },
     convertRouteHandle: null, archiveOpenStatus: "idle", archivePasswordPrompt: null, previewPasswordPrompt: null,
@@ -155,14 +156,23 @@ function harness({ navigation = false, preparation = false, preview = false } = 
   Object.defineProperty(context, "createSourceInputs", {
     get: () => sources.createSourcePaths(context.createSources),
   });
-  const effectDeclaration = preparationEffect
-    ? `const runCreatePreparationEffects = ${preparationEffect.expression.arguments[0].getText(source)};` : "";
-  const { outputText } = ts.transpileModule(`${previewDeclaration.getText(source)}\n${declarations.map((node) => node.getText(source)).join("\n")}\n${effectDeclaration}`
-    .replaceAll("import.meta.env.DEV", String(preview)), {
+  for (const name of ["getDialogModule", "openNativeDialog", "saveNativeDialog", "ensureCreatePreflightListener", "submitJob"]) {
+    let implementation = context[name];
+    const port = (...args) => implementation(...args);
+    Object.defineProperty(context, name, { get: () => port, set: (next) => { implementation = next; } });
+  }
+  const { outputText } = ts.transpileModule(`${declarations.map((node) => node.getText(source)).join("\n")}\n${sessionDeclaration.getText(source)}`, {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
   });
   context.calls = calls;
-  return vm.runInNewContext(`${outputText}\n({${declarations.map((node) => node.name.text).join(",")}${preparationEffect ? ",runCreatePreparationEffects" : ""}, previewDestinationRequestId, context:globalThis, calls})`, context);
+  const run = vm.runInNewContext(`${outputText}\n({${declarations.map((node) => node.name.text).join(",")}, createPreflight, context:globalThis, calls})`, context);
+  context.createPreflight = run.createPreflight;
+  for (const method of ["inspectCreateDestination", "cancelCreateDestinationInspection", "uniqueCreateDestination",
+    "planCreate", "checkDiskSpace", "tempDir"]) {
+    ipc[method] = (...args) => context.ipc[method](...args);
+  }
+  run.syncCreatePreflightContext();
+  return run;
 }
 
 for (const state of ["failed", "cancelled"]) {
@@ -189,10 +199,10 @@ test(`reviewing a ${state} creation restores its sources and options without res
   assert.equal(draft.createPassword, "");
   assert.equal(draft.createPasswordConfirmation, "");
   assert.equal(draft.createPasswordVisible, false);
-  assert.equal(draft.pendingCreateSubmission, null);
-  assert.equal(draft.lastCreateDest, null);
-  assert.equal(draft.lastCreatePlan, null);
-  assert.equal(draft.lastDiskSpace, null);
+  assert.equal(draft.createPreflight.state.pending, null);
+  assert.equal(draft.createPreflight.state.destination, null);
+  assert.equal(draft.createPreflight.state.plan, null);
+  assert.equal(draft.createPreflight.state.destinationDisk, null);
   assert.equal(draft.classicCreateSection, "general");
   assert.equal(run.calls.filter(([name]) => name === "plan").length, 0);
   assert.ok(run.calls.some(([name, screen]) => name === "screen" && screen === "create"));
@@ -255,14 +265,14 @@ test(`restored ${state} creation chooses the destination again and checks source
   assert.deepEqual(run.calls.filter(([name]) => ["save", "inspect", "confirm", "plan", "space"].includes(name))
     .map(([name]) => name), ["save", "inspect", "confirm", "plan", "space", "space"]);
   assert.equal(run.calls.find(([name]) => name === "save")[1].defaultPath, spec.dest);
-  const pending = run.context.pendingCreateSubmission;
+  const pending = run.createPreflight.state.pending;
   assert.equal(pending.spec.replacement_guard, "fresh-authorization");
   assert.equal(pending.spec.replace_existing, true);
   assert.equal(pending.spec.password, null);
   assert.equal(pending.spec.level, 4);
   assert.equal(pending.spec.split_size, 123456789);
   assert.equal(pending.spec.split_mode, "native");
-  assert.equal(run.context.createPreflightPhase, "reviewing");
+  assert.equal(run.createPreflight.state.phase, "reviewing");
 });
 }
 
@@ -282,16 +292,17 @@ test("creation review respects format variants, current platform capability and 
   assert.equal(sfx.context.createSplitPreset, "none");
   assert.equal(sfx.captureCreateRunDraft().suggestedDestination, "/output/Installer.app");
   for (const setup of [
-    (run) => { run.context.createSourcesLocked = () => true; },
+    (run) => run.createPreflight.start(["/unrelated"], "dialog", run.captureCreateRunDraft()),
     (run) => { run.context.createConfigurationPending = () => true; },
     (run) => { run.context.sfxCreateCapability.available = false; },
     (run) => { run.context.sfxCreateCapability.target = "windows"; },
   ]) {
     const run = harness();
-    setup(run);
+    await setup(run);
+    const destination = run.createPreflight.state.destination;
     run.reviewTask({ id: 8, state: "failed", spec: taskSpec({ sfx_target: "macos" }) });
     assert.equal(run.context.createSources[0].path, "/unrelated");
-    assert.equal(run.context.lastCreateDest, "/unrelated.zip");
+    assert.equal(run.createPreflight.state.destination, destination);
     assert.equal(run.calls.some(([name]) => name === "screen" || name === "dismiss"), false);
   }
   const unsupported = harness();
@@ -405,7 +416,13 @@ test("creation review respects format variants, current platform capability and 
   assert.equal(run.calls.filter(([name]) => name === "convert-submit").length, 1);
   assert.equal(run.calls.some(([name]) => name === "plan"), false);
 
-  run.context.createPreflightPhase = "submitting";
+  await run.createPreflight.start(taskSpec().inputs, "dialog", run.captureCreateRunDraft());
+  const createSubmission = deferred();
+  let createSubmitting = false;
+  run.context.submitJob = () => { createSubmitting = true; return createSubmission.promise; };
+  const confirmingCreate = run.createPreflight.confirm();
+  await waitFor(() => createSubmitting);
+  assert.equal(run.createPreflight.state.phase, "submitting");
   run.context.taskCenterOpen = true;
   run.context.taskCenterSelectedTaskId = 8;
   run.context.taskCenterFocusTaskId = 8;
@@ -417,7 +434,7 @@ test("creation review respects format variants, current platform capability and 
     await run.reviewTask(task);
     assert.deepEqual(createDraft(), submittingDraft);
     assert.equal(run.context.screen, "create");
-    assert.equal(run.context.createPreflightPhase, "submitting");
+    assert.equal(run.createPreflight.state.phase, "submitting");
     assert.equal(run.context.recoverySourceOverride, "/unrelated/recovery.zip");
     assert.equal(run.context.recoveryPar2Override, "/unrelated/recovery.par2");
     assert.equal(run.context.securitySettingsFocusPending, false);
@@ -429,6 +446,8 @@ test("creation review respects format variants, current platform capability and 
     assert.equal(run.calls.slice(callsBeforeReview).some(([name]) => ["focus", "focus-security", "restore-focus", "convert-submit"].includes(name)), false);
     assert.match(run.calls.at(-1)[1], /finishes adding this create task/);
   }
+  createSubmission.resolve(42);
+  await confirmingCreate;
 });
 
 test("edited formats adapt the original output suggestion and cancelled selection never creates a plan", async () => {
@@ -439,11 +458,12 @@ test("edited formats adapt the original output suggestion and cancelled selectio
   assert.equal(run.captureCreateRunDraft().suggestedDestination, "/output/my.backup.7z");
   assert.equal(run.createSuggestedOutputPath("wim", "swm"), "/output/my.backup.swm");
   run.context.saveNativeDialog = async () => null;
-  run.context.finishCreatePreflightWithIssue = (...args) => run.calls.push(["issue", ...args]);
   await run.submitCreateInputs(["/original/reports"], "dialog");
   assert.equal(run.calls.some(([name]) => name === "inspect" || name === "plan"), false);
-  assert.equal(run.context.pendingCreateSubmission, null);
-  assert.equal(run.calls.find(([name]) => name === "issue")[3], "cancelled");
+  assert.equal(run.createPreflight.state.pending, null);
+  assert.equal(run.createPreflight.state.phase, "cancelled");
+  assert.equal(run.createPreflight.state.issueStage, "destination");
+  assert.match(run.calls.findLast(([name]) => name === "notice")[1], /Destination selection cancelled/);
 });
 
 function deferred() {
@@ -470,7 +490,6 @@ function creationPreparation({ stop = null, pauseNewPlan = false, automaticDesti
   const newerPlan = deferred();
   let hit = false;
   let newerPlanHit = false;
-  let request = 0;
   const invoke = (label, value, detail) => {
     run.calls.push([label, detail]);
     if (label === "plan" && pauseNewPlan && detail.inputs[0] === "/new/source.txt") {
@@ -495,10 +514,9 @@ function creationPreparation({ stop = null, pauseNewPlan = false, automaticDesti
   run.context.saveNativeDialog = (_purpose, _save, options) => invoke("save", options.defaultPath, options);
   run.context.openNativeDialog = (_purpose, _open, options) => invoke("open", ["/picked/source.txt"], options);
   run.context.ensureCreatePreflightListener = () => invoke(
-    run.context.createPreflightPhase === "measuring" ? "source-listener" : "destination-listener",
+    run.createPreflight.state.phase === "measuring" ? "source-listener" : "destination-listener",
     undefined,
   );
-  run.context.nextPreflightRequestId = () => `request-${++request}`;
   run.context.ipc = {
     inspectCreateDestination: (path, split, requestId) => invoke("inspection", {
       conflict: true, guard: "current-output",
@@ -510,32 +528,33 @@ function creationPreparation({ stop = null, pauseNewPlan = false, automaticDesti
     checkDiskSpace: (path, bytes) => invoke(bytes === 20 ? "workspace-space"
       : bytes === 30 ? "system-temp-space" : "destination-space", { ok: true, available_bytes: 10000 }, { path, bytes }),
   };
-  run.context.tick = () => run.context.screen === "create" && run.context.createPreflightPhase === "reviewing"
+  run.context.tick = () => run.context.screen === "create" && run.createPreflight.state.phase === "reviewing"
     ? invoke("review-tick", undefined) : run.context.createPrimaryFocusPending
       ? invoke("primary-focus-tick", undefined) : Promise.resolve();
   return { run, blocked, newerPlan, plan, reached: () => hit, newPlanReached: () => newerPlanHit };
 }
 
 function preparationState(run) {
+  const state = run.createPreflight.state;
   return {
-    owner: run.context.createOutputPreparation,
-    picker: run.context.createSourcePicker,
-    phase: run.context.createPreflightPhase,
-    requestId: run.context.createPreflightRequestId,
-    requestKind: run.context.createPreflightRequestKind,
-    scanned: run.context.createPreflightScanned,
-    processedBytes: run.context.createPreflightProcessedBytes,
-    cancelling: run.context.createPreflightCancelPending,
+    owner: state.owner,
+    picker: state.picker,
+    phase: state.phase,
+    requestId: state.requestId,
+    requestKind: state.requestKind,
+    scanned: state.scanned,
+    processedBytes: state.processedBytes,
+    cancelling: state.cancelPending,
     primaryFocusPending: run.context.createPrimaryFocusPending,
-    current: run.context.createPreflightCurrent,
-    issue: run.context.createPreflightIssue,
-    issueStage: run.context.createPreflightIssueStage,
-    plan: run.context.lastCreatePlan,
-    dest: run.context.lastCreateDest,
-    workspace: run.context.lastTempDiskSpace,
-    systemTemp: run.context.lastSystemTempDiskSpace,
-    disk: run.context.lastDiskSpace,
-    pending: run.context.pendingCreateSubmission,
+    current: state.current,
+    issue: state.issue,
+    issueStage: state.issueStage,
+    plan: state.plan,
+    dest: state.destination,
+    workspace: state.workspaceDisk,
+    systemTemp: state.systemTempDisk,
+    disk: state.destinationDisk,
+    pending: state.pending,
     noticeCount: run.calls.filter(([name]) => name === "notice").length,
     focusCount: run.calls.filter(([name]) => name === "review-focus" || name === "focus" || name === "primary-focus").length,
   };
@@ -554,8 +573,8 @@ test("create preparation abandons every late boundary and preserves a newer prep
       await waitFor(reached, stage);
       run.setScreen("browse");
       assert.equal(run.context.screen, "browse", stage);
-      assert.equal(run.context.createOutputPreparation, null, stage);
-      assert.equal(run.context.pendingCreateSubmission, null, stage);
+      assert.equal(run.createPreflight.state.owner, null, stage);
+      assert.equal(run.createPreflight.state.pending, null, stage);
       run.setScreen("create");
       assert.equal(run.restoreCreateTaskDraft(taskSpec({ inputs: ["/new/source.txt"],
         dest: "/new-output/new.zip", level: 6, split_size: null })), true);
@@ -573,11 +592,11 @@ test("create preparation abandons every late boundary and preserves a newer prep
       const newSpec = run.calls.findLast(([name, detail]) => name === "plan" && detail.inputs[0] === "/new/source.txt")[1];
       newerPlan.resolve(plan(newSpec));
       await second;
-      assert.equal(run.context.createPreflightPhase, "reviewing", stage);
-      assert.equal(run.context.createOutputPreparation, null, stage);
-      assert.deepEqual(Array.from(run.context.pendingCreateSubmission.spec.inputs), ["/new/source.txt"], stage);
-      assert.equal(run.context.pendingCreateSubmission.spec.level, 6, stage);
-      assert.equal(run.context.pendingCreateSubmission.spec.dest, "/new-output/new.zip", stage);
+      assert.equal(run.createPreflight.state.phase, "reviewing", stage);
+      assert.equal(run.createPreflight.state.owner, null, stage);
+      assert.deepEqual(Array.from(run.createPreflight.state.pending.spec.inputs), ["/new/source.txt"], stage);
+      assert.equal(run.createPreflight.state.pending.spec.level, 6, stage);
+      assert.equal(run.createPreflight.state.pending.spec.dest, "/new-output/new.zip", stage);
     }
   }
   for (const change of ["mode", "source"]) {
@@ -586,10 +605,10 @@ test("create preparation abandons every late boundary and preserves a newer prep
     await waitFor(reached, "source plan before context invalidation");
     if (change === "mode") run.setMode("classic");
     else run.appendCreateSources(["/new/source.txt"], "file");
-    run.runCreatePreparationEffects();
-    assert.equal(run.context.createOutputPreparation, null, change);
-    assert.equal(run.context.createPreflightPhase, "idle", change);
-    assert.equal(run.createPreflightBusy(), false, change);
+    run.syncCreatePreflightContext();
+    assert.equal(run.createPreflight.state.owner, null, change);
+    assert.equal(run.createPreflight.state.phase, "idle", change);
+    assert.equal(run.createPreflight.busy(), false, change);
     const retained = preparationState(run);
     blocked.resolve(blocked.value);
     await preparing;
@@ -604,7 +623,7 @@ test("create source choosing retains new sources, ignores stale errors and clear
       const first = run.submitCreateJob("files");
       await waitFor(reached, stage);
       run.setScreen("browse");
-      assert.equal(run.context.createSourcePicker, null);
+      assert.equal(run.createPreflight.state.picker, null);
       run.setScreen("create");
       run.restoreCreateTaskDraft(taskSpec({ inputs: ["/new/source.txt"], dest: "/new-output/new.zip", split_size: null }));
       const newer = deferred();
@@ -612,19 +631,19 @@ test("create source choosing retains new sources, ignores stale errors and clear
       run.context.openNativeDialog = () => { newerOpened = true; return newer.promise; };
       const second = run.submitCreateJob("folder");
       await waitFor(() => newerOpened, "new source chooser");
-      const picker = run.context.createSourcePicker;
+      const picker = run.createPreflight.state.picker;
       const notices = run.calls.filter(([name]) => name === "notice").length;
       const calls = run.calls.length;
       if (rejects) blocked.reject(new Error("Old source chooser failed"));
       else blocked.resolve(blocked.value);
       await first;
-      assert.equal(run.context.createSourcePicker, picker);
+      assert.equal(run.createPreflight.state.picker, picker);
       assert.deepEqual(Array.from(run.context.createSources, (source) => source.path), ["/new/source.txt"]);
       assert.equal(run.calls.filter(([name]) => name === "notice").length, notices);
       assert.equal(run.calls.length, calls);
       newer.resolve(["/new/folder"]);
       await second;
-      assert.equal(run.context.createSourcePicker, null);
+      assert.equal(run.createPreflight.state.picker, null);
       assert.deepEqual(Array.from(run.context.createSources, (source) => source.path), ["/new/source.txt", "/new/folder"]);
       assert.equal(run.context.createSources[1].kind, "folder");
     }
@@ -635,20 +654,20 @@ test("create source choosing retains new sources, ignores stale errors and clear
   run.context.openNativeDialog = async () => null;
   await run.submitCreateJob("files");
   assert.equal(run.context.createSources, sourcesBeforeCancel);
-  assert.equal(run.context.createSourcePicker, null);
+  assert.equal(run.createPreflight.state.picker, null);
   assert.match(run.calls.at(-1)[1], /Source selection cancelled/);
 
   for (const change of ["mode", "source", "preset"]) {
     const { run: pending, blocked, reached } = creationPreparation({ stop: "open" });
     const choosing = pending.submitCreateJob("files");
     await waitFor(reached, "source chooser before a draft change");
-    const picker = pending.context.createSourcePicker;
+    const picker = pending.createPreflight.state.picker;
     const sourceRoots = pending.context.createSources;
     pending.appendCreateSources(taskSpec().inputs, "unknown");
     assert.equal(pending.context.createSources, sourceRoots, "unchanged roots keep their identity");
-    assert.equal(pending.context.createSourcePicker, picker, "a duplicate source is not a new intent");
+    assert.equal(pending.createPreflight.state.picker, picker, "a duplicate source is not a new intent");
     assert.equal(pending.restoreCreateTaskDraft(taskSpec({ dest: "/unsupported.tar" })), false);
-    assert.equal(pending.context.createSourcePicker, picker, "a blocked review keeps its owner");
+    assert.equal(pending.createPreflight.state.picker, picker, "a blocked review keeps its owner");
 
     pending.context.presetDocument = { presets: [{ id: "invalid", kind: "create", label: "Invalid",
       options: { format: "rar", output: { kind: "archive" } } },
@@ -659,19 +678,19 @@ test("create source choosing retains new sources, ignores stale errors and clear
       destination: { base: "ask", existing_output: "ask" }, completion: "none", post_success: "keep_source", test_after_create: false,
     } }] };
     pending.applyCreatePreset("invalid", false);
-    assert.equal(pending.context.createSourcePicker, picker, "an unavailable preset keeps its owner");
+    assert.equal(pending.createPreflight.state.picker, picker, "an unavailable preset keeps its owner");
     if (change === "mode") {
       pending.setMode("classic");
-      pending.runCreatePreparationEffects();
+      pending.syncCreatePreflightContext();
     } else if (change === "source") {
       pending.appendCreateSources(["/new/source.txt"], "file");
-      pending.runCreatePreparationEffects();
+      pending.syncCreatePreflightContext();
     } else {
       pending.applyCreatePreset("replacement", false);
       assert.equal(pending.context.customCreateLevel, 2);
       assert.equal(pending.context.selectedCreatePresetId, "replacement");
     }
-    assert.equal(pending.context.createSourcePicker, null, `${change} ends the old chooser`);
+    assert.equal(pending.createPreflight.state.picker, null, `${change} ends the old chooser`);
     const retainedRoots = pending.context.createSources;
     const retained = preparationState(pending);
     blocked.resolve(blocked.value);
@@ -681,34 +700,91 @@ test("create source choosing retains new sources, ignores stale errors and clear
   }
 });
 
-test("same-page creation completes all checks, cancels cleanly and retains an in-flight submission when navigation is requested", async () => {
+test("same-page creation completes all checks, cancels cleanly and retains an in-flight submission when navigation is requested", async (t) => {
+  const originalSetTimeout = globalThis.setTimeout;
+  t.after(() => { globalThis.setTimeout = originalSetTimeout; });
+  const { render } = await server.ssrLoadModule("svelte/server");
+  const { default: CreateWorkspace } = await server.ssrLoadModule("/src/components/CreateWorkspace.svelte");
+  const workspaceSurface = (run, variant) => {
+    const state = run.createPreflight.state;
+    const tr = run.context.tr;
+    const fields = { variant, tr };
+    const sourceAction = { label: "Add sources", disabled: true, busy: false, title: "", onSelect() {} };
+    return {
+      tr,
+      sources: { ariaLabel: "Sources", heading: "Sources", description: "", countLabel: "",
+        selectionLabel: "", selectAllLabel: "", emptyTitle: "Sources", emptyBody: "",
+        removeSelectedLabel: "", keepUntilQueuedLabel: "", lockedReason: "", rows: [],
+        selectedCount: 0, allSelected: false, mixedSelection: false,
+        addFiles: sourceAction, addFolders: sourceAction, review: sourceAction },
+      profiles: [], formats: [], formatNote: "", sqzPayload: null,
+      compression: { level: 4, detail: "", method: "", custom: null },
+      setupSummary: { variant, ariaLabel: "Create setup", eyebrow: "", heading: "", items: [] },
+      preset: { ...fields, instanceId: `${variant}-create`, kind: "create", options: [], selectedId: null,
+        draftName: "", summary: "", status: "idle", statusLabel: "", isDefault: false, isFileManagerDefault: false },
+      advanced: { open: false },
+      output: { ...fields, instanceId: `${variant}-create-output`, destination: "ask", completion: "none",
+        postSuccess: "keep_source", testAfterCreate: false, testAfterCreateRequired: false,
+        outputPreview: "", defaultFolder: "", fileManager: "Finder", trashName: "Trash" },
+      content: { ...fields, value: "keep_all_files", rulesText: "", rules: [] },
+      recovery: { capability: "", disabled: false, disabledReason: "" },
+      sfx: { ...fields, enabled: false, available: true, targetLabel: "macOS", outputLabel: ".app",
+        summary: "", signingWarning: "", unavailableMessage: "" },
+      protection: { ...fields, password: "", passwordConfirmation: "", passwordVisible: false,
+        encryptionEnabled: false, encryptNames: false, canEncryptData: false, canEncryptNames: false,
+        splitDisabled: false, splitPreset: "none", splitMode: "generic", nativeSplitKind: null,
+        customSplitAmount: "100", customSplitUnit: "mib", passwordCapability: "",
+        nameEncryptionCapability: "", splitCapability: "", splitSummary: "", passwordError: "", splitError: "" },
+      showPreflight: state.phase !== "idle",
+      preflight: { variant, phase: state.phase, ariaLabel: "Create preflight status", heading: "Before compression",
+        statusLabel: run.createPreflightPhaseLabel(), lockMessage: run.createSourcesLockedReason(),
+        actionLabel: run.createDestinationInspectionCancellable() ? run.createDestinationInspectionCancelLabel() : "",
+        actionPending: state.cancelPending, issue: state.issue, steps: run.createPreflightSteps(),
+        onAction: () => run.createPreflight.cancelDestination() },
+      review: state.pending && state.plan ? { variant, ariaLabel: "Create plan review", eyebrow: "Checked and ready",
+        heading: "Review before creating", description: "", outputName: state.plan.primary_output, items: [],
+        confirmLabel: "Create now", cancelLabel: "Cancel plan", busy: state.phase === "submitting",
+        onConfirm: run.confirmCreatePlan, onCancel: run.cancelCreatePlanReview } : null,
+      classic: { archiveName: "backup.zip", activeSection: "general", sections: [], recoveryCapability: "",
+        updateMode: "", featuredFormats: [] },
+    };
+  };
+  const workspaceBody = (run, variant) => render(CreateWorkspace, {
+    props: { variant, surface: workspaceSurface(run, variant) },
+  }).body;
   const { run } = creationPreparation();
   const firstDraft = run.captureCreateRunDraft();
   await run.submitCreateInputs(taskSpec().inputs, "dialog");
   assert.deepEqual(run.calls.filter(([name]) => ["save", "inspection", "confirm", "plan", "workspace-space",
     "system-temp-directory", "system-temp-space", "destination-space"].includes(name)).map(([name]) => name),
   ["save", "inspection", "confirm", "plan", "workspace-space", "system-temp-directory", "system-temp-space", "destination-space"]);
-  assert.equal(run.context.createPreflightPhase, "reviewing");
-  assert.equal(run.context.lastCreatePlan.entries, 2);
-  assert.equal(run.context.createPreflightScanned, 3);
-  assert.equal(run.context.pendingCreateSubmission.spec.level, firstDraft.level);
-  assert.equal(run.context.pendingCreateSubmission.spec.replacement_guard, "current-output");
-  assert.equal(run.context.createOutputPreparation, null);
+  assert.equal(run.createPreflight.state.phase, "reviewing");
+  assert.equal(run.createPreflight.state.plan.entries, 2);
+  assert.equal(run.createPreflight.state.scanned, 3);
+  assert.equal(run.createPreflight.state.pending.spec.level, firstDraft.level);
+  assert.equal(run.createPreflight.state.pending.spec.replacement_guard, "current-output");
+  assert.equal(run.createPreflight.state.owner, null);
   assert.equal(run.calls.filter(([name]) => name === "review-focus").length, 1);
+  for (const variant of ["modern", "classic"]) {
+    const body = workspaceBody(run, variant);
+    assert.match(body, /create-plan-review/);
+    assert.doesNotMatch(body, /create-preflight-action|Reading current output again|Rechecking the current output/);
+    if (variant === "modern") assert.doesNotMatch(body, /create-preflight-status/);
+  }
   run.cancelCreatePlanReview();
-  assert.equal(run.context.pendingCreateSubmission, null);
-  assert.equal(run.context.lastCreatePlan, null);
-  assert.equal(run.context.createPreflightPhase, "idle");
+  assert.equal(run.createPreflight.state.pending, null);
+  assert.equal(run.createPreflight.state.plan, null);
+  assert.equal(run.createPreflight.state.phase, "idle");
   assert.equal(run.calls.some(([name]) => name === "submit"), false);
 
   run.context.saveNativeDialog = async () => null;
   await run.submitCreateInputs(taskSpec().inputs, "dialog");
-  assert.equal(run.context.createPreflightPhase, "cancelled");
-  assert.equal(run.context.createOutputPreparation, null);
-  assert.equal(run.context.pendingCreateSubmission, null);
+  assert.equal(run.createPreflight.state.phase, "cancelled");
+  assert.equal(run.createPreflight.state.owner, null);
+  assert.equal(run.createPreflight.state.pending, null);
   run.context.saveNativeDialog = async (_purpose, _save, options) => options.defaultPath;
   await run.submitCreateInputs(taskSpec().inputs, "dialog");
-  const pending = run.context.pendingCreateSubmission;
+  const pending = run.createPreflight.state.pending;
   const submission = deferred();
   let submitted;
   run.context.submitJob = (spec) => { submitted = spec; return submission.promise; };
@@ -716,29 +792,75 @@ test("same-page creation completes all checks, cancels cleanly and retains an in
   await waitFor(() => Boolean(submitted), "queue submission");
   run.setScreen("browse");
   assert.equal(run.context.screen, "create");
-  assert.equal(run.context.pendingCreateSubmission, pending);
-  assert.equal(run.context.createPreflightPhase, "submitting");
+  assert.equal(run.createPreflight.state.pending, pending);
+  assert.equal(run.createPreflight.state.phase, "submitting");
   assert.match(run.calls.at(-1)[1], /finishes adding this create task/);
   submission.resolve(42);
   await confirming;
-  assert.equal(run.context.createPreflightPhase, "ready");
-  assert.equal(run.context.pendingCreateSubmission, null);
+  assert.equal(run.createPreflight.state.phase, "ready");
+  assert.equal(run.createPreflight.state.pending, null);
   assert.equal(run.context.createSources.length, 0);
   assert.deepEqual(JSON.parse(JSON.stringify(submitted)), taskSpec({ split_size: null, split_mode: "generic",
     replacement_guard: "current-output" }));
 
+  const rechecking = creationPreparation();
+  await rechecking.run.submitCreateInputs(taskSpec().inputs, "dialog");
+  const reinspection = deferred();
+  let reinspectionStarted = false;
+  rechecking.run.context.ipc.inspectCreateDestination = () => {
+    reinspectionStarted = true;
+    return reinspection.promise;
+  };
+  const reconfirming = rechecking.run.confirmCreatePlan();
+  await waitFor(() => reinspectionStarted, "confirmed output reinspection");
+  const requestId = rechecking.run.createPreflight.state.requestId;
+  assert.ok(requestId);
+  assert.equal(rechecking.run.createPreflight.state.phase, "submitting");
+  assert.equal(rechecking.run.createPreflight.state.requestKind, "destination");
+  assert.equal(rechecking.run.createPreflight.applyEvent({ request_id: requestId, phase: "destination",
+    processed_bytes: 2048, current: "/output/backup.zip" }), true);
+  const cancellationButton = (body) => body.match(/<button\b[^>]*class="[^"]*\bcreate-preflight-action\b[^"]*"[^>]*>[\s\S]*?<\/button>/)?.[0];
+  for (const variant of ["modern", "classic"]) {
+    const body = workspaceBody(rechecking.run, variant);
+    assert.match(body, /create-plan-review/);
+    assert.match(body, /create-preflight-status phase-submitting/);
+    assert.match(body, /Rechecking the current output/);
+    assert.match(body, /Reading current output again · 2048 B/);
+    assert.match(body, /Current · \/output\/backup\.zip/);
+    const button = cancellationButton(body);
+    assert.ok(button, `${variant} output reinspection keeps its cancellation entry`);
+    assert.match(button, /Cancel output check/);
+    assert.doesNotMatch(button, /\bdisabled\b/);
+    assert.match(button, /aria-busy="false"/);
+  }
+  await workspaceSurface(rechecking.run, "modern").preflight.onAction();
+  assert.equal(rechecking.run.createPreflight.state.cancelPending, true);
+  assert.equal(rechecking.run.calls.findLast(([name]) => name === "cancel-inspection")[1], requestId);
+  for (const variant of ["modern", "classic"]) {
+    const button = cancellationButton(workspaceBody(rechecking.run, variant));
+    assert.ok(button, `${variant} pending cancellation remains visible`);
+    assert.match(button, /\bdisabled\b/);
+    assert.match(button, /aria-busy="true"/);
+    assert.match(button, /Stopping the output check/);
+  }
+  reinspection.resolve({ conflict: true, guard: "current-output" });
+  await reconfirming;
+  assert.equal(rechecking.run.createPreflight.state.phase, "reviewing");
+  assert.ok(rechecking.run.createPreflight.state.pending);
+  assert.equal(rechecking.run.calls.some(([name]) => name === "submit"), false);
+
   const cancelled = creationPreparation({ stop: "inspection" });
   const checking = cancelled.run.submitCreateInputs(taskSpec().inputs, "dialog");
   await waitFor(cancelled.reached, "cancellable output inspection");
-  await cancelled.run.cancelCreateDestinationInspection();
-  assert.equal(cancelled.run.context.createPreflightCancelPending, true);
+  await cancelled.run.createPreflight.cancelDestination();
+  assert.equal(cancelled.run.createPreflight.state.cancelPending, true);
   cancelled.blocked.resolve(cancelled.blocked.value);
   await checking;
-  assert.equal(cancelled.run.context.createPreflightPhase, "cancelled");
-  assert.equal(cancelled.run.context.createOutputPreparation, null);
-  assert.equal(cancelled.run.context.pendingCreateSubmission, null);
-  assert.equal(cancelled.run.context.createPreflightRequestId, null);
-  assert.equal(cancelled.run.context.createPreflightCancelPending, false);
+  assert.equal(cancelled.run.createPreflight.state.phase, "cancelled");
+  assert.equal(cancelled.run.createPreflight.state.owner, null);
+  assert.equal(cancelled.run.createPreflight.state.pending, null);
+  assert.equal(cancelled.run.createPreflight.state.requestId, null);
+  assert.equal(cancelled.run.createPreflight.state.cancelPending, false);
   assert.equal(cancelled.run.calls.some(([name]) => name === "plan" || name === "submit"), false);
   assert.match(cancelled.run.calls.findLast(([name]) => name === "notice")[1], /Output check cancelled/);
   assert.equal(cancelled.run.calls.filter(([name]) => name === "primary-focus").length, 1);
@@ -753,8 +875,8 @@ test("same-page creation completes all checks, cancels cleanly and retains an in
     return inspection.promise;
   };
   const oldPreparation = delayedFocus.run.submitCreateInputs(taskSpec().inputs, "dialog");
-  await waitFor(() => delayedFocus.run.context.createPreflightRequestKind === "destination", "inspection before focus cancellation");
-  await delayedFocus.run.cancelCreateDestinationInspection();
+  await waitFor(() => delayedFocus.run.createPreflight.state.requestKind === "destination", "inspection before focus cancellation");
+  await delayedFocus.run.createPreflight.cancelDestination();
   inspection.resolve({ conflict: true, guard: "current-output" });
   await waitFor(delayedFocus.reached, "cancelled inspection focus tick");
   delayedFocus.run.setScreen("browse");
@@ -771,33 +893,26 @@ test("same-page creation completes all checks, cancels cleanly and retains an in
   const newSpec = delayedFocus.run.calls.findLast(([name]) => name === "plan")[1];
   delayedFocus.newerPlan.resolve(delayedFocus.plan(newSpec));
   await newPreparation;
-  assert.equal(delayedFocus.run.context.createPreflightPhase, "reviewing");
-  assert.deepEqual(Array.from(delayedFocus.run.context.pendingCreateSubmission.spec.inputs), ["/new/source.txt"]);
+  assert.equal(delayedFocus.run.createPreflight.state.phase, "reviewing");
+  assert.deepEqual(Array.from(delayedFocus.run.createPreflight.state.pending.spec.inputs), ["/new/source.txt"]);
 
   for (const leaveAndReturn of [false, true]) {
     const preview = harness({ navigation: true, preparation: true, preview: true });
     const timer = deferred();
-    preview.context.window = { setTimeout(callback, delay) {
+    globalThis.setTimeout = (callback, delay) => {
       assert.equal(delay, 180);
       preview.calls.push(["preview-cancel-timer", delay]);
       timer.promise.then(callback);
       return 1;
-    } };
-    preview.context.createPreflightPhase = "choosingDest";
-    preview.context.createPreflightRequestId = preview.previewDestinationRequestId;
-    preview.context.createPreflightRequestKind = "destination";
-    preview.context.createPreflightProcessedBytes = 1024;
-    preview.context.createPreflightIssue = "";
-    preview.context.lastCreatePlan = null;
-    preview.context.lastCreateDest = null;
-    preview.context.lastDiskSpace = null;
-    preview.context.lastTempDiskSpace = null;
-    preview.context.lastSystemTempDiskSpace = null;
+    };
+    assert.equal(preview.createPreflight.state.phase, "choosingDest");
+    assert.equal(preview.createPreflight.state.requestKind, "destination");
+    assert.equal(preview.createPreflight.state.processedBytes, 1024);
     const sources = preview.context.createSources;
     const mode = preview.context.mode;
-    const cancelling = preview.cancelCreateDestinationInspection();
+    const cancelling = preview.createPreflight.cancelDestination();
     assert.equal(preview.calls.filter(([name]) => name === "preview-cancel-timer").length, 1);
-    assert.equal(preview.context.createPreflightCancelPending, true);
+    assert.equal(preview.createPreflight.state.cancelPending, true);
     assert.equal(preview.calls.some(([name]) => name === "primary-focus" || name === "notice"), false);
     if (leaveAndReturn) {
       preview.setScreen("browse");
@@ -805,22 +920,22 @@ test("same-page creation completes all checks, cancels cleanly and retains an in
       assert.equal(preview.context.screen, "create");
       assert.equal(preview.context.mode, mode);
       assert.equal(preview.context.createSources, sources);
-      assert.equal(preview.context.createOutputPreparation, null);
+      assert.equal(preview.createPreflight.state.owner, null);
       const retained = preparationState(preview);
       const calls = preview.calls.length;
       timer.resolve();
       await cancelling;
       assert.deepEqual(preparationState(preview), retained, "returning to the same page, mode and sources cannot revive a preview cancellation");
       assert.equal(preview.calls.length, calls);
-      assert.equal(preview.context.createPreflightPhase, "idle");
-      assert.equal(preview.createPreflightBusy(), false);
+      assert.equal(preview.createPreflight.state.phase, "idle");
+      assert.equal(preview.createPreflight.busy(), false);
     } else {
       timer.resolve();
       await cancelling;
-      assert.equal(preview.context.createPreflightPhase, "cancelled");
-      assert.equal(preview.context.createOutputPreparation, null);
-      assert.equal(preview.context.createPreflightRequestId, null);
-      assert.equal(preview.context.createPreflightCancelPending, false);
+      assert.equal(preview.createPreflight.state.phase, "cancelled");
+      assert.equal(preview.createPreflight.state.owner, null);
+      assert.equal(preview.createPreflight.state.requestId, null);
+      assert.equal(preview.createPreflight.state.cancelPending, false);
       assert.equal(preview.context.createSources, sources);
       assert.equal(preview.calls.filter(([name]) => name === "primary-focus").length, 1);
       assert.match(preview.calls.findLast(([name]) => name === "notice")[1], /Output check cancelled/);

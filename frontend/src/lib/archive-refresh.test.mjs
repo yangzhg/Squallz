@@ -138,7 +138,7 @@ async function passwordRefreshActions(archive) {
     archiveOpenStatus: "idle", archiveOpenGeneration: 7, archivePasswordAttempt: 0,
     archivePickerRequest: null,
     recoveryPickerStatus: "idle", recoveryPickerRequest: 0, recoveryOutputPreparation: null,
-    dismissCreatePreparation() {},
+    dismissCreatePreparation() {}, syncCreatePreflightContext() {},
     dismissArchiveAddPreparation() {},
     archiveUpdateReview: { cancelSourceChoice() {} },
     batchPickerRequest: 0, nestedExtractPickerRequest: 0,

@@ -17,7 +17,8 @@ function harness() {
   const declarations = source.statements.filter((node) => ts.isFunctionDeclaration(node) && names.includes(node.name?.text));
   const context = {
     jobRows: [], duplicateReportTaskId: null, taskWindowMode: false,
-    screen: "duplicates", createPreflightPhase: "idle", convertRouteHandle: null,
+    screen: "duplicates", convertRouteHandle: null,
+    createPreflight: { canLeave: () => true, state: { phase: "idle" } },
     duplicateMinSize: 1048576, duplicateMinSizeError: "", duplicateExcludeText: "cache",
     duplicateScanTarget: () => "/new-scan", duplicateScanTargetName: () => "new-scan", duplicateScanTargetLabel: () => "/new-scan",
     duplicateExcludeRules: () => ["cache"], focusBlockingTaskIfAny: () => false,

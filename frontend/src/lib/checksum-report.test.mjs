@@ -73,7 +73,8 @@ function reportHarness({ navigation = false } = {}) {
       context.jobRows.push({ id: 20, spec, result: null, state: "queued" });
       return 20;
     },
-    screen: "checksum", mode: "modern", createPreflightPhase: "idle", convertRouteHandle: null,
+    screen: "checksum", mode: "modern", convertRouteHandle: null,
+    createPreflight: { canLeave: () => true, state: { phase: "idle" } },
     archiveOpenStatus: "idle", archivePasswordPrompt: null, previewPasswordPrompt: null,
     taskReviewRequestGeneration: 0, pendingTaskReviewId: null,
     taskCenterOpen: false, taskCenterSelectedTaskId: null, taskCenterFocusTaskId: null,
@@ -82,7 +83,7 @@ function reportHarness({ navigation = false } = {}) {
     taskDialogTask: () => context.jobRows.find((task) => task.id === context.taskDialogTaskId) ?? null,
     archiveUpdateReview: { cancelSourceChoice() {} }, nestedExtractDraftGeneration: 0,
     nestedExtractPickerRequest: 0, batchPickerRequest: 0, pendingArchiveTaskReview: null,
-    pendingCreateSubmission: null, dismissArchivePicker() {}, clearEntryPreviewState() {}, syncUrl() {},
+    dismissArchivePicker() {}, clearEntryPreviewState() {}, syncUrl() {}, syncCreatePreflightContext() {},
     restoreTaskWorkspaceFocus: () => calls.push(["restore-focus"]),
     currentArchive: null, sameFilePath: (left, right) => left === right,
     recoverySourceMode: "selected", recoverySourceOverride: "/previous/recovery.zip",
@@ -443,7 +444,7 @@ test("checksum report navigation and copying stay bound to the selected task", a
     assert.match(run.calls.at(-1)[1], /finishes adding this conversion/);
   }
   run.context.screen = "create";
-  run.context.createPreflightPhase = "submitting";
+  run.context.createPreflight.canLeave = () => false;
   for (const task of targets) {
     selectDetails(task);
     const before = workspace();
@@ -455,7 +456,7 @@ test("checksum report navigation and copying stay bound to the selected task", a
     assert.match(run.calls.at(-1)[1], /finishes adding this create task/);
   }
   run.context.screen = "convert";
-  run.context.createPreflightPhase = "idle";
+  run.context.createPreflight.canLeave = () => true;
   for (const [index, kind] of ["protect", "test"].entries()) {
     const task = { id: 12 + index, state: "done", expanded: false, spec: { kind, path: archive.path }, result: { ok: true } };
     run.context.jobRows.push(task);
