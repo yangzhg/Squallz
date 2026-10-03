@@ -686,6 +686,8 @@ fn macos_app_sfx_requires_a_string_minimum_system_version() {
 
 #[test]
 fn macos_sfx_can_create_its_zip_payload_from_inputs() {
+    use std::io::Read;
+
     let temp = TempDir::new("sfx-macos-inputs");
     let stub = temp.path().join("Squallz.app");
     let input = temp.path().join("readme.txt");
@@ -729,6 +731,80 @@ fn macos_sfx_can_create_its_zip_payload_from_inputs() {
         .file_name()
         .to_string_lossy()
         .contains("sfx-payload")));
+
+    let original_files = [
+        "Contents/MacOS/squallz-gui",
+        "Contents/Info.plist",
+        "Contents/Resources/en.lproj/InfoPlist.strings",
+        "Contents/Resources/squallz-sfx/payload.zip",
+        "Contents/Resources/squallz-sfx/manifest.v1",
+    ]
+    .map(|name| {
+        let path = output.join(name);
+        let bytes = fs::read(&path).unwrap();
+        (path, bytes)
+    });
+    for (name, cancel) in [("cancel.bin", true), ("changed.bin", false)] {
+        let interrupted_input = temp.path().join(name);
+        fs::write(&interrupted_input, vec![0x5a; 512 * 1024]).unwrap();
+        let control = ControlToken::new();
+        let progress = OnceOnEntryProgress::new(name, {
+            let root = temp.path().to_path_buf();
+            let input = interrupted_input.clone();
+            let control = control.clone();
+            move || {
+                let payload = fs::read_dir(&root)
+                    .unwrap()
+                    .map(|entry| entry.unwrap().path())
+                    .find(|path| {
+                        path.file_name()
+                            .unwrap()
+                            .to_string_lossy()
+                            .starts_with(".squallz-sfx-payload-")
+                    })
+                    .unwrap();
+                assert_eq!(payload.extension().unwrap(), "zip");
+                let mut file = fs::File::open(payload).unwrap();
+                let mut header = [0u8; 4];
+                file.read_exact(&mut header).unwrap();
+                assert_eq!(header, *b"PK\x03\x04");
+                if cancel {
+                    control.cancel();
+                } else {
+                    fs::write(&input, b"changed during payload writing").unwrap();
+                }
+            }
+        });
+        let error = engine
+            .create_sfx_from_inputs(
+                &stub,
+                std::slice::from_ref(&interrupted_input),
+                &output,
+                &CreateOptions::default(),
+                &SfxBuildOptions {
+                    overwrite: true,
+                    ..sfx_options
+                },
+                &progress,
+                &control,
+            )
+            .unwrap_err();
+        assert!(progress.fired.load(Ordering::Acquire));
+        if cancel {
+            assert!(matches!(error, FormatError::Cancelled));
+            assert_eq!(fs::metadata(interrupted_input).unwrap().len(), 512 * 1024);
+        } else {
+            assert!(matches!(error, FormatError::Io(_)));
+            assert!(error.to_string().contains("input changed"));
+        }
+        for (path, bytes) in &original_files {
+            assert_eq!(fs::read(path).unwrap(), *bytes);
+        }
+        let entries = engine.list(&output, &OpenOptions::default()).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].path.display, "readme.txt");
+        assert_no_private_sfx_staging(temp.path());
+    }
 
     let split_output = temp.path().join("Split.app");
     let err = engine

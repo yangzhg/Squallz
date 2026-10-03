@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readFile } from "node:fs/promises";
 import vm from "node:vm";
 import ts from "typescript";
 import { createTestServer } from "../../tests/runtime.mjs";
+import { compileTestScript, readSvelteScriptAsync, selectFunctions } from "../../tests/source.mjs";
 
 function row(path, size = 1) {
   return {
@@ -68,8 +68,7 @@ async function withArchive(run, options = {}) {
 }
 
 async function updateRefreshEffect(archive, jobs) {
-  const app = await readFile(new URL("../App.svelte", import.meta.url), "utf8");
-  const source = ts.createSourceFile("App.ts", app.match(/<script lang="ts">([\s\S]*?)<\/script>/u)[1], ts.ScriptTarget.Latest, true);
+  const source = await readSvelteScriptAsync(new URL("../App.svelte", import.meta.url), "App.ts");
   const effect = source.statements.find((node) => ts.isExpressionStatement(node)
     && node.getText(source).startsWith("$effect(") && node.getText(source).includes("refreshedUpdateJobs"));
   assert.ok(effect);
@@ -77,11 +76,9 @@ async function updateRefreshEffect(archive, jobs) {
     "pendingArchiveUpdateJobs", "openArchivePath", "finishOpenedArchive",
     "openArchiveFromDialog", "dismissArchivePicker",
   ]);
-  const helpers = source.statements.filter((node) => ts.isFunctionDeclaration(node) && names.has(node.name?.text));
+  const helpers = selectFunctions(source, names);
   assert.equal(helpers.length, names.size);
-  const { outputText } = ts.transpileModule([...helpers, effect].map((node) => node.getText(source)).join("\n"), {
-    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
-  });
+  const outputText = compileTestScript([...helpers, effect].map((node) => node.getText(source)).join("\n"));
   const pending = [];
   const notices = [];
   const context = {
@@ -123,13 +120,10 @@ function completedUpdate(id, path = "/tmp/refresh.zip") {
 }
 
 async function passwordRefreshActions(archive) {
-  const component = await readFile(new URL("../App.svelte", import.meta.url), "utf8");
-  const source = ts.createSourceFile("App.ts", component.match(/<script lang="ts">([\s\S]*?)<\/script>/u)[1], ts.ScriptTarget.Latest, true);
+  const source = await readSvelteScriptAsync(new URL("../App.svelte", import.meta.url), "App.ts");
   const names = ["cancelTaskReview", "submitPasswordRequest", "cancelPasswordRequest", "dismissArchivePasswordRequest", "dismissArchivePicker", "dismissRecoveryPreparation", "setScreen", "openArchivePath", "archiveEditorVisible", "blockingModalVisible", "archiveEditorBlockedReason"];
-  const declarations = source.statements.filter((node) => ts.isFunctionDeclaration(node) && names.includes(node.name?.text));
-  const { outputText } = ts.transpileModule(declarations.map((node) => node.getText(source)).join("\n"), {
-    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
-  });
+  const declarations = selectFunctions(source, names);
+  const outputText = compileTestScript(declarations.map((node) => node.getText(source)).join("\n"));
   const context = {
     get currentArchive() { return archive.archive(); },
     get archivePasswordPrompt() { return archive.openPasswordPrompt(); },
@@ -865,11 +859,9 @@ test("navigation to a missing folder displays a real parent instead of a phantom
 });
 
 test("virtual rows keep cold and mixed page slots and clamp after the list shrinks", async () => {
-  const component = await readFile(new URL("../App.svelte", import.meta.url), "utf8");
-  const script = component.match(/<script lang="ts">([\s\S]*?)<\/script>/)?.[1];
-  const source = ts.createSourceFile("App.ts", script, ts.ScriptTarget.Latest, true);
-  const declaration = source.statements.find((node) => ts.isFunctionDeclaration(node) && node.name?.text === "browseVirtualWindow");
-  const { outputText } = ts.transpileModule(declaration.getText(source), { compilerOptions: { target: ts.ScriptTarget.ES2022 } });
+  const source = await readSvelteScriptAsync(new URL("../App.svelte", import.meta.url), "App.ts");
+  const [declaration] = selectFunctions(source, ["browseVirtualWindow"]);
+  const outputText = compileTestScript(declaration.getText(source), { target: ts.ScriptTarget.ES2022 });
   for (const total of [0, 1, 25, 501]) {
     const window = vm.runInNewContext(`${outputText}\nbrowseVirtualWindow()`, {
       currentArchive: info(), totalRows: () => total, browseScrollTop: 40_000,
@@ -881,9 +873,9 @@ test("virtual rows keep cold and mixed page slots and clamp after the list shrin
     assert.equal(window.top + (window.end - window.start) * 40 + window.bottom, total * 40);
   }
   const names = ["browseVirtualWindow", "browseEntries", "browsePaddingTop", "browsePaddingBottom", "toDisplayEntry"];
-  const helpers = source.statements.filter((node) => ts.isFunctionDeclaration(node) && names.includes(node.name?.text));
+  const helpers = selectFunctions(source, names);
   const surfaces = ["classicArchiveBrowserSurface", "modernArchiveBrowserSurface"].map((name) => {
-    const surface = source.statements.find((node) => ts.isFunctionDeclaration(node) && node.name?.text === name);
+    const [surface] = selectFunctions(source, [name]);
     const rows = surface.body.statements.find((node) => ts.isVariableStatement(node)
       && node.declarationList.declarations.some((item) => item.name.getText(source) === "rows"));
     const result = surface.body.statements.find((node) => ts.isReturnStatement(node)).expression;
@@ -893,9 +885,7 @@ test("virtual rows keep cold and mixed page slots and clamp after the list shrin
     assert.equal(fields.length, 5);
     return `function ${name}Rows() { ${rows.getText(source)} return { ${fields.map((node) => node.getText(source)).join(",")} }; }`;
   });
-  const runtime = ts.transpileModule([...helpers.map((node) => node.getText(source)), ...surfaces].join("\n"), {
-    compilerOptions: { target: ts.ScriptTarget.ES2022 },
-  }).outputText;
+  const runtime = compileTestScript([...helpers.map((node) => node.getText(source)), ...surfaces].join("\n"), { target: ts.ScriptTarget.ES2022 });
   await withArchive(async ({ archive, ipc, requests }) => {
     const cached = Array.from({ length: 500 }, (_, index) => row(`entry-${index}.txt`));
     archive.installArchivePreview(info(), cached, { total: 10_000 });

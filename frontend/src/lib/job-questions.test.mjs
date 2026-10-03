@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { webcrypto } from "node:crypto";
-import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import ts from "typescript";
 import { createTestServer } from "../../tests/runtime.mjs";
+import { compileTestScript, readSvelteScript, selectFunctions } from "../../tests/source.mjs";
 
 function snapshot(id, version, kind = "password") {
   const prompt = kind === "password"
@@ -340,13 +340,10 @@ test("late control failures cannot clear a newer request or report a completed r
 });
 
 test("task control notices wait for acceptance and do not outlive the pending action", async () => {
-  const app = readFileSync(new URL("../App.svelte", import.meta.url), "utf8");
-  const source = ts.createSourceFile("App.ts", app.match(/<script lang="ts">([\s\S]*?)<\/script>/)[1], ts.ScriptTarget.Latest, true);
+  const source = readSvelteScript(new URL("../App.svelte", import.meta.url), "App.ts");
   const actions = [["pauseCurrentTask", "pauseTask", "pause"], ["resumeCurrentTask", "resumeTask", "resume"], ["cancelCurrentTask", "cancelTask", "cancel"]];
-  const declarations = source.statements.filter((node) => ts.isFunctionDeclaration(node) && actions.some(([name]) => node.name?.text === name));
-  const { outputText } = ts.transpileModule(declarations.map((node) => node.getText(source)).join("\n"), {
-    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
-  });
+  const declarations = selectFunctions(source, actions.map(([name]) => name));
+  const outputText = compileTestScript(declarations.map((node) => node.getText(source)).join("\n"));
   for (const [handler, control, intent] of actions) {
     for (const outcome of ["accepted", "failed", "confirmed", "superseded"]) {
       let finish;
@@ -455,13 +452,10 @@ test("failed answers survive a failed refresh and never revive a cleared or newe
 });
 
 test("question actions preserve the workspace and report success only after acknowledgement", async () => {
-  const app = readFileSync(new URL("../App.svelte", import.meta.url), "utf8");
-  const source = ts.createSourceFile("App.ts", app.match(/<script lang="ts">([\s\S]*?)<\/script>/)[1], ts.ScriptTarget.Latest, true);
+  const source = readSvelteScript(new URL("../App.svelte", import.meta.url), "App.ts");
   const names = ["submitTaskPasswordRequest", "cancelTaskPasswordRequest", "answerConflictDecision"];
-  const declarations = source.statements.filter((node) => ts.isFunctionDeclaration(node) && [...names, "isCurrentTaskPasswordPrompt", "isCurrentTaskConflictPrompt"].includes(node.name?.text));
-  const { outputText } = ts.transpileModule(declarations.map((node) => node.getText(source)).join("\n"), {
-    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
-  });
+  const declarations = selectFunctions(source, [...names, "isCurrentTaskPasswordPrompt", "isCurrentTaskConflictPrompt"]);
+  const outputText = compileTestScript(declarations.map((node) => node.getText(source)).join("\n"));
   for (const action of names) {
     for (const outcome of ["failure", "accepted", "next-password", "next-conflict"]) {
       const calls = [];
@@ -504,13 +498,10 @@ test("question actions preserve the workspace and report success only after ackn
 });
 
 test("conflict controls answer only the question shown by their task surface", async () => {
-  const app = readFileSync(new URL("../App.svelte", import.meta.url), "utf8");
-  const source = ts.createSourceFile("App.ts", app.match(/<script lang="ts">([\s\S]*?)<\/script>/)[1], ts.ScriptTarget.Latest, true);
+  const source = readSvelteScript(new URL("../App.svelte", import.meta.url), "App.ts");
   const names = ["taskDialogSurface", "taskCenterDetailSurface", "answerConflictDecision", "isCurrentTaskConflictPrompt"];
-  const declarations = source.statements.filter((node) => ts.isFunctionDeclaration(node) && names.includes(node.name?.text));
-  const { outputText } = ts.transpileModule(declarations.map((node) => node.getText(source)).join("\n"), {
-    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
-  });
+  const declarations = selectFunctions(source, names);
+  const outputText = compileTestScript(declarations.map((node) => node.getText(source)).join("\n"));
   for (const surfaceName of ["taskDialogSurface", "taskCenterDetailSurface"]) {
     for (const decision of ["overwrite", "skip", "rename", "abort"]) {
       const answers = [];
@@ -558,8 +549,7 @@ test("conflict controls answer only the question shown by their task surface", a
 });
 
 test("job questions open the shared task surface without navigating or discarding a draft", () => {
-  const app = readFileSync(new URL("../App.svelte", import.meta.url), "utf8");
-  const source = ts.createSourceFile("App.ts", app.match(/<script lang="ts">([\s\S]*?)<\/script>/)[1], ts.ScriptTarget.Latest, true);
+  const source = readSvelteScript(new URL("../App.svelte", import.meta.url), "App.ts");
   const effects = source.statements.filter((node) =>
     ts.isExpressionStatement(node) && ts.isCallExpression(node.expression) &&
     node.expression.expression.getText(source) === "$effect"
@@ -567,9 +557,7 @@ test("job questions open the shared task surface without navigating or discardin
   const routing = effects.find((node) => node.getText(source).includes("setScreen(\"password\")"));
   const dialog = effects.find((node) => node.getText(source).includes("const questionTaskId"));
   assert.ok(routing && dialog);
-  const { outputText } = ts.transpileModule([routing, dialog].map((node) => node.getText(source)).join("\n"), {
-    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
-  });
+  const outputText = compileTestScript([routing, dialog].map((node) => node.getText(source)).join("\n"));
   for (const screen of ["browse", "create", "recovery"]) {
     for (const kind of ["password", "conflict"]) {
       const draft = { output: "unfinished-archive.zip" };

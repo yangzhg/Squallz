@@ -2,12 +2,10 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
-import ts from "typescript";
+import { compileTestScript } from "../../tests/source.mjs";
 
 const source = readFileSync(new URL("./clipboard.ts", import.meta.url), "utf8");
-const { outputText } = ts.transpileModule(source, {
-  compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
-});
+const outputText = compileTestScript(source);
 const settle = async () => { for (let index = 0; index < 8; index += 1) await Promise.resolve(); };
 
 function clipboardHarness() {

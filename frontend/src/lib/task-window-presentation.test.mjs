@@ -3,21 +3,15 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
 import { parseCss } from "svelte/compiler";
-import ts from "typescript";
 
 import { createTestServer } from "../../tests/runtime.mjs";
+import { compileTestScript, readSvelteScript, selectFunctions } from "../../tests/source.mjs";
 
 function taskSurface(taskWindowMode) {
-  const component = readFileSync(new URL("../App.svelte", import.meta.url), "utf8");
-  const script = component.match(/<script lang="ts">([\s\S]*?)<\/script>/)?.[1];
-  assert.ok(script);
-  const source = ts.createSourceFile("App.ts", script, ts.ScriptTarget.Latest, true);
-  const declaration = source.statements.find((node) =>
-    ts.isFunctionDeclaration(node) && node.name?.text === "taskDialogSurface");
+  const source = readSvelteScript(new URL("../App.svelte", import.meta.url), "App.ts");
+  const [declaration] = selectFunctions(source, ["taskDialogSurface"]);
   assert.ok(declaration);
-  const { outputText } = ts.transpileModule(declaration.getText(source), {
-    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
-  });
+  const outputText = compileTestScript(declaration.getText(source));
   const callbacks = Object.fromEntries([
     "taskOutputPath", "taskRevealOutputLabel", "pauseCurrentTask", "resumeCurrentTask",
     "cancelCurrentTask", "copyTaskChecksumResults", "openTaskOutput", "openMacosSfxPublisher",

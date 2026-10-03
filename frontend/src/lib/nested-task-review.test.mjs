@@ -1,9 +1,8 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
-import ts from "typescript";
 import { createTestServer } from "../../tests/runtime.mjs";
+import { compileTestScript, readSvelteScript, selectFunctions } from "../../tests/source.mjs";
 
 const server = await createTestServer();
 test.after(() => server.close());
@@ -19,11 +18,10 @@ function spec() {
 }
 
 function harness() {
-  const component = readFileSync(new URL("../App.svelte", import.meta.url), "utf8");
-  const source = ts.createSourceFile("App.ts", component.match(/<script lang="ts">([\s\S]*?)<\/script>/)[1], ts.ScriptTarget.Latest, true);
+  const source = readSvelteScript(new URL("../App.svelte", import.meta.url), "App.ts");
   const names = ["cancelTaskReview", "reviewTask", "nestedExtractDraftLocked", "updateNestedExtractDraft", "restoreNestedExtractDraft",
     "prepareNestedExtract", "chooseNestedExtractDestination", "startNestedExtract", "nestedExtractWorkspaceSurface", "setScreen", "dismissRecoveryPreparation"];
-  const declarations = source.statements.filter((node) => ts.isFunctionDeclaration(node) && names.includes(node.name?.text));
+  const declarations = selectFunctions(source, names);
   const calls = [];
   const context = {
     nestedExtractDraft: null, nestedExtractSubmissionPending: false, nestedExtractPickerBusy: false,
@@ -53,9 +51,7 @@ function harness() {
     extractSymlinkModes: ["preserve", "skip", "follow"], extractSymlinkLabel: (mode) => mode,
     getDialogModule: async () => ({ open: async () => null }), openNativeDialog: async (_key, open, options) => open(options),
   };
-  const { outputText } = ts.transpileModule(declarations.map((node) => node.getText(source)).join("\n"), {
-    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
-  });
+  const outputText = compileTestScript(declarations.map((node) => node.getText(source)).join("\n"));
   return { ...vm.runInNewContext(`${outputText}\n({${names.join(",")}})`, context), context, calls };
 }
 

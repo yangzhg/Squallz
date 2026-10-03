@@ -1,9 +1,8 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
-import ts from "typescript";
 import { createTestServer } from "../../tests/runtime.mjs";
+import { compileTestScript, readSvelteScript, selectFunctions } from "../../tests/source.mjs";
 
 const server = await createTestServer();
 test.after(() => server.close());
@@ -22,9 +21,7 @@ function archive(path = "/original/photos.zip", id = 1, encoding = null) {
 }
 
 function harness() {
-  const component = readFileSync(new URL("../App.svelte", import.meta.url), "utf8");
-  const source = ts.createSourceFile("App.ts", component.match(/<script lang="ts">([\s\S]*?)<\/script>/)[1],
-    ts.ScriptTarget.Latest, true);
+  const source = readSvelteScript(new URL("../App.svelte", import.meta.url), "App.ts");
   const names = ["cancelTaskReview", "reviewTask", "reviewExtractTask", "reviewConvertTask", "reviewArchiveTask", "restoreExtractTaskDraft", "finishOpenedArchive",
     "openArchivePath", "openArchiveFromDialog", "dismissArchivePicker", "extractJobPaths", "extractJobDestination", "extractSmartBase",
     "extractSelectionLabel", "extractStartBlockedReason", "submitExtractJob", "submitCopyOutSelectedJob",
@@ -34,7 +31,7 @@ function harness() {
     "passwordPromptName", "passwordPromptDetail", "passwordSessionDetail", "passwordFailureDetail", "taskPasswordQuestion",
     "setScreen", "preventTaskWorkspaceNavigation", "dismissRecoveryPreparation", "effectiveExtractDest", "sameFolderExtractDest",
     "extractEncodingForJob", "archiveEncodingForJob", "extractEncodingLabel"];
-  const declarations = source.statements.filter((node) => ts.isFunctionDeclaration(node) && names.includes(node.name?.text));
+  const declarations = selectFunctions(source, names);
   const calls = [];
   const context = {
     calls, taskReviewScreen, taskWindowMode: false, currentArchive: archive(),
@@ -104,9 +101,7 @@ function harness() {
     archiveTitle: () => context.currentArchive?.name, taskPasswordReady: (value) => Boolean(value),
     adoptRecoveryTargetFromTask: (task) => { calls.push(["recovery", task.spec.path]); return true; },
   };
-  const { outputText } = ts.transpileModule(declarations.map((node) => node.getText(source)).join("\n"), {
-    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
-  });
+  const outputText = compileTestScript(declarations.map((node) => node.getText(source)).join("\n"));
   return vm.runInNewContext(`${outputText}\n({${declarations.map((node) => node.name.text).join(",")},context:globalThis,calls})`,context);
 }
 

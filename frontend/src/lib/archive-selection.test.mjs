@@ -2,9 +2,9 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import vm from "node:vm";
-import ts from "typescript";
 import { parseCss } from "svelte/compiler";
 import { createTestServer } from "../../tests/runtime.mjs";
+import { compileTestScript, readSvelteScriptAsync, selectFunctions } from "../../tests/source.mjs";
 
 const rows = Array.from({ length: 8 }, (_, index) => ({
   path: `资料-${index}.txt`,
@@ -35,23 +35,15 @@ async function loadSelectionHandlers(archive, overrides = {}) {
   } finally {
     await server.close();
   }
-  const component = await readFile(new URL("../App.svelte", import.meta.url), "utf8");
-  const script = component.match(/<script lang="ts">([\s\S]*?)<\/script>/)?.[1];
-  assert.ok(script);
-  const source = ts.createSourceFile("App.ts", script, ts.ScriptTarget.Latest, true);
+  const source = await readSvelteScriptAsync(new URL("../App.svelte", import.meta.url), "App.ts");
   const names = new Set([
     "selectEntry", "selectOnlyEntry", "showEntryContextAt", "runArchiveSelection", "toggleEntrySelection",
     "submitDeleteSelectedJob", "selectedDeletePaths", "closeEntryContext",
     "selectedRenameSource", "canRenameSelection", "hasArchiveSelection", "hasArchiveOpen", "submitRenameSelectedJob",
     "archiveEditSelectedPaths", "archiveEditorBlockedReason", "validateArchiveEditContext", "archiveEditCheckIsCurrent",
   ]);
-  const declarations = source.statements.filter(
-    (node) => ts.isFunctionDeclaration(node) && names.has(node.name?.text),
-  );
-  const { outputText } = ts.transpileModule(
-    declarations.map((node) => node.getText(source)).join("\n"),
-    { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } },
-  );
+  const declarations = selectFunctions(source, names);
+  const outputText = compileTestScript(declarations.map((node) => node.getText(source)).join("\n"));
   return vm.runInNewContext(`${outputText}\n({ selectEntry, selectOnlyEntry, showEntryContextAt, toggleEntrySelection, submitDeleteSelectedJob, canRenameSelection, submitRenameSelectedJob, context: () => entryContext })`, {
     ...archive,
     archiveSelectionRoots,

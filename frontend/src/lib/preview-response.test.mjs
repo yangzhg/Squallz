@@ -1,10 +1,9 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
-import ts from "typescript";
 
 import { createTestServer } from "../../tests/runtime.mjs";
+import { compileTestScript, readSvelteScript, selectFunctions } from "../../tests/source.mjs";
 
 function deferred() {
   let resolve;
@@ -44,8 +43,7 @@ async function withNestedOpen(run, { systemOpen = false } = {}) {
     const page = deferred();
     ipc.listEntries = async () => { pageRequested.resolve(); return page.promise; };
     archive.installArchivePreview(archiveInfo(1), outerRows, { selected: ["inner.zip"] });
-    const component = readFileSync(new URL("../App.svelte", import.meta.url), "utf8");
-    const source = ts.createSourceFile("App.ts", component.match(/<script lang="ts">([\s\S]*?)<\/script>/)[1], ts.ScriptTarget.Latest, true);
+    const source = readSvelteScript(new URL("../App.svelte", import.meta.url), "App.ts");
     const { createPreviewPasswordFlow } = await server.ssrLoadModule("/src/lib/preview-password.svelte.ts");
     const recoveryResults = await server.ssrLoadModule("/src/lib/recovery-result.ts");
     const systemOpenHelpers = systemOpen ? {
@@ -63,11 +61,7 @@ async function withNestedOpen(run, { systemOpen = false } = {}) {
       "defaultSqzRepairDest", "defaultSqzExportDest", "defaultZipRepairDest", "defaultPar2RepairDest", "defaultPar2RepairDirectoryName",
       "authorizeArchiveOutput", "saveNativeDialog", "openNativeDialog"];
     if (systemOpen) names.push("openEntryPreview", "repairFilenameEncoding", "setMode");
-    const declarations = names.map((name) => {
-      const declaration = source.statements.find((node) => ts.isFunctionDeclaration(node) && node.name?.text === name);
-      assert.ok(declaration, name);
-      return declaration.getText(source);
-    });
+    const declarations = selectFunctions(source, names).map((node) => node.getText(source));
     const notices = [];
     const operations = [];
     const context = {
@@ -129,9 +123,7 @@ async function withNestedOpen(run, { systemOpen = false } = {}) {
     };
     Object.defineProperty(context, "currentArchive", { get: () => archive.archive() });
     Object.defineProperty(context, "previewPasswordPrompt", { get: () => context.previewPasswordFlow.prompt });
-    const { outputText } = ts.transpileModule(declarations.join("\n"), {
-      compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
-    });
+    const outputText = compileTestScript(declarations.join("\n"));
     const app = vm.runInNewContext(`${outputText}\n({${names.join(",")}})`, context);
     await run({ app, archive, ipc, closed, cancelledPreviews, page, pageRequested, context, notices, operations });
   } finally {

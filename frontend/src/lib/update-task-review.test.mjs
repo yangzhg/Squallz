@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
 import ts from "typescript";
 import { createTestServer } from "../../tests/runtime.mjs";
+import { compileTestScript, readSvelteScript, selectFunctions } from "../../tests/source.mjs";
 
 const server = await createTestServer();
 test.after(() => server.close());
@@ -17,10 +17,9 @@ const spec = () => ({ kind: "update", path: "/original/历史归档.zip", encodi
   content_policy: "custom", excludes: ["*.bak", ".DS_Store"], password: "old-secret" });
 
 function handlers(review) {
-  const app = readFileSync(new URL("../App.svelte", import.meta.url), "utf8");
-  const source = ts.createSourceFile("App.ts", app.match(/<script lang="ts">([\s\S]*?)<\/script>/)[1], ts.ScriptTarget.Latest, true);
+  const source = readSvelteScript(new URL("../App.svelte", import.meta.url), "App.ts");
   const names = ["reviewTask", "submitArchiveUpdateReview", "chooseArchiveUpdateSource"];
-  const functions = source.statements.filter((node) => ts.isFunctionDeclaration(node) && names.includes(node.name?.text));
+  const functions = selectFunctions(source, names);
   const calls = [];
   const context = { taskWindowMode:false, archiveUpdateReview:review, taskReviewScreen,
     screen:"updateReview", getDialogModule:async()=>({open:async()=>null}),
@@ -31,16 +30,13 @@ function handlers(review) {
     showNotice:(message)=>calls.push(["notice",message]), pushToast:(toast)=>calls.push(["toast",toast]),
     tr:(_key,fallback)=>fallback, submitJob:async(job)=>{calls.push(["submit",plain(job)]);return 1;},
     isJobSubmitBlocked:()=>false, isErrorDto:()=>false, tError:()=>"error" };
-  const {outputText}=ts.transpileModule(functions.map((node)=>node.getText(source)).join("\n"),{
-    compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS},
-  });
+  const outputText = compileTestScript(functions.map((node) => node.getText(source)).join("\n"));
   return {...vm.runInNewContext(`${outputText}\n({${names.join(",")}})`,context),context,calls};
 }
 
 function workspaceHandlers(review, overrides = {}) {
-  const component = readFileSync(new URL("../components/ArchiveUpdateWorkspace.svelte", import.meta.url), "utf8");
-  const source = ts.createSourceFile("Workspace.ts", component.match(/<script lang="ts">([\s\S]*?)<\/script>/)[1], ts.ScriptTarget.Latest, true);
-  const functions = source.statements.filter((node) => ts.isFunctionDeclaration(node) && ["submit", "changePage"].includes(node.name?.text));
+  const source = readSvelteScript(new URL("../components/ArchiveUpdateWorkspace.svelte", import.meta.url), "Workspace.ts");
+  const functions = selectFunctions(source, ["submit", "changePage"]);
   const reset = source.statements.find((node) => ts.isExpressionStatement(node)
     && node.getText(source).startsWith("$effect(") && node.getText(source).includes("const restoredDraft = draft"));
   assert.ok(reset);
@@ -55,9 +51,7 @@ function workspaceHandlers(review, overrides = {}) {
     document: { getElementById: (id) => ({ focus: () => focused.push(id) }) },
     surface: { onSubmit: () => review.submit(async (job) => { submitted.push(plain(job)); }) },
     ...overrides };
-  const { outputText } = ts.transpileModule([...functions, reset].map((node) => node.getText(source)).join("\n"), {
-    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
-  });
+  const outputText = compileTestScript([...functions, reset].map((node) => node.getText(source)).join("\n"));
   return { ...vm.runInNewContext(`${outputText}\n({submit,changePage})`, context), context, focused, submitted,
     restoreView: () => restoreView() };
 }

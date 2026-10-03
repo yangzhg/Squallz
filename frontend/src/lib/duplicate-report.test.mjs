@@ -1,20 +1,18 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
-import ts from "typescript";
 import { createTestServer } from "../../tests/runtime.mjs";
+import { compileTestScript, readSvelteScript, selectFunctions } from "../../tests/source.mjs";
 
 const server = await createTestServer();
 test.after(() => server.close());
 const { taskDuplicateGroups, taskHasInlineResults, taskResultScreen, taskOutcomeStateLabel } = await server.ssrLoadModule("/src/lib/task-model.ts");
 
 function harness() {
-  const component = readFileSync(new URL("../App.svelte", import.meta.url), "utf8");
-  const source = ts.createSourceFile("App.ts", component.match(/<script lang="ts">([\s\S]*?)<\/script>/)[1], ts.ScriptTarget.Latest, true);
+  const source = readSvelteScript(new URL("../App.svelte", import.meta.url), "App.ts");
   const names = ["viewTaskResults", "selectedDuplicateScanTask", "duplicateResultNumber", "duplicateResultLabel",
     "submitDuplicateScanJob", "duplicatesWorkspaceSurface", "preventTaskWorkspaceNavigation", "preventCreateSubmissionNavigation"];
-  const declarations = source.statements.filter((node) => ts.isFunctionDeclaration(node) && names.includes(node.name?.text));
+  const declarations = selectFunctions(source, names);
   const context = {
     jobRows: [], duplicateReportTaskId: null, taskWindowMode: false,
     screen: "duplicates", convertRouteHandle: null,
@@ -31,9 +29,7 @@ function harness() {
     pathBaseName: (path) => path.split("/").at(-1), tr: (_key, fallback) => fallback,
     submitJob: async (spec) => { context.jobRows.push({id:99,spec,state:"queued",result:null}); return 99; },
   };
-  const { outputText } = ts.transpileModule(declarations.map((node) => node.getText(source)).join("\n"), {
-    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
-  });
+  const outputText = compileTestScript(declarations.map((node) => node.getText(source)).join("\n"));
   return vm.runInNewContext(`${outputText}\n({${declarations.map((node) => node.name.text).join(",")},context:globalThis})`,context);
 }
 

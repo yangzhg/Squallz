@@ -1,10 +1,9 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
-import ts from "typescript";
 
 import { createTestServer } from "../../tests/runtime.mjs";
+import { compileTestScript, readSvelteScript, selectFunctions } from "../../tests/source.mjs";
 
 const server = await createTestServer();
 test.after(() => server.close());
@@ -14,9 +13,7 @@ const { convertSessionFor } = await server.ssrLoadModule("/src/lib/convert-sessi
 const { ipc } = await server.ssrLoadModule("/src/lib/ipc.ts");
 
 function reportHarness({ navigation = false } = {}) {
-  const component = readFileSync(new URL("../App.svelte", import.meta.url), "utf8");
-  const script = component.match(/<script lang="ts">([\s\S]*?)<\/script>/)?.[1];
-  const source = ts.createSourceFile("App.ts", script, ts.ScriptTarget.Latest, true);
+  const source = readSvelteScript(new URL("../App.svelte", import.meta.url), "App.ts");
   const names = ["selectedChecksumTask", "checksumItems", "checksumResultText", "checksumResultNumber",
     "viewTaskResults", "checksumCopyFeedbackFor", "checksumCopyFeedbackToneFor",
     "copyChecksumText", "copyChecksumResults", "copyTaskChecksumResults", "showChecksumCopyFeedback",
@@ -28,12 +25,7 @@ function reportHarness({ navigation = false } = {}) {
       "openTaskCenter", "closeTaskCenter", "openTaskCenterDetails", "returnToTaskCenter",
       "cancelTaskReview", "adoptRecoveryTargetFromTask",
       "focusChecksumResultPanel", "focusPendingChecksumResult", "focusDuplicateReportPanel"] : [])];
-  const functions = names.map((name) => {
-    const declaration = source.statements.find((node) =>
-      ts.isFunctionDeclaration(node) && node.name?.text === name);
-    assert.ok(declaration, name);
-    return declaration.getText(source);
-  }).join("\n");
+  const functions = selectFunctions(source, names).map((node) => node.getText(source)).join("\n");
   const calls = [];
   const timers = new Map();
   let nextTimer = 0;
@@ -105,9 +97,7 @@ function reportHarness({ navigation = false } = {}) {
       if (task) task.expanded = expanded;
     },
   };
-  const { outputText } = ts.transpileModule(functions, {
-    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
-  });
+  const outputText = compileTestScript(functions);
   context.calls = calls;
   return vm.runInNewContext(`${outputText}\n({${names.join(",")}, context:globalThis, calls})`, context);
 }

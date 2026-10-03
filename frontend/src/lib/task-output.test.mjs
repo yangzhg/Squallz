@@ -1,21 +1,13 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
 import test from "node:test";
 import vm from "node:vm";
-import ts from "typescript";
+import { compileTestScript, readSvelteScriptAsync, selectFunctions } from "../../tests/source.mjs";
 
 async function loadOpenTaskOutput(dependencies) {
-  const component = await readFile(new URL("../App.svelte", import.meta.url), "utf8");
-  const script = component.match(/<script lang="ts">([\s\S]*?)<\/script>/)?.[1];
-  assert.ok(script);
-  const source = ts.createSourceFile("App.ts", script, ts.ScriptTarget.Latest, true);
-  const declaration = source.statements.find(
-    (node) => ts.isFunctionDeclaration(node) && node.name?.text === "openTaskOutput",
-  );
+  const source = await readSvelteScriptAsync(new URL("../App.svelte", import.meta.url), "App.ts");
+  const [declaration] = selectFunctions(source, ["openTaskOutput"]);
   assert.ok(declaration);
-  const { outputText } = ts.transpileModule(declaration.getText(source), {
-    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
-  });
+  const outputText = compileTestScript(declaration.getText(source));
   return vm.runInNewContext(`${outputText}\nopenTaskOutput`, {
     ...dependencies,
     require: () => ({ openPath: async () => { throw new Error("path is not allowed"); } }),

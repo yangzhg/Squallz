@@ -1,21 +1,17 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
-import ts from "typescript";
 import { createTestServer } from "../../tests/runtime.mjs";
+import { compileTestScript, readSvelteScript, selectFunctions } from "../../tests/source.mjs";
 
 const server = await createTestServer();
 test.after(() => server.close());
 const { archiveKeyboardTarget } = await server.ssrLoadModule("/src/lib/archive-keyboard.ts");
-const component = readFileSync(new URL("../App.svelte", import.meta.url), "utf8");
-const source = ts.createSourceFile("App.ts", component.match(/<script lang="ts">([\s\S]*?)<\/script>/)[1], ts.ScriptTarget.Latest, true);
+const source = readSvelteScript(new URL("../App.svelte", import.meta.url), "App.ts");
 
 function harness(names, overrides = {}) {
-  const declarations = source.statements.filter(node => ts.isFunctionDeclaration(node) && names.includes(node.name?.text));
-  const { outputText } = ts.transpileModule(declarations.map(node => node.getText(source)).join("\n"), {
-    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
-  });
+  const declarations = selectFunctions(source, names);
+  const outputText = compileTestScript(declarations.map((node) => node.getText(source)).join("\n"));
   const context = { archiveKeyboardTarget, MODERN_ROW_HEIGHT: 42, CLASSIC_ROW_HEIGHT: 29,
     archiveKeyboardRequest: 0, taskReviewRequestGeneration: 0, screen: "browse", mode: "modern",
     currentArchive: { id: 1 }, archiveDirs: [], filterText: () => "", taskCenterOpen: false,

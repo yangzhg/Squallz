@@ -14,7 +14,7 @@ use crate::api::{
 use crate::compound::{KnownTotal, ProgressRead};
 use crate::create::{
     create_plan_from_summary, ensure_create_space, open_dest_from_reserved_file,
-    validate_create_target_name, with_split_output_policy, DestSink, DestTarget,
+    validate_create_target_name, with_split_output_policy, CreateOutput, DestSink, DestTarget,
 };
 use crate::{
     create_input_summary, CreateArtifactKind, CreateCommitPolicy, CreateInputEstimate, CreatePlan,
@@ -166,10 +166,16 @@ pub(crate) fn convert(
         progress,
         ctl,
         commit_policy,
-        move |detect_name, _out_path, opts, reserved| {
-            let reserved = reserved.ok_or_else(|| {
-                FormatError::Other("split conversion lost its reserved output".into())
-            })?;
+        move |opts, output| {
+            let CreateOutput::CallerReserved {
+                detect_name,
+                reserved,
+            } = output
+            else {
+                return Err(FormatError::Other(
+                    "split conversion lost its reserved output".into(),
+                ));
+            };
             let result = convert_unsplit(
                 engine,
                 &mut *reader,

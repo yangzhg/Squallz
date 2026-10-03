@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
 import ts from "typescript";
 
 import { createTestServer } from "../../tests/runtime.mjs";
+import { compileTestScript, readSvelteScript, selectFunctions } from "../../tests/source.mjs";
 
 const server = await createTestServer();
 test.after(() => server.close());
@@ -31,9 +31,7 @@ function taskSpec(overrides = {}) {
 }
 
 function harness({ navigation = false, preparation = false, preview = false } = {}) {
-  const component = readFileSync(new URL("../App.svelte", import.meta.url), "utf8");
-  const source = ts.createSourceFile("App.ts",
-    component.match(/<script lang="ts">([\s\S]*?)<\/script>/)[1], ts.ScriptTarget.Latest, true);
+  const source = readSvelteScript(new URL("../App.svelte", import.meta.url), "App.ts");
   const names = ["reviewTask", "restoreCreateTaskDraft", "createTaskFormat", "applyPresetVolumeMode",
     "invalidateCreatePreflightResult", "clearCreatePasswordFields", "markCreatePresetDraftTouched",
     "createSuggestedOutputPath", "createArchiveNameForOutput",
@@ -54,8 +52,7 @@ function harness({ navigation = false, preparation = false, preview = false } = 
       "createPreflightStageIssueSummary", "createPreflightSteps", "createEstimateStatusbar",
       "diskPreflightStatusbar", "tempPreflightStatusbar"] : []),
     ...(navigation ? ["setScreen", "dismissTaskDialog", "closeTaskCenter", "cancelTaskReview", "adoptRecoveryTargetFromTask"] : [])];
-  const declarations = source.statements.filter((node) =>
-    ts.isFunctionDeclaration(node) && names.includes(node.name?.text));
+  const declarations = selectFunctions(source, names);
   const sessionDeclaration = source.statements.find((node) => ts.isVariableStatement(node)
     && node.declarationList.declarations.some((declaration) =>
       ts.isIdentifier(declaration.name) && declaration.name.text === "createPreflight"));
@@ -161,9 +158,7 @@ function harness({ navigation = false, preparation = false, preview = false } = 
     const port = (...args) => implementation(...args);
     Object.defineProperty(context, name, { get: () => port, set: (next) => { implementation = next; } });
   }
-  const { outputText } = ts.transpileModule(`${declarations.map((node) => node.getText(source)).join("\n")}\n${sessionDeclaration.getText(source)}`, {
-    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
-  });
+  const outputText = compileTestScript(`${declarations.map((node) => node.getText(source)).join("\n")}\n${sessionDeclaration.getText(source)}`);
   context.calls = calls;
   const run = vm.runInNewContext(`${outputText}\n({${declarations.map((node) => node.name.text).join(",")}, createPreflight, context:globalThis, calls})`, context);
   context.createPreflight = run.createPreflight;

@@ -3715,7 +3715,10 @@ mod tests {
     ) -> create::PreparedCreateInputs {
         create::prepare_unsplit_create_with_reserved_outputs(
             engine,
-            dest,
+            &create::CreateOutput::Published {
+                destination: dest,
+                policy: CreateCommitPolicy::ReplaceExisting,
+            },
             &[input.to_path_buf()],
             &[],
             &CreateOptions::default(),
@@ -3730,9 +3733,12 @@ mod tests {
         input: &Path,
         prepared: create::PreparedCreateInputs,
     ) -> FormatError {
-        create::create_prepared_with_reserved_outputs(
+        create::create_prepared_with_output(
             engine,
-            dest,
+            create::CreateOutput::Published {
+                destination: dest,
+                policy: CreateCommitPolicy::ReplaceExisting,
+            },
             &[input.to_path_buf()],
             &[],
             &CreateOptions::default(),
@@ -4143,7 +4149,10 @@ mod tests {
         let options = CreateOptions::default();
         let prepared = create::prepare_unsplit_create_with_reserved_outputs(
             &engine,
-            &dest,
+            &create::CreateOutput::Published {
+                destination: &dest,
+                policy: CreateCommitPolicy::ReplaceExisting,
+            },
             std::slice::from_ref(&source),
             &[],
             &options,
@@ -4152,9 +4161,12 @@ mod tests {
         .unwrap();
 
         std::fs::write(source.join("late.txt"), b"late entry").unwrap();
-        let verified = create::create_prepared_with_reserved_outputs(
+        let verified = create::create_prepared_with_output(
             &engine,
-            &dest,
+            create::CreateOutput::Published {
+                destination: &dest,
+                policy: CreateCommitPolicy::ReplaceExisting,
+            },
             std::slice::from_ref(&source),
             &[],
             &options,
@@ -4190,7 +4202,10 @@ mod tests {
         let options = CreateOptions::default();
         let prepared = create::prepare_unsplit_create_with_reserved_outputs(
             &engine,
-            &dest,
+            &create::CreateOutput::Published {
+                destination: &dest,
+                policy: CreateCommitPolicy::ReplaceExisting,
+            },
             std::slice::from_ref(&source),
             &[],
             &options,
@@ -4199,9 +4214,12 @@ mod tests {
         .unwrap();
         std::fs::remove_file(&input).unwrap();
 
-        let error = create::create_prepared_with_reserved_outputs(
+        let error = create::create_prepared_with_output(
             &engine,
-            &dest,
+            create::CreateOutput::Published {
+                destination: &dest,
+                policy: CreateCommitPolicy::ReplaceExisting,
+            },
             std::slice::from_ref(&source),
             &[],
             &options,

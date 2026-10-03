@@ -1,21 +1,18 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
 import ts from "typescript";
+import { compileTestScript, readSvelteScript, selectFunctions } from "../../tests/source.mjs";
 
 function harness() {
-  const app = readFileSync(new URL("../App.svelte", import.meta.url), "utf8");
-  const source = ts.createSourceFile("App.ts", app.match(/<script lang="ts">([\s\S]*?)<\/script>/)[1], ts.ScriptTarget.Latest, true);
+  const source = readSvelteScript(new URL("../App.svelte", import.meta.url), "App.ts");
   const actions = ["openTaskCenter", "closeTaskCenter", "openTaskCenterDetails", "returnToTaskCenter", "dismissTaskDialog", "returnTaskQuestionToCenter", "handleWorkflowEscape", "submitJob"];
   const names = [...actions, "cancelTaskReview", "rememberTaskWorkspaceFocus", "restoreTaskWorkspaceFocus"];
-  const declarations = source.statements.filter((node) => ts.isFunctionDeclaration(node) && names.includes(node.name?.text));
+  const declarations = selectFunctions(source, names);
   const questionEffect = source.statements.find((node) => ts.isExpressionStatement(node)
     && node.getText(source).startsWith("$effect(") && node.getText(source).includes("const questionTaskId"));
   assert.ok(questionEffect);
-  const compile = (code) => ts.transpileModule(code.replaceAll("import.meta.env.DEV", "false"), {
-    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
-  }).outputText;
+  const compile = (code) => compileTestScript(code.replaceAll("import.meta.env.DEV", "false"));
   const pendingTicks = [];
   const document = { body: {}, activeElement: null, querySelector: () => trigger };
   class Element {

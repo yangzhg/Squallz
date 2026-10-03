@@ -1112,11 +1112,14 @@ impl Engine {
         let payload_reservation = transaction::reserve_payload_path(dest)?;
         let payload = payload_reservation.path.clone();
         let payload_identity = payload_reservation.identity;
-        let create_reservation = clone_reserved_payload_for_create(&payload_reservation, dest)?;
+        let create_output = crate::create::CreateOutput::CallerReserved {
+            detect_name: "payload.zip",
+            reserved: clone_reserved_payload_for_create(&payload_reservation, dest)?,
+        };
         let result = (|| {
             let prepared = crate::create::prepare_unsplit_create_with_reserved_outputs(
                 self,
-                &payload,
+                &create_output,
                 inputs,
                 &[dest],
                 create_opts,
@@ -1124,9 +1127,9 @@ impl Engine {
             )?;
             let plan = plan_sfx_from_summary(dest, prepared.summary(), &validated_template)?;
             ensure_destination_space(dest, plan.workspace_budget_bytes)?;
-            let verified = crate::create::create_prepared_into_reserved_output(
+            let verified = crate::create::create_prepared_with_output(
                 self,
-                &payload,
+                create_output,
                 inputs,
                 &[dest],
                 create_opts,
@@ -1134,7 +1137,6 @@ impl Engine {
                 ctl,
                 prepared,
                 capture_input_manifest,
-                create_reservation,
             )?;
             let input_manifest = verified.manifest;
             let bound_payload = BoundSfxPayload::from_reserved(self, payload_reservation)?;

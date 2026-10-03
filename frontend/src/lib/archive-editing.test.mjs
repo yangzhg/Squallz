@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
 import test from "node:test";
 import vm from "node:vm";
 import ts from "typescript";
 import { createTestServer } from "../../tests/runtime.mjs";
+import { compileTestScript, readSvelteScriptAsync, selectFunctions } from "../../tests/source.mjs";
 
 function deferred() {
   let resolve, reject;
@@ -20,10 +20,7 @@ async function loadEditing(overrides = {}) {
   } finally {
     await server.close();
   }
-  const component = await readFile(new URL("../App.svelte", import.meta.url), "utf8");
-  const script = component.match(/<script lang="ts">([\s\S]*?)<\/script>/)?.[1];
-  assert.ok(script);
-  const source = ts.createSourceFile("App.ts", script, ts.ScriptTarget.Latest, true);
+  const source = await readSvelteScriptAsync(new URL("../App.svelte", import.meta.url), "App.ts");
   const names = new Set([
     "normalizeNewFolderPath", "commitNewFolderName", "submitNewFolderJob", "validateArchiveEditTarget",
     "normalizeMoveTargetDir", "submitMovePlan", "moveTargetForPath",
@@ -35,14 +32,12 @@ async function loadEditing(overrides = {}) {
     "archiveEditSelectedPaths", "archiveEditorBlockedReason", "validateArchiveEditContext", "archiveEditCheckIsCurrent",
     "setScreen", "setMode", "openRecoverySet", "dismissArchivePicker", "isCurrentArchiveAddPreparation", "dismissArchiveAddPreparation",
   ]);
+  const functions = selectFunctions(source, names);
   const declarations = source.statements.filter(
-    (node) => (ts.isFunctionDeclaration(node) && names.has(node.name?.text))
+    (node) => functions.includes(node)
       || (ts.isClassDeclaration(node) && node.name?.text === "JobSubmitBlockedError"),
   );
-  const { outputText } = ts.transpileModule(
-    declarations.map((node) => node.getText(source)).join("\n"),
-    { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } },
-  );
+  const outputText = compileTestScript(declarations.map((node) => node.getText(source)).join("\n"));
   const submitted = [];
   const notices = [];
   const toasts = [];
@@ -153,9 +148,7 @@ async function loadEditing(overrides = {}) {
     .find((node) => node.name.getText(source) === "archiveAddPending")?.initializer;
   assert.ok(addPending && ts.isCallExpression(addPending));
   assert.equal(addPending.expression.getText(source), "$derived");
-  const pendingExpression = ts.transpileModule(`(${addPending.arguments[0].getText(source)})`, {
-    compilerOptions: { target: ts.ScriptTarget.ES2022 },
-  }).outputText;
+  const pendingExpression = compileTestScript(`(${addPending.arguments[0].getText(source)})`, { target: ts.ScriptTarget.ES2022 });
   Object.defineProperty(context, "archiveAddPending", {
     get: () => vm.runInNewContext(pendingExpression, context),
   });
@@ -171,8 +164,8 @@ async function loadEditing(overrides = {}) {
     && node.getText(source).includes("isCurrentArchiveAddPreparation"));
   assert.ok(resetAdd);
   return { ...handlers, submitted, notices, toasts, closed, context,
-    refreshEditor: () => vm.runInNewContext(ts.transpileModule(reset.getText(source), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, context),
-    refreshAddPreparation: () => vm.runInNewContext(ts.transpileModule(resetAdd.getText(source), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, context),
+    refreshEditor: () => vm.runInNewContext(compileTestScript(reset.getText(source), { target: ts.ScriptTarget.ES2022 }), context),
+    refreshAddPreparation: () => vm.runInNewContext(compileTestScript(resetAdd.getText(source), { target: ts.ScriptTarget.ES2022 }), context),
   };
 }
 
@@ -654,14 +647,13 @@ test("move review exposes every conflict and its decisions submit the complete s
     });
     editing.openArchiveEditor("move");
     await editing.submitMoveSelectedJob();
-    const component = await readFile(new URL("../App.svelte", import.meta.url), "utf8");
-    const source = ts.createSourceFile("App.ts", component.match(/<script lang="ts">([\s\S]*?)<\/script>/)[1], ts.ScriptTarget.Latest, true);
+    const source = await readSvelteScriptAsync(new URL("../App.svelte", import.meta.url), "App.ts");
     const declaration = source.statements.filter(ts.isVariableStatement)
       .flatMap((statement) => [...statement.declarationList.declarations])
       .find((node) => node.name.getText(source) === "moveConflictView");
     assert.ok(declaration, "the browser must receive the complete review independently of the visible page");
-    const view = vm.runInNewContext(ts.transpileModule(`(${declaration.initializer.arguments[0].getText(source)})()`,
-      { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, editing.context);
+    const view = vm.runInNewContext(compileTestScript(`(${declaration.initializer.arguments[0].getText(source)})()`,
+      { target: ts.ScriptTarget.ES2022 }), editing.context);
     assert.equal(view.readyCount, 2);
     assert.deepEqual([...view.items].map((item) => item.from), paths.slice(0, 42));
     assert.match(view.items[41].reason, /Multiple selected entries/u);
