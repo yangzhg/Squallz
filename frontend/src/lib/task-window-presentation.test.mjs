@@ -7,21 +7,20 @@ import { parseCss } from "svelte/compiler";
 import { createTestServer } from "../../tests/runtime.mjs";
 import { compileTestScript, readSvelteScript, selectFunctions } from "../../tests/source.mjs";
 
-async function taskSurface(taskWindowMode, server) {
+async function taskSurface(presentation, server) {
   const { SettingsSession } = await server.ssrLoadModule("/src/lib/settings-session.svelte.ts");
   const source = readSvelteScript(new URL("../App.svelte", import.meta.url), "App.ts");
-  const [declaration] = selectFunctions(source, ["taskDialogSurface"]);
+  const [declaration] = selectFunctions(source, ["taskProgressDialogProps"]);
   assert.ok(declaration);
   const outputText = compileTestScript(declaration.getText(source));
   const callbacks = Object.fromEntries([
     "taskOutputPath", "taskRevealOutputLabel", "pauseCurrentTask", "resumeCurrentTask",
     "cancelCurrentTask", "copyTaskChecksumResults", "openTaskOutput", "openMacosSfxPublisher",
     "prepareTaskReview", "toggleTaskDetails", "viewTaskResults", "revealTaskOutput",
-    "dismissTaskDialog", "submitTaskPasswordRequest", "cancelTaskPasswordRequest", "answerConflictDecision",
+    "dismissTaskDialog", "returnToTaskCenter", "submitTaskPasswordRequest", "cancelTaskPasswordRequest", "answerConflictDecision",
   ].map((name) => [name, () => {}]));
-  const surface = vm.runInNewContext(`${outputText}\ntaskDialogSurface`, {
+  const surface = vm.runInNewContext(`${outputText}\ntaskProgressDialogProps`, {
     ...callbacks,
-    taskWindowMode,
     pendingTaskReviewId: null,
     activePlatform: "macos",
     settingsSession: new SettingsSession({ platform: () => "macos", tr: (_key, fallback) => fallback, emit() {} },
@@ -39,24 +38,30 @@ async function taskSurface(taskWindowMode, server) {
     isCurrentTaskPasswordPrompt: () => false,
     jobPasswordSubmissionError: null,
     conflictApplyAll: false,
-  })({ id: 42 });
+  })({ id: 42 }, presentation);
   return { surface, callbacks };
 }
 
-test("task surfaces choose window or dialog presentation without changing task actions", async () => {
+test("task surfaces choose their presentation without changing task actions", async () => {
   const server = await createTestServer();
   try {
-    for (const taskWindowMode of [true, false]) {
-      const { surface, callbacks } = await taskSurface(taskWindowMode, server);
-      assert.equal(surface.presentation, taskWindowMode ? "window" : "dialog");
+    for (const presentation of ["panel", "dialog", "window"]) {
+      const { surface, callbacks } = await taskSurface(presentation, server);
+      assert.equal(surface.presentation, presentation);
       assert.ok(surface.rootClass.split(" ").includes(
-        taskWindowMode ? "task-window-surface" : "task-modal-overlay",
+        presentation === "panel" ? "task-center-detail"
+          : presentation === "window" ? "task-window-surface" : "task-modal-overlay",
       ));
       assert.match(surface.rootClass, /platform-macos palette-ocean theme-dark/u);
+      assert.equal(surface.rootId, presentation === "panel" ? "squallz-task-center" : undefined);
+      assert.equal(surface.taskWindowMode, presentation === "window");
+      for (const name of ["passwordQuestion", "passwordValue", "passwordError", "conflictQuestion", "conflictApplyAll"]) {
+        assert.equal(Object.hasOwn(surface, name), presentation !== "panel", `${presentation}: ${name}`);
+      }
       assert.equal(surface.onPause, callbacks.pauseCurrentTask);
       assert.equal(surface.onCancel, callbacks.cancelCurrentTask);
       assert.equal(surface.onOpenOutput, callbacks.openTaskOutput);
-      assert.equal(surface.onDismiss, callbacks.dismissTaskDialog);
+      assert.equal(surface.onDismiss, presentation === "panel" ? callbacks.returnToTaskCenter : callbacks.dismissTaskDialog);
     }
   } finally {
     await server.close();
@@ -84,7 +89,6 @@ test("waiting task surfaces retain measured progress without rates or processing
     const { default: TaskCenter } = await server.ssrLoadModule("/src/components/TaskCenter.svelte");
     const { loadLocale } = await server.ssrLoadModule("/src/lib/i18n.svelte.ts");
     const helpers = await server.ssrLoadModule("/src/lib/task-dialog.ts");
-    const { surface } = await taskSurface(false, server);
     for (const [locale, passwordLabel, conflictLabel, pausedLabel] of [
       ["en-US", "Waiting for a password", "Waiting for a file decision", "Paused"],
       ["zh-CN", "正在等待密码", "正在等待文件冲突处理", "已暂停"],
@@ -103,12 +107,13 @@ test("waiting task surfaces retain measured progress without rates or processing
         assert.match(helpers.taskCurrentProgressSummary(task), /report.txt.*4 B \/ 10 B/u);
         assert.doesNotMatch(helpers.taskProgressSummary(task), /\/s|\/秒/u);
         for (const presentation of ["dialog", "panel", "window"]) {
-          const { body } = render(TaskProgressDialog, { props: { ...surface, presentation, task } });
+          const { surface } = await taskSurface(presentation, server);
+          const { body } = render(TaskProgressDialog, { props: { ...surface, task } });
           assert.match(body, /data-task-active="false"/u);
           assert.match(body, /value="40"/u);
           assert.doesNotMatch(body, /\d+ B\/(?:s|秒)/u);
           const unknown = { ...task, total: 0, currentTotal: 0, phase: "archive_open" };
-          const pending = render(TaskProgressDialog, { props: { ...surface, presentation, task: unknown } }).body;
+          const pending = render(TaskProgressDialog, { props: { ...surface, task: unknown } }).body;
           assert.doesNotMatch(pending, /<progress\b|task-current-pending active/u);
           assert.ok(pending.includes(label));
         }
@@ -118,13 +123,15 @@ test("waiting task surfaces retain measured progress without rates or processing
         assert.ok(helpers.taskProgressSummary(batch).includes(label));
         assert.match(helpers.taskProgressSummary(batch), /75%.*1\/2/u);
         for (const presentation of ["dialog", "panel", "window"]) {
-          const body = render(TaskProgressDialog, { props: { ...surface, presentation, task: batch } }).body;
+          const { surface } = await taskSurface(presentation, server);
+          const body = render(TaskProgressDialog, { props: { ...surface, task: batch } }).body;
           assert.match(body, /75%.*1\/2/u);
           assert.ok(body.includes(label));
           assert.doesNotMatch(body, /\d+ B\/(?:s|秒)/u);
         }
         assert.ok(helpers.taskProgressSummary({ ...task, scanEntries: 37 }).includes(label));
       }
+      const { surface } = await taskSurface("dialog", server);
       const running = render(TaskProgressDialog, { props: { ...surface, task: extractTask("running") } }).body;
       assert.match(running, /data-task-active="true"/u);
       assert.match(helpers.taskProgressSummary(extractTask("running")), /10 B\/(?:s|秒)/u);
@@ -137,13 +144,14 @@ test("waiting task surfaces retain measured progress without rates or processing
         assert.equal(helpers.taskCurrentProgressSummary(stopped), summary);
         assert.equal(helpers.taskCurrentProgressPercent(stopped), 40);
         for (const presentation of ["dialog", "panel", "window"]) {
-          const body = render(TaskProgressDialog, { props: { ...surface, presentation, task: stopped } }).body;
+          const { surface } = await taskSurface(presentation, server);
+          const body = render(TaskProgressDialog, { props: { ...surface, task: stopped } }).body;
           assert.ok(body.includes(summary));
           assert.ok(body.includes(helpers.taskCurrentSectionLabel(stopped)));
           assert.match(body, /data-task-active="false"/u);
           assert.doesNotMatch(body, /\d+ B\/(?:s|秒)/u);
           const unknown = { ...stopped, phase: "archive_open", currentDone: 0, currentTotal: 0 };
-          const pending = render(TaskProgressDialog, { props: { ...surface, presentation, task: unknown } }).body;
+          const pending = render(TaskProgressDialog, { props: { ...surface, task: unknown } }).body;
           assert.ok(pending.includes(stopped.current));
           assert.doesNotMatch(pending, /data-task-progress="current-file"|task-current-pending active/u);
         }
@@ -154,8 +162,9 @@ test("waiting task surfaces retain measured progress without rates or processing
       const cancelled = { ...extractTask("cancelled"), expanded: true };
       assert.deepEqual(helpers.taskResultDetailRows(cancelled), []);
       for (const presentation of ["dialog", "panel", "window"]) {
+        const { surface } = await taskSurface(presentation, server);
         const taskWindowMode = presentation === "window";
-        const body = render(TaskProgressDialog, { props: { ...surface, presentation, taskWindowMode, task: cancelled } }).body;
+        const body = render(TaskProgressDialog, { props: { ...surface, task: cancelled } }).body;
         assert.doesNotMatch(body, /class="task-result-details"/u);
         assert.ok(body.includes(helpers.taskDialogResultSummary(cancelled)));
         assert.ok(body.includes(helpers.taskNextStepDetail(cancelled, taskWindowMode)));
@@ -168,8 +177,9 @@ test("waiting task surfaces retain measured progress without rates or processing
           { archive: "damaged.zip", counts: { failed: 1, skipped: 0 }, problems: ["bad.txt: CRC mismatch"] },
         ] } };
       for (const presentation of ["dialog", "panel", "window"]) {
+        const { surface } = await taskSurface(presentation, server);
         const taskWindowMode = presentation === "window";
-        const body = render(TaskProgressDialog, { props: { ...surface, presentation, taskWindowMode, task: partialBatch } }).body;
+        const body = render(TaskProgressDialog, { props: { ...surface, task: partialBatch } }).body;
         assert.ok(body.includes(helpers.taskDialogResultSummary(partialBatch)));
         assert.ok(body.includes("bad.txt: CRC mismatch"));
         assert.equal(body.includes(helpers.taskReviewActionLabel(partialBatch)), !taskWindowMode);
@@ -187,7 +197,6 @@ test("control failures stay visible and actionable across task surfaces", async 
     const { default: TaskProgressDialog } = await server.ssrLoadModule("/src/components/TaskProgressDialog.svelte");
     const { default: TaskCenter } = await server.ssrLoadModule("/src/components/TaskCenter.svelte");
     const { loadLocale } = await server.ssrLoadModule("/src/lib/i18n.svelte.ts");
-    const { surface } = await taskSurface(false, server);
     for (const [locale, labels] of [
       ["en-US", ["Could not pause the task", "Could not resume the task", "Could not cancel the task"]],
       ["zh-CN", ["未能暂停任务", "未能继续任务", "未能取消任务"]],
@@ -196,11 +205,12 @@ test("control failures stay visible and actionable across task surfaces", async 
       for (const [index, actionFailure] of ["pause", "resume", "cancel"].entries()) {
         const task = { ...extractTask(actionFailure === "resume" ? "paused" : "running"), actionFailure };
         for (const presentation of ["dialog", "panel", "window"]) {
-          const body = render(TaskProgressDialog, { props: { ...surface, presentation, task } }).body;
+          const { surface } = await taskSurface(presentation, server);
+          const body = render(TaskProgressDialog, { props: { ...surface, task } }).body;
           assert.match(body, /class="task-action-error" role="alert"/u);
           assert.ok(body.includes(labels[index]));
           assert.doesNotMatch(body, /<button[^>]*disabled/u, "the user can retry the control");
-          const finished = render(TaskProgressDialog, { props: { ...surface, presentation,
+          const finished = render(TaskProgressDialog, { props: { ...surface,
             task: { ...task, state: "done" } } }).body;
           assert.ok(!finished.includes(labels[index]), "a completed task never carries an obsolete control failure");
         }
@@ -222,7 +232,6 @@ test("interrupted status keeps measured progress and inputs without presenting l
     const { default: TaskCenter } = await server.ssrLoadModule("/src/components/TaskCenter.svelte");
     const { loadLocale } = await server.ssrLoadModule("/src/lib/i18n.svelte.ts");
     const helpers = await server.ssrLoadModule("/src/lib/task-dialog.ts");
-    const { surface } = await taskSurface(false, server);
     for (const locale of ["en-US", "zh-CN"]) {
       await loadLocale(locale);
       const task = { ...extractTask("running"), statusStale: true };
@@ -230,22 +239,23 @@ test("interrupted status keeps measured progress and inputs without presenting l
       const detail = helpers.taskStatusUnavailableMessage();
       assert.notEqual(label, helpers.taskStateLabel("running"));
       for (const presentation of ["dialog", "panel", "window"]) {
-        const body = render(TaskProgressDialog, { props: { ...surface, presentation, task } }).body;
+        const { surface } = await taskSurface(presentation, server);
+        const body = render(TaskProgressDialog, { props: { ...surface, task } }).body;
         assert.ok(body.includes(label));
         assert.ok(body.includes(detail));
         assert.match(body, /data-task-active="false"/u);
         assert.match(body, /value="40"/u);
         assert.match(body, /report.txt.*4 B \/ 10 B/u);
         assert.doesNotMatch(body, /10 B\/(?:s|秒)/u);
-        const pending = render(TaskProgressDialog, { props: { ...surface, presentation,
+        const pending = render(TaskProgressDialog, { props: { ...surface,
           task: { ...task, total: 0, currentTotal: 0, phase: "archive_open" } } }).body;
         assert.doesNotMatch(pending, /<progress\b|task-current-pending active/u);
-        const waiting = render(TaskProgressDialog, { props: { ...surface, presentation,
+        const waiting = render(TaskProgressDialog, { props: { ...surface,
           task: { ...task, interaction: "password" },
           passwordQuestion: { name: "reports.zip", detail: "", sessionDetail: "" }, passwordValue: "" } }).body;
         assert.match(waiting, /type="password"/u);
         assert.ok(waiting.includes(detail));
-        const done = render(TaskProgressDialog, { props: { ...surface, presentation, task: { ...task, state: "done" } } }).body;
+        const done = render(TaskProgressDialog, { props: { ...surface, task: { ...task, state: "done" } } }).body;
         assert.ok(!done.includes(detail), "confirmed results remain visible during a later outage");
       }
       const row = render(TaskCenter, { props: { tasks: [{ ...task, queueMoveIntent: null }], rootClass: "task-center" } }).body;
@@ -267,10 +277,10 @@ test("window task views render one task heading and retain progress, results and
     );
     const { loadLocale } = await server.ssrLoadModule("/src/lib/i18n.svelte.ts");
     await loadLocale("en-US");
-    const { surface } = await taskSurface(true, server);
+    const { surface } = await taskSurface("window", server);
     for (const state of ["running", "paused", "done", "failed"]) {
       const { body } = render(TaskProgressDialog, { props: {
-        ...surface, presentation: "window", task: extractTask(state),
+        ...surface, task: extractTask(state),
       } });
       assert.match(body, /data-task-presentation="window"/u);
       assert.match(body, /role="region"/u);
@@ -282,7 +292,7 @@ test("window task views render one task heading and retain progress, results and
       if (state === "done" || state === "failed") assert.match(body, /task-result-callout/u);
     }
     const { body } = render(TaskProgressDialog, { props: {
-      ...surface, presentation: "window", task: extractTask("running"),
+      ...surface, task: extractTask("running"),
       passwordQuestion: { name: "reports.zip", detail: "Encrypted archive", sessionDetail: "This task only" },
     } });
     assert.match(body, /type="password"/u);
@@ -300,7 +310,6 @@ test("all task surfaces show folder finalization without finished byte bars", as
     const { default: TaskCenter } = await server.ssrLoadModule("/src/components/TaskCenter.svelte");
     const { loadLocale } = await server.ssrLoadModule("/src/lib/i18n.svelte.ts");
     const helpers = await server.ssrLoadModule("/src/lib/task-dialog.ts");
-    const { surface } = await taskSurface(false, server);
     for (const [locale, phase, currentLabel] of [
       ["en-US", "Restoring folder information", "Current folder"],
       ["zh-CN", "正在恢复文件夹信息", "当前文件夹"],
@@ -317,7 +326,8 @@ test("all task surfaces show folder finalization without finished byte bars", as
         assert.equal(helpers.hasTaskCurrentProgress(task), false);
         assert.doesNotMatch(helpers.taskProgressSummary(task), /100%|\/s|100 B/u);
         for (const presentation of ["dialog", "panel", "window"]) {
-          const { body } = render(TaskProgressDialog, { props: { ...surface, presentation, task } });
+          const { surface } = await taskSurface(presentation, server);
+          const { body } = render(TaskProgressDialog, { props: { ...surface, task } });
           assert.ok(body.includes(phase));
           assert.ok(body.includes(currentLabel));
           assert.match(body, /reports\/客户交付/u);
@@ -357,7 +367,7 @@ test("main-window task dialogs keep modal semantics and their task heading conte
     const { default: TaskProgressDialog } = await server.ssrLoadModule(
       "/src/components/TaskProgressDialog.svelte",
     );
-    const { surface } = await taskSurface(false, server);
+    const { surface } = await taskSurface("dialog", server);
     const { body } = render(TaskProgressDialog, { props: { ...surface, task: extractTask("running") } });
     assert.match(body, /role="dialog" aria-modal="true"/u);
     assert.match(body, /task-modal-eyebrow/u);
@@ -373,7 +383,7 @@ test("deferred task views retain their window surface while the component loads"
     const { default: TaskProgressDialogHost } = await server.ssrLoadModule(
       "/src/components/TaskProgressDialogHost.svelte",
     );
-    const { surface } = await taskSurface(true, server);
+    const { surface } = await taskSurface("window", server);
     const { body } = render(TaskProgressDialogHost, { props: {
       surface: { ...surface, task: extractTask("running") },
       loadingTitle: "Loading task view", loadingBody: "Preparing task controls",
@@ -398,26 +408,26 @@ test("cancelling and terminal task surfaces do not ask for input from a stale in
     const { default: TaskProgressDialog } = await server.ssrLoadModule("/src/components/TaskProgressDialog.svelte");
     const { loadLocale, tFallback } = await server.ssrLoadModule("/src/lib/i18n.svelte.ts");
     const { taskCenterCounts } = await server.ssrLoadModule("/src/lib/task-center.ts");
-    const { surface } = await taskSurface(false, server);
     for (const locale of ["en-US", "zh-CN"]) {
       await loadLocale(locale);
       for (const presentation of ["dialog", "panel", "window"]) {
+        const { surface } = await taskSurface(presentation, server);
         for (const interaction of ["password", "conflict"]) {
           const cancelling = { ...extractTask("running"), interaction, controlIntent: "cancel" };
-          const pending = render(TaskProgressDialog, { props: { ...surface, presentation, task: cancelling } }).body;
+          const pending = render(TaskProgressDialog, { props: { ...surface, task: cancelling } }).body;
           assert.ok(pending.includes(tFallback("gui.task.cancelling")));
           assert.doesNotMatch(pending, /task-interaction-callout/);
           assert.ok(!pending.includes(tFallback("gui.task_center.needs_input")));
           assert.equal(taskCenterCounts([cancelling]).attention, 0);
           const terminal = { ...cancelling, state: "cancelled", controlIntent: null };
-          const finished = render(TaskProgressDialog, { props: { ...surface, presentation, task: terminal } }).body;
+          const finished = render(TaskProgressDialog, { props: { ...surface, task: terminal } }).body;
           assert.ok(finished.includes(tFallback("gui.task.state.cancelled")));
           assert.doesNotMatch(finished, /task-interaction-callout/);
           assert.ok(!finished.includes(tFallback("gui.task_center.needs_input")));
           assert.equal(taskCenterCounts([terminal]).attention, 0);
           const failedAnswer = { ...extractTask("running"), interaction, actionFailure: "answer" };
           const response = render(TaskProgressDialog, { props: {
-            ...surface, presentation, task: failedAnswer,
+            ...surface, task: failedAnswer,
             passwordQuestion: interaction === "password" ? { name: "reports.zip", detail: "", sessionDetail: "" } : null,
             conflictQuestion: interaction === "conflict" ? { path: "reports.txt", existing: "8 B", incoming: "12 B" } : null,
           } }).body;

@@ -501,11 +501,13 @@ test("conflict controls answer only the question shown by their task surface", a
   const server = await createTestServer();
   try {
     const { SettingsSession } = await server.ssrLoadModule("/src/lib/settings-session.svelte.ts");
+    const { taskPasswordReady, normalizeTaskConflictAnswer } = await server.ssrLoadModule("/src/lib/task-model.ts");
     const source = readSvelteScript(new URL("../App.svelte", import.meta.url), "App.ts");
-    const names = ["taskDialogSurface", "taskCenterDetailSurface", "answerConflictDecision", "isCurrentTaskConflictPrompt"];
+    const names = ["taskProgressDialogProps", "answerConflictDecision", "isCurrentTaskConflictPrompt",
+      "submitTaskPasswordRequest", "cancelTaskPasswordRequest", "isCurrentTaskPasswordPrompt"];
     const declarations = selectFunctions(source, names);
     const outputText = compileTestScript(declarations.map((node) => node.getText(source)).join("\n"));
-    for (const surfaceName of ["taskDialogSurface", "taskCenterDetailSurface"]) {
+    for (const presentation of ["panel", "dialog", "window"]) {
       for (const decision of ["overwrite", "skip", "rename", "abort"]) {
         const answers = [];
         const context = {
@@ -515,23 +517,23 @@ test("conflict controls answer only the question shown by their task surface", a
             "viewTaskResults", "revealTaskOutput", "dismissTaskDialog", "returnToTaskCenter", "returnTaskQuestionToCenter",
             "taskChecksumCopyFeedback", "taskChecksumCopyFeedbackTone", "taskPasswordQuestion", "taskConflictQuestion", "showNotice",
           ].map((name) => [name, () => null])),
-          taskWindowMode: false, activePlatform: "macos", activeTheme: "dark", activeDensityChoice: "comfortable",
+          activePlatform: "macos", activeTheme: "dark", activeDensityChoice: "comfortable",
           settingsSession: new SettingsSession({ platform: () => "macos", tr: (_key, fallback) => fallback, emit() {} },
             { paletteOverride: "ocean" }),
           pendingTaskReviewId: null,
           checksumCopyPending: () => false,
           customPaletteVariables: () => ({}), tr: (_key, fallback) => fallback,
           jobPasswordPrompt: null, jobPasswordValue: "", jobPasswordSubmissionError: null,
+          jobPasswordSubmissionAttempted: false, taskPasswordReady, normalizeTaskConflictAnswer,
           jobConflictPrompt: { id: 1, version: 10 }, conflictApplyAll: false,
-          normalizeTaskConflictAnswer: (decision, applyAll) => ({ decision, applyAll }),
           answerJobConflict: async (decision, applyAll) => {
             answers.push([context.jobConflictPrompt.id, context.jobConflictPrompt.version, decision, applyAll]);
             return true;
           },
         };
-        const surface = vm.runInNewContext(`${outputText}\n${surfaceName}`, context);
-        const shown = surface({ id: 1 });
-        const unrelated = surface({ id: 2 });
+        const surface = vm.runInNewContext(`${outputText}\ntaskProgressDialogProps`, context);
+        const shown = surface({ id: 1 }, presentation);
+        const unrelated = surface({ id: 2 }, presentation);
         const applyAll = decision !== "abort";
         for (const prompt of [{ id: 1, version: 11 }, { id: 2, version: 10 }, null]) {
           context.jobConflictPrompt = prompt;
@@ -549,6 +551,38 @@ test("conflict controls answer only the question shown by their task surface", a
         assert.equal(context.conflictApplyAll, applyAll);
         await shown.onAnswerConflict(decision, applyAll);
         assert.deepEqual(answers, [[1, 10, decision, applyAll]], "the displayed question remains actionable after an equivalent snapshot");
+        if (decision === "overwrite") {
+          const passwords = [];
+          context.jobConflictPrompt = null;
+          context.jobPasswordPrompt = { id: 1, version: 10 };
+          context.jobPasswordValue = "current input";
+          context.answerJobPassword = async (value) => {
+            passwords.push([context.jobPasswordPrompt.id, context.jobPasswordPrompt.version, value]);
+            return true;
+          };
+          const passwordShown = surface({ id: 1 }, presentation);
+          const passwordUnrelated = surface({ id: 2 }, presentation);
+          for (const prompt of [{ id: 1, version: 11 }, { id: 2, version: 10 }, null]) {
+            context.jobPasswordPrompt = prompt;
+            passwordShown.onPasswordValueChange("stale input");
+            await passwordShown.onSubmitPassword();
+            await passwordShown.onCancelPassword();
+            assert.equal(context.jobPasswordValue, "current input", "a stale password surface cannot edit the current input");
+            assert.deepEqual(passwords, [], "a stale password surface cannot submit or cancel another question");
+          }
+          context.jobPasswordPrompt = { id: 1, version: 10 };
+          passwordUnrelated.onPasswordValueChange("unrelated input");
+          await passwordUnrelated.onSubmitPassword();
+          await passwordUnrelated.onCancelPassword();
+          assert.equal(context.jobPasswordValue, "current input");
+          assert.deepEqual(passwords, []);
+          passwordShown.onPasswordValueChange("accepted input");
+          await passwordShown.onSubmitPassword();
+          assert.equal(context.jobPasswordValue, "");
+          await passwordShown.onCancelPassword();
+          assert.deepEqual(passwords, [[1, 10, "accepted input"], [1, 10, null]],
+            "matching password input, submission and cancellation retain the captured task and version");
+        }
       }
     }
   } finally {

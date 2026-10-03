@@ -10953,25 +10953,32 @@
     return isErrorDto(error) ? tError(error) : null;
   }
 
-  function taskDialogSurface(task: TaskDialogModel): TaskProgressDialogSurfaceProps {
+  function taskProgressDialogProps(
+    task: TaskDialogModel,
+    presentation: "panel" | "dialog" | "window",
+  ): TaskProgressDialogSurfaceProps {
     const passwordPrompt = jobPasswordPrompt?.id === task.id ? jobPasswordPrompt : null;
     const conflictPrompt = jobConflictPrompt?.id === task.id ? jobConflictPrompt : null;
+    const rootClass = presentation === "panel" ? "task-center-detail"
+      : presentation === "window" ? "task-window-surface" : "task-modal-overlay";
     return {
       task,
-      presentation: taskWindowMode ? "window" : "dialog",
-      rootClass: `${taskWindowMode ? "task-window-surface" : "task-modal-overlay"} design-root platform-${activePlatform} palette-${settingsSession.colors.palette} theme-${activeTheme} density-${activeDensityChoice}`,
+      presentation,
+      rootClass: `${rootClass} design-root platform-${activePlatform} palette-${settingsSession.colors.palette} theme-${activeTheme} density-${activeDensityChoice}`,
       rootVariables: customPaletteVariables(),
       copyFeedback: taskChecksumCopyFeedback(task),
       copyFeedbackTone: taskChecksumCopyFeedbackTone(task),
       copyPending: checksumCopyPending("task", task.id),
-      passwordQuestion: taskPasswordQuestion(task),
-      passwordValue: jobPasswordValue,
-      passwordError: jobPasswordSubmissionError,
-      conflictQuestion: taskConflictQuestion(task),
-      conflictApplyAll,
+      ...(presentation === "panel" ? { rootId: "squallz-task-center" } : {
+        passwordQuestion: taskPasswordQuestion(task),
+        passwordValue: jobPasswordValue,
+        passwordError: jobPasswordSubmissionError,
+        conflictQuestion: taskConflictQuestion(task),
+        conflictApplyAll,
+      }),
       taskOutputPath,
       taskRevealOutputLabel,
-      taskWindowMode,
+      taskWindowMode: presentation === "window",
       reviewPending: pendingTaskReviewId === task.id,
       macosSfxPublishingAvailable: activePlatform === "macos",
       onPause: pauseCurrentTask,
@@ -10984,47 +10991,7 @@
       onToggleDetails: toggleTaskDetails,
       onViewResults: viewTaskResults,
       onRevealOutput: revealTaskOutput,
-      onDismiss: dismissTaskDialog,
-      onPasswordValueChange: (value) => {
-        if (isCurrentTaskPasswordPrompt(passwordPrompt)) jobPasswordValue = value;
-      },
-      onSubmitPassword: () => submitTaskPasswordRequest(passwordPrompt),
-      onCancelPassword: () => cancelTaskPasswordRequest(passwordPrompt),
-      onConflictApplyAllChange: (applyAll) => {
-        if (isCurrentTaskConflictPrompt(conflictPrompt)) conflictApplyAll = applyAll;
-      },
-      onAnswerConflict: (decision, applyAll) => answerConflictDecision(conflictPrompt, decision, applyAll),
-    };
-  }
-
-  function taskCenterDetailSurface(task: TaskDialogModel): TaskProgressDialogSurfaceProps {
-    const passwordPrompt = jobPasswordPrompt?.id === task.id ? jobPasswordPrompt : null;
-    const conflictPrompt = jobConflictPrompt?.id === task.id ? jobConflictPrompt : null;
-    return {
-      task,
-      rootId: "squallz-task-center",
-      rootClass: `task-center-detail design-root platform-${activePlatform} palette-${settingsSession.colors.palette} theme-${activeTheme} density-${activeDensityChoice}`,
-      rootVariables: customPaletteVariables(),
-      presentation: "panel",
-      copyFeedback: taskChecksumCopyFeedback(task),
-      copyFeedbackTone: taskChecksumCopyFeedbackTone(task),
-      copyPending: checksumCopyPending("task", task.id),
-      taskOutputPath,
-      taskRevealOutputLabel,
-      taskWindowMode: false,
-      reviewPending: pendingTaskReviewId === task.id,
-      macosSfxPublishingAvailable: activePlatform === "macos",
-      onPause: pauseCurrentTask,
-      onResume: resumeCurrentTask,
-      onCancel: cancelCurrentTask,
-      onCopyChecksumResults: copyTaskChecksumResults,
-      onOpenOutput: openTaskOutput,
-      onPublishMacosSfx: openMacosSfxPublisher,
-      onReviewTask: prepareTaskReview,
-      onToggleDetails: toggleTaskDetails,
-      onViewResults: viewTaskResults,
-      onRevealOutput: revealTaskOutput,
-      onDismiss: returnToTaskCenter,
+      onDismiss: presentation === "panel" ? returnToTaskCenter : dismissTaskDialog,
       onPasswordValueChange: (value) => {
         if (isCurrentTaskPasswordPrompt(passwordPrompt)) jobPasswordValue = value;
       },
@@ -12598,15 +12565,7 @@
   {#if taskCenterVisible()}
     {@const selectedTask = taskCenterSelectedTask()}
     {#if selectedTask}
-      <TaskProgressDialogHost
-        surface={taskCenterDetailSurface(selectedTask)}
-        loadingTitle={tr("gui.task_surface.loading", "Loading task view")}
-        loadingBody={tr("gui.task_surface.loading_body", "Preparing live progress, results, and task controls.")}
-        failureTitle={tr("gui.task_surface.load_failed", "Task view could not be loaded")}
-        failureBody={tr("gui.task_surface.load_failed_body", "The task is still safe. Retry loading its progress and controls.")}
-        retryLabel={tr("gui.task_surface.retry", "Retry view")}
-        backLabel={tr("gui.task.back_to_tasks", "Back to tasks")}
-      />
+      {@render taskProgressSurface(selectedTask, "panel")}
     {:else}
       <TaskCenterHost
         surface={taskCenterSurface()}
@@ -12645,9 +12604,9 @@
   />
 {/if}
 
-{#snippet taskProgressSurface(task: TaskDialogModel)}
+{#snippet taskProgressSurface(task: TaskDialogModel, presentation: "panel" | "dialog" | "window")}
   <TaskProgressDialogHost
-    surface={taskDialogSurface(task)}
+    surface={taskProgressDialogProps(task, presentation)}
     loadingTitle={tr("gui.task_surface.loading", "Loading task view")}
     loadingBody={tr("gui.task_surface.loading_body", "Preparing live progress, results, and task controls.")}
     failureTitle={tr("gui.task_surface.load_failed", "Task view could not be loaded")}
@@ -12660,7 +12619,7 @@
 {#if !taskWindowMode && taskDialogVisible() && !macosSfxPublisherTask}
   {@const task = taskDialogTask()}
   {#if task}
-    {@render taskProgressSurface(task)}
+    {@render taskProgressSurface(task, "dialog")}
   {/if}
 {/if}
 
@@ -12795,7 +12754,7 @@
     {#if taskDialogVisible()}
       {@const task = taskDialogTask()}
       {#if task}
-        {@render taskProgressSurface(task)}
+        {@render taskProgressSurface(task, "window")}
       {/if}
     {:else}
       <section class="task-window-empty" role="status">
