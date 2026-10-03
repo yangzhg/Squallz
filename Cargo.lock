@@ -4037,6 +4037,7 @@ dependencies = [
 name = "squallz-formats"
 version = "0.2.0"
 dependencies = [
+ "aho-corasick",
  "blake3",
  "brotli",
  "bzip2",

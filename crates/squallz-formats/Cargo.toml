@@ -10,6 +10,7 @@ default = ["process-backend"]
 process-backend = []
 
 [dependencies]
+aho-corasick = "1.1.4"
 blake3 = "1.8.5"
 brotli = "8"
 bzip2 = "0.6"

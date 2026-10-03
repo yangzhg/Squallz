@@ -3,19 +3,22 @@
 //! The bridge lists entries and streams individual files through stdout so
 //! extraction still flows through Squallz's shared safe extraction engine.
 
+mod diagnostics;
+pub(crate) mod listing;
+mod process;
 mod wim_volume;
 mod wim_writer;
 
+pub(crate) use listing::SevenZipArchiveProperties;
 pub use wim_writer::{wimlib_backend_status, WimlibBackendSource, WimlibBackendStatus};
 
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::fs;
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::io::{self, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStderr, ChildStdout, Command, Stdio};
+use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::thread::{self, JoinHandle};
 use std::time::SystemTime;
 
 use squallz_format_api::{
@@ -27,7 +30,8 @@ use squallz_format_api::{
     TEST_PROBLEM_PREVIEW_LIMIT,
 };
 
-use crate::external_process::{self, ControlledChild};
+use diagnostics::DiagnosticCapture;
+use process::SevenZipProcess;
 
 struct SevenZipSpec {
     id: &'static str,
@@ -886,21 +890,13 @@ pub(crate) fn list_entries_with_control(
     password: Option<&Password>,
     ctl: &ControlToken,
 ) -> Result<Vec<EntryMeta>, FormatError> {
-    let output = run_7z_output(tool, archive, &["l", "-slt"], password, ctl)?;
-    parse_7z_list(&output.stdout)
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct SevenZipArchiveProperties {
-    pub(crate) multivolume: Option<bool>,
-    pub(crate) volume_index: Option<u64>,
-    pub(crate) volume_count: Option<u64>,
+    Ok(run_7z_listing(tool, archive, password, ctl)?.entries)
 }
 
 pub(crate) struct SevenZipListing {
     pub(crate) entries: Vec<EntryMeta>,
     pub(crate) archive: SevenZipArchiveProperties,
-    pub(crate) stdout: Vec<u8>,
+    pub(crate) compatibility: listing::RarCompatibility,
 }
 
 pub(crate) fn list_entries_with_archive_properties(
@@ -909,13 +905,11 @@ pub(crate) fn list_entries_with_archive_properties(
     password: Option<&Password>,
     ctl: &ControlToken,
 ) -> Result<SevenZipListing, FormatError> {
-    let output = run_7z_output(tool, archive, &["l", "-slt"], password, ctl)?;
-    let entries = parse_7z_list(&output.stdout)?;
-    let archive = parse_7z_archive_properties(&output.stdout)?;
+    let listing = run_7z_listing(tool, archive, password, ctl)?;
     Ok(SevenZipListing {
-        entries,
-        archive,
-        stdout: output.stdout,
+        entries: listing.entries,
+        archive: listing.archive?,
+        compatibility: listing.compatibility,
     })
 }
 
@@ -944,46 +938,13 @@ fn spawn_entry_reader(
     password: Option<&Password>,
     control: &ControlToken,
 ) -> Result<Box<dyn Read>, FormatError> {
-    let stdin = password_stdio(password)?;
     let mut command = Command::new(tool);
     command.arg("x").arg("-so").arg(archive);
     if !backend_path.is_empty() {
         command.arg("--").arg(backend_path);
     }
-    let mut child = command
-        .stdin(stdin)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(map_tool_spawn_error)?;
-    let stdout = match child.stdout.take() {
-        Some(stdout) => stdout,
-        None => {
-            terminate_child(&mut child);
-            return Err(FormatError::Other(
-                "7-Zip did not provide an output stream".into(),
-            ));
-        }
-    };
-    let stderr = match child.stderr.take() {
-        Some(stderr) => stderr,
-        None => {
-            terminate_child(&mut child);
-            return Err(FormatError::Other(
-                "7-Zip did not provide a diagnostic stream".into(),
-            ));
-        }
-    };
-    let diagnostics = thread::spawn(move || capture_diagnostics(stderr));
-    if let Err(error) = write_password(&mut child, password) {
-        terminate_child(&mut child);
-        let _ = diagnostics.join();
-        return Err(error);
-    }
     Ok(Box::new(CommandStdoutReader {
-        child: ControlledChild::new(child, control),
-        stdout,
-        diagnostics: Some(diagnostics),
+        process: SevenZipProcess::spawn(command, password, control)?,
         password_supplied: password.is_some(),
         entry: display_path.to_owned(),
         control: control.clone(),
@@ -1007,59 +968,6 @@ pub(crate) fn require_password_for_entry(
     }
 }
 
-fn password_stdio(password: Option<&Password>) -> Result<Stdio, FormatError> {
-    if password.is_some_and(|password| {
-        password
-            .expose()
-            .as_bytes()
-            .iter()
-            .any(|byte| matches!(byte, b'\r' | b'\n'))
-    }) {
-        return Err(FormatError::Unsupported(
-            "7-Zip bridge passwords cannot contain line breaks".into(),
-        ));
-    }
-    Ok(if password.is_some() {
-        Stdio::piped()
-    } else {
-        Stdio::null()
-    })
-}
-
-fn write_password(child: &mut Child, password: Option<&Password>) -> Result<(), FormatError> {
-    let Some(password) = password else {
-        return Ok(());
-    };
-    let mut stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| FormatError::Other("7-Zip did not provide a credential stream".into()))?;
-    stdin
-        .write_all(password.expose().as_bytes())
-        .and_then(|()| stdin.write_all(b"\n"))
-        .map_err(FormatError::from)
-}
-
-fn terminate_child(child: &mut Child) {
-    let _ = child.kill();
-    let _ = child.wait();
-}
-
-const MAX_EXTERNAL_DIAGNOSTIC_BYTES: usize = 64 * 1024;
-
-fn capture_diagnostics(mut stderr: ChildStderr) -> io::Result<Vec<u8>> {
-    let mut captured = Vec::new();
-    let mut buffer = [0u8; 4096];
-    loop {
-        let read = stderr.read(&mut buffer)?;
-        if read == 0 {
-            return Ok(captured);
-        }
-        let remaining = MAX_EXTERNAL_DIAGNOSTIC_BYTES.saturating_sub(captured.len());
-        captured.extend_from_slice(&buffer[..read.min(remaining)]);
-    }
-}
-
 pub(crate) fn recoverable_test_error(error: FormatError) -> Result<FormatError, FormatError> {
     match error {
         FormatError::PasswordRequired
@@ -1070,276 +978,56 @@ pub(crate) fn recoverable_test_error(error: FormatError) -> Result<FormatError, 
     }
 }
 
-fn parse_7z_list(stdout: &[u8]) -> Result<Vec<EntryMeta>, FormatError> {
-    let text = String::from_utf8_lossy(stdout);
-    let mut entries = Vec::new();
-    let mut block = BTreeMap::<String, String>::new();
-    for line in text.lines().chain(std::iter::once("")) {
-        let line = line.trim_end_matches('\r');
-        if line.is_empty() {
-            push_list_block(&mut entries, &mut block);
-            continue;
-        }
-        if let Some((key, value)) = line.split_once(" = ") {
-            block.insert(key.trim().to_owned(), value.to_owned());
-        }
-    }
-    infer_directory_entries(&mut entries);
-    Ok(entries)
-}
-
-fn parse_7z_archive_properties(stdout: &[u8]) -> Result<SevenZipArchiveProperties, FormatError> {
-    let text = String::from_utf8_lossy(stdout);
-    let mut properties = None;
-    let mut block = BTreeMap::<String, String>::new();
-    for line in text.lines().chain(std::iter::once("")) {
-        let line = line.trim_end_matches('\r');
-        if line.is_empty() {
-            if block.contains_key("Type") && block.contains_key("Physical Size") {
-                if properties.is_some() {
-                    return Err(FormatError::CorruptArchive(
-                        "7-Zip reported more than one archive metadata block".into(),
-                    ));
-                }
-                properties = Some(SevenZipArchiveProperties {
-                    multivolume: parse_7z_flag(&block, "Multivolume")?,
-                    volume_index: parse_7z_u64(&block, "Volume Index")?,
-                    volume_count: parse_7z_u64(&block, "Volumes")?,
-                });
-            }
-            block.clear();
-            continue;
-        }
-        if let Some((key, value)) = line.split_once(" = ") {
-            block.insert(key.trim().to_owned(), value.to_owned());
-        }
-    }
-    Ok(properties.unwrap_or_default())
-}
-
-fn parse_7z_flag(block: &BTreeMap<String, String>, key: &str) -> Result<Option<bool>, FormatError> {
-    match block.get(key).map(|value| value.trim()) {
-        Some("+") => Ok(Some(true)),
-        Some("-") => Ok(Some(false)),
-        Some(_) => Err(FormatError::CorruptArchive(format!(
-            "7-Zip reported an invalid {key} value"
-        ))),
-        None => Ok(None),
-    }
-}
-
-fn parse_7z_u64(block: &BTreeMap<String, String>, key: &str) -> Result<Option<u64>, FormatError> {
-    block
-        .get(key)
-        .map(|value| {
-            value.trim().parse::<u64>().map_err(|_| {
-                FormatError::CorruptArchive(format!("7-Zip reported an invalid {key} value"))
-            })
-        })
-        .transpose()
-}
-
-fn infer_directory_entries(entries: &mut [EntryMeta]) {
-    let paths: Vec<String> = entries
-        .iter()
-        .map(|entry| entry.path.display.clone())
-        .collect();
-    for entry in entries {
-        if matches!(entry.entry_type, EntryType::Dir) {
-            continue;
-        }
-        let prefix = format!("{}/", entry.path.display.trim_end_matches('/'));
-        if paths.iter().any(|path| path.starts_with(&prefix)) {
-            entry.entry_type = EntryType::Dir;
-            entry.size = 0;
-            entry.compressed_size = None;
-        }
-    }
-}
-
-fn push_list_block(entries: &mut Vec<EntryMeta>, block: &mut BTreeMap<String, String>) {
-    let Some(path) = block.get("Path").cloned() else {
-        block.clear();
-        return;
-    };
-    if block.contains_key("Type") && block.contains_key("Physical Size") {
-        block.clear();
-        return;
-    }
-    let is_entry = block.contains_key("Folder")
-        || block.contains_key("Size")
-        || block.contains_key("Packed Size")
-        || block.contains_key("Attributes")
-        || block.contains_key("CRC")
-        || block.contains_key("Encrypted")
-        || block.contains_key("Type");
-    if !is_entry || path.is_empty() || path == "." || path == "./" {
-        block.clear();
-        return;
-    }
-
-    let attrs = block_text(block, "Attributes");
-    let folder = block.get("Folder").is_some_and(|value| value.trim() == "+")
-        || attrs.bytes().any(|b| b == b'D')
-        || block
-            .get("Type")
-            .is_some_and(|value| value.trim().eq_ignore_ascii_case("directory"));
-    let entry_type = if folder {
-        EntryType::Dir
-    } else {
-        EntryType::File
-    };
-    let size = list_entry_size(block, folder);
-    let compressed_size = block
-        .get("Packed Size")
-        .and_then(|value| value.trim().parse::<u64>().ok());
-    let crc32 = block
-        .get("CRC")
-        .and_then(|value| u32::from_str_radix(value.trim(), 16).ok());
-    let encrypted = block
-        .get("Encrypted")
-        .is_some_and(|value| value.trim() == "+");
-    entries.push(EntryMeta {
-        path: EntryPath::from_utf8(&path),
-        entry_type,
-        size,
-        compressed_size,
-        modified: None,
-        unix_mode: None,
-        crc32,
-        encrypted,
-    });
-    block.clear();
-}
-
-fn block_text<'a>(block: &'a BTreeMap<String, String>, key: &str) -> &'a str {
-    match block.get(key) {
-        Some(value) => value.as_str(),
-        None => "",
-    }
-}
-
-fn list_entry_size(block: &BTreeMap<String, String>, folder: bool) -> u64 {
-    if folder {
-        return 0;
-    }
-    if let Some(value) = block.get("Size") {
-        if let Ok(size) = value.trim().parse::<u64>() {
-            return size;
-        }
-    }
-    0
-}
-
-fn run_7z_output(
+fn run_7z_listing(
     tool: &Path,
     archive: &Path,
-    args: &[&str],
     password: Option<&Password>,
-    ctl: &ControlToken,
-) -> Result<std::process::Output, FormatError> {
-    ctl.checkpoint()?;
-    let stdin = password_stdio(password)?;
-    let mut child = Command::new(tool)
-        .args(args)
-        .arg(archive)
-        .stdin(stdin)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(map_tool_spawn_error)?;
-    let password_write = write_password(&mut child, password);
-    let output = external_process::wait_with_output(child, ctl, "7-Zip")?;
-    if !output.status.success() {
-        return Err(map_tool_failure(
-            &output.stderr,
-            &output.stdout,
+    control: &ControlToken,
+) -> Result<listing::ParsedListing, FormatError> {
+    let mut command = Command::new(tool);
+    command.args(["l", "-slt"]).arg(archive);
+    control.checkpoint()?;
+    let mut stdout = DiagnosticCapture::for_stdout()?;
+    let mut process = SevenZipProcess::spawn(command, password, control)?;
+    let parsed = listing::read(BufReader::new(DiagnosticReader {
+        reader: &mut process.stdout,
+        capture: &mut stdout,
+        control,
+    }));
+    if parsed.is_err() {
+        process.terminate();
+    }
+    let exit = process.finish()?;
+    let parsed = parsed?;
+    if !exit.status.success() {
+        return Err(diagnostics::map_output_error(
+            &exit.diagnostics,
+            &stdout.finish(),
             password.is_some(),
         ));
     }
-    password_write?;
-    Ok(output)
+    exit.password_write?;
+    Ok(parsed)
 }
 
-fn map_tool_spawn_error(e: io::Error) -> FormatError {
-    if e.kind() == io::ErrorKind::NotFound {
-        FormatError::DependencyMissing("7zz/7z external format bridge".into())
-    } else {
-        FormatError::from(e)
+struct DiagnosticReader<'a, R> {
+    reader: R,
+    capture: &'a mut DiagnosticCapture,
+    control: &'a ControlToken,
+}
+
+impl<R: Read> Read for DiagnosticReader<'_, R> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        self.control.checkpoint().map_err(io::Error::other)?;
+        let read = self.reader.read(buffer)?;
+        self.control.checkpoint().map_err(io::Error::other)?;
+        self.capture.observe(&buffer[..read]);
+        Ok(read)
     }
-}
-
-fn map_tool_failure(stderr: &[u8], stdout: &[u8], password_supplied: bool) -> FormatError {
-    if let Some(name) = missing_volume_name(stdout) {
-        return FormatError::missing_volume(name);
-    }
-    let detail = String::from_utf8_lossy(stderr).trim().to_owned();
-    let lower = detail.to_lowercase();
-    if lower.contains("unsupported") || lower.contains("not implemented") {
-        FormatError::DependencyMissing("7zz/7z external format bridge".into())
-    } else if let Some(error) = password_failure(stderr, stdout, password_supplied) {
-        error
-    } else {
-        FormatError::CorruptArchive(if detail.is_empty() {
-            "7-Zip could not read archive".into()
-        } else {
-            detail
-        })
-    }
-}
-
-fn password_failure(stderr: &[u8], stdout: &[u8], password_supplied: bool) -> Option<FormatError> {
-    const DIAGNOSTICS: &[&str] = &[
-        "wrong password",
-        "incorrect password",
-        "password is incorrect",
-        "enter password",
-        "password required",
-        "password is required",
-        "requires a password",
-        "no password",
-        "password was not supplied",
-        "password was not provided",
-        "password is not defined",
-    ];
-    let is_password_failure = [stderr, stdout].iter().any(|output| {
-        let output = String::from_utf8_lossy(output).to_ascii_lowercase();
-        DIAGNOSTICS
-            .iter()
-            .any(|diagnostic| output.contains(diagnostic))
-    });
-    is_password_failure.then_some(if password_supplied {
-        FormatError::WrongPassword
-    } else {
-        FormatError::PasswordRequired
-    })
-}
-
-fn missing_volume_name(stdout: &[u8]) -> Option<&str> {
-    const PREFIX: &str = "ERROR = Missing volume : ";
-    let text = std::str::from_utf8(stdout).ok()?;
-    text.lines().find_map(|line| {
-        let name = line.trim().strip_prefix(PREFIX)?.trim();
-        if safe_external_file_name(name) {
-            Some(name)
-        } else {
-            None
-        }
-    })
-}
-
-fn safe_external_file_name(name: &str) -> bool {
-    !name.is_empty()
-        && name != "."
-        && name != ".."
-        && !name.contains(['/', '\\', '\0'])
-        && Path::new(name).file_name() == Some(OsStr::new(name))
 }
 
 struct CommandStdoutReader {
-    child: ControlledChild,
-    stdout: ChildStdout,
-    diagnostics: Option<JoinHandle<io::Result<Vec<u8>>>>,
+    process: SevenZipProcess,
     password_supplied: bool,
     entry: String,
     control: ControlToken,
@@ -1347,13 +1035,10 @@ struct CommandStdoutReader {
 }
 
 impl CommandStdoutReader {
-    fn finish_diagnostics(&mut self) -> io::Result<Vec<u8>> {
-        let Some(handle) = self.diagnostics.take() else {
-            return Ok(Vec::new());
-        };
-        handle
-            .join()
-            .map_err(|_| io::Error::other("7-Zip diagnostic reader stopped unexpectedly"))?
+    fn stop(&mut self) {
+        self.process.terminate();
+        let _ = self.process.finish();
+        self.finished = true;
     }
 }
 
@@ -1362,42 +1047,40 @@ impl Read for CommandStdoutReader {
         if self.finished || buf.is_empty() {
             return Ok(0);
         }
-        self.control.checkpoint().map_err(io::Error::other)?;
-        let n = match self.stdout.read(buf) {
-            Ok(read) => read,
-            Err(_) if self.control.is_cancelled() => {
-                return Err(io::Error::other(FormatError::Cancelled));
+        if let Err(error) = self.control.checkpoint() {
+            self.stop();
+            return Err(io::Error::other(error));
+        }
+        let n = loop {
+            match self.process.stdout.read(buf) {
+                Ok(read) => break read,
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) => {
+                    self.stop();
+                    return Err(if self.control.is_cancelled() {
+                        io::Error::other(FormatError::Cancelled)
+                    } else {
+                        error
+                    });
+                }
             }
-            Err(error) => return Err(error),
         };
         if n > 0 {
             return Ok(n);
         }
-        let status = self.child.wait()?;
+        let exit = self.process.finish();
         self.finished = true;
-        let diagnostics = self.finish_diagnostics()?;
-        if self.control.is_cancelled() {
-            Err(io::Error::other(FormatError::Cancelled))
-        } else if status.success() {
+        let exit = exit.map_err(io::Error::other)?;
+        if exit.status.success() {
+            exit.password_write?;
             Ok(0)
-        } else if let Some(error) = password_failure(&diagnostics, &[], self.password_supplied) {
+        } else if let Some(error) = exit.diagnostics.password_failure(self.password_supplied) {
             Err(io::Error::other(error))
         } else {
             Err(io::Error::other(format!(
                 "7-Zip failed while reading {}",
                 self.entry
             )))
-        }
-    }
-}
-
-impl Drop for CommandStdoutReader {
-    fn drop(&mut self) {
-        if !self.finished {
-            self.child.terminate();
-        }
-        if let Some(handle) = self.diagnostics.take() {
-            let _ = handle.join();
         }
     }
 }
@@ -1459,6 +1142,7 @@ mod tests {
     use super::*;
     use std::fs::File;
     use std::io::Cursor;
+    use std::thread;
 
     fn env_lock() -> std::sync::MutexGuard<'static, ()> {
         crate::TEST_ENV_LOCK
@@ -1652,36 +1336,6 @@ mod tests {
     }
 
     #[test]
-    fn sevenzip_missing_volume_diagnostic_accepts_only_one_file_name() {
-        let stdout = br#"
-Path = /private/stage/archive.part1.rar
-ERROR = Missing volume : archive.part3.rar
-"#;
-        assert_eq!(missing_volume_name(stdout), Some("archive.part3.rar"));
-        assert!(matches!(
-            map_tool_failure(b"", stdout, false),
-            FormatError::CorruptArchive(detail)
-                if detail == "missing volume: archive.part3.rar"
-        ));
-        assert_eq!(
-            missing_volume_name(b"ERROR = Missing volume : ../secret.rar\n"),
-            None
-        );
-        assert_eq!(
-            missing_volume_name(b"ERROR = Missing volume : child/secret.rar\n"),
-            None
-        );
-        assert!(matches!(
-            map_tool_failure(b"Cannot read password-notes.txt", b"", false),
-            FormatError::CorruptArchive(_)
-        ));
-        assert!(matches!(
-            map_tool_failure(b"Cannot open archive. Wrong password?", b"", true),
-            FormatError::WrongPassword
-        ));
-    }
-
-    #[test]
     fn wim_header_split_detection_uses_flags_and_part_counts() {
         fn header(flags: u32, part_number: u16, total_parts: u16) -> io::Cursor<Vec<u8>> {
             let mut bytes = vec![0u8; 208];
@@ -1717,166 +1371,6 @@ ERROR = Missing volume : archive.part3.rar
             backend_path_for(&backend_paths, &path),
             "raw/backend/path.txt"
         );
-    }
-
-    #[test]
-    fn sevenzip_listing_skips_archive_metadata_block() {
-        let stdout = br#"
-Path = /tmp/squallz-7z-temp.wim
-Type = wim
-Physical Size = 1351
-Size = 17
-Packed Size = 17
-Images = 1
-
-Path = project
-Folder = +
-Attributes = D
-
-Path = project/README.txt
-Folder = -
-Size = 10
-Packed Size = 10
-Attributes = N
-
-"#;
-
-        let entries = parse_7z_list(stdout).unwrap();
-        assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].path.display, "project");
-        assert_eq!(entries[1].path.display, "project/README.txt");
-        assert_eq!(entries[1].size, 10);
-        assert!(!entries
-            .iter()
-            .any(|entry| entry.path.display.starts_with('/')));
-    }
-
-    #[test]
-    fn sevenzip_listing_reports_native_volume_properties() {
-        let stdout = br#"
-Path = /private/stage/archive.part001.rar
-Type = Rar5
-Physical Size = 2048
-Total Physical Size = 4558
-Multivolume = +
-Volume Index = 0
-Volumes = 3
-
-----------
-Path = private.txt
-Folder = -
-Size = 128
-Packed Size = 96
-Encrypted = +
-
-"#;
-
-        let properties = parse_7z_archive_properties(stdout).unwrap();
-        assert_eq!(properties.multivolume, Some(true));
-        assert_eq!(properties.volume_index, Some(0));
-        assert_eq!(properties.volume_count, Some(3));
-        assert_eq!(parse_7z_list(stdout).unwrap().len(), 1);
-    }
-
-    #[test]
-    fn sevenzip_listing_keeps_xar_typed_entries() {
-        let stdout = br#"
-Path = /tmp/squallz-7z-temp.xar
-Type = Xar
-Physical Size = 979
-Method = SHA1
-
-Path = hello.txt
-Size = 12
-Packed Size = 20
-Mode = -rw-r--r--
-Type = file
-
-Path = dir
-Size =
-Packed Size =
-Mode = drwxr-xr-x
-Type = directory
-
-Path = dir/nested.txt
-Size = 13
-Packed Size = 21
-Mode = -rw-r--r--
-Type = file
-
-"#;
-
-        let entries = parse_7z_list(stdout).unwrap();
-        assert_eq!(entries.len(), 3);
-        assert_eq!(entries[0].path.display, "hello.txt");
-        assert_eq!(entries[0].size, 12);
-        assert!(matches!(entries[0].entry_type, EntryType::File));
-        assert_eq!(entries[1].path.display, "dir");
-        assert!(matches!(entries[1].entry_type, EntryType::Dir));
-        assert_eq!(entries[2].path.display, "dir/nested.txt");
-        assert_eq!(entries[2].size, 13);
-    }
-
-    #[test]
-    fn sevenzip_listing_skips_cpio_root_dot_entry() {
-        let stdout = br#"
-Path = .
-Folder = +
-Size = 0
-Packed Size = 0
-
-Path = ./sub
-Folder = +
-Size = 0
-Packed Size = 0
-
-Path = ./sub/data.txt
-Folder = -
-Size = 15
-Packed Size = 16
-
-Path = ./README.txt
-Folder = -
-Size = 14
-Packed Size = 16
-
-"#;
-
-        let entries = parse_7z_list(stdout).unwrap();
-        assert_eq!(entries.len(), 3);
-        assert_eq!(entries[0].path.display, "./sub");
-        assert_eq!(entries[1].path.display, "./sub/data.txt");
-        assert_eq!(entries[2].path.display, "./README.txt");
-        assert!(!entries.iter().any(|entry| entry.path.display == "."));
-    }
-
-    #[test]
-    fn sevenzip_listing_infers_directory_prefix_entries() {
-        let stdout = br#"
-Path = sub
-Folder = -
-Size = 0
-
-Path = README.txt
-Folder = -
-Size = 15
-Packed Size = 4096
-
-Path = sub/data.txt
-Folder = -
-Size = 16
-Packed Size = 4096
-
-"#;
-
-        let entries = parse_7z_list(stdout).unwrap();
-        assert_eq!(entries.len(), 3);
-        assert!(matches!(entries[0].entry_type, EntryType::Dir));
-        assert_eq!(entries[0].path.display, "sub");
-        assert_eq!(entries[0].size, 0);
-        assert_eq!(entries[0].compressed_size, None);
-        assert!(matches!(entries[1].entry_type, EntryType::File));
-        assert!(matches!(entries[2].entry_type, EntryType::File));
     }
 
     #[test]
@@ -2146,18 +1640,52 @@ exit 2
         fs::set_permissions(&script, permissions).unwrap();
         fs::write(&archive, b"fake archive").unwrap();
 
+        let blocked_password = Password::new("x".repeat(1024 * 1024));
+        for password in [None, Some(&blocked_password)] {
+            let control = ControlToken::default();
+            let cancelling_control = control.clone();
+            let canceller = thread::spawn(move || {
+                thread::sleep(Duration::from_millis(100));
+                cancelling_control.cancel();
+            });
+            let started = Instant::now();
+            let error =
+                list_entries_with_control(&script, &archive, password, &control).unwrap_err();
+            canceller.join().unwrap();
+
+            assert!(matches!(error, FormatError::Cancelled));
+            assert!(started.elapsed() < Duration::from_secs(5));
+        }
+        // Cancellation while waiting for the tool must skip directory inference.
+        fs::write(
+            &script,
+            "#!/bin/sh\ncat \"$3\"\nprintf ready > \"$3.ready\"\nexec sleep 30\n",
+        )
+        .unwrap();
+        let listing: String = (0..30_000)
+            .map(|index| format!("Path = file-{index:05}.txt\nSize = 0\n\n"))
+            .collect();
+        fs::write(&archive, listing).unwrap();
+        let ready = archive.with_extension("7z.ready");
         let control = ControlToken::default();
         let cancelling_control = control.clone();
+        let ready_for_cancel = ready.clone();
         let canceller = thread::spawn(move || {
-            thread::sleep(Duration::from_millis(100));
+            let waiting = Instant::now();
+            while !ready_for_cancel.exists() && waiting.elapsed() < Duration::from_secs(5) {
+                thread::sleep(Duration::from_millis(10));
+            }
+            let ready = ready_for_cancel.exists();
+            let cancelled_at = Instant::now();
             cancelling_control.cancel();
+            (ready, cancelled_at)
         });
-        let started = Instant::now();
         let error = list_entries_with_control(&script, &archive, None, &control).unwrap_err();
-        canceller.join().unwrap();
-
+        let (output_ready, cancelled_at) = canceller.join().unwrap();
+        assert!(output_ready, "tool did not finish writing its listing");
         assert!(matches!(error, FormatError::Cancelled));
-        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(cancelled_at.elapsed() < Duration::from_secs(2));
+        fs::remove_file(ready).unwrap();
         fs::remove_file(script).unwrap();
         fs::remove_file(archive).unwrap();
     }
@@ -2176,21 +1704,39 @@ exit 2
         fs::set_permissions(&script, permissions).unwrap();
         fs::write(&archive, b"fake archive").unwrap();
 
-        let control = ControlToken::default();
-        let mut reader =
-            spawn_entry_reader(&script, &archive, "file.txt", "file.txt", None, &control).unwrap();
-        let cancelling_control = control.clone();
-        let canceller = thread::spawn(move || {
-            thread::sleep(Duration::from_millis(100));
-            cancelling_control.cancel();
-        });
-        let started = Instant::now();
-        let error = reader.read(&mut [0u8; 1]).unwrap_err();
-        canceller.join().unwrap();
+        let blocked_password = Password::new("x".repeat(1024 * 1024));
+        for password in [None, Some(&blocked_password)] {
+            let control = ControlToken::default();
+            let mut reader = spawn_entry_reader(
+                &script, &archive, "file.txt", "file.txt", password, &control,
+            )
+            .unwrap();
+            let cancelling_control = control.clone();
+            let canceller = thread::spawn(move || {
+                thread::sleep(Duration::from_millis(100));
+                cancelling_control.cancel();
+            });
+            let started = Instant::now();
+            let error = reader.read(&mut [0u8; 1]).unwrap_err();
+            canceller.join().unwrap();
 
-        assert!(matches!(FormatError::from(error), FormatError::Cancelled));
+            assert!(matches!(FormatError::from(error), FormatError::Cancelled));
+            assert!(started.elapsed() < Duration::from_secs(5));
+            drop(reader);
+        }
+        let started = Instant::now();
+        drop(
+            spawn_entry_reader(
+                &script,
+                &archive,
+                "file.txt",
+                "file.txt",
+                Some(&blocked_password),
+                &ControlToken::default(),
+            )
+            .unwrap(),
+        );
         assert!(started.elapsed() < Duration::from_secs(5));
-        drop(reader);
         fs::remove_file(script).unwrap();
         fs::remove_file(archive).unwrap();
     }
@@ -2220,6 +1766,20 @@ if env | grep -F 'bridge-fixture-password' >/dev/null; then
   exit 8
 fi
 printf '%s\n' "$*" >> "$SQUALLZ_FAKE_7Z_LOG"
+case "$(cat "$3")" in
+  late-password)
+    dd if=/dev/zero bs=4096 count=20 2>/dev/null | tr '\000' x >&2
+    printf '\nWrong password?\n' >&2
+    exit 2 ;;
+  late-volume)
+    dd if=/dev/zero bs=4096 count=20 2>/dev/null | tr '\000' x
+    printf '\nERROR = Missing volume : archive.part3.rar\n'
+    printf 'Unsupported format. Wrong password?\n' >&2
+    exit 2 ;;
+  closed-input-success)
+    exec 0<&-
+    exit 0 ;;
+esac
 if ! IFS= read -r password; then
   printf 'Enter password:\n' >&2
   exit 255
@@ -2289,6 +1849,49 @@ exit 2
         let error = wrong_reader.read_to_end(&mut Vec::new()).unwrap_err();
         let error = FormatError::from(error);
         assert!(matches!(error, FormatError::WrongPassword), "{error:?}");
+
+        let blocked_password = Password::new("x".repeat(1024 * 1024));
+        fs::write(&archive, b"late-password").unwrap();
+        for password in [None, Some(&blocked_password)] {
+            let error = list_entries(&script, &archive, password).unwrap_err();
+            assert!(matches!(
+                (password.is_some(), error),
+                (true, FormatError::WrongPassword) | (false, FormatError::PasswordRequired)
+            ));
+            let mut reader = read_entry_stdout(
+                &script,
+                &archive,
+                &entries[0].path,
+                password,
+                &ControlToken::default(),
+            )
+            .unwrap();
+            let error = FormatError::from(reader.read_to_end(&mut Vec::new()).unwrap_err());
+            assert!(matches!(
+                (password.is_some(), error),
+                (true, FormatError::WrongPassword) | (false, FormatError::PasswordRequired)
+            ));
+        }
+        fs::write(&archive, b"late-volume").unwrap();
+        let error = list_entries(&script, &archive, Some(&blocked_password)).unwrap_err();
+        assert!(
+            matches!(error, FormatError::CorruptArchive(detail) if detail == "missing volume: archive.part3.rar")
+        );
+        fs::write(&archive, b"closed-input-success").unwrap();
+        assert!(matches!(
+            list_entries(&script, &archive, Some(&blocked_password)),
+            Err(FormatError::Io(_))
+        ));
+        let mut reader = read_entry_stdout(
+            &script,
+            &archive,
+            &entries[0].path,
+            Some(&blocked_password),
+            &ControlToken::default(),
+        )
+        .unwrap();
+        let error = FormatError::from(reader.read_to_end(&mut Vec::new()).unwrap_err());
+        assert!(matches!(error, FormatError::Io(_)));
 
         let log = fs::read_to_string(&log).unwrap();
         assert!(!log.contains("bridge-fixture-password"), "{log}");
