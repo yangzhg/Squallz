@@ -134,6 +134,16 @@ pub(crate) struct PreviewSessionManager {
     shared: Arc<PreviewSessionShared>,
 }
 
+/// Pins one external handoff until it succeeds or is dropped. A successful
+/// handoff keeps the session file available until application cleanup.
+pub(crate) struct PreviewExternalUse {
+    shared: Arc<PreviewSessionShared>,
+    id: String,
+    owner: String,
+    path: PathBuf,
+    completed: bool,
+}
+
 /// A capacity reservation acquired before any preview plaintext is written.
 /// Dropping it releases the reserved slot and bytes.
 pub(crate) struct PreviewResourceReservation {
@@ -280,7 +290,11 @@ impl PreviewSessionManager {
         })
     }
 
-    pub fn path_for_external_use(&self, id: &str, owner: &str) -> Result<PathBuf, FormatError> {
+    pub fn begin_external_use(
+        &self,
+        id: &str,
+        owner: &str,
+    ) -> Result<PreviewExternalUse, FormatError> {
         let (root, path) = {
             let mut resources = lock_unpoisoned(&self.shared.resources);
             if resources.closing {
@@ -301,47 +315,15 @@ impl PreviewSessionManager {
                 session.file.path().to_path_buf(),
             )
         };
-        match validate_session_path(&root, &path) {
-            Ok(path) => Ok(path),
-            Err(error) => {
-                self.external_use_finished(id, owner, false);
-                Err(error)
-            }
-        }
-    }
-
-    pub fn external_use_succeeded(&self, id: &str, owner: &str) {
-        self.external_use_finished(id, owner, true);
-    }
-
-    pub fn external_use_failed(&self, id: &str, owner: &str) {
-        self.external_use_finished(id, owner, false);
-    }
-
-    fn external_use_finished(&self, id: &str, owner: &str, succeeded: bool) {
-        let session = {
-            let mut resources = lock_unpoisoned(&self.shared.resources);
-            let should_remove = match resources.sessions.get_mut(id) {
-                Some(session) if session.owner == owner => {
-                    if session.pending_external_uses > 0 {
-                        session.pending_external_uses -= 1;
-                    }
-                    if succeeded {
-                        session.sticky_external_pin = true;
-                    }
-                    session.release_requested && !session.is_pinned()
-                }
-                _ => false,
-            };
-            if should_remove {
-                resources.sessions.remove(id)
-            } else {
-                None
-            }
+        let mut external_use = PreviewExternalUse {
+            shared: Arc::clone(&self.shared),
+            id: id.to_owned(),
+            owner: owner.to_owned(),
+            path,
+            completed: false,
         };
-        if let Some(session) = session {
-            let _ = close_session_file(session);
-        }
+        external_use.path = validate_session_path(&root, &external_use.path)?;
+        Ok(external_use)
     }
 
     /// Releases a WebView-owned session. Files handed to another process or
@@ -420,6 +402,52 @@ impl PreviewSessionManager {
     #[cfg(test)]
     pub(crate) fn root_path(&self) -> Option<&Path> {
         self.shared.workspace.as_ref().map(PreviewWorkspace::path)
+    }
+}
+
+impl PreviewExternalUse {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn succeed(mut self) {
+        self.finish(true);
+    }
+
+    fn finish(&mut self, succeeded: bool) {
+        if self.completed {
+            return;
+        }
+        self.completed = true;
+        let session = {
+            let mut resources = lock_unpoisoned(&self.shared.resources);
+            let should_remove = match resources.sessions.get_mut(&self.id) {
+                Some(session) if session.owner == self.owner => {
+                    if session.pending_external_uses > 0 {
+                        session.pending_external_uses -= 1;
+                    }
+                    if succeeded {
+                        session.sticky_external_pin = true;
+                    }
+                    session.release_requested && !session.is_pinned()
+                }
+                _ => false,
+            };
+            if should_remove {
+                resources.sessions.remove(&self.id)
+            } else {
+                None
+            }
+        };
+        if let Some(session) = session {
+            let _ = close_session_file(session);
+        }
+    }
+}
+
+impl Drop for PreviewExternalUse {
+    fn drop(&mut self) {
+        self.finish(false);
     }
 }
 
@@ -718,9 +746,9 @@ mod tests {
         for _ in 0..MAX_ACTIVE_PREVIEW_RESOURCES {
             let (id, _) = insert_test_session(&manager, "main");
             manager
-                .path_for_external_use(&id, "main")
-                .expect("external use should begin");
-            manager.external_use_succeeded(&id, "main");
+                .begin_external_use(&id, "main")
+                .expect("external use should begin")
+                .succeed();
         }
 
         assert!(manager.reserve("main").is_ok());
@@ -733,16 +761,17 @@ mod tests {
         for _ in 0..MAX_RETAINED_EXTERNAL_SESSIONS {
             let (id, path) = insert_test_session(&manager, "main");
             manager
-                .path_for_external_use(&id, "main")
-                .expect("external use should begin");
-            manager.external_use_succeeded(&id, "main");
+                .begin_external_use(&id, "main")
+                .expect("external use should begin")
+                .succeed();
             retained_paths.push(path);
         }
 
         let (pending_id, pending_path) = insert_test_session(&manager, "main");
         let error = manager
-            .path_for_external_use(&pending_id, "main")
-            .expect_err("another retained handoff should be rejected");
+            .begin_external_use(&pending_id, "main")
+            .err()
+            .expect("another retained handoff should be rejected");
         assert_eq!(
             preview_failure_kind(&error),
             Some(PreviewFailureKind::RetainedExternalCapacity)
@@ -797,21 +826,31 @@ mod tests {
         fs::write(&outside, b"outside").expect("outside fixture");
         fs::remove_file(&path).expect("remove preview fixture");
         std::os::unix::fs::symlink(&outside, &path).expect("replace preview with symlink");
-        assert!(manager.path_for_external_use(&id, "main").is_err());
+        assert!(manager.begin_external_use(&id, "main").is_err());
+        {
+            let resources = lock_unpoisoned(&manager.shared.resources);
+            assert_eq!(resources.retained_or_pending_external_count(), 0);
+        }
         assert!(manager.release(&id, "main").is_err());
         assert_eq!(fs::read(&outside).expect("outside remains"), b"outside");
+        assert!(manager.reserve("main").is_ok());
 
         let (id, path) = insert_test_session(&manager, "main");
         let root = path.parent().expect("preview directory");
         let moved = base.path().join("moved");
         fs::rename(root, &moved).expect("move preview directory");
         std::os::unix::fs::symlink(&moved, root).expect("replace preview directory with symlink");
-        assert!(manager.path_for_external_use(&id, "main").is_err());
+        assert!(manager.begin_external_use(&id, "main").is_err());
+        {
+            let resources = lock_unpoisoned(&manager.shared.resources);
+            assert_eq!(resources.retained_or_pending_external_count(), 0);
+        }
         assert!(manager.release(&id, "main").is_err());
         assert_eq!(
             fs::read(moved.join("说明.txt")).expect("moved file remains"),
             b"preview"
         );
+        assert!(manager.reserve("main").is_ok());
     }
 
     #[test]
@@ -819,14 +858,22 @@ mod tests {
         let manager = PreviewSessionManager::new().expect("preview manager should initialize");
         let (id, path) = insert_test_session(&manager, "main");
 
-        manager
-            .path_for_external_use(&id, "main")
+        let first = manager
+            .begin_external_use(&id, "main")
             .expect("first external use should begin");
-        manager.external_use_succeeded(&id, "main");
-        manager
-            .path_for_external_use(&id, "main")
+        let second = manager
+            .begin_external_use(&id, "main")
             .expect("second external use should begin");
-        manager.external_use_failed(&id, "main");
+        first.succeed();
+        assert_eq!(
+            lock_unpoisoned(&manager.shared.resources)
+                .sessions
+                .get(&id)
+                .expect("successful session remains available")
+                .pending_external_uses,
+            1
+        );
+        drop(second);
 
         assert!(!manager.release(&id, "main").expect("pinned release"));
         assert!(path.exists());
@@ -837,12 +884,44 @@ mod tests {
         let manager = PreviewSessionManager::new().expect("preview manager should initialize");
         let (id, path) = insert_test_session(&manager, "main");
 
-        manager
-            .path_for_external_use(&id, "main")
+        let first = manager
+            .begin_external_use(&id, "main")
             .expect("external use should begin");
+        let second = manager
+            .begin_external_use(&id, "main")
+            .expect("simultaneous external use should begin");
         assert!(!manager.release(&id, "main").expect("pending release"));
-        manager.external_use_failed(&id, "main");
+        drop(first);
+        assert!(path.exists());
+        drop(second);
         assert!(!path.exists());
+        assert!(manager.release(&id, "main").is_err());
+
+        let (id, path) = insert_test_session(&manager, "main");
+        let first = manager
+            .begin_external_use(&id, "main")
+            .expect("external use before window release should begin");
+        let second = manager
+            .begin_external_use(&id, "main")
+            .expect("simultaneous external use before window release should begin");
+        assert_eq!(manager.release_window("main"), 0);
+        drop(second);
+        assert!(path.exists());
+        drop(first);
+        assert!(!path.exists());
+        assert!(manager.release(&id, "main").is_err());
+
+        let (id, path) = insert_test_session(&manager, "main");
+        let first = manager
+            .begin_external_use(&id, "main")
+            .expect("external use before cleanup should begin");
+        let second = manager
+            .begin_external_use(&id, "main")
+            .expect("simultaneous external use before cleanup should begin");
+        manager.cleanup();
+        assert!(!path.exists());
+        drop(first);
+        second.succeed();
         assert!(manager.release(&id, "main").is_err());
     }
 

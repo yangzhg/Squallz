@@ -1291,21 +1291,22 @@ pub fn open_preview_session(
     sessions: State<'_, Arc<PreviewSessionManager>>,
     preview_id: String,
 ) -> Result<(), ErrorDto> {
-    let path = sessions
-        .path_for_external_use(&preview_id, window.label())
+    let external_use = sessions
+        .begin_external_use(&preview_id, window.label())
         .map_err(preview_error_dto)?;
+    let path = external_use.path().to_path_buf();
     trace_preview_opener("open", "request", &path, None);
     match app
         .opener()
         .open_path(path.to_string_lossy().into_owned(), None::<String>)
     {
         Ok(()) => {
-            sessions.external_use_succeeded(&preview_id, window.label());
+            external_use.succeed();
             trace_preview_opener("open", "ok", &path, None);
             Ok(())
         }
         Err(_) => {
-            sessions.external_use_failed(&preview_id, window.label());
+            drop(external_use);
             trace_preview_opener("open", "err", &path, Some("opener_failed"));
             Err(ErrorDto::other("open preview failed"))
         }
@@ -1319,18 +1320,19 @@ pub fn reveal_preview_session(
     sessions: State<'_, Arc<PreviewSessionManager>>,
     preview_id: String,
 ) -> Result<(), ErrorDto> {
-    let path = sessions
-        .path_for_external_use(&preview_id, window.label())
+    let external_use = sessions
+        .begin_external_use(&preview_id, window.label())
         .map_err(preview_error_dto)?;
+    let path = external_use.path().to_path_buf();
     trace_preview_opener("reveal", "request", &path, None);
     match app.opener().reveal_item_in_dir(&path) {
         Ok(()) => {
-            sessions.external_use_succeeded(&preview_id, window.label());
+            external_use.succeed();
             trace_preview_opener("reveal", "ok", &path, None);
             Ok(())
         }
         Err(_) => {
-            sessions.external_use_failed(&preview_id, window.label());
+            drop(external_use);
             trace_preview_opener("reveal", "err", &path, Some("opener_failed"));
             Err(ErrorDto::other("reveal preview failed"))
         }
@@ -3746,11 +3748,11 @@ mod tests {
             &ControlToken::default(),
         )
         .unwrap();
-        let path = sessions
-            .path_for_external_use(&entry.preview_id, "test-window")
+        let external_use = sessions
+            .begin_external_use(&entry.preview_id, "test-window")
             .unwrap();
-        assert_eq!(std::fs::read(path).unwrap(), b"classified");
-        sessions.external_use_failed(&entry.preview_id, "test-window");
+        assert_eq!(std::fs::read(external_use.path()).unwrap(), b"classified");
+        drop(external_use);
         assert!(sessions.release(&entry.preview_id, "test-window").unwrap());
 
         // The normal extraction workflow reuses this verified inner source,
@@ -3917,11 +3919,14 @@ mod tests {
             &ControlToken::default(),
         )
         .unwrap();
-        let path = sessions
-            .path_for_external_use(&entry.preview_id, "test-window")
+        let external_use = sessions
+            .begin_external_use(&entry.preview_id, "test-window")
             .unwrap();
-        assert_eq!(std::fs::read(path).unwrap(), b"report contents");
-        sessions.external_use_failed(&entry.preview_id, "test-window");
+        assert_eq!(
+            std::fs::read(external_use.path()).unwrap(),
+            b"report contents"
+        );
+        drop(external_use);
         assert!(sessions.release(&entry.preview_id, "test-window").unwrap());
         assert!(state.password_for(&outer).is_some());
         let status = archive_password_status_impl(&state, &MemorySecretStore::new(), &outer);
@@ -3938,11 +3943,14 @@ mod tests {
             &ControlToken::default(),
         )
         .unwrap();
-        let path = sessions
-            .path_for_external_use(&next.preview_id, "test-window")
+        let external_use = sessions
+            .begin_external_use(&next.preview_id, "test-window")
             .unwrap();
-        assert_eq!(std::fs::read(path).unwrap(), b"second report");
-        sessions.external_use_failed(&next.preview_id, "test-window");
+        assert_eq!(
+            std::fs::read(external_use.path()).unwrap(),
+            b"second report"
+        );
+        drop(external_use);
         assert!(sessions.release(&next.preview_id, "test-window").unwrap());
         state.forget_password(&outer);
         assert_eq!(
@@ -4148,15 +4156,17 @@ mod tests {
         assert!(serialized.get("preview_id").is_some());
         assert!(serialized.get("temp_path").is_none());
         assert!(sessions
-            .path_for_external_use(&preview.preview_id, "other-window")
+            .begin_external_use(&preview.preview_id, "other-window")
             .is_err());
-        let preview_path = sessions
-            .path_for_external_use(&preview.preview_id, "test-window")
+        let external_use = sessions
+            .begin_external_use(&preview.preview_id, "test-window")
             .unwrap();
+        let preview_path = external_use.path();
         assert_eq!(preview_path.file_name().unwrap(), "note.txt");
         assert_eq!(std::fs::read(preview_path).unwrap(), b"preview me");
 
         sessions.cleanup();
+        drop(external_use);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -4192,11 +4202,12 @@ mod tests {
             &ControlToken::default(),
         )
         .unwrap();
-        let preview_path = sessions
-            .path_for_external_use(&preview.preview_id, "test-window")
+        let external_use = sessions
+            .begin_external_use(&preview.preview_id, "test-window")
             .unwrap();
+        let preview_path = external_use.path().to_path_buf();
         assert_eq!(std::fs::read(&preview_path).unwrap(), png);
-        sessions.external_use_succeeded(&preview.preview_id, "test-window");
+        external_use.succeed();
 
         assert!(!sessions
             .release(&preview.preview_id, "test-window")
