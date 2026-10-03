@@ -6,6 +6,7 @@
     type SettingsEffect,
     type SettingsSaveState,
   } from "./lib/settings-session.svelte";
+  import { ExtractPlanSession, type ExtractPlanInput } from "./lib/extract-plan.svelte";
   import ArchiveStartState from "./components/ArchiveStartState.svelte";
   import ArchiveReturnStrip from "./components/ArchiveReturnStrip.svelte";
   import ArchiveEntryEditor from "./components/ArchiveEntryEditor.svelte";
@@ -363,20 +364,6 @@
   type ExtractScope = "all" | "selection";
   type ExtractOverwriteMode = "ask" | "skip" | "overwrite" | "rename";
   type ExtractSymlinkMode = "preserve" | "skip" | "follow";
-  type ExtractPlanRequest = Readonly<{
-    key: string;
-    generation: number;
-    requestId: string;
-    path: string;
-    displayPath: string;
-    dest: string;
-    selection: string[] | null;
-    smart: boolean;
-    encoding: string | null;
-    promise: Promise<void>;
-    resolve: () => void;
-    control: { cancelRequested: boolean };
-  }>;
   type PresetSfxTarget = Extract<CreateArchivePresetOptions["output"], { kind: "self_extracting" }>["target"];
   type PresetSqzInnerFormat = Extract<CreateArchivePresetOptions["format_options"], { kind: "sqz" }>["inner_format"];
   type ClassicCreateSection = "general" | "compression" | "content" | "security" | "volumes" | "recovery" | "preflight";
@@ -401,7 +388,6 @@
   const maxArchivePresets = 65;
   const maxArchivePresetExcludeRules = 64;
   const maxArchivePresetExcludeRuleBytes = 256;
-  const extractPlanDebounceMs = 140;
   type FormatCapabilityCard = {
     id: string;
     name: string;
@@ -730,14 +716,10 @@
   let currentExtractOverwriteLabel = $derived(extractOverwriteLabel(extractOverwriteMode));
   let currentExtractSymlinkLabel = $derived(extractSymlinkLabel(extractSymlinkMode));
   let extractPresetEncodingLabel = $state<string | null>(null);
-  let extractPlan = $state<ExtractPlanPreflightDto | null>(null);
-  let extractPlanPhase = $state<"idle" | "loading" | "ready" | "blocked" | "error">("idle");
-  let extractPlanErrorKey = $state("");
-  let extractPlanRequestKey = "";
-  let extractPlanGeneration = 0;
-  let extractPlanDebounceTimer: ReturnType<typeof setTimeout> | null = null;
-  let extractPlanQueued: ExtractPlanRequest | null = null;
-  let extractPlanActive: ExtractPlanRequest | null = null;
+  const extractPlanSession = new ExtractPlanSession(
+    nextPreflightRequestId,
+    (input) => previewExtractPlan(input.dest, input.selection, input.smart),
+  );
   let presetDocument = $state<ArchivePresetDocument | null>(null);
   let presetLoadState = $state<"loading" | "ready" | "error">("loading");
   let selectedCreatePresetId = $state<string | null>(null);
@@ -1204,35 +1186,13 @@
 
   $effect(() => {
     syncExtractDraftArchive();
-    const current = currentArchive;
-    if (screen !== "extract" || !current) {
-      resetExtractPlanRequestState();
+    const input = captureExtractPlanInput();
+    if (!input) {
+      extractPlanSession.reset();
       return;
     }
-    const selection = extractJobPaths();
-    const dest = extractJobDestination();
-    const smart = extractDestinationMode === "smart";
-    const encoding = extractEncodingForJob();
-    const key = extractPlanKey(
-      current.id,
-      current.source,
-      current.path,
-      dest,
-      selection,
-      smart,
-      encoding,
-    );
-    if (key === extractPlanRequestKey) return;
-    void requestExtractPlan(
-      current.id,
-      current.source,
-      current.path,
-      dest,
-      selection,
-      smart,
-      encoding,
-      true,
-    );
+    if (extractPlanSession.matches(input)) return;
+    void extractPlanSession.request(input, { debounce: true });
   });
 
   $effect(() => {
@@ -1240,11 +1200,7 @@
     if (request && !request.isCurrent()) checksumCopyRequest = null;
   });
 
-  onMount(() => () => {
-    cancelActiveExtractPlan();
-    extractPlanGeneration += 1;
-    discardQueuedExtractPlan();
-  });
+  onMount(() => () => extractPlanSession.dispose());
 
   let nativeMenuConnection = $state<NativeMenuConnection | null>(null);
   let textEditingFocused = $state(false);
@@ -6522,197 +6478,32 @@
     };
   }
 
-  function clearExtractPlanDebounce(): void {
-    if (extractPlanDebounceTimer === null) return;
-    clearTimeout(extractPlanDebounceTimer);
-    extractPlanDebounceTimer = null;
-  }
-
-  function discardQueuedExtractPlan(): void {
-    clearExtractPlanDebounce();
-    const queued = extractPlanQueued;
-    extractPlanQueued = null;
-    queued?.resolve();
-  }
-
-  function cancelActiveExtractPlan(): void {
-    const active = extractPlanActive;
-    if (!active || active.control.cancelRequested) return;
-    active.control.cancelRequested = true;
-    void ipc.cancelExtractPlan(active.requestId).catch(() => {
-      // A stale read-only plan may already have completed.
-    });
-  }
-
-  function resetExtractPlanRequestState(): void {
-    cancelActiveExtractPlan();
-    extractPlanGeneration += 1;
-    extractPlanRequestKey = "";
-    discardQueuedExtractPlan();
-    extractPlan = null;
-    extractPlanPhase = "idle";
-    extractPlanErrorKey = "";
-  }
-
-  async function refreshExtractPlan(request: ExtractPlanRequest): Promise<void> {
-    try {
-      const preview = previewExtractPlan(request.dest, request.selection, request.smart);
-      const plan = preview ?? await ipc.planExtract(
-        request.path,
-        request.displayPath,
-        request.dest,
-        request.selection,
-        request.smart,
-        request.encoding,
-        request.requestId,
-      );
-      if (
-        request.generation !== extractPlanGeneration ||
-        request.key !== extractPlanRequestKey
-      ) return;
-      extractPlan = plan;
-      extractPlanPhase = plan.space_ok ? "ready" : "blocked";
-    } catch {
-      if (
-        request.generation !== extractPlanGeneration ||
-        request.key !== extractPlanRequestKey
-      ) return;
-      extractPlan = null;
-      extractPlanPhase = "error";
-      extractPlanErrorKey = "gui.extract.plan_unavailable_body";
-    }
-  }
-
-  function startQueuedExtractPlan(): void {
-    if (extractPlanActive || extractPlanDebounceTimer !== null || !extractPlanQueued) return;
-    const request = extractPlanQueued;
-    extractPlanQueued = null;
-    extractPlanActive = request;
-    void refreshExtractPlan(request).finally(() => {
-      request.resolve();
-      if (extractPlanActive !== request) return;
-      extractPlanActive = null;
-      startQueuedExtractPlan();
-    });
-  }
-
-  function queueExtractPlanRequest(request: ExtractPlanRequest, debounce: boolean): void {
-    discardQueuedExtractPlan();
-    extractPlanQueued = request;
-    if (!debounce) {
-      startQueuedExtractPlan();
-      return;
-    }
-    extractPlanDebounceTimer = setTimeout(() => {
-      extractPlanDebounceTimer = null;
-      startQueuedExtractPlan();
-    }, extractPlanDebounceMs);
-  }
-
-  function requestExtractPlan(
-    archiveId: number,
-    path: string,
-    displayPath: string,
-    dest: string,
-    selection: string[] | null,
-    smart: boolean,
-    encoding: string | null,
-    debounce = false,
-  ): Promise<void> {
-    const key = extractPlanKey(
-      archiveId,
-      path,
-      displayPath,
-      dest,
-      selection,
-      smart,
-      encoding,
-    );
-    if (
-      key === extractPlanRequestKey &&
-      (extractPlanPhase === "ready" || extractPlanPhase === "blocked") &&
-      extractPlan
-    ) {
-      return Promise.resolve();
-    }
-    if (
-      key === extractPlanRequestKey &&
-      extractPlanActive?.key === key &&
-      extractPlanActive.generation === extractPlanGeneration
-    ) return extractPlanActive.promise;
-    const queued = extractPlanQueued;
-    if (
-      key === extractPlanRequestKey &&
-      queued?.key === key &&
-      queued.generation === extractPlanGeneration
-    ) {
-      if (!debounce && extractPlanDebounceTimer !== null) {
-        clearExtractPlanDebounce();
-        startQueuedExtractPlan();
-      }
-      return queued.promise;
-    }
-
-    cancelActiveExtractPlan();
-    const generation = ++extractPlanGeneration;
-    extractPlanRequestKey = key;
-    extractPlan = null;
-    extractPlanPhase = "loading";
-    extractPlanErrorKey = "";
-    let resolveRequest: () => void = () => undefined;
-    const promise = new Promise<void>((resolve) => {
-      resolveRequest = resolve;
-    });
-    const request: ExtractPlanRequest = {
-      key,
-      generation,
-      requestId: nextPreflightRequestId(),
-      path,
-      displayPath,
-      dest,
-      selection,
-      smart,
-      encoding,
-      promise,
-      resolve: resolveRequest,
-      control: { cancelRequested: false },
+  function captureExtractPlanInput(): ExtractPlanInput | null {
+    const current = currentArchive;
+    if (!current || screen !== "extract") return null;
+    return {
+      archiveId: current.id,
+      path: current.source,
+      displayPath: current.path,
+      dest: extractJobDestination(),
+      selection: extractJobPaths(),
+      smart: extractDestinationMode === "smart",
+      encoding: extractEncodingForJob(),
     };
-    queueExtractPlanRequest(request, debounce);
-    return promise;
-  }
-
-  function extractPlanKey(
-    archiveId: number,
-    path: string,
-    displayPath: string,
-    dest: string,
-    selection: string[] | null,
-    smart: boolean,
-    encoding: string | null,
-  ): string {
-    return JSON.stringify([
-      archiveId,
-      path,
-      displayPath,
-      dest,
-      selection,
-      smart,
-      encoding,
-    ]);
   }
 
   function extractPlanStatusLabel(): string {
-    if (extractPlanPhase === "ready") return tr("gui.extract.plan_ready", "Ready");
-    if (extractPlanPhase === "blocked") return tr("gui.error.disk_full.title", "Not Enough Disk Space");
-    if (extractPlanPhase === "error") return tr("gui.extract.plan_unavailable", "Preview unavailable");
-    if (extractPlanPhase === "loading") return tr("gui.extract.plan_checking", "Checking");
+    if (extractPlanSession.phase === "ready") return tr("gui.extract.plan_ready", "Ready");
+    if (extractPlanSession.phase === "blocked") return tr("gui.error.disk_full.title", "Not Enough Disk Space");
+    if (extractPlanSession.phase === "error") return tr("gui.extract.plan_unavailable", "Preview unavailable");
+    if (extractPlanSession.phase === "loading") return tr("gui.extract.plan_checking", "Checking");
     return tr("gui.extract.plan_waiting", "Waiting");
   }
 
   function extractPlanDescription(): string {
     if (!currentArchive) return openArchiveFirstLabel();
-    if (extractPlanPhase === "blocked") return extractSpaceFailureLabel();
-    return extractPlanPhase === "ready"
+    if (extractPlanSession.phase === "blocked") return extractSpaceFailureLabel();
+    return extractPlanSession.phase === "ready"
       ? tr(
           "gui.extract.plan_ready_body",
           "The selected scope, smart layout, and destination below come from the same core plan the task will rebuild before extraction.",
@@ -6724,15 +6515,15 @@
   }
 
   function extractPlanErrorLabel(): string {
-    if (!extractPlanErrorKey) return "";
+    if (!extractPlanSession.errorKey) return "";
     return tr(
-      extractPlanErrorKey,
+      extractPlanSession.errorKey,
       "Squallz could not refresh this preview. Check the archive and destination, then try again.",
     );
   }
 
   function extractSpaceFailureLabel(): string {
-    const plan = extractPlan;
+    const plan = extractPlanSession.plan;
     if (!plan) return tr("error.disk_full", "Disk is full");
     return tr(
       "gui.error.disk_full.body",
@@ -6743,29 +6534,19 @@
   }
 
   function retryExtractPlan(): Promise<void> {
-    const current = currentArchive;
-    if (!current || screen !== "extract") return Promise.resolve();
-    extractPlanRequestKey = "";
-    return requestExtractPlan(
-      current.id,
-      current.source,
-      current.path,
-      extractJobDestination(),
-      extractJobPaths(),
-      extractDestinationMode === "smart",
-      extractEncodingForJob(),
-    );
+    const input = captureExtractPlanInput();
+    return input ? extractPlanSession.request(input, { force: true }) : Promise.resolve();
   }
 
   function extractPlanLayoutLabel(): string {
-    if (!extractPlan) return tr("gui.extract.layout_direct", "Direct");
-    return extractPlan.layout === "wrap_in_folder"
+    if (!extractPlanSession.plan) return tr("gui.extract.layout_direct", "Direct");
+    return extractPlanSession.plan.layout === "wrap_in_folder"
       ? tr("gui.extract.layout_wrapped", "Containing folder")
       : tr("gui.extract.layout_direct", "Direct");
   }
 
   function extractPlanMetrics() {
-    const plan = extractPlan;
+    const plan = extractPlanSession.plan;
     if (!plan) return [];
     const linkCount = plan.symlinks + plan.hardlinks;
     const metrics: ExtractWorkspaceSurface["plan"]["metrics"] = [
@@ -6820,9 +6601,9 @@
     if (!currentArchive) return openArchiveFirstLabel();
     if (extractDestinationMode === "smart") {
       if (
-        (extractPlanPhase === "ready" || extractPlanPhase === "blocked") &&
-        extractPlan
-      ) return extractPlan.destination;
+        (extractPlanSession.phase === "ready" || extractPlanSession.phase === "blocked") &&
+        extractPlanSession.plan
+      ) return extractPlanSession.plan.destination;
       return tr("gui.extract.smart_destination_value", "{base} · final folder chosen from archive contents")
         .replace("{base}", extractJobDestination());
     }
@@ -6938,18 +6719,18 @@
       },
       plan: {
         variant,
-        phase: extractPlanPhase,
+        phase: extractPlanSession.phase,
         ariaLabel: tr("gui.extract.plan_aria", "Extraction write plan"),
         eyebrow: tr("gui.extract.plan_eyebrow", "Before extraction"),
         heading: tr("gui.extract.plan_heading", "Know what will be written"),
         statusLabel: extractPlanStatusLabel(),
         description: extractPlanDescription(),
         destinationLabel: tr("gui.extract.plan_destination", "Planned destination"),
-        destination: extractPlan?.destination ?? extractJobDestination(),
+        destination: extractPlanSession.plan?.destination ?? extractJobDestination(),
         metrics: extractPlanMetrics(),
         note: tr("gui.extract.plan_snapshot_note", "Required space includes selected data and filesystem allocation allowance. Space and conflicts are checked again immediately before writing."),
         error: extractPlanErrorLabel(),
-        retryLabel: extractPlanPhase === "blocked"
+        retryLabel: extractPlanSession.phase === "blocked"
           ? tr("gui.extract.plan_recheck_space", "Check space again")
           : tr("gui.extract.plan_retry", "Retry preview"),
         onRetry: () => void retryExtractPlan(),
@@ -8748,9 +8529,9 @@
     if (extractScope === "selection" && extractSelectionSnapshot.length === 0) {
       return tr("gui.precondition.select_before_extract", "Select one or more entries before extracting them");
     }
-    if (extractPlanPhase === "blocked") return extractSpaceFailureLabel();
-    if (extractPlanPhase === "error") return extractPlanErrorLabel();
-    if (extractPlanPhase !== "ready") {
+    if (extractPlanSession.phase === "blocked") return extractSpaceFailureLabel();
+    if (extractPlanSession.phase === "error") return extractPlanErrorLabel();
+    if (extractPlanSession.phase !== "ready") {
       return tr("gui.extract.plan_wait_before_start", "Wait for the extraction preview to finish");
     }
     return "";
@@ -8825,11 +8606,11 @@
       showNotice(tr("gui.precondition.select_before_extract", "Select one or more entries before extracting them"));
       return;
     }
-    if (extractPlanPhase === "loading") {
+    if (extractPlanSession.phase === "loading") {
       showNotice(tr("gui.extract.plan_wait_before_start", "Wait for the extraction preview to finish"));
       return;
     }
-    if (extractPlanPhase === "blocked") {
+    if (extractPlanSession.phase === "blocked") {
       showNotice(extractSpaceFailureLabel());
       return;
     }
@@ -8845,46 +8626,16 @@
         || extractDestinationMode !== "choose" || !extractCustomDest.trim()
         || extractDestinationPicker) return;
     }
-    const current = currentArchive;
-    if (!current || screen !== "extract") return;
-    const selection = extractJobPaths();
-    const jobDestination = extractJobDestination();
-    const smart = extractDestinationMode === "smart";
-    const encoding = extractEncodingForJob();
+    const input = captureExtractPlanInput();
+    if (!input) return;
     const overwrite = extractOverwriteMode;
     const symlinks = extractSymlinkMode;
     const verifySfx = extractVerifySfx;
-    const expectedPlanKey = extractPlanKey(
-      current.id,
-      current.source,
-      current.path,
-      jobDestination,
-      selection,
-      smart,
-      encoding,
-    );
-    await requestExtractPlan(
-      current.id,
-      current.source,
-      current.path,
-      jobDestination,
-      selection,
-      smart,
-      encoding,
-    );
-    if (!currentArchive || currentArchive.id !== current.id || screen !== "extract") return;
-    const currentPlanKey = extractPlanKey(
-      currentArchive.id,
-      currentArchive.source,
-      currentArchive.path,
-      extractJobDestination(),
-      extractJobPaths(),
-      extractDestinationMode === "smart",
-      extractEncodingForJob(),
-    );
+    await extractPlanSession.request(input);
+    if (!currentArchive || currentArchive.id !== input.archiveId || screen !== "extract") return;
     if (
-      extractPlanRequestKey !== expectedPlanKey ||
-      currentPlanKey !== expectedPlanKey ||
+      !extractPlanSession.matches(input) ||
+      !extractPlanSession.matches(captureExtractPlanInput()) ||
       extractOverwriteMode !== overwrite ||
       extractSymlinkMode !== symlinks ||
       extractVerifySfx !== verifySfx
@@ -8895,7 +8646,8 @@
       ));
       return;
     }
-    if (extractPlanPhase !== "ready" || !extractPlan) {
+    const plan = extractPlanSession.plan;
+    if (extractPlanSession.phase !== "ready" || !plan) {
       showNotice(extractPlanErrorLabel() || tr(
         "gui.extract.plan_wait_before_start",
         "Wait for the extraction preview to finish",
@@ -8903,22 +8655,22 @@
       return;
     }
     const destination = effectiveExtractDest();
-    const action = selection ? tr("gui.extract.selected_queued", "Selected extract queued") : tr("gui.extract.all_queued", "Extract all queued");
+    const action = input.selection ? tr("gui.extract.selected_queued", "Selected extract queued") : tr("gui.extract.all_queued", "Extract all queued");
     const success = tr("gui.extract.started_to_destination", "{action} · destination: {destination}")
       .replace("{action}", action)
       .replace("{destination}", destination);
     const queued = await submitCurrentArchiveJob(
       {
         kind: "extract",
-        path: currentArchive.source,
-        dest: jobDestination,
-        expected_destination: extractPlan.destination,
-        expected_input_guard: extractPlan.input_guard,
-        selection,
+        path: input.path,
+        dest: input.dest,
+        expected_destination: plan.destination,
+        expected_input_guard: plan.input_guard,
+        selection: input.selection,
         overwrite,
         symlinks,
-        smart,
-        encoding,
+        smart: input.smart,
+        encoding: input.encoding,
         password: null,
         verify_sfx: verifySfx,
         best_effort: false,
@@ -11912,7 +11664,7 @@
   function restoreExtractTaskDraft(draft: ExtractTaskDraft): boolean {
     if (!currentArchive || !sameFilePath(currentArchive.source, draft.path)) return false;
     extractDestinationPicker = null;
-    resetExtractPlanRequestState();
+    extractPlanSession.reset();
     markExtractPresetDraftTouched();
     selectedExtractPresetId = null;
     extractPresetDraftName = "";
