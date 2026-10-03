@@ -1611,6 +1611,7 @@ mod tests {
 
         fn test_summary(
             &mut self,
+            _limits: &crate::SafetyLimits,
             _progress: &dyn ProgressSink,
             _ctl: &ControlToken,
         ) -> Result<TestSummary, FormatError> {
@@ -1637,6 +1638,7 @@ mod tests {
 
         fn test_summary(
             &mut self,
+            _limits: &crate::SafetyLimits,
             _progress: &dyn ProgressSink,
             _ctl: &ControlToken,
         ) -> Result<TestSummary, FormatError> {

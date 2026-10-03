@@ -81,6 +81,7 @@
     rootVariables = {},
     copyFeedback = null,
     copyFeedbackTone = null,
+    copyPending = false,
     passwordQuestion = null,
     passwordValue = "",
     passwordError = null,
@@ -115,6 +116,7 @@
     rootVariables?: CssVariableMap;
     copyFeedback?: string | null;
     copyFeedbackTone?: "success" | "danger" | null;
+    copyPending?: boolean;
     passwordQuestion?: PasswordQuestion | null;
     passwordValue?: string;
     passwordError?: string | null;
@@ -193,6 +195,12 @@
   }
 
   function onTaskCardKeydown(event: KeyboardEvent): void {
+    if (presentation === "panel" && event.key === "Escape" && !event.defaultPrevented) {
+      event.preventDefault();
+      event.stopPropagation();
+      void onDismiss(task);
+      return;
+    }
     if (presentation === "dialog") trapModalFocus(event, taskCard);
   }
 
@@ -491,8 +499,8 @@
                 <small class="checksum-copy-status" class:danger={copyFeedbackTone === "danger"} role="status">{copyFeedback}</small>
               {/if}
             </div>
-            <button type="button" class="primary-lite" onclick={() => void onCopyChecksumResults(task)}>
-              <Icon name="list" size={14} />{tr("gui.checksum.copy_results", "Copy results")}
+            <button type="button" class="primary-lite" disabled={copyPending} aria-busy={copyPending} onclick={() => void onCopyChecksumResults(task)}>
+              <Icon name="list" size={14} />{copyPending ? tr("common.copying", "Copying…") : tr("gui.checksum.copy_results", "Copy results")}
             </button>
           </div>
           <div class="task-checksum-table">
@@ -572,7 +580,7 @@
             </button>
           {/if}
           {#if presentation === "panel"}
-            <button type="button" onclick={() => void onDismiss(task)}>
+            <button type="button" aria-keyshortcuts="Escape" onclick={() => void onDismiss(task)}>
               {tr("gui.task.back_to_tasks", "Back to tasks")}
             </button>
           {/if}
@@ -613,7 +621,7 @@
               <Icon name="folder-open" size={15} />{taskRevealOutputLabel()}
             </button>
           {/if}
-          <button type="button" onclick={() => void onDismiss(task)}>
+          <button type="button" aria-keyshortcuts={presentation === "panel" ? "Escape" : undefined} onclick={() => void onDismiss(task)}>
             {presentation === "panel"
               ? tr("gui.task.back_to_tasks", "Back to tasks")
               : tr("gui.task.close", "Close")}

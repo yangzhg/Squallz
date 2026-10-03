@@ -1,4 +1,6 @@
+use std::fmt;
 use std::io;
+use std::sync::Mutex;
 use std::time::SystemTime;
 
 use crate::api::{
@@ -9,12 +11,32 @@ use crate::compound::ProgressRead;
 use crate::create::TrackedInputRead;
 use crate::filesystem_identity::PathIdentity;
 use crate::inputs::{collect_prepared_input_as, PreparedInputItem};
-use crate::CreateDestinationGuard;
 use crate::PathFilter;
+use crate::{ArchiveSourceState, CreateDestinationGuard};
 
 pub(crate) mod move_plan;
 pub(crate) mod target;
 mod transaction;
+
+/// Source binding shared by updates submitted from the same archive view.
+/// Successful updates advance the binding while holding the target lock.
+pub struct ArchiveUpdateGuard {
+    state: Mutex<ArchiveSourceState>,
+}
+
+impl ArchiveUpdateGuard {
+    pub fn new(state: ArchiveSourceState) -> Self {
+        Self {
+            state: Mutex::new(state),
+        }
+    }
+}
+
+impl fmt::Debug for ArchiveUpdateGuard {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ArchiveUpdateGuard([redacted])")
+    }
+}
 
 pub(crate) struct PreparedAdditions {
     entries: Vec<PreparedAddition>,
@@ -79,16 +101,27 @@ pub(crate) fn prepare_additions(
     Ok(PreparedAdditions { entries })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn run_update_rewrite(
     format: &dyn ArchiveFormat,
     target: &std::path::Path,
     ops: &[UpdateOp],
     opts: &UpdateOptions,
+    source_guard: Option<&ArchiveUpdateGuard>,
     progress: &dyn ProgressSink,
     ctl: &ControlToken,
 ) -> Result<(), FormatError> {
     let mut additions = prepare_additions(ops, &opts.create, progress, ctl)?;
-    transaction::run(format, target, ops, &mut additions, opts, progress, ctl)
+    transaction::run(
+        format,
+        target,
+        ops,
+        &mut additions,
+        opts,
+        source_guard,
+        progress,
+        ctl,
+    )
 }
 
 pub(crate) fn commit_created_archive(

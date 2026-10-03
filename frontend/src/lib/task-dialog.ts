@@ -1188,6 +1188,7 @@ export function taskReviewAvailable(task: TaskDialogModel, taskWindowMode: boole
 
 export function taskReviewActionLabel(task: TaskDialogModel): string {
   const target = taskReviewScreen(task);
+  if (target === "settingsSecurity") return tr("gui.task.open_security", "Open Security");
   if (target === "batch" && task.state === "done") return tr("gui.batch.review_failed", "Review failed archives");
   if (target === "recovery") return tr("gui.task.open_recovery", "Open Recovery");
   if (target === "browse") return tr("gui.task.return_to_archive", "Return to archive");
@@ -1263,6 +1264,12 @@ function taskFailureNextStepDetail(task: TaskDialogModel): string {
     );
   }
   if (key === "error.input_changed") {
+    if (task.spec.kind === "update") {
+      return tr(
+        "gui.task.failure.next_update_input_changed",
+        "Reopen the archive and select the intended items before applying changes again. These changes were not applied.",
+      );
+    }
     return tr(
       "gui.task.failure.next_input_changed",
       "Reopen the archive, review the selected files and destination, then start extraction again. Squallz did not extract anything.",
@@ -1304,6 +1311,9 @@ function taskFailureNextStepDetail(task: TaskDialogModel): string {
     return tr("gui.task.failure.next_unsafe", "Do not bypass this protection. Verify the source before trying a recovery workflow.");
   }
   if (key === "error.resource_limit") {
+    if (task.spec.kind === "test") {
+      return tr("gui.task.failure.next_test_limit", "Review the exceeded limit in the error details. For trusted archives, change test limits in Security, then start a new test.");
+    }
     return tr("gui.task.failure.next_resource", "Review the technical details before changing settings or trying another workflow.");
   }
   if (key === "error.unsupported") {

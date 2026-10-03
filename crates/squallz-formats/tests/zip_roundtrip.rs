@@ -718,7 +718,13 @@ fn roundtrip_create_list_extract_test() {
 
     // Integrity test passes for every entry.
     let report = eng
-        .test_summary(&archive, &OpenOptions::default(), &NoProgress, &ctl)
+        .test_summary(
+            &archive,
+            &OpenOptions::default(),
+            &squallz_format_api::SafetyLimits::default(),
+            &NoProgress,
+            &ctl,
+        )
         .unwrap();
     assert!(report.is_ok(), "problems: {:?}", report.problems);
     assert_eq!(report.entries_tested, entries.len() as u64);
@@ -847,6 +853,7 @@ fn interop_infozip_native_split_opens_from_any_volume() {
         .test_summary(
             &first,
             &OpenOptions::default(),
+            &squallz_format_api::SafetyLimits::default(),
             &NoProgress,
             &ControlToken::new(),
         )
@@ -1099,6 +1106,7 @@ fn local_header_fallback_extracts_when_central_directory_is_missing() {
         .test_summary(
             &archive,
             &OpenOptions::default(),
+            &squallz_format_api::SafetyLimits::default(),
             &NoProgress,
             &ControlToken::new(),
         )
@@ -1130,6 +1138,7 @@ fn local_header_fallback_extracts_zip64_local_sizes() {
         .test_summary(
             &archive,
             &OpenOptions::default(),
+            &squallz_format_api::SafetyLimits::default(),
             &NoProgress,
             &ControlToken::new(),
         )
@@ -1177,6 +1186,7 @@ fn local_header_fallback_lists_encrypted_entries_but_requires_password_to_read()
         .test_summary(
             &archive,
             &OpenOptions::default(),
+            &squallz_format_api::SafetyLimits::default(),
             &NoProgress,
             &ControlToken::new(),
         )
@@ -1225,6 +1235,7 @@ fn local_header_fallback_lists_unsupported_methods_but_refuses_to_read() {
         .test_summary(
             &archive,
             &OpenOptions::default(),
+            &squallz_format_api::SafetyLimits::default(),
             &NoProgress,
             &ControlToken::new(),
         )
@@ -1298,6 +1309,7 @@ fn local_header_fallback_extracts_signed_zip64_data_descriptor_entries() {
         .test_summary(
             &archive,
             &OpenOptions::default(),
+            &squallz_format_api::SafetyLimits::default(),
             &NoProgress,
             &ControlToken::new(),
         )
@@ -1363,6 +1375,7 @@ fn local_header_fallback_extracts_unsigned_zip64_data_descriptor_entries() {
         .test_summary(
             &archive,
             &OpenOptions::default(),
+            &squallz_format_api::SafetyLimits::default(),
             &NoProgress,
             &ControlToken::new(),
         )
@@ -1446,6 +1459,7 @@ fn local_header_fallback_extracts_signed_data_descriptor_entries() {
         .test_summary(
             &archive,
             &OpenOptions::default(),
+            &squallz_format_api::SafetyLimits::default(),
             &NoProgress,
             &ControlToken::new(),
         )
@@ -1509,6 +1523,7 @@ fn local_header_fallback_extracts_unsigned_data_descriptor_entries() {
         .test_summary(
             &archive,
             &OpenOptions::default(),
+            &squallz_format_api::SafetyLimits::default(),
             &NoProgress,
             &ControlToken::new(),
         )
@@ -1543,6 +1558,7 @@ fn local_header_fallback_reports_crc_mismatch() {
         .test_summary(
             &archive,
             &OpenOptions::default(),
+            &squallz_format_api::SafetyLimits::default(),
             &NoProgress,
             &ControlToken::new(),
         )

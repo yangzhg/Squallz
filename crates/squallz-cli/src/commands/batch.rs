@@ -136,6 +136,9 @@ struct TestJob {
     archive: PathBuf,
     password: Option<String>,
     encoding: Option<String>,
+    max_output_bytes: Option<u64>,
+    max_entries: Option<u64>,
+    max_compression_ratio: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -504,6 +507,11 @@ fn run_test_job(ctx: &Ctx, base_dir: &Path, job: &TestJob) -> Result<JobSuccess,
     let report = ctx.engine.test_summary(
         &archive,
         &open_options(&job.password, &job.encoding),
+        &safety_limits(
+            job.max_output_bytes,
+            job.max_entries,
+            job.max_compression_ratio,
+        ),
         &NoProgress,
         &ctx.ctl,
     )?;
@@ -643,6 +651,7 @@ fn run_compress_job(
                 password: opts.password.clone(),
                 encoding_override: None,
             },
+            &squallz_core::api::SafetyLimits::default(),
             &NoProgress,
             &ctx.ctl,
         )?;
@@ -904,9 +913,13 @@ fn run_repair_sqz_job(
             "batch repair_sqz output must be a .sqz container".into(),
         ));
     }
-    let source_report =
-        ctx.engine
-            .test_summary(&archive, &OpenOptions::default(), &NoProgress, &ctx.ctl)?;
+    let source_report = ctx.engine.test_summary(
+        &archive,
+        &OpenOptions::default(),
+        &squallz_core::api::SafetyLimits::default(),
+        &NoProgress,
+        &ctx.ctl,
+    )?;
     if !source_report.is_ok() {
         return Err(test_report_error(source_report));
     }
@@ -959,6 +972,7 @@ fn run_repair_zip_job(
     let source_test = ctx.engine.test_summary_with_structure(
         &archive,
         &OpenOptions::default(),
+        &squallz_core::api::SafetyLimits::default(),
         &NoProgress,
         &ctx.ctl,
     )?;

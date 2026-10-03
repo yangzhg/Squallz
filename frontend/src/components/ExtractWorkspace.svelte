@@ -11,6 +11,7 @@
     label: string;
     detail: string;
     selected: boolean;
+    busy: boolean;
     disabled: boolean;
     title: string;
     ariaLabel: string;
@@ -117,6 +118,7 @@
                 <button
                   class:selected={choice.selected}
                   aria-pressed={choice.selected}
+                  aria-busy={choice.busy}
                   disabled={choice.disabled}
                   title={choice.title}
                   aria-label={choice.ariaLabel}
@@ -239,6 +241,7 @@
                 <button
                   class:active={choice.selected}
                   aria-pressed={choice.selected}
+                  aria-busy={choice.busy}
                   disabled={choice.disabled}
                   title={choice.title}
                   aria-label={choice.ariaLabel}

@@ -149,16 +149,16 @@ impl TarArchiveReader {
 
     fn test_with_problem_recorder(
         &mut self,
+        limits: &SafetyLimits,
         progress: &dyn ProgressSink,
         ctl: &ControlToken,
         mut record_problem: impl FnMut(String),
     ) -> Result<u64, FormatError> {
-        let streamed = !self.is_seekable();
         let archive = self.rebuild()?;
         let mut buf = vec![0u8; READ_CHUNK];
         let mut done = 0u64;
         let mut entries_tested = 0u64;
-        let mut accountant = LimitsAccountant::new(SafetyLimits::default());
+        let mut accountant = LimitsAccountant::new(*limits);
         for item in archive.entries()? {
             ctl.checkpoint()?;
             let mut entry = match item {
@@ -173,18 +173,33 @@ impl TarArchiveReader {
             let meta = match meta_of(&entry) {
                 Ok(meta) => meta,
                 Err(e) => {
-                    // Preserve the test report contract: an entry whose
-                    // metadata is malformed was still encountered and tested.
-                    entries_tested += 1;
+                    // Report malformed metadata, then drain its payload under
+                    // the same limits instead of letting TAR skip it unchecked.
                     record_problem(e.to_string());
-                    continue;
+                    let raw = entry.path_bytes().into_owned();
+                    EntryMeta {
+                        path: EntryPath::from_raw(
+                            raw.clone(),
+                            String::from_utf8_lossy(&raw).into_owned(),
+                            "utf-8",
+                        ),
+                        entry_type: EntryType::Other,
+                        size: entry.size(),
+                        compressed_size: None,
+                        modified: None,
+                        unix_mode: None,
+                        crc32: None,
+                        encrypted: false,
+                    }
                 }
             };
             if is_tar_root_directory(&meta) {
                 continue;
             }
+            accountant.check_entry(&meta)?;
             entries_tested += 1;
-            let path = meta.path;
+            let path = &meta.path;
+            let mut entry_output_bytes = 0;
             // Draining validates entry framing and, for compound inputs, the
             // underlying stream's integrity checks.
             loop {
@@ -192,11 +207,13 @@ impl TarArchiveReader {
                 match entry.read(&mut buf) {
                     Ok(0) => break,
                     Ok(n) => {
-                        if streamed {
-                            accountant.add_output_bytes(n as u64)?;
-                        }
-                        done += n as u64;
-                        progress.on_progress(done, 0, &path);
+                        accountant.add_entry_output_bytes(
+                            &meta,
+                            &mut entry_output_bytes,
+                            n as u64,
+                        )?;
+                        done = done.saturating_add(n as u64);
+                        progress.on_progress(done, 0, path);
                     }
                     Err(e) => {
                         record_problem(format!("{path}: {e}"));
@@ -369,12 +386,14 @@ impl ArchiveReader for TarArchiveReader {
 
     fn test_summary(
         &mut self,
+        limits: &SafetyLimits,
         progress: &dyn ProgressSink,
         ctl: &ControlToken,
     ) -> Result<TestSummary, FormatError> {
         let problems = BoundedProblemLog::new(TEST_PROBLEM_PREVIEW_LIMIT);
-        let entries_tested =
-            self.test_with_problem_recorder(progress, ctl, |problem| problems.record(problem))?;
+        let entries_tested = self.test_with_problem_recorder(limits, progress, ctl, |problem| {
+            problems.record(problem)
+        })?;
         Ok(TestSummary {
             entries_tested,
             problems: problems.snapshot(),

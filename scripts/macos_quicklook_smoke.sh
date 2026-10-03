@@ -170,7 +170,7 @@ codesign --force --options runtime \
   --sign "$IDENTITY" \
   "$RUNTIME_APPEX"
 codesign --force --options runtime --sign "$IDENTITY" \
-  "$RUNTIME_APP/Contents/MacOS/sqz"
+  "$RUNTIME_APP/Contents/MacOS/sqz-sidecar"
 codesign --force --options runtime --sign "$IDENTITY" \
   "$RUNTIME_APP/Contents/MacOS/squallz-gui"
 codesign --force --options runtime --sign "$IDENTITY" "$RUNTIME_APP"

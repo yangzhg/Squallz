@@ -42,7 +42,7 @@
   let failureTitleId = $derived(`task-surface-${presentation}-load-failed-title`);
 
   $effect(() => {
-    if (presentation === "panel" || fallbackCard === null) return;
+    if (fallbackCard === null) return;
     void tick().then(() => fallbackCard?.focus());
   });
 
@@ -51,6 +51,12 @@
   }
 
   function onFallbackKeydown(event: KeyboardEvent): void {
+    if (presentation === "panel" && event.key === "Escape" && !event.defaultPrevented) {
+      event.preventDefault();
+      event.stopPropagation();
+      void surface.onDismiss(surface.task);
+      return;
+    }
     if (presentation === "dialog") trapModalFocus(event, fallbackCard);
   }
 </script>
@@ -80,7 +86,7 @@
         </div>
         {#if presentation === "panel"}
           <div class="deferred-workspace-actions">
-            <button type="button" onclick={() => void surface.onDismiss(surface.task)}>{backLabel}</button>
+            <button type="button" aria-keyshortcuts="Escape" onclick={() => void surface.onDismiss(surface.task)}>{backLabel}</button>
           </div>
         {/if}
       </section>
@@ -111,7 +117,7 @@
         recovery={{ taskId: surface.task.id }}
       >
         {#if presentation === "panel"}
-          <button type="button" onclick={() => void surface.onDismiss(surface.task)}>{backLabel}</button>
+          <button type="button" aria-keyshortcuts="Escape" onclick={() => void surface.onDismiss(surface.task)}>{backLabel}</button>
         {/if}
       </DeferredViewError>
     </div>

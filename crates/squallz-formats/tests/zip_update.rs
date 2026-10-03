@@ -18,6 +18,7 @@ use squallz_core::api::{
     FormatError, NoProgress, OpenOptions, Password, ProgressPhase, ProgressSink, UpdateOp,
     UpdateOptions,
 };
+use squallz_core::ArchiveUpdateGuard;
 
 /// Builds a base archive with project/a.txt, project/sub/b.txt, project/c.log.
 fn base_archive(dir: &Path, password: Option<&str>) -> PathBuf {
@@ -1251,6 +1252,233 @@ fn update_preserves_archive_permissions() {
 }
 
 #[test]
+#[cfg(unix)]
+fn archive_listing_rejects_parent_symlink_aba_even_when_path_stamps_match() {
+    use std::os::unix::fs::symlink;
+
+    use squallz_core::api::{
+        ArchiveFormat, ArchiveReader, ArchiveWriter, Detected, FormatCapabilities, FormatRegistry,
+        ReadSeek, WriteSeek,
+    };
+
+    struct RestoreParentAfterOpen {
+        inner: Arc<dyn ArchiveFormat>,
+        parent: PathBuf,
+        original_directory: PathBuf,
+        observed: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl ArchiveFormat for RestoreParentAfterOpen {
+        fn id(&self) -> &'static str {
+            "zip"
+        }
+
+        fn extensions(&self) -> &'static [&'static str] {
+            &["zip"]
+        }
+
+        fn capabilities(&self) -> FormatCapabilities {
+            self.inner.capabilities()
+        }
+
+        fn sniff(&self, head: &[u8], tail: &[u8]) -> bool {
+            self.inner.sniff(head, tail)
+        }
+
+        fn open(
+            &self,
+            mut source: Box<dyn ReadSeek>,
+            options: &OpenOptions,
+        ) -> Result<Box<dyn ArchiveReader>, FormatError> {
+            source.seek(SeekFrom::Start(0))?;
+            source.read_to_end(&mut self.observed.lock().unwrap())?;
+            source.seek(SeekFrom::Start(0))?;
+            let reader = self.inner.open(source, options)?;
+            fs::remove_file(&self.parent)?;
+            symlink(&self.original_directory, &self.parent)?;
+            Ok(reader)
+        }
+
+        fn create(
+            &self,
+            output: Box<dyn WriteSeek>,
+            options: &CreateOptions,
+        ) -> Result<Box<dyn ArchiveWriter>, FormatError> {
+            self.inner.create(output, options)
+        }
+    }
+
+    let tmp = TempDir::new("browse-parent-symlink-aba");
+    let original_directory = tmp.path().join("original");
+    let replacement_directory = tmp.path().join("replacement");
+    fs::create_dir(&original_directory).unwrap();
+    fs::create_dir(&replacement_directory).unwrap();
+    let original = build_stored_zip(&[RawZipEntry {
+        name: b"original.txt".to_vec(),
+        data: b"original archive".to_vec(),
+    }]);
+    let replacement = build_stored_zip(&[RawZipEntry {
+        name: b"replacement.txt".to_vec(),
+        data: b"replacement archive".to_vec(),
+    }]);
+    fs::write(original_directory.join("archive.zip"), &original).unwrap();
+    fs::write(replacement_directory.join("archive.zip"), &replacement).unwrap();
+    let parent = tmp.path().join("current");
+    symlink(&original_directory, &parent).unwrap();
+    let path = parent.join("archive.zip");
+    let before = engine()
+        .inspect_archive_source_state(&path, &ControlToken::new())
+        .unwrap();
+    fs::remove_file(&parent).unwrap();
+    symlink(&replacement_directory, &parent).unwrap();
+
+    let Some(Detected::Archive(zip)) = squallz_formats::registry().detect_by_name("archive.zip")
+    else {
+        panic!("ZIP format is unavailable");
+    };
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let mut registry = FormatRegistry::new();
+    registry.register_archive(Arc::new(RestoreParentAfterOpen {
+        inner: zip,
+        parent,
+        original_directory,
+        observed: Arc::clone(&observed),
+    }));
+    let result = squallz_core::Engine::new(registry)
+        .list_with_format_source_set_and_structure_with_entry_limit_and_control(
+            &path,
+            &OpenOptions::default(),
+            100,
+            &ControlToken::new(),
+        );
+    let after = engine()
+        .inspect_archive_source_state(&path, &ControlToken::new())
+        .unwrap();
+    assert_eq!(
+        before, after,
+        "both independent path stamps observe the original archive"
+    );
+    assert_eq!(
+        *observed.lock().unwrap(),
+        replacement,
+        "the actual reader consumed the replacement archive"
+    );
+    match result {
+        Err(error) => assert!(error.is_input_changed(), "{error:?}"),
+        Ok(listing) => panic!(
+            "listing accepted the replacement archive behind matching path stamps: {:?}",
+            listing
+                .entries
+                .iter()
+                .map(|entry| &entry.path.display)
+                .collect::<Vec<_>>()
+        ),
+    }
+}
+
+#[test]
+fn guarded_update_rejects_a_replaced_browsed_archive_before_rewriting() {
+    let tmp = TempDir::new("update-view-source-replaced");
+    let archive = named_archive(tmp.path(), &["report.txt", "keep.txt"]);
+    let guard = ArchiveUpdateGuard::new(
+        engine()
+            .inspect_archive_source_state(&archive, &ControlToken::new())
+            .unwrap(),
+    );
+    let original = fs::read(&archive).unwrap();
+    let held_original = tmp.path().join("held-original.zip");
+    let replacement = tmp.path().join("replacement.zip");
+    let replacement_bytes = build_stored_zip(&[
+        RawZipEntry {
+            name: b"report.txt".to_vec(),
+            data: b"different report from a replacement archive".to_vec(),
+        },
+        RawZipEntry {
+            name: b"replacement-only.txt".to_vec(),
+            data: b"keep this archive intact".to_vec(),
+        },
+    ]);
+    fs::write(&replacement, &replacement_bytes).unwrap();
+    fs::rename(&archive, &held_original).unwrap();
+    fs::rename(&replacement, &archive).unwrap();
+
+    for operation in [
+        UpdateOp::DeleteEntry {
+            path: EntrySelection::Display("report.txt".into()),
+        },
+        UpdateOp::Rename {
+            from: EntrySelection::Display("report.txt".into()),
+            to: EntryPath::from_utf8("renamed.txt"),
+        },
+        UpdateOp::AddDir {
+            path: EntryPath::from_utf8("new-folder/"),
+        },
+    ] {
+        let error = engine()
+            .update_guarded(
+                &archive,
+                &[operation],
+                &UpdateOptions::default(),
+                &guard,
+                &NoProgress,
+                &ControlToken::new(),
+            )
+            .unwrap_err();
+        assert!(error.is_input_changed(), "{error:?}");
+        assert_eq!(fs::read(&archive).unwrap(), replacement_bytes);
+        assert_eq!(fs::read(&held_original).unwrap(), original);
+        assert_no_update_temp(tmp.path());
+    }
+}
+
+#[test]
+fn guarded_concurrent_updates_advance_the_shared_browsed_source_binding() {
+    let tmp = TempDir::new("update-view-source-concurrent");
+    let actual_archive = base_archive(tmp.path(), None);
+    let archive = tmp.path().join(".").join("base.zip");
+    let guard = Arc::new(ArchiveUpdateGuard::new(
+        engine()
+            .inspect_archive_source_state(&archive, &ControlToken::new())
+            .unwrap(),
+    ));
+    let first = tmp.path().join("first.txt");
+    let second = tmp.path().join("second.txt");
+    fs::write(&first, b"first").unwrap();
+    fs::write(&second, b"second").unwrap();
+    let barrier = Arc::new(Barrier::new(2));
+    let workers = [(first, "first.txt"), (second, "second.txt")]
+        .into_iter()
+        .map(|(source, destination)| {
+            let archive = archive.clone();
+            let guard = Arc::clone(&guard);
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                engine().update_guarded(
+                    &archive,
+                    &[UpdateOp::Add {
+                        src: source,
+                        dest: EntryPath::from_utf8(destination),
+                    }],
+                    &UpdateOptions::default(),
+                    &guard,
+                    &NoProgress,
+                    &ControlToken::new(),
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    for worker in workers {
+        worker.join().unwrap().unwrap();
+    }
+    let names = list_names(&actual_archive, None);
+    assert!(names.contains(&"first.txt".into()));
+    assert!(names.contains(&"second.txt".into()));
+    assert_no_update_temp(tmp.path());
+    assert_unzip_t(&actual_archive);
+}
+
+#[test]
 fn concurrent_updates_are_serialized_against_the_latest_archive() {
     let tmp = TempDir::new("update-concurrent");
     let archive = base_archive(tmp.path(), None);
@@ -1557,6 +1785,55 @@ fn update_add_can_cancel_while_streaming_one_file() {
     assert!(matches!(error, FormatError::Cancelled));
     assert_eq!(fs::read(&archive).unwrap(), original_archive);
     assert_no_update_temp(tmp.path());
+}
+
+#[test]
+fn guarded_update_cancellation_keeps_the_binding_for_an_explicit_retry() {
+    let tmp = TempDir::new("update-view-source-cancel");
+    let archive = large_stored_archive(tmp.path());
+    let original = fs::read(&archive).unwrap();
+    let guard = ArchiveUpdateGuard::new(
+        engine()
+            .inspect_archive_source_state(&archive, &ControlToken::new())
+            .unwrap(),
+    );
+    let control = ControlToken::new();
+    let progress = CancelDuringRawCopy {
+        ctl: Arc::clone(&control),
+        fired: AtomicBool::new(false),
+        observed: Mutex::new(None),
+    };
+    let ops = [UpdateOp::DeleteEntry {
+        path: EntrySelection::Display("raw-copy/remove.txt".into()),
+    }];
+    let error = engine()
+        .update_guarded(
+            &archive,
+            &ops,
+            &UpdateOptions::default(),
+            &guard,
+            &progress,
+            &control,
+        )
+        .unwrap_err();
+    assert!(matches!(error, FormatError::Cancelled), "{error:?}");
+    assert!(progress.fired.load(Ordering::SeqCst));
+    assert_eq!(fs::read(&archive).unwrap(), original);
+    assert_no_update_temp(tmp.path());
+
+    engine()
+        .update_guarded(
+            &archive,
+            &ops,
+            &UpdateOptions::default(),
+            &guard,
+            &NoProgress,
+            &ControlToken::new(),
+        )
+        .unwrap();
+    assert!(!list_names(&archive, None).contains(&"raw-copy/remove.txt".into()));
+    assert_no_update_temp(tmp.path());
+    assert_unzip_t(&archive);
 }
 
 #[test]
@@ -2219,6 +2496,59 @@ fn update_rename_directory_moves_its_complete_subtree() {
         assert_eq!(data, b"bravo");
         assert_unzip_t(&archive);
     }
+
+    for names in [
+        &[
+            "a",
+            "a/",
+            "a/child.txt",
+            "a/nested/deep.txt",
+            "a-old/keep.txt",
+        ][..],
+        &[
+            "a/",
+            "a/child.txt",
+            "a/nested/deep.txt",
+            "a",
+            "a-old/keep.txt",
+        ][..],
+        &["a", "a/child.txt", "a/nested/deep.txt", "a-old/keep.txt"][..],
+    ] {
+        let tmp = TempDir::new("update-rename-file-directory");
+        let archive = named_archive(tmp.path(), names);
+        let mut expected = raw_entry_snapshots(&archive);
+        for entry in &mut expected {
+            if let Some(suffix) = entry.name.strip_prefix(b"a/") {
+                entry.name = [b"moved/".as_slice(), suffix].concat();
+            }
+        }
+        run_update(
+            &archive,
+            &[UpdateOp::Rename {
+                from: EntrySelection::Display("a/".into()),
+                to: EntryPath::from_utf8("moved/"),
+            }],
+            &UpdateOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(raw_entry_snapshots(&archive), expected, "{names:?}");
+        let mut reader = zip::ZipArchive::new(fs::File::open(&archive).unwrap()).unwrap();
+        for (name, original) in [
+            ("a", "a"),
+            ("moved/child.txt", "a/child.txt"),
+            ("moved/nested/deep.txt", "a/nested/deep.txt"),
+            ("a-old/keep.txt", "a-old/keep.txt"),
+        ] {
+            let mut payload = Vec::new();
+            reader
+                .by_name(name)
+                .unwrap()
+                .read_to_end(&mut payload)
+                .unwrap();
+            assert_eq!(payload, original.as_bytes(), "{name}");
+        }
+        assert_unzip_t(&archive);
+    }
 }
 
 #[test]
@@ -2287,6 +2617,35 @@ fn update_directory_rename_rejects_unsafe_or_ambiguous_plans_atomically() {
         );
         assert_eq!(fs::read(&archive).unwrap(), before, "{case:?}");
         assert_no_update_temp(tmp.path());
+    }
+
+    for names in [
+        &["a", "a/", "a/child.txt"][..],
+        &["a/", "a/child.txt", "a"][..],
+        &["a", "a/child.txt"][..],
+    ] {
+        let tmp = TempDir::new("update-rename-ambiguous-source");
+        let archive = named_archive(tmp.path(), names);
+        let before = fs::read(&archive).unwrap();
+        for from in [
+            EntrySelection::Display("a".into()),
+            EntrySelection::Raw(EntryPath::from_utf8("a")),
+        ] {
+            assert_other_contains(
+                run_update(
+                    &archive,
+                    &[UpdateOp::Rename {
+                        from,
+                        to: EntryPath::from_utf8("moved/"),
+                    }],
+                    &UpdateOptions::default(),
+                )
+                .unwrap_err(),
+                "ambiguous",
+            );
+            assert_eq!(fs::read(&archive).unwrap(), before, "{names:?}");
+            assert_no_update_temp(tmp.path());
+        }
     }
 }
 
@@ -2450,29 +2809,106 @@ fn update_rejects_target_conflicts_without_explicit_delete() {
 
 #[test]
 fn update_combined_add_delete_rename() {
-    let tmp = TempDir::new("update-combo");
-    let archive = base_archive(tmp.path(), None);
-    fs::write(tmp.path().join("fresh.txt"), b"fresh").unwrap();
-    let ops = vec![
-        UpdateOp::Add {
-            src: tmp.path().join("fresh.txt"),
-            dest: EntryPath::from_utf8("fresh.txt"),
-        },
-        UpdateOp::Delete {
-            pattern: "*.log".into(),
-        },
-        UpdateOp::Rename {
-            from: EntrySelection::Raw(EntryPath::from_utf8("project/sub/b.txt")),
-            to: EntryPath::from_utf8("project/sub/beta.txt"),
-        },
-    ];
-    run_update(&archive, &ops, &UpdateOptions::default()).unwrap();
-    let names = list_names(&archive, None);
-    assert!(names.contains(&"fresh.txt".to_string()));
-    assert!(names.contains(&"project/sub/beta.txt".to_string()));
-    assert!(!names.iter().any(|n| n.ends_with(".log")));
-    assert!(!names.contains(&"project/sub/b.txt".to_string()));
-    assert_unzip_t(&archive);
+    for comment in [
+        Vec::new(),
+        "归档说明：保留原始字节。".as_bytes().to_vec(),
+        b"\xff\xfe\0\x80".to_vec(),
+        vec![b'x'; usize::from(u16::MAX)],
+    ] {
+        let tmp = TempDir::new("update-combo");
+        let archive = base_archive(tmp.path(), None);
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&archive)
+            .unwrap();
+        let mut writer = zip::ZipWriter::new_append(file).unwrap();
+        writer
+            .set_raw_comment(comment.clone().into_boxed_slice())
+            .unwrap();
+        writer.finish().unwrap();
+        assert_eq!(
+            zip::ZipArchive::new(fs::File::open(&archive).unwrap())
+                .unwrap()
+                .comment(),
+            comment
+        );
+        let external_comment = command_exists("unzip").then(|| {
+            let output = Command::new("unzip")
+                .arg("-z")
+                .arg(&archive)
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            output.stdout
+        });
+        fs::write(tmp.path().join("fresh.txt"), b"fresh").unwrap();
+        let ops = vec![
+            UpdateOp::Add {
+                src: tmp.path().join("fresh.txt"),
+                dest: EntryPath::from_utf8("fresh.txt"),
+            },
+            UpdateOp::AddDir {
+                path: EntryPath::from_utf8("fresh-folder/"),
+            },
+            UpdateOp::Delete {
+                pattern: "*.log".into(),
+            },
+            UpdateOp::Rename {
+                from: EntrySelection::Raw(EntryPath::from_utf8("project/sub/b.txt")),
+                to: EntryPath::from_utf8("project/sub/beta.txt"),
+            },
+        ];
+        run_update(&archive, &ops, &UpdateOptions::default()).unwrap();
+        let names = list_names(&archive, None);
+        assert!(names.contains(&"fresh.txt".to_string()));
+        assert!(names.contains(&"fresh-folder/".to_string()));
+        assert!(names.contains(&"project/sub/beta.txt".to_string()));
+        assert!(!names.iter().any(|n| n.ends_with(".log")));
+        assert!(!names.contains(&"project/sub/b.txt".to_string()));
+        let mut updated = zip::ZipArchive::new(fs::File::open(&archive).unwrap()).unwrap();
+        assert_eq!(
+            updated.comment(),
+            comment,
+            "ZIP update changed archive comment bytes"
+        );
+        for (path, expected) in [
+            ("project/a.txt", b"alpha".as_slice()),
+            ("project/sub/beta.txt", b"bravo".as_slice()),
+            ("fresh.txt", b"fresh".as_slice()),
+        ] {
+            let mut payload = Vec::new();
+            updated
+                .by_name(path)
+                .unwrap()
+                .read_to_end(&mut payload)
+                .unwrap();
+            assert_eq!(payload, expected);
+            if external_comment.is_some() {
+                let output = Command::new("unzip")
+                    .arg("-p")
+                    .arg(&archive)
+                    .arg(path)
+                    .output()
+                    .unwrap();
+                assert!(output.status.success());
+                assert_eq!(output.stdout, expected);
+            }
+        }
+        assert_unzip_t(&archive);
+        if let Some(expected) = external_comment {
+            let output = Command::new("unzip")
+                .arg("-z")
+                .arg(&archive)
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            assert_eq!(
+                output.stdout, expected,
+                "unzip displayed a changed archive comment"
+            );
+        }
+    }
 }
 
 #[test]

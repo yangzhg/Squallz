@@ -26,15 +26,20 @@ pub fn run(
     tree: bool,
 ) -> Result<(), CliError> {
     let explicit = password.map(Password::new);
-    let (entries, structure) = with_password_retry(&ctx.loc, explicit.as_ref(), |pw| {
-        ctx.engine.list_with_structure(
-            &archive,
-            &OpenOptions {
-                password: pw.cloned(),
-                encoding_override: encoding.clone(),
-            },
-        )
-    })?;
+    let (entries, structure) = with_password_retry(
+        &ctx.loc,
+        explicit.as_ref(),
+        || {},
+        |pw| {
+            ctx.engine.list_with_structure(
+                &archive,
+                &OpenOptions {
+                    password: pw.cloned(),
+                    encoding_override: encoding.clone(),
+                },
+            )
+        },
+    )?;
     if structure == ArchiveStructureStatus::ZipLocalHeadersRecovered {
         ctx.eprint_problem(ctx.loc.t("cli.list.zip_local_headers_recovered"));
     }

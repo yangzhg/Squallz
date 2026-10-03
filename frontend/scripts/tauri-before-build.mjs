@@ -82,7 +82,7 @@ const cargoEnv = targetTriple.endsWith("apple-darwin")
 const executableSuffix = targetTriple.includes("windows") ? ".exe" : "";
 const cargoOutputRoot = cargoTargetDirectory(root, { env: cargoEnv });
 const stagedReleaseDir = resolve(root, "target", "release");
-const sidecarPath = resolve(stagedReleaseDir, `sqz-${targetTriple}${executableSuffix}`);
+const sidecarPath = resolve(stagedReleaseDir, `sqz-sidecar-${targetTriple}${executableSuffix}`);
 mkdirSync(stagedReleaseDir, { recursive: true });
 
 if (targetTriple === universalMacTarget) {

@@ -324,6 +324,8 @@ export type JobSpec =
   | {
       kind: "update";
       path: string;
+      /** Bind list edits to the archive version shown by this window. */
+      expected_archive_id: number | null;
       add: string[];
       /** Literal selected paths; directories retain their trailing slash. */
       delete: string[];

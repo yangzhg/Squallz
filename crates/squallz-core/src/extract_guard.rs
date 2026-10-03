@@ -1,8 +1,8 @@
 use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::fmt;
-use std::fs;
-use std::path::PathBuf;
+use std::fs::{self, File};
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
@@ -73,28 +73,55 @@ pub(crate) fn inspect_archive_source_state(
         ));
     }
 
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(b"squallz-extract-source-state-v1\0");
-    hasher.update(&(members.len() as u64).to_le_bytes());
+    let mut hasher = archive_source_state_hasher(members.len());
     for member in members {
         control.checkpoint()?;
-        update_os_str(&mut hasher, member.as_os_str());
         let file = open_regular_file_no_follow(member)?;
-        let metadata = file.metadata()?;
-        let identity = file_identity(&file)?;
-        let state = RegularFileState::from_metadata(&metadata);
-        identity.update_digest(&mut hasher);
-        state.update_digest(&mut hasher);
-
-        let current_metadata = fs::symlink_metadata(member)?;
-        if path_identity(member)? != identity || !state.matches(&current_metadata) {
-            return Err(FormatError::input_changed());
-        }
+        update_source_member(&mut hasher, member, &file)?;
     }
     control.checkpoint()?;
     Ok(ArchiveSourceState {
         digest: *hasher.finalize().as_bytes(),
     })
+}
+
+pub(crate) fn inspect_bound_archive_source_state(
+    member: &Path,
+    file: &File,
+    control: &ControlToken,
+) -> Result<ArchiveSourceState, FormatError> {
+    control.checkpoint()?;
+    let mut hasher = archive_source_state_hasher(1);
+    update_source_member(&mut hasher, member, file)?;
+    control.checkpoint()?;
+    Ok(ArchiveSourceState {
+        digest: *hasher.finalize().as_bytes(),
+    })
+}
+
+fn archive_source_state_hasher(members: usize) -> blake3::Hasher {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"squallz-extract-source-state-v1\0");
+    hasher.update(&(members as u64).to_le_bytes());
+    hasher
+}
+
+fn update_source_member(
+    hasher: &mut blake3::Hasher,
+    member: &Path,
+    file: &File,
+) -> Result<(), FormatError> {
+    let metadata = file.metadata()?;
+    let identity = file_identity(file)?;
+    let state = RegularFileState::from_metadata(&metadata);
+    let current_metadata = fs::symlink_metadata(member)?;
+    if path_identity(member)? != identity || !state.matches(&current_metadata) {
+        return Err(FormatError::input_changed());
+    }
+    update_os_str(hasher, member.as_os_str());
+    identity.update_digest(hasher);
+    state.update_digest(hasher);
+    Ok(())
 }
 
 pub fn build_extract_input_guard(

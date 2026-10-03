@@ -4,7 +4,7 @@
 use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
 
-use crate::entry::{EntryMeta, EntryPath};
+use crate::entry::{EntryMeta, EntryPath, EntryType};
 use crate::error::FormatError;
 use crate::options::{
     CompressionLevel, CreateOptions, ExtractOptions, FormatCapabilities, FormatCreateBudget,
@@ -646,6 +646,10 @@ pub trait ArchiveFormat: Send + Sync {
     }
 }
 
+/// Consumer of an archive entry, with a borrowed stream for regular files.
+pub type EntryStreamConsumer<'a> =
+    dyn FnMut(&EntryMeta, Option<&mut dyn Read>) -> Result<(), FormatError> + 'a;
+
 /// Read handle of an opened archive.
 pub trait ArchiveReader: Send {
     /// Reports whether this reader opened the archive through its complete
@@ -724,7 +728,7 @@ pub trait ArchiveReader: Send {
         crate::extract::extract_entries_with_report(self, dest, selection, opts, progress, ctl)
     }
 
-    /// Consumes a single entry stream (preview, nested archives, conversion).
+    /// Consumes a single entry stream (preview and nested archives).
     ///
     /// The consumer is called once after the entry is located. It may stop
     /// early or return an error without draining the remaining data afterward.
@@ -737,36 +741,50 @@ pub trait ArchiveReader: Send {
         consume: &mut dyn FnMut(&mut dyn Read) -> Result<(), FormatError>,
     ) -> Result<(), FormatError>;
 
-    /// Integrity test with an exact problem count and bounded diagnostic
-    /// preview.
-    fn test_summary(
-        &mut self,
-        progress: &dyn ProgressSink,
-        ctl: &ControlToken,
-    ) -> Result<TestSummary, FormatError>;
-
-    /// Integrity test with explicit decompression-bomb guardrails.
+    /// Streams a complete archive into a consumer, using the unchanged listing
+    /// previously returned by [`ArchiveReader::entries`]. Every entry is visited
+    /// once, in the reader's decoding order, with data only for regular files.
+    /// Successful consumers are followed by draining any unread data, so the
+    /// next entry is aligned and available checksums are verified. Consumer
+    /// failures stop immediately and retain their original error.
     ///
-    /// The default implementation validates declared metadata before
-    /// forwarding to [`ArchiveReader::test_summary`]. Readers that stream
-    /// decoded contents should override this method and charge observed bytes
-    /// as they are read, because untrusted metadata can understate output.
-    fn test_summary_with_limits(
+    /// Solid formats should override this method to decode each block once.
+    /// Use [`ArchiveReader::read_entry`] for bounded reads that may stop early.
+    fn read_entries(
+        &mut self,
+        entries: &[EntryMeta],
+        consume: &mut EntryStreamConsumer<'_>,
+        ctl: &ControlToken,
+    ) -> Result<(), FormatError> {
+        let mut buffer = vec![0; STREAM_CHUNK];
+        for entry in entries {
+            ctl.checkpoint()?;
+            if matches!(entry.entry_type, EntryType::File) {
+                self.read_entry(&entry.path, &mut |data| {
+                    consume(entry, Some(data))?;
+                    loop {
+                        ctl.checkpoint()?;
+                        if data.read(&mut buffer)? == 0 {
+                            return Ok(());
+                        }
+                    }
+                })?;
+            } else {
+                consume(entry, None)?;
+            }
+        }
+        ctl.checkpoint()
+    }
+
+    /// Integrity test with explicit resource limits, an exact problem count,
+    /// and a bounded diagnostic preview. Readers charge observed output while
+    /// decoding; unsafe expansion and cancellation remain hard errors.
+    fn test_summary(
         &mut self,
         limits: &SafetyLimits,
         progress: &dyn ProgressSink,
         ctl: &ControlToken,
-    ) -> Result<TestSummary, FormatError> {
-        let mut accountant = LimitsAccountant::new(*limits);
-        for entry in self.entries() {
-            ctl.checkpoint()?;
-            let entry = entry?;
-            accountant.check_entry(&entry)?;
-            accountant.add_output_bytes(entry.size)?;
-        }
-        ctl.checkpoint()?;
-        self.test_summary(progress, ctl)
-    }
+    ) -> Result<TestSummary, FormatError>;
 }
 
 /// Write handle of an archive being created.

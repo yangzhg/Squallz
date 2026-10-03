@@ -19,11 +19,12 @@ use std::thread::{self, JoinHandle};
 use std::time::SystemTime;
 
 use squallz_format_api::{
-    split_volume_name, ArchiveFormat, ArchiveReader, ArchiveSourceSet, ArchiveWriter,
-    BoundedProblemLog, ControlToken, CreateOptions, EntryMeta, EntryPath, EntryType,
-    FormatCapabilities, FormatCreateBudget, FormatError, NativeVolumeBudget, NativeVolumeLimits,
-    NativeVolumeWriter, OpenOptions, Password, PhysicalFileIdentity, ProgressSink, ReadSeek,
-    SplitOutputMode, TestSummary, WriteSeek, TEST_PROBLEM_PREVIEW_LIMIT,
+    split_volume_name, test_entry_data, ArchiveFormat, ArchiveReader, ArchiveSourceSet,
+    ArchiveWriter, BoundedProblemLog, ControlToken, CreateOptions, EntryMeta, EntryPath, EntryType,
+    FormatCapabilities, FormatCreateBudget, FormatError, LimitsAccountant, NativeVolumeBudget,
+    NativeVolumeLimits, NativeVolumeWriter, OpenOptions, Password, PhysicalFileIdentity,
+    ProgressSink, ReadSeek, SafetyLimits, SplitOutputMode, TestSummary, WriteSeek,
+    TEST_PROBLEM_PREVIEW_LIMIT,
 };
 
 use crate::external_process::{self, ControlledChild};
@@ -584,23 +585,31 @@ impl SevenZipArchiveReader {
 
     fn test_with_problem_recorder(
         &mut self,
+        limits: &SafetyLimits,
         progress: &dyn ProgressSink,
         ctl: &squallz_format_api::ControlToken,
         mut record_problem: impl FnMut(String),
     ) -> Result<u64, FormatError> {
         let entries = self.entries.clone();
-        let total = entries.len() as u64;
+        let total = entries
+            .iter()
+            .filter(|entry| matches!(entry.entry_type, EntryType::File))
+            .map(|entry| entry.size)
+            .fold(0, u64::saturating_add);
         let mut entries_tested = 0u64;
+        let mut accountant = LimitsAccountant::new(*limits);
         for meta in entries {
             ctl.checkpoint()?;
+            accountant.check_entry(&meta)?;
             if !matches!(meta.entry_type, EntryType::File) {
                 continue;
             }
             match self.read_entry_with_control(&meta.path, ctl) {
                 Ok(mut data) => {
-                    let mut sink = io::sink();
-                    if let Err(e) = io::copy(&mut data, &mut sink) {
-                        let e = recoverable_stream_error(e)?;
+                    if let Err(e) =
+                        test_entry_data(data.as_mut(), &meta, &mut accountant, total, progress, ctl)
+                    {
+                        let e = recoverable_test_error(e)?;
                         record_problem(format!("{}: {e}", meta.path.display));
                     }
                 }
@@ -610,9 +619,12 @@ impl SevenZipArchiveReader {
                 }
             }
             entries_tested += 1;
-            progress.on_progress(entries_tested, total, &meta.path);
         }
-        progress.on_progress(entries_tested, entries_tested, &EntryPath::from_utf8(""));
+        progress.on_progress(
+            accountant.output_bytes(),
+            accountant.output_bytes(),
+            &EntryPath::from_utf8(""),
+        );
         Ok(entries_tested)
     }
 }
@@ -650,12 +662,14 @@ impl ArchiveReader for SevenZipArchiveReader {
 
     fn test_summary(
         &mut self,
+        limits: &SafetyLimits,
         progress: &dyn ProgressSink,
         ctl: &squallz_format_api::ControlToken,
     ) -> Result<TestSummary, FormatError> {
         let problems = BoundedProblemLog::new(TEST_PROBLEM_PREVIEW_LIMIT);
-        let entries_tested =
-            self.test_with_problem_recorder(progress, ctl, |problem| problems.record(problem))?;
+        let entries_tested = self.test_with_problem_recorder(limits, progress, ctl, |problem| {
+            problems.record(problem)
+        })?;
         Ok(TestSummary {
             entries_tested,
             problems: problems.snapshot(),
@@ -1046,16 +1060,12 @@ fn capture_diagnostics(mut stderr: ChildStderr) -> io::Result<Vec<u8>> {
     }
 }
 
-pub(crate) fn recoverable_stream_error(error: io::Error) -> Result<io::Error, FormatError> {
-    match FormatError::from(error) {
-        FormatError::Io(error) => Ok(error),
-        error => Err(error),
-    }
-}
-
 pub(crate) fn recoverable_test_error(error: FormatError) -> Result<FormatError, FormatError> {
     match error {
-        FormatError::PasswordRequired | FormatError::WrongPassword => Err(error),
+        FormatError::PasswordRequired
+        | FormatError::WrongPassword
+        | FormatError::Cancelled
+        | FormatError::ResourceLimitExceeded(_) => Err(error),
         error => Ok(error),
     }
 }
@@ -2083,12 +2093,34 @@ exit 2
 
         let report = reader
             .test_summary(
+                &squallz_format_api::SafetyLimits::default(),
                 &squallz_format_api::NoProgress,
                 &squallz_format_api::ControlToken::new(),
             )
             .unwrap();
         assert_eq!(report.entries_tested, 2);
         assert!(report.problems.is_empty(), "{:?}", report.problems);
+
+        for limits in [
+            SafetyLimits {
+                max_output_bytes: 1,
+                ..SafetyLimits::default()
+            },
+            SafetyLimits {
+                max_entries: 1,
+                ..SafetyLimits::default()
+            },
+        ] {
+            let result = reader.test_summary(
+                &limits,
+                &squallz_format_api::NoProgress,
+                &ControlToken::default(),
+            );
+            assert!(
+                matches!(result, Err(FormatError::ResourceLimitExceeded(_))),
+                "{result:?}"
+            );
+        }
 
         let log = fs::read_to_string(&log).unwrap();
         assert!(log.contains("l -slt"));

@@ -25,9 +25,12 @@ pub fn stdin_is_tty() -> bool {
 ///   fast with exit code 4);
 /// - in a TTY the user is prompted up to 1 + [`PASSWORD_RETRIES`] times;
 /// - without a TTY the error is returned directly (exit code 4).
+///
+/// `before_prompt` releases live progress before printing prompt output.
 pub fn with_password_retry<T>(
     loc: &Localizer,
     explicit: Option<&Password>,
+    mut before_prompt: impl FnMut(),
     mut op: impl FnMut(Option<&Password>) -> Result<T, FormatError>,
 ) -> Result<T, FormatError> {
     let first = op(explicit);
@@ -40,6 +43,7 @@ pub fn with_password_retry<T>(
         other => return other,
     };
     for attempt in 0..=PASSWORD_RETRIES {
+        before_prompt();
         if attempt > 0 {
             let remaining = (PASSWORD_RETRIES - attempt + 1).to_string();
             eprintln!(
@@ -79,14 +83,16 @@ fn remembered_conflict_decision(existing: &Path, decision: AllDecision) -> Confl
 /// the decision to all remaining conflicts.
 pub struct CliConflictResolver {
     loc: Arc<Localizer>,
+    before_prompt: Arc<dyn Fn() + Send + Sync>,
     all: Mutex<Option<AllDecision>>,
 }
 
 impl CliConflictResolver {
     /// Creates the resolver.
-    pub fn new(loc: Arc<Localizer>) -> Self {
+    pub fn new(loc: Arc<Localizer>, before_prompt: Arc<dyn Fn() + Send + Sync>) -> Self {
         Self {
             loc,
+            before_prompt,
             all: Mutex::new(None),
         }
     }
@@ -113,6 +119,7 @@ impl ConflictResolver for CliConflictResolver {
             return remembered_conflict_decision(existing, decision);
         }
         loop {
+            (self.before_prompt)();
             let path = existing.display().to_string();
             eprint!(
                 "{}",
@@ -134,6 +141,7 @@ impl ConflictResolver for CliConflictResolver {
                     return ConflictDecision::Skip;
                 }
                 "r" => {
+                    (self.before_prompt)();
                     eprint!("{}", self.loc.t("cli.conflict.rename_prompt"));
                     let _ = std::io::stderr().flush();
                     let name = self.read_line_or_empty();
@@ -226,7 +234,7 @@ mod tests {
 
     #[test]
     fn conflict_resolver_recovers_after_apply_all_lock_poison() {
-        let resolver = CliConflictResolver::new(localizer());
+        let resolver = CliConflictResolver::new(localizer(), Arc::new(|| {}));
         let poisoned = catch_unwind(AssertUnwindSafe(|| {
             let mut all = resolver.all.lock().expect("poison test lock");
             *all = Some(AllDecision::Skip);

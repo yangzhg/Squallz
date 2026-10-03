@@ -572,7 +572,11 @@ fn macos_app_sfx_roundtrips_through_shared_engine() {
     let archive = temp.path().join("payload.zip");
     let output = temp.path().join("Photos.app");
     write_macos_app_template(&stub);
-    fs::write(stub.join("Contents/MacOS/sqz"), vec![0x5a; 1024 * 1024]).unwrap();
+    fs::write(
+        stub.join("Contents/MacOS/sqz-sidecar"),
+        vec![0x5a; 1024 * 1024],
+    )
+    .unwrap();
     let quick_look =
         stub.join("Contents/PlugIns/SquallzQuickLook.appex/Contents/MacOS/SquallzQuickLook");
     fs::create_dir_all(quick_look.parent().unwrap()).unwrap();
@@ -613,7 +617,7 @@ fn macos_app_sfx_roundtrips_through_shared_engine() {
     assert!(plist.contains("<string>Photos</string>"));
     assert!(plist.contains("<key>LSMinimumSystemVersion</key><string>11.0</string>"));
     assert!(!output.join("Contents/_CodeSignature").exists());
-    assert!(!output.join("Contents/MacOS/sqz").exists());
+    assert!(!output.join("Contents/MacOS/sqz-sidecar").exists());
     assert!(!output
         .join("Contents/PlugIns/SquallzQuickLook.appex")
         .exists());

@@ -1,6 +1,8 @@
 <script lang="ts" module>
   import type { EntryDto, EntryPreviewDto } from "../lib/ipc";
   import type { ArchiveBrowseRecoveryState } from "./ArchiveBrowseRecovery.svelte";
+  import type { MoveConflictReviewView } from "./MoveConflictReview.svelte";
+  import type { ArchiveEditingState } from "./ArchiveEditingStatus.svelte";
 
   type Translate = (key: string, fallback: string) => string;
 
@@ -23,12 +25,6 @@
     selectionLabel: string;
     previewActionLabel: string;
     previewActionIcon: "external-link" | "folder-open" | "eye";
-  };
-
-  type MoveConflictItem = {
-    from: string;
-    to: string;
-    keepBothTo: string | null;
   };
 
   export interface ClassicArchiveBrowserProps {
@@ -63,16 +59,14 @@
         ariaLabel: string;
       };
       selectedSummary: string;
-      conflict: {
-        count: number;
-        readyCount: number;
-        targetDir: string;
-        items: readonly MoveConflictItem[];
-      } | null;
+      editingStatus: ArchiveEditingState | null;
+      conflict: MoveConflictReviewView | null;
       structureWarning: string | null;
       recovery: ArchiveBrowseRecoveryState;
       totalRows: number;
-      rows: readonly ClassicBrowserEntry[];
+      rows: readonly (ClassicBrowserEntry | null)[];
+      startIndex: number;
+      rowsPending: boolean;
       paddingTop: number;
       paddingBottom: number;
       emptyName: string;
@@ -82,6 +76,7 @@
     onOpenRoot: () => void;
     onOpenRecovery: () => void;
     onRetryBrowse: () => void;
+    onRetryFormats: () => void;
     onOpenNestedPreview: () => void;
     onExtractNestedPreview: () => void;
     onClearPreview: (restoreEntryFocus?: boolean) => void;
@@ -108,6 +103,8 @@
   import Icon from "./Icon.svelte";
   import ArchiveStructureWarning from "./ArchiveStructureWarning.svelte";
   import ArchiveBrowseRecovery from "./ArchiveBrowseRecovery.svelte";
+  import ArchiveEditingStatus from "./ArchiveEditingStatus.svelte";
+  import MoveConflictReview from "./MoveConflictReview.svelte";
   import { cssVariables } from "../lib/css-variables";
 
   let {
@@ -116,6 +113,7 @@
     onOpenRoot,
     onOpenRecovery,
     onRetryBrowse,
+    onRetryFormats,
     onOpenNestedPreview,
     onExtractNestedPreview,
     onClearPreview,
@@ -252,6 +250,9 @@
 
   <section class="classic-table-wrap">
     <div class="classic-table-header">
+      {#if view.editingStatus}
+        <ArchiveEditingStatus state={view.editingStatus} onRetry={onRetryFormats} />
+      {/if}
       <ArchiveBrowseRecovery state={view.recovery} retryLabel={tr("gui.error.retry", "Retry")} onRetry={onRetryBrowse} />
       {#if view.structureWarning}
         <ArchiveStructureWarning
@@ -262,52 +263,16 @@
       {/if}
       <div class="classic-workbench-strip empty-workbench-strip">
         <span>{view.archiveOpen ? view.selectedSummary : view.openArchiveFirst}</span>
-        <small>
-          {view.archiveOpen
-            ? tr("gui.preview.keyboard_hint", "Space or Return opens the focused item")
+        <small role="status" aria-live="polite">
+          {view.rowsPending && !view.recovery
+            ? view.totalRows === 0 ? view.emptyName : tr("gui.list.loading_rows", "Loading entries…")
+            : view.archiveOpen
+            ? tr("gui.preview.keyboard_hint", "↑/↓ moves between items · Shift extends selection · Space or Return opens")
             : tr("gui.classic.empty_workbench_hint", "Archive editing controls appear after an archive is open.")}
         </small>
       </div>
       {#if view.conflict}
-        <div
-          class="classic-move-conflict-review"
-          role="dialog"
-          aria-label={tr("gui.move.conflicts", "Move target conflicts")}
-          tabindex="-1"
-        >
-          <header>
-            <strong>
-              {tr("gui.move.conflict_count", "{count} move conflicts").replace("{count}", String(view.conflict.count))}
-            </strong>
-            <span>
-              {tr("gui.move.ready_target", "{count} ready · target {target}")
-                .replace("{count}", String(view.conflict.readyCount))
-                .replace("{target}", view.conflict.targetDir)}
-              · {tr("gui.move.shown_conflicts", "Showing {shown} of {count} conflicts; your choice applies to the whole selection.")
-                .replace("{shown}", String(view.conflict.items.length)).replace("{count}", String(view.conflict.count))}
-            </span>
-          </header>
-          <!-- svelte-ignore a11y_no_noninteractive_tabindex (focusable scroll region) -->
-          <div class="classic-move-conflict-table" role="region" aria-label={tr("gui.move.conflicts", "Move target conflicts")} tabindex="0">
-            <div>
-              <b>{tr("common.source", "Source")}</b>
-              <b>{tr("gui.move.existing_target", "Existing target")}</b>
-              <b>{tr("gui.move.keep_both_target", "Keep both target")}</b>
-            </div>
-            {#each view.conflict.items as item}
-              <div><strong>{item.from}</strong><span>{item.to}</span><em>{item.keepBothTo}</em></div>
-            {/each}
-          </div>
-          <div class="classic-button-row compact-row">
-            <button onclick={onCancelMoveConflict}>{tr("gui.common.cancel", "Cancel")}</button>
-            <button disabled={view.conflict.readyCount === 0} onclick={onSubmitMoveReadyOnly}>
-              {tr("gui.move.ready_only", "Move ready only")}
-            </button>
-            <button class="classic-primary" onclick={onSubmitMoveKeepBoth}>
-              {tr("gui.move.keep_both_all", "Keep both and move all")}
-            </button>
-          </div>
-        </div>
+        <MoveConflictReview review={view.conflict} {tr} classic onCancel={onCancelMoveConflict} onReadyOnly={onSubmitMoveReadyOnly} onKeepBoth={onSubmitMoveKeepBoth} />
       {/if}
     </div>
     <p class="archive-selection-hint">{tr("gui.selection.range_hint", "Shift-click to select a range · ⌘/Ctrl-click to select individual entries")}</p>
@@ -316,6 +281,7 @@
       bind:this={table}
       role="table"
       aria-label={tr("gui.table.archive", "Archive table")}
+      aria-busy={view.rowsPending}
       aria-rowcount={Math.max(view.totalRows + 1, 2)}
       aria-keyshortcuts="Meta+A Control+A"
       data-total-rows={view.totalRows}
@@ -354,68 +320,73 @@
           class="virtual-pad"
           use:cssVariables={{ "--virtual-pad-height": `${view.paddingTop}px` }}
         ></div>
-        {#each view.rows as entry}
-          <div
-            class:selected={entry.selected}
-            class:previewing={entry.previewing}
-            class="classic-row"
-            role="row"
-            aria-rowindex={(entry.virtualIndex ?? 0) + 2}
-            aria-selected={entry.selected}
-            tabindex="0"
-            aria-keyshortcuts="Space Enter Backspace Meta+ArrowUp Alt+ArrowUp E"
-            data-row-index={entry.virtualIndex ?? ""}
-            onclick={(event) => onSelectEntry(entry, event)}
-            ondblclick={(event) => {
-              if (event.target instanceof Element && event.target.closest("button, input")) return;
-              event.preventDefault();
-              onActivateEntry(entry);
-            }}
-            onkeydown={(event) => onEntryKeydown(event, entry)}
-            oncontextmenu={(event) => onOpenEntryContext(event, entry)}
-          >
-            <span class="table-name" role="cell">
-              <button
-                type="button"
-                class="row-select-toggle"
-                class:checked={entry.selected}
-                role="checkbox"
-                aria-checked={entry.selected}
-                aria-label={view.selection.busy ? view.selection.busyLabel : entry.selectionLabel}
-                title={view.selection.busy ? view.selection.busyLabel : entry.selectionLabel}
-                disabled={!entry.source || view.selection.busy}
-                onclick={(event) => {
-                  event.stopPropagation();
-                  onToggleEntrySelection(entry, event);
-                }}
-              ></button>
-              <span class="archive-entry-label">
-                <strong title={entry.source?.path ?? entry.name}>{entry.name}</strong>
-                {#if entry.location}<small title={entry.source?.path}>{entry.location}</small>{/if}
-              </span>
-              {#if entry.source}
+        {#each view.rows as entry, index (view.startIndex + index)}
+          {#if entry}
+            <div
+              class:selected={entry.selected}
+              class:previewing={entry.previewing}
+              class="classic-row"
+              role="row"
+              aria-rowindex={(entry.virtualIndex ?? 0) + 2}
+              aria-selected={entry.selected}
+              tabindex="0"
+              aria-keyshortcuts="ArrowUp ArrowDown Home End PageUp PageDown Shift+ArrowUp Shift+ArrowDown Space Enter Backspace Meta+ArrowUp Alt+ArrowUp E"
+              data-row-index={entry.virtualIndex ?? ""}
+              onclick={(event) => onSelectEntry(entry, event)}
+              ondblclick={(event) => {
+                if (event.target instanceof Element && event.target.closest("button, input")) return;
+                event.preventDefault();
+                onActivateEntry(entry);
+              }}
+              onkeydown={(event) => onEntryKeydown(event, entry)}
+              oncontextmenu={(event) => onOpenEntryContext(event, entry)}
+            >
+              <span class="table-name" role="cell">
                 <button
-                  class="row-preview-button compact"
-                  disabled={view.selection.busy}
-                  aria-busy={entry.previewBusy}
-                  title={view.selection.busy ? view.selection.busyLabel : entry.previewActionLabel}
-                  aria-label={`${view.selection.busy ? view.selection.busyLabel : entry.previewActionLabel} ${entry.name}`}
+                  type="button"
+                  class="row-select-toggle"
+                  class:checked={entry.selected}
+                  role="checkbox"
+                  aria-checked={entry.selected}
+                  aria-label={view.selection.busy ? view.selection.busyLabel : entry.selectionLabel}
+                  title={view.selection.busy ? view.selection.busyLabel : entry.selectionLabel}
+                  disabled={!entry.source || view.selection.busy}
                   onclick={(event) => {
                     event.stopPropagation();
-                    onPreviewEntry(entry);
+                    onToggleEntrySelection(entry, event);
                   }}
-                ><Icon name={entry.previewActionIcon} size={12} /></button>
-              {/if}
-            </span>
-            <span role="cell">{entry.size}</span>
-            <span role="cell">{entry.packed}</span>
-            <span role="cell">{entry.ratio}</span>
-            <span role="cell">{entry.modified}</span>
-            <span role="cell">{entry.crc}</span>
-            <span role="cell">{entry.encoding}</span>
-            <span role="cell" title={entry.attr}>{entry.attr}</span>
-          </div>
-        {:else}
+                ></button>
+                <span class="archive-entry-label">
+                  <strong title={entry.source?.path ?? entry.name}>{entry.name}</strong>
+                  {#if entry.location}<small title={entry.source?.path}>{entry.location}</small>{/if}
+                </span>
+                {#if entry.source}
+                  <button
+                    class="row-preview-button compact"
+                    disabled={view.selection.busy}
+                    aria-busy={entry.previewBusy}
+                    title={view.selection.busy ? view.selection.busyLabel : entry.previewActionLabel}
+                    aria-label={`${view.selection.busy ? view.selection.busyLabel : entry.previewActionLabel} ${entry.name}`}
+                    onclick={(event) => {
+                      event.stopPropagation();
+                      onPreviewEntry(entry);
+                    }}
+                  ><Icon name={entry.previewActionIcon} size={12} /></button>
+                {/if}
+              </span>
+              <span role="cell">{entry.size}</span>
+              <span role="cell">{entry.packed}</span>
+              <span role="cell">{entry.ratio}</span>
+              <span role="cell">{entry.modified}</span>
+              <span role="cell">{entry.crc}</span>
+              <span role="cell">{entry.encoding}</span>
+              <span role="cell" title={entry.attr}>{entry.attr}</span>
+            </div>
+          {:else}
+            <div class="archive-row-placeholder classic-row-placeholder" class:pending={view.rowsPending} aria-hidden="true"></div>
+          {/if}
+        {/each}
+        {#if view.totalRows === 0}
           <div class="classic-row empty-row" role="row" aria-rowindex="2">
             <span class="table-name" role="cell">{view.emptyName}</span>
             <span role="cell">{view.emptyStatus}</span>
@@ -426,7 +397,7 @@
             <span role="cell">-</span>
             <span role="cell">-</span>
           </div>
-        {/each}
+        {/if}
         <div
           class="virtual-pad"
           use:cssVariables={{ "--virtual-pad-height": `${view.paddingBottom}px` }}

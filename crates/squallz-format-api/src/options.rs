@@ -180,7 +180,7 @@ impl Default for BoundedProblemLog {
 /// [`crate::FormatError::ResourceLimitExceeded`].
 #[derive(Debug, Clone, Copy)]
 pub struct SafetyLimits {
-    /// Upper bound on total extracted bytes
+    /// Upper bound on total decoded bytes during extraction or integrity testing
     pub max_output_bytes: u64,
     /// Upper bound on the number of entries
     pub max_entries: u64,

@@ -60,6 +60,7 @@
   }
 
   export interface SettingsWorkspaceProps {
+    onReady?: () => void;
     screen: SettingsScreen;
     tr: (key: string, fallback: string) => string;
     settingsSaveTarget: PersistedSettingsSection | null;
@@ -171,7 +172,7 @@
 </script>
 
 <script lang="ts">
-  import { onDestroy, tick, untrack } from "svelte";
+  import { onDestroy, onMount, tick, untrack } from "svelte";
   import { tError } from "../lib/i18n.svelte";
   import Icon from "./Icon.svelte";
   import IntegrationHealthPanel from "./IntegrationHealthPanel.svelte";
@@ -207,6 +208,7 @@
 
   let {
     screen,
+    onReady,
     tr,
     settingsSaveTarget,
     appearanceSaveState,
@@ -337,6 +339,8 @@
       clearPasswordBookSave();
     });
   });
+
+  onMount(() => onReady?.());
 
   onDestroy(() => {
     passwordFormGeneration += 1;
@@ -1824,8 +1828,8 @@
     <div class="sheet-head">
       <div>
         <span class="eyebrow">{tr("gui.settings.security.eyebrow", "Settings / Security")}</span>
-        <h1>{tr("gui.settings.security.title", "Extraction safety and privacy")}</h1>
-        <p>{tr("gui.settings.security.subtitle", "Set resource limits for extraction. Path traversal and link escapes remain blocked at every level.")}</p>
+        <h1>{tr("gui.settings.security.title", "Archive safety and privacy")}</h1>
+        <p>{tr("gui.settings.security.subtitle", "Limit entries and unpacked data during extraction and integrity tests.")}</p>
       </div>
       <SettingsSaveAction
         state={securitySaveState}
@@ -1841,7 +1845,7 @@
     <div class="settings-layout">
       <section class="settings-main-panel">
         <div class="settings-metric-grid">
-          <div class:invalid-setting={Boolean(safetyMaxEntriesError)}><span>{tr("gui.settings.security.max_entries", "Max entries")}</span><strong>{formattedDraftNumber(safetyMaxEntries)}</strong><small>{tr("gui.settings.captured_job_start", "Captured when job starts")}</small></div>
+          <div class:invalid-setting={Boolean(safetyMaxEntriesError)}><span>{tr("gui.settings.security.max_entries", "Max entries")}</span><strong>{formattedDraftNumber(safetyMaxEntries)}</strong><small>{tr("gui.settings.captured_job_start", "Captured on submission")}</small></div>
           <div class:invalid-setting={Boolean(safetyMaxOutputError)}><span>{tr("gui.settings.security.max_output", "Max output")}</span><strong>{formattedDraftNumber(safetyMaxOutputGiB)} GiB</strong><small>{tr("gui.settings.security.archive_bomb_guard", "Archive bomb guard")}</small></div>
           <div class:invalid-setting={Boolean(safetyMaxCompressionRatioError)}><span>{tr("gui.settings.security.ratio_guard", "Ratio guard")}</span><strong>{formattedDraftNumber(safetyMaxCompressionRatio)}x</strong><small>{tr("gui.settings.security.ratio_hint_short", "Stops suspicious expansion")}</small></div>
         </div>

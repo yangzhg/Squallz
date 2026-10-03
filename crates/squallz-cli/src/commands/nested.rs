@@ -134,15 +134,20 @@ fn list_nested(
 ) -> Result<(), CliError> {
     let temp = extract_nested_archive_to_temp(ctx, archive, &entry, password, encoding)?;
     let explicit = nested_password.map(Password::new);
-    let entries = with_password_retry(&ctx.loc, explicit.as_ref(), |pw| {
-        ctx.engine.list(
-            temp.path(),
-            &OpenOptions {
-                password: pw.cloned(),
-                encoding_override: nested_encoding.clone(),
-            },
-        )
-    })?;
+    let entries = with_password_retry(
+        &ctx.loc,
+        explicit.as_ref(),
+        || {},
+        |pw| {
+            ctx.engine.list(
+                temp.path(),
+                &OpenOptions {
+                    password: pw.cloned(),
+                    encoding_override: nested_encoding.clone(),
+                },
+            )
+        },
+    )?;
     let entries = crate::commands::list::filter_entries_for_search(entries, search.as_deref());
 
     if json {
@@ -205,12 +210,17 @@ fn extract_nested(
     let dest = extract_dest_or_current(dest);
     let archive_display_path = PathBuf::from(safe_entry_basename(&entry));
     let filter = PathFilter::new(&includes)?;
+    let progress = Arc::new(CliProgress::new_for_operation(ctx, json_output, "nested"));
 
     let mut overwrite: OverwritePolicy = overwrite.into();
     let mut resolver: Option<Arc<dyn ConflictResolver>> = None;
     if overwrite == OverwritePolicy::Ask {
         if stdin_is_tty() {
-            resolver = Some(Arc::new(CliConflictResolver::new(Arc::clone(&ctx.loc))));
+            let prompt_progress = Arc::clone(&progress);
+            resolver = Some(Arc::new(CliConflictResolver::new(
+                Arc::clone(&ctx.loc),
+                Arc::new(move || prompt_progress.finish()),
+            )));
         } else {
             overwrite = OverwritePolicy::Skip;
             ctx.eprint_notice(ctx.loc.t("cli.overwrite.non_tty_skip"));
@@ -231,55 +241,51 @@ fn extract_nested(
         ..ExtractOptions::default()
     };
 
-    let progress = CliProgress::new_for_operation(
-        ctx.quiet,
-        ctx.verbose,
-        json_output,
-        ctx.output_style,
-        ctx.color,
-        ctx.accent,
-        "nested",
-    );
     let explicit = nested_password.map(Password::new);
-    let result = with_password_retry(&ctx.loc, explicit.as_ref(), |pw| {
-        let open = OpenOptions {
-            password: pw.cloned(),
-            encoding_override: nested_encoding.clone(),
-        };
-        let (plan, report) = ctx.engine.plan_and_extract_with_report_controlled(
-            temp.path(),
-            &dest,
-            &archive_display_path,
-            smart,
-            &open,
-            &x_opts,
-            &progress,
-            &ctx.ctl,
-            |entries, control| filter.select_entries(entries, control),
-            |_| Ok(()),
-        )?;
-        let no_match = !filter.is_empty() && plan.scope.entries == 0;
-        if smart {
-            match plan.layout {
-                SmartLayout::DirectExtract => {
-                    ctx.eprint_notice(ctx.loc.t("cli.extract.smart_direct"));
-                }
-                SmartLayout::WrapInFolder => {
-                    let folder = ctx.engine.archive_stem(&archive_display_path);
-                    let message = ctx
-                        .loc
-                        .format("cli.extract.smart_wrap", &[("folder", &folder)]);
-                    ctx.eprint_notice(&message);
-                }
-            }
-        }
-        Ok(NestedExtractRunOutcome {
-            plan,
-            report: (!no_match).then_some(report),
-        })
-    });
+    let result = with_password_retry(
+        &ctx.loc,
+        explicit.as_ref(),
+        || progress.finish(),
+        |pw| {
+            let open = OpenOptions {
+                password: pw.cloned(),
+                encoding_override: nested_encoding.clone(),
+            };
+            let (plan, report) = ctx.engine.plan_and_extract_with_report_controlled(
+                temp.path(),
+                &dest,
+                &archive_display_path,
+                smart,
+                &open,
+                &x_opts,
+                progress.as_ref(),
+                &ctx.ctl,
+                |entries, control| filter.select_entries(entries, control),
+                |_| Ok(()),
+            )?;
+            let no_match = !filter.is_empty() && plan.scope.entries == 0;
+            Ok(NestedExtractRunOutcome {
+                plan,
+                report: (!no_match).then_some(report),
+            })
+        },
+    );
     progress.finish();
     let outcome = result?;
+    if smart {
+        match outcome.plan.layout {
+            SmartLayout::DirectExtract => {
+                ctx.eprint_notice(ctx.loc.t("cli.extract.smart_direct"));
+            }
+            SmartLayout::WrapInFolder => {
+                let folder = ctx.engine.archive_stem(&archive_display_path);
+                let message = ctx
+                    .loc
+                    .format("cli.extract.smart_wrap", &[("folder", &folder)]);
+                ctx.eprint_notice(&message);
+            }
+        }
+    }
     let Some(report) = outcome.report else {
         let path = outcome.plan.requested_destination.display().to_string();
         if json_output {
@@ -424,25 +430,30 @@ fn extract_nested_archive_to_temp(
     encoding: Option<String>,
 ) -> Result<NestedTempArchive, CliError> {
     let explicit = password.map(Password::new);
-    let path = with_password_retry(&ctx.loc, explicit.as_ref(), |pw| {
-        let open = OpenOptions {
-            password: pw.cloned(),
-            encoding_override: encoding.clone(),
-        };
-        let mut outer = ctx.engine.open(&archive, &open)?;
-        let (path, mut out) = create_nested_temp_file(entry)?;
-        match outer.read_entry(&EntryPath::from_utf8(entry), &mut |nested| {
-            std::io::copy(nested, &mut out)?;
-            Ok(())
-        }) {
-            Ok(()) => Ok(path),
-            Err(err) => {
-                drop(out);
-                let _ = fs::remove_file(&path);
-                Err(err)
+    let path = with_password_retry(
+        &ctx.loc,
+        explicit.as_ref(),
+        || {},
+        |pw| {
+            let open = OpenOptions {
+                password: pw.cloned(),
+                encoding_override: encoding.clone(),
+            };
+            let mut outer = ctx.engine.open(&archive, &open)?;
+            let (path, mut out) = create_nested_temp_file(entry)?;
+            match outer.read_entry(&EntryPath::from_utf8(entry), &mut |nested| {
+                std::io::copy(nested, &mut out)?;
+                Ok(())
+            }) {
+                Ok(()) => Ok(path),
+                Err(err) => {
+                    drop(out);
+                    let _ = fs::remove_file(&path);
+                    Err(err)
+                }
             }
-        }
-    })?;
+        },
+    )?;
     Ok(NestedTempArchive { path })
 }
 

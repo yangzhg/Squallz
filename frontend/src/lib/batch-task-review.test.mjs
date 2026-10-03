@@ -27,7 +27,7 @@ function harness() {
   const component = readFileSync(new URL("../App.svelte", import.meta.url), "utf8");
   const source = ts.createSourceFile("App.ts", component.match(/<script lang="ts">([\s\S]*?)<\/script>/)[1], ts.ScriptTarget.Latest, true);
   const names = ["cancelTaskReview", "reviewTask", "newBatchExtractDraft", "effectiveBatchDraft", "batchDraftLocked", "setBatchArchivePaths",
-    "updateBatchDraft", "removeBatchItem", "chooseBatchPaths", "startBatchExtract", "batchWorkspaceSurface", "setScreen"];
+    "updateBatchDraft", "removeBatchItem", "chooseBatchPaths", "startBatchExtract", "batchWorkspaceSurface", "setScreen", "dismissRecoveryPreparation"];
   const declarations = source.statements.filter((node) => ts.isFunctionDeclaration(node) && names.includes(node.name?.text));
   const calls = [];
   const context = {
@@ -36,7 +36,10 @@ function harness() {
     nestedExtractPickerBusy: false, nestedExtractPickerRequest: 0, nestedExtractDraftGeneration: 0,
     archiveUpdateReview: { cancelSourceChoice() {} }, taskReviewRequestGeneration: 0,
     dismissArchivePicker() {}, clearEntryPreviewState() {}, syncUrl() {},
-    screen: "browse", taskWindowMode: false, runtimePreviews: {batchPaths:[]},
+    screen: "browse", archiveOpenStatus: "idle", taskWindowMode: false, runtimePreviews: {batchPaths:[]},
+    recoveryPickerStatus: "idle", recoveryPickerRequest: 0, recoveryOutputPreparation: null,
+    dismissCreatePreparation() {},
+    dismissArchiveAddPreparation() {},
     currentArchive: {source:"/unrelated/current.zip"}, appliedDefaultExtractDir: "",
     uniqueNonEmptyPaths: (paths) => [...new Set(paths.filter(Boolean))],
     normalizedDefaultExtractDir: (path) => path || null,

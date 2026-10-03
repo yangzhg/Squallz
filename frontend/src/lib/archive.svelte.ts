@@ -26,6 +26,10 @@ export interface PasswordSaveState {
 export type RowSelectionResult = "selected" | "stale" | "failed";
 type ArchiveViewWindow = { start: number; end: number };
 type ArchiveRefreshStatus = "idle" | "refreshing" | "error";
+type ArchiveReopenResult = {
+  status: "applied" | "failed" | "superseded";
+  isCurrent: () => boolean;
+};
 type SelectionAnchor = { index: number; generation: number };
 const ARCHIVE_BROWSE_ERROR_TOAST_KEY = "archive-browse-error";
 const ARCHIVE_REFRESH_ERROR_TOAST_KEY = "archive-refresh-error";
@@ -110,6 +114,7 @@ const store = $state({
 
 let filterTimer: ReturnType<typeof setTimeout> | undefined;
 const pageRequests = new Map<number, { generation: number; promise: Promise<void> }>();
+const failedPages = new Set<number>();
 let pendingArchiveOpenRequestId: string | null = null;
 let archiveOpenRequestSequence = 0;
 let pendingRefreshRetry: (() => Promise<boolean>) | null = null;
@@ -586,20 +591,34 @@ function applyPasswordBookStatus(status: PasswordBookStatus): void {
   store.passwordBookState = status.error ? "error" : "ready";
 }
 
-/** Reopens the current archive with a user-selected file-name encoding. */
-export async function reopenWithEncoding(encoding: string | null): Promise<boolean> {
+async function reopenCurrentArchive(
+  encoding: string | null,
+  visibleWindow: () => ArchiveViewWindow,
+): Promise<ArchiveReopenResult> {
   const current = store.info;
-  if (!current) return false;
-  return performArchiveOpen(current.source, null, encoding, () => ({ start: 0, end: PAGE_SIZE }));
+  if (!current) {
+    const generation = store.openGeneration;
+    return { status: "failed", isCurrent: () => generation === store.openGeneration && store.info === null };
+  }
+  const reopening = performArchiveOpen(current.source, null, encoding, visibleWindow);
+  const generation = store.openGeneration;
+  const applied = await reopening;
+  const archiveId = applied && generation === store.openGeneration ? store.info?.id : current.id;
+  const isCurrent = () => generation === store.openGeneration && archiveId === store.info?.id;
+  const status = !isCurrent() ? "superseded" : applied ? "applied" : "failed";
+  return { status, isCurrent };
+}
+
+/** Reopens the current archive with a user-selected file-name encoding. */
+export function reopenWithEncoding(encoding: string | null): Promise<ArchiveReopenResult> {
+  return reopenCurrentArchive(encoding, () => ({ start: 0, end: PAGE_SIZE }));
 }
 
 /** Reopens the current archive after an in-place update and refreshes rows. */
-export async function refreshCurrentArchive(
+export function refreshCurrentArchive(
   visibleWindow: () => ArchiveViewWindow = () => ({ start: 0, end: PAGE_SIZE }),
-): Promise<boolean> {
-  const current = store.info;
-  if (!current) return false;
-  return performArchiveOpen(current.source, null, store.encodingOverride, visibleWindow);
+): Promise<ArchiveReopenResult> {
+  return reopenCurrentArchive(store.encodingOverride, visibleWindow);
 }
 
 export async function refreshArchivePasswordBookStatus(path = store.info?.path): Promise<void> {
@@ -796,10 +815,11 @@ async function fetchPage(pageNo: number): Promise<void> {
     await pending.promise;
     return;
   }
+  if (store.browseError) return;
   const loading = store.loading;
   loading.add(pageNo);
   const promise = loadPage(pageNo, generation).catch((error) => {
-    publishBrowseError(error, generation);
+    publishBrowseError(error, generation, pageNo);
   });
   pageRequests.set(pageNo, { generation, promise });
   try {
@@ -868,12 +888,14 @@ async function searchArchivePage(id: number, page: number, query: string, genera
 
 function clearBrowseError(): void {
   store.browseError = null;
+  failedPages.clear();
   removeToastByKey(ARCHIVE_BROWSE_ERROR_TOAST_KEY);
   removeToastByKey(ARCHIVE_DIRECTORY_CHANGED_TOAST_KEY);
 }
 
-function publishBrowseError(error: unknown, generation: number): void {
+function publishBrowseError(error: unknown, generation: number, pageNo?: number): void {
   if (generation !== store.generation) return;
+  if (pageNo !== undefined) failedPages.add(pageNo);
   const browseError = isErrorDto(error)
     ? error
     : { key: "gui.error.other.title", params: {}, detail: "" };
@@ -891,6 +913,18 @@ export async function retryArchiveBrowse(): Promise<void> {
   if (!store.info) return;
   if (store.refreshStatus === "error") {
     await pendingRefreshRetry?.();
+    return;
+  }
+  if (failedPages.size > 0) {
+    const generation = store.generation;
+    await Promise.all([...failedPages].map((pageNo) => {
+      const pending = pageRequests.get(pageNo);
+      return pending?.generation === generation ? pending.promise : undefined;
+    }));
+    if (generation !== store.generation) return;
+    const pages = [...failedPages];
+    clearBrowseError();
+    await Promise.all(pages.map((pageNo) => fetchPage(pageNo)));
     return;
   }
   store.filterPending = true;

@@ -3,6 +3,7 @@
   import ArchiveStartState from "./components/ArchiveStartState.svelte";
   import ArchiveReturnStrip from "./components/ArchiveReturnStrip.svelte";
   import ArchiveEntryEditor from "./components/ArchiveEntryEditor.svelte";
+  import type { ArchiveEditingState } from "./components/ArchiveEditingStatus.svelte";
   import AppIcon from "./components/AppIcon.svelte";
   import ClassicArchiveBrowserHost from "./components/ClassicArchiveBrowserHost.svelte";
   import type { ClassicArchiveBrowserSurfaceProps } from "./components/ClassicArchiveBrowserHost.svelte";
@@ -53,6 +54,7 @@
   } from "./lib/history.svelte";
   import { copyTextToClipboard } from "./lib/clipboard";
   import { archiveEditPathIssue, archiveSelectionRoots, normalizeArchivePath } from "./lib/archive-editing";
+  import { archiveKeyboardTarget } from "./lib/archive-keyboard";
   import { appActionAvailability, appActionForShortcut, dispatchAppAction, isTextEditingTarget, type AppAction } from "./lib/app-actions";
   import { connectNativeMenu, type NativeMenuConnection } from "./lib/native-menu";
   import { trapModalFocus } from "./lib/modal-focus";
@@ -72,6 +74,7 @@
     cancelArchivePasswordSave,
     clearArchivePasswordSave,
     allCurrentRowsSelected,
+    cancelPendingArchiveOpen,
     cancelPasswordPrompt as cancelArchivePasswordPrompt,
     clearSelection,
     currentDirs,
@@ -202,7 +205,7 @@
     taskWindowSubmitTransition,
     type TaskWindowSubmitTransition,
   } from "./lib/task-window";
-  import { allFormats, loadFormats } from "./lib/formats.svelte";
+  import { allFormats, formatRegistryStatus, loadFormats } from "./lib/formats.svelte";
   import { currentLang, i18nReady, listBundledLanguages, loadLocale, t, tError } from "./lib/i18n.svelte";
   import { pushToast, removeToastByKey } from "./lib/toasts.svelte";
   import { isNewSourceCleanupRecoveryGeneration } from "./lib/source-cleanup";
@@ -432,6 +435,13 @@
     confirmLateConflict: boolean;
     restoreCredentialPrompt: boolean;
     restoreEncryptNames: boolean;
+  }>;
+  type CreatePreparationOwner = Readonly<{
+    mode: Mode;
+    sources: CreateSourceRoot[];
+  }>;
+  type CreateSourcePicker = CreatePreparationOwner & Readonly<{
+    kind: "files" | "folder";
   }>;
   class JobSubmitBlockedError extends Error {
     readonly reason: TaskSubmissionBlockReason;
@@ -677,6 +687,7 @@
   let checksumResultPanel = $state<HTMLElement | null>(null);
   let checksumCheckResultPanel = $state<HTMLElement | null>(null);
   let checksumReportTaskIds = $state<Partial<Record<ChecksumResultKind, number>>>({});
+  let checksumResultFocusPending: { kind: ChecksumResultKind; origin: Element | null } | null = null;
   let duplicateReportTaskId = $state<number | null>(null);
   let duplicateReportPanel = $state<HTMLElement | null>(null);
   let duplicateReportFocusPending = false;
@@ -684,12 +695,24 @@
   let checksumCopyFeedbackTaskId = $state<number | null>(null);
   let checksumCopyFeedbackMessage = $state<string | null>(null);
   let checksumCopyFeedbackTone = $state<"success" | "danger" | null>(null);
+  let checksumCopyRequest = $state.raw<{
+    kind: "checksum" | "checksum_check" | "task";
+    taskId: number | null;
+    isCurrent: () => boolean;
+  } | null>(null);
   let browseScrollTop = $state(0);
   let browseViewportHeight = $state(0);
+  let archiveKeyboardRequest = 0;
   const refreshedUpdateJobs = new Set<number>();
   const recoveryContextTaskIds = new Set<number>();
   let recoverySubmissionPending = $state(false);
-  let outputAuthorizationPending = $state(false);
+  type RecoveryOutputKind = "export_sqz" | "repair_sqz" | "repair_zip" | "repair_recovery";
+  type RecoveryOutputPreparation = {
+    id: symbol;
+    context: string;
+    phase: "opening" | "choosing" | "checking" | "submitting";
+  };
+  let recoveryOutputPreparation = $state<RecoveryOutputPreparation | null>(null);
   let noticeTimer: ReturnType<typeof setTimeout> | null = null;
   let checksumCopyFeedbackTimer: ReturnType<typeof setTimeout> | null = null;
   const screenParam = params.get("screen");
@@ -906,15 +929,32 @@
   let extractScope = $state<ExtractScope>("all");
   let extractSelectionSnapshot = $state<string[]>([]);
   let extractCustomDest = $state("");
+  let extractDestinationPicker = $state.raw<{
+    archiveId: number;
+    source: string;
+    path: string;
+    screen: Screen;
+    selection: ReadonlySet<string> | null;
+  } | null>(null);
   let extractSmartBaseOverride = $state<string | null>(null);
   let extractVerifySfx = $state(false);
   let extractDraftArchive: { id: number; source: string } | null = null;
   let pendingArchiveTaskReview: ArchiveTaskReview | null = null;
   let extractReviewFocusPending = false;
   let convertReviewFocusPending = false;
+  let securitySettingsFocusPending = false;
   let taskReviewRequestGeneration = 0;
   let pendingTaskReviewId = $state<number | null>(null);
-  let archiveAddPending = $state(false);
+  let archiveAddPreparation = $state.raw<{
+    screen: Screen;
+    mode: Mode;
+    generation: number;
+    id: number;
+    source: string;
+    encoding: string | null;
+    phase: "preparing" | "submitting";
+  } | null>(null);
+  let archiveAddPending = $derived(archiveAddPreparation !== null);
   let extractOverwriteMode = $state<ExtractOverwriteMode>("ask");
   let extractSymlinkMode = $state<ExtractSymlinkMode>("preserve");
   let currentExtractOverwriteLabel = $derived(extractOverwriteLabel(extractOverwriteMode));
@@ -945,9 +985,11 @@
   let archiveOpenStatus = $state<"idle" | "opening">("idle");
   let archiveOpenGeneration = 0;
   let archivePickerRequest: number | null = null;
+  let filenameEncodingRequest: { generation: number } | null = null;
   let archivePasswordAttempt = 0;
   let archiveSelectionProgress = $state<{ loaded: number; total: number } | null>(null);
   let recoveryPickerStatus = $state<"idle" | "archive" | "par2">("idle");
+  let recoveryPickerRequest = 0;
   let recoverySourceMode = $state<"none" | "current" | "selected">(
     runtimePreviews.archive ? "current" : "none",
   );
@@ -979,7 +1021,8 @@
   let duplicateExcludeText = $state(".git\nnode_modules\n.DS_Store");
   let createSources = $state<CreateSourceRoot[]>([]);
   let selectedCreateSourcePaths = $state<string[]>([]);
-  let createSourcePickerBusy = $state<"files" | "folder" | null>(null);
+  let createSourcePicker = $state.raw<CreateSourcePicker | null>(null);
+  let createOutputPreparation = $state.raw<CreatePreparationOwner | null>(null);
   let createPrimaryFocusPending = false;
   let createSourceInputs = $derived(createSourcePaths(createSources));
   let classicCreateSection = $state<ClassicCreateSection>("general");
@@ -1079,6 +1122,13 @@
   let archiveEditSession = 0;
   let archiveEditReturnFocus: HTMLElement | null = null;
   let moveConflictReview = $state<MoveConflictReview | null>(null);
+  let moveConflictReturnFocus: HTMLElement | null = null;
+  let moveConflictView = $derived.by(() => {
+    const review = moveConflictReview;
+    if (!review) return null;
+    const items = review.items.filter((item) => item.conflict);
+    return { targetDir: review.targetDir, readyCount: review.items.length - items.length, items };
+  });
   let historyRows = $derived(operationHistory());
   let activePopover = $state<"quickActions" | null>(null);
   let archiveSearchInput = $state<HTMLInputElement | null>(null);
@@ -1194,6 +1244,23 @@
   });
 
   $effect(() => {
+    const request = recoveryOutputPreparation;
+    if (request && !isCurrentRecoveryOutputPreparation(request)) recoveryOutputPreparation = null;
+  });
+
+  $effect(() => {
+    const request = archiveAddPreparation;
+    if (request?.phase === "preparing" && !isCurrentArchiveAddPreparation(request)) dismissArchiveAddPreparation();
+  });
+
+  $effect(() => {
+    const picker = createSourcePicker;
+    const output = createOutputPreparation;
+    if ((picker && !isCurrentCreateSourcePicker(picker))
+      || (output && !isCurrentCreateOutputPreparation(output))) dismissCreatePreparation();
+  });
+
+  $effect(() => {
     const address = classicArchiveAddress;
     archiveDirs.join("\u0000");
     if (!address) return;
@@ -1224,6 +1291,7 @@
       renameTargetName = source ? pathBaseName(source.replace(/\/+$/g, "")) : "";
       archiveEditError = null;
       moveConflictReview = null;
+      moveConflictReturnFocus = null;
     });
   });
 
@@ -1433,6 +1501,11 @@
       encoding,
       true,
     );
+  });
+
+  $effect(() => {
+    const request = checksumCopyRequest;
+    if (request && !request.isCurrent()) checksumCopyRequest = null;
   });
 
   onMount(() => () => {
@@ -1743,16 +1816,20 @@
   });
 
   onMount(() => () => {
+    archiveAddPreparation = null;
+    dismissRecoveryPreparation();
+    clearChecksumCopyState();
+    extractDestinationPicker = null;
+    checksumResultFocusPending = null;
     createPreflightClosed = true;
+    dismissCreatePreparation();
     createPreflightCleanup?.();
     createPreflightCleanup = null;
     convertRouteHandle?.dispose();
   });
 
   onMount(() => {
-    void loadFormats().catch(() => {
-      // Dev preview uses the release-scope fallback below.
-    });
+    void retryArchiveFormats();
   });
 
   onMount(() => {
@@ -2078,14 +2155,17 @@
     if (!currentArchive || archiveOpenStatus !== "idle" || archivePasswordPrompt
       || archiveRefreshStatus() === "refreshing") return;
     const path = currentArchive.path;
+    const generation = archiveOpenGeneration;
     const completed = pendingArchiveUpdateJobs();
     if (completed.length === 0) return;
     for (const task of completed) refreshedUpdateJobs.add(task.id);
     untrack(() => {
       void refreshCurrentArchive(() => browseVirtualWindow(
         mode === "classic" ? CLASSIC_ROW_HEIGHT : MODERN_ROW_HEIGHT,
-      )).then((ok) => {
-        if (ok && currentArchive?.path === path && archiveRefreshStatus() === "idle"
+      )).then((result) => {
+        if (result.status === "applied" && result.isCurrent()
+          && generation === archiveOpenGeneration && archiveOpenStatus === "idle"
+          && currentArchive?.path === path && archiveRefreshStatus() === "idle"
           && pendingArchiveUpdateJobs().length === 0) {
           showNotice(tr("gui.archive.list_refreshed", "Archive list refreshed"));
         }
@@ -2166,6 +2246,10 @@
   }
 
   function setMode(next: Mode) {
+    if (next !== mode) {
+      filenameEncodingRequest = null;
+      dismissArchiveAddPreparation();
+    }
     firstRunDropFeedback = null;
     trackAppearanceSave(
       "mode",
@@ -2229,7 +2313,20 @@
   function setScreen(next: Screen) {
     if (preventCreateSubmissionNavigation(next)) return;
     if (preventConvertSubmissionNavigation(next)) return;
-    if (next !== screen) dismissArchivePicker();
+    if (next !== screen) {
+      filenameEncodingRequest = null;
+      dismissArchiveAddPreparation();
+      dismissCreatePreparation();
+      checksumCopyRequest = null;
+      extractDestinationPicker = null;
+      dismissArchivePicker();
+      dismissRecoveryPreparation();
+      if (archiveOpenStatus === "opening" && !archivePasswordPrompt && next !== "password") {
+        archiveOpenGeneration += 1;
+        archiveOpenStatus = "idle";
+        cancelPendingArchiveOpen();
+      }
+    }
     if (screen !== "password" && next !== screen && (next !== "password" || !previewPasswordPrompt)) {
       clearEntryPreviewState();
     }
@@ -2258,6 +2355,8 @@
     if (next !== "create") createPrimaryFocusPending = false;
     if (next !== "extract") extractReviewFocusPending = false;
     if (next !== "convert") convertReviewFocusPending = false;
+    if (next !== "settingsSecurity") securitySettingsFocusPending = false;
+    if (next !== "checksum") checksumResultFocusPending = null;
     if (next !== "duplicates") duplicateReportFocusPending = false;
     if (next !== "password") pendingArchiveTaskReview = null;
     if (screen === "create" && next !== "create" && pendingCreateSubmission) {
@@ -2287,12 +2386,28 @@
     document.getElementById(targetId)?.scrollIntoView({ block: "start", inline: "nearest" });
   }
 
-  async function focusChecksumResultPanel(kind: "checksum" | "checksum_check" = "checksum"): Promise<void> {
+  async function focusChecksumResultPanel(kind: ChecksumResultKind = "checksum"): Promise<void> {
+    const request = { kind, origin: null as Element | null };
+    checksumResultFocusPending = request;
     await tick();
-    const panel = kind === "checksum_check"
-      ? checksumCheckResultPanel ?? checksumResultPanel
+    if (checksumResultFocusPending !== request) return;
+    request.origin = document.activeElement;
+    await focusPendingChecksumResult(request);
+  }
+
+  async function focusPendingChecksumResult(request: NonNullable<typeof checksumResultFocusPending>): Promise<void> {
+    await tick();
+    if (checksumResultFocusPending !== request || request.origin === null) return;
+    if (screen !== "checksum" || modeSelectionBlocked || taskCenterOpen || blockingModalVisible()
+      || (document.activeElement !== request.origin && document.activeElement !== document.body)) {
+      checksumResultFocusPending = null;
+      return;
+    }
+    const panel = request.kind === "checksum_check"
+      ? checksumCheckResultPanel
       : checksumResultPanel;
-    if (!panel) return;
+    if (!panel?.isConnected) return;
+    checksumResultFocusPending = null;
     panel.scrollIntoView({ block: "nearest", inline: "nearest" });
     panel.focus({ preventScroll: true });
   }
@@ -3601,8 +3716,8 @@
       if (announce) showNotice(tr("gui.presets.busy", "Wait for the current preflight to finish"));
       return;
     }
-    if (announce) markCreatePresetDraftTouched();
     if (!id) {
+      if (announce) markCreatePresetDraftTouched();
       selectedCreatePresetId = null;
       createPresetDraftName = "";
       createPresetMutationState = "idle";
@@ -3632,6 +3747,8 @@
         return;
       }
     }
+    dismissCreatePreparation();
+    if (announce) markCreatePresetDraftTouched();
     invalidateCreatePreflightResult();
     selectedCreatePresetId = preset.id;
     createSuggestedDestination = null;
@@ -3679,6 +3796,7 @@
 
   function applyExtractPreset(id: string | null, announce = true) {
     if (!id) {
+      extractDestinationPicker = null;
       selectedExtractPresetId = null;
       extractPresetDraftName = "";
       extractPresetMutationState = "idle";
@@ -3686,6 +3804,7 @@
     }
     const preset = archivePresetById(id);
     if (!preset || preset.kind !== "extract") return;
+    extractDestinationPicker = null;
     selectedExtractPresetId = preset.id;
     extractSmartBaseOverride = null;
     extractPresetDraftName = preset.label;
@@ -4083,8 +4202,10 @@
     path: string,
     split: boolean,
     sfxTarget: PlatformKind | null,
+    isCurrent: () => boolean = () => true,
   ): Promise<CreateDestinationInspectionDto> {
     await ensureCreatePreflightListener();
+    if (!isCurrent()) throw new CreateDestinationInspectionError(undefined, true);
     const requestId = nextPreflightRequestId();
     createPreflightRequestId = requestId;
     createPreflightRequestKind = "destination";
@@ -4093,6 +4214,7 @@
     createPreflightCurrent = "";
     try {
       const inspection = await ipc.inspectCreateDestination(path, split, requestId, sfxTarget);
+      if (!isCurrent()) throw new CreateDestinationInspectionError(undefined, true);
       if (createPreflightRequestId === requestId && createPreflightCancelPending) {
         throw new CreateDestinationInspectionError(undefined, true);
       }
@@ -4132,16 +4254,24 @@
     ) return;
     createPreflightCancelPending = true;
     if (import.meta.env.DEV && requestId === previewDestinationRequestId) {
-      await new Promise((resolve) => window.setTimeout(resolve, 180));
-      finishCreatePreflightWithIssue(
-        "destination",
-        tr(
-          "gui.create.destination_check_cancelled",
-          "Output check cancelled · no archive was created",
-        ),
-        "cancelled",
-      );
-      focusCreatePrimaryAction();
+      const preparation: CreatePreparationOwner = { mode, sources: createSources };
+      createOutputPreparation = preparation;
+      const isCurrent = () => isCurrentCreateOutputPreparation(preparation);
+      try {
+        await new Promise((resolve) => window.setTimeout(resolve, 180));
+        if (!isCurrent() || createPreflightRequestId !== requestId || !createPreflightCancelPending) return;
+        finishCreatePreflightWithIssue(
+          "destination",
+          tr(
+            "gui.create.destination_check_cancelled",
+            "Output check cancelled · no archive was created",
+          ),
+          "cancelled",
+        );
+        await focusCreatePrimaryAction(() => isCurrent() && createPreflightPhase === "cancelled");
+      } finally {
+        if (createOutputPreparation === preparation) createOutputPreparation = null;
+      }
       return;
     }
     try {
@@ -4173,8 +4303,10 @@
     base: string,
     draft: CreateRunDraft,
     source: "dialog" | "drop",
+    isCurrent: () => boolean,
   ): Promise<ResolvedCreateDestination | null> {
     const { confirm, save } = await getDialogModule();
+    if (!isCurrent()) return null;
     const selected = await saveNativeDialog("create.save-archive", save, {
       title: source === "drop"
         ? tr("gui.create.save_dropped_items_as_archive", "Save dropped items as archive")
@@ -4182,13 +4314,16 @@
       defaultPath: createSaveDefaultPathForDraft(inputs[0], base, draft),
       filters: createSaveFiltersForDraft(draft),
     });
+    if (!isCurrent()) return null;
     if (!selected) return null;
     const path = normalizeCreateDestinationForDraft(selected, draft);
     const inspection = await inspectCreateDestinationForCreate(
       path,
       draft.splitSize !== null,
       draft.sfxTarget,
+      isCurrent,
     );
+    if (!isCurrent()) return null;
     if (inspection.conflict && inspection.guard === null) {
       throw new CreateDestinationInspectionError();
     }
@@ -4205,6 +4340,7 @@
           cancelLabel: tr("gui.create.replace_existing.cancel", "Cancel"),
         },
       );
+      if (!isCurrent()) return null;
       if (!replaceExisting) return null;
     }
     return {
@@ -4224,8 +4360,10 @@
       splitOutput: boolean,
     ) => Promise<CreateDestinationInspectionDto> = (candidate, splitOutput) =>
       inspectCreateDestinationForCreate(candidate, splitOutput, null),
+    isCurrent: () => boolean = () => true,
   ): Promise<AuthorizedArchiveOutput | null> {
     const inspection = await inspect(path, split);
+    if (!isCurrent()) return null;
     if (inspection.conflict !== (inspection.guard !== null)) {
       throw new CreateDestinationInspectionError();
     }
@@ -4249,6 +4387,7 @@
           cancelLabel: tr("gui.output.replace_existing.cancel", "Cancel"),
         },
       );
+      if (!isCurrent()) return null;
       if (!replaceExisting) return null;
     }
     return {
@@ -4262,9 +4401,10 @@
     base: string,
     draft: CreateRunDraft,
     source: "dialog" | "drop",
+    isCurrent: () => boolean,
   ): Promise<ResolvedCreateDestination | null> {
     if (draft.destination.base === "ask") {
-      return askCreateDestination(inputs, base, draft, source);
+      return askCreateDestination(inputs, base, draft, source, isCurrent);
     }
 
     let folder: string | null;
@@ -4277,7 +4417,7 @@
             "The selected sources are in different folders. Choose where to save this archive.",
           ),
         );
-        return askCreateDestination(inputs, base, draft, source);
+        return askCreateDestination(inputs, base, draft, source, isCurrent);
       }
     } else {
       folder = draft.defaultCreateDir;
@@ -4288,7 +4428,7 @@
             "The default create folder is not set. Choose where to save this archive.",
           ),
         );
-        return askCreateDestination(inputs, base, draft, source);
+        return askCreateDestination(inputs, base, draft, source, isCurrent);
       }
     }
 
@@ -4302,21 +4442,24 @@
     );
     createPreflightCurrent = status;
     try {
+      const path = await ipc.uniqueCreateDestination(proposed, draft.splitSize !== null);
+      if (!isCurrent()) return null;
       return {
-        path: await ipc.uniqueCreateDestination(proposed, draft.splitSize !== null),
+        path,
         replaceExisting: false,
         replacementGuard: null,
         confirmLateConflict: false,
       };
     } catch {
+      if (!isCurrent()) return null;
       showNotice(
         draft.destination.base === "default_directory"
           ? tr("gui.create.output.default_folder_unavailable", "The default create folder is unavailable. Choose another location.")
           : tr("gui.create.output.source_folder_unavailable", "The source folder cannot be used for output. Choose another location."),
       );
-      return askCreateDestination(inputs, base, draft, source);
+      return askCreateDestination(inputs, base, draft, source, isCurrent);
     } finally {
-      if (createPreflightCurrent === status) createPreflightCurrent = "";
+      if (isCurrent() && createPreflightCurrent === status) createPreflightCurrent = "";
     }
   }
 
@@ -4505,6 +4648,7 @@
     const selectedMode = uiModeChoice();
     return {
       screen: settingsScreen,
+      onReady: () => { if (securitySettingsFocusPending) focusSecuritySettings(); },
       tr,
       settingsSaveTarget,
       appearanceSaveState,
@@ -4617,7 +4761,7 @@
 
   function classicArchiveBrowserSurface(): ClassicArchiveBrowserSurfaceProps {
     const recovery = archiveBrowseRecoveryState();
-    const rows = browseEntries(CLASSIC_ROW_HEIGHT).map((entry) => ({
+    const rows = browseEntries(CLASSIC_ROW_HEIGHT).map((entry) => entry ? ({
       ...entry,
       selected: isEntrySelected(entry),
       previewing: isEntryPreviewActive(entry),
@@ -4629,7 +4773,7 @@
       previewActionIcon: entry.source
         ? previewActionIcon(entry.source.path, entry.source.entry_type)
         : "eye",
-    }));
+    }) : null);
     const previewLabel = previewActionLabel();
     const previewDisabledReason = previewSelectedDisabledReason();
     return {
@@ -4659,18 +4803,14 @@
           ariaLabel: labelWithDisabledReason(previewLabel, previewDisabledReason),
         },
         selectedSummary: selectedSummary(),
-        conflict: moveConflictReview
-          ? {
-              count: moveConflictCount(),
-              readyCount: moveReadyCount(),
-              targetDir: moveConflictReview.targetDir,
-              items: visibleMoveConflictItems(),
-            }
-          : null,
+        editingStatus: archiveEditingStatus(),
+        conflict: moveConflictView,
         structureWarning: archiveStructureWarningText(),
         recovery,
         totalRows: currentArchive ? totalRows() : 0,
         rows,
+        startIndex: browseVirtualWindow(CLASSIC_ROW_HEIGHT).start,
+        rowsPending: !archiveBrowseError() && (filterPending() || rows.some((entry) => entry === null)),
         paddingTop: browsePaddingTop(CLASSIC_ROW_HEIGHT),
         paddingBottom: browsePaddingBottom(CLASSIC_ROW_HEIGHT),
         emptyName: currentArchive ? noEntriesLabel() : openArchiveFirstLabel(),
@@ -4680,6 +4820,7 @@
       onOpenRoot: () => void openArchiveBreadcrumb(-1),
       onOpenRecovery: openCurrentArchiveRecoveryConfiguration,
       onRetryBrowse: () => void retryArchiveContents(),
+      onRetryFormats: () => void retryArchiveFormats(),
       onOpenNestedPreview: () => void openNestedPreviewArchive(),
       onExtractNestedPreview: () => void extractNestedPreviewArchive(),
       onClearPreview: (restoreEntryFocus) => clearEntryPreviewState(restoreEntryFocus),
@@ -4690,9 +4831,7 @@
       }),
       onRevealPreview: () => void revealEntryPreview(),
       onPreviewSelection: () => void runAppAction("preview_entry"),
-      onCancelMoveConflict: () => {
-        moveConflictReview = null;
-      },
+      onCancelMoveConflict: cancelMoveConflict,
       onSubmitMoveReadyOnly: () => void submitMoveReadyOnly(),
       onSubmitMoveKeepBoth: () => void submitMoveKeepBoth(),
       onBrowseScroll: onBrowseVirtualScroll,
@@ -4712,7 +4851,7 @@
     if (!archive) {
       throw new Error("Modern archive browser requires an open archive");
     }
-    const rows = browseEntries(MODERN_ROW_HEIGHT).map((entry) => ({
+    const rows = browseEntries(MODERN_ROW_HEIGHT).map((entry) => entry ? ({
       ...entry,
       selected: isEntrySelected(entry),
       previewing: isEntryPreviewActive(entry),
@@ -4724,7 +4863,7 @@
       previewActionIcon: entry.source
         ? previewActionIcon(entry.source.path, entry.source.entry_type)
         : "eye",
-    }));
+    }) : null);
     const mutationDisabledReason = archiveMutationDisabledReason();
     const previewLabel = previewActionLabel();
     const previewDisabledReason = previewSelectedDisabledReason();
@@ -4739,9 +4878,11 @@
         },
         actions: {
           mutationDisabledReason,
+          testDisabledReason: testArchiveDisabledReason(),
           renameDisabledReason: renameSelectedDisabledReason(),
           deleteDisabledReason: deleteSelectedDisabledReason(),
           moveDisabledReason: moveSelectedDisabledReason(),
+          copyOutDisabledReason: copyOutSelectedDisabledReason(),
           enabled: availableAppActions,
           previewBusy: previewBusy(),
           previewDisabledReason,
@@ -4753,14 +4894,8 @@
           nestedPreview: Boolean(nestedPreview),
         },
         selectedSummary: selectedSummary(),
-        conflict: moveConflictReview
-          ? {
-              count: moveConflictCount(),
-              readyCount: moveReadyCount(),
-              targetDir: moveConflictReview.targetDir,
-              items: visibleMoveConflictItems(),
-            }
-          : null,
+        editingStatus: archiveEditingStatus(),
+        conflict: moveConflictView,
         structureWarning: archiveStructureWarningText(),
         recovery,
         encodingWarning: hasEncodingWarning() ? archiveWarningText() : null,
@@ -4770,6 +4905,8 @@
         filterStatus: recovery ? "" : archiveFilterStatus(),
         selection: archiveSelectionControl(),
         rows,
+        startIndex: browseVirtualWindow(MODERN_ROW_HEIGHT).start,
+        rowsPending: !archiveBrowseError() && (filterPending() || rows.some((entry) => entry === null)),
         paddingTop: browsePaddingTop(MODERN_ROW_HEIGHT),
         paddingBottom: browsePaddingBottom(MODERN_ROW_HEIGHT),
         emptyLabel: noEntriesLabel(),
@@ -4780,21 +4917,22 @@
       onOpenRoot: () => void openArchiveBreadcrumb(-1),
       onExtractAll: () => void runAppAction("extract_all"),
       onExtractSelection: () => void runAppAction("extract_selection"),
+      onTestArchive: () => void runAppAction("test_archive"),
       onAddFiles: () => void runAppAction("add_files"),
       onOpenRecovery: openCurrentArchiveRecoveryConfiguration,
       onRetryBrowse: () => void retryArchiveContents(),
+      onRetryFormats: () => void retryArchiveFormats(),
       onConvert: () => void runAppAction("convert_archive"),
       onOpenInfo: () => void runAppAction("archive_info"),
       onRenameSelection: () => void runAppAction("rename_entry"),
       onDeleteSelection: () => void runAppAction("delete_entries"),
       onMoveSelection: () => void runAppAction("move_entries"),
+      onCopyOutSelection: () => void runAppAction("copy_entries"),
       onCreateFolder: () => void runAppAction("new_folder"),
       onPreviewSelection: () => void runAppAction("preview_entry"),
       onOpenNestedPreview: () => void openNestedPreviewArchive(),
       onExtractNestedPreview: () => void extractNestedPreviewArchive(),
-      onCancelMoveConflict: () => {
-        moveConflictReview = null;
-      },
+      onCancelMoveConflict: cancelMoveConflict,
       onSubmitMoveReadyOnly: () => void submitMoveReadyOnly(),
       onSubmitMoveKeepBoth: () => void submitMoveKeepBoth(),
       onRepairEncoding: () => void repairFilenameEncoding("gbk"),
@@ -6025,6 +6163,8 @@
       sourceOverride: recoverySourceOverride,
       par2Override: recoveryPar2Override,
     });
+    if (route.sourceMode !== recoverySourceMode || route.sourceOverride !== recoverySourceOverride
+      || route.par2Override !== recoveryPar2Override) dismissRecoveryPreparation();
     recoverySourceMode = route.sourceMode;
     recoverySourceOverride = route.sourceOverride;
     recoveryPar2Override = route.par2Override;
@@ -6053,6 +6193,8 @@
   async function openArchiveFromDialog() {
     if (archiveOpenStatus === "opening") return;
     if (preventCreateSubmissionNavigation("browse")) return;
+    dismissArchiveAddPreparation();
+    dismissRecoveryPreparation();
     dismissArchivePasswordRequest();
     clearEntryPreviewState();
     const requestGeneration = ++archiveOpenGeneration;
@@ -6187,6 +6329,9 @@
     review: ArchiveTaskReview | null = null,
   ): Promise<boolean> {
     if (preventCreateSubmissionNavigation("browse")) return false;
+    dismissArchiveAddPreparation();
+    extractDestinationPicker = null;
+    dismissRecoveryPreparation();
     dismissArchivePicker();
     dismissArchivePasswordRequest();
     clearEntryPreviewState();
@@ -6212,6 +6357,7 @@
     }
     pendingArchiveTaskReview = null;
     if (archiveOpenError(path)?.key === "error.corrupt_archive") {
+      dismissRecoveryPreparation();
       recoverySourceMode = "selected";
       recoverySourceOverride = path;
       recoveryPar2Override = null;
@@ -6236,6 +6382,7 @@
       title: tr("gui.archive.opened_operation", "Opened archive"),
       detail: pathBaseName(path),
     });
+    dismissRecoveryPreparation();
     recoverySourceMode = "current";
     recoverySourceOverride = null;
     recoveryPar2Override = null;
@@ -6316,7 +6463,9 @@
     sidecarCount = 1,
     sidecarSetCount = 1,
   ) {
+    dismissArchiveAddPreparation();
     dismissArchivePicker();
+    dismissRecoveryPreparation();
     clearEntryPreviewState();
     pendingArchiveTaskReview = null;
     archiveOpenGeneration += 1;
@@ -6355,59 +6504,76 @@
     recordValidationRenderReady(`recovery-open:${source}`);
   }
 
+  function dismissRecoveryPreparation(): void {
+    recoveryOutputPreparation = null;
+    if (recoveryPickerStatus === "idle") return;
+    recoveryPickerRequest += 1;
+    recoveryPickerStatus = "idle";
+  }
+
   async function chooseRecoveryArchive() {
-    if (recoveryPickerStatus !== "idle") return;
+    if (screen !== "recovery" || recoveryPickerStatus !== "idle") return;
+    const request = ++recoveryPickerRequest;
+    const isCurrent = () => request === recoveryPickerRequest && screen === "recovery";
     recoveryPickerStatus = "archive";
     showNotice(tr("gui.recovery.opening_archive_picker", "Choose the archive to inspect or repair."));
     try {
       const { open } = await getDialogModule();
+      if (!isCurrent()) return;
       const selected = await openNativeDialog("recovery.choose-archive", open, {
         title: tr("gui.recovery.choose_archive", "Choose archive"),
         multiple: false,
         directory: false,
       });
+      if (!isCurrent()) return;
       const path = Array.isArray(selected) ? selected[0] : selected;
       if (typeof path !== "string") {
         showNotice(tr("gui.recovery.archive_picker_cancelled", "Archive selection cancelled."));
         return;
       }
+      recoveryOutputPreparation = null;
       recoverySourceMode = "selected";
       recoverySourceOverride = path;
       showNotice(
         tr("gui.recovery.archive_selected", "Recovery target: {name}").replace("{name}", pathBaseName(path)),
       );
     } catch {
-      showNotice(tr("gui.recovery.archive_picker_unavailable", "Choosing a recovery target requires the desktop file dialog."));
+      if (isCurrent()) showNotice(tr("gui.recovery.archive_picker_unavailable", "Choosing a recovery target requires the desktop file dialog."));
     } finally {
-      recoveryPickerStatus = "idle";
+      if (isCurrent()) recoveryPickerStatus = "idle";
     }
   }
 
   async function chooseRecoveryPar2() {
-    if (recoveryPickerStatus !== "idle") return;
+    if (screen !== "recovery" || recoveryPickerStatus !== "idle") return;
+    const request = ++recoveryPickerRequest;
+    const isCurrent = () => request === recoveryPickerRequest && screen === "recovery";
     recoveryPickerStatus = "par2";
     showNotice(tr("gui.recovery.opening_par2_picker", "Choose a PAR2 recovery file."));
     try {
       const { open } = await getDialogModule();
+      if (!isCurrent()) return;
       const selected = await openNativeDialog("recovery.choose-par2", open, {
         title: tr("gui.recovery.choose_par2", "Choose PAR2 file"),
         multiple: false,
         directory: false,
         filters: [{ name: tr("gui.recovery.par2_files", "PAR2 recovery files"), extensions: ["par2"] }],
       });
+      if (!isCurrent()) return;
       const path = Array.isArray(selected) ? selected[0] : selected;
       if (typeof path !== "string") {
         showNotice(tr("gui.recovery.par2_picker_cancelled", "PAR2 selection cancelled."));
         return;
       }
+      recoveryOutputPreparation = null;
       recoveryPar2Override = path;
       showNotice(
         tr("gui.recovery.par2_selected", "PAR2 file: {name}").replace("{name}", pathBaseName(path)),
       );
     } catch {
-      showNotice(tr("gui.recovery.par2_picker_unavailable", "Choosing PAR2 data requires the desktop file dialog."));
+      if (isCurrent()) showNotice(tr("gui.recovery.par2_picker_unavailable", "Choosing PAR2 data requires the desktop file dialog."));
     } finally {
-      recoveryPickerStatus = "idle";
+      if (isCurrent()) recoveryPickerStatus = "idle";
     }
   }
 
@@ -6416,6 +6582,7 @@
       showNotice(tr("gui.recovery.no_current_archive", "No archive is currently open."));
       return;
     }
+    dismissRecoveryPreparation();
     recoverySourceMode = "current";
     recoverySourceOverride = null;
     showNotice(
@@ -6429,6 +6596,7 @@
       showNotice(tr("gui.recovery.choose_archive_before_default_par2", "Choose an archive before using its default PAR2 file."));
       return;
     }
+    dismissRecoveryPreparation();
     recoveryPar2Override = null;
     showNotice(
       tr("gui.recovery.using_default_par2", "Verify and Repair will look for {name} beside the archive.")
@@ -6480,15 +6648,15 @@
     };
   }
 
-  function browseEntries(rowHeight = MODERN_ROW_HEIGHT): DisplayEntry[] {
+  function browseEntries(rowHeight = MODERN_ROW_HEIGHT): (DisplayEntry | null)[] {
     if (!currentArchive) return [];
     const window = browseVirtualWindow(rowHeight);
-    const rows: DisplayEntry[] = [];
+    const rows: (DisplayEntry | null)[] = [];
     prefetchAround(window.start);
     prefetchAround(Math.max(window.end - 1, 0));
     for (let index = window.start; index < window.end; index += 1) {
       const row = rowAt(index);
-      if (row) rows.push({ ...toDisplayEntry(row), virtualIndex: index });
+      rows.push(row ? { ...toDisplayEntry(row), virtualIndex: index } : null);
     }
     return rows;
   }
@@ -6784,7 +6952,10 @@
     const status = archiveRefreshStatus();
     const retrying = retryingArchiveId === currentArchive.id;
     if (status === "idle" && !archiveBrowseError() && !retrying) return null;
-    return { message: archiveFilterStatus(), busy: status === "refreshing" || retrying };
+    const message = retrying && status === "idle" && !archiveBrowseError()
+      ? tr("gui.list.loading_rows", "Loading entries…")
+      : archiveFilterStatus();
+    return { message, busy: status === "refreshing" || retrying };
   }
 
   async function retryArchiveContents(): Promise<void> {
@@ -6998,6 +7169,11 @@
   function onEntryKeydown(event: KeyboardEvent, entry: DisplayEntry) {
     if (event.target !== event.currentTarget) return;
     if (event.metaKey || event.ctrlKey || event.altKey || event.isComposing) return;
+    if (["ArrowUp", "ArrowDown", "Home", "End", "PageUp", "PageDown"].includes(event.key)) {
+      event.preventDefault();
+      void moveArchiveRow(event, entry);
+      return;
+    }
     if (
       archiveSelectionBusyReason()
       && ["Delete", "Backspace", "e", "E", "m", "M", "F2"].includes(event.key)
@@ -7036,6 +7212,39 @@
       const rect = target?.getBoundingClientRect();
       showEntryContextAt(rect ? rect.left + 24 : window.innerWidth / 2, rect ? rect.bottom - 2 : window.innerHeight / 2, entry);
     }
+  }
+
+  async function moveArchiveRow(event: KeyboardEvent, entry: DisplayEntry): Promise<void> {
+    if (!currentArchive || entry.virtualIndex === undefined || screen !== "browse") return;
+    const busyReason = archiveSelectionBusyReason();
+    if (busyReason) {
+      if (!event.repeat) showNotice(busyReason);
+      return;
+    }
+    const origin = event.currentTarget as HTMLElement;
+    const list = origin.closest<HTMLElement>("[data-virtual-list]");
+    if (!list) return;
+    const rowHeight = mode === "classic" ? CLASSIC_ROW_HEIGHT : MODERN_ROW_HEIGHT;
+    const index = archiveKeyboardTarget(event.key, entry.virtualIndex, totalRows(), list.clientHeight / rowHeight);
+    if (index === null) return;
+    const request = ++archiveKeyboardRequest;
+    const archiveId = currentArchive.id;
+    const listMode = mode;
+    const navigation = taskReviewRequestGeneration;
+    const previousSelection = selectedPaths();
+    const contextIsCurrent = () => request === archiveKeyboardRequest && screen === "browse"
+      && currentArchive?.id === archiveId && mode === listMode
+      && taskReviewRequestGeneration === navigation
+      && !blockingModalVisible() && !taskCenterOpen;
+    const isCurrent = () => contextIsCurrent() && document.activeElement === origin;
+    const row = await loadRowAt(index);
+    if (!row || !isCurrent() || selectedPaths() !== previousSelection) return;
+    // A keyboard range starts at the focused row even when Tab reached it without selecting it.
+    if (event.shiftKey && previousSelection.size === 0 && entry.source) selectRow(entry.source, entry.virtualIndex);
+    await selectEntry({ ...toDisplayEntry(row), virtualIndex: index }, event);
+    if (!isCurrent() || !selectedPaths().has(row.path)) return;
+    await focusArchiveRow(index, row.path, () => contextIsCurrent()
+      && (document.activeElement === origin || (!origin.isConnected && document.activeElement === document.body)));
   }
 
   function selectedSummary(): string {
@@ -7188,11 +7397,16 @@
     kind: CreateSourceKind,
   ): { added: number; total: number } {
     const previousCount = createSources.length;
-    createSources = mergeCreateSources(
+    const merged = mergeCreateSources(
       createSources,
       paths.map((path) => ({ path, kind })),
       platformKind(),
     );
+    if (merged.length !== previousCount || merged.some((source, index) =>
+      source.path !== createSources[index]?.path || source.kind !== createSources[index]?.kind)) {
+      dismissCreatePreparation();
+      createSources = merged;
+    }
     return {
       added: createSources.length - previousCount,
       total: createSources.length,
@@ -7243,7 +7457,10 @@
   function removeCreateSourcePaths(paths: readonly string[]): number {
     if (createSourcesLocked() || paths.length === 0) return 0;
     const previousCount = createSources.length;
-    createSources = removeCreateSourcesByPaths(createSources, paths, platformKind());
+    const remaining = removeCreateSourcesByPaths(createSources, paths, platformKind());
+    if (remaining.length === previousCount) return 0;
+    dismissCreatePreparation();
+    createSources = remaining;
     selectedCreateSourcePaths = selectedCreateSourcePaths.filter(
       (selected) => !includesCreateSourcePath(paths, selected, platformKind()),
     );
@@ -7268,6 +7485,8 @@
   }
 
   function clearCreateSources(): void {
+    if (createSources.length === 0 && selectedCreateSourcePaths.length === 0 && createSuggestedDestination === null) return;
+    dismissCreatePreparation();
     createSources = [];
     selectedCreateSourcePaths = [];
     createSuggestedDestination = null;
@@ -7432,7 +7651,7 @@
       }
       return;
     }
-    if (createSourcePickerBusy) {
+    if (createSourcePicker) {
       showNotice(tr("gui.create.sources.finish_picker_before_drop", "Close the source picker before dropping other items"));
       return;
     }
@@ -7956,10 +8175,11 @@
       showNotice(openArchiveFirstLabel());
       return;
     }
-    if (mode === "choose" && !extractCustomDest.trim()) {
+    if (mode === "choose") {
       await chooseExtractDestination();
       return;
     }
+    extractDestinationPicker = null;
     markExtractPresetDraftTouched();
     extractDestinationMode = mode;
     extractSmartBaseOverride = null;
@@ -8001,16 +8221,26 @@
       destination: {
         label: extractDestinationFieldLabel(),
         path: extractJobDestination(),
-        choices: extractDestinationModes.map((mode) => ({
-          id: mode,
-          label: extractDestinationTitle(mode),
-          detail: extractDestinationDetail(mode),
-          selected: extractDestinationMode === mode,
-          disabled: Boolean(archiveRequiredReason),
-          title: archiveRequiredReason,
-          ariaLabel: labelWithDisabledReason(extractDestinationTitle(mode), archiveRequiredReason),
-          onSelect: () => void selectExtractDestination(mode),
-        })),
+        choices: extractDestinationModes.map((mode) => {
+          const busy = mode === "choose" && extractDestinationPicker !== null;
+          const label = busy
+            ? tr("gui.extract.choosing_destination", "Choosing folder…")
+            : extractDestinationTitle(mode);
+          const reason = archiveRequiredReason || (busy
+            ? tr("gui.extract.destination_picker_wait", "Finish choosing a destination, or close the folder chooser.")
+            : "");
+          return {
+            id: mode,
+            label,
+            detail: busy ? reason : extractDestinationDetail(mode),
+            selected: extractDestinationMode === mode,
+            busy,
+            disabled: Boolean(reason),
+            title: reason,
+            ariaLabel: labelWithDisabledReason(label, reason),
+            onSelect: () => void selectExtractDestination(mode),
+          };
+        }),
       },
       archive: {
         title: archiveTitle(),
@@ -8070,6 +8300,7 @@
           label: extractOverwriteLabel(mode),
           detail: "",
           selected: extractOverwriteMode === mode,
+          busy: false,
           disabled: false,
           title: "",
           ariaLabel: extractOverwriteLabel(mode),
@@ -8083,6 +8314,7 @@
           label: extractSymlinkLabel(mode),
           detail: "",
           selected: extractSymlinkMode === mode,
+          busy: false,
           disabled: false,
           title: "",
           ariaLabel: extractSymlinkLabel(mode),
@@ -8105,27 +8337,60 @@
     };
   }
 
-  async function chooseExtractDestination() {
+  async function chooseExtractDestination(): Promise<boolean> {
     if (!currentArchive) {
       showNotice(openArchiveFirstLabel());
-      return;
+      return false;
     }
+    if (extractDestinationPicker) {
+      showNotice(tr("gui.extract.destination_picker_wait", "Finish choosing a destination, or close the folder chooser."));
+      return false;
+    }
+    const request = {
+      archiveId: currentArchive.id,
+      source: currentArchive.source,
+      path: currentArchive.path,
+      screen,
+      selection: screen === "browse" ? new Set(selectedPaths()) : null,
+    };
+    const defaultPath = extractCustomDest.trim() || extractJobDestination();
+    extractDestinationPicker = request;
+    const isCurrent = () => {
+      if (extractDestinationPicker !== request || screen !== request.screen
+        || currentArchive?.id !== request.archiveId || currentArchive.source !== request.source
+        || currentArchive.path !== request.path) return false;
+      if (!request.selection) return true;
+      const selection = selectedPaths();
+      return selection.size === request.selection.size
+        && [...request.selection].every((path) => selection.has(path));
+    };
     try {
       const { open } = await getDialogModule();
+      if (!isCurrent()) return false;
       const selected = await openNativeDialog("extract.destination", open, {
         title: tr("gui.extract.choose_destination_title", "Choose extract destination"),
         multiple: false,
         directory: true,
+        defaultPath,
       });
-      if (typeof selected === "string") {
+      if (!isCurrent()) return false;
+      if (typeof selected === "string" && selected.trim()) {
         markExtractPresetDraftTouched();
         extractCustomDest = selected;
         extractSmartBaseOverride = null;
         extractDestinationMode = "choose";
         showNotice(tr("gui.extract.destination_selected", "Extract destination selected"));
+        return true;
       }
+      showNotice(tr("gui.extract.destination_picker_cancelled", "Destination selection cancelled · the current destination was kept"));
+      return false;
     } catch {
-      showNotice(tr("gui.extract.destination_picker_requires_desktop_service", "Destination picker requires the desktop service"));
+      if (isCurrent()) {
+        showNotice(tr("gui.extract.destination_picker_requires_desktop_service", "Destination picker requires the desktop service"));
+      }
+      return false;
+    } finally {
+      if (extractDestinationPicker === request) extractDestinationPicker = null;
     }
   }
 
@@ -8290,7 +8555,7 @@
   function recoveryProtectSourceDisabledReason(): string {
     if (!recoverySourcePath()) return tr("gui.recovery.choose_archive_before_protect", "Choose an archive before creating PAR2 recovery data.");
     if (!recoverySourceMatchesCurrentArchive()) return tr("gui.recovery.open_selected_before_protect", "Open this archive successfully before creating new recovery data.");
-    if (currentArchive?.read_only) return archiveMutationDisabledReason();
+    if (currentArchive?.read_only) return archiveSourceMutationDisabledReason();
     return "";
   }
 
@@ -8318,7 +8583,7 @@
   }
 
   function recoveryVerifyDisabledReason(): string {
-    if (recoverySourceMatchesCurrentArchive() && currentArchive?.read_only) return archiveMutationDisabledReason();
+    if (recoverySourceMatchesCurrentArchive() && currentArchive?.read_only) return archiveSourceMutationDisabledReason();
     return recoverySourcePath()
       ? ""
       : tr("gui.recovery.choose_archive_before_verify", "Choose the archive described by this PAR2 file.");
@@ -8326,7 +8591,7 @@
 
   function recoveryRepairPar2DisabledReason(): string {
     if (!recoverySourcePath()) return tr("gui.recovery.choose_archive_before_par2_repair", "Choose an archive before repairing with PAR2 data.");
-    if (recoverySourceMatchesCurrentArchive() && currentArchive?.read_only) return archiveMutationDisabledReason();
+    if (recoverySourceMatchesCurrentArchive() && currentArchive?.read_only) return archiveSourceMutationDisabledReason();
     const gate = recoveryRepairGate(recoveryReport());
     if (gate === "verify_first") {
       return tr("gui.recovery.verify_before_repair", "Verify this archive and PAR2 set before creating a repaired copy.");
@@ -8388,6 +8653,7 @@
       showNotice(tr("gui.precondition.select_before_extract", "Select one or more entries before extracting them"));
       return;
     }
+    extractDestinationPicker = null;
     syncExtractDraftArchive();
     extractScope = scope;
     extractSelectionSnapshot = scope === "selection" ? [...(selection ?? [])] : [];
@@ -8403,6 +8669,7 @@
   function syncExtractDraftArchive(): void {
     const current = currentArchive;
     if ((extractDraftArchive?.id ?? null) === (current?.id ?? null)) return;
+    extractDestinationPicker = null;
     const sameSource = current && extractDraftArchive && sameFilePath(current.source, extractDraftArchive.source);
     extractDraftArchive = current ? { id: current.id, source: current.source } : null;
     extractSelectionSnapshot = [];
@@ -8432,7 +8699,7 @@
     return currentArchive !== null;
   }
 
-  function archiveMutationDisabledReason(): string {
+  function archiveSourceMutationDisabledReason(): string {
     if (!currentArchive) return openArchiveFirstLabel();
     const refreshing = archiveRefreshStatusLabel();
     if (refreshing) return refreshing;
@@ -8441,12 +8708,68 @@
       : "";
   }
 
+  function archiveEditingStatus(): ArchiveEditingState | null {
+    if (!currentArchive || archiveRefreshStatusLabel()) return null;
+    if (currentArchive.read_only) {
+      return { message: archiveSourceMutationDisabledReason(), pending: false, retryLabel: null };
+    }
+    const status = formatRegistryStatus();
+    if (status === "loading") {
+      return {
+        message: tr("gui.archive.editing_loading", "Checking whether this archive supports editing…"),
+        pending: true,
+        retryLabel: null,
+      };
+    }
+    if (status === "error") {
+      return {
+        message: tr("gui.archive.editing_check_failed", "Editing support could not be checked. Retry, or extract or convert to make changes."),
+        pending: false,
+        retryLabel: tr("gui.archive.editing_retry", "Retry editing check"),
+      };
+    }
+    const format = allFormats().find((item) => item.id === currentArchive?.format);
+    if (format?.can_update === true) return null;
+    return {
+      message: format
+        ? tr("gui.archive.editing_unsupported", "This format does not support editing entries. Extract or convert to make changes.")
+        : tr("gui.archive.editing_unavailable", "Editing is unavailable for this archive. Extract or convert to make changes."),
+      pending: false,
+      retryLabel: null,
+    };
+  }
+
+  async function retryArchiveFormats(): Promise<void> {
+    const origin = document.activeElement;
+    const focusScope = origin instanceof HTMLElement ? origin.closest(".archive-editing-status")?.parentElement : null;
+    const archiveId = currentArchive?.id;
+    const generation = archiveOpenGeneration;
+    const requestScreen = screen;
+    const requestMode = mode;
+    try {
+      await loadFormats();
+    } catch {
+      // The registry state keeps editing disabled and exposes the retry action.
+    }
+    if (!focusScope) return;
+    await tick();
+    if (!focusScope.isConnected || currentArchive?.id !== archiveId || archiveOpenGeneration !== generation || screen !== requestScreen
+      || mode !== requestMode || blockingModalVisible() || modeSelectionBlocked
+      || (document.activeElement !== document.body && document.activeElement !== origin)) return;
+    const retryButton = document.querySelector<HTMLButtonElement>(".archive-editing-status button");
+    (retryButton ?? archiveSearchInput)?.focus({ preventScroll: true });
+  }
+
+  function archiveMutationDisabledReason(): string {
+    return archiveSourceMutationDisabledReason() || archiveEditingStatus()?.message || "";
+  }
+
   function hasArchiveSelection(): boolean {
     return hasArchiveOpen() && !archiveSelectionBusyReason() && selectedPaths().size > 0;
   }
 
   function canRenameSelection(): boolean {
-    return hasArchiveSelection() && !currentArchive?.read_only && selectedRenameSource() !== null;
+    return hasArchiveSelection() && !archiveMutationDisabledReason() && selectedRenameSource() !== null;
   }
 
   function entryExtension(entryPath: string): string {
@@ -8605,6 +8928,12 @@
     return enabled ? "" : openArchiveFirstLabel();
   }
 
+  function testArchiveDisabledReason(): string {
+    if (appActionEnabled("test_archive")) return "";
+    if (archiveOpenStatus === "opening") return toolbarLabel("Opening");
+    return currentArchive ? "" : tr("gui.precondition.open_before_test", "Open an archive before testing");
+  }
+
   function createExcludeRules(): string[] {
     return parseDelimitedRules(createExcludeText);
   }
@@ -8628,18 +8957,34 @@
     return ["selecting", "measuring", "checkingTemp", "choosingDest", "checkingDest", "submitting"].includes(createPreflightPhase);
   }
 
+  function isCurrentCreateSourcePicker(request: CreateSourcePicker): boolean {
+    return createSourcePicker === request && !createPreflightClosed && screen === "create"
+      && mode === request.mode && createSources === request.sources;
+  }
+
+  function isCurrentCreateOutputPreparation(request: CreatePreparationOwner): boolean {
+    return createOutputPreparation === request && !createPreflightClosed && screen === "create"
+      && mode === request.mode && createSources === request.sources;
+  }
+
+  function dismissCreatePreparation(): void {
+    createSourcePicker = null;
+    createPrimaryFocusPending = false;
+    if (createOutputPreparation) invalidateCreatePreflightResult();
+  }
+
   function createConfigurationPending(): boolean {
     return presetLoadState === "loading" || !sfxCreateCapabilityReady;
   }
 
   function createSourcesLocked(): boolean {
-    return createSourcePickerBusy !== null
+    return createSourcePicker !== null
       || createPreflightBusy()
       || pendingCreateSubmission !== null;
   }
 
   function createSourcesLockedReason(): string {
-    if (createSourcePickerBusy) {
+    if (createSourcePicker) {
       return tr("gui.create.sources.picker_open", "Finish choosing sources before changing the list");
     }
     if (createPreflightBusy()) {
@@ -8659,14 +9004,14 @@
 
   function createStartLabel(readyLabel: string): string {
     if (createConfigurationPending()) return tr("gui.create.preparing_settings", "Preparing settings");
-    if (createSourcePickerBusy) return tr("gui.create.sources.adding", "Adding sources");
+    if (createSourcePicker) return tr("gui.create.sources.adding", "Adding sources");
     if (createPreflightBusy()) return tr("gui.create.checking", "Checking");
     if (pendingCreateSubmission) return tr("gui.create.review_plan_below", "Review plan below");
     return readyLabel;
   }
 
   function createSourcePickerLabel(sourceKind: "files" | "folder"): string {
-    if (createSourcePickerBusy === sourceKind) {
+    if (createSourcePicker?.kind === sourceKind) {
       return sourceKind === "files"
         ? tr("gui.create.opening_file_picker", "Opening file picker...")
         : tr("gui.create.opening_folder_picker", "Opening folder picker...");
@@ -9083,14 +9428,14 @@
         addFiles: {
           label: createSourcePickerLabel("files"),
           disabled: createSourcesLocked(),
-          busy: createSourcePickerBusy === "files",
+          busy: createSourcePicker?.kind === "files",
           title: sourceLockedReason,
           onSelect: () => void submitCreateJob("files"),
         },
         addFolders: {
           label: createSourcePickerLabel("folder"),
           disabled: createSourcesLocked(),
-          busy: createSourcePickerBusy === "folder",
+          busy: createSourcePicker?.kind === "folder",
           title: sourceLockedReason,
           onSelect: () => void submitCreateJob("folder"),
         },
@@ -9432,6 +9777,8 @@
   }
 
   function beginCreatePreflight(draft: CreateRunDraft, phase: "selecting" | "choosingDest") {
+    dismissCreatePreparation();
+    createPrimaryFocusPending = false;
     createPresetDraftTouched = true;
     createPreflightPhase = phase;
     createPreflightScanned = 0;
@@ -9453,7 +9800,9 @@
   }
 
   function invalidateCreatePreflightResult() {
-    if (createPreflightBusy() || createPreflightPhase === "idle") return;
+    if (createPreflightBusy() && createOutputPreparation === null) return;
+    createOutputPreparation = null;
+    if (createPreflightPhase === "idle") return;
     const pending = pendingCreateSubmission;
     createPreflightPhase = "idle";
     createPreflightScanned = 0;
@@ -9485,14 +9834,13 @@
     return document.getElementById("create-primary-source-action");
   }
 
-  function focusCreatePrimaryAction() {
+  async function focusCreatePrimaryAction(isCurrent: () => boolean = () => true): Promise<void> {
     createPrimaryFocusPending = true;
-    void tick().then(() => {
-      const action = createPrimaryAction();
-      if (!createPrimaryFocusPending || screen !== "create" || blockingModalVisible() || !action) return;
-      createPrimaryFocusPending = false;
-      action.focus();
-    });
+    await tick();
+    const action = createPrimaryAction();
+    if (!isCurrent() || !createPrimaryFocusPending || screen !== "create" || blockingModalVisible() || !action) return;
+    createPrimaryFocusPending = false;
+    action.focus();
   }
 
   function discardPendingCreatePlan(restoreFocus = false) {
@@ -9536,6 +9884,7 @@
     const issue = archiveEditPathIssue(path, allowRoot);
     if (!issue) return "";
     if (issue.kind === "empty") return tr("gui.edit.path_empty", "Enter an archive path.");
+    if (issue.kind === "absolute") return tr("gui.edit.path_absolute", "Enter a relative path inside the archive without a leading slash.");
     if (issue.kind === "parent") return tr("gui.edit.path_parent", "Parent references (..) are not allowed. Enter a path inside the archive.");
     if (issue.kind === "characters") return tr("gui.edit.path_characters", "{name} contains characters that cannot be used on Windows. Remove them or choose another name.").replace("{name}", issue.segment);
     if (issue.kind === "trailing") return tr("gui.edit.path_trailing", "{name} ends with a space or dot. Choose a portable name.").replace("{name}", issue.segment);
@@ -9597,18 +9946,6 @@
     const clean = isDir ? path.slice(0, -1) : path;
     const base = pathBaseName(clean);
     return `${targetDir}${base}${isDir ? "/" : ""}`;
-  }
-
-  function moveConflictCount(): number {
-    return moveConflictReview?.items.filter((item) => item.conflict).length ?? 0;
-  }
-
-  function moveReadyCount(): number {
-    return moveConflictReview?.items.filter((item) => !item.conflict).length ?? 0;
-  }
-
-  function visibleMoveConflictItems(): MovePlanItem[] {
-    return moveConflictReview?.items.filter((item) => item.conflict).slice(0, 5) ?? [];
   }
 
   function moveTargetStatus(): string {
@@ -9926,6 +10263,9 @@
   function extractStartBlockedReason(): string {
     const archiveReason = extractArchiveRequiredReason();
     if (archiveReason) return archiveReason;
+    if (extractDestinationPicker) {
+      return tr("gui.extract.destination_picker_wait", "Finish choosing a destination, or close the folder chooser.");
+    }
     if (extractScope === "selection" && extractSelectionSnapshot.length === 0) {
       return tr("gui.precondition.select_before_extract", "Select one or more entries before extracting them");
     }
@@ -9998,6 +10338,10 @@
       showNotice(tr("gui.precondition.open_before_extract", "Open an archive before extracting"));
       return;
     }
+    if (extractDestinationPicker) {
+      showNotice(tr("gui.extract.destination_picker_wait", "Finish choosing a destination, or close the folder chooser."));
+      return;
+    }
     if (extractScope === "selection" && extractSelectionSnapshot.length === 0) {
       showNotice(tr("gui.precondition.select_before_extract", "Select one or more entries before extracting them"));
       return;
@@ -10011,8 +10355,16 @@
       return;
     }
     if (extractDestinationMode === "choose" && !extractCustomDest.trim()) {
-      await chooseExtractDestination();
-      if (!extractCustomDest.trim()) return;
+      const archive = currentArchive;
+      const origin = screen;
+      const scope = extractScope;
+      const selection = extractSelectionSnapshot;
+      const preset = selectedExtractPresetId;
+      if (!await chooseExtractDestination()) return;
+      if (currentArchive !== archive || screen !== origin || extractScope !== scope
+        || extractSelectionSnapshot !== selection || selectedExtractPresetId !== preset
+        || extractDestinationMode !== "choose" || !extractCustomDest.trim()
+        || extractDestinationPicker) return;
     }
     const current = currentArchive;
     if (!current || screen !== "extract") return;
@@ -10105,6 +10457,10 @@
   }
 
   async function submitCopyOutSelectedJob() {
+    if (extractDestinationPicker) {
+      showNotice(tr("gui.extract.destination_picker_wait", "Finish choosing a destination, or close the folder chooser."));
+      return;
+    }
     if (blockSelectionScopedAction()) return;
     const selection = selectedJobPaths();
     if (!currentArchive || !selection) {
@@ -10112,8 +10468,14 @@
       return;
     }
     if (extractDestinationMode === "choose" && !extractCustomDest.trim()) {
-      await chooseExtractDestination();
-      if (!extractCustomDest.trim()) return;
+      const archive = currentArchive;
+      const origin = screen;
+      if (!await chooseExtractDestination()) return;
+      const selected = selectedPaths();
+      if (currentArchive !== archive || screen !== origin || archiveSelectionBusyReason()
+        || selected.size !== selection.length || selection.some((path) => !selected.has(path))
+        || extractDestinationMode !== "choose" || !extractCustomDest.trim()
+        || extractDestinationPicker) return;
     }
     const destination = effectiveExtractDest();
     const jobDestination = extractJobDestination();
@@ -10307,6 +10669,7 @@
         state: reportState(calculation),
         feedback: checksumCopyFeedbackFor("checksum"),
         feedbackDanger: checksumCopyFeedbackToneFor("checksum") === "danger",
+        copyPending: checksumCopyPending("checksum", calculation?.id ?? null),
         onCopy: () => void copyChecksumResults("checksum"),
       },
       verification: {
@@ -10322,6 +10685,7 @@
         state: reportState(verification),
         feedback: checksumCopyFeedbackFor("checksum_check"),
         feedbackDanger: checksumCopyFeedbackToneFor("checksum_check") === "danger",
+        copyPending: checksumCopyPending("checksum_check", verification?.id ?? null),
         onCopy: () => void copyChecksumResults("checksum_check"),
       },
       actions: {
@@ -10340,6 +10704,8 @@
         } else {
           checksumCheckResultPanel = node;
         }
+        const request = checksumResultFocusPending;
+        if (node && request?.kind === kind) void focusPendingChecksumResult(request);
       },
     };
   }
@@ -10468,27 +10834,62 @@
       .join("\n");
   }
 
-  async function writeClipboardText(text: string): Promise<boolean> {
-    return copyTextToClipboard(text);
-  }
-
   async function copyChecksumText(
     text: string,
     kind: "checksum" | "checksum_check" | "task",
     taskId: number | null = null,
   ) {
+    clearChecksumCopyState();
+    const origin = {
+      screen,
+      mode,
+      taskCenterOpen,
+      taskCenterSelectedTaskId,
+      taskDialogTaskId,
+      taskDialogDismissedId,
+    };
+    const isCurrent = (): boolean => {
+      if (checksumCopyRequest !== request || screen !== origin.screen || mode !== origin.mode
+        || taskCenterOpen !== origin.taskCenterOpen
+        || taskCenterSelectedTaskId !== origin.taskCenterSelectedTaskId
+        || taskDialogTaskId !== origin.taskDialogTaskId
+        || taskDialogDismissedId !== origin.taskDialogDismissedId) return false;
+      if (kind !== "task") return screen === "checksum" && (selectedChecksumTask(kind)?.id ?? null) === taskId;
+      if (taskWindowMode) return taskDialogTask()?.id === taskId;
+      return taskCenterOpen
+        ? taskCenterSelectedTaskId === taskId
+        : taskDialogTaskId === taskId && taskDialogDismissedId !== taskId;
+    };
+    const request = { kind, taskId, isCurrent };
+    checksumCopyRequest = request;
+    if (!isCurrent()) {
+      checksumCopyRequest = null;
+      return;
+    }
     if (!text.trim()) {
       const message = tr("gui.checksum.no_copyable_results", "No checksum results to copy");
       showNotice(message);
       showChecksumCopyFeedback(kind, taskId, message, "danger");
+      checksumCopyRequest = null;
       return;
     }
-    const ok = await writeClipboardText(text);
-    const message = ok
-      ? tr("gui.checksum.results_copied", "Checksum results copied")
-      : tr("gui.checksum.copy_failed", "Could not copy checksum results");
-    showNotice(message);
-    showChecksumCopyFeedback(kind, taskId, message, ok ? "success" : "danger");
+    try {
+      const result = await copyTextToClipboard(text, isCurrent);
+      if (!isCurrent() || result === "superseded") return;
+      const copied = result === "copied";
+      const message = copied
+        ? tr("gui.checksum.results_copied", "Checksum results copied")
+        : tr("gui.checksum.copy_failed", "Could not copy checksum results");
+      showNotice(message);
+      showChecksumCopyFeedback(kind, taskId, message, copied ? "success" : "danger");
+    } finally {
+      if (checksumCopyRequest === request) checksumCopyRequest = null;
+    }
+  }
+
+  function checksumCopyPending(kind: "checksum" | "checksum_check" | "task", taskId: number | null): boolean {
+    return checksumCopyRequest?.kind === kind && checksumCopyRequest.taskId === taskId
+      && checksumCopyRequest.isCurrent();
   }
 
   async function copyChecksumResults(kind: "checksum" | "checksum_check") {
@@ -10873,20 +11274,47 @@
     }
   }
 
-  async function submitExportSqzJob() {
-    const disabledReason = recoverySqzExportDisabledReason();
+  function recoveryOutputContext(): string {
+    return JSON.stringify([
+      screen, mode, recoverySourceMode, recoverySourcePath(), recoverySourceForJob(),
+      recoveryPar2Override, recoverySourceMode === "current" ? archiveOpenGeneration : null,
+    ]);
+  }
+
+  function isCurrentRecoveryOutputPreparation(request: RecoveryOutputPreparation): boolean {
+    return recoveryOutputPreparation?.id === request.id
+      && request.context === recoveryOutputContext();
+  }
+
+  function recoveryOutputStatus(): string {
+    switch (recoveryOutputPreparation?.phase) {
+      case "opening":
+        return tr("gui.recovery.preparing_output", "Preparing output…");
+      case "choosing":
+        return tr("gui.recovery.choosing_output", "Choose where to save the output.");
+      case "checking":
+        return tr("gui.output.checking_existing", "Checking output…");
+      case "submitting":
+        return tr("gui.recovery.submitting_task", "Adding recovery task to queue…");
+      default:
+        return recoverySubmissionPending
+          ? tr("gui.recovery.submitting_task", "Adding recovery task to queue…")
+          : "";
+    }
+  }
+
+  async function submitRecoveryOutputJob(kind: RecoveryOutputKind) {
+    if (screen !== "recovery" || recoveryOutputPreparation || recoverySubmissionPending
+      || recoveryPickerStatus !== "idle") return;
     const source = recoverySourcePath();
     const jobSource = recoverySourceForJob();
-    if (disabledReason || !source || !jobSource) {
-      showNotice(disabledReason || tr("gui.recovery.choose_sqz_before_export", "Choose an SQZ archive before exporting."));
-      return;
-    }
-    if (outputAuthorizationPending || recoverySubmissionPending || focusBlockingTaskIfAny()) return;
-    outputAuthorizationPending = true;
-    recoverySubmissionPending = true;
-    try {
-      const { confirm, save } = await getDialogModule();
-      const dest = await saveNativeDialog("recovery.export-sqz", save, {
+    const outputDirectory = kind === "repair_recovery" && recoveryRepairUsesDirectory();
+    const extension = source ? archiveExtensionMatch(pathBaseName(source)) : null;
+    const plans = {
+      export_sqz: {
+        disabledReason: recoverySqzExportDisabledReason(),
+        missing: tr("gui.recovery.choose_sqz_before_export", "Choose an SQZ archive before exporting."),
+        operation: "recovery.export-sqz",
         title: tr("gui.recovery.export_sqz_as", "Export SQZ as"),
         defaultPath: defaultSqzExportDest(),
         filters: [
@@ -10895,131 +11323,155 @@
           { name: archiveOutputFilterName("tar.zst"), extensions: ["tar.zst", "tzst"] },
           { name: archiveOutputFilterName("tar"), extensions: ["tar"] },
         ],
-      });
-      if (!dest) {
-        showNotice(tr("gui.recovery.export_sqz_cancelled", "Export SQZ cancelled"));
-        return;
-      }
-      const authorization = await authorizeArchiveOutput(dest, confirm);
-      if (!authorization) {
-        showNotice(tr("gui.recovery.export_sqz_cancelled", "Export SQZ cancelled"));
-        return;
-      }
-      await submitJob({
-        kind: "export_sqz",
-        src: jobSource,
-        dest,
-        level: createCompressionLevel(),
-        dest_password: null,
-        replace_existing: authorization.replaceExisting,
-        replacement_guard: authorization.replacementGuard,
-      });
-      showNotice(tr("gui.recovery.sqz_export_queued", "SQZ export added to queue"));
-      recordOperation({
-        status: "queued",
-        title: tr("gui.recovery.sqz_export_queued", "SQZ export added to queue"),
-        detail: `${pathBaseName(source)} -> ${pathBaseName(dest)} · ${createProfileLabel(activeCreateProfile)}`,
-      });
-    } catch (error) {
-      if (isJobSubmitBlocked(error)) return;
-      if (createDestinationInspectionCancelled(error)) {
-        showNotice(tr("gui.recovery.export_sqz_cancelled", "Export SQZ cancelled"));
-      } else if (error instanceof CreateDestinationInspectionError) {
-        showNotice(
-          error.detail
-            ? tError(error.detail)
-            : tr("gui.output.inspect_failed", "Could not check the output. Review the destination and try again."),
-        );
-      } else {
-        showNotice(tr("gui.recovery.export_sqz_requires_desktop_service", "Export SQZ requires the desktop service"));
-      }
-    } finally {
-      outputAuthorizationPending = false;
-      recoverySubmissionPending = false;
-    }
-  }
-
-  async function submitRepairSqzJob() {
-    const disabledReason = recoverySqzRepairDisabledReason();
-    const source = recoverySourcePath();
-    const jobSource = recoverySourceForJob();
-    if (disabledReason || !source || !jobSource) {
-      showNotice(disabledReason || tr("gui.recovery.choose_sqz_before_repair", "Choose an SQZ archive or SQZ volume before repairing."));
-      return;
-    }
-    if (focusBlockingTaskIfAny()) return;
-    try {
-      const { save } = await getDialogModule();
-      const dest = await saveNativeDialog("recovery.repair-sqz", save, {
+        cancelled: tr("gui.recovery.export_sqz_cancelled", "Export SQZ cancelled"),
+        queued: tr("gui.recovery.sqz_export_queued", "SQZ export added to queue"),
+      },
+      repair_sqz: {
+        disabledReason: recoverySqzRepairDisabledReason(),
+        missing: tr("gui.recovery.choose_sqz_before_repair", "Choose an SQZ archive or SQZ volume before repairing."),
+        operation: "recovery.repair-sqz",
         title: tr("gui.recovery.repair_sqz_as", "Repair SQZ as"),
         defaultPath: defaultSqzRepairDest(),
         filters: [{ name: archiveOutputFilterName("sqz"), extensions: ["sqz"] }],
-      });
-      if (!dest) {
-        showNotice(tr("gui.recovery.repair_sqz_cancelled", "Repair SQZ cancelled"));
-        return;
-      }
-      if (sameFilePath(dest, source)) {
-        showNotice(tr("gui.recovery.repair_output_must_differ", "Choose a new file for the repaired copy. The source archive will not be overwritten."));
-        return;
-      }
-      await submitJob({
-        kind: "repair_sqz",
-        src: jobSource,
-        dest,
-        level: createCompressionLevel(),
-      });
-      showNotice(tr("gui.recovery.sqz_repair_queued", "SQZ repair added to queue"));
-      recordOperation({
-        status: "queued",
-        title: tr("gui.recovery.sqz_repair_queued", "SQZ repair added to queue"),
-        detail: `${pathBaseName(source)} -> ${pathBaseName(dest)}`,
-      });
-    } catch (error) {
-      if (isJobSubmitBlocked(error)) return;
-      showNotice(tr("gui.recovery.repair_sqz_requires_desktop_service", "Repair SQZ requires the desktop service"));
-    }
-  }
-
-  async function submitRepairZipJob() {
-    const disabledReason = recoveryZipDisabledReason();
-    const source = recoverySourcePath();
-    const jobSource = recoverySourceForJob();
-    if (disabledReason || !source || !jobSource) {
-      showNotice(disabledReason || tr("gui.recovery.choose_archive_before_zip_rebuild", "Choose a ZIP-family archive before rebuilding its index."));
-      return;
-    }
-    if (focusBlockingTaskIfAny()) return;
-    try {
-      const { save } = await getDialogModule();
-      const dest = await saveNativeDialog("recovery.rebuild-zip-index", save, {
+        cancelled: tr("gui.recovery.repair_sqz_cancelled", "Repair SQZ cancelled"),
+        queued: tr("gui.recovery.sqz_repair_queued", "SQZ repair added to queue"),
+      },
+      repair_zip: {
+        disabledReason: recoveryZipDisabledReason(),
+        missing: tr("gui.recovery.choose_archive_before_zip_rebuild", "Choose a ZIP-family archive before rebuilding its index."),
+        operation: "recovery.rebuild-zip-index",
         title: tr("gui.recovery.rebuild_zip_index_as", "Rebuild ZIP index as"),
         defaultPath: defaultZipRepairDest(),
         filters: [{ name: archiveOutputFilterName("zip"), extensions: ["zip"] }],
-      });
+        cancelled: tr("gui.recovery.zip_rebuild_cancelled", "ZIP index rebuild cancelled"),
+        queued: tr("gui.recovery.zip_rebuild_queued", "ZIP index rebuild added to queue"),
+      },
+      repair_recovery: {
+        disabledReason: recoveryRepairPar2DisabledReason(),
+        missing: tr("gui.recovery.choose_archive_before_par2_repair", "Choose an archive before repairing with PAR2 data."),
+        operation: "recovery.repair-par2",
+        title: tr("gui.recovery.repair_par2_as", "Repair with PAR2 as"),
+        defaultPath: defaultPar2RepairDest(),
+        filters: extension
+          ? [{
+              name: tr("gui.recovery.repaired_archive_filter", "Repaired archive"),
+              extensions: [extension],
+            }]
+          : [],
+        cancelled: tr("gui.recovery.repair_par2_cancelled", "PAR2 repair cancelled"),
+        queued: outputDirectory
+          ? tr("gui.recovery.par2_set_repair_queued", "PAR2 set repair added to queue")
+          : tr("gui.recovery.par2_repair_queued", "PAR2 repair added to queue"),
+      },
+    };
+    const plan = plans[kind];
+    if (plan.disabledReason || !source || !jobSource) {
+      showNotice(plan.disabledReason || plan.missing);
+      return;
+    }
+    if (focusBlockingTaskIfAny()) return;
+    const sidecar = recoveryPar2Override;
+    const directoryName = defaultPar2RepairDirectoryName();
+    const level = createCompressionLevel();
+    const profile = createProfileLabel(activeCreateProfile);
+    const request: RecoveryOutputPreparation = {
+      id: Symbol(), context: recoveryOutputContext(), phase: "opening",
+    };
+    recoveryOutputPreparation = request;
+    const isCurrent = () => isCurrentRecoveryOutputPreparation(request);
+    const setPhase = (phase: RecoveryOutputPreparation["phase"]) => {
+      if (recoveryOutputPreparation?.id === request.id) recoveryOutputPreparation.phase = phase;
+    };
+    const inspect = async (candidate: string, splitOutput: boolean) => {
+      try {
+        return await ipc.inspectCreateDestination(candidate, splitOutput, nextPreflightRequestId(), null);
+      } catch (error) {
+        throw new CreateDestinationInspectionError(error);
+      }
+    };
+    try {
+      const dialogs = await getDialogModule();
+      if (!isCurrent()) return;
+      setPhase("choosing");
+      let dest: string | null = null;
+      if (outputDirectory) {
+        const selected = await openNativeDialog("recovery.repair-par2-set-parent", dialogs.open, {
+          title: tr("gui.recovery.choose_repaired_set_parent", "Choose where to create the repaired set folder"),
+          defaultPath: pathDir(source),
+          multiple: false,
+          directory: true,
+        });
+        if (!isCurrent()) return;
+        if (typeof selected === "string") {
+          setPhase("checking");
+          dest = await ipc.uniqueCreateDestination(joinFolderPath(selected, directoryName), false);
+          if (!isCurrent()) return;
+        }
+      } else {
+        dest = await saveNativeDialog(plan.operation, dialogs.save, {
+          title: plan.title, defaultPath: plan.defaultPath, filters: plan.filters,
+        });
+        if (!isCurrent()) return;
+      }
       if (!dest) {
-        showNotice(tr("gui.recovery.zip_rebuild_cancelled", "ZIP index rebuild cancelled"));
+        showNotice(plan.cancelled);
         return;
       }
-      if (sameFilePath(dest, source)) {
+      if (kind !== "export_sqz" && (sameFilePath(dest, source) || sameFilePath(dest, jobSource))) {
         showNotice(tr("gui.recovery.repair_output_must_differ", "Choose a new file for the repaired copy. The source archive will not be overwritten."));
         return;
       }
-      await submitJob({
-        kind: "repair_zip",
-        src: jobSource,
-        dest,
-        level: createCompressionLevel(),
-      });
-      showNotice(tr("gui.recovery.zip_rebuild_queued", "ZIP index rebuild added to queue"));
+      setPhase("checking");
+      let authorization: AuthorizedArchiveOutput | null = null;
+      if (kind === "export_sqz") {
+        authorization = await authorizeArchiveOutput(dest, dialogs.confirm, false, inspect, isCurrent);
+        if (!isCurrent()) return;
+        if (!authorization) {
+          showNotice(plan.cancelled);
+          return;
+        }
+      } else {
+        const inspection = await inspect(dest, false);
+        if (!isCurrent()) return;
+        if (inspection.conflict) {
+          showNotice(tr("gui.recovery.repair_output_exists", "The destination already exists. Choose a different name or folder for the repaired copy; the existing output was kept."));
+          return;
+        }
+      }
+      let spec: JobSpec;
+      if (kind === "repair_recovery") {
+        spec = { kind, path: jobSource, output: dest, output_directory: outputDirectory, recovery: sidecar };
+      } else if (kind === "export_sqz") {
+        if (!authorization) return;
+        spec = {
+          kind, src: jobSource, dest, level, dest_password: null,
+          replace_existing: authorization.replaceExisting,
+          replacement_guard: authorization.replacementGuard,
+        };
+      } else {
+        spec = { kind, src: jobSource, dest, level };
+      }
+      setPhase("submitting");
+      await submitJob(spec);
       recordOperation({
         status: "queued",
-        title: tr("gui.recovery.zip_rebuild_queued", "ZIP index rebuild added to queue"),
-        detail: `${pathBaseName(source)} -> ${pathBaseName(dest)}`,
+        title: plan.queued,
+        detail: `${pathBaseName(source)} -> ${pathBaseName(dest)}${kind === "export_sqz" ? ` · ${profile}` : ""}`,
       });
+      if (isCurrent()) showNotice(plan.queued);
     } catch (error) {
-      if (isJobSubmitBlocked(error)) return;
-      showNotice(tr("gui.recovery.zip_rebuild_requires_desktop_service", "ZIP index rebuild requires the desktop service"));
+      if (!isCurrent() || isJobSubmitBlocked(error)) return;
+      if (createDestinationInspectionCancelled(error)) {
+        showNotice(plan.cancelled);
+      } else if (error instanceof CreateDestinationInspectionError) {
+        showNotice(error.detail
+          ? tError(error.detail)
+          : tr("gui.output.inspect_failed", "Could not check the output. Review the destination and try again."));
+      } else {
+        showNotice(tr("gui.recovery.output_preparation_failed", "Could not start this recovery task. Check the save location and try again."));
+      }
+    } finally {
+      if (recoveryOutputPreparation?.id === request.id) recoveryOutputPreparation = null;
     }
   }
 
@@ -11079,72 +11531,16 @@
     }
   }
 
-  async function submitRepairRecoveryJob() {
-    const disabledReason = recoveryRepairPar2DisabledReason();
-    const source = recoverySourcePath();
-    const jobSource = recoverySourceForJob();
-    if (disabledReason || !source || !jobSource) {
-      showNotice(disabledReason || tr("gui.recovery.choose_archive_before_par2_repair", "Choose an archive before repairing with PAR2 data."));
-      return;
-    }
-    if (focusBlockingTaskIfAny()) return;
-    try {
-      const dialogs = await getDialogModule();
-      const outputDirectory = recoveryRepairUsesDirectory();
-      let dest: string | null = null;
-      if (outputDirectory) {
-        const selected = await openNativeDialog("recovery.repair-par2-set-parent", dialogs.open, {
-          title: tr(
-            "gui.recovery.choose_repaired_set_parent",
-            "Choose where to create the repaired set folder",
-          ),
-          defaultPath: pathDir(source),
-          multiple: false,
-          directory: true,
-        });
-        if (typeof selected === "string") {
-          const proposed = joinFolderPath(selected, defaultPar2RepairDirectoryName());
-          dest = await ipc.uniqueCreateDestination(proposed, false);
-        }
-      } else {
-        const extension = archiveExtensionMatch(pathBaseName(source));
-        dest = await saveNativeDialog("recovery.repair-par2", dialogs.save, {
-          title: tr("gui.recovery.repair_par2_as", "Repair with PAR2 as"),
-          defaultPath: defaultPar2RepairDest(),
-          filters: extension ? [{ name: tr("gui.recovery.repaired_archive_filter", "Repaired archive"), extensions: [extension] }] : [],
-        });
-      }
-      if (!dest) {
-        showNotice(tr("gui.recovery.repair_par2_cancelled", "PAR2 repair cancelled"));
-        return;
-      }
-      if (sameFilePath(dest, source)) {
-        showNotice(tr("gui.recovery.repair_output_must_differ", "Choose a new file for the repaired copy. The source archive will not be overwritten."));
-        return;
-      }
-      await submitJob({
-        kind: "repair_recovery",
-        path: jobSource,
-        output: dest,
-        output_directory: outputDirectory,
-        recovery: recoveryPar2Override,
-      });
-      showNotice(
-        outputDirectory
-          ? tr("gui.recovery.par2_set_repair_queued", "PAR2 set repair added to queue")
-          : tr("gui.recovery.par2_repair_queued", "PAR2 repair added to queue"),
-      );
-      recordOperation({
-        status: "queued",
-        title: outputDirectory
-          ? tr("gui.recovery.par2_set_repair_queued", "PAR2 set repair added to queue")
-          : tr("gui.recovery.par2_repair_queued", "PAR2 repair added to queue"),
-        detail: `${pathBaseName(source)} -> ${pathBaseName(dest)}`,
-      });
-    } catch (error) {
-      if (isJobSubmitBlocked(error)) return;
-      showNotice(tr("gui.recovery.repair_par2_requires_desktop_service", "PAR2 repair requires the desktop service"));
-    }
+
+  function isCurrentArchiveAddPreparation(request: NonNullable<typeof archiveAddPreparation>): boolean {
+    return archiveAddPreparation === request && screen === request.screen && mode === request.mode
+      && archiveOpenGeneration === request.generation && archiveOpenStatus !== "opening"
+      && currentArchive?.id === request.id && currentArchive.source === request.source
+      && currentArchive.encoding_override === request.encoding;
+  }
+
+  function dismissArchiveAddPreparation(): void {
+    if (archiveAddPreparation?.phase === "preparing") archiveAddPreparation = null;
   }
 
   async function submitAddToArchiveJob() {
@@ -11160,23 +11556,20 @@
     }
     if (focusBlockingTaskIfAny()) return;
     const { id, source: path, encoding_override: encoding } = currentArchive;
-    const generation = archiveOpenGeneration;
+    const request: NonNullable<typeof archiveAddPreparation> = {
+      screen, mode, generation: archiveOpenGeneration, id, source: path, encoding, phase: "preparing",
+    };
     const content_policy = createContentPolicy;
     const excludes = content_policy === "custom" ? [...createExcludeRules()] : [];
     const level = createCompressionLevel();
     const profile = createProfileLabel(activeCreateProfile);
     const canAddToOriginalArchive = () => {
-      if (generation !== archiveOpenGeneration || archiveOpenStatus === "opening"
-        || currentArchive?.id !== id || currentArchive.source !== path
-        || currentArchive.encoding_override !== encoding) {
-        showNotice(tr("gui.add.archive_changed", "The archive changed while choosing files. No files were added. Open the intended archive and choose the files again."));
-        return false;
-      }
+      if (!isCurrentArchiveAddPreparation(request)) return false;
       const reason = archiveMutationDisabledReason();
       if (reason) showNotice(reason);
       return !reason;
     };
-    archiveAddPending = true;
+    archiveAddPreparation = request;
     try {
       let selected: string | string[] | null;
       try {
@@ -11188,6 +11581,7 @@
           directory: false,
         });
       } catch {
+        if (!isCurrentArchiveAddPreparation(request)) return;
         showNotice(tr("gui.add.picker_failed", "Could not open the file chooser. Try adding files again."));
         return;
       }
@@ -11197,9 +11591,11 @@
         showNotice(tr("gui.add.cancelled", "Add files cancelled"));
         return;
       }
+      request.phase = "submitting";
       const queued = await submitCurrentArchiveJob({
         kind: "update",
         path,
+        expected_archive_id: id,
         encoding,
         add,
         delete: [],
@@ -11221,7 +11617,7 @@
           .replace("{profile}", profile),
       });
     } finally {
-      archiveAddPending = false;
+      if (archiveAddPreparation === request) archiveAddPreparation = null;
     }
   }
 
@@ -11245,6 +11641,7 @@
       {
         kind: "update",
         path: currentArchive.source,
+        expected_archive_id: currentArchive.id,
         encoding: currentArchive.encoding_override,
         add: [],
         delete: paths,
@@ -11289,6 +11686,7 @@
     };
     setScreen("browse");
     moveConflictReview = null;
+    moveConflictReturnFocus = null;
     if (kind === "rename") renameTargetName = pathBaseName(selectedRenameSource()?.replace(/\/+$/g, "") ?? "");
     if (kind === "new-folder") newFolderName = "";
     archiveEditKind = kind;
@@ -11302,12 +11700,23 @@
     archiveEditError = null;
     const target = archiveEditReturnFocus;
     archiveEditReturnFocus = null;
+    restoreArchiveEditFocus(target);
+  }
+
+  function restoreArchiveEditFocus(target: HTMLElement | null) {
     void tick().then(() => {
       if (blockingModalVisible() || (document.activeElement !== document.body && document.activeElement !== target)) return;
       const focus = target?.isConnected && !target.matches(":disabled") && !target.closest("[inert]")
         ? target : archiveSearchInput;
       if (focus?.isConnected && !focus.closest("[inert]")) focus.focus({ preventScroll: true });
     });
+  }
+
+  function cancelMoveConflict() {
+    const target = moveConflictReturnFocus;
+    moveConflictReview = null;
+    moveConflictReturnFocus = null;
+    restoreArchiveEditFocus(target);
   }
 
   function archiveEditorFields(kind: ArchiveEditKind) {
@@ -11363,6 +11772,18 @@
     archiveEditError = null;
     return (message) => {
       if (archiveEditKind !== null && archiveEditSession === session) archiveEditError = message;
+    };
+  }
+
+  function archiveEditSubmissionSuccess(): () => void {
+    const session = archiveEditSession;
+    const review = moveConflictReview;
+    return () => {
+      if (moveConflictReview === review) {
+        moveConflictReview = null;
+        moveConflictReturnFocus = null;
+      }
+      if (archiveEditKind !== null && archiveEditSession === session) closeArchiveEditor();
     };
   }
 
@@ -11491,10 +11912,12 @@
     }
     if (!await validateArchiveEditTarget(to, () => normalizeRenameTargetName(renameTargetName, from))
       || !archiveEditCheckIsCurrent(session, id)) return;
+    const onSuccess = archiveEditSubmissionSuccess();
     const queued = await submitCurrentArchiveJob(
       {
         kind: "update",
         path: currentArchive.source,
+        expected_archive_id: currentArchive.id,
         encoding: currentArchive.encoding_override,
         add: [],
         delete: [],
@@ -11510,7 +11933,7 @@
       archiveEditSubmissionFailure(),
     );
     if (queued) {
-      closeArchiveEditor();
+      onSuccess();
       recordOperation({
         status: "queued",
         title: tr("gui.rename.queued", "Rename entry queued"),
@@ -11571,9 +11994,9 @@
       }));
       const conflicts = plan.filter((item) => item.conflict);
       if (conflicts.length > 0) {
+        moveConflictReturnFocus = archiveEditReturnFocus;
         moveConflictReview = { archiveId: currentArchive.id, generation: archiveOpenGeneration, targetDir, items: plan };
         closeArchiveEditor();
-        showNotice(tr("gui.move.review_conflicts", "Review {count} move target conflicts").replace("{count}", conflicts.length.toLocaleString()));
         return;
       }
       archiveEditChecking = false;
@@ -11593,6 +12016,7 @@
     if (moveConflictReview && (currentArchive?.id !== moveConflictReview.archiveId
       || archiveOpenGeneration !== moveConflictReview.generation || archiveOpenStatus !== "idle")) {
       moveConflictReview = null;
+      moveConflictReturnFocus = null;
       showNotice(tr("gui.move.review_changed", "The archive changed. Select the items and check the move targets again."));
       return;
     }
@@ -11609,10 +12033,12 @@
       showNotice(tr("gui.move.no_non_conflicting_targets", "No non-conflicting move targets to submit"));
       return;
     }
+    const onSuccess = archiveEditSubmissionSuccess();
     const queued = await submitCurrentArchiveJob(
       {
         kind: "update",
         path: currentArchive.source,
+        expected_archive_id: currentArchive.id,
         encoding: currentArchive.encoding_override,
         add: [],
         delete: [],
@@ -11630,8 +12056,7 @@
       archiveEditSubmissionFailure(),
     );
     if (queued) {
-      moveConflictReview = null;
-      closeArchiveEditor();
+      onSuccess();
       recordOperation({
         status: "queued",
         title: tr("gui.move.queued", "Move entries queued"),
@@ -11684,10 +12109,12 @@
     commitNewFolderName();
     if (!await validateArchiveEditTarget(folder, () => normalizeNewFolderPath())
       || !archiveEditCheckIsCurrent(session, id)) return;
+    const onSuccess = archiveEditSubmissionSuccess();
     const queued = await submitCurrentArchiveJob(
       {
         kind: "update",
         path: currentArchive.source,
+        expected_archive_id: currentArchive.id,
         encoding: currentArchive.encoding_override,
         add: [],
         delete: [],
@@ -11703,7 +12130,7 @@
       archiveEditSubmissionFailure(),
     );
     if (queued) {
-      closeArchiveEditor();
+      onSuccess();
       recordOperation({
         status: "queued",
         title: tr("gui.new_folder.queued", "New folder queued"),
@@ -11993,6 +12420,7 @@
       let confirmed: boolean;
       try {
         const { confirm } = await getDialogModule();
+        if (!responseIsCurrent()) return false;
         confirmed = await confirm(
           tr(
             "gui.preview.risky_open_body",
@@ -12054,9 +12482,9 @@
     }
   }
 
-  async function focusArchiveRow(index: number, entryPath: string | null): Promise<void> {
+  async function focusArchiveRow(index: number, entryPath: string | null, canFocus: () => boolean = () => true): Promise<void> {
     if (screen !== "browse" || !currentArchive) return;
-    const archiveSource = currentArchive.source;
+    const archiveId = currentArchive.id;
     const directoryKey = archiveDirs.join("\u0000");
     const filterKey = filterText();
     const listMode = mode;
@@ -12064,33 +12492,29 @@
     const selector = `[data-row-index="${index}"]`;
     const contextIsCurrent = () => (
       screen === "browse" &&
-      currentArchive?.source === archiveSource &&
+      currentArchive?.id === archiveId &&
       archiveDirs.join("\u0000") === directoryKey &&
       filterText() === filterKey &&
-      mode === listMode
+      mode === listMode && canFocus()
     );
     const rowMatches = () => !entryPath || rowAt(index)?.path === entryPath;
 
     await tick();
     if (!contextIsCurrent()) return;
-    let list = document.querySelector<HTMLElement>(`[data-virtual-list="${listKind}"]`);
+    const list = document.querySelector<HTMLElement>(`[data-virtual-list="${listKind}"]`);
     if (!list) return;
-    let row = list.querySelector<HTMLElement>(selector);
-    if (!row) {
-      const rowHeight = listMode === "classic" ? CLASSIC_ROW_HEIGHT : MODERN_ROW_HEIGHT;
-      const centeredOffset = Math.max(0, (list.clientHeight - rowHeight) / 2);
-      const nextScrollTop = Math.max(0, index * rowHeight - centeredOffset);
+    const rowHeight = listMode === "classic" ? CLASSIC_ROW_HEIGHT : MODERN_ROW_HEIGHT;
+    const top = index * rowHeight;
+    const nextScrollTop = Math.max(0, Math.min(top, Math.max(list.scrollTop, top + rowHeight - list.clientHeight)));
+    if (nextScrollTop !== list.scrollTop) {
       list.scrollTop = nextScrollTop;
       browseScrollTop = nextScrollTop;
       browseViewportHeight = list.clientHeight;
-      await loadRowAt(index);
-      await tick();
-      if (!contextIsCurrent()) return;
-      list = document.querySelector<HTMLElement>(`[data-virtual-list="${listKind}"]`);
-      row = list?.querySelector<HTMLElement>(selector) ?? null;
     }
+    if (!await loadRowAt(index)) return;
+    await tick();
     if (!contextIsCurrent() || !rowMatches()) return;
-    row?.focus({ preventScroll: true });
+    list.querySelector<HTMLElement>(selector)?.focus({ preventScroll: true });
   }
 
   async function openNestedArchiveEntry(
@@ -12101,6 +12525,7 @@
   ) {
     if (intent === "extract" && (preventCreateSubmissionNavigation("extract")
       || preventConvertSubmissionNavigation("extract") || focusBlockingTaskIfAny())) return;
+    dismissArchiveAddPreparation();
     const initialScreen = screen;
     const initialScreenGeneration = taskReviewRequestGeneration;
     const prepared = nestedPreview?.outer_path === outerPath && nestedPreview.entry_path === entryPath
@@ -12134,6 +12559,7 @@
         return;
       }
       if (!await adoptOpenedArchive(info, isCurrent)) return;
+      dismissRecoveryPreparation();
       recoverySourceMode = "current";
       recoverySourceOverride = null;
       recoveryPar2Override = null;
@@ -12336,7 +12762,15 @@
       showNotice(tr("gui.encoding.open_before_repair", "Open an archive before repairing filename encoding"));
       return;
     }
-    const ok = await reopenWithEncoding(encoding);
+    dismissArchiveAddPreparation();
+    clearEntryPreviewState();
+    const request = { generation: archiveOpenGeneration };
+    filenameEncodingRequest = request;
+    const result = await reopenWithEncoding(encoding);
+    if (filenameEncodingRequest !== request) return;
+    filenameEncodingRequest = null;
+    if (request.generation !== archiveOpenGeneration || result.status === "superseded" || !result.isCurrent()) return;
+    const ok = result.status === "applied";
     if (ok) {
       markExtractPresetDraftTouched();
       extractPresetEncodingLabel = null;
@@ -12349,20 +12783,25 @@
   }
 
   async function submitCreateJob(sourceKind: "files" | "folder") {
+    if (screen !== "create" || createPreflightClosed) return;
     if (focusBlockingTaskIfAny()) return;
     if (createSourcesLocked()) {
       showNotice(createSourcesLockedReason());
       return;
     }
-    createSourcePickerBusy = sourceKind;
+    const request: CreateSourcePicker = { kind: sourceKind, mode, sources: createSources };
+    createSourcePicker = request;
+    const isCurrent = () => isCurrentCreateSourcePicker(request);
     showNotice(sourceKind === "files" ? tr("gui.create.opening_file_picker", "Opening file picker...") : tr("gui.create.opening_folder_picker", "Opening folder picker..."));
     try {
       const { open } = await getDialogModule();
+      if (!isCurrent()) return;
       const selected = await openNativeDialog(`create.${sourceKind}`, open, {
         title: sourceKind === "files" ? tr("gui.create.choose_files_to_archive", "Choose files to archive") : tr("gui.create.choose_folder_to_archive", "Choose folder to archive"),
         multiple: true,
         directory: sourceKind === "folder",
       });
+      if (!isCurrent()) return;
       const inputs = Array.isArray(selected) ? selected : selected ? [selected] : [];
       if (inputs.length === 0) {
         showNotice(
@@ -12373,24 +12812,31 @@
         );
         return;
       }
+      createSourcePicker = null;
       showCreateSourcesAdded(
         appendCreateSources(inputs, sourceKind === "files" ? "file" : "folder"),
       );
     } catch {
+      if (!isCurrent()) return;
       showNotice(
         tr("gui.create.requires_desktop_dialog", "Create archive requires the desktop file dialog"),
       );
     } finally {
-      createSourcePickerBusy = null;
+      if (createSourcePicker === request) createSourcePicker = null;
     }
   }
 
   async function submitCreateInputs(inputs: string[], source: "dialog" | "drop", capturedDraft?: CreateRunDraft) {
+    if (screen !== "create" || createPreflightClosed) return;
+    if (createSourcePicker) {
+      showNotice(createSourcesLockedReason());
+      return;
+    }
     if (!capturedDraft && createConfigurationPending()) {
       showNotice(createConfigurationPendingMessage());
       return;
     }
-    if (!capturedDraft && createPreflightBusy()) {
+    if (createPreflightPhase === "submitting" || (!capturedDraft && createPreflightBusy())) {
       showNotice(tr("gui.create.preflight_already_running", "Create preflight already running"));
       return;
     }
@@ -12409,193 +12855,218 @@
       return;
     }
     beginCreatePreflight(draft, "choosingDest");
-    const base = normalizedInputs.length === 1
-      ? archiveBaseOrDefault(archiveStemName(desktopBasename(normalizedInputs[0], platformKind())))
-      : "archive";
-    let destination: ResolvedCreateDestination | null;
+    const request: CreatePreparationOwner = { mode, sources: createSources };
+    createOutputPreparation = request;
+    const isCurrent = () => isCurrentCreateOutputPreparation(request);
+    const artifactLabel = draft.sfxEnabled ? createSfxOutputLabel() : createFormats[draft.format].label;
     try {
-      destination = await resolveCreateDestination(normalizedInputs, base, draft, source);
-    } catch (error) {
-      if (createDestinationInspectionCancelled(error)) {
+      const base = normalizedInputs.length === 1
+        ? archiveBaseOrDefault(archiveStemName(desktopBasename(normalizedInputs[0], platformKind())))
+        : "archive";
+      let destination: ResolvedCreateDestination | null;
+      try {
+        destination = await resolveCreateDestination(normalizedInputs, base, draft, source, isCurrent);
+      } catch (error) {
+        if (!isCurrent()) return;
+        if (createDestinationInspectionCancelled(error)) {
+          finishCreatePreflightWithIssue(
+            "destination",
+            tr(
+              "gui.create.destination_check_cancelled",
+              "Output check cancelled · no archive was created",
+            ),
+            "cancelled",
+          );
+          await focusCreatePrimaryAction(isCurrent);
+          return;
+        }
         finishCreatePreflightWithIssue(
           "destination",
-          tr(
-            "gui.create.destination_check_cancelled",
-            "Output check cancelled · no archive was created",
-          ),
-          "cancelled",
+          error instanceof CreateDestinationInspectionError
+            ? error.detail
+              ? tError(error.detail)
+              : tr("gui.create.destination_recheck_failed", "Could not check the destination. Review it and try again.")
+            : tr("gui.create.save_dialog_requires_desktop_dialog", "Save dialog requires the desktop file dialog"),
         );
-        focusCreatePrimaryAction();
         return;
       }
-      finishCreatePreflightWithIssue(
-        "destination",
-        error instanceof CreateDestinationInspectionError
-          ? error.detail
-            ? tError(error.detail)
-            : tr("gui.create.destination_recheck_failed", "Could not check the destination. Review it and try again.")
-          : tr("gui.create.save_dialog_requires_desktop_dialog", "Save dialog requires the desktop file dialog"),
-      );
-      return;
-    }
-    if (!destination) {
-      finishCreatePreflightWithIssue(
-        "destination",
-        tr("gui.create.destination_selection_cancelled", "Destination selection cancelled · no archive was created"),
-        "cancelled",
-      );
-      return;
-    }
-    const { path: dest, replaceExisting, replacementGuard } = destination;
-    lastCreateDest = dest;
-    const spec: JobSpec = {
-      kind: "compress",
-      inputs: normalizedInputs,
-      dest,
-      level: draft.level,
-      password: draft.password,
-      encrypt_names: draft.encryptNames,
-      split_size: draft.splitSize,
-      split_mode: draft.splitMode,
-      excludes: [...draft.excludes],
-      content_policy: draft.contentPolicy,
-      sqz_inner_format: draft.sqzInnerFormat,
-      sfx_target: draft.sfxTarget,
-      replace_existing: replaceExisting,
-      replacement_guard: replacementGuard,
-      completion: draft.completion,
-      post_success: draft.postSuccess,
-      test_after_create: draft.testAfterCreate,
-    };
-
-    createPreflightPhase = "measuring";
-    await ensureCreatePreflightListener();
-    const preflightRequestId = nextPreflightRequestId();
-    createPreflightRequestId = preflightRequestId;
-    createPreflightRequestKind = "source";
-    createPreflightProcessedBytes = 0;
-    let plan: CreatePlanDto;
-    try {
-      plan = await ipc.planCreate(spec, preflightRequestId);
-    } catch {
-      finishCreatePreflightWithIssue(
-        "source",
-        tr(
-          "gui.create.check_excludes_or_permissions",
-          "Make sure the output is not selected as a source, then check exclude rules and permissions.",
-        ),
-      );
-      return;
-    } finally {
-      if (createPreflightRequestId === preflightRequestId) {
-        createPreflightRequestId = null;
-        createPreflightRequestKind = null;
+      if (!isCurrent()) return;
+      if (!destination) {
+        finishCreatePreflightWithIssue(
+          "destination",
+          tr("gui.create.destination_selection_cancelled", "Destination selection cancelled · no archive was created"),
+          "cancelled",
+        );
+        return;
       }
-    }
-    if (plan.entries === 0) {
+      const { path: dest, replaceExisting, replacementGuard } = destination;
+      lastCreateDest = dest;
+      const spec: JobSpec = {
+        kind: "compress",
+        inputs: normalizedInputs,
+        dest,
+        level: draft.level,
+        password: draft.password,
+        encrypt_names: draft.encryptNames,
+        split_size: draft.splitSize,
+        split_mode: draft.splitMode,
+        excludes: [...draft.excludes],
+        content_policy: draft.contentPolicy,
+        sqz_inner_format: draft.sqzInnerFormat,
+        sfx_target: draft.sfxTarget,
+        replace_existing: replaceExisting,
+        replacement_guard: replacementGuard,
+        completion: draft.completion,
+        post_success: draft.postSuccess,
+        test_after_create: draft.testAfterCreate,
+      };
+
+      createPreflightPhase = "measuring";
+      let preflightRequestId: string | null = null;
+      let plan: CreatePlanDto;
+      try {
+        await ensureCreatePreflightListener();
+        if (!isCurrent()) return;
+        preflightRequestId = nextPreflightRequestId();
+        createPreflightRequestId = preflightRequestId;
+        createPreflightRequestKind = "source";
+        createPreflightProcessedBytes = 0;
+        plan = await ipc.planCreate(spec, preflightRequestId);
+        if (!isCurrent()) return;
+      } catch {
+        if (!isCurrent()) return;
+        finishCreatePreflightWithIssue(
+          "source",
+          tr(
+            "gui.create.check_excludes_or_permissions",
+            "Make sure the output is not selected as a source, then check exclude rules and permissions.",
+          ),
+        );
+        return;
+      } finally {
+        if (preflightRequestId !== null && createPreflightRequestId === preflightRequestId) {
+          createPreflightRequestId = null;
+          createPreflightRequestKind = null;
+        }
+      }
+      if (plan.entries === 0) {
+        lastCreatePlan = plan;
+        lastDiskSpace = null;
+        lastTempDiskSpace = null;
+        lastSystemTempDiskSpace = null;
+        finishCreatePreflightWithIssue("source", tr("gui.create.no_entries_after_excludes", "No entries after excludes"));
+        return;
+      }
       lastCreatePlan = plan;
+      createPreflightScanned = plan.entries + plan.deduplicated_entries;
+      createPreflightCurrent = "";
       lastDiskSpace = null;
       lastTempDiskSpace = null;
       lastSystemTempDiskSpace = null;
-      finishCreatePreflightWithIssue("source", tr("gui.create.no_entries_after_excludes", "No entries after excludes"));
-      return;
-    }
-    lastCreatePlan = plan;
-    createPreflightScanned = plan.entries + plan.deduplicated_entries;
-    createPreflightCurrent = "";
-    lastDiskSpace = null;
-    lastTempDiskSpace = null;
-    lastSystemTempDiskSpace = null;
 
-    let tempDisk: DiskSpaceDto;
-    try {
-      createPreflightPhase = "checkingTemp";
-      tempDisk = await ipc.checkDiskSpace(desktopDirname(dest, platformKind()), plan.workspace_budget_bytes);
-    } catch {
-      finishCreatePreflightWithIssue(
-        "temp",
-        tr("gui.create.temp_preflight_requires_desktop_service", "Workspace check requires the desktop service"),
-      );
-      return;
-    }
-    lastTempDiskSpace = tempDisk;
-    if (!tempDisk.ok) {
-      finishCreatePreflightWithIssue(
-        "temp",
-        tr("gui.create.not_enough_temp_space", "Not enough destination space for the creation workspace · {available} available")
-          .replace("{available}", formatBytes(tempDisk.available_bytes)),
-      );
-      return;
-    }
-    if (plan.system_temp_budget_bytes > 0) {
-      let systemTempDisk: DiskSpaceDto;
+      let tempDisk: DiskSpaceDto;
       try {
-        const systemTempDir = await ipc.tempDir();
-        systemTempDisk = await ipc.checkDiskSpace(systemTempDir, plan.system_temp_budget_bytes);
+        createPreflightPhase = "checkingTemp";
+        tempDisk = await ipc.checkDiskSpace(desktopDirname(dest, platformKind()), plan.workspace_budget_bytes);
+        if (!isCurrent()) return;
       } catch {
+        if (!isCurrent()) return;
         finishCreatePreflightWithIssue(
           "temp",
           tr("gui.create.temp_preflight_requires_desktop_service", "Workspace check requires the desktop service"),
         );
         return;
       }
-      lastSystemTempDiskSpace = systemTempDisk;
-      if (!systemTempDisk.ok) {
+      lastTempDiskSpace = tempDisk;
+      if (!tempDisk.ok) {
         finishCreatePreflightWithIssue(
           "temp",
-          tr("gui.create.not_enough_system_temp_space", "Not enough space in the system temporary directory · {available} available")
-            .replace("{available}", formatBytes(systemTempDisk.available_bytes)),
+          tr("gui.create.not_enough_temp_space", "Not enough destination space for the creation workspace · {available} available")
+            .replace("{available}", formatBytes(tempDisk.available_bytes)),
         );
         return;
       }
-    }
+      if (plan.system_temp_budget_bytes > 0) {
+        let systemTempDisk: DiskSpaceDto;
+        try {
+          const systemTempDir = await ipc.tempDir();
+          if (!isCurrent()) return;
+          systemTempDisk = await ipc.checkDiskSpace(systemTempDir, plan.system_temp_budget_bytes);
+          if (!isCurrent()) return;
+        } catch {
+          if (!isCurrent()) return;
+          finishCreatePreflightWithIssue(
+            "temp",
+            tr("gui.create.temp_preflight_requires_desktop_service", "Workspace check requires the desktop service"),
+          );
+          return;
+        }
+        lastSystemTempDiskSpace = systemTempDisk;
+        if (!systemTempDisk.ok) {
+          finishCreatePreflightWithIssue(
+            "temp",
+            tr("gui.create.not_enough_system_temp_space", "Not enough space in the system temporary directory · {available} available")
+              .replace("{available}", formatBytes(systemTempDisk.available_bytes)),
+          );
+          return;
+        }
+      }
 
-    let disk: DiskSpaceDto;
-    try {
-      createPreflightPhase = "checkingDest";
-      disk = await ipc.checkDiskSpace(desktopDirname(dest, platformKind()), plan.final_output_budget_bytes);
-    } catch {
-      finishCreatePreflightWithIssue(
-        "destination",
-        tr("gui.create.destination_preflight_requires_desktop_service", "Destination disk preflight requires the desktop service"),
-      );
-      return;
-    }
-    lastDiskSpace = disk;
-    if (!disk.ok) {
-      finishCreatePreflightWithIssue(
-        "destination",
-        tr("gui.create.not_enough_destination_space", "Not enough free space in destination · {available} available")
-          .replace("{available}", formatBytes(disk.available_bytes)),
-      );
-      return;
-    }
+      let disk: DiskSpaceDto;
+      try {
+        createPreflightPhase = "checkingDest";
+        disk = await ipc.checkDiskSpace(desktopDirname(dest, platformKind()), plan.final_output_budget_bytes);
+        if (!isCurrent()) return;
+      } catch {
+        if (!isCurrent()) return;
+        finishCreatePreflightWithIssue(
+          "destination",
+          tr("gui.create.destination_preflight_requires_desktop_service", "Destination disk preflight requires the desktop service"),
+        );
+        return;
+      }
+      lastDiskSpace = disk;
+      if (!disk.ok) {
+        finishCreatePreflightWithIssue(
+          "destination",
+          tr("gui.create.not_enough_destination_space", "Not enough free space in destination · {available} available")
+            .replace("{available}", formatBytes(disk.available_bytes)),
+        );
+        return;
+      }
 
-    pendingCreateSubmission = {
-      spec,
-      source,
-      format: draft.format,
-      profile: draft.profile,
-      creatingSfx: draft.sfxEnabled,
-      artifactLabel: draft.sfxEnabled ? createSfxOutputLabel() : createFormats[draft.format].label,
-      splitSize: draft.splitSize,
-      confirmLateConflict: destination.confirmLateConflict,
-      restoreCredentialPrompt: draft.restoreCredentialPrompt,
-      restoreEncryptNames: draft.restoreEncryptNames,
-    };
-    createPreflightIssue = "";
-    createPreflightIssueStage = null;
-    createPreflightPhase = "reviewing";
-    showNotice(
-      plan.deduplicated_entries > 0
-        ? tr(
-          "gui.create.review_ready_overlap_notice",
-          "Checks complete · {count} repeated entries merged · review before creating",
-        ).replace("{count}", plan.deduplicated_entries.toLocaleString())
-        : tr("gui.create.review_ready_notice", "Checks complete · review before creating"),
-    );
-    await tick();
-    document.querySelector<HTMLElement>(".create-plan-review")?.focus({ preventScroll: false });
+      pendingCreateSubmission = {
+        spec,
+        source,
+        format: draft.format,
+        profile: draft.profile,
+        creatingSfx: draft.sfxEnabled,
+        artifactLabel,
+        splitSize: draft.splitSize,
+        confirmLateConflict: destination.confirmLateConflict,
+        restoreCredentialPrompt: draft.restoreCredentialPrompt,
+        restoreEncryptNames: draft.restoreEncryptNames,
+      };
+      createPreflightIssue = "";
+      createPreflightIssueStage = null;
+      createPreflightPhase = "reviewing";
+      showNotice(
+        plan.deduplicated_entries > 0
+          ? tr(
+            "gui.create.review_ready_overlap_notice",
+            "Checks complete · {count} repeated entries merged · review before creating",
+          ).replace("{count}", plan.deduplicated_entries.toLocaleString())
+          : tr("gui.create.review_ready_notice", "Checks complete · review before creating"),
+      );
+      await tick();
+      if (!isCurrent()) return;
+      document.querySelector<HTMLElement>(".create-plan-review")?.focus({ preventScroll: false });
+    } finally {
+      if (createOutputPreparation === request) {
+        if (!isCurrent()) dismissCreatePreparation();
+        else createOutputPreparation = null;
+      }
+    }
   }
 
   function createPlanConfirmLabel(): string {
@@ -12858,6 +13329,8 @@
 
   function openTaskCenter(source: HTMLElement | null = null): void {
     if (!appActionEnabled("task_center") || taskCenterOpen) return;
+    checksumCopyRequest = null;
+    checksumResultFocusPending = null;
     rememberTaskWorkspaceFocus(source ?? document.activeElement);
     taskCenterFocusTaskId = null;
     taskCenterSelectedTaskId = null;
@@ -12866,6 +13339,7 @@
   }
 
   function closeTaskCenter(): void {
+    checksumCopyRequest = null;
     cancelTaskReview();
     taskCenterOpen = false;
     taskCenterSelectedTaskId = null;
@@ -12897,12 +13371,14 @@
   }
 
   function openTaskCenterDetails(task: Task): void {
+    checksumCopyRequest = null;
     cancelTaskReview();
     taskCenterFocusTaskId = task.id;
     taskCenterSelectedTaskId = task.id;
   }
 
   function returnToTaskCenter(task: TaskDialogModel): void {
+    checksumCopyRequest = null;
     cancelTaskReview();
     taskCenterSelectedTaskId = null;
     taskCenterFocusTaskId = task.id;
@@ -13016,6 +13492,7 @@
       rootVariables: customPaletteVariables(),
       copyFeedback: taskChecksumCopyFeedback(task),
       copyFeedbackTone: taskChecksumCopyFeedbackTone(task),
+      copyPending: checksumCopyPending("task", task.id),
       passwordQuestion: taskPasswordQuestion(task),
       passwordValue: jobPasswordValue,
       passwordError: jobPasswordSubmissionError,
@@ -13060,6 +13537,7 @@
       presentation: "panel",
       copyFeedback: taskChecksumCopyFeedback(task),
       copyFeedbackTone: taskChecksumCopyFeedbackTone(task),
+      copyPending: checksumCopyPending("task", task.id),
       taskOutputPath,
       taskRevealOutputLabel,
       taskWindowMode: false,
@@ -13188,6 +13666,7 @@
     cancelTaskReview();
     if (task.id === null) return;
     if (isTaskActiveState(task.state)) return;
+    checksumCopyRequest = null;
     if (taskWindowMode && await closeNativeTaskWindow()) return;
     taskDialogDismissedId = task.id;
     taskDialogTaskId = null;
@@ -13373,6 +13852,7 @@
       recoverySourceOverride &&
       sameFilePath(recoverySourceOverride, source),
     );
+    dismissRecoveryPreparation();
     recoverySourceMode = matchesCurrentSource || (!preserveSelectedSource && currentArchive && sameFilePath(currentArchive.path, source))
       ? "current"
       : "selected";
@@ -13394,6 +13874,14 @@
     return !currentArchive || (!sameFilePath(currentArchive.source, task.spec.path) && !sameFilePath(currentArchive.path, task.spec.path));
   }
 
+  function preventTaskWorkspaceNavigation(next: Screen): boolean {
+    if (screen === "create" && next !== "create" && createPreflightPhase === "submitting"
+      && preventCreateSubmissionNavigation(next)) return true;
+    if (screen === "convert" && next !== "convert"
+      && convertRouteHandle && !convertRouteHandle.canLeave()) return true;
+    return false;
+  }
+
   function viewTaskResults(task: TaskDialogModel): void {
     if (taskHasInlineResults(task)) {
       if (task.id !== null) setTaskExpanded(task.id, !task.expanded);
@@ -13407,8 +13895,10 @@
       if (task.id !== null) setTaskExpanded(task.id, true);
       return;
     }
+    if (preventTaskWorkspaceNavigation(target)) return;
     if (target === "recovery" && !adoptRecoveryTargetFromTask(task)) return;
     if (task.id !== null && (task.spec.kind === "checksum" || task.spec.kind === "checksum_check")) {
+      checksumCopyRequest = null;
       checksumReportTaskIds[task.spec.kind] = task.id;
     }
     if (task.id !== null && task.spec.kind === "duplicate_scan") duplicateReportTaskId = task.id;
@@ -13432,6 +13922,10 @@
 
   async function prepareTaskReview(task: TaskDialogModel): Promise<void> {
     if (taskWindowMode || task.id === null || pendingTaskReviewId === task.id || !taskReviewScreen(task)) return;
+    if (taskReviewScreen(task) === "settingsSecurity") {
+      await reviewTask(task);
+      return;
+    }
     const generation = ++taskReviewRequestGeneration;
     pendingTaskReviewId = task.id;
     const initialScreen = screen;
@@ -13512,11 +14006,24 @@
       await reviewConvertTask(task);
       return;
     }
+    if (preventTaskWorkspaceNavigation(target)) return;
     if (target === "create" && task.spec.kind === "compress" && !restoreCreateTaskDraft(task.spec, task.outputPasswordRequired)) return;
     if (target === "recovery" && !adoptRecoveryTargetFromTask(task, displayedSpec)) return;
+    if (target === "settingsSecurity") securitySettingsFocusPending = true;
     setScreen(target);
     await dismissTaskDialog(task);
     if (target === "create") focusCreatePrimaryAction();
+    if (target === "settingsSecurity") focusSecuritySettings();
+  }
+
+  function focusSecuritySettings(): void {
+    securitySettingsFocusPending = true;
+    void tick().then(() => {
+      const input = document.getElementById("settings-security-max-entries");
+      if (!securitySettingsFocusPending || screen !== "settingsSecurity" || blockingModalVisible() || !input) return;
+      securitySettingsFocusPending = false;
+      input.focus();
+    });
   }
 
   function focusArchiveUpdateReview(): void {
@@ -13647,6 +14154,7 @@
 
   function restoreExtractTaskDraft(draft: ExtractTaskDraft): boolean {
     if (!currentArchive || !sameFilePath(currentArchive.source, draft.path)) return false;
+    extractDestinationPicker = null;
     resetExtractPlanRequestState();
     markExtractPresetDraftTouched();
     selectedExtractPresetId = null;
@@ -13694,6 +14202,7 @@
       showNotice(tr("gui.create.review.sfx_unavailable", "This device cannot recreate this self-extractor. Your current settings were kept."));
       return false;
     }
+    dismissCreatePreparation();
     markCreatePresetDraftTouched();
     selectedCreatePresetId = null;
     createPresetDraftName = "";
@@ -13868,6 +14377,7 @@
     }
     pendingArchiveTaskReview = null;
     if (archiveOpenError(prompt.path)?.key === "error.corrupt_archive") {
+      dismissRecoveryPreparation();
       recoverySourceMode = "selected";
       recoverySourceOverride = prompt.path;
       recoveryPar2Override = null;
@@ -14077,6 +14587,8 @@
 
   function recoveryWorkspaceView(): RecoveryWorkspaceView {
     const source = recoverySourcePath();
+    const preparationMessage = recoveryOutputStatus();
+    const actionBusyReason = preparationMessage || recoveryPickerBusyReason();
     const protectSourceDisabledReason = recoveryProtectSourceDisabledReason();
     const protectDisabledReason = recoveryProtectDisabledReason();
     const resultAvailable = recoveryResultAvailable();
@@ -14123,7 +14635,8 @@
       usesDefaultPar2: source !== null && recoveryPar2Override === null,
       pickerBusy: recoveryPickerStatus !== "idle",
       pickerBusyReason: recoveryPickerBusyReason(),
-      testDisabledReason: recoveryTestDisabledReason(),
+      preparationMessage,
+      testDisabledReason: actionBusyReason || recoveryTestDisabledReason(),
       sourceName: recoverySourceName() ?? tr("gui.recovery.no_archive_selected", "No archive selected"),
       requestedRedundancy: protectSourceDisabledReason
         ? notAvailable
@@ -14156,15 +14669,13 @@
       beyondCapacity: recoveryBeyondCapacity(),
       formatWorkflowTitle,
       formatWorkflowBody,
-      protectDisabledReason,
-      verifyDisabledReason: recoveryVerifyDisabledReason(),
-      repairDisabledReason: recoveryRepairPar2DisabledReason(),
-      zipDisabledReason: recoveryZipDisabledReason(),
-      sqzRepairDisabledReason: recoverySqzRepairDisabledReason(),
-      sqzExportDisabledReason: outputAuthorizationPending || recoverySubmissionPending
-        ? tr("gui.output.checking_existing", "Checking output…")
-        : recoverySqzExportDisabledReason(),
-      bestEffortDisabledReason: recoveryBestEffortDisabledReason(),
+      protectDisabledReason: actionBusyReason || protectDisabledReason,
+      verifyDisabledReason: actionBusyReason || recoveryVerifyDisabledReason(),
+      repairDisabledReason: actionBusyReason || recoveryRepairPar2DisabledReason(),
+      zipDisabledReason: actionBusyReason || recoveryZipDisabledReason(),
+      sqzRepairDisabledReason: actionBusyReason || recoverySqzRepairDisabledReason(),
+      sqzExportDisabledReason: actionBusyReason || recoverySqzExportDisabledReason(),
+      bestEffortDisabledReason: actionBusyReason || recoveryBestEffortDisabledReason(),
       verifyRecommended: recoveryVerifyRecommended(),
       repairRecommended: recoveryRepairRecommended(),
     };
@@ -14179,10 +14690,10 @@
     setRedundancy: setRecoveryRedundancy,
     protect: () => void submitProtectJob(),
     verify: () => void submitVerifyRecoveryJob(),
-    repair: () => void submitRepairRecoveryJob(),
-    repairZip: () => void submitRepairZipJob(),
-    repairSqz: () => void submitRepairSqzJob(),
-    exportSqz: () => void submitExportSqzJob(),
+    repair: () => void submitRecoveryOutputJob("repair_recovery"),
+    repairZip: () => void submitRecoveryOutputJob("repair_zip"),
+    repairSqz: () => void submitRecoveryOutputJob("repair_sqz"),
+    exportSqz: () => void submitRecoveryOutputJob("export_sqz"),
     extractReadable: () => void submitBestEffortExtractJob(),
   };
 
@@ -14371,6 +14882,16 @@
     },
   };
 
+  function clearChecksumCopyState(): void {
+    checksumCopyRequest = null;
+    if (checksumCopyFeedbackTimer) clearTimeout(checksumCopyFeedbackTimer);
+    checksumCopyFeedbackTimer = null;
+    checksumCopyFeedbackKind = null;
+    checksumCopyFeedbackTaskId = null;
+    checksumCopyFeedbackMessage = null;
+    checksumCopyFeedbackTone = null;
+  }
+
   function showChecksumCopyFeedback(
     kind: "checksum" | "checksum_check" | "task",
     taskId: number | null,
@@ -14382,13 +14903,7 @@
     checksumCopyFeedbackMessage = message;
     checksumCopyFeedbackTone = tone;
     if (checksumCopyFeedbackTimer) clearTimeout(checksumCopyFeedbackTimer);
-    checksumCopyFeedbackTimer = setTimeout(() => {
-      checksumCopyFeedbackKind = null;
-      checksumCopyFeedbackTaskId = null;
-      checksumCopyFeedbackMessage = null;
-      checksumCopyFeedbackTone = null;
-      checksumCopyFeedbackTimer = null;
-    }, 2600);
+    checksumCopyFeedbackTimer = setTimeout(clearChecksumCopyState, 2600);
   }
 
   function checksumCopyFeedbackFor(kind: "checksum" | "checksum_check"): string | null {
@@ -14502,7 +15017,7 @@
   function classicCommandDisabled(label: string): boolean {
     const action = classicCommandAction(label);
     if (action) return !appActionEnabled(action);
-    if (label === "Protect") return Boolean(currentArchive && archiveMutationDisabledReason());
+    if (label === "Protect") return Boolean(currentArchive && archiveSourceMutationDisabledReason());
     if (label === "Checksum" || label === "Duplicates") return false;
     return !hasArchiveOpen();
   }
@@ -14532,10 +15047,11 @@
       }
       return openArchiveFirstLabel();
     }
-    if (currentArchive.read_only) return archiveMutationDisabledReason();
-    if (label === "Rename") return tr("gui.precondition.select_one_before_rename", "Select exactly one file or folder before renaming");
-    if (label === "Move") return tr("gui.precondition.select_entries_before_move", "Select entries before moving");
-    if (label === "Delete") return tr("gui.precondition.select_entries_before_delete", "Select entries before deleting");
+    if (label === "Protect") return archiveSourceMutationDisabledReason();
+    if (label === "Rename") return renameSelectedDisabledReason();
+    if (label === "Move") return moveSelectedDisabledReason();
+    if (label === "Delete") return deleteSelectedDisabledReason();
+    if (label === "Add" || label === "New Folder") return archiveMutationDisabledReason() || archiveSelectionBusyReason();
     return "";
   }
 
@@ -14888,6 +15404,7 @@
 
       <div
         class="modern-shell"
+        class:browse-shell={screen === "browse"}
         class:settings-shell={isSettingsScreen()}
         class:no-archive-shell={screen === "browse" && !currentArchive}
         class:no-inspector-shell={screen === "recent" || screen === "convert" || screen === "create" || screen === "extract" || screen === "duplicates" || screen === "batch" || screen === "nestedExtract" || screen === "updateReview" || screen === "password"}
@@ -15042,7 +15559,16 @@
                   <h1>{tr("gui.archive.info_title", "Archive information")}</h1>
                   <p>{tr("gui.archive.info_subtitle", "Archive, selection, destination, encoding, and volume details.")}</p>
                 </div>
-                <button class="sheet-action" onclick={() => setScreen("browse")}><Icon name="archive" size={17} />{tr("gui.nav.back_to_archive", "Back to archive")}</button>
+                <div class="sheet-action-row">
+                  <button class="sheet-action" onclick={() => setScreen("browse")}><Icon name="archive" size={17} />{tr("gui.nav.back_to_archive", "Back to archive")}</button>
+                  <button
+                    class="sheet-action"
+                    disabled={!appActionEnabled("test_archive")}
+                    title={testArchiveDisabledReason()}
+                    aria-label={labelWithDisabledReason(tr("gui.action.test_archive", "Test archive"), testArchiveDisabledReason())}
+                    onclick={() => void runAppAction("test_archive")}
+                  ><Icon name="check-circle" size={17} />{tr("gui.action.test_archive", "Test archive")}</button>
+                </div>
               </div>
 
               <div class="settings-layout">
@@ -15319,6 +15845,12 @@
               </div>
               <div class="classic-button-row">
                 <button onclick={() => setScreen("browse")}>{tr("gui.nav.back_to_archive", "Back to archive")}</button>
+                <button
+                  disabled={!appActionEnabled("test_archive")}
+                  title={testArchiveDisabledReason()}
+                  aria-label={labelWithDisabledReason(tr("gui.action.test_archive", "Test archive"), testArchiveDisabledReason())}
+                  onclick={() => void runAppAction("test_archive")}
+                >{tr("gui.action.test_archive", "Test archive")}</button>
                 <button
                   class="classic-primary"
                   disabled={Boolean(extractArchiveRequiredReason())}

@@ -13,7 +13,7 @@ if [[ "$APP" != /* ]]; then
   APP="$ROOT/$APP"
 fi
 EXE="$APP/Contents/MacOS/squallz-gui"
-SQZ_HELPER="$APP/Contents/MacOS/sqz"
+SQZ_HELPER="$APP/Contents/MacOS/sqz-sidecar"
 WORK="$ROOT/target/squallz-macos-packaged-integration-cleanup-smoke"
 HOME_DIR="$WORK/home"
 TRACE="$WORK/trace.jsonl"
@@ -31,7 +31,7 @@ if [[ ! -x "$EXE" ]]; then
   fail "missing app executable: $EXE; run 'make app-macos' first"
 fi
 if [[ ! -x "$SQZ_HELPER" ]]; then
-  fail "missing bundled sqz helper: $SQZ_HELPER"
+  fail "missing bundled CLI helper: $SQZ_HELPER"
 fi
 if pgrep -x squallz-gui >/dev/null; then
   fail "squallz-gui is already running; close it before running packaged integration cleanup smoke"
@@ -169,7 +169,7 @@ behind in the isolated user profile.
 ## Inputs
 
 - App: \`$APP\`
-- Bundled sqz: \`$SQZ_HELPER\`
+- Bundled CLI helper: \`$SQZ_HELPER\`
 - Isolated HOME: \`$HOME_DIR\`
 - Trace: \`$TRACE\`
 

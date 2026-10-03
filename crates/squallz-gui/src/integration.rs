@@ -193,15 +193,12 @@ resolve_sqz() {
   local -a candidates
   candidates=()
   if [[ -n "${SQUALLZ_INSTALLED_APP_BUNDLE:-}" ]]; then
-    candidates+=("${SQUALLZ_INSTALLED_APP_BUNDLE}/Contents/MacOS/sqz")
-    candidates+=("${SQUALLZ_INSTALLED_APP_BUNDLE}/Contents/Resources/bin/sqz")
+    candidates+=("${SQUALLZ_INSTALLED_APP_BUNDLE}/Contents/MacOS/sqz-sidecar")
   fi
   if [[ -n "${SQUALLZ_APP_BUNDLE:-}" ]]; then
-    candidates+=("${SQUALLZ_APP_BUNDLE}/Contents/MacOS/sqz")
-    candidates+=("${SQUALLZ_APP_BUNDLE}/Contents/Resources/bin/sqz")
+    candidates+=("${SQUALLZ_APP_BUNDLE}/Contents/MacOS/sqz-sidecar")
   fi
-  candidates+=("/Applications/Squallz.app/Contents/MacOS/sqz")
-  candidates+=("/Applications/Squallz.app/Contents/Resources/bin/sqz")
+  candidates+=("/Applications/Squallz.app/Contents/MacOS/sqz-sidecar")
   candidates+=("$HOME/.cargo/bin/sqz")
 
   for candidate in "${candidates[@]}"; do
@@ -695,12 +692,10 @@ function Resolve-Sqz {
   }
   $Candidates = @()
   if ($env:LOCALAPPDATA) {
-    $Candidates += Join-Path $env:LOCALAPPDATA 'Programs\Squallz\resources\bin\sqz.exe'
-    $Candidates += Join-Path $env:LOCALAPPDATA 'Programs\Squallz\sqz.exe'
+    $Candidates += Join-Path $env:LOCALAPPDATA 'Programs\Squallz\sqz-sidecar.exe'
   }
   if ($env:ProgramFiles) {
-    $Candidates += Join-Path $env:ProgramFiles 'Squallz\resources\bin\sqz.exe'
-    $Candidates += Join-Path $env:ProgramFiles 'Squallz\sqz.exe'
+    $Candidates += Join-Path $env:ProgramFiles 'Squallz\sqz-sidecar.exe'
   }
   foreach ($Candidate in $Candidates) {
     if ($Candidate -and (Test-Path -LiteralPath $Candidate -PathType Leaf)) { return $Candidate }
@@ -3174,8 +3169,7 @@ mod tests {
             assert!(script.is_file());
             let body = fs::read_to_string(script).unwrap();
             assert!(body.contains("resolve_sqz"));
-            assert!(body.contains("Contents/MacOS/sqz"));
-            assert!(body.contains("Contents/Resources/bin/sqz"));
+            assert!(body.contains("Contents/MacOS/sqz-sidecar"));
             assert!(body.contains("run_gui_task"));
             assert!(body.contains("--squallz-action"));
             assert!(body.contains("$SQUALLZ_TASK_WINDOW_ACTION_ARG"));
@@ -3286,11 +3280,7 @@ mod tests {
             ],
         );
         let fake_app = home.join("Fake Squallz.app");
-        let bundled_sqz = fake_app
-            .join("Contents")
-            .join("Resources")
-            .join("bin")
-            .join("sqz");
+        let bundled_sqz = fake_app.join("Contents").join("MacOS").join("sqz-sidecar");
         write_fake_sqz(&bundled_sqz);
         run_action_script_from_bundle(
             &script_for("test-archive"),
@@ -4565,6 +4555,7 @@ mod windows_explorer_tests {
             assert!(script_text.contains("Start-Process"));
             assert!(script_text.contains("Resolve-Sqz"));
             assert!(script_text.contains("SQUALLZ_CLI"));
+            assert!(script_text.contains("Programs\\Squallz\\sqz-sidecar.exe"));
             assert_powershell_syntax(script);
             assert!(manifest_text.contains(&action.name));
             assert!(manifest_text.contains(&path_fragment(script)));

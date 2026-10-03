@@ -85,7 +85,13 @@ fn sevenz_roundtrip_list_test_extract() {
     assert_eq!(script.unix_mode.map(|m| m & 0o7777), Some(0o755));
 
     let report = engine
-        .test_summary(&archive, &OpenOptions::default(), &NoProgress, &ctl)
+        .test_summary(
+            &archive,
+            &OpenOptions::default(),
+            &squallz_format_api::SafetyLimits::default(),
+            &NoProgress,
+            &ctl,
+        )
         .unwrap();
     assert!(report.is_ok(), "problems: {:?}", report.problems);
 
@@ -233,7 +239,13 @@ fn sevenz_encrypted_content_requires_password() {
     }));
 
     let error = engine
-        .test_summary(&archive, &wrong, &NoProgress, &ctl)
+        .test_summary(
+            &archive,
+            &wrong,
+            &squallz_format_api::SafetyLimits::default(),
+            &NoProgress,
+            &ctl,
+        )
         .unwrap_err();
     assert!(matches!(error, FormatError::WrongPassword), "{error:?}");
 

@@ -288,7 +288,9 @@ fn cli_surface_contract_help_tokens_are_stable() {
                 "--mkdir",
                 "--delete",
                 "--rename",
+                "--rename-to",
                 "--move",
+                "--move-to",
                 "--profile",
                 "--exclude",
                 "--content-policy",
@@ -621,7 +623,9 @@ fn output_style_modern_is_opt_in_and_keeps_json_stable() {
             "--mkdir",
             "docs/",
             "--move",
-            "project/sub/b.txt=docs/b.txt",
+            "project/sub/b.txt",
+            "--move-to",
+            "docs/b.txt",
         ])
         .arg(&archive));
     assert!(out.status.success(), "stderr: {}", stderr(&out));
@@ -894,14 +898,6 @@ fn output_style_modern_is_opt_in_and_keeps_json_stable() {
         text.contains("scorecard + decision tables"),
         "stdout: {text}"
     );
-    assert!(
-        text.contains("operation cockpit")
-            && text.contains("snapshot dashboard")
-            && text.contains("signal matrix")
-            && text.contains("transfer matrix")
-            && text.contains("action queue"),
-        "stdout: {text}"
-    );
     assert!(text.contains("Modern dashboard"), "stdout: {text}");
     assert!(text.contains("Support map"), "stdout: {text}");
     assert!(text.contains("Format coverage"), "stdout: {text}");
@@ -909,21 +905,8 @@ fn output_style_modern_is_opt_in_and_keeps_json_stable() {
     assert!(text.contains("Action selector"), "stdout: {text}");
     assert!(text.contains("Modern surfaces"), "stdout: {text}");
     assert!(text.contains("Best form"), "stdout: {text}");
-    assert!(text.contains("action queue"), "stdout: {text}");
     assert!(text.contains("Command cheatsheet"), "stdout: {text}");
-    assert!(
-        text.contains("phase rail") && text.contains("speed/ETA/current"),
-        "stdout: {text}"
-    );
-    assert!(
-        text.contains("next step") && text.contains("current object"),
-        "stdout: {text}"
-    );
-    assert!(text.contains("Progress HUD"), "stdout: {text}");
-    assert!(text.contains("snapshot dashboard table"), "stdout: {text}");
-    assert!(text.contains("speed"), "stdout: {text}");
     assert!(text.contains("Modern style guide"), "stdout: {text}");
-    assert!(text.contains("operation cockpit"), "stdout: {text}");
     assert!(text.contains("--color always"), "stdout: {text}");
     assert!(text.contains("Palette gallery"), "stdout: {text}");
     for palette in ["squallz", "ocean", "jade", "sunset", "violet", "mono"] {
@@ -1984,6 +1967,28 @@ fn batch_json_script_runs_workbench_archive_jobs() {
     let repaired_test = stdout_json(&run(sqz().arg("test").arg(&repaired_sqz).arg("--json")));
     assert_eq!(repaired_test["ok"], true);
 
+    let rebuilt_before = std::fs::read(&rebuilt).unwrap();
+    let repaired_before = std::fs::read(&repaired_sqz).unwrap();
+    let repairs = serde_json::json!({
+        "jobs": [
+            { "kind": "repair_zip", "archive": "source.zip", "output": "rebuilt.zip" },
+            { "kind": "repair_sqz", "archive": "container.sqz", "output": "repaired.sqz" }
+        ]
+    });
+    std::fs::write(&script, serde_json::to_string(&repairs).unwrap()).unwrap();
+    let out = run(sqz()
+        .arg("batch")
+        .arg(&script)
+        .args(["--keep-going", "--json"]));
+    assert_eq!(out.status.code(), Some(7), "stderr: {}", stderr(&out));
+    let report = stdout_json(&out);
+    assert_eq!(report["failed"], 2);
+    for job in report["jobs"].as_array().unwrap() {
+        assert_eq!(job["error"]["kind"], "output_exists");
+    }
+    assert_eq!(std::fs::read(&rebuilt).unwrap(), rebuilt_before);
+    assert_eq!(std::fs::read(&repaired_sqz).unwrap(), repaired_before);
+
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -2037,6 +2042,182 @@ fn batch_keep_going_reports_failures_without_stopping() {
     );
 
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn archive_test_honors_safety_overrides_and_an_explicit_retry() {
+    let dir = temp_dir("test-safety-limits");
+    let root = sample_tree(&dir);
+    let archive = dir.join("source.zip");
+    let created = run(sqz().arg("compress").arg(&root).arg("-o").arg(&archive));
+    assert!(created.status.success(), "stderr: {}", stderr(&created));
+    let original = std::fs::read(&archive).unwrap();
+
+    for (flag, value) in [("--max-output-bytes", "1"), ("--max-entries", "1")] {
+        let out = run(sqz()
+            .arg("test")
+            .arg(&archive)
+            .arg(flag)
+            .arg(value)
+            .arg("--json"));
+        assert_eq!(out.status.code(), Some(6), "{flag}: {}", stdout(&out));
+        let report = stdout_json(&out);
+        assert_eq!(report["ok"], false);
+        assert_eq!(report["error"]["kind"], "resource_limit_exceeded");
+        assert!(stderr(&out).trim().is_empty());
+        assert_eq!(std::fs::read(&archive).unwrap(), original);
+    }
+    let defaults = squallz_core::api::SafetyLimits::default();
+    for (lang, style, quiet, flag) in [
+        ("en-US", "classic", false, "--max-output-bytes"),
+        ("en-US", "modern", true, "--max-entries"),
+        ("zh-CN", "classic", true, "--max-entries"),
+        ("zh-CN", "modern", false, "--max-output-bytes"),
+    ] {
+        let mut command = sqz();
+        command.args(["--lang", lang, "--style", style, "--color", "never"]);
+        if quiet {
+            command.arg("--quiet");
+        }
+        let out = run(command
+            .arg("test")
+            .arg(&archive)
+            .args(["--max-compression-ratio", "4096"])
+            .arg(flag)
+            .arg("1"));
+        assert_eq!(out.status.code(), Some(6), "{lang}/{style}/{flag}");
+        assert!(stdout(&out).trim().is_empty());
+        let text = stderr(&out);
+        let expected_bytes = if flag == "--max-output-bytes" {
+            1
+        } else {
+            defaults.max_output_bytes
+        };
+        let expected_entries = if flag == "--max-entries" {
+            1
+        } else {
+            defaults.max_entries
+        };
+        let (limits_label, trusted_hint, retry_hint, error_prefix) = if lang == "en-US" {
+            (
+                "Test limits:",
+                "trusted sources",
+                "rerun sqz test",
+                "Error: Resource limit exceeded:",
+            )
+        } else {
+            (
+                "测试限制：",
+                "来源可信",
+                "重新运行 sqz test",
+                "错误：超出资源限制：",
+            )
+        };
+        for expected in [
+            limits_label.to_owned(),
+            "sqz test --help".to_owned(),
+            trusted_hint.to_owned(),
+            retry_hint.to_owned(),
+        ] {
+            assert!(text.contains(&expected), "missing {expected}: {text}");
+        }
+        for option in [
+            format!("--max-output-bytes={expected_bytes}"),
+            format!("--max-entries={expected_entries}"),
+            "--max-compression-ratio=4096".to_owned(),
+        ] {
+            assert!(
+                text.lines()
+                    .any(|line| line.contains(&option) && line.matches("--max-").count() == 1),
+                "limit must appear on its own line: {text}"
+            );
+        }
+        assert!(!text.contains('�'), "invalid terminal control text: {text}");
+        assert!(
+            text.lines().last().unwrap().contains(error_prefix),
+            "original error must remain visible: {text}"
+        );
+        assert!(
+            !text.contains("cli.test."),
+            "untranslated test hint: {text}"
+        );
+        assert_eq!(std::fs::read(&archive).unwrap(), original);
+    }
+    let retry = run(sqz()
+        .args([
+            "--lang", "zh-CN", "--style", "modern", "--color", "never", "test",
+        ])
+        .arg(&archive)
+        .args([
+            "--max-output-bytes",
+            "1m",
+            "--max-entries",
+            "10",
+            "--max-compression-ratio",
+            "4096",
+        ]));
+    assert!(retry.status.success(), "stderr: {}", stderr(&retry));
+    assert!(stdout(&retry).contains("测试通过"));
+    assert!(stderr(&retry).trim().is_empty());
+    assert_eq!(std::fs::read(&archive).unwrap(), original);
+    let retry = run(sqz().arg("test").arg(&archive).args([
+        "--max-output-bytes",
+        "1m",
+        "--max-entries",
+        "10",
+        "--max-compression-ratio",
+        "4096",
+        "--json",
+    ]));
+    assert!(retry.status.success(), "stderr: {}", stderr(&retry));
+    assert_eq!(stdout_json(&retry)["ok"], true);
+    assert_eq!(std::fs::read(&archive).unwrap(), original);
+
+    for flag in [
+        "--max-output-bytes",
+        "--max-entries",
+        "--max-compression-ratio",
+    ] {
+        let out = run(sqz().arg("test").arg(&archive).arg(flag).arg("0"));
+        assert!(!out.status.success(), "{flag} must reject zero");
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn batch_test_honors_safety_limits_and_continues_with_an_explicit_retry() {
+    let dir = temp_dir("batch-test-safety-limits");
+    let root = sample_tree(&dir);
+    let archive = dir.join("source.zip");
+    let script = dir.join("batch.json");
+    let created = run(sqz().arg("compress").arg(&root).arg("-o").arg(&archive));
+    assert!(created.status.success(), "stderr: {}", stderr(&created));
+    let original = std::fs::read(&archive).unwrap();
+    let manifest = serde_json::json!({
+        "jobs": [
+            {"kind": "test", "archive": "source.zip", "max_output_bytes": 1},
+            {"kind": "test", "archive": "source.zip", "max_entries": 1},
+            {"kind": "test", "archive": "source.zip", "max_output_bytes": 1048576, "max_entries": 10, "max_compression_ratio": 4096}
+        ]
+    });
+    std::fs::write(&script, serde_json::to_string(&manifest).unwrap()).unwrap();
+    let out = run(sqz()
+        .arg("batch")
+        .arg(&script)
+        .args(["--keep-going", "--json"]));
+    assert_eq!(out.status.code(), Some(6), "stdout: {}", stdout(&out));
+    assert!(stderr(&out).trim().is_empty());
+    let report = stdout_json(&out);
+    assert_eq!(report["failed"], 2);
+    for index in [0, 1] {
+        assert_eq!(
+            report["jobs"][index]["error_kind"],
+            "resource_limit_exceeded"
+        );
+    }
+    assert_eq!(report["jobs"][2]["ok"], true);
+    assert_eq!(std::fs::read(&archive).unwrap(), original);
+    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
@@ -4503,6 +4684,23 @@ fn repair_zip_rebuilds_missing_central_directory_through_cli() {
         "sample must not contain a central directory"
     );
 
+    std::fs::write(&repaired, b"keep unrelated output").unwrap();
+    let out = run(sqz()
+        .args(["--lang", "en-US", "repair"])
+        .arg(&archive)
+        .arg("-o")
+        .arg(&repaired)
+        .arg("--json"));
+    assert_json_error(
+        &out,
+        7,
+        "output_exists",
+        "output location is already occupied",
+    );
+    assert_eq!(std::fs::read(&repaired).unwrap(), b"keep unrelated output");
+    assert_eq!(std::fs::read(&archive).unwrap(), original);
+    std::fs::remove_file(&repaired).unwrap();
+
     let out = run(sqz()
         .args(["--lang", "en-US", "repair"])
         .arg(&archive)
@@ -4532,6 +4730,21 @@ fn repair_zip_rebuilds_missing_central_directory_through_cli() {
         "rebuilt ZIP must contain an end-of-central-directory record"
     );
 
+    let out = run(sqz()
+        .args(["--lang", "en-US", "repair"])
+        .arg(&archive)
+        .arg("-o")
+        .arg(&repaired)
+        .arg("--json"));
+    assert_json_error(
+        &out,
+        7,
+        "output_exists",
+        "output location is already occupied",
+    );
+    assert_eq!(std::fs::read(&repaired).unwrap(), rebuilt);
+    assert_eq!(std::fs::read(&archive).unwrap(), original);
+
     let out = run(sqz().arg("test").arg(&repaired).arg("--json"));
     assert!(out.status.success(), "test failed: {}", stderr(&out));
     let report: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("valid JSON");
@@ -4554,6 +4767,26 @@ fn repair_zip_rebuilds_missing_central_directory_through_cli() {
         "stderr: {}",
         stderr(&out)
     );
+
+    let out = run(sqz()
+        .arg("repair")
+        .arg(&archive)
+        .arg("-o")
+        .arg(&archive)
+        .arg("--json"));
+    assert!(
+        out.status.success(),
+        "in-place repair failed: {}",
+        stderr(&out)
+    );
+    assert_eq!(stdout_json(&out)["in_place"], true);
+    let out = run(sqz().arg("test").arg(&archive).arg("--json"));
+    assert!(
+        out.status.success(),
+        "in-place test failed: {}",
+        stderr(&out)
+    );
+    assert_eq!(stdout_json(&out)["ok"], true);
 
     std::fs::remove_dir_all(&dir).unwrap();
 }
@@ -5471,13 +5704,6 @@ fn info_modern_groups_formats_and_uses_capability_matrix() {
     assert!(text.contains("Runtime inventory"), "{text}");
     assert!(text.contains("Command forms"), "{text}");
     assert!(text.contains("scorecard + decision tables"), "{text}");
-    assert!(
-        text.contains("operation cockpit")
-            && text.contains("signal matrix")
-            && text.contains("transfer matrix")
-            && text.contains("action queue"),
-        "{text}"
-    );
     assert!(text.contains("Modern dashboard"), "{text}");
     assert!(text.contains("Support map"), "{text}");
     assert!(text.contains("Format coverage"), "{text}");
@@ -5486,39 +5712,19 @@ fn info_modern_groups_formats_and_uses_capability_matrix() {
     assert!(text.contains("Modern surfaces"), "{text}");
     assert!(text.contains("Best form"), "{text}");
     assert!(text.contains("scorecard + support map"), "{text}");
-    assert!(text.contains("action queue"), "{text}");
-    assert!(
-        text.contains("phase rail") && text.contains("speed/ETA/current"),
-        "{text}"
-    );
     assert!(text.contains("Modern output"), "{text}");
     assert!(text.contains("Modern style guide"), "{text}");
-    assert!(text.contains("operation cockpit"), "{text}");
     assert!(text.contains("--color always"), "{text}");
     assert!(text.contains("Best for"), "{text}");
     assert!(text.contains("Signal"), "{text}");
     assert!(text.contains("Palette gallery"), "{text}");
     assert!(text.contains("Look"), "{text}");
     assert!(text.contains("Command"), "{text}");
-    assert!(
-        text.contains("next step") && text.contains("current object"),
-        "{text}"
-    );
-    assert!(text.contains("speed"), "{text}");
     for palette in ["squallz", "ocean", "jade", "sunset", "violet", "mono"] {
         assert!(text.contains(&format!("--palette {palette}")), "{text}");
     }
     assert!(text.contains("Color mode"), "{text}");
     assert!(text.contains("Palette"), "{text}");
-    assert!(text.contains("Progress HUD"), "{text}");
-    assert!(
-        text.contains("operation cockpit")
-            && text.contains("signal matrix")
-            && text.contains("transfer matrix")
-            && text.contains("action queue")
-            && text.contains("speed"),
-        "{text}"
-    );
     assert!(text.contains("primary / secondary"), "{text}");
     assert!(text.contains("Lane"), "{text}");
     assert!(text.contains("Mode"), "{text}");
@@ -7663,6 +7869,26 @@ fn repair_sqz_rewrites_recovered_container() {
     assert_eq!(report["recovery"]["repair_possible"], true);
 
     let repaired = dir.join("repaired.sqz");
+    let original = std::fs::read(&damaged).unwrap();
+    std::fs::write(&repaired, b"keep unrelated SQZ output").unwrap();
+    let out = run(sqz()
+        .args(["--lang", "en-US", "repair"])
+        .arg(&damaged)
+        .arg("-o")
+        .arg(&repaired)
+        .arg("--json"));
+    assert_json_error(
+        &out,
+        7,
+        "output_exists",
+        "output location is already occupied",
+    );
+    assert_eq!(
+        std::fs::read(&repaired).unwrap(),
+        b"keep unrelated SQZ output"
+    );
+    assert_eq!(std::fs::read(&damaged).unwrap(), original);
+    std::fs::remove_file(&repaired).unwrap();
     let out = run(sqz()
         .arg("repair")
         .arg(&damaged)
@@ -7682,6 +7908,22 @@ fn repair_sqz_rewrites_recovered_container() {
     assert_eq!(report["recovery"]["repair_possible"], true);
     assert_eq!(report["source"]["recovery"], report["recovery"]);
     assert!(repaired.is_file(), "repaired output missing");
+
+    let repaired_before = std::fs::read(&repaired).unwrap();
+    let out = run(sqz()
+        .args(["--lang", "en-US", "repair"])
+        .arg(&damaged)
+        .arg("-o")
+        .arg(&repaired)
+        .arg("--json"));
+    assert_json_error(
+        &out,
+        7,
+        "output_exists",
+        "output location is already occupied",
+    );
+    assert_eq!(std::fs::read(&repaired).unwrap(), repaired_before);
+    assert_eq!(std::fs::read(&damaged).unwrap(), original);
 
     let out = run(sqz().arg("test").arg(&repaired).arg("--json"));
     assert!(
@@ -7779,8 +8021,13 @@ fn update_add_delete_rename_through_the_cli() {
         .args(["--mkdir", "empty/reports/"])
         .args(["--delete", "*.tmp"])
         .args(["--exclude", "node_modules", "--exclude", "*.tmp"])
-        .args(["--rename", "project/a.txt=project/renamed.txt"])
-        .args(["--move", "project/sub/b.txt=moved/b.txt"])
+        .args([
+            "--rename",
+            "project/a.txt",
+            "--rename-to",
+            "project/renamed.txt",
+        ])
+        .args(["--move", "project/sub/b.txt", "--move-to", "moved/b.txt"])
         .arg("--json"));
     assert!(out.status.success(), "stderr: {}", stderr(&out));
     let report: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("valid JSON");
@@ -7819,6 +8066,183 @@ fn update_add_delete_rename_through_the_cli() {
     let out = run(sqz().arg("update").arg(&archive));
     assert!(!out.status.success());
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn update_path_pairs_preserve_literal_names_and_reject_incomplete_arguments() {
+    let dir = temp_dir("update-path-pairs");
+    let root = dir.join("Samples");
+    std::fs::create_dir(&root).unwrap();
+    let entries = [
+        ("a", "rename bystander"),
+        ("a=b name.txt", "rename selected"),
+        ("move", "move bystander"),
+        ("move=x y.txt", "move selected"),
+        ("plain.txt", "second rename"),
+        ("second move.txt", "second move"),
+    ];
+    for (name, payload) in entries {
+        std::fs::write(root.join(name), payload).unwrap();
+    }
+    for (name, payload) in [
+        ("-rename=a name.txt", "leading rename selected"),
+        ("-move=b name.txt", "leading move selected"),
+    ] {
+        std::fs::write(dir.join(name), payload).unwrap();
+    }
+    let archive = dir.join("paths.zip");
+    let created = run(sqz()
+        .arg("compress")
+        .arg(&root)
+        .arg(dir.join("-rename=a name.txt"))
+        .arg(dir.join("-move=b name.txt"))
+        .arg("-o")
+        .arg(&archive));
+    assert!(created.status.success(), "{}", stderr(&created));
+    let updated = run(sqz().arg("update").arg(&archive).args([
+        "--rename",
+        "Samples/a=b name.txt",
+        "--move",
+        "Samples/move=x y.txt",
+        "--rename",
+        "Samples/plain.txt",
+        "--move",
+        "Samples/second move.txt",
+        "--rename=-rename=a name.txt",
+        "--move=-move=b name.txt",
+        "--move-to",
+        "Folder name/moved=x y.txt",
+        "--rename-to",
+        "Samples/renamed=c name.txt",
+        "--move-to",
+        "Folder name/second=move.txt",
+        "--rename-to",
+        "Samples/ordinary=name space.txt",
+        "--rename-to=-renamed=c name.txt",
+        "--move-to=-moved=d name.txt",
+        "--json",
+    ]));
+    assert!(updated.status.success(), "{}", stderr(&updated));
+    assert_eq!(stdout_json(&updated)["operations"], 6);
+    let paths = listed_paths(&archive);
+    assert_eq!(paths.len(), 9, "{paths:?}");
+    assert!(paths.iter().any(|path| path == "Samples/"));
+    for path in [
+        "Samples/a=b name.txt",
+        "Samples/move=x y.txt",
+        "Samples/plain.txt",
+        "Samples/second move.txt",
+        "-rename=a name.txt",
+        "-move=b name.txt",
+    ] {
+        assert!(
+            !paths.iter().any(|actual| actual == path),
+            "{path}: {paths:?}"
+        );
+    }
+    let output = dir.join("extracted");
+    let extracted = run(sqz()
+        .arg("extract")
+        .arg(&archive)
+        .arg("--dest")
+        .arg(&output)
+        .arg("--json"));
+    assert!(extracted.status.success(), "{}", stderr(&extracted));
+    for (path, payload) in [
+        ("Samples/a", "rename bystander"),
+        ("Samples/move", "move bystander"),
+        ("Samples/renamed=c name.txt", "rename selected"),
+        ("Samples/ordinary=name space.txt", "second rename"),
+        ("Folder name/moved=x y.txt", "move selected"),
+        ("Folder name/second=move.txt", "second move"),
+        ("-renamed=c name.txt", "leading rename selected"),
+        ("-moved=d name.txt", "leading move selected"),
+    ] {
+        assert!(
+            paths.iter().any(|actual| actual == path),
+            "{path}: {paths:?}"
+        );
+        assert_eq!(
+            std::fs::read(output.join(path)).unwrap(),
+            payload.as_bytes()
+        );
+    }
+    let before = std::fs::read(&archive).unwrap();
+    for (option, target_option, other_option, other_target_option) in [
+        ("--rename", "--rename-to", "--move", "--move-to"),
+        ("--move", "--move-to", "--rename", "--rename-to"),
+    ] {
+        for values in [
+            vec![option],
+            vec![option, "Samples/a"],
+            vec![target_option, "Samples/target.txt"],
+            vec![option, "Samples/a", "--json"],
+            vec![option, "--json", target_option, "Samples/target.txt"],
+            vec![option, "Samples/a", target_option, "--json"],
+            vec![option, "", target_option, "Samples/target.txt", "--json"],
+            vec![option, "Samples/a", target_option, "", "--json"],
+            vec![
+                option,
+                "Samples/a",
+                target_option,
+                "Samples/target.txt",
+                "extra.txt",
+                "--json",
+            ],
+            vec![
+                option,
+                "Samples/a",
+                option,
+                "Samples/move",
+                target_option,
+                "Samples/target.txt",
+                "--json",
+            ],
+            vec![
+                option,
+                "Samples/a",
+                target_option,
+                "Samples/target.txt",
+                target_option,
+                "Samples/second-target.txt",
+                "--json",
+            ],
+            vec![
+                other_option,
+                "Samples/move",
+                other_target_option,
+                "Samples/other-target.txt",
+                option,
+                "Samples/a",
+                "--json",
+            ],
+            vec![
+                other_option,
+                "Samples/move",
+                other_target_option,
+                "Samples/other-target.txt",
+                option,
+                "Samples/a",
+                option,
+                "Samples/move",
+                target_option,
+                "Samples/target.txt",
+                "--json",
+            ],
+        ] {
+            let invalid = run(sqz().arg("update").arg(&archive).args(&values));
+            assert_eq!(
+                invalid.status.code(),
+                Some(2),
+                "{values:?}: {}{}",
+                stdout(&invalid),
+                stderr(&invalid)
+            );
+            assert!(!stderr(&invalid).trim().is_empty());
+            assert_eq!(std::fs::read(&archive).unwrap(), before, "{values:?}");
+        }
+    }
+    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
@@ -7922,6 +8346,10 @@ fn update_literal_deletion_rejects_missing_paths_atomically() {
         assert!(output.status.success());
         assert!(stdout(&output).contains("--delete-entry"));
         assert!(stdout(&output).contains("--encoding"));
+        assert!(stdout(&output).contains("--rename <FROM>"));
+        assert!(stdout(&output).contains("--rename-to <TO>"));
+        assert!(stdout(&output).contains("--move <FROM>"));
+        assert!(stdout(&output).contains("--move-to <TO>"));
         assert!(stdout(&output).contains(if language == "en-US" {
             "literal archive path"
         } else {
@@ -7980,7 +8408,12 @@ fn update_edits_legacy_entries_in_cli_and_batch() {
                 "--json",
             ]);
             if let Some(action) = action {
-                command.arg(action).arg(format!("你[1].txt={destination}"));
+                let target_option = if action == "--rename" {
+                    "--rename-to"
+                } else {
+                    "--move-to"
+                };
+                command.args([action, "你[1].txt", target_option, destination]);
             }
             run(&mut command)
         };
@@ -8018,8 +8451,8 @@ fn update_moves_and_renames_complete_directory_trees_through_the_cli() {
     assert!(created.status.success(), "{}", stderr(&created));
     for arguments in [
         vec!["--mkdir", "archive/"],
-        vec!["--move", "project/sub/=archive/sub/"],
-        vec!["--rename", "archive/=资料/"],
+        vec!["--move", "project/sub/", "--move-to", "archive/sub/"],
+        vec!["--rename", "archive/", "--rename-to", "资料/"],
     ] {
         let out = run(sqz()
             .arg("update")

@@ -36,6 +36,19 @@
 | Runtime inventory | `sqz info --json` |
 | Strict diagnostics | `sqz doctor --strict` |
 
+`update --rename FROM --rename-to TO` and `update --move FROM --move-to TO`
+take the full source and destination archive paths with separate options. Each
+option takes one nonempty value. Repeat both options for multiple entries; for
+each operation type, source and destination counts must match and values pair
+by occurrence order.
+Quote paths containing spaces; equal signs are literal characters. For a path
+starting with `-`, attach its value to the option with `=`:
+
+```bash
+sqz update archive.zip --rename 'a=b name.txt' --rename-to 'renamed=c name.txt' --move 'folder/report.txt' --move-to 'reports/report.txt'
+sqz update archive.zip --rename='-source=name.txt' --rename-to='-target=name.txt'
+```
+
 `convert` and `export` refuse existing output files by default. Split conversion
 publishes and reports generic `.001/.002/...` by default; `--split-mode native`
 uses `.z01/.z02/.../.zip` for ZIP or `.swm`, `2.swm`, … for WIM. Split WIM
@@ -87,7 +100,7 @@ The package fields remain present and use `null` when no matching asset or
 verified metadata is available. All three normal statuses exit with code 0; a
 missing package for the current platform is also a successful discovery result.
 Windows and Linux resolve the standalone `sqz` package. On macOS, the published
-DMG is reported because it includes the bundled `sqz` binary.
+DMG is reported because it includes the desktop CLI helper.
 Ctrl-C exits with code 5. Network, rate-limit, or update-service availability
 errors exit with code 7; invalid release metadata or no stable release exits
 with code 1. JSON failures keep the common
@@ -99,12 +112,21 @@ for the stable error kinds.
 
 ```sh
 sqz extract legacy.zip -d out --encoding gbk --max-output-bytes 2g
+sqz test archive.zip --max-output-bytes 2g --max-entries 100000 --max-compression-ratio 4096 --json
 sqz list archive.zip --encoding shift_jis
 sqz nested list outer.zip inner.7z --search "reports/2026"
 sqz extract archive.zip -d recovered --best-effort --json
 ```
 
-The safety limits are enforced by shared core code, not by a separate CLI-only extraction path.
+Extraction and integrity tests use the shared core safety limits. Tests count
+actual decoded bytes even when no files are written. `test` accepts
+`--max-output-bytes` (size suffixes such as `2g`), `--max-entries`, and
+`--max-compression-ratio`. Defaults are 256 GiB, 1,000,000 entries, and a ratio of
+2048. Ratio checks apply to entries larger than 1 MiB when their compressed size
+is known, and include observed output so understated metadata cannot bypass the
+check. Exceeding a limit exits with code 6 and `resource_limit_exceeded`, keeps
+the source unchanged, and does not declare the archive corrupt. Adjust limits
+only for trusted sources, then explicitly run a new test.
 `list --json`, `nested list --json`, and SFX JSON listings report `modified` as
 signed Unix seconds, rounded down to whole seconds. Zero is the Unix epoch;
 negative values preserve dates before 1970. `null` means the time is unavailable
@@ -135,7 +157,6 @@ same contract with `"output_dir": "repaired-set"`; `output`/`dest` and
 
 ```json
 {
-  "version": 1,
   "jobs": [
     { "kind": "compress", "inputs": ["project"], "output": "project.zip", "profile": "balanced" },
     { "kind": "test", "archive": "project.zip" },
@@ -186,6 +207,16 @@ sqz batch batch.json --json
 | 能力清单 | `sqz info --json` |
 | 严格诊断 | `sqz doctor --strict` |
 
+`update --rename FROM --rename-to TO` 和 `update --move FROM --move-to TO`
+使用独立选项指定归档内的完整来源路径和目标路径。每个选项接收一个非空值。修改多个
+条目时重复两种选项，每种操作的来源与目标数量必须相等，按各自出现次序配对。含空格的
+路径需加引号，等号按字面字符处理。路径以 `-` 开头时，用 `=` 将值附着在选项后：
+
+```bash
+sqz update archive.zip --rename 'a=b name.txt' --rename-to 'renamed=c name.txt' --move 'folder/report.txt' --move-to 'reports/report.txt'
+sqz update archive.zip --rename='-source=name.txt' --rename-to='-target=name.txt'
+```
+
 `convert` 和 `export` 默认拒绝已有输出。分卷转换默认发布并完整报告 `.001/.002/...`；
 ZIP 目标可用 `--split-mode native` 改为 `.z01/.z02/.../.zip`，WIM 目标则改为
 `.swm`、`2.swm`…原生分卷。Split WIM 需要 `wimlib-imagex`；由于单个大文件资源
@@ -229,7 +260,7 @@ ZIP 目标可用 `--split-mode native` 改为 `.z01/.z02/.../.zip`，WIM 目标�
 没有匹配附件或可信元数据时，软件包相关字段仍然存在，值为 `null`。三种正常状态都以
 0 退出；发现新版本但当前平台没有适配包也属于成功。Ctrl-C 以 5 退出；网络、限流或
 更新服务不可用以 7 退出。Windows 和 Linux 会匹配独立的 `sqz` 软件包；macOS 会返回
-包含 `sqz` 的正式 DMG。
+包含桌面 CLI 辅助程序的正式 DMG。
 发布元数据无效或没有稳定版以 1 退出。JSON 错误继续使用统一的
 `{"ok":false,"error":{"kind":"...","message":"...","exit_code":N}}`
 结构。稳定错误种类见[退出码说明](https://github.com/yangzhg/Squallz/blob/main/docs/exit-codes.md)。
@@ -238,12 +269,18 @@ ZIP 目标可用 `--split-mode native` 改为 `.z01/.z02/.../.zip`，WIM 目标�
 
 ```sh
 sqz extract legacy.zip -d out --encoding gbk --max-output-bytes 2g
+sqz test archive.zip --max-output-bytes 2g --max-entries 100000 --max-compression-ratio 4096 --json
 sqz list archive.zip --encoding shift_jis
 sqz nested list outer.zip inner.7z --search "reports/2026"
 sqz extract archive.zip -d recovered --best-effort --json
 ```
 
-这些安全限制由共享 core 执行，不是 CLI 单独实现的一条解压路径。
+解压和完整性测试共用 core 的安全上限。测试累计实际解码字节，即使不写出文件也计入。
+`test` 支持 `--max-output-bytes`（可用 `2g` 等后缀）、`--max-entries` 和
+`--max-compression-ratio`；默认分别为 256 GiB、1,000,000 条目和压缩比 2048。
+压缩比只在单条目超过 1 MiB 且格式提供压缩大小时检查，并同时核对实际解码字节，
+防止虚报大小绕过限制。超限以退出码 6 和 `resource_limit_exceeded` 停止，保留源归档，
+不代表已经确认归档损坏。仅对可信来源调整上限，再显式发起新的测试。
 `list --json`、`nested list --json` 与 SFX 的 JSON 列表将 `modified` 表示为有符号 Unix 秒，
 不足一秒的部分向下取整。0 表示 Unix epoch，负数保留 1970 年之前的时间；`null` 表示时间
 未知或超出有符号 64 位范围。列表的显示精度不改变解压和转换时保留的更精细时间。

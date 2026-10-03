@@ -20,16 +20,16 @@ mod writer;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
+#[cfg(feature = "process-backend")]
+use squallz_format_api::{
+    test_entry_data, BoundedProblemLog, EntryMeta, EntryPath, EntryType, LimitsAccountant,
+    Password, SafetyLimits, TestSummary, TEST_PROBLEM_PREVIEW_LIMIT,
+};
 use squallz_format_api::{
     ArchiveFormat, ArchiveReader, ArchiveSourceSet, ArchiveWriter, ControlToken, CreateOptions,
     FormatCapabilities, FormatError, NativeVolumeLimits, NativeVolumeWriter, OpenOptions,
     PhysicalFileIdentity, PreparedUpdateAdditions, ProgressSink, ReadSeek, UpdateOp, UpdateOptions,
     WriteSeek,
-};
-#[cfg(feature = "process-backend")]
-use squallz_format_api::{
-    BoundedProblemLog, EntryMeta, EntryPath, EntryType, Password, TestSummary,
-    TEST_PROBLEM_PREVIEW_LIMIT,
 };
 
 #[cfg(feature = "process-backend")]
@@ -349,6 +349,7 @@ impl SplitZipArchiveReader {
 
     fn test_with_problem_recorder(
         &mut self,
+        limits: &SafetyLimits,
         progress: &dyn ProgressSink,
         ctl: &ControlToken,
         mut record_problem: impl FnMut(String),
@@ -358,32 +359,22 @@ impl SplitZipArchiveReader {
             .iter()
             .filter(|entry| matches!(entry.entry_type, EntryType::File))
             .map(|entry| entry.size)
-            .sum();
-        let mut done = 0u64;
+            .fold(0, u64::saturating_add);
         let mut entries_tested = 0u64;
+        let mut accountant = LimitsAccountant::new(*limits);
         for meta in self.entries.clone() {
             ctl.checkpoint()?;
+            accountant.check_entry(&meta)?;
             if !matches!(meta.entry_type, EntryType::File) {
                 continue;
             }
-            progress.on_progress(done, total, &meta.path);
             match self.read_entry_with_control(&meta.path, ctl) {
                 Ok(mut data) => {
-                    let mut buffer = [0u8; 64 * 1024];
-                    loop {
-                        ctl.checkpoint()?;
-                        match data.read(&mut buffer) {
-                            Ok(0) => break,
-                            Ok(read) => {
-                                done = done.saturating_add(read as u64);
-                                progress.on_progress(done.min(total), total, &meta.path);
-                            }
-                            Err(error) => {
-                                let error = sevenzip_bridge::recoverable_stream_error(error)?;
-                                record_problem(format!("{}: {error}", meta.path.display));
-                                break;
-                            }
-                        }
+                    if let Err(error) =
+                        test_entry_data(data.as_mut(), &meta, &mut accountant, total, progress, ctl)
+                    {
+                        let error = sevenzip_bridge::recoverable_test_error(error)?;
+                        record_problem(format!("{}: {error}", meta.path.display));
                     }
                 }
                 Err(error) => {
@@ -393,7 +384,11 @@ impl SplitZipArchiveReader {
             }
             entries_tested += 1;
         }
-        progress.on_progress(done.min(total), total, &EntryPath::from_utf8(""));
+        progress.on_progress(
+            accountant.output_bytes(),
+            accountant.output_bytes(),
+            &EntryPath::from_utf8(""),
+        );
         Ok(entries_tested)
     }
 }
@@ -432,12 +427,14 @@ impl ArchiveReader for SplitZipArchiveReader {
 
     fn test_summary(
         &mut self,
+        limits: &SafetyLimits,
         progress: &dyn ProgressSink,
         ctl: &ControlToken,
     ) -> Result<TestSummary, FormatError> {
         let problems = BoundedProblemLog::new(TEST_PROBLEM_PREVIEW_LIMIT);
-        let entries_tested =
-            self.test_with_problem_recorder(progress, ctl, |problem| problems.record(problem))?;
+        let entries_tested = self.test_with_problem_recorder(limits, progress, ctl, |problem| {
+            problems.record(problem)
+        })?;
         Ok(TestSummary {
             entries_tested,
             problems: problems.snapshot(),
@@ -537,7 +534,11 @@ mod tests {
         assert_eq!(contents, b"SFX payload");
 
         let report = reader
-            .test_summary(&NoProgress, &ControlToken::default())
+            .test_summary(
+                &squallz_format_api::SafetyLimits::default(),
+                &NoProgress,
+                &ControlToken::default(),
+            )
             .expect("test SFX ZIP payload");
         assert!(report.is_ok());
         assert_eq!(report.entries_tested, 1);

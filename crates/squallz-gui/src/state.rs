@@ -15,7 +15,7 @@ use squallz_core::api::{
 };
 use squallz_core::{
     collect_volume_set_with_control, fold_archive_search_path, fold_archive_search_query,
-    rank_folded_archive_path, ArchiveListing, Engine,
+    rank_folded_archive_path, ArchiveListing, ArchiveUpdateGuard, Engine,
 };
 use tempfile::TempPath;
 
@@ -64,6 +64,32 @@ impl Row {
 enum PendingRow {
     Entry { index: usize, is_dir: bool },
     SynthesizedDir,
+}
+
+#[derive(Default)]
+struct PendingLevel {
+    directories: HashMap<Box<str>, PendingRow>,
+    files: HashMap<Box<str>, PendingRow>,
+}
+
+impl PendingLevel {
+    fn insert(&mut self, name: &str, row: PendingRow) {
+        let rows = match row {
+            PendingRow::SynthesizedDir | PendingRow::Entry { is_dir: true, .. } => {
+                &mut self.directories
+            }
+            PendingRow::Entry { is_dir: false, .. } => &mut self.files,
+        };
+        if let Some(existing) = rows.get_mut(name) {
+            if matches!(existing, PendingRow::SynthesizedDir)
+                && matches!(row, PendingRow::Entry { is_dir: true, .. })
+            {
+                *existing = row;
+            }
+        } else {
+            rows.insert(Box::from(name), row);
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -121,6 +147,9 @@ pub struct CachedArchive {
     display_path: String,
     display_name: String,
     read_only: bool,
+    /// Shared by updates authorized from this opened source. Successful writes
+    /// advance its state while the core target lock is still held.
+    update_guard: Option<Arc<ArchiveUpdateGuard>>,
     /// All entries in archive order
     pub entries: Vec<EntryMeta>,
     /// Directory level → sorted rows ("" = root, otherwise `a/b/`)
@@ -420,6 +449,7 @@ impl AppState {
             format,
             entries,
             source_set: native_source_set,
+            source_state,
             structure,
             password_verified,
         } = self
@@ -450,6 +480,11 @@ impl AppState {
         let encoding = encoding_diagnostics(&entries, encoding, control)?;
 
         let levels = build_levels(&entries, control)?;
+        let update_guard = if identity.read_only {
+            None
+        } else {
+            source_state.map(|state| Arc::new(ArchiveUpdateGuard::new(state)))
+        };
         control.checkpoint()?;
         let owned_temp = match identity.backing {
             ArchiveBacking::Pending(pending) => Some(Arc::new(OwnedArchiveTemp {
@@ -483,6 +518,7 @@ impl AppState {
                 display_path: identity.display_path.clone(),
                 display_name: display_name.clone(),
                 read_only: identity.read_only,
+                update_guard,
                 entries,
                 levels,
                 search_cache: Mutex::new(SearchCache::default()),
@@ -539,6 +575,29 @@ impl AppState {
             display_path: archive.display_path.clone(),
             read_only: archive.read_only,
             _archive: Some(archive),
+        })
+    }
+
+    pub(crate) fn archive_update_guard(
+        &self,
+        owner_window: Option<&str>,
+        id: u64,
+        path: &str,
+    ) -> Result<Arc<ArchiveUpdateGuard>, FormatError> {
+        let archive = self.archive_for_owner(id, owner_window)?;
+        if archive.read_only {
+            return Err(FormatError::Unsupported(
+                "nested archives are read-only; extract or convert them to save changes".to_owned(),
+            ));
+        }
+        if archive.source_path != Path::new(path) {
+            return Err(FormatError::input_changed());
+        }
+        archive.update_guard.as_ref().cloned().ok_or_else(|| {
+            FormatError::Unsupported(
+                "archive source cannot be updated in place; extract or convert it to save changes"
+                    .to_owned(),
+            )
         })
     }
 
@@ -996,26 +1055,19 @@ pub(crate) fn normalized_entry_path_ref(meta: &EntryMeta) -> Cow<'_, str> {
 }
 
 fn add_pending_row(
-    levels: &mut HashMap<String, HashMap<Box<str>, PendingRow>>,
+    levels: &mut HashMap<String, PendingLevel>,
     parent: &str,
     name: &str,
     row: PendingRow,
 ) {
     let Some(level) = levels.get_mut(parent) else {
-        let mut level = HashMap::new();
-        level.insert(Box::from(name), row);
+        let mut level = PendingLevel::default();
+        level.insert(name, row);
         levels.insert(parent.to_owned(), level);
         return;
     };
 
-    if let Some(existing) = level.get_mut(name) {
-        if matches!(existing, PendingRow::SynthesizedDir) && matches!(row, PendingRow::Entry { .. })
-        {
-            *existing = row;
-        }
-    } else {
-        level.insert(Box::from(name), row);
-    }
+    level.insert(name, row);
 }
 
 /// Builds the per-directory row index: every entry is attached to its parent
@@ -1025,7 +1077,7 @@ fn build_levels(
     entries: &[EntryMeta],
     control: &ControlToken,
 ) -> Result<HashMap<String, Vec<Row>>, FormatError> {
-    let mut levels: HashMap<String, HashMap<Box<str>, PendingRow>> = HashMap::new();
+    let mut levels: HashMap<String, PendingLevel> = HashMap::new();
     for (idx, meta) in entries.iter().enumerate() {
         control.checkpoint()?;
         let path = normalized_entry_path_ref(meta);
@@ -1056,10 +1108,11 @@ fn build_levels(
     }
 
     let mut indexed = HashMap::with_capacity(levels.len());
-    for (parent, rows) in levels {
+    for (parent, level) in levels {
         control.checkpoint()?;
-        let mut sortable = Vec::with_capacity(rows.len());
-        for (sequence, (name, pending)) in rows.into_iter().enumerate() {
+        let mut sortable = Vec::with_capacity(level.directories.len() + level.files.len());
+        let rows = level.directories.into_iter().chain(level.files);
+        for (sequence, (name, pending)) in rows.enumerate() {
             control.checkpoint()?;
             let folded_name = name.to_lowercase();
             let (is_dir, row) = match pending {
@@ -1454,6 +1507,7 @@ mod tests {
             display_path: "test.zip".to_owned(),
             display_name: "test.zip".to_owned(),
             read_only: false,
+            update_guard: None,
             entries,
             levels,
             search_cache: Mutex::new(SearchCache::default()),
@@ -2308,6 +2362,71 @@ mod tests {
     }
 
     #[test]
+    fn non_regular_sources_remain_browsable_without_authorizing_archive_updates() {
+        use squallz_core::{SfxBuildOptions, SfxTarget, SFX_GUI_STUB_MARKER};
+
+        let dir = temp_dir("update-non-regular-source");
+        let archive = make_zip(&dir, &["report.txt"]);
+        let state = AppState::new();
+        let template = dir.join("Template.app");
+        let executable = template.join("Contents/MacOS/squallz-gui");
+        std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        let mut stub = vec![0u8; 512];
+        stub[..4].copy_from_slice(&[0xcf, 0xfa, 0xed, 0xfe]);
+        stub[0x80..0x80 + SFX_GUI_STUB_MARKER.len()].copy_from_slice(&SFX_GUI_STUB_MARKER);
+        std::fs::write(executable, stub).unwrap();
+        std::fs::write(
+            template.join("Contents/Info.plist"),
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict>
+<key>CFBundleExecutable</key><string>squallz-gui</string>
+<key>LSMinimumSystemVersion</key><string>11.0</string>
+</dict></plist>
+"#,
+        )
+        .unwrap();
+        let app = dir.join("Package.app");
+        state
+            .engine
+            .create_sfx(
+                &template,
+                &archive,
+                &app,
+                &SfxBuildOptions {
+                    target: SfxTarget::Macos,
+                    ..SfxBuildOptions::default()
+                },
+                &NoProgress,
+                &ControlToken::new(),
+            )
+            .unwrap();
+        #[cfg(unix)]
+        let sources = {
+            let link = dir.join("linked.zip");
+            std::os::unix::fs::symlink(&archive, &link).unwrap();
+            vec![app, link]
+        };
+        #[cfg(not(unix))]
+        let sources = vec![app];
+        for source in sources {
+            let opened = state
+                .open_archive_for_window("editor", &source, None, None)
+                .unwrap();
+            assert_eq!(opened.format, "zip");
+            let page = state
+                .list_entries_for_window("editor", opened.id, 0, 10, "src/", None)
+                .unwrap();
+            assert_eq!(page.items.len(), 1);
+            assert_eq!(page.items[0].path, "src/report.txt");
+            let error = state
+                .archive_update_guard(Some("editor"), opened.id, source.to_str().unwrap())
+                .unwrap_err();
+            assert!(matches!(error, FormatError::Unsupported(_)));
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn replacing_an_archive_invalidates_its_session_password() {
         let dir = temp_dir("replaced-session-password");
         let archive = make_header_encrypted_7z(&dir);
@@ -2495,5 +2614,75 @@ mod tests {
         assert_eq!(levels.get("").unwrap()[0].entry_index(), Some(1));
         assert_eq!(levels.get("a/").unwrap()[0].name(&metas), "b");
         assert_eq!(levels.get("a/b/").unwrap()[0].name(&metas), "c.txt");
+
+        for parent in ["", "outer/"] {
+            let file_path = format!("{parent}a");
+            let directory_path = format!("{parent}a/");
+            let child_path = format!("{parent}a/child.txt");
+            let mut directory = file_meta(&directory_path, 0);
+            directory.entry_type = EntryType::Dir;
+            directory.compressed_size = Some(23);
+            let mut duplicate_directory = directory.clone();
+            duplicate_directory.compressed_size = Some(99);
+            let entries = [
+                file_meta(&file_path, 7),
+                file_meta(&child_path, 11),
+                directory,
+                file_meta(&file_path, 99),
+                duplicate_directory,
+            ];
+            // Implicit and explicit directories must coexist with same-name
+            // files, regardless of archive order. Same-kind duplicates still
+            // retain the first real entry, including after synthesis.
+            for order in [
+                &[0, 1][..],
+                &[1, 0],
+                &[0, 2],
+                &[2, 0],
+                &[0, 1, 2],
+                &[0, 2, 1],
+                &[1, 0, 2],
+                &[1, 2, 0],
+                &[2, 0, 1],
+                &[2, 1, 0],
+                &[0, 3, 2, 4, 1],
+                &[1, 2, 4, 0, 3],
+            ] {
+                let archive = cached_archive(
+                    order.iter().map(|&index| entries[index].clone()).collect(),
+                    1,
+                );
+                let first = page_level(&archive, 0, 1, parent, None);
+                assert_eq!(first.total, 2, "parent={parent:?}, order={order:?}");
+                assert_eq!(first.items[0].path, directory_path);
+                assert_eq!(first.items[0].entry_type, "dir");
+                assert_eq!(first.items[0].compressed, order.contains(&2).then_some(23));
+                let second = page_level(&archive, 1, 1, parent, Some("A"));
+                assert_eq!(second.total, 2);
+                assert_eq!(second.items[0].path, file_path);
+                assert_eq!(second.items[0].entry_type, "file");
+                assert_eq!(second.items[0].size, 7);
+                assert!(archive_path_exists(&archive, &file_path));
+                assert!(archive_path_exists(&archive, &directory_path));
+
+                let children = page_level(&archive, 0, 10, &directory_path, None);
+                assert_eq!(children.total, usize::from(order.contains(&1)));
+                let mut expected_paths = vec![file_path.clone(), directory_path.clone()];
+                if order.contains(&1) {
+                    assert_eq!(children.items[0].path, child_path);
+                    expected_paths.push(child_path.clone());
+                }
+                let search = page_search(&archive, 0, 10, &file_path, 1).unwrap();
+                assert_eq!(search.total, expected_paths.len());
+                let mut paths = search
+                    .items
+                    .into_iter()
+                    .map(|row| row.path)
+                    .collect::<Vec<_>>();
+                paths.sort();
+                expected_paths.sort();
+                assert_eq!(paths, expected_paths);
+            }
+        }
     }
 }

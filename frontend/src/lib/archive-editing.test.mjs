@@ -5,6 +5,12 @@ import vm from "node:vm";
 import ts from "typescript";
 import { createTestServer } from "../../tests/runtime.mjs";
 
+function deferred() {
+  let resolve, reject;
+  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+
 async function loadEditing(overrides = {}) {
   const server = await createTestServer();
   let helpers;
@@ -21,11 +27,13 @@ async function loadEditing(overrides = {}) {
   const names = new Set([
     "normalizeNewFolderPath", "commitNewFolderName", "submitNewFolderJob", "validateArchiveEditTarget",
     "normalizeMoveTargetDir", "submitMovePlan", "moveTargetForPath",
-    "archiveEditPathProblem", "moveTargetProblem", "submitMoveSelectedJob", "submitMoveKeepBoth",
+    "archiveEditPathProblem", "moveTargetProblem", "submitMoveSelectedJob", "submitMoveKeepBoth", "submitMoveReadyOnly",
     "normalizeRenameTargetName", "selectedRenameSource", "renameTargetIssue", "archiveEntryExtension",
     "submitRenameSelectedJob", "selectedDeletePaths", "submitDeleteSelectedJob", "submitCurrentArchiveJob",
-    "openArchiveEditor", "submitAddToArchiveJob", "archiveEditSubmissionFailure", "showArchiveEditError", "jobSubmitBlockedMessage",
+    "openArchiveEditor", "closeArchiveEditor", "restoreArchiveEditFocus", "cancelMoveConflict",
+    "submitAddToArchiveJob", "archiveEditSubmissionFailure", "archiveEditSubmissionSuccess", "showArchiveEditError", "jobSubmitBlockedMessage",
     "archiveEditSelectedPaths", "archiveEditorBlockedReason", "validateArchiveEditContext", "archiveEditCheckIsCurrent",
+    "setScreen", "setMode", "openRecoverySet", "dismissArchivePicker", "isCurrentArchiveAddPreparation", "dismissArchiveAddPreparation",
   ]);
   const declarations = source.statements.filter(
     (node) => (ts.isFunctionDeclaration(node) && names.has(node.name?.text))
@@ -44,7 +52,14 @@ async function loadEditing(overrides = {}) {
     currentArchive: { id: 17, source: "/tmp/archive-editing.zip", encoding_override: "gbk" },
     archiveOpenGeneration: 0,
     archiveOpenStatus: "idle",
-    archiveAddPending: false,
+    archiveAddPreparation: null,
+    screen: "browse",
+    mode: "modern",
+    firstRunDropFeedback: null,
+    savedModeChoice: "modern",
+    persistUiMode: (next) => { context.mode = next; return Promise.resolve(true); },
+    trackAppearanceSave: (_section, _promise, _failure, saved) => saved(),
+    archivePickerRequest: null,
     createContentPolicy: "custom",
     createExcludeRules: () => ["*.bak"],
     createCompressionLevel: () => 8,
@@ -58,19 +73,57 @@ async function loadEditing(overrides = {}) {
     renameTargetName: "重命名",
     moveTargetDir: "destination/",
     moveConflictReview: null,
+    moveConflictReturnFocus: null,
     archiveEditKind: null,
     archiveEditContext: null,
     archiveEditChecking: false,
     archiveEditSession: 0,
     archiveEditError: null,
     archiveEditReturnFocus: null,
-    closeArchiveEditor: () => { closed.push(true); context.archiveEditKind = null; context.archiveEditContext = null; context.archiveEditChecking = false; context.archiveEditSession += 1; },
+    archiveSearchInput: null,
+    blockingModalVisible: () => false,
     renameSelectedDisabledReason: () => "",
     moveSelectedDisabledReason: () => "",
     openArchiveFirstLabel: () => "Open an archive first",
-    document: { activeElement: null },
+    document: { activeElement: null, documentElement: {}, body: {}, querySelectorAll: () => [] },
     HTMLElement: class {},
-    setScreen: () => {},
+    preventCreateSubmissionNavigation: () => false,
+    preventConvertSubmissionNavigation: () => false,
+    filenameEncodingRequest: null,
+    checksumCopyRequest: null,
+    extractDestinationPicker: null,
+    archivePasswordPrompt: null,
+    previewPasswordPrompt: null,
+    dismissCreatePreparation: () => {},
+    dismissRecoveryPreparation: () => {},
+    cancelPendingArchiveOpen: () => {},
+    cancelArchivePasswordPrompt: () => {},
+    recordValidationRenderReady: () => {},
+    clearEntryPreviewState: () => {},
+    dismissArchivePasswordRequest: () => {},
+    cancelTaskReview: () => {},
+    archiveUpdateReviewFocusPending: false,
+    archiveUpdateReview: { cancelSourceChoice: () => {} },
+    nestedExtractReviewFocusPending: false,
+    nestedExtractDraftGeneration: 0,
+    nestedExtractPickerRequest: 0,
+    nestedExtractPickerBusy: false,
+    batchReviewFocusPending: false,
+    batchPickerRequest: 0,
+    batchPickerBusy: false,
+    createPrimaryFocusPending: false,
+    extractReviewFocusPending: false,
+    convertReviewFocusPending: false,
+    securitySettingsFocusPending: false,
+    checksumResultFocusPending: null,
+    duplicateReportFocusPending: false,
+    pendingArchiveTaskReview: null,
+    pendingCreateSubmission: null,
+    createOptionsValidationAttempted: false,
+    classicCreateSection: "general",
+    discardPendingCreatePlan: () => {},
+    syncUrl: () => {},
+    tick: async () => {},
     loadedRows: () => [{ path: "destination/", entry_type: "dir" }],
     selectedPaths: () => new Set(["docs/a.txt"]),
     pathBaseName: (path) => path.split("/").at(-1),
@@ -96,13 +149,31 @@ async function loadEditing(overrides = {}) {
     }),
     ...overrides.ipc,
   };
-  const handlers = vm.runInNewContext(`${outputText}\n({ normalizeNewFolderPath, commitNewFolderName, submitNewFolderJob, normalizeMoveTargetDir, submitMoveSelectedJob, submitMoveKeepBoth, submitMovePlan, normalizeRenameTargetName, submitRenameSelectedJob, submitDeleteSelectedJob, openArchiveEditor, submitAddToArchiveJob, JobSubmitBlockedError })`, context);
+  const addPending = source.statements.filter(ts.isVariableStatement)
+    .flatMap((statement) => [...statement.declarationList.declarations])
+    .find((node) => node.name.getText(source) === "archiveAddPending")?.initializer;
+  assert.ok(addPending && ts.isCallExpression(addPending));
+  assert.equal(addPending.expression.getText(source), "$derived");
+  const pendingExpression = ts.transpileModule(`(${addPending.arguments[0].getText(source)})`, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022 },
+  }).outputText;
+  Object.defineProperty(context, "archiveAddPending", {
+    get: () => vm.runInNewContext(pendingExpression, context),
+  });
+  const handlers = vm.runInNewContext(`${outputText}\n({ normalizeNewFolderPath, commitNewFolderName, submitNewFolderJob, normalizeMoveTargetDir, submitMoveSelectedJob, submitMoveKeepBoth, submitMoveReadyOnly, submitMovePlan, normalizeRenameTargetName, submitRenameSelectedJob, submitDeleteSelectedJob, openArchiveEditor, cancelMoveConflict, submitAddToArchiveJob, setScreen, setMode, openRecoverySet, isCurrentArchiveAddPreparation, dismissArchiveAddPreparation, JobSubmitBlockedError })`, context);
+  const closeEditor = context.closeArchiveEditor;
+  context.closeArchiveEditor = () => { closed.push(true); closeEditor(); };
   const reset = source.statements.find((node) => ts.isExpressionStatement(node)
     && node.getText(source).startsWith("$effect(") && node.getText(source).includes('archiveDirs.join("\\u0000")')
     && node.getText(source).includes("renameTargetName"));
   assert.ok(reset);
+  const resetAdd = source.statements.find((node) => ts.isExpressionStatement(node)
+    && node.getText(source).startsWith("$effect(") && node.getText(source).includes("archiveAddPreparation")
+    && node.getText(source).includes("isCurrentArchiveAddPreparation"));
+  assert.ok(resetAdd);
   return { ...handlers, submitted, notices, toasts, closed, context,
     refreshEditor: () => vm.runInNewContext(ts.transpileModule(reset.getText(source), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, context),
+    refreshAddPreparation: () => vm.runInNewContext(ts.transpileModule(resetAdd.getText(source), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, context),
   };
 }
 
@@ -118,6 +189,7 @@ test("refresh keeps rename text and checks the original selection before queuing
   assert.equal(editing.context.renameTargetName, "kept.txt");
   await editing.submitRenameSelectedJob();
   assert.deepEqual(checks, [[18, ["docs/a.txt"]]]);
+  assert.equal(editing.submitted[0].expected_archive_id, 18);
   assert.deepEqual(JSON.parse(JSON.stringify(editing.submitted[0].rename)), [{ from: "docs/a.txt", to: "docs/kept.txt" }]);
 });
 
@@ -128,6 +200,7 @@ test("move and new-folder drafts keep their original entries and parent after re
   moving.context.selectedPaths = () => new Set();
   moving.refreshEditor();
   await moving.submitMoveSelectedJob();
+  assert.equal(moving.submitted[0].expected_archive_id, 18);
   assert.deepEqual(JSON.parse(JSON.stringify(moving.submitted[0].rename)), [
     { from: "docs/", to: "destination/docs/" }, { from: "other.txt", to: "destination/other.txt" },
   ]);
@@ -138,6 +211,7 @@ test("move and new-folder drafts keep their original entries and parent after re
   folder.context.archiveDirs = [];
   folder.refreshEditor();
   await folder.submitNewFolderJob();
+  assert.equal(folder.submitted[0].expected_archive_id, 18);
   assert.deepEqual([...folder.submitted[0].mkdir], ["docs/Plans/"]);
 });
 
@@ -284,7 +358,7 @@ test("late destination checks cannot queue edits after cancellation, refresh or 
 });
 
 test("adding files never follows an archive switch while the native picker is pending", async () => {
-  for (const change of ["switch", "close", "reopen", "opening", "encoding", "read-only", "refresh"]) {
+  for (const change of ["switch", "close", "reopen", "opening", "encoding", "read-only", "refresh", "leave", "leave-return"]) {
     const editing = await loadEditing();
     let select;
     editing.context.getDialogModule = async () => ({ open: () => new Promise((resolve) => { select = resolve; }) });
@@ -296,25 +370,114 @@ test("adding files never follows an archive switch while the native picker is pe
     if (change === "opening") editing.context.archiveOpenGeneration++;
     if (change === "encoding") editing.context.currentArchive.encoding_override = "shift_jis";
     if (change === "read-only" || change === "refresh") editing.context.archiveMutationDisabledReason = () => change;
+    if (change === "leave" || change === "leave-return") {
+      editing.setScreen("settingsGeneral");
+      if (change === "leave-return") editing.setScreen("browse");
+    }
+    editing.refreshAddPreparation();
+    assert.equal(editing.context.archiveAddPending, change === "read-only" || change === "refresh",
+      `${change}: accepted source/navigation changes release preparing immediately`);
     select(["/inputs/资料.txt"]);
     await pending;
     assert.equal(editing.submitted.length, 0, change);
-    assert.ok(editing.notices.length > 0, change);
+    if (change === "read-only" || change === "refresh") assert.deepEqual(editing.notices, [change], change);
+    else assert.deepEqual(editing.notices, [], change);
     assert.equal(editing.context.archiveAddPending, false);
   }
 });
 
 test("archive changes before dialog loading finishes prevent an obsolete picker", async () => {
-  const editing = await loadEditing();
-  let loaded;
-  let opened = 0;
-  editing.context.getDialogModule = () => new Promise((resolve) => { loaded = resolve; });
-  const pending = editing.submitAddToArchiveJob();
-  editing.context.archiveOpenGeneration++;
-  loaded({ open: async () => { opened++; return ["/inputs/资料.txt"]; } });
-  await pending;
-  assert.equal(opened, 0);
-  assert.equal(editing.submitted.length, 0);
+  for (const change of ["archive", "leave", "leave-return", "mode-return"]) {
+    const editing = await loadEditing();
+    let loaded;
+    let opened = 0;
+    editing.context.getDialogModule = () => new Promise((resolve) => { loaded = resolve; });
+    const pending = editing.submitAddToArchiveJob();
+    if (change === "archive") editing.context.archiveOpenGeneration++;
+    else if (change === "mode-return") {
+      editing.setMode("classic");
+      editing.setMode("modern");
+    } else {
+      editing.setScreen("settingsGeneral");
+      if (change === "leave-return") editing.setScreen("browse");
+    }
+    loaded({ open: async () => { opened++; return ["/inputs/资料.txt"]; } });
+    await pending;
+    assert.equal(opened, 0, `${change}: the expired preparation must not open a chooser`);
+    assert.equal(editing.submitted.length, 0, change);
+    assert.equal(editing.context.archiveAddPending, false, change);
+    assert.deepEqual(editing.notices, [], change);
+  }
+
+  const recovery = await loadEditing({ screen: "recovery" });
+  const oldRecoveryModule = deferred();
+  const currentRecoveryModule = deferred();
+  let recoveryModules = 0;
+  let recoveryPickers = 0;
+  recovery.context.getDialogModule = () => ++recoveryModules === 1
+    ? oldRecoveryModule.promise : currentRecoveryModule.promise;
+  const obsoleteRecoveryAdd = recovery.submitAddToArchiveJob();
+  recovery.openRecoverySet("/inputs/new.par2", recovery.context.currentArchive.source, "open-file");
+  assert.equal(recovery.context.screen, "recovery");
+  assert.equal(recovery.context.archiveAddPending, false, "same-page recovery open must immediately release obsolete Add preparation without an effect flush");
+  const recoveryNotices = [...recovery.notices];
+  const currentRecoveryAdd = recovery.submitAddToArchiveJob();
+  const currentRecoveryOwner = recovery.context.archiveAddPreparation;
+  assert.equal(recoveryModules, 2);
+  oldRecoveryModule.resolve({ open: async () => { recoveryPickers++; return ["/inputs/old.txt"]; } });
+  await obsoleteRecoveryAdd;
+  assert.equal(recoveryPickers, 0);
+  assert.equal(recovery.submitted.length, 0);
+  assert.equal(recovery.context.archiveAddPreparation, currentRecoveryOwner, "obsolete recovery Add completion must retain the new owner");
+  assert.equal(recovery.context.archiveAddPending, true);
+  assert.deepEqual(recovery.notices, recoveryNotices);
+  currentRecoveryModule.resolve({ open: async () => { recoveryPickers++; return ["/inputs/current.txt"]; } });
+  await currentRecoveryAdd;
+  assert.equal(recoveryPickers, 1);
+  assert.equal(recovery.submitted.length, 1);
+  assert.deepEqual([...recovery.submitted[0].add], ["/inputs/current.txt"]);
+  assert.equal(recovery.submitted[0].expected_archive_id, 17);
+  assert.equal(recovery.context.archiveAddPending, false);
+
+  for (const phase of ["module", "chooser"]) {
+    for (const rejectOld of [false, true]) {
+      const editing = await loadEditing();
+      const old = deferred();
+      const latest = deferred();
+      let modules = 0;
+      let opened = 0;
+      editing.context.getDialogModule = () => {
+        modules++;
+        if (modules > 1) return latest.promise;
+        return phase === "module" ? old.promise : Promise.resolve({
+          open: () => { opened++; return old.promise; },
+        });
+      };
+      const stale = editing.submitAddToArchiveJob();
+      await new Promise(setImmediate);
+      editing.setScreen("settingsGeneral");
+      assert.equal(editing.context.archiveAddPending, false, `${phase}: navigation releases preparation`);
+      editing.setScreen("browse");
+      const current = editing.submitAddToArchiveJob();
+      assert.equal(modules, 2, `${phase}: a new request starts without waiting for old native work`);
+      assert.equal(editing.context.archiveAddPending, true);
+      if (rejectOld) old.reject(new Error("old chooser unavailable"));
+      else old.resolve(phase === "module"
+        ? { open: async () => { opened++; return ["/inputs/old.txt"]; } }
+        : ["/inputs/old.txt"]);
+      await stale;
+      assert.equal(editing.context.archiveAddPending, true, `${phase}: old finally must retain new preparation`);
+      assert.equal(opened, phase === "module" ? 0 : 1);
+      assert.equal(editing.submitted.length, 0);
+      assert.deepEqual(editing.notices, []);
+      assert.deepEqual(editing.toasts, []);
+      latest.resolve({ open: async () => { opened++; return ["/inputs/current.txt"]; } });
+      await current;
+      assert.equal(editing.context.archiveAddPending, false);
+      assert.equal(editing.submitted.length, 1);
+      assert.deepEqual([...editing.submitted[0].add], ["/inputs/current.txt"]);
+    }
+  }
 });
 
 test("adding files captures settings once and rejects duplicate selection and submission", async () => {
@@ -328,6 +491,13 @@ test("adding files captures settings once and rejects duplicate selection and su
   const pending = editing.submitAddToArchiveJob();
   await new Promise(setImmediate);
   assert.equal(editing.context.archiveAddPending, true);
+  editing.setScreen("browse");
+  editing.setMode("modern");
+  editing.context.preventConvertSubmissionNavigation = () => true;
+  editing.setScreen("settingsGeneral");
+  editing.context.preventConvertSubmissionNavigation = () => false;
+  assert.equal(editing.context.screen, "browse");
+  assert.equal(editing.context.archiveAddPending, true, "same-page and blocked navigation retain the current preparation");
   await editing.submitAddToArchiveJob();
   assert.equal(opened, 1);
   editing.context.createContentPolicy = "keep_all_files";
@@ -339,9 +509,14 @@ test("adding files captures settings once and rejects duplicate selection and su
   await editing.submitAddToArchiveJob();
   assert.equal(editing.submitted.length, 1);
   assert.deepEqual(JSON.parse(JSON.stringify(editing.submitted[0])), {
-    kind: "update", path: "/tmp/archive-editing.zip", encoding: "gbk", add: ["/inputs/资料.txt"],
+    kind: "update", path: "/tmp/archive-editing.zip", expected_archive_id: 17, encoding: "gbk", add: ["/inputs/资料.txt"],
     delete: [], rename: [], mkdir: [], excludes: ["*.bak"], content_policy: "custom", password: null, level: 8,
   });
+  editing.setScreen("settingsGeneral");
+  assert.equal(editing.context.screen, "settingsGeneral");
+  editing.refreshAddPreparation();
+  assert.equal(editing.context.archiveAddPreparation.phase, "submitting");
+  assert.equal(editing.context.archiveAddPending, true, "an already submitted task retains its slot until the service settles");
   submitted(1); await pending;
   assert.equal(editing.context.archiveAddPending, false);
   assert.equal(operations.length, 1);
@@ -366,6 +541,30 @@ test("add cancellation, picker failure, and submission errors release the action
     if (failure === "submit") assert.match(editing.toasts.at(-1).body, /desktop service/);
     if (failure === "error-dto") assert.equal(editing.toasts.at(-1).body, "error.io");
     if (failure === "blocked") assert.equal(editing.toasts.length, 0);
+    editing.context.getDialogModule = async () => ({ open: async () => ["/inputs/retry.txt"] });
+    editing.context.isJobSubmitBlocked = () => false;
+    editing.context.submitJob = async (spec) => { editing.submitted.push(spec); return 1; };
+    await editing.submitAddToArchiveJob();
+    assert.equal(editing.submitted.length, 1, `${failure}: the released action permits an explicit retry`);
+    assert.equal(operations.length, 1);
+    assert.equal(editing.context.archiveAddPending, false);
+  }
+
+  for (const phase of ["module", "chooser"]) {
+    const editing = await loadEditing();
+    const pendingError = deferred();
+    editing.context.getDialogModule = () => phase === "module" ? pendingError.promise
+      : Promise.resolve({ open: () => pendingError.promise });
+    const pending = editing.submitAddToArchiveJob();
+    await new Promise(setImmediate);
+    editing.setScreen("settingsGeneral");
+    editing.setScreen("browse");
+    pendingError.reject(new Error("expired chooser failure"));
+    await pending;
+    assert.equal(editing.submitted.length, 0, phase);
+    assert.deepEqual(editing.notices, [], phase);
+    assert.deepEqual(editing.toasts, [], phase);
+    assert.equal(editing.context.archiveAddPending, false);
   }
 });
 
@@ -378,6 +577,7 @@ test("deleting selected entries preserves literal paths and directory boundaries
   const job = editing.submitted[0];
   assert.equal(job.kind, "update");
   assert.equal(job.path, "/tmp/archive-editing.zip");
+  assert.equal(job.expected_archive_id, 17);
   assert.equal(job.encoding, "gbk");
   assert.deepEqual(Array.from(job.delete), ["notes.txt", "资料[1]/", "literal?.txt"]);
   assert.deepEqual(Array.from(job.rename), []);
@@ -440,6 +640,67 @@ test("move confirmation uses the complete archive plan even when target rows are
   assert.deepEqual(JSON.parse(JSON.stringify(editing.submitted[0].rename)), [{
     from: "docs/a.txt", to: "destination/a copy 3.txt",
   }]);
+});
+
+test("move review exposes every conflict and its decisions submit the complete selection", async () => {
+  const paths = Array.from({ length: 44 }, (_, index) => `docs/report-${index + 1}.txt`);
+  for (const action of ["submitMoveKeepBoth", "submitMoveReadyOnly"]) {
+    const editing = await loadEditing({
+      selectedPaths: () => new Set(paths),
+      ipc: { planArchiveMove: async (_id, sources, target) => ({ missing_sources: [], blocked_parent: null,
+        items: sources.map((from, index) => ({ from, to: target + from.split("/").at(-1),
+          conflict: index < 42 ? (index === 41 ? "duplicate_target" : "existing_target") : null,
+          keep_both_to: index < 42 ? target + `report-${index + 1} copy 2.txt` : null })),
+      }) },
+    });
+    editing.openArchiveEditor("move");
+    await editing.submitMoveSelectedJob();
+    const component = await readFile(new URL("../App.svelte", import.meta.url), "utf8");
+    const source = ts.createSourceFile("App.ts", component.match(/<script lang="ts">([\s\S]*?)<\/script>/)[1], ts.ScriptTarget.Latest, true);
+    const declaration = source.statements.filter(ts.isVariableStatement)
+      .flatMap((statement) => [...statement.declarationList.declarations])
+      .find((node) => node.name.getText(source) === "moveConflictView");
+    assert.ok(declaration, "the browser must receive the complete review independently of the visible page");
+    const view = vm.runInNewContext(ts.transpileModule(`(${declaration.initializer.arguments[0].getText(source)})()`,
+      { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, editing.context);
+    assert.equal(view.readyCount, 2);
+    assert.deepEqual([...view.items].map((item) => item.from), paths.slice(0, 42));
+    assert.match(view.items[41].reason, /Multiple selected entries/u);
+    assert.equal(editing.submitted.length, 0);
+    assert.equal(editing.notices.length, 0, "the focused review presents the decision without a notice covering its controls");
+    await editing[action]();
+    const rename = JSON.parse(JSON.stringify(editing.submitted[0].rename));
+    assert.deepEqual(rename, (action === "submitMoveKeepBoth" ? paths : paths.slice(42))
+      .map((from) => {
+        const index = paths.indexOf(from);
+        return { from, to: index < 42 ? `destination/report-${index + 1} copy 2.txt` : `destination/report-${index + 1}.txt` };
+      }));
+    assert.equal(editing.context.moveConflictReview, null);
+  }
+});
+
+test("a failed reviewed move keeps the full plan for an explicit retry", async () => {
+  const paths = Array.from({ length: 42 }, (_, index) => `docs/report-${index + 1}.txt`);
+  const editing = await loadEditing({ selectedPaths: () => new Set(paths),
+    submitJob: async () => { throw new Error("unavailable"); },
+    ipc: { planArchiveMove: async (_id, sources, target) => ({ missing_sources: [], blocked_parent: null,
+      items: sources.map((from) => ({ from, to: target + from.split("/").at(-1), conflict: "existing_target",
+        keep_both_to: target + from.split("/").at(-1).replace(".txt", " copy 2.txt") })),
+    }) },
+  });
+  editing.openArchiveEditor("move");
+  await editing.submitMoveSelectedJob();
+  const review = editing.context.moveConflictReview;
+  await editing.submitMoveKeepBoth();
+  assert.equal(editing.context.moveConflictReview, review);
+  assert.equal(editing.submitted.length, 0);
+  assert.equal(editing.toasts.length, 1);
+  assert.match(editing.toasts[0].body, /try again/u);
+  editing.context.submitJob = async (spec) => { editing.submitted.push(spec); return 1; };
+  await editing.submitMoveKeepBoth();
+  assert.equal(editing.submitted[0].rename.length, 42);
+  assert.equal(editing.submitted[0].rename[41].to, "destination/report-42 copy 2.txt");
+  assert.equal(editing.context.moveConflictReview, null);
 });
 
 test("an archive-root move keeps the root destination", async () => {
@@ -639,20 +900,135 @@ test("archive edit submission failures are shown in the current form and retry c
 });
 
 test("an obsolete edit submission cannot put its failure in a newly opened form", async () => {
-  const editing = await loadEditing();
-  let fail;
-  editing.context.submitJob = () => new Promise((_resolve, reject) => { fail = reject; });
-  editing.openArchiveEditor("rename");
-  editing.context.renameTargetName = "renamed.txt";
-  const pending = editing.submitRenameSelectedJob();
-  await new Promise(setImmediate);
-  editing.context.closeArchiveEditor();
-  editing.openArchiveEditor("rename");
-  fail(new Error("late failure"));
-  await pending;
-  assert.equal(editing.context.archiveEditKind, "rename");
-  assert.equal(editing.context.archiveEditError, null);
-  assert.equal(editing.toasts.length, 0);
+  const actions = [
+    ["rename", "submitRenameSelectedJob"],
+    ["new-folder", "submitNewFolderJob"],
+    ["move", "submitMoveSelectedJob"],
+    ["keep-both", "submitMoveKeepBoth"],
+    ["ready-only", "submitMoveReadyOnly"],
+  ];
+  async function prepare(kind) {
+    const focusCalls = [];
+    let editing;
+    class FocusTarget {
+      isConnected = true;
+      matches() { return false; }
+      closest() { return null; }
+      focus() { focusCalls.push(this); editing.context.document.activeElement = this; }
+    }
+    const operations = [];
+    editing = await loadEditing({
+      HTMLElement: FocusTarget,
+      selectedPaths: () => new Set(kind === "keep-both" || kind === "ready-only"
+        ? ["docs/a.txt", "docs/b.txt"] : ["docs/a.txt"]),
+      recordOperation: (operation) => operations.push(operation),
+      ipc: { planArchiveMove: async (_id, paths, target) => ({
+        missing_sources: [], blocked_parent: null,
+        items: paths.map((from, index) => ({ from, to: target + from.split("/").at(-1),
+          conflict: (kind === "keep-both" || kind === "ready-only") && index === 0 ? "existing_target" : null,
+          keep_both_to: index === 0 ? target + "a copy 2.txt" : null })),
+      }) },
+    });
+    editing.context.blockingModalVisible = () => Boolean(editing.context.archiveEditKind || editing.context.moveConflictReview);
+    const origin = new FocusTarget();
+    editing.context.document.activeElement = origin;
+    editing.openArchiveEditor(kind === "keep-both" || kind === "ready-only" ? "move" : kind);
+    if (kind === "rename") editing.context.renameTargetName = "renamed.txt";
+    if (kind === "new-folder") editing.context.newFolderName = "Plans";
+    if (kind === "keep-both" || kind === "ready-only") {
+      await editing.submitMoveSelectedJob();
+      assert.ok(editing.context.moveConflictReview);
+      assert.equal(editing.submitted.length, 0);
+    }
+    return { editing, origin, FocusTarget, focusCalls, operations };
+  }
+
+  for (const [kind, action] of actions) {
+    for (const outcome of ["failure", "success"]) {
+      const { editing, FocusTarget, focusCalls, operations } = await prepare(kind);
+      const queued = deferred();
+      const started = deferred();
+      editing.context.submitJob = (spec) => {
+        editing.submitted.push(spec);
+        started.resolve();
+        return queued.promise;
+      };
+      const pending = editing[action]();
+      await started.promise;
+      assert.equal(editing.submitted[0].path, "/tmp/archive-editing.zip");
+      assert.equal(editing.submitted[0].expected_archive_id, 17);
+      assert.equal(editing.submitted[0].encoding, "gbk");
+      const reviewed = kind === "keep-both" || kind === "ready-only";
+      if (reviewed) editing.cancelMoveConflict();
+      else editing.context.closeArchiveEditor();
+      const newOrigin = new FocusTarget();
+      editing.context.document.activeElement = newOrigin;
+      editing.openArchiveEditor(reviewed ? "move" : kind);
+      editing.context.renameTargetName = "new draft.txt";
+      editing.context.newFolderName = "New draft";
+      editing.context.moveTargetDir = "new-destination/";
+      if (reviewed) {
+        await editing.submitMoveSelectedJob();
+        assert.ok(editing.context.moveConflictReview);
+        assert.equal(editing.submitted.length, 1, "the new conflict review has not submitted a second task");
+      } else editing.context.archiveEditError = "New form feedback";
+      await new Promise(setImmediate);
+      const state = {
+        kind: editing.context.archiveEditKind,
+        session: editing.context.archiveEditSession,
+        context: editing.context.archiveEditContext,
+        error: editing.context.archiveEditError,
+        returnFocus: editing.context.archiveEditReturnFocus,
+        review: editing.context.moveConflictReview,
+        reviewFocus: editing.context.moveConflictReturnFocus,
+        closed: editing.closed.length,
+        focusCalls: focusCalls.length,
+      };
+      if (outcome === "success") queued.resolve(1);
+      else queued.reject(new Error("late failure"));
+      await pending;
+      await new Promise(setImmediate);
+      const label = `${kind} late ${outcome}`;
+      assert.equal(editing.context.archiveEditKind, state.kind, `${label} must keep the new editor`);
+      assert.equal(editing.context.archiveEditSession, state.session, `${label} must not close a newer session`);
+      assert.equal(editing.context.archiveEditContext, state.context, label);
+      assert.equal(editing.context.archiveEditError, state.error, `${label} must keep the new form feedback`);
+      assert.equal(editing.context.renameTargetName, "new draft.txt", label);
+      assert.equal(editing.context.newFolderName, "New draft", label);
+      assert.equal(editing.context.moveTargetDir, "new-destination/", label);
+      assert.equal(editing.context.archiveEditReturnFocus, state.returnFocus, label);
+      assert.equal(editing.context.moveConflictReview, state.review, `${label} must keep the new conflict decision`);
+      assert.equal(editing.context.moveConflictReturnFocus, state.reviewFocus, label);
+      assert.equal(editing.closed.length, state.closed, `${label} cannot trigger a new close`);
+      assert.equal(focusCalls.length, state.focusCalls, `${label} cannot restore focus from the new session`);
+      assert.equal(editing.context.document.activeElement, newOrigin, label);
+      assert.equal(editing.notices.length, outcome === "success" ? 1 : 0, "accepted tasks retain queue feedback");
+      assert.equal(operations.length, outcome === "success" ? 1 : 0, "accepted tasks retain operation history");
+      if (outcome === "success") assert.equal(operations[0].status, "queued");
+      if (!reviewed) assert.equal(editing.toasts.length, 0, "old inline failures cannot be shown in the new form");
+    }
+
+    const { editing, origin, focusCalls, operations } = await prepare(kind);
+    const closedBefore = editing.closed.length;
+    editing.context.document.activeElement = editing.context.document.body;
+    await editing[action]();
+    await new Promise(setImmediate);
+    assert.equal(editing.context.archiveEditKind, null, `${kind} current success closes its editor`);
+    assert.equal(editing.context.archiveEditContext, null);
+    assert.equal(editing.context.archiveEditError, null);
+    assert.equal(editing.context.moveConflictReview, null);
+    assert.equal(editing.context.moveConflictReturnFocus, null);
+    assert.equal(editing.closed.length, closedBefore + (kind === "keep-both" || kind === "ready-only" ? 0 : 1),
+      "a reviewed move clears its review without closing an unrelated editor");
+    assert.equal(editing.submitted.length, 1);
+    assert.equal(editing.notices.length, 1);
+    assert.equal(operations.length, 1);
+    if (kind === "rename" || kind === "new-folder" || kind === "move") {
+      assert.equal(editing.context.archiveEditReturnFocus, null);
+      assert.equal(editing.context.document.activeElement, origin);
+      assert.deepEqual(focusCalls, [origin]);
+    }
+  }
 });
 
 test("archive editor feedback retains backend errors and explains blocked submissions", async () => {
@@ -700,6 +1076,31 @@ test("the shared archive editor renders one named modal form", async () => {
     assert.match(refreshing, /Refreshing archive contents/u);
     assert.match(refreshing, /type="submit" disabled/u);
     assert.doesNotMatch(refreshing, /<input[^>]*disabled/u, "drafts remain editable while the archive refreshes");
+  } finally { await server.close(); }
+});
+
+test("move review renders a bounded, labelled path table in both browser modes", async () => {
+  const server = await createTestServer();
+  try {
+    const { render } = await server.ssrLoadModule("svelte/server");
+    const { default: Review } = await server.ssrLoadModule("/src/components/MoveConflictReview.svelte");
+    const items = Array.from({ length: 42 }, (_, index) => ({ from: `源目录/报告-${index + 1}.txt`,
+      reason: "Target already exists", to: `报告-${index + 1}.txt`, keepBothTo: `报告-${index + 1} copy 2.txt` }));
+    for (const classic of [false, true]) {
+      const { body } = render(Review, { props: { classic, review: { targetDir: "", readyCount: 0, items },
+        tr: (_key, fallback) => fallback, onCancel: () => {}, onReadyOnly: () => {}, onKeepBoth: () => {} } });
+      assert.match(body, /Move conflicts in \/: 42/u);
+      assert.match(body, /aria-rowcount="43"/u);
+      assert.equal((body.match(/<td\b/gu) ?? []).length, 75, "only one page enters the DOM");
+      assert.match(body, /Source<\/th>/u);
+      assert.match(body, /Requested target<\/th>/u);
+      assert.match(body, /Target when keeping both<\/th>/u);
+      assert.match(body, /Target already exists/u);
+      assert.match(body, /Conflicts 1–25 of 42/u);
+      assert.match(body, /disabled(?:="")?>Move items without conflicts/u);
+      assert.match(body, /Next page/u);
+      assert.doesNotMatch(body, /role="dialog"|style=/u);
+    }
   } finally { await server.close(); }
 });
 

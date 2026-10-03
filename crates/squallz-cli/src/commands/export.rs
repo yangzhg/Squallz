@@ -41,15 +41,7 @@ pub fn run(
         )
         .into());
     }
-    let progress = CliProgress::new_for_operation(
-        ctx.quiet,
-        ctx.verbose,
-        json_output,
-        ctx.output_style,
-        ctx.color,
-        ctx.accent,
-        "export",
-    );
+    let progress = CliProgress::new_for_operation(ctx, json_output, "export");
     let destination_encrypted = out_password.is_some();
     let create_opts = CreateOptions {
         level: CompressionLevel::from_numeric(level),

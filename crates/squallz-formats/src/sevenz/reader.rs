@@ -1,6 +1,6 @@
-//! 7Z read side: entry listing, single-entry reads, single-pass extraction
-//! and integrity testing. Solid blocks force sequential decoding, so
-//! extraction and testing stream every entry exactly once through
+//! 7Z read side: entry listing, single-entry reads, single-pass conversion,
+//! extraction and integrity testing. Solid blocks force sequential decoding,
+//! so complete archive operations stream every entry exactly once through
 //! `for_each_entries`; `read_entry` (preview path) decodes up to the
 //! requested file.
 
@@ -12,8 +12,9 @@ use std::time::SystemTime;
 use sevenz_rust2::ArchiveEntry;
 use squallz_format_api::{
     empty_extract_report, ArchiveReader, BoundedProblemLog, ControlToken, EntryMeta, EntryPath,
-    EntryType, ExtractOptions, ExtractReport, ExtractSink, FormatError, OpenOptions, ProgressSink,
-    ReadSeek, SymlinkPolicy, TestSummary, TEST_PROBLEM_PREVIEW_LIMIT,
+    EntryStreamConsumer, EntryType, ExtractOptions, ExtractReport, ExtractSink, FormatError,
+    LimitsAccountant, OpenOptions, ProgressSink, ReadSeek, SafetyLimits, SymlinkPolicy,
+    TestSummary, TEST_PROBLEM_PREVIEW_LIMIT,
 };
 
 use super::streams::EntryStreams;
@@ -142,14 +143,22 @@ impl SevenZArchiveReader {
 
     fn test_with_problem_recorder(
         &mut self,
+        limits: &SafetyLimits,
         progress: &dyn ProgressSink,
         ctl: &ControlToken,
         mut record_problem: impl FnMut(String),
     ) -> Result<u64, FormatError> {
-        let total: u64 = self.inner.archive().files.iter().map(|e| e.size()).sum();
+        let total: u64 = self
+            .inner
+            .archive()
+            .files
+            .iter()
+            .map(|e| e.size())
+            .fold(0, u64::saturating_add);
         let entry_plans = build_entry_read_plans(self.inner.archive(), None)?;
         let mut entries_tested = 0u64;
         let mut done = 0u64;
+        let mut accountant = LimitsAccountant::new(*limits);
         let mut cancelled = false;
         let mut mapping_failure = None;
         let password_supplied = self.password_supplied;
@@ -166,6 +175,11 @@ impl SevenZArchiveReader {
             };
             entries_tested += 1;
             let meta = meta_of(entry, plan.encrypted);
+            if let Err(error) = accountant.check_entry(&meta) {
+                mapping_failure = Some(error);
+                return Ok(false);
+            }
+            let mut entry_output_bytes = 0;
             let mut hasher = crc32fast::Hasher::new();
             let mut buf = vec![0u8; READ_CHUNK];
             loop {
@@ -176,8 +190,16 @@ impl SevenZArchiveReader {
                 match reader.read(&mut buf) {
                     Ok(0) => break,
                     Ok(n) => {
+                        if let Err(error) = accountant.add_entry_output_bytes(
+                            &meta,
+                            &mut entry_output_bytes,
+                            n as u64,
+                        ) {
+                            mapping_failure = Some(error);
+                            return Ok(false);
+                        }
                         hasher.update(&buf[..n]);
-                        done += n as u64;
+                        done = done.saturating_add(n as u64);
                         progress.on_progress(done, total, &meta.path);
                     }
                     Err(e) => {
@@ -212,7 +234,7 @@ impl SevenZArchiveReader {
         if cancelled {
             return Err(FormatError::Cancelled);
         }
-        progress.on_progress(total, total, &EntryPath::from_utf8(""));
+        progress.on_progress(done, done, &EntryPath::from_utf8(""));
         Ok(entries_tested)
     }
 }
@@ -494,6 +516,26 @@ fn classify_entry_read_error(
     }
 }
 
+fn consume_entry_data(
+    reader: &mut dyn Read,
+    ctl: &ControlToken,
+    encrypted: bool,
+    password_supplied: bool,
+    consume: &mut dyn FnMut(&mut dyn Read) -> Result<(), FormatError>,
+) -> Result<(), FormatError> {
+    let mut tracked = ReadErrorTracker {
+        inner: reader,
+        failed: false,
+        control: ctl,
+    };
+    let result = consume(&mut tracked);
+    if tracked.failed {
+        result.map_err(|error| classify_entry_read_error(error, encrypted, password_supplied))
+    } else {
+        result
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn write_entry(
     sink: &mut ExtractSink<'_>,
@@ -504,17 +546,13 @@ fn write_entry(
     ctl: &ControlToken,
     password_supplied: bool,
 ) -> Result<(), FormatError> {
-    let mut tracked = ReadErrorTracker {
-        inner: reader,
-        failed: false,
-        control: ctl,
-    };
-    let result = sink.write_file(meta, out_path, &mut tracked, progress, ctl);
-    if tracked.failed {
-        result.map_err(|error| classify_entry_read_error(error, meta.encrypted, password_supplied))
-    } else {
-        result
-    }
+    consume_entry_data(
+        reader,
+        ctl,
+        meta.encrypted,
+        password_supplied,
+        &mut |data| sink.write_file(meta, out_path, data, progress, ctl),
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -587,19 +625,7 @@ impl ArchiveReader for SevenZArchiveReader {
                             return Ok(true);
                         }
                         found = true;
-                        let mut tracked = ReadErrorTracker {
-                            inner: reader,
-                            failed: false,
-                            control: ctl,
-                        };
-                        let result = consume(&mut tracked);
-                        if tracked.failed {
-                            result.map_err(|error| {
-                                classify_entry_read_error(error, encrypted, password_supplied)
-                            })?;
-                        } else {
-                            result?;
-                        }
+                        consume_entry_data(reader, ctl, encrypted, password_supplied, consume)?;
                         Ok(false)
                     })();
                     match result {
@@ -623,6 +649,92 @@ impl ArchiveReader for SevenZArchiveReader {
         })?;
         if !found {
             return Err(map_7z_error(sevenz_rust2::Error::FileNotFound));
+        }
+        Ok(())
+    }
+
+    fn read_entries(
+        &mut self,
+        entries: &[EntryMeta],
+        consume: &mut EntryStreamConsumer<'_>,
+        ctl: &ControlToken,
+    ) -> Result<(), FormatError> {
+        ctl.checkpoint()?;
+        let archive = self.inner.archive();
+        if entries.len() != archive.files.len() {
+            return Err(FormatError::Other(
+                "7z entry listing does not match the reader".into(),
+            ));
+        }
+        for (meta, entry) in entries.iter().zip(&archive.files) {
+            ctl.checkpoint()?;
+            let same_type = match meta.entry_type {
+                EntryType::Symlink { .. } => is_symlink(entry),
+                EntryType::Dir => entry.is_directory() && !is_symlink(entry),
+                EntryType::File => !entry.is_directory() && !is_symlink(entry),
+                _ => false,
+            };
+            if meta.path.raw != entry.name().as_bytes() || meta.size != entry.size() || !same_type {
+                return Err(FormatError::Other(
+                    "7z entry listing does not match the reader".into(),
+                ));
+            }
+        }
+        let plans = build_entry_read_plans(archive, None)?;
+        let password_supplied = self.password_supplied;
+        let mut visited = 0;
+        let mut failure = None;
+        let result = self.inner.for_each_entries(|entry, data| {
+            let result = (|| {
+                ctl.checkpoint()?;
+                let plan = plans.get(&entry_identity(entry)).ok_or_else(|| {
+                    FormatError::CorruptArchive("7z entry is missing from its stream map".into())
+                })?;
+                let meta = &entries[plan.file_index];
+                if is_symlink(entry) {
+                    let target = read_symlink_target(data, ctl).map_err(|error| {
+                        classify_entry_read_error(error, plan.encrypted, password_supplied)
+                    })?;
+                    let mut resolved = meta.clone();
+                    resolved.entry_type = EntryType::Symlink { target };
+                    consume(&resolved, None)?;
+                } else {
+                    consume_entry_data(
+                        data,
+                        ctl,
+                        plan.encrypted,
+                        password_supplied,
+                        &mut |data| {
+                            if matches!(meta.entry_type, EntryType::File) {
+                                consume(meta, Some(data))?;
+                            } else {
+                                consume(meta, None)?;
+                            }
+                            drain_entry(data, ctl)
+                        },
+                    )?;
+                }
+                ctl.checkpoint()?;
+                visited += 1;
+                Ok(true)
+            })();
+            match result {
+                Ok(next) => Ok(next),
+                Err(error) => {
+                    failure = Some(error);
+                    Ok(false)
+                }
+            }
+        });
+        ctl.checkpoint()?;
+        if let Some(error) = failure {
+            return Err(error);
+        }
+        result.map_err(map_7z_error)?;
+        if visited != entries.len() {
+            return Err(FormatError::CorruptArchive(
+                "7z stream map did not visit every entry".into(),
+            ));
         }
         Ok(())
     }
@@ -849,12 +961,14 @@ impl ArchiveReader for SevenZArchiveReader {
 
     fn test_summary(
         &mut self,
+        limits: &SafetyLimits,
         progress: &dyn ProgressSink,
         ctl: &ControlToken,
     ) -> Result<TestSummary, FormatError> {
         let problems = BoundedProblemLog::new(TEST_PROBLEM_PREVIEW_LIMIT);
-        let entries_tested =
-            self.test_with_problem_recorder(progress, ctl, |problem| problems.record(problem))?;
+        let entries_tested = self.test_with_problem_recorder(limits, progress, ctl, |problem| {
+            problems.record(problem)
+        })?;
         Ok(TestSummary {
             entries_tested,
             problems: problems.snapshot(),

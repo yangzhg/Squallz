@@ -77,15 +77,7 @@ pub fn protect(
         Some(count) => redundancy_for_tolerated_volume_loss(&sources, count)?,
         None => redundancy_or_default(redundancy),
     };
-    let progress = CliProgress::new_for_operation(
-        ctx.quiet,
-        ctx.verbose,
-        json,
-        ctx.output_style,
-        ctx.color,
-        ctx.accent,
-        "protect",
-    );
+    let progress = CliProgress::new_for_operation(ctx, json, "protect");
     let report = squallz_recovery::protect_files_controlled(
         &archive,
         redundancy,
@@ -106,15 +98,7 @@ pub fn verify(
     recovery: Option<PathBuf>,
     json: bool,
 ) -> Result<(), CliError> {
-    let progress = CliProgress::new_for_operation(
-        ctx.quiet,
-        ctx.verbose,
-        json,
-        ctx.output_style,
-        ctx.color,
-        ctx.accent,
-        "verify",
-    );
+    let progress = CliProgress::new_for_operation(ctx, json, "verify");
     let report =
         squallz_recovery::verify_controlled(&archive, recovery.as_deref(), &progress, &ctx.ctl);
     progress.finish();
@@ -142,15 +126,7 @@ pub fn repair(
         .into());
     }
     if use_recovery {
-        let progress = CliProgress::new_for_operation(
-            ctx.quiet,
-            ctx.verbose,
-            json,
-            ctx.output_style,
-            ctx.color,
-            ctx.accent,
-            "repair",
-        );
+        let progress = CliProgress::new_for_operation(ctx, json, "repair");
         let report = match output_dir.as_deref() {
             Some(directory) => squallz_recovery::repair_to_directory_controlled(
                 &archive,
@@ -233,9 +209,13 @@ fn repair_sqz(
         );
     }
 
-    let source_report =
-        ctx.engine
-            .test_summary(&archive, &OpenOptions::default(), &NoProgress, &ctx.ctl)?;
+    let source_report = ctx.engine.test_summary(
+        &archive,
+        &OpenOptions::default(),
+        &squallz_core::api::SafetyLimits::default(),
+        &NoProgress,
+        &ctx.ctl,
+    )?;
     if !source_report.is_ok() {
         if json {
             let archive_path = archive.display().to_string();
@@ -263,29 +243,22 @@ fn repair_sqz(
         return Err(CliError::Exit(EXIT_CORRUPT));
     }
 
-    let progress = CliProgress::new_for_operation(
-        ctx.quiet,
-        ctx.verbose,
-        json,
-        ctx.output_style,
-        ctx.color,
-        ctx.accent,
-        "repair",
-    );
+    let progress = CliProgress::new_for_operation(ctx, json, "repair");
     let create = CreateOptions {
         level: CompressionLevel::from_numeric(level),
         resources: resource_options(threads, memory_limit),
         ..CreateOptions::default()
     };
-    let in_place = ctx.engine.convert_with_atomic_replace(
+    let result = ctx.engine.convert_with_atomic_replace(
         &archive,
         &output,
         &OpenOptions::default(),
         &create,
         &progress,
         &ctx.ctl,
-    )?;
+    );
     progress.finish();
+    let in_place = result?;
     if json {
         let archive_path = archive.display().to_string();
         let output_path = output.display().to_string();
@@ -350,6 +323,7 @@ fn repair_zip_rebuild(
     let source_test = ctx.engine.test_summary_with_structure(
         &archive,
         &OpenOptions::default(),
+        &squallz_core::api::SafetyLimits::default(),
         &NoProgress,
         &ctx.ctl,
     )?;
@@ -380,29 +354,22 @@ fn repair_zip_rebuild(
     let structure = source_test.structure;
     let source_report = source_test.into_summary();
 
-    let progress = CliProgress::new_for_operation(
-        ctx.quiet,
-        ctx.verbose,
-        json,
-        ctx.output_style,
-        ctx.color,
-        ctx.accent,
-        "repair",
-    );
+    let progress = CliProgress::new_for_operation(ctx, json, "repair");
     let create = CreateOptions {
         level: CompressionLevel::from_numeric(level),
         resources: resource_options(threads, memory_limit),
         ..CreateOptions::default()
     };
-    let in_place = ctx.engine.convert_with_atomic_replace(
+    let result = ctx.engine.convert_with_atomic_replace(
         &archive,
         &output,
         &OpenOptions::default(),
         &create,
         &progress,
         &ctx.ctl,
-    )?;
+    );
     progress.finish();
+    let in_place = result?;
     if json {
         let value = json!({
             "ok": true,

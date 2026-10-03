@@ -39,6 +39,7 @@
 | log | 0.4.31 | MIT OR Apache-2.0 | 活跃（rust-lang 官方） | i18n 缺 key 的 debug 日志门面 |
 | rpassword | 7.5.4 | Apache-2.0 | 活跃（conradkleinespel） | TTY 密码交互输入 |
 | ctrlc | 3.5.2 | MIT OR Apache-2.0 | 活跃（Detegr） | Ctrl-C → ControlToken.cancel() |
+| terminal_size | 0.4.4 | MIT OR Apache-2.0 | eminence/terminal-size 维护，2026-03 发布 | 通过安全接口查询 stderr 终端列数与行数，CLI 进度按实际尺寸显示；复用已登记的 rustix / windows-sys 平台后端 |
 | tokio | 1.52.3 | MIT | 活跃（Tokio 官方） | `squallz-cli` 直接依赖：用 current-thread runtime 执行共享的 `sqz check-update` 异步请求，并在等待期间响应 ControlToken / Ctrl-C 取消；不启动后台更新任务 |
 | winapi-util | 0.1.11 | Unlicense OR MIT | 活跃（BurntSushi） | Windows 目录和文件的卷序列号、文件 ID 查询，用于分卷工作空间、RAR 邻卷路径绑定及共享解压目录元数据恢复 |
 | libc | 0.2.186 | MIT OR Apache-2.0 | 活跃（rust-lang） | macOS 目标卷大小写语义查询（squallz-core）；Apple 平台打开链接自身的 O_SYMLINK 常量（squallz-format-api） |

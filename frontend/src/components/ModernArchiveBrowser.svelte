@@ -2,6 +2,8 @@
   import type { EntryDto } from "../lib/ipc";
   import type { AppActionAvailability } from "../lib/app-actions";
   import type { ArchiveBrowseRecoveryState } from "./ArchiveBrowseRecovery.svelte";
+  import type { MoveConflictReviewView } from "./MoveConflictReview.svelte";
+  import type { ArchiveEditingState } from "./ArchiveEditingStatus.svelte";
 
   type Translate = (key: string, fallback: string) => string;
 
@@ -26,13 +28,6 @@
     previewActionIcon: "external-link" | "folder-open" | "eye";
   };
 
-  type MoveConflictItem = {
-    from: string;
-    reason: string | null;
-    to: string;
-    keepBothTo: string | null;
-  };
-
   export interface ModernArchiveBrowserProps {
     view: {
       archive: {
@@ -44,9 +39,11 @@
       };
       actions: {
         mutationDisabledReason: string;
+        testDisabledReason: string;
         renameDisabledReason: string;
         deleteDisabledReason: string;
         moveDisabledReason: string;
+        copyOutDisabledReason: string;
         enabled: AppActionAvailability;
         previewBusy: boolean;
         previewDisabledReason: string;
@@ -58,12 +55,8 @@
         nestedPreview: boolean;
       };
       selectedSummary: string;
-      conflict: {
-        count: number;
-        readyCount: number;
-        targetDir: string;
-        items: readonly MoveConflictItem[];
-      } | null;
+      editingStatus: ArchiveEditingState | null;
+      conflict: MoveConflictReviewView | null;
       structureWarning: string | null;
       recovery: ArchiveBrowseRecoveryState;
       encodingWarning: string | null;
@@ -79,7 +72,9 @@
         busy: boolean;
         busyLabel: string;
       };
-      rows: readonly ModernBrowserEntry[];
+      rows: readonly (ModernBrowserEntry | null)[];
+      startIndex: number;
+      rowsPending: boolean;
       paddingTop: number;
       paddingBottom: number;
       emptyLabel: string;
@@ -90,14 +85,17 @@
     onOpenRoot: () => void;
     onExtractAll: () => void;
     onExtractSelection: () => void;
+    onTestArchive: () => void;
     onAddFiles: () => void;
     onOpenRecovery: () => void;
     onRetryBrowse: () => void;
+    onRetryFormats: () => void;
     onConvert: () => void;
     onOpenInfo: () => void;
     onRenameSelection: () => void;
     onDeleteSelection: () => void;
     onMoveSelection: () => void;
+    onCopyOutSelection: () => void;
     onCreateFolder: () => void;
     onPreviewSelection: () => void;
     onOpenNestedPreview: () => void;
@@ -126,6 +124,8 @@
   import Icon from "./Icon.svelte";
   import ArchiveStructureWarning from "./ArchiveStructureWarning.svelte";
   import ArchiveBrowseRecovery from "./ArchiveBrowseRecovery.svelte";
+  import ArchiveEditingStatus from "./ArchiveEditingStatus.svelte";
+  import MoveConflictReview from "./MoveConflictReview.svelte";
   import { cssVariables, type CssVariableMap } from "../lib/css-variables";
 
   let {
@@ -136,14 +136,17 @@
     onOpenRoot,
     onExtractAll,
     onExtractSelection,
+    onTestArchive,
     onAddFiles,
     onOpenRecovery,
     onRetryBrowse,
+    onRetryFormats,
     onConvert,
     onOpenInfo,
     onRenameSelection,
     onDeleteSelection,
     onMoveSelection,
+    onCopyOutSelection,
     onCreateFolder,
     onPreviewSelection,
     onOpenNestedPreview,
@@ -168,6 +171,9 @@
 
   let searchInput = $state<HTMLInputElement | null>(null);
   let breadcrumbTrail = $state<HTMLDivElement | null>(null);
+  let actionsOpen = $state(false);
+  let actionSummary = $state<HTMLElement | null>(null);
+  let tools = $state<HTMLDetailsElement | null>(null);
 
   $effect(() => {
     const trail = breadcrumbTrail;
@@ -180,8 +186,13 @@
   });
 
   onMount(() => {
+    const details = tools;
+    details?.addEventListener("keydown", onToolsKeydown);
     onSearchInputMount(searchInput);
-    return () => onSearchInputMount(null);
+    return () => {
+      details?.removeEventListener("keydown", onToolsKeydown);
+      onSearchInputMount(null);
+    };
   });
 
   function virtualPadVariables(height: number): CssVariableMap {
@@ -191,20 +202,30 @@
   function labelWithDisabledReason(label: string, reason: string): string {
     return reason ? `${label} · ${reason}` : label;
   }
+
+  function runToolAction(action: () => void): void {
+    actionsOpen = false;
+    actionSummary?.focus({ preventScroll: true });
+    action();
+  }
+
+  function onToolsKeydown(event: KeyboardEvent): void {
+    if (event.key !== "Escape" || !actionsOpen) return;
+    event.preventDefault();
+    event.stopPropagation();
+    actionsOpen = false;
+    actionSummary?.focus({ preventScroll: true });
+  }
 </script>
 
 <div class="archive-top">
   <div class="archive-hero">
-    <div class="archive-object" aria-hidden="true">
-      <div class="archive-lid"></div>
-      <div class="archive-core">
-        <span>{view.archive.format}</span>
+    <div class="archive-heading">
+      <span class="archive-format-mark" aria-hidden="true">{view.archive.format}</span>
+      <div class="archive-summary">
+        <h1>{view.archive.title}</h1>
+        <p>{view.archive.summary}</p>
       </div>
-    </div>
-    <div class="archive-summary">
-      <span class="eyebrow">{tr("gui.archive.secure_archive", "Secure archive")}</span>
-      <h1>{view.archive.title}</h1>
-      <p>{view.archive.summary}</p>
     </div>
     <div class="summary-actions">
       <button class="primary large" disabled={!view.actions.enabled.extract_all} title={view.actions.extractDestinationHint} onclick={onExtractAll}>
@@ -215,58 +236,14 @@
       </button>
       <button
         class="ghost large"
-        disabled={!view.actions.enabled.add_files}
-        title={view.actions.mutationDisabledReason}
-        onclick={onAddFiles}
-      ><Icon name="file" size={17} />{tr("gui.action.add_files", "Add files")}</button>
-      <button
-        class="ghost large"
-        disabled={Boolean(view.actions.mutationDisabledReason)}
-        title={view.actions.mutationDisabledReason}
-        onclick={onOpenRecovery}
-      ><Icon name="shield-alert" size={17} />{tr("gui.action.protect", "Protect")}</button>
-      <button class="ghost large" disabled={!view.actions.enabled.convert_archive} onclick={onConvert}>
-        <Icon name="repeat" size={17} />{tr("gui.action.convert", "Convert")}
-      </button>
-      <button class="ghost large" disabled={!view.actions.enabled.archive_info} onclick={onOpenInfo}>
-        <Icon name="info" size={17} />{tr("gui.archive.info", "Info")}
-      </button>
-      <button
-        class="ghost large"
-        disabled={!view.actions.enabled.rename_entry}
-        title={view.actions.renameDisabledReason}
+        disabled={!view.actions.enabled.test_archive}
+        title={view.actions.testDisabledReason}
         aria-label={labelWithDisabledReason(
-          tr("gui.action.rename_selected", "Rename selected"),
-          view.actions.renameDisabledReason,
+          tr("gui.action.test_archive", "Test archive"),
+          view.actions.testDisabledReason,
         )}
-        onclick={onRenameSelection}
-      ><Icon name="repeat" size={17} />{tr("gui.action.rename_selected", "Rename selected")}</button>
-      <button
-        class="ghost large"
-        disabled={!view.actions.enabled.delete_entries}
-        title={view.actions.deleteDisabledReason}
-        aria-label={labelWithDisabledReason(
-          tr("gui.action.delete_selected", "Delete selected"),
-          view.actions.deleteDisabledReason,
-        )}
-        onclick={onDeleteSelection}
-      ><Icon name="x-circle" size={17} />{tr("gui.action.delete_selected", "Delete selected")}</button>
-      <button
-        class="ghost large"
-        disabled={!view.actions.enabled.move_entries}
-        title={view.actions.moveDisabledReason}
-        aria-label={labelWithDisabledReason(
-          tr("gui.action.move_selected", "Move selected"),
-          view.actions.moveDisabledReason,
-        )}
-        onclick={onMoveSelection}
-      ><Icon name="repeat" size={17} />{tr("gui.action.move_selected", "Move selected")}</button>
-      <button
-        class="ghost large"
-        disabled={!view.actions.enabled.new_folder}
-        title={view.actions.mutationDisabledReason}
-        onclick={onCreateFolder}
-      ><Icon name="folder-open" size={17} />{tr("gui.action.new_folder", "New folder")}</button>
+        onclick={onTestArchive}
+      ><Icon name="check-circle" size={17} />{tr("gui.action.test_archive", "Test archive")}</button>
       <button
         class="ghost large"
         disabled={!view.actions.enabled.preview_entry}
@@ -278,69 +255,57 @@
         )}
         onclick={onPreviewSelection}
       ><Icon name={view.actions.previewIcon} size={17} />{view.actions.previewLabel}</button>
-      {#if view.actions.nestedPreview}
-        <button class="ghost large" onclick={onOpenNestedPreview}>
-          <Icon name="folder-open" size={17} />{tr("gui.action.open_nested", "Open")}
-        </button>
-        <button class="ghost large" onclick={onExtractNestedPreview}>
-          <Icon name="archive" size={17} />{tr("gui.action.extract_nested", "Extract")}
-        </button>
-      {/if}
     </div>
-  </div>
-
-  <div class="workbench-strip empty-workbench-strip">
-    <span>{view.selectedSummary}</span>
-    <small>{tr("gui.preview.keyboard_hint", "Space or Return opens the focused item")}</small>
-  </div>
-
-  {#if view.conflict}
-    <div class="move-conflict-review" role="dialog" aria-label={tr("gui.move.conflicts", "Move target conflicts")} tabindex="-1">
-      <div>
-        <span class="block-label">{tr("gui.move.conflicts", "Move target conflicts")}</span>
-        <strong>
-          {tr("gui.move.target_conflicts", "{count} target conflicts in {target}")
-            .replace("{count}", String(view.conflict.count))
-            .replace("{target}", view.conflict.targetDir)}
-        </strong>
-        <p>
-          {tr("gui.move.ready_without_renaming", "{count} entries are ready to move without changing names.")
-            .replace("{count}", String(view.conflict.readyCount))}
-          {tr("gui.move.shown_conflicts", "Showing {shown} of {count} conflicts; your choice applies to the whole selection.")
-            .replace("{shown}", String(view.conflict.items.length)).replace("{count}", String(view.conflict.count))}
-        </p>
-      </div>
-      <!-- svelte-ignore a11y_no_noninteractive_tabindex (focusable scroll region) -->
-      <div class="move-conflict-list" role="region" aria-label={tr("gui.move.conflicts", "Move target conflicts")} tabindex="0">
-        {#each view.conflict.items as item}
-          <div>
-            <strong>{item.from}</strong>
-            <span>{item.reason}</span>
-            <em>{item.to}</em>
-            <b>{item.keepBothTo}</b>
+    <details class="archive-tools" bind:this={tools} bind:open={actionsOpen}>
+      <summary bind:this={actionSummary}>
+        <span><Icon name="settings" size={15} />{tr("gui.archive.more_actions", "More actions")}</span>
+        <small>{view.selectedSummary}</small>
+        <Icon name="chevron-down" size={14} />
+      </summary>
+      <div class="archive-tool-groups">
+        <section>
+          <h2>{tr("gui.inspector.archive", "Archive")}</h2>
+          <div class="archive-tool-actions">
+            <button disabled={!view.actions.enabled.add_files} title={view.actions.mutationDisabledReason} onclick={() => runToolAction(onAddFiles)}><Icon name="file" size={15} />{tr("gui.action.add_files", "Add files")}</button>
+            <button disabled={!view.actions.enabled.new_folder} title={view.actions.mutationDisabledReason} onclick={() => runToolAction(onCreateFolder)}><Icon name="folder-open" size={15} />{tr("gui.action.new_folder", "New folder")}</button>
+            <button disabled={!view.actions.enabled.convert_archive} onclick={() => runToolAction(onConvert)}><Icon name="repeat" size={15} />{tr("gui.action.convert", "Convert")}</button>
+            <button disabled={!view.actions.enabled.archive_info} onclick={() => runToolAction(onOpenInfo)}><Icon name="info" size={15} />{tr("gui.archive.info", "Info")}</button>
           </div>
-        {/each}
+        </section>
+        <section>
+          <h2>{tr("gui.context.selection_actions", "Selection actions")}</h2>
+          <div class="archive-tool-actions">
+            <button disabled={!view.actions.enabled.rename_entry} title={view.actions.renameDisabledReason} aria-label={labelWithDisabledReason(tr("gui.action.rename_selected", "Rename selected"), view.actions.renameDisabledReason)} onclick={() => runToolAction(onRenameSelection)}><Icon name="repeat" size={15} />{tr("gui.action.rename_selected", "Rename selected")}</button>
+            <button disabled={!view.actions.enabled.move_entries} title={view.actions.moveDisabledReason} aria-label={labelWithDisabledReason(tr("gui.action.move_selected", "Move selected"), view.actions.moveDisabledReason)} onclick={() => runToolAction(onMoveSelection)}><Icon name="repeat" size={15} />{tr("gui.action.move_selected", "Move selected")}</button>
+            <button disabled={!view.actions.enabled.delete_entries} title={view.actions.deleteDisabledReason} aria-label={labelWithDisabledReason(tr("gui.action.delete_selected", "Delete selected"), view.actions.deleteDisabledReason)} onclick={() => runToolAction(onDeleteSelection)}><Icon name="x-circle" size={15} />{tr("gui.action.delete_selected", "Delete selected")}</button>
+            <button disabled={!view.actions.enabled.copy_entries} title={view.actions.copyOutDisabledReason} aria-label={labelWithDisabledReason(tr("gui.action.copy_out", "Copy out"), view.actions.copyOutDisabledReason)} onclick={() => runToolAction(onCopyOutSelection)}><Icon name="external-link" size={15} />{tr("gui.action.copy_out", "Copy out")}</button>
+            {#if view.actions.nestedPreview}
+              <button onclick={() => runToolAction(onOpenNestedPreview)}><Icon name="folder-open" size={15} />{tr("gui.action.open_nested", "Open")}</button>
+              <button onclick={() => runToolAction(onExtractNestedPreview)}><Icon name="archive" size={15} />{tr("gui.action.extract_nested", "Extract")}</button>
+            {/if}
+          </div>
+          <p>{tr("gui.selection.range_hint", "Shift-click to select a range · ⌘/Ctrl-click to select individual entries")}</p>
+          <p>{tr("gui.preview.keyboard_hint", "↑/↓ moves between items · Shift extends selection · Space or Return opens")}</p>
+        </section>
+        <section>
+          <h2>{tr("gui.inspector.recovery", "Recovery")}</h2>
+          <strong>{tr("gui.recovery.status_not_checked", "Recovery status not checked")}</strong>
+          <p>{tr("gui.recovery.requires_recovery_data", "Verify can detect corruption, but repair requires PAR2 or SQZ recovery data created earlier.")}</p>
+          <div class="archive-tool-actions">
+            <button onclick={() => runToolAction(onOpenRecovery)}><Icon name="shield-alert" size={15} />{tr("gui.recovery.open_recovery", "Open Recovery")}</button>
+          </div>
+        </section>
       </div>
-      <div class="move-conflict-actions">
-        <button onclick={onCancelMoveConflict}>{tr("common.cancel", "Cancel")}</button>
-        <button disabled={view.conflict.readyCount === 0} onclick={onSubmitMoveReadyOnly}>
-          {tr("gui.move.ready_only", "Move ready only")}
-        </button>
-        <button class="primary-lite" onclick={onSubmitMoveKeepBoth}>
-          {tr("gui.move.keep_both_all", "Keep both and move all")}
-        </button>
-      </div>
-    </div>
+    </details>
+  </div>
+
+  {#if view.editingStatus}
+    <ArchiveEditingStatus state={view.editingStatus} onRetry={onRetryFormats} />
   {/if}
 
-  <div class="recovery-ribbon">
-    <div>
-      <Icon name="shield-alert" size={17} />
-      <strong>{tr("gui.recovery.status_not_checked", "Recovery status not checked")}</strong>
-      <span>{tr("gui.recovery.open_to_protect_or_verify", "Open Recovery to create PAR2 data or verify existing recovery data.")}</span>
-    </div>
-    <button onclick={onOpenRecovery}>{tr("gui.recovery.open_recovery", "Open Recovery")}</button>
-  </div>
+  {#if view.conflict}
+    <MoveConflictReview review={view.conflict} {tr} onCancel={onCancelMoveConflict} onReadyOnly={onSubmitMoveReadyOnly} onKeepBoth={onSubmitMoveKeepBoth} />
+  {/if}
 
   {#if view.structureWarning}
     <ArchiveStructureWarning
@@ -404,16 +369,16 @@
         ><Icon name="x-circle" size={14} /></button>
       {/if}
     </div>
-    <span role="status" aria-live="polite">{view.filterStatus}</span>
+    <span role="status" aria-live="polite">{view.rowsPending && !view.filterPending && !view.recovery ? tr("gui.list.loading_rows", "Loading entries…") : view.filterStatus}</span>
   </div>
   <div class="archive-list-feedback">
     <ArchiveBrowseRecovery state={view.recovery} retryLabel={tr("gui.error.retry", "Retry")} onRetry={onRetryBrowse} />
-    <p class="archive-selection-hint">{tr("gui.selection.range_hint", "Shift-click to select a range · ⌘/Ctrl-click to select individual entries")}</p>
   </div>
   <div
     class="modern-table"
     role="table"
     aria-label={tr("gui.table.archive", "Archive table")}
+    aria-busy={view.rowsPending}
     aria-rowcount={Math.max(view.totalRows + 1, 2)}
     aria-keyshortcuts="Meta+A Control+A"
   >
@@ -444,93 +409,98 @@
       onscroll={onBrowseScroll}
     >
       <div class="virtual-pad" use:cssVariables={virtualPadVariables(view.paddingTop)}></div>
-      {#each view.rows as entry}
-        <div
-          class="modern-row"
-          class:selected={entry.selected}
-          class:previewing={entry.previewing}
-          role="row"
-          aria-rowindex={(entry.virtualIndex ?? 0) + 2}
-          aria-selected={entry.selected}
-          tabindex="0"
-          aria-keyshortcuts="Space Enter Backspace Meta+ArrowUp Alt+ArrowUp E"
-          data-row-index={entry.virtualIndex ?? ""}
-          onclick={(event) => onSelectEntry(entry, event)}
-          ondblclick={(event) => {
-            if (event.target instanceof Element && event.target.closest("button, input")) return;
-            event.preventDefault();
-            onActivateEntry(entry);
-          }}
-          onkeydown={(event) => onEntryKeydown(event, entry)}
-          oncontextmenu={(event) => onOpenEntryContext(event, entry)}
-        >
-          <div class="file-name" role="cell">
-            <button
-              type="button"
-              class="row-select-toggle"
-              class:checked={entry.selected}
-              role="checkbox"
-              aria-checked={entry.selected}
-              aria-label={view.selection.busy ? view.selection.busyLabel : entry.selectionLabel}
-              title={view.selection.busy ? view.selection.busyLabel : entry.selectionLabel}
-              disabled={!entry.source || view.selection.busy}
-              onclick={(event) => {
-                event.stopPropagation();
-                onToggleEntrySelection(entry, event);
-              }}
-            ></button>
-            <span
-              class="file-badge"
-              class:type-folder={entry.type === "folder"}
-              class:type-locked={entry.type === "locked"}
-              class:type-warning={entry.type === "warning"}
-              role="img"
-              aria-label={entry.attr}
-              title={entry.attr}
-            >
-              {#if entry.type === "locked"}
-                <Icon name="lock" size={14} />
-              {:else if entry.source?.entry_type === "symlink" || entry.source?.entry_type === "hardlink"}
-                <Icon name="link" size={14} />
-              {:else}
-                {entry.type === "folder"
-                  ? "DIR"
-                  : entry.type === "pdf"
-                    ? "PDF"
-                    : entry.type === "sheet"
-                      ? "XLS"
-                      : entry.type === "warning"
-                        ? "TXT"
-                        : "FILE"}
-              {/if}
-            </span>
-            <span class="archive-entry-label">
-              <strong title={entry.source?.path ?? entry.name}>{entry.name}</strong>
-              {#if entry.location}<small title={entry.source?.path}>{entry.location}</small>{/if}
-            </span>
-            {#if entry.source}
+      {#each view.rows as entry, index (view.startIndex + index)}
+        {#if entry}
+          <div
+            class="modern-row"
+            class:selected={entry.selected}
+            class:previewing={entry.previewing}
+            role="row"
+            aria-rowindex={(entry.virtualIndex ?? 0) + 2}
+            aria-selected={entry.selected}
+            tabindex="0"
+            aria-keyshortcuts="ArrowUp ArrowDown Home End PageUp PageDown Shift+ArrowUp Shift+ArrowDown Space Enter Backspace Meta+ArrowUp Alt+ArrowUp E"
+            data-row-index={entry.virtualIndex ?? ""}
+            onclick={(event) => onSelectEntry(entry, event)}
+            ondblclick={(event) => {
+              if (event.target instanceof Element && event.target.closest("button, input")) return;
+              event.preventDefault();
+              onActivateEntry(entry);
+            }}
+            onkeydown={(event) => onEntryKeydown(event, entry)}
+            oncontextmenu={(event) => onOpenEntryContext(event, entry)}
+          >
+            <div class="file-name" role="cell">
               <button
-                class="row-preview-button"
-                disabled={view.selection.busy}
-                aria-busy={entry.previewBusy}
-                title={view.selection.busy ? view.selection.busyLabel : entry.previewActionLabel}
-                aria-label={`${view.selection.busy ? view.selection.busyLabel : entry.previewActionLabel} ${entry.name}`}
+                type="button"
+                class="row-select-toggle"
+                class:checked={entry.selected}
+                role="checkbox"
+                aria-checked={entry.selected}
+                aria-label={view.selection.busy ? view.selection.busyLabel : entry.selectionLabel}
+                title={view.selection.busy ? view.selection.busyLabel : entry.selectionLabel}
+                disabled={!entry.source || view.selection.busy}
                 onclick={(event) => {
                   event.stopPropagation();
-                  onPreviewEntry(entry);
+                  onToggleEntrySelection(entry, event);
                 }}
-              ><Icon name={entry.previewActionIcon} size={13} /></button>
-            {/if}
+              ></button>
+              <span
+                class="file-badge"
+                class:type-folder={entry.type === "folder"}
+                class:type-locked={entry.type === "locked"}
+                class:type-warning={entry.type === "warning"}
+                role="img"
+                aria-label={entry.attr}
+                title={entry.attr}
+              >
+                {#if entry.type === "locked"}
+                  <Icon name="lock" size={14} />
+                {:else if entry.source?.entry_type === "symlink" || entry.source?.entry_type === "hardlink"}
+                  <Icon name="link" size={14} />
+                {:else}
+                  {entry.type === "folder"
+                    ? "DIR"
+                    : entry.type === "pdf"
+                      ? "PDF"
+                      : entry.type === "sheet"
+                        ? "XLS"
+                        : entry.type === "warning"
+                          ? "TXT"
+                          : "FILE"}
+                {/if}
+              </span>
+              <span class="archive-entry-label">
+                <strong title={entry.source?.path ?? entry.name}>{entry.name}</strong>
+                {#if entry.location}<small title={entry.source?.path}>{entry.location}</small>{/if}
+              </span>
+              {#if entry.source}
+                <button
+                  class="row-preview-button"
+                  disabled={view.selection.busy}
+                  aria-busy={entry.previewBusy}
+                  title={view.selection.busy ? view.selection.busyLabel : entry.previewActionLabel}
+                  aria-label={`${view.selection.busy ? view.selection.busyLabel : entry.previewActionLabel} ${entry.name}`}
+                  onclick={(event) => {
+                    event.stopPropagation();
+                    onPreviewEntry(entry);
+                  }}
+                ><Icon name={entry.previewActionIcon} size={13} /></button>
+              {/if}
+            </div>
+            <span role="cell">{entry.size}</span>
+            <span role="cell">{entry.packed}</span>
+            <span role="cell">{entry.modified}</span>
           </div>
-          <span role="cell">{entry.size}</span>
-          <span role="cell">{entry.packed}</span>
-          <span role="cell">{entry.modified}</span>
-        </div>
-      {:else}
+        {:else}
+          <div class="archive-row-placeholder modern-row-placeholder" class:pending={view.rowsPending} aria-hidden="true"></div>
+        {/if}
+      {/each}
+      {#if view.totalRows === 0}
         <div class="modern-row empty-row" role="row" aria-rowindex="2">
           <div class="file-name" role="cell" aria-colspan="4"><strong>{view.emptyLabel}</strong></div>
         </div>
-      {/each}
+      {/if}
       <div class="virtual-pad" use:cssVariables={virtualPadVariables(view.paddingBottom)}></div>
     </div>
   </div>

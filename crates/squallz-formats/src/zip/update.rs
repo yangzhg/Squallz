@@ -281,6 +281,7 @@ fn rewrite(
     ctl: &ControlToken,
 ) -> Result<(), FormatError> {
     let mut writer = ZipArchiveWriter::new_with_control(output, opts, ctl);
+    writer.set_raw_comment(archive.comment())?;
 
     // Progress in bytes: raw (compressed) bytes for copies, plain bytes for
     // additions.

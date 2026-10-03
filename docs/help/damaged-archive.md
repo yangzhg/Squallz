@@ -22,6 +22,9 @@ ZIP 中央目录缺失或无法读取时，`list` 仍可从本地文件头给出
 `ok: false` 和 `structure: "zip_local_headers_recovered"`。可用
 `sqz repair archive.zip -o rebuilt.zip --json` 生成不覆盖原件的新包，再对新包运行 `test`。
 
+`rebuilt.zip` 必须是未占用的新位置；已有或修复期间出现的同名项目会以 `output_exists`
+拒绝并保留已有内容，请改用新名称。显式将 `-o` 指定为源 ZIP 路径时会原地原子替换。
+
 ## 有恢复数据时
 
 如果提前生成过 PAR2：
@@ -45,6 +48,10 @@ sqz test archive.sqz --json
 sqz repair archive.sqz -o repaired.sqz --json
 sqz export repaired.sqz -o repaired.zip --json
 ```
+
+独立的 `.sqz` 修复输出同样不覆盖已有或修复期间出现的同名项目，遇到 `output_exists`
+请改用新名称。单文件 `.sqz` 省略 `-o`，或显式指定源路径时，会在修复成功后原地原子替换；
+分卷源必须指定新的 `.sqz` 输出。
 
 ## 没有恢复数据时
 

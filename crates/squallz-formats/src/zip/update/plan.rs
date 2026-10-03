@@ -141,7 +141,7 @@ pub(super) fn prepare<R: Read + Seek>(
                 "rename source not found in archive: {from}"
             )));
         }
-        if directory && original.files.contains(source) {
+        if directory && original.files.contains(source) && !selected.directory {
             return Err(FormatError::Other(format!(
                 "ambiguous rename source: {from}"
             )));
@@ -210,13 +210,16 @@ pub(super) fn prepare<R: Read + Seek>(
         if name.deleted {
             continue;
         }
-        let source = requested.get_key_value(&name.key).or_else(|| {
-            parents(&name.key).find_map(|parent| {
-                requested
-                    .get_key_value(parent)
-                    .filter(|(_, item)| item.directory)
-            })
-        });
+        let source = requested
+            .get_key_value(&name.key)
+            .filter(|(_, item)| item.directory == name.directory)
+            .or_else(|| {
+                parents(&name.key).find_map(|parent| {
+                    requested
+                        .get_key_value(parent)
+                        .filter(|(_, item)| item.directory)
+                })
+            });
         if let Some((source, request)) = source {
             let suffix = &name.key[source.len()..];
             let suffix = match std::str::from_utf8(suffix) {

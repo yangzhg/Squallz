@@ -440,7 +440,7 @@ test("SFX result and recovery details use the durable single-backup contract", a
       error: {
         key: "error.input_changed",
         params: {},
-        detail: "archive input changed after extraction preflight",
+        detail: "archive input changed since it was opened or checked",
       },
     });
     assert.equal(taskDialogResultSummary(changedInput), "Archive Changed");
@@ -448,6 +448,21 @@ test("SFX result and recovery details use the durable single-backup contract", a
       taskNextStepDetail(changedInput, false),
       "Reopen the archive, review the selected files and destination, then start extraction again. Squallz did not extract anything.",
     );
+    const changedUpdate = sfxTask({
+      state: "failed", result: null, revealPath: null, error: changedInput.error,
+      spec: {
+        kind: "update", path: changedInput.spec.path, expected_archive_id: null,
+        add: [], delete: ["original.jpg"], rename: [], mkdir: [], encoding: null,
+        excludes: [], content_policy: "keep_all_files", password: null, level: 6,
+      },
+    });
+    assert.equal(taskDialogResultSummary(changedUpdate), "Archive Changed");
+    assert.equal(taskNextStepDetail(changedUpdate, false),
+      "Reopen the archive and select the intended items before applying changes again. These changes were not applied.");
+    await loadLocale("zh-CN");
+    assert.equal(taskNextStepDetail(changedUpdate, false),
+      "请重新打开压缩包，选择需要处理的条目后再次应用修改；本次修改未应用。");
+    await loadLocale("en-US");
 
     const missingVolume = sfxTask({
       state: "failed",
@@ -615,6 +630,20 @@ test("SFX result and recovery details use the durable single-backup contract", a
     assert.equal(taskReviewScreen({ ...boundedTest, state: "running" }), null);
     assert.equal(taskReviewScreen({ ...boundedTest, state: "cancelled" }), null);
     assert.equal(taskReviewScreen({ ...boundedTest, state: "failed", error: { key: "error.corrupt_archive" } }), "recovery");
+    const limitedTest = {
+      ...boundedTest,
+      state: "failed",
+      result: null,
+      error: { key: "error.resource_limit", params: { detail: "output bytes exceed limit of 1" } },
+    };
+    assert.equal(taskReviewScreen(limitedTest), "settingsSecurity");
+    assert.equal(taskReviewActionLabel(limitedTest), "Open Security");
+    assert.equal(taskReviewAvailable(limitedTest, false), true);
+    assert.equal(taskReviewAvailable(limitedTest, true), false);
+    assert.match(taskNextStepDetail(limitedTest, false), /trusted archives.*Security.*new test/u);
+    assert.match(taskNextStepDetail(limitedTest, true), /main Squallz window/u);
+    assert.doesNotMatch(taskNextStepDetail(limitedTest, false), /Recovery|damaged/u);
+    assert.equal(taskReviewScreen({ ...limitedTest, error: { key: "error.wrong_password" } }), "archiveInfo");
     const boundedTestRows = taskResultDetailRows(boundedTest);
     assert.ok(
       boundedTestRows.some(

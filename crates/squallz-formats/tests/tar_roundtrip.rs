@@ -172,7 +172,13 @@ fn tar_roundtrip_permissions_symlink_unicode_deep() {
 
     // Integrity test passes.
     let report = engine
-        .test_summary(&archive, &OpenOptions::default(), &NoProgress, &ctl)
+        .test_summary(
+            &archive,
+            &OpenOptions::default(),
+            &squallz_format_api::SafetyLimits::default(),
+            &NoProgress,
+            &ctl,
+        )
         .unwrap();
     assert!(report.is_ok(), "problems: {:?}", report.problems);
     assert!(report.entries_tested >= 7);
@@ -254,7 +260,13 @@ fn tar_link_entries_without_targets_are_reported() {
         );
 
         let report = engine
-            .test_summary(&archive, &OpenOptions::default(), &NoProgress, &ctl)
+            .test_summary(
+                &archive,
+                &OpenOptions::default(),
+                &squallz_format_api::SafetyLimits::default(),
+                &NoProgress,
+                &ctl,
+            )
             .unwrap();
         assert!(!report.is_ok(), "{name}: test must report the bad entry");
         assert!(
@@ -267,6 +279,36 @@ fn tar_link_entries_without_targets_are_reported() {
             report.problems
         );
     }
+}
+
+#[test]
+fn malformed_tar_entries_still_consume_the_test_entry_budget() {
+    let dir = TempDir::new("tar-malformed-entry-limits");
+    let archive = dir.path().join("broken.tar");
+    let mut builder = tar::Builder::new(fs::File::create(&archive).unwrap());
+    for name in ["first-link", "second-link"] {
+        let mut header = tar::Header::new_gnu();
+        header.set_path(name).unwrap();
+        header.set_size(0);
+        header.set_entry_type(tar::EntryType::Symlink);
+        header.set_cksum();
+        builder.append(&header, io::empty()).unwrap();
+    }
+    builder.finish().unwrap();
+    let result = engine().test_summary(
+        &archive,
+        &OpenOptions::default(),
+        &squallz_core::api::SafetyLimits {
+            max_entries: 1,
+            ..squallz_core::api::SafetyLimits::default()
+        },
+        &NoProgress,
+        &ControlToken::default(),
+    );
+    assert!(
+        matches!(result, Err(FormatError::ResourceLimitExceeded(_))),
+        "{result:?}"
+    );
 }
 
 /// Hardlink entries must map to EntryType::Hardlink. The fixture is written

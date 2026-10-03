@@ -3683,6 +3683,7 @@ mod tests {
 
         fn test_summary(
             &mut self,
+            _limits: &squallz_format_api::SafetyLimits,
             _progress: &dyn squallz_format_api::ProgressSink,
             _control: &ControlToken,
         ) -> Result<TestSummary, FormatError> {

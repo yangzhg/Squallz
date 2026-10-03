@@ -266,7 +266,7 @@ fn print_modern(ctx: &Ctx, formats: &[FormatInfo]) {
             ModernTableColumn::new(label(ctx, "common.detail", "Detail"), 42),
             ModernTableColumn::new(label(ctx, "common.best_for", "Best for"), 30),
         ],
-        &modern_command_form_rows(),
+        &modern_command_form_rows(ctx),
     );
     ctx.print_modern_wrapped_table(
         &label(ctx, "cli.info.dashboard_title", "Modern dashboard"),
@@ -627,9 +627,8 @@ fn modern_dashboard_rows(
                 } else {
                     format!("{runtime_missing} risks")
                 },
-                "operation cockpit + signal matrix + transfer matrix + action queue".to_owned(),
-                "compress/extract HUD shows phase rail, progress, signal matrix, throughput, payload, guardrail, speed/ETA/current, elapsed time, next step, and action queue"
-                    .to_owned(),
+                ctx.loc.t("cli.info.action.live_form"),
+                ctx.loc.t("cli.info.progress.details"),
             ],
             if runtime_missing == 0 {
                 Tone::Success
@@ -640,7 +639,7 @@ fn modern_dashboard_rows(
     ]
 }
 
-fn modern_command_form_rows() -> Vec<ModernTableRow> {
+fn modern_command_form_rows(ctx: &Ctx) -> Vec<ModernTableRow> {
     vec![
         ModernTableRow::success(vec![
             "info".to_owned(),
@@ -665,20 +664,20 @@ fn modern_command_form_rows() -> Vec<ModernTableRow> {
         ModernTableRow::new(vec![
             "list / test".to_owned(),
             "summary card + focused table".to_owned(),
-            "entry mix, content rows, integrity status, and problem details when present".to_owned(),
+            "entry mix, content rows, integrity status, and problem details when present"
+                .to_owned(),
             "inspection and verification before extraction or release".to_owned(),
         ]),
         ModernTableRow::new(vec![
-            "live TTY progress".to_owned(),
-            "operation cockpit + signal matrix + transfer matrix + action queue".to_owned(),
-            "phase rail, gauge, signal matrix, throughput, payload, guardrail, speed/ETA/current, elapsed time, next cue, finish cue, and current object"
-                .to_owned(),
-            "compress/extract jobs where progress must be readable at a glance".to_owned(),
+            ctx.loc.t("cli.info.forms.progress"),
+            ctx.loc.t("cli.info.action.live_form"),
+            ctx.loc.t("cli.info.progress.details"),
+            ctx.loc.t("cli.info.action.live_reason"),
         ]),
         ModernTableRow::new(vec![
             "--json / classic".to_owned(),
             "stable machine contract / conservative rows".to_owned(),
-            "no ANSI, no box drawing, no redraw codes, and no modern-only reshaping".to_owned(),
+            ctx.loc.t("cli.info.progress.log_behavior"),
             "scripts, CI, logs, and terminals that need predictable plain text".to_owned(),
         ]),
     ]
@@ -730,25 +729,13 @@ fn modern_action_selector_rows(ctx: &Ctx) -> Vec<ModernTableRow> {
         ]),
         ModernTableRow::success(vec![
             label(ctx, "cli.info.action.live", "Watch a live job"),
-            label(
-                ctx,
-                "cli.info.action.live_form",
-                "operation cockpit + signal matrix + transfer matrix + action queue",
-            ),
+            ctx.loc.t("cli.info.action.live_form"),
             "interactive TTY stderr".to_owned(),
-            label(
-                ctx,
-                "cli.info.action.live_reason",
-                "best for compression/extraction where phase, ETA, elapsed time, current object, and next step matter",
-            ),
+            ctx.loc.t("cli.info.action.live_reason"),
         ]),
         ModernTableRow::new(vec![
             label(ctx, "cli.info.action.automation", "Automate"),
-            label(
-                ctx,
-                "cli.info.action.automation_form",
-                "classic rows or JSON without ANSI/redraw",
-            ),
+            ctx.loc.t("cli.info.action.automation_form"),
             "sqz <cmd> --json".to_owned(),
             label(
                 ctx,
@@ -763,14 +750,13 @@ fn modern_surface_rows(ctx: &Ctx) -> Vec<ModernTableRow> {
     vec![
         ModernTableRow::success(vec![
             label(ctx, "cli.info.surface.compress", "Compress / pack"),
-            "TTY operation cockpit with phase rail, progress gauge, signal matrix, transfer board, transfer matrix, action queue, speed, ETA, elapsed time, and current object"
-                .to_owned(),
+            ctx.loc.t("cli.info.progress.details"),
             "status panel + route table + detail tables".to_owned(),
             "watching long archive creation without losing the next verification cue".to_owned(),
         ]),
         ModernTableRow::success(vec![
             label(ctx, "cli.info.surface.extract", "Extract"),
-            "TTY operation cockpit with stream-aware gauge, signal matrix, transfer matrix, destination route cue, and action queue".to_owned(),
+            ctx.loc.t("cli.info.progress.details"),
             "destination summary + policy table + safety limits".to_owned(),
             "unpacking where overwrite, symlink, smart folder, and skipped entries must stay visible"
                 .to_owned(),
@@ -806,7 +792,7 @@ fn modern_output_rows(ctx: &Ctx) -> Vec<ModernTableRow> {
         ModernTableRow::success(vec![
             label(ctx, "common.style", "Style"),
             style,
-            "modern tables, routed panels, grouped summaries, and live HUDs".to_owned(),
+            ctx.loc.t("cli.info.output.style_description"),
         ]),
         ModernTableRow::new(vec![
             label(ctx, "cli.info.output.color_mode", "Color mode"),
@@ -819,11 +805,9 @@ fn modern_output_rows(ctx: &Ctx) -> Vec<ModernTableRow> {
             "use --palette to switch modern terminal colors; JSON and classic output remain unchanged".to_owned(),
         ]),
         ModernTableRow::success(vec![
-            label(ctx, "cli.info.output.progress_hud", "Progress HUD"),
-            "operation cockpit + snapshot dashboard + signal matrix + transfer matrix + action queue"
-                .to_owned(),
-            "compress, extract, pack, update, and repair show a table-form snapshot dashboard with progress, payload, current object, mini gauge, throughput, guardrail, speed/ETA/current, elapsed time, next step, and action queue when stderr is a TTY"
-                .to_owned(),
+            ctx.loc.t("cli.info.output.progress_hud"),
+            ctx.loc.t("cli.info.action.live_form"),
+            ctx.loc.t("cli.info.progress.behavior"),
         ]),
         ModernTableRow::new(vec![
             label(ctx, "common.preview", "Preview"),
@@ -837,9 +821,8 @@ fn modern_style_guide_rows(ctx: &Ctx) -> Vec<ModernTableRow> {
     vec![
         ModernTableRow::success(vec![
             label(ctx, "cli.info.style.live", "Live archive work"),
-            "operation cockpit".to_owned(),
-            "progress gauge + snapshot dashboard table + phase rail + signal matrix + transfer board + transfer matrix + action queue"
-                .to_owned(),
+            ctx.loc.t("cli.info.action.live_form"),
+            ctx.loc.t("cli.info.progress.details"),
             "sqz compress input -o out.7z --style modern --color always".to_owned(),
         ]),
         ModernTableRow::success(vec![
@@ -859,8 +842,7 @@ fn modern_style_guide_rows(ctx: &Ctx) -> Vec<ModernTableRow> {
         ModernTableRow::new(vec![
             label(ctx, "cli.info.style.audit", "Script or audit log"),
             "classic rows or JSON".to_owned(),
-            "plain ASCII rows for humans, JSON for machines, no box drawing or redraw codes"
-                .to_owned(),
+            ctx.loc.t("cli.info.progress.log_behavior"),
             "sqz test archive --json".to_owned(),
         ]),
     ]

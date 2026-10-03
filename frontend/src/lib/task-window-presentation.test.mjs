@@ -35,6 +35,7 @@ function taskSurface(taskWindowMode) {
     customPaletteVariables: () => ({}),
     taskChecksumCopyFeedback: () => null,
     taskChecksumCopyFeedbackTone: () => null,
+    checksumCopyPending: () => false,
     taskPasswordQuestion: () => null,
     taskConflictQuestion: () => null,
     jobPasswordPrompt: null, jobPasswordValue: "",

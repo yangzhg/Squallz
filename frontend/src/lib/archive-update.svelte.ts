@@ -124,7 +124,7 @@ export class ArchiveUpdateReview {
     }
     if (this.issue) return false;
     const spec: UpdateJob = {
-      kind: "update", path: draft.path, encoding: draft.encoding.trim() || null,
+      kind: "update", path: draft.path, expected_archive_id: null, encoding: draft.encoding.trim() || null,
       level, content_policy: draft.contentPolicy, excludes: [...draft.excludes], password: null,
       add: rows.filter((row) => row.kind === "add").map((row) => row.value),
       mkdir: rows.filter((row) => row.kind === "mkdir").map((row) => row.value),

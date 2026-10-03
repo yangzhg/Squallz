@@ -13,7 +13,7 @@ if [[ "$APP" != /* ]]; then
   APP="$ROOT/$APP"
 fi
 EXE="$APP/Contents/MacOS/squallz-gui"
-SQZ_HELPER="$APP/Contents/MacOS/sqz"
+SQZ_HELPER="$APP/Contents/MacOS/sqz-sidecar"
 WORK="$ROOT/target/squallz-macos-packaged-quick-actions-smoke"
 HOME_DIR="$WORK/home"
 TRACE="$WORK/trace.jsonl"
@@ -33,7 +33,7 @@ if [[ ! -x "$EXE" ]]; then
   fail "missing app executable: $EXE; run 'make app-macos' first"
 fi
 if [[ ! -x "$SQZ_HELPER" ]]; then
-  fail "missing bundled sqz helper: $SQZ_HELPER"
+  fail "missing bundled CLI helper: $SQZ_HELPER"
 fi
 
 declared_minimum="$(/usr/bin/plutil -extract LSMinimumSystemVersion raw "$APP/Contents/Info.plist")"
@@ -190,7 +190,7 @@ for item in installed:
     assert str(workflow).startswith(str(home)), workflow
     assert script.is_file(), script
     body = script.read_text(encoding="utf-8")
-    assert "Contents/MacOS/sqz" in body, script
+    assert "Contents/MacOS/sqz-sidecar" in body, script
     assert str(app) in body, f"script did not capture packaged app path: {script}"
     print(f"{item['id']}\t{script}\t{workflow}")
 PY
@@ -271,13 +271,13 @@ isolated HOME, lets the real Tauri backend install Finder Quick Actions, then
 runs the generated \`.workflow\` bundles through \`/usr/bin/automator\`. It sets
 the workflow's supported GUI-handoff test switch, forcing every workflow to
 resolve the first-party
-\`Contents/MacOS/sqz\` helper and perform real archive operations without
+\`Contents/MacOS/sqz-sidecar\` helper and perform real archive operations without
 a developer PATH.
 
 ## Inputs
 
 - App: \`$APP\`
-- Bundled sqz: \`$SQZ_HELPER\`
+- Bundled CLI helper: \`$SQZ_HELPER\`
 - Isolated HOME: \`$HOME_DIR\`
 - Trace: \`$TRACE\`
 - Fixture: \`$FIXTURE\`
@@ -290,7 +290,7 @@ a developer PATH.
 - \`integration.system_diagnostics\` reports all 23 declared file types without
   exposing application paths and keeps Finder visibility as a manual check.
 - Every generated script captures the packaged app path and contains the
-  \`Contents/MacOS/sqz\` resolver candidate.
+  \`Contents/MacOS/sqz-sidecar\` resolver candidate.
 - Scripts pass \`/bin/zsh -n\`.
 - Workflow plists pass \`plutil -lint\`.
 - Workflows run through \`/usr/bin/automator\` with \`SQUALLZ_CLI\` and
@@ -301,7 +301,7 @@ a developer PATH.
 - \`Squallz Test Archive\` succeeds on a ZIP made for this smoke.
 - \`Squallz Extract Here\` extracts the ZIP next to the archive.
 - \`Squallz Extract to Folder\` extracts into the derived folder.
-- \`Squallz Compress to 7Z\` creates a real \`.7z\` archive through bundled \`sqz\`.
+- \`Squallz Compress to 7Z\` creates a real \`.7z\` archive through the bundled CLI helper.
 - \`Squallz Test Archive\` succeeds on the generated \`.7z\`.
 
 ## Trace Summary
