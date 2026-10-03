@@ -88,7 +88,10 @@
   }
 
   function selectPreset(event: Event) {
-    const value = (event.currentTarget as HTMLSelectElement).value;
+    const select = event.currentTarget as HTMLSelectElement;
+    const value = select.value;
+    // Keep the visible selection when the parent cannot apply the requested preset.
+    select.value = selectedId ?? "";
     deleteArmed = false;
     onSelect(value || null);
   }

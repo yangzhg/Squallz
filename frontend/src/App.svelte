@@ -7,6 +7,10 @@
     type SettingsSaveState,
   } from "./lib/settings-session.svelte";
   import { ExtractPlanSession, type ExtractPlanInput } from "./lib/extract-plan.svelte";
+  import {
+    ExtractOptionsDraft, type ExtractDestinationMode, type ExtractScope, type ExtractTaskDraft,
+    type ExtractOverwriteMode, type ExtractSymlinkMode,
+  } from "./lib/extract-options-draft.svelte";
   import { CreateOptionsDraft, type CreateDraftEdit, type CreateDraftChange, type CreateDraftIssue } from "./lib/create-options-draft.svelte";
   import ArchiveStartState from "./components/ArchiveStartState.svelte";
   import ArchiveReturnStrip from "./components/ArchiveReturnStrip.svelte";
@@ -342,13 +346,7 @@
   type ArchivePresetMutationState = "idle" | "saving" | "error";
   type AppearanceSetting = "mode" | "theme" | "density";
   type AppearanceSaveState = Exclude<SettingsSaveState, "dirty">;
-  type ExtractDestinationMode = "smart" | "archive" | "same" | "choose";
-  type ExtractTaskDraft = Pick<Extract<JobSpec, { kind: "extract" }>,
-    "path" | "dest" | "selection" | "overwrite" | "symlinks" | "smart" | "encoding" | "verify_sfx">;
   type ArchiveTaskReview = { path: string; encoding: string | null; restore: () => boolean };
-  type ExtractScope = "all" | "selection";
-  type ExtractOverwriteMode = "ask" | "skip" | "overwrite" | "rename";
-  type ExtractSymlinkMode = "preserve" | "skip" | "follow";
   type PresetSqzInnerFormat = Extract<CreateArchivePresetOptions["format_options"], { kind: "sqz" }>["inner_format"];
   type ClassicCreateSection = "general" | "compression" | "content" | "security" | "volumes" | "recovery" | "preflight";
   type CreatePreflightStepState = "pending" | "active" | "ready" | "blocked" | "cancelled";
@@ -652,10 +650,16 @@
   const extractSymlinkModes: ExtractSymlinkMode[] = ["preserve", "skip", "follow"];
   const presetSqzInnerFormats: PresetSqzInnerFormat[] = ["sqz", "zip", "tar", "7z", "zstd"];
   let availableLanguages = $state<LanguageDto[]>([]);
-  let extractDestinationMode = $state<ExtractDestinationMode>("smart");
-  let extractScope = $state<ExtractScope>("all");
-  let extractSelectionSnapshot = $state<string[]>([]);
-  let extractCustomDest = $state("");
+  const extractOptions = new ExtractOptionsDraft(platformKind);
+  let extractDestinationMode = $derived(extractOptions.state.destinationMode);
+  let extractScope = $derived(extractOptions.state.scope);
+  let extractSelectionSnapshot = $derived(extractOptions.state.selection);
+  let extractCustomDest = $derived(extractOptions.state.customDest);
+  let extractVerifySfx = $derived(extractOptions.state.verifySfx);
+  let extractOverwriteMode = $derived(extractOptions.state.overwrite);
+  let extractSymlinkMode = $derived(extractOptions.state.symlinks);
+  let extractPresetEncodingLabel = $derived(extractOptions.state.presetEncodingLabel);
+  let extractPresetDraftTouched = $derived(extractOptions.state.touched);
   let extractDestinationPicker = $state.raw<{
     archiveId: number;
     source: string;
@@ -663,9 +667,6 @@
     screen: Screen;
     selection: ReadonlySet<string> | null;
   } | null>(null);
-  let extractSmartBaseOverride = $state<string | null>(null);
-  let extractVerifySfx = $state(false);
-  let extractDraftArchive: { id: number; source: string } | null = null;
   let pendingArchiveTaskReview: ArchiveTaskReview | null = null;
   let extractReviewFocusPending = false;
   let convertReviewFocusPending = false;
@@ -682,11 +683,8 @@
     phase: "preparing" | "submitting";
   } | null>(null);
   let archiveAddPending = $derived(archiveAddPreparation !== null);
-  let extractOverwriteMode = $state<ExtractOverwriteMode>("ask");
-  let extractSymlinkMode = $state<ExtractSymlinkMode>("preserve");
   let currentExtractOverwriteLabel = $derived(extractOverwriteLabel(extractOverwriteMode));
   let currentExtractSymlinkLabel = $derived(extractSymlinkLabel(extractSymlinkMode));
-  let extractPresetEncodingLabel = $state<string | null>(null);
   const extractPlanSession = new ExtractPlanSession(
     nextPreflightRequestId,
     (input) => previewExtractPlan(input.dest, input.selection, input.smart),
@@ -726,7 +724,6 @@
   let createPostSuccess = $derived(createOptions.state.postSuccess);
   let createOptionsValidationAttempted = $derived(createOptions.state.validationAttempted);
   let createPresetDraftTouched = $derived(createOptions.state.touched);
-  let extractPresetDraftTouched = false;
   let archiveOpenStatus = $state<"idle" | "opening">("idle");
   let archiveOpenGeneration = 0;
   let archivePickerRequest: number | null = null;
@@ -2495,10 +2492,6 @@
     invalidateCreatePreflightResult();
   }
 
-  function markExtractPresetDraftTouched() {
-    extractPresetDraftTouched = true;
-  }
-
   function createDraftIssueMessage(issue: CreateDraftIssue, requestedTarget?: string): string {
     switch (issue) {
       case "options_locked": return createOptionsLockedReason();
@@ -2830,23 +2823,7 @@
   }
 
   function currentExtractArchivePresetOptions(): ExtractArchivePresetOptions {
-    const destination: ExtractArchivePresetOptions["destination"] =
-      extractDestinationMode === "smart"
-        ? { base: "default_directory", layout: "smart" }
-        : extractDestinationMode === "archive"
-          ? { base: "default_directory", layout: "archive_folder" }
-          : extractDestinationMode === "choose"
-            ? { base: "ask", layout: "direct" }
-            : { base: "archive_parent", layout: "direct" };
-    const encoding = extractPresetEncodingLabel ?? archiveEncodingForJob();
-    return {
-      destination,
-      existing_output: extractOverwriteMode,
-      symlinks: extractSymlinkMode,
-      encoding: encoding ? { kind: "named", label: encoding } : { kind: "auto" },
-      credential: { kind: "prompt_when_needed" },
-      post_success: "keep_source",
-    };
+    return extractOptions.snapshotPreset(archiveEncodingForJob());
   }
 
   function createPresetPickerOptions() {
@@ -3031,18 +3008,8 @@
     if (!preset || preset.kind !== "extract") return;
     extractDestinationPicker = null;
     selectedExtractPresetId = preset.id;
-    extractSmartBaseOverride = null;
     extractPresetDraftName = preset.label;
-    if (preset.options.destination.layout === "smart") extractDestinationMode = "smart";
-    else if (preset.options.destination.layout === "archive_folder") extractDestinationMode = "archive";
-    else if (preset.options.destination.base === "ask") extractDestinationMode = "choose";
-    else extractDestinationMode = "same";
-    if (extractDestinationMode === "choose") extractCustomDest = "";
-    extractOverwriteMode = preset.options.existing_output;
-    extractSymlinkMode = preset.options.symlinks;
-    extractPresetEncodingLabel = preset.options.encoding.kind === "named"
-      ? preset.options.encoding.label
-      : null;
+    extractOptions.applyPreset(preset.options);
     extractPresetMutationState = "idle";
     if (announce) {
       showNotice(
@@ -5901,13 +5868,15 @@
 
   function extractJobDestination(): string {
     if (!currentArchive) return openArchiveFirstLabel();
-    if (extractDestinationMode !== "smart") return effectiveExtractDest();
-    return extractSmartBase();
+    return extractOptions.requestedDestination({
+      archiveFolder: defaultExtractDest(), archiveParent: sameFolderExtractDest(),
+      defaultDirectory: normalizedDefaultExtractDir(settingsSession.appliedGeneral.defaultExtractDir),
+    });
   }
 
   function extractSmartBase(): string {
-    return extractSmartBaseOverride ?? normalizedDefaultExtractDir(settingsSession.appliedGeneral.defaultExtractDir)
-      ?? (currentArchive ? pathDir(currentArchive.path) : openArchiveFirstLabel());
+    return extractOptions.smartBase(normalizedDefaultExtractDir(settingsSession.appliedGeneral.defaultExtractDir),
+      currentArchive ? pathDir(currentArchive.path) : openArchiveFirstLabel());
   }
 
   function sameFolderExtractDest(): string {
@@ -5995,15 +5964,7 @@
   function captureExtractPlanInput(): ExtractPlanInput | null {
     const current = currentArchive;
     if (!current || screen !== "extract") return null;
-    return {
-      archiveId: current.id,
-      path: current.source,
-      displayPath: current.path,
-      dest: extractJobDestination(),
-      selection: extractJobPaths(),
-      smart: extractDestinationMode === "smart",
-      encoding: extractEncodingForJob(),
-    };
+    return extractOptions.snapshotPlan(current, extractJobDestination());
   }
 
   function extractPlanStatusLabel(): string {
@@ -6121,9 +6082,7 @@
       return tr("gui.extract.smart_destination_value", "{base} · final folder chosen from archive contents")
         .replace("{base}", extractJobDestination());
     }
-    if (extractDestinationMode === "same") return sameFolderExtractDest();
-    if (extractDestinationMode === "choose") return extractCustomDest.trim() || defaultExtractDest();
-    return defaultExtractDest();
+    return extractJobDestination();
   }
 
   function extractDestinationFieldLabel(): string {
@@ -6160,9 +6119,7 @@
       return;
     }
     extractDestinationPicker = null;
-    markExtractPresetDraftTouched();
-    extractDestinationMode = mode;
-    extractSmartBaseOverride = null;
+    extractOptions.selectDestination(mode);
   }
 
   function extractWorkspaceSurface(variant: ExtractWorkspaceVariant): ExtractWorkspaceSurface {
@@ -6356,10 +6313,7 @@
       });
       if (!isCurrent()) return false;
       if (typeof selected === "string" && selected.trim()) {
-        markExtractPresetDraftTouched();
-        extractCustomDest = selected;
-        extractSmartBaseOverride = null;
-        extractDestinationMode = "choose";
+        extractOptions.acceptDestination(selected);
         showNotice(tr("gui.extract.destination_selected", "Extract destination selected"));
         return true;
       }
@@ -6387,8 +6341,7 @@
       showNotice(openArchiveFirstLabel());
       return;
     }
-    markExtractPresetDraftTouched();
-    extractOverwriteMode = mode;
+    extractOptions.selectPolicy({ kind: "overwrite", value: mode });
   }
 
   function extractSymlinkLabel(mode: ExtractSymlinkMode): string {
@@ -6402,8 +6355,7 @@
       showNotice(openArchiveFirstLabel());
       return;
     }
-    markExtractPresetDraftTouched();
-    extractSymlinkMode = mode;
+    extractOptions.selectPolicy({ kind: "symlinks", value: mode });
   }
 
   function extractDestForPath(path: string): string {
@@ -6609,7 +6561,7 @@
   }
 
   function extractEncodingForJob(): string | null {
-    return extractPresetEncodingLabel ?? archiveEncodingForJob();
+    return extractOptions.encodingForJob(archiveEncodingForJob());
   }
 
   function recoveryEncodingForJob(): string | null {
@@ -6634,30 +6586,16 @@
       showNotice(tr("gui.precondition.select_before_extract", "Select one or more entries before extracting them"));
       return;
     }
-    extractDestinationPicker = null;
-    syncExtractDraftArchive();
-    extractScope = scope;
-    extractSelectionSnapshot = scope === "selection" ? [...(selection ?? [])] : [];
+    if (!extractOptions.openScope(currentArchive, scope, selection, () => { extractDestinationPicker = null; })) return;
     setScreen("extract");
   }
 
   function extractJobPaths(): string[] | null {
-    return extractScope === "selection"
-      ? [...extractSelectionSnapshot]
-      : null;
+    return extractOptions.selectionSnapshot();
   }
 
   function syncExtractDraftArchive(): void {
-    const current = currentArchive;
-    if ((extractDraftArchive?.id ?? null) === (current?.id ?? null)) return;
-    extractDestinationPicker = null;
-    const sameSource = current && extractDraftArchive && sameFilePath(current.source, extractDraftArchive.source);
-    extractDraftArchive = current ? { id: current.id, source: current.source } : null;
-    extractSelectionSnapshot = [];
-    if (!sameSource) {
-      extractSmartBaseOverride = null;
-      extractVerifySfx = false;
-    }
+    if (extractOptions.syncArchive(currentArchive)) extractDestinationPicker = null;
   }
 
   function focusExtractReview(): void {
@@ -8127,19 +8065,15 @@
         || extractDestinationMode !== "choose" || !extractCustomDest.trim()
         || extractDestinationPicker) return;
     }
-    const input = captureExtractPlanInput();
-    if (!input) return;
-    const overwrite = extractOverwriteMode;
-    const symlinks = extractSymlinkMode;
-    const verifySfx = extractVerifySfx;
+    if (!currentArchive || screen !== "extract") return;
+    const snapshot = extractOptions.snapshotRun(currentArchive, extractJobDestination());
+    const { input } = snapshot;
     await extractPlanSession.request(input);
     if (!currentArchive || currentArchive.id !== input.archiveId || screen !== "extract") return;
     if (
       !extractPlanSession.matches(input) ||
       !extractPlanSession.matches(captureExtractPlanInput()) ||
-      extractOverwriteMode !== overwrite ||
-      extractSymlinkMode !== symlinks ||
-      extractVerifySfx !== verifySfx
+      !extractOptions.runOptionsMatch(snapshot)
     ) {
       showNotice(tr(
         "gui.extract.plan_changed_before_start",
@@ -8161,21 +8095,7 @@
       .replace("{action}", action)
       .replace("{destination}", destination);
     const queued = await submitCurrentArchiveJob(
-      {
-        kind: "extract",
-        path: input.path,
-        dest: input.dest,
-        expected_destination: plan.destination,
-        expected_input_guard: plan.input_guard,
-        selection: input.selection,
-        overwrite,
-        symlinks,
-        smart: input.smart,
-        encoding: input.encoding,
-        password: null,
-        verify_sfx: verifySfx,
-        best_effort: false,
-      },
+      extractOptions.extractJob(snapshot, plan),
       success,
       tr("gui.precondition.open_before_extract", "Open an archive before extracting"),
     );
@@ -8216,21 +8136,7 @@
       .replace("{action}", action)
       .replace("{destination}", destination);
     const queued = await submitCurrentArchiveJob(
-      {
-        kind: "extract",
-        path: currentArchive.source,
-        dest: jobDestination,
-        expected_destination: null,
-        expected_input_guard: null,
-        selection,
-        overwrite: extractOverwriteMode,
-        symlinks: extractSymlinkMode,
-        smart: extractDestinationMode === "smart",
-        encoding: extractEncodingForJob(),
-        password: null,
-        verify_sfx: false,
-        best_effort: false,
-      },
+      extractOptions.copyOutJob(currentArchive, jobDestination, selection),
       success,
       tr("gui.precondition.open_before_copy_out", "Open an archive before copying entries out"),
     );
@@ -10024,8 +9930,7 @@
     if (request.generation !== archiveOpenGeneration || result.status === "superseded" || !result.isCurrent()) return;
     const ok = result.status === "applied";
     if (ok) {
-      markExtractPresetDraftTouched();
-      extractPresetEncodingLabel = null;
+      extractOptions.encodingReopened();
     }
     showNotice(
       ok
@@ -11038,23 +10943,15 @@
   }
 
   function restoreExtractTaskDraft(draft: ExtractTaskDraft): boolean {
-    if (!currentArchive || !sameFilePath(currentArchive.source, draft.path)) return false;
-    extractDestinationPicker = null;
-    extractPlanSession.reset();
-    markExtractPresetDraftTouched();
-    selectedExtractPresetId = null;
-    extractPresetDraftName = "";
-    extractPresetMutationState = "idle";
-    extractDraftArchive = { id: currentArchive.id, source: currentArchive.source };
-    extractScope = draft.selection === null ? "all" : "selection";
-    extractSelectionSnapshot = [...(draft.selection ?? [])];
-    extractDestinationMode = draft.smart ? "smart" : "choose";
-    extractCustomDest = draft.dest;
-    extractSmartBaseOverride = draft.smart ? draft.dest : null;
-    extractOverwriteMode = draft.overwrite;
-    extractSymlinkMode = draft.symlinks;
-    extractPresetEncodingLabel = null;
-    extractVerifySfx = draft.verify_sfx;
+    if (!currentArchive) return false;
+    const restored = extractOptions.restoreTask(currentArchive, draft, () => {
+      extractDestinationPicker = null;
+      extractPlanSession.reset();
+      selectedExtractPresetId = null;
+      extractPresetDraftName = "";
+      extractPresetMutationState = "idle";
+    });
+    if (!restored) return false;
     setScreen("extract");
     focusExtractReview();
     showNotice(tr("gui.extract.review.restored", "Archive, selection and settings restored. Review the refreshed write plan before extracting again."));

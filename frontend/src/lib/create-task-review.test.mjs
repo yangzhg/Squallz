@@ -6,7 +6,7 @@ import ts from "typescript";
 import { createTestServer } from "../../tests/runtime.mjs";
 import { compileTestScript, readSvelteScript, selectFunctions } from "../../tests/source.mjs";
 import { settingsDto } from "../../tests/settings.mjs";
-import { installCreateOptions } from "../../tests/create-options.mjs";
+import { installCreateOptions } from "../../tests/options-drafts.mjs";
 
 const server = await createTestServer();
 test.after(() => server.close());

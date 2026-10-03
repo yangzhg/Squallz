@@ -5,12 +5,13 @@ import ts from "typescript";
 import { proxy, snapshot } from "svelte/internal/client";
 import { createTestServer } from "../../tests/runtime.mjs";
 import { compileTestScript, readSvelteScript, selectFunctions } from "../../tests/source.mjs";
-import { installCreateOptions } from "../../tests/create-options.mjs";
+import { installCreateOptions, installExtractOptions } from "../../tests/options-drafts.mjs";
 
 const server = await createTestServer();
 test.after(() => server.close());
 const { ipc, isErrorDto } = await server.ssrLoadModule("/src/lib/ipc.ts");
 const { CreateOptionsDraft } = await server.ssrLoadModule("/src/lib/create-options-draft.svelte.ts");
+const { ExtractOptionsDraft } = await server.ssrLoadModule("/src/lib/extract-options-draft.svelte.ts");
 const { createFormatIds } = await server.ssrLoadModule("/src/lib/ui-model.ts");
 const { loadLocale, tError, tFallback } = await server.ssrLoadModule("/src/lib/i18n.svelte.ts");
 const originalIpc = { saveArchivePresets: ipc.saveArchivePresets, getArchivePresets: ipc.getArchivePresets,
@@ -72,16 +73,15 @@ function harness() {
   const operations = [];
   let nextId = 0;
   const state = {
-    ipc, isErrorDto, tError, CreateOptionsDraft, createFormatIds, structuredClone, TextEncoder,
+    ipc, isErrorDto, tError, CreateOptionsDraft, ExtractOptionsDraft, createFormatIds, structuredClone, TextEncoder,
     $state: { snapshot },
     crypto: { randomUUID: () => `00000000-0000-0000-0000-${String(++nextId).padStart(12, "0")}` },
-    tr: tFallback, trashNameLabel: () => "Trash",
+    tr: tFallback, trashNameLabel: () => "Trash", platformKind: () => "macos",
     showNotice: (message) => notices.push(message), recordOperation: (operation) => operations.push(structuredClone(operation)),
     preflightBusy: false, createPreflight: { busy: () => state.preflightBusy },
     createFormatParam: null, loadCreateFormat: () => "sqz", loadCreateProfile: () => "custom", loadCustomCreateLevel: () => 7,
     sfxCreateCapabilityReady: true, sfxCreateCapability: { target: "macos", available: true, extension: "app" },
-    extractDestinationMode: "smart", extractOverwriteMode: "rename", extractSymlinkMode: "preserve",
-    extractPresetEncodingLabel: "gbk", currentArchive: { encoding_override: "shift_jis" },
+    currentArchive: { encoding_override: "shift_jis" },
     selectedCreatePresetId: "user.create.original", selectedExtractPresetId: "user.extract.original",
     createPresetDraftName: "  Daily \n backup ", extractPresetDraftName: " Daily\t backup ",
     createPresetMutationState: "idle", extractPresetMutationState: "idle", presetLoadState: "ready",
@@ -96,6 +96,9 @@ function harness() {
     set: (value) => { presetDocument = proxy(value); },
   });
   const createOptions = installCreateOptions(source, state);
+  const extractOptions = installExtractOptions(source, state);
+  extractOptions.applyPreset({ destination: { base: "default_directory", layout: "smart" }, existing_output: "rename",
+    symlinks: "preserve", encoding: { kind: "named", label: "gbk" }, credential: { kind: "prompt_when_needed" }, post_success: "keep_source" });
   const context = { capabilityReady: true, sfxCapability: state.sfxCreateCapability };
   for (const [kind, value] of [["splitPreset", "custom"], ["customSplitAmount", "1.5"], ["customSplitUnit", "gib"],
     ["contentPolicy", "custom"], ["excludeText", "*.cache; temporary/**\n*.cache"], ["sqzInnerFormat", "zip"],
@@ -253,9 +256,9 @@ test("updating preserves preset identity and keeps SaveAs admission separate fro
   state.createOptions.edit({ kind: "customSplitAmount", value: "0" }, contextFor(state), () => {});
   state.preflightBusy = true;
   state.extractPresetDraftName = "  Extract \n old ";
-  state.extractDestinationMode = "choose";
-  state.extractPresetEncodingLabel = null;
   state.currentArchive.encoding_override = null;
+  state.extractOptions.applyPreset({ ...app.currentExtractArchivePresetOptions(),
+    destination: { base: "ask", layout: "direct" }, encoding: { kind: "auto" } });
   const extracting = app.saveArchivePreset("extract", "update");
   const updatedExtract = writes[1].document.presets.find((preset) => preset.id === "user.extract.original");
   assert.equal(writes[1].document.presets.length, app.maxArchivePresets);

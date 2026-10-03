@@ -4,6 +4,7 @@ import vm from "node:vm";
 
 import { createTestServer } from "../../tests/runtime.mjs";
 import { compileTestScript, readSvelteScript, selectFunctions } from "../../tests/source.mjs";
+import { installExtractOptions } from "../../tests/options-drafts.mjs";
 
 function deferred() {
   let resolve;
@@ -77,6 +78,7 @@ async function withNestedOpen(run, { systemOpen = false } = {}) {
     archive.installArchivePreview(archiveInfo(1), outerRows, { selected: ["inner.zip"] });
     const source = readSvelteScript(new URL("../App.svelte", import.meta.url), "App.ts");
     const { PreviewSession } = await server.ssrLoadModule("/src/lib/preview-session.svelte.ts");
+    const { ExtractOptionsDraft } = await server.ssrLoadModule("/src/lib/extract-options-draft.svelte.ts");
     const recoveryResults = await server.ssrLoadModule("/src/lib/recovery-result.ts");
     const systemOpenHelpers = systemOpen ? await server.ssrLoadModule("/src/lib/preview-presentation.ts") : {};
     const names = ["clearNotice", "cancelTaskReview", "nestedArchiveAction", "extractNestedPreviewArchive", "retryEntryPreview", "runPreviewWithPassword", "clearEntryPreviewState", "entryPreviewForPath", "hasPreparedPreviewForPath", "selectOnlyEntry", "selectEntry", "toggleEntrySelection", "activateEntry", "submitPasswordRequest", "cancelPasswordRequest", "dismissArchivePasswordRequest", "dismissArchivePicker", "setScreen", "openArchivePath", "openRecoverySet", "passwordPromptDetail", "submitPreviewEntry",
@@ -88,13 +90,13 @@ async function withNestedOpen(run, { systemOpen = false } = {}) {
       "recoveryZipDisabledReason", "recoverySqzRepairDisabledReason", "recoverySqzExportDisabledReason", "recoveryRepairPar2DisabledReason",
       "recoveryRepairUsesDirectory", "recoveryReportNumber", "recoveryReport", "latestRecoveryReportTask",
       "defaultSqzRepairDest", "defaultSqzExportDest", "defaultZipRepairDest", "defaultPar2RepairDest", "defaultPar2RepairDirectoryName",
-      "authorizeArchiveOutput", "saveNativeDialog", "openNativeDialog"];
+      "authorizeArchiveOutput", "saveNativeDialog", "openNativeDialog", "openExtractWorkspace", "syncExtractDraftArchive", "selectedJobPaths"];
     if (systemOpen) names.push("openEntryPreview", "repairFilenameEncoding", "setMode");
     const declarations = selectFunctions(source, names).map((node) => node.getText(source));
     const notices = [];
     const operations = [];
     const context = {
-      ...recoveryResults, ...systemOpenHelpers, ipc, adoptOpenedArchive: archive.adoptOpenedArchive,
+      ...recoveryResults, ...systemOpenHelpers, ipc, ExtractOptionsDraft, adoptOpenedArchive: archive.adoptOpenedArchive,
       appNotice: null, noticeTimer: null, clearTimeout,
       taskReviewRequestGeneration: 0, nestedExtractDraftGeneration: 0,
       syncUrl: () => {}, tick: async () => {},
@@ -109,7 +111,7 @@ async function withNestedOpen(run, { systemOpen = false } = {}) {
       finishOpenedArchive: () => { context.screen = "browse"; },
       preventCreateSubmissionNavigation: () => false, preventConvertSubmissionNavigation: () => false,
       focusBlockingTaskIfAny: () => false,
-      openExtractWorkspace: (scope) => { context.extractScope = scope; app.setScreen("extract"); },
+      extractDestinationPicker: null, platformKind: () => "macos",
       focusExtractReview: () => { context.extractFocused = true; },
       previewSession: new PreviewSession(), screen: "browse",
       jobPasswordPrompt: null, jobConflictPrompt: null, archivePasswordPrompt: null,
@@ -149,6 +151,7 @@ async function withNestedOpen(run, { systemOpen = false } = {}) {
       tr: (_key, fallback) => fallback,
     };
     Object.defineProperty(context, "currentArchive", { get: () => archive.archive() });
+    installExtractOptions(source, context);
     Object.defineProperties(context, {
       entryPreview: { get: () => context.previewSession.file },
       nestedPreview: { get: () => context.previewSession.nested },
@@ -863,7 +866,12 @@ test("system opening and encoding repair keep preparation and feedback within th
     ipc.releasePreviewSession = async (id) => { released.push(id); return true; };
     ipc.archivePasswordStatus = async () => ({ session: false, available: true, saved: false, error: null });
     context.reopenWithEncoding = archive.reopenWithEncoding;
-    context.markExtractPresetDraftTouched = () => { draftUpdates += 1; };
+    const encodingReopened = context.extractOptions.encodingReopened.bind(context.extractOptions);
+    context.extractOptions.encodingReopened = () => { draftUpdates += 1; encodingReopened(); };
+    const applyEncodingPreset = (label) => context.extractOptions.applyPreset({
+      ...context.extractOptions.snapshotPreset(context.currentArchive?.encoding_override ?? null),
+      encoding: { kind: "named", label },
+    });
     context.persistUiMode = (next) => { context.mode = next; return Promise.resolve(); };
     context.trackAppearanceSave = () => {};
     let preparedRequest;
@@ -879,7 +887,7 @@ test("system opening and encoding repair keep preparation and feedback within th
       released.length = 0;
       closed.length = 0;
       draftUpdates = 0;
-      context.extractPresetEncodingLabel = "current draft encoding";
+      applyEncodingPreset("current draft encoding");
       ipc.openPreviewSession = async (id) => { opened.push(id); };
       return context.entryPreviewFailure;
     }
@@ -1000,7 +1008,7 @@ test("system opening and encoding repair keep preparation and feedback within th
         assert.equal(await archive.openArchive(preview.outer_path, null, "shift_jis"), true);
       }
       context.showNotice("new context feedback");
-      context.extractPresetEncodingLabel = "new context draft encoding";
+      applyEncodingPreset("new context draft encoding");
       const noticeCount = notices.length;
       response.resolve({ ...archiveInfo(18), read_only: false, encoding_override: "gbk" });
       await repairing;
@@ -1027,7 +1035,7 @@ test("system opening and encoding repair keep preparation and feedback within th
       assert.equal(await archive.openArchive(preview.outer_path, null, "shift_jis"), true);
       assert.equal(result.isCurrent(), false, "a newer same-source open supersedes an already applied result");
       context.showNotice("newer same-source feedback");
-      context.extractPresetEncodingLabel = "newer same-source draft encoding";
+      applyEncodingPreset("newer same-source draft encoding");
       return result;
     };
     await app.repairFilenameEncoding("gbk");
