@@ -5680,7 +5680,8 @@
     }
     if (blockSelectionScopedAction()) return;
     if (archiveLikePath(entry.source.path) && currentArchive) {
-      await openNestedArchiveEntry(
+      await nestedArchiveAction(
+        "open",
         currentArchive.source,
         entry.source.path,
         entry.virtualIndex ?? null,
@@ -8314,11 +8315,7 @@
     const failure = entryPreviewFailure;
     if (!failure) return;
     if (failure.policyKind === "nested") {
-      if (failure.retryAction !== "preview") {
-        void openNestedArchiveEntry(failure.outerSource, failure.entryPath, previewOriginVirtualIndex, failure.retryAction);
-      } else {
-        void submitPreviewNestedArchive(failure.entryPath, previewOriginVirtualIndex);
-      }
+      void nestedArchiveAction(failure.retryAction, failure.outerSource, failure.entryPath, previewOriginVirtualIndex);
       return;
     }
     void submitPreviewEntry(
@@ -9987,9 +9984,10 @@
     previewOriginEntryPath = entryPath;
     previewOriginVirtualIndex = virtualIndex;
     if (archiveLikePath(entryPath)) {
-      await submitPreviewNestedArchive(entryPath, virtualIndex);
+      await nestedArchiveAction("preview", currentArchive.source, entryPath, virtualIndex);
       return;
     }
+    clearNotice();
     const archivePath = currentArchive.path;
     const archiveSource = currentArchive.source;
     const preparedEntry = entryPreviewForPath(entryPath);
@@ -10034,10 +10032,6 @@
         entry_path: entryPath,
         display_name: entryPreview.display_name,
       });
-      showNotice(
-        tr("gui.preview.opening_system", "Opening: {name}")
-          .replace("{name}", entryPreview.display_name),
-      );
       if (!await openEntryPreview(entryPreview)) return;
       if (requestGeneration !== previewRequestGeneration) return;
       recordOperation({
@@ -10069,7 +10063,6 @@
         entry_path: entryPath,
         policy_kind: failurePolicy.kind,
       });
-      showNotice(message);
     } finally {
       if (requestGeneration === previewRequestGeneration) {
         previewPhase = "idle";
@@ -10078,87 +10071,128 @@
     }
   }
 
-  async function submitPreviewNestedArchive(
-    entryPath: string | null = selectedPreviewPath(),
-    virtualIndex: number | null = null,
+  async function nestedArchiveAction(
+    action: "preview" | "open" | "extract",
+    outerPath: string | null,
+    entryPath: string | null,
+    virtualIndex: number | null = previewOriginVirtualIndex,
   ) {
-    if (!currentArchive) {
-      showNotice(tr("gui.preview.open_archive_first", "Open an archive before previewing entries"));
-      return;
+    if (action === "preview") {
+      if (!currentArchive) {
+        showNotice(tr("gui.preview.open_archive_first", "Open an archive before previewing entries"));
+        return;
+      }
+      if (!entryPath) {
+        showNotice(tr("gui.preview.select_one", "Select one file entry to preview"));
+        return;
+      }
+      if (!archiveLikePath(entryPath)) {
+        showNotice(tr("gui.preview.select_archive", "Select an archive-like entry, such as .zip, .7z, .dmg or .7z.001"));
+        return;
+      }
+      outerPath = currentArchive.source;
     }
-    if (!entryPath) {
-      showNotice(tr("gui.preview.select_one", "Select one file entry to preview"));
-      return;
-    }
-    if (!archiveLikePath(entryPath)) {
-      showNotice(tr("gui.preview.select_archive", "Select an archive-like entry, such as .zip, .7z, .dmg or .7z.001"));
-      return;
-    }
+    if (outerPath === null || entryPath === null) return;
+    if (action === "extract" && (preventCreateSubmissionNavigation("extract")
+      || preventConvertSubmissionNavigation("extract") || focusBlockingTaskIfAny())) return;
+    clearNotice();
+    if (action !== "preview") dismissArchiveAddPreparation();
+    const initialScreen = screen;
+    const initialScreenGeneration = taskReviewRequestGeneration;
+    const prepared = action !== "preview" && nestedPreview?.outer_path === outerPath && nestedPreview.entry_path === entryPath
+      ? nestedPreview.archive : null;
+    if (prepared) nestedPreview = null;
     clearEntryPreviewState();
     previewOriginEntryPath = entryPath;
     previewOriginVirtualIndex = virtualIndex;
     const requestGeneration = ++previewRequestGeneration;
-    const archiveSource = currentArchive.source;
-    const archiveDisplayPath = currentArchive.path;
+    const isCurrent = () => requestGeneration === previewRequestGeneration
+      && (action !== "extract" || (screen === initialScreen
+        && (!prepared || initialScreenGeneration === taskReviewRequestGeneration)));
+    const archiveDisplayPath = currentArchive?.path ?? outerPath;
+    const encoding = action !== "preview" && currentArchive?.source === outerPath ? archiveEncodingForJob() : null;
     previewPhase = "nested";
     previewTargetName = pathBaseName(entryPath);
-    recordValidationEvent("frontend.entry.nested_preview_requested", {
+    if (action === "preview") recordValidationEvent("frontend.entry.nested_preview_requested", {
       entry_path: entryPath,
     });
     try {
       await waitForPreviewFeedbackFrame();
-      if (requestGeneration !== previewRequestGeneration) return;
-      const preparedPreview = await runPreviewWithPassword(
-        requestGeneration,
-        archiveDisplayPath,
-        entryPath,
-        async (passwords, requestId) => nestedPasswordPreviewSample(params, archiveSource, entryPath, passwords)
-          ?? ipc.previewNestedArchive(archiveSource, entryPath, passwords, archiveEncodingForJob(), requestId),
-      );
-      if (!preparedPreview) return;
-      if (requestGeneration !== previewRequestGeneration) {
-        void ipc.closeArchive(preparedPreview.archive.id).catch(() => undefined);
+      if (!isCurrent()) {
+        if (prepared) void ipc.closeArchive(prepared.id).catch(() => undefined);
         return;
       }
-      nestedPreview = preparedPreview;
-      entryPreview = null;
-      entryPreviewFailure = null;
-      recordValidationEvent("frontend.entry.nested_preview_loaded", {
-        entry_path: entryPath,
-        entry_count: nestedPreview.archive.entry_count,
-        format: nestedPreview.archive.format,
-      });
-      showNotice(
-        tr("gui.preview.nested_loaded", "Nested preview loaded · {count} entries").replace(
-          "{count}",
-          nestedPreview.archive.entry_count.toLocaleString(),
-        ),
-      );
-      recordOperation({
-        status: "info",
-        title: tr("gui.preview.nested_operation_title", "Nested archive previewed"),
-        detail: `${pathBaseName(entryPath)} · ${nestedPreview.archive.format.toUpperCase()}`,
-      });
+      const result = action === "preview" ? await runPreviewWithPassword(
+          requestGeneration,
+          archiveDisplayPath,
+          entryPath,
+          async (passwords, requestId) => nestedPasswordPreviewSample(params, outerPath, entryPath, passwords)
+            ?? ipc.previewNestedArchive(outerPath, entryPath, passwords, archiveEncodingForJob(), requestId),
+        ) : prepared ?? await runPreviewWithPassword(
+          requestGeneration,
+          currentArchive?.path ?? outerPath,
+          entryPath,
+          (passwords, requestId) => ipc.openNestedArchive(outerPath, entryPath, passwords, encoding, requestId),
+        );
+      if (!result) return;
+      const info = "archive" in result ? result.archive : result;
+      if (!isCurrent()) {
+        void ipc.closeArchive(info.id).catch(() => undefined);
+        return;
+      }
+      if ("archive" in result) {
+        nestedPreview = result;
+        entryPreview = null;
+        entryPreviewFailure = null;
+        recordValidationEvent("frontend.entry.nested_preview_loaded", {
+          entry_path: entryPath,
+          entry_count: info.entry_count,
+          format: info.format,
+        });
+        recordOperation({
+          status: "info",
+          title: tr("gui.preview.nested_operation_title", "Nested archive previewed"),
+          detail: `${pathBaseName(entryPath)} · ${info.format.toUpperCase()}`,
+        });
+      } else {
+        if (!await adoptOpenedArchive(info, isCurrent)) return;
+        dismissRecoveryPreparation();
+        recoverySourceMode = "current";
+        recoverySourceOverride = null;
+        recoveryPar2Override = null;
+        clearEntryPreviewState();
+        if (action === "extract") {
+          openExtractWorkspace("all");
+          focusExtractReview();
+        }
+        showNotice(tr("gui.preview.opened_nested_archive", "Opened nested archive · {name}").replace("{name}", info.name));
+        recordOperation({
+          status: "done",
+          title: tr("gui.preview.nested_opened_operation_title", "Nested archive opened"),
+          detail: `${pathBaseName(entryPath)} -> ${info.name}`,
+        });
+      }
     } catch (error) {
-      if (requestGeneration !== previewRequestGeneration) return;
+      if (!isCurrent()) return;
       const failurePolicy = previewPolicyFor(entryPath, entryTypeForPath(entryPath));
       const message = previewFailureMessage(
         error,
         true,
-        "gui.preview.nested_failed",
-        "Could not preview this nested archive",
+        action === "preview" ? "gui.preview.nested_failed" : "gui.preview.open_nested_requires_desktop_service",
+        action === "preview" ? "Could not preview this nested archive"
+          : "Could not open this inner archive. Preview it or extract it instead.",
       );
       entryPreviewFailure = {
         entryPath,
         entryType: entryTypeForPath(entryPath),
         displayName: pathBaseName(entryPath),
         policyKind: failurePolicy.kind,
-        outerSource: archiveSource,
-        outerDisplayPath: archiveDisplayPath,
+        outerSource: outerPath,
+        outerDisplayPath: action === "preview" ? archiveDisplayPath
+          : currentArchive?.source === outerPath ? currentArchive.path : outerPath,
         message,
-        retryAction: "preview",
+        retryAction: action,
       };
-      showNotice(message);
     } finally {
       if (requestGeneration === previewRequestGeneration) {
         previewPhase = "idle";
@@ -10208,6 +10242,8 @@
       showNotice(tr("gui.preview.preview_first", "Open a file entry first"));
       return false;
     }
+    // Preparation already cleared its previous feedback before waiting for the file.
+    if (previewPhase === "idle") clearNotice();
     const responseIdentity: PreviewResponseIdentity = {
       previewGeneration: previewRequestGeneration,
       actionGeneration: ++previewActionGeneration,
@@ -10282,7 +10318,6 @@
         message,
         retryAction: "preview",
       };
-      showNotice(message);
       return false;
     }
   }
@@ -10322,101 +10357,13 @@
     list.querySelector<HTMLElement>(selector)?.focus({ preventScroll: true });
   }
 
-  async function openNestedArchiveEntry(
-    outerPath: string,
-    entryPath: string,
-    virtualIndex: number | null = previewOriginVirtualIndex,
-    intent: "open" | "extract" = "open",
-  ) {
-    if (intent === "extract" && (preventCreateSubmissionNavigation("extract")
-      || preventConvertSubmissionNavigation("extract") || focusBlockingTaskIfAny())) return;
-    dismissArchiveAddPreparation();
-    const initialScreen = screen;
-    const initialScreenGeneration = taskReviewRequestGeneration;
-    const prepared = nestedPreview?.outer_path === outerPath && nestedPreview.entry_path === entryPath
-      ? nestedPreview.archive : null;
-    if (prepared) nestedPreview = null;
-    clearEntryPreviewState();
-    previewOriginEntryPath = entryPath;
-    previewOriginVirtualIndex = virtualIndex;
-    const requestGeneration = ++previewRequestGeneration;
-    const isCurrent = () => requestGeneration === previewRequestGeneration
-      && (intent !== "extract" || (screen === initialScreen
-        && (!prepared || initialScreenGeneration === taskReviewRequestGeneration)));
-    const encoding = currentArchive?.source === outerPath ? archiveEncodingForJob() : null;
-    previewPhase = "nested";
-    previewTargetName = pathBaseName(entryPath);
-    try {
-      await waitForPreviewFeedbackFrame();
-      if (!isCurrent()) {
-        if (prepared) void ipc.closeArchive(prepared.id).catch(() => undefined);
-        return;
-      }
-      const info = prepared ?? await runPreviewWithPassword(
-        requestGeneration,
-        currentArchive?.path ?? outerPath,
-        entryPath,
-        (passwords, requestId) => ipc.openNestedArchive(outerPath, entryPath, passwords, encoding, requestId),
-      );
-      if (!info) return;
-      if (!isCurrent()) {
-        void ipc.closeArchive(info.id).catch(() => undefined);
-        return;
-      }
-      if (!await adoptOpenedArchive(info, isCurrent)) return;
-      dismissRecoveryPreparation();
-      recoverySourceMode = "current";
-      recoverySourceOverride = null;
-      recoveryPar2Override = null;
-      clearEntryPreviewState();
-      if (intent === "extract") {
-        openExtractWorkspace("all");
-        focusExtractReview();
-      }
-      showNotice(tr("gui.preview.opened_nested_archive", "Opened nested archive · {name}").replace("{name}", info.name));
-      recordOperation({
-        status: "done",
-        title: tr("gui.preview.nested_opened_operation_title", "Nested archive opened"),
-        detail: `${pathBaseName(entryPath)} -> ${info.name}`,
-      });
-    } catch (error) {
-      if (!isCurrent()) return;
-      const failurePolicy = previewPolicyFor(entryPath, entryTypeForPath(entryPath));
-      const outerDisplayPath = currentArchive?.source === outerPath
-        ? currentArchive.path
-        : outerPath;
-      const message = previewFailureMessage(
-        error,
-        true,
-        "gui.preview.open_nested_requires_desktop_service",
-        "Could not open this inner archive. Preview it or extract it instead.",
-      );
-      entryPreviewFailure = {
-        entryPath,
-        entryType: entryTypeForPath(entryPath),
-        displayName: pathBaseName(entryPath),
-        policyKind: failurePolicy.kind,
-        outerSource: outerPath,
-        outerDisplayPath,
-        message,
-        retryAction: intent,
-      };
-      showNotice(message);
-    } finally {
-      if (requestGeneration === previewRequestGeneration) {
-        previewPhase = "idle";
-        previewTargetName = "";
-      }
-    }
-  }
-
   async function openNestedPreviewArchive() {
     const preview = nestedPreview;
     if (!preview) {
       showNotice(tr("gui.preview.preview_nested_before_open", "Preview a nested archive before opening it"));
       return;
     }
-    await openNestedArchiveEntry(preview.outer_path, preview.entry_path);
+    await nestedArchiveAction("open", preview.outer_path, preview.entry_path);
   }
 
   function nestedExtractDraftLocked(): boolean {
@@ -10559,7 +10506,7 @@
       showNotice(tr("gui.preview.preview_nested_before_extract", "Preview a nested archive before extracting it"));
       return;
     }
-    await openNestedArchiveEntry(preview.outer_path, preview.entry_path, previewOriginVirtualIndex, "extract");
+    await nestedArchiveAction("extract", preview.outer_path, preview.entry_path, previewOriginVirtualIndex);
   }
 
   async function repairFilenameEncoding(encoding = "gbk") {
@@ -12275,9 +12222,15 @@
     await forgetCurrentArchivePassword();
   }
 
-  function showNotice(message: string) {
-    appNotice = message;
+  function clearNotice() {
     if (noticeTimer) clearTimeout(noticeTimer);
+    appNotice = null;
+    noticeTimer = null;
+  }
+
+  function showNotice(message: string) {
+    clearNotice();
+    appNotice = message;
     noticeTimer = setTimeout(() => {
       appNotice = null;
       noticeTimer = null;
