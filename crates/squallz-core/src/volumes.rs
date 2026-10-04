@@ -1722,69 +1722,53 @@ struct NativeSplitSink<'a> {
     max_volumes: u32,
     resources: ResourceOptions,
     staging_id: SplitStagingId,
-    parts: Vec<SplitStagingPath>,
+    outputs: &'a mut Vec<StagedSplitOutput>,
     offset: u64,
 }
 
-impl<'a> NativeSplitSink<'a> {
-    fn new(
-        base: &'a Path,
-        format: &'a dyn ArchiveFormat,
-        volume_size: u64,
-        max_volumes: u32,
-        resources: ResourceOptions,
-    ) -> Self {
-        Self {
-            base,
-            format,
-            volume_size,
-            max_volumes,
-            resources,
-            staging_id: SplitStagingId::new(),
-            parts: Vec::new(),
-            offset: 0,
-        }
-    }
-
+impl NativeSplitSink<'_> {
     fn start_volume(&mut self) -> Result<(), FormatError> {
-        if self.parts.len() >= self.max_volumes as usize {
+        if self.outputs.len() >= self.max_volumes as usize {
             return Err(FormatError::ResourceLimitExceeded(format!(
                 "native {} volume count exceeds {}",
                 self.format.id(),
                 self.max_volumes
             )));
         }
-        if let Some(current) = self.parts.last() {
+        if let Some(current) = self.outputs.last() {
             current.file.sync_all()?;
         }
-        let disk_index = u32::try_from(self.parts.len()).map_err(|_| {
+        let disk_index = u32::try_from(self.outputs.len()).map_err(|_| {
             FormatError::ResourceLimitExceeded("native volume count exceeds 32-bit indexing".into())
         })?;
         let placeholder = self
             .format
             .native_volume_path(self.base, disk_index, false)?;
         validate_native_volume_path(self.base, &placeholder)?;
-        let (part, file) = reserve_split_staging_file(&placeholder, self.staging_id)?;
+        let (output, file) = StagedSplitOutput::reserve(
+            placeholder,
+            SplitOutputRole::Volume {
+                index: self.outputs.len(),
+                primary: false,
+            },
+            self.staging_id,
+        )?;
         drop(file);
-        self.parts.push(part);
+        self.outputs.push(output);
         self.offset = 0;
         Ok(())
     }
 
     fn sync_active(&mut self) -> Result<(), FormatError> {
-        if self.parts.is_empty() {
+        if self.outputs.is_empty() {
             return Err(FormatError::Other(
                 "native volume writer produced no output".into(),
             ));
         }
-        if let Some(current) = self.parts.last_mut() {
+        if let Some(current) = self.outputs.last_mut() {
             current.file.sync_all()?;
         }
         Ok(())
-    }
-
-    fn into_parts(self) -> Vec<SplitStagingPath> {
-        self.parts
     }
 }
 
@@ -1798,7 +1782,7 @@ impl NativeVolumeWriter for NativeSplitSink<'_> {
     }
 
     fn disk_index(&self) -> u32 {
-        self.parts.len().saturating_sub(1) as u32
+        self.outputs.len().saturating_sub(1) as u32
     }
 
     fn disk_offset(&self) -> u64 {
@@ -1813,7 +1797,7 @@ impl NativeVolumeWriter for NativeSplitSink<'_> {
                 self.volume_size
             )));
         }
-        if self.parts.is_empty()
+        if self.outputs.is_empty()
             || self
                 .offset
                 .checked_add(record_len)
@@ -1825,7 +1809,7 @@ impl NativeVolumeWriter for NativeSplitSink<'_> {
     }
 
     fn write_spanning(&mut self, mut bytes: &[u8]) -> Result<(), FormatError> {
-        if self.parts.is_empty() {
+        if self.outputs.is_empty() {
             self.start_volume()?;
         }
         while !bytes.is_empty() {
@@ -1834,7 +1818,7 @@ impl NativeVolumeWriter for NativeSplitSink<'_> {
             }
             let remaining = self.volume_size - self.offset;
             let count = bytes.len().min(remaining as usize);
-            let current = self.parts.last_mut().ok_or_else(|| {
+            let current = self.outputs.last_mut().ok_or_else(|| {
                 FormatError::Other("native volume writer lost its active output".into())
             })?;
             current.file.write_all(&bytes[..count])?;
@@ -1849,7 +1833,7 @@ impl NativeVolumeWriter for NativeSplitSink<'_> {
     }
 
     fn write_current_volume(&mut self, bytes: &[u8]) -> Result<(), FormatError> {
-        let current = self.parts.last_mut().ok_or_else(|| {
+        let current = self.outputs.last_mut().ok_or_else(|| {
             FormatError::Other("native volume writer has no active output".into())
         })?;
         current.file.write_all(bytes)?;
@@ -1912,192 +1896,37 @@ pub(crate) fn split_into_native_volumes_with_commit_policy_and_source_identity(
     }
     reader.seek(SeekFrom::Start(0))?;
 
-    let mut sink = NativeSplitSink::new(base, format, volume_size, limits.max_volumes, *resources);
-    progress.on_phase(ProgressPhase::OutputSplit, true);
-    if let Err(error) = format.write_native_volumes(&mut reader, &mut sink, progress, ctl) {
-        let parts = sink.into_parts();
-        return Err(split_staging_failure(
-            error,
-            tmp,
-            &reader,
-            source_identity,
-            base,
-            &parts,
-            &[],
-        ));
-    }
-    let source_stability = file_identity(&reader).and_then(|reader_identity| {
-        path_identity(tmp).map(|path_identity| {
-            reader_identity == source_identity && path_identity == source_identity
-        })
-    });
-    let source_error = match source_stability {
-        Ok(true) => None,
-        Ok(false) => Some(FormatError::Io(io::Error::other(
-            "complete native-volume staging archive changed while it was read",
-        ))),
-        Err(error) => Some(error.into()),
-    };
-    if let Some(error) = source_error {
-        let parts = sink.into_parts();
-        return Err(split_staging_failure(
-            error,
-            tmp,
-            &reader,
-            source_identity,
-            base,
-            &parts,
-            &[],
-        ));
-    }
-    if let Err(error) = sink.sync_active() {
-        let parts = sink.into_parts();
-        return Err(split_staging_failure(
-            error,
-            tmp,
-            &reader,
-            source_identity,
-            base,
-            &parts,
-            &[],
-        ));
-    }
-    let parts = sink.into_parts();
-    let last_index = parts
-        .len()
-        .checked_sub(1)
-        .ok_or_else(|| FormatError::Other("native volume writer produced no output".into()))?;
-    let volume_count = match u32::try_from(parts.len()) {
-        Ok(count) => count,
-        Err(_) => {
-            return Err(split_staging_failure(
-                FormatError::ResourceLimitExceeded(
-                    "native volume count exceeds 32-bit indexing".into(),
-                ),
-                tmp,
-                &reader,
-                source_identity,
-                base,
-                &parts,
-                &[],
-            ));
-        }
-    };
-    let primary_index = match format
-        .native_volume_primary_index(volume_count)
-        .and_then(|index| {
-            usize::try_from(index).map_err(|_| {
-                FormatError::ResourceLimitExceeded(
-                    "native primary volume index exceeds platform limits".into(),
-                )
+    let mut staged = StagedSplitArchive::new(tmp, reader, source_identity, base, false);
+    let result = (|| {
+        let mut sink = NativeSplitSink {
+            base: staged.base,
+            format,
+            volume_size,
+            max_volumes: limits.max_volumes,
+            resources: *resources,
+            staging_id: staged.staging_id,
+            outputs: &mut staged.outputs,
+            offset: 0,
+        };
+        progress.on_phase(ProgressPhase::OutputSplit, true);
+        format.write_native_volumes(&mut staged.source, &mut sink, progress, ctl)?;
+        let source_stability = file_identity(&staged.source).and_then(|reader_identity| {
+            path_identity(staged.tmp).map(|path_identity| {
+                reader_identity == staged.source_identity && path_identity == staged.source_identity
             })
-        }) {
-        Ok(index) => index,
-        Err(error) => {
-            return Err(split_staging_failure(
-                error,
-                tmp,
-                &reader,
-                source_identity,
-                base,
-                &parts,
-                &[],
-            ));
+        });
+        if !source_stability? {
+            return Err(FormatError::Io(io::Error::other(
+                "complete native-volume staging archive changed while it was read",
+            )));
         }
-    };
-    if primary_index > last_index {
-        return Err(split_staging_failure(
-            FormatError::Other(
-                "native format selected a primary member outside the output set".into(),
-            ),
-            tmp,
-            &reader,
-            source_identity,
-            base,
-            &parts,
-            &[],
-        ));
-    }
-    let mut volumes = Vec::with_capacity(parts.len());
-    for index in 0..parts.len() {
-        let disk_index = match u32::try_from(index) {
-            Ok(index) => index,
-            Err(_) => {
-                return Err(split_staging_failure(
-                    FormatError::ResourceLimitExceeded(
-                        "native volume count exceeds 32-bit indexing".into(),
-                    ),
-                    tmp,
-                    &reader,
-                    source_identity,
-                    base,
-                    &parts,
-                    &[],
-                ));
-            }
-        };
-        let final_path = match format.native_volume_path(base, disk_index, index == primary_index) {
-            Ok(path) => path,
-            Err(error) => {
-                return Err(split_staging_failure(
-                    error,
-                    tmp,
-                    &reader,
-                    source_identity,
-                    base,
-                    &parts,
-                    &[],
-                ));
-            }
-        };
-        if let Err(error) = validate_native_volume_path(base, &final_path) {
-            return Err(split_staging_failure(
-                error,
-                tmp,
-                &reader,
-                source_identity,
-                base,
-                &parts,
-                &[],
-            ));
-        }
-        if volumes.iter().any(|path| path == &final_path) {
-            return Err(split_staging_failure(
-                FormatError::Other("native volume format returned duplicate output names".into()),
-                tmp,
-                &reader,
-                source_identity,
-                base,
-                &parts,
-                &[],
-            ));
-        }
-        volumes.push(final_path);
-    }
-    let staged_outputs = parts
-        .into_iter()
-        .zip(volumes.iter().cloned())
-        .map(|(part, final_path)| StagedSplitOutput {
-            part: part.path,
-            final_path,
-            identity: part.identity,
-            file: part.file,
-        })
-        .collect();
-    commit_staged_split_outputs(
-        tmp,
-        &reader,
-        source_identity,
-        base,
-        staged_outputs,
-        volumes,
-        primary_index,
-        Vec::new(),
-        false,
-        progress,
-        ctl,
-        commit_policy,
-    )
+        sink.sync_active()
+    })();
+    result.map_err(|error| staged.failure(error))?;
+    staged
+        .bind_native_output_paths(format)
+        .map_err(|error| staged.failure(error))?;
+    staged.commit(progress, ctl, commit_policy)
 }
 
 fn validate_native_volume_path(base: &Path, candidate: &Path) -> Result<(), FormatError> {
@@ -2157,18 +1986,12 @@ fn split_into_volumes_with_commit_policy_inner(
     progress.on_phase(ProgressPhase::OutputSplit, true);
     progress.on_progress(0, total, &EntryPath::from_utf8(String::new()));
     let mut split_done = 0u64;
-    let mut part_paths = Vec::with_capacity(layout.count as usize);
-    let mut recovery_part_path = None;
-    let mut parity_part_path = None;
-    let mut weighted_part_path = None;
-    let mut quadratic_part_path = None;
-    let staging_id = SplitStagingId::new();
+    let mut staged = StagedSplitArchive::new(tmp, reader, source_identity, base, layout.write_sqzv);
     let result = (|| -> Result<(), FormatError> {
         let mut buf = vec![0u8; resources.stream_buffer_size(COPY_CHUNK)?];
         let mut parity_out = if layout.write_sqzv && layout.count > 1 {
             let parity_volume = recovery_parity_volume_path(base);
-            let (parity_part, file) = reserve_split_staging_file(&parity_volume, staging_id)?;
-            parity_part_path = Some(parity_part);
+            let file = staged.reserve(parity_volume, SplitOutputRole::Parity)?;
             file.set_len(SQZR_HEADER_LEN_U64 + volume_size)?;
             Some(file)
         } else {
@@ -2176,8 +1999,7 @@ fn split_into_volumes_with_commit_policy_inner(
         };
         let mut weighted_out = if layout.write_weighted_parity {
             let parity_volume = recovery_weighted_parity_volume_path(base);
-            let (parity_part, file) = reserve_split_staging_file(&parity_volume, staging_id)?;
-            weighted_part_path = Some(parity_part);
+            let file = staged.reserve(parity_volume, SplitOutputRole::WeightedParity)?;
             file.set_len(SQZR_HEADER_LEN_U64 + volume_size)?;
             Some(file)
         } else {
@@ -2185,8 +2007,7 @@ fn split_into_volumes_with_commit_policy_inner(
         };
         let mut quadratic_out = if layout.write_quadratic_parity {
             let parity_volume = recovery_quadratic_parity_volume_path(base);
-            let (parity_part, file) = reserve_split_staging_file(&parity_volume, staging_id)?;
-            quadratic_part_path = Some(parity_part);
+            let file = staged.reserve(parity_volume, SplitOutputRole::QuadraticParity)?;
             file.set_len(SQZR_HEADER_LEN_U64 + volume_size)?;
             Some(file)
         } else {
@@ -2201,14 +2022,16 @@ fn split_into_volumes_with_commit_policy_inner(
                     .map(|name| name.to_string_lossy().into_owned())
                     .unwrap_or_else(|| volume.display().to_string()),
             );
-            let (part, mut out) = reserve_split_staging_file(&volume, staging_id)?;
-            part_paths.push(part);
+            let mut out = staged.reserve(
+                volume,
+                SplitOutputRole::Volume {
+                    index: (i - 1) as usize,
+                    primary: i == 1,
+                },
+            )?;
             let mut recovery_out = if layout.write_sqzv && layout.count > 1 && i == layout.count {
                 let recovery_volume = recovery_volume_path(base, i);
-                let (recovery_part, file) =
-                    reserve_split_staging_file(&recovery_volume, staging_id)?;
-                recovery_part_path = Some(recovery_part);
-                Some(file)
+                Some(staged.reserve(recovery_volume, SplitOutputRole::TailRecovery)?)
             } else {
                 None
             };
@@ -2240,7 +2063,7 @@ fn split_into_volumes_with_commit_policy_inner(
             while left > 0 {
                 ctl.checkpoint()?;
                 let want = buf.len().min(left as usize);
-                let n = reader.read(&mut buf[..want])?;
+                let n = staged.source.read(&mut buf[..want])?;
                 if n == 0 {
                     return Err(FormatError::Io(io::Error::new(
                         io::ErrorKind::UnexpectedEof,
@@ -2315,324 +2138,233 @@ fn split_into_volumes_with_commit_policy_inner(
         }
         Ok(())
     })();
-    if let Err(error) = result {
-        let mut staged_paths = part_paths;
-        staged_paths.extend(recovery_part_path);
-        staged_paths.extend(parity_part_path);
-        staged_paths.extend(weighted_part_path);
-        staged_paths.extend(quadratic_part_path);
-        return Err(split_staging_failure(
-            error,
-            tmp,
-            &reader,
-            source_identity,
-            base,
-            &staged_paths,
-            &[],
-        ));
-    }
-
-    let mut volumes = Vec::with_capacity(layout.count as usize);
-    let mut staged_outputs = Vec::with_capacity(
-        part_paths.len()
-            + recovery_part_path.iter().count()
-            + parity_part_path.iter().count()
-            + weighted_part_path.iter().count()
-            + quadratic_part_path.iter().count(),
-    );
-    for (i, part) in part_paths.into_iter().enumerate() {
-        let final_path = volume_path(base, i as u64 + 1);
-        staged_outputs.push(StagedSplitOutput {
-            part: part.path,
-            final_path: final_path.clone(),
-            identity: part.identity,
-            file: part.file,
-        });
-        volumes.push(final_path);
-    }
-    let mut sidecars = Vec::new();
-    if let Some(part) = recovery_part_path {
-        let final_path = recovery_volume_path(base, layout.count);
-        staged_outputs.push(StagedSplitOutput {
-            part: part.path,
-            final_path: final_path.clone(),
-            identity: part.identity,
-            file: part.file,
-        });
-        sidecars.push(final_path);
-    }
-    if let Some(part) = parity_part_path {
-        let final_path = recovery_parity_volume_path(base);
-        staged_outputs.push(StagedSplitOutput {
-            part: part.path,
-            final_path: final_path.clone(),
-            identity: part.identity,
-            file: part.file,
-        });
-        sidecars.push(final_path);
-    }
-    if let Some(part) = weighted_part_path {
-        let final_path = recovery_weighted_parity_volume_path(base);
-        staged_outputs.push(StagedSplitOutput {
-            part: part.path,
-            final_path: final_path.clone(),
-            identity: part.identity,
-            file: part.file,
-        });
-        sidecars.push(final_path);
-    }
-    if let Some(part) = quadratic_part_path {
-        let final_path = recovery_quadratic_parity_volume_path(base);
-        staged_outputs.push(StagedSplitOutput {
-            part: part.path,
-            final_path: final_path.clone(),
-            identity: part.identity,
-            file: part.file,
-        });
-        sidecars.push(final_path);
-    }
-
-    commit_staged_split_outputs(
-        tmp,
-        &reader,
-        source_identity,
-        base,
-        staged_outputs,
-        volumes,
-        0,
-        sidecars,
-        layout.write_sqzv,
-        progress,
-        ctl,
-        commit_policy,
-    )
+    result.map_err(|error| staged.failure(error))?;
+    staged.commit(progress, ctl, commit_policy)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn commit_staged_split_outputs(
-    tmp: &Path,
-    reader: &File,
+/// Owns writer-stage bindings until publication takes over. There is no Drop
+/// cleanup: a failed durable publication must retain its recovery materials.
+struct StagedSplitArchive<'a> {
+    tmp: &'a Path,
+    source: File,
     source_identity: PathIdentity,
-    base: &Path,
-    staged_outputs: Vec<StagedSplitOutput>,
-    volumes: Vec<PathBuf>,
-    primary_volume_index: usize,
-    mut sidecars: Vec<PathBuf>,
+    base: &'a Path,
+    staging_id: SplitStagingId,
     include_recovery: bool,
-    progress: &dyn ProgressSink,
-    ctl: &ControlToken,
-    commit_policy: CreateCommitPolicy,
-) -> Result<SplitArtifacts, FormatError> {
-    let total_output_bytes = match staged_outputs.iter().try_fold(0u64, |total, output| {
-        fs::metadata(&output.part).map(|metadata| total.saturating_add(metadata.len()))
-    }) {
-        Ok(total) => total,
-        Err(error) => {
-            return Err(split_staging_failure(
-                error.into(),
-                tmp,
-                reader,
-                source_identity,
-                base,
-                &staged_outputs,
-                &[],
-            ));
-        }
-    };
-
-    progress.on_phase(ProgressPhase::OutputCommit, false);
-    if let Err(error) = ctl.checkpoint() {
-        return Err(split_staging_failure(
-            error,
-            tmp,
-            reader,
-            source_identity,
-            base,
-            &staged_outputs,
-            &[],
-        ));
-    }
-
-    // The complete temporary archive contains the whole plaintext payload.
-    // It must be gone before any existing output is moved out of place.
-    let _commit_lock = match lock_split_output_set(base) {
-        Ok(lock) => lock,
-        Err(error) => {
-            return Err(split_staging_failure(
-                error,
-                tmp,
-                reader,
-                source_identity,
-                base,
-                &staged_outputs,
-                &[],
-            ));
-        }
-    };
-    let recovered_outputs = match SplitPublicationTransaction::recover(base) {
-        Ok(paths) => paths,
-        Err(error) => {
-            return Err(split_staging_failure(
-                error,
-                tmp,
-                reader,
-                source_identity,
-                base,
-                &staged_outputs,
-                &[],
-            ));
-        }
-    };
-    let managed_snapshot = match commit_policy {
-        CreateCommitPolicy::NoReplace => {
-            let managed = match collect_managed_split_outputs(base, include_recovery) {
-                Ok(managed) => managed,
-                Err(error) => {
-                    return Err(split_staging_failure(
-                        error,
-                        tmp,
-                        reader,
-                        source_identity,
-                        base,
-                        &staged_outputs,
-                        &recovered_outputs,
-                    ));
-                }
-            };
-            if !managed.is_empty() {
-                return Err(split_staging_failure(
-                    crate::output_exists_error(&managed[0]),
-                    tmp,
-                    reader,
-                    source_identity,
-                    base,
-                    &staged_outputs,
-                    &recovered_outputs,
-                ));
-            }
-            None
-        }
-        CreateCommitPolicy::ReplaceExisting => {
-            match snapshot_managed_split_outputs(base, include_recovery) {
-                Ok(snapshot) => Some(snapshot),
-                Err(error) => {
-                    return Err(split_staging_failure(
-                        error,
-                        tmp,
-                        reader,
-                        source_identity,
-                        base,
-                        &staged_outputs,
-                        &recovered_outputs,
-                    ));
-                }
-            }
-        }
-        CreateCommitPolicy::ReplaceIfUnchanged(guard) => {
-            let snapshot = match verify_guarded_split_snapshot(base, include_recovery, guard) {
-                Ok(snapshot) => snapshot,
-                Err(error) => {
-                    return Err(split_staging_failure(
-                        error,
-                        tmp,
-                        reader,
-                        source_identity,
-                        base,
-                        &staged_outputs,
-                        &recovered_outputs,
-                    ));
-                }
-            };
-            Some(snapshot)
-        }
-    };
-    if let Err(error) =
-        remove_split_source_before_commit(tmp, reader, source_identity, &staged_outputs)
-    {
-        return Err(split_staging_failure(
-            error,
-            tmp,
-            reader,
-            source_identity,
-            base,
-            &staged_outputs,
-            &recovered_outputs,
-        ));
-    }
-    if let Err(error) = sync_directory(parent_or_current(base)) {
-        return Err(split_staging_failure(
-            error.into(),
-            tmp,
-            reader,
-            source_identity,
-            base,
-            &staged_outputs,
-            &recovered_outputs,
-        ));
-    }
-
-    let commit = match managed_snapshot {
-        Some(managed) => SplitPublicationTransaction::publish(base, &staged_outputs, managed),
-        None => commit_split_outputs_no_replace(&staged_outputs).map(|()| Vec::new()),
-    };
-    let preserved_outputs = match commit {
-        Ok(mut preserved_outputs) => {
-            preserved_outputs.extend(recovered_outputs.clone());
-            bind_preserved_split_outputs(preserved_outputs)?
-        }
-        Err(error) => {
-            if matches!(commit_policy, CreateCommitPolicy::NoReplace) {
-                return Err(split_staging_failure(
-                    error,
-                    tmp,
-                    reader,
-                    source_identity,
-                    base,
-                    &staged_outputs,
-                    &recovered_outputs,
-                ));
-            }
-            return Err(with_recovered_split_debt(error, &recovered_outputs));
-        }
-    };
-
-    sidecars.sort();
-    Ok(SplitArtifacts {
-        volumes,
-        primary_volume_index,
-        sidecars,
-        preserved_outputs,
-        total_output_bytes,
-    })
+    outputs: Vec<StagedSplitOutput>,
+    recovered: Vec<PreservedSplitOutput>,
 }
 
-fn split_staging_failure<B: SplitStagingBinding>(
-    error: FormatError,
-    tmp: &Path,
-    tmp_file: &File,
-    tmp_identity: PathIdentity,
-    base: &Path,
-    staged_paths: &[B],
-    recovered: &[PreservedSplitOutput],
-) -> FormatError {
-    let mut cleanup_errors = Vec::new();
-    if let Err(remove_error) = crate::remove_bound_temp_file(tmp, tmp_file, tmp_identity) {
-        cleanup_errors.push(format!(
-            "could not securely remove complete split staging archive {}: {remove_error}",
-            tmp.display()
-        ));
-    }
-    for staged in staged_paths {
-        if let Err(remove_error) = remove_bound_split_staging(staged) {
-            cleanup_errors.push(remove_error.to_string());
+impl<'a> StagedSplitArchive<'a> {
+    fn new(
+        tmp: &'a Path,
+        source: File,
+        source_identity: PathIdentity,
+        base: &'a Path,
+        include_recovery: bool,
+    ) -> Self {
+        Self {
+            tmp,
+            source,
+            source_identity,
+            base,
+            staging_id: SplitStagingId::new(),
+            include_recovery,
+            outputs: Vec::new(),
+            recovered: Vec::new(),
         }
     }
-    if let Err(sync_error) = sync_directory(parent_or_current(base)) {
-        cleanup_errors.push(format!(
-            "could not synchronize split staging cleanup: {sync_error}"
-        ));
+
+    fn reserve(&mut self, final_path: PathBuf, role: SplitOutputRole) -> Result<File, FormatError> {
+        let index = match role {
+            SplitOutputRole::Volume { index, .. } => index,
+            SplitOutputRole::TailRecovery => self
+                .outputs
+                .iter()
+                .take_while(|output| matches!(output.role, SplitOutputRole::Volume { .. }))
+                .count(),
+            _ => self.outputs.len(),
+        };
+        let (output, file) = StagedSplitOutput::reserve(final_path, role, self.staging_id)?;
+        // Parity is reserved first but follows the data/tail in cleanup and
+        // publication. Each data insertion moves at most three parity records.
+        self.outputs.insert(index, output);
+        Ok(file)
     }
-    with_recovered_split_debt(with_split_cleanup_errors(error, cleanup_errors), recovered)
+
+    fn bind_native_output_paths(&mut self, format: &dyn ArchiveFormat) -> Result<(), FormatError> {
+        let last_index =
+            self.outputs.len().checked_sub(1).ok_or_else(|| {
+                FormatError::Other("native volume writer produced no output".into())
+            })?;
+        let volume_count = u32::try_from(self.outputs.len()).map_err(|_| {
+            FormatError::ResourceLimitExceeded("native volume count exceeds 32-bit indexing".into())
+        })?;
+        let primary_index = usize::try_from(format.native_volume_primary_index(volume_count)?)
+            .map_err(|_| {
+                FormatError::ResourceLimitExceeded(
+                    "native primary volume index exceeds platform limits".into(),
+                )
+            })?;
+        if primary_index > last_index {
+            return Err(FormatError::Other(
+                "native format selected a primary member outside the output set".into(),
+            ));
+        }
+        for index in 0..self.outputs.len() {
+            let disk_index = u32::try_from(index).map_err(|_| {
+                FormatError::ResourceLimitExceeded(
+                    "native volume count exceeds 32-bit indexing".into(),
+                )
+            })?;
+            let final_path =
+                format.native_volume_path(self.base, disk_index, index == primary_index)?;
+            validate_native_volume_path(self.base, &final_path)?;
+            if self.outputs[..index]
+                .iter()
+                .any(|output| output.final_path == final_path)
+            {
+                return Err(FormatError::Other(
+                    "native volume format returned duplicate output names".into(),
+                ));
+            }
+            let output = &mut self.outputs[index];
+            output.final_path = final_path;
+            output.role = SplitOutputRole::Volume {
+                index,
+                primary: index == primary_index,
+            };
+        }
+        Ok(())
+    }
+
+    fn commit(
+        mut self,
+        progress: &dyn ProgressSink,
+        ctl: &ControlToken,
+        commit_policy: CreateCommitPolicy,
+    ) -> Result<SplitArtifacts, FormatError> {
+        let total_output_bytes = self
+            .outputs
+            .iter()
+            .try_fold(0u64, |total, output| {
+                fs::metadata(&output.part).map(|metadata| total.saturating_add(metadata.len()))
+            })
+            .map_err(|error| self.failure(error.into()))?;
+
+        progress.on_phase(ProgressPhase::OutputCommit, false);
+        ctl.checkpoint().map_err(|error| self.failure(error))?;
+        let _commit_lock = lock_split_output_set(self.base).map_err(|error| self.failure(error))?;
+        self.recovered =
+            SplitPublicationTransaction::recover(self.base).map_err(|error| self.failure(error))?;
+        let managed_snapshot = match commit_policy {
+            CreateCommitPolicy::NoReplace => {
+                let managed = collect_managed_split_outputs(self.base, self.include_recovery)
+                    .map_err(|error| self.failure(error))?;
+                if !managed.is_empty() {
+                    return Err(self.failure(crate::output_exists_error(&managed[0])));
+                }
+                None
+            }
+            CreateCommitPolicy::ReplaceExisting => Some(
+                snapshot_managed_split_outputs(self.base, self.include_recovery)
+                    .map_err(|error| self.failure(error))?,
+            ),
+            CreateCommitPolicy::ReplaceIfUnchanged(guard) => Some(
+                verify_guarded_split_snapshot(self.base, self.include_recovery, guard)
+                    .map_err(|error| self.failure(error))?,
+            ),
+        };
+
+        // The current complete archive contains the whole plaintext payload.
+        // Remove it before this publication moves any existing output aside.
+        remove_split_source_before_commit(
+            self.tmp,
+            &self.source,
+            self.source_identity,
+            &self.outputs,
+        )
+        .map_err(|error| self.failure(error))?;
+        sync_directory(parent_or_current(self.base)).map_err(|error| self.failure(error.into()))?;
+
+        let commit = match managed_snapshot {
+            Some(managed) => {
+                SplitPublicationTransaction::publish(self.base, &self.outputs, managed)
+            }
+            None => commit_split_outputs_no_replace(&self.outputs).map(|()| Vec::new()),
+        };
+        let preserved_outputs = match commit {
+            Ok(mut preserved_outputs) => {
+                preserved_outputs.extend(self.recovered.iter().cloned());
+                bind_preserved_split_outputs(preserved_outputs)?
+            }
+            Err(error) => {
+                if matches!(commit_policy, CreateCommitPolicy::NoReplace) {
+                    return Err(self.failure(error));
+                }
+                // Publication may already be durable. Only its journal owner
+                // can decide whether staging must be kept for recovery.
+                return Err(with_recovered_split_debt(error, &self.recovered));
+            }
+        };
+
+        let mut volumes = Vec::new();
+        let mut sidecars = Vec::new();
+        let mut primary_volume_index = 0;
+        for output in self.outputs {
+            match output.role {
+                SplitOutputRole::Volume { primary, .. } => {
+                    if primary {
+                        primary_volume_index = volumes.len();
+                    }
+                    volumes.push(output.final_path);
+                }
+                _ => sidecars.push(output.final_path),
+            }
+        }
+        sidecars.sort();
+        Ok(SplitArtifacts {
+            volumes,
+            primary_volume_index,
+            sidecars,
+            preserved_outputs,
+            total_output_bytes,
+        })
+    }
+
+    fn failure(&self, error: FormatError) -> FormatError {
+        self.failure_with_parent_sync(error, || sync_directory(parent_or_current(self.base)))
+    }
+
+    fn failure_with_parent_sync(
+        &self,
+        error: FormatError,
+        sync_parent: impl FnOnce() -> io::Result<()>,
+    ) -> FormatError {
+        let mut cleanup_errors = Vec::new();
+        if let Err(remove_error) =
+            crate::remove_bound_temp_file(self.tmp, &self.source, self.source_identity)
+        {
+            cleanup_errors.push(format!(
+                "could not securely remove complete split staging archive {}: {remove_error}",
+                self.tmp.display()
+            ));
+        }
+        for output in &self.outputs {
+            if let Err(remove_error) = remove_bound_split_staging(output) {
+                cleanup_errors.push(remove_error.to_string());
+            }
+        }
+        if let Err(sync_error) = sync_parent() {
+            cleanup_errors.push(format!(
+                "could not synchronize split staging cleanup: {sync_error}"
+            ));
+        }
+        with_recovered_split_debt(
+            with_split_cleanup_errors(error, cleanup_errors),
+            &self.recovered,
+        )
+    }
 }
 
 fn remove_bound_split_staging<B: SplitStagingBinding>(staged: &B) -> Result<(), FormatError> {
@@ -2702,76 +2434,6 @@ fn with_split_cleanup_errors(error: FormatError, cleanup_errors: Vec<String>) ->
     }
 }
 
-#[cfg(test)]
-fn split_staging_failure_with<B, D, S>(
-    error: FormatError,
-    tmp: &Path,
-    tmp_identity: PathIdentity,
-    staged_paths: &[B],
-    recovered: &[PreservedSplitOutput],
-    remove: &mut D,
-    sync_parent: &mut S,
-) -> FormatError
-where
-    B: SplitStagingBinding,
-    D: FnMut(&Path) -> io::Result<()>,
-    S: FnMut() -> io::Result<()>,
-{
-    let mut cleanup_errors = Vec::new();
-    if path_identity(tmp).ok() == Some(tmp_identity) {
-        match remove(tmp) {
-            Ok(()) => {}
-            Err(remove_error) if remove_error.kind() == io::ErrorKind::NotFound => {}
-            Err(remove_error) => cleanup_errors.push(format!(
-                "could not remove split staging path {}: {remove_error}",
-                tmp.display()
-            )),
-        }
-    } else if tmp.exists() {
-        cleanup_errors.push(format!(
-            "complete split staging identity changed and the competing path was left untouched: {}",
-            tmp.display()
-        ));
-    }
-    for staged in staged_paths {
-        let path = staged.staging_path();
-        let identity = staged.staging_identity();
-        if split_file_identity(staged.staging_file()).ok() != Some(identity)
-            || split_path_identity(path).ok() != Some(identity)
-        {
-            if path.exists() {
-                cleanup_errors.push(format!(
-                    "split staging identity changed and the competing path was left untouched: {}",
-                    path.display()
-                ));
-            }
-            continue;
-        }
-        match remove(path) {
-            Ok(()) => {}
-            Err(remove_error) if remove_error.kind() == io::ErrorKind::NotFound => {}
-            Err(remove_error) => cleanup_errors.push(format!(
-                "could not remove split staging path {}: {remove_error}",
-                path.display()
-            )),
-        }
-    }
-    if let Err(sync_error) = sync_parent() {
-        cleanup_errors.push(format!(
-            "could not synchronize split staging cleanup: {sync_error}"
-        ));
-    }
-    let error = if cleanup_errors.is_empty() {
-        error
-    } else {
-        FormatError::Other(format!(
-            "{error}; split staging cleanup was incomplete or not durable: {}",
-            cleanup_errors.join("; ")
-        ))
-    };
-    with_recovered_split_debt(error, recovered)
-}
-
 fn with_recovered_split_debt(
     error: FormatError,
     recovered: &[PreservedSplitOutput],
@@ -2835,6 +2497,36 @@ struct StagedSplitOutput {
     final_path: PathBuf,
     identity: SplitPathIdentity,
     file: File,
+    role: SplitOutputRole,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum SplitOutputRole {
+    Volume { index: usize, primary: bool },
+    TailRecovery,
+    Parity,
+    WeightedParity,
+    QuadraticParity,
+}
+
+impl StagedSplitOutput {
+    fn reserve(
+        final_path: PathBuf,
+        role: SplitOutputRole,
+        staging_id: SplitStagingId,
+    ) -> Result<(Self, File), FormatError> {
+        let (part, file) = reserve_split_staging_file(&final_path, staging_id)?;
+        Ok((
+            Self {
+                part: part.path,
+                final_path,
+                identity: part.identity,
+                file: part.file,
+                role,
+            },
+            file,
+        ))
+    }
 }
 
 trait SplitStagingBinding {
@@ -3743,6 +3435,10 @@ mod test_support {
                     final_path,
                     identity,
                     file,
+                    role: SplitOutputRole::Volume {
+                        index,
+                        primary: index == 0,
+                    },
                 }
             })
             .collect()
@@ -4242,44 +3938,50 @@ mod tests {
         let base = dir.join("archive.zip");
         let tmp = dir.join("archive.complete.tmp");
         std::fs::write(&tmp, b"complete new archive").unwrap();
-        let staged = staged_output_fixture(&base, &[b"new first", b"new second"]);
+        let source = open_regular_file_no_follow_read_write(&tmp).unwrap();
+        let source_identity = file_identity(&source).unwrap();
+        let mut staged = StagedSplitArchive::new(&tmp, source, source_identity, &base, false);
+        for (index, contents) in [b"new first".as_slice(), b"new second".as_slice()]
+            .into_iter()
+            .enumerate()
+        {
+            let mut file = staged
+                .reserve(
+                    volume_path(&base, index as u64 + 1),
+                    SplitOutputRole::Volume {
+                        index,
+                        primary: index == 0,
+                    },
+                )
+                .unwrap();
+            file.write_all(contents).unwrap();
+            file.sync_all().unwrap();
+        }
         let debt = dir.join(".archive.zip.001.split-backup-7-0.tmp.archive.zip.001");
         std::fs::write(&debt, b"previous output").unwrap();
-        let recovered = vec![PreservedSplitOutput {
+        staged.recovered.push(PreservedSplitOutput {
             path: debt.clone(),
             identity: split_path_identity(&debt).unwrap(),
             state_digest: path_state_digest(&debt).unwrap().unwrap(),
-        }];
+        });
         let collision = volume_path(&base, 1);
-        let tmp_identity = path_identity(&tmp).unwrap();
-        let mut removed = Vec::new();
+        std::fs::write(&collision, b"competing output").unwrap();
         let mut sync_calls = 0;
 
-        let error = split_staging_failure_with(
-            crate::output_exists_error(&collision),
-            &tmp,
-            tmp_identity,
-            &staged,
-            &recovered,
-            &mut |path| {
-                removed.push(path.to_path_buf());
-                std::fs::remove_file(path)
-            },
-            &mut || {
-                sync_calls += 1;
-                Err(io::Error::new(
-                    io::ErrorKind::PermissionDenied,
-                    "injected parent sync failure",
-                ))
-            },
-        );
+        let error = staged.failure_with_parent_sync(crate::output_exists_error(&collision), || {
+            sync_calls += 1;
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "injected parent sync failure",
+            ))
+        });
 
         assert_eq!(sync_calls, 1);
-        assert!(removed.contains(&tmp));
-        assert!(staged.iter().all(|output| removed.contains(&output.part)));
         assert!(!tmp.exists());
-        assert!(!staged.iter().any(|output| output.part.exists()));
+        assert!(!staged.outputs.iter().any(|output| output.part.exists()));
         assert!(debt.exists());
+        assert_eq!(std::fs::read(&debt).unwrap(), b"previous output");
+        assert_eq!(std::fs::read(&collision).unwrap(), b"competing output");
         assert!(error.to_string().contains("output already exists"));
         assert!(error.to_string().contains("not durable"));
         assert!(error.to_string().contains("injected parent sync failure"));
@@ -4290,44 +3992,33 @@ mod tests {
     #[test]
     fn split_generation_failure_reports_cleanup_sync_failure() {
         let dir = temp_dir("generation-cleanup-sync");
+        let base = dir.join("archive.zip");
         let tmp = dir.join("archive.complete.tmp");
-        let staged_paths = vec![
-            dir.join(".archive.zip.001.split-stage-8-0-0.tmp.archive.zip.001"),
-            dir.join(".archive.zip.002.split-stage-8-0-1.tmp.archive.zip.002"),
-        ];
         std::fs::write(&tmp, b"complete archive").unwrap();
-        for path in &staged_paths {
-            std::fs::write(path, b"partial volume").unwrap();
+        let source = open_regular_file_no_follow_read_write(&tmp).unwrap();
+        let source_identity = file_identity(&source).unwrap();
+        let mut staged = StagedSplitArchive::new(&tmp, source, source_identity, &base, false);
+        for index in 0..2 {
+            let mut file = staged
+                .reserve(
+                    volume_path(&base, index as u64 + 1),
+                    SplitOutputRole::Volume {
+                        index,
+                        primary: index == 0,
+                    },
+                )
+                .unwrap();
+            file.write_all(b"partial volume").unwrap();
+            file.sync_all().unwrap();
         }
-        let staged_bindings = staged_paths
-            .iter()
-            .map(|path| {
-                let file = OpenOptions::new()
-                    .read(true)
-                    .write(true)
-                    .open(path)
-                    .unwrap();
-                SplitStagingPath {
-                    path: path.clone(),
-                    identity: split_file_identity(&file).unwrap(),
-                    file,
-                }
-            })
-            .collect::<Vec<_>>();
-        let tmp_identity = path_identity(&tmp).unwrap();
         let mut sync_calls = 0;
 
-        let error = split_staging_failure_with(
+        let error = staged.failure_with_parent_sync(
             FormatError::Io(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
                 "archive shrank while splitting",
             )),
-            &tmp,
-            tmp_identity,
-            &staged_bindings,
-            &[],
-            &mut |path| std::fs::remove_file(path),
-            &mut || {
+            || {
                 sync_calls += 1;
                 Err(io::Error::new(
                     io::ErrorKind::PermissionDenied,
@@ -4338,7 +4029,7 @@ mod tests {
 
         assert_eq!(sync_calls, 1);
         assert!(!tmp.exists());
-        assert!(!staged_paths.iter().any(|path| path.exists()));
+        assert!(!staged.outputs.iter().any(|output| output.part.exists()));
         assert!(error.to_string().contains("archive shrank while splitting"));
         assert!(error.to_string().contains("not durable"));
         assert!(error

@@ -954,7 +954,7 @@ fn ensure_split_missing(path: &Path, role: &str) -> Result<(), FormatError> {
 mod tests {
     use super::super::{
         bind_preserved_split_outputs, snapshot_managed_split_outputs, split_into_volumes,
-        test_support::*, volume_path, ControlToken, SplitStagingId,
+        test_support::*, volume_path, ControlToken, SplitOutputRole, SplitStagingId,
     };
     use super::*;
 
@@ -1566,6 +1566,10 @@ mod tests {
                     part,
                     final_path,
                     file,
+                    role: SplitOutputRole::Volume {
+                        index,
+                        primary: index == 0,
+                    },
                 }
             })
             .collect::<Vec<_>>();
