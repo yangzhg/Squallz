@@ -637,6 +637,11 @@
     paletteOverride: hasPaletteOverride ? paletteParam : null,
     defaultExtractDir: defaultExtractDirParam,
   });
+  let resolveInitialGeneralSettingsReady!: () => void;
+  const initialGeneralSettingsReady = new Promise<void>((resolve) => {
+    resolveInitialGeneralSettingsReady = resolve;
+  });
+  let incomingOpenFilesGeneration = 0;
   const initialPlatform = buildTargetPlatform();
   let activePlatform = $state<PlatformKind>(initialPlatform);
   let prefersDarkTheme = $state(
@@ -1438,9 +1443,10 @@
     };
 
     if (ownsMainOpenFileQueue) {
+      const isCurrent = captureIncomingOpenFilesRequest();
       void ipc.takeOpenFiles()
         .then(async (event) => {
-          if (!cancelled) await handleOpenFilesPayload(event);
+          if (!cancelled && (externalOpenAction(event.action) || isCurrent())) await handleOpenFilesPayload(event);
         })
         .catch(() => {
           // Dev preview has no Tauri open-file queue.
@@ -1455,6 +1461,7 @@
 
     return () => {
       cancelled = true;
+      incomingOpenFilesGeneration += 1;
       if (listenerTimer !== null) clearTimeout(listenerTimer);
       unlisten?.();
     };
@@ -1604,6 +1611,7 @@
 
   onMount(() => {
     if (forceFirstRun) {
+      resolveInitialGeneralSettingsReady();
       void loadLocale(null).finally(() => {
         sourceCleanupRecoveryReady = true;
       });
@@ -1633,6 +1641,7 @@
           appearanceSaveGenerations.density !== requestedAppearanceGenerations.density,
         );
         settingsSession.applySnapshot(settings, requestedDraftGenerations);
+        resolveInitialGeneralSettingsReady();
         await loadLocale(settings.language).catch(() => undefined);
         if (cancelled) return;
         settingsSession.updateSnapshotLabel();
@@ -1650,6 +1659,7 @@
         }
         const previewLanguage = storedPreviewLanguage();
         settingsSession.applyPreviewLanguage(previewLanguage, requestedDraftGenerations);
+        resolveInitialGeneralSettingsReady();
         await loadLocale(previewLanguage).catch(() => undefined);
         if (cancelled) return;
         settingsSession.setDefaultsSnapshotLabel();
@@ -1659,6 +1669,7 @@
 
     return () => {
       cancelled = true;
+      resolveInitialGeneralSettingsReady();
     };
   });
 
@@ -4436,14 +4447,29 @@
     }
   }
 
+  function captureIncomingOpenFilesRequest(): () => boolean {
+    const generation = ++incomingOpenFilesGeneration;
+    const navigation = taskReviewRequestGeneration;
+    const archiveGeneration = archiveOpenGeneration;
+    const batchRevision = batchExtract.revision;
+    return () => generation === incomingOpenFilesGeneration
+      && navigation === taskReviewRequestGeneration
+      && archiveGeneration === archiveOpenGeneration
+      && batchRevision === batchExtract.revision;
+  }
+
   async function handleOpenFilesPayload(payload: OpenFilesPayload) {
     const action = externalOpenAction(payload.action);
+    if (!action && !payload.paths.some((path) => typeof path === "string" && path.length > 0)) return;
+    const isCurrent = captureIncomingOpenFilesRequest();
     if (action) {
       await submitExternalTaskWindow(action, payload.paths, payload.output ?? null);
       return;
     }
     if (preventCreateSubmissionNavigation("browse")) return;
     if (openRecoverySetFromPaths(payload.paths, "open-file")) return;
+    await initialGeneralSettingsReady;
+    if (!isCurrent() || preventCreateSubmissionNavigation("browse")) return;
     await openFirstArchivePath(payload.paths, "open-file");
   }
 
