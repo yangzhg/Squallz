@@ -9,6 +9,7 @@ use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use common::{command_exists, engine, read_archive_entries, TempDir};
+use squallz_core::CreateCommitPolicy;
 use squallz_format_api::{
     ArchiveStructureStatus, ControlToken, CreateOptions, Detected, EntryMeta, EntryPath,
     EntrySelection, EntryType, ExtractOptions, NoProgress, OpenOptions, UpdateOp, UpdateOptions,
@@ -273,6 +274,7 @@ fn recovered_file_and_directory_times_survive_extraction_and_conversion() {
             &converted,
             &OpenOptions::default(),
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &NoProgress,
             &ControlToken::new(),
         )
@@ -396,6 +398,7 @@ fn interop_infozip_and_unzip_preserve_modification_instant() {
             &ours,
             &[source],
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &NoProgress,
             &ControlToken::new(),
         )
@@ -407,6 +410,7 @@ fn interop_infozip_and_unzip_preserve_modification_instant() {
             &converted,
             &OpenOptions::default(),
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &NoProgress,
             &ControlToken::new(),
         )

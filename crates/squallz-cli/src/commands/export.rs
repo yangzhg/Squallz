@@ -62,7 +62,7 @@ pub fn run(
             return Err(error.into());
         }
     };
-    let result = ctx.engine.convert_with_policy(
+    let result = ctx.engine.convert(
         &archive,
         &output,
         &OpenOptions::default(),

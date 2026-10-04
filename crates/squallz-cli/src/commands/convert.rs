@@ -74,7 +74,7 @@ pub fn run(
                 password: pw.cloned(),
                 encoding_override: encoding.clone(),
             };
-            ctx.engine.convert_with_report_policy(
+            ctx.engine.convert(
                 &src,
                 &output,
                 &open,

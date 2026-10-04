@@ -890,7 +890,7 @@ impl JobContext<'_> {
                 let verify_sources = cleanup_plan.requires_content_verification();
                 let Some(sfx_options) = request.sfx_options() else {
                     let (report, archived_manifest) = if verify_sources {
-                        let verified = state.engine.create_with_verification_policy(
+                        let verified = state.engine.create_verified(
                             &request.dest,
                             &request.inputs,
                             &request.options,
@@ -900,7 +900,7 @@ impl JobContext<'_> {
                         )?;
                         (verified.create, verified.manifest)
                     } else {
-                        let report = state.engine.create_with_report_policy(
+                        let report = state.engine.create(
                             &request.dest,
                             &request.inputs,
                             &request.options,
@@ -1241,7 +1241,7 @@ impl JobContext<'_> {
                             password: pw.cloned(),
                             encoding_override: src_encoding.clone(),
                         };
-                        state.engine.convert_with_report_policy(
+                        state.engine.convert(
                             &src_path,
                             Path::new(dest),
                             &open,
@@ -1287,7 +1287,7 @@ impl JobContext<'_> {
                 };
                 let commit_policy =
                     job_output_commit_policy(*replace_existing, *replacement_guard, "export")?;
-                state.engine.convert_with_policy(
+                state.engine.convert(
                     &src_path,
                     &dest_path,
                     &OpenOptions::default(),

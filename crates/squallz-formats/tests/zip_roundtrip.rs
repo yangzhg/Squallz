@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex};
 use common::{
     build_stored_zip, command_exists, crc32, engine, read_archive_entries, RawZipEntry, TempDir,
 };
+use squallz_core::CreateCommitPolicy;
 use squallz_format_api::{
     CompressionLevel, ControlToken, CreateOptions, Detected, EntryMeta, EntryPath, EntryType,
     ExtractOptions, ExtractProblemReporter, FormatError, NoProgress, OpenOptions, OverwritePolicy,
@@ -325,6 +326,7 @@ fn create_excludes_existing_output_and_inner_temp_from_multiple_inputs() {
             &archive,
             &[project, outside],
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &progress,
             &ctl,
         )
@@ -363,6 +365,7 @@ fn create_rejects_an_explicit_output_input_without_overwriting_it() {
             &archive,
             std::slice::from_ref(&archive),
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &NoProgress,
             &ControlToken::new(),
         )
@@ -392,6 +395,7 @@ fn create_rejects_a_symlink_output_without_touching_its_target() {
             &archive,
             std::slice::from_ref(&input),
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &NoProgress,
             &ControlToken::new(),
         )
@@ -420,6 +424,7 @@ fn create_keeps_a_differently_named_hardlink_as_an_input() {
             &archive,
             std::slice::from_ref(&input),
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &NoProgress,
             &ControlToken::new(),
         )
@@ -458,6 +463,7 @@ fn create_excludes_output_temp_through_symlinked_parent() {
             &archive,
             std::slice::from_ref(&project),
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &progress,
             &ctl,
         )
@@ -541,6 +547,7 @@ fn split_create_excludes_old_target_volumes_without_prefix_overreach() {
             &archive,
             std::slice::from_ref(&project),
             &opts,
+            CreateCommitPolicy::ReplaceExisting,
             &progress,
             &ctl,
         )
@@ -614,6 +621,7 @@ fn split_create_excludes_case_variant_volumes_on_case_insensitive_filesystems() 
                 split_size: Some(4 * 1024),
                 ..CreateOptions::default()
             },
+            CreateCommitPolicy::ReplaceExisting,
             &NoProgress,
             &ControlToken::new(),
         )
@@ -647,6 +655,7 @@ fn roundtrip_create_list_extract_test() {
         &archive,
         &[tmp.path().join("project")],
         &CreateOptions::default(),
+        CreateCommitPolicy::ReplaceExisting,
         &NoProgress,
         &ctl,
     )
@@ -750,6 +759,7 @@ fn interop_our_zip_passes_system_unzip() {
         &archive,
         &[tmp.path().join("project")],
         &CreateOptions::default(),
+        CreateCommitPolicy::ReplaceExisting,
         &NoProgress,
         &ControlToken::new(),
     )
@@ -906,6 +916,7 @@ fn empty_zip_lists_zero_entries() {
         &archive,
         &[],
         &CreateOptions::default(),
+        CreateCommitPolicy::ReplaceExisting,
         &NoProgress,
         &ControlToken::new(),
     )
@@ -935,6 +946,7 @@ fn garbage_and_truncated_zip_report_corrupt() {
         &archive,
         &[src],
         &CreateOptions::default(),
+        CreateCommitPolicy::ReplaceExisting,
         &NoProgress,
         &ControlToken::new(),
     )

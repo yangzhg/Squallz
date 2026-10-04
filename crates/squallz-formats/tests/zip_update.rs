@@ -21,6 +21,7 @@ use squallz_core::api::{
     UpdateOptions,
 };
 use squallz_core::ArchiveUpdateGuard;
+use squallz_core::CreateCommitPolicy;
 
 /// Builds a base archive with project/a.txt, project/sub/b.txt, project/c.log.
 fn base_archive(dir: &Path, password: Option<&str>) -> PathBuf {
@@ -35,7 +36,14 @@ fn base_archive(dir: &Path, password: Option<&str>) -> PathBuf {
         ..CreateOptions::default()
     };
     engine()
-        .create(&dest, &[root], &opts, &NoProgress, &ControlToken::new())
+        .create(
+            &dest,
+            &[root],
+            &opts,
+            CreateCommitPolicy::ReplaceExisting,
+            &NoProgress,
+            &ControlToken::new(),
+        )
         .unwrap();
     dest
 }
@@ -704,7 +712,14 @@ fn large_stored_archive(dir: &Path) -> PathBuf {
         ..CreateOptions::default()
     };
     engine()
-        .create(&dest, &[root], &options, &NoProgress, &ControlToken::new())
+        .create(
+            &dest,
+            &[root],
+            &options,
+            CreateCommitPolicy::ReplaceExisting,
+            &NoProgress,
+            &ControlToken::new(),
+        )
         .unwrap();
     dest
 }
@@ -2964,6 +2979,7 @@ fn update_unsupported_format_is_rejected() {
             &dest,
             &[root],
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &NoProgress,
             &ControlToken::new(),
         )

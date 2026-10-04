@@ -274,35 +274,18 @@ fn check_can_create(
     format.validate_create_options(detect_name, opts)
 }
 
-/// Entry point for [`Engine::create`].
-pub(crate) fn create(
+/// Publishes filesystem inputs with optional source-content verification.
+/// Both public creation contracts use the same output admission and writer.
+#[allow(clippy::too_many_arguments)] // published creation: capture mode is private to the engine facade
+pub(crate) fn create_published(
     engine: &Engine,
     dest: &Path,
     inputs: &[PathBuf],
     opts: &CreateOptions,
-    progress: &dyn ProgressSink,
-    ctl: &ControlToken,
-) -> Result<CreateReport, FormatError> {
-    create_report_with_policy(
-        engine,
-        dest,
-        inputs,
-        opts,
-        CreateCommitPolicy::ReplaceExisting,
-        progress,
-        ctl,
-    )
-}
-
-/// Entry point for the verified create APIs.
-pub(crate) fn create_verified(
-    engine: &Engine,
-    dest: &Path,
-    inputs: &[PathBuf],
-    opts: &CreateOptions,
-    progress: &dyn ProgressSink,
-    ctl: &ControlToken,
     commit_policy: CreateCommitPolicy,
+    progress: &dyn ProgressSink,
+    ctl: &ControlToken,
+    capture_input_manifest: bool,
 ) -> Result<VerifiedCreateReport, FormatError> {
     create_with_output(
         engine,
@@ -316,35 +299,8 @@ pub(crate) fn create_verified(
         progress,
         ctl,
         None,
-        true,
+        capture_input_manifest,
     )
-}
-
-/// Entry point for report creation with an explicit final publication policy.
-pub(crate) fn create_report_with_policy(
-    engine: &Engine,
-    dest: &Path,
-    inputs: &[PathBuf],
-    opts: &CreateOptions,
-    commit_policy: CreateCommitPolicy,
-    progress: &dyn ProgressSink,
-    ctl: &ControlToken,
-) -> Result<CreateReport, FormatError> {
-    create_with_output(
-        engine,
-        CreateOutput::Published {
-            destination: dest,
-            policy: commit_policy,
-        },
-        inputs,
-        &[],
-        opts,
-        progress,
-        ctl,
-        None,
-        false,
-    )
-    .map(|report| report.create)
 }
 
 /// Prepares one unsplit archive input manifest for a surrounding operation.

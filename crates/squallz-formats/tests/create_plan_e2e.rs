@@ -6,6 +6,7 @@ use common::{engine, TempDir};
 #[cfg(unix)]
 use squallz_core::api::CompressionLevel;
 use squallz_core::api::{ControlToken, CreateOptions, FormatError, NoProgress};
+use squallz_core::CreateCommitPolicy;
 
 #[test]
 fn wim_create_plan_reserves_staging_and_temporary_image() {
@@ -55,7 +56,14 @@ fn split_wim_requires_native_mode_before_scanning_or_writing() {
     assert!(explicit_error.is_split_wim_creation_unsupported());
 
     let create_error = engine
-        .create(&dest, &[input], &opts, &NoProgress, &ControlToken::new())
+        .create(
+            &dest,
+            &[input],
+            &opts,
+            CreateCommitPolicy::ReplaceExisting,
+            &NoProgress,
+            &ControlToken::new(),
+        )
         .unwrap_err();
     assert!(create_error.is_split_wim_creation_unsupported());
     assert!(!dest.exists());
@@ -71,6 +79,7 @@ fn split_wim_requires_native_mode_before_scanning_or_writing() {
             &split_dest,
             &[tmp.path().join("payload.bin")],
             &split_opts,
+            CreateCommitPolicy::ReplaceExisting,
             &NoProgress,
             &ControlToken::new(),
         )
@@ -133,7 +142,14 @@ fn create_plan_covers_long_zip_entry_names() {
         .unwrap();
     let generic_budget = plan.inputs.output_budget_bytes();
     let report = engine
-        .create_with_report(&dest, &[root], &opts, &NoProgress, &ControlToken::new())
+        .create(
+            &dest,
+            &[root],
+            &opts,
+            CreateCommitPolicy::ReplaceExisting,
+            &NoProgress,
+            &ControlToken::new(),
+        )
         .unwrap();
 
     assert!(report.total_output_bytes > generic_budget);

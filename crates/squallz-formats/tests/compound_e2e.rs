@@ -17,6 +17,7 @@ use squallz_core::api::{
     ControlToken, CreateOptions, EntryType, ExtractOptions, FormatError, NoProgress, OpenOptions,
     SafetyLimits,
 };
+use squallz_core::CreateCommitPolicy;
 
 /// Compound suffixes and the matching system-tar creation flag.
 const COMBOS: [(&str, &str); 5] = [
@@ -104,6 +105,7 @@ fn ours_to_system_tar_all_compound_suffixes() {
                 &archive,
                 std::slice::from_ref(&root),
                 &CreateOptions::default(),
+                CreateCommitPolicy::ReplaceExisting,
                 &NoProgress,
                 &ctl,
             )
@@ -213,6 +215,7 @@ fn opened_compound_reader_does_not_follow_a_replaced_source_path() {
             &archive,
             std::slice::from_ref(&original_root),
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &NoProgress,
             &ctl,
         )
@@ -222,6 +225,7 @@ fn opened_compound_reader_does_not_follow_a_replaced_source_path() {
             &replacement,
             std::slice::from_ref(&replacement_root),
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &NoProgress,
             &ctl,
         )
@@ -265,6 +269,7 @@ fn damaged_gzip_trailer_fails_tar_test_and_extract() {
             &archive,
             &[root],
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &NoProgress,
             &ctl,
         )
@@ -368,6 +373,7 @@ fn plain_gz_single_entry_virtual_archive() {
             &archive,
             std::slice::from_ref(&src),
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &NoProgress,
             &ctl,
         )
@@ -463,6 +469,7 @@ fn plain_compressor_rejects_multiple_inputs_and_directories() {
             &dir.path().join("out.gz"),
             &[a, b],
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &NoProgress,
             &ctl,
         )
@@ -476,6 +483,7 @@ fn plain_compressor_rejects_multiple_inputs_and_directories() {
             &dir.path().join("dir.gz"),
             &[sub],
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &NoProgress,
             &ctl,
         )
@@ -498,6 +506,7 @@ fn compound_selective_extract() {
             &archive,
             &[root],
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &NoProgress,
             &ctl,
         )

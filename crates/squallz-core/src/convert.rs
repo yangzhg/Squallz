@@ -21,7 +21,7 @@ use crate::{
     CreateReport, Engine,
 };
 
-/// Entry point for [`Engine::convert_with_report`]. Metadata is carried over as
+/// Entry point for [`Engine::convert`]. Metadata is carried over as
 /// faithfully as the destination format allows; entry types the destination
 /// cannot store (e.g. symlinks in 7z) surface as
 /// [`FormatError::Unsupported`] naming the offending entry.
@@ -32,7 +32,7 @@ pub(crate) fn convert(
     dest: &Path,
     open_opts: &OpenOptions,
     create_opts: &CreateOptions,
-    requested_commit_policy: Option<CreateCommitPolicy>,
+    requested_commit_policy: CreateCommitPolicy,
     progress: &dyn ProgressSink,
     ctl: &ControlToken,
 ) -> Result<CreateReport, FormatError> {
@@ -48,16 +48,16 @@ pub(crate) fn convert(
         CreateArtifactKind::Archive
     };
     let commit_policy = match requested_commit_policy {
-        Some(CreateCommitPolicy::NoReplace) => {
+        CreateCommitPolicy::NoReplace => {
             if crate::create_destination_has_conflict(dest, artifact_kind)? {
                 return Err(crate::output_exists_error(dest));
             }
             CreateCommitPolicy::NoReplace
         }
-        Some(CreateCommitPolicy::ReplaceIfUnchanged(guard)) => {
+        CreateCommitPolicy::ReplaceIfUnchanged(guard) => {
             CreateCommitPolicy::ReplaceIfUnchanged(guard)
         }
-        Some(CreateCommitPolicy::ReplaceExisting) | None => {
+        CreateCommitPolicy::ReplaceExisting => {
             let inspection = crate::inspect_create_destination(dest, artifact_kind)?;
             match (inspection.conflict, inspection.guard) {
                 (false, None) => CreateCommitPolicy::NoReplace,

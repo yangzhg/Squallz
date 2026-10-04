@@ -14,6 +14,7 @@ use squallz_core::api::{
     ControlToken, CreateOptions, EntryPath, EntryType, ExtractOptions, ExtractReport, FormatError,
     NoProgress, OpenOptions, ProgressSink,
 };
+use squallz_core::CreateCommitPolicy;
 
 #[derive(Default)]
 struct EntryProgressTotals {
@@ -75,6 +76,7 @@ fn tar_roundtrip_permissions_symlink_unicode_deep() {
             &archive,
             std::slice::from_ref(&root),
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &NoProgress,
             &ctl,
         )
@@ -386,6 +388,7 @@ fn tar_sniff_without_extension() {
             &archive,
             &[root],
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &NoProgress,
             &ctl,
         )
@@ -414,6 +417,7 @@ fn tar_create_with_password_is_rejected() {
             &dir.path().join("out.tar"),
             &[root],
             &opts,
+            CreateCommitPolicy::ReplaceExisting,
             &NoProgress,
             &ctl,
         )

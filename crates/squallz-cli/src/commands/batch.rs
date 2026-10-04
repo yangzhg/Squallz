@@ -775,7 +775,7 @@ fn run_convert_job(
     };
     let commit_policy =
         super::create_commit_policy(&output, kind, allow_existing, &NoProgress, &ctx.ctl)?;
-    let report = ctx.engine.convert_with_report_policy(
+    let report = ctx.engine.convert(
         &src,
         &output,
         &open,
@@ -862,7 +862,7 @@ fn run_export_job(ctx: &Ctx, base_dir: &Path, job: &ExportJob) -> Result<JobSucc
         &NoProgress,
         &ctx.ctl,
     )?;
-    ctx.engine.convert_with_policy(
+    ctx.engine.convert(
         &archive,
         &output,
         &OpenOptions::default(),

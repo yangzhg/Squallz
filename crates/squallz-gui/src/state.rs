@@ -1431,6 +1431,7 @@ mod tests {
     use squallz_core::api::{
         CompressionLevel, ControlToken, CreateOptions, EntryPath, NoProgress, Password,
     };
+    use squallz_core::CreateCommitPolicy;
 
     fn make_zip(dir: &Path, names: &[&str]) -> PathBuf {
         let src = dir.join("src");
@@ -1450,6 +1451,7 @@ mod tests {
                     level: CompressionLevel::Fastest,
                     ..CreateOptions::default()
                 },
+                CreateCommitPolicy::ReplaceExisting,
                 &NoProgress,
                 &ControlToken::new(),
             )
@@ -1473,6 +1475,7 @@ mod tests {
                     encrypt_filenames: true,
                     ..CreateOptions::default()
                 },
+                CreateCommitPolicy::ReplaceExisting,
                 &NoProgress,
                 &ControlToken::new(),
             )
@@ -2342,6 +2345,7 @@ mod tests {
                         encrypt_filenames: false,
                         ..CreateOptions::default()
                     },
+                    CreateCommitPolicy::ReplaceExisting,
                     &NoProgress,
                     &ControlToken::default(),
                 )

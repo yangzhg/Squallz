@@ -18,6 +18,7 @@ use squallz_core::api::{
     ControlToken, CreateOptions, EntryPath, ExtractOptions, FormatError, NoProgress, OpenOptions,
     Password, ProgressSink,
 };
+use squallz_core::CreateCommitPolicy;
 use squallz_core::{
     inspect_sfx, verify_sfx_payload, SfxBuildOptions, SfxLayout, SfxTarget, SFX_CLI_STUB_MARKER,
     SFX_GUI_STUB_MARKER,
@@ -520,6 +521,7 @@ fn encrypted_zip_payload_keeps_password_boundary() {
                 password: Some(Password::new("correct horse")),
                 ..CreateOptions::default()
             },
+            CreateCommitPolicy::ReplaceExisting,
             &NoProgress,
             &ControlToken::new(),
         )

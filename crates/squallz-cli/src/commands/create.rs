@@ -80,7 +80,7 @@ pub(super) fn execute(
     let policy = policy?;
 
     let write_progress = progress_mode.start(ctx);
-    let result = ctx.engine.create_with_report_policy(
+    let result = ctx.engine.create(
         output,
         inputs,
         options,

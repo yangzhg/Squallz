@@ -11,6 +11,7 @@ use squallz_core::api::{
     ControlToken, CreateOptions, EntryType, ExtractOptions, FormatError, NoProgress, OpenOptions,
     SqzCreateOptions, SqzInnerFormat,
 };
+use squallz_core::CreateCommitPolicy;
 
 const SQZ_RECOVERY_BLOCK: usize = 64 * 1024;
 
@@ -117,6 +118,7 @@ fn sqz_file_header_crc_damage_falls_back_to_footer() {
         &archive,
         &[tmp.path().join("project")],
         &CreateOptions::default(),
+        CreateCommitPolicy::ReplaceExisting,
         &NoProgress,
         &ctl,
     )
@@ -166,6 +168,7 @@ fn sqz_valid_header_footer_uuid_mismatch_fails() {
         &archive,
         &[tmp.path().join("project")],
         &CreateOptions::default(),
+        CreateCommitPolicy::ReplaceExisting,
         &NoProgress,
         &ctl,
     )
@@ -193,6 +196,7 @@ fn sqz_footer_header_valid_crc_bad_index_bounds_fails() {
         &archive,
         &[tmp.path().join("project")],
         &CreateOptions::default(),
+        CreateCommitPolicy::ReplaceExisting,
         &NoProgress,
         &ctl,
     )
@@ -220,6 +224,7 @@ fn sqz_footer_magic_damage_recovers_from_recovery_scan() {
         &archive,
         &[tmp.path().join("project")],
         &CreateOptions::default(),
+        CreateCommitPolicy::ReplaceExisting,
         &NoProgress,
         &ctl,
     )
@@ -273,6 +278,7 @@ fn sqz_footer_crc_field_damage_recovers_from_recovery_scan() {
         &archive,
         &[tmp.path().join("project")],
         &CreateOptions::default(),
+        CreateCommitPolicy::ReplaceExisting,
         &NoProgress,
         &ctl,
     )
@@ -326,6 +332,7 @@ fn sqz_recovery_protection_trailer_damage_uses_intact_primary() {
         &archive,
         &[tmp.path().join("project")],
         &CreateOptions::default(),
+        CreateCommitPolicy::ReplaceExisting,
         &NoProgress,
         &ctl,
     )
@@ -377,6 +384,7 @@ fn sqz_recovery_protection_trailer_and_primary_damage_fails() {
         &archive,
         &[tmp.path().join("project")],
         &CreateOptions::default(),
+        CreateCommitPolicy::ReplaceExisting,
         &NoProgress,
         &ctl,
     )
@@ -405,6 +413,7 @@ fn sqz_recovery_protection_trailer_valid_crc_bad_version_fails() {
         &archive,
         &[tmp.path().join("project")],
         &CreateOptions::default(),
+        CreateCommitPolicy::ReplaceExisting,
         &NoProgress,
         &ControlToken::new(),
     )
@@ -436,6 +445,7 @@ fn sqz_roundtrip_create_list_extract_test() {
         &archive,
         &[tmp.path().join("project")],
         &CreateOptions::default(),
+        CreateCommitPolicy::ReplaceExisting,
         &NoProgress,
         &ctl,
     )
@@ -510,6 +520,7 @@ fn sqz_sniffs_without_extension_and_detects_corruption() {
         &archive,
         &[tmp.path().join("project")],
         &CreateOptions::default(),
+        CreateCommitPolicy::ReplaceExisting,
         &NoProgress,
         &ctl,
     )
@@ -543,6 +554,7 @@ fn sqz_recovery_section_self_protection_repairs_primary_damage() {
         &archive,
         &[tmp.path().join("project")],
         &CreateOptions::default(),
+        CreateCommitPolicy::ReplaceExisting,
         &NoProgress,
         &ctl,
     )
@@ -598,6 +610,7 @@ fn sqz_recovery_section_self_protection_reports_over_limit_damage() {
         &archive,
         &[project],
         &CreateOptions::default(),
+        CreateCommitPolicy::ReplaceExisting,
         &NoProgress,
         &ctl,
     )
@@ -627,6 +640,7 @@ fn sqz_embedded_recovery_repairs_single_payload_block() {
         &archive,
         std::slice::from_ref(&project),
         &CreateOptions::default(),
+        CreateCommitPolicy::ReplaceExisting,
         &NoProgress,
         &ctl,
     )
@@ -688,6 +702,7 @@ fn sqz_custom_recovery_percent_controls_payload_parity_shards() {
             },
             ..CreateOptions::default()
         },
+        CreateCommitPolicy::ReplaceExisting,
         &NoProgress,
         &ctl,
     )
@@ -747,6 +762,7 @@ fn sqz_repaired_inner_profiles_support_repeated_reads_and_extraction() {
                 },
                 ..CreateOptions::default()
             },
+            CreateCommitPolicy::ReplaceExisting,
             &NoProgress,
             &ctl,
         )
@@ -831,7 +847,14 @@ fn sqz_create_plan_covers_recovery_larger_than_generic_slack() {
         .unwrap();
     let generic_budget = plan.inputs.output_budget_bytes();
     let report = eng
-        .create_with_report(&archive, &[input], &opts, &NoProgress, &ControlToken::new())
+        .create(
+            &archive,
+            &[input],
+            &opts,
+            CreateCommitPolicy::ReplaceExisting,
+            &NoProgress,
+            &ControlToken::new(),
+        )
         .unwrap();
 
     assert!(report.total_output_bytes > generic_budget + 1024 * 1024);
@@ -869,10 +892,11 @@ fn sqz_create_plan_covers_inner_archive_profiles_and_temporary_files() {
             .plan_create(&archive, std::slice::from_ref(&input), &opts)
             .unwrap();
         let report = eng
-            .create_with_report(
+            .create(
                 &archive,
                 std::slice::from_ref(&input),
                 &opts,
+                CreateCommitPolicy::ReplaceExisting,
                 &NoProgress,
                 &ControlToken::new(),
             )
@@ -922,7 +946,14 @@ fn split_sqz_create_plan_covers_inner_temp_and_recovery_sidecars() {
         .plan_create(&archive, std::slice::from_ref(&input), &opts)
         .unwrap();
     let report = eng
-        .create_with_report(&archive, &[input], &opts, &NoProgress, &ControlToken::new())
+        .create(
+            &archive,
+            &[input],
+            &opts,
+            CreateCommitPolicy::ReplaceExisting,
+            &NoProgress,
+            &ControlToken::new(),
+        )
         .unwrap();
 
     assert!(plan.final_output_budget_bytes >= report.total_output_bytes);
@@ -956,6 +987,7 @@ fn sqz_embedded_recovery_reports_over_limit_payload_damage() {
         &archive,
         &[project],
         &CreateOptions::default(),
+        CreateCommitPolicy::ReplaceExisting,
         &NoProgress,
         &ctl,
     )
@@ -1013,6 +1045,7 @@ fn sqz_index_mirror_recovers_when_footer_index_is_damaged() {
         &archive,
         &[tmp.path().join("project")],
         &CreateOptions::default(),
+        CreateCommitPolicy::ReplaceExisting,
         &NoProgress,
         &ctl,
     )
@@ -1057,6 +1090,7 @@ fn sqz_index_corruption_fails_when_primary_mirror_and_protection_are_damaged() {
         &archive,
         &[tmp.path().join("project")],
         &CreateOptions::default(),
+        CreateCommitPolicy::ReplaceExisting,
         &NoProgress,
         &ctl,
     )

@@ -10,6 +10,7 @@ use crate::events::{EV_ASK_CONFLICT, EV_ASK_PASSWORD, EV_PROGRESS};
 use crate::preview_sessions::PreviewSessionManager;
 use squallz_core::api::{CompressionLevel, CreateOptions, OpenOptions, Password};
 use squallz_core::ChecksumAlgorithm;
+use squallz_core::CreateCommitPolicy;
 use squallz_core::QueueWaitReason;
 use squallz_core::{CreateArtifactKind, PostSuccessAction};
 use std::fs;
@@ -216,6 +217,7 @@ fn create_password_protected_zip(dir: &Path, state: &AppState) -> PathBuf {
                 password: Some(Password::new("secret")),
                 ..CreateOptions::default()
             },
+            CreateCommitPolicy::ReplaceExisting,
             &squallz_core::api::NoProgress,
             &ControlToken::new(),
         )
@@ -830,6 +832,7 @@ fn conflict_answers_require_the_owner_and_current_prompt_type() {
             &archive,
             &[inputs.join("same.txt"), inputs.join("next.txt")],
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &squallz_core::api::NoProgress,
             &squallz_core::api::ControlToken::new(),
         )
@@ -1494,6 +1497,7 @@ fn extract_job_rejects_a_stale_expected_destination_before_writing() {
             &archive,
             std::slice::from_ref(&source),
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &squallz_core::api::NoProgress,
             &ControlToken::new(),
         )
@@ -1555,6 +1559,7 @@ fn extract_job_rejects_an_archive_replaced_after_preflight() {
             &archive,
             std::slice::from_ref(&original_source),
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &squallz_core::api::NoProgress,
             &control,
         )
@@ -1588,6 +1593,7 @@ fn extract_job_rejects_an_archive_replaced_after_preflight() {
             &replacement_archive,
             &[replacement_source],
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &squallz_core::api::NoProgress,
             &control,
         )
@@ -1834,6 +1840,7 @@ fn batch_extract_runs_multiple_archives_as_one_job() {
                 level: CompressionLevel::Fastest,
                 ..CreateOptions::default()
             },
+            CreateCommitPolicy::ReplaceExisting,
             &squallz_core::api::NoProgress,
             &ControlToken::new(),
         )
@@ -1847,6 +1854,7 @@ fn batch_extract_runs_multiple_archives_as_one_job() {
                 level: CompressionLevel::Fastest,
                 ..CreateOptions::default()
             },
+            CreateCommitPolicy::ReplaceExisting,
             &squallz_core::api::NoProgress,
             &ControlToken::new(),
         )
@@ -2735,6 +2743,7 @@ fn extract_nested_job_extracts_inner_archive() {
             &inner,
             std::slice::from_ref(&inner_src),
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &squallz_core::api::NoProgress,
             &ControlToken::new(),
         )
@@ -2745,6 +2754,7 @@ fn extract_nested_job_extracts_inner_archive() {
             &outer,
             std::slice::from_ref(&inner),
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &squallz_core::api::NoProgress,
             &ControlToken::new(),
         )
@@ -2817,6 +2827,7 @@ fn extract_nested_job_prompts_separately_for_outer_and_inner_passwords() {
                 password: Some(Password::new("inner-secret")),
                 ..CreateOptions::default()
             },
+            CreateCommitPolicy::ReplaceExisting,
             &squallz_core::api::NoProgress,
             &ControlToken::new(),
         )
@@ -2830,6 +2841,7 @@ fn extract_nested_job_prompts_separately_for_outer_and_inner_passwords() {
                 password: Some(Password::new("outer-secret")),
                 ..CreateOptions::default()
             },
+            CreateCommitPolicy::ReplaceExisting,
             &squallz_core::api::NoProgress,
             &ControlToken::new(),
         )
@@ -2936,6 +2948,7 @@ fn extract_nested_job_applies_safety_limit_before_writing_temp_archive() {
             &inner,
             std::slice::from_ref(&inner_src),
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &squallz_core::api::NoProgress,
             &ControlToken::new(),
         )
@@ -2946,6 +2959,7 @@ fn extract_nested_job_applies_safety_limit_before_writing_temp_archive() {
             &outer,
             std::slice::from_ref(&inner),
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &squallz_core::api::NoProgress,
             &ControlToken::new(),
         )
@@ -3008,6 +3022,7 @@ fn queued_opaque_nested_source_stays_leased_and_never_reaches_public_state() {
             &inner,
             std::slice::from_ref(&inner_src),
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &squallz_core::api::NoProgress,
             &ControlToken::new(),
         )
@@ -3018,6 +3033,7 @@ fn queued_opaque_nested_source_stays_leased_and_never_reaches_public_state() {
             &outer,
             std::slice::from_ref(&inner),
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &squallz_core::api::NoProgress,
             &ControlToken::new(),
         )
@@ -3190,6 +3206,7 @@ fn convert_job_round_trip_through_queue() {
                 level: CompressionLevel::Fastest,
                 ..CreateOptions::default()
             },
+            CreateCommitPolicy::ReplaceExisting,
             &squallz_core::api::NoProgress,
             &ControlToken::new(),
         )
@@ -3255,6 +3272,7 @@ fn convert_job_reports_split_output_set() {
             &source,
             std::slice::from_ref(&input),
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &squallz_core::api::NoProgress,
             &ControlToken::new(),
         )
@@ -3584,6 +3602,7 @@ fn export_sqz_job_round_trip_through_queue() {
                 level: CompressionLevel::Fastest,
                 ..CreateOptions::default()
             },
+            CreateCommitPolicy::ReplaceExisting,
             &squallz_core::api::NoProgress,
             &ControlToken::new(),
         )
@@ -3646,6 +3665,7 @@ fn conversion_jobs_without_replace_permission_preserve_existing_outputs() {
                 archive,
                 std::slice::from_ref(&input),
                 &CreateOptions::default(),
+                CreateCommitPolicy::ReplaceExisting,
                 &squallz_core::api::NoProgress,
                 &ControlToken::new(),
             )
@@ -3753,6 +3773,7 @@ fn export_sqz_job_keeps_output_changed_after_confirmation() {
             &sqz,
             std::slice::from_ref(&input),
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &squallz_core::api::NoProgress,
             &ControlToken::new(),
         )
@@ -3827,6 +3848,7 @@ fn split_sqz_source_jobs_accept_first_volume() {
                 split_size: Some(30 * 1024),
                 ..CreateOptions::default()
             },
+            CreateCommitPolicy::ReplaceExisting,
             &squallz_core::api::NoProgress,
             &ControlToken::new(),
         )
@@ -3915,6 +3937,7 @@ fn repair_sqz_job_rewrites_recovered_container() {
                 level: CompressionLevel::Fastest,
                 ..CreateOptions::default()
             },
+            CreateCommitPolicy::ReplaceExisting,
             &squallz_core::api::NoProgress,
             &ControlToken::new(),
         )
@@ -4023,6 +4046,7 @@ fn repair_sqz_job_rewrites_recovered_container() {
                 split_size: Some(30 * 1024),
                 ..CreateOptions::default()
             },
+            CreateCommitPolicy::ReplaceExisting,
             &squallz_core::api::NoProgress,
             &ControlToken::new(),
         )
@@ -4337,6 +4361,7 @@ fn update_job_deletes_selected_entry() {
             &archive,
             std::slice::from_ref(&src),
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &squallz_core::api::NoProgress,
             &ControlToken::new(),
         )
@@ -4401,6 +4426,7 @@ fn update_job_deletes_only_literal_selected_paths() {
             &archive,
             &inputs,
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &squallz_core::api::NoProgress,
             &ControlToken::new(),
         )
@@ -4494,6 +4520,7 @@ fn update_job_resolves_display_names_and_rejects_ambiguous_or_missing_selection(
                     &archive,
                     &[dir.join("first.txt"), dir.join("nested")],
                     &CreateOptions::default(),
+                    CreateCommitPolicy::ReplaceExisting,
                     &squallz_core::api::NoProgress,
                     &ControlToken::new(),
                 )
@@ -4616,6 +4643,7 @@ fn update_job_add_directory_applies_content_policy_and_explicit_excludes() {
             &archive,
             std::slice::from_ref(&seed),
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &squallz_core::api::NoProgress,
             &ControlToken::new(),
         )
@@ -4820,6 +4848,7 @@ fn update_job_creates_directory_and_moves_a_subtree_into_it() {
             &archive,
             std::slice::from_ref(&seed),
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &squallz_core::api::NoProgress,
             &ControlToken::new(),
         )
@@ -4926,6 +4955,7 @@ fn update_job_reports_target_conflict_as_failed() {
             &archive,
             std::slice::from_ref(&seed),
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &squallz_core::api::NoProgress,
             &ControlToken::new(),
         )
@@ -5057,6 +5087,7 @@ fn extract_job_uses_submitted_safety_limits() {
                 level: CompressionLevel::Fastest,
                 ..CreateOptions::default()
             },
+            CreateCommitPolicy::ReplaceExisting,
             &squallz_core::api::NoProgress,
             &ControlToken::new(),
         )

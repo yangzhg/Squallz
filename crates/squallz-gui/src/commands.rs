@@ -2557,6 +2557,7 @@ mod tests {
         OpenOptions, Password, ProgressSink, SafetyLimits,
     };
     use squallz_core::api::{OverwritePolicy, SymlinkPolicy};
+    use squallz_core::CreateCommitPolicy;
     use squallz_core::{
         ByteSize, ChecksumAlgorithm, CreateCompletionAction, CreateCredential, CreateDestination,
         CreateDestinationBase, CreateOutput, CreatePreset, Engine, EntryNameEncoding,
@@ -2616,6 +2617,7 @@ mod tests {
                     encrypt_filenames: true,
                     ..CreateOptions::default()
                 },
+                CreateCommitPolicy::ReplaceExisting,
                 &NoProgress,
                 &ControlToken::new(),
             )
@@ -2831,6 +2833,7 @@ mod tests {
                 &archive,
                 std::slice::from_ref(&source),
                 &CreateOptions::default(),
+                CreateCommitPolicy::ReplaceExisting,
                 &NoProgress,
                 &ControlToken::new(),
             )
@@ -3367,6 +3370,7 @@ mod tests {
                 &inner,
                 std::slice::from_ref(&inner_src),
                 &CreateOptions::default(),
+                CreateCommitPolicy::ReplaceExisting,
                 &NoProgress,
                 &ControlToken::new(),
             )
@@ -3379,6 +3383,7 @@ mod tests {
                 &outer,
                 std::slice::from_ref(&inner),
                 &CreateOptions::default(),
+                CreateCommitPolicy::ReplaceExisting,
                 &NoProgress,
                 &ControlToken::new(),
             )
@@ -3402,6 +3407,7 @@ mod tests {
                 &outer,
                 &[file],
                 &CreateOptions::default(),
+                CreateCommitPolicy::ReplaceExisting,
                 &NoProgress,
                 &ControlToken::new(),
             )
@@ -3425,6 +3431,7 @@ mod tests {
                 &outer,
                 &[renamed],
                 &CreateOptions::default(),
+                CreateCommitPolicy::ReplaceExisting,
                 &NoProgress,
                 &ControlToken::new(),
             )
@@ -3498,6 +3505,7 @@ mod tests {
                     password: Some(Password::new("outer-secret")),
                     ..CreateOptions::default()
                 },
+                CreateCommitPolicy::ReplaceExisting,
                 &NoProgress,
                 &ControlToken::default(),
             )
@@ -3740,6 +3748,7 @@ mod tests {
                     password: Some(Password::new("entry-secret")),
                     ..CreateOptions::default()
                 },
+                CreateCommitPolicy::ReplaceExisting,
                 &NoProgress,
                 &ControlToken::default(),
             )
@@ -3984,6 +3993,7 @@ mod tests {
                 &archive,
                 std::slice::from_ref(&src),
                 &CreateOptions::default(),
+                CreateCommitPolicy::ReplaceExisting,
                 &NoProgress,
                 &ControlToken::new(),
             )
@@ -4039,6 +4049,7 @@ mod tests {
                 &archive,
                 std::slice::from_ref(&src),
                 &CreateOptions::default(),
+                CreateCommitPolicy::ReplaceExisting,
                 &NoProgress,
                 &ControlToken::new(),
             )
@@ -4581,6 +4592,7 @@ mod tests {
                         password: encrypted.then(|| Password::new("correct")),
                         ..CreateOptions::default()
                     },
+                    CreateCommitPolicy::ReplaceExisting,
                     &NoProgress,
                     &ControlToken::default(),
                 )

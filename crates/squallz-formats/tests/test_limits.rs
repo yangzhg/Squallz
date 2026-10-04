@@ -9,6 +9,7 @@ use squallz_core::api::{
     ControlToken, CreateOptions, FormatError, NoProgress, OpenOptions, SafetyLimits,
     SqzCreateOptions, SqzInnerFormat,
 };
+use squallz_core::CreateCommitPolicy;
 
 #[test]
 fn integrity_test_limits_stop_each_format_and_allow_an_explicit_retry() {
@@ -42,6 +43,7 @@ fn integrity_test_limits_stop_each_format_and_allow_an_explicit_retry() {
                     },
                     ..CreateOptions::default()
                 },
+                CreateCommitPolicy::ReplaceExisting,
                 &NoProgress,
                 &control,
             )
@@ -102,6 +104,7 @@ fn single_compressed_stream_tests_charge_decoded_bytes() {
                 &archive,
                 std::slice::from_ref(&file),
                 &CreateOptions::default(),
+                CreateCommitPolicy::ReplaceExisting,
                 &NoProgress,
                 &control,
             )

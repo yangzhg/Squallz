@@ -9,6 +9,7 @@ use squallz_core::api::{
     ControlToken, CreateOptions, EntryPath, ExtractOptions, FormatError, NoProgress, OpenOptions,
     ProgressPhase, ProgressSink,
 };
+use squallz_core::CreateCommitPolicy;
 
 #[derive(Debug, PartialEq, Eq)]
 enum Event {
@@ -96,14 +97,17 @@ fn run_operation(
                 |_| Ok(()),
             )
             .map(drop),
-        "convert" => engine.convert(
-            archive,
-            destination,
-            &open,
-            &CreateOptions::default(),
-            progress,
-            control,
-        ),
+        "convert" => engine
+            .convert(
+                archive,
+                destination,
+                &open,
+                &CreateOptions::default(),
+                CreateCommitPolicy::ReplaceExisting,
+                progress,
+                control,
+            )
+            .map(drop),
         _ => panic!("unknown test operation"),
     }
 }
@@ -120,6 +124,7 @@ fn archive_operations_report_opening_before_entry_work() {
                 &archive,
                 std::slice::from_ref(&source),
                 &CreateOptions::default(),
+                CreateCommitPolicy::ReplaceExisting,
                 &NoProgress,
                 &ControlToken::default(),
             )
@@ -188,6 +193,7 @@ fn cancellation_from_opening_feedback_preserves_existing_outputs() {
             &archive,
             &[source],
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &NoProgress,
             &ControlToken::default(),
         )

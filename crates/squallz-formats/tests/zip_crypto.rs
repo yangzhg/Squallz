@@ -8,6 +8,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::process::Command;
 
 use common::{command_exists, engine, read_archive_entries, TempDir};
+use squallz_core::CreateCommitPolicy;
 use squallz_format_api::{
     ControlToken, CreateOptions, EntryPath, ExtractOptions, FormatError, NoProgress, OpenOptions,
     Password, SafetyLimits,
@@ -36,6 +37,7 @@ fn aes256_roundtrip_and_password_errors() {
             password: Some(Password::new("correct horse")),
             ..CreateOptions::default()
         },
+        CreateCommitPolicy::ReplaceExisting,
         &NoProgress,
         &ctl,
     )
@@ -290,6 +292,7 @@ fn encrypted_infozip_native_split_uses_the_secure_password_bridge() {
             password: Some(Password::new("native-split-password")),
             ..CreateOptions::default()
         },
+        CreateCommitPolicy::ReplaceExisting,
         &NoProgress,
         &ctl,
     )

@@ -14,6 +14,7 @@ use squallz_core::api::{
     ControlToken, CreateOptions, EntryPath, EntryType, ExtractOptions, ExtractReport, FormatError,
     NoProgress, OpenOptions, OverwritePolicy, Password, SafetyLimits, SymlinkPolicy,
 };
+use squallz_core::CreateCommitPolicy;
 
 fn build_tree(root: &Path) {
     fs::create_dir_all(root.join("sub")).unwrap();
@@ -45,6 +46,7 @@ fn sevenz_roundtrip_list_test_extract() {
             &archive,
             std::slice::from_ref(&root),
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &NoProgress,
             &ctl,
         )
@@ -154,7 +156,14 @@ fn sevenz_encrypted_content_requires_password() {
         ..CreateOptions::default()
     };
     engine
-        .create(&archive, &[root], &opts, &NoProgress, &ctl)
+        .create(
+            &archive,
+            &[root],
+            &opts,
+            CreateCommitPolicy::ReplaceExisting,
+            &NoProgress,
+            &ctl,
+        )
         .unwrap();
 
     // Without a password: names are visible (header not encrypted), but
@@ -337,7 +346,14 @@ fn sevenz_encrypted_header_requires_password_to_list() {
         ..CreateOptions::default()
     };
     engine
-        .create(&archive, &[root], &opts, &NoProgress, &ctl)
+        .create(
+            &archive,
+            &[root],
+            &opts,
+            CreateCommitPolicy::ReplaceExisting,
+            &NoProgress,
+            &ctl,
+        )
         .unwrap();
 
     // Without a password even listing must fail with PasswordRequired.
@@ -385,6 +401,7 @@ fn sevenz_create_reports_symlink_unsupported_with_entry_and_target() {
             &archive,
             std::slice::from_ref(&root),
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &NoProgress,
             &ctl,
         )
@@ -431,6 +448,7 @@ fn sevenz_interop_with_system_7zip() {
             &archive,
             std::slice::from_ref(&root),
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &NoProgress,
             &ctl,
         )

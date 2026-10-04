@@ -7,7 +7,8 @@ use crate::api::{
     ControlToken, CreateOptions, FormatError, OpenOptions, ProgressSink, SafetyLimits,
 };
 use crate::{
-    is_plain_sqz_path, is_sqz_archive_path, is_zip_family_path, ArchiveTestOutcome, Engine,
+    is_plain_sqz_path, is_sqz_archive_path, is_zip_family_path, same_existing_path,
+    ArchiveTestOutcome, CreateCommitPolicy, Engine,
 };
 
 /// The recovery mechanism requested for an archive rewrite.
@@ -100,11 +101,18 @@ impl Engine {
             return Ok(ArchiveRepairOutcome::SourceRejected(source));
         }
 
-        let in_place = self.convert_with_atomic_replace(
+        let in_place = same_existing_path(src, dest);
+        let commit_policy = if in_place {
+            CreateCommitPolicy::ReplaceExisting
+        } else {
+            CreateCommitPolicy::NoReplace
+        };
+        self.convert(
             src,
             dest,
             &open,
             &options.create,
+            commit_policy,
             rewrite_progress,
             ctl,
         )?;

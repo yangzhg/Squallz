@@ -15,6 +15,7 @@ use common::{engine, read_archive_entries, TempDir};
 use squallz_core::api::{
     ControlToken, CreateOptions, ExtractOptions, NoProgress, OpenOptions, SymlinkPolicy,
 };
+use squallz_core::CreateCommitPolicy;
 
 fn extract_with(archive: &Path, dest: &Path, symlinks: SymlinkPolicy) {
     let opts = ExtractOptions {
@@ -66,6 +67,7 @@ fn zip_follow_materializes_content_copies() {
             &archive,
             &[root],
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &NoProgress,
             &ctl,
         )
@@ -108,6 +110,7 @@ fn zip_follow_skips_cycles() {
             &archive,
             &[root],
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &NoProgress,
             &ctl,
         )
@@ -128,6 +131,7 @@ fn preserve_policy_still_creates_symlinks() {
             &archive,
             &[root],
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &NoProgress,
             &ControlToken::new(),
         )

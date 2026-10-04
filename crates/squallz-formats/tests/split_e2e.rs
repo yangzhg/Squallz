@@ -14,6 +14,7 @@ use squallz_core::api::{
     ControlToken, CreateOptions, EntryPath, ExtractOptions, FormatError, NoProgress, OpenOptions,
     ProgressPhase, ProgressSink, SplitOutputMode,
 };
+use squallz_core::CreateCommitPolicy;
 
 #[derive(Default)]
 struct SplitProgress {
@@ -91,7 +92,14 @@ fn split_archive(dir: &Path, volume_size: u64) -> PathBuf {
         ..CreateOptions::default()
     };
     engine()
-        .create(&dest, &[input], &opts, &NoProgress, &ControlToken::new())
+        .create(
+            &dest,
+            &[input],
+            &opts,
+            CreateCommitPolicy::ReplaceExisting,
+            &NoProgress,
+            &ControlToken::new(),
+        )
         .unwrap();
     dest
 }
@@ -117,10 +125,11 @@ fn create_report_tracks_a_single_committed_output() {
         )
         .unwrap();
     let report = engine
-        .create_with_report(
+        .create(
             &dest,
             &[input],
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &NoProgress,
             &ControlToken::new(),
         )
@@ -153,7 +162,14 @@ fn create_report_tracks_real_split_outputs_and_primary_volume() {
         .plan_create(&requested, std::slice::from_ref(&input), &opts)
         .unwrap();
     let report = engine
-        .create_with_report(&requested, &[input], &opts, &progress, &ControlToken::new())
+        .create(
+            &requested,
+            &[input],
+            &opts,
+            CreateCommitPolicy::ReplaceExisting,
+            &progress,
+            &ControlToken::new(),
+        )
         .unwrap();
 
     let first = tmp.path().join("out.zip.001");
@@ -200,7 +216,14 @@ fn cancelling_generic_split_does_not_publish_partial_volumes() {
     };
 
     let error = engine()
-        .create(&dest, &[input], &opts, &progress, &ctl)
+        .create(
+            &dest,
+            &[input],
+            &opts,
+            CreateCommitPolicy::ReplaceExisting,
+            &progress,
+            &ctl,
+        )
         .unwrap_err();
 
     assert!(matches!(error, FormatError::Cancelled));
@@ -229,7 +252,14 @@ fn native_zip_create_uses_pkware_names_and_primary_volume() {
         .plan_create(&dest, std::slice::from_ref(&input), &opts)
         .unwrap();
     let report = engine
-        .create_with_report(&dest, &[input], &opts, &NoProgress, &ControlToken::new())
+        .create(
+            &dest,
+            &[input],
+            &opts,
+            CreateCommitPolicy::ReplaceExisting,
+            &NoProgress,
+            &ControlToken::new(),
+        )
         .unwrap();
 
     assert_eq!(plan.primary_output, dest);
@@ -289,7 +319,14 @@ fn native_split_wim_create_uses_standard_names_and_primary_member() {
         .unwrap_or_else(|error| panic!("Split WIM planning failed: {error}"));
     let progress = SplitProgress::default();
     let report = engine
-        .create_with_report(&dest, &inputs, &opts, &progress, &ControlToken::new())
+        .create(
+            &dest,
+            &inputs,
+            &opts,
+            CreateCommitPolicy::ReplaceExisting,
+            &progress,
+            &ControlToken::new(),
+        )
         .unwrap_or_else(|error| panic!("Split WIM creation failed: {error}"));
 
     assert_eq!(plan.primary_output, dest);
@@ -401,6 +438,7 @@ fn native_split_wim_conversion_uses_the_first_swm_as_primary() {
             &source,
             &inputs,
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &NoProgress,
             &ControlToken::new(),
         )
@@ -417,11 +455,12 @@ fn native_split_wim_conversion_uses_the_first_swm_as_primary() {
         .plan_convert(&source, &destination, &OpenOptions::default(), &options)
         .unwrap();
     let report = engine
-        .convert_with_report(
+        .convert(
             &source,
             &destination,
             &OpenOptions::default(),
             &options,
+            CreateCommitPolicy::ReplaceExisting,
             &NoProgress,
             &ControlToken::new(),
         )
@@ -498,7 +537,14 @@ fn cancelling_native_split_wim_does_not_publish_partial_members() {
     };
 
     let error = engine()
-        .create(&dest, &[input], &opts, &progress, &ctl)
+        .create(
+            &dest,
+            &[input],
+            &opts,
+            CreateCommitPolicy::ReplaceExisting,
+            &progress,
+            &ctl,
+        )
         .unwrap_err();
 
     assert!(matches!(error, FormatError::Cancelled));
@@ -681,7 +727,14 @@ fn sqz_create_report_includes_recovery_sidecars_without_counting_them_as_volumes
         ..CreateOptions::default()
     };
     let report = engine()
-        .create_with_report(&dest, &[input], &opts, &NoProgress, &ControlToken::new())
+        .create(
+            &dest,
+            &[input],
+            &opts,
+            CreateCommitPolicy::ReplaceExisting,
+            &NoProgress,
+            &ControlToken::new(),
+        )
         .unwrap();
 
     let volume_count = report.split_volume_count.unwrap();
@@ -896,6 +949,7 @@ fn numbered_sevenz_volumes_interoperate_with_system_7zip() {
                 split_size: Some(30 * 1024),
                 ..CreateOptions::default()
             },
+            CreateCommitPolicy::ReplaceExisting,
             &NoProgress,
             &ctl,
         )
@@ -991,6 +1045,7 @@ fn split_rebuild_replaces_current_volumes_and_removes_unsplit_base() {
                 split_size: Some(30 * 1024),
                 ..CreateOptions::default()
             },
+            CreateCommitPolicy::ReplaceExisting,
             &NoProgress,
             &ControlToken::new(),
         )
@@ -1023,6 +1078,7 @@ fn split_create_rejects_a_directory_at_the_unsplit_base() {
                 split_size: Some(30 * 1024),
                 ..CreateOptions::default()
             },
+            CreateCommitPolicy::ReplaceExisting,
             &NoProgress,
             &ControlToken::new(),
         )
@@ -1051,6 +1107,7 @@ fn split_create_rejects_an_abnormal_stale_volume_without_replacing_the_old_set()
                 split_size: Some(30 * 1024),
                 ..CreateOptions::default()
             },
+            CreateCommitPolicy::ReplaceExisting,
             &NoProgress,
             &ControlToken::new(),
         )
@@ -1090,6 +1147,7 @@ fn split_rebuild_rolls_back_when_an_existing_volume_is_occupied() {
                 split_size: Some(30 * 1024),
                 ..CreateOptions::default()
             },
+            CreateCommitPolicy::ReplaceExisting,
             &NoProgress,
             &ControlToken::new(),
         )
@@ -1143,6 +1201,7 @@ fn split_works_for_compound_and_seven_z_formats() {
                 &dest,
                 std::slice::from_ref(&input),
                 &opts,
+                CreateCommitPolicy::ReplaceExisting,
                 &NoProgress,
                 &ctl,
             )
@@ -1180,7 +1239,14 @@ fn split_sqz_writes_sqzv_headers_and_roundtrips() {
         ..CreateOptions::default()
     };
     engine()
-        .create(&dest, &[input], &opts, &NoProgress, &ctl)
+        .create(
+            &dest,
+            &[input],
+            &opts,
+            CreateCommitPolicy::ReplaceExisting,
+            &NoProgress,
+            &ctl,
+        )
         .unwrap();
 
     assert!(!dest.exists());
@@ -1287,6 +1353,7 @@ fn split_sqz_excludes_but_preserves_fixed_parts_from_an_input_directory() {
                 split_size: Some(30 * 1024),
                 ..CreateOptions::default()
             },
+            CreateCommitPolicy::ReplaceExisting,
             &NoProgress,
             &ControlToken::new(),
         )
@@ -1339,7 +1406,14 @@ fn corrupt_sqzv_header_is_reported() {
         ..CreateOptions::default()
     };
     engine()
-        .create(&dest, &[input], &opts, &NoProgress, &ControlToken::new())
+        .create(
+            &dest,
+            &[input],
+            &opts,
+            CreateCommitPolicy::ReplaceExisting,
+            &NoProgress,
+            &ControlToken::new(),
+        )
         .unwrap();
     let first = tmp.path().join("out.sqz.001");
     let mut bytes = fs::read(&first).unwrap();
@@ -1365,7 +1439,14 @@ fn sqzv_uuid_mismatch_is_reported() {
         ..CreateOptions::default()
     };
     engine()
-        .create(&dest, &[input], &opts, &NoProgress, &ControlToken::new())
+        .create(
+            &dest,
+            &[input],
+            &opts,
+            CreateCommitPolicy::ReplaceExisting,
+            &NoProgress,
+            &ControlToken::new(),
+        )
         .unwrap();
 
     let first = tmp.path().join("out.sqz.001");
@@ -1396,7 +1477,14 @@ fn missing_sqzv_payload_volume_recovers_when_within_rs_capacity() {
     };
     let ctl = ControlToken::new();
     engine()
-        .create(&dest, &[input], &opts, &NoProgress, &ctl)
+        .create(
+            &dest,
+            &[input],
+            &opts,
+            CreateCommitPolicy::ReplaceExisting,
+            &NoProgress,
+            &ctl,
+        )
         .unwrap();
 
     let missing = tmp.path().join("out.sqz.002");
@@ -1446,7 +1534,14 @@ fn missing_sqzv_payload_volume_recovers_from_rev_parity_when_rs_capacity_exceede
     };
     let ctl = ControlToken::new();
     engine()
-        .create(&dest, &[input], &opts, &NoProgress, &ctl)
+        .create(
+            &dest,
+            &[input],
+            &opts,
+            CreateCommitPolicy::ReplaceExisting,
+            &NoProgress,
+            &ctl,
+        )
         .unwrap();
 
     assert!(sqz_recovery_volume_path(tmp.path(), 1).is_file());
@@ -1495,7 +1590,14 @@ fn missing_two_sqzv_payload_volumes_recover_from_dual_rev_parity() {
     };
     let ctl = ControlToken::new();
     engine()
-        .create(&dest, &[input], &opts, &NoProgress, &ctl)
+        .create(
+            &dest,
+            &[input],
+            &opts,
+            CreateCommitPolicy::ReplaceExisting,
+            &NoProgress,
+            &ctl,
+        )
         .unwrap();
 
     assert!(sqz_recovery_volume_path(tmp.path(), 1).is_file());
@@ -1544,7 +1646,14 @@ fn missing_sqzv_payload_volume_fails_with_damaged_rev001_header() {
         ..CreateOptions::default()
     };
     engine()
-        .create(&dest, &[input], &opts, &NoProgress, &ControlToken::new())
+        .create(
+            &dest,
+            &[input],
+            &opts,
+            CreateCommitPolicy::ReplaceExisting,
+            &NoProgress,
+            &ControlToken::new(),
+        )
         .unwrap();
 
     fs::remove_file(tmp.path().join("out.sqz.002")).unwrap();
@@ -1566,7 +1675,14 @@ fn missing_sqzv_payload_volume_fails_with_damaged_rev001_payload() {
         ..CreateOptions::default()
     };
     engine()
-        .create(&dest, &[input], &opts, &NoProgress, &ControlToken::new())
+        .create(
+            &dest,
+            &[input],
+            &opts,
+            CreateCommitPolicy::ReplaceExisting,
+            &NoProgress,
+            &ControlToken::new(),
+        )
         .unwrap();
 
     fs::remove_file(tmp.path().join("out.sqz.002")).unwrap();
@@ -1585,7 +1701,14 @@ fn missing_two_sqzv_payload_volumes_fail_with_damaged_rev002_header() {
         ..CreateOptions::default()
     };
     engine()
-        .create(&dest, &[input], &opts, &NoProgress, &ControlToken::new())
+        .create(
+            &dest,
+            &[input],
+            &opts,
+            CreateCommitPolicy::ReplaceExisting,
+            &NoProgress,
+            &ControlToken::new(),
+        )
         .unwrap();
 
     fs::remove_file(tmp.path().join("out.sqz.002")).unwrap();
@@ -1608,7 +1731,14 @@ fn missing_two_sqzv_payload_volumes_fail_with_damaged_rev002_payload() {
         ..CreateOptions::default()
     };
     engine()
-        .create(&dest, &[input], &opts, &NoProgress, &ControlToken::new())
+        .create(
+            &dest,
+            &[input],
+            &opts,
+            CreateCommitPolicy::ReplaceExisting,
+            &NoProgress,
+            &ControlToken::new(),
+        )
         .unwrap();
 
     fs::remove_file(tmp.path().join("out.sqz.002")).unwrap();
@@ -1628,7 +1758,14 @@ fn missing_three_sqzv_payload_volumes_fail_with_damaged_rev003_header() {
         ..CreateOptions::default()
     };
     engine()
-        .create(&dest, &[input], &opts, &NoProgress, &ControlToken::new())
+        .create(
+            &dest,
+            &[input],
+            &opts,
+            CreateCommitPolicy::ReplaceExisting,
+            &NoProgress,
+            &ControlToken::new(),
+        )
         .unwrap();
 
     fs::remove_file(tmp.path().join("out.sqz.002")).unwrap();
@@ -1652,7 +1789,14 @@ fn missing_three_sqzv_payload_volumes_fail_with_damaged_rev003_payload() {
         ..CreateOptions::default()
     };
     engine()
-        .create(&dest, &[input], &opts, &NoProgress, &ControlToken::new())
+        .create(
+            &dest,
+            &[input],
+            &opts,
+            CreateCommitPolicy::ReplaceExisting,
+            &NoProgress,
+            &ControlToken::new(),
+        )
         .unwrap();
 
     fs::remove_file(tmp.path().join("out.sqz.002")).unwrap();
@@ -1675,7 +1819,14 @@ fn missing_two_sqzv_payload_volumes_fail_without_dual_rev_parity() {
     };
     let ctl = ControlToken::new();
     engine()
-        .create(&dest, &[input], &opts, &NoProgress, &ctl)
+        .create(
+            &dest,
+            &[input],
+            &opts,
+            CreateCommitPolicy::ReplaceExisting,
+            &NoProgress,
+            &ctl,
+        )
         .unwrap();
 
     fs::remove_file(tmp.path().join("out.sqz.002")).unwrap();
@@ -1732,7 +1883,14 @@ fn missing_three_sqzv_payload_volumes_recover_from_triple_rev_parity() {
     };
     let ctl = ControlToken::new();
     engine()
-        .create(&dest, &[input], &opts, &NoProgress, &ctl)
+        .create(
+            &dest,
+            &[input],
+            &opts,
+            CreateCommitPolicy::ReplaceExisting,
+            &NoProgress,
+            &ctl,
+        )
         .unwrap();
 
     assert!(sqz_recovery_volume_path(tmp.path(), 1).is_file());
@@ -1785,7 +1943,14 @@ fn missing_three_sqzv_payload_volumes_fail_without_triple_rev_parity() {
     };
     let ctl = ControlToken::new();
     engine()
-        .create(&dest, &[input], &opts, &NoProgress, &ctl)
+        .create(
+            &dest,
+            &[input],
+            &opts,
+            CreateCommitPolicy::ReplaceExisting,
+            &NoProgress,
+            &ctl,
+        )
         .unwrap();
 
     fs::remove_file(tmp.path().join("out.sqz.002")).unwrap();
@@ -1843,7 +2008,14 @@ fn missing_four_sqzv_payload_volumes_still_fail_with_three_rev_parity() {
     };
     let ctl = ControlToken::new();
     engine()
-        .create(&dest, &[input], &opts, &NoProgress, &ctl)
+        .create(
+            &dest,
+            &[input],
+            &opts,
+            CreateCommitPolicy::ReplaceExisting,
+            &NoProgress,
+            &ctl,
+        )
         .unwrap();
 
     assert!(sqz_recovery_volume_path(tmp.path(), 1).is_file());
@@ -1882,7 +2054,14 @@ fn missing_sqzv_payload_volume_over_capacity_fails_without_rev_parity() {
     };
     let ctl = ControlToken::new();
     engine()
-        .create(&dest, &[input], &opts, &NoProgress, &ctl)
+        .create(
+            &dest,
+            &[input],
+            &opts,
+            CreateCommitPolicy::ReplaceExisting,
+            &NoProgress,
+            &ctl,
+        )
         .unwrap();
 
     fs::remove_file(tmp.path().join("out.sqz.002")).unwrap();
@@ -1937,7 +2116,14 @@ fn missing_sqzv_tail_volume_recovers_from_rev_sidecar() {
     };
     let ctl = ControlToken::new();
     engine()
-        .create(&dest, &[input], &opts, &NoProgress, &ctl)
+        .create(
+            &dest,
+            &[input],
+            &opts,
+            CreateCommitPolicy::ReplaceExisting,
+            &NoProgress,
+            &ctl,
+        )
         .unwrap();
 
     let volumes = volume_paths(tmp.path(), "out.sqz.");
@@ -1989,7 +2175,14 @@ fn missing_sqzv_payload_and_tail_recover_from_parity_plus_tail_mirror() {
     };
     let ctl = ControlToken::new();
     engine()
-        .create(&dest, &[input], &opts, &NoProgress, &ctl)
+        .create(
+            &dest,
+            &[input],
+            &opts,
+            CreateCommitPolicy::ReplaceExisting,
+            &NoProgress,
+            &ctl,
+        )
         .unwrap();
 
     let volumes = volume_paths(tmp.path(), "out.sqz.");
@@ -2043,7 +2236,14 @@ fn missing_sqzv_tail_volume_is_still_unrecoverable() {
         ..CreateOptions::default()
     };
     engine()
-        .create(&dest, &[input], &opts, &NoProgress, &ControlToken::new())
+        .create(
+            &dest,
+            &[input],
+            &opts,
+            CreateCommitPolicy::ReplaceExisting,
+            &NoProgress,
+            &ControlToken::new(),
+        )
         .unwrap();
 
     let volumes = volume_paths(tmp.path(), "out.sqz.");
@@ -2081,6 +2281,7 @@ fn tiny_split_size_is_rejected() {
             &tmp.path().join("out.zip"),
             &[input],
             &opts,
+            CreateCommitPolicy::ReplaceExisting,
             &NoProgress,
             &ControlToken::new(),
         )

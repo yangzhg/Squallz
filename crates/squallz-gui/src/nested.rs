@@ -274,6 +274,7 @@ pub(crate) fn extract_nested_archive_to_temp_for_job(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use squallz_core::CreateCommitPolicy;
     use std::collections::HashSet;
     use std::sync::{Arc, Mutex};
 
@@ -308,6 +309,7 @@ mod tests {
                     password: Some(Password::new("secret")),
                     ..CreateOptions::default()
                 },
+                CreateCommitPolicy::ReplaceExisting,
                 &NoProgress,
                 &ControlToken::default(),
             )
@@ -480,6 +482,7 @@ mod tests {
                     level: CompressionLevel::Store,
                     ..CreateOptions::default()
                 },
+                CreateCommitPolicy::ReplaceExisting,
                 &NoProgress,
                 &ControlToken::default(),
             )

@@ -1234,62 +1234,48 @@ impl Engine {
     /// `dest.002`, ... byte-split volumes. Formats that advertise native
     /// volume support can instead use [`SplitOutputMode::Native`]; ZIP then
     /// writes `.z01`, `.z02`, ... with the final `.zip` as its primary
-    /// member. Call [`Engine::create_with_report`] when the caller must
-    /// surface retained backups from a split replacement.
+    /// member. The report includes every committed output and any retained
+    /// backups from a split replacement; callers must surface those paths.
+    ///
+    /// `ReplaceIfUnchanged` binds replacement to the destination state
+    /// returned by [`inspect_create_destination`]. `NoReplace` refuses an
+    /// output that appears before commit; split creation checks the managed
+    /// output family while holding its lock.
     pub fn create(
         &self,
         dest: &Path,
         inputs: &[PathBuf],
         opts: &CreateOptions,
-        progress: &dyn ProgressSink,
-        ctl: &ControlToken,
-    ) -> Result<(), FormatError> {
-        self.create_with_report(dest, inputs, opts, progress, ctl)
-            .map(drop)
-    }
-
-    /// Creates an archive and returns the newly committed outputs together
-    /// with any transaction-owned backups retained during split replacement.
-    /// [`Engine::create`] discards this report.
-    pub fn create_with_report(
-        &self,
-        dest: &Path,
-        inputs: &[PathBuf],
-        opts: &CreateOptions,
+        commit_policy: CreateCommitPolicy,
         progress: &dyn ProgressSink,
         ctl: &ControlToken,
     ) -> Result<CreateReport, FormatError> {
-        create::create(self, dest, inputs, opts, progress, ctl)
+        create::create_published(
+            self,
+            dest,
+            inputs,
+            opts,
+            commit_policy,
+            progress,
+            ctl,
+            false,
+        )
+        .map(|report| report.create)
     }
 
-    /// Creates an archive using an explicit final publication policy.
-    /// `ReplaceIfUnchanged` binds replacement to the destination state
-    /// returned by [`inspect_create_destination`].
-    /// `NoReplace` refuses an output that appears before commit; split
-    /// creation checks the managed output family while holding its lock.
-    pub fn create_with_report_policy(
+    /// Creates an archive under the same publication contract as [`Self::create`]
+    /// and records the exact source content written into it. The manifest lets
+    /// callers verify sources before cleanup; ordinary creation does not capture it.
+    pub fn create_verified(
         &self,
         dest: &Path,
         inputs: &[PathBuf],
         opts: &CreateOptions,
-        policy: CreateCommitPolicy,
-        progress: &dyn ProgressSink,
-        ctl: &ControlToken,
-    ) -> Result<CreateReport, FormatError> {
-        create::create_report_with_policy(self, dest, inputs, opts, policy, progress, ctl)
-    }
-
-    /// Verified creation using an explicit final publication policy.
-    pub fn create_with_verification_policy(
-        &self,
-        dest: &Path,
-        inputs: &[PathBuf],
-        opts: &CreateOptions,
-        policy: CreateCommitPolicy,
+        commit_policy: CreateCommitPolicy,
         progress: &dyn ProgressSink,
         ctl: &ControlToken,
     ) -> Result<VerifiedCreateReport, FormatError> {
-        create::create_verified(self, dest, inputs, opts, progress, ctl, policy)
+        create::create_published(self, dest, inputs, opts, commit_policy, progress, ctl, true)
     }
 
     /// Builds a conservative output/workspace plan using the same input and
@@ -1559,84 +1545,16 @@ impl Engine {
     /// (no extraction to disk). `open_opts` applies to the source and
     /// `create_opts` (password and level) to the destination.
     ///
-    /// Split conversion must use [`Self::convert_with_report`], because a
-    /// replacement can retain previous volumes that the caller must show to
-    /// the user.
-    #[allow(clippy::too_many_arguments)] // engine facade: distinct roles
-    pub fn convert(
-        &self,
-        src: &Path,
-        dest: &Path,
-        open_opts: &OpenOptions,
-        create_opts: &CreateOptions,
-        progress: &dyn ProgressSink,
-        ctl: &ControlToken,
-    ) -> Result<(), FormatError> {
-        if create_opts.split_size.is_some() {
-            return Err(FormatError::Unsupported(
-                "split conversion requires convert_with_report so preserved previous outputs cannot be hidden"
-                    .into(),
-            ));
-        }
-        self.convert_with_report(src, dest, open_opts, create_opts, progress, ctl)
-            .map(drop)
-    }
-
-    /// Converts an archive and returns every committed destination artifact.
-    /// Split replacements report transaction-owned previous volumes through
+    /// The explicit publication policy and returned report cover every
+    /// committed artifact. Split replacements report previous volumes through
     /// [`CreateReport::preserved_outputs`]; callers must surface those exact
     /// paths before offering any cleanup action.
-    #[allow(clippy::too_many_arguments)] // engine facade: distinct roles
-    pub fn convert_with_report(
-        &self,
-        src: &Path,
-        dest: &Path,
-        open_opts: &OpenOptions,
-        create_opts: &CreateOptions,
-        progress: &dyn ProgressSink,
-        ctl: &ControlToken,
-    ) -> Result<CreateReport, FormatError> {
-        convert::convert(self, src, dest, open_opts, create_opts, None, progress, ctl)
-    }
-
-    /// Converts an archive using an explicit destination publication policy.
     ///
     /// [`CreateCommitPolicy::NoReplace`] refuses an occupied destination,
     /// while [`CreateCommitPolicy::ReplaceIfUnchanged`] only replaces the
     /// exact destination state captured before the caller asked for consent.
     #[allow(clippy::too_many_arguments)] // engine facade: distinct roles
-    pub fn convert_with_policy(
-        &self,
-        src: &Path,
-        dest: &Path,
-        open_opts: &OpenOptions,
-        create_opts: &CreateOptions,
-        commit_policy: CreateCommitPolicy,
-        progress: &dyn ProgressSink,
-        ctl: &ControlToken,
-    ) -> Result<(), FormatError> {
-        if create_opts.split_size.is_some() {
-            return Err(FormatError::Unsupported(
-                "split conversion requires convert_with_report_policy so preserved previous outputs cannot be hidden"
-                    .into(),
-            ));
-        }
-        self.convert_with_report_policy(
-            src,
-            dest,
-            open_opts,
-            create_opts,
-            commit_policy,
-            progress,
-            ctl,
-        )
-        .map(drop)
-    }
-
-    /// Converts an archive using an explicit destination publication policy
-    /// and returns every committed destination artifact.
-    #[allow(clippy::too_many_arguments)] // engine facade: distinct roles
-    pub fn convert_with_report_policy(
+    pub fn convert(
         &self,
         src: &Path,
         dest: &Path,
@@ -1652,54 +1570,10 @@ impl Engine {
             dest,
             open_opts,
             create_opts,
-            Some(commit_policy),
-            progress,
-            ctl,
-        )
-    }
-
-    /// Converts an archive and reports whether `src` and `dest` name the same
-    /// existing file. Conversion commits from a same-directory staging file:
-    /// the source can be replaced atomically in place, while an independent
-    /// destination must remain unoccupied until publication.
-    ///
-    /// Split output is always rejected. Use [`Self::convert_with_report`] for
-    /// split conversion so every committed and preserved artifact is visible
-    /// to the caller.
-    ///
-    /// Returns `true` when the destination was replaced in place.
-    #[allow(clippy::too_many_arguments)] // engine facade: distinct roles
-    pub fn convert_with_atomic_replace(
-        &self,
-        src: &Path,
-        dest: &Path,
-        open_opts: &OpenOptions,
-        create_opts: &CreateOptions,
-        progress: &dyn ProgressSink,
-        ctl: &ControlToken,
-    ) -> Result<bool, FormatError> {
-        if create_opts.split_size.is_some() {
-            return Err(FormatError::Unsupported(
-                "convert_with_atomic_replace does not support split output; use convert_with_report"
-                    .into(),
-            ));
-        }
-        let in_place = same_existing_path(src, dest);
-        let commit_policy = if in_place {
-            CreateCommitPolicy::ReplaceExisting
-        } else {
-            CreateCommitPolicy::NoReplace
-        };
-        self.convert_with_policy(
-            src,
-            dest,
-            open_opts,
-            create_opts,
             commit_policy,
             progress,
             ctl,
-        )?;
-        Ok(in_place)
+        )
     }
 
     /// Folder-name stem of an archive path: the file name minus split
@@ -3494,7 +3368,7 @@ mod tests {
     ) -> FormatError {
         let input = input.to_path_buf();
         test_archive_engine()
-            .create_with_report_policy(
+            .create(
                 dest,
                 std::slice::from_ref(&input),
                 &CreateOptions::default(),
@@ -3749,7 +3623,7 @@ mod tests {
         let ctl = ControlToken::new();
 
         let error = engine
-            .create_with_report_policy(
+            .create(
                 &dest,
                 std::slice::from_ref(&input),
                 &CreateOptions::default(),
@@ -3770,10 +3644,11 @@ mod tests {
 
         let engine = test_archive_engine();
         engine
-            .create_with_report(
+            .create(
                 &dest,
                 std::slice::from_ref(&input),
                 &CreateOptions::default(),
+                CreateCommitPolicy::ReplaceExisting,
                 &progress,
                 &ctl,
             )
@@ -3794,7 +3669,7 @@ mod tests {
         let engine = test_archive_engine();
 
         let verified = engine
-            .create_with_verification_policy(
+            .create_verified(
                 &dest,
                 std::slice::from_ref(&input),
                 &CreateOptions::default(),
@@ -3827,7 +3702,7 @@ mod tests {
         let engine = Engine::new(registry);
 
         let error = engine
-            .create_with_report_policy(
+            .create(
                 &dest,
                 std::slice::from_ref(&input),
                 &CreateOptions::default(),
@@ -4245,6 +4120,7 @@ mod tests {
                 &dest,
                 std::slice::from_ref(&input),
                 &CreateOptions::default(),
+                CreateCommitPolicy::ReplaceExisting,
                 &api::NoProgress,
                 &ControlToken::new(),
             )
@@ -4280,6 +4156,7 @@ mod tests {
                 &dest,
                 std::slice::from_ref(&input),
                 &CreateOptions::default(),
+                CreateCommitPolicy::ReplaceExisting,
                 &api::NoProgress,
                 &ControlToken::new(),
             )
@@ -4313,6 +4190,7 @@ mod tests {
                 &dest,
                 std::slice::from_ref(&input),
                 &CreateOptions::default(),
+                CreateCommitPolicy::ReplaceExisting,
                 &api::NoProgress,
                 &ControlToken::new(),
             )
@@ -4346,6 +4224,7 @@ mod tests {
                 &dest,
                 &[input, alias],
                 &CreateOptions::default(),
+                CreateCommitPolicy::ReplaceExisting,
                 &api::NoProgress,
                 &ControlToken::new(),
             )
@@ -4374,6 +4253,7 @@ mod tests {
                 &dest,
                 &[input, link],
                 &CreateOptions::default(),
+                CreateCommitPolicy::ReplaceExisting,
                 &api::NoProgress,
                 &ControlToken::new(),
             )
@@ -4418,6 +4298,7 @@ mod tests {
                     &dest,
                     &inputs,
                     &CreateOptions::default(),
+                    CreateCommitPolicy::ReplaceExisting,
                     &api::NoProgress,
                     &ControlToken::new(),
                 )
@@ -4434,6 +4315,7 @@ mod tests {
                 &dest,
                 std::slice::from_ref(&first_link),
                 &CreateOptions::default(),
+                CreateCommitPolicy::ReplaceExisting,
                 &api::NoProgress,
                 &ControlToken::new(),
             )
@@ -4495,7 +4377,7 @@ mod tests {
         };
 
         let error = engine
-            .create_with_report_policy(
+            .create(
                 &dest,
                 std::slice::from_ref(&input),
                 &options,
@@ -4532,7 +4414,7 @@ mod tests {
         let engine = Engine::new(registry);
 
         let report = engine
-            .create_with_report_policy(
+            .create(
                 &dest,
                 std::slice::from_ref(&input),
                 &CreateOptions::default(),
@@ -4550,7 +4432,7 @@ mod tests {
 
         let split_dest = dir.join("split.test");
         let split_report = engine
-            .create_with_report_policy(
+            .create(
                 &split_dest,
                 std::slice::from_ref(&input),
                 &CreateOptions {
@@ -4602,10 +4484,11 @@ mod tests {
 
         for _ in 0..3 {
             let report = engine
-                .create_with_report(
+                .create(
                     &dest,
                     std::slice::from_ref(&root),
                     &CreateOptions::default(),
+                    CreateCommitPolicy::ReplaceExisting,
                     &api::NoProgress,
                     &ControlToken::new(),
                 )
@@ -4641,10 +4524,11 @@ mod tests {
         };
 
         let first = engine
-            .create_with_report(
+            .create(
                 &dest,
                 std::slice::from_ref(&input),
                 &options,
+                CreateCommitPolicy::ReplaceExisting,
                 &api::NoProgress,
                 &ControlToken::new(),
             )
@@ -4654,10 +4538,11 @@ mod tests {
 
         std::fs::write(&input, &new_payload).unwrap();
         let second = engine
-            .create_with_report(
+            .create(
                 &dest,
                 std::slice::from_ref(&input),
                 &options,
+                CreateCommitPolicy::ReplaceExisting,
                 &api::NoProgress,
                 &ControlToken::new(),
             )
@@ -4710,10 +4595,11 @@ mod tests {
 
         for run in 0..3 {
             let report = engine
-                .create_with_report(
+                .create(
                     &dest,
                     std::slice::from_ref(&source),
                     &options,
+                    CreateCommitPolicy::ReplaceExisting,
                     &api::NoProgress,
                     &ControlToken::new(),
                 )
@@ -4753,7 +4639,7 @@ mod tests {
         let engine = Engine::new(registry);
 
         let verified = engine
-            .create_with_verification_policy(
+            .create_verified(
                 &dest,
                 std::slice::from_ref(&input),
                 &CreateOptions::default(),
@@ -4798,7 +4684,7 @@ mod tests {
         }));
 
         let verified = Engine::new(registry)
-            .create_with_verification_policy(
+            .create_verified(
                 &dest,
                 std::slice::from_ref(&root),
                 &CreateOptions::default(),
@@ -4862,7 +4748,7 @@ mod tests {
         }));
 
         let verified = Engine::new(registry)
-            .create_with_verification_policy(
+            .create_verified(
                 &dest,
                 std::slice::from_ref(&link),
                 &CreateOptions::default(),
