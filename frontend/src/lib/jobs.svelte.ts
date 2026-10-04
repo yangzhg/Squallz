@@ -2,7 +2,6 @@
 // status text, and conflict/password prompts.
 
 import {
-  BATCH_PROGRESS_SCALE,
   ipc,
   type AskConflictEvent,
   type AskPasswordEvent,
@@ -54,6 +53,7 @@ import {
 } from "./extract-result";
 import { resultProblemTotal } from "./problem-preview";
 import { currentWebviewWindowListener } from "./tauri-events";
+import { createTaskPreview, createTaskPreviewHistory, type PreviewTaskKind } from "./task-preview";
 
 export type JobStateName = StateEvent["state"];
 export type TaskControlIntent = "cancel" | "pause" | "resume";
@@ -132,8 +132,6 @@ let snapshotGeneration = 0;
 let revealAfterExtract = $state(false);
 let createCompletionHandler: ((path: string) => Promise<boolean | void> | boolean | void) | null = null;
 let sourceCleanupRecoveryRefreshHandler: (() => Promise<void> | void) | null = null;
-const sampleRoot = "/Users/alex/Squallz Samples";
-const sampleOutputRoot = "/Users/alex/Squallz Exports";
 
 export function setRevealAfterExtractPreference(enabled: boolean): void {
   revealAfterExtract = enabled;
@@ -1335,654 +1333,6 @@ export function jobSnapshotStatus(): JobSnapshotStatus {
   return store.snapshotStatus;
 }
 
-type PreviewTaskKind =
-  | "archive_open"
-  | "compress"
-  | "compress_failure"
-  | "compress_split"
-  | "compress_sfx"
-  | "compress_sfx_failure"
-  | "convert_failure"
-  | "convert_encrypted_failure"
-  | "duplicate_scan"
-  | "duplicate_scan_clean"
-  | "duplicate_scan_failure"
-  | "recovery_cleanup_ready"
-  | "recovery_cleanup_unconfirmed"
-  | "recovery_cleanup_record"
-  | "extract"
-  | "extract_failure"
-  | "extract_password"
-  | "extract_conflict"
-  | "extract_nested_failure"
-  | "update_failure"
-  | "extract_unknown_current"
-  | "extract_metadata"
-  | "batch_extract_metadata"
-  | "batch_extract"
-  | "batch_extract_partial"
-  | "batch_extract_failure"
-  | "test"
-  | "checksum"
-  | "checksum_check"
-  | "recovery_protect"
-  | "recovery_verify_repairable"
-  | "recovery_verify_multi_file_repairable"
-  | "recovery_verify_over_capacity"
-  | "update_scan"
-  | "update_verify"
-  | "update_commit";
-
-function previewPhase(kind: PreviewTaskKind): ProgressPhase | null {
-  if (kind === "archive_open") return "archive_open";
-  if (kind === "test") return "archive_test";
-  if (kind === "extract_metadata" || kind === "batch_extract_metadata") return "extract_metadata";
-  if (kind === "recovery_protect") return "recovery_finalize";
-  if (isRecoveryCleanupPreview(kind)) return "recovery_finalize";
-  if (isRecoveryPreview(kind)) return "recovery_verify";
-  if (kind === "compress_split") return "output_split";
-  if (kind === "update_verify") return "update_verify";
-  if (kind === "update_commit") return "update_commit";
-  return null;
-}
-
-function isUpdatePreview(kind: PreviewTaskKind): boolean {
-  return kind === "update_scan" || kind === "update_verify" || kind === "update_commit";
-}
-
-function isRecoveryPreview(kind: PreviewTaskKind): boolean {
-  return kind === "recovery_verify_repairable"
-    || kind === "recovery_verify_multi_file_repairable"
-    || kind === "recovery_verify_over_capacity";
-}
-
-function isRecoveryCleanupPreview(kind: PreviewTaskKind): boolean {
-  return kind === "recovery_cleanup_ready"
-    || kind === "recovery_cleanup_unconfirmed"
-    || kind === "recovery_cleanup_record";
-}
-
-function previewTaskSpec(kind: PreviewTaskKind): JobSpec {
-  if (kind === "update_failure") {
-    return { kind: "update", path: `${sampleRoot}/客户交付/Quarterly delivery with complete project history.zip`,
-      expected_archive_id: null,
-      add: [`${sampleRoot}/Revised documents/完整项目说明.txt`], mkdir: ["交付文档/审核记录/"],
-      delete: ["Previous versions/旧资料[1].txt"],
-      rename: [{ from: "Previous versions/Design assets with a complete descriptive name.pdf", to: "交付文档/Design assets with a complete descriptive name.pdf" }],
-      encoding: "gbk", content_policy: "custom", excludes: ["*.bak", ".DS_Store"], level: 3, password: null };
-  }
-  if (kind === "extract_nested_failure") {
-    return { kind: "extract_nested", outer_path: `${sampleRoot}/Quarterly delivery with complete project history.zip`,
-      entry_path: "客户交付与设计资料/Previous versions/Design assets with a complete descriptive name.7z",
-      dest: `${sampleOutputRoot}/客户交付/Reviewed inner archive`, overwrite: "rename", symlinks: "skip",
-      smart: false, encoding: "gbk", password: null, best_effort: true };
-  }
-  if (kind === "batch_extract_partial" || kind === "batch_extract_failure") {
-    return { kind: "batch_extract", overwrite: "rename", symlinks: "skip", smart: false,
-      items: [
-        { path: `${sampleRoot}/Quarterly reports/季度归档与设计资料/Customer delivery with a complete descriptive name.zip`,
-          dest: `${sampleOutputRoot}/客户交付/Quarterly reports`, encoding: "gbk", password: null, best_effort: true },
-        { path: `${sampleRoot}/finished-photos.7z`, dest: `${sampleOutputRoot}/Photos`, encoding: null, password: null, best_effort: false },
-        { path: `${sampleRoot}/logs.tar`, dest: `${sampleOutputRoot}/Logs`, encoding: null, password: null, best_effort: false },
-      ] };
-  }
-  if (kind === "duplicate_scan" || kind === "duplicate_scan_clean" || kind === "duplicate_scan_failure") {
-    return { kind: "duplicate_scan", inputs: [`${sampleRoot}/${kind === "duplicate_scan_clean" ? "Inbox" : "Archive review"}`],
-      excludes: ["cache"], min_size: 1024 };
-  }
-  if (kind === "convert_failure" || kind === "convert_encrypted_failure") {
-    const encrypted = kind === "convert_encrypted_failure";
-    return {
-      kind: "convert",
-      src: `${sampleRoot}/product-backup.zip`,
-      dest: `${sampleOutputRoot}/Reviewed backup.${encrypted ? "7z" : "zip"}`,
-      level: 4, src_encoding: null, src_password: null, dest_password: null,
-      encrypt_names: encrypted, split_size: 123456789,
-      split_mode: encrypted ? "generic" : "native", replace_existing: false, replacement_guard: null,
-    };
-  }
-  if (isUpdatePreview(kind)) {
-    return {
-      kind: "update",
-      path: `${sampleRoot}/product-backup.zip`,
-      expected_archive_id: null,
-      encoding: null,
-      add: [`${sampleRoot}/incoming-assets`],
-      delete: [],
-      rename: [],
-      mkdir: [],
-      excludes: [".DS_Store"],
-      content_policy: "keep_all_files",
-      password: null,
-      level: 5,
-    };
-  }
-  if (kind === "compress" || kind === "compress_failure" || kind === "compress_split" || kind === "compress_sfx" || kind === "compress_sfx_failure") {
-    const sfx = kind === "compress_sfx" || kind === "compress_sfx_failure";
-    return {
-      kind: "compress",
-      inputs: [`${sampleRoot}/reports`, `${sampleRoot}/photos`],
-      dest: sfx ? `${sampleOutputRoot}/Installer.app` : `${sampleOutputRoot}/product-backup.zip`,
-      level: kind === "compress_failure" ? 4 : 5,
-      password: null,
-      encrypt_names: false,
-      split_size: kind === "compress_failure" ? 123456789 : kind === "compress_split" ? 8 * 1024 * 1024 : null,
-      split_mode: kind === "compress_failure" ? "native" : "generic",
-      excludes: kind === "compress_failure" ? ["*.bak", "cache/**"] : [],
-      content_policy: kind === "compress_failure" ? "custom" : "keep_all_files",
-      sqz_inner_format: null,
-      sfx_target: sfx ? "macos" : null,
-      replace_existing: kind !== "compress",
-      replacement_guard: null,
-      completion: "none",
-      post_success: "keep_source",
-      test_after_create: kind === "compress_failure",
-    };
-  }
-  if (kind === "extract" || kind === "extract_failure" || kind === "extract_password" || kind === "extract_conflict" || kind === "extract_unknown_current" || kind === "extract_metadata") {
-    return {
-      kind: "extract",
-      path: `${sampleRoot}/product-backup.zip`,
-      dest: kind === "extract_failure" ? `${sampleOutputRoot}/Reviewed files` : `${sampleOutputRoot}/product-backup`,
-      expected_destination: null,
-      expected_input_guard: null,
-      selection: kind === "extract_failure" ? ["reports/", "Launch plan.pdf"] : null,
-      overwrite: kind === "extract_failure" ? "rename" : "ask",
-      symlinks: kind === "extract_failure" ? "skip" : "preserve",
-      smart: true,
-      encoding: null,
-      password: null,
-      verify_sfx: false,
-      best_effort: false,
-    };
-  }
-  if (kind === "recovery_protect") {
-    return {
-      kind: "protect",
-      path: `${sampleRoot}/product-backup.zip`,
-      redundancy: 10,
-      recovery: `${sampleOutputRoot}/product-backup.zip.par2`,
-    };
-  }
-  if (isRecoveryCleanupPreview(kind)) {
-    return {
-      kind: "repair_recovery",
-      path: `${sampleRoot}/product-backup.zip`,
-      output: `${sampleOutputRoot}/product-backup.repaired.zip`,
-      output_directory: false,
-      recovery: `${sampleRoot}/product-backup.zip.par2`,
-    };
-  }
-  if (isRecoveryPreview(kind)) {
-    return {
-      kind: "verify_recovery",
-      path: `${sampleRoot}/product-backup.zip`,
-      recovery: `${sampleRoot}/product-backup.zip.par2`,
-    };
-  }
-  if (kind === "test" || kind === "archive_open") {
-    return {
-      kind: "test",
-      path: kind === "test"
-        ? `${sampleRoot}/inspection/damaged-backup.zip`
-        : `${sampleRoot}/product-backup.zip`,
-      encoding: null,
-      password: null,
-    };
-  }
-  if (kind === "checksum") {
-    return {
-      kind: "checksum",
-      inputs: [`${sampleRoot}/photos`],
-      excludes: [],
-      algorithm: "sha256",
-    };
-  }
-  if (kind === "checksum_check") {
-    return {
-      kind: "checksum_check",
-      manifest: `${sampleRoot}/photos/SHA256SUMS`,
-      algorithm: "sha256",
-    };
-  }
-  return {
-    kind: "batch_extract",
-    items: [
-      {
-        path: `${sampleRoot}/client-data.zip`,
-        dest: `${sampleOutputRoot}/client-data`,
-        encoding: null,
-        password: null,
-        best_effort: false,
-      },
-      {
-        path: `${sampleRoot}/photos.7z`,
-        dest: `${sampleOutputRoot}/photos`,
-        encoding: null,
-        password: null,
-        best_effort: false,
-      },
-    ],
-    overwrite: "ask",
-    symlinks: "preserve",
-    smart: true,
-  };
-}
-
-function previewTaskResult(kind: PreviewTaskKind): Record<string, unknown> {
-  if (kind === "batch_extract_partial") {
-    const spec = previewTaskSpec(kind);
-    if (spec.kind === "batch_extract") {
-      return { operation: "batch_extract", archives: 3, selected_archives: 3, collapsed_volumes: 0,
-        extracted: 1, failed: 2,
-        outputs: [{ archive: spec.items[1].path, dest: spec.items[1].dest }],
-        failures: [spec.items[0], spec.items[2]].map((item) => ({ archive: item.path,
-          error: { key: "error.io", params: { detail: "Could not write the extracted file" }, detail: "Could not write the extracted file" } })),
-      };
-    }
-  }
-  if (kind === "duplicate_scan" || kind === "duplicate_scan_clean") {
-    const groups = kind === "duplicate_scan_clean" ? [] : Array.from({ length: 25 }, (_, index) => {
-      const paths = Array.from({ length: index === 0 ? 60 : 2 }, (_, copy) =>
-        `${sampleRoot}/Archive review/Project ${index + 1}/Copy ${copy + 1}/季度归档与设计资料/Final presentation with a descriptive file name.pdf`);
-      return { hash: (index + 1).toString(16).padStart(64, "0"), hash_algorithm: "blake3", size: 2048,
-        count: paths.length, reclaimable_bytes: (paths.length - 1) * 2048, paths };
-    });
-    const count = groups.reduce((total, group) => total + group.paths.length, 0);
-    return { operation: "duplicates", hash_algorithm: "blake3", input_count: 1, min_size: 1024,
-      files_scanned: count + 4, bytes_scanned: (count + 4) * 2048, candidate_files: count, hashed_bytes: count * 2048,
-      duplicate_groups: groups.length, duplicate_files: count, reclaimable_bytes: (count - groups.length) * 2048, groups };
-  }
-  if (isUpdatePreview(kind)) return { operation: "update" };
-  if (kind === "recovery_protect") {
-    const recovery = `${sampleOutputRoot}/product-backup.zip.par2`;
-    return {
-      operation: "protect",
-      ok: true,
-      archive: `${sampleRoot}/product-backup.zip`,
-      recovery,
-      outputs: [
-        recovery,
-        `${sampleOutputRoot}/product-backup.zip.vol00+01.par2`,
-        `${sampleOutputRoot}/product-backup.zip.vol01+02.par2`,
-        `${sampleOutputRoot}/product-backup.zip.vol03+04.par2`,
-        `${sampleOutputRoot}/product-backup.zip.vol07+08.par2`,
-        `${sampleOutputRoot}/product-backup.zip.vol15+16.par2`,
-      ],
-      source_file_count: 1,
-      redundancy_percent: 10,
-    };
-  }
-  if (isRecoveryPreview(kind)) {
-    const overCapacity = kind === "recovery_verify_over_capacity";
-    return {
-      operation: "verify",
-      ok: false,
-      archive: `${sampleRoot}/product-backup.zip`,
-      recovery: `${sampleRoot}/product-backup.zip.par2`,
-      output: null,
-      tool: "rust-par2",
-      redundancy_percent: null,
-      source_file_count: kind === "recovery_verify_multi_file_repairable" ? 2 : 1,
-      status_code: 1,
-      metrics: {
-        all_correct: false,
-        repair_possible: !overCapacity,
-        blocks_needed: overCapacity ? 12 : 3,
-        recovery_blocks_available: overCapacity ? 4 : 8,
-        blocks_repaired: null,
-        files_repaired: null,
-        no_damage: false,
-      },
-      stdout: "",
-      stderr: "damage found",
-    };
-  }
-  if (kind === "batch_extract" || kind === "batch_extract_metadata") {
-    return {
-      operation: "batch_extract",
-      archives: 2,
-      extracted: 2,
-      failed: 0,
-      skipped: 0,
-      outputs: [
-        { path: `${sampleRoot}/client-data.zip`, dest: `${sampleOutputRoot}/client-data` },
-        { path: `${sampleRoot}/photos.7z`, dest: `${sampleOutputRoot}/photos` },
-      ],
-    };
-  }
-  if (kind === "extract" || kind === "extract_unknown_current" || kind === "extract_metadata") {
-    const problems = Array.from(
-      { length: 20 },
-      (_, index) => index === 0
-        ? `reports/${"annual-reports-and-supporting-documents/".repeat(6)}final  report.pdf: checksum mismatch\nThe file could not be recovered from this archive.`
-        : `damaged/item-${String(index + 1).padStart(2, "0")}.bin: checksum mismatch`,
-    );
-    return {
-      operation: "extract",
-      dest: "/tmp/squallz-output/product-backup",
-      best_effort: true,
-      skipped: 30,
-      problems,
-      problems_total: 30,
-      problems_truncated: true,
-      counts: {
-        destination: "/tmp/squallz-output/product-backup",
-        selected_entries: 42,
-        created: 10,
-        directories: 2,
-        skipped: 0,
-        replaced: 0,
-        renamed: 0,
-        failed: 30,
-        output_bytes: 48_000_000,
-      },
-    };
-  }
-  if (kind === "test" || kind === "archive_open") {
-    const problemMessages = Array.from(
-      { length: 20 },
-      (_, index) => `damaged/item-${String(index + 1).padStart(2, "0")}.bin: checksum mismatch`,
-    );
-    return {
-      operation: "test",
-      ok: false,
-      entries: 42,
-      entries_tested: 42,
-      problems: problemMessages,
-      problems_total: 30,
-      problems_truncated: true,
-    };
-  }
-  if (kind === "checksum") {
-    return {
-      operation: "checksum",
-      algorithm: "sha256",
-      files_hashed: 12,
-      bytes_hashed: 86_000_000,
-      items: [
-        {
-          path: `${sampleRoot}/photos/DSC_1930.JPG`,
-          size: 18_200_000,
-          digest: "9bc1b2a288b3f53f0c448c9a6fe2c7e97e0d8bb74f7e7f548d3f1ad4020cc714",
-        },
-        {
-          path: `${sampleRoot}/photos/DSC_1488.JPG`,
-          size: 9_200_000,
-          digest: "37166b84dfd4083c0f6fb7b99d892bc3ef8ff07c9a1714ad9f323bdb37e9f9a2",
-        },
-      ],
-    };
-  }
-  if (kind === "checksum_check") {
-    return {
-      operation: "checksum_check",
-      passed: 12,
-      checked: 12,
-      failed: 0,
-      items: [
-        {
-          path: `${sampleRoot}/photos/DSC_1930.JPG`,
-          expected: "9bc1b2a288b3f53f0c448c9a6fe2c7e97e0d8bb74f7e7f548d3f1ad4020cc714",
-          actual: "9bc1b2a288b3f53f0c448c9a6fe2c7e97e0d8bb74f7e7f548d3f1ad4020cc714",
-          ok: true,
-        },
-      ],
-    };
-  }
-  if (kind === "compress_split") {
-    const output = `${sampleOutputRoot}/product-backup.zip`;
-    const outputs = Array.from(
-      { length: 12 },
-      (_, index) => `${output}.${String(index + 1).padStart(3, "0")}`,
-    );
-    const preservedOutputs = outputs.slice(0, 3).map((path, index) => {
-      const name = basename(path);
-      return `${sampleOutputRoot}/.${name}.split-backup-940008-${index}.tmp.${name}`;
-    });
-    return {
-      operation: "create",
-      primary_output: outputs[0],
-      outputs,
-      preserved_outputs: preservedOutputs,
-      total_bytes: 92_760_416,
-      volume_count: outputs.length,
-      split: true,
-    };
-  }
-  if (kind === "compress_sfx") {
-    const output = `${sampleOutputRoot}/Installer.app`;
-    return {
-      operation: "create_sfx",
-      primary_output: output,
-      outputs: [output],
-      preserved_outputs: [
-        `${sampleOutputRoot}/.squallz-sfx-holder-940009-1/previous`,
-      ],
-      total_bytes: 48_000_000,
-      volume_count: 1,
-      split: false,
-      requires_signing: true,
-      sfx_target: "macos",
-      layout: "macos_app",
-    };
-  }
-  const output = `${sampleOutputRoot}/product-backup.zip`;
-  return {
-    operation: "create",
-    primary_output: output,
-    outputs: [output],
-    total_bytes: 24_000_000,
-    volume_count: 1,
-    split: false,
-  };
-}
-
-function previewRevealPath(kind: PreviewTaskKind): string | null {
-  if (kind === "batch_extract_partial") return `${sampleOutputRoot}/Photos`;
-  if (kind === "duplicate_scan" || kind === "duplicate_scan_clean" || kind === "duplicate_scan_failure") return null;
-  if (isUpdatePreview(kind)) return `${sampleRoot}/product-backup.zip`;
-  if (kind === "recovery_protect") return `${sampleOutputRoot}/product-backup.zip.par2`;
-  if (isRecoveryPreview(kind)) return null;
-  if (kind === "compress") return `${sampleOutputRoot}/product-backup.zip`;
-  if (kind === "compress_split") return `${sampleOutputRoot}/product-backup.zip.001`;
-  if (kind === "compress_sfx") return `${sampleOutputRoot}/Installer.app`;
-  if (kind === "extract" || kind === "extract_unknown_current" || kind === "extract_metadata") return `${sampleOutputRoot}/product-backup`;
-  if (kind === "test" || kind === "archive_open") return null;
-  if (kind === "checksum") return `${sampleRoot}/photos`;
-  if (kind === "checksum_check") return `${sampleRoot}/photos/SHA256SUMS`;
-  return `${sampleOutputRoot}/client-data`;
-}
-
-function previewProgress(kind: PreviewTaskKind, state: Extract<JobStateName, "done" | "running">) {
-  if (kind === "batch_extract_partial" || kind === "batch_extract_failure") {
-    return { done: 3, total: 3, current: "", currentDone: 0, currentTotal: 0, speed: 0 };
-  }
-  if (kind === "duplicate_scan" || kind === "duplicate_scan_clean" || kind === "duplicate_scan_failure") {
-    const bytes = state === "done" ? (kind === "duplicate_scan_clean" ? 4 : 112) * 2048 : 0;
-    return { done: bytes, total: bytes, current: "", currentDone: 0, currentTotal: 0, speed: 0 };
-  }
-  if (kind === "archive_open") {
-    return {
-      done: 0,
-      total: 0,
-      current: state === "done" ? "" : "product-backup.zip",
-      currentDone: 0,
-      currentTotal: 0,
-      speed: 0,
-    };
-  }
-  if (kind === "extract_metadata" || kind === "batch_extract_metadata") {
-    const batch = kind === "batch_extract_metadata";
-    return {
-      done: batch ? (state === "done" ? 2000 : 1000) : state === "done" ? 48_000_000 : 0,
-      total: batch ? 2000 : state === "done" ? 48_000_000 : 0,
-      current: state === "done" ? "" : `${batch ? "photos.7z: " : ""}project/design/客户交付/September release/resources`,
-      currentDone: 0,
-      currentTotal: 0,
-      speed: 0,
-    };
-  }
-  if (kind === "recovery_protect") {
-    return {
-      done: state === "done" ? 1 : 0,
-      total: 1,
-      current: "product-backup.zip.par2",
-      currentDone: 0,
-      currentTotal: 0,
-      speed: 0,
-    };
-  }
-  if (kind === "update_scan") {
-    return {
-      done: 0,
-      total: 0,
-      current: "incoming-assets/icons/app-icon@2x.png",
-      currentDone: 0,
-      currentTotal: 0,
-      speed: 0,
-    };
-  }
-  if (kind === "update_verify") {
-    return {
-      done: 438_000_000,
-      total: 730_000_000,
-      current: "product-backup.zip",
-      currentDone: 0,
-      currentTotal: 0,
-      speed: 820_000_000,
-    };
-  }
-  if (kind === "update_commit") {
-    return {
-      done: 0,
-      total: 0,
-      current: "product-backup.zip",
-      currentDone: 0,
-      currentTotal: 0,
-      speed: 0,
-    };
-  }
-  if (kind === "batch_extract") {
-    return {
-      done: (state === "done" ? 2 : 1) * BATCH_PROGRESS_SCALE,
-      total: 2 * BATCH_PROGRESS_SCALE,
-      current: "photos/IMG_2042.dng",
-      currentDone: state === "done" ? 3_200_000 : 1_280_000,
-      currentTotal: 3_200_000,
-      speed: 0,
-    };
-  }
-  if (isRecoveryPreview(kind)) {
-    return {
-      done: state === "done" ? 1_000 : 380,
-      total: 1_000,
-      current: "product-backup.zip",
-      currentDone: 0,
-      currentTotal: 0,
-      speed: 0,
-    };
-  }
-  if (kind === "compress" || kind === "compress_failure" || kind === "compress_split" || kind === "compress_sfx" || kind === "compress_sfx_failure") {
-    const total = kind === "compress_split" ? 92_760_416 : kind === "compress" ? 24_000_000 : 48_000_000;
-    return {
-      done: state === "done" ? total : Math.floor(total * 0.4),
-      total,
-      current: kind === "compress_split" ? "product-backup.zip.002" : "reports/Launch plan.pdf",
-      currentDone: kind === "compress_split" ? 0 : state === "done" ? 3_800_000 : 1_420_000,
-      currentTotal: kind === "compress_split" ? 0 : 3_800_000,
-      speed: state === "running" ? 12_800_000 : 0,
-    };
-  }
-  if (kind === "extract_unknown_current") {
-    return {
-      done: state === "done" ? 48_000_000 : 19_200_000,
-      total: 48_000_000,
-      current: "reports/Launch plan.pdf",
-      currentDone: 0,
-      currentTotal: 0,
-      speed: state === "running" ? 21_000_000 : 0,
-    };
-  }
-  if (kind === "test") {
-    return {
-      done: state === "done" ? 48_000_000 : 19_200_000,
-      total: 48_000_000,
-      current: "reports/Launch plan.pdf",
-      currentDone: 0,
-      currentTotal: 0,
-      speed: state === "running" ? 17_600_000 : 0,
-    };
-  }
-  if (kind === "checksum") {
-    return {
-      done: state === "done" ? 86_000_000 : 34_400_000,
-      total: 86_000_000,
-      current: "photos/DSC_1930.JPG",
-      currentDone: 0,
-      currentTotal: 0,
-      speed: state === "running" ? 24_000_000 : 0,
-    };
-  }
-  if (kind === "checksum_check") {
-    return {
-      done: state === "done" ? 86_000_000 : 34_400_000,
-      total: 86_000_000,
-      current: "photos/DSC_1930.JPG",
-      currentDone: 0,
-      currentTotal: 0,
-      speed: state === "running" ? 22_000_000 : 0,
-    };
-  }
-  return {
-    done: state === "done" ? 48_000_000 : 19_200_000,
-    total: 48_000_000,
-    current: "reports/Launch plan.pdf",
-    currentDone: state === "done" ? 4_096_000 : 1_920_000,
-    currentTotal: 4_096_000,
-    speed: state === "running" ? 21_000_000 : 0,
-  };
-}
-
-function previewTaskOffset(kind: PreviewTaskKind): number {
-  if (kind === "extract_password") return 34;
-  if (kind === "extract_conflict") return 35;
-  if (kind === "update_failure") return 33;
-  if (kind === "extract_nested_failure") return 32;
-  if (kind === "batch_extract_partial") return 30;
-  if (kind === "batch_extract_failure") return 31;
-  if (kind === "archive_open") return 23;
-  if (kind === "extract_metadata") return 21;
-  if (kind === "batch_extract_metadata") return 22;
-  if (kind === "recovery_protect") return 17;
-  if (kind === "update_scan") return 11;
-  if (kind === "update_verify") return 12;
-  if (kind === "update_commit") return 13;
-  if (kind === "recovery_verify_repairable") return 14;
-  if (kind === "recovery_verify_multi_file_repairable") return 16;
-  if (kind === "recovery_verify_over_capacity") return 15;
-  if (kind === "compress") return 1;
-  if (kind === "compress_split") return 8;
-  if (kind === "compress_sfx") return 9;
-  if (kind === "compress_sfx_failure") return 10;
-  if (kind === "compress_failure") return 21;
-  if (kind === "recovery_cleanup_ready") return 18;
-  if (kind === "recovery_cleanup_unconfirmed") return 19;
-  if (kind === "recovery_cleanup_record") return 20;
-  if (kind === "extract") return 2;
-  if (kind === "extract_failure") return 24;
-  if (kind === "convert_failure") return 25;
-  if (kind === "convert_encrypted_failure") return 26;
-  if (kind === "duplicate_scan") return 27;
-  if (kind === "duplicate_scan_clean") return 28;
-  if (kind === "duplicate_scan_failure") return 29;
-  if (kind === "extract_unknown_current") return 4;
-  if (kind === "test") return 5;
-  if (kind === "checksum") return 6;
-  if (kind === "checksum_check") return 7;
-  return 3;
-}
-
 const previewReviewSpecs = new Map<number, JobSpec>();
 
 export function previewTaskSpecForReview(id: number): JobSpec | null {
@@ -1991,74 +1341,13 @@ export function previewTaskSpecForReview(id: number): JobSpec | null {
 
 function installTaskPreview(kind: PreviewTaskKind, state: Extract<JobStateName, "done" | "running">): number | null {
   if (!import.meta.env.DEV) return null;
-  const id = 940_000 + (state === "running" ? 100 : 0) + previewTaskOffset(kind);
-  if (find(id)) return id;
+  const seed = createTaskPreview(kind, state);
+  if (find(seed.id)) return seed.id;
 
-  const spec = previewTaskSpec(kind);
-  previewReviewSpecs.set(id, redactedSpec(spec));
-  const progress = previewProgress(kind, state);
-  const previewState = kind === "compress_failure" || kind === "compress_sfx_failure" || kind === "extract_failure"
-    || kind === "convert_failure" || kind === "convert_encrypted_failure" || kind === "duplicate_scan_failure"
-    || kind === "batch_extract_failure" || kind === "extract_nested_failure" || kind === "update_failure" || isRecoveryCleanupPreview(kind)
-    ? "failed"
-    : state;
-  const target = isRecoveryCleanupPreview(kind)
-    ? `${sampleOutputRoot}/product-backup.repaired.zip`
-    : `${sampleOutputRoot}/Installer.app`;
-  const journal = `${sampleOutputRoot}/.squallz-sfx-transaction.json`;
-  const holder = `${sampleOutputRoot}/.squallz-sfx-holder-940010-3`;
-  const workspace =
-    `${sampleOutputRoot}/.product-backup.repaired.zip.sqz-par2-repair-940018-1.work`;
-  const recoveryJournal =
-    `${sampleOutputRoot}/.squallz-par2-repair-8f3d4a9e1c7b2d5f.json`;
-  const error: ErrorDto = kind === "compress_failure"
-    ? { key: "error.io", params: { detail: "Could not write the archive output" }, detail: "Could not write the archive output" }
-    : kind === "update_failure"
-    ? { key: "error.io", params: { detail: "Could not replace the archive" }, detail: "Could not replace the archive" }
-    : kind === "duplicate_scan_failure"
-    ? { key: "error.io", params: { detail: "Could not read the scan folder" }, detail: "Could not read the scan folder" }
-    : kind === "convert_failure" || kind === "convert_encrypted_failure"
-    ? { key: "error.io", params: { detail: "Could not write the converted archive" }, detail: "Could not write the converted archive" }
-    : kind === "extract_failure" || kind === "batch_extract_failure" || kind === "extract_nested_failure"
-    ? { key: "error.io", params: { detail: "Could not write the extracted file" }, detail: "Could not write the extracted file" }
-    : isRecoveryCleanupPreview(kind)
-    ? {
-      key: kind === "recovery_cleanup_ready"
-        ? "error.recovery_cleanup_output_ready"
-        : kind === "recovery_cleanup_unconfirmed"
-          ? "error.recovery_cleanup_unconfirmed"
-          : "error.recovery_cleanup_record",
-      params: kind === "recovery_cleanup_record"
-        ? { target, journal: recoveryJournal }
-        : { target, workspace, journal: recoveryJournal },
-      detail: kind === "recovery_cleanup_ready"
-        ? `PAR2 repair completed and the repaired copy is ready at ${target}, but its private workspace could not be removed; automatic recovery record: ${recoveryJournal}; exact workspace: ${workspace}`
-        : kind === "recovery_cleanup_unconfirmed"
-          ? `PAR2 repair was not confirmed, and its private workspace could not be removed; automatic recovery record: ${recoveryJournal}; exact workspace: ${workspace}`
-          : `The target-bound PAR2 recovery record at ${recoveryJournal} is damaged; no workspace path was trusted or removed.`,
-    }
-    : {
-      key: "error.sfx_recovery",
-      params: {
-        target,
-        journal,
-        count: "4",
-        paths: [journal, holder, `${holder}/previous`, `${holder}/replacement`].join("\n"),
-      },
-      detail: `SFX replacement requires manual recovery. Inspect target ${target} and the listed transaction paths.`,
-    };
-
-  const question: JobQuestion | null = state !== "running" ? null
-    : kind === "extract_password"
-    ? { kind: "password", prompt: { id, version: 1, name: "product-backup.zip", wrong: false } }
-    : kind === "extract_conflict"
-    ? { kind: "conflict", prompt: { id, version: 1,
-      existing_path: `${sampleOutputRoot}/product-backup/reports/Launch plan.pdf`, existing_size: 4096000,
-      existing_modified: 1781190000, incoming_path: "reports/Launch plan.pdf", incoming_size: 5120000,
-      incoming_modified: 1781276400 } }
-    : null;
+  const { spec, progress, question } = seed;
+  previewReviewSpecs.set(seed.id, redactedSpec(spec));
   store.tasks.push({
-    id,
+    id: seed.id,
     version: 0,
     spec,
     title: titleFor(spec),
@@ -2069,25 +1358,20 @@ function installTaskPreview(kind: PreviewTaskKind, state: Extract<JobStateName, 
     actionFailure: null,
     statusStale: false,
     answeredQuestionVersion: 0,
-    state: previewState,
-    outputPasswordRequired: kind === "compress_failure" || kind === "convert_failure" || kind === "convert_encrypted_failure",
+    state: seed.state,
+    outputPasswordRequired: seed.outputPasswordRequired,
     queuePosition: null,
     queueWaitReason: null,
-    cpuThreads: kind.startsWith("compress") ? 8 : 1,
-    streamBufferLimitBytes: kind.startsWith("compress") ? 512 * 1024 * 1024 : null,
-    done: progress.done,
-    total: progress.total,
-    current: progress.current,
-    currentDone: progress.currentDone,
-    currentTotal: progress.currentTotal,
-    scanEntries: kind === "update_scan" && state === "running" ? 128 : null,
-    speed: progress.speed,
-    phase: previewPhase(kind),
-    interruptible: kind !== "update_commit",
+    cpuThreads: seed.cpuThreads,
+    streamBufferLimitBytes: seed.streamBufferLimitBytes,
+    ...progress,
+    scanEntries: seed.scanEntries,
+    phase: seed.phase,
+    interruptible: seed.interruptible,
     pausable: jobSupportsPause(spec),
-    error: previewState === "failed" ? error : null,
-    result: previewState === "done" ? previewTaskResult(kind) : null,
-    revealPath: previewState === "done" ? previewRevealPath(kind) : null,
+    error: seed.error,
+    result: seed.result,
+    revealPath: seed.revealPath,
     historyRecorded: true,
     localEffects: false,
     snapshotSeen: false,
@@ -2095,7 +1379,7 @@ function installTaskPreview(kind: PreviewTaskKind, state: Extract<JobStateName, 
     queueMoveIntent: null,
     expanded: true,
   });
-  return id;
+  return seed.id;
 }
 
 export function installCompletedTaskPreview(kind: PreviewTaskKind, includeReportHistory = false): number | null {
@@ -2107,27 +1391,15 @@ export function installCompletedTaskPreview(kind: PreviewTaskKind, includeReport
   }
   const previous = find(id);
   if (!previous || (kind !== "checksum" && kind !== "checksum_check") || find(id + 2000)) return id;
-  const source = `${sampleRoot}/current-release`;
-  const spec: JobSpec = kind === "checksum"
-    ? { kind, inputs: [source], excludes: [], algorithm: "sha512" }
-    : { kind, manifest: `${source}/SHA512SUMS`, algorithm: "sha512" };
-  const digest = "ab".repeat(64);
+  const history = createTaskPreviewHistory(kind);
   store.tasks.push({
     ...previous,
     id: id + 2000,
-    spec,
-    title: titleFor(spec),
-    done: 64,
-    total: 64,
-    current: "release.txt",
-    currentDone: 64,
-    currentTotal: 64,
-    revealPath: source,
-    result: kind === "checksum"
-      ? { operation: kind, algorithm: "sha512", files_hashed: 1, bytes_hashed: 64,
-        items: [{ path: `${source}/release.txt`, digest, size: 64 }] }
-      : { operation: kind, ok: false, checked: 1, passed: 0, failed: 1,
-        items: [{ path: `${source}/release.txt`, expected: digest, actual: "cd".repeat(64), ok: false }] },
+    spec: history.spec,
+    title: titleFor(history.spec),
+    ...history.progress,
+    revealPath: history.revealPath,
+    result: history.result,
   });
   return id;
 }
@@ -2161,7 +1433,7 @@ export function installTaskQueuePreview(
   waitingKinds.forEach((kind, index) => {
     const id = 941_000 + index;
     if (find(id)) return;
-    const spec = previewTaskSpec(kind);
+    const { spec } = createTaskPreview(kind, "running");
     store.tasks.push({
       id,
       version: 0,

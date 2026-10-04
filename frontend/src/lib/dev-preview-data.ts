@@ -9,6 +9,7 @@ import type {
   QueueWaitReason,
   PasswordBookStatus,
 } from "./ipc";
+import { parseTaskPreviewKind, type PreviewTaskKind } from "./task-preview";
 
 const passwordBookPreviewRequests = new Map<string, () => void>();
 let passwordBookPreviewStatus: PasswordBookStatus | null = null;
@@ -109,43 +110,6 @@ export function preparedNestedPreviewRows(params: URLSearchParams, source: strin
   return readArchivePreview(params, 500)?.nestedPreview?.items ?? null;
 }
 
-type PreviewTaskKind =
-  | "archive_open"
-  | "compress"
-  | "compress_failure"
-  | "compress_split"
-  | "compress_sfx"
-  | "compress_sfx_failure"
-  | "convert_failure"
-  | "convert_encrypted_failure"
-  | "duplicate_scan"
-  | "duplicate_scan_clean"
-  | "duplicate_scan_failure"
-  | "recovery_cleanup_ready"
-  | "recovery_cleanup_unconfirmed"
-  | "recovery_cleanup_record"
-  | "extract"
-  | "extract_failure"
-  | "extract_password"
-  | "extract_conflict"
-  | "extract_nested_failure"
-  | "update_failure"
-  | "extract_unknown_current"
-  | "extract_metadata"
-  | "batch_extract_metadata"
-  | "batch_extract"
-  | "batch_extract_partial"
-  | "batch_extract_failure"
-  | "test"
-  | "checksum"
-  | "checksum_check"
-  | "recovery_protect"
-  | "recovery_verify_repairable"
-  | "recovery_verify_multi_file_repairable"
-  | "recovery_verify_over_capacity"
-  | "update_scan"
-  | "update_verify"
-  | "update_commit";
 type TaskQueuePreview = Exclude<QueueWaitReason, "queue_order">;
 
 export interface RuntimePreviews {
@@ -352,8 +316,8 @@ export function readRuntimePreviews(params: URLSearchParams, pageSize: number): 
     "previewExtractAvailableBytes",
     256 * 1024 * 1024 * 1024,
   );
-  const completedTask = completedTaskParam(params.get("previewCompletedTask"));
-  const activeTask = completedTaskParam(params.get("previewActiveTask"));
+  const completedTask = parseTaskPreviewKind(params.get("previewCompletedTask"));
+  const activeTask = parseTaskPreviewKind(params.get("previewActiveTask"));
   const taskQueueParam = params.get("previewTaskQueue");
   const taskQueue = taskQueueParam === "cpu"
     ? "cpu_budget"
@@ -521,46 +485,6 @@ function readIntegrationDiagnosticsPreview(params: URLSearchParams): Integration
       reason: "not_exposed_by_platform",
     },
   };
-}
-
-function completedTaskParam(value: string | null): RuntimePreviews["completedTask"] {
-  if (
-    value === "archive_open" ||
-    value === "compress" ||
-    value === "compress_failure" ||
-    value === "compress_split" ||
-    value === "compress_sfx" ||
-    value === "compress_sfx_failure" ||
-    value === "convert_failure" ||
-    value === "convert_encrypted_failure" ||
-    value === "duplicate_scan" || value === "duplicate_scan_clean" || value === "duplicate_scan_failure" ||
-    value === "recovery_cleanup_ready" ||
-    value === "recovery_cleanup_unconfirmed" ||
-    value === "recovery_cleanup_record" ||
-    value === "extract" ||
-    value === "extract_failure" ||
-    value === "extract_password" || value === "extract_conflict" ||
-    value === "extract_nested_failure" ||
-    value === "update_failure" ||
-    value === "extract_unknown_current" ||
-    value === "extract_metadata" ||
-    value === "batch_extract_metadata" ||
-    value === "batch_extract" ||
-    value === "batch_extract_partial" || value === "batch_extract_failure" ||
-    value === "test" ||
-    value === "checksum" ||
-    value === "checksum_check" ||
-    value === "recovery_protect" ||
-    value === "recovery_verify_repairable" ||
-    value === "recovery_verify_multi_file_repairable" ||
-    value === "recovery_verify_over_capacity" ||
-    value === "update_scan" ||
-    value === "update_verify" ||
-    value === "update_commit"
-  ) {
-    return value;
-  }
-  return null;
 }
 
 function readArchivePreview(params: URLSearchParams, pageSize: number): ArchivePreview | null {

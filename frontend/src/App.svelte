@@ -1096,7 +1096,7 @@
   $effect(() => {
     const completedTask = runtimePreviews.completedTask;
     if (!completedTask) return;
-    const id = installCompletedTaskPreview(completedTask, params.has("previewChecksumHistory") || params.has("previewDuplicateHistory"));
+    const id = untrack(() => installCompletedTaskPreview(completedTask, params.has("previewChecksumHistory") || params.has("previewDuplicateHistory")));
     if (id === null) return;
     taskDialogTaskId = id;
     taskDialogDismissedId = null;
@@ -1105,7 +1105,7 @@
   $effect(() => {
     const activeTaskPreview = runtimePreviews.activeTask;
     if (!activeTaskPreview) return;
-    const id = installActiveTaskPreview(activeTaskPreview, import.meta.env.DEV && params.has("previewStatusUnavailable"));
+    const id = untrack(() => installActiveTaskPreview(activeTaskPreview, import.meta.env.DEV && params.has("previewStatusUnavailable")));
     if (id === null) return;
     const surface = params.get("previewTaskSurface");
     if (surface === "panel" || surface === "center") {
@@ -1123,7 +1123,7 @@
   $effect(() => {
     const waitReason = runtimePreviews.taskQueue;
     if (!waitReason) return;
-    if (installTaskQueuePreview(waitReason) === null) return;
+    if (untrack(() => installTaskQueuePreview(waitReason)) === null) return;
     taskCenterReturnFocus = null;
     taskCenterFocusTaskId = null;
     taskCenterSelectedTaskId = null;
