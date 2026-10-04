@@ -10,9 +10,9 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use squallz_core::api::{
-    CompressionLevel, CreateOptions, Detected, EntryPath, EntrySelection, ExtractOptions,
-    FormatError, NoProgress, OpenOptions, OverwritePolicy, Password, SplitOutputMode,
-    SqzCreateOptions, SqzInnerFormat, SymlinkPolicy, TestSummary, UpdateOp, UpdateOptions,
+    CompressionLevel, CreateOptions, EntryPath, EntrySelection, ExtractOptions, FormatError,
+    NoProgress, OpenOptions, OverwritePolicy, Password, SplitOutputMode, SqzCreateOptions,
+    SqzInnerFormat, SymlinkPolicy, TestSummary, UpdateOp, UpdateOptions,
 };
 use squallz_core::{
     is_sqz_archive_path, ArchiveRepairKind, ArchiveRepairOptions, ArchiveRepairOutcome,
@@ -20,6 +20,9 @@ use squallz_core::{
 };
 
 use crate::args::{resource_options, safety_limits, CreateProfileArg};
+use crate::commands::create::{
+    execute, validate_requested_format, CreateProgressMode, CreatedArchive,
+};
 use crate::commands::reports::{
     create_report_json, empty_extract_counts_json, extract_counts_json, extract_plan_json,
     print_preserved_output_warning, print_pretty_json, recovery_summary_json, test_report_json,
@@ -635,31 +638,15 @@ fn run_compress_job(
         resources: resource_options(job.threads, job.memory_limit),
         ..CreateOptions::default()
     };
-    let kind = if job.split.is_some() {
-        squallz_core::CreateArtifactKind::SplitArchive
-    } else {
-        squallz_core::CreateArtifactKind::Archive
-    };
-    let policy = super::create_commit_policy(&output, kind, true, &NoProgress, &ctx.ctl)?;
-    let report = ctx.engine.create_with_report_policy(
+    let CreatedArchive { report, test } = execute(
+        ctx,
         &output,
         &inputs,
         &opts,
-        policy,
-        &NoProgress,
-        &ctx.ctl,
+        job.test_after_create,
+        CreateProgressMode::Batch,
     )?;
-    let entries_tested_after_create = if job.test_after_create {
-        let test_report = ctx.engine.test_summary(
-            &report.primary_output,
-            &OpenOptions {
-                password: opts.password.clone(),
-                encoding_override: None,
-            },
-            &squallz_core::api::SafetyLimits::default(),
-            &NoProgress,
-            &ctx.ctl,
-        )?;
+    let entries_tested_after_create = if let Some(test_report) = test {
         if !test_report.is_ok() {
             return Err(test_report_error(test_report));
         }
@@ -827,19 +814,13 @@ fn run_pack_job(ctx: &Ctx, base_dir: &Path, job: &PackJob) -> Result<JobSuccess,
         },
         ..CreateOptions::default()
     };
-    let kind = if job.split.is_some() {
-        squallz_core::CreateArtifactKind::SplitArchive
-    } else {
-        squallz_core::CreateArtifactKind::Archive
-    };
-    let policy = super::create_commit_policy(&output, kind, true, &NoProgress, &ctx.ctl)?;
-    let report = ctx.engine.create_with_report_policy(
+    let CreatedArchive { report, .. } = execute(
+        ctx,
         &output,
         &inputs,
         &opts,
-        policy,
-        &NoProgress,
-        &ctx.ctl,
+        false,
+        CreateProgressMode::Batch,
     )?;
     let detail = format!("packed {}", report.primary_output.display());
     let mut result = create_report_json(&report);
@@ -1305,74 +1286,6 @@ fn compression_level(
         };
     }
     Ok(profile.unwrap_or(CreateProfileArg::Balanced).level())
-}
-
-fn validate_requested_format(
-    ctx: &Ctx,
-    output: &Path,
-    requested: Option<&str>,
-) -> Result<(), FormatError> {
-    let Some(requested) = requested else {
-        return Ok(());
-    };
-    let output_name = output
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| FormatError::Unsupported("output path has no valid file name".into()))?;
-    let output_key = detected_format_key(ctx, output_name).ok_or_else(|| {
-        FormatError::Unsupported(format!(
-            "output path does not identify a supported format: {}",
-            output.display()
-        ))
-    })?;
-    let requested_key = requested_format_key(ctx, requested).ok_or_else(|| {
-        FormatError::Unsupported(format!("unsupported requested format: {requested}"))
-    })?;
-    if output_key != requested_key {
-        return Err(FormatError::Unsupported(format!(
-            "requested format '{requested}' does not match output path '{}'",
-            output.display()
-        )));
-    }
-    Ok(())
-}
-
-fn requested_format_key(ctx: &Ctx, requested_format: &str) -> Option<String> {
-    let requested = requested_format
-        .trim()
-        .trim_start_matches('.')
-        .to_ascii_lowercase();
-    if requested.is_empty() {
-        return None;
-    }
-    let direct_name = format!("archive.{requested}");
-    if let Some(key) = detected_format_key(ctx, &direct_name) {
-        return Some(key);
-    }
-    ctx.engine
-        .supported_formats()
-        .into_iter()
-        .find(|format| format.id.eq_ignore_ascii_case(&requested))
-        .and_then(|format| {
-            format
-                .extensions
-                .first()
-                .and_then(|ext| detected_format_key(ctx, &format!("archive.{ext}")))
-        })
-}
-
-fn detected_format_key(ctx: &Ctx, name: &str) -> Option<String> {
-    match ctx.engine.registry().detect_by_name(name)? {
-        Detected::Archive(archive) => Some(format!("archive:{}", archive.id())),
-        Detected::Compressed {
-            compressor,
-            inner_archive: Some(archive),
-        } => Some(format!("compound:{}:{}", archive.id(), compressor.id())),
-        Detected::Compressed {
-            compressor,
-            inner_archive: None,
-        } => Some(format!("compressor:{}", compressor.id())),
-    }
 }
 
 fn test_report_error(report: TestSummary) -> FormatError {

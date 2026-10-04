@@ -5,18 +5,18 @@ use std::path::{Path, PathBuf};
 
 use serde_json::json;
 use squallz_core::api::{
-    CompressionLevel, CreateOptions, Detected, FormatError, OpenOptions, Password, ProgressPhase,
-    ProgressSink, SplitOutputMode, SqzCreateOptions, SqzInnerFormat,
+    CompressionLevel, CreateOptions, FormatError, Password, SplitOutputMode, SqzCreateOptions,
+    SqzInnerFormat,
 };
-use squallz_core::CreateArtifactKind;
 
+use super::create::{execute, validate_requested_format, CreateProgressMode, CreatedArchive};
 use super::reports::{create_report_json, print_preserved_output_warning, print_pretty_json};
 use crate::args::resource_options;
 use crate::commands::{
     detected_format_name_for_name, Ctx, ModernStatusField, ModernTableColumn, ModernTableRow,
 };
 use crate::errors::CliError;
-use crate::progress::{fmt_bytes, CliProgress};
+use crate::progress::fmt_bytes;
 use crate::ui::Tone;
 
 struct CreateJsonReport {
@@ -60,20 +60,23 @@ pub fn run(
     test_after_create: bool,
     json_output: bool,
 ) -> Result<(), CliError> {
+    let options = CreateOptions {
+        level: CompressionLevel::from_numeric(level),
+        password: password.map(Password::new),
+        encrypt_filenames: encrypt_names,
+        excludes,
+        split_size: split,
+        split_mode,
+        resources: resource_options(threads, memory_limit),
+        sqz: SqzCreateOptions::default(),
+    };
     run_create(
         ctx,
         inputs,
         output,
         format.as_deref(),
-        SqzCreateOptions::default(),
+        options,
         level,
-        password,
-        encrypt_names,
-        excludes,
-        split,
-        split_mode,
-        threads,
-        memory_limit,
         test_after_create,
         json_output,
         CreateJsonReport::compress(),
@@ -102,23 +105,25 @@ pub fn run_pack(
     if !is_sqz {
         return Err(FormatError::Unsupported("pack output must end with .sqz".into()).into());
     }
+    let options = CreateOptions {
+        level: CompressionLevel::from_numeric(level),
+        excludes,
+        split_size: split,
+        split_mode: SplitOutputMode::Generic,
+        resources: resource_options(threads, memory_limit),
+        sqz: SqzCreateOptions {
+            inner_format,
+            recovery_percent: recovery,
+        },
+        ..CreateOptions::default()
+    };
     run_create(
         ctx,
         inputs,
         output,
         Some("sqz"),
-        SqzCreateOptions {
-            inner_format,
-            recovery_percent: recovery,
-        },
+        options,
         level,
-        None,
-        false,
-        excludes,
-        split,
-        SplitOutputMode::Generic,
-        threads,
-        memory_limit,
         test_after_create,
         json_output,
         CreateJsonReport::pack_sqz(inner_format, recovery),
@@ -131,15 +136,8 @@ fn run_create(
     inputs: Vec<PathBuf>,
     output: PathBuf,
     requested_format: Option<&str>,
-    sqz: SqzCreateOptions,
+    options: CreateOptions,
     level: u8,
-    password: Option<String>,
-    encrypt_names: bool,
-    excludes: Vec<String>,
-    split: Option<u64>,
-    split_mode: SplitOutputMode,
-    threads: Option<usize>,
-    memory_limit: Option<u64>,
     test_after_create: bool,
     json_output: bool,
     json_report: CreateJsonReport,
@@ -150,53 +148,21 @@ fn run_create(
     } else {
         "compress"
     };
-    let make_progress = || CliProgress::new_for_operation(ctx, json_output, progress_operation);
-    let opts = CreateOptions {
-        level: CompressionLevel::from_numeric(level),
-        password: password.map(Password::new),
-        encrypt_filenames: encrypt_names,
-        excludes,
-        split_size: split,
-        split_mode,
-        resources: resource_options(threads, memory_limit),
-        sqz,
-    };
-    let kind = if split.is_some() {
-        CreateArtifactKind::SplitArchive
-    } else {
-        CreateArtifactKind::Archive
-    };
-    let inspection_progress = make_progress();
-    let policy =
-        match super::create_commit_policy(&output, kind, true, &inspection_progress, &ctx.ctl) {
-            Ok(policy) => policy,
-            Err(error) => {
-                inspection_progress.finish();
-                return Err(error.into());
-            }
-        };
-    inspection_progress.finish();
-    let progress = make_progress();
-    let result = ctx
-        .engine
-        .create_with_report_policy(&output, &inputs, &opts, policy, &progress, &ctx.ctl);
-    progress.finish();
-    let create_report = result?;
-    let entries_tested_after_create = if test_after_create {
-        let verify_progress = make_progress();
-        verify_progress.on_phase(ProgressPhase::OutputVerify, true);
-        let report = ctx.engine.test_summary(
-            &create_report.primary_output,
-            &OpenOptions {
-                password: opts.password.clone(),
-                encoding_override: None,
-            },
-            &squallz_core::api::SafetyLimits::default(),
-            &verify_progress,
-            &ctx.ctl,
-        );
-        verify_progress.finish();
-        let report = report?;
+    let CreatedArchive {
+        report: create_report,
+        test,
+    } = execute(
+        ctx,
+        &output,
+        &inputs,
+        &options,
+        test_after_create,
+        CreateProgressMode::Ordinary {
+            json_output,
+            operation: progress_operation,
+        },
+    )?;
+    let entries_tested_after_create = if let Some(report) = test {
         if !report.is_ok() {
             let preview = report.problems.messages.join("; ");
             let detail = if preview.is_empty() {
@@ -532,74 +498,5 @@ fn add_create_json_fields(value: &mut serde_json::Value, report: &CreateJsonRepo
     }
     if let Some(recovery_percent) = report.recovery_percent {
         object.insert("recovery_percent".into(), json!(recovery_percent));
-    }
-}
-
-fn validate_requested_format(
-    ctx: &Ctx,
-    output: &Path,
-    requested_format: Option<&str>,
-) -> Result<(), CliError> {
-    let Some(requested_format) = requested_format else {
-        return Ok(());
-    };
-    let output_name = output
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| FormatError::Unsupported("output path has no valid file name".into()))?;
-    let output_key = detected_format_key(ctx, output_name).ok_or_else(|| {
-        FormatError::Unsupported(format!(
-            "output path does not identify a supported format: {}",
-            output.display()
-        ))
-    })?;
-    let requested_key = requested_format_key(ctx, requested_format).ok_or_else(|| {
-        FormatError::Unsupported(format!("unsupported requested format: {requested_format}"))
-    })?;
-    if output_key != requested_key {
-        return Err(FormatError::Unsupported(format!(
-            "requested format '{requested_format}' does not match output path '{}'",
-            output.display()
-        ))
-        .into());
-    }
-    Ok(())
-}
-
-fn requested_format_key(ctx: &Ctx, requested_format: &str) -> Option<String> {
-    let requested = requested_format
-        .trim()
-        .trim_start_matches('.')
-        .to_ascii_lowercase();
-    if requested.is_empty() {
-        return None;
-    }
-    let direct_name = format!("archive.{requested}");
-    if let Some(key) = detected_format_key(ctx, &direct_name) {
-        return Some(key);
-    }
-    ctx.engine
-        .supported_formats()
-        .into_iter()
-        .find(|format| format.id.eq_ignore_ascii_case(&requested))
-        .and_then(|format| {
-            format
-                .extensions
-                .first()
-                .and_then(|ext| detected_format_key(ctx, &format!("archive.{ext}")))
-        })
-}
-
-fn detected_format_key(ctx: &Ctx, name: &str) -> Option<String> {
-    match ctx.engine.registry().detect_by_name(name)? {
-        Detected::Archive(archive) => Some(format!("archive:{}", archive.id())),
-        Detected::Compressed {
-            compressor,
-            inner_archive: Some(archive),
-        } => Some(format!("compound:{}:{}", archive.id(), compressor.id())),
-        Detected::Compressed {
-            compressor,
-            inner_archive: None,
-        } => Some(format!("compressor:{}", compressor.id())),
     }
 }

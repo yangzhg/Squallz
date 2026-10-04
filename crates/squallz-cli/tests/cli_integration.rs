@@ -1733,6 +1733,9 @@ fn batch_create_jobs_report_actual_split_output_families() {
 
     let pack = &report["jobs"][1]["result"];
     assert_eq!(pack["operation"], "pack");
+    assert_eq!(pack["level"], 6);
+    assert!(pack.get("tested_after_create").is_none());
+    assert!(pack.get("entries_tested_after_create").is_none());
     assert_eq!(pack["split"], true);
     assert_eq!(
         pack["primary_output"],
@@ -1806,6 +1809,94 @@ fn batch_create_jobs_report_actual_split_output_families() {
             path.display()
         );
     }
+
+    let input = incompressible_file_with_len(&dir, "workflow-data.bin", 256 * 1024);
+    let password = "batch workflow password";
+    let manifest = serde_json::json!({
+        "jobs": [
+            {
+                "kind": "compress", "inputs": ["workflow-data.bin"],
+                "output": "protected.7z", "password": password,
+                "encrypt_names": true, "split": 30 * 1024,
+                "test_after_create": true
+            },
+            {
+                "kind": "pack", "inputs": ["workflow-data.bin"],
+                "output": "packed-native.zip", "split": 64 * 1024,
+                "split_mode": "native"
+            },
+            {
+                "kind": "pack", "inputs": ["workflow-data.bin"],
+                "output": "unsupported-native.sqz", "split": 64 * 1024,
+                "split_mode": "native"
+            }
+        ]
+    });
+    std::fs::write(&script, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+    let out = run(sqz()
+        .arg("batch")
+        .arg(&script)
+        .args(["--keep-going", "--json"]));
+    assert_eq!(out.status.code(), Some(2), "stderr: {}", stderr(&out));
+    assert!(!stdout(&out).contains(password));
+    let report = stdout_json(&out);
+    assert_eq!(report["failed"], 1);
+    assert_eq!(report["jobs"][2]["error"]["kind"], "unsupported");
+    assert!(report["jobs"][2]["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("format sqz does not support native volume creation"));
+    assert!(!dir.join("unsupported-native.sqz").exists());
+
+    let protected = &report["jobs"][0]["result"];
+    assert_eq!(report["jobs"][0]["ok"], true);
+    assert_eq!(protected["tested_after_create"], true);
+    assert_eq!(protected["entries_tested_after_create"], 1);
+    assert_eq!(
+        protected["primary_output"],
+        dir.join("protected.7z.001").display().to_string()
+    );
+    assert!(protected["volume_count"].as_u64().unwrap() > 1);
+    let primary = PathBuf::from(protected["primary_output"].as_str().unwrap());
+    let locked = run(sqz().arg("list").arg(&primary).arg("--json"));
+    assert_eq!(locked.status.code(), Some(4));
+    let tested = run(sqz()
+        .arg("test")
+        .arg(&primary)
+        .args(["--password", password, "--json"]));
+    assert!(tested.status.success(), "stderr: {}", stderr(&tested));
+    assert_eq!(
+        stdout_json(&tested)["entries_tested"],
+        protected["entries_tested_after_create"]
+    );
+    let destination = dir.join("protected-files");
+    let extracted = run(sqz()
+        .arg("extract")
+        .arg(&primary)
+        .arg("-d")
+        .arg(&destination)
+        .args(["--password", password, "--json"]));
+    assert!(extracted.status.success(), "stderr: {}", stderr(&extracted));
+    assert_eq!(
+        std::fs::read(destination.join("workflow-data.bin")).unwrap(),
+        std::fs::read(input).unwrap()
+    );
+
+    let native_pack = &report["jobs"][1]["result"];
+    assert_eq!(report["jobs"][1]["ok"], true);
+    assert_eq!(native_pack["operation"], "pack");
+    assert_eq!(native_pack["level"], 6);
+    assert_eq!(
+        native_pack["primary_output"],
+        dir.join("packed-native.zip").display().to_string()
+    );
+    assert!(native_pack.get("tested_after_create").is_none());
+    assert!(native_pack.get("entries_tested_after_create").is_none());
+    let outputs = json_output_paths(native_pack);
+    assert_eq!(outputs.first(), Some(&dir.join("packed-native.z01")));
+    assert_eq!(outputs.last(), Some(&dir.join("packed-native.zip")));
+    assert!(outputs.len() >= 2 && outputs.iter().all(|path| path.is_file()));
+    assert_eq!(native_pack["total_bytes"], output_paths_bytes(&outputs));
 
     std::fs::remove_dir_all(&dir).unwrap();
 }
@@ -2354,6 +2445,7 @@ fn batch_extract_no_match_preserves_an_invalid_destination() {
 #[test]
 fn batch_rejects_unknown_fields_and_operation_names() {
     let dir = temp_dir("batch-current-schema");
+    std::fs::write(dir.join("input.txt"), b"valid pack input").unwrap();
 
     for (name, manifest) in [
         (
@@ -2381,11 +2473,32 @@ fn batch_rejects_unknown_fields_and_operation_names() {
                 "jobs": [{ "kind": "test", "archive": "source.zip", "inputs": ["ignored"] }]
             }),
         ),
+        (
+            "pack-password",
+            serde_json::json!({
+                "jobs": [{ "kind": "pack", "inputs": ["input.txt"], "output": "pack-password.sqz", "password": "fixture password" }]
+            }),
+        ),
+        (
+            "pack-test-after-create",
+            serde_json::json!({
+                "jobs": [{ "kind": "pack", "inputs": ["input.txt"], "output": "pack-test-after-create.sqz", "test_after_create": true }]
+            }),
+        ),
     ] {
         let script = dir.join(format!("{name}.json"));
         std::fs::write(&script, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
         let out = run(sqz().arg("batch").arg(&script).arg("--json"));
         assert!(!out.status.success(), "{name} unexpectedly succeeded");
+        if let Some(field) = name.strip_prefix("pack-") {
+            assert_json_error(
+                &out,
+                2,
+                "unsupported",
+                &format!("unknown field `{}`", field.replace('-', "_")),
+            );
+            assert!(!dir.join(format!("{name}.sqz")).exists());
+        }
     }
 
     std::fs::remove_dir_all(&dir).unwrap();
@@ -2868,6 +2981,38 @@ fn compress_format_must_match_output_extension() {
         stderr(&out)
     );
     assert!(!archive.exists(), "mismatched output should not be created");
+
+    let script = dir.join("formats.json");
+    let manifest = serde_json::json!({
+        "jobs": [
+            { "kind": "compress", "inputs": ["project"], "output": "batch-wrong.7z", "format": "zip" },
+            { "kind": "compress", "inputs": ["project"], "output": "alias.jar", "format": " .ZIP " },
+            { "kind": "compress", "inputs": ["project"], "output": "compound.tgz", "format": " TAR.GZ " }
+        ]
+    });
+    std::fs::write(&script, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+    let out = run(sqz()
+        .arg("batch")
+        .arg(&script)
+        .args(["--keep-going", "--json"]));
+    assert_eq!(out.status.code(), Some(2), "stderr: {}", stderr(&out));
+    let report = stdout_json(&out);
+    assert_eq!(report["failed"], 1);
+    assert_eq!(report["jobs"][0]["error"]["kind"], "unsupported");
+    assert!(report["jobs"][0]["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("does not match output path"));
+    assert!(!dir.join("batch-wrong.7z").exists());
+    for (index, name) in [(1, "alias.jar"), (2, "compound.tgz")] {
+        assert_eq!(report["jobs"][index]["ok"], true);
+        let created = dir.join(name);
+        assert_eq!(
+            report["jobs"][index]["result"]["primary_output"],
+            created.display().to_string()
+        );
+        assert!(listed_paths(&created).contains(&"project/sub/b.txt".to_string()));
+    }
 
     std::fs::remove_dir_all(&dir).unwrap();
 }
@@ -3475,11 +3620,15 @@ fn pack_creates_sqz_container_as_a_first_class_cli_entry() {
             "--recovery",
             "10%",
         ])
+        .arg("--test-after-create")
         .arg("--json"));
     assert!(out.status.success(), "pack failed: {}", stderr(&out));
     let report: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("valid JSON");
     assert_eq!(report["ok"], true);
     assert_eq!(report["operation"], "pack_sqz");
+    assert_eq!(report["level"], 5);
+    assert_eq!(report["tested_after_create"], true);
+    assert!(report["entries_tested_after_create"].as_u64().unwrap() > 0);
     assert_eq!(report["primary_output"], archive.display().to_string());
     assert_eq!(report["split"], false);
     assert_eq!(report["volume_count"], 1);
@@ -4222,6 +4371,41 @@ fn compress_profile_matches_gui_presets_and_allows_level_override() {
     assert!(out.status.success(), "compress failed: {}", stderr(&out));
     let report: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("valid JSON");
     assert_eq!(report["level"], 3);
+
+    let default_archive = dir.join("default.zip");
+    let out = run(sqz()
+        .arg("compress")
+        .arg(&root)
+        .arg("-o")
+        .arg(&default_archive)
+        .arg("--json"));
+    assert!(out.status.success(), "compress failed: {}", stderr(&out));
+    assert_eq!(stdout_json(&out)["level"], 5);
+
+    let script = dir.join("profiles.json");
+    let manifest = serde_json::json!({
+        "jobs": [
+            { "kind": "compress", "inputs": ["project"], "output": "invalid-level.zip", "level": 10 },
+            { "kind": "compress", "inputs": ["project"], "output": "batch-default.zip" },
+            { "kind": "compress", "inputs": ["project"], "output": "batch-override.zip", "profile": "maximum", "level": 3 }
+        ]
+    });
+    std::fs::write(&script, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+    let out = run(sqz()
+        .arg("batch")
+        .arg(&script)
+        .args(["--keep-going", "--json"]));
+    assert_eq!(out.status.code(), Some(2), "stderr: {}", stderr(&out));
+    let report = stdout_json(&out);
+    assert_eq!(report["total"], 3);
+    assert_eq!(report["failed"], 1);
+    assert_eq!(report["jobs"][0]["error"]["kind"], "unsupported");
+    assert!(!dir.join("invalid-level.zip").exists());
+    for (index, name, level) in [(1, "batch-default.zip", 6), (2, "batch-override.zip", 3)] {
+        assert_eq!(report["jobs"][index]["ok"], true);
+        assert_eq!(report["jobs"][index]["result"]["level"], level);
+        assert!(dir.join(name).is_file());
+    }
 
     std::fs::remove_dir_all(&dir).unwrap();
 }

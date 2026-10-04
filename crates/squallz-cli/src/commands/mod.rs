@@ -6,6 +6,7 @@ mod check_update;
 mod checksum;
 mod compress;
 mod convert;
+mod create;
 mod doctor;
 mod duplicates;
 mod estimate;
