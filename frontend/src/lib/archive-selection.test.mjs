@@ -2,9 +2,9 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import vm from "node:vm";
-import ts from "typescript";
 import { parseCss } from "svelte/compiler";
 import { createTestServer } from "../../tests/runtime.mjs";
+import { compileTestScript, readSvelteScriptAsync, selectFunctions } from "../../tests/source.mjs";
 
 const rows = Array.from({ length: 8 }, (_, index) => ({
   path: `资料-${index}.txt`,
@@ -29,36 +29,29 @@ function info(total) {
 
 async function loadSelectionHandlers(archive, overrides = {}) {
   const server = await createTestServer();
-  let archiveSelectionRoots;
+  let archiveSelectionRoots, ArchiveEditSession, PreviewSession;
   try {
     ({ archiveSelectionRoots } = await server.ssrLoadModule("/src/lib/archive-editing.ts"));
+    ({ ArchiveEditSession } = await server.ssrLoadModule("/src/lib/archive-edit-session.svelte.ts"));
+    ({ PreviewSession } = await server.ssrLoadModule("/src/lib/preview-session.svelte.ts"));
   } finally {
     await server.close();
   }
-  const component = await readFile(new URL("../App.svelte", import.meta.url), "utf8");
-  const script = component.match(/<script lang="ts">([\s\S]*?)<\/script>/)?.[1];
-  assert.ok(script);
-  const source = ts.createSourceFile("App.ts", script, ts.ScriptTarget.Latest, true);
+  const source = await readSvelteScriptAsync(new URL("../App.svelte", import.meta.url), "App.ts");
   const names = new Set([
     "selectEntry", "selectOnlyEntry", "showEntryContextAt", "runArchiveSelection", "toggleEntrySelection",
     "submitDeleteSelectedJob", "selectedDeletePaths", "closeEntryContext",
-    "selectedRenameSource", "canRenameSelection", "hasArchiveSelection", "hasArchiveOpen", "submitRenameSelectedJob",
-    "archiveEditSelectedPaths", "archiveEditorBlockedReason", "validateArchiveEditContext", "archiveEditCheckIsCurrent",
+    "selectedRenameSource", "canRenameSelection", "hasArchiveSelection", "hasArchiveOpen",
+    "entryPreviewForPath", "hasPreparedPreviewForPath",
   ]);
-  const declarations = source.statements.filter(
-    (node) => ts.isFunctionDeclaration(node) && names.has(node.name?.text),
-  );
-  const { outputText } = ts.transpileModule(
-    declarations.map((node) => node.getText(source)).join("\n"),
-    { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } },
-  );
-  return vm.runInNewContext(`${outputText}\n({ selectEntry, selectOnlyEntry, showEntryContextAt, toggleEntrySelection, submitDeleteSelectedJob, canRenameSelection, submitRenameSelectedJob, context: () => entryContext })`, {
+  const declarations = selectFunctions(source, names);
+  const outputText = compileTestScript(declarations.map((node) => node.getText(source)).join("\n"));
+  const context = {
     ...archive,
     archiveSelectionRoots,
-    archiveEditKind: null, archiveEditContext: null, archiveEditSession: 0, archiveEditChecking: false,
     archiveSelectionBusyReason: () => "",
-    entryPreviewForPath: () => null,
-    clearEntryPreviewState: () => {},
+    previewSession: new PreviewSession(),
+    clearEntryPreviewState: () => context.previewSession.clear(),
     recordValidationEvent: () => {},
     closeQuickActions: () => {},
     blockSelectionScopedAction: () => false,
@@ -73,7 +66,16 @@ async function loadSelectionHandlers(archive, overrides = {}) {
     entryContext: null,
     window: { innerWidth: 1280, innerHeight: 800 },
     ...overrides,
-  });
+  };
+  const edit = new ArchiveEditSession(() => ({
+    archive: archive.archive(), generation: 0, opening: false, directory: archive.currentDirs().join("/"),
+    selectedPaths: archive.selectedPaths(), mutationDisabledReason: context.archiveMutationDisabledReason(),
+  }), context.submitCurrentArchiveJob ?? (async () => assert.fail("an unexpected edit was queued")),
+  context.blockSelectionScopedAction, { tr: context.tr, tError: (error) => error.key,
+    emit: (effect) => { if (effect.kind === "notice") context.showNotice(effect.message); } });
+  return { ...vm.runInNewContext(`${outputText}\n({ selectEntry, selectOnlyEntry, showEntryContextAt, toggleEntrySelection, submitDeleteSelectedJob, canRenameSelection, context: () => entryContext })`, context),
+    submitRenameSelectedJob: () => { edit.open("rename"); return edit.submit(); },
+  };
 }
 
 function displayEntry(index) {

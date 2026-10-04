@@ -2,14 +2,16 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test, { after, before } from "node:test";
 import vm from "node:vm";
-import ts from "typescript";
 import { createTestServer } from "../../tests/runtime.mjs";
+import { compileTestScript, readSvelteScriptAsync, selectFunctions } from "../../tests/source.mjs";
 
 let server;
 let actions;
+let ArchiveEditSession;
 before(async () => {
   server = await createTestServer();
   actions = await server.ssrLoadModule("/src/lib/app-actions.ts");
+  ({ ArchiveEditSession } = await server.ssrLoadModule("/src/lib/archive-edit-session.svelte.ts"));
 });
 after(async () => server?.close());
 
@@ -91,19 +93,21 @@ test("checkbox focus permits archive select-all without taking text editing away
 });
 
 async function appHandlers(overrides = {}, names = ["onEntryKeydown", "runEntryContextAction"]) {
-  const component = await readFile(new URL("../App.svelte", import.meta.url), "utf8");
-  const script = component.match(/<script lang="ts">([\s\S]*?)<\/script>/)?.[1];
-  assert.ok(script);
-  const source = ts.createSourceFile("App.ts", script, ts.ScriptTarget.Latest, true);
-  const functions = source.statements.filter((node) => ts.isFunctionDeclaration(node) && names.includes(node.name?.text));
-  const { outputText } = ts.transpileModule(functions.map((node) => node.getText(source)).join("\n"), {
-    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
-  });
+  const source = await readSvelteScriptAsync(new URL("../App.svelte", import.meta.url), "App.ts");
+  const functions = selectFunctions(source, names);
+  const outputText = compileTestScript(functions.map((node) => node.getText(source)).join("\n"));
   const context = {
     archiveSelectionBusyReason: () => "",
     tick: () => Promise.resolve(),
     ...overrides,
   };
+  if (names.includes("openArchiveEditor")) {
+    context.archiveEdit = new ArchiveEditSession(() => ({
+      archive: context.currentArchive, generation: 0, opening: false, directory: "",
+      selectedPaths: context.selectedPaths(), mutationDisabledReason: context.archiveMutationDisabledReason(),
+    }), async () => assert.fail("admission tests must not queue an edit"), context.blockSelectionScopedAction,
+    { tr: context.tr, tError: (error) => error.key, emit() {} });
+  }
   return { ...vm.runInNewContext(`${outputText}\n({ ${names.join(", ")} })`, context), context };
 }
 

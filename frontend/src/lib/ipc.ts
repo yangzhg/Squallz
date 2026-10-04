@@ -447,17 +447,6 @@ export interface JobSnapshotsDelta {
   removed: number[];
 }
 
-export interface OperationAuditRecord {
-  id: number;
-  time: number;
-  kind: string;
-  state: string;
-  title: string;
-  detail: string;
-  result_summary?: string;
-  error_key?: string;
-}
-
 export interface AskConflictEvent {
   id: number;
   version: number;
@@ -957,12 +946,6 @@ export const ipc = {
       customAccent,
       accentContrastGuard,
     }),
-  exportOperationHistory: (path: string, contents: string) =>
-    invoke<void>("export_operation_history", { path, contents }),
-  getOperationAudit: (limit?: number | null) =>
-    invoke<OperationAuditRecord[]>("get_operation_audit", { limit }),
-  exportOperationAudit: (path: string) =>
-    invoke<void>("export_operation_audit", { path }),
   setSafetyLimits: (
     maxOutputBytes: number | null,
     maxEntries: number | null,

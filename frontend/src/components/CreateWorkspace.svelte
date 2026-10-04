@@ -277,7 +277,7 @@
           </div>
         </details>
 
-        {#if surface.showPreflight && !surface.review}
+        {#if surface.showPreflight && (!surface.review || surface.review.busy)}
           <CreatePreflightStatus {...surface.preflight} />
         {/if}
 

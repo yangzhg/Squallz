@@ -1,23 +1,18 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readFileSync } from "node:fs";
 import vm from "node:vm";
-import ts from "typescript";
 import { createTestServer } from "../../tests/runtime.mjs";
+import { compileTestScript, readSvelteScript, selectFunctions } from "../../tests/source.mjs";
 
 test("external launch is consumed before asynchronous work and remembers the submitted task", async () => {
   const server = await createTestServer();
   try {
     const { windowRecoveryUrl, readWindowRecovery } = await server.ssrLoadModule("/src/lib/window-recovery.ts");
     const helpers = await server.ssrLoadModule("/src/lib/task-window.ts");
-    const source = readFileSync(new URL("../App.svelte", import.meta.url), "utf8").match(/<script lang="ts">([\s\S]*?)<\/script>/)[1];
-    const ast = ts.createSourceFile("App.ts", source, ts.ScriptTarget.Latest, true);
-    const functions = ast.statements.filter((node) => ts.isFunctionDeclaration(node)
-      && ["submitExternalTaskWindow", "submitJob"].includes(node.name?.text));
+    const ast = readSvelteScript(new URL("../App.svelte", import.meta.url), "App.ts");
+    const functions = selectFunctions(ast, ["submitExternalTaskWindow", "submitJob"]);
     assert.equal(functions.length, 2);
-    const { outputText } = ts.transpileModule(functions.map((node) => node.getText(ast)).join("\n").replaceAll("import.meta.env.DEV", "false"), {
-      compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
-    });
+    const outputText = compileTestScript(functions.map((node) => node.getText(ast)).join("\n").replaceAll("import.meta.env.DEV", "false"));
     let url = "http://tauri.localhost/?taskWindow=1&externalTask=extract-here&externalPath=%2Ftmp%2Freports.zip";
     let resolveSpec;
     let resolveSubmission;
@@ -63,12 +58,9 @@ test("task windows recover owned completed tasks without switching an explicit t
   const server = await createTestServer();
   try {
     const { taskWindowTask } = await server.ssrLoadModule("/src/lib/task-window.ts");
-    const source = readFileSync(new URL("../App.svelte", import.meta.url), "utf8").match(/<script lang="ts">([\s\S]*?)<\/script>/)[1];
-    const ast = ts.createSourceFile("App.ts", source, ts.ScriptTarget.Latest, true);
-    const declaration = ast.statements.find((node) => ts.isFunctionDeclaration(node) && node.name?.text === "taskDialogTask");
-    const { outputText } = ts.transpileModule(declaration.getText(ast), {
-      compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
-    });
+    const ast = readSvelteScript(new URL("../App.svelte", import.meta.url), "App.ts");
+    const [declaration] = selectFunctions(ast, ["taskDialogTask"]);
+    const outputText = compileTestScript(declaration.getText(ast));
     const done = { id: 4, ownedByRequester: true, state: "done", result: { files_hashed: 2 } };
     const failed = { id: 5, ownedByRequester: true, state: "failed" };
     const other = { id: 6, ownedByRequester: false, state: "running" };

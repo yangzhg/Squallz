@@ -33,6 +33,39 @@ pub(crate) struct OutputArtifacts {
     split_volume_count: Option<usize>,
 }
 
+/// One final output to publish, or an already reserved file owned by a
+/// surrounding split/SFX operation. Internal reservations carry their format
+/// name separately from their physical temporary path.
+pub(crate) enum CreateOutput<'a> {
+    Published {
+        destination: &'a Path,
+        policy: CreateCommitPolicy,
+    },
+    CallerReserved {
+        detect_name: &'a str,
+        reserved: crate::ReservedTempFile,
+    },
+}
+
+impl<'a> CreateOutput<'a> {
+    fn path(&self) -> &Path {
+        match self {
+            Self::Published { destination, .. } => destination,
+            Self::CallerReserved { reserved, .. } => &reserved.path,
+        }
+    }
+
+    fn detect_name(&self) -> Result<&'a str, FormatError> {
+        match self {
+            Self::Published { destination, .. } => (*destination)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| FormatError::Unsupported("invalid output file name".into())),
+            Self::CallerReserved { detect_name, .. } => Ok(*detect_name),
+        }
+    }
+}
+
 impl OutputArtifacts {
     pub(crate) fn into_report(self) -> CreateReport {
         CreateReport {
@@ -250,7 +283,15 @@ pub(crate) fn create(
     progress: &dyn ProgressSink,
     ctl: &ControlToken,
 ) -> Result<CreateReport, FormatError> {
-    create_with_reserved_outputs(engine, dest, inputs, &[], opts, progress, ctl)
+    create_report_with_policy(
+        engine,
+        dest,
+        inputs,
+        opts,
+        CreateCommitPolicy::ReplaceExisting,
+        progress,
+        ctl,
+    )
 }
 
 /// Entry point for [`Engine::create_with_report_no_replace`].
@@ -262,21 +303,15 @@ pub(crate) fn create_no_replace(
     progress: &dyn ProgressSink,
     ctl: &ControlToken,
 ) -> Result<CreateReport, FormatError> {
-    create_with_reserved_outputs_and_policy(
+    create_report_with_policy(
         engine,
         dest,
         inputs,
-        &[],
         opts,
+        CreateCommitPolicy::NoReplace,
         progress,
         ctl,
-        None,
-        CreateCommitPolicy::NoReplace,
-        false,
-        None,
-        true,
     )
-    .map(|report| report.create)
 }
 
 /// Entry point for the verified create APIs.
@@ -289,17 +324,17 @@ pub(crate) fn create_verified(
     ctl: &ControlToken,
     commit_policy: CreateCommitPolicy,
 ) -> Result<VerifiedCreateReport, FormatError> {
-    create_with_reserved_outputs_and_policy(
+    create_with_output(
         engine,
-        dest,
+        CreateOutput::Published {
+            destination: dest,
+            policy: commit_policy,
+        },
         inputs,
         &[],
         opts,
         progress,
         ctl,
-        None,
-        commit_policy,
-        true,
         None,
         true,
     )
@@ -315,57 +350,29 @@ pub(crate) fn create_report_with_policy(
     progress: &dyn ProgressSink,
     ctl: &ControlToken,
 ) -> Result<CreateReport, FormatError> {
-    create_with_reserved_outputs_and_policy(
+    create_with_output(
         engine,
-        dest,
+        CreateOutput::Published {
+            destination: dest,
+            policy: commit_policy,
+        },
         inputs,
         &[],
         opts,
         progress,
         ctl,
         None,
-        commit_policy,
         false,
-        None,
-        true,
-    )
-    .map(|report| report.create)
-}
-
-/// Creates an archive while reserving outputs owned by a surrounding
-/// operation, such as the final SFX artifact that will wrap this archive.
-pub(crate) fn create_with_reserved_outputs(
-    engine: &Engine,
-    dest: &Path,
-    inputs: &[PathBuf],
-    reserved_outputs: &[&Path],
-    opts: &CreateOptions,
-    progress: &dyn ProgressSink,
-    ctl: &ControlToken,
-) -> Result<CreateReport, FormatError> {
-    create_with_reserved_outputs_and_policy(
-        engine,
-        dest,
-        inputs,
-        reserved_outputs,
-        opts,
-        progress,
-        ctl,
-        None,
-        CreateCommitPolicy::ReplaceExisting,
-        false,
-        None,
-        true,
     )
     .map(|report| report.create)
 }
 
 /// Prepares one unsplit archive input manifest for a surrounding operation.
-/// The returned value is consumed by [`create_prepared_with_reserved_outputs`]
-/// so planning and writing use the same accepted entry set.
+/// The output is borrowed here and consumed by [`create_prepared_with_output`]
+/// so planning and writing use the same format and accepted entry set.
 pub(crate) fn prepare_unsplit_create_with_reserved_outputs(
     engine: &Engine,
-    dest: &Path,
+    output: &CreateOutput<'_>,
     inputs: &[PathBuf],
     reserved_outputs: &[&Path],
     opts: &CreateOptions,
@@ -376,11 +383,9 @@ pub(crate) fn prepare_unsplit_create_with_reserved_outputs(
             "prepared creation requires one complete archive output".into(),
         ));
     }
-    let detect_name = dest
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| FormatError::Unsupported("invalid output file name".into()))?;
-    let output_exclusions = CreateOutputExclusions::for_unsplit_estimate(dest, reserved_outputs);
+    let detect_name = output.detect_name()?;
+    let output_exclusions =
+        CreateOutputExclusions::for_unsplit_estimate(output.path(), reserved_outputs);
     output_exclusions.reject_explicit_inputs(inputs)?;
     prepare_create_inputs(
         engine,
@@ -392,14 +397,13 @@ pub(crate) fn prepare_unsplit_create_with_reserved_outputs(
     )
 }
 
-/// Writes a manifest returned by
-/// [`prepare_unsplit_create_with_reserved_outputs`] without walking its input
-/// roots again.
-#[allow(clippy::too_many_arguments)] // internal create plumbing; each role is distinct
-#[cfg(test)]
-pub(crate) fn create_prepared_with_reserved_outputs(
+/// Writes a prepared manifest without walking its input roots again.
+/// Caller-reserved outputs stay at their bound path for the surrounding
+/// operation to consume; the caller retains its own handle until then.
+#[allow(clippy::too_many_arguments)] // prepared create boundary: each argument has a distinct role
+pub(crate) fn create_prepared_with_output(
     engine: &Engine,
-    dest: &Path,
+    output: CreateOutput<'_>,
     inputs: &[PathBuf],
     reserved_outputs: &[&Path],
     opts: &CreateOptions,
@@ -413,83 +417,37 @@ pub(crate) fn create_prepared_with_reserved_outputs(
             "prepared creation requires one complete archive output".into(),
         ));
     }
-    create_with_reserved_outputs_and_policy(
+    create_with_output(
         engine,
-        dest,
+        output,
         inputs,
         reserved_outputs,
         opts,
         progress,
         ctl,
         Some(prepared),
-        CreateCommitPolicy::ReplaceExisting,
         capture_input_manifest,
-        None,
-        true,
     )
 }
 
-/// Writes a prepared internal archive directly through a caller-owned
-/// reservation. The caller retains another handle until the surrounding
-/// artifact has consumed the archive.
-#[allow(clippy::too_many_arguments)] // internal SFX boundary with distinct roles
-pub(crate) fn create_prepared_into_reserved_output(
+#[allow(clippy::too_many_arguments)] // internal create plumbing; each argument has a distinct role
+fn create_with_output(
     engine: &Engine,
-    dest: &Path,
-    inputs: &[PathBuf],
-    reserved_outputs: &[&Path],
-    opts: &CreateOptions,
-    progress: &dyn ProgressSink,
-    ctl: &ControlToken,
-    prepared: PreparedCreateInputs,
-    capture_input_manifest: bool,
-    reserved: crate::ReservedTempFile,
-) -> Result<VerifiedCreateReport, FormatError> {
-    if opts.split_size.is_some() {
-        return Err(FormatError::Unsupported(
-            "prepared creation requires one complete archive output".into(),
-        ));
-    }
-    create_with_reserved_outputs_and_policy(
-        engine,
-        dest,
-        inputs,
-        reserved_outputs,
-        opts,
-        progress,
-        ctl,
-        Some(prepared),
-        CreateCommitPolicy::ReplaceExisting,
-        capture_input_manifest,
-        Some(reserved),
-        false,
-    )
-}
-
-#[allow(clippy::too_many_arguments)] // internal create plumbing; each role is distinct
-fn create_with_reserved_outputs_and_policy(
-    engine: &Engine,
-    dest: &Path,
+    output: CreateOutput<'_>,
     inputs: &[PathBuf],
     reserved_outputs: &[&Path],
     opts: &CreateOptions,
     progress: &dyn ProgressSink,
     ctl: &ControlToken,
     prepared: Option<PreparedCreateInputs>,
-    commit_policy: CreateCommitPolicy,
     capture_input_manifest: bool,
-    reserved_unsplit_staging: Option<crate::ReservedTempFile>,
-    publish_unsplit_staging: bool,
 ) -> Result<VerifiedCreateReport, FormatError> {
-    if reserved_unsplit_staging.is_some() && opts.split_size.is_some() {
+    if matches!(&output, CreateOutput::CallerReserved { .. }) && opts.split_size.is_some() {
         return Err(FormatError::Unsupported(
             "a caller-owned output reservation cannot be split".into(),
         ));
     }
-    let name = dest
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| FormatError::Unsupported("invalid output file name".into()))?;
+    let name = output.detect_name()?;
     let detect_name = if opts.split_size.is_some() {
         split_volume_name(name)
             .map(|(base, _index)| base)
@@ -499,38 +457,44 @@ fn create_with_reserved_outputs_and_policy(
     };
     validate_create_target_name(engine, detect_name, opts)?;
 
-    let split_output = opts.split_size.is_some();
-    let mut reserved_unsplit_staging = reserved_unsplit_staging;
-    let (staged_archive, mut outputs) = with_split_output_policy(
-        engine,
-        dest,
-        opts,
-        progress,
-        ctl,
-        commit_policy,
-        |detect_name, out_path, write_opts, reserved_staging| {
-            create_unsplit(
-                engine,
-                detect_name,
-                CreateTarget {
-                    final_path: dest,
-                    staging_path: out_path,
-                    split: split_output,
-                    reserved_outputs,
-                    commit_policy,
-                    capture_input_manifest,
-                    reserved_staging: reserved_staging.or_else(|| reserved_unsplit_staging.take()),
-                    publish_staging: publish_unsplit_staging,
+    let final_path = output.path().to_path_buf();
+    let write = |write_opts: &CreateOptions, output: CreateOutput<'_>| {
+        create_unsplit(
+            engine,
+            CreateTarget {
+                final_path: &final_path,
+                output,
+                reserved_outputs,
+                capture_input_manifest,
+            },
+            inputs,
+            prepared,
+            write_opts,
+            opts,
+            progress,
+            ctl,
+        )
+    };
+    let (staged_archive, mut outputs) = match output {
+        CreateOutput::Published {
+            destination,
+            policy,
+        } => with_split_output_policy(engine, destination, opts, progress, ctl, policy, write)?,
+        output @ CreateOutput::CallerReserved { .. } => {
+            let created = write(opts, output)?;
+            let output = final_path.clone();
+            (
+                created,
+                OutputArtifacts {
+                    primary_output: output.clone(),
+                    outputs: vec![output],
+                    preserved_outputs: Vec::new(),
+                    total_output_bytes: 0,
+                    split_volume_count: None,
                 },
-                inputs,
-                prepared,
-                write_opts,
-                opts,
-                progress,
-                ctl,
             )
-        },
-    )?;
+        }
+    };
     if outputs.split_volume_count.is_none() {
         outputs.total_output_bytes = staged_archive.output_bytes;
     }
@@ -551,19 +515,20 @@ pub(crate) fn with_split_output_policy<T>(
     progress: &dyn ProgressSink,
     ctl: &ControlToken,
     commit_policy: CreateCommitPolicy,
-    write: impl FnOnce(
-        &str,
-        &Path,
-        &CreateOptions,
-        Option<crate::ReservedTempFile>,
-    ) -> Result<T, FormatError>,
+    write: impl FnOnce(&CreateOptions, CreateOutput<'_>) -> Result<T, FormatError>,
 ) -> Result<(T, OutputArtifacts), FormatError> {
     let name = dest
         .file_name()
         .and_then(|s| s.to_str())
         .ok_or_else(|| FormatError::Unsupported("invalid output file name".into()))?;
     let Some(split) = opts.split_size else {
-        let value = write(name, dest, opts, None)?;
+        let value = write(
+            opts,
+            CreateOutput::Published {
+                destination: dest,
+                policy: commit_policy,
+            },
+        )?;
         let output = dest.to_path_buf();
         return Ok((
             value,
@@ -571,8 +536,7 @@ pub(crate) fn with_split_output_policy<T>(
                 primary_output: output.clone(),
                 outputs: vec![output],
                 preserved_outputs: Vec::new(),
-                // The create path replaces this with its staging measurement;
-                // conversion discards the artifact report.
+                // The create path replaces this with its staging measurement.
                 total_output_bytes: 0,
                 split_volume_count: None,
             },
@@ -599,7 +563,13 @@ pub(crate) fn with_split_output_policy<T>(
         ..opts.clone()
     };
     let result = (|| {
-        let value = write(&base_name, &tmp, &inner_opts, Some(reserved))?;
+        let value = write(
+            &inner_opts,
+            CreateOutput::CallerReserved {
+                detect_name: &base_name,
+                reserved,
+            },
+        )?;
         let split_outputs = match opts.split_mode {
             SplitOutputMode::Generic => {
                 volumes::split_into_volumes_with_commit_policy_and_source_identity(
@@ -672,13 +642,9 @@ pub(crate) fn with_split_output_policy<T>(
 
 struct CreateTarget<'a> {
     final_path: &'a Path,
-    staging_path: &'a Path,
-    split: bool,
+    output: CreateOutput<'a>,
     reserved_outputs: &'a [&'a Path],
-    commit_policy: CreateCommitPolicy,
     capture_input_manifest: bool,
-    reserved_staging: Option<crate::ReservedTempFile>,
-    publish_staging: bool,
 }
 
 struct CreatedArchive {
@@ -690,7 +656,6 @@ struct CreatedArchive {
 #[allow(clippy::too_many_arguments)] // internal create plumbing; each path/options role is distinct
 fn create_unsplit(
     engine: &Engine,
-    detect_name: &str,
     target: CreateTarget<'_>,
     inputs: &[PathBuf],
     prepared: Option<PreparedCreateInputs>,
@@ -699,23 +664,32 @@ fn create_unsplit(
     progress: &dyn ProgressSink,
     ctl: &ControlToken,
 ) -> Result<CreatedArchive, FormatError> {
-    let mut target = target;
-    if !target.split
-        && target.publish_staging
-        && matches!(target.commit_policy, CreateCommitPolicy::ReplaceExisting)
-    {
-        let inspection =
-            crate::inspect_create_destination(target.staging_path, CreateArtifactKind::Archive)?;
-        target.commit_policy = match inspection.guard {
-            Some(guard) => CreateCommitPolicy::ReplaceIfUnchanged(guard),
-            None => CreateCommitPolicy::NoReplace,
-        };
-    }
-    let reserved = match target.reserved_staging.take() {
-        Some(reserved) => reserved,
-        None => crate::reserve_bound_sibling_temp_file(target.staging_path, "create")?,
+    let detect_name = target.output.detect_name()?;
+    let (reserved, publication) = match target.output {
+        CreateOutput::Published {
+            destination,
+            mut policy,
+        } => {
+            if matches!(policy, CreateCommitPolicy::ReplaceExisting) {
+                let inspection =
+                    crate::inspect_create_destination(destination, CreateArtifactKind::Archive)?;
+                policy = match inspection.guard {
+                    Some(guard) => CreateCommitPolicy::ReplaceIfUnchanged(guard),
+                    None => CreateCommitPolicy::NoReplace,
+                };
+            }
+            (
+                crate::reserve_bound_sibling_temp_file(destination, "create")?,
+                Some((destination, policy)),
+            )
+        }
+        CreateOutput::CallerReserved { reserved, .. } => (reserved, None),
     };
     let tmp = reserved.path.clone();
+    let staging_path = match &publication {
+        Some((destination, _policy)) => *destination,
+        None => tmp.as_path(),
+    };
     let tmp_identity = reserved.identity;
     let mut retained_file = Some(reserved.file.try_clone()?);
     let output_file = reserved.file;
@@ -723,9 +697,9 @@ fn create_unsplit(
     let result = (|| {
         let output_exclusions = CreateOutputExclusions::new(
             target.final_path,
-            target.staging_path,
+            staging_path,
             &tmp,
-            target.split,
+            plan_opts.split_size.is_some(),
             target.reserved_outputs,
         )?;
         output_exclusions.reject_explicit_inputs(inputs)?;
@@ -806,8 +780,8 @@ fn create_unsplit(
             ))));
         }
         let output_bytes = retained.metadata()?.len();
-        if !target.split && target.publish_staging {
-            match target.commit_policy {
+        if let Some((destination, policy)) = publication {
+            match policy {
                 CreateCommitPolicy::ReplaceExisting => {
                     return Err(FormatError::Other(
                         "archive replacement policy was not bound before writing".into(),
@@ -818,7 +792,7 @@ fn create_unsplit(
                         &tmp,
                         retained,
                         tmp_identity,
-                        target.staging_path,
+                        destination,
                     )?;
                 }
                 CreateCommitPolicy::ReplaceIfUnchanged(guard) => {
@@ -829,7 +803,7 @@ fn create_unsplit(
                         )
                     })?;
                     crate::update::commit_created_archive(
-                        target.staging_path,
+                        destination,
                         &tmp,
                         retained,
                         tmp_identity,

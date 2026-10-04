@@ -88,7 +88,10 @@
   }
 
   function selectPreset(event: Event) {
-    const value = (event.currentTarget as HTMLSelectElement).value;
+    const select = event.currentTarget as HTMLSelectElement;
+    const value = select.value;
+    // Keep the visible selection when the parent cannot apply the requested preset.
+    select.value = selectedId ?? "";
     deleteArmed = false;
     onSelect(value || null);
   }
@@ -227,7 +230,9 @@
           class:armed={deleteArmed}
           disabled={!selectedId || interactionDisabled || Boolean(deleteDisabledReason)}
           title={deleteDisabledReason}
-          aria-describedby={deleteDisabledReason ? deleteReasonId : undefined}
+          aria-describedby={deleteDisabledReason
+            ? deleteDisabledReason === updateDisabledReason ? updateReasonId : deleteReasonId
+            : undefined}
           onclick={requestDelete}
         >{deleteArmed ? tr("gui.presets.confirm_delete", "Delete this preset") : tr("common.delete", "Delete")}</button>
       </div>
@@ -235,7 +240,7 @@
       {#if updateDisabledReason || deleteDisabledReason || fileManagerDisabledReason}
         <div class="archive-preset-guidance" role="note">
           {#if updateDisabledReason}<p id={updateReasonId}>{updateDisabledReason}</p>{/if}
-          {#if deleteDisabledReason}<p id={deleteReasonId}>{deleteDisabledReason}</p>{/if}
+          {#if deleteDisabledReason && deleteDisabledReason !== updateDisabledReason}<p id={deleteReasonId}>{deleteDisabledReason}</p>{/if}
           {#if fileManagerDisabledReason}<p id={fileManagerReasonId}>{fileManagerDisabledReason}</p>{/if}
         </div>
       {/if}

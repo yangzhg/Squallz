@@ -2,9 +2,12 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 use squallz_core::api::{
-    split_volume_name, CompressionLevel, CreateOptions, FormatError, NoProgress, OpenOptions,
+    split_volume_name, CompressionLevel, CreateOptions, FormatError, NoProgress,
 };
-use squallz_core::{is_plain_sqz_path, is_sqz_archive_path, is_zip_family_path};
+use squallz_core::{
+    is_sqz_archive_path, is_zip_family_path, ArchiveRepairKind, ArchiveRepairOptions,
+    ArchiveRepairOutcome,
+};
 use squallz_recovery::RecoveryReport;
 
 use crate::args::resource_options;
@@ -203,62 +206,55 @@ fn repair_sqz(
         .into());
     }
     let output = repair_output_or_archive(output, &archive);
-    if !is_plain_sqz_path(&output) {
-        return Err(
-            FormatError::Unsupported("SQZ repair output must be a .sqz container".into()).into(),
-        );
-    }
-
-    let source_report = ctx.engine.test_summary(
-        &archive,
-        &OpenOptions::default(),
-        &squallz_core::api::SafetyLimits::default(),
-        &NoProgress,
-        &ctx.ctl,
-    )?;
-    if !source_report.is_ok() {
-        if json {
-            let archive_path = archive.display().to_string();
-            let output_path = output.display().to_string();
-            let value = json!({
-                "ok": false,
-                "operation": "repair_sqz",
-                "archive": archive_path,
-                "output": output_path,
-                "tool": "sqz-embedded-recovery",
-                "in_place": false,
-                "source": test_report_json(&source_report),
-                "recovery": source_report.recovery.as_ref().map(recovery_summary_json),
-                "problems": &source_report.problems.messages,
-                "problems_total": source_report.problems.total,
-                "problems_truncated": source_report.problems.is_truncated(),
-            });
-            print_pretty_json(&value)?;
-        } else {
-            print_test_problems(ctx, &source_report);
-            let count = source_report.problems.total.to_string();
-            let message = ctx.loc.format("cli.test.failed", &[("count", &count)]);
-            ctx.eprint_problem(&message);
-        }
-        return Err(CliError::Exit(EXIT_CORRUPT));
-    }
-
-    let progress = CliProgress::new_for_operation(ctx, json, "repair");
-    let create = CreateOptions {
-        level: CompressionLevel::from_numeric(level),
-        resources: resource_options(threads, memory_limit),
-        ..CreateOptions::default()
+    let options = ArchiveRepairOptions {
+        kind: ArchiveRepairKind::SqzEmbedded,
+        create: CreateOptions {
+            level: CompressionLevel::from_numeric(level),
+            resources: resource_options(threads, memory_limit),
+            ..CreateOptions::default()
+        },
+        safety_limits: squallz_core::api::SafetyLimits::default(),
     };
-    let result = ctx.engine.convert_with_atomic_replace(
+    let progress = CliProgress::new_for_operation(ctx, json, "repair");
+    let result = ctx.engine.repair_archive(
         &archive,
         &output,
-        &OpenOptions::default(),
-        &create,
+        &options,
+        &NoProgress,
         &progress,
         &ctx.ctl,
     );
     progress.finish();
-    let in_place = result?;
+    let (source_report, in_place) = match result? {
+        ArchiveRepairOutcome::Repaired { source, in_place } => (source.into_summary(), in_place),
+        ArchiveRepairOutcome::SourceRejected(source) => {
+            let source_report = source.summary;
+            if json {
+                let archive_path = archive.display().to_string();
+                let output_path = output.display().to_string();
+                let value = json!({
+                    "ok": false,
+                    "operation": "repair_sqz",
+                    "archive": archive_path,
+                    "output": output_path,
+                    "tool": "sqz-embedded-recovery",
+                    "in_place": false,
+                    "source": test_report_json(&source_report),
+                    "recovery": source_report.recovery.as_ref().map(recovery_summary_json),
+                    "problems": &source_report.problems.messages,
+                    "problems_total": source_report.problems.total,
+                    "problems_truncated": source_report.problems.is_truncated(),
+                });
+                print_pretty_json(&value)?;
+            } else {
+                print_test_problems(ctx, &source_report);
+                let count = source_report.problems.total.to_string();
+                let message = ctx.loc.format("cli.test.failed", &[("count", &count)]);
+                ctx.eprint_problem(&message);
+            }
+            return Err(CliError::Exit(EXIT_CORRUPT));
+        }
+    };
     if json {
         let archive_path = archive.display().to_string();
         let output_path = output.display().to_string();
@@ -313,63 +309,54 @@ fn repair_zip_rebuild(
             FormatError::Unsupported("ZIP rebuild repair requires --output <path>".into()).into(),
         );
     };
-    if !is_zip_family_path(&output) {
-        return Err(FormatError::Unsupported(
-            "ZIP rebuild output must be a ZIP-family archive (.zip/.jar/.apk/.cbz/.ipa)".into(),
-        )
-        .into());
-    }
-
-    let source_test = ctx.engine.test_summary_with_structure(
-        &archive,
-        &OpenOptions::default(),
-        &squallz_core::api::SafetyLimits::default(),
-        &NoProgress,
-        &ctx.ctl,
-    )?;
-    if !source_test.payload_is_ok() {
-        let source_report = &source_test.summary;
-        if json {
-            let value = json!({
-                "ok": false,
-                "operation": "repair_zip",
-                "archive": archive.display().to_string(),
-                "output": output.display().to_string(),
-                "tool": "zip-local-header-rebuild",
-                "in_place": false,
-                "source": test_report_json_with_structure(source_report, source_test.structure),
-                "problems": &source_report.problems.messages,
-                "problems_total": source_report.problems.total,
-                "problems_truncated": source_report.problems.is_truncated(),
-            });
-            print_pretty_json(&value)?;
-        } else {
-            print_test_problems_with_structure(ctx, source_report, source_test.structure);
-            let count = source_report.problems.total.to_string();
-            let message = ctx.loc.format("cli.test.failed", &[("count", &count)]);
-            ctx.eprint_problem(&message);
-        }
-        return Err(CliError::Exit(EXIT_CORRUPT));
-    }
-    let structure = source_test.structure;
-    let source_report = source_test.into_summary();
-
-    let progress = CliProgress::new_for_operation(ctx, json, "repair");
-    let create = CreateOptions {
-        level: CompressionLevel::from_numeric(level),
-        resources: resource_options(threads, memory_limit),
-        ..CreateOptions::default()
+    let options = ArchiveRepairOptions {
+        kind: ArchiveRepairKind::ZipIndexRebuild,
+        create: CreateOptions {
+            level: CompressionLevel::from_numeric(level),
+            resources: resource_options(threads, memory_limit),
+            ..CreateOptions::default()
+        },
+        safety_limits: squallz_core::api::SafetyLimits::default(),
     };
-    let result = ctx.engine.convert_with_atomic_replace(
+    let progress = CliProgress::new_for_operation(ctx, json, "repair");
+    let result = ctx.engine.repair_archive(
         &archive,
         &output,
-        &OpenOptions::default(),
-        &create,
+        &options,
+        &NoProgress,
         &progress,
         &ctx.ctl,
     );
     progress.finish();
-    let in_place = result?;
+    let (source_test, in_place) = match result? {
+        ArchiveRepairOutcome::Repaired { source, in_place } => (source, in_place),
+        ArchiveRepairOutcome::SourceRejected(source) => {
+            let source_report = &source.summary;
+            if json {
+                let value = json!({
+                    "ok": false,
+                    "operation": "repair_zip",
+                    "archive": archive.display().to_string(),
+                    "output": output.display().to_string(),
+                    "tool": "zip-local-header-rebuild",
+                    "in_place": false,
+                    "source": test_report_json_with_structure(source_report, source.structure),
+                    "problems": &source_report.problems.messages,
+                    "problems_total": source_report.problems.total,
+                    "problems_truncated": source_report.problems.is_truncated(),
+                });
+                print_pretty_json(&value)?;
+            } else {
+                print_test_problems_with_structure(ctx, source_report, source.structure);
+                let count = source_report.problems.total.to_string();
+                let message = ctx.loc.format("cli.test.failed", &[("count", &count)]);
+                ctx.eprint_problem(&message);
+            }
+            return Err(CliError::Exit(EXIT_CORRUPT));
+        }
+    };
+    let structure = source_test.structure;
+    let source_report = source_test.into_summary();
     if json {
         let value = json!({
             "ok": true,

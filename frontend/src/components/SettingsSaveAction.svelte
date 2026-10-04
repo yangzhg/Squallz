@@ -1,7 +1,7 @@
 <script lang="ts">
   import Icon from "./Icon.svelte";
 
-  type SaveState = "saved" | "dirty" | "saving" | "session" | "error";
+  import type { SettingsSaveState } from "../lib/settings-session.svelte";
 
   let {
     state,
@@ -12,7 +12,7 @@
     icon = "check-circle",
     onSave,
   }: {
-    state: SaveState;
+    state: SettingsSaveState;
     statusLabel: string;
     actionLabel: string;
     savingLabel: string;

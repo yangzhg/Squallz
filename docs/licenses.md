@@ -61,6 +61,7 @@
 
 | 依赖 | 版本（锁定） | 许可证 | 维护状态 | 用途 |
 | ---- | ---- | ---- | ---- | ---- |
+| aho-corasick | 1.1.4 | Unlicense OR MIT | BurntSushi 维护；复用已锁定的 globset 传递依赖 | 7-Zip 完整诊断流的大小写无关多标记匹配，共享匹配器并保持有界扫描窗口 |
 | flate2 | 1.1.9 | MIT OR Apache-2.0 | 活跃（rust-lang 官方） | gzip 编解码（默认纯 Rust miniz_oxide 后端；此前已是 zip 的传递依赖，现转直接依赖） |
 | bzip2 | 0.6.1 | MIT OR Apache-2.0 | 活跃（trifectatech 接管） | bzip2 编解码（0.6 起默认 libbz2-rs-sys 纯 Rust 后端） |
 | liblzma | 0.4.6 | MIT OR Apache-2.0 | 活跃（xz2 的维护继任 fork，Portable-Network-Archives） | xz 编解码（C 绑定，unsafe 集中在 liblzma-sys；从源码构建 xz 5.8，**已知 xz 后门事件**（CVE-2024-3094）只影响发行版动态库构建链，源码 vendored 构建不受影响，仍持续关注上游） |

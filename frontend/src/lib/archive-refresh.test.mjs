@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readFile } from "node:fs/promises";
 import vm from "node:vm";
 import ts from "typescript";
 import { createTestServer } from "../../tests/runtime.mjs";
+import { compileTestScript, readSvelteScriptAsync, selectFunctions } from "../../tests/source.mjs";
 
 function row(path, size = 1) {
   return {
@@ -68,8 +68,7 @@ async function withArchive(run, options = {}) {
 }
 
 async function updateRefreshEffect(archive, jobs) {
-  const app = await readFile(new URL("../App.svelte", import.meta.url), "utf8");
-  const source = ts.createSourceFile("App.ts", app.match(/<script lang="ts">([\s\S]*?)<\/script>/u)[1], ts.ScriptTarget.Latest, true);
+  const source = await readSvelteScriptAsync(new URL("../App.svelte", import.meta.url), "App.ts");
   const effect = source.statements.find((node) => ts.isExpressionStatement(node)
     && node.getText(source).startsWith("$effect(") && node.getText(source).includes("refreshedUpdateJobs"));
   assert.ok(effect);
@@ -77,11 +76,9 @@ async function updateRefreshEffect(archive, jobs) {
     "pendingArchiveUpdateJobs", "openArchivePath", "finishOpenedArchive",
     "openArchiveFromDialog", "dismissArchivePicker",
   ]);
-  const helpers = source.statements.filter((node) => ts.isFunctionDeclaration(node) && names.has(node.name?.text));
+  const helpers = selectFunctions(source, names);
   assert.equal(helpers.length, names.size);
-  const { outputText } = ts.transpileModule([...helpers, effect].map((node) => node.getText(source)).join("\n"), {
-    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
-  });
+  const outputText = compileTestScript([...helpers, effect].map((node) => node.getText(source)).join("\n"));
   const pending = [];
   const notices = [];
   const context = {
@@ -123,13 +120,10 @@ function completedUpdate(id, path = "/tmp/refresh.zip") {
 }
 
 async function passwordRefreshActions(archive) {
-  const component = await readFile(new URL("../App.svelte", import.meta.url), "utf8");
-  const source = ts.createSourceFile("App.ts", component.match(/<script lang="ts">([\s\S]*?)<\/script>/u)[1], ts.ScriptTarget.Latest, true);
-  const names = ["cancelTaskReview", "submitPasswordRequest", "cancelPasswordRequest", "dismissArchivePasswordRequest", "dismissArchivePicker", "dismissRecoveryPreparation", "setScreen", "openArchivePath", "archiveEditorVisible", "blockingModalVisible", "archiveEditorBlockedReason"];
-  const declarations = source.statements.filter((node) => ts.isFunctionDeclaration(node) && names.includes(node.name?.text));
-  const { outputText } = ts.transpileModule(declarations.map((node) => node.getText(source)).join("\n"), {
-    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
-  });
+  const source = await readSvelteScriptAsync(new URL("../App.svelte", import.meta.url), "App.ts");
+  const names = ["cancelTaskReview", "submitPasswordRequest", "cancelPasswordRequest", "dismissArchivePasswordRequest", "dismissArchivePicker", "dismissRecoveryPreparation", "setScreen", "openArchivePath", "archiveEditorVisible", "blockingModalVisible"];
+  const declarations = selectFunctions(source, names);
+  const outputText = compileTestScript(declarations.map((node) => node.getText(source)).join("\n"));
   const context = {
     get currentArchive() { return archive.archive(); },
     get archivePasswordPrompt() { return archive.openPasswordPrompt(); },
@@ -138,12 +132,11 @@ async function passwordRefreshActions(archive) {
     archiveOpenStatus: "idle", archiveOpenGeneration: 7, archivePasswordAttempt: 0,
     archivePickerRequest: null,
     recoveryPickerStatus: "idle", recoveryPickerRequest: 0, recoveryOutputPreparation: null,
-    dismissCreatePreparation() {},
+    dismissCreatePreparation() {}, syncCreatePreflightContext() {},
     dismissArchiveAddPreparation() {},
     archiveUpdateReview: { cancelSourceChoice() {} },
     batchPickerRequest: 0, nestedExtractPickerRequest: 0,
-    archiveEditKind: "rename", renameTargetName: "kept.txt",
-    archiveEditContext: { source: info().source, encoding: "gbk", generation: 7, id: 1 },
+
     taskDialogVisible: () => false, macosSfxPublisherTask: null,
     taskPasswordReady: (value) => value.length > 0,
     archiveMutationDisabledReason: () => archive.archiveRefreshStatus() === "idle" ? "" : "Refresh required",
@@ -157,6 +150,18 @@ async function passwordRefreshActions(archive) {
     syncUrl: () => {}, tick: async () => {},
     document: { documentElement: {}, body: {}, querySelectorAll: () => [] },
   };
+  const server = await createTestServer();
+  try {
+    const { ArchiveEditSession } = await server.ssrLoadModule("/src/lib/archive-edit-session.svelte.ts");
+    context.archiveEdit = new ArchiveEditSession(() => ({
+      archive: archive.archive(), generation: context.archiveOpenGeneration,
+      opening: context.archiveOpenStatus !== "idle", directory: archive.currentDirs().join("/"),
+      selectedPaths: archive.selectedPaths(), mutationDisabledReason: context.archiveMutationDisabledReason(),
+    }), async () => assert.fail("password refresh must not queue an edit"), () => false,
+    { tr: context.tr, tError: (error) => error.key, emit() {} });
+    context.archiveEdit.open("rename");
+    context.archiveEdit.setTarget("kept.txt");
+  } finally { await server.close(); }
   return { context, ...vm.runInNewContext(`${outputText}\n({${declarations.map((node) => node.name.text).join(",")}})`, context) };
 }
 
@@ -185,8 +190,8 @@ test("leaving a refresh password cancels its read and keeps the editor dormant u
     assert.deepEqual(closed, [2]);
     run.setScreen("browse");
     assert.equal(run.archiveEditorVisible(), true);
-    assert.equal(run.context.renameTargetName, "kept.txt");
-    assert.notEqual(run.archiveEditorBlockedReason(), "");
+    assert.equal(run.context.archiveEdit.target, "kept.txt");
+    assert.notEqual(run.context.archiveEdit.blockedReason, "");
   });
 });
 
@@ -205,7 +210,7 @@ test("an explicit same-source open abandons password refresh intent and clears i
     next.resolve(info(2));
     await opening;
     assert.deepEqual(archive.currentDirs(), [], "an explicit open uses its own initial view");
-    assert.notEqual(run.archiveEditorBlockedReason(), "", "old edit targets cannot follow a new open session");
+    assert.notEqual(run.context.archiveEdit.blockedReason, "", "old edit targets cannot follow a new open session");
   });
 });
 
@@ -229,8 +234,8 @@ test("refresh password attempts suspend the editor and resume its original sessi
     assert.equal(run.context.archiveOpenGeneration, 7);
     assert.equal(run.context.screen, "browse");
     assert.equal(run.archiveEditorVisible(), true);
-    assert.equal(run.archiveEditorBlockedReason(), "");
-    assert.equal(run.context.renameTargetName, "kept.txt");
+    assert.equal(run.context.archiveEdit.blockedReason, "");
+    assert.equal(run.context.archiveEdit.target, "kept.txt");
     assert.deepEqual(archive.currentDirs(), ["docs"]);
   });
 });
@@ -248,7 +253,7 @@ test("cancelling an in-flight refresh password keeps retry and rejects the late 
     assert.equal(run.context.archiveOpenGeneration, 7);
     assert.equal(run.archiveEditorVisible(), true);
     assert.equal(archive.archiveRefreshStatus(), "error");
-    assert.notEqual(run.archiveEditorBlockedReason(), "", "old rows cannot become editable after cancellation");
+    assert.notEqual(run.context.archiveEdit.blockedReason, "", "old rows cannot become editable after cancellation");
     ipc.openArchive = async (_path, password, encoding) => {
       assert.equal(password, null, "retry must not retain the previous password input");
       assert.equal(encoding, "gbk");
@@ -266,7 +271,7 @@ test("cancelling an in-flight refresh password keeps retry and rejects the late 
     assert.equal(archive.openPasswordPrompt().refresh, true);
     ipc.openArchive = async () => info(3);
     await run.submitPasswordRequest();
-    assert.equal(run.archiveEditorBlockedReason(), "");
+    assert.equal(run.context.archiveEdit.blockedReason, "");
     assert.equal(archive.archive().id, 3);
   });
 });
@@ -865,11 +870,9 @@ test("navigation to a missing folder displays a real parent instead of a phantom
 });
 
 test("virtual rows keep cold and mixed page slots and clamp after the list shrinks", async () => {
-  const component = await readFile(new URL("../App.svelte", import.meta.url), "utf8");
-  const script = component.match(/<script lang="ts">([\s\S]*?)<\/script>/)?.[1];
-  const source = ts.createSourceFile("App.ts", script, ts.ScriptTarget.Latest, true);
-  const declaration = source.statements.find((node) => ts.isFunctionDeclaration(node) && node.name?.text === "browseVirtualWindow");
-  const { outputText } = ts.transpileModule(declaration.getText(source), { compilerOptions: { target: ts.ScriptTarget.ES2022 } });
+  const source = await readSvelteScriptAsync(new URL("../App.svelte", import.meta.url), "App.ts");
+  const [declaration] = selectFunctions(source, ["browseVirtualWindow"]);
+  const outputText = compileTestScript(declaration.getText(source), { target: ts.ScriptTarget.ES2022 });
   for (const total of [0, 1, 25, 501]) {
     const window = vm.runInNewContext(`${outputText}\nbrowseVirtualWindow()`, {
       currentArchive: info(), totalRows: () => total, browseScrollTop: 40_000,
@@ -881,9 +884,9 @@ test("virtual rows keep cold and mixed page slots and clamp after the list shrin
     assert.equal(window.top + (window.end - window.start) * 40 + window.bottom, total * 40);
   }
   const names = ["browseVirtualWindow", "browseEntries", "browsePaddingTop", "browsePaddingBottom", "toDisplayEntry"];
-  const helpers = source.statements.filter((node) => ts.isFunctionDeclaration(node) && names.includes(node.name?.text));
+  const helpers = selectFunctions(source, names);
   const surfaces = ["classicArchiveBrowserSurface", "modernArchiveBrowserSurface"].map((name) => {
-    const surface = source.statements.find((node) => ts.isFunctionDeclaration(node) && node.name?.text === name);
+    const [surface] = selectFunctions(source, [name]);
     const rows = surface.body.statements.find((node) => ts.isVariableStatement(node)
       && node.declarationList.declarations.some((item) => item.name.getText(source) === "rows"));
     const result = surface.body.statements.find((node) => ts.isReturnStatement(node)).expression;
@@ -893,9 +896,7 @@ test("virtual rows keep cold and mixed page slots and clamp after the list shrin
     assert.equal(fields.length, 5);
     return `function ${name}Rows() { ${rows.getText(source)} return { ${fields.map((node) => node.getText(source)).join(",")} }; }`;
   });
-  const runtime = ts.transpileModule([...helpers.map((node) => node.getText(source)), ...surfaces].join("\n"), {
-    compilerOptions: { target: ts.ScriptTarget.ES2022 },
-  }).outputText;
+  const runtime = compileTestScript([...helpers.map((node) => node.getText(source)), ...surfaces].join("\n"), { target: ts.ScriptTarget.ES2022 });
   await withArchive(async ({ archive, ipc, requests }) => {
     const cached = Array.from({ length: 500 }, (_, index) => row(`entry-${index}.txt`));
     archive.installArchivePreview(info(), cached, { total: 10_000 });

@@ -7,7 +7,10 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use squallz_core::api::{ConflictDecision, ConflictResolver, EntryMeta, FormatError, Password};
+use squallz_core::api::{
+    first_free_numbered_sibling_name, ConflictDecision, ConflictResolver, EntryMeta, FormatError,
+    Password,
+};
 use squallz_core::lock_unpoisoned;
 use squallz_i18n::Localizer;
 
@@ -163,39 +166,17 @@ impl ConflictResolver for CliConflictResolver {
     }
 }
 
-/// Picks the first free `name (n).ext` sibling file name (mirrors the
-/// RenameBoth policy of the extraction engine).
+/// Keeps the CLI's timestamp fallback when all numbered siblings are occupied.
 fn auto_renamed_name(existing: &Path) -> String {
-    let stem = file_stem_or_empty(existing);
-    let ext = existing
-        .extension()
-        .map(|e| e.to_string_lossy().into_owned());
-    let parent = parent_or_empty(existing);
-    for n in 1u32..=u32::MAX {
-        let name = match &ext {
-            Some(ext) => format!("{stem} ({n}).{ext}"),
-            None => format!("{stem} ({n})"),
-        };
-        if std::fs::symlink_metadata(parent.join(&name)).is_err() {
-            return name;
-        }
+    if let Some(name) = first_free_numbered_sibling_name(existing) {
+        return name;
     }
+    let stem = existing
+        .file_stem()
+        .map(|value| value.to_string_lossy())
+        .unwrap_or_default();
+    let ext = existing.extension().map(|value| value.to_string_lossy());
     exhausted_auto_rename_fallback(&stem, ext.as_deref())
-}
-
-fn file_stem_or_empty(existing: &Path) -> String {
-    let Some(stem) = existing.file_stem() else {
-        return String::new();
-    };
-    stem.to_string_lossy().into_owned()
-}
-
-fn parent_or_empty(existing: &Path) -> &Path {
-    if let Some(parent) = existing.parent() {
-        parent
-    } else {
-        Path::new("")
-    }
 }
 
 fn exhausted_auto_rename_fallback(stem: &str, ext: Option<&str>) -> String {
@@ -248,7 +229,24 @@ mod tests {
 
     #[test]
     fn auto_rename_uses_first_free_sibling_name() {
-        let name = auto_renamed_name(Path::new("sqz-prompt-redline-unique.txt"));
-        assert_eq!(name, "sqz-prompt-redline-unique (1).txt");
+        let dir = std::env::temp_dir().join(exhausted_auto_rename_fallback(
+            &format!("sqz-prompt-{}", std::process::id()),
+            None,
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let existing = dir.join("note.txt");
+        std::fs::write(&existing, b"original").unwrap();
+        assert_eq!(auto_renamed_name(&existing), "note (1).txt");
+        std::fs::write(dir.join("note (1).txt"), b"older").unwrap();
+        std::fs::create_dir(dir.join("note (2).txt")).unwrap();
+
+        let resolver = CliConflictResolver::new(localizer(), Arc::new(|| {}));
+        *lock_unpoisoned(&resolver.all) = Some(AllDecision::RenameAuto);
+        let ConflictDecision::Rename(name) = resolver.resolve(&existing, &incoming_meta()) else {
+            panic!("remembered Keep Both decision did not rename");
+        };
+        assert_eq!(name, "note (3).txt");
+        assert_eq!(std::fs::read(&existing).unwrap(), b"original");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

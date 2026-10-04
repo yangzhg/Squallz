@@ -518,6 +518,7 @@ fn unsplit_conversion_replaces_without_hidden_backup_artifacts() {
 #[test]
 fn conversion_policies_preserve_unapproved_changed_and_late_outputs() {
     use squallz_core::api::{EntryPath, ProgressSink};
+    use squallz_core::{ArchiveRepairKind, ArchiveRepairOptions};
     use std::sync::atomic::{AtomicBool, Ordering};
 
     struct LateOutput<'a> {
@@ -528,6 +529,19 @@ fn conversion_policies_preserve_unapproved_changed_and_late_outputs() {
         fn on_progress(&self, _done: u64, _total: u64, _current: &EntryPath) {
             if !self.written.swap(true, Ordering::Relaxed) {
                 fs::write(self.destination, b"late output from another app").unwrap();
+            }
+        }
+    }
+
+    struct SourceProgress<'a> {
+        visited: AtomicBool,
+        cancel: Option<&'a ControlToken>,
+    }
+    impl ProgressSink for SourceProgress<'_> {
+        fn on_progress(&self, _done: u64, _total: u64, _current: &EntryPath) {
+            self.visited.store(true, Ordering::Relaxed);
+            if let Some(ctl) = self.cancel {
+                ctl.cancel();
             }
         }
     }
@@ -660,6 +674,70 @@ fn conversion_policies_preserve_unapproved_changed_and_late_outputs() {
             .map(|entry| entry.path.display)
             .collect::<Vec<_>>()
     );
+
+    let options = ArchiveRepairOptions {
+        kind: ArchiveRepairKind::ZipIndexRebuild,
+        create: CreateOptions::default(),
+        safety_limits: squallz_core::api::SafetyLimits::default(),
+    };
+    let repair_destination = tmp.path().join("repair-late-output.zip");
+    let source_progress = SourceProgress {
+        visited: AtomicBool::new(false),
+        cancel: None,
+    };
+    let rewrite_progress = LateOutput {
+        destination: &repair_destination,
+        written: AtomicBool::new(false),
+    };
+    let error = engine()
+        .repair_archive(
+            &source,
+            &repair_destination,
+            &options,
+            &source_progress,
+            &rewrite_progress,
+            &ctl,
+        )
+        .unwrap_err();
+    assert!(source_progress.visited.load(Ordering::Relaxed));
+    assert!(rewrite_progress.written.load(Ordering::Relaxed));
+    assert!(error.is_output_exists(), "{error:?}");
+    assert_eq!(
+        fs::read(&repair_destination).unwrap(),
+        b"late output from another app"
+    );
+    assert_eq!(fs::read(&source).unwrap(), source_before);
+
+    let cancelled_destination = tmp.path().join("cancelled-repair.zip");
+    let cancelled_ctl = ControlToken::new();
+    let source_progress = SourceProgress {
+        visited: AtomicBool::new(false),
+        cancel: Some(&cancelled_ctl),
+    };
+    let rewrite_progress = LateOutput {
+        destination: &cancelled_destination,
+        written: AtomicBool::new(false),
+    };
+    let error = engine()
+        .repair_archive(
+            &source,
+            &cancelled_destination,
+            &options,
+            &source_progress,
+            &rewrite_progress,
+            &cancelled_ctl,
+        )
+        .unwrap_err();
+    assert!(matches!(error, FormatError::Cancelled), "{error:?}");
+    assert!(source_progress.visited.load(Ordering::Relaxed));
+    assert!(!rewrite_progress.written.load(Ordering::Relaxed));
+    assert!(!cancelled_destination.exists());
+    assert_eq!(fs::read(&source).unwrap(), source_before);
+    assert!(!fs::read_dir(tmp.path()).unwrap().any(|entry| entry
+        .unwrap()
+        .file_name()
+        .to_string_lossy()
+        .contains(".convert-")));
 }
 
 #[test]

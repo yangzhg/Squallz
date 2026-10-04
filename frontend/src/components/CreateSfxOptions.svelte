@@ -32,6 +32,14 @@
     tr: (key: string, fallback: string) => string;
     onEnabledChange: (enabled: boolean) => void;
   } = $props();
+
+  function changeEnabled(event: Event) {
+    const input = event.currentTarget as HTMLInputElement;
+    const requested = input.checked;
+    // Keep the control in sync when the parent rejects this change.
+    input.checked = enabled;
+    onEnabledChange(requested);
+  }
 </script>
 
 {#snippet fields()}
@@ -43,7 +51,7 @@
       disabled={!available || disabled}
       aria-describedby={`${variant}-create-sfx-detail`}
       aria-label={disabledReason ? `${toggleLabel} · ${disabledReason}` : toggleLabel}
-      onchange={(event) => onEnabledChange((event.currentTarget as HTMLInputElement).checked)}
+      onchange={changeEnabled}
     />
     <span>{toggleLabel}</span>
   </label>

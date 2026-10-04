@@ -7,17 +7,17 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use squallz_core::api::{
-    unix_seconds, ArchiveSourceSet, ArchiveStructureStatus, BoundedProblemLog, CompressionLevel,
-    ConflictDecision, ConflictResolver, ControlToken, CreateOptions, EntryMeta, EntryPath,
-    EntrySelection, ExtractProblemReporter, ExtractReport, FormatError, OpenOptions,
-    OverwritePolicy, Password, ProblemPreview, ProgressPhase, ProgressSink, RecoverySummary,
-    SafetyLimits, SymlinkPolicy, UpdateOp, UpdateOptions,
+    first_free_numbered_sibling_name, unix_seconds, ArchiveSourceSet, ArchiveStructureStatus,
+    BoundedProblemLog, CompressionLevel, ConflictDecision, ConflictResolver, ControlToken,
+    CreateOptions, EntryMeta, EntryPath, EntrySelection, ExtractProblemReporter, ExtractReport,
+    FormatError, OpenOptions, OverwritePolicy, Password, ProblemPreview, ProgressPhase,
+    ProgressSink, RecoverySummary, SafetyLimits, SymlinkPolicy, UpdateOp, UpdateOptions,
 };
 use squallz_core::{
-    create_destination_has_conflict, is_plain_sqz_path, is_sqz_archive_path, is_zip_family_path,
-    lock_unpoisoned, CreateArtifactKind, CreateCommitPolicy, CreateDestinationGuard, CreateReport,
-    Engine, ExtractInputGuard, ExtractPlan, PostSuccessAction, SfxBuildOptions, SfxBuildReport,
-    SfxTarget,
+    create_destination_has_conflict, is_sqz_archive_path, lock_unpoisoned, ArchiveRepairKind,
+    ArchiveRepairOptions, ArchiveRepairOutcome, CreateArtifactKind, CreateCommitPolicy,
+    CreateDestinationGuard, CreateReport, Engine, ExtractInputGuard, ExtractPlan,
+    PostSuccessAction, SfxBuildOptions, SfxBuildReport, SfxTarget,
 };
 use squallz_publish::{publish_macos_sfx, MacosSfxPublishPhase};
 
@@ -42,20 +42,6 @@ fn metadata_len_or_zero(meta: Option<&fs::Metadata>) -> u64 {
     match meta {
         Some(meta) => meta.len(),
         None => 0,
-    }
-}
-
-fn path_stem_or_empty(path: &Path) -> String {
-    match path.file_stem() {
-        Some(stem) => stem.to_string_lossy().into_owned(),
-        None => String::new(),
-    }
-}
-
-fn path_parent_or_empty(path: &Path) -> &Path {
-    match path.parent() {
-        Some(parent) => parent,
-        None => Path::new(""),
     }
 }
 
@@ -252,23 +238,16 @@ impl ExtractProblemReporter for ExtractProblemCollector {
     }
 }
 
-/// Picks the first free `name (n).ext` sibling (mirrors the engine's
-/// RenameBoth policy; the conflict dialog's Keep Both button).
+/// Keeps the GUI's process/time fallback when all numbered siblings are occupied.
 fn auto_renamed_name(existing: &Path) -> String {
-    let stem = path_stem_or_empty(existing);
-    let ext = existing
-        .extension()
-        .map(|e| e.to_string_lossy().into_owned());
-    let parent = path_parent_or_empty(existing);
-    for n in 1u32..=u32::MAX {
-        let name = match &ext {
-            Some(ext) => format!("{stem} ({n}).{ext}"),
-            None => format!("{stem} ({n})"),
-        };
-        if std::fs::symlink_metadata(parent.join(&name)).is_err() {
-            return name;
-        }
+    if let Some(name) = first_free_numbered_sibling_name(existing) {
+        return name;
     }
+    let stem = existing
+        .file_stem()
+        .map(|value| value.to_string_lossy())
+        .unwrap_or_default();
+    let ext = existing.extension().map(|value| value.to_string_lossy());
     let suffix = format!("{}-{}", std::process::id(), audit::now_millis());
     match &ext {
         Some(ext) => format!("{stem} ({suffix}).{ext}"),
@@ -1323,99 +1302,54 @@ impl JobContext<'_> {
                     "dest": dest_path.to_string_lossy(),
                 })))
             }
-            JobSpec::RepairSqz { src, dest, level } => {
+            JobSpec::RepairSqz { src, dest, level } | JobSpec::RepairZip { src, dest, level } => {
                 let src_path = PathBuf::from(src);
                 let dest_path = PathBuf::from(dest);
-                if !is_sqz_archive_path(&src_path) {
-                    return Err(FormatError::Unsupported(
-                        "SQZ repair expects a .sqz source container".into(),
-                    ));
-                }
-                if !is_plain_sqz_path(&dest_path) {
-                    return Err(FormatError::Unsupported(
-                        "SQZ repair output must be a .sqz container".into(),
-                    ));
-                }
-                let create = CreateOptions {
-                    level: CompressionLevel::from_numeric(*level),
-                    resources: settings.resource_options(),
-                    ..CreateOptions::default()
+                let kind = if matches!(spec, JobSpec::RepairSqz { .. }) {
+                    ArchiveRepairKind::SqzEmbedded
+                } else {
+                    ArchiveRepairKind::ZipIndexRebuild
                 };
-                let test_report = state.engine.test_summary(
-                    &src_path,
-                    &OpenOptions::default(),
-                    &settings.safety_limits(),
-                    sink,
-                    ctl,
-                )?;
-                if !test_report.is_ok() {
-                    let detail = if test_report.problems.messages.is_empty() {
-                        "archive integrity test failed".to_owned()
-                    } else {
-                        test_report.problems.messages.join("; ")
-                    };
-                    return Err(FormatError::CorruptArchive(detail));
-                }
-                let in_place = state.engine.convert_with_atomic_replace(
-                    &src_path,
-                    &dest_path,
-                    &OpenOptions::default(),
-                    &create,
-                    sink,
-                    ctl,
-                )?;
-                Ok(Some(serde_json::json!({
-                    "dest": dest_path.to_string_lossy(),
-                    "in_place": in_place,
-                    "recovery": test_report.recovery.as_ref().map(recovery_summary_json),
-                })))
-            }
-            JobSpec::RepairZip { src, dest, level } => {
-                let src_path = PathBuf::from(src);
-                let dest_path = PathBuf::from(dest);
-                if !is_zip_family_path(&src_path) {
-                    return Err(FormatError::Unsupported(
-                        "ZIP index rebuild expects a ZIP-family source archive".into(),
-                    ));
-                }
-                if !is_zip_family_path(&dest_path) {
-                    return Err(FormatError::Unsupported(
-                        "ZIP index rebuild output must be a ZIP-family archive".into(),
-                    ));
-                }
-                let source_test = state.engine.test_summary_with_structure(
-                    &src_path,
-                    &OpenOptions::default(),
-                    &settings.safety_limits(),
-                    sink,
-                    ctl,
-                )?;
-                if !source_test.payload_is_ok() {
-                    return Err(FormatError::CorruptArchive(
-                        source_test.summary.problems.messages.join("; "),
-                    ));
-                }
-                let source_entries = source_test.summary.entries_tested;
-                let create = CreateOptions {
-                    level: CompressionLevel::from_numeric(*level),
-                    resources: settings.resource_options(),
-                    ..CreateOptions::default()
+                let options = ArchiveRepairOptions {
+                    kind,
+                    create: CreateOptions {
+                        level: CompressionLevel::from_numeric(*level),
+                        resources: settings.resource_options(),
+                        ..CreateOptions::default()
+                    },
+                    safety_limits: settings.safety_limits(),
                 };
-                let in_place = state.engine.convert_with_atomic_replace(
-                    &src_path,
-                    &dest_path,
-                    &OpenOptions::default(),
-                    &create,
-                    sink,
-                    ctl,
-                )?;
-                Ok(Some(serde_json::json!({
-                    "operation": "repair_zip",
-                    "tool": "zip-local-header-rebuild",
-                    "dest": dest_path.to_string_lossy(),
-                    "in_place": in_place,
-                    "source_entries": source_entries,
-                })))
+                let (source, in_place) = match state
+                    .engine
+                    .repair_archive(&src_path, &dest_path, &options, sink, sink, ctl)?
+                {
+                    ArchiveRepairOutcome::Repaired { source, in_place } => (source, in_place),
+                    ArchiveRepairOutcome::SourceRejected(source) => {
+                        let detail = if kind == ArchiveRepairKind::SqzEmbedded
+                            && source.summary.problems.messages.is_empty()
+                        {
+                            "archive integrity test failed".to_owned()
+                        } else {
+                            source.summary.problems.messages.join("; ")
+                        };
+                        return Err(FormatError::CorruptArchive(detail));
+                    }
+                };
+                let result = match kind {
+                    ArchiveRepairKind::SqzEmbedded => serde_json::json!({
+                        "dest": dest_path.to_string_lossy(),
+                        "in_place": in_place,
+                        "recovery": source.summary.recovery.as_ref().map(recovery_summary_json),
+                    }),
+                    ArchiveRepairKind::ZipIndexRebuild => serde_json::json!({
+                        "operation": "repair_zip",
+                        "tool": "zip-local-header-rebuild",
+                        "dest": dest_path.to_string_lossy(),
+                        "in_place": in_place,
+                        "source_entries": source.summary.entries_tested,
+                    }),
+                };
+                Ok(Some(result))
             }
             JobSpec::Protect {
                 path,

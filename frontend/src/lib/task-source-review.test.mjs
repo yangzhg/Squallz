@@ -1,14 +1,12 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
-import ts from "typescript";
+import { compileTestScript, readSvelteScript, selectFunctions } from "../../tests/source.mjs";
 
 function harness() {
-  const component=readFileSync(new URL("../App.svelte",import.meta.url),"utf8");
-  const source=ts.createSourceFile("App.ts",component.match(/<script lang="ts">([\s\S]*?)<\/script>/)[1],ts.ScriptTarget.Latest,true);
+  const source = readSvelteScript(new URL("../App.svelte", import.meta.url), "App.ts");
   const names=["cancelTaskReview","prepareTaskReview","closeTaskCenter","openTaskCenterDetails","returnToTaskCenter","adoptRecoveryTargetFromTask","testTaskUsesRecoveryContext","dismissRecoveryPreparation"];
-  const declarations=source.statements.filter((node)=>ts.isFunctionDeclaration(node)&&names.includes(node.name?.text));
+  const declarations = selectFunctions(source, names);
   const calls=[];
   const context={taskWindowMode:false,taskReviewRequestGeneration:0,pendingTaskReviewId:null,screen:"browse",currentArchive:{id:1},
     taskReviewScreen:()=>"extract",previewTaskSpecForReview:()=>null,
@@ -22,9 +20,7 @@ function harness() {
     recoveryPickerStatus:"idle",recoveryPickerRequest:0,recoveryOutputPreparation:null,
     recoverySourcePath:()=>null,recoveryContextTaskIds:new Set(),
   };
-  const {outputText}=ts.transpileModule(declarations.map(node=>node.getText(source)).join("\n"),{
-    compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS},
-  });
+  const outputText = compileTestScript(declarations.map((node) => node.getText(source)).join("\n"));
   const api=vm.runInNewContext(`${outputText}\n({${names.join(",")}})`,context);
   return {review:api.prepareTaskReview,api,context,calls};
 }

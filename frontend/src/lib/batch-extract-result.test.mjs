@@ -4,6 +4,7 @@ import test from "node:test";
 import vm from "node:vm";
 import ts from "typescript";
 import { createTestServer } from "../../tests/runtime.mjs";
+import { compileTestScript, selectFunctions } from "../../tests/source.mjs";
 
 test("batch completion feedback keeps archive and entry failures distinct in both languages", async () => {
   const server = await createTestServer();
@@ -14,10 +15,8 @@ test("batch completion feedback keeps archive and entry failures distinct in bot
     const code = readFileSync(new URL("./jobs.svelte.ts", import.meta.url), "utf8");
     const source = ts.createSourceFile("jobs.ts", code, ts.ScriptTarget.Latest, true);
     const names = ["terminalHistoryStatus", "taskHistoryDetail", "cleanHistoryDetail", "finishToast", "isRecoveryDiagnosticTask"];
-    const declarations = source.statements.filter((node) => ts.isFunctionDeclaration(node) && names.includes(node.name?.text));
-    const { outputText } = ts.transpileModule(declarations.map((node) => node.getText(source)).join("\n"), {
-      compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
-    });
+    const declarations = selectFunctions(source, names);
+    const outputText = compileTestScript(declarations.map((node) => node.getText(source)).join("\n"));
     const toasts = [];
     const run = vm.runInNewContext(`${outputText}\n({${names.join(",")}})`, {
       ...results, ...extraction, ...i18n, revealAfterExtract: false,

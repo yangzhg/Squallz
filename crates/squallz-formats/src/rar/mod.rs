@@ -8,6 +8,7 @@
 //! External readers only list or stream entries; extraction still flows
 //! through the shared safe extraction engine.
 
+mod bsdtar_listing;
 mod volume;
 
 use std::collections::BTreeMap;
@@ -24,7 +25,7 @@ use squallz_format_api::{
 };
 
 use crate::external_process::ControlledChild;
-use crate::{external_process, sevenzip_bridge};
+use crate::sevenzip_bridge;
 use volume::StagedRarSet;
 
 const RAR4_MAGIC: &[u8] = b"Rar!\x1A\x07\x00";
@@ -394,8 +395,7 @@ impl RarBackend {
             let listing = sevenzip_bridge::list_entries_with_archive_properties(
                 &sevenzip, archive, None, ctl,
             )?;
-            let rar7_v6 =
-                rar7_v6_listing_is_confirmed_unencrypted(&String::from_utf8_lossy(&listing.stdout));
+            let rar7_v6 = listing.compatibility.rar7_v6_confirmed_unencrypted;
             let listing = RarListing::from_sevenzip(listing);
             if rar7_v6 {
                 if let Some(unrar) = unrar_tool_if_available() {
@@ -456,7 +456,7 @@ impl RarBackend {
                 Ok(RarListing::from_sevenzip(listing))
             }
             Self::Bsdtar(tool) => Ok(RarListing {
-                entries: list_bsdtar_entries(tool, archive, ctl)?,
+                entries: bsdtar_listing::list_entries(tool, archive, ctl)?,
                 archive: None,
             }),
         }
@@ -498,12 +498,10 @@ fn select_single_unencrypted_backend(
     unrar: Option<PathBuf>,
     ctl: &ControlToken,
 ) -> Result<SelectedRarBackend, FormatError> {
-    let listing_text = String::from_utf8_lossy(&listing.stdout);
-    let rar7_v6 = rar7_v6_listing_is_confirmed_unencrypted(&listing_text);
-    let legacy_p7zip_rar5 = legacy_p7zip_rar5_decoder_gap(&listing_text);
+    let compatibility = listing.compatibility;
     let listing = RarListing::from_sevenzip(listing);
 
-    if rar7_v6 {
+    if compatibility.rar7_v6_confirmed_unencrypted {
         if let Some(bsdtar) = bsdtar {
             return Ok(SelectedRarBackend {
                 backend: RarBackend::Bsdtar(bsdtar),
@@ -516,7 +514,7 @@ fn select_single_unencrypted_backend(
                 listing: Some(listing),
             });
         }
-    } else if legacy_p7zip_rar5 {
+    } else if compatibility.legacy_p7zip_rar5_decoder_gap {
         if let Some(bsdtar) = bsdtar {
             match bsdtar_listing_matches(&listing.entries, &bsdtar, archive, ctl) {
                 Ok(true) => {
@@ -537,58 +535,6 @@ fn select_single_unencrypted_backend(
     })
 }
 
-fn legacy_p7zip_rar5_decoder_gap(text: &str) -> bool {
-    let legacy_p7zip = text
-        .lines()
-        .any(|line| line.trim_start().starts_with("p7zip Version 16.02 "));
-    let rar5 = text.lines().any(|line| line.trim() == "Type = Rar5");
-    if !legacy_p7zip || !rar5 {
-        return false;
-    }
-
-    let mut has_path = false;
-    let mut has_entry_field = false;
-    let mut compressed = false;
-    let mut encrypted = None;
-    let mut compressed_entry = false;
-    for line in text.lines().chain(std::iter::once("")) {
-        if line.is_empty() {
-            if has_path && has_entry_field {
-                if encrypted != Some(false) {
-                    return false;
-                }
-                compressed_entry |= compressed;
-            }
-            has_path = false;
-            has_entry_field = false;
-            compressed = false;
-            encrypted = None;
-            continue;
-        }
-        let Some((key, value)) = line.split_once(" = ") else {
-            continue;
-        };
-        let value = value.trim();
-        match key.trim() {
-            "Path" => has_path = !value.is_empty(),
-            "Folder" | "Size" | "Packed Size" | "Attributes" | "CRC" => {
-                has_entry_field = true;
-            }
-            "Method" => {
-                compressed = value
-                    .strip_prefix('m')
-                    .and_then(|method| method.as_bytes().first())
-                    .is_some_and(|level| matches!(level, b'1'..=b'5'));
-            }
-            "Encrypted" if value == "-" => encrypted = Some(false),
-            "Encrypted" => return false,
-            "Symbolic Link" | "Hard Link" | "Copy Link" if !value.is_empty() => return false,
-            _ => {}
-        }
-    }
-    compressed_entry
-}
-
 fn bsdtar_listing_matches(
     sevenzip_entries: &[EntryMeta],
     tool: &Path,
@@ -601,7 +547,7 @@ fn bsdtar_listing_matches(
     let Some(sevenzip_files) = literal_regular_files(sevenzip_entries, false) else {
         return Ok(false);
     };
-    let bsdtar_entries = list_bsdtar_entries(tool, archive, ctl)?;
+    let bsdtar_entries = bsdtar_listing::list_entries(tool, archive, ctl)?;
     let Some(bsdtar_files) = literal_regular_files(&bsdtar_entries, true) else {
         return Ok(false);
     };
@@ -691,111 +637,6 @@ fn detect_unrar_backend(
     }
 }
 
-fn rar7_v6_listing_is_confirmed_unencrypted(text: &str) -> bool {
-    let mut has_path = false;
-    let mut has_entry_field = false;
-    let mut v6_method = false;
-    let mut encrypted = None;
-    let mut confirmed_v6_entry = false;
-    for line in text.lines().chain(std::iter::once("")) {
-        if line.is_empty() {
-            if has_path && has_entry_field {
-                if encrypted != Some(false) {
-                    return false;
-                }
-                confirmed_v6_entry |= v6_method;
-            }
-            has_path = false;
-            has_entry_field = false;
-            v6_method = false;
-            encrypted = None;
-            continue;
-        }
-        let Some((key, value)) = line.split_once(" = ") else {
-            continue;
-        };
-        let value = value.trim();
-        match key {
-            "Path" => has_path = !value.is_empty(),
-            "Folder" | "Size" | "Packed Size" | "Attributes" | "CRC" => {
-                has_entry_field = true;
-            }
-            "Method" if value.starts_with("v6:") => v6_method = true,
-            "Encrypted" if value == "-" => encrypted = Some(false),
-            "Encrypted" => return false,
-            _ => {}
-        }
-    }
-    confirmed_v6_entry
-}
-
-fn list_bsdtar_entries(
-    tool: &Path,
-    archive: &Path,
-    ctl: &ControlToken,
-) -> Result<Vec<EntryMeta>, FormatError> {
-    let names = run_bsdtar_output(tool, archive, "-tf", ctl)?;
-    let verbose = match run_bsdtar_output(tool, archive, "-tvf", ctl) {
-        Ok(output) => Some(output),
-        Err(FormatError::Cancelled) => return Err(FormatError::Cancelled),
-        Err(_) => None,
-    };
-    let verbose_lines = split_verbose_output(verbose.as_ref());
-
-    let mut entries = Vec::new();
-    for (idx, raw) in names.stdout.split(|b| *b == b'\n').enumerate() {
-        let raw = trim_cr(raw);
-        if raw.is_empty() {
-            continue;
-        }
-        let display = String::from_utf8_lossy(raw).into_owned();
-        let detail = verbose_lines
-            .get(idx)
-            .and_then(|line| parse_verbose_entry(line));
-        let entry_type = entry_type_from_detail_or_display(detail.as_ref(), &display);
-        entries.push(EntryMeta {
-            path: EntryPath::from_raw(raw.to_vec(), display.clone(), "utf-8"),
-            entry_type,
-            size: detail_size(detail.as_ref()),
-            compressed_size: None,
-            modified: None,
-            unix_mode: detail.and_then(|detail| detail.unix_mode),
-            crc32: None,
-            encrypted: false,
-        });
-    }
-    Ok(entries)
-}
-
-fn split_verbose_output(output: Option<&std::process::Output>) -> Vec<&[u8]> {
-    match output {
-        Some(output) => output.stdout.split(|b| *b == b'\n').collect(),
-        None => Vec::new(),
-    }
-}
-
-fn trim_cr(raw: &[u8]) -> &[u8] {
-    match raw.strip_suffix(b"\r") {
-        Some(stripped) => stripped,
-        None => raw,
-    }
-}
-
-fn entry_type_from_detail_or_display(detail: Option<&VerboseEntry>, display: &str) -> EntryType {
-    match detail {
-        Some(detail) => detail.entry_type.clone(),
-        None if display.ends_with('/') => EntryType::Dir,
-        None => EntryType::File,
-    }
-}
-
-fn detail_size(detail: Option<&VerboseEntry>) -> u64 {
-    match detail {
-        Some(detail) => detail.size,
-        None => 0,
-    }
-}
-
 fn read_bsdtar_entry_stdout(
     tool: &Path,
     archive: &Path,
@@ -865,130 +706,11 @@ fn read_unrar_entry_stdout(
     }))
 }
 
-fn run_bsdtar_output(
-    tool: &Path,
-    archive: &Path,
-    flag: &str,
-    ctl: &ControlToken,
-) -> Result<std::process::Output, FormatError> {
-    ctl.checkpoint()?;
-    let child = Command::new(tool)
-        .arg(flag)
-        .arg(archive)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| map_tool_spawn_error(error, "bsdtar with RAR/libarchive support"))?;
-    let output = external_process::wait_with_output(child, ctl, "bsdtar")?;
-    if !output.status.success() {
-        return Err(map_tool_failure(&output.stderr));
-    }
-    Ok(output)
-}
-
-struct VerboseEntry {
-    entry_type: EntryType,
-    size: u64,
-    unix_mode: Option<u32>,
-}
-
-fn parse_verbose_entry(raw: &[u8]) -> Option<VerboseEntry> {
-    let raw = trim_cr(raw);
-    if raw.is_empty() {
-        return None;
-    }
-    let line = String::from_utf8_lossy(raw);
-    let mut parts = line.split_whitespace();
-    let mode = parts.next()?;
-    let _links = parts.next()?;
-    let _owner = parts.next()?;
-    let _group = parts.next()?;
-    let size = parts.next()?.parse().ok()?;
-    let _month = parts.next()?;
-    let _day = parts.next()?;
-    let _time_or_year = parts.next()?;
-    let rest = parts.collect::<Vec<_>>().join(" ");
-    if rest.is_empty() {
-        return None;
-    }
-    let entry_type = match mode.as_bytes().first().copied()? {
-        b'd' => EntryType::Dir,
-        b'l' => {
-            let target = symlink_target_from_verbose_rest(&rest);
-            EntryType::Symlink {
-                target: target.as_bytes().to_vec(),
-            }
-        }
-        _ => EntryType::File,
-    };
-    Some(VerboseEntry {
-        entry_type,
-        size,
-        unix_mode: unix_mode_from_verbose(mode),
-    })
-}
-
-fn symlink_target_from_verbose_rest(rest: &str) -> &str {
-    match rest.split_once(" -> ") {
-        Some((_, target)) => target,
-        None => "",
-    }
-}
-
-fn unix_mode_from_verbose(mode: &str) -> Option<u32> {
-    let bytes = mode.as_bytes();
-    if bytes.len() < 10 {
-        return None;
-    }
-    let kind = match bytes[0] {
-        b'd' => 0o040000,
-        b'l' => 0o120000,
-        b'-' => 0o100000,
-        _ => 0,
-    };
-    let mut perms = 0u32;
-    for (idx, byte) in bytes[1..10].iter().enumerate() {
-        let bit = match idx {
-            0 => 0o400,
-            1 => 0o200,
-            2 => 0o100,
-            3 => 0o040,
-            4 => 0o020,
-            5 => 0o010,
-            6 => 0o004,
-            7 => 0o002,
-            8 => 0o001,
-            _ => 0,
-        };
-        if *byte != b'-' {
-            perms |= bit;
-        }
-    }
-    Some(kind | perms)
-}
-
 fn map_tool_spawn_error(e: io::Error, dependency: &'static str) -> FormatError {
     if e.kind() == io::ErrorKind::NotFound {
         FormatError::DependencyMissing(dependency.into())
     } else {
         FormatError::from(e)
-    }
-}
-
-fn map_tool_failure(stderr: &[u8]) -> FormatError {
-    let detail = String::from_utf8_lossy(stderr).trim().to_owned();
-    let lower = detail.to_lowercase();
-    if lower.contains("unsupported") || lower.contains("not supported") {
-        FormatError::DependencyMissing("bsdtar with RAR/libarchive support".into())
-    } else if lower.contains("password") {
-        FormatError::PasswordRequired
-    } else {
-        FormatError::CorruptArchive(if detail.is_empty() {
-            "bsdtar could not read RAR archive".into()
-        } else {
-            detail
-        })
     }
 }
 
@@ -1085,13 +807,11 @@ mod tests {
         path
     }
 
-    #[cfg(unix)]
     struct EnvRestore {
         key: &'static str,
         old: Option<std::ffi::OsString>,
     }
 
-    #[cfg(unix)]
     impl EnvRestore {
         fn capture(key: &'static str) -> Self {
             Self {
@@ -1101,7 +821,6 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
     impl Drop for EnvRestore {
         fn drop(&mut self) {
             match &self.old {
@@ -1160,31 +879,9 @@ mod tests {
     }
 
     #[test]
-    fn rar_verbose_parser_handles_cr_and_missing_symlink_target() {
-        let symlink = parse_verbose_entry(
-            b"lrwxrwxrwx  0 0      0           0 Jan  1  2020 link -> hello.txt\r",
-        )
-        .expect("symlink verbose entry");
-        assert_eq!(symlink.size, 0);
-        assert_eq!(symlink.unix_mode, Some(0o120777));
-        assert!(matches!(
-            symlink.entry_type,
-            EntryType::Symlink { target } if target == b"hello.txt"
-        ));
-
-        let symlink_without_arrow =
-            parse_verbose_entry(b"lrwxrwxrwx  0 0      0           0 Jan  1  2020 link")
-                .expect("symlink without arrow still parses");
-        assert!(matches!(
-            symlink_without_arrow.entry_type,
-            EntryType::Symlink { target } if target.is_empty()
-        ));
-    }
-
-    #[test]
     fn rar_open_reports_missing_external_tool() {
         let _guard = env_lock();
-        let old = std::env::var_os("SQUALLZ_BSDTAR");
+        let _restore_tool = EnvRestore::capture("SQUALLZ_BSDTAR");
         std::env::set_var("SQUALLZ_BSDTAR", "/definitely/missing/squallz-bsdtar");
 
         let path = temp_path("missing", "rar");
@@ -1199,10 +896,6 @@ mod tests {
         assert!(matches!(err, FormatError::DependencyMissing(_)), "{err:?}");
 
         let _ = fs::remove_file(path);
-        match old {
-            Some(value) => std::env::set_var("SQUALLZ_BSDTAR", value),
-            None => std::env::remove_var("SQUALLZ_BSDTAR"),
-        }
     }
 
     #[test]
@@ -1224,26 +917,8 @@ mod tests {
     fn rar_bridge_rejects_empty_listing_from_nonempty_rar() {
         use std::os::unix::fs::PermissionsExt;
 
-        struct EnvRestore {
-            key: &'static str,
-            old: Option<std::ffi::OsString>,
-        }
-
-        impl Drop for EnvRestore {
-            fn drop(&mut self) {
-                match &self.old {
-                    Some(value) => std::env::set_var(self.key, value),
-                    None => std::env::remove_var(self.key),
-                }
-            }
-        }
-
         let _guard = env_lock();
-        let old_tool = std::env::var_os("SQUALLZ_BSDTAR");
-        let _restore_tool = EnvRestore {
-            key: "SQUALLZ_BSDTAR",
-            old: old_tool,
-        };
+        let _restore_tool = EnvRestore::capture("SQUALLZ_BSDTAR");
 
         let script = temp_path("empty-bsdtar", "sh");
         let archive = temp_path("empty-listing", "rar");
@@ -1281,33 +956,10 @@ exit 2
     fn rar_bridge_prefers_7z_for_listing_testing_and_entry_streams() {
         use std::os::unix::fs::PermissionsExt;
 
-        struct EnvRestore {
-            key: &'static str,
-            old: Option<std::ffi::OsString>,
-        }
-
-        impl Drop for EnvRestore {
-            fn drop(&mut self) {
-                match &self.old {
-                    Some(value) => std::env::set_var(self.key, value),
-                    None => std::env::remove_var(self.key),
-                }
-            }
-        }
-
         let _guard = env_lock();
-        let _restore_7z = EnvRestore {
-            key: "SQUALLZ_7Z",
-            old: std::env::var_os("SQUALLZ_7Z"),
-        };
-        let _restore_bsdtar = EnvRestore {
-            key: "SQUALLZ_BSDTAR",
-            old: std::env::var_os("SQUALLZ_BSDTAR"),
-        };
-        let _restore_log = EnvRestore {
-            key: "SQUALLZ_FAKE_7Z_LOG",
-            old: std::env::var_os("SQUALLZ_FAKE_7Z_LOG"),
-        };
+        let _restore_7z = EnvRestore::capture("SQUALLZ_7Z");
+        let _restore_bsdtar = EnvRestore::capture("SQUALLZ_BSDTAR");
+        let _restore_log = EnvRestore::capture("SQUALLZ_FAKE_7Z_LOG");
 
         let script = temp_path("fake-7z", "sh");
         let log = temp_path("fake-7z", "log");
@@ -1448,33 +1100,10 @@ exit 2
     fn rar_native_multivolume_uses_private_first_volume_from_any_member() {
         use std::os::unix::fs::PermissionsExt;
 
-        struct EnvRestore {
-            key: &'static str,
-            old: Option<std::ffi::OsString>,
-        }
-
-        impl Drop for EnvRestore {
-            fn drop(&mut self) {
-                match &self.old {
-                    Some(value) => std::env::set_var(self.key, value),
-                    None => std::env::remove_var(self.key),
-                }
-            }
-        }
-
         let _guard = env_lock();
-        let _restore_7z = EnvRestore {
-            key: "SQUALLZ_7Z",
-            old: std::env::var_os("SQUALLZ_7Z"),
-        };
-        let _restore_bsdtar = EnvRestore {
-            key: "SQUALLZ_BSDTAR",
-            old: std::env::var_os("SQUALLZ_BSDTAR"),
-        };
-        let _restore_log = EnvRestore {
-            key: "SQUALLZ_FAKE_7Z_LOG",
-            old: std::env::var_os("SQUALLZ_FAKE_7Z_LOG"),
-        };
+        let _restore_7z = EnvRestore::capture("SQUALLZ_7Z");
+        let _restore_bsdtar = EnvRestore::capture("SQUALLZ_BSDTAR");
+        let _restore_log = EnvRestore::capture("SQUALLZ_FAKE_7Z_LOG");
 
         let source_dir = temp_path("native-volume-source", "dir");
         let _ = fs::remove_dir_all(&source_dir);
@@ -1584,29 +1213,9 @@ exit 2
     fn rar_header_encrypted_multivolume_is_verified_and_opened_from_any_member() {
         use std::os::unix::fs::PermissionsExt;
 
-        struct EnvRestore {
-            key: &'static str,
-            old: Option<std::ffi::OsString>,
-        }
-
-        impl Drop for EnvRestore {
-            fn drop(&mut self) {
-                match &self.old {
-                    Some(value) => std::env::set_var(self.key, value),
-                    None => std::env::remove_var(self.key),
-                }
-            }
-        }
-
         let _guard = env_lock();
-        let _restore_7z = EnvRestore {
-            key: "SQUALLZ_7Z",
-            old: std::env::var_os("SQUALLZ_7Z"),
-        };
-        let _restore_bsdtar = EnvRestore {
-            key: "SQUALLZ_BSDTAR",
-            old: std::env::var_os("SQUALLZ_BSDTAR"),
-        };
+        let _restore_7z = EnvRestore::capture("SQUALLZ_7Z");
+        let _restore_bsdtar = EnvRestore::capture("SQUALLZ_BSDTAR");
 
         let source_dir = temp_path("header-encrypted-volume-source", "dir");
         let _ = fs::remove_dir_all(&source_dir);
@@ -1725,54 +1334,6 @@ exit 2
 
         fs::remove_file(script).unwrap();
         fs::remove_dir_all(source_dir).unwrap();
-    }
-
-    #[test]
-    fn rar7_v6_detection_requires_positive_unencrypted_evidence() {
-        assert!(rar7_v6_listing_is_confirmed_unencrypted(
-            "Path = hello.txt\nSize = 5\nMethod = v6:m3:128K\nEncrypted = -\n"
-        ));
-        assert!(!rar7_v6_listing_is_confirmed_unencrypted(
-            "Path = hello.txt\nSize = 5\nMethod = v6:m3:128K\n"
-        ));
-        assert!(!rar7_v6_listing_is_confirmed_unencrypted(
-            "Path = hello.txt\nSize = 5\nMethod = v6:m3:128K\nEncrypted = -\n\n\
-             Path = secret.txt\nSize = 6\nMethod = v6:m3:128K\nEncrypted = +\n"
-        ));
-        assert!(!rar7_v6_listing_is_confirmed_unencrypted(
-            "Path = hello.txt\nSize = 5\nMethod = m5:128K\nEncrypted = -\n"
-        ));
-        assert!(!rar7_v6_listing_is_confirmed_unencrypted(
-            "Path = hello.txt\nSize = 5\nMethod = v6:m3:128K\nEncrypted = -\n\n\
-             Path = unknown.txt\nSize = 7\nMethod = v6:m3:128K\n"
-        ));
-    }
-
-    #[test]
-    fn legacy_p7zip_rar5_detection_is_narrow() {
-        let compressed_rar5 = "7-Zip [64] 16.02\n\
-            p7zip Version 16.02 (locale=C)\n\n\
-            Path = archive.rar\nType = Rar5\nPhysical Size = 100\n\n\
-            Path = hello.txt\nSize = 5\nMethod = m5:17\nEncrypted = -\n";
-        assert!(legacy_p7zip_rar5_decoder_gap(compressed_rar5));
-        assert!(!legacy_p7zip_rar5_decoder_gap(
-            &compressed_rar5.replace("p7zip Version 16.02", "7-Zip 16.02")
-        ));
-        assert!(!legacy_p7zip_rar5_decoder_gap(
-            &compressed_rar5.replace("Type = Rar5", "Type = Rar")
-        ));
-        assert!(!legacy_p7zip_rar5_decoder_gap(
-            &compressed_rar5.replace("Method = m5:17", "Method = m0")
-        ));
-        assert!(!legacy_p7zip_rar5_decoder_gap(
-            &compressed_rar5.replace("Encrypted = -", "Encrypted = +")
-        ));
-        assert!(!legacy_p7zip_rar5_decoder_gap(
-            &compressed_rar5.replace("Encrypted = -\n", "")
-        ));
-        assert!(!legacy_p7zip_rar5_decoder_gap(&format!(
-            "{compressed_rar5}Symbolic Link = target.txt\n"
-        )));
     }
 
     #[test]
@@ -1910,21 +1471,19 @@ exit 4
             fs::set_permissions(tool, permissions).unwrap();
         }
 
-        let listing = || sevenzip_bridge::SevenZipListing {
-            entries: vec![EntryMeta {
-                path: EntryPath::from_utf8("hello.txt"),
-                entry_type: EntryType::File,
-                size: 20,
-                compressed_size: Some(12),
-                modified: None,
-                unix_mode: None,
-                crc32: Some(0x1234ABCD),
-                encrypted: false,
-            }],
-            archive: sevenzip_bridge::SevenZipArchiveProperties::default(),
-            stdout: b"p7zip Version 16.02 (locale=C)\nType = Rar5\n\n\
-                Path = hello.txt\nSize = 20\nMethod = m5:17\nEncrypted = -\n"
-                .to_vec(),
+        let listing = || {
+            let parsed = sevenzip_bridge::listing::read(
+                b"p7zip Version 16.02 (locale=C)\nType = Rar5\n\n\
+                Path = hello.txt\nSize = 20\nPacked Size = 12\nCRC = 1234ABCD\n\
+                Method = m5:17\nEncrypted = -\n"
+                    .as_slice(),
+            )
+            .unwrap();
+            sevenzip_bridge::SevenZipListing {
+                entries: parsed.entries,
+                archive: parsed.archive.unwrap(),
+                compatibility: parsed.compatibility,
+            }
         };
         let selected = select_single_unencrypted_backend(
             sevenzip.clone(),
@@ -2154,28 +1713,33 @@ printf 'rar7 via unrar'
 
         let script = temp_path("cancelled-bsdtar", "sh");
         let archive = temp_path("cancelled-bsdtar-archive", "rar");
-        fs::write(
-            &script,
-            "#!/bin/sh\nif [ \"$1\" = \"-tf\" ]; then printf 'file.txt\\n'; exit 0; fi\nexec sleep 30\n",
-        )
-        .unwrap();
-        let mut permissions = fs::metadata(&script).unwrap().permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&script, permissions).unwrap();
         fs::write(&archive, RAR4_MAGIC).unwrap();
 
-        let control = ControlToken::default();
-        let cancelling_control = control.clone();
-        let canceller = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(100));
-            cancelling_control.cancel();
-        });
-        let started = Instant::now();
-        let error = list_bsdtar_entries(&script, &archive, &control).unwrap_err();
-        canceller.join().unwrap();
+        for verbose in ["exec sleep 30", "exec 1>&-; exec sleep 30"] {
+            fs::write(
+                &script,
+                format!(
+                    "#!/bin/sh\nif [ \"$1\" = \"-tf\" ]; then printf 'file.txt\\n'; exit 0; fi\n{verbose}\n"
+                ),
+            )
+            .unwrap();
+            let mut permissions = fs::metadata(&script).unwrap().permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&script, permissions).unwrap();
 
-        assert!(matches!(error, FormatError::Cancelled));
-        assert!(started.elapsed() < Duration::from_secs(5));
+            let control = ControlToken::default();
+            let cancelling_control = control.clone();
+            let canceller = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(100));
+                cancelling_control.cancel();
+            });
+            let started = Instant::now();
+            let error = bsdtar_listing::list_entries(&script, &archive, &control).unwrap_err();
+            canceller.join().unwrap();
+
+            assert!(matches!(error, FormatError::Cancelled));
+            assert!(started.elapsed() < Duration::from_secs(5));
+        }
         fs::remove_file(script).unwrap();
         fs::remove_file(archive).unwrap();
     }
@@ -2223,31 +1787,9 @@ printf 'rar7 via unrar'
     fn rar_bridge_uses_bsdtar_for_listing_testing_and_entry_streams() {
         use std::os::unix::fs::PermissionsExt;
 
-        struct EnvRestore {
-            key: &'static str,
-            old: Option<std::ffi::OsString>,
-        }
-
-        impl Drop for EnvRestore {
-            fn drop(&mut self) {
-                match &self.old {
-                    Some(value) => std::env::set_var(self.key, value),
-                    None => std::env::remove_var(self.key),
-                }
-            }
-        }
-
         let _guard = env_lock();
-        let old_tool = std::env::var_os("SQUALLZ_BSDTAR");
-        let old_log = std::env::var_os("SQUALLZ_FAKE_BSDTAR_LOG");
-        let _restore_tool = EnvRestore {
-            key: "SQUALLZ_BSDTAR",
-            old: old_tool,
-        };
-        let _restore_log = EnvRestore {
-            key: "SQUALLZ_FAKE_BSDTAR_LOG",
-            old: old_log,
-        };
+        let _restore_tool = EnvRestore::capture("SQUALLZ_BSDTAR");
+        let _restore_log = EnvRestore::capture("SQUALLZ_FAKE_BSDTAR_LOG");
 
         let script = temp_path("fake-bsdtar", "sh");
         let log = temp_path("fake-bsdtar", "log");
@@ -2344,10 +1886,125 @@ exit 2
         assert_eq!(report.entries_tested, 2);
         assert!(report.problems.is_empty(), "{:?}", report.problems);
 
-        let log = fs::read_to_string(&log).unwrap();
-        assert!(log.contains("-tf"));
-        assert!(log.contains("-xOf"));
-        assert!(log.contains("-- -dash.txt"), "{log}");
+        let log_contents = fs::read_to_string(&log).unwrap();
+        assert!(log_contents.contains("-tf"));
+        assert!(log_contents.contains("-xOf"));
+        assert!(log_contents.contains("-- -dash.txt"), "{log_contents}");
+
+        for extra_rows in [false, true] {
+            let extra = if extra_rows {
+                "printf '%s\\n' '-rw-r--r-- 0 0 0 13 Jan 1 2020 missing' 'lrwxrwxrwx 0 0 0 0 Jan 1 2020 link -> target  with   spaces -> suffix'\nprintf '%s' '-rw-r--r-- 0 0 0 999 Jan 1 2020 ignored'"
+            } else {
+                ""
+            };
+            fs::write(
+                &script,
+                format!(
+                    r#"#!/bin/sh
+if [ "$1" = "-tf" ]; then
+  printf '\r\nfolder/\r\ndupe\tname\r\ndupe\tname\r\nbroken\r\nmissing\r\nlast\377'
+  exit 0
+fi
+if [ "$1" = "-tvf" ]; then
+  printf '%s\r\n' '-rw-r--r-- 0 0 0 99 Jan 1 2020 empty-name-row' 'drwxr-xr-x 0 0 0 0 Jan 1 2020 folder/' '-rw-r--r-- 0 0 0 41 Jan 1 2020 dupe name' '-rw-r----- 0 0 0 42 Jan 1 2020 dupe name' 'malformed row'
+  {extra}
+  exit 0
+fi
+exit 3
+"#
+                ),
+            )
+            .unwrap();
+            let entries =
+                bsdtar_listing::list_entries(&script, &archive, &ControlToken::default()).unwrap();
+            assert_eq!(
+                entries
+                    .iter()
+                    .map(|entry| entry.path.raw.as_slice())
+                    .collect::<Vec<_>>(),
+                [
+                    b"folder/".as_slice(),
+                    b"dupe\tname".as_slice(),
+                    b"dupe\tname".as_slice(),
+                    b"broken".as_slice(),
+                    b"missing".as_slice(),
+                    b"last\xff".as_slice(),
+                ]
+            );
+            assert_eq!(entries[1].path.display, "dupe\tname");
+            assert_eq!(entries[5].path.display, "last�");
+            assert_eq!(
+                entries.iter().map(|entry| entry.size).collect::<Vec<_>>(),
+                [0, 41, 42, 0, if extra_rows { 13 } else { 0 }, 0]
+            );
+            assert!(matches!(entries[0].entry_type, EntryType::Dir));
+            assert_eq!(entries[0].unix_mode, Some(0o040755));
+            assert_eq!(entries[1].unix_mode, Some(0o100644));
+            assert_eq!(entries[2].unix_mode, Some(0o100640));
+            assert_eq!(entries[3].unix_mode, None);
+            if extra_rows {
+                assert_eq!(entries[4].unix_mode, Some(0o100644));
+                assert_eq!(entries[5].unix_mode, Some(0o120777));
+                assert!(matches!(
+                    &entries[5].entry_type,
+                    EntryType::Symlink { target } if target == b"target with spaces -> suffix"
+                ));
+            } else {
+                assert_eq!(entries[4].unix_mode, None);
+                assert_eq!(entries[5].unix_mode, None);
+                assert!(matches!(entries[5].entry_type, EntryType::File));
+            }
+        }
+
+        fs::write(
+            &script,
+            r#"#!/bin/sh
+if [ "$1" = "-tf" ]; then printf 'docs/\nhello.txt\nlink\n-dash.txt\n'; exit 0; fi
+if [ "$1" = "-tvf" ]; then
+  printf '%s\n' 'drwxr-xr-x 0 0 0 0 Jan 1 2020 docs/' '-rw-r--r-- 0 0 0 21 Jan 1 2020 hello.txt'
+  printf 'verbose listing failed after a valid prefix\n' >&2
+  exit 2
+fi
+exit 3
+"#,
+        )
+        .unwrap();
+        let entries =
+            bsdtar_listing::list_entries(&script, &archive, &ControlToken::default()).unwrap();
+        assert_eq!(entries.len(), 4);
+        assert!(matches!(entries[0].entry_type, EntryType::Dir));
+        assert!(entries
+            .iter()
+            .skip(1)
+            .all(|entry| matches!(entry.entry_type, EntryType::File)));
+        assert!(entries
+            .iter()
+            .all(|entry| entry.size == 0 && entry.unix_mode.is_none()));
+
+        for message in [
+            "unsupported password",
+            "password required",
+            "  names listing failed after a valid prefix  ",
+        ] {
+            fs::write(
+                &script,
+                format!(
+                    "#!/bin/sh\nprintf 'partial.txt\\n'\nprintf '%s\\n' '{message}' >&2\nexit 2\n"
+                ),
+            )
+            .unwrap();
+            let error = bsdtar_listing::list_entries(&script, &archive, &ControlToken::default())
+                .unwrap_err();
+            match message {
+                "unsupported password" => {
+                    assert!(matches!(error, FormatError::DependencyMissing(_)))
+                }
+                "password required" => assert!(matches!(error, FormatError::PasswordRequired)),
+                _ => assert!(
+                    matches!(error, FormatError::CorruptArchive(detail) if detail == message.trim())
+                ),
+            }
+        }
 
         let _ = fs::remove_file(script);
         let _ = fs::remove_file(log);

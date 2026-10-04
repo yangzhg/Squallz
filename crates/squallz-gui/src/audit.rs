@@ -5,24 +5,18 @@
 //! operation kind, final state, timestamps, and path basenames, never
 //! passwords or full user-selected path trees.
 
-use std::collections::VecDeque;
-use std::fs::{self, File, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use serde::{Deserialize, Serialize};
-use squallz_core::api::FormatError;
+use serde::Serialize;
 
 use crate::dto::JobSpec;
 use squallz_core::lock_unpoisoned;
 
-const DEFAULT_MAX_RECORDS: usize = 500;
-const DEFAULT_EXPORT_FILE_NAME: &str = "operation-audit.json";
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Serialize)]
 pub struct OperationAuditRecord {
     pub id: u64,
     pub time: u64,
@@ -45,32 +39,7 @@ pub struct OperationAuditSummary {
 
 pub struct OperationAudit {
     path: Option<PathBuf>,
-    max_records: usize,
-    records: Mutex<VecDeque<OperationAuditRecord>>,
-}
-
-fn existing_records(path: Option<&Path>, max_records: usize) -> VecDeque<OperationAuditRecord> {
-    match path {
-        Some(path) => load_existing_records(path, max_records),
-        None => VecDeque::new(),
-    }
-}
-
-fn export_parent(path: &Path) -> &Path {
-    match path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-    {
-        Some(parent) => parent,
-        None => Path::new("."),
-    }
-}
-
-fn export_file_name(path: &Path) -> &str {
-    match path.file_name().and_then(|name| name.to_str()) {
-        Some(name) => name,
-        None => DEFAULT_EXPORT_FILE_NAME,
-    }
+    write_lock: Mutex<()>,
 }
 
 fn millis_since_epoch_or_zero(time: SystemTime) -> u64 {
@@ -109,101 +78,42 @@ fn json_str_or<'a>(value: &'a serde_json::Value, key: &str, fallback: &'a str) -
 }
 
 impl OperationAudit {
-    pub fn load() -> Self {
+    pub fn persistent() -> Self {
         let path = dirs::data_dir().map(|dir| dir.join("Squallz").join("operation-audit.jsonl"));
-        Self::from_path(path, DEFAULT_MAX_RECORDS)
+        Self::from_path(path)
     }
 
     #[cfg(test)]
-    pub fn memory() -> Self {
-        Self {
-            path: None,
-            max_records: DEFAULT_MAX_RECORDS,
-            records: Mutex::new(VecDeque::new()),
-        }
+    pub fn disabled() -> Self {
+        Self::from_path(None)
     }
 
     #[cfg(test)]
-    pub fn with_path(path: PathBuf, max_records: usize) -> Self {
-        Self::from_path(Some(path), max_records)
+    pub fn with_path(path: PathBuf) -> Self {
+        Self::from_path(Some(path))
     }
 
-    fn from_path(path: Option<PathBuf>, max_records: usize) -> Self {
-        let records = existing_records(path.as_deref(), max_records);
+    fn from_path(path: Option<PathBuf>) -> Self {
         Self {
             path,
-            max_records,
-            records: Mutex::new(records),
+            write_lock: Mutex::new(()),
         }
     }
 
     pub fn append(&self, record: OperationAuditRecord) -> std::io::Result<()> {
-        {
-            let mut records = lock_unpoisoned(&self.records);
-            records.push_back(record.clone());
-            while records.len() > self.max_records {
-                records.pop_front();
-            }
+        let Some(path) = &self.path else {
+            return Ok(());
+        };
+        // A record spans multiple writes; hold the lock through its newline
+        // and flush so concurrent job completions cannot interleave JSON.
+        let _guard = lock_unpoisoned(&self.write_lock);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
         }
-
-        if let Some(path) = &self.path {
-            if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-            serde_json::to_writer(&mut file, &record)?;
-            file.write_all(b"\n")?;
-            file.flush()?;
-        }
-        Ok(())
-    }
-
-    pub fn recent(&self, limit: usize) -> Vec<OperationAuditRecord> {
-        let limit = limit.clamp(1, self.max_records);
-        lock_unpoisoned(&self.records)
-            .iter()
-            .rev()
-            .take(limit)
-            .cloned()
-            .collect()
-    }
-
-    pub fn export_json(&self, path: &Path) -> Result<(), FormatError> {
-        if path.is_dir() {
-            return Err(FormatError::Unsupported(format!(
-                "operation audit export target is a directory: {}",
-                path.display()
-            )));
-        }
-        let parent = export_parent(path);
-        fs::create_dir_all(parent)?;
-        let file_name = export_file_name(path);
-        let tmp = parent.join(format!(".{file_name}.part-{}", std::process::id()));
-        let write_result = (|| -> Result<(), FormatError> {
-            let mut file = File::create(&tmp)?;
-            let payload = serde_json::json!({
-                "generatedAt": now_millis(),
-                "records": self.recent(self.max_records),
-            });
-            serde_json::to_writer_pretty(&mut file, &payload).map_err(|e| {
-                FormatError::Other(format!("cannot serialize operation audit: {e}"))
-            })?;
-            file.write_all(b"\n")?;
-            file.sync_all()?;
-            match fs::rename(&tmp, path) {
-                Ok(()) => Ok(()),
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                    fs::remove_file(path)?;
-                    fs::rename(&tmp, path)?;
-                    Ok(())
-                }
-                Err(e) => Err(e.into()),
-            }
-        })();
-        if write_result.is_err() {
-            let _ = fs::remove_file(&tmp);
-        }
-        write_result
+        let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+        serde_json::to_writer(&mut file, &record)?;
+        file.write_all(b"\n")?;
+        file.flush()
     }
 }
 
@@ -492,25 +402,6 @@ fn append_source_cleanup_summary(mut summary: String, result: &serde_json::Value
     summary
 }
 
-fn load_existing_records(path: &Path, max_records: usize) -> VecDeque<OperationAuditRecord> {
-    let Ok(file) = File::open(path) else {
-        return VecDeque::new();
-    };
-    let mut records = VecDeque::new();
-    for line in BufReader::new(file).lines().map_while(Result::ok) {
-        if line.trim().is_empty() {
-            continue;
-        }
-        if let Ok(record) = serde_json::from_str::<OperationAuditRecord>(&line) {
-            records.push_back(record);
-            while records.len() > max_records {
-                records.pop_front();
-            }
-        }
-    }
-    records
-}
-
 fn base(path: &str) -> String {
     let path = Path::new(path);
     match path
@@ -571,6 +462,15 @@ fn plural_u64(count: u64) -> &'static str {
 }
 
 #[cfg(test)]
+pub(crate) fn read_audit_records(path: &Path) -> Vec<serde_json::Value> {
+    fs::read_to_string(path)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -583,10 +483,10 @@ mod tests {
     }
 
     #[test]
-    fn audit_persists_recent_records_and_exports_json() {
+    fn audit_persists_records_across_writers() {
         let dir = temp_dir("persist");
         let path = dir.join("operation-audit.jsonl");
-        let audit = OperationAudit::with_path(path.clone(), 2);
+        let audit = OperationAudit::with_path(path.clone());
         audit
             .append(OperationAuditRecord {
                 id: 1,
@@ -611,6 +511,8 @@ mod tests {
                 error_key: Some("error.corrupt_archive".into()),
             })
             .unwrap();
+        drop(audit);
+        let audit = OperationAudit::with_path(path.clone());
         audit
             .append(OperationAuditRecord {
                 id: 3,
@@ -624,59 +526,75 @@ mod tests {
             })
             .unwrap();
 
-        let reloaded = OperationAudit::with_path(path, 2);
-        let recent = reloaded.recent(10);
-        assert_eq!(recent.len(), 2);
-        assert_eq!(recent[0].id, 3);
-        assert_eq!(recent[1].id, 2);
-
-        let exported = dir.join("audit-export.json");
-        reloaded.export_json(&exported).unwrap();
-        let written = std::fs::read_to_string(&exported).unwrap();
-        assert!(written.contains("\"records\""));
-        assert!(written.contains("\"Extract archive\""));
-        assert!(!written.contains("first.zip"));
+        let records = read_audit_records(&path);
+        assert_eq!(records.len(), 3);
+        assert_eq!(records[0]["id"], 1);
+        assert_eq!(records[0]["detail"], "one input -> first.zip");
+        assert_eq!(records[1]["id"], 2);
+        assert_eq!(records[1]["state"], "failed");
+        assert_eq!(records[1]["error_key"], "error.corrupt_archive");
+        assert_eq!(records[2]["id"], 3);
+        assert_eq!(records[2]["result_summary"], "skipped 0");
+        assert!(records[2].get("error_key").is_none());
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
-    fn audit_load_skips_records_with_unknown_fields() {
-        let dir = temp_dir("strict-schema");
+    fn audit_concurrent_appends_remain_complete_json_lines() {
+        let dir = temp_dir("concurrent");
         let path = dir.join("operation-audit.jsonl");
-        let valid = serde_json::to_string(&OperationAuditRecord {
-            id: 2,
-            time: 20,
-            kind: "test".into(),
-            state: "done".into(),
-            title: "Test archive".into(),
-            detail: "ok.zip".into(),
-            result_summary: None,
-            error_key: None,
-        })
-        .unwrap();
-        std::fs::write(
-            &path,
-            format!(
-                "{{\"id\":1,\"time\":10,\"kind\":\"test\",\"state\":\"done\",\"title\":\"Unexpected\",\"detail\":\"unexpected.zip\",\"unexpected_field\":true}}\n{valid}\n"
-            ),
-        )
-        .unwrap();
-
-        let audit = OperationAudit::with_path(path, 10);
-        let recent = audit.recent(10);
-        assert_eq!(recent.len(), 1);
-        assert_eq!(recent[0].id, 2);
+        let audit = std::sync::Arc::new(OperationAudit::with_path(path.clone()));
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(4));
+        let detail = "concurrent\"record\n".repeat(1_024);
+        let writers: Vec<_> = (0..4)
+            .map(|worker| {
+                let audit = std::sync::Arc::clone(&audit);
+                let barrier = std::sync::Arc::clone(&barrier);
+                let detail = detail.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    for index in 0..16 {
+                        audit
+                            .append(OperationAuditRecord {
+                                id: worker * 16 + index,
+                                time: 100,
+                                kind: "test".into(),
+                                state: "done".into(),
+                                title: "Test archive".into(),
+                                detail: detail.clone(),
+                                result_summary: None,
+                                error_key: None,
+                            })
+                            .unwrap();
+                    }
+                })
+            })
+            .collect();
+        for writer in writers {
+            writer.join().unwrap();
+        }
+        let records = read_audit_records(&path);
+        assert_eq!(records.len(), 64);
+        assert!(records.iter().all(|record| record["detail"] == detail));
+        let mut ids: Vec<_> = records
+            .iter()
+            .map(|record| record["id"].as_u64().unwrap())
+            .collect();
+        ids.sort_unstable();
+        assert_eq!(ids, (0..64).collect::<Vec<_>>());
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn audit_lock_recovers_after_poison() {
-        let audit = std::sync::Arc::new(OperationAudit::memory());
+        let dir = temp_dir("poison");
+        let path = dir.join("operation-audit.jsonl");
+        let audit = std::sync::Arc::new(OperationAudit::with_path(path.clone()));
         let poisoned_audit = std::sync::Arc::clone(&audit);
         assert!(std::thread::spawn(move || {
-            let _guard = poisoned_audit.records.lock().unwrap();
+            let _guard = poisoned_audit.write_lock.lock().unwrap();
             panic!("poison operation audit");
         })
         .join()
@@ -694,15 +612,10 @@ mod tests {
                 error_key: None,
             })
             .unwrap();
-        let recent = audit.recent(10);
-        assert_eq!(recent.len(), 1);
-        assert_eq!(recent[0].id, 42);
-
-        let dir = temp_dir("poison");
-        let exported = dir.join("audit-export.json");
-        audit.export_json(&exported).unwrap();
-        let written = std::fs::read_to_string(&exported).unwrap();
-        assert!(written.contains("\"Test archive\""));
+        let records = read_audit_records(&path);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0]["id"], 42);
+        assert_eq!(records[0]["title"], "Test archive");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

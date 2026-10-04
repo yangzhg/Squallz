@@ -15,8 +15,8 @@ use squallz_core::api::{
     SqzCreateOptions, SqzInnerFormat, SymlinkPolicy, TestSummary, UpdateOp, UpdateOptions,
 };
 use squallz_core::{
-    is_plain_sqz_path, is_sqz_archive_path, is_zip_family_path, ChecksumAlgorithm,
-    CreateContentPolicy, PathFilter,
+    is_sqz_archive_path, ArchiveRepairKind, ArchiveRepairOptions, ArchiveRepairOutcome,
+    ChecksumAlgorithm, CreateContentPolicy, PathFilter,
 };
 
 use crate::args::{resource_options, safety_limits, CreateProfileArg};
@@ -465,8 +465,12 @@ fn run_job(ctx: &Ctx, base_dir: &Path, job: &BatchJob) -> Result<JobSuccess, For
         BatchJob::Convert(job) => run_convert_job(ctx, base_dir, job),
         BatchJob::Pack(job) => run_pack_job(ctx, base_dir, job),
         BatchJob::Export(job) => run_export_job(ctx, base_dir, job),
-        BatchJob::RepairSqz(job) => run_repair_sqz_job(ctx, base_dir, job),
-        BatchJob::RepairZip(job) => run_repair_zip_job(ctx, base_dir, job),
+        BatchJob::RepairSqz(job) => {
+            run_repair_job(ctx, base_dir, job, ArchiveRepairKind::SqzEmbedded)
+        }
+        BatchJob::RepairZip(job) => {
+            run_repair_job(ctx, base_dir, job, ArchiveRepairKind::ZipIndexRebuild)
+        }
         BatchJob::Protect(job) => run_protect_job(ctx, base_dir, job),
         BatchJob::VerifyRecovery(job) => run_verify_recovery_job(ctx, base_dir, job),
         BatchJob::RepairRecovery(job) => run_repair_recovery_job(ctx, base_dir, job),
@@ -896,117 +900,66 @@ fn run_export_job(ctx: &Ctx, base_dir: &Path, job: &ExportJob) -> Result<JobSucc
     })
 }
 
-fn run_repair_sqz_job(
+fn run_repair_job(
     ctx: &Ctx,
     base_dir: &Path,
     job: &RepairJob,
+    kind: ArchiveRepairKind,
 ) -> Result<JobSuccess, FormatError> {
     let archive = resolve_path(base_dir, &job.archive);
     let output = resolve_path(base_dir, &job.output);
-    if !is_sqz_archive_path(&archive) {
-        return Err(FormatError::Unsupported(
-            "batch repair_sqz expects a .sqz source container".into(),
-        ));
-    }
-    if !is_plain_sqz_path(&output) {
-        return Err(FormatError::Unsupported(
-            "batch repair_sqz output must be a .sqz container".into(),
-        ));
-    }
-    let source_report = ctx.engine.test_summary(
-        &archive,
-        &OpenOptions::default(),
-        &squallz_core::api::SafetyLimits::default(),
-        &NoProgress,
-        &ctx.ctl,
-    )?;
-    if !source_report.is_ok() {
-        return Err(test_report_error(source_report));
-    }
     let level = compression_level(job.level, job.profile)?;
-    let create = CreateOptions {
-        level: CompressionLevel::from_numeric(level),
-        resources: resource_options(job.threads, job.memory_limit),
-        ..CreateOptions::default()
+    let options = ArchiveRepairOptions {
+        kind,
+        create: CreateOptions {
+            level: CompressionLevel::from_numeric(level),
+            resources: resource_options(job.threads, job.memory_limit),
+            ..CreateOptions::default()
+        },
+        safety_limits: squallz_core::api::SafetyLimits::default(),
     };
-    let in_place = ctx.engine.convert_with_atomic_replace(
+    let (source, in_place) = match ctx.engine.repair_archive(
         &archive,
         &output,
-        &OpenOptions::default(),
-        &create,
+        &options,
+        &NoProgress,
         &NoProgress,
         &ctx.ctl,
-    )?;
-    Ok(JobSuccess {
-        detail: format!("repaired {} to {}", archive.display(), output.display()),
-        result: json!({
-            "operation": "repair_sqz",
-            "archive": archive.display().to_string(),
-            "output": output.display().to_string(),
-            "tool": "sqz-embedded-recovery",
-            "in_place": in_place,
-            "source": test_report_json(&source_report),
-            "recovery": source_report.recovery.as_ref().map(recovery_summary_json),
-            "level": level,
-        }),
-    })
-}
-
-fn run_repair_zip_job(
-    ctx: &Ctx,
-    base_dir: &Path,
-    job: &RepairJob,
-) -> Result<JobSuccess, FormatError> {
-    let archive = resolve_path(base_dir, &job.archive);
-    let output = resolve_path(base_dir, &job.output);
-    if !is_zip_family_path(&archive) {
-        return Err(FormatError::Unsupported(
-            "batch repair_zip expects a ZIP-family source archive".into(),
-        ));
-    }
-    if !is_zip_family_path(&output) {
-        return Err(FormatError::Unsupported(
-            "batch repair_zip output must be a ZIP-family archive".into(),
-        ));
-    }
-    let source_test = ctx.engine.test_summary_with_structure(
-        &archive,
-        &OpenOptions::default(),
-        &squallz_core::api::SafetyLimits::default(),
-        &NoProgress,
-        &ctx.ctl,
-    )?;
-    if !source_test.payload_is_ok() {
-        return Err(test_report_error(source_test.into_summary()));
-    }
-    let structure = source_test.structure;
-    let source_report = source_test.into_summary();
-    let level = compression_level(job.level, job.profile)?;
-    let create = CreateOptions {
-        level: CompressionLevel::from_numeric(level),
-        resources: resource_options(job.threads, job.memory_limit),
-        ..CreateOptions::default()
+    )? {
+        ArchiveRepairOutcome::Repaired { source, in_place } => (source, in_place),
+        ArchiveRepairOutcome::SourceRejected(source) => {
+            return Err(test_report_error(source.into_summary()));
+        }
     };
-    let in_place = ctx.engine.convert_with_atomic_replace(
-        &archive,
-        &output,
-        &OpenOptions::default(),
-        &create,
-        &NoProgress,
-        &ctx.ctl,
-    )?;
-    Ok(JobSuccess {
-        detail: format!("rebuilt ZIP index into {}", output.display()),
-        result: json!({
-            "operation": "repair_zip",
-            "archive": archive.display().to_string(),
-            "output": output.display().to_string(),
-            "tool": "zip-local-header-rebuild",
-            "in_place": in_place,
-            "source": test_report_json_with_structure(&source_report, structure),
-            "level": level,
-        }),
-    })
+    let source_report = &source.summary;
+    let (detail, result) = match kind {
+        ArchiveRepairKind::SqzEmbedded => (
+            format!("repaired {} to {}", archive.display(), output.display()),
+            json!({
+                "operation": "repair_sqz",
+                "archive": archive.display().to_string(),
+                "output": output.display().to_string(),
+                "tool": "sqz-embedded-recovery",
+                "in_place": in_place,
+                "source": test_report_json(source_report),
+                "recovery": source_report.recovery.as_ref().map(recovery_summary_json),
+                "level": level,
+            }),
+        ),
+        ArchiveRepairKind::ZipIndexRebuild => (
+            format!("rebuilt ZIP index into {}", output.display()),
+            json!({
+                "operation": "repair_zip",
+                "archive": archive.display().to_string(),
+                "output": output.display().to_string(),
+                "tool": "zip-local-header-rebuild",
+                "in_place": in_place,
+                "source": test_report_json_with_structure(source_report, source.structure),
+                "level": level,
+            }),
+        ),
+    };
+    Ok(JobSuccess { detail, result })
 }
 
 fn run_protect_job(

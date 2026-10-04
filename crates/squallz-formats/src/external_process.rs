@@ -1,5 +1,5 @@
 use std::io::{self, Read};
-use std::process::{Child, ExitStatus, Output};
+use std::process::{Child, ChildStderr, ChildStdout, ExitStatus};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
@@ -84,40 +84,91 @@ impl Drop for ControlledChild {
     }
 }
 
-pub(crate) fn wait_with_output(
-    mut child: Child,
-    control: &ControlToken,
+/// Streams stdout while stderr is drained concurrently. The child and stderr
+/// reader remain owned until explicit completion or Drop.
+pub(crate) struct StdoutProcess {
+    child: ControlledChild,
+    stdout: ChildStdout,
+    stderr: Option<JoinHandle<io::Result<Vec<u8>>>>,
+    control: ControlToken,
     backend: &'static str,
-) -> Result<Output, FormatError> {
-    let stdout = child.stdout.take().map(spawn_capture);
-    let stderr = child.stderr.take().map(spawn_capture);
-    let status = wait_for_exit(&mut child, control);
-    let stdout = finish_capture(stdout, backend, "stdout");
-    let stderr = finish_capture(stderr, backend, "stderr");
-    let status = status?;
-    let stdout = stdout?;
-    let stderr = stderr?;
-    control.checkpoint()?;
-    Ok(Output {
-        status,
-        stdout,
-        stderr,
-    })
 }
 
-fn wait_for_exit(child: &mut Child, control: &ControlToken) -> Result<ExitStatus, FormatError> {
-    loop {
-        if let Err(error) = control.checkpoint() {
-            terminate_child(child);
-            return Err(error);
+pub(crate) struct StdoutExit {
+    pub(crate) status: ExitStatus,
+    pub(crate) stderr: Vec<u8>,
+}
+
+impl StdoutProcess {
+    pub(crate) fn new(
+        mut child: Child,
+        control: &ControlToken,
+        backend: &'static str,
+    ) -> Result<Self, FormatError> {
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+        let child = ControlledChild::new(child, control);
+        let (Some(stdout), Some(stderr)) = (stdout, stderr) else {
+            return Err(FormatError::Other(format!(
+                "{backend} did not provide its output streams"
+            )));
+        };
+        Ok(Self {
+            child,
+            stdout,
+            stderr: Some(spawn_capture(stderr)),
+            control: control.clone(),
+            backend,
+        })
+    }
+
+    pub(crate) fn finish(
+        mut self,
+        stdout_read: Result<(), FormatError>,
+    ) -> Result<StdoutExit, FormatError> {
+        if stdout_read.is_err() {
+            self.child.terminate();
         }
-        match child.try_wait() {
-            Ok(Some(status)) => return Ok(status),
-            Ok(None) => thread::sleep(POLL_INTERVAL),
-            Err(error) => {
-                terminate_child(child);
-                return Err(FormatError::from(error));
+        let status = self.child.wait();
+        if status.is_err() {
+            self.child.terminate();
+        }
+        let stderr = finish_capture(self.stderr.take(), self.backend);
+        // Finish all owned work before returning any read/wait error. In
+        // particular, cancellation after stdout EOF must still escape.
+        self.control.checkpoint()?;
+        let status = status?;
+        stdout_read?;
+        Ok(StdoutExit {
+            status,
+            stderr: stderr?,
+        })
+    }
+}
+
+impl Read for StdoutProcess {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        let result = (|| loop {
+            self.control.checkpoint().map_err(io::Error::other)?;
+            let read = self.stdout.read(buffer);
+            self.control.checkpoint().map_err(io::Error::other)?;
+            match read {
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                result => return result,
             }
+        })();
+        if result.is_err() {
+            self.child.terminate();
+        }
+        result
+    }
+}
+
+impl Drop for StdoutProcess {
+    fn drop(&mut self) {
+        self.child.terminate();
+        if let Some(stderr) = self.stderr.take() {
+            let _ = stderr.join();
         }
     }
 }
@@ -133,10 +184,7 @@ fn lock_child(child: &Mutex<Child>) -> MutexGuard<'_, Child> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-fn spawn_capture<R>(stream: R) -> JoinHandle<io::Result<Vec<u8>>>
-where
-    R: Read + Send + 'static,
-{
+fn spawn_capture(stream: ChildStderr) -> JoinHandle<io::Result<Vec<u8>>> {
     thread::spawn(move || {
         let mut stream = stream;
         let mut output = Vec::new();
@@ -148,7 +196,6 @@ where
 fn finish_capture(
     capture: Option<JoinHandle<io::Result<Vec<u8>>>>,
     backend: &'static str,
-    stream: &'static str,
 ) -> Result<Vec<u8>, FormatError> {
     let Some(capture) = capture else {
         return Ok(Vec::new());
@@ -157,7 +204,7 @@ fn finish_capture(
         .join()
         .map_err(|_| {
             FormatError::Io(io::Error::other(format!(
-                "{backend} {stream} reader stopped unexpectedly"
+                "{backend} stderr reader stopped unexpectedly"
             )))
         })?
         .map_err(FormatError::from)
@@ -192,7 +239,11 @@ mod tests {
             cancelling_control.cancel();
         });
         let started = Instant::now();
-        let error = wait_with_output(child, &control, "test backend").unwrap_err();
+        let mut process = StdoutProcess::new(child, &control, "test backend").unwrap();
+        let read = io::copy(&mut process, &mut io::sink())
+            .map(|_| ())
+            .map_err(FormatError::from);
+        let error = process.finish(read).err().unwrap();
         canceller.join().unwrap();
 
         assert!(matches!(error, FormatError::Cancelled));

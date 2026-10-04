@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { webcrypto } from "node:crypto";
-import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import ts from "typescript";
 import { createTestServer } from "../../tests/runtime.mjs";
+import { compileTestScript, readSvelteScript, selectFunctions } from "../../tests/source.mjs";
 
 function snapshot(id, version, kind = "password") {
   const prompt = kind === "password"
@@ -340,13 +340,10 @@ test("late control failures cannot clear a newer request or report a completed r
 });
 
 test("task control notices wait for acceptance and do not outlive the pending action", async () => {
-  const app = readFileSync(new URL("../App.svelte", import.meta.url), "utf8");
-  const source = ts.createSourceFile("App.ts", app.match(/<script lang="ts">([\s\S]*?)<\/script>/)[1], ts.ScriptTarget.Latest, true);
+  const source = readSvelteScript(new URL("../App.svelte", import.meta.url), "App.ts");
   const actions = [["pauseCurrentTask", "pauseTask", "pause"], ["resumeCurrentTask", "resumeTask", "resume"], ["cancelCurrentTask", "cancelTask", "cancel"]];
-  const declarations = source.statements.filter((node) => ts.isFunctionDeclaration(node) && actions.some(([name]) => node.name?.text === name));
-  const { outputText } = ts.transpileModule(declarations.map((node) => node.getText(source)).join("\n"), {
-    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
-  });
+  const declarations = selectFunctions(source, actions.map(([name]) => name));
+  const outputText = compileTestScript(declarations.map((node) => node.getText(source)).join("\n"));
   for (const [handler, control, intent] of actions) {
     for (const outcome of ["accepted", "failed", "confirmed", "superseded"]) {
       let finish;
@@ -455,13 +452,10 @@ test("failed answers survive a failed refresh and never revive a cleared or newe
 });
 
 test("question actions preserve the workspace and report success only after acknowledgement", async () => {
-  const app = readFileSync(new URL("../App.svelte", import.meta.url), "utf8");
-  const source = ts.createSourceFile("App.ts", app.match(/<script lang="ts">([\s\S]*?)<\/script>/)[1], ts.ScriptTarget.Latest, true);
+  const source = readSvelteScript(new URL("../App.svelte", import.meta.url), "App.ts");
   const names = ["submitTaskPasswordRequest", "cancelTaskPasswordRequest", "answerConflictDecision"];
-  const declarations = source.statements.filter((node) => ts.isFunctionDeclaration(node) && [...names, "isCurrentTaskPasswordPrompt", "isCurrentTaskConflictPrompt"].includes(node.name?.text));
-  const { outputText } = ts.transpileModule(declarations.map((node) => node.getText(source)).join("\n"), {
-    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
-  });
+  const declarations = selectFunctions(source, [...names, "isCurrentTaskPasswordPrompt", "isCurrentTaskConflictPrompt"]);
+  const outputText = compileTestScript(declarations.map((node) => node.getText(source)).join("\n"));
   for (const action of names) {
     for (const outcome of ["failure", "accepted", "next-password", "next-conflict"]) {
       const calls = [];
@@ -504,62 +498,100 @@ test("question actions preserve the workspace and report success only after ackn
 });
 
 test("conflict controls answer only the question shown by their task surface", async () => {
-  const app = readFileSync(new URL("../App.svelte", import.meta.url), "utf8");
-  const source = ts.createSourceFile("App.ts", app.match(/<script lang="ts">([\s\S]*?)<\/script>/)[1], ts.ScriptTarget.Latest, true);
-  const names = ["taskDialogSurface", "taskCenterDetailSurface", "answerConflictDecision", "isCurrentTaskConflictPrompt"];
-  const declarations = source.statements.filter((node) => ts.isFunctionDeclaration(node) && names.includes(node.name?.text));
-  const { outputText } = ts.transpileModule(declarations.map((node) => node.getText(source)).join("\n"), {
-    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
-  });
-  for (const surfaceName of ["taskDialogSurface", "taskCenterDetailSurface"]) {
-    for (const decision of ["overwrite", "skip", "rename", "abort"]) {
-      const answers = [];
-      const context = {
-        ...Object.fromEntries([
-          "taskOutputPath", "taskRevealOutputLabel", "pauseCurrentTask", "resumeCurrentTask", "cancelCurrentTask",
-          "copyTaskChecksumResults", "openTaskOutput", "openMacosSfxPublisher", "prepareTaskReview", "toggleTaskDetails",
-          "viewTaskResults", "revealTaskOutput", "dismissTaskDialog", "returnToTaskCenter", "returnTaskQuestionToCenter",
-          "taskChecksumCopyFeedback", "taskChecksumCopyFeedbackTone", "taskPasswordQuestion", "taskConflictQuestion", "showNotice",
-        ].map((name) => [name, () => null])),
-        taskWindowMode: false, activePlatform: "macos", activePalette: "ocean", activeTheme: "dark", activeDensityChoice: "comfortable",
-        pendingTaskReviewId: null,
-        checksumCopyPending: () => false,
-        customPaletteVariables: () => ({}), tr: (_key, fallback) => fallback,
-        jobPasswordPrompt: null, jobPasswordValue: "", jobPasswordSubmissionError: null,
-        jobConflictPrompt: { id: 1, version: 10 }, conflictApplyAll: false,
-        normalizeTaskConflictAnswer: (decision, applyAll) => ({ decision, applyAll }),
-        answerJobConflict: async (decision, applyAll) => {
-          answers.push([context.jobConflictPrompt.id, context.jobConflictPrompt.version, decision, applyAll]);
-          return true;
-        },
-      };
-      const surface = vm.runInNewContext(`${outputText}\n${surfaceName}`, context);
-      const shown = surface({ id: 1 });
-      const unrelated = surface({ id: 2 });
-      const applyAll = decision !== "abort";
-      for (const prompt of [{ id: 1, version: 11 }, { id: 2, version: 10 }, null]) {
-        context.jobConflictPrompt = prompt;
+  const server = await createTestServer();
+  try {
+    const { SettingsSession } = await server.ssrLoadModule("/src/lib/settings-session.svelte.ts");
+    const { taskPasswordReady, normalizeTaskConflictAnswer } = await server.ssrLoadModule("/src/lib/task-model.ts");
+    const source = readSvelteScript(new URL("../App.svelte", import.meta.url), "App.ts");
+    const names = ["taskProgressDialogProps", "answerConflictDecision", "isCurrentTaskConflictPrompt",
+      "submitTaskPasswordRequest", "cancelTaskPasswordRequest", "isCurrentTaskPasswordPrompt"];
+    const declarations = selectFunctions(source, names);
+    const outputText = compileTestScript(declarations.map((node) => node.getText(source)).join("\n"));
+    for (const presentation of ["panel", "dialog", "window"]) {
+      for (const decision of ["overwrite", "skip", "rename", "abort"]) {
+        const answers = [];
+        const context = {
+          ...Object.fromEntries([
+            "taskOutputPath", "taskRevealOutputLabel", "pauseCurrentTask", "resumeCurrentTask", "cancelCurrentTask",
+            "copyTaskChecksumResults", "openTaskOutput", "openMacosSfxPublisher", "prepareTaskReview", "toggleTaskDetails",
+            "viewTaskResults", "revealTaskOutput", "dismissTaskDialog", "returnToTaskCenter", "returnTaskQuestionToCenter",
+            "taskChecksumCopyFeedback", "taskChecksumCopyFeedbackTone", "taskPasswordQuestion", "taskConflictQuestion", "showNotice",
+          ].map((name) => [name, () => null])),
+          activePlatform: "macos", activeTheme: "dark", activeDensityChoice: "comfortable",
+          settingsSession: new SettingsSession({ platform: () => "macos", tr: (_key, fallback) => fallback, emit() {} },
+            { paletteOverride: "ocean" }),
+          pendingTaskReviewId: null,
+          checksumCopyPending: () => false,
+          customPaletteVariables: () => ({}), tr: (_key, fallback) => fallback,
+          jobPasswordPrompt: null, jobPasswordValue: "", jobPasswordSubmissionError: null,
+          jobPasswordSubmissionAttempted: false, taskPasswordReady, normalizeTaskConflictAnswer,
+          jobConflictPrompt: { id: 1, version: 10 }, conflictApplyAll: false,
+          answerJobConflict: async (decision, applyAll) => {
+            answers.push([context.jobConflictPrompt.id, context.jobConflictPrompt.version, decision, applyAll]);
+            return true;
+          },
+        };
+        const surface = vm.runInNewContext(`${outputText}\ntaskProgressDialogProps`, context);
+        const shown = surface({ id: 1 }, presentation);
+        const unrelated = surface({ id: 2 }, presentation);
+        const applyAll = decision !== "abort";
+        for (const prompt of [{ id: 1, version: 11 }, { id: 2, version: 10 }, null]) {
+          context.jobConflictPrompt = prompt;
+          await shown.onAnswerConflict(decision, applyAll);
+          assert.deepEqual(answers, [], "an old decision cannot answer a later question");
+          shown.onConflictApplyAllChange(true);
+          assert.equal(context.conflictApplyAll, false, "an old checkbox cannot change a later question");
+        }
+        context.jobConflictPrompt = { id: 1, version: 10 };
+        unrelated.onConflictApplyAllChange(true);
+        await unrelated.onAnswerConflict(decision, applyAll);
+        assert.equal(context.conflictApplyAll, false, "another task cannot change this question");
+        assert.deepEqual(answers, []);
+        shown.onConflictApplyAllChange(applyAll);
+        assert.equal(context.conflictApplyAll, applyAll);
         await shown.onAnswerConflict(decision, applyAll);
-        assert.deepEqual(answers, [], "an old decision cannot answer a later question");
-        shown.onConflictApplyAllChange(true);
-        assert.equal(context.conflictApplyAll, false, "an old checkbox cannot change a later question");
+        assert.deepEqual(answers, [[1, 10, decision, applyAll]], "the displayed question remains actionable after an equivalent snapshot");
+        if (decision === "overwrite") {
+          const passwords = [];
+          context.jobConflictPrompt = null;
+          context.jobPasswordPrompt = { id: 1, version: 10 };
+          context.jobPasswordValue = "current input";
+          context.answerJobPassword = async (value) => {
+            passwords.push([context.jobPasswordPrompt.id, context.jobPasswordPrompt.version, value]);
+            return true;
+          };
+          const passwordShown = surface({ id: 1 }, presentation);
+          const passwordUnrelated = surface({ id: 2 }, presentation);
+          for (const prompt of [{ id: 1, version: 11 }, { id: 2, version: 10 }, null]) {
+            context.jobPasswordPrompt = prompt;
+            passwordShown.onPasswordValueChange("stale input");
+            await passwordShown.onSubmitPassword();
+            await passwordShown.onCancelPassword();
+            assert.equal(context.jobPasswordValue, "current input", "a stale password surface cannot edit the current input");
+            assert.deepEqual(passwords, [], "a stale password surface cannot submit or cancel another question");
+          }
+          context.jobPasswordPrompt = { id: 1, version: 10 };
+          passwordUnrelated.onPasswordValueChange("unrelated input");
+          await passwordUnrelated.onSubmitPassword();
+          await passwordUnrelated.onCancelPassword();
+          assert.equal(context.jobPasswordValue, "current input");
+          assert.deepEqual(passwords, []);
+          passwordShown.onPasswordValueChange("accepted input");
+          await passwordShown.onSubmitPassword();
+          assert.equal(context.jobPasswordValue, "");
+          await passwordShown.onCancelPassword();
+          assert.deepEqual(passwords, [[1, 10, "accepted input"], [1, 10, null]],
+            "matching password input, submission and cancellation retain the captured task and version");
+        }
       }
-      context.jobConflictPrompt = { id: 1, version: 10 };
-      unrelated.onConflictApplyAllChange(true);
-      await unrelated.onAnswerConflict(decision, applyAll);
-      assert.equal(context.conflictApplyAll, false, "another task cannot change this question");
-      assert.deepEqual(answers, []);
-      shown.onConflictApplyAllChange(applyAll);
-      assert.equal(context.conflictApplyAll, applyAll);
-      await shown.onAnswerConflict(decision, applyAll);
-      assert.deepEqual(answers, [[1, 10, decision, applyAll]], "the displayed question remains actionable after an equivalent snapshot");
     }
+  } finally {
+    await server.close();
   }
 });
 
 test("job questions open the shared task surface without navigating or discarding a draft", () => {
-  const app = readFileSync(new URL("../App.svelte", import.meta.url), "utf8");
-  const source = ts.createSourceFile("App.ts", app.match(/<script lang="ts">([\s\S]*?)<\/script>/)[1], ts.ScriptTarget.Latest, true);
+  const source = readSvelteScript(new URL("../App.svelte", import.meta.url), "App.ts");
   const effects = source.statements.filter((node) =>
     ts.isExpressionStatement(node) && ts.isCallExpression(node.expression) &&
     node.expression.expression.getText(source) === "$effect"
@@ -567,9 +599,7 @@ test("job questions open the shared task surface without navigating or discardin
   const routing = effects.find((node) => node.getText(source).includes("setScreen(\"password\")"));
   const dialog = effects.find((node) => node.getText(source).includes("const questionTaskId"));
   assert.ok(routing && dialog);
-  const { outputText } = ts.transpileModule([routing, dialog].map((node) => node.getText(source)).join("\n"), {
-    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
-  });
+  const outputText = compileTestScript([routing, dialog].map((node) => node.getText(source)).join("\n"));
   for (const screen of ["browse", "create", "recovery"]) {
     for (const kind of ["password", "conflict"]) {
       const draft = { output: "unfinished-archive.zip" };

@@ -197,8 +197,10 @@
       </div>
       <div class="entry-preview-body">
         {#if view.preview.nestedTitle || !view.preview.busy}
-          <span>{view.preview.nestedTitle ?? view.preview.title}</span>
-          <small>{view.preview.nestedTitle ? view.preview.nestedSubtitle : view.preview.subtitle}</small>
+          <div class="entry-preview-summary" role={previewActive ? "status" : undefined}>
+            <span>{view.preview.nestedTitle ?? view.preview.title}</span>
+            <small>{view.preview.nestedTitle ? view.preview.nestedSubtitle : view.preview.subtitle}</small>
+          </div>
         {/if}
         {#if view.preview.nestedTitle}
           {#each view.preview.nestedRows as item}

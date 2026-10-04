@@ -147,8 +147,10 @@
     </div>
     <div class="entry-preview-body">
       {#if view.preview.nested}
-        <strong>{view.preview.nested.title}</strong>
-        <p>{view.preview.nested.subtitle}</p>
+        <div class="entry-preview-summary" role="status">
+          <strong>{view.preview.nested.title}</strong>
+          <p>{view.preview.nested.subtitle}</p>
+        </div>
         <div class="nested-preview-list">
           {#each view.preview.nested.rows as item}
             <div>
@@ -169,8 +171,10 @@
           <small>{view.preview.subtitle}</small>
         </div>
       {:else}
-        <strong>{view.preview.title}</strong>
-        <p>{view.preview.subtitle}</p>
+        <div class="entry-preview-summary" role={previewActive ? "status" : undefined}>
+          <strong>{view.preview.title}</strong>
+          <p>{view.preview.subtitle}</p>
+        </div>
       {/if}
     </div>
     {#if view.preview.nested || !view.preview.busy}

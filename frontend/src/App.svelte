@@ -1,5 +1,17 @@
 <script lang="ts">
   import { onMount, tick, untrack } from "svelte";
+  import {
+    SettingsSession,
+    isSettingsPersistenceFailure,
+    type SettingsEffect,
+    type SettingsSaveState,
+  } from "./lib/settings-session.svelte";
+  import { ExtractPlanSession, type ExtractPlanInput } from "./lib/extract-plan.svelte";
+  import {
+    ExtractOptionsDraft, type ExtractDestinationMode, type ExtractScope, type ExtractTaskDraft,
+    type ExtractOverwriteMode, type ExtractSymlinkMode,
+  } from "./lib/extract-options-draft.svelte";
+  import { CreateOptionsDraft, type CreateDraftEdit, type CreateDraftChange, type CreateDraftIssue } from "./lib/create-options-draft.svelte";
   import ArchiveStartState from "./components/ArchiveStartState.svelte";
   import ArchiveReturnStrip from "./components/ArchiveReturnStrip.svelte";
   import ArchiveEntryEditor from "./components/ArchiveEntryEditor.svelte";
@@ -53,7 +65,8 @@
     recordOperation,
   } from "./lib/history.svelte";
   import { copyTextToClipboard } from "./lib/clipboard";
-  import { archiveEditPathIssue, archiveSelectionRoots, normalizeArchivePath } from "./lib/archive-editing";
+  import { archiveSelectionRoots } from "./lib/archive-editing";
+  import { ArchiveEditSession, type ArchiveEditKind, type ArchiveEditOwner, type ArchiveMoveReview, type ArchiveEditEffect } from "./lib/archive-edit-session.svelte";
   import { archiveKeyboardTarget } from "./lib/archive-keyboard";
   import { appActionAvailability, appActionForShortcut, dispatchAppAction, isTextEditingTarget, type AppAction } from "./lib/app-actions";
   import { connectNativeMenu, type NativeMenuConnection } from "./lib/native-menu";
@@ -120,25 +133,18 @@
   import {
     ipc,
     isErrorDto,
-    type CreatePlanDto,
     type ExtractPlanPreflightDto,
     type CreateArchivePresetOptions,
-    type CreateCompletionAction,
     type CreateContentPolicy,
-    type CreateDestinationBase,
     type CreateDestinationInspectionDto,
-    type DiskSpaceDto,
     type EntryPreviewDto,
     type EntryDto,
-    type ErrorDto,
     type NestedArchivePasswords,
     type JobSpec,
     type ArchivePresetDocument,
     type ExtractArchivePresetOptions,
     type NamedArchivePreset,
-    type PostSuccessAction,
     type LanguageDto,
-    type NestedArchivePreviewDto,
     type SettingsDto,
     type SfxCreateCapabilityDto,
     type SourceCleanupRecoveryNotice,
@@ -166,10 +172,6 @@
     ConvertRouteStatus,
   } from "./lib/convert-route";
   import {
-    fat32CompatibleSplitSizeBytes,
-    resolveSplitSizeBytes,
-  } from "./lib/archive-output-options";
-  import {
     archiveBaseOrDefault,
     desktopBasename,
     desktopDirname,
@@ -186,6 +188,17 @@
     type CreateSourceKind,
     type CreateSourceRoot,
   } from "./lib/create-sources";
+  import {
+    CreateDestinationInspectionError,
+    CreatePreflightSession,
+    commonCreateSourceParent,
+    createDestinationInspectionCancelled,
+    type CreateCredentialIntent,
+    type CreatePreflightEffect,
+    type CreatePreflightEvent,
+    type CreatePreflightStage,
+    type CreateRunDraft,
+  } from "./lib/create-preflight.svelte";
   import { platformTrashName } from "./lib/platform-labels";
   import { cssVariables, type CssVariableMap } from "./lib/css-variables";
   import { readWindowRecovery, rememberWindowRecovery, reloadWindow } from "./lib/window-recovery";
@@ -211,16 +224,12 @@
   import { isNewSourceCleanupRecoveryGeneration } from "./lib/source-cleanup";
   import { currentWebviewWindowListener } from "./lib/tauri-events";
   import { outputPasswordRequired } from "./lib/job-snapshot";
-  import { batchExtractJob, reviewBatchExtract, type BatchExtractDraft } from "./lib/batch-extract";
+  import { BatchExtractDraft, type BatchExtractEdit } from "./lib/batch-extract.svelte";
   import { readBatchExtractResult } from "./lib/batch-extract-result";
   import { nestedExtractJob, reviewNestedExtract, type NestedExtractDraft } from "./lib/nested-extract";
   import { ArchiveUpdateReview } from "./lib/archive-update.svelte";
   import { previewSystemOpenRequiresConfirmation } from "./lib/preview-presentation";
-  import {
-    previewResponseIsCurrent,
-    type PreviewResponseIdentity,
-  } from "./lib/preview-response";
-  import { createPreviewPasswordFlow } from "./lib/preview-password.svelte";
+  import { PreviewSession, type PreviewPreparation } from "./lib/preview-session.svelte";
   import {
     activeTask,
     answerConflict as answerJobConflict,
@@ -257,7 +266,6 @@
     type TaskSubmissionBlockReason,
   } from "./lib/task-center";
   import {
-    applyCreateDestinationAuthorization,
     checksumItemStatus,
     checksumItemText,
     checksumResultLine,
@@ -303,10 +311,7 @@
     uiModeChoice,
     type UiMode,
   } from "./lib/uiMode.svelte";
-  import {
-    deriveCustomPaletteTokens,
-    normalizeHexColor,
-  } from "./lib/theme";
+  import { deriveCustomPaletteTokens } from "./lib/theme";
   import {
     checksumAlgorithms,
     classicCommands,
@@ -314,7 +319,6 @@
     createFormats,
     createProfileIds,
     createProfiles,
-    defaultCustomAccent,
     nav,
     paletteIds,
     quickActions,
@@ -325,11 +329,7 @@
     ChecksumAlgorithmId,
     CreateFormatId,
     CreateProfileId,
-    CreateSplitMode,
-    CreateSplitPreset,
-    CreateSplitUnit,
     DensityChoice,
-    NumericSetting,
     PaletteId,
     ResolvedTheme,
     Screen,
@@ -341,107 +341,18 @@
   type SaveDialogOptions = NonNullable<Parameters<DialogModule["save"]>[0]>;
   type NativeDialogOptions = OpenDialogOptions | SaveDialogOptions;
   type PlatformKind = "macos" | "windows" | "linux";
-  type NativeSplitKind = "zip" | "wim" | null;
   type MacosSfxPublisherComponentType = typeof MacosSfxPublisherComponent;
   type ThemeChoice = "system" | "light" | "dark";
-  type PersistedSettingsSection = "general" | "security" | "performance" | "colors";
-  type SettingsSaveOutcome = "idle" | "saved" | "session" | "error";
-  type SettingsSaveState = "saved" | "dirty" | "saving" | "session" | "error";
   type ArchivePresetMutationState = "idle" | "saving" | "error";
   type AppearanceSetting = "mode" | "theme" | "density";
   type AppearanceSaveState = Exclude<SettingsSaveState, "dirty">;
-  type ExtractDestinationMode = "smart" | "archive" | "same" | "choose";
-  type ExtractTaskDraft = Pick<Extract<JobSpec, { kind: "extract" }>,
-    "path" | "dest" | "selection" | "overwrite" | "symlinks" | "smart" | "encoding" | "verify_sfx">;
   type ArchiveTaskReview = { path: string; encoding: string | null; restore: () => boolean };
-  type ExtractScope = "all" | "selection";
-  type ExtractOverwriteMode = "ask" | "skip" | "overwrite" | "rename";
-  type ExtractSymlinkMode = "preserve" | "skip" | "follow";
-  type ExtractPlanRequest = Readonly<{
-    key: string;
-    generation: number;
-    requestId: string;
-    path: string;
-    displayPath: string;
-    dest: string;
-    selection: string[] | null;
-    smart: boolean;
-    encoding: string | null;
-    promise: Promise<void>;
-    resolve: () => void;
-    control: { cancelRequested: boolean };
-  }>;
-  type PresetSfxTarget = Extract<CreateArchivePresetOptions["output"], { kind: "self_extracting" }>["target"];
   type PresetSqzInnerFormat = Extract<CreateArchivePresetOptions["format_options"], { kind: "sqz" }>["inner_format"];
   type ClassicCreateSection = "general" | "compression" | "content" | "security" | "volumes" | "recovery" | "preflight";
-  type CreatePreflightStage = "source" | "temp" | "destination" | "submit";
   type CreatePreflightStepState = "pending" | "active" | "ready" | "blocked" | "cancelled";
-  type CreatePreflightPhase =
-    | "idle"
-    | "selecting"
-    | "measuring"
-    | "checkingTemp"
-    | "choosingDest"
-    | "checkingDest"
-    | "reviewing"
-    | "submitting"
-    | "ready"
-    | "cancelled"
-    | "blocked";
-  type ResolvedCreateDestination = Readonly<{
-    path: string;
-    replaceExisting: boolean;
-    replacementGuard: string | null;
-    confirmLateConflict: boolean;
-  }>;
   type AuthorizedArchiveOutput = Readonly<{
     replaceExisting: boolean;
     replacementGuard: string | null;
-  }>;
-  type CreateRunDraft = Readonly<{
-    format: CreateFormatId;
-    profile: CreateProfileId;
-    level: number;
-    password: string | null;
-    encryptNames: boolean;
-    splitSize: number | null;
-    splitMode: CreateSplitMode;
-    contentPolicy: CreateContentPolicy;
-    excludes: readonly string[];
-    sqzInnerFormat: PresetSqzInnerFormat | null;
-    sfxEnabled: boolean;
-    sfxTarget: PlatformKind | null;
-    outputExtension: string;
-    suggestedDestination: string | null;
-    destination: Readonly<{
-      base: CreateDestinationBase;
-      existing_output: OverwritePolicy;
-    }>;
-    completion: CreateCompletionAction;
-    postSuccess: PostSuccessAction;
-    testAfterCreate: boolean;
-    defaultCreateDir: string | null;
-    restoreCredentialPrompt: boolean;
-    restoreEncryptNames: boolean;
-  }>;
-  type PendingCreateSubmission = Readonly<{
-    spec: JobSpec;
-    source: "dialog" | "drop";
-    format: CreateFormatId;
-    profile: CreateProfileId;
-    creatingSfx: boolean;
-    artifactLabel: string;
-    splitSize: number | null;
-    confirmLateConflict: boolean;
-    restoreCredentialPrompt: boolean;
-    restoreEncryptNames: boolean;
-  }>;
-  type CreatePreparationOwner = Readonly<{
-    mode: Mode;
-    sources: CreateSourceRoot[];
-  }>;
-  type CreateSourcePicker = CreatePreparationOwner & Readonly<{
-    kind: "files" | "folder";
   }>;
   class JobSubmitBlockedError extends Error {
     readonly reason: TaskSubmissionBlockReason;
@@ -452,17 +363,6 @@
     }
   }
 
-  class CreateDestinationInspectionError extends Error {
-    readonly detail: ErrorDto | null;
-    readonly cancelled: boolean;
-
-    constructor(error?: unknown, cancelled = false) {
-      super("create-destination-inspection-failed");
-      this.detail = isErrorDto(error) ? error : null;
-      this.cancelled = cancelled;
-    }
-  }
-
   const devToolsChordKeys = new Set(["i", "j", "c"]);
   const balancedCreatePresetId = "builtin.create.balanced-7z";
   const crossPlatformCreatePresetId = "builtin.create.cross-platform-7z";
@@ -470,7 +370,6 @@
   const maxArchivePresets = 65;
   const maxArchivePresetExcludeRules = 64;
   const maxArchivePresetExcludeRuleBytes = 256;
-  const extractPlanDebounceMs = 140;
   type FormatCapabilityCard = {
     id: string;
     name: string;
@@ -479,36 +378,6 @@
     volumes: string;
     encrypt: string;
     note: string;
-  };
-  type FormatCoverageRow = {
-    label: string;
-    value: string;
-    detail: string;
-  };
-  type RenameTargetIssue = {
-    blocking: string | null;
-    warning: string | null;
-  };
-  type MovePlanItem = {
-    from: string;
-    to: string;
-    conflict: boolean;
-    reason: string | null;
-    keepBothTo: string | null;
-  };
-  type MoveConflictReview = {
-    archiveId: number;
-    generation: number;
-    targetDir: string;
-    items: MovePlanItem[];
-  };
-  type CreatePreflightEvent = {
-    request_id?: string;
-    phase?: string;
-    scanned?: number;
-    processed_bytes?: number;
-    total_bytes?: number;
-    current?: string;
   };
   type OpenFilesPayload = {
     paths: string[];
@@ -537,7 +406,6 @@
     canRename: boolean;
     isDir: boolean;
   };
-  type PreviewPhase = "idle" | "entry" | "nested";
   type PreviewPolicyKind = "none" | "folder" | "nested" | "system-file";
   type PreviewPolicyCode =
     | "no_archive"
@@ -555,16 +423,6 @@
     code: PreviewPolicyCode;
     disabledReason: string;
   };
-  type PreviewFailure = {
-    entryPath: string;
-    entryType: EntryDto["entry_type"] | null;
-    displayName: string;
-    policyKind: PreviewPolicyKind;
-    outerSource: string;
-    outerDisplayPath: string;
-    message: string;
-    retryAction: "preview" | "open" | "extract";
-  };
   type ValidationWindow = Window & {
     __squallzValidationSetScreen?: (next: Screen) => boolean;
     __squallzValidationJobSubmitAttempts?: number;
@@ -578,9 +436,6 @@
   const initialMode: Mode | null = modeParam === "classic" || modeParam === "modern" ? modeParam : null;
   const forceFirstRun = params.get("firstRun") === "1" || modeParam === "unset";
   const runtimePreviews = readRuntimePreviews(params, ARCHIVE_PAGE_SIZE);
-  const previewDestinationRequestId = import.meta.env.DEV && runtimePreviews.preflightDestinationBytes > 0
-    ? "dev-preview-destination"
-    : null;
   const hideHistoryParam = params.get("hideHistory") === "1";
   const createFormatParam = params.get("createFormat");
   const previewDelayMs = Math.max(0, Math.min(500, Number(params.get("previewDelayMs") ?? 0) || 0));
@@ -612,8 +467,8 @@
   let jobRows = $derived(tasks());
   let activeCurrentTask = $derived(activeTask());
   let jobPasswordPrompt = $derived(pendingPassword());
-  const previewPasswordFlow = createPreviewPasswordFlow(ipc.cancelEntryPreview);
-  let previewPasswordPrompt = $derived(previewPasswordFlow.prompt);
+  const previewSession = new PreviewSession();
+  let previewPasswordPrompt = $derived(previewSession.passwordPrompt);
   let archivePasswordPrompt = $derived(openPasswordPrompt());
   let activeJobPasswordPromptIdentity = $derived(
     jobPasswordPrompt ? `${jobPasswordPrompt.id}:${jobPasswordPrompt.version}` : null,
@@ -748,13 +603,6 @@
   const initialThemeChoice: ThemeChoice | null = isThemeChoice(themeParam) ? themeParam : null;
   const densityParam = params.get("density");
   const hasDensityOverride = isDensityChoice(densityParam);
-  let activePalette = $state<PaletteId>(
-    hasPaletteOverride ? paletteParam : "aqua",
-  );
-  let customAccent = $state(defaultCustomAccent);
-  let customAccentInput = $state(defaultCustomAccent);
-  let customAccentSaveError = $state(false);
-  let accentContrastGuard = $state(true);
   let activeThemeChoice = $state<ThemeChoice>(initialThemeChoice ?? "system");
   let activeDensityChoice = $state<DensityChoice>(hasDensityOverride ? densityParam : "standard");
   let savedModeChoice = $state<Mode | null>(initialMode);
@@ -781,6 +629,19 @@
           ? "saving"
           : "saved",
   );
+  const settingsSession = new SettingsSession({
+    platform: platformKind,
+    tr,
+    emit: applySettingsEffect,
+  }, {
+    paletteOverride: hasPaletteOverride ? paletteParam : null,
+    defaultExtractDir: defaultExtractDirParam,
+  });
+  let resolveInitialGeneralSettingsReady!: () => void;
+  const initialGeneralSettingsReady = new Promise<void>((resolve) => {
+    resolveInitialGeneralSettingsReady = resolve;
+  });
+  let incomingOpenFilesGeneration = 0;
   const initialPlatform = buildTargetPlatform();
   let activePlatform = $state<PlatformKind>(initialPlatform);
   let prefersDarkTheme = $state(
@@ -789,146 +650,21 @@
   let activeTheme = $derived<ResolvedTheme>(
     activeThemeChoice === "system" ? (prefersDarkTheme ? "dark" : "light") : activeThemeChoice,
   );
-  const bytesPerKiB = 1024;
-  const bytesPerMiB = 1024 ** 2;
-  const bytesPerGiB = 1024 ** 3;
-  const defaultSafety = {
-    maxOutputGiB: 256,
-    maxEntries: 1_000_000,
-    maxCompressionRatio: 2048,
-  };
   const extractDestinationModes: ExtractDestinationMode[] = ["smart", "archive", "same", "choose"];
   const extractOverwriteModes: ExtractOverwriteMode[] = ["ask", "skip", "overwrite", "rename"];
   const extractSymlinkModes: ExtractSymlinkMode[] = ["preserve", "skip", "follow"];
   const presetSqzInnerFormats: PresetSqzInnerFormat[] = ["sqz", "zip", "tar", "7z", "zstd"];
-  const numberFormatter = new Intl.NumberFormat("en-US");
-  let safetyMaxOutputGiB = $state<NumericSetting>(defaultSafety.maxOutputGiB);
-  let safetyMaxEntries = $state<NumericSetting>(defaultSafety.maxEntries);
-  let safetyMaxCompressionRatio = $state<NumericSetting>(defaultSafety.maxCompressionRatio);
-  let performanceParallelJobs = $state<NumericSetting>(null);
-  let performanceThreads = $state<NumericSetting>(null);
-  let performanceMemoryKiB = $state<NumericSetting>(null);
-  let settingsSnapshotLabel = $state(
-    tr("gui.settings.snapshot.defaults_active", "Saved settings · defaults"),
-  );
   let availableLanguages = $state<LanguageDto[]>([]);
-  let generalLanguageChoice = $state("");
-  let generalDefaultCreateDir = $state("");
-  let generalDefaultExtractDir = $state(defaultExtractDirParam?.trim() ?? "");
-  let appliedGeneralLanguageChoice = $state("");
-  let appliedDefaultCreateDir = $state("");
-  let appliedDefaultExtractDir = $state(defaultExtractDirParam?.trim() ?? "");
-  let generalRevealAfterExtract = $state(false);
-  let generalAutomaticUpdateChecks = $state(true);
-  let appliedGeneralRevealAfterExtract = $state(false);
-  let appliedGeneralAutomaticUpdateChecks = $state(true);
-  let savedAccentPalette = $state<PaletteId>("aqua");
-  let savedCustomAccent = $state(defaultCustomAccent);
-  let savedAccentContrastGuard = $state(true);
-  let savedGeneralLanguageChoice = $state("");
-  let savedGeneralDefaultCreateDir = $state("");
-  let savedGeneralDefaultExtractDir = $state(defaultExtractDirParam?.trim() ?? "");
-  let savedGeneralRevealAfterExtract = $state(false);
-  let savedGeneralAutomaticUpdateChecks = $state(true);
-  let savedSafetyMaxOutputGiB = $state<NumericSetting>(defaultSafety.maxOutputGiB);
-  let savedSafetyMaxEntries = $state<NumericSetting>(defaultSafety.maxEntries);
-  let savedSafetyMaxCompressionRatio = $state<NumericSetting>(defaultSafety.maxCompressionRatio);
-  let savedSafetyCustom = $state(false);
-  let savedPerformanceParallelJobs = $state<NumericSetting>(null);
-  let savedPerformanceThreads = $state<NumericSetting>(null);
-  let savedPerformanceMemoryKiB = $state<NumericSetting>(null);
-  let settingsSaveTarget = $state<PersistedSettingsSection | null>(null);
-  let settingsSaveOutcomes = $state<Record<PersistedSettingsSection, SettingsSaveOutcome>>({
-    general: "saved",
-    security: "saved",
-    performance: "saved",
-    colors: "saved",
-  });
-  const settingsDraftGenerations: Record<PersistedSettingsSection, number> = {
-    general: 0,
-    security: 0,
-    performance: 0,
-    colors: 0,
-  };
-  let defaultCreateFolderError = $derived(folderSettingValidationError(
-    generalDefaultCreateDir,
-    tr("gui.settings.folder.default_create", "Default create folder"),
-  ));
-  let defaultExtractFolderError = $derived(folderSettingValidationError(
-    generalDefaultExtractDir,
-    tr("gui.settings.folder.default_extract", "Default extract folder"),
-  ));
-  let generalSettingsValidationError = $derived(
-    defaultCreateFolderError || defaultExtractFolderError,
-  );
-  let generalSettingsDirty = $derived(
-    generalSettingsValidationError !== "" ||
-      generalLanguageChoice.trim() !== savedGeneralLanguageChoice ||
-      (normalizedDefaultCreateDir() ?? "") !== savedGeneralDefaultCreateDir ||
-      (normalizedDefaultExtractDir() ?? "") !== savedGeneralDefaultExtractDir ||
-      generalRevealAfterExtract !== savedGeneralRevealAfterExtract ||
-      generalAutomaticUpdateChecks !== savedGeneralAutomaticUpdateChecks ||
-      generalLanguageChoice.trim() !== appliedGeneralLanguageChoice ||
-      (normalizedDefaultCreateDir() ?? "") !== appliedDefaultCreateDir ||
-      (normalizedDefaultExtractDir() ?? "") !== appliedDefaultExtractDir ||
-      generalRevealAfterExtract !== appliedGeneralRevealAfterExtract ||
-      generalAutomaticUpdateChecks !== appliedGeneralAutomaticUpdateChecks,
-  );
-  let safetySettingsDirty = $derived(
-    safetyMaxOutputGiB !== savedSafetyMaxOutputGiB ||
-      safetyMaxEntries !== savedSafetyMaxEntries ||
-      safetyMaxCompressionRatio !== savedSafetyMaxCompressionRatio,
-  );
-  let performanceSettingsDirty = $derived(
-    performanceParallelJobs !== savedPerformanceParallelJobs ||
-      performanceThreads !== savedPerformanceThreads ||
-      performanceMemoryKiB !== savedPerformanceMemoryKiB,
-  );
-  let colorSettingsDirty = $derived(
-    activePalette !== savedAccentPalette ||
-      customAccentInput.trim().toUpperCase() !== savedCustomAccent ||
-      accentContrastGuard !== savedAccentContrastGuard,
-  );
-  let safetyMaxOutputError = $derived(requiredWholeSettingError(
-    safetyMaxOutputGiB,
-    1,
-    8192,
-    tr("gui.settings.security.max_output_gib", "Max output GiB"),
-  ));
-  let safetyMaxEntriesError = $derived(requiredWholeSettingError(
-    safetyMaxEntries,
-    1,
-    10_000_000,
-    tr("gui.settings.security.max_entries", "Max entries"),
-  ));
-  let safetyMaxCompressionRatioError = $derived(requiredWholeSettingError(
-    safetyMaxCompressionRatio,
-    1,
-    100_000,
-    tr("gui.settings.security.ratio_guard", "Ratio guard"),
-  ));
-  let performanceThreadsError = $derived(optionalWholeSettingError(
-    performanceThreads,
-    1,
-    64,
-    tr("gui.settings.performance.custom_threads", "Custom threads"),
-  ));
-  let performanceParallelJobsError = $derived(optionalWholeSettingError(
-    performanceParallelJobs,
-    1,
-    8,
-    tr("gui.settings.performance.custom_parallel_jobs", "Custom parallel tasks"),
-  ));
-  let performanceMemoryError = $derived(optionalWholeSettingError(
-    performanceMemoryKiB,
-    8,
-    64,
-    tr("gui.settings.performance.custom_buffer_kib", "Custom buffer KiB"),
-  ));
-  let extractDestinationMode = $state<ExtractDestinationMode>("smart");
-  let extractScope = $state<ExtractScope>("all");
-  let extractSelectionSnapshot = $state<string[]>([]);
-  let extractCustomDest = $state("");
+  const extractOptions = new ExtractOptionsDraft(platformKind);
+  let extractDestinationMode = $derived(extractOptions.state.destinationMode);
+  let extractScope = $derived(extractOptions.state.scope);
+  let extractSelectionSnapshot = $derived(extractOptions.state.selection);
+  let extractCustomDest = $derived(extractOptions.state.customDest);
+  let extractVerifySfx = $derived(extractOptions.state.verifySfx);
+  let extractOverwriteMode = $derived(extractOptions.state.overwrite);
+  let extractSymlinkMode = $derived(extractOptions.state.symlinks);
+  let extractPresetEncodingLabel = $derived(extractOptions.state.presetEncodingLabel);
+  let extractPresetDraftTouched = $derived(extractOptions.state.touched);
   let extractDestinationPicker = $state.raw<{
     archiveId: number;
     source: string;
@@ -936,9 +672,6 @@
     screen: Screen;
     selection: ReadonlySet<string> | null;
   } | null>(null);
-  let extractSmartBaseOverride = $state<string | null>(null);
-  let extractVerifySfx = $state(false);
-  let extractDraftArchive: { id: number; source: string } | null = null;
   let pendingArchiveTaskReview: ArchiveTaskReview | null = null;
   let extractReviewFocusPending = false;
   let convertReviewFocusPending = false;
@@ -955,19 +688,12 @@
     phase: "preparing" | "submitting";
   } | null>(null);
   let archiveAddPending = $derived(archiveAddPreparation !== null);
-  let extractOverwriteMode = $state<ExtractOverwriteMode>("ask");
-  let extractSymlinkMode = $state<ExtractSymlinkMode>("preserve");
   let currentExtractOverwriteLabel = $derived(extractOverwriteLabel(extractOverwriteMode));
   let currentExtractSymlinkLabel = $derived(extractSymlinkLabel(extractSymlinkMode));
-  let extractPresetEncodingLabel = $state<string | null>(null);
-  let extractPlan = $state<ExtractPlanPreflightDto | null>(null);
-  let extractPlanPhase = $state<"idle" | "loading" | "ready" | "blocked" | "error">("idle");
-  let extractPlanErrorKey = $state("");
-  let extractPlanRequestKey = "";
-  let extractPlanGeneration = 0;
-  let extractPlanDebounceTimer: ReturnType<typeof setTimeout> | null = null;
-  let extractPlanQueued: ExtractPlanRequest | null = null;
-  let extractPlanActive: ExtractPlanRequest | null = null;
+  const extractPlanSession = new ExtractPlanSession(
+    nextPreflightRequestId,
+    (input) => previewExtractPlan(input.dest, input.selection, input.smart),
+  );
   let presetDocument = $state<ArchivePresetDocument | null>(null);
   let presetLoadState = $state<"loading" | "ready" | "error">("loading");
   let selectedCreatePresetId = $state<string | null>(null);
@@ -976,12 +702,33 @@
   let extractPresetDraftName = $state("");
   let createPresetMutationState = $state<ArchivePresetMutationState>("idle");
   let extractPresetMutationState = $state<ArchivePresetMutationState>("idle");
-  let createEncryptionEnabled = $state(false);
-  let createPresetSfxTarget = $state<PresetSfxTarget>("current_platform");
-  let createPresetSqzInnerFormat = $state<PresetSqzInnerFormat>("sqz");
-  let createPresetSplitSizeBytes = $state<string | null>(null);
-  let createPresetDraftTouched = isCreateFormatId(createFormatParam);
-  let extractPresetDraftTouched = false;
+  const createOptions = new CreateOptionsDraft({
+    format: isCreateFormatId(createFormatParam) ? createFormatParam : loadCreateFormat(),
+    profile: loadCreateProfile(), customLevel: loadCustomCreateLevel(), touched: isCreateFormatId(createFormatParam),
+  });
+  let activeCreateFormat = $derived(createOptions.state.format);
+  let activeCreateProfile = $derived(createOptions.state.profile);
+  let customCreateLevel = $derived(createOptions.state.customLevel);
+  let customCreateLevelError = $derived(createOptions.state.customLevelInvalid ? customCreateLevelInvalidMessage() : "");
+  let createPassword = $derived(createOptions.state.password);
+  let createPasswordConfirmation = $derived(createOptions.state.passwordConfirmation);
+  let createPasswordVisible = $derived(createOptions.state.passwordVisible);
+  let createEncryptionEnabled = $derived(createOptions.state.encryptionEnabled);
+  let createEncryptNames = $derived(createOptions.state.encryptNames);
+  let createSplitPreset = $derived(createOptions.state.splitPreset);
+  let createSplitMode = $derived(createOptions.state.splitMode);
+  let createCustomSplitAmount = $derived(createOptions.state.customSplitAmount);
+  let createCustomSplitUnit = $derived(createOptions.state.customSplitUnit);
+  let createContentPolicy = $derived(createOptions.state.contentPolicy);
+  let createExcludeText = $derived(createOptions.state.excludeText);
+  let createSfxEnabled = $derived(createOptions.state.sfxEnabled);
+  let createPresetSqzInnerFormat = $derived(createOptions.state.sqzInnerFormat);
+  let createDestinationBase = $derived(createOptions.state.destinationBase);
+  let createSuggestedDestination = $derived(createOptions.state.suggestedDestination);
+  let createCompletion = $derived(createOptions.state.completion);
+  let createPostSuccess = $derived(createOptions.state.postSuccess);
+  let createOptionsValidationAttempted = $derived(createOptions.state.validationAttempted);
+  let createPresetDraftTouched = $derived(createOptions.state.touched);
   let archiveOpenStatus = $state<"idle" | "opening">("idle");
   let archiveOpenGeneration = 0;
   let archivePickerRequest: number | null = null;
@@ -997,7 +744,14 @@
   let recoveryPar2Override = $state<string | null>(null);
   let recoveryRedundancyDraft = $state("10");
   let openDialogModulePromise: Promise<DialogModule> | null = null;
-  let batchDraft = $state<BatchExtractDraft | null>(null);
+  const batchExtract = new BatchExtractDraft(() => ({
+    fallbackPaths: runtimePreviews.batchPaths.length > 0
+      ? runtimePreviews.batchPaths : currentArchive ? [currentArchive.source] : [],
+    archive: currentArchive,
+    defaultDirectory: normalizedDefaultExtractDir(settingsSession.appliedGeneral.defaultExtractDir),
+    platform: platformKind(),
+  }));
+  let batchDraft = $derived(batchExtract.state);
   let nestedExtractDraft = $state<NestedExtractDraft | null>(null);
   let nestedExtractSubmissionPending = $state(false);
   let nestedExtractPickerBusy = $state(false);
@@ -1009,7 +763,6 @@
   let batchSubmissionPending = $state(false);
   let batchPickerBusy = $state(false);
   let batchPickerRequest = 0;
-  let batchDraftGeneration = 0;
   let batchReviewFocusPending = false;
   let checksumPath = $state(runtimePreviews.checksumPath);
   let checksumManifestPath = $state(runtimePreviews.checksumManifestPath);
@@ -1021,17 +774,31 @@
   let duplicateExcludeText = $state(".git\nnode_modules\n.DS_Store");
   let createSources = $state<CreateSourceRoot[]>([]);
   let selectedCreateSourcePaths = $state<string[]>([]);
-  let createSourcePicker = $state.raw<CreateSourcePicker | null>(null);
-  let createOutputPreparation = $state.raw<CreatePreparationOwner | null>(null);
-  let createPrimaryFocusPending = false;
+  let createPrimaryFocusPending: object | null = null;
   let createSourceInputs = $derived(createSourcePaths(createSources));
+  const createPreflight = new CreatePreflightSession({
+    getDialogModule,
+    openNativeDialog,
+    saveNativeDialog,
+    ensurePreflightListener: ensureCreatePreflightListener,
+    nextRequestId: nextPreflightRequestId,
+    platform: platformKind,
+    archiveStemName: (name) => archiveStemName(name),
+  }, {
+    tr,
+    tError,
+    submissionBlockedMessage: (error) => isJobSubmitBlocked(error) ? jobSubmitBlockedMessage(error) : null,
+    emit: applyCreatePreflightEffect,
+  }, submitJob, {
+    scanned: runtimePreviews.preflightScanned,
+    current: runtimePreviews.preflightCurrent,
+    destinationBytes: runtimePreviews.preflightDestinationBytes,
+    destinationCurrent: runtimePreviews.preflightDestinationCurrent,
+  });
+  syncCreatePreflightContext();
   let classicCreateSection = $state<ClassicCreateSection>("general");
   let dragActive = $state(false);
   let lastDropKind = $state<"none" | "archives" | "create" | "recovery">("none");
-  let customCreateLevel = $state(loadCustomCreateLevel());
-  let customCreateLevelError = $state("");
-  let activeCreateProfile = $state<CreateProfileId>(loadCreateProfile());
-  let activeCreateFormat = $state<CreateFormatId>(isCreateFormatId(createFormatParam) ? createFormatParam : loadCreateFormat());
   const convertRouteOwner: ConvertRouteOwner = {};
   let convertRouteHandle = $state<ConvertRouteHandle | null>(null);
   let convertRouteStatus = $derived<ConvertRouteStatus>(convertRouteHandle?.status() ?? {
@@ -1041,24 +808,7 @@
     methodLabel: "-",
     destination: currentArchive?.path ?? openArchiveFirstLabel(),
   });
-  let createPassword = $state("");
-  let createPasswordConfirmation = $state("");
-  let createPasswordVisible = $state(false);
-  let createEncryptNames = $state(false);
-  let createSplitPreset = $state<CreateSplitPreset>("none");
-  let createSplitMode = $state<CreateSplitMode>("generic");
-  let createCustomSplitAmount = $state("100");
-  let createCustomSplitUnit = $state<CreateSplitUnit>("mib");
-  let createContentPolicy = $state<CreateContentPolicy>("cross_platform_clean");
-  let createDestinationBase = $state<CreateDestinationBase>("ask");
-  let createSuggestedDestination = $state<string | null>(null);
-  let createOverwritePolicy = $state<OverwritePolicy>("ask");
-  let createCompletion = $state<CreateCompletionAction>("none");
-  let createPostSuccess = $state<PostSuccessAction>("keep_source");
-  let createTestAfterCreate = $state(false);
-  let createOptionsValidationAttempted = $state(false);
   let createAdvancedOpen = $state(false);
-  let createSfxEnabled = $state(false);
   let sfxCreateCapability = $state<SfxCreateCapabilityDto>({
     target: initialPlatform,
     extension: initialPlatform === "macos" ? "app" : initialPlatform === "windows" ? "exe" : "run",
@@ -1067,68 +817,28 @@
     requires_signing: true,
   });
   let sfxCreateCapabilityReady = $state(false);
-  let createExcludeText = $state("");
-  let lastCreatePlan = $state<CreatePlanDto | null>(null);
-  let lastDiskSpace = $state<DiskSpaceDto | null>(null);
-  let lastTempDiskSpace = $state<DiskSpaceDto | null>(null);
-  let lastSystemTempDiskSpace = $state<DiskSpaceDto | null>(null);
-  let lastCreateDest = $state<string | null>(null);
-  let pendingCreateSubmission = $state<PendingCreateSubmission | null>(null);
-  let createPreflightPhase = $state<CreatePreflightPhase>(
-    runtimePreviews.preflightDestinationBytes > 0
-      ? "choosingDest"
-      : runtimePreviews.preflightScanned > 0
-        ? "measuring"
-        : "idle",
-  );
-  let createPreflightScanned = $state(runtimePreviews.preflightScanned);
-  let createPreflightCurrent = $state(
-    runtimePreviews.preflightDestinationCurrent || runtimePreviews.preflightCurrent,
-  );
-  let createPreflightExcludeCount = $state(0);
-  let createPreflightIssue = $state("");
-  let createPreflightIssueStage = $state<CreatePreflightStage | null>(null);
-  let createPreflightCreatingSfx = $state(false);
   let createPreflightCleanup: (() => void) | null = null;
   let createPreflightListenPromise: Promise<void> | null = null;
-  let createPreflightRequestId: string | null = previewDestinationRequestId;
-  let createPreflightRequestKind = $state<"source" | "destination" | null>(
-    previewDestinationRequestId ? "destination" : null,
+  let preflightEventsClosed = false;
+  let nestedPreview = $derived(previewSession.nested);
+  let entryPreview = $derived(previewSession.file);
+  let entryPreviewFailure = $derived(previewSession.failure);
+  let previewOriginEntryPath = $derived(previewSession.origin?.entryPath ?? null);
+  let previewOriginVirtualIndex = $derived(previewSession.origin?.virtualIndex ?? null);
+  let previewPhase = $derived(previewSession.phase);
+  let previewTargetName = $derived(previewSession.targetName);
+  const archiveEdit = new ArchiveEditSession(
+    () => ({
+      archive: currentArchive, generation: archiveOpenGeneration, opening: archiveOpenStatus !== "idle",
+      directory: archiveDirs.join("/"), selectedPaths: selectedPaths(),
+      mutationDisabledReason: archiveMutationDisabledReason(),
+    }),
+    submitCurrentArchiveJob,
+    blockSelectionScopedAction,
+    { tr, tError, emit: applyArchiveEditEffect },
   );
-  let createPreflightProcessedBytes = $state(runtimePreviews.preflightDestinationBytes);
-  let createPreflightCancelPending = $state(false);
-  let createPreflightClosed = false;
-  let nestedPreview = $state<NestedArchivePreviewDto | null>(null);
-  let entryPreview = $state<EntryPreviewDto | null>(null);
-  let entryPreviewFailure = $state<PreviewFailure | null>(null);
-  let previewOriginEntryPath: string | null = null;
-  let previewOriginVirtualIndex: number | null = null;
-  let previewPhase = $state<PreviewPhase>("idle");
-  let previewTargetName = $state("");
-  let previewRequestGeneration = 0;
-  let previewActionGeneration = 0;
-  let entryPreviewPreparationTail: Promise<void> = Promise.resolve();
-  let renameTargetName = $state("");
-  let moveTargetDir = $state("moved/");
-  let newFolderName = $state("");
-  type ArchiveEditKind = "rename" | "move" | "new-folder";
-  let archiveEditKind = $state<ArchiveEditKind | null>(null);
-  let archiveEditContext = $state<{
-    source: string; encoding: string | null; generation: number; id: number;
-    directory: string; paths: Set<string>;
-  } | null>(null);
-  let archiveEditChecking = $state(false);
-  let archiveEditError = $state<string | null>(null);
-  let archiveEditSession = 0;
-  let archiveEditReturnFocus: HTMLElement | null = null;
-  let moveConflictReview = $state<MoveConflictReview | null>(null);
-  let moveConflictReturnFocus: HTMLElement | null = null;
-  let moveConflictView = $derived.by(() => {
-    const review = moveConflictReview;
-    if (!review) return null;
-    const items = review.items.filter((item) => item.conflict);
-    return { targetDir: review.targetDir, readyCount: review.items.length - items.length, items };
-  });
+  let archiveEditReturnFocus: { owner: ArchiveEditOwner; target: HTMLElement | null } | null = null;
+  let moveConflictReturnFocus: { owner: ArchiveMoveReview; target: HTMLElement | null } | null = null;
   let historyRows = $derived(operationHistory());
   let activePopover = $state<"quickActions" | null>(null);
   let archiveSearchInput = $state<HTMLInputElement | null>(null);
@@ -1209,12 +919,12 @@
   ];
 
   function customPaletteVariables(): CssVariableMap {
-    if (activePalette !== "custom") return {};
+    if (settingsSession.colors.palette !== "custom") return {};
     return customPaletteVariablesFor(activeTheme);
   }
 
   function customPaletteVariablesFor(theme: ResolvedTheme): CssVariableMap {
-    return deriveCustomPaletteTokens(customAccent, theme, accentContrastGuard);
+    return deriveCustomPaletteTokens(settingsSession.colors.accent, theme, settingsSession.colors.contrastGuard);
   }
 
   function entryContextCssVariables(context: EntryContext): CssVariableMap {
@@ -1224,22 +934,9 @@
       "--entry-context-top": `${context.y}px`,
     };
   }
-
-  const customAccentValid = $derived(normalizeHexColor(customAccentInput) !== null);
-  const paletteApplyBlocked = $derived(activePalette === "custom" && !customAccentValid);
-  let generalSaveState = $derived(settingsSaveState("general", generalSettingsDirty));
-  let securitySaveState = $derived(settingsSaveState("security", safetySettingsDirty));
-  let performanceSaveState = $derived(settingsSaveState("performance", performanceSettingsDirty));
-  let colorsSaveState = $derived(settingsSaveState("colors", colorSettingsDirty));
-  let safetyValidationError = $derived(
-    safetyMaxOutputError || safetyMaxEntriesError || safetyMaxCompressionRatioError,
-  );
-  let performanceValidationError = $derived(
-    performanceParallelJobsError || performanceThreadsError || performanceMemoryError,
-  );
   $effect(() => {
     document.documentElement.dataset.theme = activeTheme;
-    document.documentElement.dataset.palette = activePalette;
+    document.documentElement.dataset.palette = settingsSession.colors.palette;
     document.documentElement.dataset.density = activeDensityChoice;
   });
 
@@ -1254,10 +951,10 @@
   });
 
   $effect(() => {
-    const picker = createSourcePicker;
-    const output = createOutputPreparation;
-    if ((picker && !isCurrentCreateSourcePicker(picker))
-      || (output && !isCurrentCreateOutputPreparation(output))) dismissCreatePreparation();
+    const context = { active: screen === "create", mode, sources: createSources };
+    untrack(() => {
+      if (createPreflight.syncContext(context)) createPrimaryFocusPending = null;
+    });
   });
 
   $effect(() => {
@@ -1284,15 +981,8 @@
   $effect(() => {
     currentArchive?.id;
     archiveDirs.join("\u0000");
-    const selected = [...selectedPaths()];
-    untrack(() => {
-      if (archiveEditKind !== null) return;
-      const source = selected.length === 1 ? selected[0] : null;
-      renameTargetName = source ? pathBaseName(source.replace(/\/+$/g, "")) : "";
-      archiveEditError = null;
-      moveConflictReview = null;
-      moveConflictReturnFocus = null;
-    });
+    selectedPaths();
+    untrack(() => archiveEdit.browseContextChanged());
   });
 
   $effect(() => {
@@ -1406,7 +1096,7 @@
   $effect(() => {
     const completedTask = runtimePreviews.completedTask;
     if (!completedTask) return;
-    const id = installCompletedTaskPreview(completedTask, params.has("previewChecksumHistory") || params.has("previewDuplicateHistory"));
+    const id = untrack(() => installCompletedTaskPreview(completedTask, params.has("previewChecksumHistory") || params.has("previewDuplicateHistory")));
     if (id === null) return;
     taskDialogTaskId = id;
     taskDialogDismissedId = null;
@@ -1415,7 +1105,7 @@
   $effect(() => {
     const activeTaskPreview = runtimePreviews.activeTask;
     if (!activeTaskPreview) return;
-    const id = installActiveTaskPreview(activeTaskPreview, import.meta.env.DEV && params.has("previewStatusUnavailable"));
+    const id = untrack(() => installActiveTaskPreview(activeTaskPreview, import.meta.env.DEV && params.has("previewStatusUnavailable")));
     if (id === null) return;
     const surface = params.get("previewTaskSurface");
     if (surface === "panel" || surface === "center") {
@@ -1433,7 +1123,7 @@
   $effect(() => {
     const waitReason = runtimePreviews.taskQueue;
     if (!waitReason) return;
-    if (installTaskQueuePreview(waitReason) === null) return;
+    if (untrack(() => installTaskQueuePreview(waitReason)) === null) return;
     taskCenterReturnFocus = null;
     taskCenterFocusTaskId = null;
     taskCenterSelectedTaskId = null;
@@ -1472,35 +1162,13 @@
 
   $effect(() => {
     syncExtractDraftArchive();
-    const current = currentArchive;
-    if (screen !== "extract" || !current) {
-      resetExtractPlanRequestState();
+    const input = captureExtractPlanInput();
+    if (!input) {
+      extractPlanSession.reset();
       return;
     }
-    const selection = extractJobPaths();
-    const dest = extractJobDestination();
-    const smart = extractDestinationMode === "smart";
-    const encoding = extractEncodingForJob();
-    const key = extractPlanKey(
-      current.id,
-      current.source,
-      current.path,
-      dest,
-      selection,
-      smart,
-      encoding,
-    );
-    if (key === extractPlanRequestKey) return;
-    void requestExtractPlan(
-      current.id,
-      current.source,
-      current.path,
-      dest,
-      selection,
-      smart,
-      encoding,
-      true,
-    );
+    if (extractPlanSession.matches(input)) return;
+    void extractPlanSession.request(input, { debounce: true });
   });
 
   $effect(() => {
@@ -1508,11 +1176,7 @@
     if (request && !request.isCurrent()) checksumCopyRequest = null;
   });
 
-  onMount(() => () => {
-    cancelActiveExtractPlan();
-    extractPlanGeneration += 1;
-    discardQueuedExtractPlan();
-  });
+  onMount(() => () => extractPlanSession.dispose());
 
   let nativeMenuConnection = $state<NativeMenuConnection | null>(null);
   let textEditingFocused = $state(false);
@@ -1733,7 +1397,17 @@
       },
     );
     browseScrollTop = 0;
-    nestedPreview = preview.nestedPreview;
+    if (preview.nestedPreview) {
+      const nested = preview.nestedPreview;
+      const preparation = previewSession.beginPreparation({
+        outerSource: nested.outer_path, outerDisplayPath: preview.info.path,
+        entryPath: nested.entry_path, virtualIndex: null,
+      }, "nested", pathBaseName(nested.entry_path));
+      if (preparation) {
+        previewSession.acceptNested(preparation, nested);
+        previewSession.finishPreparation(preparation);
+      }
+    }
   });
 
   onMount(() => {
@@ -1769,9 +1443,10 @@
     };
 
     if (ownsMainOpenFileQueue) {
+      const isCurrent = captureIncomingOpenFilesRequest();
       void ipc.takeOpenFiles()
         .then(async (event) => {
-          if (!cancelled) await handleOpenFilesPayload(event);
+          if (!cancelled && (externalOpenAction(event.action) || isCurrent())) await handleOpenFilesPayload(event);
         })
         .catch(() => {
           // Dev preview has no Tauri open-file queue.
@@ -1786,6 +1461,7 @@
 
     return () => {
       cancelled = true;
+      incomingOpenFilesGeneration += 1;
       if (listenerTimer !== null) clearTimeout(listenerTimer);
       unlisten?.();
     };
@@ -1821,8 +1497,13 @@
     clearChecksumCopyState();
     extractDestinationPicker = null;
     checksumResultFocusPending = null;
-    createPreflightClosed = true;
-    dismissCreatePreparation();
+    preflightEventsClosed = true;
+    createPrimaryFocusPending = null;
+    createPreflight.dispose();
+    archiveEdit.dispose();
+    previewSession.dispose();
+    archiveEditReturnFocus = null;
+    moveConflictReturnFocus = null;
     createPreflightCleanup?.();
     createPreflightCleanup = null;
     convertRouteHandle?.dispose();
@@ -1912,12 +1593,12 @@
       .then((capability) => {
         sfxCreateCapability = capability;
         sfxCreateCapabilityReady = true;
-        if (!capability.available) createSfxEnabled = false;
+        createOptions.acceptSfxCapability(capability.available);
         applyDefaultCreatePresetWhenReady();
       })
       .catch(() => {
         sfxCreateCapabilityReady = true;
-        createSfxEnabled = false;
+        createOptions.acceptSfxCapability(false);
         if (import.meta.env.DEV) {
           // Browser preview has no native capability service.
           applyDefaultCreatePresetWhenReady();
@@ -1930,6 +1611,7 @@
 
   onMount(() => {
     if (forceFirstRun) {
+      resolveInitialGeneralSettingsReady();
       void loadLocale(null).finally(() => {
         sourceCleanupRecoveryReady = true;
       });
@@ -1937,7 +1619,7 @@
     }
 
     let cancelled = false;
-    const requestedDraftGenerations = { ...settingsDraftGenerations };
+    const requestedDraftGenerations = settingsSession.captureGenerations();
     const requestedAppearanceGenerations = { ...appearanceSaveGenerations };
     void ipc.getSettings()
       .then(async (settings) => {
@@ -1954,14 +1636,15 @@
         ) {
           activeThemeChoice = isThemeChoice(settings.theme) ? settings.theme : "system";
         }
-        applySettingsSnapshot(
+        applyAppearanceSettingsSnapshot(
           settings,
-          requestedDraftGenerations,
           appearanceSaveGenerations.density !== requestedAppearanceGenerations.density,
         );
+        settingsSession.applySnapshot(settings, requestedDraftGenerations);
+        resolveInitialGeneralSettingsReady();
         await loadLocale(settings.language).catch(() => undefined);
         if (cancelled) return;
-        updateSettingsSnapshotLabel();
+        settingsSession.updateSnapshotLabel();
         settingsStatus = initialMode ? "preview" : "ready";
         sourceCleanupRecoveryReady = true;
         startAutomaticUpdateCheck(settings.check_updates_automatically !== false);
@@ -1975,24 +1658,18 @@
           initUiMode(null);
         }
         const previewLanguage = storedPreviewLanguage();
-        const savedPreviewLanguage = previewLanguage ?? "";
-        savedGeneralLanguageChoice = savedPreviewLanguage;
-        appliedGeneralLanguageChoice = savedPreviewLanguage;
-        if (settingsDraftGenerations.general === requestedDraftGenerations.general) {
-          generalLanguageChoice = savedPreviewLanguage;
-        }
+        settingsSession.applyPreviewLanguage(previewLanguage, requestedDraftGenerations);
+        resolveInitialGeneralSettingsReady();
         await loadLocale(previewLanguage).catch(() => undefined);
         if (cancelled) return;
-        settingsSnapshotLabel = tr(
-          "gui.settings.snapshot.defaults_active",
-          "Saved settings · defaults",
-        );
+        settingsSession.setDefaultsSnapshotLabel();
         settingsStatus = "preview";
         sourceCleanupRecoveryReady = true;
       });
 
     return () => {
       cancelled = true;
+      resolveInitialGeneralSettingsReady();
     };
   });
 
@@ -2182,7 +1859,7 @@
     const url = new URL(window.location.href);
     url.searchParams.set("mode", nextMode);
     url.searchParams.set("screen", screen);
-    url.searchParams.set("palette", activePalette);
+    url.searchParams.set("palette", settingsSession.colors.palette);
     url.searchParams.set("theme", activeThemeChoice);
     url.searchParams.set("density", activeDensityChoice);
     url.searchParams.delete("firstRun");
@@ -2239,7 +1916,7 @@
         appearanceSaveStates[setting] = isSettingsPersistenceFailure(error) ? "error" : "session";
         showNotice(
           isSettingsPersistenceFailure(error)
-            ? settingsPersistenceFailureLabel()
+            ? settingsSession.persistenceFailureLabel()
             : previewFailureLabel,
         );
       });
@@ -2249,6 +1926,7 @@
     if (next !== mode) {
       filenameEncodingRequest = null;
       dismissArchiveAddPreparation();
+      dismissCreatePreparation();
     }
     firstRunDropFeedback = null;
     trackAppearanceSave(
@@ -2259,6 +1937,7 @@
         savedModeChoice = next;
       },
     );
+    syncCreatePreflightContext();
     syncUrl(next);
   }
 
@@ -2288,7 +1967,7 @@
 
   function preventCreateSubmissionNavigation(next: Screen): boolean {
     if (screen !== "create" || next === "create") return false;
-    if (createPreflightPhase === "submitting") {
+    if (!createPreflight.canLeave()) {
       showNotice(
         tr(
           "gui.create.wait_for_submission_before_leaving",
@@ -2297,8 +1976,8 @@
       );
       return true;
     }
-    if (createPreflightPhase === "choosingDest" && createDestinationInspectionCancellable()) {
-      void cancelCreateDestinationInspection({ announce: false, keepIntentOnFailure: true });
+    if (createPreflight.state.phase === "choosingDest" && createDestinationInspectionCancellable()) {
+      void createPreflight.cancelDestination({ announce: false, keepIntentOnFailure: true });
     }
     return false;
   }
@@ -2352,21 +2031,22 @@
       batchPickerRequest += 1;
       batchPickerBusy = false;
     }
-    if (next !== "create") createPrimaryFocusPending = false;
+    if (next !== "create") createPrimaryFocusPending = null;
     if (next !== "extract") extractReviewFocusPending = false;
     if (next !== "convert") convertReviewFocusPending = false;
     if (next !== "settingsSecurity") securitySettingsFocusPending = false;
     if (next !== "checksum") checksumResultFocusPending = null;
     if (next !== "duplicates") duplicateReportFocusPending = false;
     if (next !== "password") pendingArchiveTaskReview = null;
-    if (screen === "create" && next !== "create" && pendingCreateSubmission) {
+    if (screen === "create" && next !== "create" && createPreflight.state.pending) {
       discardPendingCreatePlan();
-      createOptionsValidationAttempted = false;
+      createOptions.resetValidation();
     }
     if (next === "create" && screen !== "create") {
       classicCreateSection = "general";
     }
     screen = next;
+    syncCreatePreflightContext();
     syncUrl();
     void tick().then(() => {
       document.documentElement.scrollTop = 0;
@@ -2462,16 +2142,7 @@
 
   function applyCreatePreflightEvent(event: CreatePreflightEvent) {
     if (convertRouteHandle?.applyPreflightEvent(event)) return;
-    if (!createPreflightRequestId || event.request_id !== createPreflightRequestId) return;
-    if (event.phase === "destination" && createPreflightRequestKind === "destination") {
-      const processedBytes = Number(event.processed_bytes ?? 0);
-      if (Number.isFinite(processedBytes)) createPreflightProcessedBytes = processedBytes;
-      createPreflightCurrent = String(event.current ?? "");
-      return;
-    }
-    const scanned = Number(event.scanned ?? 0);
-    if (Number.isFinite(scanned)) createPreflightScanned = scanned;
-    createPreflightCurrent = String(event.current ?? "");
+    createPreflight.applyEvent(event);
   }
 
   function nextPreflightRequestId(): string {
@@ -2480,16 +2151,16 @@
   }
 
   function ensureCreatePreflightListener(): Promise<void> {
-    if (createPreflightCleanup || createPreflightClosed) return Promise.resolve();
+    if (createPreflightCleanup || preflightEventsClosed) return Promise.resolve();
     if (createPreflightListenPromise) return createPreflightListenPromise;
     createPreflightListenPromise = import("@tauri-apps/api/event")
       .then(({ listen }) =>
         listen<CreatePreflightEvent>("create://preflight", (event) => {
-          if (!createPreflightClosed) applyCreatePreflightEvent(event.payload);
+          if (!preflightEventsClosed) applyCreatePreflightEvent(event.payload);
         }),
       )
       .then((dispose) => {
-        if (createPreflightClosed) {
+        if (preflightEventsClosed) {
           dispose();
         } else {
           createPreflightCleanup = dispose;
@@ -2502,57 +2173,6 @@
         createPreflightListenPromise = null;
       });
     return createPreflightListenPromise;
-  }
-
-  function setPalette(next: PaletteId) {
-    activePalette = next;
-    if (next === "custom") {
-      customAccentInput = normalizeHexColor(customAccentInput) ?? customAccent;
-      customAccentSaveError = false;
-    } else {
-      customAccentSaveError = false;
-    }
-    markSettingsDraft("colors");
-    syncUrl();
-  }
-
-  function updateCustomAccent(value: string, source: "color" | "hex") {
-    activePalette = "custom";
-    const normalized = normalizeHexColor(value);
-    if (normalized) {
-      customAccent = normalized;
-      customAccentInput = normalized;
-      customAccentSaveError = false;
-    } else if (source === "hex") {
-      customAccentInput = value.trim().toUpperCase();
-      customAccentSaveError = false;
-    }
-    markSettingsDraft("colors");
-    syncUrl();
-  }
-
-  function onCustomAccentHexInput(event: Event) {
-    updateCustomAccent((event.currentTarget as HTMLInputElement).value, "hex");
-  }
-
-  function customAccentForSave(): string | null {
-    const normalized = normalizeHexColor(customAccentInput);
-    if (activePalette === "custom") {
-      return normalized;
-    }
-    return normalizeHexColor(customAccent) ?? defaultCustomAccent;
-  }
-
-  function palettePayloadForSave(): { palette: PaletteId; customAccent: string; contrastGuard: boolean } | null {
-    const customAccentPayload = customAccentForSave();
-    if (!customAccentPayload) {
-      customAccentSaveError = true;
-      return null;
-    }
-    customAccent = customAccentPayload;
-    customAccentInput = customAccentPayload;
-    customAccentSaveError = false;
-    return { palette: activePalette, customAccent: customAccentPayload, contrastGuard: accentContrastGuard };
   }
 
   function setTheme(next: ThemeChoice) {
@@ -2729,10 +2349,6 @@
     return id.toUpperCase();
   }
 
-  function formatIsExternal(format: FormatDto): boolean {
-    return format.id === "wim" || format.id === "rar" || longTailBridgeFormatIds.has(format.id);
-  }
-
   function formatStateLabel(format: FormatDto): string {
     if (format.id === "zip") return tr("gui.format.state.default", "Default");
     if (format.id === "sqz") return tr("gui.format.state.recovery_container", "Recovery container");
@@ -2822,32 +2438,6 @@
     return [...featured, ...rest].slice(0, 8);
   }
 
-  function formatExamples(formats: FormatDto[], max = 7): string {
-    if (formats.length === 0) return tr("common.none", "None");
-    const sorted = formats
-      .slice()
-      .sort((a, b) => formatSortRank(a).localeCompare(formatSortRank(b)));
-    const shown = sorted.slice(0, max).map((format) => formatDisplayName(format.id));
-    const hidden = sorted.length - shown.length;
-    return hidden > 0 ? `${shown.join(", ")} +${hidden}` : shown.join(", ");
-  }
-
-  function formatCoverageRows(): FormatCoverageRow[] {
-    const formats = registryFormats();
-    const archives = formats.filter((format) => format.kind === "archive");
-    const packUnpack = archives.filter((format) => format.can_create && format.can_extract);
-    const unpackOnly = archives.filter((format) => !format.can_create && format.can_extract);
-    const codecs = formats.filter((format) => format.kind === "compressor");
-    const external = archives.filter((format) => formatIsExternal(format));
-    return [
-      { label: tr("gui.format.coverage.pack_unpack", "Pack / unpack"), value: String(packUnpack.length), detail: formatExamples(packUnpack) },
-      { label: tr("gui.format.coverage.unpack_only", "Unpack only"), value: String(unpackOnly.length), detail: formatExamples(unpackOnly) },
-      { label: tr("gui.format.coverage.stream_codecs", "Stream codecs"), value: String(codecs.length), detail: formatExamples(codecs, 6) },
-      { label: tr("gui.format.coverage.external_bridge", "External bridge"), value: String(external.length), detail: tr("gui.format.coverage.external_bridge_detail", "7zz/7z and wimlib boundaries stay visible") },
-      { label: tr("gui.format.coverage.recovery", "Recovery"), value: "3", detail: tr("gui.format.coverage.recovery_detail", "PAR2 sidecars, .sqz embedded, .sqz.rev sidecars") },
-    ];
-  }
-
   function loadCreateProfile(): CreateProfileId {
     try {
       const value = window.localStorage.getItem("squallz.createProfile");
@@ -2866,28 +2456,14 @@
     }
   }
 
-  function clampCreateLevel(value: number): number {
-    if (!Number.isFinite(value)) return 6;
-    return Math.min(9, Math.max(1, Math.round(value)));
-  }
-
   function customCreateLevelInvalidMessage(): string {
     return tr("gui.create.custom_level_invalid", "Use a compression level from 1 to 9");
-  }
-
-  function parseCustomCreateLevelInput(input: HTMLInputElement): number | null {
-    const raw = input.value.trim();
-    const next = Number(raw);
-    if (!raw || !Number.isFinite(next) || !Number.isInteger(next) || next < 1 || next > 9) {
-      return null;
-    }
-    return next;
   }
 
   function loadCustomCreateLevel(): number {
     try {
       const raw = window.localStorage.getItem("squallz.customCreateLevel");
-      return raw === null ? 6 : clampCreateLevel(Number(raw));
+      return raw === null ? 6 : Number(raw);
     } catch {
       return 6;
     }
@@ -2929,128 +2505,92 @@
   }
 
   function markCreatePresetDraftTouched() {
-    createPresetDraftTouched = true;
+    createOptions.touch();
     invalidateCreatePreflightResult();
   }
 
-  function markExtractPresetDraftTouched() {
-    extractPresetDraftTouched = true;
+  function createDraftIssueMessage(issue: CreateDraftIssue, requestedTarget?: string): string {
+    switch (issue) {
+      case "options_locked": return createOptionsLockedReason();
+      case "format_unavailable": return tr("gui.presets.format_unavailable", "This preset uses a format that is not available in the create screen");
+      case "task_format_unavailable": return tr("gui.create.review.format_unavailable", "This task's format is not available in the create screen. Your current settings were kept.");
+      case "task_sfx_unavailable": return tr("gui.create.review.sfx_unavailable", "This device cannot recreate this self-extractor. Your current settings were kept.");
+      case "sfx_loading": return tr("gui.create.sfx_capability_loading", "Checking self-extracting support");
+      case "sfx_unavailable": return createSfxUnavailableMessage();
+      case "sfx_target_unavailable": return tr("gui.presets.sfx_target_unavailable", "This device cannot build the preset's {target} self-extractor").replace("{target}", requestedTarget ?? "");
+      case "sfx_zip_only": return tr("gui.create.sfx_zip_only_notice", "Turn off self-extracting output before choosing another format");
+      case "encryption_format_change": return tr("gui.create.encryption_format_change", "Turn off file content encryption before choosing a format that cannot encrypt files.");
+      case "name_encryption_format_change": return tr("gui.create.name_encryption_format_change", "Turn off file name encryption before choosing a format that cannot hide names.");
+      case "sfx_no_split": return tr("gui.create.sfx_no_split_notice", "Self-extracting output requires one complete ZIP payload");
+      case "native_layout_unavailable": return tr("gui.create.native_layout_unavailable", "Native volume layout is available for ZIP and WIM; self-extracting output must remain a single ZIP.");
+      case "trash_excluded": return tr("gui.create.output.source.trash_disabled_excludes", "Remove exclusion rules or choose Keep all files to move originals to {trash}").replace("{trash}", trashNameLabel());
+      case "completion_sfx": return tr("gui.create.output.completion.open_disabled_sfx", "Self-extracting outputs must be revealed and tested on their target system");
+      case "completion_split": return tr("gui.create.output.completion.open_disabled_split", "Split archives must stay together, so Squallz reveals the primary volume instead");
+      case "trash_test_required": return tr("gui.create.output.integrity.required_notice", "A full integrity test is required before originals can move to {trash}").replace("{trash}", trashNameLabel());
+      case "custom_level_invalid": return customCreateLevelInvalidMessage();
+      case "password_required": return tr("gui.create.password_required", "Enter an archive password, or turn off file content encryption.");
+      case "confirm_password_required": return tr("gui.create.confirm_password_required", "Confirm the archive password before starting");
+      case "passwords_do_not_match": return tr("gui.create.passwords_do_not_match", "The passwords do not match");
+      case "invalid_part_size": return tr("gui.create.invalid_part_size", "Enter a part size of at least 0.1 MiB");
+      case "native_zip_part_size_limit": return tr("gui.create.native_zip_part_size_limit", "Native ZIP parts cannot exceed 4 GiB − 1 byte");
+      case "sfx_requires_zip": return tr("gui.create.sfx_requires_zip", "Self-extracting output requires a single ZIP payload");
+    }
   }
 
-  function updateCreateContentPolicy(policy: CreateContentPolicy) {
-    if (policy === createContentPolicy) return;
-    markCreatePresetDraftTouched();
-    createContentPolicy = policy;
-    showNotice(
-      tr("gui.create.content_policy.changed", "Archive contents: {policy}")
-        .replace("{policy}", createContentPolicyLabel(policy)),
-    );
-    normalizeUnsupportedCreatePostSuccess();
+  function createDraftContext() {
+    return { capabilityReady: sfxCreateCapabilityReady, sfxCapability: sfxCreateCapability, locked: createPreflight.busy() };
   }
 
-  function createTrashSourceDisabledReason(): string {
-    const excludesContent = createContentPolicy === "cross_platform_clean" ||
-      (createContentPolicy === "custom" && createExcludeRules().length > 0);
-    return excludesContent
-      ? tr(
-        "gui.create.output.source.trash_disabled_excludes",
-        "Remove exclusion rules or choose Keep all files to move originals to {trash}",
-      ).replace("{trash}", trashNameLabel())
-      : "";
+  function announceCreateDraftNormalization(change: CreateDraftChange) {
+    if (change.postSuccessNormalized) {
+      showNotice(tr("gui.create.output.source.changed_to_keep", "Originals will stay in place · {reason}")
+        .replace("{reason}", createTrashSourceDisabledReason()));
+    }
+    if (change.completionNormalized) {
+      showNotice(tr("gui.create.output.completion.changed_to_reveal", "When finished changed to Reveal · {reason}")
+        .replace("{reason}", createOpenCompletionDisabledReason()));
+    }
   }
 
-  function normalizeUnsupportedCreatePostSuccess(announce = true): boolean {
-    const reason = createTrashSourceDisabledReason();
-    if (!reason || createPostSuccess !== "trash_source") return false;
-    createPostSuccess = "keep_source";
-    if (announce) {
-      showNotice(
-        tr(
-          "gui.create.output.source.changed_to_keep",
-          "Originals will stay in place · {reason}",
-        ).replace("{reason}", reason),
-      );
+  function editCreateOptions(edit: CreateDraftEdit): boolean {
+    const change = createOptions.edit(edit, createDraftContext(), markCreatePresetDraftTouched);
+    if (change.issue) {
+      showNotice(createDraftIssueMessage(change.issue, change.requestedSfxTarget));
+      return false;
+    }
+    if (!change.changed) return false;
+    if (edit.kind === "contentPolicy") {
+      showNotice(tr("gui.create.content_policy.changed", "Archive contents: {policy}")
+        .replace("{policy}", createContentPolicyLabel(edit.value)));
+    }
+    announceCreateDraftNormalization(change);
+    if (edit.kind === "sfxEnabled") {
+      if (edit.value) persistCreateFormat("zip");
+      showNotice(edit.value
+        ? tr("gui.create.sfx_enabled_notice", "Self-extracting output enabled · ZIP payload · signing required")
+        : tr("gui.create.sfx_disabled_notice", "Standard archive output restored"));
+    } else if (edit.kind === "postSuccess" && edit.value === "trash_source") {
+      showNotice(tr("gui.create.output.source.trash_selected", "Originals will move to {trash} only after the new archive passes a full integrity test")
+        .replace("{trash}", trashNameLabel()));
     }
     return true;
   }
 
+  function createTrashSourceDisabledReason(): string {
+    return createOptions.trashExcluded ? createDraftIssueMessage("trash_excluded") : "";
+  }
+
   function createOpenCompletionDisabledReason(): string {
-    if (createSfxEnabled) {
-      return tr("gui.create.output.completion.open_disabled_sfx", "Self-extracting outputs must be revealed and tested on their target system");
-    }
-    if (createSplitSizeBytes() !== null) {
-      return tr("gui.create.output.completion.open_disabled_split", "Split archives must stay together, so Squallz reveals the primary volume instead");
-    }
-    return "";
-  }
-
-  function normalizeUnsupportedCreateCompletion(announce = true) {
-    const reason = createOpenCompletionDisabledReason();
-    if (!reason || createCompletion !== "open_in_squallz") return;
-    createCompletion = "reveal_output";
-    if (announce) {
-      showNotice(
-        tr("gui.create.output.completion.changed_to_reveal", "When finished changed to Reveal · {reason}")
-          .replace("{reason}", reason),
-      );
-    }
-  }
-
-  function updateCreateDestinationBase(value: CreateDestinationBase) {
-    if (value === createDestinationBase) return;
-    markCreatePresetDraftTouched();
-    createDestinationBase = value;
-    createOverwritePolicy = value === "ask" ? "ask" : "rename";
-  }
-
-  function updateCreateCompletion(value: CreateCompletionAction) {
-    if (value === "open_in_squallz" && createOpenCompletionDisabledReason()) {
-      showNotice(createOpenCompletionDisabledReason());
-      return;
-    }
-    if (value === createCompletion) return;
-    markCreatePresetDraftTouched();
-    createCompletion = value;
-  }
-
-  function updateCreatePostSuccess(value: PostSuccessAction) {
-    if (value === "trash_source" && createTrashSourceDisabledReason()) {
-      showNotice(createTrashSourceDisabledReason());
-      return;
-    }
-    if (value === createPostSuccess) return;
-    markCreatePresetDraftTouched();
-    createPostSuccess = value;
-    if (value === "trash_source") {
-      showNotice(
-        tr("gui.create.output.source.trash_selected", "Originals will move to {trash} only after the new archive passes a full integrity test")
-          .replace("{trash}", trashNameLabel()),
-      );
-    }
+    const restriction = createOptions.completionRestriction;
+    return restriction ? createDraftIssueMessage(restriction === "sfx" ? "completion_sfx" : "completion_split") : "";
   }
 
   function effectiveCreateTestAfterCreate(): boolean {
-    return createTestAfterCreate || createPostSuccess === "trash_source";
-  }
-
-  function updateCreateTestAfterCreate(value: boolean) {
-    if (createPostSuccess === "trash_source") {
-      showNotice(
-        tr(
-          "gui.create.output.integrity.required_notice",
-          "A full integrity test is required before originals can move to {trash}",
-        ).replace("{trash}", trashNameLabel()),
-      );
-      return;
-    }
-    if (value === createTestAfterCreate) return;
-    markCreatePresetDraftTouched();
-    createTestAfterCreate = value;
+    return createOptions.effectiveTestAfterCreate;
   }
 
   function chooseCreateProfile(next: CreateProfileId) {
-    markCreatePresetDraftTouched();
-    activeCreateProfile = next;
+    if (!editCreateOptions({ kind: "profile", value: next })) return;
     persistCreateProfile(next);
     const profile = createProfileData(next);
     recordOperation({
@@ -3066,145 +2606,15 @@
   }
 
   function chooseCreateFormat(next: CreateFormatId) {
-    if (createSfxEnabled && next !== "zip") {
-      showNotice(tr("gui.create.sfx_zip_only_notice", "Turn off self-extracting output before choosing another format"));
-      return;
-    }
-    if (createEncryptionEnabled && !createFormats[next].can_encrypt_data) {
-      showNotice(tr("gui.create.encryption_format_change", "Turn off file content encryption before choosing a format that cannot encrypt files."));
-      return;
-    }
-    if (createEncryptNames && !createFormats[next].can_encrypt_names) {
-      showNotice(tr("gui.create.name_encryption_format_change", "Turn off file name encryption before choosing a format that cannot hide names."));
-      return;
-    }
-    markCreatePresetDraftTouched();
-    activeCreateFormat = next;
-    if (nativeSplitKind(next, createSfxEnabled) === null) createSplitMode = "generic";
-    if (next === "sqz") createPresetSqzInnerFormat = "sqz";
+    if (!editCreateOptions({ kind: "format", value: next })) return;
     persistCreateFormat(next);
     const format = activeCreateFormatData();
-    if (!format.can_encrypt_data) {
-      clearCreatePasswordFields();
-    } else if (!format.can_encrypt_names) {
-      createEncryptNames = false;
-    }
-    createOptionsValidationAttempted = false;
     recordOperation({
       status: "info",
       title: tr("gui.create.format_selected_operation", "Create format selected"),
       detail: `${format.label} · .${format.extension}`,
     });
     showNotice(tr("gui.create.format_selected_notice", "{format} format selected").replace("{format}", format.label));
-  }
-
-  function clearCreatePasswordFields() {
-    createPassword = "";
-    createPasswordConfirmation = "";
-    createPasswordVisible = false;
-    createEncryptNames = false;
-    createEncryptionEnabled = false;
-  }
-
-  function updateCreatePassword(value: string) {
-    markCreatePresetDraftTouched();
-    createPassword = value;
-    if (value.length > 0) createEncryptionEnabled = true;
-    createOptionsValidationAttempted = value.length === 0 && createEncryptionEnabled;
-    if (value.length === 0) {
-      createPasswordConfirmation = "";
-    }
-  }
-
-  function updateCreateEncryptionEnabled(enabled: boolean) {
-    markCreatePresetDraftTouched();
-    createEncryptionEnabled = enabled && createPasswordDataAvailable();
-    if (!createEncryptionEnabled) clearCreatePasswordFields();
-    createOptionsValidationAttempted = createEncryptionEnabled;
-  }
-
-  function updateCreatePasswordConfirmation(value: string) {
-    markCreatePresetDraftTouched();
-    createPasswordConfirmation = value;
-    createOptionsValidationAttempted = false;
-  }
-
-  function updateCreateEncryptNames(enabled: boolean) {
-    markCreatePresetDraftTouched();
-    createEncryptNames = enabled && createNameEncryptionAvailable() && createEncryptionEnabled;
-  }
-
-  function updateCreateSplitPreset(preset: CreateSplitPreset) {
-    if (createSfxEnabled && preset !== "none") {
-      showNotice(tr("gui.create.sfx_no_split_notice", "Self-extracting output requires one complete ZIP payload"));
-      return;
-    }
-    markCreatePresetDraftTouched();
-    createPresetSplitSizeBytes = null;
-    createSplitPreset = preset;
-    if (preset === "none") createSplitMode = "generic";
-    createOptionsValidationAttempted = false;
-    normalizeUnsupportedCreateCompletion();
-  }
-
-  function updateCreateSplitMode(mode: CreateSplitMode) {
-    if (mode === "native" && nativeSplitKind(activeCreateFormat, createSfxEnabled) === null) {
-      showNotice(tr(
-        "gui.create.native_layout_unavailable",
-        "Native volume layout is available for ZIP and WIM; self-extracting output must remain a single ZIP.",
-      ));
-      return;
-    }
-    markCreatePresetDraftTouched();
-    createSplitMode = mode;
-    createOptionsValidationAttempted = false;
-  }
-
-  function updateCreateCustomSplitAmount(value: string) {
-    markCreatePresetDraftTouched();
-    createPresetSplitSizeBytes = null;
-    createCustomSplitAmount = value;
-    createOptionsValidationAttempted = false;
-    normalizeUnsupportedCreateCompletion();
-  }
-
-  function updateCreateCustomSplitUnit(unit: CreateSplitUnit) {
-    markCreatePresetDraftTouched();
-    createPresetSplitSizeBytes = null;
-    createCustomSplitUnit = unit;
-    createOptionsValidationAttempted = false;
-    normalizeUnsupportedCreateCompletion();
-  }
-
-  function updateCreateSfxEnabled(enabled: boolean) {
-    if (enabled && createEncryptNames) {
-      showNotice(tr("gui.create.name_encryption_format_change", "Turn off file name encryption before choosing a format that cannot hide names."));
-      return;
-    }
-    if (enabled && !sfxCreateCapabilityReady) {
-      showNotice(tr("gui.create.sfx_capability_loading", "Checking self-extracting support"));
-      return;
-    }
-    if (enabled && !sfxCreateCapability.available) {
-      showNotice(createSfxUnavailableMessage());
-      return;
-    }
-    markCreatePresetDraftTouched();
-    createSfxEnabled = enabled;
-    createPresetSfxTarget = "current_platform";
-    createOptionsValidationAttempted = false;
-    if (enabled) {
-      activeCreateFormat = "zip";
-      persistCreateFormat("zip");
-      createSplitPreset = "none";
-      createSplitMode = "generic";
-      createPresetSplitSizeBytes = null;
-      createEncryptNames = false;
-      normalizeUnsupportedCreateCompletion();
-      showNotice(tr("gui.create.sfx_enabled_notice", "Self-extracting output enabled · ZIP payload · signing required"));
-    } else {
-      showNotice(tr("gui.create.sfx_disabled_notice", "Standard archive output restored"));
-    }
   }
 
   function createSfxOutputLabel(): string {
@@ -3246,43 +2656,17 @@
   }
 
   function createSplitSizeBytes(): number | null {
-    return resolveSplitSizeBytes(
-      createSplitPreset,
-      createCustomSplitAmount,
-      createCustomSplitUnit,
-      createPresetSplitSizeBytes,
-    );
+    return createOptions.splitSize;
   }
 
   function createPasswordValidationMessage(): string {
-    if (!createPasswordDataAvailable()) return "";
-    if (createEncryptionEnabled && createPassword.length === 0) {
-      return tr("gui.create.password_required", "Enter an archive password, or turn off file content encryption.");
-    }
-    if (createPassword.length === 0) return "";
-    if (createPasswordConfirmation.length === 0) {
-      return tr("gui.create.confirm_password_required", "Confirm the archive password before starting");
-    }
-    if (createPassword !== createPasswordConfirmation) {
-      return tr("gui.create.passwords_do_not_match", "The passwords do not match");
-    }
-    return "";
+    const issue = createOptions.passwordIssue;
+    return issue ? createDraftIssueMessage(issue) : "";
   }
 
   function createSplitValidationMessage(): string {
-    const splitSize = createSplitSizeBytes();
-    if (createSplitPreset === "custom" && splitSize === null) {
-      return tr("gui.create.invalid_part_size", "Enter a part size of at least 0.1 MiB");
-    }
-    if (
-      activeCreateFormat === "zip"
-      && createSplitMode === "native"
-      && splitSize !== null
-      && splitSize > fat32CompatibleSplitSizeBytes
-    ) {
-      return tr("gui.create.native_zip_part_size_limit", "Native ZIP parts cannot exceed 4 GiB − 1 byte");
-    }
-    return "";
+    const issue = createOptions.splitIssue;
+    return issue ? createDraftIssueMessage(issue) : "";
   }
 
   function visibleCreatePasswordError(): string {
@@ -3297,19 +2681,11 @@
   }
 
   function validateCreateOptions(): boolean {
-    createOptionsValidationAttempted = true;
-    const sfxError = createSfxEnabled && !sfxCreateCapability.available
-      ? createSfxUnavailableMessage()
-      : createSfxEnabled && (activeCreateFormat !== "zip" || createSplitPreset !== "none")
-        ? tr("gui.create.sfx_requires_zip", "Self-extracting output requires a single ZIP payload")
-        : "";
-    const passwordError = createPasswordValidationMessage();
-    const splitError = createSplitValidationMessage();
-    const error = passwordError || splitError || sfxError;
-    if (!error) return true;
+    const issue = createOptions.validate(sfxCreateCapability);
+    if (!issue) return true;
     createAdvancedOpen = true;
-    classicCreateSection = passwordError || sfxError ? "security" : "volumes";
-    showNotice(error);
+    classicCreateSection = issue === "invalid_part_size" || issue === "native_zip_part_size_limit" ? "volumes" : "security";
+    showNotice(createDraftIssueMessage(issue));
     void tick().then(() => {
       if (screen !== "create" || !createOptionsValidationAttempted || blockingModalVisible()) return;
       document.querySelector<HTMLInputElement>(".create-option-input[aria-invalid='true']")?.focus();
@@ -3324,51 +2700,23 @@
   }
 
   function captureCreateRunDraft(): CreateRunDraft | null {
-    normalizeUnsupportedCreatePostSuccess();
+    if (createOptions.normalizePostSuccess()) {
+      announceCreateDraftNormalization({ changed: true, postSuccessNormalized: true });
+    }
     if (!validateCreateOptions()) return null;
-    const format = activeCreateFormat;
-    const password = createFormats[format].can_encrypt_data && createPassword.length > 0 ? createPassword : null;
-    const splitSize = createSplitSizeBytes();
-    const splitMode = splitSize === null ? "generic" : createSplitMode;
-    const outputExtension = archiveOutputExtension(
-      format, splitSize, splitMode, createSfxEnabled, sfxCreateCapability.extension,
-    );
-    return {
-      format,
-      profile: activeCreateProfile,
-      level: createCompressionLevel(),
-      password,
-      encryptNames: Boolean(password) && createEncryptNames && createFormats[format].can_encrypt_names,
-      splitSize,
-      splitMode,
-      contentPolicy: createContentPolicy,
-      excludes: createContentPolicy === "custom" ? [...createExcludeRules()] : [],
-      sqzInnerFormat: format === "sqz" ? createPresetSqzInnerFormat : null,
-      sfxEnabled: createSfxEnabled,
-      sfxTarget: createSfxEnabled ? resolvedPresetSfxTarget(createPresetSfxTarget) : null,
-      outputExtension,
-      suggestedDestination: createSuggestedOutputPath(format, outputExtension),
-      destination: {
-        base: createDestinationBase,
-        existing_output: createOverwritePolicy,
-      },
-      completion: createCompletion,
-      postSuccess: createPostSuccess,
-      testAfterCreate: effectiveCreateTestAfterCreate(),
-      defaultCreateDir: normalizedDefaultCreateDir(appliedDefaultCreateDir),
-      restoreCredentialPrompt: createEncryptionEnabled,
-      restoreEncryptNames: createEncryptNames,
-    };
+    return createOptions.snapshotRun({
+      sfxCapability: sfxCreateCapability,
+      suggestedDestination: createSuggestedOutputPath(activeCreateFormat, createOptions.outputExtension(sfxCreateCapability.extension)),
+      defaultCreateDir: normalizedDefaultCreateDir(settingsSession.appliedGeneral.defaultCreateDir),
+    });
   }
 
-  function updateCustomCreateLevel(value: number, commit = false) {
-    markCreatePresetDraftTouched();
-    const next = clampCreateLevel(value);
-    customCreateLevelError = "";
-    customCreateLevel = next;
+  function updateCustomCreateLevel(value: number | string, commit = false) {
+    const previousProfile = activeCreateProfile;
+    if (!editCreateOptions({ kind: "customLevel", value })) return;
+    const next = customCreateLevel;
     persistCustomCreateLevel(next);
-    if (activeCreateProfile !== "custom") {
-      activeCreateProfile = "custom";
+    if (previousProfile !== "custom") {
       persistCreateProfile("custom");
     }
     if (commit) {
@@ -3386,21 +2734,11 @@
 
   function updateCustomCreateLevelFromInput(event: Event, commit = false) {
     const input = event.currentTarget as HTMLInputElement;
-    const next = parseCustomCreateLevelInput(input);
-    if (next === null) {
-      customCreateLevelError = customCreateLevelInvalidMessage();
-      showNotice(customCreateLevelError);
-      return;
-    }
-    updateCustomCreateLevel(next, commit);
-  }
-
-  function activeCreateProfileData() {
-    return createProfileData(activeCreateProfile);
+    updateCustomCreateLevel(input.value, commit);
   }
 
   function createCompressionLevel(): number {
-    return activeCreateProfileData().level;
+    return createOptions.compressionLevel;
   }
 
   function archivePresetById(id: string | null): NamedArchivePreset | null {
@@ -3460,11 +2798,6 @@
     return tr("gui.create.content_policy.custom", "Custom rules");
   }
 
-  function selectPresetSqzInnerFormat(innerFormat: PresetSqzInnerFormat) {
-    markCreatePresetDraftTouched();
-    createPresetSqzInnerFormat = innerFormat;
-  }
-
   function createArchivePresetSummary(options: CreateArchivePresetOptions): string {
     let format = isCreateFormatId(options.format)
       ? createFormats[options.format].label
@@ -3503,55 +2836,11 @@
   }
 
   function currentCreateArchivePresetOptions(): CreateArchivePresetOptions {
-    const splitSize = createSplitSizeBytes();
-    const credential: CreateArchivePresetOptions["credential"] =
-      createEncryptionEnabled
-        ? { kind: "prompt" }
-        : { kind: "none" };
-    return {
-      format: activeCreateFormat,
-      level: createCompressionLevel(),
-      credential,
-      encrypt_names: credential.kind !== "none" && createEncryptNames,
-      volumes: splitSize === null
-        ? { kind: "single" }
-        : { kind: "split", size_bytes: String(splitSize) },
-      content_policy: createContentPolicy,
-      excludes: createContentPolicy === "custom" ? createExcludeRules() : [],
-      output: createSfxEnabled
-        ? { kind: "self_extracting", target: createPresetSfxTarget }
-        : { kind: "archive" },
-      format_options: activeCreateFormat === "sqz"
-        ? { kind: "sqz", inner_format: createPresetSqzInnerFormat }
-        : { kind: "none" },
-      destination: {
-        base: createDestinationBase,
-        existing_output: createOverwritePolicy,
-      },
-      completion: createCompletion,
-      post_success: createPostSuccess,
-      test_after_create: effectiveCreateTestAfterCreate(),
-    };
+    return createOptions.snapshotPreset();
   }
 
   function currentExtractArchivePresetOptions(): ExtractArchivePresetOptions {
-    const destination: ExtractArchivePresetOptions["destination"] =
-      extractDestinationMode === "smart"
-        ? { base: "default_directory", layout: "smart" }
-        : extractDestinationMode === "archive"
-          ? { base: "default_directory", layout: "archive_folder" }
-          : extractDestinationMode === "choose"
-            ? { base: "ask", layout: "direct" }
-            : { base: "archive_parent", layout: "direct" };
-    const encoding = extractPresetEncodingLabel ?? archiveEncodingForJob();
-    return {
-      destination,
-      existing_output: extractOverwriteMode,
-      symlinks: extractSymlinkMode,
-      encoding: encoding ? { kind: "named", label: encoding } : { kind: "auto" },
-      credential: { kind: "prompt_when_needed" },
-      post_success: "keep_source",
-    };
+    return extractOptions.snapshotPreset(archiveEncodingForJob());
   }
 
   function createPresetPickerOptions() {
@@ -3674,31 +2963,10 @@
     if (presetLoadState === "error") {
       return tr("gui.presets.load_failed", "Could not load presets. The preset file was not changed.");
     }
-    if (kind === "create" && createPreflightBusy()) {
+    if (kind === "create" && createPreflight.busy()) {
       return tr("gui.presets.busy", "Wait for the current preflight to finish");
     }
     return "";
-  }
-
-  function applyPresetVolumeMode(volumes: CreateArchivePresetOptions["volumes"]) {
-    createSplitMode = "generic";
-    if (volumes.kind === "single") {
-      createSplitPreset = "none";
-      createPresetSplitSizeBytes = null;
-      return;
-    }
-    const bytes = Number(volumes.size_bytes);
-    createPresetSplitSizeBytes = volumes.size_bytes;
-    if (bytes === 25 * bytesPerMiB) createSplitPreset = "25-mib";
-    else if (bytes === 100 * bytesPerMiB) createSplitPreset = "100-mib";
-    else if (bytes === 700 * bytesPerMiB) createSplitPreset = "700-mib";
-    else if (bytes === fat32CompatibleSplitSizeBytes) createSplitPreset = "4-gib";
-    else {
-      createSplitPreset = "custom";
-      createCustomSplitUnit = bytes >= bytesPerGiB ? "gib" : "mib";
-      const divisor = createCustomSplitUnit === "gib" ? bytesPerGiB : bytesPerMiB;
-      createCustomSplitAmount = String(Number((bytes / divisor).toPrecision(9)));
-    }
   }
 
   function applyDefaultCreatePresetWhenReady() {
@@ -3707,12 +2975,8 @@
     if (presetId) applyCreatePreset(presetId, false);
   }
 
-  function resolvedPresetSfxTarget(target: PresetSfxTarget): PlatformKind {
-    return target === "current_platform" ? sfxCreateCapability.target : target;
-  }
-
   function applyCreatePreset(id: string | null, announce = true) {
-    if (createPreflightBusy()) {
+    if (createPreflight.busy()) {
       if (announce) showNotice(tr("gui.presets.busy", "Wait for the current preflight to finish"));
       return;
     }
@@ -3725,71 +2989,26 @@
     }
     const preset = archivePresetById(id);
     if (!preset || preset.kind !== "create") return;
-    if (!isCreateFormatId(preset.options.format)) {
-      showNotice(tr("gui.presets.format_unavailable", "This preset uses a format that is not available in the create screen"));
+    const change = createOptions.applyPreset(preset.options, createDraftContext(), () => {
+      dismissCreatePreparation();
+      if (announce) markCreatePresetDraftTouched();
+      invalidateCreatePreflightResult();
+    }, announce);
+    if (change.issue) {
+      showNotice(createDraftIssueMessage(change.issue, change.requestedSfxTarget));
       return;
     }
-    if (preset.options.output.kind === "self_extracting") {
-      if (!sfxCreateCapabilityReady) {
-        showNotice(tr("gui.create.sfx_capability_loading", "Checking self-extracting support"));
-        return;
-      }
-      if (!sfxCreateCapability.available) {
-        showNotice(createSfxUnavailableMessage());
-        return;
-      }
-      const requestedTarget = resolvedPresetSfxTarget(preset.options.output.target);
-      if (requestedTarget !== sfxCreateCapability.target) {
-        showNotice(
-          tr("gui.presets.sfx_target_unavailable", "This device cannot build the preset's {target} self-extractor")
-            .replace("{target}", requestedTarget),
-        );
-        return;
-      }
-    }
-    dismissCreatePreparation();
-    if (announce) markCreatePresetDraftTouched();
-    invalidateCreatePreflightResult();
     selectedCreatePresetId = preset.id;
-    createSuggestedDestination = null;
     createPresetDraftName = preset.label;
-    activeCreateFormat = preset.options.format;
-    activeCreateProfile = "custom";
-    customCreateLevel = preset.options.level;
-    customCreateLevelError = "";
-    createEncryptionEnabled = preset.options.credential.kind !== "none";
-    createPassword = "";
-    createPasswordConfirmation = "";
-    createPasswordVisible = false;
-    createEncryptNames = preset.options.encrypt_names;
-    applyPresetVolumeMode(preset.options.volumes);
-    createContentPolicy = preset.options.content_policy;
-    createExcludeText = preset.options.excludes.join("\n");
-    createSfxEnabled = preset.options.output.kind === "self_extracting";
-    createPresetSfxTarget = preset.options.output.kind === "self_extracting"
-      ? preset.options.output.target
-      : "current_platform";
-    createPresetSqzInnerFormat = preset.options.format_options.kind === "sqz"
-      ? preset.options.format_options.inner_format
-      : "sqz";
-    createDestinationBase = preset.options.destination.base;
-    createOverwritePolicy = preset.options.destination.base === "ask" ? "ask" : "rename";
-    createCompletion = preset.options.completion;
-    createPostSuccess = preset.options.post_success;
-    createTestAfterCreate = preset.options.test_after_create;
-    const postSuccessNormalized = normalizeUnsupportedCreatePostSuccess(false);
-    normalizeUnsupportedCreateCompletion(announce);
-    createOptionsValidationAttempted = false;
     createPresetMutationState = "idle";
     if (announce) {
+      // The completion change has its own feedback; source normalization is part of the applied notice.
+      announceCreateDraftNormalization({ ...change, postSuccessNormalized: false });
       showNotice(
-        postSuccessNormalized
-          ? tr(
-            "gui.create.output.source.preset_changed_to_keep",
-            "{name} applied · originals will stay in place because this preset excludes some content",
-          ).replace("{name}", archivePresetDisplayName(preset))
-          : tr("gui.presets.applied_notice", "{name} applied")
-            .replace("{name}", archivePresetDisplayName(preset)),
+        change.postSuccessNormalized
+          ? tr("gui.create.output.source.preset_changed_to_keep", "{name} applied · originals will stay in place because this preset excludes some content")
+            .replace("{name}", archivePresetDisplayName(preset))
+          : tr("gui.presets.applied_notice", "{name} applied").replace("{name}", archivePresetDisplayName(preset)),
       );
     }
   }
@@ -3806,18 +3025,8 @@
     if (!preset || preset.kind !== "extract") return;
     extractDestinationPicker = null;
     selectedExtractPresetId = preset.id;
-    extractSmartBaseOverride = null;
     extractPresetDraftName = preset.label;
-    if (preset.options.destination.layout === "smart") extractDestinationMode = "smart";
-    else if (preset.options.destination.layout === "archive_folder") extractDestinationMode = "archive";
-    else if (preset.options.destination.base === "ask") extractDestinationMode = "choose";
-    else extractDestinationMode = "same";
-    if (extractDestinationMode === "choose") extractCustomDest = "";
-    extractOverwriteMode = preset.options.existing_output;
-    extractSymlinkMode = preset.options.symlinks;
-    extractPresetEncodingLabel = preset.options.encoding.kind === "named"
-      ? preset.options.encoding.label
-      : null;
+    extractOptions.applyPreset(preset.options);
     extractPresetMutationState = "idle";
     if (announce) {
       showNotice(
@@ -3828,7 +3037,7 @@
   }
 
   function clonePresetDocument(): ArchivePresetDocument | null {
-    return presetDocument ? structuredClone(presetDocument) : null;
+    return presetDocument ? $state.snapshot(presetDocument) : null;
   }
 
   function reconcilePresetSelections(document: ArchivePresetDocument) {
@@ -3875,18 +3084,17 @@
       return true;
     } catch (error) {
       setPresetMutationState(kind, "error");
-      if (isErrorDto(error) && error.key === "error.presets_conflict") {
+      const errorDto = isErrorDto(error) ? error : null;
+      if (errorDto?.key === "error.presets_conflict") {
         void ipc.getArchivePresets().then((latest) => {
           presetDocument = latest;
           presetLoadState = "ready";
           reconcilePresetSelections(latest);
         }).catch(() => undefined);
       }
-      showNotice(
-        isErrorDto(error)
-          ? tr(error.key, tr("gui.presets.failed", "Could not save"))
-          : tr("gui.presets.failed", "Could not save"),
-      );
+      const fallback = tr("gui.presets.failed", "Could not save");
+      const message = errorDto ? tError(errorDto) : fallback;
+      showNotice(message === errorDto?.key ? fallback : message);
       return false;
     }
   }
@@ -3897,68 +3105,78 @@
     return `user.${kind}.${random}`.slice(0, 64);
   }
 
-  async function saveCurrentCreatePresetAsNew() {
+  async function saveArchivePreset(kind: "create" | "extract", operation: "save_as" | "update") {
+    const selected = operation === "update"
+      ? kind === "create" ? selectedCreateArchivePreset() : selectedExtractArchivePreset()
+      : null;
     const next = clonePresetDocument();
     if (!next) {
-      showNotice(tr("gui.presets.load_failed", "Could not load presets. The preset file was not changed."));
+      if (operation === "save_as") {
+        showNotice(tr("gui.presets.load_failed", "Could not load presets. The preset file was not changed."));
+      }
       return;
     }
-    const validationError = createPresetSaveValidationMessage();
-    if (validationError) {
-      showNotice(validationError);
-      return;
+    if (operation === "update") {
+      if (!selected || selected.built_in) return;
+      if (kind === "create" && createPresetUpdateDisabledReason()) {
+        showNotice(createPresetUpdateDisabledReason());
+        return;
+      }
     }
-    const requested = normalizePresetName(createPresetDraftName);
+    if (kind === "create") {
+      const validationError = createPresetSaveValidationMessage();
+      if (validationError) {
+        showNotice(validationError);
+        return;
+      }
+    }
+    const draftName = kind === "create" ? createPresetDraftName : extractPresetDraftName;
+    const requested = normalizePresetName(draftName);
     if (!requested) {
       showNotice(tr("gui.presets.name_required", "Enter a preset name"));
       return;
     }
-    if (next.presets.length >= maxArchivePresets) {
-      showNotice(tr("gui.presets.limit", "Delete a preset before saving another one"));
-      return;
+    let name = requested;
+    let index = -1;
+    if (selected) {
+      if (presetNameExists(kind, name, selected.id)) {
+        showNotice(tr("gui.presets.name_in_use", "That preset name is already in use"));
+        return;
+      }
+      index = next.presets.findIndex((preset) => preset.id === selected.id);
+      if (index < 0) return;
+    } else {
+      if (next.presets.length >= maxArchivePresets) {
+        showNotice(tr("gui.presets.limit", "Delete a preset before saving another one"));
+        return;
+      }
+      name = uniquePresetName(kind, requested);
     }
-    const name = uniquePresetName("create", requested);
-    const id = newArchivePresetId("create");
-    next.presets.push({
-      kind: "create",
-      id,
-      label: name,
-      built_in: false,
-      options: currentCreateArchivePresetOptions(),
-    });
-    if (await persistPresetDocument("create", next, "gui.presets.operation_saved", "Preset saved", name)) {
-      selectedCreatePresetId = id;
-      createPresetDraftName = name;
-    }
-  }
-
-  async function saveCurrentExtractPresetAsNew() {
-    const next = clonePresetDocument();
-    if (!next) {
-      showNotice(tr("gui.presets.load_failed", "Could not load presets. The preset file was not changed."));
-      return;
-    }
-    const requested = normalizePresetName(extractPresetDraftName);
-    if (!requested) {
-      showNotice(tr("gui.presets.name_required", "Enter a preset name"));
-      return;
-    }
-    if (next.presets.length >= maxArchivePresets) {
-      showNotice(tr("gui.presets.limit", "Delete a preset before saving another one"));
-      return;
-    }
-    const name = uniquePresetName("extract", requested);
-    const id = newArchivePresetId("extract");
-    next.presets.push({
-      kind: "extract",
-      id,
-      label: name,
-      built_in: false,
-      options: currentExtractArchivePresetOptions(),
-    });
-    if (await persistPresetDocument("extract", next, "gui.presets.operation_saved", "Preset saved", name)) {
-      selectedExtractPresetId = id;
-      extractPresetDraftName = name;
+    const id = selected ? selected.id : newArchivePresetId(kind);
+    const preset: NamedArchivePreset = kind === "create"
+      ? {
+          kind: "create", id, label: name, built_in: false,
+          options: currentCreateArchivePresetOptions(),
+        }
+      : {
+          kind: "extract", id, label: name, built_in: false,
+          options: currentExtractArchivePresetOptions(),
+        };
+    if (selected) next.presets[index] = preset;
+    else next.presets.push(preset);
+    if (await persistPresetDocument(
+      kind, next,
+      operation === "update" ? "gui.presets.operation_updated" : "gui.presets.operation_saved",
+      operation === "update" ? "Preset updated" : "Preset saved",
+      name,
+    )) {
+      if (kind === "create") {
+        if (operation === "save_as") selectedCreatePresetId = id;
+        createPresetDraftName = name;
+      } else {
+        if (operation === "save_as") selectedExtractPresetId = id;
+        extractPresetDraftName = name;
+      }
     }
   }
 
@@ -3979,8 +3197,8 @@
   function createPresetUpdateDisabledReason(): string {
     const selected = selectedCreateArchivePreset();
     if (!selected) return "";
-    if (selected.built_in) return tr("gui.presets.built_in_read_only", "Built-in presets cannot be changed");
-    if (createPreflightBusy()) return tr("gui.presets.busy", "Wait for the current preflight to finish");
+    if (selected.built_in) return presetReadOnlyReason(selected);
+    if (createPreflight.busy()) return tr("gui.presets.busy", "Wait for the current preflight to finish");
     if (
       presetDocument?.bindings.file_manager_create === selected.id &&
       !createPresetFinderCompatible(currentCreateArchivePresetOptions())
@@ -3990,58 +3208,10 @@
     return "";
   }
 
-  function presetDeleteDisabledReason(preset: NamedArchivePreset | null): string {
+  function presetReadOnlyReason(preset: NamedArchivePreset | null): string {
     return preset?.built_in
       ? tr("gui.presets.built_in_read_only", "Built-in presets cannot be changed")
       : "";
-  }
-
-  async function updateSelectedArchivePreset(kind: "create" | "extract") {
-    const selected = kind === "create" ? selectedCreateArchivePreset() : selectedExtractArchivePreset();
-    const next = clonePresetDocument();
-    if (!selected || !next || selected.built_in) return;
-    if (kind === "create" && createPresetUpdateDisabledReason()) {
-      showNotice(createPresetUpdateDisabledReason());
-      return;
-    }
-    if (kind === "create") {
-      const validationError = createPresetSaveValidationMessage();
-      if (validationError) {
-        showNotice(validationError);
-        return;
-      }
-    }
-    const draftName = kind === "create" ? createPresetDraftName : extractPresetDraftName;
-    const name = normalizePresetName(draftName);
-    if (!name) {
-      showNotice(tr("gui.presets.name_required", "Enter a preset name"));
-      return;
-    }
-    if (presetNameExists(kind, name, selected.id)) {
-      showNotice(tr("gui.presets.name_in_use", "That preset name is already in use"));
-      return;
-    }
-    const index = next.presets.findIndex((preset) => preset.id === selected.id);
-    if (index < 0) return;
-    next.presets[index] = kind === "create"
-      ? {
-          kind: "create",
-          id: selected.id,
-          label: name,
-          built_in: false,
-          options: currentCreateArchivePresetOptions(),
-        }
-      : {
-          kind: "extract",
-          id: selected.id,
-          label: name,
-          built_in: false,
-          options: currentExtractArchivePresetOptions(),
-        };
-    if (await persistPresetDocument(kind, next, "gui.presets.operation_updated", "Preset updated", name)) {
-      if (kind === "create") createPresetDraftName = name;
-      else extractPresetDraftName = name;
-    }
   }
 
   async function deleteSelectedArchivePreset(kind: "create" | "extract") {
@@ -4058,7 +3228,7 @@
     }
     if (await persistPresetDocument(kind, next, "gui.presets.operation_deleted", "Preset deleted", selected.label)) {
       if (kind === "create") {
-        if (createPreflightBusy()) {
+        if (createPreflight.busy()) {
           selectedCreatePresetId = null;
           createPresetDraftName = "";
         } else {
@@ -4102,50 +3272,18 @@
     );
   }
 
-  function nativeSplitKind(
-    formatId: CreateFormatId,
-    sfxEnabled = false,
-  ): NativeSplitKind {
-    if (sfxEnabled) return null;
-    return formatId === "zip" || formatId === "wim" ? formatId : null;
-  }
-
-  function archiveOutputExtension(
-    formatId: CreateFormatId,
-    splitSize: number | null,
-    splitMode: CreateSplitMode,
-    sfxEnabled = false,
-    sfxExtension = "",
-  ): string {
-    if (sfxEnabled) return sfxExtension;
-    if (formatId === "wim" && splitSize !== null && splitMode === "native") return "swm";
-    return createFormats[formatId].extension;
-  }
-
   function createArchiveNameForOutput(base: string, outputExtension: string): string {
     return `${base}.${outputExtension}`;
   }
 
   function createArchivePreviewName(base = createOutputPreviewBase()): string {
-    const extension = archiveOutputExtension(
-      activeCreateFormat, createSplitSizeBytes(), createSplitMode, createSfxEnabled, sfxCreateCapability.extension,
-    );
+    const extension = createOptions.outputExtension(sfxCreateCapability.extension);
     const suggested = createDestinationBase === "ask" ? createSuggestedOutputPath(activeCreateFormat, extension) : null;
     return suggested ? desktopBasename(suggested, platformKind()) : createArchiveNameForOutput(base, extension);
   }
 
   function joinFolderPath(folder: string, name: string): string {
     return joinDesktopPath(folder, name, platformKind());
-  }
-
-  function commonCreateSourceParent(inputs: readonly string[]): string | null {
-    const first = inputs[0];
-    if (!first) return null;
-    const platform = platformKind();
-    const parent = desktopDirname(first, platform);
-    return inputs.every((input) => sameDesktopPath(desktopDirname(input, platform), parent, platform))
-      ? parent
-      : null;
   }
 
   function createOutputPreviewBase(): string {
@@ -4157,32 +3295,22 @@
   function createOutputPreview(base = createOutputPreviewBase()): string {
     const name = createArchivePreviewName(base);
     if (createDestinationBase === "ask") {
-      const suggested = createSuggestedOutputPath(activeCreateFormat, archiveOutputExtension(
-        activeCreateFormat, createSplitSizeBytes(), createSplitMode, createSfxEnabled, sfxCreateCapability.extension,
-      ));
+      const suggested = createSuggestedOutputPath(activeCreateFormat, createOptions.outputExtension(sfxCreateCapability.extension));
       if (suggested) {
         return tr("gui.create.output.preview_confirm", "Confirm location when starting · {path}").replace("{path}", suggested);
       }
       return tr("gui.create.output.preview_ask", "Choose location when starting · {name}").replace("{name}", name);
     }
     if (createDestinationBase === "default_directory") {
-      const folder = normalizedDefaultCreateDir(appliedDefaultCreateDir);
+      const folder = normalizedDefaultCreateDir(settingsSession.appliedGeneral.defaultCreateDir);
       return folder
         ? joinFolderPath(folder, name)
         : tr("gui.create.output.preview_default_missing", "Default create folder is not set · Squallz will ask");
     }
-    const droppedParent = commonCreateSourceParent(createSourceInputs);
+    const droppedParent = commonCreateSourceParent(createSourceInputs, platformKind());
     return droppedParent
       ? joinFolderPath(droppedParent, name)
       : tr("gui.create.output.preview_source_parent", "Next to the selected sources · {name}").replace("{name}", name);
-  }
-
-  function createSaveDefaultPathForDraft(input: string, base: string, draft: CreateRunDraft): string {
-    if (draft.suggestedDestination) return draft.suggestedDestination;
-    return joinFolderPath(
-      desktopDirname(input, platformKind()),
-      createArchiveNameForOutput(base, draft.outputExtension),
-    );
   }
 
   function createSuggestedOutputPath(format: CreateFormatId, outputExtension: string): string | null {
@@ -4198,169 +3326,15 @@
     );
   }
 
-  async function inspectCreateDestinationForCreate(
-    path: string,
-    split: boolean,
-    sfxTarget: PlatformKind | null,
-    isCurrent: () => boolean = () => true,
-  ): Promise<CreateDestinationInspectionDto> {
-    await ensureCreatePreflightListener();
-    if (!isCurrent()) throw new CreateDestinationInspectionError(undefined, true);
-    const requestId = nextPreflightRequestId();
-    createPreflightRequestId = requestId;
-    createPreflightRequestKind = "destination";
-    createPreflightProcessedBytes = 0;
-    createPreflightCancelPending = false;
-    createPreflightCurrent = "";
-    try {
-      const inspection = await ipc.inspectCreateDestination(path, split, requestId, sfxTarget);
-      if (!isCurrent()) throw new CreateDestinationInspectionError(undefined, true);
-      if (createPreflightRequestId === requestId && createPreflightCancelPending) {
-        throw new CreateDestinationInspectionError(undefined, true);
-      }
-      return inspection;
-    } catch (error) {
-      const cancelled = createPreflightRequestId === requestId && createPreflightCancelPending;
-      if (error instanceof CreateDestinationInspectionError) {
-        if (!cancelled || error.cancelled) throw error;
-        throw new CreateDestinationInspectionError(error.detail ?? undefined, true);
-      }
-      throw new CreateDestinationInspectionError(error, cancelled);
-    } finally {
-      if (createPreflightRequestId === requestId) {
-        createPreflightRequestId = null;
-        createPreflightRequestKind = null;
-        createPreflightCancelPending = false;
-        createPreflightCurrent = "";
-      }
-    }
-  }
-
-  function createDestinationInspectionCancelled(error: unknown): boolean {
-    return error instanceof CreateDestinationInspectionError
-      && (error.cancelled || error.detail?.key === "error.cancelled");
-  }
-
-  async function cancelCreateDestinationInspection(
-    options: { announce?: boolean; keepIntentOnFailure?: boolean } = {},
-  ) {
-    const announce = options.announce ?? true;
-    const keepIntentOnFailure = options.keepIntentOnFailure ?? false;
-    const requestId = createPreflightRequestId;
-    if (
-      !requestId
-      || createPreflightRequestKind !== "destination"
-      || createPreflightCancelPending
-    ) return;
-    createPreflightCancelPending = true;
-    if (import.meta.env.DEV && requestId === previewDestinationRequestId) {
-      const preparation: CreatePreparationOwner = { mode, sources: createSources };
-      createOutputPreparation = preparation;
-      const isCurrent = () => isCurrentCreateOutputPreparation(preparation);
-      try {
-        await new Promise((resolve) => window.setTimeout(resolve, 180));
-        if (!isCurrent() || createPreflightRequestId !== requestId || !createPreflightCancelPending) return;
-        finishCreatePreflightWithIssue(
-          "destination",
-          tr(
-            "gui.create.destination_check_cancelled",
-            "Output check cancelled · no archive was created",
-          ),
-          "cancelled",
-        );
-        await focusCreatePrimaryAction(() => isCurrent() && createPreflightPhase === "cancelled");
-      } finally {
-        if (createOutputPreparation === preparation) createOutputPreparation = null;
-      }
-      return;
-    }
-    try {
-      await ipc.cancelCreateDestinationInspection(requestId);
-      if (
-        announce
-        && createPreflightRequestId === requestId
-        && createPreflightCancelPending
-      ) {
-        showNotice(tr(
-          "gui.create.destination_check_cancel_requested",
-          "Stopping the output check...",
-        ));
-      }
-    } catch {
-      if (createPreflightRequestId !== requestId) return;
-      if (!keepIntentOnFailure) createPreflightCancelPending = false;
-      if (announce) {
-        showNotice(tr(
-          "gui.create.destination_check_cancel_failed",
-          "Could not stop the output check. It will continue.",
-        ));
-      }
-    }
-  }
-
-  async function askCreateDestination(
-    inputs: readonly string[],
-    base: string,
-    draft: CreateRunDraft,
-    source: "dialog" | "drop",
-    isCurrent: () => boolean,
-  ): Promise<ResolvedCreateDestination | null> {
-    const { confirm, save } = await getDialogModule();
-    if (!isCurrent()) return null;
-    const selected = await saveNativeDialog("create.save-archive", save, {
-      title: source === "drop"
-        ? tr("gui.create.save_dropped_items_as_archive", "Save dropped items as archive")
-        : tr("gui.create.save_archive_as", "Save archive as"),
-      defaultPath: createSaveDefaultPathForDraft(inputs[0], base, draft),
-      filters: createSaveFiltersForDraft(draft),
-    });
-    if (!isCurrent()) return null;
-    if (!selected) return null;
-    const path = normalizeCreateDestinationForDraft(selected, draft);
-    const inspection = await inspectCreateDestinationForCreate(
-      path,
-      draft.splitSize !== null,
-      draft.sfxTarget,
-      isCurrent,
-    );
-    if (!isCurrent()) return null;
-    if (inspection.conflict && inspection.guard === null) {
-      throw new CreateDestinationInspectionError();
-    }
-    if (inspection.conflict) {
-      const replaceExisting = await confirm(
-        tr(
-          "gui.create.replace_existing.body",
-          "An output file or split volume set already exists for {path}. Replace the existing output set with the new archive?",
-        ).replace("{path}", path),
-        {
-          title: tr("gui.create.replace_existing.title", "Replace existing output?"),
-          kind: "warning",
-          okLabel: tr("gui.create.replace_existing.action", "Replace"),
-          cancelLabel: tr("gui.create.replace_existing.cancel", "Cancel"),
-        },
-      );
-      if (!isCurrent()) return null;
-      if (!replaceExisting) return null;
-    }
-    return {
-      path,
-      replaceExisting: inspection.conflict,
-      replacementGuard: inspection.guard,
-      confirmLateConflict: true,
-    };
-  }
-
   async function authorizeArchiveOutput(
     path: string,
     confirm: DialogModule["confirm"],
-    split = false,
+    split: boolean,
     inspect: (
       candidate: string,
       splitOutput: boolean,
-    ) => Promise<CreateDestinationInspectionDto> = (candidate, splitOutput) =>
-      inspectCreateDestinationForCreate(candidate, splitOutput, null),
-    isCurrent: () => boolean = () => true,
+    ) => Promise<CreateDestinationInspectionDto>,
+    isCurrent: () => boolean,
   ): Promise<AuthorizedArchiveOutput | null> {
     const inspection = await inspect(path, split);
     if (!isCurrent()) return null;
@@ -4394,102 +3368,6 @@
       replaceExisting: inspection.conflict,
       replacementGuard: inspection.guard,
     };
-  }
-
-  async function resolveCreateDestination(
-    inputs: readonly string[],
-    base: string,
-    draft: CreateRunDraft,
-    source: "dialog" | "drop",
-    isCurrent: () => boolean,
-  ): Promise<ResolvedCreateDestination | null> {
-    if (draft.destination.base === "ask") {
-      return askCreateDestination(inputs, base, draft, source, isCurrent);
-    }
-
-    let folder: string | null;
-    if (draft.destination.base === "source_parent") {
-      folder = commonCreateSourceParent(inputs);
-      if (!folder) {
-        showNotice(
-          tr(
-            "gui.create.output.source_parent_fallback",
-            "The selected sources are in different folders. Choose where to save this archive.",
-          ),
-        );
-        return askCreateDestination(inputs, base, draft, source, isCurrent);
-      }
-    } else {
-      folder = draft.defaultCreateDir;
-      if (!folder) {
-        showNotice(
-          tr(
-            "gui.create.output.default_folder_fallback",
-            "The default create folder is not set. Choose where to save this archive.",
-          ),
-        );
-        return askCreateDestination(inputs, base, draft, source, isCurrent);
-      }
-    }
-
-    const proposed = joinFolderPath(
-      folder,
-      createArchiveNameForOutput(base, draft.outputExtension),
-    );
-    const status = tr(
-      "gui.create.finding_available_destination",
-      "Finding an available output name...",
-    );
-    createPreflightCurrent = status;
-    try {
-      const path = await ipc.uniqueCreateDestination(proposed, draft.splitSize !== null);
-      if (!isCurrent()) return null;
-      return {
-        path,
-        replaceExisting: false,
-        replacementGuard: null,
-        confirmLateConflict: false,
-      };
-    } catch {
-      if (!isCurrent()) return null;
-      showNotice(
-        draft.destination.base === "default_directory"
-          ? tr("gui.create.output.default_folder_unavailable", "The default create folder is unavailable. Choose another location.")
-          : tr("gui.create.output.source_folder_unavailable", "The source folder cannot be used for output. Choose another location."),
-      );
-      return askCreateDestination(inputs, base, draft, source, isCurrent);
-    } finally {
-      if (isCurrent() && createPreflightCurrent === status) createPreflightCurrent = "";
-    }
-  }
-
-  function normalizeCreateDestinationForDraft(path: string, draft: CreateRunDraft): string {
-    const extensions = draft.outputExtension === "swm" || draft.sfxEnabled
-      ? [draft.outputExtension]
-      : createFormats[draft.format].extensions;
-    const lowerPath = path.toLowerCase();
-    if (extensions.some((extension) => lowerPath.endsWith(`.${extension.toLowerCase()}`))) return path;
-    return `${path}.${draft.outputExtension}`;
-  }
-
-  function createSaveFiltersForDraft(draft: CreateRunDraft) {
-    if (draft.sfxEnabled || draft.outputExtension === "swm") {
-      return [{
-        name: draft.sfxEnabled
-          ? tr("gui.create.sfx_filter", "Self-extracting output")
-          : tr("gui.create.split_wim_filter", "Split WIM first part"),
-        extensions: [draft.outputExtension],
-      }];
-    }
-    const activeId = draft.format;
-    return [{
-      name: createFormatFilterName(activeId),
-      extensions: createFormats[activeId].extensions,
-    }];
-  }
-
-  function createFormatFilterName(formatId: CreateFormatId): string {
-    return tr(`gui.create.format.${formatId}.filter`, createFormats[formatId].filterName);
   }
 
   function createFormatDisabledReason(formatId: CreateFormatId): string {
@@ -4547,93 +3425,6 @@
       : tr("gui.history.no_activity", "No operation history yet");
   }
 
-  async function exportOperationAuditFromUi() {
-    try {
-      const { save } = await getDialogModule();
-      const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-      const dest = await saveNativeDialog("history.export-operation-audit", save, {
-        title: tr("gui.history.export_operation_audit", "Export task audit"),
-        defaultPath: `squallz-operation-audit-${stamp}.json`,
-        filters: [{ name: tr("gui.dialog.filter.json", "JSON"), extensions: ["json"] }],
-      });
-      if (!dest) return;
-      await ipc.exportOperationAudit(dest);
-      recordOperation({
-        status: "done",
-        title: tr("gui.history.operation_audit_exported", "Task audit exported"),
-        detail: tr("gui.history.sanitized_operation_audit", "Sanitized task audit"),
-      });
-      showNotice(tr("gui.history.operation_audit_exported", "Task audit exported"));
-    } catch {
-      showNotice(tr("gui.history.operation_audit_requires_desktop_service", "Task audit export requires the desktop service"));
-    }
-  }
-
-  function markSettingsDraft(section: PersistedSettingsSection) {
-    settingsDraftGenerations[section] += 1;
-    settingsSaveOutcomes[section] = "idle";
-  }
-
-  function setWorkspaceAccentContrastGuard(enabled: boolean) {
-    accentContrastGuard = enabled;
-    markSettingsDraft("colors");
-  }
-
-  function setWorkspaceGeneralLanguageChoice(value: string) {
-    generalLanguageChoice = value;
-    markSettingsDraft("general");
-  }
-
-  function setWorkspaceGeneralDefaultCreateDir(value: string) {
-    generalDefaultCreateDir = value;
-    markSettingsDraft("general");
-  }
-
-  function setWorkspaceGeneralDefaultExtractDir(value: string) {
-    generalDefaultExtractDir = value;
-    markSettingsDraft("general");
-  }
-
-  function setWorkspaceGeneralRevealAfterExtract(enabled: boolean) {
-    generalRevealAfterExtract = enabled;
-    markSettingsDraft("general");
-  }
-
-  function setWorkspaceGeneralAutomaticUpdateChecks(enabled: boolean) {
-    generalAutomaticUpdateChecks = enabled;
-    markSettingsDraft("general");
-  }
-
-  function setWorkspaceSafetyMaxEntries(value: NumericSetting) {
-    safetyMaxEntries = value;
-    markSettingsDraft("security");
-  }
-
-  function setWorkspaceSafetyMaxOutputGiB(value: NumericSetting) {
-    safetyMaxOutputGiB = value;
-    markSettingsDraft("security");
-  }
-
-  function setWorkspaceSafetyMaxCompressionRatio(value: NumericSetting) {
-    safetyMaxCompressionRatio = value;
-    markSettingsDraft("security");
-  }
-
-  function setWorkspacePerformanceThreads(value: NumericSetting) {
-    performanceThreads = value;
-    markSettingsDraft("performance");
-  }
-
-  function setWorkspacePerformanceParallelJobs(value: NumericSetting) {
-    performanceParallelJobs = value;
-    markSettingsDraft("performance");
-  }
-
-  function setWorkspacePerformanceMemoryKiB(value: NumericSetting) {
-    performanceMemoryKiB = value;
-    markSettingsDraft("performance");
-  }
-
   function isSettingsWorkspaceScreen(value: Screen): value is SettingsScreen {
     return value === "appearance"
       || value === "colors"
@@ -4650,7 +3441,7 @@
       screen: settingsScreen,
       onReady: () => { if (securitySettingsFocusPending) focusSecuritySettings(); },
       tr,
-      settingsSaveTarget,
+      settings: settingsSession,
       appearanceSaveState,
       modernModeSelected: selectedMode === "modern" || (selectedMode === null && mode === "modern"),
       classicModeSelected: selectedMode === "classic" || (selectedMode === null && mode === "classic"),
@@ -4659,77 +3450,13 @@
       setTheme,
       activeDensityChoice,
       setDensity,
-      activePalette,
       activeTheme,
-      customAccent,
-      customAccentInput,
-      customAccentValid,
-      customAccentSaveError,
-      accentContrastGuard,
-      colorsSaveState,
-      colorSettingsDirty,
-      paletteApplyBlocked,
-      savePaletteSettings,
-      setPalette,
-      updateCustomAccent,
-      onCustomAccentHexInput,
-      setAccentContrastGuard: setWorkspaceAccentContrastGuard,
-      generalSaveState,
-      generalSettingsDirty,
-      generalSettingsValidationError,
-      saveGeneralSettings,
       availableLanguages,
-      generalLanguageChoice,
-      setGeneralLanguageChoice: setWorkspaceGeneralLanguageChoice,
-      generalDefaultCreateDir,
-      setGeneralDefaultCreateDir: setWorkspaceGeneralDefaultCreateDir,
-      defaultCreateFolderError,
       chooseDefaultCreateFolder,
-      clearDefaultCreateFolder,
-      generalDefaultExtractDir,
-      setGeneralDefaultExtractDir: setWorkspaceGeneralDefaultExtractDir,
-      defaultExtractFolderError,
       chooseDefaultExtractFolder,
-      clearDefaultExtractFolder,
-      generalRevealAfterExtract,
-      setGeneralRevealAfterExtract: setWorkspaceGeneralRevealAfterExtract,
-      generalAutomaticUpdateChecks,
-      setGeneralAutomaticUpdateChecks: setWorkspaceGeneralAutomaticUpdateChecks,
       fileManagerLabel,
       openWithLabel,
       updateCheckPreview,
-      securitySaveState,
-      safetySettingsDirty,
-      safetyValidationError,
-      saveSafetySettings,
-      safetyMaxEntries,
-      setSafetyMaxEntries: setWorkspaceSafetyMaxEntries,
-      safetyMaxEntriesError,
-      safetyMaxOutputGiB,
-      setSafetyMaxOutputGiB: setWorkspaceSafetyMaxOutputGiB,
-      safetyMaxOutputError,
-      safetyMaxCompressionRatio,
-      setSafetyMaxCompressionRatio: setWorkspaceSafetyMaxCompressionRatio,
-      safetyMaxCompressionRatioError,
-      resetSafetySettings,
-      settingsSnapshotLabel,
-      performanceSaveState,
-      performanceSettingsDirty,
-      performanceValidationError,
-      savePerformanceSettings,
-      performanceParallelJobs,
-      setPerformanceParallelJobs: setWorkspacePerformanceParallelJobs,
-      performanceParallelJobsError,
-      choosePerformanceParallelJobs,
-      performanceThreads,
-      setPerformanceThreads: setWorkspacePerformanceThreads,
-      performanceThreadsError,
-      choosePerformanceThreads,
-      performanceMemoryKiB,
-      setPerformanceMemoryKiB: setWorkspacePerformanceMemoryKiB,
-      performanceMemoryError,
-      choosePerformanceMemory,
-      resetPerformanceSettings,
       passwordBookForgetDisabledReason,
       labelWithDisabledReason,
       forgetPasswordBookPanel,
@@ -4804,7 +3531,7 @@
         },
         selectedSummary: selectedSummary(),
         editingStatus: archiveEditingStatus(),
-        conflict: moveConflictView,
+        conflict: archiveEdit.reviewView,
         structureWarning: archiveStructureWarningText(),
         recovery,
         totalRows: currentArchive ? totalRows() : 0,
@@ -4831,9 +3558,9 @@
       }),
       onRevealPreview: () => void revealEntryPreview(),
       onPreviewSelection: () => void runAppAction("preview_entry"),
-      onCancelMoveConflict: cancelMoveConflict,
-      onSubmitMoveReadyOnly: () => void submitMoveReadyOnly(),
-      onSubmitMoveKeepBoth: () => void submitMoveKeepBoth(),
+      onCancelMoveConflict: () => archiveEdit.cancelReview(),
+      onSubmitMoveReadyOnly: () => void archiveEdit.submitReviewedMove("ready-only"),
+      onSubmitMoveKeepBoth: () => void archiveEdit.submitReviewedMove("keep-both"),
       onBrowseScroll: onBrowseVirtualScroll,
       onSelectEntry: (entry, event) => selectEntry(entry, event),
       onActivateEntry: (entry) => void activateEntry(entry),
@@ -4895,7 +3622,7 @@
         },
         selectedSummary: selectedSummary(),
         editingStatus: archiveEditingStatus(),
-        conflict: moveConflictView,
+        conflict: archiveEdit.reviewView,
         structureWarning: archiveStructureWarningText(),
         recovery,
         encodingWarning: hasEncodingWarning() ? archiveWarningText() : null,
@@ -4932,9 +3659,9 @@
       onPreviewSelection: () => void runAppAction("preview_entry"),
       onOpenNestedPreview: () => void openNestedPreviewArchive(),
       onExtractNestedPreview: () => void extractNestedPreviewArchive(),
-      onCancelMoveConflict: cancelMoveConflict,
-      onSubmitMoveReadyOnly: () => void submitMoveReadyOnly(),
-      onSubmitMoveKeepBoth: () => void submitMoveKeepBoth(),
+      onCancelMoveConflict: () => archiveEdit.cancelReview(),
+      onSubmitMoveReadyOnly: () => void archiveEdit.submitReviewedMove("ready-only"),
+      onSubmitMoveKeepBoth: () => void archiveEdit.submitReviewedMove("keep-both"),
       onRepairEncoding: () => void repairFilenameEncoding("gbk"),
       onSearchInputMount: (input) => {
         archiveSearchInput = input;
@@ -5028,52 +3755,6 @@
     };
   }
 
-  function beginSettingsSave(section: PersistedSettingsSection): number | null {
-    if (settingsSaveTarget !== null) return null;
-    settingsSaveTarget = section;
-    settingsSaveOutcomes[section] = "idle";
-    return settingsDraftGenerations[section];
-  }
-
-  function finishSettingsSave(
-    section: PersistedSettingsSection,
-    generation: number,
-    outcome: SettingsSaveOutcome,
-  ) {
-    if (settingsSaveTarget === section) settingsSaveTarget = null;
-    settingsSaveOutcomes[section] =
-      settingsDraftGenerations[section] === generation || outcome !== "saved"
-        ? outcome
-        : "idle";
-  }
-
-  function settingsSaveState(
-    section: PersistedSettingsSection,
-    dirty: boolean,
-  ): SettingsSaveState {
-    if (settingsSaveTarget === section) return "saving";
-    const outcome = settingsSaveOutcomes[section];
-    if (dirty && outcome === "error") return "error";
-    if (dirty && outcome === "session") return "session";
-    return dirty ? "dirty" : "saved";
-  }
-
-  function applyPaletteSettingsSnapshot(settings: SettingsDto, preserveDraft = false) {
-    const palette = isPaletteId(settings.accent_palette) ? settings.accent_palette : "aqua";
-    const accent = normalizeHexColor(settings.custom_accent) ?? defaultCustomAccent;
-    const contrastGuard = settings.accent_contrast_guard !== false;
-    savedAccentPalette = palette;
-    savedCustomAccent = accent;
-    savedAccentContrastGuard = contrastGuard;
-    if (preserveDraft) return;
-    if (!hasPaletteOverride) activePalette = palette;
-    customAccent = accent;
-    customAccentInput = accent;
-    customAccentSaveError = false;
-    accentContrastGuard = contrastGuard;
-    settingsSaveOutcomes.colors = "saved";
-  }
-
   function applyAppearanceSettingsSnapshot(settings: SettingsDto, preserveDensity = false) {
     savedModeChoice =
       settings.ui_mode === "modern" || settings.ui_mode === "classic"
@@ -5086,32 +3767,6 @@
     if (!preserveDensity && !hasDensityOverride && isDensityChoice(settings.ui_density)) {
       activeDensityChoice = settings.ui_density;
     }
-  }
-
-  function applyGeneralSettingsSnapshot(settings: SettingsDto, preserveDraft = false) {
-    const language = settings.language ?? "";
-    const defaultCreateDir = normalizedDefaultCreateDir(settings.default_create_dir ?? "") ?? "";
-    const defaultExtractDir = normalizedDefaultExtractDir(settings.default_extract_dir ?? "") ?? "";
-    const revealAfterExtract = settings.reveal_after_extract === true;
-    const automaticUpdateChecks = settings.check_updates_automatically !== false;
-    savedGeneralLanguageChoice = language;
-    savedGeneralDefaultCreateDir = defaultCreateDir;
-    savedGeneralDefaultExtractDir = defaultExtractDir;
-    savedGeneralRevealAfterExtract = revealAfterExtract;
-    savedGeneralAutomaticUpdateChecks = automaticUpdateChecks;
-    appliedGeneralLanguageChoice = language;
-    appliedDefaultCreateDir = defaultCreateDir;
-    appliedDefaultExtractDir = defaultExtractDir;
-    appliedGeneralRevealAfterExtract = revealAfterExtract;
-    appliedGeneralAutomaticUpdateChecks = automaticUpdateChecks;
-    setRevealAfterExtractPreference(revealAfterExtract);
-    if (preserveDraft) return;
-    generalLanguageChoice = language;
-    generalDefaultCreateDir = defaultCreateDir;
-    generalDefaultExtractDir = defaultExtractDir;
-    generalRevealAfterExtract = revealAfterExtract;
-    generalAutomaticUpdateChecks = automaticUpdateChecks;
-    settingsSaveOutcomes.general = "saved";
   }
 
   async function runAutomaticUpdateCheck(generation: number): Promise<void> {
@@ -5174,381 +3829,6 @@
       if (automaticUpdateCheckTimer !== null) clearTimeout(automaticUpdateCheckTimer);
     };
   });
-
-  function safetyValuesFromSettings(settings: SettingsDto) {
-    return {
-      maxOutputGiB:
-        settings.safety_max_output_bytes && settings.safety_max_output_bytes > 0
-          ? Math.max(1, Math.round(settings.safety_max_output_bytes / bytesPerGiB))
-          : defaultSafety.maxOutputGiB,
-      maxEntries:
-        settings.safety_max_entries && settings.safety_max_entries > 0
-          ? settings.safety_max_entries
-          : defaultSafety.maxEntries,
-      maxCompressionRatio:
-        settings.safety_max_compression_ratio && settings.safety_max_compression_ratio > 0
-          ? settings.safety_max_compression_ratio
-          : defaultSafety.maxCompressionRatio,
-    };
-  }
-
-  function applySafetySettingsSnapshot(settings: SettingsDto, preserveDraft = false) {
-    const values = safetyValuesFromSettings(settings);
-    savedSafetyMaxOutputGiB = values.maxOutputGiB;
-    savedSafetyMaxEntries = values.maxEntries;
-    savedSafetyMaxCompressionRatio = values.maxCompressionRatio;
-    savedSafetyCustom = Boolean(
-      settings.safety_max_output_bytes ||
-        settings.safety_max_entries ||
-        settings.safety_max_compression_ratio,
-    );
-    if (preserveDraft) return;
-    safetyMaxOutputGiB = values.maxOutputGiB;
-    safetyMaxEntries = values.maxEntries;
-    safetyMaxCompressionRatio = values.maxCompressionRatio;
-    settingsSaveOutcomes.security = "saved";
-  }
-
-  function performanceValuesFromSettings(settings: SettingsDto) {
-    return {
-      parallelJobs:
-        settings.performance_parallel_jobs && settings.performance_parallel_jobs > 0
-          ? Math.min(settings.performance_parallel_jobs, 8)
-          : null,
-      threads:
-        settings.performance_threads && settings.performance_threads > 0
-          ? Math.min(settings.performance_threads, 64)
-          : null,
-      memoryKiB:
-        settings.performance_memory_limit_bytes && settings.performance_memory_limit_bytes > 0
-          ? wholeSetting(
-              Math.round(settings.performance_memory_limit_bytes / bytesPerKiB),
-              64,
-              8,
-              64,
-            )
-          : null,
-    };
-  }
-
-  function applyPerformanceSettingsSnapshot(settings: SettingsDto, preserveDraft = false) {
-    const values = performanceValuesFromSettings(settings);
-    savedPerformanceParallelJobs = values.parallelJobs;
-    savedPerformanceThreads = values.threads;
-    savedPerformanceMemoryKiB = values.memoryKiB;
-    if (preserveDraft) return;
-    performanceParallelJobs = values.parallelJobs;
-    performanceThreads = values.threads;
-    performanceMemoryKiB = values.memoryKiB;
-    settingsSaveOutcomes.performance = "saved";
-  }
-
-  function updateSettingsSnapshotLabel() {
-    const parallelLabel =
-      savedPerformanceParallelJobs === null
-        ? tr("gui.settings.snapshot.parallel_auto", "parallel auto")
-        : tr("gui.settings.snapshot.parallel_count", "{count} parallel")
-            .replace("{count}", String(savedPerformanceParallelJobs));
-    const workerLabel =
-      savedPerformanceThreads === null
-        ? tr("gui.settings.snapshot.workers_auto", "encoder threads auto")
-        : tr("gui.settings.snapshot.workers_count", "{count} encoder threads")
-            .replace("{count}", String(savedPerformanceThreads));
-    const memoryLabel =
-      savedPerformanceMemoryKiB === null
-        ? tr("gui.settings.snapshot.buffer_auto", "buffer auto")
-        : tr("gui.settings.snapshot.buffer_kib", "{count} KiB buffer")
-            .replace("{count}", formattedNumber(savedPerformanceMemoryKiB, 64));
-    settingsSnapshotLabel = tr(
-      "gui.settings.snapshot.summary",
-      "Saved settings · {safety} · {parallel} · {workers} · {buffer}",
-    )
-      .replace(
-        "{safety}",
-        savedSafetyCustom
-          ? tr("gui.settings.snapshot.custom_safety", "Custom safety")
-          : tr("gui.settings.snapshot.default_safety", "Default safety"),
-      )
-      .replace("{parallel}", parallelLabel)
-      .replace("{workers}", workerLabel)
-      .replace("{buffer}", memoryLabel);
-  }
-
-  function applySettingsSnapshot(
-    settings: SettingsDto,
-    requestedGenerations: Readonly<Record<PersistedSettingsSection, number>>,
-    preserveAppearance: boolean,
-  ) {
-    applyPaletteSettingsSnapshot(
-      settings,
-      settingsDraftGenerations.colors !== requestedGenerations.colors,
-    );
-    applyAppearanceSettingsSnapshot(settings, preserveAppearance);
-    applyGeneralSettingsSnapshot(
-      settings,
-      settingsDraftGenerations.general !== requestedGenerations.general,
-    );
-    applySafetySettingsSnapshot(
-      settings,
-      settingsDraftGenerations.security !== requestedGenerations.security,
-    );
-    applyPerformanceSettingsSnapshot(
-      settings,
-      settingsDraftGenerations.performance !== requestedGenerations.performance,
-    );
-    updateSettingsSnapshotLabel();
-  }
-
-  function wholeSetting(value: NumericSetting, fallback: number, min: number, max: number): number {
-    const numberValue = typeof value === "number" && Number.isFinite(value) ? value : fallback;
-    return Math.min(max, Math.max(min, Math.round(numberValue)));
-  }
-
-  function numericRangeMessage(label: string, min: number, max: number): string {
-    return tr("gui.settings.number.invalid_range", "{label} must be a whole number from {min} to {max}")
-      .replace("{label}", label)
-      .replace("{min}", numberFormatter.format(min))
-      .replace("{max}", numberFormatter.format(max));
-  }
-
-  function requiredWholeSettingError(
-    value: NumericSetting,
-    min: number,
-    max: number,
-    label: string,
-  ): string {
-    return typeof value !== "number" ||
-      !Number.isFinite(value) ||
-      !Number.isInteger(value) ||
-      value < min ||
-      value > max
-      ? numericRangeMessage(label, min, max)
-      : "";
-  }
-
-  function optionalWholeSettingError(
-    value: NumericSetting,
-    min: number,
-    max: number,
-    label: string,
-  ): string {
-    return value === null ? "" : requiredWholeSettingError(value, min, max, label);
-  }
-
-  function showNumericRangeNotice(label: string, min: number, max: number) {
-    showNotice(numericRangeMessage(label, min, max));
-  }
-
-  function validateRequiredWholeSetting(
-    value: NumericSetting,
-    min: number,
-    max: number,
-    label: string,
-  ): number | null {
-    if (
-      typeof value !== "number" ||
-      !Number.isFinite(value) ||
-      !Number.isInteger(value) ||
-      value < min ||
-      value > max
-    ) {
-      showNumericRangeNotice(label, min, max);
-      return null;
-    }
-    return value;
-  }
-
-  function validateOptionalWholeSetting(
-    value: NumericSetting,
-    min: number,
-    max: number,
-    label: string,
-  ): number | null | undefined {
-    if (value === null) return null;
-    return validateRequiredWholeSetting(value, min, max, label) ?? undefined;
-  }
-
-  function formattedNumber(value: NumericSetting, fallback: number): string {
-    return numberFormatter.format(wholeSetting(value, fallback, 1, Number.MAX_SAFE_INTEGER));
-  }
-
-  async function saveSafetySettings() {
-    const maxOutputGiB = validateRequiredWholeSetting(
-      safetyMaxOutputGiB,
-      1,
-      8192,
-      tr("gui.settings.security.max_output_gib", "Max output GiB"),
-    );
-    if (maxOutputGiB === null) return;
-    const maxEntries = validateRequiredWholeSetting(
-      safetyMaxEntries,
-      1,
-      10_000_000,
-      tr("gui.settings.security.max_entries", "Max entries"),
-    );
-    if (maxEntries === null) return;
-    const maxCompressionRatio = validateRequiredWholeSetting(
-      safetyMaxCompressionRatio,
-      1,
-      100_000,
-      tr("gui.settings.security.ratio_guard", "Ratio guard"),
-    );
-    if (maxCompressionRatio === null) return;
-    safetyMaxOutputGiB = maxOutputGiB;
-    safetyMaxEntries = maxEntries;
-    safetyMaxCompressionRatio = maxCompressionRatio;
-    const generation = beginSettingsSave("security");
-    if (generation === null) return;
-    const useDefaults =
-      maxOutputGiB === defaultSafety.maxOutputGiB &&
-      maxEntries === defaultSafety.maxEntries &&
-      maxCompressionRatio === defaultSafety.maxCompressionRatio;
-
-    try {
-      const settings = await ipc.setSafetyLimits(
-        useDefaults ? null : maxOutputGiB * bytesPerGiB,
-        useDefaults ? null : maxEntries,
-        useDefaults ? null : maxCompressionRatio,
-      );
-      applySafetySettingsSnapshot(
-        settings,
-        settingsDraftGenerations.security !== generation,
-      );
-      updateSettingsSnapshotLabel();
-      finishSettingsSave("security", generation, "saved");
-      showNotice(tr("gui.settings.security.saved", "Security settings saved"));
-    } catch (error) {
-      if (isSettingsPersistenceFailure(error)) {
-        finishSettingsSave("security", generation, "error");
-        showNotice(settingsPersistenceFailureLabel());
-      } else {
-        finishSettingsSave("security", generation, "error");
-        showNotice(
-          tr(
-            "gui.settings.apply_failed",
-            "Could not apply these settings. Try again from the desktop app.",
-          ),
-        );
-      }
-    }
-  }
-
-  function resetSafetySettings() {
-    safetyMaxOutputGiB = defaultSafety.maxOutputGiB;
-    safetyMaxEntries = defaultSafety.maxEntries;
-    safetyMaxCompressionRatio = defaultSafety.maxCompressionRatio;
-    markSettingsDraft("security");
-  }
-
-  function choosePerformanceThreads(next: NumericSetting) {
-    performanceThreads = next;
-    markSettingsDraft("performance");
-  }
-
-  function choosePerformanceParallelJobs(next: NumericSetting) {
-    performanceParallelJobs = next;
-    markSettingsDraft("performance");
-  }
-
-  function choosePerformanceMemory(next: NumericSetting) {
-    performanceMemoryKiB = next;
-    markSettingsDraft("performance");
-  }
-
-  async function savePerformanceSettings() {
-    const parallelJobs = validateOptionalWholeSetting(
-      performanceParallelJobs,
-      1,
-      8,
-      tr("gui.settings.performance.custom_parallel_jobs", "Custom parallel tasks"),
-    );
-    if (parallelJobs === undefined) return;
-    const threads = validateOptionalWholeSetting(
-      performanceThreads,
-      1,
-      64,
-      tr("gui.settings.performance.custom_threads", "Custom threads"),
-    );
-    if (threads === undefined) return;
-    const memoryKiB = validateOptionalWholeSetting(
-      performanceMemoryKiB,
-      8,
-      64,
-      tr("gui.settings.performance.custom_buffer_kib", "Custom buffer KiB"),
-    );
-    if (memoryKiB === undefined) return;
-    performanceParallelJobs = parallelJobs;
-    performanceThreads = threads;
-    performanceMemoryKiB = memoryKiB;
-    const generation = beginSettingsSave("performance");
-    if (generation === null) return;
-
-    try {
-      const settings = await ipc.setPerformanceOptions(
-        threads,
-        memoryKiB === null ? null : memoryKiB * bytesPerKiB,
-        parallelJobs,
-      );
-      applyPerformanceSettingsSnapshot(
-        settings,
-        settingsDraftGenerations.performance !== generation,
-      );
-      updateSettingsSnapshotLabel();
-      finishSettingsSave("performance", generation, "saved");
-      showNotice(tr("gui.settings.performance.saved", "Performance settings saved"));
-    } catch (error) {
-      if (isSettingsPersistenceFailure(error)) {
-        finishSettingsSave("performance", generation, "error");
-        showNotice(settingsPersistenceFailureLabel());
-      } else {
-        finishSettingsSave("performance", generation, "error");
-        showNotice(
-          tr(
-            "gui.settings.apply_failed",
-            "Could not apply these settings. Try again from the desktop app.",
-          ),
-        );
-      }
-    }
-  }
-
-  function resetPerformanceSettings() {
-    performanceParallelJobs = null;
-    performanceThreads = null;
-    performanceMemoryKiB = null;
-    markSettingsDraft("performance");
-  }
-
-  async function savePaletteSettings() {
-    const payload = palettePayloadForSave();
-    if (!payload) {
-      showNotice(tr("gui.colors.invalid_hex", "Enter a valid #RRGGBB color"));
-      return;
-    }
-    const generation = beginSettingsSave("colors");
-    if (generation === null) return;
-    try {
-      const settings = await ipc.setAccentPalette(payload.palette, payload.customAccent, payload.contrastGuard);
-      applyPaletteSettingsSnapshot(
-        settings,
-        settingsDraftGenerations.colors !== generation,
-      );
-      finishSettingsSave("colors", generation, "saved");
-      syncUrl();
-      showNotice(tr("gui.colors.saved", "Theme colors saved"));
-    } catch (error) {
-      finishSettingsSave(
-        "colors",
-        generation,
-        isSettingsPersistenceFailure(error) ? "error" : "session",
-      );
-      showNotice(
-        isSettingsPersistenceFailure(error)
-          ? settingsPersistenceFailureLabel()
-          : tr("gui.colors.saved_preview", "Theme colors apply to this session but were not saved"),
-      );
-    }
-  }
 
   function languageLabel(tag: string | null): string {
     if (!tag) return tr("gui.settings.language.follow_system", "Follow system");
@@ -5766,17 +4046,6 @@
     }
   }
 
-  function isSettingsPersistenceFailure(error: unknown): boolean {
-    return isErrorDto(error) && error.key === "error.settings_write";
-  }
-
-  function settingsPersistenceFailureLabel(): string {
-    return tr(
-      "gui.settings.save_failed",
-      "Could not save settings. Check disk access and try again.",
-    );
-  }
-
   function getDialogModule(): Promise<DialogModule> {
     if (!openDialogModulePromise) {
       openDialogModulePromise = import("@tauri-apps/plugin-dialog").catch((error) => {
@@ -5980,31 +4249,65 @@
     clearArchiveFilter();
   }
 
+  function applySettingsEffect(effect: SettingsEffect): void {
+    switch (effect.kind) {
+      case "notice":
+        showNotice(effect.message);
+        break;
+      case "generalApplied":
+        setRevealAfterExtractPreference(effect.revealAfterExtract);
+        break;
+      case "previewLanguage":
+        storePreviewLanguage(effect.language);
+        break;
+      case "generalSaved": {
+        const settings = effect.settings;
+        recordOperation({
+          status: "done",
+          title: tr("gui.settings.general.saved", "General settings saved"),
+          detail: tr(
+            "gui.settings.general.saved_detail",
+            "Language: {language} · Create folder: {createFolder} · Extract folder: {folder} · Reveal after extract {reveal} · Automatic update checks {updates}",
+          )
+            .replace("{language}", languageLabel(settings.language))
+            .replace("{createFolder}", defaultCreateFolderLabel(settings.default_create_dir ?? ""))
+            .replace("{folder}", defaultExtractFolderLabel(settings.default_extract_dir ?? ""))
+            .replace("{reveal}", settings.reveal_after_extract ? tr("common.on", "on") : tr("common.off", "off"))
+            .replace(
+              "{updates}",
+              settings.check_updates_automatically !== false
+                ? tr("common.on", "on")
+                : tr("common.off", "off"),
+            ),
+        });
+        break;
+      }
+      case "automaticUpdates":
+        startAutomaticUpdateCheck(effect.enabled);
+        break;
+      case "palettePreviewChanged":
+        syncUrl();
+        break;
+    }
+  }
+
   function normalizedFolderSetting(value: string): string | null {
     return normalizeDesktopFolder(value, platformKind());
   }
 
-  function folderSettingValidationError(value: string, label: string): string {
-    if (!value.trim() || normalizedFolderSetting(value)) return "";
-    return tr(
-      "gui.settings.folder.absolute_required",
-      "{name} must be an absolute folder path. Choose a folder or clear the field.",
-    ).replace("{name}", label);
-  }
-
-  function normalizedDefaultCreateDir(value: string = generalDefaultCreateDir): string | null {
+  function normalizedDefaultCreateDir(value: string = settingsSession.general.defaultCreateDir): string | null {
     return normalizedFolderSetting(value);
   }
 
-  function normalizedDefaultExtractDir(value: string = generalDefaultExtractDir): string | null {
+  function normalizedDefaultExtractDir(value: string = settingsSession.general.defaultExtractDir): string | null {
     return normalizedFolderSetting(value);
   }
 
-  function defaultCreateFolderLabel(value: string = generalDefaultCreateDir): string {
+  function defaultCreateFolderLabel(value: string = settingsSession.general.defaultCreateDir): string {
     return normalizedDefaultCreateDir(value) ?? tr("gui.settings.folder.ask_when_creating", "Ask when creating");
   }
 
-  function defaultExtractFolderLabel(value: string = generalDefaultExtractDir): string {
+  function defaultExtractFolderLabel(value: string = settingsSession.general.defaultExtractDir): string {
     return normalizedDefaultExtractDir(value) ?? tr("gui.settings.folder.next_to_archive", "Next to archive");
   }
 
@@ -6017,8 +4320,7 @@
         directory: true,
       });
       if (typeof selected === "string") {
-        generalDefaultExtractDir = selected;
-        markSettingsDraft("general");
+        settingsSession.setGeneral("defaultExtractDir", selected);
       }
     } catch {
       showNotice(tr("gui.settings.folder.picker_requires_desktop_service", "Folder picker requires the desktop service"));
@@ -6034,125 +4336,10 @@
         directory: true,
       });
       if (typeof selected === "string") {
-        generalDefaultCreateDir = selected;
-        markSettingsDraft("general");
+        settingsSession.setGeneral("defaultCreateDir", selected);
       }
     } catch {
       showNotice(tr("gui.settings.folder.picker_requires_desktop_service", "Folder picker requires the desktop service"));
-    }
-  }
-
-  function clearDefaultCreateFolder() {
-    generalDefaultCreateDir = "";
-    markSettingsDraft("general");
-  }
-
-  function clearDefaultExtractFolder() {
-    generalDefaultExtractDir = "";
-    markSettingsDraft("general");
-  }
-
-  async function saveGeneralSettings() {
-    if (generalSettingsValidationError) {
-      showNotice(generalSettingsValidationError);
-      return;
-    }
-    const nextLanguage = generalLanguageChoice.trim() || null;
-    const defaultCreateDir = normalizedDefaultCreateDir();
-    const defaultExtractDir = normalizedDefaultExtractDir();
-    const revealAfterExtract = generalRevealAfterExtract;
-    const automaticUpdateChecks = generalAutomaticUpdateChecks;
-    const previousAppliedLanguage = appliedGeneralLanguageChoice;
-    const requiresPersistence =
-      (nextLanguage ?? "") !== savedGeneralLanguageChoice ||
-      (defaultCreateDir ?? "") !== savedGeneralDefaultCreateDir ||
-      (defaultExtractDir ?? "") !== savedGeneralDefaultExtractDir ||
-      revealAfterExtract !== savedGeneralRevealAfterExtract ||
-      automaticUpdateChecks !== savedGeneralAutomaticUpdateChecks;
-    const generation = beginSettingsSave("general");
-    if (generation === null) return;
-    try {
-      const settings = await ipc.setGeneralOptions(
-        nextLanguage,
-        defaultCreateDir,
-        defaultExtractDir,
-        revealAfterExtract,
-        automaticUpdateChecks,
-      );
-      storePreviewLanguage(settings.language);
-      applyGeneralSettingsSnapshot(
-        settings,
-        settingsDraftGenerations.general !== generation,
-      );
-      await loadLocale(settings.language).catch(() => undefined);
-      updateSettingsSnapshotLabel();
-      finishSettingsSave("general", generation, "saved");
-      recordOperation({
-        status: "done",
-        title: tr("gui.settings.general.saved", "General settings saved"),
-        detail: tr(
-          "gui.settings.general.saved_detail",
-          "Language: {language} · Create folder: {createFolder} · Extract folder: {folder} · Reveal after extract {reveal} · Automatic update checks {updates}",
-        )
-          .replace("{language}", languageLabel(settings.language))
-          .replace("{createFolder}", defaultCreateFolderLabel(settings.default_create_dir ?? ""))
-          .replace("{folder}", defaultExtractFolderLabel(settings.default_extract_dir ?? ""))
-          .replace("{reveal}", settings.reveal_after_extract ? tr("common.on", "on") : tr("common.off", "off"))
-          .replace(
-            "{updates}",
-            settings.check_updates_automatically !== false
-              ? tr("common.on", "on")
-              : tr("common.off", "off"),
-          ),
-      });
-      showNotice(tr("gui.settings.general.saved", "General settings saved"));
-      startAutomaticUpdateCheck(settings.check_updates_automatically !== false);
-    } catch (error) {
-      if (isSettingsPersistenceFailure(error)) {
-        finishSettingsSave("general", generation, "error");
-        showNotice(settingsPersistenceFailureLabel());
-      } else {
-        let sessionApplied = false;
-        if (settingsDraftGenerations.general === generation) {
-          await loadLocale(nextLanguage).catch(() => undefined);
-          if (settingsDraftGenerations.general === generation) {
-            appliedGeneralLanguageChoice = nextLanguage ?? "";
-            appliedDefaultCreateDir = defaultCreateDir ?? "";
-            appliedDefaultExtractDir = defaultExtractDir ?? "";
-            appliedGeneralRevealAfterExtract = revealAfterExtract;
-            appliedGeneralAutomaticUpdateChecks = automaticUpdateChecks;
-            storePreviewLanguage(nextLanguage);
-            setRevealAfterExtractPreference(revealAfterExtract);
-            updateSettingsSnapshotLabel();
-            sessionApplied = true;
-            startAutomaticUpdateCheck(automaticUpdateChecks);
-          } else {
-            await loadLocale(previousAppliedLanguage || null).catch(() => undefined);
-            updateSettingsSnapshotLabel();
-          }
-        }
-        finishSettingsSave(
-          "general",
-          generation,
-          sessionApplied ? (requiresPersistence ? "session" : "saved") : "error",
-        );
-        showNotice(
-          sessionApplied
-            ? requiresPersistence
-              ? tr(
-                  "gui.settings.general.saved_preview",
-                  "General changes apply to this session but were not saved",
-                )
-              : tr(
-                  "gui.settings.general.matches_saved",
-                  "General settings now match the saved values",
-                )
-            : tr(
-                "gui.settings.previous_apply_failed",
-                "Earlier changes were not applied. Review the current draft and save again.",
-              ),
-        );
-      }
     }
   }
 
@@ -6260,14 +4447,29 @@
     }
   }
 
+  function captureIncomingOpenFilesRequest(): () => boolean {
+    const generation = ++incomingOpenFilesGeneration;
+    const navigation = taskReviewRequestGeneration;
+    const archiveGeneration = archiveOpenGeneration;
+    const batchRevision = batchExtract.revision;
+    return () => generation === incomingOpenFilesGeneration
+      && navigation === taskReviewRequestGeneration
+      && archiveGeneration === archiveOpenGeneration
+      && batchRevision === batchExtract.revision;
+  }
+
   async function handleOpenFilesPayload(payload: OpenFilesPayload) {
     const action = externalOpenAction(payload.action);
+    if (!action && !payload.paths.some((path) => typeof path === "string" && path.length > 0)) return;
+    const isCurrent = captureIncomingOpenFilesRequest();
     if (action) {
       await submitExternalTaskWindow(action, payload.paths, payload.output ?? null);
       return;
     }
     if (preventCreateSubmissionNavigation("browse")) return;
     if (openRecoverySetFromPaths(payload.paths, "open-file")) return;
+    await initialGeneralSettingsReady;
+    if (!isCurrent() || preventCreateSubmissionNavigation("browse")) return;
     await openFirstArchivePath(payload.paths, "open-file");
   }
 
@@ -6782,13 +4984,12 @@
   }
 
   function entryPreviewForPath(entryPath: string): EntryPreviewDto | null {
-    if (
-      !currentArchive ||
-      (entryPreview?.outer_path !== currentArchive.source && entryPreview?.outer_path !== currentArchive.path)
-    ) {
-      return null;
-    }
-    return entryPreview.entry_path === entryPath ? entryPreview : null;
+    return currentArchive
+      ? previewSession.fileFor(currentArchive.source, currentArchive.path, entryPath) : null;
+  }
+
+  function hasPreparedPreviewForPath(entryPath: string): boolean {
+    return Boolean(currentArchive && previewSession.hasPrepared(currentArchive.source, currentArchive.path, entryPath));
   }
 
   function isEntryPreviewActive(entry: DisplayEntry): boolean {
@@ -6810,61 +5011,11 @@
     );
   }
 
-  async function disposeEntryPreview(previewId: string): Promise<void> {
-    await ipc.releasePreviewSession(previewId).catch(() => undefined);
-  }
-
-  async function prepareEntryPreviewSerially(
-    archiveSource: string,
-    archivePath: string | null,
-    entryPath: string,
-    requestGeneration: number,
-  ): Promise<EntryPreviewDto | null> {
-    const previous = entryPreviewPreparationTail;
-    let releaseSlot: () => void = () => undefined;
-    entryPreviewPreparationTail = new Promise<void>((resolve) => {
-      releaseSlot = resolve;
-    });
-    await previous;
-    try {
-      if (requestGeneration !== previewRequestGeneration) return null;
-      return (
-        (archivePath
-          ? previewSampleForEntry(archivePath, entryPath)
-          : null) ??
-        (await runPreviewWithPassword(
-          requestGeneration,
-          archivePath ?? archiveSource,
-          entryPath,
-          (passwords, requestId) => ipc.previewArchiveEntry(
-            archiveSource, entryPath, passwords.outer, archiveEncodingForJob(), requestId,
-          ),
-        ))
-      );
-    } finally {
-      releaseSlot();
-    }
-  }
-
   function clearEntryPreviewState(restoreEntryFocus = false) {
-    previewPasswordFlow.cancel();
-    const preview = entryPreview;
-    const inner = nestedPreview;
-    const originEntryPath = previewOriginEntryPath;
-    const originVirtualIndex = previewOriginVirtualIndex;
-    previewRequestGeneration += 1;
-    previewActionGeneration += 1;
-    nestedPreview = null;
-    entryPreview = null;
-    entryPreviewFailure = null;
-    previewOriginEntryPath = null;
-    previewOriginVirtualIndex = null;
-    previewPhase = "idle";
-    previewTargetName = "";
-    if (preview) void disposeEntryPreview(preview.preview_id);
-    if (inner) void ipc.closeArchive(inner.archive.id).catch(() => undefined);
-    if (restoreEntryFocus && originVirtualIndex !== null) {
-      queueMicrotask(() => void focusArchiveRow(originVirtualIndex, originEntryPath));
+    const origin = previewSession.clear();
+    if (restoreEntryFocus && origin && origin.virtualIndex !== null) {
+      const { virtualIndex, entryPath } = origin;
+      queueMicrotask(() => void focusArchiveRow(virtualIndex, entryPath));
     }
   }
 
@@ -6874,9 +5025,8 @@
       showNotice(archiveSelectionBusyReason());
       return;
     }
-    const preservePreview = entryPreviewForPath(entry.source.path) !== null;
     selectRow(entry.source, entry.virtualIndex);
-    if (!preservePreview) clearEntryPreviewState();
+    if (!hasPreparedPreviewForPath(entry.source.path)) clearEntryPreviewState();
   }
 
   function previewDisplayEntry(entry: DisplayEntry): void {
@@ -6899,7 +5049,7 @@
       return;
     }
     toggleSelect(entry.source, entry.virtualIndex);
-    if (!entryPreviewForPath(entry.source.path)) clearEntryPreviewState();
+    if (!hasPreparedPreviewForPath(entry.source.path)) clearEntryPreviewState();
     recordValidationEvent("frontend.entry.selection_toggle", {
       path: entry.source.path,
       selected: selectedPaths().has(entry.source.path),
@@ -7058,7 +5208,7 @@
     } else {
       selectRow(entry.source, entry.virtualIndex);
     }
-    if (!entryPreviewForPath(entry.source.path)) clearEntryPreviewState();
+    if (!hasPreparedPreviewForPath(entry.source.path)) clearEntryPreviewState();
     recordValidationEvent("frontend.entry.select", {
       path: entry.source.path,
       selected_count: selectedPaths().size,
@@ -7081,7 +5231,8 @@
     }
     if (blockSelectionScopedAction()) return;
     if (archiveLikePath(entry.source.path) && currentArchive) {
-      await openNestedArchiveEntry(
+      await nestedArchiveAction(
+        "open",
         currentArchive.source,
         entry.source.path,
         entry.virtualIndex ?? null,
@@ -7297,21 +5448,6 @@
     return dot > 0 ? name.slice(dot + 1).toUpperCase() : "ARCHIVE";
   }
 
-  function newBatchExtractDraft(paths: readonly string[]): BatchExtractDraft {
-    return { overwrite: "ask", symlinks: "preserve", smart: true,
-      items: uniqueNonEmptyPaths([...paths]).map((path) => ({ path,
-        displayPath: currentArchive?.source === path ? currentArchive.path : path,
-        dest: normalizedDefaultExtractDir(appliedDefaultExtractDir) ?? pathDir(currentArchive?.source === path ? currentArchive.path : path),
-        encoding: currentArchive && sameFilePath(currentArchive.source, path) ? archiveEncodingForJob() : null,
-        best_effort: false,
-      })) };
-  }
-
-  function effectiveBatchDraft(): BatchExtractDraft {
-    return batchDraft ?? newBatchExtractDraft(runtimePreviews.batchPaths.length > 0
-      ? runtimePreviews.batchPaths : currentArchive ? [currentArchive.source] : []);
-  }
-
   function batchDraftLocked(): boolean {
     return batchSubmissionPending || batchPickerBusy;
   }
@@ -7321,34 +5457,32 @@
       showNotice(tr("gui.batch.wait_for_current", "Finish the current selection or submission before reviewing another batch."));
       return false;
     }
-    batchDraftGeneration += 1;
-    batchDraft = newBatchExtractDraft(paths);
+    batchExtract.replaceSources(paths);
     return true;
   }
 
-  function updateBatchDraft(update: (draft: BatchExtractDraft) => BatchExtractDraft): void {
+  function editBatchDraft(change: BatchExtractEdit): void {
     if (batchDraftLocked()) return;
-    batchDraftGeneration += 1;
-    batchDraft = update(effectiveBatchDraft());
+    batchExtract.edit(change);
   }
 
   function removeBatchItem(index: number): void {
-    updateBatchDraft((draft) => ({ ...draft, items: draft.items.filter((_, itemIndex) => itemIndex !== index) }));
+    editBatchDraft({ kind: "remove", index });
     void tick().then(() => {
       if (screen !== "batch") return;
-      (document.getElementById(`batch-remove-${Math.min(index, effectiveBatchDraft().items.length - 1)}`)
+      (document.getElementById(`batch-remove-${Math.min(index, batchDraft.items.length - 1)}`)
         ?? document.getElementById("batch-workspace-heading"))?.focus();
     });
   }
 
   async function chooseBatchPaths(index: number | null = null): Promise<void> {
     if (screen !== "batch" || batchDraftLocked()) return;
-    const draft = effectiveBatchDraft();
+    const draft = batchDraft;
     if (index !== null && !draft.items[index]) return;
-    const generation = batchDraftGeneration;
+    const revision = batchExtract.revision;
     const request = ++batchPickerRequest;
     const isCurrent = () => request === batchPickerRequest
-      && generation === batchDraftGeneration && screen === "batch";
+      && revision === batchExtract.revision && screen === "batch";
     batchPickerBusy = true;
     try {
       const { open } = await getDialogModule();
@@ -7364,15 +5498,8 @@
         return;
       }
       const paths = Array.isArray(selected) ? selected : [selected];
-      if (index === null) {
-        const additions = newBatchExtractDraft(paths).items.filter((item) =>
-          !draft.items.some((existing) => sameFilePath(existing.path, item.path)));
-        batchDraft = { ...draft, items: [...draft.items, ...additions] };
-        if (additions.length === 0) showNotice(tr("gui.batch.already_added", "Those archives are already in the batch."));
-      } else if (paths[0]) {
-        batchDraft = { ...draft, items: draft.items.map((item, itemIndex) => itemIndex === index ? { ...item, dest: paths[0] } : item) };
-      }
-      batchDraftGeneration += 1;
+      const added = batchExtract.acceptSelection(paths, index, draft);
+      if (index === null && added === 0) showNotice(tr("gui.batch.already_added", "Those archives are already in the batch."));
     } catch {
       if (isCurrent()) showNotice(index === null
         ? tr("gui.batch.picker_unavailable", "Could not open the file chooser. Try again, or drag archives into the window.")
@@ -7406,6 +5533,7 @@
       source.path !== createSources[index]?.path || source.kind !== createSources[index]?.kind)) {
       dismissCreatePreparation();
       createSources = merged;
+      syncCreatePreflightContext();
     }
     return {
       added: createSources.length - previousCount,
@@ -7436,12 +5564,12 @@
   }
 
   function setAllCreateSourcesSelected(selected: boolean): void {
-    if (createSourcesLocked()) return;
+    if (createPreflight.sourcesLocked()) return;
     selectedCreateSourcePaths = selected ? [...createSourceInputs] : [];
   }
 
   function toggleCreateSourceSelection(path: string): void {
-    if (createSourcesLocked()) return;
+    if (createPreflight.sourcesLocked()) return;
     selectedCreateSourcePaths = toggleCreateSourcePath(
       selectedCreateSourcePaths,
       path,
@@ -7450,17 +5578,18 @@
   }
 
   function clearCreateSourceSelection(): void {
-    if (createSourcesLocked()) return;
+    if (createPreflight.sourcesLocked()) return;
     selectedCreateSourcePaths = [];
   }
 
   function removeCreateSourcePaths(paths: readonly string[]): number {
-    if (createSourcesLocked() || paths.length === 0) return 0;
+    if (createPreflight.sourcesLocked() || paths.length === 0) return 0;
     const previousCount = createSources.length;
     const remaining = removeCreateSourcesByPaths(createSources, paths, platformKind());
     if (remaining.length === previousCount) return 0;
     dismissCreatePreparation();
     createSources = remaining;
+    syncCreatePreflightContext();
     selectedCreateSourcePaths = selectedCreateSourcePaths.filter(
       (selected) => !includesCreateSourcePath(paths, selected, platformKind()),
     );
@@ -7489,7 +5618,8 @@
     dismissCreatePreparation();
     createSources = [];
     selectedCreateSourcePaths = [];
-    createSuggestedDestination = null;
+    createOptions.clearSuggestedDestination();
+    syncCreatePreflightContext();
   }
 
   function createSourceKindLabel(kind: CreateSourceKind): string {
@@ -7522,7 +5652,7 @@
   function dropStatusLabel(): string {
     if (dragActive) return tr("gui.drop.active", "Drop archives to open, or files and folders to create an archive");
     if (lastDropKind === "archives") {
-      return tr("gui.drop.archives_ready", "{count} dropped archives ready").replace("{count}", String(effectiveBatchDraft().items.length));
+      return tr("gui.drop.archives_ready", "{count} dropped archives ready").replace("{count}", String(batchDraft.items.length));
     }
     if (lastDropKind === "create") {
       return tr("gui.drop.create_ready", "{count} dropped items ready to archive").replace("{count}", String(createSources.length));
@@ -7651,15 +5781,15 @@
       }
       return;
     }
-    if (createSourcePicker) {
+    if (createPreflight.state.picker) {
       showNotice(tr("gui.create.sources.finish_picker_before_drop", "Close the source picker before dropping other items"));
       return;
     }
-    if (createPreflightBusy()) {
+    if (createPreflight.busy()) {
       showNotice(tr("gui.create.finish_preflight_before_drop", "Wait for create preflight to finish before dropping other items"));
       return;
     }
-    if (pendingCreateSubmission) {
+    if (createPreflight.state.pending) {
       showNotice(tr("gui.create.finish_review_before_drop", "Confirm or cancel the current create plan before dropping other items"));
       return;
     }
@@ -7733,7 +5863,7 @@
   }
 
   function extractDestInDefaultFolder(fallbackParent: string, archiveName: string): string {
-    const parent = normalizedDefaultExtractDir(appliedDefaultExtractDir) ?? fallbackParent;
+    const parent = normalizedDefaultExtractDir(settingsSession.appliedGeneral.defaultExtractDir) ?? fallbackParent;
     const name = archiveStemName(archiveName);
     if (parent === "/") return `/${name}`;
     return `${parent}/${name}`;
@@ -7746,13 +5876,15 @@
 
   function extractJobDestination(): string {
     if (!currentArchive) return openArchiveFirstLabel();
-    if (extractDestinationMode !== "smart") return effectiveExtractDest();
-    return extractSmartBase();
+    return extractOptions.requestedDestination({
+      archiveFolder: defaultExtractDest(), archiveParent: sameFolderExtractDest(),
+      defaultDirectory: normalizedDefaultExtractDir(settingsSession.appliedGeneral.defaultExtractDir),
+    });
   }
 
   function extractSmartBase(): string {
-    return extractSmartBaseOverride ?? normalizedDefaultExtractDir(appliedDefaultExtractDir)
-      ?? (currentArchive ? pathDir(currentArchive.path) : openArchiveFirstLabel());
+    return extractOptions.smartBase(normalizedDefaultExtractDir(settingsSession.appliedGeneral.defaultExtractDir),
+      currentArchive ? pathDir(currentArchive.path) : openArchiveFirstLabel());
   }
 
   function sameFolderExtractDest(): string {
@@ -7837,197 +5969,24 @@
     };
   }
 
-  function clearExtractPlanDebounce(): void {
-    if (extractPlanDebounceTimer === null) return;
-    clearTimeout(extractPlanDebounceTimer);
-    extractPlanDebounceTimer = null;
-  }
-
-  function discardQueuedExtractPlan(): void {
-    clearExtractPlanDebounce();
-    const queued = extractPlanQueued;
-    extractPlanQueued = null;
-    queued?.resolve();
-  }
-
-  function cancelActiveExtractPlan(): void {
-    const active = extractPlanActive;
-    if (!active || active.control.cancelRequested) return;
-    active.control.cancelRequested = true;
-    void ipc.cancelExtractPlan(active.requestId).catch(() => {
-      // A stale read-only plan may already have completed.
-    });
-  }
-
-  function resetExtractPlanRequestState(): void {
-    cancelActiveExtractPlan();
-    extractPlanGeneration += 1;
-    extractPlanRequestKey = "";
-    discardQueuedExtractPlan();
-    extractPlan = null;
-    extractPlanPhase = "idle";
-    extractPlanErrorKey = "";
-  }
-
-  async function refreshExtractPlan(request: ExtractPlanRequest): Promise<void> {
-    try {
-      const preview = previewExtractPlan(request.dest, request.selection, request.smart);
-      const plan = preview ?? await ipc.planExtract(
-        request.path,
-        request.displayPath,
-        request.dest,
-        request.selection,
-        request.smart,
-        request.encoding,
-        request.requestId,
-      );
-      if (
-        request.generation !== extractPlanGeneration ||
-        request.key !== extractPlanRequestKey
-      ) return;
-      extractPlan = plan;
-      extractPlanPhase = plan.space_ok ? "ready" : "blocked";
-    } catch {
-      if (
-        request.generation !== extractPlanGeneration ||
-        request.key !== extractPlanRequestKey
-      ) return;
-      extractPlan = null;
-      extractPlanPhase = "error";
-      extractPlanErrorKey = "gui.extract.plan_unavailable_body";
-    }
-  }
-
-  function startQueuedExtractPlan(): void {
-    if (extractPlanActive || extractPlanDebounceTimer !== null || !extractPlanQueued) return;
-    const request = extractPlanQueued;
-    extractPlanQueued = null;
-    extractPlanActive = request;
-    void refreshExtractPlan(request).finally(() => {
-      request.resolve();
-      if (extractPlanActive !== request) return;
-      extractPlanActive = null;
-      startQueuedExtractPlan();
-    });
-  }
-
-  function queueExtractPlanRequest(request: ExtractPlanRequest, debounce: boolean): void {
-    discardQueuedExtractPlan();
-    extractPlanQueued = request;
-    if (!debounce) {
-      startQueuedExtractPlan();
-      return;
-    }
-    extractPlanDebounceTimer = setTimeout(() => {
-      extractPlanDebounceTimer = null;
-      startQueuedExtractPlan();
-    }, extractPlanDebounceMs);
-  }
-
-  function requestExtractPlan(
-    archiveId: number,
-    path: string,
-    displayPath: string,
-    dest: string,
-    selection: string[] | null,
-    smart: boolean,
-    encoding: string | null,
-    debounce = false,
-  ): Promise<void> {
-    const key = extractPlanKey(
-      archiveId,
-      path,
-      displayPath,
-      dest,
-      selection,
-      smart,
-      encoding,
-    );
-    if (
-      key === extractPlanRequestKey &&
-      (extractPlanPhase === "ready" || extractPlanPhase === "blocked") &&
-      extractPlan
-    ) {
-      return Promise.resolve();
-    }
-    if (
-      key === extractPlanRequestKey &&
-      extractPlanActive?.key === key &&
-      extractPlanActive.generation === extractPlanGeneration
-    ) return extractPlanActive.promise;
-    const queued = extractPlanQueued;
-    if (
-      key === extractPlanRequestKey &&
-      queued?.key === key &&
-      queued.generation === extractPlanGeneration
-    ) {
-      if (!debounce && extractPlanDebounceTimer !== null) {
-        clearExtractPlanDebounce();
-        startQueuedExtractPlan();
-      }
-      return queued.promise;
-    }
-
-    cancelActiveExtractPlan();
-    const generation = ++extractPlanGeneration;
-    extractPlanRequestKey = key;
-    extractPlan = null;
-    extractPlanPhase = "loading";
-    extractPlanErrorKey = "";
-    let resolveRequest: () => void = () => undefined;
-    const promise = new Promise<void>((resolve) => {
-      resolveRequest = resolve;
-    });
-    const request: ExtractPlanRequest = {
-      key,
-      generation,
-      requestId: nextPreflightRequestId(),
-      path,
-      displayPath,
-      dest,
-      selection,
-      smart,
-      encoding,
-      promise,
-      resolve: resolveRequest,
-      control: { cancelRequested: false },
-    };
-    queueExtractPlanRequest(request, debounce);
-    return promise;
-  }
-
-  function extractPlanKey(
-    archiveId: number,
-    path: string,
-    displayPath: string,
-    dest: string,
-    selection: string[] | null,
-    smart: boolean,
-    encoding: string | null,
-  ): string {
-    return JSON.stringify([
-      archiveId,
-      path,
-      displayPath,
-      dest,
-      selection,
-      smart,
-      encoding,
-    ]);
+  function captureExtractPlanInput(): ExtractPlanInput | null {
+    const current = currentArchive;
+    if (!current || screen !== "extract") return null;
+    return extractOptions.snapshotPlan(current, extractJobDestination());
   }
 
   function extractPlanStatusLabel(): string {
-    if (extractPlanPhase === "ready") return tr("gui.extract.plan_ready", "Ready");
-    if (extractPlanPhase === "blocked") return tr("gui.error.disk_full.title", "Not Enough Disk Space");
-    if (extractPlanPhase === "error") return tr("gui.extract.plan_unavailable", "Preview unavailable");
-    if (extractPlanPhase === "loading") return tr("gui.extract.plan_checking", "Checking");
+    if (extractPlanSession.phase === "ready") return tr("gui.extract.plan_ready", "Ready");
+    if (extractPlanSession.phase === "blocked") return tr("gui.error.disk_full.title", "Not Enough Disk Space");
+    if (extractPlanSession.phase === "error") return tr("gui.extract.plan_unavailable", "Preview unavailable");
+    if (extractPlanSession.phase === "loading") return tr("gui.extract.plan_checking", "Checking");
     return tr("gui.extract.plan_waiting", "Waiting");
   }
 
   function extractPlanDescription(): string {
     if (!currentArchive) return openArchiveFirstLabel();
-    if (extractPlanPhase === "blocked") return extractSpaceFailureLabel();
-    return extractPlanPhase === "ready"
+    if (extractPlanSession.phase === "blocked") return extractSpaceFailureLabel();
+    return extractPlanSession.phase === "ready"
       ? tr(
           "gui.extract.plan_ready_body",
           "The selected scope, smart layout, and destination below come from the same core plan the task will rebuild before extraction.",
@@ -8039,15 +5998,15 @@
   }
 
   function extractPlanErrorLabel(): string {
-    if (!extractPlanErrorKey) return "";
+    if (!extractPlanSession.errorKey) return "";
     return tr(
-      extractPlanErrorKey,
+      extractPlanSession.errorKey,
       "Squallz could not refresh this preview. Check the archive and destination, then try again.",
     );
   }
 
   function extractSpaceFailureLabel(): string {
-    const plan = extractPlan;
+    const plan = extractPlanSession.plan;
     if (!plan) return tr("error.disk_full", "Disk is full");
     return tr(
       "gui.error.disk_full.body",
@@ -8058,29 +6017,19 @@
   }
 
   function retryExtractPlan(): Promise<void> {
-    const current = currentArchive;
-    if (!current || screen !== "extract") return Promise.resolve();
-    extractPlanRequestKey = "";
-    return requestExtractPlan(
-      current.id,
-      current.source,
-      current.path,
-      extractJobDestination(),
-      extractJobPaths(),
-      extractDestinationMode === "smart",
-      extractEncodingForJob(),
-    );
+    const input = captureExtractPlanInput();
+    return input ? extractPlanSession.request(input, { force: true }) : Promise.resolve();
   }
 
   function extractPlanLayoutLabel(): string {
-    if (!extractPlan) return tr("gui.extract.layout_direct", "Direct");
-    return extractPlan.layout === "wrap_in_folder"
+    if (!extractPlanSession.plan) return tr("gui.extract.layout_direct", "Direct");
+    return extractPlanSession.plan.layout === "wrap_in_folder"
       ? tr("gui.extract.layout_wrapped", "Containing folder")
       : tr("gui.extract.layout_direct", "Direct");
   }
 
   function extractPlanMetrics() {
-    const plan = extractPlan;
+    const plan = extractPlanSession.plan;
     if (!plan) return [];
     const linkCount = plan.symlinks + plan.hardlinks;
     const metrics: ExtractWorkspaceSurface["plan"]["metrics"] = [
@@ -8135,15 +6084,13 @@
     if (!currentArchive) return openArchiveFirstLabel();
     if (extractDestinationMode === "smart") {
       if (
-        (extractPlanPhase === "ready" || extractPlanPhase === "blocked") &&
-        extractPlan
-      ) return extractPlan.destination;
+        (extractPlanSession.phase === "ready" || extractPlanSession.phase === "blocked") &&
+        extractPlanSession.plan
+      ) return extractPlanSession.plan.destination;
       return tr("gui.extract.smart_destination_value", "{base} · final folder chosen from archive contents")
         .replace("{base}", extractJobDestination());
     }
-    if (extractDestinationMode === "same") return sameFolderExtractDest();
-    if (extractDestinationMode === "choose") return extractCustomDest.trim() || defaultExtractDest();
-    return defaultExtractDest();
+    return extractJobDestination();
   }
 
   function extractDestinationFieldLabel(): string {
@@ -8180,9 +6127,7 @@
       return;
     }
     extractDestinationPicker = null;
-    markExtractPresetDraftTouched();
-    extractDestinationMode = mode;
-    extractSmartBaseOverride = null;
+    extractOptions.selectDestination(mode);
   }
 
   function extractWorkspaceSurface(variant: ExtractWorkspaceVariant): ExtractWorkspaceSurface {
@@ -8253,18 +6198,18 @@
       },
       plan: {
         variant,
-        phase: extractPlanPhase,
+        phase: extractPlanSession.phase,
         ariaLabel: tr("gui.extract.plan_aria", "Extraction write plan"),
         eyebrow: tr("gui.extract.plan_eyebrow", "Before extraction"),
         heading: tr("gui.extract.plan_heading", "Know what will be written"),
         statusLabel: extractPlanStatusLabel(),
         description: extractPlanDescription(),
         destinationLabel: tr("gui.extract.plan_destination", "Planned destination"),
-        destination: extractPlan?.destination ?? extractJobDestination(),
+        destination: extractPlanSession.plan?.destination ?? extractJobDestination(),
         metrics: extractPlanMetrics(),
         note: tr("gui.extract.plan_snapshot_note", "Required space includes selected data and filesystem allocation allowance. Space and conflicts are checked again immediately before writing."),
         error: extractPlanErrorLabel(),
-        retryLabel: extractPlanPhase === "blocked"
+        retryLabel: extractPlanSession.phase === "blocked"
           ? tr("gui.extract.plan_recheck_space", "Check space again")
           : tr("gui.extract.plan_retry", "Retry preview"),
         onRetry: () => void retryExtractPlan(),
@@ -8281,14 +6226,15 @@
         status: extractPresetStatus(),
         statusLabel: archivePresetStatusLabel(extractPresetStatus()),
         disabledReason: archivePresetPickerDisabledReason("extract"),
-        deleteDisabledReason: presetDeleteDisabledReason(selectedPreset),
+        updateDisabledReason: presetReadOnlyReason(selectedPreset),
+        deleteDisabledReason: presetReadOnlyReason(selectedPreset),
         isDefault: presetDocument?.bindings.app_default_extract === selectedExtractPresetId,
         isFileManagerDefault: presetDocument?.bindings.file_manager_extract === selectedExtractPresetId,
         tr,
         onSelect: (id) => applyExtractPreset(id),
         onDraftNameInput: (name) => (extractPresetDraftName = name),
-        onUpdate: () => void updateSelectedArchivePreset("extract"),
-        onSaveAs: () => void saveCurrentExtractPresetAsNew(),
+        onUpdate: () => void saveArchivePreset("extract", "update"),
+        onSaveAs: () => void saveArchivePreset("extract", "save_as"),
         onDelete: () => void deleteSelectedArchivePreset("extract"),
         onDefaultChange: (enabled) => void setArchivePresetBinding("extract", "app", enabled),
         onFileManagerDefaultChange: (enabled) => void setArchivePresetBinding("extract", "file_manager", enabled),
@@ -8375,10 +6321,7 @@
       });
       if (!isCurrent()) return false;
       if (typeof selected === "string" && selected.trim()) {
-        markExtractPresetDraftTouched();
-        extractCustomDest = selected;
-        extractSmartBaseOverride = null;
-        extractDestinationMode = "choose";
+        extractOptions.acceptDestination(selected);
         showNotice(tr("gui.extract.destination_selected", "Extract destination selected"));
         return true;
       }
@@ -8406,8 +6349,7 @@
       showNotice(openArchiveFirstLabel());
       return;
     }
-    markExtractPresetDraftTouched();
-    extractOverwriteMode = mode;
+    extractOptions.selectPolicy({ kind: "overwrite", value: mode });
   }
 
   function extractSymlinkLabel(mode: ExtractSymlinkMode): string {
@@ -8421,8 +6363,7 @@
       showNotice(openArchiveFirstLabel());
       return;
     }
-    markExtractPresetDraftTouched();
-    extractSymlinkMode = mode;
+    extractOptions.selectPolicy({ kind: "symlinks", value: mode });
   }
 
   function extractDestForPath(path: string): string {
@@ -8628,7 +6569,7 @@
   }
 
   function extractEncodingForJob(): string | null {
-    return extractPresetEncodingLabel ?? archiveEncodingForJob();
+    return extractOptions.encodingForJob(archiveEncodingForJob());
   }
 
   function recoveryEncodingForJob(): string | null {
@@ -8653,30 +6594,16 @@
       showNotice(tr("gui.precondition.select_before_extract", "Select one or more entries before extracting them"));
       return;
     }
-    extractDestinationPicker = null;
-    syncExtractDraftArchive();
-    extractScope = scope;
-    extractSelectionSnapshot = scope === "selection" ? [...(selection ?? [])] : [];
+    if (!extractOptions.openScope(currentArchive, scope, selection, () => { extractDestinationPicker = null; })) return;
     setScreen("extract");
   }
 
   function extractJobPaths(): string[] | null {
-    return extractScope === "selection"
-      ? [...extractSelectionSnapshot]
-      : null;
+    return extractOptions.selectionSnapshot();
   }
 
   function syncExtractDraftArchive(): void {
-    const current = currentArchive;
-    if ((extractDraftArchive?.id ?? null) === (current?.id ?? null)) return;
-    extractDestinationPicker = null;
-    const sameSource = current && extractDraftArchive && sameFilePath(current.source, extractDraftArchive.source);
-    extractDraftArchive = current ? { id: current.id, source: current.source } : null;
-    extractSelectionSnapshot = [];
-    if (!sameSource) {
-      extractSmartBaseOverride = null;
-      extractVerifySfx = false;
-    }
+    if (extractOptions.syncArchive(currentArchive)) extractDestinationPicker = null;
   }
 
   function focusExtractReview(): void {
@@ -8839,12 +6766,6 @@
     return previewPolicyFor(selectedPreviewPath());
   }
 
-  function previewPolicyForFailure(): PreviewPolicy | null {
-    return entryPreviewFailure
-      ? previewPolicyFor(entryPreviewFailure.entryPath, entryPreviewFailure.entryType)
-      : null;
-  }
-
   function canPreviewEntrySelection(): boolean {
     return !archiveSelectionBusyReason() && selectedPreviewPolicy().kind !== "none" && !previewBusy();
   }
@@ -8935,62 +6856,32 @@
   }
 
   function createExcludeRules(): string[] {
-    return parseDelimitedRules(createExcludeText);
+    return createOptions.excludeRules;
   }
 
-  function createDraftExcludeCount(draft: CreateRunDraft): number {
-    return draft.contentPolicy === "cross_platform_clean" ? 3 : draft.excludes.length;
-  }
-
-  function updateCreateExcludeText(value: string) {
-    markCreatePresetDraftTouched();
-    createExcludeText = value;
-    normalizeUnsupportedCreatePostSuccess();
-  }
-
-  function createExcludeCountLabel(): string {
-    const count = createExcludeRules().length;
-    return tr("gui.create.rule_count", "{count} rules").replace("{count}", count.toLocaleString());
-  }
-
-  function createPreflightBusy(): boolean {
-    return ["selecting", "measuring", "checkingTemp", "choosingDest", "checkingDest", "submitting"].includes(createPreflightPhase);
-  }
-
-  function isCurrentCreateSourcePicker(request: CreateSourcePicker): boolean {
-    return createSourcePicker === request && !createPreflightClosed && screen === "create"
-      && mode === request.mode && createSources === request.sources;
-  }
-
-  function isCurrentCreateOutputPreparation(request: CreatePreparationOwner): boolean {
-    return createOutputPreparation === request && !createPreflightClosed && screen === "create"
-      && mode === request.mode && createSources === request.sources;
+  function syncCreatePreflightContext(): void {
+    if (createPreflight.syncContext({ active: screen === "create", mode, sources: createSources })) {
+      createPrimaryFocusPending = null;
+    }
   }
 
   function dismissCreatePreparation(): void {
-    createSourcePicker = null;
-    createPrimaryFocusPending = false;
-    if (createOutputPreparation) invalidateCreatePreflightResult();
+    createPrimaryFocusPending = null;
+    createPreflight.dismissPreparation();
   }
 
   function createConfigurationPending(): boolean {
     return presetLoadState === "loading" || !sfxCreateCapabilityReady;
   }
 
-  function createSourcesLocked(): boolean {
-    return createSourcePicker !== null
-      || createPreflightBusy()
-      || pendingCreateSubmission !== null;
-  }
-
   function createSourcesLockedReason(): string {
-    if (createSourcePicker) {
+    if (createPreflight.state.picker) {
       return tr("gui.create.sources.picker_open", "Finish choosing sources before changing the list");
     }
-    if (createPreflightBusy()) {
+    if (createPreflight.busy()) {
       return tr("gui.create.sources.locked_preflight", "The source list is locked while Squallz checks it");
     }
-    if (pendingCreateSubmission) {
+    if (createPreflight.state.pending) {
       return tr("gui.create.sources.locked_review", "Confirm or cancel the current plan before changing the source list");
     }
     return "";
@@ -8998,20 +6889,20 @@
 
   function createStartDisabled(): boolean {
     return createSources.length === 0
-      || createSourcesLocked()
+      || createPreflight.sourcesLocked()
       || createConfigurationPending();
   }
 
   function createStartLabel(readyLabel: string): string {
     if (createConfigurationPending()) return tr("gui.create.preparing_settings", "Preparing settings");
-    if (createSourcePicker) return tr("gui.create.sources.adding", "Adding sources");
-    if (createPreflightBusy()) return tr("gui.create.checking", "Checking");
-    if (pendingCreateSubmission) return tr("gui.create.review_plan_below", "Review plan below");
+    if (createPreflight.state.picker) return tr("gui.create.sources.adding", "Adding sources");
+    if (createPreflight.busy()) return tr("gui.create.checking", "Checking");
+    if (createPreflight.state.pending) return tr("gui.create.review_plan_below", "Review plan below");
     return readyLabel;
   }
 
   function createSourcePickerLabel(sourceKind: "files" | "folder"): string {
-    if (createSourcePicker?.kind === sourceKind) {
+    if (createPreflight.state.picker?.kind === sourceKind) {
       return sourceKind === "files"
         ? tr("gui.create.opening_file_picker", "Opening file picker...")
         : tr("gui.create.opening_folder_picker", "Opening folder picker...");
@@ -9029,13 +6920,14 @@
   }
 
   function createOptionsLockedReason(): string {
-    return createPreflightBusy()
+    return createPreflight.busy()
       ? tr("gui.create.options_locked_preflight", "Create settings are locked until this preflight ends")
       : "";
   }
 
   function createPreflightPhaseLabel(): string {
-    switch (createPreflightPhase) {
+    const preflight = createPreflight.state;
+    switch (preflight.phase) {
       case "selecting":
         return tr("gui.create.waiting_source_picker", "Waiting for source picker");
       case "measuring":
@@ -9043,25 +6935,25 @@
       case "checkingTemp":
         return tr("gui.create.checking_temp_workspace", "Checking workspace");
       case "choosingDest":
-        if (createPreflightRequestKind === "destination") {
-          return createPreflightCancelPending
+        if (preflight.requestKind === "destination") {
+          return preflight.cancelPending
             ? tr("gui.create.cancelling_destination_check", "Stopping the output check")
             : tr("gui.create.checking_existing_destination", "Checking the current output before replacement");
         }
-        return createPreflightCurrent
+        return preflight.current
           || tr("gui.create.waiting_destination", "Waiting for destination");
       case "checkingDest":
         return tr("gui.create.checking_destination_disk_short", "Checking destination disk");
       case "reviewing":
         return tr("gui.create.ready_for_review", "Ready for review");
       case "submitting":
-        if (createPreflightRequestKind === "destination") {
-          return createPreflightCancelPending
+        if (preflight.requestKind === "destination") {
+          return preflight.cancelPending
             ? tr("gui.create.cancelling_destination_check", "Stopping the output check")
             : tr("gui.create.rechecking_existing_destination", "Rechecking the current output");
         }
-        if (createPreflightCurrent) return createPreflightCurrent;
-        return createPreflightCreatingSfx
+        if (preflight.current) return preflight.current;
+        return preflight.creatingSfx
           ? tr("gui.create.submitting_sfx_job", "Starting self-extractor task")
           : tr("gui.create.submitting_archive_job", "Submitting archive job");
       case "ready":
@@ -9076,27 +6968,28 @@
   }
 
   function createPreflightStepState(stage: Exclude<CreatePreflightStage, "submit">): CreatePreflightStepState {
-    if (createPreflightIssueStage === stage) {
-      return createPreflightPhase === "cancelled" ? "cancelled" : "blocked";
+    const preflight = createPreflight.state;
+    if (preflight.issueStage === stage) {
+      return preflight.phase === "cancelled" ? "cancelled" : "blocked";
     }
     if (stage === "source") {
-      if (createPreflightPhase === "selecting" || createPreflightPhase === "measuring") return "active";
-      if (lastCreatePlan && lastCreatePlan.entries > 0) return "ready";
+      if (preflight.phase === "selecting" || preflight.phase === "measuring") return "active";
+      if (preflight.plan && preflight.plan.entries > 0) return "ready";
       return "pending";
     }
     if (stage === "temp") {
-      if (createPreflightPhase === "checkingTemp") return "active";
-      if (lastTempDiskSpace) {
-        return lastTempDiskSpace.ok && (lastSystemTempDiskSpace?.ok ?? true) ? "ready" : "blocked";
+      if (preflight.phase === "checkingTemp") return "active";
+      if (preflight.workspaceDisk) {
+        return preflight.workspaceDisk.ok && (preflight.systemTempDisk?.ok ?? true) ? "ready" : "blocked";
       }
       return "pending";
     }
     if (
-      createPreflightPhase === "choosingDest"
-      || createPreflightPhase === "checkingDest"
-      || (createPreflightPhase === "submitting" && createPreflightRequestKind === "destination")
+      preflight.phase === "choosingDest"
+      || preflight.phase === "checkingDest"
+      || (preflight.phase === "submitting" && preflight.requestKind === "destination")
     ) return "active";
-    if (lastDiskSpace) return lastDiskSpace.ok ? "ready" : "blocked";
+    if (preflight.destinationDisk) return preflight.destinationDisk.ok ? "ready" : "blocked";
     return "pending";
   }
 
@@ -9109,35 +7002,35 @@
   }
 
   function createPreflightCurrentDetail(): string {
-    if (createPreflightPhase !== "measuring" || !createPreflightCurrent) return "";
-    return tr("gui.create.scanning_current_item", "Current · {path}").replace("{path}", createPreflightCurrent);
+    if (createPreflight.state.phase !== "measuring" || !createPreflight.state.current) return "";
+    return tr("gui.create.scanning_current_item", "Current · {path}").replace("{path}", createPreflight.state.current);
   }
 
   function createDestinationPreflightDetail(): string {
-    if (createPreflightRequestKind === "destination" && createPreflightCurrent) {
+    if (createPreflight.state.requestKind === "destination" && createPreflight.state.current) {
       return tr("gui.create.destination_check_current", "Current · {path}")
-        .replace("{path}", createPreflightCurrent);
+        .replace("{path}", createPreflight.state.current);
     }
-    return lastCreateDest
-      ? tr("gui.create.destination_path_checked", "Destination · {path}").replace("{path}", lastCreateDest)
+    return createPreflight.state.destination
+      ? tr("gui.create.destination_path_checked", "Destination · {path}").replace("{path}", createPreflight.state.destination)
       : "";
   }
 
   function createDestinationInspectionCancellable(): boolean {
-    return createPreflightRequestKind === "destination"
-      && createPreflightRequestId !== null
-      && (createPreflightPhase === "choosingDest" || createPreflightPhase === "submitting");
+    return createPreflight.state.requestKind === "destination"
+      && createPreflight.state.requestId !== null
+      && (createPreflight.state.phase === "choosingDest" || createPreflight.state.phase === "submitting");
   }
 
   function createDestinationInspectionCancelLabel(): string {
-    return createPreflightCancelPending
+    return createPreflight.state.cancelPending
       ? tr("gui.create.cancelling_destination_check", "Stopping the output check")
       : tr("gui.create.cancel_destination_check", "Cancel output check");
   }
 
   function createPreflightStageIssueSummary(stage: Exclude<CreatePreflightStage, "submit">): string | null {
-    if (createPreflightIssueStage !== stage) return null;
-    return createPreflightPhase === "cancelled"
+    if (createPreflight.state.issueStage !== stage) return null;
+    return createPreflight.state.phase === "cancelled"
       ? tr("gui.create.preflight_stage_cancelled_summary", "Cancelled before this check completed")
       : tr("gui.create.preflight_stage_blocked_summary", "This check could not finish");
   }
@@ -9180,7 +7073,7 @@
       return tr("gui.create.single_archive_summary", "Single archive · no numbered parts");
     }
     const size = formatBytes(splitSize);
-    if (!lastCreatePlan) {
+    if (!createPreflight.state.plan) {
       const nativeWim = createSplitMode === "native" && activeCreateFormat === "wim";
       const key = nativeWim
         ? "gui.create.native_split_wim_summary_pending"
@@ -9195,7 +7088,7 @@
       return tr(key, fallback)
         .replace("{size}", size);
     }
-    const count = Math.max(1, Math.trunc(lastCreatePlan.split_volume_count_budget ?? 1));
+    const count = Math.max(1, Math.trunc(createPreflight.state.plan.split_volume_count_budget ?? 1));
     return tr("gui.create.volume_output_budget_guide", "{size} per part · budget guide up to {count} parts; final count depends on compression")
       .replace("{size}", size)
       .replace("{count}", String(count));
@@ -9290,8 +7183,8 @@
   }
 
   function createPlanLayoutSummary(): string {
-    const pending = pendingCreateSubmission;
-    const plan = lastCreatePlan;
+    const pending = createPreflight.state.pending;
+    const plan = createPreflight.state.plan;
     if (!pending || !plan) return "";
     if (pending.creatingSfx) return pending.artifactLabel;
     const count = plan.split_volume_count_budget;
@@ -9307,7 +7200,7 @@
   }
 
   function createPlanReviewItems() {
-    const plan = lastCreatePlan;
+    const plan = createPreflight.state.plan;
     if (!plan) return [];
     const workspace = plan.system_temp_budget_bytes > 0
       ? tr("gui.create.review.workspace_split", "{destination} destination + {temporary} system temporary")
@@ -9352,7 +7245,8 @@
   }
 
   function createWorkspaceSurface(variant: CreateWorkspaceVariant): CreateWorkspaceSurface {
-    const preflightBusy = createPreflightBusy();
+    const preflight = createPreflight.state;
+    const preflightBusy = createPreflight.busy();
     const lockedReason = createOptionsLockedReason();
     const sourceLockedReason = createSourcesLockedReason();
     const selectedSourceCount = createSourceSelectedCount();
@@ -9364,18 +7258,18 @@
         : sourceLockedReason;
     const createPreset = selectedCreateArchivePreset();
     const sqzPayloadLabel = tr("gui.presets.sqz_inner_format", "SQZ payload");
-    const review = pendingCreateSubmission && lastCreatePlan
+    const review = preflight.pending && preflight.plan
       ? {
           variant,
           ariaLabel: tr("gui.create.review.aria", "Create plan review"),
           eyebrow: tr("gui.create.review.eyebrow", "Checked and ready"),
           heading: tr("gui.create.review.heading", "Review before creating"),
-          description: createPreflightIssue || tr("gui.create.review.description", "Squallz scanned the selected sources and checked the required filesystems. The sizes below are conservative safety bounds, not predicted compressed sizes."),
-          outputName: lastCreatePlan.primary_output,
+          description: preflight.issue || tr("gui.create.review.description", "Squallz scanned the selected sources and checked the required filesystems. The sizes below are conservative safety bounds, not predicted compressed sizes."),
+          outputName: preflight.plan.primary_output,
           items: createPlanReviewItems(),
           confirmLabel: createPlanConfirmLabel(),
           cancelLabel: tr("gui.create.review.cancel", "Cancel plan"),
-          busy: createPreflightPhase === "submitting",
+          busy: preflight.phase === "submitting",
           onConfirm: () => void confirmCreatePlan(),
           onCancel: cancelCreatePlanReview,
         }
@@ -9427,22 +7321,22 @@
         mixedSelection: selectedSourceCount > 0 && !allSourcesSelected,
         addFiles: {
           label: createSourcePickerLabel("files"),
-          disabled: createSourcesLocked(),
-          busy: createSourcePicker?.kind === "files",
+          disabled: createPreflight.sourcesLocked(),
+          busy: preflight.picker?.kind === "files",
           title: sourceLockedReason,
           onSelect: () => void submitCreateJob("files"),
         },
         addFolders: {
           label: createSourcePickerLabel("folder"),
-          disabled: createSourcesLocked(),
-          busy: createSourcePicker?.kind === "folder",
+          disabled: createPreflight.sourcesLocked(),
+          busy: preflight.picker?.kind === "folder",
           title: sourceLockedReason,
           onSelect: () => void submitCreateJob("folder"),
         },
         review: {
           label: createStartLabel(tr("gui.create.sources.review", "Review and create")),
           disabled: createStartDisabled(),
-          busy: createPreflightBusy(),
+          busy: createPreflight.busy(),
           title: reviewDisabledReason,
           onSelect: () => void submitCreateSourceList(),
         },
@@ -9484,7 +7378,7 @@
               disabled: preflightBusy,
               title: lockedReason,
               ariaLabel: labelWithDisabledReason(presetSqzInnerFormatLabel(innerFormat), lockedReason),
-              onSelect: () => selectPresetSqzInnerFormat(innerFormat),
+              onSelect: () => editCreateOptions({ kind: "sqzInnerFormat", value: innerFormat }),
             })),
           }
         : null,
@@ -9535,15 +7429,15 @@
         statusLabel: archivePresetStatusLabel(createPresetStatus()),
         disabledReason: archivePresetPickerDisabledReason("create"),
         updateDisabledReason: createPresetUpdateDisabledReason(),
-        deleteDisabledReason: presetDeleteDisabledReason(createPreset),
+        deleteDisabledReason: presetReadOnlyReason(createPreset),
         fileManagerDisabledReason: createPresetFinderDisabledReason(),
         isDefault: presetDocument?.bindings.app_default_create === selectedCreatePresetId,
         isFileManagerDefault: presetDocument?.bindings.file_manager_create === selectedCreatePresetId,
         tr,
         onSelect: (id) => applyCreatePreset(id),
         onDraftNameInput: (name) => (createPresetDraftName = name),
-        onUpdate: () => void updateSelectedArchivePreset("create"),
-        onSaveAs: () => void saveCurrentCreatePresetAsNew(),
+        onUpdate: () => void saveArchivePreset("create", "update"),
+        onSaveAs: () => void saveArchivePreset("create", "save_as"),
         onDelete: () => void deleteSelectedArchivePreset("create"),
         onDefaultChange: (enabled) => void setArchivePresetBinding("create", "app", enabled),
         onFileManagerDefaultChange: (enabled) => void setArchivePresetBinding("create", "file_manager", enabled),
@@ -9562,7 +7456,7 @@
         testAfterCreate: effectiveCreateTestAfterCreate(),
         testAfterCreateRequired: createPostSuccess === "trash_source",
         outputPreview: createOutputPreview(),
-        defaultFolder: normalizedDefaultCreateDir(appliedDefaultCreateDir) ?? "",
+        defaultFolder: normalizedDefaultCreateDir(settingsSession.appliedGeneral.defaultCreateDir) ?? "",
         fileManager: fileManagerLabel(),
         trashName: trashNameLabel(),
         disabled: preflightBusy,
@@ -9570,10 +7464,10 @@
         openDisabledReason: createOpenCompletionDisabledReason(),
         trashDisabledReason: createTrashSourceDisabledReason(),
         tr,
-        onDestinationChange: updateCreateDestinationBase,
-        onCompletionChange: updateCreateCompletion,
-        onPostSuccessChange: updateCreatePostSuccess,
-        onTestAfterCreateChange: updateCreateTestAfterCreate,
+        onDestinationChange: (value) => editCreateOptions({ kind: "destinationBase", value }),
+        onCompletionChange: (value) => editCreateOptions({ kind: "completion", value }),
+        onPostSuccessChange: (value) => editCreateOptions({ kind: "postSuccess", value }),
+        onTestAfterCreateChange: (value) => editCreateOptions({ kind: "testAfterCreate", value }),
       },
       content: {
         variant,
@@ -9584,8 +7478,8 @@
         disabled: preflightBusy,
         disabledReason: lockedReason,
         tr,
-        onChange: updateCreateContentPolicy,
-        onRulesInput: updateCreateExcludeText,
+        onChange: (value) => editCreateOptions({ kind: "contentPolicy", value }),
+        onRulesInput: (value) => editCreateOptions({ kind: "excludeText", value }),
       },
       recovery: {
         capability: createRecoveryCapability(),
@@ -9609,7 +7503,7 @@
           : ""),
         loading: !sfxCreateCapabilityReady,
         tr,
-        onEnabledChange: updateCreateSfxEnabled,
+        onEnabledChange: (value) => editCreateOptions({ kind: "sfxEnabled", value }),
       },
       protection: {
         variant,
@@ -9624,7 +7518,7 @@
         splitDisabled: createSfxEnabled,
         splitPreset: createSplitPreset,
         splitMode: createSplitMode,
-        nativeSplitKind: nativeSplitKind(activeCreateFormat, createSfxEnabled),
+        nativeSplitKind: createOptions.nativeSplitKind,
         customSplitAmount: createCustomSplitAmount,
         customSplitUnit: createCustomSplitUnit,
         passwordCapability: createPasswordCapability(),
@@ -9636,20 +7530,20 @@
         disabled: preflightBusy,
         disabledReason: lockedReason,
         tr,
-        onPasswordInput: updateCreatePassword,
-        onPasswordConfirmationInput: updateCreatePasswordConfirmation,
-        onPasswordVisibleChange: (visible) => (createPasswordVisible = visible),
-        onEncryptionEnabledChange: updateCreateEncryptionEnabled,
-        onEncryptNamesChange: updateCreateEncryptNames,
-        onSplitPresetChange: updateCreateSplitPreset,
-        onSplitModeChange: updateCreateSplitMode,
-        onCustomSplitAmountInput: updateCreateCustomSplitAmount,
-        onCustomSplitUnitChange: updateCreateCustomSplitUnit,
+        onPasswordInput: (value) => editCreateOptions({ kind: "password", value }),
+        onPasswordConfirmationInput: (value) => editCreateOptions({ kind: "passwordConfirmation", value }),
+        onPasswordVisibleChange: (value) => editCreateOptions({ kind: "passwordVisible", value }),
+        onEncryptionEnabledChange: (value) => editCreateOptions({ kind: "encryptionEnabled", value }),
+        onEncryptNamesChange: (value) => editCreateOptions({ kind: "encryptNames", value }),
+        onSplitPresetChange: (value) => editCreateOptions({ kind: "splitPreset", value }),
+        onSplitModeChange: (value) => editCreateOptions({ kind: "splitMode", value }),
+        onCustomSplitAmountInput: (value) => editCreateOptions({ kind: "customSplitAmount", value }),
+        onCustomSplitUnitChange: (value) => editCreateOptions({ kind: "customSplitUnit", value }),
       },
-      showPreflight: createPreflightPhase !== "idle",
+      showPreflight: preflight.phase !== "idle",
       preflight: {
         variant,
-        phase: createPreflightPhase,
+        phase: preflight.phase,
         ariaLabel: tr("gui.create.preflight_status", "Create preflight status"),
         heading: tr("gui.create.preflight_heading", "Before compression"),
         statusLabel: createPreflightPhaseLabel(),
@@ -9657,10 +7551,10 @@
         actionLabel: createDestinationInspectionCancellable()
           ? createDestinationInspectionCancelLabel()
           : "",
-        actionPending: createPreflightCancelPending,
-        issue: createPreflightIssue,
+        actionPending: preflight.cancelPending,
+        issue: preflight.issue,
         steps: createPreflightSteps(),
-        onAction: () => void cancelCreateDestinationInspection(),
+        onAction: () => void createPreflight.cancelDestination(),
       },
       review,
       classic: {
@@ -9718,116 +7612,73 @@
   }
 
   function createEstimateStatusbar(): string {
+    const preflight = createPreflight.state;
     const interrupted = createPreflightStageIssueSummary("source");
     if (interrupted) return interrupted;
-    if (createPreflightPhase === "selecting") return tr("gui.create.waiting_source_picker", "Waiting for source picker");
-    if (createPreflightPhase === "measuring") {
-      return createPreflightScanned > 0
-        ? tr("gui.create.scanning_inputs_count", "Scanning inputs · {count} entries").replace("{count}", createPreflightScanned.toLocaleString())
+    if (preflight.phase === "selecting") return tr("gui.create.waiting_source_picker", "Waiting for source picker");
+    if (preflight.phase === "measuring") {
+      return preflight.scanned > 0
+        ? tr("gui.create.scanning_inputs_count", "Scanning inputs · {count} entries").replace("{count}", preflight.scanned.toLocaleString())
         : tr("gui.create.measuring_input_bytes", "Measuring input bytes...");
     }
-    if (createPreflightPhase === "blocked" && lastCreatePlan?.entries === 0) return tr("gui.create.no_entries_after_excludes", "No entries after excludes");
-    if (!lastCreatePlan) return tr("gui.create.input_estimate_pending", "Input estimate awaiting preflight");
+    if (preflight.phase === "blocked" && preflight.plan?.entries === 0) return tr("gui.create.no_entries_after_excludes", "No entries after excludes");
+    if (!preflight.plan) return tr("gui.create.input_estimate_pending", "Input estimate awaiting preflight");
     return tr("gui.create.estimate_status", "{size} input · {entries} entries · {excludes}")
-      .replace("{size}", formatBytes(lastCreatePlan.total_bytes))
-      .replace("{entries}", lastCreatePlan.entries.toLocaleString())
+      .replace("{size}", formatBytes(preflight.plan.total_bytes))
+      .replace("{entries}", preflight.plan.entries.toLocaleString())
       .replace(
         "{excludes}",
-        tr("gui.create.rule_count", "{count} rules").replace("{count}", createPreflightExcludeCount.toLocaleString()),
+        tr("gui.create.rule_count", "{count} rules").replace("{count}", preflight.excludeCount.toLocaleString()),
       );
   }
 
   function diskPreflightStatusbar(): string {
+    const preflight = createPreflight.state;
     const interrupted = createPreflightStageIssueSummary("destination");
     if (interrupted) return interrupted;
-    if (createPreflightPhase === "choosingDest") {
-      if (createPreflightRequestKind === "destination") {
+    if (preflight.phase === "choosingDest") {
+      if (preflight.requestKind === "destination") {
         return tr("gui.create.destination_check_progress", "Reading current output · {bytes}")
-          .replace("{bytes}", formatBytes(createPreflightProcessedBytes));
+          .replace("{bytes}", formatBytes(preflight.processedBytes));
       }
-      return createPreflightCurrent
+      return preflight.current
         || tr("gui.create.waiting_destination_picker", "Waiting for destination picker");
     }
-    if (createPreflightPhase === "submitting" && createPreflightRequestKind === "destination") {
+    if (preflight.phase === "submitting" && preflight.requestKind === "destination") {
       return tr("gui.create.destination_recheck_progress", "Reading current output again · {bytes}")
-        .replace("{bytes}", formatBytes(createPreflightProcessedBytes));
+        .replace("{bytes}", formatBytes(preflight.processedBytes));
     }
-    if (createPreflightPhase === "checkingDest") return tr("gui.create.checking_destination_disk", "Checking destination disk...");
-    if (!lastDiskSpace) return tr("gui.create.destination_disk_pending", "Destination disk preflight pending");
+    if (preflight.phase === "checkingDest") return tr("gui.create.checking_destination_disk", "Checking destination disk...");
+    if (!preflight.destinationDisk) return tr("gui.create.destination_disk_pending", "Destination disk preflight pending");
     return tr("gui.create.disk_status_available", "{status} · {available} available")
-      .replace("{status}", lastDiskSpace.ok ? tr("gui.create.disk_ok", "Disk OK") : tr("gui.create.disk_blocked", "Disk blocked"))
-      .replace("{available}", formatBytes(lastDiskSpace.available_bytes));
+      .replace("{status}", preflight.destinationDisk.ok ? tr("gui.create.disk_ok", "Disk OK") : tr("gui.create.disk_blocked", "Disk blocked"))
+      .replace("{available}", formatBytes(preflight.destinationDisk.available_bytes));
   }
 
   function tempPreflightStatusbar(): string {
+    const preflight = createPreflight.state;
     const interrupted = createPreflightStageIssueSummary("temp");
     if (interrupted) return interrupted;
-    if (createPreflightPhase === "checkingTemp") return tr("gui.create.checking_temporary_space", "Checking workspace...");
-    if (!lastTempDiskSpace) return tr("gui.create.temp_preflight_pending", "Workspace check pending");
-    if (lastSystemTempDiskSpace) {
-      const ok = lastTempDiskSpace.ok && lastSystemTempDiskSpace.ok;
+    if (preflight.phase === "checkingTemp") return tr("gui.create.checking_temporary_space", "Checking workspace...");
+    if (!preflight.workspaceDisk) return tr("gui.create.temp_preflight_pending", "Workspace check pending");
+    if (preflight.systemTempDisk) {
+      const ok = preflight.workspaceDisk.ok && preflight.systemTempDisk.ok;
       return tr("gui.create.temp_status_destination_and_system", "{status} · destination {destination} · temporary {temporary}")
         .replace("{status}", ok ? tr("gui.create.temp_ok", "Workspace OK") : tr("gui.create.temp_blocked", "Workspace blocked"))
-        .replace("{destination}", formatBytes(lastTempDiskSpace.available_bytes))
-        .replace("{temporary}", formatBytes(lastSystemTempDiskSpace.available_bytes));
+        .replace("{destination}", formatBytes(preflight.workspaceDisk.available_bytes))
+        .replace("{temporary}", formatBytes(preflight.systemTempDisk.available_bytes));
     }
     return tr("gui.create.temp_status_available", "{status} · {available} available")
-      .replace("{status}", lastTempDiskSpace.ok ? tr("gui.create.temp_ok", "Workspace OK") : tr("gui.create.temp_blocked", "Workspace blocked"))
-      .replace("{available}", formatBytes(lastTempDiskSpace.available_bytes));
+      .replace("{status}", preflight.workspaceDisk.ok ? tr("gui.create.temp_ok", "Workspace OK") : tr("gui.create.temp_blocked", "Workspace blocked"))
+      .replace("{available}", formatBytes(preflight.workspaceDisk.available_bytes));
   }
 
-  function beginCreatePreflight(draft: CreateRunDraft, phase: "selecting" | "choosingDest") {
-    dismissCreatePreparation();
-    createPrimaryFocusPending = false;
-    createPresetDraftTouched = true;
-    createPreflightPhase = phase;
-    createPreflightScanned = 0;
-    createPreflightCurrent = "";
-    createPreflightRequestId = null;
-    createPreflightRequestKind = null;
-    createPreflightProcessedBytes = 0;
-    createPreflightCancelPending = false;
-    createPreflightExcludeCount = createDraftExcludeCount(draft);
-    createPreflightIssue = "";
-    createPreflightIssueStage = null;
-    createPreflightCreatingSfx = draft.sfxEnabled;
-    lastCreatePlan = null;
-    lastDiskSpace = null;
-    lastTempDiskSpace = null;
-    lastSystemTempDiskSpace = null;
-    lastCreateDest = null;
-    pendingCreateSubmission = null;
+  function invalidateCreatePreflightResult(): void {
+    createPreflight.invalidatePlan();
   }
 
-  function invalidateCreatePreflightResult() {
-    if (createPreflightBusy() && createOutputPreparation === null) return;
-    createOutputPreparation = null;
-    if (createPreflightPhase === "idle") return;
-    const pending = pendingCreateSubmission;
-    createPreflightPhase = "idle";
-    createPreflightScanned = 0;
-    createPreflightCurrent = "";
-    createPreflightRequestId = null;
-    createPreflightRequestKind = null;
-    createPreflightProcessedBytes = 0;
-    createPreflightCancelPending = false;
-    createPreflightIssue = "";
-    createPreflightIssueStage = null;
-    lastCreatePlan = null;
-    lastDiskSpace = null;
-    lastTempDiskSpace = null;
-    lastSystemTempDiskSpace = null;
-    lastCreateDest = null;
-    pendingCreateSubmission = null;
-    if (pending) resetCreateCredentialsAfterPlan(pending);
-  }
-
-  function resetCreateCredentialsAfterPlan(pending: PendingCreateSubmission | null) {
-    clearCreatePasswordFields();
-    if (pending?.restoreCredentialPrompt) {
-      createEncryptionEnabled = true;
-      createEncryptNames = pending.restoreEncryptNames;
-    }
+  function resetCreateCredentialsAfterPlan(pending: CreateCredentialIntent | null) {
+    createOptions.resetCredentials(pending);
   }
 
   function createPrimaryAction(): HTMLElement | null {
@@ -9835,11 +7686,12 @@
   }
 
   async function focusCreatePrimaryAction(isCurrent: () => boolean = () => true): Promise<void> {
-    createPrimaryFocusPending = true;
+    const request = {};
+    createPrimaryFocusPending = request;
     await tick();
     const action = createPrimaryAction();
-    if (!isCurrent() || !createPrimaryFocusPending || screen !== "create" || blockingModalVisible() || !action) return;
-    createPrimaryFocusPending = false;
+    if (!isCurrent() || createPrimaryFocusPending !== request || screen !== "create" || blockingModalVisible() || !action) return;
+    createPrimaryFocusPending = null;
     action.focus();
   }
 
@@ -9848,154 +7700,13 @@
     if (restoreFocus) focusCreatePrimaryAction();
   }
 
-  function finishCreatePreflightWithIssue(
-    stage: CreatePreflightStage,
-    message: string,
-    phase: "blocked" | "cancelled" = "blocked",
-  ) {
-    createPreflightIssueStage = stage;
-    createPreflightIssue = message;
-    createPreflightCurrent = "";
-    createPreflightRequestId = null;
-    createPreflightRequestKind = null;
-    createPreflightProcessedBytes = 0;
-    createPreflightCancelPending = false;
-    createPreflightPhase = phase;
-    showNotice(message);
-  }
-
   function selectedDeletePaths(): string[] {
     return archiveSelectionRoots(selectedPaths());
   }
 
   function selectedRenameSource(): string | null {
-    const selected = [...archiveEditSelectedPaths()];
+    const selected = [...selectedPaths()];
     return selected.length === 1 ? selected[0] : null;
-  }
-
-  function archiveEntryExtension(path: string): string {
-    const base = pathBaseName(path.endsWith("/") ? path.slice(0, -1) : path);
-    const dot = base.lastIndexOf(".");
-    if (dot <= 0 || dot === base.length - 1) return "";
-    return base.slice(dot);
-  }
-
-  function archiveEditPathProblem(path: string, allowRoot = false): string {
-    const issue = archiveEditPathIssue(path, allowRoot);
-    if (!issue) return "";
-    if (issue.kind === "empty") return tr("gui.edit.path_empty", "Enter an archive path.");
-    if (issue.kind === "absolute") return tr("gui.edit.path_absolute", "Enter a relative path inside the archive without a leading slash.");
-    if (issue.kind === "parent") return tr("gui.edit.path_parent", "Parent references (..) are not allowed. Enter a path inside the archive.");
-    if (issue.kind === "characters") return tr("gui.edit.path_characters", "{name} contains characters that cannot be used on Windows. Remove them or choose another name.").replace("{name}", issue.segment);
-    if (issue.kind === "trailing") return tr("gui.edit.path_trailing", "{name} ends with a space or dot. Choose a portable name.").replace("{name}", issue.segment);
-    return tr("gui.edit.path_reserved", "{name} is reserved on Windows. Choose another name.").replace("{name}", issue.segment);
-  }
-
-  function renameTargetIssue(source: string, target: string): RenameTargetIssue {
-    const unsafeSegment = archiveEditPathProblem(target);
-    if (unsafeSegment) {
-      return { blocking: unsafeSegment, warning: null };
-    }
-    if (source.endsWith("/")) {
-      return target.startsWith(source)
-        ? { blocking: tr("gui.move.inside_source", "Choose a destination outside the selected folder."), warning: null }
-        : { blocking: null, warning: null };
-    }
-    const sourceExt = archiveEntryExtension(source);
-    const targetExt = archiveEntryExtension(target);
-    if (sourceExt.toLowerCase() !== targetExt.toLowerCase()) {
-      const from = sourceExt || tr("gui.rename.no_extension", "no extension");
-      const to = targetExt || tr("gui.rename.no_extension", "no extension");
-      return { blocking: null, warning: tr("gui.rename.extension_change", "Extension changes {from} → {to}").replace("{from}", from).replace("{to}", to) };
-    }
-    return { blocking: null, warning: null };
-  }
-
-  function normalizeRenameTargetName(value = renameTargetName, source = selectedRenameSource()): string {
-    const trimmed = value.trim();
-    const path = normalizeArchivePath(trimmed);
-    if (!path) return "";
-    if (!source || trimmed.includes("/") || trimmed.includes("\\")) {
-      return source?.endsWith("/") ? `${path}/` : path;
-    }
-    const cleanSource = source.endsWith("/") ? source.slice(0, -1) : source;
-    const slash = cleanSource.lastIndexOf("/");
-    const dir = slash >= 0 ? `${cleanSource.slice(0, slash + 1)}` : "";
-    return `${dir}${path}${source.endsWith("/") ? "/" : ""}`;
-  }
-
-  function renameTargetStatus(): string {
-    if (!currentArchive) return openArchiveFirstLabel();
-    const from = selectedRenameSource();
-    if (from === null) return tr("gui.rename.select_one_entry", "Select exactly one file or folder to rename");
-    const target = normalizeRenameTargetName();
-    if (target === from) return tr("gui.rename.target_must_differ", "The name is unchanged. Enter a different name or path.");
-    const issue = renameTargetIssue(from, target);
-    if (issue.blocking) return tr("gui.rename.blocked_reason", "Blocked: {reason}").replace("{reason}", issue.blocking);
-    return `${issue.warning ? `${issue.warning} · ` : ""}${from} -> ${target}`
-      + tr("gui.edit.destination_check_suffix", " · destination will be checked before queuing");
-  }
-
-  function normalizeMoveTargetDir(value = moveTargetDir): string {
-    const path = normalizeArchivePath(value);
-    return path ? `${path}/` : "";
-  }
-
-  function moveTargetForPath(path: string, targetDir = normalizeMoveTargetDir()): string {
-    const isDir = path.endsWith("/");
-    const clean = isDir ? path.slice(0, -1) : path;
-    const base = pathBaseName(clean);
-    return `${targetDir}${base}${isDir ? "/" : ""}`;
-  }
-
-  function moveTargetStatus(): string {
-    const targetDir = normalizeMoveTargetDir();
-    if (!currentArchive) return openArchiveFirstLabel();
-    const problem = moveTargetProblem(targetDir);
-    if (problem) return problem;
-    const targetLabel = targetDir || "/";
-    const selected = archiveEditSelectedPaths().size;
-    if (selected === 0) {
-      return tr("gui.move.select_entries_to_move_into", "Select entries to move into {target}").replace("{target}", targetLabel);
-    }
-    return tr("gui.move.selected_to_target", "{count} selected -> {target}")
-      .replace("{count}", selected.toLocaleString())
-      .replace("{target}", targetLabel)
-      + tr("gui.move.check_before_submit", " · all target names will be checked before moving");
-  }
-
-  function moveTargetProblem(targetDir: string): string {
-    const problem = archiveEditPathProblem(targetDir, true);
-    if (problem) return problem;
-    for (const source of archiveSelectionRoots(archiveEditSelectedPaths())) {
-      if (source.endsWith("/") && targetDir.startsWith(source)) {
-        return tr("gui.move.inside_source", "Choose a destination outside the selected folder.");
-      }
-      if (moveTargetForPath(source, targetDir) === source) {
-        return tr("gui.move.same_location", "An entry is already in this folder. Choose another destination.");
-      }
-    }
-    return "";
-  }
-
-  function normalizeNewFolderPath(value = newFolderName): string {
-    const input = value.trim().replaceAll("\\", "/");
-    const name = normalizeArchivePath(input, tr("gui.new_folder.default_name", "New Folder"));
-    const parent = input.startsWith("/") ? "" : archiveEditContext?.directory ?? archiveDirs.join("/");
-    return `${parent ? `${parent}/` : ""}${name}/`;
-  }
-
-  function commitNewFolderName(value = newFolderName) {
-    newFolderName = value.trim().replaceAll("\\", "/");
-  }
-
-  function newFolderStatus(): string {
-    const folder = normalizeNewFolderPath();
-    if (!currentArchive) return openArchiveFirstLabel();
-    const problem = archiveEditPathProblem(folder);
-    if (problem) return problem;
-    return tr("gui.new_folder.create_path", "Create {folder}").replace("{folder}", folder)
-      + tr("gui.edit.destination_check_suffix", " · destination will be checked before queuing");
   }
 
   function archiveLikePath(path: string): boolean {
@@ -10092,11 +7803,7 @@
     const failure = entryPreviewFailure;
     if (!failure) return;
     if (failure.policyKind === "nested") {
-      if (failure.retryAction !== "preview") {
-        void openNestedArchiveEntry(failure.outerSource, failure.entryPath, previewOriginVirtualIndex, failure.retryAction);
-      } else {
-        void submitPreviewNestedArchive(failure.entryPath, previewOriginVirtualIndex);
-      }
+      void nestedArchiveAction(failure.retryAction, failure.outerSource, failure.entryPath, previewOriginVirtualIndex);
       return;
     }
     void submitPreviewEntry(
@@ -10134,20 +7841,20 @@
   }
 
   async function runPreviewWithPassword<T>(
-    requestGeneration: number,
+    preparation: PreviewPreparation,
     outerDisplayPath: string,
     entryPath: string,
     operation: (passwords: NestedArchivePasswords, requestId: string) => Promise<T>,
+    options = { serial: false },
   ): Promise<T | null> {
     try {
-      return await previewPasswordFlow.run({
+      return await previewSession.runPreparation(preparation, {
         outerName: pathBaseName(outerDisplayPath),
         innerName: pathBaseName(entryPath),
-        isCurrent: () => requestGeneration === previewRequestGeneration,
-      }, operation);
+      }, operation, options);
     } finally {
       if (
-        requestGeneration === previewRequestGeneration && screen === "password" &&
+        previewSession.isCurrent(preparation) && screen === "password" &&
         !jobPasswordPrompt && !jobConflictPrompt && !archivePasswordPrompt
       ) {
         setScreen("browse");
@@ -10269,9 +7976,9 @@
     if (extractScope === "selection" && extractSelectionSnapshot.length === 0) {
       return tr("gui.precondition.select_before_extract", "Select one or more entries before extracting them");
     }
-    if (extractPlanPhase === "blocked") return extractSpaceFailureLabel();
-    if (extractPlanPhase === "error") return extractPlanErrorLabel();
-    if (extractPlanPhase !== "ready") {
+    if (extractPlanSession.phase === "blocked") return extractSpaceFailureLabel();
+    if (extractPlanSession.phase === "error") return extractPlanErrorLabel();
+    if (extractPlanSession.phase !== "ready") {
       return tr("gui.extract.plan_wait_before_start", "Wait for the extraction preview to finish");
     }
     return "";
@@ -10346,11 +8053,11 @@
       showNotice(tr("gui.precondition.select_before_extract", "Select one or more entries before extracting them"));
       return;
     }
-    if (extractPlanPhase === "loading") {
+    if (extractPlanSession.phase === "loading") {
       showNotice(tr("gui.extract.plan_wait_before_start", "Wait for the extraction preview to finish"));
       return;
     }
-    if (extractPlanPhase === "blocked") {
+    if (extractPlanSession.phase === "blocked") {
       showNotice(extractSpaceFailureLabel());
       return;
     }
@@ -10366,49 +8073,15 @@
         || extractDestinationMode !== "choose" || !extractCustomDest.trim()
         || extractDestinationPicker) return;
     }
-    const current = currentArchive;
-    if (!current || screen !== "extract") return;
-    const selection = extractJobPaths();
-    const jobDestination = extractJobDestination();
-    const smart = extractDestinationMode === "smart";
-    const encoding = extractEncodingForJob();
-    const overwrite = extractOverwriteMode;
-    const symlinks = extractSymlinkMode;
-    const verifySfx = extractVerifySfx;
-    const expectedPlanKey = extractPlanKey(
-      current.id,
-      current.source,
-      current.path,
-      jobDestination,
-      selection,
-      smart,
-      encoding,
-    );
-    await requestExtractPlan(
-      current.id,
-      current.source,
-      current.path,
-      jobDestination,
-      selection,
-      smart,
-      encoding,
-    );
-    if (!currentArchive || currentArchive.id !== current.id || screen !== "extract") return;
-    const currentPlanKey = extractPlanKey(
-      currentArchive.id,
-      currentArchive.source,
-      currentArchive.path,
-      extractJobDestination(),
-      extractJobPaths(),
-      extractDestinationMode === "smart",
-      extractEncodingForJob(),
-    );
+    if (!currentArchive || screen !== "extract") return;
+    const snapshot = extractOptions.snapshotRun(currentArchive, extractJobDestination());
+    const { input } = snapshot;
+    await extractPlanSession.request(input);
+    if (!currentArchive || currentArchive.id !== input.archiveId || screen !== "extract") return;
     if (
-      extractPlanRequestKey !== expectedPlanKey ||
-      currentPlanKey !== expectedPlanKey ||
-      extractOverwriteMode !== overwrite ||
-      extractSymlinkMode !== symlinks ||
-      extractVerifySfx !== verifySfx
+      !extractPlanSession.matches(input) ||
+      !extractPlanSession.matches(captureExtractPlanInput()) ||
+      !extractOptions.runOptionsMatch(snapshot)
     ) {
       showNotice(tr(
         "gui.extract.plan_changed_before_start",
@@ -10416,7 +8089,8 @@
       ));
       return;
     }
-    if (extractPlanPhase !== "ready" || !extractPlan) {
+    const plan = extractPlanSession.plan;
+    if (extractPlanSession.phase !== "ready" || !plan) {
       showNotice(extractPlanErrorLabel() || tr(
         "gui.extract.plan_wait_before_start",
         "Wait for the extraction preview to finish",
@@ -10424,26 +8098,12 @@
       return;
     }
     const destination = effectiveExtractDest();
-    const action = selection ? tr("gui.extract.selected_queued", "Selected extract queued") : tr("gui.extract.all_queued", "Extract all queued");
+    const action = input.selection ? tr("gui.extract.selected_queued", "Selected extract queued") : tr("gui.extract.all_queued", "Extract all queued");
     const success = tr("gui.extract.started_to_destination", "{action} · destination: {destination}")
       .replace("{action}", action)
       .replace("{destination}", destination);
     const queued = await submitCurrentArchiveJob(
-      {
-        kind: "extract",
-        path: currentArchive.source,
-        dest: jobDestination,
-        expected_destination: extractPlan.destination,
-        expected_input_guard: extractPlan.input_guard,
-        selection,
-        overwrite,
-        symlinks,
-        smart,
-        encoding,
-        password: null,
-        verify_sfx: verifySfx,
-        best_effort: false,
-      },
+      extractOptions.extractJob(snapshot, plan),
       success,
       tr("gui.precondition.open_before_extract", "Open an archive before extracting"),
     );
@@ -10484,21 +8144,7 @@
       .replace("{action}", action)
       .replace("{destination}", destination);
     const queued = await submitCurrentArchiveJob(
-      {
-        kind: "extract",
-        path: currentArchive.source,
-        dest: jobDestination,
-        expected_destination: null,
-        expected_input_guard: null,
-        selection,
-        overwrite: extractOverwriteMode,
-        symlinks: extractSymlinkMode,
-        smart: extractDestinationMode === "smart",
-        encoding: extractEncodingForJob(),
-        password: null,
-        verify_sfx: false,
-        best_effort: false,
-      },
+      extractOptions.copyOutJob(currentArchive, jobDestination, selection),
       success,
       tr("gui.precondition.open_before_copy_out", "Open an archive before copying entries out"),
     );
@@ -10513,19 +8159,18 @@
 
   async function startBatchExtract() {
     if (batchDraftLocked()) return;
-    const draft = effectiveBatchDraft();
-    if (draft.items.length === 0) {
+    const spec = batchExtract.snapshotRun();
+    if (spec.items.length === 0) {
       showNotice(tr("gui.batch.open_archives_before_start", "Open archives before starting batch extract"));
       return;
     }
-    const invalid = draft.items.findIndex((item) => !item.dest.trim());
+    const invalid = spec.items.findIndex((item) => !item.dest.trim());
     if (invalid !== -1) {
       showNotice(tr("gui.batch.destination_required", "Choose a destination for every archive."));
       document.getElementById(`batch-destination-${invalid}`)?.focus();
       return;
     }
     if (focusBlockingTaskIfAny()) return;
-    const spec = batchExtractJob(draft);
     batchSubmissionPending = true;
     try {
       await submitJob(spec);
@@ -10544,7 +8189,7 @@
   }
 
   function batchWorkspaceSurface(variant: ToolsWorkspaceVariant): BatchWorkspaceSurface {
-    const draft = effectiveBatchDraft();
+    const draft = batchDraft;
     return {
       kind: "batch",
       mode: "batch",
@@ -10556,21 +8201,20 @@
       locked: batchDraftLocked(),
       submitting: batchSubmissionPending,
       smart: draft.smart,
-      onSmartChange: (smart) => updateBatchDraft((value) => ({ ...value, smart })),
+      onSmartChange: (value) => editBatchDraft({ kind: "smart", value }),
       overwrite: draft.overwrite,
       overwriteChoices: extractOverwriteModes.map((id) => ({ id, label: extractOverwriteLabel(id) })),
-      onOverwriteChange: (overwrite) => updateBatchDraft((value) => ({ ...value, overwrite })),
+      onOverwriteChange: (value) => editBatchDraft({ kind: "overwrite", value }),
       symlinks: draft.symlinks,
       symlinkChoices: extractSymlinkModes.map((id) => ({ id, label: extractSymlinkLabel(id) })),
-      onSymlinksChange: (symlinks) => updateBatchDraft((value) => ({ ...value, symlinks })),
+      onSymlinksChange: (value) => editBatchDraft({ kind: "symlinks", value }),
       rows: draft.items.map((item, index) => ({
         id: `${index}:${item.path}`, path: item.displayPath, name: pathBaseName(item.displayPath),
         format: archiveFormatFromPath(item.displayPath), target: item.dest,
         encoding: item.encoding ?? tr("gui.extract.encoding.auto", "Auto-detect"),
         bestEffort: item.best_effort,
         onBestEffortChange: null,
-        onTargetInput: (dest) => updateBatchDraft((value) => ({ ...value,
-          items: value.items.map((row, i) => i === index ? { ...row, dest } : row) })),
+        onTargetInput: (value) => editBatchDraft({ kind: "destination", index, value }),
         onChooseTarget: () => void chooseBatchPaths(index),
         onRemove: () => removeBatchItem(index),
       })),
@@ -11675,32 +9319,32 @@
       showNotice(reason || openArchiveFirstLabel());
       return;
     }
-    archiveEditReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    archiveEditSession += 1;
-    archiveEditError = null;
-    archiveEditChecking = false;
-    archiveEditContext = {
-      source: currentArchive.source, encoding: currentArchive.encoding_override,
-      generation: archiveOpenGeneration, id: currentArchive.id,
-      directory: archiveDirs.join("/"), paths: new Set(selectedPaths()),
+    const owner = archiveEdit.open(kind);
+    if (!owner) return;
+    archiveEditReturnFocus = {
+      owner, target: document.activeElement instanceof HTMLElement ? document.activeElement : null,
     };
     setScreen("browse");
-    moveConflictReview = null;
-    moveConflictReturnFocus = null;
-    if (kind === "rename") renameTargetName = pathBaseName(selectedRenameSource()?.replace(/\/+$/g, "") ?? "");
-    if (kind === "new-folder") newFolderName = "";
-    archiveEditKind = kind;
   }
 
-  function closeArchiveEditor() {
-    archiveEditKind = null;
-    archiveEditContext = null;
-    archiveEditSession += 1;
-    archiveEditChecking = false;
-    archiveEditError = null;
-    const target = archiveEditReturnFocus;
-    archiveEditReturnFocus = null;
-    restoreArchiveEditFocus(target);
+  function applyArchiveEditEffect(effect: ArchiveEditEffect) {
+    if (effect.kind === "notice") {
+      showNotice(effect.message);
+    } else if (effect.kind === "queued") {
+      recordOperation({ status: "queued", title: effect.title, detail: effect.detail });
+    } else if (effect.kind === "reviewCreated") {
+      const target = archiveEditReturnFocus?.owner === effect.editor ? archiveEditReturnFocus.target : null;
+      moveConflictReturnFocus = { owner: effect.review, target };
+    } else if (effect.kind === "editorClosed") {
+      if (archiveEditReturnFocus?.owner !== effect.owner) return;
+      const target = archiveEditReturnFocus.target;
+      archiveEditReturnFocus = null;
+      restoreArchiveEditFocus(target);
+    } else if (moveConflictReturnFocus?.owner === effect.review) {
+      const target = moveConflictReturnFocus.target;
+      moveConflictReturnFocus = null;
+      if (effect.restoreFocus) restoreArchiveEditFocus(target);
+    }
   }
 
   function restoreArchiveEditFocus(target: HTMLElement | null) {
@@ -11712,431 +9356,43 @@
     });
   }
 
-  function cancelMoveConflict() {
-    const target = moveConflictReturnFocus;
-    moveConflictReview = null;
-    moveConflictReturnFocus = null;
-    restoreArchiveEditFocus(target);
-  }
-
   function archiveEditorFields(kind: ArchiveEditKind) {
-    const blocked = archiveEditorBlockedReason();
+    const blocked = archiveEdit.blockedReason;
     const feedback = {
-      cancelWhileSubmitting: archiveEditChecking,
-      error: archiveEditError || (archiveRefreshStatus() === "idle" ? blocked : null),
+      cancelWhileSubmitting: archiveEdit.checking,
+      error: archiveEdit.error || (archiveRefreshStatus() === "idle" ? blocked : null),
       disabled: Boolean(blocked),
-      recovery: archiveEditContext && currentArchive?.source === archiveEditContext.source
+      recovery: archiveEdit.source && currentArchive?.source === archiveEdit.source
         && archiveRefreshStatus() !== "idle" ? archiveBrowseRecoveryState() : null,
       retryLabel: tr("gui.error.retry", "Retry"),
       onRetry: retryArchiveContents,
-      submittingLabel: archiveEditChecking
+      submittingLabel: archiveEdit.checking
         ? kind === "move" ? tr("gui.move.checking_targets", "Checking move targets…")
           : tr("gui.edit.checking_targets", "Checking archive paths…")
         : tr("gui.task_center.submitting", "Adding to the queue…"),
+      value: archiveEdit.target,
+      status: archiveEdit.status,
+      onChange: (value: string) => archiveEdit.setTarget(value),
+      onSubmit: () => archiveEdit.submit(),
     };
     if (kind === "rename") return {
       ...feedback,
       title: tr("gui.action.rename_selected", "Rename selected"),
       label: tr("gui.rename.target_name", "Rename target name"),
-      value: renameTargetName,
-      status: renameTargetStatus(),
-      onChange: (value: string) => { renameTargetName = value; archiveEditError = null; },
-      onSubmit: submitRenameSelectedJob,
     };
     if (kind === "move") return {
       ...feedback,
       title: tr("gui.action.move_selected", "Move selected"),
       label: tr("gui.move.target_folder", "Move target folder"),
-      value: moveTargetDir,
-      status: moveTargetStatus(),
       hint: tr("gui.move.path_hint", "Destination paths start at the archive root. Use / to move to the root."),
-      onChange: (value: string) => { moveTargetDir = value; archiveEditError = null; },
-      onSubmit: submitMoveSelectedJob,
     };
     return {
       ...feedback,
       title: tr("gui.action.new_folder", "New folder"),
       label: tr("gui.new_folder.name", "New folder name"),
-      value: newFolderName,
       placeholder: tr("gui.new_folder.default_name", "New Folder"),
-      status: newFolderStatus(),
       hint: tr("gui.new_folder.path_hint", "Created in the current folder. Start with / to use the archive root."),
-      onChange: (value: string) => { newFolderName = value; archiveEditError = null; },
-      onSubmit: submitNewFolderJob,
     };
-  }
-
-  function archiveEditSubmissionFailure(): ((message: string) => void) | undefined {
-    if (archiveEditKind === null) return undefined;
-    const session = archiveEditSession;
-    archiveEditError = null;
-    return (message) => {
-      if (archiveEditKind !== null && archiveEditSession === session) archiveEditError = message;
-    };
-  }
-
-  function archiveEditSubmissionSuccess(): () => void {
-    const session = archiveEditSession;
-    const review = moveConflictReview;
-    return () => {
-      if (moveConflictReview === review) {
-        moveConflictReview = null;
-        moveConflictReturnFocus = null;
-      }
-      if (archiveEditKind !== null && archiveEditSession === session) closeArchiveEditor();
-    };
-  }
-
-  function showArchiveEditError(message: string) {
-    if (archiveEditKind !== null) archiveEditError = message;
-    else showNotice(message);
-  }
-
-  function archiveEditSelectedPaths(): Set<string> {
-    return archiveEditKind && archiveEditContext ? archiveEditContext.paths : selectedPaths();
-  }
-
-  function archiveEditorBlockedReason(): string {
-    const context = archiveEditContext;
-    if (!context) return "";
-    if (!currentArchive || archiveOpenStatus !== "idle" || currentArchive.source !== context.source
-      || currentArchive.encoding_override !== context.encoding || archiveOpenGeneration !== context.generation) {
-      return tr("gui.edit.archive_changed", "The archive changed. Your text is kept. Cancel and reopen the editor for the intended archive.");
-    }
-    return archiveMutationDisabledReason();
-  }
-
-  async function validateArchiveEditContext(): Promise<boolean> {
-    const context = archiveEditContext;
-    if (!context) return true;
-    const blocked = archiveEditorBlockedReason();
-    if (blocked) { archiveEditError = blocked; return false; }
-    const archive = currentArchive;
-    if (!archive) return false;
-    if (archive.id === context.id) return true;
-    const session = archiveEditSession;
-    const paths = archiveEditKind === "new-folder"
-      ? newFolderName.trim().replaceAll("\\", "/").startsWith("/") || !context.directory ? [] : [`${context.directory}/`]
-      : archiveSelectionRoots(context.paths);
-    archiveEditChecking = true;
-    archiveEditError = null;
-    try {
-      const missing = paths.length ? await ipc.missingArchivePaths(archive.id, paths) : [];
-      if (archiveEditSession !== session || archiveEditContext !== context) return false;
-      if (currentArchive?.id !== archive.id || archiveEditorBlockedReason()) {
-        archiveEditError = tr("gui.edit.check_changed", "The archive changed while checking. Your text is kept. Try again.");
-        return false;
-      }
-      if (missing.length) {
-        archiveEditError = tr("gui.edit.items_missing", "These original items no longer exist: {paths}. Your text is kept. Cancel and select the intended items again.")
-          .replace("{paths}", missing.join(", "));
-        return false;
-      }
-      return true;
-    } catch (error) {
-      if (archiveEditSession === session) archiveEditError = tr("gui.edit.check_failed", "Could not check the original items. Your text is kept. Try again.")
-        + (isErrorDto(error) ? ` ${tError(error)}` : "");
-      return false;
-    } finally {
-      if (archiveEditSession === session) archiveEditChecking = false;
-    }
-  }
-
-  function archiveEditCheckIsCurrent(session: number, id: number | undefined): boolean {
-    if (session !== archiveEditSession) return false;
-    const blocked = archiveEditorBlockedReason();
-    if (currentArchive?.id === id && !blocked) return true;
-    archiveEditError = blocked || tr("gui.edit.check_changed", "The archive changed while checking. Your text is kept. Try again.");
-    return false;
-  }
-
-  async function validateArchiveEditTarget(target: string, currentTarget: () => string): Promise<boolean> {
-    const session = archiveEditSession;
-    const id = currentArchive?.id;
-    if (id === undefined) return false;
-    archiveEditChecking = true;
-    archiveEditError = null;
-    try {
-      const inspection = await ipc.inspectArchiveTarget(id, target);
-      if (!archiveEditCheckIsCurrent(session, id) || currentTarget() !== target) return false;
-      if (inspection.blocked_parent) {
-        archiveEditError = tr("gui.edit.parent_is_file", "{path} is a file and cannot be used as a parent folder. Choose a different path.")
-          .replace("{path}", inspection.blocked_parent);
-        return false;
-      }
-      if (inspection.exists) {
-        archiveEditError = tr("gui.edit.target_exists", "{path} already exists. Choose a different name or path.").replace("{path}", target);
-        return false;
-      }
-      return true;
-    } catch (error) {
-      if (archiveEditCheckIsCurrent(session, id) && currentTarget() === target) {
-        archiveEditError = tr("gui.edit.target_check_failed", "Could not check the destination. Your text is kept. Try again.")
-          + (isErrorDto(error) ? ` ${tError(error)}` : "");
-      }
-      return false;
-    } finally {
-      if (archiveEditSession === session) archiveEditChecking = false;
-    }
-  }
-
-  async function submitRenameSelectedJob() {
-    if (archiveEditChecking) return;
-    const session = archiveEditSession;
-    const id = currentArchive?.id;
-    if (!await validateArchiveEditContext() || !archiveEditCheckIsCurrent(session, id)) return;
-    if (blockSelectionScopedAction()) return;
-    if (!currentArchive) {
-      showNotice(tr("gui.precondition.open_before_rename", "Open an archive before renaming entries"));
-      return;
-    }
-    const readOnly = archiveMutationDisabledReason();
-    if (readOnly) {
-      showNotice(readOnly);
-      return;
-    }
-    const from = selectedRenameSource();
-    if (from === null) {
-      showNotice(tr("gui.precondition.select_one_before_rename", "Select exactly one file or folder before renaming"));
-      return;
-    }
-    const to = normalizeRenameTargetName(renameTargetName, from);
-    if (to === from) {
-      showArchiveEditError(tr("gui.rename.target_must_differ", "The name is unchanged. Enter a different name or path."));
-      return;
-    }
-    const issue = renameTargetIssue(from, to);
-    if (issue.blocking) {
-      showArchiveEditError(issue.blocking);
-      return;
-    }
-    if (!await validateArchiveEditTarget(to, () => normalizeRenameTargetName(renameTargetName, from))
-      || !archiveEditCheckIsCurrent(session, id)) return;
-    const onSuccess = archiveEditSubmissionSuccess();
-    const queued = await submitCurrentArchiveJob(
-      {
-        kind: "update",
-        path: currentArchive.source,
-        expected_archive_id: currentArchive.id,
-        encoding: currentArchive.encoding_override,
-        add: [],
-        delete: [],
-        rename: [{ from, to }],
-        mkdir: [],
-        excludes: [],
-        content_policy: "keep_all_files",
-        password: null,
-        level: 6,
-      },
-      tr("gui.rename.queued_notice", "Rename queued: {from} -> {to}").replace("{from}", from).replace("{to}", to),
-      tr("gui.precondition.open_before_rename", "Open an archive before renaming entries"),
-      archiveEditSubmissionFailure(),
-    );
-    if (queued) {
-      onSuccess();
-      recordOperation({
-        status: "queued",
-        title: tr("gui.rename.queued", "Rename entry queued"),
-        detail: `${from} -> ${to}`,
-      });
-    }
-  }
-
-  async function submitMoveSelectedJob() {
-    if (archiveEditChecking) return;
-    const session = archiveEditSession;
-    const id = currentArchive?.id;
-    if (!await validateArchiveEditContext() || !archiveEditCheckIsCurrent(session, id)) return;
-    if (blockSelectionScopedAction()) return;
-    const targetDir = normalizeMoveTargetDir();
-    if (!currentArchive) {
-      showNotice(tr("gui.precondition.open_before_move", "Open an archive before moving entries"));
-      return;
-    }
-    const readOnly = archiveMutationDisabledReason();
-    if (readOnly) {
-      showNotice(readOnly);
-      return;
-    }
-    const selected = [...archiveEditSelectedPaths()];
-    if (selected.length === 0) {
-      showNotice(tr("gui.precondition.select_entries_before_move", "Select entries before moving"));
-      return;
-    }
-    const problem = moveTargetProblem(targetDir);
-    if (problem) {
-      showArchiveEditError(problem);
-      return;
-    }
-    archiveEditChecking = true;
-    archiveEditError = null;
-    try {
-      const checked = await ipc.planArchiveMove(currentArchive.id, archiveSelectionRoots(archiveEditSelectedPaths()), targetDir);
-      if (!archiveEditCheckIsCurrent(session, id)) return;
-      if (normalizeMoveTargetDir() !== targetDir) return;
-      if (checked.missing_sources.length) {
-        archiveEditError = tr("gui.edit.items_missing", "These original items no longer exist: {paths}. Your text is kept. Cancel and select the intended items again.")
-          .replace("{paths}", checked.missing_sources.join(", "));
-        return;
-      }
-      if (checked.blocked_parent) {
-        archiveEditError = tr("gui.edit.parent_is_file", "{path} is a file and cannot be used as a parent folder. Choose a different path.")
-          .replace("{path}", checked.blocked_parent);
-        return;
-      }
-      const plan: MovePlanItem[] = checked.items.map((item) => ({
-        from: item.from, to: item.to, conflict: item.conflict !== null,
-        reason: item.conflict === "existing_target"
-          ? tr("gui.move.target_already_exists", "Target already exists")
-          : item.conflict === "duplicate_target"
-            ? tr("gui.move.duplicate_target_name", "Multiple selected entries share this target name") : null,
-        keepBothTo: item.keep_both_to,
-      }));
-      const conflicts = plan.filter((item) => item.conflict);
-      if (conflicts.length > 0) {
-        moveConflictReturnFocus = archiveEditReturnFocus;
-        moveConflictReview = { archiveId: currentArchive.id, generation: archiveOpenGeneration, targetDir, items: plan };
-        closeArchiveEditor();
-        return;
-      }
-      archiveEditChecking = false;
-      await submitMovePlan(plan.map(({ from, to }) => ({ from, to })), targetDir);
-    } catch (error) {
-      if (!archiveEditCheckIsCurrent(session, id)) return;
-      if (normalizeMoveTargetDir() !== targetDir) return;
-      archiveEditError = tr("gui.move.check_failed", "Could not check move targets. Your destination is kept. Try again.")
-        + (isErrorDto(error) ? ` ${tError(error)}` : "");
-    } finally {
-      if (archiveEditSession === session) archiveEditChecking = false;
-    }
-  }
-
-  async function submitMovePlan(rename: Array<{ from: string; to: string }>, targetDir: string) {
-    if (blockSelectionScopedAction()) return;
-    if (moveConflictReview && (currentArchive?.id !== moveConflictReview.archiveId
-      || archiveOpenGeneration !== moveConflictReview.generation || archiveOpenStatus !== "idle")) {
-      moveConflictReview = null;
-      moveConflictReturnFocus = null;
-      showNotice(tr("gui.move.review_changed", "The archive changed. Select the items and check the move targets again."));
-      return;
-    }
-    if (!currentArchive) {
-      showNotice(tr("gui.precondition.open_before_move", "Open an archive before moving entries"));
-      return;
-    }
-    const readOnly = archiveMutationDisabledReason();
-    if (readOnly) {
-      showNotice(readOnly);
-      return;
-    }
-    if (rename.length === 0) {
-      showNotice(tr("gui.move.no_non_conflicting_targets", "No non-conflicting move targets to submit"));
-      return;
-    }
-    const onSuccess = archiveEditSubmissionSuccess();
-    const queued = await submitCurrentArchiveJob(
-      {
-        kind: "update",
-        path: currentArchive.source,
-        expected_archive_id: currentArchive.id,
-        encoding: currentArchive.encoding_override,
-        add: [],
-        delete: [],
-        rename,
-        mkdir: [],
-        excludes: [],
-        content_policy: "keep_all_files",
-        password: null,
-        level: 6,
-      },
-      (rename.length === 1
-        ? tr("gui.move.operation_queued", "1 move operation queued")
-        : tr("gui.move.operations_queued", "{count} move operations queued").replace("{count}", rename.length.toLocaleString())),
-      tr("gui.precondition.open_before_move", "Open an archive before moving entries"),
-      archiveEditSubmissionFailure(),
-    );
-    if (queued) {
-      onSuccess();
-      recordOperation({
-        status: "queued",
-        title: tr("gui.move.queued", "Move entries queued"),
-        detail: tr("gui.move.entries_to_target", "{count} entries to {target}")
-          .replace("{count}", rename.length.toLocaleString())
-          .replace("{target}", targetDir || "/"),
-      });
-    }
-  }
-
-  async function submitMoveReadyOnly() {
-    const review = moveConflictReview;
-    if (!review) return;
-    const ready = review.items
-      .filter((item) => !item.conflict)
-      .map(({ from, to }) => ({ from, to }));
-    await submitMovePlan(ready, review.targetDir);
-  }
-
-  async function submitMoveKeepBoth() {
-    const review = moveConflictReview;
-    if (!review) return;
-    const rename = review.items.map((item) => ({
-      from: item.from,
-      to: item.conflict && item.keepBothTo ? item.keepBothTo : item.to,
-    }));
-    await submitMovePlan(rename, review.targetDir);
-  }
-
-  async function submitNewFolderJob() {
-    if (archiveEditChecking) return;
-    const session = archiveEditSession;
-    const id = currentArchive?.id;
-    if (!await validateArchiveEditContext() || !archiveEditCheckIsCurrent(session, id)) return;
-    const folder = normalizeNewFolderPath();
-    if (!currentArchive) {
-      showNotice(tr("gui.precondition.open_before_new_folder", "Open an archive before creating a folder"));
-      return;
-    }
-    const readOnly = archiveMutationDisabledReason();
-    if (readOnly) {
-      showNotice(readOnly);
-      return;
-    }
-    const problem = archiveEditPathProblem(folder);
-    if (problem) {
-      showArchiveEditError(problem);
-      return;
-    }
-    commitNewFolderName();
-    if (!await validateArchiveEditTarget(folder, () => normalizeNewFolderPath())
-      || !archiveEditCheckIsCurrent(session, id)) return;
-    const onSuccess = archiveEditSubmissionSuccess();
-    const queued = await submitCurrentArchiveJob(
-      {
-        kind: "update",
-        path: currentArchive.source,
-        expected_archive_id: currentArchive.id,
-        encoding: currentArchive.encoding_override,
-        add: [],
-        delete: [],
-        rename: [],
-        mkdir: [folder],
-        excludes: [],
-        content_policy: "keep_all_files",
-        password: null,
-        level: 6,
-      },
-      tr("gui.new_folder.queued_notice", "New folder queued: {folder}").replace("{folder}", folder),
-      tr("gui.precondition.open_before_new_folder", "Open an archive before creating a folder"),
-      archiveEditSubmissionFailure(),
-    );
-    if (queued) {
-      onSuccess();
-      recordOperation({
-        status: "queued",
-        title: tr("gui.new_folder.queued", "New folder queued"),
-        detail: folder,
-      });
-    }
   }
 
   async function openArchiveDirectoryEntry(entryPath: string) {
@@ -12179,62 +9435,47 @@
       return;
     }
     if (blockSelectionScopedAction()) return;
-    previewOriginEntryPath = entryPath;
-    previewOriginVirtualIndex = virtualIndex;
     if (archiveLikePath(entryPath)) {
-      await submitPreviewNestedArchive(entryPath, virtualIndex);
+      await nestedArchiveAction("preview", currentArchive.source, entryPath, virtualIndex);
       return;
     }
+    clearNotice();
     const archivePath = currentArchive.path;
     const archiveSource = currentArchive.source;
+    const origin = { outerSource: archiveSource, outerDisplayPath: archivePath, entryPath, virtualIndex };
     const preparedEntry = entryPreviewForPath(entryPath);
     if (preparedEntry) {
-      previewPhase = "entry";
-      previewTargetName = preparedEntry.display_name;
+      const preparation = previewSession.beginPreparedFileOpen(preparedEntry, origin);
+      if (!preparation) return;
       const opened = await openEntryPreview(preparedEntry);
-      if (entryPreview?.preview_id === preparedEntry.preview_id) {
-        previewPhase = "idle";
-        previewTargetName = "";
-      }
+      previewSession.finishPreparation(preparation);
       if (opened) clearEntryPreviewState();
       return;
     }
-    clearEntryPreviewState();
-    previewOriginEntryPath = entryPath;
-    previewOriginVirtualIndex = virtualIndex;
-    const requestGeneration = ++previewRequestGeneration;
-    previewPhase = "entry";
-    previewTargetName = previewEntryDisplayName(entryPath);
+    const preparation = previewSession.beginPreparation(origin, "entry", previewEntryDisplayName(entryPath));
+    if (!preparation) return;
     recordValidationEvent("frontend.entry.preview_requested", {
       entry_path: entryPath,
     });
     try {
       await waitForPreviewFeedbackFrame();
-      if (requestGeneration !== previewRequestGeneration) return;
-      const preparedPreview = await prepareEntryPreviewSerially(
-        archiveSource,
+      if (!previewSession.isCurrent(preparation)) return;
+      const preparedPreview = await runPreviewWithPassword(
+        preparation,
         archivePath,
         entryPath,
-        requestGeneration,
+        async (passwords, requestId) => previewSampleForEntry(archivePath, entryPath)
+          ?? ipc.previewArchiveEntry(archiveSource, entryPath, passwords.outer, archiveEncodingForJob(), requestId),
+        { serial: true },
       );
       if (!preparedPreview) return;
-      if (requestGeneration !== previewRequestGeneration) {
-        void disposeEntryPreview(preparedPreview.preview_id);
-        return;
-      }
-      entryPreview = preparedPreview;
-      nestedPreview = null;
-      entryPreviewFailure = null;
+      if (!previewSession.acceptFile(preparation, preparedPreview)) return;
       recordValidationEvent("frontend.entry.preview_loaded", {
         entry_path: entryPath,
-        display_name: entryPreview.display_name,
+        display_name: preparedPreview.display_name,
       });
-      showNotice(
-        tr("gui.preview.opening_system", "Opening: {name}")
-          .replace("{name}", entryPreview.display_name),
-      );
-      if (!await openEntryPreview(entryPreview)) return;
-      if (requestGeneration !== previewRequestGeneration) return;
+      if (!await openEntryPreview(preparedPreview)) return;
+      if (!previewSession.isCurrent(preparation)) return;
       recordOperation({
         status: "info",
         title: tr("gui.preview.operation_title", "Archive entry opened"),
@@ -12242,7 +9483,7 @@
       });
       clearEntryPreviewState();
     } catch (error) {
-      if (requestGeneration !== previewRequestGeneration) return;
+      if (!previewSession.isCurrent(preparation)) return;
       const failurePolicy = previewPolicyFor(entryPath, entryType ?? entryTypeForPath(entryPath));
       const message = previewFailureMessage(
         error,
@@ -12250,7 +9491,7 @@
         "gui.preview.failed",
         "Could not open this item",
       );
-      entryPreviewFailure = {
+      previewSession.failPreparation(preparation, {
         entryPath,
         entryType: entryType ?? entryTypeForPath(entryPath),
         displayName: previewEntryDisplayName(entryPath),
@@ -12259,106 +9500,134 @@
         outerDisplayPath: archivePath,
         message,
         retryAction: "preview",
-      };
+      });
       recordValidationEvent("frontend.entry.preview_failed", {
         entry_path: entryPath,
         policy_kind: failurePolicy.kind,
       });
-      showNotice(message);
     } finally {
-      if (requestGeneration === previewRequestGeneration) {
-        previewPhase = "idle";
-        previewTargetName = "";
-      }
+      previewSession.finishPreparation(preparation);
     }
   }
 
-  async function submitPreviewNestedArchive(
-    entryPath: string | null = selectedPreviewPath(),
-    virtualIndex: number | null = null,
+  async function nestedArchiveAction(
+    action: "preview" | "open" | "extract",
+    outerPath: string | null,
+    entryPath: string | null,
+    virtualIndex: number | null = previewOriginVirtualIndex,
   ) {
-    if (!currentArchive) {
-      showNotice(tr("gui.preview.open_archive_first", "Open an archive before previewing entries"));
-      return;
+    if (action === "preview") {
+      if (!currentArchive) {
+        showNotice(tr("gui.preview.open_archive_first", "Open an archive before previewing entries"));
+        return;
+      }
+      if (!entryPath) {
+        showNotice(tr("gui.preview.select_one", "Select one file entry to preview"));
+        return;
+      }
+      if (!archiveLikePath(entryPath)) {
+        showNotice(tr("gui.preview.select_archive", "Select an archive-like entry, such as .zip, .7z, .dmg or .7z.001"));
+        return;
+      }
+      outerPath = currentArchive.source;
     }
-    if (!entryPath) {
-      showNotice(tr("gui.preview.select_one", "Select one file entry to preview"));
-      return;
-    }
-    if (!archiveLikePath(entryPath)) {
-      showNotice(tr("gui.preview.select_archive", "Select an archive-like entry, such as .zip, .7z, .dmg or .7z.001"));
-      return;
-    }
-    clearEntryPreviewState();
-    previewOriginEntryPath = entryPath;
-    previewOriginVirtualIndex = virtualIndex;
-    const requestGeneration = ++previewRequestGeneration;
-    const archiveSource = currentArchive.source;
-    const archiveDisplayPath = currentArchive.path;
-    previewPhase = "nested";
-    previewTargetName = pathBaseName(entryPath);
-    recordValidationEvent("frontend.entry.nested_preview_requested", {
+    if (outerPath === null || entryPath === null) return;
+    if (action === "extract" && (preventCreateSubmissionNavigation("extract")
+      || preventConvertSubmissionNavigation("extract") || focusBlockingTaskIfAny())) return;
+    clearNotice();
+    if (action !== "preview") dismissArchiveAddPreparation();
+    const initialScreen = screen;
+    const initialScreenGeneration = taskReviewRequestGeneration;
+    const prepared = action !== "preview" ? previewSession.takeNested(outerPath, entryPath) : null;
+    const archiveDisplayPath = currentArchive?.path ?? outerPath;
+    const encoding = action !== "preview" && currentArchive?.source === outerPath ? archiveEncodingForJob() : null;
+    const preparation = previewSession.beginPreparation({
+      outerSource: outerPath, outerDisplayPath: archiveDisplayPath, entryPath, virtualIndex,
+    }, "nested", pathBaseName(entryPath));
+    if (!preparation) return;
+    const isCurrent = () => previewSession.isCurrent(preparation)
+      && (action !== "extract" || (screen === initialScreen
+        && (!prepared || initialScreenGeneration === taskReviewRequestGeneration)));
+    if (action === "preview") recordValidationEvent("frontend.entry.nested_preview_requested", {
       entry_path: entryPath,
     });
     try {
       await waitForPreviewFeedbackFrame();
-      if (requestGeneration !== previewRequestGeneration) return;
-      const preparedPreview = await runPreviewWithPassword(
-        requestGeneration,
-        archiveDisplayPath,
-        entryPath,
-        async (passwords, requestId) => nestedPasswordPreviewSample(params, archiveSource, entryPath, passwords)
-          ?? ipc.previewNestedArchive(archiveSource, entryPath, passwords, archiveEncodingForJob(), requestId),
-      );
-      if (!preparedPreview) return;
-      if (requestGeneration !== previewRequestGeneration) {
-        void ipc.closeArchive(preparedPreview.archive.id).catch(() => undefined);
+      if (!isCurrent()) {
+        if (prepared) void ipc.closeArchive(prepared.id).catch(() => undefined);
         return;
       }
-      nestedPreview = preparedPreview;
-      entryPreview = null;
-      entryPreviewFailure = null;
-      recordValidationEvent("frontend.entry.nested_preview_loaded", {
-        entry_path: entryPath,
-        entry_count: nestedPreview.archive.entry_count,
-        format: nestedPreview.archive.format,
-      });
-      showNotice(
-        tr("gui.preview.nested_loaded", "Nested preview loaded · {count} entries").replace(
-          "{count}",
-          nestedPreview.archive.entry_count.toLocaleString(),
-        ),
-      );
-      recordOperation({
-        status: "info",
-        title: tr("gui.preview.nested_operation_title", "Nested archive previewed"),
-        detail: `${pathBaseName(entryPath)} · ${nestedPreview.archive.format.toUpperCase()}`,
-      });
+      const result = action === "preview" ? await runPreviewWithPassword(
+          preparation,
+          archiveDisplayPath,
+          entryPath,
+          async (passwords, requestId) => nestedPasswordPreviewSample(params, outerPath, entryPath, passwords)
+            ?? ipc.previewNestedArchive(outerPath, entryPath, passwords, archiveEncodingForJob(), requestId),
+        ) : prepared ?? await runPreviewWithPassword(
+          preparation,
+          currentArchive?.path ?? outerPath,
+          entryPath,
+          (passwords, requestId) => ipc.openNestedArchive(outerPath, entryPath, passwords, encoding, requestId),
+        );
+      if (!result) return;
+      const info = "archive" in result ? result.archive : result;
+      if ("archive" in result) {
+        if (!previewSession.acceptNested(preparation, result)) return;
+        recordValidationEvent("frontend.entry.nested_preview_loaded", {
+          entry_path: entryPath,
+          entry_count: info.entry_count,
+          format: info.format,
+        });
+        recordOperation({
+          status: "info",
+          title: tr("gui.preview.nested_operation_title", "Nested archive previewed"),
+          detail: `${pathBaseName(entryPath)} · ${info.format.toUpperCase()}`,
+        });
+      } else {
+        if (!isCurrent()) {
+          void ipc.closeArchive(info.id).catch(() => undefined);
+          return;
+        }
+        if (!await adoptOpenedArchive(info, isCurrent)) return;
+        dismissRecoveryPreparation();
+        recoverySourceMode = "current";
+        recoverySourceOverride = null;
+        recoveryPar2Override = null;
+        clearEntryPreviewState();
+        if (action === "extract") {
+          openExtractWorkspace("all");
+          focusExtractReview();
+        }
+        showNotice(tr("gui.preview.opened_nested_archive", "Opened nested archive · {name}").replace("{name}", info.name));
+        recordOperation({
+          status: "done",
+          title: tr("gui.preview.nested_opened_operation_title", "Nested archive opened"),
+          detail: `${pathBaseName(entryPath)} -> ${info.name}`,
+        });
+      }
     } catch (error) {
-      if (requestGeneration !== previewRequestGeneration) return;
+      if (!isCurrent()) return;
       const failurePolicy = previewPolicyFor(entryPath, entryTypeForPath(entryPath));
       const message = previewFailureMessage(
         error,
         true,
-        "gui.preview.nested_failed",
-        "Could not preview this nested archive",
+        action === "preview" ? "gui.preview.nested_failed" : "gui.preview.open_nested_requires_desktop_service",
+        action === "preview" ? "Could not preview this nested archive"
+          : "Could not open this inner archive. Preview it or extract it instead.",
       );
-      entryPreviewFailure = {
+      previewSession.failPreparation(preparation, {
         entryPath,
         entryType: entryTypeForPath(entryPath),
         displayName: pathBaseName(entryPath),
         policyKind: failurePolicy.kind,
-        outerSource: archiveSource,
-        outerDisplayPath: archiveDisplayPath,
+        outerSource: outerPath,
+        outerDisplayPath: action === "preview" ? archiveDisplayPath
+          : currentArchive?.source === outerPath ? currentArchive.path : outerPath,
         message,
-        retryAction: "preview",
-      };
-      showNotice(message);
+        retryAction: action,
+      });
     } finally {
-      if (requestGeneration === previewRequestGeneration) {
-        previewPhase = "idle";
-        previewTargetName = "";
-      }
+      previewSession.finishPreparation(preparation);
     }
   }
 
@@ -12368,18 +9637,9 @@
       showNotice(tr("gui.preview.preview_first", "Open a file entry first"));
       return;
     }
-    const responseIdentity: PreviewResponseIdentity = {
-      previewGeneration: previewRequestGeneration,
-      actionGeneration: ++previewActionGeneration,
-      previewId: preview.preview_id,
-      archiveSource: currentArchive?.source ?? null,
-    };
-    const responseIsCurrent = () => previewResponseIsCurrent(responseIdentity, {
-      previewGeneration: previewRequestGeneration,
-      actionGeneration: previewActionGeneration,
-      previewId: entryPreview?.preview_id ?? null,
-      archiveSource: currentArchive?.source ?? null,
-    });
+    const action = previewSession.beginFileAction(preview, currentArchive?.source ?? null);
+    if (!action) return;
+    const responseIsCurrent = () => previewSession.fileActionIsCurrent(action, currentArchive?.source ?? null);
     try {
       await ipc.revealPreviewSession(preview.preview_id);
       if (!responseIsCurrent()) return;
@@ -12403,19 +9663,12 @@
       showNotice(tr("gui.preview.preview_first", "Open a file entry first"));
       return false;
     }
-    const responseIdentity: PreviewResponseIdentity = {
-      previewGeneration: previewRequestGeneration,
-      actionGeneration: ++previewActionGeneration,
-      previewId: preview.preview_id,
-      archiveSource: currentArchive?.source ?? null,
-    };
+    // Preparation already cleared its previous feedback before waiting for the file.
+    if (previewPhase === "idle") clearNotice();
+    const action = previewSession.beginFileAction(preview, currentArchive?.source ?? null);
+    if (!action) return false;
     const outerDisplayPath = currentArchive?.path ?? preview.outer_path;
-    const responseIsCurrent = () => previewResponseIsCurrent(responseIdentity, {
-      previewGeneration: previewRequestGeneration,
-      actionGeneration: previewActionGeneration,
-      previewId: entryPreview?.preview_id ?? null,
-      archiveSource: currentArchive?.source ?? null,
-    });
+    const responseIsCurrent = () => previewSession.fileActionIsCurrent(action, currentArchive?.source ?? null);
     if (previewSystemOpenRequiresConfirmation(preview.entry_path)) {
       let confirmed: boolean;
       try {
@@ -12455,7 +9708,7 @@
     try {
       await ipc.openPreviewSession(preview.preview_id);
       if (!responseIsCurrent()) return false;
-      entryPreviewFailure = null;
+      previewSession.completeFileAction(action, currentArchive?.source ?? null);
       showNotice(tr("gui.preview.opened_system", "Opened: {name}").replace("{name}", preview.display_name));
       return true;
     } catch (error) {
@@ -12467,7 +9720,7 @@
         "Could not open this item. Try again or extract it instead.",
       ).replace("{name}", preview.display_name);
       const entryType = entryTypeForPath(preview.entry_path);
-      entryPreviewFailure = {
+      previewSession.failFileAction(action, currentArchive?.source ?? null, {
         entryPath: preview.entry_path,
         entryType,
         displayName: preview.display_name,
@@ -12476,8 +9729,7 @@
         outerDisplayPath,
         message,
         retryAction: "preview",
-      };
-      showNotice(message);
+      });
       return false;
     }
   }
@@ -12517,101 +9769,13 @@
     list.querySelector<HTMLElement>(selector)?.focus({ preventScroll: true });
   }
 
-  async function openNestedArchiveEntry(
-    outerPath: string,
-    entryPath: string,
-    virtualIndex: number | null = previewOriginVirtualIndex,
-    intent: "open" | "extract" = "open",
-  ) {
-    if (intent === "extract" && (preventCreateSubmissionNavigation("extract")
-      || preventConvertSubmissionNavigation("extract") || focusBlockingTaskIfAny())) return;
-    dismissArchiveAddPreparation();
-    const initialScreen = screen;
-    const initialScreenGeneration = taskReviewRequestGeneration;
-    const prepared = nestedPreview?.outer_path === outerPath && nestedPreview.entry_path === entryPath
-      ? nestedPreview.archive : null;
-    if (prepared) nestedPreview = null;
-    clearEntryPreviewState();
-    previewOriginEntryPath = entryPath;
-    previewOriginVirtualIndex = virtualIndex;
-    const requestGeneration = ++previewRequestGeneration;
-    const isCurrent = () => requestGeneration === previewRequestGeneration
-      && (intent !== "extract" || (screen === initialScreen
-        && (!prepared || initialScreenGeneration === taskReviewRequestGeneration)));
-    const encoding = currentArchive?.source === outerPath ? archiveEncodingForJob() : null;
-    previewPhase = "nested";
-    previewTargetName = pathBaseName(entryPath);
-    try {
-      await waitForPreviewFeedbackFrame();
-      if (!isCurrent()) {
-        if (prepared) void ipc.closeArchive(prepared.id).catch(() => undefined);
-        return;
-      }
-      const info = prepared ?? await runPreviewWithPassword(
-        requestGeneration,
-        currentArchive?.path ?? outerPath,
-        entryPath,
-        (passwords, requestId) => ipc.openNestedArchive(outerPath, entryPath, passwords, encoding, requestId),
-      );
-      if (!info) return;
-      if (!isCurrent()) {
-        void ipc.closeArchive(info.id).catch(() => undefined);
-        return;
-      }
-      if (!await adoptOpenedArchive(info, isCurrent)) return;
-      dismissRecoveryPreparation();
-      recoverySourceMode = "current";
-      recoverySourceOverride = null;
-      recoveryPar2Override = null;
-      clearEntryPreviewState();
-      if (intent === "extract") {
-        openExtractWorkspace("all");
-        focusExtractReview();
-      }
-      showNotice(tr("gui.preview.opened_nested_archive", "Opened nested archive · {name}").replace("{name}", info.name));
-      recordOperation({
-        status: "done",
-        title: tr("gui.preview.nested_opened_operation_title", "Nested archive opened"),
-        detail: `${pathBaseName(entryPath)} -> ${info.name}`,
-      });
-    } catch (error) {
-      if (!isCurrent()) return;
-      const failurePolicy = previewPolicyFor(entryPath, entryTypeForPath(entryPath));
-      const outerDisplayPath = currentArchive?.source === outerPath
-        ? currentArchive.path
-        : outerPath;
-      const message = previewFailureMessage(
-        error,
-        true,
-        "gui.preview.open_nested_requires_desktop_service",
-        "Could not open this inner archive. Preview it or extract it instead.",
-      );
-      entryPreviewFailure = {
-        entryPath,
-        entryType: entryTypeForPath(entryPath),
-        displayName: pathBaseName(entryPath),
-        policyKind: failurePolicy.kind,
-        outerSource: outerPath,
-        outerDisplayPath,
-        message,
-        retryAction: intent,
-      };
-      showNotice(message);
-    } finally {
-      if (requestGeneration === previewRequestGeneration) {
-        previewPhase = "idle";
-        previewTargetName = "";
-      }
-    }
-  }
-
   async function openNestedPreviewArchive() {
     const preview = nestedPreview;
     if (!preview) {
       showNotice(tr("gui.preview.preview_nested_before_open", "Preview a nested archive before opening it"));
       return;
     }
-    await openNestedArchiveEntry(preview.outer_path, preview.entry_path);
+    await nestedArchiveAction("open", preview.outer_path, preview.entry_path);
   }
 
   function nestedExtractDraftLocked(): boolean {
@@ -12654,7 +9818,7 @@
   ): boolean {
     return restoreNestedExtractDraft(reviewNestedExtract({
       kind: "extract_nested", outer_path: outerSource, entry_path: entryPath,
-      dest: normalizedDefaultExtractDir(appliedDefaultExtractDir) ?? pathDir(outerDisplayPath),
+      dest: normalizedDefaultExtractDir(settingsSession.appliedGeneral.defaultExtractDir) ?? pathDir(outerDisplayPath),
       overwrite: "ask", symlinks: "preserve", smart: true,
       encoding: currentArchive?.source === outerSource ? archiveEncodingForJob() : null,
       password: null, best_effort: false,
@@ -12754,7 +9918,7 @@
       showNotice(tr("gui.preview.preview_nested_before_extract", "Preview a nested archive before extracting it"));
       return;
     }
-    await openNestedArchiveEntry(preview.outer_path, preview.entry_path, previewOriginVirtualIndex, "extract");
+    await nestedArchiveAction("extract", preview.outer_path, preview.entry_path, previewOriginVirtualIndex);
   }
 
   async function repairFilenameEncoding(encoding = "gbk") {
@@ -12772,8 +9936,7 @@
     if (request.generation !== archiveOpenGeneration || result.status === "superseded" || !result.isCurrent()) return;
     const ok = result.status === "applied";
     if (ok) {
-      markExtractPresetDraftTouched();
-      extractPresetEncodingLabel = null;
+      extractOptions.encodingReopened();
     }
     showNotice(
       ok
@@ -12783,52 +9946,19 @@
   }
 
   async function submitCreateJob(sourceKind: "files" | "folder") {
-    if (screen !== "create" || createPreflightClosed) return;
+    if (screen !== "create" || preflightEventsClosed) return;
     if (focusBlockingTaskIfAny()) return;
-    if (createSourcesLocked()) {
+    if (createPreflight.sourcesLocked()) {
       showNotice(createSourcesLockedReason());
       return;
     }
-    const request: CreateSourcePicker = { kind: sourceKind, mode, sources: createSources };
-    createSourcePicker = request;
-    const isCurrent = () => isCurrentCreateSourcePicker(request);
-    showNotice(sourceKind === "files" ? tr("gui.create.opening_file_picker", "Opening file picker...") : tr("gui.create.opening_folder_picker", "Opening folder picker..."));
-    try {
-      const { open } = await getDialogModule();
-      if (!isCurrent()) return;
-      const selected = await openNativeDialog(`create.${sourceKind}`, open, {
-        title: sourceKind === "files" ? tr("gui.create.choose_files_to_archive", "Choose files to archive") : tr("gui.create.choose_folder_to_archive", "Choose folder to archive"),
-        multiple: true,
-        directory: sourceKind === "folder",
-      });
-      if (!isCurrent()) return;
-      const inputs = Array.isArray(selected) ? selected : selected ? [selected] : [];
-      if (inputs.length === 0) {
-        showNotice(
-          tr(
-            "gui.create.sources.picker_cancelled",
-            "Source selection cancelled · the current list was kept",
-          ),
-        );
-        return;
-      }
-      createSourcePicker = null;
-      showCreateSourcesAdded(
-        appendCreateSources(inputs, sourceKind === "files" ? "file" : "folder"),
-      );
-    } catch {
-      if (!isCurrent()) return;
-      showNotice(
-        tr("gui.create.requires_desktop_dialog", "Create archive requires the desktop file dialog"),
-      );
-    } finally {
-      if (createSourcePicker === request) createSourcePicker = null;
-    }
+    syncCreatePreflightContext();
+    await createPreflight.chooseSources(sourceKind);
   }
 
   async function submitCreateInputs(inputs: string[], source: "dialog" | "drop", capturedDraft?: CreateRunDraft) {
-    if (screen !== "create" || createPreflightClosed) return;
-    if (createSourcePicker) {
+    if (screen !== "create" || preflightEventsClosed) return;
+    if (createPreflight.state.picker) {
       showNotice(createSourcesLockedReason());
       return;
     }
@@ -12836,403 +9966,102 @@
       showNotice(createConfigurationPendingMessage());
       return;
     }
-    if (createPreflightPhase === "submitting" || (!capturedDraft && createPreflightBusy())) {
+    if (!createPreflight.canLeave() || (!capturedDraft && createPreflight.busy())) {
       showNotice(tr("gui.create.preflight_already_running", "Create preflight already running"));
       return;
     }
     const draft = capturedDraft ?? captureCreateRunDraft();
     if (!draft) {
-      createPreflightPhase = "idle";
+      createPreflight.invalidatePlan();
       return;
     }
-    const normalizedInputs = uniqueNonEmptyPaths(inputs);
-    if (normalizedInputs.length === 0) {
-      finishCreatePreflightWithIssue("source", tr("gui.create.no_source_items", "No source items selected"));
-      return;
-    }
-    if (focusBlockingTaskIfAny()) {
-      createPreflightPhase = "idle";
-      return;
-    }
-    beginCreatePreflight(draft, "choosingDest");
-    const request: CreatePreparationOwner = { mode, sources: createSources };
-    createOutputPreparation = request;
-    const isCurrent = () => isCurrentCreateOutputPreparation(request);
-    const artifactLabel = draft.sfxEnabled ? createSfxOutputLabel() : createFormats[draft.format].label;
-    try {
-      const base = normalizedInputs.length === 1
-        ? archiveBaseOrDefault(archiveStemName(desktopBasename(normalizedInputs[0], platformKind())))
-        : "archive";
-      let destination: ResolvedCreateDestination | null;
-      try {
-        destination = await resolveCreateDestination(normalizedInputs, base, draft, source, isCurrent);
-      } catch (error) {
-        if (!isCurrent()) return;
-        if (createDestinationInspectionCancelled(error)) {
-          finishCreatePreflightWithIssue(
-            "destination",
-            tr(
-              "gui.create.destination_check_cancelled",
-              "Output check cancelled · no archive was created",
-            ),
-            "cancelled",
-          );
-          await focusCreatePrimaryAction(isCurrent);
-          return;
-        }
-        finishCreatePreflightWithIssue(
-          "destination",
-          error instanceof CreateDestinationInspectionError
-            ? error.detail
-              ? tError(error.detail)
-              : tr("gui.create.destination_recheck_failed", "Could not check the destination. Review it and try again.")
-            : tr("gui.create.save_dialog_requires_desktop_dialog", "Save dialog requires the desktop file dialog"),
-        );
-        return;
-      }
-      if (!isCurrent()) return;
-      if (!destination) {
-        finishCreatePreflightWithIssue(
-          "destination",
-          tr("gui.create.destination_selection_cancelled", "Destination selection cancelled · no archive was created"),
-          "cancelled",
-        );
-        return;
-      }
-      const { path: dest, replaceExisting, replacementGuard } = destination;
-      lastCreateDest = dest;
-      const spec: JobSpec = {
-        kind: "compress",
-        inputs: normalizedInputs,
-        dest,
-        level: draft.level,
-        password: draft.password,
-        encrypt_names: draft.encryptNames,
-        split_size: draft.splitSize,
-        split_mode: draft.splitMode,
-        excludes: [...draft.excludes],
-        content_policy: draft.contentPolicy,
-        sqz_inner_format: draft.sqzInnerFormat,
-        sfx_target: draft.sfxTarget,
-        replace_existing: replaceExisting,
-        replacement_guard: replacementGuard,
-        completion: draft.completion,
-        post_success: draft.postSuccess,
-        test_after_create: draft.testAfterCreate,
-      };
-
-      createPreflightPhase = "measuring";
-      let preflightRequestId: string | null = null;
-      let plan: CreatePlanDto;
-      try {
-        await ensureCreatePreflightListener();
-        if (!isCurrent()) return;
-        preflightRequestId = nextPreflightRequestId();
-        createPreflightRequestId = preflightRequestId;
-        createPreflightRequestKind = "source";
-        createPreflightProcessedBytes = 0;
-        plan = await ipc.planCreate(spec, preflightRequestId);
-        if (!isCurrent()) return;
-      } catch {
-        if (!isCurrent()) return;
-        finishCreatePreflightWithIssue(
-          "source",
-          tr(
-            "gui.create.check_excludes_or_permissions",
-            "Make sure the output is not selected as a source, then check exclude rules and permissions.",
-          ),
-        );
-        return;
-      } finally {
-        if (preflightRequestId !== null && createPreflightRequestId === preflightRequestId) {
-          createPreflightRequestId = null;
-          createPreflightRequestKind = null;
-        }
-      }
-      if (plan.entries === 0) {
-        lastCreatePlan = plan;
-        lastDiskSpace = null;
-        lastTempDiskSpace = null;
-        lastSystemTempDiskSpace = null;
-        finishCreatePreflightWithIssue("source", tr("gui.create.no_entries_after_excludes", "No entries after excludes"));
-        return;
-      }
-      lastCreatePlan = plan;
-      createPreflightScanned = plan.entries + plan.deduplicated_entries;
-      createPreflightCurrent = "";
-      lastDiskSpace = null;
-      lastTempDiskSpace = null;
-      lastSystemTempDiskSpace = null;
-
-      let tempDisk: DiskSpaceDto;
-      try {
-        createPreflightPhase = "checkingTemp";
-        tempDisk = await ipc.checkDiskSpace(desktopDirname(dest, platformKind()), plan.workspace_budget_bytes);
-        if (!isCurrent()) return;
-      } catch {
-        if (!isCurrent()) return;
-        finishCreatePreflightWithIssue(
-          "temp",
-          tr("gui.create.temp_preflight_requires_desktop_service", "Workspace check requires the desktop service"),
-        );
-        return;
-      }
-      lastTempDiskSpace = tempDisk;
-      if (!tempDisk.ok) {
-        finishCreatePreflightWithIssue(
-          "temp",
-          tr("gui.create.not_enough_temp_space", "Not enough destination space for the creation workspace · {available} available")
-            .replace("{available}", formatBytes(tempDisk.available_bytes)),
-        );
-        return;
-      }
-      if (plan.system_temp_budget_bytes > 0) {
-        let systemTempDisk: DiskSpaceDto;
-        try {
-          const systemTempDir = await ipc.tempDir();
-          if (!isCurrent()) return;
-          systemTempDisk = await ipc.checkDiskSpace(systemTempDir, plan.system_temp_budget_bytes);
-          if (!isCurrent()) return;
-        } catch {
-          if (!isCurrent()) return;
-          finishCreatePreflightWithIssue(
-            "temp",
-            tr("gui.create.temp_preflight_requires_desktop_service", "Workspace check requires the desktop service"),
-          );
-          return;
-        }
-        lastSystemTempDiskSpace = systemTempDisk;
-        if (!systemTempDisk.ok) {
-          finishCreatePreflightWithIssue(
-            "temp",
-            tr("gui.create.not_enough_system_temp_space", "Not enough space in the system temporary directory · {available} available")
-              .replace("{available}", formatBytes(systemTempDisk.available_bytes)),
-          );
-          return;
-        }
-      }
-
-      let disk: DiskSpaceDto;
-      try {
-        createPreflightPhase = "checkingDest";
-        disk = await ipc.checkDiskSpace(desktopDirname(dest, platformKind()), plan.final_output_budget_bytes);
-        if (!isCurrent()) return;
-      } catch {
-        if (!isCurrent()) return;
-        finishCreatePreflightWithIssue(
-          "destination",
-          tr("gui.create.destination_preflight_requires_desktop_service", "Destination disk preflight requires the desktop service"),
-        );
-        return;
-      }
-      lastDiskSpace = disk;
-      if (!disk.ok) {
-        finishCreatePreflightWithIssue(
-          "destination",
-          tr("gui.create.not_enough_destination_space", "Not enough free space in destination · {available} available")
-            .replace("{available}", formatBytes(disk.available_bytes)),
-        );
-        return;
-      }
-
-      pendingCreateSubmission = {
-        spec,
-        source,
-        format: draft.format,
-        profile: draft.profile,
-        creatingSfx: draft.sfxEnabled,
-        artifactLabel,
-        splitSize: draft.splitSize,
-        confirmLateConflict: destination.confirmLateConflict,
-        restoreCredentialPrompt: draft.restoreCredentialPrompt,
-        restoreEncryptNames: draft.restoreEncryptNames,
-      };
-      createPreflightIssue = "";
-      createPreflightIssueStage = null;
-      createPreflightPhase = "reviewing";
-      showNotice(
-        plan.deduplicated_entries > 0
-          ? tr(
-            "gui.create.review_ready_overlap_notice",
-            "Checks complete · {count} repeated entries merged · review before creating",
-          ).replace("{count}", plan.deduplicated_entries.toLocaleString())
-          : tr("gui.create.review_ready_notice", "Checks complete · review before creating"),
-      );
-      await tick();
-      if (!isCurrent()) return;
-      document.querySelector<HTMLElement>(".create-plan-review")?.focus({ preventScroll: false });
-    } finally {
-      if (createOutputPreparation === request) {
-        if (!isCurrent()) dismissCreatePreparation();
-        else createOutputPreparation = null;
-      }
-    }
+    if (focusBlockingTaskIfAny()) return;
+    createOptions.touch();
+    createPrimaryFocusPending = null;
+    syncCreatePreflightContext();
+    await createPreflight.start(inputs, source, draft);
   }
 
   function createPlanConfirmLabel(): string {
-    if (createPreflightPhase === "submitting") {
+    if (createPreflight.state.phase === "submitting") {
       return tr("gui.create.review.submitting", "Adding to queue");
     }
-    if (createPreflightIssueStage === "submit" || createPreflightIssueStage === "destination") {
+    if (createPreflight.state.issueStage === "submit" || createPreflight.state.issueStage === "destination") {
       return tr("gui.create.review.retry", "Try creating again");
     }
     return tr("gui.create.review.confirm", "Create now");
   }
 
-  function cancelCreatePlanReview() {
-    if (!pendingCreateSubmission || createPreflightBusy()) return;
-    discardPendingCreatePlan(true);
-    createOptionsValidationAttempted = false;
-    showNotice(tr("gui.create.review.cancelled", "Create plan cancelled · no task was added"));
+  function cancelCreatePlanReview(): void {
+    if (!createPreflight.state.pending || createPreflight.busy()) return;
+    createOptions.resetValidation();
+    createPreflight.cancelReview();
   }
 
-  async function refreshConfirmedCreateDestination(
-    spec: JobSpec,
-    confirmLateConflict: boolean,
-  ): Promise<JobSpec | null> {
-    if (
-      spec.kind !== "compress"
-      || (!confirmLateConflict && (spec.replace_existing !== true || !spec.replacement_guard))
-    ) {
-      return spec;
-    }
-    const inspection = await inspectCreateDestinationForCreate(
-      spec.dest,
-      spec.split_size !== null,
-      spec.sfx_target ?? null,
-    );
-    if (!inspection.conflict) {
-      return applyCreateDestinationAuthorization(spec, null);
-    }
-    if (inspection.guard === null) {
-      throw new Error("create destination inspection did not return a replacement guard");
-    }
-    if (
-      spec.replace_existing === true
-      && inspection.guard === spec.replacement_guard
-    ) return spec;
-
-    const { confirm } = await getDialogModule();
-    const replaceCurrent = await confirm(
-      tr(
-        "gui.create.replace_changed.body",
-        "The output at {path} changed after your earlier confirmation. Replace the current output with the new archive?",
-      ).replace("{path}", spec.dest),
-      {
-        title: tr("gui.create.replace_changed.title", "Destination changed · replace current output?"),
-        kind: "warning",
-        okLabel: tr("gui.create.replace_changed.action", "Replace current output"),
-        cancelLabel: tr("gui.create.replace_changed.cancel", "Keep current output"),
-      },
-    );
-    if (!replaceCurrent) return null;
-    return applyCreateDestinationAuthorization(spec, inspection.guard);
+  async function confirmCreatePlan(): Promise<void> {
+    if (createPreflight.busy()) return;
+    if (createPreflight.state.pending && createPreflight.state.plan && focusBlockingTaskIfAny()) return;
+    await createPreflight.confirm();
   }
 
-  async function confirmCreatePlan() {
-    if (createPreflightBusy()) return;
-    const pending = pendingCreateSubmission;
-    const plan = lastCreatePlan;
-    if (!pending || !plan) {
-      showNotice(tr("gui.create.review.expired", "This create plan is no longer current. Choose the sources again."));
-      invalidateCreatePreflightResult();
-      return;
-    }
-    if (focusBlockingTaskIfAny()) return;
-    createPreflightIssue = "";
-    createPreflightIssueStage = null;
-    createPreflightPhase = "submitting";
-    if (!taskWindowMode) {
-      taskCenterReturnFocus = document.querySelector<HTMLElement>(".create-plan-review")
-        ?? taskCenterReturnFocus;
-    }
-    let submissionSpec: JobSpec;
-    try {
-      const refreshed = await refreshConfirmedCreateDestination(
-        pending.spec,
-        pending.confirmLateConflict,
-      );
-      if (!refreshed) {
-        createPreflightPhase = "reviewing";
-        showNotice(tr("gui.create.replace_changed.kept", "Current output kept · nothing was added to the queue"));
+  async function applyCreatePreflightEffect(effect: CreatePreflightEffect, isCurrent: () => boolean): Promise<void> {
+    if (!isCurrent()) return;
+    switch (effect.kind) {
+      case "notice":
+        showNotice(effect.message);
         return;
-      }
-      submissionSpec = refreshed;
-      if (refreshed !== pending.spec) {
-        pendingCreateSubmission = { ...pending, spec: refreshed };
-      }
-    } catch (error) {
-      if (createDestinationInspectionCancelled(error)) {
-        createPreflightIssueStage = "destination";
-        createPreflightIssue = tr(
-          "gui.create.destination_recheck_cancelled",
-          "Output recheck cancelled · the plan was not submitted",
-        );
-        createPreflightCurrent = "";
-        createPreflightRequestId = null;
-        createPreflightRequestKind = null;
-        createPreflightProcessedBytes = 0;
-        createPreflightCancelPending = false;
-        createPreflightPhase = "reviewing";
-        showNotice(createPreflightIssue);
-        void tick().then(() => {
+      case "sourcesPicked":
+        showCreateSourcesAdded(appendCreateSources(effect.paths, effect.sourceKind));
+        return;
+      case "resetCredentials":
+        resetCreateCredentialsAfterPlan(effect.intent);
+        return;
+      case "prepareSubmit":
+        if (!taskWindowMode) {
+          taskCenterReturnFocus = document.querySelector<HTMLElement>(".create-plan-review")
+            ?? taskCenterReturnFocus;
+        }
+        return;
+      case "focus":
+        if (effect.target === "primary") {
+          await focusCreatePrimaryAction(isCurrent);
+        } else {
+          await tick();
+          if (!isCurrent() || screen !== "create") return;
           document.querySelector<HTMLElement>(".create-plan-review")?.focus({ preventScroll: false });
+        }
+        return;
+      case "queued": {
+        const { pending, plan } = effect;
+        const shouldRestorePrimaryFocus = !taskWindowMode
+          && !taskCenterOpen
+          && document.activeElement instanceof HTMLElement
+          && document.activeElement.closest(".create-plan-review") !== null;
+        clearCreateSources();
+        resetCreateCredentialsAfterPlan(pending);
+        createOptions.resetValidation();
+        showNotice(
+          (pending.creatingSfx
+            ? tr("gui.create.sfx_queued_notice", "Self-extractor added to queue · {size} input")
+            : tr("gui.create.queued_notice", "Create archive added to queue · {size} input"))
+            .replace("{size}", formatBytes(plan.total_bytes)),
+        );
+        recordOperation({
+          status: "queued",
+          title: pending.creatingSfx
+            ? tr("gui.create.sfx_queued", "Self-extractor queued")
+            : pending.source === "drop"
+              ? tr("gui.create.dropped_items_queued", "Dropped items queued")
+              : tr("gui.create.queued", "Create archive queued"),
+          detail: tr("gui.create.operation_detail", "{name} · {profile} · {size} input")
+            .replace("{name}", pathBaseName(plan.primary_output))
+            .replace("{profile}", createProfileLabel(pending.profile))
+            .replace("{size}", formatBytes(plan.total_bytes)),
         });
-        return;
+        if (shouldRestorePrimaryFocus) {
+          await focusCreatePrimaryAction(isCurrent);
+        }
       }
-      finishCreatePreflightWithIssue(
-        "destination",
-        error instanceof CreateDestinationInspectionError && error.detail
-          ? tError(error.detail)
-          : tr("gui.create.destination_recheck_failed", "Could not recheck the destination. Review it and try again."),
-      );
-      return;
-    }
-    try {
-      await submitJob(submissionSpec);
-      clearCreateSources();
-      resetCreateCredentialsAfterPlan(pending);
-      createOptionsValidationAttempted = false;
-    } catch (error) {
-      if (isJobSubmitBlocked(error)) {
-        createPreflightIssueStage = "submit";
-        createPreflightIssue = jobSubmitBlockedMessage(error);
-        createPreflightPhase = "blocked";
-        return;
-      }
-      finishCreatePreflightWithIssue(
-        "submit",
-        tr("gui.create.submission_requires_desktop_service", "Create archive submission requires the desktop service"),
-      );
-      return;
-    }
-    const shouldRestorePrimaryFocus = !taskWindowMode
-      && !taskCenterOpen
-      && document.activeElement instanceof HTMLElement
-      && document.activeElement.closest(".create-plan-review") !== null;
-    pendingCreateSubmission = null;
-    createPreflightPhase = "ready";
-    showNotice(
-      (pending.creatingSfx
-        ? tr("gui.create.sfx_queued_notice", "Self-extractor added to queue · {size} input")
-        : tr("gui.create.queued_notice", "Create archive added to queue · {size} input"))
-        .replace("{size}", formatBytes(plan.total_bytes)),
-    );
-    recordOperation({
-      status: "queued",
-      title: pending.creatingSfx
-        ? tr("gui.create.sfx_queued", "Self-extractor queued")
-        : pending.source === "drop"
-          ? tr("gui.create.dropped_items_queued", "Dropped items queued")
-          : tr("gui.create.queued", "Create archive queued"),
-      detail: tr("gui.create.operation_detail", "{name} · {profile} · {size} input")
-        .replace("{name}", pathBaseName(plan.primary_output))
-        .replace("{profile}", createProfileLabel(pending.profile))
-        .replace("{size}", formatBytes(plan.total_bytes)),
-    });
-    if (shouldRestorePrimaryFocus) {
-      await tick();
-      createPrimaryAction()?.focus();
     }
   }
 
@@ -13425,7 +10254,7 @@
   }
 
   function archiveEditorVisible(): boolean {
-    return screen === "browse" && archiveEditKind !== null && !archivePasswordPrompt && !previewPasswordPrompt;
+    return screen === "browse" && archiveEdit.kind !== null && !archivePasswordPrompt && !previewPasswordPrompt;
   }
 
   function blockingModalVisible(): boolean {
@@ -13482,25 +10311,32 @@
     return isErrorDto(error) ? tError(error) : null;
   }
 
-  function taskDialogSurface(task: TaskDialogModel): TaskProgressDialogSurfaceProps {
+  function taskProgressDialogProps(
+    task: TaskDialogModel,
+    presentation: "panel" | "dialog" | "window",
+  ): TaskProgressDialogSurfaceProps {
     const passwordPrompt = jobPasswordPrompt?.id === task.id ? jobPasswordPrompt : null;
     const conflictPrompt = jobConflictPrompt?.id === task.id ? jobConflictPrompt : null;
+    const rootClass = presentation === "panel" ? "task-center-detail"
+      : presentation === "window" ? "task-window-surface" : "task-modal-overlay";
     return {
       task,
-      presentation: taskWindowMode ? "window" : "dialog",
-      rootClass: `${taskWindowMode ? "task-window-surface" : "task-modal-overlay"} design-root platform-${activePlatform} palette-${activePalette} theme-${activeTheme} density-${activeDensityChoice}`,
+      presentation,
+      rootClass: `${rootClass} design-root platform-${activePlatform} palette-${settingsSession.colors.palette} theme-${activeTheme} density-${activeDensityChoice}`,
       rootVariables: customPaletteVariables(),
       copyFeedback: taskChecksumCopyFeedback(task),
       copyFeedbackTone: taskChecksumCopyFeedbackTone(task),
       copyPending: checksumCopyPending("task", task.id),
-      passwordQuestion: taskPasswordQuestion(task),
-      passwordValue: jobPasswordValue,
-      passwordError: jobPasswordSubmissionError,
-      conflictQuestion: taskConflictQuestion(task),
-      conflictApplyAll,
+      ...(presentation === "panel" ? { rootId: "squallz-task-center" } : {
+        passwordQuestion: taskPasswordQuestion(task),
+        passwordValue: jobPasswordValue,
+        passwordError: jobPasswordSubmissionError,
+        conflictQuestion: taskConflictQuestion(task),
+        conflictApplyAll,
+      }),
       taskOutputPath,
       taskRevealOutputLabel,
-      taskWindowMode,
+      taskWindowMode: presentation === "window",
       reviewPending: pendingTaskReviewId === task.id,
       macosSfxPublishingAvailable: activePlatform === "macos",
       onPause: pauseCurrentTask,
@@ -13513,47 +10349,7 @@
       onToggleDetails: toggleTaskDetails,
       onViewResults: viewTaskResults,
       onRevealOutput: revealTaskOutput,
-      onDismiss: dismissTaskDialog,
-      onPasswordValueChange: (value) => {
-        if (isCurrentTaskPasswordPrompt(passwordPrompt)) jobPasswordValue = value;
-      },
-      onSubmitPassword: () => submitTaskPasswordRequest(passwordPrompt),
-      onCancelPassword: () => cancelTaskPasswordRequest(passwordPrompt),
-      onConflictApplyAllChange: (applyAll) => {
-        if (isCurrentTaskConflictPrompt(conflictPrompt)) conflictApplyAll = applyAll;
-      },
-      onAnswerConflict: (decision, applyAll) => answerConflictDecision(conflictPrompt, decision, applyAll),
-    };
-  }
-
-  function taskCenterDetailSurface(task: TaskDialogModel): TaskProgressDialogSurfaceProps {
-    const passwordPrompt = jobPasswordPrompt?.id === task.id ? jobPasswordPrompt : null;
-    const conflictPrompt = jobConflictPrompt?.id === task.id ? jobConflictPrompt : null;
-    return {
-      task,
-      rootId: "squallz-task-center",
-      rootClass: `task-center-detail design-root platform-${activePlatform} palette-${activePalette} theme-${activeTheme} density-${activeDensityChoice}`,
-      rootVariables: customPaletteVariables(),
-      presentation: "panel",
-      copyFeedback: taskChecksumCopyFeedback(task),
-      copyFeedbackTone: taskChecksumCopyFeedbackTone(task),
-      copyPending: checksumCopyPending("task", task.id),
-      taskOutputPath,
-      taskRevealOutputLabel,
-      taskWindowMode: false,
-      reviewPending: pendingTaskReviewId === task.id,
-      macosSfxPublishingAvailable: activePlatform === "macos",
-      onPause: pauseCurrentTask,
-      onResume: resumeCurrentTask,
-      onCancel: cancelCurrentTask,
-      onCopyChecksumResults: copyTaskChecksumResults,
-      onOpenOutput: openTaskOutput,
-      onPublishMacosSfx: openMacosSfxPublisher,
-      onReviewTask: prepareTaskReview,
-      onToggleDetails: toggleTaskDetails,
-      onViewResults: viewTaskResults,
-      onRevealOutput: revealTaskOutput,
-      onDismiss: returnToTaskCenter,
+      onDismiss: presentation === "panel" ? returnToTaskCenter : dismissTaskDialog,
       onPasswordValueChange: (value) => {
         if (isCurrentTaskPasswordPrompt(passwordPrompt)) jobPasswordValue = value;
       },
@@ -13570,7 +10366,7 @@
     return {
       tasks: jobRows,
       submittingTask: submittingTaskModel(),
-      rootClass: `task-center-panel design-root platform-${activePlatform} palette-${activePalette} theme-${activeTheme} density-${activeDensityChoice}`,
+      rootClass: `task-center-panel design-root platform-${activePlatform} palette-${settingsSession.colors.palette} theme-${activeTheme} density-${activeDensityChoice}`,
       rootVariables: customPaletteVariables(),
       focusTaskId: taskCenterFocusTaskId,
       onClose: closeTaskCenter,
@@ -13875,7 +10671,7 @@
   }
 
   function preventTaskWorkspaceNavigation(next: Screen): boolean {
-    if (screen === "create" && next !== "create" && createPreflightPhase === "submitting"
+    if (screen === "create" && next !== "create" && !createPreflight.canLeave()
       && preventCreateSubmissionNavigation(next)) return true;
     if (screen === "convert" && next !== "convert"
       && convertRouteHandle && !convertRouteHandle.canLeave()) return true;
@@ -13982,14 +10778,11 @@
       const outcome = readBatchExtractResult(task.result);
       const failedCount = task.state === "done" ? outcome.reviewCount : 0;
       const failures = task.state === "done" ? outcome.reviewFailures : null;
-      const draft = reviewBatchExtract(task.spec, failures, failedCount, platformKind(),
-        displayedSpec.kind === "batch_extract" ? displayedSpec : task.spec);
-      if (!draft) {
+      if (!batchExtract.restoreTask(task.spec, failures, failedCount,
+        displayedSpec.kind === "batch_extract" ? displayedSpec : task.spec)) {
         showNotice(tr("gui.batch.review_unavailable", "The report cannot identify the failed archives unambiguously. Select the archives again; your current batch was kept."));
         return;
       }
-      batchDraftGeneration += 1;
-      batchDraft = draft;
       setScreen(target);
       await dismissTaskDialog(task);
       focusBatchReview();
@@ -14153,39 +10946,23 @@
   }
 
   function restoreExtractTaskDraft(draft: ExtractTaskDraft): boolean {
-    if (!currentArchive || !sameFilePath(currentArchive.source, draft.path)) return false;
-    extractDestinationPicker = null;
-    resetExtractPlanRequestState();
-    markExtractPresetDraftTouched();
-    selectedExtractPresetId = null;
-    extractPresetDraftName = "";
-    extractPresetMutationState = "idle";
-    extractDraftArchive = { id: currentArchive.id, source: currentArchive.source };
-    extractScope = draft.selection === null ? "all" : "selection";
-    extractSelectionSnapshot = [...(draft.selection ?? [])];
-    extractDestinationMode = draft.smart ? "smart" : "choose";
-    extractCustomDest = draft.dest;
-    extractSmartBaseOverride = draft.smart ? draft.dest : null;
-    extractOverwriteMode = draft.overwrite;
-    extractSymlinkMode = draft.symlinks;
-    extractPresetEncodingLabel = null;
-    extractVerifySfx = draft.verify_sfx;
+    if (!currentArchive) return false;
+    const restored = extractOptions.restoreTask(currentArchive, draft, () => {
+      extractDestinationPicker = null;
+      extractPlanSession.reset();
+      selectedExtractPresetId = null;
+      extractPresetDraftName = "";
+      extractPresetMutationState = "idle";
+    });
+    if (!restored) return false;
     setScreen("extract");
     focusExtractReview();
     showNotice(tr("gui.extract.review.restored", "Archive, selection and settings restored. Review the refreshed write plan before extracting again."));
     return true;
   }
 
-  function createTaskFormat(spec: Extract<JobSpec, { kind: "compress" }>): CreateFormatId | null {
-    if (spec.sfx_target) return "zip";
-    const path = spec.dest.toLowerCase();
-    if (path.endsWith(".swm")) return "wim";
-    return createFormatIds.find((format) =>
-      createFormats[format].extensions.some((extension) => path.endsWith(`.${extension}`))) ?? null;
-  }
-
   function restoreCreateTaskDraft(spec: Extract<JobSpec, { kind: "compress" }>, passwordRequired: boolean): boolean {
-    if (createSourcesLocked()) {
+    if (createPreflight.sourcesLocked()) {
       showNotice(createSourcesLockedReason());
       return false;
     }
@@ -14193,47 +10970,20 @@
       showNotice(createConfigurationPendingMessage());
       return false;
     }
-    const format = createTaskFormat(spec);
-    if (!format) {
-      showNotice(tr("gui.create.review.format_unavailable", "This task's format is not available in the create screen. Your current settings were kept."));
+    const change = createOptions.restoreTask(spec, passwordRequired, createDraftContext(), () => {
+      dismissCreatePreparation();
+      markCreatePresetDraftTouched();
+      selectedCreatePresetId = null;
+      createPresetDraftName = "";
+      createPresetMutationState = "idle";
+      createSources = mergeCreateSources([], spec.inputs.map((path) => ({ path, kind: "unknown" })), platformKind());
+      syncCreatePreflightContext();
+      selectedCreateSourcePaths = [];
+    });
+    if (change.issue) {
+      showNotice(createDraftIssueMessage(change.issue, change.requestedSfxTarget));
       return false;
     }
-    if (spec.sfx_target && (!sfxCreateCapability.available || spec.sfx_target !== sfxCreateCapability.target)) {
-      showNotice(tr("gui.create.review.sfx_unavailable", "This device cannot recreate this self-extractor. Your current settings were kept."));
-      return false;
-    }
-    dismissCreatePreparation();
-    markCreatePresetDraftTouched();
-    selectedCreatePresetId = null;
-    createPresetDraftName = "";
-    createPresetMutationState = "idle";
-    createSources = mergeCreateSources([], spec.inputs.map((path) => ({ path, kind: "unknown" })), platformKind());
-    selectedCreateSourcePaths = [];
-    activeCreateFormat = format;
-    activeCreateProfile = "custom";
-    customCreateLevel = spec.level;
-    customCreateLevelError = "";
-    clearCreatePasswordFields();
-    createEncryptNames = spec.encrypt_names;
-    createEncryptionEnabled = passwordRequired || spec.encrypt_names;
-    applyPresetVolumeMode(spec.split_size === null
-      ? { kind: "single" }
-      : { kind: "split", size_bytes: String(spec.split_size) });
-    createSplitMode = spec.split_mode;
-    createContentPolicy = spec.content_policy;
-    createExcludeText = spec.excludes.join("\n");
-    createSfxEnabled = spec.sfx_target !== null;
-    createPresetSfxTarget = spec.sfx_target ?? "current_platform";
-    createPresetSqzInnerFormat = spec.sqz_inner_format ?? "sqz";
-    createDestinationBase = "ask";
-    createOverwritePolicy = "ask";
-    createSuggestedDestination = spec.dest;
-    createCompletion = spec.completion;
-    createPostSuccess = spec.post_success;
-    createTestAfterCreate = spec.test_after_create;
-    normalizeUnsupportedCreatePostSuccess(false);
-    normalizeUnsupportedCreateCompletion(false);
-    createOptionsValidationAttempted = createEncryptionEnabled;
     classicCreateSection = "general";
     createAdvancedOpen = true;
     showNotice(tr("gui.create.review.restored", "Sources and settings restored. Passwords were cleared. Review the options and confirm the output location before starting again."));
@@ -14344,7 +11094,7 @@
     if (!taskPasswordReady(workspacePasswordValue)) return;
     workspacePasswordSubmissionAttempted = false;
     if (!archivePasswordPrompt && previewPasswordPrompt) {
-      if (previewPasswordFlow.answer(workspacePasswordValue)) workspacePasswordValue = "";
+      if (previewSession.answerPassword(workspacePasswordValue)) workspacePasswordValue = "";
       return;
     }
     const prompt = archivePasswordPrompt;
@@ -14836,9 +11586,15 @@
     await forgetCurrentArchivePassword();
   }
 
-  function showNotice(message: string) {
-    appNotice = message;
+  function clearNotice() {
     if (noticeTimer) clearTimeout(noticeTimer);
+    appNotice = null;
+    noticeTimer = null;
+  }
+
+  function showNotice(message: string) {
+    clearNotice();
+    appNotice = message;
     noticeTimer = setTimeout(() => {
       appNotice = null;
       noticeTimer = null;
@@ -15117,7 +11873,7 @@
 <div class:task-center-layout={taskCenterVisible()}>
   {#if !modeSelectionBlocked}
     <ToastHost
-      rootClass={`themed-root palette-${activePalette} theme-${activeTheme}`}
+      rootClass={`themed-root palette-${settingsSession.colors.palette} theme-${activeTheme}`}
       rootVariables={customPaletteVariables()}
       blocked={blockingModalVisible()}
     />
@@ -15126,15 +11882,7 @@
   {#if taskCenterVisible()}
     {@const selectedTask = taskCenterSelectedTask()}
     {#if selectedTask}
-      <TaskProgressDialogHost
-        surface={taskCenterDetailSurface(selectedTask)}
-        loadingTitle={tr("gui.task_surface.loading", "Loading task view")}
-        loadingBody={tr("gui.task_surface.loading_body", "Preparing live progress, results, and task controls.")}
-        failureTitle={tr("gui.task_surface.load_failed", "Task view could not be loaded")}
-        failureBody={tr("gui.task_surface.load_failed_body", "The task is still safe. Retry loading its progress and controls.")}
-        retryLabel={tr("gui.task_surface.retry", "Retry view")}
-        backLabel={tr("gui.task.back_to_tasks", "Back to tasks")}
-      />
+      {@render taskProgressSurface(selectedTask, "panel")}
     {:else}
       <TaskCenterHost
         surface={taskCenterSurface()}
@@ -15151,7 +11899,7 @@
 
 {#if appNotice && (!firstRunRequired || taskWindowMode)}
   <div
-    class={`app-notice mode-${mode} themed-root palette-${activePalette} theme-${activeTheme}`}
+    class={`app-notice mode-${mode} themed-root palette-${settingsSession.colors.palette} theme-${activeTheme}`}
     use:cssVariables={customPaletteVariables()}
     role="status"
     aria-hidden={blockingModalVisible() ? "true" : undefined}
@@ -15161,7 +11909,7 @@
 {#if macosSfxPublisherTask && LoadedMacosSfxPublisher}
   <LoadedMacosSfxPublisher
     task={macosSfxPublisherTask}
-    rootClass={`sfx-publish-overlay design-root platform-${activePlatform} palette-${activePalette} theme-${activeTheme} density-${activeDensityChoice}`}
+    rootClass={`sfx-publish-overlay design-root platform-${activePlatform} palette-${settingsSession.colors.palette} theme-${activeTheme} density-${activeDensityChoice}`}
     rootVariables={customPaletteVariables()}
     platform={platformKind()}
     previewSkipSave={import.meta.env.DEV && params.has("previewSfxPublisher")}
@@ -15173,9 +11921,9 @@
   />
 {/if}
 
-{#snippet taskProgressSurface(task: TaskDialogModel)}
+{#snippet taskProgressSurface(task: TaskDialogModel, presentation: "panel" | "dialog" | "window")}
   <TaskProgressDialogHost
-    surface={taskDialogSurface(task)}
+    surface={taskProgressDialogProps(task, presentation)}
     loadingTitle={tr("gui.task_surface.loading", "Loading task view")}
     loadingBody={tr("gui.task_surface.loading_body", "Preparing live progress, results, and task controls.")}
     failureTitle={tr("gui.task_surface.load_failed", "Task view could not be loaded")}
@@ -15188,13 +11936,13 @@
 {#if !taskWindowMode && taskDialogVisible() && !macosSfxPublisherTask}
   {@const task = taskDialogTask()}
   {#if task}
-    {@render taskProgressSurface(task)}
+    {@render taskProgressSurface(task, "dialog")}
   {/if}
 {/if}
 
 {#if (dragActive || lastDropKind !== "none") && !modeSelectionBlocked}
   <div
-    class={`drop-status mode-${mode} themed-root palette-${activePalette} theme-${activeTheme}`}
+    class={`drop-status mode-${mode} themed-root palette-${settingsSession.colors.palette} theme-${activeTheme}`}
     use:cssVariables={customPaletteVariables()}
     class:active={dragActive}
     role="status"
@@ -15202,20 +11950,20 @@
   >{dropStatusLabel()}</div>
 {/if}
 
-{#if !taskWindowMode && archiveEditKind && archiveEditorVisible() && !taskDialogVisible() && !macosSfxPublisherTask}
+{#if !taskWindowMode && archiveEdit.kind && archiveEditorVisible() && !taskDialogVisible() && !macosSfxPublisherTask}
   <ArchiveEntryEditor
-    {...archiveEditorFields(archiveEditKind)}
-    rootClass={`archive-editor-overlay design-root platform-${activePlatform} palette-${activePalette} theme-${activeTheme} density-${activeDensityChoice}`}
+    {...archiveEditorFields(archiveEdit.kind)}
+    rootClass={`archive-editor-overlay design-root platform-${activePlatform} palette-${settingsSession.colors.palette} theme-${activeTheme} density-${activeDensityChoice}`}
     rootVariables={customPaletteVariables()}
     cancelLabel={tr("common.cancel", "Cancel")}
-    onClose={closeArchiveEditor}
+    onClose={() => archiveEdit.close()}
   />
 {/if}
 
 {#if entryContext}
   <div
     bind:this={entryContextMenu}
-    class={`entry-context-menu themed-root palette-${activePalette} theme-${activeTheme}`}
+    class={`entry-context-menu themed-root palette-${settingsSession.colors.palette} theme-${activeTheme}`}
     use:cssVariables={entryContextCssVariables(entryContext)}
     role="menu"
     aria-label={tr("gui.context.actions_for", "Actions for {name}").replace("{name}", entryContext.name)}
@@ -15237,7 +11985,7 @@
 
 {#if firstRunRequired && !taskWindowMode}
   <div
-    class={`first-run-overlay themed-root palette-${activePalette} theme-${activeTheme}`}
+    class={`first-run-overlay themed-root palette-${settingsSession.colors.palette} theme-${activeTheme}`}
     use:cssVariables={customPaletteVariables()}
     role="presentation"
     aria-hidden={blockingModalVisible() ? "true" : undefined}
@@ -15314,7 +12062,7 @@
 
 {#if taskWindowMode}
   <main
-    class={`design-root task-window-root platform-${activePlatform} palette-${activePalette} theme-${activeTheme} density-${activeDensityChoice}`}
+    class={`design-root task-window-root platform-${activePlatform} palette-${settingsSession.colors.palette} theme-${activeTheme} density-${activeDensityChoice}`}
     use:cssVariables={customPaletteVariables()}
     aria-label={tr("gui.external_task.window_label", "Squallz task window")}
     aria-hidden={macosSfxPublisherTask ? "true" : undefined}
@@ -15323,7 +12071,7 @@
     {#if taskDialogVisible()}
       {@const task = taskDialogTask()}
       {#if task}
-        {@render taskProgressSurface(task)}
+        {@render taskProgressSurface(task, "window")}
       {/if}
     {:else}
       <section class="task-window-empty" role="status">
@@ -15343,7 +12091,7 @@
     {/if}
   </main>
 {:else if mode === "modern" || isSettingsScreen()}
-  <main class={`design-root modern-root platform-${activePlatform} palette-${activePalette} theme-${activeTheme} density-${activeDensityChoice}`} use:cssVariables={customPaletteVariables()} class:drop-active={dragActive} aria-hidden={blockingModalVisible() || modeSelectionBlocked ? "true" : undefined} inert={blockingModalVisible() || modeSelectionBlocked}>
+  <main class={`design-root modern-root platform-${activePlatform} palette-${settingsSession.colors.palette} theme-${activeTheme} density-${activeDensityChoice}`} use:cssVariables={customPaletteVariables()} class:drop-active={dragActive} aria-hidden={blockingModalVisible() || modeSelectionBlocked ? "true" : undefined} inert={blockingModalVisible() || modeSelectionBlocked}>
     <section class="window modern-window" aria-label={isSettingsScreen() ? tr("gui.aria.squallz_settings", "Squallz settings") : tr("gui.aria.modern_archive_browser", "Squallz Modern archive browser")}>
       <header class="modern-titlebar" data-tauri-drag-region>
         <div class="brand-lockup">
@@ -15651,7 +12399,7 @@
     </section>
   </main>
 {:else}
-  <main class={`design-root classic-root platform-${activePlatform} palette-${activePalette} theme-${activeTheme} density-${activeDensityChoice}`} use:cssVariables={customPaletteVariables()} class:drop-active={dragActive} aria-hidden={blockingModalVisible() || modeSelectionBlocked ? "true" : undefined} inert={blockingModalVisible() || modeSelectionBlocked}>
+  <main class={`design-root classic-root platform-${activePlatform} palette-${settingsSession.colors.palette} theme-${activeTheme} density-${activeDensityChoice}`} use:cssVariables={customPaletteVariables()} class:drop-active={dragActive} aria-hidden={blockingModalVisible() || modeSelectionBlocked ? "true" : undefined} inert={blockingModalVisible() || modeSelectionBlocked}>
     <section class="window classic-window" aria-label={tr("gui.aria.classic_archive_browser", "Squallz Classic archive browser")}>
       <header class="classic-titlebar" data-tauri-drag-region>
         <div class="classic-title">
@@ -15679,24 +12427,6 @@
             <Icon name="archive" size={15} />
             <span class="classic-action-label">{tr("gui.classic.new_archive", "New archive")}</span>
           </button>
-          {#if nestedPreview}
-            <button
-              aria-label={tr("gui.action.open_nested", "Open")}
-              title={tr("gui.action.open_nested", "Open")}
-              onclick={() => void openNestedPreviewArchive()}
-            >
-              <Icon name="folder-open" size={15} />
-              <span class="classic-action-label">{tr("gui.action.open_nested", "Open")}</span>
-            </button>
-            <button
-              aria-label={tr("gui.action.extract_nested", "Extract")}
-              title={tr("gui.action.extract_nested", "Extract")}
-              onclick={() => void extractNestedPreviewArchive()}
-            >
-              <Icon name="archive" size={15} />
-              <span class="classic-action-label">{tr("gui.action.extract_nested", "Extract")}</span>
-            </button>
-          {/if}
           <button
             class="task-center-trigger"
             class:attention={taskCenterHasAttention()}
@@ -15979,7 +12709,7 @@
 
       <footer class="classic-statusbar">
         {#if screen === "create"}
-          <span>{lastCreatePlan ? tr("gui.create.source_files_count", "{count} source files").replace("{count}", lastCreatePlan.files.toLocaleString()) : tr("gui.create.source_files_pending", "Source files awaiting checks")}</span>
+          <span>{createPreflight.state.plan ? tr("gui.create.source_files_count", "{count} source files").replace("{count}", createPreflight.state.plan.files.toLocaleString()) : tr("gui.create.source_files_pending", "Source files awaiting checks")}</span>
           <span>{createSfxEnabled ? createSfxOutputLabel() : activeCreateFormatData().label} · {createMethodLabel()}</span>
           <span>{createSplitCapability()} · {createRecoveryCapability()}</span>
           <strong>{diskPreflightStatusbar()}</strong>
@@ -16010,8 +12740,8 @@
           <strong>{tr("gui.batch.check_at_start", "Archives are checked when the task starts")}</strong>
         {:else if screen === "batch"}
           <span>{tr("gui.batch.title", "Batch Extract")}</span>
-          <span>{tr("gui.batch.archive_count", "Archives: {count}").replace("{count}", String(effectiveBatchDraft().items.length))}</span>
-          <span>{extractOverwriteLabel(effectiveBatchDraft().overwrite)}</span>
+          <span>{tr("gui.batch.archive_count", "Archives: {count}").replace("{count}", String(batchDraft.items.length))}</span>
+          <span>{extractOverwriteLabel(batchDraft.overwrite)}</span>
           <strong>{tr("gui.batch.check_at_start", "Archives are checked when the task starts")}</strong>
         {:else if screen === "checksum"}
           <span>{tr("gui.screen.checksum", "Checksum")}</span>

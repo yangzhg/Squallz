@@ -1,10 +1,9 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
-import ts from "typescript";
 
 import { createTestServer } from "../../tests/runtime.mjs";
+import { compileTestScript, readSvelteScript, selectFunctions } from "../../tests/source.mjs";
 
 const server = await createTestServer();
 test.after(() => server.close());
@@ -14,9 +13,7 @@ const { convertSessionFor } = await server.ssrLoadModule("/src/lib/convert-sessi
 const { ipc } = await server.ssrLoadModule("/src/lib/ipc.ts");
 
 function reportHarness({ navigation = false } = {}) {
-  const component = readFileSync(new URL("../App.svelte", import.meta.url), "utf8");
-  const script = component.match(/<script lang="ts">([\s\S]*?)<\/script>/)?.[1];
-  const source = ts.createSourceFile("App.ts", script, ts.ScriptTarget.Latest, true);
+  const source = readSvelteScript(new URL("../App.svelte", import.meta.url), "App.ts");
   const names = ["selectedChecksumTask", "checksumItems", "checksumResultText", "checksumResultNumber",
     "viewTaskResults", "checksumCopyFeedbackFor", "checksumCopyFeedbackToneFor",
     "copyChecksumText", "copyChecksumResults", "copyTaskChecksumResults", "showChecksumCopyFeedback",
@@ -28,12 +25,7 @@ function reportHarness({ navigation = false } = {}) {
       "openTaskCenter", "closeTaskCenter", "openTaskCenterDetails", "returnToTaskCenter",
       "cancelTaskReview", "adoptRecoveryTargetFromTask",
       "focusChecksumResultPanel", "focusPendingChecksumResult", "focusDuplicateReportPanel"] : [])];
-  const functions = names.map((name) => {
-    const declaration = source.statements.find((node) =>
-      ts.isFunctionDeclaration(node) && node.name?.text === name);
-    assert.ok(declaration, name);
-    return declaration.getText(source);
-  }).join("\n");
+  const functions = selectFunctions(source, names).map((node) => node.getText(source)).join("\n");
   const calls = [];
   const timers = new Map();
   let nextTimer = 0;
@@ -73,7 +65,8 @@ function reportHarness({ navigation = false } = {}) {
       context.jobRows.push({ id: 20, spec, result: null, state: "queued" });
       return 20;
     },
-    screen: "checksum", mode: "modern", createPreflightPhase: "idle", convertRouteHandle: null,
+    screen: "checksum", mode: "modern", convertRouteHandle: null,
+    createPreflight: { canLeave: () => true, state: { phase: "idle" } },
     archiveOpenStatus: "idle", archivePasswordPrompt: null, previewPasswordPrompt: null,
     taskReviewRequestGeneration: 0, pendingTaskReviewId: null,
     taskCenterOpen: false, taskCenterSelectedTaskId: null, taskCenterFocusTaskId: null,
@@ -82,7 +75,7 @@ function reportHarness({ navigation = false } = {}) {
     taskDialogTask: () => context.jobRows.find((task) => task.id === context.taskDialogTaskId) ?? null,
     archiveUpdateReview: { cancelSourceChoice() {} }, nestedExtractDraftGeneration: 0,
     nestedExtractPickerRequest: 0, batchPickerRequest: 0, pendingArchiveTaskReview: null,
-    pendingCreateSubmission: null, dismissArchivePicker() {}, clearEntryPreviewState() {}, syncUrl() {},
+    dismissArchivePicker() {}, clearEntryPreviewState() {}, syncUrl() {}, syncCreatePreflightContext() {},
     restoreTaskWorkspaceFocus: () => calls.push(["restore-focus"]),
     currentArchive: null, sameFilePath: (left, right) => left === right,
     recoverySourceMode: "selected", recoverySourceOverride: "/previous/recovery.zip",
@@ -104,9 +97,7 @@ function reportHarness({ navigation = false } = {}) {
       if (task) task.expanded = expanded;
     },
   };
-  const { outputText } = ts.transpileModule(functions, {
-    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
-  });
+  const outputText = compileTestScript(functions);
   context.calls = calls;
   return vm.runInNewContext(`${outputText}\n({${names.join(",")}, context:globalThis, calls})`, context);
 }
@@ -443,7 +434,7 @@ test("checksum report navigation and copying stay bound to the selected task", a
     assert.match(run.calls.at(-1)[1], /finishes adding this conversion/);
   }
   run.context.screen = "create";
-  run.context.createPreflightPhase = "submitting";
+  run.context.createPreflight.canLeave = () => false;
   for (const task of targets) {
     selectDetails(task);
     const before = workspace();
@@ -455,7 +446,7 @@ test("checksum report navigation and copying stay bound to the selected task", a
     assert.match(run.calls.at(-1)[1], /finishes adding this create task/);
   }
   run.context.screen = "convert";
-  run.context.createPreflightPhase = "idle";
+  run.context.createPreflight.canLeave = () => true;
   for (const [index, kind] of ["protect", "test"].entries()) {
     const task = { id: 12 + index, state: "done", expanded: false, spec: { kind, path: archive.path }, result: { ok: true } };
     run.context.jobRows.push(task);
