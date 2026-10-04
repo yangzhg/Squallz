@@ -10,7 +10,7 @@ use std::io::Write;
 use std::path::Path;
 use std::process::Command;
 
-use common::{command_exists, engine, TempDir};
+use common::{command_exists, engine, read_archive_entries, TempDir};
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use squallz_core::api::{
@@ -163,7 +163,7 @@ fn system_tar_to_ours_all_compound_suffixes() {
         assert!(create.status.success(), "{suffix}: tar -cf failed");
 
         // We must list, test and extract what system tar created.
-        let entries = engine.list(&archive, &OpenOptions::default()).unwrap();
+        let entries = read_archive_entries(&engine, &archive, &OpenOptions::default()).unwrap();
         assert!(
             entries.iter().any(|e| e.path.display.contains("a.txt")),
             "{suffix}: a.txt missing from listing"
@@ -374,7 +374,7 @@ fn plain_gz_single_entry_virtual_archive() {
         .unwrap();
 
     // list: one entry named without the .gz suffix, sized via gzip ISIZE.
-    let entries = engine.list(&archive, &OpenOptions::default()).unwrap();
+    let entries = read_archive_entries(&engine, &archive, &OpenOptions::default()).unwrap();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].path.display, "notes.txt");
     assert!(matches!(entries[0].entry_type, EntryType::File));
@@ -425,7 +425,7 @@ fn plain_gz_single_entry_virtual_archive() {
             .unwrap();
         assert!(gz.status.success());
         let sys_archive = dir.path().join("sys.txt.gz");
-        let entries = engine.list(&sys_archive, &OpenOptions::default()).unwrap();
+        let entries = read_archive_entries(&engine, &sys_archive, &OpenOptions::default()).unwrap();
         assert_eq!(entries[0].path.display, "sys.txt");
         let out2 = dir.path().join("out2");
         engine
@@ -502,7 +502,7 @@ fn compound_selective_extract() {
             &ctl,
         )
         .unwrap();
-    let entries = engine.list(&archive, &OpenOptions::default()).unwrap();
+    let entries = read_archive_entries(&engine, &archive, &OpenOptions::default()).unwrap();
     let pick: Vec<_> = entries
         .iter()
         .filter(|e| e.path.display == "tree/a.txt")

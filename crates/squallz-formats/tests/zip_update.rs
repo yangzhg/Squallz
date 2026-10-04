@@ -12,7 +12,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Barrier, Mutex};
 use std::time::{Duration, Instant};
 
-use common::{build_stored_zip, command_exists, engine, RawZipEntry, TempDir};
+use common::{
+    build_stored_zip, command_exists, engine, read_archive_entries, RawZipEntry, TempDir,
+};
 use squallz_core::api::{
     CompressionLevel, ControlToken, CreateOptions, EntryMeta, EntryPath, EntrySelection,
     FormatError, NoProgress, OpenOptions, Password, ProgressPhase, ProgressSink, UpdateOp,
@@ -248,15 +250,15 @@ fn update_display_selection_rejects_ambiguous_and_undecodable_paths_atomically()
         },
     ]);
     fs::write(&archive, &original).unwrap();
-    let entries = engine()
-        .list(
-            &archive,
-            &OpenOptions {
-                encoding_override: Some("gbk".into()),
-                ..Default::default()
-            },
-        )
-        .unwrap();
+    let entries = read_archive_entries(
+        &engine(),
+        &archive,
+        &OpenOptions {
+            encoding_override: Some("gbk".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
     assert_eq!(entries[0].path.display, entries[1].path.display);
     let options = UpdateOptions {
         encoding_override: Some("gbk".into()),
@@ -626,7 +628,7 @@ fn update_preserves_encrypted_legacy_names_and_payloads() {
             encoding_override: Some("gbk".into()),
             password: Some(Password::new("test password")),
         };
-        let entries = engine().list(&archive, &options).unwrap();
+        let entries = read_archive_entries(&engine(), &archive, &options).unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].path.display, displayed);
         assert_eq!(entries[0].path.raw, raw_name);
@@ -681,7 +683,7 @@ fn update_preserves_unix_types_and_permissions() {
     )
     .unwrap();
     assert_eq!(raw_entry_snapshots(&archive), expected);
-    let entries = engine().list(&archive, &OpenOptions::default()).unwrap();
+    let entries = read_archive_entries(&engine(), &archive, &OpenOptions::default()).unwrap();
     assert!(
         matches!(&entries.iter().find(|entry| entry.path.display == "renamed-link").unwrap().entry_type,
         squallz_core::api::EntryType::Symlink { target } if target == b"bin/run")
@@ -712,8 +714,7 @@ fn list_names(path: &Path, password: Option<&str>) -> Vec<String> {
         password: password.map(Password::new),
         encoding_override: None,
     };
-    let mut names: Vec<String> = engine()
-        .list(path, &opts)
+    let mut names: Vec<String> = read_archive_entries(&engine(), path, &opts)
         .unwrap()
         .iter()
         .map(|e: &EntryMeta| e.path.display.clone())
@@ -1344,13 +1345,12 @@ fn archive_listing_rejects_parent_symlink_aba_even_when_path_stamps_match() {
         original_directory,
         observed: Arc::clone(&observed),
     }));
-    let result = squallz_core::Engine::new(registry)
-        .list_with_format_source_set_and_structure_with_entry_limit_and_control(
-            &path,
-            &OpenOptions::default(),
-            100,
-            &ControlToken::new(),
-        );
+    let result = squallz_core::Engine::new(registry).list_archive(
+        &path,
+        &OpenOptions::default(),
+        100,
+        &ControlToken::new(),
+    );
     let after = engine()
         .inspect_archive_source_state(&path, &ControlToken::new())
         .unwrap();
@@ -2192,15 +2192,15 @@ fn update_preserves_retained_legacy_names() {
     let mut reader = zip::ZipArchive::new(fs::File::open(&archive).unwrap()).unwrap();
     assert_eq!(reader.len(), 1);
     assert_eq!(reader.by_index_raw(0).unwrap().name_raw(), name);
-    let entries = engine()
-        .list(
-            &archive,
-            &OpenOptions {
-                encoding_override: Some("gbk".into()),
-                ..OpenOptions::default()
-            },
-        )
-        .unwrap();
+    let entries = read_archive_entries(
+        &engine(),
+        &archive,
+        &OpenOptions {
+            encoding_override: Some("gbk".into()),
+            ..OpenOptions::default()
+        },
+    )
+    .unwrap();
     assert_eq!(entries[0].path.display, "压缩文件中文名称测试.txt");
     assert_eq!(entries[0].path.raw, name);
     assert_unzip_t(&archive);
@@ -2384,7 +2384,7 @@ fn update_delete_literal_keeps_encrypted_payloads_without_a_password() {
         password: Some(Password::new("deletion-test-password")),
         encoding_override: None,
     };
-    let entries = engine().list(&archive, &options).unwrap();
+    let entries = read_archive_entries(&engine(), &archive, &options).unwrap();
     assert!(!entries
         .iter()
         .any(|entry| entry.path.display.starts_with("project/sub/")));
@@ -2696,7 +2696,7 @@ fn update_encrypted_directory_rename_preserves_payloads_without_a_password() {
         password: Some(Password::new("directory-test-password")),
         encoding_override: None,
     };
-    let entries = engine().list(&archive, &options).unwrap();
+    let entries = read_archive_entries(&engine(), &archive, &options).unwrap();
     assert!(entries
         .iter()
         .filter(|entry| entry.size > 0)
@@ -2924,7 +2924,7 @@ fn update_encrypted_archive_without_password_keeps_encryption() {
     run_update(&archive, &ops, &UpdateOptions::default()).unwrap();
 
     let opts = OpenOptions::default();
-    let entries = engine().list(&archive, &opts).unwrap();
+    let entries = read_archive_entries(&engine(), &archive, &opts).unwrap();
     let old = entries
         .iter()
         .find(|e| e.path.display == "project/a.txt")

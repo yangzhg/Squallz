@@ -9,7 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde_json::{json, Value};
 use squallz_core::api::{
     ConflictResolver, EntryPath, ExtractOptions, ExtractProblemReporter, ExtractReport,
-    FormatError, OpenOptions, OverwritePolicy, Password, ProblemPreview,
+    FormatError, OpenOptions, OverwritePolicy, Password, ProblemPreview, SafetyLimits,
 };
 use squallz_core::{ExtractPlan, PathFilter, SmartLayout};
 
@@ -134,21 +134,24 @@ fn list_nested(
 ) -> Result<(), CliError> {
     let temp = extract_nested_archive_to_temp(ctx, archive, &entry, password, encoding)?;
     let explicit = nested_password.map(Password::new);
-    let entries = with_password_retry(
+    let listing = with_password_retry(
         &ctx.loc,
         explicit.as_ref(),
         || {},
         |pw| {
-            ctx.engine.list(
+            ctx.engine.list_archive(
                 temp.path(),
                 &OpenOptions {
                     password: pw.cloned(),
                     encoding_override: nested_encoding.clone(),
                 },
+                SafetyLimits::default().max_entries,
+                &ctx.ctl,
             )
         },
     )?;
-    let entries = crate::commands::list::filter_entries_for_search(entries, search.as_deref());
+    let entries =
+        crate::commands::list::filter_entries_for_search(listing.entries, search.as_deref());
 
     if json {
         let array: Vec<Value> = entries.iter().map(entry_json).collect();
@@ -251,7 +254,7 @@ fn extract_nested(
                 password: pw.cloned(),
                 encoding_override: nested_encoding.clone(),
             };
-            let (plan, report) = ctx.engine.plan_and_extract_with_report_controlled(
+            let (plan, report, _) = ctx.engine.extract_planned(
                 temp.path(),
                 &dest,
                 &archive_display_path,
@@ -260,6 +263,7 @@ fn extract_nested(
                 &x_opts,
                 progress.as_ref(),
                 &ctx.ctl,
+                None,
                 |entries, control| filter.select_entries(entries, control),
                 |_| Ok(()),
             )?;

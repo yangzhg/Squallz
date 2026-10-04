@@ -2,7 +2,7 @@ use super::progress::BATCH_PROGRESS_SCALE;
 use super::snapshots::JobOrigin;
 use super::test_support::{
     checksum_job, compress_file_job, compress_file_job_with_inner_format, deterministic_payload,
-    temp_dir, FakeTrashAdapter, TestSink,
+    read_archive_entries, temp_dir, FakeTrashAdapter, TestSink,
 };
 use super::*;
 use crate::dto::{BatchExtractItem, JobSpec, PERFORMANCE_STREAM_BUFFER_MAX_BYTES};
@@ -1562,12 +1562,13 @@ fn extract_job_rejects_an_archive_replaced_after_preflight() {
     let destination = dir.join("output");
     let (_, _, input_guard) = state
         .engine
-        .plan_extract_with_input_guard_controlled(
+        .plan_extract_with_input_guard_and_entry_limit_controlled(
             &archive,
             &destination,
             &archive,
             false,
             &OpenOptions::default(),
+            squallz_core::api::SafetyLimits::default().max_entries,
             &control,
             |_, _| Ok(None),
         )
@@ -1804,7 +1805,7 @@ fn create_sfx_job_uses_the_shared_queue_and_core() {
     assert!(output
         .join("Contents/Resources/squallz-sfx/payload.zip")
         .exists());
-    let entries = state.engine.list(&output, &OpenOptions::default()).unwrap();
+    let entries = read_archive_entries(&state.engine, &output, &OpenOptions::default()).unwrap();
     assert_eq!(entries[0].path.display, "notes/");
     let events = sink.events.lock().unwrap();
     assert_eq!(states_of(&events, id), vec!["queued", "running", "done"]);
@@ -3224,10 +3225,8 @@ fn convert_job_round_trip_through_queue() {
         manager.openable_output_for_window("main", id).unwrap(),
         sevenz
     );
-    let entries = AppState::new()
-        .engine
-        .list(&sevenz, &OpenOptions::default())
-        .unwrap();
+    let entries =
+        read_archive_entries(&AppState::new().engine, &sevenz, &OpenOptions::default()).unwrap();
     assert!(entries
         .iter()
         .any(|entry| entry.path.display == "data/hello.txt"));
@@ -3306,20 +3305,16 @@ fn convert_job_reports_split_output_set() {
     assert!(result["outputs"]
         .as_array()
         .is_some_and(|outputs| outputs.len() >= 2));
-    assert!(state
-        .engine
-        .list(&primary, &OpenOptions::default())
-        .is_err());
-    let entries = state
-        .engine
-        .list(
-            &primary,
-            &OpenOptions {
-                password: Some(Password::new("destination secret")),
-                ..OpenOptions::default()
-            },
-        )
-        .unwrap();
+    assert!(read_archive_entries(&state.engine, &primary, &OpenOptions::default()).is_err());
+    let entries = read_archive_entries(
+        &state.engine,
+        &primary,
+        &OpenOptions {
+            password: Some(Password::new("destination secret")),
+            ..OpenOptions::default()
+        },
+    )
+    .unwrap();
     assert!(entries
         .iter()
         .any(|entry| entry.path.display == "payload.txt"));
@@ -3543,7 +3538,7 @@ exit 2
     manager.wait_idle();
 
     assert!(zip.is_file(), "converted ZIP missing");
-    let entries = state.engine.list(&zip, &OpenOptions::default()).unwrap();
+    let entries = read_archive_entries(&state.engine, &zip, &OpenOptions::default()).unwrap();
     assert!(entries
         .iter()
         .any(|entry| entry.path.display == "hello.txt"));
@@ -3615,10 +3610,8 @@ fn export_sqz_job_round_trip_through_queue() {
     manager.wait_idle();
 
     assert!(zip.exists());
-    let entries = AppState::new()
-        .engine
-        .list(&zip, &OpenOptions::default())
-        .unwrap();
+    let entries =
+        read_archive_entries(&AppState::new().engine, &zip, &OpenOptions::default()).unwrap();
     assert!(entries
         .iter()
         .any(|entry| entry.path.display == "data/hello.txt"));
@@ -3879,7 +3872,7 @@ fn split_sqz_source_jobs_accept_first_volume() {
     manager.wait_idle();
 
     let engine = AppState::new().engine;
-    let entries = engine.list(&zip, &OpenOptions::default()).unwrap();
+    let entries = read_archive_entries(&engine, &zip, &OpenOptions::default()).unwrap();
     assert!(entries.iter().any(|entry| entry.path.display == "data.bin"));
     let report = engine
         .test_summary(
@@ -4181,10 +4174,8 @@ fn opened_archive_updates_reject_replacements_before_submit_and_while_queued() {
                 .state,
             "done"
         );
-        let entries = state
-            .engine
-            .list(&archive, &OpenOptions::default())
-            .unwrap();
+        let entries =
+            read_archive_entries(&state.engine, &archive, &OpenOptions::default()).unwrap();
         assert!(!entries
             .iter()
             .any(|entry| entry.path.display == "report.txt"));
@@ -4211,12 +4202,12 @@ fn opened_archive_updates_reject_replacements_before_submit_and_while_queued() {
                 .state,
             "done"
         );
-        assert!(!state
-            .engine
-            .list(&archive, &OpenOptions::default())
-            .unwrap()
-            .iter()
-            .any(|entry| entry.path.display == "report.txt"));
+        assert!(
+            !read_archive_entries(&state.engine, &archive, &OpenOptions::default())
+                .unwrap()
+                .iter()
+                .any(|entry| entry.path.display == "report.txt")
+        );
         fs::remove_dir_all(dir).unwrap();
     }
 }
@@ -4321,10 +4312,7 @@ fn opened_archive_updates_share_successful_source_advances_and_enforce_ownership
             }
         ));
     }
-    let entries = state
-        .engine
-        .list(&archive, &OpenOptions::default())
-        .unwrap();
+    let entries = read_archive_entries(&state.engine, &archive, &OpenOptions::default()).unwrap();
     assert!(entries
         .iter()
         .any(|entry| entry.path.display == "first.txt"));
@@ -4378,10 +4366,7 @@ fn update_job_deletes_selected_entry() {
     manager.wait_idle();
     let events = sink.events.lock().unwrap().clone();
     assert_eq!(states_of(&events, id), vec!["queued", "running", "done"]);
-    let entries = state
-        .engine
-        .list(&archive, &OpenOptions::default())
-        .unwrap();
+    let entries = read_archive_entries(&state.engine, &archive, &OpenOptions::default()).unwrap();
     assert!(entries.iter().any(|e| e.path.display == "data/keep.txt"));
     assert!(!entries.iter().any(|e| e.path.display == "data/drop.txt"));
     assert_eq!(
@@ -4451,9 +4436,7 @@ fn update_job_deletes_only_literal_selected_paths() {
         states_of(&sink.events.lock().unwrap(), id),
         vec!["queued", "running", "done"]
     );
-    let mut names = state
-        .engine
-        .list(&archive, &OpenOptions::default())
+    let mut names = read_archive_entries(&state.engine, &archive, &OpenOptions::default())
         .unwrap()
         .into_iter()
         .map(|entry| entry.path.display)
@@ -4573,19 +4556,18 @@ fn update_job_resolves_display_names_and_rejects_ambiguous_or_missing_selection(
             if expected_state == "failed" {
                 assert_eq!(fs::read(&archive).unwrap(), bytes);
             } else {
-                let mut names: Vec<_> = state
-                    .engine
-                    .list(
-                        &archive,
-                        &OpenOptions {
-                            encoding_override: Some("gbk".into()),
-                            ..OpenOptions::default()
-                        },
-                    )
-                    .unwrap()
-                    .into_iter()
-                    .map(|entry| entry.path.display)
-                    .collect();
+                let mut names: Vec<_> = read_archive_entries(
+                    &state.engine,
+                    &archive,
+                    &OpenOptions {
+                        encoding_override: Some("gbk".into()),
+                        ..OpenOptions::default()
+                    },
+                )
+                .unwrap()
+                .into_iter()
+                .map(|entry| entry.path.display)
+                .collect();
                 names.sort();
                 let expected = match (rename_selected, selected == "nested/first.txt") {
                     (false, false) => vec!["nested/", "nested/first.txt"],
@@ -4595,16 +4577,15 @@ fn update_job_resolves_display_names_and_rejects_ambiguous_or_missing_selection(
                 };
                 assert_eq!(names, expected);
                 if selected == "nested/first.txt" {
-                    let entries = state
-                        .engine
-                        .list(
-                            &archive,
-                            &OpenOptions {
-                                encoding_override: Some("gbk".into()),
-                                ..OpenOptions::default()
-                            },
-                        )
-                        .unwrap();
+                    let entries = read_archive_entries(
+                        &state.engine,
+                        &archive,
+                        &OpenOptions {
+                            encoding_override: Some("gbk".into()),
+                            ..OpenOptions::default()
+                        },
+                    )
+                    .unwrap();
                     assert_eq!(
                         entries
                             .iter()
@@ -4675,9 +4656,7 @@ fn update_job_add_directory_applies_content_policy_and_explicit_excludes() {
     manager.wait_idle();
     let events = sink.events.lock().unwrap().clone();
     assert_eq!(states_of(&events, id), vec!["queued", "running", "done"]);
-    let names: Vec<String> = state
-        .engine
-        .list(&archive, &OpenOptions::default())
+    let names: Vec<String> = read_archive_entries(&state.engine, &archive, &OpenOptions::default())
         .unwrap()
         .into_iter()
         .map(|e| e.path.display)
@@ -4882,9 +4861,7 @@ fn update_job_creates_directory_and_moves_a_subtree_into_it() {
     manager.wait_idle();
     let events = sink.events.lock().unwrap().clone();
     assert_eq!(states_of(&events, id), vec!["queued", "running", "done"]);
-    let names: Vec<String> = state
-        .engine
-        .list(&archive, &OpenOptions::default())
+    let names: Vec<String> = read_archive_entries(&state.engine, &archive, &OpenOptions::default())
         .unwrap()
         .into_iter()
         .map(|e| e.path.display)
@@ -4918,9 +4895,7 @@ fn update_job_creates_directory_and_moves_a_subtree_into_it() {
         states_of(&move_sink.events.lock().unwrap(), move_id),
         vec!["queued", "running", "done"]
     );
-    let names: Vec<_> = state
-        .engine
-        .list(&archive, &OpenOptions::default())
+    let names: Vec<_> = read_archive_entries(&state.engine, &archive, &OpenOptions::default())
         .unwrap()
         .into_iter()
         .map(|entry| entry.path.display)

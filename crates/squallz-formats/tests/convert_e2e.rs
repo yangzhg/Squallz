@@ -6,7 +6,7 @@ mod common;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use common::{engine, TempDir};
+use common::{engine, read_archive_entries, TempDir};
 use squallz_core::api::{
     ControlToken, CreateOptions, ExtractOptions, FormatError, NoProgress, OpenOptions, Password,
 };
@@ -170,7 +170,7 @@ fn solid_sevenz_conversion_preserves_contents_metadata_and_progress_including_sp
     let tmp = TempDir::new("convert-solid-7z");
     let source = tmp.path().join("source.7z");
     make_solid_sevenz(&source);
-    let original = engine().list(&source, &OpenOptions::default()).unwrap();
+    let original = read_archive_entries(&engine(), &source, &OpenOptions::default()).unwrap();
     assert_eq!(original.len(), 6);
     for split_size in [None, Some(128 * 1024)] {
         let destination = tmp.path().join(if split_size.is_some() {
@@ -201,9 +201,9 @@ fn solid_sevenz_conversion_preserves_contents_metadata_and_progress_including_sp
                 .iter()
                 .all(|path| fs::metadata(path).unwrap().len() <= 128 * 1024));
         }
-        let entries = engine()
-            .list(&report.primary_output, &OpenOptions::default())
-            .unwrap();
+        let entries =
+            read_archive_entries(&engine(), &report.primary_output, &OpenOptions::default())
+                .unwrap();
         assert_eq!(entries.len(), original.len());
         for before in &original {
             let name = before
@@ -500,8 +500,7 @@ fn unsplit_conversion_replaces_without_hidden_backup_artifacts() {
         fs::metadata(&destination).unwrap().len()
     );
     assert_eq!(
-        engine()
-            .list(&destination, &OpenOptions::default())
+        read_archive_entries(&engine(), &destination, &OpenOptions::default())
             .unwrap()
             .iter()
             .filter(|entry| matches!(entry.entry_type, squallz_core::api::EntryType::File))
@@ -611,8 +610,7 @@ fn conversion_policies_preserve_unapproved_changed_and_late_outputs() {
         )
         .unwrap();
     assert_eq!(
-        engine()
-            .list(&destination, &OpenOptions::default())
+        read_archive_entries(&engine(), &destination, &OpenOptions::default())
             .unwrap()
             .iter()
             .filter(|entry| matches!(entry.entry_type, squallz_core::api::EntryType::File))
@@ -661,14 +659,12 @@ fn conversion_policies_preserve_unapproved_changed_and_late_outputs() {
         )
         .unwrap());
     assert_eq!(
-        engine()
-            .list(&repaired, &OpenOptions::default())
+        read_archive_entries(&engine(), &repaired, &OpenOptions::default())
             .unwrap()
             .into_iter()
             .map(|entry| entry.path.display)
             .collect::<Vec<_>>(),
-        engine()
-            .list(&source, &OpenOptions::default())
+        read_archive_entries(&engine(), &source, &OpenOptions::default())
             .unwrap()
             .into_iter()
             .map(|entry| entry.path.display)

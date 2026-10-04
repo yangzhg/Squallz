@@ -490,6 +490,7 @@ impl Source {
 /// Metadata collected for browsing, including whether opening encrypted
 /// headers actually verified the supplied password. Listing plaintext names
 /// in a data-encrypted archive does not verify its password.
+#[derive(Debug)]
 pub struct ArchiveListing {
     pub format: String,
     pub entries: Vec<EntryMeta>,
@@ -920,52 +921,11 @@ impl Engine {
         }
     }
 
-    /// Lists entries, returning the detected format and any native physical
-    /// volume set retained by the opened reader.
-    pub fn list_with_format_and_source_set(
-        &self,
-        path: &Path,
-        opts: &OpenOptions,
-    ) -> Result<(String, Vec<EntryMeta>, Option<api::ArchiveSourceSet>), FormatError> {
-        self.list_with_format_and_source_set_with_control(path, opts, &ControlToken::default())
-    }
-
-    /// Lists entries and retains native source-set metadata while honoring
-    /// pause and cancellation throughout opening and metadata iteration.
-    pub fn list_with_format_and_source_set_with_control(
-        &self,
-        path: &Path,
-        opts: &OpenOptions,
-        control: &ControlToken,
-    ) -> Result<(String, Vec<EntryMeta>, Option<api::ArchiveSourceSet>), FormatError> {
-        self.list_with_format_and_source_set_with_entry_limit_and_control(
-            path,
-            opts,
-            SafetyLimits::default().max_entries,
-            control,
-        )
-    }
-
-    /// Lists entries with an explicit metadata-count limit while retaining
-    /// source-set metadata and honoring pause and cancellation.
-    pub fn list_with_format_and_source_set_with_entry_limit_and_control(
-        &self,
-        path: &Path,
-        opts: &OpenOptions,
-        max_entries: u64,
-        control: &ControlToken,
-    ) -> Result<(String, Vec<EntryMeta>, Option<api::ArchiveSourceSet>), FormatError> {
-        self.list_with_format_source_set_and_structure_with_entry_limit_and_control(
-            path,
-            opts,
-            max_entries,
-            control,
-        )
-        .map(|listing| (listing.format, listing.entries, listing.source_set))
-    }
-
-    /// Lists entries while retaining the reader's explicit structural state.
-    pub fn list_with_format_source_set_and_structure_with_entry_limit_and_control(
+    /// Lists metadata with the detected format, source binding, structural
+    /// state and credential verification from the opened reader. The explicit
+    /// limit is checked before retaining another entry; opening and iteration
+    /// honor pause and cancellation.
+    pub fn list_archive(
         &self,
         path: &Path,
         opts: &OpenOptions,
@@ -1020,38 +980,6 @@ impl Engine {
         })
     }
 
-    /// Lists entries.
-    pub fn list(&self, path: &Path, opts: &OpenOptions) -> Result<Vec<EntryMeta>, FormatError> {
-        self.list_with_control(path, opts, &ControlToken::default())
-    }
-
-    /// Lists entries together with the structural state used to reach them.
-    pub fn list_with_structure(
-        &self,
-        path: &Path,
-        opts: &OpenOptions,
-    ) -> Result<(Vec<EntryMeta>, ArchiveStructureStatus), FormatError> {
-        self.list_with_format_source_set_and_structure_with_entry_limit_and_control(
-            path,
-            opts,
-            SafetyLimits::default().max_entries,
-            &ControlToken::default(),
-        )
-        .map(|listing| (listing.entries, listing.structure))
-    }
-
-    /// Lists entries while checking the shared pause/cancellation token
-    /// between archive entries.
-    pub fn list_with_control(
-        &self,
-        path: &Path,
-        opts: &OpenOptions,
-        control: &ControlToken,
-    ) -> Result<Vec<EntryMeta>, FormatError> {
-        self.list_with_format_and_source_set_with_control(path, opts, control)
-            .map(|(_, entries, _)| entries)
-    }
-
     /// Extracts everything or a selection of entries.
     #[allow(clippy::too_many_arguments)] // engine facade: each argument has a distinct role
     pub fn extract(
@@ -1102,34 +1030,7 @@ impl Engine {
     /// metadata list. Source members are checked before metadata iteration,
     /// after selection and again after destination planning, so the returned
     /// guard never authorizes a plan observed across a source-state change.
-    #[allow(clippy::too_many_arguments)] // engine facade: each argument has a distinct role
-    pub fn plan_extract_with_input_guard_controlled<F>(
-        &self,
-        archive: &Path,
-        requested_destination: &Path,
-        archive_display_path: &Path,
-        smart: bool,
-        open_opts: &OpenOptions,
-        control: &ControlToken,
-        select: F,
-    ) -> Result<(ExtractPlan, ExtractSpace, ExtractInputGuard), FormatError>
-    where
-        F: FnOnce(&[EntryMeta], &ControlToken) -> Result<Option<Vec<EntryPath>>, FormatError>,
-    {
-        self.plan_extract_with_input_guard_and_entry_limit_controlled(
-            archive,
-            requested_destination,
-            archive_display_path,
-            smart,
-            open_opts,
-            SafetyLimits::default().max_entries,
-            control,
-            select,
-        )
-    }
-
-    /// Builds a guarded extraction preflight with an explicit metadata-count
-    /// limit. The limit is checked before another entry is retained in memory.
+    /// The explicit metadata limit is checked before retaining another entry.
     #[allow(clippy::too_many_arguments)] // engine facade: each argument has a distinct role
     pub fn plan_extract_with_input_guard_and_entry_limit_controlled<F>(
         &self,
@@ -1177,25 +1078,6 @@ impl Engine {
     /// Builds the same extraction preflight from an already listed archive.
     /// Layout always considers `entries` in full; selection affects only the
     /// scope and conflict snapshot.
-    pub fn plan_extract_from_entries(
-        &self,
-        requested_destination: &Path,
-        archive_display_path: &Path,
-        entries: &[EntryMeta],
-        selection: Option<&[EntryPath]>,
-        smart: bool,
-    ) -> Result<ExtractPlan, FormatError> {
-        self.plan_extract_from_entries_with_control(
-            requested_destination,
-            archive_display_path,
-            entries,
-            selection,
-            smart,
-            &ControlToken::default(),
-        )
-    }
-
-    /// Controlled variant of [`Engine::plan_extract_from_entries`].
     pub fn plan_extract_from_entries_with_control(
         &self,
         requested_destination: &Path,
@@ -1223,78 +1105,10 @@ impl Engine {
     /// create the destination. Keeping the reader alive avoids reopening
     /// password-protected, split, nested, or streamed archives between
     /// preflight and extraction.
+    /// The optional input guard is validated against that same reader; the
+    /// returned structural state also comes from it without reopening.
     #[allow(clippy::too_many_arguments)] // engine facade: each argument has a distinct role
-    pub fn plan_and_extract_with_report_controlled<F, V>(
-        &self,
-        archive: &Path,
-        requested_destination: &Path,
-        archive_display_path: &Path,
-        smart: bool,
-        open_opts: &OpenOptions,
-        extract_opts: &ExtractOptions,
-        progress: &dyn ProgressSink,
-        ctl: &ControlToken,
-        select: F,
-        validate_plan: V,
-    ) -> Result<(ExtractPlan, api::ExtractReport), FormatError>
-    where
-        F: FnOnce(&[EntryMeta], &ControlToken) -> Result<Option<Vec<EntryPath>>, FormatError>,
-        V: FnOnce(&ExtractPlan) -> Result<(), FormatError>,
-    {
-        self.plan_and_extract_with_report_and_structure_controlled(
-            archive,
-            requested_destination,
-            archive_display_path,
-            smart,
-            open_opts,
-            extract_opts,
-            progress,
-            ctl,
-            select,
-            validate_plan,
-        )
-        .map(|(plan, report, _)| (plan, report))
-    }
-
-    /// Controlled extraction that also reports the structure of the reader
-    /// used for the operation. This does not reopen or rescan the archive.
-    #[allow(clippy::too_many_arguments)] // engine facade: each argument has a distinct role
-    pub fn plan_and_extract_with_report_and_structure_controlled<F, V>(
-        &self,
-        archive: &Path,
-        requested_destination: &Path,
-        archive_display_path: &Path,
-        smart: bool,
-        open_opts: &OpenOptions,
-        extract_opts: &ExtractOptions,
-        progress: &dyn ProgressSink,
-        ctl: &ControlToken,
-        select: F,
-        validate_plan: V,
-    ) -> Result<(ExtractPlan, api::ExtractReport, ArchiveStructureStatus), FormatError>
-    where
-        F: FnOnce(&[EntryMeta], &ControlToken) -> Result<Option<Vec<EntryPath>>, FormatError>,
-        V: FnOnce(&ExtractPlan) -> Result<(), FormatError>,
-    {
-        self.plan_and_extract_with_report_guarded_and_structure_controlled(
-            archive,
-            requested_destination,
-            archive_display_path,
-            smart,
-            open_opts,
-            extract_opts,
-            progress,
-            ctl,
-            None,
-            select,
-            validate_plan,
-        )
-    }
-
-    /// Guarded extraction that also reports the structure of the same reader
-    /// used for guard validation, planning, and extraction.
-    #[allow(clippy::too_many_arguments)] // shared guarded extraction implementation
-    pub fn plan_and_extract_with_report_guarded_and_structure_controlled<F, V>(
+    pub fn extract_planned<F, V>(
         &self,
         archive: &Path,
         requested_destination: &Path,
@@ -1451,6 +1265,8 @@ impl Engine {
     /// Creates an archive using an explicit final publication policy.
     /// `ReplaceIfUnchanged` binds replacement to the destination state
     /// returned by [`inspect_create_destination`].
+    /// `NoReplace` refuses an output that appears before commit; split
+    /// creation checks the managed output family while holding its lock.
     pub fn create_with_report_policy(
         &self,
         dest: &Path,
@@ -1461,20 +1277,6 @@ impl Engine {
         ctl: &ControlToken,
     ) -> Result<CreateReport, FormatError> {
         create::create_report_with_policy(self, dest, inputs, opts, policy, progress, ctl)
-    }
-
-    /// Creates an archive without replacing an output that appears before
-    /// the final commit. Split creation rejects any existing member of the
-    /// managed output family while holding the split commit lock.
-    pub fn create_with_report_no_replace(
-        &self,
-        dest: &Path,
-        inputs: &[PathBuf],
-        opts: &CreateOptions,
-        progress: &dyn ProgressSink,
-        ctl: &ControlToken,
-    ) -> Result<CreateReport, FormatError> {
-        create::create_no_replace(self, dest, inputs, opts, progress, ctl)
     }
 
     /// Verified creation using an explicit final publication policy.
@@ -1488,26 +1290,6 @@ impl Engine {
         ctl: &ControlToken,
     ) -> Result<VerifiedCreateReport, FormatError> {
         create::create_verified(self, dest, inputs, opts, progress, ctl, policy)
-    }
-
-    /// Verified creation with commit-time no-replace semantics.
-    pub fn create_with_verification_no_replace(
-        &self,
-        dest: &Path,
-        inputs: &[PathBuf],
-        opts: &CreateOptions,
-        progress: &dyn ProgressSink,
-        ctl: &ControlToken,
-    ) -> Result<VerifiedCreateReport, FormatError> {
-        create::create_verified(
-            self,
-            dest,
-            inputs,
-            opts,
-            progress,
-            ctl,
-            CreateCommitPolicy::NoReplace,
-        )
     }
 
     /// Builds a conservative output/workspace plan using the same input and
@@ -1560,8 +1342,9 @@ impl Engine {
             .and_then(|name| name.to_str())
             .ok_or_else(|| FormatError::Unsupported("invalid output file name".into()))?;
         create::validate_create_target_name(self, detect_name, create_opts)?;
-        let entries = self.list_with_control(src, open_opts, ctl)?;
-        convert::plan_convert_from_entries(self, dest, &entries, create_opts)
+        let listing =
+            self.list_archive(src, open_opts, SafetyLimits::default().max_entries, ctl)?;
+        convert::plan_convert_from_entries(self, dest, &listing.entries, create_opts)
     }
 
     /// Walks local inputs with the same exclude semantics as archive creation
@@ -2181,17 +1964,6 @@ pub(crate) fn remove_bound_temp_file(
     }
 }
 
-#[cfg(test)]
-pub(crate) fn replace_file(tmp: &Path, dest: &Path) -> Result<(), FormatError> {
-    let parent = open_parent_directory(dest)?;
-    replace_file_with(
-        tmp,
-        dest,
-        &mut |from, to| atomic_replace_file(from, to),
-        &mut || parent.sync_all(),
-    )
-}
-
 pub(crate) fn open_parent_directory(path: &Path) -> io::Result<File> {
     open_directory(parent_or_current(path))
 }
@@ -2553,23 +2325,6 @@ where
 
 pub(crate) fn output_exists_error(dest: &Path) -> FormatError {
     FormatError::output_exists(dest)
-}
-
-#[cfg(test)]
-fn replace_file_with<R, S>(
-    tmp: &Path,
-    dest: &Path,
-    replace: &mut R,
-    sync_parent: &mut S,
-) -> Result<(), FormatError>
-where
-    R: FnMut(&Path, &Path) -> std::io::Result<()>,
-    S: FnMut() -> std::io::Result<()>,
-{
-    sync_staged_file(tmp)?;
-    replace(tmp, dest)?;
-    sync_parent()?;
-    Ok(())
 }
 
 fn sync_staged_file(path: &Path) -> io::Result<()> {
@@ -3281,7 +3036,7 @@ mod tests {
         let (engine, opens, extracts) = counting_extract_engine(3, 7);
 
         let error = engine
-            .list_with_format_and_source_set_with_entry_limit_and_control(
+            .list_archive(
                 &archive,
                 &OpenOptions::default(),
                 2,
@@ -3342,7 +3097,7 @@ mod tests {
         extract_options.limits.max_entries = 2;
 
         let error = engine
-            .plan_and_extract_with_report_controlled(
+            .extract_planned(
                 &archive,
                 &destination,
                 &archive,
@@ -3351,6 +3106,7 @@ mod tests {
                 &extract_options,
                 &api::NoProgress,
                 &ControlToken::default(),
+                None,
                 |_, _| Ok(None),
                 |_| Ok(()),
             )
@@ -3375,8 +3131,8 @@ mod tests {
         std::fs::write(&archive, b"archive").unwrap();
         let (engine, opens, extracts) = counting_extract_engine(1, 7);
 
-        let (plan, report) = engine
-            .plan_and_extract_with_report_controlled(
+        let (plan, report, _) = engine
+            .extract_planned(
                 &archive,
                 &destination,
                 &archive,
@@ -3385,6 +3141,7 @@ mod tests {
                 &ExtractOptions::default(),
                 &api::NoProgress,
                 &ControlToken::default(),
+                None,
                 |_, _| Ok(None),
                 |_| Ok(()),
             )
@@ -3419,7 +3176,7 @@ mod tests {
         let engine = Engine::new(registry);
 
         let (_, _, structure) = engine
-            .plan_and_extract_with_report_guarded_and_structure_controlled(
+            .extract_planned(
                 &archive,
                 &destination,
                 &archive,
@@ -3470,12 +3227,13 @@ mod tests {
         let control = ControlToken::default();
 
         let (_, _, input_guard) = engine
-            .plan_extract_with_input_guard_controlled(
+            .plan_extract_with_input_guard_and_entry_limit_controlled(
                 &archive,
                 &destination,
                 &archive,
                 false,
                 &OpenOptions::default(),
+                SafetyLimits::default().max_entries,
                 &control,
                 |_, _| Ok(None),
             )
@@ -3483,7 +3241,7 @@ mod tests {
         std::fs::write(&companion, b"changed companion").unwrap();
 
         let error = engine
-            .plan_and_extract_with_report_guarded_and_structure_controlled(
+            .extract_planned(
                 &archive,
                 &destination,
                 &archive,
@@ -3515,7 +3273,7 @@ mod tests {
         let (engine, opens, extracts) = counting_extract_engine(1, 7);
 
         let error = engine
-            .plan_and_extract_with_report_controlled(
+            .extract_planned(
                 &archive,
                 &destination,
                 &archive,
@@ -3524,6 +3282,7 @@ mod tests {
                 &ExtractOptions::default(),
                 &api::NoProgress,
                 &ControlToken::default(),
+                None,
                 |_, _| Ok(None),
                 |plan| Err(FormatError::destination_changed(&plan.destination)),
             )
@@ -3545,7 +3304,7 @@ mod tests {
         let (engine, opens, extracts) = counting_extract_engine(1, u64::MAX);
 
         let error = engine
-            .plan_and_extract_with_report_controlled(
+            .extract_planned(
                 &archive,
                 &destination,
                 &archive,
@@ -3554,6 +3313,7 @@ mod tests {
                 &ExtractOptions::default(),
                 &api::NoProgress,
                 &ControlToken::default(),
+                None,
                 |_, _| Ok(None),
                 |_| Ok(()),
             )
@@ -3756,7 +3516,14 @@ mod tests {
         let f = dir.join("blob.unknown");
         std::fs::write(&f, b"not an archive at all").unwrap();
         let engine = Engine::new(FormatRegistry::new());
-        let err = engine.list(&f, &OpenOptions::default()).unwrap_err();
+        let err = engine
+            .list_archive(
+                &f,
+                &OpenOptions::default(),
+                SafetyLimits::default().max_entries,
+                &ControlToken::default(),
+            )
+            .unwrap_err();
         assert!(matches!(err, FormatError::Unsupported(_)));
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -3796,68 +3563,6 @@ mod tests {
     }
 
     #[test]
-    fn replace_file_preserves_a_late_destination_when_install_fails() {
-        let dir = temp_dir("replace-race");
-        let dest = dir.join("archive.zip");
-        let tmp = dir.join("archive.tmp");
-        std::fs::write(&dest, b"old").unwrap();
-        std::fs::write(&tmp, b"new").unwrap();
-
-        let error = replace_file_with(
-            &tmp,
-            &dest,
-            &mut |_from, to| {
-                std::fs::write(to, b"late competitor")?;
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::PermissionDenied,
-                    "injected install failure",
-                ))
-            },
-            &mut || panic!("parent sync must not run after a failed replacement"),
-        )
-        .unwrap_err();
-
-        assert!(matches!(error, FormatError::Io(_)));
-        assert_eq!(std::fs::read(&dest).unwrap(), b"late competitor");
-        assert_eq!(std::fs::read(&tmp).unwrap(), b"new");
-        assert!(!std::fs::read_dir(&dir).unwrap().any(|entry| {
-            entry
-                .unwrap()
-                .file_name()
-                .to_string_lossy()
-                .contains("replace-backup")
-        }));
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn replace_file_does_not_reverse_commit_when_parent_sync_fails() {
-        let dir = temp_dir("replace-sync");
-        let dest = dir.join("archive.zip");
-        let tmp = dir.join("archive.tmp");
-        std::fs::write(&dest, b"old").unwrap();
-        std::fs::write(&tmp, b"new").unwrap();
-
-        let error = replace_file_with(
-            &tmp,
-            &dest,
-            &mut |from, to| std::fs::rename(from, to),
-            &mut || {
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::PermissionDenied,
-                    "injected directory sync failure",
-                ))
-            },
-        )
-        .unwrap_err();
-
-        assert!(matches!(error, FormatError::Io(_)));
-        assert_eq!(std::fs::read(&dest).unwrap(), b"new");
-        assert!(!tmp.exists());
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
     fn replace_file_atomically_replaces_without_backup_artifacts() {
         let dir = temp_dir("replace-atomic");
         let dest = dir.join("archive.zip");
@@ -3865,7 +3570,7 @@ mod tests {
         std::fs::write(&dest, b"old").unwrap();
         std::fs::write(&tmp, b"new").unwrap();
 
-        replace_file(&tmp, &dest).unwrap();
+        replace_file_atomically(&tmp, &dest).unwrap();
 
         assert_eq!(std::fs::read(&dest).unwrap(), b"new");
         assert!(!tmp.exists());
@@ -3945,10 +3650,11 @@ mod tests {
         let ctl = ControlToken::new();
 
         let error = engine
-            .create_with_report_no_replace(
+            .create_with_report_policy(
                 &dest,
                 std::slice::from_ref(&input),
                 &CreateOptions::default(),
+                CreateCommitPolicy::NoReplace,
                 &progress,
                 &ctl,
             )
@@ -4690,10 +4396,11 @@ mod tests {
         };
 
         let error = engine
-            .create_with_report_no_replace(
+            .create_with_report_policy(
                 &dest,
                 std::slice::from_ref(&input),
                 &options,
+                CreateCommitPolicy::NoReplace,
                 &progress,
                 &ctl,
             )
@@ -4726,10 +4433,11 @@ mod tests {
         let engine = Engine::new(registry);
 
         let report = engine
-            .create_with_report_no_replace(
+            .create_with_report_policy(
                 &dest,
                 std::slice::from_ref(&input),
                 &CreateOptions::default(),
+                CreateCommitPolicy::NoReplace,
                 &api::NoProgress,
                 &ControlToken::new(),
             )
@@ -4743,13 +4451,14 @@ mod tests {
 
         let split_dest = dir.join("split.test");
         let split_report = engine
-            .create_with_report_no_replace(
+            .create_with_report_policy(
                 &split_dest,
                 std::slice::from_ref(&input),
                 &CreateOptions {
                     split_size: Some(1024),
                     ..CreateOptions::default()
                 },
+                CreateCommitPolicy::NoReplace,
                 &api::NoProgress,
                 &ControlToken::new(),
             )
@@ -4945,10 +4654,11 @@ mod tests {
         let engine = Engine::new(registry);
 
         let verified = engine
-            .create_with_verification_no_replace(
+            .create_with_verification_policy(
                 &dest,
                 std::slice::from_ref(&input),
                 &CreateOptions::default(),
+                CreateCommitPolicy::NoReplace,
                 &api::NoProgress,
                 &ControlToken::new(),
             )
@@ -4989,10 +4699,11 @@ mod tests {
         }));
 
         let verified = Engine::new(registry)
-            .create_with_verification_no_replace(
+            .create_with_verification_policy(
                 &dest,
                 std::slice::from_ref(&root),
                 &CreateOptions::default(),
+                CreateCommitPolicy::NoReplace,
                 &api::NoProgress,
                 &ControlToken::new(),
             )
@@ -5052,10 +4763,11 @@ mod tests {
         }));
 
         let verified = Engine::new(registry)
-            .create_with_verification_no_replace(
+            .create_with_verification_policy(
                 &dest,
                 std::slice::from_ref(&link),
                 &CreateOptions::default(),
+                CreateCommitPolicy::NoReplace,
                 &api::NoProgress,
                 &ControlToken::new(),
             )

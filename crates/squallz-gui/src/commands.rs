@@ -2550,6 +2550,7 @@ pub fn set_performance_options(
 
 #[cfg(test)]
 mod tests {
+    use crate::jobs::test_support::read_archive_entries;
     use crate::preview_sessions::PreviewSessionManager;
     use squallz_core::api::{
         CompressionLevel, ControlToken, CreateOptions, EntryPath, ExtractOptions, NoProgress,
@@ -3503,9 +3504,7 @@ mod tests {
             .unwrap();
         // ZIP names are readable before the data password has been supplied.
         assert_eq!(
-            state
-                .engine
-                .list(&outer, &OpenOptions::default())
+            read_archive_entries(&state.engine, &outer, &OpenOptions::default())
                 .unwrap()
                 .len(),
             1
@@ -4588,17 +4587,16 @@ mod tests {
                 .unwrap();
             // Both ZIP directories are readable even with the wrong password.
             assert_eq!(
-                state
-                    .engine
-                    .list(
-                        &archive,
-                        &OpenOptions {
-                            password: Some(Password::new("wrong")),
-                            ..OpenOptions::default()
-                        }
-                    )
-                    .unwrap()
-                    .len(),
+                read_archive_entries(
+                    &state.engine,
+                    &archive,
+                    &OpenOptions {
+                        password: Some(Password::new("wrong")),
+                        ..OpenOptions::default()
+                    }
+                )
+                .unwrap()
+                .len(),
                 1
             );
             let error = remember_archive_password_impl(

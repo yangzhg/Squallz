@@ -10,7 +10,9 @@ use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use common::{build_stored_zip, command_exists, crc32, engine, RawZipEntry, TempDir};
+use common::{
+    build_stored_zip, command_exists, crc32, engine, read_archive_entries, RawZipEntry, TempDir,
+};
 use squallz_format_api::{
     CompressionLevel, ControlToken, CreateOptions, Detected, EntryMeta, EntryPath, EntryType,
     ExtractOptions, ExtractProblemReporter, FormatError, NoProgress, OpenOptions, OverwritePolicy,
@@ -329,7 +331,7 @@ fn create_excludes_existing_output_and_inner_temp_from_multiple_inputs() {
         .unwrap();
 
     assert!(!progress.saw_unexpected.load(Ordering::Relaxed));
-    let entries = engine().list(&archive, &OpenOptions::default()).unwrap();
+    let entries = read_archive_entries(&engine(), &archive, &OpenOptions::default()).unwrap();
     let names: Vec<_> = entries
         .iter()
         .map(|entry| entry.path.display.as_str())
@@ -424,8 +426,7 @@ fn create_keeps_a_differently_named_hardlink_as_an_input() {
         .unwrap();
 
     assert_eq!(fs::read(&input).unwrap(), original);
-    let names: Vec<_> = engine()
-        .list(&archive, &OpenOptions::default())
+    let names: Vec<_> = read_archive_entries(&engine(), &archive, &OpenOptions::default())
         .unwrap()
         .into_iter()
         .map(|entry| entry.path.display)
@@ -463,8 +464,7 @@ fn create_excludes_output_temp_through_symlinked_parent() {
         .unwrap();
 
     assert!(!progress.saw_unexpected.load(Ordering::Relaxed));
-    let names: Vec<_> = engine()
-        .list(&archive, &OpenOptions::default())
+    let names: Vec<_> = read_archive_entries(&engine(), &archive, &OpenOptions::default())
         .unwrap()
         .into_iter()
         .map(|entry| entry.path.display)
@@ -547,12 +547,15 @@ fn split_create_excludes_old_target_volumes_without_prefix_overreach() {
         .unwrap();
 
     assert!(!progress.saw_unexpected.load(Ordering::Relaxed));
-    let names: Vec<_> = engine
-        .list(&project.join("bundle.zip.001"), &OpenOptions::default())
-        .unwrap()
-        .into_iter()
-        .map(|entry| entry.path.display)
-        .collect();
+    let names: Vec<_> = read_archive_entries(
+        &engine,
+        &project.join("bundle.zip.001"),
+        &OpenOptions::default(),
+    )
+    .unwrap()
+    .into_iter()
+    .map(|entry| entry.path.display)
+    .collect();
     assert!(names.iter().any(|name| name == "project/keep.bin"));
     assert!(names
         .iter()
@@ -616,12 +619,15 @@ fn split_create_excludes_case_variant_volumes_on_case_insensitive_filesystems() 
         )
         .unwrap();
 
-    let names: Vec<_> = engine()
-        .list(&project.join("bundle.zip.001"), &OpenOptions::default())
-        .unwrap()
-        .into_iter()
-        .map(|entry| entry.path.display)
-        .collect();
+    let names: Vec<_> = read_archive_entries(
+        &engine(),
+        &project.join("bundle.zip.001"),
+        &OpenOptions::default(),
+    )
+    .unwrap()
+    .into_iter()
+    .map(|entry| entry.path.display)
+    .collect();
     assert!(!names.iter().any(|name| name == "project/BUNDLE.ZIP.999"));
     assert!(names
         .iter()
@@ -647,7 +653,7 @@ fn roundtrip_create_list_extract_test() {
     .unwrap();
 
     // List: every fixture path is present with correct metadata.
-    let entries = eng.list(&archive, &OpenOptions::default()).unwrap();
+    let entries = read_archive_entries(&eng, &archive, &OpenOptions::default()).unwrap();
     let names: Vec<&str> = entries.iter().map(|e| e.path.display.as_str()).collect();
     let has = |n: &str| {
         names
@@ -783,7 +789,7 @@ fn interop_system_zip_is_readable() {
     assert!(status.status.success());
 
     let eng = engine();
-    let entries = eng.list(&archive, &OpenOptions::default()).unwrap();
+    let entries = read_archive_entries(&eng, &archive, &OpenOptions::default()).unwrap();
     assert!(entries.iter().any(|e| e.path.display == "data/one.txt"));
     let dest = tmp.path().join("dest");
     eng.extract(
@@ -838,8 +844,18 @@ fn interop_infozip_native_split_opens_from_any_volume() {
     assert!(final_path.is_file());
 
     let eng = engine();
-    let (format, entries, source_set) = eng
-        .list_with_format_and_source_set(&second, &OpenOptions::default())
+    let squallz_core::ArchiveListing {
+        format,
+        entries,
+        source_set,
+        ..
+    } = eng
+        .list_archive(
+            &second,
+            &OpenOptions::default(),
+            squallz_format_api::SafetyLimits::default().max_entries,
+            &ControlToken::default(),
+        )
         .unwrap();
     assert_eq!(format, "zip");
     assert_eq!(entries.len(), 1);
@@ -876,7 +892,7 @@ fn interop_infozip_native_split_opens_from_any_volume() {
 
     let hidden = tmp.path().join("native.z02.missing");
     fs::rename(&second, &hidden).unwrap();
-    let error = eng.list(&first, &OpenOptions::default()).unwrap_err();
+    let error = read_archive_entries(&eng, &first, &OpenOptions::default()).unwrap_err();
     assert_eq!(error.missing_volume_path(), Some(second.as_path()));
     fs::rename(hidden, second).unwrap();
 }
@@ -894,7 +910,7 @@ fn empty_zip_lists_zero_entries() {
         &ControlToken::new(),
     )
     .unwrap();
-    let entries = eng.list(&archive, &OpenOptions::default()).unwrap();
+    let entries = read_archive_entries(&eng, &archive, &OpenOptions::default()).unwrap();
     assert!(entries.is_empty());
 }
 
@@ -906,7 +922,7 @@ fn garbage_and_truncated_zip_report_corrupt() {
     // A zero-byte and a garbage file with .zip extension.
     let garbage = tmp.path().join("garbage.zip");
     fs::write(&garbage, b"this is definitely not a zip file").unwrap();
-    let err = eng.list(&garbage, &OpenOptions::default()).unwrap_err();
+    let err = read_archive_entries(&eng, &garbage, &OpenOptions::default()).unwrap_err();
     assert!(matches!(err, FormatError::CorruptArchive(_)), "{err:?}");
 
     // A real zip truncated inside the first file payload remains corrupt:
@@ -935,7 +951,7 @@ fn garbage_and_truncated_zip_report_corrupt() {
         &bytes[..data_offset + (compressed_size / 2).max(1)],
     )
     .unwrap();
-    let err = eng.list(&truncated, &OpenOptions::default()).unwrap_err();
+    let err = read_archive_entries(&eng, &truncated, &OpenOptions::default()).unwrap_err();
     assert!(matches!(err, FormatError::CorruptArchive(_)), "{err:?}");
 }
 
@@ -959,9 +975,7 @@ fn malformed_zip64_unsigned_descriptor_does_not_overflow() {
     ];
     fs::write(&archive, bytes).unwrap();
 
-    let err = engine()
-        .list(&archive, &OpenOptions::default())
-        .unwrap_err();
+    let err = read_archive_entries(&engine(), &archive, &OpenOptions::default()).unwrap_err();
     assert!(
         matches!(
             err,
@@ -1078,7 +1092,7 @@ fn local_header_fallback_extracts_when_central_directory_is_missing() {
     fs::write(&archive, bytes).unwrap();
 
     let eng = engine();
-    let entries = eng.list(&archive, &OpenOptions::default()).unwrap();
+    let entries = read_archive_entries(&eng, &archive, &OpenOptions::default()).unwrap();
     let names: Vec<String> = entries
         .iter()
         .map(|entry| entry.path.display.clone())
@@ -1128,7 +1142,7 @@ fn local_header_fallback_extracts_zip64_local_sizes() {
     .unwrap();
 
     let eng = engine();
-    let entries = eng.list(&archive, &OpenOptions::default()).unwrap();
+    let entries = read_archive_entries(&eng, &archive, &OpenOptions::default()).unwrap();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].path.display, "large-marker.bin");
     assert_eq!(entries[0].size, 26);
@@ -1176,7 +1190,7 @@ fn local_header_fallback_lists_encrypted_entries_but_requires_password_to_read()
     .unwrap();
 
     let eng = engine();
-    let entries = eng.list(&archive, &OpenOptions::default()).unwrap();
+    let entries = read_archive_entries(&eng, &archive, &OpenOptions::default()).unwrap();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].path.display, "secret.txt");
     assert!(entries[0].encrypted);
@@ -1225,7 +1239,7 @@ fn local_header_fallback_lists_unsupported_methods_but_refuses_to_read() {
     .unwrap();
 
     let eng = engine();
-    let entries = eng.list(&archive, &OpenOptions::default()).unwrap();
+    let entries = read_archive_entries(&eng, &archive, &OpenOptions::default()).unwrap();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].path.display, "compressed.bin");
     assert_eq!(entries[0].size, 25);
@@ -1296,7 +1310,7 @@ fn local_header_fallback_extracts_signed_zip64_data_descriptor_entries() {
     fs::write(&archive, bytes).unwrap();
 
     let eng = engine();
-    let entries = eng.list(&archive, &OpenOptions::default()).unwrap();
+    let entries = read_archive_entries(&eng, &archive, &OpenOptions::default()).unwrap();
     let names: Vec<String> = entries
         .iter()
         .map(|entry| entry.path.display.clone())
@@ -1362,7 +1376,7 @@ fn local_header_fallback_extracts_unsigned_zip64_data_descriptor_entries() {
     fs::write(&archive, bytes).unwrap();
 
     let eng = engine();
-    let entries = eng.list(&archive, &OpenOptions::default()).unwrap();
+    let entries = read_archive_entries(&eng, &archive, &OpenOptions::default()).unwrap();
     let names: Vec<String> = entries
         .iter()
         .map(|entry| entry.path.display.clone())
@@ -1428,7 +1442,7 @@ fn local_header_fallback_extracts_signed_data_descriptor_entries() {
     fs::write(&archive, bytes).unwrap();
 
     let eng = engine();
-    let entries = eng.list(&archive, &OpenOptions::default()).unwrap();
+    let entries = read_archive_entries(&eng, &archive, &OpenOptions::default()).unwrap();
     let names: Vec<String> = entries
         .iter()
         .map(|entry| entry.path.display.clone())
@@ -1492,7 +1506,7 @@ fn local_header_fallback_extracts_unsigned_data_descriptor_entries() {
     fs::write(&archive, bytes).unwrap();
 
     let eng = engine();
-    let entries = eng.list(&archive, &OpenOptions::default()).unwrap();
+    let entries = read_archive_entries(&eng, &archive, &OpenOptions::default()).unwrap();
     let names: Vec<String> = entries
         .iter()
         .map(|entry| entry.path.display.clone())
@@ -1550,7 +1564,7 @@ fn local_header_fallback_reports_crc_mismatch() {
     fs::write(&archive, bytes).unwrap();
 
     let eng = engine();
-    let entries = eng.list(&archive, &OpenOptions::default()).unwrap();
+    let entries = read_archive_entries(&eng, &archive, &OpenOptions::default()).unwrap();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].path.display, "bad.txt");
 

@@ -6,7 +6,7 @@ mod common;
 use std::fs;
 use std::path::Path;
 
-use common::{engine, TempDir};
+use common::{engine, read_archive_entries, TempDir};
 use squallz_core::api::{
     ControlToken, CreateOptions, EntryType, ExtractOptions, FormatError, NoProgress, OpenOptions,
     SqzCreateOptions, SqzInnerFormat,
@@ -128,7 +128,7 @@ fn sqz_file_header_crc_damage_falls_back_to_footer() {
     let damaged = tmp.path().join("damaged-header.sqz");
     fs::write(&damaged, bytes).unwrap();
 
-    let entries = eng.list(&damaged, &OpenOptions::default()).unwrap();
+    let entries = read_archive_entries(&eng, &damaged, &OpenOptions::default()).unwrap();
     assert!(entries.iter().any(|e| e.path.display == "project/a.txt"));
     let report = eng
         .test_summary(
@@ -178,7 +178,7 @@ fn sqz_valid_header_footer_uuid_mismatch_fails() {
     let damaged = tmp.path().join("valid-header-wrong-uuid.sqz");
     fs::write(&damaged, bytes).unwrap();
 
-    let err = eng.list(&damaged, &OpenOptions::default()).unwrap_err();
+    let err = read_archive_entries(&eng, &damaged, &OpenOptions::default()).unwrap_err();
     assert!(matches!(err, FormatError::CorruptArchive(_)), "{err:?}");
 }
 
@@ -205,7 +205,7 @@ fn sqz_footer_header_valid_crc_bad_index_bounds_fails() {
     let damaged = tmp.path().join("valid-footer-bad-index.sqz");
     fs::write(&damaged, bytes).unwrap();
 
-    let err = eng.list(&damaged, &OpenOptions::default()).unwrap_err();
+    let err = read_archive_entries(&eng, &damaged, &OpenOptions::default()).unwrap_err();
     assert!(matches!(err, FormatError::CorruptArchive(_)), "{err:?}");
 }
 
@@ -235,7 +235,7 @@ fn sqz_footer_magic_damage_recovers_from_recovery_scan() {
     let damaged = tmp.path().join("damaged-footer-magic.sqz");
     fs::write(&damaged, bytes).unwrap();
 
-    let entries = eng.list(&damaged, &OpenOptions::default()).unwrap();
+    let entries = read_archive_entries(&eng, &damaged, &OpenOptions::default()).unwrap();
     assert!(entries.iter().any(|e| e.path.display == "project/a.txt"));
     let report = eng
         .test_summary(
@@ -288,7 +288,7 @@ fn sqz_footer_crc_field_damage_recovers_from_recovery_scan() {
     let damaged = tmp.path().join("damaged-footer-crc-field.sqz");
     fs::write(&damaged, bytes).unwrap();
 
-    let entries = eng.list(&damaged, &OpenOptions::default()).unwrap();
+    let entries = read_archive_entries(&eng, &damaged, &OpenOptions::default()).unwrap();
     assert!(entries.iter().any(|e| e.path.display == "project/a.txt"));
     let report = eng
         .test_summary(
@@ -339,7 +339,7 @@ fn sqz_recovery_protection_trailer_damage_uses_intact_primary() {
     let damaged = tmp.path().join("damaged-rspc-trailer.sqz");
     fs::write(&damaged, bytes).unwrap();
 
-    let entries = eng.list(&damaged, &OpenOptions::default()).unwrap();
+    let entries = read_archive_entries(&eng, &damaged, &OpenOptions::default()).unwrap();
     assert!(entries.iter().any(|e| e.path.display == "project/a.txt"));
     let report = eng
         .test_summary(
@@ -391,7 +391,7 @@ fn sqz_recovery_protection_trailer_and_primary_damage_fails() {
     let damaged = tmp.path().join("damaged-rspc-trailer-primary.sqz");
     fs::write(&damaged, bytes).unwrap();
 
-    let err = eng.list(&damaged, &OpenOptions::default()).unwrap_err();
+    let err = read_archive_entries(&eng, &damaged, &OpenOptions::default()).unwrap_err();
     assert!(matches!(err, FormatError::CorruptArchive(_)), "{err:?}");
 }
 
@@ -420,7 +420,7 @@ fn sqz_recovery_protection_trailer_valid_crc_bad_version_fails() {
     let damaged = tmp.path().join("damaged-rspc-trailer-version.sqz");
     fs::write(&damaged, bytes).unwrap();
 
-    let err = eng.list(&damaged, &OpenOptions::default()).unwrap_err();
+    let err = read_archive_entries(&eng, &damaged, &OpenOptions::default()).unwrap_err();
     assert!(matches!(err, FormatError::Unsupported(_)), "{err:?}");
 }
 
@@ -441,7 +441,7 @@ fn sqz_roundtrip_create_list_extract_test() {
     )
     .unwrap();
 
-    let entries = eng.list(&archive, &OpenOptions::default()).unwrap();
+    let entries = read_archive_entries(&eng, &archive, &OpenOptions::default()).unwrap();
     assert!(entries.iter().any(|e| e.path.display == "project/a.txt"));
     assert!(entries
         .iter()
@@ -517,19 +517,18 @@ fn sqz_sniffs_without_extension_and_detects_corruption() {
 
     let anonymous = tmp.path().join("blob.bin");
     fs::copy(&archive, &anonymous).unwrap();
-    assert!(eng
-        .list(&anonymous, &OpenOptions::default())
-        .unwrap()
-        .iter()
-        .any(|e| e.path.display == "project/a.txt"));
+    assert!(
+        read_archive_entries(&eng, &anonymous, &OpenOptions::default())
+            .unwrap()
+            .iter()
+            .any(|e| e.path.display == "project/a.txt")
+    );
 
     let mut truncated = fs::read(&archive).unwrap();
     truncated.truncate(truncated.len() - 16);
     let truncated_path = tmp.path().join("truncated.sqz");
     fs::write(&truncated_path, truncated).unwrap();
-    let err = eng
-        .list(&truncated_path, &OpenOptions::default())
-        .unwrap_err();
+    let err = read_archive_entries(&eng, &truncated_path, &OpenOptions::default()).unwrap_err();
     assert!(matches!(err, FormatError::CorruptArchive(_)), "{err:?}");
 }
 
@@ -558,7 +557,7 @@ fn sqz_recovery_section_self_protection_repairs_primary_damage() {
     let damaged = tmp.path().join("damaged-recovery-primary.sqz");
     fs::write(&damaged, bytes).unwrap();
 
-    let entries = eng.list(&damaged, &OpenOptions::default()).unwrap();
+    let entries = read_archive_entries(&eng, &damaged, &OpenOptions::default()).unwrap();
     assert!(entries.iter().any(|e| e.path.display == "project/a.txt"));
     let report = eng
         .test_summary(
@@ -609,7 +608,7 @@ fn sqz_recovery_section_self_protection_reports_over_limit_damage() {
     let damaged = tmp.path().join("damaged-recovery-primary-over-limit.sqz");
     fs::write(&damaged, bytes).unwrap();
 
-    let err = eng.list(&damaged, &OpenOptions::default()).unwrap_err();
+    let err = read_archive_entries(&eng, &damaged, &OpenOptions::default()).unwrap_err();
     assert!(matches!(err, FormatError::CorruptArchive(_)), "{err:?}");
 }
 
@@ -1030,7 +1029,7 @@ fn sqz_index_mirror_recovers_when_footer_index_is_damaged() {
     let damaged = tmp.path().join("damaged-index.sqz");
     fs::write(&damaged, bytes).unwrap();
 
-    let entries = eng.list(&damaged, &OpenOptions::default()).unwrap();
+    let entries = read_archive_entries(&eng, &damaged, &OpenOptions::default()).unwrap();
     assert!(entries.iter().any(|e| e.path.display == "project/a.txt"));
 
     let out = tmp.path().join("out");
@@ -1076,6 +1075,6 @@ fn sqz_index_corruption_fails_when_primary_mirror_and_protection_are_damaged() {
     let damaged = tmp.path().join("damaged-index-and-mirror.sqz");
     fs::write(&damaged, bytes).unwrap();
 
-    let err = eng.list(&damaged, &OpenOptions::default()).unwrap_err();
+    let err = read_archive_entries(&eng, &damaged, &OpenOptions::default()).unwrap_err();
     assert!(matches!(err, FormatError::CorruptArchive(_)), "{err:?}");
 }

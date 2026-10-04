@@ -9,7 +9,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
 
-use common::{command_exists, engine, TempDir};
+use common::{command_exists, engine, read_archive_entries, TempDir};
 use squallz_core::api::{
     ControlToken, CreateOptions, EntryPath, EntryType, ExtractOptions, ExtractReport, FormatError,
     NoProgress, OpenOptions, OverwritePolicy, Password, SafetyLimits, SymlinkPolicy,
@@ -71,7 +71,7 @@ fn sevenz_roundtrip_list_test_extract() {
     );
     assert!(!empty_out.exists());
 
-    let entries = engine.list(&archive, &OpenOptions::default()).unwrap();
+    let entries = read_archive_entries(&engine, &archive, &OpenOptions::default()).unwrap();
     let file = entries
         .iter()
         .find(|e| e.path.display == "tree/a.txt")
@@ -159,7 +159,7 @@ fn sevenz_encrypted_content_requires_password() {
 
     // Without a password: names are visible (header not encrypted), but
     // content access fails.
-    let entries = engine.list(&archive, &OpenOptions::default()).unwrap();
+    let entries = read_archive_entries(&engine, &archive, &OpenOptions::default()).unwrap();
     assert!(entries.iter().any(|e| e.path.display == "tree/a.txt"));
     assert!(entries.iter().any(|e| e.encrypted));
     assert!(engine
@@ -302,7 +302,7 @@ fn password_verification_does_not_accept_a_plain_duplicate_as_encryption_proof()
     writer.finish().unwrap();
 
     let engine = engine();
-    let entries = engine.list(&archive, &OpenOptions::default()).unwrap();
+    let entries = read_archive_entries(&engine, &archive, &OpenOptions::default()).unwrap();
     assert_eq!(entries.len(), 2);
     assert!(entries[0].encrypted);
     assert!(!entries[1].encrypted);
@@ -341,7 +341,7 @@ fn sevenz_encrypted_header_requires_password_to_list() {
         .unwrap();
 
     // Without a password even listing must fail with PasswordRequired.
-    let err = engine.list(&archive, &OpenOptions::default()).unwrap_err();
+    let err = read_archive_entries(&engine, &archive, &OpenOptions::default()).unwrap_err();
     assert!(
         matches!(err, FormatError::PasswordRequired),
         "expected PasswordRequired, got {err:?}"
@@ -352,7 +352,7 @@ fn sevenz_encrypted_header_requires_password_to_list() {
         password: Some(Password::new("hidden names")),
         ..OpenOptions::default()
     };
-    let entries = engine.list(&archive, &open).unwrap();
+    let entries = read_archive_entries(&engine, &archive, &open).unwrap();
     assert!(entries.iter().any(|e| e.path.display == "tree/a.txt"));
     // Encrypted headers provide proof without reading any payload bytes.
     assert!(engine
@@ -452,7 +452,7 @@ fn sevenz_interop_with_system_7zip() {
         .output()
         .unwrap();
     assert!(create.status.success());
-    let entries = engine.list(&sys_archive, &OpenOptions::default()).unwrap();
+    let entries = read_archive_entries(&engine, &sys_archive, &OpenOptions::default()).unwrap();
     assert!(entries.iter().any(|e| e.path.display.contains("a.txt")));
     let out = dir.path().join("out");
     engine
@@ -500,7 +500,7 @@ fn sevenz_external_symlinks_keep_types_targets_times_and_skip_policy() {
             .output()
             .unwrap();
         assert!(create.status.success());
-        let entries = engine.list(&archive, &OpenOptions::default()).unwrap();
+        let entries = read_archive_entries(&engine, &archive, &OpenOptions::default()).unwrap();
         for (name, target) in links {
             let meta = entries.iter().find(|e| e.path.display == name).unwrap();
             assert_eq!(
@@ -604,7 +604,7 @@ fn sevenz_encrypted_symlink_targets_require_a_valid_password() {
         .unwrap();
     assert!(create.status.success());
     let engine = engine();
-    let listed = engine.list(&archive, &OpenOptions::default()).unwrap();
+    let listed = read_archive_entries(&engine, &archive, &OpenOptions::default()).unwrap();
     assert!(listed[0].encrypted);
     assert_eq!(
         listed[0].entry_type,
@@ -668,7 +668,7 @@ fn sevenz_encrypted_symlink_targets_require_a_valid_password() {
             }
         }
         if password == Some("test-fixture") {
-            let listed = engine.list(&archive, &opts).unwrap();
+            let listed = read_archive_entries(&engine, &archive, &opts).unwrap();
             assert_eq!(
                 listed[0].entry_type,
                 EntryType::Symlink {
@@ -982,7 +982,7 @@ fn sevenz_mixed_archive_keeps_encryption_and_error_classification_per_block() {
         password: Some(Password::new("secret")),
         ..OpenOptions::default()
     };
-    let archive_entries = engine().list(&archive, &open).unwrap();
+    let archive_entries = read_archive_entries(&engine(), &archive, &open).unwrap();
     let secret = archive_entries
         .iter()
         .find(|entry| entry.path.display == "secret.txt")
@@ -1004,7 +1004,7 @@ fn sevenz_mixed_archive_keeps_encryption_and_error_classification_per_block() {
 
     // Browsing the plain link neither decrypts the secret block nor reads
     // the damaged, unrelated plain file. Selecting it has the same scope.
-    let listed = engine().list(&archive, &OpenOptions::default()).unwrap();
+    let listed = read_archive_entries(&engine(), &archive, &OpenOptions::default()).unwrap();
     let link = listed
         .iter()
         .find(|entry| entry.path.display == "plain-link")

@@ -377,7 +377,12 @@ mod tests {
         let missing = root.join("install2.swm");
         let paths = [
             missing_volume(engine.open(&archive, &open_options)),
-            missing_volume(engine.list(&archive, &open_options)),
+            missing_volume(engine.list_archive(
+                &archive,
+                &open_options,
+                squallz_format_api::SafetyLimits::default().max_entries,
+                &control,
+            )),
             missing_volume(engine.test_summary(
                 &archive,
                 &open_options,

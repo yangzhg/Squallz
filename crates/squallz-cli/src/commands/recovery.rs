@@ -32,13 +32,6 @@ fn redundancy_or_default(redundancy: Option<u8>) -> u8 {
     }
 }
 
-fn repair_output_or_archive(output: Option<PathBuf>, archive: &Path) -> PathBuf {
-    match output {
-        Some(path) => path,
-        None => archive.to_path_buf(),
-    }
-}
-
 fn tolerated_loss_count(tolerate_loss: u32) -> usize {
     match usize::try_from(tolerate_loss) {
         Ok(count) => count,
@@ -150,147 +143,34 @@ pub fn repair(
         let report = report?;
         return emit_report(ctx, &report, json, true);
     }
-    if is_sqz_archive_path(&archive) {
-        return repair_sqz(
-            ctx,
-            archive,
-            output,
-            recovery,
-            level,
-            threads,
-            memory_limit,
-            json,
-        );
-    }
-    if is_zip_family_path(&archive) {
-        return repair_zip_rebuild(
-            ctx,
-            archive,
-            output,
-            recovery,
-            level,
-            threads,
-            memory_limit,
-            json,
-        );
-    }
-    Err(FormatError::Unsupported(
-        "repair without --use-recovery is supported only for .sqz embedded recovery or ZIP local-header rebuild".into(),
-    )
-    .into())
-}
-
-#[allow(clippy::too_many_arguments)] // direct image of the CLI surface
-fn repair_sqz(
-    ctx: &Ctx,
-    archive: PathBuf,
-    output: Option<PathBuf>,
-    recovery: Option<PathBuf>,
-    level: u8,
-    threads: Option<usize>,
-    memory_limit: Option<u64>,
-    json: bool,
-) -> Result<(), CliError> {
-    if recovery.is_some() {
-        return Err(FormatError::Unsupported(
-            ".sqz repair uses embedded recovery; omit --recovery or pass --use-recovery for PAR2"
-                .into(),
-        )
-        .into());
-    }
-    let in_place_requested = output.is_none();
-    if in_place_requested && is_split_sqz_volume_path(&archive) {
-        return Err(FormatError::Unsupported(
-            ".sqz split-volume repair requires --output <path>".into(),
-        )
-        .into());
-    }
-    let output = repair_output_or_archive(output, &archive);
-    let options = ArchiveRepairOptions {
-        kind: ArchiveRepairKind::SqzEmbedded,
-        create: CreateOptions {
-            level: CompressionLevel::from_numeric(level),
-            resources: resource_options(threads, memory_limit),
-            ..CreateOptions::default()
-        },
-        safety_limits: squallz_core::api::SafetyLimits::default(),
-    };
-    let progress = CliProgress::new_for_operation(ctx, json, "repair");
-    let result = ctx.engine.repair_archive(
-        &archive,
-        &output,
-        &options,
-        &NoProgress,
-        &progress,
-        &ctx.ctl,
-    );
-    progress.finish();
-    let (source_report, in_place) = match result? {
-        ArchiveRepairOutcome::Repaired { source, in_place } => (source.into_summary(), in_place),
-        ArchiveRepairOutcome::SourceRejected(source) => {
-            let source_report = source.summary;
-            if json {
-                let archive_path = archive.display().to_string();
-                let output_path = output.display().to_string();
-                let value = json!({
-                    "ok": false,
-                    "operation": "repair_sqz",
-                    "archive": archive_path,
-                    "output": output_path,
-                    "tool": "sqz-embedded-recovery",
-                    "in_place": false,
-                    "source": test_report_json(&source_report),
-                    "recovery": source_report.recovery.as_ref().map(recovery_summary_json),
-                    "problems": &source_report.problems.messages,
-                    "problems_total": source_report.problems.total,
-                    "problems_truncated": source_report.problems.is_truncated(),
-                });
-                print_pretty_json(&value)?;
-            } else {
-                print_test_problems(ctx, &source_report);
-                let count = source_report.problems.total.to_string();
-                let message = ctx.loc.format("cli.test.failed", &[("count", &count)]);
-                ctx.eprint_problem(&message);
-            }
-            return Err(CliError::Exit(EXIT_CORRUPT));
-        }
-    };
-    if json {
-        let archive_path = archive.display().to_string();
-        let output_path = output.display().to_string();
-        let value = json!({
-                "ok": true,
-                "operation": "repair_sqz",
-                "archive": archive_path,
-                "output": output_path,
-                "tool": "sqz-embedded-recovery",
-                "in_place": in_place,
-                "source": test_report_json(&source_report),
-                "recovery": source_report.recovery.as_ref().map(recovery_summary_json),
-        });
-        print_pretty_json(&value)?;
-    } else if ctx.is_modern() {
-        print_archive_repair_modern(
-            ctx,
-            &ctx.loc.t("cli.sqz.repair.result_title"),
-            "repair_sqz",
-            &archive,
-            &output,
-            "sqz-embedded-recovery",
-            in_place,
-        );
+    let kind = if is_sqz_archive_path(&archive) {
+        ArchiveRepairKind::SqzEmbedded
+    } else if is_zip_family_path(&archive) {
+        ArchiveRepairKind::ZipIndexRebuild
     } else {
-        let path = output.display().to_string();
-        let message = ctx.loc.format("cli.sqz.repair.done", &[("path", &path)]);
-        ctx.print_success(&message);
-    }
-    Ok(())
+        return Err(FormatError::Unsupported(
+            "repair without --use-recovery is supported only for .sqz embedded recovery or ZIP local-header rebuild".into(),
+        )
+        .into());
+    };
+    repair_archive(
+        ctx,
+        archive,
+        kind,
+        output,
+        recovery,
+        level,
+        threads,
+        memory_limit,
+        json,
+    )
 }
 
 #[allow(clippy::too_many_arguments)] // direct image of the CLI surface
-fn repair_zip_rebuild(
+fn repair_archive(
     ctx: &Ctx,
     archive: PathBuf,
+    kind: ArchiveRepairKind,
     output: Option<PathBuf>,
     recovery: Option<PathBuf>,
     level: u8,
@@ -299,18 +179,32 @@ fn repair_zip_rebuild(
     json: bool,
 ) -> Result<(), CliError> {
     if recovery.is_some() {
-        return Err(FormatError::Unsupported(
-            "ZIP rebuild uses local headers; pass --use-recovery to repair with PAR2 data".into(),
-        )
-        .into());
+        let detail = match kind {
+            ArchiveRepairKind::SqzEmbedded => {
+                ".sqz repair uses embedded recovery; omit --recovery or pass --use-recovery for PAR2"
+            }
+            ArchiveRepairKind::ZipIndexRebuild => {
+                "ZIP rebuild uses local headers; pass --use-recovery to repair with PAR2 data"
+            }
+        };
+        return Err(FormatError::Unsupported(detail.into()).into());
     }
-    let Some(output) = output else {
-        return Err(
-            FormatError::Unsupported("ZIP rebuild repair requires --output <path>".into()).into(),
-        );
+    let output = match kind {
+        ArchiveRepairKind::SqzEmbedded => {
+            if output.is_none() && is_split_sqz_volume_path(&archive) {
+                return Err(FormatError::Unsupported(
+                    ".sqz split-volume repair requires --output <path>".into(),
+                )
+                .into());
+            }
+            output.unwrap_or_else(|| archive.clone())
+        }
+        ArchiveRepairKind::ZipIndexRebuild => output.ok_or_else(|| {
+            FormatError::Unsupported("ZIP rebuild repair requires --output <path>".into())
+        })?,
     };
     let options = ArchiveRepairOptions {
-        kind: ArchiveRepairKind::ZipIndexRebuild,
+        kind,
         create: CreateOptions {
             level: CompressionLevel::from_numeric(level),
             resources: resource_options(threads, memory_limit),
@@ -328,62 +222,80 @@ fn repair_zip_rebuild(
         &ctx.ctl,
     );
     progress.finish();
-    let (source_test, in_place) = match result? {
-        ArchiveRepairOutcome::Repaired { source, in_place } => (source, in_place),
-        ArchiveRepairOutcome::SourceRejected(source) => {
-            let source_report = &source.summary;
-            if json {
-                let value = json!({
-                    "ok": false,
-                    "operation": "repair_zip",
-                    "archive": archive.display().to_string(),
-                    "output": output.display().to_string(),
-                    "tool": "zip-local-header-rebuild",
-                    "in_place": false,
-                    "source": test_report_json_with_structure(source_report, source.structure),
-                    "problems": &source_report.problems.messages,
-                    "problems_total": source_report.problems.total,
-                    "problems_truncated": source_report.problems.is_truncated(),
-                });
-                print_pretty_json(&value)?;
-            } else {
-                print_test_problems_with_structure(ctx, source_report, source.structure);
-                let count = source_report.problems.total.to_string();
-                let message = ctx.loc.format("cli.test.failed", &[("count", &count)]);
-                ctx.eprint_problem(&message);
-            }
-            return Err(CliError::Exit(EXIT_CORRUPT));
-        }
+    let (source, in_place, repaired) = match result? {
+        ArchiveRepairOutcome::Repaired { source, in_place } => (source, in_place, true),
+        ArchiveRepairOutcome::SourceRejected(source) => (source, false, false),
     };
-    let structure = source_test.structure;
-    let source_report = source_test.into_summary();
+    let source_report = &source.summary;
+    let (operation, tool, title_key, done_key) = match kind {
+        ArchiveRepairKind::SqzEmbedded => (
+            "repair_sqz",
+            "sqz-embedded-recovery",
+            "cli.sqz.repair.result_title",
+            "cli.sqz.repair.done",
+        ),
+        ArchiveRepairKind::ZipIndexRebuild => (
+            "repair_zip",
+            "zip-local-header-rebuild",
+            "cli.zip.repair.result_title",
+            "cli.zip.repair.done",
+        ),
+    };
     if json {
-        let value = json!({
-            "ok": true,
-            "operation": "repair_zip",
+        let source_value = match kind {
+            ArchiveRepairKind::SqzEmbedded => test_report_json(source_report),
+            ArchiveRepairKind::ZipIndexRebuild => {
+                test_report_json_with_structure(source_report, source.structure)
+            }
+        };
+        let mut value = json!({
+            "ok": repaired,
+            "operation": operation,
             "archive": archive.display().to_string(),
             "output": output.display().to_string(),
-            "tool": "zip-local-header-rebuild",
+            "tool": tool,
             "in_place": in_place,
-            "source": test_report_json_with_structure(&source_report, structure),
+            "source": source_value,
         });
+        if kind == ArchiveRepairKind::SqzEmbedded {
+            value["recovery"] = json!(source_report.recovery.as_ref().map(recovery_summary_json));
+        }
+        if !repaired {
+            value["problems"] = json!(&source_report.problems.messages);
+            value["problems_total"] = json!(source_report.problems.total);
+            value["problems_truncated"] = json!(source_report.problems.is_truncated());
+        }
         print_pretty_json(&value)?;
+    } else if !repaired {
+        match kind {
+            ArchiveRepairKind::SqzEmbedded => print_test_problems(ctx, source_report),
+            ArchiveRepairKind::ZipIndexRebuild => {
+                print_test_problems_with_structure(ctx, source_report, source.structure);
+            }
+        }
+        let count = source_report.problems.total.to_string();
+        let message = ctx.loc.format("cli.test.failed", &[("count", &count)]);
+        ctx.eprint_problem(&message);
     } else if ctx.is_modern() {
         print_archive_repair_modern(
             ctx,
-            &ctx.loc.t("cli.zip.repair.result_title"),
-            "repair_zip",
+            &ctx.loc.t(title_key),
+            operation,
             &archive,
             &output,
-            "zip-local-header-rebuild",
+            tool,
             in_place,
         );
     } else {
         let path = output.display().to_string();
-        let message = ctx.loc.format("cli.zip.repair.done", &[("path", &path)]);
+        let message = ctx.loc.format(done_key, &[("path", &path)]);
         ctx.print_success(&message);
     }
-    Ok(())
+    if repaired {
+        Ok(())
+    } else {
+        Err(CliError::Exit(EXIT_CORRUPT))
+    }
 }
 
 fn is_split_sqz_volume_path(path: &Path) -> bool {

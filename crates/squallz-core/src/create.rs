@@ -294,26 +294,6 @@ pub(crate) fn create(
     )
 }
 
-/// Entry point for [`Engine::create_with_report_no_replace`].
-pub(crate) fn create_no_replace(
-    engine: &Engine,
-    dest: &Path,
-    inputs: &[PathBuf],
-    opts: &CreateOptions,
-    progress: &dyn ProgressSink,
-    ctl: &ControlToken,
-) -> Result<CreateReport, FormatError> {
-    create_report_with_policy(
-        engine,
-        dest,
-        inputs,
-        opts,
-        CreateCommitPolicy::NoReplace,
-        progress,
-        ctl,
-    )
-}
-
 /// Entry point for the verified create APIs.
 pub(crate) fn create_verified(
     engine: &Engine,

@@ -1,7 +1,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::Mutex as StdMutex;
 
-use squallz_core::api::{EntryPath, ProgressSink};
+use squallz_core::api::{
+    ControlToken, EntryMeta, EntryPath, FormatError, OpenOptions, ProgressSink, SafetyLimits,
+};
 use squallz_core::{ChecksumAlgorithm, PostSuccessAction};
 
 use super::source_cleanup::{TrashAdapter, TrashError};
@@ -48,6 +50,22 @@ impl TrashAdapter for FakeTrashAdapter {
             removed.map_err(|_| TrashError)
         }
     }
+}
+
+/// Reads fixture entries through the full engine listing API with default limits.
+pub(crate) fn read_archive_entries(
+    engine: &squallz_core::Engine,
+    path: &Path,
+    options: &OpenOptions,
+) -> Result<Vec<EntryMeta>, FormatError> {
+    engine
+        .list_archive(
+            path,
+            options,
+            SafetyLimits::default().max_entries,
+            &ControlToken::default(),
+        )
+        .map(|listing| listing.entries)
 }
 
 pub(super) fn deterministic_payload(len: usize) -> Vec<u8> {

@@ -472,30 +472,28 @@ impl JobContext<'_> {
                     password: pw.cloned(),
                     encoding_override: encoding.map(str::to_owned),
                 };
-                state
-                    .engine
-                    .plan_and_extract_with_report_guarded_and_structure_controlled(
-                        &archive,
-                        &dest,
-                        Path::new(archive_display_name),
-                        smart,
-                        &open,
-                        &x_opts,
-                        sink,
-                        ctl,
-                        expected_input_guard,
-                        |entries, control| {
-                            selection
-                                .map(|paths| expand_selection_with_control(entries, paths, control))
-                                .transpose()
-                        },
-                        |plan| match expected_destination {
-                            Some(expected) if plan.destination != expected => {
-                                Err(FormatError::destination_changed(&plan.destination))
-                            }
-                            _ => Ok(()),
-                        },
-                    )
+                state.engine.extract_planned(
+                    &archive,
+                    &dest,
+                    Path::new(archive_display_name),
+                    smart,
+                    &open,
+                    &x_opts,
+                    sink,
+                    ctl,
+                    expected_input_guard,
+                    |entries, control| {
+                        selection
+                            .map(|paths| expand_selection_with_control(entries, paths, control))
+                            .transpose()
+                    },
+                    |plan| match expected_destination {
+                        Some(expected) if plan.destination != expected => {
+                            Err(FormatError::destination_changed(&plan.destination))
+                        }
+                        _ => Ok(()),
+                    },
+                )
             },
         )?;
         let result = extract_result_json(

@@ -454,12 +454,7 @@ impl AppState {
             password_verified,
         } = self
             .engine
-            .list_with_format_source_set_and_structure_with_entry_limit_and_control(
-                path,
-                &open_opts,
-                max_entries,
-                control,
-            )?;
+            .list_archive(path, &open_opts, max_entries, control)?;
         let file_name = identity
             .display_name
             .clone()

@@ -562,7 +562,7 @@ fn run_extract_job(
         best_effort: job.best_effort,
         ..ExtractOptions::default()
     };
-    let (plan, report) = ctx.engine.plan_and_extract_with_report_controlled(
+    let (plan, report, _) = ctx.engine.extract_planned(
         &archive,
         &dest,
         &archive,
@@ -571,6 +571,7 @@ fn run_extract_job(
         &opts,
         &NoProgress,
         &ctx.ctl,
+        None,
         |entries, control| filter.select_entries(entries, control),
         |_| Ok(()),
     )?;

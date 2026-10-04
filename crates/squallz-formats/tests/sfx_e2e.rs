@@ -11,7 +11,9 @@ use std::sync::{
     Arc, Barrier,
 };
 
-use common::{build_stored_zip, command_exists, engine, RawZipEntry, TempDir};
+use common::{
+    build_stored_zip, command_exists, engine, read_archive_entries, RawZipEntry, TempDir,
+};
 use squallz_core::api::{
     ControlToken, CreateOptions, EntryPath, ExtractOptions, FormatError, NoProgress, OpenOptions,
     Password, ProgressSink,
@@ -309,7 +311,7 @@ fn windows_sfx_roundtrips_through_shared_engine() {
     )
     .unwrap();
 
-    let entries = engine().list(&output, &OpenOptions::default()).unwrap();
+    let entries = read_archive_entries(&engine(), &output, &OpenOptions::default()).unwrap();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].path.display, "docs/readme.txt");
 
@@ -446,7 +448,7 @@ fn authenticode_certificate_table_can_follow_the_sfx_footer() {
         &ControlToken::new(),
     )
     .unwrap();
-    let entries = engine().list(&output, &OpenOptions::default()).unwrap();
+    let entries = read_archive_entries(&engine(), &output, &OpenOptions::default()).unwrap();
     assert_eq!(entries[0].path.display, "docs/readme.txt");
 
     let mut bytes = fs::read(&output).unwrap();
@@ -611,7 +613,7 @@ fn macos_app_sfx_roundtrips_through_shared_engine() {
         &ControlToken::new(),
     )
     .unwrap();
-    let entries = engine().list(&output, &OpenOptions::default()).unwrap();
+    let entries = read_archive_entries(&engine(), &output, &OpenOptions::default()).unwrap();
     assert_eq!(entries[0].path.display, "docs/readme.txt");
     let plist = fs::read_to_string(output.join("Contents/Info.plist")).unwrap();
     assert!(plist.contains("<string>Photos</string>"));
@@ -724,7 +726,7 @@ fn macos_sfx_can_create_its_zip_payload_from_inputs() {
     assert_eq!(plan.primary_output, output);
     assert!(plan.final_output_budget_bytes >= report.total_bytes);
     assert!(plan.workspace_budget_bytes > plan.final_output_budget_bytes);
-    let entries = engine.list(&output, &OpenOptions::default()).unwrap();
+    let entries = read_archive_entries(&engine, &output, &OpenOptions::default()).unwrap();
     assert_eq!(entries[0].path.display, "readme.txt");
     assert!(fs::read_dir(temp.path()).unwrap().all(|entry| !entry
         .unwrap()
@@ -800,7 +802,7 @@ fn macos_sfx_can_create_its_zip_payload_from_inputs() {
         for (path, bytes) in &original_files {
             assert_eq!(fs::read(path).unwrap(), *bytes);
         }
-        let entries = engine.list(&output, &OpenOptions::default()).unwrap();
+        let entries = read_archive_entries(&engine, &output, &OpenOptions::default()).unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].path.display, "readme.txt");
         assert_no_private_sfx_staging(temp.path());
@@ -1204,8 +1206,7 @@ fn macos_sfx_rebuild_prunes_the_existing_output_bundle_from_its_payload() {
         )
         .unwrap();
 
-    let names: Vec<_> = engine()
-        .list(&output, &OpenOptions::default())
+    let names: Vec<_> = read_archive_entries(&engine(), &output, &OpenOptions::default())
         .unwrap()
         .into_iter()
         .map(|entry| entry.path.display)
@@ -1258,8 +1259,7 @@ fn single_file_sfx_rebuild_prunes_the_existing_output_from_its_payload() {
     assert!(plan.final_output_budget_bytes >= report.total_bytes);
     assert!(plan.workspace_budget_bytes > plan.final_output_budget_bytes);
 
-    let names: Vec<_> = engine
-        .list(&output, &OpenOptions::default())
+    let names: Vec<_> = read_archive_entries(&engine, &output, &OpenOptions::default())
         .unwrap()
         .into_iter()
         .map(|entry| entry.path.display)

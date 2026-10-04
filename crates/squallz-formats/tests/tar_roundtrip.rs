@@ -9,7 +9,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::Mutex;
 
-use common::{engine, TempDir};
+use common::{engine, read_archive_entries, TempDir};
 use squallz_core::api::{
     ControlToken, CreateOptions, EntryPath, EntryType, ExtractOptions, ExtractReport, FormatError,
     NoProgress, OpenOptions, ProgressSink,
@@ -102,7 +102,7 @@ fn tar_roundtrip_permissions_symlink_unicode_deep() {
     assert!(!empty_out.exists());
 
     // Listing: types, mode and symlink target survive.
-    let entries = engine.list(&archive, &OpenOptions::default()).unwrap();
+    let entries = read_archive_entries(&engine, &archive, &OpenOptions::default()).unwrap();
     let by_name = |name: &str| {
         entries
             .iter()
@@ -247,7 +247,7 @@ fn tar_link_entries_without_targets_are_reported() {
         let archive = dir.path().join(name);
         missing_link_target_tar(&archive, entry_type);
 
-        let err = engine.list(&archive, &OpenOptions::default()).unwrap_err();
+        let err = read_archive_entries(&engine, &archive, &OpenOptions::default()).unwrap_err();
         assert!(
             matches!(
                 err,
@@ -340,7 +340,7 @@ fn tar_hardlink_entries_are_mapped() {
     }
 
     let engine = engine();
-    let entries = engine.list(&archive, &OpenOptions::default()).unwrap();
+    let entries = read_archive_entries(&engine, &archive, &OpenOptions::default()).unwrap();
     let link = entries
         .iter()
         .find(|e| e.path.display == "copy.txt")
@@ -392,7 +392,7 @@ fn tar_sniff_without_extension() {
         .unwrap();
     let anonymous = dir.path().join("mystery.bin");
     fs::rename(&archive, &anonymous).unwrap();
-    let entries = engine.list(&anonymous, &OpenOptions::default()).unwrap();
+    let entries = read_archive_entries(&engine, &anonymous, &OpenOptions::default()).unwrap();
     assert!(entries.iter().any(|e| e.path.display == "tree/a.txt"));
 }
 

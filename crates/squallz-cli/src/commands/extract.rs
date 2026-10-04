@@ -126,20 +126,19 @@ pub fn run(
                 password: pw.cloned(),
                 encoding_override: encoding.clone(),
             };
-            let (plan, report, structure) = ctx
-                .engine
-                .plan_and_extract_with_report_and_structure_controlled(
-                    &archive,
-                    &dest,
-                    &archive,
-                    smart,
-                    &open,
-                    &x_opts,
-                    progress.as_ref(),
-                    &ctx.ctl,
-                    |entries, control| filter.select_entries(entries, control),
-                    |_| Ok(()),
-                )?;
+            let (plan, report, structure) = ctx.engine.extract_planned(
+                &archive,
+                &dest,
+                &archive,
+                smart,
+                &open,
+                &x_opts,
+                progress.as_ref(),
+                &ctx.ctl,
+                None,
+                |entries, control| filter.select_entries(entries, control),
+                |_| Ok(()),
+            )?;
             let no_match = !filter.is_empty() && plan.scope.entries == 0;
             Ok(ExtractRunOutcome {
                 plan,

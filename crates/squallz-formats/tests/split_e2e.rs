@@ -9,7 +9,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use common::{command_exists, engine, TempDir};
+use common::{command_exists, engine, read_archive_entries, TempDir};
 use squallz_core::api::{
     ControlToken, CreateOptions, EntryPath, ExtractOptions, FormatError, NoProgress, OpenOptions,
     ProgressPhase, ProgressSink, SplitOutputMode,
@@ -333,8 +333,17 @@ fn native_split_wim_create_uses_standard_names_and_primary_member() {
         .outputs
         .last()
         .unwrap_or_else(|| panic!("Split WIM report has no members"));
-    let (_, entries, source_set) = engine
-        .list_with_format_and_source_set(selected, &OpenOptions::default())
+    let squallz_core::ArchiveListing {
+        entries,
+        source_set,
+        ..
+    } = engine
+        .list_archive(
+            selected,
+            &OpenOptions::default(),
+            squallz_core::api::SafetyLimits::default().max_entries,
+            &ControlToken::default(),
+        )
         .unwrap();
     assert!(entries
         .iter()
@@ -444,8 +453,17 @@ fn native_split_wim_conversion_uses_the_first_swm_as_primary() {
         .outputs
         .last()
         .unwrap_or_else(|| panic!("Split WIM conversion report has no members"));
-    let (_, entries, source_set) = engine
-        .list_with_format_and_source_set(selected, &OpenOptions::default())
+    let squallz_core::ArchiveListing {
+        entries,
+        source_set,
+        ..
+    } = engine
+        .list_archive(
+            selected,
+            &OpenOptions::default(),
+            squallz_core::api::SafetyLimits::default().max_entries,
+            &ControlToken::default(),
+        )
         .unwrap();
     assert!(entries
         .iter()
@@ -544,8 +562,17 @@ fn native_split_wim_opens_from_any_member_and_reports_missing_parts() {
     assert!(third.is_file());
 
     let engine = engine();
-    let (_, entries, source_set) = engine
-        .list_with_format_and_source_set(&second, &OpenOptions::default())
+    let squallz_core::ArchiveListing {
+        entries,
+        source_set,
+        ..
+    } = engine
+        .list_archive(
+            &second,
+            &OpenOptions::default(),
+            squallz_core::api::SafetyLimits::default().max_entries,
+            &ControlToken::default(),
+        )
         .unwrap();
     assert!(entries
         .iter()
@@ -583,7 +610,7 @@ fn native_split_wim_opens_from_any_member_and_reports_missing_parts() {
 
     let saved_second = fs::read(&second).unwrap();
     fs::remove_file(&second).unwrap();
-    let error = engine.list(&third, &OpenOptions::default()).unwrap_err();
+    let error = read_archive_entries(&engine, &third, &OpenOptions::default()).unwrap_err();
     assert_eq!(error.missing_volume_path(), Some(second.as_path()));
     fs::write(second, saved_second).unwrap();
 
@@ -712,7 +739,7 @@ fn corrupt_sqzr_payload_byte(path: &Path, physical_offset: usize) {
 }
 
 fn assert_open_fails_with_corrupt_archive(path: &Path, expected: &str) {
-    let err = engine().list(path, &OpenOptions::default()).unwrap_err();
+    let err = read_archive_entries(&engine(), path, &OpenOptions::default()).unwrap_err();
     match err {
         FormatError::CorruptArchive(detail) => {
             assert!(
@@ -814,12 +841,12 @@ fn split_create_produces_volumes_and_roundtrips() {
     assert!(!tmp.path().join("out.zip.005").exists());
 
     // list via the first volume.
-    let entries = engine().list(&volumes[0], &OpenOptions::default()).unwrap();
+    let entries = read_archive_entries(&engine(), &volumes[0], &OpenOptions::default()).unwrap();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].path.display, "data.bin");
 
     // Opening a middle volume resolves the same set.
-    let entries2 = engine().list(&volumes[2], &OpenOptions::default()).unwrap();
+    let entries2 = read_archive_entries(&engine(), &volumes[2], &OpenOptions::default()).unwrap();
     assert_eq!(entries2.len(), 1);
 
     // extract via .001 and compare bytes.
@@ -908,9 +935,7 @@ fn numbered_sevenz_volumes_interoperate_with_system_7zip() {
 
     let system_middle = tmp.path().join("system.7z.002");
     assert!(system_middle.is_file());
-    let entries = engine()
-        .list(&system_middle, &OpenOptions::default())
-        .unwrap();
+    let entries = read_archive_entries(&engine(), &system_middle, &OpenOptions::default()).unwrap();
     assert!(entries
         .iter()
         .any(|entry| entry.path.display == "system-data.bin"));
@@ -933,9 +958,12 @@ fn numbered_sevenz_volumes_interoperate_with_system_7zip() {
     );
 
     fs::remove_file(&system_middle).unwrap();
-    let error = engine()
-        .list(&tmp.path().join("system.7z.001"), &OpenOptions::default())
-        .unwrap_err();
+    let error = read_archive_entries(
+        &engine(),
+        &tmp.path().join("system.7z.001"),
+        &OpenOptions::default(),
+    )
+    .unwrap_err();
     match error {
         FormatError::CorruptArchive(detail) => assert!(
             detail.contains("system.7z.002"),
@@ -973,7 +1001,7 @@ fn split_rebuild_replaces_current_volumes_and_removes_unsplit_base() {
     assert_ne!(fs::read(&first).unwrap(), b"old first volume");
     assert!(!tmp.path().join("out.zip.999").exists());
     assert_eq!(
-        engine().list(&first, &OpenOptions::default()).unwrap()[0]
+        read_archive_entries(&engine(), &first, &OpenOptions::default()).unwrap()[0]
             .path
             .display,
         "data.bin"
@@ -1084,9 +1112,12 @@ fn missing_middle_volume_is_corrupt_with_detail() {
     let missing = tmp.path().join("out.zip.002");
     fs::remove_file(&missing).unwrap();
 
-    let err = engine()
-        .list(&tmp.path().join("out.zip.001"), &OpenOptions::default())
-        .unwrap_err();
+    let err = read_archive_entries(
+        &engine(),
+        &tmp.path().join("out.zip.001"),
+        &OpenOptions::default(),
+    )
+    .unwrap_err();
     match err {
         FormatError::CorruptArchive(detail) => assert!(
             detail.contains("out.zip.002"),
@@ -1210,7 +1241,7 @@ fn split_sqz_writes_sqzv_headers_and_roundtrips() {
         tail_bytes.len() as u64,
     );
 
-    let entries = engine().list(&volumes[0], &OpenOptions::default()).unwrap();
+    let entries = read_archive_entries(&engine(), &volumes[0], &OpenOptions::default()).unwrap();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].path.display, "data.bin");
 
@@ -1261,12 +1292,15 @@ fn split_sqz_excludes_but_preserves_fixed_parts_from_an_input_directory() {
         )
         .unwrap();
 
-    let names: Vec<_> = engine()
-        .list(&source.join("out.sqz.001"), &OpenOptions::default())
-        .unwrap()
-        .into_iter()
-        .map(|entry| entry.path.display)
-        .collect();
+    let names: Vec<_> = read_archive_entries(
+        &engine(),
+        &source.join("out.sqz.001"),
+        &OpenOptions::default(),
+    )
+    .unwrap()
+    .into_iter()
+    .map(|entry| entry.path.display)
+    .collect();
     assert!(names.iter().any(|name| name == "source/data.bin"));
     assert!(names
         .iter()
@@ -1312,7 +1346,7 @@ fn corrupt_sqzv_header_is_reported() {
     bytes[12] ^= 0x7F;
     fs::write(&first, bytes).unwrap();
 
-    let err = engine().list(&first, &OpenOptions::default()).unwrap_err();
+    let err = read_archive_entries(&engine(), &first, &OpenOptions::default()).unwrap_err();
     match err {
         FormatError::CorruptArchive(detail) => {
             assert!(detail.contains("SQZV"), "detail should name SQZV: {detail}");
@@ -1342,7 +1376,7 @@ fn sqzv_uuid_mismatch_is_reported() {
     bytes[28..32].copy_from_slice(&crc.to_le_bytes());
     fs::write(&second, bytes).unwrap();
 
-    let err = engine().list(&first, &OpenOptions::default()).unwrap_err();
+    let err = read_archive_entries(&engine(), &first, &OpenOptions::default()).unwrap_err();
     match err {
         FormatError::CorruptArchive(detail) => {
             assert!(detail.contains("UUID"), "detail should name UUID: {detail}");
@@ -1370,7 +1404,7 @@ fn missing_sqzv_payload_volume_recovers_when_within_rs_capacity() {
     fs::remove_file(sqz_recovery_volume_path(tmp.path(), 1)).unwrap();
 
     let first = tmp.path().join("out.sqz.001");
-    let entries = engine().list(&first, &OpenOptions::default()).unwrap();
+    let entries = read_archive_entries(&engine(), &first, &OpenOptions::default()).unwrap();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].path.display, "data.bin");
 
@@ -1419,7 +1453,7 @@ fn missing_sqzv_payload_volume_recovers_from_rev_parity_when_rs_capacity_exceede
     fs::remove_file(tmp.path().join("out.sqz.002")).unwrap();
 
     let first = tmp.path().join("out.sqz.001");
-    let entries = engine().list(&first, &OpenOptions::default()).unwrap();
+    let entries = read_archive_entries(&engine(), &first, &OpenOptions::default()).unwrap();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].path.display, "data.bin");
 
@@ -1470,7 +1504,7 @@ fn missing_two_sqzv_payload_volumes_recover_from_dual_rev_parity() {
     fs::remove_file(tmp.path().join("out.sqz.003")).unwrap();
 
     let first = tmp.path().join("out.sqz.001");
-    let entries = engine().list(&first, &OpenOptions::default()).unwrap();
+    let entries = read_archive_entries(&engine(), &first, &OpenOptions::default()).unwrap();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].path.display, "data.bin");
 
@@ -1709,7 +1743,7 @@ fn missing_three_sqzv_payload_volumes_recover_from_triple_rev_parity() {
     fs::remove_file(tmp.path().join("out.sqz.004")).unwrap();
 
     let first = tmp.path().join("out.sqz.001");
-    let entries = engine().list(&first, &OpenOptions::default()).unwrap();
+    let entries = read_archive_entries(&engine(), &first, &OpenOptions::default()).unwrap();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].path.display, "data.bin");
 
@@ -1914,7 +1948,7 @@ fn missing_sqzv_tail_volume_recovers_from_rev_sidecar() {
     fs::remove_file(&tail).unwrap();
 
     let first = tmp.path().join("out.sqz.001");
-    let entries = engine().list(&first, &OpenOptions::default()).unwrap();
+    let entries = read_archive_entries(&engine(), &first, &OpenOptions::default()).unwrap();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].path.display, "data.bin");
 
@@ -1969,7 +2003,7 @@ fn missing_sqzv_payload_and_tail_recover_from_parity_plus_tail_mirror() {
     fs::remove_file(&tail).unwrap();
 
     let first = tmp.path().join("out.sqz.001");
-    let entries = engine().list(&first, &OpenOptions::default()).unwrap();
+    let entries = read_archive_entries(&engine(), &first, &OpenOptions::default()).unwrap();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].path.display, "data.bin");
 
@@ -2020,9 +2054,12 @@ fn missing_sqzv_tail_volume_is_still_unrecoverable() {
     fs::remove_file(&tail_mirror).unwrap();
     fs::remove_file(&parity).unwrap();
 
-    let err = engine()
-        .list(&tmp.path().join("out.sqz.001"), &OpenOptions::default())
-        .unwrap_err();
+    let err = read_archive_entries(
+        &engine(),
+        &tmp.path().join("out.sqz.001"),
+        &OpenOptions::default(),
+    )
+    .unwrap_err();
     match err {
         FormatError::CorruptArchive(detail) => {
             assert!(detail.contains("tail volume"), "detail: {detail}");

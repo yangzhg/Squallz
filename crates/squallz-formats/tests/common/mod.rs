@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering};
 
+use squallz_core::api::{ControlToken, EntryMeta, FormatError, OpenOptions, SafetyLimits};
 use squallz_core::Engine;
 
 /// Unique-per-call temp directory removed on drop.
@@ -39,6 +40,22 @@ impl Drop for TempDir {
 /// Engine wired with the built-in registry.
 pub fn engine() -> Engine {
     Engine::new(squallz_formats::registry())
+}
+
+/// Reads fixture entries through the full engine listing API with default limits.
+pub fn read_archive_entries(
+    engine: &Engine,
+    path: &Path,
+    options: &OpenOptions,
+) -> Result<Vec<EntryMeta>, FormatError> {
+    engine
+        .list_archive(
+            path,
+            options,
+            SafetyLimits::default().max_entries,
+            &ControlToken::default(),
+        )
+        .map(|listing| listing.entries)
 }
 
 /// Returns true when `cmd` exists on PATH (used to skip interop tests on

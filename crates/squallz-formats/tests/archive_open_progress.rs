@@ -82,7 +82,7 @@ fn run_operation(
             )
             .map(drop),
         "guarded_extract" => engine
-            .plan_and_extract_with_report_guarded_and_structure_controlled(
+            .extract_planned(
                 archive,
                 destination,
                 archive,
