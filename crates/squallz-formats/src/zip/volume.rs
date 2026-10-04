@@ -102,7 +102,7 @@ pub(super) enum BoundZipSource {
     Split(DiscoveredSplitZipSet, Box<dyn ReadSeek>),
 }
 
-pub(super) struct StagedSplitZipSet {
+pub(crate) struct StagedSplitZipSet {
     root: PrivateStagingDir,
     primary: PathBuf,
     metadata: SplitZipMetadata,
@@ -208,19 +208,19 @@ impl StagedSplitZipSet {
         Ok(staged)
     }
 
-    pub(super) fn path(&self) -> &Path {
+    pub(crate) fn path(&self) -> &Path {
         &self.primary
     }
 
-    pub(super) fn source_set(&self) -> &ArchiveSourceSet {
+    pub(crate) fn source_set(&self) -> &ArchiveSourceSet {
         self.source_set.source_set()
     }
 
-    pub(super) fn verify_source_set(&self, control: &ControlToken) -> Result<(), FormatError> {
+    pub(crate) fn verify_source_set(&self, control: &ControlToken) -> Result<(), FormatError> {
         self.source_set.verify_current("ZIP volume", control)
     }
 
-    pub(super) fn remap_external_error(&self, error: FormatError) -> FormatError {
+    pub(crate) fn remap_external_error(&self, error: FormatError) -> FormatError {
         if let Some(missing) = error.missing_volume_path() {
             if let Some(index) = missing
                 .file_name()

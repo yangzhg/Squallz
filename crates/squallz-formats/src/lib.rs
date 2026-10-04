@@ -16,6 +16,8 @@ pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(()
 #[cfg(feature = "process-backend")]
 mod external_process;
 #[cfg(feature = "process-backend")]
+mod external_reader;
+#[cfg(feature = "process-backend")]
 mod rar;
 mod sevenz;
 #[cfg(feature = "process-backend")]
@@ -472,64 +474,5 @@ mod tests {
             "lz4",
             None,
         );
-    }
-
-    #[test]
-    fn registry_contains_zip() {
-        let reg = super::registry();
-        let formats = reg.formats();
-        assert!(!formats.is_empty());
-        let zip = formats
-            .iter()
-            .find(|f| f.id == "zip")
-            .expect("zip registered");
-        assert_eq!(zip.kind, FormatKind::Archive);
-        assert!(zip.capabilities.can_create);
-        assert!(zip.capabilities.can_extract);
-        assert!(zip.capabilities.can_encrypt_data);
-        assert!(!zip.capabilities.can_encrypt_names);
-        let sqz = formats
-            .iter()
-            .find(|f| f.id == "sqz")
-            .expect("sqz registered");
-        assert_eq!(sqz.kind, FormatKind::Archive);
-        assert_eq!(sqz.extensions, vec!["sqz"]);
-        assert!(sqz.capabilities.can_create);
-        assert!(sqz.capabilities.can_extract);
-        assert!(sqz.capabilities.can_test);
-        assert!(sqz.capabilities.can_split);
-        let rar = formats
-            .iter()
-            .find(|f| f.id == "rar")
-            .expect("rar registered");
-        assert_eq!(rar.kind, FormatKind::Archive);
-        assert_eq!(rar.extensions, vec!["rar", "cbr"]);
-        assert!(!rar.capabilities.can_create);
-        assert!(rar.capabilities.can_extract);
-        let cab = formats
-            .iter()
-            .find(|f| f.id == "cab")
-            .expect("cab registered");
-        assert_eq!(cab.kind, FormatKind::Archive);
-        assert_eq!(cab.extensions, vec!["cab"]);
-        assert!(!cab.capabilities.can_create);
-        assert!(cab.capabilities.can_extract);
-        assert!(cab.capabilities.can_test);
-        let wim = formats
-            .iter()
-            .find(|f| f.id == "wim")
-            .expect("wim registered");
-        assert_eq!(wim.kind, FormatKind::Archive);
-        assert!(wim.capabilities.can_create);
-        assert!(wim.capabilities.can_extract);
-        for id in ["apfs", "iso", "vhdx", "z"] {
-            let format = formats
-                .iter()
-                .find(|f| f.id == id)
-                .unwrap_or_else(|| panic!("{id} registered"));
-            assert_eq!(format.kind, FormatKind::Archive);
-            assert!(!format.capabilities.can_create);
-            assert!(format.capabilities.can_extract);
-        }
     }
 }

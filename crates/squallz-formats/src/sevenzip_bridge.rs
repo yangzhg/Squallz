@@ -10,6 +10,7 @@ mod wim_volume;
 mod wim_writer;
 
 pub(crate) use listing::SevenZipArchiveProperties;
+pub(crate) use wim_volume::StagedSplitWimSet;
 pub use wim_writer::{wimlib_backend_status, WimlibBackendSource, WimlibBackendStatus};
 
 use std::collections::BTreeMap;
@@ -22,13 +23,18 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 
 use squallz_format_api::{
-    split_volume_name, test_entry_data, ArchiveFormat, ArchiveReader, ArchiveSourceSet,
-    ArchiveWriter, BoundedProblemLog, ControlToken, CreateOptions, EntryMeta, EntryPath, EntryType,
-    FormatCapabilities, FormatCreateBudget, FormatError, LimitsAccountant, NativeVolumeBudget,
-    NativeVolumeLimits, NativeVolumeWriter, OpenOptions, Password, PhysicalFileIdentity,
-    ProgressSink, ReadSeek, SafetyLimits, SplitOutputMode, TestSummary, WriteSeek,
-    TEST_PROBLEM_PREVIEW_LIMIT,
+    split_volume_name, ArchiveFormat, ArchiveReader, ArchiveSourceSet, ArchiveWriter, ControlToken,
+    CreateOptions, EntryMeta, EntryPath, FormatCapabilities, FormatCreateBudget, FormatError,
+    NativeVolumeBudget, NativeVolumeLimits, NativeVolumeWriter, OpenOptions, Password,
+    PhysicalFileIdentity, ProgressSink, ReadSeek, SplitOutputMode, WriteSeek,
 };
+
+#[cfg(test)]
+use squallz_format_api::EntryType;
+#[cfg(all(test, unix))]
+use squallz_format_api::SafetyLimits;
+
+use crate::external_reader::{ExternalArchiveReader, ExternalArchiveSource};
 
 use diagnostics::DiagnosticCapture;
 use process::SevenZipProcess;
@@ -296,7 +302,7 @@ impl ArchiveFormat for SevenZipBridgeFormat {
         if self.spec.id == "wim" {
             reject_split_wim(&mut *src)?;
         }
-        Ok(Box::new(SevenZipArchiveReader::open(
+        Ok(Box::new(open_tool_archive(
             src,
             self.spec,
             opts.password.clone(),
@@ -333,7 +339,7 @@ impl ArchiveFormat for SevenZipBridgeFormat {
             return self.open_with_control(src, opts, ctl);
         }
         match wim_volume::bind_file_with_control(source_path, source_identity, src, ctl)? {
-            wim_volume::BoundWimSource::Single(src) => Ok(Box::new(SevenZipArchiveReader::open(
+            wim_volume::BoundWimSource::Single(src) => Ok(Box::new(open_tool_archive(
                 src,
                 self.spec,
                 opts.password.clone(),
@@ -346,13 +352,23 @@ impl ArchiveFormat for SevenZipBridgeFormat {
                     selected_src,
                     ctl,
                 )?;
-                Ok(Box::new(SevenZipArchiveReader::open_split_wim(
-                    staged,
-                    tool,
-                    self.spec,
-                    opts.password.clone(),
+                let password = opts.password.clone();
+                let raw_entries =
+                    list_entries_with_control(&tool, staged.path(), password.as_ref(), ctl)
+                        .map_err(|error| staged.remap_external_error(error))?;
+                let (entries, _) = normalize_entries(self.spec, raw_entries);
+                if entries.is_empty() && fs::metadata(staged.path())?.len() > 0 {
+                    return Err(FormatError::CorruptArchive(format!(
+                        "7-Zip listed no entries for a non-empty {} archive",
+                        self.spec.id
+                    )));
+                }
+                Ok(Box::new(ExternalArchiveReader::new(
+                    ExternalArchiveSource::SplitWim { staged, tool },
+                    entries,
+                    password,
                     ctl,
-                )?))
+                )))
             }
         }
     }
@@ -501,230 +517,32 @@ fn reject_split_wim(src: &mut dyn ReadSeek) -> Result<(), FormatError> {
     Ok(())
 }
 
-struct SevenZipArchiveReader {
-    source: SevenZipArchiveSource,
-    tool: PathBuf,
-    entries: Vec<EntryMeta>,
-    backend_paths: BTreeMap<String, String>,
+fn open_tool_archive(
+    src: Box<dyn ReadSeek>,
+    spec: &'static SevenZipSpec,
     password: Option<Password>,
-    control: ControlToken,
-}
-
-impl SevenZipArchiveReader {
-    fn open(
-        src: Box<dyn ReadSeek>,
-        spec: &'static SevenZipSpec,
-        password: Option<Password>,
-        ctl: &ControlToken,
-    ) -> Result<Self, FormatError> {
-        let tool = sevenzip_tool()?;
-        let temp = TempArchive::from_reader(src, spec.id)?;
-        Self::open_source(
-            SevenZipArchiveSource::Single(temp),
-            tool,
-            spec,
-            password,
-            ctl,
-        )
+    ctl: &ControlToken,
+) -> Result<ExternalArchiveReader, FormatError> {
+    let tool = sevenzip_tool()?;
+    let archive = TempArchive::from_reader(src, spec.id)?;
+    let raw_entries = list_entries_with_control(&tool, archive.path(), password.as_ref(), ctl)?;
+    let (entries, backend_paths) = normalize_entries(spec, raw_entries);
+    if entries.is_empty() && archive.len()? > 0 {
+        return Err(FormatError::CorruptArchive(format!(
+            "7-Zip listed no entries for a non-empty {} archive",
+            spec.id
+        )));
     }
-
-    fn open_split_wim(
-        staged: wim_volume::StagedSplitWimSet,
-        tool: PathBuf,
-        spec: &'static SevenZipSpec,
-        password: Option<Password>,
-        ctl: &ControlToken,
-    ) -> Result<Self, FormatError> {
-        Self::open_source(
-            SevenZipArchiveSource::SplitWim(staged),
+    Ok(ExternalArchiveReader::new(
+        ExternalArchiveSource::ToolArchive {
+            archive,
             tool,
-            spec,
-            password,
-            ctl,
-        )
-    }
-
-    fn open_source(
-        source: SevenZipArchiveSource,
-        tool: PathBuf,
-        spec: &'static SevenZipSpec,
-        password: Option<Password>,
-        ctl: &ControlToken,
-    ) -> Result<Self, FormatError> {
-        let raw_entries = list_entries_with_control(&tool, source.path(), password.as_ref(), ctl)
-            .map_err(|error| source.remap_external_error(error))?;
-        let (entries, backend_paths) = normalize_entries(spec, raw_entries);
-        if entries.is_empty() && source.len()? > 0 {
-            return Err(FormatError::CorruptArchive(format!(
-                "7-Zip listed no entries for a non-empty {} archive",
-                spec.id
-            )));
-        }
-        Ok(Self {
-            source,
-            tool,
-            entries,
             backend_paths,
-            password,
-            control: ctl.clone(),
-        })
-    }
-
-    fn read_entry_with_control(
-        &self,
-        path: &EntryPath,
-        control: &ControlToken,
-    ) -> Result<Box<dyn Read>, FormatError> {
-        require_password_for_entry(&self.entries, path, self.password.as_ref())?;
-        let backend_path = backend_path_for(&self.backend_paths, path);
-        spawn_entry_reader(
-            &self.tool,
-            self.source.path(),
-            backend_path,
-            &path.display,
-            self.password.as_ref(),
-            control,
-        )
-    }
-
-    fn test_with_problem_recorder(
-        &mut self,
-        limits: &SafetyLimits,
-        progress: &dyn ProgressSink,
-        ctl: &squallz_format_api::ControlToken,
-        mut record_problem: impl FnMut(String),
-    ) -> Result<u64, FormatError> {
-        let entries = self.entries.clone();
-        let total = entries
-            .iter()
-            .filter(|entry| matches!(entry.entry_type, EntryType::File))
-            .map(|entry| entry.size)
-            .fold(0, u64::saturating_add);
-        let mut entries_tested = 0u64;
-        let mut accountant = LimitsAccountant::new(*limits);
-        for meta in entries {
-            ctl.checkpoint()?;
-            accountant.check_entry(&meta)?;
-            if !matches!(meta.entry_type, EntryType::File) {
-                continue;
-            }
-            match self.read_entry_with_control(&meta.path, ctl) {
-                Ok(mut data) => {
-                    if let Err(e) =
-                        test_entry_data(data.as_mut(), &meta, &mut accountant, total, progress, ctl)
-                    {
-                        let e = recoverable_test_error(e)?;
-                        record_problem(format!("{}: {e}", meta.path.display));
-                    }
-                }
-                Err(e) => {
-                    let e = recoverable_test_error(e)?;
-                    record_problem(format!("{}: {e}", meta.path.display));
-                }
-            }
-            entries_tested += 1;
-        }
-        progress.on_progress(
-            accountant.output_bytes(),
-            accountant.output_bytes(),
-            &EntryPath::from_utf8(""),
-        );
-        Ok(entries_tested)
-    }
-}
-
-impl ArchiveReader for SevenZipArchiveReader {
-    fn source_set(&self) -> Option<&ArchiveSourceSet> {
-        self.source.source_set()
-    }
-
-    fn verify_source_set(&self, ctl: &squallz_format_api::ControlToken) -> Result<(), FormatError> {
-        self.source.verify_source_set(ctl)
-    }
-
-    fn entries(&mut self) -> Box<dyn Iterator<Item = Result<EntryMeta, FormatError>> + '_> {
-        Box::new(self.entries.clone().into_iter().map(Ok))
-    }
-
-    fn consume_entries(
-        mut self: Box<Self>,
-        visitor: &mut dyn FnMut(EntryMeta) -> Result<(), FormatError>,
-    ) -> Result<(), FormatError> {
-        for entry in std::mem::take(&mut self.entries) {
-            visitor(entry)?;
-        }
-        Ok(())
-    }
-
-    fn read_entry(
-        &mut self,
-        path: &EntryPath,
-        consume: &mut dyn FnMut(&mut dyn Read) -> Result<(), FormatError>,
-    ) -> Result<(), FormatError> {
-        consume(self.read_entry_with_control(path, &self.control)?.as_mut())
-    }
-
-    fn test_summary(
-        &mut self,
-        limits: &SafetyLimits,
-        progress: &dyn ProgressSink,
-        ctl: &squallz_format_api::ControlToken,
-    ) -> Result<TestSummary, FormatError> {
-        let problems = BoundedProblemLog::new(TEST_PROBLEM_PREVIEW_LIMIT);
-        let entries_tested = self.test_with_problem_recorder(limits, progress, ctl, |problem| {
-            problems.record(problem)
-        })?;
-        Ok(TestSummary {
-            entries_tested,
-            problems: problems.snapshot(),
-            recovery: None,
-        })
-    }
-}
-
-enum SevenZipArchiveSource {
-    Single(TempArchive),
-    SplitWim(wim_volume::StagedSplitWimSet),
-}
-
-impl SevenZipArchiveSource {
-    fn path(&self) -> &Path {
-        match self {
-            Self::Single(temp) => temp.path(),
-            Self::SplitWim(staged) => staged.path(),
-        }
-    }
-
-    fn len(&self) -> Result<u64, FormatError> {
-        match self {
-            Self::Single(temp) => temp.len(),
-            Self::SplitWim(staged) => Ok(fs::metadata(staged.path())?.len()),
-        }
-    }
-
-    fn source_set(&self) -> Option<&ArchiveSourceSet> {
-        match self {
-            Self::Single(_) => None,
-            Self::SplitWim(staged) => Some(staged.source_set()),
-        }
-    }
-
-    fn verify_source_set(
-        &self,
-        control: &squallz_format_api::ControlToken,
-    ) -> Result<(), FormatError> {
-        match self {
-            Self::Single(_) => control.checkpoint(),
-            Self::SplitWim(staged) => staged.verify_source_set(control),
-        }
-    }
-
-    fn remap_external_error(&self, error: FormatError) -> FormatError {
-        match self {
-            Self::Single(_) => error,
-            Self::SplitWim(staged) => staged.remap_external_error(error),
-        }
-    }
+        },
+        entries,
+        password,
+        ctl,
+    ))
 }
 
 fn normalize_entries(
@@ -748,7 +566,7 @@ fn normalize_entries(
     (entries, backend_paths)
 }
 
-fn backend_path_for<'a>(
+pub(crate) fn backend_path_for<'a>(
     backend_paths: &'a BTreeMap<String, String>,
     path: &'a EntryPath,
 ) -> &'a str {
@@ -930,7 +748,7 @@ pub(crate) fn read_entry_stdout(
     )
 }
 
-fn spawn_entry_reader(
+pub(crate) fn spawn_entry_reader(
     tool: &Path,
     archive: &Path,
     backend_path: &str,
@@ -1085,7 +903,7 @@ impl Read for CommandStdoutReader {
     }
 }
 
-struct TempArchive {
+pub(crate) struct TempArchive {
     path: PathBuf,
 }
 
@@ -1115,7 +933,7 @@ impl TempArchive {
         Ok(archive)
     }
 
-    fn path(&self) -> &Path {
+    pub(crate) fn path(&self) -> &Path {
         &self.path
     }
 

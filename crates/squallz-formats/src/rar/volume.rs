@@ -139,7 +139,7 @@ struct DiscoveredRarSet {
     evidence: RarSetEvidence,
 }
 
-pub(super) struct StagedRarSet {
+pub(crate) struct StagedRarSet {
     root: PrivateStagingDir,
     primary: PathBuf,
     native_scheme: Option<VolumeScheme>,
@@ -300,7 +300,7 @@ impl StagedRarSet {
         Self::from_bound_file(source_path, Some(identity), src)
     }
 
-    pub(super) fn path(&self) -> &Path {
+    pub(crate) fn path(&self) -> &Path {
         &self.primary
     }
 
@@ -312,11 +312,11 @@ impl StagedRarSet {
         self.native_scheme.is_some()
     }
 
-    pub(super) fn source_set(&self) -> Option<&ArchiveSourceSet> {
+    pub(crate) fn source_set(&self) -> Option<&ArchiveSourceSet> {
         self.source_set.as_ref().map(BoundSourceSet::source_set)
     }
 
-    pub(super) fn verify_source_set(
+    pub(crate) fn verify_source_set(
         &self,
         control: &squallz_format_api::ControlToken,
     ) -> Result<(), FormatError> {

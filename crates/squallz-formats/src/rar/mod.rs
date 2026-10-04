@@ -18,15 +18,18 @@ use std::path::{Path, PathBuf};
 use std::process::{ChildStdout, Command, Stdio};
 
 use squallz_format_api::{
-    test_entry_data, ArchiveFormat, ArchiveReader, ArchiveSourceSet, ArchiveWriter,
-    BoundedProblemLog, ControlToken, CreateOptions, EntryMeta, EntryPath, EntryType,
-    FormatCapabilities, FormatError, LimitsAccountant, OpenOptions, Password, PhysicalFileIdentity,
-    ProgressSink, ReadSeek, SafetyLimits, TestSummary, WriteSeek, TEST_PROBLEM_PREVIEW_LIMIT,
+    ArchiveFormat, ArchiveReader, ArchiveSourceSet, ArchiveWriter, ControlToken, CreateOptions,
+    EntryMeta, EntryPath, EntryType, FormatCapabilities, FormatError, OpenOptions, Password,
+    PhysicalFileIdentity, ReadSeek, WriteSeek,
 };
 
+#[cfg(all(test, unix))]
+use squallz_format_api::SafetyLimits;
+
 use crate::external_process::ControlledChild;
+use crate::external_reader::{ExternalArchiveReader, ExternalArchiveSource};
 use crate::sevenzip_bridge;
-use volume::StagedRarSet;
+pub(crate) use volume::StagedRarSet;
 
 const RAR4_MAGIC: &[u8] = b"Rar!\x1A\x07\x00";
 const RAR5_MAGIC: &[u8] = b"Rar!\x1A\x07\x01\x00";
@@ -108,11 +111,9 @@ impl ArchiveFormat for RarFormat {
         opts: &OpenOptions,
         ctl: &ControlToken,
     ) -> Result<Box<dyn ArchiveReader>, FormatError> {
-        Ok(Box::new(RarArchiveReader::open(
-            src,
-            opts.password.clone(),
-            ctl,
-        )?))
+        let password = opts.password.clone();
+        let staged = StagedRarSet::single_with_control(src, ctl)?;
+        Ok(Box::new(open_staged_rar(staged, password, ctl)?))
     }
 
     fn open_file(
@@ -139,13 +140,10 @@ impl ArchiveFormat for RarFormat {
         opts: &OpenOptions,
         ctl: &ControlToken,
     ) -> Result<Box<dyn ArchiveReader>, FormatError> {
-        Ok(Box::new(RarArchiveReader::open_file(
-            source_path,
-            source_identity,
-            src,
-            opts.password.clone(),
-            ctl,
-        )?))
+        let password = opts.password.clone();
+        let staged =
+            StagedRarSet::from_bound_file_with_control(source_path, source_identity, src, ctl)?;
+        Ok(Box::new(open_staged_rar(staged, password, ctl)?))
     }
 
     fn probe_file_source_set(
@@ -178,179 +176,42 @@ impl ArchiveFormat for RarFormat {
     }
 }
 
-struct RarArchiveReader {
+fn open_staged_rar(
     staged: StagedRarSet,
-    backend: RarBackend,
-    entries: Vec<EntryMeta>,
     password: Option<Password>,
-    control: ControlToken,
+    ctl: &ControlToken,
+) -> Result<ExternalArchiveReader, FormatError> {
+    let selected = RarBackend::select(
+        staged.path(),
+        staged.is_native_multivolume(),
+        password.is_some(),
+        ctl,
+    )
+    .map_err(|error| staged.remap_external_error(error))?;
+    let backend = selected.backend;
+    let listing = match selected.listing {
+        Some(listing) => listing,
+        None => backend
+            .list_entries(staged.path(), password.as_ref(), ctl)
+            .map_err(|error| staged.remap_external_error(error))?,
+    };
+    staged.validate_external_volume_properties(listing.archive)?;
+    let entries = listing.entries;
+    if entries.is_empty() && staged.len()? > 0 {
+        return Err(FormatError::CorruptArchive(format!(
+            "{} listed no entries for a non-empty RAR archive",
+            backend.name()
+        )));
+    }
+    Ok(ExternalArchiveReader::new(
+        ExternalArchiveSource::Rar { staged, backend },
+        entries,
+        password,
+        ctl,
+    ))
 }
 
-impl RarArchiveReader {
-    fn open(
-        src: Box<dyn ReadSeek>,
-        password: Option<Password>,
-        ctl: &ControlToken,
-    ) -> Result<Self, FormatError> {
-        Self::open_staged(StagedRarSet::single_with_control(src, ctl)?, password, ctl)
-    }
-
-    fn open_file(
-        source_path: &Path,
-        source_identity: Option<PhysicalFileIdentity>,
-        src: Box<dyn ReadSeek>,
-        password: Option<Password>,
-        ctl: &ControlToken,
-    ) -> Result<Self, FormatError> {
-        Self::open_staged(
-            StagedRarSet::from_bound_file_with_control(source_path, source_identity, src, ctl)?,
-            password,
-            ctl,
-        )
-    }
-
-    fn open_staged(
-        staged: StagedRarSet,
-        password: Option<Password>,
-        ctl: &ControlToken,
-    ) -> Result<Self, FormatError> {
-        let selected = RarBackend::select(
-            staged.path(),
-            staged.is_native_multivolume(),
-            password.is_some(),
-            ctl,
-        )
-        .map_err(|error| staged.remap_external_error(error))?;
-        let backend = selected.backend;
-        let listing = match selected.listing {
-            Some(listing) => listing,
-            None => backend
-                .list_entries(staged.path(), password.as_ref(), ctl)
-                .map_err(|error| staged.remap_external_error(error))?,
-        };
-        staged.validate_external_volume_properties(listing.archive)?;
-        let entries = listing.entries;
-        if entries.is_empty() && staged.len()? > 0 {
-            return Err(FormatError::CorruptArchive(format!(
-                "{} listed no entries for a non-empty RAR archive",
-                backend.name()
-            )));
-        }
-        Ok(Self {
-            staged,
-            backend,
-            entries,
-            password,
-            control: ctl.clone(),
-        })
-    }
-
-    fn read_entry_with_control(
-        &self,
-        path: &EntryPath,
-        control: &ControlToken,
-    ) -> Result<Box<dyn Read>, FormatError> {
-        sevenzip_bridge::require_password_for_entry(&self.entries, path, self.password.as_ref())?;
-        self.backend
-            .read_entry(self.staged.path(), path, self.password.as_ref(), control)
-    }
-
-    fn test_with_problem_recorder(
-        &mut self,
-        limits: &SafetyLimits,
-        progress: &dyn ProgressSink,
-        ctl: &squallz_format_api::ControlToken,
-        mut record_problem: impl FnMut(String),
-    ) -> Result<u64, FormatError> {
-        let entries = self.entries.clone();
-        let total = entries
-            .iter()
-            .filter(|entry| matches!(entry.entry_type, EntryType::File))
-            .map(|entry| entry.size)
-            .fold(0, u64::saturating_add);
-        let mut entries_tested = 0u64;
-        let mut accountant = LimitsAccountant::new(*limits);
-        for meta in entries {
-            ctl.checkpoint()?;
-            accountant.check_entry(&meta)?;
-            if !matches!(meta.entry_type, EntryType::File) {
-                continue;
-            }
-            match self.read_entry_with_control(&meta.path, ctl) {
-                Ok(mut data) => {
-                    if let Err(e) =
-                        test_entry_data(data.as_mut(), &meta, &mut accountant, total, progress, ctl)
-                    {
-                        let e = sevenzip_bridge::recoverable_test_error(e)?;
-                        record_problem(format!("{}: {e}", meta.path.display));
-                    }
-                }
-                Err(e) => {
-                    let e = sevenzip_bridge::recoverable_test_error(e)?;
-                    record_problem(format!("{}: {e}", meta.path.display));
-                }
-            }
-            entries_tested += 1;
-        }
-        progress.on_progress(
-            accountant.output_bytes(),
-            accountant.output_bytes(),
-            &EntryPath::from_utf8(""),
-        );
-        Ok(entries_tested)
-    }
-}
-
-impl ArchiveReader for RarArchiveReader {
-    fn source_set(&self) -> Option<&ArchiveSourceSet> {
-        self.staged.source_set()
-    }
-
-    fn verify_source_set(&self, ctl: &squallz_format_api::ControlToken) -> Result<(), FormatError> {
-        self.staged.verify_source_set(ctl)
-    }
-
-    fn entries(&mut self) -> Box<dyn Iterator<Item = Result<EntryMeta, FormatError>> + '_> {
-        Box::new(self.entries.clone().into_iter().map(Ok))
-    }
-
-    fn consume_entries(
-        mut self: Box<Self>,
-        visitor: &mut dyn FnMut(EntryMeta) -> Result<(), FormatError>,
-    ) -> Result<(), FormatError> {
-        for entry in std::mem::take(&mut self.entries) {
-            visitor(entry)?;
-        }
-        Ok(())
-    }
-
-    fn read_entry(
-        &mut self,
-        path: &EntryPath,
-        consume: &mut dyn FnMut(&mut dyn Read) -> Result<(), FormatError>,
-    ) -> Result<(), FormatError> {
-        consume(self.read_entry_with_control(path, &self.control)?.as_mut())
-    }
-
-    fn test_summary(
-        &mut self,
-        limits: &SafetyLimits,
-        progress: &dyn ProgressSink,
-        ctl: &squallz_format_api::ControlToken,
-    ) -> Result<TestSummary, FormatError> {
-        let problems = BoundedProblemLog::new(TEST_PROBLEM_PREVIEW_LIMIT);
-        let entries_tested = self.test_with_problem_recorder(limits, progress, ctl, |problem| {
-            problems.record(problem)
-        })?;
-        Ok(TestSummary {
-            entries_tested,
-            problems: problems.snapshot(),
-            recovery: None,
-        })
-    }
-}
-
-enum RarBackend {
+pub(crate) enum RarBackend {
     SevenZip(PathBuf),
     SevenZipUnrar { sevenzip: PathBuf, unrar: PathBuf },
     Bsdtar(PathBuf),
@@ -462,7 +323,7 @@ impl RarBackend {
         }
     }
 
-    fn read_entry(
+    pub(crate) fn read_entry(
         &self,
         archive: &Path,
         path: &EntryPath,

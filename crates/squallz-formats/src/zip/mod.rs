@@ -16,15 +16,10 @@ mod update;
 mod volume;
 mod writer;
 
-#[cfg(feature = "process-backend")]
-use std::io::Read;
 use std::path::{Path, PathBuf};
 
-#[cfg(feature = "process-backend")]
-use squallz_format_api::{
-    test_entry_data, BoundedProblemLog, EntryMeta, EntryPath, EntryType, LimitsAccountant,
-    Password, SafetyLimits, TestSummary, TEST_PROBLEM_PREVIEW_LIMIT,
-};
+#[cfg(all(test, feature = "process-backend"))]
+use squallz_format_api::Password;
 use squallz_format_api::{
     ArchiveFormat, ArchiveReader, ArchiveSourceSet, ArchiveWriter, ControlToken, CreateOptions,
     FormatCapabilities, FormatError, NativeVolumeLimits, NativeVolumeWriter, OpenOptions,
@@ -33,10 +28,12 @@ use squallz_format_api::{
 };
 
 #[cfg(feature = "process-backend")]
+use crate::external_reader::{ExternalArchiveReader, ExternalArchiveSource};
+#[cfg(feature = "process-backend")]
 use crate::sevenzip_bridge;
 use volume::BoundZipSource;
 #[cfg(feature = "process-backend")]
-use volume::StagedSplitZipSet;
+pub(crate) use volume::StagedSplitZipSet;
 
 /// End-of-central-directory signature (`PK\x05\x06`).
 const EOCD_MAGIC: [u8; 4] = [0x50, 0x4B, 0x05, 0x06];
@@ -145,12 +142,20 @@ impl ArchiveFormat for ZipFormat {
                         selected_src,
                         ctl,
                     )?;
-                    Ok(Box::new(SplitZipArchiveReader::open(
-                        staged,
-                        tool,
-                        opts.password.clone(),
+                    let password = opts.password.clone();
+                    let entries = sevenzip_bridge::list_entries_with_control(
+                        &tool,
+                        staged.path(),
+                        password.as_ref(),
                         ctl,
-                    )?))
+                    )
+                    .map_err(|error| staged.remap_external_error(error))?;
+                    Ok(Box::new(ExternalArchiveReader::new(
+                        ExternalArchiveSource::SplitZip { staged, tool },
+                        entries,
+                        password,
+                        ctl,
+                    )))
                 }
                 #[cfg(not(feature = "process-backend"))]
                 {
@@ -295,151 +300,6 @@ impl ArchiveFormat for SfxZipFormat {
         Err(FormatError::Unsupported(
             "the SFX runtime ZIP registry is read-only".into(),
         ))
-    }
-}
-
-#[cfg(feature = "process-backend")]
-struct SplitZipArchiveReader {
-    staged: StagedSplitZipSet,
-    tool: PathBuf,
-    entries: Vec<EntryMeta>,
-    password: Option<Password>,
-    control: ControlToken,
-}
-
-#[cfg(feature = "process-backend")]
-impl SplitZipArchiveReader {
-    fn open(
-        staged: StagedSplitZipSet,
-        tool: PathBuf,
-        password: Option<Password>,
-        ctl: &ControlToken,
-    ) -> Result<Self, FormatError> {
-        let entries = sevenzip_bridge::list_entries_with_control(
-            &tool,
-            staged.path(),
-            password.as_ref(),
-            ctl,
-        )
-        .map_err(|error| staged.remap_external_error(error))?;
-        Ok(Self {
-            staged,
-            tool,
-            entries,
-            password,
-            control: ctl.clone(),
-        })
-    }
-
-    fn read_entry_with_control(
-        &self,
-        path: &EntryPath,
-        control: &ControlToken,
-    ) -> Result<Box<dyn Read>, FormatError> {
-        sevenzip_bridge::require_password_for_entry(&self.entries, path, self.password.as_ref())?;
-        sevenzip_bridge::read_entry_stdout(
-            &self.tool,
-            self.staged.path(),
-            path,
-            self.password.as_ref(),
-            control,
-        )
-        .map_err(|error| self.staged.remap_external_error(error))
-    }
-
-    fn test_with_problem_recorder(
-        &mut self,
-        limits: &SafetyLimits,
-        progress: &dyn ProgressSink,
-        ctl: &ControlToken,
-        mut record_problem: impl FnMut(String),
-    ) -> Result<u64, FormatError> {
-        let total = self
-            .entries
-            .iter()
-            .filter(|entry| matches!(entry.entry_type, EntryType::File))
-            .map(|entry| entry.size)
-            .fold(0, u64::saturating_add);
-        let mut entries_tested = 0u64;
-        let mut accountant = LimitsAccountant::new(*limits);
-        for meta in self.entries.clone() {
-            ctl.checkpoint()?;
-            accountant.check_entry(&meta)?;
-            if !matches!(meta.entry_type, EntryType::File) {
-                continue;
-            }
-            match self.read_entry_with_control(&meta.path, ctl) {
-                Ok(mut data) => {
-                    if let Err(error) =
-                        test_entry_data(data.as_mut(), &meta, &mut accountant, total, progress, ctl)
-                    {
-                        let error = sevenzip_bridge::recoverable_test_error(error)?;
-                        record_problem(format!("{}: {error}", meta.path.display));
-                    }
-                }
-                Err(error) => {
-                    let error = sevenzip_bridge::recoverable_test_error(error)?;
-                    record_problem(format!("{}: {error}", meta.path.display));
-                }
-            }
-            entries_tested += 1;
-        }
-        progress.on_progress(
-            accountant.output_bytes(),
-            accountant.output_bytes(),
-            &EntryPath::from_utf8(""),
-        );
-        Ok(entries_tested)
-    }
-}
-
-#[cfg(feature = "process-backend")]
-impl ArchiveReader for SplitZipArchiveReader {
-    fn source_set(&self) -> Option<&ArchiveSourceSet> {
-        Some(self.staged.source_set())
-    }
-
-    fn verify_source_set(&self, ctl: &ControlToken) -> Result<(), FormatError> {
-        self.staged.verify_source_set(ctl)
-    }
-
-    fn entries(&mut self) -> Box<dyn Iterator<Item = Result<EntryMeta, FormatError>> + '_> {
-        Box::new(self.entries.clone().into_iter().map(Ok))
-    }
-
-    fn consume_entries(
-        mut self: Box<Self>,
-        visitor: &mut dyn FnMut(EntryMeta) -> Result<(), FormatError>,
-    ) -> Result<(), FormatError> {
-        for entry in std::mem::take(&mut self.entries) {
-            visitor(entry)?;
-        }
-        Ok(())
-    }
-
-    fn read_entry(
-        &mut self,
-        path: &EntryPath,
-        consume: &mut dyn FnMut(&mut dyn Read) -> Result<(), FormatError>,
-    ) -> Result<(), FormatError> {
-        consume(self.read_entry_with_control(path, &self.control)?.as_mut())
-    }
-
-    fn test_summary(
-        &mut self,
-        limits: &SafetyLimits,
-        progress: &dyn ProgressSink,
-        ctl: &ControlToken,
-    ) -> Result<TestSummary, FormatError> {
-        let problems = BoundedProblemLog::new(TEST_PROBLEM_PREVIEW_LIMIT);
-        let entries_tested = self.test_with_problem_recorder(limits, progress, ctl, |problem| {
-            problems.record(problem)
-        })?;
-        Ok(TestSummary {
-            entries_tested,
-            problems: problems.snapshot(),
-            recovery: None,
-        })
     }
 }
 

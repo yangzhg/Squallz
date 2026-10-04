@@ -81,7 +81,7 @@ pub(super) enum BoundWimSource {
     Split(DiscoveredSplitWimSet, Box<dyn ReadSeek>),
 }
 
-pub(super) struct StagedSplitWimSet {
+pub(crate) struct StagedSplitWimSet {
     root: PrivateStagingDir,
     primary: PathBuf,
     source_set: BoundSourceSet,
@@ -184,15 +184,15 @@ impl StagedSplitWimSet {
         Ok(staged)
     }
 
-    pub(super) fn path(&self) -> &Path {
+    pub(crate) fn path(&self) -> &Path {
         &self.primary
     }
 
-    pub(super) fn source_set(&self) -> &ArchiveSourceSet {
+    pub(crate) fn source_set(&self) -> &ArchiveSourceSet {
         self.source_set.source_set()
     }
 
-    pub(super) fn verify_source_set(&self, control: &ControlToken) -> Result<(), FormatError> {
+    pub(crate) fn verify_source_set(&self, control: &ControlToken) -> Result<(), FormatError> {
         self.source_set.verify_current("WIM volume", control)
     }
 

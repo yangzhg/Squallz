@@ -3148,46 +3148,6 @@ fn remove_split_source_before_commit(
     Ok(())
 }
 
-#[cfg(test)]
-fn remove_split_source_before_commit_with<D>(
-    tmp: &Path,
-    source_identity: PathIdentity,
-    staged: &[StagedSplitOutput],
-    remove: &mut D,
-) -> Result<(), FormatError>
-where
-    D: FnMut(&Path) -> io::Result<()>,
-{
-    if path_identity(tmp).ok() != Some(source_identity) {
-        remove_staged_split_outputs_with(staged, remove);
-        return Err(FormatError::Io(io::Error::other(
-            "complete split staging archive changed before removal and was left untouched",
-        )));
-    }
-    if let Err(error) = remove(tmp) {
-        remove_staged_split_outputs_with(staged, remove);
-        return Err(FormatError::from(io::Error::new(
-            error.kind(),
-            format!("failed to remove complete split staging archive before commit: {error}"),
-        )));
-    }
-    Ok(())
-}
-
-#[cfg(test)]
-fn remove_staged_split_outputs_with<D>(staged: &[StagedSplitOutput], remove: &mut D)
-where
-    D: FnMut(&Path) -> io::Result<()>,
-{
-    for output in staged {
-        if split_file_identity(&output.file).ok() == Some(output.identity)
-            && split_path_identity(&output.part).ok() == Some(output.identity)
-        {
-            let _ = remove(&output.part);
-        }
-    }
-}
-
 pub(crate) fn validate_split_output_base(base: &Path) -> Result<(), FormatError> {
     match fs::symlink_metadata(base) {
         Ok(metadata) if metadata.file_type().is_file() || metadata.file_type().is_symlink() => {
@@ -3857,34 +3817,57 @@ mod tests {
     }
 
     #[test]
-    fn split_source_removal_failure_discards_parts_before_the_old_set_is_touched() {
+    fn split_source_rebind_preserves_the_old_set_and_cleans_owned_staging() {
         let dir = temp_dir("source-remove-gate");
         let base = dir.join("archive.zip");
         let old_first = volume_path(&base, 1);
         let tmp = dir.join("archive.complete.tmp");
+        let displaced = dir.join("displaced-complete.tmp");
         std::fs::write(&base, b"old unsplit").unwrap();
         std::fs::write(&old_first, b"old first").unwrap();
         std::fs::write(&tmp, b"complete new archive").unwrap();
-        let tmp_identity = path_identity(&tmp).unwrap();
-        let staged = staged_output_fixture(&base, &[b"new first", b"new second"]);
+        let source = open_regular_file_no_follow_read_write(&tmp).unwrap();
+        let source_identity = file_identity(&source).unwrap();
+        let mut staged = StagedSplitArchive::new(&tmp, source, source_identity, &base, false);
+        for (index, contents) in [b"new first".as_slice(), b"new second".as_slice()]
+            .into_iter()
+            .enumerate()
+        {
+            let mut file = staged
+                .reserve(
+                    volume_path(&base, index as u64 + 1),
+                    SplitOutputRole::Volume {
+                        index,
+                        primary: index == 0,
+                    },
+                )
+                .unwrap();
+            file.write_all(contents).unwrap();
+            file.sync_all().unwrap();
+        }
+        let owned_paths = staged
+            .outputs
+            .iter()
+            .map(|output| output.part.clone())
+            .collect::<Vec<_>>();
+        crate::move_path_no_replace(&tmp, &displaced).unwrap();
+        std::fs::write(&tmp, b"competitor").unwrap();
 
-        let error =
-            remove_split_source_before_commit_with(&tmp, tmp_identity, &staged, &mut |path| {
-                if path == tmp {
-                    return Err(io::Error::new(
-                        io::ErrorKind::PermissionDenied,
-                        "injected complete staging removal failure",
-                    ));
-                }
-                std::fs::remove_file(path)
-            })
+        let error = staged
+            .commit(
+                &NoProgress,
+                &ControlToken::default(),
+                CreateCommitPolicy::ReplaceExisting,
+            )
             .unwrap_err();
 
         assert!(error.to_string().contains("before commit"));
+        assert!(error.to_string().contains("left untouched"));
         assert_eq!(std::fs::read(&base).unwrap(), b"old unsplit");
         assert_eq!(std::fs::read(&old_first).unwrap(), b"old first");
-        assert_eq!(std::fs::read(&tmp).unwrap(), b"complete new archive");
-        assert!(!staged.iter().any(|output| output.part.exists()));
+        assert_eq!(std::fs::read(&tmp).unwrap(), b"competitor");
+        assert_eq!(std::fs::read(&displaced).unwrap(), b"complete new archive");
+        assert!(owned_paths.iter().all(|path| !path.exists()));
         assert!(split_backup_paths(&dir).is_empty());
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -3903,32 +3886,6 @@ mod tests {
         assert!(error.to_string().contains("left untouched"));
         assert_eq!(std::fs::read(&staged[0].part).unwrap(), b"competitor");
         assert_eq!(std::fs::read(&displaced).unwrap(), b"writer output");
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn secure_split_source_cleanup_preserves_a_rebound_competitor() {
-        let dir = temp_dir("secure-source-cleanup-rebound");
-        let base = dir.join("archive.zip");
-        let tmp = dir.join("archive.complete.tmp");
-        let displaced = dir.join("displaced-complete.tmp");
-        std::fs::write(&tmp, b"complete writer output").unwrap();
-        let source_file = open_regular_file_no_follow_read_write(&tmp).unwrap();
-        let source_identity = file_identity(&source_file).unwrap();
-        crate::move_path_no_replace(&tmp, &displaced).unwrap();
-        std::fs::write(&tmp, b"competitor").unwrap();
-        let staged = staged_output_fixture(&base, &[b"new first", b"new second"]);
-
-        let error = remove_split_source_before_commit(&tmp, &source_file, source_identity, &staged)
-            .unwrap_err();
-
-        assert!(error.to_string().contains("left untouched"));
-        assert_eq!(std::fs::read(&tmp).unwrap(), b"competitor");
-        assert_eq!(
-            std::fs::read(&displaced).unwrap(),
-            b"complete writer output"
-        );
-        assert!(!staged.iter().any(|output| output.part.exists()));
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -4059,10 +4016,7 @@ mod tests {
                 std::fs::write(&second, b"competitor second")?;
                 crate::publish_file_no_replace(from, to)
             },
-            &mut |staged| {
-                remove_staged_split_outputs_with(staged, &mut |path| std::fs::remove_file(path));
-                Vec::new()
-            },
+            &mut remove_staged_split_outputs,
         )
         .unwrap_err();
 
