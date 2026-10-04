@@ -1,18 +1,22 @@
 //! `sqz info`: supported formats and their capabilities.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde_json::{json, Value};
 use squallz_core::api::{FormatInfo, FormatKind};
-use squallz_formats::{sevenzip_backend_status, SevenZipBackendSource};
 
 use super::reports::print_pretty_json;
+use super::runtime::{
+    is_external, long_tail_7z_bridge_format, Availability, RuntimeFacts, RuntimeNeed,
+    RAR_LIMITATIONS,
+};
 use crate::commands::{Ctx, ModernStatusField, ModernTableColumn, ModernTableRow};
 use crate::errors::CliError;
 use crate::ui::{self, Tone};
 
 pub fn run(ctx: &Ctx, json: bool) -> Result<(), CliError> {
     let formats = ctx.engine.supported_formats();
+    let runtime = RuntimeFacts::capture();
 
     if json {
         let array: Vec<Value> = formats
@@ -35,7 +39,7 @@ pub fn run(ctx: &Ctx, json: bool) -> Result<(), CliError> {
                         "can_update": caps.can_update,
                         "can_test": caps.can_test,
                     },
-                    "implementation": implementation_json(f.id),
+                    "implementation": implementation_json(f.id, &runtime),
                     "level_mapping": level_mapping_json(f.id, caps.can_create),
                 })
             })
@@ -49,14 +53,14 @@ pub fn run(ctx: &Ctx, json: bool) -> Result<(), CliError> {
         return Ok(());
     }
     if ctx.is_modern() {
-        print_modern(ctx, &formats);
+        print_modern(ctx, &formats, &runtime);
     } else {
-        print_classic(ctx, &formats);
+        print_classic(ctx, &formats, &runtime);
     }
     Ok(())
 }
 
-fn print_classic(ctx: &Ctx, formats: &[FormatInfo]) {
+fn print_classic(ctx: &Ctx, formats: &[FormatInfo], runtime: &RuntimeFacts) {
     let built_in_archives = formats
         .iter()
         .filter(|format| format.kind == FormatKind::Archive && !is_external(format.id))
@@ -71,7 +75,7 @@ fn print_classic(ctx: &Ctx, formats: &[FormatInfo]) {
         .count();
     let runtime_ready = formats
         .iter()
-        .filter(|format| !format_has_missing_required_runtime(format))
+        .filter(|format| runtime.format_ready(format))
         .count();
     let runtime_missing = formats.len().saturating_sub(runtime_ready);
     let pack_unpack = formats
@@ -208,7 +212,7 @@ fn classic_info_line(
     )
 }
 
-fn print_modern(ctx: &Ctx, formats: &[FormatInfo]) {
+fn print_modern(ctx: &Ctx, formats: &[FormatInfo], runtime: &RuntimeFacts) {
     let built_in_archives = formats
         .iter()
         .filter(|format| format.kind == FormatKind::Archive && !is_external(format.id))
@@ -223,7 +227,7 @@ fn print_modern(ctx: &Ctx, formats: &[FormatInfo]) {
         .count();
     let runtime_ready = formats
         .iter()
-        .filter(|format| !format_has_missing_required_runtime(format))
+        .filter(|format| runtime.format_ready(format))
         .count();
     let runtime_missing = formats.len().saturating_sub(runtime_ready);
     ctx.print_modern_status_panel(
@@ -295,7 +299,7 @@ fn print_modern(ctx: &Ctx, formats: &[FormatInfo]) {
             ModernTableColumn::new(label(ctx, "common.risk", "Risk"), 26),
             ModernTableColumn::new(label(ctx, "common.examples", "Examples"), 30),
         ],
-        &modern_support_map_rows(ctx, formats),
+        &modern_support_map_rows(ctx, formats, runtime),
     );
     ctx.print_modern_wrapped_table(
         &label(ctx, "cli.info.coverage_title", "Format coverage"),
@@ -319,7 +323,7 @@ fn print_modern(ctx: &Ctx, formats: &[FormatInfo]) {
             ),
             ModernTableColumn::new(label(ctx, "common.examples", "Examples"), 42),
         ],
-        &modern_capability_lane_rows(ctx, formats),
+        &modern_capability_lane_rows(ctx, formats, runtime),
     );
     ctx.print_modern_wrapped_table(
         &label(ctx, "cli.info.action_selector_title", "Action selector"),
@@ -399,20 +403,33 @@ fn print_modern(ctx: &Ctx, formats: &[FormatInfo]) {
             )
         )
     );
-    print_modern_group(ctx, formats, "cli.info.group.built_in_archives", |format| {
-        format.kind == FormatKind::Archive && !is_external(format.id)
-    });
-    print_modern_group(ctx, formats, "cli.info.group.external_archives", |format| {
-        format.kind == FormatKind::Archive && is_external(format.id)
-    });
-    print_modern_group(ctx, formats, "cli.info.group.compressors", |format| {
-        format.kind == FormatKind::Compressor
-    });
+    print_modern_group(
+        ctx,
+        formats,
+        runtime,
+        "cli.info.group.built_in_archives",
+        |format| format.kind == FormatKind::Archive && !is_external(format.id),
+    );
+    print_modern_group(
+        ctx,
+        formats,
+        runtime,
+        "cli.info.group.external_archives",
+        |format| format.kind == FormatKind::Archive && is_external(format.id),
+    );
+    print_modern_group(
+        ctx,
+        formats,
+        runtime,
+        "cli.info.group.compressors",
+        |format| format.kind == FormatKind::Compressor,
+    );
 }
 
 fn print_modern_group(
     ctx: &Ctx,
     formats: &[FormatInfo],
+    runtime: &RuntimeFacts,
     title_key: &str,
     include: impl Fn(&FormatInfo) -> bool,
 ) {
@@ -428,11 +445,11 @@ fn print_modern_group(
                     format.id.to_owned(),
                     dotted_extensions(format),
                     capability_matrix(format),
-                    runtime_operation_detail(ctx, format, "read"),
-                    runtime_operation_detail(ctx, format, "write"),
+                    runtime_operation_detail(ctx, format, RuntimeNeed::Read, runtime),
+                    runtime_operation_detail(ctx, format, RuntimeNeed::Write, runtime),
                     backend_detail(ctx, format.id),
                 ],
-                format_runtime_tone(format),
+                format_runtime_tone(format, runtime),
             )
         })
         .collect::<Vec<_>>();
@@ -946,7 +963,11 @@ fn modern_inventory_rows(ctx: &Ctx, formats: &[FormatInfo]) -> Vec<ModernTableRo
     ]
 }
 
-fn modern_support_map_rows(ctx: &Ctx, formats: &[FormatInfo]) -> Vec<ModernTableRow> {
+fn modern_support_map_rows(
+    ctx: &Ctx,
+    formats: &[FormatInfo],
+    runtime: &RuntimeFacts,
+) -> Vec<ModernTableRow> {
     let archive_pack_unpack = formats
         .iter()
         .filter(|format| {
@@ -974,6 +995,7 @@ fn modern_support_map_rows(ctx: &Ctx, formats: &[FormatInfo]) -> Vec<ModernTable
 
     vec![
         support_map_row(
+            runtime,
             label(ctx, "cli.info.support.archive_pack", "Archive pack/unpack"),
             label(
                 ctx,
@@ -988,6 +1010,7 @@ fn modern_support_map_rows(ctx: &Ctx, formats: &[FormatInfo]) -> Vec<ModernTable
             ),
         ),
         support_map_row(
+            runtime,
             label(ctx, "cli.info.support.stream_codecs", "Stream codecs"),
             label(
                 ctx,
@@ -1002,6 +1025,7 @@ fn modern_support_map_rows(ctx: &Ctx, formats: &[FormatInfo]) -> Vec<ModernTable
             ),
         ),
         support_map_row(
+            runtime,
             label(ctx, "cli.info.support.unpack_only", "Unpack only"),
             label(ctx, "cli.info.support.mode.extract_test", "extract + test"),
             &unpack_only,
@@ -1012,6 +1036,7 @@ fn modern_support_map_rows(ctx: &Ctx, formats: &[FormatInfo]) -> Vec<ModernTable
             ),
         ),
         support_map_row(
+            runtime,
             label(ctx, "cli.info.support.edit_update", "Edit/update"),
             label(ctx, "cli.info.support.mode.zip_entries", "zip entry edits"),
             &edit_update,
@@ -1028,6 +1053,7 @@ fn modern_support_map_rows(ctx: &Ctx, formats: &[FormatInfo]) -> Vec<ModernTable
 }
 
 fn support_map_row(
+    runtime: &RuntimeFacts,
     lane: String,
     mode: String,
     formats: &[&FormatInfo],
@@ -1035,7 +1061,7 @@ fn support_map_row(
 ) -> ModernTableRow {
     let ready = formats
         .iter()
-        .filter(|format| !format_has_missing_required_runtime(format))
+        .filter(|format| runtime.format_ready(format))
         .count();
     let readiness = if formats.is_empty() {
         "-".to_owned()
@@ -1114,7 +1140,11 @@ fn format_ids(formats: &[&FormatInfo]) -> String {
         .join(", ")
 }
 
-fn modern_capability_lane_rows(ctx: &Ctx, formats: &[FormatInfo]) -> Vec<ModernTableRow> {
+fn modern_capability_lane_rows(
+    ctx: &Ctx,
+    formats: &[FormatInfo],
+    runtime: &RuntimeFacts,
+) -> Vec<ModernTableRow> {
     [
         CapabilityLane::Create,
         CapabilityLane::Extract,
@@ -1132,7 +1162,11 @@ fn modern_capability_lane_rows(ctx: &Ctx, formats: &[FormatInfo]) -> Vec<ModernT
             .collect();
         let ready = supported
             .iter()
-            .filter(|format| format_runtime_ready_for_lane(format, lane))
+            .filter(|format| {
+                runtime
+                    .availability(format.id, lane.runtime_need())
+                    .available()
+            })
             .count();
         let needs_tools = supported.len().saturating_sub(ready);
         let tone = if needs_tools == 0 {
@@ -1213,21 +1247,6 @@ fn modern_cheatsheet_rows(ctx: &Ctx) -> Vec<ModernTableRow> {
     ]
 }
 
-fn format_runtime_ready_for_lane(format: &FormatInfo, lane: CapabilityLane) -> bool {
-    if !lane.supported(format) {
-        return false;
-    }
-    if !is_external(format.id) {
-        return true;
-    }
-    let implementation = implementation_json(format.id);
-    let operation = match lane.runtime_need() {
-        RuntimeNeed::Read => "read",
-        RuntimeNeed::Write => "write",
-    };
-    json_nested_bool_field(&implementation["availability"], operation, "available")
-}
-
 fn capability_examples(formats: &[&FormatInfo]) -> String {
     const MAX_EXAMPLES: usize = 7;
     if formats.is_empty() {
@@ -1275,12 +1294,16 @@ fn classic_capabilities(ctx: &Ctx, format: &FormatInfo) -> String {
     }
 }
 
-fn runtime_operation_detail(ctx: &Ctx, format: &FormatInfo, operation: &str) -> String {
+fn runtime_operation_detail(
+    ctx: &Ctx,
+    format: &FormatInfo,
+    need: RuntimeNeed,
+    runtime: &RuntimeFacts,
+) -> String {
     if !is_external(format.id) {
-        let supported = match operation {
-            "read" => format.capabilities.can_extract || format.capabilities.can_test,
-            "write" => format.capabilities.can_create,
-            _ => false,
+        let supported = match need {
+            RuntimeNeed::Read => format.capabilities.can_extract || format.capabilities.can_test,
+            RuntimeNeed::Write => format.capabilities.can_create,
         };
         return if supported {
             label(ctx, "cli.info.runtime.ready", "ready")
@@ -1289,8 +1312,7 @@ fn runtime_operation_detail(ctx: &Ctx, format: &FormatInfo, operation: &str) -> 
         };
     }
 
-    let implementation = implementation_json(format.id);
-    availability_status_label(ctx, &implementation["availability"][operation])
+    availability_status_label(ctx, runtime.availability(format.id, need))
 }
 
 const INFO_TABLE_WIDTHS: [usize; 6] = [9, 26, 13, 16, 16, 36];
@@ -1304,12 +1326,6 @@ enum CapabilityLane {
     Split,
     Encrypt,
     EncryptNames,
-}
-
-#[derive(Clone, Copy)]
-enum RuntimeNeed {
-    Read,
-    Write,
 }
 
 impl CapabilityLane {
@@ -1348,8 +1364,8 @@ impl CapabilityLane {
     }
 }
 
-fn format_runtime_tone(format: &FormatInfo) -> Tone {
-    if format_has_missing_required_runtime(format) {
+fn format_runtime_tone(format: &FormatInfo, runtime: &RuntimeFacts) -> Tone {
+    if !runtime.format_ready(format) {
         Tone::Warning
     } else if !is_external(format.id) {
         Tone::Success
@@ -1358,25 +1374,13 @@ fn format_runtime_tone(format: &FormatInfo) -> Tone {
     }
 }
 
-fn format_has_missing_required_runtime(format: &FormatInfo) -> bool {
-    if !is_external(format.id) {
-        return false;
-    }
-    let implementation = implementation_json(format.id);
-    let availability = &implementation["availability"];
-    let read_required = format.capabilities.can_extract || format.capabilities.can_test;
-    let write_required = format.capabilities.can_create;
-    (read_required && !json_nested_bool_field(availability, "read", "available"))
-        || (write_required && !json_nested_bool_field(availability, "write", "available"))
-}
-
-fn availability_status_label(ctx: &Ctx, availability: &Value) -> String {
-    if availability["source"].as_str() == Some("unsupported") {
+fn availability_status_label(ctx: &Ctx, availability: Availability<'_>) -> String {
+    if matches!(availability, Availability::Unsupported) {
         return label(ctx, "cli.info.runtime.unsupported", "unsupported");
     }
 
     let hint = availability_tool_hint(availability);
-    if json_bool_field(availability, "available") {
+    if availability.available() {
         let status = label(ctx, "cli.info.runtime.ready", "ready");
         if hint.is_empty() {
             status
@@ -1393,11 +1397,14 @@ fn availability_status_label(ctx: &Ctx, availability: &Value) -> String {
     }
 }
 
-fn availability_tool_hint(availability: &Value) -> String {
-    if let Some(selected) = availability["selected"].as_str().filter(|s| !s.is_empty()) {
-        return normalize_tool_hint(path_file_name_or_self(selected));
+fn availability_tool_hint(availability: Availability<'_>) -> String {
+    if let Some(selected) = availability
+        .selected()
+        .filter(|path| !path.as_os_str().is_empty())
+    {
+        return normalize_tool_hint(path_file_name_or_self(&selected.to_string_lossy()));
     }
-    match first_tool_name(availability) {
+    match availability.tools().first() {
         Some(tool) => normalize_tool_hint(tool),
         None => String::new(),
     }
@@ -1411,18 +1418,6 @@ fn normalize_tool_hint(tool: &str) -> String {
     }
 }
 
-fn json_bool_field(value: &Value, field: &str) -> bool {
-    value.get(field).and_then(Value::as_bool) == Some(true)
-}
-
-fn json_nested_bool_field(value: &Value, parent: &str, field: &str) -> bool {
-    value
-        .get(parent)
-        .and_then(|parent| parent.get(field))
-        .and_then(Value::as_bool)
-        == Some(true)
-}
-
 fn path_file_name_or_self(path: &str) -> &str {
     match Path::new(path).file_name().and_then(|name| name.to_str()) {
         Some(name) => name,
@@ -1430,15 +1425,11 @@ fn path_file_name_or_self(path: &str) -> &str {
     }
 }
 
-fn first_tool_name(availability: &Value) -> Option<&str> {
-    availability
-        .get("tools")
-        .and_then(Value::as_array)
-        .and_then(|tools| tools.first())
-        .and_then(Value::as_str)
-}
-
-pub(crate) fn implementation_json(format_id: &str) -> Value {
+fn implementation_json(format_id: &str, runtime: &RuntimeFacts) -> Value {
+    let read = runtime.availability(format_id, RuntimeNeed::Read).to_json();
+    let write = runtime
+        .availability(format_id, RuntimeNeed::Write)
+        .to_json();
     match format_id {
         "zip" => json!({
             "status": "built_in",
@@ -1453,11 +1444,11 @@ pub(crate) fn implementation_json(format_id: &str) -> Value {
                 "scope": "native_split_read",
                 "tools": ["7zz", "7z", "7za"],
                 "env": "SQUALLZ_7Z",
-                "availability": sevenzip_availability(),
+                "availability": runtime.sevenzip().to_json(),
             },
             "availability": {
-                "read": built_in_availability(),
-                "write": built_in_availability(),
+                "read": read,
+                "write": write,
             },
             "limitations": [
                 {
@@ -1492,8 +1483,8 @@ pub(crate) fn implementation_json(format_id: &str) -> Value {
                 "env": "SQUALLZ_WIMLIB",
             },
             "availability": {
-                "read": sevenzip_availability(),
-                "write": env_or_path_availability(Some("SQUALLZ_WIMLIB"), &["wimlib-imagex"]),
+                "read": read,
+                "write": write,
             },
             "limitations": [
                 {
@@ -1532,45 +1523,11 @@ pub(crate) fn implementation_json(format_id: &str) -> Value {
             },
             "policy": rar_policy_json(),
             "availability": {
-                "read": rar_read_availability(),
-                "rar7_v6_decoder": env_or_path_availability(
-                    Some("SQUALLZ_UNRAR"),
-                    &["unrar"],
-                ),
-                "write": unsupported_availability(),
+                "read": read,
+                "rar7_v6_decoder": runtime.unrar().to_json(),
+                "write": write,
             },
-            "limitations": [
-                {
-                    "scope": "create",
-                    "status": "unsupported",
-                    "reason": "Squallz does not create RAR archives",
-                },
-                {
-                    "scope": "recovery_records",
-                    "status": "unsupported",
-                    "reason": "RAR recovery records and RAR .rev files are outside the launch scope",
-                },
-                {
-                    "scope": "encrypted",
-                    "status": "implemented_not_release_claimed",
-                    "reason": "encrypted RAR reading uses 7zz/7z with a stdin-only password bridge; a licensed full corpus and three-platform package matrix are still required for a release claim",
-                },
-                {
-                    "scope": "multi_volume",
-                    "status": "not_release_claimed",
-                    "reason": "native partN.rar and legacy rar/r00 read orchestration is implemented with private first-volume staging, but a licensed full corpus and macOS/Windows/Linux package matrix are still required for a release claim",
-                },
-                {
-                    "scope": "rar7_v6",
-                    "status": "implemented_not_release_claimed",
-                    "reason": "confirmed-unencrypted RAR7 v6 entry streams can use an optional user-installed unrar decoder after 7zz/7z listing and volume validation; encrypted input stays on the stdin-only 7zz/7z path, and a full three-platform corpus is still required",
-                },
-                {
-                    "scope": "damaged_repair",
-                    "status": "unsupported",
-                    "reason": "damaged RAR can be detected or rejected, but RAR repair is not implemented",
-                },
-            ],
+            "limitations": RAR_LIMITATIONS,
             "platforms": ["macos", "windows", "linux"],
             "release_gate": "licensed RAR compatibility matrix plus external tool packaging and license review",
         }),
@@ -1587,8 +1544,8 @@ pub(crate) fn implementation_json(format_id: &str) -> Value {
                 "reason": "launch scope is unpack-only for this format",
             },
             "availability": {
-                "read": sevenzip_availability(),
-                "write": unsupported_availability(),
+                "read": read,
+                "write": write,
             },
             "platforms": ["macos", "windows", "linux"],
             "release_gate": "real long-tail compatibility matrix plus 7z packaging and license review",
@@ -1603,8 +1560,8 @@ pub(crate) fn implementation_json(format_id: &str) -> Value {
                 "kind": "rust",
             },
             "availability": {
-                "read": built_in_availability(),
-                "write": built_in_availability(),
+                "read": read,
+                "write": write,
             },
             "platforms": ["macos", "windows", "linux"],
             "release_gate": null,
@@ -1640,178 +1597,6 @@ fn rar_policy_json() -> Value {
     })
 }
 
-fn built_in_availability() -> Value {
-    json!({
-        "available": true,
-        "source": "built_in",
-    })
-}
-
-fn unsupported_availability() -> Value {
-    json!({
-        "available": false,
-        "source": "unsupported",
-    })
-}
-
-fn sevenzip_availability() -> Value {
-    let status = sevenzip_backend_status();
-    let source = match status.source() {
-        Some(SevenZipBackendSource::Application) => Some("application"),
-        Some(SevenZipBackendSource::Environment) => Some("env"),
-        Some(SevenZipBackendSource::Path) => Some("path"),
-        None => None,
-    };
-    json!({
-        "available": status.available(),
-        "source": source,
-        "env": "SQUALLZ_7Z",
-        "selected": status.selected().map(|path| path.to_string_lossy()),
-        "configured": status.configured(),
-        "path_exists": status.executable().is_some(),
-        "tools": ["7zz", "7z", "7za"],
-    })
-}
-
-fn rar_read_availability() -> Value {
-    if std::env::var_os("SQUALLZ_BSDTAR").is_some() {
-        return bsdtar_availability();
-    }
-    let sevenzip = sevenzip_availability();
-    if json_bool_field(&sevenzip, "configured") || json_bool_field(&sevenzip, "available") {
-        return sevenzip;
-    }
-    bsdtar_availability()
-}
-
-fn bsdtar_availability() -> Value {
-    if let Some(configured) = std::env::var_os("SQUALLZ_BSDTAR") {
-        let configured = PathBuf::from(configured);
-        let exists = command_path_is_executable(&configured);
-        return json!({
-            "available": exists,
-            "source": "env",
-            "env": "SQUALLZ_BSDTAR",
-            "selected": configured.to_string_lossy(),
-            "configured": true,
-            "path_exists": exists,
-            "tools": ["bsdtar"],
-        });
-    }
-    let absolute = Path::new("/usr/bin/bsdtar");
-    if command_is_executable(absolute) {
-        return json!({
-            "available": true,
-            "source": "path",
-            "selected": absolute.to_string_lossy(),
-            "configured": false,
-            "path_exists": true,
-            "tools": ["bsdtar"],
-        });
-    }
-    if let Some(path) = find_on_path("bsdtar") {
-        return json!({
-            "available": true,
-            "source": "path",
-            "selected": path.to_string_lossy(),
-            "configured": false,
-            "path_exists": true,
-            "tools": ["bsdtar"],
-        });
-    }
-    json!({
-        "available": false,
-        "source": null,
-        "selected": null,
-        "configured": false,
-        "path_exists": false,
-        "tools": ["bsdtar"],
-    })
-}
-
-fn env_or_path_availability(env: Option<&str>, tools: &[&str]) -> Value {
-    if let Some(env_name) = env {
-        if let Some(configured) = std::env::var_os(env_name) {
-            let configured = PathBuf::from(configured);
-            let exists = command_path_is_executable(&configured);
-            return json!({
-                "available": exists,
-                "source": "env",
-                "env": env_name,
-                "selected": configured.to_string_lossy(),
-                "configured": true,
-                "path_exists": exists,
-                "tools": tools,
-            });
-        }
-    }
-    for tool in tools {
-        if let Some(path) = find_on_path(tool) {
-            return json!({
-                "available": true,
-                "source": "path",
-                "env": env,
-                "selected": path.to_string_lossy(),
-                "configured": false,
-                "path_exists": true,
-                "tools": tools,
-            });
-        }
-    }
-    json!({
-        "available": false,
-        "source": null,
-        "env": env,
-        "selected": null,
-        "configured": false,
-        "path_exists": false,
-        "tools": tools,
-    })
-}
-
-fn command_path_is_executable(path: &Path) -> bool {
-    if path.components().count() > 1 || path.is_absolute() {
-        return command_is_executable(path);
-    }
-    find_on_path(&path.to_string_lossy()).is_some()
-}
-
-fn find_on_path(name: &str) -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path) {
-        let candidate = dir.join(name);
-        if command_is_executable(&candidate) {
-            return Some(candidate);
-        }
-        #[cfg(windows)]
-        {
-            let candidate = dir.join(format!("{name}.exe"));
-            if command_is_executable(&candidate) {
-                return Some(candidate);
-            }
-        }
-    }
-    None
-}
-
-fn command_is_executable(path: &Path) -> bool {
-    if !path.is_file() {
-        return false;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        match path.metadata() {
-            Ok(metadata) => metadata.permissions().mode() & 0o111 != 0,
-            Err(_) => false,
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        true
-    }
-}
-
 fn label(ctx: &Ctx, key: &str, fallback: &str) -> String {
     let translated = ctx.loc.t(key);
     if translated == key {
@@ -1819,47 +1604,6 @@ fn label(ctx: &Ctx, key: &str, fallback: &str) -> String {
     } else {
         translated
     }
-}
-
-fn is_external(format_id: &str) -> bool {
-    format_id == "wim" || format_id == "rar" || long_tail_7z_bridge_format(format_id)
-}
-
-fn long_tail_7z_bridge_format(format_id: &str) -> bool {
-    matches!(
-        format_id,
-        "apfs"
-            | "ar"
-            | "arj"
-            | "cab"
-            | "chm"
-            | "cpio"
-            | "cramfs"
-            | "dmg"
-            | "ext"
-            | "fat"
-            | "gpt"
-            | "hfs"
-            | "ihex"
-            | "iso"
-            | "lzh"
-            | "lzma"
-            | "mbr"
-            | "msi"
-            | "nsis"
-            | "ntfs"
-            | "qcow2"
-            | "rpm"
-            | "squashfs"
-            | "udf"
-            | "uefi"
-            | "vdi"
-            | "vhd"
-            | "vhdx"
-            | "vmdk"
-            | "xar"
-            | "z"
-    )
 }
 
 fn level_mapping_json(format_id: &str, can_create: bool) -> Value {

@@ -17,6 +17,7 @@ mod nested;
 mod preset;
 mod recovery;
 mod reports;
+mod runtime;
 pub(crate) mod sfx;
 mod test;
 mod update;

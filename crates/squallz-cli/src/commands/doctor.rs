@@ -2,24 +2,21 @@
 //! engines. This command does not execute archive operations; it explains
 //! whether the current machine can use the advertised capabilities.
 
-use std::env;
-use std::path::{Path, PathBuf};
-
 use serde_json::{json, Value};
 use squallz_core::api::FormatInfo;
 
-use crate::commands::info::implementation_json;
 use crate::commands::reports::print_pretty_json;
+use crate::commands::runtime::{
+    is_external, Availability, RuntimeFacts, RuntimeNeed, RAR_LIMITATIONS,
+};
 use crate::commands::{Ctx, ModernStatusField, ModernTableColumn, ModernTableRow};
 use crate::errors::CliError;
 use crate::ui::Tone;
 
-const PAR2_ENV: &str = "SQUALLZ_PAR2";
-const PAR2_TOOLS: [&str; 3] = ["par2cmdline-turbo", "par2", "par2cmdline"];
-
 pub fn run(ctx: &Ctx, strict: bool, json_output: bool) -> Result<(), CliError> {
     let formats = ctx.engine.supported_formats();
-    let report = DoctorReport::new(&formats, strict);
+    let runtime = RuntimeFacts::capture();
+    let report = DoctorReport::new(&formats, strict, &runtime);
     if json_output {
         let value = report.to_json();
         print_pretty_json(&value)?;
@@ -35,7 +32,7 @@ pub fn run(ctx: &Ctx, strict: bool, json_output: bool) -> Result<(), CliError> {
 }
 
 #[derive(Debug)]
-struct DoctorReport {
+struct DoctorReport<'a> {
     ok: bool,
     strict: bool,
     total_formats: usize,
@@ -43,29 +40,29 @@ struct DoctorReport {
     external_formats: usize,
     ready_formats: usize,
     missing_formats: usize,
-    checks: Vec<DoctorCheck>,
+    checks: Vec<DoctorCheck<'a>>,
 }
 
-impl DoctorReport {
-    fn new(formats: &[FormatInfo], strict: bool) -> Self {
+impl<'a> DoctorReport<'a> {
+    fn new(formats: &[FormatInfo], strict: bool, runtime: &'a RuntimeFacts) -> Self {
         let built_in_formats = formats
             .iter()
-            .filter(|format| !format_is_external(format.id))
+            .filter(|format| !is_external(format.id))
             .count();
         let external_formats = formats.len().saturating_sub(built_in_formats);
         let ready_formats = formats
             .iter()
-            .filter(|format| format_runtime_ready(format))
+            .filter(|format| runtime.format_ready(format))
             .count();
         let missing_formats = formats.len().saturating_sub(ready_formats);
         let checks = vec![
             built_in_check(formats),
-            sevenzip_check(formats, strict),
-            wim_write_check(formats, strict),
+            sevenzip_check(formats, strict, runtime),
+            wim_write_check(formats, strict, runtime),
             sqz_recovery_check(formats),
-            par2_create_check(strict),
-            par2_verify_repair_check(),
-            rar_boundary_check(formats),
+            par2_create_check(strict, runtime),
+            par2_verify_repair_check(runtime),
+            rar_boundary_check(formats, runtime),
         ];
         let ok = checks.iter().all(|check| check.status != CheckStatus::Fail);
         Self {
@@ -98,17 +95,17 @@ impl DoctorReport {
 }
 
 #[derive(Debug)]
-struct DoctorCheck {
+struct DoctorCheck<'a> {
     id: &'static str,
     status: CheckStatus,
     scope: String,
     detail: String,
     strict_required: bool,
     formats: Vec<String>,
-    availability: Option<Value>,
+    availability: Availability<'a>,
 }
 
-impl DoctorCheck {
+impl DoctorCheck<'_> {
     fn to_json(&self) -> Value {
         json!({
             "id": self.id,
@@ -117,7 +114,7 @@ impl DoctorCheck {
             "scope": self.scope,
             "detail": self.detail,
             "formats": self.formats,
-            "availability": self.availability,
+            "availability": self.availability.to_json(),
         })
     }
 }
@@ -149,10 +146,10 @@ impl CheckStatus {
     }
 }
 
-fn built_in_check(formats: &[FormatInfo]) -> DoctorCheck {
+fn built_in_check(formats: &[FormatInfo]) -> DoctorCheck<'static> {
     let built_in = formats
         .iter()
-        .filter(|format| !format_is_external(format.id))
+        .filter(|format| !is_external(format.id))
         .map(|format| format.id.to_owned())
         .collect::<Vec<_>>();
     DoctorCheck {
@@ -162,49 +159,51 @@ fn built_in_check(formats: &[FormatInfo]) -> DoctorCheck {
         detail: "built-in Rust engines are available without external tools".to_owned(),
         strict_required: true,
         formats: built_in,
-        availability: Some(json!({"available": true, "source": "built_in"})),
+        availability: Availability::BuiltIn(true),
     }
 }
 
-fn sevenzip_check(formats: &[FormatInfo], strict: bool) -> DoctorCheck {
+fn sevenzip_check<'a>(
+    formats: &[FormatInfo],
+    strict: bool,
+    runtime: &'a RuntimeFacts,
+) -> DoctorCheck<'a> {
     let affected = formats
         .iter()
-        .filter(|format| {
-            let implementation = implementation_json(format.id);
-            implementation["read"]["kind"].as_str() == Some("external_tool")
-                && implementation["read"]["tools"]
-                    .as_array()
-                    .is_some_and(|tools| tools.iter().any(|tool| tool == "7zz"))
-        })
+        .filter(|format| is_external(format.id))
         .map(|format| format.id.to_owned())
         .collect::<Vec<_>>();
-    let availability = implementation_json("cab")["availability"]["read"].clone();
-    let available = json_bool_field(&availability, "available");
+    let availability = runtime.sevenzip();
+    let available = availability.available();
     DoctorCheck {
         id: "7z-read-bridge",
         status: availability_status(available, strict),
         scope: "long-tail unpack/test bridge".to_owned(),
         detail: if available {
-            availability_detail("7z bridge ready", &availability)
+            availability_detail("7z bridge ready", availability)
         } else {
             "install 7zz/7z or set SQUALLZ_7Z for long-tail unpack-only formats".to_owned()
         },
         strict_required: true,
         formats: affected,
-        availability: Some(availability),
+        availability,
     }
 }
 
-fn wim_write_check(formats: &[FormatInfo], strict: bool) -> DoctorCheck {
+fn wim_write_check<'a>(
+    formats: &[FormatInfo],
+    strict: bool,
+    runtime: &'a RuntimeFacts,
+) -> DoctorCheck<'a> {
     let present = formats.iter().any(|format| format.id == "wim");
-    let availability = implementation_json("wim")["availability"]["write"].clone();
-    let available = json_bool_field(&availability, "available");
+    let availability = runtime.availability("wim", RuntimeNeed::Write);
+    let available = availability.available();
     DoctorCheck {
         id: "wim-writer",
         status: availability_status(available, strict),
         scope: "WIM create".to_owned(),
         detail: if available {
-            availability_detail("wimlib-imagex writer ready", &availability)
+            availability_detail("wimlib-imagex writer ready", availability)
         } else {
             "install wimlib-imagex or set SQUALLZ_WIMLIB before creating WIM archives".to_owned()
         },
@@ -214,11 +213,11 @@ fn wim_write_check(formats: &[FormatInfo], strict: bool) -> DoctorCheck {
         } else {
             Vec::new()
         },
-        availability: Some(availability),
+        availability,
     }
 }
 
-fn sqz_recovery_check(formats: &[FormatInfo]) -> DoctorCheck {
+fn sqz_recovery_check(formats: &[FormatInfo]) -> DoctorCheck<'static> {
     let present = formats.iter().any(|format| format.id == "sqz");
     DoctorCheck {
         id: "sqz-embedded-recovery",
@@ -239,61 +238,55 @@ fn sqz_recovery_check(formats: &[FormatInfo]) -> DoctorCheck {
         } else {
             Vec::new()
         },
-        availability: Some(json!({"available": present, "source": "built_in"})),
+        availability: Availability::BuiltIn(present),
     }
 }
 
-fn par2_create_check(strict: bool) -> DoctorCheck {
-    let availability = par2_availability();
-    let available = json_bool_field(&availability, "available");
+fn par2_create_check(strict: bool, runtime: &RuntimeFacts) -> DoctorCheck<'_> {
+    let availability = runtime.par2();
+    let available = availability.available();
     DoctorCheck {
         id: "par2-create",
         status: availability_status(available, strict),
         scope: "external PAR2 sidecar create".to_owned(),
         detail: if available {
-            availability_detail("PAR2 create tool ready", &availability)
+            availability_detail("PAR2 create tool ready", availability)
         } else {
             "PAR2 create still needs par2cmdline-turbo, par2, par2cmdline, or SQUALLZ_PAR2"
                 .to_owned()
         },
         strict_required: true,
         formats: vec!["par2".to_owned()],
-        availability: Some(availability),
+        availability,
     }
 }
 
-fn par2_verify_repair_check() -> DoctorCheck {
-    let availability = par2_availability();
-    let available = json_bool_field(&availability, "available");
+fn par2_verify_repair_check(runtime: &RuntimeFacts) -> DoctorCheck<'_> {
+    let availability = runtime.par2();
+    let available = availability.available();
     DoctorCheck {
         id: "par2-verify-repair",
         status: CheckStatus::Pass,
         scope: "external PAR2 verify/repair".to_owned(),
         detail: if available {
-            availability_detail("external PAR2 verify/repair ready", &availability)
+            availability_detail("external PAR2 verify/repair ready", availability)
         } else {
             "rust-par2 fallback is built in for verify/repair; create still needs an external tool"
                 .to_owned()
         },
         strict_required: false,
         formats: vec!["par2".to_owned()],
-        availability: Some(if available {
+        availability: if available {
             availability
         } else {
-            json!({
-                "available": true,
-                "source": "built_in_fallback",
-                "selected": "rust-par2",
-                "create_available": false,
-            })
-        }),
+            Availability::Par2Fallback
+        },
     }
 }
 
-fn rar_boundary_check(formats: &[FormatInfo]) -> DoctorCheck {
+fn rar_boundary_check<'a>(formats: &[FormatInfo], runtime: &'a RuntimeFacts) -> DoctorCheck<'a> {
     let present = formats.iter().any(|format| format.id == "rar");
-    let implementation = implementation_json("rar");
-    let limits = json_array_len(&implementation["limitations"]);
+    let limits = RAR_LIMITATIONS.len();
     DoctorCheck {
         id: "rar-product-boundary",
         status: CheckStatus::Boundary,
@@ -307,7 +300,7 @@ fn rar_boundary_check(formats: &[FormatInfo]) -> DoctorCheck {
         } else {
             Vec::new()
         },
-        availability: Some(implementation["availability"]["read"].clone()),
+        availability: runtime.availability("rar", RuntimeNeed::Read),
     }
 }
 
@@ -319,147 +312,16 @@ fn availability_status(available: bool, strict: bool) -> CheckStatus {
     }
 }
 
-fn availability_detail(ready: &str, availability: &Value) -> String {
-    let selected = selected_label(availability);
-    let source = source_label(availability);
+fn availability_detail(ready: &str, availability: Availability<'_>) -> String {
+    let selected = availability
+        .selected()
+        .filter(|path| !path.as_os_str().is_empty())
+        .map_or_else(|| "built-in".into(), std::path::Path::to_string_lossy);
+    let source = availability.source().unwrap_or("runtime");
     format!("{ready} via {source}: {selected}")
 }
 
-fn format_runtime_ready(format: &FormatInfo) -> bool {
-    if !format_is_external(format.id) {
-        return true;
-    }
-    let implementation = implementation_json(format.id);
-    let availability = &implementation["availability"];
-    let read_required = format.capabilities.can_extract || format.capabilities.can_test;
-    let write_required = format.capabilities.can_create;
-    (!read_required || json_nested_bool_field(availability, "read", "available"))
-        && (!write_required || json_nested_bool_field(availability, "write", "available"))
-}
-
-fn format_is_external(format_id: &str) -> bool {
-    implementation_json(format_id)["status"].as_str() == Some("external_required")
-}
-
-fn json_bool_field(value: &Value, field: &str) -> bool {
-    value.get(field).and_then(Value::as_bool) == Some(true)
-}
-
-fn json_nested_bool_field(value: &Value, parent: &str, field: &str) -> bool {
-    value
-        .get(parent)
-        .and_then(|parent| parent.get(field))
-        .and_then(Value::as_bool)
-        == Some(true)
-}
-
-fn json_array_len(value: &Value) -> usize {
-    match value.as_array() {
-        Some(items) => items.len(),
-        None => 0,
-    }
-}
-
-fn selected_label(availability: &Value) -> &str {
-    match availability
-        .get("selected")
-        .and_then(Value::as_str)
-        .filter(|selected| !selected.is_empty())
-    {
-        Some(selected) => selected,
-        None => "built-in",
-    }
-}
-
-fn source_label(availability: &Value) -> &str {
-    match availability.get("source").and_then(Value::as_str) {
-        Some(source) => source,
-        None => "runtime",
-    }
-}
-
-fn par2_availability() -> Value {
-    if let Some(configured) = env::var_os(PAR2_ENV) {
-        let configured = PathBuf::from(configured);
-        let exists = command_path_is_executable(&configured);
-        return json!({
-            "available": exists,
-            "source": "env",
-            "env": PAR2_ENV,
-            "selected": configured.to_string_lossy(),
-            "configured": true,
-            "path_exists": exists,
-            "tools": PAR2_TOOLS,
-        });
-    }
-    for tool in PAR2_TOOLS {
-        if let Some(path) = find_on_path(tool) {
-            return json!({
-                "available": true,
-                "source": "path",
-                "env": PAR2_ENV,
-                "selected": path.to_string_lossy(),
-                "configured": false,
-                "path_exists": true,
-                "tools": PAR2_TOOLS,
-            });
-        }
-    }
-    json!({
-        "available": false,
-        "source": null,
-        "env": PAR2_ENV,
-        "selected": null,
-        "configured": false,
-        "path_exists": false,
-        "tools": PAR2_TOOLS,
-    })
-}
-
-fn command_path_is_executable(path: &Path) -> bool {
-    if path.components().count() > 1 || path.is_absolute() {
-        return command_is_executable(path);
-    }
-    find_on_path(&path.to_string_lossy()).is_some()
-}
-
-fn find_on_path(name: &str) -> Option<PathBuf> {
-    let path = env::var_os("PATH")?;
-    for dir in env::split_paths(&path) {
-        let candidate = dir.join(name);
-        if command_is_executable(&candidate) {
-            return Some(candidate);
-        }
-        #[cfg(windows)]
-        {
-            let candidate = dir.join(format!("{name}.exe"));
-            if command_is_executable(&candidate) {
-                return Some(candidate);
-            }
-        }
-    }
-    None
-}
-
-fn command_is_executable(path: &Path) -> bool {
-    if !path.is_file() {
-        return false;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        match path.metadata() {
-            Ok(metadata) => metadata.permissions().mode() & 0o111 != 0,
-            Err(_) => false,
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        true
-    }
-}
-
-fn print_classic(report: &DoctorReport) {
+fn print_classic(report: &DoctorReport<'_>) {
     println!("doctor: {}", if report.ok { "pass" } else { "fail" });
     println!(
         "formats: total={} built-in={} external={} ready={} missing={}",
@@ -481,7 +343,7 @@ fn print_classic(report: &DoctorReport) {
     }
 }
 
-fn print_modern(ctx: &Ctx, report: &DoctorReport) {
+fn print_modern(ctx: &Ctx, report: &DoctorReport<'_>) {
     let pass = report
         .checks
         .iter()

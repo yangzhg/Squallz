@@ -5696,6 +5696,108 @@ fn doctor_strict_json_exits_dependency_missing_when_runtime_tools_are_missing() 
 }
 
 #[test]
+fn info_and_doctor_follow_wim_writer_selection() {
+    let dir = std::fs::canonicalize(temp_dir("diagnostics-wim-selection")).unwrap();
+    let application = dir.join("application");
+    let tools = dir.join("tools");
+    let empty_path = dir.join("empty-path");
+    let tool_path = dir.join("tool-path");
+    for path in [&application, &tools, &empty_path, &tool_path] {
+        std::fs::create_dir_all(path).unwrap();
+    }
+    let built_cli = Path::new(env!("CARGO_BIN_EXE_sqz"));
+    let cli = application.join(built_cli.file_name().unwrap());
+    std::fs::copy(built_cli, &cli).unwrap();
+    let application_wim = write_fake_executable(&application, "wimlib-imagex");
+    write_fake_executable(&tool_path, "wimlib-imagex");
+    let sevenz = write_fake_executable(&tools, "7zz");
+    let par2 = write_fake_executable(&tools, "par2");
+    let missing_wim = dir.join("missing-wimlib");
+    let application_write = serde_json::json!({
+        "available": true,
+        "source": "application",
+        "env": "SQUALLZ_WIMLIB",
+        "selected": application_wim.to_string_lossy(),
+        "configured": false,
+        "path_exists": true,
+        "tools": ["wimlib-imagex"],
+    });
+    let configured_write = serde_json::json!({
+        "available": false,
+        "source": "env",
+        "env": "SQUALLZ_WIMLIB",
+        "selected": missing_wim.to_string_lossy(),
+        "configured": true,
+        "path_exists": false,
+        "tools": ["wimlib-imagex"],
+    });
+
+    // These files only exercise tool selection; no external encoder is invoked.
+    for (search_path, configured_wim, expected_write, missing) in [
+        (&empty_path, None, &application_write, 0_u64),
+        (&tool_path, None, &application_write, 0),
+        (&tool_path, Some(&missing_wim), &configured_write, 1),
+    ] {
+        let command = || {
+            let mut cmd = Command::new(&cli);
+            cmd.env_remove("SQZ_LANG")
+                .env("SQZ_LOCALES_DIR", "/nonexistent/squallz-test-locales")
+                .env_remove("SQUALLZ_WIMLIB")
+                .env_remove("SQUALLZ_BSDTAR")
+                .env_remove("SQUALLZ_UNRAR")
+                .env("SQUALLZ_7Z", &sevenz)
+                .env("SQUALLZ_PAR2", &par2)
+                .env("PATH", search_path);
+            if let Some(configured) = configured_wim {
+                cmd.env("SQUALLZ_WIMLIB", configured);
+            }
+            cmd
+        };
+        let info_out = run(command().args(["info", "--json"]));
+        assert!(info_out.status.success(), "stderr: {}", stderr(&info_out));
+        let formats = stdout_json(&info_out);
+        let formats = formats.as_array().unwrap();
+        let wim = formats.iter().find(|format| format["id"] == "wim").unwrap();
+        assert_eq!(
+            wim["implementation"]["availability"]["read"]["available"],
+            true
+        );
+        assert_eq!(
+            &wim["implementation"]["availability"]["write"],
+            expected_write
+        );
+
+        let doctor_out = run(command().args(["doctor", "--json", "--strict"]));
+        assert_eq!(
+            doctor_out.status.code(),
+            Some(if missing == 0 { 0 } else { 8 }),
+            "stdout: {}; stderr: {}",
+            stdout(&doctor_out),
+            stderr(&doctor_out)
+        );
+        assert!(stderr(&doctor_out).trim().is_empty());
+        let report = stdout_json(&doctor_out);
+        assert_eq!(report["ok"], missing == 0);
+        assert_eq!(report["strict"], true);
+        assert_eq!(report["summary"]["formats"], formats.len() as u64);
+        assert_eq!(report["summary"]["ready"], formats.len() as u64 - missing);
+        assert_eq!(report["summary"]["missing"], missing);
+        let checks = report["checks"].as_array().unwrap();
+        let find = |id: &str| checks.iter().find(|check| check["id"] == id).unwrap();
+        assert_eq!(find("7z-read-bridge")["status"], "pass");
+        assert_eq!(find("par2-create")["status"], "pass");
+        assert_eq!(find("par2-verify-repair")["status"], "pass");
+        assert_eq!(
+            find("wim-writer")["status"],
+            if missing == 0 { "pass" } else { "fail" }
+        );
+        assert_eq!(&find("wim-writer")["availability"], expected_write);
+    }
+
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn info_text_marks_builtin_and_external_implementations() {
     let out = run(sqz().args(["--lang", "en-US", "info"]));
     assert!(out.status.success(), "stderr: {}", stderr(&out));
