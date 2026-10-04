@@ -275,6 +275,27 @@ impl DiagnosticCapture {
 }
 
 impl Diagnostics {
+    pub(super) fn utc_switch_unsupported(&self) -> bool {
+        if self.prefix.len() >= PREFIX_BYTES {
+            return false;
+        }
+        let Ok(message) = std::str::from_utf8(&self.prefix) else {
+            return false;
+        };
+        let mut lines = message
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty());
+        lines.next() == Some("Command Line Error:")
+            && lines.next() == Some("Unknown switch:")
+            && lines.next() == Some("-slmu")
+            && lines.next().is_none()
+    }
+
+    pub(super) fn has_missing_volume(&self) -> bool {
+        self.missing_volume.is_some()
+    }
+
     pub(super) fn password_failure(&self, password_supplied: bool) -> Option<FormatError> {
         self.password.then_some(if password_supplied {
             FormatError::WrongPassword
@@ -320,6 +341,40 @@ fn safe_file_name(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn utc_switch_rejection_requires_complete_exact_diagnostics() {
+        let capture = |bytes: &[u8]| {
+            let mut diagnostic = DiagnosticCapture::for_stderr().unwrap();
+            for byte in bytes.chunks(1) {
+                diagnostic.observe(byte);
+            }
+            diagnostic.finish()
+        };
+        for message in [
+            b"Command Line Error:\nUnknown switch:\n-slmu".as_slice(),
+            b"\r\n Command Line Error:\r\n\r\n Unknown switch:\r\n -slmu\r\n".as_slice(),
+        ] {
+            assert!(capture(message).utc_switch_unsupported());
+        }
+        for message in [
+            b"".as_slice(),
+            b"Unknown switch:\n-slmu".as_slice(),
+            b"Command Line Error:\nUnsupported switch:\n-slmu".as_slice(),
+            b"Command Line Error:\nUnknown switch:\n-slm".as_slice(),
+            b"Command Line Error:\nUnknown switch:\n-slmux".as_slice(),
+            b"Command Line Error:\nUnknown switch:\n-slmu private.zip".as_slice(),
+            b"Command Line Error:\nUnknown switch:\n-slmu\nData Error".as_slice(),
+            b"Wrong password\nCommand Line Error:\nUnknown switch:\n-slmu".as_slice(),
+            b"Command Line Error:\nUnknown switch:\n-slmu\n\xff".as_slice(),
+        ] {
+            assert!(!capture(message).utc_switch_unsupported(), "{message:?}");
+        }
+        let mut truncated = b"Command Line Error:\nUnknown switch:\n-slmu\n".to_vec();
+        truncated.resize(PREFIX_BYTES, b' ');
+        truncated.extend_from_slice(b"Data Error");
+        assert!(!capture(&truncated).utc_switch_unsupported());
+    }
 
     #[test]
     fn sevenzip_missing_volume_diagnostic_accepts_only_one_file_name() {

@@ -2135,6 +2135,10 @@ fn native_split_zip_family_opens_from_middle_and_extracts_once_via_primary() {
 set -eu
 printf '%s\n' "$*" >> "$SQUALLZ_FAKE_7Z_LOG"
 archive="$3"
+if [ "$1" = "l" ]; then
+  test "$3" = "-slmu"
+  archive="$4"
+fi
 stage="$(dirname "$archive")"
 test "$(basename "$archive")" = "archive.zip"
 test -f "$stage/archive.z01"

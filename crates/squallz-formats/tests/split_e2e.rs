@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, UNIX_EPOCH};
 
 use common::{command_exists, engine, read_archive_entries, TempDir};
 use squallz_core::api::{
@@ -241,6 +242,40 @@ fn cancelling_generic_split_does_not_publish_partial_volumes() {
 fn native_zip_create_uses_pkware_names_and_primary_volume() {
     let tmp = TempDir::new("create-native-zip");
     let input = sample_input_with_len(tmp.path(), 180 * 1024);
+    let directory = tmp.path().join("documents");
+    fs::create_dir(&directory).unwrap();
+    let child = directory.join("child.txt");
+    fs::write(&child, b"nested payload").unwrap();
+    let file_time = UNIX_EPOCH + Duration::new(1_700_000_001, 123_456_700);
+    let child_time = UNIX_EPOCH + Duration::new(1_714_979_291, 987_654_300);
+    for (path, modified) in [(&input, file_time), (&child, child_time)] {
+        fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(modified))
+            .unwrap();
+    }
+    #[cfg(unix)]
+    fs::File::open(&directory)
+        .unwrap()
+        .set_times(
+            fs::FileTimes::new()
+                .set_modified(UNIX_EPOCH + Duration::new(1_705_320_001, 111_222_300)),
+        )
+        .unwrap();
+    let directory_time = fs::metadata(&directory)
+        .unwrap()
+        .modified()
+        .unwrap()
+        .duration_since(UNIX_EPOCH)
+        .unwrap();
+    // ZIP's NTFS extra field stores the source instant in 100 ns units.
+    let directory_time = UNIX_EPOCH
+        + Duration::new(
+            directory_time.as_secs(),
+            directory_time.subsec_nanos() / 100 * 100,
+        );
     let dest = tmp.path().join("native.zip");
     let opts = CreateOptions {
         split_size: Some(64 * 1024),
@@ -248,13 +283,12 @@ fn native_zip_create_uses_pkware_names_and_primary_volume() {
         ..CreateOptions::default()
     };
     let engine = engine();
-    let plan = engine
-        .plan_create(&dest, std::slice::from_ref(&input), &opts)
-        .unwrap();
+    let inputs = [input.clone(), directory];
+    let plan = engine.plan_create(&dest, &inputs, &opts).unwrap();
     let report = engine
         .create(
             &dest,
-            &[input],
+            &inputs,
             &opts,
             CreateCommitPolicy::ReplaceExisting,
             &NoProgress,
@@ -287,6 +321,69 @@ fn native_zip_create_uses_pkware_names_and_primary_volume() {
         String::from_utf8_lossy(&check.stdout),
         String::from_utf8_lossy(&check.stderr)
     );
+
+    let expected = [
+        ("data.bin", file_time),
+        ("documents", directory_time),
+        ("documents/child.txt", child_time),
+    ];
+    let backend = squallz_formats::sevenzip_backend_status();
+    let utc_listing = Command::new(backend.executable().unwrap())
+        .args(["l", "-slt", "-slmu"])
+        .arg(&dest)
+        .output()
+        .unwrap();
+    let has_utc_times = utc_listing.status.success();
+    assert!(
+        has_utc_times
+            || (utc_listing.status.code() == Some(7)
+                && String::from_utf8_lossy(&utc_listing.stderr)
+                    .replace("\r\n", "\n")
+                    .trim()
+                    == "Command Line Error:\nUnknown switch:\n-slmu")
+    );
+    let entries =
+        read_archive_entries(&engine, &report.outputs[0], &OpenOptions::default()).unwrap();
+    assert_eq!(entries.len(), expected.len());
+    for (name, modified) in expected {
+        let entry = entries
+            .iter()
+            .find(|entry| entry.path.display == name)
+            .unwrap();
+        assert_eq!(entry.modified, has_utc_times.then_some(modified), "{name}");
+    }
+    let extracted = tmp.path().join("native-extracted");
+    engine
+        .extract(
+            &report.outputs[1],
+            &extracted,
+            None,
+            &OpenOptions::default(),
+            &ExtractOptions::default(),
+            &NoProgress,
+            &ControlToken::new(),
+        )
+        .unwrap();
+    assert_eq!(
+        fs::read(extracted.join("data.bin")).unwrap(),
+        fs::read(input).unwrap()
+    );
+    assert_eq!(
+        fs::read(extracted.join("documents/child.txt")).unwrap(),
+        b"nested payload"
+    );
+    if has_utc_times {
+        for (name, modified) in expected {
+            assert_eq!(
+                fs::metadata(extracted.join(name))
+                    .unwrap()
+                    .modified()
+                    .unwrap(),
+                modified,
+                "{name}"
+            );
+        }
+    }
 }
 
 #[test]

@@ -6,6 +6,9 @@ pub(crate) use rar_compatibility::RarCompatibility;
 
 use std::collections::BTreeMap;
 use std::io::{self, BufRead};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use chrono::NaiveDateTime;
 
 use squallz_format_api::{EntryMeta, EntryPath, EntryType, FormatError};
 
@@ -29,6 +32,7 @@ pub(crate) fn read(mut reader: impl BufRead) -> io::Result<ParsedListing> {
     let mut entries = Vec::new();
     let mut block = BTreeMap::new();
     let mut archive = Ok(None);
+    let mut is_zip = false;
     let mut facts = RarFacts::default();
     let mut buffer = Vec::new();
     loop {
@@ -42,7 +46,7 @@ pub(crate) fn read(mut reader: impl BufRead) -> io::Result<ParsedListing> {
         let line = String::from_utf8_lossy(&buffer);
         let line = line.trim_end_matches('\r');
         if line.is_empty() {
-            finish_block(&mut entries, &mut block, &mut archive);
+            finish_block(&mut entries, &mut block, &mut archive, &mut is_zip);
             facts.finish_block();
         } else {
             let field = line.split_once(" = ");
@@ -52,8 +56,13 @@ pub(crate) fn read(mut reader: impl BufRead) -> io::Result<ParsedListing> {
             }
         }
     }
-    finish_block(&mut entries, &mut block, &mut archive);
+    finish_block(&mut entries, &mut block, &mut archive, &mut is_zip);
     facts.finish_block();
+    if archive.is_err() {
+        for entry in &mut entries {
+            entry.modified = None;
+        }
+    }
     infer_directory_entries(&mut entries);
     Ok(ParsedListing {
         entries,
@@ -66,6 +75,7 @@ fn finish_block(
     entries: &mut Vec<EntryMeta>,
     block: &mut BTreeMap<String, String>,
     archive: &mut Result<Option<SevenZipArchiveProperties>, FormatError>,
+    is_zip: &mut bool,
 ) {
     if block.contains_key("Type") && block.contains_key("Physical Size") {
         if let Ok(previous) = archive {
@@ -76,10 +86,14 @@ fn finish_block(
             } else {
                 archive_properties(block)
             };
+            *is_zip =
+                properties.is_ok() && block.get("Type").is_some_and(|value| value.trim() == "zip");
             *archive = properties.map(Some);
+        } else {
+            *is_zip = false;
         }
     } else {
-        push_list_block(entries, block);
+        push_list_block(entries, block, *is_zip);
     }
     block.clear();
 }
@@ -143,7 +157,7 @@ fn infer_directory_entries(entries: &mut [EntryMeta]) {
     }
 }
 
-fn push_list_block(entries: &mut Vec<EntryMeta>, block: &BTreeMap<String, String>) {
+fn push_list_block(entries: &mut Vec<EntryMeta>, block: &BTreeMap<String, String>, is_zip: bool) {
     let Some(path) = block.get("Path") else {
         return;
     };
@@ -184,7 +198,13 @@ fn push_list_block(entries: &mut Vec<EntryMeta>, block: &BTreeMap<String, String
         compressed_size: block
             .get("Packed Size")
             .and_then(|value| value.trim().parse::<u64>().ok()),
-        modified: None,
+        // ZIP NTFS timestamps carry a fraction. DOS and Unix seconds cannot
+        // be distinguished here; keep both unknown rather than trusting
+        // 7-Zip's current DST bias for a historical DOS timestamp.
+        modified: block
+            .get("Modified")
+            .filter(|value| is_zip && value.contains('.'))
+            .and_then(|value| parse_modified(value)),
         unix_mode: None,
         crc32: block
             .get("CRC")
@@ -195,9 +215,54 @@ fn push_list_block(entries: &mut Vec<EntryMeta>, block: &BTreeMap<String, String
     });
 }
 
+fn parse_modified(value: &str) -> Option<SystemTime> {
+    // The explicit UTC marker avoids interpreting an unmarked wall time in
+    // the reader's local time zone.
+    let value = value.trim().strip_suffix('Z')?;
+    let (seconds, fraction) = match value.split_once('.') {
+        Some((seconds, fraction)) => (seconds, Some(fraction)),
+        None => (value, None),
+    };
+    if seconds.len() != 19
+        || !seconds
+            .bytes()
+            .enumerate()
+            .all(|(index, byte)| match index {
+                4 | 7 => byte == b'-',
+                10 => byte == b' ',
+                13 | 16 => byte == b':',
+                _ => byte.is_ascii_digit(),
+            })
+        || seconds.get(17..19)?.parse::<u8>().ok()? >= 60
+    {
+        return None;
+    }
+    let nanos = match fraction {
+        Some(fraction)
+            if (1..=9).contains(&fraction.len())
+                && fraction.bytes().all(|byte| byte.is_ascii_digit()) =>
+        {
+            fraction.parse::<u32>().ok()? * 10u32.pow(9 - fraction.len() as u32)
+        }
+        Some(_) => return None,
+        None => 0,
+    };
+    let seconds = NaiveDateTime::parse_from_str(seconds, "%Y-%m-%d %H:%M:%S")
+        .ok()?
+        .and_utc()
+        .timestamp();
+    let base = if seconds < 0 {
+        UNIX_EPOCH.checked_sub(Duration::from_secs(seconds.unsigned_abs()))?
+    } else {
+        UNIX_EPOCH.checked_add(Duration::from_secs(seconds as u64))?
+    };
+    base.checked_add(Duration::from_nanos(u64::from(nanos)))
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::{BufReader, Cursor};
+    use std::time::{Duration, UNIX_EPOCH};
 
     use super::*;
 
@@ -210,16 +275,19 @@ Physical Size = 1351
 Size = 17
 Packed Size = 17
 Images = 1
+Modified = 2000-01-01 00:00:00Z
 
 Path = project
 Folder = +
 Attributes = D
+Modified = 2023-11-14 22:13:20Z
 
 Path = project/README.txt
 Folder = -
 Size = 10
 Packed Size = 10
 Attributes = N
+Modified = 2023-11-14 22:13:21.1234567Z
 
 "#;
 
@@ -231,6 +299,8 @@ Attributes = N
             assert_eq!(entries[0].path.display, "project");
             assert_eq!(entries[1].path.display, "project/README.txt");
             assert_eq!(entries[1].size, 10);
+            assert_eq!(entries[0].modified, None);
+            assert_eq!(entries[1].modified, None);
             assert!(!entries
                 .iter()
                 .any(|entry| entry.path.display.starts_with('/')));
@@ -238,6 +308,153 @@ Attributes = N
                 listing.archive.unwrap(),
                 SevenZipArchiveProperties::default()
             );
+        }
+    }
+
+    #[test]
+    fn sevenzip_listing_preserves_fractional_and_historical_utc_times() {
+        for (value, expected) in [
+            ("1970-01-01 00:00:00Z", UNIX_EPOCH),
+            (
+                "1969-12-31 23:59:59.123456789Z",
+                UNIX_EPOCH - Duration::from_nanos(876_543_211),
+            ),
+            (
+                "2024-02-29 23:59:58Z",
+                UNIX_EPOCH + Duration::from_secs(1_709_251_198),
+            ),
+            (
+                "2038-01-19 03:14:08Z",
+                UNIX_EPOCH + Duration::from_secs(2_147_483_648),
+            ),
+        ] {
+            assert_eq!(parse_modified(value), Some(expected), "{value}");
+        }
+        for (fraction, nanos) in [
+            ("1", 100_000_000),
+            ("12", 120_000_000),
+            ("123", 123_000_000),
+            ("1234", 123_400_000),
+            ("12345", 123_450_000),
+            ("123456", 123_456_000),
+            ("1234567", 123_456_700),
+            ("12345678", 123_456_780),
+            ("123456789", 123_456_789),
+        ] {
+            let stdout = format!(
+                "Type = zip\r\nPhysical Size = 1\r\n\r\nPath = retained.txt\r\nSize = 1\r\nModified = 1970-01-01 00:00:01.{fraction}Z"
+            );
+            let entries = read(BufReader::with_capacity(1, Cursor::new(stdout)))
+                .unwrap()
+                .entries;
+            assert_eq!(entries.len(), 1);
+            assert_eq!(
+                entries[0].modified,
+                Some(UNIX_EPOCH + Duration::new(1, nanos))
+            );
+        }
+    }
+
+    #[test]
+    fn sevenzip_listing_does_not_infer_utc_metadata_from_other_time_sources() {
+        for (archive, entry, modified) in [
+            (
+                "Type = zip\nPhysical Size = 1\n\n",
+                "",
+                "2023-11-14 22:13:20Z",
+            ),
+            (
+                "Type = zip\nPhysical Size = 1\n\n",
+                "",
+                "2023-11-14 22:13:21Z",
+            ),
+            (
+                "Type = zip\nPhysical Size = 1\n\n",
+                "",
+                "2023-11-15 06:13:20.1234567",
+            ),
+            (
+                "Type = wim\nPhysical Size = 1\n\n",
+                "",
+                "2023-11-14 22:13:20.1234567Z",
+            ),
+            (
+                "Type = Rar5\nPhysical Size = 1\n\n",
+                "",
+                "2023-11-14 22:13:20.1234567Z",
+            ),
+            (
+                "Type = Xar\nPhysical Size = 1\n\n",
+                "",
+                "2023-11-14 22:13:20.1234567Z",
+            ),
+            ("", "", "2023-11-14 22:13:20.1234567Z"),
+            ("", "Type = zip\n", "2023-11-14 22:13:20.1234567Z"),
+            ("Type = zip\n\n", "", "2023-11-14 22:13:20.1234567Z"),
+        ] {
+            let stdout =
+                format!("{archive}Path = retained.txt\nSize = 3\n{entry}Modified = {modified}\n");
+            let entries = read(stdout.as_bytes()).unwrap().entries;
+            assert_eq!(entries.len(), 1);
+            assert_eq!(entries[0].modified, None, "{stdout}");
+        }
+        let entries = read(
+            &b"Type = zip\nPhysical Size = 1\n\nPath = folder\nFolder = +\nModified = 2023-11-14 22:13:20.0000000Z"[..],
+        )
+        .unwrap()
+        .entries;
+        assert_eq!(entries[0].entry_type, EntryType::Dir);
+        assert_eq!(
+            entries[0].modified,
+            Some(UNIX_EPOCH + Duration::from_secs(1_700_000_000))
+        );
+        let listing = read(
+            &b"Type = zip\nPhysical Size = 1\n\nPath = retained.txt\nSize = 3\nModified = 2023-11-14 22:13:20.1234567Z\n\nType = zip\nPhysical Size = 1"[..],
+        )
+        .unwrap();
+        assert_eq!(listing.entries.len(), 1);
+        assert_eq!(listing.entries[0].path.display, "retained.txt");
+        assert_eq!(listing.entries[0].size, 3);
+        assert_eq!(listing.entries[0].modified, None);
+        assert!(matches!(
+            listing.archive,
+            Err(FormatError::CorruptArchive(detail))
+                if detail == "7-Zip reported more than one archive metadata block"
+        ));
+    }
+
+    #[test]
+    fn sevenzip_listing_keeps_missing_invalid_and_local_times_unknown() {
+        for value in [
+            None,
+            Some(""),
+            Some("2023-11-15 06:13:20"),
+            Some("2023-11-15 06:13:20.1234567"),
+            Some("2024-02-30 00:00:00Z"),
+            Some("2024-13-01 00:00:00Z"),
+            Some("2024-01-01 24:00:00Z"),
+            Some("2024-01-01 00:60:00Z"),
+            Some("2016-12-31 23:59:60Z"),
+            Some("1970-01-01 00:00:00.Z"),
+            Some("1970-01-01 00:00:00.1234567890Z"),
+            Some("1970-01-01 00:00:00+00:00"),
+            Some("1970-01-01 00:00:00z"),
+            Some("1970-01-01 00:00:00Z trailing"),
+            Some("invalid"),
+        ] {
+            let mut stdout = String::from(
+                "Type = zip\nPhysical Size = 1\n\nPath = retained.txt\nSize = 3\nEncrypted = +\n",
+            );
+            if let Some(value) = value {
+                assert_eq!(parse_modified(value), None, "{value}");
+                stdout.push_str(&format!("Modified = {value}\n"));
+            }
+            let entries = read(stdout.as_bytes()).unwrap().entries;
+            assert_eq!(entries.len(), 1, "{value:?}");
+            assert_eq!(entries[0].path.display, "retained.txt");
+            assert_eq!(entries[0].size, 3);
+            assert!(entries[0].encrypted);
+            assert_eq!(entries[0].modified, None, "{value:?}");
         }
     }
 

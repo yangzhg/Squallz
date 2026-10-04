@@ -986,6 +986,10 @@ esac
 IFS= read -r password
 test "$password" = "native-volume-password"
 archive="$3"
+if [ "$1" = "l" ]; then
+  test "$3" = "-slmu"
+  archive="$4"
+fi
 printf '%s\n' "$archive" >> "$SQUALLZ_FAKE_7Z_LOG"
 stage="$(dirname "$archive")"
 test "$(basename "$archive")" = "archive.part001.rar"
@@ -1107,6 +1111,10 @@ esac
 IFS= read -r password
 test "$password" = "header-encrypted-volume-password"
 archive="$3"
+if [ "$1" = "l" ]; then
+  test "$3" = "-slmu"
+  archive="$4"
+fi
 stage="$(dirname "$archive")"
 test "$(basename "$archive")" = "archive.part001.rar"
 test -f "$stage/archive.part001.rar"
@@ -1431,7 +1439,8 @@ set -eu
 printf '7z %s\n' "$*" >> "$SQUALLZ_FAKE_RAR7_LOG"
 test "$1" = "l"
 test "$2" = "-slt"
-archive="$3"
+test "$3" = "-slmu"
+archive="$4"
 stage="$(dirname "$archive")"
 test "$(basename "$archive")" = "archive.part1.rar"
 test -f "$stage/archive.part1.rar"

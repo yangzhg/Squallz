@@ -802,30 +802,54 @@ fn run_7z_listing(
     password: Option<&Password>,
     control: &ControlToken,
 ) -> Result<listing::ParsedListing, FormatError> {
-    let mut command = Command::new(tool);
-    command.args(["l", "-slt"]).arg(archive);
-    control.checkpoint()?;
-    let mut stdout = DiagnosticCapture::for_stdout()?;
-    let mut process = SevenZipProcess::spawn(command, password, control)?;
-    let parsed = listing::read(BufReader::new(DiagnosticReader {
-        reader: &mut process.stdout,
-        capture: &mut stdout,
-        control,
-    }));
-    if parsed.is_err() {
-        process.terminate();
+    let mut request_utc = true;
+    loop {
+        let mut command = Command::new(tool);
+        command.args(["l", "-slt"]);
+        if request_utc {
+            command.arg("-slmu");
+        }
+        command.arg(archive);
+        control.checkpoint()?;
+        let mut stdout = DiagnosticCapture::for_stdout()?;
+        let mut process = SevenZipProcess::spawn(command, password, control)?;
+        let parsed = listing::read(BufReader::new(DiagnosticReader {
+            reader: &mut process.stdout,
+            capture: &mut stdout,
+            control,
+        }));
+        if parsed.is_err() {
+            process.terminate();
+        }
+        let exit = process.finish()?;
+        let parsed = parsed?;
+        if !exit.status.success() {
+            let stdout = stdout.finish();
+            if request_utc
+                && exit.status.code() == Some(7)
+                && parsed.entries.is_empty()
+                && parsed
+                    .archive
+                    .as_ref()
+                    .is_ok_and(|properties| *properties == SevenZipArchiveProperties::default())
+                && exit.diagnostics.utc_switch_unsupported()
+                && stdout.password_failure(password.is_some()).is_none()
+                && !stdout.has_missing_volume()
+            {
+                // Retry the original listing contract once for an older tool's
+                // explicit switch rejection; unmarked timestamps stay unknown.
+                request_utc = false;
+                continue;
+            }
+            return Err(diagnostics::map_output_error(
+                &exit.diagnostics,
+                &stdout,
+                password.is_some(),
+            ));
+        }
+        exit.password_write?;
+        return Ok(parsed);
     }
-    let exit = process.finish()?;
-    let parsed = parsed?;
-    if !exit.status.success() {
-        return Err(diagnostics::map_output_error(
-            &exit.diagnostics,
-            &stdout.finish(),
-            password.is_some(),
-        ));
-    }
-    exit.password_write?;
-    Ok(parsed)
 }
 
 struct DiagnosticReader<'a, R> {
@@ -1322,6 +1346,7 @@ Path = docs
 Folder = +
 Size = 0
 Attributes = D
+Modified = 2023-11-14 22:13:20Z
 
 Path = hello.txt
 Folder = -
@@ -1329,6 +1354,7 @@ Size = 28
 Packed Size = 12
 CRC = 1234ABCD
 Encrypted = -
+Modified = 2023-11-14 22:13:21.1234567Z
 
 Path = -dash.txt
 Folder = -
@@ -1383,6 +1409,8 @@ exit 2
         assert_eq!(entries[1].size, 28);
         assert_eq!(entries[1].compressed_size, Some(12));
         assert_eq!(entries[1].crc32, Some(0x1234_ABCD));
+        assert_eq!(entries[0].modified, None);
+        assert_eq!(entries[1].modified, None);
         assert_eq!(entries[2].path.display, "-dash.txt");
 
         let mut hello = String::new();
@@ -1436,8 +1464,99 @@ exit 2
 
         let log = fs::read_to_string(&log).unwrap();
         assert!(log.contains("l -slt"));
+        assert!(log.contains("l -slt -slmu"), "{log}");
         assert!(log.contains("x -so"));
         assert!(log.contains("-- -dash.txt"), "{log}");
+
+        let _ = fs::remove_file(script);
+        let _ = fs::remove_file(log);
+        let _ = fs::remove_file(archive);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sevenzip_listing_retries_only_an_unsupported_utc_switch() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = env_lock();
+        let _restore_log = EnvRestore {
+            key: "SQUALLZ_FAKE_7Z_LOG",
+            old: std::env::var_os("SQUALLZ_FAKE_7Z_LOG"),
+        };
+        let _restore_mode = EnvRestore {
+            key: "SQUALLZ_FAKE_7Z_TIME_MODE",
+            old: std::env::var_os("SQUALLZ_FAKE_7Z_TIME_MODE"),
+        };
+        let script = temp_path("fake-utc-switch", "sh");
+        let log = temp_path("fake-utc-switch", "log");
+        let archive = temp_path("fake-utc-switch", "zip");
+        fs::write(
+            &script,
+            r#"#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> "$SQUALLZ_FAKE_7Z_LOG"
+if [ "$1" != "l" ] || [ "$2" != "-slt" ]; then exit 9; fi
+if [ "$3" = "-slmu" ]; then
+  if [ "$SQUALLZ_FAKE_7Z_TIME_MODE" = "modern" ]; then
+    printf 'Type = zip\nPhysical Size = 1\n\nPath = retained.txt\nSize = 3\nModified = 2023-11-14 22:13:21.1234567Z\n'
+    exit 0
+  fi
+  printf '\nCommand Line Error:\nUnknown switch:\n-slmu\n' >&2
+  case "$SQUALLZ_FAKE_7Z_TIME_MODE" in
+    password) printf 'Wrong password?\n' ;;
+    corrupt) printf 'Data Error\n' >&2 ;;
+    missing) printf 'ERROR = Missing volume : missing.cab\n' ;;
+    entries) printf 'Path = retained.txt\nSize = 3\n' ;;
+    status) exit 2 ;;
+  esac
+  exit 7
+fi
+if [ "$SQUALLZ_FAKE_7Z_TIME_MODE" != "legacy" ]; then exit 9; fi
+printf 'Type = zip\nPhysical Size = 1\n\nPath = retained.txt\nSize = 3\nModified = 2023-11-15 06:13:20\n'
+"#,
+        )
+        .unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::write(&archive, b"fake archive").unwrap();
+        std::env::set_var("SQUALLZ_FAKE_7Z_LOG", &log);
+
+        for mode in [
+            "modern", "legacy", "password", "corrupt", "missing", "entries", "status",
+        ] {
+            fs::write(&log, "").unwrap();
+            std::env::set_var("SQUALLZ_FAKE_7Z_TIME_MODE", mode);
+            let result = list_entries(&script, &archive, None);
+            let calls = fs::read_to_string(&log).unwrap();
+            let calls = calls.lines().collect::<Vec<_>>();
+            assert!(calls[0].starts_with("l -slt -slmu "), "{mode}: {calls:?}");
+            if matches!(mode, "modern" | "legacy") {
+                let entries = result.unwrap();
+                assert_eq!(entries.len(), 1);
+                assert_eq!(entries[0].path.display, "retained.txt");
+                assert_eq!(entries[0].size, 3);
+                if mode == "modern" {
+                    assert_eq!(
+                        entries[0].modified,
+                        Some(
+                            std::time::UNIX_EPOCH
+                                + std::time::Duration::new(1_700_000_001, 123_456_700)
+                        )
+                    );
+                    assert_eq!(calls.len(), 1);
+                } else {
+                    assert_eq!(entries[0].modified, None);
+                    assert_eq!(calls.len(), 2);
+                    assert!(calls[1].starts_with("l -slt "));
+                    assert!(!calls[1].contains("-slmu"));
+                }
+            } else {
+                let error = result.unwrap_err();
+                assert_eq!(calls.len(), 1, "{mode}: {calls:?}");
+                if mode == "password" {
+                    assert!(matches!(error, FormatError::PasswordRequired), "{error:?}");
+                }
+            }
+        }
 
         let _ = fs::remove_file(script);
         let _ = fs::remove_file(log);
@@ -1477,7 +1596,7 @@ exit 2
         // Cancellation while waiting for the tool must skip directory inference.
         fs::write(
             &script,
-            "#!/bin/sh\ncat \"$3\"\nprintf ready > \"$3.ready\"\nexec sleep 30\n",
+            "#!/bin/sh\ntest \"$3\" = \"-slmu\"\ncat \"$4\"\nprintf ready > \"$4.ready\"\nexec sleep 30\n",
         )
         .unwrap();
         let listing: String = (0..30_000)
@@ -1584,7 +1703,12 @@ if env | grep -F 'bridge-fixture-password' >/dev/null; then
   exit 8
 fi
 printf '%s\n' "$*" >> "$SQUALLZ_FAKE_7Z_LOG"
-case "$(cat "$3")" in
+archive="$3"
+if [ "$1" = "l" ]; then
+  test "$3" = "-slmu"
+  archive="$4"
+fi
+case "$(cat "$archive")" in
   late-password)
     dd if=/dev/zero bs=4096 count=20 2>/dev/null | tr '\000' x >&2
     printf '\nWrong password?\n' >&2
