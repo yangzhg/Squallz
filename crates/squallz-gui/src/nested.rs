@@ -5,17 +5,16 @@ use std::io::{self, Read, Write};
 use std::path::Path;
 
 use squallz_core::api::{
-    ControlToken, EntryMeta, EntryPath, FormatError, LimitsAccountant, OpenOptions, Password,
-    ProgressSink, SafetyLimits,
+    ControlToken, EntryMeta, EntryPath, FormatError, OpenOptions, Password, ProgressSink,
+    SafetyLimits,
 };
 use tempfile::{Builder, NamedTempFile, TempPath};
 
 use crate::password_cache::PasswordAttempt;
-use crate::preview_workspace::PreviewWorkspace;
 use crate::state::AppState;
+use squallz_core::{copy_archive_entry, PlaintextWorkspace};
 
 const MAX_NESTED_EXTENSION_BYTES: usize = 16;
-const NESTED_COPY_BUFFER_BYTES: usize = 256 * 1024;
 const NESTED_TEMP_MIN_FREE_BYTES: u64 = 64 * 1024 * 1024;
 pub(crate) const PREVIEW_ENTRY_TOO_LARGE_DETAIL: &str =
     "preview entry exceeds the temporary-file limit";
@@ -61,8 +60,8 @@ fn set_private_file_permissions(_file: &fs::File) -> io::Result<()> {
     Ok(())
 }
 
-pub(crate) fn create_nested_job_workspace() -> Result<PreviewWorkspace, FormatError> {
-    Ok(PreviewWorkspace::create_in(&std::env::temp_dir())?)
+pub(crate) fn create_nested_job_workspace() -> Result<PlaintextWorkspace, FormatError> {
+    Ok(PlaintextWorkspace::create_in(&std::env::temp_dir())?)
 }
 
 fn copy_with_limit<R: Read + ?Sized, W: Write>(
@@ -171,43 +170,21 @@ fn find_nested_entry(
     ctl: &ControlToken,
 ) -> Result<EntryMeta, FormatError> {
     let requested = normalized_entry_name(entry_path);
+    let mut selected = None;
     for entry in outer.entries() {
         ctl.checkpoint()?;
         let entry = entry?;
-        if normalized_entry_name(&entry.path.display) == requested {
-            return Ok(entry);
+        if normalized_entry_name(&entry.path.display) == requested
+            && selected.replace(entry).is_some()
+        {
+            return Err(FormatError::CorruptArchive(
+                "nested archive entry name is ambiguous".to_owned(),
+            ));
         }
     }
-    Err(FormatError::Other(format!(
-        "nested archive entry not found: {entry_path}"
-    )))
-}
-
-fn copy_nested_entry_with_limits<R: Read + ?Sized, W: Write>(
-    reader: &mut R,
-    writer: &mut W,
-    meta: &EntryMeta,
-    limits: SafetyLimits,
-    progress: &dyn ProgressSink,
-    ctl: &ControlToken,
-) -> Result<u64, FormatError> {
-    let mut accountant = LimitsAccountant::new(limits);
-    accountant.check_entry(meta)?;
-    let mut written = 0_u64;
-    let mut buffer = vec![0_u8; NESTED_COPY_BUFFER_BYTES];
-    progress.on_entry_progress(0, 0, &meta.path, 0, meta.size);
-    loop {
-        ctl.checkpoint()?;
-        let read = reader.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        accountant.add_output_bytes(read as u64)?;
-        writer.write_all(&buffer[..read])?;
-        written = written.saturating_add(read as u64);
-        progress.on_entry_progress(0, 0, &meta.path, written, meta.size.max(written));
-    }
-    Ok(written)
+    ctl.checkpoint()?;
+    selected
+        .ok_or_else(|| FormatError::Other(format!("nested archive entry not found: {entry_path}")))
 }
 
 fn nested_temp_limits(
@@ -262,11 +239,12 @@ pub(crate) fn extract_nested_archive_to_temp_for_job(
         });
     }
     let mut temp = create_nested_temp_file(entry_path, workspace)?;
-    outer.read_entry(&meta.path, &mut |entry| {
-        copy_nested_entry_with_limits(entry, temp.as_file_mut(), &meta, limits, progress, ctl)?;
+    let copied = outer.read_entry(&meta.path, &mut |entry| {
+        copy_archive_entry(entry, temp.as_file_mut(), &meta, limits, progress, ctl)?;
         Ok(())
-    })?;
+    });
     ctl.checkpoint()?;
+    copied?;
     temp.as_file_mut().flush()?;
     Ok(temp.into_temp_path())
 }
@@ -278,8 +256,66 @@ mod tests {
     use std::collections::HashSet;
     use std::sync::{Arc, Mutex};
 
+    const NESTED_COPY_BUFFER_BYTES: usize = 256 * 1024;
+
     struct WriteAction<F: FnMut()> {
         action: F,
+    }
+
+    #[test]
+    fn queued_nested_selection_rejects_duplicate_names_and_normalized_aliases() {
+        use squallz_core::api::{CreateOptions, Detected, EntryType, NoProgress};
+
+        let root = tempfile::tempdir().unwrap();
+        let outer = root.path().join("outer.tar");
+        let workspace = root.path().join("workspace");
+        fs::create_dir(&workspace).unwrap();
+        let Some(Detected::Archive(format)) =
+            squallz_formats::registry().detect_by_name("outer.tar")
+        else {
+            panic!("TAR format must be registered");
+        };
+        let state = AppState::new();
+        for last_name in ["folder/inner.zip", r"folder\inner.zip"] {
+            let mut writer = format
+                .create(
+                    Box::new(fs::File::create(&outer).unwrap()),
+                    &CreateOptions::default(),
+                )
+                .unwrap();
+            for (index, name) in ["folder/inner.zip", "unrelated.txt", last_name]
+                .into_iter()
+                .enumerate()
+            {
+                let meta = EntryMeta {
+                    path: EntryPath::from_utf8(name),
+                    entry_type: EntryType::File,
+                    size: index as u64 + 1,
+                    compressed_size: None,
+                    modified: None,
+                    unix_mode: None,
+                    crc32: None,
+                    encrypted: false,
+                };
+                let mut data = io::Cursor::new(vec![b'x'; meta.size as usize]);
+                writer.add_entry(&meta, Some(&mut data)).unwrap();
+            }
+            writer.finish().unwrap();
+
+            let result = extract_nested_archive_to_temp_for_job(
+                &state,
+                &outer,
+                "/folder/inner.zip",
+                None,
+                None,
+                &workspace,
+                SafetyLimits::default(),
+                &NoProgress,
+                &ControlToken::default(),
+            );
+            assert!(matches!(result, Err(FormatError::CorruptArchive(_))));
+            assert_eq!(fs::read_dir(&workspace).unwrap().count(), 0);
+        }
     }
 
     impl<F: FnMut()> Write for WriteAction<F> {
@@ -570,7 +606,7 @@ mod tests {
         let mut reader = io::Cursor::new(vec![0xA5; size]);
         let mut output = Vec::new();
 
-        let error = copy_nested_entry_with_limits(
+        let error = copy_archive_entry(
             &mut reader,
             &mut output,
             &meta,

@@ -10,9 +10,9 @@ use std::sync::{Arc, Mutex};
 use squallz_core::api::{ControlToken, FormatError};
 
 use crate::nested::{write_archive_entry_limited, PREVIEW_ENTRY_TOO_LARGE_DETAIL};
-use crate::preview_workspace::{PreviewFile, PreviewWorkspace};
 use crate::state::AppState;
 use squallz_core::lock_unpoisoned;
+use squallz_core::{PlaintextFile, PlaintextWorkspace};
 
 pub(crate) const MAX_PREVIEW_ENTRY_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_PREVIEW_RESOURCE_BYTES: u64 = 512 * 1024 * 1024;
@@ -71,7 +71,7 @@ pub(crate) struct PreparedPreview {
 
 struct PreviewSession {
     owner: String,
-    file: PreviewFile,
+    file: PlaintextFile,
     size: u64,
     sequence: u64,
     sticky_external_pin: bool,
@@ -125,7 +125,7 @@ impl PreviewResources {
 }
 
 struct PreviewSessionShared {
-    workspace: Option<PreviewWorkspace>,
+    workspace: Option<PlaintextWorkspace>,
     resources: Mutex<PreviewResources>,
     next_sequence: AtomicU64,
 }
@@ -167,7 +167,7 @@ impl PreviewSessionManager {
     }
 
     fn new_in(base: &Path) -> io::Result<Self> {
-        Ok(Self::from_workspace(Some(PreviewWorkspace::create_in(
+        Ok(Self::from_workspace(Some(PlaintextWorkspace::create_in(
             base,
         )?)))
     }
@@ -179,7 +179,7 @@ impl PreviewSessionManager {
         Self::from_workspace(None)
     }
 
-    fn from_workspace(workspace: Option<PreviewWorkspace>) -> Self {
+    fn from_workspace(workspace: Option<PlaintextWorkspace>) -> Self {
         Self {
             shared: Arc::new(PreviewSessionShared {
                 workspace,
@@ -252,7 +252,7 @@ impl PreviewSessionManager {
     ) -> Result<PreparedPreview, FormatError> {
         let reservation = self.reserve(owner)?;
         let display_name = preview_display_name(entry_path);
-        let (file, mut pending) = reservation.create_preview_file(&display_name)?;
+        let (file, mut pending) = reservation.create_file(&display_name)?;
 
         let prepared = write_archive_entry_limited(
             state,
@@ -401,7 +401,7 @@ impl PreviewSessionManager {
 
     #[cfg(test)]
     pub(crate) fn root_path(&self) -> Option<&Path> {
-        self.shared.workspace.as_ref().map(PreviewWorkspace::path)
+        self.shared.workspace.as_ref().map(PlaintextWorkspace::path)
     }
 }
 
@@ -452,15 +452,12 @@ impl Drop for PreviewExternalUse {
 }
 
 impl PreviewResourceReservation {
-    fn create_preview_file(
-        &self,
-        display_name: &str,
-    ) -> Result<(PreviewFile, fs::File), FormatError> {
+    fn create_file(&self, display_name: &str) -> Result<(PlaintextFile, fs::File), FormatError> {
         self.shared
             .workspace
             .as_ref()
             .ok_or_else(preview_unavailable)?
-            .create_preview_file(display_name)
+            .create_file(display_name)
             .map_err(FormatError::from)
     }
 
@@ -468,7 +465,7 @@ impl PreviewResourceReservation {
         self.shared
             .workspace
             .as_ref()
-            .map(PreviewWorkspace::path)
+            .map(PlaintextWorkspace::path)
             .ok_or_else(preview_unavailable)
     }
 
@@ -634,7 +631,7 @@ mod tests {
     fn insert_test_session(manager: &PreviewSessionManager, owner: &str) -> (String, PathBuf) {
         let reservation = manager.reserve(owner).expect("capacity should be reserved");
         let (file, mut pending) = reservation
-            .create_preview_file("说明.txt")
+            .create_file("说明.txt")
             .expect("preview file should be created");
         pending
             .write_all(b"preview")
@@ -680,7 +677,7 @@ mod tests {
             .reserve("main")
             .expect("capacity should be reserved");
         let (file, pending) = reservation
-            .create_preview_file("confidential.pdf")
+            .create_file("confidential.pdf")
             .expect("preview file should be created");
         drop(pending);
         let id = file.id();
@@ -932,7 +929,7 @@ mod tests {
             .reserve("main")
             .expect("capacity should be reserved");
         let (file, pending) = reservation
-            .create_preview_file("说明.txt")
+            .create_file("说明.txt")
             .expect("preview file should be created");
         drop(pending);
         let path = file.path().to_path_buf();

@@ -140,6 +140,7 @@
   "error.preview_retained_capacity": "Squallz is keeping too many files available to other apps. Reopen Squallz to release them, or extract this file instead.",
   "error.preview_storage_capacity": "Temporary item storage is full. Close nested archives or reopen Squallz, then try again.",
   "error.preview_workspace_unavailable": "Private temporary storage is unavailable. Check temporary-folder access or extract this item instead.",
+  "cli.nested.cleanup_failed": "The private temporary archive could not be removed. Check temporary-folder permissions and close applications using it, then try again.",
   "error.preview_session_unavailable": "This item is no longer available. Open it again.",
   "error.unsafe_filename": "Unsafe file name: {name}",
   "error.disk_full": "Disk is full",

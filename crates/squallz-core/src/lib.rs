@@ -21,6 +21,7 @@ mod convert;
 mod create;
 mod destination_guard;
 mod duplicates;
+mod entry_copy;
 mod extract_guard;
 mod filesystem_identity;
 mod filter;
@@ -28,6 +29,7 @@ mod inputs;
 mod layout;
 mod output_set;
 mod password;
+mod plaintext;
 mod presets;
 mod queue;
 mod repair;
@@ -52,6 +54,7 @@ pub use destination_guard::{
     CreateDestinationGuard, CreateDestinationState,
 };
 pub use duplicates::{DuplicateGroup, DuplicateScanReport};
+pub use entry_copy::copy_archive_entry;
 pub use extract_guard::{build_extract_input_guard, ArchiveSourceState, ExtractInputGuard};
 pub use filter::PathFilter;
 pub use layout::{
@@ -62,6 +65,7 @@ pub use output_set::{
     file_set_publication_pending, prepare_file_set_publication, recover_file_set_publication,
     PreparedFileSetPublication,
 };
+pub use plaintext::{PlaintextFile, PlaintextWorkspace};
 pub use presets::{
     ByteSize, CreateCompletionAction, CreateCredential, CreateDestination, CreateDestinationBase,
     CreateOutput, CreatePreset, EntryNameEncoding, ExtractCredential, ExtractDestination,

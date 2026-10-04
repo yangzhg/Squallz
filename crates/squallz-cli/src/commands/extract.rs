@@ -10,12 +10,12 @@ use serde_json::json;
 use squallz_core::api::{
     ArchiveStructureStatus, BoundedProblemLog, ConflictResolver, EntryPath, ExtractOptions,
     ExtractProblemReporter, ExtractReport, FormatError, OpenOptions, OverwritePolicy, Password,
-    ProblemPreview, SymlinkPolicy,
+    ProblemPreview, ResourceOptions, SafetyLimits, SymlinkPolicy,
 };
 use squallz_core::{ExtractPlan, PathFilter, SmartLayout};
 use squallz_i18n::{localize_error, Localizer};
 
-use crate::args::{resource_options, safety_limits, OverwriteArg, SymlinkArg};
+use crate::args::{OverwriteArg, SymlinkArg};
 use crate::commands::{Ctx, ModernStatusField, ModernTableColumn, ModernTableRow};
 use crate::errors::CliError;
 use crate::progress::{fmt_bytes, CliProgress};
@@ -63,99 +63,167 @@ struct ExtractRunOutcome {
     structure: ArchiveStructureStatus,
 }
 
-#[allow(clippy::too_many_arguments)] // direct image of the CLI surface
-pub fn run(
-    ctx: &Ctx,
-    archive: PathBuf,
-    dest: Option<PathBuf>,
-    includes: Vec<String>,
-    overwrite: OverwriteArg,
-    password: Option<String>,
-    encoding: Option<String>,
-    symlinks: SymlinkArg,
-    smart: bool,
-    best_effort: bool,
-    threads: Option<usize>,
-    memory_limit: Option<u64>,
-    max_output_bytes: Option<u64>,
-    max_entries: Option<u64>,
-    max_compression_ratio: Option<u32>,
-    json_output: bool,
-) -> Result<(), CliError> {
-    let dest = extract_dest_or_current(dest);
-    let filter = PathFilter::new(&includes)?;
-    let progress = Arc::new(CliProgress::new_for_operation(ctx, json_output, "extract"));
+/// The outer credentials belong only to preparing the nested source. The
+/// request's credentials then open the archive whose contents are extracted.
+pub(crate) enum CliExtractSource {
+    Archive(PathBuf),
+    Nested {
+        archive: PathBuf,
+        entry: String,
+        password: Option<String>,
+        encoding: Option<String>,
+    },
+}
 
-    // `ask` needs an interactive stdin; otherwise degrade to skip + warning.
-    let mut overwrite: OverwritePolicy = overwrite.into();
-    let mut resolver: Option<Arc<dyn ConflictResolver>> = None;
-    if overwrite == OverwritePolicy::Ask {
-        if stdin_is_tty() {
-            let prompt_progress = Arc::clone(&progress);
-            resolver = Some(Arc::new(CliConflictResolver::new(
-                Arc::clone(&ctx.loc),
-                Arc::new(move || prompt_progress.finish()),
-            )));
-        } else {
-            overwrite = OverwritePolicy::Skip;
-            ctx.eprint_notice(ctx.loc.t("cli.overwrite.non_tty_skip"));
-        }
-    }
-    let problem_reporter =
-        best_effort.then(|| Arc::new(CliExtractProblemReporter::new(Arc::clone(&ctx.loc))));
-    let x_opts = ExtractOptions {
+pub(crate) struct CliExtractRequest {
+    pub source: CliExtractSource,
+    pub dest: Option<PathBuf>,
+    pub includes: Vec<String>,
+    pub overwrite: OverwriteArg,
+    pub password: Option<String>,
+    pub encoding: Option<String>,
+    pub symlinks: SymlinkArg,
+    pub smart: bool,
+    pub best_effort: bool,
+    pub resources: ResourceOptions,
+    pub limits: SafetyLimits,
+    pub json_output: bool,
+}
+
+pub(crate) fn run(ctx: &Ctx, request: CliExtractRequest) -> Result<(), CliError> {
+    let CliExtractRequest {
+        source,
+        dest,
+        includes,
         overwrite,
-        resolver,
-        symlinks: symlinks.into(),
-        limits: safety_limits(max_output_bytes, max_entries, max_compression_ratio),
-        resources: resource_options(threads, memory_limit),
+        password,
+        encoding,
+        symlinks,
+        smart,
         best_effort,
-        problem_reporter: problem_reporter
-            .as_ref()
-            .map(|reporter| Arc::clone(reporter) as Arc<dyn ExtractProblemReporter>),
-        ..ExtractOptions::default()
-    };
-
-    let explicit = password.map(Password::new);
-    let result = with_password_retry(
-        &ctx.loc,
-        explicit.as_ref(),
-        || progress.finish(),
-        |pw| {
-            let open = OpenOptions {
-                password: pw.cloned(),
-                encoding_override: encoding.clone(),
-            };
-            let (plan, report, structure) = ctx.engine.extract_planned(
+        resources,
+        limits,
+        json_output,
+    } = request;
+    let nested = matches!(&source, CliExtractSource::Nested { .. });
+    let operation = if nested { "nested_extract" } else { "extract" };
+    let progress = Arc::new(CliProgress::new_for_operation(
+        ctx,
+        json_output,
+        if nested { "nested" } else { "extract" },
+    ));
+    let (archive, archive_display_path, temp) = match source {
+        CliExtractSource::Archive(archive) => (archive.clone(), archive, None),
+        CliExtractSource::Nested {
+            archive,
+            entry,
+            password,
+            encoding,
+        } => {
+            let temp = super::nested::extract_nested_archive_to_temp(
+                ctx,
                 &archive,
-                &dest,
-                &archive,
-                smart,
-                &open,
-                &x_opts,
+                &entry,
+                OpenOptions {
+                    password: password.map(Password::new),
+                    encoding_override: encoding,
+                },
+                limits,
                 progress.as_ref(),
-                &ctx.ctl,
-                None,
-                |entries, control| filter.select_entries(entries, control),
-                |_| Ok(()),
             )?;
-            let no_match = !filter.is_empty() && plan.scope.entries == 0;
-            Ok(ExtractRunOutcome {
-                plan,
-                report: (!no_match).then_some(report),
-                structure,
-            })
-        },
-    );
+            let display = PathBuf::from(super::nested::safe_entry_basename(&entry));
+            (temp.path().to_owned(), display, Some(temp))
+        }
+    };
+    let result = (|| -> Result<_, CliError> {
+        let dest = extract_dest_or_current(dest);
+        let filter = PathFilter::new(&includes)?;
+        // `ask` needs an interactive stdin; otherwise degrade to skip + warning.
+        let mut overwrite: OverwritePolicy = overwrite.into();
+        let mut resolver: Option<Arc<dyn ConflictResolver>> = None;
+        if overwrite == OverwritePolicy::Ask {
+            if stdin_is_tty() {
+                let prompt_progress = Arc::clone(&progress);
+                resolver = Some(Arc::new(CliConflictResolver::new(
+                    Arc::clone(&ctx.loc),
+                    Arc::new(move || prompt_progress.finish()),
+                )));
+            } else {
+                overwrite = OverwritePolicy::Skip;
+                ctx.eprint_notice(ctx.loc.t("cli.overwrite.non_tty_skip"));
+            }
+        }
+        let problem_reporter =
+            best_effort.then(|| Arc::new(CliExtractProblemReporter::new(Arc::clone(&ctx.loc))));
+        let x_opts = ExtractOptions {
+            overwrite,
+            resolver,
+            symlinks: symlinks.into(),
+            limits,
+            resources,
+            best_effort,
+            problem_reporter: problem_reporter
+                .as_ref()
+                .map(|reporter| Arc::clone(reporter) as Arc<dyn ExtractProblemReporter>),
+            ..ExtractOptions::default()
+        };
+
+        let explicit = password.map(Password::new);
+        let outcome = with_password_retry(
+            &ctx.loc,
+            explicit.as_ref(),
+            || progress.finish(),
+            |pw| {
+                let open = OpenOptions {
+                    password: pw.cloned(),
+                    encoding_override: encoding.clone(),
+                };
+                let (plan, report, structure) = ctx.engine.extract_planned(
+                    &archive,
+                    &dest,
+                    &archive_display_path,
+                    smart,
+                    &open,
+                    &x_opts,
+                    progress.as_ref(),
+                    &ctx.ctl,
+                    None,
+                    |entries, control| filter.select_entries(entries, control),
+                    |_| Ok(()),
+                )?;
+                let no_match = !filter.is_empty() && plan.scope.entries == 0;
+                Ok(ExtractRunOutcome {
+                    plan,
+                    report: (!no_match).then_some(report),
+                    structure,
+                })
+            },
+        )?;
+
+        Ok((outcome, x_opts, problem_reporter))
+    })();
+    let result = result.map_err(|error| match (temp.as_ref(), error) {
+        (Some(temp), CliError::Format(error)) => {
+            CliError::Format(super::nested::public_nested_error(
+                error,
+                temp,
+                &archive_display_path.to_string_lossy(),
+            ))
+        }
+        (_, error) => error,
+    });
     progress.finish();
-    let outcome = result?;
+    if let Some(temp) = temp {
+        super::nested::close_nested_temp(ctx, temp, result.is_err())?;
+    }
+    let (outcome, x_opts, problem_reporter) = result?;
     if smart {
         match outcome.plan.layout {
             SmartLayout::DirectExtract => {
                 ctx.eprint_notice(ctx.loc.t("cli.extract.smart_direct"));
             }
             SmartLayout::WrapInFolder => {
-                let folder = ctx.engine.archive_stem(&archive);
+                let folder = ctx.engine.archive_stem(&archive_display_path);
                 let message = ctx
                     .loc
                     .format("cli.extract.smart_wrap", &[("folder", &folder)]);
@@ -163,7 +231,7 @@ pub fn run(
             }
         }
     }
-    if outcome.structure == ArchiveStructureStatus::ZipLocalHeadersRecovered {
+    if !nested && outcome.structure == ArchiveStructureStatus::ZipLocalHeadersRecovered {
         ctx.eprint_problem(ctx.loc.t("cli.extract.zip_local_headers_recovered"));
     }
     let Some(report) = outcome.report else {
@@ -171,7 +239,7 @@ pub fn run(
         if json_output {
             let value = json!({
                 "ok": true,
-                "operation": "extract",
+                "operation": operation,
                 "dest": path,
                 "matched": false,
                 "best_effort": best_effort,
@@ -184,7 +252,7 @@ pub fn run(
             print_pretty_json(&value)?;
             return Ok(());
         }
-        if ctx.is_modern() {
+        if ctx.is_modern() && !nested {
             print_extract_no_match(ctx, &path, includes.len(), smart, best_effort);
         } else {
             ctx.eprint_notice(ctx.loc.t("cli.extract.no_match"));
@@ -200,7 +268,7 @@ pub fn run(
         let problems_truncated = problems.is_truncated();
         let value = json!({
             "ok": true,
-            "operation": "extract",
+            "operation": operation,
             "dest": path,
             "matched": true,
             "best_effort": best_effort,
@@ -224,20 +292,24 @@ pub fn run(
         } else {
             Tone::Warning
         };
-        let archive_label = archive.display().to_string();
-        let result = ExtractResultView {
-            archive: &archive_label,
-            mode: &mode,
-            path: &path,
-            tone,
-            opts: &x_opts,
-            include_count: includes.len(),
-            smart,
-            encoding_selected: encoding.is_some(),
-            plan: &outcome.plan,
-            report: &report,
-        };
-        print_extract_result(ctx, &result);
+        if nested {
+            super::nested::print_extract_result(ctx, &mode, &path, tone, &report);
+        } else {
+            let archive_label = archive_display_path.display().to_string();
+            let result = ExtractResultView {
+                archive: &archive_label,
+                mode: &mode,
+                path: &path,
+                tone,
+                opts: &x_opts,
+                include_count: includes.len(),
+                smart,
+                encoding_selected: encoding.is_some(),
+                plan: &outcome.plan,
+                report: &report,
+            };
+            print_extract_result(ctx, &result);
+        }
     } else {
         let message = ctx.loc.format("cli.extract.done", &[("path", &path)]);
         ctx.print_success(&message);

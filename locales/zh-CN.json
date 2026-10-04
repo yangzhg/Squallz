@@ -140,6 +140,7 @@
   "error.preview_retained_capacity": "Squallz 为其他应用保留的文件过多，请重新打开 Squallz 释放它们，或直接解压该文件。",
   "error.preview_storage_capacity": "临时条目空间已满，请关闭内层压缩包或重新打开 Squallz 后重试。",
   "error.preview_workspace_unavailable": "无法使用私有临时空间，请检查临时目录权限或改用解压。",
+  "cli.nested.cleanup_failed": "私有临时压缩包未能清理，请检查临时目录权限并关闭占用它的应用后再试。",
   "error.preview_session_unavailable": "该条目已失效，请重新打开。",
   "error.unsafe_filename": "不安全的文件名：{name}",
   "error.disk_full": "磁盘已满",

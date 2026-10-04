@@ -646,21 +646,24 @@ pub fn dispatch(cmd: Cmd, ctx: &Ctx) -> Result<(), CliError> {
             };
             extract::run(
                 ctx,
-                archive,
-                dest,
-                includes,
-                overwrite,
-                password,
-                encoding,
-                symlinks,
-                smart,
-                best_effort,
-                threads,
-                memory_limit,
-                max_output_bytes,
-                max_entries,
-                max_compression_ratio,
-                json,
+                extract::CliExtractRequest {
+                    source: extract::CliExtractSource::Archive(archive),
+                    dest,
+                    includes,
+                    overwrite,
+                    password,
+                    encoding,
+                    symlinks,
+                    smart,
+                    best_effort,
+                    resources: crate::args::resource_options(threads, memory_limit),
+                    limits: crate::args::safety_limits(
+                        max_output_bytes,
+                        max_entries,
+                        max_compression_ratio,
+                    ),
+                    json_output: json,
+                },
             )
         }
         Cmd::Convert {

@@ -75,6 +75,39 @@ pub enum FormatError {
 }
 
 impl FormatError {
+    /// Replaces a private source path in error details while retaining the
+    /// error category, I/O kind and contextual output-conflict markers.
+    pub fn with_public_path(self, private: &str, display: &str) -> Self {
+        if private.is_empty() || !self.to_string().contains(private) {
+            return self;
+        }
+        let replace = |detail: String| detail.replace(private, display);
+        if let Some(output) = self.destination_changed_path() {
+            return Self::destination_changed(PathBuf::from(replace(output.display().to_string())));
+        }
+        if let Some(output) = self.output_exists_path() {
+            return Self::output_exists(PathBuf::from(replace(output.display().to_string())));
+        }
+        match self {
+            Self::Io(error) => Self::from(std::io::Error::new(
+                error.kind(),
+                replace(error.to_string()),
+            )),
+            Self::Unsupported(detail) => Self::Unsupported(replace(detail)),
+            Self::CorruptArchive(detail) => Self::CorruptArchive(replace(detail)),
+            Self::PasswordRequired => Self::PasswordRequired,
+            Self::WrongPassword => Self::WrongPassword,
+            Self::Cancelled => Self::Cancelled,
+            Self::PathTraversal(detail) => Self::PathTraversal(replace(detail)),
+            Self::SymlinkBreakout(detail) => Self::SymlinkBreakout(replace(detail)),
+            Self::ResourceLimitExceeded(detail) => Self::ResourceLimitExceeded(replace(detail)),
+            Self::UnsafeFileName(detail) => Self::UnsafeFileName(replace(detail)),
+            Self::DiskFull => Self::DiskFull,
+            Self::DependencyMissing(detail) => Self::DependencyMissing(replace(detail)),
+            Self::Other(detail) => Self::Other(replace(detail)),
+        }
+    }
+
     /// Creates the stable unsupported marker used when a multi-part `.swm`
     /// stream has no source path from which sibling volumes can be discovered.
     pub fn split_wim_unsupported() -> Self {

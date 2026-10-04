@@ -4015,6 +4015,7 @@ dependencies = [
  "sha1 0.10.6",
  "sha2 0.10.9",
  "squallz-format-api",
+ "tempfile",
  "thiserror 2.0.18",
  "winapi-util",
  "windows-sys 0.61.2",

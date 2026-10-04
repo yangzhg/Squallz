@@ -32,7 +32,6 @@ use crate::nested::{create_nested_job_workspace, extract_nested_archive_to_temp_
 use crate::state::AppState;
 
 use super::progress::BatchProgressSink;
-use super::redact_format_error_path;
 use super::snapshots::{JobQuestion, JobSnapshotStore};
 use super::source_cleanup::{
     prepare_source_cleanup, SourceCleanup, SourceCleanupResult, SourceCleanupStatus,
@@ -1158,9 +1157,8 @@ impl JobContext<'_> {
                 });
                 state.forget_password(&temp_path);
                 let physical = temp_path.to_string_lossy();
-                let (result, _) = extraction.map_err(|error| {
-                    redact_format_error_path(error, physical.as_ref(), display_name)
-                })?;
+                let (result, _) = extraction
+                    .map_err(|error| error.with_public_path(physical.as_ref(), display_name))?;
                 Ok(Some(result))
             }
             JobSpec::Test {

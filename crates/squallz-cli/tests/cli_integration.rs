@@ -3301,6 +3301,30 @@ fn nested_archive_list_and_extract_through_the_cli() {
     );
     assert!(!modern_dest.join("project/a.txt").exists());
 
+    // The selected inner payload fits the limit, but materializing the
+    // enclosing ZIP does not. Reject it before creating the destination.
+    let limited_dest = dir.join("nested-limited-out");
+    assert!(std::fs::metadata(&inner).unwrap().len() > 16);
+    let out = run(sqz()
+        .args(["--lang", "en-US", "nested", "extract"])
+        .arg(&outer)
+        .arg(nested_entry)
+        .arg("-d")
+        .arg(&limited_dest)
+        .args([
+            "--include",
+            "project/sub/*",
+            "--max-output-bytes",
+            "16",
+            "--json",
+        ]));
+    assert_eq!(out.status.code(), Some(6), "{}", stderr(&out));
+    assert_eq!(
+        stdout_json(&out)["error"]["kind"],
+        "resource_limit_exceeded"
+    );
+    assert!(!limited_dest.exists());
+
     std::fs::remove_dir_all(&dir).unwrap();
 }
 

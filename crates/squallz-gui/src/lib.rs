@@ -15,7 +15,6 @@ mod nested;
 mod open_files;
 mod password_cache;
 mod preview_sessions;
-mod preview_workspace;
 mod secrets;
 mod settings;
 mod sfx_runtime;

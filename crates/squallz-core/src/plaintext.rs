@@ -1,4 +1,4 @@
-//! Cross-process ownership and cleanup for plaintext preview files.
+//! Private plaintext workspaces shared by archive entry and preview workflows.
 
 use std::ffi::OsStr;
 use std::fs::{self, File, Metadata, OpenOptions};
@@ -8,13 +8,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use squallz_core::api::{check_windows_portability, PhysicalFileIdentity};
-use squallz_core::{
+use crate::api::{check_windows_portability, PhysicalFileIdentity};
+use crate::{
     open_directory_no_follow, open_regular_file_no_follow, open_regular_file_no_follow_read_write,
     physical_file_identity, physical_path_identity,
 };
 
-use squallz_core::lock_unpoisoned;
+use crate::lock_unpoisoned;
 
 const REGISTRY_NAME: &str = "squallz-preview-v1";
 const SWEEP_LOCK_NAME: &str = ".sweep.lock";
@@ -102,32 +102,36 @@ impl WorkspaceRecord {
     }
 }
 
-/// An externally opened file owns its directory so duplicate archive names
-/// can retain their basename without sharing storage or cleanup ownership.
-pub(crate) struct PreviewFile {
-    workspace: PreviewWorkspace,
+/// A named private file owns its directory independently of other files.
+/// Keep this owner alive while an archive or external application uses the
+/// path, and close the writer before explicitly cleaning up the file.
+pub struct PlaintextFile {
+    workspace: PlaintextWorkspace,
     path: PathBuf,
 }
 
-impl PreviewFile {
-    pub(crate) fn id(&self) -> &str {
+impl PlaintextFile {
+    pub fn id(&self) -> &str {
         &self.workspace.record.workspace
     }
 
-    pub(crate) fn path(&self) -> &Path {
+    pub fn path(&self) -> &Path {
         &self.path
     }
 
-    pub(crate) fn root_path(&self) -> &Path {
+    pub fn root_path(&self) -> &Path {
         self.workspace.path()
     }
 
-    pub(crate) fn close(self) -> io::Result<()> {
+    pub fn close(self) -> io::Result<()> {
         self.workspace.try_cleanup()
     }
 }
 
-pub(crate) struct PreviewWorkspace {
+/// Owns temporary plaintext through a cross-process lock and bounded record.
+/// Cleanup preserves workspaces with unknown members or invalid ownership;
+/// a later instance reclaims valid workspaces left by a terminated process.
+pub struct PlaintextWorkspace {
     registry: PathBuf,
     path: PathBuf,
     owner_path: PathBuf,
@@ -135,8 +139,8 @@ pub(crate) struct PreviewWorkspace {
     record: WorkspaceRecord,
 }
 
-impl PreviewWorkspace {
-    pub(crate) fn create_in(base: &Path) -> io::Result<Self> {
+impl PlaintextWorkspace {
+    pub fn create_in(base: &Path) -> io::Result<Self> {
         Self::create(base, None)
     }
 
@@ -183,14 +187,11 @@ impl PreviewWorkspace {
         ))
     }
 
-    pub(crate) fn path(&self) -> &Path {
+    pub fn path(&self) -> &Path {
         &self.path
     }
 
-    pub(crate) fn create_preview_file(
-        &self,
-        display_name: &str,
-    ) -> io::Result<(PreviewFile, File)> {
+    pub fn create_file(&self, display_name: &str) -> io::Result<(PlaintextFile, File)> {
         let base = self
             .registry
             .parent()
@@ -200,10 +201,10 @@ impl PreviewWorkspace {
         let path = workspace.path.join(name);
         let file = create_private_file(&path)?;
         verify_private_file_binding(&path, &file)?;
-        Ok((PreviewFile { workspace, path }, file))
+        Ok((PlaintextFile { workspace, path }, file))
     }
 
-    pub(crate) fn cleanup(&self) {
+    pub fn cleanup(&self) {
         let _ = self.try_cleanup();
     }
 
@@ -233,7 +234,7 @@ impl PreviewWorkspace {
     }
 }
 
-impl Drop for PreviewWorkspace {
+impl Drop for PlaintextWorkspace {
     fn drop(&mut self) {
         self.cleanup();
     }
@@ -661,8 +662,7 @@ mod tests {
 
     const CRASH_WORKER_MODE: &str = "SQUALLZ_PREVIEW_CRASH_WORKER";
     const CRASH_WORKER_BASE: &str = "SQUALLZ_PREVIEW_CRASH_BASE";
-    const CRASH_WORKER_TEST: &str =
-        "preview_workspace::tests::preview_workspace_forced_kill_worker";
+    const CRASH_WORKER_TEST: &str = "plaintext::tests::preview_workspace_forced_kill_worker";
     const CRASH_WORKER_TIMEOUT: Duration = Duration::from_secs(10);
     const CRASH_WORKER_POLL_INTERVAL: Duration = Duration::from_millis(20);
 
@@ -672,7 +672,7 @@ mod tests {
         file.sync_all()
     }
 
-    fn abandon_workspace(workspace: PreviewWorkspace) {
+    fn abandon_workspace(workspace: PlaintextWorkspace) {
         let owner = lock_unpoisoned(&workspace.owner)
             .take()
             .expect("preview owner should be available");
@@ -831,9 +831,9 @@ mod tests {
     #[test]
     fn identical_preview_basenames_have_independent_storage_and_cleanup() -> io::Result<()> {
         let base = tempfile::tempdir()?;
-        let parent = PreviewWorkspace::create_in(base.path())?;
-        let (first, mut first_writer) = parent.create_preview_file("说明.txt")?;
-        let (second, mut second_writer) = parent.create_preview_file("说明.txt")?;
+        let parent = PlaintextWorkspace::create_in(base.path())?;
+        let (first, mut first_writer) = parent.create_file("说明.txt")?;
+        let (second, mut second_writer) = parent.create_file("说明.txt")?;
         first_writer.write_all(b"first")?;
         second_writer.write_all(b"second")?;
         drop((first_writer, second_writer));
@@ -856,8 +856,8 @@ mod tests {
     #[test]
     fn named_cleanup_rejects_unknown_members_without_deleting_owned_content() -> io::Result<()> {
         let base = tempfile::tempdir()?;
-        let parent = PreviewWorkspace::create_in(base.path())?;
-        let (preview, mut writer) = parent.create_preview_file("说明.txt")?;
+        let parent = PlaintextWorkspace::create_in(base.path())?;
+        let (preview, mut writer) = parent.create_file("说明.txt")?;
         writer.write_all(b"preview")?;
         drop(writer);
         let path = preview.path().to_path_buf();
@@ -867,7 +867,7 @@ mod tests {
         write_private_test_file(&unrelated, b"do not remove")?;
         assert!(preview.close().is_err());
 
-        let replacement = PreviewWorkspace::create_in(base.path())?;
+        let replacement = PlaintextWorkspace::create_in(base.path())?;
         assert_eq!(fs::read(&unrelated)?, b"do not remove");
         assert_eq!(fs::read(path)?, b"preview");
         assert!(root.exists());
@@ -880,8 +880,8 @@ mod tests {
     #[test]
     fn named_cleanup_does_not_follow_a_replaced_preview_symlink() -> io::Result<()> {
         let base = tempfile::tempdir()?;
-        let parent = PreviewWorkspace::create_in(base.path())?;
-        let (preview, writer) = parent.create_preview_file("说明.txt")?;
+        let parent = PlaintextWorkspace::create_in(base.path())?;
+        let (preview, writer) = parent.create_file("说明.txt")?;
         drop(writer);
         let path = preview.path().to_path_buf();
         let outside = base.path().join("outside.txt");
@@ -889,7 +889,7 @@ mod tests {
         fs::remove_file(&path)?;
         std::os::unix::fs::symlink(&outside, &path)?;
         assert!(preview.close().is_err());
-        let replacement = PreviewWorkspace::create_in(base.path())?;
+        let replacement = PlaintextWorkspace::create_in(base.path())?;
         assert!(path.symlink_metadata()?.file_type().is_symlink());
         assert_eq!(fs::read(outside)?, b"outside");
         drop(replacement);
@@ -900,7 +900,7 @@ mod tests {
     fn live_workspace_is_not_reclaimed_by_another_instance() {
         let base = tempfile::tempdir().expect("test base should initialize");
         let first =
-            PreviewWorkspace::create_in(base.path()).expect("first workspace should initialize");
+            PlaintextWorkspace::create_in(base.path()).expect("first workspace should initialize");
         let first_root = first.path.clone();
         let first_owner = first.owner_path.clone();
         let first_file = first.path.join("entry-live.txt");
@@ -908,7 +908,7 @@ mod tests {
             .expect("live preview should be written");
 
         let second =
-            PreviewWorkspace::create_in(base.path()).expect("second workspace should initialize");
+            PlaintextWorkspace::create_in(base.path()).expect("second workspace should initialize");
         assert!(first_root.exists());
         assert!(first_owner.exists());
         assert!(first_file.exists());
@@ -924,14 +924,14 @@ mod tests {
     fn stale_owned_workspace_is_reclaimed_by_the_next_instance() {
         let base = tempfile::tempdir().expect("test base should initialize");
         let stale =
-            PreviewWorkspace::create_in(base.path()).expect("stale workspace should initialize");
+            PlaintextWorkspace::create_in(base.path()).expect("stale workspace should initialize");
         let stale_root = stale.path.clone();
         let stale_owner = stale.owner_path.clone();
         write_private_test_file(&stale_root.join("entry-stale.txt"), b"private preview")
             .expect("stale preview should be written");
         abandon_workspace(stale);
 
-        let replacement = PreviewWorkspace::create_in(base.path())
+        let replacement = PlaintextWorkspace::create_in(base.path())
             .expect("replacement workspace should initialize");
         assert!(!stale_root.exists());
         assert!(!stale_owner.exists());
@@ -942,7 +942,7 @@ mod tests {
     fn stale_workspace_with_unknown_member_is_left_untouched() {
         let base = tempfile::tempdir().expect("test base should initialize");
         let stale =
-            PreviewWorkspace::create_in(base.path()).expect("stale workspace should initialize");
+            PlaintextWorkspace::create_in(base.path()).expect("stale workspace should initialize");
         let stale_root = stale.path.clone();
         let stale_owner = stale.owner_path.clone();
         let unrelated = stale_root.join("notes.bin");
@@ -950,7 +950,7 @@ mod tests {
             .expect("unrelated file should be written");
         abandon_workspace(stale);
 
-        let replacement = PreviewWorkspace::create_in(base.path())
+        let replacement = PlaintextWorkspace::create_in(base.path())
             .expect("replacement workspace should initialize");
         assert_eq!(
             fs::read(&unrelated).expect("unrelated file should remain"),
@@ -965,7 +965,7 @@ mod tests {
     fn stale_workspace_with_mismatched_marker_is_left_untouched() {
         let base = tempfile::tempdir().expect("test base should initialize");
         let stale =
-            PreviewWorkspace::create_in(base.path()).expect("stale workspace should initialize");
+            PlaintextWorkspace::create_in(base.path()).expect("stale workspace should initialize");
         let stale_root = stale.path.clone();
         let stale_owner = stale.owner_path.clone();
         let preview = stale_root.join("entry-stale.txt");
@@ -975,7 +975,7 @@ mod tests {
             .expect("marker should be changed");
         abandon_workspace(stale);
 
-        let replacement = PreviewWorkspace::create_in(base.path())
+        let replacement = PlaintextWorkspace::create_in(base.path())
             .expect("replacement workspace should initialize");
         assert_eq!(
             fs::read(&preview).expect("preview should remain"),
@@ -995,14 +995,14 @@ mod tests {
         let outside = base.path().join("outside.txt");
         fs::write(&outside, b"outside").expect("outside file should be written");
         let stale =
-            PreviewWorkspace::create_in(base.path()).expect("stale workspace should initialize");
+            PlaintextWorkspace::create_in(base.path()).expect("stale workspace should initialize");
         let stale_root = stale.path.clone();
         let stale_owner = stale.owner_path.clone();
         let link = stale_root.join("entry-link");
         symlink(&outside, &link).expect("preview symlink should be created");
         abandon_workspace(stale);
 
-        let replacement = PreviewWorkspace::create_in(base.path())
+        let replacement = PlaintextWorkspace::create_in(base.path())
             .expect("replacement workspace should initialize");
         assert!(link.symlink_metadata().is_ok());
         assert_eq!(
@@ -1022,12 +1022,12 @@ mod tests {
         let base = std::env::var_os(CRASH_WORKER_BASE)
             .map(PathBuf::from)
             .ok_or_else(|| io::Error::other("preview crash worker base is missing"))?;
-        let workspace = PreviewWorkspace::create_in(&base)?;
+        let workspace = PlaintextWorkspace::create_in(&base)?;
         write_private_test_file(
             &workspace.path.join("nested-crash.zip"),
             b"private nested archive",
         )?;
-        let (preview, mut writer) = workspace.create_preview_file("说明.txt")?;
+        let (preview, mut writer) = workspace.create_file("说明.txt")?;
         writer.write_all(b"private named preview")?;
         writer.sync_all()?;
         drop(writer);
@@ -1068,7 +1068,7 @@ mod tests {
         );
         assert!(preview_owner.is_file());
 
-        let live_probe = PreviewWorkspace::create_in(base.path())?;
+        let live_probe = PlaintextWorkspace::create_in(base.path())?;
         assert!(crashed_workspace.exists());
         assert!(crashed_owner.exists());
         assert!(crashed_preview.exists());
@@ -1081,7 +1081,7 @@ mod tests {
             "preview crash worker exited successfully instead of being terminated"
         );
 
-        let replacement = PreviewWorkspace::create_in(base.path())?;
+        let replacement = PlaintextWorkspace::create_in(base.path())?;
         assert!(!crashed_workspace.exists());
         assert!(!crashed_owner.exists());
         assert!(!crashed_preview.exists());

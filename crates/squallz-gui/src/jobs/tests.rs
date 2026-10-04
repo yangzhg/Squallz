@@ -14,7 +14,7 @@ use squallz_core::CreateCommitPolicy;
 use squallz_core::QueueWaitReason;
 use squallz_core::{CreateArtifactKind, PostSuccessAction};
 use std::fs;
-use std::io::Write as _;
+use std::io::{self, Write as _};
 use std::path::Path;
 use std::sync::Mutex as StdMutex;
 use std::time::Instant;
@@ -161,11 +161,8 @@ fn scheduler_limits_and_cpu_reservations_are_conservative() {
 #[test]
 fn private_path_redaction_keeps_the_original_error_category() {
     let private = "/private/squallz-preview/inner.zip";
-    let error = redact_format_error_path(
-        FormatError::CorruptArchive(format!("invalid footer in {private}")),
-        private,
-        "inner.zip",
-    );
+    let error = FormatError::CorruptArchive(format!("invalid footer in {private}"))
+        .with_public_path(private, "inner.zip");
 
     match error {
         FormatError::CorruptArchive(detail) => {
@@ -174,25 +171,19 @@ fn private_path_redaction_keeps_the_original_error_category() {
         other => panic!("expected corrupt archive, got {other:?}"),
     }
 
-    let error = redact_format_error_path(
-        FormatError::Io(io::Error::new(
-            io::ErrorKind::StorageFull,
-            format!("no space left while writing {private}"),
-        )),
-        private,
-        "inner.zip",
-    );
+    let error = FormatError::Io(io::Error::new(
+        io::ErrorKind::StorageFull,
+        format!("no space left while writing {private}"),
+    ))
+    .with_public_path(private, "inner.zip");
     assert!(matches!(error, FormatError::DiskFull));
 }
 
 #[test]
 fn output_conflict_redaction_keeps_the_contextual_marker() {
     let private = "/private/squallz-preview/archive.repaired.zip";
-    let error = redact_format_error_path(
-        FormatError::output_exists(private),
-        private,
-        "archive.repaired.zip",
-    );
+    let error =
+        FormatError::output_exists(private).with_public_path(private, "archive.repaired.zip");
 
     assert!(error.is_output_exists());
     assert_eq!(

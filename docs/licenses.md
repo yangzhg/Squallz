@@ -134,6 +134,8 @@ rustix 同时是 fs4 的传递依赖；errno / bitflags 均为 MIT OR Apache-2.0
 | objc2-app-kit | 0.3.2 | Zlib OR Apache-2.0 OR MIT | 活跃（madsmtm/objc2） | macOS 系统工作区、应用激活与默认处理器查询 |
 | objc2-foundation | 0.3.2 | MIT | 活跃（madsmtm/objc2） | macOS bundle、字符串与无损本地文件 URL |
 
+`tempfile` 3.27.0 同时作为 core 的开发依赖运行共享私有临时文件的故障与清理测试；core 生产路径不新增此依赖。
+
 tauri 的传递依赖树较大（wry/tao/objc2 系、muda 等），均为 MIT/Apache-2.0
 或兼容的 Zlib 宽松许可证，满足白名单。Squallz 自有的 unsafe 只存在于小范围平台桥接：
 上述 core 系统调用、macOS 系统集成，以及 Windows 凭据存储和配置替换 API。

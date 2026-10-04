@@ -4,7 +4,6 @@
 //! park the worker on the [`AskBridge`] until the frontend answers.
 
 use std::collections::{HashMap, HashSet};
-use std::io;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -388,40 +387,6 @@ fn redact_source_json(value: &mut serde_json::Value, redactions: &[(String, Stri
             }
         }
         serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {}
-    }
-}
-
-fn redact_format_error_path(error: FormatError, path: &str, display: &str) -> FormatError {
-    if path.is_empty() || !error.to_string().contains(path) {
-        return error;
-    }
-    let replace = |detail: String| detail.replace(path, display);
-    if let Some(output) = error.destination_changed_path() {
-        return FormatError::destination_changed(PathBuf::from(replace(
-            output.display().to_string(),
-        )));
-    }
-    if let Some(output) = error.output_exists_path() {
-        return FormatError::output_exists(PathBuf::from(replace(output.display().to_string())));
-    }
-    match error {
-        FormatError::Io(error) => {
-            FormatError::from(io::Error::new(error.kind(), replace(error.to_string())))
-        }
-        FormatError::Unsupported(detail) => FormatError::Unsupported(replace(detail)),
-        FormatError::CorruptArchive(detail) => FormatError::CorruptArchive(replace(detail)),
-        FormatError::PasswordRequired => FormatError::PasswordRequired,
-        FormatError::WrongPassword => FormatError::WrongPassword,
-        FormatError::Cancelled => FormatError::Cancelled,
-        FormatError::PathTraversal(detail) => FormatError::PathTraversal(replace(detail)),
-        FormatError::SymlinkBreakout(detail) => FormatError::SymlinkBreakout(replace(detail)),
-        FormatError::ResourceLimitExceeded(detail) => {
-            FormatError::ResourceLimitExceeded(replace(detail))
-        }
-        FormatError::UnsafeFileName(detail) => FormatError::UnsafeFileName(replace(detail)),
-        FormatError::DiskFull => FormatError::DiskFull,
-        FormatError::DependencyMissing(detail) => FormatError::DependencyMissing(replace(detail)),
-        FormatError::Other(detail) => FormatError::Other(replace(detail)),
     }
 }
 
