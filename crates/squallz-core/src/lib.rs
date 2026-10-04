@@ -1854,6 +1854,43 @@ pub(crate) struct ReservedTempFile {
     pub(crate) identity: filesystem_identity::PathIdentity,
 }
 
+impl ReservedTempFile {
+    /// Clone a handle without losing the binding needed if the clone fails.
+    pub(crate) fn clone_for_writer(&self, cleanup_context: &str) -> Result<File, FormatError> {
+        self.clone_for_writer_with(cleanup_context, File::try_clone)
+    }
+
+    fn clone_for_writer_with(
+        &self,
+        cleanup_context: &str,
+        clone: impl FnOnce(&File) -> io::Result<File>,
+    ) -> Result<File, FormatError> {
+        clone(&self.file).map_err(|error| self.cleanup_error(error.into(), cleanup_context))
+    }
+
+    pub(crate) fn written_size(
+        &self,
+        changed: impl FnOnce() -> io::Error,
+    ) -> Result<u64, FormatError> {
+        if filesystem_identity::file_identity(&self.file)? != self.identity
+            || filesystem_identity::path_identity(&self.path)? != self.identity
+        {
+            return Err(FormatError::Io(changed()));
+        }
+        Ok(self.file.metadata()?.len())
+    }
+
+    /// Only the current stage owner may call this; ownership can move into a journal.
+    pub(crate) fn cleanup_error(&self, error: FormatError, cleanup_context: &str) -> FormatError {
+        match remove_bound_temp_file(&self.path, &self.file, self.identity) {
+            Ok(()) => error,
+            Err(cleanup) => FormatError::Other(format!(
+                "{error}; {cleanup_context} cleanup also failed: {cleanup}"
+            )),
+        }
+    }
+}
+
 pub(crate) fn reserve_bound_sibling_temp_file(
     dest: &Path,
     purpose: &str,
@@ -3633,6 +3670,68 @@ mod tests {
         assert!(open_regular_file_no_follow_read_write(&alias).is_err());
 
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn reserved_output_clone_failure_removes_owned_staging() {
+        let dir = temp_dir("reserved-output-clone-cleanup");
+        let destination = dir.join("archive.test");
+        std::fs::write(&destination, b"previous output").unwrap();
+        let mut reserved = reserve_bound_sibling_temp_file(&destination, "create").unwrap();
+        reserved.file.write_all(b"writer-owned staging").unwrap();
+
+        let error = reserved
+            .clone_for_writer_with("created archive staging", |_| {
+                Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "injected reserved output clone failure",
+                ))
+            })
+            .unwrap_err();
+
+        assert!(matches!(
+            &error,
+            FormatError::Io(error)
+                if error.kind() == io::ErrorKind::PermissionDenied
+                    && error.to_string() == "injected reserved output clone failure"
+        ));
+        assert!(!reserved.path.exists());
+        assert_eq!(std::fs::read(&destination).unwrap(), b"previous output");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        drop(reserved);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn reserved_output_clone_failure_preserves_a_rebound_competitor() {
+        let dir = temp_dir("reserved-output-clone-rebound");
+        let destination = dir.join("archive.test");
+        std::fs::write(&destination, b"previous output").unwrap();
+        let mut reserved = reserve_bound_sibling_temp_file(&destination, "create").unwrap();
+        reserved.file.write_all(b"writer-owned staging").unwrap();
+        let displaced = dir.join("displaced-writer-staging");
+
+        let error = reserved
+            .clone_for_writer_with("created archive staging", |_| {
+                move_path_no_replace(&reserved.path, &displaced).unwrap();
+                std::fs::write(&reserved.path, b"competing output").unwrap();
+                Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "injected reserved output clone failure",
+                ))
+            })
+            .unwrap_err();
+
+        assert!(matches!(&error, FormatError::Other(_)));
+        let message = error.to_string();
+        assert!(message.contains("injected reserved output clone failure"));
+        assert!(message.contains("created archive staging cleanup also failed"));
+        assert!(message.contains("left untouched"));
+        assert_eq!(std::fs::read(&reserved.path).unwrap(), b"competing output");
+        assert_eq!(std::fs::read(&displaced).unwrap(), b"writer-owned staging");
+        assert_eq!(std::fs::read(&destination).unwrap(), b"previous output");
+        drop(reserved);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

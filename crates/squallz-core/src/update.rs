@@ -9,7 +9,6 @@ use crate::api::{
 };
 use crate::compound::ProgressRead;
 use crate::create::TrackedInputRead;
-use crate::filesystem_identity::PathIdentity;
 use crate::inputs::{collect_prepared_input_as, PreparedInputItem};
 use crate::PathFilter;
 use crate::{ArchiveSourceState, CreateDestinationGuard};
@@ -126,22 +125,12 @@ pub(crate) fn run_update_rewrite(
 
 pub(crate) fn commit_created_archive(
     target: &std::path::Path,
-    staged: &std::path::Path,
-    staged_file: std::fs::File,
-    staged_identity: PathIdentity,
+    staged: crate::ReservedTempFile,
     guard: CreateDestinationGuard,
     progress: &dyn ProgressSink,
     ctl: &ControlToken,
 ) -> Result<(), FormatError> {
-    transaction::commit_created_archive(
-        target,
-        staged,
-        staged_file,
-        staged_identity,
-        guard,
-        progress,
-        ctl,
-    )
+    transaction::commit_created_archive(target, staged, guard, progress, ctl)
 }
 
 impl PreparedAddition {

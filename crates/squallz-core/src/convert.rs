@@ -79,16 +79,14 @@ pub(crate) fn convert(
     ctl.checkpoint()?;
     if create_opts.split_size.is_none() {
         let reserved = crate::reserve_bound_sibling_temp_file(dest, "convert")?;
-        let staged = reserved.path.clone();
-        let staged_identity = reserved.identity;
-        let mut retained_file = Some(reserved.file.try_clone()?);
-        let mut cleanup_staging = true;
+        let cleanup_context = "conversion staging";
+        let output_file = reserved.clone_for_writer(cleanup_context)?;
         let result = convert_unsplit(
             engine,
             &mut *reader,
             &metas,
             detect_name,
-            reserved.file,
+            output_file,
             create_opts,
             create_opts,
             progress,
@@ -96,67 +94,40 @@ pub(crate) fn convert(
         );
         drop(reader);
         let result = result.and_then(|()| {
-            let retained = retained_file.as_ref().ok_or_else(|| {
-                FormatError::Other("conversion staging handle was transferred twice".into())
-            })?;
-            if crate::filesystem_identity::file_identity(retained)? != staged_identity
-                || crate::filesystem_identity::path_identity(&staged)? != staged_identity
-            {
-                return Err(FormatError::Io(std::io::Error::other(
-                    "conversion staging changed after writing",
-                )));
-            }
-            let total_output_bytes = retained.metadata()?.len();
-            match commit_policy {
-                CreateCommitPolicy::NoReplace => {
-                    crate::publish_bound_file_no_replace(&staged, retained, staged_identity, dest)?
-                }
-                CreateCommitPolicy::ReplaceIfUnchanged(guard) => {
-                    cleanup_staging = false;
-                    let retained = retained_file.take().ok_or_else(|| {
-                        FormatError::Other("conversion staging handle was transferred twice".into())
-                    })?;
-                    crate::update::commit_created_archive(
-                        dest,
-                        &staged,
-                        retained,
-                        staged_identity,
-                        guard,
-                        progress,
-                        ctl,
-                    )?;
-                }
-                CreateCommitPolicy::ReplaceExisting => {
-                    return Err(FormatError::Other(
-                        "conversion replacement policy was not bound before writing".into(),
-                    ));
-                }
-            }
-            Ok(CreateReport {
-                primary_output: dest.to_path_buf(),
-                outputs: vec![dest.to_path_buf()],
-                preserved_outputs: Vec::new(),
-                total_output_bytes,
-                split_volume_count: None,
-            })
+            reserved
+                .written_size(|| std::io::Error::other("conversion staging changed after writing"))
         });
-        return match result {
-            Ok(report) => Ok(report),
-            Err(error) if !cleanup_staging => Err(error),
-            Err(error) => {
-                let retained = retained_file.as_ref().ok_or_else(|| {
-                    FormatError::Other(
-                        "conversion staging handle was unavailable for cleanup".into(),
-                    )
-                })?;
-                match crate::remove_bound_temp_file(&staged, retained, staged_identity) {
-                    Ok(()) => Err(error),
-                    Err(cleanup) => Err(FormatError::Other(format!(
-                        "{error}; conversion staging cleanup also failed: {cleanup}"
-                    ))),
-                }
-            }
+        let total_output_bytes = match result {
+            Ok(bytes) => bytes,
+            Err(error) => return Err(reserved.cleanup_error(error, cleanup_context)),
         };
+        match commit_policy {
+            CreateCommitPolicy::NoReplace => {
+                crate::publish_bound_file_no_replace(
+                    &reserved.path,
+                    &reserved.file,
+                    reserved.identity,
+                    dest,
+                )
+                .map_err(|error| reserved.cleanup_error(error, cleanup_context))?;
+            }
+            CreateCommitPolicy::ReplaceIfUnchanged(guard) => {
+                crate::update::commit_created_archive(dest, reserved, guard, progress, ctl)?;
+            }
+            CreateCommitPolicy::ReplaceExisting => {
+                let error = FormatError::Other(
+                    "conversion replacement policy was not bound before writing".into(),
+                );
+                return Err(reserved.cleanup_error(error, cleanup_context));
+            }
+        }
+        return Ok(CreateReport {
+            primary_output: dest.to_path_buf(),
+            outputs: vec![dest.to_path_buf()],
+            preserved_outputs: Vec::new(),
+            total_output_bytes,
+            split_volume_count: None,
+        });
     }
 
     with_split_output_policy(

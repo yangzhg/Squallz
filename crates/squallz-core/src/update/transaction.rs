@@ -333,14 +333,12 @@ fn published_source_state(
 
 pub(super) fn commit_created_archive(
     requested_target: &Path,
-    staged: &Path,
-    staged_file: File,
-    staged_identity: PathIdentity,
+    staged: crate::ReservedTempFile,
     guard: CreateDestinationGuard,
     progress: &dyn ProgressSink,
     ctl: &ControlToken,
 ) -> Result<(), FormatError> {
-    let stage = bind_created_stage(staged, staged_file, staged_identity)?;
+    let stage = bind_created_stage(staged)?;
     commit_created_archive_bound(requested_target, guard, progress, ctl, stage)
 }
 
@@ -753,22 +751,18 @@ fn verification_label(target: &Path) -> EntryPath {
     )
 }
 
-fn bind_created_stage(
-    path: &Path,
-    file: File,
-    expected_identity: PathIdentity,
-) -> Result<ReservedStage, FormatError> {
-    let identity =
-        file_identity(&file).map_err(|error| unbound_created_stage_error(path, error))?;
-    if identity != expected_identity {
+fn bind_created_stage(reserved: crate::ReservedTempFile) -> Result<ReservedStage, FormatError> {
+    let identity = file_identity(&reserved.file)
+        .map_err(|error| unbound_created_stage_error(&reserved.path, error))?;
+    if identity != reserved.identity {
         return Err(FormatError::Io(io::Error::other(format!(
             "created archive staging was replaced after writing and the competing path was left untouched: {}",
-            path.display()
+            reserved.path.display()
         ))));
     }
     let stage = ReservedStage {
-        path: path.to_path_buf(),
-        file,
+        path: reserved.path,
+        file: reserved.file,
         identity,
     };
     let path_metadata = match fs::symlink_metadata(&stage.path) {
@@ -3599,7 +3593,11 @@ mod tests {
         fs::create_dir(&stage).unwrap();
         fs::write(stage.join("competitor"), b"keep").unwrap();
 
-        let error = match bind_created_stage(&stage, file, stage_identity) {
+        let error = match bind_created_stage(crate::ReservedTempFile {
+            path: stage.clone(),
+            file,
+            identity: stage_identity,
+        }) {
             Ok(bound) => {
                 let cleanup = cleanup_stage(FormatError::Cancelled, bound);
                 panic!("directory was unexpectedly bound: {cleanup}");
@@ -3623,7 +3621,11 @@ mod tests {
         crate::move_path_no_replace(&stage, &displaced).unwrap();
         fs::write(&stage, b"competitor").unwrap();
 
-        let error = match bind_created_stage(&stage, file, writer_identity) {
+        let error = match bind_created_stage(crate::ReservedTempFile {
+            path: stage.clone(),
+            file,
+            identity: writer_identity,
+        }) {
             Ok(bound) => {
                 let cleanup = cleanup_stage(FormatError::Cancelled, bound);
                 panic!("rebound stage was unexpectedly bound: {cleanup}");

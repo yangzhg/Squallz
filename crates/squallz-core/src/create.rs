@@ -536,7 +536,7 @@ pub(crate) fn with_split_output_policy<T>(
     let reserved = crate::reserve_bound_sibling_temp_file(&base, "split")?;
     let tmp = reserved.path.clone();
     let tmp_identity = reserved.identity;
-    let retained_tmp = reserved.file.try_clone()?;
+    let retained_tmp = reserved.clone_for_writer("split creation staging")?;
     let inner_opts = CreateOptions {
         split_size: None,
         split_mode: SplitOutputMode::Generic,
@@ -665,20 +665,17 @@ fn create_unsplit(
         }
         CreateOutput::CallerReserved { reserved, .. } => (reserved, None),
     };
-    let tmp = reserved.path.clone();
     let staging_path = match &publication {
         Some((destination, _policy)) => *destination,
-        None => tmp.as_path(),
+        None => reserved.path.as_path(),
     };
-    let tmp_identity = reserved.identity;
-    let mut retained_file = Some(reserved.file.try_clone()?);
-    let output_file = reserved.file;
-    let mut cleanup_tmp = true;
+    let cleanup_context = "created archive staging";
+    let output_file = reserved.clone_for_writer(cleanup_context)?;
     let result = (|| {
         let output_exclusions = CreateOutputExclusions::new(
             target.final_path,
             staging_path,
-            &tmp,
+            &reserved.path,
             plan_opts.split_size.is_some(),
             target.reserved_outputs,
         )?;
@@ -748,70 +745,44 @@ fn create_unsplit(
                 ));
             }
         };
-        let retained = retained_file.as_ref().ok_or_else(|| {
-            FormatError::Other("created archive staging handle was transferred too early".into())
-        })?;
-        if crate::filesystem_identity::file_identity(retained)? != tmp_identity
-            || crate::filesystem_identity::path_identity(&tmp)? != tmp_identity
-        {
-            return Err(FormatError::Io(io::Error::other(format!(
+        let output_bytes = reserved.written_size(|| {
+            io::Error::other(format!(
                 "created archive staging changed before publication: {}",
-                tmp.display()
-            ))));
-        }
-        let output_bytes = retained.metadata()?.len();
-        if let Some((destination, policy)) = publication {
-            match policy {
-                CreateCommitPolicy::ReplaceExisting => {
-                    return Err(FormatError::Other(
-                        "archive replacement policy was not bound before writing".into(),
-                    ));
-                }
-                CreateCommitPolicy::NoReplace => {
-                    crate::publish_bound_file_no_replace(
-                        &tmp,
-                        retained,
-                        tmp_identity,
-                        destination,
-                    )?;
-                }
-                CreateCommitPolicy::ReplaceIfUnchanged(guard) => {
-                    cleanup_tmp = false;
-                    let retained = retained_file.take().ok_or_else(|| {
-                        FormatError::Other(
-                            "created archive staging handle was transferred twice".into(),
-                        )
-                    })?;
-                    crate::update::commit_created_archive(
-                        destination,
-                        &tmp,
-                        retained,
-                        tmp_identity,
-                        guard,
-                        progress,
-                        ctl,
-                    )?;
-                }
-            }
-        }
+                reserved.path.display()
+            ))
+        })?;
         Ok(CreatedArchive {
             output_bytes,
             manifest: captured_inputs.manifest,
         })
     })();
-    match result {
-        Ok(created) => Ok(created),
-        Err(error) if !cleanup_tmp => Err(error),
-        Err(error) => match retained_file.as_ref() {
-            None => Err(error),
-            Some(retained) => match crate::remove_bound_temp_file(&tmp, retained, tmp_identity) {
-                Ok(()) => Err(error),
-                Err(cleanup) => Err(FormatError::Other(format!(
-                    "{error}; created archive staging cleanup also failed: {cleanup}"
-                ))),
-            },
-        },
+    let created = match result {
+        Ok(created) => created,
+        Err(error) => return Err(reserved.cleanup_error(error, cleanup_context)),
+    };
+    if let Some((destination, policy)) = publication {
+        match policy {
+            CreateCommitPolicy::ReplaceExisting => {
+                let error = FormatError::Other(
+                    "archive replacement policy was not bound before writing".into(),
+                );
+                return Err(reserved.cleanup_error(error, cleanup_context));
+            }
+            CreateCommitPolicy::NoReplace => {
+                crate::publish_bound_file_no_replace(
+                    &reserved.path,
+                    &reserved.file,
+                    reserved.identity,
+                    destination,
+                )
+                .map_err(|error| reserved.cleanup_error(error, cleanup_context))?;
+            }
+            CreateCommitPolicy::ReplaceIfUnchanged(guard) => {
+                crate::update::commit_created_archive(destination, reserved, guard, progress, ctl)?;
+            }
+        }
     }
+    Ok(created)
 }
 
 enum PreparedInputs {
