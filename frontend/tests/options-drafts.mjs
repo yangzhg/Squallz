@@ -32,3 +32,7 @@ export function installCreateOptions(source, context) {
 export function installExtractOptions(source, context) {
   return installOptions(source, context, "extractOptions");
 }
+
+export function installBatchExtractDraft(source, context) {
+  return installOptions(source, context, "batchExtract");
+}

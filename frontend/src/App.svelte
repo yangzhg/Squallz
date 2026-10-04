@@ -224,7 +224,7 @@
   import { isNewSourceCleanupRecoveryGeneration } from "./lib/source-cleanup";
   import { currentWebviewWindowListener } from "./lib/tauri-events";
   import { outputPasswordRequired } from "./lib/job-snapshot";
-  import { batchExtractJob, reviewBatchExtract, type BatchExtractDraft } from "./lib/batch-extract";
+  import { BatchExtractDraft, type BatchExtractEdit } from "./lib/batch-extract.svelte";
   import { readBatchExtractResult } from "./lib/batch-extract-result";
   import { nestedExtractJob, reviewNestedExtract, type NestedExtractDraft } from "./lib/nested-extract";
   import { ArchiveUpdateReview } from "./lib/archive-update.svelte";
@@ -739,7 +739,14 @@
   let recoveryPar2Override = $state<string | null>(null);
   let recoveryRedundancyDraft = $state("10");
   let openDialogModulePromise: Promise<DialogModule> | null = null;
-  let batchDraft = $state<BatchExtractDraft | null>(null);
+  const batchExtract = new BatchExtractDraft(() => ({
+    fallbackPaths: runtimePreviews.batchPaths.length > 0
+      ? runtimePreviews.batchPaths : currentArchive ? [currentArchive.source] : [],
+    archive: currentArchive,
+    defaultDirectory: normalizedDefaultExtractDir(settingsSession.appliedGeneral.defaultExtractDir),
+    platform: platformKind(),
+  }));
+  let batchDraft = $derived(batchExtract.state);
   let nestedExtractDraft = $state<NestedExtractDraft | null>(null);
   let nestedExtractSubmissionPending = $state(false);
   let nestedExtractPickerBusy = $state(false);
@@ -751,7 +758,6 @@
   let batchSubmissionPending = $state(false);
   let batchPickerBusy = $state(false);
   let batchPickerRequest = 0;
-  let batchDraftGeneration = 0;
   let batchReviewFocusPending = false;
   let checksumPath = $state(runtimePreviews.checksumPath);
   let checksumManifestPath = $state(runtimePreviews.checksumManifestPath);
@@ -5416,21 +5422,6 @@
     return dot > 0 ? name.slice(dot + 1).toUpperCase() : "ARCHIVE";
   }
 
-  function newBatchExtractDraft(paths: readonly string[]): BatchExtractDraft {
-    return { overwrite: "ask", symlinks: "preserve", smart: true,
-      items: uniqueNonEmptyPaths([...paths]).map((path) => ({ path,
-        displayPath: currentArchive?.source === path ? currentArchive.path : path,
-        dest: normalizedDefaultExtractDir(settingsSession.appliedGeneral.defaultExtractDir) ?? pathDir(currentArchive?.source === path ? currentArchive.path : path),
-        encoding: currentArchive && sameFilePath(currentArchive.source, path) ? archiveEncodingForJob() : null,
-        best_effort: false,
-      })) };
-  }
-
-  function effectiveBatchDraft(): BatchExtractDraft {
-    return batchDraft ?? newBatchExtractDraft(runtimePreviews.batchPaths.length > 0
-      ? runtimePreviews.batchPaths : currentArchive ? [currentArchive.source] : []);
-  }
-
   function batchDraftLocked(): boolean {
     return batchSubmissionPending || batchPickerBusy;
   }
@@ -5440,34 +5431,32 @@
       showNotice(tr("gui.batch.wait_for_current", "Finish the current selection or submission before reviewing another batch."));
       return false;
     }
-    batchDraftGeneration += 1;
-    batchDraft = newBatchExtractDraft(paths);
+    batchExtract.replaceSources(paths);
     return true;
   }
 
-  function updateBatchDraft(update: (draft: BatchExtractDraft) => BatchExtractDraft): void {
+  function editBatchDraft(change: BatchExtractEdit): void {
     if (batchDraftLocked()) return;
-    batchDraftGeneration += 1;
-    batchDraft = update(effectiveBatchDraft());
+    batchExtract.edit(change);
   }
 
   function removeBatchItem(index: number): void {
-    updateBatchDraft((draft) => ({ ...draft, items: draft.items.filter((_, itemIndex) => itemIndex !== index) }));
+    editBatchDraft({ kind: "remove", index });
     void tick().then(() => {
       if (screen !== "batch") return;
-      (document.getElementById(`batch-remove-${Math.min(index, effectiveBatchDraft().items.length - 1)}`)
+      (document.getElementById(`batch-remove-${Math.min(index, batchDraft.items.length - 1)}`)
         ?? document.getElementById("batch-workspace-heading"))?.focus();
     });
   }
 
   async function chooseBatchPaths(index: number | null = null): Promise<void> {
     if (screen !== "batch" || batchDraftLocked()) return;
-    const draft = effectiveBatchDraft();
+    const draft = batchDraft;
     if (index !== null && !draft.items[index]) return;
-    const generation = batchDraftGeneration;
+    const revision = batchExtract.revision;
     const request = ++batchPickerRequest;
     const isCurrent = () => request === batchPickerRequest
-      && generation === batchDraftGeneration && screen === "batch";
+      && revision === batchExtract.revision && screen === "batch";
     batchPickerBusy = true;
     try {
       const { open } = await getDialogModule();
@@ -5483,15 +5472,8 @@
         return;
       }
       const paths = Array.isArray(selected) ? selected : [selected];
-      if (index === null) {
-        const additions = newBatchExtractDraft(paths).items.filter((item) =>
-          !draft.items.some((existing) => sameFilePath(existing.path, item.path)));
-        batchDraft = { ...draft, items: [...draft.items, ...additions] };
-        if (additions.length === 0) showNotice(tr("gui.batch.already_added", "Those archives are already in the batch."));
-      } else if (paths[0]) {
-        batchDraft = { ...draft, items: draft.items.map((item, itemIndex) => itemIndex === index ? { ...item, dest: paths[0] } : item) };
-      }
-      batchDraftGeneration += 1;
+      const added = batchExtract.acceptSelection(paths, index, draft);
+      if (index === null && added === 0) showNotice(tr("gui.batch.already_added", "Those archives are already in the batch."));
     } catch {
       if (isCurrent()) showNotice(index === null
         ? tr("gui.batch.picker_unavailable", "Could not open the file chooser. Try again, or drag archives into the window.")
@@ -5644,7 +5626,7 @@
   function dropStatusLabel(): string {
     if (dragActive) return tr("gui.drop.active", "Drop archives to open, or files and folders to create an archive");
     if (lastDropKind === "archives") {
-      return tr("gui.drop.archives_ready", "{count} dropped archives ready").replace("{count}", String(effectiveBatchDraft().items.length));
+      return tr("gui.drop.archives_ready", "{count} dropped archives ready").replace("{count}", String(batchDraft.items.length));
     }
     if (lastDropKind === "create") {
       return tr("gui.drop.create_ready", "{count} dropped items ready to archive").replace("{count}", String(createSources.length));
@@ -8151,19 +8133,18 @@
 
   async function startBatchExtract() {
     if (batchDraftLocked()) return;
-    const draft = effectiveBatchDraft();
-    if (draft.items.length === 0) {
+    const spec = batchExtract.snapshotRun();
+    if (spec.items.length === 0) {
       showNotice(tr("gui.batch.open_archives_before_start", "Open archives before starting batch extract"));
       return;
     }
-    const invalid = draft.items.findIndex((item) => !item.dest.trim());
+    const invalid = spec.items.findIndex((item) => !item.dest.trim());
     if (invalid !== -1) {
       showNotice(tr("gui.batch.destination_required", "Choose a destination for every archive."));
       document.getElementById(`batch-destination-${invalid}`)?.focus();
       return;
     }
     if (focusBlockingTaskIfAny()) return;
-    const spec = batchExtractJob(draft);
     batchSubmissionPending = true;
     try {
       await submitJob(spec);
@@ -8182,7 +8163,7 @@
   }
 
   function batchWorkspaceSurface(variant: ToolsWorkspaceVariant): BatchWorkspaceSurface {
-    const draft = effectiveBatchDraft();
+    const draft = batchDraft;
     return {
       kind: "batch",
       mode: "batch",
@@ -8194,21 +8175,20 @@
       locked: batchDraftLocked(),
       submitting: batchSubmissionPending,
       smart: draft.smart,
-      onSmartChange: (smart) => updateBatchDraft((value) => ({ ...value, smart })),
+      onSmartChange: (value) => editBatchDraft({ kind: "smart", value }),
       overwrite: draft.overwrite,
       overwriteChoices: extractOverwriteModes.map((id) => ({ id, label: extractOverwriteLabel(id) })),
-      onOverwriteChange: (overwrite) => updateBatchDraft((value) => ({ ...value, overwrite })),
+      onOverwriteChange: (value) => editBatchDraft({ kind: "overwrite", value }),
       symlinks: draft.symlinks,
       symlinkChoices: extractSymlinkModes.map((id) => ({ id, label: extractSymlinkLabel(id) })),
-      onSymlinksChange: (symlinks) => updateBatchDraft((value) => ({ ...value, symlinks })),
+      onSymlinksChange: (value) => editBatchDraft({ kind: "symlinks", value }),
       rows: draft.items.map((item, index) => ({
         id: `${index}:${item.path}`, path: item.displayPath, name: pathBaseName(item.displayPath),
         format: archiveFormatFromPath(item.displayPath), target: item.dest,
         encoding: item.encoding ?? tr("gui.extract.encoding.auto", "Auto-detect"),
         bestEffort: item.best_effort,
         onBestEffortChange: null,
-        onTargetInput: (dest) => updateBatchDraft((value) => ({ ...value,
-          items: value.items.map((row, i) => i === index ? { ...row, dest } : row) })),
+        onTargetInput: (value) => editBatchDraft({ kind: "destination", index, value }),
         onChooseTarget: () => void chooseBatchPaths(index),
         onRemove: () => removeBatchItem(index),
       })),
@@ -10772,14 +10752,11 @@
       const outcome = readBatchExtractResult(task.result);
       const failedCount = task.state === "done" ? outcome.reviewCount : 0;
       const failures = task.state === "done" ? outcome.reviewFailures : null;
-      const draft = reviewBatchExtract(task.spec, failures, failedCount, platformKind(),
-        displayedSpec.kind === "batch_extract" ? displayedSpec : task.spec);
-      if (!draft) {
+      if (!batchExtract.restoreTask(task.spec, failures, failedCount,
+        displayedSpec.kind === "batch_extract" ? displayedSpec : task.spec)) {
         showNotice(tr("gui.batch.review_unavailable", "The report cannot identify the failed archives unambiguously. Select the archives again; your current batch was kept."));
         return;
       }
-      batchDraftGeneration += 1;
-      batchDraft = draft;
       setScreen(target);
       await dismissTaskDialog(task);
       focusBatchReview();
@@ -12737,8 +12714,8 @@
           <strong>{tr("gui.batch.check_at_start", "Archives are checked when the task starts")}</strong>
         {:else if screen === "batch"}
           <span>{tr("gui.batch.title", "Batch Extract")}</span>
-          <span>{tr("gui.batch.archive_count", "Archives: {count}").replace("{count}", String(effectiveBatchDraft().items.length))}</span>
-          <span>{extractOverwriteLabel(effectiveBatchDraft().overwrite)}</span>
+          <span>{tr("gui.batch.archive_count", "Archives: {count}").replace("{count}", String(batchDraft.items.length))}</span>
+          <span>{extractOverwriteLabel(batchDraft.overwrite)}</span>
           <strong>{tr("gui.batch.check_at_start", "Archives are checked when the task starts")}</strong>
         {:else if screen === "checksum"}
           <span>{tr("gui.screen.checksum", "Checksum")}</span>
