@@ -639,7 +639,8 @@ pub trait ArchiveReader: Send {
         Ok(())
     }
 
-    /// Extracts all entries (or a selection) into `dest`.
+    /// Extracts all entries (or a selection) into `dest` and returns completed
+    /// per-entry outcome counts.
     ///
     /// The default implementation is the shared safe extraction engine
     /// ([`crate::extract_entries`]): Zip-Slip rejection, decompression-bomb
@@ -653,24 +654,8 @@ pub trait ArchiveReader: Send {
         opts: &ExtractOptions,
         progress: &dyn ProgressSink,
         ctl: &ControlToken,
-    ) -> Result<(), FormatError> {
-        crate::extract::extract_entries(self, dest, selection, opts, progress, ctl)
-    }
-
-    /// Extracts entries and returns completed per-entry outcome counts.
-    ///
-    /// This report-returning variant preserves [`ArchiveReader::extract`] for
-    /// callers that do not need outcome details. Performance-oriented readers
-    /// should override both methods when their extraction path is single-pass.
-    fn extract_with_report(
-        &mut self,
-        dest: &Path,
-        selection: Option<&[EntryPath]>,
-        opts: &ExtractOptions,
-        progress: &dyn ProgressSink,
-        ctl: &ControlToken,
     ) -> Result<crate::ExtractReport, FormatError> {
-        crate::extract::extract_entries_with_report(self, dest, selection, opts, progress, ctl)
+        crate::extract::extract_entries(self, dest, selection, opts, progress, ctl)
     }
 
     /// Consumes a single entry stream (preview and nested archives).

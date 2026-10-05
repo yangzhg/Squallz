@@ -7487,435 +7487,225 @@ fn compress_split_human_output_reports_preserved_previous_outputs() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+struct SqzSplitCliFixture {
+    dir: PathBuf,
+    input: PathBuf,
+}
+
+impl SqzSplitCliFixture {
+    fn new(tag: &str, input_len: usize, split_size: &str, language: Option<&str>) -> Self {
+        let dir = temp_dir(tag);
+        let input = incompressible_file_with_len(&dir, "data.bin", input_len);
+        let archive = dir.join("out.sqz");
+        let mut command = sqz();
+        if let Some(language) = language {
+            command.args(["--lang", language]);
+        }
+        let out = run(command
+            .arg("pack")
+            .arg(&input)
+            .arg("-o")
+            .arg(&archive)
+            .args([
+                "--inner-format",
+                "sqz",
+                "--recovery",
+                "10%",
+                "--split",
+                split_size,
+            ]));
+        assert!(out.status.success(), "pack failed: {}", stderr(&out));
+        if language == Some("en-US") {
+            assert!(stdout(&out).contains("Created"), "stdout: {}", stdout(&out));
+        }
+        assert!(!archive.exists(), "unsplit output must not remain");
+        assert!(dir.join("out.sqz.001").is_file());
+        Self { dir, input }
+    }
+
+    fn first(&self) -> PathBuf {
+        self.dir.join("out.sqz.001")
+    }
+
+    fn sidecar(&self, index: usize) -> PathBuf {
+        self.dir.join(format!("out.sqz.rev{index:03}"))
+    }
+
+    fn volumes(&self) -> Vec<PathBuf> {
+        numbered_volume_paths(&self.dir, "out.sqz.")
+    }
+
+    fn assert_sidecars_exist(&self, indices: &[usize]) {
+        for index in indices {
+            let path = self.sidecar(*index);
+            assert!(path.is_file(), "missing {}", path.display());
+        }
+    }
+
+    fn remove_volumes(&self, indices: &[usize]) {
+        for index in indices {
+            let path = self.dir.join(format!("out.sqz.{index:03}"));
+            assert!(path.is_file(), "missing {}", path.display());
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+
+    fn assert_recovers(self, output_name: &str) {
+        let first = self.first();
+        let out = run(sqz().arg("list").arg(&first).arg("--json"));
+        assert!(out.status.success(), "list failed: {}", stderr(&out));
+        let entries = stdout_json(&out);
+        let entries = entries.as_array().unwrap();
+        let paths = entries
+            .iter()
+            .map(|entry| entry["path"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert!(paths.contains(&"data.bin"), "paths: {paths:?}");
+        assert_eq!(entries[0]["path"], "data.bin");
+        let out = run(sqz().arg("test").arg(&first).arg("--json"));
+        assert!(out.status.success(), "test failed: {}", stderr(&out));
+        let report = stdout_json(&out);
+        assert_eq!(report["ok"], true);
+        assert_eq!(report["problems"].as_array().unwrap().len(), 0);
+        let dest = self.dir.join(output_name);
+        let out = run(sqz().arg("extract").arg(&first).arg("-d").arg(&dest));
+        assert!(out.status.success(), "extract failed: {}", stderr(&out));
+        assert_eq!(
+            std::fs::read(dest.join("data.bin")).unwrap(),
+            std::fs::read(&self.input).unwrap()
+        );
+        std::fs::remove_dir_all(&self.dir).unwrap();
+    }
+
+    fn assert_report_and_extract_reject(self, output_name: &str) {
+        let first = self.first();
+        let out = run(sqz().arg("test").arg(&first).arg("--json"));
+        assert_eq!(out.status.code(), Some(3), "stderr: {}", stderr(&out));
+        let report = stdout_json(&out);
+        assert_eq!(report["ok"], false);
+        assert!(
+            report["problems"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|problem| problem
+                    .as_str()
+                    .is_some_and(|text| text.contains("unrepaired SQZ recovery block damage"))),
+            "report: {report}"
+        );
+        let out = run(sqz()
+            .args(["--lang", "en-US", "extract"])
+            .arg(&first)
+            .arg("-d")
+            .arg(self.dir.join(output_name)));
+        assert_eq!(out.status.code(), Some(3), "stderr: {}", stderr(&out));
+        assert!(
+            stderr(&out).contains("unrepaired") || stderr(&out).contains("Corrupt archive"),
+            "stderr: {}",
+            stderr(&out)
+        );
+        assert!(
+            !stdout(&out).contains("Extracted to"),
+            "stdout: {}",
+            stdout(&out)
+        );
+        std::fs::remove_dir_all(&self.dir).unwrap();
+    }
+}
+
 #[test]
 fn sqz_split_missing_volume_recovers_through_cli() {
-    let dir = temp_dir("sqz-split-recover-cli");
-    let input = incompressible_file(&dir, "data.bin");
-    let archive = dir.join("out.sqz");
-
-    let out = run(sqz()
-        .args(["--lang", "en-US", "pack"])
-        .arg(&input)
-        .arg("-o")
-        .arg(&archive)
-        .args([
-            "--inner-format",
-            "sqz",
-            "--recovery",
-            "10%",
-            "--split",
-            "30k",
-        ]));
-    assert!(out.status.success(), "pack failed: {}", stderr(&out));
-    assert!(stdout(&out).contains("Created"), "stdout: {}", stdout(&out));
-    assert!(!archive.exists(), "unsplit output must not remain");
-    assert!(dir.join("out.sqz.001").is_file());
-    assert!(dir.join("out.sqz.002").is_file());
-    assert!(dir.join("out.sqz.rev001").is_file());
-
-    std::fs::remove_file(dir.join("out.sqz.002")).unwrap();
-    let first = dir.join("out.sqz.001");
-
-    let out = run(sqz().arg("list").arg(&first).arg("--json"));
-    assert!(out.status.success(), "list failed: {}", stderr(&out));
-    let entries: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("valid JSON");
-    let paths: Vec<&str> = entries
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|entry| entry["path"].as_str().unwrap())
-        .collect();
-    assert!(paths.contains(&"data.bin"), "paths: {paths:?}");
-
-    let out = run(sqz().arg("test").arg(&first).arg("--json"));
-    assert!(out.status.success(), "test failed: {}", stderr(&out));
-    let report: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("valid JSON");
-    assert_eq!(report["ok"], true);
-    assert_eq!(report["problems"].as_array().unwrap().len(), 0);
-
-    let dest = dir.join("restored");
-    let out = run(sqz().arg("extract").arg(&first).arg("-d").arg(&dest));
-    assert!(out.status.success(), "extract failed: {}", stderr(&out));
-    assert_eq!(
-        std::fs::read(dest.join("data.bin")).unwrap(),
-        std::fs::read(&input).unwrap()
-    );
-
-    std::fs::remove_dir_all(&dir).unwrap();
+    let fixture =
+        SqzSplitCliFixture::new("sqz-split-recover-cli", 100 * 1024, "30k", Some("en-US"));
+    fixture.assert_sidecars_exist(&[1]);
+    fixture.remove_volumes(&[2]);
+    fixture.assert_recovers("restored");
 }
 
 #[test]
 fn sqz_split_missing_tail_volume_recovers_through_cli() {
-    let dir = temp_dir("sqz-split-tail-recover-cli");
-    let input = incompressible_file(&dir, "data.bin");
-    let archive = dir.join("out.sqz");
-
-    let out = run(sqz()
-        .args(["--lang", "en-US", "pack"])
-        .arg(&input)
-        .arg("-o")
-        .arg(&archive)
-        .args([
-            "--inner-format",
-            "sqz",
-            "--recovery",
-            "10%",
-            "--split",
-            "30k",
-        ]));
-    assert!(out.status.success(), "pack failed: {}", stderr(&out));
-    let volumes = numbered_volume_paths(&dir, "out.sqz.");
-    assert!(volumes.len() >= 3, "volumes: {volumes:?}");
-    let tail = volumes.last().unwrap().clone();
-    let tail_index = volumes.len();
-    let tail_mirror = dir.join(format!("out.sqz.rev{tail_index:03}"));
-    assert!(tail_mirror.is_file(), "missing {}", tail_mirror.display());
-    assert!(dir.join("out.sqz.rev001").is_file());
-
-    std::fs::remove_file(tail).unwrap();
-    std::fs::remove_file(dir.join("out.sqz.rev001")).unwrap();
-    let first = dir.join("out.sqz.001");
-
-    let out = run(sqz().arg("list").arg(&first).arg("--json"));
-    assert!(out.status.success(), "list failed: {}", stderr(&out));
-    let entries: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("valid JSON");
-    assert_eq!(entries.as_array().unwrap()[0]["path"], "data.bin");
-
-    let out = run(sqz().arg("test").arg(&first).arg("--json"));
-    assert!(out.status.success(), "test failed: {}", stderr(&out));
-    let report: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("valid JSON");
-    assert_eq!(report["ok"], true);
-    assert_eq!(report["problems"].as_array().unwrap().len(), 0);
-
-    let dest = dir.join("tail-restored");
-    let out = run(sqz().arg("extract").arg(&first).arg("-d").arg(&dest));
-    assert!(out.status.success(), "extract failed: {}", stderr(&out));
-    assert_eq!(
-        std::fs::read(dest.join("data.bin")).unwrap(),
-        std::fs::read(&input).unwrap()
+    let fixture = SqzSplitCliFixture::new(
+        "sqz-split-tail-recover-cli",
+        100 * 1024,
+        "30k",
+        Some("en-US"),
     );
-
-    std::fs::remove_dir_all(&dir).unwrap();
+    let volumes = fixture.volumes();
+    assert!(volumes.len() >= 3, "volumes: {volumes:?}");
+    fixture.assert_sidecars_exist(&[volumes.len(), 1]);
+    std::fs::remove_file(volumes.last().unwrap()).unwrap();
+    std::fs::remove_file(fixture.sidecar(1)).unwrap();
+    fixture.assert_recovers("tail-restored");
 }
 
 #[test]
 fn sqz_split_missing_payload_and_tail_recovers_through_cli() {
-    let dir = temp_dir("sqz-split-payload-tail-recover-cli");
-    let input = incompressible_file(&dir, "data.bin");
-    let archive = dir.join("out.sqz");
-
-    let out = run(sqz()
-        .args(["--lang", "en-US", "pack"])
-        .arg(&input)
-        .arg("-o")
-        .arg(&archive)
-        .args([
-            "--inner-format",
-            "sqz",
-            "--recovery",
-            "10%",
-            "--split",
-            "30k",
-        ]));
-    assert!(out.status.success(), "pack failed: {}", stderr(&out));
-    let volumes = numbered_volume_paths(&dir, "out.sqz.");
-    assert!(volumes.len() >= 4, "volumes: {volumes:?}");
-    let tail = volumes.last().unwrap().clone();
-    let tail_index = volumes.len();
-    let tail_mirror = dir.join(format!("out.sqz.rev{tail_index:03}"));
-    assert!(tail_mirror.is_file(), "missing {}", tail_mirror.display());
-    assert!(dir.join("out.sqz.rev001").is_file());
-
-    std::fs::remove_file(dir.join("out.sqz.002")).unwrap();
-    std::fs::remove_file(tail).unwrap();
-    let first = dir.join("out.sqz.001");
-
-    let out = run(sqz().arg("list").arg(&first).arg("--json"));
-    assert!(out.status.success(), "list failed: {}", stderr(&out));
-    let entries: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("valid JSON");
-    assert_eq!(entries.as_array().unwrap()[0]["path"], "data.bin");
-
-    let out = run(sqz().arg("test").arg(&first).arg("--json"));
-    assert!(out.status.success(), "test failed: {}", stderr(&out));
-    let report: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("valid JSON");
-    assert_eq!(report["ok"], true);
-    assert_eq!(report["problems"].as_array().unwrap().len(), 0);
-
-    let dest = dir.join("payload-tail-restored");
-    let out = run(sqz().arg("extract").arg(&first).arg("-d").arg(&dest));
-    assert!(out.status.success(), "extract failed: {}", stderr(&out));
-    assert_eq!(
-        std::fs::read(dest.join("data.bin")).unwrap(),
-        std::fs::read(&input).unwrap()
+    let fixture = SqzSplitCliFixture::new(
+        "sqz-split-payload-tail-recover-cli",
+        100 * 1024,
+        "30k",
+        Some("en-US"),
     );
-
-    std::fs::remove_dir_all(&dir).unwrap();
+    let volumes = fixture.volumes();
+    assert!(volumes.len() >= 4, "volumes: {volumes:?}");
+    fixture.assert_sidecars_exist(&[volumes.len(), 1]);
+    fixture.remove_volumes(&[2]);
+    std::fs::remove_file(volumes.last().unwrap()).unwrap();
+    fixture.assert_recovers("payload-tail-restored");
 }
 
 #[test]
 fn sqz_split_two_missing_volumes_recover_through_cli() {
-    let dir = temp_dir("sqz-split-two-missing-recover-cli");
-    let input = incompressible_file(&dir, "data.bin");
-    let archive = dir.join("out.sqz");
-
-    let out = run(sqz().arg("pack").arg(&input).arg("-o").arg(&archive).args([
-        "--inner-format",
-        "sqz",
-        "--recovery",
-        "10%",
-        "--split",
-        "30k",
-    ]));
-    assert!(out.status.success(), "pack failed: {}", stderr(&out));
-    assert!(dir.join("out.sqz.rev001").is_file());
-    assert!(dir.join("out.sqz.rev002").is_file());
-    assert!(dir.join("out.sqz.002").is_file());
-    assert!(dir.join("out.sqz.003").is_file());
-
-    std::fs::remove_file(dir.join("out.sqz.002")).unwrap();
-    std::fs::remove_file(dir.join("out.sqz.003")).unwrap();
-    let first = dir.join("out.sqz.001");
-
-    let out = run(sqz().arg("list").arg(&first).arg("--json"));
-    assert!(out.status.success(), "list failed: {}", stderr(&out));
-    let entries: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("valid JSON");
-    assert_eq!(entries.as_array().unwrap()[0]["path"], "data.bin");
-
-    let out = run(sqz().arg("test").arg(&first).arg("--json"));
-    assert!(out.status.success(), "test failed: {}", stderr(&out));
-    let report: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("valid JSON");
-    assert_eq!(report["ok"], true);
-    assert_eq!(report["problems"].as_array().unwrap().len(), 0);
-
-    let dest = dir.join("two-missing-restored");
-    let out = run(sqz().arg("extract").arg(&first).arg("-d").arg(&dest));
-    assert!(out.status.success(), "extract failed: {}", stderr(&out));
-    assert_eq!(
-        std::fs::read(dest.join("data.bin")).unwrap(),
-        std::fs::read(&input).unwrap()
-    );
-
-    std::fs::remove_dir_all(&dir).unwrap();
+    let fixture =
+        SqzSplitCliFixture::new("sqz-split-two-missing-recover-cli", 100 * 1024, "30k", None);
+    fixture.assert_sidecars_exist(&[1, 2]);
+    fixture.remove_volumes(&[2, 3]);
+    fixture.assert_recovers("two-missing-restored");
 }
 
 #[test]
 fn sqz_split_three_missing_volumes_recover_through_cli() {
-    let dir = temp_dir("sqz-split-three-missing-recover-cli");
-    let input = incompressible_file_with_len(&dir, "data.bin", 900 * 1024);
-    let archive = dir.join("out.sqz");
-
-    let out = run(sqz().arg("pack").arg(&input).arg("-o").arg(&archive).args([
-        "--inner-format",
-        "sqz",
-        "--recovery",
-        "10%",
-        "--split",
+    let fixture = SqzSplitCliFixture::new(
+        "sqz-split-three-missing-recover-cli",
+        900 * 1024,
         "180k",
-    ]));
-    assert!(out.status.success(), "pack failed: {}", stderr(&out));
-    assert!(dir.join("out.sqz.rev001").is_file());
-    assert!(dir.join("out.sqz.rev002").is_file());
-    assert!(dir.join("out.sqz.rev003").is_file());
-    assert!(dir.join("out.sqz.002").is_file());
-    assert!(dir.join("out.sqz.003").is_file());
-    assert!(dir.join("out.sqz.004").is_file());
-
-    std::fs::remove_file(dir.join("out.sqz.002")).unwrap();
-    std::fs::remove_file(dir.join("out.sqz.003")).unwrap();
-    std::fs::remove_file(dir.join("out.sqz.004")).unwrap();
-    let first = dir.join("out.sqz.001");
-
-    let out = run(sqz().arg("list").arg(&first).arg("--json"));
-    assert!(out.status.success(), "list failed: {}", stderr(&out));
-    let entries: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("valid JSON");
-    assert_eq!(entries.as_array().unwrap()[0]["path"], "data.bin");
-
-    let out = run(sqz().arg("test").arg(&first).arg("--json"));
-    assert!(out.status.success(), "test failed: {}", stderr(&out));
-    let report: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("valid JSON");
-    assert_eq!(report["ok"], true);
-    assert_eq!(report["problems"].as_array().unwrap().len(), 0);
-
-    let dest = dir.join("three-missing-restored");
-    let out = run(sqz().arg("extract").arg(&first).arg("-d").arg(&dest));
-    assert!(out.status.success(), "extract failed: {}", stderr(&out));
-    assert_eq!(
-        std::fs::read(dest.join("data.bin")).unwrap(),
-        std::fs::read(&input).unwrap()
+        None,
     );
-
-    std::fs::remove_dir_all(&dir).unwrap();
+    fixture.assert_sidecars_exist(&[1, 2, 3]);
+    fixture.remove_volumes(&[2, 3, 4]);
+    fixture.assert_recovers("three-missing-restored");
 }
 
 #[test]
 fn sqz_split_three_missing_volumes_fail_without_triple_parity_through_cli() {
-    let dir = temp_dir("sqz-split-three-missing-no-triple-cli");
-    let input = incompressible_file_with_len(&dir, "data.bin", 900 * 1024);
-    let archive = dir.join("out.sqz");
-
-    let out = run(sqz().arg("pack").arg(&input).arg("-o").arg(&archive).args([
-        "--inner-format",
-        "sqz",
-        "--recovery",
-        "10%",
-        "--split",
+    let fixture = SqzSplitCliFixture::new(
+        "sqz-split-three-missing-no-triple-cli",
+        900 * 1024,
         "180k",
-    ]));
-    assert!(out.status.success(), "pack failed: {}", stderr(&out));
-    assert!(dir.join("out.sqz.rev001").is_file());
-    assert!(dir.join("out.sqz.rev002").is_file());
-    assert!(dir.join("out.sqz.rev003").is_file());
-    assert!(dir.join("out.sqz.002").is_file());
-    assert!(dir.join("out.sqz.003").is_file());
-    assert!(dir.join("out.sqz.004").is_file());
-
-    std::fs::remove_file(dir.join("out.sqz.002")).unwrap();
-    std::fs::remove_file(dir.join("out.sqz.003")).unwrap();
-    std::fs::remove_file(dir.join("out.sqz.004")).unwrap();
-    std::fs::remove_file(dir.join("out.sqz.rev003")).unwrap();
-    let first = dir.join("out.sqz.001");
-
-    let out = run(sqz().arg("test").arg(&first).arg("--json"));
-    assert_eq!(out.status.code(), Some(3), "stderr: {}", stderr(&out));
-    let report: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("valid JSON");
-    assert_eq!(report["ok"], false);
-    assert!(report["problems"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|problem| problem
-            .as_str()
-            .is_some_and(|text| text.contains("unrepaired SQZ recovery block damage"))));
-
-    let out = run(sqz()
-        .args(["--lang", "en-US", "extract"])
-        .arg(&first)
-        .arg("-d")
-        .arg(dir.join("three-missing-out")));
-    assert_eq!(out.status.code(), Some(3), "stderr: {}", stderr(&out));
-    assert!(
-        stderr(&out).contains("unrepaired") || stderr(&out).contains("Corrupt archive"),
-        "stderr: {}",
-        stderr(&out)
+        None,
     );
-    assert!(
-        !stdout(&out).contains("Extracted to"),
-        "stdout: {}",
-        stdout(&out)
-    );
-
-    std::fs::remove_dir_all(&dir).unwrap();
+    fixture.assert_sidecars_exist(&[1, 2, 3]);
+    fixture.remove_volumes(&[2, 3, 4]);
+    std::fs::remove_file(fixture.sidecar(3)).unwrap();
+    fixture.assert_report_and_extract_reject("three-missing-out");
 }
 
 #[test]
 fn sqz_split_four_missing_volumes_fail_through_cli() {
-    let dir = temp_dir("sqz-split-four-missing-cli");
-    let input = incompressible_file_with_len(&dir, "data.bin", 1_200 * 1024);
-    let archive = dir.join("out.sqz");
-
-    let out = run(sqz().arg("pack").arg(&input).arg("-o").arg(&archive).args([
-        "--inner-format",
-        "sqz",
-        "--recovery",
-        "10%",
-        "--split",
-        "180k",
-    ]));
-    assert!(out.status.success(), "pack failed: {}", stderr(&out));
-    assert!(dir.join("out.sqz.rev001").is_file());
-    assert!(dir.join("out.sqz.rev002").is_file());
-    assert!(dir.join("out.sqz.rev003").is_file());
-    for index in 2..=5 {
-        assert!(dir.join(format!("out.sqz.{index:03}")).is_file());
-        std::fs::remove_file(dir.join(format!("out.sqz.{index:03}"))).unwrap();
-    }
-    let first = dir.join("out.sqz.001");
-
-    let out = run(sqz().arg("test").arg(&first).arg("--json"));
-    assert_eq!(out.status.code(), Some(3), "stderr: {}", stderr(&out));
-    let report: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("valid JSON");
-    assert_eq!(report["ok"], false);
-    assert!(
-        report["problems"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|problem| problem
-                .as_str()
-                .is_some_and(|text| text.contains("unrepaired SQZ recovery block damage"))),
-        "report: {report}"
-    );
-
-    let out = run(sqz()
-        .args(["--lang", "en-US", "extract"])
-        .arg(&first)
-        .arg("-d")
-        .arg(dir.join("four-missing-out")));
-    assert_eq!(out.status.code(), Some(3), "stderr: {}", stderr(&out));
-    assert!(
-        stderr(&out).contains("unrepaired") || stderr(&out).contains("Corrupt archive"),
-        "stderr: {}",
-        stderr(&out)
-    );
-
-    std::fs::remove_dir_all(&dir).unwrap();
+    let fixture = SqzSplitCliFixture::new("sqz-split-four-missing-cli", 1_200 * 1024, "180k", None);
+    fixture.assert_sidecars_exist(&[1, 2, 3]);
+    fixture.remove_volumes(&[2, 3, 4, 5]);
+    fixture.assert_report_and_extract_reject("four-missing-out");
 }
 
 #[test]
 fn sqz_split_two_missing_volumes_fail_without_dual_parity_through_cli() {
-    let dir = temp_dir("sqz-split-two-missing-no-dual-cli");
-    let input = incompressible_file(&dir, "data.bin");
-    let archive = dir.join("out.sqz");
-
-    let out = run(sqz().arg("pack").arg(&input).arg("-o").arg(&archive).args([
-        "--inner-format",
-        "sqz",
-        "--recovery",
-        "10%",
-        "--split",
-        "30k",
-    ]));
-    assert!(out.status.success(), "pack failed: {}", stderr(&out));
-    assert!(dir.join("out.sqz.rev001").is_file());
-    assert!(dir.join("out.sqz.rev002").is_file());
-    assert!(dir.join("out.sqz.002").is_file());
-    assert!(dir.join("out.sqz.003").is_file());
-
-    std::fs::remove_file(dir.join("out.sqz.002")).unwrap();
-    std::fs::remove_file(dir.join("out.sqz.003")).unwrap();
-    std::fs::remove_file(dir.join("out.sqz.rev002")).unwrap();
-    let first = dir.join("out.sqz.001");
-
-    let out = run(sqz().arg("test").arg(&first).arg("--json"));
-    assert_eq!(out.status.code(), Some(3), "stderr: {}", stderr(&out));
-    let report: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("valid JSON");
-    assert_eq!(report["ok"], false);
-    assert!(report["problems"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|problem| problem
-            .as_str()
-            .is_some_and(|text| text.contains("unrepaired SQZ recovery block damage"))));
-
-    let out = run(sqz()
-        .args(["--lang", "en-US", "extract"])
-        .arg(&first)
-        .arg("-d")
-        .arg(dir.join("two-missing-out")));
-    assert_eq!(out.status.code(), Some(3), "stderr: {}", stderr(&out));
-    assert!(
-        stderr(&out).contains("unrepaired") || stderr(&out).contains("Corrupt archive"),
-        "stderr: {}",
-        stderr(&out)
-    );
-    assert!(
-        !stdout(&out).contains("Extracted to"),
-        "stdout: {}",
-        stdout(&out)
-    );
-
-    std::fs::remove_dir_all(&dir).unwrap();
+    let fixture =
+        SqzSplitCliFixture::new("sqz-split-two-missing-no-dual-cli", 100 * 1024, "30k", None);
+    fixture.assert_sidecars_exist(&[1, 2]);
+    fixture.remove_volumes(&[2, 3]);
+    std::fs::remove_file(fixture.sidecar(2)).unwrap();
+    fixture.assert_report_and_extract_reject("two-missing-out");
 }
 
 #[test]

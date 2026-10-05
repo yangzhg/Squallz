@@ -84,7 +84,7 @@ fn tar_roundtrip_permissions_symlink_unicode_deep() {
 
     let empty_out = dir.path().join("empty-selection");
     let empty_report = engine
-        .extract_with_report(
+        .extract(
             &archive,
             &empty_out,
             Some(&[]),
@@ -128,7 +128,7 @@ fn tar_roundtrip_permissions_symlink_unicode_deep() {
     // Extraction: contents, permissions and the link itself.
     let out = dir.path().join("out");
     let extract_report = engine
-        .extract_with_report(
+        .extract(
             &archive,
             &out,
             None,
@@ -217,7 +217,7 @@ fn tar_selection_progress_uses_only_selected_file_bytes() {
     let progress = EntryProgressTotals::default();
 
     let report = engine
-        .extract_with_report(
+        .extract(
             &archive,
             &destination,
             Some(&selection),

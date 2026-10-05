@@ -326,18 +326,6 @@ impl ArchiveReader for TarArchiveReader {
         opts: &ExtractOptions,
         progress: &dyn ProgressSink,
         ctl: &ControlToken,
-    ) -> Result<(), FormatError> {
-        self.extract_with_report(dest, selection, opts, progress, ctl)
-            .map(drop)
-    }
-
-    fn extract_with_report(
-        &mut self,
-        dest: &Path,
-        selection: Option<&[EntryPath]>,
-        opts: &ExtractOptions,
-        progress: &dyn ProgressSink,
-        ctl: &ControlToken,
     ) -> Result<ExtractReport, FormatError> {
         if selection.is_some_and(<[EntryPath]>::is_empty) {
             return Ok(empty_extract_report(dest, progress));
@@ -381,7 +369,7 @@ impl ArchiveReader for TarArchiveReader {
             }
         }
         self.validate_stream_end(ctl)?;
-        sink.finish_with_report(progress, ctl)
+        sink.finish(progress, ctl)
     }
 
     fn test_summary(

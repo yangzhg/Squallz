@@ -703,7 +703,7 @@ fn damaged_symlinks_never_publish_a_partial_target() {
             &ControlToken::default(),
         )
         .unwrap();
-        let result = reader.extract_with_report(
+        let result = reader.extract(
             &root,
             None,
             &ExtractOptions {

@@ -1563,806 +1563,301 @@ fn sqzv_uuid_mismatch_is_reported() {
     }
 }
 
+struct SqzSplitFixture {
+    tmp: TempDir,
+    input_len: usize,
+    ctl: Arc<ControlToken>,
+}
+
+impl SqzSplitFixture {
+    fn new(tag: &str, input_len: usize, split_size: u64) -> Self {
+        let tmp = TempDir::new(tag);
+        let input = sample_input_with_len(tmp.path(), input_len);
+        let opts = CreateOptions {
+            split_size: Some(split_size),
+            ..CreateOptions::default()
+        };
+        let ctl = ControlToken::new();
+        engine()
+            .create(
+                &tmp.path().join("out.sqz"),
+                &[input],
+                &opts,
+                CreateCommitPolicy::ReplaceExisting,
+                &NoProgress,
+                &ctl,
+            )
+            .unwrap();
+        Self {
+            tmp,
+            input_len,
+            ctl,
+        }
+    }
+
+    fn first(&self) -> PathBuf {
+        self.tmp.path().join("out.sqz.001")
+    }
+
+    fn sidecar(&self, index: usize) -> PathBuf {
+        sqz_recovery_volume_path(self.tmp.path(), index)
+    }
+
+    fn volumes(&self) -> Vec<PathBuf> {
+        volume_paths(self.tmp.path(), "out.sqz.")
+    }
+
+    fn remove_volumes(&self, indices: &[usize]) {
+        for index in indices {
+            fs::remove_file(self.tmp.path().join(format!("out.sqz.{index:03}"))).unwrap();
+        }
+    }
+
+    fn assert_sidecars_exist(&self, indices: &[usize]) {
+        for index in indices {
+            let path = self.sidecar(*index);
+            assert!(path.is_file(), "{} missing", path.display());
+        }
+    }
+
+    fn assert_recovers(&self, output_name: &str) {
+        let first = self.first();
+        let entries = read_archive_entries(&engine(), &first, &OpenOptions::default()).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].path.display, "data.bin");
+        let report = engine()
+            .test_summary(
+                &first,
+                &OpenOptions::default(),
+                &squallz_format_api::SafetyLimits::default(),
+                &NoProgress,
+                &self.ctl,
+            )
+            .unwrap();
+        assert!(report.is_ok(), "problems: {:?}", report.problems);
+        let out = self.tmp.path().join(output_name);
+        engine()
+            .extract(
+                &first,
+                &out,
+                None,
+                &OpenOptions::default(),
+                &ExtractOptions::default(),
+                &NoProgress,
+                &self.ctl,
+            )
+            .unwrap();
+        assert_eq!(
+            fs::read(out.join("data.bin")).unwrap(),
+            payload(self.input_len)
+        );
+    }
+
+    fn assert_report_rejects(&self, reason: &str) {
+        let report = engine()
+            .test_summary(
+                &self.first(),
+                &OpenOptions::default(),
+                &squallz_format_api::SafetyLimits::default(),
+                &NoProgress,
+                &self.ctl,
+            )
+            .unwrap();
+        assert!(!report.is_ok(), "{reason}; report: {report:?}");
+    }
+
+    fn assert_extract_rejects(&self, output_name: &str) {
+        let err = engine()
+            .extract(
+                &self.first(),
+                &self.tmp.path().join(output_name),
+                None,
+                &OpenOptions::default(),
+                &ExtractOptions::default(),
+                &NoProgress,
+                &self.ctl,
+            )
+            .unwrap_err();
+        match err {
+            FormatError::CorruptArchive(detail) => {
+                assert!(
+                    detail.contains("unrepaired") || detail.contains("block"),
+                    "{detail}"
+                );
+            }
+            other => panic!("expected CorruptArchive, got {other:?}"),
+        }
+    }
+}
+
 #[test]
 fn missing_sqzv_payload_volume_recovers_when_within_rs_capacity() {
-    let tmp = TempDir::new("split-sqzv-missing-repairable");
-    let input = sample_input(tmp.path());
-    let dest = tmp.path().join("out.sqz");
-    let opts = CreateOptions {
-        split_size: Some(30 * 1024),
-        ..CreateOptions::default()
-    };
-    let ctl = ControlToken::new();
-    engine()
-        .create(
-            &dest,
-            &[input],
-            &opts,
-            CreateCommitPolicy::ReplaceExisting,
-            &NoProgress,
-            &ctl,
-        )
-        .unwrap();
-
-    let missing = tmp.path().join("out.sqz.002");
-    fs::remove_file(&missing).unwrap();
-    fs::remove_file(sqz_recovery_volume_path(tmp.path(), 1)).unwrap();
-
-    let first = tmp.path().join("out.sqz.001");
-    let entries = read_archive_entries(&engine(), &first, &OpenOptions::default()).unwrap();
-    assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].path.display, "data.bin");
-
-    let report = engine()
-        .test_summary(
-            &first,
-            &OpenOptions::default(),
-            &squallz_format_api::SafetyLimits::default(),
-            &NoProgress,
-            &ctl,
-        )
-        .unwrap();
-    assert!(report.is_ok(), "problems: {:?}", report.problems);
-
-    let out = tmp.path().join("sqzv-recovered");
-    engine()
-        .extract(
-            &first,
-            &out,
-            None,
-            &OpenOptions::default(),
-            &ExtractOptions::default(),
-            &NoProgress,
-            &ctl,
-        )
-        .unwrap();
-    assert_eq!(fs::read(out.join("data.bin")).unwrap(), payload(100 * 1024));
+    let fixture = SqzSplitFixture::new("split-sqzv-missing-repairable", 100 * 1024, 30 * 1024);
+    fixture.remove_volumes(&[2]);
+    fs::remove_file(fixture.sidecar(1)).unwrap();
+    fixture.assert_recovers("sqzv-recovered");
 }
 
 #[test]
 fn missing_sqzv_payload_volume_recovers_from_rev_parity_when_rs_capacity_exceeded() {
-    let tmp = TempDir::new("split-sqzv-missing-parity");
-    let input_len = 700 * 1024;
-    let input = sample_input_with_len(tmp.path(), input_len);
-    let dest = tmp.path().join("out.sqz");
-    let opts = CreateOptions {
-        split_size: Some(180 * 1024),
-        ..CreateOptions::default()
-    };
-    let ctl = ControlToken::new();
-    engine()
-        .create(
-            &dest,
-            &[input],
-            &opts,
-            CreateCommitPolicy::ReplaceExisting,
-            &NoProgress,
-            &ctl,
-        )
-        .unwrap();
-
-    assert!(sqz_recovery_volume_path(tmp.path(), 1).is_file());
-    fs::remove_file(tmp.path().join("out.sqz.002")).unwrap();
-
-    let first = tmp.path().join("out.sqz.001");
-    let entries = read_archive_entries(&engine(), &first, &OpenOptions::default()).unwrap();
-    assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].path.display, "data.bin");
-
-    let report = engine()
-        .test_summary(
-            &first,
-            &OpenOptions::default(),
-            &squallz_format_api::SafetyLimits::default(),
-            &NoProgress,
-            &ctl,
-        )
-        .unwrap();
-    assert!(report.is_ok(), "problems: {:?}", report.problems);
-
-    let out = tmp.path().join("sqzv-parity-recovered");
-    engine()
-        .extract(
-            &first,
-            &out,
-            None,
-            &OpenOptions::default(),
-            &ExtractOptions::default(),
-            &NoProgress,
-            &ctl,
-        )
-        .unwrap();
-    assert_eq!(fs::read(out.join("data.bin")).unwrap(), payload(input_len));
+    let fixture = SqzSplitFixture::new("split-sqzv-missing-parity", 700 * 1024, 180 * 1024);
+    fixture.assert_sidecars_exist(&[1]);
+    fixture.remove_volumes(&[2]);
+    fixture.assert_recovers("sqzv-parity-recovered");
 }
 
 #[test]
 fn missing_two_sqzv_payload_volumes_recover_from_dual_rev_parity() {
-    let tmp = TempDir::new("split-sqzv-two-missing-dual-parity");
-    let input_len = 700 * 1024;
-    let input = sample_input_with_len(tmp.path(), input_len);
-    let dest = tmp.path().join("out.sqz");
-    let opts = CreateOptions {
-        split_size: Some(180 * 1024),
-        ..CreateOptions::default()
-    };
-    let ctl = ControlToken::new();
-    engine()
-        .create(
-            &dest,
-            &[input],
-            &opts,
-            CreateCommitPolicy::ReplaceExisting,
-            &NoProgress,
-            &ctl,
-        )
-        .unwrap();
-
-    assert!(sqz_recovery_volume_path(tmp.path(), 1).is_file());
-    assert!(sqz_recovery_volume_path(tmp.path(), 2).is_file());
-    fs::remove_file(tmp.path().join("out.sqz.002")).unwrap();
-    fs::remove_file(tmp.path().join("out.sqz.003")).unwrap();
-
-    let first = tmp.path().join("out.sqz.001");
-    let entries = read_archive_entries(&engine(), &first, &OpenOptions::default()).unwrap();
-    assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].path.display, "data.bin");
-
-    let report = engine()
-        .test_summary(
-            &first,
-            &OpenOptions::default(),
-            &squallz_format_api::SafetyLimits::default(),
-            &NoProgress,
-            &ctl,
-        )
-        .unwrap();
-    assert!(report.is_ok(), "problems: {:?}", report.problems);
-
-    let out = tmp.path().join("sqzv-two-missing-recovered");
-    engine()
-        .extract(
-            &first,
-            &out,
-            None,
-            &OpenOptions::default(),
-            &ExtractOptions::default(),
-            &NoProgress,
-            &ctl,
-        )
-        .unwrap();
-    assert_eq!(fs::read(out.join("data.bin")).unwrap(), payload(input_len));
+    let fixture =
+        SqzSplitFixture::new("split-sqzv-two-missing-dual-parity", 700 * 1024, 180 * 1024);
+    fixture.assert_sidecars_exist(&[1, 2]);
+    fixture.remove_volumes(&[2, 3]);
+    fixture.assert_recovers("sqzv-two-missing-recovered");
 }
 
 #[test]
 fn missing_sqzv_payload_volume_fails_with_damaged_rev001_header() {
-    let tmp = TempDir::new("split-sqzv-damaged-rev001-header");
-    let input = sample_input_with_len(tmp.path(), 700 * 1024);
-    let dest = tmp.path().join("out.sqz");
-    let opts = CreateOptions {
-        split_size: Some(180 * 1024),
-        ..CreateOptions::default()
-    };
-    engine()
-        .create(
-            &dest,
-            &[input],
-            &opts,
-            CreateCommitPolicy::ReplaceExisting,
-            &NoProgress,
-            &ControlToken::new(),
-        )
-        .unwrap();
-
-    fs::remove_file(tmp.path().join("out.sqz.002")).unwrap();
-    corrupt_sqzr_header(&sqz_recovery_volume_path(tmp.path(), 1));
-
+    let fixture = SqzSplitFixture::new("split-sqzv-damaged-rev001-header", 700 * 1024, 180 * 1024);
+    fixture.remove_volumes(&[2]);
+    corrupt_sqzr_header(&fixture.sidecar(1));
     assert_open_fails_with_corrupt_archive(
-        &tmp.path().join("out.sqz.001"),
+        &fixture.first(),
         "SQZ recovery volume header CRC-32C mismatch",
     );
 }
 
 #[test]
 fn missing_sqzv_payload_volume_fails_with_damaged_rev001_payload() {
-    let tmp = TempDir::new("split-sqzv-damaged-rev001-payload");
-    let input = sample_input_with_len(tmp.path(), 700 * 1024);
-    let dest = tmp.path().join("out.sqz");
-    let opts = CreateOptions {
-        split_size: Some(180 * 1024),
-        ..CreateOptions::default()
-    };
-    engine()
-        .create(
-            &dest,
-            &[input],
-            &opts,
-            CreateCommitPolicy::ReplaceExisting,
-            &NoProgress,
-            &ControlToken::new(),
-        )
-        .unwrap();
-
-    fs::remove_file(tmp.path().join("out.sqz.002")).unwrap();
-    corrupt_sqzr_payload_byte(&sqz_recovery_volume_path(tmp.path(), 1), 0);
-
-    assert_open_fails_with_corrupt_archive(&tmp.path().join("out.sqz.001"), "SQZV");
+    let fixture = SqzSplitFixture::new("split-sqzv-damaged-rev001-payload", 700 * 1024, 180 * 1024);
+    fixture.remove_volumes(&[2]);
+    corrupt_sqzr_payload_byte(&fixture.sidecar(1), 0);
+    assert_open_fails_with_corrupt_archive(&fixture.first(), "SQZV");
 }
 
 #[test]
 fn missing_two_sqzv_payload_volumes_fail_with_damaged_rev002_header() {
-    let tmp = TempDir::new("split-sqzv-damaged-rev002-header");
-    let input = sample_input_with_len(tmp.path(), 700 * 1024);
-    let dest = tmp.path().join("out.sqz");
-    let opts = CreateOptions {
-        split_size: Some(180 * 1024),
-        ..CreateOptions::default()
-    };
-    engine()
-        .create(
-            &dest,
-            &[input],
-            &opts,
-            CreateCommitPolicy::ReplaceExisting,
-            &NoProgress,
-            &ControlToken::new(),
-        )
-        .unwrap();
-
-    fs::remove_file(tmp.path().join("out.sqz.002")).unwrap();
-    fs::remove_file(tmp.path().join("out.sqz.003")).unwrap();
-    corrupt_sqzr_header(&sqz_recovery_volume_path(tmp.path(), 2));
-
+    let fixture = SqzSplitFixture::new("split-sqzv-damaged-rev002-header", 700 * 1024, 180 * 1024);
+    fixture.remove_volumes(&[2, 3]);
+    corrupt_sqzr_header(&fixture.sidecar(2));
     assert_open_fails_with_corrupt_archive(
-        &tmp.path().join("out.sqz.001"),
+        &fixture.first(),
         "SQZ recovery volume header CRC-32C mismatch",
     );
 }
 
 #[test]
 fn missing_two_sqzv_payload_volumes_fail_with_damaged_rev002_payload() {
-    let tmp = TempDir::new("split-sqzv-damaged-rev002-payload");
-    let input = sample_input_with_len(tmp.path(), 700 * 1024);
-    let dest = tmp.path().join("out.sqz");
-    let opts = CreateOptions {
-        split_size: Some(180 * 1024),
-        ..CreateOptions::default()
-    };
-    engine()
-        .create(
-            &dest,
-            &[input],
-            &opts,
-            CreateCommitPolicy::ReplaceExisting,
-            &NoProgress,
-            &ControlToken::new(),
-        )
-        .unwrap();
-
-    fs::remove_file(tmp.path().join("out.sqz.002")).unwrap();
-    fs::remove_file(tmp.path().join("out.sqz.003")).unwrap();
-    corrupt_sqzr_payload_byte(&sqz_recovery_volume_path(tmp.path(), 2), 0);
-
-    assert_open_fails_with_corrupt_archive(&tmp.path().join("out.sqz.001"), "SQZV");
+    let fixture = SqzSplitFixture::new("split-sqzv-damaged-rev002-payload", 700 * 1024, 180 * 1024);
+    fixture.remove_volumes(&[2, 3]);
+    corrupt_sqzr_payload_byte(&fixture.sidecar(2), 0);
+    assert_open_fails_with_corrupt_archive(&fixture.first(), "SQZV");
 }
 
 #[test]
 fn missing_three_sqzv_payload_volumes_fail_with_damaged_rev003_header() {
-    let tmp = TempDir::new("split-sqzv-damaged-rev003-header");
-    let input = sample_input_with_len(tmp.path(), 900 * 1024);
-    let dest = tmp.path().join("out.sqz");
-    let opts = CreateOptions {
-        split_size: Some(180 * 1024),
-        ..CreateOptions::default()
-    };
-    engine()
-        .create(
-            &dest,
-            &[input],
-            &opts,
-            CreateCommitPolicy::ReplaceExisting,
-            &NoProgress,
-            &ControlToken::new(),
-        )
-        .unwrap();
-
-    fs::remove_file(tmp.path().join("out.sqz.002")).unwrap();
-    fs::remove_file(tmp.path().join("out.sqz.003")).unwrap();
-    fs::remove_file(tmp.path().join("out.sqz.004")).unwrap();
-    corrupt_sqzr_header(&sqz_recovery_volume_path(tmp.path(), 3));
-
+    let fixture = SqzSplitFixture::new("split-sqzv-damaged-rev003-header", 900 * 1024, 180 * 1024);
+    fixture.remove_volumes(&[2, 3, 4]);
+    corrupt_sqzr_header(&fixture.sidecar(3));
     assert_open_fails_with_corrupt_archive(
-        &tmp.path().join("out.sqz.001"),
+        &fixture.first(),
         "SQZ recovery volume header CRC-32C mismatch",
     );
 }
 
 #[test]
 fn missing_three_sqzv_payload_volumes_fail_with_damaged_rev003_payload() {
-    let tmp = TempDir::new("split-sqzv-damaged-rev003-payload");
-    let input = sample_input_with_len(tmp.path(), 900 * 1024);
-    let dest = tmp.path().join("out.sqz");
-    let opts = CreateOptions {
-        split_size: Some(180 * 1024),
-        ..CreateOptions::default()
-    };
-    engine()
-        .create(
-            &dest,
-            &[input],
-            &opts,
-            CreateCommitPolicy::ReplaceExisting,
-            &NoProgress,
-            &ControlToken::new(),
-        )
-        .unwrap();
-
-    fs::remove_file(tmp.path().join("out.sqz.002")).unwrap();
-    fs::remove_file(tmp.path().join("out.sqz.003")).unwrap();
-    fs::remove_file(tmp.path().join("out.sqz.004")).unwrap();
-    corrupt_sqzr_payload_byte(&sqz_recovery_volume_path(tmp.path(), 3), 0);
-
-    assert_open_fails_with_corrupt_archive(&tmp.path().join("out.sqz.001"), "SQZV");
+    let fixture = SqzSplitFixture::new("split-sqzv-damaged-rev003-payload", 900 * 1024, 180 * 1024);
+    fixture.remove_volumes(&[2, 3, 4]);
+    corrupt_sqzr_payload_byte(&fixture.sidecar(3), 0);
+    assert_open_fails_with_corrupt_archive(&fixture.first(), "SQZV");
 }
 
 #[test]
 fn missing_two_sqzv_payload_volumes_fail_without_dual_rev_parity() {
-    let tmp = TempDir::new("split-sqzv-two-missing-no-dual-parity");
-    let input_len = 700 * 1024;
-    let input = sample_input_with_len(tmp.path(), input_len);
-    let dest = tmp.path().join("out.sqz");
-    let opts = CreateOptions {
-        split_size: Some(180 * 1024),
-        ..CreateOptions::default()
-    };
-    let ctl = ControlToken::new();
-    engine()
-        .create(
-            &dest,
-            &[input],
-            &opts,
-            CreateCommitPolicy::ReplaceExisting,
-            &NoProgress,
-            &ctl,
-        )
-        .unwrap();
-
-    fs::remove_file(tmp.path().join("out.sqz.002")).unwrap();
-    fs::remove_file(tmp.path().join("out.sqz.003")).unwrap();
-    fs::remove_file(sqz_recovery_volume_path(tmp.path(), 2)).unwrap();
-
-    let first = tmp.path().join("out.sqz.001");
-    let report = engine()
-        .test_summary(
-            &first,
-            &OpenOptions::default(),
-            &squallz_format_api::SafetyLimits::default(),
-            &NoProgress,
-            &ctl,
-        )
-        .unwrap();
-    assert!(
-        !report.is_ok(),
-        "two missing large volumes require the weighted parity sidecar"
+    let fixture = SqzSplitFixture::new(
+        "split-sqzv-two-missing-no-dual-parity",
+        700 * 1024,
+        180 * 1024,
     );
-
-    let out = tmp.path().join("sqzv-two-missing-no-dual");
-    let err = engine()
-        .extract(
-            &first,
-            &out,
-            None,
-            &OpenOptions::default(),
-            &ExtractOptions::default(),
-            &NoProgress,
-            &ctl,
-        )
-        .unwrap_err();
-    match err {
-        FormatError::CorruptArchive(detail) => {
-            assert!(
-                detail.contains("unrepaired") || detail.contains("block"),
-                "{detail}"
-            );
-        }
-        other => panic!("expected CorruptArchive, got {other:?}"),
-    }
+    fixture.remove_volumes(&[2, 3]);
+    fs::remove_file(fixture.sidecar(2)).unwrap();
+    fixture.assert_report_rejects("two missing large volumes require the weighted parity sidecar");
+    fixture.assert_extract_rejects("sqzv-two-missing-no-dual");
 }
 
 #[test]
 fn missing_three_sqzv_payload_volumes_recover_from_triple_rev_parity() {
-    let tmp = TempDir::new("split-sqzv-three-missing-triple-parity");
-    let input_len = 1_000 * 1024;
-    let input = sample_input_with_len(tmp.path(), input_len);
-    let dest = tmp.path().join("out.sqz");
-    let opts = CreateOptions {
-        split_size: Some(180 * 1024),
-        ..CreateOptions::default()
-    };
-    let ctl = ControlToken::new();
-    engine()
-        .create(
-            &dest,
-            &[input],
-            &opts,
-            CreateCommitPolicy::ReplaceExisting,
-            &NoProgress,
-            &ctl,
-        )
-        .unwrap();
-
-    assert!(sqz_recovery_volume_path(tmp.path(), 1).is_file());
-    assert!(sqz_recovery_volume_path(tmp.path(), 2).is_file());
-    assert!(sqz_recovery_volume_path(tmp.path(), 3).is_file());
-    fs::remove_file(tmp.path().join("out.sqz.002")).unwrap();
-    fs::remove_file(tmp.path().join("out.sqz.003")).unwrap();
-    fs::remove_file(tmp.path().join("out.sqz.004")).unwrap();
-
-    let first = tmp.path().join("out.sqz.001");
-    let entries = read_archive_entries(&engine(), &first, &OpenOptions::default()).unwrap();
-    assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].path.display, "data.bin");
-
-    let report = engine()
-        .test_summary(
-            &first,
-            &OpenOptions::default(),
-            &squallz_format_api::SafetyLimits::default(),
-            &NoProgress,
-            &ctl,
-        )
-        .unwrap();
-    assert!(report.is_ok(), "problems: {:?}", report.problems);
-
-    let out = tmp.path().join("sqzv-three-missing-recovered");
-    engine()
-        .extract(
-            &first,
-            &out,
-            None,
-            &OpenOptions::default(),
-            &ExtractOptions::default(),
-            &NoProgress,
-            &ctl,
-        )
-        .unwrap();
-    assert_eq!(fs::read(out.join("data.bin")).unwrap(), payload(input_len));
+    let fixture = SqzSplitFixture::new(
+        "split-sqzv-three-missing-triple-parity",
+        1_000 * 1024,
+        180 * 1024,
+    );
+    fixture.assert_sidecars_exist(&[1, 2, 3]);
+    fixture.remove_volumes(&[2, 3, 4]);
+    fixture.assert_recovers("sqzv-three-missing-recovered");
 }
 
 #[test]
 fn missing_three_sqzv_payload_volumes_fail_without_triple_rev_parity() {
-    let tmp = TempDir::new("split-sqzv-three-missing-no-triple-parity");
-    let input_len = 1_000 * 1024;
-    let input = sample_input_with_len(tmp.path(), input_len);
-    let dest = tmp.path().join("out.sqz");
-    let opts = CreateOptions {
-        split_size: Some(180 * 1024),
-        ..CreateOptions::default()
-    };
-    let ctl = ControlToken::new();
-    engine()
-        .create(
-            &dest,
-            &[input],
-            &opts,
-            CreateCommitPolicy::ReplaceExisting,
-            &NoProgress,
-            &ctl,
-        )
-        .unwrap();
-
-    fs::remove_file(tmp.path().join("out.sqz.002")).unwrap();
-    fs::remove_file(tmp.path().join("out.sqz.003")).unwrap();
-    fs::remove_file(tmp.path().join("out.sqz.004")).unwrap();
-    fs::remove_file(sqz_recovery_volume_path(tmp.path(), 3)).unwrap();
-
-    let first = tmp.path().join("out.sqz.001");
-    let report = engine()
-        .test_summary(
-            &first,
-            &OpenOptions::default(),
-            &squallz_format_api::SafetyLimits::default(),
-            &NoProgress,
-            &ctl,
-        )
-        .unwrap();
-    assert!(
-        !report.is_ok(),
-        "three missing large volumes require the quadratic parity sidecar"
+    let fixture = SqzSplitFixture::new(
+        "split-sqzv-three-missing-no-triple-parity",
+        1_000 * 1024,
+        180 * 1024,
     );
-
-    let out = tmp.path().join("sqzv-three-missing-no-triple");
-    let err = engine()
-        .extract(
-            &first,
-            &out,
-            None,
-            &OpenOptions::default(),
-            &ExtractOptions::default(),
-            &NoProgress,
-            &ctl,
-        )
-        .unwrap_err();
-    match err {
-        FormatError::CorruptArchive(detail) => {
-            assert!(
-                detail.contains("unrepaired") || detail.contains("block"),
-                "{detail}"
-            );
-        }
-        other => panic!("expected CorruptArchive, got {other:?}"),
-    }
+    fixture.remove_volumes(&[2, 3, 4]);
+    fs::remove_file(fixture.sidecar(3)).unwrap();
+    fixture
+        .assert_report_rejects("three missing large volumes require the quadratic parity sidecar");
+    fixture.assert_extract_rejects("sqzv-three-missing-no-triple");
 }
 
 #[test]
 fn missing_four_sqzv_payload_volumes_still_fail_with_three_rev_parity() {
-    let tmp = TempDir::new("split-sqzv-four-missing");
-    let input_len = 1_200 * 1024;
-    let input = sample_input_with_len(tmp.path(), input_len);
-    let dest = tmp.path().join("out.sqz");
-    let opts = CreateOptions {
-        split_size: Some(180 * 1024),
-        ..CreateOptions::default()
-    };
-    let ctl = ControlToken::new();
-    engine()
-        .create(
-            &dest,
-            &[input],
-            &opts,
-            CreateCommitPolicy::ReplaceExisting,
-            &NoProgress,
-            &ctl,
-        )
-        .unwrap();
-
-    assert!(sqz_recovery_volume_path(tmp.path(), 1).is_file());
-    assert!(sqz_recovery_volume_path(tmp.path(), 2).is_file());
-    assert!(sqz_recovery_volume_path(tmp.path(), 3).is_file());
-    fs::remove_file(tmp.path().join("out.sqz.002")).unwrap();
-    fs::remove_file(tmp.path().join("out.sqz.003")).unwrap();
-    fs::remove_file(tmp.path().join("out.sqz.004")).unwrap();
-    fs::remove_file(tmp.path().join("out.sqz.005")).unwrap();
-
-    let first = tmp.path().join("out.sqz.001");
-    let report = engine()
-        .test_summary(
-            &first,
-            &OpenOptions::default(),
-            &squallz_format_api::SafetyLimits::default(),
-            &NoProgress,
-            &ctl,
-        )
-        .unwrap();
-    assert!(
-        !report.is_ok(),
-        "four missing large volumes must not be over-claimed as recoverable"
+    let fixture = SqzSplitFixture::new("split-sqzv-four-missing", 1_200 * 1024, 180 * 1024);
+    fixture.assert_sidecars_exist(&[1, 2, 3]);
+    fixture.remove_volumes(&[2, 3, 4, 5]);
+    fixture.assert_report_rejects(
+        "four missing large volumes must not be over-claimed as recoverable",
     );
 }
 
 #[test]
 fn missing_sqzv_payload_volume_over_capacity_fails_without_rev_parity() {
-    let tmp = TempDir::new("split-sqzv-missing-no-parity");
-    let input_len = 700 * 1024;
-    let input = sample_input_with_len(tmp.path(), input_len);
-    let dest = tmp.path().join("out.sqz");
-    let opts = CreateOptions {
-        split_size: Some(180 * 1024),
-        ..CreateOptions::default()
-    };
-    let ctl = ControlToken::new();
-    engine()
-        .create(
-            &dest,
-            &[input],
-            &opts,
-            CreateCommitPolicy::ReplaceExisting,
-            &NoProgress,
-            &ctl,
-        )
-        .unwrap();
-
-    fs::remove_file(tmp.path().join("out.sqz.002")).unwrap();
-    fs::remove_file(sqz_recovery_volume_path(tmp.path(), 1)).unwrap();
-
-    let first = tmp.path().join("out.sqz.001");
-    let report = engine()
-        .test_summary(
-            &first,
-            &OpenOptions::default(),
-            &squallz_format_api::SafetyLimits::default(),
-            &NoProgress,
-            &ctl,
-        )
-        .unwrap();
-    assert!(
-        !report.is_ok(),
-        "missing large volume must exceed embedded RS capacity"
-    );
-
-    let out = tmp.path().join("sqzv-no-parity");
-    let err = engine()
-        .extract(
-            &first,
-            &out,
-            None,
-            &OpenOptions::default(),
-            &ExtractOptions::default(),
-            &NoProgress,
-            &ctl,
-        )
-        .unwrap_err();
-    match err {
-        FormatError::CorruptArchive(detail) => {
-            assert!(
-                detail.contains("unrepaired") || detail.contains("block"),
-                "{detail}"
-            );
-        }
-        other => panic!("expected CorruptArchive, got {other:?}"),
-    }
+    let fixture = SqzSplitFixture::new("split-sqzv-missing-no-parity", 700 * 1024, 180 * 1024);
+    fixture.remove_volumes(&[2]);
+    fs::remove_file(fixture.sidecar(1)).unwrap();
+    fixture.assert_report_rejects("missing large volume must exceed embedded RS capacity");
+    fixture.assert_extract_rejects("sqzv-no-parity");
 }
 
 #[test]
 fn missing_sqzv_tail_volume_recovers_from_rev_sidecar() {
-    let tmp = TempDir::new("split-sqzv-missing-tail-sidecar");
-    let input = sample_input(tmp.path());
-    let dest = tmp.path().join("out.sqz");
-    let opts = CreateOptions {
-        split_size: Some(30 * 1024),
-        ..CreateOptions::default()
-    };
-    let ctl = ControlToken::new();
-    engine()
-        .create(
-            &dest,
-            &[input],
-            &opts,
-            CreateCommitPolicy::ReplaceExisting,
-            &NoProgress,
-            &ctl,
-        )
-        .unwrap();
-
-    let volumes = volume_paths(tmp.path(), "out.sqz.");
-    let tail = volumes.last().expect("tail volume").clone();
-    let tail_mirror = sqz_recovery_volume_path(tmp.path(), volumes.len());
-    assert!(tail_mirror.is_file(), "{} missing", tail_mirror.display());
-    assert!(sqz_recovery_volume_path(tmp.path(), 1).is_file());
-    fs::remove_file(&tail).unwrap();
-
-    let first = tmp.path().join("out.sqz.001");
-    let entries = read_archive_entries(&engine(), &first, &OpenOptions::default()).unwrap();
-    assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].path.display, "data.bin");
-
-    let report = engine()
-        .test_summary(
-            &first,
-            &OpenOptions::default(),
-            &squallz_format_api::SafetyLimits::default(),
-            &NoProgress,
-            &ctl,
-        )
-        .unwrap();
-    assert!(report.is_ok(), "problems: {:?}", report.problems);
-
-    let out = tmp.path().join("sqzv-tail-recovered");
-    engine()
-        .extract(
-            &first,
-            &out,
-            None,
-            &OpenOptions::default(),
-            &ExtractOptions::default(),
-            &NoProgress,
-            &ctl,
-        )
-        .unwrap();
-    assert_eq!(fs::read(out.join("data.bin")).unwrap(), payload(100 * 1024));
+    let fixture = SqzSplitFixture::new("split-sqzv-missing-tail-sidecar", 100 * 1024, 30 * 1024);
+    let volumes = fixture.volumes();
+    fixture.assert_sidecars_exist(&[volumes.len(), 1]);
+    fs::remove_file(volumes.last().expect("tail volume")).unwrap();
+    fixture.assert_recovers("sqzv-tail-recovered");
 }
 
 #[test]
 fn missing_sqzv_payload_and_tail_recover_from_parity_plus_tail_mirror() {
-    let tmp = TempDir::new("split-sqzv-missing-payload-tail");
-    let input = sample_input(tmp.path());
-    let dest = tmp.path().join("out.sqz");
-    let opts = CreateOptions {
-        split_size: Some(30 * 1024),
-        ..CreateOptions::default()
-    };
-    let ctl = ControlToken::new();
-    engine()
-        .create(
-            &dest,
-            &[input],
-            &opts,
-            CreateCommitPolicy::ReplaceExisting,
-            &NoProgress,
-            &ctl,
-        )
-        .unwrap();
-
-    let volumes = volume_paths(tmp.path(), "out.sqz.");
+    let fixture = SqzSplitFixture::new("split-sqzv-missing-payload-tail", 100 * 1024, 30 * 1024);
+    let volumes = fixture.volumes();
     assert!(volumes.len() >= 4, "volumes: {volumes:?}");
-    let tail = volumes.last().expect("tail volume").clone();
-    let tail_mirror = sqz_recovery_volume_path(tmp.path(), volumes.len());
-    assert!(tail_mirror.is_file(), "{} missing", tail_mirror.display());
-    assert!(sqz_recovery_volume_path(tmp.path(), 1).is_file());
-
-    fs::remove_file(tmp.path().join("out.sqz.002")).unwrap();
-    fs::remove_file(&tail).unwrap();
-
-    let first = tmp.path().join("out.sqz.001");
-    let entries = read_archive_entries(&engine(), &first, &OpenOptions::default()).unwrap();
-    assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].path.display, "data.bin");
-
-    let report = engine()
-        .test_summary(
-            &first,
-            &OpenOptions::default(),
-            &squallz_format_api::SafetyLimits::default(),
-            &NoProgress,
-            &ctl,
-        )
-        .unwrap();
-    assert!(report.is_ok(), "problems: {:?}", report.problems);
-
-    let out = tmp.path().join("sqzv-payload-tail-recovered");
-    engine()
-        .extract(
-            &first,
-            &out,
-            None,
-            &OpenOptions::default(),
-            &ExtractOptions::default(),
-            &NoProgress,
-            &ctl,
-        )
-        .unwrap();
-    assert_eq!(fs::read(out.join("data.bin")).unwrap(), payload(100 * 1024));
+    fixture.assert_sidecars_exist(&[volumes.len(), 1]);
+    fixture.remove_volumes(&[2]);
+    fs::remove_file(volumes.last().expect("tail volume")).unwrap();
+    fixture.assert_recovers("sqzv-payload-tail-recovered");
 }
 
 #[test]
 fn missing_sqzv_tail_volume_is_still_unrecoverable() {
-    let tmp = TempDir::new("split-sqzv-missing-tail");
-    let input = sample_input(tmp.path());
-    let dest = tmp.path().join("out.sqz");
-    let opts = CreateOptions {
-        split_size: Some(30 * 1024),
-        ..CreateOptions::default()
-    };
-    engine()
-        .create(
-            &dest,
-            &[input],
-            &opts,
-            CreateCommitPolicy::ReplaceExisting,
-            &NoProgress,
-            &ControlToken::new(),
-        )
-        .unwrap();
-
-    let volumes = volume_paths(tmp.path(), "out.sqz.");
-    let tail = volumes.last().expect("tail volume").clone();
-    let tail_mirror = sqz_recovery_volume_path(tmp.path(), volumes.len());
-    let parity = sqz_recovery_volume_path(tmp.path(), 1);
-    fs::remove_file(&tail).unwrap();
-    fs::remove_file(&tail_mirror).unwrap();
-    fs::remove_file(&parity).unwrap();
-
-    let err = read_archive_entries(
-        &engine(),
-        &tmp.path().join("out.sqz.001"),
-        &OpenOptions::default(),
-    )
-    .unwrap_err();
-    match err {
-        FormatError::CorruptArchive(detail) => {
-            assert!(detail.contains("tail volume"), "detail: {detail}");
-        }
-        other => panic!("expected CorruptArchive, got {other:?}"),
-    }
+    let fixture = SqzSplitFixture::new("split-sqzv-missing-tail", 100 * 1024, 30 * 1024);
+    let volumes = fixture.volumes();
+    fs::remove_file(volumes.last().expect("tail volume")).unwrap();
+    fs::remove_file(fixture.sidecar(volumes.len())).unwrap();
+    fs::remove_file(fixture.sidecar(1)).unwrap();
+    assert_open_fails_with_corrupt_archive(&fixture.first(), "tail volume");
 }
 
 #[test]

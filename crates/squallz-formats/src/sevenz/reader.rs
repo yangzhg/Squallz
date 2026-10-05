@@ -746,18 +746,6 @@ impl ArchiveReader for SevenZArchiveReader {
         opts: &ExtractOptions,
         progress: &dyn ProgressSink,
         ctl: &ControlToken,
-    ) -> Result<(), FormatError> {
-        self.extract_with_report(dest, selection, opts, progress, ctl)
-            .map(drop)
-    }
-
-    fn extract_with_report(
-        &mut self,
-        dest: &Path,
-        selection: Option<&[EntryPath]>,
-        opts: &ExtractOptions,
-        progress: &dyn ProgressSink,
-        ctl: &ControlToken,
     ) -> Result<ExtractReport, FormatError> {
         if selection.is_some_and(<[EntryPath]>::is_empty) {
             return Ok(empty_extract_report(dest, progress));
@@ -953,7 +941,7 @@ impl ArchiveReader for SevenZArchiveReader {
             return Err(e);
         }
         backend_result.map_err(map_7z_error)?;
-        sink.finish_with_report(progress, ctl)
+        sink.finish(progress, ctl)
     }
 
     fn test_summary(

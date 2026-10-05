@@ -62,17 +62,8 @@ fn run_operation(
                 control,
             )
             .map(|report| assert!(report.is_ok())),
-        "extract" => engine.extract(
-            archive,
-            destination,
-            None,
-            &open,
-            &extract,
-            progress,
-            control,
-        ),
-        "extract_report" => engine
-            .extract_with_report(
+        "extract" => engine
+            .extract(
                 archive,
                 destination,
                 None,
@@ -129,13 +120,7 @@ fn archive_operations_report_opening_before_entry_work() {
                 &ControlToken::default(),
             )
             .unwrap();
-        for operation in [
-            "test",
-            "extract",
-            "extract_report",
-            "guarded_extract",
-            "convert",
-        ] {
+        for operation in ["test", "extract", "guarded_extract", "convert"] {
             let destination = temp.path().join(format!("{format}-{operation}.zip"));
             let progress = OpeningProgress::default();
             run_operation(
@@ -198,13 +183,7 @@ fn cancellation_from_opening_feedback_preserves_existing_outputs() {
             &ControlToken::default(),
         )
         .unwrap();
-    for operation in [
-        "test",
-        "extract",
-        "extract_report",
-        "guarded_extract",
-        "convert",
-    ] {
+    for operation in ["test", "extract", "guarded_extract", "convert"] {
         let destination = temp.path().join(format!("{operation}.zip"));
         let original = if operation == "convert" {
             destination.clone()

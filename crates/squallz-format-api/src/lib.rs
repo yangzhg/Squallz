@@ -32,8 +32,8 @@ mod traits;
 pub use entry::{unix_seconds, EntryMeta, EntryPath, EntryType};
 pub use error::FormatError;
 pub use extract::{
-    empty_extract_report, extract_entries, extract_entries_with_report,
-    first_free_numbered_sibling_name, ExtractReport, ExtractSink,
+    empty_extract_report, extract_entries, first_free_numbered_sibling_name, ExtractReport,
+    ExtractSink,
 };
 #[cfg(windows)]
 pub use file_ops::reopen_readonly_file;

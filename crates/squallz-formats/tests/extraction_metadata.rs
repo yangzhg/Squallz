@@ -83,7 +83,7 @@ fn entry_times_survive_all_supported_shared_extraction_paths() {
         for best_effort in [false, true] {
             let destination = tmp.path().join(format!("{extension}-{best_effort}"));
             let report = engine()
-                .extract_with_report(
+                .extract(
                     &archive,
                     &destination,
                     None,

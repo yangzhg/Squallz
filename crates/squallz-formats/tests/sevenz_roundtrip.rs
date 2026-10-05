@@ -54,7 +54,7 @@ fn sevenz_roundtrip_list_test_extract() {
 
     let empty_out = dir.path().join("empty-selection");
     let empty_report = engine
-        .extract_with_report(
+        .extract(
             &archive,
             &empty_out,
             Some(&[]),
@@ -99,7 +99,7 @@ fn sevenz_roundtrip_list_test_extract() {
 
     let out = dir.path().join("out");
     let extract_report = engine
-        .extract_with_report(
+        .extract(
             &archive,
             &out,
             None,
@@ -534,7 +534,7 @@ fn sevenz_external_symlinks_keep_types_targets_times_and_skip_policy() {
                     .path()
                     .join(format!("{solid}-{best_effort}-{symlinks:?}"));
                 let report = engine
-                    .extract_with_report(
+                    .extract(
                         &archive,
                         &out,
                         None,
@@ -584,7 +584,7 @@ fn sevenz_external_symlinks_keep_types_targets_times_and_skip_policy() {
         }
         let selected = dir.path().join(format!("{solid}-selected"));
         let report = engine
-            .extract_with_report(
+            .extract(
                 &archive,
                 &selected,
                 Some(&[EntryPath::from_utf8("file-link")]),
@@ -630,7 +630,7 @@ fn sevenz_encrypted_symlink_targets_require_a_valid_password() {
     );
     let skipped = dir.path().join("skipped");
     let report = engine
-        .extract_with_report(
+        .extract(
             &archive,
             &skipped,
             None,
@@ -655,7 +655,7 @@ fn sevenz_encrypted_symlink_targets_require_a_valid_password() {
             let out = dir
                 .path()
                 .join(format!("out-{}-{best_effort}", password.is_some()));
-            let result = engine.extract_with_report(
+            let result = engine.extract(
                 &archive,
                 &out,
                 None,
@@ -826,7 +826,7 @@ fn sevenz_selection_skips_an_unrelated_damaged_block() {
         ..extract_opts()
     };
     let report = engine()
-        .extract_with_report(
+        .extract(
             &archive,
             &best_effort_out,
             None,
@@ -916,7 +916,7 @@ fn sevenz_best_effort_stops_a_damaged_solid_block_and_continues_the_next_block()
         ..extract_opts()
     };
     let report = engine()
-        .extract_with_report(
+        .extract(
             &archive,
             &out,
             None,
@@ -937,7 +937,7 @@ fn sevenz_best_effort_stops_a_damaged_solid_block_and_continues_the_next_block()
     let selected_out = dir.path().join("selected-out");
     let selection = [EntryPath::from_utf8("b.txt"), EntryPath::from_utf8("z.txt")];
     let report = engine()
-        .extract_with_report(
+        .extract(
             &archive,
             &selected_out,
             Some(&selection),

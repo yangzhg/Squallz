@@ -776,17 +776,9 @@ impl<'o> ExtractSink<'o> {
         Ok(())
     }
 
-    /// Restores deferred directory metadata and reports completion.
+    /// Restores deferred directory metadata, finishes progress reporting, and
+    /// returns the completed per-entry outcome counts.
     pub fn finish(
-        self,
-        progress: &dyn ProgressSink,
-        ctl: &ControlToken,
-    ) -> Result<(), FormatError> {
-        self.finish_with_report(progress, ctl).map(drop)
-    }
-
-    /// Finishes progress reporting and returns the completed outcome counts.
-    pub fn finish_with_report(
         mut self,
         progress: &dyn ProgressSink,
         ctl: &ControlToken,
@@ -862,18 +854,6 @@ fn file_stem_or_empty(path: &Path) -> String {
 /// extracted in their place; hardlinks link to an already-extracted target
 /// or fall back to a content copy.
 pub fn extract_entries<R: ArchiveReader + ?Sized>(
-    reader: &mut R,
-    dest: &Path,
-    selection: Option<&[EntryPath]>,
-    opts: &ExtractOptions,
-    progress: &dyn ProgressSink,
-    ctl: &ControlToken,
-) -> Result<(), FormatError> {
-    extract_entries_with_report(reader, dest, selection, opts, progress, ctl).map(drop)
-}
-
-/// Report-returning variant of [`extract_entries`].
-pub fn extract_entries_with_report<R: ArchiveReader + ?Sized>(
     reader: &mut R,
     dest: &Path,
     selection: Option<&[EntryPath]>,
@@ -967,7 +947,7 @@ pub fn extract_entries_with_report<R: ArchiveReader + ?Sized>(
             _ => sink.write_meta_entry(meta, progress, ctl)?,
         }
     }
-    sink.finish_with_report(progress, ctl)
+    sink.finish(progress, ctl)
 }
 
 /// Writes the content of `target` (a file entry) at the link entry's own
@@ -1507,7 +1487,7 @@ mod tests {
             let out = sink.file_target(&file, &events, &ctl).unwrap().unwrap();
             sink.write_file(&file, &out, &mut Cursor::new(b"new"), &events, &ctl)
                 .unwrap();
-            let report = sink.finish_with_report(&events, &ctl).unwrap();
+            let report = sink.finish(&events, &ctl).unwrap();
             assert_eq!(report.output_bytes, 3);
             let recorded = events.0.lock().unwrap();
             assert_eq!(
@@ -1673,7 +1653,7 @@ mod tests {
         let destination = root.join("not-created");
         let selection = Vec::new();
 
-        let report = extract_entries_with_report(
+        let report = extract_entries(
             &mut UnusedReader,
             &destination,
             Some(&selection),
@@ -1706,7 +1686,7 @@ mod tests {
             ..ExtractOptions::default()
         };
 
-        let error = extract_entries_with_report(
+        let error = extract_entries(
             &mut reader,
             &destination,
             None,
@@ -1739,7 +1719,7 @@ mod tests {
             ..ExtractOptions::default()
         };
 
-        let error = extract_entries_with_report(
+        let error = extract_entries(
             &mut reader,
             &destination,
             None,
@@ -1771,8 +1751,7 @@ mod tests {
         ctl.cancel();
 
         let error =
-            extract_entries_with_report(&mut reader, &destination, None, &opts, &NoProgress, &ctl)
-                .unwrap_err();
+            extract_entries(&mut reader, &destination, None, &opts, &NoProgress, &ctl).unwrap_err();
 
         assert!(matches!(error, FormatError::Cancelled), "{error:?}");
         fs::remove_dir_all(&root).unwrap();
@@ -1790,9 +1769,7 @@ mod tests {
             .unwrap();
 
         assert!(!root.join("copied.txt").exists());
-        let report = sink
-            .finish_with_report(&NoProgress, &ControlToken::default())
-            .unwrap();
+        let report = sink.finish(&NoProgress, &ControlToken::default()).unwrap();
         assert_eq!(report.selected_entries, 1);
         assert_eq!(report.skipped, 1);
         assert_eq!(report.created + report.replaced + report.renamed, 0);
@@ -1817,9 +1794,7 @@ mod tests {
             .unwrap();
 
         assert!(!root.join("copied.txt").exists());
-        let report = sink
-            .finish_with_report(&NoProgress, &ControlToken::default())
-            .unwrap();
+        let report = sink.finish(&NoProgress, &ControlToken::default()).unwrap();
         assert_eq!(report.selected_entries, 1);
         assert_eq!(report.skipped, 1);
         assert_eq!(report.output_bytes, 0);
@@ -1845,9 +1820,7 @@ mod tests {
 
         assert!(!destination.join("copied.txt").exists());
         assert_eq!(fs::read(outside.join("secret.txt")).unwrap(), b"private");
-        let report = sink
-            .finish_with_report(&NoProgress, &ControlToken::default())
-            .unwrap();
+        let report = sink.finish(&NoProgress, &ControlToken::default()).unwrap();
         assert_eq!(report.skipped, 1);
         fs::remove_dir_all(&root).unwrap();
     }
@@ -1898,9 +1871,7 @@ mod tests {
                 archived_time()
             );
         }
-        let report = sink
-            .finish_with_report(&NoProgress, &ControlToken::default())
-            .unwrap();
+        let report = sink.finish(&NoProgress, &ControlToken::default()).unwrap();
         assert_eq!(report.selected_entries, 3);
         assert_eq!(report.renamed, 1);
         assert_eq!(report.created, 2);
@@ -1941,9 +1912,7 @@ mod tests {
                 .unwrap(),
             original_modified
         );
-        let report = sink
-            .finish_with_report(&NoProgress, &ControlToken::default())
-            .unwrap();
+        let report = sink.finish(&NoProgress, &ControlToken::default()).unwrap();
         assert_eq!(report.selected_entries, 2);
         assert_eq!(report.skipped, 2);
         assert_eq!(report.created + report.replaced + report.renamed, 0);
@@ -2150,9 +2119,7 @@ mod tests {
             archived_time()
         );
         assert!(extract_temp_paths(&dir).is_empty());
-        let report = sink
-            .finish_with_report(&NoProgress, &ControlToken::default())
-            .unwrap();
+        let report = sink.finish(&NoProgress, &ControlToken::default()).unwrap();
         assert_eq!(report.destination, dir);
         assert_eq!(report.selected_entries, 1);
         assert_eq!(report.replaced, 1);
@@ -2343,9 +2310,7 @@ mod tests {
         }
         assert_eq!(fs::read(&target).unwrap(), b"racer");
         assert!(extract_temp_paths(&dir).is_empty());
-        let report = sink
-            .finish_with_report(&NoProgress, &ControlToken::default())
-            .unwrap();
+        let report = sink.finish(&NoProgress, &ControlToken::default()).unwrap();
         assert_eq!(report.selected_entries, 1);
         assert_eq!(report.created, 0);
         assert_eq!(report.replaced, 0);
@@ -2423,9 +2388,7 @@ mod tests {
         assert!(!wrote);
         assert_eq!(fs::read(&target).unwrap(), b"old");
         assert!(extract_temp_paths(&dir).is_empty());
-        let report = sink
-            .finish_with_report(&NoProgress, &ControlToken::default())
-            .unwrap();
+        let report = sink.finish(&NoProgress, &ControlToken::default()).unwrap();
         assert_eq!(report.selected_entries, 1);
         assert_eq!(report.failed, 1);
         assert_eq!(report.created + report.replaced + report.renamed, 0);
@@ -2455,9 +2418,7 @@ mod tests {
         );
 
         assert!(sink.pending_outputs.is_empty());
-        let report = sink
-            .finish_with_report(&NoProgress, &ControlToken::default())
-            .unwrap();
+        let report = sink.finish(&NoProgress, &ControlToken::default()).unwrap();
         assert_eq!(report.selected_entries, 1);
         assert_eq!(report.failed, 1);
         assert_eq!(report.skipped, 0);

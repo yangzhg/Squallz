@@ -960,31 +960,10 @@ impl Engine {
         })
     }
 
-    /// Extracts everything or a selection of entries.
-    #[allow(clippy::too_many_arguments)] // engine facade: each argument has a distinct role
-    pub fn extract(
-        &self,
-        path: &Path,
-        dest: &Path,
-        selection: Option<&[EntryPath]>,
-        open_opts: &OpenOptions,
-        extract_opts: &ExtractOptions,
-        progress: &dyn ProgressSink,
-        ctl: &ControlToken,
-    ) -> Result<(), FormatError> {
-        let mut reader = self.open_for_operation(path, open_opts, progress, ctl)?;
-        progress.on_phase(ProgressPhase::ExtractEntries, true);
-        ctl.checkpoint()?;
-        controlled_result(
-            ctl,
-            reader.extract(dest, selection, extract_opts, progress, ctl),
-        )
-    }
-
     /// Extracts everything or a selection and returns completed per-entry
     /// outcome counts.
     #[allow(clippy::too_many_arguments)] // engine facade: each argument has a distinct role
-    pub fn extract_with_report(
+    pub fn extract(
         &self,
         path: &Path,
         dest: &Path,
@@ -999,7 +978,7 @@ impl Engine {
         ctl.checkpoint()?;
         controlled_result(
             ctl,
-            reader.extract_with_report(dest, selection, extract_opts, progress, ctl),
+            reader.extract(dest, selection, extract_opts, progress, ctl),
         )
     }
 
@@ -1157,7 +1136,7 @@ impl Engine {
         ctl.checkpoint()?;
         let report = controlled_result(
             ctl,
-            opened.reader.extract_with_report(
+            opened.reader.extract(
                 &plan.destination,
                 selection.as_deref(),
                 extract_opts,
@@ -2589,7 +2568,7 @@ mod tests {
             }))
         }
 
-        fn extract_with_report(
+        fn extract(
             &mut self,
             dest: &Path,
             selection: Option<&[EntryPath]>,
