@@ -24,8 +24,8 @@ use crate::destination_guard::{path_state_digest, verify_destination_guard_bindi
 #[cfg(windows)]
 use crate::filesystem_identity::path_change_time;
 use crate::filesystem_identity::{
-    file_identity, open_regular_file_no_follow_read_write, path_identity, PathIdentity,
-    RegularFileState,
+    file_identity, open_new_artifact, open_regular_file_no_follow_read_write, path_identity,
+    PathIdentity, RegularFileState,
 };
 use crate::{
     parent_or_current, sync_directory, CreateArtifactKind, CreateCommitPolicy,
@@ -259,25 +259,7 @@ fn reserve_split_staging_file(
         ));
         candidate_name.push(name);
         let candidate = parent.join(candidate_name);
-        let mut options = OpenOptions::new();
-        options.read(true).write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        #[cfg(windows)]
-        {
-            use std::os::windows::fs::OpenOptionsExt;
-            use windows_sys::Win32::Storage::FileSystem::{
-                FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ,
-            };
-
-            options
-                .share_mode(FILE_SHARE_READ | FILE_SHARE_DELETE)
-                .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
-        }
-        match options.open(&candidate) {
+        match open_new_artifact(&candidate) {
             Ok(file) => {
                 let identity = split_file_identity(&file)?;
                 if split_path_identity(&candidate).ok() != Some(identity) {

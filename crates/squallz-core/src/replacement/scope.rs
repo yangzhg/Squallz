@@ -1,5 +1,5 @@
 use std::ffi::OsStr;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -555,7 +555,7 @@ fn open_lock_file(path: &Path) -> io::Result<File> {
     use windows_sys::Win32::Storage::FileSystem::{
         FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ, FILE_SHARE_WRITE,
     };
-    OpenOptions::new()
+    fs::OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
@@ -566,32 +566,10 @@ fn open_lock_file(path: &Path) -> io::Result<File> {
 }
 #[cfg(not(any(unix, windows)))]
 fn open_lock_file(path: &Path) -> io::Result<File> {
-    OpenOptions::new()
+    fs::OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
         .truncate(false)
         .open(path)
-}
-
-/// Create a private read/write file without opening an existing path.
-pub(crate) fn open_new_artifact(path: &Path) -> io::Result<File> {
-    let mut options = OpenOptions::new();
-    options.read(true).write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        use windows_sys::Win32::Storage::FileSystem::{
-            FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ,
-        };
-        options
-            .share_mode(FILE_SHARE_READ | FILE_SHARE_DELETE)
-            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
-    }
-    options.open(path)
 }

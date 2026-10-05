@@ -4,7 +4,8 @@ use std::path::{Path, PathBuf};
 
 use crate::api::FormatError;
 use crate::filesystem_identity::{
-    file_identity, open_regular_file_no_follow, path_identity, PathIdentity, RegularFileState,
+    file_identity, open_new_artifact, open_regular_file_no_follow, path_identity, PathIdentity,
+    RegularFileState,
 };
 
 use super::evidence::{invalid, regular_is_current, RegularProof};
@@ -12,7 +13,7 @@ use super::model::{
     ActiveWriter, ArtifactRole, Failure, PersistFailure, Prepared, Replacement, ReplacementRecord,
     Visibility,
 };
-use super::scope::{identity_at, open_new_artifact, RecordPhase, Scope};
+use super::scope::{identity_at, RecordPhase, Scope};
 
 enum ContentProof {
     PayloadBytes {

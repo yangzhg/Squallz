@@ -596,7 +596,7 @@ impl JobManager {
         let redactions = prepared.redactions;
         let update_guard = prepared.update_guard;
         let queue_id = self.queue.submit_with_resources(
-            Box::new(move |ctl, queue_sink| {
+            Box::new(move |ctl, phase_gate| {
                 let _source_leases = source_leases;
                 let starting_state = if ctl.is_paused() { "paused" } else { "running" };
                 if let Some(version) =
@@ -608,7 +608,7 @@ impl JobManager {
                     gui_id,
                     Arc::clone(&events),
                     Arc::clone(&snapshots),
-                    queue_sink,
+                    phase_gate,
                     &redactions,
                 );
                 let outcome = JobContext {

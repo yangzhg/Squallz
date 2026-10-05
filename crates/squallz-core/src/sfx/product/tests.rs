@@ -1059,7 +1059,7 @@ fn exact_old_stage_path_requires_a_current_held_writer() {
         .is_err());
         drop(hook);
         assert!(!old_stage.path.exists());
-        let mut held = replacement::open_new_artifact(&old_stage.path).unwrap();
+        let mut held = crate::filesystem_identity::open_new_artifact(&old_stage.path).unwrap();
         held.write_all(b"current writer").unwrap();
         held.sync_all().unwrap();
         let identity = file_identity(&held).unwrap();

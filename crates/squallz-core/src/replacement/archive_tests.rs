@@ -9,12 +9,14 @@ use std::time::Duration;
 
 use crate::api::{ControlToken, EntryPath, FormatError, NoProgress, ProgressPhase, ProgressSink};
 use crate::destination_guard::verify_destination_guard;
-use crate::filesystem_identity::{file_identity, open_regular_file_no_follow, RegularFileState};
+use crate::filesystem_identity::{
+    file_identity, open_new_artifact, open_regular_file_no_follow, RegularFileState,
+};
 use crate::CreateArtifactKind;
 
 use super::evidence::{ProofSlot, VerificationContext};
 use super::model::{Authorization, Outcome, PersistFailure, Replacement};
-use super::scope::{open_new_artifact, RecordPhase, Scope};
+use super::scope::{RecordPhase, Scope};
 use super::{owner, prepare, record};
 
 struct ArchiveFixture {

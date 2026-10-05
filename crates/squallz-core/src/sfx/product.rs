@@ -17,7 +17,7 @@ use crate::api::{ControlToken, EntryPath, FormatError, NoProgress, ProgressPhase
 use crate::archive_path::{checked_path_component, is_canonical_process_sequence};
 use crate::destination_guard::{path_state_digest, verify_destination_guard};
 use crate::filesystem_identity::open_regular_file_no_follow;
-use crate::filesystem_identity::{file_identity, path_identity, PathIdentity};
+use crate::filesystem_identity::{file_identity, open_new_artifact, path_identity, PathIdentity};
 use crate::replacement::{
     self, ActiveWriter, ArtifactRole, Authorization, Failure, Outcome, OwnedInput, PersistFailure,
     RecordPhase, Recovery, Scope, VerificationContext, Visibility,
@@ -192,7 +192,7 @@ pub(super) fn reserve_file_stage(
             ".squallz-sfx-{namespace}-{}-{sequence}.{extension}",
             std::process::id()
         ));
-        match replacement::open_new_artifact(&path) {
+        match open_new_artifact(&path) {
             Ok(file) => {
                 let identity = file_identity(&file)?;
                 let path_matches = match kind {

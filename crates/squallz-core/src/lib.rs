@@ -57,6 +57,7 @@ pub use destination_guard::{
 pub use duplicates::{DuplicateGroup, DuplicateScanReport};
 pub use entry_copy::copy_archive_entry;
 pub use extract_guard::{build_extract_input_guard, ArchiveSourceState, ExtractInputGuard};
+pub use filesystem_identity::open_new_artifact;
 pub use filter::PathFilter;
 pub use layout::{
     analyze_extract_layout, inspect_extract_space, ExtractPlan, ExtractScope, ExtractSpace,
@@ -76,9 +77,7 @@ pub use presets::{
     SfxTargetPolicy, VolumeMode, BALANCED_CREATE_PRESET_ID, CROSS_PLATFORM_CREATE_PRESET_ID,
     MAX_SPLIT_SIZE_BYTES, MIN_SPLIT_SIZE_BYTES, PRESET_SCHEMA_VERSION, SMART_EXTRACT_PRESET_ID,
 };
-pub use queue::{
-    Job, JobId, JobProgress, JobQueue, JobResources, JobState, QueueWaitReason, QueuedJobStatus,
-};
+pub use queue::{Job, JobId, JobQueue, JobResources, JobState, QueueWaitReason, QueuedJobStatus};
 pub use repair::{ArchiveRepairKind, ArchiveRepairOptions, ArchiveRepairOutcome};
 pub use sfx::{
     default_sfx_extract_destination, discover_packaged_sfx_runtime, inspect_sfx,
@@ -1730,26 +1729,7 @@ pub(crate) fn reserve_bound_sibling_temp_file(
 ) -> Result<ReservedTempFile, FormatError> {
     for _ in 0..1000u32 {
         let candidate = sibling_temp_path(dest, purpose)?;
-        let mut options = fs::OpenOptions::new();
-        options.read(true).write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-
-            options.mode(0o600);
-        }
-        #[cfg(windows)]
-        {
-            use std::os::windows::fs::OpenOptionsExt;
-            use windows_sys::Win32::Storage::FileSystem::{
-                FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ,
-            };
-
-            options
-                .share_mode(FILE_SHARE_READ | FILE_SHARE_DELETE)
-                .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
-        }
-        match options.open(&candidate) {
+        match filesystem_identity::open_new_artifact(&candidate) {
             Ok(file) => {
                 let identity = filesystem_identity::file_identity(&file).map_err(|error| {
                     FormatError::from(io::Error::new(

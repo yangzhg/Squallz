@@ -4,7 +4,8 @@
 mod common;
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use common::{engine, read_archive_entries, TempDir};
 use squallz_core::api::{
@@ -107,329 +108,177 @@ fn byte_pattern_positions(bytes: &[u8], pattern: &[u8]) -> Vec<usize> {
         .collect()
 }
 
-#[test]
-fn sqz_file_header_crc_damage_falls_back_to_footer() {
-    let tmp = TempDir::new("sqz-header-fallback");
-    build_tree(tmp.path());
-    let archive = tmp.path().join("out.sqz");
-    let eng = engine();
-    let ctl = ControlToken::new();
-    eng.create(
-        &archive,
-        &[tmp.path().join("project")],
-        &CreateOptions::default(),
-        CreateCommitPolicy::ReplaceExisting,
-        &NoProgress,
-        &ctl,
-    )
-    .unwrap();
+struct SqzStructureFixture {
+    tmp: TempDir,
+    archive: PathBuf,
+    eng: squallz_core::Engine,
+    ctl: Arc<ControlToken>,
+}
 
-    let mut bytes = fs::read(&archive).unwrap();
-    assert_eq!(&bytes[0..8], b"SQZARCH\x1A");
-    bytes[16] ^= 0x55;
-    let damaged = tmp.path().join("damaged-header.sqz");
-    fs::write(&damaged, bytes).unwrap();
-
-    let entries = read_archive_entries(&eng, &damaged, &OpenOptions::default()).unwrap();
-    assert!(entries.iter().any(|e| e.path.display == "project/a.txt"));
-    let report = eng
-        .test_summary(
-            &damaged,
-            &OpenOptions::default(),
-            &squallz_format_api::SafetyLimits::default(),
+impl SqzStructureFixture {
+    fn new(tag: &str) -> Self {
+        let tmp = TempDir::new(tag);
+        build_tree(tmp.path());
+        let archive = tmp.path().join("out.sqz");
+        let eng = engine();
+        let ctl = ControlToken::new();
+        eng.create(
+            &archive,
+            &[tmp.path().join("project")],
+            &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &NoProgress,
             &ctl,
         )
         .unwrap();
-    assert!(report.is_ok(), "problems: {:?}", report.problems);
+        Self {
+            tmp,
+            archive,
+            eng,
+            ctl,
+        }
+    }
 
-    let out = tmp.path().join("out");
-    eng.extract(
-        &damaged,
-        &out,
-        None,
-        &OpenOptions::default(),
-        &ExtractOptions::default(),
-        &NoProgress,
-        &ctl,
-    )
-    .unwrap();
-    assert_eq!(fs::read(out.join("project/a.txt")).unwrap(), b"hello sqz");
+    fn mutated_archive(&self, name: &str, mutate: impl FnOnce(&mut [u8])) -> PathBuf {
+        let mut bytes = fs::read(&self.archive).unwrap();
+        mutate(&mut bytes);
+        let damaged = self.tmp.path().join(name);
+        fs::write(&damaged, bytes).unwrap();
+        damaged
+    }
+
+    fn assert_recovers(&self, damaged: &Path) {
+        let entries = read_archive_entries(&self.eng, damaged, &OpenOptions::default()).unwrap();
+        assert!(entries.iter().any(|e| e.path.display == "project/a.txt"));
+        let report = self
+            .eng
+            .test_summary(
+                damaged,
+                &OpenOptions::default(),
+                &squallz_format_api::SafetyLimits::default(),
+                &NoProgress,
+                &self.ctl,
+            )
+            .unwrap();
+        assert!(report.is_ok(), "problems: {:?}", report.problems);
+        let out = self.tmp.path().join("out");
+        self.eng
+            .extract(
+                damaged,
+                &out,
+                None,
+                &OpenOptions::default(),
+                &ExtractOptions::default(),
+                &NoProgress,
+                &self.ctl,
+            )
+            .unwrap();
+        assert_eq!(fs::read(out.join("project/a.txt")).unwrap(), b"hello sqz");
+    }
+
+    fn assert_open_corrupt(&self, damaged: &Path) {
+        let err = read_archive_entries(&self.eng, damaged, &OpenOptions::default()).unwrap_err();
+        assert!(matches!(err, FormatError::CorruptArchive(_)), "{err:?}");
+    }
+}
+
+fn recovery_trailer_position(bytes: &[u8]) -> usize {
+    byte_pattern_positions(bytes, b"RSPC")
+        .pop()
+        .expect("recovery protection trailer found")
+}
+
+#[test]
+fn sqz_file_header_crc_damage_falls_back_to_footer() {
+    let fixture = SqzStructureFixture::new("sqz-header-fallback");
+    let damaged = fixture.mutated_archive("damaged-header.sqz", |bytes| {
+        assert_eq!(&bytes[0..8], b"SQZARCH\x1A");
+        bytes[16] ^= 0x55;
+    });
+    fixture.assert_recovers(&damaged);
 }
 
 #[test]
 fn sqz_valid_header_footer_uuid_mismatch_fails() {
-    let tmp = TempDir::new("sqz-header-uuid-mismatch");
-    build_tree(tmp.path());
-    let archive = tmp.path().join("out.sqz");
-    let eng = engine();
-    let ctl = ControlToken::new();
-    eng.create(
-        &archive,
-        &[tmp.path().join("project")],
-        &CreateOptions::default(),
-        CreateCommitPolicy::ReplaceExisting,
-        &NoProgress,
-        &ctl,
-    )
-    .unwrap();
-
-    let mut bytes = fs::read(&archive).unwrap();
-    assert_eq!(&bytes[0..8], b"SQZARCH\x1A");
-    bytes[16] ^= 0x55;
-    rewrite_sqz_header_crc(&mut bytes);
-    let damaged = tmp.path().join("valid-header-wrong-uuid.sqz");
-    fs::write(&damaged, bytes).unwrap();
-
-    let err = read_archive_entries(&eng, &damaged, &OpenOptions::default()).unwrap_err();
-    assert!(matches!(err, FormatError::CorruptArchive(_)), "{err:?}");
+    let fixture = SqzStructureFixture::new("sqz-header-uuid-mismatch");
+    let damaged = fixture.mutated_archive("valid-header-wrong-uuid.sqz", |bytes| {
+        assert_eq!(&bytes[0..8], b"SQZARCH\x1A");
+        bytes[16] ^= 0x55;
+        rewrite_sqz_header_crc(bytes);
+    });
+    fixture.assert_open_corrupt(&damaged);
 }
 
 #[test]
 fn sqz_footer_header_valid_crc_bad_index_bounds_fails() {
-    let tmp = TempDir::new("sqz-footer-index-bounds");
-    build_tree(tmp.path());
-    let archive = tmp.path().join("out.sqz");
-    let eng = engine();
-    let ctl = ControlToken::new();
-    eng.create(
-        &archive,
-        &[tmp.path().join("project")],
-        &CreateOptions::default(),
-        CreateCommitPolicy::ReplaceExisting,
-        &NoProgress,
-        &ctl,
-    )
-    .unwrap();
-
-    let mut bytes = fs::read(&archive).unwrap();
-    let footer_start = bytes.len() - 64;
-    bytes[footer_start + 8..footer_start + 16].copy_from_slice(&u64::MAX.to_le_bytes());
-    rewrite_sqz_footer_crc(&mut bytes);
-    let damaged = tmp.path().join("valid-footer-bad-index.sqz");
-    fs::write(&damaged, bytes).unwrap();
-
-    let err = read_archive_entries(&eng, &damaged, &OpenOptions::default()).unwrap_err();
-    assert!(matches!(err, FormatError::CorruptArchive(_)), "{err:?}");
+    let fixture = SqzStructureFixture::new("sqz-footer-index-bounds");
+    let damaged = fixture.mutated_archive("valid-footer-bad-index.sqz", |bytes| {
+        let footer_start = bytes.len() - 64;
+        bytes[footer_start + 8..footer_start + 16].copy_from_slice(&u64::MAX.to_le_bytes());
+        rewrite_sqz_footer_crc(bytes);
+    });
+    fixture.assert_open_corrupt(&damaged);
 }
 
 #[test]
 fn sqz_footer_magic_damage_recovers_from_recovery_scan() {
-    let tmp = TempDir::new("sqz-footer-scan-recovery");
-    build_tree(tmp.path());
-    let archive = tmp.path().join("out.sqz");
-    let eng = engine();
-    let ctl = ControlToken::new();
-    eng.create(
-        &archive,
-        &[tmp.path().join("project")],
-        &CreateOptions::default(),
-        CreateCommitPolicy::ReplaceExisting,
-        &NoProgress,
-        &ctl,
-    )
-    .unwrap();
-
-    let mut bytes = fs::read(&archive).unwrap();
-    let footer_start = bytes.len() - 64;
-    assert_eq!(
-        &bytes[footer_start + 56..footer_start + 64],
-        b"\x1ASQZEND\n"
-    );
-    bytes[footer_start + 63] ^= 0x5A;
-    let damaged = tmp.path().join("damaged-footer-magic.sqz");
-    fs::write(&damaged, bytes).unwrap();
-
-    let entries = read_archive_entries(&eng, &damaged, &OpenOptions::default()).unwrap();
-    assert!(entries.iter().any(|e| e.path.display == "project/a.txt"));
-    let report = eng
-        .test_summary(
-            &damaged,
-            &OpenOptions::default(),
-            &squallz_format_api::SafetyLimits::default(),
-            &NoProgress,
-            &ctl,
-        )
-        .unwrap();
-    assert!(report.is_ok(), "problems: {:?}", report.problems);
-
-    let out = tmp.path().join("out");
-    eng.extract(
-        &damaged,
-        &out,
-        None,
-        &OpenOptions::default(),
-        &ExtractOptions::default(),
-        &NoProgress,
-        &ctl,
-    )
-    .unwrap();
-    assert_eq!(fs::read(out.join("project/a.txt")).unwrap(), b"hello sqz");
+    let fixture = SqzStructureFixture::new("sqz-footer-scan-recovery");
+    let damaged = fixture.mutated_archive("damaged-footer-magic.sqz", |bytes| {
+        let footer_start = bytes.len() - 64;
+        assert_eq!(
+            &bytes[footer_start + 56..footer_start + 64],
+            b"\x1ASQZEND\n"
+        );
+        bytes[footer_start + 63] ^= 0x5A;
+    });
+    fixture.assert_recovers(&damaged);
 }
 
 #[test]
 fn sqz_footer_crc_field_damage_recovers_from_recovery_scan() {
-    let tmp = TempDir::new("sqz-footer-crc-field-recovery");
-    build_tree(tmp.path());
-    let archive = tmp.path().join("out.sqz");
-    let eng = engine();
-    let ctl = ControlToken::new();
-    eng.create(
-        &archive,
-        &[tmp.path().join("project")],
-        &CreateOptions::default(),
-        CreateCommitPolicy::ReplaceExisting,
-        &NoProgress,
-        &ctl,
-    )
-    .unwrap();
-
-    let mut bytes = fs::read(&archive).unwrap();
-    let footer_start = bytes.len() - 64;
-    assert_eq!(
-        &bytes[footer_start + 56..footer_start + 64],
-        b"\x1ASQZEND\n"
-    );
-    bytes[footer_start] ^= 0x5A;
-    let damaged = tmp.path().join("damaged-footer-crc-field.sqz");
-    fs::write(&damaged, bytes).unwrap();
-
-    let entries = read_archive_entries(&eng, &damaged, &OpenOptions::default()).unwrap();
-    assert!(entries.iter().any(|e| e.path.display == "project/a.txt"));
-    let report = eng
-        .test_summary(
-            &damaged,
-            &OpenOptions::default(),
-            &squallz_format_api::SafetyLimits::default(),
-            &NoProgress,
-            &ctl,
-        )
-        .unwrap();
-    assert!(report.is_ok(), "problems: {:?}", report.problems);
-
-    let out = tmp.path().join("out");
-    eng.extract(
-        &damaged,
-        &out,
-        None,
-        &OpenOptions::default(),
-        &ExtractOptions::default(),
-        &NoProgress,
-        &ctl,
-    )
-    .unwrap();
-    assert_eq!(fs::read(out.join("project/a.txt")).unwrap(), b"hello sqz");
+    let fixture = SqzStructureFixture::new("sqz-footer-crc-field-recovery");
+    let damaged = fixture.mutated_archive("damaged-footer-crc-field.sqz", |bytes| {
+        let footer_start = bytes.len() - 64;
+        assert_eq!(
+            &bytes[footer_start + 56..footer_start + 64],
+            b"\x1ASQZEND\n"
+        );
+        bytes[footer_start] ^= 0x5A;
+    });
+    fixture.assert_recovers(&damaged);
 }
 
 #[test]
 fn sqz_recovery_protection_trailer_damage_uses_intact_primary() {
-    let tmp = TempDir::new("sqz-rspc-trailer-damage");
-    build_tree(tmp.path());
-    let archive = tmp.path().join("out.sqz");
-    let eng = engine();
-    let ctl = ControlToken::new();
-    eng.create(
-        &archive,
-        &[tmp.path().join("project")],
-        &CreateOptions::default(),
-        CreateCommitPolicy::ReplaceExisting,
-        &NoProgress,
-        &ctl,
-    )
-    .unwrap();
-
-    let mut bytes = fs::read(&archive).unwrap();
-    let trailer_pos = byte_pattern_positions(&bytes, b"RSPC")
-        .pop()
-        .expect("recovery protection trailer found");
-    bytes[trailer_pos + 44] ^= 0x55;
-    let damaged = tmp.path().join("damaged-rspc-trailer.sqz");
-    fs::write(&damaged, bytes).unwrap();
-
-    let entries = read_archive_entries(&eng, &damaged, &OpenOptions::default()).unwrap();
-    assert!(entries.iter().any(|e| e.path.display == "project/a.txt"));
-    let report = eng
-        .test_summary(
-            &damaged,
-            &OpenOptions::default(),
-            &squallz_format_api::SafetyLimits::default(),
-            &NoProgress,
-            &ctl,
-        )
-        .unwrap();
-    assert!(report.is_ok(), "problems: {:?}", report.problems);
-
-    let out = tmp.path().join("out");
-    eng.extract(
-        &damaged,
-        &out,
-        None,
-        &OpenOptions::default(),
-        &ExtractOptions::default(),
-        &NoProgress,
-        &ctl,
-    )
-    .unwrap();
-    assert_eq!(fs::read(out.join("project/a.txt")).unwrap(), b"hello sqz");
+    let fixture = SqzStructureFixture::new("sqz-rspc-trailer-damage");
+    let damaged = fixture.mutated_archive("damaged-rspc-trailer.sqz", |bytes| {
+        let trailer_pos = recovery_trailer_position(bytes);
+        bytes[trailer_pos + 44] ^= 0x55;
+    });
+    fixture.assert_recovers(&damaged);
 }
 
 #[test]
 fn sqz_recovery_protection_trailer_and_primary_damage_fails() {
-    let tmp = TempDir::new("sqz-rspc-trailer-primary-damage");
-    build_tree(tmp.path());
-    let archive = tmp.path().join("out.sqz");
-    let eng = engine();
-    let ctl = ControlToken::new();
-    eng.create(
-        &archive,
-        &[tmp.path().join("project")],
-        &CreateOptions::default(),
-        CreateCommitPolicy::ReplaceExisting,
-        &NoProgress,
-        &ctl,
-    )
-    .unwrap();
-
-    let mut bytes = fs::read(&archive).unwrap();
-    corrupt_recovery_primary_blocks(&mut bytes, &[0]);
-    let trailer_pos = byte_pattern_positions(&bytes, b"RSPC")
-        .pop()
-        .expect("recovery protection trailer found");
-    bytes[trailer_pos + 44] ^= 0x55;
-    let damaged = tmp.path().join("damaged-rspc-trailer-primary.sqz");
-    fs::write(&damaged, bytes).unwrap();
-
-    let err = read_archive_entries(&eng, &damaged, &OpenOptions::default()).unwrap_err();
-    assert!(matches!(err, FormatError::CorruptArchive(_)), "{err:?}");
+    let fixture = SqzStructureFixture::new("sqz-rspc-trailer-primary-damage");
+    let damaged = fixture.mutated_archive("damaged-rspc-trailer-primary.sqz", |bytes| {
+        corrupt_recovery_primary_blocks(bytes, &[0]);
+        let trailer_pos = recovery_trailer_position(bytes);
+        bytes[trailer_pos + 44] ^= 0x55;
+    });
+    fixture.assert_open_corrupt(&damaged);
 }
 
 #[test]
 fn sqz_recovery_protection_trailer_valid_crc_bad_version_fails() {
-    let tmp = TempDir::new("sqz-rspc-trailer-version-damage");
-    build_tree(tmp.path());
-    let archive = tmp.path().join("out.sqz");
-    let eng = engine();
-    eng.create(
-        &archive,
-        &[tmp.path().join("project")],
-        &CreateOptions::default(),
-        CreateCommitPolicy::ReplaceExisting,
-        &NoProgress,
-        &ControlToken::new(),
-    )
-    .unwrap();
-
-    let mut bytes = fs::read(&archive).unwrap();
-    let trailer_pos = byte_pattern_positions(&bytes, b"RSPC")
-        .pop()
-        .expect("recovery protection trailer found");
-    bytes[trailer_pos + 4] = 2;
-    let crc = crc32c::crc32c(&bytes[trailer_pos..trailer_pos + 76]);
-    bytes[trailer_pos + 76..trailer_pos + 80].copy_from_slice(&crc.to_le_bytes());
-    let damaged = tmp.path().join("damaged-rspc-trailer-version.sqz");
-    fs::write(&damaged, bytes).unwrap();
-
-    let err = read_archive_entries(&eng, &damaged, &OpenOptions::default()).unwrap_err();
+    let fixture = SqzStructureFixture::new("sqz-rspc-trailer-version-damage");
+    let damaged = fixture.mutated_archive("damaged-rspc-trailer-version.sqz", |bytes| {
+        let trailer_pos = recovery_trailer_position(bytes);
+        bytes[trailer_pos + 4] = 2;
+        let crc = crc32c::crc32c(&bytes[trailer_pos..trailer_pos + 76]);
+        bytes[trailer_pos + 76..trailer_pos + 80].copy_from_slice(&crc.to_le_bytes());
+    });
+    let err = read_archive_entries(&fixture.eng, &damaged, &OpenOptions::default()).unwrap_err();
     assert!(matches!(err, FormatError::Unsupported(_)), "{err:?}");
 }
 

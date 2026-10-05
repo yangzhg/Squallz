@@ -3423,204 +3423,108 @@ fn compress_list_test_extract_sqz_roundtrip() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+struct SqzStructureCliFixture {
+    dir: PathBuf,
+    archive: PathBuf,
+}
+
+impl SqzStructureCliFixture {
+    fn new(tag: &str) -> Self {
+        let dir = temp_dir(tag);
+        let root = sample_tree(&dir);
+        let archive = dir.join("out.sqz");
+        let out = run(sqz().arg("pack").arg(&root).arg("-o").arg(&archive));
+        assert!(out.status.success(), "pack failed: {}", stderr(&out));
+        Self { dir, archive }
+    }
+
+    fn json_operation(&self, operation: &str, language: Option<&str>) -> Output {
+        let mut command = sqz();
+        if let Some(language) = language {
+            command.args(["--lang", language]);
+        }
+        run(command.arg(operation).arg(&self.archive).arg("--json"))
+    }
+
+    fn assert_recovers(self, report_language: Option<&str>) {
+        let out = self.json_operation("list", report_language);
+        assert!(out.status.success(), "list failed: {}", stderr(&out));
+        let entries = stdout_json(&out);
+        assert!(entries
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["path"] == "project/sub/b.txt"));
+        let out = self.json_operation("test", report_language);
+        assert!(out.status.success(), "test failed: {}", stderr(&out));
+        assert_eq!(stdout_json(&out)["ok"], true);
+        let dest = self.dir.join("extracted");
+        let out = run(sqz().arg("extract").arg(&self.archive).arg("-d").arg(&dest));
+        assert!(out.status.success(), "extract failed: {}", stderr(&out));
+        assert_eq!(
+            std::fs::read(dest.join("project/sub/b.txt")).unwrap(),
+            b"nested content"
+        );
+        std::fs::remove_dir_all(&self.dir).unwrap();
+    }
+
+    fn assert_rejected(self, operations: &[&str], detail: &str, report_language: Option<&str>) {
+        for operation in operations {
+            let out = self.json_operation(operation, report_language);
+            assert_json_error(&out, 3, "corrupt_archive", detail);
+        }
+        std::fs::remove_dir_all(&self.dir).unwrap();
+    }
+}
+
 #[test]
 fn sqz_header_damage_recovers_through_cli() {
-    let dir = temp_dir("sqz-header-cli");
-    let root = sample_tree(&dir);
-    let archive = dir.join("out.sqz");
-
-    let out = run(sqz().arg("pack").arg(&root).arg("-o").arg(&archive));
-    assert!(out.status.success(), "pack failed: {}", stderr(&out));
-    corrupt_sqz_file_header_crc(&archive);
-
-    let out = run(sqz().arg("list").arg(&archive).arg("--json"));
-    assert!(out.status.success(), "list failed: {}", stderr(&out));
-    let entries: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("valid JSON");
-    assert!(entries
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|entry| entry["path"] == "project/sub/b.txt"));
-
-    let out = run(sqz().arg("test").arg(&archive).arg("--json"));
-    assert!(out.status.success(), "test failed: {}", stderr(&out));
-    let report: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("valid JSON");
-    assert_eq!(report["ok"], true);
-
-    let dest = dir.join("extracted");
-    let out = run(sqz().arg("extract").arg(&archive).arg("-d").arg(&dest));
-    assert!(out.status.success(), "extract failed: {}", stderr(&out));
-    assert_eq!(
-        std::fs::read(dest.join("project/sub/b.txt")).unwrap(),
-        b"nested content"
-    );
-
-    std::fs::remove_dir_all(&dir).unwrap();
+    let fixture = SqzStructureCliFixture::new("sqz-header-cli");
+    corrupt_sqz_file_header_crc(&fixture.archive);
+    fixture.assert_recovers(None);
 }
 
 #[test]
 fn sqz_footer_header_bounds_damage_fails_through_cli() {
-    let dir = temp_dir("sqz-footer-cli");
-    let root = sample_tree(&dir);
-    let archive = dir.join("out.sqz");
-
-    let out = run(sqz().arg("pack").arg(&root).arg("-o").arg(&archive));
-    assert!(out.status.success(), "pack failed: {}", stderr(&out));
-    corrupt_sqz_footer_index_length_with_valid_crc(&archive);
-
-    let out = run(sqz().arg("list").arg(&archive).arg("--json"));
-    assert_json_error(&out, 3, "corrupt_archive", "footer index");
-
-    std::fs::remove_dir_all(&dir).unwrap();
+    let fixture = SqzStructureCliFixture::new("sqz-footer-cli");
+    corrupt_sqz_footer_index_length_with_valid_crc(&fixture.archive);
+    fixture.assert_rejected(&["list"], "footer index", None);
 }
 
 #[test]
 fn sqz_header_footer_uuid_mismatch_fails_through_cli() {
-    let dir = temp_dir("sqz-header-footer-uuid-cli");
-    let root = sample_tree(&dir);
-    let archive = dir.join("out.sqz");
-
-    let out = run(sqz().arg("pack").arg(&root).arg("-o").arg(&archive));
-    assert!(out.status.success(), "pack failed: {}", stderr(&out));
-    corrupt_sqz_file_header_uuid_with_valid_crc(&archive);
-
-    for command in ["list", "test"] {
-        let out = run(sqz().arg(command).arg(&archive).arg("--json"));
-        assert_json_error(&out, 3, "corrupt_archive", "header/footer UUID mismatch");
-    }
-
-    std::fs::remove_dir_all(&dir).unwrap();
+    let fixture = SqzStructureCliFixture::new("sqz-header-footer-uuid-cli");
+    corrupt_sqz_file_header_uuid_with_valid_crc(&fixture.archive);
+    fixture.assert_rejected(&["list", "test"], "header/footer UUID mismatch", None);
 }
 
 #[test]
 fn sqz_recovery_protection_trailer_damage_recovers_through_cli() {
-    let dir = temp_dir("sqz-rspc-trailer-cli");
-    let root = sample_tree(&dir);
-    let archive = dir.join("out.sqz");
-
-    let out = run(sqz().arg("pack").arg(&root).arg("-o").arg(&archive));
-    assert!(out.status.success(), "pack failed: {}", stderr(&out));
-    corrupt_sqz_recovery_protection_trailer(&archive);
-
-    let out = run(sqz()
-        .args(["--lang", "en-US", "list"])
-        .arg(&archive)
-        .arg("--json"));
-    assert!(out.status.success(), "list failed: {}", stderr(&out));
-    let entries: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("valid JSON");
-    assert!(entries
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|entry| entry["path"] == "project/sub/b.txt"));
-
-    let out = run(sqz()
-        .args(["--lang", "en-US", "test"])
-        .arg(&archive)
-        .arg("--json"));
-    assert!(out.status.success(), "test failed: {}", stderr(&out));
-    let report: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("valid JSON");
-    assert_eq!(report["ok"], true);
-
-    let dest = dir.join("extracted");
-    let out = run(sqz().arg("extract").arg(&archive).arg("-d").arg(&dest));
-    assert!(out.status.success(), "extract failed: {}", stderr(&out));
-    assert_eq!(
-        std::fs::read(dest.join("project/sub/b.txt")).unwrap(),
-        b"nested content"
-    );
-
-    std::fs::remove_dir_all(&dir).unwrap();
+    let fixture = SqzStructureCliFixture::new("sqz-rspc-trailer-cli");
+    corrupt_sqz_recovery_protection_trailer(&fixture.archive);
+    fixture.assert_recovers(Some("en-US"));
 }
 
 #[test]
 fn sqz_recovery_protection_trailer_and_primary_damage_fails_through_cli() {
-    let dir = temp_dir("sqz-rspc-trailer-primary-cli");
-    let root = sample_tree(&dir);
-    let archive = dir.join("out.sqz");
-
-    let out = run(sqz().arg("pack").arg(&root).arg("-o").arg(&archive));
-    assert!(out.status.success(), "pack failed: {}", stderr(&out));
-    corrupt_sqz_recovery_primary_block(&archive);
-    corrupt_sqz_recovery_protection_trailer(&archive);
-
-    let out = run(sqz()
-        .args(["--lang", "en-US", "list"])
-        .arg(&archive)
-        .arg("--json"));
-    assert_json_error(&out, 3, "corrupt_archive", "recovery protection trailer");
-
-    std::fs::remove_dir_all(&dir).unwrap();
+    let fixture = SqzStructureCliFixture::new("sqz-rspc-trailer-primary-cli");
+    corrupt_sqz_recovery_primary_block(&fixture.archive);
+    corrupt_sqz_recovery_protection_trailer(&fixture.archive);
+    fixture.assert_rejected(&["list"], "recovery protection trailer", Some("en-US"));
 }
 
 #[test]
 fn sqz_footer_magic_damage_recovers_through_cli() {
-    let dir = temp_dir("sqz-footer-recover-cli");
-    let root = sample_tree(&dir);
-    let archive = dir.join("out.sqz");
-
-    let out = run(sqz().arg("pack").arg(&root).arg("-o").arg(&archive));
-    assert!(out.status.success(), "pack failed: {}", stderr(&out));
-    corrupt_sqz_footer_magic(&archive);
-
-    let out = run(sqz().arg("list").arg(&archive).arg("--json"));
-    assert!(out.status.success(), "list failed: {}", stderr(&out));
-    let entries: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("valid JSON");
-    assert!(entries
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|entry| entry["path"] == "project/sub/b.txt"));
-
-    let out = run(sqz().arg("test").arg(&archive).arg("--json"));
-    assert!(out.status.success(), "test failed: {}", stderr(&out));
-    let report: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("valid JSON");
-    assert_eq!(report["ok"], true);
-
-    let dest = dir.join("extracted");
-    let out = run(sqz().arg("extract").arg(&archive).arg("-d").arg(&dest));
-    assert!(out.status.success(), "extract failed: {}", stderr(&out));
-    assert_eq!(
-        std::fs::read(dest.join("project/sub/b.txt")).unwrap(),
-        b"nested content"
-    );
-
-    std::fs::remove_dir_all(&dir).unwrap();
+    let fixture = SqzStructureCliFixture::new("sqz-footer-recover-cli");
+    corrupt_sqz_footer_magic(&fixture.archive);
+    fixture.assert_recovers(None);
 }
 
 #[test]
 fn sqz_footer_crc_field_damage_recovers_through_cli() {
-    let dir = temp_dir("sqz-footer-crc-field-cli");
-    let root = sample_tree(&dir);
-    let archive = dir.join("out.sqz");
-
-    let out = run(sqz().arg("pack").arg(&root).arg("-o").arg(&archive));
-    assert!(out.status.success(), "pack failed: {}", stderr(&out));
-    corrupt_sqz_footer_crc_field(&archive);
-
-    let out = run(sqz().arg("list").arg(&archive).arg("--json"));
-    assert!(out.status.success(), "list failed: {}", stderr(&out));
-    let entries: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("valid JSON");
-    assert!(entries
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|entry| entry["path"] == "project/sub/b.txt"));
-
-    let out = run(sqz().arg("test").arg(&archive).arg("--json"));
-    assert!(out.status.success(), "test failed: {}", stderr(&out));
-    let report: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("valid JSON");
-    assert_eq!(report["ok"], true);
-
-    let dest = dir.join("extracted");
-    let out = run(sqz().arg("extract").arg(&archive).arg("-d").arg(&dest));
-    assert!(out.status.success(), "extract failed: {}", stderr(&out));
-    assert_eq!(
-        std::fs::read(dest.join("project/sub/b.txt")).unwrap(),
-        b"nested content"
-    );
-
-    std::fs::remove_dir_all(&dir).unwrap();
+    let fixture = SqzStructureCliFixture::new("sqz-footer-crc-field-cli");
+    corrupt_sqz_footer_crc_field(&fixture.archive);
+    fixture.assert_recovers(None);
 }
 
 #[test]

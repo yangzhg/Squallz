@@ -1,8 +1,8 @@
 //! Task queue: jobs run on worker threads with a configurable parallel-job
 //! ceiling and CPU budget, per-job [`ControlToken`]s for pause/resume/cancel,
-//! per-job progress snapshots and state-change subscriptions. A one-worker
-//! queue remains strictly ordered. The GUI drives its task panel from this
-//! module; the CLI does not use it yet.
+//! scheduling state and synchronous phase safety. A one-worker queue remains
+//! strictly ordered. The GUI owns presentation progress; the CLI does not use
+//! this queue yet.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::panic::{self, AssertUnwindSafe};
@@ -14,7 +14,7 @@ use crate::api::{ControlToken, EntryPath, FormatError, ProgressPhase, ProgressSi
 use crate::lock_unpoisoned;
 
 /// A queued unit of work. It receives the job's own control token and a
-/// progress sink that feeds the queue's per-job progress snapshot.
+/// phase sink that keeps pause/cancel admission in sync with engine phases.
 pub type Job =
     Box<dyn FnOnce(&ControlToken, &dyn ProgressSink) -> Result<(), FormatError> + Send + 'static>;
 
@@ -94,24 +94,9 @@ impl JobState {
     }
 }
 
-/// Latest progress snapshot of a job.
-#[derive(Debug, Clone, Default)]
-pub struct JobProgress {
-    /// Bytes processed
-    pub done: u64,
-    /// Total bytes (0 = unknown)
-    pub total: u64,
-    /// Display path of the current entry
-    pub current: String,
-}
-
-/// State-change listener: `(id, new_state)`.
-type Listener = Arc<dyn Fn(JobId, &JobState) + Send + Sync>;
-
 struct Slot {
     state: JobState,
     token: Arc<ControlToken>,
-    progress: JobProgress,
     interruptible: bool,
     resources: JobResources,
     job: Option<Job>,
@@ -123,7 +108,6 @@ struct Inner {
     wakeup: Condvar,
     /// Signals idleness changes to [`JobQueue::wait_idle`].
     idle: Condvar,
-    listeners: Mutex<Vec<Listener>>,
     running: AtomicUsize,
     cpu_threads_in_use: AtomicUsize,
     max_running: AtomicUsize,
@@ -140,7 +124,6 @@ impl Inner {
             queue: Mutex::new(VecDeque::new()),
             wakeup: Condvar::new(),
             idle: Condvar::new(),
-            listeners: Mutex::new(Vec::new()),
             running: AtomicUsize::new(0),
             cpu_threads_in_use: AtomicUsize::new(0),
             max_running: AtomicUsize::new(max_running.clamp(1, max_workers)),
@@ -209,21 +192,11 @@ impl Inner {
         (requested, cancelled_queued)
     }
 
-    fn notify_state(&self, id: JobId, state: &JobState) {
-        let listeners = lock_unpoisoned(&self.listeners).clone();
-        for listener in listeners {
-            listener(id, state);
-        }
-    }
-
     fn set_state(&self, id: JobId, state: JobState) {
-        {
-            let mut slots = lock_unpoisoned(&self.slots);
-            if let Some(slot) = slots.get_mut(&id) {
-                slot.state = state.clone();
-            }
+        let mut slots = lock_unpoisoned(&self.slots);
+        if let Some(slot) = slots.get_mut(&id) {
+            slot.state = state;
         }
-        self.notify_state(id, &state);
     }
 
     /// Notifies workers and idle waiters while holding the queue lock so a
@@ -295,21 +268,14 @@ impl Inner {
     }
 }
 
-/// Per-job progress sink feeding the queue's snapshot.
-struct SlotProgress {
+/// Synchronous phase gate for a job's pause/cancel admission.
+struct PhaseGate {
     inner: Arc<Inner>,
     id: JobId,
 }
 
-impl ProgressSink for SlotProgress {
-    fn on_progress(&self, done: u64, total: u64, current: &EntryPath) {
-        let mut slots = lock_unpoisoned(&self.inner.slots);
-        if let Some(slot) = slots.get_mut(&self.id) {
-            slot.progress.done = done;
-            slot.progress.total = total;
-            slot.progress.current.clone_from(&current.display);
-        }
-    }
+impl ProgressSink for PhaseGate {
+    fn on_progress(&self, _done: u64, _total: u64, _current: &EntryPath) {}
 
     fn on_phase(&self, _phase: ProgressPhase, interruptible: bool) {
         let mut slots = lock_unpoisoned(&self.inner.slots);
@@ -370,7 +336,6 @@ impl JobQueue {
             Slot {
                 state: JobState::Queued,
                 token: ControlToken::new(),
-                progress: JobProgress::default(),
                 interruptible: true,
                 resources,
                 job: Some(job),
@@ -399,13 +364,6 @@ impl JobQueue {
             .map(|s| s.state.clone())
     }
 
-    /// Latest progress snapshot of a job.
-    pub fn progress(&self, id: JobId) -> Option<JobProgress> {
-        lock_unpoisoned(&self.inner.slots)
-            .get(&id)
-            .map(|s| s.progress.clone())
-    }
-
     /// Removes a completed slot after a presentation layer has retained any
     /// result it still needs. Active jobs are never removed.
     pub fn forget_terminal(&self, id: JobId) -> bool {
@@ -415,11 +373,6 @@ impl JobQueue {
         }
         slots.remove(&id);
         true
-    }
-
-    /// Registers a state-change listener (kept for the queue's lifetime).
-    pub fn subscribe(&self, listener: impl Fn(JobId, &JobState) + Send + Sync + 'static) {
-        lock_unpoisoned(&self.inner.listeners).push(Arc::new(listener));
     }
 
     /// Pauses a job: takes effect at the next chunk boundary of a running job;
@@ -620,9 +573,6 @@ impl JobQueue {
     /// capacity for another job in the same group.
     pub fn try_cancel_many(&self, ids: &[JobId]) -> Vec<JobId> {
         let (requested, cancelled_queued) = self.inner.request_cancel_many(ids);
-        for id in &cancelled_queued {
-            self.inner.notify_state(*id, &JobState::Cancelled);
-        }
         if !cancelled_queued.is_empty() {
             self.inner.notify_waiters();
         }
@@ -630,7 +580,7 @@ impl JobQueue {
     }
 
     /// Blocks until the queue is empty and no job is running (test/CLI
-    /// convenience; the GUI subscribes instead).
+    /// convenience; the GUI retains its own presentation snapshots).
     pub fn wait_idle(&self) {
         let mut queue = lock_unpoisoned(&self.inner.queue);
         while !queue.is_empty() || self.inner.running.load(Ordering::SeqCst) > 0 {
@@ -700,14 +650,12 @@ fn worker_loop(inner: &Arc<Inner>) {
         // transition. Cancellation therefore sees either a queued closure it
         // can remove or a running job it must stop cooperatively.
         let claimed = inner.claim_job(id);
-        let Some((job, token, start_state)) = claimed else {
+        let Some((job, token, _)) = claimed else {
             inner.release_resources(reserved_threads);
             continue;
         };
 
-        inner.notify_state(id, &start_state);
-
-        let sink = SlotProgress {
+        let sink = PhaseGate {
             inner: Arc::clone(inner),
             id,
         };
@@ -1212,7 +1160,6 @@ mod tests {
             Slot {
                 state: JobState::Queued,
                 token: ControlToken::new(),
-                progress: JobProgress::default(),
                 interruptible: true,
                 resources: JobResources::default(),
                 job: Some(Box::new(|_ctl, _progress| Ok(()))),
@@ -1289,25 +1236,15 @@ mod tests {
         assert_eq!(queue.state(id), Some(JobState::Done));
     }
 
-    /// A failing job records its error and does not block later jobs;
-    /// subscribers observe the state changes.
+    /// A failing job records its error and does not block later jobs.
     #[test]
-    fn failed_job_does_not_block_queue_and_notifies() {
+    fn failed_job_does_not_block_queue() {
         let queue = JobQueue::new(1);
-        let seen = Arc::new(Mutex::new(Vec::new()));
-        let seen_c = Arc::clone(&seen);
-        queue.subscribe(move |id, state| {
-            seen_c.lock().unwrap().push((id, state.clone()));
-        });
         let id1 = queue.submit(Box::new(|_ctl, _p| Err(FormatError::Other("boom".into()))));
         let id2 = queue.submit(Box::new(|_ctl, _p| Ok(())));
         queue.wait_idle();
         assert_eq!(queue.state(id1), Some(JobState::Failed("boom".into())));
         assert_eq!(queue.state(id2), Some(JobState::Done));
-        let events = seen.lock().unwrap();
-        assert!(events.contains(&(id1, JobState::Running)));
-        assert!(events.contains(&(id1, JobState::Failed("boom".into()))));
-        assert!(events.contains(&(id2, JobState::Done)));
     }
 
     #[test]
@@ -1325,21 +1262,6 @@ mod tests {
             Some(JobState::Failed("job panicked".into()))
         );
         assert_eq!(queue.state(id2), Some(JobState::Done));
-    }
-
-    /// Progress reported by a job is visible through the snapshot API.
-    #[test]
-    fn progress_snapshot_is_observable() {
-        let queue = JobQueue::new(1);
-        let id = queue.submit(Box::new(|_ctl, progress| {
-            progress.on_progress(50, 100, &EntryPath::from_utf8("a.txt"));
-            Ok(())
-        }));
-        queue.wait_idle();
-        let snapshot = queue.progress(id).unwrap();
-        assert_eq!(snapshot.done, 50);
-        assert_eq!(snapshot.total, 100);
-        assert_eq!(snapshot.current, "a.txt");
     }
 
     #[test]

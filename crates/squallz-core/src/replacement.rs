@@ -28,7 +28,7 @@ pub(crate) use owner::{
 };
 pub(crate) use prepare::{discard_archive_stage, prepare};
 pub(crate) use record::persist;
-pub(crate) use scope::{canonical_requested, open_new_artifact, RecordPhase, Scope};
+pub(crate) use scope::{canonical_requested, RecordPhase, Scope};
 
 pub(crate) fn move_path_no_replace(
     from: &std::path::Path,

@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::api::FormatError;
 use crate::destination_guard::path_state_digest;
-use crate::filesystem_identity::open_regular_file_no_follow_read_write;
+use crate::filesystem_identity::{open_new_artifact, open_regular_file_no_follow_read_write};
 use crate::stored_os_string::StoredOsString;
 use crate::{parent_or_current, sync_directory};
 
@@ -693,26 +693,7 @@ fn write_split_transaction_with_state(
             SPLIT_JOURNAL_SEQUENCE.fetch_add(1, Ordering::Relaxed)
         ));
         let temp_path = parent.join(temp_name);
-        let mut options = OpenOptions::new();
-        options.read(true).write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-
-            options.mode(0o600);
-        }
-        #[cfg(windows)]
-        {
-            use std::os::windows::fs::OpenOptionsExt;
-            use windows_sys::Win32::Storage::FileSystem::{
-                FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ,
-            };
-
-            options
-                .share_mode(FILE_SHARE_READ | FILE_SHARE_DELETE)
-                .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
-        }
-        let file = options.open(&temp_path)?;
+        let file = open_new_artifact(&temp_path)?;
         let identity = split_file_identity(&file)?;
         if split_path_identity(&temp_path).ok() != Some(identity) {
             return Err(FormatError::Io(io::Error::other(format!(

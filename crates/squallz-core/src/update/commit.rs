@@ -10,7 +10,8 @@ use crate::api::{
 use crate::destination_guard::{verify_destination_guard, verify_destination_guard_with_progress};
 use crate::extract_guard::inspect_bound_archive_source_state;
 use crate::filesystem_identity::{
-    file_identity, open_regular_file_no_follow, path_identity, PathIdentity, RegularFileState,
+    file_identity, open_new_artifact, open_regular_file_no_follow, path_identity, PathIdentity,
+    RegularFileState,
 };
 use crate::replacement::{
     self, ActiveWriter, ArtifactRole, Authorization, Failure, Outcome, OwnedInput, PersistFailure,
@@ -381,7 +382,7 @@ fn public_label(target: &Path) -> EntryPath {
 fn reserve_stage(scope: &Scope) -> Result<ReservedTempFile, FormatError> {
     for _ in 0..1000 {
         let path = scope.reserve_name("stage");
-        match replacement::open_new_artifact(&path) {
+        match open_new_artifact(&path) {
             Ok(file) => {
                 let identity = file_identity(&file).map_err(|error| unbound_stage(&path, error))?;
                 let stage = ReservedTempFile {
