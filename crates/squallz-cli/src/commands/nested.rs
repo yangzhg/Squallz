@@ -262,7 +262,7 @@ pub(crate) fn extract_nested_archive_to_temp(
         || progress.finish(),
         |password| {
             progress.on_phase(ProgressPhase::ArchiveOpen, true);
-            let mut outer = ctx.engine.open_with_control(
+            let mut outer = ctx.engine.open(
                 archive,
                 &OpenOptions {
                     password: password.cloned(),

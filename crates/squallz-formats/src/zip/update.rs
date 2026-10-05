@@ -280,7 +280,7 @@ fn rewrite(
     progress: &dyn ProgressSink,
     ctl: &ControlToken,
 ) -> Result<(), FormatError> {
-    let mut writer = ZipArchiveWriter::new_with_control(output, opts, ctl);
+    let mut writer = ZipArchiveWriter::new(output, opts, ctl);
     writer.set_raw_comment(archive.comment())?;
 
     // Progress in bytes: raw (compressed) bytes for copies, plain bytes for

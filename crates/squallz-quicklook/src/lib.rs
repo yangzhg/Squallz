@@ -10,8 +10,8 @@ use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use squallz_format_api::{
-    ArchiveReader, Detected, EntryMeta, EntryType, FormatError, OpenOptions, ReadSeek,
-    StreamFactory,
+    ArchiveReader, ControlToken, Detected, EntryMeta, EntryType, FormatError, OpenOptions,
+    ReadSeek, StreamFactory,
 };
 use squallz_i18n::Localizer;
 
@@ -276,7 +276,7 @@ fn open_preview(path: &Path, options: RenderOptions) -> Result<PreviewOpen, Form
             let format_id = format.id().to_owned();
             let source: Box<dyn ReadSeek> =
                 Box::new(BudgetedReader::new(file, options.input_read_budget));
-            let reader = format.open(source, &OpenOptions::default())?;
+            let reader = format.open(source, &OpenOptions::default(), &ControlToken::default())?;
             Ok(PreviewOpen::Archive {
                 format: format_id,
                 reader,

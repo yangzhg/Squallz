@@ -7,7 +7,7 @@ use squallz_core::api::FormatInfo;
 
 use crate::commands::reports::print_pretty_json;
 use crate::commands::runtime::{
-    is_external, Availability, RuntimeFacts, RuntimeNeed, RAR_LIMITATIONS,
+    is_external, Availability, FormatOverview, RuntimeFacts, RuntimeNeed, RAR_LIMITATIONS,
 };
 use crate::commands::{Ctx, ModernStatusField, ModernTableColumn, ModernTableRow};
 use crate::errors::CliError;
@@ -45,16 +45,7 @@ struct DoctorReport<'a> {
 
 impl<'a> DoctorReport<'a> {
     fn new(formats: &[FormatInfo], strict: bool, runtime: &'a RuntimeFacts) -> Self {
-        let built_in_formats = formats
-            .iter()
-            .filter(|format| !is_external(format.id))
-            .count();
-        let external_formats = formats.len().saturating_sub(built_in_formats);
-        let ready_formats = formats
-            .iter()
-            .filter(|format| runtime.format_ready(format))
-            .count();
-        let missing_formats = formats.len().saturating_sub(ready_formats);
+        let overview = FormatOverview::new(formats, runtime);
         let checks = vec![
             built_in_check(formats),
             sevenzip_check(formats, strict, runtime),
@@ -69,10 +60,10 @@ impl<'a> DoctorReport<'a> {
             ok,
             strict,
             total_formats: formats.len(),
-            built_in_formats,
-            external_formats,
-            ready_formats,
-            missing_formats,
+            built_in_formats: overview.built_in,
+            external_formats: overview.external,
+            ready_formats: overview.ready,
+            missing_formats: overview.missing,
             checks,
         }
     }

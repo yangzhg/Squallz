@@ -94,15 +94,7 @@ pub(super) struct GeneratedWimPart {
 }
 
 impl StagedSplitWimSet {
-    #[cfg(test)]
     pub(super) fn from_discovered(
-        discovered: DiscoveredSplitWimSet,
-        selected_src: Box<dyn ReadSeek>,
-    ) -> Result<Self, FormatError> {
-        Self::from_discovered_with_control(discovered, selected_src, &ControlToken::default())
-    }
-
-    pub(super) fn from_discovered_with_control(
         discovered: DiscoveredSplitWimSet,
         mut selected_src: Box<dyn ReadSeek>,
         control: &ControlToken,
@@ -222,16 +214,7 @@ impl StagedSplitWimSet {
     }
 }
 
-#[cfg(test)]
 pub(super) fn bind_file(
-    source_path: &Path,
-    source_identity: Option<PhysicalFileIdentity>,
-    src: Box<dyn ReadSeek>,
-) -> Result<BoundWimSource, FormatError> {
-    bind_file_with_control(source_path, source_identity, src, &ControlToken::default())
-}
-
-pub(super) fn bind_file_with_control(
     source_path: &Path,
     source_identity: Option<PhysicalFileIdentity>,
     mut src: Box<dyn ReadSeek>,
@@ -244,14 +227,6 @@ pub(super) fn bind_file_with_control(
 }
 
 pub(super) fn probe_bound_file(
-    source_path: &Path,
-    source_identity: Option<PhysicalFileIdentity>,
-    src: &mut dyn ReadSeek,
-) -> Result<Option<ArchiveSourceSet>, FormatError> {
-    probe_bound_file_with_control(source_path, source_identity, src, &ControlToken::default())
-}
-
-pub(super) fn probe_bound_file_with_control(
     source_path: &Path,
     source_identity: Option<PhysicalFileIdentity>,
     src: &mut dyn ReadSeek,
@@ -630,9 +605,14 @@ mod tests {
         let selected = &paths[1];
         let mut stream = File::open(selected).unwrap();
         stream.seek(SeekFrom::Start(9)).unwrap();
-        let source_set = probe_bound_file(selected, Some(physical_identity(selected)), &mut stream)
-            .unwrap()
-            .unwrap();
+        let source_set = probe_bound_file(
+            selected,
+            Some(physical_identity(selected)),
+            &mut stream,
+            &ControlToken::default(),
+        )
+        .unwrap()
+        .unwrap();
 
         assert_eq!(stream.stream_position().unwrap(), 9);
         assert_eq!(source_set.primary(), paths[0]);
@@ -650,8 +630,13 @@ mod tests {
         fs::write(&third, header(3, 3, [0x33; 16])).unwrap();
         let mut stream = File::open(&third).unwrap();
 
-        let error =
-            probe_bound_file(&third, Some(physical_identity(&third)), &mut stream).unwrap_err();
+        let error = probe_bound_file(
+            &third,
+            Some(physical_identity(&third)),
+            &mut stream,
+            &ControlToken::default(),
+        )
+        .unwrap_err();
 
         assert_eq!(
             error.missing_volume_path(),
@@ -670,8 +655,13 @@ mod tests {
         fs::write(&second, header(2, 2, [0x22; 16])).unwrap();
         let mut stream = File::open(&first).unwrap();
 
-        let error =
-            probe_bound_file(&first, Some(physical_identity(&first)), &mut stream).unwrap_err();
+        let error = probe_bound_file(
+            &first,
+            Some(physical_identity(&first)),
+            &mut stream,
+            &ControlToken::default(),
+        )
+        .unwrap_err();
 
         assert!(matches!(error, FormatError::CorruptArchive(_)));
         fs::remove_dir_all(root).unwrap();
@@ -687,13 +677,22 @@ mod tests {
         fs::write(&second, header(2, 2, [0x77; 16])).unwrap();
         let selected_stream = File::open(&second).unwrap();
         let selected_identity = physical_identity(&second);
-        let BoundWimSource::Split(discovered, selected_stream) =
-            bind_file(&second, Some(selected_identity), Box::new(selected_stream)).unwrap()
-        else {
+        let BoundWimSource::Split(discovered, selected_stream) = bind_file(
+            &second,
+            Some(selected_identity),
+            Box::new(selected_stream),
+            &ControlToken::default(),
+        )
+        .unwrap() else {
             panic!("expected Split WIM source");
         };
 
-        let staged = StagedSplitWimSet::from_discovered(discovered, selected_stream).unwrap();
+        let staged = StagedSplitWimSet::from_discovered(
+            discovered,
+            selected_stream,
+            &ControlToken::default(),
+        )
+        .unwrap();
 
         assert_eq!(staged.path().file_name(), Some(OsStr::new("archive.swm")));
         assert!(staged.root.join("archive2.swm").is_file());

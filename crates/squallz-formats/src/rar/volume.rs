@@ -149,12 +149,7 @@ pub(crate) struct StagedRarSet {
 }
 
 impl StagedRarSet {
-    #[cfg(test)]
-    pub(super) fn single(src: Box<dyn ReadSeek>) -> Result<Self, FormatError> {
-        Self::single_with_control(src, &ControlToken::default())
-    }
-
-    pub(super) fn single_with_control(
+    pub(super) fn single(
         mut src: Box<dyn ReadSeek>,
         control: &ControlToken,
     ) -> Result<Self, FormatError> {
@@ -173,21 +168,7 @@ impl StagedRarSet {
         })
     }
 
-    #[cfg(test)]
     pub(super) fn from_bound_file(
-        source_path: &Path,
-        source_identity: Option<PhysicalFileIdentity>,
-        src: Box<dyn ReadSeek>,
-    ) -> Result<Self, FormatError> {
-        Self::from_bound_file_with_control(
-            source_path,
-            source_identity,
-            src,
-            &ControlToken::default(),
-        )
-    }
-
-    pub(super) fn from_bound_file_with_control(
         source_path: &Path,
         source_identity: Option<PhysicalFileIdentity>,
         mut src: Box<dyn ReadSeek>,
@@ -197,7 +178,7 @@ impl StagedRarSet {
         let Some(discovered) =
             discover_bound_set(source_path, source_identity, &mut *src, control)?
         else {
-            return Self::single_with_control(src, control);
+            return Self::single(src, control);
         };
         control.checkpoint()?;
         let DiscoveredRarSet {
@@ -297,7 +278,7 @@ impl StagedRarSet {
     ) -> Result<Self, FormatError> {
         let file = open_regular_file_no_follow(source_path)?;
         let identity = SourceIdentity::from_file(&file)?.physical_identity();
-        Self::from_bound_file(source_path, Some(identity), src)
+        Self::from_bound_file(source_path, Some(identity), src, &ControlToken::default())
     }
 
     pub(crate) fn path(&self) -> &Path {
@@ -561,14 +542,6 @@ impl LegacyScheme {
 }
 
 pub(super) fn probe_bound_file(
-    source_path: &Path,
-    source_identity: Option<PhysicalFileIdentity>,
-    src: &mut dyn ReadSeek,
-) -> Result<Option<ArchiveSourceSet>, FormatError> {
-    probe_bound_file_with_control(source_path, source_identity, src, &ControlToken::default())
-}
-
-pub(super) fn probe_bound_file_with_control(
     source_path: &Path,
     source_identity: Option<PhysicalFileIdentity>,
     src: &mut dyn ReadSeek,
@@ -1945,7 +1918,12 @@ mod tests {
         fs::write(&selected, rar5_volume(1, false)).unwrap();
         let opened = File::open(&selected).unwrap();
 
-        let error = match StagedRarSet::from_bound_file(&selected, None, Box::new(opened)) {
+        let error = match StagedRarSet::from_bound_file(
+            &selected,
+            None,
+            Box::new(opened),
+            &ControlToken::default(),
+        ) {
             Ok(_) => panic!("native discovery without an opened-file identity must fail closed"),
             Err(error) => error,
         };
@@ -1969,8 +1947,12 @@ mod tests {
         fs::rename(&selected, &displaced).unwrap();
         fs::write(&selected, rar5_volume(1, false)).unwrap();
 
-        let error = match StagedRarSet::from_bound_file(&selected, Some(identity), Box::new(opened))
-        {
+        let error = match StagedRarSet::from_bound_file(
+            &selected,
+            Some(identity),
+            Box::new(opened),
+            &ControlToken::default(),
+        ) {
             Ok(_) => panic!("replaced selected path must not be mixed with sibling volumes"),
             Err(error) => error,
         };
@@ -2013,9 +1995,14 @@ mod tests {
             .unwrap()
             .physical_identity();
 
-        let source_set = probe_bound_file(&second, Some(identity), &mut selected)
-            .unwrap()
-            .unwrap();
+        let source_set = probe_bound_file(
+            &second,
+            Some(identity),
+            &mut selected,
+            &ControlToken::default(),
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(source_set.primary(), first);
         assert_eq!(source_set.members(), &[first, second]);
         assert_eq!(selected.stream_position().unwrap(), 0);
@@ -2035,9 +2022,14 @@ mod tests {
             .unwrap()
             .physical_identity();
 
-        assert!(probe_bound_file(&first, Some(identity), &mut selected)
-            .unwrap()
-            .is_none());
+        assert!(probe_bound_file(
+            &first,
+            Some(identity),
+            &mut selected,
+            &ControlToken::default()
+        )
+        .unwrap()
+        .is_none());
 
         fs::remove_dir_all(dir).unwrap();
     }
@@ -2127,8 +2119,11 @@ mod tests {
 
     #[test]
     fn external_errors_do_not_expose_the_private_staging_path() {
-        let staged =
-            StagedRarSet::single(Box::new(Cursor::new(rar5_single()))).expect("staging must work");
+        let staged = StagedRarSet::single(
+            Box::new(Cursor::new(rar5_single())),
+            &ControlToken::default(),
+        )
+        .expect("staging must work");
         let root = staged.root.to_string_lossy().into_owned();
         let error = staged.remap_external_error(FormatError::CorruptArchive(format!(
             "backend failed while reading {}",
@@ -2376,7 +2371,11 @@ mod tests {
     fn staging_uses_private_permissions_and_rejects_symlink_members() {
         use std::os::unix::fs::{symlink, MetadataExt, PermissionsExt};
 
-        let staged = StagedRarSet::single(Box::new(Cursor::new(rar5_volume(0, false)))).unwrap();
+        let staged = StagedRarSet::single(
+            Box::new(Cursor::new(rar5_volume(0, false))),
+            &ControlToken::default(),
+        )
+        .unwrap();
         assert_eq!(
             fs::metadata(&staged.root).unwrap().permissions().mode() & 0o777,
             0o700

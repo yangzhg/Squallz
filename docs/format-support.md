@@ -375,7 +375,10 @@ Implemented code paths:
   scripts, and release checks can distinguish the actual product boundary from
   runtime availability: RAR is read-only, not bundled, primary read uses
   `SQUALLZ_7Z` / `7zz` / `7z` / `7za`; `SQUALLZ_BSDTAR` / `bsdtar` is an
-  explicit or validated single-file compatibility fallback, while
+  explicit or validated single-file compatibility fallback. Ordinary single-file
+  input also uses bsdtar when no 7z executable is available and no password was
+  supplied; native volumes and password input still require 7zz/7z. An invalid
+  explicit `SQUALLZ_BSDTAR` is not replaced by another tool. Meanwhile,
   `SQUALLZ_UNRAR` / `unrar` is an optional decoder for confirmed-unencrypted
   RAR7 v6 entry streams. Neither fallback is a bundled cross-platform promise;
   `fallback_scopes` is the exhaustive machine-readable policy.

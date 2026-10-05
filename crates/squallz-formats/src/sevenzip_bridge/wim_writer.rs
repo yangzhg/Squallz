@@ -98,13 +98,6 @@ pub(super) fn create_budget(
 pub(super) fn create(
     dst: Box<dyn WriteSeek>,
     opts: &CreateOptions,
-) -> Result<Box<dyn ArchiveWriter>, FormatError> {
-    create_with_control(dst, opts, &ControlToken::default())
-}
-
-pub(super) fn create_with_control(
-    dst: Box<dyn WriteSeek>,
-    opts: &CreateOptions,
     ctl: &ControlToken,
 ) -> Result<Box<dyn ArchiveWriter>, FormatError> {
     validate_create_options(opts)?;
@@ -113,7 +106,7 @@ pub(super) fn create_with_control(
         dst,
         staging: TempWorkspace::new("wim-stage")?,
         output: TempPath::new("wim")?,
-        compress: wim_compress_arg(opts.level),
+        compress: wim_compression_name(opts.level),
         threads: opts.resources.threads.map(|threads| threads.max(1)),
         control: ctl.clone(),
     }))
@@ -352,12 +345,12 @@ impl ArchiveWriter for WimArchiveWriter {
     }
 }
 
-fn wim_compress_arg(level: CompressionLevel) -> &'static str {
+pub fn wim_compression_name(level: CompressionLevel) -> &'static str {
     match level {
-        CompressionLevel::Store => "--compress=none",
-        CompressionLevel::Fastest | CompressionLevel::Fast => "--compress=XPRESS",
-        CompressionLevel::Normal | CompressionLevel::Maximum => "--compress=LZX",
-        CompressionLevel::Ultra => "--compress=LZMS",
+        CompressionLevel::Store => "none",
+        CompressionLevel::Fastest | CompressionLevel::Fast => "XPRESS",
+        CompressionLevel::Normal | CompressionLevel::Maximum => "LZX",
+        CompressionLevel::Ultra => "LZMS",
     }
 }
 
@@ -401,7 +394,7 @@ fn wimlib_capture_command(
         .arg(source)
         .arg(output)
         .arg("Squallz")
-        .arg(compress)
+        .arg(format!("--compress={compress}"))
         .arg("--no-acls")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -785,21 +778,26 @@ mod tests {
 
     #[test]
     fn wim_compress_args_match_creation_levels() {
-        assert_eq!(wim_compress_arg(CompressionLevel::Store), "--compress=none");
-        assert_eq!(
-            wim_compress_arg(CompressionLevel::Fastest),
-            "--compress=XPRESS"
-        );
-        assert_eq!(
-            wim_compress_arg(CompressionLevel::Fast),
-            "--compress=XPRESS"
-        );
-        assert_eq!(wim_compress_arg(CompressionLevel::Normal), "--compress=LZX");
-        assert_eq!(
-            wim_compress_arg(CompressionLevel::Maximum),
-            "--compress=LZX"
-        );
-        assert_eq!(wim_compress_arg(CompressionLevel::Ultra), "--compress=LZMS");
+        for (level, name) in [
+            (CompressionLevel::Store, "none"),
+            (CompressionLevel::Fastest, "XPRESS"),
+            (CompressionLevel::Fast, "XPRESS"),
+            (CompressionLevel::Normal, "LZX"),
+            (CompressionLevel::Maximum, "LZX"),
+            (CompressionLevel::Ultra, "LZMS"),
+        ] {
+            assert_eq!(wim_compression_name(level), name);
+            let command = wimlib_capture_command(
+                Path::new("wimlib-imagex"),
+                Path::new("source"),
+                Path::new("archive.wim"),
+                wim_compression_name(level),
+                None,
+            );
+            assert!(command
+                .get_args()
+                .any(|arg| arg == format!("--compress={name}").as_str()));
+        }
     }
 
     #[test]
@@ -808,7 +806,7 @@ mod tests {
             Path::new("wimlib-imagex"),
             Path::new("source"),
             Path::new("archive.wim"),
-            "--compress=LZX",
+            "LZX",
             Some(6),
         );
         let args = command
@@ -908,7 +906,11 @@ mod tests {
                 Err(FormatError::Unsupported(_))
             ));
             assert!(matches!(
-                create(Box::new(io::Cursor::new(Vec::new())), &opts),
+                create(
+                    Box::new(io::Cursor::new(Vec::new())),
+                    &opts,
+                    &ControlToken::default()
+                ),
                 Err(FormatError::Unsupported(_))
             ));
         }
@@ -1018,7 +1020,7 @@ mod tests {
         std::env::set_var("SQUALLZ_WIMLIB", tool.path());
 
         let control = ControlToken::default();
-        let writer = create_with_control(
+        let writer = create(
             Box::new(io::Cursor::new(Vec::<u8>::new())),
             &CreateOptions::default(),
             &control,

@@ -950,7 +950,7 @@ fn run_protect_job(
     job: &ProtectJob,
 ) -> Result<JobSuccess, FormatError> {
     let archive = resolve_path(base_dir, &job.archive);
-    let sources = ctx.engine.recovery_protect_sources(&archive)?;
+    let sources = ctx.engine.recovery_protect_sources(&archive, &ctx.ctl)?;
     let redundancy = match job.tolerate_loss {
         Some(count) => redundancy_for_tolerated_volume_loss(&sources, count)?,
         None => job.redundancy.unwrap_or(10),

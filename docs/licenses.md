@@ -187,15 +187,16 @@ tauri 的传递依赖树较大（wry/tao/objc2 系、muda 等），均为 MIT/Ap
 | 7-Zip / 7zz / 7z | 外部可执行文件，未随本仓库锁定或分发 | GNU LGPL + unRAR restriction（按官方 `license.txt` 复核） | 活跃；官方支持三平台构建和广泛格式清单 | 长尾 unpack-only bridge；候选 WIM writer；RAR 只读候选 |
 | RARLAB UnRAR | 用户自行安装的外部可执行文件，未随本仓库锁定或分发 | RARLAB freeware / unRAR license，禁止借此重建专有 RAR 压缩算法 | 活跃；官方 RAR/WinRAR 平台包提供命令行 UnRAR | 仅为 7zz/7z 已明确确认未加密的 RAR7 v6 条目提供只读流式解码 |
 | wimlib / wimlib-imagex | 外部库或可执行文件候选，未引入 | GPL-3.0 / LGPL-2.1 组合，具体构建配置需发布前复核 | 活跃；官方介绍为跨平台 WIM 创建/修改/提取库 | WIM pack/unpack 发布阻断候选 |
-| libarchive / bsdtar | 系统或外部可执行文件，未随本仓库锁定或分发 | BSD 风格许可证，但具体系统构建含格式插件差异 | 活跃；用于本机 RAR 诊断、用户显式选择或经严格验证的单文件兼容 fallback | 不作为首发跨平台产品承诺；旧 p7zip RAR5 自动选择只覆盖已知解码缺口，并先核对普通文件路径与大小 |
+| libarchive / bsdtar | 系统或外部可执行文件，未随本仓库锁定或分发 | BSD 风格许可证，但具体系统构建含格式插件差异 | 活跃；用于本机 RAR 诊断、用户显式选择、经严格验证的单文件兼容 fallback，或无可用 7z 且未提供密码时的普通单文件读取 | 不作为首发跨平台产品承诺；密码输入和原生多卷仍要求 7zz/7z；旧 p7zip RAR5 选择先核对普通文件路径与大小 |
 
 2026-07-28 复核官方 7-Zip `license.txt` 与 RARLAB 下载、UnRAR 7 说明和许可页面后，当前结论保持不变：
 Squallz 不链接 unrar 源码、不创建 RAR、不实现 RAR recovery record；RAR 只能是外部工具只读能力。
 当前 `squallz-formats` 已实现 7zz/7z read bridge，并让 RAR 只读路径默认优先使用
 `SQUALLZ_7Z` / `7zz` / `7z` / `7za`；但没有把 7-Zip 二进制打包进产物。发布前若随包分发
 7zz/7z，必须补齐 LGPL/unRAR restriction 告知、源码或 relink/replace 路径、平台包内文件归属、
-以及 RAR 创建禁令说明。`SQUALLZ_BSDTAR` / `bsdtar` 仅是显式、诊断或经严格验证的单文件兼容 fallback，
-不是跨平台 bundled capability。`SQUALLZ_UNRAR` / `unrar` 只在 7zz/7z 明确证明 RAR7 v6 输入未加密后
+以及 RAR 创建禁令说明。`SQUALLZ_BSDTAR` / `bsdtar` 用于显式、诊断或经严格验证的单文件兼容 fallback，
+也用于无可用 7z 且未提供密码时的普通单文件读取；密码输入和原生多卷仍要求 7zz/7z。
+该系统工具不是跨平台 bundled capability。`SQUALLZ_UNRAR` / `unrar` 只在 7zz/7z 明确证明 RAR7 v6 输入未加密后
 流式读取条目，不接收密码，也不随 Squallz 分发；若未来考虑随包分发，必须先单独完成 RARLAB
 许可、版本、平台文件归属和用户可见告知审查。WIM
 创建已实现 external `wimlib-imagex` bridge，但当前仍只调用用户或测试环境提供的外部工具；

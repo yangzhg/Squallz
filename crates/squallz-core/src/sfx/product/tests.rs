@@ -1237,6 +1237,7 @@ impl ArchiveFormat for TestZipFormat {
         &self,
         _source: Box<dyn ReadSeek>,
         _options: &ArchiveOpenOptions,
+        _ctl: &ControlToken,
     ) -> Result<Box<dyn ArchiveReader>, FormatError> {
         Ok(Box::new(TestZipReader))
     }
@@ -1245,6 +1246,7 @@ impl ArchiveFormat for TestZipFormat {
         &self,
         mut destination: Box<dyn WriteSeek>,
         _options: &CreateOptions,
+        _ctl: &ControlToken,
     ) -> Result<Box<dyn ArchiveWriter>, FormatError> {
         destination.write_all(b"TESTZIP\0")?;
         Ok(Box::new(TestZipWriter { destination }))

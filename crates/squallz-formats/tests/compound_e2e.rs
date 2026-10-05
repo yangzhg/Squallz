@@ -231,7 +231,9 @@ fn opened_compound_reader_does_not_follow_a_replaced_source_path() {
         )
         .unwrap();
 
-    let mut reader = engine.open(&archive, &OpenOptions::default()).unwrap();
+    let mut reader = engine
+        .open(&archive, &OpenOptions::default(), &ControlToken::default())
+        .unwrap();
     fs::remove_file(&archive).unwrap();
     fs::rename(&replacement, &archive).unwrap();
 

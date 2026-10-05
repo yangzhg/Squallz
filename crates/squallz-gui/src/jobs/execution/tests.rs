@@ -356,13 +356,19 @@ fn batch_extract_collapses_only_confirmed_volume_members() {
         make_item(Path::new("shown-part2.rar"), "/output/part2"),
     ];
 
-    let normalized = normalize_batch_extract_items_with(&items, &display_items, |path| {
-        if source_set.members().iter().any(|member| member == path) {
-            Ok(Some(source_set.clone()))
-        } else {
-            Ok(None)
-        }
-    });
+    let normalized = normalize_batch_extract_items_with(
+        &items,
+        &display_items,
+        &ControlToken::default(),
+        |path| {
+            if source_set.members().iter().any(|member| member == path) {
+                Ok(Some(source_set.clone()))
+            } else {
+                Ok(None)
+            }
+        },
+    )
+    .unwrap();
 
     assert_eq!(normalized.len(), 2);
     assert_eq!(normalized[0].execution.path, part1.to_string_lossy());
@@ -382,11 +388,13 @@ fn batch_extract_keeps_candidates_separate_when_source_probe_fails() {
     };
     let items = vec![make_item("sample.part1.rar"), make_item("sample.part2.rar")];
 
-    let normalized = normalize_batch_extract_items_with(&items, &items, |_| {
-        Err(FormatError::CorruptArchive(
-            "source set is not confirmed".into(),
-        ))
-    });
+    let normalized =
+        normalize_batch_extract_items_with(&items, &items, &ControlToken::default(), |_| {
+            Err(FormatError::CorruptArchive(
+                "source set is not confirmed".into(),
+            ))
+        })
+        .unwrap();
 
     assert_eq!(normalized.len(), 2);
     assert_eq!(normalized[0].execution.path, "sample.part1.rar");
@@ -412,17 +420,48 @@ fn batch_extract_prefers_a_selected_primary_after_native_volume_collapse() {
     };
     let items = vec![make_item(&second), make_item(&primary), make_item(&first)];
 
-    let normalized = normalize_batch_extract_items_with(&items, &items, |path| {
-        if source_set.members().iter().any(|member| member == path) {
-            Ok(Some(source_set.clone()))
-        } else {
-            Ok(None)
-        }
-    });
+    let normalized =
+        normalize_batch_extract_items_with(&items, &items, &ControlToken::default(), |path| {
+            if source_set.members().iter().any(|member| member == path) {
+                Ok(Some(source_set.clone()))
+            } else {
+                Ok(None)
+            }
+        })
+        .unwrap();
 
     assert_eq!(normalized.len(), 1);
     assert_eq!(normalized[0].execution.path, primary.to_string_lossy());
     assert_eq!(normalized[0].execution.dest, "/output/sample.zip");
+}
+
+#[test]
+fn batch_extract_stops_discovery_when_cancelled() {
+    let items: Vec<_> = ["first.zip", "second.zip"]
+        .into_iter()
+        .map(|path| BatchExtractItem {
+            path: path.into(),
+            dest: format!("/output/{path}"),
+            encoding: None,
+            password: None,
+            best_effort: false,
+        })
+        .collect();
+    for cancelled_error in [false, true] {
+        let control = ControlToken::default();
+        let mut queried = Vec::new();
+        let result = normalize_batch_extract_items_with(&items, &items, &control, |path| {
+            queried.push(path.to_path_buf());
+            if cancelled_error {
+                Err(FormatError::Cancelled)
+            } else {
+                control.cancel();
+                Ok(None)
+            }
+        });
+        assert!(matches!(result, Err(FormatError::Cancelled)));
+        assert_eq!(queried, [PathBuf::from("first.zip")]);
+    }
 }
 
 #[test]

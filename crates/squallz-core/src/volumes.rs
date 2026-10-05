@@ -1489,15 +1489,7 @@ impl ReconstructedVolumeReader {
 
 impl MultiVolumeReader {
     /// Opens every volume of the set.
-    #[cfg(test)]
-    pub(crate) fn open(set: &VolumeSet) -> Result<Self, FormatError> {
-        Self::open_with_control(set, &ControlToken::default())
-    }
-
-    pub(crate) fn open_with_control(
-        set: &VolumeSet,
-        control: &ControlToken,
-    ) -> Result<Self, FormatError> {
+    pub(crate) fn open(set: &VolumeSet, control: &ControlToken) -> Result<Self, FormatError> {
         control.checkpoint()?;
         let mut readers = Vec::with_capacity(set.len());
         let mut offsets = Vec::with_capacity(set.len());
@@ -3691,7 +3683,7 @@ mod tests {
         actual_backups.sort();
         assert_eq!(reported_backups, actual_backups);
         let set = collect_volume_set(&volume_path(&base, 1)).unwrap();
-        let mut reader = MultiVolumeReader::open(&set).unwrap();
+        let mut reader = MultiVolumeReader::open(&set, &ControlToken::default()).unwrap();
         let mut output = Vec::new();
         reader.read_to_end(&mut output).unwrap();
         assert!(output == first || output == second);
@@ -4346,7 +4338,7 @@ mod tests {
         // Reassemble through the multi-volume reader, with a seek.
         let parts = collect_volume_set(&volumes[2]).unwrap();
         assert_eq!(parts.len(), 5);
-        let mut reader = MultiVolumeReader::open(&parts).unwrap();
+        let mut reader = MultiVolumeReader::open(&parts, &ControlToken::default()).unwrap();
         let mut out = Vec::new();
         reader.read_to_end(&mut out).unwrap();
         assert_eq!(out, data);

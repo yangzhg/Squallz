@@ -223,9 +223,7 @@ pub(crate) fn extract_nested_archive_to_temp_for_job(
         password: password.cloned(),
         encoding_override: encoding.map(str::to_owned),
     };
-    let mut outer = state
-        .engine
-        .open_with_control(outer_path, &open_opts, ctl)?;
+    let mut outer = state.engine.open(outer_path, &open_opts, ctl)?;
     let meta = find_nested_entry(outer.as_mut(), entry_path, ctl)?;
     let (limits, writable) = nested_temp_limits(workspace, limits)?;
     if meta.size > limits.max_output_bytes {
@@ -281,6 +279,7 @@ mod tests {
                 .create(
                     Box::new(fs::File::create(&outer).unwrap()),
                     &CreateOptions::default(),
+                    &ControlToken::default(),
                 )
                 .unwrap();
             for (index, name) in ["folder/inner.zip", "unrelated.txt", last_name]

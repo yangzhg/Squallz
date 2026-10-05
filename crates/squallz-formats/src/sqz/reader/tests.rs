@@ -44,7 +44,11 @@ impl Seek for CountedSource {
 fn sqz_bytes(meta: &EntryMeta, content: &[u8]) -> Vec<u8> {
     let output = Output::default();
     let mut writer = super::super::SqzFormat
-        .create(Box::new(output.clone()), &CreateOptions::default())
+        .create(
+            Box::new(output.clone()),
+            &CreateOptions::default(),
+            &ControlToken::default(),
+        )
         .unwrap();
     writer
         .add_entry(meta, Some(&mut Cursor::new(content)))
@@ -313,6 +317,27 @@ fn recovered_reads_reject_missing_or_truncated_repaired_blocks() {
 }
 
 #[test]
+fn sqz_inner_zip_writer_retains_creation_control() {
+    let opts = CreateOptions {
+        sqz: SqzCreateOptions {
+            inner_format: SqzInnerFormat::Zip,
+            ..SqzCreateOptions::default()
+        },
+        ..CreateOptions::default()
+    };
+    let control = ControlToken::new();
+    let mut writer = super::super::SqzFormat
+        .create(Box::new(Output::default()), &opts, &control)
+        .unwrap();
+    control.cancel();
+    let content = b"cancelled payload";
+    assert!(matches!(
+        writer.add_entry(&file_record(content).meta, Some(&mut Cursor::new(content))),
+        Err(FormatError::Cancelled)
+    ));
+}
+
+#[test]
 fn recovered_encrypted_inner_archives_remain_readable() {
     let content = vec![b'x'; VERIFY_CHUNK + 17];
     let meta = file_record(&content).meta;
@@ -327,12 +352,18 @@ fn recovered_encrypted_inner_archives_remain_readable() {
             ..CreateOptions::default()
         };
         assert!(matches!(
-            super::super::SqzFormat.create(Box::new(Output::default()), &opts),
+            super::super::SqzFormat.create(
+                Box::new(Output::default()),
+                &opts,
+                &ControlToken::default()
+            ),
             Err(FormatError::Unsupported(_))
         ));
         // Build a reader compatibility fixture below the public creation boundary.
         let output = Output::default();
-        let mut writer = super::super::writer::create(Box::new(output.clone()), &opts).unwrap();
+        let mut writer =
+            super::super::writer::create(Box::new(output.clone()), &opts, &ControlToken::default())
+                .unwrap();
         writer
             .add_entry(&meta, Some(&mut Cursor::new(&content)))
             .unwrap();
@@ -346,6 +377,7 @@ fn recovered_encrypted_inner_archives_remain_readable() {
                 password: Some(password),
                 ..OpenOptions::default()
             },
+            &ControlToken::default(),
         )
         .unwrap();
         let entries = reader.entries().collect::<Result<Vec<_>, _>>().unwrap();
@@ -414,6 +446,7 @@ fn recovery_loading_uses_bounded_reads_for_healthy_and_damaged_archives() {
                 max_read: Arc::clone(&max_read),
             }),
             &OpenOptions::default(),
+            &ControlToken::default(),
         )
         .unwrap();
         let report = reader
@@ -488,6 +521,7 @@ fn recovery_loading_preserves_cancellation_and_source_errors() {
                     cancel,
                 }),
                 &OpenOptions::default(),
+                &ControlToken::default(),
             );
             let error = result.err().expect("source failure must stop recovery");
             if cancel {
@@ -523,8 +557,12 @@ fn footer_recovery_skips_false_candidates_and_finds_a_trailer_across_chunks() {
     let distance = FOOTER_LEN + index_len + RECOVERY_PROTECTION_TRAILER_LEN;
     assert!((1..=3).contains(&(distance - VERIFY_CHUNK)));
     bytes[footer + 48] ^= 1;
-    let mut reader =
-        SqzArchiveReader::open(Box::new(Cursor::new(bytes)), &OpenOptions::default()).unwrap();
+    let mut reader = SqzArchiveReader::open(
+        Box::new(Cursor::new(bytes)),
+        &OpenOptions::default(),
+        &ControlToken::default(),
+    )
+    .unwrap();
     assert!(reader
         .test_summary(
             &squallz_format_api::SafetyLimits::default(),
@@ -569,9 +607,13 @@ fn recovery_loading_rejects_metadata_changed_after_verification() {
         recovery_start,
         primary_reads: 0,
     };
-    let error = SqzArchiveReader::open(Box::new(source), &OpenOptions::default())
-        .err()
-        .expect("modified recovery metadata must fail");
+    let error = SqzArchiveReader::open(
+        Box::new(source),
+        &OpenOptions::default(),
+        &ControlToken::default(),
+    )
+    .err()
+    .expect("modified recovery metadata must fail");
     assert!(
         matches!(error, FormatError::CorruptArchive(ref message) if message.contains("changed while opening archive")),
         "{error:?}"

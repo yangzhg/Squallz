@@ -446,7 +446,7 @@ impl Source {
                 })
             }
             Self::Volumes { parts, .. } => Ok(OpenedSource {
-                stream: Box::new(MultiVolumeReader::open_with_control(parts, control)?),
+                stream: Box::new(MultiVolumeReader::open(parts, control)?),
                 identity: None,
                 binding: None,
             }),
@@ -661,14 +661,6 @@ impl Engine {
     pub fn archive_source_set(
         &self,
         path: &Path,
-    ) -> Result<Option<api::ArchiveSourceSet>, FormatError> {
-        self.archive_source_set_with_control(path, &ControlToken::default())
-    }
-
-    /// Controlled variant of [`Engine::archive_source_set`].
-    pub fn archive_source_set_with_control(
-        &self,
-        path: &Path,
         control: &ControlToken,
     ) -> Result<Option<api::ArchiveSourceSet>, FormatError> {
         control.checkpoint()?;
@@ -702,12 +694,7 @@ impl Engine {
         match self.registry.detect(name, &head, &tail) {
             Some(api::Detected::Archive(format)) => controlled_result(
                 control,
-                format.probe_file_source_set_with_control(
-                    source_path,
-                    source_identity,
-                    &mut *stream,
-                    control,
-                ),
+                format.probe_file_source_set(source_path, source_identity, &mut *stream, control),
             ),
             _ => {
                 control.checkpoint()?;
@@ -724,7 +711,7 @@ impl Engine {
         control: &ControlToken,
     ) -> Result<ArchiveSourceState, FormatError> {
         control.checkpoint()?;
-        let members = match self.archive_source_set_with_control(path, control)? {
+        let members = match self.archive_source_set(path, control)? {
             Some(source_set) => source_set.members().to_vec(),
             None => vec![path.to_path_buf()],
         };
@@ -736,8 +723,12 @@ impl Engine {
     /// Generic byte-split archives and native container volume sets use the
     /// same validated discovery path as archive opening. A regular single-file
     /// archive remains a one-element source set.
-    pub fn recovery_protect_sources(&self, path: &Path) -> Result<Vec<PathBuf>, FormatError> {
-        match self.archive_source_set(path)? {
+    pub fn recovery_protect_sources(
+        &self,
+        path: &Path,
+        control: &ControlToken,
+    ) -> Result<Vec<PathBuf>, FormatError> {
+        match self.archive_source_set(path, control)? {
             Some(source_set) => Ok(source_set.members().to_vec()),
             None => Ok(vec![path.to_path_buf()]),
         }
@@ -745,18 +736,9 @@ impl Engine {
 
     /// Opens an archive and returns a read handle. Generic byte-split sets
     /// (`x.zip.001`) and validated native container volumes are resolved
-    /// transparently.
+    /// transparently. Pause and cancellation are honored during detection,
+    /// metadata parsing and stream-backed staging.
     pub fn open(
-        &self,
-        path: &Path,
-        opts: &OpenOptions,
-    ) -> Result<Box<dyn ArchiveReader>, FormatError> {
-        self.open_with_control(path, opts, &ControlToken::default())
-    }
-
-    /// Opens an archive while honoring pause and cancellation during format
-    /// detection, metadata parsing and stream-backed staging.
-    pub fn open_with_control(
         &self,
         path: &Path,
         opts: &OpenOptions,
@@ -809,7 +791,7 @@ impl Engine {
         let (head, tail) = controlled_result(control, sniff_window(&mut *stream))?;
         let reader = match self.registry.detect(Some("payload.zip"), &head, &tail) {
             Some(api::Detected::Archive(format)) if format.id() == "zip" => {
-                controlled_result(control, format.open_with_control(stream, opts, control))?
+                controlled_result(control, format.open(stream, opts, control))?
             }
             _ => {
                 return Err(FormatError::CorruptArchive(
@@ -834,10 +816,7 @@ impl Engine {
             let (head, tail) = controlled_result(control, sniff_window(&mut *stream))?;
             return match self.registry.detect(Some("payload.zip"), &head, &tail) {
                 Some(api::Detected::Archive(format)) if format.id() == "zip" => {
-                    let reader = controlled_result(
-                        control,
-                        format.open_with_control(stream, opts, control),
-                    )?;
+                    let reader = controlled_result(control, format.open(stream, opts, control))?;
                     Ok(OpenedArchive::new("zip".to_owned(), reader, None, None))
                 }
                 _ => Err(FormatError::CorruptArchive(
@@ -863,14 +842,10 @@ impl Engine {
             Some(api::Detected::Archive(f)) => {
                 let format = f.id().to_owned();
                 let reader = match source.physical_path() {
-                    Some(source_path) => f.open_file_with_control(
-                        source_path,
-                        source_identity,
-                        stream,
-                        opts,
-                        control,
-                    ),
-                    None => f.open_with_control(stream, opts, control),
+                    Some(source_path) => {
+                        f.open_file(source_path, source_identity, stream, opts, control)
+                    }
+                    None => f.open(stream, opts, control),
                 };
                 let reader = controlled_result(control, reader)?;
                 Ok(OpenedArchive::new(
@@ -2399,10 +2374,7 @@ mod tests {
     struct FileOpenProbeFormat {
         stream_opens: Arc<AtomicUsize>,
         file_opens: Arc<AtomicUsize>,
-        controlled_stream_opens: Arc<AtomicUsize>,
-        controlled_file_opens: Arc<AtomicUsize>,
         source_probes: Arc<AtomicUsize>,
-        controlled_source_probes: Arc<AtomicUsize>,
         source_path: Arc<std::sync::Mutex<Option<PathBuf>>>,
         bytes: Arc<std::sync::Mutex<Vec<u8>>>,
     }
@@ -2432,7 +2404,9 @@ mod tests {
             &self,
             mut src: Box<dyn api::ReadSeek>,
             _opts: &OpenOptions,
+            ctl: &ControlToken,
         ) -> Result<Box<dyn ArchiveReader>, FormatError> {
+            ctl.checkpoint()?;
             let mut byte = [0_u8; 1];
             src.read_exact(&mut byte)?;
             self.control.cancel();
@@ -2446,6 +2420,7 @@ mod tests {
             &self,
             _dst: Box<dyn api::WriteSeek>,
             _opts: &CreateOptions,
+            _ctl: &ControlToken,
         ) -> Result<Box<dyn api::ArchiveWriter>, FormatError> {
             Err(FormatError::Unsupported("cancel-open create".into()))
         }
@@ -2484,7 +2459,9 @@ mod tests {
             &self,
             src: Box<dyn api::ReadSeek>,
             _opts: &OpenOptions,
+            ctl: &ControlToken,
         ) -> Result<Box<dyn ArchiveReader>, FormatError> {
+            ctl.checkpoint()?;
             self.stream_opens.fetch_add(1, Ordering::SeqCst);
             self.record(src)
         }
@@ -2495,35 +2472,13 @@ mod tests {
             source_identity: Option<api::PhysicalFileIdentity>,
             src: Box<dyn api::ReadSeek>,
             _opts: &OpenOptions,
+            ctl: &ControlToken,
         ) -> Result<Box<dyn ArchiveReader>, FormatError> {
+            ctl.checkpoint()?;
             self.file_opens.fetch_add(1, Ordering::SeqCst);
             assert!(source_identity.is_some());
             *self.source_path.lock().unwrap() = Some(source_path.to_path_buf());
             self.record(src)
-        }
-
-        fn open_with_control(
-            &self,
-            src: Box<dyn api::ReadSeek>,
-            opts: &OpenOptions,
-            ctl: &ControlToken,
-        ) -> Result<Box<dyn ArchiveReader>, FormatError> {
-            ctl.checkpoint()?;
-            self.controlled_stream_opens.fetch_add(1, Ordering::SeqCst);
-            self.open(src, opts)
-        }
-
-        fn open_file_with_control(
-            &self,
-            source_path: &Path,
-            source_identity: Option<api::PhysicalFileIdentity>,
-            src: Box<dyn api::ReadSeek>,
-            opts: &OpenOptions,
-            ctl: &ControlToken,
-        ) -> Result<Box<dyn ArchiveReader>, FormatError> {
-            ctl.checkpoint()?;
-            self.controlled_file_opens.fetch_add(1, Ordering::SeqCst);
-            self.open_file(source_path, source_identity, src, opts)
         }
 
         fn probe_file_source_set(
@@ -2531,28 +2486,19 @@ mod tests {
             _source_path: &Path,
             source_identity: Option<api::PhysicalFileIdentity>,
             _src: &mut dyn api::ReadSeek,
-        ) -> Result<Option<api::ArchiveSourceSet>, FormatError> {
-            assert!(source_identity.is_some());
-            self.source_probes.fetch_add(1, Ordering::SeqCst);
-            Ok(None)
-        }
-
-        fn probe_file_source_set_with_control(
-            &self,
-            source_path: &Path,
-            source_identity: Option<api::PhysicalFileIdentity>,
-            src: &mut dyn api::ReadSeek,
             ctl: &ControlToken,
         ) -> Result<Option<api::ArchiveSourceSet>, FormatError> {
             ctl.checkpoint()?;
-            self.controlled_source_probes.fetch_add(1, Ordering::SeqCst);
-            self.probe_file_source_set(source_path, source_identity, src)
+            assert!(source_identity.is_some());
+            self.source_probes.fetch_add(1, Ordering::SeqCst);
+            Ok(None)
         }
 
         fn create(
             &self,
             _dst: Box<dyn api::WriteSeek>,
             _opts: &CreateOptions,
+            _ctl: &ControlToken,
         ) -> Result<Box<dyn api::ArchiveWriter>, FormatError> {
             Err(FormatError::Unsupported("probe create".into()))
         }
@@ -2579,6 +2525,7 @@ mod tests {
             &self,
             _src: Box<dyn api::ReadSeek>,
             _opts: &OpenOptions,
+            _ctl: &ControlToken,
         ) -> Result<Box<dyn ArchiveReader>, FormatError> {
             self.opens.fetch_add(1, Ordering::SeqCst);
             Ok(Box::new(CountingExtractReader {
@@ -2596,6 +2543,7 @@ mod tests {
             &self,
             _dst: Box<dyn api::WriteSeek>,
             _opts: &CreateOptions,
+            _ctl: &ControlToken,
         ) -> Result<Box<dyn api::ArchiveWriter>, FormatError> {
             Err(FormatError::Unsupported("counted extract create".into()))
         }
@@ -2707,6 +2655,7 @@ mod tests {
             &self,
             _src: Box<dyn api::ReadSeek>,
             _opts: &OpenOptions,
+            _ctl: &ControlToken,
         ) -> Result<Box<dyn ArchiveReader>, FormatError> {
             Err(FormatError::Unsupported("test open".into()))
         }
@@ -2715,6 +2664,7 @@ mod tests {
             &self,
             output: Box<dyn api::WriteSeek>,
             _opts: &CreateOptions,
+            _ctl: &ControlToken,
         ) -> Result<Box<dyn api::ArchiveWriter>, FormatError> {
             Ok(Box::new(TestArchiveWriter {
                 output,
@@ -2768,6 +2718,7 @@ mod tests {
             &self,
             _src: Box<dyn api::ReadSeek>,
             _opts: &OpenOptions,
+            _ctl: &ControlToken,
         ) -> Result<Box<dyn ArchiveReader>, FormatError> {
             Err(FormatError::Unsupported("short-read test open".into()))
         }
@@ -2776,6 +2727,7 @@ mod tests {
             &self,
             output: Box<dyn api::WriteSeek>,
             _opts: &CreateOptions,
+            _ctl: &ControlToken,
         ) -> Result<Box<dyn api::ArchiveWriter>, FormatError> {
             Ok(Box::new(ShortReadArchiveWriter { output }))
         }
@@ -2827,6 +2779,7 @@ mod tests {
             &self,
             _src: Box<dyn api::ReadSeek>,
             _opts: &OpenOptions,
+            _ctl: &ControlToken,
         ) -> Result<Box<dyn ArchiveReader>, FormatError> {
             Err(FormatError::Unsupported("rebind test open".into()))
         }
@@ -2835,6 +2788,7 @@ mod tests {
             &self,
             output: Box<dyn api::WriteSeek>,
             _opts: &CreateOptions,
+            _ctl: &ControlToken,
         ) -> Result<Box<dyn api::ArchiveWriter>, FormatError> {
             Ok(Box::new(RebindingArchiveWriter {
                 output,
@@ -3263,60 +3217,51 @@ mod tests {
 
         let stream_opens = Arc::new(AtomicUsize::new(0));
         let file_opens = Arc::new(AtomicUsize::new(0));
-        let controlled_stream_opens = Arc::new(AtomicUsize::new(0));
-        let controlled_file_opens = Arc::new(AtomicUsize::new(0));
         let source_probes = Arc::new(AtomicUsize::new(0));
-        let controlled_source_probes = Arc::new(AtomicUsize::new(0));
         let source_path = Arc::new(std::sync::Mutex::new(None));
         let bytes = Arc::new(std::sync::Mutex::new(Vec::new()));
         let mut registry = FormatRegistry::new();
         registry.register_archive(Arc::new(FileOpenProbeFormat {
             stream_opens: Arc::clone(&stream_opens),
             file_opens: Arc::clone(&file_opens),
-            controlled_stream_opens: Arc::clone(&controlled_stream_opens),
-            controlled_file_opens: Arc::clone(&controlled_file_opens),
             source_probes: Arc::clone(&source_probes),
-            controlled_source_probes: Arc::clone(&controlled_source_probes),
             source_path: Arc::clone(&source_path),
             bytes: Arc::clone(&bytes),
         }));
         let engine = Engine::new(registry);
 
-        let single_error = match engine.open(&single, &OpenOptions::default()) {
-            Ok(_) => panic!("probe single-file open should return its marker error"),
-            Err(error) => error,
-        };
+        let single_error =
+            match engine.open(&single, &OpenOptions::default(), &ControlToken::default()) {
+                Ok(_) => panic!("probe single-file open should return its marker error"),
+                Err(error) => error,
+            };
         assert!(matches!(
             single_error,
             FormatError::Unsupported(message) if message == "probe complete"
         ));
         assert_eq!(file_opens.load(Ordering::SeqCst), 1);
         assert_eq!(stream_opens.load(Ordering::SeqCst), 0);
-        assert_eq!(controlled_file_opens.load(Ordering::SeqCst), 1);
-        assert_eq!(controlled_stream_opens.load(Ordering::SeqCst), 0);
         assert_eq!(*source_path.lock().unwrap(), Some(single.clone()));
         assert_eq!(*bytes.lock().unwrap(), b"single");
 
         let source_set = engine
-            .archive_source_set_with_control(&single, &ControlToken::default())
+            .archive_source_set(&single, &ControlToken::default())
             .unwrap();
         assert!(source_set.is_none());
         assert_eq!(source_probes.load(Ordering::SeqCst), 1);
-        assert_eq!(controlled_source_probes.load(Ordering::SeqCst), 1);
 
         *source_path.lock().unwrap() = None;
-        let split_error = match engine.open(&second, &OpenOptions::default()) {
-            Ok(_) => panic!("probe split-volume open should return its marker error"),
-            Err(error) => error,
-        };
+        let split_error =
+            match engine.open(&second, &OpenOptions::default(), &ControlToken::default()) {
+                Ok(_) => panic!("probe split-volume open should return its marker error"),
+                Err(error) => error,
+            };
         assert!(matches!(
             split_error,
             FormatError::Unsupported(message) if message == "probe complete"
         ));
         assert_eq!(file_opens.load(Ordering::SeqCst), 1);
         assert_eq!(stream_opens.load(Ordering::SeqCst), 1);
-        assert_eq!(controlled_file_opens.load(Ordering::SeqCst), 1);
-        assert_eq!(controlled_stream_opens.load(Ordering::SeqCst), 1);
         assert_eq!(*source_path.lock().unwrap(), None);
         assert_eq!(*bytes.lock().unwrap(), b"first-second");
 
@@ -3335,7 +3280,7 @@ mod tests {
         }));
         let engine = Engine::new(registry);
 
-        let error = match engine.open_with_control(&archive, &OpenOptions::default(), &control) {
+        let error = match engine.open(&archive, &OpenOptions::default(), &control) {
             Ok(_) => panic!("controlled open should stop during format parsing"),
             Err(error) => error,
         };
@@ -3456,7 +3401,9 @@ mod tests {
 
         let engine = Engine::new(FormatRegistry::new());
         assert_eq!(
-            engine.recovery_protect_sources(&second).unwrap(),
+            engine
+                .recovery_protect_sources(&second, &ControlToken::default())
+                .unwrap(),
             vec![first, second, third]
         );
 
@@ -3471,7 +3418,9 @@ mod tests {
 
         let engine = Engine::new(FormatRegistry::new());
         assert_eq!(
-            engine.recovery_protect_sources(&archive).unwrap(),
+            engine
+                .recovery_protect_sources(&archive, &ControlToken::default())
+                .unwrap(),
             vec![archive]
         );
 

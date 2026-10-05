@@ -68,6 +68,7 @@ fn solid_entries_are_read_once_with_their_own_metadata() {
             cancel_after: None,
         }),
         &OpenOptions::default(),
+        &ControlToken::default(),
     )
     .unwrap();
     assert_eq!(reader.inner.archive().blocks.len(), 1);
@@ -142,6 +143,7 @@ fn entry_prefix_does_not_decode_the_complete_file() {
             cancel_after: None,
         }),
         &OpenOptions::default(),
+        &ControlToken::default(),
     )
     .unwrap();
     bytes.store(0, std::sync::atomic::Ordering::Relaxed);
@@ -215,6 +217,7 @@ fn an_early_lzma2_end_never_completes_a_nonempty_entry() {
         let mut reader = SevenZArchiveReader::open(
             Box::new(Cursor::new(bytes.clone())),
             &OpenOptions::default(),
+            &ControlToken::default(),
         )
         .unwrap();
         let entries = reader.entries().collect::<Result<Vec<_>, _>>().unwrap();
@@ -265,9 +268,12 @@ fn complete_entry_reads_preserve_duplicate_names_drain_tails_and_check_crc() {
         if corrupt {
             bytes[32 + 4096 - 1] ^= 1;
         }
-        let mut reader =
-            SevenZArchiveReader::open(Box::new(Cursor::new(bytes)), &OpenOptions::default())
-                .unwrap();
+        let mut reader = SevenZArchiveReader::open(
+            Box::new(Cursor::new(bytes)),
+            &OpenOptions::default(),
+            &ControlToken::default(),
+        )
+        .unwrap();
         let entries = reader.entries().collect::<Result<Vec<_>, _>>().unwrap();
         let mut calls = 0;
         let result = reader.read_entries(
@@ -328,6 +334,7 @@ fn complete_entry_reads_preserve_password_errors_and_stop_after_consumer_failure
                 password: password.map(Password::new),
                 ..OpenOptions::default()
             },
+            &ControlToken::default(),
         )
         .unwrap();
         let entries = reader.entries().collect::<Result<Vec<_>, _>>().unwrap();
@@ -402,8 +409,12 @@ fn entry_stream_checks_crc_when_consumed_completely() {
         .unwrap();
     let mut bytes = writer.finish().unwrap().into_inner();
     bytes[32 + 16 * 1024 - 1] ^= 1;
-    let mut reader =
-        SevenZArchiveReader::open(Box::new(Cursor::new(bytes)), &OpenOptions::default()).unwrap();
+    let mut reader = SevenZArchiveReader::open(
+        Box::new(Cursor::new(bytes)),
+        &OpenOptions::default(),
+        &ControlToken::default(),
+    )
+    .unwrap();
     reader
         .read_entry(&EntryPath::from_utf8("file"), &mut |entry| {
             let mut prefix = [0; 16];
@@ -455,7 +466,7 @@ fn compressed_entry_prefix_and_cancellation_do_not_read_the_complete_solid_block
     for cancel in [false, true] {
         let ctl = ControlToken::default();
         let bytes = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let mut reader = SevenZArchiveReader::open_controlled(
+        let mut reader = SevenZArchiveReader::open(
             Box::new(CountedSource {
                 inner: Cursor::new(archive.clone()),
                 bytes: bytes.clone(),
@@ -512,6 +523,7 @@ fn encrypted_entry_stream_preserves_consumer_errors_and_password_classification(
                 password: password.map(Password::new),
                 ..OpenOptions::default()
             },
+            &ControlToken::default(),
         )
         .unwrap();
         let result = reader.read_entry(&EntryPath::from_utf8("file"), &mut |entry| {
@@ -563,7 +575,7 @@ fn solid_entry_read_cancels_while_skipping_preceding_data_and_while_consuming() 
     let data = writer.finish().unwrap().into_inner();
     let ctl = ControlToken::default();
     let bytes = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let mut reader = SevenZArchiveReader::open_controlled(
+    let mut reader = SevenZArchiveReader::open(
         Box::new(CountedSource {
             inner: Cursor::new(data.clone()),
             bytes: bytes.clone(),
@@ -580,12 +592,9 @@ fn solid_entry_read_cancels_while_skipping_preceding_data_and_while_consuming() 
     assert!(matches!(result, Err(FormatError::Cancelled)), "{result:?}");
     assert!(bytes.load(std::sync::atomic::Ordering::Relaxed) < 512 * 1024);
     let ctl = ControlToken::default();
-    let mut reader = SevenZArchiveReader::open_controlled(
-        Box::new(Cursor::new(data)),
-        &OpenOptions::default(),
-        &ctl,
-    )
-    .unwrap();
+    let mut reader =
+        SevenZArchiveReader::open(Box::new(Cursor::new(data)), &OpenOptions::default(), &ctl)
+            .unwrap();
     let result = reader.read_entry(&EntryPath::from_utf8("second"), &mut |entry| {
         let mut prefix = [0; 16];
         entry.read_exact(&mut prefix)?;
@@ -624,6 +633,7 @@ fn symlink_targets_are_bounded_validated_and_cancellable() {
         let mut reader = SevenZArchiveReader::open(
             Box::new(Cursor::new(link_archive(target))),
             &OpenOptions::default(),
+            &ControlToken::default(),
         )
         .unwrap();
         assert!(matches!(
@@ -657,9 +667,12 @@ fn symlink_listing_validates_crc_and_resource_limits() {
         if !oversized {
             bytes[32] ^= 1;
         }
-        let mut reader =
-            SevenZArchiveReader::open(Box::new(Cursor::new(bytes)), &OpenOptions::default())
-                .unwrap();
+        let mut reader = SevenZArchiveReader::open(
+            Box::new(Cursor::new(bytes)),
+            &OpenOptions::default(),
+            &ControlToken::default(),
+        )
+        .unwrap();
         let error = reader.entries().next().unwrap().unwrap_err();
         if oversized {
             assert!(
@@ -687,6 +700,7 @@ fn damaged_symlinks_never_publish_a_partial_target() {
         let mut reader = SevenZArchiveReader::open(
             Box::new(Cursor::new(bytes.clone())),
             &OpenOptions::default(),
+            &ControlToken::default(),
         )
         .unwrap();
         let result = reader.extract_with_report(
@@ -714,7 +728,7 @@ fn damaged_symlinks_never_publish_a_partial_target() {
 #[test]
 fn cancelled_listing_returns_cancellation() {
     let ctl = ControlToken::default();
-    let mut reader = SevenZArchiveReader::open_controlled(
+    let mut reader = SevenZArchiveReader::open(
         Box::new(Cursor::new(link_archive(b"target"))),
         &OpenOptions::default(),
         &ctl,
@@ -752,6 +766,7 @@ fn symlink_descendants_cannot_write_outside_the_destination() {
     let mut reader = SevenZArchiveReader::open(
         Box::new(Cursor::new(writer.finish().unwrap().into_inner())),
         &OpenOptions::default(),
+        &ControlToken::default(),
     )
     .unwrap();
     let result = reader.extract(

@@ -1658,6 +1658,7 @@ fn zip64_store_5gib_roundtrip() {
                 level: CompressionLevel::Store,
                 ..CreateOptions::default()
             },
+            &ControlToken::default(),
         )
         .unwrap();
     let meta = EntryMeta {
@@ -1693,7 +1694,13 @@ fn zip64_store_5gib_roundtrip() {
                 .unwrap();
         }
         let src = fs::File::open(&archive).unwrap();
-        let mut reader = format.open(Box::new(src), &OpenOptions::default()).unwrap();
+        let mut reader = format
+            .open(
+                Box::new(src),
+                &OpenOptions::default(),
+                &ControlToken::default(),
+            )
+            .unwrap();
         let entries: Vec<EntryMeta> = reader.entries().collect::<Result<_, _>>().unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].path.display, name);

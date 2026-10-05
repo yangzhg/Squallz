@@ -97,8 +97,12 @@ impl ArchiveFormat for ZipFormat {
         &self,
         src: Box<dyn ReadSeek>,
         opts: &OpenOptions,
+        ctl: &ControlToken,
     ) -> Result<Box<dyn ArchiveReader>, FormatError> {
-        reader::open(src, opts)
+        ctl.checkpoint()?;
+        let reader = reader::open(src, opts)?;
+        ctl.checkpoint()?;
+        Ok(reader)
     }
 
     fn open_file(
@@ -107,27 +111,11 @@ impl ArchiveFormat for ZipFormat {
         source_identity: Option<PhysicalFileIdentity>,
         src: Box<dyn ReadSeek>,
         opts: &OpenOptions,
-    ) -> Result<Box<dyn ArchiveReader>, FormatError> {
-        self.open_file_with_control(
-            source_path,
-            source_identity,
-            src,
-            opts,
-            &ControlToken::default(),
-        )
-    }
-
-    fn open_file_with_control(
-        &self,
-        source_path: &Path,
-        source_identity: Option<PhysicalFileIdentity>,
-        src: Box<dyn ReadSeek>,
-        opts: &OpenOptions,
         ctl: &ControlToken,
     ) -> Result<Box<dyn ArchiveReader>, FormatError> {
         ctl.checkpoint()?;
-        match volume::bind_file_with_control(source_path, source_identity, src, ctl)? {
-            BoundZipSource::Single(src) => reader::open(src, opts),
+        match volume::bind_file(source_path, source_identity, src, ctl)? {
+            BoundZipSource::Single(src) => self.open(src, opts, ctl),
             BoundZipSource::Split(discovered, selected_src) => {
                 #[cfg(feature = "process-backend")]
                 {
@@ -137,19 +125,11 @@ impl ArchiveFormat for ZipFormat {
                                 "7zz/7z with native split ZIP support".into(),
                             )
                         })?;
-                    let staged = StagedSplitZipSet::from_discovered_with_control(
-                        discovered,
-                        selected_src,
-                        ctl,
-                    )?;
+                    let staged = StagedSplitZipSet::from_discovered(discovered, selected_src, ctl)?;
                     let password = opts.password.clone();
-                    let entries = sevenzip_bridge::list_entries_with_control(
-                        &tool,
-                        staged.path(),
-                        password.as_ref(),
-                        ctl,
-                    )
-                    .map_err(|error| staged.remap_external_error(error))?;
+                    let entries =
+                        sevenzip_bridge::list_entries(&tool, staged.path(), password.as_ref(), ctl)
+                            .map_err(|error| staged.remap_external_error(error))?;
                     Ok(Box::new(ExternalArchiveReader::new(
                         ExternalArchiveSource::SplitZip { staged, tool },
                         entries,
@@ -173,38 +153,21 @@ impl ArchiveFormat for ZipFormat {
         source_path: &Path,
         source_identity: Option<PhysicalFileIdentity>,
         src: &mut dyn ReadSeek,
-    ) -> Result<Option<ArchiveSourceSet>, FormatError> {
-        volume::probe_bound_file(source_path, source_identity, src)
-    }
-
-    fn probe_file_source_set_with_control(
-        &self,
-        source_path: &Path,
-        source_identity: Option<PhysicalFileIdentity>,
-        src: &mut dyn ReadSeek,
         ctl: &ControlToken,
     ) -> Result<Option<ArchiveSourceSet>, FormatError> {
-        volume::probe_bound_file_with_control(source_path, source_identity, src, ctl)
+        volume::probe_bound_file(source_path, source_identity, src, ctl)
     }
 
     fn create(
         &self,
         dst: Box<dyn WriteSeek>,
         opts: &CreateOptions,
-    ) -> Result<Box<dyn ArchiveWriter>, FormatError> {
-        Ok(Box::new(writer::ZipArchiveWriter::new(dst, opts)))
-    }
-
-    fn create_with_control(
-        &self,
-        dst: Box<dyn WriteSeek>,
-        opts: &CreateOptions,
         ctl: &ControlToken,
     ) -> Result<Box<dyn ArchiveWriter>, FormatError> {
         ctl.checkpoint()?;
-        Ok(Box::new(writer::ZipArchiveWriter::new_with_control(
-            dst, opts, ctl,
-        )))
+        let writer = writer::ZipArchiveWriter::new(dst, opts, ctl);
+        ctl.checkpoint()?;
+        Ok(Box::new(writer))
     }
 
     fn native_volume_limits(&self) -> Option<NativeVolumeLimits> {
@@ -288,15 +251,21 @@ impl ArchiveFormat for SfxZipFormat {
         &self,
         src: Box<dyn ReadSeek>,
         opts: &OpenOptions,
+        ctl: &ControlToken,
     ) -> Result<Box<dyn ArchiveReader>, FormatError> {
-        reader::open(src, opts)
+        ctl.checkpoint()?;
+        let reader = reader::open(src, opts)?;
+        ctl.checkpoint()?;
+        Ok(reader)
     }
 
     fn create(
         &self,
         _dst: Box<dyn WriteSeek>,
         _opts: &CreateOptions,
+        ctl: &ControlToken,
     ) -> Result<Box<dyn ArchiveWriter>, FormatError> {
+        ctl.checkpoint()?;
         Err(FormatError::Unsupported(
             "the SFX runtime ZIP registry is read-only".into(),
         ))
@@ -348,6 +317,7 @@ mod tests {
         let error = match format.create(
             Box::new(Cursor::new(Vec::<u8>::new())),
             &CreateOptions::default(),
+            &ControlToken::default(),
         ) {
             Ok(_) => panic!("SFX ZIP adapter must reject creation"),
             Err(error) => error,
@@ -375,7 +345,11 @@ mod tests {
 
         let format = SfxZipFormat;
         let mut reader = format
-            .open(Box::new(Cursor::new(bytes)), &OpenOptions::default())
+            .open(
+                Box::new(Cursor::new(bytes)),
+                &OpenOptions::default(),
+                &ControlToken::default(),
+            )
             .expect("open SFX ZIP through shared reader");
         let entries = reader
             .entries()
@@ -409,7 +383,7 @@ mod tests {
         let format = ZipFormat;
         let control = ControlToken::default();
         let mut writer = format
-            .create_with_control(
+            .create(
                 Box::new(std::io::Cursor::new(Vec::<u8>::new())),
                 &CreateOptions::default(),
                 &control,

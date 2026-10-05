@@ -839,7 +839,7 @@ impl Engine {
     ) -> Result<StagedSfx, FormatError> {
         if opts.target == SfxTarget::Macos {
             let prepared = bundle::prepare_template(stub)?;
-            let payload = BoundSfxPayload::open(self, archive)?;
+            let payload = BoundSfxPayload::open(self, archive, ctl)?;
             return bundle::stage(self, prepared, payload, dest, opts, progress, ctl);
         }
         validate_build_paths(stub, archive, dest, opts.overwrite)?;
@@ -851,7 +851,7 @@ impl Engine {
                 ));
             }
         };
-        let payload = BoundSfxPayload::open(self, archive)?;
+        let payload = BoundSfxPayload::open(self, archive, ctl)?;
         self.stage_single_file_sfx(stub, payload, dest, opts, progress, ctl, validated_template)
     }
 
@@ -923,7 +923,7 @@ impl Engine {
             finalize_single_file_stage_with(
                 &mut || output.sync_all(),
                 &mut || {
-                    let reader = self.open_with_control(&tmp, &OpenOptions::default(), ctl)?;
+                    let reader = self.open(&tmp, &OpenOptions::default(), ctl)?;
                     drop(reader);
                     Ok(())
                 },
@@ -1136,7 +1136,7 @@ impl Engine {
                 capture_input_manifest,
             )?;
             let input_manifest = verified.manifest;
-            let bound_payload = BoundSfxPayload::from_reserved(self, payload_reservation)?;
+            let bound_payload = BoundSfxPayload::from_reserved(self, payload_reservation, ctl)?;
             ctl.checkpoint()?;
             let staged = match validated_template {
                 ValidatedSfxTemplate::Macos(prepared) => bundle::stage(
@@ -1236,18 +1236,20 @@ pub(super) struct BoundSfxPayload {
 }
 
 impl BoundSfxPayload {
-    fn open(engine: &Engine, path: &Path) -> Result<Self, FormatError> {
+    fn open(engine: &Engine, path: &Path, ctl: &ControlToken) -> Result<Self, FormatError> {
+        ctl.checkpoint()?;
         let file = open_regular_file_no_follow(path)?;
         let identity = file_identity(&file)?;
-        Self::from_file(engine, path, file, identity)
+        Self::from_file(engine, path, file, identity, ctl)
     }
 
     fn from_reserved(
         engine: &Engine,
         reserved: crate::ReservedTempFile,
+        ctl: &ControlToken,
     ) -> Result<Self, FormatError> {
         let path = reserved.path;
-        Self::from_file(engine, &path, reserved.file, reserved.identity)
+        Self::from_file(engine, &path, reserved.file, reserved.identity, ctl)
     }
 
     fn from_file(
@@ -1255,6 +1257,7 @@ impl BoundSfxPayload {
         path: &Path,
         file: File,
         expected_identity: PathIdentity,
+        ctl: &ControlToken,
     ) -> Result<Self, FormatError> {
         let state = RegularFileState::from_metadata(&file.metadata()?);
         let payload = Self {
@@ -1264,7 +1267,7 @@ impl BoundSfxPayload {
             state,
         };
         payload.verify()?;
-        validate_zip_payload(engine, path)?;
+        validate_zip_payload(engine, path, ctl)?;
         payload.verify()?;
         Ok(payload)
     }
@@ -1707,7 +1710,12 @@ fn validate_build_paths(
     Ok(())
 }
 
-pub(super) fn validate_zip_payload(engine: &Engine, archive: &Path) -> Result<(), FormatError> {
+pub(super) fn validate_zip_payload(
+    engine: &Engine,
+    archive: &Path,
+    ctl: &ControlToken,
+) -> Result<(), FormatError> {
+    ctl.checkpoint()?;
     let name = archive
         .file_name()
         .and_then(|value| value.to_str())
@@ -1725,7 +1733,7 @@ pub(super) fn validate_zip_payload(engine: &Engine, archive: &Path) -> Result<()
             ));
         }
     }
-    let _reader = engine.open(archive, &OpenOptions::default())?;
+    let _reader = engine.open(archive, &OpenOptions::default(), ctl)?;
     Ok(())
 }
 
@@ -2101,6 +2109,7 @@ mod tests {
             &self,
             mut src: Box<dyn ReadSeek>,
             _opts: &OpenOptions,
+            _ctl: &ControlToken,
         ) -> Result<Box<dyn ArchiveReader>, FormatError> {
             let mut bytes = Vec::new();
             src.read_to_end(&mut bytes)?;
@@ -2111,6 +2120,7 @@ mod tests {
             &self,
             _dst: Box<dyn WriteSeek>,
             _opts: &CreateOptions,
+            _ctl: &ControlToken,
         ) -> Result<Box<dyn ArchiveWriter>, FormatError> {
             Err(FormatError::Unsupported("test reader is read-only".into()))
         }

@@ -101,18 +101,10 @@ impl ArchiveFormat for RarFormat {
         &self,
         src: Box<dyn ReadSeek>,
         opts: &OpenOptions,
-    ) -> Result<Box<dyn ArchiveReader>, FormatError> {
-        self.open_with_control(src, opts, &ControlToken::default())
-    }
-
-    fn open_with_control(
-        &self,
-        src: Box<dyn ReadSeek>,
-        opts: &OpenOptions,
         ctl: &ControlToken,
     ) -> Result<Box<dyn ArchiveReader>, FormatError> {
         let password = opts.password.clone();
-        let staged = StagedRarSet::single_with_control(src, ctl)?;
+        let staged = StagedRarSet::single(src, ctl)?;
         Ok(Box::new(open_staged_rar(staged, password, ctl)?))
     }
 
@@ -122,27 +114,10 @@ impl ArchiveFormat for RarFormat {
         source_identity: Option<PhysicalFileIdentity>,
         src: Box<dyn ReadSeek>,
         opts: &OpenOptions,
-    ) -> Result<Box<dyn ArchiveReader>, FormatError> {
-        self.open_file_with_control(
-            source_path,
-            source_identity,
-            src,
-            opts,
-            &ControlToken::default(),
-        )
-    }
-
-    fn open_file_with_control(
-        &self,
-        source_path: &Path,
-        source_identity: Option<PhysicalFileIdentity>,
-        src: Box<dyn ReadSeek>,
-        opts: &OpenOptions,
         ctl: &ControlToken,
     ) -> Result<Box<dyn ArchiveReader>, FormatError> {
         let password = opts.password.clone();
-        let staged =
-            StagedRarSet::from_bound_file_with_control(source_path, source_identity, src, ctl)?;
+        let staged = StagedRarSet::from_bound_file(source_path, source_identity, src, ctl)?;
         Ok(Box::new(open_staged_rar(staged, password, ctl)?))
     }
 
@@ -151,25 +126,18 @@ impl ArchiveFormat for RarFormat {
         source_path: &Path,
         source_identity: Option<PhysicalFileIdentity>,
         src: &mut dyn ReadSeek,
-    ) -> Result<Option<ArchiveSourceSet>, FormatError> {
-        volume::probe_bound_file(source_path, source_identity, src)
-    }
-
-    fn probe_file_source_set_with_control(
-        &self,
-        source_path: &Path,
-        source_identity: Option<PhysicalFileIdentity>,
-        src: &mut dyn ReadSeek,
         ctl: &ControlToken,
     ) -> Result<Option<ArchiveSourceSet>, FormatError> {
-        volume::probe_bound_file_with_control(source_path, source_identity, src, ctl)
+        volume::probe_bound_file(source_path, source_identity, src, ctl)
     }
 
     fn create(
         &self,
         _dst: Box<dyn WriteSeek>,
         _opts: &CreateOptions,
+        ctl: &ControlToken,
     ) -> Result<Box<dyn ArchiveWriter>, FormatError> {
+        ctl.checkpoint()?;
         Err(FormatError::Unsupported(
             "Squallz does not create RAR archives".into(),
         ))
@@ -750,6 +718,7 @@ mod tests {
         let err = match RarFormat.open(
             Box::new(File::open(&path).unwrap()),
             &OpenOptions::default(),
+            &ControlToken::default(),
         ) {
             Ok(_) => panic!("RAR open should fail when SQUALLZ_BSDTAR points to a missing tool"),
             Err(err) => err,
@@ -765,6 +734,7 @@ mod tests {
         let err = match RarFormat.create(
             Box::new(File::create(&path).unwrap()),
             &CreateOptions::default(),
+            &ControlToken::default(),
         ) {
             Ok(_) => panic!("RAR creation should be unsupported"),
             Err(err) => err,
@@ -802,6 +772,7 @@ exit 2
         let err = match RarFormat.open(
             Box::new(File::open(&archive).unwrap()),
             &OpenOptions::default(),
+            &ControlToken::default(),
         ) {
             Ok(_) => panic!("non-empty RAR with empty bridge listing must not open as healthy"),
             Err(err) => err,
@@ -887,6 +858,7 @@ exit 2
             .open(
                 Box::new(File::open(&archive).unwrap()),
                 &OpenOptions::default(),
+                &ControlToken::default(),
             )
             .unwrap();
         let entries: Vec<_> = reader.entries().collect::<Result<_, _>>().unwrap();
@@ -1033,6 +1005,7 @@ exit 2
                 Some(volume::test_physical_identity(&second).unwrap()),
                 Box::new(File::open(&second).unwrap()),
                 &options,
+                &ControlToken::default(),
             )
             .unwrap();
         let source_set = reader.source_set().unwrap();
@@ -1094,7 +1067,12 @@ exit 2
         let identity = volume::test_physical_identity(&second).unwrap();
         let mut selected = File::open(&second).unwrap();
         let probed = RarFormat
-            .probe_file_source_set(&second, Some(identity), &mut selected)
+            .probe_file_source_set(
+                &second,
+                Some(identity),
+                &mut selected,
+                &ControlToken::default(),
+            )
             .unwrap()
             .unwrap();
         assert_eq!(probed.primary(), first);
@@ -1164,6 +1142,7 @@ exit 2
                 Some(volume::test_physical_identity(&second).unwrap()),
                 Box::new(File::open(&second).unwrap()),
                 &options,
+                &ControlToken::default(),
             )
             .unwrap();
         let source_set = reader.source_set().unwrap();
@@ -1191,6 +1170,7 @@ exit 2
             Some(volume::test_physical_identity(&second).unwrap()),
             Box::new(File::open(&second).unwrap()),
             &options,
+            &ControlToken::default(),
         ) {
             Ok(_) => panic!("mismatched encrypted RAR volume count was accepted"),
             Err(error) => error,
@@ -1505,6 +1485,7 @@ printf 'rar7 via unrar'
                 Some(volume::test_physical_identity(&second).unwrap()),
                 Box::new(File::open(&second).unwrap()),
                 &OpenOptions::default(),
+                &ControlToken::default(),
             )
             .unwrap();
         let source_set = reader.source_set().unwrap();
@@ -1713,6 +1694,7 @@ exit 2
             .open(
                 Box::new(File::open(&archive).unwrap()),
                 &OpenOptions::default(),
+                &ControlToken::default(),
             )
             .unwrap();
         let entries: Vec<_> = reader.entries().collect::<Result<_, _>>().unwrap();

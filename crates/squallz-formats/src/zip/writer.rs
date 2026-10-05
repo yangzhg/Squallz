@@ -46,11 +46,7 @@ impl ZipArchiveWriter {
         controlled_zip_result(result, &self.control)
     }
 
-    pub(super) fn new(dst: Box<dyn WriteSeek>, opts: &CreateOptions) -> Self {
-        Self::new_with_control(dst, opts, &ControlToken::default())
-    }
-
-    pub(super) fn new_with_control(
+    pub(super) fn new(
         dst: Box<dyn WriteSeek>,
         opts: &CreateOptions,
         control: &ControlToken,
@@ -325,7 +321,7 @@ mod tests {
 
     fn memory_writer() -> ZipArchiveWriter {
         let dst: Box<dyn WriteSeek> = Box::new(Cursor::new(Vec::<u8>::new()));
-        ZipArchiveWriter::new(dst, &CreateOptions::default())
+        ZipArchiveWriter::new(dst, &CreateOptions::default(), &ControlToken::default())
     }
 
     struct CancelOnArmedWrite {
@@ -423,11 +419,8 @@ mod tests {
             armed_writes: Arc::clone(&armed_writes),
             largest_write: Arc::clone(&largest_write),
         };
-        let mut writer = ZipArchiveWriter::new_with_control(
-            Box::new(output),
-            &CreateOptions::default(),
-            &control,
-        );
+        let mut writer =
+            ZipArchiveWriter::new(Box::new(output), &CreateOptions::default(), &control);
         for index in 0..50_000 {
             writer
                 .add_entry(

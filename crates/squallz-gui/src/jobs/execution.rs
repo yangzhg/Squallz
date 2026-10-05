@@ -81,10 +81,13 @@ fn batch_extract_work_item(
 fn normalize_batch_extract_items_with(
     items: &[BatchExtractItem],
     display_items: &[BatchExtractItem],
+    ctl: &ControlToken,
     mut source_set_for: impl FnMut(&Path) -> Result<Option<ArchiveSourceSet>, FormatError>,
-) -> Vec<BatchExtractWorkItem> {
+) -> Result<Vec<BatchExtractWorkItem>, FormatError> {
+    ctl.checkpoint()?;
     let mut indices_by_path: HashMap<PathBuf, Vec<usize>> = HashMap::new();
     for (index, item) in items.iter().enumerate() {
+        ctl.checkpoint()?;
         indices_by_path
             .entry(PathBuf::from(&item.path))
             .or_default()
@@ -94,11 +97,13 @@ fn normalize_batch_extract_items_with(
     let mut consumed = vec![false; items.len()];
     let mut normalized = Vec::with_capacity(items.len());
     for index in 0..items.len() {
+        ctl.checkpoint()?;
         if consumed[index] {
             continue;
         }
         let source_set = match source_set_for(Path::new(&items[index].path)) {
             Ok(Some(source_set)) if source_set.members().len() > 1 => source_set,
+            Err(FormatError::Cancelled) => return Err(FormatError::Cancelled),
             // Discovery is only a grouping gate. The ordinary extraction path
             // remains authoritative and reports format or I/O failures.
             Ok(_) | Err(_) => {
@@ -111,10 +116,12 @@ fn normalize_batch_extract_items_with(
         let mut includes_current = false;
         let mut primary_index = None;
         for member in source_set.members() {
+            ctl.checkpoint()?;
             let Some(member_indices) = indices_by_path.get(member) else {
                 continue;
             };
             for &member_index in member_indices {
+                ctl.checkpoint()?;
                 if consumed[member_index] {
                     continue;
                 }
@@ -132,6 +139,7 @@ fn normalize_batch_extract_items_with(
 
         let representative = primary_index.unwrap_or(family_indices[0]);
         for &member_index in &family_indices {
+            ctl.checkpoint()?;
             consumed[member_index] = true;
         }
         normalized.push(batch_extract_work_item(
@@ -140,7 +148,8 @@ fn normalize_batch_extract_items_with(
             representative,
         ));
     }
-    normalized
+    ctl.checkpoint()?;
+    Ok(normalized)
 }
 
 fn status_code_label(status_code: Option<i32>) -> String {
@@ -522,9 +531,9 @@ impl JobContext<'_> {
             ));
         }
 
-        let work_items = normalize_batch_extract_items_with(items, display_items, |path| {
-            state.engine.archive_source_set(path)
-        });
+        let work_items = normalize_batch_extract_items_with(items, display_items, ctl, |path| {
+            state.engine.archive_source_set(path, ctl)
+        })?;
         let batch_sink = BatchProgressSink::new(sink, work_items.len());
         let batch_context = JobContext {
             sink: &batch_sink,
@@ -1354,7 +1363,7 @@ impl JobContext<'_> {
             } => {
                 let archive = PathBuf::from(path);
                 let recovery = recovery.as_deref().map(PathBuf::from);
-                let sources = state.engine.recovery_protect_sources(&archive)?;
+                let sources = state.engine.recovery_protect_sources(&archive, ctl)?;
                 let report = squallz_recovery::protect_files_controlled(
                     &archive,
                     *redundancy,

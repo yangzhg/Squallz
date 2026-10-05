@@ -95,6 +95,7 @@ fn symlink_breakout_write_is_rejected() {
         .create(
             Box::new(fs::File::create(&archive).unwrap()),
             &CreateOptions::default(),
+            &ControlToken::default(),
         )
         .unwrap();
     let link_meta = EntryMeta {

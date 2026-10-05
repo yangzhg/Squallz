@@ -641,7 +641,9 @@ fn update_preserves_encrypted_legacy_names_and_payloads() {
         assert_eq!(entries[0].path.display, displayed);
         assert_eq!(entries[0].path.raw, raw_name);
         assert!(entries[0].encrypted);
-        let mut reader = engine().open(&archive, &options).unwrap();
+        let mut reader = engine()
+            .open(&archive, &options, &ControlToken::default())
+            .unwrap();
         let mut contents = Vec::new();
         reader
             .read_entry(&entries[0].path, &mut |entry| {
@@ -1305,11 +1307,12 @@ fn archive_listing_rejects_parent_symlink_aba_even_when_path_stamps_match() {
             &self,
             mut source: Box<dyn ReadSeek>,
             options: &OpenOptions,
+            ctl: &ControlToken,
         ) -> Result<Box<dyn ArchiveReader>, FormatError> {
             source.seek(SeekFrom::Start(0))?;
             source.read_to_end(&mut self.observed.lock().unwrap())?;
             source.seek(SeekFrom::Start(0))?;
-            let reader = self.inner.open(source, options)?;
+            let reader = self.inner.open(source, options, ctl)?;
             fs::remove_file(&self.parent)?;
             symlink(&self.original_directory, &self.parent)?;
             Ok(reader)
@@ -1319,8 +1322,9 @@ fn archive_listing_rejects_parent_symlink_aba_even_when_path_stamps_match() {
             &self,
             output: Box<dyn WriteSeek>,
             options: &CreateOptions,
+            ctl: &ControlToken,
         ) -> Result<Box<dyn ArchiveWriter>, FormatError> {
-            self.inner.create(output, options)
+            self.inner.create(output, options, ctl)
         }
     }
 
@@ -2407,7 +2411,9 @@ fn update_delete_literal_keeps_encrypted_payloads_without_a_password() {
         .iter()
         .filter(|entry| !entry.path.display.ends_with('/'))
         .all(|entry| entry.encrypted));
-    let mut reader = engine().open(&archive, &options).unwrap();
+    let mut reader = engine()
+        .open(&archive, &options, &ControlToken::default())
+        .unwrap();
     let mut data = Vec::new();
     reader
         .read_entry(&EntryPath::from_utf8("project/a.txt"), &mut |entry| {
@@ -2456,7 +2462,9 @@ fn update_rename_entry() {
 
     // The renamed entry's content is intact.
     let opts = OpenOptions::default();
-    let mut reader = engine().open(&archive, &opts).unwrap();
+    let mut reader = engine()
+        .open(&archive, &opts, &ControlToken::default())
+        .unwrap();
     let mut data = Vec::new();
     reader
         .read_entry(&EntryPath::from_utf8("project/renamed.txt"), &mut |entry| {
@@ -2500,7 +2508,9 @@ fn update_rename_directory_moves_its_complete_subtree() {
         assert!(names.contains(&"整理/资料/".into()), "{names:?}");
         assert!(!names.iter().any(|name| name.starts_with("project/sub")));
         assert!(names.contains(&"project/a.txt".into()));
-        let mut reader = engine().open(&archive, &OpenOptions::default()).unwrap();
+        let mut reader = engine()
+            .open(&archive, &OpenOptions::default(), &ControlToken::default())
+            .unwrap();
         let mut data = Vec::new();
         reader
             .read_entry(&EntryPath::from_utf8("整理/资料/b.txt"), &mut |entry| {
@@ -2716,7 +2726,9 @@ fn update_encrypted_directory_rename_preserves_payloads_without_a_password() {
         .iter()
         .filter(|entry| entry.size > 0)
         .all(|entry| entry.encrypted));
-    let mut reader = engine().open(&archive, &options).unwrap();
+    let mut reader = engine()
+        .open(&archive, &options, &ControlToken::default())
+        .unwrap();
     for (name, expected) in [
         ("资料/a.txt", b"alpha".as_slice()),
         ("资料/sub/b.txt", b"bravo".as_slice()),
@@ -2810,7 +2822,9 @@ fn update_rejects_target_conflicts_without_explicit_delete() {
     )
     .unwrap();
 
-    let mut reader = engine().open(&archive, &OpenOptions::default()).unwrap();
+    let mut reader = engine()
+        .open(&archive, &OpenOptions::default(), &ControlToken::default())
+        .unwrap();
     let mut data = Vec::new();
     reader
         .read_entry(&EntryPath::from_utf8("project/a.txt"), &mut |entry| {
@@ -2956,7 +2970,9 @@ fn update_encrypted_archive_without_password_keeps_encryption() {
         password: Some(Password::new("secret")),
         encoding_override: None,
     };
-    let mut reader = engine().open(&archive, &open).unwrap();
+    let mut reader = engine()
+        .open(&archive, &open, &ControlToken::default())
+        .unwrap();
     let mut data = Vec::new();
     reader
         .read_entry(&EntryPath::from_utf8("project/a.txt"), &mut |entry| {

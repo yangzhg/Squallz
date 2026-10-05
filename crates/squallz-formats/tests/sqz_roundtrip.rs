@@ -772,7 +772,7 @@ fn sqz_repaired_inner_profiles_support_repeated_reads_and_extraction() {
         bytes[64 + descriptor_len] ^= 0xA5;
         fs::write(&archive, bytes).unwrap();
         let opts = OpenOptions::default();
-        let mut reader = eng.open(&archive, &opts).unwrap();
+        let mut reader = eng.open(&archive, &opts, &ControlToken::default()).unwrap();
         let entries = reader.entries().collect::<Result<Vec<_>, _>>().unwrap();
         assert_eq!(entries.len(), 1, "{inner_format}");
         for _ in 0..2 {

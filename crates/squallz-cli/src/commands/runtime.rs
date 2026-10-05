@@ -4,10 +4,11 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 use serde_json::{json, Value};
-use squallz_core::api::FormatInfo;
+use squallz_core::api::{FormatInfo, FormatKind};
 use squallz_formats::{
-    sevenzip_backend_status, wimlib_backend_status, SevenZipBackendSource, SevenZipBackendStatus,
-    WimlibBackendSource, WimlibBackendStatus,
+    is_sevenzip_bridge_format, sevenzip_backend_status, unrar_backend_status,
+    wimlib_backend_status, SevenZipBackendSource, SevenZipBackendStatus, UnrarBackendSource,
+    UnrarBackendStatus, WimlibBackendSource, WimlibBackendStatus,
 };
 
 #[derive(Clone, Copy)]
@@ -20,7 +21,7 @@ pub(super) struct RuntimeFacts {
     sevenzip: SevenZipBackendStatus,
     wimlib: WimlibBackendStatus,
     bsdtar: CommandSelection,
-    unrar: CommandSelection,
+    unrar: UnrarBackendStatus,
     par2: CommandSelection,
 }
 
@@ -34,7 +35,7 @@ impl RuntimeFacts {
                 &["bsdtar"],
                 Some("/usr/bin/bsdtar"),
             ),
-            unrar: CommandSelection::detect("SQUALLZ_UNRAR", &["unrar"], None),
+            unrar: unrar_backend_status(),
             par2: CommandSelection::detect("SQUALLZ_PAR2", PAR2_TOOLS, None),
         }
     }
@@ -72,7 +73,7 @@ impl RuntimeFacts {
                 if self.bsdtar.configured() {
                     self.bsdtar
                         .availability(Some("SQUALLZ_BSDTAR"), &["bsdtar"])
-                } else if self.sevenzip.configured() || self.sevenzip.available() {
+                } else if self.sevenzip.available() {
                     self.sevenzip()
                 } else {
                     self.bsdtar.availability(None, &["bsdtar"])
@@ -85,7 +86,17 @@ impl RuntimeFacts {
     }
 
     pub(super) fn unrar(&self) -> Availability<'_> {
-        self.unrar.availability(Some("SQUALLZ_UNRAR"), &["unrar"])
+        Availability::Tool {
+            available: self.unrar.available(),
+            source: self.unrar.source().map(|source| match source {
+                UnrarBackendSource::Environment => "env",
+                UnrarBackendSource::Path => "path",
+            }),
+            env: Some("SQUALLZ_UNRAR"),
+            selected: self.unrar.selected(),
+            configured: self.unrar.configured(),
+            tools: &["unrar"],
+        }
     }
 
     pub(super) fn par2(&self) -> Availability<'_> {
@@ -100,6 +111,51 @@ impl RuntimeFacts {
         let write_ready =
             !caps.can_create || self.availability(format.id, RuntimeNeed::Write).available();
         read_ready && write_ready
+    }
+}
+
+/// Registry groups and whole-format readiness shared by info and doctor.
+/// Capability lanes still evaluate their own read or write requirement.
+#[derive(Default)]
+pub(super) struct FormatOverview<'a> {
+    pub(super) formats: &'a [FormatInfo],
+    pub(super) built_in_archives: Vec<&'a FormatInfo>,
+    pub(super) external_archives: Vec<&'a FormatInfo>,
+    pub(super) stream_codecs: Vec<&'a FormatInfo>,
+    pub(super) pack_unpack: Vec<&'a FormatInfo>,
+    pub(super) unpack_only_archives: Vec<&'a FormatInfo>,
+    pub(super) built_in: usize,
+    pub(super) external: usize,
+    pub(super) ready: usize,
+    pub(super) missing: usize,
+}
+
+impl<'a> FormatOverview<'a> {
+    pub(super) fn new(formats: &'a [FormatInfo], runtime: &RuntimeFacts) -> Self {
+        let mut overview = Self {
+            formats,
+            ..Self::default()
+        };
+        for format in formats {
+            let external = is_external(format.id);
+            overview.built_in += usize::from(!external);
+            overview.ready += usize::from(runtime.format_ready(format));
+            match format.kind {
+                FormatKind::Archive if external => overview.external_archives.push(format),
+                FormatKind::Archive => overview.built_in_archives.push(format),
+                FormatKind::Compressor => overview.stream_codecs.push(format),
+            }
+            let caps = format.capabilities;
+            if caps.can_create && caps.can_extract {
+                overview.pack_unpack.push(format);
+            }
+            if format.kind == FormatKind::Archive && !caps.can_create && caps.can_extract {
+                overview.unpack_only_archives.push(format);
+            }
+        }
+        overview.external = formats.len().saturating_sub(overview.built_in);
+        overview.missing = formats.len().saturating_sub(overview.ready);
+        overview
     }
 }
 
@@ -287,44 +343,7 @@ fn command_is_executable(path: &Path) -> bool {
 const PAR2_TOOLS: &[&str] = &["par2cmdline-turbo", "par2", "par2cmdline"];
 
 pub(super) fn is_external(format_id: &str) -> bool {
-    format_id == "wim" || format_id == "rar" || long_tail_7z_bridge_format(format_id)
-}
-
-pub(super) fn long_tail_7z_bridge_format(format_id: &str) -> bool {
-    matches!(
-        format_id,
-        "apfs"
-            | "ar"
-            | "arj"
-            | "cab"
-            | "chm"
-            | "cpio"
-            | "cramfs"
-            | "dmg"
-            | "ext"
-            | "fat"
-            | "gpt"
-            | "hfs"
-            | "ihex"
-            | "iso"
-            | "lzh"
-            | "lzma"
-            | "mbr"
-            | "msi"
-            | "nsis"
-            | "ntfs"
-            | "qcow2"
-            | "rpm"
-            | "squashfs"
-            | "udf"
-            | "uefi"
-            | "vdi"
-            | "vhd"
-            | "vhdx"
-            | "vmdk"
-            | "xar"
-            | "z"
-    )
+    format_id == "rar" || is_sevenzip_bridge_format(format_id)
 }
 
 #[derive(Serialize)]

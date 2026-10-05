@@ -110,15 +110,7 @@ pub(crate) struct StagedSplitZipSet {
 }
 
 impl StagedSplitZipSet {
-    #[cfg(test)]
     pub(super) fn from_discovered(
-        discovered: DiscoveredSplitZipSet,
-        selected_src: Box<dyn ReadSeek>,
-    ) -> Result<Self, FormatError> {
-        Self::from_discovered_with_control(discovered, selected_src, &ControlToken::default())
-    }
-
-    pub(super) fn from_discovered_with_control(
         discovered: DiscoveredSplitZipSet,
         mut selected_src: Box<dyn ReadSeek>,
         control: &ControlToken,
@@ -265,16 +257,7 @@ impl StagedSplitZipSet {
     }
 }
 
-#[cfg(test)]
 pub(super) fn bind_file(
-    source_path: &Path,
-    source_identity: Option<PhysicalFileIdentity>,
-    src: Box<dyn ReadSeek>,
-) -> Result<BoundZipSource, FormatError> {
-    bind_file_with_control(source_path, source_identity, src, &ControlToken::default())
-}
-
-pub(super) fn bind_file_with_control(
     source_path: &Path,
     source_identity: Option<PhysicalFileIdentity>,
     mut src: Box<dyn ReadSeek>,
@@ -287,14 +270,6 @@ pub(super) fn bind_file_with_control(
 }
 
 pub(super) fn probe_bound_file(
-    source_path: &Path,
-    source_identity: Option<PhysicalFileIdentity>,
-    src: &mut dyn ReadSeek,
-) -> Result<Option<ArchiveSourceSet>, FormatError> {
-    probe_bound_file_with_control(source_path, source_identity, src, &ControlToken::default())
-}
-
-pub(super) fn probe_bound_file_with_control(
     source_path: &Path,
     source_identity: Option<PhysicalFileIdentity>,
     src: &mut dyn ReadSeek,
@@ -1032,9 +1007,14 @@ mod tests {
 
         let identity = test_physical_identity(&second).unwrap();
         let mut selected = Cursor::new(b"second".to_vec());
-        let source_set = probe_bound_file(&second, Some(identity), &mut selected)
-            .unwrap()
-            .unwrap();
+        let source_set = probe_bound_file(
+            &second,
+            Some(identity),
+            &mut selected,
+            &ControlToken::default(),
+        )
+        .unwrap()
+        .unwrap();
 
         assert_eq!(source_set.primary(), final_path);
         assert_eq!(source_set.members(), &[first, second, final_path]);
@@ -1051,9 +1031,14 @@ mod tests {
 
         let identity = test_physical_identity(&final_path).unwrap();
         let mut selected = Cursor::new(split_final(0));
-        assert!(probe_bound_file(&final_path, Some(identity), &mut selected)
-            .unwrap()
-            .is_none());
+        assert!(probe_bound_file(
+            &final_path,
+            Some(identity),
+            &mut selected,
+            &ControlToken::default()
+        )
+        .unwrap()
+        .is_none());
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -1067,7 +1052,13 @@ mod tests {
 
         let identity = test_physical_identity(&first).unwrap();
         let mut selected = Cursor::new(b"first".to_vec());
-        let error = probe_bound_file(&first, Some(identity), &mut selected).unwrap_err();
+        let error = probe_bound_file(
+            &first,
+            Some(identity),
+            &mut selected,
+            &ControlToken::default(),
+        )
+        .unwrap_err();
         assert_eq!(
             error.missing_volume_path(),
             Some(dir.join("sample.z02").as_path())
@@ -1083,7 +1074,13 @@ mod tests {
 
         let identity = test_physical_identity(&first).unwrap();
         let mut selected = Cursor::new(b"first".to_vec());
-        let error = probe_bound_file(&first, Some(identity), &mut selected).unwrap_err();
+        let error = probe_bound_file(
+            &first,
+            Some(identity),
+            &mut selected,
+            &ControlToken::default(),
+        )
+        .unwrap_err();
         assert_eq!(
             error.missing_volume_path(),
             Some(dir.join("sample.zip").as_path())
@@ -1104,7 +1101,12 @@ mod tests {
         let identity = test_physical_identity(&first).unwrap();
         let mut selected = Cursor::new(b"first".to_vec());
         assert!(matches!(
-            probe_bound_file(&first, Some(identity), &mut selected),
+            probe_bound_file(
+                &first,
+                Some(identity),
+                &mut selected,
+                &ControlToken::default()
+            ),
             Err(FormatError::CorruptArchive(_))
         ));
         fs::remove_dir_all(dir).unwrap();
@@ -1123,9 +1125,14 @@ mod tests {
 
         let identity = test_physical_identity(&first).unwrap();
         let mut selected = Cursor::new(b"first".to_vec());
-        let source_set = probe_bound_file(&first, Some(identity), &mut selected)
-            .unwrap()
-            .unwrap();
+        let source_set = probe_bound_file(
+            &first,
+            Some(identity),
+            &mut selected,
+            &ControlToken::default(),
+        )
+        .unwrap()
+        .unwrap();
 
         assert_eq!(source_set.primary(), final_path);
         assert_eq!(source_set.members(), &[first, second, final_path]);
@@ -1147,9 +1154,14 @@ mod tests {
 
         let identity = test_physical_identity(&first).unwrap();
         let mut selected = Cursor::new(b"first".to_vec());
-        let source_set = probe_bound_file(&first, Some(identity), &mut selected)
-            .unwrap()
-            .unwrap();
+        let source_set = probe_bound_file(
+            &first,
+            Some(identity),
+            &mut selected,
+            &ControlToken::default(),
+        )
+        .unwrap()
+        .unwrap();
 
         assert_eq!(source_set.primary(), final_path);
         assert_eq!(source_set.members(), &[first, second, final_path]);
@@ -1175,11 +1187,17 @@ mod tests {
         .unwrap();
 
         let identity = test_physical_identity(&second).unwrap();
-        let staged = match bind_file(&second, Some(identity), Box::new(Cursor::new(second_bytes)))
-            .unwrap()
+        let staged = match bind_file(
+            &second,
+            Some(identity),
+            Box::new(Cursor::new(second_bytes)),
+            &ControlToken::default(),
+        )
+        .unwrap()
         {
             BoundZipSource::Split(discovered, selected) => {
-                StagedSplitZipSet::from_discovered(discovered, selected).unwrap()
+                StagedSplitZipSet::from_discovered(discovered, selected, &ControlToken::default())
+                    .unwrap()
             }
             BoundZipSource::Single(_) => panic!("split ZIP must be staged as a set"),
         };
@@ -1222,7 +1240,12 @@ mod tests {
         let identity = test_physical_identity(&first).unwrap();
         let mut selected = Cursor::new(b"first".to_vec());
         assert!(matches!(
-            probe_bound_file(&first, Some(identity), &mut selected),
+            probe_bound_file(
+                &first,
+                Some(identity),
+                &mut selected,
+                &ControlToken::default()
+            ),
             Err(FormatError::CorruptArchive(_))
         ));
         fs::remove_dir_all(dir).unwrap();
@@ -1260,11 +1283,13 @@ mod tests {
             &first,
             Some(identity),
             Box::new(Cursor::new(b"first".to_vec())),
+            &ControlToken::default(),
         )
         .unwrap()
         {
             BoundZipSource::Split(discovered, selected) => {
-                StagedSplitZipSet::from_discovered(discovered, selected).unwrap()
+                StagedSplitZipSet::from_discovered(discovered, selected, &ControlToken::default())
+                    .unwrap()
             }
             BoundZipSource::Single(_) => panic!("split ZIP must be staged as a set"),
         };

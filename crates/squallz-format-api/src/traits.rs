@@ -377,29 +377,13 @@ pub trait ArchiveFormat: Send + Sync {
     /// 64 bytes from the end (ZIP keeps its central directory there and SFX
     /// archives start with MZ, hence both windows).
     fn sniff(&self, head: &[u8], tail: &[u8]) -> bool;
-    /// Opens for reading.
+    /// Opens for reading, observing pause and cancellation during setup.
     fn open(
         &self,
         src: Box<dyn ReadSeek>,
         opts: &OpenOptions,
-    ) -> Result<Box<dyn ArchiveReader>, FormatError>;
-    /// Controlled variant of [`ArchiveFormat::open`].
-    ///
-    /// The default preserves existing format implementations and checks the
-    /// token around their open call. Formats that wait on an external decoder
-    /// or another blocking backend should override this method and propagate
-    /// `ctl` into that wait.
-    fn open_with_control(
-        &self,
-        src: Box<dyn ReadSeek>,
-        opts: &OpenOptions,
         ctl: &ControlToken,
-    ) -> Result<Box<dyn ArchiveReader>, FormatError> {
-        ctl.checkpoint()?;
-        let reader = self.open(src, opts)?;
-        ctl.checkpoint()?;
-        Ok(reader)
-    }
+    ) -> Result<Box<dyn ArchiveReader>, FormatError>;
     /// Opens one physical archive file while retaining its source path as a
     /// hint for formats whose native layout spans sibling files.
     ///
@@ -412,25 +396,12 @@ pub trait ArchiveFormat: Send + Sync {
         source_identity: Option<PhysicalFileIdentity>,
         src: Box<dyn ReadSeek>,
         opts: &OpenOptions,
-    ) -> Result<Box<dyn ArchiveReader>, FormatError> {
-        let _ = source_path;
-        let _ = source_identity;
-        self.open(src, opts)
-    }
-    /// Controlled variant of [`ArchiveFormat::open_file`].
-    ///
-    /// Formats that override `open_file` with a blocking backend should also
-    /// override this method so cancellation reaches that backend.
-    fn open_file_with_control(
-        &self,
-        source_path: &Path,
-        source_identity: Option<PhysicalFileIdentity>,
-        src: Box<dyn ReadSeek>,
-        opts: &OpenOptions,
         ctl: &ControlToken,
     ) -> Result<Box<dyn ArchiveReader>, FormatError> {
         ctl.checkpoint()?;
-        let reader = self.open_file(source_path, source_identity, src, opts)?;
+        let _ = source_path;
+        let _ = source_identity;
+        let reader = self.open(src, opts, ctl)?;
         ctl.checkpoint()?;
         Ok(reader)
     }
@@ -446,27 +417,14 @@ pub trait ArchiveFormat: Send + Sync {
         source_path: &Path,
         source_identity: Option<PhysicalFileIdentity>,
         src: &mut dyn ReadSeek,
-    ) -> Result<Option<ArchiveSourceSet>, FormatError> {
-        let _ = source_path;
-        let _ = source_identity;
-        let _ = src;
-        Ok(None)
-    }
-    /// Controlled variant of [`ArchiveFormat::probe_file_source_set`].
-    ///
-    /// Formats that enumerate or inspect sibling volumes should override this
-    /// method so pause and cancellation are observed between filesystem calls.
-    fn probe_file_source_set_with_control(
-        &self,
-        source_path: &Path,
-        source_identity: Option<PhysicalFileIdentity>,
-        src: &mut dyn ReadSeek,
         ctl: &ControlToken,
     ) -> Result<Option<ArchiveSourceSet>, FormatError> {
         ctl.checkpoint()?;
-        let source_set = self.probe_file_source_set(source_path, source_identity, src)?;
+        let _ = source_path;
+        let _ = source_identity;
+        let _ = src;
         ctl.checkpoint()?;
-        Ok(source_set)
+        Ok(None)
     }
     /// Opens for reading from a restartable sequential stream (no `Seek`).
     /// This is how compound formats (`.tar.gz`) are read without a temp
@@ -484,26 +442,13 @@ pub trait ArchiveFormat: Send + Sync {
         )))
     }
     /// Creates for writing (returns `Unsupported` when `can_create=false`).
+    /// Writers with blocking setup or finalization retain this control token.
     fn create(
         &self,
         dst: Box<dyn WriteSeek>,
         opts: &CreateOptions,
-    ) -> Result<Box<dyn ArchiveWriter>, FormatError>;
-    /// Controlled variant of [`ArchiveFormat::create`].
-    ///
-    /// Formats whose writer performs blocking setup or finalization should
-    /// retain a clone of `ctl` in the returned writer.
-    fn create_with_control(
-        &self,
-        dst: Box<dyn WriteSeek>,
-        opts: &CreateOptions,
         ctl: &ControlToken,
-    ) -> Result<Box<dyn ArchiveWriter>, FormatError> {
-        ctl.checkpoint()?;
-        let writer = self.create(dst, opts)?;
-        ctl.checkpoint()?;
-        Ok(writer)
-    }
+    ) -> Result<Box<dyn ArchiveWriter>, FormatError>;
     /// Declares support and physical bounds for native multi-volume creation.
     fn native_volume_limits(&self) -> Option<NativeVolumeLimits> {
         None
@@ -871,7 +816,9 @@ mod tests {
             &self,
             _src: Box<dyn ReadSeek>,
             _opts: &OpenOptions,
+            ctl: &ControlToken,
         ) -> Result<Box<dyn ArchiveReader>, FormatError> {
+            ctl.checkpoint()?;
             Err(FormatError::Unsupported("dummy open".to_string()))
         }
 
@@ -879,7 +826,9 @@ mod tests {
             &self,
             _dst: Box<dyn WriteSeek>,
             _opts: &CreateOptions,
+            ctl: &ControlToken,
         ) -> Result<Box<dyn ArchiveWriter>, FormatError> {
+            ctl.checkpoint()?;
             Err(FormatError::Unsupported("dummy create".to_string()))
         }
     }
@@ -943,6 +892,7 @@ mod tests {
             None,
             Box::new(std::io::Cursor::new(Vec::<u8>::new())),
             &OpenOptions::default(),
+            &ControlToken::default(),
         ) {
             Ok(_) => panic!("dummy file open should forward to its unsupported stream open"),
             Err(error) => error,
@@ -960,12 +910,8 @@ mod tests {
         control.cancel();
         let mut source = std::io::Cursor::new(Vec::<u8>::new());
 
-        let result = format.probe_file_source_set_with_control(
-            Path::new("archive.dummy"),
-            None,
-            &mut source,
-            &control,
-        );
+        let result =
+            format.probe_file_source_set(Path::new("archive.dummy"), None, &mut source, &control);
 
         assert!(matches!(result, Err(FormatError::Cancelled)));
     }

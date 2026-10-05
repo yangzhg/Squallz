@@ -68,7 +68,7 @@ pub fn protect(
     recovery: Option<PathBuf>,
     json: bool,
 ) -> Result<(), CliError> {
-    let sources = ctx.engine.recovery_protect_sources(&archive)?;
+    let sources = ctx.engine.recovery_protect_sources(&archive, &ctx.ctl)?;
     let redundancy = match tolerate_loss {
         Some(count) => redundancy_for_tolerated_volume_loss(&sources, count)?,
         None => redundancy_or_default(redundancy),

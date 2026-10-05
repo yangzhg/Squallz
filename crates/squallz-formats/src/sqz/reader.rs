@@ -53,7 +53,9 @@ impl SqzArchiveReader {
     pub(super) fn open(
         mut src: Box<dyn ReadSeek>,
         opts: &OpenOptions,
+        ctl: &ControlToken,
     ) -> Result<Self, FormatError> {
+        ctl.checkpoint()?;
         let len = src.seek(SeekFrom::End(0))?;
         if len < (HEADER_LEN + FOOTER_LEN) as u64 {
             return Err(FormatError::CorruptArchive("sqz file is too small".into()));
@@ -135,7 +137,9 @@ impl SqzArchiveReader {
             records,
             recovery,
         };
-        reader.open_inner_profile(&descriptor.inner_format, opts)
+        let reader = reader.open_inner_profile(&descriptor.inner_format, opts, ctl)?;
+        ctl.checkpoint()?;
+        Ok(reader)
     }
 }
 
@@ -144,6 +148,7 @@ impl EntrySetSqzReader {
         self,
         inner_format: &str,
         opts: &OpenOptions,
+        ctl: &ControlToken,
     ) -> Result<SqzArchiveReader, FormatError> {
         match inner_format {
             "sqz" | "" => Ok(SqzArchiveReader::EntrySet(self)),
@@ -179,9 +184,9 @@ impl EntrySetSqzReader {
                     record.data_size,
                 ));
                 let inner = match inner_format {
-                    "zip" => ZipFormat.open(inner_src, opts)?,
-                    "tar" => TarFormat.open(inner_src, opts)?,
-                    "7z" => SevenZFormat.open(inner_src, opts)?,
+                    "zip" => ZipFormat.open(inner_src, opts, ctl)?,
+                    "tar" => TarFormat.open(inner_src, opts, ctl)?,
+                    "7z" => SevenZFormat.open(inner_src, opts, ctl)?,
                     other => {
                         return Err(FormatError::Unsupported(format!(
                             "unsupported sqz inner format: {other}"

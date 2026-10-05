@@ -156,7 +156,7 @@ where
     match detected {
         Detected::Archive(f) => {
             let file = open_file()?;
-            let writer = f.create_with_control(Box::new(file), write_opts, ctl)?;
+            let writer = f.create(Box::new(file), write_opts, ctl)?;
             Ok(DestTarget::Archive(DestSink {
                 writer,
                 shared: None,

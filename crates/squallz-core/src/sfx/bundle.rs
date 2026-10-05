@@ -379,7 +379,11 @@ pub(super) fn stage(
             &squallz_format_api::NoProgress,
             ctl,
         )?;
-        let reader = engine.open(&payload_dest, &squallz_format_api::OpenOptions::default())?;
+        let reader = engine.open(
+            &payload_dest,
+            &squallz_format_api::OpenOptions::default(),
+            ctl,
+        )?;
         drop(reader);
         let total_bytes = directory_bytes(&tmp)?;
         ensure_staged_root_binding(

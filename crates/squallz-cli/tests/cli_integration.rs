@@ -5596,6 +5596,7 @@ fn extract_json_separates_conflict_outcomes_from_problem_counts() {
 fn info_json_reports_formats_and_capabilities() {
     let out = run(sqz().arg("info").arg("--json"));
     assert!(out.status.success());
+    assert!(stderr(&out).trim().is_empty());
     let formats: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("valid JSON");
     let zip = formats
         .as_array()
@@ -5606,6 +5607,18 @@ fn info_json_reports_formats_and_capabilities() {
     assert_eq!(zip["kind"], "archive");
     assert_eq!(zip["capabilities"]["can_create"], true);
     assert_eq!(zip["capabilities"]["can_encrypt_names"], false);
+    assert_eq!(
+        zip["capabilities"],
+        serde_json::json!({
+            "can_create": true,
+            "can_extract": true,
+            "can_encrypt_data": true,
+            "can_encrypt_names": false,
+            "can_split": true,
+            "can_update": true,
+            "can_test": true,
+        })
+    );
     assert!(zip["extensions"]
         .as_array()
         .unwrap()
@@ -5628,6 +5641,10 @@ fn info_json_reports_formats_and_capabilities() {
     assert_eq!(
         zip["implementation"]["availability"]["write"]["available"],
         true
+    );
+    assert_eq!(
+        zip["implementation"]["availability"]["read"],
+        serde_json::json!({"available": true, "source": "built_in"})
     );
     assert_eq!(
         zip["implementation"]["optional_external"]["scope"],
@@ -5661,6 +5678,37 @@ fn info_json_reports_formats_and_capabilities() {
     assert!(zip["implementation"]["release_gate"]
         .as_str()
         .is_some_and(|gate| gate.contains("three-platform filesystem")));
+
+    let find = |id: &str| {
+        formats
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["id"] == id)
+            .unwrap()
+    };
+    assert_eq!(
+        find("wim")["level_mapping"]["backend"],
+        serde_json::json!({
+            "store": "none",
+            "fastest": "XPRESS",
+            "fast": "XPRESS",
+            "normal": "LZX",
+            "maximum": "LZX",
+            "ultra": "LZMS",
+        })
+    );
+    let sqz_mapping = &find("sqz")["level_mapping"];
+    assert_eq!(sqz_mapping.as_object().unwrap().len(), 2);
+    let sqz_backend = &sqz_mapping["backend"];
+    assert_eq!(sqz_backend.as_object().unwrap().len(), 7);
+    for level in ["store", "fastest", "fast", "normal", "maximum", "ultra"] {
+        assert_eq!(sqz_backend[level], "depends on inner profile");
+    }
+    let note = sqz_backend["note"].as_str().unwrap();
+    assert!(note.contains("SQZ and TAR inner profiles ignore compression level"));
+    assert!(note
+        .contains("ZIP, 7Z and Zstd inner profiles use their respective backend level mappings"));
 }
 
 #[test]
@@ -5668,11 +5716,12 @@ fn info_json_reports_external_tool_availability() {
     let missing_7z = "/definitely/missing/squallz-test-7z";
     let missing_unrar = "/definitely/missing/squallz-test-unrar";
     let missing_wimlib = "/definitely/missing/squallz-test-wimlib";
+    let missing_bsdtar = "/definitely/missing/squallz-test-bsdtar";
     let out = run(sqz()
         .env("SQUALLZ_7Z", missing_7z)
         .env("SQUALLZ_UNRAR", missing_unrar)
         .env("SQUALLZ_WIMLIB", missing_wimlib)
-        .env_remove("SQUALLZ_BSDTAR")
+        .env("SQUALLZ_BSDTAR", missing_bsdtar)
         .arg("info")
         .arg("--json"));
     assert!(out.status.success(), "stderr: {}", stderr(&out));
@@ -5696,7 +5745,7 @@ fn info_json_reports_external_tool_availability() {
     let rar_read = &find("rar")["implementation"]["availability"]["read"];
     assert_eq!(rar_read["available"], false);
     assert_eq!(rar_read["source"], "env");
-    assert_eq!(rar_read["selected"], missing_7z);
+    assert_eq!(rar_read["selected"], missing_bsdtar);
     assert_eq!(rar_read["path_exists"], false);
     let zip_split_read = &find("zip")["implementation"]["optional_external"]["availability"];
     assert_eq!(zip_split_read["available"], false);
@@ -5716,8 +5765,17 @@ fn info_json_reports_external_tool_availability() {
             "explicit_diagnostic",
             "validated_p7zip_16_02_rar5_single_file",
             "confirmed_unencrypted_rar7_v6_single_file",
+            "single_file_no_password_7z_unavailable",
         ])
     );
+    assert!(rar_policy["fallback_reason"]
+        .as_str()
+        .is_some_and(|reason| {
+            reason.contains("single-file reads without a supplied password use bsdtar")
+                && reason.contains(
+                    "native multi-volume and supplied-password reads still require 7zz/7z",
+                )
+        }));
     assert!(rar_policy["license_boundary"]
         .as_str()
         .is_some_and(|boundary| boundary.contains("does not link or bundle unrar code")));
@@ -5739,6 +5797,86 @@ fn info_json_reports_external_tool_availability() {
     let cab_write = &find("cab")["implementation"]["availability"]["write"];
     assert_eq!(cab_write["available"], false);
     assert_eq!(cab_write["source"], "unsupported");
+}
+
+#[test]
+fn info_and_doctor_report_plain_rar_bsdtar_fallback_without_hiding_bad_7z() {
+    let dir = temp_dir("diagnostics-rar-selection");
+    let sevenz = write_fake_executable(&dir, "7zz");
+    write_fake_executable(&dir, "bsdtar");
+    let wimlib = write_fake_executable(&dir, "wimlib-imagex");
+    let par2 = write_fake_executable(&dir, "par2");
+    let missing_7z = dir.join("missing-7z");
+    let missing_bsdtar = dir.join("missing-bsdtar");
+    for (configured_7z, configured_bsdtar, rar_ready, bridge_ready) in [
+        (&missing_7z, None, true, false),
+        (&sevenz, Some(&missing_bsdtar), false, true),
+    ] {
+        let command = || {
+            let mut cmd = sqz();
+            cmd.env("SQUALLZ_7Z", configured_7z)
+                .env_remove("SQUALLZ_BSDTAR")
+                .env("SQUALLZ_WIMLIB", &wimlib)
+                .env("SQUALLZ_PAR2", &par2)
+                .env("PATH", &dir);
+            if let Some(path) = configured_bsdtar {
+                cmd.env("SQUALLZ_BSDTAR", path);
+            }
+            cmd
+        };
+        let out = run(command().args(["info", "--json"]));
+        assert!(out.status.success(), "stderr: {}", stderr(&out));
+        let formats = stdout_json(&out);
+        let find = |id: &str| {
+            formats
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|f| f["id"] == id)
+                .unwrap()
+        };
+        let rar_read = &find("rar")["implementation"]["availability"]["read"];
+        assert_eq!(rar_read["available"], rar_ready);
+        assert_eq!(rar_read["tools"], serde_json::json!(["bsdtar"]));
+        assert_eq!(rar_read["configured"], configured_bsdtar.is_some());
+        if let Some(path) = configured_bsdtar {
+            assert_eq!(rar_read["source"], "env");
+            assert_eq!(rar_read["selected"], path.to_string_lossy().as_ref());
+        } else {
+            assert_eq!(rar_read["source"], "path");
+            assert!(rar_read.get("env").is_none());
+        }
+        let bridge = &find("zip")["implementation"]["optional_external"]["availability"];
+        assert_eq!(bridge["available"], bridge_ready);
+        assert_eq!(bridge["configured"], true);
+        assert_eq!(bridge["source"], "env");
+        assert_eq!(bridge["selected"], configured_7z.to_string_lossy().as_ref());
+        assert_eq!(
+            find("wim")["implementation"]["availability"]["read"],
+            *bridge
+        );
+        assert_eq!(
+            find("cab")["implementation"]["availability"]["read"],
+            *bridge
+        );
+
+        let out = run(command().args(["doctor", "--json", "--strict"]));
+        assert_eq!(out.status.code(), Some(if bridge_ready { 0 } else { 8 }));
+        assert!(stderr(&out).trim().is_empty());
+        let report = stdout_json(&out);
+        assert_eq!(report["summary"]["ready"], if rar_ready { 11 } else { 42 });
+        let check = |id: &str| {
+            report["checks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|c| c["id"] == id)
+                .unwrap()
+        };
+        assert_eq!(check("7z-read-bridge")["availability"], *bridge);
+        assert_eq!(check("rar-product-boundary")["availability"], *rar_read);
+    }
+    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
@@ -5779,7 +5917,7 @@ fn info_json_reports_available_external_tool_from_path() {
         .env_remove("SQUALLZ_7Z")
         .env_remove("SQUALLZ_UNRAR")
         .env_remove("SQUALLZ_BSDTAR")
-        .env("PATH", path)
+        .env("PATH", &path)
         .arg("info")
         .arg("--json"));
     assert!(out.status.success(), "stderr: {}", stderr(&out));
@@ -5818,6 +5956,35 @@ fn info_json_reports_available_external_tool_from_path() {
         Some(selected_unrar.as_str())
     );
     assert_eq!(rar7_decoder["path_exists"], true);
+
+    // A configured basename stays selected; an invalid override cannot fall
+    // back to the working unrar that is present on PATH.
+    for (configured, available) in [("unrar", true), ("missing-unrar-override", false)] {
+        let out = run(sqz()
+            .env("SQUALLZ_UNRAR", configured)
+            .env("PATH", &path)
+            .args(["info", "--json"]));
+        assert!(out.status.success(), "stderr: {}", stderr(&out));
+        let formats = stdout_json(&out);
+        let rar = formats
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["id"] == "rar")
+            .unwrap();
+        assert_eq!(
+            rar["implementation"]["availability"]["rar7_v6_decoder"],
+            serde_json::json!({
+                "available": available,
+                "source": "env",
+                "env": "SQUALLZ_UNRAR",
+                "selected": configured,
+                "configured": true,
+                "path_exists": available,
+                "tools": ["unrar"],
+            })
+        );
+    }
 
     std::fs::remove_dir_all(&dir).unwrap();
 }
@@ -6000,6 +6167,62 @@ fn info_and_doctor_follow_wim_writer_selection() {
             if missing == 0 { "pass" } else { "fail" }
         );
         assert_eq!(&find("wim-writer")["availability"], expected_write);
+
+        if missing == 1 {
+            for (language, ready, needs_tools, create, extract, archive_pack) in [
+                (
+                    "en-US",
+                    "Ready now",
+                    "Needs tools",
+                    "Create archives",
+                    "Unpack archives",
+                    "Archive pack/unpack",
+                ),
+                (
+                    "zh-CN",
+                    "当前可用",
+                    "需工具",
+                    "创建压缩包",
+                    "解压压缩包",
+                    "归档创建/解包",
+                ),
+            ] {
+                for style in ["classic", "modern"] {
+                    let out = run(command().args([
+                        "--lang", language, "--style", style, "--color", "never", "info",
+                    ]));
+                    assert!(out.status.success(), "stderr: {}", stderr(&out));
+                    let text = stdout(&out);
+                    assert_no_i18n_keys(&text);
+                    assert!(!text.contains('\u{1b}'));
+                    if style == "classic" {
+                        for (label, count) in [(ready, "42"), (needs_tools, "1")] {
+                            assert!(
+                                text.lines().any(|line| {
+                                    line.trim_start().starts_with(&format!("{label}:"))
+                                        && line.ends_with(count)
+                                }),
+                                "{text}"
+                            );
+                        }
+                    } else {
+                        let row = |label: &str| {
+                            text.lines()
+                                .find_map(|line| {
+                                    let cells = line.split('│').map(str::trim).collect::<Vec<_>>();
+                                    (cells.get(1) == Some(&label)).then_some(cells)
+                                })
+                                .unwrap_or_else(|| panic!("{label} row missing: {text}"))
+                        };
+                        // WIM can be read while its writer is unavailable.
+                        // Whole-format, archive, and capability denominators differ.
+                        assert_eq!(&row(create)[2..5], &["11", "10", "1"]);
+                        assert_eq!(&row(extract)[2..5], &["43", "43", "0"]);
+                        assert_eq!(row(archive_pack)[3], "4/5");
+                    }
+                }
+            }
+        }
     }
 
     std::fs::remove_dir_all(dir).unwrap();

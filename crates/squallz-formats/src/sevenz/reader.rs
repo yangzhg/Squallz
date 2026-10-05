@@ -32,15 +32,12 @@ pub(super) struct SevenZArchiveReader {
 }
 
 impl SevenZArchiveReader {
-    pub(super) fn open(src: Box<dyn ReadSeek>, opts: &OpenOptions) -> Result<Self, FormatError> {
-        Self::open_controlled(src, opts, &ControlToken::default())
-    }
-
-    pub(super) fn open_controlled(
+    pub(super) fn open(
         src: Box<dyn ReadSeek>,
         opts: &OpenOptions,
         ctl: &ControlToken,
     ) -> Result<Self, FormatError> {
+        ctl.checkpoint()?;
         let password = open_password(opts);
         // Opening a header-encrypted archive without a password surfaces
         // PasswordRequired here.

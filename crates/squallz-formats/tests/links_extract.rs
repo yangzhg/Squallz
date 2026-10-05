@@ -203,7 +203,9 @@ fn default_driver_hardlink_copy_inherits_target_time() {
     let archive = tmp.path().join("hard.tar");
     hardlink_tar(&archive, b"fallback content");
     let engine = engine();
-    let mut reader = engine.open(&archive, &OpenOptions::default()).unwrap();
+    let mut reader = engine
+        .open(&archive, &OpenOptions::default(), &ControlToken::default())
+        .unwrap();
     let out = tmp.path().join("out");
     squallz_format_api::extract_entries(
         &mut *reader,

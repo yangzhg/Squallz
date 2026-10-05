@@ -37,6 +37,7 @@ fn create_with_times(path: &Path, entries: &[(&str, SystemTime)]) {
         .create(
             Box::new(fs::File::create(path).unwrap()),
             &CreateOptions::default(),
+            &ControlToken::default(),
         )
         .unwrap();
     for &(name, modified) in entries {

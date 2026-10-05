@@ -11,7 +11,9 @@ mod wim_writer;
 
 pub(crate) use listing::SevenZipArchiveProperties;
 pub(crate) use wim_volume::StagedSplitWimSet;
-pub use wim_writer::{wimlib_backend_status, WimlibBackendSource, WimlibBackendStatus};
+pub use wim_writer::{
+    wim_compression_name, wimlib_backend_status, WimlibBackendSource, WimlibBackendStatus,
+};
 
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
@@ -42,6 +44,11 @@ use process::SevenZipProcess;
 struct SevenZipSpec {
     id: &'static str,
     extensions: &'static [&'static str],
+}
+
+/// Whether this archive ID uses the external 7-Zip bridge.
+pub fn is_sevenzip_bridge_format(format_id: &str) -> bool {
+    SPECS.iter().any(|spec| spec.id == format_id)
 }
 
 pub(crate) struct SevenZipBridgeFormat {
@@ -286,14 +293,6 @@ impl ArchiveFormat for SevenZipBridgeFormat {
 
     fn open(
         &self,
-        src: Box<dyn ReadSeek>,
-        opts: &OpenOptions,
-    ) -> Result<Box<dyn ArchiveReader>, FormatError> {
-        self.open_with_control(src, opts, &ControlToken::default())
-    }
-
-    fn open_with_control(
-        &self,
         mut src: Box<dyn ReadSeek>,
         opts: &OpenOptions,
         ctl: &ControlToken,
@@ -316,29 +315,13 @@ impl ArchiveFormat for SevenZipBridgeFormat {
         source_identity: Option<PhysicalFileIdentity>,
         src: Box<dyn ReadSeek>,
         opts: &OpenOptions,
-    ) -> Result<Box<dyn ArchiveReader>, FormatError> {
-        self.open_file_with_control(
-            source_path,
-            source_identity,
-            src,
-            opts,
-            &ControlToken::default(),
-        )
-    }
-
-    fn open_file_with_control(
-        &self,
-        source_path: &Path,
-        source_identity: Option<PhysicalFileIdentity>,
-        src: Box<dyn ReadSeek>,
-        opts: &OpenOptions,
         ctl: &ControlToken,
     ) -> Result<Box<dyn ArchiveReader>, FormatError> {
         ctl.checkpoint()?;
         if self.spec.id != "wim" {
-            return self.open_with_control(src, opts, ctl);
+            return self.open(src, opts, ctl);
         }
-        match wim_volume::bind_file_with_control(source_path, source_identity, src, ctl)? {
+        match wim_volume::bind_file(source_path, source_identity, src, ctl)? {
             wim_volume::BoundWimSource::Single(src) => Ok(Box::new(open_tool_archive(
                 src,
                 self.spec,
@@ -347,15 +330,11 @@ impl ArchiveFormat for SevenZipBridgeFormat {
             )?)),
             wim_volume::BoundWimSource::Split(discovered, selected_src) => {
                 let tool = sevenzip_tool()?;
-                let staged = wim_volume::StagedSplitWimSet::from_discovered_with_control(
-                    discovered,
-                    selected_src,
-                    ctl,
-                )?;
+                let staged =
+                    wim_volume::StagedSplitWimSet::from_discovered(discovered, selected_src, ctl)?;
                 let password = opts.password.clone();
-                let raw_entries =
-                    list_entries_with_control(&tool, staged.path(), password.as_ref(), ctl)
-                        .map_err(|error| staged.remap_external_error(error))?;
+                let raw_entries = list_entries(&tool, staged.path(), password.as_ref(), ctl)
+                    .map_err(|error| staged.remap_external_error(error))?;
                 let (entries, _) = normalize_entries(self.spec, raw_entries);
                 if entries.is_empty() && fs::metadata(staged.path())?.len() > 0 {
                     return Err(FormatError::CorruptArchive(format!(
@@ -378,27 +357,10 @@ impl ArchiveFormat for SevenZipBridgeFormat {
         source_path: &Path,
         source_identity: Option<PhysicalFileIdentity>,
         src: &mut dyn ReadSeek,
-    ) -> Result<Option<ArchiveSourceSet>, FormatError> {
-        if self.spec.id == "wim" {
-            return wim_volume::probe_bound_file(source_path, source_identity, src);
-        }
-        Ok(None)
-    }
-
-    fn probe_file_source_set_with_control(
-        &self,
-        source_path: &Path,
-        source_identity: Option<PhysicalFileIdentity>,
-        src: &mut dyn ReadSeek,
         ctl: &ControlToken,
     ) -> Result<Option<ArchiveSourceSet>, FormatError> {
         if self.spec.id == "wim" {
-            return wim_volume::probe_bound_file_with_control(
-                source_path,
-                source_identity,
-                src,
-                ctl,
-            );
+            return wim_volume::probe_bound_file(source_path, source_identity, src, ctl);
         }
         ctl.checkpoint()?;
         Ok(None)
@@ -408,25 +370,11 @@ impl ArchiveFormat for SevenZipBridgeFormat {
         &self,
         dst: Box<dyn WriteSeek>,
         opts: &CreateOptions,
-    ) -> Result<Box<dyn ArchiveWriter>, FormatError> {
-        if self.spec.id == "wim" {
-            return wim_writer::create(dst, opts);
-        }
-        Err(FormatError::Unsupported(format!(
-            "format {} is currently read-only through the 7-Zip bridge",
-            self.spec.id
-        )))
-    }
-
-    fn create_with_control(
-        &self,
-        dst: Box<dyn WriteSeek>,
-        opts: &CreateOptions,
         ctl: &ControlToken,
     ) -> Result<Box<dyn ArchiveWriter>, FormatError> {
         ctl.checkpoint()?;
         if self.spec.id == "wim" {
-            return wim_writer::create_with_control(dst, opts, ctl);
+            return wim_writer::create(dst, opts, ctl);
         }
         Err(FormatError::Unsupported(format!(
             "format {} is currently read-only through the 7-Zip bridge",
@@ -524,8 +472,8 @@ fn open_tool_archive(
     ctl: &ControlToken,
 ) -> Result<ExternalArchiveReader, FormatError> {
     let tool = sevenzip_tool()?;
-    let archive = TempArchive::from_reader(src, spec.id)?;
-    let raw_entries = list_entries_with_control(&tool, archive.path(), password.as_ref(), ctl)?;
+    let archive = TempArchive::from_reader(src, spec.id, ctl)?;
+    let raw_entries = list_entries(&tool, archive.path(), password.as_ref(), ctl)?;
     let (entries, backend_paths) = normalize_entries(spec, raw_entries);
     if entries.is_empty() && archive.len()? > 0 {
         return Err(FormatError::CorruptArchive(format!(
@@ -693,16 +641,7 @@ fn command_is_executable(path: &Path) -> bool {
     }
 }
 
-#[cfg(test)]
 pub(crate) fn list_entries(
-    tool: &Path,
-    archive: &Path,
-    password: Option<&Password>,
-) -> Result<Vec<EntryMeta>, FormatError> {
-    list_entries_with_control(tool, archive, password, &ControlToken::default())
-}
-
-pub(crate) fn list_entries_with_control(
     tool: &Path,
     archive: &Path,
     password: Option<&Password>,
@@ -932,7 +871,11 @@ pub(crate) struct TempArchive {
 }
 
 impl TempArchive {
-    fn from_reader(src: Box<dyn ReadSeek>, tag: &str) -> Result<Self, FormatError> {
+    fn from_reader(
+        src: Box<dyn ReadSeek>,
+        tag: &str,
+        ctl: &ControlToken,
+    ) -> Result<Self, FormatError> {
         static NEXT_ID: AtomicU64 = AtomicU64::new(0);
         let path = std::env::temp_dir().join(format!(
             "squallz-7z-{}-{}-{}.{}",
@@ -941,18 +884,26 @@ impl TempArchive {
             system_time_nanos(SystemTime::now()),
             tag
         ));
-        Self::from_reader_at(src, path)
+        Self::from_reader_at(src, path, ctl)
     }
 
-    fn from_reader_at(mut src: Box<dyn ReadSeek>, path: PathBuf) -> Result<Self, FormatError> {
+    fn from_reader_at(
+        mut src: Box<dyn ReadSeek>,
+        path: PathBuf,
+        ctl: &ControlToken,
+    ) -> Result<Self, FormatError> {
+        ctl.checkpoint()?;
         src.seek(SeekFrom::Start(0))?;
+        ctl.checkpoint()?;
         let mut out = crate::stable_source::create_private_file(&path)?;
         let archive = Self { path };
-        let staged = io::copy(&mut src, &mut out).and_then(|_| out.flush());
+        let staged = crate::stable_source::copy_stream(&mut src, &mut out, ctl)
+            .and_then(|_| out.flush().map_err(FormatError::from))
+            .and_then(|_| ctl.checkpoint());
         drop(out);
         if let Err(error) = staged {
             drop(archive);
-            return Err(FormatError::from(error));
+            return Err(error);
         }
         Ok(archive)
     }
@@ -1026,6 +977,7 @@ mod tests {
         let archive = TempArchive::from_reader_at(
             Box::new(Cursor::new(b"private archive bytes".to_vec())),
             path.clone(),
+            &ControlToken::default(),
         )
         .unwrap();
         assert_eq!(archive.path(), path);
@@ -1046,6 +998,7 @@ mod tests {
         let collision = TempArchive::from_reader_at(
             Box::new(Cursor::new(b"replacement".to_vec())),
             path.clone(),
+            &ControlToken::default(),
         );
         assert!(matches!(
             collision,
@@ -1060,6 +1013,7 @@ mod tests {
                 reads: 0,
             }),
             path.clone(),
+            &ControlToken::default(),
         );
         assert!(matches!(failure, Err(FormatError::Io(_))));
         assert!(!path.exists());
@@ -1295,6 +1249,7 @@ exit 2
             .open(
                 Box::new(File::open(&archive).unwrap()),
                 &OpenOptions::default(),
+                &ControlToken::default(),
             )
             .unwrap();
         let entries: Vec<_> = reader.entries().collect::<Result<_, _>>().unwrap();
@@ -1400,6 +1355,7 @@ exit 2
             .open(
                 Box::new(File::open(&archive).unwrap()),
                 &OpenOptions::default(),
+                &ControlToken::default(),
             )
             .unwrap();
         let entries: Vec<_> = reader.entries().collect::<Result<_, _>>().unwrap();
@@ -1525,7 +1481,7 @@ printf 'Type = zip\nPhysical Size = 1\n\nPath = retained.txt\nSize = 3\nModified
         ] {
             fs::write(&log, "").unwrap();
             std::env::set_var("SQUALLZ_FAKE_7Z_TIME_MODE", mode);
-            let result = list_entries(&script, &archive, None);
+            let result = list_entries(&script, &archive, None, &ControlToken::default());
             let calls = fs::read_to_string(&log).unwrap();
             let calls = calls.lines().collect::<Vec<_>>();
             assert!(calls[0].starts_with("l -slt -slmu "), "{mode}: {calls:?}");
@@ -1586,8 +1542,7 @@ printf 'Type = zip\nPhysical Size = 1\n\nPath = retained.txt\nSize = 3\nModified
                 cancelling_control.cancel();
             });
             let started = Instant::now();
-            let error =
-                list_entries_with_control(&script, &archive, password, &control).unwrap_err();
+            let error = list_entries(&script, &archive, password, &control).unwrap_err();
             canceller.join().unwrap();
 
             assert!(matches!(error, FormatError::Cancelled));
@@ -1617,7 +1572,7 @@ printf 'Type = zip\nPhysical Size = 1\n\nPath = retained.txt\nSize = 3\nModified
             cancelling_control.cancel();
             (ready, cancelled_at)
         });
-        let error = list_entries_with_control(&script, &archive, None, &control).unwrap_err();
+        let error = list_entries(&script, &archive, None, &control).unwrap_err();
         let (output_ready, cancelled_at) = canceller.join().unwrap();
         assert!(output_ready, "tool did not finish writing its listing");
         assert!(matches!(error, FormatError::Cancelled));
@@ -1758,13 +1713,15 @@ exit 2
 
         let correct = Password::new("bridge-fixture-password");
         let wrong = Password::new("bridge-fixture-wrong");
-        let entries = list_entries(&script, &archive, Some(&correct)).unwrap();
+        let entries =
+            list_entries(&script, &archive, Some(&correct), &ControlToken::default()).unwrap();
         assert_eq!(entries.len(), 1);
         assert!(entries[0].encrypted);
 
-        let error = list_entries(&script, &archive, Some(&wrong)).unwrap_err();
+        let error =
+            list_entries(&script, &archive, Some(&wrong), &ControlToken::default()).unwrap_err();
         assert!(matches!(error, FormatError::WrongPassword), "{error:?}");
-        let error = list_entries(&script, &archive, None).unwrap_err();
+        let error = list_entries(&script, &archive, None, &ControlToken::default()).unwrap_err();
         assert!(matches!(error, FormatError::PasswordRequired), "{error:?}");
 
         let mut payload = String::new();
@@ -1795,7 +1752,8 @@ exit 2
         let blocked_password = Password::new("x".repeat(1024 * 1024));
         fs::write(&archive, b"late-password").unwrap();
         for password in [None, Some(&blocked_password)] {
-            let error = list_entries(&script, &archive, password).unwrap_err();
+            let error =
+                list_entries(&script, &archive, password, &ControlToken::default()).unwrap_err();
             assert!(matches!(
                 (password.is_some(), error),
                 (true, FormatError::WrongPassword) | (false, FormatError::PasswordRequired)
@@ -1815,13 +1773,24 @@ exit 2
             ));
         }
         fs::write(&archive, b"late-volume").unwrap();
-        let error = list_entries(&script, &archive, Some(&blocked_password)).unwrap_err();
+        let error = list_entries(
+            &script,
+            &archive,
+            Some(&blocked_password),
+            &ControlToken::default(),
+        )
+        .unwrap_err();
         assert!(
             matches!(error, FormatError::CorruptArchive(detail) if detail == "missing volume: archive.part3.rar")
         );
         fs::write(&archive, b"closed-input-success").unwrap();
         assert!(matches!(
-            list_entries(&script, &archive, Some(&blocked_password)),
+            list_entries(
+                &script,
+                &archive,
+                Some(&blocked_password),
+                &ControlToken::default()
+            ),
             Err(FormatError::Io(_))
         ));
         let mut reader = read_entry_stdout(
@@ -1895,6 +1864,7 @@ exit 2
             .create(
                 Box::new(File::create(&archive).unwrap()),
                 &CreateOptions::default(),
+                &ControlToken::default(),
             )
             .unwrap();
         writer
