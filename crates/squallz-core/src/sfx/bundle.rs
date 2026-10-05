@@ -14,7 +14,9 @@ use super::{
     bundle_tree::BundleTree, SfxBuildOptions, SfxBuildReport, SfxInfo, SfxLayout, SfxTarget,
     StagedSfx, COPY_BUFFER_BYTES, SFX_GUI_STUB_MARKER,
 };
-use crate::filesystem_identity::{open_regular_file_no_follow, RegularFileState};
+use crate::filesystem_identity::{
+    file_identity, open_regular_file_no_follow, path_identity, PathIdentity, RegularFileState,
+};
 use crate::Engine;
 
 const MANIFEST_MAGIC: [u8; 8] = *b"SQZSFXB1";
@@ -104,14 +106,14 @@ fn directory_windows_times(metadata: &fs::Metadata) -> (u64, u64) {
 struct TemplateEntry {
     relative: PathBuf,
     kind: TemplateEntryKind,
-    identity: super::transaction::PathIdentity,
+    identity: PathIdentity,
     permissions: fs::Permissions,
 }
 
 #[derive(Debug)]
 pub(super) struct PreparedTemplate {
     template: PathBuf,
-    root_identity: super::transaction::PathIdentity,
+    root_identity: PathIdentity,
     root_state: TemplateDirectoryState,
     root_permissions: fs::Permissions,
     executable_relative: PathBuf,
@@ -183,7 +185,7 @@ pub(super) fn prepare_template(template: &Path) -> Result<PreparedTemplate, Form
             "macOS SFX template must be a non-symlink .app bundle".into(),
         ));
     }
-    let root_identity = super::transaction::path_identity(template)?;
+    let root_identity = path_identity(template)?;
     validate_template_output_layout(template)?;
     let plist = template_info_plist(template)?;
     let executable = template_executable(template, &plist)?;
@@ -288,12 +290,9 @@ pub(super) fn stage(
     let required = bundle_output_budget(dest, &prepared.entries, payload_bytes, &metadata_budget)?;
     super::ensure_destination_space(dest, required)?;
 
-    let (tmp, staged_identity) =
-        super::transaction::reserve_staged_path(dest, SfxLayout::MacosApp)?;
+    let (tmp, staged_identity) = super::product::reserve_bundle_stage(dest)?;
     let held_root = open_bundle_root(&tmp)?;
-    if super::transaction::file_identity(&held_root)? != staged_identity
-        || super::transaction::path_identity(&tmp)? != staged_identity
-    {
+    if file_identity(&held_root)? != staged_identity || path_identity(&tmp)? != staged_identity {
         return Err(FormatError::Io(io::Error::other(
             "SFX bundle staging changed while it was opened",
         )));
@@ -410,14 +409,9 @@ pub(super) fn stage(
     })();
     match result {
         Ok(staged) => Ok(staged),
-        Err(error) => Err(super::transaction::merge_cleanup_result(
+        Err(error) => Err(super::product::merge_cleanup_result(
             error,
-            super::transaction::discard_staged_path(
-                &tmp,
-                staged_identity,
-                SfxLayout::MacosApp,
-                dest,
-            ),
+            super::product::discard_staged_path(&tmp, staged_identity, SfxLayout::MacosApp, dest),
             dest,
         )),
     }
@@ -426,24 +420,22 @@ pub(super) fn stage(
 fn ensure_staged_root_binding(
     held_root: &File,
     path: &Path,
-    identity: super::transaction::PathIdentity,
+    identity: PathIdentity,
     message: &str,
 ) -> Result<(), FormatError> {
-    if super::transaction::file_identity(held_root)? != identity
-        || super::transaction::path_identity(path)? != identity
-    {
+    if file_identity(held_root)? != identity || path_identity(path)? != identity {
         return Err(FormatError::Io(io::Error::other(message)));
     }
     Ok(())
 }
 
 #[cfg(not(windows))]
-fn open_bundle_root(path: &Path) -> io::Result<File> {
+pub(super) fn open_bundle_root(path: &Path) -> io::Result<File> {
     File::open(path)
 }
 
 #[cfg(windows)]
-fn open_bundle_root(path: &Path) -> io::Result<File> {
+pub(super) fn open_bundle_root(path: &Path) -> io::Result<File> {
     use std::os::windows::fs::OpenOptionsExt;
     use windows_sys::Win32::Storage::FileSystem::{
         FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE,
@@ -452,6 +444,7 @@ fn open_bundle_root(path: &Path) -> io::Result<File> {
 
     fs::OpenOptions::new()
         .read(true)
+        .write(true)
         .share_mode(FILE_SHARE_READ | FILE_SHARE_DELETE)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
         .open(path)
@@ -663,12 +656,10 @@ fn template_info_plist(template: &Path) -> Result<String, FormatError> {
             "app template Info.plist must be a regular file".into(),
         ));
     }
-    let identity = super::transaction::path_identity(&plist_path)?;
+    let identity = path_identity(&plist_path)?;
     let mut file = open_regular_file_no_follow(&plist_path)?;
     let state = RegularFileState::from_metadata(&file.metadata()?);
-    if super::transaction::file_identity(&file)? != identity
-        || super::transaction::path_identity(&plist_path)? != identity
-    {
+    if file_identity(&file)? != identity || path_identity(&plist_path)? != identity {
         return Err(template_changed(&plist_path));
     }
     if state.bytes() > MAX_INFO_PLIST_BYTES {
@@ -688,7 +679,7 @@ fn template_info_plist(template: &Path) -> Result<String, FormatError> {
     }
     if plist.len() as u64 != state.bytes()
         || !state.matches(&file.metadata()?)
-        || super::transaction::path_identity(&plist_path)? != identity
+        || path_identity(&plist_path)? != identity
     {
         return Err(template_changed(&plist_path));
     }
@@ -785,7 +776,7 @@ fn scan_dir(
             ));
         }
         let metadata = fs::symlink_metadata(item.path())?;
-        let identity = super::transaction::path_identity(&item.path())?;
+        let identity = path_identity(&item.path())?;
         let kind = if metadata.file_type().is_symlink() {
             let target = fs::read_link(item.path())?;
             validate_template_symlink_support(&child)?;
@@ -805,7 +796,7 @@ fn scan_dir(
                 child.display()
             )));
         };
-        if super::transaction::path_identity(&item.path())? != identity {
+        if path_identity(&item.path())? != identity {
             return Err(template_changed(&item.path()));
         }
         let directory_state = match &kind {
@@ -829,11 +820,11 @@ fn scan_dir(
 
 fn validate_scanned_directory(
     path: &Path,
-    identity: super::transaction::PathIdentity,
+    identity: PathIdentity,
     state: &TemplateDirectoryState,
 ) -> Result<(), FormatError> {
     let metadata = fs::symlink_metadata(path)?;
-    if !state.matches(&metadata) || super::transaction::path_identity(path)? != identity {
+    if !state.matches(&metadata) || path_identity(path)? != identity {
         return Err(template_changed(path));
     }
     Ok(())
@@ -1058,9 +1049,7 @@ fn validate_template_file_handle(
             "prepared macOS SFX entry is not a regular file".into(),
         ));
     };
-    if super::transaction::file_identity(file)? != entry.identity
-        || !state.matches(&file.metadata()?)
-    {
+    if file_identity(file)? != entry.identity || !state.matches(&file.metadata()?) {
         return Err(template_changed(path));
     }
     Ok(())
@@ -1083,8 +1072,8 @@ fn prepared_path_metadata(path: &Path) -> Result<fs::Metadata, FormatError> {
     })
 }
 
-fn prepared_path_identity(path: &Path) -> Result<super::transaction::PathIdentity, FormatError> {
-    super::transaction::path_identity(path).map_err(|error| {
+fn prepared_path_identity(path: &Path) -> Result<PathIdentity, FormatError> {
+    path_identity(path).map_err(|error| {
         if error.kind() == io::ErrorKind::NotFound {
             template_changed(path)
         } else {
@@ -1661,25 +1650,25 @@ mod tests {
             std::process::id()
         ));
         let (collision, collision_identity) =
-            super::super::transaction::reserve_staged_path(&dest, SfxLayout::MacosApp).unwrap();
+            super::super::product::reserve_bundle_stage(&dest).unwrap();
         fs::write(collision.join("owned-by-another-task"), b"keep").unwrap();
 
         let (reserved, reserved_identity) =
-            super::super::transaction::reserve_staged_path(&dest, SfxLayout::MacosApp).unwrap();
+            super::super::product::reserve_bundle_stage(&dest).unwrap();
 
         assert_ne!(reserved, collision);
         assert_eq!(
             fs::read(collision.join("owned-by-another-task")).unwrap(),
             b"keep"
         );
-        super::super::transaction::discard_staged_path(
+        super::super::product::discard_staged_path(
             &reserved,
             reserved_identity,
             SfxLayout::MacosApp,
             &dest,
         )
         .unwrap();
-        super::super::transaction::discard_staged_path(
+        super::super::product::discard_staged_path(
             &collision,
             collision_identity,
             SfxLayout::MacosApp,

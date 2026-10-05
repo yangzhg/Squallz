@@ -601,20 +601,6 @@ pub(crate) fn verify_destination_guard_with_progress(
     Ok(guard.state_digest())
 }
 
-pub(crate) fn verify_moved_path_state(
-    guard: CreateDestinationGuard,
-    current_path: &Path,
-    reported_destination: &Path,
-) -> Result<(), FormatError> {
-    if guarded_path_state_digest(current_path, reported_destination)? != Some(guard.state_digest())
-    {
-        return Err(FormatError::destination_changed(
-            reported_destination.to_path_buf(),
-        ));
-    }
-    Ok(())
-}
-
 pub(crate) fn verify_path_state_digest(
     expected: [u8; 32],
     current_path: &Path,

@@ -13,9 +13,12 @@ use crate::inputs::{collect_prepared_input_as, PreparedInputItem};
 use crate::PathFilter;
 use crate::{ArchiveSourceState, CreateDestinationGuard};
 
+mod commit;
 pub(crate) mod move_plan;
 pub(crate) mod target;
-mod transaction;
+
+#[cfg(test)]
+pub(crate) use commit::{archive_failure_for_test, recover_scope_for_test};
 
 /// Source binding shared by updates submitted from the same archive view.
 /// Successful updates advance the binding while holding the target lock.
@@ -111,7 +114,7 @@ pub(crate) fn run_update_rewrite(
     ctl: &ControlToken,
 ) -> Result<(), FormatError> {
     let mut additions = prepare_additions(ops, &opts.create, progress, ctl)?;
-    transaction::run(
+    commit::run(
         format,
         target,
         ops,
@@ -130,7 +133,7 @@ pub(crate) fn commit_created_archive(
     progress: &dyn ProgressSink,
     ctl: &ControlToken,
 ) -> Result<(), FormatError> {
-    transaction::commit_created_archive(target, staged, guard, progress, ctl)
+    commit::commit_created_archive(target, staged, guard, progress, ctl)
 }
 
 impl PreparedAddition {

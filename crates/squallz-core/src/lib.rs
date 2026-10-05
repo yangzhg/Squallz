@@ -33,6 +33,7 @@ mod plaintext;
 mod presets;
 mod queue;
 mod repair;
+mod replacement;
 mod sfx;
 mod stored_os_string;
 mod update;

@@ -6,7 +6,7 @@
 
 mod bundle;
 mod bundle_tree;
-mod transaction;
+mod product;
 
 use std::fs::{self, File};
 use std::io::{self, Read, Seek, SeekFrom, Write};
@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use squallz_format_api::{
     check_windows_portability, split_volume_name, ControlToken, CreateOptions, Detected, EntryPath,
-    FormatError, OpenOptions, ProgressPhase, ProgressSink, ReadSeek, ResourceOptions,
+    FormatError, OpenOptions, ProgressSink, ReadSeek, ResourceOptions,
 };
 
 use crate::filesystem_identity::{
@@ -28,8 +28,9 @@ use crate::{
     CreatePlan, Engine,
 };
 
-pub(crate) use transaction::classify_sfx_transaction_artifact;
-pub use transaction::{sfx_recovery_details, SfxRecoveryDetails};
+pub(crate) use product::classify_sfx_transaction_artifact;
+use product::{publish_staged_sfx, publish_staged_sfx_after_cleanup};
+pub use product::{sfx_recovery_details, SfxRecoveryDetails};
 
 const FOOTER_MAGIC: [u8; 8] = *b"SQZSFX1\0";
 const FOOTER_LEN: u64 = 32;
@@ -306,7 +307,7 @@ pub struct VerifiedSfxBuildReport {
 
 struct StagedSfx {
     path: PathBuf,
-    identity: transaction::PathIdentity,
+    identity: PathIdentity,
     held_file: Option<File>,
     report: SfxBuildReport,
     progress_total: u64,
@@ -317,7 +318,7 @@ impl StagedSfx {
         if self
             .held_file
             .as_ref()
-            .is_some_and(|file| transaction::file_identity(file).ok() != Some(self.identity))
+            .is_some_and(|file| file_identity(file).ok() != Some(self.identity))
         {
             return Err(FormatError::Io(io::Error::other(
                 "SFX staging handle identity changed",
@@ -334,7 +335,7 @@ impl StagedSfx {
 
     fn discard(&mut self) -> Result<(), FormatError> {
         self.release_held_file()?;
-        transaction::discard_staged_path(
+        product::discard_staged_path(
             &self.path,
             self.identity,
             self.report.layout,
@@ -815,7 +816,7 @@ impl Engine {
         progress: &dyn ProgressSink,
         ctl: &ControlToken,
     ) -> Result<SfxBuildReport, FormatError> {
-        transaction::preflight_destination(dest)?;
+        product::preflight_destination(dest)?;
         let layout = if opts.target == SfxTarget::Macos {
             SfxLayout::MacosApp
         } else {
@@ -875,7 +876,7 @@ impl Engine {
             .ok_or_else(|| FormatError::ResourceLimitExceeded("SFX size overflow".into()))?;
         ensure_destination_space(dest, total_bytes)?;
 
-        let reserved = transaction::reserve_single_file_stage(dest)?;
+        let reserved = product::reserve_file_stage(dest, product::TemporaryKind::Stage)?;
         let tmp = reserved.path.clone();
         let staged_identity = reserved.identity;
         let result = (|| {
@@ -934,8 +935,8 @@ impl Engine {
                 },
             )?;
             drop(output);
-            if transaction::file_identity(&reserved.file)? != staged_identity
-                || transaction::path_identity(&tmp)? != staged_identity
+            if file_identity(&reserved.file)? != staged_identity
+                || path_identity(&tmp)? != staged_identity
             {
                 return Err(FormatError::Io(io::Error::other(
                     "SFX staging changed after writing",
@@ -962,14 +963,9 @@ impl Engine {
         })();
         match result {
             Ok(staged) => Ok(staged),
-            Err(error) => Err(transaction::merge_cleanup_result(
+            Err(error) => Err(product::merge_cleanup_result(
                 error,
-                transaction::discard_staged_path(
-                    &tmp,
-                    staged_identity,
-                    SfxLayout::SingleFile,
-                    dest,
-                ),
+                product::discard_staged_path(&tmp, staged_identity, SfxLayout::SingleFile, dest),
                 dest,
             )),
         }
@@ -1093,7 +1089,7 @@ impl Engine {
         ctl: &ControlToken,
         capture_input_manifest: bool,
     ) -> Result<VerifiedSfxBuildReport, FormatError> {
-        transaction::preflight_destination(dest)?;
+        product::preflight_destination(dest)?;
         if create_opts.split_size.is_some() {
             return Err(FormatError::Unsupported(
                 "self-extracting archives require one complete ZIP payload".into(),
@@ -1109,7 +1105,8 @@ impl Engine {
         validate_publish_destination(dest, layout, commit_policy_allows_replace(commit_policy))?;
         let validated_template = validate_sfx_template_for_build(stub, &sfx_opts, ctl)?;
 
-        let payload_reservation = transaction::reserve_payload_path(dest)?;
+        let payload_reservation =
+            product::reserve_file_stage(dest, product::TemporaryKind::Payload)?;
         let payload = payload_reservation.path.clone();
         let payload_identity = payload_reservation.identity;
         let create_output = crate::create::CreateOutput::CallerReserved {
@@ -1166,7 +1163,7 @@ impl Engine {
         match result {
             Ok((staged, input_manifest)) => {
                 publish_staged_sfx_after_cleanup(staged, dest, commit_policy, progress, ctl, || {
-                    transaction::discard_staged_path(
+                    product::discard_staged_path(
                         &payload,
                         payload_identity,
                         SfxLayout::SingleFile,
@@ -1178,9 +1175,9 @@ impl Engine {
                     manifest: input_manifest,
                 })
             }
-            Err(error) => Err(transaction::merge_cleanup_result(
+            Err(error) => Err(product::merge_cleanup_result(
                 error,
-                transaction::discard_staged_path(
+                product::discard_staged_path(
                     &payload,
                     payload_identity,
                     SfxLayout::SingleFile,
@@ -1207,7 +1204,7 @@ fn clone_reserved_payload_for_create_with(
     let file = match clone_file(&reserved.file) {
         Ok(file) => file,
         Err(error) => {
-            return Err(transaction::merge_cleanup_result(
+            return Err(product::merge_cleanup_result(
                 error.into(),
                 crate::remove_bound_temp_file(&reserved.path, &reserved.file, reserved.identity),
                 destination,
@@ -1561,84 +1558,6 @@ where
     copy_permissions()?;
     sync()?;
     Ok(())
-}
-
-fn publish_staged_sfx_after_cleanup(
-    mut staged: StagedSfx,
-    dest: &Path,
-    commit_policy: CreateCommitPolicy,
-    progress: &dyn ProgressSink,
-    ctl: &ControlToken,
-    cleanup: impl FnOnce() -> Result<(), FormatError>,
-) -> Result<SfxBuildReport, FormatError> {
-    if let Err(error) = cleanup() {
-        let target = staged.report.path.clone();
-        return Err(transaction::merge_cleanup_result(
-            error,
-            staged.discard(),
-            &target,
-        ));
-    }
-    publish_staged_sfx(staged, dest, commit_policy, progress, ctl)
-}
-
-fn publish_staged_sfx(
-    mut staged: StagedSfx,
-    dest: &Path,
-    commit_policy: CreateCommitPolicy,
-    progress: &dyn ProgressSink,
-    ctl: &ControlToken,
-) -> Result<SfxBuildReport, FormatError> {
-    staged.release_held_file()?;
-    progress.on_phase(ProgressPhase::OutputCommit, false);
-    if let Err(error) = ctl.checkpoint() {
-        let target = staged.report.path.clone();
-        return Err(transaction::merge_cleanup_result(
-            error,
-            staged.discard(),
-            &target,
-        ));
-    }
-    staged.report.preserved_outputs = match replace_staged_path(
-        &staged.path,
-        staged.identity,
-        dest,
-        staged.report.layout,
-        commit_policy,
-    ) {
-        Ok(preserved_outputs) => preserved_outputs,
-        Err(error) => {
-            if !recovery_error_requires_staging(&error) {
-                let target = staged.report.path.clone();
-                return Err(transaction::merge_cleanup_result(
-                    error,
-                    staged.discard(),
-                    &target,
-                ));
-            }
-            return Err(error);
-        }
-    };
-    progress.on_progress(
-        staged.progress_total,
-        staged.progress_total,
-        &EntryPath::from_utf8(""),
-    );
-    Ok(staged.report)
-}
-
-fn recovery_error_requires_staging(error: &FormatError) -> bool {
-    transaction::sfx_recovery_requires_staging(error)
-}
-
-fn replace_staged_path(
-    staged: &Path,
-    staged_identity: transaction::PathIdentity,
-    dest: &Path,
-    layout: SfxLayout,
-    commit_policy: CreateCommitPolicy,
-) -> Result<Vec<PathBuf>, FormatError> {
-    transaction::replace_bound_staged_path(staged, staged_identity, dest, layout, commit_policy)
 }
 
 fn commit_policy_from_overwrite(overwrite: bool) -> CreateCommitPolicy {
@@ -2342,7 +2261,8 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir(&dir).unwrap();
         let destination = dir.join("output.exe");
-        let reserved = transaction::reserve_payload_path(&destination).unwrap();
+        let reserved =
+            product::reserve_file_stage(&destination, product::TemporaryKind::Payload).unwrap();
         let payload = reserved.path.clone();
 
         let error = match clone_reserved_payload_for_create_with(&reserved, &destination, |_| {
@@ -2631,7 +2551,8 @@ mod tests {
 
         let destination = temp_file("windows-staged-handle").with_extension("exe");
         let _ = fs::remove_file(&destination);
-        let mut reserved = transaction::reserve_single_file_stage(&destination).unwrap();
+        let mut reserved =
+            product::reserve_file_stage(&destination, product::TemporaryKind::Stage).unwrap();
         reserved.file.write_all(b"staged SFX bytes").unwrap();
         reserved.file.sync_all().unwrap();
         let path = reserved.path.clone();
@@ -2911,17 +2832,17 @@ mod tests {
             } else {
                 fs::write(&dest, b"keep").unwrap();
             }
-            let (staged_path, _) = transaction::reserve_staged_path(&dest, layout).unwrap();
+            let (staged_path, mut held) = reserve_test_stage(&dest, layout);
             if layout == SfxLayout::MacosApp {
                 fs::write(staged_path.join("replacement"), b"new").unwrap();
             } else {
-                fs::write(&staged_path, b"new").unwrap();
+                held.write_all(b"new").unwrap();
             }
 
             let staged = StagedSfx {
                 path: staged_path.clone(),
-                identity: transaction::path_identity(&staged_path).unwrap(),
-                held_file: None,
+                identity: path_identity(&staged_path).unwrap(),
+                held_file: Some(held),
                 progress_total: 1,
                 report: SfxBuildReport {
                     path: dest.clone(),
@@ -2972,12 +2893,12 @@ mod tests {
         let _ = fs::remove_dir_all(&single_dest);
         fs::create_dir(&single_dest).unwrap();
         fs::write(single_dest.join("keep"), b"directory must survive").unwrap();
-        let (single_stage, _) =
-            transaction::reserve_staged_path(&single_dest, SfxLayout::SingleFile).unwrap();
-        fs::write(&single_stage, b"single replacement").unwrap();
+        let (single_stage, mut single_held) =
+            reserve_test_stage(&single_dest, SfxLayout::SingleFile);
+        single_held.write_all(b"single replacement").unwrap();
 
         let error = publish_staged_sfx(
-            test_staged_sfx(single_stage.clone(), SfxLayout::SingleFile),
+            test_staged_sfx(single_stage.clone(), single_held, SfxLayout::SingleFile),
             &single_dest,
             commit_policy_from_overwrite(true),
             &squallz_format_api::NoProgress,
@@ -2994,12 +2915,11 @@ mod tests {
         let bundle_dest = temp_file("bundle-destination-file").with_extension("app");
         let _ = fs::remove_file(&bundle_dest);
         fs::write(&bundle_dest, b"file must survive").unwrap();
-        let (bundle_stage, _) =
-            transaction::reserve_staged_path(&bundle_dest, SfxLayout::MacosApp).unwrap();
+        let (bundle_stage, bundle_held) = reserve_test_stage(&bundle_dest, SfxLayout::MacosApp);
         fs::write(bundle_stage.join("replacement"), b"bundle replacement").unwrap();
 
         let error = publish_staged_sfx(
-            test_staged_sfx(bundle_stage.clone(), SfxLayout::MacosApp),
+            test_staged_sfx(bundle_stage.clone(), bundle_held, SfxLayout::MacosApp),
             &bundle_dest,
             commit_policy_from_overwrite(true),
             &squallz_format_api::NoProgress,
@@ -3019,12 +2939,11 @@ mod tests {
         let dest = temp_file("no-clobber-destination");
         let _ = fs::remove_file(&dest);
         fs::write(&dest, b"previous output").unwrap();
-        let (staged_path, _) =
-            transaction::reserve_staged_path(&dest, SfxLayout::SingleFile).unwrap();
-        fs::write(&staged_path, b"new output").unwrap();
+        let (staged_path, mut held) = reserve_test_stage(&dest, SfxLayout::SingleFile);
+        held.write_all(b"new output").unwrap();
 
         let error = publish_staged_sfx(
-            test_staged_sfx(staged_path.clone(), SfxLayout::SingleFile),
+            test_staged_sfx(staged_path.clone(), held, SfxLayout::SingleFile),
             &dest,
             commit_policy_from_overwrite(false),
             &squallz_format_api::NoProgress,
@@ -3042,12 +2961,11 @@ mod tests {
     fn no_overwrite_single_file_publish_uses_atomic_rename_path() {
         let dest = temp_file("no-clobber-rename-destination");
         let _ = fs::remove_file(&dest);
-        let (staged_path, _) =
-            transaction::reserve_staged_path(&dest, SfxLayout::SingleFile).unwrap();
-        fs::write(&staged_path, b"new output").unwrap();
+        let (staged_path, mut held) = reserve_test_stage(&dest, SfxLayout::SingleFile);
+        held.write_all(b"new output").unwrap();
 
         publish_staged_sfx(
-            test_staged_sfx(staged_path.clone(), SfxLayout::SingleFile),
+            test_staged_sfx(staged_path.clone(), held, SfxLayout::SingleFile),
             &dest,
             commit_policy_from_overwrite(false),
             &squallz_format_api::NoProgress,
@@ -3067,10 +2985,9 @@ mod tests {
         fs::create_dir(&dir).unwrap();
         let dest = dir.join("output.exe");
         fs::write(&dest, b"previous output").unwrap();
-        let (staged_path, _) =
-            transaction::reserve_staged_path(&dest, SfxLayout::SingleFile).unwrap();
-        fs::write(&staged_path, b"new output").unwrap();
-        let mut staged = test_staged_sfx(staged_path.clone(), SfxLayout::SingleFile);
+        let (staged_path, mut held) = reserve_test_stage(&dest, SfxLayout::SingleFile);
+        held.write_all(b"new output").unwrap();
+        let mut staged = test_staged_sfx(staged_path.clone(), held, SfxLayout::SingleFile);
         staged.report.path.clone_from(&dest);
 
         let report = publish_staged_sfx(
@@ -3090,12 +3007,29 @@ mod tests {
         fs::remove_dir_all(dir).unwrap();
     }
 
-    fn test_staged_sfx(path: PathBuf, layout: SfxLayout) -> StagedSfx {
-        let identity = transaction::path_identity(&path).unwrap();
+    fn reserve_test_stage(destination: &Path, layout: SfxLayout) -> (PathBuf, File) {
+        match layout {
+            SfxLayout::SingleFile => {
+                let reserved =
+                    product::reserve_file_stage(destination, product::TemporaryKind::Stage)
+                        .unwrap();
+                (reserved.path, reserved.file)
+            }
+            SfxLayout::MacosApp => {
+                let (path, identity) = product::reserve_bundle_stage(destination).unwrap();
+                let held = bundle::open_bundle_root(&path).unwrap();
+                assert_eq!(file_identity(&held).unwrap(), identity);
+                (path, held)
+            }
+        }
+    }
+
+    fn test_staged_sfx(path: PathBuf, held: File, layout: SfxLayout) -> StagedSfx {
+        let identity = path_identity(&path).unwrap();
         StagedSfx {
             path: path.clone(),
             identity,
-            held_file: None,
+            held_file: Some(held),
             progress_total: 1,
             report: SfxBuildReport {
                 path,

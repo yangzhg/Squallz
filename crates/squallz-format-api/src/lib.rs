@@ -35,6 +35,8 @@ pub use extract::{
     empty_extract_report, extract_entries, extract_entries_with_report,
     first_free_numbered_sibling_name, ExtractReport, ExtractSink,
 };
+#[cfg(windows)]
+pub use file_ops::reopen_readonly_file;
 pub use file_ops::{atomic_replace_file, move_path_no_replace};
 pub use options::{
     BoundedProblemLog, CompressionLevel, ConflictDecision, ConflictResolver, CreateOptions,
