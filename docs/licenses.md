@@ -165,28 +165,27 @@ tauri 的传递依赖树较大（wry/tao/objc2 系、muda 等），均为 MIT/Ap
 
 ## PAR2 外部工具桥接
 
-| 工具 / 候选 | 版本 | 许可证 | 维护状态 | 用途 |
+| 工具 | 版本 | 许可证 | 维护状态 | 用途 |
 | ---- | ---- | ---- | ---- | ---- |
 | par2cmdline-turbo | 外部可执行文件，未随本仓库锁定或分发 | GPL-2.0 | 活跃（animetosho/par2cmdline-turbo） | 可选外部 PAR2 create/verify/repair 桥接，优先通过 `SQUALLZ_PAR2` 或 PATH 调用 |
 | par2cmdline | 外部可执行文件，未随本仓库锁定或分发 | GPL-2.0-or-later（常见发行版包） | 活跃维护 fork + 发行版维护 | `par2` / `par2cmdline` 兼容 fallback |
 | rust-par2 | 0.1.2（`squallz-recovery` 直接依赖） | MIT OR Apache-2.0 | 新项目；已通过 par2cmdline-turbo fixture verify/repair/over-limit smoke | 无外部 par2 时内置 verify/repair fallback |
-| parmesan-par2 | 0.1.0（候选，未引入） | MIT | 当前 macOS ARM 构建失败（缺 `flush_neon` 方法），暂不作为产品 create 依赖 | 后续继续寻找或自研纯 Rust PAR2 create |
 
 当前代码只桥接用户或测试环境提供的外部可执行文件，不把 GPL PAR2 工具打进 Squallz 产物。
 若后续 DMG/安装包内置 `par2cmdline-turbo` 或 `par2cmdline`，必须补齐 GPL
 源码提供、许可证展示、分发方式和用户可替换机制；若改为 Rust 内置实现，则先做标准 PAR2
 互操作矩阵，再把新增 crate 转入正式直接依赖。当前 `squallz-recovery` 已把 `rust-par2` 打入产品二进制，
-用于无外部 par2 时的 verify/repair；`parmesan-par2` 未引入，PAR2 create 仍依赖外部标准工具。
+用于无外部 par2 时的 verify/repair；PAR2 create 依赖外部标准工具。
 
-## 长尾格式外部后端候选
+## 长尾格式外部后端
 
 随包分发的发布合同见 `docs/external-tools-distribution.md`；本节只记录许可证台账与当前工程用途。
 
-| 工具 / 候选 | 版本 | 许可证 | 维护状态 | 用途 |
+| 工具 | 版本 | 许可证 | 维护状态 | 用途 |
 | ---- | ---- | ---- | ---- | ---- |
-| 7-Zip / 7zz / 7z | 外部可执行文件，未随本仓库锁定或分发 | GNU LGPL + unRAR restriction（按官方 `license.txt` 复核） | 活跃；官方支持三平台构建和广泛格式清单 | 长尾 unpack-only bridge；候选 WIM writer；RAR 只读候选 |
+| 7-Zip / 7zz / 7z | 外部可执行文件，未随本仓库锁定或分发 | GNU LGPL + unRAR restriction（按官方 `license.txt` 复核） | 活跃；官方支持三平台构建和广泛格式清单 | 长尾 unpack-only bridge、RAR 只读和 WIM read/test |
 | RARLAB UnRAR | 用户自行安装的外部可执行文件，未随本仓库锁定或分发 | RARLAB freeware / unRAR license，禁止借此重建专有 RAR 压缩算法 | 活跃；官方 RAR/WinRAR 平台包提供命令行 UnRAR | 仅为 7zz/7z 已明确确认未加密的 RAR7 v6 条目提供只读流式解码 |
-| wimlib / wimlib-imagex | 外部库或可执行文件候选，未引入 | GPL-3.0 / LGPL-2.1 组合，具体构建配置需发布前复核 | 活跃；官方介绍为跨平台 WIM 创建/修改/提取库 | WIM pack/unpack 发布阻断候选 |
+| wimlib / wimlib-imagex | 外部可执行文件，未随本仓库锁定或分发 | GPL-3.0 / LGPL-2.1 组合，具体构建配置需发布前复核 | 活跃；官方介绍为跨平台 WIM 创建/修改/提取库 | WIM 创建与原生 Split WIM 分卷写入；不链接到 Squallz 二进制 |
 | libarchive / bsdtar | 系统或外部可执行文件，未随本仓库锁定或分发 | BSD 风格许可证，但具体系统构建含格式插件差异 | 活跃；用于本机 RAR 诊断、用户显式选择、经严格验证的单文件兼容 fallback，或无可用 7z 且未提供密码时的普通单文件读取 | 不作为首发跨平台产品承诺；密码输入和原生多卷仍要求 7zz/7z；旧 p7zip RAR5 选择先核对普通文件路径与大小 |
 
 2026-07-28 复核官方 7-Zip `license.txt` 与 RARLAB 下载、UnRAR 7 说明和许可页面后，当前结论保持不变：

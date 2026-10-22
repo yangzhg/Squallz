@@ -15,6 +15,7 @@
   import { errorSummary } from "../lib/error-presentation";
   import { basename as pathBaseName } from "../lib/format";
   import { currentLang, tFallback as tr } from "../lib/i18n.svelte";
+  import { restoreModalFocus, trapModalFocus } from "../lib/modal-focus";
   import {
     ipc,
     isErrorDto,
@@ -28,6 +29,7 @@
     output,
     initialIdentity = "",
     initialProfile = "",
+    returnFocus = null,
     onSubmit,
     onCancel,
   }: {
@@ -37,6 +39,7 @@
     output: string;
     initialIdentity?: string;
     initialProfile?: string;
+    returnFocus?: HTMLElement | null;
     onSubmit: (request: SfxPublishRequest) => Promise<string | null>;
     onCancel: () => void;
   } = $props();
@@ -103,7 +106,9 @@
       identity = result.identities.includes(identity) ? identity : result.identities[0];
       publisherState = "available";
       await tick();
-      (identities.length > 1 ? identitySelect : profileInput)?.focus({ preventScroll: true });
+      if (generation === statusGeneration && card?.ownerDocument.activeElement === card) {
+        (identities.length > 1 ? identitySelect : profileInput)?.focus({ preventScroll: true });
+      }
     } catch (error) {
       if (generation !== statusGeneration) return;
       publisherState = "error";
@@ -113,40 +118,14 @@
     }
   }
 
-  function focusableElements(): HTMLElement[] {
-    if (!card) return [];
-    return Array.from(
-      card.querySelectorAll<HTMLElement>(
-        'button:not(:disabled), input:not(:disabled), select:not(:disabled), [href], [tabindex]:not([tabindex="-1"])',
-      ),
-    ).filter((element) => !element.hasAttribute("hidden"));
-  }
-
   function onKeydown(event: KeyboardEvent): void {
-    if (event.key === "Escape" && !submitting) {
+    if (event.key === "Escape") {
       event.preventDefault();
-      onCancel();
+      event.stopPropagation();
+      if (!submitting) onCancel();
       return;
     }
-    if (event.key !== "Tab") return;
-    const focusable = focusableElements();
-    if (focusable.length === 0) {
-      event.preventDefault();
-      card?.focus();
-      return;
-    }
-    const first = focusable[0];
-    const last = focusable[focusable.length - 1];
-    if (document.activeElement === card) {
-      event.preventDefault();
-      (event.shiftKey ? last : first).focus();
-    } else if (event.shiftKey && document.activeElement === first) {
-      event.preventDefault();
-      last.focus();
-    } else if (!event.shiftKey && document.activeElement === last) {
-      event.preventDefault();
-      first.focus();
-    }
+    trapModalFocus(event, card);
   }
 
   function updateIdentity(event: Event): void {
@@ -208,12 +187,21 @@
   }
 
   onMount(() => {
+    const panel = card;
+    const previousFocus = panel?.ownerDocument.activeElement;
+    let mounted = true;
     identity = initialIdentity;
     notaryProfile = initialProfile;
-    void tick().then(() => card?.focus({ preventScroll: true }));
+    void tick().then(() => {
+      if (mounted && panel?.ownerDocument.activeElement === previousFocus) {
+        panel?.focus({ preventScroll: true });
+      }
+    });
     void refreshStatus();
     return () => {
+      mounted = false;
       statusGeneration += 1;
+      restoreModalFocus(panel, returnFocus);
     };
   });
 </script>

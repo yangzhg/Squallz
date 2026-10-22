@@ -37,6 +37,7 @@ function harness() {
     taskCenterReturnFocus: null, taskCenterOpen: false, taskCenterSelectedTaskId: null, taskCenterFocusTaskId: null,
     taskDialogTaskId: null, taskDialogDismissedId: null, taskReviewRequestGeneration: 0, activePopover: null,
     jobPasswordPrompt: null, jobConflictPrompt: { id: 7, version: 1 }, otherModal: false,
+    nativeDialogCount: 0, macosSfxPublisherTask: null, archiveEditorVisible: () => false,
     tick: () => new Promise((resolve) => pendingTicks.push(resolve)),
     appActionEnabled: () => true, createPrimaryAction: () => createButton,
     isTaskActiveState: (state) => ["running", "queued", "paused"].includes(state),

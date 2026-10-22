@@ -33,11 +33,11 @@ Status: blocked
 
 $message
 
-## Required Closure
+## Windows validation
 
-Run \`scripts/windows_credential_manager_smoke.ps1\` on Windows and commit
-\`benches/WINDOWS_CREDENTIAL_MANAGER_SMOKE.md\` only when it reports
-\`Status: pass\`.
+Run \`scripts/windows_credential_manager_smoke.ps1\` on Windows and check
+that the generated report shows \`Status: pass\`. Keep the report as a local
+or CI validation artifact.
 EOF
 }
 

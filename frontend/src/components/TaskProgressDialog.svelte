@@ -3,6 +3,7 @@
   import Icon from "./Icon.svelte";
   import { cssVariables, type CssVariableMap } from "../lib/css-variables";
   import { trapModalFocus } from "../lib/modal-focus";
+  import { fitTaskWindow } from "../lib/task-window-size";
   import type { TaskConflictDecision, TaskDialogModel } from "../lib/task-dialog";
   import { taskNeedsInput } from "../lib/task-model";
   import {
@@ -82,6 +83,7 @@
     copyFeedback = null,
     copyFeedbackTone = null,
     copyPending = false,
+    notice = null,
     passwordQuestion = null,
     passwordValue = "",
     passwordError = null,
@@ -117,6 +119,7 @@
     copyFeedback?: string | null;
     copyFeedbackTone?: "success" | "danger" | null;
     copyPending?: boolean;
+    notice?: string | null;
     passwordQuestion?: PasswordQuestion | null;
     passwordValue?: string;
     passwordError?: string | null;
@@ -195,10 +198,10 @@
   }
 
   function onTaskCardKeydown(event: KeyboardEvent): void {
-    if (presentation === "panel" && event.key === "Escape" && !event.defaultPrevented) {
+    if (event.key === "Escape" && !event.defaultPrevented) {
       event.preventDefault();
       event.stopPropagation();
-      void onDismiss(task);
+      if (presentation === "panel" || !isTaskActiveState(task.state)) void onDismiss(task);
       return;
     }
     if (presentation === "dialog") trapModalFocus(event, taskCard);
@@ -207,7 +210,10 @@
   $effect(() => {
     const focusIdentity = `${presentation}:${task.id ?? "submitting"}:${Boolean(passwordQuestion)}:${Boolean(conflictQuestion)}`;
     void focusIdentity;
-    void tick().then(() => (passwordInput ?? taskCard)?.focus());
+    void tick().then(() => {
+      const target = passwordInput ?? taskCard;
+      if (target?.isConnected && !target.closest("[inert]")) target.focus({ preventScroll: true });
+    });
   });
 
   function scrollResultList(event: KeyboardEvent): void {
@@ -261,9 +267,11 @@
   <div
     bind:this={taskCard}
     class="task-modal-card"
+    use:fitTaskWindow={presentation === "window"}
     data-task-state={task.state}
     data-task-outcome={displayedTaskTone()}
     data-task-active={taskProgressActive(task) ? "true" : "false"}
+    data-task-question={Boolean(passwordQuestion || conflictQuestion)}
     role={presentation === "dialog" ? "dialog" : "region"}
     aria-modal={presentation === "dialog" ? "true" : undefined}
     aria-labelledby={titleId}
@@ -290,6 +298,7 @@
       tabindex="0"
       onkeydown={scrollResultList}
     >
+    {#if notice && (passwordQuestion || conflictQuestion)}<div class="surface-notice" role="status">{notice}</div>{/if}
     {#if !isTaskActiveState(task.state)}
       <section
         class="task-result-callout"
@@ -301,6 +310,12 @@
         <div class="task-result-copy">
           <strong>{tr("gui.task.result")}</strong>
           <span>{taskDialogResultSummary(task)}</span>
+        </div>
+      </section>
+      <section class="task-next-step" aria-label={tr("gui.task.next_step")}>
+        <div>
+          <strong>{tr("gui.task.next_step")}</strong>
+          <span>{taskNextStepDetail(task, taskWindowMode)}</span>
         </div>
       </section>
     {/if}
@@ -404,6 +419,7 @@
       </section>
     {/if}
 
+    {#if task.state !== "done"}
     <div class="task-modal-progress-stack">
       <section class="task-modal-progress-block" data-task-progress-kind="overall">
         <div class="task-modal-progress-line">
@@ -463,6 +479,7 @@
         </section>
       {/if}
     </div>
+    {/if}
 
     {#if taskControlCalloutVisible(task)}
       <section class="task-control-callout" class:attention={task.controlIntent !== null} aria-live="polite">
@@ -503,7 +520,14 @@
               <Icon name="list" size={14} />{copyPending ? tr("common.copying") : tr("gui.checksum.copy_results")}
             </button>
           </div>
-          <div class="task-checksum-table">
+          <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions (focusable scroll region) -->
+          <div
+            class="task-checksum-table"
+            role="region"
+            aria-label={tr("gui.task.checksum_results")}
+            tabindex="0"
+            onkeydown={scrollResultList}
+          >
             <div><b>{tr("gui.checksum.result")}</b><b>{tr("gui.checksum.digest")}</b><b>{tr("common.status")}</b></div>
             {#each checksumRows as item}
               <div>
@@ -523,7 +547,14 @@
           aria-label={taskResultDetailTitle(task)}
         >
           <strong>{taskResultDetailTitle(task)}</strong>
-          <div class="task-result-detail-list">
+          <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions (focusable scroll region) -->
+          <div
+            class="task-result-detail-list"
+            role="region"
+            aria-label={taskResultDetailTitle(task)}
+            tabindex="0"
+            onkeydown={scrollResultList}
+          >
             {#each detailRows as row}
               <div>
                 <span>{row.label}</span>
@@ -544,17 +575,12 @@
           </div>
         </section>
       {/if}
-      <section class="task-next-step" aria-label={tr("gui.task.next_step")}>
-        <div>
-          <strong>{tr("gui.task.next_step")}</strong>
-          <span>{taskNextStepDetail(task, taskWindowMode)}</span>
-        </div>
-      </section>
     {/if}
     </div>
 
     {#if !passwordQuestion && !conflictQuestion}
     <footer class="task-modal-actions">
+      {#if notice}<div class="surface-notice" role="status">{notice}</div>{/if}
       {#if actionFailure}
         <p class="task-action-error" role="alert">{actionFailure}</p>
       {/if}
@@ -621,7 +647,7 @@
               <Icon name="folder-open" size={15} />{taskRevealOutputLabel()}
             </button>
           {/if}
-          <button type="button" aria-keyshortcuts={presentation === "panel" ? "Escape" : undefined} onclick={() => void onDismiss(task)}>
+          <button type="button" aria-keyshortcuts="Escape" onclick={() => void onDismiss(task)}>
             {presentation === "panel"
               ? tr("gui.task.back_to_tasks")
               : tr("gui.task.close")}

@@ -25,6 +25,7 @@
     failureBody,
     retryLabel,
     backLabel,
+    onUnavailableBack,
   }: {
     surface: TaskProgressDialogSurfaceProps;
     loadingTitle: string;
@@ -33,6 +34,7 @@
     failureBody: string;
     retryLabel: string;
     backLabel: string;
+    onUnavailableBack?: () => void;
   } = $props();
 
   let component = $state(taskDialogLoader.load());
@@ -51,10 +53,10 @@
   }
 
   function onFallbackKeydown(event: KeyboardEvent): void {
-    if (presentation === "panel" && event.key === "Escape" && !event.defaultPrevented) {
+    if (event.key === "Escape" && !event.defaultPrevented) {
       event.preventDefault();
       event.stopPropagation();
-      void surface.onDismiss(surface.task);
+      onUnavailableBack?.();
       return;
     }
     if (presentation === "dialog") trapModalFocus(event, fallbackCard);
@@ -84,9 +86,9 @@
           <strong id={loadingTitleId}>{loadingTitle}</strong>
           <span>{loadingBody}</span>
         </div>
-        {#if presentation === "panel"}
+        {#if onUnavailableBack}
           <div class="deferred-workspace-actions">
-            <button type="button" aria-keyshortcuts="Escape" onclick={() => void surface.onDismiss(surface.task)}>{backLabel}</button>
+            <button type="button" aria-keyshortcuts="Escape" onclick={onUnavailableBack}>{backLabel}</button>
           </div>
         {/if}
       </section>
@@ -116,8 +118,8 @@
         titleId={failureTitleId} class="task-surface-deferred"
         recovery={{ taskId: surface.task.id }}
       >
-        {#if presentation === "panel"}
-          <button type="button" aria-keyshortcuts="Escape" onclick={() => void surface.onDismiss(surface.task)}>{backLabel}</button>
+        {#if onUnavailableBack}
+          <button type="button" aria-keyshortcuts="Escape" onclick={onUnavailableBack}>{backLabel}</button>
         {/if}
       </DeferredViewError>
     </div>

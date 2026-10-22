@@ -13,15 +13,17 @@ test("batch completion feedback keeps archive and entry failures distinct in bot
     const results = await server.ssrLoadModule("/src/lib/batch-extract-result.ts");
     const extraction = await server.ssrLoadModule("/src/lib/extract-result.ts");
     const presentation = await server.ssrLoadModule("/src/lib/task-outcome.ts");
+    const platformLabels = await server.ssrLoadModule("/src/lib/platform-labels.ts");
     const i18n = await server.ssrLoadModule("/src/lib/i18n.svelte.ts");
     const code = readFileSync(new URL("./jobs.svelte.ts", import.meta.url), "utf8");
     const source = ts.createSourceFile("jobs.ts", code, ts.ScriptTarget.Latest, true);
-    const names = ["finishToast"];
+    const names = ["finishToast", "pushTaskResultToast"];
     const declarations = selectFunctions(source, names);
     const outputText = compileTestScript(declarations.map((node) => node.getText(source)).join("\n"));
     const toasts = [];
     const run = vm.runInNewContext(`${outputText}\n({${names.join(",")}})`, {
-      ...results, ...extraction, ...i18n, ...presentation, revealAfterExtract: false,
+      ...results, ...extraction, ...i18n, ...presentation, ...platformLabels,
+      revealAfterExtract: false, presentedTaskId: null,
       revealPath() {}, pushToast: (toast) => toasts.push(toast),
     });
     for (const [locale, entryText] of [["en-US", "2 entries failed · 1 entries skipped"], ["zh-CN", "2 个条目失败 · 1 个条目跳过"]]) {
@@ -45,6 +47,9 @@ test("batch completion feedback keeps archive and entry failures distinct in bot
       run.finishToast(task);
       assert.equal(toasts.at(-1).kind, "warning");
       assert.equal(toasts.at(-1).title, summary);
+      assert.equal(toasts.at(-1).action.label, i18n.t("gui.task.show_in_file_manager", {
+        fileManager: platformLabels.platformFileManagerName(),
+      }));
       assert.equal(task.revealPath, "/output/damaged");
 
       task.result.failed = 0;

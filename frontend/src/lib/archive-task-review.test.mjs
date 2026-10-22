@@ -93,6 +93,7 @@ function harness() {
     focusBlockingTaskIfAny: () => false, preventCreateSubmissionNavigation: () => false,
     preventConvertSubmissionNavigation: () => false,
     focusExtractReview: () => calls.push(["focus"]),
+    focusConvertReview: () => calls.push(["focus-convert"]),
     isPar2Path: () => false, openPasswordPrompt: () => context.archivePasswordPrompt,
     archiveOpenError: () => null, archiveOpenFailureNotice: () => "Could not open archive",
     openArchiveStore: async (path, password, encoding) => {
@@ -331,6 +332,63 @@ test("a current archive picker preserves selection, cancellation, and failure fe
     assert.equal(run.context.archivePickerRequest, null);
     if (outcome === "selected") assert.equal(run.context.currentArchive.path, "/chosen.zip");
     else assert.match(run.calls.at(-1)[1], outcome === "cancelled" ? /cancelled/ : /desktop file dialog/);
+  }
+});
+
+test("choosing a source from conversion keeps the converter only after a successful open", async () => {
+  for (const outcome of ["selected", "cancelled", "failed", "unreadable", "corrupt"]) {
+    const run = harness();
+    run.context.currentArchive = null;
+    run.context.screen = "convert";
+    run.context.openNativeDialog = async () => {
+      if (outcome === "failed") throw new Error("dialog unavailable");
+      return outcome === "cancelled" ? null : "/chosen.zip";
+    };
+    if (["unreadable", "corrupt"].includes(outcome)) {
+      run.context.openArchiveStore = async () => false;
+      run.context.archiveOpenError = () => ({ key: outcome === "corrupt" ? "error.corrupt_archive" : "error.io" });
+    }
+    await run.openArchiveFromDialog();
+    assert.equal(run.context.screen, outcome === "corrupt" ? "recovery" : "convert", outcome);
+    assert.equal(run.context.pendingArchiveTaskReview, null, outcome);
+    assert.equal(run.calls.some(([kind]) => kind === "focus-convert"), outcome === "selected", outcome);
+    if (outcome === "selected") assert.equal(run.context.currentArchive.path, "/chosen.zip");
+    else assert.equal(run.context.currentArchive, null);
+  }
+});
+
+test("conversion source selection resumes after password success and drops the continuation on cancellation or failure", async () => {
+  for (const outcome of ["unlocked", "cancelled", "corrupt", "unreadable"]) {
+    const run = harness();
+    run.context.currentArchive = null;
+    run.context.screen = "convert";
+    run.context.openNativeDialog = async () => "/locked.zip";
+    run.context.openArchiveStore = async () => {
+      run.context.archivePasswordPrompt = { path: "/locked.zip", encoding: null, wrong: false };
+      return false;
+    };
+    await run.openArchiveFromDialog();
+    assert.equal(run.context.screen, "password");
+    assert.equal(run.context.pendingArchiveTaskReview.path, "/locked.zip");
+    assert.equal(run.calls.some(([kind]) => kind === "focus-convert"), false);
+    if (outcome === "cancelled") {
+      await run.cancelPasswordRequest();
+      assert.equal(run.context.screen, "browse");
+    } else {
+      run.context.openArchiveStore = async () => {
+        run.context.archivePasswordPrompt = null;
+        if (outcome !== "unlocked") return false;
+        run.context.currentArchive = archive("/locked.zip");
+        return true;
+      };
+      run.context.archiveOpenError = () => ({ key: outcome === "corrupt" ? "error.corrupt_archive" : "error.io" });
+      run.context.workspacePasswordValue = "entered-password";
+      await run.submitPasswordRequest();
+      assert.equal(run.context.screen, outcome === "unlocked" ? "convert" : outcome === "corrupt" ? "recovery" : "browse");
+    }
+    assert.equal(run.context.pendingArchiveTaskReview, null);
+    assert.equal(run.context.workspacePasswordValue, "");
+    assert.equal(run.calls.some(([kind]) => kind === "focus-convert"), outcome === "unlocked");
   }
 });
 

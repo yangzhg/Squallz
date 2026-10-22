@@ -166,6 +166,7 @@ test("convert lazy sessions isolate roots and preserve only non-sensitive drafts
     let submitBehavior = () => submitPending;
     const bridge = {
       getArchive: () => currentArchive,
+      openArchive: () => {},
       tr: englishTranslate,
       tError: () => "translated error",
       showNotice: (message) => notices.push(message),
@@ -542,6 +543,7 @@ test("disposed convert sessions ignore late submission failures", async () => {
     });
     const bridge = {
       getArchive: () => archive,
+      openArchive: () => {},
       tr: englishTranslate,
       tError: () => "translated error",
       showNotice: (message) => notices.push(message),

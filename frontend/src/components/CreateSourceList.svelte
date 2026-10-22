@@ -9,9 +9,6 @@
   let selectedCount = $derived(session.selectedCount());
   let allSelected = $derived(session.allSelected());
   let lockedReason = $derived(session.view.sourcesLockedReason());
-  let reviewReason = $derived(session.sources.length === 0
-    ? tr("gui.create.sources.add_before_review")
-    : session.configurationPending ? session.view.configurationPendingMessage() : lockedReason);
 
   let selectAllInput = $state<HTMLInputElement | null>(null);
 
@@ -64,7 +61,6 @@
       <span class="create-source-list-mark"><Icon name="archive" size={18} /></span>
       <div>
         <h2>{tr("gui.create.sources.heading")}</h2>
-        <p>{tr("gui.create.sources.description")}</p>
       </div>
     </div>
     <div class="create-source-list-add">
@@ -151,19 +147,4 @@
     </div>
   {/if}
 
-  <footer class="create-source-list-footer">
-    <span>{tr("gui.create.sources.keep_until_queued")}</span>
-    <button
-      id="create-primary-source-action"
-      type="button"
-      class:primary={variant === "modern"}
-      class:sheet-action={variant === "modern"}
-      class:classic-primary={variant === "classic"}
-      class="create-source-review-action"
-      disabled={session.view.startDisabled()}
-      aria-busy={session.preflight.busy()}
-      title={reviewReason}
-      onclick={() => void session.review()}
-    ><Icon name="search" size={16} />{session.view.startLabel(tr("gui.create.sources.review"))}</button>
-  </footer>
 </section>

@@ -23,6 +23,7 @@
   import ArchiveEditingStatus from "./ArchiveEditingStatus.svelte";
   import MoveConflictReview from "./MoveConflictReview.svelte";
   import { cssVariables } from "../lib/css-variables";
+  import { archiveTabStopPath } from "../lib/archive-keyboard";
 
   let {
     view,
@@ -53,9 +54,13 @@
   }: ClassicArchiveBrowserProps = $props();
 
   let table: HTMLDivElement | undefined = $state();
+  let focusedPath = $state<string | null>(null);
+  let detailsVisible = $state(false);
+  const tableId = $props.id();
+  const tabStopPath = $derived(archiveTabStopPath(view.rows, focusedPath));
 
   $effect(() => {
-    if (view.totalRows === 0 && table) table.scrollLeft = 0;
+    if ((!detailsVisible || view.totalRows === 0) && table) table.scrollLeft = 0;
   });
 
 </script>
@@ -107,9 +112,16 @@
           {view.rowsPending && !view.recovery
             ? view.totalRows === 0 ? view.emptyName : tr("gui.list.loading_rows")
             : view.archiveOpen
-            ? tr("gui.preview.keyboard_hint")
+            ? tr("gui.list.classic_keyboard_hint")
             : tr("gui.classic.empty_workbench_hint")}
         </small>
+        <button
+          type="button"
+          class="classic-columns-toggle"
+          aria-expanded={detailsVisible}
+          aria-controls={tableId}
+          onclick={() => detailsVisible = !detailsVisible}
+        >{tr(detailsVisible ? "gui.list.hide_detail_columns" : "gui.list.show_detail_columns")}</button>
       </div>
       {#if view.conflict}
         <MoveConflictReview review={view.conflict} {tr} classic onCancel={onCancelMoveConflict} onReadyOnly={onSubmitMoveReadyOnly} onKeepBoth={onSubmitMoveKeepBoth} />
@@ -118,11 +130,14 @@
     <p class="archive-selection-hint">{tr("gui.selection.range_hint")}</p>
     <div
       class="classic-table"
+      class:with-details={detailsVisible}
+      id={tableId}
       bind:this={table}
       role="table"
       aria-label={tr("gui.table.archive")}
       aria-busy={view.rowsPending}
       aria-rowcount={Math.max(view.totalRows + 1, 2)}
+      aria-colcount={detailsVisible ? 8 : 4}
       aria-keyshortcuts="Meta+A Control+A"
       data-total-rows={view.totalRows}
     >
@@ -144,11 +159,13 @@
         </span>
         <span role="columnheader">{tr("gui.table.size")}</span>
         <span role="columnheader">{tr("gui.table.packed")}</span>
-        <span role="columnheader">{tr("gui.table.ratio")}</span>
         <span role="columnheader">{tr("gui.table.modified")}</span>
-        <span role="columnheader">{tr("gui.table.crc")}</span>
-        <span role="columnheader">{tr("gui.table.filename_encoding")}</span>
-        <span role="columnheader">{tr("gui.table.attr")}</span>
+        {#if detailsVisible}
+          <span role="columnheader">{tr("gui.table.ratio")}</span>
+          <span role="columnheader">{tr("gui.table.crc")}</span>
+          <span role="columnheader">{tr("gui.table.filename_encoding")}</span>
+          <span role="columnheader">{tr("gui.table.attr")}</span>
+        {/if}
       </div>
       <div
         class="virtual-scroll classic-virtual-scroll"
@@ -169,9 +186,10 @@
               role="row"
               aria-rowindex={(entry.virtualIndex ?? 0) + 2}
               aria-selected={entry.selected}
-              tabindex="0"
-              aria-keyshortcuts="ArrowUp ArrowDown Home End PageUp PageDown Shift+ArrowUp Shift+ArrowDown Space Enter Backspace Meta+ArrowUp Alt+ArrowUp E"
+              tabindex={entry.source?.path === tabStopPath ? 0 : -1}
+              aria-keyshortcuts="ArrowUp ArrowDown ArrowLeft ArrowRight Home End PageUp PageDown Shift+ArrowUp Shift+ArrowDown Shift+Space Space Enter Backspace Meta+ArrowUp Alt+ArrowUp E"
               data-row-index={entry.virtualIndex ?? ""}
+              onfocusin={() => focusedPath = entry.source?.path ?? null}
               onclick={(event) => onSelectEntry(entry, event)}
               ondblclick={(event) => {
                 if (event.target instanceof Element && event.target.closest("button, input")) return;
@@ -185,6 +203,7 @@
                 <button
                   type="button"
                   class="row-select-toggle"
+                  tabindex="-1"
                   class:checked={entry.selected}
                   role="checkbox"
                   aria-checked={entry.selected}
@@ -203,6 +222,7 @@
                 {#if entry.source}
                   <button
                     class="row-preview-button compact"
+                    tabindex="-1"
                     disabled={view.selection.busy}
                     aria-busy={entry.previewBusy}
                     title={view.selection.busy ? view.selection.busyLabel : entry.previewActionLabel}
@@ -216,11 +236,13 @@
               </span>
               <span role="cell">{entry.size}</span>
               <span role="cell">{entry.packed}</span>
-              <span role="cell">{entry.ratio}</span>
               <span role="cell">{entry.modified}</span>
-              <span role="cell">{entry.crc}</span>
-              <span role="cell">{entry.encoding}</span>
-              <span role="cell" title={entry.attr}>{entry.attr}</span>
+              {#if detailsVisible}
+                <span role="cell">{entry.ratio}</span>
+                <span role="cell">{entry.crc}</span>
+                <span role="cell">{entry.encoding}</span>
+                <span role="cell" title={entry.attr}>{entry.attr}</span>
+              {/if}
             </div>
           {:else}
             <div class="archive-row-placeholder classic-row-placeholder" class:pending={view.rowsPending} aria-hidden="true"></div>
@@ -230,10 +252,12 @@
           <div class="classic-row empty-row" role="row" aria-rowindex="2">
             <span class="table-name" role="cell">{view.emptyName}</span>
             <span role="cell">{view.emptyStatus}</span>
-            <span role="cell">-</span>
-            <span role="cell">-</span>
-            <span role="cell">-</span>
-            <span role="cell">-</span>
+            {#if detailsVisible}
+              <span role="cell">-</span>
+              <span role="cell">-</span>
+              <span role="cell">-</span>
+              <span role="cell">-</span>
+            {/if}
             <span role="cell">-</span>
             <span role="cell">-</span>
           </div>

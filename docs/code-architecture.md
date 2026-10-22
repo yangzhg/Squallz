@@ -7,6 +7,7 @@ Squallz has two desktop layouts and a CLI. Archive operations belong to the shar
 | Responsibility | Owner | Consumers |
 | --- | --- | --- |
 | Create, extract, recovery and local-tool workflows | The corresponding session in `frontend/src/lib` | Classic and Modern workspaces |
+| Checksum report ownership, filtering and pagination | `tools-session.svelte.ts` | The shared report in `ToolsWorkspace.svelte` |
 | Destination format, compression, encryption and split-volume draft | `output-options-draft.svelte.ts` | Create options and conversion session |
 | Protection controls and shared option labels | `output-options-presentation.ts` | Create and conversion presentations |
 | Output preparation, review, submission and cancellation lifecycle | `archive-output-workflow.svelte.ts` | Create preflight and conversion session |
@@ -19,6 +20,9 @@ Squallz has two desktop layouts and a CLI. Archive operations belong to the shar
 | Job registration and authoritative snapshot reduction | `jobs.svelte.ts`, `job-snapshot.ts` | Every workflow and task window |
 | Task result validation and discriminated result types | `job-result.ts` | Registration, live events and recovery before store mutation |
 | Result status, summary and output availability | `task-outcome.ts` | Completion notifications, history and task dialogs |
+| Modal focus containment and safe restoration | `modal-focus.ts` | Task, archive editor, publishing and first-run surfaces |
+| Anchored menu positioning and keyboard movement | `popup-menu.ts` | Both quick-action menus and the archive context menu |
+| Content fitting within the monitor work area | `task-window-size.ts` | Native task windows using the shared task card |
 
 Each workflow has its own draft instance. Sharing the output-option implementation does not share credentials or editable state between creating and converting. Create retains SFX constraints; conversion retains its source archive, source credentials and preflight lifecycle. Both compose the same destination-option rules.
 
@@ -26,7 +30,25 @@ Each create or conversion session owns an independent `ArchiveOutputWorkflow` in
 
 Task notifications, history and dialogs interpret results through one presentation model. History retains its compact, path-redacted text and notifications retain reveal actions and actionable warnings. Output availability is derived from the completed result even when a window recovers a task without owning its completion effects.
 
+Application modals share centered placement and backdrop tokens in `design.css`. Task passwords and conflicts remain inside the task surface, while publishing replaces its application modal. Native dialogs defer incoming task questions until their promise settles. Escape is consumed by the current surface; closing a menu cannot also clear search or dismiss a preview. Escape never cancels an active job.
+
+Menus measure their rendered size and anchor, clamp to the viewport, and provide arrow-key navigation. Escape restores available origin focus; outside clicks and navigation do not reclaim focus from the user's new target. Modal focus ignores hidden, disabled and inert controls, and deferred restoration does not steal focus from a newer surface.
+
+Task control state and operation feedback appear inside the task surface. Showing a task's details consumes its queued completion and source-cleanup notifications without suppressing history, output actions or independent errors. Other notifications retain their remaining visible lifetime while a modal blocks them. Background output actions explicitly name the platform file manager.
+
+Completed task surfaces prioritize the outcome and next step over detailed results and omit redundant completion progress bars. Failed or cancelled tasks retain their measured progress. Batch errors precede summary counts; long result and checksum lists scroll locally. Native task windows grow to fit measured content within the design-token height limit and monitor work area, preserving width and stopping automatic fitting after a manual resize. The outer body remains scrollable as a fallback for constrained windows.
+
 Classic and Modern retain different layout, table columns and row heights. Their browser models derive rows and commands from the same state. Preview loading, failure, file and nested-archive actions have one implementation; compact and detailed nested-entry presentation remain explicit layout choices.
+
+Both archive browsers keep one active row in the Tab order. Arrow and paging keys move between rows, Shift extends selection, Shift+Space toggles selection, and Space previews. Classic tables prioritize names and expose optional metadata columns. The row height used for virtual paging matches the centralized CSS token.
+
+Create and conversion workspaces keep their primary review action in a shared bottom action area. Input acquisition, preflight, confirmation and task submission remain owned by their existing sessions. Configuration summaries and less frequent options use disclosures; output paths remain readable text.
+
+Checksum inputs and completed reports have separate presentation. Reports retain their own targets, algorithm and statistics when inputs change. Verification defaults to failures when present; all rows remain available through filtering and pagination, and copying always uses the full report. Each report keeps its view state by task identity. Duplicate minimum-size units are a presentation choice over the existing byte-count contract.
+
+The archive inspector is attached only to archive browsing and archive information. Tool workspaces own their relevant configuration and results. Main navigation exposes the current page, and palette selection uses native radio inputs. Primary buttons use a single background color with explicit foreground and hover tokens; theme previews do not imply an application-wide accessibility certification.
+
+Page content uses opacity-only entry animation so layout ancestors do not change the containing block for anchored surfaces. Sticky action bars stay still; navigation and format choices use color feedback. Choice-label transitions and control movement are enabled only when motion is allowed. Reduced-motion tests resolve media conditions, selector specificity and source order, including hovered/pressed buttons and switch inputs.
 
 The application entry still owns navigation, desktop coordination and significant archive browsing logic. It is not a fully minimal composition root. Moving a function out of this entry alone is not evidence of reduced complexity.
 
@@ -56,11 +78,11 @@ Temporary plaintext previews and stable format sources retain separate resource 
 
 ## Stylesheet responsibilities
 
-`frontend/src/design.css` is the required central stylesheet for both layouts. Its current source has 15,334 physical lines, 13,299 nonblank lines, 2,040 CSS rules and 8,271 declarations; 592 declarations define custom properties and none use `!important`. These are source counts, including keyframe rules, not counts of independently rendered components. Rules whose selectors mention `classic` and `modern` number 304 and 162 respectively; other rules include shared controls, workflows, task windows and shell surfaces. Those selector groups do not partition the file.
+`frontend/src/design.css` owns visual rules for both layouts, including shared controls, workflow surfaces, task windows and the application shell. Components select semantic classes; colors, dimensions, spacing, shadows, animation durations and stacking levels belong to centralized design tokens. Standalone inline styles and component-local visual rules are prohibited.
 
-This size is understandable for the current feature set and centralized-style constraint, but the ownership is not yet sufficiently clear. Shared control rules and layout variants are interleaved; for example, classic primary-button rules appear around lines 4,821 and 12,230, changing literal heights from 36px to 32px instead of expressing that variation with control-size tokens. Global theme application near the end lists many individual feature selectors. Adding a feature can therefore require changes both in its own rules and in distant theme/state lists. Responsive rules also span five viewport conditions before the hover/motion sections. Repeated selectors under different media conditions are often necessary and must not be removed as duplicates.
+Shared controls and task/result surfaces define their common appearance and interaction states. Classic and Modern express layout differences through classes and tokens. Theme, viewport and reduced-motion rules remain in the same stylesheet. Selectors repeated under different media conditions can serve distinct behaviors and must be evaluated with their conditions, specificity and source order.
 
-The next style refactor should define common control and task/result surfaces first, then express Classic/Modern layout differences and interaction states through those surfaces and tokens. Theme, viewport and reduced-motion behavior need explicit ownership inside the centralized stylesheet. A file split or minification alone would not reduce these responsibilities. Acceptance requires both layouts, light/dark/custom accent, narrow windows, focus/disabled/loading/error states and reduced motion; the Rust output refactor does not claim that visual work is complete.
+Visual changes require checks in both layouts, light and dark themes, custom accent colors, narrow windows and high-DPI displays. Hover, active, focus-visible, disabled, selected, loading and error states must remain clear. Reduced-motion behavior must cover entry animations and interaction feedback, and long results must scroll locally without making the page overflow horizontally.
 
 ## Change rules
 
@@ -69,4 +91,4 @@ The next style refactor should define common control and task/result surfaces fi
 - Store default user-facing copy in the locale catalogs. `tFallback(key)` resolves default English before locale loading; explicit alternate fallback text is reserved for an existing distinct contract. `t()` and `tError()` retain their missing-key signal for error classification.
 - Preserve current archive formats, JSON envelopes, password lifetimes, cancellation, streaming limits and path safety when merging implementations.
 - Count added shared modules when reporting source reductions. Report production source separately from tests, and code changes separately from repeated-copy removal. Compare both entry and total bundle sizes; source reduction alone does not establish faster startup.
-- Verify changes with the repository checks in `AGENTS.md`, contract tests for all affected entry points, and real UI inspection for both layouts. Record environment limits explicitly.
+- Verify Rust changes with formatting, strict Clippy and workspace tests; verify frontend changes with its type checks, tests and production build. Exercise affected contracts and inspect both desktop layouts. State environment limits in the review or task discussion.

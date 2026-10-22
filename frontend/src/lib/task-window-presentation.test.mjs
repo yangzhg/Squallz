@@ -22,6 +22,7 @@ async function taskSurface(presentation, server) {
   ].map((name) => [name, () => {}]));
   const surface = vm.runInNewContext(`${outputText}\ntaskProgressDialogProps`, {
     ...callbacks,
+    appNotice: null,
     pendingTaskReviewId: null,
     activePlatform: "macos",
     settingsSession: new SettingsSession({ platform: () => "macos", tr: englishTranslate, emit() {} },
@@ -285,7 +286,8 @@ test("window task views render one task heading and retain progress, results and
       assert.match(body, /role="region"/u);
       assert.doesNotMatch(body, /aria-modal|task-modal-eyebrow/u);
       assert.equal((body.match(/<h2\b/gu) ?? []).length, 1);
-      assert.match(body, /<progress\b/u);
+      if (state === "done") assert.doesNotMatch(body, /<progress\b/u);
+      else assert.match(body, /<progress\b/u);
       if (state === "running") assert.match(body, />Pause<|>Pause<!--/u);
       if (state === "paused") assert.match(body, />Resume<|>Resume<!--/u);
       if (state === "done" || state === "failed") assert.match(body, /task-result-callout/u);
@@ -295,6 +297,7 @@ test("window task views render one task heading and retain progress, results and
       passwordQuestion: { name: "reports.zip", detail: "Encrypted archive", sessionDetail: "This task only" },
     } });
     assert.match(body, /type="password"/u);
+    assert.match(body, /data-task-question="true"/u);
     assert.match(body, /Unlock and continue/u);
   } finally {
     await server.close();
@@ -447,6 +450,28 @@ test("cancelling and terminal task surfaces do not ask for input from a stale in
   }
 });
 
+test("completed task surfaces prioritize outcomes and next steps before scrollable details", async () => {
+  const server = await createTestServer();
+  try {
+    const { render } = await server.ssrLoadModule("svelte/server");
+    const { default: TaskProgressDialog } = await server.ssrLoadModule("/src/components/TaskProgressDialog.svelte");
+    const task = { ...extractTask("done"), expanded: true, result: jobResult("extract"), done: 100 };
+    for (const presentation of ["dialog", "panel", "window"]) {
+      const { surface } = await taskSurface(presentation, server);
+      const body = render(TaskProgressDialog, { props: { ...surface, task } }).body;
+      assert.doesNotMatch(body, /<progress\b|task-modal-progress-stack/u);
+      const outcome = body.indexOf('class="task-result-callout');
+      const nextStep = body.indexOf('class="task-next-step');
+      const details = body.indexOf('class="task-result-details');
+      assert.ok(outcome >= 0 && nextStep > outcome && details > nextStep);
+      assert.match(body, /class="task-result-detail-list" role="region"[^>]*tabindex="0"/u);
+      assert.ok(body.includes("/output"), "the original result and output remain available");
+    }
+  } finally {
+    await server.close();
+  }
+});
+
 test("window task surfaces fill their host and keep scrollable content inside the window", () => {
   const css = readFileSync(new URL("../design.css", import.meta.url), "utf8");
   const rules = parseCss(css).children.filter((node) => node.type === "Rule");
@@ -469,5 +494,10 @@ test("window task surfaces fill their host and keep scrollable content inside th
   assert.equal(card["box-shadow"], "none");
   assert.match(card.padding, /^var\(--/u);
   assert.equal(declarations(".task-modal-body").overflow, "auto");
+  assert.equal(declarations('.task-modal-card[data-task-question="true"]')["grid-template-rows"], "auto minmax(0, 1fr)");
+  for (const selector of [".task-result-detail-list", ".task-checksum-table"]) {
+    assert.equal(declarations(selector).overflow, "auto");
+    assert.match(declarations(selector)["max-height"], /^var\(--/u);
+  }
   assert.equal(declarations(".task-modal-overlay").position, "fixed");
 });

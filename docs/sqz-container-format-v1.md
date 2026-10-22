@@ -1,6 +1,6 @@
 # SQZ 容器格式规范 v1
 
-本规范定义 Squallz 自定义恢复容器（扩展名 `.sqz`）的二进制结构。完整 v1 目标是在单个文件内同时封装归档条目数据与 Reed-Solomon 恢复记录，实现开放格式的自包含修复；当前实现已覆盖条目级透明容器、完整性校验、payload block 级内嵌恢复和标准格式 export。
+本规范定义 Squallz 自定义恢复容器（扩展名 `.sqz`）的二进制结构。v1 在单个文件内封装归档条目数据与 Reed-Solomon 恢复记录，提供条目级透明容器、完整性校验、payload block 级内嵌恢复和标准格式 export。
 
 任何字段变更必须先更新本文档并提升版本号。
 
@@ -30,8 +30,8 @@
   profile 直接导出外层条目；`zip` / `tar` / `7z` profiles 先由 reader 代理内部归档 entries，
   再重写为目标标准包。当前不承诺 byte-for-byte 还原内部归档原始字节。
 
-当前 S2/S5 仅能力内修复 Recovery Section primary、可由 `RSPC`/Index mirror 重建的 Footer 定位字段、trailer CRC 损坏但 primary/protection payload 仍完整匹配的窄场景，以及 `rev001/rev002/rev003` 都有效时最多三个物理卷缺失；不独立修复 `RSPC` trailer + primary 同损、不接受有效 CRC 但语义非法的 `RSPC` trailer、不提供 Footer Index 的独立 RS 编码、不修复 Footer CRC 合法但语义非法的 bounds、不修复条目元数据语义错误、不支持四个及以上物理卷同时缺失、缺少必要 recovery sidecar 的多卷丢失或容器级加密数据。必要 recovery sidecar header/body 损坏时必须按 `CorruptArchive` 或 unrepaired 如实失败，不承诺修复损坏 sidecar。
-这些能力需要通过后续实现和测试关闭，UI/文档不得把当前能力描述为“任意损坏都可修复”。
+v1 仅能力内修复 Recovery Section primary、可由 `RSPC`/Index mirror 重建的 Footer 定位字段、trailer CRC 损坏但 primary/protection payload 仍完整匹配的窄场景，以及 `rev001/rev002/rev003` 都有效时最多三个物理卷缺失；不独立修复 `RSPC` trailer + primary 同损、不接受有效 CRC 但语义非法的 `RSPC` trailer、不提供 Footer Index 的独立 RS 编码、不修复 Footer CRC 合法但语义非法的 bounds、不修复条目元数据语义错误、不支持四个及以上物理卷同时缺失、缺少必要 recovery sidecar 的多卷丢失或容器级加密数据。必要 recovery sidecar header/body 损坏时必须按 `CorruptArchive` 或 unrepaired 如实失败，不承诺修复损坏 sidecar。
+UI 和文档必须按上述边界说明修复能力，不得描述为“任意损坏都可修复”。
 
 ---
 
@@ -207,25 +207,25 @@ primary `RSEC` 可完整解析、且按 primary 重算出的 protection payload 
 
 ## 6. Footer Index（变长）
 
-Footer Index 是目录，用于条目枚举与结构重建。当前块级损坏定位使用 Recovery Section 的 block hash；主 Index 损坏时可用 Recovery Section 内的完整镜像恢复。后续仍建议对 Index 和镜像整体做 RS 保护。
+Footer Index 是目录，用于条目枚举与结构重建。块级损坏定位使用 Recovery Section 的 block hash；主 Index 损坏时可用 Recovery Section 内的完整镜像恢复。
 
 ### 6.1 Index Header
 
 | 大小 | 字段 | 说明 |
 | --- | --- | --- |
 | 4 | idx_magic | ASCII `FIDX` |
-| 2 | index_version | S1 = 1 |
-| 2 | index_flags | S1 = 0 |
+| 2 | index_version | v1 = 1 |
+| 2 | index_flags | v1 = 0 |
 | 8 | entry_count | 条目数量 |
 
-### 6.2 S1 条目目录
+### 6.2 条目目录
 
 每个条目顺序编码：
 
 | 大小 | 字段 | 说明 |
 | --- | --- | --- |
 | 1 | entry_kind | `0` = file，`1` = dir，`2` = symlink，`3` = hardlink，`4` = other |
-| 1 | encrypted | S1 固定为 0 |
+| 1 | encrypted | v1 固定为 0 |
 | 2 | reserved | 置 0 |
 | 8 | data_offset | 文件数据在容器内的偏移；非文件为 0 |
 | 8 | data_size | 文件数据长度；非文件为 0 |
@@ -247,8 +247,6 @@ Footer Index 是目录，用于条目枚举与结构重建。当前块级损坏�
 - 当前实现 Index mirror：Footer Header CRC 保护 footer 固定头本身，Recovery Section 内的 `index_hash`
   用于检测主 Footer Index 是否损坏；若主 Index 损坏但镜像 hash 正确，读取使用镜像继续打开。
 - 当前 mirror 不是独立 RS 编码；如果主 Index、镜像和 `RSPC` 对 Recovery Section primary 的保护同时不可用，读取必须失败。
-- 后续可在块条目之后追加对 Index 本身的 RS 恢复数据，固定冗余建议 20%，进一步保证 Index 局部损坏可自修复。
-- 字段：`index_rs_block_count`（2 字节）+ 恢复数据。
 
 ---
 
@@ -314,12 +312,11 @@ Footer Header 放在文件最后，便于从尾部反向定位，实现头部损
 
 ---
 
-## 9. 加密（可选）
+## 9. 加密边界
 
-- 算法：AES-256-GCM 或 ChaCha20-Poly1305。
-- KDF：Argon2id，参数与盐存于 Payload Descriptor 的 `encryption_params`（tag `0x0007`），不存密钥。
-- 加密范围：Payload Data Blocks；可选加密 Payload Descriptor 中的文件名等元数据（flags 位 1）。
-- 顺序：先压缩，后加密，再对密文计算 RS 恢复块。这样加密包损坏也能先在密文层修复，再解密。
+v1 不支持容器级数据或文件名加密。创建入口拒绝密码和文件名加密选项；格式能力报告中的
+`can_encrypt_data` 与 `can_encrypt_names` 均为 `false`。`header_flags` 位 0/1 和
+`encryption_params` tag 的编号保留，不表示当前实现支持加密或密文修复。
 
 ---
 
@@ -343,14 +340,13 @@ Footer Header 放在文件最后，便于从尾部反向定位，实现头部损
 
 ### 10.3 export
 
-S3 当前语义：读取 `.sqz` 可见条目并重写为用户指定的标准 archive。输出格式由目标扩展名决定；
+导出读取 `.sqz` 可见条目并重写为用户指定的标准 archive。输出格式由目标扩展名决定；
 `.sqz` 作为输出会被拒绝，避免“导出到自身格式”。导出的 ZIP/TAR/7Z 已通过 Squallz 回读；
 ZIP 在系统 `unzip -t` 存在时额外验证，TAR 在系统 `tar -tf` 存在时额外验证。`zip` / `tar` /
 `7z` inner profile 暴露内部归档 entries 后沿用同一导出路径。其他标准目标沿用现有
 `Engine::convert` 的目标格式能力与限制。
 
-未来若引入“透明封装单个原始压缩包 blob”的 SQZ profile，可追加新的 descriptor flag 与导出策略；
-不得改变 S1 条目级容器的既有含义。
+v1 不提供单个原始压缩包 blob 的 raw profile，也不承诺逐字节还原内部归档。
 
 ---
 
@@ -365,13 +361,12 @@ ZIP 在系统 `unzip -t` 存在时额外验证，TAR 在系统 `tar -tf` 存在�
 ## 12. 格式验证要求
 
 - 封装并完整还原内部 zip/tar/7z/zstd。（`--inner-format zip|tar|7z|zstd` 覆盖 `pack/list/test/extract/export`）
-- 封装并完整还原内部 raw。（仍需后续 profile；raw 缺少多文件/目录语义，首发不能伪装为完整 archive profile）
 - 人为损坏不超过冗余量的数据块时，可自包含修复；超量时如实报告失败；测试/修复入口必须暴露结构化恢复摘要。
 - 破坏 File Header，验证从 Footer Header 重建成功；同时验证 File Header CRC 合法但 UUID 与 Footer 不一致时必须失败。
 - 破坏 Footer tail magic 或 CRC 覆盖字段，验证在 File Header、`RSPC` trailer、Recovery Section 和 Index mirror 完整时可通过扫描恢复；同时验证合法 CRC 的坏 index bounds 必须失败。
 - 破坏主 Footer Index，验证 Index mirror 可恢复；破坏主 Index、mirror 且让 Recovery Section 保护不可用时必须失败。
 - 破坏 Recovery Section primary 单块时，验证 `RSPC` 保护层可恢复；同组超过 2 个 primary 坏块时必须失败；破坏 `RSPC` trailer CRC 但 primary 完整时可降级解析，trailer 与 primary 同损、或有效 CRC 的坏版本 trailer 必须失败。
 - 分卷：`SQZV` 小头写入、UUID 一致性校验与读取剥离已实现；缺失一个非尾部 payload 卷且坏块数在 RS 能力内时可恢复；缺失一个物理卷且 `name.sqz.rev001` 有效时可由 XOR parity 重建；`rev001 + rev002` 有效时可恢复两个物理卷缺失；`rev001 + rev002 + rev003` 有效时可恢复三个物理卷缺失；缺尾卷但 `name.sqz.revNNN` 尾卷镜像存在时可定位并恢复；缺少必要 sidecar、损坏必要 sidecar 或四个及以上物理卷缺失仍必须失败。
-- 加密容器损坏后仍可修复，修复发生在解密前的密文层。（未实现）
+- 创建入口拒绝容器级数据和文件名加密选项，能力报告与该限制一致。
 - `export` 产出的标准包可被第三方工具正常打开。
 - 大文件流式处理，内存占用受控，不随文件大小线性膨胀。

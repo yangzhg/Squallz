@@ -106,14 +106,40 @@
     session: CreateSession;
   } = $props();
   let surface = $derived(session.view.surface(variant));
+  let reviewReason = $derived(session.sources.length === 0
+    ? surface.tr("gui.create.sources.add_before_review")
+    : session.configurationPending
+      ? session.view.configurationPendingMessage()
+      : session.view.sourcesLockedReason());
   onMount(() => surface.onReady?.());
 </script>
+
+{#snippet createAction()}
+  {#if !surface.review}
+    <footer class="workspace-action-bar" class:classic={variant === "classic"}>
+      <div class="workspace-action-summary">
+        <span>{surface.tr("gui.create.output.preview")}</span>
+        <strong>{surface.output.outputPreview}</strong>
+        <small>{reviewReason || surface.tr("gui.create.sources.review_hint")}</small>
+      </div>
+      <button
+        id="create-primary-source-action"
+        type="button"
+        class:primary={variant === "modern"}
+        class:classic-primary={variant === "classic"}
+        disabled={session.view.startDisabled()}
+        aria-busy={session.preflight.busy()}
+        title={reviewReason}
+        onclick={() => void session.review()}
+      ><Icon name="search" size={16} />{session.view.startLabel(surface.tr("gui.create.sources.review"))}</button>
+    </footer>
+  {/if}
+{/snippet}
 
 {#if variant === "modern"}
   <div class="create-sheet modern-create">
     <div class="sheet-head">
       <div>
-        <span class="eyebrow">{surface.tr("gui.create.eyebrow")}</span>
         <h1>{surface.tr("gui.create.real_preflight_title")}</h1>
         <p>{surface.tr("gui.create.real_preflight_body")}</p>
       </div>
@@ -122,7 +148,7 @@
 
     <div class="create-workflow">
       <section class="create-main-panel">
-        <div class="create-essentials-grid">
+        <div class="create-settings-section">
           <div class="create-core-settings">
             <div class="create-choice-line">
               <span class="create-choice-label" aria-hidden="true">
@@ -229,10 +255,9 @@
             </div>
           </div>
 
-          <CreateSetupSummary {...surface.setupSummary} />
         </div>
 
-        <ArchivePresetPicker {...surface.preset} />
+        <CreateOutputOptions {...surface.output} />
 
         <details
           class="create-advanced-disclosure"
@@ -249,7 +274,7 @@
           </summary>
           <div class="create-advanced-grid">
             <div class="create-advanced-column create-advanced-column-primary">
-              <CreateOutputOptions {...surface.output} />
+              <CreateProtectionOptions {...surface.protection} />
               <CreateContentPolicyOptions {...surface.content} />
               <div class="recovery-callout">
                 <div>
@@ -266,9 +291,14 @@
             </div>
             <aside class="create-advanced-column create-advanced-column-secondary">
               <CreateSfxOptions {...surface.sfx} />
-              <CreateProtectionOptions {...surface.protection} />
+              <ArchivePresetPicker {...surface.preset} compact />
             </aside>
           </div>
+        </details>
+
+        <details class="workspace-summary-disclosure">
+          <summary>{surface.setupSummary.heading}</summary>
+          <CreateSetupSummary {...surface.setupSummary} />
         </details>
 
         {#if surface.showPreflight && (!surface.review || surface.review.busy)}
@@ -280,6 +310,7 @@
         {/if}
       </section>
     </div>
+    {@render createAction()}
   </div>
 {:else}
   <div class="classic-dialog-body">
@@ -291,14 +322,6 @@
         </div>
       </header>
       <CreateSourceList variant="classic" {session} />
-
-      <div class="classic-preset-wrap">
-        <ArchivePresetPicker {...surface.preset} />
-      </div>
-
-      <div class="classic-create-summary-wrap">
-        <CreateSetupSummary {...surface.setupSummary} />
-      </div>
 
       <div class="classic-tabs" role="group" aria-label={surface.tr("gui.create.sections")}>
         {#each surface.classic.sections as section (section.id)}
@@ -431,19 +454,14 @@
         </div>
       {/if}
 
-      <div class="classic-capability-grid">
-        {#each surface.classic.featuredFormats as format (format.name)}
-          <div>
-            <strong>{format.name}</strong>
-            <span>{format.state}</span>
-            <small>{surface.tr("gui.format.card_capability_line")
-              .replace("{create}", format.create)
-              .replace("{volumes}", format.volumes)
-              .replace("{encrypt}", format.encrypt)}</small>
-            <em>{format.note}</em>
-          </div>
-        {/each}
+      <div class="classic-preset-wrap">
+        <ArchivePresetPicker {...surface.preset} compact />
       </div>
+      <details class="workspace-summary-disclosure classic-create-summary-wrap">
+        <summary>{surface.setupSummary.heading}</summary>
+        <CreateSetupSummary {...surface.setupSummary} />
+      </details>
+      {@render createAction()}
     </section>
   </div>
 {/if}

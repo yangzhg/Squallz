@@ -1127,8 +1127,9 @@ test("modal focus wraps at both ends and handles an empty panel", async () => {
   try {
     const { trapModalFocus } = await server.ssrLoadModule("/src/lib/modal-focus.ts");
     const doc = { activeElement: null };
-    const first = { hasAttribute: () => false, focus: () => { doc.activeElement = first; } };
-    const last = { hasAttribute: () => false, focus: () => { doc.activeElement = last; } };
+    const available = { ownerDocument: doc, tabIndex: 0, matches: () => false, hasAttribute: () => false, getAttribute: () => null };
+    const first = { ...available, focus: () => { doc.activeElement = first; } };
+    const last = { ...available, focus: () => { doc.activeElement = last; } };
     let elements = [first, last];
     const root = { ownerDocument: doc, querySelectorAll: () => elements, contains: (node) => elements.includes(node), focus: () => { doc.activeElement = root; } };
     let prevented = 0;

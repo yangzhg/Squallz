@@ -1253,10 +1253,6 @@
     return tr(`gui.colors.palette.${palette.id}.note`, palette.note);
   }
 
-  function palettePreviewContrast(palette: Palette): string {
-    return activeTheme === "dark" ? (palette.darkContrast ?? palette.contrast) : palette.contrast;
-  }
-
   function activePaletteName(): string {
     return paletteName(activePaletteData);
   }
@@ -1448,24 +1444,27 @@
       />
     </div>
 
-    <div class="appearance-layout">
+    <div class="appearance-layout" role="radiogroup" aria-label={tr("gui.colors.title")}>
       <section class="palette-panel">
         <div class="panel-title"><Icon name="palette" size={16} />{tr("gui.colors.curated_palettes")}</div>
         <div class="palette-grid">
           {#each builtInPalettes as palette}
-            <button
+            <label
               class:selected={palette.id === settings.colors.palette}
               class={`palette-card palette-${palette.id} theme-${activeTheme}`}
-              onclick={() => settings.setPalette(palette.id)}
             >
               <div class="palette-card-head">
-                <strong>{paletteName(palette)}</strong>
+                <span class="palette-choice">
+                  <input type="radio" name="color-palette" value={palette.id}
+                    checked={palette.id === settings.colors.palette}
+                    onchange={() => settings.setPalette(palette.id)} />
+                  <strong>{paletteName(palette)}</strong>
+                </span>
                 <span>{paletteMood(palette)}</span>
               </div>
               <div class="palette-swatches"><i></i><i></i><i></i></div>
               <p>{paletteNote(palette)}</p>
-              <small>{tr("gui.colors.aa_contrast")} {palettePreviewContrast(palette)}</small>
-            </button>
+            </label>
           {/each}
         </div>
       </section>
@@ -1495,9 +1494,12 @@
           <div class="custom-color-readout">
             <strong>{settings.colors.accent}</strong>
             <span>{tr("gui.colors.accent_preview")}</span>
-            <button class:active={settings.colors.palette === "custom"} class="custom-select-button" onclick={() => settings.setPalette("custom")}>
-              {settings.colors.palette === "custom" ? tr("common.current") : tr("gui.colors.use_custom")}
-            </button>
+            <label class="palette-choice custom-select-button">
+              <input type="radio" name="color-palette" value="custom"
+                checked={settings.colors.palette === "custom"}
+                onchange={() => settings.setPalette("custom")} />
+              <span>{tr("gui.colors.use_custom")}</span>
+            </label>
           </div>
         </div>
         <div class="custom-color-fields">

@@ -40,8 +40,6 @@ export type Palette = {
   darkSupport?: string;
   darkBase?: string;
   note: string;
-  contrast: string;
-  darkContrast?: string;
 };
 
 type CreateProfile = {
@@ -245,8 +243,6 @@ export const palettes: Palette[] = [
     darkSupport: "#46D8CF",
     darkBase: "#12151A",
     note: "Clean teal, graphite neutrals, calm utility feel.",
-    contrast: "7.3:1",
-    darkContrast: "6.6:1",
   },
   {
     id: "sage",
@@ -259,8 +255,6 @@ export const palettes: Palette[] = [
     darkSupport: "#A6DDBD",
     darkBase: "#12151A",
     note: "Muted sage with titanium gray for restrained desktop work.",
-    contrast: "6.6:1",
-    darkContrast: "7.8:1",
   },
   {
     id: "nordic",
@@ -273,8 +267,6 @@ export const palettes: Palette[] = [
     darkSupport: "#91C4F7",
     darkBase: "#12151A",
     note: "Cool professional blue without turning the app into one flat hue.",
-    contrast: "7.8:1",
-    darkContrast: "6.4:1",
   },
   {
     id: "copper",
@@ -287,8 +279,6 @@ export const palettes: Palette[] = [
     darkSupport: "#EFB879",
     darkBase: "#12151A",
     note: "Ink neutrals with a restrained copper accent for classic tools.",
-    contrast: "6.9:1",
-    darkContrast: "6.9:1",
   },
   {
     id: "aubergine",
@@ -301,8 +291,6 @@ export const palettes: Palette[] = [
     darkSupport: "#D7AFD9",
     darkBase: "#12151A",
     note: "Deep wine-plum balanced by steel so it avoids purple overload.",
-    contrast: "7.1:1",
-    darkContrast: "7.1:1",
   },
   {
     id: "mono",
@@ -315,8 +303,6 @@ export const palettes: Palette[] = [
     darkSupport: "#D1DBE6",
     darkBase: "#12151A",
     note: "Graphite-first UI for users who want the app to disappear.",
-    contrast: "8.4:1",
-    darkContrast: "9.2:1",
   },
   {
     id: "custom",
@@ -326,7 +312,6 @@ export const palettes: Palette[] = [
     support: "#64748B",
     base: "#F6F8FA",
     note: "Saved custom color with automatic light and dark contrast.",
-    contrast: "auto",
   },
 ];
 

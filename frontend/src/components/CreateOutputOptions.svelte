@@ -14,7 +14,6 @@
     postSuccess,
     testAfterCreate,
     testAfterCreateRequired,
-    outputPreview,
     defaultFolder,
     fileManager,
     trashName,
@@ -263,15 +262,14 @@
         <h2><Icon name="archive" size={16} />{tr("gui.create.output.title")}</h2>
         <p>{tr("gui.create.output.intro", "Choose where the archive goes and what Squallz does after a successful task.")}</p>
       </div>
-      <div class="create-output-preview">
-        <span>{tr("gui.create.output.preview")}</span>
-        <strong>{outputPreview}</strong>
-      </div>
     </header>
     {@render destinationFields()}
-    {@render completionFields()}
-    {@render integrityFields()}
-    {@render sourceFields()}
+    <details class="workspace-summary-disclosure create-completion-options">
+      <summary>{tr("gui.create.output.completion.title")}</summary>
+      {@render completionFields()}
+      {@render integrityFields()}
+      {@render sourceFields()}
+    </details>
   </section>
 {:else}
   <div class="classic-label classic-create-section-target">{tr("gui.create.output.destination.title")}</div>

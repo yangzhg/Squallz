@@ -64,6 +64,7 @@
   import ArchiveEditingStatus from "./ArchiveEditingStatus.svelte";
   import MoveConflictReview from "./MoveConflictReview.svelte";
   import { cssVariables, type CssVariableMap } from "../lib/css-variables";
+  import { archiveTabStopPath } from "../lib/archive-keyboard";
 
   let {
     view,
@@ -111,6 +112,8 @@
   let actionsOpen = $state(false);
   let actionSummary = $state<HTMLElement | null>(null);
   let tools = $state<HTMLDetailsElement | null>(null);
+  let focusedPath = $state<string | null>(null);
+  const tabStopPath = $derived(archiveTabStopPath(view.rows, focusedPath));
 
   $effect(() => {
     const trail = breadcrumbTrail;
@@ -355,9 +358,10 @@
             role="row"
             aria-rowindex={(entry.virtualIndex ?? 0) + 2}
             aria-selected={entry.selected}
-            tabindex="0"
-            aria-keyshortcuts="ArrowUp ArrowDown Home End PageUp PageDown Shift+ArrowUp Shift+ArrowDown Space Enter Backspace Meta+ArrowUp Alt+ArrowUp E"
+            tabindex={entry.source?.path === tabStopPath ? 0 : -1}
+            aria-keyshortcuts="ArrowUp ArrowDown Home End PageUp PageDown Shift+ArrowUp Shift+ArrowDown Shift+Space Space Enter Backspace Meta+ArrowUp Alt+ArrowUp E"
             data-row-index={entry.virtualIndex ?? ""}
+            onfocusin={() => focusedPath = entry.source?.path ?? null}
             onclick={(event) => onSelectEntry(entry, event)}
             ondblclick={(event) => {
               if (event.target instanceof Element && event.target.closest("button, input")) return;
@@ -371,6 +375,7 @@
               <button
                 type="button"
                 class="row-select-toggle"
+                tabindex="-1"
                 class:checked={entry.selected}
                 role="checkbox"
                 aria-checked={entry.selected}
@@ -414,6 +419,7 @@
               {#if entry.source}
                 <button
                   class="row-preview-button"
+                  tabindex="-1"
                   disabled={view.selection.busy}
                   aria-busy={entry.previewBusy}
                   title={view.selection.busy ? view.selection.busyLabel : entry.previewActionLabel}

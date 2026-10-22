@@ -361,26 +361,58 @@ test("late control failures cannot clear a newer request or report a completed r
   });
 });
 
-test("task control notices wait for acceptance and do not outlive the pending action", async () => {
+test("task controls keep pending feedback inline and never replay a stale action notice", async () => {
   const source = readSvelteScript(new URL("../App.svelte", import.meta.url), "App.ts");
   const actions = [["pauseCurrentTask", "pauseTask", "pause"], ["resumeCurrentTask", "resumeTask", "resume"], ["cancelCurrentTask", "cancelTask", "cancel"]];
   const declarations = selectFunctions(source, actions.map(([name]) => name));
   const outputText = compileTestScript(declarations.map((node) => node.getText(source)).join("\n"));
   for (const [handler, control, intent] of actions) {
-    for (const outcome of ["accepted", "failed", "confirmed", "superseded"]) {
-      let finish;
-      const notices = [];
-      const task = { id: 1, controlIntent: intent };
-      const context = { [control]: () => new Promise((resolve) => { finish = resolve; }),
-        showNotice: (message) => notices.push(message), tr: englishTranslate };
-      const run = vm.runInNewContext(`${outputText}\n${handler}`, context);
-      const request = run(task);
-      assert.deepEqual(notices, [], "the IPC request is still pending");
-      if (outcome === "confirmed") task.controlIntent = null;
-      if (outcome === "superseded") task.controlIntent = "another action";
-      finish(outcome !== "failed");
-      await request;
-      assert.equal(notices.length, outcome === "accepted" ? 1 : 0);
+    const outcomes = ["accepted", "failed", "confirmed", intent === "cancel" ? "duplicate" : "superseded"];
+    for (const outcome of outcomes) {
+      await withQuestionFeed(async ({ jobs, ipc, records, emit, server }) => {
+        const { taskControlCalloutVisible, taskDialogEyebrow, taskActionFailureMessage } =
+          await server.ssrLoadModule("/src/lib/task-dialog.ts");
+        const { loadLocale, t } = await server.ssrLoadModule("/src/lib/i18n.svelte.ts");
+        await loadLocale("en-US");
+        if (intent === "resume") {
+          await emit("job://snapshot", stateSnapshot(records, { id: 1, version: 12, state: "paused" }));
+        }
+        const task = jobs.tasks()[0];
+        let finish;
+        let requests = 0;
+        ipc[`${intent}Job`] = () => {
+          requests += 1;
+          return new Promise((resolve, reject) => { finish = { resolve, reject }; });
+        };
+        const notices = [];
+        const run = vm.runInNewContext(`${outputText}\n${handler}`, {
+          [control]: jobs[control], showNotice: (message) => notices.push(message), tr: englishTranslate,
+        });
+        const request = run(task);
+        assert.equal(task.controlIntent, intent);
+        assert.equal(taskControlCalloutVisible(task), true, "pending controls give immediate feedback in their task");
+        assert.equal(taskDialogEyebrow(task), t(`gui.task.${intent}_requested`));
+        assert.deepEqual(notices, []);
+        if (outcome === "confirmed") {
+          const state = intent === "pause" ? "paused" : intent === "resume" ? "running" : "cancelled";
+          await emit("job://snapshot", stateSnapshot(records, { id: 1, version: 20, state }));
+        } else if (outcome === "superseded") {
+          ipc.cancelJob = async () => {};
+          await jobs.cancelTask(task.id);
+        } else if (outcome === "duplicate") {
+          await run(task);
+          assert.equal(requests, 1, "a pending cancellation cannot be submitted twice");
+        }
+        if (outcome === "failed") finish.reject(new Error("Control was rejected"));
+        else finish.resolve();
+        await request;
+        const expectedIntent = outcome === "superseded" ? "cancel"
+          : outcome === "accepted" || outcome === "duplicate" ? intent : null;
+        assert.equal(task.controlIntent, expectedIntent);
+        assert.equal(taskControlCalloutVisible(task), expectedIntent !== null);
+        assert.equal(Boolean(taskActionFailureMessage(task)), outcome === "failed");
+        assert.deepEqual(notices, [], "settlement stays with the current task instead of generating a floating notice");
+      });
     }
   }
 });
@@ -532,6 +564,7 @@ test("conflict controls answer only the question shown by their task surface", a
     for (const presentation of ["panel", "dialog", "window"]) {
       for (const decision of ["overwrite", "skip", "rename", "abort"]) {
         const answers = [];
+        const notices = [];
         const context = {
           ...Object.fromEntries([
             "taskOutputPath", "taskRevealOutputLabel", "pauseCurrentTask", "resumeCurrentTask", "cancelCurrentTask",
@@ -542,12 +575,13 @@ test("conflict controls answer only the question shown by their task surface", a
           activePlatform: "macos", activeTheme: "dark", activeDensityChoice: "comfortable",
           settingsSession: new SettingsSession({ platform: () => "macos", tr: englishTranslate, emit() {} },
             { paletteOverride: "ocean" }),
-          pendingTaskReviewId: null,
+          pendingTaskReviewId: null, appNotice: null,
           tools: { copyPending: () => false, copyFeedback: () => null, copyTask() {} },
           customPaletteVariables: () => ({}), tr: englishTranslate,
           jobPasswordPrompt: null, jobPasswordValue: "", jobPasswordSubmissionError: null,
           jobPasswordSubmissionAttempted: false, taskPasswordReady, normalizeTaskConflictAnswer,
           jobConflictPrompt: { id: 1, version: 10 }, conflictApplyAll: false,
+          showNotice: (message) => notices.push(message),
           answerJobConflict: async (decision, applyAll) => {
             answers.push([context.jobConflictPrompt.id, context.jobConflictPrompt.version, decision, applyAll]);
             return true;
@@ -571,8 +605,13 @@ test("conflict controls answer only the question shown by their task surface", a
         assert.deepEqual(answers, []);
         shown.onConflictApplyAllChange(applyAll);
         assert.equal(context.conflictApplyAll, applyAll);
+        notices.length = 0;
         await shown.onAnswerConflict(decision, applyAll);
         assert.deepEqual(answers, [[1, 10, decision, applyAll]], "the displayed question remains actionable after an equivalent snapshot");
+        if (decision === "abort") {
+          assert.deepEqual(notices, [englishTranslate("gui.task.cancel_requested")],
+            "conflict cancellation keeps feedback in the task while awaiting its terminal state");
+        }
         if (decision === "overwrite") {
           const passwords = [];
           context.jobConflictPrompt = null;
@@ -631,6 +670,7 @@ test("job questions open the shared task surface without navigating or discardin
         jobConflictPrompt: kind === "conflict" ? { id: 9 } : null,
         archivePasswordPrompt: null, previewPasswordPrompt: null,
         taskWindowMode: false, taskDialogTaskId: null, taskDialogDismissedId: 8,
+        nativeDialogCount: 0, macosSfxPublisherTask: null, archiveEditorVisible: () => false,
         rememberTaskWorkspaceFocus: () => {},
         $effect: (effect) => effect(), untrack: (callback) => callback(),
         setScreen: (next) => { context.screen = next; context.pendingCreateSubmission = null; },

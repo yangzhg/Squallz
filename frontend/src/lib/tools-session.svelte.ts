@@ -15,6 +15,10 @@ export type ChecksumResultKind = "checksum" | "checksum_check";
 type ToolKind = ChecksumResultKind | "duplicate_scan";
 type CopyKind = ChecksumResultKind | "task";
 type PickerKind = "file" | "folder" | "manifest" | "duplicates";
+type SizeUnit = "b" | "kib" | "mib" | "gib";
+const sizeUnits: Readonly<Record<SizeUnit, number>> = { b: 1, kib: 1024, mib: 1024 ** 2, gib: 1024 ** 3 };
+const checksumPageSize = 50;
+type ChecksumView = { taskId: number | null; page: number; failuresOnly: boolean };
 type ToolsDraft = {
   checksumPath: string;
   manifestPath: string;
@@ -57,6 +61,8 @@ export class ToolsSession {
   });
   #selected = $state<Partial<Record<ToolKind, number>>>({});
   #minimumSizeError = $state("");
+  #minimumSizeUnit = $state<SizeUnit>("mib");
+  #checksumViews = $state<Partial<Record<ChecksumResultKind, ChecksumView>>>({});
   #feedback = $state<CopyFeedback | null>(null);
   #copyRequest = $state.raw<{ kind: CopyKind; taskId: number | null; isCurrent: () => boolean } | null>(null);
   #feedbackTimer: ReturnType<typeof setTimeout> | null = null;
@@ -67,11 +73,16 @@ export class ToolsSession {
 
   constructor(private readonly port: ToolsSessionPort, seed: Partial<ToolsDraft> = {}) {
     Object.assign(this.#draft, seed);
+    this.#minimumSizeUnit = (["gib", "mib", "kib"] as const)
+      .find((unit) => this.#draft.minimumSize >= sizeUnits[unit] && this.#draft.minimumSize % sizeUnits[unit] === 0) ?? "b";
   }
 
   get draft(): Readonly<ToolsDraft> { return this.#draft; }
   get selectedReports(): Readonly<Partial<Record<ToolKind, number>>> { return this.#selected; }
   get minimumSizeError(): string { return this.#minimumSizeError; }
+  get minimumSizeUnit(): SizeUnit { return this.#minimumSizeUnit; }
+  get minimumSizeValue(): number { return this.#draft.minimumSize / sizeUnits[this.#minimumSizeUnit]; }
+  get minimumSizeLabel(): string { return formatBytes(this.#draft.minimumSize); }
   get feedback(): CopyFeedback | null { return this.#feedback; }
 
   edit(edit: Partial<ToolsDraft>): void {
@@ -131,6 +142,8 @@ export class ToolsSession {
     return this.#draft.manifestPath.trim() || tr("gui.checksum.choose_manifest_prompt");
   }
 
+  get hasArchive(): boolean { return this.port.read().archive !== null; }
+
   get currentArchiveDisabledReason(): string {
     const archive = this.port.read().archive;
     return !archive ? tr("gui.empty.open_archive_first") : archive.read_only
@@ -155,11 +168,17 @@ export class ToolsSession {
 
   updateMinimumSize(event: Event): void {
     const raw = (event.currentTarget as HTMLInputElement).value.trim();
-    const value = Number(raw);
-    this.#minimumSizeError = !raw || !Number.isFinite(value) || !Number.isInteger(value) || value < 0
+    const value = Number(raw) * sizeUnits[this.#minimumSizeUnit];
+    this.#minimumSizeError = !raw || !Number.isSafeInteger(value) || value < 0
       ? tr("gui.duplicates.min_size_invalid") : "";
     if (this.#minimumSizeError) this.port.notice(this.#minimumSizeError);
     else this.#draft.minimumSize = value;
+  }
+
+  changeMinimumSizeUnit(unit: string): void {
+    if (!(unit in sizeUnits)) return;
+    this.#minimumSizeUnit = unit as SizeUnit;
+    this.#minimumSizeError = "";
   }
 
   async choose(kind: PickerKind): Promise<void> {
@@ -320,6 +339,14 @@ export class ToolsSession {
   checksumReport(kind: ChecksumResultKind) {
     const task = this.selectedTask(kind);
     const items = this.checksumItems(kind);
+    const taskId = task?.id ?? null;
+    const failures = kind === "checksum_check" ? items.filter((item) => "ok" in item && !item.ok) : [];
+    const saved = this.#checksumViews[kind];
+    const view = saved?.taskId === taskId ? saved : { taskId, page: 0, failuresOnly: failures.length > 0 };
+    const filtered = view.failuresOnly ? failures : items;
+    const pageCount = Math.max(1, Math.ceil(filtered.length / checksumPageSize));
+    const page = Math.min(view.page, pageCount - 1);
+    const start = page * checksumPageSize;
     const calculated = this.result("checksum");
     const checked = this.result("checksum_check");
     const metrics = kind === "checksum" ? [
@@ -331,16 +358,33 @@ export class ToolsSession {
       [checked?.checked ?? 0, tr("gui.checksum.checked"), false],
     ] as const;
     const report = {
+      taskId,
       context: task?.spec.kind === "checksum" || task?.spec.kind === "checksum_check" ? {
         sources: task.spec.kind === "checksum" ? task.spec.inputs : [task.spec.manifest],
         algorithm: this.algorithmLabel(task.spec.algorithm),
       } : null,
       summary: metrics.map(([value, label, bytes]) => ({ label, value: this.resultLabel(value, bytes) })),
-      totalRows: items.length, state: task ? taskOutcomeStateLabel(task) : taskStateLabel(null),
+      totalRows: items.length, filteredRows: filtered.length, failedRows: failures.length,
+      page, pageCount, start: filtered.length ? start + 1 : 0, end: Math.min(start + checksumPageSize, filtered.length),
+      failuresOnly: view.failuresOnly,
+      onPage: (next: number) => {
+        if (!Number.isFinite(next) || this.selectedTask(kind)?.id !== taskId) return;
+        this.#checksumViews[kind] = { taskId, failuresOnly: view.failuresOnly, page: Math.max(0, Math.min(Math.floor(next), pageCount - 1)) };
+      },
+      onFilter: (failuresOnly: boolean) => {
+        if (this.selectedTask(kind)?.id !== taskId) return;
+        this.#checksumViews[kind] = { taskId, page: 0, failuresOnly: kind === "checksum_check" && failuresOnly };
+      },
+      matchesInput: task?.spec.kind === "checksum"
+        ? task.spec.algorithm === this.#draft.algorithm && task.spec.inputs.length === 1 && task.spec.inputs[0] === this.target("checksum")
+          && JSON.stringify(task.spec.excludes) === JSON.stringify(this.excludes("checksum"))
+        : task?.spec.kind === "checksum_check"
+          ? task.spec.algorithm === this.#draft.algorithm && task.spec.manifest === this.#draft.manifestPath.trim() : false,
+      state: task ? taskOutcomeStateLabel(task) : taskStateLabel(null),
       feedback: this.copyFeedback(kind)?.message ?? null, feedbackDanger: this.copyFeedback(kind)?.tone === "danger",
       copyPending: this.copyPending(kind, task?.id ?? null), onCopy: () => void this.copyResults(kind),
     };
-    const rows = items.slice(0, 20);
+    const rows = filtered.slice(start, start + checksumPageSize);
     return kind === "checksum" ? {
       ...report, kind,
       rows: rows.map((item) => ({

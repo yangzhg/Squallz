@@ -1,3 +1,4 @@
+import { untrack } from "svelte";
 import { parseJobResult, type JobResult } from "./job-result";
 // Job store: reduces authoritative backend snapshots and feeds foreground progress,
 // status text, and conflict/password prompts.
@@ -26,12 +27,12 @@ import {
 } from "./job-snapshot";
 import { t, tFallback } from "./i18n.svelte";
 import { jobTitleFor } from "./job-title";
-import { pushToast } from "./toasts.svelte";
+import { pushToast, removeToastByKey, type Toast } from "./toasts.svelte";
 import { taskResultPresentation } from "./task-outcome";
 import { readCreateResult } from "./create-result";
 import { openCreatedOutputWithFallback } from "./create-completion";
 import { recordOperation } from "./history.svelte";
-import { platformTrashName } from "./platform-labels";
+import { platformFileManagerName, platformTrashName } from "./platform-labels";
 import {
   readSourceCleanupSummary,
   shouldRefreshSourceCleanupRecovery,
@@ -109,8 +110,28 @@ const locallyDismissed = new Set<number>();
 let snapshotRevision: number | null = null;
 let snapshotGeneration = 0;
 let revealAfterExtract = $state(false);
+let presentedTaskId: number | null = null;
 let createCompletionHandler: ((path: string) => Promise<boolean | void> | boolean | void) | null = null;
 let sourceCleanupRecoveryRefreshHandler: (() => Promise<void> | void) | null = null;
+
+/** Results already presented in task details do not also need a notification. */
+export function setPresentedTaskId(id: number | null): void {
+  presentedTaskId = id;
+  if (id === null) return;
+  untrack(() => {
+    removeToastByKey(`task:${id}:result`);
+    removeToastByKey(`task:${id}:source-cleanup`);
+  });
+}
+
+function pushTaskResultToast(
+  task: Task,
+  kind: "result" | "source-cleanup",
+  toast: Omit<Toast, "id" | "key">,
+): void {
+  if (task.id === presentedTaskId) return;
+  pushToast({ ...toast, key: `task:${task.id}:${kind}` });
+}
 
 export function setRevealAfterExtractPreference(enabled: boolean): void {
   revealAfterExtract = enabled;
@@ -228,7 +249,7 @@ function runTerminalEffects(task: Task, previousState: JobStateName): void {
   } else if (task.state === "failed") {
     recordTaskHistory(task);
   } else {
-    pushToast({ kind: "info", title: t("gui.toast.cancelled") });
+    pushTaskResultToast(task, "result", { kind: "info", title: t("gui.toast.cancelled") });
   }
 }
 
@@ -283,7 +304,7 @@ function reportSourceCleanup(task: Task): void {
   if (task.spec.kind !== "compress" || task.spec.post_success !== "trash_source") return;
   const cleanup = readSourceCleanupSummary(task.result);
   if (!cleanup) {
-    pushToast({
+    pushTaskResultToast(task, "source-cleanup", {
       kind: "warning",
       title: tFallback("gui.toast.source_cleanup_unknown"),
     });
@@ -292,14 +313,14 @@ function reportSourceCleanup(task: Task): void {
   const { moved, kept, recoveryRequired, status } = cleanup;
   const trash = platformTrashName();
   if (!status || status === "not_requested") {
-    pushToast({
+    pushTaskResultToast(task, "source-cleanup", {
       kind: "warning",
       title: tFallback("gui.toast.source_cleanup_unknown"),
     });
     return;
   }
   if (recoveryRequired > 0) {
-    pushToast({
+    pushTaskResultToast(task, "source-cleanup", {
       kind: "warning",
       title: tFallback(
         "gui.toast.source_cleanup_recovery",
@@ -310,7 +331,7 @@ function reportSourceCleanup(task: Task): void {
     return;
   }
   if (status === "cancelled") {
-    pushToast({
+    pushTaskResultToast(task, "source-cleanup", {
       kind: "warning",
       title: tFallback(
         "gui.toast.source_cleanup_cancelled",
@@ -320,7 +341,7 @@ function reportSourceCleanup(task: Task): void {
     return;
   }
   if (status !== "completed" || kept > 0) {
-    pushToast({
+    pushTaskResultToast(task, "source-cleanup", {
       kind: "warning",
       title: tFallback(
         "gui.toast.source_cleanup_partial",
@@ -329,7 +350,7 @@ function reportSourceCleanup(task: Task): void {
     });
     return;
   }
-  pushToast({
+  pushTaskResultToast(task, "source-cleanup", {
     kind: "success",
     title: tFallback(
       "gui.toast.source_cleanup_done",
@@ -368,12 +389,12 @@ function finishToast(task: Task): void {
   if (revealAfterExtract && output && (
     task.spec.kind === "extract" || task.spec.kind === "extract_nested" || task.spec.kind === "batch_extract"
   )) void revealPath(output);
-  pushToast({
+  pushTaskResultToast(task, "result", {
     kind: outcome.toastKind,
     title: outcome.summary,
     body: outcome.body,
     action: output
-      ? { label: t("gui.toast.reveal"), run: () => revealPath(output) }
+      ? { label: t("gui.task.show_in_file_manager", { fileManager: platformFileManagerName() }), run: () => revealPath(output) }
       : undefined,
   });
 }

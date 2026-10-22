@@ -35,6 +35,7 @@ export interface ConvertRouteHandle {
 export interface ConvertRouteBridge {
   onReady?: () => void;
   getArchive: () => ArchiveInfo | null;
+  openArchive: () => void;
   tr: (key: string, fallback?: string) => string;
   tError: (error: unknown) => string;
   showNotice: (message: string) => void;

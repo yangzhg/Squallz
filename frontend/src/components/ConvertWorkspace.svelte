@@ -28,6 +28,8 @@
       onSelect: () => void;
     };
     source: {
+      available: boolean;
+      onChoose: () => void;
       path: string;
       format: string;
       summary: string;
@@ -60,19 +62,7 @@
       onKeydown: (event: KeyboardEvent) => void;
     };
     protection: ComponentProps<CreateProtectionOptionsComponent>;
-    contract: {
-      title: string;
-      body: string;
-    };
-    readiness: {
-      title: string;
-      state: string;
-      body: string;
-    };
-    guard: {
-      title: string;
-      body: string;
-    };
+    safetyNote: string;
     showPreflight: boolean;
     preflight: {
       phase: ArchiveOutputPhase;
@@ -495,36 +485,61 @@
   {/if}
 {/snippet}
 
-{#if variant === "modern"}
-  <div class="create-sheet modern-convert">
-    <div class="sheet-head">
-      <div>
-        <span class="eyebrow">{surface.tr("gui.convert.eyebrow")}</span>
-        <h1 id="convert-workspace-heading" tabindex="-1">{surface.tr("gui.convert.title", "Convert archive")}</h1>
-        <p>{surface.tr("gui.convert.subtitle", "Choose the output format, compression, protection, and volume layout. Squallz converts without modifying the source.")}</p>
+{#snippet convertAction()}
+  {#if !surface.review}
+    <footer class="workspace-action-bar" class:classic={variant === "classic"}>
+      <div class="workspace-action-summary">
+        <span>{surface.tr("gui.convert.destination")}</span>
+        <strong>{surface.destination.path}</strong>
+        <small>{surface.start.title || surface.tr("gui.convert.source_unchanged")}</small>
       </div>
       <button
+        id="convert-primary-action"
         type="button"
-        class="primary sheet-action"
+        class:primary={variant === "modern"}
+        class:classic-primary={variant === "classic"}
         disabled={surface.start.disabled}
         title={surface.start.title}
         aria-label={surface.start.ariaLabel}
         aria-busy={surface.start.busy}
         onclick={surface.start.onSelect}
       ><Icon name="repeat" size={17} />{surface.start.label}</button>
+    </footer>
+  {/if}
+{/snippet}
+
+{#if !surface.source.available}
+  <section class="workspace-empty-state" class:classic={variant === "classic"}>
+    <Icon name="repeat" size={28} />
+    <h1 id="convert-workspace-heading" tabindex="-1">{surface.tr("gui.convert.title")}</h1>
+    <p>{surface.tr("gui.convert.empty_body")}</p>
+    <button
+      type="button"
+      class:primary={variant === "modern"}
+      class:classic-primary={variant === "classic"}
+      onclick={surface.source.onChoose}
+    ><Icon name="folder-open" size={17} />{surface.tr("gui.convert.choose_source")}</button>
+  </section>
+{:else if variant === "modern"}
+  <div class="create-sheet modern-convert">
+    <div class="sheet-head">
+      <div>
+        <h1 id="convert-workspace-heading" tabindex="-1">{surface.tr("gui.convert.title", "Convert archive")}</h1>
+        <p>{surface.tr("gui.convert.subtitle", "Choose the output format, compression, protection, and volume layout. Squallz converts without modifying the source.")}</p>
+      </div>
     </div>
 
-    <div class="create-grid">
+    <div class="create-workflow">
       <section class="create-main-panel convert-main-panel">
         <div class="convert-route-grid">
           <div class="convert-route-node">
             <span class="field-label">{surface.tr("gui.convert.source")}</span>
-            <div class="path-preview convert-path-preview">{surface.source.path}</div>
+            <p class="workspace-readonly-value">{surface.source.path}</p>
           </div>
           <span class="convert-route-arrow" aria-hidden="true"><Icon name="repeat" size={17} /></span>
           <div class="convert-route-node">
             <span class="field-label">{surface.tr("gui.convert.destination")}</span>
-            <div class="path-preview convert-path-preview" aria-live="polite">{surface.destination.path}</div>
+            <p class="workspace-readonly-value" aria-live="polite">{surface.destination.path}</p>
           </div>
         </div>
 
@@ -547,19 +562,6 @@
           </section>
         </div>
 
-        <div class="settings-metric-grid two-column convert-metric-grid">
-          <div>
-            <span>{surface.tr("gui.convert.source_format")}</span>
-            <strong>{surface.source.format}</strong>
-            <small>{surface.source.summary}</small>
-          </div>
-          <div>
-            <span>{surface.tr("gui.convert.method")}</span>
-            <strong>{surface.compression.method}</strong>
-            <small>{surface.tr("gui.convert.streaming_note")}</small>
-          </div>
-        </div>
-
         <details
           class="create-advanced-disclosure convert-advanced-disclosure"
           open={surface.advanced.open}
@@ -578,10 +580,14 @@
           </div>
         </details>
 
-        <div class="setting-callout">
-          <strong>{surface.contract.title}</strong>
-          <span>{surface.contract.body}</span>
-        </div>
+        <details class="workspace-summary-disclosure">
+          <summary>{surface.tr("gui.convert.details")}</summary>
+          <dl class="workflow-detail-list">
+            <div><dt>{surface.tr("gui.convert.source_format")}</dt><dd>{surface.source.format} · {surface.source.summary}</dd></div>
+            <div><dt>{surface.tr("gui.convert.method")}</dt><dd>{surface.compression.method}</dd></div>
+          </dl>
+          <p>{surface.safetyNote}</p>
+        </details>
 
         {#if surface.showPreflight}
           <CreatePreflightStatus {...preflightPresentation()} />
@@ -592,18 +598,8 @@
         {/if}
       </section>
 
-      <aside class="create-side-panel">
-        <section>
-          <div class="panel-title"><Icon name="check-circle" size={16} />{surface.readiness.title}</div>
-          <strong>{surface.readiness.state}</strong>
-          <p>{surface.readiness.body}</p>
-        </section>
-        <section>
-          <div class="panel-title"><Icon name="shield-alert" size={16} />{surface.guard.title}</div>
-          <p>{surface.guard.body}</p>
-        </section>
-      </aside>
     </div>
+    {@render convertAction()}
   </div>
 {:else}
   <div class="classic-dialog-body">
@@ -613,30 +609,21 @@
           <h1 id="convert-workspace-heading" tabindex="-1">{surface.tr("gui.convert.title", "Convert archive")}</h1>
           <p>{surface.tr("gui.convert.classic_intro")}</p>
         </div>
-        <button
-          type="button"
-          class="classic-primary"
-          disabled={surface.start.disabled}
-          title={surface.start.title}
-          aria-label={surface.start.ariaLabel}
-          aria-busy={surface.start.busy}
-          onclick={surface.start.onSelect}
-        >{surface.start.label}</button>
       </header>
 
       <div class="classic-form-grid">
         <div class="classic-label">{surface.tr("gui.convert.source")}</div>
-        <div class="classic-input convert-copy">{surface.source.path}</div>
+        <p class="workspace-readonly-value">{surface.source.path}</p>
         <div class="classic-label">{surface.tr("gui.convert.source_format")}</div>
-        <div class="classic-input convert-copy">{surface.source.format} · {surface.source.summary}</div>
+        <p class="workspace-readonly-value">{surface.source.format} · {surface.source.summary}</p>
         <div class="classic-label">{surface.tr("gui.convert.target_format")}</div>
         {@render formatChoices(true)}
         <div class="classic-label">{surface.tr("gui.create.format_boundary")}</div>
-        <div class="classic-input accent convert-copy">{surface.formatNote}</div>
+        <p class="workspace-readonly-value">{surface.formatNote}</p>
         <div class="classic-label">{surface.tr("gui.convert.profile")}</div>
         {@render profileChoices(true)}
         <div class="classic-label">{surface.tr("gui.convert.method")}</div>
-        <div class="classic-input">{surface.compression.method}</div>
+        <p class="workspace-readonly-value">{surface.compression.method}</p>
         {#if surface.compression.custom}
           <div class="classic-label">{surface.tr("gui.convert.custom_level")}</div>
           <div class="convert-custom-level-classic">
@@ -644,14 +631,8 @@
           </div>
         {/if}
         <div class="classic-label">{surface.tr("gui.convert.destination")}</div>
-        <div class="classic-input accent convert-copy" aria-live="polite">{surface.destination.path}</div>
+        <p class="workspace-readonly-value" aria-live="polite">{surface.destination.path}</p>
         <CreateProtectionOptions {...surface.protection} />
-        <div class="classic-label">{surface.contract.title}</div>
-        <div class="classic-input convert-copy">{surface.contract.body}</div>
-        <div class="classic-label">{surface.readiness.title}</div>
-        <div class="classic-input">{surface.readiness.state}</div>
-        <div class="classic-label">{surface.guard.title}</div>
-        <div class="classic-input convert-copy">{surface.guard.body}</div>
       </div>
 
       {#if surface.showPreflight}
@@ -665,6 +646,7 @@
           <CreatePlanReview {...reviewPresentation()} />
         </div>
       {/if}
+      {@render convertAction()}
     </section>
   </div>
 {/if}

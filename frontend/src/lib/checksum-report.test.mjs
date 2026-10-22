@@ -549,17 +549,18 @@ test("both workspace styles show the selected manifest report and full result pa
       assert.equal(surface.session.checksumReport("checksum_check").context.algorithm, "SHA-512");
       assert.equal(surface.session.checksumReport("checksum_check").context.sources[0], "/run-7/SHA256SUMS");
       assert.equal(surface.session.draft.algorithm, "sha256");
-      assert.equal(surface.session.checksumReport("checksum_check").rows.length, 20);
+      assert.equal(surface.session.checksumReport("checksum_check").rows.length, 25);
       assert.equal(surface.session.checksumReport("checksum_check").totalRows, 25);
       assert.equal(harness.tools.checksumText("checksum_check").split("\n").length, 25);
       const { body } = render(ToolsWorkspace, { props: { surface } });
       assert.ok(body.includes('/run-7/folder-0/report.txt'));
       assert.ok(body.includes('/run-7/folder-19/report.txt'));
+      assert.ok(body.includes('/run-7/folder-24/report.txt'));
       assert.ok(body.includes('ab'.repeat(64)) && body.includes('cd'.repeat(64)));
       assert.ok(body.includes(tFallback("gui.checksum.report_manifest")));
       assert.ok(body.includes(tFallback("gui.task.state.needs_attention")));
-      assert.ok(body.includes(tFallback("gui.checksum.result_preview_rows")
-        .replace("{shown}", "20").replace("{total}", "25")));
+      assert.ok(body.includes(tFallback("gui.checksum.result_range")
+        .replace("{start}", "1").replace("{end}", "25").replace("{total}", "25")));
       assert.doesNotMatch(body, /run-8|gui\.checksum\./u);
     }
   }

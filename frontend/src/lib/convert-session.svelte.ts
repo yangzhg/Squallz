@@ -484,7 +484,7 @@ export class ConvertSession implements ConvertRouteHandle {
           const isCurrent = this.workflow.current();
           await tick();
           if (isCurrent() && typeof document !== "undefined") {
-            document.querySelector<HTMLElement>(".modern-convert .sheet-action, .classic-convert .classic-primary")?.focus();
+            document.getElementById("convert-primary-action")?.focus();
           }
         }
       },
@@ -504,7 +504,7 @@ export class ConvertSession implements ConvertRouteHandle {
     const isCurrent = this.workflow.current();
     void tick().then(() => {
       if (isCurrent() && typeof document !== "undefined") {
-        document.querySelector<HTMLElement>(".modern-convert .sheet-action, .classic-convert .classic-primary")?.focus();
+        document.getElementById("convert-primary-action")?.focus();
       }
     });
   }
@@ -611,7 +611,6 @@ export class ConvertSession implements ConvertRouteHandle {
     const protection = outputProtectionControls(this.draft, (edit) => this.editOutput(edit),
       (key, fallback) => this.tr(key, fallback),
       this.optionIssue(this.output.passwordIssue), this.optionIssue(this.output.splitIssue));
-    const optionIssue = protection.passwordError || protection.splitError;
     const lockedReason = this.lockedReason();
     const disabledReason = requiredReason || lockedReason;
     const startLabel = this.data.pending
@@ -619,17 +618,6 @@ export class ConvertSession implements ConvertRouteHandle {
       : this.busy()
         ? this.tr("gui.convert.checking")
         : this.tr("gui.convert.start");
-    const readinessState = this.data.pending
-      ? this.tr("gui.convert.review_ready")
-      : this.busy()
-        ? this.tr("gui.convert.checking")
-        : this.data.issue
-          ? this.tr("gui.state.needs_attention")
-          : this.archive() && !requiredReason && !optionIssue
-            ? this.tr("gui.state.ready")
-            : optionIssue
-              ? this.tr("gui.state.needs_attention")
-              : requiredReason || this.openArchiveLabel();
     const review = this.data.pending && this.data.plan
       ? {
           plan: this.data.plan,
@@ -652,6 +640,8 @@ export class ConvertSession implements ConvertRouteHandle {
         onSelect: () => void this.start(),
       },
       source: {
+        available: this.archive() !== null,
+        onChoose: () => this.bridge.openArchive(),
         path: this.archive()?.path ?? this.openArchiveLabel(),
         format: this.archive()?.format.toUpperCase() ?? "-",
         summary: this.sourceSummary(),
@@ -732,27 +722,7 @@ export class ConvertSession implements ConvertRouteHandle {
         disabledReason: lockedReason,
         tr: (key, fallback) => this.tr(key, fallback),
       },
-      contract: {
-        title: this.tr("gui.convert.contract_title"),
-        body: this.tr("gui.convert.contract_body"),
-      },
-      readiness: {
-        title: this.tr("gui.convert.readiness"),
-        state: readinessState,
-        body: this.archive()
-          ? this.data.pending
-            ? this.tr("gui.convert.review_ready_body")
-            : this.busy()
-              ? this.tr("gui.convert.checking_body")
-              : this.data.issue || requiredReason || optionIssue
-                ? this.data.issue || this.tr("gui.convert.fix_options_body")
-                : this.tr("gui.convert.ready_body")
-          : this.tr("gui.convert.open_archive_first_body"),
-      },
-      guard: {
-        title: this.tr("gui.settings.security.guard"),
-        body: this.tr("gui.convert.guard_body"),
-      },
+      safetyNote: this.tr("gui.convert.guard_body"),
       showPreflight: this.data.phase !== "idle",
       preflight: {
         phase: this.data.phase,

@@ -256,14 +256,17 @@
             {/if}
           </div>
         </div>
-        <dl class="recovery-fact-list">
+        <details class="workspace-summary-disclosure">
+          <summary>{tr("gui.recovery.protection_details")}</summary>
+          <dl class="recovery-fact-list">
           <div><dt>{tr("common.target")}</dt><dd>{view.sourceName}</dd></div>
           <div><dt>{tr("gui.recovery.requested_redundancy")}</dt><dd>{view.requestedRedundancy}</dd></div>
           <div><dt>{tr("gui.recovery.protection_scope")}</dt><dd>{protectionScopeLabel()}</dd></div>
           <div><dt>{tr("gui.recovery.repair_capacity")}</dt><dd>{view.repairCapacity}</dd></div>
           <div><dt>{tr("gui.recovery.repair_output")}</dt><dd>{view.repairOutputMode}</dd></div>
           <div><dt>{tr("gui.recovery.planned_index")}</dt><dd>{view.plannedIndex}</dd></div>
-        </dl>
+          </dl>
+        </details>
       </div>
 
       <section class={`verify-card tone-${view.resultTone}`} aria-labelledby={`${variant}-recovery-result-title`}>
@@ -290,8 +293,8 @@
     </section>
 
     <aside class="recovery-side recovery-workspace-side">
-      <section class="sqz-recovery-card">
-        <span class="block-label">{tr("gui.recovery.format_workflow")}</span>
+      <details class="workspace-summary-disclosure recovery-format-disclosure">
+        <summary>{tr("gui.recovery.format_specific_tools")}</summary>
         <strong>{view.formatWorkflowTitle}</strong>
         <p>{view.formatWorkflowBody}</p>
         <div class="recovery-format-actions" aria-label={tr("gui.recovery.format_specific_tools")}>
@@ -306,7 +309,7 @@
             ><Icon name={action.icon} size={15} />{action.label}</button>
           {/each}
         </div>
-      </section>
+      </details>
     </aside>
   </div>
 </section>

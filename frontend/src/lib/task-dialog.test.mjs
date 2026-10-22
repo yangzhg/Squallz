@@ -4,6 +4,54 @@ import test from "node:test";
 
 import { createTestServer } from "../../tests/runtime.mjs";
 
+test("batch result warnings and failures precede statistics while preserving counts and output", async () => {
+  const server = await createTestServer();
+  try {
+    const { taskResultDetailRows } = await server.ssrLoadModule("/src/lib/task-dialog.ts");
+    const { errorSummary } = await server.ssrLoadModule("/src/lib/error-presentation.ts");
+    const { loadLocale, t } = await server.ssrLoadModule("/src/lib/i18n.svelte.ts");
+    const failure = { archive: "/archives/unreadable.zip", error: { key: "error.corrupt_archive", params: {}, detail: "Invalid archive header" } };
+    for (const locale of ["en-US", "zh-CN"]) {
+      await loadLocale(locale);
+      for (const selected of [3, 4]) {
+        const task = {
+          state: "done", spec: { kind: "batch_extract", items: [] },
+          result: jobResult("batch_extract", {
+            archives: 3, selected_archives: selected, extracted: 2, failed: 1, recovered_archives: 1,
+            failures: [failure],
+            outputs: [
+              { archive: "/archives/partial.zip", dest: "/output/partial", structure: "zip_local_headers_recovered",
+                counts: { failed: 2, skipped: 1 }, problems: ["broken.txt: CRC mismatch"], problems_total: 2 },
+              { archive: "/archives/complete.zip", dest: "/output/complete" },
+            ],
+          }),
+        };
+        const rows = taskResultDetailRows(task);
+        const firstStatistic = rows.findIndex((row) => row.label === t("gui.task.batch_complete_archives"));
+        const issueRows = rows.slice(0, firstStatistic);
+        assert.equal(issueRows.length, 5, "warning, failed archive, incomplete archive, problem, and omitted problems stay before statistics");
+        assert.equal(issueRows[0].label, t("gui.archive.zip_index_damaged"));
+        assert.ok(issueRows[0].value.includes("partial.zip"));
+        assert.equal(issueRows[1].value, `${failure.archive}\n${errorSummary(failure.error)}`);
+        assert.ok(issueRows[2].value.startsWith("/archives/partial.zip\n"));
+        assert.equal(issueRows[3].value, "broken.txt: CRC mismatch");
+        assert.equal(issueRows[4].label, t("gui.task.result_more_problems"));
+        const statistics = [
+          { label: t("gui.task.batch_complete_archives"), value: "1" },
+          { label: t("gui.task.batch_incomplete_archives"), value: "1" },
+          { label: t("gui.task.result_archives"), value: "3" },
+          ...(selected > 3 ? [{ label: t("gui.task.result_selected_files"), value: "4" }] : []),
+          { label: t("gui.task.batch_failed_archives"), value: "1" },
+          { label: t("common.output"), value: "/output/partial" },
+        ];
+        assert.deepEqual(rows.slice(firstStatistic), statistics);
+      }
+    }
+  } finally {
+    await server.close();
+  }
+});
+
 function sfxTask(overrides = {}) {
   return {
     id: 42,

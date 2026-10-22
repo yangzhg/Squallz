@@ -954,6 +954,18 @@ export function taskResultDetailRows(task: TaskDialogModel): TaskResultDetailRow
     const archives = report.archives;
     const selectedArchives = report.selected_archives;
     const outcome = readBatchExtractResult(task.result);
+    appendArchiveStructureWarning(rows, task);
+    for (const failure of outcome.failures) {
+      rows.push({ label: tr("common.archive"), value: `${failure.archive}\n${errorSummary(failure.error)}` });
+    }
+    for (const output of outcome.incompleteOutputs) {
+      const counts = output.counts;
+      rows.push({
+        label: tr("common.archive"),
+        value: `${output.archive}\n${batchExtractEntrySummary(counts.failed, counts.skipped)}`,
+      });
+      appendProblems(rows, output);
+    }
     rows.push(
       {
         label: tr("gui.task.batch_complete_archives"),
@@ -967,29 +979,17 @@ export function taskResultDetailRows(task: TaskDialogModel): TaskResultDetailRow
         label: tr("gui.task.result_archives"),
         value: archives.toLocaleString(),
       },
-      {
-        label: tr("gui.task.batch_failed_archives"),
-        value: report.failed.toLocaleString(),
-      },
     );
     if (selectedArchives > archives) {
-      rows.splice(3, 0, {
+      rows.push({
         label: tr("gui.task.result_selected_files"),
         value: selectedArchives.toLocaleString(),
       });
     }
-    appendArchiveStructureWarning(rows, task);
-    for (const failure of outcome.failures) {
-      rows.push({ label: tr("common.archive"), value: `${failure.archive}\n${errorSummary(failure.error)}` });
-    }
-    for (const output of outcome.incompleteOutputs) {
-      const counts = output.counts;
-      rows.push({
-        label: tr("common.archive"),
-        value: `${output.archive}\n${batchExtractEntrySummary(counts.failed, counts.skipped)}`,
-      });
-      appendProblems(rows, output);
-    }
+    rows.push({
+      label: tr("gui.task.batch_failed_archives"),
+      value: report.failed.toLocaleString(),
+    });
   }
 
   const output = taskOutputPath(task);

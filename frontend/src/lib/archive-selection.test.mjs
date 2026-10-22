@@ -64,6 +64,7 @@ async function loadSelectionHandlers(archive, overrides = {}) {
     selectionProgressLabel: (loaded, total) => `${loaded}/${total}`,
     archiveSelectionProgress: null,
     entryContext: null,
+    entryContextMenu: null,
     window: { innerWidth: 1280, innerHeight: 800 },
     ...overrides,
   };

@@ -1,3 +1,13 @@
+import type { BrowserEntry } from "./archive-browser";
+
+export function archiveTabStopPath(rows: readonly (BrowserEntry | null)[], focusedPath: string | null): string | null {
+  const entries = rows.filter((entry) => entry?.source);
+  return entries.find((entry) => entry?.source?.path === focusedPath)?.source?.path
+    ?? entries.find((entry) => entry?.selected)?.source?.path
+    ?? entries[0]?.source?.path
+    ?? null;
+}
+
 export function archiveKeyboardTarget(key: string, index: number, total: number, pageRows: number): number | null {
   if (!Number.isInteger(index) || index < 0 || index >= total) return null;
   const page = Math.max(1, Math.floor(pageRows));

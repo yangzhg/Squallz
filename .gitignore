@@ -1,6 +1,7 @@
 target/
 node_modules/
 dist/
+/crates/squallz-gui/gen/schemas/
 benches/
 AGENTS.md
 PLAN.md

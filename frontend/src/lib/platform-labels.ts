@@ -11,3 +11,9 @@ export function platformTrashName(
     ? tFallback("gui.platform.trash.windows")
     : tFallback("gui.platform.trash.default");
 }
+
+export function platformFileManagerName(
+  platform: DesktopPathPlatform = targetDesktopPlatform(),
+): string {
+  return tFallback(`gui.platform.file_manager.${platform}`);
+}

@@ -69,7 +69,8 @@
   import { archiveKeyboardTarget } from "./lib/archive-keyboard";
   import { appActionAvailability, appActionForShortcut, dispatchAppAction, isTextEditingTarget, type AppAction } from "./lib/app-actions";
   import { connectNativeMenu, type NativeMenuConnection } from "./lib/native-menu";
-  import { trapModalFocus } from "./lib/modal-focus";
+  import { restoreModalFocus, trapModalFocus } from "./lib/modal-focus";
+  import { popupMenu } from "./lib/popup-menu";
   import type { UpdateCheckPreview } from "./lib/app-update.svelte";
   import {
     adoptOpenedArchive,
@@ -172,7 +173,7 @@
   import {
     type CreatePreflightEffect,
   } from "./lib/create-preflight.svelte";
-  import { platformTrashName } from "./lib/platform-labels";
+  import { platformFileManagerName, platformTrashName } from "./lib/platform-labels";
   import { cssVariables, type CssVariableMap } from "./lib/css-variables";
   import { readWindowRecovery, rememberWindowRecovery, reloadWindow } from "./lib/window-recovery";
   import {
@@ -221,6 +222,7 @@
     moveTaskEarlier,
     moveTaskLater,
     setCreateCompletionHandler,
+    setPresentedTaskId,
     setRevealAfterExtractPreference,
     setSourceCleanupRecoveryRefreshHandler,
     setTaskExpanded,
@@ -410,6 +412,8 @@
   let taskDialogTaskId = $state<number | null>(windowRecovery.taskId ?? null);
   let taskDialogDismissedId = $state<number | null>(null);
   let macosSfxPublisherTask = $state<TaskDialogModel | null>(null);
+  let macosSfxReturnFocus = $state<HTMLElement | null>(null);
+  let nativeDialogCount = $state(0);
   let LoadedMacosSfxPublisher = $state<MacosSfxPublisherComponentType | null>(null);
   let macosSfxPublisherLoad: Promise<MacosSfxPublisherComponentType> | null = null;
   let taskCenterOpen = $state(windowRecovery.taskCenter ?? false);
@@ -715,8 +719,9 @@
   let quickActionPopover = $state<HTMLDivElement | null>(null);
   let entryContext = $state<EntryContext | null>(null);
   let entryContextMenu = $state<HTMLDivElement | null>(null);
+  let entryContextReturnFocus = $state<HTMLElement | null>(null);
   const MODERN_ROW_HEIGHT = 42;
-  const CLASSIC_ROW_HEIGHT = 29;
+  const CLASSIC_ROW_HEIGHT = 42;
   const VIRTUAL_OVERSCAN_ROWS = 12;
 
   const longTailBridgeFormatIds = new Set([
@@ -794,13 +799,6 @@
     return deriveCustomPaletteTokens(settingsSession.colors.accent, theme, settingsSession.colors.contrastGuard);
   }
 
-  function entryContextCssVariables(context: EntryContext): CssVariableMap {
-    return {
-      ...customPaletteVariables(),
-      "--entry-context-left": `${context.x}px`,
-      "--entry-context-top": `${context.y}px`,
-    };
-  }
   $effect(() => {
     document.documentElement.dataset.theme = activeTheme;
     document.documentElement.dataset.palette = settingsSession.colors.palette;
@@ -925,6 +923,7 @@
       rememberWindowRecovery({ taskWindow: true, taskId: task.id });
       return;
     }
+    if (nativeDialogCount > 0 || macosSfxPublisherTask || archiveEditorVisible()) return;
     const questionTaskId = jobPasswordPrompt?.id ?? jobConflictPrompt?.id ?? null;
     if (questionTaskId !== null) {
       rememberTaskWorkspaceFocus();
@@ -939,6 +938,13 @@
     activePopover = null;
     entryContext = null;
     if (modeSelectionBlocked) taskCenterOpen = false;
+  });
+
+  $effect(() => {
+    const task = taskDialogVisible() ? taskDialogTask()
+      : taskCenterVisible() ? taskCenterSelectedTask() : null;
+    setPresentedTaskId(task?.id ?? null);
+    return () => setPresentedTaskId(null);
   });
 
   $effect(() => {
@@ -1594,14 +1600,15 @@
       if (!(target instanceof Node)) return;
       if (activePopover === "quickActions") {
         if (quickActionPopover?.contains(target) || quickActionButton?.contains(target)) return;
-        closeQuickActions();
+        closeQuickActions(false);
       }
       if (entryContext && !entryContextMenu?.contains(target)) {
-        closeEntryContext();
+        closeEntryContext(false);
       }
     };
 
     const onKeyDown = (event: KeyboardEvent) => {
+      if (event.defaultPrevented) return;
       if (!nativeMenuConnection) {
         const action = appActionForShortcut(event, activePlatform);
         if (action && appActionEnabled(action)) {
@@ -1616,10 +1623,12 @@
         if (activePopover === "quickActions") {
           event.preventDefault();
           closeQuickActions();
+          return;
         }
         if (entryContext) {
           event.preventDefault();
-          closeEntryContext();
+          closeEntryContext(true);
+          return;
         }
         if (handleWorkflowEscape()) {
           event.preventDefault();
@@ -1905,7 +1914,7 @@
   function handleWorkflowEscape(): boolean {
     if (modeSelectionBlocked || blockingModalVisible() || document.activeElement?.closest("#squallz-task-center")) return false;
     if (screen === "browse" && (previewBusy() || nestedPreview || entryPreview || entryPreviewFailure)) {
-      clearEntryPreviewState();
+      clearEntryPreviewState(true);
       return true;
     }
     if (screen === "browse" && filterText()) {
@@ -1951,17 +1960,19 @@
   }
 
   function toggleQuickActions() {
+    closeEntryContext(false);
     activePopover = activePopover === "quickActions" ? null : "quickActions";
   }
 
   function closeQuickActions(restoreFocus = true) {
+    const menu = quickActionPopover;
     activePopover = null;
-    if (restoreFocus) queueMicrotask(() => quickActionButton?.focus());
+    if (restoreFocus) restoreModalFocus(menu, quickActionButton);
   }
 
   function chooseQuickAction(next: Screen) {
+    closeQuickActions(false);
     navigateToScreen(next);
-    closeQuickActions();
   }
 
   function navigationAction(next: Screen): AppAction | undefined {
@@ -2757,10 +2768,15 @@
 
   function getDialogModule(): Promise<DialogModule> {
     if (!openDialogModulePromise) {
-      openDialogModulePromise = import("@tauri-apps/plugin-dialog").catch((error) => {
-        openDialogModulePromise = null;
-        throw error;
-      });
+      openDialogModulePromise = import("@tauri-apps/plugin-dialog")
+        .then((dialog): DialogModule => ({
+          ...dialog,
+          confirm: (message, options) => withNativeDialog(() => dialog.confirm(message, options)),
+        }))
+        .catch((error) => {
+          openDialogModulePromise = null;
+          throw error;
+        });
     }
     return openDialogModulePromise;
   }
@@ -2786,10 +2802,7 @@
   }
 
   function fileManagerLabel(): string {
-    const platform = platformKind();
-    if (platform === "macos") return tr("gui.platform.file_manager.macos");
-    if (platform === "windows") return tr("gui.platform.file_manager.windows");
-    return tr("gui.platform.file_manager.linux");
+    return platformFileManagerName(platformKind());
   }
 
   function trashNameLabel(): string {
@@ -3023,6 +3036,7 @@
   async function openArchiveFromDialog() {
     if (archiveOpenStatus === "opening") return;
     if (preventCreateSubmissionNavigation("browse")) return;
+    const returnToConvert = screen === "convert";
     dismissArchiveAddPreparation();
     recoverySession.leave();
     dismissArchivePasswordRequest();
@@ -3073,7 +3087,16 @@
     }
     const path = Array.isArray(selected) ? selected[0] : selected;
     if (typeof path === "string") {
-      await openArchivePath(path, "dialog");
+      await openArchivePath(path, "dialog", returnToConvert ? {
+        path,
+        encoding: null,
+        restore: () => {
+          setScreen("convert");
+          focusConvertReview();
+          showNotice(tr("gui.archive.open_loaded"));
+          return true;
+        },
+      } : null);
     } else {
       showNotice(tr("gui.archive.open_cancelled"));
     }
@@ -3783,12 +3806,9 @@
       selectOnlyEntry(entry);
     }
     closeQuickActions(false);
-    const viewportPadding = 12;
-    const menuWidth = 236;
-    const menuHeight = 264;
     entryContext = {
-      x: Math.max(viewportPadding, Math.min(x, window.innerWidth - menuWidth - viewportPadding)),
-      y: Math.max(viewportPadding, Math.min(y, window.innerHeight - menuHeight - viewportPadding)),
+      x,
+      y,
       name: entry.name,
       path: entry.source?.path ?? null,
       canRename: Boolean(entry.source),
@@ -3798,11 +3818,14 @@
 
   function openEntryContext(event: MouseEvent, entry: DisplayEntry) {
     event.preventDefault();
+    entryContextReturnFocus = event.currentTarget instanceof HTMLElement ? event.currentTarget : null;
     showEntryContextAt(event.clientX, event.clientY, entry);
   }
 
-  function closeEntryContext() {
+  function closeEntryContext(restoreFocus = false) {
+    const menu = entryContextMenu;
     entryContext = null;
+    if (restoreFocus) restoreModalFocus(menu, entryContextReturnFocus);
   }
 
   async function runEntryContextAction(action: "extract" | "delete" | "rename" | "move" | "preview" | "test") {
@@ -3818,13 +3841,25 @@
   }
 
   function onEntryKeydown(event: KeyboardEvent, entry: DisplayEntry) {
-    if (event.target !== event.currentTarget) return;
     if (event.metaKey || event.ctrlKey || event.altKey || event.isComposing) return;
+    if ((event.key === "ArrowLeft" || event.key === "ArrowRight") && event.currentTarget instanceof HTMLElement) {
+      const label = event.currentTarget.querySelector<HTMLElement>(".archive-entry-label");
+      if (label && label.scrollWidth > label.clientWidth) {
+        const offset = event.key === "ArrowLeft" ? -label.clientWidth : label.clientWidth;
+        const next = Math.max(0, Math.min(label.scrollWidth - label.clientWidth, label.scrollLeft + offset));
+        if (next !== label.scrollLeft) {
+          event.preventDefault();
+          label.scrollLeft = next;
+        }
+      }
+      return;
+    }
     if (["ArrowUp", "ArrowDown", "Home", "End", "PageUp", "PageDown"].includes(event.key)) {
       event.preventDefault();
       void moveArchiveRow(event, entry);
       return;
     }
+    if (event.target !== event.currentTarget) return;
     if (
       archiveSelectionBusyReason()
       && ["Delete", "Backspace", "e", "E", "m", "M", "F2"].includes(event.key)
@@ -3839,7 +3874,8 @@
     } else if (event.key === " ") {
       event.preventDefault();
       if (!event.repeat) {
-        previewDisplayEntry(entry);
+        if (event.shiftKey) toggleEntrySelection(entry);
+        else previewDisplayEntry(entry);
       }
     } else if (event.key === "Backspace" && selectedPaths().size === 0) {
       event.preventDefault();
@@ -3860,8 +3896,9 @@
     } else if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
       event.preventDefault();
       const target = event.currentTarget instanceof HTMLElement ? event.currentTarget : null;
+      entryContextReturnFocus = target;
       const rect = target?.getBoundingClientRect();
-      showEntryContextAt(rect ? rect.left + 24 : window.innerWidth / 2, rect ? rect.bottom - 2 : window.innerHeight / 2, entry);
+      showEntryContextAt(rect ? rect.left : window.innerWidth / 2, rect ? rect.bottom : window.innerHeight / 2, entry);
     }
   }
 
@@ -3887,7 +3924,7 @@
       && currentArchive?.id === archiveId && mode === listMode
       && taskReviewRequestGeneration === navigation
       && !blockingModalVisible() && !taskCenterOpen;
-    const isCurrent = () => contextIsCurrent() && document.activeElement === origin;
+    const isCurrent = () => contextIsCurrent() && origin.contains(document.activeElement);
     const row = await loadRowAt(index);
     if (!row || !isCurrent() || selectedPaths() !== previousSelection) return;
     // A keyboard range starts at the focused row even when Tab reached it without selecting it.
@@ -3895,7 +3932,7 @@
     await selectEntry({ ...toDisplayEntry(row), virtualIndex: index }, event);
     if (!isCurrent() || !selectedPaths().has(row.path)) return;
     await focusArchiveRow(index, row.path, () => contextIsCurrent()
-      && (document.activeElement === origin || (!origin.isConnected && document.activeElement === document.body)));
+      && (origin.contains(document.activeElement) || (!origin.isConnected && document.activeElement === document.body)));
   }
 
   function selectedSummary(): string {
@@ -4046,12 +4083,21 @@
 
   async function openNativeDialog(kind: string, open: DialogModule["open"], options: OpenDialogOptions) {
     recordNativeDialogRequest(kind, options);
-    return open(options);
+    return withNativeDialog(() => open(options));
   }
 
   async function saveNativeDialog(kind: string, save: DialogModule["save"], options: SaveDialogOptions) {
     recordNativeDialogRequest(kind, options);
-    return save(options);
+    return withNativeDialog(() => save(options));
+  }
+
+  async function withNativeDialog<T>(show: () => Promise<T>): Promise<T> {
+    nativeDialogCount += 1;
+    try {
+      return await show();
+    } finally {
+      nativeDialogCount -= 1;
+    }
   }
 
   function recordValidationRenderReady(reason: string) {
@@ -4877,7 +4923,6 @@
       kind, variant, session: tools, tr,
       title: kind === "checksum" ? tr("gui.screen.checksum") : tr("gui.screen.duplicates"),
       archiveReturn: toolsArchiveReturnSurface(variant),
-      onNavigate: (next: "duplicates" | "recovery" | "create" | "batch") => setScreen(next),
       onPanelMount: (kind: ChecksumResultKind | "duplicates", node: HTMLElement | null) => {
         if (kind === "duplicates") { registerDuplicateReportPanel(node); return; }
         if (kind === "checksum") checksumResultPanel = node;
@@ -5777,7 +5822,7 @@
   }
 
   function blockingModalVisible(): boolean {
-    return taskDialogVisible() || macosSfxPublisherTask !== null || archiveEditorVisible();
+    return nativeDialogCount > 0 || taskDialogVisible() || macosSfxPublisherTask !== null || archiveEditorVisible();
   }
 
   function taskCenterVisible(): boolean {
@@ -5796,6 +5841,7 @@
 
   async function openMacosSfxPublisher(task: TaskDialogModel): Promise<void> {
     if (activePlatform !== "macos") return;
+    macosSfxReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     try {
       LoadedMacosSfxPublisher = await loadMacosSfxPublisher();
       macosSfxPublisherTask = task;
@@ -5845,6 +5891,7 @@
       copyFeedback: tools.copyFeedback("task", task.id)?.message ?? null,
       copyFeedbackTone: tools.copyFeedback("task", task.id)?.tone ?? null,
       copyPending: tools.copyPending("task", task.id),
+      notice: appNotice,
       ...(presentation === "panel" ? { rootId: "squallz-task-center" } : {
         passwordQuestion: taskPasswordQuestion(task),
         passwordValue: jobPasswordValue,
@@ -5884,6 +5931,7 @@
     return {
       tasks: jobRows,
       submittingTask: submittingTaskModel(),
+      notice: appNotice,
       rootClass: `task-center-panel design-root platform-${activePlatform} palette-${settingsSession.colors.palette} theme-${activeTheme} density-${activeDensityChoice}`,
       rootVariables: customPaletteVariables(),
       focusTaskId: taskCenterFocusTaskId,
@@ -6078,23 +6126,17 @@
 
   async function cancelCurrentTask(task: TaskDialogModel): Promise<void> {
     if (task.id === null) return;
-    if (await cancelTask(task.id) && task.controlIntent === "cancel") {
-      showNotice(tr("gui.task.cancel_requested"));
-    }
+    await cancelTask(task.id);
   }
 
   async function pauseCurrentTask(task: TaskDialogModel): Promise<void> {
     if (task.id === null) return;
-    if (await pauseTask(task.id) && task.controlIntent === "pause") {
-      showNotice(tr("gui.task.pause_requested"));
-    }
+    await pauseTask(task.id);
   }
 
   async function resumeCurrentTask(task: TaskDialogModel): Promise<void> {
     if (task.id === null) return;
-    if (await resumeTask(task.id) && task.controlIntent === "resume") {
-      showNotice(tr("gui.task.resume_requested"));
-    }
+    await resumeTask(task.id);
   }
 
   function moveQueuedTaskEarlier(task: Task): void {
@@ -6726,6 +6768,7 @@
   }
 
   const convertRouteBridge: ConvertRouteBridge = {
+    openArchive: () => void runAppAction("open_archive"),
     onReady: () => {
       if (convertReviewFocusPending) focusConvertReview();
     },
@@ -6796,6 +6839,17 @@
     if (label === "Settings") return "settingsGeneral";
     if (label === "Appearance") return "appearance";
     return "browse";
+  }
+
+  function currentNavigationScreen(): Screen {
+    if (isSettingsScreen()) return "settingsGeneral";
+    if (["batch", "nestedExtract", "password"].includes(screen)) return "extract";
+    if (["updateReview", "archiveInfo"].includes(screen)) return "browse";
+    return screen;
+  }
+
+  function showArchiveInspector(): boolean {
+    return currentArchive !== null && (screen === "browse" || screen === "archiveInfo");
   }
 
   function screenForCommand(label: string): Screen {
@@ -6947,13 +7001,11 @@
 </script>
 
 <div class:task-center-layout={taskCenterVisible()}>
-  {#if !modeSelectionBlocked}
-    <ToastHost
+  <ToastHost
       rootClass={`themed-root palette-${settingsSession.colors.palette} theme-${activeTheme}`}
       rootVariables={customPaletteVariables()}
-      blocked={blockingModalVisible()}
+      blocked={modeSelectionBlocked || blockingModalVisible()}
     />
-  {/if}
 
   {#if taskCenterVisible()}
     {@const selectedTask = taskCenterSelectedTask()}
@@ -6973,18 +7025,18 @@
   {/if}
 </div>
 
-{#if appNotice && (!firstRunRequired || taskWindowMode)}
+{#if appNotice && (!firstRunRequired || taskWindowMode) && !blockingModalVisible() && !taskCenterVisible()}
   <div
     class={`app-notice mode-${mode} themed-root palette-${settingsSession.colors.palette} theme-${activeTheme}`}
     use:cssVariables={customPaletteVariables()}
     role="status"
-    aria-hidden={blockingModalVisible() ? "true" : undefined}
   >{appNotice}</div>
 {/if}
 
 {#if macosSfxPublisherTask && LoadedMacosSfxPublisher}
   <LoadedMacosSfxPublisher
     task={macosSfxPublisherTask}
+    returnFocus={macosSfxReturnFocus}
     rootClass={`sfx-publish-overlay design-root platform-${activePlatform} palette-${settingsSession.colors.palette} theme-${activeTheme} density-${activeDensityChoice}`}
     rootVariables={customPaletteVariables()}
     platform={platformKind()}
@@ -7006,6 +7058,10 @@
     failureBody={tr("gui.task_surface.load_failed_body")}
     retryLabel={tr("gui.task_surface.retry")}
     backLabel={tr("gui.task.back_to_tasks")}
+    onUnavailableBack={!taskWindowMode && task.id !== null ? () => {
+      if (presentation === "panel") returnToTaskCenter(task);
+      else if (task.id !== null) returnTaskQuestionToCenter(task.id);
+    } : undefined}
   />
 {/snippet}
 
@@ -7040,7 +7096,8 @@
   <div
     bind:this={entryContextMenu}
     class={`entry-context-menu themed-root palette-${settingsSession.colors.palette} theme-${activeTheme}`}
-    use:cssVariables={entryContextCssVariables(entryContext)}
+    use:cssVariables={customPaletteVariables()}
+    use:popupMenu={{ point: entryContext, anchor: entryContextReturnFocus, onClose: closeEntryContext }}
     role="menu"
     aria-label={tr("gui.context.actions_for").replace("{name}", entryContext.name)}
     aria-hidden={blockingModalVisible() || modeSelectionBlocked ? "true" : undefined}
@@ -7180,16 +7237,18 @@
         <div class="modern-toolbar" aria-label={tr("gui.aria.primary_actions")}>
           {#if isSettingsScreen()}
             <button onclick={() => setScreen("browse")}><Icon name="archive" size={16} />{tr("gui.settings.back_to_archives", "Archives")}</button>
-          {:else}
+          {:else if currentArchive || screen === "recent"}
             <button disabled={!appActionEnabled("open_archive")} aria-busy={archiveOpenStatus === "opening"} onclick={() => void runAppAction("open_archive")}><Icon name="folder-open" size={16} />{archiveOpenStatus === "opening" ? toolbarLabel("Opening") : toolbarLabel("Open")}</button>
-            <button disabled={!appActionEnabled("create_archive")} onclick={() => void runAppAction("create_archive")}><Icon name="sparkles" size={16} />{toolbarLabel("Create")}</button>
-            <button onclick={() => openRecoveryConfiguration()}><Icon name="shield-alert" size={16} />{tr("gui.recovery.title")}</button>
+            {#if screen === "browse" && currentArchive}
             <button class="primary" disabled={!appActionEnabled("extract_all")} title={archiveSelectionBusyReason() || archiveActionTitle(hasArchiveOpen())} onclick={() => void runAppAction("extract_all")}><Icon name="archive" size={16} />{toolbarLabel("Extract")}</button>
+            {/if}
+          {/if}
+          {#if !isSettingsScreen()}
             <button
               bind:this={quickActionButton}
               class="icon-only"
               aria-label={tr("gui.quick.title")}
-              aria-haspopup="dialog"
+              aria-haspopup="menu"
               aria-expanded={activePopover === "quickActions"}
               onclick={toggleQuickActions}
             ><Icon name="sparkles" size={16} /></button>
@@ -7212,13 +7271,14 @@
       </header>
 
       {#if activePopover === "quickActions"}
-        <div bind:this={quickActionPopover} class="quick-popover modern-quick-popover" role="dialog" aria-label={tr("gui.quick.title")}>
+        <div bind:this={quickActionPopover} class="quick-popover" role="menu" aria-label={tr("gui.quick.title")}
+          use:popupMenu={{ anchor: quickActionButton, onClose: closeQuickActions }}>
           <div class="quick-popover-head">
             <strong>{tr("gui.quick.title")}</strong>
             <span>{tr("gui.quick.subtitle")}</span>
           </div>
           {#each quickActions as action}
-            <button disabled={navigationDisabled(action.screen)} title={navigationDisabledReason(action.screen)} onclick={() => chooseQuickAction(action.screen)}>
+            <button role="menuitem" disabled={navigationDisabled(action.screen)} title={navigationDisabledReason(action.screen)} onclick={() => chooseQuickAction(action.screen)}>
               <Icon name={action.icon} size={15} />
               <span><strong>{quickActionLabel(action.label)}</strong><small>{quickActionDetail(action.label, action.detail)}</small></span>
             </button>
@@ -7231,7 +7291,7 @@
         class:browse-shell={screen === "browse"}
         class:settings-shell={isSettingsScreen()}
         class:no-archive-shell={screen === "browse" && !currentArchive}
-        class:no-inspector-shell={screen === "recent" || screen === "convert" || screen === "create" || screen === "extract" || screen === "duplicates" || screen === "batch" || screen === "nestedExtract" || screen === "updateReview" || screen === "password"}
+        class:no-inspector-shell={!isSettingsScreen() && !showArchiveInspector()}
       >
         <aside class="modern-sidebar" aria-label={tr("gui.aria.navigation")}>
           <div class="sidebar-section">
@@ -7239,7 +7299,8 @@
               <button
                 disabled={navigationDisabled(screenForNav(item[1]))}
                 title={navigationDisabledReason(screenForNav(item[1]))}
-                class:current={(screen === "recent" && item[1] === "Recent") || ((screen === "browse" || screen === "updateReview") && item[1] === "Archives") || (screen === "create" && item[1] === "Create") || ((screen === "extract" || screen === "batch" || screen === "nestedExtract" || screen === "password") && item[1] === "Extract") || (screen === "convert" && item[1] === "Convert") || (screen === "checksum" && item[1] === "Checksum") || (screen === "duplicates" && item[1] === "Duplicates") || (screen === "recovery" && item[1] === "Recovery") || (isSettingsScreen() && item[1] === "Settings")}
+                class:current={currentNavigationScreen() === screenForNav(item[1])}
+                aria-current={currentNavigationScreen() === screenForNav(item[1]) ? "page" : undefined}
                 onclick={() => navigateToScreen(screenForNav(item[1]))}
               >
                 <Icon name={item[0]} size={16} />
@@ -7247,7 +7308,7 @@
               </button>
             {/each}
           </div>
-          {#if !hideOperationHistory}
+          {#if !hideOperationHistory && jobRows.length > 0}
             <button
               class="recent-card history-card"
               type="button"
@@ -7459,7 +7520,7 @@
 	          {/if}
         </section>
 
-        {#if !isSettingsScreen() && screen !== "recent" && screen !== "convert" && screen !== "create" && screen !== "extract" && screen !== "duplicates" && screen !== "batch" && screen !== "nestedExtract" && screen !== "updateReview" && screen !== "password" && (screen !== "browse" || currentArchive)}
+        {#if showArchiveInspector()}
           <ModernInspectorHost
             surface={modernInspectorSurface()}
             ariaLabel={tr("gui.aria.archive_inspector")}
@@ -7617,7 +7678,7 @@
               class="classic-quick-trigger"
               aria-label={tr("gui.quick.title")}
               title={tr("gui.quick.title")}
-              aria-haspopup="dialog"
+              aria-haspopup="menu"
               aria-expanded={activePopover === "quickActions"}
               onclick={toggleQuickActions}
             ><Icon name="sparkles" size={14} /></button>
@@ -7626,13 +7687,14 @@
         {/if}
 
       {#if activePopover === "quickActions"}
-        <div bind:this={quickActionPopover} class="quick-popover classic-quick-popover" role="dialog" aria-label={tr("gui.quick.title")}>
+        <div bind:this={quickActionPopover} class="quick-popover" role="menu" aria-label={tr("gui.quick.title")}
+          use:popupMenu={{ anchor: quickActionButton, onClose: closeQuickActions }}>
           <div class="quick-popover-head">
             <strong>{tr("gui.quick.title")}</strong>
             <span>{tr("gui.quick.close_hint")}</span>
           </div>
           {#each quickActions as action}
-            <button disabled={navigationDisabled(action.screen)} title={navigationDisabledReason(action.screen)} onclick={() => chooseQuickAction(action.screen)}>
+            <button role="menuitem" disabled={navigationDisabled(action.screen)} title={navigationDisabledReason(action.screen)} onclick={() => chooseQuickAction(action.screen)}>
               <Icon name={action.icon} size={15} />
               <span><strong>{quickActionLabel(action.label)}</strong><small>{quickActionDetail(action.label, action.detail)}</small></span>
             </button>

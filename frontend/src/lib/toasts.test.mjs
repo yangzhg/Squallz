@@ -20,8 +20,9 @@ test("modal views hide toast controls without discarding their notifications", a
   }
 });
 
-test("actionable toasts stay visible while timed toasts and the queue keep working", async () => {
+test("actionable toasts stay visible while timed toasts and the queue keep working", async (context) => {
   const server = await createTestServer();
+  context.mock.method(performance, "now", () => 0);
 
   try {
     const { dismissToast, pushToast, removeToast, toasts } = await server.ssrLoadModule(
@@ -163,3 +164,84 @@ test("actionable toasts stay visible while timed toasts and the queue keep worki
     await server.close();
   }
 });
+
+async function withToastClock(context, run) {
+  const server = await createTestServer();
+  let notices;
+  try {
+    notices = await server.ssrLoadModule("/src/lib/toasts.svelte.ts");
+    let now = 0;
+    let nextHandle = 1;
+    const pending = new Map();
+    context.mock.method(performance, "now", () => now);
+    context.mock.method(globalThis, "setTimeout", (callback, delay) => {
+      const handle = nextHandle++;
+      pending.set(handle, { at: now + delay, callback });
+      return handle;
+    });
+    context.mock.method(globalThis, "clearTimeout", (handle) => pending.delete(handle));
+    const advance = (elapsed) => {
+      const end = now + elapsed;
+      while (true) {
+        const next = [...pending].sort((a, b) => a[1].at - b[1].at)[0];
+        if (!next || next[1].at > end) break;
+        now = next[1].at;
+        pending.delete(next[0]);
+        next[1].callback();
+      }
+      now = end;
+    };
+    await run({ ...notices, advance, pending });
+  } finally {
+    while (notices?.toasts().length) notices.dismissToast(notices.toasts()[0].id);
+    context.mock.restoreAll();
+    await server.close();
+  }
+}
+
+test("blocked notifications retain their remaining visible time and newly blocked notices get their full time", (context) =>
+  withToastClock(context, ({ pushToast, toasts, setToastsBlocked, advance, pending }) => {
+    pushToast({ kind: "info", title: "partly read" });
+    advance(1500);
+    const staleCallback = [...pending.values()][0].callback;
+    setToastsBlocked(true);
+    pushToast({ kind: "warning", title: "arrived while blocked" });
+    advance(60_000);
+    staleCallback();
+    assert.deepEqual(toasts().map((toast) => toast.title), ["arrived while blocked", "partly read"]);
+    assert.equal(pending.size, 0);
+
+    setToastsBlocked(false);
+    advance(2499);
+    assert.equal(toasts().length, 2);
+    advance(1);
+    assert.deepEqual(toasts().map((toast) => toast.title), ["arrived while blocked"]);
+    advance(3499);
+    assert.equal(toasts().length, 1);
+    advance(1);
+    assert.equal(toasts().length, 0);
+  }));
+
+test("priority preemption and keyed removal preserve blocked queues and visible-time budgets", (context) =>
+  withToastClock(context, ({ pushToast, toasts, dismissToast, removeToastByKey, setToastsBlocked, advance }) => {
+    pushToast({ kind: "info", title: "partly read", key: "ordinary" });
+    pushToast({ kind: "success", title: "action", action: { label: "Show", run() {} } });
+    pushToast({ kind: "danger", title: "recovery" });
+    advance(1000);
+    setToastsBlocked(true);
+    pushToast({ kind: "warning", title: "needs attention", key: "attention" });
+    pushToast({ kind: "info", title: "queued result", key: "consumed-result" });
+    removeToastByKey("consumed-result");
+    advance(60_000);
+    setToastsBlocked(false);
+    assert.deepEqual(toasts().map((toast) => toast.title), ["recovery", "needs attention", "action"]);
+    dismissToast(toasts().find((toast) => toast.title === "action").id);
+    advance(2999);
+    assert.ok(toasts().some((toast) => toast.title === "partly read"));
+    advance(1);
+    assert.deepEqual(toasts().map((toast) => toast.title), ["recovery", "needs attention"]);
+    advance(3000);
+    assert.deepEqual(toasts().map((toast) => toast.title), ["recovery"]);
+    dismissToast(toasts()[0].id);
+    assert.equal(toasts().length, 0);
+  }));

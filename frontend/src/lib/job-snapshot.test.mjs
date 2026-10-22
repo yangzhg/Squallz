@@ -31,7 +31,8 @@ async function withJobEvents(run) {
     const { mockIPC, mockWindows } = await server.ssrLoadModule("@tauri-apps/api/mocks");
     const { emit } = await server.ssrLoadModule("@tauri-apps/api/event");
     mockWindows("main");
-    mockIPC(() => {}, { shouldMockEvents: true });
+    const nativeCalls = [];
+    mockIPC((command, args) => { nativeCalls.push({ command, args }); }, { shouldMockEvents: true });
     const jobs = await server.ssrLoadModule("/src/lib/jobs.svelte.ts");
     const { ipc } = await server.ssrLoadModule("/src/lib/ipc.ts");
     const { loadLocale } = await server.ssrLoadModule("/src/lib/i18n.svelte.ts");
@@ -39,7 +40,7 @@ async function withJobEvents(run) {
     await loadLocale("en-US");
     ipc.jobSnapshots = () => new Promise((resolve) => { finishPoll = resolve; });
     dispose = await jobs.initJobEvents();
-    await run({ server, jobs, ipc, notices,
+    await run({ server, jobs, ipc, notices, nativeCalls, mockIPC,
       publish: (record) => emit("job://snapshot", live(record)),
       recover: async (delta) => { finishPoll(delta); await new Promise((resolve) => setTimeout(resolve, 0)); } });
   } finally {
@@ -50,6 +51,119 @@ async function withJobEvents(run) {
     await server.close();
   }
 }
+
+const createSpec = {
+  kind: "compress", inputs: ["/input/report.txt"], dest: "/output/archive.zip", level: 6,
+  password: null, encrypt_names: false, split_size: null, split_mode: "generic",
+  excludes: [], content_policy: "keep_all_files", sqz_inner_format: null, sfx_target: null,
+  replace_existing: false, replacement_guard: null, completion: "open_in_squallz",
+  post_success: "trash_source", test_after_create: false,
+};
+
+test("presented task results suppress duplicate notices while completion, recovery and history still run", () =>
+  withJobEvents(async ({ server, jobs, ipc, notices, publish, nativeCalls }) => {
+    const { operationHistory } = await server.ssrLoadModule("/src/lib/history.svelte.ts");
+    await server.ssrLoadModule("@tauri-apps/plugin-opener");
+    const opened = [];
+    let recoveryRefreshes = 0;
+    jobs.setCreateCompletionHandler((path) => { opened.push(path); return true; });
+    jobs.setSourceCleanupRecoveryRefreshHandler(() => { recoveryRefreshes += 1; });
+    ipc.submitJob = async () => ({ ...snapshot(71, 1), spec: createSpec });
+    await jobs.submitJob(createSpec);
+    jobs.setPresentedTaskId(71);
+    const completed = { ...snapshot(71, 2, "done"), result: jobResult("compress", {
+      source_cleanup: { status: "partial", moved: 1, kept: 1, recovery_required: 1 },
+    }) };
+    await publish(completed);
+    assert.equal(notices.toasts().length, 0);
+    assert.deepEqual(opened, ["/output/archive.zip"]);
+    assert.equal(recoveryRefreshes, 1);
+    assert.equal(operationHistory().length, 1);
+    assert.equal(jobs.tasks().find((task) => task.id === 71).revealPath, "/output/archive.zip");
+    jobs.setPresentedTaskId(null);
+    await publish(completed);
+    assert.equal(notices.toasts().length, 0, "closing details does not replay a consumed result");
+    assert.equal(recoveryRefreshes, 1);
+    assert.equal(operationHistory().length, 1);
+
+    ipc.submitJob = async () => snapshot(72, 1);
+    await jobs.submitJob(spec);
+    jobs.setPresentedTaskId(72);
+    await publish(snapshot(72, 2, "cancelled"));
+    assert.equal(notices.toasts().length, 0);
+
+    const extractSpec = { kind: "extract", path: "/input/report.zip", dest: "/output", password: null,
+      expected_destination: null, expected_input_guard: null, selection: null, overwrite: "ask",
+      symlinks: "skip", smart: false, encoding: null, verify_sfx: true, best_effort: false };
+    ipc.submitJob = async () => ({ ...snapshot(73, 1), spec: extractSpec });
+    await jobs.submitJob(extractSpec);
+    jobs.setPresentedTaskId(73);
+    jobs.setRevealAfterExtractPreference(true);
+    await publish({ ...snapshot(73, 2, "done"), result: jobResult("extract") });
+    const revealCalls = () => nativeCalls.filter((call) => call.command === "plugin:opener|reveal_item_in_dir");
+    for (let attempt = 0; attempt < 50 && revealCalls().length === 0; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 2));
+    }
+    assert.deepEqual(revealCalls(), [{ command: "plugin:opener|reveal_item_in_dir", args: { paths: ["/output"] } }]);
+    assert.equal(notices.toasts().length, 0);
+    assert.equal(operationHistory().length, 2);
+  }));
+
+test("opening task details consumes visible and queued result notices without clearing unrelated errors", () =>
+  withJobEvents(async ({ server, jobs, ipc, notices }) => {
+    const { platformFileManagerName } = await server.ssrLoadModule("/src/lib/platform-labels.ts");
+    const { t } = await server.ssrLoadModule("/src/lib/i18n.svelte.ts");
+    ipc.submitJob = async () => ({ ...snapshot(81, 1, "done"),
+      spec: { ...createSpec, completion: "none" },
+      result: jobResult("compress", { source_cleanup: { status: "completed", moved: 1 } }),
+    });
+    jobs.setPresentedTaskId(80);
+    await jobs.submitJob(createSpec);
+    assert.deepEqual(notices.toasts().map((toast) => toast.key), ["task:81:result", "task:81:source-cleanup"]);
+    assert.equal(notices.toasts()[0].action.label,
+      t("gui.task.show_in_file_manager", { fileManager: platformFileManagerName() }));
+    jobs.setPresentedTaskId(81);
+    assert.equal(notices.toasts().length, 0);
+    jobs.setPresentedTaskId(null);
+
+    for (let id = 1; id <= 3; id += 1) notices.pushToast({ kind: "danger", title: `urgent ${id}` });
+    ipc.submitJob = async () => ({ ...snapshot(82, 1, "done"), spec: { ...createSpec, completion: "none" },
+      result: jobResult("compress", { source_cleanup: { status: "partial", kept: 1 } }),
+    });
+    await jobs.submitJob(createSpec);
+    notices.pushToast({ kind: "warning", title: "Could not open output", key: "task:82:output-error" });
+    ipc.submitJob = async () => snapshot(83, 1, "cancelled");
+    await jobs.submitJob(spec);
+    jobs.setPresentedTaskId(82);
+    const remaining = [];
+    while (notices.toasts().length) {
+      remaining.push(notices.toasts()[0]);
+      notices.dismissToast(notices.toasts()[0].id);
+    }
+    assert.ok(remaining.some((toast) => toast.key === "task:82:output-error"));
+    assert.ok(remaining.some((toast) => toast.key === "task:83:result"));
+    assert.ok(remaining.every((toast) => !["task:82:result", "task:82:source-cleanup"].includes(toast.key)));
+  }));
+
+test("a foreground completion action failure remains visible after result notices are consumed", () =>
+  withJobEvents(async ({ server, jobs, ipc, notices, mockIPC }) => {
+    await server.ssrLoadModule("@tauri-apps/plugin-opener");
+    const { t } = await server.ssrLoadModule("/src/lib/i18n.svelte.ts");
+    mockIPC((command) => {
+      if (command === "plugin:opener|reveal_item_in_dir") throw new Error("File manager unavailable");
+    }, { shouldMockEvents: true });
+    const revealSpec = { ...createSpec, completion: "reveal_output", post_success: "keep_source" };
+    ipc.submitJob = async () => ({ ...snapshot(91, 1, "done"), spec: revealSpec, result: jobResult("compress") });
+    jobs.setPresentedTaskId(91);
+    await jobs.submitJob(revealSpec);
+    for (let attempt = 0; attempt < 50 && notices.toasts().length === 0; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 2));
+    }
+    jobs.setPresentedTaskId(91);
+    assert.equal(notices.toasts().length, 1);
+    assert.equal(notices.toasts()[0].title, t("gui.toast.reveal_failed"));
+    assert.equal(notices.toasts()[0].key, undefined);
+  }));
 
 test("submission snapshots preserve progress and final states when live updates precede registration", () =>
   withJobEvents(async ({ jobs, ipc, publish }) => {

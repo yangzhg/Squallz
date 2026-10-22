@@ -27,6 +27,7 @@
     task,
     rootClass,
     rootVariables,
+    returnFocus = null,
     platform,
     previewSkipSave,
     chooseOutput,
@@ -38,6 +39,7 @@
     task: TaskDialogModel;
     rootClass: string;
     rootVariables: CssVariableMap;
+    returnFocus?: HTMLElement | null;
     platform: DesktopPathPlatform;
     previewSkipSave: boolean;
     chooseOutput: (suggested: string) => Promise<string | null>;
@@ -129,6 +131,7 @@
   <SfxPublishDialog
     {rootClass}
     {rootVariables}
+    {returnFocus}
     {source}
     {output}
     {initialIdentity}

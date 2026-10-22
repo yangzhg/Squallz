@@ -37,6 +37,7 @@
   let {
     tasks,
     submittingTask = null,
+    notice = null,
     rootClass,
     rootVariables = {},
     focusTaskId = null,
@@ -52,6 +53,7 @@
   }: {
     tasks: readonly Task[];
     submittingTask?: TaskDialogModel | null;
+    notice?: string | null;
     rootClass: string;
     rootVariables?: CssVariableMap;
     focusTaskId?: number | null;
@@ -484,6 +486,7 @@
   </div>
 
   <footer class="task-center-footer">
+    {#if notice}<div class="surface-notice" role="status">{notice}</div>{/if}
     {#if counts.clearable > 0}
       <button type="button" onclick={onClear}>
         {tr("gui.task_center.clear_completed")

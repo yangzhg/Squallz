@@ -1,6 +1,4 @@
 <script lang="ts">
-  import Icon from "./Icon.svelte";
-
   type CreateSetupSummaryItem = Readonly<{
     id: string;
     icon: string;
@@ -12,8 +10,6 @@
   let {
     variant,
     ariaLabel,
-    eyebrow,
-    heading,
     items,
   }: {
     variant: "modern" | "classic";
@@ -29,22 +25,15 @@
   class:classic={variant === "classic"}
   aria-label={ariaLabel}
 >
-  <header>
-    <span>{eyebrow}</span>
-    <strong>{heading}</strong>
-  </header>
-  <div class="create-setup-summary-grid">
+  <dl class="create-setup-summary-grid">
     {#each items as item (item.id)}
       <div class="create-setup-summary-item">
-        <span class="create-setup-summary-icon" aria-hidden="true">
-          <Icon name={item.icon} size={16} />
-        </span>
-        <div>
-          <span>{item.label}</span>
+        <dt>{item.label}</dt>
+        <dd>
           <strong>{item.value}</strong>
           <small>{item.detail}</small>
-        </div>
+        </dd>
       </div>
     {/each}
-  </div>
+  </dl>
 </section>

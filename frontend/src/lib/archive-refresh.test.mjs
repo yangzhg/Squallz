@@ -162,7 +162,7 @@ async function passwordRefreshActions(server, archive) {
     archiveUpdateReview: { cancelSourceChoice() {} },
     batchPickerRequest: 0, nestedExtractPickerRequest: 0,
 
-    taskDialogVisible: () => false, macosSfxPublisherTask: null,
+    taskDialogVisible: () => false, macosSfxPublisherTask: null, nativeDialogCount: 0,
     taskPasswordReady: (value) => value.length > 0,
     archiveMutationDisabledReason: () => archive.archiveRefreshStatus() === "idle" ? "" : "Refresh required",
     openArchiveStore: archive.openArchive, cancelArchivePasswordPrompt: archive.cancelPasswordPrompt,
@@ -923,7 +923,7 @@ test("virtual rows keep cold and mixed page slots and clamp after the list shrin
       get currentArchive() { return archive.archive(); },
       totalRows: archive.totalRows, rowAt: archive.rowAt, prefetchAround: archive.prefetchAround,
       archiveBrowseError: archive.archiveBrowseError, filterPending: archive.filterPending, filterText: archive.filterText,
-      browseScrollTop: 0, browseViewportHeight: 420, MODERN_ROW_HEIGHT: 42, CLASSIC_ROW_HEIGHT: 29,
+      browseScrollTop: 0, browseViewportHeight: 420, MODERN_ROW_HEIGHT: 42, CLASSIC_ROW_HEIGHT: 42,
       VIRTUAL_OVERSCAN_ROWS: 12, entryType: (entry) => entry.entry_type,
       formatBytes: String, formatModified: () => "", entryAttributeLabel: () => "File",
       tr: englishTranslate, isEntrySelected: () => false,
@@ -934,7 +934,7 @@ test("virtual rows keep cold and mixed page slots and clamp after the list shrin
       archivePreviewActions: () => ({}), openCurrentArchiveRecoveryConfiguration() {}, toggleAllArchiveEntries() {},
     };
     const app = vm.runInNewContext(`${runtime}\n({browseVirtualWindow, archiveBrowserSurface})`, context);
-    const classic = () => app.archiveBrowserSurface(29).view;
+    const classic = () => app.archiveBrowserSurface(42).view;
     const modern = () => app.archiveBrowserSurface(42).view;
     const onScroll = app.archiveBrowserSurface(42).onBrowseScroll;
     const scrollTo = (top) => onScroll({ currentTarget: { scrollTop: top, clientHeight: 420 } });
@@ -954,7 +954,7 @@ test("virtual rows keep cold and mixed page slots and clamp after the list shrin
       });
       return view;
     }
-    for (const [surface, height] of [[classic, 29], [modern, 42]]) {
+    for (const [surface, height] of [[classic, 42], [modern, 42]]) {
       scrollTo(500 * height);
       const mixed = checkSlots(surface, height, true);
       assert.equal(mixed.rows.filter(Boolean).length, 12, "cached rows must stay in their original slots");
@@ -967,7 +967,7 @@ test("virtual rows keep cold and mixed page slots and clamp after the list shrin
     const loadedPage = Array.from({ length: 500 }, (_, index) => row(`entry-${500 + index}.txt`));
     pendingPages.get(1).resolve({ items: loadedPage, total: 10_000, page: 1 });
     await until(() => archive.rowAt(500) !== null);
-    for (const [surface, height] of [[classic, 29], [modern, 42]]) {
+    for (const [surface, height] of [[classic, 42], [modern, 42]]) {
       scrollTo(500 * height);
       assert.ok(checkSlots(surface, height, false).rows.every(Boolean));
     }

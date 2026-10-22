@@ -23,7 +23,14 @@ export interface Toast {
 }
 
 const store = $state({ visible: [] as Toast[], queue: [] as Toast[] });
-const timers = new Map<number, ReturnType<typeof setTimeout>>();
+interface ToastTimer {
+  remaining: number;
+  startedAt: number | null;
+  handle: ReturnType<typeof setTimeout> | null;
+}
+
+const timers = new Map<number, ToastTimer>();
+let presentationBlocked = false;
 let nextId = 1;
 
 const DURATION: Record<ToastKind, number> = {
@@ -37,6 +44,16 @@ export function toasts(): Toast[] {
   return store.visible;
 }
 
+/** Count only time during which the notification can be seen and used. */
+export function setToastsBlocked(blocked: boolean): void {
+  if (presentationBlocked === blocked) return;
+  presentationBlocked = blocked;
+  for (const toast of store.visible) {
+    if (blocked) pauseToastTimer(toast.id);
+    else startToastTimer(toast);
+  }
+}
+
 export function pushToast(toast: Omit<Toast, "id">): void {
   if (toast.key) removeToastByKey(toast.key);
   const full: Toast = { ...toast, id: nextId++ };
@@ -44,7 +61,7 @@ export function pushToast(toast: Omit<Toast, "id">): void {
     const candidate = preemptionCandidate(full.kind);
     if (candidate >= 0) {
       const [displaced] = store.visible.splice(candidate, 1);
-      clearToastTimer(displaced.id);
+      pauseToastTimer(displaced.id);
       enqueue(displaced);
       show(full);
     } else {
@@ -92,16 +109,37 @@ function show(toast: Toast): void {
   const nextLower = store.visible.findIndex((visible) => priority(visible.kind) < priority(toast.kind));
   if (nextLower < 0) store.visible.push(toast);
   else store.visible.splice(nextLower, 0, toast);
-  const ms = toast.action || toast.persistent ? 0 : DURATION[toast.kind];
-  if (ms > 0) {
-    timers.set(toast.id, setTimeout(() => dismissToast(toast.id), ms));
+  startToastTimer(toast);
+}
+
+function startToastTimer(toast: Toast): void {
+  const duration = toast.action || toast.persistent ? 0 : DURATION[toast.kind];
+  if (duration === 0 || presentationBlocked) return;
+  let timer = timers.get(toast.id);
+  if (!timer) {
+    timer = { remaining: duration, startedAt: null, handle: null };
+    timers.set(toast.id, timer);
   }
+  if (timer.handle !== null) return;
+  const running = timer;
+  running.startedAt = performance.now();
+  const handle = setTimeout(() => {
+    if (running.handle === handle) dismissToast(toast.id);
+  }, running.remaining);
+  running.handle = handle;
+}
+
+function pauseToastTimer(id: number): void {
+  const timer = timers.get(id);
+  if (!timer || timer.handle === null || timer.startedAt === null) return;
+  clearTimeout(timer.handle);
+  timer.remaining = Math.max(0, timer.remaining - (performance.now() - timer.startedAt));
+  timer.startedAt = null;
+  timer.handle = null;
 }
 
 function clearToastTimer(id: number): void {
-  const timer = timers.get(id);
-  if (timer === undefined) return;
-  clearTimeout(timer);
+  pauseToastTimer(id);
   timers.delete(id);
 }
 
@@ -122,12 +160,18 @@ export function removeToast(id: number): void {
     return;
   }
   const queueIndex = store.queue.findIndex((toast) => toast.id === id);
-  if (queueIndex >= 0) store.queue.splice(queueIndex, 1);
+  if (queueIndex >= 0) {
+    clearToastTimer(id);
+    store.queue.splice(queueIndex, 1);
+  }
 }
 
 export function removeToastByKey(key: string): void {
   for (let i = store.queue.length - 1; i >= 0; i -= 1) {
-    if (store.queue[i].key === key) store.queue.splice(i, 1);
+    if (store.queue[i].key === key) {
+      clearToastTimer(store.queue[i].id);
+      store.queue.splice(i, 1);
+    }
   }
   const visible = store.visible.find((toast) => toast.key === key);
   if (visible) dismissToast(visible.id);

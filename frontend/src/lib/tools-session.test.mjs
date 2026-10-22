@@ -148,3 +148,91 @@ test("tool submissions capture their input once and discarded sessions publish n
     assert.deepEqual(run.notices, []);
   }
 });
+
+test("verification reports expose late failures and every row through bounded pages", () => {
+  for (const failures of [[24], [0, 24, 124], []]) {
+    const run = harness();
+    const items = Array.from({ length: 125 }, (_, index) => ({
+      path: `/data/file-${index}.txt`, expected: "expected", actual: failures.includes(index) ? "different" : "expected",
+      ok: !failures.includes(index), error: null,
+    }));
+    const task = { id: 1, state: "done", spec: { kind: "checksum_check", manifest: "/data/SHA256SUMS", algorithm: "sha256" },
+      result: jobResult("checksum_check", { items, checked: 125, failed: failures.length, passed: 125 - failures.length }) };
+    run.context.tasks.push(task);
+    let report = run.tools.checksumReport("checksum_check");
+    assert.equal(report.failuresOnly, failures.length > 0);
+    if (failures.length) assert.deepEqual(Array.from(report.rows, (row) => row.name), failures.map((index) => items[index].path));
+    report.onFilter(false);
+    const visible = [];
+    for (let page = 0; page < 3; page += 1) {
+      run.tools.checksumReport("checksum_check").onPage(page);
+      report = run.tools.checksumReport("checksum_check");
+      assert.equal(report.page, page);
+      assert.ok(report.rows.length <= 50);
+      visible.push(...report.rows.map((row) => row.name));
+    }
+    assert.deepEqual(visible, items.map((item) => item.path));
+    report.onFilter(true);
+    report = run.tools.checksumReport("checksum_check");
+    assert.equal(report.page, 0);
+    assert.equal(report.filteredRows, failures.length);
+    assert.equal(run.tools.checksumText("checksum_check").split("\n").length, 125, "copy always includes the complete report");
+    run.context.tasks.push({ ...task, id: 2, result: jobResult("checksum_check", { items: [items[1]] }) });
+    report.onPage(2);
+    const current = run.tools.checksumReport("checksum_check");
+    assert.equal(current.taskId, 2);
+    assert.equal(current.page, 0);
+    assert.equal(current.failuresOnly, false, "a new report starts with its own result state");
+    run.tools.dispose();
+  }
+});
+
+test("calculation report pages retain their algorithm and mark changed inputs", () => {
+  const run = harness();
+  const items = Array.from({ length: 55 }, (_, index) => ({ path: `/data/file-${index}`, size: index, digest: `digest-${index}` }));
+  run.context.tasks.push({ id: 1, state: "done", spec: { kind: "checksum", inputs: ["/data"], algorithm: "sha256", excludes: [] },
+    result: jobResult("checksum", { items, files_hashed: 55 }) });
+  run.tools.edit({ checksumPath: "/data", checksumExcludes: "" });
+  let report = run.tools.checksumReport("checksum");
+  assert.equal(report.matchesInput, true);
+  assert.equal(report.rows.length, 50);
+  report.onPage(1);
+  report = run.tools.checksumReport("checksum");
+  assert.equal(report.rows[0].name, "/data/file-50");
+  assert.equal(report.rows.length, 5);
+  run.tools.edit({ algorithm: "blake3" });
+  report = run.tools.checksumReport("checksum");
+  assert.equal(report.matchesInput, false);
+  assert.equal(report.context.algorithm, "SHA-256");
+  run.tools.edit({ algorithm: "sha256", checksumExcludes: "cache" });
+  assert.equal(run.tools.checksumReport("checksum").matchesInput, false);
+  run.tools.edit({ checksumPath: "/other", checksumExcludes: "" });
+  assert.equal(run.tools.checksumReport("checksum").matchesInput, false);
+  run.tools.dispose();
+});
+
+test("duplicate size controls convert units without changing byte-based submissions", async () => {
+  const specs = [];
+  const run = harness({ submitJob: async (spec) => { specs.push(spec); return 1; } });
+  run.tools.edit({ duplicatePath: "/data" });
+  assert.equal(run.tools.minimumSizeUnit, "mib");
+  assert.equal(run.tools.minimumSizeValue, 1);
+  run.tools.updateMinimumSize({ currentTarget: { value: "1.5" } });
+  assert.equal(run.tools.draft.minimumSize, 1572864);
+  run.tools.changeMinimumSizeUnit("kib");
+  assert.equal(run.tools.minimumSizeValue, 1536);
+  await run.tools.submit("duplicate_scan");
+  assert.equal(specs[0].min_size, 1572864);
+  run.tools.changeMinimumSizeUnit("b");
+  for (const invalid of ["", "-1", "0.5", "Infinity", "9007199254740992"]) {
+    run.tools.updateMinimumSize({ currentTarget: { value: invalid } });
+    assert.ok(run.tools.minimumSizeError);
+    await run.tools.submit("duplicate_scan");
+  }
+  assert.equal(specs.length, 1, "invalid sizes cannot silently submit the previous value");
+  run.tools.updateMinimumSize({ currentTarget: { value: "0" } });
+  assert.equal(run.tools.minimumSizeError, "");
+  await run.tools.submit("duplicate_scan");
+  assert.equal(specs[1].min_size, 0);
+  run.tools.dispose();
+});

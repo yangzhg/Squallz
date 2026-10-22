@@ -170,12 +170,13 @@ export function deriveCustomPaletteTokens(
     theme === "dark"
       ? colorToHex(mixColor(accent, white, 0.72))
       : colorToHex(mixColor(accent, nearBlack, 0.52));
-  const contrastColor = contrastRatio(accent, white) >= 4.5 ? white : nearBlack;
+  const contrastColor = contrastRatio(accent, white) >= 4.5
+    ? white
+    : contrastRatio(accent, nearBlack) >= 4.5 ? nearBlack : parseHexColor("#000000");
   const accentHex = colorToHex(accent);
   const accent2Hex = colorToHex(accent2);
-  const hoverMixTarget = theme === "dark" ? white : nearBlack;
-  const accentHoverHex = colorToHex(mixColor(accent, hoverMixTarget, theme === "dark" ? 0.14 : 0.08));
-  const accent2HoverHex = colorToHex(mixColor(accent2, hoverMixTarget, theme === "dark" ? 0.18 : 0.12));
+  const hoverMixTarget = contrastColor === white ? nearBlack : white;
+  const accentHoverHex = colorToHex(mixColor(accent, hoverMixTarget, 0.08));
 
   return {
     "--accent": accentHex,
@@ -191,10 +192,10 @@ export function deriveCustomPaletteTokens(
     "--color-accent-border": colorToRgba(accent, theme === "dark" ? 0.38 : 0.34),
     "--color-accent-shadow": "var(--accent-shadow)",
     "--color-focus-ring": colorToRgba(accent, theme === "dark" ? 0.36 : 0.3),
-    "--button-primary-bg": `linear-gradient(135deg, ${accentHex}, ${accent2Hex})`,
+    "--button-primary-bg": accentHex,
     "--button-primary-fg": colorToHex(contrastColor),
     "--button-primary-border": colorToRgba(accent, theme === "dark" ? 0.42 : 0.34),
-    "--button-primary-bg-hover": `linear-gradient(135deg, ${accentHoverHex}, ${accent2HoverHex})`,
+    "--button-primary-bg-hover": accentHoverHex,
     "--button-primary-fg-hover": colorToHex(contrastColor),
     "--button-selected-bg": accentSoft,
     "--button-selected-fg": accentInk,
@@ -211,7 +212,6 @@ export function buildCustomPaletteData(hex: string, theme: ResolvedTheme, contra
   const tokens = deriveCustomPaletteTokens(hex, theme, contrastGuard);
   const accent = tokens["--accent"];
   const support = tokens["--accent-2"];
-  const contrast = contrastRatio(parseHexColor(accent), parseHexColor(tokens["--color-accent-contrast"])).toFixed(1);
   return {
     id: "custom",
     name: "Custom Accent",
@@ -220,7 +220,6 @@ export function buildCustomPaletteData(hex: string, theme: ResolvedTheme, contra
     support,
     base: theme === "dark" ? DARK_BASE : LIGHT_BASE,
     note: "Saved custom color with automatic light and dark contrast.",
-    contrast: `${contrast}:1`,
   };
 }
 

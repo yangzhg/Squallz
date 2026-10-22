@@ -18,7 +18,7 @@ function harness() {
   }, { duplicatePath: "/new-scan", minimumSize: 1048576, duplicateExcludes: "cache" });
   return { tasks, tools, surface: (variant) => ({ kind: "duplicates", variant, session: tools,
     title: tFallback("gui.screen.duplicates", "Duplicate Finder"), tr: tFallback,
-    archiveReturn: { visible: false }, onNavigate() {}, onPanelMount() {},
+    archiveReturn: { visible: false }, onPanelMount() {},
   }) };
 }
 

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from "svelte";
   import Icon from "./Icon.svelte";
   import { cssVariables, type CssVariableMap } from "../lib/css-variables";
   import { tFallback } from "../lib/i18n.svelte";
@@ -6,6 +7,7 @@
     pushToast,
     dismissToast,
     removeToast,
+    setToastsBlocked,
     toasts,
     type Toast,
     type ToastKind,
@@ -24,6 +26,12 @@
   let runningActionIds = $state<number[]>([]);
   let host = $state<HTMLElement | null>(null);
   let leadingToastId: number | undefined;
+
+  $effect.pre(() => {
+    const nextBlocked = blocked;
+    untrack(() => setToastsBlocked(nextBlocked));
+    return () => setToastsBlocked(false);
+  });
 
   $effect(() => {
     const leading = toasts()[0];

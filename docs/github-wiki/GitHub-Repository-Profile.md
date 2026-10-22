@@ -95,4 +95,4 @@ gh api -X PUT repos/yangzhg/Squallz/topics \
 
 ## 手动更新命令
 
-如果本机 `gh` 已重新登录，可以使用上面的命令更新 GitHub description、homepage、Wiki 开关和 topics。
+在本机完成 GitHub CLI 认证后，可以使用上面的命令更新 GitHub description、homepage、Wiki 开关和 topics。

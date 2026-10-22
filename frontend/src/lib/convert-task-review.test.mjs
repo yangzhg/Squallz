@@ -22,6 +22,7 @@ function harness(t) {
   let archive = { ...originalArchive };
   const bridge = {
     getArchive: () => archive, tr: englishTranslate, tError: () => "Read/write error",
+    openArchive: () => calls.push(["open"]),
     showNotice: (message) => calls.push(["notice", message]), ensurePreflightListener: async () => {},
     getDialogModule: async () => ({ save() {}, confirm: async () => { calls.push(["confirm"]); return true; } }),
     saveNativeDialog: async (_kind, _save, options) => { calls.push(["save", options.defaultPath]); return options.defaultPath; },
@@ -64,6 +65,25 @@ async function waitFor(predicate) {
   }
   assert.fail("Conversion did not reach the expected state");
 }
+
+test("conversion offers an archive picker until a source is opened", (t) => {
+  const { session, calls, setArchive } = harness(t);
+  setArchive(null);
+  session.syncArchive(null);
+  for (const variant of ["modern", "classic"]) {
+    const empty = session.surface(variant);
+    assert.equal(empty.source.available, false);
+    assert.equal(empty.start.disabled, true);
+    empty.source.onChoose();
+    assert.equal(session.surface(variant).source.available, false);
+  }
+  assert.deepEqual(calls, [["open"], ["open"]]);
+  setArchive(originalArchive);
+  session.syncArchive(originalArchive);
+  assert.equal(session.surface("modern").source.available, true);
+  assert.equal(session.surface("classic").source.path, originalArchive.path);
+  assert.equal(session.surface("modern").start.disabled, false);
+});
 
 test("review restores conversion options and obtains a fresh output authorization before submission", async (t) => {
   const { session, calls } = harness(t);

@@ -131,12 +131,11 @@ Top-level Windows 11 integration needs `IExplorerCommand`, package identity
 (MSIX or a sparse package), signing, and target-platform testing; none of those
 is implied by the current health result.
 
-Remaining Windows release work:
+Windows release validation requirements:
 
 - validate registry values and command invocation on a real Windows host;
-- add package lifecycle integration for the verbs;
-- test multi-selection, PowerShell policy, SmartScreen, and signed installers;
-- decide whether a packaged `IExplorerCommand` implementation is justified.
+- verify that package installation, upgrade, and removal maintain the verbs;
+- test multi-selection, PowerShell policy, SmartScreen, and signed installers.
 
 ## Linux
 
@@ -159,11 +158,11 @@ that every Linux distribution can run the AppImage. WebKitGTK, the graphics
 stack, AppImage runtime behavior, and file-manager integration still require
 native package smoke tests on each supported distribution.
 
-Remaining Linux release work:
+Linux release validation requirements:
 
 - run native Nautilus and Dolphin smoke tests on supported distributions;
 - validate service menus with the target distribution's tooling;
-- complete AppImage/deb/rpm and WebKitGTK packaging checks;
+- verify AppImage/deb/rpm packages and WebKitGTK on the supported distributions;
 - document sandbox-specific paths for Flatpak or other confined builds before
   offering in-app installation there.
 

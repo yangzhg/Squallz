@@ -82,14 +82,14 @@ async function withNestedOpen(run, { systemOpen = false } = {}) {
     const { RecoverySession } = await server.ssrLoadModule("/src/lib/recovery-session.svelte.ts");
     const systemOpenHelpers = systemOpen ? await server.ssrLoadModule("/src/lib/preview-presentation.ts") : {};
     const names = ["clearNotice", "cancelTaskReview", "nestedArchiveAction", "extractNestedPreviewArchive", "retryEntryPreview", "runPreviewWithPassword", "clearEntryPreviewState", "entryPreviewForPath", "hasPreparedPreviewForPath", "selectOnlyEntry", "selectEntry", "toggleEntrySelection", "activateEntry", "submitPasswordRequest", "cancelPasswordRequest", "dismissArchivePasswordRequest", "dismissArchivePicker", "setScreen", "openArchivePath", "openRecoverySet", "passwordPromptDetail", "submitPreviewEntry",
-      "openRecoveryConfiguration", "saveNativeDialog", "openNativeDialog", "openExtractWorkspace", "selectedJobPaths"];
+      "openRecoveryConfiguration", "saveNativeDialog", "openNativeDialog", "withNativeDialog", "openExtractWorkspace", "selectedJobPaths"];
     if (systemOpen) names.push("openEntryPreview", "repairFilenameEncoding", "setMode");
     const declarations = selectFunctions(source, names).map((node) => node.getText(source));
     const notices = [];
     const operations = [];
     const context = {
       ...systemOpenHelpers, ipc, adoptOpenedArchive: archive.adoptOpenedArchive,
-      appNotice: null, noticeTimer: null, clearTimeout,
+      appNotice: null, noticeTimer: null, clearTimeout, nativeDialogCount: 0,
       taskReviewRequestGeneration: 0, nestedExtractDraftGeneration: 0,
       syncUrl: () => {}, tick: async () => {},
       document: { documentElement: {}, body: {}, querySelectorAll: () => [] },
