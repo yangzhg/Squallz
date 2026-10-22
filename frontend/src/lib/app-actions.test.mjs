@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test, { after, before } from "node:test";
 import vm from "node:vm";
-import { createTestServer } from "../../tests/runtime.mjs";
+import { englishTranslate, createTestServer } from "../../tests/runtime.mjs";
 import { compileTestScript, readSvelteScriptAsync, selectFunctions } from "../../tests/source.mjs";
 
 let server;
@@ -135,7 +135,7 @@ test("archive editing checks the source and registered capabilities while readin
     archiveSelectionBusyReason: () => state.selectionBusy,
     selectedPreviewPolicy: () => ({ disabledReason: state.selected ? "" : "Select one entry" }),
     previewBusy: () => state.preparing,
-    tr: (_key, fallback) => fallback,
+    tr: englishTranslate,
     showNotice: (message) => notices.push(message),
     blockSelectionScopedAction: () => false,
     submitJob: () => assert.fail("an unsupported update was submitted"),

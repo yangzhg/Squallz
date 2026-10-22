@@ -31,7 +31,7 @@ use crate::dto::{
 #[cfg(target_os = "macos")]
 use crate::dto::{IntegrationDefaultHandlerDto, IntegrationDefaultHandlerStateDto};
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
-use crate::open_files::{EXTERNAL_TASK_ACTION_ARG, EXTERNAL_TASK_OUTPUT_ARG};
+use crate::open_files::EXTERNAL_TASK_ACTION_ARG;
 use squallz_formats::{SevenZipBackendSource, UnrarBackendSource, WimlibBackendSource};
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 use squallz_i18n::Localizer;
@@ -74,7 +74,7 @@ const FINDER_ACTIONS: &[FinderAction] = &[
 if run_gui_task "checksum" "$@"; then
   exit 0
 fi
-run_sqz checksum "$@"
+run_sqz file-manager checksum -- "$@"
 "#,
     },
     FinderAction {
@@ -85,11 +85,7 @@ run_sqz checksum "$@"
 if run_gui_task "extract-here" "$@"; then
   exit 0
 fi
-for item in "$@"; do
-  [[ -f "$item" ]] || continue
-  dest="$(dirname "$item")"
-  run_sqz extract "$item" -d "$dest" --smart --file-manager-preset
-done
+run_sqz file-manager extract-here -- "$@"
 "#,
     },
     FinderAction {
@@ -100,24 +96,7 @@ done
 if run_gui_task "extract-to-folder" "$@"; then
   exit 0
 fi
-archive_stem() {
-  local base suffix
-  base="$(basename "$1")"
-  for suffix in ".tar.zst" ".tar.xz" ".tar.bz2" ".tar.gz" ".tbz2" ".tgz" ".txz" ".tzst" ".zip" ".7z" ".rar" ".sqz" ".tar" ".gz" ".bz2" ".xz" ".zst" ".br" ".lz4"; do
-    if [[ "$base" == *"$suffix" ]]; then
-      printf '%s\n' "${base%$suffix}"
-      return 0
-    fi
-  done
-  printf '%s\n' "${base%.*}"
-}
-
-for item in "$@"; do
-  [[ -f "$item" ]] || continue
-  dest="$(dirname "$item")/$(archive_stem "$item")"
-  mkdir -p "$dest"
-  run_sqz extract "$item" -d "$dest" --file-manager-preset
-done
+run_sqz file-manager extract-to-folder -- "$@"
 "#,
     },
     FinderAction {
@@ -125,38 +104,10 @@ done
         name_key: "gui.integration.finder.action.compress_to_7z",
         script_name: "squallz-compress-to-7z.sh",
         script_body: r#"
-unique_output() {
-  local path base ext candidate n
-  path="$1"
-  if [[ ! -e "$path" ]]; then
-    printf '%s\n' "$path"
-    return 0
-  fi
-  base="${path:r}"
-  ext="${path:e}"
-  for n in {2..999}; do
-    candidate="$base $n.$ext"
-    if [[ ! -e "$candidate" ]]; then
-      printf '%s\n' "$candidate"
-      return 0
-    fi
-  done
-  printf '%s\n' "$path"
-}
-
-[[ "$#" -gt 0 ]] || exit 0
-parent="$(dirname "$1")"
-first_name="$(basename "$1")"
-if [[ "$#" -eq 1 ]]; then
-output="$parent/${first_name%.*}.7z"
-else
-  output="$parent/Archive.7z"
-fi
-output="$(unique_output "$output")"
-if run_gui_task_with_output "compress-to-7z" "$output" "$@"; then
+if run_gui_task "compress-to-7z" "$@"; then
   exit 0
 fi
-run_sqz compress "$@" -o "$output" --file-manager-preset
+run_sqz file-manager compress-to-7z -- "$@"
 "#,
     },
     FinderAction {
@@ -164,12 +115,12 @@ run_sqz compress "$@" -o "$output" --file-manager-preset
         name_key: "gui.integration.finder.action.test_archive",
         script_name: "squallz-test-archive.sh",
         script_body: r#"
-if run_gui_task "test-archive" "$@"; then
-  exit 0
-fi
 for item in "$@"; do
   [[ -f "$item" ]] || continue
-  run_sqz test "$item"
+  if run_gui_task "test-archive" "$item"; then
+    continue
+  fi
+  run_sqz file-manager test-archive -- "$item"
 done
 "#,
     },
@@ -182,7 +133,6 @@ set -euo pipefail
 SQUALLZ_INSTALLED_APP_BUNDLE={installed_app_bundle}
 CLI_NOT_FOUND_ALERT={cli_not_found_alert}
 SQUALLZ_TASK_WINDOW_ACTION_ARG={task_window_action_arg}
-SQUALLZ_TASK_WINDOW_OUTPUT_ARG={task_window_output_arg}
 
 resolve_sqz() {
   if [[ -n "${SQUALLZ_CLI:-}" && -x "${SQUALLZ_CLI}" ]]; then
@@ -249,16 +199,6 @@ run_gui_task() {
   /usr/bin/open -n "$app" --args "$SQUALLZ_TASK_WINDOW_ACTION_ARG" "$action" "$@" >/dev/null 2>&1
 }
 
-run_gui_task_with_output() {
-  local action output app
-  action="$1"
-  output="$2"
-  shift 2
-  app="$(resolve_app_bundle 2>/dev/null || true)"
-  [[ -n "$app" ]] || return 1
-  /usr/bin/open -n "$app" --args "$SQUALLZ_TASK_WINDOW_ACTION_ARG" "$action" "$SQUALLZ_TASK_WINDOW_OUTPUT_ARG" "$output" "$@" >/dev/null 2>&1
-}
-
 SQZ=""
 run_sqz() {
   if [[ -z "$SQZ" ]]; then
@@ -289,7 +229,7 @@ const LINUX_FILE_MANAGER_ACTIONS: &[LinuxFileManagerAction] = &[
 if run_gui_task "checksum" "$@"; then
   exit 0
 fi
-run_sqz checksum "$@"
+run_sqz file-manager checksum -- "$@"
 "#,
     },
     LinuxFileManagerAction {
@@ -303,11 +243,7 @@ set -- "${SQUALLZ_REGULAR_FILE_INPUTS[@]}"
 if run_gui_task "extract-here" "$@"; then
   exit 0
 fi
-for item in "$@"; do
-  [[ -f "$item" ]] || continue
-  dest="$(dirname -- "$item")"
-  run_sqz extract "$item" -d "$dest" --smart --file-manager-preset
-done
+run_sqz file-manager extract-here -- "$@"
 "#,
     },
     LinuxFileManagerAction {
@@ -321,24 +257,7 @@ set -- "${SQUALLZ_REGULAR_FILE_INPUTS[@]}"
 if run_gui_task "extract-to-folder" "$@"; then
   exit 0
 fi
-archive_stem() {
-  local base suffix
-  base="$(basename -- "$1")"
-  for suffix in ".tar.zst" ".tar.xz" ".tar.bz2" ".tar.gz" ".tbz2" ".tgz" ".txz" ".tzst" ".zip" ".7z" ".rar" ".sqz" ".tar" ".gz" ".bz2" ".xz" ".zst" ".br" ".lz4"; do
-    if [[ "$base" == *"$suffix" ]]; then
-      printf '%s\n' "${base%"$suffix"}"
-      return 0
-    fi
-  done
-  printf '%s\n' "${base%.*}"
-}
-
-for item in "$@"; do
-  [[ -f "$item" ]] || continue
-  dest="$(dirname -- "$item")/$(archive_stem "$item")"
-  mkdir -p -- "$dest"
-  run_sqz extract "$item" -d "$dest" --file-manager-preset
-done
+run_sqz file-manager extract-to-folder -- "$@"
 "#,
     },
     LinuxFileManagerAction {
@@ -347,37 +266,10 @@ done
         script_name: "squallz-compress-to-7z.sh",
         desktop_name: "squallz-compress-to-7z.desktop",
         script_body: r#"
-unique_output() {
-  local path base candidate n
-  path="$1"
-  if [[ ! -e "$path" ]]; then
-    printf '%s\n' "$path"
-    return 0
-  fi
-  base="${path%.7z}"
-  for n in $(seq 2 999); do
-    candidate="$base $n.7z"
-    if [[ ! -e "$candidate" ]]; then
-      printf '%s\n' "$candidate"
-      return 0
-    fi
-  done
-  printf '%s\n' "$path"
-}
-
-[[ "$#" -gt 0 ]] || exit 0
-parent="$(dirname -- "$1")"
-first_name="$(basename -- "$1")"
-if [[ "$#" -eq 1 ]]; then
-  output="$parent/${first_name%.*}.7z"
-else
-  output="$parent/Archive.7z"
-fi
-output="$(unique_output "$output")"
-if run_gui_task_with_output "compress-to-7z" "$output" "$@"; then
+if run_gui_task "compress-to-7z" "$@"; then
   exit 0
 fi
-run_sqz compress "$@" -o "$output" --file-manager-preset
+run_sqz file-manager compress-to-7z -- "$@"
 "#,
     },
     LinuxFileManagerAction {
@@ -389,10 +281,11 @@ run_sqz compress "$@" -o "$output" --file-manager-preset
 collect_regular_file_inputs "$@" || exit 0
 set -- "${SQUALLZ_REGULAR_FILE_INPUTS[@]}"
 for item in "$@"; do
+  [[ -f "$item" ]] || continue
   if run_gui_task "test-archive" "$item"; then
     continue
   fi
-  run_sqz test "$item"
+  run_sqz file-manager test-archive -- "$item"
 done
 "#,
     },
@@ -405,7 +298,6 @@ set -euo pipefail
 CLI_NOT_FOUND_TITLE={cli_not_found_title}
 CLI_NOT_FOUND_MESSAGE={cli_not_found_message}
 SQUALLZ_TASK_WINDOW_ACTION_ARG={task_window_action_arg}
-SQUALLZ_TASK_WINDOW_OUTPUT_ARG={task_window_output_arg}
 SQUALLZ_APPIMAGE={installed_appimage}
 SQUALLZ_APPIMAGE_EXTRACT_AND_RUN={installed_appimage_extract_and_run}
 
@@ -488,16 +380,6 @@ run_gui_task() {
   launch_gui "$gui" "$SQUALLZ_TASK_WINDOW_ACTION_ARG" "$action" "$@"
 }
 
-run_gui_task_with_output() {
-  local action output gui
-  action="$1"
-  output="$2"
-  shift 2
-  gui="$(resolve_gui 2>/dev/null || true)"
-  [[ -n "$gui" ]] || return 1
-  launch_gui "$gui" "$SQUALLZ_TASK_WINDOW_ACTION_ARG" "$action" "$SQUALLZ_TASK_WINDOW_OUTPUT_ARG" "$output" "$@"
-}
-
 SQZ=""
 run_sqz() {
   if [[ -z "$SQZ" ]]; then
@@ -552,7 +434,7 @@ const WINDOWS_EXPLORER_ACTIONS: &[WindowsExplorerAction] = &[
 $Selected = @(Select-ExistingPaths $Paths)
 if ($Selected.Count -eq 0) { exit 0 }
 if (Invoke-SquallzGuiTask -Action 'checksum' -Paths $Selected) { exit 0 }
-$Arguments = @('checksum') + $Selected
+$Arguments = @('file-manager', 'checksum', '--') + $Selected
 Invoke-Sqz @Arguments
 "#,
     },
@@ -564,10 +446,8 @@ Invoke-Sqz @Arguments
 $Selected = @(Select-ExistingFiles $Paths)
 if ($Selected.Count -eq 0) { exit 0 }
 if (Invoke-SquallzGuiTask -Action 'extract-here' -Paths $Selected) { exit 0 }
-foreach ($Item in $Selected) {
-  $Dest = Split-Path -Parent $Item
-  Invoke-Sqz extract $Item -d $Dest --smart --file-manager-preset
-}
+$Arguments = @('file-manager', 'extract-here', '--') + $Selected
+Invoke-Sqz @Arguments
 "#,
     },
     WindowsExplorerAction {
@@ -578,12 +458,8 @@ foreach ($Item in $Selected) {
 $Selected = @(Select-ExistingFiles $Paths)
 if ($Selected.Count -eq 0) { exit 0 }
 if (Invoke-SquallzGuiTask -Action 'extract-to-folder' -Paths $Selected) { exit 0 }
-foreach ($Item in $Selected) {
-  $Parent = Split-Path -Parent $Item
-  $Dest = Join-Path $Parent (Get-ArchiveStem $Item)
-  New-Item -ItemType Directory -Force -Path $Dest | Out-Null
-  Invoke-Sqz extract $Item -d $Dest --file-manager-preset
-}
+$Arguments = @('file-manager', 'extract-to-folder', '--') + $Selected
+Invoke-Sqz @Arguments
 "#,
     },
     WindowsExplorerAction {
@@ -593,15 +469,8 @@ foreach ($Item in $Selected) {
         script_body: r#"
 $Selected = @(Select-ExistingPaths $Paths)
 if ($Selected.Count -eq 0) { exit 0 }
-$Parent = Split-Path -Parent $Selected[0]
-if ($Selected.Count -eq 1) {
-  $Output = Join-Path $Parent "$(Get-ArchiveStem $Selected[0]).7z"
-} else {
-  $Output = Join-Path $Parent 'Archive.7z'
-}
-$Output = New-UniqueOutputPath $Output
-if (Invoke-SquallzGuiTask -Action 'compress-to-7z' -Output $Output -Paths $Selected) { exit 0 }
-$Arguments = @('compress') + $Selected + @('-o', $Output, '--file-manager-preset')
+if (Invoke-SquallzGuiTask -Action 'compress-to-7z' -Paths $Selected) { exit 0 }
+$Arguments = @('file-manager', 'compress-to-7z', '--') + $Selected
 Invoke-Sqz @Arguments
 "#,
     },
@@ -612,9 +481,9 @@ Invoke-Sqz @Arguments
         script_body: r#"
 $Selected = @(Select-ExistingFiles $Paths)
 if ($Selected.Count -eq 0) { exit 0 }
-if (Invoke-SquallzGuiTask -Action 'test-archive' -Paths $Selected) { exit 0 }
 foreach ($Item in $Selected) {
-  Invoke-Sqz test $Item
+  if (Invoke-SquallzGuiTask -Action 'test-archive' -Paths @($Item)) { continue }
+  Invoke-Sqz file-manager test-archive -- $Item
 }
 "#,
     },
@@ -630,7 +499,6 @@ $ErrorActionPreference = 'Stop'
 $CliNotFoundTitle = {cli_not_found_title}
 $CliNotFoundMessage = {cli_not_found_message}
 $SquallzTaskWindowActionArg = {task_window_action_arg}
-$SquallzTaskWindowOutputArg = {task_window_output_arg}
 
 function Show-SquallzCliMissing {
   try {
@@ -673,13 +541,11 @@ function ConvertTo-CommandLineArgument {
 function Invoke-SquallzGuiTask {
   param(
     [Parameter(Mandatory = $true)][string]$Action,
-    [string]$Output = '',
     [string[]]$Paths = @()
   )
   $Gui = Resolve-SquallzGui
   if (-not $Gui) { return $false }
   $Arguments = @($SquallzTaskWindowActionArg, $Action)
-  if ($Output) { $Arguments += @($SquallzTaskWindowOutputArg, $Output) }
   $Arguments += $Paths
   $ArgumentLine = ($Arguments | ForEach-Object { ConvertTo-CommandLineArgument $_ }) -join ' '
   Start-Process -FilePath $Gui -ArgumentList $ArgumentLine | Out-Null
@@ -728,29 +594,6 @@ function Select-ExistingFiles {
   }
 }
 
-function Get-ArchiveStem {
-  param([string]$Path)
-  $Name = [System.IO.Path]::GetFileName($Path)
-  foreach ($Suffix in @('.tar.zst', '.tar.xz', '.tar.bz2', '.tar.gz', '.tbz2', '.tgz', '.txz', '.tzst', '.zip', '.7z', '.rar', '.sqz', '.tar', '.gz', '.bz2', '.xz', '.zst', '.br', '.lz4')) {
-    if ($Name.EndsWith($Suffix, [System.StringComparison]::OrdinalIgnoreCase)) {
-      return $Name.Substring(0, $Name.Length - $Suffix.Length)
-    }
-  }
-  return [System.IO.Path]::GetFileNameWithoutExtension($Name)
-}
-
-function New-UniqueOutputPath {
-  param([string]$Path)
-  if (-not (Test-Path -LiteralPath $Path)) { return $Path }
-  $Parent = Split-Path -Parent $Path
-  $Base = [System.IO.Path]::GetFileNameWithoutExtension($Path)
-  $Extension = [System.IO.Path]::GetExtension($Path)
-  foreach ($N in 2..999) {
-    $Candidate = Join-Path $Parent "$Base $N$Extension"
-    if (-not (Test-Path -LiteralPath $Candidate)) { return $Candidate }
-  }
-  return $Path
-}
 "#;
 
 pub fn apply_visible_integrations() -> io::Result<IntegrationApplyResultDto> {
@@ -1321,10 +1164,6 @@ fn finder_script_preamble(installed_app_bundle: Option<&Path>, loc: &Localizer) 
             "{task_window_action_arg}",
             &shell_single_quote_value(EXTERNAL_TASK_ACTION_ARG),
         )
-        .replace(
-            "{task_window_output_arg}",
-            &shell_single_quote_value(EXTERNAL_TASK_OUTPUT_ARG),
-        )
 }
 
 #[cfg(target_os = "macos")]
@@ -1565,10 +1404,6 @@ fn linux_script_preamble(loc: &Localizer, appimage: Option<&LinuxAppImageLaunch>
         .replace(
             "{task_window_action_arg}",
             &shell_single_quote_value(EXTERNAL_TASK_ACTION_ARG),
-        )
-        .replace(
-            "{task_window_output_arg}",
-            &shell_single_quote_value(EXTERNAL_TASK_OUTPUT_ARG),
         )
         .replace(
             "{installed_appimage}",
@@ -2486,10 +2321,6 @@ fn windows_script_preamble(loc: &Localizer) -> String {
             "{task_window_action_arg}",
             &powershell_single_quote_value(EXTERNAL_TASK_ACTION_ARG),
         )
-        .replace(
-            "{task_window_output_arg}",
-            &powershell_single_quote_value(EXTERNAL_TASK_OUTPUT_ARG),
-        )
 }
 
 #[cfg(any(target_os = "windows", all(test, target_os = "macos")))]
@@ -3289,53 +3120,44 @@ mod tests {
             &[sample.join("one.zip")],
         );
 
-        assert!(sample.join("one").is_dir());
-        assert!(sample.join("two").is_dir());
+        assert!(!sample.join("one").exists());
+        assert!(!sample.join("two").exists());
 
         let one = sample.join("one.zip").to_string_lossy().into_owned();
         let two = sample.join("two.7z").to_string_lossy().into_owned();
         let plain = sample.join("plain file.txt").to_string_lossy().into_owned();
         let folder = sample.join("folder input").to_string_lossy().into_owned();
-        let parent = sample.to_string_lossy().into_owned();
         let log = fs::read_to_string(&log).unwrap();
         assert!(
+            log.contains(&format!("<file-manager><extract-here><--><{one}><{two}>")),
+            "log: {log}"
+        );
+        assert!(
             log.contains(&format!(
-                "<extract><{one}><-d><{parent}><--smart><--file-manager-preset>"
+                "<file-manager><extract-to-folder><--><{one}><{two}>"
             )),
             "log: {log}"
         );
         assert!(
             log.contains(&format!(
-                "<extract><{two}><-d><{parent}><--smart><--file-manager-preset>"
+                "<file-manager><compress-to-7z><--><{plain}><{folder}>"
             )),
             "log: {log}"
         );
         assert!(
-            log.contains(&format!(
-                "<extract><{one}><-d><{parent}/one><--file-manager-preset>"
-            )),
+            log.contains(&format!("<file-manager><checksum><--><{plain}><{one}>")),
             "log: {log}"
         );
         assert!(
-            log.contains(&format!(
-                "<extract><{two}><-d><{parent}/two><--file-manager-preset>"
-            )),
+            log.contains(&format!("<file-manager><test-archive><--><{one}>")),
             "log: {log}"
         );
         assert!(
-            log.contains(&format!(
-                "<compress><{plain}><{folder}><-o><{parent}/Archive.7z><--file-manager-preset>"
-            )),
+            log.contains(&format!("<file-manager><test-archive><--><{two}>")),
             "log: {log}"
         );
         assert!(
-            log.contains(&format!("<checksum><{plain}><{one}>")),
-            "log: {log}"
-        );
-        assert!(log.contains(&format!("<test><{one}>")), "log: {log}");
-        assert!(log.contains(&format!("<test><{two}>")), "log: {log}");
-        assert!(
-            !log.contains(&format!("<test><{folder}>")),
+            !log.contains(&format!("<file-manager><test-archive><--><{folder}>")),
             "directory inputs should be skipped by archive-test action; log: {log}"
         );
 
@@ -3859,8 +3681,7 @@ mod linux_file_manager_tests {
         );
         assert!(
             relative_compress_log.contains(&format!(
-                "<--squallz-action><compress-to-7z><--squallz-output><{}><{}>",
-                sample_cwd.join("plain file 2.7z").display(),
+                "<--squallz-action><compress-to-7z><{}>",
                 sample_cwd.join("plain file.txt").display()
             )),
             "log: {relative_compress_log}"
@@ -3915,42 +3736,33 @@ mod linux_file_manager_tests {
         let two = sample.join("two.7z").to_string_lossy().into_owned();
         let plain = sample.join("plain file.txt").to_string_lossy().into_owned();
         let folder = sample.join("folder input").to_string_lossy().into_owned();
-        let parent = sample.to_string_lossy().into_owned();
         let cli_log = fs::read_to_string(&cli_log).unwrap();
         assert!(
+            cli_log.contains(&format!("<file-manager><extract-here><--><{one}><{two}>")),
+            "log: {cli_log}"
+        );
+        assert!(
             cli_log.contains(&format!(
-                "<extract><{one}><-d><{parent}><--smart><--file-manager-preset>"
+                "<file-manager><extract-to-folder><--><{one}><{two}>"
             )),
             "log: {cli_log}"
         );
         assert!(
             cli_log.contains(&format!(
-                "<extract><{two}><-d><{parent}><--smart><--file-manager-preset>"
+                "<file-manager><compress-to-7z><--><{plain}><{folder}>"
             )),
             "log: {cli_log}"
         );
         assert!(
-            cli_log.contains(&format!(
-                "<extract><{one}><-d><{parent}/one><--file-manager-preset>"
-            )),
+            cli_log.contains(&format!("<file-manager><test-archive><--><{one}>")),
             "log: {cli_log}"
         );
         assert!(
-            cli_log.contains(&format!(
-                "<compress><{plain}><{folder}><-o><{parent}/Archive.7z><--file-manager-preset>"
-            )),
+            cli_log.contains(&format!("<file-manager><test-archive><--><{two}>")),
             "log: {cli_log}"
         );
         assert!(
-            cli_log.contains(&format!("<test><{one}>")),
-            "log: {cli_log}"
-        );
-        assert!(
-            cli_log.contains(&format!("<test><{two}>")),
-            "log: {cli_log}"
-        );
-        assert!(
-            !cli_log.contains(&format!("<test><{folder}>")),
+            !cli_log.contains(&format!("<file-manager><test-archive><--><{folder}>")),
             "directory inputs should be skipped by archive-test action; log: {cli_log}"
         );
 
@@ -4563,12 +4375,11 @@ mod windows_explorer_tests {
                 action.id.as_str(),
                 "extract-here" | "extract-to-folder" | "compress-to-7z"
             ) {
-                assert!(script_text.contains("--file-manager-preset"));
+                assert!(script_text.contains("file-manager"));
             }
             if action.id == "compress-to-7z" {
-                assert!(script_text.contains("--squallz-output"));
-                assert!(script_text.contains("$SquallzTaskWindowOutputArg = '--squallz-output'"));
-                assert!(script_text.contains("Archive.7z"));
+                assert!(!script_text.contains("--squallz-output"));
+                assert!(!script_text.contains("Archive.7z"));
             }
         }
 

@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
 
-use crate::api::{ControlToken, EntryPath, EntryType, FormatError, NoProgress, ProgressSink};
+use crate::api::{ControlToken, EntryPath, EntryType, FormatError, ProgressSink};
 use crate::{inputs, PathFilter};
 
 const HASH_BUFFER_SIZE: usize = 128 * 1024;
@@ -67,14 +67,15 @@ impl ChecksumAlgorithm {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ChecksumItem {
+    #[serde(serialize_with = "crate::api::reporting::serialize_path")]
     pub path: PathBuf,
     pub size: u64,
     pub digest: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ChecksumReport {
     pub algorithm: ChecksumAlgorithm,
     pub input_count: usize,
@@ -84,8 +85,9 @@ pub struct ChecksumReport {
     pub items: Vec<ChecksumItem>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ChecksumVerificationItem {
+    #[serde(serialize_with = "crate::api::reporting::serialize_path")]
     pub path: PathBuf,
     pub expected: String,
     pub actual: Option<String>,
@@ -93,9 +95,10 @@ pub struct ChecksumVerificationItem {
     pub error: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ChecksumVerificationReport {
     pub algorithm: ChecksumAlgorithm,
+    #[serde(serialize_with = "crate::api::reporting::serialize_path")]
     pub manifest: PathBuf,
     pub checked: usize,
     pub passed: usize,
@@ -114,22 +117,12 @@ pub(crate) fn checksum_files(
     inputs: &[PathBuf],
     excludes: &[String],
     algorithm: ChecksumAlgorithm,
-) -> Result<ChecksumReport, FormatError> {
-    let progress = NoProgress;
-    let ctl = ControlToken::new();
-    checksum_files_with_progress(inputs, excludes, algorithm, &progress, &ctl)
-}
-
-pub(crate) fn checksum_files_with_progress(
-    inputs: &[PathBuf],
-    excludes: &[String],
-    algorithm: ChecksumAlgorithm,
     progress: &dyn ProgressSink,
     ctl: &ControlToken,
 ) -> Result<ChecksumReport, FormatError> {
     ctl.checkpoint()?;
     let filter = PathFilter::new(excludes)?;
-    let items = inputs::collect_inputs(inputs, &filter)?;
+    let items = inputs::collect_inputs(inputs, &filter, progress, ctl)?;
     let entries_scanned = items.len();
     ctl.checkpoint()?;
 
@@ -171,15 +164,6 @@ pub(crate) fn checksum_files_with_progress(
 }
 
 pub(crate) fn verify_checksum_manifest(
-    manifest: &Path,
-    algorithm: ChecksumAlgorithm,
-) -> Result<ChecksumVerificationReport, FormatError> {
-    let progress = NoProgress;
-    let ctl = ControlToken::new();
-    verify_checksum_manifest_with_progress(manifest, algorithm, &progress, &ctl)
-}
-
-pub(crate) fn verify_checksum_manifest_with_progress(
     manifest: &Path,
     algorithm: ChecksumAlgorithm,
     progress: &dyn ProgressSink,
@@ -472,7 +456,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::{
-        checksum_file, checksum_files_with_progress, verify_checksum_manifest, ChecksumAlgorithm,
+        checksum_file, checksum_files, verify_checksum_manifest, ChecksumAlgorithm,
         ChecksumProgressState, CHECKSUM_PROGRESS_STEP_BYTES, HASH_BUFFER_SIZE,
     };
     use crate::api::{ControlToken, EntryPath, FormatError, NoProgress, ProgressSink};
@@ -582,7 +566,7 @@ mod tests {
         let progress = RecordingProgress::default();
         let ctl = ControlToken::new();
 
-        let report = checksum_files_with_progress(
+        let report = checksum_files(
             std::slice::from_ref(&path),
             &[],
             ChecksumAlgorithm::Sha256,
@@ -612,7 +596,7 @@ mod tests {
             events: Mutex::new(Vec::new()),
         };
 
-        let err = checksum_files_with_progress(
+        let err = checksum_files(
             std::slice::from_ref(&path),
             &[],
             ChecksumAlgorithm::Sha256,
@@ -641,7 +625,13 @@ mod tests {
         let payload_name = payload.file_name().unwrap().to_string_lossy();
         std::fs::write(&manifest, format!("{digest}  {payload_name}\n")).unwrap();
 
-        let report = verify_checksum_manifest(&manifest, ChecksumAlgorithm::Sha256).unwrap();
+        let report = verify_checksum_manifest(
+            &manifest,
+            ChecksumAlgorithm::Sha256,
+            &NoProgress,
+            &ControlToken::default(),
+        )
+        .unwrap();
         assert!(report.is_ok());
         assert_eq!(report.checked, 1);
         assert_eq!(report.passed, 1);

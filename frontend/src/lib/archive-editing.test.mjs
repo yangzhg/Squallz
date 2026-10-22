@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import vm from "node:vm";
 import ts from "typescript";
-import { createTestServer } from "../../tests/runtime.mjs";
+import { englishTranslate, createTestServer } from "../../tests/runtime.mjs";
 import { compileTestScript, readSvelteScriptAsync, selectFunctions } from "../../tests/source.mjs";
 
 function deferred() {
@@ -13,13 +13,14 @@ function deferred() {
 
 async function loadEditing(overrides = {}) {
   const server = await createTestServer();
-  let helpers, ArchiveEditSession, realIpc;
+  let helpers, ArchiveEditSession, CreateOptionsDraft, realIpc;
   try {
     helpers = await server.ssrLoadModule("/src/lib/archive-editing.ts");
     const ipcModule = await server.ssrLoadModule("/src/lib/ipc.ts");
     helpers = { ...helpers, isErrorDto: ipcModule.isErrorDto };
     realIpc = ipcModule.ipc;
     ({ ArchiveEditSession } = await server.ssrLoadModule("/src/lib/archive-edit-session.svelte.ts"));
+    ({ CreateOptionsDraft } = await server.ssrLoadModule("/src/lib/create-options-draft.svelte.ts"));
   } finally {
     await server.close();
   }
@@ -53,11 +54,6 @@ async function loadEditing(overrides = {}) {
     persistUiMode: (next) => { context.mode = next; return Promise.resolve(true); },
     trackAppearanceSave: (_section, _promise, _failure, saved) => saved(),
     archivePickerRequest: null,
-    createContentPolicy: "custom",
-    createExcludeRules: () => ["*.bak"],
-    createCompressionLevel: () => 8,
-    activeCreateProfile: "custom",
-    createProfileLabel: (value) => value,
     getDialogModule: async () => ({ open: async () => ["/inputs/资料.txt"] }),
     openNativeDialog: async (_kind, open, options) => open(options),
     archiveTitle: () => "archive-editing.zip",
@@ -74,12 +70,11 @@ async function loadEditing(overrides = {}) {
     preventCreateSubmissionNavigation: () => false,
     preventConvertSubmissionNavigation: () => false,
     filenameEncodingRequest: null,
-    checksumCopyRequest: null,
-    extractDestinationPicker: null,
+    tools: { leave() {} },
+    extraction: { leave() {}, invalidatePicker() {} },
     archivePasswordPrompt: null,
     previewPasswordPrompt: null,
-    dismissCreatePreparation: () => {}, syncCreatePreflightContext() {},
-    dismissRecoveryPreparation: () => {},
+    recoverySession: { leave() {}, selectSet() {} },
     cancelPendingArchiveOpen: () => {},
     cancelArchivePasswordPrompt: () => {},
     recordValidationRenderReady: () => {},
@@ -89,12 +84,7 @@ async function loadEditing(overrides = {}) {
     archiveUpdateReviewFocusPending: false,
     archiveUpdateReview: { cancelSourceChoice: () => {} },
     nestedExtractReviewFocusPending: false,
-    nestedExtractDraftGeneration: 0,
-    nestedExtractPickerRequest: 0,
-    nestedExtractPickerBusy: false,
     batchReviewFocusPending: false,
-    batchPickerRequest: 0,
-    batchPickerBusy: false,
     createPrimaryFocusPending: false,
     extractReviewFocusPending: false,
     convertReviewFocusPending: false,
@@ -102,9 +92,6 @@ async function loadEditing(overrides = {}) {
     checksumResultFocusPending: null,
     duplicateReportFocusPending: false,
     pendingArchiveTaskReview: null,
-    createOptionsValidationAttempted: false,
-    classicCreateSection: "general",
-    discardPendingCreatePlan: () => {},
     syncUrl: () => {},
     tick: async () => {},
     loadedRows: () => [{ path: "destination/", entry_type: "dir" }],
@@ -118,11 +105,17 @@ async function loadEditing(overrides = {}) {
     focusBlockingTaskIfAny: () => false,
     isJobSubmitBlocked: () => false,
     recordOperation: () => {},
-    tr: (_key, fallback) => fallback,
+    tr: englishTranslate,
     submitJob: async (spec) => { submitted.push(spec); return 1; },
     $effect: (callback) => callback(), untrack: (callback) => callback(),
     ...overrides,
   };
+  const options = new CreateOptionsDraft({ format: "7z", profile: "custom", customLevel: 8 });
+  const optionContext = { capabilityReady: false, sfxCapability: { available: false } };
+  options.edit({ kind: "contentPolicy", value: "custom" }, optionContext, () => {});
+  options.edit({ kind: "excludeText", value: "*.bak" }, optionContext, () => {});
+  // Archive editing consumes Create options, while navigation only needs these lifecycle ports.
+  context.create = { options, view: { profileLabel: (value) => value }, dismiss() {}, syncContext() {} };
   context.ipc = {
     missingArchivePaths: async () => [],
     inspectArchiveTarget: async () => ({ exists: false, blocked_parent: null }),
@@ -500,10 +493,11 @@ test("adding files captures settings once and rejects duplicate selection and su
   assert.equal(editing.context.archiveAddPending, true, "same-page and blocked navigation retain the current preparation");
   await editing.submitAddToArchiveJob();
   assert.equal(opened, 1);
-  editing.context.createContentPolicy = "keep_all_files";
-  editing.context.createCompressionLevel = () => 0;
-  editing.context.createExcludeRules = () => ["*.txt"];
-  editing.context.activeCreateProfile = "fast";
+  const options = editing.context.create.options;
+  const optionContext = { capabilityReady: false, sfxCapability: { available: false } };
+  for (const [kind, value] of [["contentPolicy", "keep_all_files"], ["excludeText", "*.txt"], ["profile", "fast"]]) {
+    options.edit({ kind, value }, optionContext, () => {});
+  }
   select(["/inputs/资料.txt"]);
   await new Promise(setImmediate);
   await editing.submitAddToArchiveJob();
@@ -1112,7 +1106,7 @@ test("move review renders a bounded, labelled path table in both browser modes",
       reason: "Target already exists", to: `报告-${index + 1}.txt`, keepBothTo: `报告-${index + 1} copy 2.txt` }));
     for (const classic of [false, true]) {
       const { body } = render(Review, { props: { classic, review: { targetDir: "", readyCount: 0, items },
-        tr: (_key, fallback) => fallback, onCancel: () => {}, onReadyOnly: () => {}, onKeepBoth: () => {} } });
+        tr: englishTranslate, onCancel: () => {}, onReadyOnly: () => {}, onKeepBoth: () => {} } });
       assert.match(body, /Move conflicts in \/: 42/u);
       assert.match(body, /aria-rowcount="43"/u);
       assert.equal((body.match(/<td\b/gu) ?? []).length, 75, "only one page enters the DOM");

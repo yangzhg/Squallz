@@ -1,94 +1,32 @@
-export interface ExtractResultCounts {
-  destination: string;
-  selected_entries: number;
-  created: number;
-  directories: number;
-  skipped: number;
-  replaced: number;
-  renamed: number;
-  failed: number;
-  output_bytes: number;
+import type { JobResult, ExtractReport } from "./job-result";
+export type { ExtractResultCounts } from "./job-result";
+
+type Result = JobResult | ExtractReport | null | undefined;
+
+export interface ExtractResultOutcome { skipped: number; failed: number }
+
+export function extractResultHasRecoveredZipStructure(result: Result): boolean {
+  if (!result) return false;
+  return ("structure" in result && result.structure === "zip_local_headers_recovered")
+    || ("kind" in result && result.kind === "batch_extract" && result.recovered_archives > 0);
 }
 
-export interface ExtractResultOutcome {
-  skipped: number;
-  failed: number;
+export function recoveredZipArchivePaths(result: Result): string[] {
+  return result && "kind" in result && result.kind === "batch_extract"
+    ? result.outputs.filter((output) => output.structure === "zip_local_headers_recovered").map((output) => output.archive)
+    : [];
 }
 
-function resultCount(value: unknown): number {
-  return typeof value === "number" && Number.isFinite(value)
-    ? Math.max(0, Math.trunc(value))
-    : 0;
+export function readExtractResultCounts(result: Result) {
+  return result && "counts" in result ? result.counts : null;
 }
 
-export function extractResultHasRecoveredZipStructure(
-  result: Record<string, unknown> | null | undefined,
-): boolean {
-  if (result?.structure === "zip_local_headers_recovered") return true;
-  const outputs = result?.outputs;
-  return Array.isArray(outputs) && outputs.some(
-    (output) => output !== null
-      && typeof output === "object"
-      && !Array.isArray(output)
-      && (output as Record<string, unknown>).structure === "zip_local_headers_recovered",
-  );
-}
-
-export function recoveredZipArchivePaths(
-  result: Record<string, unknown> | null | undefined,
-): string[] {
-  const outputs = result?.outputs;
-  if (!Array.isArray(outputs)) return [];
-  return outputs.flatMap((output) => {
-    if (output === null || typeof output !== "object" || Array.isArray(output)) return [];
-    const record = output as Record<string, unknown>;
-    return record.structure === "zip_local_headers_recovered"
-      && typeof record.archive === "string"
-      ? [record.archive]
-      : [];
-  });
-}
-
-export function readExtractResultCounts(
-  result: Record<string, unknown> | null | undefined,
-): ExtractResultCounts | null {
-  const raw = result?.counts;
-  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return null;
-  const counts = raw as Record<string, unknown>;
-  return {
-    destination: typeof counts.destination === "string" ? counts.destination : "",
-    selected_entries: resultCount(counts.selected_entries),
-    created: resultCount(counts.created),
-    directories: resultCount(counts.directories),
-    skipped: resultCount(counts.skipped),
-    replaced: resultCount(counts.replaced),
-    renamed: resultCount(counts.renamed),
-    failed: resultCount(counts.failed),
-    output_bytes: resultCount(counts.output_bytes),
-  };
-}
-
-export function readExtractResultOutcome(
-  result: Record<string, unknown> | null | undefined,
-): ExtractResultOutcome {
+export function readExtractResultOutcome(result: Result): ExtractResultOutcome {
   const counts = readExtractResultCounts(result);
-  if (counts) {
-    return {
-      skipped: counts.skipped,
-      failed: counts.failed,
-    };
-  }
-  return {
-    skipped: 0,
-    failed: 0,
-  };
+  return { skipped: counts?.skipped ?? 0, failed: counts?.failed ?? 0 };
 }
 
-export function extractResultNeedsAttention(
-  result: Record<string, unknown> | null | undefined,
-): boolean {
+export function extractResultNeedsAttention(result: Result): boolean {
   const outcome = readExtractResultOutcome(result);
-  return extractResultHasRecoveredZipStructure(result)
-    || outcome.skipped > 0
-    || outcome.failed > 0;
+  return extractResultHasRecoveredZipStructure(result) || outcome.skipped > 0 || outcome.failed > 0;
 }

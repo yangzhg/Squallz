@@ -332,3 +332,12 @@ export const palettes: Palette[] = [
 
 export const builtInPalettes = palettes.filter((palette) => palette.id !== "custom");
 import type { ChecksumAlgorithm } from "./ipc";
+export interface FormatCapabilityCard {
+  id: string;
+  name: string;
+  state: string;
+  create: string;
+  volumes: string;
+  encrypt: string;
+  note: string;
+}

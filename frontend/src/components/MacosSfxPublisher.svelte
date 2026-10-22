@@ -21,7 +21,7 @@
     taskOutputPath,
     type TaskDialogModel,
   } from "../lib/task-model";
-  import { tFallback } from "../lib/i18n.svelte";
+  import { tFallback as tr } from "../lib/i18n.svelte";
 
   let {
     task,
@@ -52,9 +52,6 @@
   let initialIdentity = $state(rememberedIdentity);
   let initialProfile = $state(rememberedProfile);
 
-  function tr(key: string, fallback: string): string {
-    return tFallback(key, fallback);
-  }
 
   onMount(() => {
     let active = true;
@@ -84,7 +81,6 @@
       onNotice(
         tr(
           "gui.sfx_publish.save_dialog_failed",
-          "Publishing requires the macOS save dialog. The unsigned app is unchanged.",
         ),
       );
       onClose();
@@ -99,7 +95,6 @@
       onNotice(
         tr(
           "gui.sfx_publish.separate_output_required",
-          "Choose a different output. Publishing keeps the unsigned source unchanged.",
         ),
       );
       onClose();
@@ -119,14 +114,12 @@
       onNotice(
         tr(
           "gui.sfx_publish.queued",
-          "Secure macOS publication added to the task queue.",
         ),
       );
       return null;
     } catch (error) {
       return formatSubmitError(error) ?? tr(
         "gui.sfx_publish.submit_failed",
-        "Could not start secure publication. The unsigned app is unchanged.",
       );
     }
   }

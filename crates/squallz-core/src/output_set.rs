@@ -10,8 +10,8 @@ use squallz_format_api::{ControlToken, EntryPath, FormatError, ProgressSink};
 
 use crate::archive_path::checked_path_component;
 use crate::filesystem_identity::{
-    file_identity, open_regular_file_no_follow_read_write, path_identity, PathIdentity,
-    RegularFileState,
+    file_identity, open_new_artifact, open_regular_file_no_follow_read_write, path_identity,
+    PathIdentity, RegularFileState,
 };
 use crate::stored_os_string::StoredOsString;
 
@@ -820,7 +820,7 @@ fn write_journal(
             JOURNAL_SEQUENCE.fetch_add(1, Ordering::Relaxed)
         ));
         let temp_path = parent.join(temp_name);
-        let mut file = create_journal_file(&temp_path)?;
+        let mut file = open_new_artifact(&temp_path)?;
         let identity = file_identity(&file)?;
         if path_identity(&temp_path)? != identity {
             return Err(binding_error(
@@ -999,29 +999,6 @@ fn publication_recovery_error<const N: usize>(reason: &str, paths: [&Path; N]) -
         "file-set publication requires recovery: {reason}; no competing path was removed or overwritten: {}",
         paths.join(", ")
     )))
-}
-
-fn create_journal_file(path: &Path) -> io::Result<File> {
-    let mut options = OpenOptions::new();
-    options.read(true).write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-
-        options.mode(0o600);
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        use windows_sys::Win32::Storage::FileSystem::{
-            FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ,
-        };
-
-        options
-            .share_mode(FILE_SHARE_READ | FILE_SHARE_DELETE)
-            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
-    }
-    options.open(path)
 }
 
 #[cfg(test)]

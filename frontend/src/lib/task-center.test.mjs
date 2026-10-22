@@ -1,3 +1,4 @@
+import { jobResult } from "../../tests/job-results.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
 
@@ -103,7 +104,7 @@ function task(id, state, overrides = {}) {
     interruptible: true,
     pausable: true,
     error: null,
-    result: state === "done" ? {} : null,
+    result: state === "done" ? jobResult("compress") : null,
     revealPath: null,
     historyRecorded: state === "done" || state === "failed",
     localEffects: false,
@@ -140,7 +141,7 @@ test("task center keeps attention visible and follows authoritative waiting orde
       task(14, "queued", { queuePosition: 1 }),
       task(15, "failed", { error: { key: "error.io", params: {}, detail: "failed" } }),
       task(16, "done", {
-        result: {
+        result: jobResult("compress", {
           operation: "create",
           primary_output: "/tmp/archive-16.sqz",
           outputs: ["/tmp/archive-16.sqz"],
@@ -148,7 +149,7 @@ test("task center keeps attention visible and follows authoritative waiting orde
           total_bytes: 10,
           volume_count: 1,
           split: false,
-        },
+        }),
       }),
       task(17, "cancelled"),
     ];

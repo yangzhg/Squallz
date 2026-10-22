@@ -1,24 +1,27 @@
 //! `sqz info`: supported formats and their capabilities.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde_json::{json, Value};
-use squallz_core::api::{FormatInfo, FormatKind};
-use squallz_formats::{sevenzip_backend_status, SevenZipBackendSource};
+use squallz_core::api::{CompressionLevel, FormatInfo, FormatKind};
+use squallz_formats::{is_sevenzip_bridge_format, wim_compression_name};
 
 use super::reports::print_pretty_json;
+use super::runtime::{
+    is_external, Availability, FormatOverview, RuntimeFacts, RuntimeNeed, RAR_LIMITATIONS,
+};
 use crate::commands::{Ctx, ModernStatusField, ModernTableColumn, ModernTableRow};
 use crate::errors::CliError;
 use crate::ui::{self, Tone};
 
 pub fn run(ctx: &Ctx, json: bool) -> Result<(), CliError> {
     let formats = ctx.engine.supported_formats();
+    let runtime = RuntimeFacts::capture();
 
     if json {
         let array: Vec<Value> = formats
             .iter()
             .map(|f| {
-                let caps = f.capabilities;
                 json!({
                     "id": f.id,
                     "kind": match f.kind {
@@ -26,17 +29,9 @@ pub fn run(ctx: &Ctx, json: bool) -> Result<(), CliError> {
                         FormatKind::Compressor => "compressor",
                     },
                     "extensions": f.extensions,
-                    "capabilities": {
-                        "can_create": caps.can_create,
-                        "can_extract": caps.can_extract,
-                        "can_encrypt_data": caps.can_encrypt_data,
-                        "can_encrypt_names": caps.can_encrypt_names,
-                        "can_split": caps.can_split,
-                        "can_update": caps.can_update,
-                        "can_test": caps.can_test,
-                    },
-                    "implementation": implementation_json(f.id),
-                    "level_mapping": level_mapping_json(f.id, caps.can_create),
+                    "capabilities": capabilities_json(f),
+                    "implementation": implementation_json(f.id, &runtime),
+                    "level_mapping": level_mapping_json(f.id, f.capabilities.can_create),
                 })
             })
             .collect();
@@ -48,105 +43,63 @@ pub fn run(ctx: &Ctx, json: bool) -> Result<(), CliError> {
         println!("{}", ctx.loc.t("cli.info.empty"));
         return Ok(());
     }
+    let overview = FormatOverview::new(&formats, &runtime);
     if ctx.is_modern() {
-        print_modern(ctx, &formats);
+        print_modern(ctx, &overview, &runtime);
     } else {
-        print_classic(ctx, &formats);
+        print_classic(ctx, &overview);
     }
     Ok(())
 }
 
-fn print_classic(ctx: &Ctx, formats: &[FormatInfo]) {
-    let built_in_archives = formats
-        .iter()
-        .filter(|format| format.kind == FormatKind::Archive && !is_external(format.id))
-        .count();
-    let external_archives = formats
-        .iter()
-        .filter(|format| format.kind == FormatKind::Archive && is_external(format.id))
-        .count();
-    let compressors = formats
-        .iter()
-        .filter(|format| format.kind == FormatKind::Compressor)
-        .count();
-    let runtime_ready = formats
-        .iter()
-        .filter(|format| !format_has_missing_required_runtime(format))
-        .count();
-    let runtime_missing = formats.len().saturating_sub(runtime_ready);
-    let pack_unpack = formats
-        .iter()
-        .filter(|format| format.capabilities.can_create && format.capabilities.can_extract)
-        .collect::<Vec<_>>();
-    let unpack_only = formats
-        .iter()
-        .filter(|format| {
-            format.kind == FormatKind::Archive
-                && !format.capabilities.can_create
-                && format.capabilities.can_extract
-        })
-        .collect::<Vec<_>>();
-    let stream_codecs = formats
-        .iter()
-        .filter(|format| format.kind == FormatKind::Compressor)
-        .collect::<Vec<_>>();
-
-    println!(
-        "{}",
-        label(ctx, "cli.info.classic.summary_title", "Summary")
-    );
-    print_classic_value(ctx, label(ctx, "common.formats", "Formats"), formats.len());
+fn print_classic(ctx: &Ctx, overview: &FormatOverview<'_>) {
+    let formats = overview.formats;
+    println!("{}", ctx.loc.t("cli.info.classic.summary_title"));
+    print_classic_value(ctx, ctx.loc.t("common.formats"), formats.len());
     print_classic_value(
         ctx,
-        label(ctx, "cli.info.inventory.built_in", "Built-in archives"),
-        built_in_archives,
+        ctx.loc.t("cli.info.inventory.built_in"),
+        overview.built_in_archives.len(),
     );
     print_classic_value(
         ctx,
-        label(ctx, "cli.info.inventory.external", "External bridges"),
-        external_archives,
+        ctx.loc.t("cli.info.inventory.external"),
+        overview.external_archives.len(),
     );
     print_classic_value(
         ctx,
-        label(ctx, "cli.info.inventory.compressors", "Compressors"),
-        compressors,
+        ctx.loc.t("cli.info.inventory.compressors"),
+        overview.stream_codecs.len(),
     );
+    print_classic_value(ctx, ctx.loc.t("cli.info.inventory.ready"), overview.ready);
     print_classic_value(
         ctx,
-        label(ctx, "cli.info.inventory.ready", "Ready now"),
-        runtime_ready,
-    );
-    print_classic_value(
-        ctx,
-        label(ctx, "cli.info.inventory.needs_tools", "Needs tools"),
-        runtime_missing,
+        ctx.loc.t("cli.info.inventory.needs_tools"),
+        overview.missing,
     );
     println!();
-    println!(
-        "{}",
-        label(ctx, "cli.info.classic.coverage_title", "Coverage")
+    println!("{}", ctx.loc.t("cli.info.classic.coverage_title"));
+    print_classic_wrapped_value(
+        ctx,
+        ctx.loc.t("cli.info.coverage.pack_unpack"),
+        &format_ids(&overview.pack_unpack),
     );
     print_classic_wrapped_value(
         ctx,
-        label(ctx, "cli.info.coverage.pack_unpack", "Pack / unpack"),
-        &format_ids(&pack_unpack),
+        ctx.loc.t("cli.info.coverage.unpack_only"),
+        &format_ids(&overview.unpack_only_archives),
     );
     print_classic_wrapped_value(
         ctx,
-        label(ctx, "cli.info.coverage.unpack_only", "Unpack only"),
-        &format_ids(&unpack_only),
-    );
-    print_classic_wrapped_value(
-        ctx,
-        label(ctx, "cli.info.coverage.streams", "Stream codecs"),
-        &format_ids(&stream_codecs),
+        ctx.loc.t("cli.info.coverage.streams"),
+        &format_ids(&overview.stream_codecs),
     );
     println!();
-    let id_label = label(ctx, "common.id", "ID");
-    let kind_header = label(ctx, "common.kind", "Kind");
-    let extensions_header = label(ctx, "cli.info.col.extensions", "Extensions");
-    let capabilities_header = label(ctx, "cli.info.col.capabilities", "Capabilities");
-    let backend_header = label(ctx, "cli.info.col.engine", "Engine");
+    let id_label = ctx.loc.t("common.id");
+    let kind_header = ctx.loc.t("common.kind");
+    let extensions_header = ctx.loc.t("cli.info.col.extensions");
+    let capabilities_header = ctx.loc.t("cli.info.col.capabilities");
+    let backend_header = ctx.loc.t("cli.info.col.engine");
     println!(
         "{}",
         classic_info_line(
@@ -208,259 +161,131 @@ fn classic_info_line(
     )
 }
 
-fn print_modern(ctx: &Ctx, formats: &[FormatInfo]) {
-    let built_in_archives = formats
-        .iter()
-        .filter(|format| format.kind == FormatKind::Archive && !is_external(format.id))
-        .count();
-    let external_archives = formats
-        .iter()
-        .filter(|format| format.kind == FormatKind::Archive && is_external(format.id))
-        .count();
-    let compressors = formats
-        .iter()
-        .filter(|format| format.kind == FormatKind::Compressor)
-        .count();
-    let runtime_ready = formats
-        .iter()
-        .filter(|format| !format_has_missing_required_runtime(format))
-        .count();
-    let runtime_missing = formats.len().saturating_sub(runtime_ready);
+fn print_modern(ctx: &Ctx, overview: &FormatOverview<'_>, runtime: &RuntimeFacts) {
+    let formats = overview.formats;
     ctx.print_modern_status_panel(
-        &label(ctx, "cli.info.heading", "Supported formats"),
-        &label(ctx, "cli.info.runtime.ready", "ready"),
+        &ctx.loc.t("cli.info.heading"),
+        &ctx.loc.t("cli.info.runtime.ready"),
         Tone::Success,
-        &modern_summary(ctx, formats),
+        &modern_summary(ctx, overview),
         &[
+            ModernStatusField::new(ctx.loc.t("common.count"), formats.len().to_string()),
             ModernStatusField::new(
-                label(ctx, "common.count", "Count"),
-                formats.len().to_string(),
+                ctx.loc.t("cli.info.inventory.built_in"),
+                overview.built_in_archives.len().to_string(),
             ),
             ModernStatusField::new(
-                label(ctx, "cli.info.inventory.built_in", "Built-in"),
-                built_in_archives.to_string(),
+                ctx.loc.t("cli.info.inventory.external"),
+                overview.external_archives.len().to_string(),
             ),
             ModernStatusField::new(
-                label(ctx, "cli.info.inventory.external", "External bridges"),
-                external_archives.to_string(),
+                ctx.loc.t("cli.info.inventory.compressors"),
+                overview.stream_codecs.len().to_string(),
             ),
             ModernStatusField::new(
-                label(ctx, "cli.info.inventory.compressors", "Compressors"),
-                compressors.to_string(),
+                ctx.loc.t("cli.info.inventory.ready"),
+                overview.ready.to_string(),
             ),
             ModernStatusField::new(
-                label(ctx, "cli.info.inventory.ready", "Ready now"),
-                runtime_ready.to_string(),
-            ),
-            ModernStatusField::new(
-                label(ctx, "cli.info.inventory.needs_tools", "Needs tools"),
-                runtime_missing.to_string(),
+                ctx.loc.t("cli.info.inventory.needs_tools"),
+                overview.missing.to_string(),
             ),
         ],
-    );
-    ctx.print_modern_wrapped_table(
-        &label(ctx, "cli.info.command_forms_title", "Command forms"),
-        &[
-            ModernTableColumn::new(label(ctx, "common.command", "Command"), 20),
-            ModernTableColumn::new(label(ctx, "common.form", "Form"), 34),
-            ModernTableColumn::new(label(ctx, "common.detail", "Detail"), 42),
-            ModernTableColumn::new(label(ctx, "common.best_for", "Best for"), 30),
-        ],
-        &modern_command_form_rows(ctx),
-    );
-    ctx.print_modern_wrapped_table(
-        &label(ctx, "cli.info.dashboard_title", "Modern dashboard"),
-        &[
-            ModernTableColumn::new(label(ctx, "common.signal", "Signal"), 18),
-            ModernTableColumn::right(label(ctx, "common.count", "Count"), 8),
-            ModernTableColumn::new(label(ctx, "common.form", "Form"), 26),
-            ModernTableColumn::new(label(ctx, "common.detail", "Detail"), 44),
-        ],
-        &modern_dashboard_rows(
-            ctx,
-            formats,
-            built_in_archives,
-            external_archives,
-            compressors,
-            runtime_ready,
-            runtime_missing,
-        ),
     );
     ctx.print_modern_table(
-        &label(ctx, "cli.info.support_map_title", "Support map"),
+        &ctx.loc.t("cli.info.support_map_title"),
         &[
-            ModernTableColumn::new(label(ctx, "common.lane", "Lane"), 20),
-            ModernTableColumn::new(label(ctx, "common.mode", "Mode"), 20),
-            ModernTableColumn::right(label(ctx, "common.readiness", "Ready"), 8),
-            ModernTableColumn::new(label(ctx, "common.risk", "Risk"), 26),
-            ModernTableColumn::new(label(ctx, "common.examples", "Examples"), 30),
+            ModernTableColumn::new(ctx.loc.t("common.lane"), 20),
+            ModernTableColumn::new(ctx.loc.t("common.mode"), 20),
+            ModernTableColumn::right(ctx.loc.t("common.readiness"), 8),
+            ModernTableColumn::new(ctx.loc.t("common.risk"), 26),
+            ModernTableColumn::new(ctx.loc.t("common.examples"), 30),
         ],
-        &modern_support_map_rows(ctx, formats),
-    );
-    ctx.print_modern_wrapped_table(
-        &label(ctx, "cli.info.coverage_title", "Format coverage"),
-        &[
-            ModernTableColumn::new(label(ctx, "common.workflow", "Workflow"), 18),
-            ModernTableColumn::right(label(ctx, "common.count", "Count"), 7),
-            ModernTableColumn::new(label(ctx, "common.runtime", "Runtime"), 20),
-            ModernTableColumn::new(label(ctx, "common.formats", "Formats"), 64),
-        ],
-        &modern_format_coverage_rows(ctx, formats),
+        &modern_support_map_rows(ctx, overview, runtime),
     );
     ctx.print_modern_table(
-        &label(ctx, "cli.info.capability_lanes_title", "Capability lanes"),
+        &ctx.loc.t("cli.info.capability_lanes_title"),
         &[
-            ModernTableColumn::new(label(ctx, "common.workflow", "Workflow"), 18),
-            ModernTableColumn::right(label(ctx, "common.formats", "Formats"), 8),
-            ModernTableColumn::right(label(ctx, "cli.info.inventory.ready", "Ready now"), 9),
-            ModernTableColumn::right(
-                label(ctx, "cli.info.inventory.needs_tools", "Needs tools"),
-                11,
-            ),
-            ModernTableColumn::new(label(ctx, "common.examples", "Examples"), 42),
+            ModernTableColumn::new(ctx.loc.t("common.workflow"), 18),
+            ModernTableColumn::right(ctx.loc.t("common.formats"), 8),
+            ModernTableColumn::right(ctx.loc.t("cli.info.inventory.ready"), 9),
+            ModernTableColumn::right(ctx.loc.t("cli.info.inventory.needs_tools"), 11),
+            ModernTableColumn::new(ctx.loc.t("common.examples"), 42),
         ],
-        &modern_capability_lane_rows(ctx, formats),
+        &modern_capability_lane_rows(ctx, formats, runtime),
     );
     ctx.print_modern_wrapped_table(
-        &label(ctx, "cli.info.action_selector_title", "Action selector"),
+        &ctx.loc.t("cli.info.output_title"),
         &[
-            ModernTableColumn::new(label(ctx, "common.goal", "Goal"), 18),
-            ModernTableColumn::new(label(ctx, "common.best_form", "Best form"), 34),
-            ModernTableColumn::new(label(ctx, "common.command", "Command"), 34),
-            ModernTableColumn::new(label(ctx, "common.reason", "Reason"), 34),
-        ],
-        &modern_action_selector_rows(ctx),
-    );
-    ctx.print_modern_wrapped_table(
-        &label(ctx, "cli.info.surface_gallery_title", "Modern surfaces"),
-        &[
-            ModernTableColumn::new(label(ctx, "common.workflow", "Workflow"), 18),
-            ModernTableColumn::new(label(ctx, "common.live_form", "Live form"), 34),
-            ModernTableColumn::new(label(ctx, "common.result_form", "Result form"), 34),
-            ModernTableColumn::new(label(ctx, "common.best_for", "Best for"), 34),
-        ],
-        &modern_surface_rows(ctx),
-    );
-    ctx.print_modern_wrapped_table(
-        &label(ctx, "cli.info.output_title", "Modern output"),
-        &[
-            ModernTableColumn::new(label(ctx, "common.setting", "Setting"), 16),
-            ModernTableColumn::new(label(ctx, "common.current", "Current"), 48),
-            ModernTableColumn::new(label(ctx, "common.effect", "Effect"), 38),
+            ModernTableColumn::new(ctx.loc.t("common.setting"), 16),
+            ModernTableColumn::new(ctx.loc.t("common.current"), 48),
+            ModernTableColumn::new(ctx.loc.t("common.effect"), 38),
         ],
         &modern_output_rows(ctx),
     );
-    ctx.print_modern_wrapped_table(
-        &label(ctx, "cli.info.style_guide_title", "Modern style guide"),
-        &[
-            ModernTableColumn::new(label(ctx, "common.scenario", "Scenario"), 20),
-            ModernTableColumn::new(label(ctx, "common.best_form", "Best form"), 34),
-            ModernTableColumn::new(label(ctx, "common.rendered_as", "Rendered as"), 42),
-            ModernTableColumn::new(label(ctx, "common.example", "Example"), 38),
-        ],
-        &modern_style_guide_rows(ctx),
-    );
-    ctx.print_modern_wrapped_table(
-        &label(ctx, "cli.info.palette_gallery_title", "Palette gallery"),
-        &[
-            ModernTableColumn::new(label(ctx, "common.palette", "Palette"), 16),
-            ModernTableColumn::new(label(ctx, "common.command", "Command"), 24),
-            ModernTableColumn::new(label(ctx, "common.look", "Look"), 34),
-            ModernTableColumn::new(label(ctx, "common.best_for", "Best for"), 34),
-        ],
-        &modern_palette_rows(ctx),
-    );
     ctx.print_modern_table(
-        &label(ctx, "cli.info.inventory_title", "Runtime inventory"),
+        &ctx.loc.t("cli.info.cheatsheet_title"),
         &[
-            ModernTableColumn::new(label(ctx, "common.scope", "Scope"), 24),
-            ModernTableColumn::right(label(ctx, "common.count", "Count"), 8),
-            ModernTableColumn::new(label(ctx, "common.runtime", "Runtime"), 58),
-        ],
-        &modern_inventory_rows(ctx, formats),
-    );
-    ctx.print_modern_table(
-        &label(ctx, "cli.info.cheatsheet_title", "Command cheatsheet"),
-        &[
-            ModernTableColumn::new(label(ctx, "common.workflow", "Workflow"), 18),
-            ModernTableColumn::new(label(ctx, "common.command", "Command"), 38),
-            ModernTableColumn::new(label(ctx, "common.use", "Use"), 38),
+            ModernTableColumn::new(ctx.loc.t("common.workflow"), 18),
+            ModernTableColumn::new(ctx.loc.t("common.command"), 38),
+            ModernTableColumn::new(ctx.loc.t("common.use"), 38),
         ],
         &modern_cheatsheet_rows(ctx),
     );
     println!(
         "{}",
-        ctx.paint_stdout_tone(
-            Tone::Secondary,
-            &label(
-                ctx,
-                "cli.info.legend",
-                "Legend: C=create X=extract T=test U=update S=split E=encrypt N=hide names; ✓ supported, · unavailable.",
-            )
-        )
+        ctx.paint_stdout_tone(Tone::Secondary, &ctx.loc.t("cli.info.legend"))
     );
-    print_modern_group(ctx, formats, "cli.info.group.built_in_archives", |format| {
-        format.kind == FormatKind::Archive && !is_external(format.id)
-    });
-    print_modern_group(ctx, formats, "cli.info.group.external_archives", |format| {
-        format.kind == FormatKind::Archive && is_external(format.id)
-    });
-    print_modern_group(ctx, formats, "cli.info.group.compressors", |format| {
-        format.kind == FormatKind::Compressor
-    });
+    print_modern_group(
+        ctx,
+        &overview.built_in_archives,
+        runtime,
+        "cli.info.group.built_in_archives",
+    );
+    print_modern_group(
+        ctx,
+        &overview.external_archives,
+        runtime,
+        "cli.info.group.external_archives",
+    );
+    print_modern_group(
+        ctx,
+        &overview.stream_codecs,
+        runtime,
+        "cli.info.group.compressors",
+    );
 }
 
-fn print_modern_group(
-    ctx: &Ctx,
-    formats: &[FormatInfo],
-    title_key: &str,
-    include: impl Fn(&FormatInfo) -> bool,
-) {
-    let rows: Vec<&FormatInfo> = formats.iter().filter(|format| include(format)).collect();
-    if rows.is_empty() {
+fn print_modern_group(ctx: &Ctx, formats: &[&FormatInfo], runtime: &RuntimeFacts, title_key: &str) {
+    if formats.is_empty() {
         return;
     }
-    let rows = rows
-        .into_iter()
+    let rows = formats
+        .iter()
         .map(|format| {
             ModernTableRow::with_tone(
                 vec![
                     format.id.to_owned(),
                     dotted_extensions(format),
                     capability_matrix(format),
-                    runtime_operation_detail(ctx, format, "read"),
-                    runtime_operation_detail(ctx, format, "write"),
+                    runtime_operation_detail(ctx, format, RuntimeNeed::Read, runtime),
+                    runtime_operation_detail(ctx, format, RuntimeNeed::Write, runtime),
                     backend_detail(ctx, format.id),
                 ],
-                format_runtime_tone(format),
+                format_runtime_tone(format, runtime),
             )
         })
         .collect::<Vec<_>>();
     ctx.print_modern_wrapped_table_with_note(
-        &format!("{} · {}", group_label(ctx, title_key), rows.len()),
+        &format!("{} · {}", ctx.loc.t(title_key), rows.len()),
         Some(&modern_group_note(ctx, title_key)),
         &[
-            ModernTableColumn::new(label(ctx, "common.id", "ID"), INFO_TABLE_WIDTHS[0]),
-            ModernTableColumn::new(
-                label(ctx, "cli.info.col.extensions", "Extensions"),
-                INFO_TABLE_WIDTHS[1],
-            ),
-            ModernTableColumn::new(
-                label(ctx, "cli.info.col.matrix", "C X T U S E N"),
-                INFO_TABLE_WIDTHS[2],
-            ),
-            ModernTableColumn::new(
-                label(ctx, "cli.info.col.read", "Read"),
-                INFO_TABLE_WIDTHS[3],
-            ),
-            ModernTableColumn::new(
-                label(ctx, "cli.info.col.write", "Write"),
-                INFO_TABLE_WIDTHS[4],
-            ),
-            ModernTableColumn::new(
-                label(ctx, "cli.info.col.engine", "Engine"),
-                INFO_TABLE_WIDTHS[5],
-            ),
+            ModernTableColumn::new(ctx.loc.t("common.id"), INFO_TABLE_WIDTHS[0]),
+            ModernTableColumn::new(ctx.loc.t("cli.info.col.extensions"), INFO_TABLE_WIDTHS[1]),
+            ModernTableColumn::new(ctx.loc.t("cli.info.col.matrix"), INFO_TABLE_WIDTHS[2]),
+            ModernTableColumn::new(ctx.loc.t("cli.info.col.read"), INFO_TABLE_WIDTHS[3]),
+            ModernTableColumn::new(ctx.loc.t("cli.info.col.write"), INFO_TABLE_WIDTHS[4]),
+            ModernTableColumn::new(ctx.loc.t("cli.info.col.engine"), INFO_TABLE_WIDTHS[5]),
         ],
         &rows,
     );
@@ -468,8 +293,8 @@ fn print_modern_group(
 
 fn kind_label(ctx: &Ctx, kind: FormatKind) -> String {
     match kind {
-        FormatKind::Archive => label(ctx, "common.format.archive", "archive"),
-        FormatKind::Compressor => label(ctx, "common.format.compressor", "compressor"),
+        FormatKind::Archive => ctx.loc.t("common.format.archive"),
+        FormatKind::Compressor => ctx.loc.t("common.format.compressor"),
     }
 }
 
@@ -483,91 +308,43 @@ fn dotted_extensions(format: &FormatInfo) -> String {
 }
 
 fn capability_matrix(format: &FormatInfo) -> String {
-    let caps = format.capabilities;
-    [
-        caps.can_create,
-        caps.can_extract,
-        caps.can_test,
-        caps.can_update,
-        caps.can_split,
-        caps.can_encrypt_data,
-        caps.can_encrypt_names,
-    ]
-    .into_iter()
-    .map(|supported| if supported { "✓" } else { "·" })
-    .collect::<Vec<_>>()
-    .join(" ")
+    CapabilityLane::ALL
+        .into_iter()
+        .map(|lane| if lane.supported(format) { "✓" } else { "·" })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn implementation_status(ctx: &Ctx, format_id: &str) -> String {
     if is_external(format_id) {
-        label(ctx, "cli.info.impl.external", "external")
+        ctx.loc.t("cli.info.impl.external")
     } else {
-        label(ctx, "cli.info.impl.built_in", "built-in")
+        ctx.loc.t("cli.info.impl.built_in")
     }
 }
 
 fn backend_detail(ctx: &Ctx, format_id: &str) -> String {
     match format_id {
-        "wim" => label(
-            ctx,
-            "cli.info.engine.wim",
-            "external: 7zz read; wimlib write",
-        ),
-        "rar" => label(
-            ctx,
-            "cli.info.engine.rar",
-            "external: 7zz/7z; bsdtar and optional unrar fallback",
-        ),
-        id if long_tail_7z_bridge_format(id) => {
-            label(ctx, "cli.info.engine.7z", "external: 7zz/7z")
-        }
+        "wim" => ctx.loc.t("cli.info.engine.wim"),
+        "rar" => ctx.loc.t("cli.info.engine.rar"),
+        id if is_sevenzip_bridge_format(id) => ctx.loc.t("cli.info.engine.7z"),
         _ => implementation_status(ctx, format_id),
-    }
-}
-
-fn group_label(ctx: &Ctx, key: &str) -> String {
-    match key {
-        "cli.info.group.built_in_archives" => label(ctx, key, "Built-in archives"),
-        "cli.info.group.external_archives" => label(ctx, key, "External archive bridges"),
-        "cli.info.group.compressors" => label(ctx, key, "Stream compressors"),
-        _ => label(ctx, key, key),
     }
 }
 
 fn modern_group_note(ctx: &Ctx, key: &str) -> String {
     match key {
-        "cli.info.group.built_in_archives" => label(
-            ctx,
-            "cli.info.note.built_in_archives",
-            "Ready now; no external tools required.",
-        ),
-        "cli.info.group.external_archives" => label(
-            ctx,
-            "cli.info.note.external_archives",
-            "Runtime shows this machine's external tools; --json exposes exact paths.",
-        ),
-        "cli.info.group.compressors" => label(
-            ctx,
-            "cli.info.note.compressors",
-            "Stream codecs are built in and available cross-platform.",
-        ),
+        "cli.info.group.built_in_archives" => ctx.loc.t("cli.info.note.built_in_archives"),
+        "cli.info.group.external_archives" => ctx.loc.t("cli.info.note.external_archives"),
+        "cli.info.group.compressors" => ctx.loc.t("cli.info.note.compressors"),
         _ => String::new(),
     }
 }
 
-fn modern_summary(ctx: &Ctx, formats: &[FormatInfo]) -> String {
-    let built_in = formats
-        .iter()
-        .filter(|format| !is_external(format.id))
-        .count()
-        .to_string();
-    let external = formats
-        .iter()
-        .filter(|format| is_external(format.id))
-        .count()
-        .to_string();
-    let total = formats.len().to_string();
+fn modern_summary(ctx: &Ctx, overview: &FormatOverview<'_>) -> String {
+    let built_in = overview.built_in.to_string();
+    let external = overview.external.to_string();
+    let total = overview.formats.len().to_string();
     ctx.loc.format(
         "cli.info.summary",
         &[
@@ -578,456 +355,87 @@ fn modern_summary(ctx: &Ctx, formats: &[FormatInfo]) -> String {
     )
 }
 
-#[allow(clippy::too_many_arguments)]
-fn modern_dashboard_rows(
-    ctx: &Ctx,
-    formats: &[FormatInfo],
-    built_in_archives: usize,
-    external_archives: usize,
-    compressors: usize,
-    runtime_ready: usize,
-    runtime_missing: usize,
-) -> Vec<ModernTableRow> {
-    let pack_unpack = formats
-        .iter()
-        .filter(|format| format.capabilities.can_create && format.capabilities.can_extract)
-        .count();
-    let unpack_only = formats
-        .iter()
-        .filter(|format| !format.capabilities.can_create && format.capabilities.can_extract)
-        .count();
-    vec![
-        ModernTableRow::success(vec![
-            label(ctx, "cli.info.dashboard.ready", "Ready now"),
-            format!("{runtime_ready}/{}", formats.len()),
-            "scorecard + support map".to_owned(),
-            format!(
-                "{} built-in archives, {external_archives} external bridges, {compressors} stream codecs",
-                built_in_archives
-            ),
-        ]),
-        ModernTableRow::success(vec![
-            label(ctx, "cli.info.dashboard.pack_unpack", "Pack / unpack"),
-            pack_unpack.to_string(),
-            "capability matrix".to_owned(),
-            "create, extract, test, split, encrypt, and name-hiding lanes stay visible".to_owned(),
-        ]),
-        ModernTableRow::new(vec![
-            label(ctx, "cli.info.dashboard.unpack_only", "Unpack only"),
-            unpack_only.to_string(),
-            "bridge table".to_owned(),
-            "RAR/WIM and long-tail formats show runtime tool readiness instead of hidden notes"
-                .to_owned(),
-        ]),
-        ModernTableRow::with_tone(
-            vec![
-                label(ctx, "cli.info.dashboard.live", "Live jobs"),
-                if runtime_missing == 0 {
-                    "clear".to_owned()
-                } else {
-                    format!("{runtime_missing} risks")
-                },
-                ctx.loc.t("cli.info.action.live_form"),
-                ctx.loc.t("cli.info.progress.details"),
-            ],
-            if runtime_missing == 0 {
-                Tone::Success
-            } else {
-                Tone::Warning
-            },
-        ),
-    ]
-}
-
-fn modern_command_form_rows(ctx: &Ctx) -> Vec<ModernTableRow> {
-    vec![
-        ModernTableRow::success(vec![
-            "info".to_owned(),
-            "scorecard + decision tables".to_owned(),
-            "format coverage, capability lanes, runtime readiness, and palette controls".to_owned(),
-            "choosing the right archive route before doing work".to_owned(),
-        ]),
-        ModernTableRow::success(vec![
-            "compress / pack".to_owned(),
-            "result panel + create plan + detail tables".to_owned(),
-            "output path, format, level/profile, volume mode, recovery mode, and verify-next cue"
-                .to_owned(),
-            "archive creation where the result must be inspectable immediately".to_owned(),
-        ]),
-        ModernTableRow::success(vec![
-            "extract".to_owned(),
-            "destination panel + policy tables".to_owned(),
-            "archive, destination, selection, overwrite, symlink, smart layout, and safety limits"
-                .to_owned(),
-            "safe unpacking without hiding risk controls".to_owned(),
-        ]),
-        ModernTableRow::new(vec![
-            "list / test".to_owned(),
-            "summary card + focused table".to_owned(),
-            "entry mix, content rows, integrity status, and problem details when present"
-                .to_owned(),
-            "inspection and verification before extraction or release".to_owned(),
-        ]),
-        ModernTableRow::new(vec![
-            ctx.loc.t("cli.info.forms.progress"),
-            ctx.loc.t("cli.info.action.live_form"),
-            ctx.loc.t("cli.info.progress.details"),
-            ctx.loc.t("cli.info.action.live_reason"),
-        ]),
-        ModernTableRow::new(vec![
-            "--json / classic".to_owned(),
-            "stable machine contract / conservative rows".to_owned(),
-            ctx.loc.t("cli.info.progress.log_behavior"),
-            "scripts, CI, logs, and terminals that need predictable plain text".to_owned(),
-        ]),
-    ]
-}
-
-fn modern_action_selector_rows(ctx: &Ctx) -> Vec<ModernTableRow> {
-    vec![
-        ModernTableRow::success(vec![
-            label(ctx, "cli.info.action.pack", "Pack files"),
-            label(
-                ctx,
-                "cli.info.action.pack_form",
-                "result panel + metrics table",
-            ),
-            "sqz compress input -o out.zip --style modern".to_owned(),
-            label(
-                ctx,
-                "cli.info.action.pack_reason",
-                "best when you need an immediate output path, size, volume count, and verify-next cue",
-            ),
-        ]),
-        ModernTableRow::success(vec![
-            label(ctx, "cli.info.action.unpack", "Unpack safely"),
-            label(
-                ctx,
-                "cli.info.action.unpack_form",
-                "policy table + destination route",
-            ),
-            "sqz extract archive -d out --smart --style modern".to_owned(),
-            label(
-                ctx,
-                "cli.info.action.unpack_reason",
-                "best when overwrite, symlink, smart-folder, and safety limits must stay visible",
-            ),
-        ]),
-        ModernTableRow::new(vec![
-            label(ctx, "cli.info.action.inspect", "Inspect support"),
-            label(
-                ctx,
-                "cli.info.action.inspect_form",
-                "support map + format coverage + runtime inventory",
-            ),
-            "sqz info --style modern".to_owned(),
-            label(
-                ctx,
-                "cli.info.action.inspect_reason",
-                "best when choosing a format or checking whether a bridge runtime is available",
-            ),
-        ]),
-        ModernTableRow::success(vec![
-            label(ctx, "cli.info.action.live", "Watch a live job"),
-            ctx.loc.t("cli.info.action.live_form"),
-            "interactive TTY stderr".to_owned(),
-            ctx.loc.t("cli.info.action.live_reason"),
-        ]),
-        ModernTableRow::new(vec![
-            label(ctx, "cli.info.action.automation", "Automate"),
-            ctx.loc.t("cli.info.action.automation_form"),
-            "sqz <cmd> --json".to_owned(),
-            label(
-                ctx,
-                "cli.info.action.automation_reason",
-                "best for shell scripts, CI, and predictable parsing",
-            ),
-        ]),
-    ]
-}
-
-fn modern_surface_rows(ctx: &Ctx) -> Vec<ModernTableRow> {
-    vec![
-        ModernTableRow::success(vec![
-            label(ctx, "cli.info.surface.compress", "Compress / pack"),
-            ctx.loc.t("cli.info.progress.details"),
-            "status panel + route table + detail tables".to_owned(),
-            "watching long archive creation without losing the next verification cue".to_owned(),
-        ]),
-        ModernTableRow::success(vec![
-            label(ctx, "cli.info.surface.extract", "Extract"),
-            ctx.loc.t("cli.info.progress.details"),
-            "destination summary + policy table + safety limits".to_owned(),
-            "unpacking where overwrite, symlink, smart folder, and skipped entries must stay visible"
-                .to_owned(),
-        ]),
-        ModernTableRow::new(vec![
-            label(ctx, "cli.info.surface.info", "Info"),
-            "no live redraw".to_owned(),
-            "support map + coverage tables + palette gallery".to_owned(),
-            "choosing a format, runtime bridge, or modern terminal color before running work"
-                .to_owned(),
-        ]),
-        ModernTableRow::new(vec![
-            label(ctx, "cli.info.surface.doctor", "Doctor"),
-            "no live redraw".to_owned(),
-            "runtime checks table + limitation notes".to_owned(),
-            "checking external tools, RAR boundaries, WIM tooling, and product support limits"
-                .to_owned(),
-        ]),
-        ModernTableRow::new(vec![
-            label(ctx, "cli.info.surface.automation", "Automation"),
-            "classic stderr or quiet".to_owned(),
-            "raw JSON without ANSI, boxes, or redraw control codes".to_owned(),
-            "scripts, CI, and logs where parseability matters more than presentation".to_owned(),
-        ]),
-    ]
-}
-
 fn modern_output_rows(ctx: &Ctx) -> Vec<ModernTableRow> {
     let style = format!("{:?}", ctx.output_style).to_ascii_lowercase();
     let color = format!("{:?}", ctx.color).to_ascii_lowercase();
     let palette = format!("{:?}", ctx.accent).to_ascii_lowercase();
     vec![
         ModernTableRow::success(vec![
-            label(ctx, "common.style", "Style"),
-            style,
+            ctx.loc.t("common.style"),
+            format!("--style {style}"),
             ctx.loc.t("cli.info.output.style_description"),
         ]),
         ModernTableRow::new(vec![
-            label(ctx, "cli.info.output.color_mode", "Color mode"),
-            color,
-            "auto follows TTY and NO_COLOR; always and never are explicit".to_owned(),
+            ctx.loc.t("cli.info.output.color_mode"),
+            format!("--color {color}"),
+            ctx.loc.t("cli.info.output.color_description"),
         ]),
         ModernTableRow::success(vec![
-            label(ctx, "common.palette", "Palette"),
-            palette,
-            "use --palette to switch modern terminal colors; JSON and classic output remain unchanged".to_owned(),
-        ]),
-        ModernTableRow::success(vec![
-            ctx.loc.t("cli.info.output.progress_hud"),
-            ctx.loc.t("cli.info.action.live_form"),
-            ctx.loc.t("cli.info.progress.behavior"),
-        ]),
-        ModernTableRow::new(vec![
-            label(ctx, "common.preview", "Preview"),
-            "primary / secondary".to_owned(),
-            "success, warning, and error tones stay semantic across palettes".to_owned(),
+            ctx.loc.t("common.palette"),
+            format!("--palette {palette}"),
+            ctx.loc.t("cli.info.output.palette_description"),
         ]),
     ]
 }
 
-fn modern_style_guide_rows(ctx: &Ctx) -> Vec<ModernTableRow> {
-    vec![
-        ModernTableRow::success(vec![
-            label(ctx, "cli.info.style.live", "Live archive work"),
-            ctx.loc.t("cli.info.action.live_form"),
-            ctx.loc.t("cli.info.progress.details"),
-            "sqz compress input -o out.7z --style modern --color always".to_owned(),
-        ]),
-        ModernTableRow::success(vec![
-            label(ctx, "cli.info.style.result", "Finished operation"),
-            "status panel + result tables".to_owned(),
-            "summary fields, route table, settings table, detail table, and verify-next cue"
-                .to_owned(),
-            "sqz extract archive -d out --style modern".to_owned(),
-        ]),
-        ModernTableRow::new(vec![
-            label(ctx, "cli.info.style.discovery", "Capability discovery"),
-            "scorecard + decision tables".to_owned(),
-            "support map, format coverage, capability lanes, runtime inventory, and palette gallery"
-                .to_owned(),
-            "sqz info --style modern --color always".to_owned(),
-        ]),
-        ModernTableRow::new(vec![
-            label(ctx, "cli.info.style.audit", "Script or audit log"),
-            "classic rows or JSON".to_owned(),
-            ctx.loc.t("cli.info.progress.log_behavior"),
-            "sqz test archive --json".to_owned(),
-        ]),
-    ]
-}
-
-fn modern_palette_rows(ctx: &Ctx) -> Vec<ModernTableRow> {
-    vec![
-        ModernTableRow::success(vec![
-            "squallz".to_owned(),
-            "--palette squallz".to_owned(),
-            "#2DD4BF primary + #0EA5E9 secondary".to_owned(),
-            label(
-                ctx,
-                "cli.info.palette.best_default",
-                "default brand look and app icon continuity",
-            ),
-        ]),
-        ModernTableRow::success(vec![
-            "ocean".to_owned(),
-            "--palette ocean".to_owned(),
-            "#0EA5E9 primary + #2DD4BF secondary".to_owned(),
-            label(ctx, "cli.info.palette.best_ocean", "blue-led output"),
-        ]),
-        ModernTableRow::success(vec![
-            "jade".to_owned(),
-            "--palette jade".to_owned(),
-            "#34D399 primary + #2DD4BF secondary".to_owned(),
-            label(ctx, "cli.info.palette.best_jade", "green-led output"),
-        ]),
-        ModernTableRow::new(vec![
-            "sunset".to_owned(),
-            "--palette sunset".to_owned(),
-            "#FB923C primary + #F472B6 secondary".to_owned(),
-            label(ctx, "cli.info.palette.best_sunset", "warm output"),
-        ]),
-        ModernTableRow::new(vec![
-            "violet".to_owned(),
-            "--palette violet".to_owned(),
-            "ANSI violet primary + secondary".to_owned(),
-            label(ctx, "cli.info.palette.best_violet", "256-color terminals"),
-        ]),
-        ModernTableRow::new(vec![
-            "mono".to_owned(),
-            "--palette mono".to_owned(),
-            "monochrome high-contrast ANSI".to_owned(),
-            label(
-                ctx,
-                "cli.info.palette.best_plain",
-                "terminals that cannot render truecolor well",
-            ),
-        ]),
-    ]
-}
-
-fn modern_inventory_rows(ctx: &Ctx, formats: &[FormatInfo]) -> Vec<ModernTableRow> {
-    let built_in_archives = formats
+fn modern_support_map_rows(
+    ctx: &Ctx,
+    overview: &FormatOverview<'_>,
+    runtime: &RuntimeFacts,
+) -> Vec<ModernTableRow> {
+    let archive_pack_unpack = overview
+        .pack_unpack
         .iter()
-        .filter(|format| format.kind == FormatKind::Archive && !is_external(format.id))
-        .count();
-    let external_archives = formats
-        .iter()
-        .filter(|format| format.kind == FormatKind::Archive && is_external(format.id))
-        .count();
-    let compressors = formats
-        .iter()
-        .filter(|format| format.kind == FormatKind::Compressor)
-        .count();
-    vec![
-        ModernTableRow::new(vec![
-            label(ctx, "cli.info.inventory.formats", "Formats"),
-            formats.len().to_string(),
-            modern_summary(ctx, formats),
-        ]),
-        ModernTableRow::success(vec![
-            label(ctx, "cli.info.inventory.built_in", "Built-in"),
-            built_in_archives.to_string(),
-            label(
-                ctx,
-                "cli.info.note.built_in_archives",
-                "Ready now; no external tools required.",
-            ),
-        ]),
-        ModernTableRow::new(vec![
-            label(ctx, "cli.info.inventory.external", "External bridges"),
-            external_archives.to_string(),
-            label(
-                ctx,
-                "cli.info.note.external_archives",
-                "Runtime shows this machine's external tools; --json exposes exact paths.",
-            ),
-        ]),
-        ModernTableRow::success(vec![
-            label(ctx, "cli.info.inventory.compressors", "Compressors"),
-            compressors.to_string(),
-            label(
-                ctx,
-                "cli.info.note.compressors",
-                "Stream codecs are built in and available cross-platform.",
-            ),
-        ]),
-    ]
-}
-
-fn modern_support_map_rows(ctx: &Ctx, formats: &[FormatInfo]) -> Vec<ModernTableRow> {
-    let archive_pack_unpack = formats
-        .iter()
-        .filter(|format| {
-            format.kind == FormatKind::Archive
-                && format.capabilities.can_create
-                && format.capabilities.can_extract
-        })
+        .copied()
+        .filter(|format| format.kind == FormatKind::Archive)
         .collect::<Vec<_>>();
-    let stream_codecs = formats
-        .iter()
-        .filter(|format| format.kind == FormatKind::Compressor)
-        .collect::<Vec<_>>();
-    let unpack_only = formats
-        .iter()
-        .filter(|format| {
-            format.kind == FormatKind::Archive
-                && !format.capabilities.can_create
-                && format.capabilities.can_extract
-        })
-        .collect::<Vec<_>>();
-    let edit_update = formats
+    let edit_update = overview
+        .formats
         .iter()
         .filter(|format| format.capabilities.can_update)
         .collect::<Vec<_>>();
 
     vec![
         support_map_row(
-            label(ctx, "cli.info.support.archive_pack", "Archive pack/unpack"),
-            label(
-                ctx,
-                "cli.info.support.mode.create_extract",
-                "create + extract",
-            ),
+            runtime,
+            ctx.loc.t("cli.info.support.archive_pack"),
+            ctx.loc.t("cli.info.support.mode.create_extract"),
             &archive_pack_unpack,
-            label(
-                ctx,
-                "cli.info.support.risk.native_external",
-                "native + WIM external",
-            ),
+            ctx.loc.t("cli.info.support.risk.native_external"),
         ),
         support_map_row(
-            label(ctx, "cli.info.support.stream_codecs", "Stream codecs"),
-            label(
-                ctx,
-                "cli.info.support.mode.codec_streams",
-                "single-file codecs",
-            ),
-            &stream_codecs,
-            label(
-                ctx,
-                "cli.info.support.risk.built_in",
-                "built-in cross-platform",
-            ),
+            runtime,
+            ctx.loc.t("cli.info.support.stream_codecs"),
+            ctx.loc.t("cli.info.support.mode.codec_streams"),
+            &overview.stream_codecs,
+            ctx.loc.t("cli.info.support.risk.built_in"),
         ),
         support_map_row(
-            label(ctx, "cli.info.support.unpack_only", "Unpack only"),
-            label(ctx, "cli.info.support.mode.extract_test", "extract + test"),
-            &unpack_only,
-            label(
-                ctx,
-                "cli.info.support.risk.external_bridge",
-                "external bridge tools",
-            ),
+            runtime,
+            ctx.loc.t("cli.info.support.unpack_only"),
+            ctx.loc.t("cli.info.support.mode.extract_test"),
+            &overview.unpack_only_archives,
+            ctx.loc.t("cli.info.support.risk.external_bridge"),
         ),
         support_map_row(
-            label(ctx, "cli.info.support.edit_update", "Edit/update"),
-            label(ctx, "cli.info.support.mode.zip_entries", "zip entry edits"),
+            runtime,
+            ctx.loc.t("cli.info.support.edit_update"),
+            ctx.loc.t("cli.info.support.mode.zip_entries"),
             &edit_update,
-            label(ctx, "cli.info.support.risk.atomic_writer", "atomic writer"),
+            ctx.loc.t("cli.info.support.risk.atomic_writer"),
         ),
         ModernTableRow::success(vec![
-            label(ctx, "cli.info.support.recovery", "Recovery/repair"),
-            label(ctx, "cli.info.support.mode.recovery", "sqz/par2/zip repair"),
-            label(ctx, "cli.info.support.ready.release", "3 paths"),
-            label(ctx, "cli.info.support.risk.recovery", "built-in + PAR2 opt"),
-            "sqz, zip rebuild, PAR2".to_owned(),
+            ctx.loc.t("cli.info.support.recovery"),
+            ctx.loc.t("cli.info.support.mode.recovery"),
+            ctx.loc.t("cli.info.support.ready.release"),
+            ctx.loc.t("cli.info.support.risk.recovery"),
+            ctx.loc.t("cli.info.support.recovery_examples"),
         ]),
     ]
 }
 
 fn support_map_row(
+    runtime: &RuntimeFacts,
     lane: String,
     mode: String,
     formats: &[&FormatInfo],
@@ -1035,7 +443,7 @@ fn support_map_row(
 ) -> ModernTableRow {
     let ready = formats
         .iter()
-        .filter(|format| !format_has_missing_required_runtime(format))
+        .filter(|format| runtime.format_ready(format))
         .count();
     let readiness = if formats.is_empty() {
         "-".to_owned()
@@ -1050,59 +458,6 @@ fn support_map_row(
     }
 }
 
-fn modern_format_coverage_rows(ctx: &Ctx, formats: &[FormatInfo]) -> Vec<ModernTableRow> {
-    let pack_unpack = formats
-        .iter()
-        .filter(|format| format.capabilities.can_create && format.capabilities.can_extract)
-        .collect::<Vec<_>>();
-    let unpack_only = formats
-        .iter()
-        .filter(|format| {
-            format.kind == FormatKind::Archive
-                && !format.capabilities.can_create
-                && format.capabilities.can_extract
-        })
-        .collect::<Vec<_>>();
-    let stream_codecs = formats
-        .iter()
-        .filter(|format| format.kind == FormatKind::Compressor)
-        .collect::<Vec<_>>();
-    vec![
-        ModernTableRow::success(vec![
-            label(ctx, "cli.info.coverage.pack_unpack", "Pack / unpack"),
-            pack_unpack.len().to_string(),
-            label(
-                ctx,
-                "cli.info.coverage.runtime.native_bridge",
-                "built-in + bridge",
-            ),
-            format_ids(&pack_unpack),
-        ]),
-        ModernTableRow::warning(vec![
-            label(ctx, "cli.info.coverage.unpack_only", "Unpack only"),
-            unpack_only.len().to_string(),
-            label(ctx, "cli.info.coverage.runtime.bridge", "external bridge"),
-            format_ids(&unpack_only),
-        ]),
-        ModernTableRow::success(vec![
-            label(ctx, "cli.info.coverage.streams", "Stream codecs"),
-            stream_codecs.len().to_string(),
-            label(ctx, "cli.info.coverage.runtime.built_in", "built-in"),
-            format_ids(&stream_codecs),
-        ]),
-        ModernTableRow::success(vec![
-            label(ctx, "cli.info.support.recovery", "Recovery/repair"),
-            "3".to_owned(),
-            label(
-                ctx,
-                "cli.info.coverage.runtime.mixed",
-                "built-in + optional",
-            ),
-            "sqz, zip rebuild, PAR2".to_owned(),
-        ]),
-    ]
-}
-
 fn format_ids(formats: &[&FormatInfo]) -> String {
     if formats.is_empty() {
         return "-".to_owned();
@@ -1114,118 +469,79 @@ fn format_ids(formats: &[&FormatInfo]) -> String {
         .join(", ")
 }
 
-fn modern_capability_lane_rows(ctx: &Ctx, formats: &[FormatInfo]) -> Vec<ModernTableRow> {
-    [
-        CapabilityLane::Create,
-        CapabilityLane::Extract,
-        CapabilityLane::Test,
-        CapabilityLane::Update,
-        CapabilityLane::Split,
-        CapabilityLane::Encrypt,
-        CapabilityLane::EncryptNames,
-    ]
-    .into_iter()
-    .map(|lane| {
-        let supported: Vec<&FormatInfo> = formats
-            .iter()
-            .filter(|format| lane.supported(format))
-            .collect();
-        let ready = supported
-            .iter()
-            .filter(|format| format_runtime_ready_for_lane(format, lane))
-            .count();
-        let needs_tools = supported.len().saturating_sub(ready);
-        let tone = if needs_tools == 0 {
-            Tone::Success
-        } else {
-            Tone::Warning
-        };
-        ModernTableRow::with_tone(
-            vec![
-                lane.label(ctx),
-                supported.len().to_string(),
-                ready.to_string(),
-                needs_tools.to_string(),
-                capability_examples(&supported),
-            ],
-            tone,
-        )
-    })
-    .collect()
+fn modern_capability_lane_rows(
+    ctx: &Ctx,
+    formats: &[FormatInfo],
+    runtime: &RuntimeFacts,
+) -> Vec<ModernTableRow> {
+    CapabilityLane::ALL
+        .into_iter()
+        .map(|lane| {
+            let supported: Vec<&FormatInfo> = formats
+                .iter()
+                .filter(|format| lane.supported(format))
+                .collect();
+            let ready = supported
+                .iter()
+                .filter(|format| {
+                    runtime
+                        .availability(format.id, lane.runtime_need())
+                        .available()
+                })
+                .count();
+            let needs_tools = supported.len().saturating_sub(ready);
+            let tone = if needs_tools == 0 {
+                Tone::Success
+            } else {
+                Tone::Warning
+            };
+            ModernTableRow::with_tone(
+                vec![
+                    lane.label(ctx),
+                    supported.len().to_string(),
+                    ready.to_string(),
+                    needs_tools.to_string(),
+                    capability_examples(&supported),
+                ],
+                tone,
+            )
+        })
+        .collect()
 }
 
 fn modern_cheatsheet_rows(ctx: &Ctx) -> Vec<ModernTableRow> {
     vec![
         ModernTableRow::success(vec![
-            label(ctx, "cli.info.workflow.create", "Create archives"),
-            "sqz compress <input> -o out.zip".to_owned(),
-            label(
-                ctx,
-                "cli.info.cheatsheet.create",
-                "Create ZIP, 7z, TAR, WIM, or SQZ output.",
-            ),
+            ctx.loc.t("cli.info.workflow.create"),
+            ctx.loc.t("cli.info.cheatsheet.create_command"),
+            ctx.loc.t("cli.info.cheatsheet.create"),
         ]),
         ModernTableRow::success(vec![
-            label(ctx, "cli.info.workflow.extract", "Unpack archives"),
-            "sqz extract archive -d out --smart".to_owned(),
-            label(
-                ctx,
-                "cli.info.cheatsheet.extract",
-                "Unpack with overwrite and safety controls.",
-            ),
+            ctx.loc.t("cli.info.workflow.extract"),
+            ctx.loc.t("cli.info.cheatsheet.extract_command"),
+            ctx.loc.t("cli.info.cheatsheet.extract"),
         ]),
         ModernTableRow::new(vec![
-            label(ctx, "cli.info.cheatsheet.inspect", "Inspect"),
-            "sqz list archive --tree".to_owned(),
-            label(
-                ctx,
-                "cli.info.cheatsheet.inspect_use",
-                "Browse contents before extracting.",
-            ),
+            ctx.loc.t("cli.info.cheatsheet.inspect"),
+            ctx.loc.t("cli.info.cheatsheet.inspect_command"),
+            ctx.loc.t("cli.info.cheatsheet.inspect_use"),
         ]),
         ModernTableRow::new(vec![
-            label(ctx, "cli.info.workflow.test", "Integrity test"),
-            "sqz test archive --json".to_owned(),
-            label(
-                ctx,
-                "cli.info.cheatsheet.test",
-                "Machine-readable verification for scripts.",
-            ),
+            ctx.loc.t("cli.info.workflow.test"),
+            ctx.loc.t("cli.info.cheatsheet.test_command"),
+            ctx.loc.t("cli.info.cheatsheet.test"),
         ]),
         ModernTableRow::new(vec![
-            label(ctx, "cli.info.workflow.update", "Update entries"),
-            "sqz update archive --add file".to_owned(),
-            label(
-                ctx,
-                "cli.info.cheatsheet.update",
-                "Add, delete, rename, or move entries atomically.",
-            ),
+            ctx.loc.t("cli.info.workflow.update"),
+            ctx.loc.t("cli.info.cheatsheet.update_command"),
+            ctx.loc.t("cli.info.cheatsheet.update"),
         ]),
         ModernTableRow::new(vec![
-            label(ctx, "cli.info.cheatsheet.recover", "Recovery"),
-            "sqz pack <input> -o vault.sqz".to_owned(),
-            label(
-                ctx,
-                "cli.info.cheatsheet.recover_use",
-                "Use SQZ or PAR2 recovery flows for repairable archives.",
-            ),
+            ctx.loc.t("cli.info.cheatsheet.recover"),
+            ctx.loc.t("cli.info.cheatsheet.recover_command"),
+            ctx.loc.t("cli.info.cheatsheet.recover_use"),
         ]),
     ]
-}
-
-fn format_runtime_ready_for_lane(format: &FormatInfo, lane: CapabilityLane) -> bool {
-    if !lane.supported(format) {
-        return false;
-    }
-    if !is_external(format.id) {
-        return true;
-    }
-    let implementation = implementation_json(format.id);
-    let operation = match lane.runtime_need() {
-        RuntimeNeed::Read => "read",
-        RuntimeNeed::Write => "write",
-    };
-    json_nested_bool_field(&implementation["availability"], operation, "available")
 }
 
 fn capability_examples(formats: &[&FormatInfo]) -> String {
@@ -1245,52 +561,37 @@ fn capability_examples(formats: &[&FormatInfo]) -> String {
 }
 
 fn classic_capabilities(ctx: &Ctx, format: &FormatInfo) -> String {
-    let caps = format.capabilities;
-    let mut values = Vec::new();
-    if caps.can_create {
-        values.push(label(ctx, "cli.info.cap.create", "create"));
-    }
-    if caps.can_extract {
-        values.push(label(ctx, "cli.info.cap.extract", "extract"));
-    }
-    if caps.can_test {
-        values.push(label(ctx, "cli.info.cap.test", "test"));
-    }
-    if caps.can_update {
-        values.push(label(ctx, "cli.info.cap.update", "update"));
-    }
-    if caps.can_split {
-        values.push(label(ctx, "cli.info.cap.split", "split"));
-    }
-    if caps.can_encrypt_data {
-        values.push(label(ctx, "cli.info.cap.encrypt", "encrypt"));
-    }
-    if caps.can_encrypt_names {
-        values.push(label(ctx, "cli.info.cap.encrypt_names", "hide-names"));
-    }
+    let values = CapabilityLane::ALL
+        .into_iter()
+        .filter(|lane| lane.supported(format))
+        .map(|lane| lane.classic_label(ctx))
+        .collect::<Vec<_>>();
     if values.is_empty() {
-        label(ctx, "cli.info.cap.none", "none")
+        ctx.loc.t("cli.info.cap.none")
     } else {
         values.join(" ")
     }
 }
 
-fn runtime_operation_detail(ctx: &Ctx, format: &FormatInfo, operation: &str) -> String {
+fn runtime_operation_detail(
+    ctx: &Ctx,
+    format: &FormatInfo,
+    need: RuntimeNeed,
+    runtime: &RuntimeFacts,
+) -> String {
     if !is_external(format.id) {
-        let supported = match operation {
-            "read" => format.capabilities.can_extract || format.capabilities.can_test,
-            "write" => format.capabilities.can_create,
-            _ => false,
+        let supported = match need {
+            RuntimeNeed::Read => format.capabilities.can_extract || format.capabilities.can_test,
+            RuntimeNeed::Write => format.capabilities.can_create,
         };
         return if supported {
-            label(ctx, "cli.info.runtime.ready", "ready")
+            ctx.loc.t("cli.info.runtime.ready")
         } else {
-            label(ctx, "cli.info.runtime.unsupported", "unsupported")
+            ctx.loc.t("cli.info.runtime.unsupported")
         };
     }
 
-    let implementation = implementation_json(format.id);
-    availability_status_label(ctx, &implementation["availability"][operation])
+    availability_status_label(ctx, runtime.availability(format.id, need))
 }
 
 const INFO_TABLE_WIDTHS: [usize; 6] = [9, 26, 13, 16, 16, 36];
@@ -1306,22 +607,50 @@ enum CapabilityLane {
     EncryptNames,
 }
 
-#[derive(Clone, Copy)]
-enum RuntimeNeed {
-    Read,
-    Write,
-}
-
 impl CapabilityLane {
+    const ALL: [Self; 7] = [
+        Self::Create,
+        Self::Extract,
+        Self::Test,
+        Self::Update,
+        Self::Split,
+        Self::Encrypt,
+        Self::EncryptNames,
+    ];
+
+    fn json_key(self) -> &'static str {
+        match self {
+            Self::Create => "can_create",
+            Self::Extract => "can_extract",
+            Self::Test => "can_test",
+            Self::Update => "can_update",
+            Self::Split => "can_split",
+            Self::Encrypt => "can_encrypt_data",
+            Self::EncryptNames => "can_encrypt_names",
+        }
+    }
+
+    fn classic_label(self, ctx: &Ctx) -> String {
+        match self {
+            Self::Create => ctx.loc.t("cli.info.cap.create"),
+            Self::Extract => ctx.loc.t("cli.info.cap.extract"),
+            Self::Test => ctx.loc.t("cli.info.cap.test"),
+            Self::Update => ctx.loc.t("cli.info.cap.update"),
+            Self::Split => ctx.loc.t("cli.info.cap.split"),
+            Self::Encrypt => ctx.loc.t("cli.info.cap.encrypt"),
+            Self::EncryptNames => ctx.loc.t("cli.info.cap.encrypt_names"),
+        }
+    }
+
     fn label(self, ctx: &Ctx) -> String {
         match self {
-            Self::Create => label(ctx, "cli.info.workflow.create", "Create archives"),
-            Self::Extract => label(ctx, "cli.info.workflow.extract", "Unpack archives"),
-            Self::Test => label(ctx, "cli.info.workflow.test", "Integrity test"),
-            Self::Update => label(ctx, "cli.info.workflow.update", "Update entries"),
-            Self::Split => label(ctx, "cli.info.workflow.split", "Split volumes"),
-            Self::Encrypt => label(ctx, "cli.info.workflow.encrypt", "Encrypt data"),
-            Self::EncryptNames => label(ctx, "cli.info.workflow.encrypt_names", "Hide names"),
+            Self::Create => ctx.loc.t("cli.info.workflow.create"),
+            Self::Extract => ctx.loc.t("cli.info.workflow.extract"),
+            Self::Test => ctx.loc.t("cli.info.workflow.test"),
+            Self::Update => ctx.loc.t("cli.info.workflow.update"),
+            Self::Split => ctx.loc.t("cli.info.workflow.split"),
+            Self::Encrypt => ctx.loc.t("cli.info.workflow.encrypt"),
+            Self::EncryptNames => ctx.loc.t("cli.info.workflow.encrypt_names"),
         }
     }
 
@@ -1348,8 +677,15 @@ impl CapabilityLane {
     }
 }
 
-fn format_runtime_tone(format: &FormatInfo) -> Tone {
-    if format_has_missing_required_runtime(format) {
+fn capabilities_json(format: &FormatInfo) -> Value {
+    CapabilityLane::ALL
+        .into_iter()
+        .map(|lane| (lane.json_key().to_owned(), json!(lane.supported(format))))
+        .collect()
+}
+
+fn format_runtime_tone(format: &FormatInfo, runtime: &RuntimeFacts) -> Tone {
+    if !runtime.format_ready(format) {
         Tone::Warning
     } else if !is_external(format.id) {
         Tone::Success
@@ -1358,33 +694,21 @@ fn format_runtime_tone(format: &FormatInfo) -> Tone {
     }
 }
 
-fn format_has_missing_required_runtime(format: &FormatInfo) -> bool {
-    if !is_external(format.id) {
-        return false;
-    }
-    let implementation = implementation_json(format.id);
-    let availability = &implementation["availability"];
-    let read_required = format.capabilities.can_extract || format.capabilities.can_test;
-    let write_required = format.capabilities.can_create;
-    (read_required && !json_nested_bool_field(availability, "read", "available"))
-        || (write_required && !json_nested_bool_field(availability, "write", "available"))
-}
-
-fn availability_status_label(ctx: &Ctx, availability: &Value) -> String {
-    if availability["source"].as_str() == Some("unsupported") {
-        return label(ctx, "cli.info.runtime.unsupported", "unsupported");
+fn availability_status_label(ctx: &Ctx, availability: Availability<'_>) -> String {
+    if matches!(availability, Availability::Unsupported) {
+        return ctx.loc.t("cli.info.runtime.unsupported");
     }
 
     let hint = availability_tool_hint(availability);
-    if json_bool_field(availability, "available") {
-        let status = label(ctx, "cli.info.runtime.ready", "ready");
+    if availability.available() {
+        let status = ctx.loc.t("cli.info.runtime.ready");
         if hint.is_empty() {
             status
         } else {
             format!("{status}({hint})")
         }
     } else {
-        let status = label(ctx, "cli.info.runtime.missing", "missing");
+        let status = ctx.loc.t("cli.info.runtime.missing");
         if hint.is_empty() {
             status
         } else {
@@ -1393,11 +717,14 @@ fn availability_status_label(ctx: &Ctx, availability: &Value) -> String {
     }
 }
 
-fn availability_tool_hint(availability: &Value) -> String {
-    if let Some(selected) = availability["selected"].as_str().filter(|s| !s.is_empty()) {
-        return normalize_tool_hint(path_file_name_or_self(selected));
+fn availability_tool_hint(availability: Availability<'_>) -> String {
+    if let Some(selected) = availability
+        .selected()
+        .filter(|path| !path.as_os_str().is_empty())
+    {
+        return normalize_tool_hint(path_file_name_or_self(&selected.to_string_lossy()));
     }
-    match first_tool_name(availability) {
+    match availability.tools().first() {
         Some(tool) => normalize_tool_hint(tool),
         None => String::new(),
     }
@@ -1411,18 +738,6 @@ fn normalize_tool_hint(tool: &str) -> String {
     }
 }
 
-fn json_bool_field(value: &Value, field: &str) -> bool {
-    value.get(field).and_then(Value::as_bool) == Some(true)
-}
-
-fn json_nested_bool_field(value: &Value, parent: &str, field: &str) -> bool {
-    value
-        .get(parent)
-        .and_then(|parent| parent.get(field))
-        .and_then(Value::as_bool)
-        == Some(true)
-}
-
 fn path_file_name_or_self(path: &str) -> &str {
     match Path::new(path).file_name().and_then(|name| name.to_str()) {
         Some(name) => name,
@@ -1430,15 +745,11 @@ fn path_file_name_or_self(path: &str) -> &str {
     }
 }
 
-fn first_tool_name(availability: &Value) -> Option<&str> {
-    availability
-        .get("tools")
-        .and_then(Value::as_array)
-        .and_then(|tools| tools.first())
-        .and_then(Value::as_str)
-}
-
-pub(crate) fn implementation_json(format_id: &str) -> Value {
+fn implementation_json(format_id: &str, runtime: &RuntimeFacts) -> Value {
+    let read = runtime.availability(format_id, RuntimeNeed::Read).to_json();
+    let write = runtime
+        .availability(format_id, RuntimeNeed::Write)
+        .to_json();
     match format_id {
         "zip" => json!({
             "status": "built_in",
@@ -1453,11 +764,11 @@ pub(crate) fn implementation_json(format_id: &str) -> Value {
                 "scope": "native_split_read",
                 "tools": ["7zz", "7z", "7za"],
                 "env": "SQUALLZ_7Z",
-                "availability": sevenzip_availability(),
+                "availability": runtime.sevenzip().to_json(),
             },
             "availability": {
-                "read": built_in_availability(),
-                "write": built_in_availability(),
+                "read": read,
+                "write": write,
             },
             "limitations": [
                 {
@@ -1492,8 +803,8 @@ pub(crate) fn implementation_json(format_id: &str) -> Value {
                 "env": "SQUALLZ_WIMLIB",
             },
             "availability": {
-                "read": sevenzip_availability(),
-                "write": env_or_path_availability(Some("SQUALLZ_WIMLIB"), &["wimlib-imagex"]),
+                "read": read,
+                "write": write,
             },
             "limitations": [
                 {
@@ -1532,49 +843,15 @@ pub(crate) fn implementation_json(format_id: &str) -> Value {
             },
             "policy": rar_policy_json(),
             "availability": {
-                "read": rar_read_availability(),
-                "rar7_v6_decoder": env_or_path_availability(
-                    Some("SQUALLZ_UNRAR"),
-                    &["unrar"],
-                ),
-                "write": unsupported_availability(),
+                "read": read,
+                "rar7_v6_decoder": runtime.unrar().to_json(),
+                "write": write,
             },
-            "limitations": [
-                {
-                    "scope": "create",
-                    "status": "unsupported",
-                    "reason": "Squallz does not create RAR archives",
-                },
-                {
-                    "scope": "recovery_records",
-                    "status": "unsupported",
-                    "reason": "RAR recovery records and RAR .rev files are outside the launch scope",
-                },
-                {
-                    "scope": "encrypted",
-                    "status": "implemented_not_release_claimed",
-                    "reason": "encrypted RAR reading uses 7zz/7z with a stdin-only password bridge; a licensed full corpus and three-platform package matrix are still required for a release claim",
-                },
-                {
-                    "scope": "multi_volume",
-                    "status": "not_release_claimed",
-                    "reason": "native partN.rar and legacy rar/r00 read orchestration is implemented with private first-volume staging, but a licensed full corpus and macOS/Windows/Linux package matrix are still required for a release claim",
-                },
-                {
-                    "scope": "rar7_v6",
-                    "status": "implemented_not_release_claimed",
-                    "reason": "confirmed-unencrypted RAR7 v6 entry streams can use an optional user-installed unrar decoder after 7zz/7z listing and volume validation; encrypted input stays on the stdin-only 7zz/7z path, and a full three-platform corpus is still required",
-                },
-                {
-                    "scope": "damaged_repair",
-                    "status": "unsupported",
-                    "reason": "damaged RAR can be detected or rejected, but RAR repair is not implemented",
-                },
-            ],
+            "limitations": RAR_LIMITATIONS,
             "platforms": ["macos", "windows", "linux"],
             "release_gate": "licensed RAR compatibility matrix plus external tool packaging and license review",
         }),
-        id if long_tail_7z_bridge_format(id) => json!({
+        id if is_sevenzip_bridge_format(id) => json!({
             "status": "external_required",
             "bundled": false,
             "read": {
@@ -1587,8 +864,8 @@ pub(crate) fn implementation_json(format_id: &str) -> Value {
                 "reason": "launch scope is unpack-only for this format",
             },
             "availability": {
-                "read": sevenzip_availability(),
-                "write": unsupported_availability(),
+                "read": read,
+                "write": write,
             },
             "platforms": ["macos", "windows", "linux"],
             "release_gate": "real long-tail compatibility matrix plus 7z packaging and license review",
@@ -1603,8 +880,8 @@ pub(crate) fn implementation_json(format_id: &str) -> Value {
                 "kind": "rust",
             },
             "availability": {
-                "read": built_in_availability(),
-                "write": built_in_availability(),
+                "read": read,
+                "write": write,
             },
             "platforms": ["macos", "windows", "linux"],
             "release_gate": null,
@@ -1625,8 +902,9 @@ fn rar_policy_json() -> Value {
             "explicit_diagnostic",
             "validated_p7zip_16_02_rar5_single_file",
             "confirmed_unencrypted_rar7_v6_single_file",
+            "single_file_no_password_7z_unavailable",
         ],
-        "fallback_reason": "bsdtar remains explicit, can handle confirmed single-file RAR7 v6 input, and is selected for the legacy p7zip 16.02 RAR5 decoder gap only after exact regular-file path and size agreement; optional unrar only streams confirmed-unencrypted RAR7 v6 entries after 7zz/7z listing and volume validation; neither tool is bundled",
+        "fallback_reason": "bsdtar remains explicit, can handle confirmed single-file RAR7 v6 input, and is selected for the legacy p7zip 16.02 RAR5 decoder gap only after exact regular-file path and size agreement; optional unrar only streams confirmed-unencrypted RAR7 v6 entries after 7zz/7z listing and volume validation; neither tool is bundled. When no executable 7zz/7z is available, single-file reads without a supplied password use bsdtar; native multi-volume and supplied-password reads still require 7zz/7z.",
         "native_multi_volume": {
             "read_only": true,
             "tools": ["7zz", "7z", "7za"],
@@ -1638,228 +916,6 @@ fn rar_policy_json() -> Value {
         "license_boundary": "Squallz does not link or bundle unrar code and does not create RAR archives; optional unrar is user-installed and read-only, while bundling 7zz/7z would require LGPL plus unRAR restriction notices, source/replacement path, and RAR creation must remain unsupported",
         "release_claim": "read-only public-sample subset; native multi-volume orchestration plus real macOS RAR5, legacy RAR4 old-style, and confirmed-unencrypted RAR7 v6 volume smokes are implemented, but broader historical RAR4 and encrypted/solid coverage, the full three-platform package matrix, and damaged RAR repair are not release-claimed",
     })
-}
-
-fn built_in_availability() -> Value {
-    json!({
-        "available": true,
-        "source": "built_in",
-    })
-}
-
-fn unsupported_availability() -> Value {
-    json!({
-        "available": false,
-        "source": "unsupported",
-    })
-}
-
-fn sevenzip_availability() -> Value {
-    let status = sevenzip_backend_status();
-    let source = match status.source() {
-        Some(SevenZipBackendSource::Application) => Some("application"),
-        Some(SevenZipBackendSource::Environment) => Some("env"),
-        Some(SevenZipBackendSource::Path) => Some("path"),
-        None => None,
-    };
-    json!({
-        "available": status.available(),
-        "source": source,
-        "env": "SQUALLZ_7Z",
-        "selected": status.selected().map(|path| path.to_string_lossy()),
-        "configured": status.configured(),
-        "path_exists": status.executable().is_some(),
-        "tools": ["7zz", "7z", "7za"],
-    })
-}
-
-fn rar_read_availability() -> Value {
-    if std::env::var_os("SQUALLZ_BSDTAR").is_some() {
-        return bsdtar_availability();
-    }
-    let sevenzip = sevenzip_availability();
-    if json_bool_field(&sevenzip, "configured") || json_bool_field(&sevenzip, "available") {
-        return sevenzip;
-    }
-    bsdtar_availability()
-}
-
-fn bsdtar_availability() -> Value {
-    if let Some(configured) = std::env::var_os("SQUALLZ_BSDTAR") {
-        let configured = PathBuf::from(configured);
-        let exists = command_path_is_executable(&configured);
-        return json!({
-            "available": exists,
-            "source": "env",
-            "env": "SQUALLZ_BSDTAR",
-            "selected": configured.to_string_lossy(),
-            "configured": true,
-            "path_exists": exists,
-            "tools": ["bsdtar"],
-        });
-    }
-    let absolute = Path::new("/usr/bin/bsdtar");
-    if command_is_executable(absolute) {
-        return json!({
-            "available": true,
-            "source": "path",
-            "selected": absolute.to_string_lossy(),
-            "configured": false,
-            "path_exists": true,
-            "tools": ["bsdtar"],
-        });
-    }
-    if let Some(path) = find_on_path("bsdtar") {
-        return json!({
-            "available": true,
-            "source": "path",
-            "selected": path.to_string_lossy(),
-            "configured": false,
-            "path_exists": true,
-            "tools": ["bsdtar"],
-        });
-    }
-    json!({
-        "available": false,
-        "source": null,
-        "selected": null,
-        "configured": false,
-        "path_exists": false,
-        "tools": ["bsdtar"],
-    })
-}
-
-fn env_or_path_availability(env: Option<&str>, tools: &[&str]) -> Value {
-    if let Some(env_name) = env {
-        if let Some(configured) = std::env::var_os(env_name) {
-            let configured = PathBuf::from(configured);
-            let exists = command_path_is_executable(&configured);
-            return json!({
-                "available": exists,
-                "source": "env",
-                "env": env_name,
-                "selected": configured.to_string_lossy(),
-                "configured": true,
-                "path_exists": exists,
-                "tools": tools,
-            });
-        }
-    }
-    for tool in tools {
-        if let Some(path) = find_on_path(tool) {
-            return json!({
-                "available": true,
-                "source": "path",
-                "env": env,
-                "selected": path.to_string_lossy(),
-                "configured": false,
-                "path_exists": true,
-                "tools": tools,
-            });
-        }
-    }
-    json!({
-        "available": false,
-        "source": null,
-        "env": env,
-        "selected": null,
-        "configured": false,
-        "path_exists": false,
-        "tools": tools,
-    })
-}
-
-fn command_path_is_executable(path: &Path) -> bool {
-    if path.components().count() > 1 || path.is_absolute() {
-        return command_is_executable(path);
-    }
-    find_on_path(&path.to_string_lossy()).is_some()
-}
-
-fn find_on_path(name: &str) -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path) {
-        let candidate = dir.join(name);
-        if command_is_executable(&candidate) {
-            return Some(candidate);
-        }
-        #[cfg(windows)]
-        {
-            let candidate = dir.join(format!("{name}.exe"));
-            if command_is_executable(&candidate) {
-                return Some(candidate);
-            }
-        }
-    }
-    None
-}
-
-fn command_is_executable(path: &Path) -> bool {
-    if !path.is_file() {
-        return false;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        match path.metadata() {
-            Ok(metadata) => metadata.permissions().mode() & 0o111 != 0,
-            Err(_) => false,
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        true
-    }
-}
-
-fn label(ctx: &Ctx, key: &str, fallback: &str) -> String {
-    let translated = ctx.loc.t(key);
-    if translated == key {
-        fallback.to_owned()
-    } else {
-        translated
-    }
-}
-
-fn is_external(format_id: &str) -> bool {
-    format_id == "wim" || format_id == "rar" || long_tail_7z_bridge_format(format_id)
-}
-
-fn long_tail_7z_bridge_format(format_id: &str) -> bool {
-    matches!(
-        format_id,
-        "apfs"
-            | "ar"
-            | "arj"
-            | "cab"
-            | "chm"
-            | "cpio"
-            | "cramfs"
-            | "dmg"
-            | "ext"
-            | "fat"
-            | "gpt"
-            | "hfs"
-            | "ihex"
-            | "iso"
-            | "lzh"
-            | "lzma"
-            | "mbr"
-            | "msi"
-            | "nsis"
-            | "ntfs"
-            | "qcow2"
-            | "rpm"
-            | "squashfs"
-            | "udf"
-            | "uefi"
-            | "vdi"
-            | "vhd"
-            | "vhdx"
-            | "vmdk"
-            | "xar"
-            | "z"
-    )
 }
 
 fn level_mapping_json(format_id: &str, can_create: bool) -> Value {
@@ -1949,14 +1005,22 @@ fn backend_level_mapping(format_id: &str) -> Value {
             "maximum": "lzma2 preset 8",
             "ultra": "lzma2 preset 9",
         }),
+        "wim" => json!({
+            "store": wim_compression_name(CompressionLevel::Store),
+            "fastest": wim_compression_name(CompressionLevel::Fastest),
+            "fast": wim_compression_name(CompressionLevel::Fast),
+            "normal": wim_compression_name(CompressionLevel::Normal),
+            "maximum": wim_compression_name(CompressionLevel::Maximum),
+            "ultra": wim_compression_name(CompressionLevel::Ultra),
+        }),
         "sqz" => json!({
-            "store": "transparent container",
-            "fastest": "transparent container",
-            "fast": "transparent container",
-            "normal": "transparent container",
-            "maximum": "transparent container",
-            "ultra": "transparent container",
-            "note": "SQZ v1 may ignore compression level for transparent container payloads",
+            "store": "depends on inner profile",
+            "fastest": "depends on inner profile",
+            "fast": "depends on inner profile",
+            "normal": "depends on inner profile",
+            "maximum": "depends on inner profile",
+            "ultra": "depends on inner profile",
+            "note": "SQZ and TAR inner profiles ignore compression level; ZIP, 7Z and Zstd inner profiles use their respective backend level mappings",
         }),
         _ => json!({
             "store": "no compression-level effect",

@@ -6,6 +6,7 @@ mod common;
 use std::fs;
 
 use common::{build_stored_zip, engine, RawZipEntry, TempDir};
+use squallz_core::CreateCommitPolicy;
 use squallz_format_api::{
     ControlToken, CreateOptions, Detected, EntryMeta, EntryPath, EntryType, ExtractOptions,
     FormatError, NoProgress, OpenOptions, OverwritePolicy, SafetyLimits,
@@ -94,6 +95,7 @@ fn symlink_breakout_write_is_rejected() {
         .create(
             Box::new(fs::File::create(&archive).unwrap()),
             &CreateOptions::default(),
+            &ControlToken::default(),
         )
         .unwrap();
     let link_meta = EntryMeta {
@@ -151,6 +153,7 @@ fn bomb_output_byte_limit_aborts() {
         &archive,
         &[src],
         &CreateOptions::default(),
+        CreateCommitPolicy::ReplaceExisting,
         &NoProgress,
         &ControlToken::new(),
     )
@@ -194,6 +197,7 @@ fn bomb_entry_count_limit_aborts() {
         &archive,
         &[dir],
         &CreateOptions::default(),
+        CreateCommitPolicy::ReplaceExisting,
         &NoProgress,
         &ControlToken::new(),
     )
@@ -234,6 +238,7 @@ fn archive_with_a_txt(tmp: &TempDir, content: &[u8]) -> std::path::PathBuf {
             &archive,
             &[src],
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &NoProgress,
             &ControlToken::new(),
         )

@@ -340,7 +340,7 @@ pub(crate) fn copy_selected_stream(
     src.seek(SeekFrom::Start(0))?;
     control.checkpoint()?;
     let mut output = create_private_file(destination)?;
-    copy_stream_with_control(src, &mut output, control)?;
+    copy_stream(src, &mut output, control)?;
     control.checkpoint()?;
     output.flush()?;
     control.checkpoint()
@@ -364,7 +364,7 @@ pub(crate) fn copy_stable_source(
     verify_source_binding(source, &initial, kind)?;
     control.checkpoint()?;
     let mut output = create_private_file(destination)?;
-    copy_stream_with_control(&mut input, &mut output, control)?;
+    copy_stream(&mut input, &mut output, control)?;
     control.checkpoint()?;
     output.flush()?;
     control.checkpoint()?;
@@ -378,7 +378,7 @@ pub(crate) fn copy_stable_source(
     control.checkpoint()
 }
 
-fn copy_stream_with_control(
+pub(crate) fn copy_stream(
     input: &mut dyn Read,
     output: &mut dyn Write,
     control: &ControlToken,

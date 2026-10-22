@@ -6,6 +6,7 @@ use common::{engine, TempDir};
 #[cfg(unix)]
 use squallz_core::api::CompressionLevel;
 use squallz_core::api::{ControlToken, CreateOptions, FormatError, NoProgress};
+use squallz_core::CreateCommitPolicy;
 
 #[test]
 fn wim_create_plan_reserves_staging_and_temporary_image() {
@@ -20,6 +21,8 @@ fn wim_create_plan_reserves_staging_and_temporary_image() {
             &dest,
             std::slice::from_ref(&input),
             &CreateOptions::default(),
+            |_count, _path| {},
+            &ControlToken::new(),
         )
         .unwrap_or_else(|error| panic!("failed to build WIM create plan: {error}"));
     let folded_temp = plan
@@ -45,17 +48,36 @@ fn split_wim_requires_native_mode_before_scanning_or_writing() {
     let opts = CreateOptions::default();
 
     let plan_error = engine
-        .plan_create(&dest, std::slice::from_ref(&input), &opts)
+        .plan_create(
+            &dest,
+            std::slice::from_ref(&input),
+            &opts,
+            |_count, _path| {},
+            &ControlToken::new(),
+        )
         .unwrap_err();
     assert!(plan_error.is_split_wim_creation_unsupported());
     let explicit_first = tmp.path().join("archive.swm.001");
     let explicit_error = engine
-        .plan_create(&explicit_first, std::slice::from_ref(&input), &opts)
+        .plan_create(
+            &explicit_first,
+            std::slice::from_ref(&input),
+            &opts,
+            |_count, _path| {},
+            &ControlToken::new(),
+        )
         .unwrap_err();
     assert!(explicit_error.is_split_wim_creation_unsupported());
 
     let create_error = engine
-        .create(&dest, &[input], &opts, &NoProgress, &ControlToken::new())
+        .create(
+            &dest,
+            &[input],
+            &opts,
+            CreateCommitPolicy::ReplaceExisting,
+            &NoProgress,
+            &ControlToken::new(),
+        )
         .unwrap_err();
     assert!(create_error.is_split_wim_creation_unsupported());
     assert!(!dest.exists());
@@ -71,6 +93,7 @@ fn split_wim_requires_native_mode_before_scanning_or_writing() {
             &split_dest,
             &[tmp.path().join("payload.bin")],
             &split_opts,
+            CreateCommitPolicy::ReplaceExisting,
             &NoProgress,
             &ControlToken::new(),
         )
@@ -88,6 +111,8 @@ fn split_wim_requires_native_mode_before_scanning_or_writing() {
             &dest,
             std::slice::from_ref(&tmp.path().join("payload.bin")),
             &native_opts,
+            |_count, _path| {},
+            &ControlToken::new(),
         )
         .unwrap();
     assert_eq!(plan.primary_output, dest);
@@ -99,6 +124,8 @@ fn split_wim_requires_native_mode_before_scanning_or_writing() {
             &wrong_extension,
             std::slice::from_ref(&tmp.path().join("payload.bin")),
             &native_opts,
+            |_count, _path| {},
+            &ControlToken::new(),
         )
         .unwrap_err();
     assert!(matches!(
@@ -129,11 +156,24 @@ fn create_plan_covers_long_zip_entry_names() {
     };
     let engine = engine();
     let plan = engine
-        .plan_create(&dest, std::slice::from_ref(&root), &opts)
+        .plan_create(
+            &dest,
+            std::slice::from_ref(&root),
+            &opts,
+            |_count, _path| {},
+            &ControlToken::new(),
+        )
         .unwrap();
     let generic_budget = plan.inputs.output_budget_bytes();
     let report = engine
-        .create_with_report(&dest, &[root], &opts, &NoProgress, &ControlToken::new())
+        .create(
+            &dest,
+            &[root],
+            &opts,
+            CreateCommitPolicy::ReplaceExisting,
+            &NoProgress,
+            &ControlToken::new(),
+        )
         .unwrap();
 
     assert!(report.total_output_bytes > generic_budget);

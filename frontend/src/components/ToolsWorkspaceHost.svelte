@@ -33,11 +33,11 @@
   let workspace = $state(workspaceLoader.load());
 
   let loadingTitle = $derived(
-    surface.tr("gui.tools.workspace_loading", "Loading {tool}")
+    surface.tr("gui.tools.workspace_loading")
       .replace("{tool}", surface.title),
   );
   let failureTitle = $derived(
-    surface.tr("gui.tools.workspace_load_failed", "{tool} could not be loaded")
+    surface.tr("gui.tools.workspace_load_failed")
       .replace("{tool}", surface.title),
   );
   let modernClass = $derived(
@@ -62,7 +62,7 @@
         <Icon name="hourglass" size={20} />
         <div>
           <strong>{loadingTitle}</strong>
-          <span>{surface.tr("gui.tools.workspace_loading_body", "Preparing this tool and its current options.")}</span>
+          <span>{surface.tr("gui.tools.workspace_loading_body")}</span>
         </div>
       </section>
     </div>
@@ -73,7 +73,7 @@
           <Icon name="hourglass" size={20} />
           <div>
             <strong>{loadingTitle}</strong>
-            <span>{surface.tr("gui.tools.workspace_loading_body", "Preparing this tool and its current options.")}</span>
+            <span>{surface.tr("gui.tools.workspace_loading_body")}</span>
           </div>
         </div>
       </section>
@@ -86,16 +86,16 @@
     <div class={modernClass}>
       <DeferredViewError
         {error} title={failureTitle}
-        body={surface.tr("gui.tools.workspace_load_failed_body", "Your selected archive, target, and options were not changed. Retry loading this workspace.")}
-        retryLabel={surface.tr("gui.tools.workspace_retry", "Retry")} onRetry={retry}
+        body={surface.tr("gui.tools.workspace_load_failed_body")}
+        retryLabel={surface.tr("gui.tools.workspace_retry")} onRetry={retry}
       />
     </div>
   {:else}
     <div class="classic-dialog-body">
       <DeferredViewError
         {error} title={failureTitle}
-        body={surface.tr("gui.tools.workspace_load_failed_body", "Your selected archive, target, and options were not changed. Retry loading this workspace.")}
-        retryLabel={surface.tr("gui.tools.workspace_retry", "Retry")} onRetry={retry} classic
+        body={surface.tr("gui.tools.workspace_load_failed_body")}
+        retryLabel={surface.tr("gui.tools.workspace_retry")} onRetry={retry} classic
       />
     </div>
   {/if}

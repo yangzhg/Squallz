@@ -2,18 +2,22 @@ use super::progress::BATCH_PROGRESS_SCALE;
 use super::snapshots::JobOrigin;
 use super::test_support::{
     checksum_job, compress_file_job, compress_file_job_with_inner_format, deterministic_payload,
-    temp_dir, FakeTrashAdapter, TestSink,
+    read_archive_entries, temp_dir, FakeTrashAdapter, TestSink,
 };
 use super::*;
 use crate::dto::{BatchExtractItem, JobSpec, PERFORMANCE_STREAM_BUFFER_MAX_BYTES};
-use crate::events::{EV_ASK_CONFLICT, EV_ASK_PASSWORD, EV_PROGRESS};
+use crate::events::EV_SNAPSHOT;
 use crate::preview_sessions::PreviewSessionManager;
+use crate::raw_zip::build_stored_zip;
+#[cfg(unix)]
+use crate::raw_zip::crc32;
 use squallz_core::api::{CompressionLevel, CreateOptions, OpenOptions, Password};
 use squallz_core::ChecksumAlgorithm;
+use squallz_core::CreateCommitPolicy;
 use squallz_core::QueueWaitReason;
 use squallz_core::{CreateArtifactKind, PostSuccessAction};
 use std::fs;
-use std::io::Write as _;
+use std::io::{self, Write as _};
 use std::path::Path;
 use std::sync::Mutex as StdMutex;
 use std::time::Instant;
@@ -160,11 +164,8 @@ fn scheduler_limits_and_cpu_reservations_are_conservative() {
 #[test]
 fn private_path_redaction_keeps_the_original_error_category() {
     let private = "/private/squallz-preview/inner.zip";
-    let error = redact_format_error_path(
-        FormatError::CorruptArchive(format!("invalid footer in {private}")),
-        private,
-        "inner.zip",
-    );
+    let error = FormatError::CorruptArchive(format!("invalid footer in {private}"))
+        .with_public_path(private, "inner.zip");
 
     match error {
         FormatError::CorruptArchive(detail) => {
@@ -173,25 +174,19 @@ fn private_path_redaction_keeps_the_original_error_category() {
         other => panic!("expected corrupt archive, got {other:?}"),
     }
 
-    let error = redact_format_error_path(
-        FormatError::Io(io::Error::new(
-            io::ErrorKind::StorageFull,
-            format!("no space left while writing {private}"),
-        )),
-        private,
-        "inner.zip",
-    );
+    let error = FormatError::Io(io::Error::new(
+        io::ErrorKind::StorageFull,
+        format!("no space left while writing {private}"),
+    ))
+    .with_public_path(private, "inner.zip");
     assert!(matches!(error, FormatError::DiskFull));
 }
 
 #[test]
 fn output_conflict_redaction_keeps_the_contextual_marker() {
     let private = "/private/squallz-preview/archive.repaired.zip";
-    let error = redact_format_error_path(
-        FormatError::output_exists(private),
-        private,
-        "archive.repaired.zip",
-    );
+    let error =
+        FormatError::output_exists(private).with_public_path(private, "archive.repaired.zip");
 
     assert!(error.is_output_exists());
     assert_eq!(
@@ -216,6 +211,7 @@ fn create_password_protected_zip(dir: &Path, state: &AppState) -> PathBuf {
                 password: Some(Password::new("secret")),
                 ..CreateOptions::default()
             },
+            CreateCommitPolicy::ReplaceExisting,
             &squallz_core::api::NoProgress,
             &ControlToken::new(),
         )
@@ -338,18 +334,6 @@ fn write_incompressible_file(path: &Path, len: usize) {
     std::fs::write(path, data).unwrap();
 }
 
-fn crc32(data: &[u8]) -> u32 {
-    let mut crc = 0xFFFF_FFFFu32;
-    for &b in data {
-        crc ^= u32::from(b);
-        for _ in 0..8 {
-            let mask = (crc & 1).wrapping_neg();
-            crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
-        }
-    }
-    !crc
-}
-
 #[cfg(unix)]
 fn rar5_test_volume(index: u64, has_next: bool) -> Vec<u8> {
     fn encode_vint(mut value: u64) -> Vec<u8> {
@@ -404,68 +388,40 @@ fn split_zip_test_final_volume(final_disk: u16) -> Vec<u8> {
     bytes
 }
 
-fn build_stored_zip(entries: &[(&[u8], &[u8])]) -> Vec<u8> {
-    let mut out = Vec::new();
-    let mut central = Vec::new();
-    for (name, data) in entries {
-        let offset = out.len() as u32;
-        let crc = crc32(data);
-        let size = data.len() as u32;
-        let name_len = name.len() as u16;
-
-        out.extend_from_slice(&[0x50, 0x4B, 0x03, 0x04]);
-        out.extend_from_slice(&20u16.to_le_bytes());
-        out.extend_from_slice(&0u16.to_le_bytes());
-        out.extend_from_slice(&0u16.to_le_bytes());
-        out.extend_from_slice(&0u16.to_le_bytes());
-        out.extend_from_slice(&0x21u16.to_le_bytes());
-        out.extend_from_slice(&crc.to_le_bytes());
-        out.extend_from_slice(&size.to_le_bytes());
-        out.extend_from_slice(&size.to_le_bytes());
-        out.extend_from_slice(&name_len.to_le_bytes());
-        out.extend_from_slice(&0u16.to_le_bytes());
-        out.extend_from_slice(name);
-        out.extend_from_slice(data);
-
-        central.extend_from_slice(&[0x50, 0x4B, 0x01, 0x02]);
-        central.extend_from_slice(&20u16.to_le_bytes());
-        central.extend_from_slice(&20u16.to_le_bytes());
-        central.extend_from_slice(&0u16.to_le_bytes());
-        central.extend_from_slice(&0u16.to_le_bytes());
-        central.extend_from_slice(&0u16.to_le_bytes());
-        central.extend_from_slice(&0x21u16.to_le_bytes());
-        central.extend_from_slice(&crc.to_le_bytes());
-        central.extend_from_slice(&size.to_le_bytes());
-        central.extend_from_slice(&size.to_le_bytes());
-        central.extend_from_slice(&name_len.to_le_bytes());
-        central.extend_from_slice(&0u16.to_le_bytes());
-        central.extend_from_slice(&0u16.to_le_bytes());
-        central.extend_from_slice(&0u16.to_le_bytes());
-        central.extend_from_slice(&0u16.to_le_bytes());
-        central.extend_from_slice(&0u32.to_le_bytes());
-        central.extend_from_slice(&offset.to_le_bytes());
-        central.extend_from_slice(name);
-    }
-    let central_offset = out.len() as u32;
-    let central_size = central.len() as u32;
-    out.extend_from_slice(&central);
-    out.extend_from_slice(&[0x50, 0x4B, 0x05, 0x06]);
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(&(entries.len() as u16).to_le_bytes());
-    out.extend_from_slice(&(entries.len() as u16).to_le_bytes());
-    out.extend_from_slice(&central_size.to_le_bytes());
-    out.extend_from_slice(&central_offset.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out
+fn states_of(events: &[(String, serde_json::Value)], id: u64) -> Vec<String> {
+    let mut snapshots: Vec<_> = events
+        .iter()
+        .filter(|(name, p)| name == EV_SNAPSHOT && p["id"] == id)
+        .map(|(_, payload)| payload)
+        .collect();
+    // Emission happens after unlocking the snapshot store; versions define order.
+    snapshots.sort_unstable_by_key(|payload| payload["version"].as_u64().unwrap());
+    snapshots
+        .into_iter()
+        .map(|payload| payload["state"].as_str().unwrap().to_owned())
+        .fold(Vec::new(), |mut states, state| {
+            if states.last() != Some(&state) {
+                states.push(state);
+            }
+            states
+        })
 }
 
-fn states_of(events: &[(String, serde_json::Value)], id: u64) -> Vec<String> {
-    events
-        .iter()
-        .filter(|(name, p)| name == EV_STATE && p["id"] == id)
-        .map(|(_, p)| p["state"].as_str().unwrap().to_owned())
-        .collect()
+#[test]
+fn state_sequence_uses_snapshot_versions_instead_of_delivery_order() {
+    let events = [(3, "running"), (1, "queued"), (2, "paused"), (4, "done")]
+        .into_iter()
+        .map(|(version, state)| {
+            (
+                EV_SNAPSHOT.into(),
+                serde_json::json!({ "id": 7, "version": version, "state": state }),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        states_of(&events, 7),
+        ["queued", "paused", "running", "done"]
+    );
 }
 
 fn real_current_file_progress_events(
@@ -475,9 +431,9 @@ fn real_current_file_progress_events(
     events
         .iter()
         .filter(|(name, payload)| {
-            name == EV_PROGRESS
+            name == EV_SNAPSHOT
                 && payload["id"] == id
-                && payload["current_total"].as_u64().unwrap_or(0) > 0
+                && payload["progress"]["current_total"].as_u64().unwrap_or(0) > 0
         })
         .map(|(_, payload)| payload)
         .collect()
@@ -495,8 +451,8 @@ fn assert_real_current_file_progress(
     );
     assert!(
         progress.iter().any(|payload| {
-            let done = payload["current_done"].as_u64().unwrap_or(0);
-            let total = payload["current_total"].as_u64().unwrap_or(0);
+            let done = payload["progress"]["current_done"].as_u64().unwrap_or(0);
+            let total = payload["progress"]["current_total"].as_u64().unwrap_or(0);
             total > 0 && done <= total
         }),
         "{operation} job current-file progress should keep current_done bounded by current_total"
@@ -520,7 +476,7 @@ fn wait_for_event(
 
 fn wait_for_state(sink: &TestSink, id: u64, state: &str, timeout: std::time::Duration) {
     wait_for_event(sink, timeout, |(name, payload)| {
-        name == EV_STATE && payload["id"] == id && payload["state"] == state
+        name == EV_SNAPSHOT && payload["id"] == id && payload["state"] == state
     });
 }
 
@@ -528,7 +484,9 @@ fn wait_for_password_prompt(sink: &TestSink, id: u64) {
     wait_for_event(
         sink,
         std::time::Duration::from_secs(2),
-        |(name, payload)| name == EV_ASK_PASSWORD && payload["id"] == id,
+        |(name, payload)| {
+            name == EV_SNAPSHOT && payload["question"]["kind"] == "password" && payload["id"] == id
+        },
     );
 }
 
@@ -540,7 +498,11 @@ fn wait_for_password_prompt_count(sink: &TestSink, id: u64, expected: usize) {
             .lock()
             .unwrap()
             .iter()
-            .filter(|(name, payload)| name == EV_ASK_PASSWORD && payload["id"] == id)
+            .filter(|(name, payload)| {
+                name == EV_SNAPSHOT
+                    && payload["question"]["kind"] == "password"
+                    && payload["id"] == id
+            })
             .count();
         if count >= expected {
             return;
@@ -572,7 +534,7 @@ fn wait_for_snapshot_state(
 fn done_result(events: &[(String, serde_json::Value)], id: u64) -> Option<serde_json::Value> {
     events
         .iter()
-        .find(|(name, p)| name == EV_STATE && p["id"] == id && p["state"] == "done")
+        .find(|(name, p)| name == EV_SNAPSHOT && p["id"] == id && p["state"] == "done")
         .and_then(|(_, p)| p.get("result").cloned())
 }
 
@@ -630,7 +592,6 @@ fn main_window_can_reorder_visible_queued_jobs_without_cross_owner_access() {
             first_id,
             ManagedJob {
                 queue_id: first_queue_id,
-                cancel_flag: Arc::new(AtomicBool::new(false)),
                 owner_window: Some("task-first".into()),
                 events: events.clone(),
                 pausable: true,
@@ -640,7 +601,6 @@ fn main_window_can_reorder_visible_queued_jobs_without_cross_owner_access() {
             second_id,
             ManagedJob {
                 queue_id: second_queue_id,
-                cancel_flag: Arc::new(AtomicBool::new(false)),
                 owner_window: Some("task-second".into()),
                 events,
                 pausable: true,
@@ -650,7 +610,6 @@ fn main_window_can_reorder_visible_queued_jobs_without_cross_owner_access() {
             third_id,
             ManagedJob {
                 queue_id: third_queue_id,
-                cancel_flag: Arc::new(AtomicBool::new(false)),
                 owner_window: Some("task-third".into()),
                 events: Arc::new(TestSink::default()),
                 pausable: true,
@@ -790,7 +749,7 @@ fn snapshot_controls_use_requester_scope_and_owner_event_sink() {
     );
     let versions = states
         .iter()
-        .filter(|(name, payload)| name == EV_STATE && payload["id"] == id)
+        .filter(|(name, payload)| name == EV_SNAPSHOT && payload["id"] == id)
         .map(|(_, payload)| payload["version"].as_u64().unwrap())
         .collect::<Vec<_>>();
     assert!(versions.windows(2).all(|pair| pair[0] < pair[1]));
@@ -830,6 +789,7 @@ fn conflict_answers_require_the_owner_and_current_prompt_type() {
             &archive,
             &[inputs.join("same.txt"), inputs.join("next.txt")],
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &squallz_core::api::NoProgress,
             &squallz_core::api::ControlToken::new(),
         )
@@ -874,7 +834,9 @@ fn conflict_answers_require_the_owner_and_current_prompt_type() {
     wait_for_event(
         &owner_sink,
         std::time::Duration::from_secs(2),
-        |(name, payload)| name == EV_ASK_CONFLICT && payload["id"] == id,
+        |(name, payload)| {
+            name == EV_SNAPSHOT && payload["question"]["kind"] == "conflict" && payload["id"] == id
+        },
     );
     assert_eq!(
         manager
@@ -924,7 +886,10 @@ fn conflict_answers_require_the_owner_and_current_prompt_type() {
         &owner_sink,
         std::time::Duration::from_secs(2),
         |(name, payload)| {
-            name == EV_ASK_CONFLICT && payload["id"] == id && payload["incoming_path"] == "next.txt"
+            name == EV_SNAPSHOT
+                && payload["question"]["kind"] == "conflict"
+                && payload["id"] == id
+                && payload["question"]["prompt"]["incoming_path"] == "next.txt"
         },
     );
     let next_question = manager
@@ -1065,7 +1030,6 @@ fn core_terminal_failure_reconciles_a_nonterminal_snapshot() {
         gui_id,
         ManagedJob {
             queue_id,
-            cancel_flag: Arc::new(AtomicBool::new(false)),
             owner_window: Some("main".into()),
             events,
             pausable: true,
@@ -1112,24 +1076,7 @@ fn job_manager_registry_recovers_after_poison() {
     let id = manager.submit(
         Arc::clone(&state),
         Arc::clone(&events),
-        JobSpec::Compress {
-            inputs: vec![src.to_string_lossy().into_owned()],
-            dest: zip.to_string_lossy().into_owned(),
-            level: 5,
-            password: None,
-            encrypt_names: false,
-            split_size: None,
-            split_mode: squallz_core::api::SplitOutputMode::Generic,
-            excludes: vec![],
-            content_policy: squallz_core::CreateContentPolicy::KeepAllFiles,
-            sqz_inner_format: None,
-            sfx_target: None,
-            completion: squallz_core::CreateCompletionAction::None,
-            post_success: PostSuccessAction::KeepSource,
-            test_after_create: false,
-            replace_existing: false,
-            replacement_guard: None,
-        },
+        compress_file_job(&src, &zip),
         SettingsDto::default(),
     );
     manager.wait_idle();
@@ -1162,26 +1109,19 @@ fn partial_source_cleanup_keeps_successful_archive_job_done() {
     let id = manager.submit(
         state,
         events,
-        JobSpec::Compress {
-            inputs: vec![
-                first.to_string_lossy().into_owned(),
-                second.to_string_lossy().into_owned(),
-            ],
-            dest: archive.to_string_lossy().into_owned(),
-            level: 5,
-            password: None,
-            encrypt_names: false,
-            split_size: None,
-            split_mode: squallz_core::api::SplitOutputMode::Generic,
-            excludes: vec![],
-            content_policy: squallz_core::CreateContentPolicy::KeepAllFiles,
-            sqz_inner_format: None,
-            sfx_target: None,
-            completion: squallz_core::CreateCompletionAction::None,
-            post_success: PostSuccessAction::TrashSource,
-            test_after_create: false,
-            replace_existing: false,
-            replacement_guard: None,
+        {
+            let mut spec = compress_file_job(&first, &archive);
+            let JobSpec::Compress {
+                inputs,
+                post_success,
+                ..
+            } = &mut spec
+            else {
+                unreachable!()
+            };
+            inputs.push(second.to_string_lossy().into_owned());
+            *post_success = PostSuccessAction::TrashSource;
+            spec
         },
         SettingsDto::default(),
     );
@@ -1190,8 +1130,8 @@ fn partial_source_cleanup_keeps_successful_archive_job_done() {
     let snapshot = manager.snapshot(id).unwrap();
     assert_eq!(snapshot.state, "done");
     assert!(archive.exists());
-    let result = snapshot.result.as_ref().unwrap();
-    assert_eq!(result["tested_after_create"], true);
+    let result = &serde_json::json!(snapshot.result.as_ref().unwrap());
+    assert!(result["entries_tested_after_create"].is_number());
     assert_eq!(result["entries_tested_after_create"], 2);
     let cleanup = &result["source_cleanup"];
     assert_eq!(cleanup["status"], "partial");
@@ -1220,23 +1160,13 @@ fn failed_source_cleanup_keeps_successful_archive_job_done() {
     let id = manager.submit(
         state,
         events,
-        JobSpec::Compress {
-            inputs: vec![source.to_string_lossy().into_owned()],
-            dest: archive.to_string_lossy().into_owned(),
-            level: 5,
-            password: None,
-            encrypt_names: false,
-            split_size: None,
-            split_mode: squallz_core::api::SplitOutputMode::Generic,
-            excludes: vec![],
-            content_policy: squallz_core::CreateContentPolicy::KeepAllFiles,
-            sqz_inner_format: None,
-            sfx_target: None,
-            completion: squallz_core::CreateCompletionAction::None,
-            post_success: PostSuccessAction::TrashSource,
-            test_after_create: false,
-            replace_existing: false,
-            replacement_guard: None,
+        {
+            let mut spec = compress_file_job(&source, &archive);
+            let JobSpec::Compress { post_success, .. } = &mut spec else {
+                unreachable!()
+            };
+            *post_success = PostSuccessAction::TrashSource;
+            spec
         },
         SettingsDto::default(),
     );
@@ -1245,8 +1175,8 @@ fn failed_source_cleanup_keeps_successful_archive_job_done() {
     let snapshot = manager.snapshot(id).unwrap();
     assert_eq!(snapshot.state, "done");
     assert!(archive.exists());
-    let result = snapshot.result.as_ref().unwrap();
-    assert_eq!(result["tested_after_create"], true);
+    let result = &serde_json::json!(snapshot.result.as_ref().unwrap());
+    assert!(result["entries_tested_after_create"].is_number());
     assert_eq!(result["entries_tested_after_create"], 1);
     let cleanup = &result["source_cleanup"];
     assert_eq!(cleanup["status"], "failed");
@@ -1277,46 +1207,19 @@ fn create_worker_refuses_existing_destination_and_split_family() {
     let existing_id = manager.submit(
         Arc::clone(&state),
         Arc::clone(&events),
-        JobSpec::Compress {
-            inputs: vec![source.to_string_lossy().into_owned()],
-            dest: archive.to_string_lossy().into_owned(),
-            level: 5,
-            password: None,
-            encrypt_names: false,
-            split_size: None,
-            split_mode: squallz_core::api::SplitOutputMode::Generic,
-            excludes: vec![],
-            content_policy: squallz_core::CreateContentPolicy::KeepAllFiles,
-            sqz_inner_format: None,
-            sfx_target: None,
-            completion: squallz_core::CreateCompletionAction::None,
-            post_success: PostSuccessAction::KeepSource,
-            test_after_create: false,
-            replace_existing: false,
-            replacement_guard: None,
-        },
+        compress_file_job(&source, &archive),
         SettingsDto::default(),
     );
     let split_id = manager.submit(
         Arc::clone(&state),
         Arc::clone(&events),
-        JobSpec::Compress {
-            inputs: vec![source.to_string_lossy().into_owned()],
-            dest: split_archive.to_string_lossy().into_owned(),
-            level: 5,
-            password: None,
-            encrypt_names: false,
-            split_size: Some(8 * 1024),
-            split_mode: squallz_core::api::SplitOutputMode::Generic,
-            excludes: vec![],
-            content_policy: squallz_core::CreateContentPolicy::KeepAllFiles,
-            sqz_inner_format: None,
-            sfx_target: None,
-            completion: squallz_core::CreateCompletionAction::None,
-            post_success: PostSuccessAction::KeepSource,
-            test_after_create: false,
-            replace_existing: false,
-            replacement_guard: None,
+        {
+            let mut spec = compress_file_job(&source, &split_archive);
+            let JobSpec::Compress { split_size, .. } = &mut spec else {
+                unreachable!()
+            };
+            *split_size = Some(8 * 1024);
+            spec
         },
         SettingsDto::default(),
     );
@@ -1339,23 +1242,19 @@ fn create_worker_refuses_existing_destination_and_split_family() {
     let replace_id = manager.submit(
         state,
         events,
-        JobSpec::Compress {
-            inputs: vec![source.to_string_lossy().into_owned()],
-            dest: archive.to_string_lossy().into_owned(),
-            level: 5,
-            password: None,
-            encrypt_names: false,
-            split_size: None,
-            split_mode: squallz_core::api::SplitOutputMode::Generic,
-            excludes: vec![],
-            content_policy: squallz_core::CreateContentPolicy::KeepAllFiles,
-            sqz_inner_format: None,
-            sfx_target: None,
-            completion: squallz_core::CreateCompletionAction::None,
-            post_success: PostSuccessAction::KeepSource,
-            test_after_create: false,
-            replace_existing: true,
-            replacement_guard: Some(replacement_guard),
+        {
+            let mut spec = compress_file_job(&source, &archive);
+            let JobSpec::Compress {
+                replace_existing,
+                replacement_guard: guard,
+                ..
+            } = &mut spec
+            else {
+                unreachable!()
+            };
+            *replace_existing = true;
+            *guard = Some(replacement_guard);
+            spec
         },
         SettingsDto::default(),
     );
@@ -1384,24 +1283,7 @@ fn compress_then_extract_round_trip() {
     let id1 = manager.submit(
         Arc::clone(&state),
         Arc::clone(&events),
-        JobSpec::Compress {
-            inputs: vec![src.to_string_lossy().into_owned()],
-            dest: zip.to_string_lossy().into_owned(),
-            level: 5,
-            password: None,
-            encrypt_names: false,
-            split_size: None,
-            split_mode: squallz_core::api::SplitOutputMode::Generic,
-            excludes: vec![],
-            content_policy: squallz_core::CreateContentPolicy::KeepAllFiles,
-            sqz_inner_format: None,
-            sfx_target: None,
-            completion: squallz_core::CreateCompletionAction::None,
-            post_success: PostSuccessAction::KeepSource,
-            test_after_create: false,
-            replace_existing: false,
-            replacement_guard: None,
-        },
+        compress_file_job(&src, &zip),
         SettingsDto::default(),
     );
     let out = dir.join("out");
@@ -1429,8 +1311,8 @@ fn compress_then_extract_round_trip() {
     assert!(out.join("data/hello.txt").exists());
     let create_snapshot = manager.snapshot(id1).unwrap();
     assert_eq!(create_snapshot.state, "done");
-    let create_result = create_snapshot.result.as_ref().unwrap();
-    assert_eq!(create_result["operation"], "create");
+    let create_result = &serde_json::json!(create_snapshot.result.as_ref().unwrap());
+    assert_eq!(create_result["kind"], "compress");
     assert_eq!(
         create_result["primary_output"].as_str(),
         Some(zip.to_string_lossy().as_ref())
@@ -1447,7 +1329,7 @@ fn compress_then_extract_round_trip() {
     );
     let snapshot = manager.snapshot(id2).unwrap();
     assert_eq!(snapshot.state, "done");
-    let extract_result = snapshot.result.as_ref().unwrap();
+    let extract_result = &serde_json::json!(snapshot.result.as_ref().unwrap());
     assert_eq!(
         extract_result.get("dest").and_then(|dest| dest.as_str()),
         Some(out.to_string_lossy().as_ref())
@@ -1494,6 +1376,7 @@ fn extract_job_rejects_a_stale_expected_destination_before_writing() {
             &archive,
             std::slice::from_ref(&source),
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &squallz_core::api::NoProgress,
             &ControlToken::new(),
         )
@@ -1529,7 +1412,7 @@ fn extract_job_rejects_a_stale_expected_destination_before_writing() {
     let failed = events
         .iter()
         .find(|(name, payload)| {
-            name == EV_STATE && payload["id"] == id && payload["state"] == "failed"
+            name == EV_SNAPSHOT && payload["id"] == id && payload["state"] == "failed"
         })
         .expect("stale extraction plan must fail");
     assert_eq!(
@@ -1555,6 +1438,7 @@ fn extract_job_rejects_an_archive_replaced_after_preflight() {
             &archive,
             std::slice::from_ref(&original_source),
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &squallz_core::api::NoProgress,
             &control,
         )
@@ -1562,12 +1446,13 @@ fn extract_job_rejects_an_archive_replaced_after_preflight() {
     let destination = dir.join("output");
     let (_, _, input_guard) = state
         .engine
-        .plan_extract_with_input_guard_controlled(
+        .plan_extract_with_input_guard_and_entry_limit_controlled(
             &archive,
             &destination,
             &archive,
             false,
             &OpenOptions::default(),
+            squallz_core::api::SafetyLimits::default().max_entries,
             &control,
             |_, _| Ok(None),
         )
@@ -1587,6 +1472,7 @@ fn extract_job_rejects_an_archive_replaced_after_preflight() {
             &replacement_archive,
             &[replacement_source],
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &squallz_core::api::NoProgress,
             &control,
         )
@@ -1622,7 +1508,7 @@ fn extract_job_rejects_an_archive_replaced_after_preflight() {
     let failed = events
         .iter()
         .find(|(name, payload)| {
-            name == EV_STATE && payload["id"] == id && payload["state"] == "failed"
+            name == EV_SNAPSHOT && payload["id"] == id && payload["state"] == "failed"
         })
         .expect("stale extraction input must fail");
     assert_eq!(
@@ -1647,23 +1533,21 @@ fn split_compress_job_reports_the_committed_output_set() {
     let id = manager.submit(
         state,
         events,
-        JobSpec::Compress {
-            inputs: vec![src.to_string_lossy().into_owned()],
-            dest: archive.to_string_lossy().into_owned(),
-            level: 1,
-            password: None,
-            encrypt_names: false,
-            split_size: Some(8 * 1024),
-            split_mode: squallz_core::api::SplitOutputMode::Generic,
-            excludes: vec![],
-            content_policy: squallz_core::CreateContentPolicy::KeepAllFiles,
-            sqz_inner_format: None,
-            sfx_target: None,
-            completion: squallz_core::CreateCompletionAction::None,
-            post_success: PostSuccessAction::KeepSource,
-            test_after_create: true,
-            replace_existing: false,
-            replacement_guard: None,
+        {
+            let mut spec = compress_file_job(&src, &archive);
+            let JobSpec::Compress {
+                level,
+                split_size,
+                test_after_create,
+                ..
+            } = &mut spec
+            else {
+                unreachable!()
+            };
+            *level = 1;
+            *split_size = Some(8 * 1024);
+            *test_after_create = true;
+            spec
         },
         SettingsDto::default(),
     );
@@ -1671,10 +1555,10 @@ fn split_compress_job_reports_the_committed_output_set() {
 
     let snapshot = manager.snapshot(id).unwrap();
     assert_eq!(snapshot.state, "done");
-    let result = snapshot.result.as_ref().unwrap();
-    assert_eq!(result["operation"], "create");
+    let result = &serde_json::json!(snapshot.result.as_ref().unwrap());
+    assert_eq!(result["kind"], "compress");
     assert_eq!(result["split"], true);
-    assert_eq!(result["tested_after_create"], true);
+    assert!(result["entries_tested_after_create"].is_number());
     assert!(result["entries_tested_after_create"]
         .as_u64()
         .is_some_and(|entries| entries > 0));
@@ -1705,34 +1589,6 @@ fn split_compress_job_reports_the_committed_output_set() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
-#[test]
-fn compress_job_forwards_the_sqz_inner_format() {
-    let spec = JobSpec::Compress {
-        inputs: vec!["data".into()],
-        dest: "profile.sqz".into(),
-        level: 5,
-        password: None,
-        encrypt_names: false,
-        split_size: None,
-        split_mode: squallz_core::api::SplitOutputMode::Generic,
-        excludes: vec![],
-        content_policy: squallz_core::CreateContentPolicy::KeepAllFiles,
-        sqz_inner_format: Some(squallz_core::SqzInnerFormat::Zip),
-        sfx_target: None,
-        completion: squallz_core::CreateCompletionAction::None,
-        post_success: PostSuccessAction::KeepSource,
-        test_after_create: false,
-        replace_existing: false,
-        replacement_guard: None,
-    };
-
-    let request = create_job_request(&spec, &SettingsDto::default()).unwrap();
-    assert_eq!(
-        request.options.sqz.inner_format,
-        squallz_core::SqzInnerFormat::Zip
-    );
-}
-
 #[cfg(target_os = "macos")]
 #[test]
 fn create_sfx_job_uses_the_shared_queue_and_core() {
@@ -1752,23 +1608,19 @@ fn create_sfx_job_uses_the_shared_queue_and_core() {
     let id = manager.submit(
         Arc::clone(&state),
         Arc::clone(&events),
-        JobSpec::Compress {
-            inputs: vec![src.to_string_lossy().into_owned()],
-            dest: output.to_string_lossy().into_owned(),
-            level: 5,
-            password: None,
-            encrypt_names: false,
-            split_size: None,
-            split_mode: squallz_core::api::SplitOutputMode::Generic,
-            excludes: vec![],
-            content_policy: squallz_core::CreateContentPolicy::KeepAllFiles,
-            sqz_inner_format: None,
-            sfx_target: Some(SfxTarget::Macos),
-            completion: squallz_core::CreateCompletionAction::None,
-            post_success: PostSuccessAction::KeepSource,
-            test_after_create: true,
-            replace_existing: false,
-            replacement_guard: None,
+        {
+            let mut spec = compress_file_job(&src, &output);
+            let JobSpec::Compress {
+                sfx_target,
+                test_after_create,
+                ..
+            } = &mut spec
+            else {
+                unreachable!()
+            };
+            *sfx_target = Some(SfxTarget::Macos);
+            *test_after_create = true;
+            spec
         },
         SettingsDto::default(),
     );
@@ -1776,15 +1628,8 @@ fn create_sfx_job_uses_the_shared_queue_and_core() {
 
     let snapshot = manager.snapshot(id).unwrap();
     assert_eq!(snapshot.state, "done");
-    assert_eq!(
-        snapshot
-            .result
-            .as_ref()
-            .and_then(|result| result.get("operation"))
-            .and_then(|value| value.as_str()),
-        Some("create_sfx")
-    );
-    let result = snapshot.result.as_ref().unwrap();
+    assert!(matches!(&snapshot.result, Some(JobResult::Compress(report)) if report.sfx.is_some()));
+    let result = &serde_json::json!(snapshot.result.as_ref().unwrap());
     assert_eq!(result["source_cleanup"]["status"], "not_requested");
     assert_eq!(
         result["primary_output"].as_str(),
@@ -1793,18 +1638,18 @@ fn create_sfx_job_uses_the_shared_queue_and_core() {
     assert_eq!(result["outputs"].as_array().map(Vec::len), Some(1));
     assert_eq!(result["volume_count"], 1);
     assert_eq!(result["split"], false);
-    assert_eq!(result["tested_after_create"], true);
+    assert!(result["entries_tested_after_create"].is_number());
     assert!(result["entries_tested_after_create"]
         .as_u64()
         .is_some_and(|entries| entries > 0));
     assert!(result["total_bytes"]
         .as_u64()
         .is_some_and(|bytes| bytes > 0));
-    assert_eq!(result["requires_signing"], true);
+    assert_eq!(result["sfx"]["requires_signing"], true);
     assert!(output
         .join("Contents/Resources/squallz-sfx/payload.zip")
         .exists());
-    let entries = state.engine.list(&output, &OpenOptions::default()).unwrap();
+    let entries = read_archive_entries(&state.engine, &output, &OpenOptions::default()).unwrap();
     assert_eq!(entries[0].path.display, "notes/");
     let events = sink.events.lock().unwrap();
     assert_eq!(states_of(&events, id), vec!["queued", "running", "done"]);
@@ -1833,6 +1678,7 @@ fn batch_extract_runs_multiple_archives_as_one_job() {
                 level: CompressionLevel::Fastest,
                 ..CreateOptions::default()
             },
+            CreateCommitPolicy::ReplaceExisting,
             &squallz_core::api::NoProgress,
             &ControlToken::new(),
         )
@@ -1846,6 +1692,7 @@ fn batch_extract_runs_multiple_archives_as_one_job() {
                 level: CompressionLevel::Fastest,
                 ..CreateOptions::default()
             },
+            CreateCommitPolicy::ReplaceExisting,
             &squallz_core::api::NoProgress,
             &ControlToken::new(),
         )
@@ -1902,7 +1749,7 @@ fn batch_extract_runs_multiple_archives_as_one_job() {
     let events = sink.events.lock().unwrap().clone();
     assert_eq!(states_of(&events, id), vec!["queued", "running", "done"]);
     let result = done_result(&events, id).unwrap();
-    assert_eq!(result["operation"], "batch_extract");
+    assert_eq!(result["kind"], "batch_extract");
     assert_eq!(result["archives"], 2);
     assert_eq!(result["extracted"], 2);
     assert_eq!(result["failed"], 0);
@@ -1910,20 +1757,20 @@ fn batch_extract_runs_multiple_archives_as_one_job() {
     assert_eq!(result["outputs"][0]["plan"]["layout"], "direct");
     assert_eq!(result["outputs"][0]["counts"]["created"], 1);
     assert_eq!(result["outputs"][0]["counts"]["failed"], 0);
-    assert!(result["outputs"][0].get("structure").is_none());
+    assert_eq!(result["outputs"][0]["structure"], "complete");
     assert_eq!(
         result["outputs"][1]["structure"],
         "zip_local_headers_recovered"
     );
-    assert_eq!(result["structure"], "zip_local_headers_recovered");
+    assert!(result.get("structure").is_none());
     assert_eq!(result["recovered_archives"], 1);
     assert_eq!(
         manager.openable_output_for_window("main", id).unwrap(),
         out_a
     );
-    assert!(events.iter().any(|(name, payload)| name == EV_PROGRESS
+    assert!(events.iter().any(|(name, payload)| name == EV_SNAPSHOT
         && payload["id"] == id
-        && payload["total"].as_u64().unwrap_or(0) == 2 * BATCH_PROGRESS_SCALE));
+        && payload["progress"]["total"].as_u64().unwrap_or(0) == 2 * BATCH_PROGRESS_SCALE));
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -2082,9 +1929,9 @@ esac
     assert_eq!(result["extracted"], 1);
     assert_eq!(result["failed"], 0);
     assert!(recorded_events.iter().any(|(name, payload)| {
-        name == EV_PROGRESS
+        name == EV_SNAPSHOT
             && payload["id"] == id
-            && payload["total"].as_u64() == Some(BATCH_PROGRESS_SCALE)
+            && payload["progress"]["total"].as_u64() == Some(BATCH_PROGRESS_SCALE)
     }));
     let tool_log = std::fs::read_to_string(&log).unwrap();
     assert_eq!(
@@ -2126,6 +1973,10 @@ fn native_split_zip_family_opens_from_middle_and_extracts_once_via_primary() {
 set -eu
 printf '%s\n' "$*" >> "$SQUALLZ_FAKE_7Z_LOG"
 archive="$3"
+if [ "$1" = "l" ]; then
+  test "$3" = "-slmu"
+  archive="$4"
+fi
 stage="$(dirname "$archive")"
 test "$(basename "$archive")" = "archive.zip"
 test -f "$stage/archive.z01"
@@ -2581,7 +2432,11 @@ fn releasing_window_aborts_conflict_without_touching_existing_file() {
     wait_for_event(
         &sink,
         std::time::Duration::from_secs(2),
-        |(name, payload)| name == EV_ASK_CONFLICT && payload["id"] == conflict_id,
+        |(name, payload)| {
+            name == EV_SNAPSHOT
+                && payload["question"]["kind"] == "conflict"
+                && payload["id"] == conflict_id
+        },
     );
 
     let next_id = manager.submit_for_test_window(
@@ -2667,23 +2522,13 @@ fn completed_jobs_are_written_to_backend_audit_log() {
     let id = manager.submit(
         Arc::clone(&state),
         Arc::clone(&events),
-        JobSpec::Compress {
-            inputs: vec![src.to_string_lossy().into_owned()],
-            dest: zip.to_string_lossy().into_owned(),
-            level: 5,
-            password: Some("audit-password-must-not-appear".into()),
-            encrypt_names: false,
-            split_size: None,
-            split_mode: squallz_core::api::SplitOutputMode::Generic,
-            excludes: vec![],
-            content_policy: squallz_core::CreateContentPolicy::KeepAllFiles,
-            sqz_inner_format: None,
-            sfx_target: None,
-            completion: squallz_core::CreateCompletionAction::None,
-            post_success: PostSuccessAction::KeepSource,
-            test_after_create: false,
-            replace_existing: false,
-            replacement_guard: None,
+        {
+            let mut spec = compress_file_job(&src, &zip);
+            let JobSpec::Compress { password, .. } = &mut spec else {
+                unreachable!()
+            };
+            *password = Some("audit-password-must-not-appear".into());
+            spec
         },
         SettingsDto::default(),
     );
@@ -2707,7 +2552,7 @@ fn completed_jobs_are_written_to_backend_audit_log() {
         .unwrap()
         .contains("audit-password"));
     assert!(matches!(
-        snapshot.spec,
+        snapshot.spec.unwrap(),
         JobSpec::Compress {
             password: None,
             encrypt_names: false,
@@ -2734,6 +2579,7 @@ fn extract_nested_job_extracts_inner_archive() {
             &inner,
             std::slice::from_ref(&inner_src),
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &squallz_core::api::NoProgress,
             &ControlToken::new(),
         )
@@ -2744,6 +2590,7 @@ fn extract_nested_job_extracts_inner_archive() {
             &outer,
             std::slice::from_ref(&inner),
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &squallz_core::api::NoProgress,
             &ControlToken::new(),
         )
@@ -2816,6 +2663,7 @@ fn extract_nested_job_prompts_separately_for_outer_and_inner_passwords() {
                 password: Some(Password::new("inner-secret")),
                 ..CreateOptions::default()
             },
+            CreateCommitPolicy::ReplaceExisting,
             &squallz_core::api::NoProgress,
             &ControlToken::new(),
         )
@@ -2829,6 +2677,7 @@ fn extract_nested_job_prompts_separately_for_outer_and_inner_passwords() {
                 password: Some(Password::new("outer-secret")),
                 ..CreateOptions::default()
             },
+            CreateCommitPolicy::ReplaceExisting,
             &squallz_core::api::NoProgress,
             &ControlToken::new(),
         )
@@ -2867,9 +2716,13 @@ fn extract_nested_job_prompts_separately_for_outer_and_inner_passwords() {
         let recorded = sink.events.lock().unwrap();
         let first = recorded
             .iter()
-            .find(|(name, payload)| name == EV_ASK_PASSWORD && payload["id"] == id)
+            .find(|(name, payload)| {
+                name == EV_SNAPSHOT
+                    && payload["question"]["kind"] == "password"
+                    && payload["id"] == id
+            })
             .unwrap();
-        assert_eq!(first.1["name"], outer_name);
+        assert_eq!(first.1["question"]["prompt"]["name"], outer_name);
     }
     manager
         .answer_password_for_window(
@@ -2895,9 +2748,13 @@ fn extract_nested_job_prompts_separately_for_outer_and_inner_passwords() {
         let recorded = sink.events.lock().unwrap();
         let prompts = recorded
             .iter()
-            .filter(|(name, payload)| name == EV_ASK_PASSWORD && payload["id"] == id)
+            .filter(|(name, payload)| {
+                name == EV_SNAPSHOT
+                    && payload["question"]["kind"] == "password"
+                    && payload["id"] == id
+            })
             .collect::<Vec<_>>();
-        assert_eq!(prompts[1].1["name"], inner_name);
+        assert_eq!(prompts[1].1["question"]["prompt"]["name"], inner_name);
     }
     manager
         .answer_password_for_window(
@@ -2935,6 +2792,7 @@ fn extract_nested_job_applies_safety_limit_before_writing_temp_archive() {
             &inner,
             std::slice::from_ref(&inner_src),
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &squallz_core::api::NoProgress,
             &ControlToken::new(),
         )
@@ -2945,6 +2803,7 @@ fn extract_nested_job_applies_safety_limit_before_writing_temp_archive() {
             &outer,
             std::slice::from_ref(&inner),
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &squallz_core::api::NoProgress,
             &ControlToken::new(),
         )
@@ -2983,7 +2842,7 @@ fn extract_nested_job_applies_safety_limit_before_writing_temp_archive() {
     let failure = recorded
         .iter()
         .find(|(name, payload)| {
-            name == EV_STATE && payload["id"] == id && payload["state"] == "failed"
+            name == EV_SNAPSHOT && payload["id"] == id && payload["state"] == "failed"
         })
         .unwrap();
     assert_eq!(failure.1["error"]["key"], "error.resource_limit");
@@ -3007,6 +2866,7 @@ fn queued_opaque_nested_source_stays_leased_and_never_reaches_public_state() {
             &inner,
             std::slice::from_ref(&inner_src),
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &squallz_core::api::NoProgress,
             &ControlToken::new(),
         )
@@ -3017,6 +2877,7 @@ fn queued_opaque_nested_source_stays_leased_and_never_reaches_public_state() {
             &outer,
             std::slice::from_ref(&inner),
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &squallz_core::api::NoProgress,
             &ControlToken::new(),
         )
@@ -3025,14 +2886,11 @@ fn queued_opaque_nested_source_stays_leased_and_never_reaches_public_state() {
     let previews = PreviewSessionManager::new().unwrap();
     let preview_root = previews.root_path().unwrap().to_path_buf();
     let reservation = previews.reserve("lease-test").unwrap();
-    let mut pending = tempfile::Builder::new()
-        .prefix("owned-outer-")
-        .suffix(".zip")
-        .tempfile_in(reservation.workspace_path().unwrap())
-        .unwrap();
+    let (pending, mut writer) = reservation.create_file("owned-outer.zip").unwrap();
     let mut source_file = fs::File::open(&outer).unwrap();
-    let size = std::io::copy(&mut source_file, pending.as_file_mut()).unwrap();
-    pending.as_file_mut().flush().unwrap();
+    let size = std::io::copy(&mut source_file, &mut writer).unwrap();
+    writer.flush().unwrap();
+    drop(writer);
     let physical_path = pending.path().to_path_buf();
     let display_path = dir
         .join("displayed-outer.zip")
@@ -3041,7 +2899,7 @@ fn queued_opaque_nested_source_stays_leased_and_never_reaches_public_state() {
     let archive = state
         .open_archive_with_owned_temp_and_entry_limit(
             "lease-test",
-            pending.into_temp_path(),
+            pending,
             reservation,
             size,
             display_path.clone(),
@@ -3189,6 +3047,7 @@ fn convert_job_round_trip_through_queue() {
                 level: CompressionLevel::Fastest,
                 ..CreateOptions::default()
             },
+            CreateCommitPolicy::ReplaceExisting,
             &squallz_core::api::NoProgress,
             &ControlToken::new(),
         )
@@ -3224,10 +3083,8 @@ fn convert_job_round_trip_through_queue() {
         manager.openable_output_for_window("main", id).unwrap(),
         sevenz
     );
-    let entries = AppState::new()
-        .engine
-        .list(&sevenz, &OpenOptions::default())
-        .unwrap();
+    let entries =
+        read_archive_entries(&AppState::new().engine, &sevenz, &OpenOptions::default()).unwrap();
     assert!(entries
         .iter()
         .any(|entry| entry.path.display == "data/hello.txt"));
@@ -3256,6 +3113,7 @@ fn convert_job_reports_split_output_set() {
             &source,
             std::slice::from_ref(&input),
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &squallz_core::api::NoProgress,
             &ControlToken::new(),
         )
@@ -3289,8 +3147,8 @@ fn convert_job_reports_split_output_set() {
     assert!(second.is_file());
     let snapshot = manager.snapshot(id).unwrap();
     assert_eq!(snapshot.state, "done");
-    let result = snapshot.result.as_ref().unwrap();
-    assert_eq!(result["operation"], "convert");
+    let result = &serde_json::json!(snapshot.result.as_ref().unwrap());
+    assert_eq!(result["kind"], "convert");
     assert!(snapshot.output_password_required);
     assert!(!serde_json::to_string(&snapshot)
         .unwrap()
@@ -3306,20 +3164,16 @@ fn convert_job_reports_split_output_set() {
     assert!(result["outputs"]
         .as_array()
         .is_some_and(|outputs| outputs.len() >= 2));
-    assert!(state
-        .engine
-        .list(&primary, &OpenOptions::default())
-        .is_err());
-    let entries = state
-        .engine
-        .list(
-            &primary,
-            &OpenOptions {
-                password: Some(Password::new("destination secret")),
-                ..OpenOptions::default()
-            },
-        )
-        .unwrap();
+    assert!(read_archive_entries(&state.engine, &primary, &OpenOptions::default()).is_err());
+    let entries = read_archive_entries(
+        &state.engine,
+        &primary,
+        &OpenOptions {
+            password: Some(Password::new("destination secret")),
+            ..OpenOptions::default()
+        },
+    )
+    .unwrap();
     assert!(entries
         .iter()
         .any(|entry| entry.path.display == "payload.txt"));
@@ -3371,7 +3225,7 @@ fn repair_zip_job_rebuilds_missing_central_directory() {
             vec!["queued", "running", "failed"]
         );
         let failure = recorded_events.iter().find(|(name, payload)| {
-            name == EV_STATE && payload["id"] == limited_id && payload["state"] == "failed"
+            name == EV_SNAPSHOT && payload["id"] == limited_id && payload["state"] == "failed"
         });
         assert_eq!(
             failure.and_then(|(_, payload)| payload["error"]["key"].as_str()),
@@ -3417,8 +3271,8 @@ fn repair_zip_job_rebuilds_missing_central_directory() {
         vec!["queued", "running", "done"]
     );
     let result = done_result(&recorded_events, id).unwrap();
-    assert_eq!(result["operation"].as_str(), Some("repair_zip"));
-    assert_eq!(result["tool"].as_str(), Some("zip-local-header-rebuild"));
+    assert_eq!(result["kind"].as_str(), Some("repair_zip"));
+    assert!(result.get("tool").is_none());
     assert_eq!(
         result["dest"].as_str(),
         Some(repaired.to_string_lossy().as_ref())
@@ -3543,7 +3397,7 @@ exit 2
     manager.wait_idle();
 
     assert!(zip.is_file(), "converted ZIP missing");
-    let entries = state.engine.list(&zip, &OpenOptions::default()).unwrap();
+    let entries = read_archive_entries(&state.engine, &zip, &OpenOptions::default()).unwrap();
     assert!(entries
         .iter()
         .any(|entry| entry.path.display == "hello.txt"));
@@ -3589,6 +3443,7 @@ fn export_sqz_job_round_trip_through_queue() {
                 level: CompressionLevel::Fastest,
                 ..CreateOptions::default()
             },
+            CreateCommitPolicy::ReplaceExisting,
             &squallz_core::api::NoProgress,
             &ControlToken::new(),
         )
@@ -3615,10 +3470,8 @@ fn export_sqz_job_round_trip_through_queue() {
     manager.wait_idle();
 
     assert!(zip.exists());
-    let entries = AppState::new()
-        .engine
-        .list(&zip, &OpenOptions::default())
-        .unwrap();
+    let entries =
+        read_archive_entries(&AppState::new().engine, &zip, &OpenOptions::default()).unwrap();
     assert!(entries
         .iter()
         .any(|entry| entry.path.display == "data/hello.txt"));
@@ -3629,7 +3482,7 @@ fn export_sqz_job_round_trip_through_queue() {
     );
     let result = done_result(&recorded_events, id).unwrap();
     assert_eq!(
-        result["dest"].as_str(),
+        result["primary_output"].as_str(),
         Some(zip.to_string_lossy().as_ref())
     );
     std::fs::remove_dir_all(&dir).unwrap();
@@ -3653,6 +3506,7 @@ fn conversion_jobs_without_replace_permission_preserve_existing_outputs() {
                 archive,
                 std::slice::from_ref(&input),
                 &CreateOptions::default(),
+                CreateCommitPolicy::ReplaceExisting,
                 &squallz_core::api::NoProgress,
                 &ControlToken::new(),
             )
@@ -3735,7 +3589,7 @@ fn conversion_jobs_without_replace_permission_preserve_existing_outputs() {
         let failed = recorded_events
             .iter()
             .find(|(name, payload)| {
-                name == EV_STATE && payload["id"] == id && payload["state"] == "failed"
+                name == EV_SNAPSHOT && payload["id"] == id && payload["state"] == "failed"
             })
             .unwrap();
         assert_eq!(
@@ -3760,6 +3614,7 @@ fn export_sqz_job_keeps_output_changed_after_confirmation() {
             &sqz,
             std::slice::from_ref(&input),
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &squallz_core::api::NoProgress,
             &ControlToken::new(),
         )
@@ -3808,7 +3663,7 @@ fn export_sqz_job_keeps_output_changed_after_confirmation() {
     let failed = recorded_events
         .iter()
         .find(|(name, payload)| {
-            name == EV_STATE && payload["id"] == id && payload["state"] == "failed"
+            name == EV_SNAPSHOT && payload["id"] == id && payload["state"] == "failed"
         })
         .unwrap();
     assert_eq!(
@@ -3834,6 +3689,7 @@ fn split_sqz_source_jobs_accept_first_volume() {
                 split_size: Some(30 * 1024),
                 ..CreateOptions::default()
             },
+            CreateCommitPolicy::ReplaceExisting,
             &squallz_core::api::NoProgress,
             &ControlToken::new(),
         )
@@ -3879,7 +3735,7 @@ fn split_sqz_source_jobs_accept_first_volume() {
     manager.wait_idle();
 
     let engine = AppState::new().engine;
-    let entries = engine.list(&zip, &OpenOptions::default()).unwrap();
+    let entries = read_archive_entries(&engine, &zip, &OpenOptions::default()).unwrap();
     assert!(entries.iter().any(|entry| entry.path.display == "data.bin"));
     let report = engine
         .test_summary(
@@ -3922,6 +3778,7 @@ fn repair_sqz_job_rewrites_recovered_container() {
                 level: CompressionLevel::Fastest,
                 ..CreateOptions::default()
             },
+            CreateCommitPolicy::ReplaceExisting,
             &squallz_core::api::NoProgress,
             &ControlToken::new(),
         )
@@ -4030,6 +3887,7 @@ fn repair_sqz_job_rewrites_recovered_container() {
                 split_size: Some(30 * 1024),
                 ..CreateOptions::default()
             },
+            CreateCommitPolicy::ReplaceExisting,
             &squallz_core::api::NoProgress,
             &ControlToken::new(),
         )
@@ -4181,10 +4039,8 @@ fn opened_archive_updates_reject_replacements_before_submit_and_while_queued() {
                 .state,
             "done"
         );
-        let entries = state
-            .engine
-            .list(&archive, &OpenOptions::default())
-            .unwrap();
+        let entries =
+            read_archive_entries(&state.engine, &archive, &OpenOptions::default()).unwrap();
         assert!(!entries
             .iter()
             .any(|entry| entry.path.display == "report.txt"));
@@ -4211,12 +4067,12 @@ fn opened_archive_updates_reject_replacements_before_submit_and_while_queued() {
                 .state,
             "done"
         );
-        assert!(!state
-            .engine
-            .list(&archive, &OpenOptions::default())
-            .unwrap()
-            .iter()
-            .any(|entry| entry.path.display == "report.txt"));
+        assert!(
+            !read_archive_entries(&state.engine, &archive, &OpenOptions::default())
+                .unwrap()
+                .iter()
+                .any(|entry| entry.path.display == "report.txt")
+        );
         fs::remove_dir_all(dir).unwrap();
     }
 }
@@ -4305,7 +4161,7 @@ fn opened_archive_updates_share_successful_source_advances_and_enforce_ownership
         let snapshot = manager.snapshot_for_window("editor", id).unwrap();
         assert_eq!(snapshot.state, "done");
         assert!(matches!(
-            snapshot.spec,
+            snapshot.spec.unwrap(),
             JobSpec::Update {
                 expected_archive_id: None,
                 ..
@@ -4321,10 +4177,7 @@ fn opened_archive_updates_share_successful_source_advances_and_enforce_ownership
             }
         ));
     }
-    let entries = state
-        .engine
-        .list(&archive, &OpenOptions::default())
-        .unwrap();
+    let entries = read_archive_entries(&state.engine, &archive, &OpenOptions::default()).unwrap();
     assert!(entries
         .iter()
         .any(|entry| entry.path.display == "first.txt"));
@@ -4349,6 +4202,7 @@ fn update_job_deletes_selected_entry() {
             &archive,
             std::slice::from_ref(&src),
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &squallz_core::api::NoProgress,
             &ControlToken::new(),
         )
@@ -4378,10 +4232,7 @@ fn update_job_deletes_selected_entry() {
     manager.wait_idle();
     let events = sink.events.lock().unwrap().clone();
     assert_eq!(states_of(&events, id), vec!["queued", "running", "done"]);
-    let entries = state
-        .engine
-        .list(&archive, &OpenOptions::default())
-        .unwrap();
+    let entries = read_archive_entries(&state.engine, &archive, &OpenOptions::default()).unwrap();
     assert!(entries.iter().any(|e| e.path.display == "data/keep.txt"));
     assert!(!entries.iter().any(|e| e.path.display == "data/drop.txt"));
     assert_eq!(
@@ -4416,6 +4267,7 @@ fn update_job_deletes_only_literal_selected_paths() {
             &archive,
             &inputs,
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &squallz_core::api::NoProgress,
             &ControlToken::new(),
         )
@@ -4451,9 +4303,7 @@ fn update_job_deletes_only_literal_selected_paths() {
         states_of(&sink.events.lock().unwrap(), id),
         vec!["queued", "running", "done"]
     );
-    let mut names = state
-        .engine
-        .list(&archive, &OpenOptions::default())
+    let mut names = read_archive_entries(&state.engine, &archive, &OpenOptions::default())
         .unwrap()
         .into_iter()
         .map(|entry| entry.path.display)
@@ -4511,6 +4361,7 @@ fn update_job_resolves_display_names_and_rejects_ambiguous_or_missing_selection(
                     &archive,
                     &[dir.join("first.txt"), dir.join("nested")],
                     &CreateOptions::default(),
+                    CreateCommitPolicy::ReplaceExisting,
                     &squallz_core::api::NoProgress,
                     &ControlToken::new(),
                 )
@@ -4573,19 +4424,18 @@ fn update_job_resolves_display_names_and_rejects_ambiguous_or_missing_selection(
             if expected_state == "failed" {
                 assert_eq!(fs::read(&archive).unwrap(), bytes);
             } else {
-                let mut names: Vec<_> = state
-                    .engine
-                    .list(
-                        &archive,
-                        &OpenOptions {
-                            encoding_override: Some("gbk".into()),
-                            ..OpenOptions::default()
-                        },
-                    )
-                    .unwrap()
-                    .into_iter()
-                    .map(|entry| entry.path.display)
-                    .collect();
+                let mut names: Vec<_> = read_archive_entries(
+                    &state.engine,
+                    &archive,
+                    &OpenOptions {
+                        encoding_override: Some("gbk".into()),
+                        ..OpenOptions::default()
+                    },
+                )
+                .unwrap()
+                .into_iter()
+                .map(|entry| entry.path.display)
+                .collect();
                 names.sort();
                 let expected = match (rename_selected, selected == "nested/first.txt") {
                     (false, false) => vec!["nested/", "nested/first.txt"],
@@ -4595,16 +4445,15 @@ fn update_job_resolves_display_names_and_rejects_ambiguous_or_missing_selection(
                 };
                 assert_eq!(names, expected);
                 if selected == "nested/first.txt" {
-                    let entries = state
-                        .engine
-                        .list(
-                            &archive,
-                            &OpenOptions {
-                                encoding_override: Some("gbk".into()),
-                                ..OpenOptions::default()
-                            },
-                        )
-                        .unwrap();
+                    let entries = read_archive_entries(
+                        &state.engine,
+                        &archive,
+                        &OpenOptions {
+                            encoding_override: Some("gbk".into()),
+                            ..OpenOptions::default()
+                        },
+                    )
+                    .unwrap();
                     assert_eq!(
                         entries
                             .iter()
@@ -4635,6 +4484,7 @@ fn update_job_add_directory_applies_content_policy_and_explicit_excludes() {
             &archive,
             std::slice::from_ref(&seed),
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &squallz_core::api::NoProgress,
             &ControlToken::new(),
         )
@@ -4675,9 +4525,7 @@ fn update_job_add_directory_applies_content_policy_and_explicit_excludes() {
     manager.wait_idle();
     let events = sink.events.lock().unwrap().clone();
     assert_eq!(states_of(&events, id), vec!["queued", "running", "done"]);
-    let names: Vec<String> = state
-        .engine
-        .list(&archive, &OpenOptions::default())
+    let names: Vec<String> = read_archive_entries(&state.engine, &archive, &OpenOptions::default())
         .unwrap()
         .into_iter()
         .map(|e| e.path.display)
@@ -4723,7 +4571,9 @@ fn duplicate_scan_job_reports_groups_without_modifying_files() {
     let events = sink.events.lock().unwrap().clone();
     assert_eq!(states_of(&events, id), vec!["queued", "running", "done"]);
     let result = done_result(&events, id).expect("duplicate result");
-    assert_eq!(result["operation"], "duplicates");
+    assert!(result.get("ok").is_none());
+    assert_eq!(result.as_object().unwrap().len(), 13);
+    assert_eq!(result["kind"], "duplicate_scan");
     assert_eq!(result["hash_algorithm"], "blake3");
     assert_eq!(result["duplicate_groups"].as_u64(), Some(1));
     assert_eq!(result["duplicate_files"].as_u64(), Some(2));
@@ -4759,15 +4609,17 @@ fn checksum_job_hashes_files_with_shared_excludes() {
     assert_eq!(std::fs::read(root.join("keep.txt")).unwrap(), b"abc");
     let events = sink.events.lock().unwrap().clone();
     assert_eq!(states_of(&events, id), vec!["queued", "running", "done"]);
-    assert!(events.iter().any(|(name, payload)| name == EV_PROGRESS
+    assert!(events.iter().any(|(name, payload)| name == EV_SNAPSHOT
         && payload["id"] == id
-        && payload["done"] == 3
-        && payload["total"] == 3
-        && payload["current"]
+        && payload["progress"]["done"] == 3
+        && payload["progress"]["total"] == 3
+        && payload["progress"]["current"]
             .as_str()
             .is_some_and(|current| current.ends_with("keep.txt"))));
     let result = done_result(&events, id).expect("checksum result");
-    assert_eq!(result["operation"], "checksum");
+    assert_eq!(result.as_object().unwrap().len(), 7);
+    assert!(result.get("ok").is_none());
+    assert_eq!(result["kind"], "checksum");
     assert_eq!(result["algorithm"], "sha256");
     assert_eq!(result["files_hashed"].as_u64(), Some(1));
     assert_eq!(result["bytes_hashed"].as_u64(), Some(3));
@@ -4818,7 +4670,8 @@ fn checksum_check_job_reports_manifest_mismatch() {
     let events = sink.events.lock().unwrap().clone();
     assert_eq!(states_of(&events, id), vec!["queued", "running", "done"]);
     let result = done_result(&events, id).expect("checksum check result");
-    assert_eq!(result["operation"], "checksum_check");
+    assert_eq!(result.as_object().unwrap().len(), 9);
+    assert_eq!(result["kind"], "checksum_check");
     assert_eq!(result["ok"].as_bool(), Some(false));
     assert_eq!(result["checked"].as_u64(), Some(2));
     assert_eq!(result["passed"].as_u64(), Some(1));
@@ -4841,6 +4694,7 @@ fn update_job_creates_directory_and_moves_a_subtree_into_it() {
             &archive,
             std::slice::from_ref(&seed),
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &squallz_core::api::NoProgress,
             &ControlToken::new(),
         )
@@ -4882,9 +4736,7 @@ fn update_job_creates_directory_and_moves_a_subtree_into_it() {
     manager.wait_idle();
     let events = sink.events.lock().unwrap().clone();
     assert_eq!(states_of(&events, id), vec!["queued", "running", "done"]);
-    let names: Vec<String> = state
-        .engine
-        .list(&archive, &OpenOptions::default())
+    let names: Vec<String> = read_archive_entries(&state.engine, &archive, &OpenOptions::default())
         .unwrap()
         .into_iter()
         .map(|e| e.path.display)
@@ -4918,9 +4770,7 @@ fn update_job_creates_directory_and_moves_a_subtree_into_it() {
         states_of(&move_sink.events.lock().unwrap(), move_id),
         vec!["queued", "running", "done"]
     );
-    let names: Vec<_> = state
-        .engine
-        .list(&archive, &OpenOptions::default())
+    let names: Vec<_> = read_archive_entries(&state.engine, &archive, &OpenOptions::default())
         .unwrap()
         .into_iter()
         .map(|entry| entry.path.display)
@@ -4951,6 +4801,7 @@ fn update_job_reports_target_conflict_as_failed() {
             &archive,
             std::slice::from_ref(&seed),
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &squallz_core::api::NoProgress,
             &ControlToken::new(),
         )
@@ -4987,7 +4838,7 @@ fn update_job_reports_target_conflict_as_failed() {
     assert_eq!(states_of(&events, id), vec!["queued", "running", "failed"]);
     let failed = events
         .iter()
-        .find(|(name, p)| name == EV_STATE && p["id"] == id && p["state"] == "failed")
+        .find(|(name, p)| name == EV_SNAPSHOT && p["id"] == id && p["state"] == "failed")
         .expect("failed state");
     assert_eq!(failed.1["error"]["key"].as_str(), Some("error.other"));
     assert!(
@@ -5026,9 +4877,9 @@ fn archive_test_job_uses_submitted_safety_limits() {
     );
     manager.wait_idle();
     let events = sink.events.lock().unwrap();
-    let failure = events
-        .iter()
-        .find(|(name, value)| name == EV_STATE && value["id"] == id && value["state"] == "failed");
+    let failure = events.iter().find(|(name, value)| {
+        name == EV_SNAPSHOT && value["id"] == id && value["state"] == "failed"
+    });
     assert_eq!(
         failure.and_then(|(_, value)| value["error"]["key"].as_str()),
         Some("error.resource_limit"),
@@ -5053,7 +4904,7 @@ fn archive_test_job_uses_submitted_safety_limits() {
     manager.wait_idle();
     let events = sink.events.lock().unwrap();
     let retried = events.iter().find(|(name, value)| {
-        name == EV_STATE && value["id"] == retry_id && value["state"] == "done"
+        name == EV_SNAPSHOT && value["id"] == retry_id && value["state"] == "done"
     });
     assert_eq!(
         retried.map(|(_, value)| &value["result"]["ok"]),
@@ -5082,6 +4933,7 @@ fn extract_job_uses_submitted_safety_limits() {
                 level: CompressionLevel::Fastest,
                 ..CreateOptions::default()
             },
+            CreateCommitPolicy::ReplaceExisting,
             &squallz_core::api::NoProgress,
             &ControlToken::new(),
         )
@@ -5120,7 +4972,7 @@ fn extract_job_uses_submitted_safety_limits() {
     let events = sink.events.lock().unwrap();
     let failed = events
         .iter()
-        .find(|(name, p)| name == EV_STATE && p["id"] == id && p["state"] == "failed");
+        .find(|(name, p)| name == EV_SNAPSHOT && p["id"] == id && p["state"] == "failed");
     assert_eq!(
         failed.and_then(|(_, p)| p["error"]["key"].as_str()),
         Some("error.resource_limit")
@@ -5286,8 +5138,10 @@ fn test_job_keeps_exact_problem_total_with_bounded_messages() {
     assert_eq!(states_of(&events, id), vec!["queued", "running", "done"]);
     let result = done_result(&events, id).unwrap();
     assert_eq!(result["ok"], false);
-    assert_eq!(result["entries"], 25);
+    assert!(result.get("entries").is_none());
     assert_eq!(result["entries_tested"], 25);
+    assert!(result["recovery"].is_null());
+    assert_eq!(result.as_object().unwrap().len(), 7);
     assert_eq!(result["problems_total"], 25);
     assert_eq!(result["problems_truncated"], true);
     assert_eq!(result["problems"].as_array().map(Vec::len), Some(20));
@@ -5329,6 +5183,8 @@ fn recovered_zip_test_job_reports_typed_structure_status() {
     assert_eq!(result["entries_tested"], 1);
     assert_eq!(result["problems_total"], 1);
     assert_eq!(result["structure"], "zip_local_headers_recovered");
+    assert!(result["recovery"].is_null());
+    assert_eq!(result.as_object().unwrap().len(), 8);
     assert_eq!(result["problems"].as_array().map(Vec::len), Some(1));
     std::fs::remove_dir_all(&dir).unwrap();
 }
@@ -5597,40 +5453,40 @@ esac
         vec!["queued", "running", "done"]
     );
     assert!(events.iter().any(|(name, payload)| {
-        name == EV_PROGRESS
+        name == EV_SNAPSHOT
             && payload["id"] == protect_id
-            && payload["phase"] == "recovery_process"
-            && payload["interruptible"] == true
+            && payload["progress"]["phase"] == "recovery_process"
+            && payload["progress"]["interruptible"] == true
     }));
     assert!(events.iter().any(|(name, payload)| {
-        name == EV_PROGRESS
+        name == EV_SNAPSHOT
             && payload["id"] == protect_id
-            && payload["phase"] == "recovery_finalize"
-            && payload["interruptible"] == false
+            && payload["progress"]["phase"] == "recovery_finalize"
+            && payload["progress"]["interruptible"] == false
     }));
     assert!(events.iter().any(|(name, payload)| {
-        name == EV_PROGRESS
+        name == EV_SNAPSHOT
             && payload["id"] == verify_id
-            && payload["phase"] == "recovery_verify"
-            && payload["interruptible"] == true
+            && payload["progress"]["phase"] == "recovery_verify"
+            && payload["progress"]["interruptible"] == true
     }));
     assert!(events.iter().any(|(name, payload)| {
-        name == EV_PROGRESS
+        name == EV_SNAPSHOT
             && payload["id"] == repair_id
-            && payload["phase"] == "recovery_process"
-            && payload["interruptible"] == false
+            && payload["progress"]["phase"] == "recovery_process"
+            && payload["progress"]["interruptible"] == false
     }));
     assert!(events.iter().any(|(name, payload)| {
-        name == EV_PROGRESS
+        name == EV_SNAPSHOT
             && payload["id"] == repair_copy_id
-            && payload["phase"] == "recovery_prepare"
-            && payload["interruptible"] == true
+            && payload["progress"]["phase"] == "recovery_prepare"
+            && payload["progress"]["interruptible"] == true
     }));
     assert!(events.iter().any(|(name, payload)| {
-        name == EV_PROGRESS
+        name == EV_SNAPSHOT
             && payload["id"] == repair_copy_id
-            && payload["phase"] == "recovery_verify"
-            && payload["interruptible"] == false
+            && payload["progress"]["phase"] == "recovery_verify"
+            && payload["progress"]["interruptible"] == false
     }));
     assert_eq!(
         states_of(&events, conflict_id),
@@ -5669,7 +5525,7 @@ esac
     let conflict = events
         .iter()
         .find(|(name, payload)| {
-            name == EV_STATE && payload["id"] == conflict_id && payload["state"] == "failed"
+            name == EV_SNAPSHOT && payload["id"] == conflict_id && payload["state"] == "failed"
         })
         .expect("PAR2 output conflict must emit a failed state");
     assert_eq!(

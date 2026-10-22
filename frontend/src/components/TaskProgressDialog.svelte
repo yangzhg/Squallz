@@ -165,7 +165,7 @@
     if (task.controlIntent === "cancel") return taskCancelButtonLabel(task);
     return !taskNeedsInput(task)
       ? taskOutcomeStateLabel(task)
-      : tr("gui.task_center.needs_input", "Needs input");
+      : tr("gui.task_center.needs_input");
   }
 
   function displayedTaskTone(): string {
@@ -179,19 +179,19 @@
 
   function interactionTitle(): string {
     return task.interaction === "password"
-      ? tr("gui.task.interaction.password_title", "Password needed")
-      : tr("gui.task.interaction.conflict_title", "File decision needed");
+      ? tr("gui.task.interaction.password_title")
+      : tr("gui.task.interaction.conflict_title");
   }
 
   function interactionDetail(): string {
     if (task.interaction === "password") {
       return task.ownedByRequester
-        ? tr("gui.task.interaction.password_waiting", "This task is waiting for a password.")
-        : tr("gui.task.interaction.password_task_window", "Enter the password in the separate task window opened by your file manager.");
+        ? tr("gui.task.interaction.password_waiting")
+        : tr("gui.task.interaction.password_task_window");
     }
     return task.ownedByRequester
-      ? tr("gui.task.interaction.conflict_waiting", "This task is waiting for a file decision.")
-      : tr("gui.task.interaction.conflict_task_window", "Choose how to handle the file in the separate task window opened by your file manager.");
+      ? tr("gui.task.interaction.conflict_waiting")
+      : tr("gui.task.interaction.conflict_task_window");
   }
 
   function onTaskCardKeydown(event: KeyboardEvent): void {
@@ -286,7 +286,7 @@
     <div
       class="task-modal-body"
       role="region"
-      aria-label={tr("gui.task_center.details", "Details")}
+      aria-label={tr("gui.task_center.details")}
       tabindex="0"
       onkeydown={scrollResultList}
     >
@@ -299,7 +299,7 @@
       >
         <span class="task-result-mark"><Icon name={resultIconName()} size={18} /></span>
         <div class="task-result-copy">
-          <strong>{tr("gui.task.result", "Result")}</strong>
+          <strong>{tr("gui.task.result")}</strong>
           <span>{taskDialogResultSummary(task)}</span>
         </div>
       </section>
@@ -334,7 +334,7 @@
     {#if passwordQuestion}
       <form
         class="task-question-card"
-        aria-label={tr("gui.password.required", "Password required")}
+        aria-label={tr("gui.password.required")}
         onsubmit={(event) => {
           event.preventDefault();
           void onSubmitPassword();
@@ -343,19 +343,19 @@
         <header class="task-question-head">
           <span class="task-question-icon"><Icon name="lock" size={18} /></span>
           <div>
-            <strong>{tr("gui.password.unlock_name", "Unlock {name}").replace("{name}", passwordQuestion.name)}</strong>
+            <strong>{tr("gui.password.unlock_name").replace("{name}", passwordQuestion.name)}</strong>
             <span>{passwordQuestion.detail}</span>
           </div>
         </header>
         <label class="task-question-field">
-          <span>{tr("gui.password.password", "Password")}</span>
+          <span>{tr("gui.password.password")}</span>
           <input
             bind:this={passwordInput}
             class="secure-input"
             type="password"
             value={passwordValue}
             autocomplete="current-password"
-            aria-label={tr("gui.password.archive_password", "Archive password")}
+            aria-label={tr("gui.password.archive_password")}
             aria-invalid={passwordError ? "true" : undefined}
             aria-describedby={passwordFeedback ? passwordErrorId : undefined}
             oninput={(event) => onPasswordValueChange(event.currentTarget.value)}
@@ -366,8 +366,8 @@
         {/if}
         <p class="task-question-note"><Icon name="info" size={14} />{passwordQuestion.sessionDetail}</p>
         <footer class="task-question-actions">
-          <button type="button" onclick={onCancelPassword}>{tr("common.cancel", "Cancel")}</button>
-          <button class="primary-lite" type="submit">{tr("gui.password.unlock_continue", "Unlock and continue")}</button>
+          <button type="button" onclick={onCancelPassword}>{tr("common.cancel")}</button>
+          <button class="primary-lite" type="submit">{tr("gui.password.unlock_continue")}</button>
         </footer>
       </form>
     {:else if conflictQuestion}
@@ -375,8 +375,8 @@
         <header class="task-question-head">
           <span class="task-question-icon warning"><Icon name="alert-triangle" size={18} /></span>
           <div>
-            <strong>{tr("gui.conflict.one_item_exists", "1 item already exists")}</strong>
-            <span>{tr("gui.conflict.task_paused", "This task is waiting for your conflict choice.")}</span>
+            <strong>{tr("gui.conflict.one_item_exists")}</strong>
+            <span>{tr("gui.conflict.task_paused")}</span>
           </div>
         </header>
         <div class="task-question-conflict">
@@ -393,12 +393,12 @@
             checked={conflictApplyAll}
             onchange={(event) => onConflictApplyAllChange(event.currentTarget.checked)}
           />
-          <span>{tr("gui.conflict.apply_remaining", "Apply this decision to remaining conflicts")}</span>
+          <span>{tr("gui.conflict.apply_remaining")}</span>
         </label>
         <footer class="task-question-actions">
-          <button type="button" onclick={() => onAnswerConflict("abort", false)}>{tr("gui.conflict.cancel_extraction", "Cancel extraction")}</button>
-          <button type="button" onclick={() => onAnswerConflict("skip", conflictApplyAll)}>{tr("gui.conflict.skip", "Skip")}</button>
-          <button class="conflict-danger" type="button" onclick={() => onAnswerConflict("overwrite", conflictApplyAll)}>{tr("gui.conflict.overwrite", "Replace")}</button>
+          <button type="button" onclick={() => onAnswerConflict("abort", false)}>{tr("gui.conflict.cancel_extraction")}</button>
+          <button type="button" onclick={() => onAnswerConflict("skip", conflictApplyAll)}>{tr("gui.conflict.skip")}</button>
+          <button class="conflict-danger" type="button" onclick={() => onAnswerConflict("overwrite", conflictApplyAll)}>{tr("gui.conflict.overwrite")}</button>
           <button class="primary-lite" type="button" onclick={() => onAnswerConflict("rename", conflictApplyAll)}>{tr("gui.conflict.rename", "Keep both")}</button>
         </footer>
       </section>
@@ -490,21 +490,21 @@
       {/if}
       {#if (task.spec.kind === "checksum" || task.spec.kind === "checksum_check") && taskChecksumItems(task).length > 0}
         {@const checksumRows = taskChecksumItems(task).slice(0, task.expanded ? 20 : 6)}
-        <section class="task-checksum-result" aria-label={tr("gui.task.checksum_results", "Checksum results")}>
+        <section class="task-checksum-result" aria-label={tr("gui.task.checksum_results")}>
           <div class="task-checksum-head">
             <div>
-              <strong>{tr("gui.task.checksum_results", "Checksum results")}</strong>
-              <span>{tr("gui.checksum.result_rows", "{count} rows").replace("{count}", taskChecksumItems(task).length.toLocaleString())}</span>
+              <strong>{tr("gui.task.checksum_results")}</strong>
+              <span>{tr("gui.checksum.result_rows").replace("{count}", taskChecksumItems(task).length.toLocaleString())}</span>
               {#if copyFeedback}
                 <small class="checksum-copy-status" class:danger={copyFeedbackTone === "danger"} role="status">{copyFeedback}</small>
               {/if}
             </div>
             <button type="button" class="primary-lite" disabled={copyPending} aria-busy={copyPending} onclick={() => void onCopyChecksumResults(task)}>
-              <Icon name="list" size={14} />{copyPending ? tr("common.copying", "Copying…") : tr("gui.checksum.copy_results", "Copy results")}
+              <Icon name="list" size={14} />{copyPending ? tr("common.copying") : tr("gui.checksum.copy_results")}
             </button>
           </div>
           <div class="task-checksum-table">
-            <div><b>{tr("gui.checksum.result", "Checksum result")}</b><b>{tr("gui.checksum.digest", "Digest")}</b><b>{tr("common.status", "Status")}</b></div>
+            <div><b>{tr("gui.checksum.result")}</b><b>{tr("gui.checksum.digest")}</b><b>{tr("common.status")}</b></div>
             {#each checksumRows as item}
               <div>
                 <span>{pathBaseName(checksumItemText(item, "path")) || checksumItemText(item, "path")}</span>
@@ -544,9 +544,9 @@
           </div>
         </section>
       {/if}
-      <section class="task-next-step" aria-label={tr("gui.task.next_step", "Next step")}>
+      <section class="task-next-step" aria-label={tr("gui.task.next_step")}>
         <div>
-          <strong>{tr("gui.task.next_step", "Next step")}</strong>
+          <strong>{tr("gui.task.next_step")}</strong>
           <span>{taskNextStepDetail(task, taskWindowMode)}</span>
         </div>
       </section>
@@ -560,7 +560,7 @@
       {/if}
       {#if task.state === "submitting"}
         <button type="button" disabled>
-          <Icon name="hourglass" size={15} />{tr("gui.task.starting", "Starting...")}
+          <Icon name="hourglass" size={15} />{tr("gui.task.starting")}
         </button>
       {:else}
         {#if task.state === "running" && task.interruptible && task.pausable}
@@ -581,7 +581,7 @@
           {/if}
           {#if presentation === "panel"}
             <button type="button" aria-keyshortcuts="Escape" onclick={() => void onDismiss(task)}>
-              {tr("gui.task.back_to_tasks", "Back to tasks")}
+              {tr("gui.task.back_to_tasks")}
             </button>
           {/if}
         {:else}
@@ -592,7 +592,7 @@
           {@const reviewAvailable = taskReviewAvailable(task, taskWindowMode)}
           {#if sfxPublishAvailable}
             <button class="primary" type="button" onclick={() => void onPublishMacosSfx(task)}>
-              <Icon name="shield-check" size={15} />{tr("gui.task.publish_macos_sfx", "Publish for macOS")}
+              <Icon name="shield-check" size={15} />{tr("gui.task.publish_macos_sfx")}
             </button>
           {/if}
           {#if outputPath && outputCanOpen}
@@ -602,7 +602,7 @@
           {/if}
           {#if reviewAvailable}
             <button class={primaryActionAvailable ? "primary-lite" : "primary"} type="button" disabled={reviewPending} aria-busy={reviewPending} onclick={() => onReviewTask(task)}>
-              <Icon name={taskReviewScreen(task) === "recovery" ? "shield-alert" : "settings"} size={15} />{reviewPending ? tr("gui.task.review.preparing", "Preparing review…") : taskReviewActionLabel(task)}
+              <Icon name={taskReviewScreen(task) === "recovery" ? "shield-alert" : "settings"} size={15} />{reviewPending ? tr("gui.task.review.preparing") : taskReviewActionLabel(task)}
             </button>
           {/if}
           {#if taskResultAvailableForSurface(task, taskWindowMode)}
@@ -616,15 +616,15 @@
               <Icon name="list" size={15} />{taskResultActionLabel(task)}
             </button>
           {/if}
-          {#if task.revealPath}
+          {#if outputPath}
             <button type="button" onclick={() => void onRevealOutput(task)}>
               <Icon name="folder-open" size={15} />{taskRevealOutputLabel()}
             </button>
           {/if}
           <button type="button" aria-keyshortcuts={presentation === "panel" ? "Escape" : undefined} onclick={() => void onDismiss(task)}>
             {presentation === "panel"
-              ? tr("gui.task.back_to_tasks", "Back to tasks")
-              : tr("gui.task.close", "Close")}
+              ? tr("gui.task.back_to_tasks")
+              : tr("gui.task.close")}
           </button>
         {/if}
       {/if}

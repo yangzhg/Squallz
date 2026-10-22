@@ -137,15 +137,11 @@ fn create(
     };
     inspection_progress.finish();
     let progress = make_progress();
-    let report = ctx.engine.create_sfx_with_policy(
+    let report = ctx.engine.create_sfx(
         &stub,
         &archive,
         &output,
-        &SfxBuildOptions {
-            target,
-            overwrite: force,
-            resources,
-        },
+        &SfxBuildOptions { target, resources },
         policy,
         &progress,
         &ctx.ctl,

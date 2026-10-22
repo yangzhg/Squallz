@@ -1,6 +1,6 @@
-import type { JobQuestion, JobSnapshot, JobSpec, StateEvent } from "./ipc";
+import type { JobQuestion, JobSnapshot, JobSpec } from "./ipc";
 
-export type SnapshotState = StateEvent["state"];
+export type SnapshotState = JobSnapshot["state"];
 
 /** Capture output protection before credentials are removed from a task. */
 export function outputPasswordRequired(spec: JobSpec): boolean {
@@ -23,27 +23,6 @@ export function snapshotQuestion(
     || !question) return null;
   // Progress and queue updates must not reset the active form or its focus.
   return current?.prompt.version === question.prompt.version ? current : question;
-}
-
-export function shouldApplySnapshotState(
-  currentVersion: number,
-  currentState: SnapshotState,
-  incomingVersion: number,
-  incomingState: SnapshotState,
-): boolean {
-  if (incomingVersion <= currentVersion) return false;
-  return !isTerminalSnapshotState(currentState) || isTerminalSnapshotState(incomingState);
-}
-
-export function shouldApplySnapshotProgress(
-  progressVersion: number,
-  currentState: SnapshotState,
-  incomingVersion: number,
-  stateVersion: number,
-): boolean {
-  // A delayed pre-terminal measurement may fill missing progress without changing the outcome.
-  return incomingVersion > progressVersion
-    && (!isTerminalSnapshotState(currentState) || incomingVersion < stateVersion);
 }
 
 export function shouldApplyFullSnapshot(

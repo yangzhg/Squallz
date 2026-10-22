@@ -1,106 +1,23 @@
 <script lang="ts" module>
-  import type { EntryDto, EntryPreviewDto } from "../lib/ipc";
-  import type { ArchiveBrowseRecoveryState } from "./ArchiveBrowseRecovery.svelte";
-  import type { MoveConflictReviewView } from "./MoveConflictReview.svelte";
-  import type { ArchiveEditingState } from "./ArchiveEditingStatus.svelte";
 
-  type Translate = (key: string, fallback: string) => string;
+  import type { ArchiveBrowserActions, ArchiveBrowserView, ArchivePreviewActions, ArchivePreviewView } from "../lib/archive-browser";
 
-  export type ClassicBrowserEntry = {
-    name: string;
-    location: string;
-    type: string;
-    size: string;
-    packed: string;
-    ratio: string;
-    modified: string;
-    crc: string;
-    encoding: string;
-    attr: string;
-    source?: EntryDto;
-    virtualIndex?: number;
-    selected: boolean;
-    previewing: boolean;
-    previewBusy: boolean;
-    selectionLabel: string;
-    previewActionLabel: string;
-    previewActionIcon: "external-link" | "folder-open" | "eye";
-  };
-
-  export interface ClassicArchiveBrowserProps {
-    view: {
+  export interface ClassicArchiveBrowserProps extends ArchiveBrowserActions, ArchivePreviewActions {
+    view: ArchiveBrowserView & {
       archiveTitle: string;
       archiveFormatSummary: string;
       archiveOpen: boolean;
       openArchiveFirst: string;
-      selection: {
-        checked: boolean;
-        mixed: boolean;
-        disabled: boolean;
-        label: string;
-        busy: boolean;
-        busyLabel: string;
-      };
-      preview: {
-        policyKind: string;
-        policyCode: string;
-        nestedTitle: string | null;
-        nestedSubtitle: string;
-        nestedRows: readonly string[];
-        title: string;
-        subtitle: string;
-        busy: boolean;
-        entry: EntryPreviewDto | null;
-        failed: boolean;
-        canPreview: boolean;
-        actionLabel: string;
-        actionIcon: "external-link" | "folder-open" | "eye";
-        disabledReason: string;
-        ariaLabel: string;
-      };
-      selectedSummary: string;
-      editingStatus: ArchiveEditingState | null;
-      conflict: MoveConflictReviewView | null;
-      structureWarning: string | null;
-      recovery: ArchiveBrowseRecoveryState;
-      totalRows: number;
-      rows: readonly (ClassicBrowserEntry | null)[];
-      startIndex: number;
-      rowsPending: boolean;
-      paddingTop: number;
-      paddingBottom: number;
+      preview: ArchivePreviewView;
       emptyName: string;
       emptyStatus: string;
     };
-    tr: Translate;
-    onOpenRoot: () => void;
-    onOpenRecovery: () => void;
-    onRetryBrowse: () => void;
-    onRetryFormats: () => void;
-    onOpenNestedPreview: () => void;
-    onExtractNestedPreview: () => void;
-    onClearPreview: (restoreEntryFocus?: boolean) => void;
-    onRetryPreview: () => void;
-    onExtractPreviewFailure: () => void;
-    onOpenPreview: () => void;
-    onRevealPreview: () => void;
-    onPreviewSelection: () => void;
-    onCancelMoveConflict: () => void;
-    onSubmitMoveReadyOnly: () => void;
-    onSubmitMoveKeepBoth: () => void;
-    onBrowseScroll: (event: Event) => void;
-    onSelectEntry: (entry: ClassicBrowserEntry, event: MouseEvent | KeyboardEvent) => void;
-    onActivateEntry: (entry: ClassicBrowserEntry) => void;
-    onEntryKeydown: (event: KeyboardEvent, entry: ClassicBrowserEntry) => void;
-    onOpenEntryContext: (event: MouseEvent, entry: ClassicBrowserEntry) => void;
-    onToggleEntrySelection: (entry: ClassicBrowserEntry, event: MouseEvent) => void;
-    onToggleAllEntries: () => void;
-    onPreviewEntry: (entry: ClassicBrowserEntry) => void;
   }
 </script>
 
 <script lang="ts">
   import Icon from "./Icon.svelte";
+  import ArchiveEntryPreview from "./ArchiveEntryPreview.svelte";
   import ArchiveStructureWarning from "./ArchiveStructureWarning.svelte";
   import ArchiveBrowseRecovery from "./ArchiveBrowseRecovery.svelte";
   import ArchiveEditingStatus from "./ArchiveEditingStatus.svelte";
@@ -141,23 +58,15 @@
     if (view.totalRows === 0 && table) table.scrollLeft = 0;
   });
 
-  let previewActive = $derived(
-    Boolean(
-      view.preview.nestedTitle ||
-        view.preview.busy ||
-        view.preview.failed ||
-        view.preview.entry,
-    ),
-  );
 </script>
 
 <div class="classic-body">
-  <aside class="classic-tree" aria-label={tr("gui.aria.archive_folders", "Archive folders")}>
+  <aside class="classic-tree" aria-label={tr("gui.aria.archive_folders")}>
     <button
       type="button"
       class="classic-tree-item active"
       disabled={!view.archiveOpen}
-      title={tr("gui.nav.root", "Archive root")}
+      title={tr("gui.nav.root")}
       onclick={onOpenRoot}
     ><Icon name="archive" size={15} />{view.archiveTitle}</button>
     {#if view.archiveOpen}
@@ -165,89 +74,18 @@
         type="button"
         class="classic-tree-item"
         onclick={onOpenRoot}
-      ><Icon name="folder" size={15} />{tr("gui.list.archive_root", "Archive root")}</button>
+      ><Icon name="folder" size={15} />{tr("gui.list.archive_root")}</button>
     {:else}
       <div class="classic-tree-item muted" title={view.openArchiveFirst} aria-label={view.openArchiveFirst}>
         <Icon name="folder-open" size={15} />{view.openArchiveFirst}
       </div>
     {/if}
     <div class="tree-note">
-      <strong>{tr("gui.archive.format", "Format")}</strong>
+      <strong>{tr("gui.archive.format")}</strong>
       <span>{view.archiveFormatSummary}</span>
     </div>
-    <div
-      class="tree-note nested-tree-note entry-preview-panel"
-      class:preview-sheet-active={previewActive}
-      data-preview-policy={view.preview.policyKind}
-      data-preview-code={view.preview.policyCode}
-      role="region"
-      aria-label={tr("gui.preview.panel", "Entry actions")}
-    >
-      <div class="preview-panel-heading">
-        <strong>{tr("gui.preview.panel", "Entry actions")}</strong>
-        {#if previewActive}
-          <button
-            type="button"
-            class="preview-panel-close"
-            aria-label={tr("gui.preview.close", "Close item actions")}
-            title={tr("gui.preview.close", "Close item actions")}
-            onclick={(event) => onClearPreview(event.detail === 0)}
-          ><Icon name="x" size={13} /></button>
-        {/if}
-      </div>
-      <div class="entry-preview-body">
-        {#if view.preview.nestedTitle || !view.preview.busy}
-          <div class="entry-preview-summary" role={previewActive ? "status" : undefined}>
-            <span>{view.preview.nestedTitle ?? view.preview.title}</span>
-            <small>{view.preview.nestedTitle ? view.preview.nestedSubtitle : view.preview.subtitle}</small>
-          </div>
-        {/if}
-        {#if view.preview.nestedTitle}
-          {#each view.preview.nestedRows as item}
-            <em>{item}</em>
-          {/each}
-        {:else if view.preview.busy}
-          <div class="preview-loading compact" role="status" aria-live="polite">
-            <span>{tr("gui.preview.loading", "Preparing item")}</span>
-            <small>{view.preview.subtitle}</small>
-          </div>
-        {/if}
-      </div>
-      {#if view.preview.nestedTitle || !view.preview.busy}
-        <div class="entry-preview-actions">
-          {#if view.preview.nestedTitle}
-            <button onclick={onOpenNestedPreview}>
-              <Icon name="folder-open" size={13} />{tr("gui.action.open_nested", "Open")}
-            </button>
-            <button onclick={onExtractNestedPreview}>
-              <Icon name="archive" size={13} />{tr("gui.action.extract_nested", "Extract")}
-            </button>
-          {:else if view.preview.failed}
-            <button onclick={onRetryPreview}>
-              <Icon name="rotate-cw" size={13} />{tr("gui.preview.retry", "Retry")}
-            </button>
-            <button onclick={onExtractPreviewFailure}>
-              <Icon name="archive" size={13} />{tr("gui.preview.extract_instead", "Extract instead")}
-            </button>
-          {:else if view.preview.entry}
-            <button class="preview-system-action" onclick={onOpenPreview}>
-              <Icon name="external-link" size={13} />{tr("gui.action.open_preview", "Open")}
-            </button>
-            <button onclick={onRevealPreview}>
-              <Icon name="folder-open" size={13} />{tr("gui.toast.reveal", "Reveal")}
-            </button>
-          {:else}
-            <button
-              disabled={!view.preview.canPreview}
-              aria-busy={view.preview.busy}
-              title={view.preview.disabledReason}
-              aria-label={view.preview.ariaLabel}
-              onclick={onPreviewSelection}
-            ><Icon name={view.preview.actionIcon} size={13} />{view.preview.actionLabel}</button>
-          {/if}
-        </div>
-      {/if}
-    </div>
+    <ArchiveEntryPreview view={view.preview} {tr} classic
+      actions={{ onOpenNestedPreview, onExtractNestedPreview, onClearPreview, onRetryPreview, onExtractPreviewFailure, onOpenPreview, onRevealPreview, onPreviewSelection }} />
   </aside>
 
   <section class="classic-table-wrap">
@@ -255,11 +93,11 @@
       {#if view.editingStatus}
         <ArchiveEditingStatus state={view.editingStatus} onRetry={onRetryFormats} />
       {/if}
-      <ArchiveBrowseRecovery state={view.recovery} retryLabel={tr("gui.error.retry", "Retry")} onRetry={onRetryBrowse} />
+      <ArchiveBrowseRecovery state={view.recovery} retryLabel={tr("gui.error.retry")} onRetry={onRetryBrowse} />
       {#if view.structureWarning}
         <ArchiveStructureWarning
           message={view.structureWarning}
-          actionLabel={tr("gui.archive.open_zip_repair", "Open ZIP repair")}
+          actionLabel={tr("gui.archive.open_zip_repair")}
           onRepair={onOpenRecovery}
         />
       {/if}
@@ -267,22 +105,22 @@
         <span>{view.archiveOpen ? view.selectedSummary : view.openArchiveFirst}</span>
         <small role="status" aria-live="polite">
           {view.rowsPending && !view.recovery
-            ? view.totalRows === 0 ? view.emptyName : tr("gui.list.loading_rows", "Loading entries…")
+            ? view.totalRows === 0 ? view.emptyName : tr("gui.list.loading_rows")
             : view.archiveOpen
-            ? tr("gui.preview.keyboard_hint", "↑/↓ moves between items · Shift extends selection · Space or Return opens")
-            : tr("gui.classic.empty_workbench_hint", "Archive editing controls appear after an archive is open.")}
+            ? tr("gui.preview.keyboard_hint")
+            : tr("gui.classic.empty_workbench_hint")}
         </small>
       </div>
       {#if view.conflict}
         <MoveConflictReview review={view.conflict} {tr} classic onCancel={onCancelMoveConflict} onReadyOnly={onSubmitMoveReadyOnly} onKeepBoth={onSubmitMoveKeepBoth} />
       {/if}
     </div>
-    <p class="archive-selection-hint">{tr("gui.selection.range_hint", "Shift-click to select a range · ⌘/Ctrl-click to select individual entries")}</p>
+    <p class="archive-selection-hint">{tr("gui.selection.range_hint")}</p>
     <div
       class="classic-table"
       bind:this={table}
       role="table"
-      aria-label={tr("gui.table.archive", "Archive table")}
+      aria-label={tr("gui.table.archive")}
       aria-busy={view.rowsPending}
       aria-rowcount={Math.max(view.totalRows + 1, 2)}
       aria-keyshortcuts="Meta+A Control+A"
@@ -302,15 +140,15 @@
             disabled={view.selection.disabled}
             onclick={onToggleAllEntries}
           ></button>
-          <span>{tr("gui.table.name", "Name")}</span>
+          <span>{tr("gui.table.name")}</span>
         </span>
-        <span role="columnheader">{tr("gui.table.size", "Size")}</span>
-        <span role="columnheader">{tr("gui.table.packed", "Packed")}</span>
-        <span role="columnheader">{tr("gui.table.ratio", "Ratio")}</span>
-        <span role="columnheader">{tr("gui.table.modified", "Modified")}</span>
-        <span role="columnheader">{tr("gui.table.crc", "CRC")}</span>
-        <span role="columnheader">{tr("gui.table.filename_encoding", "Name encoding")}</span>
-        <span role="columnheader">{tr("gui.table.attr", "Attr")}</span>
+        <span role="columnheader">{tr("gui.table.size")}</span>
+        <span role="columnheader">{tr("gui.table.packed")}</span>
+        <span role="columnheader">{tr("gui.table.ratio")}</span>
+        <span role="columnheader">{tr("gui.table.modified")}</span>
+        <span role="columnheader">{tr("gui.table.crc")}</span>
+        <span role="columnheader">{tr("gui.table.filename_encoding")}</span>
+        <span role="columnheader">{tr("gui.table.attr")}</span>
       </div>
       <div
         class="virtual-scroll classic-virtual-scroll"

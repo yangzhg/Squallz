@@ -1,71 +1,25 @@
-<script lang="ts" module>
-  export type CreateSourceListVariant = "modern" | "classic";
-  export type CreateSourceListKind = "file" | "folder" | "unknown";
-
-  export interface CreateSourceListAction {
-    label: string;
-    disabled: boolean;
-    busy: boolean;
-    title: string;
-    onSelect: () => void;
-  }
-
-  export interface CreateSourceListRow {
-    path: string;
-    name: string;
-    parent: string;
-    kind: CreateSourceListKind;
-    kindLabel: string;
-    selected: boolean;
-    selectLabel: string;
-    removeLabel: string;
-  }
-
-  export interface CreateSourceListSurface {
-    ariaLabel: string;
-    heading: string;
-    description: string;
-    countLabel: string;
-    selectionLabel: string;
-    selectAllLabel: string;
-    emptyTitle: string;
-    emptyBody: string;
-    removeSelectedLabel: string;
-    keepUntilQueuedLabel: string;
-    lockedReason: string;
-    rows: CreateSourceListRow[];
-    selectedCount: number;
-    allSelected: boolean;
-    mixedSelection: boolean;
-    addFiles: CreateSourceListAction;
-    addFolders: CreateSourceListAction;
-    review: CreateSourceListAction;
-    onToggleAll: (selected: boolean) => void;
-    onToggleRow: (path: string) => void;
-    onRemoveRow: (path: string) => void;
-    onRemoveSelected: () => void;
-    onClearSelection: () => void;
-  }
-</script>
-
 <script lang="ts">
+  import { tFallback as tr } from "../lib/i18n.svelte";
+  import { desktopBasename, desktopDirname } from "../lib/desktop-path";
+  import type { CreateSession } from "../lib/create-session.svelte";
+  import type { CreateSourceKind } from "../lib/create-sources";
   import Icon from "./Icon.svelte";
 
-  let {
-    variant,
-    surface,
-  }: {
-    variant: CreateSourceListVariant;
-    surface: CreateSourceListSurface;
-  } = $props();
+  let { variant, session }: { variant: "modern" | "classic"; session: CreateSession } = $props();
+  let selectedCount = $derived(session.selectedCount());
+  let allSelected = $derived(session.allSelected());
+  let lockedReason = $derived(session.view.sourcesLockedReason());
+  let reviewReason = $derived(session.sources.length === 0
+    ? tr("gui.create.sources.add_before_review")
+    : session.configurationPending ? session.view.configurationPendingMessage() : lockedReason);
 
   let selectAllInput = $state<HTMLInputElement | null>(null);
 
   $effect(() => {
-    if (selectAllInput) selectAllInput.indeterminate = surface.mixedSelection;
+    if (selectAllInput) selectAllInput.indeterminate = selectedCount > 0 && !allSelected;
   });
 
-  function sourceIcon(kind: CreateSourceListKind): string {
+  function sourceIcon(kind: CreateSourceKind): string {
     if (kind === "folder") return "folder";
     if (kind === "file") return "file";
     return "archive";
@@ -77,23 +31,23 @@
       || event.target.closest(".create-source-list") === null
     ) return;
     const key = event.key.toLowerCase();
-    if ((event.metaKey || event.ctrlKey) && key === "a" && surface.rows.length > 0) {
+    if ((event.metaKey || event.ctrlKey) && key === "a" && session.sources.length > 0) {
       event.preventDefault();
-      surface.onToggleAll(true);
+      session.selectAll(true);
       return;
     }
-    if (event.key === "Escape" && surface.selectedCount > 0) {
+    if (event.key === "Escape" && selectedCount > 0) {
       event.preventDefault();
-      surface.onClearSelection();
+      session.clearSelection();
       return;
     }
     if (
       (event.key === "Delete" || event.key === "Backspace")
-      && surface.selectedCount > 0
+      && selectedCount > 0
       && !(event.target instanceof HTMLButtonElement)
     ) {
       event.preventDefault();
-      surface.onRemoveSelected();
+      session.removeSelected();
     }
   }
 </script>
@@ -103,40 +57,40 @@
 <section
   class:classic={variant === "classic"}
   class="create-source-list"
-  aria-label={surface.ariaLabel}
+  aria-label={tr("gui.create.sources.aria")}
 >
   <header class="create-source-list-head">
     <div class="create-source-list-title">
       <span class="create-source-list-mark"><Icon name="archive" size={18} /></span>
       <div>
-        <h2>{surface.heading}</h2>
-        <p>{surface.description}</p>
+        <h2>{tr("gui.create.sources.heading")}</h2>
+        <p>{tr("gui.create.sources.description")}</p>
       </div>
     </div>
     <div class="create-source-list-add">
       <button
         type="button"
-        disabled={surface.addFiles.disabled}
-        aria-busy={surface.addFiles.busy}
-        title={surface.addFiles.title}
-        onclick={surface.addFiles.onSelect}
-      ><Icon name="file" size={15} />{surface.addFiles.label}</button>
+        disabled={session.preflight.sourcesLocked()}
+        aria-busy={session.preflight.state.picker?.kind === "files"}
+        title={lockedReason}
+        onclick={() => void session.chooseSources("files")}
+      ><Icon name="file" size={15} />{session.view.sourcePickerLabel("files")}</button>
       <button
         type="button"
-        disabled={surface.addFolders.disabled}
-        aria-busy={surface.addFolders.busy}
-        title={surface.addFolders.title}
-        onclick={surface.addFolders.onSelect}
-      ><Icon name="folder-open" size={15} />{surface.addFolders.label}</button>
+        disabled={session.preflight.sourcesLocked()}
+        aria-busy={session.preflight.state.picker?.kind === "folder"}
+        title={lockedReason}
+        onclick={() => void session.chooseSources("folder")}
+      ><Icon name="folder-open" size={15} />{session.view.sourcePickerLabel("folder")}</button>
     </div>
   </header>
 
-  {#if surface.rows.length === 0}
+  {#if session.sources.length === 0}
     <div class="create-source-list-empty">
       <span class="create-source-list-empty-mark"><Icon name="folder-open" size={22} /></span>
       <div>
-        <strong>{surface.emptyTitle}</strong>
-        <span>{surface.emptyBody}</span>
+        <strong>{tr("gui.create.sources.empty_title")}</strong>
+        <span>{tr("gui.create.sources.empty_body")}</span>
       </div>
     </div>
   {:else}
@@ -145,49 +99,52 @@
         <input
           bind:this={selectAllInput}
           type="checkbox"
-          checked={surface.allSelected}
-          disabled={Boolean(surface.lockedReason)}
-          aria-label={surface.selectAllLabel}
-          onchange={(event) => surface.onToggleAll(event.currentTarget.checked)}
+          checked={allSelected}
+          disabled={Boolean(lockedReason)}
+          aria-label={tr("gui.create.sources.select_all")}
+          onchange={(event) => session.selectAll(event.currentTarget.checked)}
         />
-        <span>{surface.countLabel}</span>
+        <span>{session.view.sourceCountLabel()}</span>
       </label>
-      <span class="create-source-selection">{surface.selectionLabel}</span>
+      <span class="create-source-selection">{session.view.sourceSelectionLabel()}</span>
       <button
         type="button"
         class="create-source-remove-selected"
-        disabled={surface.selectedCount === 0 || Boolean(surface.lockedReason)}
-        title={surface.lockedReason}
-        onclick={surface.onRemoveSelected}
-      >{surface.removeSelectedLabel}</button>
+        disabled={selectedCount === 0 || Boolean(lockedReason)}
+        title={lockedReason}
+        onclick={session.removeSelected}
+      >{tr("gui.create.sources.remove_selected")}</button>
     </div>
 
     <div class="create-source-list-rows" role="list">
-      {#each surface.rows as row (row.path)}
-        <div class:selected={row.selected} class="create-source-row" role="listitem" title={row.path}>
+      {#each session.sources as row (row.path)}
+        {@const name = desktopBasename(row.path, session.port.platform())}
+        {@const selected = session.isSelected(row.path)}
+        {@const removeLabel = tr("gui.create.sources.remove_item").replace("{name}", name)}
+        <div class:selected={selected} class="create-source-row" role="listitem" title={row.path}>
           <label>
             <input
               type="checkbox"
-              checked={row.selected}
-              disabled={Boolean(surface.lockedReason)}
-              aria-label={row.selectLabel}
-              onchange={() => surface.onToggleRow(row.path)}
+              checked={selected}
+              disabled={Boolean(lockedReason)}
+              aria-label={tr("gui.create.sources.select_item").replace("{name}", name)}
+              onchange={() => session.toggleSelection(row.path)}
             />
-            <span class="create-source-kind" role="img" aria-label={row.kindLabel}>
+            <span class="create-source-kind" role="img" aria-label={session.view.sourceKindLabel(row.kind)}>
               <Icon name={sourceIcon(row.kind)} size={17} />
             </span>
             <span class="create-source-copy">
-              <strong>{row.name}</strong>
-              <small>{row.parent}</small>
+              <strong>{name}</strong>
+              <small>{desktopDirname(row.path, session.port.platform())}</small>
             </span>
           </label>
           <button
             type="button"
             class="create-source-remove"
-            disabled={Boolean(surface.lockedReason)}
-            title={row.removeLabel}
-            aria-label={row.removeLabel}
-            onclick={() => surface.onRemoveRow(row.path)}
+            disabled={Boolean(lockedReason)}
+            title={removeLabel}
+            aria-label={removeLabel}
+            onclick={() => session.removeSource(row.path)}
           ><Icon name="x" size={15} /></button>
         </div>
       {/each}
@@ -195,7 +152,7 @@
   {/if}
 
   <footer class="create-source-list-footer">
-    <span>{surface.keepUntilQueuedLabel}</span>
+    <span>{tr("gui.create.sources.keep_until_queued")}</span>
     <button
       id="create-primary-source-action"
       type="button"
@@ -203,10 +160,10 @@
       class:sheet-action={variant === "modern"}
       class:classic-primary={variant === "classic"}
       class="create-source-review-action"
-      disabled={surface.review.disabled}
-      aria-busy={surface.review.busy}
-      title={surface.review.title}
-      onclick={surface.review.onSelect}
-    ><Icon name="search" size={16} />{surface.review.label}</button>
+      disabled={session.view.startDisabled()}
+      aria-busy={session.preflight.busy()}
+      title={reviewReason}
+      onclick={() => void session.review()}
+    ><Icon name="search" size={16} />{session.view.startLabel(tr("gui.create.sources.review"))}</button>
   </footer>
 </section>

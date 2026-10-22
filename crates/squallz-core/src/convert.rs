@@ -11,17 +11,17 @@ use crate::api::{
     ArchiveReader, Compressor, ControlToken, CreateOptions, Detected, EntryMeta, EntryPath,
     EntryType, FormatError, OpenOptions, ProgressPhase, ProgressSink,
 };
-use crate::compound::{KnownTotal, ProgressRead};
-use crate::create::{
-    create_plan_from_summary, ensure_create_space, open_dest_from_reserved_file,
-    validate_create_target_name, with_split_output_policy, CreateOutput, DestSink, DestTarget,
+use crate::archive_output::{
+    bind_commit_policy, validate_create_target_name, ArchiveOutput, ArchiveWriterTarget, DestSink,
+    DestTarget,
 };
+use crate::compound::{KnownTotal, ProgressRead};
+use crate::create::{create_plan_from_summary, ensure_create_space};
 use crate::{
-    create_input_summary, CreateArtifactKind, CreateCommitPolicy, CreateInputEstimate, CreatePlan,
-    CreateReport, Engine,
+    create_input_summary, CreateCommitPolicy, CreateInputEstimate, CreatePlan, CreateReport, Engine,
 };
 
-/// Entry point for [`Engine::convert_with_report`]. Metadata is carried over as
+/// Entry point for [`Engine::convert`]. Metadata is carried over as
 /// faithfully as the destination format allows; entry types the destination
 /// cannot store (e.g. symlinks in 7z) surface as
 /// [`FormatError::Unsupported`] naming the offending entry.
@@ -32,7 +32,7 @@ pub(crate) fn convert(
     dest: &Path,
     open_opts: &OpenOptions,
     create_opts: &CreateOptions,
-    requested_commit_policy: Option<CreateCommitPolicy>,
+    requested_commit_policy: CreateCommitPolicy,
     progress: &dyn ProgressSink,
     ctl: &ControlToken,
 ) -> Result<CreateReport, FormatError> {
@@ -42,34 +42,7 @@ pub(crate) fn convert(
         .ok_or_else(|| FormatError::Unsupported("invalid output file name".into()))?;
     validate_create_target_name(engine, detect_name, create_opts)?;
 
-    let artifact_kind = if create_opts.split_size.is_some() {
-        CreateArtifactKind::SplitArchive
-    } else {
-        CreateArtifactKind::Archive
-    };
-    let commit_policy = match requested_commit_policy {
-        Some(CreateCommitPolicy::NoReplace) => {
-            if crate::create_destination_has_conflict(dest, artifact_kind)? {
-                return Err(crate::output_exists_error(dest));
-            }
-            CreateCommitPolicy::NoReplace
-        }
-        Some(CreateCommitPolicy::ReplaceIfUnchanged(guard)) => {
-            CreateCommitPolicy::ReplaceIfUnchanged(guard)
-        }
-        Some(CreateCommitPolicy::ReplaceExisting) | None => {
-            let inspection = crate::inspect_create_destination(dest, artifact_kind)?;
-            match (inspection.conflict, inspection.guard) {
-                (false, None) => CreateCommitPolicy::NoReplace,
-                (true, Some(guard)) => CreateCommitPolicy::ReplaceIfUnchanged(guard),
-                _ => {
-                    return Err(FormatError::Other(
-                        "conversion destination inspection returned an inconsistent result".into(),
-                    ));
-                }
-            }
-        }
-    };
+    let commit_policy = bind_commit_policy(dest, create_opts, requested_commit_policy)?;
 
     let mut reader = engine.open_for_operation(src, open_opts, progress, ctl)?;
     let metas = collect_entry_metadata(&mut *reader, ctl)?;
@@ -77,121 +50,17 @@ pub(crate) fn convert(
     ensure_create_space(dest, &plan)?;
     progress.on_phase(ProgressPhase::ArchiveConvert, true);
     ctl.checkpoint()?;
-    if create_opts.split_size.is_none() {
-        let reserved = crate::reserve_bound_sibling_temp_file(dest, "convert")?;
-        let staged = reserved.path.clone();
-        let staged_identity = reserved.identity;
-        let mut retained_file = Some(reserved.file.try_clone()?);
-        let mut cleanup_staging = true;
-        let result = convert_unsplit(
-            engine,
-            &mut *reader,
-            &metas,
-            detect_name,
-            reserved.file,
-            create_opts,
-            create_opts,
-            progress,
-            ctl,
-        );
-        drop(reader);
-        let result = result.and_then(|()| {
-            let retained = retained_file.as_ref().ok_or_else(|| {
-                FormatError::Other("conversion staging handle was transferred twice".into())
-            })?;
-            if crate::filesystem_identity::file_identity(retained)? != staged_identity
-                || crate::filesystem_identity::path_identity(&staged)? != staged_identity
-            {
-                return Err(FormatError::Io(std::io::Error::other(
-                    "conversion staging changed after writing",
-                )));
-            }
-            let total_output_bytes = retained.metadata()?.len();
-            match commit_policy {
-                CreateCommitPolicy::NoReplace => {
-                    crate::publish_bound_file_no_replace(&staged, retained, staged_identity, dest)?
-                }
-                CreateCommitPolicy::ReplaceIfUnchanged(guard) => {
-                    cleanup_staging = false;
-                    let retained = retained_file.take().ok_or_else(|| {
-                        FormatError::Other("conversion staging handle was transferred twice".into())
-                    })?;
-                    crate::update::commit_created_archive(
-                        dest,
-                        &staged,
-                        retained,
-                        staged_identity,
-                        guard,
-                        progress,
-                        ctl,
-                    )?;
-                }
-                CreateCommitPolicy::ReplaceExisting => {
-                    return Err(FormatError::Other(
-                        "conversion replacement policy was not bound before writing".into(),
-                    ));
-                }
-            }
-            Ok(CreateReport {
-                primary_output: dest.to_path_buf(),
-                outputs: vec![dest.to_path_buf()],
-                preserved_outputs: Vec::new(),
-                total_output_bytes,
-                split_volume_count: None,
-            })
-        });
-        return match result {
-            Ok(report) => Ok(report),
-            Err(error) if !cleanup_staging => Err(error),
-            Err(error) => {
-                let retained = retained_file.as_ref().ok_or_else(|| {
-                    FormatError::Other(
-                        "conversion staging handle was unavailable for cleanup".into(),
-                    )
-                })?;
-                match crate::remove_bound_temp_file(&staged, retained, staged_identity) {
-                    Ok(()) => Err(error),
-                    Err(cleanup) => Err(FormatError::Other(format!(
-                        "{error}; conversion staging cleanup also failed: {cleanup}"
-                    ))),
-                }
-            }
-        };
+    ArchiveOutput::Published {
+        destination: dest,
+        policy: commit_policy,
     }
-
-    with_split_output_policy(
-        engine,
-        dest,
-        create_opts,
-        progress,
-        ctl,
-        commit_policy,
-        move |opts, output| {
-            let CreateOutput::CallerReserved {
-                detect_name,
-                reserved,
-            } = output
-            else {
-                return Err(FormatError::Other(
-                    "split conversion lost its reserved output".into(),
-                ));
-            };
-            let result = convert_unsplit(
-                engine,
-                &mut *reader,
-                &metas,
-                detect_name,
-                reserved.file,
-                opts,
-                create_opts,
-                progress,
-                ctl,
-            );
-            drop(reader);
-            result
-        },
-    )
-    .map(|(_value, outputs)| outputs.into_report())
+    .write(engine, create_opts, progress, ctl, move |writer| {
+        let result = convert_unsplit(&mut *reader, &metas, writer, progress, ctl);
+        // Release source handles before publishing over that same archive.
+        drop(reader);
+        result
+    })
+    .map(|(_, report)| report)
 }
 
 pub(crate) fn plan_convert_from_entries(
@@ -290,26 +159,15 @@ fn validate_single_stream_layout(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)] // internal plumbing with distinct roles
 fn convert_unsplit(
-    engine: &Engine,
     reader: &mut dyn ArchiveReader,
     metas: &[EntryMeta],
-    detect_name: &str,
-    output: File,
-    write_opts: &CreateOptions,
-    validation_opts: &CreateOptions,
+    writer: ArchiveWriterTarget<'_>,
     progress: &dyn ProgressSink,
     ctl: &ControlToken,
 ) -> Result<(), FormatError> {
-    match open_dest_from_reserved_file(
-        engine,
-        detect_name,
-        output,
-        write_opts,
-        validation_opts,
-        ctl,
-    )? {
+    let write_opts = writer.options;
+    match writer.open(ctl)? {
         DestTarget::Archive(sink) => copy_entries(reader, metas, sink, write_opts, progress, ctl),
         DestTarget::SingleStream { compressor, output } => single_stream_convert(
             reader,

@@ -64,7 +64,7 @@
     splitTitle?: string;
     disabled?: boolean;
     disabledReason?: string;
-    tr: (key: string, fallback: string) => string;
+    tr: (key: string, fallback?: string) => string;
     onPasswordInput: (value: string) => void;
     onPasswordConfirmationInput: (value: string) => void;
     onPasswordVisibleChange: (visible: boolean) => void;
@@ -85,22 +85,21 @@
 
   function nativeSplitLabel(): string {
     if (nativeSplitKind === "zip") {
-      return tr("gui.create.volume_layout_native_zip", "Native ZIP · .z01 … .zip");
+      return tr("gui.create.volume_layout_native_zip");
     }
     if (nativeSplitKind === "wim") {
-      return tr("gui.create.volume_layout_native_wim", "Native Split WIM · .swm, 2.swm, …");
+      return tr("gui.create.volume_layout_native_wim");
     }
-    return tr("gui.create.volume_layout_native_unavailable", "Native · ZIP or WIM only");
+    return tr("gui.create.volume_layout_native_unavailable");
   }
 
   function nativeSplitWarning(): string {
     if (nativeSplitKind === "wim") {
       return tr(
         "gui.create.native_wim_parts_required",
-        "Keep every .swm part together and open the first .swm. A single large file can make one part exceed the target size.",
       );
     }
-    return tr("gui.create.native_zip_parts_required", "Keep every .zNN part with the final .zip file; open the .zip file.");
+    return tr("gui.create.native_zip_parts_required");
   }
 </script>
 
@@ -113,10 +112,10 @@
         disabled={disabled}
         onchange={(event) => onEncryptionEnabledChange((event.currentTarget as HTMLInputElement).checked)}
       />
-      <span>{tr("gui.create.encrypt_file_contents", "Encrypt file contents")}</span>
+      <span>{tr("gui.create.encrypt_file_contents")}</span>
     </label>
     <label class="create-option-field">
-      <span>{tr("gui.create.password", "Password")}</span>
+      <span>{tr("gui.create.password")}</span>
       <div class="secure-input-row">
         <input
           class="create-option-input"
@@ -125,7 +124,7 @@
           value={password}
           disabled={disabled}
           title={disabledReason}
-          aria-label={disabledReason ? `${tr("gui.create.archive_password", "Archive password")} · ${disabledReason}` : tr("gui.create.archive_password", "Archive password")}
+          aria-label={disabledReason ? `${tr("gui.create.archive_password")} · ${disabledReason}` : tr("gui.create.archive_password")}
           aria-invalid={passwordError ? "true" : "false"}
           aria-required={encryptionEnabled}
           aria-describedby={passwordError ? passwordErrorId : undefined}
@@ -136,14 +135,14 @@
           type="button"
           disabled={disabled}
           title={disabledReason}
-          aria-label={passwordVisible ? tr("gui.create.hide_password", "Hide password") : tr("gui.create.show_password", "Show password")}
+          aria-label={passwordVisible ? tr("gui.create.hide_password") : tr("gui.create.show_password")}
           aria-pressed={passwordVisible}
           onclick={() => onPasswordVisibleChange(!passwordVisible)}
-        >{passwordVisible ? tr("common.hide", "Hide") : tr("common.show", "Show")}</button>
+        >{passwordVisible ? tr("common.hide") : tr("common.show")}</button>
       </div>
     </label>
     <label class="create-option-field">
-      <span>{tr("gui.create.confirm_password", "Confirm password")}</span>
+      <span>{tr("gui.create.confirm_password")}</span>
       <input
         class="create-option-input"
         type={passwordType()}
@@ -151,7 +150,7 @@
         value={passwordConfirmation}
         disabled={disabled}
         title={disabledReason}
-        aria-label={disabledReason ? `${tr("gui.create.confirm_archive_password", "Confirm archive password")} · ${disabledReason}` : tr("gui.create.confirm_archive_password", "Confirm archive password")}
+        aria-label={disabledReason ? `${tr("gui.create.confirm_archive_password")} · ${disabledReason}` : tr("gui.create.confirm_archive_password")}
         aria-invalid={passwordError ? "true" : "false"}
         aria-required={encryptionEnabled}
         aria-describedby={passwordError ? passwordErrorId : undefined}
@@ -168,7 +167,7 @@
         disabled={disabled || !canEncryptNames || !encryptionEnabled}
         onchange={(event) => onEncryptNamesChange((event.currentTarget as HTMLInputElement).checked)}
       />
-      <span>{tr("gui.create.encrypt_file_names", "Encrypt file names")} · {nameEncryptionCapability}</span>
+      <span>{tr("gui.create.encrypt_file_names")} · {nameEncryptionCapability}</span>
     </label>
     <small class="create-option-help">{passwordCapability}</small>
   {:else}
@@ -178,26 +177,26 @@
 
 {#snippet splitFields()}
   <label class="create-option-field">
-    <span>{tr("gui.create.part_size", "Part size")}</span>
+    <span>{tr("gui.create.part_size")}</span>
     <select
       value={splitPreset}
       disabled={disabled || splitDisabled}
       title={disabledReason}
-      aria-label={disabledReason ? `${tr("gui.create.split_volume_size", "Split volume size")} · ${disabledReason}` : tr("gui.create.split_volume_size", "Split volume size")}
+      aria-label={disabledReason ? `${tr("gui.create.split_volume_size")} · ${disabledReason}` : tr("gui.create.split_volume_size")}
       onchange={(event) => onSplitPresetChange((event.currentTarget as HTMLSelectElement).value as CreateSplitPreset)}
     >
-      <option value="none">{tr("gui.create.single_archive", "Single archive")}</option>
+      <option value="none">{tr("gui.create.single_archive")}</option>
       <option value="25-mib">25 MiB</option>
       <option value="100-mib">100 MiB</option>
       <option value="700-mib">700 MiB</option>
-      <option value="4-gib">{tr("gui.compress.split.fat32", "FAT32 limit (4 GiB − 1 B)")}</option>
-      <option value="custom">{tr("common.custom", "Custom")}</option>
+      <option value="4-gib">{tr("gui.compress.split.fat32")}</option>
+      <option value="custom">{tr("common.custom")}</option>
     </select>
   </label>
   {#if splitPreset === "custom"}
     <div class="custom-split-row">
       <label class="create-option-field">
-        <span>{tr("gui.create.custom_part_size", "Custom part size")}</span>
+        <span>{tr("gui.create.custom_part_size")}</span>
         <input
           type="number"
           min="0.1"
@@ -206,19 +205,19 @@
           value={customSplitAmount}
           disabled={disabled || splitDisabled}
           title={disabledReason}
-          aria-label={disabledReason ? `${tr("gui.create.custom_part_size", "Custom part size")} · ${disabledReason}` : tr("gui.create.custom_part_size", "Custom part size")}
+          aria-label={disabledReason ? `${tr("gui.create.custom_part_size")} · ${disabledReason}` : tr("gui.create.custom_part_size")}
           aria-invalid={splitError ? "true" : "false"}
           aria-describedby={splitError ? splitErrorId : undefined}
           oninput={(event) => onCustomSplitAmountInput((event.currentTarget as HTMLInputElement).value)}
         />
       </label>
       <label class="create-option-field create-option-unit">
-        <span>{tr("common.unit", "Unit")}</span>
+        <span>{tr("common.unit")}</span>
         <select
           value={customSplitUnit}
           disabled={disabled || splitDisabled}
           title={disabledReason}
-          aria-label={disabledReason ? `${tr("gui.create.custom_part_size_unit", "Custom part size unit")} · ${disabledReason}` : tr("gui.create.custom_part_size_unit", "Custom part size unit")}
+          aria-label={disabledReason ? `${tr("gui.create.custom_part_size_unit")} · ${disabledReason}` : tr("gui.create.custom_part_size_unit")}
           onchange={(event) => onCustomSplitUnitChange((event.currentTarget as HTMLSelectElement).value as CreateSplitUnit)}
         >
           <option value="mib">MiB</option>
@@ -229,15 +228,15 @@
   {/if}
   {#if splitPreset !== "none"}
     <label class="create-option-field">
-      <span>{tr("gui.create.volume_layout", "Volume layout")}</span>
+      <span>{tr("gui.create.volume_layout")}</span>
       <select
         value={splitMode}
         disabled={disabled || splitDisabled}
         title={disabledReason}
-        aria-label={disabledReason ? `${tr("gui.create.volume_layout_aria", "Split volume layout")} · ${disabledReason}` : tr("gui.create.volume_layout_aria", "Split volume layout")}
+        aria-label={disabledReason ? `${tr("gui.create.volume_layout_aria")} · ${disabledReason}` : tr("gui.create.volume_layout_aria")}
         onchange={(event) => onSplitModeChange((event.currentTarget as HTMLSelectElement).value as CreateSplitMode)}
       >
-        <option value="generic">{tr("gui.create.volume_layout_generic", "Generic · .001, .002, …")}</option>
+        <option value="generic">{tr("gui.create.volume_layout_generic")}</option>
         <option value="native" disabled={nativeSplitKind === null}>
           {nativeSplitLabel()}
         </option>
@@ -253,23 +252,23 @@
     <small class="create-option-warning">
       {splitMode === "native"
         ? nativeSplitWarning()
-        : tr("gui.create.generic_parts_required", "Keep every numbered .001 part in the same folder; open the .001 file.")}
+        : tr("gui.create.generic_parts_required")}
     </small>
   {/if}
 {/snippet}
 
 {#if variant === "modern"}
   <section class="create-option-card">
-    <h2><Icon name="lock" size={16} />{passwordTitle || tr("gui.create.password", "Password")}</h2>
+    <h2><Icon name="lock" size={16} />{passwordTitle || tr("gui.create.password")}</h2>
     {@render passwordFields()}
   </section>
   <section class="create-option-card">
-    <h2><Icon name="panel-top" size={16} />{splitTitle || tr("gui.create.split_volumes", "Split volumes")}</h2>
+    <h2><Icon name="panel-top" size={16} />{splitTitle || tr("gui.create.split_volumes")}</h2>
     {@render splitFields()}
   </section>
 {:else}
-  <div class="classic-label">{passwordTitle || tr("gui.create.password", "Password")}</div>
+  <div class="classic-label">{passwordTitle || tr("gui.create.password")}</div>
   <div class="classic-input create-option-classic">{@render passwordFields()}</div>
-  <div class="classic-label">{splitTitle || tr("gui.create.split_to_volumes", "Split to volumes")}</div>
+  <div class="classic-label">{splitTitle || tr("gui.create.split_to_volumes")}</div>
   <div id={classicSplitSectionId} class="classic-input create-option-classic classic-create-section-target">{@render splitFields()}</div>
 {/if}

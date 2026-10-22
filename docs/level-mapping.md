@@ -13,14 +13,14 @@ CLI `--level 0–9` → `CompressionLevel` 档位（`CompressionLevel::from_nume
 
 各后端的档位换算（每接入一个后端在此追加一列）：
 
-| 档位 | zip (deflate) | gzip (deflate) | bzip2 (block 1–9) | xz (preset 0–9) | zstd (1–22) | lz4 (lz4_flex) | brotli (quality 0–11) | 7z (LZMA2 preset 0–9) |
-| ---- | ---- | ---- | ---- | ---- | ---- | ---- | ---- | ---- |
-| Store | Stored（不压缩） | 0（gzip 帧内不压缩） | 1* | 0* | 1* | fast* | 0* | COPY（不压缩） |
-| Fastest | deflate 1 | 1 | 1 | 1 | 1 | fast | 1 | 1 |
-| Fast | deflate 3 | 3 | 3 | 3 | 2 | fast | 4 | 3 |
-| Normal | deflate 6 | 6 | 6 | 6 | 3 | fast | 6 | 6 |
-| Maximum | deflate 8 | 8 | 9 | 8 | 12 | fast | 9 | 8 |
-| Ultra | deflate 9 | 9 | 9 | 9 | 19 | fast | 11 | 9 |
+| 档位 | zip (deflate) | gzip (deflate) | bzip2 (block 1–9) | xz (preset 0–9) | zstd (1–22) | lz4 (lz4_flex) | brotli (quality 0–11) | 7z (LZMA2 preset 0–9) | WIM (wimlib-imagex) |
+| ---- | ---- | ---- | ---- | ---- | ---- | ---- | ---- | ---- | ---- |
+| Store | Stored（不压缩） | 0（gzip 帧内不压缩） | 1* | 0* | 1* | fast* | 0* | COPY（不压缩） | none（不压缩） |
+| Fastest | deflate 1 | 1 | 1 | 1 | 1 | fast | 1 | 1 | XPRESS |
+| Fast | deflate 3 | 3 | 3 | 3 | 2 | fast | 4 | 3 | XPRESS |
+| Normal | deflate 6 | 6 | 6 | 6 | 3 | fast | 6 | 6 | LZX |
+| Maximum | deflate 8 | 8 | 9 | 8 | 12 | fast | 9 | 8 | LZX |
+| Ultra | deflate 9 | 9 | 9 | 9 | 19 | fast | 11 | 9 | LZMS |
 
 注：
 
@@ -30,3 +30,8 @@ CLI `--level 0–9` → `CompressionLevel` 档位（`CompressionLevel::from_nume
   同一设置；如未来需要 HC 档可评估 lz4（C 绑定）。
 - zstd 的 Maximum/Ultra 取 12/19 而非 22：19 以上需要巨大字典内存，收益极小，
   与 `--ultra` 语义保持在常规内存预算内。
+- WIM writer 将上述名称作为 wimlib-imagex 的 `--compress` 参数；读取仍使用独立的
+  7z 后端，不能由读取工具是否可用推断 WIM 创建是否可用。
+- SQZ v1 的压缩级别效果取决于 `--inner-format`：原生 SQZ 与 TAR 内层不压缩，
+  ZIP、7Z 与 Zstd 内层分别沿用本表对应的映射。`info --json` 未选择创建 profile，
+  因此在现有六档键及 note 中说明条件，不报告一个虚构的当前 profile。

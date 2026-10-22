@@ -1,36 +1,23 @@
 import { basename } from "./format";
 import type { JobSpec } from "./ipc";
-import { t } from "./i18n.svelte";
-
-function fill(template: string, params: Record<string, string | number>): string {
-  let out = template;
-  for (const [name, value] of Object.entries(params)) {
-    out = out.split(`{${name}}`).join(String(value));
-  }
-  return out;
-}
-
-function translate(key: string, fallback: string, params: Record<string, string | number>): string {
-  const value = t(key, params);
-  return value === key ? fill(fallback, params) : value;
-}
+import { tFallback as translate } from "./i18n.svelte";
 
 export function jobTitleFor(spec: JobSpec): string {
   switch (spec.kind) {
     case "compress":
       return spec.sfx_target
-        ? translate("gui.task.job.create_sfx", "Create self-extractor {name}", { name: basename(spec.dest) })
-        : translate("gui.task.job.compress", "Compress {name}", { name: basename(spec.dest) });
+        ? translate("gui.task.job.create_sfx", { name: basename(spec.dest) })
+        : translate("gui.task.job.compress", { name: basename(spec.dest) });
     case "publish_macos_sfx":
-      return translate("gui.task.job.publish_macos_sfx", "Publish {name}", { name: basename(spec.output) });
+      return translate("gui.task.job.publish_macos_sfx", { name: basename(spec.output) });
     case "extract":
-      return translate("gui.task.job.extract", "Extract {name}", { name: basename(spec.path) });
+      return translate("gui.task.job.extract", { name: basename(spec.path) });
     case "batch_extract":
-      return translate("gui.task.job.batch_extract", "Batch extract", {});
+      return translate("gui.task.job.batch_extract", {});
     case "extract_nested":
-      return translate("gui.task.job.extract", "Extract {name}", { name: basename(spec.entry_path) });
+      return translate("gui.task.job.extract", { name: basename(spec.entry_path) });
     case "test":
-      return translate("gui.task.job.test", "Test {name}", { name: basename(spec.path) });
+      return translate("gui.task.job.test", { name: basename(spec.path) });
     case "convert":
       return translate("gui.task.job.convert", "Convert {from} -> {to}", {
         from: basename(spec.src),
@@ -52,18 +39,18 @@ export function jobTitleFor(spec: JobSpec): string {
         to: basename(spec.dest),
       });
     case "protect":
-      return translate("gui.task.job.protect", "Protect {name}", { name: basename(spec.path) });
+      return translate("gui.task.job.protect", { name: basename(spec.path) });
     case "verify_recovery":
-      return translate("gui.task.job.verify_recovery", "Verify recovery for {name}", { name: basename(spec.path) });
+      return translate("gui.task.job.verify_recovery", { name: basename(spec.path) });
     case "repair_recovery":
-      return translate("gui.task.job.repair_recovery", "Repair {name}", { name: basename(spec.path) });
+      return translate("gui.task.job.repair_recovery", { name: basename(spec.path) });
     case "update":
-      return translate("gui.task.job.update", "Update {name}", { name: basename(spec.path) });
+      return translate("gui.task.job.update", { name: basename(spec.path) });
     case "checksum":
-      return translate("gui.task.job.checksum", "Checksum {name}", { name: basename(spec.inputs[0] ?? "files") });
+      return translate("gui.task.job.checksum", { name: basename(spec.inputs[0] ?? "files") });
     case "checksum_check":
-      return translate("gui.task.job.checksum_check", "Verify checksums {name}", { name: basename(spec.manifest) });
+      return translate("gui.task.job.checksum_check", { name: basename(spec.manifest) });
     case "duplicate_scan":
-      return translate("gui.task.job.duplicate_scan", "Find duplicates in {name}", { name: basename(spec.inputs[0] ?? "scan") });
+      return translate("gui.task.job.duplicate_scan", { name: basename(spec.inputs[0] ?? "scan") });
   }
 }

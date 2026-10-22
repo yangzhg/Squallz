@@ -510,7 +510,7 @@ impl TestSummary {
 
 /// Summary of recovery data and damage observed while opening/testing an
 /// archive.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RecoverySummary {
     /// Recovery scheme identifier, e.g. `sqz-embedded-rs-gf8`.
     pub scheme: String,

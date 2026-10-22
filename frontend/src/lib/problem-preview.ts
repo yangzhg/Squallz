@@ -1,15 +1,10 @@
-type ResultRecord = Record<string, unknown> | null | undefined;
+import type { JobResult, ExtractReport } from "./job-result";
+type Result = JobResult | ExtractReport | null | undefined;
 
-export function resultProblemMessages(result: ResultRecord): unknown[] {
-  if (Array.isArray(result?.problems)) return result.problems;
-  return [];
+export function resultProblemMessages(result: Result): string[] {
+  return result && "problems" in result ? result.problems : [];
 }
 
-export function resultProblemTotal(result: ResultRecord): number {
-  const messages = resultProblemMessages(result);
-  const reportedTotal = result?.problems_total;
-  if (typeof reportedTotal === "number" && Number.isFinite(reportedTotal)) {
-    return Math.max(messages.length, Math.max(0, Math.trunc(reportedTotal)));
-  }
-  return messages.length;
+export function resultProblemTotal(result: Result): number {
+  return result && "problems_total" in result ? result.problems_total : 0;
 }

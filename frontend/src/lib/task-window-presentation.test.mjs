@@ -1,10 +1,11 @@
+import { jobResult } from "../../tests/job-results.mjs";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
 import { parseCss } from "svelte/compiler";
 
-import { createTestServer } from "../../tests/runtime.mjs";
+import { englishTranslate, createTestServer } from "../../tests/runtime.mjs";
 import { compileTestScript, readSvelteScript, selectFunctions } from "../../tests/source.mjs";
 
 async function taskSurface(presentation, server) {
@@ -23,14 +24,12 @@ async function taskSurface(presentation, server) {
     ...callbacks,
     pendingTaskReviewId: null,
     activePlatform: "macos",
-    settingsSession: new SettingsSession({ platform: () => "macos", tr: (_key, fallback) => fallback, emit() {} },
+    settingsSession: new SettingsSession({ platform: () => "macos", tr: englishTranslate, emit() {} },
       { paletteOverride: "ocean" }),
     activeTheme: "dark",
     activeDensityChoice: "comfortable",
     customPaletteVariables: () => ({}),
-    taskChecksumCopyFeedback: () => null,
-    taskChecksumCopyFeedbackTone: () => null,
-    checksumCopyPending: () => false,
+    tools: { copyPending: () => false, copyFeedback: () => null, copyTask: callbacks.copyTaskChecksumResults },
     taskPasswordQuestion: () => null,
     taskConflictQuestion: () => null,
     jobPasswordPrompt: null, jobPasswordValue: "",
@@ -173,9 +172,9 @@ test("waiting task surfaces retain measured progress without rates or processing
       }
       const partialBatch = { ...extractTask("done"), expanded: true,
         spec: { kind: "batch_extract", items: [{ path: "damaged.zip" }] },
-        result: { archives: 1, extracted: 1, failed: 0, outputs: [
+        result: jobResult("batch_extract", { archives: 1, extracted: 1, failed: 0, outputs: [
           { archive: "damaged.zip", counts: { failed: 1, skipped: 0 }, problems: ["bad.txt: CRC mismatch"] },
-        ] } };
+        ] }) };
       for (const presentation of ["dialog", "panel", "window"]) {
         const { surface } = await taskSurface(presentation, server);
         const taskWindowMode = presentation === "window";

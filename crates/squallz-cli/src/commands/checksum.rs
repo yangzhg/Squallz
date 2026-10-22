@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use serde_json::json;
+use super::reports::{checksum_check_report_json, checksum_report_json};
 use squallz_core::{
     ChecksumAlgorithm, ChecksumReport, ChecksumVerificationItem, ChecksumVerificationReport,
 };
@@ -60,11 +60,11 @@ pub fn run(
         let progress = CliProgress::new_for_operation(ctx, as_json, "checksum");
         let report = ctx
             .engine
-            .verify_checksum_manifest_with_progress(&manifest, algorithm, &progress, &ctx.ctl);
+            .verify_checksum_manifest(&manifest, algorithm, &progress, &ctx.ctl);
         progress.finish();
         let report = report?;
         if as_json {
-            print_check_json(&report)?;
+            print_pretty_json(&checksum_check_report_json(&report))?;
         } else if ctx.is_modern() {
             print_check_modern(ctx, &report);
         } else {
@@ -80,61 +80,18 @@ pub fn run(
     let progress = CliProgress::new_for_operation(ctx, as_json, "checksum");
     let report = ctx
         .engine
-        .checksum_files_with_progress(&inputs, &excludes, algorithm, &progress, &ctx.ctl);
+        .checksum_files(&inputs, &excludes, algorithm, &progress, &ctx.ctl);
     progress.finish();
     let report = report?;
 
     if as_json {
-        print_json(&report)?;
+        print_pretty_json(&checksum_report_json(&report))?;
     } else if ctx.is_modern() {
         print_modern(ctx, &report, &excludes);
     } else {
         print_classic(&report);
     }
     Ok(())
-}
-
-fn print_json(report: &ChecksumReport) -> Result<(), CliError> {
-    let value = json!({
-        "ok": true,
-        "operation": "checksum",
-        "algorithm": report.algorithm.id(),
-        "input_count": report.input_count,
-        "entries_scanned": report.entries_scanned,
-        "files_hashed": report.files_hashed,
-        "bytes_hashed": report.bytes_hashed,
-        "items": report.items.iter().map(|item| {
-            json!({
-                "path": path_string(&item.path),
-                "size": item.size,
-                "digest": item.digest,
-            })
-        }).collect::<Vec<_>>(),
-    });
-    print_pretty_json(&value)
-}
-
-fn print_check_json(report: &ChecksumVerificationReport) -> Result<(), CliError> {
-    let value = json!({
-        "ok": report.is_ok(),
-        "operation": "checksum_check",
-        "algorithm": report.algorithm.id(),
-        "manifest": path_string(&report.manifest),
-        "checked": report.checked,
-        "passed": report.passed,
-        "failed": report.failed,
-        "bytes_hashed": report.bytes_hashed,
-        "items": report.items.iter().map(|item| {
-            json!({
-                "path": path_string(&item.path),
-                "expected": item.expected,
-                "actual": item.actual,
-                "ok": item.ok,
-                "error": item.error,
-            })
-        }).collect::<Vec<_>>(),
-    });
-    print_pretty_json(&value)
 }
 
 fn print_classic(report: &ChecksumReport) {

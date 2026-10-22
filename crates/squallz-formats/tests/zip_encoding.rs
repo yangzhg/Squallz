@@ -7,7 +7,7 @@ mod common;
 
 use std::fs;
 
-use common::{build_stored_zip, engine, RawZipEntry, TempDir};
+use common::{build_stored_zip, engine, read_archive_entries, RawZipEntry, TempDir};
 use squallz_format_api::{ControlToken, ExtractOptions, NoProgress, OpenOptions};
 
 const NAME_UTF8: &str = "压缩文件中文名称测试.txt";
@@ -39,7 +39,7 @@ fn gbk_names_decode_with_manual_override() {
         encoding_override: Some("gbk".into()),
         ..OpenOptions::default()
     };
-    let entries = engine().list(&archive, &opts).unwrap();
+    let entries = read_archive_entries(&engine(), &archive, &opts).unwrap();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].path.display, NAME_UTF8);
     assert_eq!(entries[0].path.encoding, "GBK");
@@ -54,7 +54,7 @@ fn gbk_names_decode_with_manual_override() {
 fn gbk_names_decode_with_auto_detection() {
     let tmp = TempDir::new("gbk-auto");
     let archive = gbk_fixture(&tmp);
-    let entries = engine().list(&archive, &OpenOptions::default()).unwrap();
+    let entries = read_archive_entries(&engine(), &archive, &OpenOptions::default()).unwrap();
     assert_eq!(entries.len(), 1);
     assert_eq!(
         entries[0].path.display, NAME_UTF8,

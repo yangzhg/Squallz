@@ -16,29 +16,30 @@ use tauri_plugin_opener::OpenerExt;
 #[cfg(test)]
 use squallz_core::api::NoProgress;
 use squallz_core::api::{
-    ControlToken, Detected, FormatError, FormatKind, OpenOptions, OverwritePolicy, Password,
-    ProgressSink, SafetyLimits, SymlinkPolicy,
+    ControlToken, Detected, FormatError, FormatKind, OpenOptions, Password, ProgressSink,
+    SafetyLimits,
 };
+use squallz_core::ExternalTaskAction;
 use squallz_core::{
     create_destination_has_conflict as core_create_destination_has_conflict,
     find_available_create_destination as core_find_available_create_destination,
     inspect_create_destination_with_progress as inspect_core_create_destination_with_progress,
-    parent_or_current, ChecksumAlgorithm, CreateArtifactKind, CreateCompletionAction,
-    CreateContentPolicy, CreateCredential, CreateOutput, EntryNameEncoding, PostSuccessAction,
-    PresetDocument, PresetError, PresetStore, SfxTarget, VolumeMode,
+    parent_or_current, ArchiveMovePlan, ArchiveTargetInspection, ChecksumAlgorithm,
+    CreateArtifactKind, PresetDocument, PresetError, PresetStore, SfxTarget,
 };
 use squallz_i18n::Localizer;
 
 use crate::create_preflight::{
     DestinationInspectionProgress, PreflightRequestKind, PreflightRequestLease, PreflightRequests,
+    EV_CREATE_PREFLIGHT,
 };
 use crate::dto::{
-    normalize_performance_stream_buffer_limit, ArchiveInfo, ArchiveMovePlanDto,
-    ArchiveTargetInspectionDto, BatchExtractItem, CreateDestinationInspectionDto, CreatePlanDto,
-    DiskSpaceDto, EntryPreviewDto, ErrorDto, ExternalTaskActionDto, ExtractPlanPreflightDto,
-    FormatDto, IntegrationApplyResultDto, IntegrationRemoveResultDto, IntegrationStatusDto,
-    IntegrationSystemDiagnosticsDto, JobSpec, LanguageDto, LocaleTable, NestedArchivePasswords,
-    NestedArchivePreviewDto, Page, PasswordBookStatusDto, SettingsDto, SfxCreateCapabilityDto,
+    normalize_performance_stream_buffer_limit, ArchiveInfo, BatchExtractItem,
+    CreateDestinationInspectionDto, CreatePlanDto, DiskSpaceDto, EntryPreviewDto, ErrorDto,
+    ExtractPlanPreflightDto, FormatDto, IntegrationApplyResultDto, IntegrationRemoveResultDto,
+    IntegrationStatusDto, IntegrationSystemDiagnosticsDto, JobSpec, LanguageDto, LocaleTable,
+    NestedArchivePasswords, NestedArchivePreviewDto, Page, PasswordBookStatusDto, SettingsDto,
+    SfxCreateCapabilityDto,
 };
 use crate::events::EventSink;
 use crate::integration;
@@ -532,7 +533,7 @@ pub async fn inspect_archive_target(
     state: State<'_, Arc<AppState>>,
     id: u64,
     target: String,
-) -> Result<ArchiveTargetInspectionDto, ErrorDto> {
+) -> Result<ArchiveTargetInspection, ErrorDto> {
     let state = Arc::clone(state.inner());
     let owner_window = window.label().to_owned();
     tauri::async_runtime::spawn_blocking(move || {
@@ -540,7 +541,6 @@ pub async fn inspect_archive_target(
     })
     .await
     .map_err(|error| ErrorDto::other(format!("archive target check failed: {error}")))?
-    .map(ArchiveTargetInspectionDto::from)
     .map_err(ErrorDto::from)
 }
 
@@ -552,7 +552,7 @@ pub async fn plan_archive_move(
     id: u64,
     paths: Vec<String>,
     target_dir: String,
-) -> Result<ArchiveMovePlanDto, ErrorDto> {
+) -> Result<ArchiveMovePlan, ErrorDto> {
     let state = Arc::clone(state.inner());
     let owner_window = window.label().to_owned();
     tauri::async_runtime::spawn_blocking(move || {
@@ -560,7 +560,6 @@ pub async fn plan_archive_move(
     })
     .await
     .map_err(|error| ErrorDto::other(format!("archive move check failed: {error}")))?
-    .map(ArchiveMovePlanDto::from)
     .map_err(ErrorDto::from)
 }
 
@@ -667,82 +666,128 @@ pub fn archive_stem(state: State<'_, Arc<AppState>>, path: String) -> String {
     state.engine.archive_stem(Path::new(&path))
 }
 
+fn plan_create_impl(
+    state: &AppState,
+    spec: &JobSpec,
+    settings: &SettingsDto,
+    sfx_template: Option<&Path>,
+    events: &dyn EventSink,
+    request_id: &str,
+    lease: &PreflightRequestLease,
+) -> Result<CreatePlanDto, FormatError> {
+    let request = create_job_request(spec, settings)?;
+    let control = lease.control();
+    control.checkpoint()?;
+    let mut last_emit = Instant::now() - PREFLIGHT_PROGRESS_INTERVAL;
+    let mut scanned_entries = 0usize;
+    let plan = {
+        let mut emit_progress = |scanned: usize, current: &str| {
+            scanned_entries = scanned;
+            if !control.is_cancelled()
+                && (scanned == 1
+                    || scanned.is_multiple_of(128)
+                    || last_emit.elapsed() >= PREFLIGHT_PROGRESS_INTERVAL)
+            {
+                last_emit = Instant::now();
+                events.emit_json(
+                    EV_CREATE_PREFLIGHT,
+                    json!({
+                        "request_id": request_id,
+                        "phase": "scanning",
+                        "scanned": scanned,
+                        "current": current,
+                    }),
+                );
+            }
+        };
+        match request.sfx_options() {
+            Some(sfx_options) => {
+                let template = sfx_template.ok_or_else(|| {
+                    FormatError::DependencyMissing("Squallz SFX runtime template".into())
+                })?;
+                state.engine.plan_sfx_from_inputs(
+                    template,
+                    &request.inputs,
+                    &request.dest,
+                    &request.options,
+                    &sfx_options,
+                    &mut emit_progress,
+                    &control,
+                )
+            }
+            None => state.engine.plan_create(
+                &request.dest,
+                &request.inputs,
+                &request.options,
+                &mut emit_progress,
+                &control,
+            ),
+        }
+    }?;
+    let plan = CreatePlanDto::from(plan).with_scanned_entries(scanned_entries);
+    lease.begin_commit()?;
+    events.emit_json(
+        EV_CREATE_PREFLIGHT,
+        json!({
+            "request_id": request_id,
+            "phase": "done",
+            "scanned": scanned_entries,
+            "current": "",
+        }),
+    );
+    Ok(plan)
+}
+
 /// Plans a frozen create job with the same options and output layout the
 /// worker will execute. The returned budgets are conservative guardrails,
 /// while the input totals come from a real source walk.
 #[tauri::command]
 pub async fn plan_create(
-    app: AppHandle,
     window: WebviewWindow,
     state: State<'_, Arc<AppState>>,
+    requests: State<'_, Arc<PreflightRequests>>,
     jobs: State<'_, Arc<JobManager>>,
     settings: State<'_, Arc<SettingsStore>>,
     spec: JobSpec,
     request_id: String,
 ) -> Result<CreatePlanDto, ErrorDto> {
     let state = Arc::clone(state.inner());
-    let request = create_job_request(&spec, &settings.get()).map_err(ErrorDto::from)?;
+    let settings = settings.get();
     let sfx_template = jobs.sfx_template_path();
-    let events = TauriEvents::new(app, &window);
-    tauri::async_runtime::spawn_blocking(move || -> Result<CreatePlanDto, FormatError> {
-        let mut last_emit = Instant::now() - PREFLIGHT_PROGRESS_INTERVAL;
-        let mut scanned_entries = 0usize;
-        let plan = {
-            let mut emit_progress = |scanned: usize, current: &str| {
-                scanned_entries = scanned;
-                if scanned == 1
-                    || scanned.is_multiple_of(128)
-                    || last_emit.elapsed() >= PREFLIGHT_PROGRESS_INTERVAL
-                {
-                    last_emit = Instant::now();
-                    events.emit_json(
-                        "create://preflight",
-                        json!({
-                            "request_id": request_id.as_str(),
-                            "phase": "scanning",
-                            "scanned": scanned,
-                            "current": current,
-                        }),
-                    );
-                }
-            };
-            match request.sfx_options() {
-                Some(sfx_options) => {
-                    let template = sfx_template.as_deref().ok_or_else(|| {
-                        FormatError::DependencyMissing("Squallz SFX runtime template".into())
-                    })?;
-                    state.engine.plan_sfx_from_inputs_with_progress(
-                        template,
-                        &request.inputs,
-                        &request.dest,
-                        &request.options,
-                        &sfx_options,
-                        &mut emit_progress,
-                    )
-                }
-                None => state.engine.plan_create_with_progress(
-                    &request.dest,
-                    &request.inputs,
-                    &request.options,
-                    &mut emit_progress,
-                ),
-            }
-        }?;
-        let plan = CreatePlanDto::from(plan).with_scanned_entries(scanned_entries);
-        events.emit_json(
-            "create://preflight",
-            json!({
-                "request_id": request_id.as_str(),
-                "phase": "done",
-                "scanned": scanned_entries,
-                "current": "",
-            }),
-        );
-        Ok(plan)
+    let events = TauriEvents::new(window.app_handle().clone(), &window);
+    let lease = requests.begin_request(
+        PreflightRequestKind::CreatePlan,
+        window.label(),
+        &request_id,
+    );
+    tauri::async_runtime::spawn_blocking(move || {
+        plan_create_impl(
+            &state,
+            &spec,
+            &settings,
+            sfx_template.as_deref(),
+            &events,
+            &request_id,
+            &lease,
+        )
     })
     .await
     .map_err(|e| ErrorDto::other(format!("create plan task failed: {e}")))?
     .map_err(ErrorDto::from)
+}
+
+/// Cancels the matching source scan owned by this WebView.
+#[tauri::command]
+pub fn cancel_create_plan(
+    window: WebviewWindow,
+    requests: State<'_, Arc<PreflightRequests>>,
+    request_id: String,
+) {
+    requests.cancel(
+        PreflightRequestKind::CreatePlan,
+        window.label(),
+        &request_id,
+    );
 }
 
 fn plan_convert_impl(
@@ -1395,7 +1440,7 @@ fn open_nested_archive_impl(
         .resolve_archive_source(outer_source, Some(owner))
         .map_err(preview_error_dto)?;
     let reservation = sessions.reserve(owner).map_err(preview_error_dto)?;
-    let workspace = reservation.workspace_path().map_err(preview_error_dto)?;
+    let workspace = reservation.workspace().map_err(preview_error_dto)?;
     let (temp, prepared) = extract_nested_archive_to_temp_limited(
         state,
         outer.path(),
@@ -1414,7 +1459,7 @@ fn open_nested_archive_impl(
     })?;
     let display_name = entry_base_name(entry_path);
     let display_path = nested_archive_display_path(outer.display_path(), entry_path);
-    let temp_path = temp.to_path_buf();
+    let temp_path = temp.path().to_path_buf();
     let info = state
         .open_archive_with_owned_temp_and_entry_limit(
             owner,
@@ -1556,7 +1601,7 @@ pub async fn get_macos_sfx_publisher_status(
     .map_err(|error| ErrorDto::other(format!("SFX publisher check failed: {error}")))?
 }
 
-/// Submits a job to the queue; progress/state arrive as `job://*` events.
+/// Submits a job and returns the same authoritative snapshot sent by events.
 #[tauri::command]
 pub fn submit_job(
     app: AppHandle,
@@ -1565,16 +1610,18 @@ pub fn submit_job(
     jobs: State<'_, Arc<JobManager>>,
     settings: State<'_, Arc<SettingsStore>>,
     spec: JobSpec,
-) -> Result<u64, ErrorDto> {
+) -> Result<JobStateSnapshot, ErrorDto> {
     let owner_window = window.label().to_owned();
-    jobs.submit_for_window(
-        owner_window,
-        Arc::clone(state.inner()),
-        Arc::new(TauriEvents::new(app, &window)),
-        spec,
-        settings.get(),
-    )
-    .map_err(ErrorDto::from)
+    let id = jobs
+        .submit_for_window(
+            owner_window.clone(),
+            Arc::clone(state.inner()),
+            Arc::new(TauriEvents::new(app, &window)),
+            spec,
+            settings.get(),
+        )
+        .map_err(ErrorDto::from)?;
+    jobs.snapshot_for_window(&owner_window, id)
 }
 
 #[tauri::command]
@@ -1696,7 +1743,7 @@ pub fn cancel_job(
     jobs.cancel_for_window(window.label(), id)
 }
 
-/// Answers a `job://ask-conflict` prompt.
+/// Answers the current conflict question.
 #[tauri::command]
 pub fn answer_conflict(
     window: WebviewWindow,
@@ -1709,7 +1756,7 @@ pub fn answer_conflict(
     jobs.answer_conflict_for_window(window.label(), id, question_version, decision, apply_all)
 }
 
-/// Answers a `job://ask-password` prompt (`None` = the user cancelled).
+/// Answers the current password question (`None` = the user cancelled).
 #[tauri::command]
 pub fn answer_password(
     window: WebviewWindow,
@@ -1912,7 +1959,7 @@ pub fn save_archive_presets(
 pub fn resolve_external_task_job(
     state: State<'_, Arc<AppState>>,
     presets: State<'_, Arc<PresetStore>>,
-    action: ExternalTaskActionDto,
+    action: ExternalTaskAction,
     paths: Vec<String>,
     output: Option<String>,
     checksum_algorithm: ChecksumAlgorithm,
@@ -1933,237 +1980,108 @@ pub fn resolve_external_task_job(
 fn resolve_external_task_job_impl(
     state: &AppState,
     document: &PresetDocument,
-    action: ExternalTaskActionDto,
+    action: ExternalTaskAction,
     paths: Vec<String>,
     output: Option<String>,
     checksum_algorithm: ChecksumAlgorithm,
     checksum_excludes: Vec<String>,
 ) -> Result<Option<JobSpec>, ErrorDto> {
-    let paths: Vec<String> = paths.into_iter().filter(|path| !path.is_empty()).collect();
-    let Some(first) = paths.first() else {
-        return Ok(None);
-    };
-    match action {
-        ExternalTaskActionDto::Checksum => Ok(Some(JobSpec::Checksum {
-            inputs: paths,
-            excludes: checksum_excludes,
-            algorithm: checksum_algorithm,
-        })),
-        ExternalTaskActionDto::ExtractHere | ExternalTaskActionDto::ExtractToFolder => {
-            resolve_external_extract_job(state, document, action, paths).map(Some)
-        }
-        ExternalTaskActionDto::ExtractSfx => Ok(Some(JobSpec::Extract {
-            path: first.clone(),
-            dest: output
+    use squallz_core::ExternalTaskPlan;
+    let plan = state
+        .engine
+        .resolve_external_task(
+            document,
+            action,
+            paths.into_iter().map(PathBuf::from).collect(),
+            output
                 .as_deref()
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
-                .map(str::to_owned)
-                .unwrap_or_else(|| external_archive_folder(state, first)),
-            expected_destination: None,
-            expected_input_guard: None,
-            selection: None,
-            overwrite: squallz_core::api::OverwritePolicy::Ask,
-            symlinks: squallz_core::api::SymlinkPolicy::Skip,
-            smart: false,
-            encoding: None,
-            password: None,
-            verify_sfx: true,
-            best_effort: false,
-        })),
-        ExternalTaskActionDto::CompressTo7z => {
-            let (
-                level,
-                encrypt_names,
-                split_size,
-                content_policy,
-                excludes,
-                completion,
-                post_success,
-                test_after_create,
-            ) = if let Some(options) = bound_create_preset(document)? {
-                if options.format.as_str() != "7z"
-                    || options.credential != CreateCredential::None
-                    || options.output != CreateOutput::Archive
-                {
-                    return Err(ErrorDto::presets(
-                        "file-manager create preset is not compatible with Compress to 7Z",
-                        false,
-                    ));
-                }
-                let split_size = match options.volumes {
-                    VolumeMode::Single => None,
-                    VolumeMode::Split { size_bytes } => Some(size_bytes.get()),
-                };
-                (
-                    options.level.get(),
-                    options.encrypt_names,
-                    split_size,
-                    options.content_policy,
-                    options.excludes.clone(),
-                    options.completion,
-                    options.post_success,
-                    options.test_after_create,
-                )
-            } else {
-                (
-                    5,
-                    false,
-                    None,
-                    CreateContentPolicy::KeepAllFiles,
-                    Vec::new(),
-                    CreateCompletionAction::None,
-                    PostSuccessAction::KeepSource,
-                    false,
-                )
-            };
-            Ok(Some(JobSpec::Compress {
-                inputs: paths.clone(),
-                dest: external_compress_output(state, &paths, output.as_deref()),
-                level,
-                password: None,
-                encrypt_names,
-                split_size,
-                split_mode: squallz_core::api::SplitOutputMode::Generic,
-                excludes,
-                content_policy,
-                sqz_inner_format: None,
-                sfx_target: None,
-                completion,
-                post_success,
-                test_after_create,
-                replace_existing: false,
-                replacement_guard: None,
-            }))
-        }
-        ExternalTaskActionDto::TestArchive => Ok(Some(JobSpec::Test {
-            path: first.clone(),
-            encoding: None,
-            password: None,
-        })),
-    }
-}
-
-fn bound_create_preset(
-    document: &PresetDocument,
-) -> Result<Option<&squallz_core::CreatePreset>, ErrorDto> {
-    let Some(id) = document.bindings.file_manager_create.as_ref() else {
-        return Ok(None);
-    };
-    let preset = document
-        .preset(id)
-        .ok_or_else(|| ErrorDto::presets("file-manager create preset is missing", false))?;
-    preset.create_options().map(Some).ok_or_else(|| {
-        ErrorDto::presets("file-manager create binding is not a create preset", false)
-    })
-}
-
-fn bound_extract_preset(
-    document: &PresetDocument,
-) -> Result<Option<&squallz_core::ExtractPreset>, ErrorDto> {
-    let Some(id) = document.bindings.file_manager_extract.as_ref() else {
-        return Ok(None);
-    };
-    let preset = document
-        .preset(id)
-        .ok_or_else(|| ErrorDto::presets("file-manager extract preset is missing", false))?;
-    preset.extract_options().map(Some).ok_or_else(|| {
-        ErrorDto::presets(
-            "file-manager extract binding is not an extract preset",
-            false,
+                .map(PathBuf::from),
         )
-    })
-}
-
-fn resolve_external_extract_job(
-    state: &AppState,
-    document: &PresetDocument,
-    action: ExternalTaskActionDto,
-    paths: Vec<String>,
-) -> Result<JobSpec, ErrorDto> {
-    let (overwrite, symlinks, encoding) = if let Some(options) = bound_extract_preset(document)? {
-        let encoding = match &options.encoding {
-            EntryNameEncoding::Auto => None,
-            EntryNameEncoding::Named { label } => Some(label.clone()),
-        };
-        (options.existing_output, options.symlinks, encoding)
-    } else {
-        (OverwritePolicy::Ask, SymlinkPolicy::Preserve, None)
-    };
-    let smart = action == ExternalTaskActionDto::ExtractHere;
-    if paths.len() == 1 {
-        let path = paths.into_iter().next().ok_or_else(|| {
-            ErrorDto::other("external extract path disappeared during resolution")
-        })?;
-        return Ok(JobSpec::Extract {
-            dest: external_extract_destination(state, action, &path),
-            path,
-            expected_destination: None,
-            expected_input_guard: None,
-            selection: None,
-            overwrite,
-            symlinks,
-            smart,
-            encoding,
+        .map_err(ErrorDto::from)?;
+    let Some(plan) = plan else { return Ok(None) };
+    let display = |path: PathBuf| path.to_string_lossy().into_owned();
+    let job = match plan {
+        ExternalTaskPlan::Checksum { inputs } => JobSpec::Checksum {
+            inputs: inputs.into_iter().map(display).collect(),
+            excludes: checksum_excludes,
+            algorithm: checksum_algorithm,
+        },
+        ExternalTaskPlan::Compress {
+            inputs,
+            output,
+            options,
+        } => JobSpec::Compress {
+            inputs: inputs.into_iter().map(display).collect(),
+            dest: display(output),
+            level: options.level,
             password: None,
-            verify_sfx: false,
-            best_effort: false,
-        });
-    }
-    Ok(JobSpec::BatchExtract {
-        items: paths
-            .into_iter()
-            .map(|path| BatchExtractItem {
-                dest: external_extract_destination(state, action, &path),
-                path,
-                encoding: encoding.clone(),
+            encrypt_names: options.encrypt_names,
+            split_size: options.split,
+            split_mode: squallz_core::api::SplitOutputMode::Generic,
+            excludes: options.excludes,
+            content_policy: options.content_policy,
+            sqz_inner_format: None,
+            sfx_target: None,
+            completion: options.completion,
+            post_success: options.post_success,
+            test_after_create: options.test_after_create,
+            replace_existing: false,
+            replacement_guard: None,
+        },
+        ExternalTaskPlan::Extract {
+            mut items,
+            options,
+            smart,
+            verify_sfx,
+        } => {
+            if items.len() == 1 {
+                let (path, dest) = items.remove(0);
+                JobSpec::Extract {
+                    path: display(path),
+                    dest: display(dest),
+                    expected_destination: None,
+                    expected_input_guard: None,
+                    selection: None,
+                    overwrite: options.overwrite,
+                    symlinks: options.symlinks,
+                    smart,
+                    encoding: options.encoding,
+                    password: None,
+                    verify_sfx,
+                    best_effort: false,
+                }
+            } else {
+                JobSpec::BatchExtract {
+                    items: items
+                        .into_iter()
+                        .map(|(path, dest)| BatchExtractItem {
+                            path: display(path),
+                            dest: display(dest),
+                            encoding: options.encoding.clone(),
+                            password: None,
+                            best_effort: false,
+                        })
+                        .collect(),
+                    overwrite: options.overwrite,
+                    symlinks: options.symlinks,
+                    smart,
+                }
+            }
+        }
+        ExternalTaskPlan::Test { paths } => {
+            if paths.len() != 1 {
+                return Err(ErrorDto::other("test tasks require one archive per window"));
+            }
+            JobSpec::Test {
+                path: display(paths[0].clone()),
+                encoding: None,
                 password: None,
-                best_effort: false,
-            })
-            .collect(),
-        overwrite,
-        symlinks,
-        smart,
-    })
-}
-
-fn external_extract_destination(
-    state: &AppState,
-    action: ExternalTaskActionDto,
-    path: &str,
-) -> String {
-    let source = Path::new(path);
-    let parent = source.parent().unwrap_or_else(|| Path::new(""));
-    if action == ExternalTaskActionDto::ExtractHere {
-        return parent.to_string_lossy().into_owned();
-    }
-    parent
-        .join(state.engine.archive_stem(source))
-        .to_string_lossy()
-        .into_owned()
-}
-
-fn external_archive_folder(state: &AppState, path: &str) -> String {
-    external_extract_destination(state, ExternalTaskActionDto::ExtractToFolder, path)
-}
-
-fn external_compress_output(state: &AppState, paths: &[String], requested: Option<&str>) -> String {
-    if let Some(requested) = requested.map(str::trim).filter(|value| !value.is_empty()) {
-        return requested.to_owned();
-    }
-    let first = paths
-        .first()
-        .map_or_else(|| Path::new("Archive"), Path::new);
-    let parent = first.parent().unwrap_or_else(|| Path::new(""));
-    let stem = if paths.len() == 1 {
-        state.engine.archive_stem(first)
-    } else {
-        "Archive".to_owned()
+            }
+        }
     };
-    parent
-        .join(format!("{stem}.7z"))
-        .to_string_lossy()
-        .into_owned()
+    Ok(Some(job))
 }
 
 fn create_destination_parent(path: &Path) -> &Path {
@@ -2550,12 +2468,14 @@ pub fn set_performance_options(
 
 #[cfg(test)]
 mod tests {
+    use crate::jobs::test_support::{read_archive_entries, TestSink};
     use crate::preview_sessions::PreviewSessionManager;
     use squallz_core::api::{
         CompressionLevel, ControlToken, CreateOptions, EntryPath, ExtractOptions, NoProgress,
         OpenOptions, Password, ProgressSink, SafetyLimits,
     };
     use squallz_core::api::{OverwritePolicy, SymlinkPolicy};
+    use squallz_core::CreateCommitPolicy;
     use squallz_core::{
         ByteSize, ChecksumAlgorithm, CreateCompletionAction, CreateCredential, CreateDestination,
         CreateDestinationBase, CreateOutput, CreatePreset, Engine, EntryNameEncoding,
@@ -2569,19 +2489,21 @@ mod tests {
 
     use super::{
         apply_accent_palette, apply_general_options, archive_password_status_impl,
-        bound_create_preset, bound_extract_preset, create_destination_has_conflict,
-        disk_space_preflight, forget_archive_password_impl, inspect_create_destination_impl,
-        inspect_create_destination_impl_with_progress, open_archive_resolving_password,
-        open_archive_source_resolving_password, open_nested_archive_impl, plan_convert_impl,
-        plan_extract_impl, preview_archive_entry_impl, preview_nested_archive_impl,
-        preview_trace_payload, remember_archive_password_impl, requested_page_size,
-        resolve_external_task_job_impl, unique_create_destination_path, valid_accent_palette,
-        valid_hex_color, MAX_ARCHIVE_PAGE_SIZE,
+        create_destination_has_conflict, disk_space_preflight, forget_archive_password_impl,
+        inspect_create_destination_impl, inspect_create_destination_impl_with_progress,
+        open_archive_resolving_password, open_archive_source_resolving_password,
+        open_nested_archive_impl, plan_convert_impl, plan_create_impl, plan_extract_impl,
+        preview_archive_entry_impl, preview_nested_archive_impl, preview_trace_payload,
+        remember_archive_password_impl, requested_page_size, resolve_external_task_job_impl,
+        unique_create_destination_path, valid_accent_palette, valid_hex_color,
+        MAX_ARCHIVE_PAGE_SIZE,
     };
     use crate::create_preflight::{PreflightRequestKind, PreflightRequests};
-    use crate::dto::{ErrorDto, ExternalTaskActionDto, JobSpec, SettingsDto};
+    use crate::dto::{ErrorDto, JobSpec, SettingsDto};
+    use crate::events::EventSink;
     use crate::secrets::{tests::MemorySecretStore, tests::ReadFailingSecretStore, SecretStore};
     use crate::state::{AppState, DEFAULT_PAGE_SIZE};
+    use squallz_core::ExternalTaskAction;
 
     fn temp_dir(tag: &str) -> PathBuf {
         let dir =
@@ -2589,6 +2511,142 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    fn create_scan_spec(input: &Path, destination: &Path) -> JobSpec {
+        JobSpec::Compress {
+            inputs: vec![input.to_string_lossy().into_owned()],
+            dest: destination.to_string_lossy().into_owned(),
+            level: 1,
+            password: None,
+            encrypt_names: false,
+            split_size: None,
+            split_mode: squallz_core::api::SplitOutputMode::Generic,
+            excludes: Vec::new(),
+            content_policy: squallz_core::CreateContentPolicy::KeepAllFiles,
+            sqz_inner_format: None,
+            sfx_target: None,
+            completion: CreateCompletionAction::None,
+            post_success: PostSuccessAction::KeepSource,
+            test_after_create: false,
+            replace_existing: false,
+            replacement_guard: None,
+        }
+    }
+
+    struct CloseWindowOnCreateScan {
+        requests: Arc<PreflightRequests>,
+        events: TestSink,
+    }
+
+    impl EventSink for CloseWindowOnCreateScan {
+        fn emit_json(&self, event: &str, payload: serde_json::Value) {
+            if payload["phase"] == "scanning" {
+                self.requests.release_window("main");
+            }
+            self.events.emit_json(event, payload);
+        }
+    }
+
+    #[test]
+    fn create_plan_window_release_stops_the_walk_and_tracks_its_lease() {
+        let dir = temp_dir("create-plan-window-release");
+        let source = dir.join("source");
+        std::fs::create_dir(&source).unwrap();
+        for index in 0..16 {
+            std::fs::write(source.join(format!("{index:02}.txt")), b"source bytes").unwrap();
+        }
+        let destination = dir.join("output.zip");
+        std::fs::write(&destination, b"previous output").unwrap();
+        let requests = Arc::new(PreflightRequests::default());
+        let lease = requests.begin_request(PreflightRequestKind::CreatePlan, "main", "scan");
+        let other = requests.begin_request(PreflightRequestKind::CreatePlan, "other", "scan");
+        let events = CloseWindowOnCreateScan {
+            requests: Arc::clone(&requests),
+            events: TestSink::default(),
+        };
+
+        let result = plan_create_impl(
+            &AppState::new(),
+            &create_scan_spec(&source, &destination),
+            &SettingsDto::default(),
+            None,
+            &events,
+            "scan",
+            &lease,
+        );
+
+        assert!(matches!(
+            result,
+            Err(squallz_core::api::FormatError::Cancelled)
+        ));
+        let emitted = events.events.events.lock().unwrap();
+        assert_eq!(emitted.len(), 1);
+        assert_eq!(emitted[0].0, super::EV_CREATE_PREFLIGHT);
+        assert_eq!(emitted[0].1["phase"], "scanning");
+        assert_eq!(emitted[0].1["request_id"], "scan");
+        assert!(!other.control().is_cancelled());
+        assert_eq!(std::fs::read(&destination).unwrap(), b"previous output");
+        assert_eq!(std::fs::read_dir(&source).unwrap().count(), 16);
+        drop(emitted);
+        drop(other);
+
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let waiting = Arc::clone(&requests);
+        let waiter = std::thread::spawn(move || {
+            waiting.wait_idle();
+            done_tx.send(()).unwrap();
+        });
+        let drained_before_drop = done_rx.recv_timeout(std::time::Duration::from_millis(20));
+        drop(lease);
+        done_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+        waiter.join().unwrap();
+        assert!(matches!(
+            drained_before_drop,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn create_plan_precancellation_skips_ordinary_and_sfx_source_io() {
+        let dir = temp_dir("create-plan-precancellation");
+        let destination = dir.join("output.zip");
+        let requests = Arc::new(PreflightRequests::default());
+        let events = TestSink::default();
+        for (request_id, target) in [
+            ("archive", None),
+            ("sfx", Some(squallz_core::SfxTarget::host())),
+        ] {
+            requests.cancel(PreflightRequestKind::CreatePlan, "main", request_id);
+            let lease =
+                requests.begin_request(PreflightRequestKind::CreatePlan, "main", request_id);
+            let mut spec = create_scan_spec(&dir.join("missing"), &destination);
+            if let JobSpec::Compress { sfx_target, .. } = &mut spec {
+                *sfx_target = target;
+            }
+
+            let result = plan_create_impl(
+                &AppState::new(),
+                &spec,
+                &SettingsDto::default(),
+                None,
+                &events,
+                request_id,
+                &lease,
+            );
+
+            assert!(matches!(
+                result,
+                Err(squallz_core::api::FormatError::Cancelled)
+            ));
+        }
+        assert!(events.events.lock().unwrap().is_empty());
+        assert!(!destination.exists());
+        requests.wait_idle();
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -2615,6 +2673,7 @@ mod tests {
                     encrypt_filenames: true,
                     ..CreateOptions::default()
                 },
+                CreateCommitPolicy::ReplaceExisting,
                 &NoProgress,
                 &ControlToken::new(),
             )
@@ -2666,16 +2725,13 @@ mod tests {
             &ControlToken::default(),
         )
         .unwrap();
-        assert_eq!(
-            plan.plan.requested_destination,
-            destination.to_string_lossy()
-        );
-        assert_eq!(plan.plan.destination, destination.to_string_lossy());
-        assert_eq!(plan.plan.layout, "direct");
-        assert_eq!(plan.plan.files, 1);
-        assert!(plan.plan.entries >= 1);
-        assert_eq!(plan.plan.total_bytes, 10);
-        assert!(plan.required_free_bytes >= plan.plan.total_bytes);
+        assert_eq!(plan.plan.requested_destination, destination);
+        assert_eq!(plan.plan.destination, destination);
+        assert_eq!(plan.plan.layout, squallz_core::SmartLayout::DirectExtract);
+        assert_eq!(plan.plan.scope.files, 1);
+        assert!(plan.plan.scope.entries >= 1);
+        assert_eq!(plan.plan.scope.total_bytes, 10);
+        assert!(plan.required_free_bytes >= plan.plan.scope.total_bytes);
         assert!(plan.available_bytes > 0);
         assert!(plan.space_ok);
 
@@ -2830,6 +2886,7 @@ mod tests {
                 &archive,
                 std::slice::from_ref(&source),
                 &CreateOptions::default(),
+                CreateCommitPolicy::ReplaceExisting,
                 &NoProgress,
                 &ControlToken::new(),
             )
@@ -2850,11 +2907,8 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(plan.plan.layout, "wrap_in_folder");
-        assert_eq!(
-            plan.plan.destination,
-            destination.join("actual-name").to_string_lossy()
-        );
+        assert_eq!(plan.plan.layout, squallz_core::SmartLayout::WrapInFolder);
+        assert_eq!(plan.plan.destination, destination.join("actual-name"));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -2905,13 +2959,17 @@ mod tests {
     #[test]
     fn external_extract_actions_keep_their_distinct_destination_layouts() {
         let state = AppState::new();
+        let dir = temp_dir("external_extract_actions_keep_their_distinct_destination_layouts");
+        std::fs::write(dir.join("report"), b"source").unwrap();
+        std::fs::write(dir.join("report.7z"), b"existing output").unwrap();
+        std::fs::write(dir.join("backup.tar.gz"), b"archive").unwrap();
         let presets = squallz_core::PresetDocument::seeded();
-        let archive = "/Users/example/Downloads/backup.tar.gz".to_owned();
+        let archive = dir.join("backup.tar.gz").to_string_lossy().into_owned();
 
         let here = resolve_external_task_job_impl(
             &state,
             &presets,
-            ExternalTaskActionDto::ExtractHere,
+            ExternalTaskAction::ExtractHere,
             vec![archive.clone()],
             None,
             ChecksumAlgorithm::Sha256,
@@ -2921,7 +2979,7 @@ mod tests {
         .expect("extract-here should produce a job");
         match here {
             JobSpec::Extract { dest, smart, .. } => {
-                assert_eq!(dest, "/Users/example/Downloads");
+                assert_eq!(dest, dir.to_string_lossy());
                 assert!(smart);
             }
             other => panic!("expected extract job, got {other:?}"),
@@ -2930,7 +2988,7 @@ mod tests {
         let folder = resolve_external_task_job_impl(
             &state,
             &presets,
-            ExternalTaskActionDto::ExtractToFolder,
+            ExternalTaskAction::ExtractToFolder,
             vec![archive],
             None,
             ChecksumAlgorithm::Sha256,
@@ -2940,22 +2998,51 @@ mod tests {
         .expect("extract-to-folder should produce a job");
         match folder {
             JobSpec::Extract { dest, smart, .. } => {
-                assert_eq!(dest, "/Users/example/Downloads/backup");
+                assert_eq!(dest, dir.join("backup").to_string_lossy());
                 assert!(!smart, "archive folder must not be wrapped a second time");
             }
             other => panic!("expected extract job, got {other:?}"),
         }
+        for (name, stem) in [
+            ("movie.part7.rar", "movie.part7"),
+            ("movie.r07", "movie.r07"),
+            ("movie.rar.007", "movie"),
+            ("movie.z07", "movie"),
+        ] {
+            let path = dir.join(name);
+            std::fs::write(&path, b"archive").unwrap();
+            let job = resolve_external_task_job_impl(
+                &state,
+                &presets,
+                ExternalTaskAction::ExtractToFolder,
+                vec![path.to_string_lossy().into_owned()],
+                None,
+                ChecksumAlgorithm::Sha256,
+                Vec::new(),
+            )
+            .unwrap()
+            .unwrap();
+            let JobSpec::Extract { dest, .. } = job else {
+                panic!("expected extraction task")
+            };
+            assert_eq!(dest, dir.join(stem).to_string_lossy());
+        }
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
     fn external_create_uses_the_bound_preset_snapshot() {
         let state = AppState::new();
+        let dir = temp_dir("external_create_uses_the_bound_preset_snapshot");
+        std::fs::write(dir.join("report"), b"source").unwrap();
+        std::fs::write(dir.join("report.7z"), b"existing output").unwrap();
+        std::fs::write(dir.join("backup.tar.gz"), b"archive").unwrap();
         let presets = squallz_core::PresetDocument::seeded();
         let job = resolve_external_task_job_impl(
             &state,
             &presets,
-            ExternalTaskActionDto::CompressTo7z,
-            vec!["/Users/example/Documents/report".to_owned()],
+            ExternalTaskAction::CompressTo7z,
+            vec![dir.join("report").to_string_lossy().into_owned()],
             None,
             ChecksumAlgorithm::Sha256,
             Vec::new(),
@@ -2969,17 +3056,27 @@ mod tests {
                 password,
                 ..
             } => {
-                assert_eq!(dest, "/Users/example/Documents/report.7z");
+                assert_eq!(dest, dir.join("report (2).7z").to_string_lossy());
+                assert_eq!(
+                    std::fs::read(dir.join("report.7z")).unwrap(),
+                    b"existing output"
+                );
                 assert_eq!(level, 5);
                 assert_eq!(password, None);
             }
             other => panic!("expected compress job, got {other:?}"),
         }
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
     fn external_actions_use_safe_defaults_when_file_manager_presets_are_unbound() {
         let state = AppState::new();
+        let dir =
+            temp_dir("external_actions_use_safe_defaults_when_file_manager_presets_are_unbound");
+        std::fs::write(dir.join("report"), b"source").unwrap();
+        std::fs::write(dir.join("report.7z"), b"existing output").unwrap();
+        std::fs::write(dir.join("backup.tar.gz"), b"archive").unwrap();
         let mut presets = squallz_core::PresetDocument::seeded();
         presets.bindings.file_manager_create = None;
         presets.bindings.file_manager_extract = None;
@@ -2987,18 +3084,11 @@ mod tests {
             .validate()
             .expect("unbound presets should remain valid");
 
-        assert!(bound_create_preset(&presets)
-            .expect("unbound create lookup should succeed")
-            .is_none());
-        assert!(bound_extract_preset(&presets)
-            .expect("unbound extract lookup should succeed")
-            .is_none());
-
         let create = resolve_external_task_job_impl(
             &state,
             &presets,
-            ExternalTaskActionDto::CompressTo7z,
-            vec!["/Users/example/Documents/report".to_owned()],
+            ExternalTaskAction::CompressTo7z,
+            vec![dir.join("report").to_string_lossy().into_owned()],
             None,
             ChecksumAlgorithm::Sha256,
             Vec::new(),
@@ -3035,8 +3125,8 @@ mod tests {
         let extract = resolve_external_task_job_impl(
             &state,
             &presets,
-            ExternalTaskActionDto::ExtractHere,
-            vec!["/Users/example/Downloads/report.7z".to_owned()],
+            ExternalTaskAction::ExtractHere,
+            vec![dir.join("report.7z").to_string_lossy().into_owned()],
             None,
             ChecksumAlgorithm::Sha256,
             Vec::new(),
@@ -3056,11 +3146,18 @@ mod tests {
             }
             other => panic!("expected extract job, got {other:?}"),
         }
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
     fn external_actions_apply_bound_policy_without_overriding_explicit_destination_action() {
         let state = AppState::new();
+        let dir = temp_dir(
+            "external_actions_apply_bound_policy_without_overriding_explicit_destination_action",
+        );
+        std::fs::write(dir.join("report"), b"source").unwrap();
+        std::fs::write(dir.join("report.7z"), b"existing output").unwrap();
+        std::fs::write(dir.join("backup.tar.gz"), b"archive").unwrap();
         let mut presets = squallz_core::PresetDocument::seeded();
 
         let create_id = PresetId::new("user.create.finder-fast").expect("valid create preset id");
@@ -3119,8 +3216,8 @@ mod tests {
         let create = resolve_external_task_job_impl(
             &state,
             &presets,
-            ExternalTaskActionDto::CompressTo7z,
-            vec!["/Users/example/Documents/report".to_owned()],
+            ExternalTaskAction::CompressTo7z,
+            vec![dir.join("report").to_string_lossy().into_owned()],
             None,
             ChecksumAlgorithm::Sha256,
             Vec::new(),
@@ -3152,8 +3249,8 @@ mod tests {
         let extract = resolve_external_task_job_impl(
             &state,
             &presets,
-            ExternalTaskActionDto::ExtractHere,
-            vec!["/Users/example/Downloads/backup.tar.gz".to_owned()],
+            ExternalTaskAction::ExtractHere,
+            vec![dir.join("backup.tar.gz").to_string_lossy().into_owned()],
             None,
             ChecksumAlgorithm::Sha256,
             Vec::new(),
@@ -3169,7 +3266,7 @@ mod tests {
                 encoding,
                 ..
             } => {
-                assert_eq!(dest, "/Users/example/Downloads");
+                assert_eq!(dest, dir.to_string_lossy());
                 assert!(smart);
                 assert!(matches!(overwrite, OverwritePolicy::RenameBoth));
                 assert!(matches!(symlinks, SymlinkPolicy::Skip));
@@ -3177,6 +3274,7 @@ mod tests {
             }
             other => panic!("expected extract job, got {other:?}"),
         }
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -3366,6 +3464,7 @@ mod tests {
                 &inner,
                 std::slice::from_ref(&inner_src),
                 &CreateOptions::default(),
+                CreateCommitPolicy::ReplaceExisting,
                 &NoProgress,
                 &ControlToken::new(),
             )
@@ -3378,6 +3477,7 @@ mod tests {
                 &outer,
                 std::slice::from_ref(&inner),
                 &CreateOptions::default(),
+                CreateCommitPolicy::ReplaceExisting,
                 &NoProgress,
                 &ControlToken::new(),
             )
@@ -3401,6 +3501,7 @@ mod tests {
                 &outer,
                 &[file],
                 &CreateOptions::default(),
+                CreateCommitPolicy::ReplaceExisting,
                 &NoProgress,
                 &ControlToken::new(),
             )
@@ -3424,6 +3525,7 @@ mod tests {
                 &outer,
                 &[renamed],
                 &CreateOptions::default(),
+                CreateCommitPolicy::ReplaceExisting,
                 &NoProgress,
                 &ControlToken::new(),
             )
@@ -3497,15 +3599,14 @@ mod tests {
                     password: Some(Password::new("outer-secret")),
                     ..CreateOptions::default()
                 },
+                CreateCommitPolicy::ReplaceExisting,
                 &NoProgress,
                 &ControlToken::default(),
             )
             .unwrap();
         // ZIP names are readable before the data password has been supplied.
         assert_eq!(
-            state
-                .engine
-                .list(&outer, &OpenOptions::default())
+            read_archive_entries(&state.engine, &outer, &OpenOptions::default())
                 .unwrap()
                 .len(),
             1
@@ -3629,11 +3730,11 @@ mod tests {
             &ControlToken::default(),
         )
         .unwrap();
-        assert_eq!(plan.plan.files, 1);
+        assert_eq!(plan.plan.scope.files, 1);
         let spec = JobSpec::Extract {
             path: info.source.clone(),
             dest: destination.to_string_lossy().into_owned(),
-            expected_destination: Some(plan.plan.destination),
+            expected_destination: Some(plan.plan.destination.to_string_lossy().into_owned()),
             expected_input_guard: Some(plan.input_guard),
             selection: None,
             overwrite: OverwritePolicy::Ask,
@@ -3663,10 +3764,12 @@ mod tests {
                 let snapshot = manager.snapshot_for_window("test-window", id).unwrap();
                 if let Some((_, prompt)) =
                     sink.events.lock().unwrap().iter().find(|(event, value)| {
-                        event == crate::events::EV_ASK_CONFLICT && value["id"] == id
+                        event == crate::events::EV_SNAPSHOT
+                            && value["question"]["kind"] == "conflict"
+                            && value["id"] == id
                     })
                 {
-                    return prompt["version"].as_u64().unwrap();
+                    return prompt["question"]["prompt"]["version"].as_u64().unwrap();
                 }
                 if start.elapsed() > std::time::Duration::from_secs(3)
                     || matches!(snapshot.state.as_str(), "done" | "failed" | "cancelled")
@@ -3712,7 +3815,8 @@ mod tests {
         let events = sink.events.lock().unwrap();
         assert!(!events
             .iter()
-            .any(|(event, _)| event == crate::events::EV_ASK_PASSWORD));
+            .any(|(event, value)| event == crate::events::EV_SNAPSHOT
+                && value["question"]["kind"] == "password"));
         let visible = serde_json::to_string(&*events).unwrap();
         assert!(!visible.contains(&physical.to_string_lossy().to_string()));
         assert!(!visible.contains(&info.source));
@@ -3741,6 +3845,7 @@ mod tests {
                     password: Some(Password::new("entry-secret")),
                     ..CreateOptions::default()
                 },
+                CreateCommitPolicy::ReplaceExisting,
                 &NoProgress,
                 &ControlToken::default(),
             )
@@ -3985,6 +4090,7 @@ mod tests {
                 &archive,
                 std::slice::from_ref(&src),
                 &CreateOptions::default(),
+                CreateCommitPolicy::ReplaceExisting,
                 &NoProgress,
                 &ControlToken::new(),
             )
@@ -4040,6 +4146,7 @@ mod tests {
                 &archive,
                 std::slice::from_ref(&src),
                 &CreateOptions::default(),
+                CreateCommitPolicy::ReplaceExisting,
                 &NoProgress,
                 &ControlToken::new(),
             )
@@ -4206,9 +4313,9 @@ mod tests {
             &ControlToken::default(),
         )
         .unwrap();
-        assert_eq!(plan.plan.destination, destination.to_string_lossy());
-        assert_eq!(plan.plan.layout, "direct");
-        assert_eq!(plan.plan.files, 1);
+        assert_eq!(plan.plan.destination, destination);
+        assert_eq!(plan.plan.layout, squallz_core::SmartLayout::DirectExtract);
+        assert_eq!(plan.plan.scope.files, 1);
 
         state.close_archive_for_window("test-window", info.id);
         sessions.cleanup();
@@ -4582,23 +4689,23 @@ mod tests {
                         password: encrypted.then(|| Password::new("correct")),
                         ..CreateOptions::default()
                     },
+                    CreateCommitPolicy::ReplaceExisting,
                     &NoProgress,
                     &ControlToken::default(),
                 )
                 .unwrap();
             // Both ZIP directories are readable even with the wrong password.
             assert_eq!(
-                state
-                    .engine
-                    .list(
-                        &archive,
-                        &OpenOptions {
-                            password: Some(Password::new("wrong")),
-                            ..OpenOptions::default()
-                        }
-                    )
-                    .unwrap()
-                    .len(),
+                read_archive_entries(
+                    &state.engine,
+                    &archive,
+                    &OpenOptions {
+                        password: Some(Password::new("wrong")),
+                        ..OpenOptions::default()
+                    }
+                )
+                .unwrap()
+                .len(),
                 1
             );
             let error = remember_archive_password_impl(

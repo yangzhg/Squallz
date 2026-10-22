@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createTestServer } from "../../tests/runtime.mjs";
+import { englishTranslate, createTestServer } from "../../tests/runtime.mjs";
 
 const noop = () => {};
 const actions = {
@@ -88,7 +88,7 @@ test("modern and classic recovery workspaces expose the same semantic actions", 
     const { default: RecoveryWorkspace } = await server.ssrLoadModule(
       "/src/components/RecoveryWorkspace.svelte",
     );
-    const tr = (_key, fallback) => fallback;
+    const tr = englishTranslate;
 
     for (const beyondCapacity of [false, true]) {
       const rendered = new Map();
@@ -96,8 +96,7 @@ test("modern and classic recovery workspaces expose the same semantic actions", 
         const { body } = render(RecoveryWorkspace, {
           props: {
             variant,
-            view: workspaceView(beyondCapacity),
-            actions,
+            session: { view: () => workspaceView(beyondCapacity), actions },
             tr,
           },
         });
@@ -156,14 +155,13 @@ test("invalid recovery strength is explained and blocks protection", async () =>
     const { body } = render(RecoveryWorkspace, {
       props: {
         variant: "modern",
-        view: workspaceView(false, {
+        session: { view: () => workspaceView(false, {
           redundancyDraft: "0",
           redundancyError: error,
           requestedRedundancy: error,
           protectDisabledReason: error,
-        }),
-        actions,
-        tr: (_key, fallback) => fallback,
+        }), actions },
+        tr: englishTranslate,
       },
     });
 

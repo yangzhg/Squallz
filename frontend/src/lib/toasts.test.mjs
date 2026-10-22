@@ -3,6 +3,23 @@ import test from "node:test";
 
 import { createTestServer } from "../../tests/runtime.mjs";
 
+test("modal views hide toast controls without discarding their notifications", async () => {
+  const server = await createTestServer();
+  try {
+    const { render } = await server.ssrLoadModule("svelte/server");
+    const { default: Host } = await server.ssrLoadModule("/src/components/ToastHost.svelte");
+    const { pushToast, toasts } = await server.ssrLoadModule("/src/lib/toasts.svelte.ts");
+    pushToast({ kind: "warning", title: "Archive needs review", action: { label: "Review", run() {} } });
+    const body = (blocked) => render(Host, { props: { rootClass: "themed-root", blocked } }).body;
+    assert.match(body(false), /Archive needs review/);
+    assert.doesNotMatch(body(true), /<button|Archive needs review/);
+    assert.equal(toasts().length, 1);
+    assert.match(body(false), /Archive needs review/);
+  } finally {
+    await server.close();
+  }
+});
+
 test("actionable toasts stay visible while timed toasts and the queue keep working", async () => {
   const server = await createTestServer();
 

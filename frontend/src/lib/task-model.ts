@@ -1,12 +1,13 @@
+import { resultOf, type ChecksumItem, type DuplicateGroup } from "./job-result";
 import { tFallback } from "./i18n.svelte";
 import { readCreateResult } from "./create-result";
 import { readBatchExtractResult } from "./batch-extract-result";
 import type { Task } from "./jobs.svelte";
-import { recoveryResultOk } from "./recovery-result";
+import { taskResultOutputPath, taskResultStatus } from "./task-outcome";
+import { readSourceCleanupSummary, type SourceCleanupSummary } from "./source-cleanup";
 import type { Screen } from "./ui-model";
 import type { JobSpec } from "./ipc";
 import {
-  extractResultNeedsAttention,
   readExtractResultCounts,
 } from "./extract-result";
 
@@ -29,25 +30,7 @@ export interface TaskConflictAnswer {
   applyAll: boolean;
 }
 
-export type SourceCleanupResult = {
-  status: string;
-  moved: number;
-  kept: number;
-  recoveryRequired: number;
-};
-
-type CompressJobSpec = Extract<JobSpec, { kind: "compress" }>;
-
-export function applyCreateDestinationAuthorization(
-  spec: CompressJobSpec,
-  guard: string | null,
-): CompressJobSpec {
-  return {
-    ...spec,
-    replace_existing: guard !== null,
-    replacement_guard: guard,
-  };
-}
+export type SourceCleanupResult = SourceCleanupSummary;
 
 export function taskPasswordReady(value: string): boolean {
   return value.length > 0;
@@ -64,15 +47,15 @@ export function normalizeTaskConflictAnswer(
 }
 
 export function taskStateLabel(state: string | null | undefined): string {
-  if (!state) return tFallback("gui.task.state.pending", "Pending");
-  if (state === "submitting") return tFallback("gui.task.state.submitting", "Starting");
-  if (state === "queued") return tFallback("gui.task.state.waiting", "Waiting");
-  if (state === "running") return tFallback("gui.task.state.running", "Running");
-  if (state === "paused") return tFallback("gui.task.state.paused", "Paused");
+  if (!state) return tFallback("gui.task.state.pending");
+  if (state === "submitting") return tFallback("gui.task.state.submitting");
+  if (state === "queued") return tFallback("gui.task.state.waiting");
+  if (state === "running") return tFallback("gui.task.state.running");
+  if (state === "paused") return tFallback("gui.task.state.paused");
   if (state === "pausing") return tFallback("gui.task.state.pausing", "Pausing...");
-  if (state === "done") return tFallback("gui.task.state.done", "Done");
-  if (state === "failed") return tFallback("gui.task.state.failed", "Failed");
-  if (state === "cancelled") return tFallback("gui.task.state.cancelled", "Cancelled");
+  if (state === "done") return tFallback("gui.task.state.done");
+  if (state === "failed") return tFallback("gui.task.state.failed");
+  if (state === "cancelled") return tFallback("gui.task.state.cancelled");
   return state;
 }
 
@@ -93,98 +76,46 @@ export function taskStatusUnavailable(task: TaskDialogModel): boolean {
 }
 
 export function taskOutcomeStateLabel(task: TaskDialogModel): string {
-  if (taskStatusUnavailable(task)) return tFallback("gui.task.status_unavailable", "Status unavailable");
+  if (taskStatusUnavailable(task)) return tFallback("gui.task.status_unavailable");
   return taskOutcomeNeedsAttention(task)
-    ? tFallback("gui.task.state.needs_attention", "Needs attention")
+    ? tFallback("gui.task.state.needs_attention")
     : taskStateLabel(task.state);
 }
 
 export function sourceCleanupResult(task: TaskDialogModel): SourceCleanupResult | null {
-  const raw = task.result?.source_cleanup;
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
-  const cleanup = raw as Record<string, unknown>;
-  return {
-    status: String(cleanup.status ?? ""),
-    moved: Math.max(0, Math.trunc(Number(cleanup.moved) || 0)),
-    kept: Math.max(0, Math.trunc(Number(cleanup.kept) || 0)),
-    recoveryRequired: Math.max(0, Math.trunc(Number(cleanup.recovery_required) || 0)),
-  };
+  return readSourceCleanupSummary(task.result);
 }
 
 export function taskOutcomeNeedsAttention(task: TaskDialogModel): boolean {
-  if (task.state !== "done") return false;
-  if (task.spec.kind === "test" || task.spec.kind === "checksum_check") {
-    return task.result?.ok === false;
-  }
-  if (task.spec.kind === "batch_extract") {
-    const outcome = readBatchExtractResult(task.result);
-    return outcome.reviewCount > 0 || outcome.skippedEntries > 0
-      || extractResultNeedsAttention(task.result);
-  }
-  if (task.spec.kind === "extract" || task.spec.kind === "extract_nested") {
-    return extractResultNeedsAttention(task.result);
-  }
-  if (
-    (task.spec.kind === "compress" || task.spec.kind === "convert")
-    && readCreateResult(task.result, task.spec.dest, task.spec.split_size !== null)
-      .preservedOutputs.length > 0
-  ) {
-    return true;
-  }
-  if (task.spec.kind === "compress" && task.spec.post_success === "trash_source") {
-    const cleanup = sourceCleanupResult(task);
-    return cleanup === null || cleanup.status !== "completed";
-  }
-  const recoveryDiagnostic = task.spec.kind === "verify_recovery"
-    || task.spec.kind === "repair_recovery";
-  return recoveryDiagnostic && recoveryResultOk(task.result) === false;
+  return task.state === "done" && taskResultStatus(task) !== "done";
 }
 
-export function taskChecksumItems(task: TaskDialogModel): Record<string, unknown>[] {
-  const items = task.result?.items;
-  if (!Array.isArray(items)) return [];
-  return items.filter(
-    (item): item is Record<string, unknown> =>
-      item !== null && typeof item === "object" && !Array.isArray(item),
-  );
+export function taskChecksumItems(task: TaskDialogModel): ChecksumItem[] {
+  const result = task.result;
+  return result?.kind === "checksum" || result?.kind === "checksum_check" ? result.items : [];
 }
 
-export interface DuplicateGroupSummary {
-  hash: string;
-  size: number;
-  paths: string[];
-}
+export type DuplicateGroupSummary = Pick<DuplicateGroup, "hash" | "size" | "paths">;
 
 export function taskDuplicateGroups(task: TaskDialogModel | null): DuplicateGroupSummary[] {
-  const groups = task?.spec.kind === "duplicate_scan" ? task.result?.groups : null;
-  if (!Array.isArray(groups)) return [];
-  return groups.flatMap((group) => {
-    if (!group || typeof group !== "object" || typeof group.hash !== "string"
-      || typeof group.size !== "number" || !Number.isFinite(group.size) || group.size < 0
-      || !Array.isArray(group.paths)) return [];
-    const paths = group.paths.filter((path: unknown): path is string => typeof path === "string");
-    return paths.length < 2 ? [] : [{ hash: group.hash, size: group.size, paths }];
-  });
+  return resultOf(task?.result, "duplicate_scan")?.groups ?? [];
 }
 
-export function checksumItemText(item: Record<string, unknown>, key: string): string {
-  const value = item[key];
-  return typeof value === "string" ? value : "";
+export function checksumItemText(item: ChecksumItem, key: "path" | "digest" | "expected" | "actual" | "error"): string {
+  if (key === "path") return item.path;
+  if (key === "digest") return "digest" in item ? item.digest : "";
+  return "expected" in item ? item[key] ?? "" : "";
 }
 
-export function checksumItemStatus(item: Record<string, unknown>): string {
-  const ok = item.ok;
-  if (typeof ok === "boolean") {
-    return ok
-      ? tFallback("gui.checksum.status_ok", "OK")
-      : tFallback("gui.checksum.status_failed_caps", "FAILED");
-  }
-  return tFallback("gui.checksum.status_hashed", "hashed");
+export function checksumItemStatus(item: ChecksumItem): string {
+  return "ok" in item
+    ? tFallback(item.ok ? "gui.checksum.status_ok" : "gui.checksum.status_failed_caps")
+    : tFallback("gui.checksum.status_hashed");
 }
 
 export function checksumResultLine(
   kind: "checksum" | "checksum_check",
-  item: Record<string, unknown>,
+  item: ChecksumItem,
 ): string {
   const path = checksumItemText(item, "path");
   if (kind === "checksum") return `${checksumItemText(item, "digest")}  ${path}`;
@@ -247,7 +178,7 @@ export function taskReviewScreen(task: TaskDialogModel): Screen | null {
   if (task.state === "done" && task.spec.kind === "batch_extract" && readBatchExtractResult(task.result).reviewCount > 0) {
     return "batch";
   }
-  if (task.state === "done" && task.spec.kind === "test" && task.result?.ok === false) {
+  if (task.state === "done" && task.spec.kind === "test" && resultOf(task.result, "test")?.ok === false) {
     return "recovery";
   }
   if (task.state !== "failed" && task.state !== "cancelled") return null;
@@ -288,11 +219,11 @@ export function taskReviewScreen(task: TaskDialogModel): Screen | null {
 }
 
 export function taskOutputPath(task: TaskDialogModel): string | null {
-  return task.revealPath;
+  return taskResultOutputPath(task);
 }
 
 export function taskOutputCanOpen(task: TaskDialogModel): boolean {
-  if (!task.revealPath) return false;
+  if (!taskOutputPath(task)) return false;
   if (task.spec.kind === "protect") return false;
   if (task.spec.kind !== "compress" && task.spec.kind !== "convert") return true;
   if (task.spec.kind === "compress" && task.spec.sfx_target) return false;

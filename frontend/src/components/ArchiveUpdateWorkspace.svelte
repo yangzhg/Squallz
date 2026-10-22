@@ -19,7 +19,7 @@
     ? Math.min(pageSelection.index, Math.max(0, pageCount - 1)) : 0);
   let start = $derived(page * pageSize);
   let visibleOperations = $derived(draft?.operations.slice(start, start + pageSize) ?? []);
-  let range = $derived(surface.tr("gui.update_review.range", "Changes {start}–{end} of {count} · selections are kept across pages")
+  let range = $derived(surface.tr("gui.update_review.range")
     .replace("{start}", (start + 1).toLocaleString())
     .replace("{end}", (start + visibleOperations.length).toLocaleString())
     .replace("{count}", (draft?.operations.length ?? 0).toLocaleString()));
@@ -36,18 +36,18 @@
   });
 
   function operationLabel(kind: UpdateOperation["kind"]): string {
-    if (kind === "add") return surface.tr("gui.action.add_files", "Add files");
-    if (kind === "delete") return surface.tr("gui.update_review.delete", "Delete from archive");
-    if (kind === "mkdir") return surface.tr("gui.action.new_folder", "New folder");
-    return surface.tr("gui.update_review.rename", "Rename or move");
+    if (kind === "add") return surface.tr("gui.action.add_files");
+    if (kind === "delete") return surface.tr("gui.update_review.delete");
+    if (kind === "mkdir") return surface.tr("gui.action.new_folder");
+    return surface.tr("gui.update_review.rename");
   }
 
   function issueLabel(issue: UpdateIssue): string {
-    if (issue.kind === "selection") return surface.tr("gui.update_review.select", "Select at least one change to apply.");
-    if (issue.kind === "level") return surface.tr("gui.update_review.level_invalid", "Enter a whole compression level from 0 to 9.");
-    if (issue.kind === "unchanged") return surface.tr("gui.rename.target_must_differ", "The name is unchanged. Enter a different name or path.");
-    if (issue.kind === "path") return surface.tr("gui.update_review.path_invalid", "Use a relative path inside the archive without a leading slash, parent references (..), or reserved file names and characters.");
-    return surface.tr("gui.update_review.path_empty", "Enter a path for this change.");
+    if (issue.kind === "selection") return surface.tr("gui.update_review.select");
+    if (issue.kind === "level") return surface.tr("gui.update_review.level_invalid");
+    if (issue.kind === "unchanged") return surface.tr("gui.rename.target_must_differ");
+    if (issue.kind === "path") return surface.tr("gui.update_review.path_invalid");
+    return surface.tr("gui.update_review.path_empty");
   }
 
   async function submit() {
@@ -84,11 +84,11 @@
   }
 
   function sourceFeedback(id: number): string {
-    if (review.sourcePicking === id) return surface.tr("gui.update_review.source_choosing", "Choose a replacement source in the file dialog.");
+    if (review.sourcePicking === id) return surface.tr("gui.update_review.source_choosing");
     if (review.sourceFeedback?.id !== id) return "";
-    if (review.sourceFeedback.kind === "failed") return surface.tr("gui.update_review.source_failed", "Could not open the chooser. The source was kept. Try again or edit the path here.");
-    if (review.sourceFeedback.kind === "cancelled") return surface.tr("gui.update_review.source_cancelled", "Selection cancelled. The source was kept.");
-    return surface.tr("gui.update_review.source_selected", "Source replaced. Review the changes before applying them.");
+    if (review.sourceFeedback.kind === "failed") return surface.tr("gui.update_review.source_failed");
+    if (review.sourceFeedback.kind === "cancelled") return surface.tr("gui.update_review.source_cancelled");
+    return surface.tr("gui.update_review.source_selected");
   }
 </script>
 
@@ -96,9 +96,9 @@
   <header class="operation-workspace-header">
     <div>
       <h1 id="update-review-heading" bind:this={heading} tabindex="-1">{surface.title}</h1>
-      <p>{surface.tr("gui.update_review.count", "{count} changes selected").replace("{count}", String(review.selectedCount()))}</p>
+      <p>{surface.tr("gui.update_review.count").replace("{count}", String(review.selectedCount()))}</p>
       {#if draft}
-        <p><strong>{surface.tr("gui.update_review.archive", "Archive to change")}</strong></p>
+        <p><strong>{surface.tr("gui.update_review.archive")}</strong></p>
         <p class="operation-path">{draft.displayPath}</p>
       {/if}
     </div>
@@ -109,24 +109,24 @@
         </button>
       {/if}
       <button class="primary" disabled={review.pending || review.sourcePicking !== null || review.selectedCount() === 0} onclick={submit}>
-        <Icon name="check" size={16} />{review.pending ? surface.tr("gui.task_center.submitting", "Adding to the queue…") : surface.tr("gui.update_review.apply", "Apply selected changes")}
+        <Icon name="check" size={16} />{review.pending ? surface.tr("gui.task_center.submitting") : surface.tr("gui.update_review.apply")}
       </button>
     </div>
   </header>
   {#if draft && pageCount > 1}
     <div class="operation-page-controls">
       <p id="update-review-range" class="operation-range" role="status">{range}</p>
-      <nav class="operation-pagination" aria-label={surface.tr("gui.update_review.pages", "Archive change pages")}>
-        <button type="button" class="secondary-lite" disabled={page === 0} onclick={() => void changePage(0)}>{surface.tr("gui.update_review.first_page", "First page")}</button>
-        <button type="button" class="secondary-lite" disabled={page === 0} onclick={() => void changePage(page - 1)}>{surface.tr("gui.update_review.previous_page", "Previous page")}</button>
-        <button type="button" class="secondary-lite" disabled={page === pageCount - 1} onclick={() => void changePage(page + 1)}>{surface.tr("gui.update_review.next_page", "Next page")}</button>
-        <button type="button" class="secondary-lite" disabled={page === pageCount - 1} onclick={() => void changePage(pageCount - 1)}>{surface.tr("gui.update_review.last_page", "Last page")}</button>
+      <nav class="operation-pagination" aria-label={surface.tr("gui.update_review.pages")}>
+        <button type="button" class="secondary-lite" disabled={page === 0} onclick={() => void changePage(0)}>{surface.tr("gui.update_review.first_page")}</button>
+        <button type="button" class="secondary-lite" disabled={page === 0} onclick={() => void changePage(page - 1)}>{surface.tr("gui.update_review.previous_page")}</button>
+        <button type="button" class="secondary-lite" disabled={page === pageCount - 1} onclick={() => void changePage(page + 1)}>{surface.tr("gui.update_review.next_page")}</button>
+        <button type="button" class="secondary-lite" disabled={page === pageCount - 1} onclick={() => void changePage(pageCount - 1)}>{surface.tr("gui.update_review.last_page")}</button>
       </nav>
     </div>
   {/if}
   <div class="operation-workspace-body" bind:this={body}>
     {#if draft}
-      <p class="operation-workspace-hint">{surface.tr("gui.update_review.hint", "These changes modify this archive. Review every selected operation; the archive may have changed since the original task. Entries and conflicts are checked again before writing. Passwords are requested when needed.")}</p>
+      <p class="operation-workspace-hint">{surface.tr("gui.update_review.hint")}</p>
       {#if review.issue?.kind === "selection"}<p id="update-review-error" class="update-review-error" role="alert">{issueLabel(review.issue)}</p>{/if}
       <ol class="operation-list" start={start + 1}>
         {#each visibleOperations as row, index (row.id)}
@@ -140,7 +140,7 @@
             {#if row.source}<p class="operation-path">{row.source}</p>{/if}
             {#if row.kind !== "delete"}
               <label class="operation-field" for={`update-operation-${row.id}`}>
-                <span>{row.kind === "add" ? surface.tr("gui.update_review.source", "File or folder to add") : surface.tr("gui.update_review.target", "Path inside archive")}</span>
+                <span>{row.kind === "add" ? surface.tr("gui.update_review.source") : surface.tr("gui.update_review.target")}</span>
                 {#if row.kind === "add"}
                   <textarea class="operation-input" id={`update-operation-${row.id}`} rows="2" value={row.value}
                     disabled={review.pending || review.sourcePicking === row.id || !row.enabled} aria-invalid={review.issue?.field === `update-operation-${row.id}`}
@@ -159,10 +159,10 @@
               {#if row.kind === "add"}
                 <div class="operation-workspace-actions">
                   <button class="secondary-lite" disabled={review.pending || review.sourcePicking !== null || !row.enabled} onclick={() => void chooseSource(row.id, "file")}>
-                    <Icon name="file" size={16} />{surface.tr("gui.update_review.choose_file", "Choose file…")}
+                    <Icon name="file" size={16} />{surface.tr("gui.update_review.choose_file")}
                   </button>
                   <button class="secondary-lite" disabled={review.pending || review.sourcePicking !== null || !row.enabled} onclick={() => void chooseSource(row.id, "folder")}>
-                    <Icon name="folder" size={16} />{surface.tr("gui.update_review.choose_folder", "Choose folder…")}
+                    <Icon name="folder" size={16} />{surface.tr("gui.update_review.choose_folder")}
                   </button>
                 </div>
                 {#if sourceFeedback(row.id)}
@@ -175,16 +175,16 @@
         {/each}
       </ol>
       <details class="update-review-options" bind:open={advancedOpen}>
-        <summary>{surface.tr("gui.update_review.options", "Encoding and compression options")}</summary>
+        <summary>{surface.tr("gui.update_review.options")}</summary>
         <div class="operation-policy-controls">
           <label class="operation-field">
-            <span>{surface.tr("gui.archive.encoding", "Encoding")}</span>
+            <span>{surface.tr("gui.archive.encoding")}</span>
             <input class="operation-input" value={draft.encoding} disabled={review.pending}
-              placeholder={surface.tr("gui.extract.encoding.auto", "Auto-detect")}
+              placeholder={surface.tr("gui.extract.encoding.auto")}
               oninput={(event) => review.editSettings({encoding:event.currentTarget.value})} />
           </label>
           <label class="operation-field" for="update-level">
-            <span>{surface.tr("gui.update_review.level", "Compression level (0–9)")}</span>
+            <span>{surface.tr("gui.update_review.level")}</span>
             <input class="operation-input" id="update-level" type="number" min="0" max="9" step="1" value={draft.level}
               disabled={review.pending} aria-invalid={review.issue?.field === "update-level"}
               aria-describedby={review.issue?.field === "update-level" ? "update-review-error" : undefined}
@@ -194,7 +194,7 @@
             {/if}
           </label>
           <label class="operation-field">
-            <span>{surface.tr("gui.create.content_policy.title", "Archive contents")}</span>
+            <span>{surface.tr("gui.create.content_policy.title")}</span>
             <select class="operation-input" value={draft.contentPolicy} disabled={review.pending}
               onchange={(event) => review.editSettings({contentPolicy:event.currentTarget.value as CreateContentPolicy})}>
               {#each policies as policy}<option value={policy}>{surface.policyLabel(policy)}</option>{/each}
@@ -202,21 +202,21 @@
           </label>
         </div>
         {#if draft.contentPolicy === "custom"}
-          <ExcludeRulesEditor title={surface.tr("gui.excludes.title", "Excludes")}
-            hint={surface.tr("gui.update_review.excludes_hint", "Exclusions apply to added files and new folders.")}
+          <ExcludeRulesEditor title={surface.tr("gui.excludes.title")}
+            hint={surface.tr("gui.update_review.excludes_hint")}
             countLabel={String(draft.excludes.length)} value={draft.excludesText}
-            placeholder={surface.tr("gui.excludes.placeholder", ".git\nnode_modules\n.DS_Store")}
-            ariaLabel={surface.tr("gui.excludes.title", "Excludes")} rules={draft.excludes}
-            emptyLabel={surface.tr("gui.update_review.no_excludes", "No exclusion rules")}
+            placeholder={surface.tr("gui.excludes.placeholder")}
+            ariaLabel={surface.tr("gui.excludes.title")} rules={draft.excludes}
+            emptyLabel={surface.tr("gui.update_review.no_excludes")}
             disabled={review.pending} onInput={(value) => review.editExcludes(value)} />
         {/if}
       </details>
     {:else}
       <div class="operation-empty-state">
         <Icon name="archive" size={32} />
-        <strong>{surface.tr("gui.update_review.empty", "No archive changes to review")}</strong>
-        <p>{surface.tr("gui.update_review.empty_hint", "Open a failed or cancelled archive update in the task center and choose Review task settings.")}</p>
-        <button class="secondary-lite" onclick={surface.onOpenTasks}>{surface.tr("gui.task_center.title", "Task center")}</button>
+        <strong>{surface.tr("gui.update_review.empty")}</strong>
+        <p>{surface.tr("gui.update_review.empty_hint")}</p>
+        <button class="secondary-lite" onclick={surface.onOpenTasks}>{surface.tr("gui.task_center.title")}</button>
       </div>
     {/if}
   </div>

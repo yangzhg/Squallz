@@ -227,7 +227,9 @@ Finder, Explorer and Linux file-manager actions resolve their binding before a
 job is submitted. The resulting `JobSpec` is a complete snapshot, so editing a
 preset cannot change a running or queued job. If the GUI handoff is unavailable,
 the generated integration scripts call the bundled CLI with
-`--file-manager-preset`, which reads the same document.
+`file-manager <action> -- <paths...>`, which reads the same document and resolves
+the same paths, destination naming, collision avoidance and archive policy in core.
+Creation always rejects outputs that appear after the destination was selected.
 
 The file-manager action still owns its explicit destination:
 

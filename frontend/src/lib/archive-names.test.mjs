@@ -8,7 +8,6 @@ test("recovery grouping stays conservative until RAR headers are verified", asyn
 
   try {
     const names = await server.ssrLoadModule("/src/lib/archive-names.ts");
-    const externalTasks = await server.ssrLoadModule("/src/lib/external-tasks.ts");
     assert.equal(names.archiveNameWithoutVolumeSuffix("movie.part2.rar"), "movie.part2.rar");
     assert.equal(names.archiveNameWithoutVolumeSuffix("movie.part002.RAR"), "movie.part002.RAR");
     assert.equal(names.archiveNameWithoutVolumeSuffix("movie.rar.002"), "movie.rar");
@@ -65,10 +64,6 @@ test("recovery grouping stays conservative until RAR headers are verified", asyn
       ).size,
       3,
     );
-    assert.equal(externalTasks.defaultExternalArchiveStemName("movie.part7.rar"), "movie.part7");
-    assert.equal(externalTasks.defaultExternalArchiveStemName("movie.r07"), "movie");
-    assert.equal(externalTasks.defaultExternalArchiveStemName("movie.rar.007"), "movie");
-    assert.equal(externalTasks.defaultExternalArchiveStemName("movie.z07"), "movie");
     assert.equal(names.legacyRarVolumeExtensions.length, 100);
     assert.deepEqual(
       [

@@ -16,6 +16,8 @@ pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(()
 #[cfg(feature = "process-backend")]
 mod external_process;
 #[cfg(feature = "process-backend")]
+mod external_reader;
+#[cfg(feature = "process-backend")]
 mod rar;
 mod sevenz;
 #[cfg(feature = "process-backend")]
@@ -25,14 +27,16 @@ mod sqz;
 mod stable_source;
 mod stream;
 mod tar;
+mod testing;
 mod zip;
 
 #[cfg(feature = "process-backend")]
 pub use rar::{unrar_backend_status, UnrarBackendSource, UnrarBackendStatus};
 #[cfg(feature = "process-backend")]
 pub use sevenzip_bridge::{
-    sevenzip_backend_status, wimlib_backend_status, SevenZipBackendSource, SevenZipBackendStatus,
-    WimlibBackendSource, WimlibBackendStatus,
+    is_sevenzip_bridge_format, sevenzip_backend_status, wim_compression_name,
+    wimlib_backend_status, SevenZipBackendSource, SevenZipBackendStatus, WimlibBackendSource,
+    WimlibBackendStatus,
 };
 
 /// Builds the registry containing every built-in format.
@@ -102,9 +106,10 @@ pub fn embedded_preview_registry() -> FormatRegistry {
 #[cfg(test)]
 mod tests {
     use squallz_format_api::{
-        ControlToken, Detected, ExtractOptions, FormatError, FormatInfo, FormatKind, NoProgress,
-        OpenOptions,
+        ControlToken, Detected, FormatError, FormatInfo, FormatKind, OpenOptions,
     };
+    #[cfg(feature = "process-backend")]
+    use squallz_format_api::{ExtractOptions, NoProgress};
 
     fn format_info<'a>(formats: &'a [FormatInfo], id: &str) -> &'a FormatInfo {
         formats
@@ -192,6 +197,73 @@ mod tests {
         assert_archive(&formats[0], &["zip"], false, true, false, false, false);
     }
 
+    #[test]
+    fn archive_setup_observes_cancellation_before_io() {
+        use squallz_format_api::CreateOptions;
+        use std::io::Cursor;
+        use std::path::Path;
+
+        let control = ControlToken::new();
+        control.cancel();
+        for registry in [super::registry(), super::sfx_zip_registry()] {
+            for info in registry
+                .formats()
+                .into_iter()
+                .filter(|info| info.kind == FormatKind::Archive)
+            {
+                let name = format!("archive.{}", info.extensions[0]);
+                let Some(Detected::Archive(format)) = registry.detect_by_name(&name) else {
+                    panic!("archive detection for {}", info.id);
+                };
+                let empty = || Box::new(Cursor::new(Vec::<u8>::new()));
+                assert!(
+                    matches!(
+                        format.open(empty(), &OpenOptions::default(), &control),
+                        Err(FormatError::Cancelled)
+                    ),
+                    "{} open",
+                    info.id
+                );
+                assert!(
+                    matches!(
+                        format.open_file(
+                            Path::new(&name),
+                            None,
+                            empty(),
+                            &OpenOptions::default(),
+                            &control
+                        ),
+                        Err(FormatError::Cancelled)
+                    ),
+                    "{} open_file",
+                    info.id
+                );
+                assert!(
+                    matches!(
+                        format.probe_file_source_set(
+                            Path::new(&name),
+                            None,
+                            &mut *empty(),
+                            &control
+                        ),
+                        Err(FormatError::Cancelled)
+                    ),
+                    "{} probe",
+                    info.id
+                );
+                assert!(
+                    matches!(
+                        format.create(empty(), &CreateOptions::default(), &control),
+                        Err(FormatError::Cancelled)
+                    ),
+                    "{} create",
+                    info.id
+                );
+            }
+        }
+    }
+
+    #[cfg(feature = "process-backend")]
     fn missing_volume<T>(result: Result<T, FormatError>) -> std::path::PathBuf {
         match result {
             Err(error) => error
@@ -202,6 +274,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "process-backend")]
     fn split_wim_header() -> Vec<u8> {
         let mut header = vec![0u8; 208];
         header[..8].copy_from_slice(b"MSWIM\0\0\0");
@@ -321,44 +394,53 @@ mod tests {
             true,
             false,
         );
-        assert_archive(
-            format_info(&formats, "rar"),
-            &["rar", "cbr"],
-            false,
-            false,
-            false,
-            false,
-            false,
-        );
-        assert_archive(
-            format_info(&formats, "wim"),
-            &["wim", "swm", "esd"],
-            true,
-            false,
-            false,
-            true,
-            false,
-        );
-
-        for (id, extensions) in [
-            ("apfs", &["apfs"][..]),
-            ("cab", &["cab"][..]),
-            ("iso", &["iso"][..]),
-            ("vhdx", &["vhdx"][..]),
-            ("z", &["z", "taz"][..]),
-        ] {
+        #[cfg(feature = "process-backend")]
+        {
             assert_archive(
-                format_info(&formats, id),
-                extensions,
+                format_info(&formats, "rar"),
+                &["rar", "cbr"],
                 false,
                 false,
                 false,
                 false,
                 false,
             );
+            assert_archive(
+                format_info(&formats, "wim"),
+                &["wim", "swm", "esd"],
+                true,
+                false,
+                false,
+                true,
+                false,
+            );
+
+            for (id, extensions) in [
+                ("apfs", &["apfs"][..]),
+                ("cab", &["cab"][..]),
+                ("iso", &["iso"][..]),
+                ("vhdx", &["vhdx"][..]),
+                ("z", &["z", "taz"][..]),
+            ] {
+                assert_archive(
+                    format_info(&formats, id),
+                    extensions,
+                    false,
+                    false,
+                    false,
+                    false,
+                    false,
+                );
+            }
         }
+        #[cfg(not(feature = "process-backend"))]
+        assert_eq!(
+            formats.iter().map(|format| format.id).collect::<Vec<_>>(),
+            ["zip", "tar", "7z", "sqz", "gzip", "bzip2", "xz", "zstd", "lz4", "brotli"]
+        );
     }
 
+    #[cfg(feature = "process-backend")]
     #[test]
     fn split_wim_reports_the_same_missing_member_from_every_reader_entry_point() {
         let root = std::env::temp_dir().join(format!(
@@ -376,8 +458,13 @@ mod tests {
         let control = ControlToken::new();
         let missing = root.join("install2.swm");
         let paths = [
-            missing_volume(engine.open(&archive, &open_options)),
-            missing_volume(engine.list(&archive, &open_options)),
+            missing_volume(engine.open(&archive, &open_options, &ControlToken::default())),
+            missing_volume(engine.list_archive(
+                &archive,
+                &open_options,
+                squallz_format_api::SafetyLimits::default().max_entries,
+                &control,
+            )),
             missing_volume(engine.test_summary(
                 &archive,
                 &open_options,
@@ -446,8 +533,16 @@ mod tests {
 
         assert_detected_compressed(reg.detect_by_name("payload.gz"), "gzip", None);
         assert_eq!(reg.display_stem("payload.gz"), "payload");
-        assert_detected_archive(reg.detect_by_name("comic.cbr"), "rar");
-        assert_detected_archive(reg.detect_by_name("package.deb"), "ar");
+        #[cfg(feature = "process-backend")]
+        {
+            assert_detected_archive(reg.detect_by_name("comic.cbr"), "rar");
+            assert_detected_archive(reg.detect_by_name("package.deb"), "ar");
+        }
+        #[cfg(not(feature = "process-backend"))]
+        {
+            assert!(reg.detect_by_name("comic.cbr").is_none());
+            assert!(reg.detect_by_name("package.deb").is_none());
+        }
     }
 
     #[test]
@@ -459,72 +554,22 @@ mod tests {
             reg.detect(None, &[0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C, 0x00], b""),
             "7z",
         );
-        assert_detected_archive(reg.detect(None, b"Rar!\x1A\x07\x00rest", b""), "rar");
-        assert_detected_archive(reg.detect(None, b"MSWIM\0\0\0rest", b""), "wim");
-        assert_detected_archive(reg.detect(None, b"MSCFrest", b""), "cab");
+        #[cfg(feature = "process-backend")]
+        {
+            assert_detected_archive(reg.detect(None, b"Rar!\x1A\x07\x00rest", b""), "rar");
+            assert_detected_archive(reg.detect(None, b"MSWIM\0\0\0rest", b""), "wim");
+            assert_detected_archive(reg.detect(None, b"MSCFrest", b""), "cab");
+        }
+        #[cfg(not(feature = "process-backend"))]
+        {
+            assert!(reg.detect(None, b"Rar!\x1A\x07\x00rest", b"").is_none());
+            assert!(reg.detect(None, b"MSWIM\0\0\0rest", b"").is_none());
+            assert!(reg.detect(None, b"MSCFrest", b"").is_none());
+        }
         assert_detected_compressed(
             reg.detect(None, &[0x04, 0x22, 0x4D, 0x18, 0x40], b""),
             "lz4",
             None,
         );
-    }
-
-    #[test]
-    fn registry_contains_zip() {
-        let reg = super::registry();
-        let formats = reg.formats();
-        assert!(!formats.is_empty());
-        let zip = formats
-            .iter()
-            .find(|f| f.id == "zip")
-            .expect("zip registered");
-        assert_eq!(zip.kind, FormatKind::Archive);
-        assert!(zip.capabilities.can_create);
-        assert!(zip.capabilities.can_extract);
-        assert!(zip.capabilities.can_encrypt_data);
-        assert!(!zip.capabilities.can_encrypt_names);
-        let sqz = formats
-            .iter()
-            .find(|f| f.id == "sqz")
-            .expect("sqz registered");
-        assert_eq!(sqz.kind, FormatKind::Archive);
-        assert_eq!(sqz.extensions, vec!["sqz"]);
-        assert!(sqz.capabilities.can_create);
-        assert!(sqz.capabilities.can_extract);
-        assert!(sqz.capabilities.can_test);
-        assert!(sqz.capabilities.can_split);
-        let rar = formats
-            .iter()
-            .find(|f| f.id == "rar")
-            .expect("rar registered");
-        assert_eq!(rar.kind, FormatKind::Archive);
-        assert_eq!(rar.extensions, vec!["rar", "cbr"]);
-        assert!(!rar.capabilities.can_create);
-        assert!(rar.capabilities.can_extract);
-        let cab = formats
-            .iter()
-            .find(|f| f.id == "cab")
-            .expect("cab registered");
-        assert_eq!(cab.kind, FormatKind::Archive);
-        assert_eq!(cab.extensions, vec!["cab"]);
-        assert!(!cab.capabilities.can_create);
-        assert!(cab.capabilities.can_extract);
-        assert!(cab.capabilities.can_test);
-        let wim = formats
-            .iter()
-            .find(|f| f.id == "wim")
-            .expect("wim registered");
-        assert_eq!(wim.kind, FormatKind::Archive);
-        assert!(wim.capabilities.can_create);
-        assert!(wim.capabilities.can_extract);
-        for id in ["apfs", "iso", "vhdx", "z"] {
-            let format = formats
-                .iter()
-                .find(|f| f.id == id)
-                .unwrap_or_else(|| panic!("{id} registered"));
-            assert_eq!(format.kind, FormatKind::Archive);
-            assert!(!format.capabilities.can_create);
-            assert!(format.capabilities.can_extract);
-        }
     }
 }

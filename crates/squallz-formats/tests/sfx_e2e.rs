@@ -7,15 +7,18 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc, Barrier,
 };
 
-use common::{build_stored_zip, command_exists, engine, RawZipEntry, TempDir};
+use common::{
+    build_stored_zip, command_exists, engine, read_archive_entries, RawZipEntry, TempDir,
+};
 use squallz_core::api::{
     ControlToken, CreateOptions, EntryPath, ExtractOptions, FormatError, NoProgress, OpenOptions,
     Password, ProgressSink,
 };
+use squallz_core::CreateCommitPolicy;
 use squallz_core::{
     inspect_sfx, verify_sfx_payload, SfxBuildOptions, SfxLayout, SfxTarget, SFX_CLI_STUB_MARKER,
     SFX_GUI_STUB_MARKER,
@@ -229,7 +232,7 @@ fn create_macos_sfx_from_input(
     template: &Path,
     input: &Path,
     output: &Path,
-    overwrite: bool,
+    commit_policy: CreateCommitPolicy,
     progress: &dyn ProgressSink,
 ) -> Result<(), FormatError> {
     engine()
@@ -240,9 +243,9 @@ fn create_macos_sfx_from_input(
             &CreateOptions::default(),
             &SfxBuildOptions {
                 target: SfxTarget::Macos,
-                overwrite,
                 ..SfxBuildOptions::default()
             },
+            commit_policy,
             progress,
             &ControlToken::new(),
         )
@@ -257,7 +260,7 @@ fn rejected_plan_before_input_scan(
 ) -> (FormatError, usize) {
     let mut scanned_entries = 0usize;
     let error = engine()
-        .plan_sfx_from_inputs_with_progress(
+        .plan_sfx_from_inputs(
             stub,
             &[input.to_path_buf()],
             output,
@@ -267,6 +270,7 @@ fn rejected_plan_before_input_scan(
                 ..SfxBuildOptions::default()
             },
             |_count, _path| scanned_entries += 1,
+            &ControlToken::new(),
         )
         .unwrap_err();
     (error, scanned_entries)
@@ -290,6 +294,7 @@ fn windows_sfx_roundtrips_through_shared_engine() {
                 target: SfxTarget::Windows,
                 ..SfxBuildOptions::default()
             },
+            CreateCommitPolicy::NoReplace,
             &NoProgress,
             &ControlToken::new(),
         )
@@ -309,7 +314,7 @@ fn windows_sfx_roundtrips_through_shared_engine() {
     )
     .unwrap();
 
-    let entries = engine().list(&output, &OpenOptions::default()).unwrap();
+    let entries = read_archive_entries(&engine(), &output, &OpenOptions::default()).unwrap();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].path.display, "docs/readme.txt");
 
@@ -351,6 +356,7 @@ fn standard_unzip_can_extract_the_embedded_zip_payload() {
                 target: SfxTarget::Windows,
                 ..SfxBuildOptions::default()
             },
+            CreateCommitPolicy::NoReplace,
             &NoProgress,
             &ControlToken::new(),
         )
@@ -393,6 +399,7 @@ fn sfx_checksum_detects_payload_tampering_before_extract() {
                 target: SfxTarget::Windows,
                 ..SfxBuildOptions::default()
             },
+            CreateCommitPolicy::NoReplace,
             &NoProgress,
             &ControlToken::new(),
         )
@@ -430,6 +437,7 @@ fn authenticode_certificate_table_can_follow_the_sfx_footer() {
                 target: SfxTarget::Windows,
                 ..SfxBuildOptions::default()
             },
+            CreateCommitPolicy::NoReplace,
             &NoProgress,
             &ControlToken::new(),
         )
@@ -446,7 +454,7 @@ fn authenticode_certificate_table_can_follow_the_sfx_footer() {
         &ControlToken::new(),
     )
     .unwrap();
-    let entries = engine().list(&output, &OpenOptions::default()).unwrap();
+    let entries = read_archive_entries(&engine(), &output, &OpenOptions::default()).unwrap();
     assert_eq!(entries[0].path.display, "docs/readme.txt");
 
     let mut bytes = fs::read(&output).unwrap();
@@ -480,6 +488,7 @@ fn sfx_extraction_keeps_shared_path_traversal_guard() {
                 target: SfxTarget::Windows,
                 ..SfxBuildOptions::default()
             },
+            CreateCommitPolicy::NoReplace,
             &NoProgress,
             &ControlToken::new(),
         )
@@ -518,6 +527,7 @@ fn encrypted_zip_payload_keeps_password_boundary() {
                 password: Some(Password::new("correct horse")),
                 ..CreateOptions::default()
             },
+            CreateCommitPolicy::ReplaceExisting,
             &NoProgress,
             &ControlToken::new(),
         )
@@ -531,6 +541,7 @@ fn encrypted_zip_payload_keeps_password_boundary() {
                 target: SfxTarget::Windows,
                 ..SfxBuildOptions::default()
             },
+            CreateCommitPolicy::NoReplace,
             &NoProgress,
             &ControlToken::new(),
         )
@@ -592,6 +603,7 @@ fn macos_app_sfx_roundtrips_through_shared_engine() {
                 target: SfxTarget::Macos,
                 ..SfxBuildOptions::default()
             },
+            CreateCommitPolicy::NoReplace,
             &NoProgress,
             &ControlToken::new(),
         )
@@ -611,7 +623,7 @@ fn macos_app_sfx_roundtrips_through_shared_engine() {
         &ControlToken::new(),
     )
     .unwrap();
-    let entries = engine().list(&output, &OpenOptions::default()).unwrap();
+    let entries = read_archive_entries(&engine(), &output, &OpenOptions::default()).unwrap();
     assert_eq!(entries[0].path.display, "docs/readme.txt");
     let plist = fs::read_to_string(output.join("Contents/Info.plist")).unwrap();
     assert!(plist.contains("<string>Photos</string>"));
@@ -648,6 +660,7 @@ fn macos_app_sfx_requires_a_string_minimum_system_version() {
                 target: SfxTarget::Macos,
                 ..SfxBuildOptions::default()
             },
+            CreateCommitPolicy::NoReplace,
             &NoProgress,
             &ControlToken::new(),
         )
@@ -673,6 +686,7 @@ fn macos_app_sfx_requires_a_string_minimum_system_version() {
                 target: SfxTarget::Macos,
                 ..SfxBuildOptions::default()
             },
+            CreateCommitPolicy::NoReplace,
             &NoProgress,
             &ControlToken::new(),
         )
@@ -707,6 +721,8 @@ fn macos_sfx_can_create_its_zip_payload_from_inputs() {
             &output,
             &CreateOptions::default(),
             &sfx_options,
+            |_count, _path| {},
+            &ControlToken::new(),
         )
         .unwrap();
     let report = engine
@@ -716,6 +732,7 @@ fn macos_sfx_can_create_its_zip_payload_from_inputs() {
             &output,
             &CreateOptions::default(),
             &sfx_options,
+            CreateCommitPolicy::NoReplace,
             &NoProgress,
             &ControlToken::new(),
         )
@@ -724,7 +741,7 @@ fn macos_sfx_can_create_its_zip_payload_from_inputs() {
     assert_eq!(plan.primary_output, output);
     assert!(plan.final_output_budget_bytes >= report.total_bytes);
     assert!(plan.workspace_budget_bytes > plan.final_output_budget_bytes);
-    let entries = engine.list(&output, &OpenOptions::default()).unwrap();
+    let entries = read_archive_entries(&engine, &output, &OpenOptions::default()).unwrap();
     assert_eq!(entries[0].path.display, "readme.txt");
     assert!(fs::read_dir(temp.path()).unwrap().all(|entry| !entry
         .unwrap()
@@ -781,10 +798,8 @@ fn macos_sfx_can_create_its_zip_payload_from_inputs() {
                 std::slice::from_ref(&interrupted_input),
                 &output,
                 &CreateOptions::default(),
-                &SfxBuildOptions {
-                    overwrite: true,
-                    ..sfx_options
-                },
+                &sfx_options,
+                CreateCommitPolicy::ReplaceExisting,
                 &progress,
                 &control,
             )
@@ -800,7 +815,7 @@ fn macos_sfx_can_create_its_zip_payload_from_inputs() {
         for (path, bytes) in &original_files {
             assert_eq!(fs::read(path).unwrap(), *bytes);
         }
-        let entries = engine.list(&output, &OpenOptions::default()).unwrap();
+        let entries = read_archive_entries(&engine, &output, &OpenOptions::default()).unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].path.display, "readme.txt");
         assert_no_private_sfx_staging(temp.path());
@@ -820,6 +835,7 @@ fn macos_sfx_can_create_its_zip_payload_from_inputs() {
                 target: SfxTarget::Macos,
                 ..SfxBuildOptions::default()
             },
+            CreateCommitPolicy::NoReplace,
             &NoProgress,
             &ControlToken::new(),
         )
@@ -845,8 +861,14 @@ fn macos_sfx_rejects_template_entries_added_after_preparation() {
         let late = late.clone();
         move || fs::write(&late, b"late").unwrap()
     });
-    let error =
-        create_macos_sfx_from_input(&template, &input, &output, false, &progress).unwrap_err();
+    let error = create_macos_sfx_from_input(
+        &template,
+        &input,
+        &output,
+        CreateCommitPolicy::NoReplace,
+        &progress,
+    )
+    .unwrap_err();
 
     assert!(progress.fired.load(Ordering::Acquire));
     assert!(matches!(error, FormatError::CorruptArchive(_)));
@@ -878,8 +900,14 @@ fn macos_sfx_rejects_a_prepared_template_file_replacement() {
             fs::rename(&replacement, &theme).unwrap();
         }
     });
-    let error =
-        create_macos_sfx_from_input(&template, &input, &output, true, &progress).unwrap_err();
+    let error = create_macos_sfx_from_input(
+        &template,
+        &input,
+        &output,
+        CreateCommitPolicy::ReplaceExisting,
+        &progress,
+    )
+    .unwrap_err();
 
     assert!(progress.fired.load(Ordering::Acquire));
     assert!(matches!(error, FormatError::CorruptArchive(_)));
@@ -920,6 +948,7 @@ fn macos_sfx_rejects_a_template_file_rebound_after_open() {
                 target: SfxTarget::Macos,
                 ..SfxBuildOptions::default()
             },
+            CreateCommitPolicy::NoReplace,
             &progress,
             &ControlToken::new(),
         )
@@ -964,6 +993,7 @@ fn macos_sfx_staging_root_replacement_never_mutates_the_competing_path() {
                 target: SfxTarget::Macos,
                 ..SfxBuildOptions::default()
             },
+            CreateCommitPolicy::NoReplace,
             &progress,
             &ControlToken::new(),
         )
@@ -999,8 +1029,14 @@ fn macos_sfx_rejects_a_prepared_template_file_removed_before_assembly() {
         let theme = theme.clone();
         move || fs::remove_file(&theme).unwrap()
     });
-    let error =
-        create_macos_sfx_from_input(&template, &input, &output, false, &progress).unwrap_err();
+    let error = create_macos_sfx_from_input(
+        &template,
+        &input,
+        &output,
+        CreateCommitPolicy::NoReplace,
+        &progress,
+    )
+    .unwrap_err();
 
     assert!(progress.fired.load(Ordering::Acquire));
     assert!(matches!(error, FormatError::CorruptArchive(_)));
@@ -1027,8 +1063,14 @@ fn macos_sfx_rejects_a_prepared_template_directory_replacement() {
             fs::create_dir(&theme).unwrap();
         }
     });
-    let error =
-        create_macos_sfx_from_input(&template, &input, &output, false, &progress).unwrap_err();
+    let error = create_macos_sfx_from_input(
+        &template,
+        &input,
+        &output,
+        CreateCommitPolicy::NoReplace,
+        &progress,
+    )
+    .unwrap_err();
 
     assert!(progress.fired.load(Ordering::Acquire));
     assert!(matches!(error, FormatError::CorruptArchive(_)));
@@ -1059,8 +1101,14 @@ fn macos_sfx_rejects_a_prepared_template_file_changed_to_a_symlink() {
             std::os::unix::fs::symlink(&outside, &theme).unwrap();
         }
     });
-    let error =
-        create_macos_sfx_from_input(&template, &input, &output, false, &progress).unwrap_err();
+    let error = create_macos_sfx_from_input(
+        &template,
+        &input,
+        &output,
+        CreateCommitPolicy::NoReplace,
+        &progress,
+    )
+    .unwrap_err();
 
     assert!(progress.fired.load(Ordering::Acquire));
     assert!(matches!(error, FormatError::CorruptArchive(_)));
@@ -1091,8 +1139,14 @@ fn macos_sfx_rejects_a_prepared_template_symlink_target_change() {
             std::os::unix::fs::symlink("dark.dat", &current).unwrap();
         }
     });
-    let error =
-        create_macos_sfx_from_input(&template, &input, &output, false, &progress).unwrap_err();
+    let error = create_macos_sfx_from_input(
+        &template,
+        &input,
+        &output,
+        CreateCommitPolicy::NoReplace,
+        &progress,
+    )
+    .unwrap_err();
 
     assert!(progress.fired.load(Ordering::Acquire));
     assert!(matches!(error, FormatError::CorruptArchive(_)));
@@ -1123,6 +1177,8 @@ fn macos_sfx_plan_budgets_custom_template_nodes_and_symlinks() {
             &output,
             &CreateOptions::default(),
             &options,
+            |_count, _path| {},
+            &ControlToken::new(),
         )
         .unwrap();
 
@@ -1140,6 +1196,8 @@ fn macos_sfx_plan_budgets_custom_template_nodes_and_symlinks() {
             &output,
             &CreateOptions::default(),
             &options,
+            |_count, _path| {},
+            &ControlToken::new(),
         )
         .unwrap();
     assert!(plan.final_output_budget_bytes > baseline.final_output_budget_bytes);
@@ -1151,6 +1209,7 @@ fn macos_sfx_plan_budgets_custom_template_nodes_and_symlinks() {
             &output,
             &CreateOptions::default(),
             &options,
+            CreateCommitPolicy::NoReplace,
             &NoProgress,
             &ControlToken::new(),
         )
@@ -1196,16 +1255,15 @@ fn macos_sfx_rebuild_prunes_the_existing_output_bundle_from_its_payload() {
             &CreateOptions::default(),
             &SfxBuildOptions {
                 target: SfxTarget::Macos,
-                overwrite: true,
                 ..SfxBuildOptions::default()
             },
+            CreateCommitPolicy::ReplaceExisting,
             &NoProgress,
             &ControlToken::new(),
         )
         .unwrap();
 
-    let names: Vec<_> = engine()
-        .list(&output, &OpenOptions::default())
+    let names: Vec<_> = read_archive_entries(&engine(), &output, &OpenOptions::default())
         .unwrap()
         .into_iter()
         .map(|entry| entry.path.display)
@@ -1231,7 +1289,6 @@ fn single_file_sfx_rebuild_prunes_the_existing_output_from_its_payload() {
     let engine = engine();
     let sfx_options = SfxBuildOptions {
         target: SfxTarget::Windows,
-        overwrite: true,
         ..SfxBuildOptions::default()
     };
     let plan = engine
@@ -1241,6 +1298,8 @@ fn single_file_sfx_rebuild_prunes_the_existing_output_from_its_payload() {
             &output,
             &CreateOptions::default(),
             &sfx_options,
+            |_count, _path| {},
+            &ControlToken::new(),
         )
         .unwrap();
     let report = engine
@@ -1250,6 +1309,7 @@ fn single_file_sfx_rebuild_prunes_the_existing_output_from_its_payload() {
             &output,
             &CreateOptions::default(),
             &sfx_options,
+            CreateCommitPolicy::ReplaceExisting,
             &NoProgress,
             &ControlToken::new(),
         )
@@ -1258,8 +1318,7 @@ fn single_file_sfx_rebuild_prunes_the_existing_output_from_its_payload() {
     assert!(plan.final_output_budget_bytes >= report.total_bytes);
     assert!(plan.workspace_budget_bytes > plan.final_output_budget_bytes);
 
-    let names: Vec<_> = engine
-        .list(&output, &OpenOptions::default())
+    let names: Vec<_> = read_archive_entries(&engine, &output, &OpenOptions::default())
         .unwrap()
         .into_iter()
         .map(|entry| entry.path.display)
@@ -1286,9 +1345,9 @@ fn sfx_rejects_an_explicit_output_input_without_overwriting_it() {
             &CreateOptions::default(),
             &SfxBuildOptions {
                 target: SfxTarget::Windows,
-                overwrite: true,
                 ..SfxBuildOptions::default()
             },
+            CreateCommitPolicy::ReplaceExisting,
             &NoProgress,
             &ControlToken::new(),
         )
@@ -1318,9 +1377,9 @@ fn macos_sfx_rejects_an_explicit_input_inside_the_output_bundle() {
             &CreateOptions::default(),
             &SfxBuildOptions {
                 target: SfxTarget::Macos,
-                overwrite: true,
                 ..SfxBuildOptions::default()
             },
+            CreateCommitPolicy::ReplaceExisting,
             &NoProgress,
             &ControlToken::new(),
         )
@@ -1348,6 +1407,7 @@ fn macos_bundle_detects_payload_tampering_and_strips_source_signature() {
                 target: SfxTarget::Macos,
                 ..SfxBuildOptions::default()
             },
+            CreateCommitPolicy::NoReplace,
             &NoProgress,
             &ControlToken::new(),
         )
@@ -1384,6 +1444,7 @@ fn macos_bundle_detects_payload_tampering_and_strips_source_signature() {
                 target: SfxTarget::Macos,
                 ..SfxBuildOptions::default()
             },
+            CreateCommitPolicy::NoReplace,
             &NoProgress,
             &ctl,
         )
@@ -1404,6 +1465,7 @@ fn macos_bundle_detects_payload_tampering_and_strips_source_signature() {
                 target: SfxTarget::Macos,
                 ..SfxBuildOptions::default()
             },
+            CreateCommitPolicy::NoReplace,
             &NoProgress,
             &ControlToken::new(),
         )
@@ -1440,6 +1502,7 @@ fn macos_bundle_template_rejects_symlinks_that_resolve_outside() {
                 target: SfxTarget::Macos,
                 ..SfxBuildOptions::default()
             },
+            CreateCommitPolicy::NoReplace,
             &NoProgress,
             &ControlToken::new(),
         )
@@ -1471,6 +1534,7 @@ fn macos_bundle_template_rejects_symlinked_generated_path_ancestors() {
                 target: SfxTarget::Macos,
                 ..SfxBuildOptions::default()
             },
+            CreateCommitPolicy::NoReplace,
             &NoProgress,
             &ControlToken::new(),
         )
@@ -1511,6 +1575,8 @@ fn macos_bundle_template_rejects_special_files_during_plan_and_create() {
             &output,
             &CreateOptions::default(),
             &options,
+            |_count, _path| {},
+            &ControlToken::new(),
         )
         .unwrap_err();
     assert!(matches!(error, FormatError::Unsupported(_)));
@@ -1522,6 +1588,7 @@ fn macos_bundle_template_rejects_special_files_during_plan_and_create() {
             &archive,
             &output,
             &options,
+            CreateCommitPolicy::NoReplace,
             &NoProgress,
             &ControlToken::new(),
         )
@@ -1548,6 +1615,7 @@ fn macos_single_file_sfx_is_rejected() {
                 target: SfxTarget::Macos,
                 ..SfxBuildOptions::default()
             },
+            CreateCommitPolicy::NoReplace,
             &NoProgress,
             &ControlToken::new(),
         )
@@ -1574,6 +1642,7 @@ fn sfx_build_requires_a_matching_squallz_stub() {
                 target: SfxTarget::Windows,
                 ..SfxBuildOptions::default()
             },
+            CreateCommitPolicy::NoReplace,
             &NoProgress,
             &ControlToken::new(),
         )
@@ -1592,6 +1661,7 @@ fn sfx_build_requires_a_matching_squallz_stub() {
                 target: SfxTarget::Windows,
                 ..SfxBuildOptions::default()
             },
+            CreateCommitPolicy::NoReplace,
             &NoProgress,
             &ControlToken::new(),
         )
@@ -1609,6 +1679,7 @@ fn sfx_build_requires_a_matching_squallz_stub() {
                 target: SfxTarget::Linux,
                 ..SfxBuildOptions::default()
             },
+            CreateCommitPolicy::NoReplace,
             &NoProgress,
             &ControlToken::new(),
         )
@@ -1691,6 +1762,7 @@ fn sfx_plan_rejects_an_existing_sfx_before_scanning_inputs() {
                 target: SfxTarget::Windows,
                 ..SfxBuildOptions::default()
             },
+            CreateCommitPolicy::NoReplace,
             &NoProgress,
             &ControlToken::new(),
         )
@@ -1743,6 +1815,7 @@ fn input_sfx_creation_validates_the_runtime_before_reading_sources() {
                 target: SfxTarget::Windows,
                 ..SfxBuildOptions::default()
             },
+            CreateCommitPolicy::NoReplace,
             &NoProgress,
             &ControlToken::new(),
         )
@@ -1781,6 +1854,7 @@ fn single_file_sfx_rejects_runtime_path_replacement_during_copy() {
                 target: SfxTarget::Windows,
                 ..SfxBuildOptions::default()
             },
+            CreateCommitPolicy::NoReplace,
             &progress,
             &ControlToken::new(),
         )
@@ -1822,6 +1896,7 @@ fn single_file_sfx_rejects_runtime_rebound_to_a_symlink_during_copy() {
                 target: SfxTarget::Windows,
                 ..SfxBuildOptions::default()
             },
+            CreateCommitPolicy::NoReplace,
             &progress,
             &ControlToken::new(),
         )
@@ -1830,6 +1905,94 @@ fn single_file_sfx_rejects_runtime_rebound_to_a_symlink_during_copy() {
     assert!(error.to_string().contains("SFX runtime changed"));
     assert!(!output.exists());
     assert_no_private_sfx_staging(temp.path());
+}
+
+#[test]
+fn sfx_plan_and_creation_cancel_during_input_scan() {
+    struct CancelInputScan {
+        ctl: Arc<ControlToken>,
+        scanned: AtomicUsize,
+    }
+    impl ProgressSink for CancelInputScan {
+        fn on_scan_progress(&self, _entries: u64, _current: &EntryPath) {
+            if self.scanned.fetch_add(1, Ordering::SeqCst) + 1 == 2 {
+                self.ctl.cancel();
+            }
+        }
+        fn on_progress(&self, _done: u64, _total: u64, _current: &EntryPath) {}
+    }
+    let temp = TempDir::new("sfx-input-scan-cancel");
+    let stub = temp.path().join("stub.exe");
+    let source = temp.path().join("source");
+    let output = temp.path().join("package.exe");
+    write_pe_stub(&stub);
+    fs::create_dir(&source).unwrap();
+    fs::write(source.join("first.txt"), b"first source").unwrap();
+    fs::write(source.join("last.txt"), b"last source").unwrap();
+    let options = SfxBuildOptions {
+        target: SfxTarget::Windows,
+        ..SfxBuildOptions::default()
+    };
+    let ctl = ControlToken::new();
+    let mut scanned = Vec::new();
+    let error = engine()
+        .plan_sfx_from_inputs(
+            &stub,
+            std::slice::from_ref(&source),
+            &output,
+            &CreateOptions::default(),
+            &options,
+            |count, path| {
+                scanned.push((count, path.to_owned()));
+                if count == 2 {
+                    ctl.cancel();
+                }
+            },
+            &ctl,
+        )
+        .unwrap_err();
+    assert!(matches!(error, FormatError::Cancelled));
+    assert_eq!(scanned.len(), 2);
+    assert_eq!(scanned[0], (1, "source".to_owned()));
+    assert!(!output.exists());
+    assert_no_private_sfx_staging(temp.path());
+
+    for existing in [false, true] {
+        if existing {
+            fs::write(&output, b"previous SFX").unwrap();
+        }
+        let ctl = ControlToken::new();
+        let progress = CancelInputScan {
+            ctl: Arc::clone(&ctl),
+            scanned: AtomicUsize::new(0),
+        };
+        let error = engine()
+            .create_sfx_from_inputs(
+                &stub,
+                std::slice::from_ref(&source),
+                &output,
+                &CreateOptions::default(),
+                &options,
+                if existing {
+                    CreateCommitPolicy::ReplaceExisting
+                } else {
+                    CreateCommitPolicy::NoReplace
+                },
+                &progress,
+                &ctl,
+            )
+            .unwrap_err();
+        assert!(matches!(error, FormatError::Cancelled));
+        assert_eq!(progress.scanned.load(Ordering::SeqCst), 2);
+        if existing {
+            assert_eq!(fs::read(&output).unwrap(), b"previous SFX");
+        } else {
+            assert!(!output.exists());
+        }
+        assert_eq!(fs::read(source.join("first.txt")).unwrap(), b"first source");
+        assert_eq!(fs::read(source.join("last.txt")).unwrap(), b"last source");
+        assert_no_private_sfx_staging(temp.path());
+    }
 }
 
 #[test]
@@ -1852,6 +2015,7 @@ fn cancelled_sfx_build_leaves_no_output() {
                 target: SfxTarget::Windows,
                 ..SfxBuildOptions::default()
             },
+            CreateCommitPolicy::NoReplace,
             &NoProgress,
             &ctl,
         )
@@ -1886,9 +2050,9 @@ fn cancelled_sfx_overwrite_preserves_the_previous_output() {
             &output,
             &SfxBuildOptions {
                 target: SfxTarget::Windows,
-                overwrite: true,
                 ..SfxBuildOptions::default()
             },
+            CreateCommitPolicy::ReplaceExisting,
             &progress,
             &ctl,
         )
@@ -1910,9 +2074,9 @@ fn cancelled_sfx_overwrite_preserves_the_previous_output() {
             &bundle,
             &SfxBuildOptions {
                 target: SfxTarget::Macos,
-                overwrite: true,
                 ..SfxBuildOptions::default()
             },
+            CreateCommitPolicy::ReplaceExisting,
             &progress,
             &ctl,
         )
@@ -1951,6 +2115,7 @@ fn concurrent_input_builds_publish_once_and_clean_their_private_staging() {
                         target: SfxTarget::Windows,
                         ..SfxBuildOptions::default()
                     },
+                    CreateCommitPolicy::NoReplace,
                     &NoProgress,
                     &ControlToken::new(),
                 )
@@ -2001,6 +2166,7 @@ fn split_volume_cannot_be_used_as_sfx_payload() {
                 target: SfxTarget::Windows,
                 ..SfxBuildOptions::default()
             },
+            CreateCommitPolicy::NoReplace,
             &NoProgress,
             &ControlToken::new(),
         )

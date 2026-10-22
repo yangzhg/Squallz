@@ -9,7 +9,6 @@ mod args;
 mod commands;
 mod content_policy;
 mod errors;
-mod file_manager_presets;
 mod progress;
 mod prompt;
 mod ui;
@@ -18,12 +17,10 @@ use std::any::Any;
 use std::panic;
 use std::sync::Arc;
 
-use clap::Parser;
 use squallz_core::api::ControlToken;
 use squallz_core::{Engine, SFX_CLI_STUB_MARKER};
 use squallz_i18n::Localizer;
 
-use crate::args::Cli;
 use crate::commands::Ctx;
 use crate::errors::{
     error_kind, exit_code, localize_error, localize_update_error, update_error_kind,
@@ -52,17 +49,16 @@ fn run_cli() {
         }
     }
 
-    if let Some(code) = args::try_print_localized_help(std::env::args_os()) {
-        std::process::exit(code);
-    }
-
-    let cli = Cli::parse();
+    let (cli, loc) = match args::parse_cli(std::env::args_os()) {
+        Ok(parsed) => parsed,
+        Err(error) => error.exit(),
+    };
     let json_errors = cli.cmd.json_requested();
     let output_style = cli.output_style;
     let color = cli.color;
     let accent = cli.accent;
-    let (ctx, loc) = command_context(
-        cli.lang.as_deref(),
+    let ctx = command_context(
+        Arc::new(loc),
         cli.quiet,
         cli.verbose,
         output_style,
@@ -72,37 +68,33 @@ fn run_cli() {
     finish_command(
         commands::dispatch(cli.cmd, &ctx),
         &ctx,
-        &loc,
+        &ctx.loc,
         json_errors,
         output_style,
     );
 }
 
 fn command_context(
-    lang: Option<&str>,
+    loc: Arc<Localizer>,
     quiet: bool,
     verbose: bool,
     output_style: args::OutputStyleArg,
     color: args::ColorArg,
     accent: args::AccentArg,
-) -> (Ctx, Arc<Localizer>) {
-    let loc = Arc::new(Localizer::load(lang));
+) -> Ctx {
     let ctl = ControlToken::new();
     let handler_ctl = Arc::clone(&ctl);
     let _ = ctrlc::set_handler(move || handler_ctl.cancel());
-    (
-        Ctx {
-            engine: Engine::new(squallz_formats::registry()),
-            loc: Arc::clone(&loc),
-            ctl,
-            quiet,
-            verbose,
-            output_style,
-            color,
-            accent,
-        },
+    Ctx {
+        engine: Engine::new(squallz_formats::registry()),
         loc,
-    )
+        ctl,
+        quiet,
+        verbose,
+        output_style,
+        color,
+        accent,
+    }
 }
 
 fn finish_command(

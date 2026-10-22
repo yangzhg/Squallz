@@ -6,21 +6,20 @@ use std::time::Instant;
 use squallz_core::api::{EntryPath, ProgressPhase, ProgressSink};
 use squallz_core::lock_unpoisoned;
 
-use crate::dto::ProgressEvent;
-use crate::events::{emit, EventSink, EV_PROGRESS};
+use crate::events::{emit, EventSink, EV_SNAPSHOT};
 
 use super::redact_source_text;
 use super::snapshots::{JobProgressSnapshot, JobSnapshotStore};
 
 const PROGRESS_THROTTLE_MS: u128 = 60;
 
-/// Progress sink that forwards to the queue snapshot and emits throttled
-/// `job://progress` events with a derived speed.
+/// Progress sink that retains GUI snapshots, emits throttled `job://snapshot`
+/// events with a derived speed, and synchronously forwards phase safety.
 pub(super) struct EmitProgress<'a> {
     id: u64,
     events: Arc<dyn EventSink>,
     snapshots: Arc<Mutex<JobSnapshotStore>>,
-    queue_sink: &'a dyn ProgressSink,
+    phase_gate: &'a dyn ProgressSink,
     redactions: &'a [(String, String)],
     inner: Mutex<ProgressWindow>,
 }
@@ -43,15 +42,6 @@ struct ProgressSnapshot {
     current_done: u64,
     current_total: u64,
     scanned_entries: Option<u64>,
-    phase: Option<String>,
-    interruptible: bool,
-}
-
-#[derive(serde::Serialize)]
-struct JobProgressEvent {
-    #[serde(flatten)]
-    base: ProgressEvent,
-    #[serde(skip_serializing_if = "Option::is_none")]
     phase: Option<String>,
     interruptible: bool,
 }
@@ -168,14 +158,14 @@ impl<'a> EmitProgress<'a> {
         id: u64,
         events: Arc<dyn EventSink>,
         snapshots: Arc<Mutex<JobSnapshotStore>>,
-        queue_sink: &'a dyn ProgressSink,
+        phase_gate: &'a dyn ProgressSink,
         redactions: &'a [(String, String)],
     ) -> Self {
         Self {
             id,
             events,
             snapshots,
-            queue_sink,
+            phase_gate,
             redactions,
             inner: Mutex::new(ProgressWindow {
                 last_emit: Instant::now(),
@@ -249,29 +239,10 @@ impl<'a> EmitProgress<'a> {
             phase: snapshot.phase,
             interruptible: snapshot.interruptible,
         };
-        let Some(version) = lock_unpoisoned(&self.snapshots).set_progress(self.id, &mut progress)
-        else {
-            return;
-        };
-        emit(
-            &*self.events,
-            EV_PROGRESS,
-            &JobProgressEvent {
-                base: ProgressEvent {
-                    id: self.id,
-                    version,
-                    done: progress.done,
-                    total: progress.total,
-                    current: progress.current,
-                    current_done: progress.current_done,
-                    current_total: progress.current_total,
-                    scanned_entries: progress.scanned_entries,
-                    speed: progress.speed,
-                },
-                phase: progress.phase,
-                interruptible: progress.interruptible,
-            },
-        );
+        let snapshot = lock_unpoisoned(&self.snapshots).set_progress(self.id, &mut progress);
+        if let Some(snapshot) = snapshot {
+            emit(&*self.events, EV_SNAPSHOT, &snapshot);
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -408,20 +379,17 @@ impl ProgressSink for EmitProgress<'_> {
     ) {
         let redacted = self.redact_current(current);
         let current = redacted.as_ref().unwrap_or(current);
-        self.queue_sink
-            .on_entry_progress(done, total, current, current_done, current_total);
         self.record_progress(done, total, current, current_done, current_total, None);
     }
 
     fn on_scan_progress(&self, scanned_entries: u64, current: &EntryPath) {
         let redacted = self.redact_current(current);
         let current = redacted.as_ref().unwrap_or(current);
-        self.queue_sink.on_scan_progress(scanned_entries, current);
         self.record_progress(0, 0, current, 0, 0, Some(scanned_entries));
     }
 
     fn on_phase(&self, phase: ProgressPhase, interruptible: bool) {
-        self.queue_sink.on_phase(phase, interruptible);
+        self.phase_gate.on_phase(phase, interruptible);
         self.record_phase(phase, interruptible);
     }
 }
@@ -680,7 +648,7 @@ mod tests {
     }
 
     #[test]
-    fn progress_redacts_private_source_paths_before_queue_and_window_snapshots() {
+    fn progress_redacts_private_source_paths_in_gui_snapshots() {
         let sink = Arc::new(TestSink::default());
         let events: Arc<dyn EventSink> = sink.clone();
         let queue_sink = RecordingProgressSink::default();
@@ -730,15 +698,15 @@ mod tests {
             format!("{display}: docs/readme.txt"),
             format!("scanning {display}/assets"),
         ];
-        assert_eq!(*queue_sink.paths.lock().unwrap(), expected);
+        assert!(queue_sink.paths.lock().unwrap().is_empty());
 
         let emitted = sink
             .events
             .lock()
             .unwrap()
             .iter()
-            .filter(|(name, payload)| name == EV_PROGRESS && payload["id"] == 42)
-            .map(|(_, payload)| payload["current"].as_str().unwrap().to_owned())
+            .filter(|(name, payload)| name == EV_SNAPSHOT && payload["id"] == 42)
+            .map(|(_, payload)| payload["progress"]["current"].as_str().unwrap().to_owned())
             .collect::<Vec<_>>();
         assert_eq!(emitted, expected);
         assert!(emitted.iter().all(|current| !current.contains(private)));
@@ -752,7 +720,7 @@ mod tests {
             progress.on_progress(0, 0, &EntryPath::from_utf8(current));
             let snapshot = lock_unpoisoned(&snapshots).snapshot("main", 42).unwrap();
             assert_eq!(snapshot.progress.current, display);
-            assert_eq!(queue_sink.paths.lock().unwrap().last().unwrap(), display);
+            assert!(queue_sink.paths.lock().unwrap().is_empty());
         }
     }
 }

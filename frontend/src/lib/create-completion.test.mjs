@@ -1,3 +1,4 @@
+import { jobResult } from "../../tests/job-results.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
 
@@ -60,12 +61,11 @@ test("created archive results retain integrity-test evidence", async () => {
   try {
     const { readCreateResult } = await server.ssrLoadModule("/src/lib/create-result.ts");
     const result = readCreateResult(
-      {
+      jobResult("compress", {
         primary_output: "/tmp/archive.zip",
         outputs: ["/tmp/archive.zip"],
-        tested_after_create: true,
         entries_tested_after_create: 17,
-      },
+      }),
       "/tmp/fallback.zip",
       false,
     );

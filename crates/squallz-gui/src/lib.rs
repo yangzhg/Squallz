@@ -15,7 +15,9 @@ mod nested;
 mod open_files;
 mod password_cache;
 mod preview_sessions;
-mod preview_workspace;
+#[cfg(test)]
+#[path = "../../squallz-formats/tests/common/raw_zip.rs"]
+mod raw_zip;
 mod secrets;
 mod settings;
 mod sfx_runtime;
@@ -96,6 +98,7 @@ pub fn run() {
             commands::get_formats,
             commands::archive_stem,
             commands::plan_create,
+            commands::cancel_create_plan,
             commands::plan_convert,
             commands::cancel_convert_plan,
             commands::plan_extract,

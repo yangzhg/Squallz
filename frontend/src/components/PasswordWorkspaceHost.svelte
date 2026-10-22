@@ -37,8 +37,8 @@
       <section class="deferred-workspace-state" role="status" aria-live="polite" aria-busy="true">
         <Icon name="hourglass" size={20} />
         <div>
-          <strong>{surface.tr("gui.password.loading", "Loading password entry")}</strong>
-          <span>{surface.tr("gui.password.loading_body", "Preparing the password form for this archive.")}</span>
+          <strong>{surface.tr("gui.password.loading")}</strong>
+          <span>{surface.tr("gui.password.loading_body")}</span>
         </div>
       </section>
     </div>
@@ -48,8 +48,8 @@
         <div class="deferred-workspace-state" role="status" aria-live="polite" aria-busy="true">
           <Icon name="hourglass" size={20} />
           <div>
-            <strong>{surface.tr("gui.password.loading", "Loading password entry")}</strong>
-            <span>{surface.tr("gui.password.loading_body", "Preparing the password form for this archive.")}</span>
+            <strong>{surface.tr("gui.password.loading")}</strong>
+            <span>{surface.tr("gui.password.loading_body")}</span>
           </div>
         </div>
       </section>
@@ -61,17 +61,17 @@
   {#if surface.variant === "modern"}
     <div class="password-workspace">
       <DeferredViewError
-        {error} title={surface.tr("gui.password.load_failed", "Password entry could not be loaded")}
-        body={surface.tr("gui.password.load_failed_body", "Retry loading the password form to continue opening the archive.")}
-        retryLabel={surface.tr("gui.task_surface.retry", "Retry view")} onRetry={retry}
+        {error} title={surface.tr("gui.password.load_failed")}
+        body={surface.tr("gui.password.load_failed_body")}
+        retryLabel={surface.tr("gui.task_surface.retry")} onRetry={retry}
       />
     </div>
   {:else}
     <div class="classic-dialog-body password-workspace">
       <DeferredViewError
-        {error} title={surface.tr("gui.password.load_failed", "Password entry could not be loaded")}
-        body={surface.tr("gui.password.load_failed_body", "Retry loading the password form to continue opening the archive.")}
-        retryLabel={surface.tr("gui.task_surface.retry", "Retry view")} onRetry={retry} classic
+        {error} title={surface.tr("gui.password.load_failed")}
+        body={surface.tr("gui.password.load_failed_body")}
+        retryLabel={surface.tr("gui.task_surface.retry")} onRetry={retry} classic
       />
     </div>
   {/if}

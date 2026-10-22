@@ -135,6 +135,7 @@ Executable archive boundary:
 
 The built-in ZIP reader prefers NTFS UTC modification timestamps (100 ns
 precision), then signed Info-ZIP extended Unix timestamps, then DOS local time.
+
 DOS-only timestamps use the host's historical time-zone rules and have two-second
 precision. A repeated daylight-saving hour resolves to the earlier instant; a
 nonexistent local time remains unknown. A DOS-only archive has no source time
@@ -152,6 +153,15 @@ extra fields at a broken length boundary. Unavailable UTC metadata falls back to
 valid local DOS time; otherwise the modification time remains unknown. The
 source still reports its damaged central directory until readable entries are
 written to a new archive.
+
+Native ZIP volumes use the external reader. Its listing requests `-slmu` and
+restores fractional UTC modification times reported for ZIP entries, including
+files and directories with NTFS metadata. An older tool's explicit rejection
+of that switch retries the original listing once and leaves times unknown.
+DOS-only and UT-only whole-second times remain unknown: the tool can apply the
+current DST offset to a historical DOS time, and its whole-second output does
+not distinguish those origins. Other external formats keep their existing
+timestamp behavior. This does not change the built-in reader's precedence.
 
 References: [PKWARE APPNOTE, sections 4.4.6 and 4.5.5](https://pkware.cachefly.net/webdocs/casestudies/APPNOTE.TXT)
 and [Info-ZIP extra-field specification](https://libzip.org/specifications/extrafld.txt).
@@ -239,7 +249,7 @@ Current route:
 | WIM create, standalone WIM/ESD read, and native Split WIM create/read | External wimlib-imagex and 7zz/7z bridges | Real local wimlib/7zz create/split/list/test/extract passes on the current macOS host. Native creation publishes a validated standard `.swm`, `2.swm`, … family transactionally with the first member primary; cancellation does not expose partial members. A complete existing family opens from any member after exact-name, GUID, part-count, stable-identity, and completeness validation, and missing parts are named precisely. Target-platform package/license and broader third-party corpus remain |
 | RAR read | External 7zz/7z bridge; bsdtar for explicit use or a validated single-file decoder gap; optional user-installed unrar for confirmed-unencrypted RAR7 v6 streams | Squallz does not include a RAR decoder. The read-only path supports encrypted input through the stdin-only 7zz/7z password bridge. On Linux, a public compressed RAR5 sample that p7zip 16.02 can list but cannot decode passes list/test/extract through bsdtar only after both tools report exactly matching regular-file paths and sizes. RAR-format `partN.rar` and legacy `.rar/.r00`–`.r99` sets remain on isolated first-volume 7zz/7z staging and can open from any member. On macOS, real RAR5 and old-style RAR4 volume sets including header encryption pass list/extract, password, and missing-volume checks; a real two-volume RAR7 v6 set also passes list/test/extract from its second member with byte-identical output when unrar is configured. Broader historical RAR4, encrypted/solid RAR7 coverage, and the full three-platform package matrix are not release-claimed. Damaged repair is unsupported |
 
-The 7zz bridge lists entries with `7z l -slt` and streams one entry at a time
+The 7zz bridge lists entries with `7z l -slt -slmu` when supported and streams one entry at a time
 with `7z x -so`. The bridge output still flows through Squallz shared safe
 extraction, so Zip Slip, symlink breakout, name sanitization, overwrite, and
 resource limits remain centralized. Passwords use a piped stdin prompt and are
@@ -268,10 +278,13 @@ Implemented code paths:
   dependency in user documentation and GUI format capability surfaces; they must
   not be described as fully bundled unless packaging and license evidence is added.
   The plain classic `sqz info` table includes an ASCII `Capabilities` column
-  and a `Backend` column so users can scan built-in versus external backends
-  in logs. Modern `sqz info` adds a wrapped `Format coverage` table, a
-  `Runtime inventory`, boxed grouped capability matrix, and separate
-  `Read` / `Write` columns for the current machine while leaving JSON
+  and an `Engine` column so users can scan built-in versus external backends
+  in logs. Modern `sqz info` groups the complete capability matrix by
+  built-in archives, external bridges, and stream codecs, with separate
+  `Read` / `Write` tool availability for the current machine. A support map
+  distinguishes archive, codec, update, and recovery workflows; capability
+  rows count each operation's available runtimes. The output also includes
+  the selected style/color/palette and a short command cheatsheet. JSON is
   unchanged.
 - `sqz doctor --json` exposes a compact runtime readiness report for built-in
   formats, the 7zz/7z read bridge, WIM writer, SQZ embedded recovery, PAR2
@@ -365,7 +378,10 @@ Implemented code paths:
   scripts, and release checks can distinguish the actual product boundary from
   runtime availability: RAR is read-only, not bundled, primary read uses
   `SQUALLZ_7Z` / `7zz` / `7z` / `7za`; `SQUALLZ_BSDTAR` / `bsdtar` is an
-  explicit or validated single-file compatibility fallback, while
+  explicit or validated single-file compatibility fallback. Ordinary single-file
+  input also uses bsdtar when no 7z executable is available and no password was
+  supplied; native volumes and password input still require 7zz/7z. An invalid
+  explicit `SQUALLZ_BSDTAR` is not replaced by another tool. Meanwhile,
   `SQUALLZ_UNRAR` / `unrar` is an optional decoder for confirmed-unencrypted
   RAR7 v6 entry streams. Neither fallback is a bundled cross-platform promise;
   `fallback_scopes` is the exhaustive machine-readable policy.

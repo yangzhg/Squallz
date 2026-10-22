@@ -17,6 +17,8 @@ use squallz_format_api::{
 use zip::read::ZipFile;
 use zip::{ZipArchive, ZipReadOptions};
 
+use crate::testing::test_entry_with_problems;
+
 use super::datetime::{local_modified_time, modified_time};
 use super::encoding::{decode_entry_name, resolve_fallback_encoding};
 use super::error::map_zip_error;
@@ -207,7 +209,6 @@ impl ZipArchiveReader {
         let total: u64 = (0..self.archive.len())
             .filter_map(|i| self.archive.by_index_raw(i).ok().map(|f| f.size()))
             .fold(0, u64::saturating_add);
-        let mut done = 0u64;
         let mut entries_tested = 0u64;
         let mut accountant = LimitsAccountant::new(*limits);
         for idx in 0..self.archive.len() {
@@ -217,41 +218,19 @@ impl ZipArchiveReader {
             // browsing limit on materialized link targets does not apply here.
             let meta = self.meta_at_with_path(idx, path.clone(), false)?;
             accountant.check_entry(&meta)?;
-            progress.on_progress(done, total, &path);
             entries_tested += 1;
-            match self.open_entry(idx) {
-                // Missing or incorrect credentials are hard failures, not
-                // evidence that the archive payload is damaged.
-                Err(e @ (FormatError::PasswordRequired | FormatError::WrongPassword)) => {
-                    return Err(e)
-                }
-                Err(e) => record_problem(format!("{path}: {e}")),
-                Ok(mut file) => {
-                    // Reading through EOF makes the ZIP backend verify CRCs.
-                    let mut buf = [0u8; 64 * 1024];
-                    let mut entry_output_bytes = 0u64;
-                    loop {
-                        ctl.checkpoint()?;
-                        match file.read(&mut buf) {
-                            Ok(0) => break,
-                            Ok(n) => {
-                                accountant.add_entry_output_bytes(
-                                    &meta,
-                                    &mut entry_output_bytes,
-                                    n as u64,
-                                )?;
-                                done = done.saturating_add(n as u64);
-                                progress.on_progress(done, total, &path);
-                            }
-                            Err(e) => {
-                                record_problem(format!("{path}: {e}"));
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
+            // Reading through EOF makes the ZIP backend verify CRCs.
+            test_entry_with_problems(
+                self.open_entry(idx),
+                &meta,
+                &mut accountant,
+                total,
+                progress,
+                ctl,
+                &mut record_problem,
+            )?;
         }
+        let done = accountant.output_bytes();
         progress.on_progress(done, done, &EntryPath::from_utf8(""));
         Ok(entries_tested)
     }
@@ -304,7 +283,6 @@ impl LocalZipArchiveReader {
             .filter(|entry| matches!(entry.meta.entry_type, EntryType::File))
             .map(|entry| entry.meta.size)
             .fold(0, u64::saturating_add);
-        let mut done = 0u64;
         let mut entries_tested = 0u64;
         let mut accountant = LimitsAccountant::new(*limits);
         let entries = self.entries.clone();
@@ -315,37 +293,17 @@ impl LocalZipArchiveReader {
                 continue;
             }
             entries_tested += 1;
-            progress.on_progress(done, total, &entry.meta.path);
-            match self.read_entry_at(idx) {
-                Ok(mut data) => {
-                    let mut buf = [0u8; 64 * 1024];
-                    let mut entry_output_bytes = 0u64;
-                    loop {
-                        ctl.checkpoint()?;
-                        match data.read(&mut buf) {
-                            Ok(0) => break,
-                            Ok(n) => {
-                                accountant.add_entry_output_bytes(
-                                    &entry.meta,
-                                    &mut entry_output_bytes,
-                                    n as u64,
-                                )?;
-                                done = done.saturating_add(n as u64);
-                                progress.on_progress(done, total, &entry.meta.path);
-                            }
-                            Err(e) => {
-                                record_problem(format!("{}: {e}", entry.meta.path));
-                                break;
-                            }
-                        }
-                    }
-                }
-                Err(e @ (FormatError::PasswordRequired | FormatError::WrongPassword)) => {
-                    return Err(e);
-                }
-                Err(e) => record_problem(format!("{}: {e}", entry.meta.path)),
-            }
+            test_entry_with_problems(
+                self.read_entry_at(idx),
+                &entry.meta,
+                &mut accountant,
+                total,
+                progress,
+                ctl,
+                &mut record_problem,
+            )?;
         }
+        let done = accountant.output_bytes();
         progress.on_progress(done, done, &EntryPath::from_utf8(""));
         Ok(entries_tested)
     }

@@ -2,7 +2,7 @@
 //! (macOS: `~/Library/Application Support/Squallz/settings.json`).
 
 use std::ffi::OsString;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -10,8 +10,8 @@ use std::sync::Mutex;
 
 use crate::dto::SettingsDto;
 use squallz_core::{
-    api::PhysicalFileIdentity, lock_unpoisoned, physical_file_identity, physical_path_identity,
-    replace_file_atomically,
+    api::PhysicalFileIdentity, lock_unpoisoned, open_new_artifact, physical_file_identity,
+    physical_path_identity, replace_file_atomically,
 };
 
 static SETTINGS_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -106,25 +106,7 @@ struct SettingsTempFile {
 
 impl SettingsTempFile {
     fn create(path: PathBuf) -> io::Result<Self> {
-        let mut options = OpenOptions::new();
-        options.read(true).write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        #[cfg(windows)]
-        {
-            use std::os::windows::fs::OpenOptionsExt;
-            use windows_sys::Win32::Storage::FileSystem::{
-                FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ,
-            };
-            options
-                .share_mode(FILE_SHARE_READ | FILE_SHARE_DELETE)
-                .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
-        }
-
-        let file = options.open(&path)?;
+        let file = open_new_artifact(&path)?;
         // If identity capture fails, leave the unverified pathname untouched.
         let identity = physical_file_identity(&file)?;
         let temporary = Self {

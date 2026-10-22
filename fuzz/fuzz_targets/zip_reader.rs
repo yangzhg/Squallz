@@ -1,11 +1,9 @@
 #![no_main]
 
-use std::io::{Cursor, Read};
+use std::io::Cursor;
 
 use libfuzzer_sys::fuzz_target;
-use squallz_format_api::{
-    ControlToken, Detected, EntryType, NoProgress, OpenOptions, SafetyLimits,
-};
+use squallz_format_api::{ControlToken, Detected, EntryType, NoProgress, OpenOptions, SafetyLimits};
 
 const MAX_INPUT_BYTES: usize = 2 * 1024 * 1024;
 const MAX_ENTRIES_TO_LIST: usize = 32;
@@ -36,8 +34,9 @@ fn fuzz_zip_reader(data: &[u8]) {
     }
 
     let opts = OpenOptions::default();
+    let control = ControlToken::default();
     let cursor = Cursor::new(data.to_vec());
-    let Ok(mut reader) = format.open(Box::new(cursor), &opts) else {
+    let Ok(mut reader) = format.open(Box::new(cursor), &opts, &control) else {
         return;
     };
 
@@ -48,13 +47,12 @@ fn fuzz_zip_reader(data: &[u8]) {
         .collect::<Vec<_>>();
 
     let progress = NoProgress;
-    let control = ControlToken::default();
     let limits = SafetyLimits {
         max_output_bytes: MAX_TEST_OUTPUT_BYTES,
         max_entries: MAX_ENTRIES_TO_LIST as u64,
         ..SafetyLimits::default()
     };
-    let _ = reader.test_summary_with_limits(&limits, &progress, &control);
+    let _ = reader.test_summary(&limits, &progress, &control);
 
     let mut read_buf = [0u8; 4096];
     for entry in entries
@@ -62,17 +60,17 @@ fn fuzz_zip_reader(data: &[u8]) {
         .filter(|entry| matches!(entry.entry_type, EntryType::File))
         .take(MAX_ENTRIES_TO_READ)
     {
-        let Ok(mut stream) = reader.read_entry(&entry.path) else {
-            continue;
-        };
-        let mut remaining = MAX_ENTRY_READ_BYTES.min(entry.size as usize);
-        while remaining > 0 {
-            let want = remaining.min(read_buf.len());
-            match stream.read(&mut read_buf[..want]) {
-                Ok(0) => break,
-                Ok(n) => remaining = remaining.saturating_sub(n),
-                Err(_) => break,
+        let _ = reader.read_entry(&entry.path, &mut |stream| {
+            let mut remaining = entry.size.min(MAX_ENTRY_READ_BYTES as u64) as usize;
+            while remaining > 0 {
+                let want = remaining.min(read_buf.len());
+                match stream.read(&mut read_buf[..want]) {
+                    Ok(0) => break,
+                    Ok(n) => remaining = remaining.saturating_sub(n),
+                    Err(_) => break,
+                }
             }
-        }
+            Ok(())
+        });
     }
 }

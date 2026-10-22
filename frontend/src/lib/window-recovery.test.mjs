@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import vm from "node:vm";
-import { createTestServer } from "../../tests/runtime.mjs";
+import { englishTranslate, createTestServer } from "../../tests/runtime.mjs";
 import { compileTestScript, readSvelteScript, selectFunctions } from "../../tests/source.mjs";
 
 test("external launch is consumed before asynchronous work and remembers the submitted task", async () => {
@@ -9,6 +9,7 @@ test("external launch is consumed before asynchronous work and remembers the sub
   try {
     const { windowRecoveryUrl, readWindowRecovery } = await server.ssrLoadModule("/src/lib/window-recovery.ts");
     const helpers = await server.ssrLoadModule("/src/lib/task-window.ts");
+    const { ToolsSession } = await server.ssrLoadModule("/src/lib/tools-session.svelte.ts");
     const ast = readSvelteScript(new URL("../App.svelte", import.meta.url), "App.ts");
     const functions = selectFunctions(ast, ["submitExternalTaskWindow", "submitJob"]);
     assert.equal(functions.length, 2);
@@ -23,8 +24,8 @@ test("external launch is consumed before asynchronous work and remembers the sub
       ...helpers, taskWindowMode: true, taskWindowLaunchState: null,
       taskDialogTaskId: 7, taskDialogDismissedId: null,
       jobSubmitInFlight: false, submittingJobSpec: null,
-      checksumAlgorithm: "sha256", checksumExcludeRules: () => [],
-      tr: (_key, fallback) => fallback, showNotice: () => {},
+      tools: new ToolsSession({ read: () => ({ archive: null, tasks: [], screen: "browse", copyScope: "", visibleTaskId: null }) }),
+      tr: englishTranslate, showNotice: () => {},
       focusBlockingTaskIfAny: () => null, isErrorDto: () => false,
       isJobSubmitBlocked: () => false,
       rememberWindowRecovery: (recovery) => { url = windowRecoveryUrl(url, recovery); },

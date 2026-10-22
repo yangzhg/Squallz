@@ -383,27 +383,7 @@ export type ProgressPhase =
 // Batch totals use this many work units per grouped archive; entry counters remain bytes.
 export const BATCH_PROGRESS_SCALE = 1_000;
 
-export interface ProgressEvent {
-  id: number;
-  version: number;
-  done: number;
-  total: number;
-  current: string;
-  current_done?: number;
-  current_total?: number;
-  scanned_entries?: number;
-  speed: number;
-  phase?: ProgressPhase;
-  interruptible?: boolean;
-}
-
-export interface StateEvent {
-  id: number;
-  version: number;
-  state: "queued" | "running" | "paused" | "done" | "failed" | "cancelled";
-  error: ErrorDto | null;
-  result?: Record<string, unknown> | null;
-}
+export type JobStateName = "queued" | "running" | "paused" | "done" | "failed" | "cancelled";
 
 export type JobOrigin = "app" | "file_manager";
 export type JobInteraction = "conflict" | "password";
@@ -424,18 +404,19 @@ export interface JobSnapshotProgress {
 export interface JobSnapshot {
   id: number;
   version: number;
-  spec: JobSpec;
+  /** Immutable description is omitted on live updates and previously known delta rows. */
+  spec?: JobSpec;
   output_password_required: boolean;
   origin: JobOrigin;
   owned_by_requester: boolean;
-  state: StateEvent["state"];
+  state: JobStateName;
   queue_position: number | null;
   queue_wait_reason: QueueWaitReason | null;
   cpu_threads: number;
   stream_buffer_limit_bytes: number | null;
   progress: JobSnapshotProgress;
   error: ErrorDto | null;
-  result: Record<string, unknown> | null;
+  result: unknown;
   interaction: JobInteraction | null;
   question: JobQuestion | null;
 }
@@ -447,7 +428,7 @@ export interface JobSnapshotsDelta {
   removed: number[];
 }
 
-export interface AskConflictEvent {
+export interface JobConflictPrompt {
   id: number;
   version: number;
   existing_path: string;
@@ -460,7 +441,7 @@ export interface AskConflictEvent {
   incoming_modified: number | null;
 }
 
-export interface AskPasswordEvent {
+export interface JobPasswordPrompt {
   id: number;
   version: number;
   name: string;
@@ -468,8 +449,8 @@ export interface AskPasswordEvent {
 }
 
 export type JobQuestion =
-  | { kind: "password"; prompt: AskPasswordEvent }
-  | { kind: "conflict"; prompt: AskConflictEvent };
+  | { kind: "password"; prompt: JobPasswordPrompt }
+  | { kind: "conflict"; prompt: JobConflictPrompt };
 
 export interface PasswordBookStatus {
   session: boolean;
@@ -754,6 +735,8 @@ export const ipc = {
   archiveStem: (path: string) => invoke<string>("archive_stem", { path }),
   planCreate: (spec: JobSpec, requestId: string) =>
     invoke<CreatePlanDto>("plan_create", { spec, requestId }),
+  cancelCreatePlan: (requestId: string) =>
+    invoke<void>("cancel_create_plan", { requestId }),
   planConvert: (spec: JobSpec, requestId: string) =>
     invoke<CreatePlanDto>("plan_convert", { spec, requestId }),
   cancelConvertPlan: (requestId: string) =>
@@ -848,7 +831,7 @@ export const ipc = {
       encoding,
       requestId,
     }),
-  submitJob: (spec: JobSpec) => invoke<number>("submit_job", { spec }),
+  submitJob: (spec: JobSpec) => invoke<JobSnapshot & { spec: JobSpec }>("submit_job", { spec }),
   getSfxCreateCapability: () =>
     invoke<SfxCreateCapabilityDto>("get_sfx_create_capability"),
   getMacosSfxPublisherStatus: () =>

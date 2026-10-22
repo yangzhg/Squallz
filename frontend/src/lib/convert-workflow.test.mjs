@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createTestServer } from "../../tests/runtime.mjs";
+import { englishTranslate, createTestServer } from "../../tests/runtime.mjs";
 
 test("conversion target helpers preserve explicit formats and safe extensions", async () => {
   const server = await createTestServer();
@@ -55,121 +55,63 @@ test("conversion target helpers preserve explicit formats and safe extensions", 
 
 test("conversion preflight checks the exact core budgets before review", async () => {
   const server = await createTestServer();
-
   try {
-    const [{ runConvertPreflight }, { ipc }] = await Promise.all([
-      server.ssrLoadModule("/src/lib/convert-preflight.ts"),
+    const [{ ArchiveOutputWorkflow }, { ipc }] = await Promise.all([
+      server.ssrLoadModule("/src/lib/archive-output-workflow.svelte.ts"),
       server.ssrLoadModule("/src/lib/ipc.ts"),
     ]);
     const plan = {
-      input_count: 1,
-      entries: 4,
-      files: 3,
-      directories: 1,
-      symlinks: 0,
-      total_bytes: 512,
-      output_budget_bytes: 700,
-      primary_output: "/dest/archive.7z.001",
-      archive_output_budget_bytes: 700,
-      final_output_budget_bytes: 700,
-      split_volume_count_budget: 3,
-      workspace_budget_bytes: 1_000,
-      system_temp_budget_bytes: 200,
+      input_count: 1, entries: 4, files: 3, directories: 1, symlinks: 0, total_bytes: 512,
+      output_budget_bytes: 700, primary_output: "/dest/archive.7z.001",
+      archive_output_budget_bytes: 700, final_output_budget_bytes: 700,
+      split_volume_count_budget: 3, workspace_budget_bytes: 1_000, system_temp_budget_bytes: 200,
     };
-    const original = {
-      planConvert: ipc.planConvert,
-      checkDiskSpace: ipc.checkDiskSpace,
-      tempDir: ipc.tempDir,
+    const spec = {
+      kind: "convert", src: "/source/archive.zip", dest: "/dest/archive.7z", level: 6,
+      src_encoding: null, src_password: null, dest_password: null, encrypt_names: false,
+      split_size: 256, split_mode: "generic",
     };
-    const calls = [];
-    const phases = [];
-    const snapshots = [];
+    const original = { ...ipc };
+    const calls = [], phases = [], snapshots = [];
+    let request = 0;
+    const workflow = new ArchiveOutputWorkflow({
+      kind: "convert", ensureListener: async () => {}, nextRequestId: () => `convert-plan-${++request}`,
+      tr: englishTranslate, notice() {},
+    });
     ipc.planConvert = async (_spec, requestId) => {
       calls.push(["plan", requestId]);
+      phases.push(workflow.state.phase);
       return plan;
     };
     ipc.tempDir = async () => "/system-temp";
     ipc.checkDiskSpace = async (pathValue, requiredBytes) => {
+      assert.equal(workflow.state.requestId, null);
+      assert.equal(workflow.state.requestKind, null);
+      if (phases.at(-1) !== workflow.state.phase) phases.push(workflow.state.phase);
+      if (requiredBytes === 1_000) {
+        calls.push(["plan-complete"]);
+        snapshots.push(["plan", workflow.state.plan]);
+      } else if (requiredBytes === 200) snapshots.push(["workspace", workflow.state.workspaceDisk]);
+      else snapshots.push(["temporary", workflow.state.systemTempDisk]);
       calls.push(["space", pathValue, requiredBytes]);
-      return {
-        path: pathValue,
-        required_bytes: requiredBytes,
-        available_bytes: 10_000,
-        ok: true,
-      };
+      return { path: pathValue, required_bytes: requiredBytes, available_bytes: 10_000, ok: true };
     };
-
     try {
-      const outcome = await runConvertPreflight({
-        spec: {
-          kind: "convert",
-          src: "/source/archive.zip",
-          dest: "/dest/archive.7z",
-          level: 6,
-          src_encoding: null,
-          src_password: null,
-          dest_password: null,
-          encrypt_names: false,
-          split_size: 256,
-          split_mode: "generic",
-        },
-        requestId: "convert-plan-1",
-        destinationDirectory: "/dest",
-        isCurrent: () => true,
-        cancelRequested: () => false,
-        onPlanRequestComplete: () => calls.push(["plan-complete"]),
-        onPhase: (phase) => phases.push(phase),
-        onPlan: (value) => snapshots.push(["plan", value]),
-        onTempDisk: (value) => snapshots.push(["workspace", value]),
-        onSystemTempDisk: (value) => snapshots.push(["temporary", value]),
-        onDestinationDisk: (value) => snapshots.push(["destination", value]),
-      });
-
+      const outcome = await workflow.prepare(spec, "/dest", workflow.begin());
+      snapshots.push(["destination", workflow.state.destinationDisk]);
       assert.equal(outcome.status, "ready");
       assert.deepEqual(phases, ["measuring", "checkingTemp", "checkingDest"]);
       assert.deepEqual(calls, [
-        ["plan", "convert-plan-1"],
-        ["plan-complete"],
-        ["space", "/dest", 1_000],
-        ["space", "/system-temp", 200],
-        ["space", "/dest", 700],
+        ["plan", "convert-plan-1"], ["plan-complete"], ["space", "/dest", 1_000],
+        ["space", "/system-temp", 200], ["space", "/dest", 700],
       ]);
-      assert.deepEqual(snapshots.map(([kind]) => kind), [
-        "plan",
-        "workspace",
-        "temporary",
-        "destination",
-      ]);
-
+      assert.deepEqual(snapshots.map(([kind]) => kind), ["plan", "workspace", "temporary", "destination"]);
+      assert.deepEqual(snapshots[0][1], plan);
+      assert.ok(snapshots.slice(1).every(([, disk]) => disk.ok));
       let diskCheckCalled = false;
-      ipc.checkDiskSpace = async () => {
-        diskCheckCalled = true;
-        throw new Error("unexpected disk check");
-      };
-      const cancelled = await runConvertPreflight({
-        spec: {
-          kind: "convert",
-          src: "/source/archive.zip",
-          dest: "/dest/archive.7z",
-          level: 6,
-          src_encoding: null,
-          src_password: null,
-          dest_password: null,
-          encrypt_names: false,
-          split_size: null,
-          split_mode: "generic",
-        },
-        requestId: "convert-plan-2",
-        destinationDirectory: "/dest",
-        isCurrent: () => true,
-        cancelRequested: () => true,
-        onPlanRequestComplete: () => {},
-        onPhase: () => {},
-        onPlan: () => {},
-        onTempDisk: () => {},
-        onSystemTempDisk: () => {},
-        onDestinationDisk: () => {},
-      });
+      ipc.checkDiskSpace = async () => { diskCheckCalled = true; throw new Error("unexpected disk check"); };
+      ipc.planConvert = async () => { workflow.state.cancelPending = true; return plan; };
+      const cancelled = await workflow.prepare({ ...spec, split_size: null }, "/dest", workflow.begin());
       assert.equal(cancelled.status, "cancelled");
       assert.equal(diskCheckCalled, false);
     } finally {
@@ -224,7 +166,7 @@ test("convert lazy sessions isolate roots and preserve only non-sensitive drafts
     let submitBehavior = () => submitPending;
     const bridge = {
       getArchive: () => currentArchive,
-      tr: (_key, fallback) => fallback,
+      tr: englishTranslate,
       tError: () => "translated error",
       showNotice: (message) => notices.push(message),
       ensurePreflightListener: async () => {},
@@ -411,6 +353,32 @@ test("convert lazy sessions isolate roots and preserve only non-sensitive drafts
       assert.equal(returned.formats.find((choice) => choice.id === "7z").selected, true);
       assert.equal(returned.profiles.find((choice) => choice.id === "maximum").selected, true);
 
+      const regularDiskCheck = ipc.checkDiskSpace;
+      for (const ok of [true, false]) {
+        const departing = convertSessionFor({}, bridge);
+        departing.syncArchive(archive);
+        let departed = false;
+        let noticeCount;
+        ipc.checkDiskSpace = (_path, bytes) => {
+          const result = Promise.resolve({ ok: bytes === 700 ? ok : true, available_bytes: 10000 });
+          if (bytes === 700) {
+            result.then(() => queueMicrotask(() => {
+              assert.equal(departing.surface("modern").preflight.phase, "checkingDest");
+              departing.leave();
+              noticeCount = notices.length;
+              departed = true;
+            }));
+          }
+          return result;
+        };
+        departing.surface("modern").start.onSelect();
+        await waitFor(() => departed);
+        assert.equal(departing.surface("modern").preflight.phase, "idle");
+        assert.equal(departing.surface("modern").review, null);
+        assert.equal(notices.length, noticeCount);
+      }
+      ipc.checkDiskSpace = regularDiskCheck;
+
       const other = convertSessionFor({}, bridge);
       other.syncArchive(archive);
       assert.notEqual(other, session);
@@ -574,7 +542,7 @@ test("disposed convert sessions ignore late submission failures", async () => {
     });
     const bridge = {
       getArchive: () => archive,
-      tr: (_key, fallback) => fallback,
+      tr: englishTranslate,
       tError: () => "translated error",
       showNotice: (message) => notices.push(message),
       ensurePreflightListener: async () => {},

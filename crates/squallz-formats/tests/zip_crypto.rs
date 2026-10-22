@@ -6,8 +6,10 @@ mod common;
 use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::process::Command;
+use std::time::{Duration, UNIX_EPOCH};
 
-use common::{command_exists, engine, TempDir};
+use common::{command_exists, engine, read_archive_entries, TempDir};
+use squallz_core::CreateCommitPolicy;
 use squallz_format_api::{
     ControlToken, CreateOptions, EntryPath, ExtractOptions, FormatError, NoProgress, OpenOptions,
     Password, SafetyLimits,
@@ -36,13 +38,14 @@ fn aes256_roundtrip_and_password_errors() {
             password: Some(Password::new("correct horse")),
             ..CreateOptions::default()
         },
+        CreateCommitPolicy::ReplaceExisting,
         &NoProgress,
         &ctl,
     )
     .unwrap();
 
     // Listing works without a password; metadata marks entries encrypted.
-    let entries = eng.list(&archive, &open_with(None)).unwrap();
+    let entries = read_archive_entries(&eng, &archive, &open_with(None)).unwrap();
     assert_eq!(entries.len(), 1);
     assert!(entries[0].encrypted);
 
@@ -245,7 +248,9 @@ fn password_verification_checks_the_smallest_encrypted_entry_through_its_authent
     // The directory and password verifier remain intact; only the final
     // authentication tag fails, after all decoded bytes have been consumed.
     assert_eq!(
-        eng.list(&archive, &OpenOptions::default()).unwrap().len(),
+        read_archive_entries(&eng, &archive, &OpenOptions::default())
+            .unwrap()
+            .len(),
         3
     );
     assert!(eng
@@ -277,6 +282,13 @@ fn encrypted_infozip_native_split_uses_the_secure_password_bridge() {
     }
     let source = tmp.path().join("payload.bin");
     fs::write(&source, &payload).unwrap();
+    let modified = UNIX_EPOCH + Duration::new(1_700_000_001, 123_456_700);
+    fs::File::options()
+        .write(true)
+        .open(&source)
+        .unwrap()
+        .set_times(fs::FileTimes::new().set_modified(modified))
+        .unwrap();
 
     let eng = engine();
     let ctl = ControlToken::new();
@@ -288,6 +300,7 @@ fn encrypted_infozip_native_split_uses_the_secure_password_bridge() {
             password: Some(Password::new("native-split-password")),
             ..CreateOptions::default()
         },
+        CreateCommitPolicy::ReplaceExisting,
         &NoProgress,
         &ctl,
     )
@@ -309,9 +322,26 @@ fn encrypted_infozip_native_split_uses_the_secure_password_bridge() {
     assert!(first.is_file());
     assert!(final_path.is_file());
 
-    let entries = eng.list(&first, &open_with(None)).unwrap();
+    let backend = squallz_formats::sevenzip_backend_status();
+    let utc_listing = Command::new(backend.executable().unwrap())
+        .args(["l", "-slt", "-slmu"])
+        .arg(&final_path)
+        .output()
+        .unwrap();
+    let has_utc_times = utc_listing.status.success();
+    assert!(
+        has_utc_times
+            || (utc_listing.status.code() == Some(7)
+                && String::from_utf8_lossy(&utc_listing.stderr)
+                    .replace("\r\n", "\n")
+                    .trim()
+                    == "Command Line Error:\nUnknown switch:\n-slmu")
+    );
+
+    let entries = read_archive_entries(&eng, &first, &open_with(None)).unwrap();
     assert_eq!(entries.len(), 1);
     assert!(entries[0].encrypted);
+    assert_eq!(entries[0].modified, has_utc_times.then_some(modified));
 
     let error = eng
         .test_summary(
@@ -361,6 +391,15 @@ fn encrypted_infozip_native_split_uses_the_secure_password_bridge() {
     )
     .unwrap();
     assert_eq!(fs::read(dest.join("payload.bin")).unwrap(), payload);
+    if has_utc_times {
+        assert_eq!(
+            fs::metadata(dest.join("payload.bin"))
+                .unwrap()
+                .modified()
+                .unwrap(),
+            modified
+        );
+    }
 }
 
 #[test]
@@ -386,7 +425,7 @@ fn zipcrypto_legacy_archive_is_readable() {
 
     let eng = engine();
     let ctl = ControlToken::new();
-    let entries = eng.list(&archive, &open_with(None)).unwrap();
+    let entries = read_archive_entries(&eng, &archive, &open_with(None)).unwrap();
     assert!(entries[0].encrypted);
 
     assert!(eng

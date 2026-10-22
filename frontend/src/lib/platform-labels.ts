@@ -8,6 +8,6 @@ export function platformTrashName(
   platform: DesktopPathPlatform = targetDesktopPlatform(),
 ): string {
   return platform === "windows"
-    ? tFallback("gui.platform.trash.windows", "Recycle Bin")
-    : tFallback("gui.platform.trash.default", "Trash");
+    ? tFallback("gui.platform.trash.windows")
+    : tFallback("gui.platform.trash.default");
 }

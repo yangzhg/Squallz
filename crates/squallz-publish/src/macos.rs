@@ -1017,7 +1017,9 @@ mod tests {
 
     use serde_json::json;
     use squallz_core::api::{NoProgress, ResourceOptions};
-    use squallz_core::{Engine, SfxBuildOptions, SFX_CLI_STUB_MARKER, SFX_GUI_STUB_MARKER};
+    use squallz_core::{
+        CreateCommitPolicy, Engine, SfxBuildOptions, SFX_CLI_STUB_MARKER, SFX_GUI_STUB_MARKER,
+    };
 
     use super::*;
 
@@ -1172,9 +1174,9 @@ mod tests {
                 &source,
                 &SfxBuildOptions {
                     target: SfxTarget::Macos,
-                    overwrite: false,
                     resources: ResourceOptions::default(),
                 },
+                CreateCommitPolicy::NoReplace,
                 &NoProgress,
                 &ControlToken::default(),
             )

@@ -84,50 +84,48 @@
     const unconfirmed = tasks.find(taskStatusUnavailable);
     if (unconfirmed) return taskOutcomeStateLabel(unconfirmed);
     if (counts.attention > 0) {
-      return tr("gui.task_center.summary_attention", "{count} need attention")
+      return tr("gui.task_center.summary_attention")
         .replace("{count}", counts.attention.toLocaleString());
     }
     if (activeCount > 0 || counts.waiting > 0) {
-      return tr("gui.task_center.summary_active", "{active} active · {waiting} waiting")
+      return tr("gui.task_center.summary_active")
         .replace("{active}", activeCount.toLocaleString())
         .replace("{waiting}", counts.waiting.toLocaleString());
     }
     if (counts.completed > 0) {
-      return tr("gui.task_center.summary_completed", "{count} recent tasks")
+      return tr("gui.task_center.summary_completed")
         .replace("{count}", counts.completed.toLocaleString());
     }
-    return tr("gui.task_center.summary_idle", "No tasks");
+    return tr("gui.task_center.summary_idle");
   }
 
   function queuedDetail(task: Task): string {
     const position = taskQueuePosition(tasks, task.id);
-    if (!position) return tr("gui.task_center.waiting", "Waiting in the queue");
+    if (!position) return tr("gui.task_center.waiting");
     if (task.queueWaitReason === "cpu_budget") {
       return tr(
         "gui.task_center.waiting_cpu",
-        "Waiting for CPU capacity · queue #{position}",
       ).replace("{position}", position.position.toLocaleString());
     }
     if (task.queueWaitReason === "parallel_limit") {
       return tr(
         "gui.task_center.waiting_slot",
-        "Waiting for a task slot · queue #{position}",
       ).replace("{position}", position.position.toLocaleString());
     }
     if (task.queueWaitReason === null) {
-      return tr("gui.task_center.waiting_next", "Ready to start");
+      return tr("gui.task_center.waiting_next");
     }
-    return tr("gui.task_center.waiting_position", "Waiting · #{position} in the queue")
+    return tr("gui.task_center.waiting_position")
       .replace("{position}", position.position.toLocaleString());
   }
 
   function taskCpuLabel(task: Task): string {
-    return tr("gui.task_center.resource_cpu", "CPU × {count}")
+    return tr("gui.task_center.resource_cpu")
       .replace("{count}", task.cpuThreads.toLocaleString());
   }
 
   function taskBufferLabel(task: Task): string {
-    return tr("gui.task_center.resource_buffer", "Stream buffer cap {size}")
+    return tr("gui.task_center.resource_buffer")
       .replace("{size}", formatBytes(task.streamBufferLimitBytes));
   }
 
@@ -135,13 +133,13 @@
     if (!taskNeedsInput(task)) return null;
     if (task.interaction === "password") {
       return task.ownedByRequester
-        ? tr("gui.task_center.password_waiting", "Waiting for a password")
-        : tr("gui.task_center.password_task_window", "Waiting for a password in its task window");
+        ? tr("gui.task_center.password_waiting")
+        : tr("gui.task_center.password_task_window");
     }
     if (task.interaction === "conflict") {
       return task.ownedByRequester
-        ? tr("gui.task_center.conflict_waiting", "Waiting for a file decision")
-        : tr("gui.task_center.conflict_task_window", "Waiting for a file decision in its task window");
+        ? tr("gui.task_center.conflict_waiting")
+        : tr("gui.task_center.conflict_task_window");
     }
     return null;
   }
@@ -159,7 +157,7 @@
     if (task.controlIntent === "cancel") return taskCancelButtonLabel(task);
     return !taskNeedsInput(task)
       ? taskOutcomeStateLabel(task)
-      : tr("gui.task_center.needs_input", "Needs input");
+      : tr("gui.task_center.needs_input");
   }
 
   function taskTone(task: Task): string {
@@ -294,25 +292,25 @@
 >
   <header class="task-center-head">
     <div>
-      <span class="eyebrow">{tr("gui.task_center.eyebrow", "Smart scheduling")}</span>
-      <h2 id="task-center-title">{tr("gui.task_center.title", "Task center")}</h2>
+      <span class="eyebrow">{tr("gui.task_center.eyebrow")}</span>
+      <h2 id="task-center-title">{tr("gui.task_center.title")}</h2>
       <p aria-live="polite">{countSummary()}</p>
     </div>
     <button
       bind:this={closeButton}
       class="task-center-close"
       type="button"
-      aria-label={tr("gui.task_center.close", "Close task center")}
-      title={tr("gui.task_center.close", "Close task center")}
+      aria-label={tr("gui.task_center.close")}
+      title={tr("gui.task_center.close")}
       aria-keyshortcuts="Escape"
       onclick={onClose}
     ><Icon name="x" size={17} /></button>
   </header>
 
-  <div class="task-center-counts" aria-label={tr("gui.task_center.counts", "Task counts")}>
-    <span><b>{activeCount}</b>{tr("gui.task_center.active", "Active")}</span>
-    <span><b>{counts.waiting}</b>{tr("gui.task_center.waiting_count", "Waiting")}</span>
-    <span class:attention={counts.attention > 0}><b>{counts.attention}</b>{tr("gui.task_center.attention", "Attention")}</span>
+  <div class="task-center-counts" aria-label={tr("gui.task_center.counts")}>
+    <span><b>{activeCount}</b>{tr("gui.task_center.active")}</span>
+    <span><b>{counts.waiting}</b>{tr("gui.task_center.waiting_count")}</span>
+    <span class:attention={counts.attention > 0}><b>{counts.attention}</b>{tr("gui.task_center.attention")}</span>
   </div>
 
   {#if tasks.some(taskStatusUnavailable)}
@@ -373,7 +371,7 @@
             {#if task.origin === "file_manager" || showCpuResource || showBufferResource}
               <div class="task-center-tags">
                 {#if task.origin === "file_manager"}
-                  <span class="task-center-origin">{tr("gui.task_center.origin_file_manager", "File manager")}</span>
+                  <span class="task-center-origin">{tr("gui.task_center.origin_file_manager")}</span>
                 {/if}
                 {#if showCpuResource}
                   <span class="task-center-resource">{taskCpuLabel(task)}</span>
@@ -393,7 +391,7 @@
               class="task-center-progress"
               value={taskProgressPercent(task)}
               max="100"
-              aria-label={tr("gui.task_center.progress_for", "Progress for {name}").replace("{name}", taskTitleLabel(task))}
+              aria-label={tr("gui.task_center.progress_for").replace("{name}", taskTitleLabel(task))}
             ></progress>
             <strong>{taskProgressPercent(task)}%</strong>
           </div>
@@ -416,7 +414,7 @@
         <div
           class="task-center-actions"
           role="group"
-          aria-label={tr("gui.task_center.actions_for", "Actions for {name}").replace("{name}", taskTitleLabel(task))}
+          aria-label={tr("gui.task_center.actions_for").replace("{name}", taskTitleLabel(task))}
         >
           {#if task.state === "running" && task.interruptible && task.pausable}
             <button type="button" disabled={taskControlsBusy(task)} onclick={() => onPause(task)}>
@@ -431,27 +429,27 @@
             <div
               class="task-center-reorder"
               role="group"
-              aria-label={tr("gui.task_center.reorder_for", "Queue position for {name}").replace("{name}", taskTitleLabel(task))}
+              aria-label={tr("gui.task_center.reorder_for").replace("{name}", taskTitleLabel(task))}
             >
               <span
                 class="task-center-drag-handle"
                 class:busy={task.queueMoveIntent === "position"}
                 aria-hidden="true"
-                title={tr("gui.task_center.drag_handle", "Drag to reorder")}
+                title={tr("gui.task_center.drag_handle")}
                 onpointerdown={(event) => startQueueDrag(event, task)}
               ><Icon name={task.queueMoveIntent === "position" ? "hourglass" : "grip-vertical"} size={14} /></span>
               <button
                 type="button"
                 disabled={!queuePosition?.canMoveEarlier || taskControlsBusy(task)}
-                aria-label={tr("gui.task_center.move_earlier", "Move earlier")}
-                title={tr("gui.task_center.move_earlier", "Move earlier")}
+                aria-label={tr("gui.task_center.move_earlier")}
+                title={tr("gui.task_center.move_earlier")}
                 onclick={() => onMoveEarlier(task)}
               ><Icon name={task.queueMoveIntent === "earlier" ? "hourglass" : "chevron-up"} size={14} /></button>
               <button
                 type="button"
                 disabled={!queuePosition?.canMoveLater || taskControlsBusy(task)}
-                aria-label={tr("gui.task_center.move_later", "Move later")}
-                title={tr("gui.task_center.move_later", "Move later")}
+                aria-label={tr("gui.task_center.move_later")}
+                title={tr("gui.task_center.move_later")}
                 onclick={() => onMoveLater(task)}
               ><Icon name={task.queueMoveIntent === "later" ? "hourglass" : "chevron-down"} size={14} /></button>
             </div>
@@ -461,7 +459,7 @@
             type="button"
             data-task-details-id={task.id}
             onclick={() => onDetails(task)}
-          ><Icon name="external-link" size={14} />{tr("gui.task_center.details", "Details")}</button>
+          ><Icon name="external-link" size={14} />{tr("gui.task_center.details")}</button>
           {#if (task.state === "running" || task.state === "paused" || task.state === "queued") && task.interruptible}
             <button
               class="danger"
@@ -477,8 +475,8 @@
         <section class="task-center-empty">
           <span><Icon name="check-circle" size={20} /></span>
           <div>
-            <strong>{tr("gui.task_center.empty_title", "No tasks yet")}</strong>
-            <p>{tr("gui.task_center.empty_detail", "Compression, extraction, tests, and checksums appear here.")}</p>
+            <strong>{tr("gui.task_center.empty_title")}</strong>
+            <p>{tr("gui.task_center.empty_detail")}</p>
           </div>
         </section>
       {/if}
@@ -488,11 +486,11 @@
   <footer class="task-center-footer">
     {#if counts.clearable > 0}
       <button type="button" onclick={onClear}>
-        {tr("gui.task_center.clear_completed", "Clear completed ({count})")
+        {tr("gui.task_center.clear_completed")
           .replace("{count}", counts.clearable.toLocaleString())}
       </button>
     {:else}
-      <span>{tr("gui.task_center.attention_kept", "Failed tasks and results that need review stay here.")}</span>
+      <span>{tr("gui.task_center.attention_kept")}</span>
     {/if}
   </footer>
 </aside>

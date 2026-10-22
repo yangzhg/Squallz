@@ -9,11 +9,12 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::Mutex;
 
-use common::{engine, TempDir};
+use common::{engine, read_archive_entries, TempDir};
 use squallz_core::api::{
     ControlToken, CreateOptions, EntryPath, EntryType, ExtractOptions, ExtractReport, FormatError,
     NoProgress, OpenOptions, ProgressSink,
 };
+use squallz_core::CreateCommitPolicy;
 
 #[derive(Default)]
 struct EntryProgressTotals {
@@ -75,6 +76,7 @@ fn tar_roundtrip_permissions_symlink_unicode_deep() {
             &archive,
             std::slice::from_ref(&root),
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &NoProgress,
             &ctl,
         )
@@ -82,7 +84,7 @@ fn tar_roundtrip_permissions_symlink_unicode_deep() {
 
     let empty_out = dir.path().join("empty-selection");
     let empty_report = engine
-        .extract_with_report(
+        .extract(
             &archive,
             &empty_out,
             Some(&[]),
@@ -102,7 +104,7 @@ fn tar_roundtrip_permissions_symlink_unicode_deep() {
     assert!(!empty_out.exists());
 
     // Listing: types, mode and symlink target survive.
-    let entries = engine.list(&archive, &OpenOptions::default()).unwrap();
+    let entries = read_archive_entries(&engine, &archive, &OpenOptions::default()).unwrap();
     let by_name = |name: &str| {
         entries
             .iter()
@@ -126,7 +128,7 @@ fn tar_roundtrip_permissions_symlink_unicode_deep() {
     // Extraction: contents, permissions and the link itself.
     let out = dir.path().join("out");
     let extract_report = engine
-        .extract_with_report(
+        .extract(
             &archive,
             &out,
             None,
@@ -215,7 +217,7 @@ fn tar_selection_progress_uses_only_selected_file_bytes() {
     let progress = EntryProgressTotals::default();
 
     let report = engine
-        .extract_with_report(
+        .extract(
             &archive,
             &destination,
             Some(&selection),
@@ -247,7 +249,7 @@ fn tar_link_entries_without_targets_are_reported() {
         let archive = dir.path().join(name);
         missing_link_target_tar(&archive, entry_type);
 
-        let err = engine.list(&archive, &OpenOptions::default()).unwrap_err();
+        let err = read_archive_entries(&engine, &archive, &OpenOptions::default()).unwrap_err();
         assert!(
             matches!(
                 err,
@@ -340,7 +342,7 @@ fn tar_hardlink_entries_are_mapped() {
     }
 
     let engine = engine();
-    let entries = engine.list(&archive, &OpenOptions::default()).unwrap();
+    let entries = read_archive_entries(&engine, &archive, &OpenOptions::default()).unwrap();
     let link = entries
         .iter()
         .find(|e| e.path.display == "copy.txt")
@@ -386,13 +388,14 @@ fn tar_sniff_without_extension() {
             &archive,
             &[root],
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &NoProgress,
             &ctl,
         )
         .unwrap();
     let anonymous = dir.path().join("mystery.bin");
     fs::rename(&archive, &anonymous).unwrap();
-    let entries = engine.list(&anonymous, &OpenOptions::default()).unwrap();
+    let entries = read_archive_entries(&engine, &anonymous, &OpenOptions::default()).unwrap();
     assert!(entries.iter().any(|e| e.path.display == "tree/a.txt"));
 }
 
@@ -414,6 +417,7 @@ fn tar_create_with_password_is_rejected() {
             &dir.path().join("out.tar"),
             &[root],
             &opts,
+            CreateCommitPolicy::ReplaceExisting,
             &NoProgress,
             &ctl,
         )

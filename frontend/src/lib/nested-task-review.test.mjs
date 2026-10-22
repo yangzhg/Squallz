@@ -1,16 +1,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import vm from "node:vm";
-import { createTestServer } from "../../tests/runtime.mjs";
-import { compileTestScript, readSvelteScript, selectFunctions } from "../../tests/source.mjs";
+import { englishTranslate, createTestServer } from "../../tests/runtime.mjs";
+import { extractionFixture } from "../../tests/extraction.mjs";
 import { settingsDto } from "../../tests/settings.mjs";
 
 const server = await createTestServer();
 test.after(() => server.close());
 const { taskReviewScreen } = await server.ssrLoadModule("/src/lib/task-model.ts");
-const { nestedExtractJob, reviewNestedExtract } = await server.ssrLoadModule("/src/lib/nested-extract.ts");
-const { desktopBasename, desktopDirname } = await server.ssrLoadModule("/src/lib/desktop-path.ts");
+const { reviewNestedExtract } = await server.ssrLoadModule("/src/lib/nested-extract.ts");
 const { SettingsSession } = await server.ssrLoadModule("/src/lib/settings-session.svelte.ts");
+const fixture = await extractionFixture(server);
+test.afterEach(() => fixture.dispose());
 const plain = (value) => JSON.parse(JSON.stringify(value));
 
 function spec() {
@@ -20,48 +20,31 @@ function spec() {
 }
 
 function harness() {
-  const source = readSvelteScript(new URL("../App.svelte", import.meta.url), "App.ts");
-  const names = ["cancelTaskReview", "reviewTask", "nestedExtractDraftLocked", "updateNestedExtractDraft", "restoreNestedExtractDraft",
-    "prepareNestedExtract", "chooseNestedExtractDestination", "startNestedExtract", "nestedExtractWorkspaceSurface", "setScreen", "dismissRecoveryPreparation"];
-  const declarations = selectFunctions(source, names);
   const calls = [];
   const context = {
-    nestedExtractDraft: null, nestedExtractSubmissionPending: false, nestedExtractPickerBusy: false,
-    nestedExtractDraftGeneration: 0, nestedExtractReviewFocusPending: false, nestedExtractPickerRequest: 0,
-    batchPickerRequest: 0, batchPickerBusy: false,
-    archiveUpdateReview: { cancelSourceChoice() {} }, taskReviewRequestGeneration: 0,
-    dismissArchivePicker() {}, clearEntryPreviewState() {}, syncUrl() {}, tick: async () => {},
-    screen: "browse", archiveOpenStatus: "idle", taskWindowMode: false,
-    recoveryPickerStatus: "idle", recoveryPickerRequest: 0, recoveryOutputPreparation: null,
-    dismissCreatePreparation() {}, syncCreatePreflightContext() {},
-    dismissArchiveAddPreparation() {},
-    currentArchive: { source: "/unrelated/current.zip" },
-    nestedExtractJob, reviewNestedExtract, taskReviewScreen,
-    normalizedDefaultExtractDir: (path) => path || null,
-    pathDir: (path) => desktopDirname(path, "macos"), pathBaseName: (path) => desktopBasename(path, "macos"),
-    archiveFormatFromPath: (path) => path.split(".").at(-1).toUpperCase(), archiveEncodingForJob: () => "shift_jis",
-    tr: (_key, fallback) => fallback, preventCreateSubmissionNavigation: () => false,
-    preventConvertSubmissionNavigation: () => false, focusBlockingTaskIfAny: () => false,
-    setScreen: (screen) => { context.screen = screen; calls.push(["screen", screen]); },
-    dismissTaskDialog: async () => calls.push(["dismiss"]), focusNestedExtractReview: () => calls.push(["focus"]),
-    showNotice: (message) => calls.push(["notice", message]), recordOperation() {},
-    document: { documentElement:{},body:{},querySelectorAll:()=>[],getElementById: (id) => ({ focus: () => calls.push(["focus-field", id]) }) },
+    screen: "nestedExtract", currentArchive: { source: "/unrelated/current.zip", encoding_override: "shift_jis" },
+    tr: englishTranslate, showNotice: (message) => calls.push(["notice", message]),
     submitJob: async (job) => { calls.push(["submit", plain(job)]); return 99; },
-    isJobSubmitBlocked: () => false, isErrorDto: () => false, tError: () => "error",
-    toolsArchiveReturnSurface: () => ({ visible: false }),
-    extractOverwriteModes: ["ask", "skip", "overwrite", "rename"], extractOverwriteLabel: (mode) => mode,
-    extractSymlinkModes: ["preserve", "skip", "follow"], extractSymlinkLabel: (mode) => mode,
+    document: { getElementById: (id) => ({ focus: () => calls.push(["focus-field", id]) }) },
     getDialogModule: async () => ({ open: async () => null }), openNativeDialog: async (_key, open, options) => open(options),
   };
   context.settingsSession = new SettingsSession({ platform: () => "macos", tr: context.tr, emit() {} });
   context.settingsSession.applySnapshot(settingsDto(), context.settingsSession.captureGenerations());
-  const outputText = compileTestScript(declarations.map((node) => node.getText(source)).join("\n"));
-  return { ...vm.runInNewContext(`${outputText}\n({${names.join(",")}})`, context), context, calls };
+  const extraction = fixture.install(context);
+  const session = extraction.review;
+  return { context, calls, session,
+    navigate: (screen) => { extraction.leave(); context.screen = screen; },
+    surface: (variant) => ({ kind: "batch", mode: "nested", variant, session,
+      title: context.tr("gui.nested_extract.title", "Extract inner archive"), tr: context.tr,
+      archiveReturn: { visible: false }, onReady() {}, onRemove() {}, onBrowse() {},
+      format: (path) => path.split(".").at(-1).toUpperCase() }),
+  };
 }
 
 async function restore(run, state = "failed") {
   const job = spec();
-  await run.reviewTask({ state, spec: job }, { ...job, outer_path: "/Archives/外层归档.zip" });
+  assert.equal(taskReviewScreen({ state, spec: job }), "nestedExtract");
+  assert.equal(run.session.adoptNested(reviewNestedExtract(job, "/Archives/外层归档.zip")), true);
 }
 
 for (const state of ["failed", "cancelled"]) {
@@ -72,89 +55,89 @@ test(`${state} inner extraction restores the exact source and nonsecret settings
   await restore(run, state);
   assert.equal(run.context.screen, "nestedExtract");
   assert.equal(run.calls.some(([name]) => name === "submit"), false);
-  const surface = run.nestedExtractWorkspaceSurface("modern");
-  assert.equal(surface.rows[0].path, "/Archives/外层归档.zip › Previous versions/完整内层归档.7z");
-  assert.equal(surface.rows[0].encoding, "gbk");
-  assert.equal(surface.rows[0].bestEffort, true);
-  assert.equal(surface.overwrite, "rename");
-  assert.equal(surface.symlinks, "skip");
-  assert.equal(surface.smart, false);
-  surface.rows[0].onTargetInput("/edited/交付");
-  surface.onOverwriteChange("ask"); surface.onSymlinksChange("preserve"); surface.onSmartChange(true);
-  surface.rows[0].onBestEffortChange(false);
-  await run.startNestedExtract();
+  const draft = run.session.nested;
+  assert.equal(`${draft.outerDisplayPath} › ${draft.entry_path}`, "/Archives/外层归档.zip › Previous versions/完整内层归档.7z");
+  assert.equal(draft.encoding, "gbk");
+  assert.equal(draft.best_effort, true);
+  assert.equal(draft.overwrite, "rename");
+  assert.equal(draft.symlinks, "skip");
+  assert.equal(draft.smart, false);
+  run.session.editNested({ dest: "/edited/交付" });
+  run.session.editNested({ overwrite: "ask", symlinks: "preserve", smart: true });
+  run.session.editNested({ best_effort: false });
+  await run.session.start("nested");
   const submitted = run.calls.find(([name]) => name === "submit")[1];
   assert.deepEqual(submitted, { ...spec(), dest: "/edited/交付", overwrite: "ask", symlinks: "preserve",
     smart: true, best_effort: false, password: null });
-  assert.equal("password" in run.context.nestedExtractDraft, false);
+  assert.equal("password" in run.session.nested, false);
   assert.equal("outerDisplayPath" in submitted, false);
 });
 }
 
 test("preview extraction first reviews a smart base directory without pre-adding the inner archive name", () => {
   const run = harness();
-  run.context.currentArchive = { source: "squallz-archive://7" };
-  assert.equal(run.prepareNestedExtract("squallz-archive://7", "/Archives/outer.zip", "inner.zip"), true);
-  assert.equal(run.context.nestedExtractDraft.dest, "/Archives");
-  assert.equal(run.context.nestedExtractDraft.encoding, "shift_jis");
-  assert.equal(run.context.nestedExtractDraft.smart, true);
+  run.context.currentArchive = { source: "squallz-archive://7", encoding_override: "shift_jis" };
+  assert.equal(run.session.adoptNested(run.session.prepareNested("squallz-archive://7", "/Archives/outer.zip", "inner.zip")), true);
+  assert.equal(run.session.nested.dest, "/Archives");
+  assert.equal(run.session.nested.encoding, "shift_jis");
+  assert.equal(run.session.nested.smart, true);
   assert.equal(run.calls.some(([name]) => name === "submit"), false);
   run.context.settingsSession.applySnapshot(settingsDto({ default_extract_dir: "/Preferred" }),
     run.context.settingsSession.captureGenerations());
   run.context.settingsSession.setGeneral("defaultExtractDir", "/not-applied");
-  run.prepareNestedExtract("/another/outer.zip", "/another/outer.zip", "inner.zip");
-  assert.equal(run.context.nestedExtractDraft.dest, "/Preferred");
-  assert.equal(run.context.nestedExtractDraft.encoding, null);
+  run.session.adoptNested(run.session.prepareNested("/another/outer.zip", "/another/outer.zip", "inner.zip"));
+  assert.equal(run.session.nested.dest, "/Preferred");
+  assert.equal(run.session.nested.encoding, null);
 });
 
 test("empty targets and submission locks prevent accidental or duplicate extraction; failures preserve edits", async () => {
   const run = harness();
-  assert.equal(await run.startNestedExtract(), false);
+  assert.equal(await run.session.start("nested"), false);
   await restore(run);
-  run.nestedExtractWorkspaceSurface("classic").rows[0].onTargetInput("  ");
-  assert.equal(await run.startNestedExtract(), false);
+  run.session.editNested({ dest: "  " });
+  assert.equal(await run.session.start("nested"), false);
   assert.deepEqual(run.calls.at(-1), ["focus-field", "batch-destination-0"]);
-  run.nestedExtractWorkspaceSurface("modern").rows[0].onTargetInput("/edited");
-  const saved = plain(run.context.nestedExtractDraft);
+  run.session.editNested({ dest: "/edited" });
+  const saved = plain(run.session.nested);
   let reject;
   run.context.submitJob = (job) => { run.calls.push(["submit", plain(job)]); return new Promise((_, fail) => { reject = fail; }); };
-  const pending = run.startNestedExtract();
-  assert.equal(run.nestedExtractWorkspaceSurface("classic").locked, true);
-  run.nestedExtractWorkspaceSurface("classic").rows[0].onTargetInput("/ignored");
-  run.prepareNestedExtract("/other.zip", "/other.zip", "other.7z");
-  await run.startNestedExtract();
+  const pending = run.session.start("nested");
+  assert.equal(run.session.locked("nested"), true);
+  run.session.editNested({ dest: "/ignored" });
+  assert.equal(run.session.adoptNested(run.session.prepareNested("/other.zip", "/other.zip", "other.7z")), false);
+  await run.session.start("nested");
   assert.equal(run.calls.filter(([name]) => name === "submit").length, 1);
-  assert.deepEqual(plain(run.context.nestedExtractDraft), saved);
+  assert.deepEqual(plain(run.session.nested), saved);
   reject(new Error("service unavailable")); await pending;
-  assert.equal(run.context.nestedExtractSubmissionPending, false);
-  assert.deepEqual(plain(run.context.nestedExtractDraft), saved);
+  assert.equal(run.session.submitting("nested"), false);
+  assert.deepEqual(plain(run.session.nested), saved);
   assert.match(run.calls.at(-1)[1], /Could not start extraction/);
 });
 
 test("destination selection preserves cancellation and ignores responses after leaving the review", async () => {
   const run = harness(); await restore(run);
   run.context.getDialogModule = async () => ({ open: async () => "/picked" });
-  await run.chooseNestedExtractDestination();
-  assert.equal(run.context.nestedExtractDraft.dest, "/picked");
+  await run.session.choose("nested");
+  assert.equal(run.session.nested.dest, "/picked");
   run.context.getDialogModule = async () => ({ open: async () => null });
-  await run.chooseNestedExtractDestination();
-  assert.equal(run.context.nestedExtractDraft.dest, "/picked");
+  await run.session.choose("nested");
+  assert.equal(run.session.nested.dest, "/picked");
   assert.match(run.calls.at(-1)[1], /cancelled/);
   let finish;
   run.context.getDialogModule = async () => ({ open: () => new Promise((resolve) => { finish = resolve; }) });
-  const pending = run.chooseNestedExtractDestination();
+  const pending = run.session.choose("nested");
   await new Promise((resolve) => setImmediate(resolve));
-  run.context.nestedExtractDraftGeneration++;
+  run.session.leave();
   finish("/stale"); await pending;
-  assert.equal(run.context.nestedExtractDraft.dest, "/picked");
-  assert.equal(run.context.nestedExtractPickerBusy, false);
+  assert.equal(run.session.nested.dest, "/picked");
+  assert.equal(run.session.locked("nested"), false);
 });
 
 test("navigation invalidates an inner destination chooser before opening and preserves newer requests", async () => {
   for (const phase of ["loading", "choosing"]) {
     for (const outcome of ["selected", "cancelled", "failed"]) {
       const run = harness(); await restore(run);
-      const saved = plain(run.context.nestedExtractDraft);
+      const saved = plain(run.session.nested);
       let finish, fail, started;
       const ready = new Promise(resolve => { started = resolve; });
       const oldResult = new Promise((resolve, reject) => { finish = resolve; fail = reject; });
@@ -162,25 +145,25 @@ test("navigation invalidates an inner destination chooser before opening and pre
       run.context.getDialogModule = phase === "loading" ? () => { started(); return oldResult; }
         : async () => ({open:async()=>null});
       run.context.openNativeDialog = () => { opened++; started(); return oldResult; };
-      const oldChoice = run.chooseNestedExtractDestination(); await ready;
-      run.setScreen("settingsGeneral"); run.setScreen("nestedExtract");
-      assert.equal(run.context.nestedExtractPickerBusy, false);
+      const oldChoice = run.session.choose("nested"); await ready;
+      run.navigate("settingsGeneral"); run.navigate("nestedExtract");
+      assert.equal(run.session.locked("nested"), false);
       let completeNew;
       run.context.getDialogModule = async () => ({open:async()=>null});
       run.context.openNativeDialog = () => { opened++; return new Promise(resolve => { completeNew = resolve; }); };
-      const newChoice = run.chooseNestedExtractDestination();
+      const newChoice = run.session.choose("nested");
       await new Promise(resolve => setImmediate(resolve));
       const noticeCount = run.calls.filter(([kind]) => kind === "notice").length;
       if (outcome === "failed") fail(new Error("late dialog failure"));
       else finish(phase === "loading" ? {open:async()=>"/stale"} : outcome === "cancelled" ? null : "/stale");
       await oldChoice;
       assert.equal(opened, phase === "loading" ? 1 : 2);
-      assert.deepEqual(plain(run.context.nestedExtractDraft), saved);
-      assert.equal(run.context.nestedExtractPickerBusy, true);
+      assert.deepEqual(plain(run.session.nested), saved);
+      assert.equal(run.session.locked("nested"), true);
       assert.equal(run.calls.filter(([kind]) => kind === "notice").length, noticeCount);
       completeNew("/new/destination"); await newChoice;
-      assert.equal(run.context.nestedExtractDraft.dest, "/new/destination");
-      assert.equal(run.context.nestedExtractPickerBusy, false);
+      assert.equal(run.session.nested.dest, "/new/destination");
+      assert.equal(run.session.locked("nested"), false);
     }
   }
 });
@@ -193,7 +176,7 @@ test("shared review layout presents the inner source, outer encoding and real op
   for (const locale of ["en-US", "zh-CN"]) {
     await loadLocale(locale); run.context.tr = tFallback;
     for (const variant of ["modern", "classic"]) {
-      const { body } = render(ToolsWorkspace, { props: { surface: run.nestedExtractWorkspaceSurface(variant) } });
+      const { body } = render(ToolsWorkspace, { props: { surface: run.surface(variant) } });
       assert.ok(body.includes("/Archives/外层归档.zip › Previous versions/完整内层归档.7z"));
       assert.ok(body.includes(tFallback("gui.nested_extract.outer_encoding").replace("{encoding}", "gbk")));
       assert.ok(body.includes(tFallback("gui.nested_extract.execution_hint")));
@@ -201,7 +184,8 @@ test("shared review layout presents the inner source, outer encoding and real op
       assert.equal(body.includes(tFallback("gui.batch.add_archives")), false);
     }
   }
-  run.context.nestedExtractDraft = null;
-  const { body } = render(ToolsWorkspace, { props: { surface: run.nestedExtractWorkspaceSurface("classic") } });
+  const empty = harness();
+  empty.context.tr = tFallback;
+  const { body } = render(ToolsWorkspace, { props: { surface: empty.surface("classic") } });
   assert.ok(body.includes(tFallback("gui.nested_extract.empty_hint")));
 });

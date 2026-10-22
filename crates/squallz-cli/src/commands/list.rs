@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use serde_json::{json, Value};
 use squallz_core::api::{
-    unix_seconds, ArchiveStructureStatus, EntryMeta, EntryType, OpenOptions, Password,
+    unix_seconds, ArchiveStructureStatus, EntryMeta, EntryType, OpenOptions, Password, SafetyLimits,
 };
 use squallz_core::{fold_archive_search_path, fold_archive_search_query, rank_folded_archive_path};
 
@@ -26,24 +26,26 @@ pub fn run(
     tree: bool,
 ) -> Result<(), CliError> {
     let explicit = password.map(Password::new);
-    let (entries, structure) = with_password_retry(
+    let listing = with_password_retry(
         &ctx.loc,
         explicit.as_ref(),
         || {},
         |pw| {
-            ctx.engine.list_with_structure(
+            ctx.engine.list_archive(
                 &archive,
                 &OpenOptions {
                     password: pw.cloned(),
                     encoding_override: encoding.clone(),
                 },
+                SafetyLimits::default().max_entries,
+                &ctx.ctl,
             )
         },
     )?;
-    if structure == ArchiveStructureStatus::ZipLocalHeadersRecovered {
+    if listing.structure == ArchiveStructureStatus::ZipLocalHeadersRecovered {
         ctx.eprint_problem(ctx.loc.t("cli.list.zip_local_headers_recovered"));
     }
-    let entries = filter_entries_for_search(entries, search.as_deref());
+    let entries = filter_entries_for_search(listing.entries, search.as_deref());
 
     if json {
         let value = Value::Array(entries.iter().map(entry_json).collect());

@@ -1,13 +1,15 @@
 use std::fs;
 use std::path::Path;
 
-use serde_json::json;
 use squallz_core::api::{OverwritePolicy, SymlinkPolicy};
 use squallz_core::lock_unpoisoned;
 
 use super::*;
+use crate::jobs::results::{BatchExtractOutput, BatchExtractResult, PublishResult};
 use crate::jobs::snapshots::JobSnapshotStore;
-use crate::jobs::test_support::{checksum_job, compress_file_job};
+use crate::jobs::test_support::{
+    checksum_job, compress_file_job, create_report, extract_report, recovery_report,
+};
 
 fn extract_spec(dest: &Path) -> JobSpec {
     JobSpec::Extract {
@@ -26,7 +28,7 @@ fn extract_spec(dest: &Path) -> JobSpec {
     }
 }
 
-fn completed(spec: JobSpec, result: serde_json::Value) -> JobStateSnapshot {
+fn completed(spec: JobSpec, result: JobResult) -> JobStateSnapshot {
     let mut store = JobSnapshotStore::default();
     store.insert(1, Some("task-owner".into()), spec, "queued");
     store.set_state(1, "done", None, Some(result));
@@ -38,7 +40,10 @@ fn extraction_opens_the_reported_destination_not_the_requested_base() {
     let dir = tempfile::tempdir().unwrap();
     let actual = dir.path().join("中文输出");
     fs::create_dir(&actual).unwrap();
-    let snapshot = completed(extract_spec(dir.path()), json!({"dest": actual}));
+    let snapshot = completed(
+        extract_spec(dir.path()),
+        JobResult::Extract(extract_report(&actual)),
+    );
     assert_eq!(output_path(&snapshot).unwrap(), actual);
 
     let nested = completed(
@@ -53,7 +58,7 @@ fn extraction_opens_the_reported_destination_not_the_requested_base() {
             password: None,
             best_effort: false,
         },
-        json!({"dest": actual}),
+        JobResult::ExtractNested(extract_report(&actual)),
     );
     assert_eq!(output_path(&nested).unwrap(), actual);
 }
@@ -68,17 +73,36 @@ fn batch_output_requires_a_successfully_reported_destination() {
             symlinks: SymlinkPolicy::Preserve,
             smart: true,
         },
-        json!({"outputs": [{"dest": dir.path()}], "failed": 1}),
+        JobResult::BatchExtract(BatchExtractResult {
+            archives: 2,
+            selected_archives: 2,
+            collapsed_volumes: 0,
+            extracted: 1,
+            failed: 1,
+            recovered_archives: 0,
+            outputs: vec![BatchExtractOutput {
+                archive: "source.zip".into(),
+                result: extract_report(dir.path()),
+            }],
+            failures: Vec::new(),
+        }),
     );
     assert_eq!(output_path(&snapshot).unwrap(), dir.path());
-    snapshot.result = Some(json!({"outputs": [], "failed": 1}));
+    let Some(JobResult::BatchExtract(report)) = &mut snapshot.result else {
+        panic!("batch result")
+    };
+    report.outputs.clear();
+    report.extracted = 0;
     assert!(output_path(&snapshot).is_err());
 }
 
 #[test]
 fn incomplete_missing_and_wrong_type_outputs_are_rejected() {
     let dir = tempfile::tempdir().unwrap();
-    let valid = completed(extract_spec(dir.path()), json!({"dest": dir.path()}));
+    let valid = completed(
+        extract_spec(dir.path()),
+        JobResult::Extract(extract_report(dir.path())),
+    );
     for state in ["queued", "running", "paused", "failed", "cancelled"] {
         let mut snapshot = valid.clone();
         snapshot.state = state.into();
@@ -88,10 +112,15 @@ fn incomplete_missing_and_wrong_type_outputs_are_rejected() {
     fs::write(&file, b"data").unwrap();
     for result in [
         None,
-        Some(json!({})),
-        Some(json!({"dest": ""})),
-        Some(json!({"dest": dir.path().join("missing")})),
-        Some(json!({"dest": file})),
+        Some(JobResult::Update {
+            archive: dir.path().to_string_lossy().into_owned(),
+            operations: 1,
+        }),
+        Some(JobResult::Extract(extract_report(Path::new("")))),
+        Some(JobResult::Extract(extract_report(
+            &dir.path().join("missing"),
+        ))),
+        Some(JobResult::Extract(extract_report(&file))),
     ] {
         let mut snapshot = valid.clone();
         snapshot.result = result;
@@ -120,18 +149,16 @@ fn archive_and_recovery_outputs_preserve_the_existing_opening_boundaries() {
     assert_eq!(
         output_path(&completed(
             convert.clone(),
-            json!({"primary_output": archive, "split": false})
+            JobResult::Convert(create_report(&archive, false, 16))
         ))
         .unwrap(),
         archive
     );
-    for split in [json!(true), serde_json::Value::Null] {
-        assert!(output_path(&completed(
-            convert.clone(),
-            json!({"primary_output": archive, "split": split})
-        ))
-        .is_err());
-    }
+    assert!(output_path(&completed(
+        convert,
+        JobResult::Convert(create_report(&archive, true, 16))
+    ))
+    .is_err());
     for spec in [
         JobSpec::ExportSqz {
             src: "source.sqz".into(),
@@ -153,7 +180,25 @@ fn archive_and_recovery_outputs_preserve_the_existing_opening_boundaries() {
         },
     ] {
         assert_eq!(
-            output_path(&completed(spec, json!({"dest": archive}))).unwrap(),
+            output_path(&completed(
+                spec.clone(),
+                match spec {
+                    JobSpec::ExportSqz { .. } =>
+                        JobResult::ExportSqz(create_report(&archive, false, 16).output),
+                    JobSpec::RepairSqz { .. } => JobResult::RepairSqz {
+                        dest: archive.to_string_lossy().into_owned(),
+                        in_place: false,
+                        recovery: None
+                    },
+                    JobSpec::RepairZip { .. } => JobResult::RepairZip {
+                        dest: archive.to_string_lossy().into_owned(),
+                        in_place: false,
+                        source_entries: 1
+                    },
+                    _ => unreachable!(),
+                }
+            ))
+            .unwrap(),
             archive
         );
     }
@@ -166,12 +211,16 @@ fn archive_and_recovery_outputs_preserve_the_existing_opening_boundaries() {
     assert_eq!(
         output_path(&completed(
             repair.clone(),
-            json!({"ok": true, "archive": archive})
+            JobResult::RepairRecovery(recovery_report(&archive, None, true))
         ))
         .unwrap(),
         archive
     );
-    assert!(output_path(&completed(repair, json!({"ok": false, "output": archive}))).is_err());
+    assert!(output_path(&completed(
+        repair,
+        JobResult::RepairRecovery(recovery_report(&archive, Some(archive.clone()), false))
+    ))
+    .is_err());
 
     for spec in [
         checksum_job(&archive),
@@ -184,7 +233,7 @@ fn archive_and_recovery_outputs_preserve_the_existing_opening_boundaries() {
     ] {
         assert!(output_path(&completed(
             spec,
-            json!({"primary_output": archive, "dest": archive})
+            JobResult::Compress(create_report(&archive, false, 16))
         ))
         .is_err());
     }
@@ -200,7 +249,17 @@ fn published_apps_and_repaired_directories_use_directory_outputs() {
             identity: String::new(),
             notary_profile: String::new(),
         },
-        json!({"primary_output": dir.path()}),
+        JobResult::PublishMacosSfx(PublishResult {
+            source: "Source.app".into(),
+            primary_output: dir.path().to_string_lossy().into_owned(),
+            outputs: vec![dir.path().to_string_lossy().into_owned()],
+            target: "macos",
+            layout: "macos_app",
+            payload_bytes: 1,
+            total_bytes: 2,
+            team_id: "TEAM".into(),
+            submission_id: "accepted-submission".into(),
+        }),
     );
     assert_eq!(output_path(&published).unwrap(), dir.path());
     let repaired = completed(
@@ -210,7 +269,11 @@ fn published_apps_and_repaired_directories_use_directory_outputs() {
             output_directory: true,
             recovery: None,
         },
-        json!({"ok": true, "output": dir.path()}),
+        JobResult::RepairRecovery(recovery_report(
+            Path::new("source.zip"),
+            Some(dir.path().into()),
+            true,
+        )),
     );
     assert_eq!(output_path(&repaired).unwrap(), dir.path());
 }
@@ -227,7 +290,12 @@ fn output_access_obeys_window_visibility_and_dismissal() {
             extract_spec(dir.path()),
             "queued",
         );
-        snapshots.set_state(42, "done", None, Some(json!({"dest": dir.path()})));
+        snapshots.set_state(
+            42,
+            "done",
+            None,
+            Some(JobResult::Extract(extract_report(dir.path()))),
+        );
     }
     for requester in ["main", "task-owner"] {
         assert_eq!(

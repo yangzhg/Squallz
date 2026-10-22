@@ -1,3 +1,5 @@
+import { ArchiveOutputWorkflow, type ArchiveOutputState, type ArchiveOutputPhase, type ArchiveOutputStage } from "./archive-output-workflow.svelte";
+import { DestinationInspectionError, destinationInspectionCancelled, authorizeArchiveOutput } from "./archive-output-authorization";
 import {
   archiveBaseOrDefault,
   desktopBasename,
@@ -10,35 +12,20 @@ import { createSourcePaths, mergeCreateSources, type CreateSourceRoot } from "./
 import { formatBytes } from "./format";
 import {
   ipc,
-  isErrorDto,
   type CreateDestinationBase,
-  type CreateDestinationInspectionDto,
   type CreatePlanDto,
-  type DiskSpaceDto,
   type ErrorDto,
   type JobSpec,
   type OverwritePolicy,
 } from "./ipc";
-import { applyCreateDestinationAuthorization } from "./task-model";
 import { createFormats, type CreateFormatId, type CreateProfileId } from "./ui-model";
 import type { UiMode } from "./uiMode.svelte";
 
 type CompressJobSpec = Extract<JobSpec, { kind: "compress" }>;
 type DialogModule = typeof import("@tauri-apps/plugin-dialog");
 
-export type CreatePreflightStage = "source" | "temp" | "destination" | "submit";
-export type CreatePreflightPhase =
-  | "idle"
-  | "selecting"
-  | "measuring"
-  | "checkingTemp"
-  | "choosingDest"
-  | "checkingDest"
-  | "reviewing"
-  | "submitting"
-  | "ready"
-  | "cancelled"
-  | "blocked";
+export type CreatePreflightStage = ArchiveOutputStage;
+export type CreatePreflightPhase = ArchiveOutputPhase;
 
 export type CreateRunDraft = Readonly<{
   format: CreateFormatId;
@@ -138,52 +125,18 @@ export interface CreatePreflightServices {
 }
 
 export interface CreatePreflightPresentation {
-  tr: (key: string, fallback: string) => string;
+  tr: (key: string, fallback?: string) => string;
   tError: (error: ErrorDto) => string;
   submissionBlockedMessage: (error: unknown) => string | null;
   emit: (effect: CreatePreflightEffect, isCurrent: () => boolean) => void | Promise<void>;
 }
 
-type CreatePreflightData = {
-  phase: CreatePreflightPhase;
-  scanned: number;
-  current: string;
+export type CreatePreflightState = Readonly<ArchiveOutputState<PendingCreateSubmission> & {
   excludeCount: number;
-  issue: string;
-  issueStage: CreatePreflightStage | null;
   creatingSfx: boolean;
-  requestId: string | null;
-  requestKind: "source" | "destination" | null;
-  processedBytes: number;
-  cancelPending: boolean;
-  plan: CreatePlanDto | null;
-  destination: string | null;
-  destinationDisk: DiskSpaceDto | null;
-  workspaceDisk: DiskSpaceDto | null;
-  systemTempDisk: DiskSpaceDto | null;
-  pending: PendingCreateSubmission | null;
-};
-
-export type CreatePreflightState = Readonly<CreatePreflightData & {
   picker: CreateSourcePicker | null;
   owner: CreatePreparationOwner | null;
 }>;
-
-export class CreateDestinationInspectionError extends Error {
-  readonly detail: ErrorDto | null;
-  readonly cancelled: boolean;
-
-  constructor(error?: unknown, cancelled = false) {
-    super("create-destination-inspection-failed");
-    this.detail = isErrorDto(error) ? error : null;
-    this.cancelled = cancelled;
-  }
-}
-
-export function createDestinationInspectionCancelled(error: unknown): boolean {
-  return error instanceof CreateDestinationInspectionError
-    && (error.cancelled || error.detail?.key === "error.cancelled");
-}
 
 export function commonCreateSourceParent(
   inputs: readonly string[],
@@ -197,35 +150,15 @@ export function commonCreateSourceParent(
     : null;
 }
 
-function emptyData(): CreatePreflightData {
-  return {
-    phase: "idle",
-    scanned: 0,
-    current: "",
-    excludeCount: 0,
-    issue: "",
-    issueStage: null,
-    creatingSfx: false,
-    requestId: null,
-    requestKind: null,
-    processedBytes: 0,
-    cancelPending: false,
-    plan: null,
-    destination: null,
-    destinationDisk: null,
-    workspaceDisk: null,
-    systemTempDisk: null,
-    pending: null,
-  };
-}
-
 export class CreatePreflightSession {
-  private data = $state<CreatePreflightData>(emptyData());
+  private readonly workflow: ArchiveOutputWorkflow<PendingCreateSubmission>;
+  private get data() { return this.workflow.state; }
+  private excludeCount = $state(0);
+  private creatingSfx = $state(false);
   private picker = $state.raw<CreateSourcePicker | null>(null);
   private owner = $state.raw<CreatePreparationOwner | null>(null);
   private context: CreatePreflightContext = { active: false, mode: "modern", sources: [] };
-  private submission: object | null = null;
-  private generation = 0;
+  private get generation() { return this.workflow.generation; }
   private closed = false;
   private readonly previewDestinationRequestId: string | null;
 
@@ -235,6 +168,11 @@ export class CreatePreflightSession {
     private readonly submit: (spec: CompressJobSpec) => Promise<number>,
     seed?: CreatePreflightSeed,
   ) {
+    this.workflow = new ArchiveOutputWorkflow({
+      kind: "create", ensureListener: services.ensurePreflightListener,
+      nextRequestId: services.nextRequestId, getDialogModule: services.getDialogModule,
+      tr: (key) => this.tr(key), notice: (message) => this.notice(message), tError: presentation.tError,
+    });
     this.previewDestinationRequestId = import.meta.env.DEV && (seed?.destinationBytes ?? 0) > 0
       ? "dev-preview-destination" : null;
     if (seed) {
@@ -248,7 +186,7 @@ export class CreatePreflightSession {
   }
 
   get state(): CreatePreflightState {
-    return { ...this.data, picker: this.picker, owner: this.owner };
+    return { ...this.data, excludeCount: this.excludeCount, creatingSfx: this.creatingSfx, picker: this.picker, owner: this.owner };
   }
 
   syncContext(context: CreatePreflightContext): boolean {
@@ -269,7 +207,7 @@ export class CreatePreflightSession {
     return this.owner === request && this.sameContext(request);
   }
 
-  private tr(key: string, fallback: string): string {
+  private tr(key: string, fallback?: string): string {
     return this.presentation.tr(key, fallback);
   }
 
@@ -277,16 +215,8 @@ export class CreatePreflightSession {
     if (!this.closed) void this.presentation.emit({ kind: "notice", message }, () => !this.closed);
   }
 
-  private clearRequest(): void {
-    this.data.requestId = null;
-    this.data.requestKind = null;
-    this.data.processedBytes = 0;
-    this.data.cancelPending = false;
-    this.data.current = "";
-  }
-
   busy(): boolean {
-    return ["selecting", "measuring", "checkingTemp", "choosingDest", "checkingDest", "submitting"].includes(this.data.phase);
+    return this.workflow.busy();
   }
 
   sourcesLocked(): boolean {
@@ -298,18 +228,16 @@ export class CreatePreflightSession {
   }
 
   dismissPreparation(): void {
-    this.generation += 1;
+    if (this.data.phase === "submitting") return;
+    this.workflow.generation += 1;
     this.picker = null;
     if (this.owner) this.invalidatePlan();
   }
 
   invalidatePlan(): void {
     if (this.busy() && this.owner === null) return;
-    this.generation += 1;
     this.owner = null;
-    if (this.data.phase === "idle") return;
-    const { pending, excludeCount, creatingSfx } = this.data;
-    this.data = { ...emptyData(), excludeCount, creatingSfx };
+    const pending = this.workflow.reset();
     if (pending && !this.closed) {
       void this.presentation.emit({ kind: "resetCredentials", intent: pending }, () => !this.closed);
     }
@@ -334,14 +262,14 @@ export class CreatePreflightSession {
     this.picker = request;
     const isCurrent = () => this.picker === request && this.sameContext(request);
     this.notice(kind === "files"
-      ? this.tr("gui.create.opening_file_picker", "Opening file picker...")
-      : this.tr("gui.create.opening_folder_picker", "Opening folder picker..."));
+      ? this.tr("gui.create.opening_file_picker")
+      : this.tr("gui.create.opening_folder_picker"));
     try {
       const { open } = await this.services.getDialogModule();
       if (!isCurrent()) return;
       const selected = await this.services.openNativeDialog(`create.${kind}`, open, {
         title: kind === "files"
-          ? this.tr("gui.create.choose_files_to_archive", "Choose files to archive")
+          ? this.tr("gui.create.choose_files_to_archive")
           : this.tr("gui.create.choose_folder_to_archive", "Choose folder to archive"),
         multiple: true,
         directory: kind === "folder",
@@ -349,7 +277,7 @@ export class CreatePreflightSession {
       if (!isCurrent()) return;
       const paths = Array.isArray(selected) ? selected : selected ? [selected] : [];
       if (paths.length === 0) {
-        this.notice(this.tr("gui.create.sources.picker_cancelled", "Source selection cancelled · the current list was kept"));
+        this.notice(this.tr("gui.create.sources.picker_cancelled"));
         return;
       }
       this.picker = null;
@@ -358,7 +286,7 @@ export class CreatePreflightSession {
         kind: "sourcesPicked", paths, sourceKind: kind === "files" ? "file" : "folder",
       }, () => this.sameContext(request) && this.generation === generation);
     } catch {
-      if (isCurrent()) this.notice(this.tr("gui.create.requires_desktop_dialog", "Create archive requires the desktop file dialog"));
+      if (isCurrent()) this.notice(this.tr("gui.create.requires_desktop_dialog"));
     } finally {
       if (this.picker === request) this.picker = null;
     }
@@ -366,10 +294,9 @@ export class CreatePreflightSession {
 
   private begin(draft: CreateRunDraft): CreatePreparationOwner {
     this.dismissPreparation();
-    this.data = emptyData();
-    this.data.phase = "choosingDest";
-    this.data.excludeCount = draft.contentPolicy === "cross_platform_clean" ? 3 : draft.excludes.length;
-    this.data.creatingSfx = draft.sfxEnabled;
+    this.workflow.begin();
+    this.excludeCount = draft.contentPolicy === "cross_platform_clean" ? 3 : draft.excludes.length;
+    this.creatingSfx = draft.sfxEnabled;
     const request = { mode: this.context.mode, sources: this.context.sources };
     this.owner = request;
     return request;
@@ -380,49 +307,7 @@ export class CreatePreflightSession {
     message: string,
     phase: "blocked" | "cancelled" = "blocked",
   ): void {
-    this.clearRequest();
-    this.data.issueStage = stage;
-    this.data.issue = message;
-    this.data.phase = phase;
-    this.notice(message);
-  }
-
-  private async inspectDestination(
-    path: string,
-    split: boolean,
-    sfxTarget: CompressJobSpec["sfx_target"],
-    isCurrent: () => boolean,
-  ): Promise<CreateDestinationInspectionDto> {
-    await this.services.ensurePreflightListener();
-    if (!isCurrent()) throw new CreateDestinationInspectionError(undefined, true);
-    const requestId = this.services.nextRequestId();
-    this.data.requestId = requestId;
-    this.data.requestKind = "destination";
-    this.data.processedBytes = 0;
-    this.data.cancelPending = false;
-    this.data.current = "";
-    try {
-      const inspection = await ipc.inspectCreateDestination(path, split, requestId, sfxTarget);
-      if (!isCurrent()) throw new CreateDestinationInspectionError(undefined, true);
-      if (this.data.requestId === requestId && this.data.cancelPending) {
-        throw new CreateDestinationInspectionError(undefined, true);
-      }
-      return inspection;
-    } catch (error) {
-      const cancelled = this.data.requestId === requestId && this.data.cancelPending;
-      if (error instanceof CreateDestinationInspectionError) {
-        if (!cancelled || error.cancelled) throw error;
-        throw new CreateDestinationInspectionError(error.detail ?? undefined, true);
-      }
-      throw new CreateDestinationInspectionError(error, cancelled);
-    } finally {
-      if (this.data.requestId === requestId) {
-        this.data.requestId = null;
-        this.data.requestKind = null;
-        this.data.cancelPending = false;
-        this.data.current = "";
-      }
-    }
+    this.workflow.issue(stage, message, phase);
   }
 
   async cancelDestination(
@@ -431,8 +316,8 @@ export class CreatePreflightSession {
     const announce = options.announce ?? true;
     const requestId = this.data.requestId;
     if (!requestId || this.data.requestKind !== "destination" || this.data.cancelPending) return;
-    this.data.cancelPending = true;
     if (import.meta.env.DEV && requestId === this.previewDestinationRequestId) {
+      this.data.cancelPending = true;
       const request = { mode: this.context.mode, sources: this.context.sources };
       this.owner = request;
       const isCurrent = () => this.currentOwner(request);
@@ -441,7 +326,7 @@ export class CreatePreflightSession {
         if (!isCurrent() || this.data.requestId !== requestId || !this.data.cancelPending) return;
         this.finishIssue(
           "destination",
-          this.tr("gui.create.destination_check_cancelled", "Output check cancelled · no archive was created"),
+          this.tr("gui.create.destination_check_cancelled"),
           "cancelled",
         );
         await this.presentation.emit(
@@ -453,18 +338,7 @@ export class CreatePreflightSession {
       }
       return;
     }
-    try {
-      await ipc.cancelCreateDestinationInspection(requestId);
-      if (announce && this.data.requestId === requestId && this.data.cancelPending) {
-        this.notice(this.tr("gui.create.destination_check_cancel_requested", "Stopping the output check..."));
-      }
-    } catch {
-      if (this.data.requestId !== requestId) return;
-      if (!options.keepIntentOnFailure) this.data.cancelPending = false;
-      if (announce) {
-        this.notice(this.tr("gui.create.destination_check_cancel_failed", "Could not stop the output check. It will continue."));
-      }
-    }
+    await this.workflow.cancel(announce, options.keepIntentOnFailure);
   }
 
   private async askDestination(
@@ -481,17 +355,17 @@ export class CreatePreflightSession {
       : createFormats[draft.format].extensions;
     let filterName: string;
     if (draft.sfxEnabled) {
-      filterName = this.tr("gui.create.sfx_filter", "Self-extracting output");
+      filterName = this.tr("gui.create.sfx_filter");
     } else if (draft.outputExtension === "swm") {
-      filterName = this.tr("gui.create.split_wim_filter", "Split WIM first part");
+      filterName = this.tr("gui.create.split_wim_filter");
     } else {
       filterName = this.tr(`gui.create.format.${draft.format}.filter`, createFormats[draft.format].filterName);
     }
     const platform = this.services.platform();
     const selected = await this.services.saveNativeDialog("create.save-archive", save, {
       title: source === "drop"
-        ? this.tr("gui.create.save_dropped_items_as_archive", "Save dropped items as archive")
-        : this.tr("gui.create.save_archive_as", "Save archive as"),
+        ? this.tr("gui.create.save_dropped_items_as_archive")
+        : this.tr("gui.create.save_archive_as"),
       defaultPath: draft.suggestedDestination ?? joinDesktopPath(
         desktopDirname(inputs[0], platform), `${base}.${draft.outputExtension}`, platform,
       ),
@@ -501,30 +375,11 @@ export class CreatePreflightSession {
     const path = extensions.some((extension) => selected.toLowerCase().endsWith(`.${extension.toLowerCase()}`))
       ? selected
       : `${selected}.${draft.outputExtension}`;
-    const inspection = await this.inspectDestination(path, draft.splitSize !== null, draft.sfxTarget, isCurrent);
-    if (!isCurrent()) return null;
-    if (inspection.conflict && inspection.guard === null) throw new CreateDestinationInspectionError();
-    if (inspection.conflict) {
-      const replace = await confirm(
-        this.tr(
-          "gui.create.replace_existing.body",
-          "An output file or split volume set already exists for {path}. Replace the existing output set with the new archive?",
-        ).replace("{path}", path),
-        {
-          title: this.tr("gui.create.replace_existing.title", "Replace existing output?"),
-          kind: "warning",
-          okLabel: this.tr("gui.create.replace_existing.action", "Replace"),
-          cancelLabel: this.tr("gui.create.replace_existing.cancel", "Cancel"),
-        },
-      );
-      if (!isCurrent() || !replace) return null;
-    }
-    return {
-      path,
-      replaceExisting: inspection.conflict,
-      replacementGuard: inspection.guard,
-      confirmLateConflict: true,
-    };
+    const authorization = await authorizeArchiveOutput({
+      path, inspect: () => this.workflow.inspect(path, draft.splitSize !== null, draft.sfxTarget, isCurrent),
+      isCurrent, confirm: async () => confirm, tr: (key) => this.tr(key), message: "gui.create.replace_existing",
+    });
+    return authorization ? { path, ...authorization, confirmLateConflict: true } : null;
   }
 
   private async resolveDestination(
@@ -540,11 +395,11 @@ export class CreatePreflightSession {
       : draft.defaultCreateDir;
     if (!folder) {
       this.notice(draft.destination.base === "source_parent"
-        ? this.tr("gui.create.output.source_parent_fallback", "The selected sources are in different folders. Choose where to save this archive.")
-        : this.tr("gui.create.output.default_folder_fallback", "The default create folder is not set. Choose where to save this archive."));
+        ? this.tr("gui.create.output.source_parent_fallback")
+        : this.tr("gui.create.output.default_folder_fallback"));
       return this.askDestination(inputs, base, draft, source, isCurrent);
     }
-    const status = this.tr("gui.create.finding_available_destination", "Finding an available output name...");
+    const status = this.tr("gui.create.finding_available_destination");
     this.data.current = status;
     try {
       const proposed = joinDesktopPath(folder, `${base}.${draft.outputExtension}`, this.services.platform());
@@ -554,8 +409,8 @@ export class CreatePreflightSession {
     } catch {
       if (!isCurrent()) return null;
       this.notice(draft.destination.base === "default_directory"
-        ? this.tr("gui.create.output.default_folder_unavailable", "The default create folder is unavailable. Choose another location.")
-        : this.tr("gui.create.output.source_folder_unavailable", "The source folder cannot be used for output. Choose another location."));
+        ? this.tr("gui.create.output.default_folder_unavailable")
+        : this.tr("gui.create.output.source_folder_unavailable"));
       return this.askDestination(inputs, base, draft, source, isCurrent);
     } finally {
       if (isCurrent() && this.data.current === status) this.data.current = "";
@@ -564,9 +419,9 @@ export class CreatePreflightSession {
 
   private artifactLabel(draft: CreateRunDraft): string {
     if (!draft.sfxEnabled) return createFormats[draft.format].label;
-    if (draft.sfxTarget === "macos") return this.tr("gui.create.sfx_macos_output", "macOS app (.app)");
-    if (draft.sfxTarget === "windows") return this.tr("gui.create.sfx_windows_output", "Windows app (.exe)");
-    return this.tr("gui.create.sfx_linux_output", "Linux executable (.run)");
+    if (draft.sfxTarget === "macos") return this.tr("gui.create.sfx_macos_output");
+    if (draft.sfxTarget === "windows") return this.tr("gui.create.sfx_windows_output");
+    return this.tr("gui.create.sfx_linux_output");
   }
 
   async start(
@@ -579,7 +434,7 @@ export class CreatePreflightSession {
       [], inputs.map((path) => ({ path, kind: "unknown" })), this.services.platform(),
     ));
     if (normalizedInputs.length === 0) {
-      this.finishIssue("source", this.tr("gui.create.no_source_items", "No source items selected"));
+      this.finishIssue("source", this.tr("gui.create.no_source_items"));
       return;
     }
     const request = this.begin(draft);
@@ -593,20 +448,20 @@ export class CreatePreflightSession {
         destination = await this.resolveDestination(normalizedInputs, base, draft, source, isCurrent);
       } catch (error) {
         if (!isCurrent()) return;
-        if (createDestinationInspectionCancelled(error)) {
+        if (destinationInspectionCancelled(error)) {
           this.finishIssue(
             "destination",
-            this.tr("gui.create.destination_check_cancelled", "Output check cancelled · no archive was created"),
+            this.tr("gui.create.destination_check_cancelled"),
             "cancelled",
           );
           await this.presentation.emit({ kind: "focus", target: "primary" }, isCurrent);
           return;
         }
-        const message = error instanceof CreateDestinationInspectionError
+        const message = error instanceof DestinationInspectionError
           ? error.detail
             ? this.presentation.tError(error.detail)
             : this.tr("gui.create.destination_recheck_failed", "Could not check the destination. Review it and try again.")
-          : this.tr("gui.create.save_dialog_requires_desktop_dialog", "Save dialog requires the desktop file dialog");
+          : this.tr("gui.create.save_dialog_requires_desktop_dialog");
         this.finishIssue("destination", message);
         return;
       }
@@ -614,7 +469,7 @@ export class CreatePreflightSession {
       if (!destination) {
         this.finishIssue(
           "destination",
-          this.tr("gui.create.destination_selection_cancelled", "Destination selection cancelled · no archive was created"),
+          this.tr("gui.create.destination_selection_cancelled"),
           "cancelled",
         );
         return;
@@ -639,103 +494,28 @@ export class CreatePreflightSession {
         post_success: draft.postSuccess,
         test_after_create: draft.testAfterCreate,
       };
-      this.data.phase = "measuring";
-      let requestId: string | null = null;
-      let plan: CreatePlanDto;
-      try {
-        await this.services.ensurePreflightListener();
-        if (!isCurrent()) return;
-        requestId = this.services.nextRequestId();
-        this.data.requestId = requestId;
-        this.data.requestKind = "source";
-        this.data.processedBytes = 0;
-        plan = await ipc.planCreate(spec, requestId);
-        if (!isCurrent()) return;
-      } catch {
-        if (!isCurrent()) return;
-        this.finishIssue("source", this.tr(
-          "gui.create.check_excludes_or_permissions",
-          "Make sure the output is not selected as a source, then check exclude rules and permissions.",
-        ));
-        return;
-      } finally {
-        if (requestId !== null && this.data.requestId === requestId) {
-          this.data.requestId = null;
-          this.data.requestKind = null;
-        }
-      }
-      this.data.plan = plan;
-      if (plan.entries === 0) {
-        this.finishIssue("source", this.tr("gui.create.no_entries_after_excludes", "No entries after excludes"));
+      const outcome = await this.workflow.prepare(spec, desktopDirname(spec.dest, this.services.platform()), isCurrent);
+      if (!isCurrent() || outcome.status === "stale") return;
+      if (outcome.status === "cancelled") {
+        this.finishIssue("source", this.tr("gui.create.preflight_cancelled"), "cancelled");
         return;
       }
-      this.data.scanned = plan.entries + plan.deduplicated_entries;
-      this.data.current = "";
-      let workspace: DiskSpaceDto;
-      try {
-        this.data.phase = "checkingTemp";
-        workspace = await ipc.checkDiskSpace(
-          desktopDirname(spec.dest, this.services.platform()), plan.workspace_budget_bytes,
-        );
-        if (!isCurrent()) return;
-      } catch {
-        if (!isCurrent()) return;
-        this.finishIssue("temp", this.tr("gui.create.temp_preflight_requires_desktop_service", "Workspace check requires the desktop service"));
+      if (outcome.status === "error") {
+        const messages = {
+          plan: "gui.create.check_excludes_or_permissions",
+          empty: "gui.create.no_entries_after_excludes",
+          workspace_service: "gui.create.temp_preflight_requires_desktop_service",
+          workspace_space: "gui.create.not_enough_temp_space",
+          system_temp_space: "gui.create.not_enough_system_temp_space",
+          destination_service: "gui.create.destination_preflight_requires_desktop_service",
+          destination_space: "gui.create.not_enough_destination_space",
+        };
+        this.finishIssue(outcome.stage, this.tr(messages[outcome.code])
+          .replace("{available}", formatBytes("availableBytes" in outcome ? outcome.availableBytes ?? 0 : 0)));
         return;
       }
-      this.data.workspaceDisk = workspace;
-      if (!workspace.ok) {
-        this.finishIssue("temp", this.tr(
-          "gui.create.not_enough_temp_space",
-          "Not enough destination space for the creation workspace · {available} available",
-        ).replace("{available}", formatBytes(workspace.available_bytes)));
-        return;
-      }
-      if (plan.system_temp_budget_bytes > 0) {
-        let systemTemp: DiskSpaceDto;
-        try {
-          const path = await ipc.tempDir();
-          if (!isCurrent()) return;
-          systemTemp = await ipc.checkDiskSpace(path, plan.system_temp_budget_bytes);
-          if (!isCurrent()) return;
-        } catch {
-          if (!isCurrent()) return;
-          this.finishIssue("temp", this.tr("gui.create.temp_preflight_requires_desktop_service", "Workspace check requires the desktop service"));
-          return;
-        }
-        this.data.systemTempDisk = systemTemp;
-        if (!systemTemp.ok) {
-          this.finishIssue("temp", this.tr(
-            "gui.create.not_enough_system_temp_space",
-            "Not enough space in the system temporary directory · {available} available",
-          ).replace("{available}", formatBytes(systemTemp.available_bytes)));
-          return;
-        }
-      }
-      let disk: DiskSpaceDto;
-      try {
-        this.data.phase = "checkingDest";
-        disk = await ipc.checkDiskSpace(
-          desktopDirname(spec.dest, this.services.platform()), plan.final_output_budget_bytes,
-        );
-        if (!isCurrent()) return;
-      } catch {
-        if (!isCurrent()) return;
-        this.finishIssue("destination", this.tr(
-          "gui.create.destination_preflight_requires_desktop_service",
-          "Destination disk preflight requires the desktop service",
-        ));
-        return;
-      }
-      this.data.destinationDisk = disk;
-      if (!disk.ok) {
-        this.finishIssue("destination", this.tr(
-          "gui.create.not_enough_destination_space",
-          "Not enough free space in destination · {available} available",
-        ).replace("{available}", formatBytes(disk.available_bytes)));
-        return;
-      }
-      this.data.pending = {
+      const plan = outcome.plan;
+      this.workflow.review({
         spec,
         source,
         format: draft.format,
@@ -746,14 +526,12 @@ export class CreatePreflightSession {
         confirmLateConflict: destination.confirmLateConflict,
         restoreCredentialPrompt: draft.restoreCredentialPrompt,
         restoreEncryptNames: draft.restoreEncryptNames,
-      };
-      this.data.phase = "reviewing";
+      });
       this.notice(plan.deduplicated_entries > 0
         ? this.tr(
             "gui.create.review_ready_overlap_notice",
-            "Checks complete · {count} repeated entries merged · review before creating",
           ).replace("{count}", plan.deduplicated_entries.toLocaleString())
-        : this.tr("gui.create.review_ready_notice", "Checks complete · review before creating"));
+        : this.tr("gui.create.review_ready_notice"));
       await this.presentation.emit({ kind: "focus", target: "review" }, isCurrent);
     } finally {
       if (this.owner === request) {
@@ -771,36 +549,7 @@ export class CreatePreflightSession {
       { kind: "focus", target: "primary" },
       () => !this.closed && this.context.active && this.generation === generation,
     );
-    this.notice(this.tr("gui.create.review.cancelled", "Create plan cancelled · no task was added"));
-  }
-
-  private async refreshConfirmedDestination(
-    spec: CompressJobSpec,
-    confirmLateConflict: boolean,
-    isCurrent: () => boolean,
-  ): Promise<CompressJobSpec | null> {
-    if (!confirmLateConflict && (spec.replace_existing !== true || !spec.replacement_guard)) return spec;
-    const inspection = await this.inspectDestination(spec.dest, spec.split_size !== null, spec.sfx_target, isCurrent);
-    if (!isCurrent()) return null;
-    if (!inspection.conflict) return applyCreateDestinationAuthorization(spec, null);
-    if (inspection.guard === null) throw new CreateDestinationInspectionError();
-    if (spec.replace_existing && inspection.guard === spec.replacement_guard) return spec;
-    const { confirm } = await this.services.getDialogModule();
-    if (!isCurrent()) return null;
-    const replace = await confirm(
-      this.tr(
-        "gui.create.replace_changed.body",
-        "The output at {path} changed after your earlier confirmation. Replace the current output with the new archive?",
-      ).replace("{path}", spec.dest),
-      {
-        title: this.tr("gui.create.replace_changed.title", "Destination changed · replace current output?"),
-        kind: "warning",
-        okLabel: this.tr("gui.create.replace_changed.action", "Replace current output"),
-        cancelLabel: this.tr("gui.create.replace_changed.cancel", "Keep current output"),
-      },
-    );
-    if (!isCurrent() || !replace) return null;
-    return applyCreateDestinationAuthorization(spec, inspection.guard);
+    this.notice(this.tr("gui.create.review.cancelled"));
   }
 
   async confirm(): Promise<void> {
@@ -808,81 +557,26 @@ export class CreatePreflightSession {
     const pending = this.data.pending;
     const plan = this.data.plan;
     if (!pending || !plan) {
-      this.notice(this.tr("gui.create.review.expired", "This create plan is no longer current. Choose the sources again."));
+      this.notice(this.tr("gui.create.review.expired"));
       this.invalidatePlan();
       return;
     }
-    const request = {};
-    this.submission = request;
-    const isCurrent = () => !this.closed && this.submission === request;
-    this.data.issue = "";
-    this.data.issueStage = null;
-    this.data.phase = "submitting";
-    void this.presentation.emit({ kind: "prepareSubmit" }, isCurrent);
-    try {
-      let spec: CompressJobSpec;
-      try {
-        const refreshed = await this.refreshConfirmedDestination(pending.spec, pending.confirmLateConflict, isCurrent);
-        if (!isCurrent()) return;
-        if (!refreshed) {
-          this.data.phase = "reviewing";
-          this.notice(this.tr("gui.create.replace_changed.kept", "Current output kept · nothing was added to the queue"));
-          return;
-        }
-        spec = refreshed;
-        if (refreshed !== pending.spec) this.data.pending = { ...pending, spec: refreshed };
-      } catch (error) {
-        if (!isCurrent()) return;
-        if (createDestinationInspectionCancelled(error)) {
-          this.clearRequest();
-          this.data.issueStage = "destination";
-          this.data.issue = this.tr(
-            "gui.create.destination_recheck_cancelled",
-            "Output recheck cancelled · the plan was not submitted",
-          );
-          this.data.phase = "reviewing";
-          this.notice(this.data.issue);
-          await this.presentation.emit({ kind: "focus", target: "review" }, isCurrent);
-          return;
-        }
-        this.finishIssue("destination", error instanceof CreateDestinationInspectionError && error.detail
-          ? this.presentation.tError(error.detail)
-          : this.tr("gui.create.destination_recheck_failed", "Could not recheck the destination. Review it and try again."));
-        return;
-      }
-      let jobId: number;
-      try {
-        jobId = await this.submit(spec);
-        if (!isCurrent()) return;
-      } catch (error) {
-        if (!isCurrent()) return;
-        const blocked = this.presentation.submissionBlockedMessage(error);
-        if (blocked !== null) {
-          this.data.issueStage = "submit";
-          this.data.issue = blocked;
-          this.data.phase = "blocked";
-          return;
-        }
-        this.finishIssue("submit", this.tr(
-          "gui.create.submission_requires_desktop_service",
-          "Create archive submission requires the desktop service",
-        ));
-        return;
-      }
-      this.data.pending = null;
-      this.data.phase = "ready";
-      await this.presentation.emit({ kind: "queued", pending, plan, jobId }, isCurrent);
-    } finally {
-      if (this.submission === request) this.submission = null;
-    }
+    await this.workflow.confirm({
+      recheck: pending.confirmLateConflict || (pending.spec.replace_existing && Boolean(pending.spec.replacement_guard)),
+      prepare: (isCurrent) => { void this.presentation.emit({ kind: "prepareSubmit" }, isCurrent); },
+      submit: this.submit,
+      blockedMessage: this.presentation.submissionBlockedMessage,
+      queued: (queued, plan, jobId, isCurrent) => this.presentation.emit({ kind: "queued", pending: queued, plan, jobId }, isCurrent),
+      focusReview: (isCurrent) => this.presentation.emit({ kind: "focus", target: "review" }, isCurrent),
+    });
   }
 
   dispose(): void {
+    this.workflow.dispose();
     this.closed = true;
-    this.generation += 1;
     this.picker = null;
     this.owner = null;
-    this.submission = null;
-    this.data = emptyData();
+    this.excludeCount = 0;
+    this.creatingSfx = false;
   }
 }

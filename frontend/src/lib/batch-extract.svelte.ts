@@ -21,7 +21,7 @@ export type BatchExtractEdit =
   | { kind: "destination"; index: number; value: string }
   | { kind: "remove"; index: number };
 
-/** Owns batch draft writes and revision; the host admits native replies and submits jobs. */
+/** Revisioned batch edits, immutable submissions and unambiguous failed-item restoration. */
 export class BatchExtractDraft {
   #draft = $state<BatchExtractDraftState | null>(null);
   #revision = 0;

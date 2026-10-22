@@ -3,7 +3,6 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use squallz_core::api::{
@@ -11,8 +10,9 @@ use squallz_core::api::{
     BoundedProblemLog, CompressionLevel, ConflictDecision, ConflictResolver, ControlToken,
     CreateOptions, EntryMeta, EntryPath, EntrySelection, ExtractProblemReporter, ExtractReport,
     FormatError, OpenOptions, OverwritePolicy, Password, ProblemPreview, ProgressPhase,
-    ProgressSink, RecoverySummary, SafetyLimits, SymlinkPolicy, UpdateOp, UpdateOptions,
+    ProgressSink, SafetyLimits, SymlinkPolicy, UpdateOp, UpdateOptions,
 };
+use squallz_core::reports::{ChecksumCheckReport, CreateOutputReport, DuplicateReport, TestReport};
 use squallz_core::{
     create_destination_has_conflict, is_sqz_archive_path, lock_unpoisoned, ArchiveRepairKind,
     ArchiveRepairOptions, ArchiveRepairOutcome, CreateArtifactKind, CreateCommitPolicy,
@@ -24,15 +24,17 @@ use squallz_publish::{publish_macos_sfx, MacosSfxPublishPhase};
 use crate::audit;
 use crate::bridge::{AskAnswer, AskBridge};
 use crate::dto::{
-    AskConflictEvent, AskPasswordEvent, BatchExtractItem, ErrorDto, ExtractPlanDto, JobSpec,
-    SettingsDto,
+    BatchExtractItem, ErrorDto, JobConflictPrompt, JobPasswordPrompt, JobSpec, SettingsDto,
 };
-use crate::events::{emit, EventSink, EV_ASK_CONFLICT, EV_ASK_PASSWORD};
+use crate::events::{emit, EventSink, EV_SNAPSHOT};
 use crate::nested::{create_nested_job_workspace, extract_nested_archive_to_temp_for_job};
 use crate::state::AppState;
 
 use super::progress::BatchProgressSink;
-use super::redact_format_error_path;
+use super::results::{
+    BatchExtractFailure, BatchExtractOutput, BatchExtractResult, CreateResult, ExtractResult,
+    JobResult, PublishResult, SfxDetails,
+};
 use super::snapshots::{JobQuestion, JobSnapshotStore};
 use super::source_cleanup::{
     prepare_source_cleanup, SourceCleanup, SourceCleanupResult, SourceCleanupStatus,
@@ -82,10 +84,13 @@ fn batch_extract_work_item(
 fn normalize_batch_extract_items_with(
     items: &[BatchExtractItem],
     display_items: &[BatchExtractItem],
+    ctl: &ControlToken,
     mut source_set_for: impl FnMut(&Path) -> Result<Option<ArchiveSourceSet>, FormatError>,
-) -> Vec<BatchExtractWorkItem> {
+) -> Result<Vec<BatchExtractWorkItem>, FormatError> {
+    ctl.checkpoint()?;
     let mut indices_by_path: HashMap<PathBuf, Vec<usize>> = HashMap::new();
     for (index, item) in items.iter().enumerate() {
+        ctl.checkpoint()?;
         indices_by_path
             .entry(PathBuf::from(&item.path))
             .or_default()
@@ -95,11 +100,13 @@ fn normalize_batch_extract_items_with(
     let mut consumed = vec![false; items.len()];
     let mut normalized = Vec::with_capacity(items.len());
     for index in 0..items.len() {
+        ctl.checkpoint()?;
         if consumed[index] {
             continue;
         }
         let source_set = match source_set_for(Path::new(&items[index].path)) {
             Ok(Some(source_set)) if source_set.members().len() > 1 => source_set,
+            Err(FormatError::Cancelled) => return Err(FormatError::Cancelled),
             // Discovery is only a grouping gate. The ordinary extraction path
             // remains authoritative and reports format or I/O failures.
             Ok(_) | Err(_) => {
@@ -112,10 +119,12 @@ fn normalize_batch_extract_items_with(
         let mut includes_current = false;
         let mut primary_index = None;
         for member in source_set.members() {
+            ctl.checkpoint()?;
             let Some(member_indices) = indices_by_path.get(member) else {
                 continue;
             };
             for &member_index in member_indices {
+                ctl.checkpoint()?;
                 if consumed[member_index] {
                     continue;
                 }
@@ -133,6 +142,7 @@ fn normalize_batch_extract_items_with(
 
         let representative = primary_index.unwrap_or(family_indices[0]);
         for &member_index in &family_indices {
+            ctl.checkpoint()?;
             consumed[member_index] = true;
         }
         normalized.push(batch_extract_work_item(
@@ -141,7 +151,8 @@ fn normalize_batch_extract_items_with(
             representative,
         ));
     }
-    normalized
+    ctl.checkpoint()?;
+    Ok(normalized)
 }
 
 fn status_code_label(status_code: Option<i32>) -> String {
@@ -157,8 +168,8 @@ struct GuiConflictResolver {
     events: Arc<dyn EventSink>,
     bridge: Arc<AskBridge>,
     snapshots: Arc<Mutex<JobSnapshotStore>>,
-    /// Per-job cancel flag (releases the wait when the job is cancelled)
-    cancel_flag: Arc<AtomicBool>,
+    /// Shared job control releases the wait after accepted cancellation.
+    ctl: ControlToken,
     /// Decision to apply to every further conflict ("apply to all")
     all: Mutex<Option<String>>,
 }
@@ -183,7 +194,7 @@ impl ConflictResolver for GuiConflictResolver {
         self.bridge.prepare(self.gui_id);
         let question = lock_unpoisoned(&self.snapshots).ask(
             self.gui_id,
-            JobQuestion::Conflict(AskConflictEvent {
+            JobQuestion::Conflict(JobConflictPrompt {
                 id: self.gui_id,
                 version: 0,
                 existing_path: existing.to_string_lossy().into_owned(),
@@ -197,12 +208,12 @@ impl ConflictResolver for GuiConflictResolver {
                 incoming_modified: incoming.modified.and_then(unix_seconds),
             }),
         );
-        let Some(JobQuestion::Conflict(prompt)) = question else {
+        let Some(snapshot) = question else {
             self.bridge.wait(self.gui_id, &|| true);
             return ConflictDecision::Abort;
         };
-        emit(&*self.events, EV_ASK_CONFLICT, &prompt);
-        let cancelled = || self.cancel_flag.load(Ordering::Relaxed);
+        emit(&*self.events, EV_SNAPSHOT, &snapshot);
+        let cancelled = || self.ctl.is_cancelled();
         let answer = self.bridge.wait(self.gui_id, &cancelled);
         let _ = lock_unpoisoned(&self.snapshots).clear_question(self.gui_id);
         match answer {
@@ -263,7 +274,6 @@ pub(super) struct JobContext<'a> {
     pub(super) bridge: &'a Arc<AskBridge>,
     pub(super) events: &'a Arc<dyn EventSink>,
     pub(super) ctl: &'a ControlToken,
-    pub(super) cancel_flag: &'a Arc<AtomicBool>,
     pub(super) sink: &'a dyn ProgressSink,
     pub(super) snapshots: &'a Arc<Mutex<JobSnapshotStore>>,
     pub(super) sfx_template: Option<&'a Path>,
@@ -288,7 +298,6 @@ impl JobContext<'_> {
             events,
             snapshots,
             ctl,
-            cancel_flag,
             gui_id,
             ..
         } = *self;
@@ -315,19 +324,19 @@ impl JobContext<'_> {
                     bridge.prepare(gui_id);
                     let question = lock_unpoisoned(snapshots).ask(
                         gui_id,
-                        JobQuestion::Password(AskPasswordEvent {
+                        JobQuestion::Password(JobPasswordPrompt {
                             id: gui_id,
                             version: 0,
                             name,
                             wrong: matches!(e, FormatError::WrongPassword),
                         }),
                     );
-                    let Some(JobQuestion::Password(prompt)) = question else {
+                    let Some(snapshot) = question else {
                         bridge.wait(gui_id, &|| true);
                         return Err(FormatError::Cancelled);
                     };
-                    emit(&**events, EV_ASK_PASSWORD, &prompt);
-                    let cancelled = || ctl.is_cancelled() || cancel_flag.load(Ordering::Relaxed);
+                    emit(&**events, EV_SNAPSHOT, &snapshot);
+                    let cancelled = || ctl.is_cancelled();
                     let answer = bridge.wait(gui_id, &cancelled);
                     let _ = lock_unpoisoned(snapshots).clear_question(gui_id);
                     match answer {
@@ -345,37 +354,24 @@ impl JobContext<'_> {
     }
 }
 
-fn extract_result_json(
+fn extract_result(
     plan: ExtractPlan,
     report: ExtractReport,
     structure: ArchiveStructureStatus,
     best_effort: bool,
     problems: ProblemPreview,
-) -> serde_json::Value {
+) -> ExtractResult {
     let problems_truncated = problems.is_truncated();
-    let mut result = serde_json::json!({
-        "dest": report.destination.to_string_lossy(),
-        "best_effort": best_effort,
-        "problems": problems.messages,
-        "problems_total": problems.total,
-        "problems_truncated": problems_truncated,
-        "plan": ExtractPlanDto::from(plan),
-        "counts": {
-            "destination": report.destination.to_string_lossy(),
-            "selected_entries": report.selected_entries,
-            "created": report.created,
-            "directories": report.directories,
-            "skipped": report.skipped,
-            "replaced": report.replaced,
-            "renamed": report.renamed,
-            "failed": report.failed,
-            "output_bytes": report.output_bytes,
-        },
-    });
-    if !structure.is_complete() {
-        result["structure"] = serde_json::json!(structure.id());
+    ExtractResult {
+        dest: report.destination.to_string_lossy().into_owned(),
+        best_effort,
+        problems: problems.messages,
+        problems_total: problems.total,
+        problems_truncated,
+        plan,
+        counts: report,
+        structure,
     }
-    result
 }
 
 struct ExtractRequest<'a> {
@@ -398,7 +394,7 @@ impl JobContext<'_> {
     fn extract(
         &self,
         request: ExtractRequest<'_>,
-    ) -> Result<(serde_json::Value, ArchiveStructureStatus), FormatError> {
+    ) -> Result<(ExtractResult, ArchiveStructureStatus), FormatError> {
         let Self {
             state,
             settings,
@@ -406,7 +402,6 @@ impl JobContext<'_> {
             events,
             snapshots,
             ctl,
-            cancel_flag,
             sink,
             gui_id,
             ..
@@ -436,7 +431,7 @@ impl JobContext<'_> {
                 events: Arc::clone(events),
                 bridge: Arc::clone(bridge),
                 snapshots: Arc::clone(snapshots),
-                cancel_flag: Arc::clone(cancel_flag),
+                ctl: ctl.clone(),
                 all: Mutex::new(None),
             }))
         } else {
@@ -472,33 +467,31 @@ impl JobContext<'_> {
                     password: pw.cloned(),
                     encoding_override: encoding.map(str::to_owned),
                 };
-                state
-                    .engine
-                    .plan_and_extract_with_report_guarded_and_structure_controlled(
-                        &archive,
-                        &dest,
-                        Path::new(archive_display_name),
-                        smart,
-                        &open,
-                        &x_opts,
-                        sink,
-                        ctl,
-                        expected_input_guard,
-                        |entries, control| {
-                            selection
-                                .map(|paths| expand_selection_with_control(entries, paths, control))
-                                .transpose()
-                        },
-                        |plan| match expected_destination {
-                            Some(expected) if plan.destination != expected => {
-                                Err(FormatError::destination_changed(&plan.destination))
-                            }
-                            _ => Ok(()),
-                        },
-                    )
+                state.engine.extract_planned(
+                    &archive,
+                    &dest,
+                    Path::new(archive_display_name),
+                    smart,
+                    &open,
+                    &x_opts,
+                    sink,
+                    ctl,
+                    expected_input_guard,
+                    |entries, control| {
+                        selection
+                            .map(|paths| expand_selection_with_control(entries, paths, control))
+                            .transpose()
+                    },
+                    |plan| match expected_destination {
+                        Some(expected) if plan.destination != expected => {
+                            Err(FormatError::destination_changed(&plan.destination))
+                        }
+                        _ => Ok(()),
+                    },
+                )
             },
         )?;
-        let result = extract_result_json(
+        let result = extract_result(
             plan,
             report,
             structure,
@@ -515,7 +508,7 @@ impl JobContext<'_> {
         overwrite: &OverwritePolicy,
         symlinks: &SymlinkPolicy,
         smart: bool,
-    ) -> Result<serde_json::Value, FormatError> {
+    ) -> Result<BatchExtractResult, FormatError> {
         let Self {
             state, ctl, sink, ..
         } = *self;
@@ -525,9 +518,9 @@ impl JobContext<'_> {
             ));
         }
 
-        let work_items = normalize_batch_extract_items_with(items, display_items, |path| {
-            state.engine.archive_source_set(path)
-        });
+        let work_items = normalize_batch_extract_items_with(items, display_items, ctl, |path| {
+            state.engine.archive_source_set(path, ctl)
+        })?;
         let batch_sink = BatchProgressSink::new(sink, work_items.len());
         let batch_context = JobContext {
             sink: &batch_sink,
@@ -560,45 +553,36 @@ impl JobContext<'_> {
                 verify_sfx: false,
                 best_effort: item.best_effort,
             }) {
-                Ok((mut result, structure)) => {
-                    result["archive"] = serde_json::json!(shown_path);
+                Ok((result, structure)) => {
                     if structure == ArchiveStructureStatus::ZipLocalHeadersRecovered {
                         recovered_archives = recovered_archives.saturating_add(1);
                     }
-                    outputs.push(result);
+                    outputs.push(BatchExtractOutput {
+                        archive: shown_path.to_owned(),
+                        result,
+                    });
                 }
                 Err(FormatError::Cancelled) => return Err(FormatError::Cancelled),
                 Err(error) => {
-                    let dto = ErrorDto::from(&error);
-                    failures.push(serde_json::json!({
-                        "archive": shown_path,
-                        "error": {
-                            "key": dto.key,
-                            "params": dto.params,
-                            "detail": dto.detail,
-                        },
-                    }));
+                    failures.push(BatchExtractFailure {
+                        archive: shown_path.to_owned(),
+                        error: ErrorDto::from(&error),
+                    });
                 }
             }
             batch_sink.finish_archive(index, label);
         }
 
-        let mut result = serde_json::json!({
-            "operation": "batch_extract",
-            "archives": work_items.len(),
-            "selected_archives": items.len(),
-            "collapsed_volumes": items.len().saturating_sub(work_items.len()),
-            "extracted": outputs.len(),
-            "failed": failures.len(),
-            "outputs": outputs,
-            "failures": failures,
-        });
-        if recovered_archives > 0 {
-            result["structure"] =
-                serde_json::json!(ArchiveStructureStatus::ZipLocalHeadersRecovered.id());
-            result["recovered_archives"] = serde_json::json!(recovered_archives);
-        }
-        Ok(result)
+        Ok(BatchExtractResult {
+            archives: work_items.len(),
+            selected_archives: items.len(),
+            collapsed_volumes: items.len().saturating_sub(work_items.len()),
+            extracted: outputs.len(),
+            failed: failures.len(),
+            outputs,
+            failures,
+            recovered_archives,
+        })
     }
 }
 
@@ -609,7 +593,6 @@ pub(crate) struct CreateJobRequest {
     pub(crate) sfx_target: Option<SfxTarget>,
     pub(crate) post_success: PostSuccessAction,
     pub(crate) test_after_create: bool,
-    pub(crate) replace_existing: bool,
     pub(crate) commit_policy: CreateCommitPolicy,
 }
 
@@ -634,7 +617,6 @@ impl CreateJobRequest {
     pub(crate) fn sfx_options(&self) -> Option<SfxBuildOptions> {
         self.sfx_target.map(|target| SfxBuildOptions {
             target,
-            overwrite: self.replace_existing,
             resources: self.options.resources,
         })
     }
@@ -714,8 +696,7 @@ pub(crate) fn create_job_request(
         }
     }
 
-    let replace_existing = *replace_existing;
-    let commit_policy = job_output_commit_policy(replace_existing, *replacement_guard, "create")?;
+    let commit_policy = job_output_commit_policy(*replace_existing, *replacement_guard, "create")?;
     Ok(CreateJobRequest {
         inputs: inputs.iter().map(PathBuf::from).collect(),
         dest: PathBuf::from(dest),
@@ -723,7 +704,6 @@ pub(crate) fn create_job_request(
         sfx_target,
         post_success: *post_success,
         test_after_create: *test_after_create || *post_success == PostSuccessAction::TrashSource,
-        replace_existing,
         commit_policy,
     })
 }
@@ -802,64 +782,45 @@ fn test_created_archive(
 
 fn create_report_result(
     report: CreateReport,
-    operation: &'static str,
     source_cleanup: SourceCleanupResult,
     integrity_entries: Option<u64>,
-) -> serde_json::Value {
-    let volume_count = report.split_volume_count.unwrap_or(1);
-    let split = report.split_volume_count.is_some();
-    let primary_output = report.primary_output.to_string_lossy().into_owned();
-    let outputs: Vec<String> = report
-        .outputs
-        .into_iter()
-        .map(|path| path.to_string_lossy().into_owned())
-        .collect();
-    let preserved_outputs: Vec<String> = report
-        .preserved_outputs
-        .into_iter()
-        .map(|path| path.to_string_lossy().into_owned())
-        .collect();
-    serde_json::json!({
-        "operation": operation,
-        "primary_output": primary_output,
-        "outputs": outputs,
-        "preserved_outputs": preserved_outputs,
-        "total_bytes": report.total_output_bytes,
-        "volume_count": volume_count,
-        "split": split,
-        "tested_after_create": integrity_entries.is_some(),
-        "entries_tested_after_create": integrity_entries,
-        "source_cleanup": source_cleanup.to_json(),
-    })
+) -> CreateResult {
+    CreateResult {
+        output: CreateOutputReport::from(&report),
+        source_cleanup,
+        entries_tested_after_create: integrity_entries,
+        sfx: None,
+    }
 }
 
 fn sfx_report_result(
     report: SfxBuildReport,
     source_cleanup: SourceCleanupResult,
     integrity_entries: Option<u64>,
-) -> serde_json::Value {
+) -> CreateResult {
     let primary_output = report.path.to_string_lossy().into_owned();
-    let preserved_outputs = report
-        .preserved_outputs
-        .into_iter()
-        .map(|path| path.to_string_lossy().into_owned())
-        .collect::<Vec<_>>();
-    serde_json::json!({
-        "operation": "create_sfx",
-        "primary_output": primary_output.clone(),
-        "outputs": [primary_output],
-        "preserved_outputs": preserved_outputs,
-        "volume_count": 1,
-        "split": false,
-        "target": report.target.as_str(),
-        "layout": report.layout.as_str(),
-        "payload_bytes": report.payload_bytes,
-        "total_bytes": report.total_bytes,
-        "requires_signing": report.requires_signing,
-        "tested_after_create": integrity_entries.is_some(),
-        "entries_tested_after_create": integrity_entries,
-        "source_cleanup": source_cleanup.to_json(),
-    })
+    CreateResult {
+        output: CreateOutputReport {
+            primary_output: primary_output.clone(),
+            outputs: vec![primary_output],
+            preserved_outputs: report
+                .preserved_outputs
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect(),
+            volume_count: 1,
+            split: false,
+            total_bytes: report.total_bytes,
+        },
+        sfx: Some(SfxDetails {
+            target: report.target.as_str(),
+            layout: report.layout.as_str(),
+            payload_bytes: report.payload_bytes,
+            requires_signing: report.requires_signing,
+        }),
+        source_cleanup,
+        entries_tested_after_create: integrity_entries,
+    }
 }
 
 impl JobContext<'_> {
@@ -867,12 +828,11 @@ impl JobContext<'_> {
         &self,
         spec: &JobSpec,
         display_spec: &JobSpec,
-    ) -> Result<Option<serde_json::Value>, FormatError> {
+    ) -> Result<JobResult, FormatError> {
         let Self {
             state,
             settings,
             ctl,
-            cancel_flag,
             sink,
             sfx_template,
             source_cleanup,
@@ -886,13 +846,13 @@ impl JobContext<'_> {
                     &request.inputs,
                     request.post_success,
                     &request.options.excludes,
-                    &|| ctl.is_cancelled() || cancel_flag.load(Ordering::Relaxed),
+                    &|| ctl.is_cancelled(),
                     sink,
                 )?;
                 let verify_sources = cleanup_plan.requires_content_verification();
                 let Some(sfx_options) = request.sfx_options() else {
                     let (report, archived_manifest) = if verify_sources {
-                        let verified = state.engine.create_with_verification_policy(
+                        let verified = state.engine.create_verified(
                             &request.dest,
                             &request.inputs,
                             &request.options,
@@ -902,7 +862,7 @@ impl JobContext<'_> {
                         )?;
                         (verified.create, verified.manifest)
                     } else {
-                        let report = state.engine.create_with_report_policy(
+                        let report = state.engine.create(
                             &request.dest,
                             &request.inputs,
                             &request.options,
@@ -925,12 +885,11 @@ impl JobContext<'_> {
                         cleanup_plan,
                         &report.outputs,
                         &archived_manifest,
-                        &|| ctl.is_cancelled() || cancel_flag.load(Ordering::Relaxed),
+                        &|| ctl.is_cancelled(),
                         sink,
                     );
-                    return Ok(Some(create_report_result(
+                    return Ok(JobResult::Compress(create_report_result(
                         report,
-                        "create",
                         source_cleanup,
                         integrity_entries,
                     )));
@@ -939,22 +898,20 @@ impl JobContext<'_> {
                     FormatError::DependencyMissing("Squallz SFX runtime template".into())
                 })?;
                 let (report, archived_manifest) = if verify_sources {
-                    let verified = state
-                        .engine
-                        .create_sfx_from_inputs_with_verification_and_policy(
-                            template,
-                            &request.inputs,
-                            &request.dest,
-                            &request.options,
-                            &sfx_options,
-                            request.commit_policy,
-                            sink,
-                            ctl,
-                        )?;
+                    let verified = state.engine.create_sfx_from_inputs_with_verification(
+                        template,
+                        &request.inputs,
+                        &request.dest,
+                        &request.options,
+                        &sfx_options,
+                        request.commit_policy,
+                        sink,
+                        ctl,
+                    )?;
                     (verified.sfx, verified.manifest)
                 } else {
                     (
-                        state.engine.create_sfx_from_inputs_with_policy(
+                        state.engine.create_sfx_from_inputs(
                             template,
                             &request.inputs,
                             &request.dest,
@@ -980,10 +937,10 @@ impl JobContext<'_> {
                     cleanup_plan,
                     std::slice::from_ref(&report.path),
                     &archived_manifest,
-                    &|| ctl.is_cancelled() || cancel_flag.load(Ordering::Relaxed),
+                    &|| ctl.is_cancelled(),
                     sink,
                 );
-                Ok(Some(sfx_report_result(
+                Ok(JobResult::Compress(sfx_report_result(
                     report,
                     source_cleanup,
                     integrity_entries,
@@ -1023,27 +980,17 @@ impl JobContext<'_> {
                     sink,
                     &mut phase,
                 )?;
-                Ok(Some(serde_json::json!({
-                    "operation": "sfx_publish_macos",
-                    "source": report.source.to_string_lossy(),
-                    "primary_output": report.output.to_string_lossy(),
-                    "outputs": [report.output.to_string_lossy()],
-                    "target": report.info.target.as_str(),
-                    "layout": report.info.layout.as_str(),
-                    "payload_bytes": report.info.payload_bytes,
-                    "total_bytes": report.info.total_bytes,
-                    "signature": "developer_id",
-                    "team_id": report.team_id,
-                    "notarization": "Accepted",
-                    "submission_id": report.submission_id,
-                    "stapled": true,
-                    "codesign_verified": true,
-                    "gatekeeper_verified": true,
-                    "checksum_verified": true,
-                    "source_preserved": true,
-                    "requires_signing": false,
-                    "auto_run": false,
-                })))
+                Ok(JobResult::PublishMacosSfx(PublishResult {
+                    source: report.source.to_string_lossy().into_owned(),
+                    primary_output: report.output.to_string_lossy().into_owned(),
+                    outputs: vec![report.output.to_string_lossy().into_owned()],
+                    target: report.info.target.as_str(),
+                    layout: report.info.layout.as_str(),
+                    payload_bytes: report.info.payload_bytes,
+                    total_bytes: report.info.total_bytes,
+                    team_id: report.team_id,
+                    submission_id: report.submission_id,
+                }))
             }
             JobSpec::Extract {
                 path,
@@ -1081,7 +1028,7 @@ impl JobContext<'_> {
                     verify_sfx: *verify_sfx,
                     best_effort: *best_effort,
                 })?;
-                Ok(Some(result))
+                Ok(JobResult::Extract(result))
             }
             JobSpec::BatchExtract {
                 items,
@@ -1095,7 +1042,7 @@ impl JobContext<'_> {
                 };
                 let result =
                     self.extract_batch(items, display_items, overwrite, symlinks, *smart)?;
-                Ok(Some(result))
+                Ok(JobResult::BatchExtract(result))
             }
             JobSpec::ExtractNested {
                 outer_path,
@@ -1135,14 +1082,14 @@ impl JobContext<'_> {
                             entry_path,
                             resolved_password,
                             encoding.as_deref(),
-                            workspace.path(),
+                            &workspace,
                             limits,
                             sink,
                             ctl,
                         )
                     },
                 )?;
-                let temp_path = temp.to_path_buf();
+                let temp_path = temp.path().to_path_buf();
                 let extraction = self.extract(ExtractRequest {
                     archive: &temp_path,
                     archive_display_name: display_name,
@@ -1160,10 +1107,9 @@ impl JobContext<'_> {
                 });
                 state.forget_password(&temp_path);
                 let physical = temp_path.to_string_lossy();
-                let (result, _) = extraction.map_err(|error| {
-                    redact_format_error_path(error, physical.as_ref(), display_name)
-                })?;
-                Ok(Some(result))
+                let (result, _) = extraction
+                    .map_err(|error| error.with_public_path(physical.as_ref(), display_name))?;
+                Ok(JobResult::ExtractNested(result))
             }
             JobSpec::Test {
                 path,
@@ -1197,23 +1143,7 @@ impl JobContext<'_> {
                 )?;
                 let structure = outcome.structure;
                 let report = outcome.into_summary();
-                let ok = report.is_ok();
-                let entries_tested = report.entries_tested;
-                let problems_total = report.problems.total;
-                let problems_truncated = report.problems.is_truncated();
-                let problems = report.problems.messages;
-                let mut result = serde_json::json!({
-                    "ok": ok,
-                    "entries": entries_tested,
-                    "entries_tested": entries_tested,
-                    "problems": problems,
-                    "problems_total": problems_total,
-                    "problems_truncated": problems_truncated,
-                });
-                if !structure.is_complete() {
-                    result["structure"] = serde_json::json!(structure.id());
-                }
-                Ok(Some(result))
+                Ok(JobResult::Test(TestReport::new(&report, structure)))
             }
             JobSpec::Convert {
                 src,
@@ -1243,7 +1173,7 @@ impl JobContext<'_> {
                             password: pw.cloned(),
                             encoding_override: src_encoding.clone(),
                         };
-                        state.engine.convert_with_report_policy(
+                        state.engine.convert(
                             &src_path,
                             Path::new(dest),
                             &open,
@@ -1254,9 +1184,8 @@ impl JobContext<'_> {
                         )
                     },
                 )?;
-                Ok(Some(create_report_result(
+                Ok(JobResult::Convert(create_report_result(
                     report,
-                    "convert",
                     SourceCleanupResult::new(SourceCleanupStatus::NotRequested, 0, 0),
                     None,
                 )))
@@ -1289,7 +1218,7 @@ impl JobContext<'_> {
                 };
                 let commit_policy =
                     job_output_commit_policy(*replace_existing, *replacement_guard, "export")?;
-                state.engine.convert_with_policy(
+                let report = state.engine.convert(
                     &src_path,
                     &dest_path,
                     &OpenOptions::default(),
@@ -1298,9 +1227,7 @@ impl JobContext<'_> {
                     sink,
                     ctl,
                 )?;
-                Ok(Some(serde_json::json!({
-                    "dest": dest_path.to_string_lossy(),
-                })))
+                Ok(JobResult::ExportSqz(CreateOutputReport::from(&report)))
             }
             JobSpec::RepairSqz { src, dest, level } | JobSpec::RepairZip { src, dest, level } => {
                 let src_path = PathBuf::from(src);
@@ -1336,20 +1263,18 @@ impl JobContext<'_> {
                     }
                 };
                 let result = match kind {
-                    ArchiveRepairKind::SqzEmbedded => serde_json::json!({
-                        "dest": dest_path.to_string_lossy(),
-                        "in_place": in_place,
-                        "recovery": source.summary.recovery.as_ref().map(recovery_summary_json),
-                    }),
-                    ArchiveRepairKind::ZipIndexRebuild => serde_json::json!({
-                        "operation": "repair_zip",
-                        "tool": "zip-local-header-rebuild",
-                        "dest": dest_path.to_string_lossy(),
-                        "in_place": in_place,
-                        "source_entries": source.summary.entries_tested,
-                    }),
+                    ArchiveRepairKind::SqzEmbedded => JobResult::RepairSqz {
+                        dest: dest_path.to_string_lossy().into_owned(),
+                        in_place,
+                        recovery: source.summary.recovery,
+                    },
+                    ArchiveRepairKind::ZipIndexRebuild => JobResult::RepairZip {
+                        dest: dest_path.to_string_lossy().into_owned(),
+                        in_place,
+                        source_entries: source.summary.entries_tested,
+                    },
                 };
-                Ok(Some(result))
+                Ok(result)
             }
             JobSpec::Protect {
                 path,
@@ -1358,8 +1283,8 @@ impl JobContext<'_> {
             } => {
                 let archive = PathBuf::from(path);
                 let recovery = recovery.as_deref().map(PathBuf::from);
-                let sources = state.engine.recovery_protect_sources(&archive)?;
-                let report = squallz_recovery::protect_files_controlled(
+                let sources = state.engine.recovery_protect_sources(&archive, ctl)?;
+                let report = squallz_recovery::protect_files(
                     &archive,
                     *redundancy,
                     recovery.as_deref(),
@@ -1372,9 +1297,8 @@ impl JobContext<'_> {
             JobSpec::VerifyRecovery { path, recovery } => {
                 let archive = PathBuf::from(path);
                 let recovery = recovery.as_deref().map(PathBuf::from);
-                let report =
-                    squallz_recovery::verify_controlled(&archive, recovery.as_deref(), sink, ctl)?;
-                recovery_report_json(report)
+                let report = squallz_recovery::verify(&archive, recovery.as_deref(), sink, ctl)?;
+                Ok(JobResult::VerifyRecovery(report))
             }
             JobSpec::RepairRecovery {
                 path,
@@ -1391,7 +1315,7 @@ impl JobContext<'_> {
                             "PAR2 directory repair requires an output directory".into(),
                         )
                     })?;
-                    squallz_recovery::repair_to_directory_controlled(
+                    squallz_recovery::repair_to_directory(
                         &archive,
                         directory,
                         recovery.as_deref(),
@@ -1399,7 +1323,7 @@ impl JobContext<'_> {
                         ctl,
                     )?
                 } else {
-                    squallz_recovery::repair_controlled(
+                    squallz_recovery::repair(
                         &archive,
                         output.as_deref(),
                         recovery.as_deref(),
@@ -1407,7 +1331,7 @@ impl JobContext<'_> {
                         ctl,
                     )?
                 };
-                recovery_report_json(report)
+                Ok(JobResult::RepairRecovery(report))
             }
             JobSpec::Update {
                 path,
@@ -1468,10 +1392,10 @@ impl JobContext<'_> {
                 } else {
                     state.engine.update(&archive, &ops, &opts, sink, ctl)?;
                 }
-                Ok(Some(serde_json::json!({
-                    "archive": archive.to_string_lossy(),
-                    "operations": add.len() + delete.len() + rename.len() + mkdir.len(),
-                })))
+                Ok(JobResult::Update {
+                    archive: archive.to_string_lossy().into_owned(),
+                    operations: ops.len(),
+                })
             }
             JobSpec::Checksum {
                 inputs,
@@ -1489,22 +1413,9 @@ impl JobContext<'_> {
                 let inputs = inputs.iter().map(PathBuf::from).collect::<Vec<_>>();
                 let report = state
                     .engine
-                    .checksum_files_with_progress(&inputs, excludes, algorithm, sink, ctl)?;
+                    .checksum_files(&inputs, excludes, algorithm, sink, ctl)?;
                 ctl.checkpoint()?;
-                Ok(Some(serde_json::json!({
-                    "ok": true,
-                    "operation": "checksum",
-                    "algorithm": report.algorithm.id(),
-                    "input_count": report.input_count,
-                    "entries_scanned": report.entries_scanned,
-                    "files_hashed": report.files_hashed,
-                    "bytes_hashed": report.bytes_hashed,
-                    "items": report.items.iter().map(|item| serde_json::json!({
-                        "path": item.path.to_string_lossy().into_owned(),
-                        "size": item.size,
-                        "digest": &item.digest,
-                    })).collect::<Vec<_>>(),
-                })))
+                Ok(JobResult::Checksum(report))
             }
             JobSpec::ChecksumCheck {
                 manifest,
@@ -1518,30 +1429,14 @@ impl JobContext<'_> {
                 let algorithm = *algorithm;
                 ctl.checkpoint()?;
                 sink.on_progress(0, 0, &EntryPath::from_utf8("Verifying checksum manifest"));
-                let report = state.engine.verify_checksum_manifest_with_progress(
+                let report = state.engine.verify_checksum_manifest(
                     Path::new(manifest),
                     algorithm,
                     sink,
                     ctl,
                 )?;
                 ctl.checkpoint()?;
-                Ok(Some(serde_json::json!({
-                    "ok": report.is_ok(),
-                    "operation": "checksum_check",
-                    "algorithm": report.algorithm.id(),
-                    "manifest": report.manifest.to_string_lossy().into_owned(),
-                    "checked": report.checked,
-                    "passed": report.passed,
-                    "failed": report.failed,
-                    "bytes_hashed": report.bytes_hashed,
-                    "items": report.items.iter().map(|item| serde_json::json!({
-                        "path": item.path.to_string_lossy().into_owned(),
-                        "expected": &item.expected,
-                        "actual": &item.actual,
-                        "ok": item.ok,
-                        "error": &item.error,
-                    })).collect::<Vec<_>>(),
-                })))
+                Ok(JobResult::ChecksumCheck(ChecksumCheckReport::from(&report)))
             }
             JobSpec::DuplicateScan {
                 inputs,
@@ -1558,63 +1453,21 @@ impl JobContext<'_> {
                 let inputs = inputs.iter().map(PathBuf::from).collect::<Vec<_>>();
                 let report = state
                     .engine
-                    .find_duplicate_files(&inputs, excludes, *min_size)?;
+                    .find_duplicate_files(&inputs, excludes, *min_size, sink, ctl)?;
                 ctl.checkpoint()?;
-                Ok(Some(serde_json::json!({
-                    "operation": "duplicates",
-                    "hash_algorithm": "blake3",
-                    "input_count": report.input_count,
-                    "entries_scanned": report.entries_scanned,
-                    "files_scanned": report.files_scanned,
-                    "bytes_scanned": report.bytes_scanned,
-                    "min_size": min_size,
-                    "candidate_files": report.candidate_files,
-                    "hashed_bytes": report.hashed_bytes,
-                    "duplicate_groups": report.duplicate_groups(),
-                    "duplicate_files": report.duplicate_files(),
-                    "reclaimable_bytes": report.reclaimable_bytes(),
-                    "groups": report.groups.iter().map(|group| serde_json::json!({
-                        "hash": group.hash,
-                        "hash_algorithm": "blake3",
-                        "size": group.size,
-                        "count": group.count(),
-                        "reclaimable_bytes": group.reclaimable_bytes(),
-                        "paths": group.paths.iter().map(|path| path.to_string_lossy().into_owned()).collect::<Vec<_>>(),
-                    })).collect::<Vec<_>>(),
-                })))
+                Ok(JobResult::DuplicateScan(DuplicateReport::new(
+                    &report, *min_size,
+                )))
             }
         }
     }
 }
 
-fn recovery_summary_json(summary: &RecoverySummary) -> serde_json::Value {
-    serde_json::json!({
-        "scheme": &summary.scheme,
-        "block_size": summary.block_size,
-        "total_blocks": summary.total_blocks,
-        "data_shards": summary.data_shards,
-        "parity_shards": summary.parity_shards,
-        "recovery_blocks_available": summary.recovery_blocks_available,
-        "damaged_blocks": summary.damaged_blocks,
-        "repaired_blocks": summary.repaired_blocks,
-        "unrepaired_blocks": summary.unrepaired_blocks,
-        "repair_possible": summary.repair_possible,
-    })
-}
-
-fn recovery_report_json(
-    report: squallz_recovery::RecoveryReport,
-) -> Result<Option<serde_json::Value>, FormatError> {
-    serde_json::to_value(report)
-        .map(Some)
-        .map_err(|e| FormatError::Other(format!("cannot serialize recovery report: {e}")))
-}
-
 fn finish_protect_report(
     report: squallz_recovery::RecoveryReport,
-) -> Result<Option<serde_json::Value>, FormatError> {
+) -> Result<JobResult, FormatError> {
     if report.ok {
-        return recovery_report_json(report);
+        return Ok(JobResult::Protect(report));
     }
 
     let detail = if report.stderr.is_empty() {

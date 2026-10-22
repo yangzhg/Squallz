@@ -125,6 +125,10 @@ distribution warning rather than a successful trust check.
 
 ## Safe output replacement
 
+The core `create_sfx`, `create_sfx_from_inputs`, and
+`create_sfx_from_inputs_with_verification` entry points all take an explicit
+`CreateCommitPolicy` for output publication.
+
 Replacing an existing self-extractor is a guarded, recoverable transaction.
 Before the build starts, Squallz binds the exact artifact the caller approved.
 After staging is complete, it coordinates publishers per output directory,

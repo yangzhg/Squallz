@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import vm from "node:vm";
 import { parseCss } from "svelte/compiler";
-import { createTestServer } from "../../tests/runtime.mjs";
+import { englishTranslate, createTestServer } from "../../tests/runtime.mjs";
 import { compileTestScript, readSvelteScriptAsync, selectFunctions } from "../../tests/source.mjs";
 
 const rows = Array.from({ length: 8 }, (_, index) => ({
@@ -60,7 +60,7 @@ async function loadSelectionHandlers(archive, overrides = {}) {
     archiveTitle: () => "selection.zip",
     recordOperation: () => {},
     showNotice: () => {},
-    tr: (_key, fallback) => fallback,
+    tr: englishTranslate,
     selectionProgressLabel: (loaded, total) => `${loaded}/${total}`,
     archiveSelectionProgress: null,
     entryContext: null,

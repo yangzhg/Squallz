@@ -10,20 +10,26 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use squallz_core::api::{
-    CompressionLevel, CreateOptions, Detected, EntryPath, EntrySelection, ExtractOptions,
-    FormatError, NoProgress, OpenOptions, OverwritePolicy, Password, SplitOutputMode,
-    SqzCreateOptions, SqzInnerFormat, SymlinkPolicy, TestSummary, UpdateOp, UpdateOptions,
+    CompressionLevel, CreateOptions, EntryPath, EntrySelection, ExtractOptions, FormatError,
+    NoProgress, OpenOptions, OverwritePolicy, Password, SplitOutputMode, SqzCreateOptions,
+    SqzInnerFormat, SymlinkPolicy, UpdateOp, UpdateOptions,
 };
 use squallz_core::{
-    is_sqz_archive_path, ArchiveRepairKind, ArchiveRepairOptions, ArchiveRepairOutcome,
-    ChecksumAlgorithm, CreateContentPolicy, PathFilter,
+    ArchiveRepairKind, ArchiveRepairOptions, ArchiveRepairOutcome, ChecksumAlgorithm,
+    CreateContentPolicy, PathFilter,
 };
 
+use super::reports::{checksum_check_report_json, checksum_report_json, duplicate_report_json};
+
 use crate::args::{resource_options, safety_limits, CreateProfileArg};
+use crate::commands::convert::{ConversionEntry, ConversionKind, ConversionRequest};
+use crate::commands::create::{
+    validate_requested_format, CreateProgressMode, CreatedArchive, CreationRequest,
+};
 use crate::commands::reports::{
     create_report_json, empty_extract_counts_json, extract_counts_json, extract_plan_json,
-    print_preserved_output_warning, print_pretty_json, recovery_summary_json, test_report_json,
-    test_report_json_with_structure,
+    print_preserved_output_warning, print_pretty_json, recovery_summary_json, test_report_error,
+    test_report_json, test_report_json_with_structure,
 };
 use crate::errors::{error_kind, exit_code, localize_error, CliError};
 
@@ -486,7 +492,9 @@ fn run_estimate_job(
     let inputs = resolve_inputs(base_dir, &job.inputs)?;
     let excludes =
         crate::content_policy::resolve_create_excludes(job.content_policy, job.excludes.clone());
-    let estimate = ctx.engine.estimate_create_inputs(&inputs, &excludes)?;
+    let estimate =
+        ctx.engine
+            .estimate_create_inputs(&inputs, &excludes, |_count, _path| {}, &ctx.ctl)?;
     let mut result = json!({
         "operation": "estimate",
         "input_count": estimate.input_count,
@@ -562,7 +570,7 @@ fn run_extract_job(
         best_effort: job.best_effort,
         ..ExtractOptions::default()
     };
-    let (plan, report) = ctx.engine.plan_and_extract_with_report_controlled(
+    let (plan, report, _) = ctx.engine.extract_planned(
         &archive,
         &dest,
         &archive,
@@ -571,6 +579,7 @@ fn run_extract_job(
         &opts,
         &NoProgress,
         &ctx.ctl,
+        None,
         |entries, control| filter.select_entries(entries, control),
         |_| Ok(()),
     )?;
@@ -634,38 +643,17 @@ fn run_compress_job(
         resources: resource_options(job.threads, job.memory_limit),
         ..CreateOptions::default()
     };
-    let kind = if job.split.is_some() {
-        squallz_core::CreateArtifactKind::SplitArchive
-    } else {
-        squallz_core::CreateArtifactKind::Archive
-    };
-    let policy = super::create_commit_policy(&output, kind, true, &NoProgress, &ctx.ctl)?;
-    let report = ctx.engine.create_with_report_policy(
-        &output,
-        &inputs,
-        &opts,
-        policy,
-        &NoProgress,
-        &ctx.ctl,
-    )?;
-    let entries_tested_after_create = if job.test_after_create {
-        let test_report = ctx.engine.test_summary(
-            &report.primary_output,
-            &OpenOptions {
-                password: opts.password.clone(),
-                encoding_override: None,
-            },
-            &squallz_core::api::SafetyLimits::default(),
-            &NoProgress,
-            &ctx.ctl,
-        )?;
-        if !test_report.is_ok() {
-            return Err(test_report_error(test_report));
-        }
-        Some(test_report.entries_tested)
-    } else {
-        None
-    };
+    let CreatedArchive {
+        report,
+        entries_tested: entries_tested_after_create,
+    } = CreationRequest {
+        output: &output,
+        inputs: &inputs,
+        options: &opts,
+        test_after_create: job.test_after_create,
+        replace_existing: true,
+    }
+    .execute(ctx, CreateProgressMode::Batch)?;
     let detail = format!("created {}", report.primary_output.display());
     let mut result = create_report_json(&report);
     result["operation"] = json!("compress");
@@ -682,13 +670,9 @@ fn run_checksum_job(
 ) -> Result<JobSuccess, FormatError> {
     let inputs = resolve_inputs(base_dir, &job.inputs)?;
     let algorithm = job.algorithm.unwrap_or(ChecksumAlgorithm::Sha256);
-    let report = ctx.engine.checksum_files_with_progress(
-        &inputs,
-        &job.excludes,
-        algorithm,
-        &NoProgress,
-        &ctx.ctl,
-    )?;
+    let report =
+        ctx.engine
+            .checksum_files(&inputs, &job.excludes, algorithm, &NoProgress, &ctx.ctl)?;
     Ok(JobSuccess {
         detail: format!(
             "hashed {} files with {}",
@@ -706,12 +690,9 @@ fn run_checksum_check_job(
 ) -> Result<JobSuccess, FormatError> {
     let manifest = resolve_path(base_dir, &job.check);
     let algorithm = job.algorithm.unwrap_or(ChecksumAlgorithm::Sha256);
-    let report = ctx.engine.verify_checksum_manifest_with_progress(
-        &manifest,
-        algorithm,
-        &NoProgress,
-        &ctx.ctl,
-    )?;
+    let report =
+        ctx.engine
+            .verify_checksum_manifest(&manifest, algorithm, &NoProgress, &ctx.ctl)?;
     if !report.is_ok() {
         return Err(FormatError::CorruptArchive(format!(
             "checksum verification failed: {} of {} entries did not match",
@@ -735,9 +716,9 @@ fn run_duplicates_job(
 ) -> Result<JobSuccess, FormatError> {
     let inputs = resolve_inputs(base_dir, &job.inputs)?;
     let min_size = job.min_size.unwrap_or(1);
-    let report = ctx
-        .engine
-        .find_duplicate_files(&inputs, &job.excludes, min_size)?;
+    let report =
+        ctx.engine
+            .find_duplicate_files(&inputs, &job.excludes, min_size, &NoProgress, &ctx.ctl)?;
     if job.fail_on_found && !report.groups.is_empty() {
         return Err(FormatError::CorruptArchive(format!(
             "duplicate scan found {} duplicate groups",
@@ -759,50 +740,29 @@ fn run_convert_job(
     base_dir: &Path,
     job: &ConvertJob,
 ) -> Result<JobSuccess, FormatError> {
-    let src = resolve_path(base_dir, &job.src);
-    let output = resolve_path(base_dir, &job.output);
-    let level = compression_level(job.level, job.profile)?;
-    let open = open_options(&job.password, &job.encoding);
-    let create = CreateOptions {
-        level: CompressionLevel::from_numeric(level),
-        password: job
-            .out_password
-            .clone()
-            .or_else(|| job.password.clone())
-            .map(Password::new),
-        encrypt_filenames: job.encrypt_names,
-        split_size: job.split,
-        split_mode: job.split_mode.unwrap_or(SplitOutputMode::Generic),
-        resources: resource_options(job.threads, job.memory_limit),
-        ..CreateOptions::default()
-    };
-    let allow_existing = matches!(
-        job.overwrite.unwrap_or(BatchOverwrite::Skip).into(),
-        OverwritePolicy::Overwrite
-    );
-    let kind = if job.split.is_some() {
-        squallz_core::CreateArtifactKind::SplitArchive
-    } else {
-        squallz_core::CreateArtifactKind::Archive
-    };
-    let commit_policy =
-        super::create_commit_policy(&output, kind, allow_existing, &NoProgress, &ctx.ctl)?;
-    let report = ctx.engine.convert_with_report_policy(
-        &src,
-        &output,
-        &open,
-        &create,
-        commit_policy,
-        &NoProgress,
-        &ctx.ctl,
-    )?;
-    let mut result = create_report_json(&report);
-    result["operation"] = json!("convert");
-    result["source"] = json!(src.display().to_string());
-    result["level"] = json!(level);
+    run_conversion_job(
+        ctx,
+        ConversionRequest {
+            kind: ConversionKind::Convert,
+            source: resolve_path(base_dir, &job.src),
+            output: resolve_path(base_dir, &job.output),
+            level: compression_level(job.level, job.profile)?,
+            open: open_options(&job.password, &job.encoding),
+            out_password: job.out_password.clone().or_else(|| job.password.clone()),
+            encrypt_names: job.encrypt_names,
+            split: job.split,
+            split_mode: job.split_mode.unwrap_or(SplitOutputMode::Generic),
+            resources: resource_options(job.threads, job.memory_limit),
+            force: matches!(job.overwrite, Some(BatchOverwrite::Overwrite)),
+        },
+    )
+}
+
+fn run_conversion_job(ctx: &Ctx, request: ConversionRequest) -> Result<JobSuccess, FormatError> {
+    let outcome = request.execute(ctx, ConversionEntry::Batch)?;
     Ok(JobSuccess {
-        detail: format!("converted {} to {}", src.display(), output.display()),
-        result,
+        detail: outcome.detail,
+        result: outcome.result,
     })
 }
 
@@ -826,20 +786,14 @@ fn run_pack_job(ctx: &Ctx, base_dir: &Path, job: &PackJob) -> Result<JobSuccess,
         },
         ..CreateOptions::default()
     };
-    let kind = if job.split.is_some() {
-        squallz_core::CreateArtifactKind::SplitArchive
-    } else {
-        squallz_core::CreateArtifactKind::Archive
-    };
-    let policy = super::create_commit_policy(&output, kind, true, &NoProgress, &ctx.ctl)?;
-    let report = ctx.engine.create_with_report_policy(
-        &output,
-        &inputs,
-        &opts,
-        policy,
-        &NoProgress,
-        &ctx.ctl,
-    )?;
+    let CreatedArchive { report, .. } = CreationRequest {
+        output: &output,
+        inputs: &inputs,
+        options: &opts,
+        test_after_create: false,
+        replace_existing: true,
+    }
+    .execute(ctx, CreateProgressMode::Batch)?;
     let detail = format!("packed {}", report.primary_output.display());
     let mut result = create_report_json(&report);
     result["operation"] = json!("pack");
@@ -850,54 +804,25 @@ fn run_pack_job(ctx: &Ctx, base_dir: &Path, job: &PackJob) -> Result<JobSuccess,
 }
 
 fn run_export_job(ctx: &Ctx, base_dir: &Path, job: &ExportJob) -> Result<JobSuccess, FormatError> {
-    let archive = resolve_path(base_dir, &job.archive);
+    let source = resolve_path(base_dir, &job.archive);
     let output = resolve_path(base_dir, &job.output);
-    if !is_sqz_archive_path(&archive) {
-        return Err(FormatError::Unsupported(
-            "batch export expects a .sqz source container".into(),
-        ));
-    }
-    if is_sqz_archive_path(&output) {
-        return Err(FormatError::Unsupported(
-            "batch export output must be a standard archive, not .sqz".into(),
-        ));
-    }
-    let level = compression_level(job.level, job.profile)?;
-    let create = CreateOptions {
-        level: CompressionLevel::from_numeric(level),
-        password: job.out_password.clone().map(Password::new),
-        resources: resource_options(job.threads, job.memory_limit),
-        ..CreateOptions::default()
-    };
-    let allow_existing = matches!(
-        job.overwrite.unwrap_or(BatchOverwrite::Skip).into(),
-        OverwritePolicy::Overwrite
-    );
-    let commit_policy = super::create_commit_policy(
-        &output,
-        squallz_core::CreateArtifactKind::Archive,
-        allow_existing,
-        &NoProgress,
-        &ctx.ctl,
-    )?;
-    ctx.engine.convert_with_policy(
-        &archive,
-        &output,
-        &OpenOptions::default(),
-        &create,
-        commit_policy,
-        &NoProgress,
-        &ctx.ctl,
-    )?;
-    Ok(JobSuccess {
-        detail: format!("exported {} to {}", archive.display(), output.display()),
-        result: json!({
-            "operation": "export",
-            "archive": archive.display().to_string(),
-            "output": output.display().to_string(),
-            "level": level,
-        }),
-    })
+    ConversionKind::Export.validate_paths(&source, &output, ConversionEntry::Batch)?;
+    run_conversion_job(
+        ctx,
+        ConversionRequest {
+            kind: ConversionKind::Export,
+            source,
+            output,
+            level: compression_level(job.level, job.profile)?,
+            open: OpenOptions::default(),
+            out_password: job.out_password.clone(),
+            encrypt_names: false,
+            split: None,
+            split_mode: SplitOutputMode::Generic,
+            resources: resource_options(job.threads, job.memory_limit),
+            force: matches!(job.overwrite, Some(BatchOverwrite::Overwrite)),
+        },
+    )
 }
 
 fn run_repair_job(
@@ -968,13 +893,13 @@ fn run_protect_job(
     job: &ProtectJob,
 ) -> Result<JobSuccess, FormatError> {
     let archive = resolve_path(base_dir, &job.archive);
-    let sources = ctx.engine.recovery_protect_sources(&archive)?;
+    let sources = ctx.engine.recovery_protect_sources(&archive, &ctx.ctl)?;
     let redundancy = match job.tolerate_loss {
         Some(count) => redundancy_for_tolerated_volume_loss(&sources, count)?,
         None => job.redundancy.unwrap_or(10),
     };
     let recovery_path = resolve_optional_path(base_dir, job.recovery_path.as_deref());
-    let report = squallz_recovery::protect_files_controlled(
+    let report = squallz_recovery::protect_files(
         &archive,
         redundancy,
         recovery_path.as_deref(),
@@ -992,12 +917,8 @@ fn run_verify_recovery_job(
 ) -> Result<JobSuccess, FormatError> {
     let archive = resolve_path(base_dir, &job.archive);
     let recovery_path = resolve_optional_path(base_dir, job.recovery_path.as_deref());
-    let report = squallz_recovery::verify_controlled(
-        &archive,
-        recovery_path.as_deref(),
-        &NoProgress,
-        &ctx.ctl,
-    )?;
+    let report =
+        squallz_recovery::verify(&archive, recovery_path.as_deref(), &NoProgress, &ctx.ctl)?;
     recovery_success(report, true)
 }
 
@@ -1022,14 +943,14 @@ fn run_repair_recovery_job(
     }
     let recovery_path = resolve_optional_path(base_dir, job.recovery_path.as_deref());
     let report = match output_dir.as_deref() {
-        Some(directory) => squallz_recovery::repair_to_directory_controlled(
+        Some(directory) => squallz_recovery::repair_to_directory(
             &archive,
             directory,
             recovery_path.as_deref(),
             &NoProgress,
             &ctx.ctl,
         )?,
-        None => squallz_recovery::repair_controlled(
+        None => squallz_recovery::repair(
             &archive,
             output.as_deref(),
             recovery_path.as_deref(),
@@ -1146,75 +1067,6 @@ fn open_options(password: &Option<String>, encoding: &Option<String>) -> OpenOpt
     }
 }
 
-fn checksum_report_json(report: &squallz_core::ChecksumReport) -> Value {
-    json!({
-        "ok": true,
-        "operation": "checksum",
-        "algorithm": report.algorithm.id(),
-        "input_count": report.input_count,
-        "entries_scanned": report.entries_scanned,
-        "files_hashed": report.files_hashed,
-        "bytes_hashed": report.bytes_hashed,
-        "items": report.items.iter().map(|item| {
-            json!({
-                "path": item.path.display().to_string(),
-                "size": item.size,
-                "digest": item.digest,
-            })
-        }).collect::<Vec<_>>(),
-    })
-}
-
-fn checksum_check_report_json(report: &squallz_core::ChecksumVerificationReport) -> Value {
-    json!({
-        "ok": report.is_ok(),
-        "operation": "checksum_check",
-        "algorithm": report.algorithm.id(),
-        "manifest": report.manifest.display().to_string(),
-        "checked": report.checked,
-        "passed": report.passed,
-        "failed": report.failed,
-        "bytes_hashed": report.bytes_hashed,
-        "items": report.items.iter().map(|item| {
-            json!({
-                "path": item.path.display().to_string(),
-                "expected": item.expected,
-                "actual": item.actual,
-                "ok": item.ok,
-                "error": item.error,
-            })
-        }).collect::<Vec<_>>(),
-    })
-}
-
-fn duplicate_report_json(report: &squallz_core::DuplicateScanReport, min_size: u64) -> Value {
-    json!({
-        "ok": true,
-        "operation": "duplicates",
-        "hash_algorithm": "blake3",
-        "input_count": report.input_count,
-        "entries_scanned": report.entries_scanned,
-        "files_scanned": report.files_scanned,
-        "bytes_scanned": report.bytes_scanned,
-        "min_size": min_size,
-        "candidate_files": report.candidate_files,
-        "hashed_bytes": report.hashed_bytes,
-        "duplicate_groups": report.duplicate_groups(),
-        "duplicate_files": report.duplicate_files(),
-        "reclaimable_bytes": report.reclaimable_bytes(),
-        "groups": report.groups.iter().map(|group| {
-            json!({
-                "hash": group.hash,
-                "hash_algorithm": "blake3",
-                "size": group.size,
-                "count": group.count(),
-                "reclaimable_bytes": group.reclaimable_bytes(),
-                "paths": group.paths.iter().map(|path| path.display().to_string()).collect::<Vec<_>>(),
-            })
-        }).collect::<Vec<_>>(),
-    })
-}
-
 fn recovery_success(
     report: squallz_recovery::RecoveryReport,
     corrupt_on_failure: bool,
@@ -1304,88 +1156,6 @@ fn compression_level(
         };
     }
     Ok(profile.unwrap_or(CreateProfileArg::Balanced).level())
-}
-
-fn validate_requested_format(
-    ctx: &Ctx,
-    output: &Path,
-    requested: Option<&str>,
-) -> Result<(), FormatError> {
-    let Some(requested) = requested else {
-        return Ok(());
-    };
-    let output_name = output
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| FormatError::Unsupported("output path has no valid file name".into()))?;
-    let output_key = detected_format_key(ctx, output_name).ok_or_else(|| {
-        FormatError::Unsupported(format!(
-            "output path does not identify a supported format: {}",
-            output.display()
-        ))
-    })?;
-    let requested_key = requested_format_key(ctx, requested).ok_or_else(|| {
-        FormatError::Unsupported(format!("unsupported requested format: {requested}"))
-    })?;
-    if output_key != requested_key {
-        return Err(FormatError::Unsupported(format!(
-            "requested format '{requested}' does not match output path '{}'",
-            output.display()
-        )));
-    }
-    Ok(())
-}
-
-fn requested_format_key(ctx: &Ctx, requested_format: &str) -> Option<String> {
-    let requested = requested_format
-        .trim()
-        .trim_start_matches('.')
-        .to_ascii_lowercase();
-    if requested.is_empty() {
-        return None;
-    }
-    let direct_name = format!("archive.{requested}");
-    if let Some(key) = detected_format_key(ctx, &direct_name) {
-        return Some(key);
-    }
-    ctx.engine
-        .supported_formats()
-        .into_iter()
-        .find(|format| format.id.eq_ignore_ascii_case(&requested))
-        .and_then(|format| {
-            format
-                .extensions
-                .first()
-                .and_then(|ext| detected_format_key(ctx, &format!("archive.{ext}")))
-        })
-}
-
-fn detected_format_key(ctx: &Ctx, name: &str) -> Option<String> {
-    match ctx.engine.registry().detect_by_name(name)? {
-        Detected::Archive(archive) => Some(format!("archive:{}", archive.id())),
-        Detected::Compressed {
-            compressor,
-            inner_archive: Some(archive),
-        } => Some(format!("compound:{}:{}", archive.id(), compressor.id())),
-        Detected::Compressed {
-            compressor,
-            inner_archive: None,
-        } => Some(format!("compressor:{}", compressor.id())),
-    }
-}
-
-fn test_report_error(report: TestSummary) -> FormatError {
-    let omitted = report.problems.omitted();
-    let mut problems = report.problems.messages;
-    if omitted > 0 {
-        problems.push(format!("{omitted} additional integrity problem(s) omitted"));
-    }
-    let problems = problems.join("; ");
-    FormatError::CorruptArchive(if problems.is_empty() {
-        "batch test failed".to_owned()
-    } else {
-        problems
-    })
 }
 
 impl BatchMove {
@@ -1539,6 +1309,8 @@ fn batch_preserved_output_paths(reports: &[BatchJobReport]) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::BatchScript;
 
     #[test]
@@ -1564,5 +1336,45 @@ mod tests {
           ]
         }"#;
         assert!(serde_json::from_str::<BatchScript>(current).is_ok());
+    }
+
+    #[test]
+    fn batch_estimate_honours_cancelled_context_before_reporting_a_real_tree() {
+        let dir = std::env::temp_dir().join(format!(
+            "sqz-unit-batch-estimate-cancel-{}",
+            std::process::id()
+        ));
+        let root = dir.join("project");
+        std::fs::create_dir_all(&root).unwrap();
+        let input = root.join("payload.txt");
+        let output = dir.join("planned.zip");
+        std::fs::write(&input, b"source payload").unwrap();
+        std::fs::write(&output, b"previous output").unwrap();
+        let ctx = super::Ctx {
+            engine: squallz_core::Engine::new(squallz_formats::registry()),
+            loc: std::sync::Arc::new(squallz_i18n::Localizer::load(Some("en-US"))),
+            ctl: squallz_core::api::ControlToken::new(),
+            quiet: true,
+            verbose: false,
+            output_style: Default::default(),
+            color: Default::default(),
+            accent: Default::default(),
+        };
+        let job = super::EstimateJob {
+            id: Some("scan".into()),
+            inputs: vec![PathBuf::from("project")],
+            output: Some(PathBuf::from("planned.zip")),
+            excludes: vec![],
+            content_policy: None,
+        };
+        ctx.ctl.cancel();
+
+        assert!(matches!(
+            super::run_estimate_job(&ctx, &dir, &job),
+            Err(squallz_core::api::FormatError::Cancelled)
+        ));
+        assert_eq!(std::fs::read(&input).unwrap(), b"source payload");
+        assert_eq!(std::fs::read(&output).unwrap(), b"previous output");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

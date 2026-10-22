@@ -6,27 +6,24 @@
     type SettingsEffect,
     type SettingsSaveState,
   } from "./lib/settings-session.svelte";
-  import { ExtractPlanSession, type ExtractPlanInput } from "./lib/extract-plan.svelte";
+  import { ExtractWorkspaceSession } from "./lib/extract-workspace.svelte";
+  import { ExtractPresentation } from "./lib/extract-presentation";
   import {
-    ExtractOptionsDraft, type ExtractDestinationMode, type ExtractScope, type ExtractTaskDraft,
-    type ExtractOverwriteMode, type ExtractSymlinkMode,
+    type ExtractScope,
+    type ExtractTaskDraft,
   } from "./lib/extract-options-draft.svelte";
-  import { CreateOptionsDraft, type CreateDraftEdit, type CreateDraftChange, type CreateDraftIssue } from "./lib/create-options-draft.svelte";
+  import { CreateSession } from "./lib/create-session.svelte";
   import ArchiveStartState from "./components/ArchiveStartState.svelte";
   import ArchiveReturnStrip from "./components/ArchiveReturnStrip.svelte";
   import ArchiveEntryEditor from "./components/ArchiveEntryEditor.svelte";
   import type { ArchiveEditingState } from "./components/ArchiveEditingStatus.svelte";
   import AppIcon from "./components/AppIcon.svelte";
   import ClassicArchiveBrowserHost from "./components/ClassicArchiveBrowserHost.svelte";
+  import type { ArchiveBrowserActions, ArchiveBrowserView, ArchivePreviewActions, ArchivePreviewView } from "./lib/archive-browser";
   import type { ClassicArchiveBrowserSurfaceProps } from "./components/ClassicArchiveBrowserHost.svelte";
   import ArchiveOperationWorkspaceHost from "./components/ArchiveOperationWorkspaceHost.svelte";
   import type {
-    CreateWorkspaceSurface,
-    CreateWorkspaceVariant,
-  } from "./components/ArchiveOperationWorkspaceHost.svelte";
-  import type {
-    ExtractWorkspaceSurface,
-    ExtractWorkspaceVariant,
+    ExtractWorkspaceBridge,
   } from "./components/ArchiveOperationWorkspaceHost.svelte";
   import Icon from "./components/Icon.svelte";
   import ModernArchiveBrowserHost from "./components/ModernArchiveBrowserHost.svelte";
@@ -64,7 +61,9 @@
     operationHistory,
     recordOperation,
   } from "./lib/history.svelte";
-  import { copyTextToClipboard } from "./lib/clipboard";
+  import { ToolsSession } from "./lib/tools-session.svelte";
+  import { ArchivePresetSession, archivePresetDisplayName } from "./lib/archive-presets.svelte";
+  import { createContentPolicyLabel, extractOverwriteLabel } from "./lib/archive-option-labels";
   import { archiveSelectionRoots } from "./lib/archive-editing";
   import { ArchiveEditSession, type ArchiveEditKind, type ArchiveEditOwner, type ArchiveMoveReview, type ArchiveEditEffect } from "./lib/archive-edit-session.svelte";
   import { archiveKeyboardTarget } from "./lib/archive-keyboard";
@@ -74,7 +73,6 @@
   import type { UpdateCheckPreview } from "./lib/app-update.svelte";
   import {
     adoptOpenedArchive,
-    allRowsLoaded,
     archive,
     archiveBrowseError,
     archiveRefreshStatus,
@@ -100,7 +98,6 @@
     goUp,
     installArchivePreview,
     loadRowAt,
-    loadedRows,
     openArchive as openArchiveStore,
     openPasswordPrompt,
     reopenWithEncoding,
@@ -134,22 +131,15 @@
     ipc,
     isErrorDto,
     type ExtractPlanPreflightDto,
-    type CreateArchivePresetOptions,
-    type CreateContentPolicy,
-    type CreateDestinationInspectionDto,
     type EntryPreviewDto,
     type EntryDto,
     type NestedArchivePasswords,
     type JobSpec,
-    type ArchivePresetDocument,
-    type ExtractArchivePresetOptions,
     type NamedArchivePreset,
     type LanguageDto,
     type SettingsDto,
-    type SfxCreateCapabilityDto,
     type SourceCleanupRecoveryNotice,
     type FormatDto,
-    type OverwritePolicy,
   } from "./lib/ipc";
   import {
     previewSampleForEntry,
@@ -162,7 +152,6 @@
     dirname as pathDir,
     formatBytes,
     formatModified,
-    parseDelimitedRules,
   } from "./lib/format";
   import type {
     ConvertRouteBridge,
@@ -172,38 +161,21 @@
     ConvertRouteStatus,
   } from "./lib/convert-route";
   import {
-    archiveBaseOrDefault,
-    desktopBasename,
-    desktopDirname,
     joinDesktopPath,
     normalizeDesktopFolder,
     sameDesktopPath,
   } from "./lib/desktop-path";
   import {
     createSourcePaths,
-    includesCreateSourcePath,
     mergeCreateSources,
-    removeCreateSourcesByPaths,
-    toggleCreateSourcePath,
-    type CreateSourceKind,
-    type CreateSourceRoot,
   } from "./lib/create-sources";
   import {
-    CreateDestinationInspectionError,
-    CreatePreflightSession,
-    commonCreateSourceParent,
-    createDestinationInspectionCancelled,
-    type CreateCredentialIntent,
     type CreatePreflightEffect,
-    type CreatePreflightEvent,
-    type CreatePreflightStage,
-    type CreateRunDraft,
   } from "./lib/create-preflight.svelte";
   import { platformTrashName } from "./lib/platform-labels";
   import { cssVariables, type CssVariableMap } from "./lib/css-variables";
   import { readWindowRecovery, rememberWindowRecovery, reloadWindow } from "./lib/window-recovery";
   import {
-    buildExternalTaskJobSpec,
     externalOpenAction,
     type ExternalOpenAction,
   } from "./lib/external-tasks";
@@ -219,14 +191,13 @@
     type TaskWindowSubmitTransition,
   } from "./lib/task-window";
   import { allFormats, formatRegistryStatus, loadFormats } from "./lib/formats.svelte";
-  import { currentLang, i18nReady, listBundledLanguages, loadLocale, t, tError } from "./lib/i18n.svelte";
+  import { currentLang, i18nReady, listBundledLanguages, loadLocale, t, tError, tFallback as tr } from "./lib/i18n.svelte";
   import { pushToast, removeToastByKey } from "./lib/toasts.svelte";
   import { isNewSourceCleanupRecoveryGeneration } from "./lib/source-cleanup";
   import { currentWebviewWindowListener } from "./lib/tauri-events";
   import { outputPasswordRequired } from "./lib/job-snapshot";
-  import { BatchExtractDraft, type BatchExtractEdit } from "./lib/batch-extract.svelte";
-  import { readBatchExtractResult } from "./lib/batch-extract-result";
-  import { nestedExtractJob, reviewNestedExtract, type NestedExtractDraft } from "./lib/nested-extract";
+
+  import { reviewNestedExtract, type NestedExtractDraft } from "./lib/nested-extract";
   import { ArchiveUpdateReview } from "./lib/archive-update.svelte";
   import { previewSystemOpenRequiresConfirmation } from "./lib/preview-presentation";
   import { PreviewSession, type PreviewPreparation } from "./lib/preview-session.svelte";
@@ -266,15 +237,9 @@
     type TaskSubmissionBlockReason,
   } from "./lib/task-center";
   import {
-    checksumItemStatus,
-    checksumItemText,
-    checksumResultLine,
     isTaskActiveState,
     normalizeTaskConflictAnswer,
     taskPasswordReady,
-    taskChecksumResultText,
-    taskDuplicateGroups,
-    taskOutcomeNeedsAttention,
     taskOutcomeStateLabel,
     taskStatusUnavailable,
     taskReviewScreen,
@@ -283,27 +248,10 @@
     taskOutputPath,
     taskHasInlineResults,
     taskResultScreen,
-    taskStateLabel,
     type TaskConflictDecision,
     type TaskDialogModel,
   } from "./lib/task-model";
-  import {
-    latestMatchingRecoveryTask,
-    recoveryRouteForOpen,
-    recoveryRepairGate,
-    recoveryResultBoolean as recoveryResultMetricBoolean,
-    recoveryResultConfirmsRepairCapacity,
-    recoveryResultHasNoDamage,
-    recoveryResultMetrics,
-    recoveryResultNumber as recoveryResultMetricNumber,
-    recoveryResultOk,
-    recoveryResultOperation,
-    recoveryResultTone as recoveryResultToneFor,
-  } from "./lib/recovery-result";
-  import type {
-    RecoveryWorkspaceActions,
-    RecoveryWorkspaceView,
-  } from "./lib/recovery-workspace";
+  import { RecoverySession } from "./lib/recovery-session.svelte";
   import {
     activeUiMode,
     initUiMode,
@@ -313,12 +261,7 @@
   } from "./lib/uiMode.svelte";
   import { deriveCustomPaletteTokens } from "./lib/theme";
   import {
-    checksumAlgorithms,
     classicCommands,
-    createFormatIds,
-    createFormats,
-    createProfileIds,
-    createProfiles,
     nav,
     paletteIds,
     quickActions,
@@ -326,9 +269,7 @@
     settingsSections,
   } from "./lib/ui-model";
   import type {
-    ChecksumAlgorithmId,
-    CreateFormatId,
-    CreateProfileId,
+    FormatCapabilityCard,
     DensityChoice,
     PaletteId,
     ResolvedTheme,
@@ -343,17 +284,9 @@
   type PlatformKind = "macos" | "windows" | "linux";
   type MacosSfxPublisherComponentType = typeof MacosSfxPublisherComponent;
   type ThemeChoice = "system" | "light" | "dark";
-  type ArchivePresetMutationState = "idle" | "saving" | "error";
   type AppearanceSetting = "mode" | "theme" | "density";
   type AppearanceSaveState = Exclude<SettingsSaveState, "dirty">;
   type ArchiveTaskReview = { path: string; encoding: string | null; restore: () => boolean };
-  type PresetSqzInnerFormat = Extract<CreateArchivePresetOptions["format_options"], { kind: "sqz" }>["inner_format"];
-  type ClassicCreateSection = "general" | "compression" | "content" | "security" | "volumes" | "recovery" | "preflight";
-  type CreatePreflightStepState = "pending" | "active" | "ready" | "blocked" | "cancelled";
-  type AuthorizedArchiveOutput = Readonly<{
-    replaceExisting: boolean;
-    replacementGuard: string | null;
-  }>;
   class JobSubmitBlockedError extends Error {
     readonly reason: TaskSubmissionBlockReason;
 
@@ -364,21 +297,6 @@
   }
 
   const devToolsChordKeys = new Set(["i", "j", "c"]);
-  const balancedCreatePresetId = "builtin.create.balanced-7z";
-  const crossPlatformCreatePresetId = "builtin.create.cross-platform-7z";
-  const smartExtractPresetId = "builtin.extract.smart";
-  const maxArchivePresets = 65;
-  const maxArchivePresetExcludeRules = 64;
-  const maxArchivePresetExcludeRuleBytes = 256;
-  type FormatCapabilityCard = {
-    id: string;
-    name: string;
-    state: string;
-    create: string;
-    volumes: string;
-    encrypt: string;
-    note: string;
-  };
   type OpenFilesPayload = {
     paths: string[];
     action?: string | null;
@@ -520,14 +438,14 @@
   let jobPasswordSubmissionAttempted = $state(false);
   let jobPasswordSubmissionError = $derived(
     jobPasswordSubmissionAttempted && !taskPasswordReady(jobPasswordValue)
-      ? tr("gui.password.empty_error", "Enter a password to continue.")
+      ? tr("gui.password.empty_error")
       : null,
   );
   let workspacePasswordValue = $state("");
   let workspacePasswordSubmissionAttempted = $state(false);
   let workspacePasswordSubmissionError = $derived(
     workspacePasswordSubmissionAttempted && !taskPasswordReady(workspacePasswordValue)
-      ? tr("gui.password.empty_error", "Enter a password to continue.")
+      ? tr("gui.password.empty_error")
       : null,
   );
   let conflictApplyAll = $state(false);
@@ -541,35 +459,14 @@
   const sourceCleanupBusyToastKey = "source-cleanup-recovery-busy";
   let checksumResultPanel = $state<HTMLElement | null>(null);
   let checksumCheckResultPanel = $state<HTMLElement | null>(null);
-  let checksumReportTaskIds = $state<Partial<Record<ChecksumResultKind, number>>>({});
   let checksumResultFocusPending: { kind: ChecksumResultKind; origin: Element | null } | null = null;
-  let duplicateReportTaskId = $state<number | null>(null);
   let duplicateReportPanel = $state<HTMLElement | null>(null);
   let duplicateReportFocusPending = false;
-  let checksumCopyFeedbackKind = $state<"checksum" | "checksum_check" | "task" | null>(null);
-  let checksumCopyFeedbackTaskId = $state<number | null>(null);
-  let checksumCopyFeedbackMessage = $state<string | null>(null);
-  let checksumCopyFeedbackTone = $state<"success" | "danger" | null>(null);
-  let checksumCopyRequest = $state.raw<{
-    kind: "checksum" | "checksum_check" | "task";
-    taskId: number | null;
-    isCurrent: () => boolean;
-  } | null>(null);
   let browseScrollTop = $state(0);
   let browseViewportHeight = $state(0);
   let archiveKeyboardRequest = 0;
   const refreshedUpdateJobs = new Set<number>();
-  const recoveryContextTaskIds = new Set<number>();
-  let recoverySubmissionPending = $state(false);
-  type RecoveryOutputKind = "export_sqz" | "repair_sqz" | "repair_zip" | "repair_recovery";
-  type RecoveryOutputPreparation = {
-    id: symbol;
-    context: string;
-    phase: "opening" | "choosing" | "checking" | "submitting";
-  };
-  let recoveryOutputPreparation = $state<RecoveryOutputPreparation | null>(null);
   let noticeTimer: ReturnType<typeof setTimeout> | null = null;
-  let checksumCopyFeedbackTimer: ReturnType<typeof setTimeout> | null = null;
   const screenParam = params.get("screen");
   let screen = $state<Screen>(
     screenIds.includes(screenParam as Screen) ? (screenParam as Screen) : "browse",
@@ -650,28 +547,36 @@
   let activeTheme = $derived<ResolvedTheme>(
     activeThemeChoice === "system" ? (prefersDarkTheme ? "dark" : "light") : activeThemeChoice,
   );
-  const extractDestinationModes: ExtractDestinationMode[] = ["smart", "archive", "same", "choose"];
-  const extractOverwriteModes: ExtractOverwriteMode[] = ["ask", "skip", "overwrite", "rename"];
-  const extractSymlinkModes: ExtractSymlinkMode[] = ["preserve", "skip", "follow"];
-  const presetSqzInnerFormats: PresetSqzInnerFormat[] = ["sqz", "zip", "tar", "7z", "zstd"];
   let availableLanguages = $state<LanguageDto[]>([]);
-  const extractOptions = new ExtractOptionsDraft(platformKind);
-  let extractDestinationMode = $derived(extractOptions.state.destinationMode);
-  let extractScope = $derived(extractOptions.state.scope);
-  let extractSelectionSnapshot = $derived(extractOptions.state.selection);
-  let extractCustomDest = $derived(extractOptions.state.customDest);
-  let extractVerifySfx = $derived(extractOptions.state.verifySfx);
-  let extractOverwriteMode = $derived(extractOptions.state.overwrite);
-  let extractSymlinkMode = $derived(extractOptions.state.symlinks);
-  let extractPresetEncodingLabel = $derived(extractOptions.state.presetEncodingLabel);
-  let extractPresetDraftTouched = $derived(extractOptions.state.touched);
-  let extractDestinationPicker = $state.raw<{
-    archiveId: number;
-    source: string;
-    path: string;
-    screen: Screen;
-    selection: ReadonlySet<string> | null;
-  } | null>(null);
+  const extraction: ExtractWorkspaceSession = new ExtractWorkspaceSession({
+    read: () => ({
+      archive: currentArchive,
+      screen,
+      selection: selectedPaths(),
+      selectionBusy: archiveSelectionBusyReason(),
+      defaultDirectory: normalizedDefaultExtractDir(settingsSession.appliedGeneral.defaultExtractDir),
+      fallbackPaths: runtimePreviews.batchPaths.length > 0
+        ? runtimePreviews.batchPaths : currentArchive ? [currentArchive.source] : [],
+      platform: platformKind(),
+      presetId: presets.selection("extract").id,
+      archiveTitle: archiveTitle(),
+    }),
+    choose: async (purpose, options, isCurrent) => {
+      const { open } = await getDialogModule();
+      return isCurrent() ? openNativeDialog(purpose, open, options) : null;
+    },
+    submit: submitJob,
+    submitArchive: submitCurrentArchiveJob,
+    blocked: () => Boolean(focusBlockingTaskIfAny()),
+    isSubmitBlocked: isJobSubmitBlocked,
+    notice: showNotice,
+    focusDestination: (index) => document.getElementById(`batch-destination-${index}`)?.focus(),
+    archiveFolder: defaultExtractDest,
+    requestId: nextPreflightRequestId,
+    preview: (input) => previewExtractPlan(input.dest, input.selection, input.smart),
+    clearPreset: () => presets.clearSelection("extract"),
+  });
+  const extractView = new ExtractPresentation(extraction, defaultExtractDest);
   let pendingArchiveTaskReview: ArchiveTaskReview | null = null;
   let extractReviewFocusPending = false;
   let convertReviewFocusPending = false;
@@ -688,115 +593,89 @@
     phase: "preparing" | "submitting";
   } | null>(null);
   let archiveAddPending = $derived(archiveAddPreparation !== null);
-  let currentExtractOverwriteLabel = $derived(extractOverwriteLabel(extractOverwriteMode));
-  let currentExtractSymlinkLabel = $derived(extractSymlinkLabel(extractSymlinkMode));
-  const extractPlanSession = new ExtractPlanSession(
-    nextPreflightRequestId,
-    (input) => previewExtractPlan(input.dest, input.selection, input.smart),
-  );
-  let presetDocument = $state<ArchivePresetDocument | null>(null);
-  let presetLoadState = $state<"loading" | "ready" | "error">("loading");
-  let selectedCreatePresetId = $state<string | null>(null);
-  let selectedExtractPresetId = $state<string | null>(null);
-  let createPresetDraftName = $state("");
-  let extractPresetDraftName = $state("");
-  let createPresetMutationState = $state<ArchivePresetMutationState>("idle");
-  let extractPresetMutationState = $state<ArchivePresetMutationState>("idle");
-  const createOptions = new CreateOptionsDraft({
-    format: isCreateFormatId(createFormatParam) ? createFormatParam : loadCreateFormat(),
-    profile: loadCreateProfile(), customLevel: loadCustomCreateLevel(), touched: isCreateFormatId(createFormatParam),
+  const presets: ArchivePresetSession = new ArchivePresetSession({
+    create: {
+      options: () => create.options.snapshotPreset(), apply: (preset, announce) => create.applyPreset(preset, announce),
+      ready: () => create.capabilityReady, touched: () => create.options.state.touched,
+      disabledReason: () => create.preflight.busy() ? tr("gui.presets.busy") : "",
+      saveIssue: () => create.saveIssue(),
+    },
+    extract: {
+      options: () => extraction.options.snapshotPreset(archiveEncodingForJob()), apply: applyExtractPreset,
+      ready: () => true, touched: () => extraction.options.state.touched, disabledReason: () => "",
+    },
+    notice: showNotice,
   });
-  let activeCreateFormat = $derived(createOptions.state.format);
-  let activeCreateProfile = $derived(createOptions.state.profile);
-  let customCreateLevel = $derived(createOptions.state.customLevel);
-  let customCreateLevelError = $derived(createOptions.state.customLevelInvalid ? customCreateLevelInvalidMessage() : "");
-  let createPassword = $derived(createOptions.state.password);
-  let createPasswordConfirmation = $derived(createOptions.state.passwordConfirmation);
-  let createPasswordVisible = $derived(createOptions.state.passwordVisible);
-  let createEncryptionEnabled = $derived(createOptions.state.encryptionEnabled);
-  let createEncryptNames = $derived(createOptions.state.encryptNames);
-  let createSplitPreset = $derived(createOptions.state.splitPreset);
-  let createSplitMode = $derived(createOptions.state.splitMode);
-  let createCustomSplitAmount = $derived(createOptions.state.customSplitAmount);
-  let createCustomSplitUnit = $derived(createOptions.state.customSplitUnit);
-  let createContentPolicy = $derived(createOptions.state.contentPolicy);
-  let createExcludeText = $derived(createOptions.state.excludeText);
-  let createSfxEnabled = $derived(createOptions.state.sfxEnabled);
-  let createPresetSqzInnerFormat = $derived(createOptions.state.sqzInnerFormat);
-  let createDestinationBase = $derived(createOptions.state.destinationBase);
-  let createSuggestedDestination = $derived(createOptions.state.suggestedDestination);
-  let createCompletion = $derived(createOptions.state.completion);
-  let createPostSuccess = $derived(createOptions.state.postSuccess);
-  let createOptionsValidationAttempted = $derived(createOptions.state.validationAttempted);
-  let createPresetDraftTouched = $derived(createOptions.state.touched);
+  let createPrimaryFocusPending: object | null = null;
+  const create: CreateSession = new CreateSession({
+    getDialogModule, openNativeDialog, saveNativeDialog, nextRequestId: nextPreflightRequestId,
+    platform: platformKind, archiveStemName,
+    read: () => ({ screen, mode, defaultDirectory: normalizedDefaultCreateDir(settingsSession.appliedGeneral.defaultCreateDir) }),
+    presets: () => presets, notice: showNotice, submit: submitJob,
+    blocked: () => Boolean(focusBlockingTaskIfAny()), tError,
+    submissionBlockedMessage: (error) => isJobSubmitBlocked(error) ? jobSubmitBlockedMessage(error) : null,
+    emit: applyCreatePreflightEffect,
+    clearFocus: () => { createPrimaryFocusPending = null; },
+    primaryFocusPending: () => createPrimaryFocusPending !== null,
+    focusPrimary: () => void focusCreatePrimaryAction(),
+    focusInvalid: () => void tick().then(() => {
+      if (screen === "create" && create.options.state.validationAttempted && !blockingModalVisible()) {
+        document.querySelector<HTMLInputElement>(".create-option-input[aria-invalid='true']")?.focus();
+      }
+    }),
+    scrollSection: (target) => void tick().then(() => document.getElementById(target)?.scrollIntoView({ block: "start", inline: "nearest" })),
+    openRecovery: openRecoveryConfiguration, fileManager: fileManagerLabel, trashName: trashNameLabel,
+    featuredFormats: featuredFormatCards,
+    forwardEvent: (event) => convertRouteHandle?.applyPreflightEvent(event) ?? false,
+  }, createFormatParam, {
+    scanned: runtimePreviews.preflightScanned, current: runtimePreviews.preflightCurrent,
+    destinationBytes: runtimePreviews.preflightDestinationBytes, destinationCurrent: runtimePreviews.preflightDestinationCurrent,
+  });
   let archiveOpenStatus = $state<"idle" | "opening">("idle");
   let archiveOpenGeneration = 0;
   let archivePickerRequest: number | null = null;
   let filenameEncodingRequest: { generation: number } | null = null;
   let archivePasswordAttempt = 0;
   let archiveSelectionProgress = $state<{ loaded: number; total: number } | null>(null);
-  let recoveryPickerStatus = $state<"idle" | "archive" | "par2">("idle");
-  let recoveryPickerRequest = 0;
-  let recoverySourceMode = $state<"none" | "current" | "selected">(
-    runtimePreviews.archive ? "current" : "none",
-  );
-  let recoverySourceOverride = $state<string | null>(null);
-  let recoveryPar2Override = $state<string | null>(null);
-  let recoveryRedundancyDraft = $state("10");
+  const recoverySession = new RecoverySession({
+    read: () => ({
+      active: screen === "recovery", mode, generation: archiveOpenGeneration,
+      archive: currentArchive, tasks: jobRows, selection: selectedJobPaths(),
+      platform: platformKind(), level: create.options.compressionLevel,
+      profile: create.view.profileLabel(create.options.state.profile),
+    }),
+    dialogs: getDialogModule, openDialog: openNativeDialog, saveDialog: saveNativeDialog,
+    submit: submitJob, blocked: isJobSubmitBlocked, focusBlockingTask: () => Boolean(focusBlockingTaskIfAny()),
+    notice: showNotice, extension: archiveExtensionMatch, stem: archiveStemName,
+    extractDestination: extractDestForPath, mutationDisabledReason: archiveSourceMutationDisabledReason,
+    outputFilterName: archiveOutputFilterName, inspectionId: nextPreflightRequestId,
+  }, Boolean(runtimePreviews.archive));
   let openDialogModulePromise: Promise<DialogModule> | null = null;
-  const batchExtract = new BatchExtractDraft(() => ({
-    fallbackPaths: runtimePreviews.batchPaths.length > 0
-      ? runtimePreviews.batchPaths : currentArchive ? [currentArchive.source] : [],
-    archive: currentArchive,
-    defaultDirectory: normalizedDefaultExtractDir(settingsSession.appliedGeneral.defaultExtractDir),
-    platform: platformKind(),
-  }));
-  let batchDraft = $derived(batchExtract.state);
-  let nestedExtractDraft = $state<NestedExtractDraft | null>(null);
-  let nestedExtractSubmissionPending = $state(false);
-  let nestedExtractPickerBusy = $state(false);
-  let nestedExtractPickerRequest = 0;
-  let nestedExtractDraftGeneration = 0;
   let nestedExtractReviewFocusPending = false;
   const archiveUpdateReview = new ArchiveUpdateReview();
   let archiveUpdateReviewFocusPending = false;
-  let batchSubmissionPending = $state(false);
-  let batchPickerBusy = $state(false);
-  let batchPickerRequest = 0;
   let batchReviewFocusPending = false;
-  let checksumPath = $state(runtimePreviews.checksumPath);
-  let checksumManifestPath = $state(runtimePreviews.checksumManifestPath);
-  let checksumAlgorithm = $state<ChecksumAlgorithmId>("sha256");
-  let checksumExcludeText = $state(".git\nnode_modules\n.DS_Store");
-  let duplicateScanPath = $state(runtimePreviews.duplicateScanPath);
-  let duplicateMinSize = $state(runtimePreviews.duplicateMinSize);
-  let duplicateMinSizeError = $state("");
-  let duplicateExcludeText = $state(".git\nnode_modules\n.DS_Store");
-  let createSources = $state<CreateSourceRoot[]>([]);
-  let selectedCreateSourcePaths = $state<string[]>([]);
-  let createPrimaryFocusPending: object | null = null;
-  let createSourceInputs = $derived(createSourcePaths(createSources));
-  const createPreflight = new CreatePreflightSession({
-    getDialogModule,
-    openNativeDialog,
-    saveNativeDialog,
-    ensurePreflightListener: ensureCreatePreflightListener,
-    nextRequestId: nextPreflightRequestId,
-    platform: platformKind,
-    archiveStemName: (name) => archiveStemName(name),
+  const tools = new ToolsSession({
+    read: () => ({
+      archive: currentArchive, tasks: jobRows, screen,
+      copyScope: [screen, mode, taskCenterOpen, taskCenterSelectedTaskId, taskDialogTaskId, taskDialogDismissedId].join(":"),
+      visibleTaskId: taskWindowMode ? taskDialogTask()?.id ?? null : taskCenterOpen
+        ? taskCenterSelectedTaskId : taskDialogDismissedId === taskDialogTaskId ? null : taskDialogTaskId,
+    }),
+    choose: async (purpose, options, isCurrent) => {
+      const { open } = await getDialogModule();
+      if (!isCurrent()) return null;
+      return openNativeDialog(purpose, open, options);
+    },
+    submitJob,
+    submissionBlocked: () => Boolean(focusBlockingTaskIfAny()),
+    isSubmitBlocked: isJobSubmitBlocked,
+    notice: showNotice,
   }, {
-    tr,
-    tError,
-    submissionBlockedMessage: (error) => isJobSubmitBlocked(error) ? jobSubmitBlockedMessage(error) : null,
-    emit: applyCreatePreflightEffect,
-  }, submitJob, {
-    scanned: runtimePreviews.preflightScanned,
-    current: runtimePreviews.preflightCurrent,
-    destinationBytes: runtimePreviews.preflightDestinationBytes,
-    destinationCurrent: runtimePreviews.preflightDestinationCurrent,
+    checksumPath: runtimePreviews.checksumPath, manifestPath: runtimePreviews.checksumManifestPath,
+    duplicatePath: runtimePreviews.duplicateScanPath, minimumSize: runtimePreviews.duplicateMinSize,
   });
-  syncCreatePreflightContext();
-  let classicCreateSection = $state<ClassicCreateSection>("general");
+  $effect(() => tools.syncContext());
   let dragActive = $state(false);
   let lastDropKind = $state<"none" | "archives" | "create" | "recovery">("none");
   const convertRouteOwner: ConvertRouteOwner = {};
@@ -808,18 +687,6 @@
     methodLabel: "-",
     destination: currentArchive?.path ?? openArchiveFirstLabel(),
   });
-  let createAdvancedOpen = $state(false);
-  let sfxCreateCapability = $state<SfxCreateCapabilityDto>({
-    target: initialPlatform,
-    extension: initialPlatform === "macos" ? "app" : initialPlatform === "windows" ? "exe" : "run",
-    available: true,
-    status: "available",
-    requires_signing: true,
-  });
-  let sfxCreateCapabilityReady = $state(false);
-  let createPreflightCleanup: (() => void) | null = null;
-  let createPreflightListenPromise: Promise<void> | null = null;
-  let preflightEventsClosed = false;
   let nestedPreview = $derived(previewSession.nested);
   let entryPreview = $derived(previewSession.file);
   let entryPreviewFailure = $derived(previewSession.failure);
@@ -941,8 +808,7 @@
   });
 
   $effect(() => {
-    const request = recoveryOutputPreparation;
-    if (request && !isCurrentRecoveryOutputPreparation(request)) recoveryOutputPreparation = null;
+    recoverySession.syncContext();
   });
 
   $effect(() => {
@@ -951,10 +817,8 @@
   });
 
   $effect(() => {
-    const context = { active: screen === "create", mode, sources: createSources };
-    untrack(() => {
-      if (createPreflight.syncContext(context)) createPrimaryFocusPending = null;
-    });
+    screen; mode; create.sources;
+    untrack(create.syncContext);
   });
 
   $effect(() => {
@@ -1160,23 +1024,7 @@
     void reportStartupSourceCleanupRecovery();
   });
 
-  $effect(() => {
-    syncExtractDraftArchive();
-    const input = captureExtractPlanInput();
-    if (!input) {
-      extractPlanSession.reset();
-      return;
-    }
-    if (extractPlanSession.matches(input)) return;
-    void extractPlanSession.request(input, { debounce: true });
-  });
-
-  $effect(() => {
-    const request = checksumCopyRequest;
-    if (request && !request.isCurrent()) checksumCopyRequest = null;
-  });
-
-  onMount(() => () => extractPlanSession.dispose());
+  $effect(() => extraction.sync());
 
   let nativeMenuConnection = $state<NativeMenuConnection | null>(null);
   let textEditingFocused = $state(false);
@@ -1229,7 +1077,7 @@
         move_entries: () => openArchiveEditor("move"),
         delete_entries: submitDeleteSelectedJob,
         preview_entry: () => submitPreviewEntry(previewTarget?.path, previewTarget?.type),
-        copy_entries: submitCopyOutSelectedJob,
+        copy_entries: () => extraction.copyOut(),
         test_archive: submitTestJob,
         convert_archive: () => setScreen("convert"),
         archive_info: () => setScreen("archiveInfo"),
@@ -1493,19 +1341,17 @@
 
   onMount(() => () => {
     archiveAddPreparation = null;
-    dismissRecoveryPreparation();
-    clearChecksumCopyState();
-    extractDestinationPicker = null;
+    recoverySession.dispose();
+    tools.dispose();
+    presets.dispose();
+    extraction.dispose();
     checksumResultFocusPending = null;
-    preflightEventsClosed = true;
     createPrimaryFocusPending = null;
-    createPreflight.dispose();
+    create.dispose();
     archiveEdit.dispose();
     previewSession.dispose();
     archiveEditReturnFocus = null;
     moveConflictReturnFocus = null;
-    createPreflightCleanup?.();
-    createPreflightCleanup = null;
     convertRouteHandle?.dispose();
   });
 
@@ -1514,26 +1360,7 @@
   });
 
   onMount(() => {
-    let cancelled = false;
-    void ipc.getArchivePresets()
-      .then((document) => {
-        if (cancelled) return;
-        presetDocument = document;
-        presetLoadState = "ready";
-        applyDefaultCreatePresetWhenReady();
-        if (!extractPresetDraftTouched && document.bindings.app_default_extract) {
-          applyExtractPreset(document.bindings.app_default_extract, false);
-        }
-      })
-      .catch(() => {
-        if (cancelled) return;
-        presetLoadState = "error";
-        createPresetMutationState = "error";
-        extractPresetMutationState = "error";
-      });
-    return () => {
-      cancelled = true;
-    };
+    void presets.load();
   });
 
   onMount(() => {
@@ -1589,24 +1416,7 @@
           error: error instanceof Error ? error.message : String(error),
         }).catch(() => undefined);
       });
-    void ipc.getSfxCreateCapability()
-      .then((capability) => {
-        sfxCreateCapability = capability;
-        sfxCreateCapabilityReady = true;
-        createOptions.acceptSfxCapability(capability.available);
-        applyDefaultCreatePresetWhenReady();
-      })
-      .catch(() => {
-        sfxCreateCapabilityReady = true;
-        createOptions.acceptSfxCapability(false);
-        if (import.meta.env.DEV) {
-          // Browser preview has no native capability service.
-          applyDefaultCreatePresetWhenReady();
-        } else {
-          sfxCreateCapability = { ...sfxCreateCapability, available: false, status: "invalid" };
-          applyDefaultCreatePresetWhenReady();
-        }
-      });
+    void create.loadCapability();
   });
 
   onMount(() => {
@@ -1692,20 +1502,18 @@
       return;
     }
     const action = {
-      label: tr("gui.common.close", "Close"),
+      label: tr("gui.common.close"),
       run: () => undefined,
     };
     pushToast({
       kind: "warning",
       title: tr(
         "gui.toast.compress_done_preserved",
-        "Created {name} · Review {count} preserved backups",
       )
         .replace("{name}", "reports.7z.001")
         .replace("{count}", "3"),
       body: tr(
         "gui.toast.compress_done_preserved_detail",
-        "Verify the new archive before deleting any preserved backup.",
       ),
       action,
     });
@@ -1844,7 +1652,7 @@
           && generation === archiveOpenGeneration && archiveOpenStatus === "idle"
           && currentArchive?.path === path && archiveRefreshStatus() === "idle"
           && pendingArchiveUpdateJobs().length === 0) {
-          showNotice(tr("gui.archive.list_refreshed", "Archive list refreshed"));
+          showNotice(tr("gui.archive.list_refreshed"));
         }
       });
     });
@@ -1924,20 +1732,22 @@
 
   function setMode(next: Mode) {
     if (next !== mode) {
+      tools.leave();
+      extraction.leave();
       filenameEncodingRequest = null;
       dismissArchiveAddPreparation();
-      dismissCreatePreparation();
+      create.dismiss();
     }
     firstRunDropFeedback = null;
     trackAppearanceSave(
       "mode",
       persistUiMode(next),
-      tr("gui.mode.saved_preview_desktop_unavailable", "Interface mode changed for this session but was not saved"),
+      tr("gui.mode.saved_preview_desktop_unavailable"),
       () => {
         savedModeChoice = next;
       },
     );
-    syncCreatePreflightContext();
+    create.syncContext();
     syncUrl(next);
   }
 
@@ -1966,20 +1776,7 @@
   }
 
   function preventCreateSubmissionNavigation(next: Screen): boolean {
-    if (screen !== "create" || next === "create") return false;
-    if (!createPreflight.canLeave()) {
-      showNotice(
-        tr(
-          "gui.create.wait_for_submission_before_leaving",
-          "Wait until Squallz finishes adding this create task to the queue",
-        ),
-      );
-      return true;
-    }
-    if (createPreflight.state.phase === "choosingDest" && createDestinationInspectionCancellable()) {
-      void createPreflight.cancelDestination({ announce: false, keepIntentOnFailure: true });
-    }
-    return false;
+    return screen === "create" && next !== "create" && !create.leave();
   }
 
   function preventConvertSubmissionNavigation(next: Screen): boolean {
@@ -1995,11 +1792,11 @@
     if (next !== screen) {
       filenameEncodingRequest = null;
       dismissArchiveAddPreparation();
-      dismissCreatePreparation();
-      checksumCopyRequest = null;
-      extractDestinationPicker = null;
+      create.dismiss();
+      tools.leave();
+      extraction.leave();
       dismissArchivePicker();
-      dismissRecoveryPreparation();
+      recoverySession.leave();
       if (archiveOpenStatus === "opening" && !archivePasswordPrompt && next !== "password") {
         archiveOpenGeneration += 1;
         archiveOpenStatus = "idle";
@@ -2022,14 +1819,9 @@
     }
     if (next !== "nestedExtract") {
       nestedExtractReviewFocusPending = false;
-      nestedExtractDraftGeneration += 1;
-      nestedExtractPickerRequest += 1;
-      nestedExtractPickerBusy = false;
     }
     if (next !== "batch") {
       batchReviewFocusPending = false;
-      batchPickerRequest += 1;
-      batchPickerBusy = false;
     }
     if (next !== "create") createPrimaryFocusPending = null;
     if (next !== "extract") extractReviewFocusPending = false;
@@ -2038,15 +1830,8 @@
     if (next !== "checksum") checksumResultFocusPending = null;
     if (next !== "duplicates") duplicateReportFocusPending = false;
     if (next !== "password") pendingArchiveTaskReview = null;
-    if (screen === "create" && next !== "create" && createPreflight.state.pending) {
-      discardPendingCreatePlan();
-      createOptions.resetValidation();
-    }
-    if (next === "create" && screen !== "create") {
-      classicCreateSection = "general";
-    }
     screen = next;
-    syncCreatePreflightContext();
+    create.syncContext();
     syncUrl();
     void tick().then(() => {
       document.documentElement.scrollTop = 0;
@@ -2058,12 +1843,6 @@
         element.scrollLeft = 0;
       }
     });
-  }
-
-  async function showClassicCreateSection(section: ClassicCreateSection, targetId: string): Promise<void> {
-    classicCreateSection = section;
-    await tick();
-    document.getElementById(targetId)?.scrollIntoView({ block: "start", inline: "nearest" });
   }
 
   async function focusChecksumResultPanel(kind: ChecksumResultKind = "checksum"): Promise<void> {
@@ -2140,39 +1919,9 @@
     return false;
   }
 
-  function applyCreatePreflightEvent(event: CreatePreflightEvent) {
-    if (convertRouteHandle?.applyPreflightEvent(event)) return;
-    createPreflight.applyEvent(event);
-  }
-
   function nextPreflightRequestId(): string {
     return globalThis.crypto?.randomUUID?.()
       ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
-  }
-
-  function ensureCreatePreflightListener(): Promise<void> {
-    if (createPreflightCleanup || preflightEventsClosed) return Promise.resolve();
-    if (createPreflightListenPromise) return createPreflightListenPromise;
-    createPreflightListenPromise = import("@tauri-apps/api/event")
-      .then(({ listen }) =>
-        listen<CreatePreflightEvent>("create://preflight", (event) => {
-          if (!preflightEventsClosed) applyCreatePreflightEvent(event.payload);
-        }),
-      )
-      .then((dispose) => {
-        if (preflightEventsClosed) {
-          dispose();
-        } else {
-          createPreflightCleanup = dispose;
-        }
-      })
-      .catch(() => {
-        // Dev preview has no native Tauri event bus.
-      })
-      .finally(() => {
-        createPreflightListenPromise = null;
-      });
-    return createPreflightListenPromise;
   }
 
   function setTheme(next: ThemeChoice) {
@@ -2181,7 +1930,7 @@
     trackAppearanceSave(
       "theme",
       ipc.setTheme(next),
-      tr("gui.theme.saved_preview_desktop_unavailable", "Theme changed for this session but was not saved"),
+      tr("gui.theme.saved_preview_desktop_unavailable"),
       () => {
         savedThemeChoice = next;
       },
@@ -2194,7 +1943,7 @@
     trackAppearanceSave(
       "density",
       ipc.setUiDensity(next),
-      tr("gui.density.saved_preview_desktop_unavailable", "Spacing changed for this session but was not saved"),
+      tr("gui.density.saved_preview_desktop_unavailable"),
       () => {
         savedDensityChoice = next;
       },
@@ -2253,14 +2002,6 @@
 
   function isPaletteId(value: string | null): value is PaletteId {
     return paletteIds.includes(value as PaletteId);
-  }
-
-  function isCreateProfileId(value: string | null): value is CreateProfileId {
-    return createProfileIds.includes(value as CreateProfileId);
-  }
-
-  function isCreateFormatId(value: string | null): value is CreateFormatId {
-    return createFormatIds.includes(value as CreateFormatId);
   }
 
   function archiveFormatDto(
@@ -2350,40 +2091,39 @@
   }
 
   function formatStateLabel(format: FormatDto): string {
-    if (format.id === "zip") return tr("gui.format.state.default", "Default");
-    if (format.id === "sqz") return tr("gui.format.state.recovery_container", "Recovery container");
-    if (format.id === "wim") return tr("gui.format.state.external_writer", "External writer");
-    if (format.id === "rar") return tr("gui.format.state.open_only", "External read-only");
-    if (longTailBridgeFormatIds.has(format.id)) return tr("gui.format.state.7zz_bridge", "7zz bridge");
-    if (format.id.startsWith("tar.")) return tr("gui.format.state.compound", "Compound");
-    if (format.kind === "compressor") return tr("gui.format.state.stream_codec", "Stream codec");
-    return tr("gui.format.state.built_in", "Built-in");
+    if (format.id === "zip") return tr("gui.format.state.default");
+    if (format.id === "sqz") return tr("gui.format.state.recovery_container");
+    if (format.id === "wim") return tr("gui.format.state.external_writer");
+    if (format.id === "rar") return tr("gui.format.state.open_only");
+    if (longTailBridgeFormatIds.has(format.id)) return tr("gui.format.state.7zz_bridge");
+    if (format.id.startsWith("tar.")) return tr("gui.format.state.compound");
+    if (format.kind === "compressor") return tr("gui.format.state.stream_codec");
+    return tr("gui.format.state.built_in");
   }
 
   function formatCreateLabel(format: FormatDto): string {
     if (!format.can_create) return tr("common.no", "No");
-    if (format.id === "wim") return tr("gui.format.create.if_wimlib", "If wimlib exists");
+    if (format.id === "wim") return tr("gui.format.create.if_wimlib");
     return tr("common.yes", "Yes");
   }
 
   function formatEncryptLabel(format: FormatDto): string {
-    if (format.can_encrypt_names) return tr("gui.format.encrypt.names_data", "Names + data");
-    if (format.can_encrypt_data) return tr("gui.format.encrypt.data", "Data");
+    if (format.can_encrypt_names) return tr("gui.format.encrypt.names_data");
+    if (format.can_encrypt_data) return tr("gui.format.encrypt.data");
     return tr("common.no", "No");
   }
 
   function formatNote(format: FormatDto): string {
     if (format.id === "rar") return tr(
       "gui.format.note.rar_read_only",
-      "Squallz groups and validates RAR volume sets; external 7zz/7z decodes them read-only, including encrypted archives. RAR creation and recovery-record repair are not supported",
     );
-    if (format.id === "wim") return tr("gui.format.note.wim_external", "WIM create requires wimlib-imagex; read uses 7zz/7z");
-    if (format.id === "sqz") return tr("gui.format.note.sqz_recovery", "Embedded recovery container with export");
-    if (longTailBridgeFormatIds.has(format.id)) return tr("gui.format.note.7zz_bridge", "Unpack-only through the 7zz/7z bridge");
-    if (format.id.startsWith("tar.")) return tr("gui.format.note.compound_tar", "Compound TAR stream; no encryption claim");
+    if (format.id === "wim") return tr("gui.format.note.wim_external");
+    if (format.id === "sqz") return tr("gui.format.note.sqz_recovery");
+    if (longTailBridgeFormatIds.has(format.id)) return tr("gui.format.note.7zz_bridge");
+    if (format.id.startsWith("tar.")) return tr("gui.format.note.compound_tar");
     return format.extensions.length > 0
-      ? tr("gui.format.note.extensions", "Extensions {extensions}").replace("{extensions}", `.${format.extensions.slice(0, 3).join(", .")}`)
-      : tr("gui.format.note.registry_capability", "Registry capability");
+      ? tr("gui.format.note.extensions").replace("{extensions}", `.${format.extensions.slice(0, 3).join(", .")}`)
+      : tr("gui.format.note.registry_capability");
   }
 
   function formatSortRank(format: FormatDto): string {
@@ -2396,21 +2136,21 @@
 
   function formatVolumeLabel(format: FormatDto): string {
     if (format.id === "zip") {
-      return tr("gui.format.volume.zip", "Create/open .001 or native .z01");
+      return tr("gui.format.volume.zip");
     }
     if (format.id === "rar") {
-      return tr("gui.format.volume.rar", "Open native RAR volumes");
+      return tr("gui.format.volume.rar");
     }
     if (format.id === "wim") {
-      return tr("gui.format.volume.wim", "Create/open native .swm volumes");
+      return tr("gui.format.volume.wim");
     }
     if (format.id === "sqz") {
-      return tr("gui.format.volume.sqz", "Create/open SQZV .001");
+      return tr("gui.format.volume.sqz");
     }
     if (format.can_split) {
-      return tr("gui.format.volume.generic", "Create/open .001");
+      return tr("gui.format.volume.generic");
     }
-    return tr("gui.format.volume.single", "Single archive");
+    return tr("gui.format.volume.single");
   }
 
   function formatCapabilityCards(): FormatCapabilityCard[] {
@@ -2438,944 +2178,16 @@
     return [...featured, ...rest].slice(0, 8);
   }
 
-  function loadCreateProfile(): CreateProfileId {
-    try {
-      const value = window.localStorage.getItem("squallz.createProfile");
-      return isCreateProfileId(value) ? value : "balanced";
-    } catch {
-      return "balanced";
-    }
-  }
-
-  function loadCreateFormat(): CreateFormatId {
-    try {
-      const value = window.localStorage.getItem("squallz.createFormat");
-      return isCreateFormatId(value) ? value : "7z";
-    } catch {
-      return "7z";
-    }
-  }
-
-  function customCreateLevelInvalidMessage(): string {
-    return tr("gui.create.custom_level_invalid", "Use a compression level from 1 to 9");
-  }
-
-  function loadCustomCreateLevel(): number {
-    try {
-      const raw = window.localStorage.getItem("squallz.customCreateLevel");
-      return raw === null ? 6 : Number(raw);
-    } catch {
-      return 6;
-    }
-  }
-
-  function persistCreateProfile(next: CreateProfileId) {
-    try {
-      window.localStorage.setItem("squallz.createProfile", next);
-    } catch {
-      // Profile choice is a convenience setting; browser storage failure is non-fatal.
-    }
-  }
-
-  function persistCreateFormat(next: CreateFormatId) {
-    try {
-      window.localStorage.setItem("squallz.createFormat", next);
-    } catch {
-      // Format preference only affects the next save-dialog default.
-    }
-  }
-
-  function persistCustomCreateLevel(next: number) {
-    try {
-      window.localStorage.setItem("squallz.customCreateLevel", String(next));
-    } catch {
-      // Custom profile is non-critical; private-mode failures should not block jobs.
-    }
-  }
-
-  function createProfileData(profileId: CreateProfileId) {
-    if (profileId === "custom") {
-      return {
-        label: tr("gui.create.profile.custom", "Custom"),
-        level: customCreateLevel,
-        detail: tr("gui.create.profile.custom.detail", "Choose an exact compression level"),
-      };
-    }
-    return createProfiles[profileId];
-  }
-
-  function markCreatePresetDraftTouched() {
-    createOptions.touch();
-    invalidateCreatePreflightResult();
-  }
-
-  function createDraftIssueMessage(issue: CreateDraftIssue, requestedTarget?: string): string {
-    switch (issue) {
-      case "options_locked": return createOptionsLockedReason();
-      case "format_unavailable": return tr("gui.presets.format_unavailable", "This preset uses a format that is not available in the create screen");
-      case "task_format_unavailable": return tr("gui.create.review.format_unavailable", "This task's format is not available in the create screen. Your current settings were kept.");
-      case "task_sfx_unavailable": return tr("gui.create.review.sfx_unavailable", "This device cannot recreate this self-extractor. Your current settings were kept.");
-      case "sfx_loading": return tr("gui.create.sfx_capability_loading", "Checking self-extracting support");
-      case "sfx_unavailable": return createSfxUnavailableMessage();
-      case "sfx_target_unavailable": return tr("gui.presets.sfx_target_unavailable", "This device cannot build the preset's {target} self-extractor").replace("{target}", requestedTarget ?? "");
-      case "sfx_zip_only": return tr("gui.create.sfx_zip_only_notice", "Turn off self-extracting output before choosing another format");
-      case "encryption_format_change": return tr("gui.create.encryption_format_change", "Turn off file content encryption before choosing a format that cannot encrypt files.");
-      case "name_encryption_format_change": return tr("gui.create.name_encryption_format_change", "Turn off file name encryption before choosing a format that cannot hide names.");
-      case "sfx_no_split": return tr("gui.create.sfx_no_split_notice", "Self-extracting output requires one complete ZIP payload");
-      case "native_layout_unavailable": return tr("gui.create.native_layout_unavailable", "Native volume layout is available for ZIP and WIM; self-extracting output must remain a single ZIP.");
-      case "trash_excluded": return tr("gui.create.output.source.trash_disabled_excludes", "Remove exclusion rules or choose Keep all files to move originals to {trash}").replace("{trash}", trashNameLabel());
-      case "completion_sfx": return tr("gui.create.output.completion.open_disabled_sfx", "Self-extracting outputs must be revealed and tested on their target system");
-      case "completion_split": return tr("gui.create.output.completion.open_disabled_split", "Split archives must stay together, so Squallz reveals the primary volume instead");
-      case "trash_test_required": return tr("gui.create.output.integrity.required_notice", "A full integrity test is required before originals can move to {trash}").replace("{trash}", trashNameLabel());
-      case "custom_level_invalid": return customCreateLevelInvalidMessage();
-      case "password_required": return tr("gui.create.password_required", "Enter an archive password, or turn off file content encryption.");
-      case "confirm_password_required": return tr("gui.create.confirm_password_required", "Confirm the archive password before starting");
-      case "passwords_do_not_match": return tr("gui.create.passwords_do_not_match", "The passwords do not match");
-      case "invalid_part_size": return tr("gui.create.invalid_part_size", "Enter a part size of at least 0.1 MiB");
-      case "native_zip_part_size_limit": return tr("gui.create.native_zip_part_size_limit", "Native ZIP parts cannot exceed 4 GiB − 1 byte");
-      case "sfx_requires_zip": return tr("gui.create.sfx_requires_zip", "Self-extracting output requires a single ZIP payload");
-    }
-  }
-
-  function createDraftContext() {
-    return { capabilityReady: sfxCreateCapabilityReady, sfxCapability: sfxCreateCapability, locked: createPreflight.busy() };
-  }
-
-  function announceCreateDraftNormalization(change: CreateDraftChange) {
-    if (change.postSuccessNormalized) {
-      showNotice(tr("gui.create.output.source.changed_to_keep", "Originals will stay in place · {reason}")
-        .replace("{reason}", createTrashSourceDisabledReason()));
-    }
-    if (change.completionNormalized) {
-      showNotice(tr("gui.create.output.completion.changed_to_reveal", "When finished changed to Reveal · {reason}")
-        .replace("{reason}", createOpenCompletionDisabledReason()));
-    }
-  }
-
-  function editCreateOptions(edit: CreateDraftEdit): boolean {
-    const change = createOptions.edit(edit, createDraftContext(), markCreatePresetDraftTouched);
-    if (change.issue) {
-      showNotice(createDraftIssueMessage(change.issue, change.requestedSfxTarget));
-      return false;
-    }
-    if (!change.changed) return false;
-    if (edit.kind === "contentPolicy") {
-      showNotice(tr("gui.create.content_policy.changed", "Archive contents: {policy}")
-        .replace("{policy}", createContentPolicyLabel(edit.value)));
-    }
-    announceCreateDraftNormalization(change);
-    if (edit.kind === "sfxEnabled") {
-      if (edit.value) persistCreateFormat("zip");
-      showNotice(edit.value
-        ? tr("gui.create.sfx_enabled_notice", "Self-extracting output enabled · ZIP payload · signing required")
-        : tr("gui.create.sfx_disabled_notice", "Standard archive output restored"));
-    } else if (edit.kind === "postSuccess" && edit.value === "trash_source") {
-      showNotice(tr("gui.create.output.source.trash_selected", "Originals will move to {trash} only after the new archive passes a full integrity test")
-        .replace("{trash}", trashNameLabel()));
+  function applyExtractPreset(preset: Extract<NamedArchivePreset, { kind: "extract" }> | null, announce: boolean): boolean {
+    extraction.applyPreset(preset?.options ?? null);
+    if (preset) {
+      if (announce) showNotice(tr("gui.presets.applied_notice").replace("{name}", archivePresetDisplayName(preset)));
     }
     return true;
   }
 
-  function createTrashSourceDisabledReason(): string {
-    return createOptions.trashExcluded ? createDraftIssueMessage("trash_excluded") : "";
-  }
-
-  function createOpenCompletionDisabledReason(): string {
-    const restriction = createOptions.completionRestriction;
-    return restriction ? createDraftIssueMessage(restriction === "sfx" ? "completion_sfx" : "completion_split") : "";
-  }
-
-  function effectiveCreateTestAfterCreate(): boolean {
-    return createOptions.effectiveTestAfterCreate;
-  }
-
-  function chooseCreateProfile(next: CreateProfileId) {
-    if (!editCreateOptions({ kind: "profile", value: next })) return;
-    persistCreateProfile(next);
-    const profile = createProfileData(next);
-    recordOperation({
-      status: "info",
-      title: tr("gui.create.profile_selected_operation", "Profile selected"),
-      detail: `${profile.label} · level ${profile.level}`,
-    });
-    showNotice(tr("gui.create.profile_selected_notice", "{profile} profile selected").replace("{profile}", profile.label));
-  }
-
-  function activeCreateFormatData() {
-    return createFormats[activeCreateFormat];
-  }
-
-  function chooseCreateFormat(next: CreateFormatId) {
-    if (!editCreateOptions({ kind: "format", value: next })) return;
-    persistCreateFormat(next);
-    const format = activeCreateFormatData();
-    recordOperation({
-      status: "info",
-      title: tr("gui.create.format_selected_operation", "Create format selected"),
-      detail: `${format.label} · .${format.extension}`,
-    });
-    showNotice(tr("gui.create.format_selected_notice", "{format} format selected").replace("{format}", format.label));
-  }
-
-  function createSfxOutputLabel(): string {
-    if (sfxCreateCapability.target === "macos") return tr("gui.create.sfx_macos_output", "macOS app (.app)");
-    if (sfxCreateCapability.target === "windows") return tr("gui.create.sfx_windows_output", "Windows app (.exe)");
-    return tr("gui.create.sfx_linux_output", "Linux executable (.run)");
-  }
-
-  function createSfxTargetLabel(): string {
-    if (sfxCreateCapability.target === "macos") return tr("gui.create.sfx_target_macos", "This Mac");
-    if (sfxCreateCapability.target === "windows") return tr("gui.create.sfx_target_windows", "This Windows PC");
-    return tr("gui.create.sfx_target_linux", "This Linux system");
-  }
-
-  function createSfxSummary(): string {
-    return createSfxEnabled
-      ? tr("gui.create.sfx_summary_enabled", "One ZIP payload plus the Squallz extraction runtime; split volumes are off.")
-      : tr("gui.create.sfx_summary_disabled", "Standard archive output; recipients need a compatible archive app.");
-  }
-
-  function createSfxSigningWarning(): string {
-    if (sfxCreateCapability.target === "macos") {
-      return tr("gui.create.sfx_signing_macos", "The result is unsigned. Sign and notarize it before sending it to another Mac.");
-    }
-    if (sfxCreateCapability.target === "windows") {
-      return tr("gui.create.sfx_signing_windows", "The result is unsigned. Sign it before sharing to reduce SmartScreen warnings.");
-    }
-    return tr("gui.create.sfx_signing_linux", "The result is unsigned. Recipients should verify its source before running it.");
-  }
-
-  function createSfxUnavailableMessage(): string {
-    if (sfxCreateCapability.status === "invalid") {
-      return tr(
-        "gui.create.sfx_template_invalid",
-        "The self-extractor runtime is damaged or does not match this platform. Reinstall the full desktop package.",
-      );
-    }
-    return tr("gui.create.sfx_template_unavailable", "This installation is missing its self-extractor template. Reinstall the full desktop package.");
-  }
-
-  function createSplitSizeBytes(): number | null {
-    return createOptions.splitSize;
-  }
-
-  function createPasswordValidationMessage(): string {
-    const issue = createOptions.passwordIssue;
-    return issue ? createDraftIssueMessage(issue) : "";
-  }
-
-  function createSplitValidationMessage(): string {
-    const issue = createOptions.splitIssue;
-    return issue ? createDraftIssueMessage(issue) : "";
-  }
-
-  function visibleCreatePasswordError(): string {
-    const error = createPasswordValidationMessage();
-    return createOptionsValidationAttempted || createPasswordConfirmation.length > 0
-      || (createEncryptionEnabled && createPassword.length === 0) ? error : "";
-  }
-
-  function visibleCreateSplitError(): string {
-    const error = createSplitValidationMessage();
-    return createOptionsValidationAttempted || createCustomSplitAmount.length > 0 ? error : "";
-  }
-
-  function validateCreateOptions(): boolean {
-    const issue = createOptions.validate(sfxCreateCapability);
-    if (!issue) return true;
-    createAdvancedOpen = true;
-    classicCreateSection = issue === "invalid_part_size" || issue === "native_zip_part_size_limit" ? "volumes" : "security";
-    showNotice(createDraftIssueMessage(issue));
-    void tick().then(() => {
-      if (screen !== "create" || !createOptionsValidationAttempted || blockingModalVisible()) return;
-      document.querySelector<HTMLInputElement>(".create-option-input[aria-invalid='true']")?.focus();
-    });
-    return false;
-  }
-
-  function toggleCreateAdvancedFromKeyboard(event: KeyboardEvent) {
-    if (event.key !== "Enter" && event.key !== " " && event.key !== "Spacebar") return;
-    event.preventDefault();
-    createAdvancedOpen = !createAdvancedOpen;
-  }
-
-  function captureCreateRunDraft(): CreateRunDraft | null {
-    if (createOptions.normalizePostSuccess()) {
-      announceCreateDraftNormalization({ changed: true, postSuccessNormalized: true });
-    }
-    if (!validateCreateOptions()) return null;
-    return createOptions.snapshotRun({
-      sfxCapability: sfxCreateCapability,
-      suggestedDestination: createSuggestedOutputPath(activeCreateFormat, createOptions.outputExtension(sfxCreateCapability.extension)),
-      defaultCreateDir: normalizedDefaultCreateDir(settingsSession.appliedGeneral.defaultCreateDir),
-    });
-  }
-
-  function updateCustomCreateLevel(value: number | string, commit = false) {
-    const previousProfile = activeCreateProfile;
-    if (!editCreateOptions({ kind: "customLevel", value })) return;
-    const next = customCreateLevel;
-    persistCustomCreateLevel(next);
-    if (previousProfile !== "custom") {
-      persistCreateProfile("custom");
-    }
-    if (commit) {
-      recordOperation({
-        status: "info",
-        title: tr("gui.create.custom_level_updated_operation", "Custom level updated"),
-        detail: tr("gui.create.level_detail", "Compression level {level}").replace("{level}", String(next)),
-      });
-      showNotice(
-        tr("gui.create.custom_level_saved_notice", "Compression level {level} saved for this device")
-          .replace("{level}", String(next)),
-      );
-    }
-  }
-
-  function updateCustomCreateLevelFromInput(event: Event, commit = false) {
-    const input = event.currentTarget as HTMLInputElement;
-    updateCustomCreateLevel(input.value, commit);
-  }
-
-  function createCompressionLevel(): number {
-    return createOptions.compressionLevel;
-  }
-
-  function archivePresetById(id: string | null): NamedArchivePreset | null {
-    if (!id) return null;
-    return presetDocument?.presets.find((preset) => preset.id === id) ?? null;
-  }
-
-  function createArchivePresets(): Extract<NamedArchivePreset, { kind: "create" }>[] {
-    return (presetDocument?.presets.filter((preset) => preset.kind === "create") ?? []) as Extract<
-      NamedArchivePreset,
-      { kind: "create" }
-    >[];
-  }
-
-  function extractArchivePresets(): Extract<NamedArchivePreset, { kind: "extract" }>[] {
-    return (presetDocument?.presets.filter((preset) => preset.kind === "extract") ?? []) as Extract<
-      NamedArchivePreset,
-      { kind: "extract" }
-    >[];
-  }
-
-  function archivePresetDisplayName(preset: NamedArchivePreset): string {
-    if (preset.id === crossPlatformCreatePresetId) {
-      return tr("gui.presets.builtin_cross_platform_7z", "Cross-platform 7Z");
-    }
-    if (preset.id === balancedCreatePresetId) {
-      return tr("gui.presets.builtin_balanced_7z", "Balanced 7Z");
-    }
-    if (preset.id === smartExtractPresetId) {
-      return tr("gui.presets.builtin_smart_extract", "Smart extract");
-    }
-    return preset.label;
-  }
-
-  function archivePresetPartSummary(volumes: CreateArchivePresetOptions["volumes"]): string {
-    if (volumes.kind === "single") return tr("gui.presets.single_archive", "single archive");
-    const value = Number(volumes.size_bytes);
-    const size = Number.isSafeInteger(value) ? formatBytes(value) : `${volumes.size_bytes} B`;
-    return tr("gui.presets.split_archive", "{size} per part").replace("{size}", size);
-  }
-
-  function presetSqzInnerFormatLabel(innerFormat: PresetSqzInnerFormat): string {
-    if (innerFormat === "zip") return tr("gui.presets.sqz_inner_zip", "ZIP payload");
-    if (innerFormat === "tar") return tr("gui.presets.sqz_inner_tar", "TAR payload");
-    if (innerFormat === "7z") return tr("gui.presets.sqz_inner_7z", "7Z payload");
-    if (innerFormat === "zstd") return tr("gui.presets.sqz_inner_zstd", "Zstandard payload");
-    return tr("gui.presets.sqz_inner_sqz", "Native SQZ payload");
-  }
-
-  function createContentPolicyLabel(policy: CreateContentPolicy): string {
-    if (policy === "cross_platform_clean") {
-      return tr("gui.create.content_policy.clean", "Cross-platform clean");
-    }
-    if (policy === "keep_all_files") {
-      return tr("gui.create.content_policy.keep_all", "Keep every file");
-    }
-    return tr("gui.create.content_policy.custom", "Custom rules");
-  }
-
-  function createArchivePresetSummary(options: CreateArchivePresetOptions): string {
-    let format = isCreateFormatId(options.format)
-      ? createFormats[options.format].label
-      : options.format.toUpperCase();
-    if (options.format_options.kind === "sqz") {
-      format = tr("gui.presets.sqz_format_summary", "{format} · {inner}")
-        .replace("{format}", format)
-        .replace("{inner}", presetSqzInnerFormatLabel(options.format_options.inner_format));
-    }
-    const protection = options.credential.kind === "none"
-      ? tr("gui.presets.no_password", "no password")
-      : tr("gui.presets.ask_password", "ask for password");
-    const summary = tr("gui.presets.create_summary", "{format} · level {level} · {parts} · {protection} · {content}")
-      .replace("{format}", format)
-      .replace("{level}", String(options.level))
-      .replace("{parts}", archivePresetPartSummary(options.volumes))
-      .replace("{protection}", protection)
-      .replace("{content}", createContentPolicyLabel(options.content_policy));
-    return options.test_after_create
-      ? `${summary} · ${tr("gui.presets.integrity_test", "integrity tested")}`
-      : summary;
-  }
-
-  function extractArchivePresetSummary(options: ExtractArchivePresetOptions): string {
-    const destination = options.destination.layout === "smart"
-      ? tr("gui.presets.smart_destination", "smart folder")
-      : options.destination.layout === "archive_folder"
-        ? tr("gui.presets.archive_folder_destination", "archive folder")
-        : options.destination.base === "ask"
-          ? tr("gui.presets.choose_destination", "choose a folder")
-          : tr("gui.presets.same_folder_destination", "same folder");
-    return tr("gui.presets.extract_summary", "{destination} · conflicts: {conflicts} · links: {links}")
-      .replace("{destination}", destination)
-      .replace("{conflicts}", extractOverwriteLabel(options.existing_output))
-      .replace("{links}", extractSymlinkLabel(options.symlinks));
-  }
-
-  function currentCreateArchivePresetOptions(): CreateArchivePresetOptions {
-    return createOptions.snapshotPreset();
-  }
-
-  function currentExtractArchivePresetOptions(): ExtractArchivePresetOptions {
-    return extractOptions.snapshotPreset(archiveEncodingForJob());
-  }
-
-  function createPresetPickerOptions() {
-    return createArchivePresets().map((preset) => ({
-      id: preset.id,
-      name: archivePresetDisplayName(preset),
-      summary: createArchivePresetSummary(preset.options),
-    }));
-  }
-
-  function extractPresetPickerOptions() {
-    return extractArchivePresets().map((preset) => ({
-      id: preset.id,
-      name: archivePresetDisplayName(preset),
-      summary: extractArchivePresetSummary(preset.options),
-    }));
-  }
-
-  function normalizePresetName(value: string): string {
-    return Array.from(value.replace(/\s+/gu, " ").trim()).slice(0, 40).join("");
-  }
-
-  function presetNameExists(kind: "create" | "extract", name: string, exceptId: string | null): boolean {
-    const normalized = name.toLocaleLowerCase();
-    return (presetDocument?.presets ?? []).some(
-      (preset) =>
-        preset.kind === kind &&
-        preset.id !== exceptId &&
-        preset.label.toLocaleLowerCase() === normalized,
-    );
-  }
-
-  function uniquePresetName(kind: "create" | "extract", requested: string): string {
-    if (!presetNameExists(kind, requested, null)) return requested;
-    for (let index = 2; index <= 99; index += 1) {
-      const suffix = ` ${index}`;
-      const base = Array.from(requested).slice(0, 40 - suffix.length).join("");
-      const candidate = `${base}${suffix}`;
-      if (!presetNameExists(kind, candidate, null)) return candidate;
-    }
-    return `${Array.from(requested).slice(0, 32).join("")} ${Date.now().toString(36)}`;
-  }
-
-  function createPresetSaveValidationMessage(): string {
-    if (createPostSuccess === "trash_source" && createTrashSourceDisabledReason()) {
-      return createTrashSourceDisabledReason();
-    }
-    const splitError = createSplitValidationMessage();
-    if (splitError) return splitError;
-    const rules = createContentPolicy === "custom" ? createExcludeRules() : [];
-    if (rules.length > maxArchivePresetExcludeRules) {
-      return tr("gui.presets.exclude_limit", "Presets can store up to {count} exclude rules")
-        .replace("{count}", String(maxArchivePresetExcludeRules));
-    }
-    const oversized = rules.find((rule) => new TextEncoder().encode(rule).length > maxArchivePresetExcludeRuleBytes);
-    if (oversized) {
-      return tr("gui.presets.exclude_rule_too_long", "Shorten the exclude rule beginning with {rule}; each rule can use up to {count} bytes")
-        .replace("{rule}", oversized.slice(0, 24))
-        .replace("{count}", String(maxArchivePresetExcludeRuleBytes));
-    }
-    return "";
-  }
-
-  function selectedCreateArchivePreset() {
-    const preset = archivePresetById(selectedCreatePresetId);
-    return preset?.kind === "create" ? preset : null;
-  }
-
-  function selectedExtractArchivePreset() {
-    const preset = archivePresetById(selectedExtractPresetId);
-    return preset?.kind === "extract" ? preset : null;
-  }
-
-  function createPresetModified(): boolean {
-    const selected = selectedCreateArchivePreset();
-    if (!selected) return false;
-    return (
-      JSON.stringify(currentCreateArchivePresetOptions()) !== JSON.stringify(selected.options) ||
-      normalizePresetName(createPresetDraftName) !== selected.label
-    );
-  }
-
-  function extractPresetModified(): boolean {
-    const selected = selectedExtractArchivePreset();
-    if (!selected) return false;
-    return (
-      JSON.stringify(currentExtractArchivePresetOptions()) !== JSON.stringify(selected.options) ||
-      normalizePresetName(extractPresetDraftName) !== selected.label
-    );
-  }
-
-  function createPresetStatus(): "idle" | "applied" | "modified" | "saving" | "error" {
-    if (presetLoadState === "error" || createPresetMutationState === "error") return "error";
-    if (presetLoadState === "loading" || createPresetMutationState === "saving") return "saving";
-    if (!selectedCreatePresetId) return "idle";
-    return createPresetModified() ? "modified" : "applied";
-  }
-
-  function extractPresetStatus(): "idle" | "applied" | "modified" | "saving" | "error" {
-    if (presetLoadState === "error" || extractPresetMutationState === "error") return "error";
-    if (presetLoadState === "loading" || extractPresetMutationState === "saving") return "saving";
-    if (!selectedExtractPresetId) return "idle";
-    return extractPresetModified() ? "modified" : "applied";
-  }
-
-  function archivePresetStatusLabel(
-    status: "idle" | "applied" | "modified" | "saving" | "error",
-  ): string {
-    if (presetLoadState === "loading") return tr("gui.presets.loading", "Loading presets");
-    if (presetLoadState === "error") return tr("gui.presets.unavailable", "Presets unavailable");
-    if (status === "saving") return tr("gui.presets.saving", "Saving");
-    if (status === "error") return tr("gui.presets.failed", "Could not save");
-    if (status === "modified") return tr("gui.presets.modified", "Modified");
-    if (status === "applied") return tr("gui.presets.applied", "Applied");
-    return tr("gui.presets.current", "Not saved");
-  }
-
-  function archivePresetPickerDisabledReason(kind: "create" | "extract"): string {
-    if (presetLoadState === "loading") return tr("gui.presets.loading", "Loading presets");
-    if (presetLoadState === "error") {
-      return tr("gui.presets.load_failed", "Could not load presets. The preset file was not changed.");
-    }
-    if (kind === "create" && createPreflight.busy()) {
-      return tr("gui.presets.busy", "Wait for the current preflight to finish");
-    }
-    return "";
-  }
-
-  function applyDefaultCreatePresetWhenReady() {
-    if (!sfxCreateCapabilityReady || createPresetDraftTouched || !presetDocument) return;
-    const presetId = presetDocument.bindings.app_default_create;
-    if (presetId) applyCreatePreset(presetId, false);
-  }
-
-  function applyCreatePreset(id: string | null, announce = true) {
-    if (createPreflight.busy()) {
-      if (announce) showNotice(tr("gui.presets.busy", "Wait for the current preflight to finish"));
-      return;
-    }
-    if (!id) {
-      if (announce) markCreatePresetDraftTouched();
-      selectedCreatePresetId = null;
-      createPresetDraftName = "";
-      createPresetMutationState = "idle";
-      return;
-    }
-    const preset = archivePresetById(id);
-    if (!preset || preset.kind !== "create") return;
-    const change = createOptions.applyPreset(preset.options, createDraftContext(), () => {
-      dismissCreatePreparation();
-      if (announce) markCreatePresetDraftTouched();
-      invalidateCreatePreflightResult();
-    }, announce);
-    if (change.issue) {
-      showNotice(createDraftIssueMessage(change.issue, change.requestedSfxTarget));
-      return;
-    }
-    selectedCreatePresetId = preset.id;
-    createPresetDraftName = preset.label;
-    createPresetMutationState = "idle";
-    if (announce) {
-      // The completion change has its own feedback; source normalization is part of the applied notice.
-      announceCreateDraftNormalization({ ...change, postSuccessNormalized: false });
-      showNotice(
-        change.postSuccessNormalized
-          ? tr("gui.create.output.source.preset_changed_to_keep", "{name} applied · originals will stay in place because this preset excludes some content")
-            .replace("{name}", archivePresetDisplayName(preset))
-          : tr("gui.presets.applied_notice", "{name} applied").replace("{name}", archivePresetDisplayName(preset)),
-      );
-    }
-  }
-
-  function applyExtractPreset(id: string | null, announce = true) {
-    if (!id) {
-      extractDestinationPicker = null;
-      selectedExtractPresetId = null;
-      extractPresetDraftName = "";
-      extractPresetMutationState = "idle";
-      return;
-    }
-    const preset = archivePresetById(id);
-    if (!preset || preset.kind !== "extract") return;
-    extractDestinationPicker = null;
-    selectedExtractPresetId = preset.id;
-    extractPresetDraftName = preset.label;
-    extractOptions.applyPreset(preset.options);
-    extractPresetMutationState = "idle";
-    if (announce) {
-      showNotice(
-        tr("gui.presets.applied_notice", "{name} applied")
-          .replace("{name}", archivePresetDisplayName(preset)),
-      );
-    }
-  }
-
-  function clonePresetDocument(): ArchivePresetDocument | null {
-    return presetDocument ? $state.snapshot(presetDocument) : null;
-  }
-
-  function reconcilePresetSelections(document: ArchivePresetDocument) {
-    if (
-      selectedCreatePresetId &&
-      !document.presets.some((preset) => preset.kind === "create" && preset.id === selectedCreatePresetId)
-    ) {
-      selectedCreatePresetId = null;
-    }
-    if (
-      selectedExtractPresetId &&
-      !document.presets.some((preset) => preset.kind === "extract" && preset.id === selectedExtractPresetId)
-    ) {
-      selectedExtractPresetId = null;
-    }
-  }
-
-  function setPresetMutationState(kind: "create" | "extract", state: ArchivePresetMutationState) {
-    if (kind === "create") createPresetMutationState = state;
-    else extractPresetMutationState = state;
-  }
-
-  async function persistPresetDocument(
-    kind: "create" | "extract",
-    next: ArchivePresetDocument,
-    successKey: string,
-    successFallback: string,
-    detail: string,
-  ): Promise<boolean> {
-    if (
-      (kind === "create" && createPresetMutationState === "saving") ||
-      (kind === "extract" && extractPresetMutationState === "saving")
-    ) {
-      return false;
-    }
-    setPresetMutationState(kind, "saving");
-    try {
-      const saved = await ipc.saveArchivePresets(next.revision, next);
-      presetDocument = saved;
-      presetLoadState = "ready";
-      setPresetMutationState(kind, "idle");
-      showNotice(tr(successKey, successFallback));
-      recordOperation({ status: "done", title: tr(successKey, successFallback), detail });
-      return true;
-    } catch (error) {
-      setPresetMutationState(kind, "error");
-      const errorDto = isErrorDto(error) ? error : null;
-      if (errorDto?.key === "error.presets_conflict") {
-        void ipc.getArchivePresets().then((latest) => {
-          presetDocument = latest;
-          presetLoadState = "ready";
-          reconcilePresetSelections(latest);
-        }).catch(() => undefined);
-      }
-      const fallback = tr("gui.presets.failed", "Could not save");
-      const message = errorDto ? tError(errorDto) : fallback;
-      showNotice(message === errorDto?.key ? fallback : message);
-      return false;
-    }
-  }
-
-  function newArchivePresetId(kind: "create" | "extract"): string {
-    const random = globalThis.crypto?.randomUUID?.().replaceAll("-", "")
-      ?? `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
-    return `user.${kind}.${random}`.slice(0, 64);
-  }
-
-  async function saveArchivePreset(kind: "create" | "extract", operation: "save_as" | "update") {
-    const selected = operation === "update"
-      ? kind === "create" ? selectedCreateArchivePreset() : selectedExtractArchivePreset()
-      : null;
-    const next = clonePresetDocument();
-    if (!next) {
-      if (operation === "save_as") {
-        showNotice(tr("gui.presets.load_failed", "Could not load presets. The preset file was not changed."));
-      }
-      return;
-    }
-    if (operation === "update") {
-      if (!selected || selected.built_in) return;
-      if (kind === "create" && createPresetUpdateDisabledReason()) {
-        showNotice(createPresetUpdateDisabledReason());
-        return;
-      }
-    }
-    if (kind === "create") {
-      const validationError = createPresetSaveValidationMessage();
-      if (validationError) {
-        showNotice(validationError);
-        return;
-      }
-    }
-    const draftName = kind === "create" ? createPresetDraftName : extractPresetDraftName;
-    const requested = normalizePresetName(draftName);
-    if (!requested) {
-      showNotice(tr("gui.presets.name_required", "Enter a preset name"));
-      return;
-    }
-    let name = requested;
-    let index = -1;
-    if (selected) {
-      if (presetNameExists(kind, name, selected.id)) {
-        showNotice(tr("gui.presets.name_in_use", "That preset name is already in use"));
-        return;
-      }
-      index = next.presets.findIndex((preset) => preset.id === selected.id);
-      if (index < 0) return;
-    } else {
-      if (next.presets.length >= maxArchivePresets) {
-        showNotice(tr("gui.presets.limit", "Delete a preset before saving another one"));
-        return;
-      }
-      name = uniquePresetName(kind, requested);
-    }
-    const id = selected ? selected.id : newArchivePresetId(kind);
-    const preset: NamedArchivePreset = kind === "create"
-      ? {
-          kind: "create", id, label: name, built_in: false,
-          options: currentCreateArchivePresetOptions(),
-        }
-      : {
-          kind: "extract", id, label: name, built_in: false,
-          options: currentExtractArchivePresetOptions(),
-        };
-    if (selected) next.presets[index] = preset;
-    else next.presets.push(preset);
-    if (await persistPresetDocument(
-      kind, next,
-      operation === "update" ? "gui.presets.operation_updated" : "gui.presets.operation_saved",
-      operation === "update" ? "Preset updated" : "Preset saved",
-      name,
-    )) {
-      if (kind === "create") {
-        if (operation === "save_as") selectedCreatePresetId = id;
-        createPresetDraftName = name;
-      } else {
-        if (operation === "save_as") selectedExtractPresetId = id;
-        extractPresetDraftName = name;
-      }
-    }
-  }
-
-  function createPresetFinderCompatible(options: CreateArchivePresetOptions): boolean {
-    return options.format === "7z" &&
-      options.credential.kind === "none" &&
-      options.output.kind === "archive" &&
-      options.completion !== "open_in_squallz" &&
-      options.post_success === "keep_source";
-  }
-
-  function createPresetFinderDisabledReason(): string {
-    const selected = selectedCreateArchivePreset();
-    if (!selected || createPresetFinderCompatible(selected.options)) return "";
-    return tr("gui.presets.finder_create_incompatible", "File-manager compression needs a standard 7Z preset that keeps sources, does not prompt for a password, and does not open the result in Squallz");
-  }
-
-  function createPresetUpdateDisabledReason(): string {
-    const selected = selectedCreateArchivePreset();
-    if (!selected) return "";
-    if (selected.built_in) return presetReadOnlyReason(selected);
-    if (createPreflight.busy()) return tr("gui.presets.busy", "Wait for the current preflight to finish");
-    if (
-      presetDocument?.bindings.file_manager_create === selected.id &&
-      !createPresetFinderCompatible(currentCreateArchivePresetOptions())
-    ) {
-      return tr("gui.presets.unbind_finder_before_update", "Turn off file-manager use before saving incompatible changes");
-    }
-    return "";
-  }
-
-  function presetReadOnlyReason(preset: NamedArchivePreset | null): string {
-    return preset?.built_in
-      ? tr("gui.presets.built_in_read_only", "Built-in presets cannot be changed")
-      : "";
-  }
-
-  async function deleteSelectedArchivePreset(kind: "create" | "extract") {
-    const selected = kind === "create" ? selectedCreateArchivePreset() : selectedExtractArchivePreset();
-    const next = clonePresetDocument();
-    if (!selected || !next || selected.built_in) return;
-    next.presets = next.presets.filter((preset) => preset.id !== selected.id);
-    if (kind === "create") {
-      if (next.bindings.app_default_create === selected.id) next.bindings.app_default_create = balancedCreatePresetId;
-      if (next.bindings.file_manager_create === selected.id) next.bindings.file_manager_create = balancedCreatePresetId;
-    } else {
-      if (next.bindings.app_default_extract === selected.id) next.bindings.app_default_extract = smartExtractPresetId;
-      if (next.bindings.file_manager_extract === selected.id) next.bindings.file_manager_extract = smartExtractPresetId;
-    }
-    if (await persistPresetDocument(kind, next, "gui.presets.operation_deleted", "Preset deleted", selected.label)) {
-      if (kind === "create") {
-        if (createPreflight.busy()) {
-          selectedCreatePresetId = null;
-          createPresetDraftName = "";
-        } else {
-          applyCreatePreset(balancedCreatePresetId, false);
-        }
-      } else {
-        applyExtractPreset(smartExtractPresetId, false);
-      }
-    }
-  }
-
-  async function setArchivePresetBinding(
-    kind: "create" | "extract",
-    target: "app" | "file_manager",
-    enabled: boolean,
-  ) {
-    const selected = kind === "create" ? selectedCreateArchivePreset() : selectedExtractArchivePreset();
-    const next = clonePresetDocument();
-    if (!selected || !next) return;
-    if (
-      kind === "create" &&
-      selected.kind === "create" &&
-      target === "file_manager" &&
-      enabled &&
-      !createPresetFinderCompatible(selected.options)
-    ) {
-      showNotice(createPresetFinderDisabledReason());
-      return;
-    }
-    const value = enabled ? selected.id : null;
-    if (kind === "create" && target === "app") next.bindings.app_default_create = value;
-    else if (kind === "create") next.bindings.file_manager_create = value;
-    else if (target === "app") next.bindings.app_default_extract = value;
-    else next.bindings.file_manager_extract = value;
-    await persistPresetDocument(
-      kind,
-      next,
-      "gui.presets.operation_binding",
-      "Preset default changed",
-      archivePresetDisplayName(selected),
-    );
-  }
-
-  function createArchiveNameForOutput(base: string, outputExtension: string): string {
-    return `${base}.${outputExtension}`;
-  }
-
-  function createArchivePreviewName(base = createOutputPreviewBase()): string {
-    const extension = createOptions.outputExtension(sfxCreateCapability.extension);
-    const suggested = createDestinationBase === "ask" ? createSuggestedOutputPath(activeCreateFormat, extension) : null;
-    return suggested ? desktopBasename(suggested, platformKind()) : createArchiveNameForOutput(base, extension);
-  }
-
   function joinFolderPath(folder: string, name: string): string {
     return joinDesktopPath(folder, name, platformKind());
-  }
-
-  function createOutputPreviewBase(): string {
-    return createSourceInputs.length === 1
-      ? archiveBaseOrDefault(archiveStemName(desktopBasename(createSourceInputs[0], platformKind())))
-      : "archive";
-  }
-
-  function createOutputPreview(base = createOutputPreviewBase()): string {
-    const name = createArchivePreviewName(base);
-    if (createDestinationBase === "ask") {
-      const suggested = createSuggestedOutputPath(activeCreateFormat, createOptions.outputExtension(sfxCreateCapability.extension));
-      if (suggested) {
-        return tr("gui.create.output.preview_confirm", "Confirm location when starting · {path}").replace("{path}", suggested);
-      }
-      return tr("gui.create.output.preview_ask", "Choose location when starting · {name}").replace("{name}", name);
-    }
-    if (createDestinationBase === "default_directory") {
-      const folder = normalizedDefaultCreateDir(settingsSession.appliedGeneral.defaultCreateDir);
-      return folder
-        ? joinFolderPath(folder, name)
-        : tr("gui.create.output.preview_default_missing", "Default create folder is not set · Squallz will ask");
-    }
-    const droppedParent = commonCreateSourceParent(createSourceInputs, platformKind());
-    return droppedParent
-      ? joinFolderPath(droppedParent, name)
-      : tr("gui.create.output.preview_source_parent", "Next to the selected sources · {name}").replace("{name}", name);
-  }
-
-  function createSuggestedOutputPath(format: CreateFormatId, outputExtension: string): string | null {
-    const path = createSuggestedDestination;
-    if (!path) return null;
-    const extensions = outputExtension === createFormats[format].extension
-      ? createFormats[format].extensions
-      : [outputExtension];
-    if (extensions.some((extension) => path.toLowerCase().endsWith(`.${extension}`))) return path;
-    return joinFolderPath(
-      desktopDirname(path, platformKind()),
-      createArchiveNameForOutput(archiveStemName(desktopBasename(path, platformKind())), outputExtension),
-    );
-  }
-
-  async function authorizeArchiveOutput(
-    path: string,
-    confirm: DialogModule["confirm"],
-    split: boolean,
-    inspect: (
-      candidate: string,
-      splitOutput: boolean,
-    ) => Promise<CreateDestinationInspectionDto>,
-    isCurrent: () => boolean,
-  ): Promise<AuthorizedArchiveOutput | null> {
-    const inspection = await inspect(path, split);
-    if (!isCurrent()) return null;
-    if (inspection.conflict !== (inspection.guard !== null)) {
-      throw new CreateDestinationInspectionError();
-    }
-    if (inspection.conflict) {
-      const replaceExisting = await confirm(
-        (split
-          ? tr(
-              "gui.output.replace_existing_split.body",
-              "An archive or numbered volume set already exists for {path}. Replace only this exact output set? If another app changes it before the task finishes, Squallz will keep it.",
-            )
-          : tr(
-              "gui.output.replace_existing.body",
-              "An archive already exists at {path}. Replace only this exact version? If another app changes it before the task finishes, Squallz will keep it.",
-            )).replace("{path}", path),
-        {
-          title: split
-            ? tr("gui.output.replace_existing_split.title", "Replace existing output set?")
-            : tr("gui.output.replace_existing.title", "Replace existing archive?"),
-          kind: "warning",
-          okLabel: tr("gui.output.replace_existing.action", "Replace"),
-          cancelLabel: tr("gui.output.replace_existing.cancel", "Cancel"),
-        },
-      );
-      if (!isCurrent()) return null;
-      if (!replaceExisting) return null;
-    }
-    return {
-      replaceExisting: inspection.conflict,
-      replacementGuard: inspection.guard,
-    };
-  }
-
-  function createFormatDisabledReason(formatId: CreateFormatId): string {
-    const lockedReason = createOptionsLockedReason();
-    if (lockedReason) return lockedReason;
-    return createSfxEnabled && formatId !== "zip"
-      ? tr("gui.create.sfx_zip_only", "Self-extracting output uses a ZIP payload")
-      : "";
   }
 
   function archiveOutputFilterName(format: "zip" | "7z" | "tar.zst" | "tar" | "sqz"): string {
@@ -3388,41 +2200,10 @@
     }[format]);
   }
 
-  function createMethodLabel(): string {
-    if (activeCreateFormat === "wim") return createFormatMethod();
-    if (activeCreateFormat === "sqz") {
-      return tr("gui.create.method_profile", "{method} · profile {profile}")
-        .replace("{method}", createFormatMethod())
-        .replace("{profile}", createProfileLabel(activeCreateProfile));
-    }
-    return tr("gui.create.method_level_profile", "{method} · Level {level} · {profile}")
-      .replace("{method}", createFormatMethod())
-      .replace("{level}", String(createCompressionLevel()))
-      .replace("{profile}", createProfileLabel(activeCreateProfile));
-  }
-
-  function createPasswordCapability(): string {
-    return createFormatPassword();
-  }
-
-  function createSplitCapability(): string {
-    return createSfxEnabled
-      ? tr("gui.create.sfx_no_split_capability", "Self-extracting output uses one complete ZIP payload")
-      : createFormatSplit();
-  }
-
-  function createRecoveryCapability(): string {
-    return createFormatRecovery();
-  }
-
-  function createFormatNote(): string {
-    return createFormatNoteFor();
-  }
-
   function historyLastLabel(): string {
     return historyRows.length > 0
-      ? tr("gui.history.local_only", "Local history stored")
-      : tr("gui.history.no_activity", "No operation history yet");
+      ? tr("gui.history.local_only")
+      : tr("gui.history.no_activity");
   }
 
   function isSettingsWorkspaceScreen(value: Screen): value is SettingsScreen {
@@ -3486,9 +2267,9 @@
     };
   }
 
-  function classicArchiveBrowserSurface(): ClassicArchiveBrowserSurfaceProps {
+  function archiveBrowserSurface(rowHeight: number): ArchiveBrowserActions & ArchivePreviewActions & { view: ArchiveBrowserView } {
     const recovery = archiveBrowseRecoveryState();
-    const rows = browseEntries(CLASSIC_ROW_HEIGHT).map((entry) => entry ? ({
+    const rows = browseEntries(rowHeight).map((entry) => entry ? ({
       ...entry,
       selected: isEntrySelected(entry),
       previewing: isEntryPreviewActive(entry),
@@ -3501,34 +2282,9 @@
         ? previewActionIcon(entry.source.path, entry.source.entry_type)
         : "eye",
     }) : null);
-    const previewLabel = previewActionLabel();
-    const previewDisabledReason = previewSelectedDisabledReason();
     return {
       view: {
-        archiveTitle: archiveTitle(),
-        archiveFormatSummary: currentArchive
-          ? `${archiveFormat()} · ${archiveEntryCountLabel(currentArchive.entry_count)}`
-          : openArchiveFirstLabel(),
-        archiveOpen: Boolean(currentArchive),
-        openArchiveFirst: openArchiveFirstLabel(),
         selection: archiveSelectionControl(),
-        preview: {
-          policyKind: activePreviewPolicyKind(),
-          policyCode: activePreviewPolicyCode(),
-          nestedTitle: nestedPreview ? nestedPreviewTitle() : null,
-          nestedSubtitle: nestedPreview ? nestedPreviewSubtitle() : "",
-          nestedRows: nestedPreview ? nestedPreviewRows().map((item) => item.display) : [],
-          title: entryPreviewTitle(),
-          subtitle: entryPreviewSubtitle(),
-          busy: previewBusy(),
-          entry: entryPreview,
-          failed: Boolean(entryPreviewFailure),
-          canPreview: appActionEnabled("preview_entry"),
-          actionLabel: previewLabel,
-          actionIcon: previewActionIcon(),
-          disabledReason: previewDisabledReason,
-          ariaLabel: labelWithDisabledReason(previewLabel, previewDisabledReason),
-        },
         selectedSummary: selectedSummary(),
         editingStatus: archiveEditingStatus(),
         conflict: archiveEdit.reviewView,
@@ -3536,28 +2292,17 @@
         recovery,
         totalRows: currentArchive ? totalRows() : 0,
         rows,
-        startIndex: browseVirtualWindow(CLASSIC_ROW_HEIGHT).start,
+        startIndex: browseVirtualWindow(rowHeight).start,
         rowsPending: !archiveBrowseError() && (filterPending() || rows.some((entry) => entry === null)),
-        paddingTop: browsePaddingTop(CLASSIC_ROW_HEIGHT),
-        paddingBottom: browsePaddingBottom(CLASSIC_ROW_HEIGHT),
-        emptyName: currentArchive ? noEntriesLabel() : openArchiveFirstLabel(),
-        emptyStatus: recovery ? "" : currentArchive ? archiveFilterStatus() : noEntriesLabel(),
+        paddingTop: browsePaddingTop(rowHeight),
+        paddingBottom: browsePaddingBottom(rowHeight),
       },
       tr,
       onOpenRoot: () => void openArchiveBreadcrumb(-1),
       onOpenRecovery: openCurrentArchiveRecoveryConfiguration,
       onRetryBrowse: () => void retryArchiveContents(),
       onRetryFormats: () => void retryArchiveFormats(),
-      onOpenNestedPreview: () => void openNestedPreviewArchive(),
-      onExtractNestedPreview: () => void extractNestedPreviewArchive(),
-      onClearPreview: (restoreEntryFocus) => clearEntryPreviewState(restoreEntryFocus),
-      onRetryPreview: retryEntryPreview,
-      onExtractPreviewFailure: () => void extractEntryPreviewFailure(),
-      onOpenPreview: () => void openEntryPreview().then((opened) => {
-        if (opened) clearEntryPreviewState();
-      }),
-      onRevealPreview: () => void revealEntryPreview(),
-      onPreviewSelection: () => void runAppAction("preview_entry"),
+      ...archivePreviewActions(),
       onCancelMoveConflict: () => archiveEdit.cancelReview(),
       onSubmitMoveReadyOnly: () => void archiveEdit.submitReviewedMove("ready-only"),
       onSubmitMoveKeepBoth: () => void archiveEdit.submitReviewedMove("keep-both"),
@@ -3572,30 +2317,38 @@
     };
   }
 
+  function classicArchiveBrowserSurface(): ClassicArchiveBrowserSurfaceProps {
+    const surface = archiveBrowserSurface(CLASSIC_ROW_HEIGHT);
+    return {
+      ...surface,
+      view: {
+        ...surface.view,
+        archiveTitle: archiveTitle(),
+        archiveFormatSummary: currentArchive
+          ? `${archiveFormat()} · ${archiveEntryCountLabel(currentArchive.entry_count)}`
+          : openArchiveFirstLabel(),
+        archiveOpen: Boolean(currentArchive),
+        openArchiveFirst: openArchiveFirstLabel(),
+        preview: archivePreviewView(),
+        emptyName: currentArchive ? noEntriesLabel() : openArchiveFirstLabel(),
+        emptyStatus: surface.view.recovery ? "" : currentArchive ? archiveFilterStatus() : noEntriesLabel(),
+      },
+    };
+  }
+
   function modernArchiveBrowserSurface(): ModernArchiveBrowserSurfaceProps {
-    const recovery = archiveBrowseRecoveryState();
+    const surface = archiveBrowserSurface(MODERN_ROW_HEIGHT);
     const archive = currentArchive;
     if (!archive) {
       throw new Error("Modern archive browser requires an open archive");
     }
-    const rows = browseEntries(MODERN_ROW_HEIGHT).map((entry) => entry ? ({
-      ...entry,
-      selected: isEntrySelected(entry),
-      previewing: isEntryPreviewActive(entry),
-      previewBusy: isEntryPreviewBusy(entry),
-      selectionLabel: entrySelectionLabel(entry),
-      previewActionLabel: entry.source
-        ? previewEntryActionLabel(entry)
-        : "",
-      previewActionIcon: entry.source
-        ? previewActionIcon(entry.source.path, entry.source.entry_type)
-        : "eye",
-    }) : null);
     const mutationDisabledReason = archiveMutationDisabledReason();
     const previewLabel = previewActionLabel();
     const previewDisabledReason = previewSelectedDisabledReason();
     return {
+      ...surface,
       view: {
+        ...surface.view,
         archive: {
           title: archiveTitle(),
           format: archiveFormat(),
@@ -3615,40 +2368,23 @@
           previewDisabledReason,
           previewLabel,
           previewIcon: previewActionIcon(),
-          extractDestinationHint: archiveSelectionBusyReason() || extractDestinationHint(),
+          extractDestinationHint: archiveSelectionBusyReason() || extractView.extractDestinationHint(),
           extractAllLabel: extractAllToLabel(),
           extractSelectedLabel: extractSelectedToLabel(),
           nestedPreview: Boolean(nestedPreview),
         },
-        selectedSummary: selectedSummary(),
-        editingStatus: archiveEditingStatus(),
-        conflict: archiveEdit.reviewView,
-        structureWarning: archiveStructureWarningText(),
-        recovery,
         encodingWarning: hasEncodingWarning() ? archiveWarningText() : null,
-        totalRows: totalRows(),
         filterText: filterText(),
         filterPending: filterPending(),
-        filterStatus: recovery ? "" : archiveFilterStatus(),
-        selection: archiveSelectionControl(),
-        rows,
-        startIndex: browseVirtualWindow(MODERN_ROW_HEIGHT).start,
-        rowsPending: !archiveBrowseError() && (filterPending() || rows.some((entry) => entry === null)),
-        paddingTop: browsePaddingTop(MODERN_ROW_HEIGHT),
-        paddingBottom: browsePaddingBottom(MODERN_ROW_HEIGHT),
+        filterStatus: surface.view.recovery ? "" : archiveFilterStatus(),
         emptyLabel: noEntriesLabel(),
       },
-      tr,
       onOpenBreadcrumb: (index) => void openArchiveBreadcrumb(index),
       onGoUp: () => void runAppAction("go_up"),
-      onOpenRoot: () => void openArchiveBreadcrumb(-1),
       onExtractAll: () => void runAppAction("extract_all"),
       onExtractSelection: () => void runAppAction("extract_selection"),
       onTestArchive: () => void runAppAction("test_archive"),
       onAddFiles: () => void runAppAction("add_files"),
-      onOpenRecovery: openCurrentArchiveRecoveryConfiguration,
-      onRetryBrowse: () => void retryArchiveContents(),
-      onRetryFormats: () => void retryArchiveFormats(),
       onConvert: () => void runAppAction("convert_archive"),
       onOpenInfo: () => void runAppAction("archive_info"),
       onRenameSelection: () => void runAppAction("rename_entry"),
@@ -3656,12 +2392,6 @@
       onMoveSelection: () => void runAppAction("move_entries"),
       onCopyOutSelection: () => void runAppAction("copy_entries"),
       onCreateFolder: () => void runAppAction("new_folder"),
-      onPreviewSelection: () => void runAppAction("preview_entry"),
-      onOpenNestedPreview: () => void openNestedPreviewArchive(),
-      onExtractNestedPreview: () => void extractNestedPreviewArchive(),
-      onCancelMoveConflict: () => archiveEdit.cancelReview(),
-      onSubmitMoveReadyOnly: () => void archiveEdit.submitReviewedMove("ready-only"),
-      onSubmitMoveKeepBoth: () => void archiveEdit.submitReviewedMove("keep-both"),
       onRepairEncoding: () => void repairFilenameEncoding("gbk"),
       onSearchInputMount: (input) => {
         archiveSearchInput = input;
@@ -3669,14 +2399,44 @@
       onSearchInput: updateArchiveFilter,
       onSearchKeydown: onArchiveFilterKeydown,
       onClearSearch: clearArchiveFilter,
-      onBrowseScroll: onBrowseVirtualScroll,
-      onSelectEntry: (entry, event) => selectEntry(entry, event),
-      onActivateEntry: (entry) => void activateEntry(entry),
-      onEntryKeydown: (event, entry) => onEntryKeydown(event, entry),
-      onOpenEntryContext: (event, entry) => openEntryContext(event, entry),
-      onToggleEntrySelection: (entry, event) => toggleEntrySelection(entry, event),
-      onToggleAllEntries: toggleAllArchiveEntries,
-      onPreviewEntry: (entry) => previewDisplayEntry(entry),
+    };
+  }
+
+  function archivePreviewView(): ArchivePreviewView {
+    return {
+      policyKind: activePreviewPolicyKind(),
+      policyCode: activePreviewPolicyCode(),
+      nested: nestedPreview
+        ? {
+            title: nestedPreviewTitle(),
+            subtitle: nestedPreviewSubtitle(),
+            rows: nestedPreviewRows(),
+          }
+        : null,
+      title: entryPreviewTitle(),
+      subtitle: entryPreviewSubtitle(),
+      busy: previewBusy(),
+      failed: Boolean(entryPreviewFailure),
+      entry: entryPreview,
+      canPreview: appActionEnabled("preview_entry"),
+      actionLabel: previewActionLabel(),
+      actionIcon: previewActionIcon(),
+      disabledReason: previewSelectedDisabledReason(),
+    };
+  }
+
+  function archivePreviewActions(): ArchivePreviewActions {
+    return {
+      onOpenNestedPreview: () => void openNestedPreviewArchive(),
+      onExtractNestedPreview: () => void extractNestedPreviewArchive(),
+      onClearPreview: (restoreEntryFocus) => clearEntryPreviewState(restoreEntryFocus),
+      onRetryPreview: retryEntryPreview,
+      onExtractPreviewFailure: () => void extractEntryPreviewFailure(),
+      onOpenPreview: () => void openEntryPreview().then((opened) => {
+        if (opened) clearEntryPreviewState();
+      }),
+      onRevealPreview: () => void revealEntryPreview(),
+      onPreviewSelection: () => void runAppAction("preview_entry"),
     };
   }
 
@@ -3685,35 +2445,16 @@
     if (screen === "recovery") {
       view = {
         kind: "recovery",
-        tone: recoveryResultTone(),
-        title: recoveryResultTitle(),
-        detail: recoveryResultDetail(),
-        metricsAvailable: recoveryMetricsAvailable(),
-        explanation: recoveryResultExplanation(),
+        tone: recoverySession.resultTone(),
+        title: recoverySession.resultTitle(),
+        detail: recoverySession.resultDetail(),
+        metricsAvailable: recoverySession.metricsAvailable(),
+        explanation: recoverySession.resultExplanation(),
       };
     } else {
       view = {
         kind: "archive",
-        preview: {
-          policyKind: activePreviewPolicyKind(),
-          policyCode: activePreviewPolicyCode(),
-          nested: nestedPreview
-            ? {
-                title: nestedPreviewTitle(),
-                subtitle: nestedPreviewSubtitle(),
-                rows: nestedPreviewRows(),
-              }
-            : null,
-          title: entryPreviewTitle(),
-          subtitle: entryPreviewSubtitle(),
-          busy: previewBusy(),
-          failed: Boolean(entryPreviewFailure),
-          entry: entryPreview,
-          canPreview: appActionEnabled("preview_entry"),
-          actionLabel: previewActionLabel(),
-          actionIcon: previewActionIcon(),
-          disabledReason: previewSelectedDisabledReason(),
-        },
+        preview: archivePreviewView(),
         canRename: appActionEnabled("rename_entry"),
         canMove: appActionEnabled("move_entries"),
         canTest: appActionEnabled("test_archive"),
@@ -3722,10 +2463,10 @@
           ? {
               format: archiveFormat(),
               entries: currentArchive.entry_count,
-              encoding: extractEncodingLabel(),
+              encoding: extractView.extractEncodingLabel(),
               volumes: currentArchive.volumes?.length
                 ? archiveVolumeCountLabel(currentArchive.volumes.length)
-                : tr("gui.archive.single", "Single"),
+                : tr("gui.archive.single"),
             }
           : null,
         openArchiveFirst: openArchiveFirstLabel(),
@@ -3737,16 +2478,7 @@
     return {
       view,
       tr,
-      onOpenNestedPreview: () => void openNestedPreviewArchive(),
-      onExtractNestedPreview: () => void extractNestedPreviewArchive(),
-      onClearPreview: (restoreEntryFocus) => clearEntryPreviewState(restoreEntryFocus),
-      onRetryPreview: retryEntryPreview,
-      onExtractPreviewFailure: () => void extractEntryPreviewFailure(),
-      onOpenPreview: () => void openEntryPreview().then((opened) => {
-        if (opened) clearEntryPreviewState();
-      }),
-      onRevealPreview: () => void revealEntryPreview(),
-      onPreviewSelection: () => void runAppAction("preview_entry"),
+      ...archivePreviewActions(),
       onRenameSelection: () => void runAppAction("rename_entry"),
       onMoveSelection: () => void runAppAction("move_entries"),
       onOpenRecovery: openRecoveryConfiguration,
@@ -3781,14 +2513,13 @@
       pushToast({
         key: "software-update-available",
         kind: "info",
-        title: tr("gui.update.automatic_available_title", "Squallz {version} is available")
+        title: tr("gui.update.automatic_available_title")
           .replace("{version}", `v${result.latestVersion}`),
         body: tr(
           "gui.update.automatic_available_body",
-          "Review the package signature, checksum, and release details before downloading.",
         ),
         action: {
-          label: tr("gui.update.review", "Review update"),
+          label: tr("gui.update.review"),
           run: () => setScreen("settingsGeneral"),
         },
         persistent: true,
@@ -3831,14 +2562,9 @@
   });
 
   function languageLabel(tag: string | null): string {
-    if (!tag) return tr("gui.settings.language.follow_system", "Follow system");
+    if (!tag) return tr("gui.settings.language.follow_system");
     const language = availableLanguages.find((item) => item.tag === tag);
     return language ? `${language.name} · ${language.tag}` : tag;
-  }
-
-  function tr(key: string, fallback: string): string {
-    const value = t(key);
-    return value === key ? fallback : value;
   }
 
   function showSourceCleanupRecovery(notice: SourceCleanupRecoveryNotice) {
@@ -3848,10 +2574,9 @@
         kind: "danger",
         title: tr(
           "gui.toast.source_recovery.restored",
-          "Squallz restored an original after an interrupted cleanup; review it before continuing",
         ),
         body: notice.path
-          ? tr("gui.toast.source_recovery.restored_path", "Restored to {path}").replace(
+          ? tr("gui.toast.source_recovery.restored_path").replace(
               "{path}",
               notice.path,
             )
@@ -3864,7 +2589,6 @@
         kind: "info",
         title: tr(
           "gui.toast.source_recovery.cleared",
-          "An interrupted source cleanup was safely reset; the original stayed in place",
         ),
       });
       return;
@@ -3874,10 +2598,9 @@
         kind: "danger",
         title: tr(
           "gui.toast.source_recovery.preserved",
-          "Squallz preserved an original after an interrupted cleanup; review it before continuing",
         ),
         body: notice.path
-          ? tr("gui.toast.source_recovery.path", "Preserved at {path}").replace("{path}", notice.path)
+          ? tr("gui.toast.source_recovery.path").replace("{path}", notice.path)
           : undefined,
       });
       return;
@@ -3887,12 +2610,10 @@
         kind: "danger",
         title: tr(
           "gui.toast.source_recovery.changed",
-          "An interrupted cleanup found a different item at a recovery path; it was not moved to Trash",
         ),
         body: notice.path
           ? tr(
               "gui.toast.source_recovery.changed_path",
-              "Review {path}, the original location, and Trash before continuing",
             ).replace("{path}", notice.path)
           : undefined,
       });
@@ -3903,12 +2624,10 @@
         kind: "danger",
         title: tr(
           "gui.toast.source_recovery.completed_unknown",
-          "An interrupted cleanup may have reached {trash}; check the original location and {trash}",
         ).replaceAll("{trash}", trash),
         body: notice.path
           ? tr(
               "gui.toast.source_recovery.original_path",
-              "Original location: {path}",
             ).replace("{path}", notice.path)
           : undefined,
       });
@@ -3921,7 +2640,6 @@
         persistent: true,
         title: tr(
           "gui.toast.source_recovery.busy",
-          "Another Squallz window is finishing source cleanup; moving originals is temporarily unavailable",
         ),
       });
       return;
@@ -3930,13 +2648,11 @@
       kind: "danger",
       title: tr(
         "gui.toast.source_recovery.needs_attention",
-        "Source cleanup is paused; review the recovery record before moving any originals to {trash}",
       ).replace("{trash}", trash),
       body: sourceCleanupRecoveryReason(notice.reason),
       action: {
         label: tr(
           "gui.toast.source_recovery.show_record",
-          "Show recovery record",
         ),
         run: () => showSourceCleanupRecoveryRecord(notice.journal_path),
       },
@@ -3949,24 +2665,20 @@
     if (reason === "journal_invalid") {
       return tr(
         "gui.toast.source_recovery.reason_invalid",
-        "The recovery record is damaged or no longer matches its files. Do not delete or move the related items manually until you review it.",
       );
     }
     if (reason === "journal_permission_denied") {
       return tr(
         "gui.toast.source_recovery.reason_permission",
-        "Squallz cannot read the recovery record. Check its permissions before retrying source cleanup.",
       );
     }
     if (reason === "journal_unavailable") {
       return tr(
         "gui.toast.source_recovery.reason_unavailable",
-        "Squallz cannot access its recovery storage. Keep the original and any preserved copy until the storage is available.",
       );
     }
     return tr(
       "gui.toast.source_recovery.reason_failed",
-      "Squallz could not safely determine where an original was left. Review the recovery record, the original location, and Trash before continuing.",
     );
   }
 
@@ -3990,16 +2702,13 @@
       kind: "warning",
       title: tr(
         "gui.toast.source_recovery.show_record_failed",
-        "Could not show the recovery record",
       ),
       body: path
         ? tr(
             "gui.toast.source_recovery.show_record_failed_path",
-            "Recovery record: {path}. Copy this path and open it manually before moving or deleting the related originals.",
           ).replace("{path}", path)
         : tr(
             "gui.toast.source_recovery.show_record_failed_detail",
-            "Open Squallz's configuration folder and inspect source-cleanup.json before moving or deleting the related originals.",
           ),
     });
   }
@@ -4071,16 +2780,16 @@
 
   function platformNameLabel(): string {
     const platform = platformKind();
-    if (platform === "macos") return tr("gui.platform.macos", "macOS");
-    if (platform === "windows") return tr("gui.platform.windows", "Windows");
-    return tr("gui.platform.linux", "Linux");
+    if (platform === "macos") return tr("gui.platform.macos");
+    if (platform === "windows") return tr("gui.platform.windows");
+    return tr("gui.platform.linux");
   }
 
   function fileManagerLabel(): string {
     const platform = platformKind();
-    if (platform === "macos") return tr("gui.platform.file_manager.macos", "Finder");
-    if (platform === "windows") return tr("gui.platform.file_manager.windows", "File Explorer");
-    return tr("gui.platform.file_manager.linux", "File manager");
+    if (platform === "macos") return tr("gui.platform.file_manager.macos");
+    if (platform === "windows") return tr("gui.platform.file_manager.windows");
+    return tr("gui.platform.file_manager.linux");
   }
 
   function trashNameLabel(): string {
@@ -4089,13 +2798,13 @@
 
   function secretStoreLabel(): string {
     const platform = platformKind();
-    if (platform === "macos") return tr("gui.platform.secret_store.macos", "Keychain");
-    if (platform === "windows") return tr("gui.platform.secret_store.windows", "Credential Manager");
-    return tr("gui.platform.secret_store.linux", "Secret Service");
+    if (platform === "macos") return tr("gui.platform.secret_store.macos");
+    if (platform === "windows") return tr("gui.platform.secret_store.windows");
+    return tr("gui.platform.secret_store.linux");
   }
 
   function openWithLabel(): string {
-    return tr("gui.settings.integration.open_with", "Open With");
+    return tr("gui.settings.integration.open_with");
   }
 
   function labelKey(label: string): string {
@@ -4136,58 +2845,8 @@
     return tr(`gui.quick.${labelKey(label)}.detail`, detail);
   }
 
-  function createProfileLabel(profileId: CreateProfileId): string {
-    return tr(`gui.create.profile.${profileId}`, createProfiles[profileId].label);
-  }
-
-  function createProfileDetail(profileId: CreateProfileId): string {
-    return tr(`gui.create.profile.${profileId}.detail`, createProfiles[profileId].detail);
-  }
-
-  function activeCreateProfileDetail(): string {
-    return createProfileDetail(activeCreateProfile);
-  }
-
-  function createFormatMethod(formatId: CreateFormatId = activeCreateFormat): string {
-    return tr(`gui.create.format.${formatId}.method`, createFormats[formatId].method);
-  }
-
-  function createFormatPassword(formatId: CreateFormatId = activeCreateFormat): string {
-    return tr(`gui.create.format.${formatId}.password`, createFormats[formatId].password);
-  }
-
-  function createPasswordDataAvailable(formatId: CreateFormatId = activeCreateFormat): boolean {
-    return createFormats[formatId].can_encrypt_data;
-  }
-
-  function createNameEncryptionAvailable(formatId: CreateFormatId = activeCreateFormat): boolean {
-    return createFormats[formatId].can_encrypt_names;
-  }
-
-  function createNameEncryptionCapability(formatId: CreateFormatId = activeCreateFormat): string {
-    if (createNameEncryptionAvailable(formatId)) {
-      return tr("gui.create.name_encryption_available", "7Z can hide file names");
-    }
-    if (formatId === "zip") {
-      return tr("gui.create.name_encryption_zip_visible", "ZIP names stay visible; use 7Z");
-    }
-    return tr("gui.create.name_encryption_unavailable", "File name encryption unavailable");
-  }
-
-  function createFormatSplit(formatId: CreateFormatId = activeCreateFormat): string {
-    return tr(`gui.create.format.${formatId}.split`, createFormats[formatId].split);
-  }
-
-  function createFormatRecovery(formatId: CreateFormatId = activeCreateFormat): string {
-    return tr(`gui.create.format.${formatId}.recovery`, createFormats[formatId].recovery);
-  }
-
-  function createFormatNoteFor(formatId: CreateFormatId = activeCreateFormat): string {
-    return tr(`gui.create.format.${formatId}.note`, createFormats[formatId].note);
-  }
-
   function noArchiveLabel(): string {
-    return tr("gui.empty.no_archive_short", "No archive open");
+    return tr("gui.empty.no_archive_short");
   }
 
   function classicArchiveStartVisible(): boolean {
@@ -4195,20 +2854,20 @@
   }
 
   function openArchiveFirstLabel(): string {
-    return tr("gui.empty.open_archive_first", "Open archive");
+    return tr("gui.empty.open_archive_first");
   }
 
   function noEntriesLabel(): string {
     if (filterPending()) return archiveFilterStatus();
     if (archiveBrowseError()) {
       return filterText().trim()
-        ? tr("gui.empty.search_failed", "Search stopped before results could load")
-        : tr("gui.empty.browse_failed", "Folder contents could not be loaded");
+        ? tr("gui.empty.search_failed")
+        : tr("gui.empty.browse_failed");
     }
     if (filterText().trim()) {
-      return tr("gui.empty.no_search_matches", "No entries match this search");
+      return tr("gui.empty.no_search_matches");
     }
-    return tr("gui.empty.no_entries", "No entries");
+    return tr("gui.empty.no_entries");
   }
 
   function archiveFilterStatus(): string {
@@ -4216,19 +2875,19 @@
     if (refreshStatus) return refreshStatus;
     if (archiveBrowseError()) {
       return filterText().trim()
-        ? tr("gui.list.search_failed", "Search could not be completed")
-        : tr("gui.list.browse_failed", "Folder contents could not be loaded");
+        ? tr("gui.list.search_failed")
+        : tr("gui.list.browse_failed");
     }
     if (filterPending()) {
       return filterText().trim()
-        ? tr("gui.list.searching", "Searching the entire archive…")
-        : tr("gui.list.loading_folder", "Loading folder contents…");
+        ? tr("gui.list.searching")
+        : tr("gui.list.loading_folder");
     }
     const count = totalRows().toLocaleString();
     if (filterText().trim()) {
-      return tr("gui.list.search_result_count", "{count} matches across the archive").replace("{count}", count);
+      return tr("gui.list.search_result_count").replace("{count}", count);
     }
-    return tr("gui.list.current_folder_count", "{count} items in this folder").replace("{count}", count);
+    return tr("gui.list.current_folder_count").replace("{count}", count);
   }
 
   function updateArchiveFilter(value: string): void {
@@ -4264,10 +2923,9 @@
         const settings = effect.settings;
         recordOperation({
           status: "done",
-          title: tr("gui.settings.general.saved", "General settings saved"),
+          title: tr("gui.settings.general.saved"),
           detail: tr(
             "gui.settings.general.saved_detail",
-            "Language: {language} · Create folder: {createFolder} · Extract folder: {folder} · Reveal after extract {reveal} · Automatic update checks {updates}",
           )
             .replace("{language}", languageLabel(settings.language))
             .replace("{createFolder}", defaultCreateFolderLabel(settings.default_create_dir ?? ""))
@@ -4304,18 +2962,18 @@
   }
 
   function defaultCreateFolderLabel(value: string = settingsSession.general.defaultCreateDir): string {
-    return normalizedDefaultCreateDir(value) ?? tr("gui.settings.folder.ask_when_creating", "Ask when creating");
+    return normalizedDefaultCreateDir(value) ?? tr("gui.settings.folder.ask_when_creating");
   }
 
   function defaultExtractFolderLabel(value: string = settingsSession.general.defaultExtractDir): string {
-    return normalizedDefaultExtractDir(value) ?? tr("gui.settings.folder.next_to_archive", "Next to archive");
+    return normalizedDefaultExtractDir(value) ?? tr("gui.settings.folder.next_to_archive");
   }
 
   async function chooseDefaultExtractFolder() {
     try {
       const { open } = await getDialogModule();
       const selected = await openNativeDialog("settings.default-extract-folder", open, {
-        title: tr("gui.settings.folder.choose_title", "Choose default extract folder"),
+        title: tr("gui.settings.folder.choose_title"),
         multiple: false,
         directory: true,
       });
@@ -4323,7 +2981,7 @@
         settingsSession.setGeneral("defaultExtractDir", selected);
       }
     } catch {
-      showNotice(tr("gui.settings.folder.picker_requires_desktop_service", "Folder picker requires the desktop service"));
+      showNotice(tr("gui.settings.folder.picker_requires_desktop_service"));
     }
   }
 
@@ -4331,7 +2989,7 @@
     try {
       const { open } = await getDialogModule();
       const selected = await openNativeDialog("settings.default-create-folder", open, {
-        title: tr("gui.settings.folder.choose_create_title", "Choose default create folder"),
+        title: tr("gui.settings.folder.choose_create_title"),
         multiple: false,
         directory: true,
       });
@@ -4339,29 +2997,14 @@
         settingsSession.setGeneral("defaultCreateDir", selected);
       }
     } catch {
-      showNotice(tr("gui.settings.folder.picker_requires_desktop_service", "Folder picker requires the desktop service"));
+      showNotice(tr("gui.settings.folder.picker_requires_desktop_service"));
     }
   }
 
   function openRecoveryConfiguration(source: "preserve" | "current" = "preserve") {
     if (preventCreateSubmissionNavigation("recovery")) return;
-    const route = recoveryRouteForOpen(source, Boolean(currentArchive), {
-      sourceMode: recoverySourceMode,
-      sourceOverride: recoverySourceOverride,
-      par2Override: recoveryPar2Override,
-    });
-    if (route.sourceMode !== recoverySourceMode || route.sourceOverride !== recoverySourceOverride
-      || route.par2Override !== recoveryPar2Override) dismissRecoveryPreparation();
-    recoverySourceMode = route.sourceMode;
-    recoverySourceOverride = route.sourceOverride;
-    recoveryPar2Override = route.par2Override;
+    recoverySession.open(source);
     setScreen("recovery");
-    showNotice(
-      recoverySourcePath()
-        ? tr("gui.recovery.route_for_archive", "Recovery opened for {name}.")
-          .replace("{name}", recoverySourceName() ?? tr("gui.archive.generic", "Archive"))
-        : tr("gui.recovery.choose_archive_to_begin", "Choose a damaged archive or a PAR2 file to begin."),
-    );
   }
 
   function openCurrentArchiveRecoveryConfiguration() {
@@ -4381,14 +3024,14 @@
     if (archiveOpenStatus === "opening") return;
     if (preventCreateSubmissionNavigation("browse")) return;
     dismissArchiveAddPreparation();
-    dismissRecoveryPreparation();
+    recoverySession.leave();
     dismissArchivePasswordRequest();
     clearEntryPreviewState();
     const requestGeneration = ++archiveOpenGeneration;
     archivePickerRequest = requestGeneration;
     const isCurrent = () => archivePickerRequest === requestGeneration && archiveOpenGeneration === requestGeneration;
     archiveOpenStatus = "opening";
-    showNotice(tr("gui.archive.opening_picker", "Opening file picker..."));
+    showNotice(tr("gui.archive.opening_picker"));
     let selected: string | string[] | null = null;
     try {
       const { open } = await getDialogModule();
@@ -4398,11 +3041,11 @@
         ? undefined
         : [
             {
-              name: tr("gui.archive.filter_all_files", "All files"),
+              name: tr("gui.archive.filter_all_files"),
               extensions: ["*"],
             },
             {
-              name: tr("gui.archive.filter_archives", "Archives"),
+              name: tr("gui.archive.filter_archives"),
               extensions: [
                 ...registryFormatExtensions(),
                 ...legacyRarVolumeExtensions,
@@ -4410,17 +3053,17 @@
                 "001",
               ],
             },
-            { name: tr("gui.recovery.par2_files", "PAR2 recovery files"), extensions: ["par2"] },
+            { name: tr("gui.recovery.par2_files"), extensions: ["par2"] },
           ];
       selected = await openNativeDialog("archive.open", open, {
-        title: tr("gui.archive.open_dialog_title", "Open archive"),
+        title: tr("gui.archive.open_dialog_title"),
         multiple: false,
         directory: false,
         filters,
       });
       if (!isCurrent()) return;
     } catch {
-      if (isCurrent()) showNotice(tr("gui.archive.open_requires_desktop_dialog", "Open archive requires the desktop file dialog"));
+      if (isCurrent()) showNotice(tr("gui.archive.open_requires_desktop_dialog"));
       return;
     } finally {
       if (isCurrent()) {
@@ -4432,7 +3075,7 @@
     if (typeof path === "string") {
       await openArchivePath(path, "dialog");
     } else {
-      showNotice(tr("gui.archive.open_cancelled", "Open archive cancelled."));
+      showNotice(tr("gui.archive.open_cancelled"));
     }
   }
 
@@ -4440,10 +3083,10 @@
     const validPaths = paths.filter((item) => typeof item === "string" && item.length > 0);
     const path = validPaths[0];
     if (!path) return;
-    if (!setBatchArchivePaths(validPaths)) return;
+    if (!extraction.review.replaceSources(validPaths)) return;
     await openArchivePath(path, source);
     if (validPaths.length > 1) {
-      showNotice(tr("gui.archive.opened_first_more_batch", "Opened first archive · {count} more ready for batch extract").replace("{count}", String(validPaths.length - 1)));
+      showNotice(tr("gui.archive.opened_first_more_batch").replace("{count}", String(validPaths.length - 1)));
     }
   }
 
@@ -4451,11 +3094,11 @@
     const generation = ++incomingOpenFilesGeneration;
     const navigation = taskReviewRequestGeneration;
     const archiveGeneration = archiveOpenGeneration;
-    const batchRevision = batchExtract.revision;
+    const batchRevision = extraction.review.batch.revision;
     return () => generation === incomingOpenFilesGeneration
       && navigation === taskReviewRequestGeneration
       && archiveGeneration === archiveOpenGeneration
-      && batchRevision === batchExtract.revision;
+      && batchRevision === extraction.review.batch.revision;
   }
 
   async function handleOpenFilesPayload(payload: OpenFilesPayload) {
@@ -4489,26 +3132,18 @@
         action,
         paths,
         output,
-        checksumAlgorithm,
-        checksumExcludeRules(),
+        tools.draft.algorithm,
+        tools.excludes("checksum"),
       );
     } catch (error) {
       if (isErrorDto(error)) {
-        applyTaskWindowSubmitTransition(taskWindowSubmitTransition(action, "preset-error", tr));
-        showNotice(tr(error.key, tr("gui.presets.load_failed", "Could not load presets. The preset file was not changed.")));
+        const status = error.key.startsWith("error.presets") ? "preset-error" : "resolve-error";
+        applyTaskWindowSubmitTransition(taskWindowSubmitTransition(action, status, tr));
+        showNotice(tError(error));
         return;
       }
-      if (!import.meta.env.DEV) {
-        applyTaskWindowSubmitTransition(taskWindowSubmitTransition(action, "requires-desktop-service", tr));
-        return;
-      }
-      resolvedSpec = buildExternalTaskJobSpec(action, {
-        paths,
-        output,
-        checksumAlgorithm,
-        checksumExcludes: checksumExcludeRules(),
-        archiveStemName,
-      });
+      applyTaskWindowSubmitTransition(taskWindowSubmitTransition(action, "requires-desktop-service", tr));
+      return;
     }
     const plan = taskWindowSubmitPlan(action, resolvedSpec, tr);
     if (!plan.jobSpec) {
@@ -4532,8 +3167,8 @@
   ): Promise<boolean> {
     if (preventCreateSubmissionNavigation("browse")) return false;
     dismissArchiveAddPreparation();
-    extractDestinationPicker = null;
-    dismissRecoveryPreparation();
+    extraction.invalidatePicker();
+    recoverySession.leave();
     dismissArchivePicker();
     dismissArchivePasswordRequest();
     clearEntryPreviewState();
@@ -4554,18 +3189,16 @@
     const passwordPrompt = openPasswordPrompt();
     if (passwordPrompt?.path === path) {
       setScreen("password");
-      showNotice(tr("gui.archive.password_needed", "Enter the archive password to continue."));
+      showNotice(tr("gui.archive.password_needed"));
       return true;
     }
     pendingArchiveTaskReview = null;
     if (archiveOpenError(path)?.key === "error.corrupt_archive") {
-      dismissRecoveryPreparation();
-      recoverySourceMode = "selected";
-      recoverySourceOverride = path;
-      recoveryPar2Override = null;
+      recoverySession.leave();
+      recoverySession.selectSource(path);
       setScreen("recovery");
       showNotice(
-        tr("gui.recovery.open_failed_routed", "{name} could not be opened. It is ready for recovery checks.")
+        tr("gui.recovery.open_failed_routed")
           .replace("{name}", pathBaseName(path)),
       );
       return true;
@@ -4581,22 +3214,20 @@
     rememberRecent(path);
     recordOperation({
       status: "info",
-      title: tr("gui.archive.opened_operation", "Opened archive"),
+      title: tr("gui.archive.opened_operation"),
       detail: pathBaseName(path),
     });
-    dismissRecoveryPreparation();
-    recoverySourceMode = "current";
-    recoverySourceOverride = null;
-    recoveryPar2Override = null;
+    recoverySession.leave();
+    recoverySession.adoptArchive();
     clearEntryPreviewState();
     if (review && sameFilePath(review.path, path) && review.restore()) return;
     setScreen("browse");
     showNotice(
       source === "password"
-        ? tr("gui.archive.unlocked", "Archive unlocked")
+        ? tr("gui.archive.unlocked")
         : source === "open-file"
-          ? tr("gui.archive.open_file_loaded", "Open-file archive loaded")
-          : tr("gui.archive.open_loaded", "Open archive loaded"),
+          ? tr("gui.archive.open_file_loaded")
+          : tr("gui.archive.open_loaded"),
     );
     recordValidationRenderReady(`archive-open:${source}`);
   }
@@ -4610,18 +3241,18 @@
       return tError(error);
     }
     if (error?.key === "error.unsupported") {
-      return tr("gui.archive.open_unsupported", "{name} uses a format or compression method that is not supported.")
+      return tr("gui.archive.open_unsupported")
         .replace("{name}", pathBaseName(path));
     }
     if (error?.key === "error.io") {
-      return tr("gui.archive.open_io", "Could not access {name}. Check its location and file permissions.")
+      return tr("gui.archive.open_io")
         .replace("{name}", pathBaseName(path));
     }
     if (error?.key === "error.resource_limit") {
-      return tr("gui.archive.open_resource_limit", "{name} exceeds the current safety limits. Review Security settings before trying again.")
+      return tr("gui.archive.open_resource_limit")
         .replace("{name}", pathBaseName(path));
     }
-    return tr("gui.archive.open_failed", "Could not open {name}. Check the format, file access, and integrity.")
+    return tr("gui.archive.open_failed")
       .replace("{name}", pathBaseName(path));
   }
 
@@ -4667,143 +3298,15 @@
   ) {
     dismissArchiveAddPreparation();
     dismissArchivePicker();
-    dismissRecoveryPreparation();
+    recoverySession.leave();
     clearEntryPreviewState();
     pendingArchiveTaskReview = null;
     archiveOpenGeneration += 1;
     archiveOpenStatus = "idle";
     cancelArchivePasswordPrompt();
-    recoveryPar2Override = sidecar;
-    recoverySourceOverride = archivePath;
-    recoverySourceMode = archivePath ? "selected" : "none";
+    recoverySession.selectSet(sidecar, archivePath, sidecarCount, sidecarSetCount);
     setScreen("recovery");
-    let notice: string;
-    if (sidecarSetCount > 1) {
-      notice = tr(
-        "gui.recovery.multiple_sidecar_sets_choose",
-        "{name} selected, but {count} PAR2 sets were provided. Choose the matching archive and PAR2 file.",
-      )
-        .replace("{name}", pathBaseName(sidecar))
-        .replace("{count}", sidecarSetCount.toLocaleString());
-    } else if (sidecarCount > 1) {
-      const key = archivePath
-        ? "gui.recovery.sidecar_set_loaded"
-        : "gui.recovery.sidecar_set_loaded_choose_archive";
-      const fallback = archivePath
-        ? "{name} selected from {count} PAR2 files. Other recovery volumes will be found beside it."
-        : "{name} selected from {count} PAR2 files. Choose the matching archive.";
-      notice = tr(key, fallback)
-        .replace("{name}", pathBaseName(sidecar))
-        .replace("{count}", sidecarCount.toLocaleString());
-    } else if (archivePath) {
-      notice = tr("gui.recovery.set_loaded", "Recovery set loaded for {name}")
-        .replace("{name}", pathBaseName(archivePath));
-    } else {
-      notice = tr("gui.recovery.par2_loaded_choose_archive", "{name} selected. Choose its archive or use the current archive.")
-        .replace("{name}", pathBaseName(sidecar));
-    }
-    showNotice(notice);
     recordValidationRenderReady(`recovery-open:${source}`);
-  }
-
-  function dismissRecoveryPreparation(): void {
-    recoveryOutputPreparation = null;
-    if (recoveryPickerStatus === "idle") return;
-    recoveryPickerRequest += 1;
-    recoveryPickerStatus = "idle";
-  }
-
-  async function chooseRecoveryArchive() {
-    if (screen !== "recovery" || recoveryPickerStatus !== "idle") return;
-    const request = ++recoveryPickerRequest;
-    const isCurrent = () => request === recoveryPickerRequest && screen === "recovery";
-    recoveryPickerStatus = "archive";
-    showNotice(tr("gui.recovery.opening_archive_picker", "Choose the archive to inspect or repair."));
-    try {
-      const { open } = await getDialogModule();
-      if (!isCurrent()) return;
-      const selected = await openNativeDialog("recovery.choose-archive", open, {
-        title: tr("gui.recovery.choose_archive", "Choose archive"),
-        multiple: false,
-        directory: false,
-      });
-      if (!isCurrent()) return;
-      const path = Array.isArray(selected) ? selected[0] : selected;
-      if (typeof path !== "string") {
-        showNotice(tr("gui.recovery.archive_picker_cancelled", "Archive selection cancelled."));
-        return;
-      }
-      recoveryOutputPreparation = null;
-      recoverySourceMode = "selected";
-      recoverySourceOverride = path;
-      showNotice(
-        tr("gui.recovery.archive_selected", "Recovery target: {name}").replace("{name}", pathBaseName(path)),
-      );
-    } catch {
-      if (isCurrent()) showNotice(tr("gui.recovery.archive_picker_unavailable", "Choosing a recovery target requires the desktop file dialog."));
-    } finally {
-      if (isCurrent()) recoveryPickerStatus = "idle";
-    }
-  }
-
-  async function chooseRecoveryPar2() {
-    if (screen !== "recovery" || recoveryPickerStatus !== "idle") return;
-    const request = ++recoveryPickerRequest;
-    const isCurrent = () => request === recoveryPickerRequest && screen === "recovery";
-    recoveryPickerStatus = "par2";
-    showNotice(tr("gui.recovery.opening_par2_picker", "Choose a PAR2 recovery file."));
-    try {
-      const { open } = await getDialogModule();
-      if (!isCurrent()) return;
-      const selected = await openNativeDialog("recovery.choose-par2", open, {
-        title: tr("gui.recovery.choose_par2", "Choose PAR2 file"),
-        multiple: false,
-        directory: false,
-        filters: [{ name: tr("gui.recovery.par2_files", "PAR2 recovery files"), extensions: ["par2"] }],
-      });
-      if (!isCurrent()) return;
-      const path = Array.isArray(selected) ? selected[0] : selected;
-      if (typeof path !== "string") {
-        showNotice(tr("gui.recovery.par2_picker_cancelled", "PAR2 selection cancelled."));
-        return;
-      }
-      recoveryOutputPreparation = null;
-      recoveryPar2Override = path;
-      showNotice(
-        tr("gui.recovery.par2_selected", "PAR2 file: {name}").replace("{name}", pathBaseName(path)),
-      );
-    } catch {
-      if (isCurrent()) showNotice(tr("gui.recovery.par2_picker_unavailable", "Choosing PAR2 data requires the desktop file dialog."));
-    } finally {
-      if (isCurrent()) recoveryPickerStatus = "idle";
-    }
-  }
-
-  function useCurrentArchiveForRecovery() {
-    if (!currentArchive) {
-      showNotice(tr("gui.recovery.no_current_archive", "No archive is currently open."));
-      return;
-    }
-    dismissRecoveryPreparation();
-    recoverySourceMode = "current";
-    recoverySourceOverride = null;
-    showNotice(
-      tr("gui.recovery.using_current_archive", "Using {name} for recovery.").replace("{name}", currentArchive.name),
-    );
-  }
-
-  function useDefaultPar2ForRecovery() {
-    const source = recoverySourcePath();
-    if (!source) {
-      showNotice(tr("gui.recovery.choose_archive_before_default_par2", "Choose an archive before using its default PAR2 file."));
-      return;
-    }
-    dismissRecoveryPreparation();
-    recoveryPar2Override = null;
-    showNotice(
-      tr("gui.recovery.using_default_par2", "Verify and Repair will look for {name} beside the archive.")
-        .replace("{name}", pathBaseName(`${source}.par2`)),
-    );
   }
 
   function entryType(row: EntryDto): string {
@@ -4815,13 +3318,13 @@
 
   function entryAttributeLabel(row: EntryDto): string {
     const parts: string[] = [];
-    if (row.entry_type === "dir") parts.push(tr("gui.attr.folder", "Folder"));
-    else if (row.entry_type === "symlink") parts.push(tr("gui.attr.symlink", "Symbolic link"));
-    else if (row.entry_type === "hardlink") parts.push(tr("gui.attr.hardlink", "Hard link"));
-    else if (row.entry_type === "other") parts.push(tr("gui.attr.other", "Other"));
-    else parts.push(tr("gui.attr.file", "File"));
-    if (row.encrypted) parts.push(tr("gui.attr.encrypted", "Encrypted"));
-    if (row.encoding !== "utf-8" || row.display.includes("\uFFFD")) parts.push(tr("gui.attr.encoding_review", "Encoding review"));
+    if (row.entry_type === "dir") parts.push(tr("gui.attr.folder"));
+    else if (row.entry_type === "symlink") parts.push(tr("gui.attr.symlink"));
+    else if (row.entry_type === "hardlink") parts.push(tr("gui.attr.hardlink"));
+    else if (row.entry_type === "other") parts.push(tr("gui.attr.other"));
+    else parts.push(tr("gui.attr.file"));
+    if (row.encrypted) parts.push(tr("gui.attr.encrypted"));
+    if (row.encoding !== "utf-8" || row.display.includes("\uFFFD")) parts.push(tr("gui.attr.encoding_review"));
     return parts.join(" · ");
   }
 
@@ -4832,7 +3335,7 @@
     const parentBoundary = normalizedPath.lastIndexOf("/");
     const location = filterText().trim()
       ? parentBoundary < 0
-        ? tr("gui.list.archive_root", "Archive root")
+        ? tr("gui.list.archive_root")
         : normalizedPath.slice(0, parentBoundary)
       : "";
     return {
@@ -4901,24 +3404,23 @@
   }
 
   function archiveFormat(): string {
-    return currentArchive?.format.toUpperCase() ?? tr("gui.archive.generic", "Archive");
+    return currentArchive?.format.toUpperCase() ?? tr("gui.archive.generic");
   }
 
   function archiveSummary(): string {
     if (!currentArchive) {
       return tr(
         "gui.empty.no_archive_summary",
-        "Open an archive to browse entries, inspect metadata, and run archive actions.",
       );
     }
     const diagnostics = currentArchive.garbled_count
-      ? tr("gui.archive.names_review", "{count} names need review")
+      ? tr("gui.archive.names_review")
           .replace("{count}", currentArchive.garbled_count.toLocaleString())
       : currentArchive.non_utf8_name_count
-        ? tr("gui.archive.non_utf8_names", "{count} non-UTF-8 names")
+        ? tr("gui.archive.non_utf8_names")
             .replace("{count}", currentArchive.non_utf8_name_count.toLocaleString())
-        : tr("gui.archive.names_clean", "Names decoded cleanly");
-    return tr("gui.archive.summary", "{count} entries · {format} · {diagnostics}")
+        : tr("gui.archive.names_clean");
+    return tr("gui.archive.summary")
       .replace("{count}", currentArchive.entry_count.toLocaleString())
       .replace("{format}", archiveFormat())
       .replace("{diagnostics}", diagnostics);
@@ -4931,7 +3433,6 @@
   function archiveReturnDetail(): string {
     return tr(
       "gui.archive.return_current_detail",
-      "{archive} remains open; return to its file list without losing this tool setup.",
     ).replace("{archive}", archiveTitle());
   }
 
@@ -4939,7 +3440,7 @@
     const title = archiveTitle();
     setScreen("browse");
     showNotice(
-      tr("gui.archive.returned_to_current", "Returned to {archive}").replace("{archive}", title),
+      tr("gui.archive.returned_to_current").replace("{archive}", title),
     );
   }
 
@@ -4947,9 +3448,9 @@
     if (!currentArchive) return openArchiveFirstLabel();
     const count = currentArchive.garbled_count || currentArchive.non_utf8_name_count;
     if (count === 0) {
-      return tr("gui.archive.encoding_clean", "No filename encoding issues detected.");
+      return tr("gui.archive.encoding_clean");
     }
-    return tr("gui.archive.encoding_warning", "Encoding review needed for {count} names.")
+    return tr("gui.archive.encoding_warning")
       .replace("{count}", count.toLocaleString());
   }
 
@@ -4957,7 +3458,6 @@
     if (currentArchive?.structure !== "zip_local_headers_recovered") return null;
     return tr(
       "gui.archive.zip_local_headers_recovered",
-      "The ZIP index is missing or unreadable. The visible files came from local headers; test the archive and rebuild its index before relying on it.",
     );
   }
 
@@ -4977,7 +3477,7 @@
   }
 
   function entrySelectionLabel(entry: DisplayEntry): string {
-    const name = entry.name || entry.source?.path || tr("gui.selection.entry", "entry");
+    const name = entry.name || entry.source?.path || tr("gui.selection.entry");
     const key = isEntrySelected(entry) ? "gui.selection.deselect_entry" : "gui.selection.select_entry";
     const fallback = isEntrySelected(entry) ? "Deselect {name}" : "Select {name}";
     return tr(key, fallback).replace("{name}", name);
@@ -5066,8 +3566,8 @@
     const label = busyLabel
       ? busyLabel
       : checked
-      ? tr("gui.selection.clear", "Clear selection")
-      : tr("gui.selection.select_all", "Select all entries");
+      ? tr("gui.selection.clear")
+      : tr("gui.selection.select_all");
     return {
       checked,
       mixed,
@@ -5079,7 +3579,7 @@
   }
 
   function selectionProgressLabel(loaded: number, total: number): string {
-    return tr("gui.selection.selecting", "Selecting {loaded} of {total}…")
+    return tr("gui.selection.selecting")
       .replace("{loaded}", loaded.toLocaleString())
       .replace("{total}", total.toLocaleString());
   }
@@ -5092,8 +3592,8 @@
 
   function archiveRefreshStatusLabel(): string {
     const status = archiveRefreshStatus();
-    if (status === "refreshing") return tr("gui.archive.refreshing", "Refreshing archive contents…");
-    if (status === "error") return tr("gui.archive.refresh_failed", "Could not refresh the archive. Retry to see the latest files.");
+    if (status === "refreshing") return tr("gui.archive.refreshing");
+    if (status === "error") return tr("gui.archive.refresh_failed");
     return "";
   }
 
@@ -5103,7 +3603,7 @@
     const retrying = retryingArchiveId === currentArchive.id;
     if (status === "idle" && !archiveBrowseError() && !retrying) return null;
     const message = retrying && status === "idle" && !archiveBrowseError()
-      ? tr("gui.list.loading_rows", "Loading entries…")
+      ? tr("gui.list.loading_rows")
       : archiveFilterStatus();
     return { message, busy: status === "refreshing" || retrying };
   }
@@ -5147,11 +3647,11 @@
     const result = await operation(updateProgress);
     archiveSelectionProgress = null;
     if (result === "failed") {
-      showNotice(tr("gui.selection.failed", "Could not complete the selection. Your previous selection was kept. Try again."));
+      showNotice(tr("gui.selection.failed"));
       return false;
     }
     if (result === "stale") {
-      showNotice(tr("gui.selection.stale", "The view or selection changed. The pending selection was cancelled."));
+      showNotice(tr("gui.selection.stale"));
       return false;
     }
     showNotice(successLabel());
@@ -5163,7 +3663,7 @@
     if (control.disabled || control.checked) return;
     const selected = await runArchiveSelection(
       selectAllRows,
-      () => tr("gui.selection.all_selected", "All entries selected"),
+      () => tr("gui.selection.all_selected"),
     );
     if (!selected) return;
     clearEntryPreviewState();
@@ -5182,7 +3682,7 @@
       recordValidationEvent("frontend.entry.selection_clear", {
         selected_count: 0,
       });
-      showNotice(tr("gui.selection.cleared", "Selection cleared"));
+      showNotice(tr("gui.selection.cleared"));
       return;
     }
     void selectAllArchiveEntries();
@@ -5199,7 +3699,7 @@
       const row = entry.source;
       const selected = await runArchiveSelection(
         (onProgress) => selectRangeTo(row, entry.virtualIndex, additive, onProgress),
-        () => tr("gui.selection.count_selected", "{count} selected")
+        () => tr("gui.selection.count_selected")
           .replace("{count}", selectedPaths().size.toLocaleString()),
       );
       if (!selected) return;
@@ -5256,7 +3756,7 @@
     recordValidationEvent("frontend.entry.go_up", {
       path: archiveDirs.join("/"),
     });
-    showNotice(tr("gui.nav.opened_parent_folder", "Opened parent folder"));
+    showNotice(tr("gui.nav.opened_parent_folder"));
   }
 
   async function openArchiveBreadcrumb(level: number) {
@@ -5401,20 +3901,20 @@
   function selectedSummary(): string {
     const count = selectedPaths().size;
     if (!currentArchive || count === 0) {
-      return tr("gui.selection.none", "No entries selected");
+      return tr("gui.selection.none");
     }
-    return tr("gui.selection.selected_size", "{count} selected · {size}")
+    return tr("gui.selection.selected_size")
       .replace("{count}", count.toLocaleString())
       .replace("{size}", formatBytes(selectedSize()));
   }
 
   function archiveEntryCountLabel(count: number): string {
-    return tr("gui.archive.entry_count", "{count} entries")
+    return tr("gui.archive.entry_count")
       .replace("{count}", count.toLocaleString());
   }
 
   function archiveVolumeCountLabel(count: number): string {
-    return tr("gui.archive.volume_count", "{count} volumes")
+    return tr("gui.archive.volume_count")
       .replace("{count}", count.toLocaleString());
   }
 
@@ -5448,65 +3948,13 @@
     return dot > 0 ? name.slice(dot + 1).toUpperCase() : "ARCHIVE";
   }
 
-  function batchDraftLocked(): boolean {
-    return batchSubmissionPending || batchPickerBusy;
-  }
-
-  function setBatchArchivePaths(paths: readonly string[]): boolean {
-    if (batchDraftLocked()) {
-      showNotice(tr("gui.batch.wait_for_current", "Finish the current selection or submission before reviewing another batch."));
-      return false;
-    }
-    batchExtract.replaceSources(paths);
-    return true;
-  }
-
-  function editBatchDraft(change: BatchExtractEdit): void {
-    if (batchDraftLocked()) return;
-    batchExtract.edit(change);
-  }
-
   function removeBatchItem(index: number): void {
-    editBatchDraft({ kind: "remove", index });
+    extraction.review.editBatch({ kind: "remove", index });
     void tick().then(() => {
       if (screen !== "batch") return;
-      (document.getElementById(`batch-remove-${Math.min(index, batchDraft.items.length - 1)}`)
+      (document.getElementById(`batch-remove-${Math.min(index, extraction.review.batch.state.items.length - 1)}`)
         ?? document.getElementById("batch-workspace-heading"))?.focus();
     });
-  }
-
-  async function chooseBatchPaths(index: number | null = null): Promise<void> {
-    if (screen !== "batch" || batchDraftLocked()) return;
-    const draft = batchDraft;
-    if (index !== null && !draft.items[index]) return;
-    const revision = batchExtract.revision;
-    const request = ++batchPickerRequest;
-    const isCurrent = () => request === batchPickerRequest
-      && revision === batchExtract.revision && screen === "batch";
-    batchPickerBusy = true;
-    try {
-      const { open } = await getDialogModule();
-      if (!isCurrent()) return;
-      const selected = await openNativeDialog(index === null ? "batch.sources" : "batch.destination", open, {
-        title: index === null ? tr("gui.batch.add_archives", "Add archives") : tr("gui.batch.choose_destination", "Choose destination"),
-        multiple: index === null, directory: index !== null,
-        defaultPath: index === null ? undefined : draft.items[index]?.dest,
-      });
-      if (!isCurrent()) return;
-      if (!selected) {
-        showNotice(tr("gui.batch.selection_cancelled", "Selection cancelled · the current batch was kept"));
-        return;
-      }
-      const paths = Array.isArray(selected) ? selected : [selected];
-      const added = batchExtract.acceptSelection(paths, index, draft);
-      if (index === null && added === 0) showNotice(tr("gui.batch.already_added", "Those archives are already in the batch."));
-    } catch {
-      if (isCurrent()) showNotice(index === null
-        ? tr("gui.batch.picker_unavailable", "Could not open the file chooser. Try again, or drag archives into the window.")
-        : tr("gui.batch.destination_picker_unavailable", "Could not open the folder chooser. Try again, or edit the destination in the list."));
-    } finally {
-      if (request === batchPickerRequest) batchPickerBusy = false;
-    }
   }
 
   function focusBatchReview(): void {
@@ -5519,146 +3967,16 @@
     });
   }
 
-  function appendCreateSources(
-    paths: readonly string[],
-    kind: CreateSourceKind,
-  ): { added: number; total: number } {
-    const previousCount = createSources.length;
-    const merged = mergeCreateSources(
-      createSources,
-      paths.map((path) => ({ path, kind })),
-      platformKind(),
-    );
-    if (merged.length !== previousCount || merged.some((source, index) =>
-      source.path !== createSources[index]?.path || source.kind !== createSources[index]?.kind)) {
-      dismissCreatePreparation();
-      createSources = merged;
-      syncCreatePreflightContext();
-    }
-    return {
-      added: createSources.length - previousCount,
-      total: createSources.length,
-    };
-  }
-
-  function showCreateSourcesAdded(result: { added: number; total: number }): void {
-    showNotice(
-      result.added > 0
-        ? tr("gui.create.sources.added", "{added} items added · {total} total")
-          .replace("{added}", result.added.toLocaleString())
-          .replace("{total}", result.total.toLocaleString())
-        : tr("gui.create.sources.already_added", "Those items are already in the source list"),
-    );
-  }
-
-  function createSourceSelected(path: string): boolean {
-    return includesCreateSourcePath(selectedCreateSourcePaths, path, platformKind());
-  }
-
-  function createSourceSelectedCount(): number {
-    return createSources.filter((source) => createSourceSelected(source.path)).length;
-  }
-
-  function createSourceAllSelected(): boolean {
-    return createSources.length > 0 && createSourceSelectedCount() === createSources.length;
-  }
-
-  function setAllCreateSourcesSelected(selected: boolean): void {
-    if (createPreflight.sourcesLocked()) return;
-    selectedCreateSourcePaths = selected ? [...createSourceInputs] : [];
-  }
-
-  function toggleCreateSourceSelection(path: string): void {
-    if (createPreflight.sourcesLocked()) return;
-    selectedCreateSourcePaths = toggleCreateSourcePath(
-      selectedCreateSourcePaths,
-      path,
-      platformKind(),
-    );
-  }
-
-  function clearCreateSourceSelection(): void {
-    if (createPreflight.sourcesLocked()) return;
-    selectedCreateSourcePaths = [];
-  }
-
-  function removeCreateSourcePaths(paths: readonly string[]): number {
-    if (createPreflight.sourcesLocked() || paths.length === 0) return 0;
-    const previousCount = createSources.length;
-    const remaining = removeCreateSourcesByPaths(createSources, paths, platformKind());
-    if (remaining.length === previousCount) return 0;
-    dismissCreatePreparation();
-    createSources = remaining;
-    syncCreatePreflightContext();
-    selectedCreateSourcePaths = selectedCreateSourcePaths.filter(
-      (selected) => !includesCreateSourcePath(paths, selected, platformKind()),
-    );
-    return previousCount - createSources.length;
-  }
-
-  function removeCreateSource(path: string): void {
-    if (removeCreateSourcePaths([path]) === 0) return;
-    showNotice(
-      tr("gui.create.sources.removed_one", "{name} removed from the source list")
-        .replace("{name}", desktopBasename(path, platformKind())),
-    );
-  }
-
-  function removeSelectedCreateSources(): void {
-    const removed = removeCreateSourcePaths(selectedCreateSourcePaths);
-    if (removed === 0) return;
-    showNotice(
-      tr("gui.create.sources.removed_many", "{count} items removed from the source list")
-        .replace("{count}", removed.toLocaleString()),
-    );
-  }
-
-  function clearCreateSources(): void {
-    if (createSources.length === 0 && selectedCreateSourcePaths.length === 0 && createSuggestedDestination === null) return;
-    dismissCreatePreparation();
-    createSources = [];
-    selectedCreateSourcePaths = [];
-    createOptions.clearSuggestedDestination();
-    syncCreatePreflightContext();
-  }
-
-  function createSourceKindLabel(kind: CreateSourceKind): string {
-    if (kind === "file") return tr("gui.create.sources.kind_file", "File");
-    if (kind === "folder") return tr("gui.create.sources.kind_folder", "Folder");
-    return tr("gui.create.sources.kind_item", "File or folder");
-  }
-
-  function createSourceCountLabel(): string {
-    return tr("gui.create.sources.count", "{count} items")
-      .replace("{count}", createSources.length.toLocaleString());
-  }
-
-  function createSourceSelectionLabel(): string {
-    const count = createSourceSelectedCount();
-    return count === 0
-      ? tr("gui.create.sources.none_selected", "None selected")
-      : tr("gui.create.sources.selected_count", "{count} selected")
-        .replace("{count}", count.toLocaleString());
-  }
-
-  async function submitCreateSourceList(): Promise<void> {
-    if (createSourceInputs.length === 0) {
-      showNotice(tr("gui.create.no_source_items", "No source items selected"));
-      return;
-    }
-    await submitCreateInputs([...createSourceInputs], "dialog");
-  }
-
   function dropStatusLabel(): string {
-    if (dragActive) return tr("gui.drop.active", "Drop archives to open, or files and folders to create an archive");
+    if (dragActive) return tr("gui.drop.active");
     if (lastDropKind === "archives") {
-      return tr("gui.drop.archives_ready", "{count} dropped archives ready").replace("{count}", String(batchDraft.items.length));
+      return tr("gui.drop.archives_ready").replace("{count}", String(extraction.review.batch.state.items.length));
     }
     if (lastDropKind === "create") {
-      return tr("gui.drop.create_ready", "{count} dropped items ready to archive").replace("{count}", String(createSources.length));
+      return tr("gui.drop.create_ready").replace("{count}", String(create.sources.length));
     }
     if (lastDropKind === "recovery") {
-      return tr("gui.drop.recovery_ready", "Recovery files ready");
+      return tr("gui.drop.recovery_ready");
     }
     return "";
   }
@@ -5775,26 +4093,26 @@
     if (modeSelectionBlocked) {
       dragActive = false;
       if (firstRunRequired) {
-        firstRunDropFeedback = tr("gui.first_run.choose_before_drop", "Choose an interface mode before opening or creating archives");
+        firstRunDropFeedback = tr("gui.first_run.choose_before_drop");
       } else {
-        showNotice(tr("gui.first_run.wait_before_drop", "Wait while Squallz checks saved settings before opening or creating archives"));
+        showNotice(tr("gui.first_run.wait_before_drop"));
       }
       return;
     }
-    if (createPreflight.state.picker) {
-      showNotice(tr("gui.create.sources.finish_picker_before_drop", "Close the source picker before dropping other items"));
+    if (create.preflight.state.picker) {
+      showNotice(tr("gui.create.sources.finish_picker_before_drop"));
       return;
     }
-    if (createPreflight.busy()) {
-      showNotice(tr("gui.create.finish_preflight_before_drop", "Wait for create preflight to finish before dropping other items"));
+    if (create.preflight.busy()) {
+      showNotice(tr("gui.create.finish_preflight_before_drop"));
       return;
     }
-    if (createPreflight.state.pending) {
-      showNotice(tr("gui.create.finish_review_before_drop", "Confirm or cancel the current create plan before dropping other items"));
+    if (create.preflight.state.pending) {
+      showNotice(tr("gui.create.finish_review_before_drop"));
       return;
     }
     if (screen === "create") {
-      const result = appendCreateSources(dropped, "unknown");
+      const result = create.appendSources(dropped, "unknown");
       lastDropKind = "create";
       recordValidationEvent("frontend.drop", {
         source,
@@ -5804,7 +4122,7 @@
         create_count: dropped.length,
       });
       if (source !== "preview" && source !== "validation") {
-        showCreateSourcesAdded(result);
+        create.view.sourcesAdded(result);
       }
       return;
     }
@@ -5831,7 +4149,7 @@
         create_count: 0,
       });
       lastDropKind = "archives";
-      if (!setBatchArchivePaths(archivePaths)) return;
+      if (!extraction.review.replaceSources(archivePaths)) return;
       if (archivePaths.length === 1) {
         await openArchivePath(archivePaths[0], "open-file");
       } else {
@@ -5841,7 +4159,7 @@
     }
 
     lastDropKind = "create";
-    const result = appendCreateSources(dropped, "unknown");
+    const result = create.appendSources(dropped, "unknown");
     recordValidationEvent("frontend.drop", {
       source,
       route: "create",
@@ -5850,15 +4168,14 @@
       create_count: createInputs.length,
     });
     setScreen("create");
-    if (source === "native" && createPostSuccess === "trash_source") {
+    if (source === "native" && create.options.state.postSuccess === "trash_source") {
       showNotice(
         tr(
           "gui.create.output.trash_drop_confirmation",
-          "Review the output settings, then confirm creation before originals can move to {trash}.",
         ).replace("{trash}", trashNameLabel()),
       );
     } else if (source !== "preview" && source !== "validation") {
-      showCreateSourcesAdded(result);
+      create.view.sourcesAdded(result);
     }
   }
 
@@ -5872,27 +4189,6 @@
   function defaultExtractDest(): string {
     if (!currentArchive) return openArchiveFirstLabel();
     return extractDestInDefaultFolder(pathDir(currentArchive.path), currentArchive.name);
-  }
-
-  function extractJobDestination(): string {
-    if (!currentArchive) return openArchiveFirstLabel();
-    return extractOptions.requestedDestination({
-      archiveFolder: defaultExtractDest(), archiveParent: sameFolderExtractDest(),
-      defaultDirectory: normalizedDefaultExtractDir(settingsSession.appliedGeneral.defaultExtractDir),
-    });
-  }
-
-  function extractSmartBase(): string {
-    return extractOptions.smartBase(normalizedDefaultExtractDir(settingsSession.appliedGeneral.defaultExtractDir),
-      currentArchive ? pathDir(currentArchive.path) : openArchiveFirstLabel());
-  }
-
-  function sameFolderExtractDest(): string {
-    return currentArchive ? pathDir(currentArchive.path) : openArchiveFirstLabel();
-  }
-
-  function chosenExtractDest(): string {
-    return extractCustomDest.trim() || tr("gui.extract.pick_another_folder", "Pick another folder");
   }
 
   function previewEntryMatchesSelection(entry: EntryDto, selection: string[] | null): boolean {
@@ -5969,501 +4265,8 @@
     };
   }
 
-  function captureExtractPlanInput(): ExtractPlanInput | null {
-    const current = currentArchive;
-    if (!current || screen !== "extract") return null;
-    return extractOptions.snapshotPlan(current, extractJobDestination());
-  }
-
-  function extractPlanStatusLabel(): string {
-    if (extractPlanSession.phase === "ready") return tr("gui.extract.plan_ready", "Ready");
-    if (extractPlanSession.phase === "blocked") return tr("gui.error.disk_full.title", "Not Enough Disk Space");
-    if (extractPlanSession.phase === "error") return tr("gui.extract.plan_unavailable", "Preview unavailable");
-    if (extractPlanSession.phase === "loading") return tr("gui.extract.plan_checking", "Checking");
-    return tr("gui.extract.plan_waiting", "Waiting");
-  }
-
-  function extractPlanDescription(): string {
-    if (!currentArchive) return openArchiveFirstLabel();
-    if (extractPlanSession.phase === "blocked") return extractSpaceFailureLabel();
-    return extractPlanSession.phase === "ready"
-      ? tr(
-          "gui.extract.plan_ready_body",
-          "The selected scope, smart layout, and destination below come from the same core plan the task will rebuild before extraction.",
-        )
-      : tr(
-          "gui.extract.plan_checking_body",
-          "Reading the archive layout and checking the current destination without writing files.",
-        );
-  }
-
-  function extractPlanErrorLabel(): string {
-    if (!extractPlanSession.errorKey) return "";
-    return tr(
-      extractPlanSession.errorKey,
-      "Squallz could not refresh this preview. Check the archive and destination, then try again.",
-    );
-  }
-
-  function extractSpaceFailureLabel(): string {
-    const plan = extractPlanSession.plan;
-    if (!plan) return tr("error.disk_full", "Disk is full");
-    return tr(
-      "gui.error.disk_full.body",
-      "{required} needed, {available} available. Free up space and retry.",
-    )
-      .replace("{required}", formatBytes(plan.required_free_bytes))
-      .replace("{available}", formatBytes(plan.available_bytes));
-  }
-
-  function retryExtractPlan(): Promise<void> {
-    const input = captureExtractPlanInput();
-    return input ? extractPlanSession.request(input, { force: true }) : Promise.resolve();
-  }
-
-  function extractPlanLayoutLabel(): string {
-    if (!extractPlanSession.plan) return tr("gui.extract.layout_direct", "Direct");
-    return extractPlanSession.plan.layout === "wrap_in_folder"
-      ? tr("gui.extract.layout_wrapped", "Containing folder")
-      : tr("gui.extract.layout_direct", "Direct");
-  }
-
-  function extractPlanMetrics() {
-    const plan = extractPlanSession.plan;
-    if (!plan) return [];
-    const linkCount = plan.symlinks + plan.hardlinks;
-    const metrics: ExtractWorkspaceSurface["plan"]["metrics"] = [
-      {
-        id: "scope",
-        label: tr("gui.extract.plan_scope", "Scope"),
-        value: tr("gui.extract.plan_scope_value", "{entries} entries · {files} files · {folders} folders · {links} links · {other} other")
-          .replace("{entries}", plan.entries.toLocaleString())
-          .replace("{files}", plan.files.toLocaleString())
-          .replace("{folders}", plan.directories.toLocaleString())
-          .replace("{links}", linkCount.toLocaleString())
-          .replace("{other}", plan.other.toLocaleString()),
-      },
-      {
-        id: "size",
-        label: tr("gui.extract.plan_size", "Selected file data"),
-        value: formatBytes(plan.total_bytes),
-      },
-    ];
-    if (plan.entries > 0) {
-      metrics.push(
-        {
-          id: "required-space",
-          label: tr("common.required", "Required"),
-          value: formatBytes(plan.required_free_bytes),
-        },
-        {
-          id: "available-space",
-          label: tr("common.available", "Available"),
-          value: formatBytes(plan.available_bytes),
-          tone: plan.space_ok ? "default" as const : "warning" as const,
-        },
-      );
-    }
-    metrics.push(
-      {
-        id: "layout",
-        label: tr("gui.extract.plan_layout", "Layout"),
-        value: extractPlanLayoutLabel(),
-      },
-      {
-        id: "conflicts",
-        label: tr("gui.extract.plan_conflicts", "Estimated conflicts"),
-        value: plan.estimated_conflicts.toLocaleString(),
-        tone: plan.estimated_conflicts > 0 ? "warning" as const : "default" as const,
-      },
-    );
-    return metrics;
-  }
-
-  function effectiveExtractDest(): string {
-    if (!currentArchive) return openArchiveFirstLabel();
-    if (extractDestinationMode === "smart") {
-      if (
-        (extractPlanSession.phase === "ready" || extractPlanSession.phase === "blocked") &&
-        extractPlanSession.plan
-      ) return extractPlanSession.plan.destination;
-      return tr("gui.extract.smart_destination_value", "{base} · final folder chosen from archive contents")
-        .replace("{base}", extractJobDestination());
-    }
-    return extractJobDestination();
-  }
-
-  function extractDestinationFieldLabel(): string {
-    return extractDestinationMode === "smart"
-      ? tr("gui.extract.smart_base", "Smart base")
-      : tr("gui.extract.final_destination", "Final destination");
-  }
-
-  function extractDestinationTitle(mode: ExtractDestinationMode): string {
-    if (mode === "archive") return tr("gui.extract.archive_folder", "Archive folder");
-    if (mode === "same") return tr("gui.extract.same_folder", "Same folder");
-    if (mode === "choose") return tr("gui.extract.choose", "Choose");
-    return tr("gui.extract.smart_folder", "Smart folder");
-  }
-
-  function extractDestinationDetail(mode: ExtractDestinationMode): string {
-    if (!currentArchive) return openArchiveFirstLabel();
-    if (mode === "same") return sameFolderExtractDest();
-    if (mode === "choose") return chosenExtractDest();
-    if (mode === "smart") {
-      return tr("gui.extract.smart_destination_value", "{base} · final folder chosen from archive contents")
-        .replace("{base}", extractSmartBase());
-    }
-    return defaultExtractDest();
-  }
-
-  async function selectExtractDestination(mode: ExtractDestinationMode) {
-    if (!currentArchive) {
-      showNotice(openArchiveFirstLabel());
-      return;
-    }
-    if (mode === "choose") {
-      await chooseExtractDestination();
-      return;
-    }
-    extractDestinationPicker = null;
-    extractOptions.selectDestination(mode);
-  }
-
-  function extractWorkspaceSurface(variant: ExtractWorkspaceVariant): ExtractWorkspaceSurface {
-    const archiveRequiredReason = extractArchiveRequiredReason();
-    const startBlockedReason = extractStartBlockedReason();
-    const startLabel = variant === "modern"
-      ? extractActionLabel()
-      : tr("gui.extract.start", "Extract");
-    const batchLabel = variant === "modern"
-      ? tr("gui.extract.review_batch", "Review batch extract")
-      : tr("gui.extract.batch_review", "Batch review");
-    const selectedPreset = selectedExtractArchivePreset();
-
-    return {
-      tr,
-      title: variant === "modern"
-        ? extractSafeTitle()
-        : classicCommandLabel("Extract To"),
-      onReady: () => {
-        if (extractReviewFocusPending) focusExtractReview();
-      },
-      start: {
-        label: startLabel,
-        disabled: Boolean(startBlockedReason),
-        title: startBlockedReason || extractDestinationHint(),
-        ariaLabel: labelWithDisabledReason(startLabel, startBlockedReason),
-        onSelect: () => void submitExtractJob(),
-      },
-      batch: {
-        label: batchLabel,
-        disabled: Boolean(archiveRequiredReason),
-        title: archiveRequiredReason,
-        ariaLabel: labelWithDisabledReason(batchLabel, archiveRequiredReason),
-        onSelect: () => setScreen("batch"),
-      },
-      destination: {
-        label: extractDestinationFieldLabel(),
-        path: extractJobDestination(),
-        choices: extractDestinationModes.map((mode) => {
-          const busy = mode === "choose" && extractDestinationPicker !== null;
-          const label = busy
-            ? tr("gui.extract.choosing_destination", "Choosing folder…")
-            : extractDestinationTitle(mode);
-          const reason = archiveRequiredReason || (busy
-            ? tr("gui.extract.destination_picker_wait", "Finish choosing a destination, or close the folder chooser.")
-            : "");
-          return {
-            id: mode,
-            label,
-            detail: busy ? reason : extractDestinationDetail(mode),
-            selected: extractDestinationMode === mode,
-            busy,
-            disabled: Boolean(reason),
-            title: reason,
-            ariaLabel: labelWithDisabledReason(label, reason),
-            onSelect: () => void selectExtractDestination(mode),
-          };
-        }),
-      },
-      archive: {
-        title: archiveTitle(),
-        line: archiveLine(),
-        selection: extractSelectionLabel(),
-        password: extractPasswordLabel(),
-        verification: extractVerifySfx
-          ? tr("gui.extract.verify_sfx", "The self-extractor payload will be verified before writing files.")
-          : null,
-      },
-      plan: {
-        variant,
-        phase: extractPlanSession.phase,
-        ariaLabel: tr("gui.extract.plan_aria", "Extraction write plan"),
-        eyebrow: tr("gui.extract.plan_eyebrow", "Before extraction"),
-        heading: tr("gui.extract.plan_heading", "Know what will be written"),
-        statusLabel: extractPlanStatusLabel(),
-        description: extractPlanDescription(),
-        destinationLabel: tr("gui.extract.plan_destination", "Planned destination"),
-        destination: extractPlanSession.plan?.destination ?? extractJobDestination(),
-        metrics: extractPlanMetrics(),
-        note: tr("gui.extract.plan_snapshot_note", "Required space includes selected data and filesystem allocation allowance. Space and conflicts are checked again immediately before writing."),
-        error: extractPlanErrorLabel(),
-        retryLabel: extractPlanSession.phase === "blocked"
-          ? tr("gui.extract.plan_recheck_space", "Check space again")
-          : tr("gui.extract.plan_retry", "Retry preview"),
-        onRetry: () => void retryExtractPlan(),
-      },
-      preset: {
-        instanceId: `${variant}-extract`,
-        variant,
-        compact: true,
-        kind: "extract",
-        options: extractPresetPickerOptions(),
-        selectedId: selectedExtractPresetId,
-        draftName: extractPresetDraftName,
-        summary: extractArchivePresetSummary(currentExtractArchivePresetOptions()),
-        status: extractPresetStatus(),
-        statusLabel: archivePresetStatusLabel(extractPresetStatus()),
-        disabledReason: archivePresetPickerDisabledReason("extract"),
-        updateDisabledReason: presetReadOnlyReason(selectedPreset),
-        deleteDisabledReason: presetReadOnlyReason(selectedPreset),
-        isDefault: presetDocument?.bindings.app_default_extract === selectedExtractPresetId,
-        isFileManagerDefault: presetDocument?.bindings.file_manager_extract === selectedExtractPresetId,
-        tr,
-        onSelect: (id) => applyExtractPreset(id),
-        onDraftNameInput: (name) => (extractPresetDraftName = name),
-        onUpdate: () => void saveArchivePreset("extract", "update"),
-        onSaveAs: () => void saveArchivePreset("extract", "save_as"),
-        onDelete: () => void deleteSelectedArchivePreset("extract"),
-        onDefaultChange: (enabled) => void setArchivePresetBinding("extract", "app", enabled),
-        onFileManagerDefaultChange: (enabled) => void setArchivePresetBinding("extract", "file_manager", enabled),
-      },
-      overwrite: {
-        label: currentExtractOverwriteLabel,
-        choices: extractOverwriteModes.map((mode) => ({
-          id: mode,
-          label: extractOverwriteLabel(mode),
-          detail: "",
-          selected: extractOverwriteMode === mode,
-          busy: false,
-          disabled: false,
-          title: "",
-          ariaLabel: extractOverwriteLabel(mode),
-          onSelect: () => selectExtractOverwrite(mode),
-        })),
-      },
-      symlink: {
-        label: currentExtractSymlinkLabel,
-        choices: extractSymlinkModes.map((mode) => ({
-          id: mode,
-          label: extractSymlinkLabel(mode),
-          detail: "",
-          selected: extractSymlinkMode === mode,
-          busy: false,
-          disabled: false,
-          title: "",
-          ariaLabel: extractSymlinkLabel(mode),
-          onSelect: () => selectExtractSymlink(mode),
-        })),
-      },
-      encoding: {
-        label: extractEncodingLabel(),
-        detail: currentArchive ? archiveWarningText() : openArchiveFirstLabel(),
-      },
-      test: {
-        disabled: !appActionEnabled("test_archive"),
-        title: archiveRequiredReason,
-        ariaLabel: labelWithDisabledReason(
-          tr("gui.extract.test_first", "Test first"),
-          archiveRequiredReason,
-        ),
-        onSelect: () => void runAppAction("test_archive"),
-      },
-    };
-  }
-
-  async function chooseExtractDestination(): Promise<boolean> {
-    if (!currentArchive) {
-      showNotice(openArchiveFirstLabel());
-      return false;
-    }
-    if (extractDestinationPicker) {
-      showNotice(tr("gui.extract.destination_picker_wait", "Finish choosing a destination, or close the folder chooser."));
-      return false;
-    }
-    const request = {
-      archiveId: currentArchive.id,
-      source: currentArchive.source,
-      path: currentArchive.path,
-      screen,
-      selection: screen === "browse" ? new Set(selectedPaths()) : null,
-    };
-    const defaultPath = extractCustomDest.trim() || extractJobDestination();
-    extractDestinationPicker = request;
-    const isCurrent = () => {
-      if (extractDestinationPicker !== request || screen !== request.screen
-        || currentArchive?.id !== request.archiveId || currentArchive.source !== request.source
-        || currentArchive.path !== request.path) return false;
-      if (!request.selection) return true;
-      const selection = selectedPaths();
-      return selection.size === request.selection.size
-        && [...request.selection].every((path) => selection.has(path));
-    };
-    try {
-      const { open } = await getDialogModule();
-      if (!isCurrent()) return false;
-      const selected = await openNativeDialog("extract.destination", open, {
-        title: tr("gui.extract.choose_destination_title", "Choose extract destination"),
-        multiple: false,
-        directory: true,
-        defaultPath,
-      });
-      if (!isCurrent()) return false;
-      if (typeof selected === "string" && selected.trim()) {
-        extractOptions.acceptDestination(selected);
-        showNotice(tr("gui.extract.destination_selected", "Extract destination selected"));
-        return true;
-      }
-      showNotice(tr("gui.extract.destination_picker_cancelled", "Destination selection cancelled · the current destination was kept"));
-      return false;
-    } catch {
-      if (isCurrent()) {
-        showNotice(tr("gui.extract.destination_picker_requires_desktop_service", "Destination picker requires the desktop service"));
-      }
-      return false;
-    } finally {
-      if (extractDestinationPicker === request) extractDestinationPicker = null;
-    }
-  }
-
-  function extractOverwriteLabel(mode: ExtractOverwriteMode): string {
-    if (mode === "skip") return tr("gui.extract.overwrite.skip", "Skip");
-    if (mode === "overwrite") return tr("gui.extract.overwrite.overwrite", "Overwrite");
-    if (mode === "rename") return tr("gui.extract.overwrite.rename", "Keep both (auto-rename)");
-    return tr("gui.extract.overwrite.ask", "Ask");
-  }
-
-  function selectExtractOverwrite(mode: ExtractOverwriteMode) {
-    if (!currentArchive) {
-      showNotice(openArchiveFirstLabel());
-      return;
-    }
-    extractOptions.selectPolicy({ kind: "overwrite", value: mode });
-  }
-
-  function extractSymlinkLabel(mode: ExtractSymlinkMode): string {
-    if (mode === "skip") return tr("gui.extract.symlink.skip", "Skip links");
-    if (mode === "follow") return tr("gui.extract.symlink.follow", "Follow safe links");
-    return tr("gui.extract.symlink.preserve", "Preserve links");
-  }
-
-  function selectExtractSymlink(mode: ExtractSymlinkMode) {
-    if (!currentArchive) {
-      showNotice(openArchiveFirstLabel());
-      return;
-    }
-    extractOptions.selectPolicy({ kind: "symlinks", value: mode });
-  }
-
   function extractDestForPath(path: string): string {
     return extractDestInDefaultFolder(pathDir(path), pathBaseName(path));
-  }
-
-  function defaultSqzExportDest(): string {
-    const source = recoverySourcePath();
-    if (!source) return openArchiveFirstLabel();
-    return `${pathDir(source)}/${archiveStemName(pathBaseName(source))}.zip`;
-  }
-
-  function defaultSqzRepairDest(): string {
-    const source = recoverySourcePath();
-    if (!source) return openArchiveFirstLabel();
-    return `${pathDir(source)}/${archiveStemName(pathBaseName(source))}.repaired.sqz`;
-  }
-
-  function defaultZipRepairDest(): string {
-    const source = recoverySourcePath();
-    if (!source) return openArchiveFirstLabel();
-    return `${pathDir(source)}/${archiveStemName(pathBaseName(source))}.rebuilt.zip`;
-  }
-
-  function recoverySourcePath(): string | null {
-    if (recoverySourceMode === "current") return currentArchive?.path ?? null;
-    if (recoverySourceMode === "selected") return recoverySourceOverride;
-    return null;
-  }
-
-  function recoverySourceForJob(): string | null {
-    const source = recoverySourcePath();
-    return recoverySourceMatchesCurrentArchive() ? currentArchive?.source ?? null : source;
-  }
-
-  function recoverySourceName(): string | null {
-    const source = recoverySourcePath();
-    return source ? pathBaseName(source) : null;
-  }
-
-  function defaultRecoveryPath(): string | null {
-    const source = recoverySourcePath();
-    return source ? `${source}.par2` : null;
-  }
-
-  function recoveryPar2Path(): string | null {
-    return recoveryPar2Override ?? defaultRecoveryPath();
-  }
-
-  function recoverySourceMatchesCurrentArchive(): boolean {
-    const source = recoverySourcePath();
-    return Boolean(
-      recoverySourceMode === "current" &&
-      source &&
-      currentArchive &&
-      sameFilePath(source, currentArchive.path),
-    );
-  }
-
-  function recoverySourceIsSplit(): boolean {
-    const source = recoverySourcePath();
-    return Boolean(source && /\.\d{3,}$/i.test(pathBaseName(source)));
-  }
-
-  function recoveryRepairUsesDirectory(): boolean {
-    const reportedCount = recoveryReportNumber("source_file_count");
-    if (reportedCount !== null) return reportedCount > 1;
-    return recoverySourceIsSplit()
-      || (recoverySourceMatchesCurrentArchive() && (currentArchive?.volumes?.length ?? 0) > 1);
-  }
-
-  function recoverySourceFormatId(): string | null {
-    const source = recoverySourcePath();
-    if (!source) return null;
-    if (recoverySourceMatchesCurrentArchive()) return currentArchive?.format.toLowerCase() ?? null;
-    return archiveExtensionMatch(pathBaseName(source));
-  }
-
-  function isRecoverySourceZipFamily(): boolean {
-    const format = recoverySourceFormatId();
-    return Boolean(format && ["zip", "jar", "apk", "cbz", "ipa"].includes(format));
-  }
-
-  function isRecoverySourceSqz(): boolean {
-    return recoverySourceFormatId() === "sqz";
-  }
-
-  function defaultPar2RepairDest(): string {
-    const source = recoverySourcePath();
-    if (!source) return openArchiveFirstLabel();
-    const sourceName = pathBaseName(source);
-    const extension = archiveExtensionMatch(sourceName);
-    const suffix = extension ? `.${extension}` : "";
-    return `${pathDir(source)}/${archiveStemName(sourceName)}.repaired${suffix}`;
-  }
-
-  function defaultPar2RepairDirectoryName(): string {
-    const source = recoverySourcePath();
-    if (!source) return tr("gui.recovery.repaired_set_folder_name", "repaired-set");
-    return `${archiveStemName(pathBaseName(source))}.repaired`;
   }
 
   function sameFilePath(left: string, right: string): boolean {
@@ -6474,115 +4277,13 @@
     return reason ? `${label} · ${reason}` : label;
   }
 
-  function recoveryZipDisabledReason(): string {
-    if (!recoverySourcePath()) return tr("gui.recovery.choose_archive_before_zip_rebuild", "Choose a ZIP-family archive before rebuilding its index.");
-    if (recoverySourceIsSplit()) return tr("gui.recovery.zip_rebuild_no_split", "ZIP index rebuild cannot write a safe copy from a split archive.");
-    return isRecoverySourceZipFamily() ? "" : tr("gui.recovery.zip_rebuild_zip_family_only", "ZIP index rebuild is available for ZIP-family archives");
-  }
-
-  function recoverySqzExportDisabledReason(): string {
-    if (!isRecoverySourceSqz()) return tr("gui.recovery.choose_sqz_before_export", "Choose an SQZ archive before exporting.");
-    return recoverySourceMatchesCurrentArchive()
-      ? ""
-      : tr("gui.recovery.open_selected_sqz_before_export", "Open this SQZ archive successfully before exporting it.");
-  }
-
-  function recoverySqzRepairDisabledReason(): string {
-    return isRecoverySourceSqz()
-      ? ""
-      : tr("gui.recovery.choose_sqz_before_repair", "Choose an SQZ archive or SQZ volume before repairing.");
-  }
-
-  function recoveryProtectSourceDisabledReason(): string {
-    if (!recoverySourcePath()) return tr("gui.recovery.choose_archive_before_protect", "Choose an archive before creating PAR2 recovery data.");
-    if (!recoverySourceMatchesCurrentArchive()) return tr("gui.recovery.open_selected_before_protect", "Open this archive successfully before creating new recovery data.");
-    if (currentArchive?.read_only) return archiveSourceMutationDisabledReason();
-    return "";
-  }
-
-  function recoveryRedundancyValue(): number | null {
-    const value = recoveryRedundancyDraft.trim();
-    if (!/^\d+$/.test(value)) return null;
-    const percent = Number(value);
-    return Number.isSafeInteger(percent) && percent >= 1 && percent <= 100
-      ? percent
-      : null;
-  }
-
-  function recoveryRedundancyError(): string {
-    return recoveryRedundancyValue() === null
-      ? tr("gui.recovery.redundancy_invalid", "Enter a whole percentage from 1% to 100%.")
-      : "";
-  }
-
-  function setRecoveryRedundancy(value: string): void {
-    recoveryRedundancyDraft = value;
-  }
-
-  function recoveryProtectDisabledReason(): string {
-    return recoveryProtectSourceDisabledReason() || recoveryRedundancyError();
-  }
-
-  function recoveryVerifyDisabledReason(): string {
-    if (recoverySourceMatchesCurrentArchive() && currentArchive?.read_only) return archiveSourceMutationDisabledReason();
-    return recoverySourcePath()
-      ? ""
-      : tr("gui.recovery.choose_archive_before_verify", "Choose the archive described by this PAR2 file.");
-  }
-
-  function recoveryRepairPar2DisabledReason(): string {
-    if (!recoverySourcePath()) return tr("gui.recovery.choose_archive_before_par2_repair", "Choose an archive before repairing with PAR2 data.");
-    if (recoverySourceMatchesCurrentArchive() && currentArchive?.read_only) return archiveSourceMutationDisabledReason();
-    const gate = recoveryRepairGate(recoveryReport());
-    if (gate === "verify_first") {
-      return tr("gui.recovery.verify_before_repair", "Verify this archive and PAR2 set before creating a repaired copy.");
-    }
-    if (gate === "no_damage") {
-      return tr("gui.recovery.no_damage_to_repair", "Verification found no damaged blocks to repair.");
-    }
-    if (gate === "over_capacity") {
-      return tr("gui.recovery.insufficient_par2_data", "Verification found more damage than the available PAR2 data can repair");
-    }
-    return "";
-  }
-
-  function recoveryTestDisabledReason(): string {
-    return recoverySourcePath()
-      ? ""
-      : tr("gui.recovery.choose_archive_before_test", "Choose an archive before testing");
-  }
-
-  function recoveryBestEffortDisabledReason(): string {
-    return recoverySourcePath()
-      ? ""
-      : tr("gui.recovery.choose_archive_before_best_effort", "Choose an archive before extracting readable files.");
-  }
-
-  function recoveryPickerBusyReason(): string {
-    return recoveryPickerStatus === "idle"
-      ? ""
-      : tr("gui.recovery.file_picker_open", "A file picker is already open.");
-  }
-
   function archiveEncodingForJob(): string | null {
     return currentArchive?.encoding_override ?? null;
   }
 
-  function extractEncodingForJob(): string | null {
-    return extractOptions.encodingForJob(archiveEncodingForJob());
-  }
-
-  function recoveryEncodingForJob(): string | null {
-    return recoverySourceMatchesCurrentArchive() ? archiveEncodingForJob() : null;
-  }
-
-  function recoverySelectionForJob(): string[] | null {
-    return recoverySourceMatchesCurrentArchive() ? selectedJobPaths() : null;
-  }
-
   function openExtractWorkspace(scope: ExtractScope) {
     if (!currentArchive) {
-      showNotice(tr("gui.precondition.open_before_extract", "Open an archive before extracting"));
+      showNotice(tr("gui.precondition.open_before_extract"));
       return;
     }
     if (scope === "selection" && archiveSelectionBusyReason()) {
@@ -6591,19 +4292,28 @@
     }
     const selection = selectedJobPaths();
     if (scope === "selection" && !selection) {
-      showNotice(tr("gui.precondition.select_before_extract", "Select one or more entries before extracting them"));
+      showNotice(tr("gui.precondition.select_before_extract"));
       return;
     }
-    if (!extractOptions.openScope(currentArchive, scope, selection, () => { extractDestinationPicker = null; })) return;
+    if (!extraction.open(scope, selection)) return;
     setScreen("extract");
   }
 
-  function extractJobPaths(): string[] | null {
-    return extractOptions.selectionSnapshot();
+  function extractWorkspaceBridge(): ExtractWorkspaceBridge {
+    return { archiveTitle: archiveTitle(), archiveLine: archiveLine(), password: extractPasswordLabel(),
+      warning: archiveWarningText(), testEnabled: appActionEnabled("test_archive"),
+      onReady: () => { if (extractReviewFocusPending) focusExtractReview(); },
+      onBatch: () => setScreen("batch"), onTest: () => void runAppAction("test_archive") };
   }
 
-  function syncExtractDraftArchive(): void {
-    if (extractOptions.syncArchive(currentArchive)) extractDestinationPicker = null;
+  function extractionReviewSurface(mode: "batch" | "nested", variant: ToolsWorkspaceVariant): BatchWorkspaceSurface {
+    return { kind: "batch", mode, variant, session: extraction.review, tr,
+      title: mode === "batch" ? tr("gui.screen.batch") : tr("gui.nested_extract.title"),
+      archiveReturn: toolsArchiveReturnSurface(variant), format: archiveFormatFromPath,
+      onReady: () => { if (mode === "batch" ? batchReviewFocusPending : nestedExtractReviewFocusPending) {
+        if (mode === "batch") focusBatchReview(); else focusNestedExtractReview();
+      } },
+      onRemove: removeBatchItem, onBrowse: () => setScreen("browse") };
   }
 
   function focusExtractReview(): void {
@@ -6631,7 +4341,7 @@
     const refreshing = archiveRefreshStatusLabel();
     if (refreshing) return refreshing;
     return currentArchive.read_only
-      ? tr("gui.archive.nested_read_only", "Nested archives are read-only. Extract or convert to save changes.")
+      ? tr("gui.archive.nested_read_only")
       : "";
   }
 
@@ -6643,24 +4353,24 @@
     const status = formatRegistryStatus();
     if (status === "loading") {
       return {
-        message: tr("gui.archive.editing_loading", "Checking whether this archive supports editing…"),
+        message: tr("gui.archive.editing_loading"),
         pending: true,
         retryLabel: null,
       };
     }
     if (status === "error") {
       return {
-        message: tr("gui.archive.editing_check_failed", "Editing support could not be checked. Retry, or extract or convert to make changes."),
+        message: tr("gui.archive.editing_check_failed"),
         pending: false,
-        retryLabel: tr("gui.archive.editing_retry", "Retry editing check"),
+        retryLabel: tr("gui.archive.editing_retry"),
       };
     }
     const format = allFormats().find((item) => item.id === currentArchive?.format);
     if (format?.can_update === true) return null;
     return {
       message: format
-        ? tr("gui.archive.editing_unsupported", "This format does not support editing entries. Extract or convert to make changes.")
-        : tr("gui.archive.editing_unavailable", "Editing is unavailable for this archive. Extract or convert to make changes."),
+        ? tr("gui.archive.editing_unsupported")
+        : tr("gui.archive.editing_unavailable"),
       pending: false,
       retryLabel: null,
     };
@@ -6722,17 +4432,17 @@
     if (!currentArchive) {
       return {
         kind: "none",
-        label: tr("gui.preview.no_file", "Open or preview"),
+        label: tr("gui.preview.no_file"),
         code: "no_archive",
-        disabledReason: tr("gui.preview.open_archive_first", "Open an archive before opening or previewing entries"),
+        disabledReason: tr("gui.preview.open_archive_first"),
       };
     }
     if (!entryPath) {
       return {
         kind: "none",
-        label: tr("gui.preview.no_file", "Open or preview"),
+        label: tr("gui.preview.no_file"),
         code: "select_one",
-        disabledReason: tr("gui.preview.select_one", "Select one entry to open or preview"),
+        disabledReason: tr("gui.preview.select_one"),
       };
     }
 
@@ -6740,7 +4450,7 @@
     if (resolvedType === "dir" || entryPath.endsWith("/")) {
       return {
         kind: "folder",
-        label: tr("gui.preview.open_folder", "Open"),
+        label: tr("gui.preview.open_folder"),
         code: "folder",
         disabledReason: "",
       };
@@ -6756,7 +4466,7 @@
 
     return {
       kind: "system-file",
-      label: tr("gui.action.open_preview", "Open"),
+      label: tr("gui.action.open_preview"),
       code: previewSystemCode(entryPath),
       disabledReason: "",
     };
@@ -6775,7 +4485,7 @@
     if (readOnly) return readOnly;
     return canRenameSelection()
       ? ""
-      : tr("gui.precondition.select_one_before_rename", "Select exactly one file or folder before renaming");
+      : tr("gui.precondition.select_one_before_rename");
   }
 
   function deleteSelectedDisabledReason(): string {
@@ -6783,7 +4493,7 @@
     if (readOnly) return readOnly;
     return hasArchiveSelection()
       ? ""
-      : tr("gui.precondition.select_entries_before_delete", "Select entries before deleting");
+      : tr("gui.precondition.select_entries_before_delete");
   }
 
   function moveSelectedDisabledReason(): string {
@@ -6791,20 +4501,20 @@
     if (readOnly) return readOnly;
     return hasArchiveSelection()
       ? ""
-      : tr("gui.precondition.select_entries_before_move", "Select entries before moving");
+      : tr("gui.precondition.select_entries_before_move");
   }
 
   function copyOutSelectedDisabledReason(): string {
-    if (!currentArchive) return tr("gui.precondition.open_before_copy_out", "Open an archive before copying entries out");
+    if (!currentArchive) return tr("gui.precondition.open_before_copy_out");
     return hasArchiveSelection()
       ? ""
-      : tr("gui.precondition.select_entries_before_copy_out", "Select entries before copying out");
+      : tr("gui.precondition.select_entries_before_copy_out");
   }
 
   function previewSelectedDisabledReason(): string {
     const selectionBusy = archiveSelectionBusyReason();
     if (selectionBusy) return selectionBusy;
-    if (previewBusy()) return tr("gui.preview.loading", "Preparing item");
+    if (previewBusy()) return tr("gui.preview.loading");
     return selectedPreviewPolicy().disabledReason;
   }
 
@@ -6812,7 +4522,7 @@
     entryPath: string | null = selectedPreviewPath(),
     entryType: EntryDto["entry_type"] | null = null,
   ): string {
-    if (previewBusy()) return tr("gui.preview.loading", "Preparing item");
+    if (previewBusy()) return tr("gui.preview.loading");
     return previewPolicyFor(entryPath, entryType).label;
   }
 
@@ -6841,7 +4551,7 @@
   function previewEntryActionLabel(entry: DisplayEntry): string {
     if (!entry.source) return "";
     return isEntryPreviewBusy(entry)
-      ? tr("gui.preview.loading", "Preparing item")
+      ? tr("gui.preview.loading")
       : previewPolicyFor(entry.source.path, entry.source.entry_type).label;
   }
 
@@ -6852,833 +4562,7 @@
   function testArchiveDisabledReason(): string {
     if (appActionEnabled("test_archive")) return "";
     if (archiveOpenStatus === "opening") return toolbarLabel("Opening");
-    return currentArchive ? "" : tr("gui.precondition.open_before_test", "Open an archive before testing");
-  }
-
-  function createExcludeRules(): string[] {
-    return createOptions.excludeRules;
-  }
-
-  function syncCreatePreflightContext(): void {
-    if (createPreflight.syncContext({ active: screen === "create", mode, sources: createSources })) {
-      createPrimaryFocusPending = null;
-    }
-  }
-
-  function dismissCreatePreparation(): void {
-    createPrimaryFocusPending = null;
-    createPreflight.dismissPreparation();
-  }
-
-  function createConfigurationPending(): boolean {
-    return presetLoadState === "loading" || !sfxCreateCapabilityReady;
-  }
-
-  function createSourcesLockedReason(): string {
-    if (createPreflight.state.picker) {
-      return tr("gui.create.sources.picker_open", "Finish choosing sources before changing the list");
-    }
-    if (createPreflight.busy()) {
-      return tr("gui.create.sources.locked_preflight", "The source list is locked while Squallz checks it");
-    }
-    if (createPreflight.state.pending) {
-      return tr("gui.create.sources.locked_review", "Confirm or cancel the current plan before changing the source list");
-    }
-    return "";
-  }
-
-  function createStartDisabled(): boolean {
-    return createSources.length === 0
-      || createPreflight.sourcesLocked()
-      || createConfigurationPending();
-  }
-
-  function createStartLabel(readyLabel: string): string {
-    if (createConfigurationPending()) return tr("gui.create.preparing_settings", "Preparing settings");
-    if (createPreflight.state.picker) return tr("gui.create.sources.adding", "Adding sources");
-    if (createPreflight.busy()) return tr("gui.create.checking", "Checking");
-    if (createPreflight.state.pending) return tr("gui.create.review_plan_below", "Review plan below");
-    return readyLabel;
-  }
-
-  function createSourcePickerLabel(sourceKind: "files" | "folder"): string {
-    if (createPreflight.state.picker?.kind === sourceKind) {
-      return sourceKind === "files"
-        ? tr("gui.create.opening_file_picker", "Opening file picker...")
-        : tr("gui.create.opening_folder_picker", "Opening folder picker...");
-    }
-    return sourceKind === "files"
-      ? tr("gui.action.add_files", "Add files")
-      : tr("gui.create.sources.add_folders", "Add folders");
-  }
-
-  function createConfigurationPendingMessage(): string {
-    return tr(
-      "gui.create.wait_for_initial_settings",
-      "Loading your default creation settings. Try again in a moment.",
-    );
-  }
-
-  function createOptionsLockedReason(): string {
-    return createPreflight.busy()
-      ? tr("gui.create.options_locked_preflight", "Create settings are locked until this preflight ends")
-      : "";
-  }
-
-  function createPreflightPhaseLabel(): string {
-    const preflight = createPreflight.state;
-    switch (preflight.phase) {
-      case "selecting":
-        return tr("gui.create.waiting_source_picker", "Waiting for source picker");
-      case "measuring":
-        return tr("gui.create.measuring_source_bytes", "Measuring source bytes and exclude rules");
-      case "checkingTemp":
-        return tr("gui.create.checking_temp_workspace", "Checking workspace");
-      case "choosingDest":
-        if (preflight.requestKind === "destination") {
-          return preflight.cancelPending
-            ? tr("gui.create.cancelling_destination_check", "Stopping the output check")
-            : tr("gui.create.checking_existing_destination", "Checking the current output before replacement");
-        }
-        return preflight.current
-          || tr("gui.create.waiting_destination", "Waiting for destination");
-      case "checkingDest":
-        return tr("gui.create.checking_destination_disk_short", "Checking destination disk");
-      case "reviewing":
-        return tr("gui.create.ready_for_review", "Ready for review");
-      case "submitting":
-        if (preflight.requestKind === "destination") {
-          return preflight.cancelPending
-            ? tr("gui.create.cancelling_destination_check", "Stopping the output check")
-            : tr("gui.create.rechecking_existing_destination", "Rechecking the current output");
-        }
-        if (preflight.current) return preflight.current;
-        return preflight.creatingSfx
-          ? tr("gui.create.submitting_sfx_job", "Starting self-extractor task")
-          : tr("gui.create.submitting_archive_job", "Submitting archive job");
-      case "ready":
-        return tr("gui.create.preflight_ready", "Preflight ready");
-      case "cancelled":
-        return tr("gui.create.preflight_cancelled", "Preflight cancelled");
-      case "blocked":
-        return tr("gui.create.preflight_blocked", "Preflight blocked");
-      case "idle":
-        return tr("gui.create.preflight_pending", "Preflight pending");
-    }
-  }
-
-  function createPreflightStepState(stage: Exclude<CreatePreflightStage, "submit">): CreatePreflightStepState {
-    const preflight = createPreflight.state;
-    if (preflight.issueStage === stage) {
-      return preflight.phase === "cancelled" ? "cancelled" : "blocked";
-    }
-    if (stage === "source") {
-      if (preflight.phase === "selecting" || preflight.phase === "measuring") return "active";
-      if (preflight.plan && preflight.plan.entries > 0) return "ready";
-      return "pending";
-    }
-    if (stage === "temp") {
-      if (preflight.phase === "checkingTemp") return "active";
-      if (preflight.workspaceDisk) {
-        return preflight.workspaceDisk.ok && (preflight.systemTempDisk?.ok ?? true) ? "ready" : "blocked";
-      }
-      return "pending";
-    }
-    if (
-      preflight.phase === "choosingDest"
-      || preflight.phase === "checkingDest"
-      || (preflight.phase === "submitting" && preflight.requestKind === "destination")
-    ) return "active";
-    if (preflight.destinationDisk) return preflight.destinationDisk.ok ? "ready" : "blocked";
-    return "pending";
-  }
-
-  function createPreflightStepStateLabel(state: CreatePreflightStepState): string {
-    if (state === "active") return tr("gui.create.preflight_stage_active", "In progress");
-    if (state === "ready") return tr("gui.create.preflight_stage_ready", "Checked");
-    if (state === "blocked") return tr("gui.create.preflight_stage_blocked", "Blocked");
-    if (state === "cancelled") return tr("gui.create.preflight_stage_cancelled", "Cancelled");
-    return tr("gui.create.preflight_stage_pending", "Pending");
-  }
-
-  function createPreflightCurrentDetail(): string {
-    if (createPreflight.state.phase !== "measuring" || !createPreflight.state.current) return "";
-    return tr("gui.create.scanning_current_item", "Current · {path}").replace("{path}", createPreflight.state.current);
-  }
-
-  function createDestinationPreflightDetail(): string {
-    if (createPreflight.state.requestKind === "destination" && createPreflight.state.current) {
-      return tr("gui.create.destination_check_current", "Current · {path}")
-        .replace("{path}", createPreflight.state.current);
-    }
-    return createPreflight.state.destination
-      ? tr("gui.create.destination_path_checked", "Destination · {path}").replace("{path}", createPreflight.state.destination)
-      : "";
-  }
-
-  function createDestinationInspectionCancellable(): boolean {
-    return createPreflight.state.requestKind === "destination"
-      && createPreflight.state.requestId !== null
-      && (createPreflight.state.phase === "choosingDest" || createPreflight.state.phase === "submitting");
-  }
-
-  function createDestinationInspectionCancelLabel(): string {
-    return createPreflight.state.cancelPending
-      ? tr("gui.create.cancelling_destination_check", "Stopping the output check")
-      : tr("gui.create.cancel_destination_check", "Cancel output check");
-  }
-
-  function createPreflightStageIssueSummary(stage: Exclude<CreatePreflightStage, "submit">): string | null {
-    if (createPreflight.state.issueStage !== stage) return null;
-    return createPreflight.state.phase === "cancelled"
-      ? tr("gui.create.preflight_stage_cancelled_summary", "Cancelled before this check completed")
-      : tr("gui.create.preflight_stage_blocked_summary", "This check could not finish");
-  }
-
-  function createPreflightSteps() {
-    const sourceState = createPreflightStepState("source");
-    const tempState = createPreflightStepState("temp");
-    const destinationState = createPreflightStepState("destination");
-    return [
-      {
-        id: "source",
-        label: tr("gui.create.input_preflight", "Input preflight"),
-        summary: createEstimateStatusbar(),
-        detail: createPreflightCurrentDetail(),
-        state: sourceState,
-        stateLabel: createPreflightStepStateLabel(sourceState),
-      },
-      {
-        id: "temp",
-        label: tr("gui.create.temp_preflight", "Workspace peak"),
-        summary: tempPreflightStatusbar(),
-        detail: "",
-        state: tempState,
-        stateLabel: createPreflightStepStateLabel(tempState),
-      },
-      {
-        id: "destination",
-        label: tr("gui.create.disk_preflight", "Disk preflight"),
-        summary: diskPreflightStatusbar(),
-        detail: createDestinationPreflightDetail(),
-        state: destinationState,
-        stateLabel: createPreflightStepStateLabel(destinationState),
-      },
-    ];
-  }
-
-  function createVolumePreview(): string {
-    const splitSize = createSplitSizeBytes();
-    if (splitSize === null) {
-      return tr("gui.create.single_archive_summary", "Single archive · no numbered parts");
-    }
-    const size = formatBytes(splitSize);
-    if (!createPreflight.state.plan) {
-      const nativeWim = createSplitMode === "native" && activeCreateFormat === "wim";
-      const key = nativeWim
-        ? "gui.create.native_split_wim_summary_pending"
-        : createSplitMode === "native"
-          ? "gui.create.native_split_summary_pending"
-          : "gui.create.split_summary_pending";
-      const fallback = nativeWim
-        ? "{size} target per part · native .swm set; one large file may exceed the target"
-        : createSplitMode === "native"
-          ? "{size} per part · native ZIP set ending in .zip"
-          : "{size} per part · final count appears after preflight and write";
-      return tr(key, fallback)
-        .replace("{size}", size);
-    }
-    const count = Math.max(1, Math.trunc(createPreflight.state.plan.split_volume_count_budget ?? 1));
-    return tr("gui.create.volume_output_budget_guide", "{size} per part · budget guide up to {count} parts; final count depends on compression")
-      .replace("{size}", size)
-      .replace("{count}", String(count));
-  }
-
-  function createSetupPresetLabel(): string {
-    const selected = selectedCreateArchivePreset();
-    return selected
-      ? archivePresetDisplayName(selected)
-      : tr("gui.create.setup.custom", "Custom setup");
-  }
-
-  function createCompletionSummaryLabel(): string {
-    if (createCompletion === "reveal_output") {
-      return tr("gui.create.output.completion.reveal", "Reveal in {fileManager}")
-        .replace("{fileManager}", fileManagerLabel());
-    }
-    if (createCompletion === "open_in_squallz") {
-      return tr("gui.create.output.completion.open", "Open in Squallz");
-    }
-    return tr("gui.create.output.completion.none", "Do nothing");
-  }
-
-  function createSourceHandlingSummaryLabel(): string {
-    return createPostSuccess === "trash_source"
-      ? tr("gui.create.output.source.trash", "Move originals to {trash}").replace("{trash}", trashNameLabel())
-      : tr("gui.create.output.source.keep", "Keep originals");
-  }
-
-  function createIntegritySummaryLabel(): string {
-    return effectiveCreateTestAfterCreate()
-      ? tr("gui.create.output.integrity.enabled_summary", "Full integrity test")
-      : tr("gui.create.output.integrity.disabled_summary", "No extra integrity test");
-  }
-
-  function createProtectionSummaryLabel(): string {
-    if (createPassword.length > 0 && createEncryptNames) {
-      return tr("gui.create.setup.password_and_names", "Password + encrypted names");
-    }
-    if (createPassword.length > 0) {
-      return tr("gui.create.setup.password_on", "Password on");
-    }
-    if (createEncryptionEnabled) {
-      return tr("gui.create.setup.password_required", "Password required");
-    }
-    return tr("gui.create.setup.no_password", "No password");
-  }
-
-  function createSetupSummaryItems() {
-    const outputValue = createSfxEnabled
-      ? createSfxOutputLabel()
-      : activeCreateFormatData().label;
-    const outputDetail = createSfxEnabled ? createSfxSummary() : createMethodLabel();
-    return [
-      {
-        id: "preset",
-        icon: "sparkles",
-        label: tr("gui.create.setup.preset", "Current preset"),
-        value: createSetupPresetLabel(),
-        detail: createArchivePresetSummary(currentCreateArchivePresetOptions()),
-      },
-      {
-        id: "artifact",
-        icon: "archive",
-        label: tr("gui.create.setup.artifact", "Output"),
-        value: outputValue,
-        detail: outputDetail,
-      },
-      {
-        id: "destination",
-        icon: "folder-open",
-        label: tr("gui.create.setup.destination", "Save & finish"),
-        value: createOutputPreview(),
-        detail: tr(
-          "gui.create.setup.afterwards_with_integrity",
-          "{completion} · {sources} · {integrity}",
-        )
-          .replace("{completion}", createCompletionSummaryLabel())
-          .replace("{sources}", createSourceHandlingSummaryLabel())
-          .replace("{integrity}", createIntegritySummaryLabel()),
-      },
-      {
-        id: "protection",
-        icon: "lock",
-        label: tr("gui.create.setup.protection", "Protection & volumes"),
-        value: createProtectionSummaryLabel(),
-        detail: tr("gui.create.setup.volume_and_content", "{volumes} · {content}")
-          .replace("{volumes}", createVolumePreview())
-          .replace("{content}", createContentPolicyLabel(createContentPolicy)),
-      },
-    ];
-  }
-
-  function createPlanLayoutSummary(): string {
-    const pending = createPreflight.state.pending;
-    const plan = createPreflight.state.plan;
-    if (!pending || !plan) return "";
-    if (pending.creatingSfx) return pending.artifactLabel;
-    const count = plan.split_volume_count_budget;
-    if (pending.splitSize !== null && count !== null) {
-      const volumeSummary = tr("gui.create.review.numbered_volumes", "Numbered volumes · up to {count} data parts")
-        .replace("{count}", Math.max(1, Math.trunc(count)).toLocaleString());
-      return pending.format === "sqz"
-        ? tr("gui.create.review.sqz_recovery_separate", "{volumes} · SQZ recovery files are separate")
-          .replace("{volumes}", volumeSummary)
-        : volumeSummary;
-    }
-    return tr("gui.create.review.single_file", "One archive file");
-  }
-
-  function createPlanReviewItems() {
-    const plan = createPreflight.state.plan;
-    if (!plan) return [];
-    const workspace = plan.system_temp_budget_bytes > 0
-      ? tr("gui.create.review.workspace_split", "{destination} destination + {temporary} system temporary")
-        .replace("{destination}", formatBytes(plan.workspace_budget_bytes))
-        .replace("{temporary}", formatBytes(plan.system_temp_budget_bytes))
-      : tr("gui.create.review.workspace_destination", "{size} on the destination filesystem")
-        .replace("{size}", formatBytes(plan.workspace_budget_bytes));
-    return [
-      {
-        id: "inputs",
-        label: tr("gui.create.review.inputs", "Measured inputs"),
-        value: tr("gui.create.review.input_value", "{size} · {entries} entries")
-          .replace("{size}", formatBytes(plan.total_bytes))
-          .replace("{entries}", plan.entries.toLocaleString()),
-      },
-      ...(plan.deduplicated_entries > 0
-        ? [{
-            id: "overlap",
-            label: tr("gui.create.review.overlap", "Overlap handling"),
-            value: tr(
-              "gui.create.review.overlap_value",
-              "{count} repeated entries merged after filters",
-            ).replace("{count}", plan.deduplicated_entries.toLocaleString()),
-          }]
-        : []),
-      {
-        id: "layout",
-        label: tr("gui.create.review.layout", "Output layout"),
-        value: createPlanLayoutSummary(),
-      },
-      {
-        id: "budget",
-        label: tr("gui.create.review.output_budget", "Final output space upper bound"),
-        value: formatBytes(plan.final_output_budget_bytes),
-      },
-      {
-        id: "workspace",
-        label: tr("gui.create.review.workspace", "Peak creation workspace"),
-        value: workspace,
-      },
-    ];
-  }
-
-  function createWorkspaceSurface(variant: CreateWorkspaceVariant): CreateWorkspaceSurface {
-    const preflight = createPreflight.state;
-    const preflightBusy = createPreflight.busy();
-    const lockedReason = createOptionsLockedReason();
-    const sourceLockedReason = createSourcesLockedReason();
-    const selectedSourceCount = createSourceSelectedCount();
-    const allSourcesSelected = createSourceAllSelected();
-    const reviewDisabledReason = createSources.length === 0
-      ? tr("gui.create.sources.add_before_review", "Add at least one file or folder before reviewing")
-      : createConfigurationPending()
-        ? createConfigurationPendingMessage()
-        : sourceLockedReason;
-    const createPreset = selectedCreateArchivePreset();
-    const sqzPayloadLabel = tr("gui.presets.sqz_inner_format", "SQZ payload");
-    const review = preflight.pending && preflight.plan
-      ? {
-          variant,
-          ariaLabel: tr("gui.create.review.aria", "Create plan review"),
-          eyebrow: tr("gui.create.review.eyebrow", "Checked and ready"),
-          heading: tr("gui.create.review.heading", "Review before creating"),
-          description: preflight.issue || tr("gui.create.review.description", "Squallz scanned the selected sources and checked the required filesystems. The sizes below are conservative safety bounds, not predicted compressed sizes."),
-          outputName: preflight.plan.primary_output,
-          items: createPlanReviewItems(),
-          confirmLabel: createPlanConfirmLabel(),
-          cancelLabel: tr("gui.create.review.cancel", "Cancel plan"),
-          busy: preflight.phase === "submitting",
-          onConfirm: () => void confirmCreatePlan(),
-          onCancel: cancelCreatePlanReview,
-        }
-      : null;
-
-    return {
-      tr,
-      onReady: () => {
-        if (createPrimaryFocusPending) focusCreatePrimaryAction();
-      },
-      sources: {
-        ariaLabel: tr("gui.create.sources.aria", "Items to archive"),
-        heading: tr("gui.create.sources.heading", "Items to archive"),
-        description: tr(
-          "gui.create.sources.description",
-          "Add files or folders, then review the list before scanning.",
-        ),
-        countLabel: createSourceCountLabel(),
-        selectionLabel: createSourceSelectionLabel(),
-        selectAllLabel: tr("gui.create.sources.select_all", "Select all source items"),
-        emptyTitle: tr("gui.create.sources.empty_title", "Nothing added yet"),
-        emptyBody: tr(
-          "gui.create.sources.empty_body",
-          "Add files or folders, or drag them into this window.",
-        ),
-        removeSelectedLabel: tr("gui.create.sources.remove_selected", "Remove selected"),
-        keepUntilQueuedLabel: tr(
-          "gui.create.sources.keep_until_queued",
-          "This list is cleared only after the task is added to the queue.",
-        ),
-        lockedReason: sourceLockedReason,
-        rows: createSources.map((source) => {
-          const name = desktopBasename(source.path, platformKind());
-          return {
-            path: source.path,
-            name,
-            parent: desktopDirname(source.path, platformKind()),
-            kind: source.kind,
-            kindLabel: createSourceKindLabel(source.kind),
-            selected: createSourceSelected(source.path),
-            selectLabel: tr("gui.create.sources.select_item", "Select {name}")
-              .replace("{name}", name),
-            removeLabel: tr("gui.create.sources.remove_item", "Remove {name}")
-              .replace("{name}", name),
-          };
-        }),
-        selectedCount: selectedSourceCount,
-        allSelected: allSourcesSelected,
-        mixedSelection: selectedSourceCount > 0 && !allSourcesSelected,
-        addFiles: {
-          label: createSourcePickerLabel("files"),
-          disabled: createPreflight.sourcesLocked(),
-          busy: preflight.picker?.kind === "files",
-          title: sourceLockedReason,
-          onSelect: () => void submitCreateJob("files"),
-        },
-        addFolders: {
-          label: createSourcePickerLabel("folder"),
-          disabled: createPreflight.sourcesLocked(),
-          busy: preflight.picker?.kind === "folder",
-          title: sourceLockedReason,
-          onSelect: () => void submitCreateJob("folder"),
-        },
-        review: {
-          label: createStartLabel(tr("gui.create.sources.review", "Review and create")),
-          disabled: createStartDisabled(),
-          busy: createPreflight.busy(),
-          title: reviewDisabledReason,
-          onSelect: () => void submitCreateSourceList(),
-        },
-        onToggleAll: setAllCreateSourcesSelected,
-        onToggleRow: toggleCreateSourceSelection,
-        onRemoveRow: removeCreateSource,
-        onRemoveSelected: removeSelectedCreateSources,
-        onClearSelection: clearCreateSourceSelection,
-      },
-      profiles: createProfileIds.map((profileId) => ({
-        id: profileId,
-        label: createProfileLabel(profileId),
-        selected: activeCreateProfile === profileId,
-        disabled: preflightBusy,
-        title: lockedReason,
-        ariaLabel: labelWithDisabledReason(createProfileLabel(profileId), lockedReason),
-        onSelect: () => chooseCreateProfile(profileId),
-      })),
-      formats: createFormatIds.map((formatId) => {
-        const disabledReason = createFormatDisabledReason(formatId);
-        return {
-          id: formatId,
-          label: createFormats[formatId].label,
-          selected: activeCreateFormat === formatId,
-          disabled: Boolean(disabledReason),
-          title: disabledReason || createFormatNoteFor(formatId),
-          ariaLabel: labelWithDisabledReason(createFormats[formatId].label, disabledReason),
-          onSelect: () => chooseCreateFormat(formatId),
-        };
-      }),
-      formatNote: createFormatNote(),
-      sqzPayload: activeCreateFormat === "sqz"
-        ? {
-            label: sqzPayloadLabel,
-            options: presetSqzInnerFormats.map((innerFormat) => ({
-              id: innerFormat,
-              label: presetSqzInnerFormatLabel(innerFormat),
-              selected: createPresetSqzInnerFormat === innerFormat,
-              disabled: preflightBusy,
-              title: lockedReason,
-              ariaLabel: labelWithDisabledReason(presetSqzInnerFormatLabel(innerFormat), lockedReason),
-              onSelect: () => editCreateOptions({ kind: "sqzInnerFormat", value: innerFormat }),
-            })),
-          }
-        : null,
-      compression: {
-        level: createCompressionLevel(),
-        detail: activeCreateProfileDetail(),
-        method: createMethodLabel(),
-        custom: activeCreateProfile === "custom"
-          ? {
-              value: customCreateLevel,
-              error: customCreateLevelError,
-              disabled: preflightBusy,
-              title: lockedReason,
-              rangeAriaLabel: labelWithDisabledReason(
-                variant === "classic"
-                  ? tr("gui.create.classic_custom_compression_level", "Classic custom compression level")
-                  : tr("gui.create.custom_compression_level", "Custom compression level"),
-                lockedReason,
-              ),
-              numberAriaLabel: labelWithDisabledReason(
-                variant === "classic"
-                  ? tr("gui.create.classic_custom_compression_level_number", "Classic custom compression level number")
-                  : tr("gui.create.custom_compression_level_number", "Custom compression level number"),
-                lockedReason,
-              ),
-              onInput: (event) => updateCustomCreateLevelFromInput(event),
-              onChange: (event) => updateCustomCreateLevelFromInput(event, true),
-            }
-          : null,
-      },
-      setupSummary: {
-        variant,
-        ariaLabel: tr("gui.create.setup.aria", "Current create setup"),
-        eyebrow: tr("gui.create.setup.eyebrow", "Before creating"),
-        heading: tr("gui.create.setup.heading", "What Squallz will create"),
-        items: createSetupSummaryItems(),
-      },
-      preset: {
-        instanceId: `${variant}-create`,
-        variant,
-        compact: variant === "modern",
-        kind: "create",
-        options: createPresetPickerOptions(),
-        selectedId: selectedCreatePresetId,
-        draftName: createPresetDraftName,
-        summary: createArchivePresetSummary(currentCreateArchivePresetOptions()),
-        status: createPresetStatus(),
-        statusLabel: archivePresetStatusLabel(createPresetStatus()),
-        disabledReason: archivePresetPickerDisabledReason("create"),
-        updateDisabledReason: createPresetUpdateDisabledReason(),
-        deleteDisabledReason: presetReadOnlyReason(createPreset),
-        fileManagerDisabledReason: createPresetFinderDisabledReason(),
-        isDefault: presetDocument?.bindings.app_default_create === selectedCreatePresetId,
-        isFileManagerDefault: presetDocument?.bindings.file_manager_create === selectedCreatePresetId,
-        tr,
-        onSelect: (id) => applyCreatePreset(id),
-        onDraftNameInput: (name) => (createPresetDraftName = name),
-        onUpdate: () => void saveArchivePreset("create", "update"),
-        onSaveAs: () => void saveArchivePreset("create", "save_as"),
-        onDelete: () => void deleteSelectedArchivePreset("create"),
-        onDefaultChange: (enabled) => void setArchivePresetBinding("create", "app", enabled),
-        onFileManagerDefaultChange: (enabled) => void setArchivePresetBinding("create", "file_manager", enabled),
-      },
-      advanced: {
-        open: createAdvancedOpen,
-        onToggle: (open) => (createAdvancedOpen = open),
-        onKeydown: toggleCreateAdvancedFromKeyboard,
-      },
-      output: {
-        instanceId: `${variant}-create-output`,
-        variant,
-        destination: createDestinationBase,
-        completion: createCompletion,
-        postSuccess: createPostSuccess,
-        testAfterCreate: effectiveCreateTestAfterCreate(),
-        testAfterCreateRequired: createPostSuccess === "trash_source",
-        outputPreview: createOutputPreview(),
-        defaultFolder: normalizedDefaultCreateDir(settingsSession.appliedGeneral.defaultCreateDir) ?? "",
-        fileManager: fileManagerLabel(),
-        trashName: trashNameLabel(),
-        disabled: preflightBusy,
-        disabledReason: lockedReason,
-        openDisabledReason: createOpenCompletionDisabledReason(),
-        trashDisabledReason: createTrashSourceDisabledReason(),
-        tr,
-        onDestinationChange: (value) => editCreateOptions({ kind: "destinationBase", value }),
-        onCompletionChange: (value) => editCreateOptions({ kind: "completion", value }),
-        onPostSuccessChange: (value) => editCreateOptions({ kind: "postSuccess", value }),
-        onTestAfterCreateChange: (value) => editCreateOptions({ kind: "testAfterCreate", value }),
-      },
-      content: {
-        variant,
-        classicSectionId: variant === "classic" ? "classic-create-content" : undefined,
-        value: createContentPolicy,
-        rulesText: createExcludeText,
-        rules: createExcludeRules(),
-        disabled: preflightBusy,
-        disabledReason: lockedReason,
-        tr,
-        onChange: (value) => editCreateOptions({ kind: "contentPolicy", value }),
-        onRulesInput: (value) => editCreateOptions({ kind: "excludeText", value }),
-      },
-      recovery: {
-        capability: createRecoveryCapability(),
-        disabled: preflightBusy,
-        disabledReason: lockedReason,
-        onOpen: openRecoveryConfiguration,
-      },
-      sfx: {
-        variant,
-        classicSectionId: variant === "classic" ? "classic-create-security" : undefined,
-        enabled: createSfxEnabled,
-        available: sfxCreateCapability.available,
-        targetLabel: createSfxTargetLabel(),
-        outputLabel: createSfxOutputLabel(),
-        summary: createSfxSummary(),
-        signingWarning: createSfxSigningWarning(),
-        unavailableMessage: createSfxUnavailableMessage(),
-        disabled: preflightBusy || !sfxCreateCapabilityReady,
-        disabledReason: lockedReason || (!sfxCreateCapabilityReady
-          ? tr("gui.create.sfx_capability_loading", "Checking self-extracting support")
-          : ""),
-        loading: !sfxCreateCapabilityReady,
-        tr,
-        onEnabledChange: (value) => editCreateOptions({ kind: "sfxEnabled", value }),
-      },
-      protection: {
-        variant,
-        classicSplitSectionId: variant === "classic" ? "classic-create-volumes" : undefined,
-        password: createPassword,
-        passwordConfirmation: createPasswordConfirmation,
-        passwordVisible: createPasswordVisible,
-        encryptionEnabled: createEncryptionEnabled,
-        encryptNames: createEncryptNames,
-        canEncryptData: createPasswordDataAvailable(),
-        canEncryptNames: createNameEncryptionAvailable(),
-        splitDisabled: createSfxEnabled,
-        splitPreset: createSplitPreset,
-        splitMode: createSplitMode,
-        nativeSplitKind: createOptions.nativeSplitKind,
-        customSplitAmount: createCustomSplitAmount,
-        customSplitUnit: createCustomSplitUnit,
-        passwordCapability: createPasswordCapability(),
-        nameEncryptionCapability: createNameEncryptionCapability(),
-        splitCapability: createSplitCapability(),
-        splitSummary: createVolumePreview(),
-        passwordError: visibleCreatePasswordError(),
-        splitError: visibleCreateSplitError(),
-        disabled: preflightBusy,
-        disabledReason: lockedReason,
-        tr,
-        onPasswordInput: (value) => editCreateOptions({ kind: "password", value }),
-        onPasswordConfirmationInput: (value) => editCreateOptions({ kind: "passwordConfirmation", value }),
-        onPasswordVisibleChange: (value) => editCreateOptions({ kind: "passwordVisible", value }),
-        onEncryptionEnabledChange: (value) => editCreateOptions({ kind: "encryptionEnabled", value }),
-        onEncryptNamesChange: (value) => editCreateOptions({ kind: "encryptNames", value }),
-        onSplitPresetChange: (value) => editCreateOptions({ kind: "splitPreset", value }),
-        onSplitModeChange: (value) => editCreateOptions({ kind: "splitMode", value }),
-        onCustomSplitAmountInput: (value) => editCreateOptions({ kind: "customSplitAmount", value }),
-        onCustomSplitUnitChange: (value) => editCreateOptions({ kind: "customSplitUnit", value }),
-      },
-      showPreflight: preflight.phase !== "idle",
-      preflight: {
-        variant,
-        phase: preflight.phase,
-        ariaLabel: tr("gui.create.preflight_status", "Create preflight status"),
-        heading: tr("gui.create.preflight_heading", "Before compression"),
-        statusLabel: createPreflightPhaseLabel(),
-        lockMessage: lockedReason,
-        actionLabel: createDestinationInspectionCancellable()
-          ? createDestinationInspectionCancelLabel()
-          : "",
-        actionPending: preflight.cancelPending,
-        issue: preflight.issue,
-        steps: createPreflightSteps(),
-        onAction: () => void createPreflight.cancelDestination(),
-      },
-      review,
-      classic: {
-        archiveName: createArchivePreviewName(),
-        activeSection: classicCreateSection,
-        sections: [
-          {
-            id: "general",
-            label: settingsSectionLabel("General"),
-            targetId: "classic-create-general",
-            onSelect: () => void showClassicCreateSection("general", "classic-create-general"),
-          },
-          {
-            id: "compression",
-            label: tr("gui.create.section_compression", "Compression"),
-            targetId: "classic-create-compression",
-            onSelect: () => void showClassicCreateSection("compression", "classic-create-compression"),
-          },
-          {
-            id: "content",
-            label: tr("gui.create.section_content", "Contents"),
-            targetId: "classic-create-content",
-            onSelect: () => void showClassicCreateSection("content", "classic-create-content"),
-          },
-          {
-            id: "security",
-            label: settingsSectionLabel("Security"),
-            targetId: "classic-create-security",
-            onSelect: () => void showClassicCreateSection("security", "classic-create-security"),
-          },
-          {
-            id: "volumes",
-            label: tr("gui.create.section_volumes", "Volumes"),
-            targetId: "classic-create-volumes",
-            onSelect: () => void showClassicCreateSection("volumes", "classic-create-volumes"),
-          },
-          {
-            id: "recovery",
-            label: tr("gui.recovery.title", "Recovery"),
-            targetId: "classic-create-recovery",
-            onSelect: () => void showClassicCreateSection("recovery", "classic-create-recovery"),
-          },
-          {
-            id: "preflight",
-            label: tr("gui.create.input_preflight", "Preflight"),
-            targetId: "classic-create-preflight",
-            onSelect: () => void showClassicCreateSection("preflight", "classic-create-preflight"),
-          },
-        ],
-        recoveryCapability: createRecoveryCapability(),
-        updateMode: tr("gui.create.add_and_replace_files", "Add and replace files"),
-        featuredFormats: featuredFormatCards(),
-      },
-    };
-  }
-
-  function createEstimateStatusbar(): string {
-    const preflight = createPreflight.state;
-    const interrupted = createPreflightStageIssueSummary("source");
-    if (interrupted) return interrupted;
-    if (preflight.phase === "selecting") return tr("gui.create.waiting_source_picker", "Waiting for source picker");
-    if (preflight.phase === "measuring") {
-      return preflight.scanned > 0
-        ? tr("gui.create.scanning_inputs_count", "Scanning inputs · {count} entries").replace("{count}", preflight.scanned.toLocaleString())
-        : tr("gui.create.measuring_input_bytes", "Measuring input bytes...");
-    }
-    if (preflight.phase === "blocked" && preflight.plan?.entries === 0) return tr("gui.create.no_entries_after_excludes", "No entries after excludes");
-    if (!preflight.plan) return tr("gui.create.input_estimate_pending", "Input estimate awaiting preflight");
-    return tr("gui.create.estimate_status", "{size} input · {entries} entries · {excludes}")
-      .replace("{size}", formatBytes(preflight.plan.total_bytes))
-      .replace("{entries}", preflight.plan.entries.toLocaleString())
-      .replace(
-        "{excludes}",
-        tr("gui.create.rule_count", "{count} rules").replace("{count}", preflight.excludeCount.toLocaleString()),
-      );
-  }
-
-  function diskPreflightStatusbar(): string {
-    const preflight = createPreflight.state;
-    const interrupted = createPreflightStageIssueSummary("destination");
-    if (interrupted) return interrupted;
-    if (preflight.phase === "choosingDest") {
-      if (preflight.requestKind === "destination") {
-        return tr("gui.create.destination_check_progress", "Reading current output · {bytes}")
-          .replace("{bytes}", formatBytes(preflight.processedBytes));
-      }
-      return preflight.current
-        || tr("gui.create.waiting_destination_picker", "Waiting for destination picker");
-    }
-    if (preflight.phase === "submitting" && preflight.requestKind === "destination") {
-      return tr("gui.create.destination_recheck_progress", "Reading current output again · {bytes}")
-        .replace("{bytes}", formatBytes(preflight.processedBytes));
-    }
-    if (preflight.phase === "checkingDest") return tr("gui.create.checking_destination_disk", "Checking destination disk...");
-    if (!preflight.destinationDisk) return tr("gui.create.destination_disk_pending", "Destination disk preflight pending");
-    return tr("gui.create.disk_status_available", "{status} · {available} available")
-      .replace("{status}", preflight.destinationDisk.ok ? tr("gui.create.disk_ok", "Disk OK") : tr("gui.create.disk_blocked", "Disk blocked"))
-      .replace("{available}", formatBytes(preflight.destinationDisk.available_bytes));
-  }
-
-  function tempPreflightStatusbar(): string {
-    const preflight = createPreflight.state;
-    const interrupted = createPreflightStageIssueSummary("temp");
-    if (interrupted) return interrupted;
-    if (preflight.phase === "checkingTemp") return tr("gui.create.checking_temporary_space", "Checking workspace...");
-    if (!preflight.workspaceDisk) return tr("gui.create.temp_preflight_pending", "Workspace check pending");
-    if (preflight.systemTempDisk) {
-      const ok = preflight.workspaceDisk.ok && preflight.systemTempDisk.ok;
-      return tr("gui.create.temp_status_destination_and_system", "{status} · destination {destination} · temporary {temporary}")
-        .replace("{status}", ok ? tr("gui.create.temp_ok", "Workspace OK") : tr("gui.create.temp_blocked", "Workspace blocked"))
-        .replace("{destination}", formatBytes(preflight.workspaceDisk.available_bytes))
-        .replace("{temporary}", formatBytes(preflight.systemTempDisk.available_bytes));
-    }
-    return tr("gui.create.temp_status_available", "{status} · {available} available")
-      .replace("{status}", preflight.workspaceDisk.ok ? tr("gui.create.temp_ok", "Workspace OK") : tr("gui.create.temp_blocked", "Workspace blocked"))
-      .replace("{available}", formatBytes(preflight.workspaceDisk.available_bytes));
-  }
-
-  function invalidateCreatePreflightResult(): void {
-    createPreflight.invalidatePlan();
-  }
-
-  function resetCreateCredentialsAfterPlan(pending: CreateCredentialIntent | null) {
-    createOptions.resetCredentials(pending);
+    return currentArchive ? "" : tr("gui.precondition.open_before_test");
   }
 
   function createPrimaryAction(): HTMLElement | null {
@@ -7693,11 +4577,6 @@
     if (!isCurrent() || createPrimaryFocusPending !== request || screen !== "create" || blockingModalVisible() || !action) return;
     createPrimaryFocusPending = null;
     action.focus();
-  }
-
-  function discardPendingCreatePlan(restoreFocus = false) {
-    invalidateCreatePreflightResult();
-    if (restoreFocus) focusCreatePrimaryAction();
   }
 
   function selectedDeletePaths(): string[] {
@@ -7724,21 +4603,21 @@
 
   function nestedPreviewTitle(): string {
     if (!currentArchive) return openArchiveFirstLabel();
-    if (previewPhase === "nested") return tr("gui.preview.loading", "Preparing item");
-    if (!nestedPreview) return tr("gui.preview.no_nested", "Preview");
+    if (previewPhase === "nested") return tr("gui.preview.loading");
+    if (!nestedPreview) return tr("gui.preview.no_nested");
     return `${pathBaseName(nestedPreview.entry_path)} · ${nestedPreview.archive.format.toUpperCase()}`;
   }
 
   function nestedPreviewSubtitle(): string {
     if (!currentArchive) return openArchiveFirstLabel();
     if (previewPhase === "nested") {
-      return tr("gui.preview.loading_target", "Preparing {name}...")
-        .replace("{name}", previewTargetName || tr("gui.preview.selected_entry", "selected entry"));
+      return tr("gui.preview.loading_target")
+        .replace("{name}", previewTargetName || tr("gui.preview.selected_entry"));
     }
-    if (!nestedPreview) return tr("gui.preview.select_file", "Select an item, then choose Open or Preview.");
-    return tr("gui.preview.nested_entries", "{count} entries{suffix}")
+    if (!nestedPreview) return tr("gui.preview.select_file");
+    return tr("gui.preview.nested_entries")
       .replace("{count}", nestedPreview.archive.entry_count.toLocaleString())
-      .replace("{suffix}", nestedPreview.truncated ? tr("gui.preview.first_200_shown_suffix", " · first 200 shown") : "");
+      .replace("{suffix}", nestedPreview.truncated ? tr("gui.preview.first_200_shown_suffix") : "");
   }
 
   function nestedPreviewRows(): EntryDto[] {
@@ -7747,23 +4626,23 @@
 
   function entryPreviewTitle(): string {
     if (!currentArchive) return openArchiveFirstLabel();
-    if (previewPhase !== "idle") return tr("gui.preview.loading", "Preparing item");
-    if (entryPreviewFailure) return tr("gui.preview.failed_title", "Item did not open");
-    if (!entryPreview) return tr("gui.preview.no_file", "Open or preview");
+    if (previewPhase !== "idle") return tr("gui.preview.loading");
+    if (entryPreviewFailure) return tr("gui.preview.failed_title");
+    if (!entryPreview) return tr("gui.preview.no_file");
     return entryPreview.display_name;
   }
 
   function entryPreviewSubtitle(): string {
     if (!currentArchive) return openArchiveFirstLabel();
     if (previewPhase !== "idle") {
-      return tr("gui.preview.loading_target", "Preparing {name}...")
-        .replace("{name}", previewTargetName || tr("gui.preview.selected_entry", "selected entry"));
+      return tr("gui.preview.loading_target")
+        .replace("{name}", previewTargetName || tr("gui.preview.selected_entry"));
     }
     if (entryPreviewFailure) {
       return entryPreviewFailure.message;
     }
     if (!entryPreview) {
-      return tr("gui.preview.select_file", "Select an item, then choose Open or Preview.");
+      return tr("gui.preview.select_file");
     }
     return formatBytes(entryPreview.size);
   }
@@ -7832,7 +4711,7 @@
     }
     const row = previewEntryForPath(failure.entryPath);
     if (!row) {
-      showNotice(tr("gui.preview.extract_unavailable", "Return to the entry and select Extract instead."));
+      showNotice(tr("gui.preview.extract_unavailable"));
       return;
     }
     selectRow(row);
@@ -7874,8 +4753,8 @@
       }
       if (error.key === "error.resource_limit") {
         return nested
-          ? tr("gui.preview.nested_resource_limit", "Nested preview reached a safety limit. Extract the inner archive instead.")
-          : tr("gui.preview.resource_limit", "Opening this item reached a safety limit. Extract it instead.");
+          ? tr("gui.preview.nested_resource_limit")
+          : tr("gui.preview.resource_limit");
       }
     }
     return tr(fallbackKey, fallback);
@@ -7892,116 +4771,56 @@
     }
   }
 
-  function extractSelectionLabel(): string {
-    if (!currentArchive) return openArchiveFirstLabel();
-    const count = extractJobPaths()?.length ?? 0;
-    return extractScope === "selection"
-      ? tr("gui.selection.count_selected", "{count} selected").replace("{count}", count.toLocaleString())
-      : tr("gui.selection.all_entries", "All entries");
-  }
-
-  function extractActionLabel(): string {
-    if (!currentArchive) return tr("gui.extract.start", "Extract");
-    return extractJobPaths()
-      ? actionLabel("Extract selected")
-      : tr("gui.action.extract_all", "Extract all");
-  }
-
-  function extractSafeTitle(): string {
-    return extractJobPaths()
-      ? tr("gui.extract.safe_title", "Extract selected files safely")
-      : tr("gui.extract.safe_title_all", "Extract every file safely");
-  }
-
   function extractAllToLabel(): string {
-    return tr("gui.action.extract_all_to", "Extract all to…");
+    return tr("gui.action.extract_all_to");
   }
 
   function extractSelectedToLabel(): string {
-    return tr("gui.action.extract_selected_to", "Extract selected to…");
+    return tr("gui.action.extract_selected_to");
   }
 
   function extractPasswordLabel(): string {
     if (!currentArchive) return openArchiveFirstLabel();
     if (passwordBookStatus.state === "ready" && passwordBookStatus.saved) {
-      return tr("gui.password.book_can_unlock", "Password Book can unlock if needed");
+      return tr("gui.password.book_can_unlock");
     }
-    return tr("gui.password.ask_only_if_required", "Ask only if the archive requires it");
+    return tr("gui.password.ask_only_if_required");
   }
 
   function extractPasswordStatusbarLabel(): string {
     if (!currentArchive) return openArchiveFirstLabel();
     if (passwordBookStatus.state === "ready" && passwordBookStatus.saved) {
-      return tr("gui.extract.password_book_ready_short", "Password Book ready");
+      return tr("gui.extract.password_book_ready_short");
     }
-    return tr("gui.extract.password_if_needed_short", "Password if needed");
-  }
-
-  function extractEncodingLabel(): string {
-    if (!currentArchive) return openArchiveFirstLabel();
-    if (extractPresetEncodingLabel) {
-      return tr("gui.presets.encoding_override", "Preset: {encoding}")
-        .replace("{encoding}", extractPresetEncodingLabel.toUpperCase());
-    }
-    if (currentArchive.encoding_override) return currentArchive.encoding_override.toUpperCase();
-    if (currentArchive.suggested_encoding) {
-      return tr("gui.archive.encoding_suggested", "{encoding} suggested").replace("{encoding}", currentArchive.suggested_encoding.toUpperCase());
-    }
-    return tr("gui.archive.encoding_utf8_clean", "UTF-8 clean");
+    return tr("gui.extract.password_if_needed_short");
   }
 
   function archiveLine(): string {
     if (!currentArchive) return openArchiveFirstLabel();
-    return tr("gui.archive.line", "{name} · {count} entries · {format}")
+    return tr("gui.archive.line")
       .replace("{name}", currentArchive.name)
       .replace("{count}", currentArchive.entry_count.toLocaleString())
       .replace("{format}", archiveFormat());
   }
 
-  function extractDestinationHint(): string {
-    return tr("gui.extract.destination_hint", "Will extract to {destination}")
-      .replace("{destination}", effectiveExtractDest());
-  }
-
-  function extractArchiveRequiredReason(): string {
-    return currentArchive ? "" : tr("gui.precondition.open_before_extract", "Open an archive before extracting");
-  }
-
-  function extractStartBlockedReason(): string {
-    const archiveReason = extractArchiveRequiredReason();
-    if (archiveReason) return archiveReason;
-    if (extractDestinationPicker) {
-      return tr("gui.extract.destination_picker_wait", "Finish choosing a destination, or close the folder chooser.");
-    }
-    if (extractScope === "selection" && extractSelectionSnapshot.length === 0) {
-      return tr("gui.precondition.select_before_extract", "Select one or more entries before extracting them");
-    }
-    if (extractPlanSession.phase === "blocked") return extractSpaceFailureLabel();
-    if (extractPlanSession.phase === "error") return extractPlanErrorLabel();
-    if (extractPlanSession.phase !== "ready") {
-      return tr("gui.extract.plan_wait_before_start", "Wait for the extraction preview to finish");
-    }
-    return "";
-  }
-
   function archiveInfoRows(): Array<[string, string]> {
     if (!currentArchive) {
-      return [[tr("gui.inspector.archive", "Archive"), openArchiveFirstLabel()]];
+      return [[tr("gui.inspector.archive"), openArchiveFirstLabel()]];
     }
     return [
-      [tr("common.name", "Name"), currentArchive.name],
-      [tr("common.path", "Path"), currentArchive.path],
-      [tr("gui.archive.format", "Format"), archiveFormat()],
-      [tr("gui.table.entries", "Entries"), currentArchive.entry_count.toLocaleString()],
-      [tr("gui.archive.encoding", "Encoding"), extractEncodingLabel()],
+      [tr("common.name"), currentArchive.name],
+      [tr("common.path"), currentArchive.path],
+      [tr("gui.archive.format"), archiveFormat()],
+      [tr("gui.table.entries"), currentArchive.entry_count.toLocaleString()],
+      [tr("gui.archive.encoding"), extractView.extractEncodingLabel()],
       [
-        tr("gui.archive.volumes", "Volumes"),
+        tr("gui.archive.volumes"),
         currentArchive.volumes?.length
           ? archiveVolumeCountLabel(currentArchive.volumes.length)
-          : tr("gui.archive.single", "Single"),
+          : tr("gui.archive.single"),
       ],
-      [tr("common.selection", "Selection"), selectedSummary()],
-      [extractDestinationFieldLabel(), extractJobDestination()],
+      [tr("common.selection"), selectedSummary()],
+      [extractView.extractDestinationFieldLabel(), extraction.destination],
     ];
   }
 
@@ -8030,199 +4849,14 @@
         onFailure?.(jobSubmitBlockedMessage(error));
         return false;
       }
-      const title = tr("gui.job.submit_failed", "Could not queue the task");
+      const title = tr("gui.job.submit_failed");
       const body = isErrorDto(error)
         ? tError(error)
-        : tr("gui.job.submit_unavailable", "Check that the Squallz desktop service is available, then try again.");
+        : tr("gui.job.submit_unavailable");
       if (onFailure) onFailure(`${title} · ${body}`);
       else pushToast({ kind: "danger", title, body });
       return false;
     }
-  }
-
-  async function submitExtractJob() {
-    if (!currentArchive) {
-      showNotice(tr("gui.precondition.open_before_extract", "Open an archive before extracting"));
-      return;
-    }
-    if (extractDestinationPicker) {
-      showNotice(tr("gui.extract.destination_picker_wait", "Finish choosing a destination, or close the folder chooser."));
-      return;
-    }
-    if (extractScope === "selection" && extractSelectionSnapshot.length === 0) {
-      showNotice(tr("gui.precondition.select_before_extract", "Select one or more entries before extracting them"));
-      return;
-    }
-    if (extractPlanSession.phase === "loading") {
-      showNotice(tr("gui.extract.plan_wait_before_start", "Wait for the extraction preview to finish"));
-      return;
-    }
-    if (extractPlanSession.phase === "blocked") {
-      showNotice(extractSpaceFailureLabel());
-      return;
-    }
-    if (extractDestinationMode === "choose" && !extractCustomDest.trim()) {
-      const archive = currentArchive;
-      const origin = screen;
-      const scope = extractScope;
-      const selection = extractSelectionSnapshot;
-      const preset = selectedExtractPresetId;
-      if (!await chooseExtractDestination()) return;
-      if (currentArchive !== archive || screen !== origin || extractScope !== scope
-        || extractSelectionSnapshot !== selection || selectedExtractPresetId !== preset
-        || extractDestinationMode !== "choose" || !extractCustomDest.trim()
-        || extractDestinationPicker) return;
-    }
-    if (!currentArchive || screen !== "extract") return;
-    const snapshot = extractOptions.snapshotRun(currentArchive, extractJobDestination());
-    const { input } = snapshot;
-    await extractPlanSession.request(input);
-    if (!currentArchive || currentArchive.id !== input.archiveId || screen !== "extract") return;
-    if (
-      !extractPlanSession.matches(input) ||
-      !extractPlanSession.matches(captureExtractPlanInput()) ||
-      !extractOptions.runOptionsMatch(snapshot)
-    ) {
-      showNotice(tr(
-        "gui.extract.plan_changed_before_start",
-        "Extraction settings changed while the write plan was being checked. Review the updated plan and start again.",
-      ));
-      return;
-    }
-    const plan = extractPlanSession.plan;
-    if (extractPlanSession.phase !== "ready" || !plan) {
-      showNotice(extractPlanErrorLabel() || tr(
-        "gui.extract.plan_wait_before_start",
-        "Wait for the extraction preview to finish",
-      ));
-      return;
-    }
-    const destination = effectiveExtractDest();
-    const action = input.selection ? tr("gui.extract.selected_queued", "Selected extract queued") : tr("gui.extract.all_queued", "Extract all queued");
-    const success = tr("gui.extract.started_to_destination", "{action} · destination: {destination}")
-      .replace("{action}", action)
-      .replace("{destination}", destination);
-    const queued = await submitCurrentArchiveJob(
-      extractOptions.extractJob(snapshot, plan),
-      success,
-      tr("gui.precondition.open_before_extract", "Open an archive before extracting"),
-    );
-    if (queued) {
-      recordOperation({
-        status: "queued",
-        title: action,
-        detail: `${archiveTitle()} -> ${destination}`,
-      });
-    }
-  }
-
-  async function submitCopyOutSelectedJob() {
-    if (extractDestinationPicker) {
-      showNotice(tr("gui.extract.destination_picker_wait", "Finish choosing a destination, or close the folder chooser."));
-      return;
-    }
-    if (blockSelectionScopedAction()) return;
-    const selection = selectedJobPaths();
-    if (!currentArchive || !selection) {
-      showNotice(copyOutSelectedDisabledReason());
-      return;
-    }
-    if (extractDestinationMode === "choose" && !extractCustomDest.trim()) {
-      const archive = currentArchive;
-      const origin = screen;
-      if (!await chooseExtractDestination()) return;
-      const selected = selectedPaths();
-      if (currentArchive !== archive || screen !== origin || archiveSelectionBusyReason()
-        || selected.size !== selection.length || selection.some((path) => !selected.has(path))
-        || extractDestinationMode !== "choose" || !extractCustomDest.trim()
-        || extractDestinationPicker) return;
-    }
-    const destination = effectiveExtractDest();
-    const jobDestination = extractJobDestination();
-    const action = tr("gui.copy_out.selected_queued", "Selected copy-out queued");
-    const success = tr("gui.copy_out.started_to_destination", "{action} · destination: {destination}")
-      .replace("{action}", action)
-      .replace("{destination}", destination);
-    const queued = await submitCurrentArchiveJob(
-      extractOptions.copyOutJob(currentArchive, jobDestination, selection),
-      success,
-      tr("gui.precondition.open_before_copy_out", "Open an archive before copying entries out"),
-    );
-    if (queued) {
-      recordOperation({
-        status: "queued",
-        title: action,
-        detail: `${archiveTitle()} -> ${destination}`,
-      });
-    }
-  }
-
-  async function startBatchExtract() {
-    if (batchDraftLocked()) return;
-    const spec = batchExtract.snapshotRun();
-    if (spec.items.length === 0) {
-      showNotice(tr("gui.batch.open_archives_before_start", "Open archives before starting batch extract"));
-      return;
-    }
-    const invalid = spec.items.findIndex((item) => !item.dest.trim());
-    if (invalid !== -1) {
-      showNotice(tr("gui.batch.destination_required", "Choose a destination for every archive."));
-      document.getElementById(`batch-destination-${invalid}`)?.focus();
-      return;
-    }
-    if (focusBlockingTaskIfAny()) return;
-    batchSubmissionPending = true;
-    try {
-      await submitJob(spec);
-      showNotice(tr("gui.batch.extract_job_queued", "{count} archives added as one task").replace("{count}", spec.items.length.toLocaleString()));
-      recordOperation({
-        status: "queued",
-        title: tr("gui.batch.extract_queued", "Batch extract queued"),
-        detail: tr("gui.batch.archive_count", "Archives: {count}").replace("{count}", spec.items.length.toLocaleString()),
-      });
-    } catch (error) {
-      if (isJobSubmitBlocked(error)) return;
-      showNotice(isErrorDto(error) ? tError(error) : tr("gui.batch.requires_desktop_service", "Batch extract requires the desktop service"));
-    } finally {
-      batchSubmissionPending = false;
-    }
-  }
-
-  function batchWorkspaceSurface(variant: ToolsWorkspaceVariant): BatchWorkspaceSurface {
-    const draft = batchDraft;
-    return {
-      kind: "batch",
-      mode: "batch",
-      variant,
-      title: tr("gui.screen.batch", "Batch Extract Review"),
-      tr,
-      archiveReturn: toolsArchiveReturnSurface(variant),
-      onReady: () => { if (batchReviewFocusPending) focusBatchReview(); },
-      locked: batchDraftLocked(),
-      submitting: batchSubmissionPending,
-      smart: draft.smart,
-      onSmartChange: (value) => editBatchDraft({ kind: "smart", value }),
-      overwrite: draft.overwrite,
-      overwriteChoices: extractOverwriteModes.map((id) => ({ id, label: extractOverwriteLabel(id) })),
-      onOverwriteChange: (value) => editBatchDraft({ kind: "overwrite", value }),
-      symlinks: draft.symlinks,
-      symlinkChoices: extractSymlinkModes.map((id) => ({ id, label: extractSymlinkLabel(id) })),
-      onSymlinksChange: (value) => editBatchDraft({ kind: "symlinks", value }),
-      rows: draft.items.map((item, index) => ({
-        id: `${index}:${item.path}`, path: item.displayPath, name: pathBaseName(item.displayPath),
-        format: archiveFormatFromPath(item.displayPath), target: item.dest,
-        encoding: item.encoding ?? tr("gui.extract.encoding.auto", "Auto-detect"),
-        bestEffort: item.best_effort,
-        onBestEffortChange: null,
-        onTargetInput: (value) => editBatchDraft({ kind: "destination", index, value }),
-        onChooseTarget: () => void chooseBatchPaths(index),
-        onRemove: () => removeBatchItem(index),
-      })),
-      actions: {
-        onStart: () => void startBatchExtract(),
-        onAdd: () => void chooseBatchPaths(),
-      },
-    };
   }
 
   function toolsArchiveReturnSurface(variant: ToolsWorkspaceVariant) {
@@ -8230,642 +4864,33 @@
       visible: variant === "classic" && showArchiveReturnBar(),
       title: archiveTitle(),
       detail: archiveReturnDetail(),
-      contextLabel: tr("gui.archive.current_context", "Current archive"),
-      actionLabel: tr("gui.archive.back_to_current", "Back to current archive"),
+      contextLabel: tr("gui.archive.current_context"),
+      actionLabel: tr("gui.archive.back_to_current"),
       onReturn: returnToCurrentArchive,
     };
   }
 
-  function checksumWorkspaceSurface(variant: ToolsWorkspaceVariant): ChecksumWorkspaceSurface {
-    const calculation = selectedChecksumTask("checksum");
-    const verification = selectedChecksumTask("checksum_check");
-    const reportContext = (task: Task | null) => {
-      if (task?.spec.kind !== "checksum" && task?.spec.kind !== "checksum_check") return null;
-      return {
-        sources: task.spec.kind === "checksum" ? task.spec.inputs : [task.spec.manifest],
-        algorithm: checksumAlgorithmLabel(task.spec.algorithm),
-      };
-    };
-    const reportState = (task: Task | null) => task ? taskOutcomeStateLabel(task) : taskStateLabel(null);
-    const checksumRows = checksumItems("checksum").slice(0, 20).map((item) => {
-      const path = checksumItemText(item, "path");
-      return {
-        name: path,
-        size: formatBytes(checksumItemNumber(item, "size")),
-        digest: checksumItemText(item, "digest"),
-        status: checksumItemStatus(item),
-      };
-    });
-    const verificationRows = checksumItems("checksum_check").slice(0, 20).map((item) => {
-      const path = checksumItemText(item, "path");
-      return {
-        name: path,
-        expected: checksumItemText(item, "expected"),
-        actual: checksumItemText(item, "actual") || checksumItemText(item, "error"),
-        status: checksumItemStatus(item),
-      };
-    });
-    const currentArchiveDisabledReason = checksumCurrentArchiveDisabledReason();
-
+  function localToolsSurface(kind: "checksum", variant: ToolsWorkspaceVariant): ChecksumWorkspaceSurface;
+  function localToolsSurface(kind: "duplicates", variant: ToolsWorkspaceVariant): DuplicatesWorkspaceSurface;
+  function localToolsSurface(kind: "checksum" | "duplicates", variant: ToolsWorkspaceVariant): ChecksumWorkspaceSurface | DuplicatesWorkspaceSurface {
     return {
-      kind: "checksum",
-      variant,
-      title: tr("gui.screen.checksum", "Checksum"),
-      tr,
+      kind, variant, session: tools, tr,
+      title: kind === "checksum" ? tr("gui.screen.checksum") : tr("gui.screen.duplicates"),
       archiveReturn: toolsArchiveReturnSurface(variant),
-      target: {
-        name: checksumTargetName(),
-        label: checksumTargetLabel(),
-        currentArchiveDisabledReason,
-      },
-      algorithm: {
-        options: checksumAlgorithms,
-        selected: checksumAlgorithm,
-        label: checksumAlgorithmLabel(checksumAlgorithm),
-        labelFor: checksumAlgorithmLabel,
-        hintFor: checksumAlgorithmHint,
-        onSelect: selectChecksumAlgorithm,
-      },
-      metrics: {
-        filesHashed: checksumResultNumber("checksum", "files_hashed").toLocaleString(),
-        bytesHashed: formatBytes(checksumResultNumber("checksum", "bytes_hashed")),
-        passed: checksumResultNumber("checksum_check", "passed").toLocaleString(),
-        checked: checksumResultNumber("checksum_check", "checked").toLocaleString(),
-        failed: checksumResultNumber("checksum_check", "failed").toLocaleString(),
-      },
-      excludes: {
-        value: checksumExcludeText,
-        rules: checksumExcludeRules(),
-        countLabel: tr("gui.excludes.count", "{count} rules")
-          .replace("{count}", String(checksumExcludeRules().length)),
-        onInput: (value) => (checksumExcludeText = value),
-      },
-      manifestLabel: checksumManifestLabel(),
-      result: {
-        kind: "checksum",
-        context: reportContext(calculation),
-        totalRows: checksumItems("checksum").length,
-        summary: [
-          { label: tr("gui.checksum.hashed_files", "Files hashed"), value: checksumResultNumber("checksum", "files_hashed").toLocaleString() },
-          { label: tr("gui.checksum.hashed_bytes", "Bytes hashed"), value: formatBytes(checksumResultNumber("checksum", "bytes_hashed")) },
-        ],
-        rows: checksumRows,
-        state: reportState(calculation),
-        feedback: checksumCopyFeedbackFor("checksum"),
-        feedbackDanger: checksumCopyFeedbackToneFor("checksum") === "danger",
-        copyPending: checksumCopyPending("checksum", calculation?.id ?? null),
-        onCopy: () => void copyChecksumResults("checksum"),
-      },
-      verification: {
-        kind: "checksum_check",
-        context: reportContext(verification),
-        totalRows: checksumItems("checksum_check").length,
-        summary: [
-          { label: tr("gui.checksum.passed", "Passed"), value: checksumResultNumber("checksum_check", "passed").toLocaleString() },
-          { label: tr("gui.checksum.failed", "Failed"), value: checksumResultNumber("checksum_check", "failed").toLocaleString() },
-          { label: tr("gui.checksum.checked", "Checked"), value: checksumResultNumber("checksum_check", "checked").toLocaleString() },
-        ],
-        rows: verificationRows,
-        state: reportState(verification),
-        feedback: checksumCopyFeedbackFor("checksum_check"),
-        feedbackDanger: checksumCopyFeedbackToneFor("checksum_check") === "danger",
-        copyPending: checksumCopyPending("checksum_check", verification?.id ?? null),
-        onCopy: () => void copyChecksumResults("checksum_check"),
-      },
-      actions: {
-        onChooseFile: () => void chooseChecksumFile(),
-        onChooseFolder: () => void chooseChecksumFolder(),
-        onUseCurrentArchive: useCurrentArchiveForChecksum,
-        onCalculate: () => void submitChecksumJob(),
-        onChooseManifest: () => void chooseChecksumManifest(),
-        onVerifyManifest: () => void submitChecksumCheckJob(),
-        onOpenDuplicates: () => setScreen("duplicates"),
-        onOpenRecovery: () => setScreen("recovery"),
-      },
-      onPanelMount: (kind: ChecksumResultKind, node: HTMLElement | null) => {
-        if (kind === "checksum") {
-          checksumResultPanel = node;
-        } else {
-          checksumCheckResultPanel = node;
-        }
+      onNavigate: (next: "duplicates" | "recovery" | "create" | "batch") => setScreen(next),
+      onPanelMount: (kind: ChecksumResultKind | "duplicates", node: HTMLElement | null) => {
+        if (kind === "duplicates") { registerDuplicateReportPanel(node); return; }
+        if (kind === "checksum") checksumResultPanel = node;
+        else checksumCheckResultPanel = node;
         const request = checksumResultFocusPending;
         if (node && request?.kind === kind) void focusPendingChecksumResult(request);
       },
     };
   }
 
-  function duplicatesWorkspaceSurface(variant: ToolsWorkspaceVariant): DuplicatesWorkspaceSurface {
-    const task = selectedDuplicateScanTask();
-
-    return {
-      kind: "duplicates",
-      variant,
-      title: tr("gui.screen.duplicates", "Duplicate Finder"),
-      tr,
-      archiveReturn: toolsArchiveReturnSurface(variant),
-      target: {
-        name: duplicateScanTargetName(),
-        label: duplicateScanTargetLabel(),
-      },
-      minimumSize: {
-        value: duplicateMinSize,
-        label: formatBytes(duplicateMinSize),
-        error: duplicateMinSizeError,
-        onInput: updateDuplicateMinSizeFromInput,
-      },
-      excludes: {
-        value: duplicateExcludeText,
-        rules: duplicateExcludeRules(),
-        countLabel: tr("gui.excludes.count", "{count} rules")
-          .replace("{count}", String(duplicateExcludeRules().length)),
-        onInput: (value) => (duplicateExcludeText = value),
-      },
-      report: {
-        taskId: task?.id ?? null,
-        state: task ? taskOutcomeStateLabel(task) : taskStateLabel(null),
-        context: task?.spec.kind === "duplicate_scan" ? {
-          sources: task.spec.inputs,
-          minimumSize: formatBytes(task.spec.min_size),
-          excludes: task.spec.excludes,
-        } : null,
-        summary: [
-          { label: tr("gui.duplicates.files_scanned", "Files scanned"), value: duplicateResultLabel("files_scanned") },
-          { label: tr("gui.duplicates.bytes_scanned", "Bytes scanned"), value: duplicateResultLabel("bytes_scanned", true) },
-          { label: tr("gui.duplicates.candidates_hashed", "Candidates hashed"), value: duplicateResultLabel("candidate_files") },
-          { label: tr("gui.duplicates.hashed_bytes", "Bytes hashed"), value: duplicateResultLabel("hashed_bytes", true) },
-          { label: tr("gui.duplicates.groups", "Groups"), value: duplicateResultLabel("duplicate_groups") },
-          { label: tr("gui.duplicates.files", "Files"), value: duplicateResultLabel("duplicate_files") },
-          { label: tr("gui.duplicates.reclaimable", "Reclaimable"), value: duplicateResultLabel("reclaimable_bytes", true) },
-        ],
-        groups: taskDuplicateGroups(task),
-        emptyMessage: !task
-          ? tr("gui.duplicates.report_empty", "Choose a folder and start a scan to find duplicate files.")
-          : task.state === "done" && task.result?.duplicate_groups === 0
-            && Array.isArray(task.result.groups) && task.result.groups.length === 0
-            ? tr("gui.duplicates.report_clean", "No duplicate files were found within this scan's size and exclude rules.")
-            : task.state === "queued" || task.state === "running" || task.state === "paused"
-              ? tr("gui.duplicates.report_pending", "The report will appear when this scan finishes. Follow its progress in the task center.")
-              : tr("gui.duplicates.report_unavailable", "No complete report is available for this scan. Open its task details to review the outcome, or run a new scan."),
-        onMount: registerDuplicateReportPanel,
-      },
-      actions: {
-        onChooseFolder: () => void chooseDuplicateScanFolder(),
-        onUseArchiveFolder: useCurrentArchiveFolderForDuplicates,
-        onScan: () => void submitDuplicateScanJob(),
-        onOpenCreate: () => setScreen("create"),
-        onOpenBatch: () => setScreen("batch"),
-      },
-    };
-  }
-
-  function checksumTarget(): string {
-    if (checksumPath.trim()) return checksumPath.trim();
-    return currentArchive && !currentArchive.read_only ? currentArchive.path : "";
-  }
-
-  function checksumCurrentArchiveDisabledReason(): string {
-    if (!currentArchive) return openArchiveFirstLabel();
-    return currentArchive.read_only
-      ? tr("gui.checksum.nested_requires_extract", "Extract the inner archive before checksumming its container file.")
-      : "";
-  }
-
-  function checksumTargetLabel(): string {
-    const target = checksumTarget();
-    return target ? target : tr("gui.checksum.choose_file_or_folder", "Choose a file or folder");
-  }
-
-  function checksumTargetName(): string {
-    const target = checksumTarget();
-    return target ? pathBaseName(target) || target : tr("gui.checksum.no_target_selected", "No target selected");
-  }
-
-  function checksumManifestLabel(): string {
-    return checksumManifestPath.trim() || tr("gui.checksum.choose_manifest_prompt", "Choose a checksum manifest");
-  }
-
-  function selectedChecksumTask(kind: "checksum" | "checksum_check"): Task | null {
-    const selectedId = checksumReportTaskIds[kind];
-    const selected = jobRows.find((task) => task.id === selectedId && task.spec.kind === kind);
-    if (selected) return selected;
-    for (let index = jobRows.length - 1; index >= 0; index -= 1) {
-      const task = jobRows[index];
-      if (task.spec.kind === kind) return task;
-    }
-    return null;
-  }
-
-  function checksumResultNumber(kind: "checksum" | "checksum_check", key: string): number {
-    const value = selectedChecksumTask(kind)?.result?.[key];
-    return typeof value === "number" && Number.isFinite(value) ? value : 0;
-  }
-
-  function checksumItems(kind: "checksum" | "checksum_check"): Record<string, unknown>[] {
-    const items = selectedChecksumTask(kind)?.result?.items;
-    if (!Array.isArray(items)) return [];
-    return items.filter((item): item is Record<string, unknown> => item !== null && typeof item === "object" && !Array.isArray(item));
-  }
-
-  function checksumItemNumber(item: Record<string, unknown>, key: string): number {
-    const value = item[key];
-    return typeof value === "number" && Number.isFinite(value) ? value : 0;
-  }
-
-  function checksumResultText(kind: "checksum" | "checksum_check"): string {
-    return checksumItems(kind)
-      .map((item) => checksumResultLine(kind, item))
-      .filter((line) => line.trim().length > 0)
-      .join("\n");
-  }
-
-  async function copyChecksumText(
-    text: string,
-    kind: "checksum" | "checksum_check" | "task",
-    taskId: number | null = null,
-  ) {
-    clearChecksumCopyState();
-    const origin = {
-      screen,
-      mode,
-      taskCenterOpen,
-      taskCenterSelectedTaskId,
-      taskDialogTaskId,
-      taskDialogDismissedId,
-    };
-    const isCurrent = (): boolean => {
-      if (checksumCopyRequest !== request || screen !== origin.screen || mode !== origin.mode
-        || taskCenterOpen !== origin.taskCenterOpen
-        || taskCenterSelectedTaskId !== origin.taskCenterSelectedTaskId
-        || taskDialogTaskId !== origin.taskDialogTaskId
-        || taskDialogDismissedId !== origin.taskDialogDismissedId) return false;
-      if (kind !== "task") return screen === "checksum" && (selectedChecksumTask(kind)?.id ?? null) === taskId;
-      if (taskWindowMode) return taskDialogTask()?.id === taskId;
-      return taskCenterOpen
-        ? taskCenterSelectedTaskId === taskId
-        : taskDialogTaskId === taskId && taskDialogDismissedId !== taskId;
-    };
-    const request = { kind, taskId, isCurrent };
-    checksumCopyRequest = request;
-    if (!isCurrent()) {
-      checksumCopyRequest = null;
-      return;
-    }
-    if (!text.trim()) {
-      const message = tr("gui.checksum.no_copyable_results", "No checksum results to copy");
-      showNotice(message);
-      showChecksumCopyFeedback(kind, taskId, message, "danger");
-      checksumCopyRequest = null;
-      return;
-    }
-    try {
-      const result = await copyTextToClipboard(text, isCurrent);
-      if (!isCurrent() || result === "superseded") return;
-      const copied = result === "copied";
-      const message = copied
-        ? tr("gui.checksum.results_copied", "Checksum results copied")
-        : tr("gui.checksum.copy_failed", "Could not copy checksum results");
-      showNotice(message);
-      showChecksumCopyFeedback(kind, taskId, message, copied ? "success" : "danger");
-    } finally {
-      if (checksumCopyRequest === request) checksumCopyRequest = null;
-    }
-  }
-
-  function checksumCopyPending(kind: "checksum" | "checksum_check" | "task", taskId: number | null): boolean {
-    return checksumCopyRequest?.kind === kind && checksumCopyRequest.taskId === taskId
-      && checksumCopyRequest.isCurrent();
-  }
-
-  async function copyChecksumResults(kind: "checksum" | "checksum_check") {
-    await copyChecksumText(checksumResultText(kind), kind, selectedChecksumTask(kind)?.id ?? null);
-  }
-
-  async function copyTaskChecksumResults(task: TaskDialogModel) {
-    await copyChecksumText(taskChecksumResultText(task), "task", task.id);
-  }
-
-  function checksumExcludeRules(): string[] {
-    return parseDelimitedRules(checksumExcludeText);
-  }
-
-  function checksumAlgorithmLabel(algorithm: ChecksumAlgorithmId): string {
-    if (algorithm === "sha256") return "SHA-256";
-    if (algorithm === "sha224") return "SHA-224";
-    if (algorithm === "sha384") return "SHA-384";
-    if (algorithm === "sha512") return "SHA-512";
-    if (algorithm === "sha1") return "SHA-1";
-    if (algorithm === "md5") return "MD5";
-    if (algorithm === "blake3") return "BLAKE3";
-    return "CRC32";
-  }
-
-  function checksumAlgorithmHint(algorithm: ChecksumAlgorithmId): string {
-    if (algorithm === "sha256") return tr("gui.checksum.algorithm_sha256_hint", "Default");
-    if (algorithm === "sha224") return tr("gui.checksum.algorithm_sha224_hint", "SHA-2");
-    if (algorithm === "sha384") return tr("gui.checksum.algorithm_sha384_hint", "Signed releases");
-    if (algorithm === "sha512") return tr("gui.checksum.algorithm_sha512_hint", "Wide SHA-2");
-    if (algorithm === "sha1") return tr("gui.checksum.algorithm_sha1_hint", "Weak");
-    if (algorithm === "md5") return tr("gui.checksum.algorithm_md5_hint", "Weak");
-    if (algorithm === "blake3") return tr("gui.checksum.algorithm_blake3_hint", "Fast");
-    return tr("gui.checksum.algorithm_crc32_hint", "ZIP CRC");
-  }
-
-  function selectChecksumAlgorithm(value: ChecksumAlgorithmId) {
-    checksumAlgorithm = value;
-  }
-
-  async function chooseChecksumFile() {
-    try {
-      const { open } = await getDialogModule();
-      const selected = await openNativeDialog("checksum.file", open, {
-        title: tr("gui.checksum.choose_file_to_checksum", "Choose file to checksum"),
-        multiple: false,
-      });
-      if (!selected || Array.isArray(selected)) {
-        showNotice(tr("gui.checksum.target_unchanged", "Checksum target unchanged"));
-        return;
-      }
-      checksumPath = selected;
-      showNotice(tr("gui.checksum.target_selected", "Checksum target selected"));
-    } catch {
-      showNotice(tr("gui.checksum.choose_file_requires_desktop_dialog", "Choosing a checksum file requires the desktop file dialog"));
-    }
-  }
-
-  async function chooseChecksumFolder() {
-    try {
-      const { open } = await getDialogModule();
-      const selected = await openNativeDialog("checksum.folder", open, {
-        title: tr("gui.checksum.choose_folder_to_checksum", "Choose folder to checksum"),
-        directory: true,
-        multiple: false,
-      });
-      if (!selected || Array.isArray(selected)) {
-        showNotice(tr("gui.checksum.target_unchanged", "Checksum target unchanged"));
-        return;
-      }
-      checksumPath = selected;
-      showNotice(tr("gui.checksum.folder_selected", "Checksum folder selected"));
-    } catch {
-      showNotice(tr("gui.checksum.choose_folder_requires_desktop_dialog", "Choosing a checksum folder requires the desktop file dialog"));
-    }
-  }
-
-  async function chooseChecksumManifest() {
-    try {
-      const { open } = await getDialogModule();
-      const selected = await openNativeDialog("checksum.manifest", open, {
-        title: tr("gui.checksum.choose_manifest", "Choose checksum manifest"),
-        multiple: false,
-      });
-      if (!selected || Array.isArray(selected)) {
-        showNotice(tr("gui.checksum.manifest_unchanged", "Checksum manifest unchanged"));
-        return;
-      }
-      checksumManifestPath = selected;
-      showNotice(tr("gui.checksum.manifest_selected", "Checksum manifest selected"));
-    } catch {
-      showNotice(tr("gui.checksum.choose_manifest_requires_desktop_dialog", "Choosing a checksum manifest requires the desktop file dialog"));
-    }
-  }
-
-  function useCurrentArchiveForChecksum() {
-    const disabledReason = checksumCurrentArchiveDisabledReason();
-    if (disabledReason) {
-      showNotice(disabledReason);
-      return;
-    }
-    if (!currentArchive) return;
-    checksumPath = currentArchive.path;
-    showNotice(tr("gui.checksum.target_current_archive", "Checksum target set to current archive"));
-  }
-
-  async function submitChecksumJob() {
-    const target = checksumTarget();
-    if (!target) {
-      showNotice(tr("gui.checksum.choose_before_checksumming", "Choose a file or folder before checksumming"));
-      return;
-    }
-    if (focusBlockingTaskIfAny()) return;
-    try {
-      const id = await submitJob({
-        kind: "checksum",
-        inputs: [target],
-        excludes: checksumExcludeRules(),
-        algorithm: checksumAlgorithm,
-      });
-      checksumReportTaskIds.checksum = id;
-      showNotice(tr("gui.checksum.queued", "Checksum added to queue"));
-      recordOperation({
-        status: "queued",
-        title: tr("gui.checksum.queued", "Checksum added to queue"),
-        detail: `${pathBaseName(target) || target} · ${checksumAlgorithm}`,
-      });
-    } catch (error) {
-      if (isJobSubmitBlocked(error)) return;
-      showNotice(tr("gui.checksum.requires_desktop_service", "Checksum requires the desktop service"));
-    }
-  }
-
-  async function submitChecksumCheckJob() {
-    const manifest = checksumManifestPath.trim();
-    if (!manifest) {
-      showNotice(tr("gui.checksum.choose_manifest_before_verifying", "Choose a checksum manifest before verifying"));
-      return;
-    }
-    if (focusBlockingTaskIfAny()) return;
-    try {
-      const id = await submitJob({
-        kind: "checksum_check",
-        manifest,
-        algorithm: checksumAlgorithm,
-      });
-      checksumReportTaskIds.checksum_check = id;
-      showNotice(tr("gui.checksum.verification_queued", "Checksum verification added to queue"));
-      recordOperation({
-        status: "queued",
-        title: tr("gui.checksum.verification_queued", "Checksum verification added to queue"),
-        detail: `${pathBaseName(manifest) || manifest} · ${checksumAlgorithm}`,
-      });
-    } catch (error) {
-      if (isJobSubmitBlocked(error)) return;
-      showNotice(tr("gui.checksum.verification_requires_desktop_service", "Checksum verification requires the desktop service"));
-    }
-  }
-
-  function duplicateScanTarget(): string {
-    if (duplicateScanPath.trim()) return duplicateScanPath.trim();
-    return currentArchive ? pathDir(currentArchive.path) : "";
-  }
-
-  function duplicateScanTargetLabel(): string {
-    const target = duplicateScanTarget();
-    return target ? target : tr("gui.duplicates.choose_folder_or_open_archive", "Choose a folder or open an archive");
-  }
-
-  function duplicateScanTargetName(): string {
-    const target = duplicateScanTarget();
-    return target ? pathBaseName(target) || target : tr("gui.duplicates.no_folder_selected", "No folder selected");
-  }
-
-  function selectedDuplicateScanTask(): Task | null {
-    const selected = jobRows.find((task) => task.id === duplicateReportTaskId && task.spec.kind === "duplicate_scan");
-    if (selected) return selected;
-    for (let index = jobRows.length - 1; index >= 0; index -= 1) {
-      const task = jobRows[index];
-      if (task.spec.kind === "duplicate_scan") return task;
-    }
-    return null;
-  }
-
-  function duplicateResultNumber(key: string): number | null {
-    const value = selectedDuplicateScanTask()?.result?.[key];
-    return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
-  }
-
-  function duplicateResultLabel(key: string, bytes = false): string {
-    const value = duplicateResultNumber(key);
-    return value === null ? "—" : bytes ? formatBytes(value) : value.toLocaleString();
-  }
-
-  function duplicateExcludeRules(): string[] {
-    return parseDelimitedRules(duplicateExcludeText);
-  }
-
-  function duplicateMinSizeInvalidMessage(): string {
-    return tr("gui.duplicates.min_size_invalid", "Use a whole number of bytes, 0 or more");
-  }
-
-  function parseDuplicateMinSizeInput(input: HTMLInputElement): number | null {
-    const raw = input.value.trim();
-    const value = Number(raw);
-    if (!raw || !Number.isFinite(value) || !Number.isInteger(value) || value < 0) {
-      return null;
-    }
-    return value;
-  }
-
-  function updateDuplicateMinSizeFromInput(event: Event) {
-    const input = event.currentTarget as HTMLInputElement;
-    const value = parseDuplicateMinSizeInput(input);
-    if (value === null) {
-      duplicateMinSizeError = duplicateMinSizeInvalidMessage();
-      showNotice(duplicateMinSizeError);
-      return;
-    }
-    duplicateMinSizeError = "";
-    duplicateMinSize = value;
-  }
-
-  async function chooseDuplicateScanFolder() {
-    try {
-      const { open } = await getDialogModule();
-      const selected = await openNativeDialog("duplicates.folder", open, {
-        title: tr("gui.duplicates.choose_folder_to_scan", "Choose folder to scan"),
-        directory: true,
-        multiple: false,
-      });
-      if (!selected || Array.isArray(selected)) {
-        showNotice(tr("gui.duplicates.folder_unchanged", "Duplicate scan folder unchanged"));
-        return;
-      }
-      duplicateScanPath = selected;
-      showNotice(tr("gui.duplicates.folder_selected", "Duplicate scan folder selected"));
-    } catch {
-      showNotice(tr("gui.duplicates.choose_folder_requires_desktop_dialog", "Choosing a scan folder requires the desktop file dialog"));
-    }
-  }
-
-  function useCurrentArchiveFolderForDuplicates() {
-    if (!currentArchive) {
-      showNotice(tr("gui.duplicates.open_archive_or_choose_folder", "Open an archive or choose a folder first"));
-      return;
-    }
-    duplicateScanPath = pathDir(currentArchive.path);
-    showNotice(tr("gui.duplicates.target_archive_folder", "Duplicate scan target set to archive folder"));
-  }
-
-  async function submitDuplicateScanJob() {
-    if (duplicateMinSizeError) {
-      showNotice(duplicateMinSizeError);
-      return;
-    }
-    const target = duplicateScanTarget();
-    if (!target) {
-      showNotice(tr("gui.duplicates.choose_folder_before_scan", "Choose a folder before scanning for duplicates"));
-      return;
-    }
-    if (focusBlockingTaskIfAny()) return;
-    try {
-      const id = await submitJob({
-        kind: "duplicate_scan",
-        inputs: [target],
-        excludes: duplicateExcludeRules(),
-        min_size: Math.max(0, Math.floor(duplicateMinSize)),
-      });
-      duplicateReportTaskId = id;
-      showNotice(tr("gui.duplicates.queued", "Duplicate scan added to queue"));
-      recordOperation({
-        status: "queued",
-        title: tr("gui.duplicates.queued", "Duplicate scan added to queue"),
-        detail: tr("gui.duplicates.operation_detail", "{target} · min {min}")
-          .replace("{target}", pathBaseName(target) || target)
-          .replace("{min}", formatBytes(duplicateMinSize)),
-      });
-    } catch (error) {
-      if (isJobSubmitBlocked(error)) return;
-      showNotice(tr("gui.duplicates.requires_desktop_service", "Duplicate scan requires the desktop service"));
-    }
-  }
-
-  async function submitBestEffortExtractJob() {
-    const source = recoverySourcePath();
-    const jobSource = recoverySourceForJob();
-    if (!source || !jobSource) {
-      showNotice(tr("gui.recovery.choose_archive_before_best_effort", "Choose an archive before extracting readable files."));
-      return;
-    }
-    if (focusBlockingTaskIfAny()) return;
-    const selection = recoverySelectionForJob();
-    const dest = `${extractDestForPath(source)}-readable`;
-    recoverySubmissionPending = true;
-    try {
-      const id = await submitJob({
-        kind: "extract",
-        path: jobSource,
-        dest,
-        expected_destination: null,
-        expected_input_guard: null,
-        selection,
-        overwrite: "rename",
-        symlinks: "preserve",
-        smart: true,
-        encoding: recoveryEncodingForJob(),
-        password: null,
-        verify_sfx: false,
-        best_effort: true,
-      });
-      recoveryContextTaskIds.add(id);
-      const title = selection
-        ? tr("gui.recovery.best_effort_selected_queued", "Selected best-effort extract added to queue")
-        : tr("gui.recovery.best_effort_queued", "Best-effort extract added to queue");
-      showNotice(title);
-      recordOperation({
-        status: "queued",
-        title,
-        detail: `${pathBaseName(source)} -> ${pathBaseName(dest)}`,
-      });
-    } catch (error) {
-      if (isJobSubmitBlocked(error)) return;
-      showNotice(tr("gui.recovery.best_effort_requires_desktop_service", "Extracting readable files requires the desktop service."));
-    } finally {
-      recoverySubmissionPending = false;
-    }
-  }
-
   async function submitTestJob() {
     if (!currentArchive) {
-      showNotice(tr("gui.precondition.open_before_test", "Open an archive before testing"));
+      showNotice(tr("gui.precondition.open_before_test"));
       return;
     }
     const queued = await submitCurrentArchiveJob(
@@ -8875,306 +4900,17 @@
         encoding: archiveEncodingForJob(),
         password: null,
       },
-      tr("gui.test.queued", "Archive test added to queue"),
-      tr("gui.precondition.open_before_test", "Open an archive before testing"),
+      tr("gui.test.queued"),
+      tr("gui.precondition.open_before_test"),
     );
     if (queued) {
       recordOperation({
         status: "queued",
-        title: tr("gui.test.queued", "Archive test added to queue"),
+        title: tr("gui.test.queued"),
         detail: archiveTitle(),
       });
     }
   }
-
-  async function submitRecoveryTestJob() {
-    const source = recoverySourcePath();
-    const jobSource = recoverySourceForJob();
-    if (!source || !jobSource) {
-      showNotice(tr("gui.recovery.choose_archive_before_test", "Choose an archive before testing"));
-      return;
-    }
-    if (focusBlockingTaskIfAny()) return;
-    recoverySubmissionPending = true;
-    try {
-      const id = await submitJob({
-        kind: "test",
-        path: jobSource,
-        encoding: recoveryEncodingForJob(),
-        password: null,
-      });
-      recoveryContextTaskIds.add(id);
-      showNotice(tr("gui.recovery.archive_test_started", "Archive test added to the queue from Recovery."));
-      recordOperation({
-        status: "queued",
-        title: tr("gui.test.queued", "Archive test added to queue"),
-        detail: pathBaseName(source),
-      });
-    } catch (error) {
-      if (isJobSubmitBlocked(error)) return;
-      showNotice(tr("gui.recovery.archive_test_requires_desktop_service", "Archive testing requires the desktop service."));
-    } finally {
-      recoverySubmissionPending = false;
-    }
-  }
-
-  function recoveryOutputContext(): string {
-    return JSON.stringify([
-      screen, mode, recoverySourceMode, recoverySourcePath(), recoverySourceForJob(),
-      recoveryPar2Override, recoverySourceMode === "current" ? archiveOpenGeneration : null,
-    ]);
-  }
-
-  function isCurrentRecoveryOutputPreparation(request: RecoveryOutputPreparation): boolean {
-    return recoveryOutputPreparation?.id === request.id
-      && request.context === recoveryOutputContext();
-  }
-
-  function recoveryOutputStatus(): string {
-    switch (recoveryOutputPreparation?.phase) {
-      case "opening":
-        return tr("gui.recovery.preparing_output", "Preparing output…");
-      case "choosing":
-        return tr("gui.recovery.choosing_output", "Choose where to save the output.");
-      case "checking":
-        return tr("gui.output.checking_existing", "Checking output…");
-      case "submitting":
-        return tr("gui.recovery.submitting_task", "Adding recovery task to queue…");
-      default:
-        return recoverySubmissionPending
-          ? tr("gui.recovery.submitting_task", "Adding recovery task to queue…")
-          : "";
-    }
-  }
-
-  async function submitRecoveryOutputJob(kind: RecoveryOutputKind) {
-    if (screen !== "recovery" || recoveryOutputPreparation || recoverySubmissionPending
-      || recoveryPickerStatus !== "idle") return;
-    const source = recoverySourcePath();
-    const jobSource = recoverySourceForJob();
-    const outputDirectory = kind === "repair_recovery" && recoveryRepairUsesDirectory();
-    const extension = source ? archiveExtensionMatch(pathBaseName(source)) : null;
-    const plans = {
-      export_sqz: {
-        disabledReason: recoverySqzExportDisabledReason(),
-        missing: tr("gui.recovery.choose_sqz_before_export", "Choose an SQZ archive before exporting."),
-        operation: "recovery.export-sqz",
-        title: tr("gui.recovery.export_sqz_as", "Export SQZ as"),
-        defaultPath: defaultSqzExportDest(),
-        filters: [
-          { name: archiveOutputFilterName("zip"), extensions: ["zip"] },
-          { name: archiveOutputFilterName("7z"), extensions: ["7z"] },
-          { name: archiveOutputFilterName("tar.zst"), extensions: ["tar.zst", "tzst"] },
-          { name: archiveOutputFilterName("tar"), extensions: ["tar"] },
-        ],
-        cancelled: tr("gui.recovery.export_sqz_cancelled", "Export SQZ cancelled"),
-        queued: tr("gui.recovery.sqz_export_queued", "SQZ export added to queue"),
-      },
-      repair_sqz: {
-        disabledReason: recoverySqzRepairDisabledReason(),
-        missing: tr("gui.recovery.choose_sqz_before_repair", "Choose an SQZ archive or SQZ volume before repairing."),
-        operation: "recovery.repair-sqz",
-        title: tr("gui.recovery.repair_sqz_as", "Repair SQZ as"),
-        defaultPath: defaultSqzRepairDest(),
-        filters: [{ name: archiveOutputFilterName("sqz"), extensions: ["sqz"] }],
-        cancelled: tr("gui.recovery.repair_sqz_cancelled", "Repair SQZ cancelled"),
-        queued: tr("gui.recovery.sqz_repair_queued", "SQZ repair added to queue"),
-      },
-      repair_zip: {
-        disabledReason: recoveryZipDisabledReason(),
-        missing: tr("gui.recovery.choose_archive_before_zip_rebuild", "Choose a ZIP-family archive before rebuilding its index."),
-        operation: "recovery.rebuild-zip-index",
-        title: tr("gui.recovery.rebuild_zip_index_as", "Rebuild ZIP index as"),
-        defaultPath: defaultZipRepairDest(),
-        filters: [{ name: archiveOutputFilterName("zip"), extensions: ["zip"] }],
-        cancelled: tr("gui.recovery.zip_rebuild_cancelled", "ZIP index rebuild cancelled"),
-        queued: tr("gui.recovery.zip_rebuild_queued", "ZIP index rebuild added to queue"),
-      },
-      repair_recovery: {
-        disabledReason: recoveryRepairPar2DisabledReason(),
-        missing: tr("gui.recovery.choose_archive_before_par2_repair", "Choose an archive before repairing with PAR2 data."),
-        operation: "recovery.repair-par2",
-        title: tr("gui.recovery.repair_par2_as", "Repair with PAR2 as"),
-        defaultPath: defaultPar2RepairDest(),
-        filters: extension
-          ? [{
-              name: tr("gui.recovery.repaired_archive_filter", "Repaired archive"),
-              extensions: [extension],
-            }]
-          : [],
-        cancelled: tr("gui.recovery.repair_par2_cancelled", "PAR2 repair cancelled"),
-        queued: outputDirectory
-          ? tr("gui.recovery.par2_set_repair_queued", "PAR2 set repair added to queue")
-          : tr("gui.recovery.par2_repair_queued", "PAR2 repair added to queue"),
-      },
-    };
-    const plan = plans[kind];
-    if (plan.disabledReason || !source || !jobSource) {
-      showNotice(plan.disabledReason || plan.missing);
-      return;
-    }
-    if (focusBlockingTaskIfAny()) return;
-    const sidecar = recoveryPar2Override;
-    const directoryName = defaultPar2RepairDirectoryName();
-    const level = createCompressionLevel();
-    const profile = createProfileLabel(activeCreateProfile);
-    const request: RecoveryOutputPreparation = {
-      id: Symbol(), context: recoveryOutputContext(), phase: "opening",
-    };
-    recoveryOutputPreparation = request;
-    const isCurrent = () => isCurrentRecoveryOutputPreparation(request);
-    const setPhase = (phase: RecoveryOutputPreparation["phase"]) => {
-      if (recoveryOutputPreparation?.id === request.id) recoveryOutputPreparation.phase = phase;
-    };
-    const inspect = async (candidate: string, splitOutput: boolean) => {
-      try {
-        return await ipc.inspectCreateDestination(candidate, splitOutput, nextPreflightRequestId(), null);
-      } catch (error) {
-        throw new CreateDestinationInspectionError(error);
-      }
-    };
-    try {
-      const dialogs = await getDialogModule();
-      if (!isCurrent()) return;
-      setPhase("choosing");
-      let dest: string | null = null;
-      if (outputDirectory) {
-        const selected = await openNativeDialog("recovery.repair-par2-set-parent", dialogs.open, {
-          title: tr("gui.recovery.choose_repaired_set_parent", "Choose where to create the repaired set folder"),
-          defaultPath: pathDir(source),
-          multiple: false,
-          directory: true,
-        });
-        if (!isCurrent()) return;
-        if (typeof selected === "string") {
-          setPhase("checking");
-          dest = await ipc.uniqueCreateDestination(joinFolderPath(selected, directoryName), false);
-          if (!isCurrent()) return;
-        }
-      } else {
-        dest = await saveNativeDialog(plan.operation, dialogs.save, {
-          title: plan.title, defaultPath: plan.defaultPath, filters: plan.filters,
-        });
-        if (!isCurrent()) return;
-      }
-      if (!dest) {
-        showNotice(plan.cancelled);
-        return;
-      }
-      if (kind !== "export_sqz" && (sameFilePath(dest, source) || sameFilePath(dest, jobSource))) {
-        showNotice(tr("gui.recovery.repair_output_must_differ", "Choose a new file for the repaired copy. The source archive will not be overwritten."));
-        return;
-      }
-      setPhase("checking");
-      let authorization: AuthorizedArchiveOutput | null = null;
-      if (kind === "export_sqz") {
-        authorization = await authorizeArchiveOutput(dest, dialogs.confirm, false, inspect, isCurrent);
-        if (!isCurrent()) return;
-        if (!authorization) {
-          showNotice(plan.cancelled);
-          return;
-        }
-      } else {
-        const inspection = await inspect(dest, false);
-        if (!isCurrent()) return;
-        if (inspection.conflict) {
-          showNotice(tr("gui.recovery.repair_output_exists", "The destination already exists. Choose a different name or folder for the repaired copy; the existing output was kept."));
-          return;
-        }
-      }
-      let spec: JobSpec;
-      if (kind === "repair_recovery") {
-        spec = { kind, path: jobSource, output: dest, output_directory: outputDirectory, recovery: sidecar };
-      } else if (kind === "export_sqz") {
-        if (!authorization) return;
-        spec = {
-          kind, src: jobSource, dest, level, dest_password: null,
-          replace_existing: authorization.replaceExisting,
-          replacement_guard: authorization.replacementGuard,
-        };
-      } else {
-        spec = { kind, src: jobSource, dest, level };
-      }
-      setPhase("submitting");
-      await submitJob(spec);
-      recordOperation({
-        status: "queued",
-        title: plan.queued,
-        detail: `${pathBaseName(source)} -> ${pathBaseName(dest)}${kind === "export_sqz" ? ` · ${profile}` : ""}`,
-      });
-      if (isCurrent()) showNotice(plan.queued);
-    } catch (error) {
-      if (!isCurrent() || isJobSubmitBlocked(error)) return;
-      if (createDestinationInspectionCancelled(error)) {
-        showNotice(plan.cancelled);
-      } else if (error instanceof CreateDestinationInspectionError) {
-        showNotice(error.detail
-          ? tError(error.detail)
-          : tr("gui.output.inspect_failed", "Could not check the output. Review the destination and try again."));
-      } else {
-        showNotice(tr("gui.recovery.output_preparation_failed", "Could not start this recovery task. Check the save location and try again."));
-      }
-    } finally {
-      if (recoveryOutputPreparation?.id === request.id) recoveryOutputPreparation = null;
-    }
-  }
-
-  async function submitProtectJob() {
-    const disabledReason = recoveryProtectDisabledReason();
-    const source = recoverySourcePath();
-    const jobSource = recoverySourceForJob();
-    const redundancy = recoveryRedundancyValue();
-    if (disabledReason || !source || !jobSource || redundancy === null) {
-      showNotice(disabledReason || tr("gui.recovery.choose_archive_before_protect", "Choose an archive before creating PAR2 recovery data."));
-      return;
-    }
-    if (focusBlockingTaskIfAny()) return;
-    try {
-      await submitJob({
-        kind: "protect",
-        path: jobSource,
-        redundancy,
-        recovery: null,
-      });
-      showNotice(tr("gui.recovery.par2_protection_queued", "PAR2 protection added to queue"));
-      recordOperation({
-        status: "queued",
-        title: tr("gui.recovery.par2_protection_queued", "PAR2 protection added to queue"),
-        detail: pathBaseName(source),
-      });
-    } catch (error) {
-      if (isJobSubmitBlocked(error)) return;
-      showNotice(tr("gui.recovery.protect_requires_desktop_service", "Creating PAR2 recovery data requires the desktop service."));
-    }
-  }
-
-  async function submitVerifyRecoveryJob() {
-    const disabledReason = recoveryVerifyDisabledReason();
-    const source = recoverySourcePath();
-    const jobSource = recoverySourceForJob();
-    if (disabledReason || !source || !jobSource) {
-      showNotice(disabledReason || tr("gui.recovery.choose_archive_before_verify", "Choose the archive described by this PAR2 file."));
-      return;
-    }
-    if (focusBlockingTaskIfAny()) return;
-    try {
-      await submitJob({
-        kind: "verify_recovery",
-        path: jobSource,
-        recovery: recoveryPar2Override,
-      });
-      showNotice(tr("gui.recovery.par2_verify_queued", "PAR2 verification added to queue"));
-      recordOperation({
-        status: "queued",
-        title: tr("gui.recovery.par2_verify_queued", "PAR2 verification added to queue"),
-        detail: `${pathBaseName(source)} · ${pathBaseName(recoveryPar2Path() ?? "")}`,
-      });
-    } catch (error) {
-      if (isJobSubmitBlocked(error)) return;
-      showNotice(tr("gui.recovery.verify_requires_desktop_service", "Verifying PAR2 recovery data requires the desktop service."));
-    }
-  }
-
 
   function isCurrentArchiveAddPreparation(request: NonNullable<typeof archiveAddPreparation>): boolean {
     return archiveAddPreparation === request && screen === request.screen && mode === request.mode
@@ -9190,7 +4926,7 @@
   async function submitAddToArchiveJob() {
     if (archiveAddPending) return;
     if (!currentArchive) {
-      showNotice(tr("gui.precondition.open_before_add", "Open an archive before adding files"));
+      showNotice(tr("gui.precondition.open_before_add"));
       return;
     }
     const readOnly = archiveMutationDisabledReason();
@@ -9203,10 +4939,10 @@
     const request: NonNullable<typeof archiveAddPreparation> = {
       screen, mode, generation: archiveOpenGeneration, id, source: path, encoding, phase: "preparing",
     };
-    const content_policy = createContentPolicy;
-    const excludes = content_policy === "custom" ? [...createExcludeRules()] : [];
-    const level = createCompressionLevel();
-    const profile = createProfileLabel(activeCreateProfile);
+    const content_policy = create.options.state.contentPolicy;
+    const excludes = content_policy === "custom" ? [...create.options.excludeRules] : [];
+    const level = create.options.compressionLevel;
+    const profile = create.view.profileLabel(create.options.state.profile);
     const canAddToOriginalArchive = () => {
       if (!isCurrentArchiveAddPreparation(request)) return false;
       const reason = archiveMutationDisabledReason();
@@ -9220,19 +4956,19 @@
         const { open } = await getDialogModule();
         if (!canAddToOriginalArchive()) return;
         selected = await openNativeDialog("archive.add-files", open, {
-          title: tr("gui.add.choose_files_to_add", "Choose files to add"),
+          title: tr("gui.add.choose_files_to_add"),
           multiple: true,
           directory: false,
         });
       } catch {
         if (!isCurrentArchiveAddPreparation(request)) return;
-        showNotice(tr("gui.add.picker_failed", "Could not open the file chooser. Try adding files again."));
+        showNotice(tr("gui.add.picker_failed"));
         return;
       }
       if (!canAddToOriginalArchive()) return;
       const add = Array.isArray(selected) ? selected : selected ? [selected] : [];
       if (add.length === 0) {
-        showNotice(tr("gui.add.cancelled", "Add files cancelled"));
+        showNotice(tr("gui.add.cancelled"));
         return;
       }
       request.phase = "submitting";
@@ -9250,13 +4986,13 @@
         password: null,
         level,
       },
-      tr("gui.add.operations_queued", "{count} add operations queued").replace("{count}", add.length.toLocaleString()),
-      tr("gui.precondition.open_before_add", "Open an archive before adding files"));
+      tr("gui.add.operations_queued").replace("{count}", add.length.toLocaleString()),
+      tr("gui.precondition.open_before_add"));
       if (!queued) return;
       recordOperation({
         status: "queued",
-        title: tr("gui.add.queued", "Add files queued"),
-        detail: tr("gui.add.items_profile", "{count} items · {profile}")
+        title: tr("gui.add.queued"),
+        detail: tr("gui.add.items_profile")
           .replace("{count}", add.length.toLocaleString())
           .replace("{profile}", profile),
       });
@@ -9268,7 +5004,7 @@
   async function submitDeleteSelectedJob() {
     if (blockSelectionScopedAction()) return;
     if (!currentArchive) {
-      showNotice(tr("gui.precondition.open_before_delete", "Open an archive before deleting entries"));
+      showNotice(tr("gui.precondition.open_before_delete"));
       return;
     }
     const readOnly = archiveMutationDisabledReason();
@@ -9278,7 +5014,7 @@
     }
     const paths = selectedDeletePaths();
     if (paths.length === 0) {
-      showNotice(tr("gui.precondition.select_entries_before_delete", "Select entries before deleting"));
+      showNotice(tr("gui.precondition.select_entries_before_delete"));
       return;
     }
     const queued = await submitCurrentArchiveJob(
@@ -9297,15 +5033,15 @@
         level: 6,
       },
       (paths.length === 1
-        ? tr("gui.delete.operation_queued", "1 delete operation queued")
-        : tr("gui.delete.operations_queued", "{count} delete operations queued").replace("{count}", paths.length.toLocaleString())),
-      tr("gui.precondition.open_before_delete", "Open an archive before deleting entries"),
+        ? tr("gui.delete.operation_queued")
+        : tr("gui.delete.operations_queued").replace("{count}", paths.length.toLocaleString())),
+      tr("gui.precondition.open_before_delete"),
     );
     if (queued) {
       recordOperation({
         status: "queued",
-        title: tr("gui.delete.queued", "Delete entries queued"),
-        detail: tr("gui.delete.entries_from_archive", "{count} entries from {archive}")
+        title: tr("gui.delete.queued"),
+        detail: tr("gui.delete.entries_from_archive")
           .replace("{count}", paths.length.toLocaleString())
           .replace("{archive}", archiveTitle()),
       });
@@ -9364,12 +5100,12 @@
       disabled: Boolean(blocked),
       recovery: archiveEdit.source && currentArchive?.source === archiveEdit.source
         && archiveRefreshStatus() !== "idle" ? archiveBrowseRecoveryState() : null,
-      retryLabel: tr("gui.error.retry", "Retry"),
+      retryLabel: tr("gui.error.retry"),
       onRetry: retryArchiveContents,
       submittingLabel: archiveEdit.checking
-        ? kind === "move" ? tr("gui.move.checking_targets", "Checking move targets…")
-          : tr("gui.edit.checking_targets", "Checking archive paths…")
-        : tr("gui.task_center.submitting", "Adding to the queue…"),
+        ? kind === "move" ? tr("gui.move.checking_targets")
+          : tr("gui.edit.checking_targets")
+        : tr("gui.task_center.submitting"),
       value: archiveEdit.target,
       status: archiveEdit.status,
       onChange: (value: string) => archiveEdit.setTarget(value),
@@ -9377,28 +5113,28 @@
     };
     if (kind === "rename") return {
       ...feedback,
-      title: tr("gui.action.rename_selected", "Rename selected"),
-      label: tr("gui.rename.target_name", "Rename target name"),
+      title: tr("gui.action.rename_selected"),
+      label: tr("gui.rename.target_name"),
     };
     if (kind === "move") return {
       ...feedback,
-      title: tr("gui.action.move_selected", "Move selected"),
-      label: tr("gui.move.target_folder", "Move target folder"),
-      hint: tr("gui.move.path_hint", "Destination paths start at the archive root. Use / to move to the root."),
+      title: tr("gui.action.move_selected"),
+      label: tr("gui.move.target_folder"),
+      hint: tr("gui.move.path_hint"),
     };
     return {
       ...feedback,
-      title: tr("gui.action.new_folder", "New folder"),
-      label: tr("gui.new_folder.name", "New folder name"),
-      placeholder: tr("gui.new_folder.default_name", "New Folder"),
-      hint: tr("gui.new_folder.path_hint", "Created in the current folder. Start with / to use the archive root."),
+      title: tr("gui.action.new_folder"),
+      label: tr("gui.new_folder.name"),
+      placeholder: tr("gui.new_folder.default_name"),
+      hint: tr("gui.new_folder.path_hint"),
     };
   }
 
   async function openArchiveDirectoryEntry(entryPath: string) {
     const name = pathBaseName(entryPath.replace(/\/+$/g, ""));
     if (!name) {
-      showNotice(tr("gui.preview.open_folder_failed", "Could not open the folder"));
+      showNotice(tr("gui.preview.open_folder_failed"));
       return;
     }
     const targetDirectory = entryPath
@@ -9414,7 +5150,7 @@
       name,
       path: archiveDirs.join("/"),
     });
-    showNotice(tr("gui.preview.folder_opened", "Opened folder: {name}").replace("{name}", name));
+    showNotice(tr("gui.preview.folder_opened").replace("{name}", name));
   }
 
   async function submitPreviewEntry(
@@ -9423,11 +5159,11 @@
     virtualIndex: number | null = null,
   ) {
     if (!currentArchive) {
-      showNotice(tr("gui.preview.open_archive_first", "Open an archive before opening or previewing entries"));
+      showNotice(tr("gui.preview.open_archive_first"));
       return;
     }
     if (!entryPath) {
-      showNotice(tr("gui.preview.select_one", "Select one entry to open or preview"));
+      showNotice(tr("gui.preview.select_one"));
       return;
     }
     if (entryType === "dir" || entryPath.endsWith("/") || entryTypeForPath(entryPath) === "dir") {
@@ -9478,7 +5214,7 @@
       if (!previewSession.isCurrent(preparation)) return;
       recordOperation({
         status: "info",
-        title: tr("gui.preview.operation_title", "Archive entry opened"),
+        title: tr("gui.preview.operation_title"),
         detail: pathBaseName(entryPath),
       });
       clearEntryPreviewState();
@@ -9526,7 +5262,7 @@
         return;
       }
       if (!archiveLikePath(entryPath)) {
-        showNotice(tr("gui.preview.select_archive", "Select an archive-like entry, such as .zip, .7z, .dmg or .7z.001"));
+        showNotice(tr("gui.preview.select_archive"));
         return;
       }
       outerPath = currentArchive.source;
@@ -9580,7 +5316,7 @@
         });
         recordOperation({
           status: "info",
-          title: tr("gui.preview.nested_operation_title", "Nested archive previewed"),
+          title: tr("gui.preview.nested_operation_title"),
           detail: `${pathBaseName(entryPath)} · ${info.format.toUpperCase()}`,
         });
       } else {
@@ -9589,19 +5325,17 @@
           return;
         }
         if (!await adoptOpenedArchive(info, isCurrent)) return;
-        dismissRecoveryPreparation();
-        recoverySourceMode = "current";
-        recoverySourceOverride = null;
-        recoveryPar2Override = null;
+        recoverySession.leave();
+        recoverySession.adoptArchive();
         clearEntryPreviewState();
         if (action === "extract") {
           openExtractWorkspace("all");
           focusExtractReview();
         }
-        showNotice(tr("gui.preview.opened_nested_archive", "Opened nested archive · {name}").replace("{name}", info.name));
+        showNotice(tr("gui.preview.opened_nested_archive").replace("{name}", info.name));
         recordOperation({
           status: "done",
-          title: tr("gui.preview.nested_opened_operation_title", "Nested archive opened"),
+          title: tr("gui.preview.nested_opened_operation_title"),
           detail: `${pathBaseName(entryPath)} -> ${info.name}`,
         });
       }
@@ -9634,7 +5368,7 @@
   async function revealEntryPreview() {
     const preview = entryPreview;
     if (!preview) {
-      showNotice(tr("gui.preview.preview_first", "Open a file entry first"));
+      showNotice(tr("gui.preview.preview_first"));
       return;
     }
     const action = previewSession.beginFileAction(preview, currentArchive?.source ?? null);
@@ -9644,7 +5378,7 @@
       await ipc.revealPreviewSession(preview.preview_id);
       if (!responseIsCurrent()) return;
       showNotice(
-        tr("gui.preview.revealed_system", "Shown in the file manager: {name}")
+        tr("gui.preview.revealed_system")
           .replace("{name}", preview.display_name),
       );
     } catch (error) {
@@ -9660,7 +5394,7 @@
 
   async function openEntryPreview(preview: EntryPreviewDto | null = entryPreview): Promise<boolean> {
     if (!preview) {
-      showNotice(tr("gui.preview.preview_first", "Open a file entry first"));
+      showNotice(tr("gui.preview.preview_first"));
       return false;
     }
     // Preparation already cleared its previous feedback before waiting for the file.
@@ -9677,20 +5411,18 @@
         confirmed = await confirm(
           tr(
             "gui.preview.risky_open_body",
-            "Open “{name}” with the system? Files from archives can run code. Extract and inspect it first unless you trust the source.",
           ).replace("{name}", preview.display_name),
           {
-            title: tr("gui.preview.risky_open_title", "Open a potentially executable file?"),
+            title: tr("gui.preview.risky_open_title"),
             kind: "warning",
-            okLabel: tr("gui.preview.risky_open_action", "Open anyway"),
-            cancelLabel: tr("gui.preview.risky_open_cancel", "Cancel"),
+            okLabel: tr("gui.preview.risky_open_action"),
+            cancelLabel: tr("gui.preview.risky_open_cancel"),
           },
         );
       } catch {
         if (!responseIsCurrent()) return false;
         showNotice(tr(
           "gui.preview.risky_open_confirm_failed",
-          "The safety confirmation could not be shown, so the file was not opened.",
         ));
         return false;
       }
@@ -9699,7 +5431,6 @@
         showNotice(
           tr(
             "gui.preview.risky_open_cancelled",
-            "Potentially executable file was not opened: {name}",
           ).replace("{name}", preview.display_name),
         );
         return false;
@@ -9709,7 +5440,7 @@
       await ipc.openPreviewSession(preview.preview_id);
       if (!responseIsCurrent()) return false;
       previewSession.completeFileAction(action, currentArchive?.source ?? null);
-      showNotice(tr("gui.preview.opened_system", "Opened: {name}").replace("{name}", preview.display_name));
+      showNotice(tr("gui.preview.opened_system").replace("{name}", preview.display_name));
       return true;
     } catch (error) {
       if (!responseIsCurrent()) return false;
@@ -9772,30 +5503,19 @@
   async function openNestedPreviewArchive() {
     const preview = nestedPreview;
     if (!preview) {
-      showNotice(tr("gui.preview.preview_nested_before_open", "Preview a nested archive before opening it"));
+      showNotice(tr("gui.preview.preview_nested_before_open"));
       return;
     }
     await nestedArchiveAction("open", preview.outer_path, preview.entry_path);
   }
 
-  function nestedExtractDraftLocked(): boolean {
-    return nestedExtractSubmissionPending || nestedExtractPickerBusy;
-  }
-
-  function updateNestedExtractDraft(update: (draft: NestedExtractDraft) => NestedExtractDraft): void {
-    if (!nestedExtractDraft || nestedExtractDraftLocked()) return;
-    nestedExtractDraft = update(nestedExtractDraft);
-    nestedExtractDraftGeneration += 1;
-  }
-
   function restoreNestedExtractDraft(draft: NestedExtractDraft): boolean {
-    if (nestedExtractDraftLocked()) {
-      showNotice(tr("gui.nested_extract.wait_for_current", "Finish the current selection or submission before reviewing another inner archive."));
+    if (extraction.review.locked("nested")) {
+      showNotice(tr("gui.nested_extract.wait_for_current"));
       return false;
     }
     if (preventCreateSubmissionNavigation("nestedExtract") || preventConvertSubmissionNavigation("nestedExtract") || focusBlockingTaskIfAny()) return false;
-    nestedExtractDraft = draft;
-    nestedExtractDraftGeneration += 1;
+    if (!extraction.review.adoptNested(draft)) return false;
     setScreen("nestedExtract");
     focusNestedExtractReview();
     return true;
@@ -9811,111 +5531,14 @@
     });
   }
 
-  function prepareNestedExtract(
-    outerSource: string,
-    outerDisplayPath: string,
-    entryPath: string,
-  ): boolean {
-    return restoreNestedExtractDraft(reviewNestedExtract({
-      kind: "extract_nested", outer_path: outerSource, entry_path: entryPath,
-      dest: normalizedDefaultExtractDir(settingsSession.appliedGeneral.defaultExtractDir) ?? pathDir(outerDisplayPath),
-      overwrite: "ask", symlinks: "preserve", smart: true,
-      encoding: currentArchive?.source === outerSource ? archiveEncodingForJob() : null,
-      password: null, best_effort: false,
-    }, outerDisplayPath));
-  }
-
-  async function chooseNestedExtractDestination(): Promise<void> {
-    const draft = nestedExtractDraft;
-    if (!draft || screen !== "nestedExtract" || nestedExtractDraftLocked()) return;
-    const generation = nestedExtractDraftGeneration;
-    const request = ++nestedExtractPickerRequest;
-    const isCurrent = () => request === nestedExtractPickerRequest
-      && generation === nestedExtractDraftGeneration && screen === "nestedExtract";
-    nestedExtractPickerBusy = true;
-    try {
-      const { open } = await getDialogModule();
-      if (!isCurrent()) return;
-      const selected = await openNativeDialog("nested-extract.destination", open, {
-        title: tr("gui.batch.choose_destination", "Choose destination"),
-        multiple: false, directory: true, defaultPath: draft.dest,
-      });
-      if (!isCurrent()) return;
-      const path = Array.isArray(selected) ? selected[0] : selected;
-      if (path) {
-        nestedExtractDraft = { ...draft, dest: path };
-        nestedExtractDraftGeneration += 1;
-      } else {
-        showNotice(tr("gui.nested_extract.selection_cancelled", "Selection cancelled · your extraction settings were kept"));
-      }
-    } catch {
-      if (isCurrent()) {
-        showNotice(tr("gui.batch.destination_picker_unavailable", "Could not open the folder chooser. Try again, or edit the destination in the list."));
-      }
-    } finally {
-      if (request === nestedExtractPickerRequest) nestedExtractPickerBusy = false;
-    }
-  }
-
-  async function startNestedExtract(): Promise<boolean> {
-    const draft = nestedExtractDraft;
-    if (!draft || nestedExtractDraftLocked()) return false;
-    if (!draft.dest.trim()) {
-      showNotice(tr("gui.nested_extract.destination_required", "Choose a destination for this inner archive."));
-      document.getElementById("batch-destination-0")?.focus();
-      return false;
-    }
-    if (focusBlockingTaskIfAny()) return false;
-    nestedExtractSubmissionPending = true;
-    try {
-      await submitJob(nestedExtractJob(draft));
-      showNotice(tr("gui.preview.extract_nested_queued", "Nested extract added to queue · {name}").replace("{name}", pathBaseName(draft.entry_path)));
-      recordOperation({
-        status: "queued",
-        title: tr("gui.preview.nested_extract_queued_operation_title", "Nested archive extract queued"),
-        detail: `${pathBaseName(draft.entry_path)} -> ${pathBaseName(draft.dest)}`,
-      });
-      return true;
-    } catch (error) {
-      if (isJobSubmitBlocked(error)) return false;
-      showNotice(isErrorDto(error) ? tError(error) : tr("gui.nested_extract.submit_failed", "Could not start extraction. Try again; your settings were kept."));
-      return false;
-    } finally {
-      nestedExtractSubmissionPending = false;
-    }
-  }
-
-  function nestedExtractWorkspaceSurface(variant: ToolsWorkspaceVariant): BatchWorkspaceSurface {
-    const draft = nestedExtractDraft;
-    return {
-      kind: "batch", mode: "nested", variant, title: tr("gui.nested_extract.title", "Extract inner archive"), tr,
-      archiveReturn: toolsArchiveReturnSurface(variant),
-      onReady: () => { if (nestedExtractReviewFocusPending) focusNestedExtractReview(); },
-      locked: nestedExtractDraftLocked(), submitting: nestedExtractSubmissionPending,
-      smart: draft?.smart ?? true,
-      onSmartChange: (smart) => updateNestedExtractDraft((value) => ({ ...value, smart })),
-      overwrite: draft?.overwrite ?? "ask",
-      overwriteChoices: extractOverwriteModes.map((id) => ({ id, label: extractOverwriteLabel(id) })),
-      onOverwriteChange: (overwrite) => updateNestedExtractDraft((value) => ({ ...value, overwrite })),
-      symlinks: draft?.symlinks ?? "preserve",
-      symlinkChoices: extractSymlinkModes.map((id) => ({ id, label: extractSymlinkLabel(id) })),
-      onSymlinksChange: (symlinks) => updateNestedExtractDraft((value) => ({ ...value, symlinks })),
-      rows: draft ? [{
-        id: "inner-archive", path: `${draft.outerDisplayPath} › ${draft.entry_path}`,
-        name: pathBaseName(draft.entry_path), format: archiveFormatFromPath(draft.entry_path), target: draft.dest,
-        encoding: draft.encoding ?? tr("gui.extract.encoding.auto", "Auto-detect"), bestEffort: draft.best_effort,
-        onBestEffortChange: (best_effort) => updateNestedExtractDraft((value) => ({ ...value, best_effort })),
-        onTargetInput: (dest) => updateNestedExtractDraft((value) => ({ ...value, dest })),
-        onChooseTarget: () => void chooseNestedExtractDestination(), onRemove: null,
-      }] : [],
-      actions: { onStart: () => void startNestedExtract(), onAdd: draft ? null : () => setScreen("browse") },
-    };
+  function prepareNestedExtract(outerSource: string, outerDisplayPath: string, entryPath: string): boolean {
+    return restoreNestedExtractDraft(extraction.review.prepareNested(outerSource, outerDisplayPath, entryPath));
   }
 
   async function extractNestedPreviewArchive() {
     const preview = nestedPreview;
     if (!preview) {
-      showNotice(tr("gui.preview.preview_nested_before_extract", "Preview a nested archive before extracting it"));
+      showNotice(tr("gui.preview.preview_nested_before_extract"));
       return;
     }
     await nestedArchiveAction("extract", preview.outer_path, preview.entry_path, previewOriginVirtualIndex);
@@ -9923,7 +5546,7 @@
 
   async function repairFilenameEncoding(encoding = "gbk") {
     if (!currentArchive) {
-      showNotice(tr("gui.encoding.open_before_repair", "Open an archive before repairing filename encoding"));
+      showNotice(tr("gui.encoding.open_before_repair"));
       return;
     }
     dismissArchiveAddPreparation();
@@ -9936,132 +5559,28 @@
     if (request.generation !== archiveOpenGeneration || result.status === "superseded" || !result.isCurrent()) return;
     const ok = result.status === "applied";
     if (ok) {
-      extractOptions.encodingReopened();
+      extraction.options.encodingReopened();
     }
     showNotice(
       ok
-        ? tr("gui.encoding.reopened_with", "Filename encoding reopened with {encoding}").replace("{encoding}", encoding.toUpperCase())
-        : tr("gui.encoding.reopen_failed", "Could not reopen archive with that encoding"),
+        ? tr("gui.encoding.reopened_with").replace("{encoding}", encoding.toUpperCase())
+        : tr("gui.encoding.reopen_failed"),
     );
-  }
-
-  async function submitCreateJob(sourceKind: "files" | "folder") {
-    if (screen !== "create" || preflightEventsClosed) return;
-    if (focusBlockingTaskIfAny()) return;
-    if (createPreflight.sourcesLocked()) {
-      showNotice(createSourcesLockedReason());
-      return;
-    }
-    syncCreatePreflightContext();
-    await createPreflight.chooseSources(sourceKind);
-  }
-
-  async function submitCreateInputs(inputs: string[], source: "dialog" | "drop", capturedDraft?: CreateRunDraft) {
-    if (screen !== "create" || preflightEventsClosed) return;
-    if (createPreflight.state.picker) {
-      showNotice(createSourcesLockedReason());
-      return;
-    }
-    if (!capturedDraft && createConfigurationPending()) {
-      showNotice(createConfigurationPendingMessage());
-      return;
-    }
-    if (!createPreflight.canLeave() || (!capturedDraft && createPreflight.busy())) {
-      showNotice(tr("gui.create.preflight_already_running", "Create preflight already running"));
-      return;
-    }
-    const draft = capturedDraft ?? captureCreateRunDraft();
-    if (!draft) {
-      createPreflight.invalidatePlan();
-      return;
-    }
-    if (focusBlockingTaskIfAny()) return;
-    createOptions.touch();
-    createPrimaryFocusPending = null;
-    syncCreatePreflightContext();
-    await createPreflight.start(inputs, source, draft);
-  }
-
-  function createPlanConfirmLabel(): string {
-    if (createPreflight.state.phase === "submitting") {
-      return tr("gui.create.review.submitting", "Adding to queue");
-    }
-    if (createPreflight.state.issueStage === "submit" || createPreflight.state.issueStage === "destination") {
-      return tr("gui.create.review.retry", "Try creating again");
-    }
-    return tr("gui.create.review.confirm", "Create now");
-  }
-
-  function cancelCreatePlanReview(): void {
-    if (!createPreflight.state.pending || createPreflight.busy()) return;
-    createOptions.resetValidation();
-    createPreflight.cancelReview();
-  }
-
-  async function confirmCreatePlan(): Promise<void> {
-    if (createPreflight.busy()) return;
-    if (createPreflight.state.pending && createPreflight.state.plan && focusBlockingTaskIfAny()) return;
-    await createPreflight.confirm();
   }
 
   async function applyCreatePreflightEffect(effect: CreatePreflightEffect, isCurrent: () => boolean): Promise<void> {
     if (!isCurrent()) return;
-    switch (effect.kind) {
-      case "notice":
-        showNotice(effect.message);
-        return;
-      case "sourcesPicked":
-        showCreateSourcesAdded(appendCreateSources(effect.paths, effect.sourceKind));
-        return;
-      case "resetCredentials":
-        resetCreateCredentialsAfterPlan(effect.intent);
-        return;
-      case "prepareSubmit":
-        if (!taskWindowMode) {
-          taskCenterReturnFocus = document.querySelector<HTMLElement>(".create-plan-review")
-            ?? taskCenterReturnFocus;
-        }
-        return;
-      case "focus":
-        if (effect.target === "primary") {
-          await focusCreatePrimaryAction(isCurrent);
-        } else {
-          await tick();
-          if (!isCurrent() || screen !== "create") return;
-          document.querySelector<HTMLElement>(".create-plan-review")?.focus({ preventScroll: false });
-        }
-        return;
-      case "queued": {
-        const { pending, plan } = effect;
-        const shouldRestorePrimaryFocus = !taskWindowMode
-          && !taskCenterOpen
-          && document.activeElement instanceof HTMLElement
-          && document.activeElement.closest(".create-plan-review") !== null;
-        clearCreateSources();
-        resetCreateCredentialsAfterPlan(pending);
-        createOptions.resetValidation();
-        showNotice(
-          (pending.creatingSfx
-            ? tr("gui.create.sfx_queued_notice", "Self-extractor added to queue · {size} input")
-            : tr("gui.create.queued_notice", "Create archive added to queue · {size} input"))
-            .replace("{size}", formatBytes(plan.total_bytes)),
-        );
-        recordOperation({
-          status: "queued",
-          title: pending.creatingSfx
-            ? tr("gui.create.sfx_queued", "Self-extractor queued")
-            : pending.source === "drop"
-              ? tr("gui.create.dropped_items_queued", "Dropped items queued")
-              : tr("gui.create.queued", "Create archive queued"),
-          detail: tr("gui.create.operation_detail", "{name} · {profile} · {size} input")
-            .replace("{name}", pathBaseName(plan.primary_output))
-            .replace("{profile}", createProfileLabel(pending.profile))
-            .replace("{size}", formatBytes(plan.total_bytes)),
-        });
-        if (shouldRestorePrimaryFocus) {
-          await focusCreatePrimaryAction(isCurrent);
-        }
+    if (effect.kind === "prepareSubmit" && !taskWindowMode) {
+      taskCenterReturnFocus = document.querySelector<HTMLElement>(".create-plan-review") ?? taskCenterReturnFocus;
+    } else if (effect.kind === "focus") {
+      if (effect.target === "primary") await focusCreatePrimaryAction(isCurrent);
+      else {
+        await tick();
+        if (isCurrent() && screen === "create") document.querySelector<HTMLElement>(".create-plan-review")?.focus({ preventScroll: false });
       }
+    } else if (effect.kind === "queued" && !taskWindowMode && !taskCenterOpen
+      && document.activeElement instanceof HTMLElement && document.activeElement.closest(".create-plan-review")) {
+      await focusCreatePrimaryAction(isCurrent);
     }
   }
 
@@ -10114,7 +5633,7 @@
   function currentTaskStatusLabel(): string {
     const failed = jobRows.find((task) => task.state === "failed");
     const task = activeCurrentTask ?? failed ?? null;
-    if (!task) return tr("gui.state.ready", "Ready");
+    if (!task) return tr("gui.state.ready");
     return `${titleForJobSpec(task.spec)} · ${taskOutcomeStateLabel(task)}`;
   }
 
@@ -10136,29 +5655,29 @@
     if (unconfirmed) return taskOutcomeStateLabel(unconfirmed);
     const counts = taskCenterCounts(jobRows);
     if (counts.attention > 0) {
-      return tr("gui.task_center.summary_attention", "{count} need attention")
+      return tr("gui.task_center.summary_attention")
         .replace("{count}", counts.attention.toLocaleString());
     }
     const active = counts.active + (submittingJobSpec ? 1 : 0);
     if (active > 0 || counts.waiting > 0) {
-      return tr("gui.task_center.summary_active", "{active} active · {waiting} waiting")
+      return tr("gui.task_center.summary_active")
         .replace("{active}", active.toLocaleString())
         .replace("{waiting}", counts.waiting.toLocaleString());
     }
     if (counts.completed > 0) {
-      return tr("gui.task_center.summary_completed", "{count} recent tasks")
+      return tr("gui.task_center.summary_completed")
         .replace("{count}", counts.completed.toLocaleString());
     }
-    return tr("gui.task_center.summary_idle", "No tasks");
+    return tr("gui.task_center.summary_idle");
   }
 
   function taskCenterTriggerLabel(): string {
-    return `${tr("gui.task_center.title", "Task center")} · ${taskCenterSummaryLabel()}`;
+    return `${tr("gui.task_center.title")} · ${taskCenterSummaryLabel()}`;
   }
 
   function openTaskCenter(source: HTMLElement | null = null): void {
     if (!appActionEnabled("task_center") || taskCenterOpen) return;
-    checksumCopyRequest = null;
+    tools.leave();
     checksumResultFocusPending = null;
     rememberTaskWorkspaceFocus(source ?? document.activeElement);
     taskCenterFocusTaskId = null;
@@ -10168,7 +5687,7 @@
   }
 
   function closeTaskCenter(): void {
-    checksumCopyRequest = null;
+    tools.leave();
     cancelTaskReview();
     taskCenterOpen = false;
     taskCenterSelectedTaskId = null;
@@ -10200,14 +5719,14 @@
   }
 
   function openTaskCenterDetails(task: Task): void {
-    checksumCopyRequest = null;
+    tools.leave();
     cancelTaskReview();
     taskCenterFocusTaskId = task.id;
     taskCenterSelectedTaskId = task.id;
   }
 
   function returnToTaskCenter(task: TaskDialogModel): void {
-    checksumCopyRequest = null;
+    tools.leave();
     cancelTaskReview();
     taskCenterSelectedTaskId = null;
     taskCenterFocusTaskId = task.id;
@@ -10218,7 +5737,7 @@
     if (ids.length === 0) return;
     if (!await clearFinished(ids)) return;
     showNotice(
-      tr("gui.task_center.cleared", "Cleared {count} completed tasks")
+      tr("gui.task_center.cleared")
         .replace("{count}", ids.length.toLocaleString()),
     );
   }
@@ -10284,7 +5803,6 @@
       showNotice(
         tr(
           "gui.sfx_publish.load_failed_detail",
-          "The unsigned app is unchanged. Retry this view or return to the task result.",
         ),
       );
     }
@@ -10297,10 +5815,10 @@
   async function chooseMacosSfxPublishOutput(suggested: string): Promise<string | null> {
     const { save } = await getDialogModule();
     return saveNativeDialog("sfx.publish-macos", save, {
-      title: tr("gui.sfx_publish.choose_output", "Save the published macOS app"),
+      title: tr("gui.sfx_publish.choose_output"),
       defaultPath: suggested,
       filters: [{
-        name: tr("gui.sfx_publish.app_filter", "macOS application"),
+        name: tr("gui.sfx_publish.app_filter"),
         extensions: ["app"],
       }],
     });
@@ -10324,9 +5842,9 @@
       presentation,
       rootClass: `${rootClass} design-root platform-${activePlatform} palette-${settingsSession.colors.palette} theme-${activeTheme} density-${activeDensityChoice}`,
       rootVariables: customPaletteVariables(),
-      copyFeedback: taskChecksumCopyFeedback(task),
-      copyFeedbackTone: taskChecksumCopyFeedbackTone(task),
-      copyPending: checksumCopyPending("task", task.id),
+      copyFeedback: tools.copyFeedback("task", task.id)?.message ?? null,
+      copyFeedbackTone: tools.copyFeedback("task", task.id)?.tone ?? null,
+      copyPending: tools.copyPending("task", task.id),
       ...(presentation === "panel" ? { rootId: "squallz-task-center" } : {
         passwordQuestion: taskPasswordQuestion(task),
         passwordValue: jobPasswordValue,
@@ -10342,7 +5860,7 @@
       onPause: pauseCurrentTask,
       onResume: resumeCurrentTask,
       onCancel: cancelCurrentTask,
-      onCopyChecksumResults: copyTaskChecksumResults,
+      onCopyChecksumResults: (task) => tools.copyTask(task),
       onOpenOutput: openTaskOutput,
       onPublishMacosSfx: openMacosSfxPublisher,
       onReviewTask: prepareTaskReview,
@@ -10412,9 +5930,9 @@
     return {
       name: jobPasswordPrompt.name,
       detail: jobPasswordPrompt.wrong
-        ? tr("gui.password.previous_rejected", "Previous password was rejected. Try again or cancel this job.")
-        : tr("gui.password.task_paused", "This task is waiting for the archive password."),
-      sessionDetail: tr("gui.password.session_only_separate_book", "Used for this archive in the current app session. Save it separately in Password Book."),
+        ? tr("gui.password.previous_rejected")
+        : tr("gui.password.task_paused"),
+      sessionDetail: tr("gui.password.session_only_separate_book"),
     };
   }
 
@@ -10462,7 +5980,7 @@
     cancelTaskReview();
     if (task.id === null) return;
     if (isTaskActiveState(task.state)) return;
-    checksumCopyRequest = null;
+    tools.leave();
     if (taskWindowMode && await closeNativeTaskWindow()) return;
     taskDialogDismissedId = task.id;
     taskDialogTaskId = null;
@@ -10479,21 +5997,19 @@
 
   function jobSubmitBlockedMessage(error: unknown): string {
     if (!(error instanceof JobSubmitBlockedError)) {
-      return tr("gui.task.one_at_a_time_notice", "Finish or cancel the current task before starting another one");
+      return tr("gui.task.one_at_a_time_notice");
     }
     if (error.reason === "starting") {
       return tr(
         "gui.task.starting_notice",
-        "The previous task is still entering the queue. Try again in a moment",
       );
     }
     if (error.reason === "replace-existing") {
       return tr(
         "gui.task.replace_existing_queue_blocked",
-        "Wait for the current queue to finish before replacing existing output.",
       );
     }
-    return tr("gui.task.one_at_a_time_notice", "Finish or cancel the current task before starting another one");
+    return tr("gui.task.one_at_a_time_notice");
   }
 
   async function submitJob(spec: JobSpec): Promise<number> {
@@ -10563,115 +6079,45 @@
   async function cancelCurrentTask(task: TaskDialogModel): Promise<void> {
     if (task.id === null) return;
     if (await cancelTask(task.id) && task.controlIntent === "cancel") {
-      showNotice(tr("gui.task.cancel_requested", "Cancel requested"));
+      showNotice(tr("gui.task.cancel_requested"));
     }
   }
 
   async function pauseCurrentTask(task: TaskDialogModel): Promise<void> {
     if (task.id === null) return;
     if (await pauseTask(task.id) && task.controlIntent === "pause") {
-      showNotice(tr("gui.task.pause_requested", "Pause requested"));
+      showNotice(tr("gui.task.pause_requested"));
     }
   }
 
   async function resumeCurrentTask(task: TaskDialogModel): Promise<void> {
     if (task.id === null) return;
     if (await resumeTask(task.id) && task.controlIntent === "resume") {
-      showNotice(tr("gui.task.resume_requested", "Resume requested"));
+      showNotice(tr("gui.task.resume_requested"));
     }
   }
 
   function moveQueuedTaskEarlier(task: Task): void {
     moveTaskEarlier(task.id);
-    showNotice(tr("gui.task_center.moving_earlier", "Moving task earlier in the queue…"));
+    showNotice(tr("gui.task_center.moving_earlier"));
   }
 
   function moveQueuedTaskLater(task: Task): void {
     moveTaskLater(task.id);
-    showNotice(tr("gui.task_center.moving_later", "Moving task later in the queue…"));
+    showNotice(tr("gui.task_center.moving_later"));
   }
 
   function moveQueuedTaskBefore(task: Task, beforeTask: Task | null): void {
     moveTaskBefore(task.id, beforeTask?.id ?? null);
-    showNotice(tr("gui.task_center.moving_position", "Moving task to its new queue position…"));
+    showNotice(tr("gui.task_center.moving_position"));
   }
 
   function taskRevealOutputLabel(): string {
     return t("gui.task.show_in_file_manager", { fileManager: fileManagerLabel() });
   }
 
-  function adoptRecoveryTargetFromTask(task: TaskDialogModel, displayedSpec: JobSpec = task.spec): boolean {
-    let source: string | null = null;
-    let sidecar: string | null | undefined;
-    switch (task.spec.kind) {
-      case "protect":
-        source = task.spec.path;
-        sidecar = null;
-        break;
-      case "verify_recovery":
-      case "repair_recovery":
-        source = task.spec.path;
-        sidecar = task.spec.recovery;
-        break;
-      case "repair_zip":
-      case "repair_sqz":
-      case "export_sqz":
-        source = task.spec.src;
-        sidecar = null;
-        break;
-      case "extract":
-        if (!task.spec.best_effort) return false;
-        source = task.spec.path;
-        sidecar = recoverySourcePath() && sameFilePath(recoverySourcePath() ?? "", source)
-          ? undefined
-          : null;
-        break;
-      case "test":
-        source = task.spec.path;
-        sidecar = recoverySourcePath() && sameFilePath(recoverySourcePath() ?? "", source)
-          ? undefined
-          : null;
-        break;
-      default:
-        return false;
-    }
-    if (!source) return false;
-    const displayedSource = "path" in displayedSpec ? displayedSpec.path
-      : "src" in displayedSpec ? displayedSpec.src : source;
-    const matchesCurrentSource = Boolean(currentArchive && sameFilePath(currentArchive.source, source));
-    if (source !== displayedSource && !matchesCurrentSource) {
-      showNotice(tr("gui.task.review.source_unavailable", "Could not restore this task's source. Reopen the original archive (and its inner archive, if needed), then start a new task. Your current settings were kept."));
-      return false;
-    }
-    const preserveSelectedSource = Boolean(
-      recoverySourceMode === "selected" &&
-      recoverySourceOverride &&
-      sameFilePath(recoverySourceOverride, source),
-    );
-    dismissRecoveryPreparation();
-    recoverySourceMode = matchesCurrentSource || (!preserveSelectedSource && currentArchive && sameFilePath(currentArchive.path, source))
-      ? "current"
-      : "selected";
-    recoverySourceOverride = recoverySourceMode === "selected" ? source : null;
-    if (sidecar !== undefined) recoveryPar2Override = sidecar;
-    return true;
-  }
-
-  function testTaskUsesRecoveryContext(task: TaskDialogModel): boolean {
-    if (task.spec.kind !== "test") return false;
-    if (task.id !== null && recoveryContextTaskIds.has(task.id)) return true;
-    if (
-      recoverySourceMode === "selected" &&
-      recoverySourceOverride &&
-      sameFilePath(recoverySourceOverride, task.spec.path)
-    ) {
-      return true;
-    }
-    return !currentArchive || (!sameFilePath(currentArchive.source, task.spec.path) && !sameFilePath(currentArchive.path, task.spec.path));
-  }
-
   function preventTaskWorkspaceNavigation(next: Screen): boolean {
-    if (screen === "create" && next !== "create" && !createPreflight.canLeave()
+    if (screen === "create" && next !== "create" && !create.preflight.canLeave()
       && preventCreateSubmissionNavigation(next)) return true;
     if (screen === "convert" && next !== "convert"
       && convertRouteHandle && !convertRouteHandle.canLeave()) return true;
@@ -10692,12 +6138,8 @@
       return;
     }
     if (preventTaskWorkspaceNavigation(target)) return;
-    if (target === "recovery" && !adoptRecoveryTargetFromTask(task)) return;
-    if (task.id !== null && (task.spec.kind === "checksum" || task.spec.kind === "checksum_check")) {
-      checksumCopyRequest = null;
-      checksumReportTaskIds[task.spec.kind] = task.id;
-    }
-    if (task.id !== null && task.spec.kind === "duplicate_scan") duplicateReportTaskId = task.id;
+    if (target === "recovery" && !recoverySession.adoptTask(task)) return;
+    tools.adoptTask(task);
     setScreen(target);
     void dismissTaskDialog(task);
     if (target === "checksum") {
@@ -10735,7 +6177,7 @@
       await reviewTask({ ...task, spec }, task.spec);
     } catch {
       if (!isCurrent()) return;
-      showNotice(tr("gui.task.review.source_unavailable", "Could not restore this task's source. Reopen the original archive (and its inner archive, if needed), then start a new task. Your current settings were kept."));
+      showNotice(tr("gui.task.review.source_unavailable"));
     } finally {
       if (generation === taskReviewRequestGeneration) pendingTaskReviewId = null;
     }
@@ -10744,7 +6186,7 @@
   async function reviewTask(task: TaskDialogModel, displayedSpec: JobSpec = task.spec): Promise<void> {
     if (taskWindowMode) return;
     let target = taskReviewScreen(task);
-    if (target === "archiveInfo" && testTaskUsesRecoveryContext(task)) {
+    if (target === "archiveInfo" && recoverySession.usesTaskContext(task)) {
       target = "recovery";
     }
     if (target === "extract" && task.spec.kind === "extract" && task.spec.best_effort) {
@@ -10754,7 +6196,7 @@
     if (target === "updateReview" && task.spec.kind === "update" && displayedSpec.kind === "update") {
       if (preventCreateSubmissionNavigation(target) || preventConvertSubmissionNavigation(target) || focusBlockingTaskIfAny()) return;
       if (!archiveUpdateReview.restore(task.spec, displayedSpec.path)) {
-        showNotice(tr("gui.update_review.wait", "Wait for the current changes to finish submitting before reviewing another task."));
+        showNotice(tr("gui.update_review.wait"));
         return;
       }
       setScreen(target);
@@ -10766,29 +6208,22 @@
       if (!restoreNestedExtractDraft(reviewNestedExtract(task.spec, displayedSpec.outer_path))) return;
       await dismissTaskDialog(task);
       focusNestedExtractReview();
-      showNotice(tr("gui.nested_extract.review_restored", "Inner archive and extraction settings restored. Some files may already exist; review the destination and conflict policy before starting again. Passwords will be requested when needed."));
+      showNotice(tr("gui.nested_extract.review_restored"));
       return;
     }
     if (target === "batch" && task.spec.kind === "batch_extract") {
-      if (batchDraftLocked()) {
-        showNotice(tr("gui.batch.wait_for_current", "Finish the current selection or submission before reviewing another batch."));
+      if (extraction.review.locked("batch")) {
+        showNotice(tr("gui.batch.wait_for_current"));
         return;
       }
       if (preventCreateSubmissionNavigation(target) || preventConvertSubmissionNavigation(target) || focusBlockingTaskIfAny()) return;
-      const outcome = readBatchExtractResult(task.result);
-      const failedCount = task.state === "done" ? outcome.reviewCount : 0;
-      const failures = task.state === "done" ? outcome.reviewFailures : null;
-      if (!batchExtract.restoreTask(task.spec, failures, failedCount,
-        displayedSpec.kind === "batch_extract" ? displayedSpec : task.spec)) {
-        showNotice(tr("gui.batch.review_unavailable", "The report cannot identify the failed archives unambiguously. Select the archives again; your current batch was kept."));
-        return;
-      }
+      if (!extraction.review.adoptBatch(task, displayedSpec)) return;
       setScreen(target);
       await dismissTaskDialog(task);
       focusBatchReview();
       showNotice(task.state === "done"
-        ? tr("gui.batch.review_failed_restored", "Archives with failures were restored. They will be processed from the beginning; review existing output and conflict policies. Passwords will be requested when needed.")
-        : tr("gui.batch.review_restored", "Batch inputs and policies restored. Some files may already exist; review conflicts before starting again. Passwords will be requested when needed."));
+        ? tr("gui.batch.review_failed_restored")
+        : tr("gui.batch.review_restored"));
       return;
     }
     if (target === "extract" && task.spec.kind === "extract") {
@@ -10800,8 +6235,8 @@
       return;
     }
     if (preventTaskWorkspaceNavigation(target)) return;
-    if (target === "create" && task.spec.kind === "compress" && !restoreCreateTaskDraft(task.spec, task.outputPasswordRequired)) return;
-    if (target === "recovery" && !adoptRecoveryTargetFromTask(task, displayedSpec)) return;
+    if (target === "create" && task.spec.kind === "compress" && !create.restoreTask(task.spec, task.outputPasswordRequired)) return;
+    if (target === "recovery" && !recoverySession.adoptTask(task, displayedSpec)) return;
     if (target === "settingsSecurity") securitySettingsFocusPending = true;
     setScreen(target);
     await dismissTaskDialog(task);
@@ -10833,12 +6268,12 @@
     if (focusBlockingTaskIfAny()) return;
     try {
       if (await archiveUpdateReview.submit(submitJob)) {
-        showNotice(tr("gui.update_review.queued", "Selected archive changes added to the queue"));
+        showNotice(tr("gui.update_review.queued"));
       }
     } catch (error) {
       if (isJobSubmitBlocked(error)) return;
-      pushToast({ kind: "danger", title: tr("gui.job.submit_failed", "Could not queue the task"),
-        body: isErrorDto(error) ? tError(error) : tr("gui.job.submit_unavailable", "Check that the Squallz desktop service is available, then try again.") });
+      pushToast({ kind: "danger", title: tr("gui.job.submit_failed"),
+        body: isErrorDto(error) ? tError(error) : tr("gui.job.submit_unavailable") });
     }
   }
 
@@ -10849,7 +6284,7 @@
       const { open } = await getDialogModule();
       if (!isCurrent() || screen !== "updateReview") return null;
       const selected = await openNativeDialog("update-review.source", open, {
-        title: kind === "folder" ? tr("gui.update_review.choose_folder", "Choose folder…") : tr("gui.update_review.choose_file", "Choose file…"),
+        title: kind === "folder" ? tr("gui.update_review.choose_folder") : tr("gui.update_review.choose_file"),
         multiple: false, directory: kind === "folder", defaultPath: path || undefined,
       });
       return Array.isArray(selected) ? selected[0] ?? null : selected;
@@ -10857,7 +6292,7 @@
   }
 
   function archiveUpdateWorkspaceSurface(variant: ToolsWorkspaceVariant): ArchiveUpdateWorkspaceSurface {
-    return { kind: "update", variant, title: tr("gui.update_review.title", "Review archive changes"), tr,
+    return { kind: "update", variant, title: tr("gui.update_review.title"), tr,
       archiveReturn: { ...toolsArchiveReturnSurface(variant), visible: Boolean(currentArchive) }, review: archiveUpdateReview,
       policyLabel: createContentPolicyLabel,
       onReady: () => { if (archiveUpdateReviewFocusPending) focusArchiveUpdateReview(); },
@@ -10900,7 +6335,7 @@
     try {
       session = await loadConvertRouteForReview();
     } catch {
-      if (isCurrent()) showNotice(tr("gui.convert.review.load_failed", "Could not load conversion settings. Try reviewing this task again."));
+      if (isCurrent()) showNotice(tr("gui.convert.review.load_failed"));
       return;
     }
     if (!isCurrent() || !session.canReviewTask(draft)) return;
@@ -10913,7 +6348,7 @@
         if (!session.restoreTaskDraft(draft)) return false;
         setScreen("convert");
         focusConvertReview();
-        showNotice(tr("gui.convert.review.restored", "Archive and settings restored. Passwords were cleared. Review protection and confirm the output location before converting again."));
+        showNotice(tr("gui.convert.review.restored"));
         return true;
       },
     });
@@ -10931,7 +6366,7 @@
 
   async function reviewArchiveTask(task: TaskDialogModel, target: "extract" | "convert", review: ArchiveTaskReview): Promise<void> {
     if (archiveOpenStatus === "opening") {
-      showNotice(tr("gui.task.review.wait_for_open", "Wait for the current archive to finish opening, then review this task again."));
+      showNotice(tr("gui.task.review.wait_for_open"));
       return;
     }
     if (preventCreateSubmissionNavigation(target) || preventConvertSubmissionNavigation(target) || focusBlockingTaskIfAny()) return;
@@ -10947,46 +6382,11 @@
 
   function restoreExtractTaskDraft(draft: ExtractTaskDraft): boolean {
     if (!currentArchive) return false;
-    const restored = extractOptions.restoreTask(currentArchive, draft, () => {
-      extractDestinationPicker = null;
-      extractPlanSession.reset();
-      selectedExtractPresetId = null;
-      extractPresetDraftName = "";
-      extractPresetMutationState = "idle";
-    });
+    const restored = extraction.restore(draft);
     if (!restored) return false;
     setScreen("extract");
     focusExtractReview();
-    showNotice(tr("gui.extract.review.restored", "Archive, selection and settings restored. Review the refreshed write plan before extracting again."));
-    return true;
-  }
-
-  function restoreCreateTaskDraft(spec: Extract<JobSpec, { kind: "compress" }>, passwordRequired: boolean): boolean {
-    if (createPreflight.sourcesLocked()) {
-      showNotice(createSourcesLockedReason());
-      return false;
-    }
-    if (createConfigurationPending()) {
-      showNotice(createConfigurationPendingMessage());
-      return false;
-    }
-    const change = createOptions.restoreTask(spec, passwordRequired, createDraftContext(), () => {
-      dismissCreatePreparation();
-      markCreatePresetDraftTouched();
-      selectedCreatePresetId = null;
-      createPresetDraftName = "";
-      createPresetMutationState = "idle";
-      createSources = mergeCreateSources([], spec.inputs.map((path) => ({ path, kind: "unknown" })), platformKind());
-      syncCreatePreflightContext();
-      selectedCreateSourcePaths = [];
-    });
-    if (change.issue) {
-      showNotice(createDraftIssueMessage(change.issue, change.requestedSfxTarget));
-      return false;
-    }
-    classicCreateSection = "general";
-    createAdvancedOpen = true;
-    showNotice(tr("gui.create.review.restored", "Sources and settings restored. Passwords were cleared. Review the options and confirm the output location before starting again."));
+    showNotice(tr("gui.extract.review.restored"));
     return true;
   }
 
@@ -11003,21 +6403,22 @@
       await ipc.openJobOutput(task.id);
       showNotice(
         taskOutputIsFolder(task)
-          ? tr("gui.task.output_folder_opened", "Output folder opened")
-          : tr("gui.task.output_opened", "Output opened"),
+          ? tr("gui.task.output_folder_opened")
+          : tr("gui.task.output_opened"),
       );
     } catch {
-      showNotice(tr("gui.task.open_output_failed", "Cannot open the task output. Try revealing it in your file manager, or check that it still exists."));
+      showNotice(tr("gui.task.open_output_failed"));
     }
   }
 
   async function revealTaskOutput(task: TaskDialogModel): Promise<void> {
-    if (!task.revealPath) return;
+    const outputPath = taskOutputPath(task);
+    if (!outputPath) return;
     try {
       const { revealItemInDir } = await import("@tauri-apps/plugin-opener");
-      await revealItemInDir(task.revealPath);
+      await revealItemInDir(outputPath);
     } catch {
-      showNotice(tr("gui.task.reveal_failed", "Cannot reveal the task output"));
+      showNotice(tr("gui.task.reveal_failed"));
     }
   }
 
@@ -11030,27 +6431,27 @@
   function passwordPromptDetail(): string {
     if (archivePasswordPrompt) {
       return archivePasswordPrompt.wrong
-        ? tr("gui.password.open_previous_rejected", "That password was rejected. Try again or return to the archive list.")
-        : tr("gui.password.archive_waiting", "Enter the password to open this archive.");
+        ? tr("gui.password.open_previous_rejected")
+        : tr("gui.password.archive_waiting");
     }
     if (previewPasswordPrompt) {
-      if (previewPasswordPrompt.wrong) return tr("gui.preview.password_rejected", "That password was rejected. Try again or cancel opening this item.");
+      if (previewPasswordPrompt.wrong) return tr("gui.preview.password_rejected");
       return previewPasswordPrompt.scope === "inner"
-        ? tr("gui.preview.inner_password", "Enter the inner archive password to continue opening this item.")
-        : tr("gui.preview.outer_password", "Enter the archive password to read this item.");
+        ? tr("gui.preview.inner_password")
+        : tr("gui.preview.outer_password");
     }
     return tr("gui.password.no_prompt_pending", "No password request is active.");
   }
 
   function passwordSessionDetail(): string {
     if (previewPasswordPrompt && !archivePasswordPrompt) {
-      return tr("gui.preview.password_session", "Used for this operation and the opened archive in this app session. Not saved to Password Book.");
+      return tr("gui.preview.password_session");
     }
-    return tr("gui.password.open_session_only", "Used for this archive in the current app session.");
+    return tr("gui.password.open_session_only");
   }
 
   function passwordFailureDetail(): string {
-    return tr("gui.password.open_return_to_prompt", "Stay on this prompt so you can retry or cancel.");
+    return tr("gui.password.open_return_to_prompt");
   }
 
   function isCurrentTaskPasswordPrompt(prompt: typeof jobPasswordPrompt): boolean {
@@ -11069,7 +6470,7 @@
     const answer = answerJobPassword(jobPasswordValue);
     jobPasswordValue = "";
     if (!await answer) return;
-    showNotice(tr("gui.password.sent_to_task", "Password sent to task"));
+    showNotice(tr("gui.password.sent_to_task"));
     if (jobPasswordPrompt || jobConflictPrompt) return;
     returnTaskQuestionToCenter(promptId);
   }
@@ -11080,7 +6481,7 @@
     jobPasswordValue = "";
     const promptId = prompt.id;
     if (!await answerJobPassword(null)) return;
-    showNotice(tr("gui.password.prompt_cancelled", "Password prompt cancelled"));
+    showNotice(tr("gui.password.prompt_cancelled"));
     if (jobPasswordPrompt || jobConflictPrompt) return;
     returnTaskQuestionToCenter(promptId);
   }
@@ -11111,14 +6512,14 @@
     if (ok) {
       if (prompt.refresh) {
         setScreen("browse");
-        showNotice(tr("gui.archive.unlocked", "Archive unlocked"));
+        showNotice(tr("gui.archive.unlocked"));
         return;
       }
       finishOpenedArchive(prompt.path, "password");
       return;
     }
     if (openPasswordPrompt()?.path === prompt.path) {
-      showNotice(tr("gui.password.open_previous_rejected", "That password was rejected. Try again or return to the archive list."));
+      showNotice(tr("gui.password.open_previous_rejected"));
       return;
     }
     if (prompt.refresh) {
@@ -11127,13 +6528,11 @@
     }
     pendingArchiveTaskReview = null;
     if (archiveOpenError(prompt.path)?.key === "error.corrupt_archive") {
-      dismissRecoveryPreparation();
-      recoverySourceMode = "selected";
-      recoverySourceOverride = prompt.path;
-      recoveryPar2Override = null;
+      recoverySession.leave();
+      recoverySession.selectSource(prompt.path);
       setScreen("recovery");
       showNotice(
-        tr("gui.recovery.open_failed_routed", "{name} could not be opened. It is ready for recovery checks.")
+        tr("gui.recovery.open_failed_routed")
           .replace("{name}", pathBaseName(prompt.path)),
       );
       return;
@@ -11159,293 +6558,18 @@
     workspacePasswordSubmissionAttempted = false;
     if (previewPasswordPrompt && !archivePasswordPrompt) {
       clearEntryPreviewState(true);
-      showNotice(tr("gui.preview.password_cancelled", "Item opening cancelled. The archive is unchanged."));
+      showNotice(tr("gui.preview.password_cancelled"));
     }
     if (archivePasswordPrompt) {
       const refreshing = archivePasswordPrompt.refresh;
       dismissArchivePasswordRequest();
       showNotice(refreshing
-        ? tr("gui.archive.refresh_cancelled", "Refresh cancelled. Retry before editing the archive.")
-        : tr("gui.password.archive_open_cancelled", "Archive opening cancelled."));
+        ? tr("gui.archive.refresh_cancelled")
+        : tr("gui.password.archive_open_cancelled"));
     }
     workspacePasswordValue = "";
     setScreen("browse");
   }
-
-  function latestRecoveryReportTask(): Task | null {
-    const source = recoverySourcePath();
-    const sidecar = recoveryPar2Path();
-    if (!source || !sidecar) return null;
-    return latestMatchingRecoveryTask(jobRows, (task) => {
-      if (task.spec.kind !== "verify_recovery" && task.spec.kind !== "repair_recovery") return false;
-      const taskSidecar = task.spec.recovery ?? `${task.spec.path}.par2`;
-      return sameFilePath(task.spec.path, source) && sameFilePath(taskSidecar, sidecar);
-    });
-  }
-
-  function recoveryReport(): Record<string, unknown> | null {
-    return latestRecoveryReportTask()?.result ?? null;
-  }
-
-  function recoveryMetrics(): Record<string, unknown> | null {
-    return recoveryResultMetrics(recoveryReport());
-  }
-
-  function recoveryMetricNumber(key: string): number | null {
-    return recoveryResultMetricNumber(recoveryReport(), key);
-  }
-
-  function recoveryMetricBoolean(key: string): boolean | null {
-    return recoveryResultMetricBoolean(recoveryReport(), key);
-  }
-
-  function recoveryResultAvailable(): boolean {
-    return recoveryReport() !== null;
-  }
-
-  function recoveryMetricsAvailable(): boolean {
-    return recoveryMetrics() !== null;
-  }
-
-  function recoveryBeyondCapacity(): boolean {
-    return recoveryMetricsAvailable() && recoveryMetricBoolean("repair_possible") === false;
-  }
-
-  function recoveryNoDamage(): boolean {
-    return recoveryResultHasNoDamage(recoveryReport());
-  }
-
-  function recoveryResultTone(): RecoveryWorkspaceView["resultTone"] {
-    return recoveryResultToneFor(recoveryReport());
-  }
-
-  function recoveryVerifyRecommended(): boolean {
-    return !recoveryResultAvailable() && !recoveryVerifyDisabledReason();
-  }
-
-  function recoveryRepairRecommended(): boolean {
-    return recoveryResultOperation(recoveryReport()) === "verify"
-      && recoveryResultConfirmsRepairCapacity(recoveryReport())
-      && !recoveryRepairPar2DisabledReason();
-  }
-
-  function recoveryRemainingMargin(): number | null {
-    const needed = recoveryMetricNumber("blocks_needed");
-    const available = recoveryMetricNumber("recovery_blocks_available");
-    if (needed === null || available === null) return null;
-    return Math.max(0, available - needed);
-  }
-
-  function recoveryReportString(key: string): string | null {
-    const value = recoveryReport()?.[key];
-    return typeof value === "string" && value.length > 0 ? value : null;
-  }
-
-  function recoveryReportNumber(key: string): number | null {
-    const value = recoveryReport()?.[key];
-    return typeof value === "number" && Number.isFinite(value) && value >= 0
-      ? value
-      : null;
-  }
-
-  function recoveryOverCapacityDetail(): string {
-    const needed = recoveryMetricNumber("blocks_needed") ?? 0;
-    const available = recoveryMetricNumber("recovery_blocks_available") ?? 0;
-    return tr("gui.recovery.damage_over_capacity_values", "{needed} damaged or missing blocks exceed {available} available recovery blocks.")
-      .replace("{needed}", needed.toLocaleString())
-      .replace("{available}", available.toLocaleString());
-  }
-
-  function recoveryResultTitle(): string {
-    if (!recoverySourcePath()) return tr("gui.recovery.no_archive_selected", "No archive selected");
-    if (!recoveryResultAvailable()) return tr("gui.recovery.not_verified", "Not verified");
-    const operation = recoveryResultOperation(recoveryReport());
-    const ok = recoveryResultOk(recoveryReport());
-    if (operation === "repair") {
-      if (ok === true) return tr("gui.recovery.repair_completed", "Repair completed");
-      return tr("gui.recovery.repair_not_completed", "Repair did not complete");
-    }
-    if (recoveryNoDamage()) {
-      return tr("gui.recovery.no_damage", "No damage");
-    }
-    const repairPossible = recoveryMetricBoolean("repair_possible");
-    if (repairPossible === true) return tr("gui.recovery.repairable", "Repairable");
-    if (repairPossible === false) return tr("gui.recovery.not_repairable", "Not repairable");
-    return ok === true
-      ? tr("gui.recovery.verification_passed", "Verification passed")
-      : tr("gui.recovery.damage_detected", "Damage detected");
-  }
-
-  function recoveryResultDetail(): string {
-    if (!recoverySourcePath()) return tr("gui.recovery.choose_archive_before_verify", "Choose the archive described by this PAR2 file.");
-    if (!recoveryResultAvailable()) return tr("gui.recovery.run_verify_capacity", "Verify recovery capacity before creating a repaired copy.");
-    const needed = recoveryMetricNumber("blocks_needed");
-    const available = recoveryMetricNumber("recovery_blocks_available");
-    if (needed !== null && available !== null) {
-      return tr("gui.recovery.capacity_summary", "{needed} blocks needed · {available} recovery blocks available")
-        .replace("{needed}", needed.toLocaleString())
-        .replace("{available}", available.toLocaleString());
-    }
-    return recoveryResultOk(recoveryReport()) === true
-      ? tr("gui.recovery.tool_no_block_counts_ok", "Verification completed, but the PAR2 tool did not report block counts.")
-      : tr("gui.recovery.tool_no_block_counts_failed", "Verification found a problem, but the PAR2 tool did not report block counts.");
-  }
-
-  function recoveryResultExplanation(): string {
-    if (!recoveryResultAvailable() || !recoveryMetricsAvailable()) return recoveryResultDetail();
-    if (recoveryResultOperation(recoveryReport()) === "repair" && recoveryResultOk(recoveryReport()) === false) {
-      if (recoveryBeyondCapacity()) return recoveryOverCapacityDetail();
-      return tr("gui.recovery.repair_incomplete_despite_capacity", "Recovery data appears sufficient, but the repair task did not complete. Review the report before trying again.");
-    }
-    if (recoveryNoDamage()) {
-      return tr("gui.recovery.no_damage_body", "Verification found no damaged or missing blocks.");
-    }
-    if (recoveryMetricBoolean("repair_possible") === true) {
-      return tr("gui.recovery.damage_within_rs_capacity", "Detected damage is within the available Reed-Solomon recovery capacity.");
-    }
-    return recoveryOverCapacityDetail();
-  }
-
-  function recoveryResultFooter(): string {
-    if (!recoverySourcePath()) return tr("gui.recovery.choose_archive_before_verify", "Choose the archive described by this PAR2 file.");
-    if (!recoveryResultAvailable()) return tr("gui.recovery.no_verification_result", "No verification result yet");
-    const repaired = recoveryMetricNumber("blocks_repaired") ?? 0;
-    if (repaired > 0) {
-      return tr("gui.recovery.blocks_repaired", "{count} blocks repaired").replace("{count}", repaired.toLocaleString());
-    }
-    if (recoveryResultOperation(recoveryReport()) === "repair" && recoveryResultOk(recoveryReport()) === true) {
-      const output = recoveryReportString("output");
-      return output
-        ? tr("gui.recovery.repaired_copy_ready", "Repaired copy: {name}").replace("{name}", pathBaseName(output))
-        : tr("gui.recovery.repair_completed", "Repair completed");
-    }
-    if (recoveryResultOk(recoveryReport()) === false) {
-      return recoveryBeyondCapacity()
-        ? tr("gui.recovery.damage_exceeds_capacity", "Damage exceeds available recovery data")
-        : tr("gui.recovery.verification_did_not_pass", "Verification did not pass");
-    }
-    const task = latestRecoveryReportTask();
-    return task ? taskOutcomeStateLabel(task) : taskStateLabel(null);
-  }
-
-  function recoveryRedundancyLabel(): string {
-    const redundancy = recoveryRedundancyValue();
-    if (redundancy === null) return recoveryRedundancyError();
-    return tr("gui.recovery.redundancy_percent", "{percent}% requested redundancy")
-      .replace("{percent}", redundancy.toLocaleString());
-  }
-
-  function recoveryWorkspaceView(): RecoveryWorkspaceView {
-    const source = recoverySourcePath();
-    const preparationMessage = recoveryOutputStatus();
-    const actionBusyReason = preparationMessage || recoveryPickerBusyReason();
-    const protectSourceDisabledReason = recoveryProtectSourceDisabledReason();
-    const protectDisabledReason = recoveryProtectDisabledReason();
-    const resultAvailable = recoveryResultAvailable();
-    const metricsAvailable = recoveryMetricsAvailable();
-    const sourceIsSqz = isRecoverySourceSqz();
-    const notAvailable = tr("gui.recovery.not_available_for_target", "Not available for this target");
-    const protectedSourceCount = recoveryReportNumber("source_file_count")
-      ?? (recoverySourceMatchesCurrentArchive()
-        ? Math.max(1, currentArchive?.volumes?.length ?? 1)
-        : 1);
-    const metrics = metricsAvailable
-      ? {
-          blocksNeeded: recoveryMetricNumber("blocks_needed")?.toLocaleString() ?? "-",
-          recoveryBlocksAvailable:
-            recoveryMetricNumber("recovery_blocks_available")?.toLocaleString() ?? "-",
-          remainingMargin: recoveryRemainingMargin()?.toLocaleString() ?? "-",
-        }
-      : null;
-    const formatWorkflowTitle = sourceIsSqz
-      ? tr("gui.recovery.sqz_capable_not_checked", "SQZ recovery capable · not checked")
-      : source
-        ? tr("gui.recovery.par2_sidecar_workflow", "PAR2 sidecar workflow")
-        : tr("gui.recovery.no_archive_selected", "No archive selected");
-    const formatWorkflowBody = sourceIsSqz
-      ? tr(
-          "gui.recovery.sqz_capability_body",
-          "SQZ supports embedded recovery, but this file has not been checked until a repair or test task reports a result.",
-        )
-      : source
-        ? tr(
-            "gui.recovery.standard_archive_capability_body",
-            "Use PAR2 for damage recovery. ZIP index rebuild is a separate workflow for ZIP-family archives with readable local headers.",
-          )
-        : tr(
-            "gui.recovery.choose_archive_for_capabilities",
-            "Choose an archive to see the recovery tools available for its format.",
-          );
-
-    return {
-      archiveName: source,
-      par2Name: recoveryPar2Path(),
-      currentArchiveAvailable: currentArchive !== null,
-      usesCurrentArchive: recoverySourceMatchesCurrentArchive(),
-      usesDefaultPar2: source !== null && recoveryPar2Override === null,
-      pickerBusy: recoveryPickerStatus !== "idle",
-      pickerBusyReason: recoveryPickerBusyReason(),
-      preparationMessage,
-      testDisabledReason: actionBusyReason || recoveryTestDisabledReason(),
-      sourceName: recoverySourceName() ?? tr("gui.recovery.no_archive_selected", "No archive selected"),
-      requestedRedundancy: protectSourceDisabledReason
-        ? notAvailable
-        : recoveryRedundancyLabel(),
-      redundancyDraft: recoveryRedundancyDraft,
-      redundancyError: recoveryRedundancyError(),
-      protectedSourceCount,
-      repairCapacity: resultAvailable
-        ? recoveryResultDetail()
-        : tr("gui.recovery.shown_after_verify", "Shown after verify"),
-      repairOutputMode: recoveryRepairUsesDirectory()
-        ? tr(
-            "gui.recovery.repair_output_new_folder",
-            "New folder with all {count} protected files",
-          ).replace("{count}", protectedSourceCount.toLocaleString())
-        : tr(
-            "gui.recovery.repair_output_new_file",
-            "New file; source stays unchanged",
-          ),
-      plannedIndex: protectSourceDisabledReason
-        ? notAvailable
-        : pathBaseName(defaultRecoveryPath() ?? ""),
-      resultTone: recoveryResultTone(),
-      resultTitle: recoveryResultTitle(),
-      resultDetail: recoveryResultDetail(),
-      resultExplanation: recoveryResultExplanation(),
-      resultFooter: recoveryResultFooter(),
-      resultAvailable,
-      metrics,
-      beyondCapacity: recoveryBeyondCapacity(),
-      formatWorkflowTitle,
-      formatWorkflowBody,
-      protectDisabledReason: actionBusyReason || protectDisabledReason,
-      verifyDisabledReason: actionBusyReason || recoveryVerifyDisabledReason(),
-      repairDisabledReason: actionBusyReason || recoveryRepairPar2DisabledReason(),
-      zipDisabledReason: actionBusyReason || recoveryZipDisabledReason(),
-      sqzRepairDisabledReason: actionBusyReason || recoverySqzRepairDisabledReason(),
-      sqzExportDisabledReason: actionBusyReason || recoverySqzExportDisabledReason(),
-      bestEffortDisabledReason: actionBusyReason || recoveryBestEffortDisabledReason(),
-      verifyRecommended: recoveryVerifyRecommended(),
-      repairRecommended: recoveryRepairRecommended(),
-    };
-  }
-
-  const recoveryWorkspaceActions: RecoveryWorkspaceActions = {
-    chooseArchive: () => void chooseRecoveryArchive(),
-    choosePar2: () => void chooseRecoveryPar2(),
-    useCurrentArchive: useCurrentArchiveForRecovery,
-    useDefaultPar2: useDefaultPar2ForRecovery,
-    testArchive: () => void submitRecoveryTestJob(),
-    setRedundancy: setRecoveryRedundancy,
-    protect: () => void submitProtectJob(),
-    verify: () => void submitVerifyRecoveryJob(),
-    repair: () => void submitRecoveryOutputJob("repair_recovery"),
-    repairZip: () => void submitRecoveryOutputJob("repair_zip"),
-    repairSqz: () => void submitRecoveryOutputJob("repair_sqz"),
-    exportSqz: () => void submitRecoveryOutputJob("export_sqz"),
-    extractReadable: () => void submitBestEffortExtractJob(),
-  };
 
   function isCurrentTaskConflictPrompt(prompt: typeof jobConflictPrompt): boolean {
     return prompt !== null && jobConflictPrompt?.id === prompt.id && jobConflictPrompt.version === prompt.version;
@@ -11460,12 +6584,12 @@
     const promptId = prompt.id;
     if (!await answerJobConflict(answer.decision, answer.applyAll)) return;
     if (answer.decision === "abort") {
-      showNotice(tr("gui.task.cancel_requested", "Cancel requested"));
+      showNotice(tr("gui.task.cancel_requested"));
     } else {
       showNotice(
         answer.applyAll
-          ? tr("gui.conflict.decision_applied_remaining", "Conflict decision applied to remaining files")
-          : tr("gui.conflict.decision_sent", "Conflict decision sent to task"),
+          ? tr("gui.conflict.decision_applied_remaining")
+          : tr("gui.conflict.decision_sent"),
       );
     }
     if (jobPasswordPrompt || jobConflictPrompt) return;
@@ -11478,84 +6602,84 @@
   }
 
   function passwordBookSecretStoreLabel(): string {
-    if (!currentArchive) return tr("gui.settings.password_book.not_checked", "Not checked");
-    if (passwordBookStatus.state === "checking") return tr("gui.settings.password_book.checking", "Checking");
-    if (passwordBookStatus.state === "idle") return tr("gui.settings.password_book.not_checked", "Not checked");
-    if (passwordBookStatus.state === "error") return tr("gui.settings.password_book.unavailable_status", "Unavailable");
+    if (!currentArchive) return tr("gui.settings.password_book.not_checked");
+    if (passwordBookStatus.state === "checking") return tr("gui.settings.password_book.checking");
+    if (passwordBookStatus.state === "idle") return tr("gui.settings.password_book.not_checked");
+    if (passwordBookStatus.state === "error") return tr("gui.settings.password_book.unavailable_status");
     return passwordBookStatus.available
-      ? tr("gui.settings.password_book.available", "Available")
-      : tr("gui.settings.password_book.unavailable_status", "Unavailable");
+      ? tr("gui.settings.password_book.available")
+      : tr("gui.settings.password_book.unavailable_status");
   }
 
   function passwordBookCurrentLabel(): string {
     if (!currentArchive) return noArchiveLabel();
-    if (currentArchive.read_only) return tr("gui.settings.password_book.unavailable_status", "Unavailable");
-    if (passwordBookStatus.state === "checking") return tr("gui.settings.password_book.checking", "Checking");
+    if (currentArchive.read_only) return tr("gui.settings.password_book.unavailable_status");
+    if (passwordBookStatus.state === "checking") return tr("gui.settings.password_book.checking");
     const saved = passwordBookStatus.saved === null
-      ? tr("gui.settings.password_book.saved_unknown", "Saved status unknown")
+      ? tr("gui.settings.password_book.saved_unknown")
       : passwordBookStatus.saved
-      ? tr("gui.settings.password_book.saved_status", "Saved")
-      : tr("gui.settings.password_book.not_saved_status", "Not saved");
+      ? tr("gui.settings.password_book.saved_status")
+      : tr("gui.settings.password_book.not_saved_status");
     return passwordBookStatus.session
-      ? `${tr("gui.settings.password_book.session_available", "Available in this session")} · ${saved}`
+      ? `${tr("gui.settings.password_book.session_available")} · ${saved}`
       : saved;
   }
 
   function passwordBookDetailLabel(): string {
-    if (!currentArchive) return tr("gui.settings.password_book.open_archive_to_check", "Open an archive to check saved password status");
+    if (!currentArchive) return tr("gui.settings.password_book.open_archive_to_check");
     if (currentArchive.read_only) {
-      return tr("gui.settings.password_book.nested_unavailable", "Extract the inner archive before saving or checking its password.");
+      return tr("gui.settings.password_book.nested_unavailable");
     }
     if (passwordBookStatus.state === "checking") {
-      return tr("gui.settings.password_book.checking_detail", "Checking the system secret store");
+      return tr("gui.settings.password_book.checking_detail");
     }
     if (passwordBookStatus.state === "error") {
-      return tr("gui.settings.password_book.check_failed_detail", "Refresh to check the system secret store again");
+      return tr("gui.settings.password_book.check_failed_detail");
     }
     if (passwordBookStatus.state === "idle") {
-      return tr("gui.settings.password_book.refresh_to_check", "Refresh to check for a saved password");
+      return tr("gui.settings.password_book.refresh_to_check");
     }
     if (!passwordBookStatus.available) {
-      return tr("gui.settings.password_book.secret_store_unavailable_detail", "The system secret store is unavailable. Make sure it is installed and running with a default password collection; passwords stay in this session until then.");
+      return tr("gui.settings.password_book.secret_store_unavailable_detail");
     }
     return passwordBookStatus.saved
-      ? tr("gui.settings.password_book.current_has_saved_entry", "Current archive has a saved secret-store entry")
-      : tr("gui.settings.password_book.prompt_or_save_after_unlock", "Enter this archive’s password below to verify and save it.");
+      ? tr("gui.settings.password_book.current_has_saved_entry")
+      : tr("gui.settings.password_book.prompt_or_save_after_unlock");
   }
 
   function passwordBookForgetDisabledReason(): string {
-    if (archivePasswordSaveBusy()) return tr("gui.settings.password_book.wait_for_save", "Wait for verification to finish or cancel it.");
+    if (archivePasswordSaveBusy()) return tr("gui.settings.password_book.wait_for_save");
     if (!currentArchive) return openArchiveFirstLabel();
     if (currentArchive.read_only) {
-      return tr("gui.settings.password_book.nested_unavailable", "Extract the inner archive before saving or checking its password.");
+      return tr("gui.settings.password_book.nested_unavailable");
     }
     if (passwordBookStatus.state === "checking") {
-      return tr("gui.settings.password_book.wait_for_status", "Wait for the password status check to finish");
+      return tr("gui.settings.password_book.wait_for_status");
     }
     if (passwordBookStatus.session) return "";
     if (passwordBookStatus.state === "error") {
-      return tr("gui.settings.password_book.refresh_after_failure", "Refresh password status before forgetting it");
+      return tr("gui.settings.password_book.refresh_after_failure");
     }
     if (passwordBookStatus.state !== "ready") {
-      return tr("gui.settings.password_book.refresh_before_forgetting", "Check password status before forgetting it");
+      return tr("gui.settings.password_book.refresh_before_forgetting");
     }
     if (passwordBookStatus.saved === null) {
-      return tr("gui.settings.password_book.refresh_after_failure", "Refresh password status before forgetting it");
+      return tr("gui.settings.password_book.refresh_after_failure");
     }
     if (!passwordBookStatus.saved) {
-      return tr("gui.settings.password_book.no_saved_entry", "The current archive has no stored password");
+      return tr("gui.settings.password_book.no_saved_entry");
     }
     return "";
   }
 
   function passwordBookRefreshDisabledReason(): string {
-    if (archivePasswordSaveBusy()) return tr("gui.settings.password_book.wait_for_save", "Wait for verification to finish or cancel it.");
+    if (archivePasswordSaveBusy()) return tr("gui.settings.password_book.wait_for_save");
     if (!currentArchive) return openArchiveFirstLabel();
     if (currentArchive.read_only) {
-      return tr("gui.settings.password_book.nested_unavailable", "Extract the inner archive before saving or checking its password.");
+      return tr("gui.settings.password_book.nested_unavailable");
     }
     if (passwordBookStatus.state === "checking") {
-      return tr("gui.settings.password_book.wait_for_status", "Wait for the password status check to finish");
+      return tr("gui.settings.password_book.wait_for_status");
     }
     return "";
   }
@@ -11570,9 +6694,9 @@
 
     try {
       await refreshArchivePasswordBookStatus(currentArchive.path);
-      showNotice(tr("gui.settings.password_book.status_refreshed", "Password Book status refreshed"));
+      showNotice(tr("gui.settings.password_book.status_refreshed"));
     } catch {
-      showNotice(tr("gui.settings.password_book.status_check_failed", "Could not check Password Book status. Start or unlock the system secret store, then try again."));
+      showNotice(tr("gui.settings.password_book.status_check_failed"));
     }
   }
 
@@ -11609,7 +6733,7 @@
     tr,
     tError: (error) => isErrorDto(error) ? tError(error) : String(error),
     showNotice,
-    ensurePreflightListener: ensureCreatePreflightListener,
+    ensurePreflightListener: create.ensureEvents,
     getDialogModule,
     saveNativeDialog,
     submitJob,
@@ -11637,54 +6761,6 @@
       handle.syncArchive(currentArchive);
     },
   };
-
-  function clearChecksumCopyState(): void {
-    checksumCopyRequest = null;
-    if (checksumCopyFeedbackTimer) clearTimeout(checksumCopyFeedbackTimer);
-    checksumCopyFeedbackTimer = null;
-    checksumCopyFeedbackKind = null;
-    checksumCopyFeedbackTaskId = null;
-    checksumCopyFeedbackMessage = null;
-    checksumCopyFeedbackTone = null;
-  }
-
-  function showChecksumCopyFeedback(
-    kind: "checksum" | "checksum_check" | "task",
-    taskId: number | null,
-    message: string,
-    tone: "success" | "danger",
-  ) {
-    checksumCopyFeedbackKind = kind;
-    checksumCopyFeedbackTaskId = taskId;
-    checksumCopyFeedbackMessage = message;
-    checksumCopyFeedbackTone = tone;
-    if (checksumCopyFeedbackTimer) clearTimeout(checksumCopyFeedbackTimer);
-    checksumCopyFeedbackTimer = setTimeout(clearChecksumCopyState, 2600);
-  }
-
-  function checksumCopyFeedbackFor(kind: "checksum" | "checksum_check"): string | null {
-    return checksumCopyFeedbackKind === kind && checksumCopyFeedbackTaskId === selectedChecksumTask(kind)?.id
-      ? checksumCopyFeedbackMessage
-      : null;
-  }
-
-  function checksumCopyFeedbackToneFor(kind: "checksum" | "checksum_check"): "success" | "danger" | null {
-    return checksumCopyFeedbackKind === kind && checksumCopyFeedbackTaskId === selectedChecksumTask(kind)?.id
-      ? checksumCopyFeedbackTone
-      : null;
-  }
-
-  function taskChecksumCopyFeedback(task: TaskDialogModel): string | null {
-    return checksumCopyFeedbackKind === "task" && checksumCopyFeedbackTaskId === task.id
-      ? checksumCopyFeedbackMessage
-      : null;
-  }
-
-  function taskChecksumCopyFeedbackTone(task: TaskDialogModel): "success" | "danger" | null {
-    return checksumCopyFeedbackKind === "task" && checksumCopyFeedbackTaskId === task.id
-      ? checksumCopyFeedbackTone
-      : null;
-  }
 
   async function showNativeWindow() {
     try {
@@ -11788,18 +6864,18 @@
       if (selectionBusyReason) return selectionBusyReason;
     }
     if (!currentArchive) {
-      if (label === "Add") return tr("gui.precondition.open_before_add", "Open an archive before adding files");
-      if (label === "Extract To") return tr("gui.precondition.open_before_extract", "Open an archive before extracting");
-      if (label === "Test") return tr("gui.precondition.open_before_test", "Open an archive before testing");
-      if (label === "Protect") return tr("gui.precondition.open_before_protect", "Open an archive before protecting");
-      if (label === "Delete") return tr("gui.precondition.open_before_delete", "Open an archive before deleting entries");
-      if (label === "Rename") return tr("gui.precondition.open_before_rename", "Open an archive before renaming entries");
-      if (label === "Move") return tr("gui.precondition.open_before_move", "Open an archive before moving entries");
-      if (label === "New Folder") return tr("gui.precondition.open_before_new_folder", "Open an archive before creating a folder");
+      if (label === "Add") return tr("gui.precondition.open_before_add");
+      if (label === "Extract To") return tr("gui.precondition.open_before_extract");
+      if (label === "Test") return tr("gui.precondition.open_before_test");
+      if (label === "Protect") return tr("gui.precondition.open_before_protect");
+      if (label === "Delete") return tr("gui.precondition.open_before_delete");
+      if (label === "Rename") return tr("gui.precondition.open_before_rename");
+      if (label === "Move") return tr("gui.precondition.open_before_move");
+      if (label === "New Folder") return tr("gui.precondition.open_before_new_folder");
       if (label === "Convert") {
         return currentArchive
           ? ""
-          : tr("gui.precondition.open_before_convert", "Open an archive before converting");
+          : tr("gui.precondition.open_before_convert");
       }
       return openArchiveFirstLabel();
     }
@@ -11814,7 +6890,7 @@
   function classicCommandTitle(label: string): string {
     const disabledTitle = classicCommandDisabledTitle(label);
     if (disabledTitle) return disabledTitle;
-    if (label === "Extract To") return extractDestinationHint();
+    if (label === "Extract To") return extractView.extractDestinationHint();
     if (label === "Info") return tr("gui.archive.info_title", "Show archive information");
     return "";
   }
@@ -11826,7 +6902,7 @@
   function classicCommandDisplayLabel(label: string): string {
     if (label === "View") {
       const entryPath = selectedPreviewPath();
-      return entryPath ? previewActionLabel(entryPath) : tr("gui.action.open_preview", "Open");
+      return entryPath ? previewActionLabel(entryPath) : tr("gui.action.open_preview");
     }
     return label === "Extract To" && hasArchiveSelection()
       ? actionLabel("Extract selected")
@@ -11847,25 +6923,25 @@
 
   function titleForScreen() {
     if (screen === "browse" && !currentArchive) return navLabel("Archives");
-    if (screen === "recent") return tr("gui.screen.recent", "Recent Archives");
-    if (screen === "create") return tr("gui.screen.create", "Create Archive");
-    if (screen === "extract") return tr("gui.screen.extract", "Extract");
-    if (screen === "convert") return tr("gui.screen.convert", "Convert Archive");
-    if (screen === "batch") return tr("gui.screen.batch", "Batch Extract Review");
-    if (screen === "nestedExtract") return tr("gui.nested_extract.title", "Extract inner archive");
-    if (screen === "updateReview") return tr("gui.update_review.title", "Review archive changes");
-    if (screen === "checksum") return tr("gui.screen.checksum", "Checksum");
-    if (screen === "duplicates") return tr("gui.screen.duplicates", "Duplicate Finder");
-    if (screen === "password") return tr("gui.screen.password", "Password Required");
-    if (screen === "recovery") return tr("gui.screen.recovery", "Recovery");
-    if (screen === "archiveInfo") return tr("gui.screen.archive_info", "Archive Info");
-    if (screen === "integration") return tr("gui.screen.integration", "Formats & Integration");
-    if (screen === "appearance") return tr("gui.screen.appearance", "Appearance");
-    if (screen === "colors") return tr("gui.screen.colors", "Appearance · Theme Colors");
-    if (screen === "settingsGeneral") return tr("gui.screen.settings_general", "Settings · General");
-    if (screen === "settingsSecurity") return tr("gui.screen.settings_security", "Settings · Security");
-    if (screen === "settingsPerformance") return tr("gui.screen.settings_performance", "Settings · Performance");
-    if (screen === "passwordBook") return tr("gui.screen.password_book", "Settings · Password Book");
+    if (screen === "recent") return tr("gui.screen.recent");
+    if (screen === "create") return tr("gui.screen.create");
+    if (screen === "extract") return tr("gui.screen.extract");
+    if (screen === "convert") return tr("gui.screen.convert");
+    if (screen === "batch") return tr("gui.screen.batch");
+    if (screen === "nestedExtract") return tr("gui.nested_extract.title");
+    if (screen === "updateReview") return tr("gui.update_review.title");
+    if (screen === "checksum") return tr("gui.screen.checksum");
+    if (screen === "duplicates") return tr("gui.screen.duplicates");
+    if (screen === "password") return tr("gui.screen.password");
+    if (screen === "recovery") return tr("gui.screen.recovery");
+    if (screen === "archiveInfo") return tr("gui.screen.archive_info");
+    if (screen === "integration") return tr("gui.screen.integration");
+    if (screen === "appearance") return tr("gui.screen.appearance");
+    if (screen === "colors") return tr("gui.screen.colors");
+    if (screen === "settingsGeneral") return tr("gui.screen.settings_general");
+    if (screen === "settingsSecurity") return tr("gui.screen.settings_security");
+    if (screen === "settingsPerformance") return tr("gui.screen.settings_performance");
+    if (screen === "passwordBook") return tr("gui.screen.password_book");
     return archiveTitle();
   }
 </script>
@@ -11886,12 +6962,12 @@
     {:else}
       <TaskCenterHost
         surface={taskCenterSurface()}
-        loadingTitle={tr("gui.task_surface.center_loading", "Loading task center")}
-        loadingBody={tr("gui.task_surface.center_loading_body", "Preparing recent tasks and the shared queue.")}
-        failureTitle={tr("gui.task_surface.center_load_failed", "Task center could not be loaded")}
-        failureBody={tr("gui.task_surface.center_load_failed_body", "Your tasks are unchanged. Retry loading the task center.")}
-        retryLabel={tr("gui.task_surface.retry", "Retry view")}
-        closeLabel={tr("gui.task_center.close", "Close task center")}
+        loadingTitle={tr("gui.task_surface.center_loading")}
+        loadingBody={tr("gui.task_surface.center_loading_body")}
+        failureTitle={tr("gui.task_surface.center_load_failed")}
+        failureBody={tr("gui.task_surface.center_load_failed_body")}
+        retryLabel={tr("gui.task_surface.retry")}
+        closeLabel={tr("gui.task_center.close")}
       />
     {/if}
   {/if}
@@ -11924,12 +7000,12 @@
 {#snippet taskProgressSurface(task: TaskDialogModel, presentation: "panel" | "dialog" | "window")}
   <TaskProgressDialogHost
     surface={taskProgressDialogProps(task, presentation)}
-    loadingTitle={tr("gui.task_surface.loading", "Loading task view")}
-    loadingBody={tr("gui.task_surface.loading_body", "Preparing live progress, results, and task controls.")}
-    failureTitle={tr("gui.task_surface.load_failed", "Task view could not be loaded")}
-    failureBody={tr("gui.task_surface.load_failed_body", "The task is still safe. Retry loading its progress and controls.")}
-    retryLabel={tr("gui.task_surface.retry", "Retry view")}
-    backLabel={tr("gui.task.back_to_tasks", "Back to tasks")}
+    loadingTitle={tr("gui.task_surface.loading")}
+    loadingBody={tr("gui.task_surface.loading_body")}
+    failureTitle={tr("gui.task_surface.load_failed")}
+    failureBody={tr("gui.task_surface.load_failed_body")}
+    retryLabel={tr("gui.task_surface.retry")}
+    backLabel={tr("gui.task.back_to_tasks")}
   />
 {/snippet}
 
@@ -11955,7 +7031,7 @@
     {...archiveEditorFields(archiveEdit.kind)}
     rootClass={`archive-editor-overlay design-root platform-${activePlatform} palette-${settingsSession.colors.palette} theme-${activeTheme} density-${activeDensityChoice}`}
     rootVariables={customPaletteVariables()}
-    cancelLabel={tr("common.cancel", "Cancel")}
+    cancelLabel={tr("common.cancel")}
     onClose={() => archiveEdit.close()}
   />
 {/if}
@@ -11966,19 +7042,19 @@
     class={`entry-context-menu themed-root palette-${settingsSession.colors.palette} theme-${activeTheme}`}
     use:cssVariables={entryContextCssVariables(entryContext)}
     role="menu"
-    aria-label={tr("gui.context.actions_for", "Actions for {name}").replace("{name}", entryContext.name)}
+    aria-label={tr("gui.context.actions_for").replace("{name}", entryContext.name)}
     aria-hidden={blockingModalVisible() || modeSelectionBlocked ? "true" : undefined}
     inert={blockingModalVisible() || modeSelectionBlocked}
   >
     <div class="entry-context-head">
-      <span>{tr("gui.context.selection_actions", "Selection actions")}</span>
+      <span>{tr("gui.context.selection_actions")}</span>
       <strong>{entryContext.name}</strong>
     </div>
     <button role="menuitem" disabled={!appActionEnabled("extract_selection")} title={archiveSelectionBusyReason() || (currentArchive ? "" : openArchiveFirstLabel())} onclick={() => void runEntryContextAction("extract")}><Icon name="archive" size={15} />{actionLabel("Extract selected")}</button>
     <button role="menuitem" disabled={!appActionEnabled("delete_entries")} title={deleteSelectedDisabledReason()} onclick={() => void runEntryContextAction("delete")}><Icon name="x-circle" size={15} />{actionLabel("Delete selected")}</button>
     <button role="menuitem" disabled={!entryContext.canRename || !appActionEnabled("rename_entry")} title={renameSelectedDisabledReason()} onclick={() => void runEntryContextAction("rename")}><Icon name="repeat" size={15} />{actionLabel("Rename selected")}</button>
     <button role="menuitem" disabled={!appActionEnabled("move_entries")} title={moveSelectedDisabledReason()} onclick={() => void runEntryContextAction("move")}><Icon name="repeat" size={15} />{actionLabel("Move selected")}</button>
-    <button role="menuitem" disabled={!entryContext.path || !contextualAppActions({ path: entryContext.path, type: entryContext.isDir ? "dir" : "file" }).preview_entry} title={entryContext.path ? previewActionLabel(entryContext.path, entryContext.isDir ? "dir" : "file") : tr("gui.preview.select_one", "Select one entry to open or preview")} onclick={() => void runEntryContextAction("preview")}><Icon name={previewActionIcon(entryContext.path, entryContext.isDir ? "dir" : "file")} size={15} />{previewActionLabel(entryContext.path, entryContext.isDir ? "dir" : "file")}</button>
+    <button role="menuitem" disabled={!entryContext.path || !contextualAppActions({ path: entryContext.path, type: entryContext.isDir ? "dir" : "file" }).preview_entry} title={entryContext.path ? previewActionLabel(entryContext.path, entryContext.isDir ? "dir" : "file") : tr("gui.preview.select_one")} onclick={() => void runEntryContextAction("preview")}><Icon name={previewActionIcon(entryContext.path, entryContext.isDir ? "dir" : "file")} size={15} />{previewActionLabel(entryContext.path, entryContext.isDir ? "dir" : "file")}</button>
     <button role="menuitem" disabled={!appActionEnabled("test_archive")} title={currentArchive ? "" : openArchiveFirstLabel()} onclick={() => void runEntryContextAction("test")}><Icon name="shield-alert" size={15} />{actionLabel("Test archive")}</button>
   </div>
 {/if}
@@ -12005,8 +7081,8 @@
         <AppIcon size={46} title="Squallz" />
         <div>
           <span class="eyebrow">Squallz</span>
-          <h1 id="squallz-first-run-title">{tr("gui.first_run.title", "Start with Squallz")}</h1>
-          <p id="squallz-first-run-description">{tr("gui.first_run.body", "Modern is ready with safe everyday defaults. Create or open an archive now, and switch to Classic any time.")}</p>
+          <h1 id="squallz-first-run-title">{tr("gui.first_run.title")}</h1>
+          <p id="squallz-first-run-description">{tr("gui.first_run.body")}</p>
         </div>
       </div>
 
@@ -12015,18 +7091,18 @@
           <div class="first-run-mode-head">
             <span class="first-run-mode-mark" aria-hidden="true"><Icon name="sparkles" size={20} /></span>
             <div class="first-run-mode-copy">
-              <span class="mode-kicker">{tr("gui.first_run.recommended", "Recommended")}</span>
-              <strong id="squallz-first-run-modern-title">{tr("gui.mode.modern", "Modern")}</strong>
-              <small>{tr("gui.first_run.modern_body", "A clean workspace for everyday compression and extraction.")}</small>
+              <span class="mode-kicker">{tr("gui.first_run.recommended")}</span>
+              <strong id="squallz-first-run-modern-title">{tr("gui.mode.modern")}</strong>
+              <small>{tr("gui.first_run.modern_body")}</small>
             </div>
           </div>
           <span class="first-run-mode-features">
-            <span><Icon name="sparkles" size={14} />{tr("gui.first_run.modern_focus", "Focused workspace")}</span>
-            <span><Icon name="check-circle" size={14} />{tr("gui.first_run.modern_guided", "Guided create and extract")}</span>
+            <span><Icon name="sparkles" size={14} />{tr("gui.first_run.modern_focus")}</span>
+            <span><Icon name="check-circle" size={14} />{tr("gui.first_run.modern_guided")}</span>
           </span>
           <div class="first-run-primary-actions">
             <button bind:this={firstRunRecommendedButton} class="primary" onclick={() => void startFirstRun("create")}>
-              <Icon name="sparkles" size={16} />{tr("gui.classic.create_archive", "Create archive")}
+              <Icon name="sparkles" size={16} />{tr("gui.classic.create_archive")}
             </button>
             <button aria-busy={archiveOpenStatus === "opening"} onclick={() => void startFirstRun("open")}>
               <Icon name="folder-open" size={16} />{archiveOpenStatus === "opening" ? toolbarLabel("Opening") : toolbarLabel("Open")}
@@ -12037,24 +7113,24 @@
         <button class="first-run-classic-card" onclick={() => setMode("classic")}>
           <span class="first-run-mode-mark" aria-hidden="true"><Icon name="list" size={20} /></span>
           <span class="first-run-mode-copy">
-            <span class="mode-kicker">{tr("gui.first_run.power_workflow", "Detailed controls")}</span>
-            <strong>{tr("gui.mode.classic", "Classic")}</strong>
-            <small>{tr("gui.first_run.classic_body", "More controls on screen, with a detailed file table and keyboard shortcuts.")}</small>
+            <span class="mode-kicker">{tr("gui.first_run.power_workflow")}</span>
+            <strong>{tr("gui.mode.classic")}</strong>
+            <small>{tr("gui.first_run.classic_body")}</small>
           </span>
           <span class="first-run-classic-features">
-            <span><Icon name="list" size={14} />{tr("gui.first_run.classic_table", "Detailed file table")}</span>
-            <span><Icon name="search" size={14} />{tr("gui.first_run.classic_keyboard", "Keyboard-first navigation")}</span>
+            <span><Icon name="list" size={14} />{tr("gui.first_run.classic_table")}</span>
+            <span><Icon name="search" size={14} />{tr("gui.first_run.classic_keyboard")}</span>
           </span>
           <span class="first-run-choice-action">
-            {tr("gui.first_run.choose_mode", "Use {mode}").replace("{mode}", tr("gui.mode.classic", "Classic"))}
+            {tr("gui.first_run.choose_mode").replace("{mode}", tr("gui.mode.classic"))}
             <Icon name="chevron-right" size={14} />
           </span>
         </button>
       </div>
 
       <footer class="first-run-footer">
-        <span role="status" aria-live="polite" aria-atomic="true">{firstRunDropFeedback ?? tr("gui.first_run.mode_changed_settings", "Mode can be changed in Settings")}</span>
-        <button onclick={reviewFirstRunSettings}>{tr("gui.first_run.review_settings_action", "Review settings first")}</button>
+        <span role="status" aria-live="polite" aria-atomic="true">{firstRunDropFeedback ?? tr("gui.first_run.mode_changed_settings")}</span>
+        <button onclick={reviewFirstRunSettings}>{tr("gui.first_run.review_settings_action")}</button>
       </footer>
     </div>
   </div>
@@ -12064,7 +7140,7 @@
   <main
     class={`design-root task-window-root platform-${activePlatform} palette-${settingsSession.colors.palette} theme-${activeTheme} density-${activeDensityChoice}`}
     use:cssVariables={customPaletteVariables()}
-    aria-label={tr("gui.external_task.window_label", "Squallz task window")}
+    aria-label={tr("gui.external_task.window_label")}
     aria-hidden={macosSfxPublisherTask ? "true" : undefined}
     inert={macosSfxPublisherTask !== null}
   >
@@ -12083,7 +7159,7 @@
         {#if displayedTaskWindowState.status === "reconnect-error" || displayedTaskWindowState.status === "task-unavailable"}
           <div class="task-window-empty-actions">
             <button class="primary-lite" type="button" onclick={() => reloadWindow({ taskWindow: true, taskId: taskDialogTaskId })}>
-              <Icon name="rotate-cw" size={15} />{tr("gui.external_task.reconnect_action", "Retry connection")}
+              <Icon name="rotate-cw" size={15} />{tr("gui.external_task.reconnect_action")}
             </button>
           </div>
         {/if}
@@ -12092,7 +7168,7 @@
   </main>
 {:else if mode === "modern" || isSettingsScreen()}
   <main class={`design-root modern-root platform-${activePlatform} palette-${settingsSession.colors.palette} theme-${activeTheme} density-${activeDensityChoice}`} use:cssVariables={customPaletteVariables()} class:drop-active={dragActive} aria-hidden={blockingModalVisible() || modeSelectionBlocked ? "true" : undefined} inert={blockingModalVisible() || modeSelectionBlocked}>
-    <section class="window modern-window" aria-label={isSettingsScreen() ? tr("gui.aria.squallz_settings", "Squallz settings") : tr("gui.aria.modern_archive_browser", "Squallz Modern archive browser")}>
+    <section class="window modern-window" aria-label={isSettingsScreen() ? tr("gui.aria.squallz_settings") : tr("gui.aria.modern_archive_browser")}>
       <header class="modern-titlebar" data-tauri-drag-region>
         <div class="brand-lockup">
           <div class="brand-glyph"><AppIcon size={36} title="Squallz" /></div>
@@ -12101,18 +7177,18 @@
             <span>{titleForScreen()}</span>
           </div>
         </div>
-        <div class="modern-toolbar" aria-label={tr("gui.aria.primary_actions", "Primary actions")}>
+        <div class="modern-toolbar" aria-label={tr("gui.aria.primary_actions")}>
           {#if isSettingsScreen()}
             <button onclick={() => setScreen("browse")}><Icon name="archive" size={16} />{tr("gui.settings.back_to_archives", "Archives")}</button>
           {:else}
             <button disabled={!appActionEnabled("open_archive")} aria-busy={archiveOpenStatus === "opening"} onclick={() => void runAppAction("open_archive")}><Icon name="folder-open" size={16} />{archiveOpenStatus === "opening" ? toolbarLabel("Opening") : toolbarLabel("Open")}</button>
             <button disabled={!appActionEnabled("create_archive")} onclick={() => void runAppAction("create_archive")}><Icon name="sparkles" size={16} />{toolbarLabel("Create")}</button>
-            <button onclick={() => openRecoveryConfiguration()}><Icon name="shield-alert" size={16} />{tr("gui.recovery.title", "Recovery")}</button>
+            <button onclick={() => openRecoveryConfiguration()}><Icon name="shield-alert" size={16} />{tr("gui.recovery.title")}</button>
             <button class="primary" disabled={!appActionEnabled("extract_all")} title={archiveSelectionBusyReason() || archiveActionTitle(hasArchiveOpen())} onclick={() => void runAppAction("extract_all")}><Icon name="archive" size={16} />{toolbarLabel("Extract")}</button>
             <button
               bind:this={quickActionButton}
               class="icon-only"
-              aria-label={tr("gui.quick.title", "Quick actions")}
+              aria-label={tr("gui.quick.title")}
               aria-haspopup="dialog"
               aria-expanded={activePopover === "quickActions"}
               onclick={toggleQuickActions}
@@ -12136,10 +7212,10 @@
       </header>
 
       {#if activePopover === "quickActions"}
-        <div bind:this={quickActionPopover} class="quick-popover modern-quick-popover" role="dialog" aria-label={tr("gui.quick.title", "Quick actions")}>
+        <div bind:this={quickActionPopover} class="quick-popover modern-quick-popover" role="dialog" aria-label={tr("gui.quick.title")}>
           <div class="quick-popover-head">
-            <strong>{tr("gui.quick.title", "Quick actions")}</strong>
-            <span>{tr("gui.quick.subtitle", "Jump without changing layout")}</span>
+            <strong>{tr("gui.quick.title")}</strong>
+            <span>{tr("gui.quick.subtitle")}</span>
           </div>
           {#each quickActions as action}
             <button disabled={navigationDisabled(action.screen)} title={navigationDisabledReason(action.screen)} onclick={() => chooseQuickAction(action.screen)}>
@@ -12157,7 +7233,7 @@
         class:no-archive-shell={screen === "browse" && !currentArchive}
         class:no-inspector-shell={screen === "recent" || screen === "convert" || screen === "create" || screen === "extract" || screen === "duplicates" || screen === "batch" || screen === "nestedExtract" || screen === "updateReview" || screen === "password"}
       >
-        <aside class="modern-sidebar" aria-label={tr("gui.aria.navigation", "Navigation")}>
+        <aside class="modern-sidebar" aria-label={tr("gui.aria.navigation")}>
           <div class="sidebar-section">
             {#each nav as item}
               <button
@@ -12180,7 +7256,7 @@
               aria-label={taskCenterTriggerLabel()}
               onclick={(event) => openTaskCenter(event.currentTarget)}
             >
-              <span>{tr("gui.task_center.title", "Task center")}</span>
+              <span>{tr("gui.task_center.title")}</span>
               <strong>{taskCenterSummaryLabel()}</strong>
               <small>{historyLastLabel()}</small>
             </button>
@@ -12191,11 +7267,11 @@
           class="modern-content"
           class:settings-workspace={isSettingsScreen()}
           class:browse-workspace={screen === "browse"}
-          aria-label={isSettingsScreen() ? tr("gui.settings.workspace", "Settings workspace") : tr("gui.aria.archive_contents", "Archive contents")}
+          aria-label={isSettingsScreen() ? tr("gui.settings.workspace") : tr("gui.aria.archive_contents")}
         >
           {#if isSettingsScreen()}
-            <aside class="settings-workspace-rail" aria-label={tr("gui.settings.sections", "Settings sections")}>
-              <div class="panel-title"><Icon name="settings" size={16} />{tr("gui.settings.title", "Settings")}</div>
+            <aside class="settings-workspace-rail" aria-label={tr("gui.settings.sections")}>
+              <div class="panel-title"><Icon name="settings" size={16} />{tr("gui.settings.title")}</div>
               <SettingsRouteList sections={settingsSections} active={screen} labelFor={settingsSectionLabel} detailFor={settingsSectionDetail} onChoose={setScreen} />
             </aside>
           {/if}
@@ -12203,8 +7279,8 @@
             <ArchiveReturnStrip
               title={archiveTitle()}
               detail={archiveReturnDetail()}
-              contextLabel={tr("gui.archive.current_context", "Current archive")}
-              actionLabel={tr("gui.archive.back_to_current", "Back to current archive")}
+              contextLabel={tr("gui.archive.current_context")}
+              actionLabel={tr("gui.archive.back_to_current")}
               onReturn={returnToCurrentArchive}
             />
           {/if}
@@ -12212,34 +7288,34 @@
             <div class="create-sheet modern-recent">
               <div class="sheet-head">
                 <div>
-                  <span class="eyebrow">{tr("gui.recent.eyebrow", "Workspace / Recent")}</span>
+                  <span class="eyebrow">{tr("gui.recent.eyebrow")}</span>
                   <h1>{tr("gui.recent.title", "Recent archives")}</h1>
-                  <p>{tr("gui.recent.subtitle", "Reopen recent archives. Squallz stores paths only, never archive contents.")}</p>
+                  <p>{tr("gui.recent.subtitle")}</p>
                 </div>
                 <button class="primary sheet-action" disabled={!appActionEnabled("open_archive")} onclick={() => void runAppAction("open_archive")}><Icon name="folder-open" size={17} />{archiveOpenStatus === "opening" ? toolbarLabel("Opening") : toolbarLabel("Open")}</button>
               </div>
 
               <div class="create-grid">
                 <section class="create-main-panel">
-                  <div class="panel-title"><Icon name="archive" size={16} />{tr("gui.recent.list_title", "Recent files")}</div>
+                  <div class="panel-title"><Icon name="archive" size={16} />{tr("gui.recent.list_title")}</div>
                   <div class="limits-table recent-table">
-                    <div><b>{tr("common.name", "Name")}</b><b>{tr("common.path", "Path")}</b><b>{tr("common.action", "Action")}</b></div>
+                    <div><b>{tr("common.name")}</b><b>{tr("common.path")}</b><b>{tr("common.action")}</b></div>
                     {#each recentFiles() as path}
-                      <div><span>{pathBaseName(path) || path}</span><span>{path}</span><button onclick={() => void openArchivePath(path, "dialog")}>{tr("gui.recent.reopen", "Reopen")}</button></div>
+                      <div><span>{pathBaseName(path) || path}</span><span>{path}</span><button onclick={() => void openArchivePath(path, "dialog")}>{tr("gui.recent.reopen")}</button></div>
                     {:else}
-                      <div><span>{tr("gui.recent.none", "No recent archives")}</span><span>{tr("gui.recent.open_to_start", "Open an archive to start this list.")}</span><button disabled={!appActionEnabled("open_archive")} onclick={() => void runAppAction("open_archive")}>{toolbarLabel("Open")}</button></div>
+                      <div><span>{tr("gui.recent.none")}</span><span>{tr("gui.recent.open_to_start")}</span><button disabled={!appActionEnabled("open_archive")} onclick={() => void runAppAction("open_archive")}>{toolbarLabel("Open")}</button></div>
                     {/each}
                   </div>
                 </section>
                 <aside class="create-side-panel">
                   <section>
-                    <div class="panel-title"><Icon name="check-circle" size={16} />{tr("gui.recent.current_title", "Current archive")}</div>
+                    <div class="panel-title"><Icon name="check-circle" size={16} />{tr("gui.recent.current_title")}</div>
                     <strong>{currentArchive ? currentArchive.name : noArchiveLabel()}</strong>
                     <p>{currentArchive ? currentArchive.path : openArchiveFirstLabel()}</p>
                   </section>
                   <section>
-                    <div class="panel-title"><Icon name="shield-alert" size={16} />{tr("gui.recent.privacy_title", "Privacy boundary")}</div>
-                    <p>{tr("gui.recent.privacy_body", "Recent files are stored locally as paths for quick reopening. Passwords and archive contents are not stored here.")}</p>
+                    <div class="panel-title"><Icon name="shield-alert" size={16} />{tr("gui.recent.privacy_title")}</div>
+                    <p>{tr("gui.recent.privacy_body")}</p>
                   </section>
                 </aside>
               </div>
@@ -12250,44 +7326,44 @@
               variant="modern"
               owner={convertRouteOwner}
               bridge={convertRouteBridge}
-              loadingTitle={tr("gui.convert.workspace_loading", "Loading Convert")}
-              loadingBody={tr("gui.convert.workspace_loading_body", "Preparing output formats and compression choices.")}
-              failureTitle={tr("gui.convert.workspace_load_failed", "Convert could not be loaded")}
-              failureBody={tr("gui.convert.workspace_load_failed_body", "The open archive and conversion choices were not changed. Retry loading the convert workspace.")}
-              retryLabel={tr("gui.convert.workspace_retry", "Retry")}
+              loadingTitle={tr("gui.convert.workspace_loading")}
+              loadingBody={tr("gui.convert.workspace_loading_body")}
+              failureTitle={tr("gui.convert.workspace_load_failed")}
+              failureBody={tr("gui.convert.workspace_load_failed_body")}
+              retryLabel={tr("gui.convert.workspace_retry")}
             />
           {:else if screen === "create"}
             <ArchiveOperationWorkspaceHost
               kind="create"
               variant="modern"
-              surface={createWorkspaceSurface("modern")}
-              loadingTitle={tr("gui.create.workspace_loading", "Loading Create")}
-              loadingBody={tr("gui.create.workspace_loading_body", "Preparing formats, presets, and output options.")}
-              failureTitle={tr("gui.create.workspace_load_failed", "Create could not be loaded")}
-              failureBody={tr("gui.create.workspace_load_failed_body", "Your create settings and selected sources were not changed. Retry loading the create workspace.")}
-              retryLabel={tr("gui.create.workspace_retry", "Retry")}
+              session={create}
+              loadingTitle={tr("gui.create.workspace_loading")}
+              loadingBody={tr("gui.create.workspace_loading_body")}
+              failureTitle={tr("gui.create.workspace_load_failed")}
+              failureBody={tr("gui.create.workspace_load_failed_body")}
+              retryLabel={tr("gui.create.workspace_retry")}
             />
           {:else if screen === "extract"}
             <ArchiveOperationWorkspaceHost
               kind="extract"
               variant="modern"
-              surface={extractWorkspaceSurface("modern")}
-              loadingTitle={tr("gui.extract.workspace_loading", "Loading Extract")}
-              loadingBody={tr("gui.extract.workspace_loading_body", "Preparing the destination, write plan, and safety options.")}
-              failureTitle={tr("gui.extract.workspace_load_failed", "Extract could not be loaded")}
-              failureBody={tr("gui.extract.workspace_load_failed_body", "Your destination and safety choices were not changed. Retry loading the extract workspace.")}
-              retryLabel={tr("gui.extract.workspace_retry", "Retry")}
+              session={extraction} view={extractView} {presets} bridge={extractWorkspaceBridge()}
+              loadingTitle={tr("gui.extract.workspace_loading")}
+              loadingBody={tr("gui.extract.workspace_loading_body")}
+              failureTitle={tr("gui.extract.workspace_load_failed")}
+              failureBody={tr("gui.extract.workspace_load_failed_body")}
+              retryLabel={tr("gui.extract.workspace_retry")}
             />
           {:else if screen === "batch"}
-            <ToolsWorkspaceHost surface={batchWorkspaceSurface("modern")} />
+            <ToolsWorkspaceHost surface={extractionReviewSurface("batch", "modern")} />
           {:else if screen === "nestedExtract"}
-            <ToolsWorkspaceHost surface={nestedExtractWorkspaceSurface("modern")} />
+            <ToolsWorkspaceHost surface={extractionReviewSurface("nested", "modern")} />
           {:else if screen === "updateReview"}
             <ToolsWorkspaceHost surface={archiveUpdateWorkspaceSurface("modern")} />
           {:else if screen === "checksum"}
-            <ToolsWorkspaceHost surface={checksumWorkspaceSurface("modern")} />
+            <ToolsWorkspaceHost surface={localToolsSurface("checksum", "modern")} />
           {:else if screen === "duplicates"}
-            <ToolsWorkspaceHost surface={duplicatesWorkspaceSurface("modern")} />
+            <ToolsWorkspaceHost surface={localToolsSurface("duplicates", "modern")} />
           {:else if screen === "password"}
             <PasswordWorkspaceHost
               surface={passwordWorkspaceSurface("modern")}
@@ -12295,53 +7371,52 @@
           {:else if screen === "recovery"}
             <RecoveryWorkspaceHost
               variant="modern"
-              view={recoveryWorkspaceView()}
-              actions={recoveryWorkspaceActions}
+              session={recoverySession}
               {tr}
             />
           {:else if screen === "archiveInfo"}
             <div class="settings-view modern-archive-info">
               <div class="sheet-head">
                 <div>
-                  <span class="eyebrow">{tr("gui.archive.info_eyebrow", "Archive / Info")}</span>
-                  <h1>{tr("gui.archive.info_title", "Archive information")}</h1>
-                  <p>{tr("gui.archive.info_subtitle", "Archive, selection, destination, encoding, and volume details.")}</p>
+                  <span class="eyebrow">{tr("gui.archive.info_eyebrow")}</span>
+                  <h1>{tr("gui.archive.info_title")}</h1>
+                  <p>{tr("gui.archive.info_subtitle")}</p>
                 </div>
                 <div class="sheet-action-row">
-                  <button class="sheet-action" onclick={() => setScreen("browse")}><Icon name="archive" size={17} />{tr("gui.nav.back_to_archive", "Back to archive")}</button>
+                  <button class="sheet-action" onclick={() => setScreen("browse")}><Icon name="archive" size={17} />{tr("gui.nav.back_to_archive")}</button>
                   <button
                     class="sheet-action"
                     disabled={!appActionEnabled("test_archive")}
                     title={testArchiveDisabledReason()}
-                    aria-label={labelWithDisabledReason(tr("gui.action.test_archive", "Test archive"), testArchiveDisabledReason())}
+                    aria-label={labelWithDisabledReason(tr("gui.action.test_archive"), testArchiveDisabledReason())}
                     onclick={() => void runAppAction("test_archive")}
-                  ><Icon name="check-circle" size={17} />{tr("gui.action.test_archive", "Test archive")}</button>
+                  ><Icon name="check-circle" size={17} />{tr("gui.action.test_archive")}</button>
                 </div>
               </div>
 
               <div class="settings-layout">
                 <section class="settings-main-panel">
                   <div class="limits-table archive-info-table">
-                    <div><b>{tr("common.field", "Field")}</b><b>{tr("common.value", "Value")}</b></div>
+                    <div><b>{tr("common.field")}</b><b>{tr("common.value")}</b></div>
                     {#each archiveInfoRows() as row}
                       <div><span>{row[0]}</span><strong>{row[1]}</strong></div>
                     {/each}
                   </div>
                 </section>
                 <aside class="settings-side-panel">
-                  <div class="panel-title"><Icon name="archive" size={16} />{extractDestinationFieldLabel()}</div>
+                  <div class="panel-title"><Icon name="archive" size={16} />{extractView.extractDestinationFieldLabel()}</div>
                   <div class="setting-callout">
-                    <strong>{extractDestinationTitle(extractDestinationMode)}</strong>
-                    <span>{extractJobDestination()}</span>
+                    <strong>{extractView.extractDestinationTitle(extraction.state.destinationMode)}</strong>
+                    <span>{extraction.destination}</span>
                   </div>
                   <div class="settings-route-list">
                     <button class="settings-route-card" onclick={() => openExtractWorkspace("all")}>
                       <Icon name="archive" size={16} />
-                      <span><strong>{tr("gui.screen.extract", "Extract")}</strong><small>{extractDestinationHint()}</small></span>
+                      <span><strong>{tr("gui.screen.extract")}</strong><small>{extractView.extractDestinationHint()}</small></span>
                     </button>
                     <button class="settings-route-card" onclick={() => setScreen("checksum")}>
                       <Icon name="check-circle" size={16} />
-                      <span><strong>{tr("gui.screen.checksum", "Checksum")}</strong><small>{tr("gui.checksum.route_from_info", "Verify this archive or another file")}</small></span>
+                      <span><strong>{tr("gui.screen.checksum")}</strong><small>{tr("gui.checksum.route_from_info")}</small></span>
                     </button>
                   </div>
                 </aside>
@@ -12350,29 +7425,29 @@
           {:else if isSettingsWorkspaceScreen(screen)}
             <SettingsWorkspaceHost
               workspace={settingsWorkspaceProps(screen)}
-              loadingTitle={tr("gui.settings.workspace_loading", "Loading Settings")}
-              loadingBody={tr("gui.settings.workspace_loading_body", "Preparing appearance, safety, performance, and integration controls.")}
-              failureTitle={tr("gui.settings.workspace_load_failed", "Settings could not be loaded")}
-              failureBody={tr("gui.settings.workspace_load_failed_body", "No settings were changed. Retry loading this workspace.")}
-              retryLabel={tr("gui.settings.workspace_retry", "Retry")}
+              loadingTitle={tr("gui.settings.workspace_loading")}
+              loadingBody={tr("gui.settings.workspace_loading_body")}
+              failureTitle={tr("gui.settings.workspace_load_failed")}
+              failureBody={tr("gui.settings.workspace_load_failed_body")}
+              retryLabel={tr("gui.settings.workspace_retry")}
             />
 	          {:else}
 	            <div class="archive-workspace" class:no-archive={!currentArchive}>
 	              {#if currentArchive}
 	                <ModernArchiveBrowserHost
 	                  surface={modernArchiveBrowserSurface()}
-	                  loadingTitle={tr("gui.archive.browser_loading", "Loading archive browser")}
-	                  loadingBody={tr("gui.archive.browser_loading_body", "Preparing the file list and archive actions.")}
-	                  failureTitle={tr("gui.archive.browser_load_failed", "Archive browser could not be loaded")}
-	                  failureBody={tr("gui.archive.browser_load_failed_body", "The open archive and your selection are unchanged. Retry loading the browser.")}
-	                  retryLabel={tr("gui.archive.browser_retry", "Retry browser")}
+	                  loadingTitle={tr("gui.archive.browser_loading")}
+	                  loadingBody={tr("gui.archive.browser_loading_body")}
+	                  failureTitle={tr("gui.archive.browser_load_failed")}
+	                  failureBody={tr("gui.archive.browser_load_failed_body")}
+	                  retryLabel={tr("gui.archive.browser_retry")}
 	                />
 		            {:else}
 	              <ArchiveStartState
 	                variant="modern"
-	                eyebrow={tr("gui.archive.secure_archive", "Secure archive")}
+	                eyebrow={tr("gui.archive.secure_archive")}
 	                title={noArchiveLabel()}
-	                body={tr("gui.empty.no_archive_summary", "Open an archive to browse entries, inspect metadata, and run archive actions.")}
+	                body={tr("gui.empty.no_archive_summary")}
 	                openLabel={archiveOpenStatus === "opening" ? toolbarLabel("Opening") : toolbarLabel("Open")}
 	                createLabel={toolbarLabel("Create")}
 	                openBusy={archiveOpenStatus === "opening"}
@@ -12387,12 +7462,12 @@
         {#if !isSettingsScreen() && screen !== "recent" && screen !== "convert" && screen !== "create" && screen !== "extract" && screen !== "duplicates" && screen !== "batch" && screen !== "nestedExtract" && screen !== "updateReview" && screen !== "password" && (screen !== "browse" || currentArchive)}
           <ModernInspectorHost
             surface={modernInspectorSurface()}
-            ariaLabel={tr("gui.aria.archive_inspector", "Archive inspector")}
-            loadingTitle={tr("gui.inspector.workspace_loading", "Loading inspector")}
-            loadingBody={tr("gui.inspector.workspace_loading_body", "Preparing archive details and selection actions.")}
-            failureTitle={tr("gui.inspector.workspace_load_failed", "Inspector could not be loaded")}
-            failureBody={tr("gui.inspector.workspace_load_failed_body", "The archive and your selection are unchanged. Retry loading the inspector.")}
-            retryLabel={tr("gui.inspector.workspace_retry", "Retry inspector")}
+            ariaLabel={tr("gui.aria.archive_inspector")}
+            loadingTitle={tr("gui.inspector.workspace_loading")}
+            loadingBody={tr("gui.inspector.workspace_loading_body")}
+            failureTitle={tr("gui.inspector.workspace_load_failed")}
+            failureBody={tr("gui.inspector.workspace_load_failed_body")}
+            retryLabel={tr("gui.inspector.workspace_retry")}
           />
         {/if}
       </div>
@@ -12400,7 +7475,7 @@
   </main>
 {:else}
   <main class={`design-root classic-root platform-${activePlatform} palette-${settingsSession.colors.palette} theme-${activeTheme} density-${activeDensityChoice}`} use:cssVariables={customPaletteVariables()} class:drop-active={dragActive} aria-hidden={blockingModalVisible() || modeSelectionBlocked ? "true" : undefined} inert={blockingModalVisible() || modeSelectionBlocked}>
-    <section class="window classic-window" aria-label={tr("gui.aria.classic_archive_browser", "Squallz Classic archive browser")}>
+    <section class="window classic-window" aria-label={tr("gui.aria.classic_archive_browser")}>
       <header class="classic-titlebar" data-tauri-drag-region>
         <div class="classic-title">
           <AppIcon size={19} title="Squallz" />
@@ -12419,13 +7494,13 @@
             <span class="classic-action-label">{archiveOpenStatus === "opening" ? toolbarLabel("Opening") : toolbarLabel("Open")}</span>
           </button>
           <button
-            aria-label={tr("gui.classic.new_archive", "New archive")}
-            title={tr("gui.classic.new_archive", "New archive")}
+            aria-label={tr("gui.classic.new_archive")}
+            title={tr("gui.classic.new_archive")}
             disabled={!appActionEnabled("create_archive")}
             onclick={() => void runAppAction("create_archive")}
           >
             <Icon name="archive" size={15} />
-            <span class="classic-action-label">{tr("gui.classic.new_archive", "New archive")}</span>
+            <span class="classic-action-label">{tr("gui.classic.new_archive")}</span>
           </button>
           <button
             class="task-center-trigger"
@@ -12437,7 +7512,7 @@
             onclick={(event) => openTaskCenter(event.currentTarget)}
           >
             <Icon name="list" size={15} />
-            <span class="classic-action-label">{tr("gui.task_center.short_title", "Tasks")}</span>
+            <span class="classic-action-label">{tr("gui.task_center.short_title")}</span>
             {#if taskCenterBadgeCount() > 0}
               <span class="task-center-trigger-badge">{Math.min(taskCenterBadgeCount(), 99)}</span>
             {/if}
@@ -12454,7 +7529,7 @@
         </div>
       </header>
 
-      <div class="classic-commandbar" aria-label={tr("gui.aria.archive_commands", "Archive commands")}>
+      <div class="classic-commandbar" aria-label={tr("gui.aria.archive_commands")}>
           {#each classicCommands as command}
             <button
               class={`cmd-${command[2]}`}
@@ -12474,21 +7549,21 @@
             class="classic-pathrow"
             class:empty-address={!currentArchive}
           >
-          <div class="classic-path-navigation" aria-label={tr("gui.nav.archive_navigation", "Archive navigation")}>
+          <div class="classic-path-navigation" aria-label={tr("gui.nav.archive_navigation")}>
             <button
               class="path-button"
               disabled={!appActionEnabled("go_up")}
-              aria-label={tr("gui.nav.up", "Up one level")}
-              title={tr("gui.nav.up", "Up one level")}
+              aria-label={tr("gui.nav.up")}
+              title={tr("gui.nav.up")}
               onclick={() => void runAppAction("go_up")}
-            ><Icon name="chevron-up" size={14} /><span>{tr("gui.nav.up_short", "Up")}</span></button>
+            ><Icon name="chevron-up" size={14} /><span>{tr("gui.nav.up_short")}</span></button>
             <button
               class="path-button"
               disabled={!canGoUpArchive()}
-              aria-label={tr("gui.nav.root", "Archive root")}
-              title={tr("gui.nav.root", "Archive root")}
+              aria-label={tr("gui.nav.root")}
+              title={tr("gui.nav.root")}
               onclick={() => void openArchiveBreadcrumb(-1)}
-            ><Icon name="archive" size={14} /><span>{tr("gui.nav.root_short", "Root")}</span></button>
+            ><Icon name="archive" size={14} /><span>{tr("gui.nav.root_short")}</span></button>
           </div>
           <div class="address" bind:this={classicArchiveAddress}>
             <button type="button" disabled={!currentArchive} title={archiveTitle()} onclick={() => void openArchiveBreadcrumb(-1)}>{archiveTitle()}</button>
@@ -12497,25 +7572,25 @@
             {/each}
           </div>
           {#if screen === "extract" || screen === "batch" || screen === "nestedExtract"}
-            <div class="encoding-chip accent"><Icon name="archive" size={14} />{screen === "nestedExtract" ? tr("gui.nested_extract.title", "Extract inner archive") : screen === "batch" ? tr("gui.batch.title", "Batch Extract") : extractDestinationTitle(extractDestinationMode)}</div>
+            <div class="encoding-chip accent"><Icon name="archive" size={14} />{screen === "nestedExtract" ? tr("gui.nested_extract.title") : screen === "batch" ? tr("gui.batch.title") : extractView.extractDestinationTitle(extraction.state.destinationMode)}</div>
           {:else if screen === "password"}
-            <div class="encoding-chip warning"><Icon name="lock" size={14} />{tr("gui.password.required", "Password required")}</div>
+            <div class="encoding-chip warning"><Icon name="lock" size={14} />{tr("gui.password.required")}</div>
           {:else if screen === "recovery"}
-            <div class="encoding-chip accent"><Icon name="shield-alert" size={14} />{recoverySourceName() ?? tr("gui.recovery.no_archive_selected", "No archive selected")}</div>
+            <div class="encoding-chip accent"><Icon name="shield-alert" size={14} />{recoverySession.sourceName() ?? tr("gui.recovery.no_archive_selected")}</div>
           {:else if screen === "checksum"}
-            <div class="encoding-chip accent"><Icon name="check-circle" size={14} />{checksumAlgorithmLabel(checksumAlgorithm)}</div>
+            <div class="encoding-chip accent"><Icon name="check-circle" size={14} />{tools.algorithmLabel()}</div>
           {:else if screen === "duplicates"}
-            <div class="encoding-chip accent"><Icon name="search" size={14} />{tr("gui.duplicates.blake3_scan", "BLAKE3 scan")}</div>
+            <div class="encoding-chip accent"><Icon name="search" size={14} />{tr("gui.duplicates.blake3_scan")}</div>
           {:else if currentArchive && hasArchiveStructureWarning()}
-            <div class="encoding-chip warning"><Icon name="alert-triangle" size={14} />{tr("gui.archive.zip_index_damaged", "ZIP index damaged")}</div>
+            <div class="encoding-chip warning"><Icon name="alert-triangle" size={14} />{tr("gui.archive.zip_index_damaged")}</div>
           {:else if currentArchive && hasEncodingWarning()}
-            <div class="encoding-chip warning"><Icon name="alert-triangle" size={14} />{tr("gui.encoding.gbk_suggested", "GBK suggested")}</div>
+            <div class="encoding-chip warning"><Icon name="alert-triangle" size={14} />{tr("gui.encoding.gbk_suggested")}</div>
           {:else if currentArchive}
             <div
               class="encoding-chip accent archive-state-chip"
-              aria-label={tr("gui.archive.open", "Archive open")}
-              title={tr("gui.archive.open", "Archive open")}
-            ><Icon name="archive" size={14} /><span>{tr("gui.archive.open", "Archive open")}</span></div>
+              aria-label={tr("gui.archive.open")}
+              title={tr("gui.archive.open")}
+            ><Icon name="archive" size={14} /><span>{tr("gui.archive.open")}</span></div>
           {:else}
             <div class="encoding-chip accent"><Icon name="folder-open" size={14} />{openArchiveFirstLabel()}</div>
           {/if}
@@ -12526,22 +7601,22 @@
                 bind:this={archiveSearchInput}
                 value={filterText()}
                 disabled={!currentArchive || screen !== "browse"}
-                aria-label={tr("gui.list.search_aria", "Search paths across the entire archive")}
+                aria-label={tr("gui.list.search_aria")}
                 aria-busy={filterPending()}
-                title={tr("gui.list.search_shortcut", "Search the entire archive (⌘F / Ctrl+F)")}
-                placeholder={tr("gui.list.search_placeholder", "Search the entire archive")}
+                title={tr("gui.list.search_shortcut")}
+                placeholder={tr("gui.list.search_placeholder")}
                 oninput={(event) => updateArchiveFilter(event.currentTarget.value)}
                 onkeydown={onArchiveFilterKeydown}
               />
               {#if filterText()}
-                <button type="button" aria-label={tr("gui.list.search_clear", "Clear search")} title={tr("gui.list.search_clear", "Clear search")} onclick={clearArchiveFilter}><Icon name="x-circle" size={13} /></button>
+                <button type="button" aria-label={tr("gui.list.search_clear")} title={tr("gui.list.search_clear")} onclick={clearArchiveFilter}><Icon name="x-circle" size={13} /></button>
               {/if}
             </div>
             <button
               bind:this={quickActionButton}
               class="classic-quick-trigger"
-              aria-label={tr("gui.quick.title", "Quick actions")}
-              title={tr("gui.quick.title", "Quick actions")}
+              aria-label={tr("gui.quick.title")}
+              title={tr("gui.quick.title")}
               aria-haspopup="dialog"
               aria-expanded={activePopover === "quickActions"}
               onclick={toggleQuickActions}
@@ -12551,10 +7626,10 @@
         {/if}
 
       {#if activePopover === "quickActions"}
-        <div bind:this={quickActionPopover} class="quick-popover classic-quick-popover" role="dialog" aria-label={tr("gui.quick.title", "Quick actions")}>
+        <div bind:this={quickActionPopover} class="quick-popover classic-quick-popover" role="dialog" aria-label={tr("gui.quick.title")}>
           <div class="quick-popover-head">
-            <strong>{tr("gui.quick.title", "Quick actions")}</strong>
-            <span>{tr("gui.quick.close_hint", "Esc or outside click closes")}</span>
+            <strong>{tr("gui.quick.title")}</strong>
+            <span>{tr("gui.quick.close_hint")}</span>
           </div>
           {#each quickActions as action}
             <button disabled={navigationDisabled(action.screen)} title={navigationDisabledReason(action.screen)} onclick={() => chooseQuickAction(action.screen)}>
@@ -12570,29 +7645,29 @@
           <section class="classic-extract-sheet classic-info">
             <header>
               <div>
-                <h1>{tr("gui.archive.info_title", "Archive information")}</h1>
-                <p>{tr("gui.archive.info_subtitle", "Archive, selection, destination, encoding, and volume details.")}</p>
+                <h1>{tr("gui.archive.info_title")}</h1>
+                <p>{tr("gui.archive.info_subtitle")}</p>
               </div>
               <div class="classic-button-row">
-                <button onclick={() => setScreen("browse")}>{tr("gui.nav.back_to_archive", "Back to archive")}</button>
+                <button onclick={() => setScreen("browse")}>{tr("gui.nav.back_to_archive")}</button>
                 <button
                   disabled={!appActionEnabled("test_archive")}
                   title={testArchiveDisabledReason()}
-                  aria-label={labelWithDisabledReason(tr("gui.action.test_archive", "Test archive"), testArchiveDisabledReason())}
+                  aria-label={labelWithDisabledReason(tr("gui.action.test_archive"), testArchiveDisabledReason())}
                   onclick={() => void runAppAction("test_archive")}
-                >{tr("gui.action.test_archive", "Test archive")}</button>
+                >{tr("gui.action.test_archive")}</button>
                 <button
                   class="classic-primary"
-                  disabled={Boolean(extractArchiveRequiredReason())}
-                  title={extractArchiveRequiredReason()}
-                  aria-label={labelWithDisabledReason(tr("gui.screen.extract", "Extract"), extractArchiveRequiredReason())}
+                  disabled={Boolean(extraction.archiveRequiredReason)}
+                  title={extraction.archiveRequiredReason}
+                  aria-label={labelWithDisabledReason(tr("gui.screen.extract"), extraction.archiveRequiredReason)}
                   onclick={() => openExtractWorkspace("all")}
-                >{tr("gui.screen.extract", "Extract")}</button>
+                >{tr("gui.screen.extract")}</button>
               </div>
             </header>
             <div class="classic-batch-grid">
               <section>
-                <h2>{tr("gui.inspector.archive", "Archive")}</h2>
+                <h2>{tr("gui.inspector.archive")}</h2>
                 <div class="classic-form-grid compact">
                   {#each archiveInfoRows() as row}
                     <div class="classic-label">{row[0]}</div>
@@ -12601,12 +7676,12 @@
                 </div>
               </section>
               <aside>
-                <h2>{extractDestinationFieldLabel()}</h2>
+                <h2>{extractView.extractDestinationFieldLabel()}</h2>
                 <div class="classic-form-grid compact no-pad">
-                  <div class="classic-label">{tr("common.mode", "Mode")}</div>
-                  <div class="classic-input accent">{extractDestinationTitle(extractDestinationMode)}</div>
-                  <div class="classic-label">{tr("common.destination", "Destination")}</div>
-                  <div class="classic-input classic-copy-wrap">{extractJobDestination()}</div>
+                  <div class="classic-label">{tr("common.mode")}</div>
+                  <div class="classic-input accent">{extractView.extractDestinationTitle(extraction.state.destinationMode)}</div>
+                  <div class="classic-label">{tr("common.destination")}</div>
+                  <div class="classic-input classic-copy-wrap">{extraction.destination}</div>
                 </div>
               </aside>
             </div>
@@ -12618,44 +7693,44 @@
           variant="classic"
           owner={convertRouteOwner}
           bridge={convertRouteBridge}
-          loadingTitle={tr("gui.convert.workspace_loading", "Loading Convert")}
-          loadingBody={tr("gui.convert.workspace_loading_body", "Preparing output formats and compression choices.")}
-          failureTitle={tr("gui.convert.workspace_load_failed", "Convert could not be loaded")}
-          failureBody={tr("gui.convert.workspace_load_failed_body", "The open archive and conversion choices were not changed. Retry loading the convert workspace.")}
-          retryLabel={tr("gui.convert.workspace_retry", "Retry")}
+          loadingTitle={tr("gui.convert.workspace_loading")}
+          loadingBody={tr("gui.convert.workspace_loading_body")}
+          failureTitle={tr("gui.convert.workspace_load_failed")}
+          failureBody={tr("gui.convert.workspace_load_failed_body")}
+          retryLabel={tr("gui.convert.workspace_retry")}
         />
       {:else if screen === "create"}
         <ArchiveOperationWorkspaceHost
           kind="create"
           variant="classic"
-          surface={createWorkspaceSurface("classic")}
-          loadingTitle={tr("gui.create.workspace_loading", "Loading Create")}
-          loadingBody={tr("gui.create.workspace_loading_body", "Preparing formats, presets, and output options.")}
-          failureTitle={tr("gui.create.workspace_load_failed", "Create could not be loaded")}
-          failureBody={tr("gui.create.workspace_load_failed_body", "Your create settings and selected sources were not changed. Retry loading the create workspace.")}
-          retryLabel={tr("gui.create.workspace_retry", "Retry")}
+          session={create}
+          loadingTitle={tr("gui.create.workspace_loading")}
+          loadingBody={tr("gui.create.workspace_loading_body")}
+          failureTitle={tr("gui.create.workspace_load_failed")}
+          failureBody={tr("gui.create.workspace_load_failed_body")}
+          retryLabel={tr("gui.create.workspace_retry")}
         />
       {:else if screen === "extract"}
         <ArchiveOperationWorkspaceHost
           kind="extract"
           variant="classic"
-          surface={extractWorkspaceSurface("classic")}
-          loadingTitle={tr("gui.extract.workspace_loading", "Loading Extract")}
-          loadingBody={tr("gui.extract.workspace_loading_body", "Preparing the destination, write plan, and safety options.")}
-          failureTitle={tr("gui.extract.workspace_load_failed", "Extract could not be loaded")}
-          failureBody={tr("gui.extract.workspace_load_failed_body", "Your destination and safety choices were not changed. Retry loading the extract workspace.")}
-          retryLabel={tr("gui.extract.workspace_retry", "Retry")}
+          session={extraction} view={extractView} {presets} bridge={extractWorkspaceBridge()}
+          loadingTitle={tr("gui.extract.workspace_loading")}
+          loadingBody={tr("gui.extract.workspace_loading_body")}
+          failureTitle={tr("gui.extract.workspace_load_failed")}
+          failureBody={tr("gui.extract.workspace_load_failed_body")}
+          retryLabel={tr("gui.extract.workspace_retry")}
         />
       {:else if screen === "batch"}
-        <ToolsWorkspaceHost surface={batchWorkspaceSurface("classic")} />
+        <ToolsWorkspaceHost surface={extractionReviewSurface("batch", "classic")} />
       {:else if screen === "nestedExtract"}
-        <ToolsWorkspaceHost surface={nestedExtractWorkspaceSurface("classic")} />
+        <ToolsWorkspaceHost surface={extractionReviewSurface("nested", "classic")} />
       {:else if screen === "updateReview"}
         <ToolsWorkspaceHost surface={archiveUpdateWorkspaceSurface("classic")} />
       {:else if screen === "checksum"}
-        <ToolsWorkspaceHost surface={checksumWorkspaceSurface("classic")} />
+        <ToolsWorkspaceHost surface={localToolsSurface("checksum", "classic")} />
       {:else if screen === "duplicates"}
-        <ToolsWorkspaceHost surface={duplicatesWorkspaceSurface("classic")} />
+        <ToolsWorkspaceHost surface={localToolsSurface("duplicates", "classic")} />
       {:else if screen === "password"}
         <PasswordWorkspaceHost
           surface={passwordWorkspaceSurface("classic")}
@@ -12666,8 +7741,8 @@
             <ArchiveReturnStrip
               title={archiveTitle()}
               detail={archiveReturnDetail()}
-              contextLabel={tr("gui.archive.current_context", "Current archive")}
-              actionLabel={tr("gui.archive.back_to_current", "Back to current archive")}
+              contextLabel={tr("gui.archive.current_context")}
+              actionLabel={tr("gui.archive.back_to_current")}
               buttonClass="classic-primary"
               iconSize={15}
               onReturn={returnToCurrentArchive}
@@ -12675,8 +7750,7 @@
           {/if}
           <RecoveryWorkspaceHost
             variant="classic"
-            view={recoveryWorkspaceView()}
-            actions={recoveryWorkspaceActions}
+            session={recoverySession}
             {tr}
           />
         </div>
@@ -12685,11 +7759,11 @@
           <div class="classic-start-body">
             <ArchiveStartState
               variant="classic"
-              eyebrow={tr("gui.archive.secure_archive", "Secure archive")}
+              eyebrow={tr("gui.archive.secure_archive")}
               title={noArchiveLabel()}
-              body={tr("gui.empty.no_archive_summary", "Open an archive to browse entries, inspect metadata, and run archive actions.")}
+              body={tr("gui.empty.no_archive_summary")}
               openLabel={archiveOpenStatus === "opening" ? toolbarLabel("Opening") : toolbarLabel("Open")}
-              createLabel={tr("gui.classic.create_archive", "Create archive")}
+              createLabel={tr("gui.classic.create_archive")}
               openBusy={archiveOpenStatus === "opening"}
               onOpen={() => void runAppAction("open_archive")}
               onCreate={() => void runAppAction("create_archive")}
@@ -12698,76 +7772,76 @@
         {:else}
           <ClassicArchiveBrowserHost
             surface={classicArchiveBrowserSurface()}
-            loadingTitle={tr("gui.archive.browser_loading", "Loading archive browser")}
-            loadingBody={tr("gui.archive.browser_loading_body", "Preparing the file list and archive actions.")}
-            failureTitle={tr("gui.archive.browser_load_failed", "Archive browser could not be loaded")}
-            failureBody={tr("gui.archive.browser_load_failed_body", "The open archive and your selection are unchanged. Retry loading the browser.")}
-            retryLabel={tr("gui.archive.browser_retry", "Retry browser")}
+            loadingTitle={tr("gui.archive.browser_loading")}
+            loadingBody={tr("gui.archive.browser_loading_body")}
+            failureTitle={tr("gui.archive.browser_load_failed")}
+            failureBody={tr("gui.archive.browser_load_failed_body")}
+            retryLabel={tr("gui.archive.browser_retry")}
           />
         {/if}
       {/if}
 
       <footer class="classic-statusbar">
         {#if screen === "create"}
-          <span>{createPreflight.state.plan ? tr("gui.create.source_files_count", "{count} source files").replace("{count}", createPreflight.state.plan.files.toLocaleString()) : tr("gui.create.source_files_pending", "Source files awaiting checks")}</span>
-          <span>{createSfxEnabled ? createSfxOutputLabel() : activeCreateFormatData().label} · {createMethodLabel()}</span>
-          <span>{createSplitCapability()} · {createRecoveryCapability()}</span>
-          <strong>{diskPreflightStatusbar()}</strong>
+          <span>{create.preflight.state.plan ? tr("gui.create.source_files_count").replace("{count}", create.preflight.state.plan.files.toLocaleString()) : tr("gui.create.source_files_pending")}</span>
+          <span>{create.options.state.sfxEnabled ? create.view.sfxOutputLabel() : create.formatData.label} · {create.view.methodLabel()}</span>
+          <span>{create.view.splitCapability()} · {create.view.formatRecovery()}</span>
+          <strong>{create.view.diskPreflightStatusbar()}</strong>
         {:else if screen === "convert"}
           <span>{tr("gui.convert.title", "Convert archive")}</span>
-          <span>{tr("gui.convert.status_source_target", "{source} → {target}")
+          <span>{tr("gui.convert.status_source_target")
             .replace("{source}", convertRouteStatus.sourceFormat)
             .replace("{target}", convertRouteStatus.targetLabel)}</span>
           <span>{convertRouteStatus.profileLabel} · {convertRouteStatus.methodLabel}</span>
-          <strong>{tr("gui.convert.status_destination", "Destination: {destination}").replace("{destination}", convertRouteStatus.destination)}</strong>
+          <strong>{tr("gui.convert.status_destination").replace("{destination}", convertRouteStatus.destination)}</strong>
         {:else if screen === "extract"}
-          {@const extractActionStatus = extractActionLabel()}
-          {@const extractScopeStatus = `${extractSelectionLabel()} · ${extractDestinationTitle(extractDestinationMode)}`}
-          {@const extractConflictStatus = tr("gui.extract.status_conflicts", "Conflicts: {mode} · {password}").replace("{mode}", currentExtractOverwriteLabel).replace("{password}", extractPasswordLabel())}
-          {@const extractConflictCompactStatus = tr("gui.extract.status_conflicts", "Conflicts: {mode} · {password}").replace("{mode}", currentExtractOverwriteLabel).replace("{password}", extractPasswordStatusbarLabel())}
-          {@const extractDestinationStatus = tr("gui.extract.status_destination", "Destination: {destination}").replace("{destination}", effectiveExtractDest())}
+          {@const extractActionStatus = extractView.extractActionLabel()}
+          {@const extractScopeStatus = `${extractView.extractSelectionLabel()} · ${extractView.extractDestinationTitle(extraction.state.destinationMode)}`}
+          {@const extractConflictStatus = tr("gui.extract.status_conflicts").replace("{mode}", extractOverwriteLabel(extraction.state.overwrite)).replace("{password}", extractPasswordLabel())}
+          {@const extractConflictCompactStatus = tr("gui.extract.status_conflicts").replace("{mode}", extractOverwriteLabel(extraction.state.overwrite)).replace("{password}", extractPasswordStatusbarLabel())}
+          {@const extractDestinationStatus = tr("gui.extract.status_destination").replace("{destination}", extraction.effectiveDestination)}
           <span title={extractActionStatus}>{extractActionStatus}</span>
           <span title={extractScopeStatus}>{extractScopeStatus}</span>
           <span title={extractConflictStatus}>{extractConflictCompactStatus}</span>
           <strong title={extractDestinationStatus}>{extractDestinationStatus}</strong>
         {:else if screen === "updateReview"}
-          <span>{tr("gui.update_review.title", "Review archive changes")}</span>
-          <strong>{tr("gui.update_review.count", "{count} changes selected").replace("{count}", String(archiveUpdateReview.selectedCount()))}</strong>
+          <span>{tr("gui.update_review.title")}</span>
+          <strong>{tr("gui.update_review.count").replace("{count}", String(archiveUpdateReview.selectedCount()))}</strong>
         {:else if screen === "nestedExtract"}
-          <span>{tr("gui.nested_extract.title", "Extract inner archive")}</span>
-          <span>{nestedExtractDraft ? pathBaseName(nestedExtractDraft.entry_path) : tr("gui.nested_extract.empty", "No inner archive selected")}</span>
-          <span>{extractOverwriteLabel(nestedExtractDraft?.overwrite ?? "ask")}</span>
-          <strong>{tr("gui.batch.check_at_start", "Archives are checked when the task starts")}</strong>
+          <span>{tr("gui.nested_extract.title")}</span>
+          <span>{extraction.review.nested ? pathBaseName(extraction.review.nested.entry_path) : tr("gui.nested_extract.empty")}</span>
+          <span>{extractOverwriteLabel(extraction.review.nested?.overwrite ?? "ask")}</span>
+          <strong>{tr("gui.batch.check_at_start")}</strong>
         {:else if screen === "batch"}
-          <span>{tr("gui.batch.title", "Batch Extract")}</span>
-          <span>{tr("gui.batch.archive_count", "Archives: {count}").replace("{count}", String(batchDraft.items.length))}</span>
-          <span>{extractOverwriteLabel(batchDraft.overwrite)}</span>
-          <strong>{tr("gui.batch.check_at_start", "Archives are checked when the task starts")}</strong>
+          <span>{tr("gui.batch.title")}</span>
+          <span>{tr("gui.batch.archive_count").replace("{count}", String(extraction.review.batch.state.items.length))}</span>
+          <span>{extractOverwriteLabel(extraction.review.batch.state.overwrite)}</span>
+          <strong>{tr("gui.batch.check_at_start")}</strong>
         {:else if screen === "checksum"}
-          <span>{tr("gui.screen.checksum", "Checksum")}</span>
-          <span>{tr("gui.status.target", "Target: {target}").replace("{target}", checksumTargetName())}</span>
-          <span>{tr("gui.checksum.status_algorithm_excludes", "{algorithm} · {count} excludes").replace("{algorithm}", checksumAlgorithmLabel(checksumAlgorithm)).replace("{count}", String(checksumExcludeRules().length))}</span>
-          <strong>{tr("gui.checksum.status_failed_report", "{count} failed in this manifest report").replace("{count}", checksumResultNumber("checksum_check", "failed").toLocaleString())}</strong>
+          <span>{tr("gui.screen.checksum")}</span>
+          <span>{tr("gui.status.target").replace("{target}", tools.targetName("checksum"))}</span>
+          <span>{tr("gui.checksum.status_algorithm_excludes").replace("{algorithm}", tools.algorithmLabel()).replace("{count}", String(tools.excludes("checksum").length))}</span>
+          <strong>{tr("gui.checksum.status_failed_report").replace("{count}", (tools.result("checksum_check")?.failed ?? 0).toLocaleString())}</strong>
         {:else if screen === "duplicates"}
-          <span>{tr("gui.screen.duplicates", "Duplicate Finder")}</span>
-          <span>{tr("gui.status.target", "Target: {target}").replace("{target}", duplicateScanTargetName())}</span>
-          <span>{tr("gui.duplicates.status_min_excludes", "Min: {min} · {count} excludes").replace("{min}", formatBytes(duplicateMinSize)).replace("{count}", String(duplicateExcludeRules().length))}</span>
-          <strong>{tr("gui.duplicates.status_groups_reclaimable", "{groups} groups · {size} reclaimable").replace("{groups}", duplicateResultLabel("duplicate_groups")).replace("{size}", duplicateResultLabel("reclaimable_bytes", true))}</strong>
+          <span>{tr("gui.screen.duplicates")}</span>
+          <span>{tr("gui.status.target").replace("{target}", tools.targetName("duplicate_scan"))}</span>
+          <span>{tr("gui.duplicates.status_min_excludes").replace("{min}", formatBytes(tools.draft.minimumSize)).replace("{count}", String(tools.excludes("duplicate_scan").length))}</span>
+          <strong>{tr("gui.duplicates.status_groups_reclaimable").replace("{groups}", tools.resultLabel(tools.result("duplicate_scan")?.duplicate_groups)).replace("{size}", tools.resultLabel(tools.result("duplicate_scan")?.reclaimable_bytes, true))}</strong>
         {:else if screen === "password"}
-          <span>{tr("gui.screen.password", "Password Required")}</span>
+          <span>{tr("gui.screen.password")}</span>
           <span>{passwordPromptName()}</span>
-          <span>{tr("gui.password.keychain_opt_in_short", "{secretStore} opt-in only").replace("{secretStore}", secretStoreLabel())}</span>
-          <strong>{tr("gui.password.no_plaintext_storage", "No plaintext password stored in settings or task status")}</strong>
+          <span>{tr("gui.password.keychain_opt_in_short").replace("{secretStore}", secretStoreLabel())}</span>
+          <strong>{tr("gui.password.no_plaintext_storage")}</strong>
 	        {:else if screen === "recovery"}
-	          <span>{tr("gui.recovery.status_par2_sidecar", "Recovery: PAR2 sidecar")}</span>
-	          <span>{recoverySourceName() ?? tr("gui.recovery.no_archive_selected", "No archive selected")}</span>
-	          <span>{recoveryResultAvailable() ? recoveryResultDetail() : tr("gui.recovery.verify_first", "Verify first")}</span>
-	          <strong>{recoveryResultFooter()}</strong>
+	          <span>{tr("gui.recovery.status_par2_sidecar")}</span>
+	          <span>{recoverySession.sourceName() ?? tr("gui.recovery.no_archive_selected")}</span>
+	          <span>{recoverySession.resultAvailable() ? recoverySession.resultDetail() : tr("gui.recovery.verify_first")}</span>
+	          <strong>{recoverySession.resultFooter()}</strong>
         {:else if screen === "archiveInfo"}
-          <span>{tr("gui.screen.archive_info", "Archive Info")}</span>
+          <span>{tr("gui.screen.archive_info")}</span>
           <span>{currentArchive ? archiveTitle() : openArchiveFirstLabel()}</span>
           <span>{currentArchive ? archiveFormat() : "-"}</span>
-          <strong>{extractDestinationHint()}</strong>
+          <strong>{extractView.extractDestinationHint()}</strong>
         {:else if classicArchiveStartVisible()}
           <span role="status" aria-live="polite">{navLabel("Archives")}</span>
           <span></span>
@@ -12776,7 +7850,7 @@
         {:else}
           <span role="status" aria-live="polite">{currentArchive ? archiveFilterStatus() : noArchiveLabel()}</span>
           <span>{selectedSummary()}</span>
-          <span>{currentArchive ? `${archiveFormat()} · ${currentArchive.volumes?.length ? archiveVolumeCountLabel(currentArchive.volumes.length) : tr("gui.archive.single_file", "single file")}` : openArchiveFirstLabel()}</span>
+          <span>{currentArchive ? `${archiveFormat()} · ${currentArchive.volumes?.length ? archiveVolumeCountLabel(currentArchive.volumes.length) : tr("gui.archive.single_file")}` : openArchiveFirstLabel()}</span>
           <strong>{currentTaskStatusLabel()}</strong>
         {/if}
       </footer>

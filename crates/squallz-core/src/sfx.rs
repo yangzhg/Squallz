@@ -6,7 +6,7 @@
 
 mod bundle;
 mod bundle_tree;
-mod transaction;
+mod product;
 
 use std::fs::{self, File};
 use std::io::{self, Read, Seek, SeekFrom, Write};
@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use squallz_format_api::{
     check_windows_portability, split_volume_name, ControlToken, CreateOptions, Detected, EntryPath,
-    FormatError, OpenOptions, ProgressPhase, ProgressSink, ReadSeek, ResourceOptions,
+    FormatError, OpenOptions, ProgressSink, ReadSeek, ResourceOptions,
 };
 
 use crate::filesystem_identity::{
@@ -28,8 +28,9 @@ use crate::{
     CreatePlan, Engine,
 };
 
-pub(crate) use transaction::classify_sfx_transaction_artifact;
-pub use transaction::{sfx_recovery_details, SfxRecoveryDetails};
+pub(crate) use product::classify_sfx_transaction_artifact;
+use product::{publish_staged_sfx, publish_staged_sfx_after_cleanup};
+pub use product::{sfx_recovery_details, SfxRecoveryDetails};
 
 const FOOTER_MAGIC: [u8; 8] = *b"SQZSFX1\0";
 const FOOTER_LEN: u64 = 32;
@@ -255,8 +256,6 @@ impl VerifiedSfxPayload {
 pub struct SfxBuildOptions {
     /// Explicit target platform.
     pub target: SfxTarget,
-    /// Replace an existing destination.
-    pub overwrite: bool,
     /// Buffer resource policy.
     pub resources: ResourceOptions,
 }
@@ -265,7 +264,6 @@ impl Default for SfxBuildOptions {
     fn default() -> Self {
         Self {
             target: SfxTarget::host(),
-            overwrite: false,
             resources: ResourceOptions::default(),
         }
     }
@@ -306,7 +304,7 @@ pub struct VerifiedSfxBuildReport {
 
 struct StagedSfx {
     path: PathBuf,
-    identity: transaction::PathIdentity,
+    identity: PathIdentity,
     held_file: Option<File>,
     report: SfxBuildReport,
     progress_total: u64,
@@ -317,7 +315,7 @@ impl StagedSfx {
         if self
             .held_file
             .as_ref()
-            .is_some_and(|file| transaction::file_identity(file).ok() != Some(self.identity))
+            .is_some_and(|file| file_identity(file).ok() != Some(self.identity))
         {
             return Err(FormatError::Io(io::Error::other(
                 "SFX staging handle identity changed",
@@ -334,7 +332,7 @@ impl StagedSfx {
 
     fn discard(&mut self) -> Result<(), FormatError> {
         self.release_held_file()?;
-        transaction::discard_staged_path(
+        product::discard_staged_path(
             &self.path,
             self.identity,
             self.report.layout,
@@ -739,73 +737,34 @@ impl Engine {
         dest: &Path,
         create_opts: &CreateOptions,
         sfx_opts: &SfxBuildOptions,
-    ) -> Result<CreatePlan, FormatError> {
-        self.plan_sfx_from_inputs_with_progress(
-            stub,
-            inputs,
-            dest,
-            create_opts,
-            sfx_opts,
-            |_count, _path| {},
-        )
-    }
-
-    /// Progress-reporting variant of [`Engine::plan_sfx_from_inputs`].
-    #[allow(clippy::too_many_arguments)] // engine facade: each parameter has a distinct role
-    pub fn plan_sfx_from_inputs_with_progress(
-        &self,
-        stub: &Path,
-        inputs: &[PathBuf],
-        dest: &Path,
-        create_opts: &CreateOptions,
-        sfx_opts: &SfxBuildOptions,
         progress: impl FnMut(usize, &str),
+        ctl: &ControlToken,
     ) -> Result<CreatePlan, FormatError> {
         if create_opts.split_size.is_some() {
             return Err(FormatError::Unsupported(
                 "self-extracting archives require one complete ZIP payload".into(),
             ));
         }
-        let validation_ctl = ControlToken::new();
-        let validated_template = validate_sfx_template_for_build(stub, sfx_opts, &validation_ctl)?;
+        let validated_template = validate_sfx_template_for_build(stub, sfx_opts, ctl)?;
         let input_summary = crate::create::prepare_sfx_input_summary_with_progress(
             self,
             inputs,
             dest,
             create_opts,
             progress,
+            ctl,
         )?;
-        plan_sfx_from_summary(dest, input_summary, &validated_template)
+        let plan = plan_sfx_from_summary(dest, input_summary, &validated_template)?;
+        ctl.checkpoint()?;
+        Ok(plan)
     }
 
     /// Assembles a Squallz-aware PE/ELF stub and a ZIP payload into an SFX v1
     /// artifact. The payload is streamed and the destination is committed by
     /// sibling rename only after the footer and checksum are complete.
-    pub fn create_sfx(
-        &self,
-        stub: &Path,
-        archive: &Path,
-        dest: &Path,
-        opts: &SfxBuildOptions,
-        progress: &dyn ProgressSink,
-        ctl: &ControlToken,
-    ) -> Result<SfxBuildReport, FormatError> {
-        self.create_sfx_with_policy(
-            stub,
-            archive,
-            dest,
-            opts,
-            commit_policy_from_overwrite(opts.overwrite),
-            progress,
-            ctl,
-        )
-    }
-
-    /// Policy-controlled variant of [`Engine::create_sfx`]. The commit policy
-    /// is authoritative for destination replacement; the remaining build
-    /// options retain their existing meaning.
+    /// The explicit commit policy controls destination replacement.
     #[allow(clippy::too_many_arguments)] // engine facade: each parameter has a distinct role
-    pub fn create_sfx_with_policy(
+    pub fn create_sfx(
         &self,
         stub: &Path,
         archive: &Path,
@@ -815,33 +774,48 @@ impl Engine {
         progress: &dyn ProgressSink,
         ctl: &ControlToken,
     ) -> Result<SfxBuildReport, FormatError> {
-        transaction::preflight_destination(dest)?;
+        product::preflight_destination(dest)?;
         let layout = if opts.target == SfxTarget::Macos {
             SfxLayout::MacosApp
         } else {
             SfxLayout::SingleFile
         };
         verify_commit_policy_destination(dest, layout, commit_policy, progress, ctl)?;
-        let opts = options_for_commit_policy(opts, commit_policy);
-        let staged = self.stage_sfx(stub, archive, dest, &opts, progress, ctl)?;
+        let staged = self.stage_sfx(stub, archive, dest, opts, commit_policy, progress, ctl)?;
         publish_staged_sfx(staged, dest, commit_policy, progress, ctl)
     }
 
+    #[allow(clippy::too_many_arguments)] // staging keeps the complete publication policy
     fn stage_sfx(
         &self,
         stub: &Path,
         archive: &Path,
         dest: &Path,
         opts: &SfxBuildOptions,
+        commit_policy: CreateCommitPolicy,
         progress: &dyn ProgressSink,
         ctl: &ControlToken,
     ) -> Result<StagedSfx, FormatError> {
         if opts.target == SfxTarget::Macos {
             let prepared = bundle::prepare_template(stub)?;
-            let payload = BoundSfxPayload::open(self, archive)?;
-            return bundle::stage(self, prepared, payload, dest, opts, progress, ctl);
+            let payload = BoundSfxPayload::open(self, archive, ctl)?;
+            return bundle::stage(
+                self,
+                prepared,
+                payload,
+                dest,
+                opts,
+                commit_policy,
+                progress,
+                ctl,
+            );
         }
-        validate_build_paths(stub, archive, dest, opts.overwrite)?;
+        validate_build_paths(
+            stub,
+            archive,
+            dest,
+            commit_policy_allows_replace(commit_policy),
+        )?;
         let validated_template = match validate_sfx_template_for_build(stub, opts, ctl)? {
             ValidatedSfxTemplate::SingleFile(template) => template,
             ValidatedSfxTemplate::Macos(_) => {
@@ -850,8 +824,17 @@ impl Engine {
                 ));
             }
         };
-        let payload = BoundSfxPayload::open(self, archive)?;
-        self.stage_single_file_sfx(stub, payload, dest, opts, progress, ctl, validated_template)
+        let payload = BoundSfxPayload::open(self, archive, ctl)?;
+        self.stage_single_file_sfx(
+            stub,
+            payload,
+            dest,
+            opts,
+            commit_policy,
+            progress,
+            ctl,
+            validated_template,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -861,11 +844,17 @@ impl Engine {
         mut payload: BoundSfxPayload,
         dest: &Path,
         opts: &SfxBuildOptions,
+        commit_policy: CreateCommitPolicy,
         progress: &dyn ProgressSink,
         ctl: &ControlToken,
         mut validated_template: ValidatedSingleFileTemplate,
     ) -> Result<StagedSfx, FormatError> {
-        validate_build_paths(stub, payload.path(), dest, opts.overwrite)?;
+        validate_build_paths(
+            stub,
+            payload.path(),
+            dest,
+            commit_policy_allows_replace(commit_policy),
+        )?;
         payload.verify()?;
         let payload_bytes = payload.len();
         let stub_bytes = validated_template.stub_bytes;
@@ -875,7 +864,7 @@ impl Engine {
             .ok_or_else(|| FormatError::ResourceLimitExceeded("SFX size overflow".into()))?;
         ensure_destination_space(dest, total_bytes)?;
 
-        let reserved = transaction::reserve_single_file_stage(dest)?;
+        let reserved = product::reserve_file_stage(dest, product::TemporaryKind::Stage)?;
         let tmp = reserved.path.clone();
         let staged_identity = reserved.identity;
         let result = (|| {
@@ -922,7 +911,7 @@ impl Engine {
             finalize_single_file_stage_with(
                 &mut || output.sync_all(),
                 &mut || {
-                    let reader = self.open_with_control(&tmp, &OpenOptions::default(), ctl)?;
+                    let reader = self.open(&tmp, &OpenOptions::default(), ctl)?;
                     drop(reader);
                     Ok(())
                 },
@@ -934,8 +923,8 @@ impl Engine {
                 },
             )?;
             drop(output);
-            if transaction::file_identity(&reserved.file)? != staged_identity
-                || transaction::path_identity(&tmp)? != staged_identity
+            if file_identity(&reserved.file)? != staged_identity
+                || path_identity(&tmp)? != staged_identity
             {
                 return Err(FormatError::Io(io::Error::other(
                     "SFX staging changed after writing",
@@ -962,14 +951,9 @@ impl Engine {
         })();
         match result {
             Ok(staged) => Ok(staged),
-            Err(error) => Err(transaction::merge_cleanup_result(
+            Err(error) => Err(product::merge_cleanup_result(
                 error,
-                transaction::discard_staged_path(
-                    &tmp,
-                    staged_identity,
-                    SfxLayout::SingleFile,
-                    dest,
-                ),
+                product::discard_staged_path(&tmp, staged_identity, SfxLayout::SingleFile, dest),
                 dest,
             )),
         }
@@ -978,32 +962,9 @@ impl Engine {
     /// Creates the ZIP payload and wraps it in a target SFX as one cancellable
     /// operation. The intermediate ZIP is placed beside the destination and is
     /// removed after assembly.
+    /// The explicit commit policy controls destination replacement.
     #[allow(clippy::too_many_arguments)] // engine facade: each parameter has a distinct role
     pub fn create_sfx_from_inputs(
-        &self,
-        stub: &Path,
-        inputs: &[PathBuf],
-        dest: &Path,
-        create_opts: &CreateOptions,
-        sfx_opts: &SfxBuildOptions,
-        progress: &dyn ProgressSink,
-        ctl: &ControlToken,
-    ) -> Result<SfxBuildReport, FormatError> {
-        self.create_sfx_from_inputs_with_policy(
-            stub,
-            inputs,
-            dest,
-            create_opts,
-            sfx_opts,
-            commit_policy_from_overwrite(sfx_opts.overwrite),
-            progress,
-            ctl,
-        )
-    }
-
-    /// Policy-controlled variant of [`Engine::create_sfx_from_inputs`].
-    #[allow(clippy::too_many_arguments)] // engine facade: each parameter has a distinct role
-    pub fn create_sfx_from_inputs_with_policy(
         &self,
         stub: &Path,
         inputs: &[PathBuf],
@@ -1030,33 +991,9 @@ impl Engine {
 
     /// Creates an SFX and reports every source entry accepted by its ZIP
     /// writer. Regular-file hashes come from the payload writer's input stream.
+    /// The explicit commit policy controls destination replacement.
     #[allow(clippy::too_many_arguments)] // engine facade: each parameter has a distinct role
     pub fn create_sfx_from_inputs_with_verification(
-        &self,
-        stub: &Path,
-        inputs: &[PathBuf],
-        dest: &Path,
-        create_opts: &CreateOptions,
-        sfx_opts: &SfxBuildOptions,
-        progress: &dyn ProgressSink,
-        ctl: &ControlToken,
-    ) -> Result<VerifiedSfxBuildReport, FormatError> {
-        self.create_sfx_from_inputs_with_verification_and_policy(
-            stub,
-            inputs,
-            dest,
-            create_opts,
-            sfx_opts,
-            commit_policy_from_overwrite(sfx_opts.overwrite),
-            progress,
-            ctl,
-        )
-    }
-
-    /// Policy-controlled variant of
-    /// [`Engine::create_sfx_from_inputs_with_verification`].
-    #[allow(clippy::too_many_arguments)] // engine facade: each parameter has a distinct role
-    pub fn create_sfx_from_inputs_with_verification_and_policy(
         &self,
         stub: &Path,
         inputs: &[PathBuf],
@@ -1093,7 +1030,7 @@ impl Engine {
         ctl: &ControlToken,
         capture_input_manifest: bool,
     ) -> Result<VerifiedSfxBuildReport, FormatError> {
-        transaction::preflight_destination(dest)?;
+        product::preflight_destination(dest)?;
         if create_opts.split_size.is_some() {
             return Err(FormatError::Unsupported(
                 "self-extracting archives require one complete ZIP payload".into(),
@@ -1105,14 +1042,14 @@ impl Engine {
             SfxLayout::SingleFile
         };
         verify_commit_policy_destination(dest, layout, commit_policy, progress, ctl)?;
-        let sfx_opts = options_for_commit_policy(sfx_opts, commit_policy);
         validate_publish_destination(dest, layout, commit_policy_allows_replace(commit_policy))?;
-        let validated_template = validate_sfx_template_for_build(stub, &sfx_opts, ctl)?;
+        let validated_template = validate_sfx_template_for_build(stub, sfx_opts, ctl)?;
 
-        let payload_reservation = transaction::reserve_payload_path(dest)?;
+        let payload_reservation =
+            product::reserve_file_stage(dest, product::TemporaryKind::Payload)?;
         let payload = payload_reservation.path.clone();
         let payload_identity = payload_reservation.identity;
-        let create_output = crate::create::CreateOutput::CallerReserved {
+        let create_output = crate::archive_output::ArchiveOutput::CallerReserved {
             detect_name: "payload.zip",
             reserved: clone_reserved_payload_for_create(&payload_reservation, dest)?,
         };
@@ -1123,7 +1060,8 @@ impl Engine {
                 inputs,
                 &[dest],
                 create_opts,
-                |_count, _path| {},
+                |count, path| progress.on_scan_progress(crate::usize_to_u64(count), path),
+                ctl,
             )?;
             let plan = plan_sfx_from_summary(dest, prepared.summary(), &validated_template)?;
             ensure_destination_space(dest, plan.workspace_budget_bytes)?;
@@ -1139,7 +1077,7 @@ impl Engine {
                 capture_input_manifest,
             )?;
             let input_manifest = verified.manifest;
-            let bound_payload = BoundSfxPayload::from_reserved(self, payload_reservation)?;
+            let bound_payload = BoundSfxPayload::from_reserved(self, payload_reservation, ctl)?;
             ctl.checkpoint()?;
             let staged = match validated_template {
                 ValidatedSfxTemplate::Macos(prepared) => bundle::stage(
@@ -1147,7 +1085,8 @@ impl Engine {
                     prepared,
                     bound_payload,
                     dest,
-                    &sfx_opts,
+                    sfx_opts,
+                    commit_policy,
                     progress,
                     ctl,
                 ),
@@ -1155,7 +1094,8 @@ impl Engine {
                     stub,
                     bound_payload,
                     dest,
-                    &sfx_opts,
+                    sfx_opts,
+                    commit_policy,
                     progress,
                     ctl,
                     template,
@@ -1166,7 +1106,7 @@ impl Engine {
         match result {
             Ok((staged, input_manifest)) => {
                 publish_staged_sfx_after_cleanup(staged, dest, commit_policy, progress, ctl, || {
-                    transaction::discard_staged_path(
+                    product::discard_staged_path(
                         &payload,
                         payload_identity,
                         SfxLayout::SingleFile,
@@ -1178,9 +1118,9 @@ impl Engine {
                     manifest: input_manifest,
                 })
             }
-            Err(error) => Err(transaction::merge_cleanup_result(
+            Err(error) => Err(product::merge_cleanup_result(
                 error,
-                transaction::discard_staged_path(
+                product::discard_staged_path(
                     &payload,
                     payload_identity,
                     SfxLayout::SingleFile,
@@ -1207,7 +1147,7 @@ fn clone_reserved_payload_for_create_with(
     let file = match clone_file(&reserved.file) {
         Ok(file) => file,
         Err(error) => {
-            return Err(transaction::merge_cleanup_result(
+            return Err(product::merge_cleanup_result(
                 error.into(),
                 crate::remove_bound_temp_file(&reserved.path, &reserved.file, reserved.identity),
                 destination,
@@ -1239,18 +1179,20 @@ pub(super) struct BoundSfxPayload {
 }
 
 impl BoundSfxPayload {
-    fn open(engine: &Engine, path: &Path) -> Result<Self, FormatError> {
+    fn open(engine: &Engine, path: &Path, ctl: &ControlToken) -> Result<Self, FormatError> {
+        ctl.checkpoint()?;
         let file = open_regular_file_no_follow(path)?;
         let identity = file_identity(&file)?;
-        Self::from_file(engine, path, file, identity)
+        Self::from_file(engine, path, file, identity, ctl)
     }
 
     fn from_reserved(
         engine: &Engine,
         reserved: crate::ReservedTempFile,
+        ctl: &ControlToken,
     ) -> Result<Self, FormatError> {
         let path = reserved.path;
-        Self::from_file(engine, &path, reserved.file, reserved.identity)
+        Self::from_file(engine, &path, reserved.file, reserved.identity, ctl)
     }
 
     fn from_file(
@@ -1258,6 +1200,7 @@ impl BoundSfxPayload {
         path: &Path,
         file: File,
         expected_identity: PathIdentity,
+        ctl: &ControlToken,
     ) -> Result<Self, FormatError> {
         let state = RegularFileState::from_metadata(&file.metadata()?);
         let payload = Self {
@@ -1267,7 +1210,7 @@ impl BoundSfxPayload {
             state,
         };
         payload.verify()?;
-        validate_zip_payload(engine, path)?;
+        validate_zip_payload(engine, path, ctl)?;
         payload.verify()?;
         Ok(payload)
     }
@@ -1563,104 +1506,8 @@ where
     Ok(())
 }
 
-fn publish_staged_sfx_after_cleanup(
-    mut staged: StagedSfx,
-    dest: &Path,
-    commit_policy: CreateCommitPolicy,
-    progress: &dyn ProgressSink,
-    ctl: &ControlToken,
-    cleanup: impl FnOnce() -> Result<(), FormatError>,
-) -> Result<SfxBuildReport, FormatError> {
-    if let Err(error) = cleanup() {
-        let target = staged.report.path.clone();
-        return Err(transaction::merge_cleanup_result(
-            error,
-            staged.discard(),
-            &target,
-        ));
-    }
-    publish_staged_sfx(staged, dest, commit_policy, progress, ctl)
-}
-
-fn publish_staged_sfx(
-    mut staged: StagedSfx,
-    dest: &Path,
-    commit_policy: CreateCommitPolicy,
-    progress: &dyn ProgressSink,
-    ctl: &ControlToken,
-) -> Result<SfxBuildReport, FormatError> {
-    staged.release_held_file()?;
-    progress.on_phase(ProgressPhase::OutputCommit, false);
-    if let Err(error) = ctl.checkpoint() {
-        let target = staged.report.path.clone();
-        return Err(transaction::merge_cleanup_result(
-            error,
-            staged.discard(),
-            &target,
-        ));
-    }
-    staged.report.preserved_outputs = match replace_staged_path(
-        &staged.path,
-        staged.identity,
-        dest,
-        staged.report.layout,
-        commit_policy,
-    ) {
-        Ok(preserved_outputs) => preserved_outputs,
-        Err(error) => {
-            if !recovery_error_requires_staging(&error) {
-                let target = staged.report.path.clone();
-                return Err(transaction::merge_cleanup_result(
-                    error,
-                    staged.discard(),
-                    &target,
-                ));
-            }
-            return Err(error);
-        }
-    };
-    progress.on_progress(
-        staged.progress_total,
-        staged.progress_total,
-        &EntryPath::from_utf8(""),
-    );
-    Ok(staged.report)
-}
-
-fn recovery_error_requires_staging(error: &FormatError) -> bool {
-    transaction::sfx_recovery_requires_staging(error)
-}
-
-fn replace_staged_path(
-    staged: &Path,
-    staged_identity: transaction::PathIdentity,
-    dest: &Path,
-    layout: SfxLayout,
-    commit_policy: CreateCommitPolicy,
-) -> Result<Vec<PathBuf>, FormatError> {
-    transaction::replace_bound_staged_path(staged, staged_identity, dest, layout, commit_policy)
-}
-
-fn commit_policy_from_overwrite(overwrite: bool) -> CreateCommitPolicy {
-    if overwrite {
-        CreateCommitPolicy::ReplaceExisting
-    } else {
-        CreateCommitPolicy::NoReplace
-    }
-}
-
 fn commit_policy_allows_replace(commit_policy: CreateCommitPolicy) -> bool {
     !matches!(commit_policy, CreateCommitPolicy::NoReplace)
-}
-
-fn options_for_commit_policy(
-    options: &SfxBuildOptions,
-    commit_policy: CreateCommitPolicy,
-) -> SfxBuildOptions {
-    SfxBuildOptions {
-        overwrite: commit_policy_allows_replace(commit_policy),
-        ..*options
-    }
 }
 
 fn verify_commit_policy_destination(
@@ -1788,7 +1635,12 @@ fn validate_build_paths(
     Ok(())
 }
 
-pub(super) fn validate_zip_payload(engine: &Engine, archive: &Path) -> Result<(), FormatError> {
+pub(super) fn validate_zip_payload(
+    engine: &Engine,
+    archive: &Path,
+    ctl: &ControlToken,
+) -> Result<(), FormatError> {
+    ctl.checkpoint()?;
     let name = archive
         .file_name()
         .and_then(|value| value.to_str())
@@ -1806,7 +1658,7 @@ pub(super) fn validate_zip_payload(engine: &Engine, archive: &Path) -> Result<()
             ));
         }
     }
-    let _reader = engine.open(archive, &OpenOptions::default())?;
+    let _reader = engine.open(archive, &OpenOptions::default(), ctl)?;
     Ok(())
 }
 
@@ -1905,37 +1757,24 @@ fn copy_plain_file(
     expected_len: u64,
     expected_digest: Option<[u8; 32]>,
 ) -> Result<(), FormatError> {
-    let mut current_done = 0u64;
-    let mut remaining = expected_len;
-    let mut buffer = vec![0u8; resources.stream_buffer_size(COPY_BUFFER_BYTES)?];
     let mut hasher = expected_digest.map(|_| Sha256::new());
-    let entry = EntryPath::from_utf8(label);
-    while remaining > 0 {
-        ctl.checkpoint()?;
-        let limit = remaining.min(buffer.len() as u64) as usize;
-        let read = source_file.read(&mut buffer[..limit])?;
-        if read == 0 {
-            return Err(FormatError::Io(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                format!("{} changed while building SFX", source.display()),
-            )));
-        }
-        output.write_all(&buffer[..read])?;
-        if let Some(hasher) = &mut hasher {
-            hasher.update(&buffer[..read]);
-        }
-        remaining -= read as u64;
-        current_done += read as u64;
-        *overall_done += read as u64;
-        progress.on_entry_progress(
-            *overall_done,
-            overall_total,
-            &entry,
-            current_done,
-            expected_len,
-        );
-    }
-    reject_trailing_source_bytes(source_file, source)?;
+    copy_sfx_bytes(
+        source_file,
+        output,
+        expected_len,
+        resources,
+        progress,
+        ctl,
+        overall_done,
+        overall_total,
+        &EntryPath::from_utf8(label),
+        |bytes| {
+            if let Some(hasher) = &mut hasher {
+                hasher.update(bytes);
+            }
+        },
+        |kind| single_file_copy_error(source, kind),
+    )?;
     if let (Some(hasher), Some(expected_digest)) = (hasher, expected_digest) {
         let actual_digest: [u8; 32] = hasher.finalize().into();
         if actual_digest != expected_digest {
@@ -1978,47 +1817,66 @@ fn copy_payload(
 ) -> Result<u32, FormatError> {
     source.verify()?;
     source.file_mut().seek(SeekFrom::Start(0))?;
-    let mut current_done = 0u64;
-    let mut remaining = expected_len;
-    let mut buffer = vec![0u8; resources.stream_buffer_size(COPY_BUFFER_BYTES)?];
     let mut hasher = Hasher::new();
-    let entry = EntryPath::from_utf8("payload.zip");
-    while remaining > 0 {
-        ctl.checkpoint()?;
-        let limit = remaining.min(buffer.len() as u64) as usize;
-        let read = source.file_mut().read(&mut buffer[..limit])?;
-        if read == 0 {
-            return Err(FormatError::Io(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                format!("{} changed while building SFX", source.path().display()),
-            )));
-        }
-        output.write_all(&buffer[..read])?;
-        hasher.update(&buffer[..read]);
-        remaining -= read as u64;
-        current_done += read as u64;
-        *overall_done += read as u64;
-        progress.on_entry_progress(
-            *overall_done,
-            overall_total,
-            &entry,
-            current_done,
-            expected_len,
-        );
-    }
     let source_path = source.path().to_path_buf();
-    reject_trailing_source_bytes(source.file_mut(), &source_path)?;
+    copy_sfx_bytes(
+        source.file_mut(),
+        output,
+        expected_len,
+        resources,
+        progress,
+        ctl,
+        overall_done,
+        overall_total,
+        &EntryPath::from_utf8("payload.zip"),
+        |bytes| hasher.update(bytes),
+        |kind| single_file_copy_error(&source_path, kind),
+    )?;
     source.verify()?;
     Ok(hasher.finalize())
 }
 
-fn reject_trailing_source_bytes(file: &mut File, source: &Path) -> Result<(), FormatError> {
+fn single_file_copy_error(source: &Path, kind: io::ErrorKind) -> FormatError {
+    FormatError::Io(io::Error::new(
+        kind,
+        format!("{} changed while building SFX", source.display()),
+    ))
+}
+
+/// Copies exactly the accepted payload, then probes for source growth. Binding,
+/// digest verification and publication remain with the layout-specific caller.
+#[allow(clippy::too_many_arguments)]
+fn copy_sfx_bytes(
+    input: &mut dyn Read,
+    output: &mut dyn Write,
+    expected: u64,
+    resources: &ResourceOptions,
+    progress: &dyn ProgressSink,
+    ctl: &ControlToken,
+    overall_done: &mut u64,
+    overall_total: u64,
+    entry: &EntryPath,
+    mut hash_bytes: impl FnMut(&[u8]),
+    changed: impl Fn(io::ErrorKind) -> FormatError,
+) -> Result<(), FormatError> {
+    let mut buffer = vec![0u8; resources.stream_buffer_size(COPY_BUFFER_BYTES)?];
+    let mut current = 0u64;
+    while current < expected {
+        ctl.checkpoint()?;
+        let limit = (expected - current).min(buffer.len() as u64) as usize;
+        let read = input.read(&mut buffer[..limit])?;
+        if read == 0 {
+            return Err(changed(io::ErrorKind::UnexpectedEof));
+        }
+        output.write_all(&buffer[..read])?;
+        hash_bytes(&buffer[..read]);
+        current += read as u64;
+        *overall_done += read as u64;
+        progress.on_entry_progress(*overall_done, overall_total, entry, current, expected);
+    }
     let mut extra = [0u8; 1];
-    if file.read(&mut extra)? != 0 {
-        return Err(FormatError::Io(io::Error::other(format!(
-            "{} changed while building SFX",
-            source.display()
-        ))));
+    if input.read(&mut extra)? != 0 {
+        return Err(changed(io::ErrorKind::Other));
     }
     Ok(())
 }
@@ -2182,6 +2040,7 @@ mod tests {
             &self,
             mut src: Box<dyn ReadSeek>,
             _opts: &OpenOptions,
+            _ctl: &ControlToken,
         ) -> Result<Box<dyn ArchiveReader>, FormatError> {
             let mut bytes = Vec::new();
             src.read_to_end(&mut bytes)?;
@@ -2192,6 +2051,7 @@ mod tests {
             &self,
             _dst: Box<dyn WriteSeek>,
             _opts: &CreateOptions,
+            _ctl: &ControlToken,
         ) -> Result<Box<dyn ArchiveWriter>, FormatError> {
             Err(FormatError::Unsupported("test reader is read-only".into()))
         }
@@ -2283,6 +2143,159 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct CopyProgress {
+        events: std::sync::Mutex<Vec<[u64; 4]>>,
+        cancel: Option<ControlToken>,
+    }
+
+    impl ProgressSink for CopyProgress {
+        fn on_progress(&self, _done: u64, _total: u64, _current: &EntryPath) {}
+
+        fn on_entry_progress(
+            &self,
+            done: u64,
+            total: u64,
+            current: &EntryPath,
+            current_done: u64,
+            current_total: u64,
+        ) {
+            assert_eq!(current.display, "payload.zip");
+            self.events
+                .lock()
+                .unwrap()
+                .push([done, total, current_done, current_total]);
+            if let Some(control) = &self.cancel {
+                control.cancel();
+            }
+        }
+    }
+
+    #[test]
+    fn sfx_copy_rejects_short_and_trailing_data_including_empty_payloads() {
+        for (input, expected, error_kind) in [
+            (&b""[..], 0, None),
+            (&b"x"[..], 0, Some(io::ErrorKind::Other)),
+            (&b"x"[..], 2, Some(io::ErrorKind::UnexpectedEof)),
+            (&b"xy"[..], 2, None),
+            (&b"xyz"[..], 2, Some(io::ErrorKind::Other)),
+        ] {
+            let mut output = Vec::new();
+            let mut hashed = Vec::new();
+            let mut done = 7;
+            let progress = CopyProgress::default();
+            let result = copy_sfx_bytes(
+                &mut Cursor::new(input),
+                &mut output,
+                expected,
+                &ResourceOptions::default(),
+                &progress,
+                &ControlToken::default(),
+                &mut done,
+                7 + expected,
+                &EntryPath::from_utf8("payload.zip"),
+                |bytes| hashed.extend_from_slice(bytes),
+                |kind| single_file_copy_error(Path::new("payload"), kind),
+            );
+            match (result, error_kind) {
+                (Ok(()), None) => {}
+                (Err(FormatError::Io(error)), Some(kind)) => assert_eq!(error.kind(), kind),
+                result => panic!("unexpected copy result: {result:?}"),
+            }
+            assert_eq!(output, input[..input.len().min(expected as usize)]);
+            assert_eq!(hashed, output);
+            assert_eq!(done, 7 + output.len() as u64);
+            assert_eq!(
+                progress.events.lock().unwrap().len(),
+                usize::from(!output.is_empty())
+            );
+        }
+    }
+
+    #[test]
+    fn sfx_copy_obeys_buffer_budget_progress_and_cancellation() {
+        let chunk = ResourceOptions::MIN_STREAM_BUFFER_BYTES;
+        let payload = vec![0x5a; chunk as usize + 1];
+        let resources = ResourceOptions {
+            memory_limit: Some(chunk),
+            ..ResourceOptions::default()
+        };
+        for cancel in [false, true] {
+            let control = ControlToken::default();
+            let progress = CopyProgress {
+                cancel: cancel.then(|| control.clone()),
+                ..CopyProgress::default()
+            };
+            let mut output = Vec::new();
+            let mut sha256 = Sha256::new();
+            let mut crc32 = Hasher::new();
+            let mut done = 7;
+            let result = copy_sfx_bytes(
+                &mut Cursor::new(&payload),
+                &mut output,
+                payload.len() as u64,
+                &resources,
+                &progress,
+                &control,
+                &mut done,
+                chunk + 18,
+                &EntryPath::from_utf8("payload.zip"),
+                |bytes| {
+                    sha256.update(bytes);
+                    crc32.update(bytes);
+                },
+                |kind| single_file_copy_error(Path::new("payload"), kind),
+            );
+            assert_eq!(matches!(result, Err(FormatError::Cancelled)), cancel);
+            if !cancel {
+                result.unwrap();
+            }
+            let copied = if cancel { chunk } else { chunk + 1 };
+            assert_eq!(output, payload[..copied as usize]);
+            assert_eq!(done, 7 + copied);
+            assert_eq!(sha256.finalize(), Sha256::digest(&output));
+            assert_eq!(crc32.finalize(), crc32fast::hash(&output));
+            let mut expected = vec![[7 + chunk, chunk + 18, chunk, chunk + 1]];
+            if !cancel {
+                expected.push([8 + chunk, chunk + 18, chunk + 1, chunk + 1]);
+            }
+            assert_eq!(*progress.events.lock().unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn sfx_copy_does_not_hash_or_report_a_failed_write() {
+        struct FailedWrite;
+        impl Write for FailedWrite {
+            fn write(&mut self, _bytes: &[u8]) -> io::Result<usize> {
+                Err(io::Error::other("write failed"))
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let progress = CopyProgress::default();
+        let mut hashed = 0;
+        let mut done = 7;
+        let result = copy_sfx_bytes(
+            &mut Cursor::new(b"x"),
+            &mut FailedWrite,
+            1,
+            &ResourceOptions::default(),
+            &progress,
+            &ControlToken::default(),
+            &mut done,
+            8,
+            &EntryPath::from_utf8("payload.zip"),
+            |bytes| hashed += bytes.len(),
+            |kind| single_file_copy_error(Path::new("payload"), kind),
+        );
+        assert!(matches!(result, Err(FormatError::Io(_))));
+        assert_eq!(hashed, 0);
+        assert_eq!(done, 7);
+        assert!(progress.events.lock().unwrap().is_empty());
+    }
+
     #[test]
     fn default_extract_destination_stays_below_its_base() {
         let base = Path::new("/tmp/packages");
@@ -2342,7 +2355,8 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir(&dir).unwrap();
         let destination = dir.join("output.exe");
-        let reserved = transaction::reserve_payload_path(&destination).unwrap();
+        let reserved =
+            product::reserve_file_stage(&destination, product::TemporaryKind::Payload).unwrap();
         let payload = reserved.path.clone();
 
         let error = match clone_reserved_payload_for_create_with(&reserved, &destination, |_| {
@@ -2631,7 +2645,8 @@ mod tests {
 
         let destination = temp_file("windows-staged-handle").with_extension("exe");
         let _ = fs::remove_file(&destination);
-        let mut reserved = transaction::reserve_single_file_stage(&destination).unwrap();
+        let mut reserved =
+            product::reserve_file_stage(&destination, product::TemporaryKind::Stage).unwrap();
         reserved.file.write_all(b"staged SFX bytes").unwrap();
         reserved.file.sync_all().unwrap();
         let path = reserved.path.clone();
@@ -2821,6 +2836,7 @@ mod tests {
                 &archive_path,
                 &output_path,
                 &options,
+                CreateCommitPolicy::NoReplace,
                 &NoProgress,
                 &ControlToken::default(),
             )
@@ -2876,7 +2892,6 @@ mod tests {
                 memory_limit: Some(ResourceOptions::MIN_STREAM_BUFFER_BYTES),
                 ..ResourceOptions::default()
             },
-            ..SfxBuildOptions::default()
         };
 
         let error = engine
@@ -2885,6 +2900,7 @@ mod tests {
                 &archive_path,
                 &output_path,
                 &options,
+                CreateCommitPolicy::NoReplace,
                 &progress,
                 &ControlToken::default(),
             )
@@ -2911,17 +2927,17 @@ mod tests {
             } else {
                 fs::write(&dest, b"keep").unwrap();
             }
-            let (staged_path, _) = transaction::reserve_staged_path(&dest, layout).unwrap();
+            let (staged_path, mut held) = reserve_test_stage(&dest, layout);
             if layout == SfxLayout::MacosApp {
                 fs::write(staged_path.join("replacement"), b"new").unwrap();
             } else {
-                fs::write(&staged_path, b"new").unwrap();
+                held.write_all(b"new").unwrap();
             }
 
             let staged = StagedSfx {
                 path: staged_path.clone(),
-                identity: transaction::path_identity(&staged_path).unwrap(),
-                held_file: None,
+                identity: path_identity(&staged_path).unwrap(),
+                held_file: Some(held),
                 progress_total: 1,
                 report: SfxBuildReport {
                     path: dest.clone(),
@@ -2943,7 +2959,7 @@ mod tests {
             let error = publish_staged_sfx_after_cleanup(
                 staged,
                 &dest,
-                commit_policy_from_overwrite(true),
+                CreateCommitPolicy::ReplaceExisting,
                 &squallz_format_api::NoProgress,
                 &ControlToken::default(),
                 || {
@@ -2972,14 +2988,14 @@ mod tests {
         let _ = fs::remove_dir_all(&single_dest);
         fs::create_dir(&single_dest).unwrap();
         fs::write(single_dest.join("keep"), b"directory must survive").unwrap();
-        let (single_stage, _) =
-            transaction::reserve_staged_path(&single_dest, SfxLayout::SingleFile).unwrap();
-        fs::write(&single_stage, b"single replacement").unwrap();
+        let (single_stage, mut single_held) =
+            reserve_test_stage(&single_dest, SfxLayout::SingleFile);
+        single_held.write_all(b"single replacement").unwrap();
 
         let error = publish_staged_sfx(
-            test_staged_sfx(single_stage.clone(), SfxLayout::SingleFile),
+            test_staged_sfx(single_stage.clone(), single_held, SfxLayout::SingleFile),
             &single_dest,
-            commit_policy_from_overwrite(true),
+            CreateCommitPolicy::ReplaceExisting,
             &squallz_format_api::NoProgress,
             &ControlToken::default(),
         )
@@ -2994,14 +3010,13 @@ mod tests {
         let bundle_dest = temp_file("bundle-destination-file").with_extension("app");
         let _ = fs::remove_file(&bundle_dest);
         fs::write(&bundle_dest, b"file must survive").unwrap();
-        let (bundle_stage, _) =
-            transaction::reserve_staged_path(&bundle_dest, SfxLayout::MacosApp).unwrap();
+        let (bundle_stage, bundle_held) = reserve_test_stage(&bundle_dest, SfxLayout::MacosApp);
         fs::write(bundle_stage.join("replacement"), b"bundle replacement").unwrap();
 
         let error = publish_staged_sfx(
-            test_staged_sfx(bundle_stage.clone(), SfxLayout::MacosApp),
+            test_staged_sfx(bundle_stage.clone(), bundle_held, SfxLayout::MacosApp),
             &bundle_dest,
-            commit_policy_from_overwrite(true),
+            CreateCommitPolicy::ReplaceExisting,
             &squallz_format_api::NoProgress,
             &ControlToken::default(),
         )
@@ -3019,14 +3034,13 @@ mod tests {
         let dest = temp_file("no-clobber-destination");
         let _ = fs::remove_file(&dest);
         fs::write(&dest, b"previous output").unwrap();
-        let (staged_path, _) =
-            transaction::reserve_staged_path(&dest, SfxLayout::SingleFile).unwrap();
-        fs::write(&staged_path, b"new output").unwrap();
+        let (staged_path, mut held) = reserve_test_stage(&dest, SfxLayout::SingleFile);
+        held.write_all(b"new output").unwrap();
 
         let error = publish_staged_sfx(
-            test_staged_sfx(staged_path.clone(), SfxLayout::SingleFile),
+            test_staged_sfx(staged_path.clone(), held, SfxLayout::SingleFile),
             &dest,
-            commit_policy_from_overwrite(false),
+            CreateCommitPolicy::NoReplace,
             &squallz_format_api::NoProgress,
             &ControlToken::default(),
         )
@@ -3042,14 +3056,13 @@ mod tests {
     fn no_overwrite_single_file_publish_uses_atomic_rename_path() {
         let dest = temp_file("no-clobber-rename-destination");
         let _ = fs::remove_file(&dest);
-        let (staged_path, _) =
-            transaction::reserve_staged_path(&dest, SfxLayout::SingleFile).unwrap();
-        fs::write(&staged_path, b"new output").unwrap();
+        let (staged_path, mut held) = reserve_test_stage(&dest, SfxLayout::SingleFile);
+        held.write_all(b"new output").unwrap();
 
         publish_staged_sfx(
-            test_staged_sfx(staged_path.clone(), SfxLayout::SingleFile),
+            test_staged_sfx(staged_path.clone(), held, SfxLayout::SingleFile),
             &dest,
-            commit_policy_from_overwrite(false),
+            CreateCommitPolicy::NoReplace,
             &squallz_format_api::NoProgress,
             &ControlToken::default(),
         )
@@ -3067,16 +3080,15 @@ mod tests {
         fs::create_dir(&dir).unwrap();
         let dest = dir.join("output.exe");
         fs::write(&dest, b"previous output").unwrap();
-        let (staged_path, _) =
-            transaction::reserve_staged_path(&dest, SfxLayout::SingleFile).unwrap();
-        fs::write(&staged_path, b"new output").unwrap();
-        let mut staged = test_staged_sfx(staged_path.clone(), SfxLayout::SingleFile);
+        let (staged_path, mut held) = reserve_test_stage(&dest, SfxLayout::SingleFile);
+        held.write_all(b"new output").unwrap();
+        let mut staged = test_staged_sfx(staged_path.clone(), held, SfxLayout::SingleFile);
         staged.report.path.clone_from(&dest);
 
         let report = publish_staged_sfx(
             staged,
             &dest,
-            commit_policy_from_overwrite(true),
+            CreateCommitPolicy::ReplaceExisting,
             &squallz_format_api::NoProgress,
             &ControlToken::default(),
         )
@@ -3090,12 +3102,29 @@ mod tests {
         fs::remove_dir_all(dir).unwrap();
     }
 
-    fn test_staged_sfx(path: PathBuf, layout: SfxLayout) -> StagedSfx {
-        let identity = transaction::path_identity(&path).unwrap();
+    fn reserve_test_stage(destination: &Path, layout: SfxLayout) -> (PathBuf, File) {
+        match layout {
+            SfxLayout::SingleFile => {
+                let reserved =
+                    product::reserve_file_stage(destination, product::TemporaryKind::Stage)
+                        .unwrap();
+                (reserved.path, reserved.file)
+            }
+            SfxLayout::MacosApp => {
+                let (path, identity) = product::reserve_bundle_stage(destination).unwrap();
+                let held = bundle::open_bundle_root(&path).unwrap();
+                assert_eq!(file_identity(&held).unwrap(), identity);
+                (path, held)
+            }
+        }
+    }
+
+    fn test_staged_sfx(path: PathBuf, held: File, layout: SfxLayout) -> StagedSfx {
+        let identity = path_identity(&path).unwrap();
         StagedSfx {
             path: path.clone(),
             identity,
-            held_file: None,
+            held_file: Some(held),
             progress_total: 1,
             report: SfxBuildReport {
                 path,

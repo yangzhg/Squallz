@@ -32,15 +32,12 @@ pub(super) struct SevenZArchiveReader {
 }
 
 impl SevenZArchiveReader {
-    pub(super) fn open(src: Box<dyn ReadSeek>, opts: &OpenOptions) -> Result<Self, FormatError> {
-        Self::open_controlled(src, opts, &ControlToken::default())
-    }
-
-    pub(super) fn open_controlled(
+    pub(super) fn open(
         src: Box<dyn ReadSeek>,
         opts: &OpenOptions,
         ctl: &ControlToken,
     ) -> Result<Self, FormatError> {
+        ctl.checkpoint()?;
         let password = open_password(opts);
         // Opening a header-encrypted archive without a password surfaces
         // PasswordRequired here.
@@ -749,18 +746,6 @@ impl ArchiveReader for SevenZArchiveReader {
         opts: &ExtractOptions,
         progress: &dyn ProgressSink,
         ctl: &ControlToken,
-    ) -> Result<(), FormatError> {
-        self.extract_with_report(dest, selection, opts, progress, ctl)
-            .map(drop)
-    }
-
-    fn extract_with_report(
-        &mut self,
-        dest: &Path,
-        selection: Option<&[EntryPath]>,
-        opts: &ExtractOptions,
-        progress: &dyn ProgressSink,
-        ctl: &ControlToken,
     ) -> Result<ExtractReport, FormatError> {
         if selection.is_some_and(<[EntryPath]>::is_empty) {
             return Ok(empty_extract_report(dest, progress));
@@ -956,7 +941,7 @@ impl ArchiveReader for SevenZArchiveReader {
             return Err(e);
         }
         backend_result.map_err(map_7z_error)?;
-        sink.finish_with_report(progress, ctl)
+        sink.finish(progress, ctl)
     }
 
     fn test_summary(

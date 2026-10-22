@@ -1,3 +1,4 @@
+import { jobResult } from "../../tests/job-results.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
 
@@ -34,8 +35,8 @@ function sfxTask(overrides = {}) {
     interruptible: true,
     pausable: true,
     error: null,
-    result: {
-      operation: "create_sfx",
+    result: jobResult("compress", {
+      sfx: { target: "macos", layout: "macos_app", payload_bytes: 32_000_000, requires_signing: true },
       primary_output: "/Users/alex/Exports/Installer.app",
       outputs: ["/Users/alex/Exports/Installer.app"],
       preserved_outputs: [
@@ -44,7 +45,7 @@ function sfxTask(overrides = {}) {
       total_bytes: 48_000_000,
       volume_count: 1,
       split: false,
-    },
+    }),
     revealPath: "/Users/alex/Exports/Installer.app",
     historyRecorded: true,
     controlIntent: null,
@@ -112,7 +113,7 @@ test("SFX result and recovery details use the durable single-backup contract", a
       taskCanPublishMacosSfx(sfxTask({
         result: {
           ...completed.result,
-          requires_signing: false,
+          sfx: { ...completed.result.sfx, requires_signing: false },
         },
       })),
       false,
@@ -128,7 +129,7 @@ test("SFX result and recovery details use the durable single-backup contract", a
         identity: "Developer ID Application: Acme Studio (A1B2C3D4E5)",
         notary_profile: "release-notary",
       },
-      result: {
+      result: jobResult("publish_macos_sfx", {
         operation: "sfx_publish_macos",
         primary_output: "/Users/alex/Exports/Installer-published.app",
         outputs: ["/Users/alex/Exports/Installer-published.app"],
@@ -138,7 +139,7 @@ test("SFX result and recovery details use the durable single-backup contract", a
         stapled: true,
         source_preserved: true,
         requires_signing: false,
-      },
+      }),
       revealPath: "/Users/alex/Exports/Installer-published.app",
     };
     assert.equal(taskCanPublishMacosSfx(published), false);
@@ -197,7 +198,7 @@ test("SFX result and recovery details use the durable single-backup contract", a
         replace_existing: false,
         replacement_guard: null,
       },
-      result: {
+      result: jobResult("convert", {
         operation: "convert",
         primary_output: "/Users/alex/Backups/converted.7z.001",
         outputs: [
@@ -208,7 +209,7 @@ test("SFX result and recovery details use the durable single-backup contract", a
         total_bytes: 150_000_000,
         volume_count: 2,
         split: true,
-      },
+      }),
       revealPath: "/Users/alex/Backups/converted.7z.001",
     });
     assert.equal(taskHasInlineResults(converted), true);
@@ -238,7 +239,7 @@ test("SFX result and recovery details use the durable single-backup contract", a
         redundancy: 10,
         recovery: recoveryIndex,
       },
-      result: {
+      result: jobResult("protect", {
         operation: "protect",
         ok: true,
         recovery: recoveryIndex,
@@ -248,7 +249,7 @@ test("SFX result and recovery details use the durable single-backup contract", a
           "/Users/alex/Backups/product-backup.zip.vol01+02.par2",
         ],
         source_file_count: 1,
-      },
+      }),
       revealPath: recoveryIndex,
     });
     assert.equal(taskHasInlineResults(protectedSet), true);
@@ -300,7 +301,7 @@ test("SFX result and recovery details use the durable single-backup contract", a
         output: "/Users/alex/Samples/damaged.repaired.zip",
         recovery: "/Users/alex/Samples/damaged.zip.par2",
       },
-      result: {
+      result: jobResult("repair_recovery", {
         operation: "repair",
         ok: false,
         output: "/Users/alex/Samples/damaged.repaired.zip",
@@ -309,7 +310,7 @@ test("SFX result and recovery details use the durable single-backup contract", a
           blocks_needed: 3,
           recovery_blocks_available: 8,
         },
-      },
+      }),
       revealPath: null,
     });
     assert.equal(
@@ -526,7 +527,7 @@ test("SFX result and recovery details use the durable single-backup contract", a
         encoding: null,
         password: null,
       },
-      result: {
+      result: jobResult("extract", {
         dest: "/Users/alex/Downloads/Photos",
         best_effort: true,
         skipped: 1,
@@ -542,7 +543,7 @@ test("SFX result and recovery details use the durable single-backup contract", a
           failed: 1,
           output_bytes: 12_582_912,
         },
-      },
+      }),
       revealPath: "/Users/alex/Downloads/Photos",
     });
     assert.equal(taskOutcomeNeedsAttention(extracted), true);
@@ -596,7 +597,7 @@ test("SFX result and recovery details use the durable single-backup contract", a
         encoding: null,
         password: null,
       },
-      result: {
+      result: jobResult("test", {
         operation: "test",
         ok: false,
         entries: 42,
@@ -607,7 +608,7 @@ test("SFX result and recovery details use the durable single-backup contract", a
         ),
         problems_total: 30,
         problems_truncated: true,
-      },
+      }),
       revealPath: null,
     };
     assert.equal(
@@ -762,7 +763,7 @@ test("SFX result and recovery details use the durable single-backup contract", a
         symlinks: "preserve",
         smart: false,
       },
-      result: {
+      result: jobResult("batch_extract", {
         operation: "batch_extract",
         archives: 1,
         selected_archives: 2,
@@ -771,7 +772,7 @@ test("SFX result and recovery details use the durable single-backup contract", a
         failed: 0,
         outputs: [],
         failures: [],
-      },
+      }),
     };
     assert.equal(
       taskDialogResultSummary(groupedBatch),
@@ -781,7 +782,7 @@ test("SFX result and recovery details use the durable single-backup contract", a
     assert.ok(groupedRows.some((row) => row.label === "Archives" && row.value === "1"));
     assert.ok(groupedRows.some((row) => row.label === "Selected files" && row.value === "2"));
     assert.equal(taskProgressSummary(groupedBatch), "100% · 1/1 archives");
-    assert.equal(taskProgressSummary({ ...groupedBatch, result: { archives: 3, extracted: 2, failed: 1 } }), "100% · 3/3 archives");
+    assert.equal(taskProgressSummary({ ...groupedBatch, result: jobResult("batch_extract", { archives: 3, extracted: 2, failed: 1 }) }), "100% · 3/3 archives");
     const partialBatch = { ...groupedBatch, result: { ...groupedBatch.result, outputs: [
       { archive: "damaged.zip", counts: { failed: 2, skipped: 1 }, problems: ["bad.txt: CRC mismatch"], problems_total: 2 },
     ] } };
@@ -1078,7 +1079,6 @@ test("task questions keep empty passwords pending and normalize conflict scope",
 
   try {
     const {
-      applyCreateDestinationAuthorization,
       normalizeTaskConflictAnswer,
       taskPasswordReady,
     } = await server.ssrLoadModule("/src/lib/task-dialog.ts");
@@ -1097,32 +1097,6 @@ test("task questions keep empty passwords pending and normalize conflict scope",
       });
     }
 
-    const initiallyAbsentDestination = {
-      kind: "compress",
-      inputs: ["/Users/alex/Reports"],
-      dest: "/Users/alex/Exports/reports.zip",
-      level: 5,
-      password: null,
-      encrypt_names: false,
-      split_size: null,
-      split_mode: "generic",
-      excludes: [],
-      replace_existing: false,
-      replacement_guard: null,
-    };
-    const confirmedLateConflict = applyCreateDestinationAuthorization(
-      initiallyAbsentDestination,
-      "sqcg1_content-bound-guard",
-    );
-    assert.equal(confirmedLateConflict.replace_existing, true);
-    assert.equal(
-      confirmedLateConflict.replacement_guard,
-      "sqcg1_content-bound-guard",
-    );
-    assert.deepEqual(
-      applyCreateDestinationAuthorization(confirmedLateConflict, null),
-      initiallyAbsentDestination,
-    );
   } finally {
     await server.close();
   }

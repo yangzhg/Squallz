@@ -14,6 +14,8 @@ pub(super) struct BundleTree {
     root: File,
     #[cfg(not(unix))]
     root: PathBuf,
+    #[cfg(windows)]
+    held_root: File,
 }
 
 impl BundleTree {
@@ -27,9 +29,12 @@ impl BundleTree {
         }
         #[cfg(not(unix))]
         {
+            #[cfg(not(windows))]
             let _ = root;
             Ok(Self {
                 root: path.to_path_buf(),
+                #[cfg(windows)]
+                held_root: root.try_clone()?,
             })
         }
     }
@@ -250,6 +255,9 @@ impl BundleTree {
         };
 
         validate_relative_path_or_root(relative)?;
+        if relative.as_os_str().is_empty() {
+            return self.held_root.sync_all();
+        }
         OpenOptions::new()
             .read(true)
             .write(true)

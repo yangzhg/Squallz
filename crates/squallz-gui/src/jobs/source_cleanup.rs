@@ -449,8 +449,9 @@ impl SourceCleanupPlan {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum SourceCleanupStatus {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceCleanupStatus {
     NotRequested,
     Completed,
     Blocked,
@@ -460,7 +461,7 @@ pub(super) enum SourceCleanupStatus {
 }
 
 impl SourceCleanupStatus {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::NotRequested => "not_requested",
             Self::Completed => "completed",
@@ -472,12 +473,12 @@ impl SourceCleanupStatus {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct SourceCleanupResult {
-    status: SourceCleanupStatus,
-    moved: usize,
-    kept: usize,
-    recovery_required: usize,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct SourceCleanupResult {
+    pub(crate) status: SourceCleanupStatus,
+    pub(crate) moved: usize,
+    pub(crate) kept: usize,
+    pub(crate) recovery_required: usize,
 }
 
 impl SourceCleanupResult {
@@ -488,15 +489,6 @@ impl SourceCleanupResult {
             kept,
             recovery_required: 0,
         }
-    }
-
-    pub(super) fn to_json(self) -> serde_json::Value {
-        serde_json::json!({
-            "status": self.status.as_str(),
-            "moved": self.moved,
-            "kept": self.kept,
-            "recovery_required": self.recovery_required,
-        })
     }
 }
 

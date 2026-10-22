@@ -17,7 +17,18 @@ use super::reports::print_pretty_json;
 use super::{Ctx, ModernTableColumn, ModernTableRow};
 use crate::args::{PresetBindingArg, PresetCmd};
 use crate::errors::CliError;
-use crate::file_manager_presets::preset_store;
+
+pub(crate) fn preset_store() -> Result<PresetStore, CliError> {
+    let base = dirs::config_dir()
+        .or_else(|| dirs::home_dir().map(|home| home.join(".config")))
+        .ok_or_else(|| {
+            CliError::from(FormatError::Other(
+                "no private user configuration directory is available for shared presets"
+                    .to_owned(),
+            ))
+        })?;
+    Ok(PresetStore::new(base.join("Squallz").join("presets.json")))
+}
 
 const MAX_PRESET_INPUT_BYTES: u64 = 1024 * 1024;
 
@@ -299,7 +310,7 @@ fn print_path(_ctx: &Ctx, json_output: bool) -> Result<(), CliError> {
     }
 }
 
-fn load_document(ctx: &Ctx) -> Result<(PresetStore, PresetDocument), CliError> {
+pub(super) fn load_document(ctx: &Ctx) -> Result<(PresetStore, PresetDocument), CliError> {
     let store = preset_store()?;
     let document = store
         .load()

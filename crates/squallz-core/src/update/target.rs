@@ -1,6 +1,6 @@
 use crate::api::{sanitize_entry_path, ControlToken, EntryPath, FormatError};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ArchiveTargetInspection {
     pub exists: bool,
     pub blocked_parent: Option<String>,
@@ -105,6 +105,14 @@ mod tests {
                 })
             );
         }
+        assert_eq!(
+            serde_json::to_value(inspect("file/child")).unwrap(),
+            serde_json::json!({"exists": false, "blocked_parent": "file"})
+        );
+        assert_eq!(
+            serde_json::to_value(inspect("docs/")).unwrap(),
+            serde_json::json!({"exists": true, "blocked_parent": null})
+        );
     }
 
     #[test]

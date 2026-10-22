@@ -1,332 +1,46 @@
-//! Archive creation: format selection by destination name, the shared
-//! destination-writer machinery (plain / compound / single-stream, reused
-//! by format conversion) and `.001` split-volume output.
+//! File-system input planning and streaming for archive creation.
+//! Output admission, writer selection and publication belong to archive_output.
 
-use std::cell::RefCell;
 use std::fs::File;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::api::{
-    split_volume_name, ArchiveFormat, ArchiveWriter, Compressor, ControlToken, CreateOptions,
-    Detected, EntryMeta, EntryPath, EntryType, FormatCreateBudget, FormatError, ProgressSink,
-    SplitOutputMode,
+    split_volume_name, Compressor, ControlToken, CreateOptions, Detected, EntryMeta, EntryPath,
+    EntryType, FormatCreateBudget, FormatError, ProgressSink, SplitOutputMode,
 };
-use crate::compound::{KnownTotal, ProgressRead, SharedCompressSink};
+use crate::archive_output::{
+    check_can_create, validate_create_target_name, ArchiveOutput, ArchiveWriterTarget, DestSink,
+    DestTarget,
+};
+use crate::compound::{KnownTotal, ProgressRead};
 use crate::inputs::{
     collect_inputs_excluding_with_progress, collect_prepared_inputs_excluding_with_progress,
     deduplicate_prepared_input_roots, prepare_single_stream_input, InputItem, PreparedInputItem,
 };
 use crate::volumes::{self, MIN_SPLIT_SIZE};
 use crate::{
-    CreateArtifactKind, CreateCommitPolicy, CreateInputEstimate, CreateInputManifestEntry,
-    CreateInputModifiedTime, CreateInputSummary, CreatePlan, CreateReport, Engine, PathFilter,
-    VerifiedCreateReport,
+    CreateCommitPolicy, CreateInputEstimate, CreateInputManifestEntry, CreateInputModifiedTime,
+    CreateInputSummary, CreatePlan, Engine, PathFilter, VerifiedCreateReport,
 };
 
-pub(crate) struct OutputArtifacts {
-    primary_output: PathBuf,
-    outputs: Vec<PathBuf>,
-    preserved_outputs: Vec<PathBuf>,
-    total_output_bytes: u64,
-    split_volume_count: Option<usize>,
-}
-
-/// One final output to publish, or an already reserved file owned by a
-/// surrounding split/SFX operation. Internal reservations carry their format
-/// name separately from their physical temporary path.
-pub(crate) enum CreateOutput<'a> {
-    Published {
-        destination: &'a Path,
-        policy: CreateCommitPolicy,
-    },
-    CallerReserved {
-        detect_name: &'a str,
-        reserved: crate::ReservedTempFile,
-    },
-}
-
-impl<'a> CreateOutput<'a> {
-    fn path(&self) -> &Path {
-        match self {
-            Self::Published { destination, .. } => destination,
-            Self::CallerReserved { reserved, .. } => &reserved.path,
-        }
-    }
-
-    fn detect_name(&self) -> Result<&'a str, FormatError> {
-        match self {
-            Self::Published { destination, .. } => (*destination)
-                .file_name()
-                .and_then(|name| name.to_str())
-                .ok_or_else(|| FormatError::Unsupported("invalid output file name".into())),
-            Self::CallerReserved { detect_name, .. } => Ok(*detect_name),
-        }
-    }
-}
-
-impl OutputArtifacts {
-    pub(crate) fn into_report(self) -> CreateReport {
-        CreateReport {
-            primary_output: self.primary_output,
-            outputs: self.outputs,
-            preserved_outputs: self.preserved_outputs,
-            total_output_bytes: self.total_output_bytes,
-            split_volume_count: self.split_volume_count,
-        }
-    }
-}
-
-/// Destination writer over an archive output: plain (`x.zip`) or compound
-/// (`x.tar.gz`, where finishing must also flush the compressor sink).
-pub(crate) struct DestSink {
-    writer: Box<dyn ArchiveWriter>,
-    shared: Option<SharedCompressSink>,
-}
-
-impl DestSink {
-    pub(crate) fn add_entry(
-        &mut self,
-        meta: &EntryMeta,
-        data: Option<&mut dyn std::io::Read>,
-    ) -> Result<(), FormatError> {
-        self.writer.add_entry(meta, data)
-    }
-
-    pub(crate) fn finish(self) -> Result<(), FormatError> {
-        self.writer.finish()?;
-        match self.shared {
-            Some(shared) => shared.finish(),
-            None => Ok(()),
-        }
-    }
-}
-
-/// Resolved destination of a create/convert operation.
-pub(crate) enum DestTarget {
-    /// An archive container (possibly compound).
-    Archive(DestSink),
-    /// A bare single-stream compressor (`x.gz`): the caller must supply
-    /// exactly one file's content.
-    SingleStream {
-        compressor: Arc<dyn Compressor>,
-        output: File,
-    },
-}
-
-pub(crate) fn open_dest_from_reserved_file(
-    engine: &Engine,
-    detect_name: &str,
-    output: File,
-    write_opts: &CreateOptions,
-    validation_opts: &CreateOptions,
-    ctl: &ControlToken,
-) -> Result<DestTarget, FormatError> {
-    open_dest_with(
-        engine,
-        detect_name,
-        write_opts,
-        validation_opts,
-        ctl,
-        || Ok(output),
-    )
-}
-
-fn open_dest_with<F>(
-    engine: &Engine,
-    detect_name: &str,
-    write_opts: &CreateOptions,
-    validation_opts: &CreateOptions,
-    ctl: &ControlToken,
-    open_file: F,
-) -> Result<DestTarget, FormatError>
-where
-    F: FnOnce() -> Result<File, io::Error>,
-{
-    let detected = engine
-        .registry()
-        .detect_by_name(detect_name)
-        .ok_or_else(|| {
-            FormatError::Unsupported(format!(
-                "creating this format is not supported: {detect_name}"
-            ))
-        })?;
-    validate_detected_create_target(&detected, detect_name, validation_opts)?;
-    match detected {
-        Detected::Archive(f) => {
-            let file = open_file()?;
-            let writer = f.create_with_control(Box::new(file), write_opts, ctl)?;
-            Ok(DestTarget::Archive(DestSink {
-                writer,
-                shared: None,
-            }))
-        }
-        Detected::Compressed {
-            compressor,
-            inner_archive: Some(archive),
-        } => {
-            let file = open_file()?;
-            let sink = compressor.compress_writer(
-                Box::new(file),
-                write_opts.level,
-                &write_opts.resources,
-            )?;
-            let shared = SharedCompressSink::new(sink);
-            ctl.checkpoint()?;
-            let writer = archive.create_stream(Box::new(shared.clone()), write_opts)?;
-            ctl.checkpoint()?;
-            Ok(DestTarget::Archive(DestSink {
-                writer,
-                shared: Some(shared),
-            }))
-        }
-        Detected::Compressed {
-            compressor,
-            inner_archive: None,
-        } => Ok(DestTarget::SingleStream {
-            compressor,
-            output: open_file()?,
-        }),
-    }
-}
-
-pub(crate) fn validate_create_target_name(
-    engine: &Engine,
-    detect_name: &str,
-    opts: &CreateOptions,
-) -> Result<(), FormatError> {
-    let detected = engine
-        .registry()
-        .detect_by_name(detect_name)
-        .ok_or_else(|| {
-            FormatError::Unsupported(format!(
-                "creating this format is not supported: {detect_name}"
-            ))
-        })?;
-    validate_detected_create_target(&detected, detect_name, opts)
-}
-
-fn validate_detected_create_target(
-    detected: &Detected,
-    detect_name: &str,
-    opts: &CreateOptions,
-) -> Result<(), FormatError> {
-    match detected {
-        Detected::Archive(format)
-        | Detected::Compressed {
-            inner_archive: Some(format),
-            ..
-        } => check_can_create(format, detect_name, opts),
-        Detected::Compressed {
-            compressor,
-            inner_archive: None,
-        } if opts.password.is_some() => Err(FormatError::Unsupported(format!(
-            "format {} does not support encryption",
-            compressor.id()
-        ))),
-        Detected::Compressed {
-            inner_archive: None,
-            ..
-        } => Ok(()),
-    }?;
-    if opts.split_mode != SplitOutputMode::Native {
-        return Ok(());
-    }
-    let split_size = opts.split_size.ok_or_else(|| {
-        FormatError::Unsupported("native volume mode requires a split size".into())
-    })?;
-    let Detected::Archive(format) = detected else {
-        return Err(FormatError::Unsupported(
-            "native volume creation requires a directly supported archive format".into(),
-        ));
-    };
-    let limits = format.native_volume_limits().ok_or_else(|| {
-        FormatError::Unsupported(format!(
-            "format {} does not support native volume creation",
-            format.id()
-        ))
-    })?;
-    if !(limits.min_volume_size..=limits.max_volume_size).contains(&split_size) {
-        return Err(FormatError::Unsupported(format!(
-            "native {} volume size must be between {} and {} bytes",
-            format.id(),
-            limits.min_volume_size,
-            limits.max_volume_size
-        )));
-    }
-    format.native_volume_path(Path::new(detect_name), 0, true)?;
-    Ok(())
-}
-
-/// Rejects formats that declare `can_create=false`.
-fn check_can_create(
-    format: &Arc<dyn ArchiveFormat>,
-    detect_name: &str,
-    opts: &CreateOptions,
-) -> Result<(), FormatError> {
-    if !format.capabilities().can_create {
-        return Err(FormatError::Unsupported(format!(
-            "format {} does not support creation",
-            format.id()
-        )));
-    }
-    format.validate_create_options(detect_name, opts)
-}
-
-/// Entry point for [`Engine::create`].
-pub(crate) fn create(
+/// Publishes filesystem inputs with optional source-content verification.
+/// Both public creation contracts use the same output admission and writer.
+#[allow(clippy::too_many_arguments)] // published creation: capture mode is private to the engine facade
+pub(crate) fn create_published(
     engine: &Engine,
     dest: &Path,
     inputs: &[PathBuf],
     opts: &CreateOptions,
-    progress: &dyn ProgressSink,
-    ctl: &ControlToken,
-) -> Result<CreateReport, FormatError> {
-    create_report_with_policy(
-        engine,
-        dest,
-        inputs,
-        opts,
-        CreateCommitPolicy::ReplaceExisting,
-        progress,
-        ctl,
-    )
-}
-
-/// Entry point for [`Engine::create_with_report_no_replace`].
-pub(crate) fn create_no_replace(
-    engine: &Engine,
-    dest: &Path,
-    inputs: &[PathBuf],
-    opts: &CreateOptions,
-    progress: &dyn ProgressSink,
-    ctl: &ControlToken,
-) -> Result<CreateReport, FormatError> {
-    create_report_with_policy(
-        engine,
-        dest,
-        inputs,
-        opts,
-        CreateCommitPolicy::NoReplace,
-        progress,
-        ctl,
-    )
-}
-
-/// Entry point for the verified create APIs.
-pub(crate) fn create_verified(
-    engine: &Engine,
-    dest: &Path,
-    inputs: &[PathBuf],
-    opts: &CreateOptions,
-    progress: &dyn ProgressSink,
-    ctl: &ControlToken,
     commit_policy: CreateCommitPolicy,
+    progress: &dyn ProgressSink,
+    ctl: &ControlToken,
+    capture_input_manifest: bool,
 ) -> Result<VerifiedCreateReport, FormatError> {
     create_with_output(
         engine,
-        CreateOutput::Published {
+        ArchiveOutput::Published {
             destination: dest,
             policy: commit_policy,
         },
@@ -336,35 +50,8 @@ pub(crate) fn create_verified(
         progress,
         ctl,
         None,
-        true,
+        capture_input_manifest,
     )
-}
-
-/// Entry point for report creation with an explicit final publication policy.
-pub(crate) fn create_report_with_policy(
-    engine: &Engine,
-    dest: &Path,
-    inputs: &[PathBuf],
-    opts: &CreateOptions,
-    commit_policy: CreateCommitPolicy,
-    progress: &dyn ProgressSink,
-    ctl: &ControlToken,
-) -> Result<CreateReport, FormatError> {
-    create_with_output(
-        engine,
-        CreateOutput::Published {
-            destination: dest,
-            policy: commit_policy,
-        },
-        inputs,
-        &[],
-        opts,
-        progress,
-        ctl,
-        None,
-        false,
-    )
-    .map(|report| report.create)
 }
 
 /// Prepares one unsplit archive input manifest for a surrounding operation.
@@ -372,11 +59,12 @@ pub(crate) fn create_report_with_policy(
 /// so planning and writing use the same format and accepted entry set.
 pub(crate) fn prepare_unsplit_create_with_reserved_outputs(
     engine: &Engine,
-    output: &CreateOutput<'_>,
+    output: &ArchiveOutput<'_>,
     inputs: &[PathBuf],
     reserved_outputs: &[&Path],
     opts: &CreateOptions,
-    mut progress: impl FnMut(usize, &str),
+    progress: impl FnMut(usize, &EntryPath),
+    ctl: &ControlToken,
 ) -> Result<PreparedCreateInputs, FormatError> {
     if opts.split_size.is_some() {
         return Err(FormatError::Unsupported(
@@ -386,14 +74,15 @@ pub(crate) fn prepare_unsplit_create_with_reserved_outputs(
     let detect_name = output.detect_name()?;
     let output_exclusions =
         CreateOutputExclusions::for_unsplit_estimate(output.path(), reserved_outputs);
-    output_exclusions.reject_explicit_inputs(inputs)?;
+    output_exclusions.reject_explicit_inputs(inputs, ctl)?;
     prepare_create_inputs(
         engine,
         detect_name,
         inputs,
         opts,
         &output_exclusions,
-        |count, path| progress(count, &path.display),
+        progress,
+        ctl,
     )
 }
 
@@ -403,7 +92,7 @@ pub(crate) fn prepare_unsplit_create_with_reserved_outputs(
 #[allow(clippy::too_many_arguments)] // prepared create boundary: each argument has a distinct role
 pub(crate) fn create_prepared_with_output(
     engine: &Engine,
-    output: CreateOutput<'_>,
+    output: ArchiveOutput<'_>,
     inputs: &[PathBuf],
     reserved_outputs: &[&Path],
     opts: &CreateOptions,
@@ -433,7 +122,7 @@ pub(crate) fn create_prepared_with_output(
 #[allow(clippy::too_many_arguments)] // internal create plumbing; each argument has a distinct role
 fn create_with_output(
     engine: &Engine,
-    output: CreateOutput<'_>,
+    output: ArchiveOutput<'_>,
     inputs: &[PathBuf],
     reserved_outputs: &[&Path],
     opts: &CreateOptions,
@@ -442,214 +131,31 @@ fn create_with_output(
     prepared: Option<PreparedCreateInputs>,
     capture_input_manifest: bool,
 ) -> Result<VerifiedCreateReport, FormatError> {
-    if matches!(&output, CreateOutput::CallerReserved { .. }) && opts.split_size.is_some() {
-        return Err(FormatError::Unsupported(
-            "a caller-owned output reservation cannot be split".into(),
-        ));
-    }
-    let name = output.detect_name()?;
-    let detect_name = if opts.split_size.is_some() {
-        split_volume_name(name)
-            .map(|(base, _index)| base)
-            .unwrap_or(name)
-    } else {
-        name
-    };
-    validate_create_target_name(engine, detect_name, opts)?;
-
     let final_path = output.path().to_path_buf();
-    let write = |write_opts: &CreateOptions, output: CreateOutput<'_>| {
+    let (manifest, create) = output.write(engine, opts, progress, ctl, |writer| {
         create_unsplit(
             engine,
             CreateTarget {
                 final_path: &final_path,
-                output,
+                writer,
                 reserved_outputs,
                 capture_input_manifest,
             },
             inputs,
             prepared,
-            write_opts,
             opts,
             progress,
             ctl,
         )
-    };
-    let (staged_archive, mut outputs) = match output {
-        CreateOutput::Published {
-            destination,
-            policy,
-        } => with_split_output_policy(engine, destination, opts, progress, ctl, policy, write)?,
-        output @ CreateOutput::CallerReserved { .. } => {
-            let created = write(opts, output)?;
-            let output = final_path.clone();
-            (
-                created,
-                OutputArtifacts {
-                    primary_output: output.clone(),
-                    outputs: vec![output],
-                    preserved_outputs: Vec::new(),
-                    total_output_bytes: 0,
-                    split_volume_count: None,
-                },
-            )
-        }
-    };
-    if outputs.split_volume_count.is_none() {
-        outputs.total_output_bytes = staged_archive.output_bytes;
-    }
-    Ok(VerifiedCreateReport {
-        create: outputs.into_report(),
-        manifest: staged_archive.manifest,
-    })
-}
-
-/// Runs `write` against the final path directly, or — when
-/// `opts.split_size` is set — against a temporary file that is then cut
-/// into `.001`-style volumes and committed with the caller's destination
-/// policy.
-pub(crate) fn with_split_output_policy<T>(
-    engine: &Engine,
-    dest: &Path,
-    opts: &CreateOptions,
-    progress: &dyn ProgressSink,
-    ctl: &ControlToken,
-    commit_policy: CreateCommitPolicy,
-    write: impl FnOnce(&CreateOptions, CreateOutput<'_>) -> Result<T, FormatError>,
-) -> Result<(T, OutputArtifacts), FormatError> {
-    let name = dest
-        .file_name()
-        .and_then(|s| s.to_str())
-        .ok_or_else(|| FormatError::Unsupported("invalid output file name".into()))?;
-    let Some(split) = opts.split_size else {
-        let value = write(
-            opts,
-            CreateOutput::Published {
-                destination: dest,
-                policy: commit_policy,
-            },
-        )?;
-        let output = dest.to_path_buf();
-        return Ok((
-            value,
-            OutputArtifacts {
-                primary_output: output.clone(),
-                outputs: vec![output],
-                preserved_outputs: Vec::new(),
-                // The create path replaces this with its staging measurement.
-                total_output_bytes: 0,
-                split_volume_count: None,
-            },
-        ));
-    };
-    if split < MIN_SPLIT_SIZE {
-        return Err(FormatError::Unsupported(format!(
-            "split size below the {MIN_SPLIT_SIZE}-byte minimum: {split}"
-        )));
-    }
-    // Accept an explicit first-volume name (`x.zip.001`) as the base too.
-    let (base_name, base) = match split_volume_name(name) {
-        Some((stripped, _)) => (stripped.to_string(), dest.with_file_name(stripped)),
-        None => (name.to_string(), dest.to_path_buf()),
-    };
-    volumes::validate_split_output_base(&base)?;
-    let reserved = crate::reserve_bound_sibling_temp_file(&base, "split")?;
-    let tmp = reserved.path.clone();
-    let tmp_identity = reserved.identity;
-    let retained_tmp = reserved.file.try_clone()?;
-    let inner_opts = CreateOptions {
-        split_size: None,
-        split_mode: SplitOutputMode::Generic,
-        ..opts.clone()
-    };
-    let result = (|| {
-        let value = write(
-            &inner_opts,
-            CreateOutput::CallerReserved {
-                detect_name: &base_name,
-                reserved,
-            },
-        )?;
-        let split_outputs = match opts.split_mode {
-            SplitOutputMode::Generic => {
-                volumes::split_into_volumes_with_commit_policy_and_source_identity(
-                    &tmp,
-                    retained_tmp.try_clone()?,
-                    tmp_identity,
-                    &base,
-                    split,
-                    &opts.resources,
-                    progress,
-                    ctl,
-                    commit_policy,
-                )?
-            }
-            SplitOutputMode::Native => {
-                let detected = engine
-                    .registry()
-                    .detect_by_name(&base_name)
-                    .ok_or_else(|| {
-                        FormatError::Unsupported(format!(
-                            "creating this format is not supported: {base_name}"
-                        ))
-                    })?;
-                let Detected::Archive(format) = detected else {
-                    return Err(FormatError::Unsupported(
-                        "native volume creation requires a directly supported archive format"
-                            .into(),
-                    ));
-                };
-                volumes::split_into_native_volumes_with_commit_policy_and_source_identity(
-                    &tmp,
-                    retained_tmp.try_clone()?,
-                    tmp_identity,
-                    &base,
-                    split,
-                    &*format,
-                    &opts.resources,
-                    progress,
-                    ctl,
-                    commit_policy,
-                )?
-            }
-        };
-        let primary_output = split_outputs
-            .volumes
-            .get(split_outputs.primary_volume_index)
-            .cloned()
-            .ok_or_else(|| {
-                FormatError::Other("split creation returned no primary volume".into())
-            })?;
-        let split_volume_count = split_outputs.volumes.len();
-        let mut outputs = split_outputs.volumes;
-        outputs.extend(split_outputs.sidecars);
-        Ok((
-            value,
-            OutputArtifacts {
-                primary_output,
-                outputs,
-                preserved_outputs: split_outputs.preserved_outputs,
-                total_output_bytes: split_outputs.total_output_bytes,
-                split_volume_count: Some(split_volume_count),
-            },
-        ))
-    })();
-    if result.is_err() {
-        let _ = crate::remove_bound_temp_file(&tmp, &retained_tmp, tmp_identity);
-    }
-    result
+    })?;
+    Ok(VerifiedCreateReport { create, manifest })
 }
 
 struct CreateTarget<'a> {
     final_path: &'a Path,
-    output: CreateOutput<'a>,
+    writer: ArchiveWriterTarget<'a>,
     reserved_outputs: &'a [&'a Path],
     capture_input_manifest: bool,
-}
-
-struct CreatedArchive {
-    output_bytes: u64,
-    manifest: Vec<CreateInputManifestEntry>,
 }
 
 /// Single-output creation from file-system inputs.
@@ -659,101 +165,60 @@ fn create_unsplit(
     target: CreateTarget<'_>,
     inputs: &[PathBuf],
     prepared: Option<PreparedCreateInputs>,
-    write_opts: &CreateOptions,
     plan_opts: &CreateOptions,
     progress: &dyn ProgressSink,
     ctl: &ControlToken,
-) -> Result<CreatedArchive, FormatError> {
-    let detect_name = target.output.detect_name()?;
-    let (reserved, publication) = match target.output {
-        CreateOutput::Published {
-            destination,
-            mut policy,
-        } => {
-            if matches!(policy, CreateCommitPolicy::ReplaceExisting) {
-                let inspection =
-                    crate::inspect_create_destination(destination, CreateArtifactKind::Archive)?;
-                policy = match inspection.guard {
-                    Some(guard) => CreateCommitPolicy::ReplaceIfUnchanged(guard),
-                    None => CreateCommitPolicy::NoReplace,
-                };
-            }
-            (
-                crate::reserve_bound_sibling_temp_file(destination, "create")?,
-                Some((destination, policy)),
-            )
+) -> Result<Vec<CreateInputManifestEntry>, FormatError> {
+    let detect_name = target.writer.detect_name;
+    let staging_path = target.writer.staging_path;
+    let write_opts = target.writer.options;
+    let output_exclusions = CreateOutputExclusions::new(
+        target.final_path,
+        staging_path,
+        plan_opts.split_size.is_some(),
+        target.reserved_outputs,
+    )?;
+    output_exclusions.reject_explicit_inputs(inputs, ctl)?;
+    let prepared = match prepared {
+        Some(prepared) if prepared.detect_name == detect_name => prepared,
+        Some(_) => {
+            return Err(FormatError::Other(
+                "prepared create format does not match destination".into(),
+            ));
         }
-        CreateOutput::CallerReserved { reserved, .. } => (reserved, None),
-    };
-    let tmp = reserved.path.clone();
-    let staging_path = match &publication {
-        Some((destination, _policy)) => *destination,
-        None => tmp.as_path(),
-    };
-    let tmp_identity = reserved.identity;
-    let mut retained_file = Some(reserved.file.try_clone()?);
-    let output_file = reserved.file;
-    let mut cleanup_tmp = true;
-    let result = (|| {
-        let output_exclusions = CreateOutputExclusions::new(
-            target.final_path,
-            staging_path,
-            &tmp,
-            plan_opts.split_size.is_some(),
-            target.reserved_outputs,
-        )?;
-        output_exclusions.reject_explicit_inputs(inputs)?;
-        let prepared = match prepared {
-            Some(prepared) if prepared.detect_name == detect_name => prepared,
-            Some(_) => {
-                return Err(FormatError::Other(
-                    "prepared create format does not match destination".into(),
-                ));
-            }
-            None => prepare_create_inputs(
-                engine,
-                detect_name,
-                inputs,
-                plan_opts,
-                &output_exclusions,
-                |_count, _path| {},
-            )?,
-        };
-        let plan = create_plan_from_summary(
+        None => prepare_create_inputs(
             engine,
             detect_name,
-            target.final_path,
-            prepared.summary,
+            inputs,
             plan_opts,
-        )?;
-        ensure_create_space(target.final_path, &plan)?;
-        let captured_inputs = match (
-            open_dest_from_reserved_file(
-                engine,
-                detect_name,
-                output_file,
+            &output_exclusions,
+            |count, path| progress.on_scan_progress(crate::usize_to_u64(count), path),
+            ctl,
+        )?,
+    };
+    let plan = create_plan_from_summary(
+        engine,
+        detect_name,
+        target.final_path,
+        prepared.summary,
+        plan_opts,
+    )?;
+    ensure_create_space(target.final_path, &plan)?;
+    let captured_inputs = match (target.writer.open(ctl)?, prepared.items) {
+        (DestTarget::Archive(mut sink), PreparedInputs::Archive(items)) => {
+            let inputs = write_entries(
+                &mut sink,
+                &items,
                 write_opts,
-                plan_opts,
+                progress,
                 ctl,
-            )?,
-            prepared.items,
-        ) {
-            (DestTarget::Archive(mut sink), PreparedInputs::Archive(items)) => {
-                let inputs = write_entries(
-                    &mut sink,
-                    &items,
-                    write_opts,
-                    progress,
-                    ctl,
-                    target.capture_input_manifest,
-                )?;
-                sink.finish()?;
-                inputs
-            }
-            (
-                DestTarget::SingleStream { compressor, output },
-                PreparedInputs::SingleStream(item),
-            ) => create_single_stream(
+                target.capture_input_manifest,
+            )?;
+            sink.finish()?;
+            inputs
+        }
+        (DestTarget::SingleStream { compressor, output }, PreparedInputs::SingleStream(item)) => {
+            create_single_stream(
                 &compressor,
                 output,
                 &item,
@@ -761,77 +226,15 @@ fn create_unsplit(
                 progress,
                 ctl,
                 target.capture_input_manifest,
-            )?,
-            _ => {
-                return Err(FormatError::Other(
-                    "create destination changed while preparing inputs".into(),
-                ));
-            }
-        };
-        let retained = retained_file.as_ref().ok_or_else(|| {
-            FormatError::Other("created archive staging handle was transferred too early".into())
-        })?;
-        if crate::filesystem_identity::file_identity(retained)? != tmp_identity
-            || crate::filesystem_identity::path_identity(&tmp)? != tmp_identity
-        {
-            return Err(FormatError::Io(io::Error::other(format!(
-                "created archive staging changed before publication: {}",
-                tmp.display()
-            ))));
+            )?
         }
-        let output_bytes = retained.metadata()?.len();
-        if let Some((destination, policy)) = publication {
-            match policy {
-                CreateCommitPolicy::ReplaceExisting => {
-                    return Err(FormatError::Other(
-                        "archive replacement policy was not bound before writing".into(),
-                    ));
-                }
-                CreateCommitPolicy::NoReplace => {
-                    crate::publish_bound_file_no_replace(
-                        &tmp,
-                        retained,
-                        tmp_identity,
-                        destination,
-                    )?;
-                }
-                CreateCommitPolicy::ReplaceIfUnchanged(guard) => {
-                    cleanup_tmp = false;
-                    let retained = retained_file.take().ok_or_else(|| {
-                        FormatError::Other(
-                            "created archive staging handle was transferred twice".into(),
-                        )
-                    })?;
-                    crate::update::commit_created_archive(
-                        destination,
-                        &tmp,
-                        retained,
-                        tmp_identity,
-                        guard,
-                        progress,
-                        ctl,
-                    )?;
-                }
-            }
+        _ => {
+            return Err(FormatError::Other(
+                "create destination changed while preparing inputs".into(),
+            ));
         }
-        Ok(CreatedArchive {
-            output_bytes,
-            manifest: captured_inputs.manifest,
-        })
-    })();
-    match result {
-        Ok(created) => Ok(created),
-        Err(error) if !cleanup_tmp => Err(error),
-        Err(error) => match retained_file.as_ref() {
-            None => Err(error),
-            Some(retained) => match crate::remove_bound_temp_file(&tmp, retained, tmp_identity) {
-                Ok(()) => Err(error),
-                Err(cleanup) => Err(FormatError::Other(format!(
-                    "{error}; created archive staging cleanup also failed: {cleanup}"
-                ))),
-            },
-        },
-    }
+    };
+    Ok(captured_inputs.manifest)
 }
 
 enum PreparedInputs {
@@ -858,6 +261,7 @@ fn prepare_create_inputs(
     opts: &CreateOptions,
     output_exclusions: &CreateOutputExclusions,
     mut progress: impl FnMut(usize, &EntryPath),
+    ctl: &ControlToken,
 ) -> Result<PreparedCreateInputs, FormatError> {
     match engine.registry().detect_by_name(detect_name) {
         Some(Detected::Archive(format)) => {
@@ -868,8 +272,9 @@ fn prepare_create_inputs(
                 &excludes,
                 output_exclusions,
                 &mut progress,
+                ctl,
             )?;
-            let summary = crate::summarize_create_input_manifest(inputs.len(), &items);
+            let summary = crate::summarize_create_input_manifest(inputs.len(), &items, ctl)?;
             Ok(PreparedCreateInputs {
                 detect_name: detect_name.to_owned(),
                 summary,
@@ -887,8 +292,9 @@ fn prepare_create_inputs(
                 &excludes,
                 output_exclusions,
                 &mut progress,
+                ctl,
             )?;
-            let summary = crate::summarize_create_input_manifest(inputs.len(), &items);
+            let summary = crate::summarize_create_input_manifest(inputs.len(), &items, ctl)?;
             Ok(PreparedCreateInputs {
                 detect_name: detect_name.to_owned(),
                 summary,
@@ -907,6 +313,7 @@ fn prepare_create_inputs(
             }
             if inputs.len() > 1 {
                 for input in inputs {
+                    ctl.checkpoint()?;
                     let metadata = std::fs::symlink_metadata(input)?;
                     if metadata.file_type().is_symlink() || !metadata.is_file() {
                         return Err(FormatError::Unsupported(format!(
@@ -918,25 +325,27 @@ fn prepare_create_inputs(
             }
             let mut prepared_items = Vec::with_capacity(inputs.len());
             for (index, input) in inputs.iter().enumerate() {
+                ctl.checkpoint()?;
                 let label = EntryPath::from_utf8(
                     input
                         .file_name()
                         .map_or_else(String::new, |name| name.to_string_lossy().into_owned()),
                 );
                 let item =
-                    prepare_single_stream_input(input, label.clone()).map_err(
-                        |error| match error {
+                    prepare_single_stream_input(input, label.clone(), ctl).map_err(|error| {
+                        match error {
                             FormatError::Unsupported(_) => FormatError::Unsupported(format!(
                                 "format {} compresses a single regular file",
                                 compressor.id()
                             )),
                             error => error,
-                        },
-                    )?;
+                        }
+                    })?;
                 progress(index.saturating_add(1), &label);
+                ctl.checkpoint()?;
                 prepared_items.push(item);
             }
-            let mut items = deduplicate_prepared_input_roots(prepared_items)?;
+            let mut items = deduplicate_prepared_input_roots(prepared_items, ctl)?;
             if items.len() != 1 {
                 return Err(FormatError::Unsupported(format!(
                     "format {} compresses exactly one file",
@@ -1178,14 +587,13 @@ impl CreateOutputExclusions {
     fn new(
         final_dest: &Path,
         staging: &Path,
-        inner_temp: &Path,
         split_output: bool,
         reserved_outputs: &[&Path],
     ) -> Result<Self, FormatError> {
         let base = split_output
             .then(|| split_output_base(final_dest))
             .transpose()?;
-        let exact_paths: Vec<PathBuf> = [final_dest, staging, inner_temp]
+        let exact_paths: Vec<PathBuf> = [final_dest, staging]
             .into_iter()
             .chain(base.as_deref())
             .chain(reserved_outputs.iter().copied())
@@ -1262,7 +670,11 @@ impl CreateOutputExclusions {
         }
     }
 
-    fn reject_explicit_inputs(&self, inputs: &[PathBuf]) -> Result<(), FormatError> {
+    fn reject_explicit_inputs(
+        &self,
+        inputs: &[PathBuf],
+        ctl: &ControlToken,
+    ) -> Result<(), FormatError> {
         for input in inputs {
             if self.matches(input)?
                 || self
@@ -1275,7 +687,9 @@ impl CreateOutputExclusions {
                     input.display()
                 )));
             }
+            ctl.checkpoint()?;
         }
+        ctl.checkpoint()?;
         Ok(())
     }
 
@@ -1301,12 +715,13 @@ impl CreateOutputExclusions {
     }
 }
 
-pub(crate) fn plan_create_with_progress(
+pub(crate) fn plan_create(
     engine: &Engine,
     dest: &Path,
     inputs: &[PathBuf],
     opts: &CreateOptions,
     mut progress: impl FnMut(usize, &str),
+    ctl: &ControlToken,
 ) -> Result<CreatePlan, FormatError> {
     let name = dest
         .file_name()
@@ -1321,7 +736,7 @@ pub(crate) fn plan_create_with_progress(
     };
     validate_create_target_name(engine, detect_name, opts)?;
     let output_exclusions = CreateOutputExclusions::for_estimate(dest, opts.split_size.is_some())?;
-    output_exclusions.reject_explicit_inputs(inputs)?;
+    output_exclusions.reject_explicit_inputs(inputs, ctl)?;
     let prepared = prepare_create_inputs(
         engine,
         detect_name,
@@ -1329,8 +744,11 @@ pub(crate) fn plan_create_with_progress(
         opts,
         &output_exclusions,
         |count, path| progress(count, &path.display),
+        ctl,
     )?;
-    create_plan_from_summary(engine, detect_name, dest, prepared.summary, opts)
+    let plan = create_plan_from_summary(engine, detect_name, dest, prepared.summary, opts)?;
+    ctl.checkpoint()?;
+    Ok(plan)
 }
 
 pub(crate) fn prepare_sfx_input_summary_with_progress(
@@ -1339,9 +757,10 @@ pub(crate) fn prepare_sfx_input_summary_with_progress(
     dest: &Path,
     opts: &CreateOptions,
     mut progress: impl FnMut(usize, &str),
+    ctl: &ControlToken,
 ) -> Result<CreateInputSummary, FormatError> {
     let output_exclusions = CreateOutputExclusions::for_unsplit_estimate(dest, &[]);
-    output_exclusions.reject_explicit_inputs(inputs)?;
+    output_exclusions.reject_explicit_inputs(inputs, ctl)?;
     let prepared = prepare_create_inputs(
         engine,
         "squallz-sfx-payload.zip",
@@ -1349,6 +768,7 @@ pub(crate) fn prepare_sfx_input_summary_with_progress(
         opts,
         &output_exclusions,
         |count, path| progress(count, &path.display),
+        ctl,
     )?;
     Ok(prepared.summary)
 }
@@ -1359,10 +779,11 @@ pub(crate) fn collect_inputs_for_output_estimate(
     final_dest: &Path,
     split_output: bool,
     mut progress: impl FnMut(usize, &EntryPath),
+    ctl: &ControlToken,
 ) -> Result<Vec<InputItem>, FormatError> {
     let output_exclusions = CreateOutputExclusions::for_estimate(final_dest, split_output)?;
-    output_exclusions.reject_explicit_inputs(inputs)?;
-    collect_with_output_exclusions(inputs, excludes, &output_exclusions, &mut progress)
+    output_exclusions.reject_explicit_inputs(inputs, ctl)?;
+    collect_with_output_exclusions(inputs, excludes, &output_exclusions, &mut progress, ctl)
 }
 
 fn collect_with_output_exclusions(
@@ -1370,27 +791,15 @@ fn collect_with_output_exclusions(
     excludes: &PathFilter,
     output_exclusions: &CreateOutputExclusions,
     progress: &mut impl FnMut(usize, &EntryPath),
+    ctl: &ControlToken,
 ) -> Result<Vec<InputItem>, FormatError> {
-    let exclusion_error = RefCell::new(None);
-    let items = collect_inputs_excluding_with_progress(
+    collect_inputs_excluding_with_progress(
         inputs,
         excludes,
-        |path| match output_exclusions.matches(path) {
-            Ok(excluded) => excluded,
-            Err(error) => {
-                let mut first = exclusion_error.borrow_mut();
-                if first.is_none() {
-                    *first = Some(error);
-                }
-                true
-            }
-        },
+        |path| output_exclusions.matches(path),
         progress,
-    );
-    match (exclusion_error.into_inner(), items) {
-        (Some(error), _) => Err(error),
-        (None, items) => items,
-    }
+        ctl,
+    )
 }
 
 fn collect_prepared_with_output_exclusions(
@@ -1398,27 +807,15 @@ fn collect_prepared_with_output_exclusions(
     excludes: &PathFilter,
     output_exclusions: &CreateOutputExclusions,
     progress: &mut impl FnMut(usize, &EntryPath),
+    ctl: &ControlToken,
 ) -> Result<Vec<PreparedInputItem>, FormatError> {
-    let exclusion_error = RefCell::new(None);
-    let items = collect_prepared_inputs_excluding_with_progress(
+    collect_prepared_inputs_excluding_with_progress(
         inputs,
         excludes,
-        |path| match output_exclusions.matches(path) {
-            Ok(excluded) => excluded,
-            Err(error) => {
-                let mut first = exclusion_error.borrow_mut();
-                if first.is_none() {
-                    *first = Some(error);
-                }
-                true
-            }
-        },
+        |path| output_exclusions.matches(path),
         progress,
-    );
-    match (exclusion_error.into_inner(), items) {
-        (Some(error), _) => Err(error),
-        (None, items) => items,
-    }
+        ctl,
+    )
 }
 
 fn matches_split_volume(base: &Path, path: &Path) -> bool {

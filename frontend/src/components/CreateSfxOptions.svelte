@@ -29,7 +29,7 @@
     disabled?: boolean;
     disabledReason?: string;
     loading?: boolean;
-    tr: (key: string, fallback: string) => string;
+    tr: (key: string, fallback?: string) => string;
     onEnabledChange: (enabled: boolean) => void;
   } = $props();
 
@@ -43,7 +43,7 @@
 </script>
 
 {#snippet fields()}
-  {@const toggleLabel = tr("gui.create.sfx_toggle", "Create self-extracting file")}
+  {@const toggleLabel = tr("gui.create.sfx_toggle")}
   <label class="create-option-check" class:disabled={!available || disabled} title={disabledReason}>
     <input
       type="checkbox"
@@ -58,15 +58,14 @@
   {#if !loading}
     <div
       class="create-sfx-target"
-      aria-label={`${tr("gui.create.sfx_target_platform", "Target platform")}: ${targetLabel}`}
+      aria-label={`${tr("gui.create.sfx_target_platform")}: ${targetLabel}`}
     >
       <Icon name="panel-top" size={16} />
       <div>
-        <span>{tr("gui.create.sfx_target_platform", "Target platform")}</span>
+        <span>{tr("gui.create.sfx_target_platform")}</span>
         <strong>{targetLabel} · {outputLabel}</strong>
         <small>{tr(
           "gui.create.sfx_current_runtime_note",
-          "Uses this platform's bundled runtime. Build each desktop target on that platform.",
         )}</small>
       </div>
     </div>
@@ -78,23 +77,23 @@
     <p class="create-output-warning create-sfx-signing-warning" role="status" aria-live="polite">
       <Icon name="shield-alert" size={16} />
       <span>
-        <strong>{tr("gui.create.sfx_unsigned_heading", "Unsigned executable")}</strong>
+        <strong>{tr("gui.create.sfx_unsigned_heading")}</strong>
         <span>{signingWarning}</span>
       </span>
     </p>
   {:else if !available}
     <small class="create-option-error" role="status">{unavailableMessage}</small>
   {:else}
-    <small class="create-option-help">{tr("gui.create.sfx_enable_hint", "Recipients can extract without installing Squallz.")}</small>
+    <small class="create-option-help">{tr("gui.create.sfx_enable_hint")}</small>
   {/if}
 {/snippet}
 
 {#if variant === "modern"}
   <section class="create-option-card">
-    <h2><Icon name="archive" size={16} />{tr("gui.create.self_extracting", "Self-extracting")}</h2>
+    <h2><Icon name="archive" size={16} />{tr("gui.create.self_extracting")}</h2>
     {@render fields()}
   </section>
 {:else}
-  <div class="classic-label">{tr("gui.create.self_extracting", "Self-extracting")}</div>
+  <div class="classic-label">{tr("gui.create.self_extracting")}</div>
   <div id={classicSectionId} class="classic-input create-option-classic classic-create-section-target">{@render fields()}</div>
 {/if}

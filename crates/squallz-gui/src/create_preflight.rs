@@ -28,6 +28,7 @@ enum PreflightRequestId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum PreflightRequestKind {
     CreateDestination,
+    CreatePlan,
     ConvertPlan,
     ExtractPlan,
     OpenArchive,

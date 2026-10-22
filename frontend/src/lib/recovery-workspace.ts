@@ -63,4 +63,4 @@ export type RecoveryWorkspaceActions = Readonly<{
   extractReadable: () => void;
 }>;
 
-export type RecoveryWorkspaceTranslate = (key: string, fallback: string) => string;
+export type RecoveryWorkspaceTranslate = (key: string, fallback?: string) => string;

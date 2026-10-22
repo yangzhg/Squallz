@@ -1,3 +1,4 @@
+import type { JobResult, ResultOf } from "./job-result";
 import { BATCH_PROGRESS_SCALE, type ErrorDto, type JobQuestion, type JobSpec, type ProgressPhase } from "./ipc";
 import { basename } from "./format";
 
@@ -15,7 +16,7 @@ type PreviewData = {
   progress: PreviewProgress;
   phase: ProgressPhase | null;
   error: ErrorDto | null;
-  result: Record<string, unknown>;
+  result: JobResult;
   revealPath: string | null;
   question: JobQuestion | null;
   scanEntries: number | null;
@@ -24,7 +25,7 @@ type PreviewData = {
 export type TaskPreviewSeed = Omit<PreviewData, "result"> & {
   id: number;
   state: PreviewState | "failed";
-  result: Record<string, unknown> | null;
+  result: JobResult | null;
   cpuThreads: number;
   streamBufferLimitBytes: number | null;
   interruptible: boolean;
@@ -133,9 +134,10 @@ function ioError(detail: string): ErrorDto {
   return { key: "error.io", params: { detail }, detail };
 }
 
-function createResult(output = archiveOutput, totalBytes = 24_000_000): Record<string, unknown> {
-  return { operation: "create", primary_output: output, outputs: [output],
-    total_bytes: totalBytes, volume_count: 1, split: false };
+function createResult(output = archiveOutput, totalBytes = 24_000_000): ResultOf<"compress"> {
+  return { kind: "compress", primary_output: output, outputs: [output], preserved_outputs: [],
+    total_bytes: totalBytes, volume_count: 1, split: false, sfx: null, entries_tested_after_create: null,
+    source_cleanup: { status: "not_requested", moved: 0, kept: 0, recovery_required: 0 } };
 }
 
 function compressionPreview(variant: "plain" | "failure" | "split" | "sfx" | "sfxFailure", state: PreviewState): PreviewData {
@@ -161,14 +163,14 @@ function compressionPreview(variant: "plain" | "failure" | "split" | "sfx" | "sf
       const name = basename(path);
       return `${sampleOutputRoot}/.${name}.split-backup-940008-${index}.tmp.${name}`;
     });
-    result = { operation: "create", primary_output: outputs[0], outputs, preserved_outputs: preserved,
+    result = { ...createResult(), primary_output: outputs[0], outputs, preserved_outputs: preserved,
       total_bytes: total, volume_count: outputs.length, split: true };
     revealPath = outputs[0];
   } else if (variant === "sfx") {
-    result = { operation: "create_sfx", primary_output: output, outputs: [output],
+    result = { ...createResult(), primary_output: output, outputs: [output],
       preserved_outputs: [`${sampleOutputRoot}/.squallz-sfx-holder-940009-1/previous`],
-      total_bytes: total, volume_count: 1, split: false, requires_signing: true,
-      sfx_target: "macos", layout: "macos_app" };
+      total_bytes: total, volume_count: 1, split: false,
+      sfx: { target: "macos", layout: "macos_app", payload_bytes: total - 4096, requires_signing: true } };
   }
   const journal = `${sampleOutputRoot}/.squallz-sfx-transaction.json`;
   const holder = `${sampleOutputRoot}/.squallz-sfx-holder-940010-3`;
@@ -204,12 +206,13 @@ function conversionPreview(encrypted: boolean, state: PreviewState): PreviewData
   };
 }
 
-function extractionResult(): Record<string, unknown> {
-  const destination = "/tmp/squallz-output/product-backup";
+function extractionResult(destination = "/tmp/squallz-output/product-backup"): ResultOf<"extract"> {
   const problems = Array.from({ length: 20 }, (_, index) => index === 0
     ? `reports/${"annual-reports-and-supporting-documents/".repeat(6)}final  report.pdf: checksum mismatch\nThe file could not be recovered from this archive.`
     : `damaged/item-${String(index + 1).padStart(2, "0")}.bin: checksum mismatch`);
-  return { operation: "extract", dest: destination, best_effort: true, skipped: 30, problems,
+  return { kind: "extract", dest: destination, best_effort: true, problems, structure: "complete",
+    plan: { requested_destination: destination, destination, layout: "direct", entries: 42, files: 40,
+      directories: 2, symlinks: 0, hardlinks: 0, other: 0, total_bytes: 48_000_000, estimated_conflicts: 0 },
     problems_total: 30, problems_truncated: true,
     counts: { destination, selected_entries: 42, created: 10, directories: 2, skipped: 0,
       replaced: 0, renamed: 0, failed: 30, output_bytes: 48_000_000 } };
@@ -245,7 +248,7 @@ function extractionPreview(variant: "plain" | "failure" | "password" | "conflict
     progress: metadata ? metadataProgress(false, state)
       : byteProgress(state, unknownCurrent ? { currentTotal: 0, runningCurrent: 0 } : {}),
     phase: metadata ? "extract_metadata" : null, error: failure ? ioError("Could not write the extracted file") : null,
-    result: report ? extractionResult() : createResult(),
+    result: extractionResult(),
     revealPath: report ? extractedOutput : `${sampleOutputRoot}/client-data`,
     question, scanEntries: null, outputPasswordRequired: false,
   };
@@ -264,12 +267,16 @@ function batchPreview(variant: "plain" | "metadata" | "partial" | "failure", sta
   ];
   const spec: JobSpec = { kind: "batch_extract", items, overwrite: reviewed ? "rename" : "ask",
     symlinks: reviewed ? "skip" : "preserve", smart: !reviewed };
-  const result = variant === "partial"
-    ? { operation: "batch_extract", archives: 3, selected_archives: 3, collapsed_volumes: 0,
-      extracted: 1, failed: 2, outputs: [{ archive: items[1].path, dest: items[1].dest }],
-      failures: [items[0], items[2]].map((item) => ({ archive: item.path, error: ioError("Could not write the extracted file") })) }
-    : { operation: "batch_extract", archives: 2, extracted: 2, failed: 0, skipped: 0,
-      outputs: items.map((item) => ({ path: item.path, dest: item.dest })) };
+  const succeeded = variant === "partial" ? [items[1]] : items;
+  const outputs = succeeded.map((item) => {
+    const report = extractionResult(item.dest);
+    return { ...report, archive: item.path, best_effort: false, problems: [], problems_total: 0, problems_truncated: false,
+      counts: { ...report.counts, created: 40, failed: 0 } };
+  });
+  const failures = variant === "partial"
+    ? [items[0], items[2]].map((item) => ({ archive: item.path, error: ioError("Could not write the extracted file") })) : [];
+  const result: ResultOf<"batch_extract"> = { kind: "batch_extract", archives: items.length, selected_archives: items.length,
+    collapsed_volumes: 0, extracted: outputs.length, failed: failures.length, recovered_archives: 0, outputs, failures };
   const progress = reviewed ? { ...emptyProgress(), done: 3, total: 3 }
     : variant === "metadata" ? metadataProgress(true, state)
     : { ...emptyProgress("photos/IMG_2042.dng"), done: (state === "done" ? 2 : 1) * BATCH_PROGRESS_SCALE,
@@ -301,7 +308,7 @@ function inspectionPreview(variant: "open" | "test", state: PreviewState): Previ
     progress: opening ? emptyProgress(state === "done" ? "" : "product-backup.zip")
       : byteProgress(state, { speed: 17_600_000, currentTotal: 0, runningCurrent: 0 }),
     phase: opening ? "archive_open" : "archive_test", error: null,
-    result: { operation: "test", ok: false, entries: 42, entries_tested: 42,
+    result: { kind: "test", ok: false, entries_tested: 42, recovery: null, structure: "complete",
       problems: Array.from({ length: 20 }, (_, index) => `damaged/item-${String(index + 1).padStart(2, "0")}.bin: checksum mismatch`),
       problems_total: 30, problems_truncated: true },
     revealPath: null, question: null, scanEntries: null, outputPasswordRequired: false,
@@ -325,7 +332,7 @@ function updatePreview(variant: "failure" | "scan" | "verify" | "commit", state:
   return {
     spec, progress, phase: variant === "verify" ? "update_verify" : variant === "commit" ? "update_commit" : null,
     error: failure ? ioError("Could not replace the archive") : null,
-    result: failure ? createResult() : { operation: "update" }, revealPath: failure ? `${sampleOutputRoot}/client-data` : spec.path,
+    result: { kind: "update", archive: spec.path, operations: spec.add.length + spec.mkdir.length + spec.delete.length + spec.rename.length }, revealPath: failure ? `${sampleOutputRoot}/client-data` : spec.path,
     question: null, scanEntries: variant === "scan" && state === "running" ? 128 : null, outputPasswordRequired: false,
   };
 }
@@ -336,7 +343,8 @@ function protectionPreview(state: PreviewState): PreviewData {
     spec: { kind: "protect", path: archive, redundancy: 10, recovery },
     progress: { ...emptyProgress("product-backup.zip.par2"), done: state === "done" ? 1 : 0, total: 1 },
     phase: "recovery_finalize", error: null, revealPath: recovery,
-    result: { operation: "protect", ok: true, archive, recovery,
+    result: { kind: "protect", operation: "protect", ok: true, archive, recovery,
+      output: null, tool: "par2", status_code: 0, metrics: null, stdout: "", stderr: "",
       outputs: [recovery, ...["00+01", "01+02", "03+04", "07+08", "15+16"].map((part) => `${sampleOutputRoot}/product-backup.zip.vol${part}.par2`)],
       source_file_count: 1, redundancy_percent: 10 },
     question: null, scanEntries: null, outputPasswordRequired: false,
@@ -350,7 +358,7 @@ function recoveryPreview(variant: "repairable" | "multiFile" | "overCapacity", s
     spec: { kind: "verify_recovery", path: archive, recovery },
     progress: { ...emptyProgress("product-backup.zip"), done: state === "done" ? 1000 : 380, total: 1000 },
     phase: "recovery_verify", error: null, revealPath: null,
-    result: { operation: "verify", ok: false, archive, recovery, output: null, tool: "rust-par2", redundancy_percent: null,
+    result: { kind: "verify_recovery", operation: "verify", outputs: [], ok: false, archive, recovery, output: null, tool: "rust-par2", redundancy_percent: null,
       source_file_count: variant === "multiFile" ? 2 : 1, status_code: 1,
       metrics: { all_correct: false, repair_possible: !overCapacity, blocks_needed: overCapacity ? 12 : 3,
         recovery_blocks_available: overCapacity ? 4 : 8, blocks_repaired: null, files_repaired: null, no_damage: false },
@@ -384,7 +392,7 @@ function duplicatePreview(variant: "groups" | "clean" | "failure", state: Previe
   const groups = clean ? [] : Array.from({ length: 25 }, (_, index) => {
     const paths = Array.from({ length: index === 0 ? 60 : 2 }, (_, copy) =>
       `${sampleRoot}/Archive review/Project ${index + 1}/Copy ${copy + 1}/季度归档与设计资料/Final presentation with a descriptive file name.pdf`);
-    return { hash: (index + 1).toString(16).padStart(64, "0"), hash_algorithm: "blake3", size: 2048,
+    return { hash: (index + 1).toString(16).padStart(64, "0"), hash_algorithm: "blake3" as const, size: 2048,
       count: paths.length, reclaimable_bytes: (paths.length - 1) * 2048, paths };
   });
   const count = groups.reduce((total, group) => total + group.paths.length, 0);
@@ -393,7 +401,7 @@ function duplicatePreview(variant: "groups" | "clean" | "failure", state: Previe
     spec: { kind: "duplicate_scan", inputs: [`${sampleRoot}/${clean ? "Inbox" : "Archive review"}`], excludes: ["cache"], min_size: 1024 },
     progress: { ...emptyProgress(), done: progressBytes, total: progressBytes }, phase: null,
     error: variant === "failure" ? ioError("Could not read the scan folder") : null,
-    result: { operation: "duplicates", hash_algorithm: "blake3", input_count: 1, min_size: 1024,
+    result: { kind: "duplicate_scan", entries_scanned: count + 4, hash_algorithm: "blake3", input_count: 1, min_size: 1024,
       files_scanned: count + 4, bytes_scanned: (count + 4) * 2048, candidate_files: count, hashed_bytes: count * 2048,
       duplicate_groups: groups.length, duplicate_files: count, reclaimable_bytes: (count - groups.length) * 2048, groups },
     revealPath: null, question: null, scanEntries: null, outputPasswordRequired: false,
@@ -412,16 +420,16 @@ function checksumPreview(check: boolean, state: PreviewState): PreviewData {
       runningCurrent: 0,
     }),
     phase: null, error: null, revealPath: check ? `${photos}/SHA256SUMS` : photos,
-    result: check ? { operation: "checksum_check", passed: 12, checked: 12, failed: 0,
-      items: [{ path: `${photos}/DSC_1930.JPG`, expected: photoDigest, actual: photoDigest, ok: true }] }
-      : { operation: "checksum", algorithm: "sha256", files_hashed: 12, bytes_hashed: 86_000_000,
+    result: check ? { kind: "checksum_check", algorithm: "sha256", manifest: `${photos}/SHA256SUMS`, bytes_hashed: 86_000_000, ok: true, passed: 12, checked: 12, failed: 0,
+      items: [{ path: `${photos}/DSC_1930.JPG`, expected: photoDigest, actual: photoDigest, ok: true, error: null }] }
+      : { kind: "checksum", input_count: 1, entries_scanned: 12, algorithm: "sha256", files_hashed: 12, bytes_hashed: 86_000_000,
         items: [{ path: `${photos}/DSC_1930.JPG`, size: 18_200_000, digest: photoDigest },
           { path: `${photos}/DSC_1488.JPG`, size: 9_200_000, digest: "37166b84dfd4083c0f6fb7b99d892bc3ef8ff07c9a1714ad9f323bdb37e9f9a2" }] },
     question: null, scanEntries: null, outputPasswordRequired: false,
   };
 }
 
-export function createTaskPreviewHistory(kind: "checksum" | "checksum_check") {
+export function createTaskPreviewHistory(kind: "checksum" | "checksum_check"): { spec: JobSpec; progress: Pick<PreviewProgress, "done" | "total" | "current" | "currentDone" | "currentTotal">; revealPath: string; result: JobResult } {
   const source = `${sampleRoot}/current-release`;
   const path = `${source}/release.txt`;
   const digest = "ab".repeat(64);
@@ -432,7 +440,7 @@ export function createTaskPreviewHistory(kind: "checksum" | "checksum_check") {
     spec,
     progress: { done: 64, total: 64, current: "release.txt", currentDone: 64, currentTotal: 64 },
     revealPath: source,
-    result: kind === "checksum" ? { operation: kind, algorithm: "sha512", files_hashed: 1, bytes_hashed: 64, items: [{ path, digest, size: 64 }] }
-      : { operation: kind, ok: false, checked: 1, passed: 0, failed: 1, items: [{ path, expected: digest, actual: "cd".repeat(64), ok: false }] },
+    result: kind === "checksum" ? { kind, input_count: 1, entries_scanned: 1, algorithm: "sha512", files_hashed: 1, bytes_hashed: 64, items: [{ path, digest, size: 64 }] }
+      : { kind, algorithm: "sha512", manifest: `${source}/SHA512SUMS`, bytes_hashed: 64, ok: false, checked: 1, passed: 0, failed: 1, items: [{ path, expected: digest, actual: "cd".repeat(64), ok: false, error: null }] },
   };
 }

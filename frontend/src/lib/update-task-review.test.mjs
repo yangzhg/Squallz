@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import vm from "node:vm";
 import ts from "typescript";
-import { createTestServer } from "../../tests/runtime.mjs";
+import { englishTranslate, createTestServer } from "../../tests/runtime.mjs";
 import { compileTestScript, readSvelteScript, selectFunctions } from "../../tests/source.mjs";
 
 const server = await createTestServer();
@@ -28,7 +28,7 @@ function handlers(review) {
     focusBlockingTaskIfAny:()=>false, setScreen:(screen)=>calls.push(["screen",screen]),
     dismissTaskDialog:async()=>calls.push(["dismiss"]), focusArchiveUpdateReview:()=>calls.push(["focus"]),
     showNotice:(message)=>calls.push(["notice",message]), pushToast:(toast)=>calls.push(["toast",toast]),
-    tr:(_key,fallback)=>fallback, submitJob:async(job)=>{calls.push(["submit",plain(job)]);return 1;},
+    tr:englishTranslate, submitJob:async(job)=>{calls.push(["submit",plain(job)]);return 1;},
     isJobSubmitBlocked:()=>false, isErrorDto:()=>false, tError:()=>"error" };
   const outputText = compileTestScript(functions.map((node) => node.getText(source)).join("\n"));
   return {...vm.runInNewContext(`${outputText}\n({${names.join(",")}})`,context),context,calls};

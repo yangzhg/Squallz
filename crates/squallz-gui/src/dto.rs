@@ -1,5 +1,5 @@
 //! IPC data-transfer objects. Everything the frontend sees crosses through
-//! these serde types; errors are structured `{key, params}` pairs rendered
+//! serializable result types; errors are structured `{key, params}` pairs rendered
 //! by the frontend i18n store.
 
 use std::collections::HashMap;
@@ -12,7 +12,7 @@ use squallz_core::api::{
 use squallz_core::{
     ChecksumAlgorithm, CreateCompletionAction, CreateContentPolicy, CreateDestinationGuard,
     CreatePlan, ExtractInputGuard, ExtractPlan, ExtractSpace, PostSuccessAction,
-    SfxRecoveryDetails, SfxTarget, SmartLayout, SqzInnerFormat,
+    SfxRecoveryDetails, SfxTarget, SqzInnerFormat,
 };
 use squallz_i18n::error_message;
 use squallz_recovery::RecoveryCleanupDetails;
@@ -39,58 +39,6 @@ pub struct ErrorDto {
     pub params: HashMap<String, String>,
     /// Log-only detail (English), shown only in the details expander
     pub detail: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct ArchiveTargetInspectionDto {
-    pub exists: bool,
-    pub blocked_parent: Option<String>,
-}
-
-impl From<squallz_core::ArchiveTargetInspection> for ArchiveTargetInspectionDto {
-    fn from(inspection: squallz_core::ArchiveTargetInspection) -> Self {
-        Self {
-            exists: inspection.exists,
-            blocked_parent: inspection.blocked_parent,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct ArchiveMovePlanDto {
-    pub items: Vec<ArchiveMoveItemDto>,
-    pub missing_sources: Vec<String>,
-    pub blocked_parent: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct ArchiveMoveItemDto {
-    pub from: String,
-    pub to: String,
-    pub conflict: Option<&'static str>,
-    pub keep_both_to: Option<String>,
-}
-
-impl From<squallz_core::ArchiveMovePlan> for ArchiveMovePlanDto {
-    fn from(plan: squallz_core::ArchiveMovePlan) -> Self {
-        Self {
-            missing_sources: plan.missing_sources,
-            blocked_parent: plan.blocked_parent,
-            items: plan
-                .items
-                .into_iter()
-                .map(|item| ArchiveMoveItemDto {
-                    from: item.from,
-                    to: item.to,
-                    conflict: item.conflict.map(|conflict| match conflict {
-                        squallz_core::ArchiveMoveConflict::ExistingTarget => "existing_target",
-                        squallz_core::ArchiveMoveConflict::DuplicateTarget => "duplicate_target",
-                    }),
-                    keep_both_to: item.keep_both_to,
-                })
-                .collect(),
-        }
-    }
 }
 
 impl From<&FormatError> for ErrorDto {
@@ -429,50 +377,12 @@ impl CreatePlanDto {
     }
 }
 
-/// Shared core extraction plan used by desktop preflight and job results.
-#[derive(Debug, Clone, Serialize)]
-pub struct ExtractPlanDto {
-    pub requested_destination: String,
-    pub destination: String,
-    pub layout: String,
-    pub entries: u64,
-    pub files: u64,
-    pub directories: u64,
-    pub symlinks: u64,
-    pub hardlinks: u64,
-    pub other: u64,
-    pub total_bytes: u64,
-    pub estimated_conflicts: u64,
-}
-
-impl From<ExtractPlan> for ExtractPlanDto {
-    fn from(value: ExtractPlan) -> Self {
-        Self {
-            requested_destination: value.requested_destination.to_string_lossy().into_owned(),
-            destination: value.destination.to_string_lossy().into_owned(),
-            layout: match value.layout {
-                SmartLayout::DirectExtract => "direct",
-                SmartLayout::WrapInFolder => "wrap_in_folder",
-            }
-            .to_owned(),
-            entries: value.scope.entries,
-            files: value.scope.files,
-            directories: value.scope.directories,
-            symlinks: value.scope.symlinks,
-            hardlinks: value.scope.hardlinks,
-            other: value.scope.other,
-            total_bytes: value.scope.total_bytes,
-            estimated_conflicts: value.estimated_conflicts,
-        }
-    }
-}
-
 /// Extraction plan plus the destination-volume capacity observed during the
 /// same read-only preflight.
 #[derive(Debug, Clone, Serialize)]
 pub struct ExtractPlanPreflightDto {
     #[serde(flatten)]
-    pub plan: ExtractPlanDto,
+    pub plan: ExtractPlan,
     pub input_guard: ExtractInputGuard,
     pub required_free_bytes: u64,
     pub available_bytes: u64,
@@ -482,7 +392,7 @@ pub struct ExtractPlanPreflightDto {
 impl ExtractPlanPreflightDto {
     pub fn new(plan: ExtractPlan, space: ExtractSpace, input_guard: ExtractInputGuard) -> Self {
         Self {
-            plan: ExtractPlanDto::from(plan),
+            plan,
             input_guard,
             required_free_bytes: space.required_bytes,
             available_bytes: space.available_bytes,
@@ -559,17 +469,6 @@ pub struct EntryPreviewDto {
     pub preview_id: String,
     pub size: u64,
     pub archive_like: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum ExternalTaskActionDto {
-    Checksum,
-    ExtractHere,
-    ExtractToFolder,
-    ExtractSfx,
-    CompressTo7z,
-    TestArchive,
 }
 
 /// Job submission parameters (`submit_job`).
@@ -875,43 +774,9 @@ pub struct RenameSpec {
     pub to: String,
 }
 
-/// Progress event payload (`job://progress`, throttled to ≥60 ms).
+/// Conflict question included in the authoritative job snapshot.
 #[derive(Debug, Clone, Serialize)]
-pub struct ProgressEvent {
-    pub id: u64,
-    /// Global snapshot revision for stale-event rejection.
-    pub version: u64,
-    /// Bytes, or 1,000 work units per grouped archive for batch extraction.
-    pub done: u64,
-    /// 0 = unknown total (indeterminate progress bar)
-    pub total: u64,
-    pub current: String,
-    /// Bytes processed within the current entry; 0 when unknown.
-    pub current_done: u64,
-    /// Total bytes for the current entry; 0 when unknown.
-    pub current_total: u64,
-    /// Entries prepared during an input scan. Omitted for byte progress.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub scanned_entries: Option<u64>,
-    /// Smoothed throughput in bytes/second; 0 for batch work units.
-    pub speed: u64,
-}
-
-/// State event payload (`job://state`).
-#[derive(Debug, Clone, Serialize)]
-pub struct StateEvent {
-    pub id: u64,
-    /// Global snapshot revision for stale-event rejection.
-    pub version: u64,
-    /// `queued|running|paused|done|failed|cancelled`
-    pub state: String,
-    /// Structured error for `failed`
-    pub error: Option<ErrorDto>,
-}
-
-/// Conflict prompt payload (`job://ask-conflict`).
-#[derive(Debug, Clone, Serialize)]
-pub struct AskConflictEvent {
+pub struct JobConflictPrompt {
     pub id: u64,
     /// Identity of this pending question, unchanged by progress updates.
     pub version: u64,
@@ -927,9 +792,9 @@ pub struct AskConflictEvent {
     pub incoming_modified: Option<i64>,
 }
 
-/// Password prompt payload (`job://ask-password`).
+/// Password question included in the authoritative job snapshot.
 #[derive(Debug, Clone, Serialize)]
-pub struct AskPasswordEvent {
+pub struct JobPasswordPrompt {
     pub id: u64,
     /// Identity of this pending question, unchanged by progress updates.
     pub version: u64,
@@ -1212,8 +1077,8 @@ mod tests {
     use squallz_recovery::RecoveryCleanupDetails;
 
     use super::{
-        CreatePlanDto, EntryDto, ErrorDto, ExtractPlanDto, ExtractPlanPreflightDto, JobSpec,
-        SettingsDto, PERFORMANCE_STREAM_BUFFER_MAX_BYTES, PERFORMANCE_STREAM_BUFFER_MIN_BYTES,
+        CreatePlanDto, EntryDto, ErrorDto, ExtractPlanPreflightDto, JobSpec, SettingsDto,
+        PERFORMANCE_STREAM_BUFFER_MAX_BYTES, PERFORMANCE_STREAM_BUFFER_MIN_BYTES,
     };
 
     #[test]
@@ -1387,7 +1252,7 @@ mod tests {
 
     #[test]
     fn extract_plan_dto_keeps_layout_scope_and_conflicts() {
-        let dto = ExtractPlanDto::from(ExtractPlan {
+        let dto = serde_json::json!(ExtractPlan {
             requested_destination: PathBuf::from("output"),
             destination: PathBuf::from("output/archive"),
             layout: SmartLayout::WrapInFolder,
@@ -1403,17 +1268,17 @@ mod tests {
             estimated_conflicts: 2,
         });
 
-        assert_eq!(dto.requested_destination, "output");
-        assert_eq!(dto.destination, "output/archive");
-        assert_eq!(dto.layout, "wrap_in_folder");
-        assert_eq!(dto.entries, 7);
-        assert_eq!(dto.files, 3);
-        assert_eq!(dto.directories, 1);
-        assert_eq!(dto.symlinks, 1);
-        assert_eq!(dto.hardlinks, 1);
-        assert_eq!(dto.other, 1);
-        assert_eq!(dto.total_bytes, 4096);
-        assert_eq!(dto.estimated_conflicts, 2);
+        assert_eq!(dto["requested_destination"], "output");
+        assert_eq!(dto["destination"], "output/archive");
+        assert_eq!(dto["layout"], "wrap_in_folder");
+        assert_eq!(dto["entries"], 7);
+        assert_eq!(dto["files"], 3);
+        assert_eq!(dto["directories"], 1);
+        assert_eq!(dto["symlinks"], 1);
+        assert_eq!(dto["hardlinks"], 1);
+        assert_eq!(dto["other"], 1);
+        assert_eq!(dto["total_bytes"], 4096);
+        assert_eq!(dto["estimated_conflicts"], 2);
     }
 
     #[test]

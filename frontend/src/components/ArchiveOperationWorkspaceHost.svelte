@@ -6,24 +6,27 @@
     ConvertRouteOwner,
     ConvertWorkspaceVariant,
   } from "../lib/convert-route";
+  import type { CreateSession } from "../lib/create-session.svelte";
   import type {
-    CreateWorkspaceSurface,
     CreateWorkspaceVariant,
   } from "./CreateWorkspace.svelte";
   import type {
-    ExtractWorkspaceSurface,
+    ExtractWorkspaceBridge,
     ExtractWorkspaceVariant,
   } from "./ExtractWorkspace.svelte";
 
   export type { ConvertWorkspaceVariant } from "../lib/convert-route";
   export type {
-    CreateWorkspaceSurface,
     CreateWorkspaceVariant,
   } from "./CreateWorkspace.svelte";
   export type {
-    ExtractWorkspaceSurface,
+    ExtractWorkspaceBridge,
     ExtractWorkspaceVariant,
   } from "./ExtractWorkspace.svelte";
+
+  import type { ExtractWorkspaceSession } from "../lib/extract-workspace.svelte";
+  import type { ExtractPresentation } from "../lib/extract-presentation";
+  import type { ArchivePresetSession } from "../lib/archive-presets.svelte";
 
   type WorkspaceKind = "create" | "convert" | "extract";
   type WorkspaceProps = {
@@ -33,14 +36,21 @@
     failureBody: string;
     retryLabel: string;
   } & (
-    | { kind: "create"; variant: CreateWorkspaceVariant; surface: CreateWorkspaceSurface }
+    | { kind: "create"; variant: CreateWorkspaceVariant; session: CreateSession }
     | {
         kind: "convert";
         variant: ConvertWorkspaceVariant;
         owner: ConvertRouteOwner;
         bridge: ConvertRouteBridge;
       }
-    | { kind: "extract"; variant: ExtractWorkspaceVariant; surface: ExtractWorkspaceSurface }
+    | {
+        kind: "extract";
+        variant: ExtractWorkspaceVariant;
+        session: ExtractWorkspaceSession;
+        view: ExtractPresentation;
+        presets: ArchivePresetSession;
+        bridge: ExtractWorkspaceBridge;
+      }
   );
   type WorkspaceComponent = Component<Record<string, unknown>>;
 
@@ -111,8 +121,10 @@
 {:then Workspace}
   {#if props.kind === "convert"}
     <Workspace variant={props.variant} owner={props.owner} bridge={props.bridge} />
+  {:else if props.kind === "extract"}
+    <Workspace variant={props.variant} session={props.session} view={props.view} presets={props.presets} bridge={props.bridge} />
   {:else}
-    <Workspace variant={props.variant} surface={props.surface} />
+    <Workspace variant={props.variant} session={props.session} />
   {/if}
 {:catch error}
   {#if props.variant === "modern"}

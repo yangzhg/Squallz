@@ -64,7 +64,7 @@ export class ArchiveEditSession {
     private readonly queue: QueueArchiveEdit,
     private readonly blockSelectionAction: () => boolean,
     private readonly presentation: {
-      tr: (key: string, fallback: string) => string;
+      tr: (key: string, fallback?: string) => string;
       tError: (error: ErrorDto) => string;
       emit: (effect: ArchiveEditEffect) => void;
     },
@@ -136,7 +136,7 @@ export class ArchiveEditSession {
     const context = this.readContext();
     if (!context.archive || context.opening || context.archive.source !== owner.source
       || context.archive.encoding_override !== owner.encoding || context.generation !== owner.generation) {
-      return this.tr("gui.edit.archive_changed", "The archive changed. Your text is kept. Cancel and reopen the editor for the intended archive.");
+      return this.tr("gui.edit.archive_changed");
     }
     return context.mutationDisabledReason;
   }
@@ -150,7 +150,7 @@ export class ArchiveEditSession {
       return path ? `${path}/` : "";
     }
     if (owner.kind === "new-folder") {
-      const name = normalizeArchivePath(input, this.tr("gui.new_folder.default_name", "New Folder"));
+      const name = normalizeArchivePath(input, this.tr("gui.new_folder.default_name"));
       const parent = input.startsWith("/") ? "" : owner.directory;
       return `${parent ? `${parent}/` : ""}${name}/`;
     }
@@ -165,27 +165,27 @@ export class ArchiveEditSession {
 
   get status(): string {
     const owner = this.#draft;
-    if (!owner || !this.readContext().archive) return this.tr("gui.empty.open_archive_first", "Open archive");
+    if (!owner || !this.readContext().archive) return this.tr("gui.empty.open_archive_first");
     const target = this.targetPath;
     if (owner.kind === "rename") {
       const from = this.renameSource(owner);
-      if (from === null) return this.tr("gui.rename.select_one_entry", "Select exactly one file or folder to rename");
+      if (from === null) return this.tr("gui.rename.select_one_entry");
       if (target === from) return this.unchangedName();
       const issue = this.renameIssue(from, target);
-      if (issue.blocking) return this.tr("gui.rename.blocked_reason", "Blocked: {reason}").replace("{reason}", issue.blocking);
+      if (issue.blocking) return this.tr("gui.rename.blocked_reason").replace("{reason}", issue.blocking);
       return `${issue.warning ? `${issue.warning} · ` : ""}${from} -> ${target}` + this.destinationCheckSuffix();
     }
     const problem = owner.kind === "move" ? this.moveProblem(owner, target) : this.pathProblem(target);
     if (problem) return problem;
     if (owner.kind === "new-folder") {
-      return this.tr("gui.new_folder.create_path", "Create {folder}").replace("{folder}", target) + this.destinationCheckSuffix();
+      return this.tr("gui.new_folder.create_path").replace("{folder}", target) + this.destinationCheckSuffix();
     }
     if (!owner.paths.size) {
-      return this.tr("gui.move.select_entries_to_move_into", "Select entries to move into {target}").replace("{target}", target || "/");
+      return this.tr("gui.move.select_entries_to_move_into").replace("{target}", target || "/");
     }
-    return this.tr("gui.move.selected_to_target", "{count} selected -> {target}")
+    return this.tr("gui.move.selected_to_target")
       .replace("{count}", owner.paths.size.toLocaleString()).replace("{target}", target || "/")
-      + this.tr("gui.move.check_before_submit", " · all target names will be checked before moving");
+      + this.tr("gui.move.check_before_submit");
   }
 
   async submit(): Promise<void> {
@@ -203,7 +203,7 @@ export class ArchiveEditSession {
     }
     const from = this.renameSource(owner);
     if (owner.kind === "rename" && from === null) {
-      this.notice(this.tr("gui.precondition.select_one_before_rename", "Select exactly one file or folder before renaming"));
+      this.notice(this.tr("gui.precondition.select_one_before_rename"));
       return;
     }
     const problem = owner.kind === "rename"
@@ -214,14 +214,14 @@ export class ArchiveEditSession {
     if (!await this.validateTarget(owner, archive.id, target) || !this.checkCurrent(owner, archiveId, target)) return;
     if (owner.kind === "rename") {
       await this.submitUpdate(archive, { rename: [{ from: from!, to: target }], mkdir: [] },
-        this.tr("gui.rename.queued_notice", "Rename queued: {from} -> {to}").replace("{from}", from!).replace("{to}", target),
-        this.tr("gui.precondition.open_before_rename", "Open an archive before renaming entries"),
-        this.tr("gui.rename.queued", "Rename entry queued"), `${from} -> ${target}`);
+        this.tr("gui.rename.queued_notice").replace("{from}", from!).replace("{to}", target),
+        this.tr("gui.precondition.open_before_rename"),
+        this.tr("gui.rename.queued"), `${from} -> ${target}`);
     } else {
       await this.submitUpdate(archive, { rename: [], mkdir: [target] },
-        this.tr("gui.new_folder.queued_notice", "New folder queued: {folder}").replace("{folder}", target),
-        this.tr("gui.precondition.open_before_new_folder", "Open an archive before creating a folder"),
-        this.tr("gui.new_folder.queued", "New folder queued"), target);
+        this.tr("gui.new_folder.queued_notice").replace("{folder}", target),
+        this.tr("gui.precondition.open_before_new_folder"),
+        this.tr("gui.new_folder.queued"), target);
     }
   }
 
@@ -248,7 +248,7 @@ export class ArchiveEditSession {
       if (missing.length) { this.#error = this.missingItems(missing); return false; }
       return true;
     } catch (error) {
-      if (this.checkCurrent(owner, id, target)) this.#error = this.tr("gui.edit.check_failed", "Could not check the original items. Your text is kept. Try again.") + this.errorDetail(error);
+      if (this.checkCurrent(owner, id, target)) this.#error = this.tr("gui.edit.check_failed") + this.errorDetail(error);
       return false;
     } finally {
       if (this.#draft === owner) this.#checking = false;
@@ -259,7 +259,7 @@ export class ArchiveEditSession {
     if (this.#draft !== owner || this.targetPath !== target) return false;
     const blocked = this.blockedReason;
     if (id !== undefined && this.readContext().archive?.id === id && !blocked) return true;
-    this.#error = blocked || this.tr("gui.edit.check_changed", "The archive changed while checking. Your text is kept. Try again.");
+    this.#error = blocked || this.tr("gui.edit.check_changed");
     return false;
   }
 
@@ -271,12 +271,12 @@ export class ArchiveEditSession {
       if (!this.checkCurrent(owner, id, target)) return false;
       if (inspection.blocked_parent) { this.#error = this.parentIsFile(inspection.blocked_parent); return false; }
       if (inspection.exists) {
-        this.#error = this.tr("gui.edit.target_exists", "{path} already exists. Choose a different name or path.").replace("{path}", target);
+        this.#error = this.tr("gui.edit.target_exists").replace("{path}", target);
         return false;
       }
       return true;
     } catch (error) {
-      if (this.checkCurrent(owner, id, target)) this.#error = this.tr("gui.edit.target_check_failed", "Could not check the destination. Your text is kept. Try again.") + this.errorDetail(error);
+      if (this.checkCurrent(owner, id, target)) this.#error = this.tr("gui.edit.target_check_failed") + this.errorDetail(error);
       return false;
     } finally {
       if (this.#draft === owner) this.#checking = false;
@@ -284,7 +284,7 @@ export class ArchiveEditSession {
   }
 
   private async checkMove(owner: ArchiveEditOwner, archive: EditingArchive, targetDir: string): Promise<void> {
-    if (!owner.paths.size) { this.notice(this.tr("gui.precondition.select_entries_before_move", "Select entries before moving")); return; }
+    if (!owner.paths.size) { this.notice(this.tr("gui.precondition.select_entries_before_move")); return; }
     const problem = this.moveProblem(owner, targetDir);
     if (problem) { this.#error = problem; return; }
     this.#checking = true;
@@ -296,8 +296,8 @@ export class ArchiveEditSession {
       if (checked.blocked_parent) { this.#error = this.parentIsFile(checked.blocked_parent); return; }
       const items = checked.items.map((item): MovePlanItem => ({
         from: item.from, to: item.to, conflict: item.conflict !== null,
-        reason: item.conflict === "existing_target" ? this.tr("gui.move.target_already_exists", "Target already exists")
-          : item.conflict === "duplicate_target" ? this.tr("gui.move.duplicate_target_name", "Multiple selected entries share this target name") : null,
+        reason: item.conflict === "existing_target" ? this.tr("gui.move.target_already_exists")
+          : item.conflict === "duplicate_target" ? this.tr("gui.move.duplicate_target_name") : null,
         keepBothTo: item.keep_both_to,
       }));
       const conflicts = items.filter((item) => item.conflict);
@@ -314,7 +314,7 @@ export class ArchiveEditSession {
       this.#checking = false;
       await this.submitMovePlan(items.map(({ from, to }) => ({ from, to })), targetDir);
     } catch (error) {
-      if (this.checkCurrent(owner, archive.id, targetDir)) this.#error = this.tr("gui.move.check_failed", "Could not check move targets. Your destination is kept. Try again.") + this.errorDetail(error);
+      if (this.checkCurrent(owner, archive.id, targetDir)) this.#error = this.tr("gui.move.check_failed") + this.errorDetail(error);
     } finally {
       if (this.#draft === owner) this.#checking = false;
     }
@@ -326,18 +326,18 @@ export class ArchiveEditSession {
     const review = this.#review;
     if (review && (context.archive?.id !== review.archiveId || context.generation !== review.generation || context.opening)) {
       this.clearReview(false);
-      this.notice(this.tr("gui.move.review_changed", "The archive changed. Select the items and check the move targets again."));
+      this.notice(this.tr("gui.move.review_changed"));
       return;
     }
-    if (!context.archive) { this.notice(this.tr("gui.precondition.open_before_move", "Open an archive before moving entries")); return; }
+    if (!context.archive) { this.notice(this.tr("gui.precondition.open_before_move")); return; }
     if (context.mutationDisabledReason) { this.notice(context.mutationDisabledReason); return; }
-    if (!rename.length) { this.notice(this.tr("gui.move.no_non_conflicting_targets", "No non-conflicting move targets to submit")); return; }
+    if (!rename.length) { this.notice(this.tr("gui.move.no_non_conflicting_targets")); return; }
     await this.submitUpdate(context.archive, { rename, mkdir: [] },
-      rename.length === 1 ? this.tr("gui.move.operation_queued", "1 move operation queued")
-        : this.tr("gui.move.operations_queued", "{count} move operations queued").replace("{count}", rename.length.toLocaleString()),
-      this.tr("gui.precondition.open_before_move", "Open an archive before moving entries"),
-      this.tr("gui.move.queued", "Move entries queued"),
-      this.tr("gui.move.entries_to_target", "{count} entries to {target}").replace("{count}", rename.length.toLocaleString()).replace("{target}", targetDir || "/"));
+      rename.length === 1 ? this.tr("gui.move.operation_queued")
+        : this.tr("gui.move.operations_queued").replace("{count}", rename.length.toLocaleString()),
+      this.tr("gui.precondition.open_before_move"),
+      this.tr("gui.move.queued"),
+      this.tr("gui.move.entries_to_target").replace("{count}", rename.length.toLocaleString()).replace("{target}", targetDir || "/"));
   }
 
   private async submitUpdate(archive: EditingArchive, intent: Pick<UpdateJob, "rename" | "mkdir">,
@@ -365,34 +365,34 @@ export class ArchiveEditSession {
   }
 
   private renameSource(owner: ArchiveEditOwner): string | null { return owner.paths.size === 1 ? [...owner.paths][0] : null; }
-  private tr(key: string, fallback: string): string { return this.presentation.tr(key, fallback); }
+  private tr(key: string, fallback?: string): string { return this.presentation.tr(key, fallback); }
   private notice(message: string): void { this.presentation.emit({ kind: "notice", message }); }
   private errorDetail(error: unknown): string { return isErrorDto(error) ? ` ${this.presentation.tError(error)}` : ""; }
-  private unchangedName(): string { return this.tr("gui.rename.target_must_differ", "The name is unchanged. Enter a different name or path."); }
-  private destinationCheckSuffix(): string { return this.tr("gui.edit.destination_check_suffix", " · destination will be checked before queuing"); }
+  private unchangedName(): string { return this.tr("gui.rename.target_must_differ"); }
+  private destinationCheckSuffix(): string { return this.tr("gui.edit.destination_check_suffix"); }
   private missingItems(paths: readonly string[]): string {
-    return this.tr("gui.edit.items_missing", "These original items no longer exist: {paths}. Your text is kept. Cancel and select the intended items again.").replace("{paths}", paths.join(", "));
+    return this.tr("gui.edit.items_missing").replace("{paths}", paths.join(", "));
   }
   private parentIsFile(path: string): string {
-    return this.tr("gui.edit.parent_is_file", "{path} is a file and cannot be used as a parent folder. Choose a different path.").replace("{path}", path);
+    return this.tr("gui.edit.parent_is_file").replace("{path}", path);
   }
 
   private pathProblem(path: string, allowRoot = false): string {
     const issue = archiveEditPathIssue(path, allowRoot);
     if (!issue) return "";
-    if (issue.kind === "empty") return this.tr("gui.edit.path_empty", "Enter an archive path.");
-    if (issue.kind === "absolute") return this.tr("gui.edit.path_absolute", "Enter a relative path inside the archive without a leading slash.");
-    if (issue.kind === "parent") return this.tr("gui.edit.path_parent", "Parent references (..) are not allowed. Enter a path inside the archive.");
-    if (issue.kind === "characters") return this.tr("gui.edit.path_characters", "{name} contains characters that cannot be used on Windows. Remove them or choose another name.").replace("{name}", issue.segment);
-    if (issue.kind === "trailing") return this.tr("gui.edit.path_trailing", "{name} ends with a space or dot. Choose a portable name.").replace("{name}", issue.segment);
-    return this.tr("gui.edit.path_reserved", "{name} is reserved on Windows. Choose another name.").replace("{name}", issue.segment);
+    if (issue.kind === "empty") return this.tr("gui.edit.path_empty");
+    if (issue.kind === "absolute") return this.tr("gui.edit.path_absolute");
+    if (issue.kind === "parent") return this.tr("gui.edit.path_parent");
+    if (issue.kind === "characters") return this.tr("gui.edit.path_characters").replace("{name}", issue.segment);
+    if (issue.kind === "trailing") return this.tr("gui.edit.path_trailing").replace("{name}", issue.segment);
+    return this.tr("gui.edit.path_reserved").replace("{name}", issue.segment);
   }
 
   private renameIssue(source: string, target: string): { blocking: string | null; warning: string | null } {
     const blocking = this.pathProblem(target);
     if (blocking) return { blocking, warning: null };
     if (source.endsWith("/")) return {
-      blocking: target.startsWith(source) ? this.tr("gui.move.inside_source", "Choose a destination outside the selected folder.") : null,
+      blocking: target.startsWith(source) ? this.tr("gui.move.inside_source") : null,
       warning: null,
     };
     const extension = (path: string) => {
@@ -402,19 +402,19 @@ export class ArchiveEditSession {
     };
     const from = extension(source), to = extension(target);
     return { blocking: null, warning: from.toLowerCase() === to.toLowerCase() ? null
-      : this.tr("gui.rename.extension_change", "Extension changes {from} → {to}")
-        .replace("{from}", from || this.tr("gui.rename.no_extension", "no extension"))
-        .replace("{to}", to || this.tr("gui.rename.no_extension", "no extension")) };
+      : this.tr("gui.rename.extension_change")
+        .replace("{from}", from || this.tr("gui.rename.no_extension"))
+        .replace("{to}", to || this.tr("gui.rename.no_extension")) };
   }
 
   private moveProblem(owner: ArchiveEditOwner, targetDir: string): string {
     const problem = this.pathProblem(targetDir, true);
     if (problem) return problem;
     for (const source of archiveSelectionRoots(owner.paths)) {
-      if (source.endsWith("/") && targetDir.startsWith(source)) return this.tr("gui.move.inside_source", "Choose a destination outside the selected folder.");
+      if (source.endsWith("/") && targetDir.startsWith(source)) return this.tr("gui.move.inside_source");
       const isDir = source.endsWith("/");
       if (`${targetDir}${basename(source.replace(/\/$/u, ""))}${isDir ? "/" : ""}` === source) {
-        return this.tr("gui.move.same_location", "An entry is already in this folder. Choose another destination.");
+        return this.tr("gui.move.same_location");
       }
     }
     return "";

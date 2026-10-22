@@ -14,8 +14,8 @@ mod writer;
 use std::io::Write;
 
 use squallz_format_api::{
-    ArchiveFormat, ArchiveReader, ArchiveWriter, CreateOptions, FormatCapabilities, FormatError,
-    OpenOptions, ReadSeek, StreamFactory, WriteSeek,
+    ArchiveFormat, ArchiveReader, ArchiveWriter, ControlToken, CreateOptions, FormatCapabilities,
+    FormatError, OpenOptions, ReadSeek, StreamFactory, WriteSeek,
 };
 
 /// Offset of the `ustar` magic inside a tar header block.
@@ -70,8 +70,12 @@ impl ArchiveFormat for TarFormat {
         &self,
         src: Box<dyn ReadSeek>,
         _opts: &OpenOptions,
+        ctl: &ControlToken,
     ) -> Result<Box<dyn ArchiveReader>, FormatError> {
-        Ok(Box::new(reader::TarArchiveReader::seekable(src)))
+        ctl.checkpoint()?;
+        let reader = reader::TarArchiveReader::seekable(src);
+        ctl.checkpoint()?;
+        Ok(Box::new(reader))
     }
 
     fn open_stream(
@@ -86,9 +90,13 @@ impl ArchiveFormat for TarFormat {
         &self,
         dst: Box<dyn WriteSeek>,
         opts: &CreateOptions,
+        ctl: &ControlToken,
     ) -> Result<Box<dyn ArchiveWriter>, FormatError> {
+        ctl.checkpoint()?;
         self.check_create_opts(opts)?;
-        Ok(Box::new(writer::TarArchiveWriter::new(dst)))
+        let writer = writer::TarArchiveWriter::new(dst);
+        ctl.checkpoint()?;
+        Ok(Box::new(writer))
     }
 
     fn create_stream(

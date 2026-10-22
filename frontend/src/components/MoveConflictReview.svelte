@@ -18,7 +18,7 @@
     review, tr, classic = false, onCancel, onReadyOnly, onKeepBoth,
   }: {
     review: MoveConflictReviewView;
-    tr: (key: string, fallback: string) => string;
+    tr: (key: string, fallback?: string) => string;
     classic?: boolean;
     onCancel: () => void;
     onReadyOnly: () => void;
@@ -35,7 +35,7 @@
   let pageCount = $derived(Math.ceil(review.items.length / pageSize));
   let start = $derived(page * pageSize);
   let items = $derived(review.items.slice(start, start + pageSize));
-  let range = $derived(tr("gui.move.conflict_range", "Conflicts {start}–{end} of {count}")
+  let range = $derived(tr("gui.move.conflict_range")
     .replace("{start}", (start + 1).toLocaleString())
     .replace("{end}", (start + items.length).toLocaleString())
     .replace("{count}", review.items.length.toLocaleString()));
@@ -71,14 +71,14 @@
 >
   <header class="move-conflict-heading">
     <h2 id={`${id}-title`} bind:this={heading} tabindex="-1">
-      {tr("gui.move.target_conflicts", "Move conflicts in {target}: {count}")
+      {tr("gui.move.target_conflicts")
         .replace("{count}", review.items.length.toLocaleString())
         .replace("{target}", review.targetDir || "/")}
     </h2>
     <p>
-      {tr("gui.move.ready_without_renaming", "{count} entries are ready to move without changing names.")
+      {tr("gui.move.ready_without_renaming")
         .replace("{count}", review.readyCount.toLocaleString())}
-      {tr("gui.move.whole_selection", "Your choice applies to the whole selection.")}
+      {tr("gui.move.whole_selection")}
     </p>
   </header>
   <!-- svelte-ignore a11y_no_noninteractive_tabindex (focusable scroll region) -->
@@ -86,16 +86,16 @@
     class="move-conflict-list"
     bind:this={list}
     role="region"
-    aria-label={tr("gui.move.conflict_paths", "Conflict paths")}
+    aria-label={tr("gui.move.conflict_paths")}
     aria-describedby={`${id}-range`}
     tabindex="0"
   >
     <table class="move-conflict-table" aria-labelledby={`${id}-title`} aria-rowcount={review.items.length + 1}>
       <thead>
         <tr aria-rowindex="1">
-          <th scope="col">{tr("common.source", "Source")}</th>
-          <th scope="col">{tr("gui.move.requested_target", "Requested target")}</th>
-          <th scope="col">{tr("gui.move.keep_both_target", "Target when keeping both")}</th>
+          <th scope="col">{tr("common.source")}</th>
+          <th scope="col">{tr("gui.move.requested_target")}</th>
+          <th scope="col">{tr("gui.move.keep_both_target")}</th>
         </tr>
       </thead>
       <tbody>
@@ -112,17 +112,17 @@
   <div class="move-conflict-page-controls">
     <p id={`${id}-range`} class="move-conflict-range" role="status">{range}</p>
     {#if pageCount > 1}
-      <nav class="move-conflict-pagination" aria-label={tr("gui.move.conflict_pages", "Move conflict pages")}>
-        <button type="button" class="secondary-lite" disabled={page === 0} onclick={() => void changePage(0)}>{tr("gui.move.first_page", "First page")}</button>
-        <button type="button" class="secondary-lite" disabled={page === 0} onclick={() => void changePage(page - 1)}>{tr("gui.move.previous_page", "Previous page")}</button>
-        <button type="button" class="secondary-lite" disabled={page === pageCount - 1} onclick={() => void changePage(page + 1)}>{tr("gui.move.next_page", "Next page")}</button>
-        <button type="button" class="secondary-lite" disabled={page === pageCount - 1} onclick={() => void changePage(pageCount - 1)}>{tr("gui.move.last_page", "Last page")}</button>
+      <nav class="move-conflict-pagination" aria-label={tr("gui.move.conflict_pages")}>
+        <button type="button" class="secondary-lite" disabled={page === 0} onclick={() => void changePage(0)}>{tr("gui.move.first_page")}</button>
+        <button type="button" class="secondary-lite" disabled={page === 0} onclick={() => void changePage(page - 1)}>{tr("gui.move.previous_page")}</button>
+        <button type="button" class="secondary-lite" disabled={page === pageCount - 1} onclick={() => void changePage(page + 1)}>{tr("gui.move.next_page")}</button>
+        <button type="button" class="secondary-lite" disabled={page === pageCount - 1} onclick={() => void changePage(pageCount - 1)}>{tr("gui.move.last_page")}</button>
       </nav>
     {/if}
   </div>
   <div class="move-conflict-actions" class:classic-button-row={classic}>
-    <button type="button" onclick={onCancel}>{tr("common.cancel", "Cancel")}</button>
-    <button type="button" disabled={review.readyCount === 0} onclick={onReadyOnly}>{tr("gui.move.ready_only", "Move items without conflicts")}</button>
-    <button type="button" class={classic ? "classic-primary" : "primary-lite"} onclick={onKeepBoth}>{tr("gui.move.keep_both_all", "Keep both and move all")}</button>
+    <button type="button" onclick={onCancel}>{tr("common.cancel")}</button>
+    <button type="button" disabled={review.readyCount === 0} onclick={onReadyOnly}>{tr("gui.move.ready_only")}</button>
+    <button type="button" class={classic ? "classic-primary" : "primary-lite"} onclick={onKeepBoth}>{tr("gui.move.keep_both_all")}</button>
   </div>
 </section>

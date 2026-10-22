@@ -1,18 +1,24 @@
+import { jobResult } from "../../tests/job-results.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
 import vm from "node:vm";
-import { createTestServer } from "../../tests/runtime.mjs";
+import { englishTranslate, createTestServer } from "../../tests/runtime.mjs";
 import { compileTestScript, readSvelteScript, selectFunctions, selectMountCallbacks, selectVariableStatements } from "../../tests/source.mjs";
 import { settingsDto } from "../../tests/settings.mjs";
-import { installBatchExtractDraft } from "../../tests/options-drafts.mjs";
+import { extractionFixture } from "../../tests/extraction.mjs";
 
 const server = await createTestServer();
 test.after(() => server.close());
 const { taskReviewScreen } = await server.ssrLoadModule("/src/lib/task-model.ts");
-const { BatchExtractDraft } = await server.ssrLoadModule("/src/lib/batch-extract.svelte.ts");
+const fixture = await extractionFixture(server);
+test.afterEach(() => fixture.dispose());
 const { readBatchExtractResult } = await server.ssrLoadModule("/src/lib/batch-extract-result.ts");
 const { desktopBasename, normalizeDesktopFolder } = await server.ssrLoadModule("/src/lib/desktop-path.ts");
 const { SettingsSession } = await server.ssrLoadModule("/src/lib/settings-session.svelte.ts");
+const { RecoverySession } = await server.ssrLoadModule("/src/lib/recovery-session.svelte.ts");
+const { ToolsSession } = await server.ssrLoadModule("/src/lib/tools-session.svelte.ts");
+const hostSessions = [];
+test.afterEach(() => { for (const session of hostSessions.splice(0)) session.dispose(); });
 const archiveStore = await server.ssrLoadModule("/src/lib/archive.svelte.ts");
 const { ipc } = await server.ssrLoadModule("/src/lib/ipc.ts");
 const { loadLocale } = await server.ssrLoadModule("/src/lib/i18n.svelte.ts");
@@ -34,26 +40,24 @@ const plain = (value) => JSON.parse(JSON.stringify(value));
 
 function harness() {
   const source = readSvelteScript(new URL("../App.svelte", import.meta.url), "App.ts");
-  const names = ["cancelTaskReview", "reviewTask", "batchDraftLocked", "setBatchArchivePaths", "editBatchDraft",
-    "removeBatchItem", "chooseBatchPaths", "startBatchExtract", "batchWorkspaceSurface", "setScreen", "dismissRecoveryPreparation",
-    "normalizedDefaultExtractDir", "normalizedFolderSetting"];
+  const names = ["cancelTaskReview", "reviewTask", "removeBatchItem", "setScreen",
+    "extractionReviewSurface", "normalizedDefaultExtractDir", "normalizedFolderSetting"];
   const declarations = selectFunctions(source, names);
   const calls = [];
   const context = {
-    BatchExtractDraft, normalizeDesktopFolder, batchSubmissionPending: false, batchPickerBusy: false,
+    normalizeDesktopFolder,
     batchReviewFocusPending: false, batchPickerRequest: 0,
     nestedExtractPickerBusy: false, nestedExtractPickerRequest: 0, nestedExtractDraftGeneration: 0,
     archiveUpdateReview: { cancelSourceChoice() {} }, taskReviewRequestGeneration: 0,
     dismissArchivePicker() {}, clearEntryPreviewState() {}, syncUrl() {},
     screen: "browse", archiveOpenStatus: "idle", taskWindowMode: false, runtimePreviews: {batchPaths:[]},
-    recoveryPickerStatus: "idle", recoveryPickerRequest: 0, recoveryOutputPreparation: null,
-    dismissCreatePreparation() {}, syncCreatePreflightContext() {},
+    create: { dismiss() {}, syncContext() {} },
     dismissArchiveAddPreparation() {},
     currentArchive: {source:"/unrelated/current.zip",path:"/unrelated/current.zip",encoding_override:"shift_jis"},
     pathBaseName: (path) => desktopBasename(path,"macos"),
     archiveFormatFromPath: (path) => path.split(".").at(-1).toUpperCase(),
     platformKind: () => "macos",
-    tr: (_key, fallback) => fallback, taskReviewScreen, readBatchExtractResult,
+    tr: englishTranslate, taskReviewScreen, readBatchExtractResult,
     preventCreateSubmissionNavigation: () => false, preventConvertSubmissionNavigation: () => false,
     focusBlockingTaskIfAny: () => false,
     dismissTaskDialog: async () => { calls.push(["dismiss"]); },
@@ -70,8 +74,18 @@ function harness() {
     openNativeDialog: async (_key,open,options) => open(options),
   };
   context.settingsSession = new SettingsSession({ platform: context.platformKind, tr: context.tr, emit() {} });
+  context.recoverySession = new RecoverySession({
+    read: () => ({ active: context.screen === "recovery", mode: "modern", generation: context.archiveOpenGeneration ?? 0,
+      archive: context.currentArchive, tasks: [], selection: [], platform: "macos", level: 6, profile: "Balanced" }),
+    notice: context.showNotice,
+  });
+  context.tools = new ToolsSession({
+    read: () => ({ archive: context.currentArchive, tasks: [], screen: context.screen, copyScope: "", visibleTaskId: null }),
+    notice: context.showNotice,
+  });
+  hostSessions.push(context.recoverySession, context.tools);
   context.settingsSession.applySnapshot(settingsDto(), context.settingsSession.captureGenerations());
-  installBatchExtractDraft(source, context);
+  fixture.install(context);
   const outputText = compileTestScript(declarations.map((node) => node.getText(source)).join("\n"));
   return {...vm.runInNewContext(`${outputText}\n({${names.join(",")}})`,context),context,calls};
 }
@@ -139,7 +153,6 @@ function startupHarness({ forceFirstRun = false, taskWindowMode = false, batchPa
     cancelArchivePasswordPrompt: archiveStore.cancelPasswordPrompt,
     rememberRecent: (path) => calls.push(["recent", path]), recordValidationRenderReady() {},
     taskDialogTaskId: null, taskDialogDismissedId: null, jobSubmitInFlight: false, submittingJobSpec: null,
-    checksumAlgorithm: "sha256", checksumExcludeRules: () => [],
     rememberWindowRecovery: (recovery) => calls.push(["window-recovery", plain(recovery)]),
     submitArchiveJob: async (job) => { calls.push(["submit", plain(job)]); return 99; },
     setTimeout, clearTimeout,
@@ -155,7 +168,7 @@ function startupHarness({ forceFirstRun = false, taskWindowMode = false, batchPa
   const code = [...variables, ...declarations].map((node) => node.getText(source)).join("\n");
   vm.runInContext(compileTestScript(code.replaceAll("import.meta.env.DEV", "false")), vmContext);
   const callbacks = vm.runInContext(compileTestScript(`[${mounts.map((node) => node.getText(source)).join(",")}];`), vmContext);
-  if (batchPaths) run.setBatchArchivePaths(batchPaths);
+  if (batchPaths) run.context.extraction.review.replaceSources(batchPaths);
   const cleanups = callbacks.map((mount) => mount());
   let disposed = false;
   const cleanup = () => { if (!disposed) { disposed = true; for (const release of cleanups) release?.(); } };
@@ -179,11 +192,11 @@ async function withStartup(options, body) {
 
 test("partially successful batches expose a review action for failed archives", () => {
   assert.equal(taskReviewScreen({ state: "done", spec: { kind: "batch_extract" },
-    result: { failed: 1, extracted: 2 } }), "batch");
+    result: jobResult("batch_extract", { failed: 1, extracted: 2 }) }), "batch");
   assert.equal(taskReviewScreen({ state: "done", spec: { kind: "batch_extract" },
-    result: { failed: 0, extracted: 3 } }), null);
+    result: jobResult("batch_extract", { failed: 0, extracted: 3 }) }), null);
   assert.equal(taskReviewScreen({ state: "done", spec: { kind: "batch_extract" },
-    result: { failed: 0, extracted: 3, outputs: [{ archive: "damaged.zip", counts: { failed: 1 } }] } }), "batch");
+    result: jobResult("batch_extract", { failed: 0, extracted: 3, outputs: [{ archive: "damaged.zip", counts: { failed: 1 } }] }) }), "batch");
 });
 
 for (const state of ["failed", "cancelled"]) {
@@ -192,29 +205,29 @@ test(`${state} batch review restores original nonsecret settings; edits are exac
   const original = spec();
   await run.reviewTask({state,spec:original,result:null});
   original.items[0].dest = "/changed/task-input";
-  assert.equal(run.context.batchDraft.items[0].dest, spec().items[0].dest, "review retains its own nonsecret item snapshot");
+  assert.equal(run.context.extraction.review.batch.state.items[0].dest, spec().items[0].dest, "review retains its own nonsecret item snapshot");
   assert.equal(run.context.screen,"batch");
   assert.equal(run.calls.some(([name]) => name === "submit"),false);
-  let surface = run.batchWorkspaceSurface("modern");
-  assert.deepEqual(Array.from(surface.rows,(row)=>row.target),spec().items.map((item)=>item.dest));
-  assert.equal(surface.rows[0].encoding,"gbk");
-  assert.equal(surface.rows[0].bestEffort,true);
-  assert.equal(surface.overwrite,"rename");
-  assert.equal(surface.symlinks,"skip");
-  assert.equal(surface.smart,false);
-  surface.rows[0].onTargetInput("/edited/完整目标");
-  surface.onSmartChange(true);
-  surface.onOverwriteChange("ask");
-  surface.onSymlinksChange("preserve");
-  surface = run.batchWorkspaceSurface("classic");
-  const saved = plain(run.context.batchDraft);
-  const snapshot = run.context.batchExtract.snapshotRun();
+  let draft = run.context.extraction.review.batch.state;
+  assert.deepEqual(Array.from(draft.items,(row)=>row.dest),spec().items.map((item)=>item.dest));
+  assert.equal(draft.items[0].encoding,"gbk");
+  assert.equal(draft.items[0].best_effort,true);
+  assert.equal(draft.overwrite,"rename");
+  assert.equal(draft.symlinks,"skip");
+  assert.equal(draft.smart,false);
+  run.context.extraction.review.editBatch({ kind: "destination", index: 0, value: "/edited/完整目标" });
+  run.context.extraction.review.editBatch({ kind: "smart", value: true });
+  run.context.extraction.review.editBatch({ kind: "overwrite", value: "ask" });
+  run.context.extraction.review.editBatch({ kind: "symlinks", value: "preserve" });
+  draft = run.context.extraction.review.batch.state;
+  const saved = plain(run.context.extraction.review.batch.state);
+  const snapshot = run.context.extraction.review.batch.snapshotRun();
   snapshot.items[0].dest = "/changed/run-snapshot";
   snapshot.items.push({ ...snapshot.items[0], path: "/changed/extra.zip" });
-  assert.deepEqual(plain(run.context.batchDraft), saved, "a run snapshot cannot change draft items or destinations");
-  await run.startBatchExtract();
+  assert.deepEqual(plain(run.context.extraction.review.batch.state), saved, "a run snapshot cannot change draft items or destinations");
+  await run.context.extraction.review.start("batch");
   const submitted = run.calls.find(([name])=>name==="submit")[1];
-  assert.deepEqual(submitted.items.map((item)=>item.dest),Array.from(surface.rows,(row)=>row.target));
+  assert.deepEqual(submitted.items.map((item)=>item.dest),Array.from(draft.items,(row)=>row.dest));
   assert.equal(submitted.items[0].dest,"/edited/完整目标");
   assert.equal(submitted.items[0].encoding,"gbk");
   assert.equal(submitted.items[0].best_effort,true);
@@ -222,102 +235,102 @@ test(`${state} batch review restores original nonsecret settings; edits are exac
   assert.equal(submitted.overwrite,"ask");
   assert.equal(submitted.symlinks,"preserve");
   assert.ok(submitted.items.every((item)=>item.password===null));
-  assert.equal("password" in run.context.batchDraft.items[0],false);
+  assert.equal("password" in run.context.extraction.review.batch.state.items[0],false);
 });
 }
 
 test("partial success restores only identified failures and ambiguous results preserve the current draft", async () => {
   const run = harness();
   const job=spec();
-  await run.reviewTask({state:"done",spec:job,result:{failed:2,failures:[{archive:job.items[2].path},{archive:job.items[0].path}]}});
-  assert.deepEqual(Array.from(run.context.batchDraft.items,(item)=>item.path),[job.items[0].path,job.items[2].path]);
-  const saved=plain(run.context.batchDraft);
-  const revision = run.context.batchExtract.revision;
+  await run.reviewTask({state:"done",spec:job,result:jobResult("batch_extract", {failed:2,failures:[{archive:job.items[2].path},{archive:job.items[0].path}]})});
+  assert.deepEqual(Array.from(run.context.extraction.review.batch.state.items,(item)=>item.path),[job.items[0].path,job.items[2].path]);
+  const saved=plain(run.context.extraction.review.batch.state);
+  const revision = run.context.extraction.review.batch.revision;
   for (const failures of [[],[{archive:"/unknown.zip"}],[{archive:job.items[0].path},{archive:job.items[0].path}]]) {
-    await run.reviewTask({state:"done",spec:job,result:{failed:2,failures}});
-    assert.deepEqual(plain(run.context.batchDraft),saved);
+    await run.reviewTask({state:"done",spec:job,result:jobResult("batch_extract", {failed:2,failures})});
+    assert.deepEqual(plain(run.context.extraction.review.batch.state),saved);
     assert.match(run.calls.at(-1)[1],/cannot identify/);
-    assert.equal(run.context.batchExtract.revision, revision, "ambiguous reports do not invalidate an unchanged draft");
+    assert.equal(run.context.extraction.review.batch.revision, revision, "ambiguous reports do not invalidate an unchanged draft");
   }
   for (const [task, displayed] of [
-    [{ state: "done", spec: job, result: { failed: 1, failures: [{ archive: "/unknown.zip" }] } }, job],
+    [{ state: "done", spec: job, result: jobResult("batch_extract", { failed: 1, failures: [{ archive: "/unknown.zip" }] }) }, job],
     [{ state: "failed", spec: job, result: null }, { ...job, items: job.items.slice(1) }],
   ]) {
     await run.reviewTask(task, displayed);
-    assert.deepEqual(plain(run.context.batchDraft), saved);
-    assert.equal(run.context.batchExtract.revision, revision);
+    assert.deepEqual(plain(run.context.extraction.review.batch.state), saved);
+    assert.equal(run.context.extraction.review.batch.revision, revision);
   }
   const duplicate={...job,items:[job.items[0],{...job.items[0],dest:"/different"}]};
-  assert.equal(run.context.batchExtract.restoreTask(duplicate, [{ archive: job.items[0].path }], 1, duplicate), false);
-  assert.deepEqual(plain(run.context.batchDraft), saved);
-  assert.equal(run.context.batchExtract.revision, revision);
+  assert.equal(run.context.extraction.review.batch.restoreTask(duplicate, [{ archive: job.items[0].path }], 1, duplicate), false);
+  assert.deepEqual(plain(run.context.extraction.review.batch.state), saved);
+  assert.equal(run.context.extraction.review.batch.revision, revision);
   const windows={...job,items:[{...job.items[0],path:"C:\\Sources\\A.zip"}]};
   const windowsReview = harness();
   windowsReview.context.platformKind = () => "windows";
-  assert.equal(windowsReview.context.batchExtract.restoreTask(windows, [{ archive: "c:/sources/a.zip" }], 1, windows), true);
-  assert.equal(windowsReview.context.batchDraft.items.length, 1);
-  const windowsDraft = plain(windowsReview.context.batchDraft);
-  const windowsRevision = windowsReview.context.batchExtract.revision;
+  assert.equal(windowsReview.context.extraction.review.batch.restoreTask(windows, [{ archive: "c:/sources/a.zip" }], 1, windows), true);
+  assert.equal(windowsReview.context.extraction.review.batch.state.items.length, 1);
+  const windowsDraft = plain(windowsReview.context.extraction.review.batch.state);
+  const windowsRevision = windowsReview.context.extraction.review.batch.revision;
   windowsReview.context.platformKind = () => "linux";
-  assert.equal(windowsReview.context.batchExtract.restoreTask(windows, [{ archive: "c:/sources/a.zip" }], 1, windows), false);
-  assert.deepEqual(plain(windowsReview.context.batchDraft), windowsDraft);
-  assert.equal(windowsReview.context.batchExtract.revision, windowsRevision);
+  assert.equal(windowsReview.context.extraction.review.batch.restoreTask(windows, [{ archive: "c:/sources/a.zip" }], 1, windows), false);
+  assert.deepEqual(plain(windowsReview.context.extraction.review.batch.state), windowsDraft);
+  assert.equal(windowsReview.context.extraction.review.batch.revision, windowsRevision);
   assert.equal(run.calls.some(([name])=>name==="submit"),false);
 });
 
 test("best-effort batches restore only archives with failed entries or archive failures", async () => {
   const run = harness();
   const job = spec();
-  const result = { failed: 1, failures: [{ archive: job.items[2].path }], outputs: [
+  const result = jobResult("batch_extract", { failed: 1, failures: [{ archive: job.items[2].path }], outputs: [
     { archive: job.items[0].path, counts: { failed: 2, skipped: 1 } },
     { archive: job.items[1].path, counts: { failed: 0, skipped: 1 } },
-  ] };
+  ] });
   await run.reviewTask({ state: "done", spec: job, result });
-  assert.deepEqual(Array.from(run.context.batchDraft.items, (item) => item.path), [job.items[0].path, job.items[2].path]);
+  assert.deepEqual(Array.from(run.context.extraction.review.batch.state.items, (item) => item.path), [job.items[0].path, job.items[2].path]);
   assert.equal(run.calls.some(([name]) => name === "submit"), false);
   assert.match(run.calls.at(-1)[1], /from the beginning/);
-  await run.startBatchExtract();
+  await run.context.extraction.review.start("batch");
   const submitted = run.calls.find(([name]) => name === "submit")[1];
   assert.deepEqual(submitted.items.map((item) => item.path), [job.items[0].path, job.items[2].path]);
   assert.ok(submitted.items.every((item) => item.password === null));
-  const saved = plain(run.context.batchDraft);
-  await run.reviewTask({ state: "done", spec: job, result: { failed: 0, outputs: [
+  const saved = plain(run.context.extraction.review.batch.state);
+  await run.reviewTask({ state: "done", spec: job, result: jobResult("batch_extract", { failed: 0, outputs: [
     { archive: job.items[0].path, counts: { failed: 1 } },
     { archive: job.items[0].path, counts: { failed: 1 } },
-  ] } });
-  assert.deepEqual(plain(run.context.batchDraft), saved);
+  ] }) });
+  assert.deepEqual(plain(run.context.extraction.review.batch.state), saved);
   assert.match(run.calls.at(-1)[1], /cannot identify/);
 });
 
 test("new batches use the displayed smart base and an explicitly empty list never falls back to the current archive", async () => {
   const run=harness();
   run.context.screen="batch";
-  assert.deepEqual(Array.from(run.context.batchDraft.items, (item) => [item.path, item.dest, item.encoding]),
+  assert.deepEqual(Array.from(run.context.extraction.review.batch.state.items, (item) => [item.path, item.dest, item.encoding]),
     [["/unrelated/current.zip", "/unrelated", "shift_jis"]]);
   run.context.runtimePreviews.batchPaths = ["/preview/backup.zip"];
   run.context.settingsSession.applySnapshot(settingsDto({ default_extract_dir: "/applied/fallback" }),
     run.context.settingsSession.captureGenerations());
-  assert.deepEqual(Array.from(run.context.batchDraft.items, (item) => [item.path, item.dest, item.encoding]),
+  assert.deepEqual(Array.from(run.context.extraction.review.batch.state.items, (item) => [item.path, item.dest, item.encoding]),
     [["/preview/backup.zip", "/applied/fallback", null]], "fallback remains live until a business edit is accepted");
-  assert.equal(run.context.batchExtract.revision, 0, "reading fallback does not initialize a saved draft");
+  assert.equal(run.context.extraction.review.batch.revision, 0, "reading fallback does not initialize a saved draft");
   run.context.getDialogModule = async () => ({ open: async () => [] });
-  await run.chooseBatchPaths(0);
+  await run.context.extraction.review.choose("batch", 0);
   run.context.runtimePreviews.batchPaths = [];
   run.context.currentArchive = { source: "/later/current.zip", path: "/later/current.zip", encoding_override: "gbk" };
   run.context.settingsSession.applySnapshot(settingsDto(), run.context.settingsSession.captureGenerations());
-  assert.deepEqual(Array.from(run.context.batchDraft.items, (item) => [item.path, item.dest, item.encoding]),
+  assert.deepEqual(Array.from(run.context.extraction.review.batch.state.items, (item) => [item.path, item.dest, item.encoding]),
     [["/later/current.zip", "/later", "gbk"]]);
-  run.setBatchArchivePaths(["/inbox/backup.zip","/other/photos.7z"]);
-  assert.deepEqual(Array.from(run.context.batchDraft.items,(item)=>item.dest),["/inbox","/other"]);
+  run.context.extraction.review.replaceSources(["/inbox/backup.zip","/other/photos.7z"]);
+  assert.deepEqual(Array.from(run.context.extraction.review.batch.state.items,(item)=>item.dest),["/inbox","/other"]);
   run.context.settingsSession.applySnapshot(settingsDto({ default_extract_dir: "/preferred" }),
     run.context.settingsSession.captureGenerations());
   run.context.settingsSession.setGeneral("defaultExtractDir", "/not-applied");
-  run.setBatchArchivePaths(["/inbox/backup.zip"]);
-  assert.equal(run.context.batchDraft.items[0].dest,"/preferred");
+  run.context.extraction.review.replaceSources(["/inbox/backup.zip"]);
+  assert.equal(run.context.extraction.review.batch.state.items[0].dest,"/preferred");
   run.removeBatchItem(0);
   run.context.runtimePreviews.batchPaths = ["/preview/must-not-return.zip"];
-  await run.startBatchExtract();
-  assert.equal(run.context.batchDraft.items.length,0);
+  await run.context.extraction.review.start("batch");
+  assert.equal(run.context.extraction.review.batch.state.items.length,0);
   assert.equal(run.calls.some(([name])=>name==="submit"),false);
   assert.ok(run.calls.some(([name,id])=>name==="focus-field"&&id==="batch-workspace-heading"));
   const paths = ["/inbox/backup.zip", "/other/photos.zip"];
@@ -326,7 +339,7 @@ test("new batches use the displayed smart base and an explicitly empty list neve
       const { context, calls } = startup;
       if (order === "take-first") {
         startup.take.resolve(incoming(paths)); await settle();
-        assert.equal(context.batchExtract.revision, 0, "initial sources wait before materializing a batch");
+        assert.equal(context.extraction.review.batch.revision, 0, "initial sources wait before materializing a batch");
         assert.equal(calls.some(([kind]) => kind === "open-native"), false);
         assert.equal(context.currentArchive, null);
       }
@@ -334,7 +347,7 @@ test("new batches use the displayed smart base and an explicitly empty list neve
       startup.settings.resolve(settingsDto({ default_extract_dir: "/Exports/Default", language: "zh-CN" }));
       assert.equal(await startup.localeEntered.promise, "zh-CN");
       if (order === "settings-first") {
-        assert.equal(context.batchExtract.revision, 0);
+        assert.equal(context.extraction.review.batch.revision, 0);
         assert.equal(calls.some(([kind]) => kind === "open-native"), false);
         startup.take.resolve(incoming(paths));
       }
@@ -342,9 +355,9 @@ test("new batches use the displayed smart base and an explicitly empty list neve
       assert.equal(context.settingsSession.appliedGeneral.defaultExtractDir, "/Exports/Default");
       assert.equal(context.settingsSession.general.defaultExtractDir, "/newer/settings-draft");
       assert.equal(context.currentArchive.source, paths[0]);
-      assert.deepEqual(Array.from(context.batchDraft.items, (item) => [item.path, item.dest]),
+      assert.deepEqual(Array.from(context.extraction.review.batch.state.items, (item) => [item.path, item.dest]),
         paths.map((path) => [path, "/Exports/Default"]));
-      assert.equal(context.batchExtract.revision, 1);
+      assert.equal(context.extraction.review.batch.revision, 1);
       assert.equal(calls.filter(([kind]) => kind === "settings").length, 1);
       assert.equal(context.settingsStatus, "loading", "real locale loading is still pending when the archive is admitted");
       assert.equal(context.sourceCleanupRecoveryReady, false);
@@ -358,7 +371,7 @@ test("new batches use the displayed smart base and an explicitly empty list neve
     await withStartup({ forceFirstRun }, async (startup) => {
       startup.take.resolve(incoming(paths)); await settle();
       if (!forceFirstRun) {
-        assert.equal(startup.context.batchExtract.revision, 0);
+        assert.equal(startup.context.extraction.review.batch.revision, 0);
         assert.equal(startup.calls.some(([kind]) => kind === "open-native"), false);
         startup.settings.reject(new Error("settings unavailable"));
       }
@@ -366,8 +379,8 @@ test("new batches use the displayed smart base and an explicitly empty list neve
       await settle();
       assert.equal(startup.context.currentArchive.source, paths[0]);
       assert.equal(startup.context.settingsSession.appliedGeneral.defaultExtractDir, "");
-      assert.deepEqual(Array.from(startup.context.batchDraft.items, (item) => item.dest), ["/inbox", "/other"]);
-      assert.equal(startup.context.batchExtract.revision, 1);
+      assert.deepEqual(Array.from(startup.context.extraction.review.batch.state.items, (item) => item.dest), ["/inbox", "/other"]);
+      assert.equal(startup.context.extraction.review.batch.revision, 1);
       assert.equal(startup.calls.filter(([kind]) => kind === "settings").length, forceFirstRun ? 0 : 1);
       assert.equal(startup.context.sourceCleanupRecoveryReady, false, "fallback admission also precedes locale completion");
     });
@@ -378,24 +391,24 @@ test("batch review matches displayed failures while submitting the original opaq
   const run=harness();
   const displayed=spec();
   const actual={...displayed,items:displayed.items.map((item,index)=>({...item,path:`squallz-archive://${index+1}`}))};
-  await run.reviewTask({state:"done",spec:actual,result:{failed:1,failures:[{archive:displayed.items[0].path}]}},displayed);
-  const surface=run.batchWorkspaceSurface("modern");
-  assert.equal(surface.rows.length,1);
-  assert.equal(surface.rows[0].path,displayed.items[0].path);
-  assert.equal(surface.rows[0].name,"完整文件名.zip");
-  await run.startBatchExtract();
+  await run.reviewTask({state:"done",spec:actual,result:jobResult("batch_extract", {failed:1,failures:[{archive:displayed.items[0].path}]})},displayed);
+  const draft=run.context.extraction.review.batch.state;
+  assert.equal(draft.items.length,1);
+  assert.equal(draft.items[0].displayPath,displayed.items[0].path);
+  assert.equal(desktopBasename(draft.items[0].displayPath,"macos"),"完整文件名.zip");
+  await run.context.extraction.review.start("batch");
   const submitted=run.calls.find(([name])=>name==="submit")[1];
   assert.equal(submitted.items[0].path,"squallz-archive://1");
   assert.equal("displayPath" in submitted.items[0],false);
   run.context.currentArchive={source:"squallz-archive://8",path:"/Archives/outer.zip › inner.zip"};
   run.context.settingsSession.applySnapshot(settingsDto(), run.context.settingsSession.captureGenerations());
-  run.setBatchArchivePaths([run.context.currentArchive.source]);
-  assert.equal(run.context.batchDraft.items[0].dest,"/Archives");
-  assert.equal(run.batchWorkspaceSurface("classic").rows[0].path,run.context.currentArchive.path);
+  run.context.extraction.review.replaceSources([run.context.currentArchive.source]);
+  assert.equal(run.context.extraction.review.batch.state.items[0].dest,"/Archives");
+  assert.equal(run.context.extraction.review.batch.state.items[0].displayPath,run.context.currentArchive.path);
   run.context.platformKind = () => "windows";
   run.context.currentArchive = { source: "C:\\Archives\\A.zip", path: "C:\\Displayed\\A.zip", encoding_override: "shift_jis" };
-  run.setBatchArchivePaths(["c:/archives/a.zip"]);
-  assert.deepEqual(Array.from(run.context.batchDraft.items, (item) => [item.path, item.displayPath, item.dest, item.encoding]),
+  run.context.extraction.review.replaceSources(["c:/archives/a.zip"]);
+  assert.deepEqual(Array.from(run.context.extraction.review.batch.state.items, (item) => [item.path, item.displayPath, item.dest, item.encoding]),
     [["c:/archives/a.zip", "c:/archives/a.zip", "c:/archives", "shift_jis"]],
     "display identity remains exact while encoding uses platform path equivalence");
 });
@@ -403,28 +416,28 @@ test("batch review matches displayed failures while submitting the original opaq
 test("submission locks a batch against edits, duplicate submits and incoming selections; errors preserve its draft", async () => {
   const run=harness();
   await run.reviewTask({state:"failed",spec:spec()});
-  const saved=plain(run.context.batchDraft);
-  const revision = run.context.batchExtract.revision;
+  const saved=plain(run.context.extraction.review.batch.state);
+  const revision = run.context.extraction.review.batch.revision;
   let reject;
   run.context.submitJob=(job)=>{run.calls.push(["submit",plain(job)]);return new Promise((_,fail)=>{reject=fail;});};
-  const pending=run.startBatchExtract();
-  assert.equal(run.batchWorkspaceSurface("modern").locked,true);
-  run.batchWorkspaceSurface("classic").rows[0].onTargetInput("/ignored");
-  run.batchWorkspaceSurface("modern").onSmartChange(true);
+  const pending=run.context.extraction.review.start("batch");
+  assert.equal(run.context.extraction.review.locked("batch"),true);
+  run.context.extraction.review.editBatch({ kind: "destination", index: 0, value: "/ignored" });
+  run.context.extraction.review.editBatch({ kind: "smart", value: true });
   run.removeBatchItem(1);
-  assert.equal(run.setBatchArchivePaths(["/ignored.zip"]),false);
-  await run.startBatchExtract();
+  assert.equal(run.context.extraction.review.replaceSources(["/ignored.zip"]),false);
+  await run.context.extraction.review.start("batch");
   await run.reviewTask({state:"failed",spec:{...spec(),items:[spec().items[1]]}});
-  assert.deepEqual(plain(run.context.batchDraft),saved);
-  assert.equal(run.context.batchExtract.revision, revision, "busy rejection leaves the admission revision intact");
+  assert.deepEqual(plain(run.context.extraction.review.batch.state),saved);
+  assert.equal(run.context.extraction.review.batch.revision, revision, "busy rejection leaves the admission revision intact");
   assert.equal(run.calls.filter(([name])=>name==="submit").length,1);
   reject(new Error("not connected"));
   await pending;
-  assert.equal(run.batchWorkspaceSurface("classic").locked,false);
-  assert.deepEqual(plain(run.context.batchDraft),saved);
+  assert.equal(run.context.extraction.review.locked("batch"),false);
+  assert.deepEqual(plain(run.context.extraction.review.batch.state),saved);
   assert.match(run.calls.at(-1)[1],/desktop service/);
-  run.batchWorkspaceSurface("modern").rows[1].onTargetInput("  ");
-  await run.startBatchExtract();
+  run.context.extraction.review.editBatch({ kind: "destination", index: 1, value: "  " });
+  await run.context.extraction.review.start("batch");
   assert.deepEqual(run.calls.at(-1),["focus-field","batch-destination-1"]);
   assert.equal(run.calls.filter(([name])=>name==="submit").length,1);
 });
@@ -433,39 +446,39 @@ test("native selection adds without duplication, changes the chosen destination 
   const run=harness();
   await run.reviewTask({state:"failed",spec:spec()});
   run.context.getDialogModule=async()=>({open:async(options)=>options.directory?"/picked": [spec().items[0].path,"/new/new.zip"]});
-  await run.chooseBatchPaths();
-  assert.equal(run.context.batchDraft.items.length,4);
-  await run.chooseBatchPaths(1);
-  assert.equal(run.context.batchDraft.items[1].dest,"/picked");
-  const saved=plain(run.context.batchDraft);
-  let revision = run.context.batchExtract.revision;
-  const surface = run.batchWorkspaceSurface("modern");
-  surface.onOverwriteChange(surface.overwrite);
-  assert.equal(run.context.batchExtract.revision, ++revision, "accepted same-value edits invalidate earlier draft captures");
+  await run.context.extraction.review.choose("batch");
+  assert.equal(run.context.extraction.review.batch.state.items.length,4);
+  await run.context.extraction.review.choose("batch", 1);
+  assert.equal(run.context.extraction.review.batch.state.items[1].dest,"/picked");
+  const saved=plain(run.context.extraction.review.batch.state);
+  let revision = run.context.extraction.review.batch.revision;
+  const draft = run.context.extraction.review.batch.state;
+  run.context.extraction.review.editBatch({ kind: "overwrite", value: draft.overwrite });
+  assert.equal(run.context.extraction.review.batch.revision, ++revision, "accepted same-value edits invalidate earlier draft captures");
   run.context.getDialogModule = async () => ({ open: async () => [spec().items[0].path] });
-  await run.chooseBatchPaths();
-  assert.equal(run.context.batchExtract.revision, ++revision, "accepted duplicate-only selection still advances revision");
-  assert.deepEqual(plain(run.context.batchDraft), saved);
+  await run.context.extraction.review.choose("batch");
+  assert.equal(run.context.extraction.review.batch.revision, ++revision, "accepted duplicate-only selection still advances revision");
+  assert.deepEqual(plain(run.context.extraction.review.batch.state), saved);
   run.context.getDialogModule = async () => ({ open: async () => [] });
   for (const index of [null, 1]) {
-    await run.chooseBatchPaths(index);
-    assert.equal(run.context.batchExtract.revision, ++revision, "an accepted empty native selection advances revision");
-    assert.deepEqual(plain(run.context.batchDraft), saved);
+    await run.context.extraction.review.choose("batch", index);
+    assert.equal(run.context.extraction.review.batch.revision, ++revision, "an accepted empty native selection advances revision");
+    assert.deepEqual(plain(run.context.extraction.review.batch.state), saved);
   }
   run.context.getDialogModule=async()=>({open:async()=>null});
-  await run.chooseBatchPaths();
-  assert.deepEqual(plain(run.context.batchDraft),saved);
+  await run.context.extraction.review.choose("batch");
+  assert.deepEqual(plain(run.context.extraction.review.batch.state),saved);
   assert.match(run.calls.at(-1)[1],/cancelled/);
-  assert.equal(run.context.batchExtract.revision, revision, "cancellation preserves the draft revision");
+  assert.equal(run.context.extraction.review.batch.revision, revision, "cancellation preserves the draft revision");
   let finish;
   run.context.getDialogModule=async()=>({open:()=>new Promise((resolve)=>{finish=resolve;})});
-  const pending=run.chooseBatchPaths();
+  const pending=run.context.extraction.review.choose("batch");
   await new Promise((resolve)=>setImmediate(resolve));
   run.context.screen="browse";
   finish(["/stale.zip"]);
   await pending;
-  assert.deepEqual(plain(run.context.batchDraft),saved);
-  assert.equal(run.context.batchPickerBusy,false);
+  assert.deepEqual(plain(run.context.extraction.review.batch.state),saved);
+  assert.equal(run.context.extraction.review.locked("batch"),false);
 });
 
 test("leaving batch review abandons loading and open choosers without unlocking a newer choice", async () => {
@@ -473,7 +486,7 @@ test("leaving batch review abandons loading and open choosers without unlocking 
     for (const phase of ["loading", "choosing"]) {
       for (const outcome of ["selected", "cancelled", "failed"]) {
         const run = harness(); await run.reviewTask({state:"failed",spec:spec()});
-        const saved = plain(run.context.batchDraft);
+        const saved = plain(run.context.extraction.review.batch.state);
         let finish, fail, started;
         const ready = new Promise(resolve => { started = resolve; });
         const oldResult = new Promise((resolve, reject) => { finish = resolve; fail = reject; });
@@ -481,31 +494,31 @@ test("leaving batch review abandons loading and open choosers without unlocking 
         run.context.getDialogModule = phase === "loading" ? () => { started(); return oldResult; }
           : async () => ({open:async()=>null});
         run.context.openNativeDialog = () => { opened++; started(); return oldResult; };
-        const oldChoice = run.chooseBatchPaths(index); await ready;
-        assert.equal(run.context.batchPickerBusy, true);
+        const oldChoice = run.context.extraction.review.choose("batch", index); await ready;
+        assert.equal(run.context.extraction.review.locked("batch"), true);
         run.setScreen("settingsGeneral"); run.setScreen("batch");
-        assert.equal(run.context.batchPickerBusy, false, "navigation must release the abandoned chooser");
+        assert.equal(run.context.extraction.review.locked("batch"), false, "navigation must release the abandoned chooser");
         let completeNew;
         run.context.getDialogModule = async () => ({open:async()=>null});
         run.context.openNativeDialog = () => { opened++; return new Promise(resolve => { completeNew = resolve; }); };
-        const newChoice = run.chooseBatchPaths(index);
+        const newChoice = run.context.extraction.review.choose("batch", index);
         await new Promise(resolve => setImmediate(resolve));
         const noticeCount = run.calls.filter(([kind]) => kind === "notice").length;
         if (outcome === "failed") fail(new Error("late dialog failure"));
         else finish(phase === "loading" ? {open:async()=>"/stale"} : outcome === "cancelled" ? null : ["/stale"]);
         await oldChoice;
         assert.equal(opened, phase === "loading" ? 1 : 2, "abandoned module loads must not open a dialog");
-        assert.deepEqual(plain(run.context.batchDraft), saved);
-        assert.equal(run.context.batchPickerBusy, true, "old completion must not unlock the new chooser");
+        assert.deepEqual(plain(run.context.extraction.review.batch.state), saved);
+        assert.equal(run.context.extraction.review.locked("batch"), true, "old completion must not unlock the new chooser");
         assert.equal(run.calls.filter(([kind]) => kind === "notice").length, noticeCount);
         run.context.settingsSession.applySnapshot(settingsDto({ default_extract_dir: "/applied/while-choosing" }),
           run.context.settingsSession.captureGenerations());
         completeNew(index === null ? ["/new/archive.zip"] : "/new/destination"); await newChoice;
-        assert.equal(run.context.batchPickerBusy, false);
+        assert.equal(run.context.extraction.review.locked("batch"), false);
         if (index === null) {
-          assert.equal(run.context.batchDraft.items.at(-1).path, "/new/archive.zip");
-          assert.equal(run.context.batchDraft.items.at(-1).dest, "/applied/while-choosing", "new source defaults are read at native acceptance");
-        } else assert.equal(run.context.batchDraft.items[index].dest, "/new/destination");
+          assert.equal(run.context.extraction.review.batch.state.items.at(-1).path, "/new/archive.zip");
+          assert.equal(run.context.extraction.review.batch.state.items.at(-1).dest, "/applied/while-choosing", "new source defaults are read at native acceptance");
+        } else assert.equal(run.context.extraction.review.batch.state.items[index].dest, "/new/destination");
       }
     }
   }
@@ -519,19 +532,19 @@ test("leaving batch review abandons loading and open choosers without unlocking 
         if (change === "navigation" || change === "navigation-aba") {
           startup.setScreen("settingsGeneral");
           if (change === "navigation-aba") startup.setScreen("browse");
-        } else if (change === "source") startup.setBatchArchivePaths(["/newer/source.zip"]);
+        } else if (change === "source") startup.context.extraction.review.replaceSources(["/newer/source.zip"]);
         else if (change === "archive") await startup.open("/newer/current.zip", "dialog");
-        else if (change === "destination") startup.batchWorkspaceSurface("modern").rows[0].onTargetInput("/manual/keep");
+        else if (change === "destination") startup.context.extraction.review.editBatch({ kind: "destination", index: 0, value: "/manual/keep" });
         else startup.removeBatchItem(0);
-        const saved = plain(startup.context.batchDraft);
-        const revision = startup.context.batchExtract.revision;
+        const saved = plain(startup.context.extraction.review.batch.state);
+        const revision = startup.context.extraction.review.batch.revision;
         const screen = startup.context.screen;
         const notices = startup.calls.filter(([kind]) => kind === "notice").length;
         if (phase === "take-pending") startup.take.resolve(incoming(["/stale/input.zip"]));
         startup.settings.resolve(settingsDto({ default_extract_dir: "/Exports/Default" }));
         await startup.localeEntered.promise; await settle();
-        assert.deepEqual(plain(startup.context.batchDraft), saved, `${phase}/${change} keeps newer draft state`);
-        assert.equal(startup.context.batchExtract.revision, revision);
+        assert.deepEqual(plain(startup.context.extraction.review.batch.state), saved, `${phase}/${change} keeps newer draft state`);
+        assert.equal(startup.context.extraction.review.batch.revision, revision);
         assert.equal(startup.context.screen, screen);
         assert.equal(startup.context.currentArchive?.source ?? null, change === "archive" ? "/newer/current.zip" : null);
         assert.deepEqual(startup.calls.filter(([kind]) => kind === "open-native").map(([, path]) => path),
@@ -548,12 +561,12 @@ test("leaving batch review abandons loading and open choosers without unlocking 
     startup.emit(incoming(["/older/first.zip"]));
     startup.emit(incoming(["/newer/last.zip", "/newer/second.zip"]));
     startup.queue.resolve(incoming([])); await settle();
-    assert.equal(startup.context.batchExtract.revision, 0);
+    assert.equal(startup.context.extraction.review.batch.revision, 0);
     assert.equal(startup.calls.some(([kind]) => kind === "open-native"), false);
     startup.settings.resolve(settingsDto({ default_extract_dir: "/Exports/Default" }));
     await startup.localeEntered.promise; await settle();
     assert.deepEqual(startup.calls.filter(([kind]) => kind === "open-native").map(([, path]) => path), ["/newer/last.zip"]);
-    assert.deepEqual(Array.from(startup.context.batchDraft.items, (item) => [item.path, item.dest]),
+    assert.deepEqual(Array.from(startup.context.extraction.review.batch.state.items, (item) => [item.path, item.dest]),
       [["/newer/last.zip", "/Exports/Default"], ["/newer/second.zip", "/Exports/Default"]],
       "an empty native queue drain cannot supersede the newest waiting event");
     startup.cleanup();
@@ -562,14 +575,14 @@ test("leaving batch review abandons loading and open choosers without unlocking 
   for (const route of ["external", "external-empty", "recovery"]) {
     await withStartup({ batchPaths: ["/original/keep.zip"] }, async (startup) => {
       startup.take.resolve(incoming(["/stale/input.zip"])); await settle();
-      const saved = plain(startup.context.batchDraft);
+      const saved = plain(startup.context.extraction.review.batch.state);
       const latest = route === "recovery" ? incoming(["/recovery/keep.par2"])
         : incoming(route === "external-empty" ? [] : ["/external/new.zip"], "extract-here");
       await startup.handle(latest);
       assert.equal(startup.context.settingsSession.appliedGeneral.defaultExtractDir, "");
       if (route === "recovery") {
         assert.equal(startup.context.screen, "recovery");
-        assert.equal(startup.context.recoveryPar2Override, "/recovery/keep.par2");
+        assert.equal(startup.context.recoverySession.sidecarPath(), "/recovery/keep.par2");
       } else {
         assert.equal(startup.context.taskWindowMode, true);
         assert.equal(startup.context.taskWindowLaunchState.status, route === "external-empty" ? "no-selection" : "started");
@@ -579,7 +592,7 @@ test("leaving batch review abandons loading and open choosers without unlocking 
       startup.settings.resolve(settingsDto({ default_extract_dir: "/Exports/Default" }));
       await startup.localeEntered.promise; await settle();
       assert.equal(startup.calls.some(([kind]) => kind === "open-native"), false);
-      assert.deepEqual(plain(startup.context.batchDraft), saved, "immediate routes supersede an older ordinary source wait");
+      assert.deepEqual(plain(startup.context.extraction.review.batch.state), saved, "immediate routes supersede an older ordinary source wait");
     });
   }
   await withStartup({ taskWindowMode: true }, async (startup) => {
@@ -594,14 +607,14 @@ test("leaving batch review abandons loading and open choosers without unlocking 
   for (const change of ["navigation", "destination"]) {
     await withStartup({ batchPaths: ["/original/keep.zip"] }, async (startup) => {
       if (change === "navigation") startup.setScreen("settingsGeneral");
-      else startup.batchWorkspaceSurface("classic").rows[0].onTargetInput("/manual/keep");
-      const saved = plain(startup.context.batchDraft);
+      else startup.context.extraction.review.editBatch({ kind: "destination", index: 0, value: "/manual/keep" });
+      const saved = plain(startup.context.extraction.review.batch.state);
       startup.take.resolve(incoming(["/external/take.zip"], "extract-here")); await settle();
       assert.equal(startup.context.taskWindowLaunchState.status, "started", "late external take retains its independent task route");
       assert.equal(startup.context.taskDialogTaskId, 99);
       assert.equal(startup.calls.filter(([kind]) => kind === "submit").length, 1);
       assert.equal(startup.context.settingsSession.appliedGeneral.defaultExtractDir, "");
-      assert.deepEqual(plain(startup.context.batchDraft), saved);
+      assert.deepEqual(plain(startup.context.extraction.review.batch.state), saved);
     });
   }
   for (const phase of ["take-pending", "general-pending", "queue-pending"]) {
@@ -618,7 +631,7 @@ test("leaving batch review abandons loading and open choosers without unlocking 
       if (phase === "queue-pending") startup.emit(incoming(["/disposed/event.zip"]));
       await settle();
       assert.equal(startup.context.currentArchive, null);
-      assert.equal(startup.context.batchExtract.revision, 0);
+      assert.equal(startup.context.extraction.review.batch.revision, 0);
       assert.equal(startup.context.settingsSession.appliedGeneral.defaultExtractDir, "");
       assert.equal(startup.calls.some(([kind]) => kind === "open-native" || kind === "locale" || kind === "updates"), false);
       assert.equal(startup.calls.filter(([kind]) => kind === "unlisten").length, phase === "queue-pending" ? 1 : 0);
@@ -635,7 +648,7 @@ test("both layouts show editable targets and honest checks in both languages wit
   for(const locale of ["en-US","zh-CN"]) {
     await loadLocale(locale);run.context.tr=tFallback;
     for(const variant of ["modern","classic"]) {
-      const surface=run.batchWorkspaceSurface(variant);
+      const surface=run.extractionReviewSurface("batch", variant);
       const {body}=render(ToolsWorkspace,{props:{surface}});
       assert.ok(body.includes(spec().items[0].path));
       assert.ok(body.includes('value="/output/zip"'));

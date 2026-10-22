@@ -63,20 +63,6 @@ fn repair_recovery_detail(path: &str, output: &Option<String>) -> String {
     }
 }
 
-fn json_u64_or(value: &serde_json::Value, key: &str, fallback: u64) -> u64 {
-    match value.get(key).and_then(|v| v.as_u64()) {
-        Some(number) => number,
-        None => fallback,
-    }
-}
-
-fn json_str_or<'a>(value: &'a serde_json::Value, key: &str, fallback: &'a str) -> &'a str {
-    match value.get(key).and_then(|v| v.as_str()) {
-        Some(text) => text,
-        None => fallback,
-    }
-}
-
 impl OperationAudit {
     pub fn persistent() -> Self {
         let path = dirs::data_dir().map(|dir| dir.join("Squallz").join("operation-audit.jsonl"));
@@ -291,114 +277,101 @@ pub fn summarize_job(spec: &JobSpec) -> OperationAuditSummary {
     }
 }
 
-pub fn summarize_result(result: Option<&serde_json::Value>) -> Option<String> {
-    let value = result?;
-    let operation = value.get("operation").and_then(|v| v.as_str());
-    if operation == Some("create") {
-        let total_bytes = json_u64_or(value, "total_bytes", 0);
-        let summary = if value.get("split").and_then(|value| value.as_bool()) == Some(true) {
-            let volume_count = json_u64_or(value, "volume_count", 1);
+pub fn summarize_result(result: Option<&crate::jobs::JobResult>) -> Option<String> {
+    use crate::jobs::JobResult;
+    Some(match result? {
+        JobResult::Compress(report) | JobResult::Convert(report) => {
+            let total_bytes = report.output.total_bytes;
+            let summary = if let Some(sfx) = &report.sfx {
+                let signing = if sfx.requires_signing {
+                    ", signing required"
+                } else {
+                    ""
+                };
+                format!("created self-extractor, {total_bytes} bytes{signing}")
+            } else if report.output.split {
+                let volumes = report.output.volume_count;
+                format!(
+                    "created {volumes} volume{}, {total_bytes} bytes",
+                    plural(volumes)
+                )
+            } else {
+                format!("created archive, {total_bytes} bytes")
+            };
+            append_source_cleanup_summary(summary, &report.source_cleanup)
+        }
+        JobResult::PublishMacosSfx(_) => "signed, notarized, stapled, and verified".into(),
+        JobResult::BatchExtract(report) => {
+            let (extracted, archives, failed) = (report.extracted, report.archives, report.failed);
+            let skipped: u64 = report
+                .outputs
+                .iter()
+                .map(|output| output.result.counts.skipped)
+                .sum();
             format!(
-                "created {volume_count} volume{}, {total_bytes} bytes",
-                plural_u64(volume_count)
+                "{extracted}/{archives} archive{} extracted, {failed} failed, {skipped} skipped",
+                plural(archives)
             )
-        } else {
-            format!("created archive, {total_bytes} bytes")
-        };
-        return Some(append_source_cleanup_summary(summary, value));
-    }
-    if operation == Some("create_sfx") {
-        let total_bytes = json_u64_or(value, "total_bytes", 0);
-        let signing = if value
-            .get("requires_signing")
-            .and_then(|v| v.as_bool())
-            .is_some_and(|required| required)
-        {
-            ", signing required"
-        } else {
-            ""
-        };
-        return Some(append_source_cleanup_summary(
-            format!("created self-extractor, {total_bytes} bytes{signing}"),
-            value,
-        ));
-    }
-    if operation == Some("sfx_publish_macos") {
-        return Some("signed, notarized, stapled, and verified".into());
-    }
-    if operation == Some("batch_extract") {
-        let archives = json_u64_or(value, "archives", 0);
-        let extracted = json_u64_or(value, "extracted", 0);
-        let failed = json_u64_or(value, "failed", 0);
-        let skipped = json_u64_or(value, "skipped", 0);
-        return Some(format!(
-            "{extracted}/{archives} archive{} extracted, {failed} failed, {skipped} skipped",
-            plural_u64(archives)
-        ));
-    }
-    if let Some(skipped) = value.get("skipped").and_then(|v| v.as_u64()) {
-        return Some(format!("skipped {skipped}"));
-    }
-    if let Some(entries) = value.get("entries").and_then(|v| v.as_u64()) {
-        let problems = json_u64_or(value, "problems", 0);
-        return Some(format!("tested {entries}, problems {problems}"));
-    }
-    if let Some(operations) = value.get("operations").and_then(|v| v.as_u64()) {
-        return Some(format!(
-            "{operations} update operation{}",
-            plural_u64(operations)
-        ));
-    }
-    if let Some(files) = value.get("files_hashed").and_then(|v| v.as_u64()) {
-        let bytes = json_u64_or(value, "bytes_hashed", 0);
-        let algorithm = json_str_or(value, "algorithm", "checksum");
-        return Some(format!(
-            "{files} file{} hashed, {bytes} bytes, {algorithm}",
-            plural_u64(files)
-        ));
-    }
-    if let Some(checked) = value.get("checked").and_then(|v| v.as_u64()) {
-        let passed = json_u64_or(value, "passed", 0);
-        let failed = json_u64_or(value, "failed", 0);
-        return Some(format!(
-            "{passed}/{checked} passed, {failed} failed{}",
-            plural_u64(failed)
-        ));
-    }
-    if let Some(groups) = value.get("duplicate_groups").and_then(|v| v.as_u64()) {
-        let files = json_u64_or(value, "duplicate_files", 0);
-        let reclaimable = json_u64_or(value, "reclaimable_bytes", 0);
-        return Some(format!(
-            "{groups} duplicate group{}, {files} file{}, {reclaimable} bytes reclaimable",
-            plural_u64(groups),
-            plural_u64(files)
-        ));
-    }
-    if let Some(ok) = value.get("ok").and_then(|v| v.as_bool()) {
-        return Some(if ok { "ok".into() } else { "not ok".into() });
-    }
-    None
+        }
+        JobResult::Extract(report) | JobResult::ExtractNested(report) => format!(
+            "extracted {}, {} failed, {} skipped",
+            report.counts.created, report.counts.failed, report.counts.skipped
+        ),
+        JobResult::Test(report) => format!(
+            "tested {}, problems {}",
+            report.entries_tested, report.problems_total
+        ),
+        JobResult::Update { operations, .. } => {
+            format!("{operations} update operation{}", plural(*operations))
+        }
+        JobResult::Checksum(report) => format!(
+            "{} file{} hashed, {} bytes, {}",
+            report.files_hashed,
+            plural(report.files_hashed),
+            report.bytes_hashed,
+            report.algorithm.id()
+        ),
+        JobResult::ChecksumCheck(report) => format!(
+            "{}/{} passed, {} failed{}",
+            report.report.passed,
+            report.report.checked,
+            report.report.failed,
+            plural(report.report.failed)
+        ),
+        JobResult::DuplicateScan(report) => format!(
+            "{} duplicate group{}, {} file{}, {} bytes reclaimable",
+            report.duplicate_groups,
+            plural(report.duplicate_groups),
+            report.duplicate_files,
+            plural(report.duplicate_files),
+            report.reclaimable_bytes
+        ),
+        JobResult::Protect(report)
+        | JobResult::VerifyRecovery(report)
+        | JobResult::RepairRecovery(report) => {
+            if report.ok {
+                "ok".into()
+            } else {
+                "not ok".into()
+            }
+        }
+        JobResult::ExportSqz(_) | JobResult::RepairSqz { .. } | JobResult::RepairZip { .. } => {
+            return None
+        }
+    })
 }
 
-fn append_source_cleanup_summary(mut summary: String, result: &serde_json::Value) -> String {
-    let Some(cleanup) = result.get("source_cleanup") else {
-        return summary;
-    };
-    let status = match cleanup.get("status").and_then(|value| value.as_str()) {
-        Some("completed") => "completed",
-        Some("partial") => "partial",
-        Some("blocked") => "blocked",
-        Some("cancelled") => "cancelled",
-        Some("failed") => "failed",
-        Some("not_requested") | None => return summary,
-        Some(_) => "unknown",
-    };
-    let moved = json_u64_or(cleanup, "moved", 0);
-    let kept = json_u64_or(cleanup, "kept", 0);
-    let recovery_required = json_u64_or(cleanup, "recovery_required", 0);
-    summary.push_str(&format!(
-        ", source cleanup {status}, {moved} moved, {kept} not moved, {recovery_required} recovery required"
-    ));
+fn append_source_cleanup_summary(
+    mut summary: String,
+    cleanup: &crate::jobs::SourceCleanupResult,
+) -> String {
+    let status = cleanup.status.as_str();
+    if status != "not_requested" {
+        summary.push_str(&format!(
+            ", source cleanup {status}, {} moved, {} not moved, {} recovery required",
+            cleanup.moved, cleanup.kept, cleanup.recovery_required
+        ));
+    }
     summary
 }
 
@@ -446,14 +419,6 @@ fn shorten(value: &str) -> String {
 }
 
 fn plural(count: usize) -> &'static str {
-    if count == 1 {
-        ""
-    } else {
-        "s"
-    }
-}
-
-fn plural_u64(count: u64) -> &'static str {
     if count == 1 {
         ""
     } else {
@@ -678,12 +643,24 @@ mod tests {
         assert!(!summary.detail.contains("also-secret"));
         assert!(!summary.detail.contains("/Users/example"));
 
-        let result = serde_json::json!({
-            "operation": "batch_extract",
-            "archives": 2,
-            "extracted": 1,
-            "failed": 1,
-            "skipped": 3,
+        use crate::jobs::{
+            results::{BatchExtractOutput, BatchExtractResult},
+            JobResult,
+        };
+        let mut output = crate::jobs::test_support::extract_report(Path::new("private-client"));
+        output.counts.skipped = 3;
+        let result = JobResult::BatchExtract(BatchExtractResult {
+            archives: 2,
+            selected_archives: 2,
+            collapsed_volumes: 0,
+            extracted: 1,
+            failed: 1,
+            recovered_archives: 0,
+            outputs: vec![BatchExtractOutput {
+                archive: "private-client.zip".into(),
+                result: output,
+            }],
+            failures: Vec::new(),
         });
         assert_eq!(
             summarize_result(Some(&result)).as_deref(),
@@ -693,22 +670,19 @@ mod tests {
 
     #[test]
     fn create_result_summary_uses_counts_without_persisting_output_paths() {
-        let result = serde_json::json!({
-            "operation": "create",
-            "primary_output": "/Users/example/Documents/private-backup.zip.001",
-            "outputs": [
-                "/Users/example/Documents/private-backup.zip.001",
-                "/Users/example/Documents/private-backup.zip.002"
-            ],
-            "total_bytes": 8192,
-            "volume_count": 2,
-            "split": true,
-            "source_cleanup": {
-                "status": "partial",
-                "moved": 1,
-                "kept": 1
-            },
-        });
+        use crate::jobs::{results::SfxDetails, test_support::create_report, JobResult};
+        let mut report = create_report(
+            Path::new("/Users/example/Documents/private-backup.zip.001"),
+            true,
+            8192,
+        );
+        report.output.volume_count = 2;
+        report
+            .output
+            .outputs
+            .push("/Users/example/Documents/private-backup.zip.002".into());
+        report.source_cleanup = crate::jobs::test_support::partial_cleanup();
+        let result = JobResult::Compress(report);
         let summary = summarize_result(Some(&result)).expect("create result summary");
         assert_eq!(
             summary,
@@ -717,29 +691,48 @@ mod tests {
         assert!(!summary.contains("private-backup"));
         assert!(!summary.contains("/Users/example"));
 
-        let unsplit = serde_json::json!({
-            "operation": "create",
-            "primary_output": "/Users/example/Documents/private-backup.zip",
-            "outputs": ["/Users/example/Documents/private-backup.zip"],
-            "total_bytes": 4096,
-            "volume_count": 1,
-            "split": false,
-        });
+        let unsplit = JobResult::Compress(create_report(
+            Path::new("/Users/example/Documents/private-backup.zip"),
+            false,
+            4096,
+        ));
         assert_eq!(
             summarize_result(Some(&unsplit)).as_deref(),
             Some("created archive, 4096 bytes")
         );
 
-        let sfx = serde_json::json!({
-            "operation": "create_sfx",
-            "primary_output": "/Users/example/Documents/private-backup.app",
-            "outputs": ["/Users/example/Documents/private-backup.app"],
-            "total_bytes": 16384,
-            "requires_signing": true,
+        let mut report = create_report(
+            Path::new("/Users/example/Documents/private-backup.app"),
+            false,
+            16384,
+        );
+        report.sfx = Some(SfxDetails {
+            target: "macos",
+            layout: "macos_app",
+            payload_bytes: 1024,
+            requires_signing: true,
         });
+        let sfx = JobResult::Compress(report);
         assert_eq!(
             summarize_result(Some(&sfx)).as_deref(),
             Some("created self-extractor, 16384 bytes, signing required")
+        );
+    }
+
+    #[test]
+    fn test_summary_uses_the_exact_problem_total_instead_of_the_preview_length() {
+        let report = squallz_core::reports::TestReport {
+            ok: false,
+            entries_tested: 25,
+            problems: vec!["bad entry".into()],
+            problems_total: 25,
+            problems_truncated: true,
+            recovery: None,
+            structure: squallz_core::api::ArchiveStructureStatus::Complete,
+        };
+        assert_eq!(
+            summarize_result(Some(&crate::jobs::JobResult::Test(report))).as_deref(),
+            Some("tested 25, problems 25")
         );
     }
 }

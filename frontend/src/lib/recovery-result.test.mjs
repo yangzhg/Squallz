@@ -60,6 +60,7 @@ test("recovery results gate repair and expose one semantic tone", async () => {
     assert.deepEqual(
       readRecoveryProtectionResult(
         {
+          kind: "protect",
           recovery: "/Users/alex/Backups/archive.zip.par2",
           outputs: [
             "/Users/alex/Backups/archive.zip.vol00+01.par2",
@@ -86,7 +87,7 @@ test("recovery results gate repair and expose one semantic tone", async () => {
     );
 
     const repairable = {
-      operation: "verify",
+      kind: "verify_recovery", operation: "verify",
       ok: false,
       metrics: {
         all_correct: false,
@@ -114,20 +115,20 @@ test("recovery results gate repair and expose one semantic tone", async () => {
     assert.equal(recoveryResultTone(overCapacity), "danger");
 
     for (const metrics of [{ no_damage: true }, { all_correct: true }]) {
-      const result = { operation: "verify", ok: true, metrics };
+      const result = { kind: "verify_recovery", operation: "verify", ok: true, metrics };
       assert.equal(recoveryResultHasNoDamage(result), true);
       assert.equal(recoveryRepairGate(result), "no_damage");
       assert.equal(recoveryResultConfirmsRepairCapacity(result), false);
       assert.equal(recoveryResultTone(result), "success");
     }
 
-    const successfulWithoutCounts = { operation: "verify", ok: true };
+    const successfulWithoutCounts = { kind: "verify_recovery", operation: "verify", ok: true };
     assert.equal(recoveryResultHasNoDamage(successfulWithoutCounts), true);
     assert.equal(recoveryRepairGate(successfulWithoutCounts), "no_damage");
     assert.equal(recoveryResultConfirmsRepairCapacity(successfulWithoutCounts), false);
     assert.equal(recoveryResultTone(successfulWithoutCounts), "success");
 
-    const failedWithoutCounts = { operation: "verify", ok: false };
+    const failedWithoutCounts = { kind: "verify_recovery", operation: "verify", ok: false };
     assert.equal(recoveryResultHasNoDamage(failedWithoutCounts), false);
     assert.equal(recoveryRepairGate(failedWithoutCounts), null);
     assert.equal(recoveryResultConfirmsRepairCapacity(failedWithoutCounts), false);

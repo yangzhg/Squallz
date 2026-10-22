@@ -11,6 +11,7 @@ pub use squallz_format_api::{
     move_path_no_replace, OverwritePolicy, SqzInnerFormat, SymlinkPolicy,
 };
 
+mod archive_output;
 mod archive_path;
 mod archive_search;
 mod checksum;
@@ -21,6 +22,9 @@ mod convert;
 mod create;
 mod destination_guard;
 mod duplicates;
+mod entry_copy;
+mod entry_materialization;
+mod external_actions;
 mod extract_guard;
 mod filesystem_identity;
 mod filter;
@@ -28,9 +32,12 @@ mod inputs;
 mod layout;
 mod output_set;
 mod password;
+mod plaintext;
 mod presets;
 mod queue;
 mod repair;
+mod replacement;
+pub mod reports;
 mod sfx;
 mod stored_os_string;
 mod update;
@@ -52,7 +59,13 @@ pub use destination_guard::{
     CreateDestinationGuard, CreateDestinationState,
 };
 pub use duplicates::{DuplicateGroup, DuplicateScanReport};
+pub use entry_copy::copy_archive_entry;
+pub use entry_materialization::{EntryReference, PreparedArchiveEntry};
+pub use external_actions::{
+    ExternalTaskAction, ExternalTaskPlan, FileManagerCreateOptions, FileManagerExtractOptions,
+};
 pub use extract_guard::{build_extract_input_guard, ArchiveSourceState, ExtractInputGuard};
+pub use filesystem_identity::open_new_artifact;
 pub use filter::PathFilter;
 pub use layout::{
     analyze_extract_layout, inspect_extract_space, ExtractPlan, ExtractScope, ExtractSpace,
@@ -62,6 +75,7 @@ pub use output_set::{
     file_set_publication_pending, prepare_file_set_publication, recover_file_set_publication,
     PreparedFileSetPublication,
 };
+pub use plaintext::{PlaintextFile, PlaintextWorkspace};
 pub use presets::{
     ByteSize, CreateCompletionAction, CreateCredential, CreateDestination, CreateDestinationBase,
     CreateOutput, CreatePreset, EntryNameEncoding, ExtractCredential, ExtractDestination,
@@ -71,9 +85,7 @@ pub use presets::{
     SfxTargetPolicy, VolumeMode, BALANCED_CREATE_PRESET_ID, CROSS_PLATFORM_CREATE_PRESET_ID,
     MAX_SPLIT_SIZE_BYTES, MIN_SPLIT_SIZE_BYTES, PRESET_SCHEMA_VERSION, SMART_EXTRACT_PRESET_ID,
 };
-pub use queue::{
-    Job, JobId, JobProgress, JobQueue, JobResources, JobState, QueueWaitReason, QueuedJobStatus,
-};
+pub use queue::{Job, JobId, JobQueue, JobResources, JobState, QueueWaitReason, QueuedJobStatus};
 pub use repair::{ArchiveRepairKind, ArchiveRepairOptions, ArchiveRepairOutcome};
 pub use sfx::{
     default_sfx_extract_destination, discover_packaged_sfx_runtime, inspect_sfx,
@@ -302,13 +314,15 @@ impl CreateInputEstimate {
 fn summarize_create_input_manifest<T: AsRef<inputs::InputItem>>(
     input_count: usize,
     items: &[T],
-) -> CreateInputSummary {
+    ctl: &ControlToken,
+) -> Result<CreateInputSummary, FormatError> {
     let mut estimate = CreateInputEstimate {
         input_count,
         ..CreateInputEstimate::default()
     };
     let mut archive_metadata_bytes = 0u64;
     for item in items {
+        ctl.checkpoint()?;
         let item = item.as_ref();
         estimate.entries += 1;
         archive_metadata_bytes =
@@ -331,7 +345,8 @@ fn summarize_create_input_manifest<T: AsRef<inputs::InputItem>>(
             _ => {}
         }
     }
-    create_input_summary(estimate, archive_metadata_bytes)
+    ctl.checkpoint()?;
+    Ok(create_input_summary(estimate, archive_metadata_bytes))
 }
 
 pub(crate) fn create_input_summary(
@@ -441,7 +456,7 @@ impl Source {
                 })
             }
             Self::Volumes { parts, .. } => Ok(OpenedSource {
-                stream: Box::new(MultiVolumeReader::open_with_control(parts, control)?),
+                stream: Box::new(MultiVolumeReader::open(parts, control)?),
                 identity: None,
                 binding: None,
             }),
@@ -490,6 +505,7 @@ impl Source {
 /// Metadata collected for browsing, including whether opening encrypted
 /// headers actually verified the supplied password. Listing plaintext names
 /// in a data-encrypted archive does not verify its password.
+#[derive(Debug)]
 pub struct ArchiveListing {
     pub format: String,
     pub entries: Vec<EntryMeta>,
@@ -655,14 +671,6 @@ impl Engine {
     pub fn archive_source_set(
         &self,
         path: &Path,
-    ) -> Result<Option<api::ArchiveSourceSet>, FormatError> {
-        self.archive_source_set_with_control(path, &ControlToken::default())
-    }
-
-    /// Controlled variant of [`Engine::archive_source_set`].
-    pub fn archive_source_set_with_control(
-        &self,
-        path: &Path,
         control: &ControlToken,
     ) -> Result<Option<api::ArchiveSourceSet>, FormatError> {
         control.checkpoint()?;
@@ -696,12 +704,7 @@ impl Engine {
         match self.registry.detect(name, &head, &tail) {
             Some(api::Detected::Archive(format)) => controlled_result(
                 control,
-                format.probe_file_source_set_with_control(
-                    source_path,
-                    source_identity,
-                    &mut *stream,
-                    control,
-                ),
+                format.probe_file_source_set(source_path, source_identity, &mut *stream, control),
             ),
             _ => {
                 control.checkpoint()?;
@@ -718,7 +721,7 @@ impl Engine {
         control: &ControlToken,
     ) -> Result<ArchiveSourceState, FormatError> {
         control.checkpoint()?;
-        let members = match self.archive_source_set_with_control(path, control)? {
+        let members = match self.archive_source_set(path, control)? {
             Some(source_set) => source_set.members().to_vec(),
             None => vec![path.to_path_buf()],
         };
@@ -730,8 +733,12 @@ impl Engine {
     /// Generic byte-split archives and native container volume sets use the
     /// same validated discovery path as archive opening. A regular single-file
     /// archive remains a one-element source set.
-    pub fn recovery_protect_sources(&self, path: &Path) -> Result<Vec<PathBuf>, FormatError> {
-        match self.archive_source_set(path)? {
+    pub fn recovery_protect_sources(
+        &self,
+        path: &Path,
+        control: &ControlToken,
+    ) -> Result<Vec<PathBuf>, FormatError> {
+        match self.archive_source_set(path, control)? {
             Some(source_set) => Ok(source_set.members().to_vec()),
             None => Ok(vec![path.to_path_buf()]),
         }
@@ -739,18 +746,9 @@ impl Engine {
 
     /// Opens an archive and returns a read handle. Generic byte-split sets
     /// (`x.zip.001`) and validated native container volumes are resolved
-    /// transparently.
+    /// transparently. Pause and cancellation are honored during detection,
+    /// metadata parsing and stream-backed staging.
     pub fn open(
-        &self,
-        path: &Path,
-        opts: &OpenOptions,
-    ) -> Result<Box<dyn ArchiveReader>, FormatError> {
-        self.open_with_control(path, opts, &ControlToken::default())
-    }
-
-    /// Opens an archive while honoring pause and cancellation during format
-    /// detection, metadata parsing and stream-backed staging.
-    pub fn open_with_control(
         &self,
         path: &Path,
         opts: &OpenOptions,
@@ -803,7 +801,7 @@ impl Engine {
         let (head, tail) = controlled_result(control, sniff_window(&mut *stream))?;
         let reader = match self.registry.detect(Some("payload.zip"), &head, &tail) {
             Some(api::Detected::Archive(format)) if format.id() == "zip" => {
-                controlled_result(control, format.open_with_control(stream, opts, control))?
+                controlled_result(control, format.open(stream, opts, control))?
             }
             _ => {
                 return Err(FormatError::CorruptArchive(
@@ -828,10 +826,7 @@ impl Engine {
             let (head, tail) = controlled_result(control, sniff_window(&mut *stream))?;
             return match self.registry.detect(Some("payload.zip"), &head, &tail) {
                 Some(api::Detected::Archive(format)) if format.id() == "zip" => {
-                    let reader = controlled_result(
-                        control,
-                        format.open_with_control(stream, opts, control),
-                    )?;
+                    let reader = controlled_result(control, format.open(stream, opts, control))?;
                     Ok(OpenedArchive::new("zip".to_owned(), reader, None, None))
                 }
                 _ => Err(FormatError::CorruptArchive(
@@ -857,14 +852,10 @@ impl Engine {
             Some(api::Detected::Archive(f)) => {
                 let format = f.id().to_owned();
                 let reader = match source.physical_path() {
-                    Some(source_path) => f.open_file_with_control(
-                        source_path,
-                        source_identity,
-                        stream,
-                        opts,
-                        control,
-                    ),
-                    None => f.open_with_control(stream, opts, control),
+                    Some(source_path) => {
+                        f.open_file(source_path, source_identity, stream, opts, control)
+                    }
+                    None => f.open(stream, opts, control),
                 };
                 let reader = controlled_result(control, reader)?;
                 Ok(OpenedArchive::new(
@@ -920,52 +911,11 @@ impl Engine {
         }
     }
 
-    /// Lists entries, returning the detected format and any native physical
-    /// volume set retained by the opened reader.
-    pub fn list_with_format_and_source_set(
-        &self,
-        path: &Path,
-        opts: &OpenOptions,
-    ) -> Result<(String, Vec<EntryMeta>, Option<api::ArchiveSourceSet>), FormatError> {
-        self.list_with_format_and_source_set_with_control(path, opts, &ControlToken::default())
-    }
-
-    /// Lists entries and retains native source-set metadata while honoring
-    /// pause and cancellation throughout opening and metadata iteration.
-    pub fn list_with_format_and_source_set_with_control(
-        &self,
-        path: &Path,
-        opts: &OpenOptions,
-        control: &ControlToken,
-    ) -> Result<(String, Vec<EntryMeta>, Option<api::ArchiveSourceSet>), FormatError> {
-        self.list_with_format_and_source_set_with_entry_limit_and_control(
-            path,
-            opts,
-            SafetyLimits::default().max_entries,
-            control,
-        )
-    }
-
-    /// Lists entries with an explicit metadata-count limit while retaining
-    /// source-set metadata and honoring pause and cancellation.
-    pub fn list_with_format_and_source_set_with_entry_limit_and_control(
-        &self,
-        path: &Path,
-        opts: &OpenOptions,
-        max_entries: u64,
-        control: &ControlToken,
-    ) -> Result<(String, Vec<EntryMeta>, Option<api::ArchiveSourceSet>), FormatError> {
-        self.list_with_format_source_set_and_structure_with_entry_limit_and_control(
-            path,
-            opts,
-            max_entries,
-            control,
-        )
-        .map(|listing| (listing.format, listing.entries, listing.source_set))
-    }
-
-    /// Lists entries while retaining the reader's explicit structural state.
-    pub fn list_with_format_source_set_and_structure_with_entry_limit_and_control(
+    /// Lists metadata with the detected format, source binding, structural
+    /// state and credential verification from the opened reader. The explicit
+    /// limit is checked before retaining another entry; opening and iteration
+    /// honor pause and cancellation.
+    pub fn list_archive(
         &self,
         path: &Path,
         opts: &OpenOptions,
@@ -1020,63 +970,10 @@ impl Engine {
         })
     }
 
-    /// Lists entries.
-    pub fn list(&self, path: &Path, opts: &OpenOptions) -> Result<Vec<EntryMeta>, FormatError> {
-        self.list_with_control(path, opts, &ControlToken::default())
-    }
-
-    /// Lists entries together with the structural state used to reach them.
-    pub fn list_with_structure(
-        &self,
-        path: &Path,
-        opts: &OpenOptions,
-    ) -> Result<(Vec<EntryMeta>, ArchiveStructureStatus), FormatError> {
-        self.list_with_format_source_set_and_structure_with_entry_limit_and_control(
-            path,
-            opts,
-            SafetyLimits::default().max_entries,
-            &ControlToken::default(),
-        )
-        .map(|listing| (listing.entries, listing.structure))
-    }
-
-    /// Lists entries while checking the shared pause/cancellation token
-    /// between archive entries.
-    pub fn list_with_control(
-        &self,
-        path: &Path,
-        opts: &OpenOptions,
-        control: &ControlToken,
-    ) -> Result<Vec<EntryMeta>, FormatError> {
-        self.list_with_format_and_source_set_with_control(path, opts, control)
-            .map(|(_, entries, _)| entries)
-    }
-
-    /// Extracts everything or a selection of entries.
-    #[allow(clippy::too_many_arguments)] // engine facade: each argument has a distinct role
-    pub fn extract(
-        &self,
-        path: &Path,
-        dest: &Path,
-        selection: Option<&[EntryPath]>,
-        open_opts: &OpenOptions,
-        extract_opts: &ExtractOptions,
-        progress: &dyn ProgressSink,
-        ctl: &ControlToken,
-    ) -> Result<(), FormatError> {
-        let mut reader = self.open_for_operation(path, open_opts, progress, ctl)?;
-        progress.on_phase(ProgressPhase::ExtractEntries, true);
-        ctl.checkpoint()?;
-        controlled_result(
-            ctl,
-            reader.extract(dest, selection, extract_opts, progress, ctl),
-        )
-    }
-
     /// Extracts everything or a selection and returns completed per-entry
     /// outcome counts.
     #[allow(clippy::too_many_arguments)] // engine facade: each argument has a distinct role
-    pub fn extract_with_report(
+    pub fn extract(
         &self,
         path: &Path,
         dest: &Path,
@@ -1091,7 +988,7 @@ impl Engine {
         ctl.checkpoint()?;
         controlled_result(
             ctl,
-            reader.extract_with_report(dest, selection, extract_opts, progress, ctl),
+            reader.extract(dest, selection, extract_opts, progress, ctl),
         )
     }
 
@@ -1102,34 +999,7 @@ impl Engine {
     /// metadata list. Source members are checked before metadata iteration,
     /// after selection and again after destination planning, so the returned
     /// guard never authorizes a plan observed across a source-state change.
-    #[allow(clippy::too_many_arguments)] // engine facade: each argument has a distinct role
-    pub fn plan_extract_with_input_guard_controlled<F>(
-        &self,
-        archive: &Path,
-        requested_destination: &Path,
-        archive_display_path: &Path,
-        smart: bool,
-        open_opts: &OpenOptions,
-        control: &ControlToken,
-        select: F,
-    ) -> Result<(ExtractPlan, ExtractSpace, ExtractInputGuard), FormatError>
-    where
-        F: FnOnce(&[EntryMeta], &ControlToken) -> Result<Option<Vec<EntryPath>>, FormatError>,
-    {
-        self.plan_extract_with_input_guard_and_entry_limit_controlled(
-            archive,
-            requested_destination,
-            archive_display_path,
-            smart,
-            open_opts,
-            SafetyLimits::default().max_entries,
-            control,
-            select,
-        )
-    }
-
-    /// Builds a guarded extraction preflight with an explicit metadata-count
-    /// limit. The limit is checked before another entry is retained in memory.
+    /// The explicit metadata limit is checked before retaining another entry.
     #[allow(clippy::too_many_arguments)] // engine facade: each argument has a distinct role
     pub fn plan_extract_with_input_guard_and_entry_limit_controlled<F>(
         &self,
@@ -1177,25 +1047,6 @@ impl Engine {
     /// Builds the same extraction preflight from an already listed archive.
     /// Layout always considers `entries` in full; selection affects only the
     /// scope and conflict snapshot.
-    pub fn plan_extract_from_entries(
-        &self,
-        requested_destination: &Path,
-        archive_display_path: &Path,
-        entries: &[EntryMeta],
-        selection: Option<&[EntryPath]>,
-        smart: bool,
-    ) -> Result<ExtractPlan, FormatError> {
-        self.plan_extract_from_entries_with_control(
-            requested_destination,
-            archive_display_path,
-            entries,
-            selection,
-            smart,
-            &ControlToken::default(),
-        )
-    }
-
-    /// Controlled variant of [`Engine::plan_extract_from_entries`].
     pub fn plan_extract_from_entries_with_control(
         &self,
         requested_destination: &Path,
@@ -1223,78 +1074,10 @@ impl Engine {
     /// create the destination. Keeping the reader alive avoids reopening
     /// password-protected, split, nested, or streamed archives between
     /// preflight and extraction.
+    /// The optional input guard is validated against that same reader; the
+    /// returned structural state also comes from it without reopening.
     #[allow(clippy::too_many_arguments)] // engine facade: each argument has a distinct role
-    pub fn plan_and_extract_with_report_controlled<F, V>(
-        &self,
-        archive: &Path,
-        requested_destination: &Path,
-        archive_display_path: &Path,
-        smart: bool,
-        open_opts: &OpenOptions,
-        extract_opts: &ExtractOptions,
-        progress: &dyn ProgressSink,
-        ctl: &ControlToken,
-        select: F,
-        validate_plan: V,
-    ) -> Result<(ExtractPlan, api::ExtractReport), FormatError>
-    where
-        F: FnOnce(&[EntryMeta], &ControlToken) -> Result<Option<Vec<EntryPath>>, FormatError>,
-        V: FnOnce(&ExtractPlan) -> Result<(), FormatError>,
-    {
-        self.plan_and_extract_with_report_and_structure_controlled(
-            archive,
-            requested_destination,
-            archive_display_path,
-            smart,
-            open_opts,
-            extract_opts,
-            progress,
-            ctl,
-            select,
-            validate_plan,
-        )
-        .map(|(plan, report, _)| (plan, report))
-    }
-
-    /// Controlled extraction that also reports the structure of the reader
-    /// used for the operation. This does not reopen or rescan the archive.
-    #[allow(clippy::too_many_arguments)] // engine facade: each argument has a distinct role
-    pub fn plan_and_extract_with_report_and_structure_controlled<F, V>(
-        &self,
-        archive: &Path,
-        requested_destination: &Path,
-        archive_display_path: &Path,
-        smart: bool,
-        open_opts: &OpenOptions,
-        extract_opts: &ExtractOptions,
-        progress: &dyn ProgressSink,
-        ctl: &ControlToken,
-        select: F,
-        validate_plan: V,
-    ) -> Result<(ExtractPlan, api::ExtractReport, ArchiveStructureStatus), FormatError>
-    where
-        F: FnOnce(&[EntryMeta], &ControlToken) -> Result<Option<Vec<EntryPath>>, FormatError>,
-        V: FnOnce(&ExtractPlan) -> Result<(), FormatError>,
-    {
-        self.plan_and_extract_with_report_guarded_and_structure_controlled(
-            archive,
-            requested_destination,
-            archive_display_path,
-            smart,
-            open_opts,
-            extract_opts,
-            progress,
-            ctl,
-            None,
-            select,
-            validate_plan,
-        )
-    }
-
-    /// Guarded extraction that also reports the structure of the same reader
-    /// used for guard validation, planning, and extraction.
-    #[allow(clippy::too_many_arguments)] // shared guarded extraction implementation
-    pub fn plan_and_extract_with_report_guarded_and_structure_controlled<F, V>(
+    pub fn extract_planned<F, V>(
         &self,
         archive: &Path,
         requested_destination: &Path,
@@ -1363,7 +1146,7 @@ impl Engine {
         ctl.checkpoint()?;
         let report = controlled_result(
             ctl,
-            opened.reader.extract_with_report(
+            opened.reader.extract(
                 &plan.destination,
                 selection.as_deref(),
                 extract_opts,
@@ -1420,94 +1203,48 @@ impl Engine {
     /// `dest.002`, ... byte-split volumes. Formats that advertise native
     /// volume support can instead use [`SplitOutputMode::Native`]; ZIP then
     /// writes `.z01`, `.z02`, ... with the final `.zip` as its primary
-    /// member. Call [`Engine::create_with_report`] when the caller must
-    /// surface retained backups from a split replacement.
+    /// member. The report includes every committed output and any retained
+    /// backups from a split replacement; callers must surface those paths.
+    ///
+    /// `ReplaceIfUnchanged` binds replacement to the destination state
+    /// returned by [`inspect_create_destination`]. `NoReplace` refuses an
+    /// output that appears before commit; split creation checks the managed
+    /// output family while holding its lock.
     pub fn create(
         &self,
         dest: &Path,
         inputs: &[PathBuf],
         opts: &CreateOptions,
-        progress: &dyn ProgressSink,
-        ctl: &ControlToken,
-    ) -> Result<(), FormatError> {
-        self.create_with_report(dest, inputs, opts, progress, ctl)
-            .map(drop)
-    }
-
-    /// Creates an archive and returns the newly committed outputs together
-    /// with any transaction-owned backups retained during split replacement.
-    /// [`Engine::create`] discards this report.
-    pub fn create_with_report(
-        &self,
-        dest: &Path,
-        inputs: &[PathBuf],
-        opts: &CreateOptions,
+        commit_policy: CreateCommitPolicy,
         progress: &dyn ProgressSink,
         ctl: &ControlToken,
     ) -> Result<CreateReport, FormatError> {
-        create::create(self, dest, inputs, opts, progress, ctl)
-    }
-
-    /// Creates an archive using an explicit final publication policy.
-    /// `ReplaceIfUnchanged` binds replacement to the destination state
-    /// returned by [`inspect_create_destination`].
-    pub fn create_with_report_policy(
-        &self,
-        dest: &Path,
-        inputs: &[PathBuf],
-        opts: &CreateOptions,
-        policy: CreateCommitPolicy,
-        progress: &dyn ProgressSink,
-        ctl: &ControlToken,
-    ) -> Result<CreateReport, FormatError> {
-        create::create_report_with_policy(self, dest, inputs, opts, policy, progress, ctl)
-    }
-
-    /// Creates an archive without replacing an output that appears before
-    /// the final commit. Split creation rejects any existing member of the
-    /// managed output family while holding the split commit lock.
-    pub fn create_with_report_no_replace(
-        &self,
-        dest: &Path,
-        inputs: &[PathBuf],
-        opts: &CreateOptions,
-        progress: &dyn ProgressSink,
-        ctl: &ControlToken,
-    ) -> Result<CreateReport, FormatError> {
-        create::create_no_replace(self, dest, inputs, opts, progress, ctl)
-    }
-
-    /// Verified creation using an explicit final publication policy.
-    pub fn create_with_verification_policy(
-        &self,
-        dest: &Path,
-        inputs: &[PathBuf],
-        opts: &CreateOptions,
-        policy: CreateCommitPolicy,
-        progress: &dyn ProgressSink,
-        ctl: &ControlToken,
-    ) -> Result<VerifiedCreateReport, FormatError> {
-        create::create_verified(self, dest, inputs, opts, progress, ctl, policy)
-    }
-
-    /// Verified creation with commit-time no-replace semantics.
-    pub fn create_with_verification_no_replace(
-        &self,
-        dest: &Path,
-        inputs: &[PathBuf],
-        opts: &CreateOptions,
-        progress: &dyn ProgressSink,
-        ctl: &ControlToken,
-    ) -> Result<VerifiedCreateReport, FormatError> {
-        create::create_verified(
+        create::create_published(
             self,
             dest,
             inputs,
             opts,
+            commit_policy,
             progress,
             ctl,
-            CreateCommitPolicy::NoReplace,
+            false,
         )
+        .map(|report| report.create)
+    }
+
+    /// Creates an archive under the same publication contract as [`Self::create`]
+    /// and records the exact source content written into it. The manifest lets
+    /// callers verify sources before cleanup; ordinary creation does not capture it.
+    pub fn create_verified(
+        &self,
+        dest: &Path,
+        inputs: &[PathBuf],
+        opts: &CreateOptions,
+        commit_policy: CreateCommitPolicy,
+        progress: &dyn ProgressSink,
+        ctl: &ControlToken,
+    ) -> Result<VerifiedCreateReport, FormatError> {
+        create::create_published(self, dest, inputs, opts, commit_policy, progress, ctl, true)
     }
 
     /// Builds a conservative output/workspace plan using the same input and
@@ -1517,19 +1254,10 @@ impl Engine {
         dest: &Path,
         inputs: &[PathBuf],
         opts: &CreateOptions,
-    ) -> Result<CreatePlan, FormatError> {
-        self.plan_create_with_progress(dest, inputs, opts, |_count, _path| {})
-    }
-
-    /// Progress-reporting variant of [`Engine::plan_create`].
-    pub fn plan_create_with_progress(
-        &self,
-        dest: &Path,
-        inputs: &[PathBuf],
-        opts: &CreateOptions,
         progress: impl FnMut(usize, &str),
+        ctl: &ControlToken,
     ) -> Result<CreatePlan, FormatError> {
-        create::plan_create_with_progress(self, dest, inputs, opts, progress)
+        create::plan_create(self, dest, inputs, opts, progress, ctl)
     }
 
     /// Builds a conservative output/workspace plan for an archive conversion.
@@ -1559,35 +1287,31 @@ impl Engine {
             .file_name()
             .and_then(|name| name.to_str())
             .ok_or_else(|| FormatError::Unsupported("invalid output file name".into()))?;
-        create::validate_create_target_name(self, detect_name, create_opts)?;
-        let entries = self.list_with_control(src, open_opts, ctl)?;
-        convert::plan_convert_from_entries(self, dest, &entries, create_opts)
+        archive_output::validate_create_target_name(self, detect_name, create_opts)?;
+        let listing =
+            self.list_archive(src, open_opts, SafetyLimits::default().max_entries, ctl)?;
+        convert::plan_convert_from_entries(self, dest, &listing.entries, create_opts)
     }
 
     /// Walks local inputs with the same exclude semantics as archive creation
     /// and returns a non-compression estimate for the UI/preflight layer.
+    /// Reports each included filesystem candidate before overlapping roots are
+    /// merged, so the final estimate can contain fewer entries than the scan count.
     pub fn estimate_create_inputs(
         &self,
         inputs: &[PathBuf],
         excludes: &[String],
-    ) -> Result<CreateInputEstimate, FormatError> {
-        self.estimate_create_inputs_with_progress(inputs, excludes, |_count, _path| {})
-    }
-
-    /// Same as [`Engine::estimate_create_inputs`], reporting each included
-    /// filesystem candidate before overlapping roots are merged. The final
-    /// estimate can therefore contain fewer entries than the last scan count.
-    pub fn estimate_create_inputs_with_progress(
-        &self,
-        inputs: &[PathBuf],
-        excludes: &[String],
         mut progress: impl FnMut(usize, &str),
+        ctl: &ControlToken,
     ) -> Result<CreateInputEstimate, FormatError> {
         let filter = PathFilter::new(excludes)?;
-        let items = inputs::collect_inputs_with_progress(inputs, &filter, |count, path| {
-            progress(count, &path.display);
-        })?;
-        Ok(summarize_create_input_manifest(inputs.len(), &items).estimate)
+        let items = inputs::collect_inputs_with_progress(
+            inputs,
+            &filter,
+            |count, path| progress(count, &path.display),
+            ctl,
+        )?;
+        Ok(summarize_create_input_manifest(inputs.len(), &items, ctl)?.estimate)
     }
 
     /// Estimates inputs while applying the output-family exclusions used by
@@ -1599,44 +1323,9 @@ impl Engine {
         excludes: &[String],
         output: &Path,
         split_output: bool,
-    ) -> Result<CreateInputEstimate, FormatError> {
-        self.estimate_create_inputs_for_output_with_progress(
-            inputs,
-            excludes,
-            output,
-            split_output,
-            |_count, _path| {},
-        )
-    }
-
-    /// Output-aware variant of [`Engine::estimate_create_inputs_with_progress`].
-    pub fn estimate_create_inputs_for_output_with_progress(
-        &self,
-        inputs: &[PathBuf],
-        excludes: &[String],
-        output: &Path,
-        split_output: bool,
-        progress: impl FnMut(usize, &str),
-    ) -> Result<CreateInputEstimate, FormatError> {
-        Ok(self
-            .estimate_create_input_summary_for_output_with_progress(
-                inputs,
-                excludes,
-                output,
-                split_output,
-                progress,
-            )?
-            .estimate)
-    }
-
-    pub(crate) fn estimate_create_input_summary_for_output_with_progress(
-        &self,
-        inputs: &[PathBuf],
-        excludes: &[String],
-        output: &Path,
-        split_output: bool,
         mut progress: impl FnMut(usize, &str),
-    ) -> Result<CreateInputSummary, FormatError> {
+        ctl: &ControlToken,
+    ) -> Result<CreateInputEstimate, FormatError> {
         let filter = PathFilter::new(excludes)?;
         let items = create::collect_inputs_for_output_estimate(
             inputs,
@@ -1644,63 +1333,48 @@ impl Engine {
             output,
             split_output,
             |count, path| progress(count, &path.display),
+            ctl,
         )?;
-        Ok(summarize_create_input_manifest(inputs.len(), &items))
+        Ok(summarize_create_input_manifest(inputs.len(), &items, ctl)?.estimate)
     }
 
     /// Finds duplicate local files with the same input walking and exclude
-    /// semantics used by archive creation.
+    /// semantics used by archive creation, merging overlapping roots.
+    /// Reports scan and byte progress and checks cancellation throughout.
     pub fn find_duplicate_files(
         &self,
         inputs: &[PathBuf],
         excludes: &[String],
         min_size: u64,
+        progress: &dyn ProgressSink,
+        ctl: &ControlToken,
     ) -> Result<DuplicateScanReport, FormatError> {
-        duplicates::find_duplicates(inputs, excludes, min_size)
+        duplicates::find_duplicates(inputs, excludes, min_size, progress, ctl)
     }
 
-    /// Computes checksums for local files and recursively scanned folders,
-    /// using the same exclude semantics as archive creation.
+    /// Computes checksums for files and recursively scanned folders with the
+    /// shared exclude rules, scan and byte progress, and cancellation.
     pub fn checksum_files(
         &self,
         inputs: &[PathBuf],
         excludes: &[String],
         algorithm: ChecksumAlgorithm,
-    ) -> Result<ChecksumReport, FormatError> {
-        checksum::checksum_files(inputs, excludes, algorithm)
-    }
-
-    /// Computes checksums with chunk-level progress and cancellation.
-    pub fn checksum_files_with_progress(
-        &self,
-        inputs: &[PathBuf],
-        excludes: &[String],
-        algorithm: ChecksumAlgorithm,
         progress: &dyn ProgressSink,
         ctl: &ControlToken,
     ) -> Result<ChecksumReport, FormatError> {
-        checksum::checksum_files_with_progress(inputs, excludes, algorithm, progress, ctl)
+        checksum::checksum_files(inputs, excludes, algorithm, progress, ctl)
     }
 
-    /// Verifies a `sha256sum`-style checksum manifest. Relative paths are
-    /// resolved from the manifest file's parent directory.
+    /// Verifies a `sha256sum`-style manifest with byte progress and cancellation.
+    /// Relative paths are resolved from the manifest file's parent directory.
     pub fn verify_checksum_manifest(
         &self,
         manifest: &Path,
         algorithm: ChecksumAlgorithm,
-    ) -> Result<ChecksumVerificationReport, FormatError> {
-        checksum::verify_checksum_manifest(manifest, algorithm)
-    }
-
-    /// Verifies a checksum manifest with chunk-level progress and cancellation.
-    pub fn verify_checksum_manifest_with_progress(
-        &self,
-        manifest: &Path,
-        algorithm: ChecksumAlgorithm,
         progress: &dyn ProgressSink,
         ctl: &ControlToken,
     ) -> Result<ChecksumVerificationReport, FormatError> {
-        checksum::verify_checksum_manifest_with_progress(manifest, algorithm, progress, ctl)
+        checksum::verify_checksum_manifest(manifest, algorithm, progress, ctl)
     }
 
     /// Applies append/delete/rename operations through the core-owned durable
@@ -1776,84 +1450,16 @@ impl Engine {
     /// (no extraction to disk). `open_opts` applies to the source and
     /// `create_opts` (password and level) to the destination.
     ///
-    /// Split conversion must use [`Self::convert_with_report`], because a
-    /// replacement can retain previous volumes that the caller must show to
-    /// the user.
-    #[allow(clippy::too_many_arguments)] // engine facade: distinct roles
-    pub fn convert(
-        &self,
-        src: &Path,
-        dest: &Path,
-        open_opts: &OpenOptions,
-        create_opts: &CreateOptions,
-        progress: &dyn ProgressSink,
-        ctl: &ControlToken,
-    ) -> Result<(), FormatError> {
-        if create_opts.split_size.is_some() {
-            return Err(FormatError::Unsupported(
-                "split conversion requires convert_with_report so preserved previous outputs cannot be hidden"
-                    .into(),
-            ));
-        }
-        self.convert_with_report(src, dest, open_opts, create_opts, progress, ctl)
-            .map(drop)
-    }
-
-    /// Converts an archive and returns every committed destination artifact.
-    /// Split replacements report transaction-owned previous volumes through
+    /// The explicit publication policy and returned report cover every
+    /// committed artifact. Split replacements report previous volumes through
     /// [`CreateReport::preserved_outputs`]; callers must surface those exact
     /// paths before offering any cleanup action.
-    #[allow(clippy::too_many_arguments)] // engine facade: distinct roles
-    pub fn convert_with_report(
-        &self,
-        src: &Path,
-        dest: &Path,
-        open_opts: &OpenOptions,
-        create_opts: &CreateOptions,
-        progress: &dyn ProgressSink,
-        ctl: &ControlToken,
-    ) -> Result<CreateReport, FormatError> {
-        convert::convert(self, src, dest, open_opts, create_opts, None, progress, ctl)
-    }
-
-    /// Converts an archive using an explicit destination publication policy.
     ///
     /// [`CreateCommitPolicy::NoReplace`] refuses an occupied destination,
     /// while [`CreateCommitPolicy::ReplaceIfUnchanged`] only replaces the
     /// exact destination state captured before the caller asked for consent.
     #[allow(clippy::too_many_arguments)] // engine facade: distinct roles
-    pub fn convert_with_policy(
-        &self,
-        src: &Path,
-        dest: &Path,
-        open_opts: &OpenOptions,
-        create_opts: &CreateOptions,
-        commit_policy: CreateCommitPolicy,
-        progress: &dyn ProgressSink,
-        ctl: &ControlToken,
-    ) -> Result<(), FormatError> {
-        if create_opts.split_size.is_some() {
-            return Err(FormatError::Unsupported(
-                "split conversion requires convert_with_report_policy so preserved previous outputs cannot be hidden"
-                    .into(),
-            ));
-        }
-        self.convert_with_report_policy(
-            src,
-            dest,
-            open_opts,
-            create_opts,
-            commit_policy,
-            progress,
-            ctl,
-        )
-        .map(drop)
-    }
-
-    /// Converts an archive using an explicit destination publication policy
-    /// and returns every committed destination artifact.
-    #[allow(clippy::too_many_arguments)] // engine facade: distinct roles
-    pub fn convert_with_report_policy(
+    pub fn convert(
         &self,
         src: &Path,
         dest: &Path,
@@ -1869,54 +1475,10 @@ impl Engine {
             dest,
             open_opts,
             create_opts,
-            Some(commit_policy),
-            progress,
-            ctl,
-        )
-    }
-
-    /// Converts an archive and reports whether `src` and `dest` name the same
-    /// existing file. Conversion commits from a same-directory staging file:
-    /// the source can be replaced atomically in place, while an independent
-    /// destination must remain unoccupied until publication.
-    ///
-    /// Split output is always rejected. Use [`Self::convert_with_report`] for
-    /// split conversion so every committed and preserved artifact is visible
-    /// to the caller.
-    ///
-    /// Returns `true` when the destination was replaced in place.
-    #[allow(clippy::too_many_arguments)] // engine facade: distinct roles
-    pub fn convert_with_atomic_replace(
-        &self,
-        src: &Path,
-        dest: &Path,
-        open_opts: &OpenOptions,
-        create_opts: &CreateOptions,
-        progress: &dyn ProgressSink,
-        ctl: &ControlToken,
-    ) -> Result<bool, FormatError> {
-        if create_opts.split_size.is_some() {
-            return Err(FormatError::Unsupported(
-                "convert_with_atomic_replace does not support split output; use convert_with_report"
-                    .into(),
-            ));
-        }
-        let in_place = same_existing_path(src, dest);
-        let commit_policy = if in_place {
-            CreateCommitPolicy::ReplaceExisting
-        } else {
-            CreateCommitPolicy::NoReplace
-        };
-        self.convert_with_policy(
-            src,
-            dest,
-            open_opts,
-            create_opts,
             commit_policy,
             progress,
             ctl,
-        )?;
-        Ok(in_place)
+        )
     }
 
     /// Folder-name stem of an archive path: the file name minus split
@@ -2071,32 +1633,50 @@ pub(crate) struct ReservedTempFile {
     pub(crate) identity: filesystem_identity::PathIdentity,
 }
 
+impl ReservedTempFile {
+    /// Clone a handle without losing the binding needed if the clone fails.
+    pub(crate) fn clone_for_writer(&self, cleanup_context: &str) -> Result<File, FormatError> {
+        self.clone_for_writer_with(cleanup_context, File::try_clone)
+    }
+
+    fn clone_for_writer_with(
+        &self,
+        cleanup_context: &str,
+        clone: impl FnOnce(&File) -> io::Result<File>,
+    ) -> Result<File, FormatError> {
+        clone(&self.file).map_err(|error| self.cleanup_error(error.into(), cleanup_context))
+    }
+
+    pub(crate) fn written_size(
+        &self,
+        changed: impl FnOnce() -> io::Error,
+    ) -> Result<u64, FormatError> {
+        if filesystem_identity::file_identity(&self.file)? != self.identity
+            || filesystem_identity::path_identity(&self.path)? != self.identity
+        {
+            return Err(FormatError::Io(changed()));
+        }
+        Ok(self.file.metadata()?.len())
+    }
+
+    /// Only the current stage owner may call this; ownership can move into a journal.
+    pub(crate) fn cleanup_error(&self, error: FormatError, cleanup_context: &str) -> FormatError {
+        match remove_bound_temp_file(&self.path, &self.file, self.identity) {
+            Ok(()) => error,
+            Err(cleanup) => FormatError::Other(format!(
+                "{error}; {cleanup_context} cleanup also failed: {cleanup}"
+            )),
+        }
+    }
+}
+
 pub(crate) fn reserve_bound_sibling_temp_file(
     dest: &Path,
     purpose: &str,
 ) -> Result<ReservedTempFile, FormatError> {
     for _ in 0..1000u32 {
         let candidate = sibling_temp_path(dest, purpose)?;
-        let mut options = fs::OpenOptions::new();
-        options.read(true).write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-
-            options.mode(0o600);
-        }
-        #[cfg(windows)]
-        {
-            use std::os::windows::fs::OpenOptionsExt;
-            use windows_sys::Win32::Storage::FileSystem::{
-                FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ,
-            };
-
-            options
-                .share_mode(FILE_SHARE_READ | FILE_SHARE_DELETE)
-                .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
-        }
-        match options.open(&candidate) {
+        match filesystem_identity::open_new_artifact(&candidate) {
             Ok(file) => {
                 let identity = filesystem_identity::file_identity(&file).map_err(|error| {
                     FormatError::from(io::Error::new(
@@ -2179,17 +1759,6 @@ pub(crate) fn remove_bound_temp_file(
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error.into()),
     }
-}
-
-#[cfg(test)]
-pub(crate) fn replace_file(tmp: &Path, dest: &Path) -> Result<(), FormatError> {
-    let parent = open_parent_directory(dest)?;
-    replace_file_with(
-        tmp,
-        dest,
-        &mut |from, to| atomic_replace_file(from, to),
-        &mut || parent.sync_all(),
-    )
 }
 
 pub(crate) fn open_parent_directory(path: &Path) -> io::Result<File> {
@@ -2555,23 +2124,6 @@ pub(crate) fn output_exists_error(dest: &Path) -> FormatError {
     FormatError::output_exists(dest)
 }
 
-#[cfg(test)]
-fn replace_file_with<R, S>(
-    tmp: &Path,
-    dest: &Path,
-    replace: &mut R,
-    sync_parent: &mut S,
-) -> Result<(), FormatError>
-where
-    R: FnMut(&Path, &Path) -> std::io::Result<()>,
-    S: FnMut() -> std::io::Result<()>,
-{
-    sync_staged_file(tmp)?;
-    replace(tmp, dest)?;
-    sync_parent()?;
-    Ok(())
-}
-
 fn sync_staged_file(path: &Path) -> io::Result<()> {
     let metadata = fs::symlink_metadata(path)?;
     if !metadata.file_type().is_file() {
@@ -2665,6 +2217,7 @@ fn sniff_window(stream: &mut dyn ReadSeek) -> Result<(Vec<u8>, Vec<u8>), FormatE
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::NoProgress;
     use std::io::{Read, Write};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -2728,10 +2281,7 @@ mod tests {
     struct FileOpenProbeFormat {
         stream_opens: Arc<AtomicUsize>,
         file_opens: Arc<AtomicUsize>,
-        controlled_stream_opens: Arc<AtomicUsize>,
-        controlled_file_opens: Arc<AtomicUsize>,
         source_probes: Arc<AtomicUsize>,
-        controlled_source_probes: Arc<AtomicUsize>,
         source_path: Arc<std::sync::Mutex<Option<PathBuf>>>,
         bytes: Arc<std::sync::Mutex<Vec<u8>>>,
     }
@@ -2761,7 +2311,9 @@ mod tests {
             &self,
             mut src: Box<dyn api::ReadSeek>,
             _opts: &OpenOptions,
+            ctl: &ControlToken,
         ) -> Result<Box<dyn ArchiveReader>, FormatError> {
+            ctl.checkpoint()?;
             let mut byte = [0_u8; 1];
             src.read_exact(&mut byte)?;
             self.control.cancel();
@@ -2775,6 +2327,7 @@ mod tests {
             &self,
             _dst: Box<dyn api::WriteSeek>,
             _opts: &CreateOptions,
+            _ctl: &ControlToken,
         ) -> Result<Box<dyn api::ArchiveWriter>, FormatError> {
             Err(FormatError::Unsupported("cancel-open create".into()))
         }
@@ -2813,7 +2366,9 @@ mod tests {
             &self,
             src: Box<dyn api::ReadSeek>,
             _opts: &OpenOptions,
+            ctl: &ControlToken,
         ) -> Result<Box<dyn ArchiveReader>, FormatError> {
+            ctl.checkpoint()?;
             self.stream_opens.fetch_add(1, Ordering::SeqCst);
             self.record(src)
         }
@@ -2824,35 +2379,13 @@ mod tests {
             source_identity: Option<api::PhysicalFileIdentity>,
             src: Box<dyn api::ReadSeek>,
             _opts: &OpenOptions,
+            ctl: &ControlToken,
         ) -> Result<Box<dyn ArchiveReader>, FormatError> {
+            ctl.checkpoint()?;
             self.file_opens.fetch_add(1, Ordering::SeqCst);
             assert!(source_identity.is_some());
             *self.source_path.lock().unwrap() = Some(source_path.to_path_buf());
             self.record(src)
-        }
-
-        fn open_with_control(
-            &self,
-            src: Box<dyn api::ReadSeek>,
-            opts: &OpenOptions,
-            ctl: &ControlToken,
-        ) -> Result<Box<dyn ArchiveReader>, FormatError> {
-            ctl.checkpoint()?;
-            self.controlled_stream_opens.fetch_add(1, Ordering::SeqCst);
-            self.open(src, opts)
-        }
-
-        fn open_file_with_control(
-            &self,
-            source_path: &Path,
-            source_identity: Option<api::PhysicalFileIdentity>,
-            src: Box<dyn api::ReadSeek>,
-            opts: &OpenOptions,
-            ctl: &ControlToken,
-        ) -> Result<Box<dyn ArchiveReader>, FormatError> {
-            ctl.checkpoint()?;
-            self.controlled_file_opens.fetch_add(1, Ordering::SeqCst);
-            self.open_file(source_path, source_identity, src, opts)
         }
 
         fn probe_file_source_set(
@@ -2860,28 +2393,19 @@ mod tests {
             _source_path: &Path,
             source_identity: Option<api::PhysicalFileIdentity>,
             _src: &mut dyn api::ReadSeek,
-        ) -> Result<Option<api::ArchiveSourceSet>, FormatError> {
-            assert!(source_identity.is_some());
-            self.source_probes.fetch_add(1, Ordering::SeqCst);
-            Ok(None)
-        }
-
-        fn probe_file_source_set_with_control(
-            &self,
-            source_path: &Path,
-            source_identity: Option<api::PhysicalFileIdentity>,
-            src: &mut dyn api::ReadSeek,
             ctl: &ControlToken,
         ) -> Result<Option<api::ArchiveSourceSet>, FormatError> {
             ctl.checkpoint()?;
-            self.controlled_source_probes.fetch_add(1, Ordering::SeqCst);
-            self.probe_file_source_set(source_path, source_identity, src)
+            assert!(source_identity.is_some());
+            self.source_probes.fetch_add(1, Ordering::SeqCst);
+            Ok(None)
         }
 
         fn create(
             &self,
             _dst: Box<dyn api::WriteSeek>,
             _opts: &CreateOptions,
+            _ctl: &ControlToken,
         ) -> Result<Box<dyn api::ArchiveWriter>, FormatError> {
             Err(FormatError::Unsupported("probe create".into()))
         }
@@ -2908,6 +2432,7 @@ mod tests {
             &self,
             _src: Box<dyn api::ReadSeek>,
             _opts: &OpenOptions,
+            _ctl: &ControlToken,
         ) -> Result<Box<dyn ArchiveReader>, FormatError> {
             self.opens.fetch_add(1, Ordering::SeqCst);
             Ok(Box::new(CountingExtractReader {
@@ -2925,6 +2450,7 @@ mod tests {
             &self,
             _dst: Box<dyn api::WriteSeek>,
             _opts: &CreateOptions,
+            _ctl: &ControlToken,
         ) -> Result<Box<dyn api::ArchiveWriter>, FormatError> {
             Err(FormatError::Unsupported("counted extract create".into()))
         }
@@ -2970,7 +2496,7 @@ mod tests {
             }))
         }
 
-        fn extract_with_report(
+        fn extract(
             &mut self,
             dest: &Path,
             selection: Option<&[EntryPath]>,
@@ -3036,6 +2562,7 @@ mod tests {
             &self,
             _src: Box<dyn api::ReadSeek>,
             _opts: &OpenOptions,
+            _ctl: &ControlToken,
         ) -> Result<Box<dyn ArchiveReader>, FormatError> {
             Err(FormatError::Unsupported("test open".into()))
         }
@@ -3044,6 +2571,7 @@ mod tests {
             &self,
             output: Box<dyn api::WriteSeek>,
             _opts: &CreateOptions,
+            _ctl: &ControlToken,
         ) -> Result<Box<dyn api::ArchiveWriter>, FormatError> {
             Ok(Box::new(TestArchiveWriter {
                 output,
@@ -3097,6 +2625,7 @@ mod tests {
             &self,
             _src: Box<dyn api::ReadSeek>,
             _opts: &OpenOptions,
+            _ctl: &ControlToken,
         ) -> Result<Box<dyn ArchiveReader>, FormatError> {
             Err(FormatError::Unsupported("short-read test open".into()))
         }
@@ -3105,6 +2634,7 @@ mod tests {
             &self,
             output: Box<dyn api::WriteSeek>,
             _opts: &CreateOptions,
+            _ctl: &ControlToken,
         ) -> Result<Box<dyn api::ArchiveWriter>, FormatError> {
             Ok(Box::new(ShortReadArchiveWriter { output }))
         }
@@ -3156,6 +2686,7 @@ mod tests {
             &self,
             _src: Box<dyn api::ReadSeek>,
             _opts: &OpenOptions,
+            _ctl: &ControlToken,
         ) -> Result<Box<dyn ArchiveReader>, FormatError> {
             Err(FormatError::Unsupported("rebind test open".into()))
         }
@@ -3164,6 +2695,7 @@ mod tests {
             &self,
             output: Box<dyn api::WriteSeek>,
             _opts: &CreateOptions,
+            _ctl: &ControlToken,
         ) -> Result<Box<dyn api::ArchiveWriter>, FormatError> {
             Ok(Box::new(RebindingArchiveWriter {
                 output,
@@ -3281,7 +2813,7 @@ mod tests {
         let (engine, opens, extracts) = counting_extract_engine(3, 7);
 
         let error = engine
-            .list_with_format_and_source_set_with_entry_limit_and_control(
+            .list_archive(
                 &archive,
                 &OpenOptions::default(),
                 2,
@@ -3342,7 +2874,7 @@ mod tests {
         extract_options.limits.max_entries = 2;
 
         let error = engine
-            .plan_and_extract_with_report_controlled(
+            .extract_planned(
                 &archive,
                 &destination,
                 &archive,
@@ -3351,6 +2883,7 @@ mod tests {
                 &extract_options,
                 &api::NoProgress,
                 &ControlToken::default(),
+                None,
                 |_, _| Ok(None),
                 |_| Ok(()),
             )
@@ -3375,8 +2908,8 @@ mod tests {
         std::fs::write(&archive, b"archive").unwrap();
         let (engine, opens, extracts) = counting_extract_engine(1, 7);
 
-        let (plan, report) = engine
-            .plan_and_extract_with_report_controlled(
+        let (plan, report, _) = engine
+            .extract_planned(
                 &archive,
                 &destination,
                 &archive,
@@ -3385,6 +2918,7 @@ mod tests {
                 &ExtractOptions::default(),
                 &api::NoProgress,
                 &ControlToken::default(),
+                None,
                 |_, _| Ok(None),
                 |_| Ok(()),
             )
@@ -3419,7 +2953,7 @@ mod tests {
         let engine = Engine::new(registry);
 
         let (_, _, structure) = engine
-            .plan_and_extract_with_report_guarded_and_structure_controlled(
+            .extract_planned(
                 &archive,
                 &destination,
                 &archive,
@@ -3470,12 +3004,13 @@ mod tests {
         let control = ControlToken::default();
 
         let (_, _, input_guard) = engine
-            .plan_extract_with_input_guard_controlled(
+            .plan_extract_with_input_guard_and_entry_limit_controlled(
                 &archive,
                 &destination,
                 &archive,
                 false,
                 &OpenOptions::default(),
+                SafetyLimits::default().max_entries,
                 &control,
                 |_, _| Ok(None),
             )
@@ -3483,7 +3018,7 @@ mod tests {
         std::fs::write(&companion, b"changed companion").unwrap();
 
         let error = engine
-            .plan_and_extract_with_report_guarded_and_structure_controlled(
+            .extract_planned(
                 &archive,
                 &destination,
                 &archive,
@@ -3515,7 +3050,7 @@ mod tests {
         let (engine, opens, extracts) = counting_extract_engine(1, 7);
 
         let error = engine
-            .plan_and_extract_with_report_controlled(
+            .extract_planned(
                 &archive,
                 &destination,
                 &archive,
@@ -3524,6 +3059,7 @@ mod tests {
                 &ExtractOptions::default(),
                 &api::NoProgress,
                 &ControlToken::default(),
+                None,
                 |_, _| Ok(None),
                 |plan| Err(FormatError::destination_changed(&plan.destination)),
             )
@@ -3545,7 +3081,7 @@ mod tests {
         let (engine, opens, extracts) = counting_extract_engine(1, u64::MAX);
 
         let error = engine
-            .plan_and_extract_with_report_controlled(
+            .extract_planned(
                 &archive,
                 &destination,
                 &archive,
@@ -3554,6 +3090,7 @@ mod tests {
                 &ExtractOptions::default(),
                 &api::NoProgress,
                 &ControlToken::default(),
+                None,
                 |_, _| Ok(None),
                 |_| Ok(()),
             )
@@ -3587,60 +3124,51 @@ mod tests {
 
         let stream_opens = Arc::new(AtomicUsize::new(0));
         let file_opens = Arc::new(AtomicUsize::new(0));
-        let controlled_stream_opens = Arc::new(AtomicUsize::new(0));
-        let controlled_file_opens = Arc::new(AtomicUsize::new(0));
         let source_probes = Arc::new(AtomicUsize::new(0));
-        let controlled_source_probes = Arc::new(AtomicUsize::new(0));
         let source_path = Arc::new(std::sync::Mutex::new(None));
         let bytes = Arc::new(std::sync::Mutex::new(Vec::new()));
         let mut registry = FormatRegistry::new();
         registry.register_archive(Arc::new(FileOpenProbeFormat {
             stream_opens: Arc::clone(&stream_opens),
             file_opens: Arc::clone(&file_opens),
-            controlled_stream_opens: Arc::clone(&controlled_stream_opens),
-            controlled_file_opens: Arc::clone(&controlled_file_opens),
             source_probes: Arc::clone(&source_probes),
-            controlled_source_probes: Arc::clone(&controlled_source_probes),
             source_path: Arc::clone(&source_path),
             bytes: Arc::clone(&bytes),
         }));
         let engine = Engine::new(registry);
 
-        let single_error = match engine.open(&single, &OpenOptions::default()) {
-            Ok(_) => panic!("probe single-file open should return its marker error"),
-            Err(error) => error,
-        };
+        let single_error =
+            match engine.open(&single, &OpenOptions::default(), &ControlToken::default()) {
+                Ok(_) => panic!("probe single-file open should return its marker error"),
+                Err(error) => error,
+            };
         assert!(matches!(
             single_error,
             FormatError::Unsupported(message) if message == "probe complete"
         ));
         assert_eq!(file_opens.load(Ordering::SeqCst), 1);
         assert_eq!(stream_opens.load(Ordering::SeqCst), 0);
-        assert_eq!(controlled_file_opens.load(Ordering::SeqCst), 1);
-        assert_eq!(controlled_stream_opens.load(Ordering::SeqCst), 0);
         assert_eq!(*source_path.lock().unwrap(), Some(single.clone()));
         assert_eq!(*bytes.lock().unwrap(), b"single");
 
         let source_set = engine
-            .archive_source_set_with_control(&single, &ControlToken::default())
+            .archive_source_set(&single, &ControlToken::default())
             .unwrap();
         assert!(source_set.is_none());
         assert_eq!(source_probes.load(Ordering::SeqCst), 1);
-        assert_eq!(controlled_source_probes.load(Ordering::SeqCst), 1);
 
         *source_path.lock().unwrap() = None;
-        let split_error = match engine.open(&second, &OpenOptions::default()) {
-            Ok(_) => panic!("probe split-volume open should return its marker error"),
-            Err(error) => error,
-        };
+        let split_error =
+            match engine.open(&second, &OpenOptions::default(), &ControlToken::default()) {
+                Ok(_) => panic!("probe split-volume open should return its marker error"),
+                Err(error) => error,
+            };
         assert!(matches!(
             split_error,
             FormatError::Unsupported(message) if message == "probe complete"
         ));
         assert_eq!(file_opens.load(Ordering::SeqCst), 1);
         assert_eq!(stream_opens.load(Ordering::SeqCst), 1);
-        assert_eq!(controlled_file_opens.load(Ordering::SeqCst), 1);
-        assert_eq!(controlled_stream_opens.load(Ordering::SeqCst), 1);
         assert_eq!(*source_path.lock().unwrap(), None);
         assert_eq!(*bytes.lock().unwrap(), b"first-second");
 
@@ -3659,7 +3187,7 @@ mod tests {
         }));
         let engine = Engine::new(registry);
 
-        let error = match engine.open_with_control(&archive, &OpenOptions::default(), &control) {
+        let error = match engine.open(&archive, &OpenOptions::default(), &control) {
             Ok(_) => panic!("controlled open should stop during format parsing"),
             Err(error) => error,
         };
@@ -3697,7 +3225,7 @@ mod tests {
     ) -> FormatError {
         let input = input.to_path_buf();
         test_archive_engine()
-            .create_with_report_policy(
+            .create(
                 dest,
                 std::slice::from_ref(&input),
                 &CreateOptions::default(),
@@ -3715,7 +3243,7 @@ mod tests {
     ) -> create::PreparedCreateInputs {
         create::prepare_unsplit_create_with_reserved_outputs(
             engine,
-            &create::CreateOutput::Published {
+            &archive_output::ArchiveOutput::Published {
                 destination: dest,
                 policy: CreateCommitPolicy::ReplaceExisting,
             },
@@ -3723,6 +3251,7 @@ mod tests {
             &[],
             &CreateOptions::default(),
             |_count, _path| {},
+            &ControlToken::new(),
         )
         .unwrap()
     }
@@ -3735,7 +3264,7 @@ mod tests {
     ) -> FormatError {
         create::create_prepared_with_output(
             engine,
-            create::CreateOutput::Published {
+            archive_output::ArchiveOutput::Published {
                 destination: dest,
                 policy: CreateCommitPolicy::ReplaceExisting,
             },
@@ -3756,7 +3285,14 @@ mod tests {
         let f = dir.join("blob.unknown");
         std::fs::write(&f, b"not an archive at all").unwrap();
         let engine = Engine::new(FormatRegistry::new());
-        let err = engine.list(&f, &OpenOptions::default()).unwrap_err();
+        let err = engine
+            .list_archive(
+                &f,
+                &OpenOptions::default(),
+                SafetyLimits::default().max_entries,
+                &ControlToken::default(),
+            )
+            .unwrap_err();
         assert!(matches!(err, FormatError::Unsupported(_)));
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -3773,7 +3309,9 @@ mod tests {
 
         let engine = Engine::new(FormatRegistry::new());
         assert_eq!(
-            engine.recovery_protect_sources(&second).unwrap(),
+            engine
+                .recovery_protect_sources(&second, &ControlToken::default())
+                .unwrap(),
             vec![first, second, third]
         );
 
@@ -3788,72 +3326,12 @@ mod tests {
 
         let engine = Engine::new(FormatRegistry::new());
         assert_eq!(
-            engine.recovery_protect_sources(&archive).unwrap(),
+            engine
+                .recovery_protect_sources(&archive, &ControlToken::default())
+                .unwrap(),
             vec![archive]
         );
 
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn replace_file_preserves_a_late_destination_when_install_fails() {
-        let dir = temp_dir("replace-race");
-        let dest = dir.join("archive.zip");
-        let tmp = dir.join("archive.tmp");
-        std::fs::write(&dest, b"old").unwrap();
-        std::fs::write(&tmp, b"new").unwrap();
-
-        let error = replace_file_with(
-            &tmp,
-            &dest,
-            &mut |_from, to| {
-                std::fs::write(to, b"late competitor")?;
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::PermissionDenied,
-                    "injected install failure",
-                ))
-            },
-            &mut || panic!("parent sync must not run after a failed replacement"),
-        )
-        .unwrap_err();
-
-        assert!(matches!(error, FormatError::Io(_)));
-        assert_eq!(std::fs::read(&dest).unwrap(), b"late competitor");
-        assert_eq!(std::fs::read(&tmp).unwrap(), b"new");
-        assert!(!std::fs::read_dir(&dir).unwrap().any(|entry| {
-            entry
-                .unwrap()
-                .file_name()
-                .to_string_lossy()
-                .contains("replace-backup")
-        }));
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn replace_file_does_not_reverse_commit_when_parent_sync_fails() {
-        let dir = temp_dir("replace-sync");
-        let dest = dir.join("archive.zip");
-        let tmp = dir.join("archive.tmp");
-        std::fs::write(&dest, b"old").unwrap();
-        std::fs::write(&tmp, b"new").unwrap();
-
-        let error = replace_file_with(
-            &tmp,
-            &dest,
-            &mut |from, to| std::fs::rename(from, to),
-            &mut || {
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::PermissionDenied,
-                    "injected directory sync failure",
-                ))
-            },
-        )
-        .unwrap_err();
-
-        assert!(matches!(error, FormatError::Io(_)));
-        assert_eq!(std::fs::read(&dest).unwrap(), b"new");
-        assert!(!tmp.exists());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -3865,7 +3343,7 @@ mod tests {
         std::fs::write(&dest, b"old").unwrap();
         std::fs::write(&tmp, b"new").unwrap();
 
-        replace_file(&tmp, &dest).unwrap();
+        replace_file_atomically(&tmp, &dest).unwrap();
 
         assert_eq!(std::fs::read(&dest).unwrap(), b"new");
         assert!(!tmp.exists());
@@ -3931,6 +3409,68 @@ mod tests {
     }
 
     #[test]
+    fn reserved_output_clone_failure_removes_owned_staging() {
+        let dir = temp_dir("reserved-output-clone-cleanup");
+        let destination = dir.join("archive.test");
+        std::fs::write(&destination, b"previous output").unwrap();
+        let mut reserved = reserve_bound_sibling_temp_file(&destination, "create").unwrap();
+        reserved.file.write_all(b"writer-owned staging").unwrap();
+
+        let error = reserved
+            .clone_for_writer_with("created archive staging", |_| {
+                Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "injected reserved output clone failure",
+                ))
+            })
+            .unwrap_err();
+
+        assert!(matches!(
+            &error,
+            FormatError::Io(error)
+                if error.kind() == io::ErrorKind::PermissionDenied
+                    && error.to_string() == "injected reserved output clone failure"
+        ));
+        assert!(!reserved.path.exists());
+        assert_eq!(std::fs::read(&destination).unwrap(), b"previous output");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        drop(reserved);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn reserved_output_clone_failure_preserves_a_rebound_competitor() {
+        let dir = temp_dir("reserved-output-clone-rebound");
+        let destination = dir.join("archive.test");
+        std::fs::write(&destination, b"previous output").unwrap();
+        let mut reserved = reserve_bound_sibling_temp_file(&destination, "create").unwrap();
+        reserved.file.write_all(b"writer-owned staging").unwrap();
+        let displaced = dir.join("displaced-writer-staging");
+
+        let error = reserved
+            .clone_for_writer_with("created archive staging", |_| {
+                move_path_no_replace(&reserved.path, &displaced).unwrap();
+                std::fs::write(&reserved.path, b"competing output").unwrap();
+                Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "injected reserved output clone failure",
+                ))
+            })
+            .unwrap_err();
+
+        assert!(matches!(&error, FormatError::Other(_)));
+        let message = error.to_string();
+        assert!(message.contains("injected reserved output clone failure"));
+        assert!(message.contains("created archive staging cleanup also failed"));
+        assert!(message.contains("left untouched"));
+        assert_eq!(std::fs::read(&reserved.path).unwrap(), b"competing output");
+        assert_eq!(std::fs::read(&displaced).unwrap(), b"writer-owned staging");
+        assert_eq!(std::fs::read(&destination).unwrap(), b"previous output");
+        drop(reserved);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn no_replace_create_preserves_a_destination_created_during_write() {
         let dir = temp_dir("create-no-replace-race");
         let input = dir.join("source.bin");
@@ -3945,10 +3485,11 @@ mod tests {
         let ctl = ControlToken::new();
 
         let error = engine
-            .create_with_report_no_replace(
+            .create(
                 &dest,
                 std::slice::from_ref(&input),
                 &CreateOptions::default(),
+                CreateCommitPolicy::NoReplace,
                 &progress,
                 &ctl,
             )
@@ -3965,16 +3506,87 @@ mod tests {
 
         let engine = test_archive_engine();
         engine
-            .create_with_report(
+            .create(
                 &dest,
                 std::slice::from_ref(&input),
                 &CreateOptions::default(),
+                CreateCommitPolicy::ReplaceExisting,
                 &progress,
                 &ctl,
             )
             .unwrap();
         assert_eq!(std::fs::read(&dest).unwrap(), b"archive payload");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn archive_output_cancels_before_publication_or_returning_a_reserved_payload() {
+        for mode in 0..3 {
+            let dir = tempfile::tempdir().unwrap();
+            let destination = dir.path().join("archive.test");
+            let output = if mode == 2 {
+                archive_output::ArchiveOutput::CallerReserved {
+                    detect_name: "archive.test",
+                    reserved: reserve_bound_sibling_temp_file(&destination, "payload").unwrap(),
+                }
+            } else {
+                archive_output::ArchiveOutput::Published {
+                    destination: &destination,
+                    policy: CreateCommitPolicy::NoReplace,
+                }
+            };
+            let options = CreateOptions {
+                split_size: (mode == 1).then_some(1024),
+                ..CreateOptions::default()
+            };
+            let control = ControlToken::new();
+            let error = output
+                .write(
+                    &test_archive_engine(),
+                    &options,
+                    &NoProgress,
+                    &control,
+                    |mut target| {
+                        target.file.write_all(b"finished content")?;
+                        control.cancel();
+                        Ok(())
+                    },
+                )
+                .unwrap_err();
+            assert!(matches!(error, FormatError::Cancelled));
+            assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn archive_output_preserves_competing_staging_after_identity_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let destination = dir.path().join("archive.test");
+        let displaced = dir.path().join("displaced");
+        let mut staging = PathBuf::new();
+        let error = archive_output::ArchiveOutput::Published {
+            destination: &destination,
+            policy: CreateCommitPolicy::NoReplace,
+        }
+        .write(
+            &test_archive_engine(),
+            &CreateOptions::default(),
+            &NoProgress,
+            &ControlToken::new(),
+            |mut target| {
+                target.file.write_all(b"owned archive")?;
+                staging = target.staging_path.to_owned();
+                std::fs::rename(&staging, &displaced)?;
+                std::fs::write(&staging, b"competing file")?;
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("left untouched"));
+        assert!(!destination.exists());
+        assert_eq!(std::fs::read(staging).unwrap(), b"competing file");
+        assert_eq!(std::fs::read(displaced).unwrap(), b"owned archive");
     }
 
     #[test]
@@ -3989,7 +3601,7 @@ mod tests {
         let engine = test_archive_engine();
 
         let verified = engine
-            .create_with_verification_policy(
+            .create_verified(
                 &dest,
                 std::slice::from_ref(&input),
                 &CreateOptions::default(),
@@ -4022,7 +3634,7 @@ mod tests {
         let engine = Engine::new(registry);
 
         let error = engine
-            .create_with_report_policy(
+            .create(
                 &dest,
                 std::slice::from_ref(&input),
                 &CreateOptions::default(),
@@ -4149,7 +3761,7 @@ mod tests {
         let options = CreateOptions::default();
         let prepared = create::prepare_unsplit_create_with_reserved_outputs(
             &engine,
-            &create::CreateOutput::Published {
+            &archive_output::ArchiveOutput::Published {
                 destination: &dest,
                 policy: CreateCommitPolicy::ReplaceExisting,
             },
@@ -4157,13 +3769,14 @@ mod tests {
             &[],
             &options,
             |_count, _path| {},
+            &ControlToken::new(),
         )
         .unwrap();
 
         std::fs::write(source.join("late.txt"), b"late entry").unwrap();
         let verified = create::create_prepared_with_output(
             &engine,
-            create::CreateOutput::Published {
+            archive_output::ArchiveOutput::Published {
                 destination: &dest,
                 policy: CreateCommitPolicy::ReplaceExisting,
             },
@@ -4202,7 +3815,7 @@ mod tests {
         let options = CreateOptions::default();
         let prepared = create::prepare_unsplit_create_with_reserved_outputs(
             &engine,
-            &create::CreateOutput::Published {
+            &archive_output::ArchiveOutput::Published {
                 destination: &dest,
                 policy: CreateCommitPolicy::ReplaceExisting,
             },
@@ -4210,13 +3823,14 @@ mod tests {
             &[],
             &options,
             |_count, _path| {},
+            &ControlToken::new(),
         )
         .unwrap();
         std::fs::remove_file(&input).unwrap();
 
         let error = create::create_prepared_with_output(
             &engine,
-            create::CreateOutput::Published {
+            archive_output::ArchiveOutput::Published {
                 destination: &dest,
                 policy: CreateCommitPolicy::ReplaceExisting,
             },
@@ -4440,6 +4054,7 @@ mod tests {
                 &dest,
                 std::slice::from_ref(&input),
                 &CreateOptions::default(),
+                CreateCommitPolicy::ReplaceExisting,
                 &api::NoProgress,
                 &ControlToken::new(),
             )
@@ -4475,6 +4090,7 @@ mod tests {
                 &dest,
                 std::slice::from_ref(&input),
                 &CreateOptions::default(),
+                CreateCommitPolicy::ReplaceExisting,
                 &api::NoProgress,
                 &ControlToken::new(),
             )
@@ -4508,6 +4124,7 @@ mod tests {
                 &dest,
                 std::slice::from_ref(&input),
                 &CreateOptions::default(),
+                CreateCommitPolicy::ReplaceExisting,
                 &api::NoProgress,
                 &ControlToken::new(),
             )
@@ -4541,6 +4158,7 @@ mod tests {
                 &dest,
                 &[input, alias],
                 &CreateOptions::default(),
+                CreateCommitPolicy::ReplaceExisting,
                 &api::NoProgress,
                 &ControlToken::new(),
             )
@@ -4569,6 +4187,7 @@ mod tests {
                 &dest,
                 &[input, link],
                 &CreateOptions::default(),
+                CreateCommitPolicy::ReplaceExisting,
                 &api::NoProgress,
                 &ControlToken::new(),
             )
@@ -4613,6 +4232,7 @@ mod tests {
                     &dest,
                     &inputs,
                     &CreateOptions::default(),
+                    CreateCommitPolicy::ReplaceExisting,
                     &api::NoProgress,
                     &ControlToken::new(),
                 )
@@ -4629,6 +4249,7 @@ mod tests {
                 &dest,
                 std::slice::from_ref(&first_link),
                 &CreateOptions::default(),
+                CreateCommitPolicy::ReplaceExisting,
                 &api::NoProgress,
                 &ControlToken::new(),
             )
@@ -4690,10 +4311,11 @@ mod tests {
         };
 
         let error = engine
-            .create_with_report_no_replace(
+            .create(
                 &dest,
                 std::slice::from_ref(&input),
                 &options,
+                CreateCommitPolicy::NoReplace,
                 &progress,
                 &ctl,
             )
@@ -4726,10 +4348,11 @@ mod tests {
         let engine = Engine::new(registry);
 
         let report = engine
-            .create_with_report_no_replace(
+            .create(
                 &dest,
                 std::slice::from_ref(&input),
                 &CreateOptions::default(),
+                CreateCommitPolicy::NoReplace,
                 &api::NoProgress,
                 &ControlToken::new(),
             )
@@ -4743,13 +4366,14 @@ mod tests {
 
         let split_dest = dir.join("split.test");
         let split_report = engine
-            .create_with_report_no_replace(
+            .create(
                 &split_dest,
                 std::slice::from_ref(&input),
                 &CreateOptions {
                     split_size: Some(1024),
                     ..CreateOptions::default()
                 },
+                CreateCommitPolicy::NoReplace,
                 &api::NoProgress,
                 &ControlToken::new(),
             )
@@ -4794,10 +4418,11 @@ mod tests {
 
         for _ in 0..3 {
             let report = engine
-                .create_with_report(
+                .create(
                     &dest,
                     std::slice::from_ref(&root),
                     &CreateOptions::default(),
+                    CreateCommitPolicy::ReplaceExisting,
                     &api::NoProgress,
                     &ControlToken::new(),
                 )
@@ -4833,10 +4458,11 @@ mod tests {
         };
 
         let first = engine
-            .create_with_report(
+            .create(
                 &dest,
                 std::slice::from_ref(&input),
                 &options,
+                CreateCommitPolicy::ReplaceExisting,
                 &api::NoProgress,
                 &ControlToken::new(),
             )
@@ -4846,10 +4472,11 @@ mod tests {
 
         std::fs::write(&input, &new_payload).unwrap();
         let second = engine
-            .create_with_report(
+            .create(
                 &dest,
                 std::slice::from_ref(&input),
                 &options,
+                CreateCommitPolicy::ReplaceExisting,
                 &api::NoProgress,
                 &ControlToken::new(),
             )
@@ -4902,10 +4529,11 @@ mod tests {
 
         for run in 0..3 {
             let report = engine
-                .create_with_report(
+                .create(
                     &dest,
                     std::slice::from_ref(&source),
                     &options,
+                    CreateCommitPolicy::ReplaceExisting,
                     &api::NoProgress,
                     &ControlToken::new(),
                 )
@@ -4945,10 +4573,11 @@ mod tests {
         let engine = Engine::new(registry);
 
         let verified = engine
-            .create_with_verification_no_replace(
+            .create_verified(
                 &dest,
                 std::slice::from_ref(&input),
                 &CreateOptions::default(),
+                CreateCommitPolicy::NoReplace,
                 &api::NoProgress,
                 &ControlToken::new(),
             )
@@ -4989,10 +4618,11 @@ mod tests {
         }));
 
         let verified = Engine::new(registry)
-            .create_with_verification_no_replace(
+            .create_verified(
                 &dest,
                 std::slice::from_ref(&root),
                 &CreateOptions::default(),
+                CreateCommitPolicy::NoReplace,
                 &api::NoProgress,
                 &ControlToken::new(),
             )
@@ -5052,10 +4682,11 @@ mod tests {
         }));
 
         let verified = Engine::new(registry)
-            .create_with_verification_no_replace(
+            .create_verified(
                 &dest,
                 std::slice::from_ref(&link),
                 &CreateOptions::default(),
+                CreateCommitPolicy::NoReplace,
                 &api::NoProgress,
                 &ControlToken::new(),
             )
@@ -5388,6 +5019,183 @@ mod tests {
     }
 
     #[test]
+    fn create_input_exclusion_errors_stop_before_later_scan_progress() {
+        let dir = temp_dir("create-input-exclusion-error");
+        let source = dir.join("source");
+        let journal = source.join(".squallz-sfx-cleanup.json");
+        let later = source.join("later.txt");
+        let dest = dir.join("archive.test");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::write(&journal, b"{not json").unwrap();
+        std::fs::write(&later, b"later source").unwrap();
+        std::fs::write(&dest, b"previous archive").unwrap();
+        let engine = test_archive_engine();
+
+        for prepared in [false, true] {
+            let ctl = ControlToken::new();
+            let mut scanned = Vec::new();
+            let progress = |count, path: &str| scanned.push((count, path.to_owned()));
+            let result = if prepared {
+                engine
+                    .plan_create(
+                        &dest,
+                        std::slice::from_ref(&source),
+                        &CreateOptions::default(),
+                        progress,
+                        &ctl,
+                    )
+                    .map(drop)
+            } else {
+                engine
+                    .estimate_create_inputs_for_output(
+                        std::slice::from_ref(&source),
+                        &[],
+                        &dest,
+                        false,
+                        progress,
+                        &ctl,
+                    )
+                    .map(drop)
+            };
+            let error = result.unwrap_err();
+            assert!(error.to_string().contains("SFX cleanup record is invalid"));
+            assert!(sfx_recovery_details(&error)
+                .unwrap()
+                .paths
+                .contains(&journal));
+            assert_eq!(
+                scanned,
+                vec![(1, "source".to_owned())],
+                "prepared={prepared}"
+            );
+        }
+        assert_eq!(std::fs::read(&journal).unwrap(), b"{not json");
+        assert_eq!(std::fs::read(&later).unwrap(), b"later source");
+        assert_eq!(std::fs::read(&dest).unwrap(), b"previous archive");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn create_plans_and_estimates_cancel_during_directory_scan() {
+        let dir = temp_dir("create-input-scan-cancel");
+        let source = dir.join("source");
+        let dest = source.join("archive.test");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::write(source.join("first.txt"), b"first source").unwrap();
+        std::fs::write(source.join("last.txt"), b"last source").unwrap();
+        std::fs::write(&dest, b"previous archive").unwrap();
+        let engine = test_archive_engine();
+
+        for operation in ["estimate", "output_estimate", "plan"] {
+            let ctl = ControlToken::new();
+            let mut scanned = Vec::new();
+            let progress = |count, path: &str| {
+                scanned.push((count, path.to_owned()));
+                if count == 2 {
+                    ctl.cancel();
+                }
+            };
+            let result = match operation {
+                "estimate" => engine
+                    .estimate_create_inputs(std::slice::from_ref(&source), &[], progress, &ctl)
+                    .map(drop),
+                "output_estimate" => engine
+                    .estimate_create_inputs_for_output(
+                        std::slice::from_ref(&source),
+                        &[],
+                        &dest,
+                        false,
+                        progress,
+                        &ctl,
+                    )
+                    .map(drop),
+                "plan" => engine
+                    .plan_create(
+                        &dest,
+                        std::slice::from_ref(&source),
+                        &CreateOptions::default(),
+                        progress,
+                        &ctl,
+                    )
+                    .map(drop),
+                _ => unreachable!(),
+            };
+            assert!(matches!(result, Err(FormatError::Cancelled)), "{operation}");
+            assert_eq!(scanned.len(), 2, "{operation}");
+            assert_eq!(scanned[0], (1, "source".to_owned()));
+            assert_eq!(scanned[1].0, 2);
+            assert_eq!(std::fs::read(&dest).unwrap(), b"previous archive");
+            assert_eq!(
+                std::fs::read(source.join("first.txt")).unwrap(),
+                b"first source"
+            );
+            assert_eq!(
+                std::fs::read(source.join("last.txt")).unwrap(),
+                b"last source"
+            );
+            assert_no_create_commit_artifacts(&source);
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn create_cancels_during_input_preparation_and_preserves_destination() {
+        struct CancelInputScan {
+            ctl: Arc<ControlToken>,
+            scanned: AtomicUsize,
+            writes: AtomicUsize,
+        }
+        impl ProgressSink for CancelInputScan {
+            fn on_scan_progress(&self, _entries: u64, _current: &api::EntryPath) {
+                if self.scanned.fetch_add(1, Ordering::SeqCst) + 1 == 2 {
+                    self.ctl.cancel();
+                }
+            }
+            fn on_progress(&self, _done: u64, _total: u64, _current: &api::EntryPath) {
+                self.writes.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let dir = temp_dir("create-prepared-scan-cancel");
+        let source = dir.join("source");
+        let dest = dir.join("archive.test");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::write(source.join("first.txt"), b"first source").unwrap();
+        std::fs::write(source.join("last.txt"), b"last source").unwrap();
+        std::fs::write(&dest, b"previous archive").unwrap();
+        let ctl = ControlToken::new();
+        let progress = CancelInputScan {
+            ctl: Arc::clone(&ctl),
+            scanned: AtomicUsize::new(0),
+            writes: AtomicUsize::new(0),
+        };
+        let error = test_archive_engine()
+            .create(
+                &dest,
+                std::slice::from_ref(&source),
+                &CreateOptions::default(),
+                CreateCommitPolicy::ReplaceExisting,
+                &progress,
+                &ctl,
+            )
+            .unwrap_err();
+
+        assert!(matches!(error, FormatError::Cancelled));
+        assert_eq!(progress.scanned.load(Ordering::SeqCst), 2);
+        assert_eq!(progress.writes.load(Ordering::SeqCst), 0);
+        assert_eq!(std::fs::read(&dest).unwrap(), b"previous archive");
+        assert_eq!(
+            std::fs::read(source.join("first.txt")).unwrap(),
+            b"first source"
+        );
+        assert_eq!(
+            std::fs::read(source.join("last.txt")).unwrap(),
+            b"last source"
+        );
+        assert_no_create_commit_artifacts(&dir);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn estimate_create_inputs_counts_and_applies_excludes() {
         let dir = temp_dir("estimate");
         let root = dir.join("project");
@@ -5402,6 +5210,8 @@ mod tests {
             .estimate_create_inputs(
                 std::slice::from_ref(&root),
                 &["node_modules".to_owned(), "*.tmp".to_owned()],
+                |_count, _path| {},
+                &ControlToken::new(),
             )
             .unwrap();
         assert_eq!(estimate.input_count, 1);
@@ -5433,7 +5243,12 @@ mod tests {
 
         let engine = Engine::new(FormatRegistry::new());
         let estimate = engine
-            .estimate_create_inputs(std::slice::from_ref(&root), &[])
+            .estimate_create_inputs(
+                std::slice::from_ref(&root),
+                &[],
+                |_count, _path| {},
+                &ControlToken::new(),
+            )
             .unwrap();
 
         assert_eq!(estimate.input_count, 1);
@@ -5443,7 +5258,12 @@ mod tests {
         assert_eq!(estimate.total_bytes, b"similarpayload".len() as u64);
 
         let error = engine
-            .estimate_create_inputs(std::slice::from_ref(&active), &[])
+            .estimate_create_inputs(
+                std::slice::from_ref(&active),
+                &[],
+                |_count, _path| {},
+                &ControlToken::new(),
+            )
             .unwrap_err();
         assert!(matches!(
             error,
@@ -5465,10 +5285,11 @@ mod tests {
         let engine = Engine::new(FormatRegistry::new());
         let mut progress = Vec::new();
         let estimate = engine
-            .estimate_create_inputs_with_progress(
+            .estimate_create_inputs(
                 std::slice::from_ref(&root),
                 &["*.tmp".to_owned()],
                 |count, path| progress.push((count, path.to_owned())),
+                &ControlToken::new(),
             )
             .unwrap();
 
@@ -5499,7 +5320,14 @@ mod tests {
 
         let output = root.join("backup.sqz");
         let estimate = Engine::new(FormatRegistry::new())
-            .estimate_create_inputs_for_output(std::slice::from_ref(&root), &[], &output, true)
+            .estimate_create_inputs_for_output(
+                std::slice::from_ref(&root),
+                &[],
+                &output,
+                true,
+                |_count, _path| {},
+                &ControlToken::new(),
+            )
             .unwrap();
 
         assert_eq!(estimate.files, 2);
@@ -5519,7 +5347,14 @@ mod tests {
         std::fs::write(&child, b"source").unwrap();
 
         let error = Engine::new(FormatRegistry::new())
-            .estimate_create_inputs_for_output(std::slice::from_ref(&child), &[], &output, false)
+            .estimate_create_inputs_for_output(
+                std::slice::from_ref(&child),
+                &[],
+                &output,
+                false,
+                |_count, _path| {},
+                &ControlToken::new(),
+            )
             .unwrap_err();
 
         assert!(matches!(error, FormatError::Unsupported(_)));
@@ -5536,12 +5371,123 @@ mod tests {
         std::fs::create_dir(&output).unwrap();
 
         let error = Engine::new(FormatRegistry::new())
-            .estimate_create_inputs_for_output(std::slice::from_ref(&input), &[], &output, true)
+            .estimate_create_inputs_for_output(
+                std::slice::from_ref(&input),
+                &[],
+                &output,
+                true,
+                |_count, _path| {},
+                &ControlToken::new(),
+            )
             .unwrap_err();
 
         assert!(matches!(error, FormatError::Unsupported(_)));
         assert!(output.is_dir());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn local_file_scans_cancel_before_hashing() {
+        struct CancelScan<'a> {
+            ctl: &'a ControlToken,
+            scanned: AtomicUsize,
+            hashed: AtomicUsize,
+        }
+        impl ProgressSink for CancelScan<'_> {
+            fn on_progress(&self, done: u64, _total: u64, _current: &EntryPath) {
+                if done > 0 {
+                    self.hashed.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+            fn on_scan_progress(&self, entries: u64, _current: &EntryPath) {
+                self.scanned.store(entries as usize, Ordering::SeqCst);
+                if entries == 2 {
+                    self.ctl.cancel();
+                }
+            }
+        }
+        let dir = temp_dir("local-scan-cancel");
+        let files = [dir.join("a.bin"), dir.join("b.bin")];
+        for path in &files {
+            std::fs::write(path, b"preserved").unwrap();
+        }
+        let engine = Engine::new(FormatRegistry::new());
+        for checksum in [true, false] {
+            let ctl = ControlToken::default();
+            let progress = CancelScan {
+                ctl: &ctl,
+                scanned: AtomicUsize::new(0),
+                hashed: AtomicUsize::new(0),
+            };
+            let result = if checksum {
+                engine
+                    .checksum_files(
+                        std::slice::from_ref(&dir),
+                        &[],
+                        ChecksumAlgorithm::Sha256,
+                        &progress,
+                        &ctl,
+                    )
+                    .map(|_| ())
+            } else {
+                engine
+                    .find_duplicate_files(std::slice::from_ref(&dir), &[], 0, &progress, &ctl)
+                    .map(|_| ())
+            };
+            assert!(matches!(result, Err(FormatError::Cancelled)));
+            assert_eq!(progress.scanned.load(Ordering::SeqCst), 2);
+            assert_eq!(progress.hashed.load(Ordering::SeqCst), 0);
+            for path in &files {
+                assert_eq!(std::fs::read(path).unwrap(), b"preserved");
+            }
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn duplicate_hashing_cancels_at_first_and_final_updates() {
+        struct CancelHash<'a> {
+            ctl: &'a ControlToken,
+            at_end: bool,
+            events: Mutex<Vec<u64>>,
+        }
+        impl ProgressSink for CancelHash<'_> {
+            fn on_progress(&self, done: u64, total: u64, _current: &EntryPath) {
+                self.events.lock().unwrap().push(done);
+                if done > 0 && (!self.at_end || done == total) {
+                    self.ctl.cancel();
+                }
+            }
+        }
+        let dir = temp_dir("duplicate-hash-cancel");
+        let files = [dir.join("a.bin"), dir.join("b.bin")];
+        let bytes = vec![0x5a; 1024 * 1024 + 1];
+        for path in &files {
+            std::fs::write(path, &bytes).unwrap();
+        }
+        let engine = Engine::new(FormatRegistry::new());
+        for at_end in [false, true] {
+            let ctl = ControlToken::default();
+            let progress = CancelHash {
+                ctl: &ctl,
+                at_end,
+                events: Mutex::new(Vec::new()),
+            };
+            let result = engine.find_duplicate_files(&files, &[], 0, &progress, &ctl);
+            assert!(matches!(result, Err(FormatError::Cancelled)));
+            let events = progress.events.lock().unwrap();
+            assert!(events.iter().any(|done| *done > 0));
+            if at_end {
+                assert_eq!(events.last(), Some(&(2 * bytes.len() as u64)));
+            } else {
+                assert_eq!(events.iter().filter(|done| **done > 0).count(), 1);
+                assert!(events.last().is_some_and(|done| *done < bytes.len() as u64));
+            }
+            for path in &files {
+                assert_eq!(std::fs::read(path).unwrap(), bytes);
+            }
+        }
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -5557,10 +5503,16 @@ mod tests {
 
         let engine = Engine::new(FormatRegistry::new());
         let report = engine
-            .find_duplicate_files(std::slice::from_ref(&root), &["cache".to_owned()], 1)
+            .find_duplicate_files(
+                &[root.clone(), root.join("src/a.bin")],
+                &["cache".to_owned()],
+                1,
+                &NoProgress,
+                &ControlToken::default(),
+            )
             .unwrap();
 
-        assert_eq!(report.input_count, 1);
+        assert_eq!(report.input_count, 2);
         assert_eq!(report.files_scanned, 3);
         assert_eq!(report.duplicate_groups(), 1);
         assert_eq!(report.duplicate_files(), 2);
@@ -5592,6 +5544,8 @@ mod tests {
                 std::slice::from_ref(&root),
                 &["target".to_owned()],
                 ChecksumAlgorithm::Sha256,
+                &NoProgress,
+                &ControlToken::default(),
             )
             .unwrap();
 
@@ -5624,7 +5578,12 @@ mod tests {
 
         let engine = Engine::new(FormatRegistry::new());
         let report = engine
-            .verify_checksum_manifest(&dir.join("SHA256SUMS"), ChecksumAlgorithm::Sha256)
+            .verify_checksum_manifest(
+                &dir.join("SHA256SUMS"),
+                ChecksumAlgorithm::Sha256,
+                &NoProgress,
+                &ControlToken::default(),
+            )
             .unwrap();
 
         assert!(!report.is_ok());

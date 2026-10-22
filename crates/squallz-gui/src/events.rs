@@ -5,10 +5,7 @@
 use serde::Serialize;
 
 /// Event names shared with the frontend.
-pub const EV_PROGRESS: &str = "job://progress";
-pub const EV_STATE: &str = "job://state";
-pub const EV_ASK_CONFLICT: &str = "job://ask-conflict";
-pub const EV_ASK_PASSWORD: &str = "job://ask-password";
+pub const EV_SNAPSHOT: &str = "job://snapshot";
 
 /// Minimal emit interface (implemented by the Tauri `AppHandle` in main.rs
 /// and by a buffering fake in tests).
@@ -69,10 +66,7 @@ mod tests {
 
     #[test]
     fn event_names_keep_frontend_contract() {
-        assert_eq!(EV_PROGRESS, "job://progress");
-        assert_eq!(EV_STATE, "job://state");
-        assert_eq!(EV_ASK_CONFLICT, "job://ask-conflict");
-        assert_eq!(EV_ASK_PASSWORD, "job://ask-password");
+        assert_eq!(EV_SNAPSHOT, "job://snapshot");
     }
 
     #[test]
@@ -81,14 +75,14 @@ mod tests {
 
         emit(
             &sink,
-            EV_STATE,
+            EV_SNAPSHOT,
             &json!({ "id": "job-1", "state": "running" }),
         );
 
         assert_eq!(
             sink.events(),
             vec![(
-                EV_STATE.to_string(),
+                EV_SNAPSHOT.to_string(),
                 json!({ "id": "job-1", "state": "running" })
             )]
         );
@@ -98,7 +92,7 @@ mod tests {
     fn emit_skips_unserializable_payload_without_calling_sink() {
         let sink = RecordingSink::default();
 
-        emit(&sink, EV_PROGRESS, &FailingPayload);
+        emit(&sink, EV_SNAPSHOT, &FailingPayload);
 
         assert!(sink.events().is_empty());
     }

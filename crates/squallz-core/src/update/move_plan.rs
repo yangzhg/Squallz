@@ -3,13 +3,14 @@ use std::collections::{HashMap, HashSet};
 use super::target::{blocked_parent, occupied, validate_target};
 use crate::api::{ControlToken, FormatError};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ArchiveMoveConflict {
     ExistingTarget,
     DuplicateTarget,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ArchiveMoveItem {
     pub from: String,
     pub to: String,
@@ -17,7 +18,7 @@ pub struct ArchiveMoveItem {
     pub keep_both_to: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
 pub struct ArchiveMovePlan {
     pub items: Vec<ArchiveMoveItem>,
     pub missing_sources: Vec<String>,
@@ -174,6 +175,17 @@ mod tests {
         assert_eq!(
             result.items[2].keep_both_to.as_deref(),
             Some("out/file copy 3/")
+        );
+        assert_eq!(
+            serde_json::to_value(&result).unwrap(),
+            serde_json::json!({
+                "items": [
+                    {"from": "src/folder/", "to": "out/folder/", "conflict": "existing_target", "keep_both_to": "out/folder copy 2/"},
+                    {"from": "src/file", "to": "out/file", "conflict": "duplicate_target", "keep_both_to": "out/file copy 2"},
+                    {"from": "other/file/", "to": "out/file/", "conflict": "duplicate_target", "keep_both_to": "out/file copy 3/"}
+                ],
+                "missing_sources": [], "blocked_parent": null
+            })
         );
     }
 

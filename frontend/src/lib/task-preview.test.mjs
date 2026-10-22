@@ -90,7 +90,7 @@ test("preview questions, failure reviews and progress retain their workflow and 
     for (const kind of ["extract_password", "extract_conflict"]) {
       const done = install(kind);
       assert.equal(done.question, null);
-      assert.equal(done.result.operation, "create");
+      assert.equal(done.result.kind, "extract");
       assert.match(done.revealPath, /\/client-data$/u);
     }
     for (const [kind, screen, key, protection] of [

@@ -8,7 +8,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use crate::api::{ControlToken, EntryPath, EntryType, FormatError};
+use crate::api::{ControlToken, EntryPath, EntryType, FormatError, ProgressSink};
 use crate::archive_path::{
     is_canonical_positive_u32, is_canonical_positive_u64, is_canonical_process_sequence,
 };
@@ -70,9 +70,11 @@ impl AsRef<InputItem> for PreparedInputItem {
 }
 
 impl PreparedInputItem {
-    fn prepare(item: InputItem) -> Result<Self, FormatError> {
+    fn prepare(item: InputItem, ctl: &ControlToken) -> Result<Self, FormatError> {
+        ctl.checkpoint()?;
         let identity = path_identity(&item.src)?;
         let metadata = std::fs::symlink_metadata(&item.src)?;
+        ctl.checkpoint()?;
         let source = match &item.entry_type {
             EntryType::File => {
                 if metadata.file_type().is_symlink() || !metadata.is_file() {
@@ -124,10 +126,12 @@ impl PreparedInputItem {
                 )));
             }
         };
+        ctl.checkpoint()?;
         let source_path = normalized_source_path(&item)?;
         if path_identity(&source_path)? != identity {
             return Err(input_changed(&item));
         }
+        ctl.checkpoint()?;
         Ok(Self {
             item,
             source_path,
@@ -255,9 +259,11 @@ struct CollectedCandidate<T> {
 pub(crate) fn prepare_single_stream_input(
     input: &Path,
     name: EntryPath,
+    ctl: &ControlToken,
 ) -> Result<PreparedInputItem, FormatError> {
     // Resolve a user-selected symbolic link once, then bind and later open the
     // resulting regular file without following a new final-component link.
+    ctl.checkpoint()?;
     let source = std::fs::canonicalize(input)?;
     let metadata = std::fs::symlink_metadata(&source)?;
     if metadata.file_type().is_symlink() || !metadata.is_file() {
@@ -265,15 +271,18 @@ pub(crate) fn prepare_single_stream_input(
             "single-stream compression requires one regular file".into(),
         ));
     }
-    PreparedInputItem::prepare(InputItem {
-        src: source,
-        name,
-        entry_type: EntryType::File,
-        size: metadata.len(),
-        unix_mode: unix_mode_of(&metadata),
-        modified: metadata.modified().ok(),
-        link_target: None,
-    })
+    PreparedInputItem::prepare(
+        InputItem {
+            src: source,
+            name,
+            entry_type: EntryType::File,
+            size: metadata.len(),
+            unix_mode: unix_mode_of(&metadata),
+            modified: metadata.modified().ok(),
+            link_target: None,
+        },
+        ctl,
+    )
 }
 
 fn normalized_source_path(item: &InputItem) -> Result<PathBuf, FormatError> {
@@ -308,38 +317,32 @@ fn input_changed(item: &InputItem) -> FormatError {
 /// relative to each input's parent directory (the top-level folder name is
 /// kept); symbolic links are not followed. Entries matching `excludes` are
 /// pruned (a matched directory is skipped with its whole subtree).
+/// Overlapping roots remain distinct for checksum accounting.
 pub(crate) fn collect_inputs(
     inputs: &[PathBuf],
     excludes: &PathFilter,
-) -> Result<Vec<InputItem>, FormatError> {
-    collect_inputs_excluding(inputs, excludes, |_| false)
-}
-
-/// Walks inputs while pruning file-system paths reserved by the caller.
-/// A matched directory is skipped before its children are read. Overlapping
-/// roots remain distinct for callers such as checksum and duplicate scans.
-pub(crate) fn collect_inputs_excluding(
-    inputs: &[PathBuf],
-    excludes: &PathFilter,
-    mut exclude_path: impl FnMut(&Path) -> bool,
+    progress: &dyn ProgressSink,
+    ctl: &ControlToken,
 ) -> Result<Vec<InputItem>, FormatError> {
     collect_inputs_mapped_with_progress(
         inputs,
         excludes,
-        &mut exclude_path,
-        &mut |_count, _path| {},
+        &mut |_| Ok(false),
+        &mut |count, path| progress.on_scan_progress(count as u64, path),
         &mut Ok,
         false,
+        ctl,
     )
 }
 
-/// Walks creation inputs and merges overlapping roots after exclusions.
+/// Walks inputs and merges overlapping roots after exclusions.
 /// Progress reports included candidates before that merge.
 pub(crate) fn collect_inputs_excluding_with_progress(
     inputs: &[PathBuf],
     excludes: &PathFilter,
-    mut exclude_path: impl FnMut(&Path) -> bool,
+    mut exclude_path: impl FnMut(&Path) -> Result<bool, FormatError>,
     mut progress: impl FnMut(usize, &EntryPath),
+    ctl: &ControlToken,
 ) -> Result<Vec<InputItem>, FormatError> {
     collect_inputs_mapped_with_progress(
         inputs,
@@ -348,22 +351,25 @@ pub(crate) fn collect_inputs_excluding_with_progress(
         &mut progress,
         &mut Ok,
         true,
+        ctl,
     )
 }
 
 pub(crate) fn collect_prepared_inputs_excluding_with_progress(
     inputs: &[PathBuf],
     excludes: &PathFilter,
-    mut exclude_path: impl FnMut(&Path) -> bool,
+    mut exclude_path: impl FnMut(&Path) -> Result<bool, FormatError>,
     mut progress: impl FnMut(usize, &EntryPath),
+    ctl: &ControlToken,
 ) -> Result<Vec<PreparedInputItem>, FormatError> {
     collect_inputs_mapped_with_progress(
         inputs,
         excludes,
         &mut exclude_path,
         &mut progress,
-        &mut PreparedInputItem::prepare,
+        &mut |item| PreparedInputItem::prepare(item, ctl),
         true,
+        ctl,
     )
 }
 
@@ -389,11 +395,11 @@ pub(crate) fn collect_prepared_input_as(
         input,
         name.clone(),
         excludes,
-        &mut |_| false,
+        &mut |_| Ok(false),
         false,
-        Some(ctl),
+        ctl,
         &mut |item| {
-            let item = PreparedInputItem::prepare(item)?;
+            let item = PreparedInputItem::prepare(item, ctl)?;
             progress(&item.item().name);
             out.push(item);
             ctl.checkpoint()
@@ -404,37 +410,41 @@ pub(crate) fn collect_prepared_input_as(
 
 pub(crate) fn deduplicate_prepared_input_roots(
     items: Vec<PreparedInputItem>,
+    ctl: &ControlToken,
 ) -> Result<Vec<PreparedInputItem>, FormatError> {
-    let candidates = items
-        .into_iter()
-        .enumerate()
-        .map(|(root_index, item)| CollectedCandidate { item, root_index })
-        .collect();
-    deduplicate_collected_inputs(candidates)
+    let mut candidates = Vec::with_capacity(items.len());
+    for (root_index, item) in items.into_iter().enumerate() {
+        ctl.checkpoint()?;
+        candidates.push(CollectedCandidate { item, root_index });
+    }
+    deduplicate_collected_inputs(candidates, ctl)
 }
 
 pub(crate) fn collect_inputs_with_progress(
     inputs: &[PathBuf],
     excludes: &PathFilter,
     mut progress: impl FnMut(usize, &EntryPath),
+    ctl: &ControlToken,
 ) -> Result<Vec<InputItem>, FormatError> {
     collect_inputs_mapped_with_progress(
         inputs,
         excludes,
-        &mut |_| false,
+        &mut |_| Ok(false),
         &mut progress,
         &mut Ok,
         true,
+        ctl,
     )
 }
 
 fn collect_inputs_mapped_with_progress<T: CollectedInput>(
     inputs: &[PathBuf],
     excludes: &PathFilter,
-    exclude_path: &mut impl FnMut(&Path) -> bool,
+    exclude_path: &mut impl FnMut(&Path) -> Result<bool, FormatError>,
     progress: &mut impl FnMut(usize, &EntryPath),
     map: &mut impl FnMut(InputItem) -> Result<T, FormatError>,
     deduplicate: bool,
+    ctl: &ControlToken,
 ) -> Result<Vec<T>, FormatError> {
     let mut candidates = Vec::new();
     let mut items = Vec::new();
@@ -445,9 +455,12 @@ fn collect_inputs_mapped_with_progress<T: CollectedInput>(
                 input.display()
             )));
         }
+        ctl.checkpoint()?;
         let base = input.parent().map_or_else(PathBuf::new, Path::to_path_buf);
         let mut emit = |item| {
+            ctl.checkpoint()?;
             let item = map(item)?;
+            ctl.checkpoint()?;
             let count = if deduplicate {
                 candidates.len()
             } else {
@@ -455,6 +468,7 @@ fn collect_inputs_mapped_with_progress<T: CollectedInput>(
             }
             .saturating_add(1);
             progress(count, &item.as_ref().name);
+            ctl.checkpoint()?;
             if deduplicate {
                 candidates.push(CollectedCandidate { item, root_index });
             } else {
@@ -462,22 +476,26 @@ fn collect_inputs_mapped_with_progress<T: CollectedInput>(
             }
             Ok(())
         };
-        walk(input, &base, excludes, exclude_path, &mut emit)?;
+        walk(input, &base, excludes, exclude_path, ctl, &mut emit)?;
     }
+    ctl.checkpoint()?;
     if !deduplicate {
         return Ok(items);
     }
-    deduplicate_collected_inputs(candidates)
+    deduplicate_collected_inputs(candidates, ctl)
 }
 
 fn deduplicate_collected_inputs<T: CollectedInput>(
     candidates: Vec<CollectedCandidate<T>>,
+    ctl: &ControlToken,
 ) -> Result<Vec<T>, FormatError> {
     let candidate_count = candidates.len();
     let mut preferred_by_source: HashMap<PathBuf, usize> = HashMap::new();
     let mut keep = vec![false; candidate_count];
     for (index, candidate) in candidates.iter().enumerate() {
+        ctl.checkpoint()?;
         let source_path = candidate.item.deduplication_path()?;
+        ctl.checkpoint()?;
         if let Some(&preferred) = preferred_by_source.get(&source_path) {
             if !candidates[preferred]
                 .item
@@ -501,6 +519,7 @@ fn deduplicate_collected_inputs<T: CollectedInput>(
     let preferred = keep.clone();
     let mut directories = HashMap::new();
     for (index, candidate) in candidates.iter().enumerate() {
+        ctl.checkpoint()?;
         if !matches!(&candidate.item.as_ref().entry_type, EntryType::Dir) {
             continue;
         }
@@ -512,11 +531,13 @@ fn deduplicate_collected_inputs<T: CollectedInput>(
             .or_insert(index);
     }
     for (index, candidate) in candidates.iter().enumerate() {
+        ctl.checkpoint()?;
         if !preferred[index] {
             continue;
         }
         let mut name = candidate.item.as_ref().name.display.as_str();
         while let Some((parent, _)) = name.rsplit_once('/') {
+            ctl.checkpoint()?;
             if parent.is_empty() {
                 break;
             }
@@ -527,11 +548,15 @@ fn deduplicate_collected_inputs<T: CollectedInput>(
         }
     }
 
-    Ok(candidates
-        .into_iter()
-        .zip(keep)
-        .filter_map(|(candidate, keep)| keep.then_some(candidate.item))
-        .collect())
+    let mut items = Vec::new();
+    for (candidate, keep) in candidates.into_iter().zip(keep) {
+        ctl.checkpoint()?;
+        if keep {
+            items.push(candidate.item);
+        }
+    }
+    ctl.checkpoint()?;
+    Ok(items)
 }
 
 fn archive_path_depth(path: &EntryPath) -> usize {
@@ -545,7 +570,8 @@ fn walk(
     path: &Path,
     base: &Path,
     excludes: &PathFilter,
-    exclude_path: &mut impl FnMut(&Path) -> bool,
+    exclude_path: &mut impl FnMut(&Path) -> Result<bool, FormatError>,
+    ctl: &ControlToken,
     emit: &mut impl FnMut(InputItem) -> Result<(), FormatError>,
 ) -> Result<(), FormatError> {
     let rel = match path.strip_prefix(base) {
@@ -556,26 +582,26 @@ fn walk(
         rel.to_string_lossy()
             .replace(std::path::MAIN_SEPARATOR, "/"),
     );
-    walk_named(path, name, excludes, exclude_path, true, None, emit)
+    walk_named(path, name, excludes, exclude_path, true, ctl, emit)
 }
 
 fn walk_named(
     path: &Path,
     name: EntryPath,
     excludes: &PathFilter,
-    exclude_path: &mut impl FnMut(&Path) -> bool,
+    exclude_path: &mut impl FnMut(&Path) -> Result<bool, FormatError>,
     stat_before_excludes: bool,
-    ctl: Option<&ControlToken>,
+    ctl: &ControlToken,
     emit: &mut impl FnMut(InputItem) -> Result<(), FormatError>,
 ) -> Result<(), FormatError> {
-    input_checkpoint(ctl)?;
+    ctl.checkpoint()?;
     if !stat_before_excludes && excludes.matches(name.display.trim_end_matches('/')) {
         return Ok(());
     }
     if is_internal_transaction_artifact(path) {
         return Ok(());
     }
-    if exclude_path(path) {
+    if exclude_path(path)? {
         return Ok(());
     }
     let metadata = stat_before_excludes
@@ -656,28 +682,21 @@ fn walk_named(
 
 fn collect_child_paths(
     mut entries: impl Iterator<Item = io::Result<PathBuf>>,
-    ctl: Option<&ControlToken>,
+    ctl: &ControlToken,
 ) -> Result<Vec<PathBuf>, FormatError> {
     let mut children = Vec::new();
     loop {
-        input_checkpoint(ctl)?;
-        let entry = entries.next();
-        input_checkpoint(ctl)?;
+        ctl.checkpoint()?;
+        let entry = entries.next().transpose()?;
+        ctl.checkpoint()?;
         match entry {
-            Some(entry) => children.push(entry?),
+            Some(entry) => children.push(entry),
             None => break,
         }
     }
     children.sort();
-    input_checkpoint(ctl)?;
+    ctl.checkpoint()?;
     Ok(children)
-}
-
-fn input_checkpoint(ctl: Option<&ControlToken>) -> Result<(), FormatError> {
-    if let Some(ctl) = ctl {
-        ctl.checkpoint()?;
-    }
-    Ok(())
 }
 
 fn is_internal_transaction_artifact(path: &Path) -> bool {
@@ -785,6 +804,7 @@ fn unix_mode_of(_meta: &std::fs::Metadata) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::NoProgress;
 
     fn temp_dir(tag: &str) -> PathBuf {
         let dir =
@@ -806,7 +826,13 @@ mod tests {
         std::fs::write(root.join("a.txt"), b"hello").unwrap();
         std::fs::write(root.join("sub/b.txt"), b"world!").unwrap();
 
-        let items = collect_inputs(std::slice::from_ref(&root), &PathFilter::default()).unwrap();
+        let items = collect_inputs(
+            std::slice::from_ref(&root),
+            &PathFilter::default(),
+            &NoProgress,
+            &ControlToken::default(),
+        )
+        .unwrap();
         assert_eq!(
             names(&items),
             vec![
@@ -830,11 +856,15 @@ mod tests {
         std::fs::write(&child, b"hello").unwrap();
 
         let mut scanned = 0;
-        let items =
-            collect_inputs_with_progress(&[root, child], &PathFilter::default(), |count, _| {
+        let items = collect_inputs_with_progress(
+            &[root, child],
+            &PathFilter::default(),
+            |count, _| {
                 scanned = count;
-            })
-            .unwrap();
+            },
+            &ControlToken::new(),
+        )
+        .unwrap();
         assert_eq!(names(&items), vec!["project", "project/README.md"]);
         assert_eq!(scanned.saturating_sub(items.len()), 1);
         std::fs::remove_dir_all(&dir).unwrap();
@@ -848,7 +878,13 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(&child, b"hello").unwrap();
 
-        let items = collect_inputs(&[root, child], &PathFilter::default()).unwrap();
+        let items = collect_inputs(
+            &[root, child],
+            &PathFilter::default(),
+            &NoProgress,
+            &ControlToken::default(),
+        )
+        .unwrap();
 
         assert_eq!(
             names(&items),
@@ -872,6 +908,7 @@ mod tests {
             &[child, sibling, root],
             &PathFilter::default(),
             |count, _| scanned = count,
+            &ControlToken::new(),
         )
         .unwrap();
         assert_eq!(
@@ -890,8 +927,13 @@ mod tests {
         std::fs::create_dir_all(&foo).unwrap();
         std::fs::create_dir_all(&foobar).unwrap();
 
-        let items = collect_inputs_with_progress(&[foo, foobar], &PathFilter::default(), |_, _| {})
-            .unwrap();
+        let items = collect_inputs_with_progress(
+            &[foo, foobar],
+            &PathFilter::default(),
+            |_, _| {},
+            &ControlToken::new(),
+        )
+        .unwrap();
         assert_eq!(names(&items), vec!["foo", "foobar"]);
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -910,6 +952,7 @@ mod tests {
             |count, _| {
                 scanned = count;
             },
+            &ControlToken::new(),
         )
         .unwrap();
         assert_eq!(names(&items), vec!["report.txt"]);
@@ -926,7 +969,13 @@ mod tests {
         std::fs::write(&child, b"hello").unwrap();
         let excludes = PathFilter::new(&["project/README.md".to_owned()]).unwrap();
 
-        let items = collect_inputs_with_progress(&[root, child], &excludes, |_, _| {}).unwrap();
+        let items = collect_inputs_with_progress(
+            &[root, child],
+            &excludes,
+            |_, _| {},
+            &ControlToken::new(),
+        )
+        .unwrap();
 
         assert_eq!(names(&items), vec!["project", "README.md"]);
         std::fs::remove_dir_all(&dir).unwrap();
@@ -941,7 +990,13 @@ mod tests {
         std::fs::write(child.join("guide.txt"), b"guide").unwrap();
         let excludes = PathFilter::new(&["project/docs/guide.txt".to_owned()]).unwrap();
 
-        let items = collect_inputs_with_progress(&[root, child], &excludes, |_, _| {}).unwrap();
+        let items = collect_inputs_with_progress(
+            &[root, child],
+            &excludes,
+            |_, _| {},
+            &ControlToken::new(),
+        )
+        .unwrap();
 
         assert_eq!(
             names(&items),
@@ -958,9 +1013,13 @@ mod tests {
         std::fs::write(&first, b"shared").unwrap();
         std::fs::hard_link(&first, &second).unwrap();
 
-        let items =
-            collect_inputs_with_progress(&[first, second], &PathFilter::default(), |_, _| {})
-                .unwrap();
+        let items = collect_inputs_with_progress(
+            &[first, second],
+            &PathFilter::default(),
+            |_, _| {},
+            &ControlToken::new(),
+        )
+        .unwrap();
 
         assert_eq!(names(&items), vec!["first.txt", "second.txt"]);
         std::fs::remove_dir_all(&dir).unwrap();
@@ -978,8 +1037,9 @@ mod tests {
         let items = collect_prepared_inputs_excluding_with_progress(
             &[child, root],
             &PathFilter::default(),
-            |_| false,
+            |_| Ok(false),
             |count, _| scanned = count,
+            &ControlToken::new(),
         )
         .unwrap();
 
@@ -1004,12 +1064,13 @@ mod tests {
         let error = collect_prepared_inputs_excluding_with_progress(
             &[file.clone(), duplicate],
             &PathFilter::default(),
-            |_| false,
+            |_| Ok(false),
             |count, _| {
                 if count == 1 {
                     std::fs::write(&file, b"changed after first binding").unwrap();
                 }
             },
+            &ControlToken::new(),
         )
         .unwrap_err();
 
@@ -1027,8 +1088,13 @@ mod tests {
         let child = root.join("empty");
         std::fs::create_dir_all(child.join("nested")).unwrap();
 
-        let items = collect_inputs_with_progress(&[child, root], &PathFilter::default(), |_, _| {})
-            .unwrap();
+        let items = collect_inputs_with_progress(
+            &[child, root],
+            &PathFilter::default(),
+            |_, _| {},
+            &ControlToken::new(),
+        )
+        .unwrap();
 
         assert_eq!(
             names(&items),
@@ -1050,9 +1116,13 @@ mod tests {
         symlink(&target, &first).unwrap();
         symlink(&target, &second).unwrap();
 
-        let items =
-            collect_inputs_with_progress(&[first, second], &PathFilter::default(), |_, _| {})
-                .unwrap();
+        let items = collect_inputs_with_progress(
+            &[first, second],
+            &PathFilter::default(),
+            |_, _| {},
+            &ControlToken::new(),
+        )
+        .unwrap();
 
         assert_eq!(names(&items), vec!["first-link", "second-link"]);
         assert!(items
@@ -1073,7 +1143,13 @@ mod tests {
         std::fs::write(root.join("scratch.tmp"), b"tmp").unwrap();
 
         let excludes = PathFilter::new(&[".git".to_owned(), "*.tmp".to_owned()]).unwrap();
-        let items = collect_inputs(std::slice::from_ref(&root), &excludes).unwrap();
+        let items = collect_inputs(
+            std::slice::from_ref(&root),
+            &excludes,
+            &NoProgress,
+            &ControlToken::default(),
+        )
+        .unwrap();
         assert_eq!(
             names(&items),
             vec!["project", "project/src", "project/src/main.rs"]
@@ -1087,7 +1163,8 @@ mod tests {
         let missing = dir.join("missing.tmp");
         let excludes = PathFilter::new(&["*.tmp".to_owned()]).unwrap();
 
-        let error = collect_inputs(&[missing], &excludes).unwrap_err();
+        let error = collect_inputs(&[missing], &excludes, &NoProgress, &ControlToken::default())
+            .unwrap_err();
 
         assert!(matches!(
             error,
@@ -1108,11 +1185,15 @@ mod tests {
 
         let excludes = PathFilter::new(&[".git".to_owned(), "*.tmp".to_owned()]).unwrap();
         let mut progress = Vec::new();
-        let items =
-            collect_inputs_with_progress(std::slice::from_ref(&root), &excludes, |count, path| {
+        let items = collect_inputs_with_progress(
+            std::slice::from_ref(&root),
+            &excludes,
+            |count, path| {
                 progress.push((count, path.display.clone()));
-            })
-            .unwrap();
+            },
+            &ControlToken::new(),
+        )
+        .unwrap();
 
         assert_eq!(
             names(&items),
@@ -1146,10 +1227,31 @@ mod tests {
             Some(Ok(PathBuf::from(format!("entry-{read}"))))
         });
 
-        let error = collect_child_paths(entries, Some(ctl.as_ref())).unwrap_err();
+        let error = collect_child_paths(entries, ctl.as_ref()).unwrap_err();
 
         assert!(matches!(error, FormatError::Cancelled));
         assert_eq!(reads.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn child_enumeration_preserves_a_returned_io_error_when_cancelled() {
+        let ctl = ControlToken::new();
+        let ctl_for_entries = std::sync::Arc::clone(&ctl);
+        let entries = std::iter::from_fn(move || {
+            ctl_for_entries.cancel();
+            Some(Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "directory read denied",
+            )))
+        });
+
+        let error = collect_child_paths(entries, ctl.as_ref()).unwrap_err();
+
+        assert!(matches!(
+            error,
+            FormatError::Io(error) if error.kind() == io::ErrorKind::PermissionDenied
+        ));
+        assert!(ctl.is_cancelled());
     }
 
     #[test]
@@ -1225,7 +1327,13 @@ mod tests {
             std::fs::write(root.join(name), b"keep").unwrap();
         }
 
-        let items = collect_inputs(std::slice::from_ref(&root), &PathFilter::default()).unwrap();
+        let items = collect_inputs(
+            std::slice::from_ref(&root),
+            &PathFilter::default(),
+            &NoProgress,
+            &ControlToken::default(),
+        )
+        .unwrap();
         let names = names(&items);
 
         for name in internal {
@@ -1267,7 +1375,13 @@ mod tests {
         std::fs::write(&holder_shaped_file, b"ordinary file").unwrap();
         std::fs::write(root.join("payload.txt"), b"payload").unwrap();
 
-        let items = collect_inputs(std::slice::from_ref(&root), &PathFilter::default()).unwrap();
+        let items = collect_inputs(
+            std::slice::from_ref(&root),
+            &PathFilter::default(),
+            &NoProgress,
+            &ControlToken::default(),
+        )
+        .unwrap();
         let names = names(&items);
 
         assert!(names.iter().any(|name| name == "project/payload.txt"));
@@ -1300,8 +1414,13 @@ mod tests {
         std::fs::create_dir(&holder).unwrap();
         std::fs::write(holder.join("source.txt"), b"source").unwrap();
 
-        let error = collect_inputs(std::slice::from_ref(&holder), &PathFilter::default())
-            .expect_err("explicit holder input must fail");
+        let error = collect_inputs(
+            std::slice::from_ref(&holder),
+            &PathFilter::default(),
+            &NoProgress,
+            &ControlToken::default(),
+        )
+        .expect_err("explicit holder input must fail");
         assert!(matches!(
             error,
             FormatError::Unsupported(message)
@@ -1320,8 +1439,13 @@ mod tests {
         let socket = dir.join("service.sock");
         let listener = UnixListener::bind(&socket).unwrap();
 
-        let error =
-            collect_inputs(std::slice::from_ref(&socket), &PathFilter::default()).unwrap_err();
+        let error = collect_inputs(
+            std::slice::from_ref(&socket),
+            &PathFilter::default(),
+            &NoProgress,
+            &ControlToken::default(),
+        )
+        .unwrap_err();
         assert!(matches!(
             error,
             FormatError::Unsupported(message)

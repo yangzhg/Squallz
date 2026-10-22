@@ -1,14 +1,13 @@
 //! clap argument definitions.
 //!
-//! i18n note: runtime output goes through the language packs. Clap help is
-//! static by default, so `try_print_localized_help` rewrites the generated
-//! command tree for English help before clap handles `--help`.
+//! Command descriptions and runtime output share the selected language pack.
+//! Parsing resolves the resource keys in the derived command tree once.
 
 use std::ffi::OsString;
 use std::path::PathBuf;
 
 use clap::{
-    error::ErrorKind, Arg, ArgAction, ArgGroup, Command, CommandFactory, Parser, Subcommand,
+    Arg, ArgAction, ArgGroup, Command, CommandFactory, FromArgMatches, Parser, Subcommand,
     ValueEnum,
 };
 use serde::Deserialize;
@@ -16,46 +15,41 @@ use squallz_core::api::{
     OverwritePolicy, ResourceOptions, SafetyLimits, SplitOutputMode, SqzInnerFormat, SymlinkPolicy,
 };
 use squallz_core::{ChecksumAlgorithm, CreateContentPolicy, PresetKind, SfxTarget};
+use squallz_i18n::Localizer;
 
-pub fn try_print_localized_help<I>(args: I) -> Option<i32>
+pub fn parse_cli<I, T>(args: I) -> Result<(Cli, Localizer), clap::Error>
 where
-    I: IntoIterator<Item = OsString>,
+    I: IntoIterator<Item = T>,
+    T: Into<OsString>,
 {
-    let args: Vec<OsString> = args.into_iter().collect();
-    if !is_help_or_version_request(&args) {
-        return None;
+    let args: Vec<OsString> = args.into_iter().map(Into::into).collect();
+    let loc = Localizer::load(explicit_language(&args).as_deref());
+    let mut cmd = localized_command(&loc);
+    if loc.language() == "zh-CN" && is_check_update_help_request(&args) {
+        cmd = customize_update_help(cmd, &loc);
     }
-
-    let mut cmd = if help_lang_is_english(&args) {
-        localize_help_en(Cli::command())
-    } else if is_check_update_help_request(&args) {
-        localize_check_update_help_zh(Cli::command())
-    } else {
-        return None;
-    };
-    match cmd.try_get_matches_from_mut(args) {
-        Ok(_) => None,
-        Err(err) => {
-            let code = err.exit_code();
-            let kind = err.kind();
-            let _ = err.print();
-            if matches!(kind, ErrorKind::DisplayHelp | ErrorKind::DisplayVersion) {
-                Some(0)
-            } else {
-                Some(code)
-            }
-        }
-    }
+    let mut matches = cmd.try_get_matches_from_mut(args)?;
+    Ok((Cli::from_arg_matches_mut(&mut matches)?, loc))
 }
 
-fn is_help_or_version_request(args: &[OsString]) -> bool {
-    args.iter().skip(1).any(|arg| {
-        let value = arg.to_string_lossy();
-        matches!(
-            value.as_ref(),
-            "--help" | "-h" | "help" | "--version" | "-V"
-        )
-    })
+/// Builds the one command tree used by parsing and command-specific errors.
+pub fn localized_command(loc: &Localizer) -> Command {
+    fn localize(cmd: Command, loc: &Localizer) -> Command {
+        let about = cmd.get_about().map(|about| loc.t(&about.to_string()));
+        let cmd = match about {
+            Some(about) => cmd.about(about),
+            None => cmd,
+        };
+        cmd.mut_args(|arg| {
+            let help = arg.get_help().map(|help| loc.t(&help.to_string()));
+            match help {
+                Some(help) => arg.help(help),
+                None => arg,
+            }
+        })
+        .mut_subcommands(|command| localize(command, loc))
+    }
+    localize(Cli::command(), loc)
 }
 
 fn is_check_update_help_request(args: &[OsString]) -> bool {
@@ -70,617 +64,55 @@ fn is_check_update_help_request(args: &[OsString]) -> bool {
     has_check_update && has_help
 }
 
-fn help_lang_is_english(args: &[OsString]) -> bool {
-    let explicit = explicit_help_language(args);
-    let requested = squallz_i18n::requested_language(explicit.as_deref());
-    requested
-        .as_deref()
-        .is_none_or(|language| !is_chinese_lang(language))
-}
-
-fn explicit_help_language(args: &[OsString]) -> Option<String> {
+fn explicit_language(args: &[OsString]) -> Option<String> {
+    let mut requested = None;
     let mut iter = args.iter().skip(1);
     while let Some(arg) = iter.next() {
         let value = arg.to_string_lossy();
-        if value == "--lang" {
-            return iter
-                .next()
-                .map(|value| value.to_string_lossy().into_owned());
+        if value == "--" {
+            break;
         }
-        if let Some(language) = value.strip_prefix("--lang=") {
-            return Some(language.to_owned());
+        if value == "--lang" {
+            match iter.next() {
+                Some(value) if value != "--" => {
+                    requested = Some(value.to_string_lossy().into_owned());
+                }
+                _ => break,
+            }
+        } else if let Some(language) = value.strip_prefix("--lang=") {
+            requested = Some(language.to_owned());
         }
     }
-    None
+    requested
 }
 
-fn is_chinese_lang(language: &str) -> bool {
-    let normalized = language.trim().to_ascii_lowercase();
-    normalized == "zh" || normalized.starts_with("zh-") || normalized.starts_with("zh_")
-}
-
-fn localize_help_en(cmd: Command) -> Command {
-    let cmd = cmd
-        .about("Squallz: cross-platform archive manager")
-        .mut_arg("lang", |arg| {
-            arg.help("Interface language, for example zh-CN or en-US. Defaults to SQZ_LANG or the system language.")
-        })
-        .mut_arg("quiet", |arg| arg.help("Quiet mode: do not print progress."))
-        .mut_arg("verbose", |arg| arg.help("Verbose mode: print one line per entry."))
-        .mut_arg("output_style", |arg| {
-            arg.help("Human-readable output style. Defaults to classic; modern only changes non-JSON output.")
-        })
-        .mut_arg("color", |arg| {
-            arg.help("When to colorize modern human output: auto, always, or never.")
-        })
-        .mut_arg("accent", |arg| {
-            arg.help("Theme palette for modern human output: squallz, ocean, jade, sunset, violet, or mono.")
-        });
-
-    cmd.mut_subcommand("compress", localize_compress_help_en)
-        .mut_subcommand("pack", localize_pack_help_en)
-        .mut_subcommand("estimate", localize_estimate_help_en)
-        .mut_subcommand("duplicates", localize_duplicates_help_en)
-        .mut_subcommand("checksum", localize_checksum_help_en)
-        .mut_subcommand("extract", localize_extract_help_en)
-        .mut_subcommand("sfx", localize_sfx_help_en)
-        .mut_subcommand("list", localize_list_help_en)
-        .mut_subcommand("test", localize_test_help_en)
-        .mut_subcommand("convert", localize_convert_help_en)
-        .mut_subcommand("nested", localize_nested_help_en)
-        .mut_subcommand("export", localize_export_help_en)
-        .mut_subcommand("update", localize_update_help_en)
-        .mut_subcommand("protect", localize_protect_help_en)
-        .mut_subcommand("verify", localize_verify_help_en)
-        .mut_subcommand("repair", localize_repair_help_en)
-        .mut_subcommand("batch", localize_batch_help_en)
-        .mut_subcommand("check-update", localize_check_update_help_en)
-        .mut_subcommand("doctor", localize_doctor_help_en)
-        .mut_subcommand("preset", localize_preset_help_en)
-        .mut_subcommand("info", |cmd| {
-            cmd.about("List supported formats and capabilities")
-                .mut_arg("json", json_help_en)
-        })
-}
-
-fn localize_preset_help_en(cmd: Command) -> Command {
-    cmd.about("Manage the presets shared by the desktop app and file-manager actions")
-        .mut_subcommand("list", |cmd| {
-            cmd.about("List saved create and extract presets")
-                .mut_arg("kind", |arg| {
-                    arg.help("Filter by preset kind: create or extract.")
-                })
-                .mut_arg("json", json_help_en)
-        })
-        .mut_subcommand("show", |cmd| {
-            cmd.about("Show one complete preset")
-                .mut_arg("id", |arg| arg.help("Preset ID."))
-                .mut_arg("json", json_help_en)
-        })
-        .mut_subcommand("clone", |cmd| {
-            cmd.about("Create an editable preset from an existing preset")
-                .mut_arg("source_id", |arg| arg.help("Existing source preset ID."))
-                .mut_arg("new_id", |arg| arg.help("Unique ID for the new preset."))
-                .mut_arg("label", |arg| arg.help("Display name for the new preset."))
-                .mut_arg("json", json_help_en)
-        })
-        .mut_subcommand("update", |cmd| {
-            cmd.about("Replace one editable preset from the JSON emitted by preset show")
-                .mut_arg("id", |arg| arg.help("Editable preset ID."))
-                .mut_arg("file", |arg| {
-                    arg.help("JSON file containing one complete preset with the same ID and built_in=false.")
-                })
-                .mut_arg("json", json_help_en)
-        })
-        .mut_subcommand("delete", |cmd| {
-            cmd.about("Delete one editable preset and restore safe built-in bindings")
-                .mut_arg("id", |arg| arg.help("Editable preset ID."))
-                .mut_arg("json", json_help_en)
-        })
-        .mut_subcommand("bind", |cmd| {
-            cmd.about("Bind a preset to an app or file-manager default slot")
-                .mut_arg("slot", |arg| {
-                    arg.help("Binding slot: app-create, app-extract, file-manager-create, or file-manager-extract.")
-                })
-                .mut_arg("id", |arg| arg.help("Preset ID."))
-                .mut_arg("json", json_help_en)
-        })
-        .mut_subcommand("unbind", |cmd| {
-            cmd.about("Clear an app or file-manager default slot")
-                .mut_arg("slot", |arg| {
-                    arg.help("Binding slot: app-create, app-extract, file-manager-create, or file-manager-extract.")
-                })
-                .mut_arg("json", json_help_en)
-        })
-        .mut_subcommand("path", |cmd| {
-            cmd.about("Show the shared preset document path")
-                .mut_arg("json", json_help_en)
-        })
-}
-
-fn localize_sfx_help_en(cmd: Command) -> Command {
-    cmd.about("Create, inspect, or publish a self-extracting archive")
-        .mut_subcommand("create", |cmd| {
-            cmd.about("Append a ZIP payload to a Squallz PE/ELF SFX stub")
-                .mut_arg("archive", |arg| arg.help("Complete ZIP payload path."))
-                .mut_arg("output", |arg| arg.help("Output self-extracting executable."))
-                .mut_arg("target", |arg| {
-                    arg.help("Explicit target platform: windows, linux, or macos. macOS output is a signable .app bundle.")
-                })
-                .mut_arg("stub", |arg| {
-                    arg.help("Squallz SFX-capable executable or macOS .app template. Defaults to the current binary, or its enclosing Squallz.app, when available.")
-                })
-                .mut_arg("force", |arg| arg.help("Replace an existing output."))
-                .mut_arg("memory_limit", memory_limit_help_en)
-                .mut_arg("json", json_help_en)
-        })
-        .mut_subcommand("inspect", |cmd| {
-            cmd.about("Inspect and checksum a Squallz SFX artifact")
-                .mut_arg("file", |arg| arg.help("Self-extracting executable path."))
-                .mut_arg("memory_limit", memory_limit_help_en)
-                .mut_arg("json", json_help_en)
-        })
-        .mut_subcommand("publish-macos", |cmd| {
-            cmd.about("Sign, notarize, staple, and verify a macOS SFX app")
-                .mut_arg("source", |arg| {
-                    arg.help("Unsigned macOS SFX .app to preserve unchanged.")
-                })
-                .mut_arg("output", |arg| {
-                    arg.help("New signed and notarized .app. Existing paths are never replaced.")
-                })
-                .mut_arg("identity", |arg| {
-                    arg.help("Developer ID Application identity or certificate fingerprint available to codesign.")
-                })
-                .mut_arg("notary_profile", |arg| {
-                    arg.help("Existing notarytool Keychain profile. Squallz never reads or stores its password.")
-                })
-                .mut_arg("memory_limit", memory_limit_help_en)
-                .mut_arg("json", json_help_en)
-        })
-}
-
-fn localize_compress_help_en(cmd: Command) -> Command {
-    cmd.about("Compress files or folders")
-        .mut_arg("inputs", |arg| arg.help("Input files or folders."))
-        .mut_arg("output", |arg| {
-            arg.help("Output archive path. The format is detected from the file extension.")
-        })
-        .mut_arg("format", |arg| {
-            arg.help("Explicit output format, such as zip, 7z, or tar.gz. Must match the output extension.")
-        })
-        .mut_arg("level", |arg| {
-            arg.help("Compression level 0-9. 0 stores only; 9 is maximum. Overrides --profile.")
-        })
-        .mut_arg("profile", profile_help_en)
-        .mut_arg("password", |arg| arg.help("Encryption password."))
-        .mut_arg("encrypt_names", |arg| {
-            arg.help("Encrypt entry names when the target format supports header encryption.")
-        })
-        .mut_arg("excludes", exclude_help_en)
-        .mut_arg("content_policy", content_policy_help_en)
-        .mut_arg("split", split_help_en)
-        .mut_arg("split_mode", |arg| {
-            arg.help("Volume layout: generic creates .001 files; native creates an interoperable format-specific set such as ZIP .z01 … .zip.")
-        })
-        .mut_arg("threads", threads_help_en)
-        .mut_arg("memory_limit", memory_limit_help_en)
-        .mut_arg("test_after_create", test_after_create_help_en)
-        .mut_arg("json", json_help_en)
-}
-
-fn localize_pack_help_en(cmd: Command) -> Command {
-    cmd.about("Create a native Squallz .sqz self-recovery container")
-        .mut_arg("inputs", |arg| arg.help("Input files or folders."))
-        .mut_arg("output", |arg| arg.help("Output .sqz container path."))
-        .mut_arg("level", |arg| {
-            arg.help("Compression level 0-9. Overrides --profile; SQZ v1 transparent containers may ignore this value.")
-        })
-        .mut_arg("profile", profile_help_en)
-        .mut_arg("inner_format", |arg| {
-            arg.help("SQZ v1 inner payload profile: sqz, zip, tar, 7z, or zstd.")
-        })
-        .mut_arg("recovery", |arg| {
-            arg.help("SQZ payload recovery redundancy percentage, such as 10 or 10%.")
-        })
-        .mut_arg("excludes", exclude_help_en)
-        .mut_arg("content_policy", content_policy_help_en)
-        .mut_arg("split", generic_split_help_en)
-        .mut_arg("threads", threads_help_en)
-        .mut_arg("memory_limit", memory_limit_help_en)
-        .mut_arg("test_after_create", test_after_create_help_en)
-        .mut_arg("json", json_help_en)
-}
-
-fn localize_estimate_help_en(cmd: Command) -> Command {
-    cmd.about("Estimate input size and destination disk space before creating an archive")
-        .mut_arg("inputs", |arg| arg.help("Input files or folders."))
-        .mut_arg("excludes", exclude_help_en)
-        .mut_arg("content_policy", content_policy_help_en)
-        .mut_arg("output", |arg| {
-            arg.help(
-                "Planned output archive path. When set, Squallz checks destination free space.",
-            )
-        })
-        .mut_arg("json", json_help_en)
-}
-
-fn localize_duplicates_help_en(cmd: Command) -> Command {
-    cmd.about("Find duplicate local files before archiving or cleanup")
-        .mut_arg("inputs", |arg| arg.help("Input files or folders to scan."))
-        .mut_arg("excludes", exclude_help_en)
-        .mut_arg("min_size", |arg| {
-            arg.help("Minimum file size to hash, such as 1, 4k, 10m, or 1g. Defaults to 1 byte.")
-        })
-        .mut_arg("json", json_help_en)
-}
-
-fn localize_checksum_help_en(cmd: Command) -> Command {
-    cmd.about("Compute checksums for files or folders")
-        .mut_arg("inputs", |arg| arg.help("Input files or folders to hash."))
-        .mut_arg("algorithm", |arg| {
-            arg.help("Checksum algorithm: sha256, blake3, sha512, sha384, sha224, sha1, md5, or crc32. Defaults to sha256.")
-        })
-        .mut_arg("check", |arg| {
-            arg.help("Verify a checksum manifest in '<digest>  <path>' format. Relative paths resolve from the manifest directory.")
-        })
-        .mut_arg("excludes", exclude_help_en)
-        .mut_arg("json", json_help_en)
-}
-
-fn localize_extract_help_en(cmd: Command) -> Command {
-    cmd.about("Extract an archive")
-        .mut_arg("archive", |arg| arg.help("Archive path."))
-        .mut_arg("dest", |arg| arg.help("Destination directory. Defaults to the current directory."))
-        .mut_arg("includes", |arg| arg.help("Only extract matching entries. Can be repeated."))
-        .mut_arg("overwrite", |arg| arg.help("Overwrite policy."))
-        .mut_arg("password", |arg| arg.help("Decryption password."))
-        .mut_arg("encoding", |arg| arg.help("Entry-name encoding, such as gbk or shift_jis."))
-        .mut_arg("symlinks", |arg| arg.help("Symbolic-link handling policy."))
-        .mut_arg("smart", |arg| {
-            arg.help("Smart extract: extract a single root directory directly, otherwise wrap loose entries in a same-name folder.")
-        })
-        .mut_arg("best_effort", |arg| {
-            arg.help("Best-effort extract: skip readable-entry or CRC failures within recoverable boundaries.")
-        })
-        .mut_arg("threads", threads_help_en)
-        .mut_arg("memory_limit", memory_limit_help_en)
-        .mut_arg("max_output_bytes", |arg| arg.help("Maximum total extracted output size."))
-        .mut_arg("max_entries", |arg| arg.help("Maximum number of extracted entries."))
-        .mut_arg("max_compression_ratio", |arg| {
-            arg.help("Maximum decompressed-to-compressed ratio for a single entry.")
-        })
-        .mut_arg("json", json_help_en)
-}
-
-fn localize_list_help_en(cmd: Command) -> Command {
-    cmd.about("List archive contents")
-        .mut_arg("archive", |arg| arg.help("Archive path."))
-        .mut_arg("password", |arg| arg.help("Decryption password."))
-        .mut_arg("encoding", |arg| arg.help("Entry-name encoding."))
-        .mut_arg("search", |arg| {
-            arg.help("Search literal text across complete entry paths, ignoring case.")
-        })
-        .mut_arg("json", json_help_en)
-        .mut_arg("tree", |arg| {
-            arg.help("Print a directory tree for human reading.")
-        })
-}
-
-fn localize_test_help_en(cmd: Command) -> Command {
-    cmd.about("Test archive integrity")
-        .mut_arg("archive", |arg| arg.help("Archive path."))
-        .mut_arg("password", |arg| arg.help("Decryption password."))
-        .mut_arg("encoding", |arg| arg.help("Entry-name encoding."))
-        .mut_arg("max_output_bytes", |arg| {
-            arg.help("Maximum total decoded size during testing (for example 1g or 500m).")
-        })
-        .mut_arg("max_entries", |arg| {
-            arg.help("Maximum number of tested entries.")
-        })
-        .mut_arg("max_compression_ratio", |arg| {
-            arg.help("Maximum decompressed-to-compressed ratio for a single entry.")
-        })
-        .mut_arg("json", json_help_en)
-}
-
-fn localize_batch_help_en(cmd: Command) -> Command {
-    cmd.about("Run a JSON batch script of archive operations")
-        .mut_arg("script", |arg| {
-            arg.help("Batch JSON script. Relative paths resolve from the script directory unless base_dir is set.")
-        })
-        .mut_arg("keep_going", |arg| {
-            arg.help("Continue after a failed job and report all failures.")
-        })
-        .mut_arg("json", json_help_en)
-}
-
-fn localize_doctor_help_en(cmd: Command) -> Command {
-    cmd.about("Diagnose runtime engines, external tools, and recovery readiness")
-        .mut_arg("strict", |arg| {
-            arg.help("Exit 8 when a runtime dependency required by release-claimed capabilities is missing.")
-        })
-        .mut_arg("json", json_help_en)
-}
-
-fn localize_convert_help_en(cmd: Command) -> Command {
-    cmd.about("Convert an archive to another format without extracting it to disk")
-        .mut_arg("src", |arg| arg.help("Source archive path."))
-        .mut_arg("output", |arg| {
-            arg.help("Output archive path. The format is detected from the file extension.")
-        })
-        .mut_arg("password", |arg| {
-            arg.help("Source archive decryption password.")
-        })
-        .mut_arg("out_password", |arg| {
-            arg.help("Output archive encryption password.")
-        })
-        .mut_arg("encrypt_names", |arg| {
-            arg.help(
-                "Encrypt output entry names when the target format supports header encryption.",
-            )
-        })
-        .mut_arg("level", |arg| {
-            arg.help("Output compression level 0-9. Overrides --profile.")
-        })
-        .mut_arg("profile", profile_help_en)
-        .mut_arg("split", split_help_en)
-        .mut_arg("split_mode", |arg| {
-            arg.help("Volume layout: generic creates .001 files; native creates an interoperable format-specific set such as ZIP .z01 … .zip.")
-        })
-        .mut_arg("encoding", |arg| arg.help("Source entry-name encoding."))
-        .mut_arg("threads", threads_help_en)
-        .mut_arg("memory_limit", memory_limit_help_en)
-        .mut_arg("force", |arg| {
-            arg.help("Replace the exact existing output inspected before conversion. Refuses the replacement if it changes before commit.")
-        })
-        .mut_arg("json", json_help_en)
-}
-
-fn localize_nested_help_en(cmd: Command) -> Command {
-    cmd.about("Operate on an archive entry that is itself an archive")
-        .mut_subcommand("list", |cmd| {
-            cmd.about("List nested archive contents")
-                .mut_arg("archive", |arg| arg.help("Outer archive path."))
-                .mut_arg("entry", |arg| arg.help("Nested archive entry path inside the outer archive."))
-                .mut_arg("password", |arg| arg.help("Outer archive decryption password."))
-                .mut_arg("encoding", |arg| arg.help("Outer archive entry-name encoding."))
-                .mut_arg("nested_password", |arg| arg.help("Nested archive decryption password."))
-                .mut_arg("nested_encoding", |arg| arg.help("Nested archive entry-name encoding."))
-                .mut_arg("search", |arg| {
-                    arg.help("Search literal text across complete nested entry paths, ignoring case.")
-                })
-                .mut_arg("json", json_help_en)
-                .mut_arg("tree", |arg| arg.help("Print a directory tree for human reading."))
-        })
-        .mut_subcommand("extract", |cmd| {
-            cmd.about("Extract nested archive contents")
-                .mut_arg("archive", |arg| arg.help("Outer archive path."))
-                .mut_arg("entry", |arg| arg.help("Nested archive entry path inside the outer archive."))
-                .mut_arg("dest", |arg| arg.help("Destination directory. Defaults to the current directory."))
-                .mut_arg("includes", |arg| arg.help("Only extract matching nested entries. Can be repeated."))
-                .mut_arg("overwrite", |arg| arg.help("Overwrite policy."))
-                .mut_arg("password", |arg| arg.help("Outer archive decryption password."))
-                .mut_arg("encoding", |arg| arg.help("Outer archive entry-name encoding."))
-                .mut_arg("nested_password", |arg| arg.help("Nested archive decryption password."))
-                .mut_arg("nested_encoding", |arg| arg.help("Nested archive entry-name encoding."))
-                .mut_arg("symlinks", |arg| arg.help("Symbolic-link handling policy."))
-                .mut_arg("smart", |arg| {
-                    arg.help("Smart extract: extract a single root directory directly, otherwise wrap loose entries in a same-name folder.")
-                })
-                .mut_arg("best_effort", |arg| {
-                    arg.help("Best-effort extract: skip readable-entry or CRC failures within recoverable boundaries.")
-                })
-                .mut_arg("threads", threads_help_en)
-                .mut_arg("memory_limit", memory_limit_help_en)
-                .mut_arg("max_output_bytes", |arg| arg.help("Maximum total extracted output size."))
-                .mut_arg("max_entries", |arg| arg.help("Maximum number of extracted entries."))
-                .mut_arg("max_compression_ratio", |arg| {
-                    arg.help("Maximum decompressed-to-compressed ratio for a single entry.")
-                })
-                .mut_arg("json", json_help_en)
-        })
-}
-
-fn localize_export_help_en(cmd: Command) -> Command {
-    cmd.about("Export a .sqz container to a standard archive")
-        .mut_arg("archive", |arg| arg.help("Source .sqz container path."))
-        .mut_arg("output", |arg| {
-            arg.help(
-                "Output standard archive path. The format is detected from the file extension.",
-            )
-        })
-        .mut_arg("level", |arg| {
-            arg.help("Output compression level 0-9. Overrides --profile.")
-        })
-        .mut_arg("profile", profile_help_en)
-        .mut_arg("out_password", |arg| {
-            arg.help("Output archive encryption password.")
-        })
-        .mut_arg("threads", threads_help_en)
-        .mut_arg("memory_limit", memory_limit_help_en)
-        .mut_arg("force", |arg| {
-            arg.help("Replace the exact existing output inspected before export. Refuses the replacement if it changes before commit.")
-        })
-        .mut_arg("json", json_help_en)
-}
-
-fn localize_update_help_en(cmd: Command) -> Command {
-    cmd.about("Edit entries in an existing archive: add, delete, rename, move, or create")
-        .mut_arg("archive", |arg| arg.help("Archive path."))
-        .mut_arg("add", |arg| {
-            arg.help("Add a local file or folder. Can be repeated.")
-        })
-        .mut_arg("mkdir", |arg| {
-            arg.help("Create an empty directory entry. Can be repeated.")
-        })
-        .mut_arg("delete", |arg| {
-            arg.help("Delete entries matching a glob. Can be repeated.")
-        })
-        .mut_arg("delete_entries", |arg| {
-            arg.help("Delete a literal archive path. End directories with / to delete their subtree. Can be repeated.")
-        })
-        .mut_arg("encoding", |arg| {
-            arg.help("Source entry-name encoding for selections, globs, renames and progress, such as gbk or shift_jis.")
-        })
-        .mut_arg("rename", |arg| {
-            arg.help("Source archive path to rename. Pair each occurrence with --rename-to. Can be repeated.")
-        })
-        .mut_arg("rename_to", |arg| {
-            arg.help("Destination archive path for --rename, paired in occurrence order. Can be repeated.")
-        })
-        .mut_arg("move_entries", |arg| {
-            arg.help("Source archive path to move. Pair each occurrence with --move-to. Can be repeated.")
-        })
-        .mut_arg("move_to", |arg| {
-            arg.help("Destination archive path for --move, paired in occurrence order. Can be repeated.")
-        })
-        .mut_arg("excludes", exclude_help_en)
-        .mut_arg("content_policy", content_policy_help_en)
-        .mut_arg("password", |arg| {
-            arg.help("Encryption password for added entries.")
-        })
-        .mut_arg("encrypt_names", |arg| {
-            arg.help("Encrypt added entry names when the target format supports header encryption.")
-        })
-        .mut_arg("level", |arg| {
-            arg.help("Compression level for added entries, 0-9. Overrides --profile.")
-        })
-        .mut_arg("profile", profile_help_en)
-        .mut_arg("threads", threads_help_en)
-        .mut_arg("memory_limit", memory_limit_help_en)
-        .mut_arg("json", json_help_en)
-}
-
-fn localize_check_update_help_en(cmd: Command) -> Command {
-    cmd.about(
-        "Check the stable Squallz release channel; does not download or install update packages",
-    )
-    .mut_arg("json", json_help_en)
-}
-
-fn localize_check_update_help_zh(cmd: Command) -> Command {
-    const HELP_TEMPLATE: &str = "\
-{before-help}{about-with-newline}
-用法: {usage}
-
-选项:
-{options}{after-help}";
-
+fn customize_update_help(cmd: Command, loc: &Localizer) -> Command {
     cmd.mut_arg("output_style", |arg| {
-        arg.help("人类可读输出风格：classic 或 modern；默认 classic，不影响 JSON。")
+        arg.help(loc.t("cli.help.check_update.style"))
             .hide_possible_values(true)
             .hide_default_value(true)
     })
     .mut_arg("color", |arg| {
-        arg.help("modern 输出的颜色策略：auto、always 或 never。")
+        arg.help(loc.t("cli.help.check_update.color"))
             .hide_possible_values(true)
             .hide_default_value(true)
     })
     .mut_arg("accent", |arg| {
-        arg.help(
-            "modern 输出配色；使用 --palette，可选 squallz、ocean、jade、sunset、violet 或 mono。",
-        )
-        .hide_possible_values(true)
-        .hide_default_value(true)
+        arg.help(loc.t("cli.help.check_update.palette"))
+            .hide_possible_values(true)
+            .hide_default_value(true)
     })
     .mut_subcommand("check-update", |cmd| {
-        cmd.help_template(HELP_TEMPLATE)
+        cmd.help_template(loc.t("cli.help.check_update.template"))
             .disable_help_flag(true)
             .arg(
                 Arg::new("help")
                     .short('h')
                     .long("help")
                     .action(ArgAction::Help)
-                    .help("显示帮助"),
+                    .help(loc.t("cli.help.check_update.help")),
             )
     })
-}
-
-fn localize_protect_help_en(cmd: Command) -> Command {
-    cmd.about("Create external PAR2 recovery data for a standard archive")
-        .mut_arg("archive", |arg| arg.help("Archive path to protect."))
-        .mut_arg("redundancy", |arg| {
-            arg.help("Recovery redundancy percentage, such as 10 or 10%. Conflicts with --tolerate-loss.")
-        })
-        .mut_arg("tolerate_loss", |arg| {
-            arg.help("For a .001 split-volume set, create enough PAR2 redundancy to tolerate N missing largest volumes.")
-        })
-        .mut_arg("recovery", |arg| arg.help("Output .par2 index path. Defaults to <archive>.par2."))
-        .mut_arg("json", json_help_en)
-}
-
-fn localize_verify_help_en(cmd: Command) -> Command {
-    cmd.about("Verify external PAR2 recovery data")
-        .mut_arg("archive", |arg| arg.help("Original archive path."))
-        .mut_arg("use_recovery", |arg| {
-            arg.help("Use external recovery data. Verify currently always uses PAR2.")
-        })
-        .mut_arg("recovery", |arg| {
-            arg.help(".par2 index path. Defaults to <archive>.par2.")
-        })
-        .mut_arg("json", json_help_en)
-}
-
-fn localize_repair_help_en(cmd: Command) -> Command {
-    cmd.about("Repair an archive with .sqz embedded recovery, ZIP local-header rebuild, or external PAR2 data")
-        .mut_arg("archive", |arg| arg.help("Original archive path."))
-        .mut_arg("use_recovery", |arg| arg.help("Force external PAR2 recovery data."))
-        .mut_arg("output", |arg| {
-            arg.help("Output file. SQZ/ZIP repair fails if a separate output is already occupied or becomes occupied; choose a new name. Naming the source uses atomic in-place replacement. Single-file .sqz repair can omit it; ZIP rebuild requires it. For a single-file PAR2 set, this creates a no-replace repair copy; omitting it repairs the source in place.")
-        })
-        .mut_arg("output_dir", |arg| {
-            arg.help("New output directory for every file described by a PAR2 set. Conflicts with --output and requires --use-recovery.")
-        })
-        .mut_arg("recovery", |arg| arg.help(".par2 index path. Defaults to <archive>.par2."))
-        .mut_arg("level", |arg| {
-            arg.help("Compression level for SQZ rewrite output, 0-9. Overrides --profile; ignored by external PAR2 repair.")
-        })
-        .mut_arg("profile", profile_help_en)
-        .mut_arg("threads", threads_help_en)
-        .mut_arg("memory_limit", memory_limit_help_en)
-        .mut_arg("json", json_help_en)
-}
-
-fn json_help_en(arg: clap::Arg) -> clap::Arg {
-    arg.help("Print JSON output for machine use.")
-}
-
-fn exclude_help_en(arg: clap::Arg) -> clap::Arg {
-    arg.help(
-        "Exclude a glob pattern. Can be repeated, for example --exclude .git --exclude \"*.tmp\".",
-    )
-}
-
-fn content_policy_help_en(arg: clap::Arg) -> clap::Arg {
-    arg.help(
-        "Archive content policy. Explicit --exclude rules are combined with the selected policy.",
-    )
-}
-
-fn split_help_en(arg: clap::Arg) -> clap::Arg {
-    arg.help("Split volume size, such as 500k, 100m, or 1g. Generic mode writes .001/.002/...; native ZIP and WIM use their standard volume names.")
-}
-
-fn generic_split_help_en(arg: clap::Arg) -> clap::Arg {
-    arg.help("Split volume size, such as 500k, 100m, or 1g. Writes .001/.002/... volumes.")
-}
-
-fn test_after_create_help_en(arg: clap::Arg) -> clap::Arg {
-    arg.help("Reopen the created archive and read every entry before reporting success.")
-}
-
-fn profile_help_en(arg: clap::Arg) -> clap::Arg {
-    arg.help("Built-in create profile: fast=level 2, balanced=level 6, maximum=level 9. Explicit --level overrides it.")
-}
-
-fn threads_help_en(arg: clap::Arg) -> clap::Arg {
-    arg.help("Worker thread count. Defaults to automatic.")
-}
-
-fn memory_limit_help_en(arg: clap::Arg) -> clap::Arg {
-    arg.help(
-        "Squallz stream-buffer memory limit, such as 256m or 1g. This is not a process RSS limit.",
-    )
 }
 
 /// Parses a human-readable size: plain bytes or binary `k`/`m`/`g`
@@ -826,24 +258,24 @@ pub fn safety_limits(
 }
 
 #[derive(Parser)]
-#[command(name = "sqz", version, about = "Squallz：跨平台压缩解压工具")]
+#[command(name = "sqz", version, about = "cli.help.root.about")]
 pub struct Cli {
-    /// 界面语言（如 zh-CN / en-US；默认 SQZ_LANG 环境变量或系统语言）
+    /// cli.help.root.lang
     #[arg(long, global = true)]
     pub lang: Option<String>,
-    /// 静默模式：不输出进度
+    /// cli.help.root.quiet
     #[arg(short, long, global = true)]
     pub quiet: bool,
-    /// 详细模式：逐条目打印
+    /// cli.help.root.verbose
     #[arg(short, long, global = true, conflicts_with = "quiet")]
     pub verbose: bool,
-    /// 人类可读输出风格（默认 classic；modern 只影响非 JSON 输出）
+    /// cli.help.root.output_style
     #[arg(long = "style", global = true, value_enum, default_value_t)]
     pub output_style: OutputStyleArg,
-    /// 颜色输出策略（默认 auto；只影响人类可读输出）
+    /// cli.help.root.color
     #[arg(long, global = true, value_enum, default_value_t)]
     pub color: ColorArg,
-    /// modern 人类输出配色（默认 squallz；不影响 JSON / classic）
+    /// cli.help.root.accent
     #[arg(long = "palette", global = true, value_enum, default_value_t)]
     pub accent: AccentArg,
     #[command(subcommand)]
@@ -1051,436 +483,448 @@ pub enum AccentArg {
     Mono,
 }
 
+#[derive(clap::Args)]
+pub struct CompressArgs {
+    /// cli.help.shared.inputs
+    #[arg(required = true)]
+    pub inputs: Vec<PathBuf>,
+    /// cli.help.compress.output
+    #[arg(short, long)]
+    pub output: PathBuf,
+    /// cli.help.compress.format
+    #[arg(long)]
+    pub format: Option<String>,
+    /// cli.help.compress.level
+    #[arg(long, value_parser = parse_compression_level)]
+    pub level: Option<u8>,
+    /// cli.help.shared.profile
+    #[arg(long, value_enum)]
+    pub profile: Option<CreateProfileArg>,
+    /// cli.help.compress.password
+    #[arg(long)]
+    pub password: Option<String>,
+    /// cli.help.compress.encrypt_names
+    #[arg(long)]
+    pub encrypt_names: bool,
+    /// cli.help.shared.excludes
+    #[arg(long = "exclude", value_name = "GLOB")]
+    pub excludes: Vec<String>,
+    /// cli.help.shared.content_policy
+    #[arg(long, value_enum)]
+    pub content_policy: Option<CreateContentPolicyArg>,
+    /// cli.help.shared.split
+    #[arg(long, value_name = "SIZE", value_parser = parse_size)]
+    pub split: Option<u64>,
+    /// cli.help.shared.split_mode
+    #[arg(long, value_enum, requires = "split")]
+    pub split_mode: Option<SplitModeArg>,
+    /// cli.help.shared.threads
+    #[arg(long, value_name = "N", value_parser = parse_nonzero_usize)]
+    pub threads: Option<usize>,
+    /// cli.help.shared.memory_limit
+    #[arg(long, value_name = "SIZE", value_parser = parse_nonzero_size)]
+    pub memory_limit: Option<u64>,
+    /// cli.help.compress.test_after_create
+    #[arg(long)]
+    pub test_after_create: bool,
+    /// cli.help.shared.json
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(clap::Args)]
+pub struct PackArgs {
+    /// cli.help.shared.inputs
+    #[arg(required = true)]
+    pub inputs: Vec<PathBuf>,
+    /// cli.help.pack.output
+    #[arg(short, long)]
+    pub output: PathBuf,
+    /// cli.help.pack.level
+    #[arg(long, value_parser = parse_compression_level)]
+    pub level: Option<u8>,
+    /// cli.help.shared.profile
+    #[arg(long, value_enum)]
+    pub profile: Option<CreateProfileArg>,
+    /// cli.help.pack.inner_format
+    #[arg(long, default_value_t = SqzInnerFormat::Sqz)]
+    pub inner_format: SqzInnerFormat,
+    /// cli.help.pack.recovery
+    #[arg(long, default_value = "25%", value_parser = parse_percent)]
+    pub recovery: u8,
+    /// cli.help.shared.excludes
+    #[arg(long = "exclude", value_name = "GLOB")]
+    pub excludes: Vec<String>,
+    /// cli.help.shared.content_policy
+    #[arg(long, value_enum)]
+    pub content_policy: Option<CreateContentPolicyArg>,
+    /// cli.help.pack.split
+    #[arg(long, value_name = "SIZE", value_parser = parse_size)]
+    pub split: Option<u64>,
+    /// cli.help.shared.threads
+    #[arg(long, value_name = "N", value_parser = parse_nonzero_usize)]
+    pub threads: Option<usize>,
+    /// cli.help.shared.memory_limit
+    #[arg(long, value_name = "SIZE", value_parser = parse_nonzero_size)]
+    pub memory_limit: Option<u64>,
+    /// cli.help.pack.test_after_create
+    #[arg(long)]
+    pub test_after_create: bool,
+    /// cli.help.shared.json
+    #[arg(long)]
+    pub json: bool,
+}
+
 #[derive(Subcommand)]
 pub enum Cmd {
-    /// 压缩文件/目录
-    Compress {
-        /// 输入文件或目录
+    /// cli.help.file_manager.about
+    #[command(hide = true)]
+    FileManager {
+        /// cli.help.file_manager.action
+        action: squallz_core::ExternalTaskAction,
+        /// cli.help.shared.inputs
         #[arg(required = true)]
-        inputs: Vec<PathBuf>,
-        /// 输出压缩包路径（格式由扩展名决定）
-        #[arg(short, long)]
-        output: PathBuf,
-        /// 显式声明输出格式（如 zip / 7z / tar.gz；必须与 -o 扩展名匹配）
-        #[arg(long)]
-        format: Option<String>,
-        /// 压缩级别 0-9（0=仅存储，9=极限；会覆盖 --profile）
-        #[arg(long, value_parser = parse_compression_level)]
-        level: Option<u8>,
-        /// 内置创建预设（fast=2，balanced=6，maximum=9）
-        #[arg(long, value_enum)]
-        profile: Option<CreateProfileArg>,
-        /// 加密密码
-        #[arg(long)]
-        password: Option<String>,
-        /// 加密条目名（仅支持 7z 等具备 header encryption 的格式）
-        #[arg(long)]
-        encrypt_names: bool,
-        /// 排除 glob 模式（可多次，如 --exclude .git --exclude "*.tmp"）
-        #[arg(long = "exclude", value_name = "GLOB")]
-        excludes: Vec<String>,
-        /// 归档内容策略；显式 --exclude 会与策略规则合并
-        #[arg(long, value_enum)]
-        content_policy: Option<CreateContentPolicyArg>,
-        /// 分卷大小（如 500k / 100m / 1g）；默认生成 .001/.002，原生模式使用 ZIP/WIM 标准命名
-        #[arg(long, value_name = "SIZE", value_parser = parse_size)]
-        split: Option<u64>,
-        /// 分卷布局：generic 为 .001/.002，native 为格式原生布局（支持 ZIP 与 WIM）
-        #[arg(long, value_enum, requires = "split")]
-        split_mode: Option<SplitModeArg>,
-        /// 压缩 worker 线程数（默认自动）
-        #[arg(long, value_name = "N", value_parser = parse_nonzero_usize)]
-        threads: Option<usize>,
-        /// Squallz 流式缓冲内存上限（如 256m / 1g；不是进程 RSS 上限）
-        #[arg(long, value_name = "SIZE", value_parser = parse_nonzero_size)]
-        memory_limit: Option<u64>,
-        /// 创建完成后重新打开归档并完整读取所有条目
-        #[arg(long)]
-        test_after_create: bool,
-        /// Apply the shared file-manager create preset (integration fallback only)
-        #[arg(long, hide = true)]
-        file_manager_preset: bool,
-        /// 以 JSON 输出（机器可读）
+        paths: Vec<PathBuf>,
+        /// cli.help.shared.json
         #[arg(long)]
         json: bool,
     },
-    /// 创建 Squallz 原生 .sqz 自恢复容器
-    Pack {
-        /// 输入文件或目录
-        #[arg(required = true)]
-        inputs: Vec<PathBuf>,
-        /// 输出 .sqz 容器路径
-        #[arg(short, long)]
-        output: PathBuf,
-        /// 压缩级别 0-9（会覆盖 --profile；当前 SQZ v1 透明容器可能忽略该值）
-        #[arg(long, value_parser = parse_compression_level)]
-        level: Option<u8>,
-        /// 内置创建预设（fast=2，balanced=6，maximum=9）
-        #[arg(long, value_enum)]
-        profile: Option<CreateProfileArg>,
-        /// SQZ v1 内部 payload profile（支持 sqz / zip / tar / 7z / zstd）
-        #[arg(long, default_value_t = SqzInnerFormat::Sqz)]
-        inner_format: SqzInnerFormat,
-        /// SQZ payload 恢复冗余比例（如 10 或 10%；默认 25%）
-        #[arg(long, default_value = "25%", value_parser = parse_percent)]
-        recovery: u8,
-        /// 排除 glob 模式（可多次，如 --exclude .git --exclude "*.tmp"）
-        #[arg(long = "exclude", value_name = "GLOB")]
-        excludes: Vec<String>,
-        /// 归档内容策略；显式 --exclude 会与策略规则合并
-        #[arg(long, value_enum)]
-        content_policy: Option<CreateContentPolicyArg>,
-        /// 分卷大小（如 500k / 100m / 1g），产物为 .001/.002/... 分卷
-        #[arg(long, value_name = "SIZE", value_parser = parse_size)]
-        split: Option<u64>,
-        /// 压缩 worker 线程数（默认自动）
-        #[arg(long, value_name = "N", value_parser = parse_nonzero_usize)]
-        threads: Option<usize>,
-        /// Squallz 流式缓冲内存上限（如 256m / 1g；不是进程 RSS 上限）
-        #[arg(long, value_name = "SIZE", value_parser = parse_nonzero_size)]
-        memory_limit: Option<u64>,
-        /// 创建完成后重新打开容器并完整读取所有条目
-        #[arg(long)]
-        test_after_create: bool,
-        /// 以 JSON 输出（机器可读）
-        #[arg(long)]
-        json: bool,
-    },
-    /// 创建或检查自解压文件
+    /// cli.help.compress.about
+    Compress(CompressArgs),
+    /// cli.help.pack.about
+    Pack(PackArgs),
+    /// cli.help.sfx.about
     Sfx {
         #[command(subcommand)]
         cmd: SfxCmd,
     },
-    /// 估算创建压缩包前的输入规模与目标磁盘空间
+    /// cli.help.estimate.about
     Estimate {
-        /// 输入文件或目录
+        /// cli.help.shared.inputs
         #[arg(required = true)]
         inputs: Vec<PathBuf>,
-        /// 排除 glob 模式（可多次，如 --exclude .git --exclude "*.tmp"）
+        /// cli.help.shared.excludes
         #[arg(long = "exclude", value_name = "GLOB")]
         excludes: Vec<String>,
-        /// 归档内容策略；显式 --exclude 会与策略规则合并
+        /// cli.help.shared.content_policy
         #[arg(long, value_enum)]
         content_policy: Option<CreateContentPolicyArg>,
-        /// 计划输出压缩包路径；提供后会检查目标卷可用空间
+        /// cli.help.estimate.output
         #[arg(short, long)]
         output: Option<PathBuf>,
-        /// 以 JSON 输出（机器可读）
+        /// cli.help.shared.json
         #[arg(long)]
         json: bool,
     },
-    /// 查找本地重复文件
+    /// cli.help.duplicates.about
     Duplicates {
-        /// 输入文件或目录
+        /// cli.help.duplicates.inputs
         #[arg(required = true)]
         inputs: Vec<PathBuf>,
-        /// 排除 glob 模式（可多次，如 --exclude .git --exclude "*.tmp"）
+        /// cli.help.shared.excludes
         #[arg(long = "exclude", value_name = "GLOB")]
         excludes: Vec<String>,
-        /// 最小参与哈希的文件大小（默认 1 字节；可用 4k / 10m / 1g）
+        /// cli.help.duplicates.min_size
         #[arg(long, value_name = "SIZE", default_value = "1", value_parser = parse_size)]
         min_size: u64,
-        /// 以 JSON 输出（机器可读）
+        /// cli.help.shared.json
         #[arg(long)]
         json: bool,
     },
-    /// 计算本地文件校验和
+    /// cli.help.checksum.about
     Checksum {
-        /// 输入文件或目录
+        /// cli.help.checksum.inputs
         #[arg(required_unless_present = "check")]
         inputs: Vec<PathBuf>,
-        /// 校验算法（默认 sha256）
+        /// cli.help.checksum.algorithm
         #[arg(short = 'a', long, value_enum, default_value_t)]
         algorithm: ChecksumAlgorithmArg,
-        /// 校验 `<digest>  <path>` 格式的 manifest（相对路径按 manifest 所在目录解析）
+        /// cli.help.checksum.check
         #[arg(long, value_name = "MANIFEST", conflicts_with = "inputs")]
         check: Option<PathBuf>,
-        /// 排除 glob 模式（可多次，如 --exclude .git --exclude "*.tmp"）
+        /// cli.help.shared.excludes
         #[arg(long = "exclude", value_name = "GLOB")]
         excludes: Vec<String>,
-        /// 以 JSON 输出（机器可读）
+        /// cli.help.shared.json
         #[arg(long)]
         json: bool,
     },
-    /// 解压压缩包
+    /// cli.help.extract.about
     Extract {
-        /// 压缩包路径
+        /// cli.help.shared.archive
         archive: PathBuf,
-        /// 目标目录（默认当前目录）
+        /// cli.help.shared.dest
         #[arg(short = 'd', long)]
         dest: Option<PathBuf>,
-        /// 仅解压匹配的条目（glob，可多次，如 --include "docs/*"）
+        /// cli.help.extract.includes
         #[arg(long = "include", value_name = "GLOB")]
         includes: Vec<String>,
-        /// 覆盖策略
+        /// cli.help.shared.overwrite
         #[arg(long, value_enum, default_value_t)]
         overwrite: OverwriteArg,
-        /// 解密密码
+        /// cli.help.shared.password
         #[arg(long)]
         password: Option<String>,
-        /// 条目名编码（如 gbk、shift_jis；默认自动检测）
+        /// cli.help.extract.encoding
         #[arg(long)]
         encoding: Option<String>,
-        /// 符号链接策略
+        /// cli.help.shared.symlinks
         #[arg(long, value_enum, default_value_t)]
         symlinks: SymlinkArg,
-        /// 智能解压：单根目录直接解压，散文件自动装入同名子目录
+        /// cli.help.shared.smart
         #[arg(long)]
         smart: bool,
-        /// 尽力提取可读条目：跳过可恢复范围内的单条目读/CRC 错误
+        /// cli.help.shared.best_effort
         #[arg(long)]
         best_effort: bool,
-        /// 解压 worker 线程数（默认自动）
+        /// cli.help.shared.extract_threads
         #[arg(long, value_name = "N", value_parser = parse_nonzero_usize)]
         threads: Option<usize>,
-        /// Squallz 流式缓冲内存上限（如 256m / 1g；不是进程 RSS 上限）
+        /// cli.help.shared.memory_limit
         #[arg(long, value_name = "SIZE", value_parser = parse_nonzero_size)]
         memory_limit: Option<u64>,
-        /// 最大总输出字节数（支持 1g / 500m 等后缀）
+        /// cli.help.shared.max_output_bytes
         #[arg(long, value_name = "SIZE", value_parser = parse_nonzero_size)]
         max_output_bytes: Option<u64>,
-        /// 最大解压条目数
+        /// cli.help.shared.max_entries
         #[arg(long, value_name = "N", value_parser = parse_nonzero_u64)]
         max_entries: Option<u64>,
-        /// 单条目最大解压/压缩比
+        /// cli.help.shared.max_compression_ratio
         #[arg(long, value_name = "N", value_parser = parse_nonzero_u32)]
         max_compression_ratio: Option<u32>,
-        /// Apply the shared file-manager extract preset (integration fallback only)
-        #[arg(long, hide = true)]
-        file_manager_preset: bool,
-        /// 以 JSON 输出（机器可读）
+        /// cli.help.shared.json
         #[arg(long)]
         json: bool,
     },
-    /// 列出压缩包内容
+    /// cli.help.list.about
     List {
-        /// 压缩包路径
+        /// cli.help.shared.archive
         archive: PathBuf,
-        /// 解密密码
+        /// cli.help.shared.password
         #[arg(long)]
         password: Option<String>,
-        /// 条目名编码
+        /// cli.help.shared.encoding
         #[arg(long)]
         encoding: Option<String>,
-        /// 按完整条目路径进行不区分大小写的文本搜索
+        /// cli.help.list.search
         #[arg(long, value_name = "QUERY")]
         search: Option<String>,
-        /// 以 JSON 输出（机器可读）
+        /// cli.help.shared.json
         #[arg(long)]
         json: bool,
-        /// 以目录树输出（面向人工阅读）
+        /// cli.help.shared.tree
         #[arg(long, conflicts_with = "json")]
         tree: bool,
     },
-    /// 测试压缩包完整性
+    /// cli.help.test.about
     Test {
-        /// 压缩包路径
+        /// cli.help.shared.archive
         archive: PathBuf,
-        /// 解密密码
+        /// cli.help.shared.password
         #[arg(long)]
         password: Option<String>,
-        /// 条目名编码
+        /// cli.help.shared.encoding
         #[arg(long)]
         encoding: Option<String>,
-        /// 测试时最大总解码字节数（支持 1g / 500m 等后缀）
+        /// cli.help.test.max_output_bytes
         #[arg(long, value_name = "SIZE", value_parser = parse_nonzero_size)]
         max_output_bytes: Option<u64>,
-        /// 最大测试条目数
+        /// cli.help.test.max_entries
         #[arg(long, value_name = "N", value_parser = parse_nonzero_u64)]
         max_entries: Option<u64>,
-        /// 单条目最大解压/压缩比
+        /// cli.help.shared.max_compression_ratio
         #[arg(long, value_name = "N", value_parser = parse_nonzero_u32)]
         max_compression_ratio: Option<u32>,
-        /// 以 JSON 输出（机器可读）
+        /// cli.help.shared.json
         #[arg(long)]
         json: bool,
     },
-    /// 转换压缩包格式（如 zip → 7z，流式逐条目，不解压到磁盘）
+    /// cli.help.convert.about
     Convert {
-        /// 源压缩包路径
+        /// cli.help.convert.src
         src: PathBuf,
-        /// 目标压缩包路径（格式由扩展名决定）
+        /// cli.help.convert.output
         #[arg(short, long)]
         output: PathBuf,
-        /// 源压缩包解密密码
+        /// cli.help.convert.password
         #[arg(long)]
         password: Option<String>,
-        /// 目标压缩包加密密码
+        /// cli.help.shared.out_password
         #[arg(long)]
         out_password: Option<String>,
-        /// 加密目标条目名（仅支持 7z 等具备 header encryption 的格式）
+        /// cli.help.convert.encrypt_names
         #[arg(long)]
         encrypt_names: bool,
-        /// 分卷大小（如 500k / 100m / 1g）；默认生成 .001/.002，原生模式使用 ZIP/WIM 标准命名
+        /// cli.help.shared.split
         #[arg(long, value_name = "SIZE", value_parser = parse_size)]
         split: Option<u64>,
-        /// 分卷布局：generic 为 .001/.002，native 为格式原生布局（支持 ZIP 与 WIM）
+        /// cli.help.shared.split_mode
         #[arg(long, value_enum, requires = "split")]
         split_mode: Option<SplitModeArg>,
-        /// 目标压缩级别 0-9（会覆盖 --profile）
+        /// cli.help.shared.level
         #[arg(long, value_parser = parse_compression_level)]
         level: Option<u8>,
-        /// 内置创建预设（fast=2，balanced=6，maximum=9）
+        /// cli.help.shared.profile
         #[arg(long, value_enum)]
         profile: Option<CreateProfileArg>,
-        /// 源条目名编码（如 gbk；默认自动检测）
+        /// cli.help.convert.encoding
         #[arg(long)]
         encoding: Option<String>,
-        /// 压缩 worker 线程数（默认自动）
+        /// cli.help.shared.threads
         #[arg(long, value_name = "N", value_parser = parse_nonzero_usize)]
         threads: Option<usize>,
-        /// Squallz 流式缓冲内存上限（如 256m / 1g；不是进程 RSS 上限）
+        /// cli.help.shared.memory_limit
         #[arg(long, value_name = "SIZE", value_parser = parse_nonzero_size)]
         memory_limit: Option<u64>,
-        /// 覆盖操作开始前绑定的现有目标；提交前若目标变化则拒绝覆盖
+        /// cli.help.convert.force
         #[arg(long)]
         force: bool,
-        /// 以 JSON 输出（机器可读）
+        /// cli.help.shared.json
         #[arg(long)]
         json: bool,
     },
-    /// 操作压缩包内部的嵌套压缩包条目
+    /// cli.help.nested.about
     Nested {
         #[command(subcommand)]
         cmd: NestedCmd,
     },
-    /// 导出 .sqz 容器为标准压缩包
+    /// cli.help.export.about
     Export {
-        /// 源 .sqz 容器路径
+        /// cli.help.export.archive
         archive: PathBuf,
-        /// 输出标准压缩包路径（格式由扩展名决定）
+        /// cli.help.export.output
         #[arg(short, long)]
         output: PathBuf,
-        /// 目标压缩级别 0-9（会覆盖 --profile）
+        /// cli.help.shared.level
         #[arg(long, value_parser = parse_compression_level)]
         level: Option<u8>,
-        /// 内置创建预设（fast=2，balanced=6，maximum=9）
+        /// cli.help.shared.profile
         #[arg(long, value_enum)]
         profile: Option<CreateProfileArg>,
-        /// 目标压缩包加密密码
+        /// cli.help.shared.out_password
         #[arg(long)]
         out_password: Option<String>,
-        /// 压缩 worker 线程数（默认自动）
+        /// cli.help.shared.threads
         #[arg(long, value_name = "N", value_parser = parse_nonzero_usize)]
         threads: Option<usize>,
-        /// Squallz 流式缓冲内存上限（如 256m / 1g；不是进程 RSS 上限）
+        /// cli.help.shared.memory_limit
         #[arg(long, value_name = "SIZE", value_parser = parse_nonzero_size)]
         memory_limit: Option<u64>,
-        /// 覆盖操作开始前绑定的现有目标；提交前若目标变化则拒绝覆盖
+        /// cli.help.export.force
         #[arg(long)]
         force: bool,
-        /// 以 JSON 输出（机器可读）
+        /// cli.help.shared.json
         #[arg(long)]
         json: bool,
     },
-    /// 修改已有压缩包：追加 / 删除 / 重命名 / 移动条目
+    /// cli.help.update.about
     #[command(group(
         ArgGroup::new("ops").required(true).multiple(true).args(["add", "delete", "delete_entries", "rename", "move_entries", "mkdir"])
     ))]
     Update {
-        /// 压缩包路径
+        /// cli.help.shared.archive
         archive: PathBuf,
-        /// 追加本地文件或目录（可多次）
+        /// cli.help.update.add
         #[arg(long = "add", value_name = "PATH")]
         add: Vec<PathBuf>,
-        /// 创建空目录条目（可多次，如 --mkdir docs/reports/）
+        /// cli.help.update.mkdir
         #[arg(long = "mkdir", value_name = "ENTRY_PATH")]
         mkdir: Vec<String>,
-        /// 按 glob 删除条目（可多次，如 --delete "*.log"）
+        /// cli.help.update.delete
         #[arg(long = "delete", value_name = "GLOB")]
         delete: Vec<String>,
-        /// 按完整字面路径删除条目；目录以 / 结尾并删除整个子树（可多次）
+        /// cli.help.update.delete_entries
         #[arg(long = "delete-entry", value_name = "ENTRY_PATH")]
         delete_entries: Vec<String>,
-        /// 源条目名编码，用于选择、glob、重命名和进度显示（如 gbk / shift_jis）
+        /// cli.help.update.encoding
         #[arg(long)]
         encoding: Option<String>,
-        /// 要重命名的源条目路径；每次均需配对 --rename-to（可多次）
+        /// cli.help.update.rename
         #[arg(long = "rename", value_name = "FROM", num_args = 1, requires = "rename_to",
               action = ArgAction::Append, value_parser = clap::builder::NonEmptyStringValueParser::new())]
         rename: Vec<String>,
-        /// 重命名目标条目路径；按出现顺序与 --rename 配对（可多次）
+        /// cli.help.update.rename_to
         #[arg(long = "rename-to", value_name = "TO", num_args = 1, requires = "rename",
               action = ArgAction::Append, value_parser = clap::builder::NonEmptyStringValueParser::new())]
         rename_to: Vec<String>,
-        /// 要移动的源条目路径；每次均需配对 --move-to（可多次）
+        /// cli.help.update.move_entries
         #[arg(long = "move", value_name = "FROM", num_args = 1, requires = "move_to",
               action = ArgAction::Append, value_parser = clap::builder::NonEmptyStringValueParser::new())]
         move_entries: Vec<String>,
-        /// 移动目标条目路径；按出现顺序与 --move 配对（可多次）
+        /// cli.help.update.move_to
         #[arg(long = "move-to", value_name = "TO", num_args = 1, requires = "move_entries",
               action = ArgAction::Append, value_parser = clap::builder::NonEmptyStringValueParser::new())]
         move_to: Vec<String>,
-        /// 追加本地目录时排除 glob 模式（可多次）
+        /// cli.help.update.excludes
         #[arg(long = "exclude", value_name = "GLOB")]
         excludes: Vec<String>,
-        /// 新增条目的内容策略；显式 --exclude 会与策略规则合并
+        /// cli.help.update.content_policy
         #[arg(long, value_enum)]
         content_policy: Option<CreateContentPolicyArg>,
-        /// 新增条目的加密密码
+        /// cli.help.update.password
         #[arg(long)]
         password: Option<String>,
-        /// 加密新增条目名（仅支持 7z 等具备 header encryption 的格式）
+        /// cli.help.update.encrypt_names
         #[arg(long)]
         encrypt_names: bool,
-        /// 新增条目的压缩级别 0-9（会覆盖 --profile）
+        /// cli.help.update.level
         #[arg(long, value_parser = parse_compression_level)]
         level: Option<u8>,
-        /// 内置创建预设（fast=2，balanced=6，maximum=9）
+        /// cli.help.shared.profile
         #[arg(long, value_enum)]
         profile: Option<CreateProfileArg>,
-        /// 压缩 worker 线程数（默认自动）
+        /// cli.help.shared.threads
         #[arg(long, value_name = "N", value_parser = parse_nonzero_usize)]
         threads: Option<usize>,
-        /// Squallz 流式缓冲内存上限（如 256m / 1g；不是进程 RSS 上限）
+        /// cli.help.shared.memory_limit
         #[arg(long, value_name = "SIZE", value_parser = parse_nonzero_size)]
         memory_limit: Option<u64>,
-        /// 以 JSON 输出（机器可读）
+        /// cli.help.shared.json
         #[arg(long)]
         json: bool,
     },
-    /// 为标准压缩包生成外置 PAR2 恢复数据
+    /// cli.help.protect.about
     Protect {
-        /// 要保护的压缩包路径
+        /// cli.help.protect.archive
         archive: PathBuf,
-        /// 恢复冗余百分比，如 10 或 10%（默认 10%；与 --tolerate-loss 互斥）
+        /// cli.help.protect.redundancy
         #[arg(long, value_parser = parse_percent, conflicts_with = "tolerate_loss")]
         redundancy: Option<u8>,
-        /// 为 .001 分卷集生成足以容忍 N 个最大卷丢失的 PAR2 冗余
+        /// cli.help.protect.tolerate_loss
         #[arg(long, value_name = "Nvolumes", value_parser = parse_tolerate_loss)]
         tolerate_loss: Option<u32>,
-        /// 输出 .par2 索引路径（默认 <archive>.par2）
+        /// cli.help.protect.recovery
         #[arg(short, long)]
         recovery: Option<PathBuf>,
-        /// 以 JSON 输出（机器可读）
+        /// cli.help.shared.json
         #[arg(long)]
         json: bool,
     },
-    /// 校验外置 PAR2 恢复数据
+    /// cli.help.verify.about
     Verify {
-        /// 原始压缩包路径
+        /// cli.help.shared.original_archive
         archive: PathBuf,
-        /// 使用外置恢复数据（当前 verify 命令固定走 PAR2）
+        /// cli.help.verify.use_recovery
         #[arg(long)]
         use_recovery: bool,
-        /// .par2 索引路径（默认 <archive>.par2）
+        /// cli.help.shared.recovery
         #[arg(short, long)]
         recovery: Option<PathBuf>,
-        /// 以 JSON 输出（机器可读）
+        /// cli.help.shared.json
         #[arg(long)]
         json: bool,
     },
-    /// 修复压缩包：.sqz 用内嵌恢复；ZIP 可重建 central directory；--use-recovery 使用外置 PAR2
+    /// cli.help.repair.about
     Repair {
-        /// 原始压缩包路径
+        /// cli.help.shared.original_archive
         archive: PathBuf,
-        /// 强制使用外置 PAR2 恢复数据
+        /// cli.help.repair.use_recovery
         #[arg(long)]
         use_recovery: bool,
-        /// 输出路径（SQZ/ZIP 独立输出已占用或修复期间出现同名项目时失败并保留已有内容，请改用新名称；指定源路径时原地原子替换，单文件 .sqz 可省略，ZIP rebuild 必填；单文件 PAR2 集指定输出时创建不覆盖已有项目的修复副本，省略时原地修复源文件）
+        /// cli.help.repair.output
         #[arg(short, long)]
         output: Option<PathBuf>,
-        /// PAR2 多文件集的全新输出目录；与 --output 互斥且仅用于 --use-recovery
+        /// cli.help.repair.output_dir
         #[arg(
             long,
             value_name = "DIR",
@@ -1488,59 +932,59 @@ pub enum Cmd {
             requires = "use_recovery"
         )]
         output_dir: Option<PathBuf>,
-        /// .par2 索引路径（默认 <archive>.par2）
+        /// cli.help.shared.recovery
         #[arg(short, long)]
         recovery: Option<PathBuf>,
-        /// SQZ 重写输出的压缩级别 0-9（会覆盖 --profile；外置 PAR2 修复忽略）
+        /// cli.help.repair.level
         #[arg(long, value_parser = parse_compression_level)]
         level: Option<u8>,
-        /// 内置创建预设（fast=2，balanced=6，maximum=9）
+        /// cli.help.shared.profile
         #[arg(long, value_enum)]
         profile: Option<CreateProfileArg>,
-        /// SQZ 重写输出的压缩 worker 线程数（默认自动；外置 PAR2 修复忽略）
+        /// cli.help.repair.threads
         #[arg(long, value_name = "N", value_parser = parse_nonzero_usize)]
         threads: Option<usize>,
-        /// SQZ 重写输出的 Squallz 流式缓冲内存上限（外置 PAR2 修复忽略）
+        /// cli.help.repair.memory_limit
         #[arg(long, value_name = "SIZE", value_parser = parse_nonzero_size)]
         memory_limit: Option<u64>,
-        /// 以 JSON 输出（机器可读）
+        /// cli.help.shared.json
         #[arg(long)]
         json: bool,
     },
-    /// 运行 JSON 批处理脚本（自动化 / CI）
+    /// cli.help.batch.about
     Batch {
-        /// 批处理 JSON 脚本路径；相对路径默认按脚本所在目录解析
+        /// cli.help.batch.script
         script: PathBuf,
-        /// 某个 job 失败后继续执行后续 job，并汇总所有失败
+        /// cli.help.batch.keep_going
         #[arg(long)]
         keep_going: bool,
-        /// 以 JSON 输出（机器可读）
+        /// cli.help.shared.json
         #[arg(long)]
         json: bool,
     },
-    /// 检查 Squallz 稳定版软件更新；不会下载或安装更新软件包
+    /// cli.help.check_update.about
     CheckUpdate {
-        /// 以 JSON 输出（机器可读）
+        /// cli.help.shared.json
         #[arg(long)]
         json: bool,
     },
-    /// 诊断当前机器的引擎、外部工具与恢复能力
+    /// cli.help.doctor.about
     Doctor {
-        /// 发布/CI 严格模式：声明能力所需运行时缺失时退出 8
+        /// cli.help.doctor.strict
         #[arg(long)]
         strict: bool,
-        /// 以 JSON 输出（机器可读）
+        /// cli.help.shared.json
         #[arg(long)]
         json: bool,
     },
-    /// 管理桌面应用、文件管理器与 CLI 共用的压缩和解压预设
+    /// cli.help.preset.about
     Preset {
         #[command(subcommand)]
         cmd: PresetCmd,
     },
-    /// 列出支持的格式与能力
+    /// cli.help.info.about
     Info {
-        /// 以 JSON 输出（机器可读）
+        /// cli.help.shared.json
         #[arg(long)]
         json: bool,
     },
@@ -1549,8 +993,9 @@ pub enum Cmd {
 impl Cmd {
     pub fn json_requested(&self) -> bool {
         match self {
-            Cmd::Compress { json, .. }
-            | Cmd::Pack { json, .. }
+            Cmd::FileManager { json, .. }
+            | Cmd::Compress(CompressArgs { json, .. })
+            | Cmd::Pack(PackArgs { json, .. })
             | Cmd::Estimate { json, .. }
             | Cmd::Duplicates { json, .. }
             | Cmd::Checksum { json, .. }
@@ -1576,78 +1021,78 @@ impl Cmd {
 
 #[derive(Subcommand)]
 pub enum PresetCmd {
-    /// 列出已保存的创建和解压预设
+    /// cli.help.preset.list.about
     List {
-        /// 只显示 create 或 extract 预设
+        /// cli.help.preset.list.kind
         #[arg(long, value_enum)]
         kind: Option<PresetKindArg>,
-        /// 以 JSON 输出完整预设文档
+        /// cli.help.preset.list.json
         #[arg(long)]
         json: bool,
     },
-    /// 显示一个完整预设；JSON 输出可直接用于 update
+    /// cli.help.preset.show.about
     Show {
-        /// 预设 ID
+        /// cli.help.shared.id
         id: String,
-        /// 以 JSON 输出（机器可读）
+        /// cli.help.shared.json
         #[arg(long)]
         json: bool,
     },
-    /// 从现有预设克隆一个可编辑预设
+    /// cli.help.preset.clone.about
     Clone {
-        /// 现有来源预设 ID
+        /// cli.help.preset.clone.source_id
         source_id: String,
-        /// 新预设的唯一 ID
+        /// cli.help.preset.clone.new_id
         new_id: String,
-        /// 新预设显示名称
+        /// cli.help.preset.clone.label
         #[arg(long)]
         label: String,
-        /// 以 JSON 输出（机器可读）
+        /// cli.help.shared.json
         #[arg(long)]
         json: bool,
     },
-    /// 用 preset show --json 产生的完整 JSON 替换一个可编辑预设
+    /// cli.help.preset.update.about
     Update {
-        /// 要更新的预设 ID
+        /// cli.help.preset.update.id
         id: String,
-        /// 包含一个完整预设对象的 JSON 文件
+        /// cli.help.preset.update.file
         #[arg(long)]
         file: PathBuf,
-        /// 以 JSON 输出（机器可读）
+        /// cli.help.shared.json
         #[arg(long)]
         json: bool,
     },
-    /// 删除一个可编辑预设，并把相关绑定恢复到安全的内置预设
+    /// cli.help.preset.delete.about
     Delete {
-        /// 要删除的预设 ID
+        /// cli.help.preset.delete.id
         id: String,
-        /// 以 JSON 输出（机器可读）
+        /// cli.help.shared.json
         #[arg(long)]
         json: bool,
     },
-    /// 把预设绑定到应用或文件管理器默认槽位
+    /// cli.help.preset.bind.about
     Bind {
-        /// app-create、app-extract、file-manager-create 或 file-manager-extract
+        /// cli.help.shared.slot
         #[arg(value_enum)]
         slot: PresetBindingArg,
-        /// 预设 ID
+        /// cli.help.shared.id
         id: String,
-        /// 以 JSON 输出（机器可读）
+        /// cli.help.shared.json
         #[arg(long)]
         json: bool,
     },
-    /// 清除应用或文件管理器默认槽位
+    /// cli.help.preset.unbind.about
     Unbind {
-        /// app-create、app-extract、file-manager-create 或 file-manager-extract
+        /// cli.help.shared.slot
         #[arg(value_enum)]
         slot: PresetBindingArg,
-        /// 以 JSON 输出（机器可读）
+        /// cli.help.shared.json
         #[arg(long)]
         json: bool,
     },
-    /// 显示共享预设文档路径
+    /// cli.help.preset.path.about
     Path {
-        /// 以 JSON 输出（机器可读）
+        /// cli.help.shared.json
         #[arg(long)]
         json: bool,
     },
@@ -1670,57 +1115,57 @@ impl PresetCmd {
 
 #[derive(Subcommand)]
 pub enum SfxCmd {
-    /// 把完整 ZIP 载荷与 Squallz PE/ELF stub 组装为自解压文件
+    /// cli.help.sfx.create.about
     Create {
-        /// 完整 ZIP 载荷
+        /// cli.help.sfx.create.archive
         archive: PathBuf,
-        /// 输出自解压文件
+        /// cli.help.sfx.create.output
         #[arg(short, long)]
         output: PathBuf,
-        /// 目标平台（必须明确指定）
+        /// cli.help.sfx.create.target
         #[arg(long, value_enum)]
         target: SfxTargetArg,
-        /// 目标平台的 Squallz SFX stub；macOS 使用 Squallz.app 模板
+        /// cli.help.sfx.create.stub
         #[arg(long)]
         stub: Option<PathBuf>,
-        /// 覆盖已有输出
+        /// cli.help.sfx.create.force
         #[arg(long)]
         force: bool,
-        /// 流式复制缓冲内存上限
+        /// cli.help.sfx.create.memory_limit
         #[arg(long, value_name = "SIZE", value_parser = parse_nonzero_size)]
         memory_limit: Option<u64>,
-        /// 以 JSON 输出（机器可读）
+        /// cli.help.shared.json
         #[arg(long)]
         json: bool,
     },
-    /// 检查 SFX footer、目标平台与完整载荷校验和
+    /// cli.help.sfx.inspect.about
     Inspect {
-        /// 自解压文件
+        /// cli.help.sfx.inspect.file
         file: PathBuf,
-        /// 流式校验缓冲内存上限
+        /// cli.help.sfx.verification_memory_limit
         #[arg(long, value_name = "SIZE", value_parser = parse_nonzero_size)]
         memory_limit: Option<u64>,
-        /// 以 JSON 输出（机器可读）
+        /// cli.help.shared.json
         #[arg(long)]
         json: bool,
     },
-    /// 签名、公证、装订并验证 macOS SFX，同时保留未签名原件
+    /// cli.help.sfx.publish_macos.about
     PublishMacos {
-        /// 保持不变的未签名 macOS SFX .app
+        /// cli.help.sfx.publish_macos.source
         source: PathBuf,
-        /// 新建已签名并公证的 .app；不会覆盖已有路径
+        /// cli.help.sfx.publish_macos.output
         #[arg(short, long)]
         output: PathBuf,
-        /// codesign 可用的 Developer ID Application 身份或证书指纹
+        /// cli.help.sfx.publish_macos.identity
         #[arg(long, value_name = "IDENTITY")]
         identity: String,
-        /// 已保存到钥匙串的 notarytool profile；Squallz 不读取或保存其密码
+        /// cli.help.sfx.publish_macos.notary_profile
         #[arg(long, value_name = "PROFILE")]
         notary_profile: String,
-        /// 流式校验缓冲内存上限
+        /// cli.help.sfx.verification_memory_limit
         #[arg(long, value_name = "SIZE", value_parser = parse_nonzero_size)]
         memory_limit: Option<u64>,
-        /// 以 JSON 输出（机器可读）
+        /// cli.help.shared.json
         #[arg(long)]
         json: bool,
     },
@@ -1738,86 +1183,86 @@ impl SfxCmd {
 
 #[derive(Subcommand)]
 pub enum NestedCmd {
-    /// 列出嵌套压缩包内容
+    /// cli.help.nested.list.about
     List {
-        /// 外层压缩包路径
+        /// cli.help.nested.outer_archive
         archive: PathBuf,
-        /// 外层压缩包内的嵌套压缩包条目路径
+        /// cli.help.shared.entry
         entry: String,
-        /// 外层压缩包解密密码
+        /// cli.help.nested.outer_password
         #[arg(long)]
         password: Option<String>,
-        /// 外层条目名编码
+        /// cli.help.nested.outer_encoding
         #[arg(long)]
         encoding: Option<String>,
-        /// 嵌套压缩包解密密码
+        /// cli.help.shared.nested_password
         #[arg(long)]
         nested_password: Option<String>,
-        /// 嵌套条目名编码
+        /// cli.help.shared.nested_encoding
         #[arg(long)]
         nested_encoding: Option<String>,
-        /// 按完整嵌套条目路径进行不区分大小写的文本搜索
+        /// cli.help.nested.list.search
         #[arg(long, value_name = "QUERY")]
         search: Option<String>,
-        /// 以 JSON 输出（机器可读）
+        /// cli.help.shared.json
         #[arg(long)]
         json: bool,
-        /// 以目录树输出（面向人工阅读）
+        /// cli.help.shared.tree
         #[arg(long, conflicts_with = "json")]
         tree: bool,
     },
-    /// 解压嵌套压缩包内容
+    /// cli.help.nested.extract.about
     Extract {
-        /// 外层压缩包路径
+        /// cli.help.nested.outer_archive
         archive: PathBuf,
-        /// 外层压缩包内的嵌套压缩包条目路径
+        /// cli.help.shared.entry
         entry: String,
-        /// 目标目录（默认当前目录）
+        /// cli.help.shared.dest
         #[arg(short = 'd', long)]
         dest: Option<PathBuf>,
-        /// 仅解压匹配的嵌套条目（glob，可多次）
+        /// cli.help.nested.extract.includes
         #[arg(long = "include", value_name = "GLOB")]
         includes: Vec<String>,
-        /// 覆盖策略
+        /// cli.help.shared.overwrite
         #[arg(long, value_enum, default_value_t)]
         overwrite: OverwriteArg,
-        /// 外层压缩包解密密码
+        /// cli.help.nested.outer_password
         #[arg(long)]
         password: Option<String>,
-        /// 外层条目名编码
+        /// cli.help.nested.outer_encoding
         #[arg(long)]
         encoding: Option<String>,
-        /// 嵌套压缩包解密密码
+        /// cli.help.shared.nested_password
         #[arg(long)]
         nested_password: Option<String>,
-        /// 嵌套条目名编码
+        /// cli.help.shared.nested_encoding
         #[arg(long)]
         nested_encoding: Option<String>,
-        /// 符号链接策略
+        /// cli.help.shared.symlinks
         #[arg(long, value_enum, default_value_t)]
         symlinks: SymlinkArg,
-        /// 智能解压：单根目录直接解压，散文件自动装入同名子目录
+        /// cli.help.shared.smart
         #[arg(long)]
         smart: bool,
-        /// 尽力提取可读条目：跳过可恢复范围内的单条目读/CRC 错误
+        /// cli.help.shared.best_effort
         #[arg(long)]
         best_effort: bool,
-        /// 解压 worker 线程数（默认自动）
+        /// cli.help.shared.extract_threads
         #[arg(long, value_name = "N", value_parser = parse_nonzero_usize)]
         threads: Option<usize>,
-        /// Squallz 流式缓冲内存上限（如 256m / 1g；不是进程 RSS 上限）
+        /// cli.help.shared.memory_limit
         #[arg(long, value_name = "SIZE", value_parser = parse_nonzero_size)]
         memory_limit: Option<u64>,
-        /// 最大总输出字节数（支持 1g / 500m 等后缀）
+        /// cli.help.shared.max_output_bytes
         #[arg(long, value_name = "SIZE", value_parser = parse_nonzero_size)]
         max_output_bytes: Option<u64>,
-        /// 最大解压条目数
+        /// cli.help.shared.max_entries
         #[arg(long, value_name = "N", value_parser = parse_nonzero_u64)]
         max_entries: Option<u64>,
-        /// 单条目最大解压/压缩比
+        /// cli.help.shared.max_compression_ratio
         #[arg(long, value_name = "N", value_parser = parse_nonzero_u32)]
         max_compression_ratio: Option<u32>,
-        /// 以 JSON 输出（机器可读）
+        /// cli.help.shared.json
         #[arg(long)]
         json: bool,
     },
@@ -1880,6 +1325,8 @@ impl From<SymlinkArg> for SymlinkPolicy {
 mod tests {
     use std::path::Path;
 
+    use clap::error::ErrorKind;
+
     use super::*;
 
     fn os_args(values: &[&str]) -> Vec<OsString> {
@@ -1889,23 +1336,24 @@ mod tests {
     #[test]
     fn explicit_help_language_accepts_both_clap_forms() {
         assert_eq!(
-            explicit_help_language(&os_args(&["sqz", "--lang", "en-US", "--help"])),
+            explicit_language(&os_args(&["sqz", "--lang", "en-US", "--help"])),
             Some("en-US".to_owned())
         );
         assert_eq!(
-            explicit_help_language(&os_args(&["sqz", "--lang=en", "list", "--help"])),
+            explicit_language(&os_args(&["sqz", "--lang=en", "list", "--help"])),
             Some("en".to_owned())
         );
         assert_eq!(
-            explicit_help_language(&os_args(&["sqz", "--lang", "zh-CN", "--help"])),
+            explicit_language(&os_args(&["sqz", "--lang", "zh-CN", "--help"])),
             Some("zh-CN".to_owned())
         );
-        assert_eq!(explicit_help_language(&os_args(&["sqz", "--lang"])), None);
+        assert_eq!(explicit_language(&os_args(&["sqz", "--lang"])), None);
     }
 
     #[test]
     fn check_update_chinese_help_has_localized_structure() {
-        let mut cmd = localize_check_update_help_zh(Cli::command());
+        let loc = Localizer::with_user_dir(Some("zh-CN"), None);
+        let mut cmd = customize_update_help(localized_command(&loc), &loc);
         let error = cmd
             .try_get_matches_from_mut(["sqz", "--lang", "zh-CN", "check-update", "--help"])
             .expect_err("help should stop argument parsing");
@@ -1982,49 +1430,35 @@ mod tests {
     }
 
     #[test]
-    fn file_manager_preset_flag_is_accepted_only_on_archive_actions() {
-        let compress = Cli::try_parse_from([
+    fn file_manager_actions_accept_raw_paths_and_json() {
+        let (parsed, _) = parse_cli([
+            "sqz",
+            "file-manager",
+            "compress-to-7z",
+            "--json",
+            "--",
+            "-input.txt",
+        ])
+        .expect("file-manager action should parse");
+        assert!(parsed.cmd.json_requested());
+        assert!(
+            matches!(parsed.cmd, Cmd::FileManager { action: squallz_core::ExternalTaskAction::CompressTo7z, paths, .. } if paths == [PathBuf::from("-input.txt")])
+        );
+        assert!(parse_cli(["sqz", "file-manager", "invalid", "input.txt"]).is_err());
+        assert!(parse_cli([
             "sqz",
             "compress",
             "input.txt",
             "-o",
-            "output.7z",
-            "--file-manager-preset",
+            "out.7z",
+            "--file-manager-preset"
         ])
-        .expect("compress fallback flag should parse");
-        assert!(matches!(
-            compress.cmd,
-            Cmd::Compress {
-                file_manager_preset: true,
-                ..
-            }
-        ));
-
-        let extract = Cli::try_parse_from([
-            "sqz",
-            "extract",
-            "archive.7z",
-            "-d",
-            "output",
-            "--file-manager-preset",
-        ])
-        .expect("extract fallback flag should parse");
-        assert!(matches!(
-            extract.cmd,
-            Cmd::Extract {
-                file_manager_preset: true,
-                ..
-            }
-        ));
-
-        assert!(
-            Cli::try_parse_from(["sqz", "list", "archive.7z", "--file-manager-preset"]).is_err()
-        );
+        .is_err());
     }
 
     #[test]
     fn preset_management_commands_keep_json_error_mode() {
-        let parsed = Cli::try_parse_from([
+        let (parsed, _) = parse_cli([
             "sqz",
             "preset",
             "bind",
@@ -2044,12 +1478,12 @@ mod tests {
             }
         ));
 
-        assert!(Cli::try_parse_from(["sqz", "preset", "update", "user.create.portable"]).is_err());
+        assert!(parse_cli(["sqz", "preset", "update", "user.create.portable"]).is_err());
     }
 
     #[test]
     fn create_commands_accept_integrity_testing_after_commit() {
-        let compress = Cli::try_parse_from([
+        let (compress, _) = parse_cli([
             "sqz",
             "compress",
             "input.txt",
@@ -2060,13 +1494,13 @@ mod tests {
         .expect("compress integrity flag should parse");
         assert!(matches!(
             compress.cmd,
-            Cmd::Compress {
+            Cmd::Compress(CompressArgs {
                 test_after_create: true,
                 ..
-            }
+            })
         ));
 
-        let pack = Cli::try_parse_from([
+        let (pack, _) = parse_cli([
             "sqz",
             "pack",
             "input.txt",
@@ -2077,27 +1511,27 @@ mod tests {
         .expect("pack integrity flag should parse");
         assert!(matches!(
             pack.cmd,
-            Cmd::Pack {
+            Cmd::Pack(PackArgs {
                 test_after_create: true,
                 ..
-            }
+            })
         ));
     }
 
     #[test]
     fn software_update_check_is_distinct_from_archive_update() {
-        let parsed = Cli::try_parse_from(["sqz", "check-update", "--json"])
+        let (parsed, _) = parse_cli(["sqz", "check-update", "--json"])
             .expect("software update check should parse");
         assert!(parsed.cmd.json_requested());
         assert!(matches!(parsed.cmd, Cmd::CheckUpdate { json: true }));
 
-        assert!(Cli::try_parse_from(["sqz", "check-update", "archive.zip"]).is_err());
-        assert!(Cli::try_parse_from(["sqz", "update", "archive.zip"]).is_err());
+        assert!(parse_cli(["sqz", "check-update", "archive.zip"]).is_err());
+        assert!(parse_cli(["sqz", "update", "archive.zip"]).is_err());
     }
 
     #[test]
     fn macos_sfx_publish_requires_explicit_identity_profile_and_output() {
-        let parsed = Cli::try_parse_from([
+        let (parsed, _) = parse_cli([
             "sqz",
             "sfx",
             "publish-macos",
@@ -2129,7 +1563,7 @@ mod tests {
                 && notary_profile == "squallz-release"
         ));
 
-        assert!(Cli::try_parse_from([
+        assert!(parse_cli([
             "sqz",
             "sfx",
             "publish-macos",
@@ -2144,7 +1578,7 @@ mod tests {
 
     #[test]
     fn par2_directory_repair_requires_an_explicit_non_file_destination() {
-        let parsed = Cli::try_parse_from([
+        let (parsed, _) = parse_cli([
             "sqz",
             "repair",
             "archive.zip.001",
@@ -2163,7 +1597,7 @@ mod tests {
             } if path == &PathBuf::from("repaired-set")
         ));
 
-        assert!(Cli::try_parse_from([
+        assert!(parse_cli([
             "sqz",
             "repair",
             "archive.zip.001",
@@ -2171,7 +1605,7 @@ mod tests {
             "repaired-set",
         ])
         .is_err());
-        assert!(Cli::try_parse_from([
+        assert!(parse_cli([
             "sqz",
             "repair",
             "archive.zip.001",

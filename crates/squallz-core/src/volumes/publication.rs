@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -11,19 +11,21 @@ use serde::{Deserialize, Serialize};
 
 use crate::api::FormatError;
 use crate::destination_guard::path_state_digest;
-use crate::filesystem_identity::open_regular_file_no_follow_read_write;
+use crate::filesystem_identity::{
+    file_identity, open_new_artifact, open_regular_file_no_follow_read_write, path_identity,
+    PathIdentity,
+};
 use crate::stored_os_string::StoredOsString;
 use crate::{parent_or_current, sync_directory};
 
 use super::{
     collect_managed_split_outputs, ensure_split_identity, ensure_split_state_binding, is_sqz_base,
     managed_split_output_name, observed_split_identity, remove_bound_split_staging,
-    remove_staged_split_outputs, split_file_identity, split_path_identity,
-    split_staging_matches_final, split_transaction_conflict, split_transaction_journal_path,
-    split_transaction_output_name, transaction_backup_matches_output_family,
-    validate_staged_split_outputs, with_preserved_split_debt, with_split_cleanup_errors,
-    ManagedSplitOutputSnapshot, PreservedSplitOutput, SplitPathIdentity, SplitStagingBinding,
-    SplitStagingPath, StagedSplitOutput,
+    remove_staged_split_outputs, split_staging_matches_final, split_transaction_conflict,
+    split_transaction_journal_path, split_transaction_output_name,
+    transaction_backup_matches_output_family, validate_staged_split_outputs,
+    with_preserved_split_debt, with_split_cleanup_errors, ManagedSplitOutputSnapshot,
+    PreservedSplitOutput, SplitStagingBinding, SplitStagingPath, StagedSplitOutput,
 };
 
 static SPLIT_JOURNAL_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -108,8 +110,8 @@ impl SplitPublicationTransaction {
             }
             let mut outputs = Vec::with_capacity(staged.len());
             for output in staged {
-                if split_file_identity(&output.file).ok() != Some(output.identity)
-                    || split_path_identity(&output.part).ok() != Some(output.identity)
+                if file_identity(&output.file).ok() != Some(output.identity)
+                    || path_identity(&output.part).ok() != Some(output.identity)
                 {
                     return Err(split_transaction_conflict(
                         "the staged split output was replaced after writing",
@@ -122,8 +124,8 @@ impl SplitPublicationTransaction {
                         [&output.part],
                     )
                 })?;
-                if split_file_identity(&output.file)? != output.identity
-                    || split_path_identity(&output.part)? != output.identity
+                if file_identity(&output.file)? != output.identity
+                    || path_identity(&output.part)? != output.identity
                 {
                     return Err(split_transaction_conflict(
                         "the staged split output identity changed while it was bound",
@@ -176,8 +178,8 @@ impl SplitPublicationTransaction {
 
     fn ensure_journal_binding(&self) -> Result<(), FormatError> {
         let open = &self.open;
-        if split_file_identity(&open.file).ok() != Some(open.identity)
-            || split_path_identity(&open.path).ok() != Some(open.identity)
+        if file_identity(&open.file).ok() != Some(open.identity)
+            || path_identity(&open.path).ok() != Some(open.identity)
         {
             return Err(split_transaction_conflict(
                 "the retained transaction journal no longer owns its published path",
@@ -208,8 +210,8 @@ impl SplitPublicationTransaction {
             })?;
         if bytes.len() > SPLIT_TRANSACTION_MAX_BYTES
             || *blake3::hash(&bytes).as_bytes() != open.content_digest
-            || split_file_identity(&open.file).ok() != Some(open.identity)
-            || split_path_identity(&open.path).ok() != Some(open.identity)
+            || file_identity(&open.file).ok() != Some(open.identity)
+            || path_identity(&open.path).ok() != Some(open.identity)
         {
             return Err(split_transaction_conflict(
                 "the retained transaction journal changed after it was opened",
@@ -225,7 +227,7 @@ impl SplitPublicationTransaction {
             .iter()
             .filter_map(|entry| {
                 let identity_matches = matches!(
-                    split_path_identity(&entry.backup),
+                    path_identity(&entry.backup),
                     Ok(identity) if identity == entry.identity
                 );
                 let state_matches = matches!(
@@ -517,7 +519,7 @@ impl SplitPublicationTransaction {
 struct SplitJournalBackup {
     original: StoredOsString,
     backup: StoredOsString,
-    identity: SplitPathIdentity,
+    identity: PathIdentity,
     state_digest: [u8; 32],
 }
 
@@ -526,7 +528,7 @@ struct SplitJournalBackup {
 struct SplitJournalOutput {
     staged: StoredOsString,
     final_path: StoredOsString,
-    identity: SplitPathIdentity,
+    identity: PathIdentity,
     state_digest: [u8; 32],
 }
 
@@ -543,7 +545,7 @@ struct SplitTransactionRecord {
 struct OpenSplitTransaction {
     path: PathBuf,
     file: File,
-    identity: SplitPathIdentity,
+    identity: PathIdentity,
     content_digest: [u8; 32],
     record: SplitTransactionRecord,
 }
@@ -563,7 +565,7 @@ impl OpenSplitTransaction {
 struct ResolvedSplitBackup {
     original: PathBuf,
     backup: PathBuf,
-    identity: SplitPathIdentity,
+    identity: PathIdentity,
     state_digest: [u8; 32],
 }
 
@@ -571,7 +573,7 @@ struct ResolvedSplitBackup {
 struct ResolvedSplitOutput {
     staged: PathBuf,
     final_path: PathBuf,
-    identity: SplitPathIdentity,
+    identity: PathIdentity,
     state_digest: [u8; 32],
 }
 
@@ -594,7 +596,7 @@ impl SplitStagingBinding for OpenSplitTransaction {
         &self.path
     }
 
-    fn staging_identity(&self) -> SplitPathIdentity {
+    fn staging_identity(&self) -> PathIdentity {
         self.identity
     }
 
@@ -693,28 +695,9 @@ fn write_split_transaction_with_state(
             SPLIT_JOURNAL_SEQUENCE.fetch_add(1, Ordering::Relaxed)
         ));
         let temp_path = parent.join(temp_name);
-        let mut options = OpenOptions::new();
-        options.read(true).write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-
-            options.mode(0o600);
-        }
-        #[cfg(windows)]
-        {
-            use std::os::windows::fs::OpenOptionsExt;
-            use windows_sys::Win32::Storage::FileSystem::{
-                FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ,
-            };
-
-            options
-                .share_mode(FILE_SHARE_READ | FILE_SHARE_DELETE)
-                .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
-        }
-        let file = options.open(&temp_path)?;
-        let identity = split_file_identity(&file)?;
-        if split_path_identity(&temp_path).ok() != Some(identity) {
+        let file = open_new_artifact(&temp_path)?;
+        let identity = file_identity(&file)?;
+        if path_identity(&temp_path).ok() != Some(identity) {
             return Err(FormatError::Io(io::Error::other(format!(
                 "split transaction staging changed while it was reserved and was left untouched: {}",
                 temp_path.display()
@@ -736,8 +719,8 @@ fn write_split_transaction_with_state(
                 .unwrap_or_default();
             return Err(with_split_cleanup_errors(error.into(), cleanup_errors));
         }
-        if split_file_identity(&temp.file)? != temp.identity
-            || split_path_identity(&temp.path).ok() != Some(temp.identity)
+        if file_identity(&temp.file)? != temp.identity
+            || path_identity(&temp.path).ok() != Some(temp.identity)
         {
             return Err(FormatError::Io(io::Error::other(format!(
                 "split transaction staging changed after writing and was left untouched: {}",
@@ -752,8 +735,8 @@ fn write_split_transaction_with_state(
             return Err(with_split_cleanup_errors(error.into(), cleanup_errors));
         }
         journal_published = true;
-        if split_file_identity(&temp.file)? != temp.identity
-            || split_path_identity(&path).ok() != Some(temp.identity)
+        if file_identity(&temp.file)? != temp.identity
+            || path_identity(&path).ok() != Some(temp.identity)
         {
             return Err(FormatError::Io(io::Error::other(format!(
                 "published split transaction journal no longer matches its writer-owned staging file and was left for recovery: {}",
@@ -797,8 +780,8 @@ fn open_split_transaction(base: &Path) -> Result<Option<OpenSplitTransaction>, F
         )));
     }
     let mut file = open_regular_file_no_follow_read_write(&path)?;
-    let identity = split_file_identity(&file)?;
-    if split_path_identity(&path)? != identity {
+    let identity = file_identity(&file)?;
+    if path_identity(&path)? != identity {
         return Err(FormatError::Io(io::Error::other(
             "split transaction journal changed while it was opened",
         )));
@@ -954,7 +937,7 @@ fn ensure_split_missing(path: &Path, role: &str) -> Result<(), FormatError> {
 mod tests {
     use super::super::{
         bind_preserved_split_outputs, snapshot_managed_split_outputs, split_into_volumes,
-        test_support::*, volume_path, ControlToken, SplitStagingId,
+        test_support::*, volume_path, ControlToken, SplitOutputRole, SplitStagingId,
     };
     use super::*;
 
@@ -1016,10 +999,7 @@ mod tests {
         assert_eq!(backups.len(), 2);
         assert_eq!(transaction.verified_backups().len(), 2);
         for output in &transaction.resolved.outputs {
-            assert_eq!(
-                split_path_identity(&output.staged).unwrap(),
-                output.identity
-            );
+            assert_eq!(path_identity(&output.staged).unwrap(), output.identity);
             assert_eq!(
                 path_state_digest(&output.staged).unwrap(),
                 Some(output.state_digest)
@@ -1091,7 +1071,7 @@ mod tests {
             .contains("staged output could not be installed"));
         assert!(error.to_string().contains("manual recovery"));
         assert_eq!(std::fs::read(&old_first).unwrap(), b"new first");
-        assert_eq!(split_path_identity(&old_first).unwrap(), staged[0].identity);
+        assert_eq!(path_identity(&old_first).unwrap(), staged[0].identity);
         assert!(!staged[0].part.exists());
         assert_eq!(std::fs::read(&staged[1].part).unwrap(), b"new second");
         assert!(!old_second.exists());
@@ -1241,7 +1221,7 @@ mod tests {
             b"competitor backup"
         );
         assert_eq!(std::fs::read(&displaced_backup).unwrap(), b"old first");
-        assert_eq!(split_path_identity(&old_first).unwrap(), staged[0].identity);
+        assert_eq!(path_identity(&old_first).unwrap(), staged[0].identity);
         assert!(!staged[0].part.exists());
         assert!(split_transaction_journal_path(&base).unwrap().exists());
         assert!(transaction.verified_backups().is_empty());
@@ -1283,7 +1263,7 @@ mod tests {
         assert_eq!(std::fs::read(&old_first).unwrap(), b"new first");
         assert_eq!(std::fs::read(&displaced_backup).unwrap(), b"old first");
         assert!(!transaction_backup.exists());
-        assert_eq!(split_path_identity(&old_first).unwrap(), staged[0].identity);
+        assert_eq!(path_identity(&old_first).unwrap(), staged[0].identity);
         assert!(!staged[0].part.exists());
         assert!(split_transaction_journal_path(&base).unwrap().exists());
         assert!(transaction.verified_backups().is_empty());
@@ -1307,13 +1287,13 @@ mod tests {
             base: base.clone(),
             include_recovery: false,
             backups: vec![ResolvedSplitBackup {
-                identity: split_path_identity(&final_path).unwrap(),
+                identity: path_identity(&final_path).unwrap(),
                 state_digest: path_state_digest(&final_path).unwrap().unwrap(),
                 original: final_path.clone(),
                 backup: backup.clone(),
             }],
             outputs: vec![ResolvedSplitOutput {
-                identity: split_path_identity(&staged).unwrap(),
+                identity: path_identity(&staged).unwrap(),
                 state_digest: path_state_digest(&staged).unwrap().unwrap(),
                 staged: staged.clone(),
                 final_path: final_path.clone(),
@@ -1359,13 +1339,13 @@ mod tests {
             base: recorded_base.clone(),
             include_recovery: false,
             backups: vec![ResolvedSplitBackup {
-                identity: split_path_identity(&final_path).unwrap(),
+                identity: path_identity(&final_path).unwrap(),
                 state_digest: path_state_digest(&final_path).unwrap().unwrap(),
                 original: final_path.clone(),
                 backup: backup.clone(),
             }],
             outputs: vec![ResolvedSplitOutput {
-                identity: split_path_identity(&staged).unwrap(),
+                identity: path_identity(&staged).unwrap(),
                 state_digest: path_state_digest(&staged).unwrap().unwrap(),
                 staged: staged.clone(),
                 final_path: final_path.clone(),
@@ -1405,13 +1385,13 @@ mod tests {
             base: base.clone(),
             include_recovery: false,
             backups: vec![ResolvedSplitBackup {
-                identity: split_path_identity(&final_path).unwrap(),
+                identity: path_identity(&final_path).unwrap(),
                 state_digest: path_state_digest(&final_path).unwrap().unwrap(),
                 original: final_path.clone(),
                 backup: backup.clone(),
             }],
             outputs: vec![ResolvedSplitOutput {
-                identity: split_path_identity(&staged).unwrap(),
+                identity: path_identity(&staged).unwrap(),
                 state_digest: path_state_digest(&staged).unwrap().unwrap(),
                 staged: staged.clone(),
                 final_path: final_path.clone(),
@@ -1447,7 +1427,7 @@ mod tests {
             include_recovery: false,
             backups: Vec::new(),
             outputs: vec![ResolvedSplitOutput {
-                identity: split_path_identity(&staged).unwrap(),
+                identity: path_identity(&staged).unwrap(),
                 state_digest: path_state_digest(&staged).unwrap().unwrap(),
                 staged: staged.clone(),
                 final_path: final_path.clone(),
@@ -1488,13 +1468,13 @@ mod tests {
             base: base.clone(),
             include_recovery: false,
             backups: vec![ResolvedSplitBackup {
-                identity: split_path_identity(&final_path).unwrap(),
+                identity: path_identity(&final_path).unwrap(),
                 state_digest: path_state_digest(&final_path).unwrap().unwrap(),
                 original: final_path.clone(),
                 backup: backup.clone(),
             }],
             outputs: vec![ResolvedSplitOutput {
-                identity: split_path_identity(&staged).unwrap(),
+                identity: path_identity(&staged).unwrap(),
                 state_digest: path_state_digest(&staged).unwrap().unwrap(),
                 staged: staged.clone(),
                 final_path: final_path.clone(),
@@ -1562,10 +1542,14 @@ mod tests {
                 file.write_all(contents).unwrap();
                 file.sync_all().unwrap();
                 StagedSplitOutput {
-                    identity: split_file_identity(&file).unwrap(),
+                    identity: file_identity(&file).unwrap(),
                     part,
                     final_path,
                     file,
+                    role: SplitOutputRole::Volume {
+                        index,
+                        primary: index == 0,
+                    },
                 }
             })
             .collect::<Vec<_>>();
@@ -1618,13 +1602,13 @@ mod tests {
             base: base.clone(),
             include_recovery: false,
             backups: vec![ResolvedSplitBackup {
-                identity: split_path_identity(&final_path).unwrap(),
+                identity: path_identity(&final_path).unwrap(),
                 state_digest: path_state_digest(&final_path).unwrap().unwrap(),
                 original: final_path.clone(),
                 backup: backup.clone(),
             }],
             outputs: vec![ResolvedSplitOutput {
-                identity: split_file_identity(&staged_file).unwrap(),
+                identity: file_identity(&staged_file).unwrap(),
                 state_digest: path_state_digest(&staged).unwrap().unwrap(),
                 staged: staged.clone(),
                 final_path: final_path.clone(),
@@ -1669,13 +1653,13 @@ mod tests {
             base: base.clone(),
             include_recovery: false,
             backups: vec![ResolvedSplitBackup {
-                identity: split_path_identity(&final_path).unwrap(),
+                identity: path_identity(&final_path).unwrap(),
                 state_digest: path_state_digest(&final_path).unwrap().unwrap(),
                 original: final_path.clone(),
                 backup: backup.clone(),
             }],
             outputs: vec![ResolvedSplitOutput {
-                identity: split_file_identity(&staged_file).unwrap(),
+                identity: file_identity(&staged_file).unwrap(),
                 state_digest: path_state_digest(&staged).unwrap().unwrap(),
                 staged: staged.clone(),
                 final_path: final_path.clone(),
@@ -1715,13 +1699,13 @@ mod tests {
             base: base.clone(),
             include_recovery: false,
             backups: vec![ResolvedSplitBackup {
-                identity: split_path_identity(&final_path).unwrap(),
+                identity: path_identity(&final_path).unwrap(),
                 state_digest: path_state_digest(&final_path).unwrap().unwrap(),
                 original: final_path.clone(),
                 backup: old_backup.clone(),
             }],
             outputs: vec![ResolvedSplitOutput {
-                identity: split_path_identity(&staged).unwrap(),
+                identity: path_identity(&staged).unwrap(),
                 state_digest: path_state_digest(&staged).unwrap().unwrap(),
                 staged,
                 final_path: final_path.clone(),
@@ -1769,13 +1753,13 @@ mod tests {
             base: base.clone(),
             include_recovery: false,
             backups: vec![ResolvedSplitBackup {
-                identity: split_path_identity(&final_path).unwrap(),
+                identity: path_identity(&final_path).unwrap(),
                 state_digest: path_state_digest(&final_path).unwrap().unwrap(),
                 original: final_path.clone(),
                 backup: backup.clone(),
             }],
             outputs: vec![ResolvedSplitOutput {
-                identity: split_path_identity(&staged).unwrap(),
+                identity: path_identity(&staged).unwrap(),
                 state_digest: path_state_digest(&staged).unwrap().unwrap(),
                 staged: staged.clone(),
                 final_path: final_path.clone(),
@@ -1786,7 +1770,7 @@ mod tests {
         crate::move_path_no_replace(&final_path, &backup).unwrap();
         std::fs::write(&final_path, b"late competitor").unwrap();
         sync_directory(&dir).unwrap();
-        let competitor_identity = split_path_identity(&final_path).unwrap();
+        let competitor_identity = path_identity(&final_path).unwrap();
 
         let error = SplitPublicationTransaction::recover(&base).unwrap_err();
 
@@ -1801,12 +1785,9 @@ mod tests {
         assert_eq!(std::fs::read(&final_path).unwrap(), b"late competitor");
         assert_eq!(std::fs::read(&backup).unwrap(), b"old output");
         assert_eq!(std::fs::read(&staged).unwrap(), b"new output");
+        assert_eq!(path_identity(&final_path).unwrap(), competitor_identity);
         assert_eq!(
-            split_path_identity(&final_path).unwrap(),
-            competitor_identity
-        );
-        assert_eq!(
-            split_path_identity(&backup).unwrap(),
+            path_identity(&backup).unwrap(),
             transaction.backups[0].identity
         );
         assert_eq!(
@@ -1814,7 +1795,7 @@ mod tests {
             Some(transaction.backups[0].state_digest)
         );
         assert_eq!(
-            split_path_identity(&staged).unwrap(),
+            path_identity(&staged).unwrap(),
             transaction.outputs[0].identity
         );
         assert!(split_transaction_journal_path(&base).unwrap().exists());

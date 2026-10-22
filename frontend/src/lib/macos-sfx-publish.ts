@@ -63,7 +63,8 @@ export function taskCanPublishMacosSfx(task: TaskDialogModel): boolean {
   const unsignedCreate = task.state === "done"
     && task.spec.kind === "compress"
     && task.spec.sfx_target === "macos"
-    && task.result?.requires_signing !== false
+    && task.result?.kind === "compress"
+    && task.result.sfx?.requires_signing === true
     && Boolean(taskOutputPath(task));
   const retry = (task.state === "failed" || task.state === "cancelled")
     && task.spec.kind === "publish_macos_sfx"

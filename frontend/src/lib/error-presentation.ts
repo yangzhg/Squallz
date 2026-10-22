@@ -58,10 +58,10 @@ export function errorSummary(error: ErrorDto | null): string {
   }
   if (key === "error.corrupt_archive") return tFallback("gui.error.corrupt.title", "Archive is damaged");
   if (key === "error.path_traversal" || key === "error.symlink_breakout" || key === "error.unsafe_filename") {
-    return tFallback("gui.task.error.unsafe_archive", "Squallz blocked unsafe archive content");
+    return tFallback("gui.task.error.unsafe_archive");
   }
   if (key === "error.resource_limit") {
-    return tFallback("gui.task.error.resource_limit", "The task exceeded a safety limit");
+    return tFallback("gui.task.error.resource_limit");
   }
   return tFallback("gui.error.other.title", "Operation failed");
 }

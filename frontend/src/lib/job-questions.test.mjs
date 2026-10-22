@@ -1,9 +1,10 @@
+import { jobResult } from "../../tests/job-results.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { webcrypto } from "node:crypto";
 import vm from "node:vm";
 import ts from "typescript";
-import { createTestServer } from "../../tests/runtime.mjs";
+import { englishTranslate, createTestServer } from "../../tests/runtime.mjs";
 import { compileTestScript, readSvelteScript, selectFunctions } from "../../tests/source.mjs";
 
 function snapshot(id, version, kind = "password") {
@@ -21,6 +22,27 @@ function snapshot(id, version, kind = "password") {
       speed: 0, phase: null, interruptible: true }, error: null, result: null,
     interaction: kind, question: { kind, prompt },
   };
+}
+
+function stateSnapshot(records, update) {
+  const record = records.find((item) => item.id === update.id);
+  Object.assign(record, update);
+  if (record.state === "done" && record.result === null) record.result = jobResult("test");
+  if (record.state !== "running") record.progress.speed = 0;
+  if (["done", "failed", "cancelled"].includes(record.state)) {
+    record.question = null;
+    record.interaction = null;
+  }
+  const { spec: _description, ...live } = structuredClone(record);
+  return live;
+}
+
+function progressSnapshot(records, update) {
+  const { id, version, ...progress } = update;
+  const record = records.find((item) => item.id === id);
+  record.version = version;
+  Object.assign(record.progress, progress);
+  return stateSnapshot(records, { id });
 }
 
 async function until(predicate) {
@@ -66,7 +88,7 @@ test("reconnecting restores every pending question without replaying prompt even
     const initialPrompt = jobs.pendingPassword();
     records[0].version = ++revision;
     records[0].progress.done = 10;
-    await emit("job://ask-password", records[0].question.prompt);
+    await emit("job://snapshot", records.find((record) => record.id === (records[0].question.prompt).id));
     await until(() => jobs.tasks()[0].done === 10);
     assert.equal(jobs.pendingPassword(), initialPrompt, "progress preserves the active form");
 
@@ -93,7 +115,7 @@ test("reconnecting restores every pending question without replaying prompt even
     records[0].version = ++revision;
     records[0].question = null;
     records[0].interaction = null;
-    await emit("job://ask-password", initialPrompt);
+    await emit("job://snapshot", records.find((record) => record.id === (initialPrompt).id));
     await until(() => jobs.tasks()[0].state === "cancelled");
     assert.equal(jobs.pendingPassword().id, 2, "a late prompt event cannot reopen a cancelled task");
 
@@ -116,19 +138,19 @@ test("pause and resume events do not restore an old transfer rate", async () => 
     record.question = null;
     record.version = 12;
     record.progress = { ...record.progress, done: 40, speed: 64 };
-    await emit("job://ask-password", { id: 1 });
+    await emit("job://snapshot", records.find((record) => record.id === ({ id: 1 }).id));
     await until(() => jobs.tasks()[0].version === 12);
     const task = jobs.tasks()[0];
     assert.equal(task.speed, 64);
-    await emit("job://state", { id: 1, version: 13, state: "paused" });
+    await emit("job://snapshot", stateSnapshot(records, { id: 1, version: 13, state: "paused" }));
     assert.equal(task.speed, 0);
     assert.equal(task.done, 40);
-    await emit("job://state", { id: 1, version: 14, state: "running" });
+    await emit("job://snapshot", stateSnapshot(records, { id: 1, version: 14, state: "running" }));
     assert.equal(task.speed, 0);
-    await emit("job://progress", { id: 1, version: 15, ...record.progress, done: 50, speed: 80 });
+    await emit("job://snapshot", progressSnapshot(records, { id: 1, version: 15, ...record.progress, done: 50, speed: 80 }));
     assert.equal(task.speed, 80);
     assert.equal(task.done, 50);
-    await emit("job://state", { id: 1, version: 16, state: "cancelled" });
+    await emit("job://snapshot", stateSnapshot(records, { id: 1, version: 16, state: "cancelled" }));
     assert.equal(task.speed, 0);
   });
 });
@@ -156,7 +178,7 @@ test("unavailable status retains progress and questions without reviving an old 
     const helpers = await server.ssrLoadModule("/src/lib/task-dialog.ts");
     Object.assign(records[1], { version: 12, question: null, interaction: null });
     Object.assign(records[1].progress, { done: 40, speed: 64 });
-    await emit("job://ask-conflict", { id: 2 });
+    await emit("job://snapshot", records.find((record) => record.id === ({ id: 2 }).id));
     await until(() => jobs.tasks()[1].version === 12);
     const task = jobs.tasks()[1];
     const question = jobs.pendingPassword();
@@ -168,7 +190,7 @@ test("unavailable status retains progress and questions without reviving an old 
     assert.equal(task.speed, 0);
     assert.equal(jobs.pendingPassword(), question);
     assert.equal(helpers.taskProgressActive(task), false);
-    await emit("job://progress", { id: 2, version: 13, ...records[1].progress, done: 50, speed: 80 });
+    await emit("job://snapshot", progressSnapshot(records, { id: 2, version: 13, ...records[1].progress, done: 50, speed: 80 }));
     assert.equal(task.done, 50);
     assert.equal(task.speed, 0, "progress events do not conceal the interrupted status feed");
     ipc.jobSnapshots = async () => ({ revision: 13, reset: false, upserts: [], removed: [] });
@@ -177,12 +199,12 @@ test("unavailable status retains progress and questions without reviving an old 
     assert.equal(jobs.pendingPassword(), question);
     assert.equal(task.statusStale, false);
     assert.equal(task.speed, 0, "an empty delta does not make an old speed current");
-    await emit("job://progress", { id: 2, version: 14, ...records[1].progress, done: 60, speed: 96 });
+    await emit("job://snapshot", progressSnapshot(records, { id: 2, version: 14, ...records[1].progress, done: 60, speed: 96 }));
     assert.equal(task.speed, 96);
     assert.equal(helpers.taskProgressActive(task), true);
     ipc.jobSnapshots = async () => { throw new Error("status unavailable"); };
     await until(() => jobs.jobSnapshotStatus() === "unavailable");
-    await emit("job://state", { id: 2, version: 15, state: "done", result: { ok: true } });
+    await emit("job://snapshot", stateSnapshot(records, { id: 2, version: 15, state: "done", result: jobResult("test") }));
     assert.equal(helpers.taskOutcomeStateLabel(task), helpers.taskStateLabel("done"));
     assert.equal(task.statusStale, false, "a terminal event still confirms the result");
   });
@@ -266,15 +288,15 @@ test("resuming into the queue releases controls through both events and snapshot
     ipc.resumeJob = async () => {};
     for (const [index, delivery] of ["event", "snapshot"].entries()) {
       const id = index + 1;
-      await emit("job://state", { id, version: 20, state: "paused" });
+      await emit("job://snapshot", stateSnapshot(records, { id, version: 20, state: "paused" }));
       jobs.resumeTask(id);
       const task = jobs.tasks().find((item) => item.id === id);
       assert.equal(task.controlIntent, "resume");
       if (delivery === "event") {
-        await emit("job://state", { id, version: 21, state: "queued" });
+        await emit("job://snapshot", stateSnapshot(records, { id, version: 21, state: "queued" }));
       } else {
         Object.assign(records[index], { version: 21, state: "queued", interaction: null, question: null });
-        await emit("job://ask-password", { id });
+        await emit("job://snapshot", records.find((record) => record.id === ({ id }).id));
         await until(() => task.version === 21);
       }
       assert.equal(task.state, "queued");
@@ -288,14 +310,14 @@ test("resuming into the queue releases controls through both events and snapshot
 });
 
 test("late control failures cannot clear a newer request or report a completed request as failed", async () => {
-  await withQuestionFeed(async ({ jobs, ipc, emit, server }) => {
+  await withQuestionFeed(async ({ jobs, ipc, records, emit, server }) => {
     const notices = await server.ssrLoadModule("/src/lib/toasts.svelte.ts");
     try {
       const failures = [];
       ipc.pauseJob = () => new Promise((_, reject) => { failures.push(reject); });
       const first = jobs.pauseTask(1);
-      await emit("job://state", { id: 1, version: 20, state: "paused" });
-      await emit("job://state", { id: 1, version: 21, state: "running" });
+      await emit("job://snapshot", stateSnapshot(records, { id: 1, version: 20, state: "paused" }));
+      await emit("job://snapshot", stateSnapshot(records, { id: 1, version: 21, state: "running" }));
       const next = jobs.pauseTask(1);
       const task = jobs.tasks()[0];
       assert.equal(task.controlIntent, "pause");
@@ -303,7 +325,7 @@ test("late control failures cannot clear a newer request or report a completed r
       await first;
       assert.equal(task.controlIntent, "pause", "the new pause remains pending");
       assert.equal(notices.toasts().length, 0);
-      await emit("job://state", { id: 1, version: 22, state: "paused" });
+      await emit("job://snapshot", stateSnapshot(records, { id: 1, version: 22, state: "paused" }));
       failures[1](new Error("response lost after confirmation"));
       await next;
       assert.equal(task.controlIntent, null);
@@ -331,7 +353,7 @@ test("late control failures cannot clear a newer request or report a completed r
       assert.equal(jobs.tasks()[1].actionFailure, null, "retry clears the old inline error immediately");
       retryAccepted();
       assert.equal(await retry, true);
-      await emit("job://state", { id: 2, version: 20, state: "paused" });
+      await emit("job://snapshot", stateSnapshot(records, { id: 2, version: 20, state: "paused" }));
       assert.equal(jobs.tasks()[1].controlIntent, null);
     } finally {
       for (const toast of [...notices.toasts()]) notices.dismissToast(toast.id);
@@ -350,7 +372,7 @@ test("task control notices wait for acceptance and do not outlive the pending ac
       const notices = [];
       const task = { id: 1, controlIntent: intent };
       const context = { [control]: () => new Promise((resolve) => { finish = resolve; }),
-        showNotice: (message) => notices.push(message), tr: (_key, fallback) => fallback };
+        showNotice: (message) => notices.push(message), tr: englishTranslate };
       const run = vm.runInNewContext(`${outputText}\n${handler}`, context);
       const request = run(task);
       assert.deepEqual(notices, [], "the IPC request is still pending");
@@ -394,12 +416,12 @@ test("cancellation keeps inputs unavailable through snapshot refreshes and ignor
     assert.equal(requests, 1);
     records[0].version = 12;
     records[0].progress.done = 25;
-    await emit("job://ask-password", records[0].question.prompt);
+    await emit("job://snapshot", records.find((record) => record.id === (records[0].question.prompt).id));
     await until(() => jobs.tasks()[0].done === 25);
     assert.equal(jobs.pendingPassword(), null, "polling cannot reopen input during cancellation");
     assert.equal(jobs.tasks()[0].controlIntent, "cancel");
     release();
-    await emit("job://state", { id: 1, version: 13, state: "cancelled", error: null });
+    await emit("job://snapshot", stateSnapshot(records, { id: 1, version: 13, state: "cancelled", error: null }));
     await until(() => jobs.tasks()[0].state === "cancelled");
     const task = jobs.tasks()[0];
     assert.equal(task.question, null);
@@ -434,7 +456,7 @@ test("failed answers survive a failed refresh and never revive a cleared or newe
     records[0].version = 12;
     records[0].question = { kind: "password", prompt: { id: 1, version: 12, name: "archive-1.zip", wrong: true } };
     ipc.jobSnapshot = async (id) => structuredClone(records.find((record) => record.id === id));
-    await emit("job://ask-password", records[0].question.prompt);
+    await emit("job://snapshot", records.find((record) => record.id === (records[0].question.prompt).id));
     await until(() => jobs.pendingPassword()?.version === 12);
     assert.equal(jobs.tasks()[0].actionFailure, null);
     reject(new Error("late answer failure"));
@@ -443,7 +465,7 @@ test("failed answers survive a failed refresh and never revive a cleared or newe
     assert.equal(jobs.tasks()[0].actionFailure, null, "an old failure cannot annotate a newer prompt");
 
     jobs.answerPassword("temporary-secret");
-    await emit("job://state", { id: 1, version: 13, state: "done", error: null });
+    await emit("job://snapshot", stateSnapshot(records, { id: 1, version: 13, state: "done", error: null }));
     await until(() => jobs.tasks()[0].state === "done");
     reject(new Error("late answer failure"));
     await until(() => jobs.tasks()[0].answeredQuestionVersion === 0);
@@ -468,7 +490,7 @@ test("question actions preserve the workspace and report success only after ackn
         normalizeTaskConflictAnswer: (decision, applyAll) => ({ decision, applyAll }),
         setScreen: (screen) => calls.push(["screen", screen]),
         returnTaskQuestionToCenter: (id) => calls.push(["center", id]),
-        showNotice: (message) => calls.push(["notice", message]), tr: (_key, fallback) => fallback,
+        showNotice: (message) => calls.push(["notice", message]), tr: englishTranslate,
       };
       const answer = () => {
         context.jobPasswordPrompt = null;
@@ -518,11 +540,11 @@ test("conflict controls answer only the question shown by their task surface", a
             "taskChecksumCopyFeedback", "taskChecksumCopyFeedbackTone", "taskPasswordQuestion", "taskConflictQuestion", "showNotice",
           ].map((name) => [name, () => null])),
           activePlatform: "macos", activeTheme: "dark", activeDensityChoice: "comfortable",
-          settingsSession: new SettingsSession({ platform: () => "macos", tr: (_key, fallback) => fallback, emit() {} },
+          settingsSession: new SettingsSession({ platform: () => "macos", tr: englishTranslate, emit() {} },
             { paletteOverride: "ocean" }),
           pendingTaskReviewId: null,
-          checksumCopyPending: () => false,
-          customPaletteVariables: () => ({}), tr: (_key, fallback) => fallback,
+          tools: { copyPending: () => false, copyFeedback: () => null, copyTask() {} },
+          customPaletteVariables: () => ({}), tr: englishTranslate,
           jobPasswordPrompt: null, jobPasswordValue: "", jobPasswordSubmissionError: null,
           jobPasswordSubmissionAttempted: false, taskPasswordReady, normalizeTaskConflictAnswer,
           jobConflictPrompt: { id: 1, version: 10 }, conflictApplyAll: false,

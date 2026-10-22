@@ -245,7 +245,7 @@ fn extract_once(
     progress: &dyn ProgressSink,
     ctl: &ControlToken,
 ) -> Result<squallz_core::api::ExtractReport, FormatError> {
-    reader.extract_with_report(&plan.destination, None, options, progress, ctl)
+    reader.extract(&plan.destination, None, options, progress, ctl)
 }
 
 fn open_payload(
@@ -399,7 +399,7 @@ mod tests {
             consume(&mut Cursor::new(Vec::<u8>::new()))
         }
 
-        fn extract_with_report(
+        fn extract(
             &mut self,
             _dest: &Path,
             _selection: Option<&[EntryPath]>,

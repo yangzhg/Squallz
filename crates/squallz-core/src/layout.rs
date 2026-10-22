@@ -21,7 +21,7 @@ const MAX_SNAPSHOT_DIRECTORY_STATES: usize = 8_192;
 const MIN_EXTRACT_ALLOCATION_GRANULARITY: u64 = 4 * 1024;
 
 /// Selected entry and byte totals for an extraction plan.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
 pub struct ExtractScope {
     pub entries: u64,
     pub files: u64,
@@ -33,15 +33,18 @@ pub struct ExtractScope {
 }
 
 /// Read-only extraction preflight shared by CLI and desktop callers.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ExtractPlan {
     /// Destination requested by the caller before smart layout is applied.
+    #[serde(serialize_with = "crate::api::reporting::serialize_path")]
     pub requested_destination: PathBuf,
     /// Final destination after smart layout is applied.
+    #[serde(serialize_with = "crate::api::reporting::serialize_path")]
     pub destination: PathBuf,
     /// Smart-layout verdict derived from the complete archive entry list.
     pub layout: SmartLayout,
     /// Totals for the selected extraction scope only.
+    #[serde(flatten)]
     pub scope: ExtractScope,
     /// Selected entries whose final path currently conflicts with the
     /// destination snapshot or an earlier selected archive entry.
@@ -108,9 +111,11 @@ fn nearest_existing_directory(path: &Path) -> Result<PathBuf, FormatError> {
 }
 
 /// Verdict of [`analyze_extract_layout`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SmartLayout {
     /// Every entry lives under one root directory: extract as-is.
+    #[serde(rename = "direct")]
     DirectExtract,
     /// Loose files at the archive root: wrap them in a folder named after
     /// the archive (the caller derives the name).
@@ -1093,16 +1098,15 @@ mod tests {
         let entries = vec![selected_file, selected_dir, unselected_file];
         let selection = vec![entries[0].path.clone(), entries[1].path.clone()];
 
-        let engine = crate::Engine::new(crate::api::FormatRegistry::new());
-        let plan = engine
-            .plan_extract_from_entries(
-                &requested,
-                Path::new("/logical/archive/visible"),
-                &entries,
-                Some(&selection),
-                true,
-            )
-            .unwrap();
+        let plan = build_extract_plan(
+            &requested,
+            "visible",
+            &entries,
+            Some(&selection),
+            true,
+            &ControlToken::default(),
+        )
+        .unwrap();
 
         assert_eq!(plan.requested_destination, requested);
         assert_eq!(plan.destination, destination);
@@ -1151,14 +1155,24 @@ mod tests {
 
         let parent_first = vec![meta("node", false), meta("node/child.txt", false)];
         let child_first = vec![meta("node/child.txt", false), meta("node", false)];
-        let engine = crate::Engine::new(crate::api::FormatRegistry::new());
-
-        let parent_first_plan = engine
-            .plan_extract_from_entries(&requested, Path::new("archive"), &parent_first, None, false)
-            .unwrap();
-        let child_first_plan = engine
-            .plan_extract_from_entries(&requested, Path::new("archive"), &child_first, None, false)
-            .unwrap();
+        let parent_first_plan = build_extract_plan(
+            &requested,
+            "archive",
+            &parent_first,
+            None,
+            false,
+            &ControlToken::default(),
+        )
+        .unwrap();
+        let child_first_plan = build_extract_plan(
+            &requested,
+            "archive",
+            &child_first,
+            None,
+            false,
+            &ControlToken::default(),
+        )
+        .unwrap();
 
         assert_eq!(parent_first_plan.estimated_conflicts, 1);
         assert_eq!(child_first_plan.estimated_conflicts, 1);
@@ -1173,11 +1187,15 @@ mod tests {
         ));
         let _ = fs::remove_dir_all(&requested);
         let entries = vec![meta("node/child.txt", false), meta("node", false)];
-        let engine = crate::Engine::new(crate::api::FormatRegistry::new());
-
-        let plan = engine
-            .plan_extract_from_entries(&requested, Path::new("archive"), &entries, None, false)
-            .unwrap();
+        let plan = build_extract_plan(
+            &requested,
+            "archive",
+            &entries,
+            None,
+            false,
+            &ControlToken::default(),
+        )
+        .unwrap();
 
         assert_eq!(plan.estimated_conflicts, 1);
         assert!(!requested.exists());
@@ -1193,11 +1211,15 @@ mod tests {
         fs::create_dir_all(&requested).unwrap();
         fs::write(requested.join("blocked"), b"file").unwrap();
         let entries = vec![meta("blocked/child.txt", false)];
-        let engine = crate::Engine::new(crate::api::FormatRegistry::new());
-
-        let error = engine
-            .plan_extract_from_entries(&requested, Path::new("archive"), &entries, None, false)
-            .unwrap_err();
+        let error = build_extract_plan(
+            &requested,
+            "archive",
+            &entries,
+            None,
+            false,
+            &ControlToken::default(),
+        )
+        .unwrap_err();
 
         assert!(
             matches!(error, FormatError::Io(ref error) if error.kind() == std::io::ErrorKind::NotADirectory),
@@ -1217,11 +1239,15 @@ mod tests {
         let requested = root.join("output");
         fs::write(&requested, b"file").unwrap();
         let entries = vec![meta("entry.txt", false)];
-        let engine = crate::Engine::new(crate::api::FormatRegistry::new());
-
-        let error = engine
-            .plan_extract_from_entries(&requested, Path::new("archive"), &entries, None, false)
-            .unwrap_err();
+        let error = build_extract_plan(
+            &requested,
+            "archive",
+            &entries,
+            None,
+            false,
+            &ControlToken::default(),
+        )
+        .unwrap_err();
 
         assert!(
             matches!(error, FormatError::Io(ref error) if error.kind() == std::io::ErrorKind::NotADirectory),
@@ -1242,17 +1268,15 @@ mod tests {
         fs::write(&wrapped_destination, b"file").unwrap();
         let entries = vec![meta("loose.txt", false)];
         let selection = Vec::new();
-        let engine = crate::Engine::new(crate::api::FormatRegistry::new());
-
-        let plan = engine
-            .plan_extract_from_entries(
-                &root,
-                Path::new("archive.zip"),
-                &entries,
-                Some(&selection),
-                true,
-            )
-            .unwrap();
+        let plan = build_extract_plan(
+            &root,
+            "archive.zip",
+            &entries,
+            Some(&selection),
+            true,
+            &ControlToken::default(),
+        )
+        .unwrap();
 
         assert_eq!(plan.layout, SmartLayout::WrapInFolder);
         assert_eq!(plan.destination, wrapped_destination);
@@ -1613,11 +1637,15 @@ mod tests {
         fs::create_dir_all(&actual).unwrap();
         std::os::unix::fs::symlink(&actual, &requested).unwrap();
         let entries = vec![meta("free.txt", false)];
-        let engine = crate::Engine::new(crate::api::FormatRegistry::new());
-
-        let plan = engine
-            .plan_extract_from_entries(&requested, Path::new("archive"), &entries, None, false)
-            .unwrap();
+        let plan = build_extract_plan(
+            &requested,
+            "archive",
+            &entries,
+            None,
+            false,
+            &ControlToken::default(),
+        )
+        .unwrap();
 
         assert_eq!(plan.destination, requested);
         assert_eq!(plan.estimated_conflicts, 0);
@@ -1637,11 +1665,15 @@ mod tests {
         fs::create_dir_all(&real).unwrap();
         std::os::unix::fs::symlink("real", requested.join("alias")).unwrap();
         let entries = vec![meta("alias/file.txt", false)];
-        let engine = crate::Engine::new(crate::api::FormatRegistry::new());
-
-        let plan = engine
-            .plan_extract_from_entries(&requested, Path::new("archive"), &entries, None, false)
-            .unwrap();
+        let plan = build_extract_plan(
+            &requested,
+            "archive",
+            &entries,
+            None,
+            false,
+            &ControlToken::default(),
+        )
+        .unwrap();
 
         assert_eq!(plan.estimated_conflicts, 0);
         fs::remove_dir_all(&root).unwrap();
@@ -1662,11 +1694,15 @@ mod tests {
         fs::write(outside.join("child.txt"), b"outside").unwrap();
         std::os::unix::fs::symlink(&outside, requested.join("escape")).unwrap();
         let entries = vec![meta("escape/child.txt", false)];
-        let engine = crate::Engine::new(crate::api::FormatRegistry::new());
-
-        let error = engine
-            .plan_extract_from_entries(&requested, Path::new("archive"), &entries, None, false)
-            .unwrap_err();
+        let error = build_extract_plan(
+            &requested,
+            "archive",
+            &entries,
+            None,
+            false,
+            &ControlToken::default(),
+        )
+        .unwrap_err();
 
         assert!(
             matches!(error, FormatError::SymlinkBreakout(_)),

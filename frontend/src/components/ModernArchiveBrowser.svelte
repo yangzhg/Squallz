@@ -1,35 +1,10 @@
 <script lang="ts" module>
-  import type { EntryDto } from "../lib/ipc";
   import type { AppActionAvailability } from "../lib/app-actions";
-  import type { ArchiveBrowseRecoveryState } from "./ArchiveBrowseRecovery.svelte";
-  import type { MoveConflictReviewView } from "./MoveConflictReview.svelte";
-  import type { ArchiveEditingState } from "./ArchiveEditingStatus.svelte";
 
-  type Translate = (key: string, fallback: string) => string;
+  import type { ArchiveBrowserActions, ArchiveBrowserView, ArchivePreviewActions } from "../lib/archive-browser";
 
-  export type ModernBrowserEntry = {
-    name: string;
-    location: string;
-    type: string;
-    size: string;
-    packed: string;
-    ratio: string;
-    modified: string;
-    crc: string;
-    encoding: string;
-    attr: string;
-    source?: EntryDto;
-    virtualIndex?: number;
-    selected: boolean;
-    previewing: boolean;
-    previewBusy: boolean;
-    selectionLabel: string;
-    previewActionLabel: string;
-    previewActionIcon: "external-link" | "folder-open" | "eye";
-  };
-
-  export interface ModernArchiveBrowserProps {
-    view: {
+  export interface ModernArchiveBrowserProps extends ArchiveBrowserActions, ArchivePreviewActions {
+    view: ArchiveBrowserView & {
       archive: {
         title: string;
         format: string;
@@ -54,42 +29,18 @@
         extractSelectedLabel: string;
         nestedPreview: boolean;
       };
-      selectedSummary: string;
-      editingStatus: ArchiveEditingState | null;
-      conflict: MoveConflictReviewView | null;
-      structureWarning: string | null;
-      recovery: ArchiveBrowseRecoveryState;
       encodingWarning: string | null;
-      totalRows: number;
       filterText: string;
       filterPending: boolean;
       filterStatus: string;
-      selection: {
-        checked: boolean;
-        mixed: boolean;
-        disabled: boolean;
-        label: string;
-        busy: boolean;
-        busyLabel: string;
-      };
-      rows: readonly (ModernBrowserEntry | null)[];
-      startIndex: number;
-      rowsPending: boolean;
-      paddingTop: number;
-      paddingBottom: number;
       emptyLabel: string;
     };
-    tr: Translate;
     onOpenBreadcrumb: (index: number) => void;
     onGoUp: () => void;
-    onOpenRoot: () => void;
     onExtractAll: () => void;
     onExtractSelection: () => void;
     onTestArchive: () => void;
     onAddFiles: () => void;
-    onOpenRecovery: () => void;
-    onRetryBrowse: () => void;
-    onRetryFormats: () => void;
     onConvert: () => void;
     onOpenInfo: () => void;
     onRenameSelection: () => void;
@@ -97,25 +48,11 @@
     onMoveSelection: () => void;
     onCopyOutSelection: () => void;
     onCreateFolder: () => void;
-    onPreviewSelection: () => void;
-    onOpenNestedPreview: () => void;
-    onExtractNestedPreview: () => void;
-    onCancelMoveConflict: () => void;
-    onSubmitMoveReadyOnly: () => void;
-    onSubmitMoveKeepBoth: () => void;
     onRepairEncoding: () => void;
     onSearchInputMount: (input: HTMLInputElement | null) => void;
     onSearchInput: (value: string) => void;
     onSearchKeydown: (event: KeyboardEvent) => void;
     onClearSearch: () => void;
-    onBrowseScroll: (event: Event) => void;
-    onSelectEntry: (entry: ModernBrowserEntry, event: MouseEvent | KeyboardEvent) => void;
-    onActivateEntry: (entry: ModernBrowserEntry) => void;
-    onEntryKeydown: (event: KeyboardEvent, entry: ModernBrowserEntry) => void;
-    onOpenEntryContext: (event: MouseEvent, entry: ModernBrowserEntry) => void;
-    onToggleEntrySelection: (entry: ModernBrowserEntry, event: MouseEvent) => void;
-    onToggleAllEntries: () => void;
-    onPreviewEntry: (entry: ModernBrowserEntry) => void;
   }
 </script>
 
@@ -239,11 +176,11 @@
         disabled={!view.actions.enabled.test_archive}
         title={view.actions.testDisabledReason}
         aria-label={labelWithDisabledReason(
-          tr("gui.action.test_archive", "Test archive"),
+          tr("gui.action.test_archive"),
           view.actions.testDisabledReason,
         )}
         onclick={onTestArchive}
-      ><Icon name="check-circle" size={17} />{tr("gui.action.test_archive", "Test archive")}</button>
+      ><Icon name="check-circle" size={17} />{tr("gui.action.test_archive")}</button>
       <button
         class="ghost large"
         disabled={!view.actions.enabled.preview_entry}
@@ -258,41 +195,41 @@
     </div>
     <details class="archive-tools" bind:this={tools} bind:open={actionsOpen}>
       <summary bind:this={actionSummary}>
-        <span><Icon name="settings" size={15} />{tr("gui.archive.more_actions", "More actions")}</span>
+        <span><Icon name="settings" size={15} />{tr("gui.archive.more_actions")}</span>
         <small>{view.selectedSummary}</small>
         <Icon name="chevron-down" size={14} />
       </summary>
       <div class="archive-tool-groups">
         <section>
-          <h2>{tr("gui.inspector.archive", "Archive")}</h2>
+          <h2>{tr("gui.inspector.archive")}</h2>
           <div class="archive-tool-actions">
-            <button disabled={!view.actions.enabled.add_files} title={view.actions.mutationDisabledReason} onclick={() => runToolAction(onAddFiles)}><Icon name="file" size={15} />{tr("gui.action.add_files", "Add files")}</button>
-            <button disabled={!view.actions.enabled.new_folder} title={view.actions.mutationDisabledReason} onclick={() => runToolAction(onCreateFolder)}><Icon name="folder-open" size={15} />{tr("gui.action.new_folder", "New folder")}</button>
-            <button disabled={!view.actions.enabled.convert_archive} onclick={() => runToolAction(onConvert)}><Icon name="repeat" size={15} />{tr("gui.action.convert", "Convert")}</button>
-            <button disabled={!view.actions.enabled.archive_info} onclick={() => runToolAction(onOpenInfo)}><Icon name="info" size={15} />{tr("gui.archive.info", "Info")}</button>
+            <button disabled={!view.actions.enabled.add_files} title={view.actions.mutationDisabledReason} onclick={() => runToolAction(onAddFiles)}><Icon name="file" size={15} />{tr("gui.action.add_files")}</button>
+            <button disabled={!view.actions.enabled.new_folder} title={view.actions.mutationDisabledReason} onclick={() => runToolAction(onCreateFolder)}><Icon name="folder-open" size={15} />{tr("gui.action.new_folder")}</button>
+            <button disabled={!view.actions.enabled.convert_archive} onclick={() => runToolAction(onConvert)}><Icon name="repeat" size={15} />{tr("gui.action.convert")}</button>
+            <button disabled={!view.actions.enabled.archive_info} onclick={() => runToolAction(onOpenInfo)}><Icon name="info" size={15} />{tr("gui.archive.info")}</button>
           </div>
         </section>
         <section>
-          <h2>{tr("gui.context.selection_actions", "Selection actions")}</h2>
+          <h2>{tr("gui.context.selection_actions")}</h2>
           <div class="archive-tool-actions">
-            <button disabled={!view.actions.enabled.rename_entry} title={view.actions.renameDisabledReason} aria-label={labelWithDisabledReason(tr("gui.action.rename_selected", "Rename selected"), view.actions.renameDisabledReason)} onclick={() => runToolAction(onRenameSelection)}><Icon name="repeat" size={15} />{tr("gui.action.rename_selected", "Rename selected")}</button>
-            <button disabled={!view.actions.enabled.move_entries} title={view.actions.moveDisabledReason} aria-label={labelWithDisabledReason(tr("gui.action.move_selected", "Move selected"), view.actions.moveDisabledReason)} onclick={() => runToolAction(onMoveSelection)}><Icon name="repeat" size={15} />{tr("gui.action.move_selected", "Move selected")}</button>
-            <button disabled={!view.actions.enabled.delete_entries} title={view.actions.deleteDisabledReason} aria-label={labelWithDisabledReason(tr("gui.action.delete_selected", "Delete selected"), view.actions.deleteDisabledReason)} onclick={() => runToolAction(onDeleteSelection)}><Icon name="x-circle" size={15} />{tr("gui.action.delete_selected", "Delete selected")}</button>
-            <button disabled={!view.actions.enabled.copy_entries} title={view.actions.copyOutDisabledReason} aria-label={labelWithDisabledReason(tr("gui.action.copy_out", "Copy out"), view.actions.copyOutDisabledReason)} onclick={() => runToolAction(onCopyOutSelection)}><Icon name="external-link" size={15} />{tr("gui.action.copy_out", "Copy out")}</button>
+            <button disabled={!view.actions.enabled.rename_entry} title={view.actions.renameDisabledReason} aria-label={labelWithDisabledReason(tr("gui.action.rename_selected"), view.actions.renameDisabledReason)} onclick={() => runToolAction(onRenameSelection)}><Icon name="repeat" size={15} />{tr("gui.action.rename_selected")}</button>
+            <button disabled={!view.actions.enabled.move_entries} title={view.actions.moveDisabledReason} aria-label={labelWithDisabledReason(tr("gui.action.move_selected"), view.actions.moveDisabledReason)} onclick={() => runToolAction(onMoveSelection)}><Icon name="repeat" size={15} />{tr("gui.action.move_selected")}</button>
+            <button disabled={!view.actions.enabled.delete_entries} title={view.actions.deleteDisabledReason} aria-label={labelWithDisabledReason(tr("gui.action.delete_selected"), view.actions.deleteDisabledReason)} onclick={() => runToolAction(onDeleteSelection)}><Icon name="x-circle" size={15} />{tr("gui.action.delete_selected")}</button>
+            <button disabled={!view.actions.enabled.copy_entries} title={view.actions.copyOutDisabledReason} aria-label={labelWithDisabledReason(tr("gui.action.copy_out"), view.actions.copyOutDisabledReason)} onclick={() => runToolAction(onCopyOutSelection)}><Icon name="external-link" size={15} />{tr("gui.action.copy_out")}</button>
             {#if view.actions.nestedPreview}
-              <button onclick={() => runToolAction(onOpenNestedPreview)}><Icon name="folder-open" size={15} />{tr("gui.action.open_nested", "Open")}</button>
-              <button onclick={() => runToolAction(onExtractNestedPreview)}><Icon name="archive" size={15} />{tr("gui.action.extract_nested", "Extract")}</button>
+              <button onclick={() => runToolAction(onOpenNestedPreview)}><Icon name="folder-open" size={15} />{tr("gui.action.open_nested")}</button>
+              <button onclick={() => runToolAction(onExtractNestedPreview)}><Icon name="archive" size={15} />{tr("gui.action.extract_nested")}</button>
             {/if}
           </div>
-          <p>{tr("gui.selection.range_hint", "Shift-click to select a range · ⌘/Ctrl-click to select individual entries")}</p>
-          <p>{tr("gui.preview.keyboard_hint", "↑/↓ moves between items · Shift extends selection · Space or Return opens")}</p>
+          <p>{tr("gui.selection.range_hint")}</p>
+          <p>{tr("gui.preview.keyboard_hint")}</p>
         </section>
         <section>
-          <h2>{tr("gui.inspector.recovery", "Recovery")}</h2>
-          <strong>{tr("gui.recovery.status_not_checked", "Recovery status not checked")}</strong>
-          <p>{tr("gui.recovery.requires_recovery_data", "Verify can detect corruption, but repair requires PAR2 or SQZ recovery data created earlier.")}</p>
+          <h2>{tr("gui.inspector.recovery")}</h2>
+          <strong>{tr("gui.recovery.status_not_checked")}</strong>
+          <p>{tr("gui.recovery.requires_recovery_data")}</p>
           <div class="archive-tool-actions">
-            <button onclick={() => runToolAction(onOpenRecovery)}><Icon name="shield-alert" size={15} />{tr("gui.recovery.open_recovery", "Open Recovery")}</button>
+            <button onclick={() => runToolAction(onOpenRecovery)}><Icon name="shield-alert" size={15} />{tr("gui.recovery.open_recovery")}</button>
           </div>
         </section>
       </div>
@@ -310,7 +247,7 @@
   {#if view.structureWarning}
     <ArchiveStructureWarning
       message={view.structureWarning}
-      actionLabel={tr("gui.archive.open_zip_repair", "Open ZIP repair")}
+      actionLabel={tr("gui.archive.open_zip_repair")}
       onRepair={onOpenRecovery}
     />
   {/if}
@@ -319,28 +256,28 @@
     <div class="warning-ribbon">
       <Icon name="alert-triangle" size={17} />
       <span>{view.encodingWarning}</span>
-      <button onclick={onRepairEncoding}>{tr("gui.encoding.repair_with_gbk", "Repair with GBK")}</button>
+      <button onclick={onRepairEncoding}>{tr("gui.encoding.repair_with_gbk")}</button>
     </div>
   {/if}
 </div>
 
 <div class="modern-list" data-total-rows={view.totalRows}>
   <div class="archive-pathline archive-list-navigation">
-    <div class="archive-path-actions" aria-label={tr("gui.nav.archive_navigation", "Archive navigation")}>
+    <div class="archive-path-actions" aria-label={tr("gui.nav.archive_navigation")}>
       <button
         type="button"
         disabled={!view.archive.canGoUp}
-        title={tr("gui.nav.up", "Up one level")}
+        title={tr("gui.nav.up")}
         onclick={onGoUp}
-      ><Icon name="chevron-up" size={14} />{tr("gui.nav.up_short", "Up")}</button>
+      ><Icon name="chevron-up" size={14} />{tr("gui.nav.up_short")}</button>
       <button
         type="button"
         disabled={view.archive.dirs.length === 0}
-        title={tr("gui.nav.root", "Archive root")}
+        title={tr("gui.nav.root")}
         onclick={onOpenRoot}
-      ><Icon name="archive" size={14} />{tr("gui.nav.root_short", "Root")}</button>
+      ><Icon name="archive" size={14} />{tr("gui.nav.root_short")}</button>
     </div>
-    <div bind:this={breadcrumbTrail} class="archive-breadcrumbs" aria-label={tr("gui.nav.archive_breadcrumbs", "Archive breadcrumbs")}>
+    <div bind:this={breadcrumbTrail} class="archive-breadcrumbs" aria-label={tr("gui.nav.archive_breadcrumbs")}>
       <button type="button" title={view.archive.title} onclick={() => onOpenBreadcrumb(-1)}>{view.archive.title}</button>
       {#each view.archive.dirs as dir, index}
         <i>/</i><button type="button" title={dir} onclick={() => onOpenBreadcrumb(index)}>{dir}</button>
@@ -353,31 +290,31 @@
       <input
         bind:this={searchInput}
         value={view.filterText}
-        aria-label={tr("gui.list.search_aria", "Search paths across the entire archive")}
+        aria-label={tr("gui.list.search_aria")}
         aria-busy={view.filterPending}
-        title={tr("gui.list.search_shortcut", "Search the entire archive (⌘F / Ctrl+F)")}
-        placeholder={tr("gui.list.search_placeholder", "Search the entire archive")}
+        title={tr("gui.list.search_shortcut")}
+        placeholder={tr("gui.list.search_placeholder")}
         oninput={(event) => onSearchInput(event.currentTarget.value)}
         onkeydown={onSearchKeydown}
       />
       {#if view.filterText}
         <button
           type="button"
-          aria-label={tr("gui.list.search_clear", "Clear search")}
-          title={tr("gui.list.search_clear", "Clear search")}
+          aria-label={tr("gui.list.search_clear")}
+          title={tr("gui.list.search_clear")}
           onclick={onClearSearch}
         ><Icon name="x-circle" size={14} /></button>
       {/if}
     </div>
-    <span role="status" aria-live="polite">{view.rowsPending && !view.filterPending && !view.recovery ? tr("gui.list.loading_rows", "Loading entries…") : view.filterStatus}</span>
+    <span role="status" aria-live="polite">{view.rowsPending && !view.filterPending && !view.recovery ? tr("gui.list.loading_rows") : view.filterStatus}</span>
   </div>
   <div class="archive-list-feedback">
-    <ArchiveBrowseRecovery state={view.recovery} retryLabel={tr("gui.error.retry", "Retry")} onRetry={onRetryBrowse} />
+    <ArchiveBrowseRecovery state={view.recovery} retryLabel={tr("gui.error.retry")} onRetry={onRetryBrowse} />
   </div>
   <div
     class="modern-table"
     role="table"
-    aria-label={tr("gui.table.archive", "Archive table")}
+    aria-label={tr("gui.table.archive")}
     aria-busy={view.rowsPending}
     aria-rowcount={Math.max(view.totalRows + 1, 2)}
     aria-keyshortcuts="Meta+A Control+A"
@@ -396,11 +333,11 @@
           disabled={view.selection.disabled}
           onclick={onToggleAllEntries}
         ></button>
-        <span>{tr("gui.list.col.name", "Name")}</span>
+        <span>{tr("gui.list.col.name")}</span>
       </span>
-      <span role="columnheader">{tr("gui.list.col.size", "Size")}</span>
-      <span role="columnheader">{tr("gui.list.col.packed", "Packed")}</span>
-      <span role="columnheader">{tr("gui.list.col.modified", "Modified")}</span>
+      <span role="columnheader">{tr("gui.list.col.size")}</span>
+      <span role="columnheader">{tr("gui.list.col.packed")}</span>
+      <span role="columnheader">{tr("gui.list.col.modified")}</span>
     </div>
     <div
       class="virtual-scroll modern-virtual-scroll"

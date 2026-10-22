@@ -19,9 +19,9 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
-use squallz_format_api::{
-    ControlToken, EntryPath, FormatError, NoProgress, ProgressPhase, ProgressSink,
-};
+#[cfg(test)]
+use squallz_format_api::NoProgress;
+use squallz_format_api::{ControlToken, EntryPath, FormatError, ProgressPhase, ProgressSink};
 
 use repair_workspace::{RepairWorkspace, RepairWorkspaceTarget, WorkspaceDebt};
 
@@ -104,53 +104,12 @@ pub fn recovery_cleanup_details(error: &FormatError) -> Option<RecoveryCleanupDe
         .map(|source| source.details.clone())
 }
 
-/// Builds external PAR2 data for one archive or split-set head.
-pub fn protect(
-    archive: &Path,
-    redundancy: u8,
-    recovery: Option<&Path>,
-) -> Result<RecoveryReport, FormatError> {
-    let progress = NoProgress;
-    let control = ControlToken::default();
-    protect_controlled(archive, redundancy, recovery, &progress, &control)
-}
-
-/// Builds external PAR2 data while reporting its real backend stages.
-pub fn protect_controlled(
-    archive: &Path,
-    redundancy: u8,
-    recovery: Option<&Path>,
-    progress: &dyn ProgressSink,
-    control: &ControlToken,
-) -> Result<RecoveryReport, FormatError> {
-    protect_files_controlled(
-        archive,
-        redundancy,
-        recovery,
-        &[archive.to_path_buf()],
-        progress,
-        control,
-    )
-}
-
-/// Builds external PAR2 data for an explicit set of source files.
-pub fn protect_files(
-    archive: &Path,
-    redundancy: u8,
-    recovery: Option<&Path>,
-    sources: &[PathBuf],
-) -> Result<RecoveryReport, FormatError> {
-    let progress = NoProgress;
-    let control = ControlToken::default();
-    protect_files_controlled(archive, redundancy, recovery, sources, &progress, &control)
-}
-
 /// Builds external PAR2 data for an explicit source set with stage progress.
 ///
 /// The backend writes into a private sibling directory. Its complete output
 /// set is validated and hashed before a durable, no-replace publication makes
 /// recovery volumes visible beside the requested index.
-pub fn protect_files_controlled(
+pub fn protect_files(
     archive: &Path,
     redundancy: u8,
     recovery: Option<&Path>,
@@ -261,15 +220,8 @@ pub fn protect_files_controlled(
     finish_protect_work_dir(result, &work_dir, &recovery)
 }
 
-/// Verifies external PAR2 data for an archive.
-pub fn verify(archive: &Path, recovery: Option<&Path>) -> Result<RecoveryReport, FormatError> {
-    let progress = NoProgress;
-    let control = ControlToken::default();
-    verify_controlled(archive, recovery, &progress, &control)
-}
-
 /// Verifies PAR2 data with real external-tool stages and safe cancellation.
-pub fn verify_controlled(
+pub fn verify(
     archive: &Path,
     recovery: Option<&Path>,
     progress: &dyn ProgressSink,
@@ -317,19 +269,8 @@ pub fn verify_controlled(
     }
 }
 
-/// Repairs an archive with external PAR2 data.
-pub fn repair(
-    archive: &Path,
-    output: Option<&Path>,
-    recovery: Option<&Path>,
-) -> Result<RecoveryReport, FormatError> {
-    let progress = NoProgress;
-    let control = ControlToken::default();
-    repair_controlled(archive, output, recovery, &progress, &control)
-}
-
 /// Repairs PAR2 data with controlled private staging and truthful phases.
-pub fn repair_controlled(
+pub fn repair(
     archive: &Path,
     output: Option<&Path>,
     recovery: Option<&Path>,
@@ -386,17 +327,6 @@ pub fn repair_controlled(
 /// the PAR2 set, preserving their relative paths. The output directory must
 /// not already exist.
 pub fn repair_to_directory(
-    archive: &Path,
-    output: &Path,
-    recovery: Option<&Path>,
-) -> Result<RecoveryReport, FormatError> {
-    let progress = NoProgress;
-    let control = ControlToken::default();
-    repair_to_directory_controlled(archive, output, recovery, &progress, &control)
-}
-
-/// Repairs every described file into a new directory with safe cancellation.
-pub fn repair_to_directory_controlled(
     archive: &Path,
     output: &Path,
     recovery: Option<&Path>,
@@ -2246,18 +2176,19 @@ mod tests {
                 true,
             )
         });
-        let wait_started = Instant::now();
-        while !progress.has_phase(ProgressPhase::RecoveryProcess)
-            && wait_started.elapsed() < Duration::from_secs(2)
-        {
+        while !progress.has_phase(ProgressPhase::RecoveryProcess) && !worker.is_finished() {
             thread::sleep(Duration::from_millis(10));
         }
-        assert!(progress.has_phase(ProgressPhase::RecoveryProcess));
+        let phase_reported = progress.has_phase(ProgressPhase::RecoveryProcess);
 
         let cancel_started = Instant::now();
         control.cancel();
         let result = worker.join().expect("PAR2 worker thread");
 
+        assert!(
+            phase_reported,
+            "PAR2 worker exited without a processing phase"
+        );
         assert!(matches!(result, Err(FormatError::Cancelled)));
         assert!(cancel_started.elapsed() < Duration::from_secs(5));
         fs::remove_dir_all(root)?;
@@ -2273,6 +2204,8 @@ mod tests {
                     redundancy,
                     None,
                     &[PathBuf::from("archive.zip")],
+                    &NoProgress,
+                    &ControlToken::default(),
                 ),
                 Err(FormatError::Unsupported(message))
                     if message == "PAR2 redundancy must be a whole percentage from 1 to 100"
@@ -2284,7 +2217,7 @@ mod tests {
     fn explicit_repair_output_rejects_the_source_path() {
         let archive = Path::new("archive.zip");
         assert!(matches!(
-            repair(archive, Some(archive), None),
+            repair(archive, Some(archive), None, &NoProgress, &ControlToken::default()),
             Err(FormatError::Unsupported(message))
                 if message == "PAR2 repair output must differ from the source archive"
         ));
@@ -2304,8 +2237,14 @@ mod tests {
         fs::write(&archive, b"source archive")?;
         fs::write(&output, b"existing output")?;
 
-        let error = repair(&archive, Some(&output), None)
-            .expect_err("existing output must be rejected before repair starts");
+        let error = repair(
+            &archive,
+            Some(&output),
+            None,
+            &NoProgress,
+            &ControlToken::default(),
+        )
+        .expect_err("existing output must be rejected before repair starts");
         assert!(error.is_output_exists());
         assert_eq!(error.output_exists_path(), Some(output.as_path()));
         assert_eq!(fs::read(&archive)?, b"source archive");
@@ -2356,7 +2295,13 @@ mod tests {
                 .decode(include_str!("../tests/fixtures/multi-set.zip.vol0+4.par2.b64").trim())?,
         )?;
 
-        let report = repair_to_directory(&first, &output, Some(&recovery))?;
+        let report = repair_to_directory(
+            &first,
+            &output,
+            Some(&recovery),
+            &NoProgress,
+            &ControlToken::default(),
+        )?;
         assert!(report.ok, "{report:?}");
         assert_eq!(report.output.as_deref(), Some(output.as_path()));
         assert_eq!(report.source_file_count, 2);
@@ -2410,8 +2355,14 @@ mod tests {
         fs::create_dir_all(&output)?;
         fs::write(&archive, b"source archive")?;
 
-        let error = repair_to_directory(&archive, &output, None)
-            .expect_err("an existing output directory must be preserved");
+        let error = repair_to_directory(
+            &archive,
+            &output,
+            None,
+            &NoProgress,
+            &ControlToken::default(),
+        )
+        .expect_err("an existing output directory must be preserved");
         assert!(error.is_output_exists());
         assert_eq!(error.output_exists_path(), Some(output.as_path()));
         assert_eq!(fs::read(&archive)?, b"source archive");

@@ -15,9 +15,8 @@ use squallz_core::api::{
 };
 use squallz_core::{
     collect_volume_set_with_control, fold_archive_search_path, fold_archive_search_query,
-    rank_folded_archive_path, ArchiveListing, ArchiveUpdateGuard, Engine,
+    rank_folded_archive_path, ArchiveListing, ArchiveUpdateGuard, Engine, PlaintextFile,
 };
-use tempfile::TempPath;
 
 use crate::dto::{ArchiveInfo, EntryDto, Page};
 use crate::password_cache::{PasswordAttempt, SessionPasswords};
@@ -166,26 +165,26 @@ pub struct CachedArchive {
 }
 
 struct OwnedArchiveTemp {
-    _file: TempPath,
+    _file: PlaintextFile,
     _lease: PreviewResourceLease,
     passwords: Arc<SessionPasswords>,
 }
 
 impl Drop for OwnedArchiveTemp {
     fn drop(&mut self) {
-        self.passwords.forget(&self._file);
+        self.passwords.forget(self._file.path());
     }
 }
 
 struct PendingOwnedArchiveTemp {
-    file: TempPath,
+    file: PlaintextFile,
     reservation: PreviewResourceReservation,
     size: u64,
 }
 
 enum ArchiveBacking {
     Persistent,
-    Pending(PendingOwnedArchiveTemp),
+    Pending(Box<PendingOwnedArchiveTemp>),
     Shared(Arc<OwnedArchiveTemp>),
 }
 
@@ -394,7 +393,7 @@ impl AppState {
     pub(crate) fn open_archive_with_owned_temp_and_entry_limit(
         &self,
         owner_window: &str,
-        temp: TempPath,
+        temp: PlaintextFile,
         reservation: PreviewResourceReservation,
         size: u64,
         display_path: String,
@@ -403,7 +402,7 @@ impl AppState {
         password: Option<&str>,
         control: &ControlToken,
     ) -> Result<ArchiveInfo, FormatError> {
-        let path = temp.to_path_buf();
+        let path = temp.path().to_path_buf();
         let owned_temp = PendingOwnedArchiveTemp {
             file: temp,
             reservation,
@@ -420,7 +419,7 @@ impl AppState {
                 display_path,
                 display_name: Some(display_name),
                 read_only: true,
-                backing: ArchiveBacking::Pending(owned_temp),
+                backing: ArchiveBacking::Pending(Box::new(owned_temp)),
             },
         )
     }
@@ -454,12 +453,7 @@ impl AppState {
             password_verified,
         } = self
             .engine
-            .list_with_format_source_set_and_structure_with_entry_limit_and_control(
-                path,
-                &open_opts,
-                max_entries,
-                control,
-            )?;
+            .list_archive(path, &open_opts, max_entries, control)?;
         let file_name = identity
             .display_name
             .clone()
@@ -1436,6 +1430,7 @@ mod tests {
     use squallz_core::api::{
         CompressionLevel, ControlToken, CreateOptions, EntryPath, NoProgress, Password,
     };
+    use squallz_core::CreateCommitPolicy;
 
     fn make_zip(dir: &Path, names: &[&str]) -> PathBuf {
         let src = dir.join("src");
@@ -1455,6 +1450,7 @@ mod tests {
                     level: CompressionLevel::Fastest,
                     ..CreateOptions::default()
                 },
+                CreateCommitPolicy::ReplaceExisting,
                 &NoProgress,
                 &ControlToken::new(),
             )
@@ -1478,6 +1474,7 @@ mod tests {
                     encrypt_filenames: true,
                     ..CreateOptions::default()
                 },
+                CreateCommitPolicy::ReplaceExisting,
                 &NoProgress,
                 &ControlToken::new(),
             )
@@ -1758,72 +1755,13 @@ mod tests {
         );
     }
 
-    fn crc32(data: &[u8]) -> u32 {
-        let mut crc = 0xFFFF_FFFFu32;
-        for &b in data {
-            crc ^= b as u32;
-            for _ in 0..8 {
-                let mask = (crc & 1).wrapping_neg();
-                crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
-            }
-        }
-        !crc
-    }
-
     fn make_raw_name_zip(dir: &Path, raw_name: &[u8]) -> PathBuf {
-        let data = b"non-utf8 name";
-        let crc = crc32(data);
-        let size = data.len() as u32;
-        let name_len = raw_name.len() as u16;
-        let mut out = Vec::new();
-        let offset = 0u32;
-
-        out.extend_from_slice(&[0x50, 0x4B, 0x03, 0x04]);
-        out.extend_from_slice(&20u16.to_le_bytes());
-        out.extend_from_slice(&0u16.to_le_bytes());
-        out.extend_from_slice(&0u16.to_le_bytes());
-        out.extend_from_slice(&0u16.to_le_bytes());
-        out.extend_from_slice(&0x21u16.to_le_bytes());
-        out.extend_from_slice(&crc.to_le_bytes());
-        out.extend_from_slice(&size.to_le_bytes());
-        out.extend_from_slice(&size.to_le_bytes());
-        out.extend_from_slice(&name_len.to_le_bytes());
-        out.extend_from_slice(&0u16.to_le_bytes());
-        out.extend_from_slice(raw_name);
-        out.extend_from_slice(data);
-
-        let central_offset = out.len() as u32;
-        out.extend_from_slice(&[0x50, 0x4B, 0x01, 0x02]);
-        out.extend_from_slice(&20u16.to_le_bytes());
-        out.extend_from_slice(&20u16.to_le_bytes());
-        out.extend_from_slice(&0u16.to_le_bytes());
-        out.extend_from_slice(&0u16.to_le_bytes());
-        out.extend_from_slice(&0u16.to_le_bytes());
-        out.extend_from_slice(&0x21u16.to_le_bytes());
-        out.extend_from_slice(&crc.to_le_bytes());
-        out.extend_from_slice(&size.to_le_bytes());
-        out.extend_from_slice(&size.to_le_bytes());
-        out.extend_from_slice(&name_len.to_le_bytes());
-        out.extend_from_slice(&0u16.to_le_bytes());
-        out.extend_from_slice(&0u16.to_le_bytes());
-        out.extend_from_slice(&0u16.to_le_bytes());
-        out.extend_from_slice(&0u16.to_le_bytes());
-        out.extend_from_slice(&0u32.to_le_bytes());
-        out.extend_from_slice(&offset.to_le_bytes());
-        out.extend_from_slice(raw_name);
-
-        let central_size = out.len() as u32 - central_offset;
-        out.extend_from_slice(&[0x50, 0x4B, 0x05, 0x06]);
-        out.extend_from_slice(&0u16.to_le_bytes());
-        out.extend_from_slice(&0u16.to_le_bytes());
-        out.extend_from_slice(&1u16.to_le_bytes());
-        out.extend_from_slice(&1u16.to_le_bytes());
-        out.extend_from_slice(&central_size.to_le_bytes());
-        out.extend_from_slice(&central_offset.to_le_bytes());
-        out.extend_from_slice(&0u16.to_le_bytes());
-
         let dest = dir.join("gbk-names.zip");
-        std::fs::write(&dest, out).unwrap();
+        std::fs::write(
+            &dest,
+            crate::raw_zip::build_stored_zip(&[(raw_name, b"non-utf8 name")]),
+        )
+        .unwrap();
         dest
     }
 
@@ -2347,6 +2285,7 @@ mod tests {
                         encrypt_filenames: false,
                         ..CreateOptions::default()
                     },
+                    CreateCommitPolicy::ReplaceExisting,
                     &NoProgress,
                     &ControlToken::default(),
                 )
@@ -2363,7 +2302,7 @@ mod tests {
 
     #[test]
     fn non_regular_sources_remain_browsable_without_authorizing_archive_updates() {
-        use squallz_core::{SfxBuildOptions, SfxTarget, SFX_GUI_STUB_MARKER};
+        use squallz_core::{CreateCommitPolicy, SfxBuildOptions, SfxTarget, SFX_GUI_STUB_MARKER};
 
         let dir = temp_dir("update-non-regular-source");
         let archive = make_zip(&dir, &["report.txt"]);
@@ -2396,6 +2335,7 @@ mod tests {
                     target: SfxTarget::Macos,
                     ..SfxBuildOptions::default()
                 },
+                CreateCommitPolicy::NoReplace,
                 &NoProgress,
                 &ControlToken::new(),
             )

@@ -11,22 +11,19 @@
 <script lang="ts">
   import Icon from "./Icon.svelte";
   import DeferredViewError from "./DeferredViewError.svelte";
+  import type { RecoverySession } from "../lib/recovery-session.svelte";
   import type {
-    RecoveryWorkspaceActions,
     RecoveryWorkspaceTranslate,
     RecoveryWorkspaceVariant,
-    RecoveryWorkspaceView,
   } from "../lib/recovery-workspace";
 
   let {
     variant,
-    view,
-    actions,
+    session,
     tr,
   }: {
     variant: RecoveryWorkspaceVariant;
-    view: RecoveryWorkspaceView;
-    actions: RecoveryWorkspaceActions;
+    session: RecoverySession;
     tr: RecoveryWorkspaceTranslate;
   } = $props();
 
@@ -41,18 +38,18 @@
   <section class="deferred-workspace-state recovery" role="status" aria-live="polite" aria-busy="true">
     <Icon name="hourglass" size={20} />
     <div>
-      <strong>{tr("gui.recovery.workspace_loading", "Loading Recovery")}</strong>
-      <span>{tr("gui.recovery.workspace_loading_body", "Checking the selected archive and preparing its recovery actions.")}</span>
+      <strong>{tr("gui.recovery.workspace_loading")}</strong>
+      <span>{tr("gui.recovery.workspace_loading_body")}</span>
     </div>
   </section>
 {:then Workspace}
-  <Workspace {variant} {view} {actions} {tr} />
+  <Workspace {variant} {session} {tr} />
 {:catch error}
   <DeferredViewError
     {error}
-    title={tr("gui.recovery.workspace_load_failed", "Recovery could not be loaded")}
-    body={tr("gui.recovery.workspace_load_failed_body", "Your archive was not changed. Retry loading the recovery workspace.")}
-    retryLabel={tr("gui.recovery.workspace_retry", "Retry")}
+    title={tr("gui.recovery.workspace_load_failed")}
+    body={tr("gui.recovery.workspace_load_failed_body")}
+    retryLabel={tr("gui.recovery.workspace_retry")}
     onRetry={retry} classic={variant === "classic"}
   />
 {/await}

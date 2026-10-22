@@ -8,7 +8,6 @@
     summary: Array<{ label: string; value: string }>;
     groups: DuplicateGroupSummary[];
     emptyMessage: string;
-    onMount: (node: HTMLElement | null) => void;
   }
 </script>
 
@@ -16,7 +15,11 @@
   import { tick } from "svelte";
   import { formatBytes } from "../lib/format";
 
-  let { report, tr }: { report: DuplicateReportSurface; tr: (key: string, fallback: string) => string } = $props();
+  let { report, tr, onMount }: {
+    report: DuplicateReportSurface;
+    tr: (key: string, fallback?: string) => string;
+    onMount: (node: HTMLElement | null) => void;
+  } = $props();
   const pageSize = 20;
   const pathPageSize = 50;
   let page = $state(0);
@@ -28,8 +31,8 @@
   let groups = $derived(report.groups.slice(start, start + pageSize));
 
   function registerPanel(node: HTMLElement) {
-    report.onMount(node);
-    return { destroy: () => report.onMount(null) };
+    onMount(node);
+    return { destroy: () => onMount(null) };
   }
 
   async function changePage(next: number) {
@@ -50,21 +53,21 @@
   }
 </script>
 
-<section class="duplicate-report" tabindex="-1" aria-label={tr("gui.duplicates.report_title", "Duplicate scan report")} use:registerPanel>
+<section class="duplicate-report" tabindex="-1" aria-label={tr("gui.duplicates.report_title")} use:registerPanel>
   <header class="duplicate-report-heading">
-    <h2 bind:this={heading} tabindex="-1">{tr("gui.duplicates.report_title", "Duplicate scan report")}</h2>
+    <h2 bind:this={heading} tabindex="-1">{tr("gui.duplicates.report_title")}</h2>
     {#if report.context}<span>{report.state}</span>{/if}
   </header>
   {#if report.context}
     <dl class="tool-report-context">
-      <div><dt>{tr("gui.duplicates.report_target", "Scanned locations")}</dt><dd>{#each report.context.sources as source}<span>{source}</span>{/each}</dd></div>
-      <div><dt>{tr("gui.duplicates.minimum_size", "Minimum size")}</dt><dd>{report.context.minimumSize}</dd></div>
-      <div><dt>{tr("gui.create.excludes", "Excludes")}</dt><dd>{#each report.context.excludes as rule}<span>{rule}</span>{:else}{tr("gui.create.no_rules", "No rules")}{/each}</dd></div>
+      <div><dt>{tr("gui.duplicates.report_target")}</dt><dd>{#each report.context.sources as source}<span>{source}</span>{/each}</dd></div>
+      <div><dt>{tr("gui.duplicates.minimum_size")}</dt><dd>{report.context.minimumSize}</dd></div>
+      <div><dt>{tr("gui.create.excludes")}</dt><dd>{#each report.context.excludes as rule}<span>{rule}</span>{:else}{tr("gui.create.no_rules")}{/each}</dd></div>
       {#each report.summary as item}<div><dt>{item.label}</dt><dd>{item.value}</dd></div>{/each}
     </dl>
   {/if}
   {#if groups.length > 0}
-    <p class="duplicate-report-hint">{tr("gui.duplicates.potential_space", "Potential space if one copy per group remains")}</p>
+    <p class="duplicate-report-hint">{tr("gui.duplicates.potential_space")}</p>
     <div class="duplicate-report-groups">
       {#each groups as group, index}
         {@const groupIndex = start + index}
@@ -77,8 +80,8 @@
           }}
         >
           <summary>
-            <strong>{tr("gui.duplicates.group_number", "Group {number}").replace("{number}", String(groupIndex + 1))}</strong>
-            <span>{tr("gui.duplicates.group_files_size", "{count} files · {size} each")
+            <strong>{tr("gui.duplicates.group_number").replace("{number}", String(groupIndex + 1))}</strong>
+            <span>{tr("gui.duplicates.group_files_size")
               .replace("{count}", group.paths.length.toLocaleString()).replace("{size}", formatBytes(group.size))}</span>
           </summary>
           {#if openGroup === groupIndex}
@@ -87,7 +90,7 @@
               <ul bind:this={pathList}>{#each group.paths.slice(0, visiblePaths) as path}<li tabindex="-1">{path}</li>{/each}</ul>
               {#if group.paths.length > visiblePaths}
                 <button type="button" class="secondary-lite" onclick={() => void showMorePaths()}>
-                  {tr("gui.duplicates.show_more_paths", "Show more files ({shown} of {total})")
+                  {tr("gui.duplicates.show_more_paths")
                     .replace("{shown}", visiblePaths.toLocaleString()).replace("{total}", group.paths.length.toLocaleString())}
                 </button>
               {/if}
@@ -97,11 +100,11 @@
       {/each}
     </div>
     {#if report.groups.length > pageSize}
-      <nav class="duplicate-report-pagination" aria-label={tr("gui.duplicates.report_pages", "Duplicate report pages")}>
-        <button type="button" class="secondary-lite" disabled={page === 0} onclick={() => void changePage(page - 1)}>{tr("gui.duplicates.previous_groups", "Previous groups")}</button>
-        <span>{tr("gui.duplicates.group_range", "Groups {start}–{end} of {total}")
+      <nav class="duplicate-report-pagination" aria-label={tr("gui.duplicates.report_pages")}>
+        <button type="button" class="secondary-lite" disabled={page === 0} onclick={() => void changePage(page - 1)}>{tr("gui.duplicates.previous_groups")}</button>
+        <span>{tr("gui.duplicates.group_range")
           .replace("{start}", String(start + 1)).replace("{end}", String(start + groups.length)).replace("{total}", report.groups.length.toLocaleString())}</span>
-        <button type="button" class="secondary-lite" disabled={start + pageSize >= report.groups.length} onclick={() => void changePage(page + 1)}>{tr("gui.duplicates.next_groups", "Next groups")}</button>
+        <button type="button" class="secondary-lite" disabled={start + pageSize >= report.groups.length} onclick={() => void changePage(page + 1)}>{tr("gui.duplicates.next_groups")}</button>
       </nav>
     {/if}
   {:else}

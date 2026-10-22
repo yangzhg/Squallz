@@ -11,6 +11,46 @@ pub fn move_path_no_replace(src: &Path, dest: &Path) -> io::Result<()> {
     move_path_no_replace_impl(src, dest)
 }
 
+/// Reopens the held Windows file object for read access without following a path.
+/// A writer handoff first permits its still-open write handle, closes that handle,
+/// then reopens the readonly object with `permit_existing_writer` set to false.
+#[cfg(windows)]
+#[allow(unsafe_code)]
+pub fn reopen_readonly_file(
+    file: &std::fs::File,
+    permit_existing_writer: bool,
+) -> io::Result<std::fs::File> {
+    use std::os::windows::io::{AsRawHandle, FromRawHandle};
+    use windows_sys::Win32::Foundation::{GENERIC_READ, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        ReOpenFile, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ,
+        FILE_SHARE_WRITE,
+    };
+
+    let sharing = FILE_SHARE_READ
+        | FILE_SHARE_DELETE
+        | if permit_existing_writer {
+            FILE_SHARE_WRITE
+        } else {
+            0
+        };
+    // SAFETY: File owns a valid handle for the synchronous call. ReOpenFile opens
+    // the same object with read access; reparse targets are never followed.
+    let handle = unsafe {
+        ReOpenFile(
+            file.as_raw_handle().cast(),
+            GENERIC_READ,
+            sharing,
+            FILE_FLAG_OPEN_REPARSE_POINT,
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: success returns one newly owned handle, transferred exactly once.
+    Ok(unsafe { std::fs::File::from_raw_handle(handle.cast()) })
+}
+
 #[cfg(any(target_os = "android", target_os = "linux", target_vendor = "apple"))]
 fn move_path_no_replace_impl(src: &Path, dest: &Path) -> io::Result<()> {
     use rustix::fs::{renameat_with, RenameFlags, CWD};
@@ -187,6 +227,48 @@ mod tests {
         assert_eq!(std::fs::read(&dest).unwrap(), b"existing payload");
         assert_eq!(std::fs::read(&staged).unwrap(), b"new payload");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn readonly_handoff_seals_writes_and_reopens_the_original_object() {
+        use std::io::{Read, Write};
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Foundation::ERROR_SHARING_VIOLATION;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ,
+        };
+
+        let dir = temp_dir("readonly-object-handoff");
+        let path = dir.join("stage.tmp");
+        let displaced = dir.join("displaced.tmp");
+        let mut writer = std::fs::OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_DELETE)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(&path)
+            .unwrap();
+        writer.write_all(b"owned bytes").unwrap();
+        writer.sync_all().unwrap();
+        let temporary = reopen_readonly_file(&writer, true).unwrap();
+        drop(writer);
+        let mut sealed = reopen_readonly_file(&temporary, false).unwrap();
+        let error = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(ERROR_SHARING_VIOLATION as i32));
+        std::fs::rename(&path, &displaced).unwrap();
+        std::fs::write(&path, b"unrelated competitor").unwrap();
+        let mut bytes = Vec::new();
+        sealed.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, b"owned bytes");
+        assert_eq!(std::fs::read(&path).unwrap(), b"unrelated competitor");
+        drop(sealed);
+        drop(temporary);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

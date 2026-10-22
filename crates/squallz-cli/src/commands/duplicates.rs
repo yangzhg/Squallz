@@ -2,13 +2,13 @@
 
 use std::path::{Path, PathBuf};
 
-use serde_json::json;
+use super::reports::duplicate_report_json;
 use squallz_core::{DuplicateGroup, DuplicateScanReport};
 
 use super::reports::print_pretty_json;
 use crate::commands::{Ctx, ModernStatusField, ModernTableColumn, ModernTableRow};
 use crate::errors::CliError;
-use crate::progress::fmt_bytes;
+use crate::progress::{fmt_bytes, CliProgress};
 use crate::ui::Tone;
 
 const HASH_PREVIEW_CHARS: usize = 16;
@@ -20,52 +20,21 @@ pub fn run(
     min_size: u64,
     as_json: bool,
 ) -> Result<(), CliError> {
-    let report = ctx
+    let progress = CliProgress::new_for_operation(ctx, as_json, "duplicates");
+    let result = ctx
         .engine
-        .find_duplicate_files(&inputs, &excludes, min_size)?;
+        .find_duplicate_files(&inputs, &excludes, min_size, &progress, &ctx.ctl);
+    progress.finish();
+    let report = result?;
 
     if as_json {
-        print_json(&report, min_size)?;
+        print_pretty_json(&duplicate_report_json(&report, min_size))?;
     } else if ctx.is_modern() {
         print_modern(ctx, &report, min_size, &excludes);
     } else {
         print_classic(ctx, &report, min_size);
     }
     Ok(())
-}
-
-fn print_json(report: &DuplicateScanReport, min_size: u64) -> Result<(), CliError> {
-    let groups = report
-        .groups
-        .iter()
-        .map(|group| {
-            json!({
-                "hash": group.hash,
-                "hash_algorithm": "blake3",
-                "size": group.size,
-                "count": group.count(),
-                "reclaimable_bytes": group.reclaimable_bytes(),
-                "paths": group.paths.iter().map(|path| path_string(path)).collect::<Vec<_>>(),
-            })
-        })
-        .collect::<Vec<_>>();
-    let value = json!({
-        "ok": true,
-        "operation": "duplicates",
-        "hash_algorithm": "blake3",
-        "input_count": report.input_count,
-        "entries_scanned": report.entries_scanned,
-        "files_scanned": report.files_scanned,
-        "bytes_scanned": report.bytes_scanned,
-        "min_size": min_size,
-        "candidate_files": report.candidate_files,
-        "hashed_bytes": report.hashed_bytes,
-        "duplicate_groups": report.duplicate_groups(),
-        "duplicate_files": report.duplicate_files(),
-        "reclaimable_bytes": report.reclaimable_bytes(),
-        "groups": groups,
-    });
-    print_pretty_json(&value)
 }
 
 fn print_classic(ctx: &Ctx, report: &DuplicateScanReport, min_size: u64) {

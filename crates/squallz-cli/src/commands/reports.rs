@@ -1,10 +1,48 @@
 use std::path::Path;
 
 use serde_json::{json, Value};
-use squallz_core::api::{
-    ArchiveStructureStatus, ExtractReport, FormatError, RecoverySummary, TestSummary,
+use squallz_core::api::RecoverySummary;
+use squallz_core::api::{ArchiveStructureStatus, ExtractReport, FormatError, TestSummary};
+use squallz_core::reports::{ChecksumCheckReport, CreateOutputReport, DuplicateReport, TestReport};
+use squallz_core::{
+    ChecksumReport, ChecksumVerificationReport, CreateReport, DuplicateScanReport, ExtractPlan,
 };
-use squallz_core::{CreateReport, ExtractPlan, SmartLayout};
+
+pub(crate) fn create_report_json(report: &CreateReport) -> Value {
+    json!(CreateOutputReport::from(report))
+}
+pub(crate) fn extract_counts_json(report: &ExtractReport) -> Value {
+    json!(report)
+}
+pub(crate) fn test_report_json(report: &TestSummary) -> Value {
+    test_report_json_with_structure(report, ArchiveStructureStatus::Complete)
+}
+pub(crate) fn test_report_json_with_structure(
+    report: &TestSummary,
+    structure: ArchiveStructureStatus,
+) -> Value {
+    json!(TestReport::new(report, structure))
+}
+pub(crate) fn recovery_summary_json(report: &RecoverySummary) -> Value {
+    json!(report)
+}
+pub(crate) fn checksum_report_json(report: &ChecksumReport) -> Value {
+    let mut value = json!(report);
+    value["ok"] = json!(true);
+    value["operation"] = json!("checksum");
+    value
+}
+pub(crate) fn checksum_check_report_json(report: &ChecksumVerificationReport) -> Value {
+    let mut value = json!(ChecksumCheckReport::from(report));
+    value["operation"] = json!("checksum_check");
+    value
+}
+pub(crate) fn duplicate_report_json(report: &DuplicateScanReport, min_size: u64) -> Value {
+    let mut value = json!(DuplicateReport::new(report, min_size));
+    value["ok"] = json!(true);
+    value["operation"] = json!("duplicates");
+    value
+}
 
 use crate::errors::CliError;
 use crate::ui::Tone;
@@ -17,71 +55,14 @@ pub(crate) fn print_pretty_json(value: &Value) -> Result<(), CliError> {
     Ok(())
 }
 
-pub(crate) fn create_report_json(report: &CreateReport) -> Value {
-    let outputs = report
-        .outputs
-        .iter()
-        .map(|path| path.display().to_string())
-        .collect::<Vec<_>>();
-    let preserved_outputs = report
-        .preserved_outputs
-        .iter()
-        .map(|path| path.display().to_string())
-        .collect::<Vec<_>>();
-    json!({
-        "primary_output": report.primary_output.display().to_string(),
-        "outputs": outputs,
-        "preserved_outputs": preserved_outputs,
-        "total_bytes": report.total_output_bytes,
-        "split": report.split_volume_count.is_some(),
-        "volume_count": report.split_volume_count.unwrap_or(1),
-    })
-}
-
 pub(crate) fn extract_plan_json(plan: &ExtractPlan) -> Value {
-    json!({
-        "requested_destination": plan.requested_destination.display().to_string(),
-        "destination": plan.destination.display().to_string(),
-        "layout": match plan.layout {
-            SmartLayout::DirectExtract => "direct",
-            SmartLayout::WrapInFolder => "wrap_in_folder",
-        },
-        "entries": plan.scope.entries,
-        "files": plan.scope.files,
-        "directories": plan.scope.directories,
-        "symlinks": plan.scope.symlinks,
-        "hardlinks": plan.scope.hardlinks,
-        "other": plan.scope.other,
-        "total_bytes": plan.scope.total_bytes,
-        "estimated_conflicts": plan.estimated_conflicts,
-    })
-}
-
-pub(crate) fn extract_counts_json(report: &ExtractReport) -> Value {
-    json!({
-        "destination": report.destination.display().to_string(),
-        "selected_entries": report.selected_entries,
-        "created": report.created,
-        "directories": report.directories,
-        "skipped": report.skipped,
-        "replaced": report.replaced,
-        "renamed": report.renamed,
-        "failed": report.failed,
-        "output_bytes": report.output_bytes,
-    })
+    json!(plan)
 }
 
 pub(crate) fn empty_extract_counts_json(destination: &Path) -> Value {
-    json!({
-        "destination": destination.display().to_string(),
-        "selected_entries": 0,
-        "created": 0,
-        "directories": 0,
-        "skipped": 0,
-        "replaced": 0,
-        "renamed": 0,
-        "failed": 0,
-        "output_bytes": 0,
+    extract_counts_json(&ExtractReport {
+        destination: destination.to_path_buf(),
+        ..ExtractReport::default()
     })
 }
 
@@ -138,28 +119,6 @@ fn pretty_json_text(value: &Value) -> Result<String, CliError> {
         .map_err(|e| FormatError::Other(format!("cannot serialize CLI JSON report: {e}")).into())
 }
 
-pub(crate) fn test_report_json(report: &TestSummary) -> Value {
-    json!({
-        "ok": report.is_ok(),
-        "entries_tested": report.entries_tested,
-        "problems": &report.problems.messages,
-        "problems_total": report.problems.total,
-        "problems_truncated": report.problems.is_truncated(),
-        "recovery": report.recovery.as_ref().map(recovery_summary_json),
-    })
-}
-
-pub(crate) fn test_report_json_with_structure(
-    report: &TestSummary,
-    structure: ArchiveStructureStatus,
-) -> Value {
-    let mut value = test_report_json(report);
-    if !structure.is_complete() {
-        value["structure"] = json!(structure.id());
-    }
-    value
-}
-
 pub(crate) fn print_test_problems(ctx: &Ctx, report: &TestSummary) {
     print_test_problems_with_structure(ctx, report, ArchiveStructureStatus::Complete);
 }
@@ -203,18 +162,17 @@ pub(crate) fn print_test_problems_with_structure(
     }
 }
 
-pub(crate) fn recovery_summary_json(summary: &RecoverySummary) -> Value {
-    json!({
-        "scheme": &summary.scheme,
-        "block_size": summary.block_size,
-        "total_blocks": summary.total_blocks,
-        "data_shards": summary.data_shards,
-        "parity_shards": summary.parity_shards,
-        "recovery_blocks_available": summary.recovery_blocks_available,
-        "damaged_blocks": summary.damaged_blocks,
-        "repaired_blocks": summary.repaired_blocks,
-        "unrepaired_blocks": summary.unrepaired_blocks,
-        "repair_possible": summary.repair_possible,
+pub(super) fn test_report_error(report: TestSummary) -> FormatError {
+    let omitted = report.problems.omitted();
+    let mut problems = report.problems.messages;
+    if omitted > 0 {
+        problems.push(format!("{omitted} additional integrity problem(s) omitted"));
+    }
+    let problems = problems.join("; ");
+    FormatError::CorruptArchive(if problems.is_empty() {
+        "batch test failed".to_owned()
+    } else {
+        problems
     })
 }
 
@@ -223,7 +181,7 @@ mod tests {
     use std::path::PathBuf;
 
     use squallz_core::api::ExtractReport;
-    use squallz_core::{ExtractPlan, ExtractScope, SmartLayout};
+    use squallz_core::{CreateReport, ExtractPlan, ExtractScope, SmartLayout};
 
     use super::*;
 

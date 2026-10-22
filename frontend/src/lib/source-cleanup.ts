@@ -1,3 +1,5 @@
+import type { JobResult } from "./job-result";
+
 export interface SourceCleanupSummary {
   moved: number;
   kept: number;
@@ -6,22 +8,16 @@ export interface SourceCleanupSummary {
 }
 
 export function readSourceCleanupSummary(
-  result: Record<string, unknown> | null,
+  result: JobResult | null,
 ): SourceCleanupSummary | null {
-  const raw = result?.source_cleanup;
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
-  const cleanup = raw as Record<string, unknown>;
-  return {
-    moved: Math.max(0, Math.trunc(Number(cleanup.moved) || 0)),
-    kept: Math.max(0, Math.trunc(Number(cleanup.kept) || 0)),
-    recoveryRequired: Math.max(0, Math.trunc(Number(cleanup.recovery_required) || 0)),
-    status: String(cleanup.status ?? ""),
-  };
+  if (!result || !("source_cleanup" in result)) return null;
+  const cleanup = result.source_cleanup;
+  return { moved: cleanup.moved, kept: cleanup.kept, recoveryRequired: cleanup.recovery_required, status: cleanup.status };
 }
 
 export function shouldRefreshSourceCleanupRecovery(
   kind: string,
-  result: Record<string, unknown> | null,
+  result: JobResult | null,
 ): boolean {
   if (kind !== "compress") return false;
   const status = readSourceCleanupSummary(result)?.status;

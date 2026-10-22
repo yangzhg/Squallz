@@ -12,13 +12,16 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Barrier, Mutex};
 use std::time::{Duration, Instant};
 
-use common::{build_stored_zip, command_exists, engine, RawZipEntry, TempDir};
+use common::{
+    build_stored_zip, command_exists, engine, read_archive_entries, RawZipEntry, TempDir,
+};
 use squallz_core::api::{
     CompressionLevel, ControlToken, CreateOptions, EntryMeta, EntryPath, EntrySelection,
     FormatError, NoProgress, OpenOptions, Password, ProgressPhase, ProgressSink, UpdateOp,
     UpdateOptions,
 };
 use squallz_core::ArchiveUpdateGuard;
+use squallz_core::CreateCommitPolicy;
 
 /// Builds a base archive with project/a.txt, project/sub/b.txt, project/c.log.
 fn base_archive(dir: &Path, password: Option<&str>) -> PathBuf {
@@ -33,7 +36,14 @@ fn base_archive(dir: &Path, password: Option<&str>) -> PathBuf {
         ..CreateOptions::default()
     };
     engine()
-        .create(&dest, &[root], &opts, &NoProgress, &ControlToken::new())
+        .create(
+            &dest,
+            &[root],
+            &opts,
+            CreateCommitPolicy::ReplaceExisting,
+            &NoProgress,
+            &ControlToken::new(),
+        )
         .unwrap();
     dest
 }
@@ -248,15 +258,15 @@ fn update_display_selection_rejects_ambiguous_and_undecodable_paths_atomically()
         },
     ]);
     fs::write(&archive, &original).unwrap();
-    let entries = engine()
-        .list(
-            &archive,
-            &OpenOptions {
-                encoding_override: Some("gbk".into()),
-                ..Default::default()
-            },
-        )
-        .unwrap();
+    let entries = read_archive_entries(
+        &engine(),
+        &archive,
+        &OpenOptions {
+            encoding_override: Some("gbk".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
     assert_eq!(entries[0].path.display, entries[1].path.display);
     let options = UpdateOptions {
         encoding_override: Some("gbk".into()),
@@ -626,12 +636,14 @@ fn update_preserves_encrypted_legacy_names_and_payloads() {
             encoding_override: Some("gbk".into()),
             password: Some(Password::new("test password")),
         };
-        let entries = engine().list(&archive, &options).unwrap();
+        let entries = read_archive_entries(&engine(), &archive, &options).unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].path.display, displayed);
         assert_eq!(entries[0].path.raw, raw_name);
         assert!(entries[0].encrypted);
-        let mut reader = engine().open(&archive, &options).unwrap();
+        let mut reader = engine()
+            .open(&archive, &options, &ControlToken::default())
+            .unwrap();
         let mut contents = Vec::new();
         reader
             .read_entry(&entries[0].path, &mut |entry| {
@@ -681,7 +693,7 @@ fn update_preserves_unix_types_and_permissions() {
     )
     .unwrap();
     assert_eq!(raw_entry_snapshots(&archive), expected);
-    let entries = engine().list(&archive, &OpenOptions::default()).unwrap();
+    let entries = read_archive_entries(&engine(), &archive, &OpenOptions::default()).unwrap();
     assert!(
         matches!(&entries.iter().find(|entry| entry.path.display == "renamed-link").unwrap().entry_type,
         squallz_core::api::EntryType::Symlink { target } if target == b"bin/run")
@@ -702,7 +714,14 @@ fn large_stored_archive(dir: &Path) -> PathBuf {
         ..CreateOptions::default()
     };
     engine()
-        .create(&dest, &[root], &options, &NoProgress, &ControlToken::new())
+        .create(
+            &dest,
+            &[root],
+            &options,
+            CreateCommitPolicy::ReplaceExisting,
+            &NoProgress,
+            &ControlToken::new(),
+        )
         .unwrap();
     dest
 }
@@ -712,8 +731,7 @@ fn list_names(path: &Path, password: Option<&str>) -> Vec<String> {
         password: password.map(Password::new),
         encoding_override: None,
     };
-    let mut names: Vec<String> = engine()
-        .list(path, &opts)
+    let mut names: Vec<String> = read_archive_entries(&engine(), path, &opts)
         .unwrap()
         .iter()
         .map(|e: &EntryMeta| e.path.display.clone())
@@ -1289,11 +1307,12 @@ fn archive_listing_rejects_parent_symlink_aba_even_when_path_stamps_match() {
             &self,
             mut source: Box<dyn ReadSeek>,
             options: &OpenOptions,
+            ctl: &ControlToken,
         ) -> Result<Box<dyn ArchiveReader>, FormatError> {
             source.seek(SeekFrom::Start(0))?;
             source.read_to_end(&mut self.observed.lock().unwrap())?;
             source.seek(SeekFrom::Start(0))?;
-            let reader = self.inner.open(source, options)?;
+            let reader = self.inner.open(source, options, ctl)?;
             fs::remove_file(&self.parent)?;
             symlink(&self.original_directory, &self.parent)?;
             Ok(reader)
@@ -1303,8 +1322,9 @@ fn archive_listing_rejects_parent_symlink_aba_even_when_path_stamps_match() {
             &self,
             output: Box<dyn WriteSeek>,
             options: &CreateOptions,
+            ctl: &ControlToken,
         ) -> Result<Box<dyn ArchiveWriter>, FormatError> {
-            self.inner.create(output, options)
+            self.inner.create(output, options, ctl)
         }
     }
 
@@ -1344,13 +1364,12 @@ fn archive_listing_rejects_parent_symlink_aba_even_when_path_stamps_match() {
         original_directory,
         observed: Arc::clone(&observed),
     }));
-    let result = squallz_core::Engine::new(registry)
-        .list_with_format_source_set_and_structure_with_entry_limit_and_control(
-            &path,
-            &OpenOptions::default(),
-            100,
-            &ControlToken::new(),
-        );
+    let result = squallz_core::Engine::new(registry).list_archive(
+        &path,
+        &OpenOptions::default(),
+        100,
+        &ControlToken::new(),
+    );
     let after = engine()
         .inspect_archive_source_state(&path, &ControlToken::new())
         .unwrap();
@@ -2192,15 +2211,15 @@ fn update_preserves_retained_legacy_names() {
     let mut reader = zip::ZipArchive::new(fs::File::open(&archive).unwrap()).unwrap();
     assert_eq!(reader.len(), 1);
     assert_eq!(reader.by_index_raw(0).unwrap().name_raw(), name);
-    let entries = engine()
-        .list(
-            &archive,
-            &OpenOptions {
-                encoding_override: Some("gbk".into()),
-                ..OpenOptions::default()
-            },
-        )
-        .unwrap();
+    let entries = read_archive_entries(
+        &engine(),
+        &archive,
+        &OpenOptions {
+            encoding_override: Some("gbk".into()),
+            ..OpenOptions::default()
+        },
+    )
+    .unwrap();
     assert_eq!(entries[0].path.display, "压缩文件中文名称测试.txt");
     assert_eq!(entries[0].path.raw, name);
     assert_unzip_t(&archive);
@@ -2384,7 +2403,7 @@ fn update_delete_literal_keeps_encrypted_payloads_without_a_password() {
         password: Some(Password::new("deletion-test-password")),
         encoding_override: None,
     };
-    let entries = engine().list(&archive, &options).unwrap();
+    let entries = read_archive_entries(&engine(), &archive, &options).unwrap();
     assert!(!entries
         .iter()
         .any(|entry| entry.path.display.starts_with("project/sub/")));
@@ -2392,7 +2411,9 @@ fn update_delete_literal_keeps_encrypted_payloads_without_a_password() {
         .iter()
         .filter(|entry| !entry.path.display.ends_with('/'))
         .all(|entry| entry.encrypted));
-    let mut reader = engine().open(&archive, &options).unwrap();
+    let mut reader = engine()
+        .open(&archive, &options, &ControlToken::default())
+        .unwrap();
     let mut data = Vec::new();
     reader
         .read_entry(&EntryPath::from_utf8("project/a.txt"), &mut |entry| {
@@ -2441,7 +2462,9 @@ fn update_rename_entry() {
 
     // The renamed entry's content is intact.
     let opts = OpenOptions::default();
-    let mut reader = engine().open(&archive, &opts).unwrap();
+    let mut reader = engine()
+        .open(&archive, &opts, &ControlToken::default())
+        .unwrap();
     let mut data = Vec::new();
     reader
         .read_entry(&EntryPath::from_utf8("project/renamed.txt"), &mut |entry| {
@@ -2485,7 +2508,9 @@ fn update_rename_directory_moves_its_complete_subtree() {
         assert!(names.contains(&"整理/资料/".into()), "{names:?}");
         assert!(!names.iter().any(|name| name.starts_with("project/sub")));
         assert!(names.contains(&"project/a.txt".into()));
-        let mut reader = engine().open(&archive, &OpenOptions::default()).unwrap();
+        let mut reader = engine()
+            .open(&archive, &OpenOptions::default(), &ControlToken::default())
+            .unwrap();
         let mut data = Vec::new();
         reader
             .read_entry(&EntryPath::from_utf8("整理/资料/b.txt"), &mut |entry| {
@@ -2696,12 +2721,14 @@ fn update_encrypted_directory_rename_preserves_payloads_without_a_password() {
         password: Some(Password::new("directory-test-password")),
         encoding_override: None,
     };
-    let entries = engine().list(&archive, &options).unwrap();
+    let entries = read_archive_entries(&engine(), &archive, &options).unwrap();
     assert!(entries
         .iter()
         .filter(|entry| entry.size > 0)
         .all(|entry| entry.encrypted));
-    let mut reader = engine().open(&archive, &options).unwrap();
+    let mut reader = engine()
+        .open(&archive, &options, &ControlToken::default())
+        .unwrap();
     for (name, expected) in [
         ("资料/a.txt", b"alpha".as_slice()),
         ("资料/sub/b.txt", b"bravo".as_slice()),
@@ -2795,7 +2822,9 @@ fn update_rejects_target_conflicts_without_explicit_delete() {
     )
     .unwrap();
 
-    let mut reader = engine().open(&archive, &OpenOptions::default()).unwrap();
+    let mut reader = engine()
+        .open(&archive, &OpenOptions::default(), &ControlToken::default())
+        .unwrap();
     let mut data = Vec::new();
     reader
         .read_entry(&EntryPath::from_utf8("project/a.txt"), &mut |entry| {
@@ -2924,7 +2953,7 @@ fn update_encrypted_archive_without_password_keeps_encryption() {
     run_update(&archive, &ops, &UpdateOptions::default()).unwrap();
 
     let opts = OpenOptions::default();
-    let entries = engine().list(&archive, &opts).unwrap();
+    let entries = read_archive_entries(&engine(), &archive, &opts).unwrap();
     let old = entries
         .iter()
         .find(|e| e.path.display == "project/a.txt")
@@ -2941,7 +2970,9 @@ fn update_encrypted_archive_without_password_keeps_encryption() {
         password: Some(Password::new("secret")),
         encoding_override: None,
     };
-    let mut reader = engine().open(&archive, &open).unwrap();
+    let mut reader = engine()
+        .open(&archive, &open, &ControlToken::default())
+        .unwrap();
     let mut data = Vec::new();
     reader
         .read_entry(&EntryPath::from_utf8("project/a.txt"), &mut |entry| {
@@ -2964,6 +2995,7 @@ fn update_unsupported_format_is_rejected() {
             &dest,
             &[root],
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &NoProgress,
             &ControlToken::new(),
         )

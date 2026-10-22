@@ -6,7 +6,7 @@ mod common;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use common::{engine, TempDir};
+use common::{engine, read_archive_entries, TempDir};
 use squallz_core::api::{
     ControlToken, CreateOptions, ExtractOptions, FormatError, NoProgress, OpenOptions, Password,
 };
@@ -25,6 +25,7 @@ fn make_archive(dir: &Path, name: &str) -> PathBuf {
             &dest,
             &[root],
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &NoProgress,
             &ControlToken::new(),
         )
@@ -43,6 +44,7 @@ fn convert_and_check(dir: &Path, src: &Path, dest_name: &str) {
             &dest,
             &OpenOptions::default(),
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &NoProgress,
             &ctl,
         )
@@ -170,7 +172,7 @@ fn solid_sevenz_conversion_preserves_contents_metadata_and_progress_including_sp
     let tmp = TempDir::new("convert-solid-7z");
     let source = tmp.path().join("source.7z");
     make_solid_sevenz(&source);
-    let original = engine().list(&source, &OpenOptions::default()).unwrap();
+    let original = read_archive_entries(&engine(), &source, &OpenOptions::default()).unwrap();
     assert_eq!(original.len(), 6);
     for split_size in [None, Some(128 * 1024)] {
         let destination = tmp.path().join(if split_size.is_some() {
@@ -180,7 +182,7 @@ fn solid_sevenz_conversion_preserves_contents_metadata_and_progress_including_sp
         });
         let progress = ProgressRecorder::default();
         let report = engine()
-            .convert_with_report(
+            .convert(
                 &source,
                 &destination,
                 &OpenOptions::default(),
@@ -189,6 +191,7 @@ fn solid_sevenz_conversion_preserves_contents_metadata_and_progress_including_sp
                     split_size,
                     ..CreateOptions::default()
                 },
+                CreateCommitPolicy::ReplaceExisting,
                 &progress,
                 &ControlToken::default(),
             )
@@ -201,9 +204,9 @@ fn solid_sevenz_conversion_preserves_contents_metadata_and_progress_including_sp
                 .iter()
                 .all(|path| fs::metadata(path).unwrap().len() <= 128 * 1024));
         }
-        let entries = engine()
-            .list(&report.primary_output, &OpenOptions::default())
-            .unwrap();
+        let entries =
+            read_archive_entries(&engine(), &report.primary_output, &OpenOptions::default())
+                .unwrap();
         assert_eq!(entries.len(), original.len());
         for before in &original {
             let name = before
@@ -300,7 +303,7 @@ fn solid_sevenz_late_corruption_and_cancellation_preserve_the_existing_output() 
         let ctl = ControlToken::default();
         let cancelling = CancelOnSecondFile(&ctl);
         let progress: &dyn ProgressSink = if cancel { &cancelling } else { &NoProgress };
-        let result = engine().convert_with_policy(
+        let result = engine().convert(
             &source,
             &destination,
             &OpenOptions::default(),
@@ -357,7 +360,7 @@ fn sevenz_early_end_preserves_existing_conversion_outputs() {
             .guard
             .unwrap();
         let error = engine()
-            .convert_with_policy(
+            .convert(
                 &source,
                 &destination,
                 &OpenOptions::default(),
@@ -413,6 +416,7 @@ fn sevenz_conversion_cancellation_and_corruption_preserve_existing_outputs() {
                 level: CompressionLevel::Store,
                 ..CreateOptions::default()
             },
+            CreateCommitPolicy::ReplaceExisting,
             &NoProgress,
             &ControlToken::default(),
         )
@@ -434,7 +438,7 @@ fn sevenz_conversion_cancellation_and_corruption_preserve_existing_outputs() {
             let cancelling = CancelOnProgress(&ctl);
             let progress: &dyn ProgressSink = if cancel { &cancelling } else { &NoProgress };
             let error = engine()
-                .convert_with_policy(
+                .convert(
                     &source,
                     &destination,
                     &OpenOptions::default(),
@@ -481,11 +485,12 @@ fn unsplit_conversion_replaces_without_hidden_backup_artifacts() {
     fs::write(&destination, b"previous output").unwrap();
 
     let report = engine()
-        .convert_with_report(
+        .convert(
             &source,
             &destination,
             &OpenOptions::default(),
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &NoProgress,
             &ControlToken::new(),
         )
@@ -500,8 +505,7 @@ fn unsplit_conversion_replaces_without_hidden_backup_artifacts() {
         fs::metadata(&destination).unwrap().len()
     );
     assert_eq!(
-        engine()
-            .list(&destination, &OpenOptions::default())
+        read_archive_entries(&engine(), &destination, &OpenOptions::default())
             .unwrap()
             .iter()
             .filter(|entry| matches!(entry.entry_type, squallz_core::api::EntryType::File))
@@ -553,7 +557,7 @@ fn conversion_policies_preserve_unapproved_changed_and_late_outputs() {
     let ctl = ControlToken::new();
 
     let error = engine()
-        .convert_with_policy(
+        .convert(
             &source,
             &destination,
             &OpenOptions::default(),
@@ -572,7 +576,7 @@ fn conversion_policies_preserve_unapproved_changed_and_late_outputs() {
         .unwrap();
     fs::write(&destination, b"newer output from another app").unwrap();
     let error = engine()
-        .convert_with_policy(
+        .convert(
             &source,
             &destination,
             &OpenOptions::default(),
@@ -600,7 +604,7 @@ fn conversion_policies_preserve_unapproved_changed_and_late_outputs() {
         .guard
         .unwrap();
     engine()
-        .convert_with_policy(
+        .convert(
             &source,
             &destination,
             &OpenOptions::default(),
@@ -611,8 +615,7 @@ fn conversion_policies_preserve_unapproved_changed_and_late_outputs() {
         )
         .unwrap();
     assert_eq!(
-        engine()
-            .list(&destination, &OpenOptions::default())
+        read_archive_entries(&engine(), &destination, &OpenOptions::default())
             .unwrap()
             .iter()
             .filter(|entry| matches!(entry.entry_type, squallz_core::api::EntryType::File))
@@ -627,11 +630,12 @@ fn conversion_policies_preserve_unapproved_changed_and_late_outputs() {
         written: AtomicBool::new(false),
     };
     let error = engine()
-        .convert_with_atomic_replace(
+        .convert(
             &source,
             &repaired,
             &OpenOptions::default(),
             &CreateOptions::default(),
+            CreateCommitPolicy::NoReplace,
             &late,
             &ctl,
         )
@@ -650,25 +654,25 @@ fn conversion_policies_preserve_unapproved_changed_and_late_outputs() {
         .contains(".convert-")));
 
     fs::remove_file(&repaired).unwrap();
-    assert!(!engine()
-        .convert_with_atomic_replace(
+    let converted = engine()
+        .convert(
             &source,
             &repaired,
             &OpenOptions::default(),
             &CreateOptions::default(),
+            CreateCommitPolicy::NoReplace,
             &NoProgress,
             &ctl,
         )
-        .unwrap());
+        .unwrap();
+    assert_eq!(converted.primary_output, repaired);
     assert_eq!(
-        engine()
-            .list(&repaired, &OpenOptions::default())
+        read_archive_entries(&engine(), &repaired, &OpenOptions::default())
             .unwrap()
             .into_iter()
             .map(|entry| entry.path.display)
             .collect::<Vec<_>>(),
-        engine()
-            .list(&source, &OpenOptions::default())
+        read_archive_entries(&engine(), &source, &OpenOptions::default())
             .unwrap()
             .into_iter()
             .map(|entry| entry.path.display)
@@ -751,44 +755,13 @@ fn split_conversion_requires_and_returns_an_artifact_report() {
     };
     let ctl = ControlToken::new();
 
-    let error = engine()
+    let first = engine()
         .convert(
             &source,
             &destination,
             &OpenOptions::default(),
             &options,
-            &NoProgress,
-            &ctl,
-        )
-        .unwrap_err();
-    assert!(matches!(
-        error,
-        FormatError::Unsupported(ref detail) if detail.contains("convert_with_report")
-    ));
-
-    let error = engine()
-        .convert_with_atomic_replace(
-            &source,
-            &destination,
-            &OpenOptions::default(),
-            &options,
-            &NoProgress,
-            &ctl,
-        )
-        .unwrap_err();
-    assert!(matches!(
-        error,
-        FormatError::Unsupported(ref detail)
-            if detail.contains("convert_with_atomic_replace") && detail.contains("split")
-    ));
-    assert!(!destination.exists());
-
-    let first = engine()
-        .convert_with_report(
-            &source,
-            &destination,
-            &OpenOptions::default(),
-            &options,
+            CreateCommitPolicy::ReplaceExisting,
             &NoProgress,
             &ctl,
         )
@@ -797,7 +770,7 @@ fn split_conversion_requires_and_returns_an_artifact_report() {
     assert!(first.preserved_outputs.is_empty());
 
     let error = engine()
-        .convert_with_report_policy(
+        .convert(
             &source,
             &destination,
             &OpenOptions::default(),
@@ -810,11 +783,12 @@ fn split_conversion_requires_and_returns_an_artifact_report() {
     assert!(error.is_output_exists());
 
     let second = engine()
-        .convert_with_report(
+        .convert(
             &source,
             &destination,
             &OpenOptions::default(),
             &options,
+            CreateCommitPolicy::ReplaceExisting,
             &NoProgress,
             &ctl,
         )
@@ -854,11 +828,12 @@ fn conversion_plan_reuses_the_real_split_output_layout() {
     assert!(plan.workspace_budget_bytes >= plan.final_output_budget_bytes);
 
     let report = engine
-        .convert_with_report(
+        .convert(
             &source,
             &destination,
             &OpenOptions::default(),
             &options,
+            CreateCommitPolicy::ReplaceExisting,
             &NoProgress,
             &ControlToken::new(),
         )
@@ -918,11 +893,12 @@ fn swm_destination_without_native_options_is_rejected_before_source_open_or_stag
     let destination = tmp.path().join("image.swm");
 
     let error = engine()
-        .convert_with_report(
+        .convert(
             &source,
             &destination,
             &OpenOptions::default(),
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &NoProgress,
             &ControlToken::new(),
         )
@@ -946,7 +922,14 @@ fn encrypted_source_to_encrypted_destination() {
         ..CreateOptions::default()
     };
     engine()
-        .create(&src, &[root], &src_opts, &NoProgress, &ctl)
+        .create(
+            &src,
+            &[root],
+            &src_opts,
+            CreateCommitPolicy::ReplaceExisting,
+            &NoProgress,
+            &ctl,
+        )
         .unwrap();
 
     // Wrong/missing source password fails.
@@ -956,6 +939,7 @@ fn encrypted_source_to_encrypted_destination() {
             &tmp.path().join("fail.7z"),
             &OpenOptions::default(),
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &NoProgress,
             &ctl,
         )
@@ -976,7 +960,15 @@ fn encrypted_source_to_encrypted_destination() {
         ..CreateOptions::default()
     };
     engine()
-        .convert(&src, &dest, &open, &create, &NoProgress, &ctl)
+        .convert(
+            &src,
+            &dest,
+            &open,
+            &create,
+            CreateCommitPolicy::ReplaceExisting,
+            &NoProgress,
+            &ctl,
+        )
         .unwrap();
     let out = tmp.path().join("extracted");
     let dest_open = OpenOptions {
@@ -1011,7 +1003,14 @@ fn symlink_to_7z_reports_unsupported_with_entry() {
     let src = tmp.path().join("src.zip");
     let ctl = ControlToken::new();
     engine()
-        .create(&src, &[root], &CreateOptions::default(), &NoProgress, &ctl)
+        .create(
+            &src,
+            &[root],
+            &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
+            &NoProgress,
+            &ctl,
+        )
         .unwrap();
     let dest = tmp.path().join("out.7z");
     fs::write(&dest, b"previous output").unwrap();
@@ -1021,6 +1020,7 @@ fn symlink_to_7z_reports_unsupported_with_entry() {
             &dest,
             &OpenOptions::default(),
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &NoProgress,
             &ctl,
         )
@@ -1061,6 +1061,7 @@ fn hardlink_to_7z_reports_unsupported_with_entry_and_target() {
             &tmp.path().join("out.7z"),
             &OpenOptions::default(),
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &NoProgress,
             &ctl,
         )
@@ -1097,7 +1098,14 @@ fn single_file_zip_converts_to_plain_gz() {
     let src = tmp.path().join("src.zip");
     let ctl = ControlToken::new();
     engine()
-        .create(&src, &[root], &CreateOptions::default(), &NoProgress, &ctl)
+        .create(
+            &src,
+            &[root],
+            &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
+            &NoProgress,
+            &ctl,
+        )
         .unwrap();
     let dest = tmp.path().join("only.txt.gz");
     engine()
@@ -1106,6 +1114,7 @@ fn single_file_zip_converts_to_plain_gz() {
             &dest,
             &OpenOptions::default(),
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &NoProgress,
             &ctl,
         )

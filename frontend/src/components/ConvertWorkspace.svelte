@@ -1,20 +1,9 @@
 <script lang="ts" module>
   import type { ComponentProps } from "svelte";
   import type { CreatePlanDto, DiskSpaceDto } from "../lib/ipc";
+  import type { ArchiveOutputState, ArchiveOutputPhase, ArchiveOutputStage } from "../lib/archive-output-workflow.svelte";
 
   type CreateProtectionOptionsComponent = typeof import("./CreateProtectionOptions.svelte").default;
-  type ConvertPreflightPhase =
-    | "idle"
-    | "choosingDest"
-    | "measuring"
-    | "checkingTemp"
-    | "checkingDest"
-    | "reviewing"
-    | "submitting"
-    | "ready"
-    | "cancelled"
-    | "blocked";
-  type ConvertPreflightStage = "source" | "temp" | "destination" | "submit";
 
   export type ConvertWorkspaceVariant = "modern" | "classic";
 
@@ -29,7 +18,7 @@
   }
 
   export interface ConvertWorkspaceSurface {
-    tr: (key: string, fallback: string) => string;
+    tr: (key: string, fallback?: string) => string;
     start: {
       label: string;
       disabled: boolean;
@@ -86,12 +75,12 @@
     };
     showPreflight: boolean;
     preflight: {
-      phase: ConvertPreflightPhase;
-      requestKind: "plan" | "destination" | null;
+      phase: ArchiveOutputPhase;
+      requestKind: ArchiveOutputState<never>["requestKind"];
       cancelPending: boolean;
       current: string;
       issue: string;
-      issueStage: ConvertPreflightStage | null;
+      issueStage: ArchiveOutputStage | null;
       lockedReason: string;
       cancellable: boolean;
       destination: string | null;
@@ -135,38 +124,39 @@
   function preflightPhaseLabel(): string {
     const preflight = surface.preflight;
     if (preflight.cancelPending) {
-      return surface.tr("gui.convert.preflight_cancelling", "Stopping the current check");
+      return surface.tr("gui.convert.preflight_cancelling");
     }
     switch (preflight.phase) {
+      case "selecting":
       case "choosingDest":
         return preflight.requestKind === "destination"
-          ? surface.tr("gui.convert.preflight_checking_output", "Checking the current output")
-          : surface.tr("gui.convert.preflight_waiting_destination", "Waiting for destination");
+          ? surface.tr("gui.convert.preflight_checking_output")
+          : surface.tr("gui.convert.preflight_waiting_destination");
       case "measuring":
-        return surface.tr("gui.convert.preflight_reading_archive", "Reading archive metadata");
+        return surface.tr("gui.convert.preflight_reading_archive");
       case "checkingTemp":
-        return surface.tr("gui.convert.preflight_checking_workspace", "Checking conversion workspace");
+        return surface.tr("gui.convert.preflight_checking_workspace");
       case "checkingDest":
-        return surface.tr("gui.convert.preflight_checking_destination", "Checking destination disk");
+        return surface.tr("gui.convert.preflight_checking_destination");
       case "reviewing":
-        return surface.tr("gui.convert.preflight_ready_for_review", "Ready for review");
+        return surface.tr("gui.convert.preflight_ready_for_review");
       case "submitting":
         return preflight.requestKind === "destination"
-          ? surface.tr("gui.convert.preflight_rechecking_output", "Rechecking the current output")
-          : surface.tr("gui.convert.preflight_submitting", "Adding conversion to the queue");
+          ? surface.tr("gui.convert.preflight_rechecking_output")
+          : surface.tr("gui.convert.preflight_submitting");
       case "ready":
-        return surface.tr("gui.convert.preflight_ready", "Conversion queued");
+        return surface.tr("gui.convert.preflight_ready");
       case "cancelled":
-        return surface.tr("gui.convert.preflight_cancelled", "Checks cancelled");
+        return surface.tr("gui.convert.preflight_cancelled");
       case "blocked":
-        return surface.tr("gui.convert.preflight_blocked", "Checks need attention");
+        return surface.tr("gui.convert.preflight_blocked");
       case "idle":
-        return surface.tr("gui.convert.preflight_pending", "Checks pending");
+        return surface.tr("gui.convert.preflight_pending");
     }
   }
 
   function preflightStepState(
-    stage: Exclude<ConvertPreflightStage, "submit">,
+    stage: Exclude<ArchiveOutputStage, "submit">,
   ): StepState {
     const preflight = surface.preflight;
     if (preflight.issueStage === stage) {
@@ -195,21 +185,21 @@
   }
 
   function preflightStepStateLabel(state: StepState): string {
-    if (state === "active") return surface.tr("gui.convert.preflight_stage_active", "In progress");
-    if (state === "ready") return surface.tr("gui.convert.preflight_stage_ready", "Checked");
-    if (state === "blocked") return surface.tr("gui.convert.preflight_stage_blocked", "Blocked");
-    if (state === "cancelled") return surface.tr("gui.convert.preflight_stage_cancelled", "Cancelled");
-    return surface.tr("gui.convert.preflight_stage_pending", "Pending");
+    if (state === "active") return surface.tr("gui.convert.preflight_stage_active");
+    if (state === "ready") return surface.tr("gui.convert.preflight_stage_ready");
+    if (state === "blocked") return surface.tr("gui.convert.preflight_stage_blocked");
+    if (state === "cancelled") return surface.tr("gui.convert.preflight_stage_cancelled");
+    return surface.tr("gui.convert.preflight_stage_pending");
   }
 
   function preflightIssueSummary(
-    stage: Exclude<ConvertPreflightStage, "submit">,
+    stage: Exclude<ArchiveOutputStage, "submit">,
   ): string | null {
     const preflight = surface.preflight;
     if (preflight.issueStage !== stage) return null;
     return preflight.phase === "cancelled"
-      ? surface.tr("gui.convert.preflight_stage_cancelled_summary", "Cancelled before this check completed")
-      : surface.tr("gui.convert.preflight_stage_blocked_summary", "This check could not finish");
+      ? surface.tr("gui.convert.preflight_stage_cancelled_summary")
+      : surface.tr("gui.convert.preflight_stage_blocked_summary");
   }
 
   function archivePreflightSummary(): string {
@@ -217,12 +207,12 @@
     const interrupted = preflightIssueSummary("source");
     if (interrupted) return interrupted;
     if (preflight.phase === "measuring") {
-      return surface.tr("gui.convert.preflight_archive_metadata_pending", "Reading entries without extracting files…");
+      return surface.tr("gui.convert.preflight_archive_metadata_pending");
     }
     if (!preflight.plan) {
-      return surface.tr("gui.convert.preflight_archive_pending", "Archive measurement pending");
+      return surface.tr("gui.convert.preflight_archive_pending");
     }
-    return surface.tr("gui.convert.preflight_archive_value", "{size} · {entries} entries")
+    return surface.tr("gui.convert.preflight_archive_value")
       .replace("{size}", formatBytes(preflight.plan.total_bytes))
       .replace("{entries}", preflight.plan.entries.toLocaleString());
   }
@@ -232,32 +222,31 @@
     const interrupted = preflightIssueSummary("temp");
     if (interrupted) return interrupted;
     if (preflight.phase === "checkingTemp") {
-      return surface.tr("gui.convert.preflight_workspace_checking", "Checking peak workspace…");
+      return surface.tr("gui.convert.preflight_workspace_checking");
     }
     if (!preflight.workspaceDisk) {
-      return surface.tr("gui.convert.preflight_workspace_pending", "Workspace check pending");
+      return surface.tr("gui.convert.preflight_workspace_pending");
     }
     if (preflight.systemTempDisk) {
       const ok = preflight.workspaceDisk.ok && preflight.systemTempDisk.ok;
       return surface.tr(
         "gui.convert.preflight_workspace_split",
-        "{status} · destination {destination} · temporary {temporary}",
       )
         .replace(
           "{status}",
           ok
-            ? surface.tr("gui.convert.preflight_workspace_ok", "Workspace OK")
-            : surface.tr("gui.convert.preflight_workspace_blocked", "Workspace blocked"),
+            ? surface.tr("gui.convert.preflight_workspace_ok")
+            : surface.tr("gui.convert.preflight_workspace_blocked"),
         )
         .replace("{destination}", formatBytes(preflight.workspaceDisk.available_bytes))
         .replace("{temporary}", formatBytes(preflight.systemTempDisk.available_bytes));
     }
-    return surface.tr("gui.convert.preflight_space_available", "{status} · {available} available")
+    return surface.tr("gui.convert.preflight_space_available")
       .replace(
         "{status}",
         preflight.workspaceDisk.ok
-          ? surface.tr("gui.convert.preflight_workspace_ok", "Workspace OK")
-          : surface.tr("gui.convert.preflight_workspace_blocked", "Workspace blocked"),
+          ? surface.tr("gui.convert.preflight_workspace_ok")
+          : surface.tr("gui.convert.preflight_workspace_blocked"),
       )
       .replace("{available}", formatBytes(preflight.workspaceDisk.available_bytes));
   }
@@ -268,21 +257,21 @@
     if (interrupted) return interrupted;
     if (preflight.phase === "choosingDest") {
       return preflight.requestKind === "destination"
-        ? surface.tr("gui.convert.preflight_output_checking", "Checking the existing output set…")
-        : surface.tr("gui.convert.preflight_destination_waiting", "Waiting for a save location…");
+        ? surface.tr("gui.convert.preflight_output_checking")
+        : surface.tr("gui.convert.preflight_destination_waiting");
     }
     if (preflight.phase === "checkingDest") {
-      return surface.tr("gui.convert.preflight_destination_checking", "Checking final output space…");
+      return surface.tr("gui.convert.preflight_destination_checking");
     }
     if (!preflight.destinationDisk) {
-      return surface.tr("gui.convert.preflight_destination_pending", "Destination check pending");
+      return surface.tr("gui.convert.preflight_destination_pending");
     }
-    return surface.tr("gui.convert.preflight_space_available", "{status} · {available} available")
+    return surface.tr("gui.convert.preflight_space_available")
       .replace(
         "{status}",
         preflight.destinationDisk.ok
-          ? surface.tr("gui.convert.preflight_destination_ok", "Destination OK")
-          : surface.tr("gui.convert.preflight_destination_blocked", "Destination blocked"),
+          ? surface.tr("gui.convert.preflight_destination_ok")
+          : surface.tr("gui.convert.preflight_destination_blocked"),
       )
       .replace("{available}", formatBytes(preflight.destinationDisk.available_bytes));
   }
@@ -294,7 +283,7 @@
     return [
       {
         id: "source",
-        label: surface.tr("gui.convert.preflight_archive", "Archive metadata"),
+        label: surface.tr("gui.convert.preflight_archive"),
         summary: archivePreflightSummary(),
         detail: "",
         state: sourceState,
@@ -302,7 +291,7 @@
       },
       {
         id: "temp",
-        label: surface.tr("gui.convert.preflight_workspace", "Workspace peak"),
+        label: surface.tr("gui.convert.preflight_workspace"),
         summary: workspacePreflightSummary(),
         detail: "",
         state: workspaceState,
@@ -310,13 +299,13 @@
       },
       {
         id: "destination",
-        label: surface.tr("gui.convert.preflight_destination", "Output destination"),
+        label: surface.tr("gui.convert.preflight_destination"),
         summary: destinationPreflightSummary(),
         detail: surface.preflight.current
-          ? surface.tr("gui.convert.preflight_current", "Current · {path}")
+          ? surface.tr("gui.convert.preflight_current")
               .replace("{path}", surface.preflight.current)
           : surface.preflight.destination
-            ? surface.tr("gui.convert.preflight_destination_value", "Destination · {path}")
+            ? surface.tr("gui.convert.preflight_destination_value")
                 .replace("{path}", surface.preflight.destination)
             : "",
         state: destinationState,
@@ -330,14 +319,14 @@
     return {
       variant,
       phase: preflight.phase,
-      ariaLabel: surface.tr("gui.convert.preflight_status", "Conversion preflight status"),
-      heading: surface.tr("gui.convert.preflight_heading", "Before conversion"),
+      ariaLabel: surface.tr("gui.convert.preflight_status"),
+      heading: surface.tr("gui.convert.preflight_heading"),
       statusLabel: preflightPhaseLabel(),
       lockMessage: preflight.lockedReason,
       actionLabel: preflight.cancellable
         ? preflight.cancelPending
-          ? surface.tr("gui.convert.preflight_cancelling", "Stopping the current check")
-          : surface.tr("gui.convert.preflight_cancel", "Cancel checks")
+          ? surface.tr("gui.convert.preflight_cancelling")
+          : surface.tr("gui.convert.preflight_cancel")
         : "",
       actionPending: preflight.cancelPending,
       issue: preflight.issue,
@@ -351,11 +340,11 @@
     if (!review) return "";
     const count = review.plan.split_volume_count_budget;
     if (review.splitSize !== null && count !== null) {
-      return surface.tr("gui.convert.review.numbered_volumes", "Numbered parts · up to {count} × {size}")
+      return surface.tr("gui.convert.review.numbered_volumes")
         .replace("{count}", Math.max(1, Math.trunc(count)).toLocaleString())
         .replace("{size}", formatBytes(review.splitSize));
     }
-    return surface.tr("gui.convert.review.single_file", "One archive file");
+    return surface.tr("gui.convert.review.single_file");
   }
 
   function reviewItems() {
@@ -365,33 +354,32 @@
     const workspace = plan.system_temp_budget_bytes > 0
       ? surface.tr(
           "gui.convert.review.workspace_split",
-          "{destination} destination + {temporary} system temporary",
         )
           .replace("{destination}", formatBytes(plan.workspace_budget_bytes))
           .replace("{temporary}", formatBytes(plan.system_temp_budget_bytes))
-      : surface.tr("gui.convert.review.workspace_destination", "{size} on the destination filesystem")
+      : surface.tr("gui.convert.review.workspace_destination")
           .replace("{size}", formatBytes(plan.workspace_budget_bytes));
     return [
       {
         id: "source",
-        label: surface.tr("gui.convert.review.source", "Measured source archive"),
-        value: surface.tr("gui.convert.review.source_value", "{size} · {entries} entries")
+        label: surface.tr("gui.convert.review.source"),
+        value: surface.tr("gui.convert.review.source_value")
           .replace("{size}", formatBytes(plan.total_bytes))
           .replace("{entries}", plan.entries.toLocaleString()),
       },
       {
         id: "layout",
-        label: surface.tr("gui.convert.review.layout", "Output layout"),
+        label: surface.tr("gui.convert.review.layout"),
         value: reviewLayout(),
       },
       {
         id: "budget",
-        label: surface.tr("gui.convert.review.output_budget", "Final output space upper bound"),
+        label: surface.tr("gui.convert.review.output_budget"),
         value: formatBytes(plan.final_output_budget_bytes),
       },
       {
         id: "workspace",
-        label: surface.tr("gui.convert.review.workspace", "Peak conversion workspace"),
+        label: surface.tr("gui.convert.review.workspace"),
         value: workspace,
       },
     ];
@@ -401,21 +389,20 @@
     const review = surface.review!;
     return {
       variant,
-      ariaLabel: surface.tr("gui.convert.review.aria", "Conversion plan review"),
-      eyebrow: surface.tr("gui.convert.review.eyebrow", "Checked and ready"),
-      heading: surface.tr("gui.convert.review.heading", "Review before converting"),
+      ariaLabel: surface.tr("gui.convert.review.aria"),
+      eyebrow: surface.tr("gui.convert.review.eyebrow"),
+      heading: surface.tr("gui.convert.review.heading"),
       description: review.issue || surface.tr(
         "gui.convert.review.description",
-        "Squallz read the source archive metadata and checked the required filesystems. These values are conservative safety bounds, not compressed-size predictions; the worker checks them again before writing.",
       ),
       outputName: pathBaseName(review.plan.primary_output),
       items: reviewItems(),
       confirmLabel: review.busy
-        ? surface.tr("gui.convert.review.submitting", "Adding to queue")
+        ? surface.tr("gui.convert.review.submitting")
         : review.retry
-          ? surface.tr("gui.convert.review.retry", "Try conversion again")
-          : surface.tr("gui.convert.review.confirm", "Start conversion"),
-      cancelLabel: surface.tr("gui.convert.review.cancel", "Back to options"),
+          ? surface.tr("gui.convert.review.retry")
+          : surface.tr("gui.convert.review.confirm"),
+      cancelLabel: surface.tr("gui.convert.review.cancel"),
       busy: review.busy,
       onConfirm: review.onConfirm,
       onCancel: review.onCancel,
@@ -427,7 +414,7 @@
   <div
     class={classic ? "classic-segments" : "format-segments"}
     role="group"
-    aria-label={surface.tr("gui.convert.target_format", "Target format")}
+    aria-label={surface.tr("gui.convert.target_format")}
   >
     {#each surface.formats as format (format.id)}
       <button
@@ -448,7 +435,7 @@
   <div
     class={classic ? "classic-segments classic-profile-segments" : "preset-row"}
     role="group"
-    aria-label={surface.tr("gui.convert.profile", "Compression profile")}
+    aria-label={surface.tr("gui.convert.profile")}
   >
     {#each surface.profiles as profile (profile.id)}
       <button
@@ -512,7 +499,7 @@
   <div class="create-sheet modern-convert">
     <div class="sheet-head">
       <div>
-        <span class="eyebrow">{surface.tr("gui.convert.eyebrow", "Archive / Convert")}</span>
+        <span class="eyebrow">{surface.tr("gui.convert.eyebrow")}</span>
         <h1 id="convert-workspace-heading" tabindex="-1">{surface.tr("gui.convert.title", "Convert archive")}</h1>
         <p>{surface.tr("gui.convert.subtitle", "Choose the output format, compression, protection, and volume layout. Squallz converts without modifying the source.")}</p>
       </div>
@@ -531,28 +518,28 @@
       <section class="create-main-panel convert-main-panel">
         <div class="convert-route-grid">
           <div class="convert-route-node">
-            <span class="field-label">{surface.tr("gui.convert.source", "Source")}</span>
+            <span class="field-label">{surface.tr("gui.convert.source")}</span>
             <div class="path-preview convert-path-preview">{surface.source.path}</div>
           </div>
           <span class="convert-route-arrow" aria-hidden="true"><Icon name="repeat" size={17} /></span>
           <div class="convert-route-node">
-            <span class="field-label">{surface.tr("gui.convert.destination", "Destination")}</span>
+            <span class="field-label">{surface.tr("gui.convert.destination")}</span>
             <div class="path-preview convert-path-preview" aria-live="polite">{surface.destination.path}</div>
           </div>
         </div>
 
         <div class="convert-choice-stack">
           <section class="convert-choice-group">
-            <span class="field-label">{surface.tr("gui.convert.target_format", "Target format")}</span>
+            <span class="field-label">{surface.tr("gui.convert.target_format")}</span>
             {@render formatChoices()}
             <p class="format-note">{surface.formatNote}</p>
           </section>
           <section class="convert-choice-group">
-            <span class="field-label">{surface.tr("gui.convert.profile", "Compression profile")}</span>
+            <span class="field-label">{surface.tr("gui.convert.profile")}</span>
             {@render profileChoices()}
             <div class="level-control">
               <div>
-                <strong>{surface.tr("gui.convert.level", "Compression level {level}").replace("{level}", String(surface.compression.level))}</strong>
+                <strong>{surface.tr("gui.convert.level").replace("{level}", String(surface.compression.level))}</strong>
                 <span>{surface.compression.detail}</span>
               </div>
               {@render customLevel()}
@@ -562,14 +549,14 @@
 
         <div class="settings-metric-grid two-column convert-metric-grid">
           <div>
-            <span>{surface.tr("gui.convert.source_format", "Source format")}</span>
+            <span>{surface.tr("gui.convert.source_format")}</span>
             <strong>{surface.source.format}</strong>
             <small>{surface.source.summary}</small>
           </div>
           <div>
-            <span>{surface.tr("gui.convert.method", "Output method")}</span>
+            <span>{surface.tr("gui.convert.method")}</span>
             <strong>{surface.compression.method}</strong>
-            <small>{surface.tr("gui.convert.streaming_note", "Conversion is streamed; no temporary extraction")}</small>
+            <small>{surface.tr("gui.convert.streaming_note")}</small>
           </div>
         </div>
 
@@ -581,7 +568,7 @@
           <summary onkeydown={surface.advanced.onKeydown}>
             <span class="create-advanced-summary-icon"><Icon name="settings" size={17} /></span>
             <span>
-              <strong>{surface.tr("gui.convert.advanced.title", "Output protection and volumes")}</strong>
+              <strong>{surface.tr("gui.convert.advanced.title")}</strong>
               <small>{surface.advanced.detail}</small>
             </span>
             <Icon name="chevron-down" size={16} class="create-advanced-chevron" />
@@ -624,7 +611,7 @@
       <header>
         <div>
           <h1 id="convert-workspace-heading" tabindex="-1">{surface.tr("gui.convert.title", "Convert archive")}</h1>
-          <p>{surface.tr("gui.convert.classic_intro", "Choose the target format, compression, protection, and volume layout before saving the converted archive.")}</p>
+          <p>{surface.tr("gui.convert.classic_intro")}</p>
         </div>
         <button
           type="button"
@@ -638,25 +625,25 @@
       </header>
 
       <div class="classic-form-grid">
-        <div class="classic-label">{surface.tr("gui.convert.source", "Source")}</div>
+        <div class="classic-label">{surface.tr("gui.convert.source")}</div>
         <div class="classic-input convert-copy">{surface.source.path}</div>
-        <div class="classic-label">{surface.tr("gui.convert.source_format", "Source format")}</div>
+        <div class="classic-label">{surface.tr("gui.convert.source_format")}</div>
         <div class="classic-input convert-copy">{surface.source.format} · {surface.source.summary}</div>
-        <div class="classic-label">{surface.tr("gui.convert.target_format", "Target format")}</div>
+        <div class="classic-label">{surface.tr("gui.convert.target_format")}</div>
         {@render formatChoices(true)}
-        <div class="classic-label">{surface.tr("gui.create.format_boundary", "Format boundary")}</div>
+        <div class="classic-label">{surface.tr("gui.create.format_boundary")}</div>
         <div class="classic-input accent convert-copy">{surface.formatNote}</div>
-        <div class="classic-label">{surface.tr("gui.convert.profile", "Compression profile")}</div>
+        <div class="classic-label">{surface.tr("gui.convert.profile")}</div>
         {@render profileChoices(true)}
-        <div class="classic-label">{surface.tr("gui.convert.method", "Output method")}</div>
+        <div class="classic-label">{surface.tr("gui.convert.method")}</div>
         <div class="classic-input">{surface.compression.method}</div>
         {#if surface.compression.custom}
-          <div class="classic-label">{surface.tr("gui.convert.custom_level", "Custom level")}</div>
+          <div class="classic-label">{surface.tr("gui.convert.custom_level")}</div>
           <div class="convert-custom-level-classic">
             {@render customLevel(true)}
           </div>
         {/if}
-        <div class="classic-label">{surface.tr("gui.convert.destination", "Destination")}</div>
+        <div class="classic-label">{surface.tr("gui.convert.destination")}</div>
         <div class="classic-input accent convert-copy" aria-live="polite">{surface.destination.path}</div>
         <CreateProtectionOptions {...surface.protection} />
         <div class="classic-label">{surface.contract.title}</div>

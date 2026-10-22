@@ -1,4 +1,4 @@
-import { fat32CompatibleSplitSizeBytes, resolveSplitSizeBytes } from "./archive-output-options";
+import { OutputOptionsDraft, clampCustomLevel, type OutputOptionsState, type OutputOptionEdit } from "./output-options-draft.svelte";
 import type { CreateCredentialIntent, CreateRunDraft } from "./create-preflight.svelte";
 import { parseDelimitedRules } from "./format";
 import type {
@@ -6,8 +6,8 @@ import type {
   CreateDestinationBase, JobSpec, OverwritePolicy, PostSuccessAction, SfxCreateCapabilityDto,
 } from "./ipc";
 import {
-  createFormatIds, createFormats, createProfiles,
-  type CreateFormatId, type CreateProfileId, type CreateSplitMode, type CreateSplitPreset, type CreateSplitUnit,
+  createFormatIds, createFormats,
+  type CreateFormatId,
 } from "./ui-model";
 
 type CompressJob = Extract<JobSpec, { kind: "compress" }>;
@@ -29,17 +29,9 @@ export type CreateDraftContext = Readonly<{
 }>;
 
 export type CreateDraftEdit =
-  | { kind: "format"; value: CreateFormatId }
-  | { kind: "profile"; value: CreateProfileId }
-  | { kind: "customLevel"; value: number | string }
-  | { kind: "password"; value: string }
-  | { kind: "passwordConfirmation"; value: string }
-  | { kind: "customSplitAmount"; value: string }
+  | OutputOptionEdit
   | { kind: "excludeText"; value: string }
-  | { kind: "passwordVisible" | "encryptionEnabled" | "encryptNames" | "sfxEnabled" | "testAfterCreate"; value: boolean }
-  | { kind: "splitPreset"; value: CreateSplitPreset }
-  | { kind: "splitMode"; value: CreateSplitMode }
-  | { kind: "customSplitUnit"; value: CreateSplitUnit }
+  | { kind: "sfxEnabled" | "testAfterCreate"; value: boolean }
   | { kind: "contentPolicy"; value: CreateContentPolicy }
   | { kind: "sqzInnerFormat"; value: SqzInnerFormat }
   | { kind: "destinationBase"; value: CreateDestinationBase }
@@ -54,21 +46,7 @@ export type CreateDraftChange = Readonly<{
   requestedSfxTarget?: SfxCreateCapabilityDto["target"];
 }>;
 
-type CreateOptionsState = {
-  format: CreateFormatId;
-  profile: CreateProfileId;
-  customLevel: number;
-  customLevelInvalid: boolean;
-  password: string;
-  passwordConfirmation: string;
-  passwordVisible: boolean;
-  encryptionEnabled: boolean;
-  encryptNames: boolean;
-  splitPreset: CreateSplitPreset;
-  splitMode: CreateSplitMode;
-  customSplitAmount: string;
-  customSplitUnit: CreateSplitUnit;
-  exactSplitSizeBytes: string | null;
+type CreateOptionsState = OutputOptionsState & {
   contentPolicy: CreateContentPolicy;
   excludeText: string;
   sfxEnabled: boolean;
@@ -80,7 +58,6 @@ type CreateOptionsState = {
   completion: CreateCompletionAction;
   postSuccess: PostSuccessAction;
   testAfterCreate: boolean;
-  validationAttempted: boolean;
   touched: boolean;
 };
 
@@ -92,32 +69,23 @@ type RestoredOptions = Pick<CreateOptionsState,
 };
 
 const rejected = (issue: CreateDraftIssue): CreateDraftChange => ({ changed: false, issue });
-const clampCustomLevel = (value: number): number => Number.isFinite(value) ? Math.min(9, Math.max(1, Math.round(value))) : 6;
 
 /** Owns editable create options; native plans and submission belong to CreatePreflightSession. */
 export class CreateOptionsDraft {
-  #state = $state<CreateOptionsState>({
-    format: "7z", profile: "balanced", customLevel: 6, customLevelInvalid: false,
-    password: "", passwordConfirmation: "", passwordVisible: false, encryptionEnabled: false, encryptNames: false,
-    splitPreset: "none", splitMode: "generic", customSplitAmount: "100", customSplitUnit: "mib", exactSplitSizeBytes: null,
+  #output = new OutputOptionsDraft<Omit<CreateOptionsState, keyof OutputOptionsState>>({
     contentPolicy: "cross_platform_clean", excludeText: "", sfxEnabled: false, sfxTarget: "current_platform",
     sqzInnerFormat: "sqz", destinationBase: "ask", overwritePolicy: "ask", suggestedDestination: null,
-    completion: "none", postSuccess: "keep_source", testAfterCreate: false, validationAttempted: false, touched: false,
+    completion: "none", postSuccess: "keep_source", testAfterCreate: false, touched: false,
   });
 
   constructor(initial: Pick<CreateOptionsState, "format" | "profile" | "customLevel"> & { touched?: boolean }) {
     Object.assign(this.#state, initial, { customLevel: clampCustomLevel(initial.customLevel) });
   }
 
+  get #state(): CreateOptionsState { return this.#output.state; }
   get state(): Readonly<CreateOptionsState> { return this.#state; }
-  get compressionLevel(): number {
-    const state = this.#state;
-    return state.profile === "custom" ? state.customLevel : createProfiles[state.profile].level;
-  }
-  get splitSize(): number | null {
-    const state = this.#state;
-    return resolveSplitSizeBytes(state.splitPreset, state.customSplitAmount, state.customSplitUnit, state.exactSplitSizeBytes);
-  }
+  get compressionLevel(): number { return this.#output.compressionLevel; }
+  get splitSize(): number | null { return this.#output.splitSize; }
   get excludeRules(): string[] { return parseDelimitedRules(this.#state.excludeText); }
   get effectiveTestAfterCreate(): boolean { return this.#state.testAfterCreate || this.#state.postSuccess === "trash_source"; }
   get trashExcluded(): boolean {
@@ -127,43 +95,18 @@ export class CreateOptionsDraft {
     if (this.#state.sfxEnabled) return "sfx";
     return this.splitSize !== null ? "split" : null;
   }
-  get nativeSplitKind(): "zip" | "wim" | null {
-    const { format, sfxEnabled } = this.#state;
-    return !sfxEnabled && (format === "zip" || format === "wim") ? format : null;
-  }
-  get passwordIssue(): CreateDraftIssue | null {
-    const state = this.#state;
-    if (!createFormats[state.format].can_encrypt_data) return null;
-    if (state.encryptionEnabled && !state.password) return "password_required";
-    if (!state.password) return null;
-    if (!state.passwordConfirmation) return "confirm_password_required";
-    return state.password === state.passwordConfirmation ? null : "passwords_do_not_match";
-  }
-  get splitIssue(): CreateDraftIssue | null {
-    const size = this.splitSize;
-    if (this.#state.splitPreset === "custom" && size === null) return "invalid_part_size";
-    return this.#state.format === "zip" && this.#state.splitMode === "native" && size !== null && size > fat32CompatibleSplitSizeBytes
-      ? "native_zip_part_size_limit" : null;
-  }
+  get nativeSplitKind(): "zip" | "wim" | null { return this.#state.sfxEnabled ? null : this.#output.nativeSplitKind; }
+  get passwordIssue(): CreateDraftIssue | null { return this.#output.passwordIssue; }
+  get splitIssue(): CreateDraftIssue | null { return this.#output.splitIssue; }
 
   outputExtension(sfxExtension: string): string {
-    if (this.#state.sfxEnabled) return sfxExtension;
-    return this.#state.format === "wim" && this.splitSize !== null && this.#state.splitMode === "native"
-      ? "swm" : createFormats[this.#state.format].extension;
+    return this.#state.sfxEnabled ? sfxExtension : this.#output.outputExtension;
   }
 
   edit(edit: CreateDraftEdit, context: CreateDraftContext, beforeEdit: () => void): CreateDraftChange {
     const issue = this.#editIssue(edit, context);
     if (issue) return rejected(issue);
-    if (edit.kind === "customLevel" && typeof edit.value === "string") {
-      const raw = edit.value.trim();
-      const value = Number(raw);
-      if (!raw || !Number.isInteger(value) || value < 1 || value > 9) {
-        this.#state.customLevelInvalid = true;
-        return rejected("custom_level_invalid");
-      }
-      edit = { kind: "customLevel", value };
-    }
+    if (edit.kind === "customLevel" && !this.#output.validateLevel(edit.value)) return rejected("custom_level_invalid");
     const state = this.#state;
     if ((edit.kind === "contentPolicy" || edit.kind === "destinationBase" || edit.kind === "completion"
       || edit.kind === "postSuccess" || edit.kind === "testAfterCreate") && state[edit.kind] === edit.value) {
@@ -173,51 +116,12 @@ export class CreateOptionsDraft {
     if (edit.kind !== "passwordVisible") beforeEdit();
     switch (edit.kind) {
       case "format":
-        state.format = edit.value;
-        if (this.nativeSplitKind === null) state.splitMode = "generic";
+        this.#output.edit(edit);
         if (edit.value === "sqz") state.sqzInnerFormat = "sqz";
-        if (!createFormats[edit.value].can_encrypt_data) this.#clearCredentials();
-        else if (!createFormats[edit.value].can_encrypt_names) state.encryptNames = false;
-        state.validationAttempted = false;
         break;
-      case "profile": state.profile = edit.value; break;
-      case "customLevel":
-        state.customLevel = clampCustomLevel(Number(edit.value));
-        state.customLevelInvalid = false;
-        state.profile = "custom";
-        break;
-      case "password":
-        state.password = edit.value;
-        if (edit.value) state.encryptionEnabled = true;
-        state.validationAttempted = !edit.value && state.encryptionEnabled;
-        if (!edit.value) state.passwordConfirmation = "";
-        break;
-      case "passwordConfirmation": state.passwordConfirmation = edit.value; state.validationAttempted = false; break;
       case "passwordVisible":
-        state.passwordVisible = edit.value;
+        this.#output.edit(edit);
         return { changed: true };
-      case "encryptionEnabled":
-        state.encryptionEnabled = edit.value && createFormats[state.format].can_encrypt_data;
-        if (!state.encryptionEnabled) this.#clearCredentials();
-        state.validationAttempted = state.encryptionEnabled;
-        break;
-      case "encryptNames": state.encryptNames = edit.value && createFormats[state.format].can_encrypt_names && state.encryptionEnabled; break;
-      case "splitPreset":
-        state.splitPreset = edit.value;
-        state.exactSplitSizeBytes = null;
-        if (edit.value === "none") state.splitMode = "generic";
-        state.validationAttempted = false;
-        break;
-      case "splitMode":
-        state.splitMode = edit.value;
-        state.validationAttempted = false;
-        break;
-      case "customSplitAmount": case "customSplitUnit":
-        if (edit.kind === "customSplitAmount") state.customSplitAmount = edit.value;
-        else state.customSplitUnit = edit.value;
-        state.exactSplitSizeBytes = null;
-        state.validationAttempted = false;
-        break;
       case "sfxEnabled":
         state.sfxEnabled = edit.value;
         state.sfxTarget = "current_platform";
@@ -248,6 +152,7 @@ export class CreateOptionsDraft {
         break;
       case "excludeText": state.excludeText = edit.value; break;
       case "sqzInnerFormat": state.sqzInnerFormat = edit.value; break;
+      default: this.#output.edit(edit);
     }
     state.touched = true;
     return this.#normalize(edit.kind === "contentPolicy" || edit.kind === "excludeText",
@@ -261,7 +166,7 @@ export class CreateOptionsDraft {
   acceptSfxCapability(available: boolean): void { if (!available) this.#state.sfxEnabled = false; }
   normalizePostSuccess(): boolean { return Boolean(this.#normalize(true, false).postSuccessNormalized); }
   resetCredentials(intent: CreateCredentialIntent | null): void {
-    this.#clearCredentials();
+    this.#output.clearCredentials();
     if (intent?.restoreCredentialPrompt) {
       this.#state.encryptionEnabled = true;
       this.#state.encryptNames = intent.restoreEncryptNames;
@@ -366,40 +271,16 @@ export class CreateOptionsDraft {
     return { level: this.compressionLevel, splitSize: this.splitSize,
       excludes: this.#state.contentPolicy === "custom" ? this.excludeRules : [], testAfterCreate: this.effectiveTestAfterCreate };
   }
-  #clearCredentials(): void {
-    Object.assign(this.#state, { password: "", passwordConfirmation: "", passwordVisible: false, encryptNames: false, encryptionEnabled: false });
-  }
   #resolveSfxTarget(target: SfxTarget, capability: SfxCreateCapabilityDto): SfxCreateCapabilityDto["target"] {
     return target === "current_platform" ? capability.target : target;
   }
   #restore(options: RestoredOptions): CreateDraftChange {
     const { volumes, ...fields } = options;
-    this.#clearCredentials();
+    this.#output.clearCredentials();
     Object.assign(this.#state, fields, { profile: "custom", customLevelInvalid: false,
       overwritePolicy: options.destinationBase === "ask" ? "ask" : "rename", validationAttempted: false });
-    this.#restoreVolumes(volumes);
+    this.#output.restoreSplitSize(volumes.kind === "single" ? null : volumes.size_bytes, true);
     return this.#normalize(true, true);
-  }
-  #restoreVolumes(volumes: CreateArchivePresetOptions["volumes"]): void {
-    const state = this.#state;
-    if (volumes.kind === "single") {
-      state.splitPreset = "none";
-      state.exactSplitSizeBytes = null;
-      return;
-    }
-    const bytes = Number(volumes.size_bytes);
-    const bytesPerMiB = 1024 ** 2;
-    const bytesPerGiB = 1024 ** 3;
-    state.exactSplitSizeBytes = volumes.size_bytes;
-    if (bytes === 25 * bytesPerMiB) state.splitPreset = "25-mib";
-    else if (bytes === 100 * bytesPerMiB) state.splitPreset = "100-mib";
-    else if (bytes === 700 * bytesPerMiB) state.splitPreset = "700-mib";
-    else if (bytes === fat32CompatibleSplitSizeBytes) state.splitPreset = "4-gib";
-    else {
-      state.splitPreset = "custom";
-      state.customSplitUnit = bytes >= bytesPerGiB ? "gib" : "mib";
-      state.customSplitAmount = String(Number((bytes / (state.customSplitUnit === "gib" ? bytesPerGiB : bytesPerMiB)).toPrecision(9)));
-    }
   }
   #editIssue(edit: CreateDraftEdit, context: CreateDraftContext): CreateDraftIssue | null {
     if (context.locked) return "options_locked";
@@ -407,9 +288,7 @@ export class CreateOptionsDraft {
     switch (edit.kind) {
       case "format":
         if (state.sfxEnabled && edit.value !== "zip") return "sfx_zip_only";
-        if (state.encryptionEnabled && !createFormats[edit.value].can_encrypt_data) return "encryption_format_change";
-        if (state.encryptNames && !createFormats[edit.value].can_encrypt_names) return "name_encryption_format_change";
-        break;
+        return this.#output.formatIssue(edit.value);
       case "sfxEnabled":
         if (edit.value && state.encryptNames) return "name_encryption_format_change";
         if (edit.value && !context.capabilityReady) return "sfx_loading";

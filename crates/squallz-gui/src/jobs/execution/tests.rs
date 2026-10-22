@@ -21,7 +21,7 @@ fn keep_both_conflict_decision_uses_first_free_sibling_name() {
 #[test]
 fn extract_result_keeps_problem_preview_separate_from_core_counts() {
     let destination = PathBuf::from("output/archive");
-    let result = extract_result_json(
+    let result = extract_result(
         ExtractPlan {
             requested_destination: PathBuf::from("output"),
             destination: destination.clone(),
@@ -55,6 +55,7 @@ fn extract_result_keeps_problem_preview_separate_from_core_counts() {
             messages: vec!["broken.txt: invalid data".to_owned()],
         },
     );
+    let result = serde_json::json!(result);
 
     assert_eq!(result["dest"], destination.to_string_lossy().as_ref());
     assert!(result.get("skipped").is_none());
@@ -122,7 +123,6 @@ fn create_job_request_is_shared_for_plan_and_worker_options() {
     assert!(request.sfx_options().is_none());
     assert_eq!(request.post_success, PostSuccessAction::KeepSource);
     assert!(request.test_after_create);
-    assert!(!request.replace_existing);
     assert_eq!(request.commit_policy, CreateCommitPolicy::NoReplace);
 
     let not_create = JobSpec::Test {
@@ -271,10 +271,10 @@ fn create_result_reports_preserved_split_outputs_for_review() {
             total_output_bytes: 42,
             split_volume_count: Some(1),
         },
-        "create",
         SourceCleanupResult::new(SourceCleanupStatus::NotRequested, 0, 1),
         None,
     );
+    let result = serde_json::json!(result);
 
     assert_eq!(
         result["primary_output"].as_str(),
@@ -288,7 +288,7 @@ fn create_result_reports_preserved_split_outputs_for_review() {
         ])
     );
     assert_eq!(result["split"], true);
-    assert_eq!(result["tested_after_create"], false);
+    assert!(result.get("tested_after_create").is_none());
     assert!(result["entries_tested_after_create"].is_null());
 }
 
@@ -312,6 +312,7 @@ fn sfx_result_reports_preserved_previous_outputs_for_the_shared_warning_ui() {
         SourceCleanupResult::new(SourceCleanupStatus::NotRequested, 0, 1),
         Some(7),
     );
+    let result = serde_json::json!(result);
 
     assert_eq!(
         result["primary_output"].as_str(),
@@ -321,9 +322,9 @@ fn sfx_result_reports_preserved_previous_outputs_for_the_shared_warning_ui() {
         result["preserved_outputs"],
         serde_json::json!([preserved.to_string_lossy()])
     );
-    assert_eq!(result["operation"], "create_sfx");
-    assert_eq!(result["requires_signing"], true);
-    assert_eq!(result["tested_after_create"], true);
+    assert_eq!(result["sfx"]["target"], "macos");
+    assert_eq!(result["sfx"]["requires_signing"], true);
+    assert!(result["entries_tested_after_create"].is_number());
     assert_eq!(result["entries_tested_after_create"], 7);
 }
 
@@ -356,13 +357,19 @@ fn batch_extract_collapses_only_confirmed_volume_members() {
         make_item(Path::new("shown-part2.rar"), "/output/part2"),
     ];
 
-    let normalized = normalize_batch_extract_items_with(&items, &display_items, |path| {
-        if source_set.members().iter().any(|member| member == path) {
-            Ok(Some(source_set.clone()))
-        } else {
-            Ok(None)
-        }
-    });
+    let normalized = normalize_batch_extract_items_with(
+        &items,
+        &display_items,
+        &ControlToken::default(),
+        |path| {
+            if source_set.members().iter().any(|member| member == path) {
+                Ok(Some(source_set.clone()))
+            } else {
+                Ok(None)
+            }
+        },
+    )
+    .unwrap();
 
     assert_eq!(normalized.len(), 2);
     assert_eq!(normalized[0].execution.path, part1.to_string_lossy());
@@ -382,11 +389,13 @@ fn batch_extract_keeps_candidates_separate_when_source_probe_fails() {
     };
     let items = vec![make_item("sample.part1.rar"), make_item("sample.part2.rar")];
 
-    let normalized = normalize_batch_extract_items_with(&items, &items, |_| {
-        Err(FormatError::CorruptArchive(
-            "source set is not confirmed".into(),
-        ))
-    });
+    let normalized =
+        normalize_batch_extract_items_with(&items, &items, &ControlToken::default(), |_| {
+            Err(FormatError::CorruptArchive(
+                "source set is not confirmed".into(),
+            ))
+        })
+        .unwrap();
 
     assert_eq!(normalized.len(), 2);
     assert_eq!(normalized[0].execution.path, "sample.part1.rar");
@@ -412,17 +421,48 @@ fn batch_extract_prefers_a_selected_primary_after_native_volume_collapse() {
     };
     let items = vec![make_item(&second), make_item(&primary), make_item(&first)];
 
-    let normalized = normalize_batch_extract_items_with(&items, &items, |path| {
-        if source_set.members().iter().any(|member| member == path) {
-            Ok(Some(source_set.clone()))
-        } else {
-            Ok(None)
-        }
-    });
+    let normalized =
+        normalize_batch_extract_items_with(&items, &items, &ControlToken::default(), |path| {
+            if source_set.members().iter().any(|member| member == path) {
+                Ok(Some(source_set.clone()))
+            } else {
+                Ok(None)
+            }
+        })
+        .unwrap();
 
     assert_eq!(normalized.len(), 1);
     assert_eq!(normalized[0].execution.path, primary.to_string_lossy());
     assert_eq!(normalized[0].execution.dest, "/output/sample.zip");
+}
+
+#[test]
+fn batch_extract_stops_discovery_when_cancelled() {
+    let items: Vec<_> = ["first.zip", "second.zip"]
+        .into_iter()
+        .map(|path| BatchExtractItem {
+            path: path.into(),
+            dest: format!("/output/{path}"),
+            encoding: None,
+            password: None,
+            best_effort: false,
+        })
+        .collect();
+    for cancelled_error in [false, true] {
+        let control = ControlToken::default();
+        let mut queried = Vec::new();
+        let result = normalize_batch_extract_items_with(&items, &items, &control, |path| {
+            queried.push(path.to_path_buf());
+            if cancelled_error {
+                Err(FormatError::Cancelled)
+            } else {
+                control.cancel();
+                Ok(None)
+            }
+        });
+        assert!(matches!(result, Err(FormatError::Cancelled)));
+        assert_eq!(queried, [PathBuf::from("first.zip")]);
+    }
 }
 
 #[test]
@@ -451,7 +491,7 @@ fn failed_recovery_report_keeps_metrics_for_the_result_ui() {
         stderr: "damage found".to_owned(),
     };
 
-    let result = recovery_report_json(report).unwrap().unwrap();
+    let result = serde_json::json!(JobResult::VerifyRecovery(report));
     assert_eq!(result["ok"].as_bool(), Some(false));
     assert_eq!(result["metrics"]["repair_possible"].as_bool(), Some(true));
     assert_eq!(result["metrics"]["blocks_needed"].as_u64(), Some(3));

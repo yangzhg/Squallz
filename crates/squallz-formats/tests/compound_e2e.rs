@@ -10,13 +10,14 @@ use std::io::Write;
 use std::path::Path;
 use std::process::Command;
 
-use common::{command_exists, engine, TempDir};
+use common::{command_exists, engine, read_archive_entries, TempDir};
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use squallz_core::api::{
     ControlToken, CreateOptions, EntryType, ExtractOptions, FormatError, NoProgress, OpenOptions,
     SafetyLimits,
 };
+use squallz_core::CreateCommitPolicy;
 
 /// Compound suffixes and the matching system-tar creation flag.
 const COMBOS: [(&str, &str); 5] = [
@@ -104,6 +105,7 @@ fn ours_to_system_tar_all_compound_suffixes() {
                 &archive,
                 std::slice::from_ref(&root),
                 &CreateOptions::default(),
+                CreateCommitPolicy::ReplaceExisting,
                 &NoProgress,
                 &ctl,
             )
@@ -163,7 +165,7 @@ fn system_tar_to_ours_all_compound_suffixes() {
         assert!(create.status.success(), "{suffix}: tar -cf failed");
 
         // We must list, test and extract what system tar created.
-        let entries = engine.list(&archive, &OpenOptions::default()).unwrap();
+        let entries = read_archive_entries(&engine, &archive, &OpenOptions::default()).unwrap();
         assert!(
             entries.iter().any(|e| e.path.display.contains("a.txt")),
             "{suffix}: a.txt missing from listing"
@@ -213,6 +215,7 @@ fn opened_compound_reader_does_not_follow_a_replaced_source_path() {
             &archive,
             std::slice::from_ref(&original_root),
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &NoProgress,
             &ctl,
         )
@@ -222,12 +225,15 @@ fn opened_compound_reader_does_not_follow_a_replaced_source_path() {
             &replacement,
             std::slice::from_ref(&replacement_root),
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &NoProgress,
             &ctl,
         )
         .unwrap();
 
-    let mut reader = engine.open(&archive, &OpenOptions::default()).unwrap();
+    let mut reader = engine
+        .open(&archive, &OpenOptions::default(), &ControlToken::default())
+        .unwrap();
     fs::remove_file(&archive).unwrap();
     fs::rename(&replacement, &archive).unwrap();
 
@@ -265,6 +271,7 @@ fn damaged_gzip_trailer_fails_tar_test_and_extract() {
             &archive,
             &[root],
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &NoProgress,
             &ctl,
         )
@@ -368,13 +375,14 @@ fn plain_gz_single_entry_virtual_archive() {
             &archive,
             std::slice::from_ref(&src),
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &NoProgress,
             &ctl,
         )
         .unwrap();
 
     // list: one entry named without the .gz suffix, sized via gzip ISIZE.
-    let entries = engine.list(&archive, &OpenOptions::default()).unwrap();
+    let entries = read_archive_entries(&engine, &archive, &OpenOptions::default()).unwrap();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].path.display, "notes.txt");
     assert!(matches!(entries[0].entry_type, EntryType::File));
@@ -425,7 +433,7 @@ fn plain_gz_single_entry_virtual_archive() {
             .unwrap();
         assert!(gz.status.success());
         let sys_archive = dir.path().join("sys.txt.gz");
-        let entries = engine.list(&sys_archive, &OpenOptions::default()).unwrap();
+        let entries = read_archive_entries(&engine, &sys_archive, &OpenOptions::default()).unwrap();
         assert_eq!(entries[0].path.display, "sys.txt");
         let out2 = dir.path().join("out2");
         engine
@@ -463,6 +471,7 @@ fn plain_compressor_rejects_multiple_inputs_and_directories() {
             &dir.path().join("out.gz"),
             &[a, b],
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &NoProgress,
             &ctl,
         )
@@ -476,6 +485,7 @@ fn plain_compressor_rejects_multiple_inputs_and_directories() {
             &dir.path().join("dir.gz"),
             &[sub],
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &NoProgress,
             &ctl,
         )
@@ -498,11 +508,12 @@ fn compound_selective_extract() {
             &archive,
             &[root],
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &NoProgress,
             &ctl,
         )
         .unwrap();
-    let entries = engine.list(&archive, &OpenOptions::default()).unwrap();
+    let entries = read_archive_entries(&engine, &archive, &OpenOptions::default()).unwrap();
     let pick: Vec<_> = entries
         .iter()
         .filter(|e| e.path.display == "tree/a.txt")

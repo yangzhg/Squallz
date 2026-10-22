@@ -48,7 +48,7 @@
     } catch {
       pushToast({
         kind: "warning",
-        title: tFallback("gui.toast.action_failed", "Could not complete this action"),
+        title: tFallback("gui.toast.action_failed"),
       });
     } finally {
       runningActionIds = runningActionIds.filter((id) => id !== toast.id);
@@ -56,14 +56,12 @@
   }
 </script>
 
-{#if toasts().length > 0}
+{#if !blocked && toasts().length > 0}
   <section
     bind:this={host}
     class={`toast-host ${rootClass}`}
     use:cssVariables={rootVariables}
-    aria-label={tFallback("gui.toast.notifications", "Notifications")}
-    aria-hidden={blocked ? "true" : undefined}
-    inert={blocked}
+    aria-label={tFallback("gui.toast.notifications")}
   >
     {#each toasts() as toast (toast.id)}
       <article
@@ -91,8 +89,8 @@
         <button
           class="toast-dismiss"
           type="button"
-          aria-label={`${tFallback("gui.common.close", "Close")}: ${toast.title}`}
-          title={tFallback("gui.common.close", "Close")}
+          aria-label={`${tFallback("gui.common.close")}: ${toast.title}`}
+          title={tFallback("gui.common.close")}
           onclick={() => dismissToast(toast.id)}
         ><Icon name="x" size={14} /></button>
       </article>

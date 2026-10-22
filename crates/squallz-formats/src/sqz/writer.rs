@@ -6,9 +6,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use reed_solomon_erasure::galois_8::ReedSolomon;
 use squallz_format_api::{
-    ArchiveFormat, ArchiveWriter, CompressionLevel, Compressor, CreateOptions, EntryMeta,
-    EntryPath, EntryType, FormatCreateBudget, FormatError, ResourceOptions, SqzCreateOptions,
-    SqzInnerFormat, WriteSeek,
+    ArchiveFormat, ArchiveWriter, CompressionLevel, Compressor, ControlToken, CreateOptions,
+    EntryMeta, EntryPath, EntryType, FormatCreateBudget, FormatError, ResourceOptions,
+    SqzCreateOptions, SqzInnerFormat, WriteSeek,
 };
 
 use crate::{sevenz::SevenZFormat, tar::TarFormat, zip::ZipFormat};
@@ -48,6 +48,7 @@ pub(super) struct SqzArchiveWriter {
 pub(super) fn create(
     dst: Box<dyn WriteSeek>,
     opts: &CreateOptions,
+    ctl: &ControlToken,
 ) -> Result<Box<dyn ArchiveWriter>, FormatError> {
     match opts.sqz.inner_format {
         SqzInnerFormat::Sqz => Ok(Box::new(SqzArchiveWriter::new(dst, &opts.sqz)?)),
@@ -55,21 +56,25 @@ pub(super) fn create(
             dst,
             opts,
             InnerProfile::Zip,
+            ctl,
         )?)),
         SqzInnerFormat::Tar => Ok(Box::new(InnerArchiveSqzWriter::new(
             dst,
             opts,
             InnerProfile::Tar,
+            ctl,
         )?)),
         SqzInnerFormat::SevenZip => Ok(Box::new(InnerArchiveSqzWriter::new(
             dst,
             opts,
             InnerProfile::SevenZ,
+            ctl,
         )?)),
         SqzInnerFormat::Zstd => Ok(Box::new(InnerArchiveSqzWriter::new(
             dst,
             opts,
             InnerProfile::TarZstd,
+            ctl,
         )?)),
     }
 }
@@ -311,12 +316,13 @@ impl InnerProfile {
         self,
         file: File,
         opts: &CreateOptions,
+        ctl: &ControlToken,
     ) -> Result<Box<dyn ArchiveWriter>, FormatError> {
         match self {
-            Self::Zip => ZipFormat.create(Box::new(file), opts),
-            Self::Tar => TarFormat.create(Box::new(file), opts),
-            Self::SevenZ => SevenZFormat.create(Box::new(file), opts),
-            Self::TarZstd => TarFormat.create(Box::new(file), opts),
+            Self::Zip => ZipFormat.create(Box::new(file), opts, ctl),
+            Self::Tar => TarFormat.create(Box::new(file), opts, ctl),
+            Self::SevenZ => SevenZFormat.create(Box::new(file), opts, ctl),
+            Self::TarZstd => TarFormat.create(Box::new(file), opts, ctl),
         }
     }
 
@@ -339,13 +345,14 @@ impl InnerArchiveSqzWriter {
         dst: Box<dyn WriteSeek>,
         opts: &CreateOptions,
         profile: InnerProfile,
+        ctl: &ControlToken,
     ) -> Result<Self, FormatError> {
         let outer = SqzArchiveWriter::new(dst, &opts.sqz)?;
         let (temp, file) = create_temp_inner_file(profile.temp_extension())?;
         let mut inner_opts = opts.clone();
         inner_opts.sqz = SqzCreateOptions::default();
         inner_opts.split_size = None;
-        let inner = profile.create_inner_writer(file, &inner_opts)?;
+        let inner = profile.create_inner_writer(file, &inner_opts, ctl)?;
         Ok(Self {
             outer,
             inner,

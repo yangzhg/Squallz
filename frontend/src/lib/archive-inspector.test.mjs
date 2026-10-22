@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createTestServer } from "../../tests/runtime.mjs";
+import { englishTranslate, createTestServer } from "../../tests/runtime.mjs";
 
 test("archive inspector presents metadata and integrity-test availability", async () => {
   const server = await createTestServer();
@@ -18,7 +18,7 @@ test("archive inspector presents metadata and integrity-test availability", asyn
     ]) {
       const { body } = render(ModernInspector, {
         props: {
-          tr: (_key, fallback) => fallback,
+          tr: englishTranslate,
           view: {
             kind: "archive",
             archive,

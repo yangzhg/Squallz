@@ -19,7 +19,7 @@ impl Engine {
         control: &ControlToken,
         consume: &mut dyn FnMut(&mut dyn Read) -> Result<(), FormatError>,
     ) -> Result<bool, FormatError> {
-        let mut archive = self.open_with_control(path, opts, control)?;
+        let mut archive = self.open(path, opts, control)?;
         let mut matches = 0;
         let mut encrypted = false;
         if opts.password.is_some() {
@@ -74,7 +74,7 @@ impl Engine {
             password: None,
             encoding_override: opts.encoding_override.clone(),
         };
-        let encrypted_header = match self.open_with_control(path, &without_password, control) {
+        let encrypted_header = match self.open(path, &without_password, control) {
             Ok(_) => false,
             Err(FormatError::PasswordRequired | FormatError::WrongPassword) => true,
             Err(error) => return Err(error),

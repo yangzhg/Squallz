@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createTestServer } from "../../tests/runtime.mjs";
+import { englishTranslate, createTestServer } from "../../tests/runtime.mjs";
 
 const server = await createTestServer();
 test.after(() => server.close());
 const { convertSessionFor } = await server.ssrLoadModule("/src/lib/convert-session.svelte.ts");
+const { CreateOptionsDraft } = await server.ssrLoadModule("/src/lib/create-options-draft.svelte.ts");
 const { ipc } = await server.ssrLoadModule("/src/lib/ipc.ts");
 
 const originalArchive = { id: 1, path: "/original/photos.7z", source: "/original/photos.7z",
@@ -20,7 +21,7 @@ function harness(t) {
   const calls = [];
   let archive = { ...originalArchive };
   const bridge = {
-    getArchive: () => archive, tr: (_key, fallback) => fallback, tError: () => "Read/write error",
+    getArchive: () => archive, tr: englishTranslate, tError: () => "Read/write error",
     showNotice: (message) => calls.push(["notice", message]), ensurePreflightListener: async () => {},
     getDialogModule: async () => ({ save() {}, confirm: async () => { calls.push(["confirm"]); return true; } }),
     saveNativeDialog: async (_kind, _save, options) => { calls.push(["save", options.defaultPath]); return options.defaultPath; },
@@ -199,4 +200,99 @@ test("restored name encryption requires a new password or an explicit opt-out an
   assert.match(session.surface("modern").protection.passwordError, /new destination password/);
   session.surface("modern").protection.onEncryptionEnabledChange(false);
   assert.equal(session.surface("modern").protection.passwordError, "");
+});
+
+test("creation and conversion share output edits while preserving format capability guards", (t) => {
+  const { session, calls } = harness(t);
+  const create = new CreateOptionsDraft({ format: "7z", profile: "balanced", customLevel: 6 });
+  const context = { capabilityReady: true, sfxCapability: { available: true, target: "macos", extension: "app" } };
+  session.surface("modern").formats.find((item) => item.id === "7z").onSelect();
+  const callbacks = {
+    password: "onPasswordInput", passwordConfirmation: "onPasswordConfirmationInput",
+    passwordVisible: "onPasswordVisibleChange", encryptionEnabled: "onEncryptionEnabledChange",
+    encryptNames: "onEncryptNamesChange", splitPreset: "onSplitPresetChange", splitMode: "onSplitModeChange",
+    customSplitAmount: "onCustomSplitAmountInput", customSplitUnit: "onCustomSplitUnitChange",
+  };
+  function edit(kind, value) {
+    const result = create.edit({ kind, value }, context, () => {});
+    const surface = session.surface("classic");
+    if (kind === "format") surface.formats.find((item) => item.id === value).onSelect();
+    else surface.protection[callbacks[kind]](value);
+    const protection = session.surface("modern").protection;
+    for (const field of Object.keys(callbacks)) assert.equal(protection[field], create.state[field], field);
+    assert.equal(session.surface("modern").formats.find((item) => item.selected).id, create.state.format);
+    return result;
+  }
+  edit("encryptionEnabled", true);
+  assert.equal(create.passwordIssue, "password_required");
+  assert.match(session.surface("modern").protection.passwordError, /new destination password/);
+  edit("password", "destination-secret");
+  edit("passwordConfirmation", "different-secret");
+  assert.equal(create.passwordIssue, "passwords_do_not_match");
+  assert.match(session.surface("modern").protection.passwordError, /do not match/);
+  edit("passwordConfirmation", "destination-secret");
+  edit("passwordVisible", true);
+  edit("encryptNames", true);
+  assert.equal(edit("format", "zip").issue, "name_encryption_format_change");
+  assert.match(calls.at(-1)[1], /Turn off file name encryption/);
+  assert.equal(edit("format", "tar.zst").issue, "encryption_format_change");
+  edit("encryptNames", false);
+  edit("format", "zip");
+  edit("splitPreset", "custom");
+  edit("splitMode", "native");
+  edit("customSplitUnit", "gib");
+  edit("customSplitAmount", "4");
+  assert.equal(create.splitIssue, "native_zip_part_size_limit");
+  assert.match(session.surface("modern").protection.splitError, /4 GiB/);
+  edit("splitPreset", "4-gib");
+  assert.equal(create.splitSize, 0xffff_ffff);
+  assert.equal(session.surface("modern").protection.splitError, "");
+  edit("password", "");
+  edit("encryptionEnabled", false);
+  edit("format", "tar.zst");
+  assert.equal(edit("splitMode", "native").issue, "native_layout_unavailable");
+  edit("splitPreset", "none");
+  assert.equal(create.splitSize, null);
+});
+
+test("restoring output sizes keeps exact bytes and each screen's preset presentation", (t) => {
+  const { session } = harness(t);
+  const create = new CreateOptionsDraft({ format: "zip", profile: "balanced", customLevel: 6 });
+  const context = { capabilityReady: true, sfxCapability: { available: false } };
+  for (const [size, preset] of [[25 * 1024 ** 2, "25-mib"], [0xffff_ffff, "4-gib"], [123456789, "custom"]]) {
+    const options = { ...create.snapshotPreset(), volumes: { kind: "split", size_bytes: String(size) } };
+    assert.equal(create.applyPreset(options, context, () => {}).changed, true);
+    assert.equal(session.restoreTaskDraft(draft({ split_size: size })), true);
+    assert.equal(create.state.splitPreset, preset);
+    assert.equal(session.surface("modern").protection.splitPreset, "custom");
+    assert.equal(create.splitSize, size);
+    assert.equal(create.snapshotPreset().volumes.size_bytes, String(size));
+  }
+  create.edit({ kind: "customSplitAmount", value: "2" }, context, () => {});
+  assert.equal(create.splitSize, 2 * 1024 ** 2);
+});
+
+test("creation applies output edits after invalidating credentials and retains its SFX guards", () => {
+  const create = new CreateOptionsDraft({ format: "zip", profile: "balanced", customLevel: 6 });
+  const context = { capabilityReady: true, sfxCapability: { available: true, target: "macos", extension: "app" } };
+  const invalidate = () => create.resetCredentials(null);
+  create.edit({ kind: "password", value: "new-secret" }, context, invalidate);
+  assert.equal(create.state.password, "new-secret");
+  assert.equal(create.state.encryptionEnabled, true);
+  create.edit({ kind: "passwordVisible", value: true }, context, invalidate);
+  assert.equal(create.state.password, "new-secret");
+  create.edit({ kind: "splitPreset", value: "100-mib" }, context, invalidate);
+  assert.equal(create.state.password, "");
+  create.edit({ kind: "sfxEnabled", value: true }, context, invalidate);
+  assert.equal(create.state.splitPreset, "none");
+  assert.equal(create.outputExtension("app"), "app");
+  assert.equal(create.nativeSplitKind, null);
+  assert.equal(create.edit({ kind: "format", value: "7z" }, context, invalidate).issue, "sfx_zip_only");
+  assert.equal(create.edit({ kind: "splitPreset", value: "25-mib" }, context, invalidate).issue, "sfx_no_split");
+  assert.equal(create.edit({ kind: "splitMode", value: "native" }, context, invalidate).issue, "native_layout_unavailable");
+  assert.equal(create.edit({ kind: "customLevel", value: "" }, context, invalidate).issue, "custom_level_invalid");
+  assert.equal(create.state.customLevel, 6);
+  create.edit({ kind: "customLevel", value: "9" }, context, invalidate);
+  assert.equal(create.compressionLevel, 9);
+  assert.equal(create.state.customLevelInvalid, false);
 });

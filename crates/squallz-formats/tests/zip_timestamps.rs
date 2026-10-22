@@ -8,7 +8,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use common::{command_exists, engine, TempDir};
+use common::{command_exists, engine, read_archive_entries, TempDir};
+use squallz_core::CreateCommitPolicy;
 use squallz_format_api::{
     ArchiveStructureStatus, ControlToken, CreateOptions, Detected, EntryMeta, EntryPath,
     EntrySelection, EntryType, ExtractOptions, NoProgress, OpenOptions, UpdateOp, UpdateOptions,
@@ -36,6 +37,7 @@ fn create_with_times(path: &Path, entries: &[(&str, SystemTime)]) {
         .create(
             Box::new(fs::File::create(path).unwrap()),
             &CreateOptions::default(),
+            &ControlToken::default(),
         )
         .unwrap();
     for &(name, modified) in entries {
@@ -72,7 +74,7 @@ fn write_fixture(path: &Path, options: FullFileOptions<'static>) {
 }
 
 fn read_time(path: &Path) -> Option<SystemTime> {
-    let entries = engine().list(path, &OpenOptions::default()).unwrap();
+    let entries = read_archive_entries(&engine(), path, &OpenOptions::default()).unwrap();
     assert_eq!(entries.len(), 1);
     entries[0].modified
 }
@@ -83,9 +85,15 @@ fn recovered_copy(path: &Path) -> PathBuf {
     let central = bytes.windows(4).position(|w| w == b"PK\x01\x02").unwrap();
     let recovered = path.with_extension("recovered.zip");
     fs::write(&recovered, &bytes[..central]).unwrap();
-    let (_, structure) = engine()
-        .list_with_structure(&recovered, &OpenOptions::default())
-        .unwrap();
+    let structure = engine()
+        .list_archive(
+            &recovered,
+            &OpenOptions::default(),
+            squallz_format_api::SafetyLimits::default().max_entries,
+            &ControlToken::default(),
+        )
+        .unwrap()
+        .structure;
     assert_eq!(structure, ArchiveStructureStatus::ZipLocalHeadersRecovered);
     recovered
 }
@@ -267,6 +275,7 @@ fn recovered_file_and_directory_times_survive_extraction_and_conversion() {
             &converted,
             &OpenOptions::default(),
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &NoProgress,
             &ControlToken::new(),
         )
@@ -279,8 +288,17 @@ fn recovered_file_and_directory_times_survive_extraction_and_conversion() {
         ),
         (&converted, ArchiveStructureStatus::Complete, "converted"),
     ] {
-        let (entries, actual_structure) = engine()
-            .list_with_structure(path, &OpenOptions::default())
+        let squallz_core::ArchiveListing {
+            entries,
+            structure: actual_structure,
+            ..
+        } = engine()
+            .list_archive(
+                path,
+                &OpenOptions::default(),
+                squallz_format_api::SafetyLimits::default().max_entries,
+                &ControlToken::default(),
+            )
             .unwrap();
         assert_eq!(actual_structure, structure);
         assert_eq!(entries.len(), 2);
@@ -381,6 +399,7 @@ fn interop_infozip_and_unzip_preserve_modification_instant() {
             &ours,
             &[source],
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &NoProgress,
             &ControlToken::new(),
         )
@@ -392,6 +411,7 @@ fn interop_infozip_and_unzip_preserve_modification_instant() {
             &converted,
             &OpenOptions::default(),
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &NoProgress,
             &ControlToken::new(),
         )

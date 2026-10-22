@@ -1,22 +1,24 @@
 //! Shared helpers for archive entries that themselves contain archives.
 
+#[cfg(test)]
 use std::fs;
+use std::fs::File;
 use std::io::{self, Read, Write};
 use std::path::Path;
 
+#[cfg(test)]
+use squallz_core::api::EntryMeta;
 use squallz_core::api::{
-    ControlToken, EntryMeta, EntryPath, FormatError, LimitsAccountant, OpenOptions, Password,
-    ProgressSink, SafetyLimits,
+    ControlToken, EntryPath, FormatError, OpenOptions, Password, ProgressSink, SafetyLimits,
 };
-use tempfile::{Builder, NamedTempFile, TempPath};
 
 use crate::password_cache::PasswordAttempt;
-use crate::preview_workspace::PreviewWorkspace;
 use crate::state::AppState;
+#[cfg(test)]
+use squallz_core::copy_archive_entry;
+use squallz_core::{EntryReference, PlaintextFile, PlaintextWorkspace};
 
 const MAX_NESTED_EXTENSION_BYTES: usize = 16;
-const NESTED_COPY_BUFFER_BYTES: usize = 256 * 1024;
-const NESTED_TEMP_MIN_FREE_BYTES: u64 = 64 * 1024 * 1024;
 pub(crate) const PREVIEW_ENTRY_TOO_LARGE_DETAIL: &str =
     "preview entry exceeds the temporary-file limit";
 
@@ -39,30 +41,14 @@ fn safe_entry_suffix(entry_path: &str) -> String {
 
 fn create_nested_temp_file(
     entry_path: &str,
-    workspace: &Path,
-) -> Result<NamedTempFile, FormatError> {
+    workspace: &PlaintextWorkspace,
+) -> Result<(PlaintextFile, File), FormatError> {
     let suffix = safe_entry_suffix(entry_path);
-    let file = Builder::new()
-        .prefix("nested-")
-        .suffix(&suffix)
-        .tempfile_in(workspace)?;
-    set_private_file_permissions(file.as_file())?;
-    Ok(file)
+    Ok(workspace.create_file(&format!("nested-entry{suffix}"))?)
 }
 
-#[cfg(unix)]
-fn set_private_file_permissions(file: &fs::File) -> io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    file.set_permissions(fs::Permissions::from_mode(0o600))
-}
-
-#[cfg(not(unix))]
-fn set_private_file_permissions(_file: &fs::File) -> io::Result<()> {
-    Ok(())
-}
-
-pub(crate) fn create_nested_job_workspace() -> Result<PreviewWorkspace, FormatError> {
-    Ok(PreviewWorkspace::create_in(&std::env::temp_dir())?)
+pub(crate) fn create_nested_job_workspace() -> Result<PlaintextWorkspace, FormatError> {
+    Ok(PlaintextWorkspace::create_in(&std::env::temp_dir())?)
 }
 
 fn copy_with_limit<R: Read + ?Sized, W: Write>(
@@ -142,93 +128,29 @@ pub(crate) fn extract_nested_archive_to_temp_limited(
     entry_path: &str,
     password: Option<&str>,
     encoding: Option<&str>,
-    workspace: &Path,
+    workspace: &PlaintextWorkspace,
     max_bytes: u64,
     control: &ControlToken,
-) -> Result<(TempPath, PreparedEntry), FormatError> {
-    let mut temp = create_nested_temp_file(entry_path, workspace)?;
+) -> Result<(PlaintextFile, PreparedEntry), FormatError> {
+    let (temp, mut writer) = create_nested_temp_file(entry_path, workspace)?;
     let prepared = write_archive_entry_limited(
         state,
         outer_path,
         entry_path,
         password,
         encoding,
-        temp.as_file_mut(),
+        &mut writer,
         max_bytes,
         control,
     )?;
-    temp.as_file_mut().flush()?;
-    Ok((temp.into_temp_path(), prepared))
-}
-
-fn normalized_entry_name(path: &str) -> String {
-    path.replace('\\', "/").trim_start_matches('/').to_owned()
-}
-
-fn find_nested_entry(
-    outer: &mut dyn squallz_core::api::ArchiveReader,
-    entry_path: &str,
-    ctl: &ControlToken,
-) -> Result<EntryMeta, FormatError> {
-    let requested = normalized_entry_name(entry_path);
-    for entry in outer.entries() {
-        ctl.checkpoint()?;
-        let entry = entry?;
-        if normalized_entry_name(&entry.path.display) == requested {
-            return Ok(entry);
-        }
-    }
-    Err(FormatError::Other(format!(
-        "nested archive entry not found: {entry_path}"
-    )))
-}
-
-fn copy_nested_entry_with_limits<R: Read + ?Sized, W: Write>(
-    reader: &mut R,
-    writer: &mut W,
-    meta: &EntryMeta,
-    limits: SafetyLimits,
-    progress: &dyn ProgressSink,
-    ctl: &ControlToken,
-) -> Result<u64, FormatError> {
-    let mut accountant = LimitsAccountant::new(limits);
-    accountant.check_entry(meta)?;
-    let mut written = 0_u64;
-    let mut buffer = vec![0_u8; NESTED_COPY_BUFFER_BYTES];
-    progress.on_entry_progress(0, 0, &meta.path, 0, meta.size);
-    loop {
-        ctl.checkpoint()?;
-        let read = reader.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        accountant.add_output_bytes(read as u64)?;
-        writer.write_all(&buffer[..read])?;
-        written = written.saturating_add(read as u64);
-        progress.on_entry_progress(0, 0, &meta.path, written, meta.size.max(written));
-    }
-    Ok(written)
-}
-
-fn nested_temp_limits(
-    workspace: &Path,
-    mut limits: SafetyLimits,
-) -> Result<(SafetyLimits, u64), FormatError> {
-    let available = fs4::available_space(workspace)?;
-    let headroom = (available / 20)
-        .max(NESTED_TEMP_MIN_FREE_BYTES)
-        .min(available);
-    let writable = available.saturating_sub(headroom);
-    if writable == 0 {
-        return Err(FormatError::DiskFull);
-    }
-    limits.max_output_bytes = limits.max_output_bytes.min(writable);
-    Ok((limits, writable))
+    writer.flush()?;
+    drop(writer);
+    Ok((temp, prepared))
 }
 
 /// Materializes one archive entry for a queued nested-extraction job. The
 /// caller supplies the same safety limits, progress sink, and control token
-/// used by the extraction that follows. The returned TempPath deletes the
+/// used by the extraction that follows. The returned plaintext owner deletes the
 /// private file on every normal, error, and cancellation path.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn extract_nested_archive_to_temp_for_job(
@@ -237,48 +159,192 @@ pub(crate) fn extract_nested_archive_to_temp_for_job(
     entry_path: &str,
     password: Option<&Password>,
     encoding: Option<&str>,
-    workspace: &Path,
+    workspace: &PlaintextWorkspace,
     limits: SafetyLimits,
     progress: &dyn ProgressSink,
     ctl: &ControlToken,
-) -> Result<TempPath, FormatError> {
+) -> Result<PlaintextFile, FormatError> {
     let open_opts = OpenOptions {
         password: password.cloned(),
         encoding_override: encoding.map(str::to_owned),
     };
-    let mut outer = state
-        .engine
-        .open_with_control(outer_path, &open_opts, ctl)?;
-    let meta = find_nested_entry(outer.as_mut(), entry_path, ctl)?;
-    let (limits, writable) = nested_temp_limits(workspace, limits)?;
-    if meta.size > limits.max_output_bytes {
-        return Err(if meta.size > writable {
-            FormatError::DiskFull
-        } else {
-            FormatError::ResourceLimitExceeded(format!(
-                "output bytes exceed limit of {}",
-                limits.max_output_bytes
-            ))
-        });
-    }
-    let mut temp = create_nested_temp_file(entry_path, workspace)?;
-    outer.read_entry(&meta.path, &mut |entry| {
-        copy_nested_entry_with_limits(entry, temp.as_file_mut(), &meta, limits, progress, ctl)?;
-        Ok(())
-    })?;
-    ctl.checkpoint()?;
-    temp.as_file_mut().flush()?;
-    Ok(temp.into_temp_path())
+    let prepared = state.engine.prepare_entry_materialization(
+        outer_path,
+        EntryReference::Display(entry_path),
+        &open_opts,
+        ctl,
+    )?;
+    let (temp, mut writer) = create_nested_temp_file(entry_path, workspace)?;
+    prepared.copy_to(&temp, &mut writer, limits, progress)?;
+    drop(writer);
+    Ok(temp)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use squallz_core::CreateCommitPolicy;
     use std::collections::HashSet;
     use std::sync::{Arc, Mutex};
 
+    const NESTED_COPY_BUFFER_BYTES: usize = 256 * 1024;
+
     struct WriteAction<F: FnMut()> {
         action: F,
+    }
+
+    #[test]
+    fn queued_nested_selection_rejects_duplicate_names_and_normalized_aliases() {
+        use squallz_core::api::{CreateOptions, Detected, EntryType, NoProgress};
+
+        let root = tempfile::tempdir().unwrap();
+        let outer = root.path().join("outer.tar");
+        let workspace = PlaintextWorkspace::create_in(root.path()).unwrap();
+        let original_files = fs::read_dir(workspace.path()).unwrap().count();
+        let Some(Detected::Archive(format)) =
+            squallz_formats::registry().detect_by_name("outer.tar")
+        else {
+            panic!("TAR format must be registered");
+        };
+        let state = AppState::new();
+        for last_name in ["folder/inner.zip", r"folder\inner.zip"] {
+            let mut writer = format
+                .create(
+                    Box::new(fs::File::create(&outer).unwrap()),
+                    &CreateOptions::default(),
+                    &ControlToken::default(),
+                )
+                .unwrap();
+            for (index, name) in ["folder/inner.zip", "unrelated.txt", last_name]
+                .into_iter()
+                .enumerate()
+            {
+                let meta = EntryMeta {
+                    path: EntryPath::from_utf8(name),
+                    entry_type: EntryType::File,
+                    size: index as u64 + 1,
+                    compressed_size: None,
+                    modified: None,
+                    unix_mode: None,
+                    crc32: None,
+                    encrypted: false,
+                };
+                let mut data = io::Cursor::new(vec![b'x'; meta.size as usize]);
+                writer.add_entry(&meta, Some(&mut data)).unwrap();
+            }
+            writer.finish().unwrap();
+
+            let result = extract_nested_archive_to_temp_for_job(
+                &state,
+                &outer,
+                "/folder/inner.zip",
+                None,
+                None,
+                &workspace,
+                SafetyLimits::default(),
+                &NoProgress,
+                &ControlToken::default(),
+            );
+            assert!(matches!(result, Err(FormatError::CorruptArchive(_))));
+            assert_eq!(
+                fs::read_dir(workspace.path()).unwrap().count(),
+                original_files
+            );
+            let raw = state.engine.prepare_entry_materialization(
+                &outer,
+                EntryReference::Raw(&EntryPath::from_utf8("folder/inner.zip")),
+                &OpenOptions::default(),
+                &ControlToken::default(),
+            );
+            #[cfg(unix)]
+            assert_eq!(raw.is_ok(), last_name.contains('\\'));
+            #[cfg(not(unix))]
+            drop(raw);
+        }
+    }
+
+    #[test]
+    fn complete_materialization_retains_raw_identity_and_checks_its_output_owner() {
+        use squallz_core::api::{CreateOptions, Detected, EntryType, NoProgress};
+
+        let root = tempfile::tempdir().unwrap();
+        let outer = root.path().join("outer.tar");
+        let Some(Detected::Archive(format)) =
+            squallz_formats::registry().detect_by_name("outer.tar")
+        else {
+            panic!("TAR format must be registered");
+        };
+        let control = ControlToken::default();
+        let mut writer = format
+            .create(
+                Box::new(File::create(&outer).unwrap()),
+                &CreateOptions::default(),
+                &control,
+            )
+            .unwrap();
+        let payload = b"the selected archive bytes";
+        let meta = EntryMeta {
+            path: EntryPath::from_utf8(r"folder\inner.bin"),
+            entry_type: EntryType::File,
+            size: payload.len() as u64,
+            compressed_size: None,
+            modified: None,
+            unix_mode: None,
+            crc32: None,
+            encrypted: false,
+        };
+        writer
+            .add_entry(&meta, Some(&mut io::Cursor::new(payload)))
+            .unwrap();
+        writer.finish().unwrap();
+        let state = AppState::new();
+        let workspace = PlaintextWorkspace::create_in(root.path()).unwrap();
+        let (output, mut writer) = workspace.create_file("selected.bin").unwrap();
+        let (other, mut other_writer) = workspace.create_file("other.bin").unwrap();
+        let prepare = || {
+            state
+                .engine
+                .prepare_entry_materialization(
+                    &outer,
+                    EntryReference::Display("/folder/inner.bin"),
+                    &OpenOptions::default(),
+                    &control,
+                )
+                .unwrap()
+        };
+        let mismatch = prepare().copy_to(
+            &output,
+            &mut other_writer,
+            SafetyLimits::default(),
+            &NoProgress,
+        );
+        assert!(matches!(mismatch, Err(FormatError::Io(_))));
+        let limited = prepare().copy_to(
+            &output,
+            &mut writer,
+            SafetyLimits {
+                max_output_bytes: payload.len() as u64 - 1,
+                ..SafetyLimits::default()
+            },
+            &NoProgress,
+        );
+        assert!(matches!(
+            limited,
+            Err(FormatError::ResourceLimitExceeded(_))
+        ));
+        assert!(fs::read(output.path()).unwrap().is_empty());
+        assert!(fs::read(other.path()).unwrap().is_empty());
+        assert_eq!(
+            prepare()
+                .copy_to(&output, &mut writer, SafetyLimits::default(), &NoProgress)
+                .unwrap(),
+            payload.len() as u64
+        );
+        drop((writer, other_writer, workspace));
+        assert_eq!(fs::read(output.path()).unwrap(), payload);
+        let output_root = output.root_path().to_path_buf();
+        output.close().unwrap();
+        assert!(!output_root.exists());
     }
 
     impl<F: FnMut()> Write for WriteAction<F> {
@@ -308,6 +374,7 @@ mod tests {
                     password: Some(Password::new("secret")),
                     ..CreateOptions::default()
                 },
+                CreateCommitPolicy::ReplaceExisting,
                 &NoProgress,
                 &ControlToken::default(),
             )
@@ -375,10 +442,12 @@ mod tests {
     #[test]
     fn nested_temp_files_are_unique_for_same_entry() {
         let root = tempfile::tempdir().expect("temporary root should be created");
+        let workspace = PlaintextWorkspace::create_in(root.path()).unwrap();
         let mut seen = HashSet::new();
         let mut opened = Vec::new();
         for _ in 0..128 {
-            let file = create_nested_temp_file("dir/inner.zip", root.path()).unwrap();
+            let (file, writer) = create_nested_temp_file("dir/inner.zip", &workspace).unwrap();
+            drop(writer);
             assert!(file
                 .path()
                 .file_name()
@@ -399,7 +468,10 @@ mod tests {
     #[test]
     fn nested_temp_file_hides_entry_names_and_keeps_safe_extension() {
         let root = tempfile::tempdir().expect("temporary root should be created");
-        let file = create_nested_temp_file("../dir/inner archive?.zip", root.path()).unwrap();
+        let workspace = PlaintextWorkspace::create_in(root.path()).unwrap();
+        let (file, writer) =
+            create_nested_temp_file("../dir/inner archive?.zip", &workspace).unwrap();
+        drop(writer);
         let name = file
             .path()
             .file_name()
@@ -418,7 +490,8 @@ mod tests {
     fn nested_job_workspace_and_file_are_removed_by_raii() {
         let workspace = create_nested_job_workspace().unwrap();
         let workspace_path = workspace.path().to_path_buf();
-        let file = create_nested_temp_file("inner.zip", workspace.path()).unwrap();
+        let (file, writer) = create_nested_temp_file("inner.zip", &workspace).unwrap();
+        drop(writer);
         let file_path = file.path().to_path_buf();
 
         assert!(workspace_path.exists());
@@ -480,6 +553,7 @@ mod tests {
                     level: CompressionLevel::Store,
                     ..CreateOptions::default()
                 },
+                CreateCommitPolicy::ReplaceExisting,
                 &NoProgress,
                 &ControlToken::default(),
             )
@@ -528,12 +602,16 @@ mod tests {
             "inner.bin",
             None,
             None,
-            workspace.path(),
+            &workspace,
             SafetyLimits::default(),
             &progress,
             &ctl,
         );
-        assert!(matches!(result, Err(FormatError::Cancelled)), "{result:?}");
+        assert!(
+            matches!(result, Err(FormatError::Cancelled)),
+            "{:?}",
+            result.err()
+        );
         let remaining_files = std::fs::read_dir(workspace.path())
             .unwrap()
             .map(|entry| entry.unwrap().file_name())
@@ -567,7 +645,7 @@ mod tests {
         let mut reader = io::Cursor::new(vec![0xA5; size]);
         let mut output = Vec::new();
 
-        let error = copy_nested_entry_with_limits(
+        let error = copy_archive_entry(
             &mut reader,
             &mut output,
             &meta,

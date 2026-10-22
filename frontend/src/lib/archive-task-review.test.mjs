@@ -1,18 +1,19 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import vm from "node:vm";
-import { createTestServer } from "../../tests/runtime.mjs";
+import { englishTranslate, createTestServer } from "../../tests/runtime.mjs";
 import { compileTestScript, readSvelteScript, selectFunctions } from "../../tests/source.mjs";
 import { settingsDto } from "../../tests/settings.mjs";
-import { installExtractOptions } from "../../tests/options-drafts.mjs";
+import { extractionFixture } from "../../tests/extraction.mjs";
 
 const server = await createTestServer();
 test.after(() => server.close());
 const { taskReviewScreen } = await server.ssrLoadModule("/src/lib/task-model.ts");
 const { SettingsSession } = await server.ssrLoadModule("/src/lib/settings-session.svelte.ts");
-const { ExtractPlanSession } = await server.ssrLoadModule("/src/lib/extract-plan.svelte.ts");
-const { ExtractOptionsDraft } = await server.ssrLoadModule("/src/lib/extract-options-draft.svelte.ts");
+const fixture = await extractionFixture(server);
+test.afterEach(() => fixture.dispose());
 const { PreviewSession } = await server.ssrLoadModule("/src/lib/preview-session.svelte.ts");
+const { RecoverySession } = await server.ssrLoadModule("/src/lib/recovery-session.svelte.ts");
 const { ipc } = await server.ssrLoadModule("/src/lib/ipc.ts");
 const originalPlanIpc = { planExtract: ipc.planExtract, cancelExtractPlan: ipc.cancelExtractPlan, cancelEntryPreview: ipc.cancelEntryPreview };
 let planSessions = [];
@@ -45,24 +46,19 @@ function archive(path = "/original/photos.zip", id = 1, encoding = null) {
 function harness() {
   const source = readSvelteScript(new URL("../App.svelte", import.meta.url), "App.ts");
   const names = ["cancelTaskReview", "reviewTask", "reviewExtractTask", "reviewConvertTask", "reviewArchiveTask", "restoreExtractTaskDraft", "finishOpenedArchive",
-    "openArchivePath", "openArchiveFromDialog", "dismissArchivePicker", "extractJobPaths", "extractJobDestination", "extractSmartBase",
-    "extractSelectionLabel", "extractStartBlockedReason", "submitExtractJob", "submitCopyOutSelectedJob",
-    "chooseExtractDestination", "selectExtractDestination", "openExtractWorkspace", "applyExtractPreset", "captureExtractPlanInput",
-    "syncExtractDraftArchive", "cancelPasswordRequest", "submitPasswordRequest", "dismissArchivePasswordRequest",
+    "openArchivePath", "openArchiveFromDialog", "dismissArchivePicker", "openExtractWorkspace",
+    "cancelPasswordRequest", "submitPasswordRequest", "dismissArchivePasswordRequest",
     "isCurrentTaskPasswordPrompt", "submitTaskPasswordRequest", "cancelTaskPasswordRequest", "passwordWorkspaceSurface",
     "passwordPromptName", "passwordPromptDetail", "passwordSessionDetail", "passwordFailureDetail", "taskPasswordQuestion",
-    "setScreen", "preventTaskWorkspaceNavigation", "dismissRecoveryPreparation", "effectiveExtractDest", "sameFolderExtractDest",
-    "extractEncodingForJob", "archiveEncodingForJob", "extractEncodingLabel", "selectExtractOverwrite", "selectExtractSymlink"];
+    "setScreen", "preventTaskWorkspaceNavigation", "archiveEncodingForJob"];
   const declarations = selectFunctions(source, names);
   const calls = [];
   const context = {
-    calls, taskReviewScreen, ExtractOptionsDraft, taskWindowMode: false, currentArchive: archive(),
+    calls, taskReviewScreen, taskWindowMode: false, currentArchive: archive(),
     screen: "browse", archiveOpenStatus: "idle", archiveOpenGeneration: 0, archivePasswordAttempt: 0,
-    createPreflight: { state: { pending: null } }, convertRouteHandle: null,
+    create: { dismiss() {}, syncContext() {} }, convertRouteHandle: null,
     archivePickerRequest: null,
-    recoveryPickerStatus: "idle", recoveryPickerRequest: 0, recoveryOutputPreparation: null,
-    dismissCreatePreparation() {}, syncCreatePreflightContext() {},
-    dismissArchiveAddPreparation() {},
+    dismissArchiveAddPreparation() {}, tools: { leave() {} },
     getDialogModule: async () => ({ open: async () => null }),
     openNativeDialog: async (_kind, open, options) => open(options), platformKind: () => "macos",
     taskReviewRequestGeneration: 0, nestedExtractDraftGeneration: 0, nestedExtractReviewFocusPending: false,
@@ -79,8 +75,7 @@ function harness() {
     workspacePasswordSubmissionAttempted: false, standalonePasswordFocusedInput: null,
     workspacePasswordSubmissionError: null, secretStoreLabel: () => "Keychain",
     isTaskActiveState: (state) => state === "running",
-    recoverySourceMode: "current", recoverySourceOverride: null, recoveryPar2Override: null,
-    tr: (_key, fallback) => fallback,
+    tr: englishTranslate,
     sameFilePath: (a, b) => a === b, pathBaseName: (path) => path.split("/").at(-1),
     pathDir: (path) => path.slice(0, path.lastIndexOf("/")), normalizedDefaultExtractDir: (value) => value,
     defaultExtractDest: () => "/unrelated/default/photos",
@@ -108,23 +103,27 @@ function harness() {
     rememberRecent() {}, recordOperation() {}, clearEntryPreviewState: () => context.previewSession.clear(), recordValidationRenderReady() {},
     submitCurrentArchiveJob: async (job) => { calls.push(["submit", job]); return true; },
     archiveTitle: () => context.currentArchive?.name, taskPasswordReady: (value) => Boolean(value),
-    adoptRecoveryTargetFromTask: (task) => { calls.push(["recovery", task.spec.path]); return true; },
   };
+  context.recoverySession = new RecoverySession({
+    read: () => ({ active: context.screen === "recovery", mode: "modern", generation: context.archiveOpenGeneration,
+      archive: context.currentArchive, tasks: [], selection: [], platform: "macos", level: 6, profile: "Balanced" }),
+    notice: context.showNotice,
+  });
+  previewSessions.push(context.recoverySession);
   Object.defineProperty(context, "previewPasswordPrompt", { get: () => context.previewSession.passwordPrompt });
   previewSessions.push(context.previewSession);
   context.settingsSession = new SettingsSession({ platform: context.platformKind, tr: context.tr, emit() {} });
   context.settingsSession.applySnapshot(settingsDto({ default_extract_dir: "/unrelated/default" }),
     context.settingsSession.captureGenerations());
-  const extractOptions = installExtractOptions(source, context);
+  const extractOptions = fixture.install(context).options;
   extractOptions.syncArchive(context.currentArchive);
   extractOptions.acceptDestination("/unrelated/output");
   extractOptions.applyPreset({ destination: { base: "archive_parent", layout: "direct" }, existing_output: "overwrite",
     symlinks: "follow", encoding: { kind: "named", label: "gbk" }, credential: { kind: "prompt_when_needed" }, post_success: "keep_source" });
-  let nextPlanRequest = 0;
-  context.extractPlanSession = new ExtractPlanSession(() => `review-plan-${++nextPlanRequest}`);
-  planSessions.push(context.extractPlanSession);
-  const resetPlan = context.extractPlanSession.reset.bind(context.extractPlanSession);
-  context.extractPlanSession.reset = () => { calls.push(["reset"]); resetPlan(); };
+
+  planSessions.push(context.extraction.plan);
+  const resetPlan = context.extraction.plan.reset.bind(context.extraction.plan);
+  context.extraction.plan.reset = () => { calls.push(["reset"]); resetPlan(); };
   ipc.planExtract = async (...parts) => {
     calls.push(["plan", ...parts]);
     return { requested_destination: parts[2], destination: "/original/output/photos",
@@ -134,6 +133,12 @@ function harness() {
   };
   const outputText = compileTestScript(declarations.map((node) => node.getText(source)).join("\n"));
   return vm.runInNewContext(`${outputText}\n({${declarations.map((node) => node.name.text).join(",")},context:globalThis,calls})`,context);
+}
+
+async function loadPreset(run, preset) {
+  const original = ipc.getArchivePresets;
+  ipc.getArchivePresets = async () => ({ version: 1, presets: [preset], bindings: {} });
+  try { await run.context.presets.load(); } finally { ipc.getArchivePresets = original; }
 }
 
 function deferred() {
@@ -199,7 +204,7 @@ test("leaving a task review while its archive opens keeps the current workspace 
       assert.equal(run.context.pendingArchiveTaskReview, null);
       assert.deepEqual(cancelled, [request.requestId]);
       assert.deepEqual(closed, [2]);
-      assert.equal(run.context.extractCustomDest, "/unrelated/output");
+      assert.equal(run.context.extraction.state.customDest, "/unrelated/output");
       assert.equal(run.calls.some(([name]) => name === "restore" || name === "submit" || name === "notice"), false);
     });
   }
@@ -257,7 +262,7 @@ test("leaving while the first page loads releases its handle without clearing a 
     assert.equal(run.context.screen, "browse");
     assert.equal(run.context.archiveOpenStatus, "idle");
     assert.equal(store.archive().source, "/newer.zip");
-    assert.equal(run.context.extractCustomDest, "/unrelated/output");
+    assert.equal(run.context.extraction.state.customDest, "/unrelated/output");
   });
 });
 
@@ -334,23 +339,23 @@ test(`${state} extraction review restores its selection and policies instead of 
   const run = harness();
   await run.reviewTask({ id: 8, state, spec: spec() });
   await Promise.resolve();
-  assert.deepEqual(Array.from(run.extractJobPaths() ?? []), ["photos/", "notes.txt"]);
-  assert.equal(run.extractJobDestination(), "/original/output");
-  assert.equal(run.context.extractDestinationMode, "smart");
-  assert.equal(run.context.extractOverwriteMode, "rename");
-  assert.equal(run.context.extractSymlinkMode, "skip");
-  assert.equal(run.context.extractPresetEncodingLabel, null);
-  assert.equal(run.context.selectedExtractPresetId, null);
-  assert.equal(run.context.extractPresetDraftTouched, true);
-  assert.equal(run.context.extractPlanSession.plan, null);
+  assert.deepEqual(Array.from(run.context.extraction.options.selectionSnapshot() ?? []), ["photos/", "notes.txt"]);
+  assert.equal(run.context.extraction.destination, "/original/output");
+  assert.equal(run.context.extraction.state.destinationMode, "smart");
+  assert.equal(run.context.extraction.state.overwrite, "rename");
+  assert.equal(run.context.extraction.state.symlinks, "skip");
+  assert.equal(run.context.extraction.state.presetEncodingLabel, null);
+  assert.equal(run.context.presets.selection("extract").id, null);
+  assert.equal(run.context.extraction.state.touched, true);
+  assert.equal(run.context.extraction.plan.plan, null);
   assert.equal(run.context.screen, "extract");
   assert.equal(run.calls.some(([name]) => name === "submit"), false);
-  run.syncExtractDraftArchive();
-  assert.deepEqual(Array.from(run.extractJobPaths()), ["photos/", "notes.txt"]);
-  const capturedPlan = run.captureExtractPlanInput();
+  run.context.extraction.adoptArchive();
+  assert.deepEqual(Array.from(run.context.extraction.options.selectionSnapshot()), ["photos/", "notes.txt"]);
+  const capturedPlan = run.context.extraction.input;
   capturedPlan.selection.push("snapshot-only.txt");
-  assert.deepEqual(Array.from(run.extractJobPaths()), ["photos/", "notes.txt"], "plan input cannot mutate the workspace selection");
-  await run.submitExtractJob();
+  assert.deepEqual(Array.from(run.context.extraction.options.selectionSnapshot()), ["photos/", "notes.txt"], "plan input cannot mutate the workspace selection");
+  await run.context.extraction.start();
   const submitted = run.calls.find(([name]) => name === "submit")[1];
   assert.equal(submitted.dest, "/original/output");
   assert.equal(submitted.expected_destination, "/original/output/photos");
@@ -368,12 +373,12 @@ test("review reopens the original archive with its encoding and preserves direct
   const original = spec({ path: "/original/Installer.app", smart: false, selection: null, encoding: "gbk", verify_sfx: true });
   await run.reviewTask({ id: 8, state: "failed", spec: original });
   assert.deepEqual(run.calls.find(([name]) => name === "open"), ["open", original.path, null, "gbk"]);
-  assert.equal(run.extractEncodingLabel(), "GBK");
-  assert.equal(run.context.extractDestinationMode, "choose");
-  assert.equal(run.extractJobDestination(), original.dest);
-  assert.equal(run.extractJobPaths(), null);
+  assert.equal(run.context.extractView.extractEncodingLabel(), "GBK");
+  assert.equal(run.context.extraction.state.destinationMode, "choose");
+  assert.equal(run.context.extraction.destination, original.dest);
+  assert.equal(run.context.extraction.options.selectionSnapshot(), null);
   assert.equal(run.calls.some(([name]) => name === "submit"), false);
-  await run.submitExtractJob();
+  await run.context.extraction.start();
   const submitted = run.calls.find(([name]) => name === "submit")[1];
   assert.equal(submitted.path, original.path);
   assert.equal(submitted.encoding, "gbk");
@@ -387,11 +392,11 @@ test("extract destination can be reselected and stale choosers cannot change or 
   const fresh = () => {
     const run = harness();
     run.context.screen = "extract";
-    run.context.extractOptions.applyPreset({ ...run.context.extractOptions.snapshotPreset(null),
+    run.context.extraction.options.applyPreset({ ...run.context.extraction.options.snapshotPreset(null),
       destination: { base: "ask", layout: "direct" } });
     return run;
   };
-  const startChooser = (run, call = () => run.chooseExtractDestination()) => {
+  const startChooser = (run, call = () => run.context.extraction.chooseDestination()) => {
     const result = deferred();
     const started = deferred();
     run.context.openNativeDialog = async (kind, _open, options) => {
@@ -405,76 +410,77 @@ test("extract destination can be reselected and stale choosers cannot change or 
   const options = [];
   let selected = "/folder/A";
   run.context.openNativeDialog = async (_kind, _open, value) => { options.push(value); return selected; };
-  await run.selectExtractDestination("choose");
-  assert.equal(run.context.extractCustomDest, "/folder/A");
+  await run.context.extraction.selectDestination("choose");
+  assert.equal(run.context.extraction.state.customDest, "/folder/A");
   selected = "/folder/B";
-  await run.selectExtractDestination("choose");
+  await run.context.extraction.selectDestination("choose");
   assert.equal(options.length, 2, "Choose must reopen the folder chooser after a destination was selected");
   assert.equal(options[1].defaultPath, "/folder/A");
-  assert.equal(run.context.extractCustomDest, "/folder/B");
-  assert.equal(run.context.extractPresetDraftTouched, true);
-  await run.selectExtractDestination("smart");
-  run.context.extractOptions.restoreTask(run.context.currentArchive, spec({ smart: true, dest: "/folder/B" }), () => {});
+  assert.equal(run.context.extraction.state.customDest, "/folder/B");
+  assert.equal(run.context.extraction.state.touched, true);
+  await run.context.extraction.selectDestination("smart");
+  run.context.extraction.options.restoreTask(run.context.currentArchive, spec({ smart: true, dest: "/folder/B" }), () => {});
   selected = null;
-  await run.selectExtractDestination("choose");
-  assert.equal(run.context.extractDestinationMode, "smart");
-  assert.equal(run.context.extractCustomDest, "/folder/B");
-  assert.equal(run.context.extractOptions.state.smartBaseOverride, "/folder/B");
+  await run.context.extraction.selectDestination("choose");
+  assert.equal(run.context.extraction.state.destinationMode, "smart");
+  assert.equal(run.context.extraction.state.customDest, "/folder/B");
+  assert.equal(run.context.extraction.options.state.smartBaseOverride, "/folder/B");
   assert.match(run.calls.at(-1)[1], /cancelled.*kept/i);
   run.context.openNativeDialog = async () => { throw new Error("unavailable"); };
-  assert.equal(await run.chooseExtractDestination(), false);
-  assert.equal(run.context.extractCustomDest, "/folder/B");
+  assert.equal(await run.context.extraction.chooseDestination(), false);
+  assert.equal(run.context.extraction.state.customDest, "/folder/B");
   assert.match(run.calls.at(-1)[1], /desktop service/i);
-  assert.equal(run.context.extractDestinationPicker, null);
+  assert.equal(run.context.extraction.choosing, false);
 
   const loading = fresh();
   const module = deferred();
   let nativeOpens = 0;
   loading.context.getDialogModule = () => module.promise;
   loading.context.openNativeDialog = async () => { nativeOpens++; return "/late/module"; };
-  const waitingForModule = loading.chooseExtractDestination();
-  assert.notEqual(loading.context.extractDestinationPicker, null);
+  const waitingForModule = loading.context.extraction.chooseDestination();
+  assert.equal(loading.context.extraction.choosing, true);
   loading.setScreen("browse");
   loading.setScreen("extract");
   module.resolve({ open: async () => null });
   assert.equal(await waitingForModule, false);
   assert.equal(nativeOpens, 0, "leaving and returning must not revive the old module request");
-  assert.equal(loading.context.extractCustomDest, "");
+  assert.equal(loading.context.extraction.state.customDest, "");
 
   const busy = fresh();
-  busy.context.extractOptions.acceptDestination("/folder/A");
+  busy.context.extraction.options.acceptDestination("/folder/A");
   const waiting = startChooser(busy);
   await waiting.started;
-  assert.notEqual(busy.extractStartBlockedReason(), "");
-  await busy.submitExtractJob();
-  await busy.submitCopyOutSelectedJob();
+  assert.notEqual(busy.context.extractView.extractStartBlockedReason(), "");
+  await busy.context.extraction.start();
+  await busy.context.extraction.copyOut();
   assert.equal(busy.calls.some(([name]) => name === "plan" || name === "submit"), false);
-  await busy.selectExtractDestination("same");
+  await busy.context.extraction.selectDestination("same");
   const notices = busy.calls.length;
   waiting.result.resolve("/late/mode");
   assert.equal(await waiting.work, false);
-  assert.equal(busy.context.extractDestinationMode, "same");
-  assert.equal(busy.context.extractCustomDest, "/folder/A");
+  assert.equal(busy.context.extraction.state.destinationMode, "same");
+  assert.equal(busy.context.extraction.state.customDest, "/folder/A");
   assert.equal(busy.calls.length, notices, "a late chosen folder must not produce feedback");
 
   const preset = fresh();
   const obsolete = startChooser(preset);
   await obsolete.started;
-  const owner = preset.context.extractDestinationPicker;
+  const owner = preset.context.extraction.choosing;
   preset.setScreen("extract");
-  preset.applyExtractPreset("missing");
+  preset.context.presets.apply("extract", "missing");
   assert.equal(preset.restoreExtractTaskDraft(spec({ path: "/missing.zip" })), false);
   preset.context.selectedJobPaths = () => null;
   preset.openExtractWorkspace("selection");
-  assert.equal(preset.context.extractDestinationPicker, owner, "invalid or unchanged intents must retain the chooser");
+  assert.equal(preset.context.extraction.choosing, owner, "invalid or unchanged intents must retain the chooser");
   preset.context.archivePresetById = () => ({ id: "same", kind: "extract", label: "Same folder", options: {
     destination: { layout: "direct", base: "archive_parent" }, existing_output: "skip", symlinks: "skip", encoding: { kind: "auto" },
   } });
-  preset.applyExtractPreset("same", false);
+  await loadPreset(preset, preset.context.archivePresetById());
+  preset.context.presets.apply("extract", "same", false);
   const afterPreset = preset.calls.length;
   obsolete.result.reject(new Error("late failure"));
   assert.equal(await obsolete.work, false);
-  assert.equal(preset.context.extractDestinationMode, "same");
+  assert.equal(preset.context.extraction.state.destinationMode, "same");
   assert.equal(preset.calls.length, afterPreset, "a stale failure must not replace the preset feedback");
 
   const scope = fresh();
@@ -484,55 +490,55 @@ test("extract destination can be reselected and stale choosers cannot change or 
   oldScope.result.resolve(null);
   const afterScope = scope.calls.length;
   assert.equal(await oldScope.work, false);
-  assert.deepEqual(Array.from(scope.context.extractSelectionSnapshot), ["notes.txt"]);
+  assert.deepEqual(Array.from(scope.context.extraction.state.selection), ["notes.txt"]);
   assert.equal(scope.calls.length, afterScope, "stale cancellation must be silent");
 
   const replaced = fresh();
   const first = startChooser(replaced);
   await first.started;
-  await replaced.selectExtractDestination("same");
+  await replaced.context.extraction.selectDestination("same");
   const second = startChooser(replaced);
   await second.started;
-  const secondOwner = replaced.context.extractDestinationPicker;
+  const secondOwner = replaced.context.extraction.choosing;
   first.result.resolve("/late/first");
   assert.equal(await first.work, false);
-  assert.equal(replaced.context.extractDestinationPicker, secondOwner, "old finally must not release the newer chooser");
+  assert.equal(replaced.context.extraction.choosing, secondOwner, "old finally must not release the newer chooser");
   second.result.resolve("/folder/newest");
   assert.equal(await second.work, true);
-  assert.equal(replaced.context.extractCustomDest, "/folder/newest");
-  assert.equal(replaced.context.extractDestinationPicker, null);
+  assert.equal(replaced.context.extraction.state.customDest, "/folder/newest");
+  assert.equal(replaced.context.extraction.choosing, false);
 
-  for (const caller of ["submitExtractJob", "submitCopyOutSelectedJob"]) {
+  for (const caller of ["start", "copyOut"]) {
     const task = fresh();
-    if (caller === "submitCopyOutSelectedJob") task.context.screen = "browse";
-    const pending = startChooser(task, () => task[caller]());
+    if (caller === "copyOut") task.context.screen = "browse";
+    const pending = startChooser(task, () => task.context.extraction[caller]());
     await pending.started;
-    if (caller === "submitExtractJob") {
+    if (caller === "start") {
       assert.equal(task.restoreExtractTaskDraft(spec({ smart: false, dest: "/new/review" })), true);
     } else {
       await task.openArchivePath("/other.zip", "open-file");
       await task.openArchivePath("/original/photos.zip", "open-file");
-      task.context.extractOptions.acceptDestination("/new/source");
+      task.context.extraction.options.acceptDestination("/new/source");
     }
     pending.result.resolve("/late/submission");
     await pending.work;
     assert.equal(task.calls.some(([name]) => name === "plan" || name === "submit"), false,
       `${caller} must not submit after its chooser was superseded`);
-    assert.notEqual(task.context.extractCustomDest, "/late/submission");
+    assert.notEqual(task.context.extraction.state.customDest, "/late/submission");
   }
 
   const copy = fresh();
   copy.context.screen = "browse";
-  const changedSelection = startChooser(copy, () => copy.submitCopyOutSelectedJob());
+  const changedSelection = startChooser(copy, () => copy.context.extraction.copyOut());
   await changedSelection.started;
   copy.context.selectedPaths = () => new Set(["new.txt"]);
   const beforeLateSelection = copy.calls.length;
   changedSelection.result.resolve("/folder/copied");
   await changedSelection.work;
   assert.equal(copy.calls.some(([name]) => name === "submit"), false, "copy-out must not submit an obsolete selection");
-  assert.equal(copy.context.extractCustomDest, "");
+  assert.equal(copy.context.extraction.state.customDest, "");
   assert.equal(copy.calls.length, beforeLateSelection, "an obsolete selection must not produce feedback");
-  const currentSelection = startChooser(copy, () => copy.submitCopyOutSelectedJob());
+  const currentSelection = startChooser(copy, () => copy.context.extraction.copyOut());
   await currentSelection.started;
   currentSelection.result.resolve("/folder/current");
   await currentSelection.work;
@@ -544,10 +550,10 @@ test("extract destination can be reselected and stale choosers cannot change or 
   assert.equal(submitted.expected_input_guard, null);
   assert.equal(submitted.verify_sfx, false, "copy-out does not inherit a normal extraction plan's verification");
 
-  for (const caller of ["submitExtractJob", "submitCopyOutSelectedJob"]) {
+  for (const caller of ["start", "copyOut"]) {
     for (const replaceAfterAcceptance of [false, true]) {
       const task = fresh();
-      if (caller === "submitCopyOutSelectedJob") task.context.screen = "browse";
+      if (caller === "copyOut") task.context.screen = "browse";
       const dialogModule = deferred();
       task.context.getDialogModule = () => dialogModule.promise;
       let accepted = false;
@@ -558,19 +564,19 @@ test("extract destination can be reselected and stale choosers cannot change or 
         accepted = true;
         if (!replaceAfterAcceptance) return;
         queueMicrotask(() => {
-          assert.equal(task.context.extractCustomDest, "/accepted");
-          assert.equal(task.context.extractDestinationPicker, null,
+          assert.equal(task.context.extraction.state.customDest, "/accepted");
+          assert.equal(task.context.extraction.choosing, false,
             "the accepted chooser must finish before the caller resumes");
-          if (caller === "submitExtractJob") {
+          if (caller === "start") {
             task.restoreExtractTaskDraft(spec({ smart: false, dest: "/new/draft" }));
           } else {
             task.context.currentArchive = archive("/new/source.zip", 3);
-            task.syncExtractDraftArchive();
-            task.context.extractOptions.acceptDestination("/new/source-output");
+            task.context.extraction.adoptArchive();
+            task.context.extraction.options.acceptDestination("/new/source-output");
           }
         });
       };
-      const pending = startChooser(task, () => task[caller]());
+      const pending = startChooser(task, () => task.context.extraction[caller]());
       dialogModule.resolve({ open: async () => null });
       await pending.started;
       pending.result.resolve("/accepted");
@@ -603,7 +609,7 @@ test("unlocking a failed task retries the password then restores only its non-se
   };
   await run.reviewTask({ id: 8, state: "failed", spec: spec({ encoding: "gbk" }) });
   assert.equal(run.context.screen, "password");
-  assert.equal(run.context.extractCustomDest, "/unrelated/output");
+  assert.equal(run.context.extraction.state.customDest, "/unrelated/output");
   assert.equal("password" in run.context.pendingArchiveTaskReview, false);
   assert.equal("expected_input_guard" in run.context.pendingArchiveTaskReview, false);
   assert.equal("expected_destination" in run.context.pendingArchiveTaskReview, false);
@@ -615,8 +621,8 @@ test("unlocking a failed task retries the password then restores only its non-se
   run.context.workspacePasswordValue = "correct";
   await run.submitPasswordRequest();
   assert.equal(run.context.screen, "extract");
-  assert.equal(run.extractJobDestination(), "/original/output");
-  assert.deepEqual(Array.from(run.extractJobPaths()), ["photos/", "notes.txt"]);
+  assert.equal(run.context.extraction.destination, "/original/output");
+  assert.deepEqual(Array.from(run.context.extraction.options.selectionSnapshot()), ["photos/", "notes.txt"]);
   assert.equal(run.context.pendingArchiveTaskReview, null);
   assert.equal(run.context.workspacePasswordValue, "");
   assert.equal(run.calls.some(([name]) => name === "submit"), false);
@@ -627,27 +633,28 @@ test("a different decoding reopens the same archive, while a same-source reload 
   run.context.currentArchive = archive("/original/photos.zip", 1, "gbk");
   await run.reviewTask({ id: 8, state: "failed", spec: spec({ verify_sfx: true }) });
   assert.deepEqual(run.calls.find(([name]) => name === "open"), ["open", "/original/photos.zip", null, null]);
-  assert.equal(run.extractEncodingForJob(), null);
+  assert.equal(run.context.extraction.options.encodingForJob(run.context.currentArchive?.encoding_override ?? null), null);
   run.context.currentArchive = archive("/original/photos.zip", 3, "shift_jis");
-  run.syncExtractDraftArchive();
-  assert.equal(run.context.extractVerifySfx, true);
-  assert.equal(run.extractJobDestination(), "/original/output");
-  assert.deepEqual(Array.from(run.extractJobPaths()), []);
+  run.context.extraction.adoptArchive();
+  assert.equal(run.context.extraction.state.verifySfx, true);
+  assert.equal(run.context.extraction.destination, "/original/output");
+  assert.deepEqual(Array.from(run.context.extraction.options.selectionSnapshot()), []);
   run.context.currentArchive = archive("/another.zip", 4);
-  run.syncExtractDraftArchive();
-  assert.equal(run.context.extractVerifySfx, false);
-  assert.equal(run.context.extractOptions.state.smartBaseOverride, null);
+  run.context.extraction.adoptArchive();
+  assert.equal(run.context.extraction.state.verifySfx, false);
+  assert.equal(run.context.extraction.options.state.smartBaseOverride, null);
   run.context.currentArchive = archive("/original/photos.zip", 5);
   run.restoreExtractTaskDraft(spec({ verify_sfx: true }));
-  const selection = run.extractJobPaths();
+  const selection = run.context.extraction.options.selectionSnapshot();
   run.context.archivePresetById = () => ({ id: "compatible", kind: "extract", label: "Same folder", options: {
     destination: { layout: "direct", base: "archive_parent" }, existing_output: "skip", symlinks: "preserve",
     encoding: { kind: "auto" }, credential: { kind: "prompt_when_needed" }, post_success: "keep_source",
   } });
-  run.applyExtractPreset("compatible", false);
-  assert.deepEqual(Array.from(run.extractJobPaths()), Array.from(selection), "preset options do not carry a task's selection");
-  assert.equal(run.context.extractVerifySfx, true, "preset options do not carry a task's verification intent");
-  assert.equal(run.context.extractCustomDest, "/original/output", "non-choose presets preserve the previously chosen path");
+  await loadPreset(run, run.context.archivePresetById());
+  run.context.presets.apply("extract", "compatible", false);
+  assert.deepEqual(Array.from(run.context.extraction.options.selectionSnapshot()), Array.from(selection), "preset options do not carry a task's selection");
+  assert.equal(run.context.extraction.state.verifySfx, true, "preset options do not carry a task's verification intent");
+  assert.equal(run.context.extraction.state.customDest, "/original/output", "non-choose presets preserve the previously chosen path");
 });
 
 test("an archive unlock response cannot clear a password being entered for a background task", async () => {
@@ -756,7 +763,7 @@ test("cancelling, navigating away, or opening another archive drops a pending ex
     assert.equal(run.context.pendingArchiveTaskReview, null);
     assert.equal(run.context.archivePasswordPrompt, null);
     assert.equal(run.context.workspacePasswordValue, "");
-    assert.equal(run.context.extractCustomDest, "/unrelated/output");
+    assert.equal(run.context.extraction.state.customDest, "/unrelated/output");
   }
   const run = harness();
   run.context.currentArchive = archive("/unrelated.zip");
@@ -772,7 +779,7 @@ test("cancelling, navigating away, or opening another archive drops a pending ex
   finishOpen(true);
   await reviewing;
   assert.equal(run.context.screen, "browse");
-  assert.equal(run.context.extractCustomDest, "/unrelated/output");
+  assert.equal(run.context.extraction.state.customDest, "/unrelated/output");
   assert.equal(run.context.pendingArchiveTaskReview, null);
 });
 
@@ -785,16 +792,16 @@ test("failed opens and busy navigation preserve the current draft; best-effort t
     if (reason === "create-busy") run.context.preventCreateSubmissionNavigation = () => true;
     if (reason === "convert-busy") run.context.preventConvertSubmissionNavigation = () => true;
     await run.reviewTask({ id: 8, state: "failed", spec: spec() });
-    assert.equal(run.context.extractCustomDest, "/unrelated/output");
-    assert.equal(run.context.extractOverwriteMode, "overwrite");
+    assert.equal(run.context.extraction.state.customDest, "/unrelated/output");
+    assert.equal(run.context.extraction.state.overwrite, "overwrite");
     assert.equal(run.context.pendingArchiveTaskReview, null);
     assert.equal(run.calls.some(([name]) => name === "submit" || name === "reset"), false);
   }
   const run = harness();
   await run.reviewTask({ id: 8, state: "failed", spec: spec({ best_effort: true }) });
   assert.equal(run.context.screen, "recovery");
-  assert.deepEqual(run.calls.find(([name]) => name === "recovery"), ["recovery", "/original/photos.zip"]);
-  assert.equal(run.context.extractCustomDest, "/unrelated/output");
+  assert.equal(run.context.recoverySession.sourcePath(), "/original/photos.zip");
+  assert.equal(run.context.extraction.state.customDest, "/unrelated/output");
 });
 
 test("empty or invalidated selections cannot expand to extracting all entries", async () => {
@@ -803,12 +810,12 @@ test("empty or invalidated selections cannot expand to extracting all entries", 
     await run.reviewTask({ id: 8, state: "failed", spec: spec({ selection: changeArchive ? ["photos/"] : [] }) });
     if (changeArchive) {
       run.context.currentArchive = archive("/another.zip", 3);
-      run.syncExtractDraftArchive();
+      run.context.extraction.adoptArchive();
     }
-    assert.deepEqual(Array.from(run.extractJobPaths()), []);
-    assert.equal(run.extractSelectionLabel(), "0 selected");
-    assert.match(run.extractStartBlockedReason(), /Select one or more entries/);
-    await run.submitExtractJob();
+    assert.deepEqual(Array.from(run.context.extraction.options.selectionSnapshot()), []);
+    assert.equal(run.context.extractView.extractSelectionLabel(), "0 selected");
+    assert.match(run.context.extractView.extractStartBlockedReason(), /Select one or more entries/);
+    await run.context.extraction.start();
     assert.equal(run.calls.some(([name]) => name === "submit" || name === "plan"), false);
   }
 });
@@ -817,7 +824,7 @@ test("changing verification while rechecking the plan prevents submitting stale 
   for (const change of ["verifySfx", "overwrite", "symlinks"]) {
     const run = harness();
     await run.reviewTask({ id: 8, state: "failed", spec: spec({ verify_sfx: true }) });
-    const input = run.captureExtractPlanInput();
+    const input = run.context.extraction.input;
     const response = deferred();
     const entered = deferred();
     const plan = ipc.planExtract;
@@ -826,14 +833,14 @@ test("changing verification while rechecking the plan prevents submitting stale 
       entered.resolve();
       return response.promise.then(() => result);
     };
-    const submitting = run.submitExtractJob();
+    const submitting = run.context.extraction.start();
     await entered.promise;
     if (change === "verifySfx") {
-      run.context.extractOptions.restoreTask(run.context.currentArchive, spec({ verify_sfx: false }), () => {});
-    } else if (change === "overwrite") run.selectExtractOverwrite("skip");
-    else run.selectExtractSymlink("follow");
-    assert.equal(run.context.extractPlanSession.matches(input), true);
-    assert.equal(run.context.extractPlanSession.matches(run.captureExtractPlanInput()), true);
+      run.context.extraction.options.restoreTask(run.context.currentArchive, spec({ verify_sfx: false }), () => {});
+    } else if (change === "overwrite") run.context.extraction.selectPolicy({ kind: "overwrite", value: "skip" });
+    else run.context.extraction.selectPolicy({ kind: "symlinks", value: "follow" });
+    assert.equal(run.context.extraction.plan.matches(input), true);
+    assert.equal(run.context.extraction.plan.matches(run.context.extraction.input), true);
     response.resolve();
     await submitting;
     assert.equal(run.calls.some(([name]) => name === "submit"), false);

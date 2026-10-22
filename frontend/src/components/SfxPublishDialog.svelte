@@ -14,7 +14,7 @@
   import { cssVariables, type CssVariableMap } from "../lib/css-variables";
   import { errorSummary } from "../lib/error-presentation";
   import { basename as pathBaseName } from "../lib/format";
-  import { currentLang, tFallback } from "../lib/i18n.svelte";
+  import { currentLang, tFallback as tr } from "../lib/i18n.svelte";
   import {
     ipc,
     isErrorDto,
@@ -60,7 +60,7 @@
   let descriptionId = $derived(`sfx-publish-description-${currentLang()}`);
   let profileError = $derived(
     validationAttempted && notaryProfile.trim().length === 0
-      ? tr("gui.sfx_publish.profile_required", "Enter an existing notarytool Keychain profile.")
+      ? tr("gui.sfx_publish.profile_required")
       : null,
   );
   let canSubmit = $derived(
@@ -70,9 +70,6 @@
       && !submitting,
   );
 
-  function tr(key: string, fallback: string): string {
-    return tFallback(key, fallback);
-  }
 
   function previewStatus(): MacosSfxPublisherStatusDto | null {
     if (!import.meta.env.DEV || typeof window === "undefined") return null;
@@ -112,7 +109,7 @@
       publisherState = "error";
       statusError = isErrorDto(error)
         ? errorSummary(error)
-        : tr("gui.sfx_publish.status_failed", "Could not read signing identities from Keychain.");
+        : tr("gui.sfx_publish.status_failed");
     }
   }
 
@@ -167,7 +164,7 @@
     submitError = null;
     if (!canSubmit) {
       if (publisherState === "available" && identity.length === 0) {
-        submitError = tr("gui.sfx_publish.identity_required", "Choose a Developer ID Application identity.");
+        submitError = tr("gui.sfx_publish.identity_required");
       }
       return;
     }
@@ -185,30 +182,29 @@
   }
 
   function stateTitle(): string {
-    if (publisherState === "checking") return tr("gui.sfx_publish.checking", "Checking signing readiness");
-    if (publisherState === "available") return tr("gui.sfx_publish.ready", "Developer ID identity found");
-    if (publisherState === "missing_identity") return tr("gui.sfx_publish.missing_identity", "Developer ID certificate not found");
-    if (publisherState === "unsupported") return tr("gui.sfx_publish.unsupported", "Publishing is available only on macOS");
-    return tr("gui.sfx_publish.status_failed_title", "Signing readiness could not be checked");
+    if (publisherState === "checking") return tr("gui.sfx_publish.checking");
+    if (publisherState === "available") return tr("gui.sfx_publish.ready");
+    if (publisherState === "missing_identity") return tr("gui.sfx_publish.missing_identity");
+    if (publisherState === "unsupported") return tr("gui.sfx_publish.unsupported");
+    return tr("gui.sfx_publish.status_failed_title");
   }
 
   function stateDetail(): string {
     if (publisherState === "checking") {
-      return tr("gui.sfx_publish.checking_detail", "Reading code-signing identities from your login Keychain.");
+      return tr("gui.sfx_publish.checking_detail");
     }
     if (publisherState === "available") {
-      return tr("gui.sfx_publish.ready_detail", "Choose the identity that should sign this distributable copy.");
+      return tr("gui.sfx_publish.ready_detail");
     }
     if (publisherState === "missing_identity") {
       return tr(
         "gui.sfx_publish.missing_identity_detail",
-        "Install a Developer ID Application certificate in Keychain, then refresh this check.",
       );
     }
     if (publisherState === "unsupported") {
-      return tr("gui.sfx_publish.unsupported_detail", "Open this self-extractor on a Mac configured for Developer ID distribution.");
+      return tr("gui.sfx_publish.unsupported_detail");
     }
-    return statusError ?? tr("gui.sfx_publish.status_failed", "Could not read signing identities from Keychain.");
+    return statusError ?? tr("gui.sfx_publish.status_failed");
   }
 
   onMount(() => {
@@ -246,12 +242,11 @@
         <span><Icon name="shield-check" size={15} /></span>
       </span>
       <div>
-        <span class="eyebrow">{tr("gui.sfx_publish.eyebrow", "Trusted distribution")}</span>
-        <h2 id={titleId}>{tr("gui.sfx_publish.title", "Publish for macOS")}</h2>
+        <span class="eyebrow">{tr("gui.sfx_publish.eyebrow")}</span>
+        <h2 id={titleId}>{tr("gui.sfx_publish.title")}</h2>
         <p id={descriptionId}>
           {tr(
             "gui.sfx_publish.body",
-            "Create a separate signed and notarized copy that macOS can verify before launch.",
           )}
         </p>
       </div>
@@ -259,32 +254,32 @@
         class="sfx-publish-close"
         type="button"
         disabled={submitting}
-        aria-label={tr("common.cancel", "Cancel")}
+        aria-label={tr("common.cancel")}
         onclick={onCancel}
       ><Icon name="x" size={16} /></button>
     </header>
 
     <div class="sfx-publish-body">
-      <ol class="sfx-publish-steps" aria-label={tr("gui.sfx_publish.steps", "Publishing stages")}>
+      <ol class="sfx-publish-steps" aria-label={tr("gui.sfx_publish.steps")}>
         <li>
           <span><Icon name="shield-check" size={16} /></span>
           <div>
-            <strong>{tr("gui.sfx_publish.step_sign", "Developer ID sign")}</strong>
-            <small>{tr("gui.sfx_publish.step_sign_detail", "Nested runtime, then app")}</small>
+            <strong>{tr("gui.sfx_publish.step_sign")}</strong>
+            <small>{tr("gui.sfx_publish.step_sign_detail")}</small>
           </div>
         </li>
         <li>
           <span><Icon name="external-link" size={16} /></span>
           <div>
-            <strong>{tr("gui.sfx_publish.step_notarize", "Apple notarize")}</strong>
-            <small>{tr("gui.sfx_publish.step_notarize_detail", "Wait for an Accepted result")}</small>
+            <strong>{tr("gui.sfx_publish.step_notarize")}</strong>
+            <small>{tr("gui.sfx_publish.step_notarize_detail")}</small>
           </div>
         </li>
         <li>
           <span><Icon name="check-circle" size={16} /></span>
           <div>
-            <strong>{tr("gui.sfx_publish.step_verify", "Staple and verify")}</strong>
-            <small>{tr("gui.sfx_publish.step_verify_detail", "Gatekeeper and payload checks")}</small>
+            <strong>{tr("gui.sfx_publish.step_verify")}</strong>
+            <small>{tr("gui.sfx_publish.step_verify_detail")}</small>
           </div>
         </li>
       </ol>
@@ -316,14 +311,14 @@
         </div>
         {#if publisherState === "missing_identity" || publisherState === "error"}
           <button type="button" disabled={submitting} onclick={() => void refreshStatus()}>
-            <Icon name="rotate-cw" size={14} />{tr("common.refresh", "Refresh")}
+            <Icon name="rotate-cw" size={14} />{tr("common.refresh")}
           </button>
         {/if}
       </section>
 
       <div class="sfx-publish-fields">
         <label class="sfx-publish-field">
-          <span>{tr("gui.sfx_publish.identity", "Developer ID identity")}</span>
+          <span>{tr("gui.sfx_publish.identity")}</span>
           <select
             bind:this={identitySelect}
             value={identity}
@@ -331,18 +326,18 @@
             onchange={updateIdentity}
           >
             {#if identities.length === 0}
-              <option value="">{tr("gui.sfx_publish.no_identity", "No identity available")}</option>
+              <option value="">{tr("gui.sfx_publish.no_identity")}</option>
             {:else}
               {#each identities as candidate}
                 <option value={candidate}>{candidate}</option>
               {/each}
             {/if}
           </select>
-          <small>{tr("gui.sfx_publish.identity_help", "Only Developer ID Application identities are shown.")}</small>
+          <small>{tr("gui.sfx_publish.identity_help")}</small>
         </label>
 
         <label class="sfx-publish-field">
-          <span>{tr("gui.sfx_publish.profile", "Notary Keychain profile")}</span>
+          <span>{tr("gui.sfx_publish.profile")}</span>
           <input
             bind:this={profileInput}
             type="text"
@@ -350,7 +345,7 @@
             disabled={publisherState !== "available" || submitting}
             autocomplete="off"
             spellcheck="false"
-            placeholder={tr("gui.sfx_publish.profile_placeholder", "Example: squallz-notary")}
+            placeholder={tr("gui.sfx_publish.profile_placeholder")}
             aria-invalid={profileError ? "true" : undefined}
             aria-describedby={profileError ? "sfx-publish-profile-error" : "sfx-publish-profile-help"}
             oninput={updateProfile}
@@ -359,7 +354,7 @@
             <small id="sfx-publish-profile-error" class="sfx-publish-field-error" role="alert">{profileError}</small>
           {:else}
             <small id="sfx-publish-profile-help">
-              {tr("gui.sfx_publish.profile_help", "Use a profile already stored by notarytool. It is verified when the task starts.")}
+              {tr("gui.sfx_publish.profile_help")}
             </small>
           {/if}
         </label>
@@ -367,11 +362,11 @@
 
       <dl class="sfx-publish-paths">
         <div>
-          <dt>{tr("gui.sfx_publish.unsigned_source", "Unsigned source")}</dt>
+          <dt>{tr("gui.sfx_publish.unsigned_source")}</dt>
           <dd><strong>{pathBaseName(source)}</strong><span>{source}</span></dd>
         </div>
         <div>
-          <dt>{tr("gui.sfx_publish.published_copy", "Published copy")}</dt>
+          <dt>{tr("gui.sfx_publish.published_copy")}</dt>
           <dd><strong>{pathBaseName(output)}</strong><span>{output}</span></dd>
         </div>
       </dl>
@@ -380,7 +375,6 @@
         <Icon name="lock" size={14} />
         {tr(
           "gui.sfx_publish.security_note",
-          "Squallz references your existing certificate and Keychain profile. Certificate passwords and Apple credentials are never requested or stored here.",
         )}
       </p>
 
@@ -393,13 +387,13 @@
 
     <footer class="sfx-publish-actions">
       <button type="button" disabled={submitting} onclick={onCancel}>
-        {tr("common.cancel", "Cancel")}
+        {tr("common.cancel")}
       </button>
       <button class="primary" type="submit" disabled={!canSubmit} aria-busy={submitting}>
         <Icon name={submitting ? "hourglass" : "shield-check"} size={15} />
         {submitting
-          ? tr("gui.sfx_publish.starting", "Starting secure publication…")
-          : tr("gui.sfx_publish.submit", "Sign, notarize, and publish")}
+          ? tr("gui.sfx_publish.starting")
+          : tr("gui.sfx_publish.submit")}
       </button>
     </footer>
     </form>

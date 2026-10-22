@@ -17,7 +17,7 @@
     preview = null,
     automaticChecksEnabled,
   }: {
-    tr: (key: string, fallback: string) => string;
+    tr: (key: string, fallback?: string) => string;
     preview?: UpdateCheckPreview;
     automaticChecksEnabled: boolean;
   } = $props();
@@ -43,23 +43,23 @@
   }
 
   function statusLabel(): string {
-    if (phase === "checking") return tr("gui.update.status.checking", "Checking");
-    if (phase === "error") return tr("gui.update.status.failed", "Check failed");
+    if (phase === "checking") return tr("gui.update.status.checking");
+    if (phase === "error") return tr("gui.update.status.failed");
     if (!result) {
       if (lastSuccessAt !== null) {
-        return tr("gui.update.status.checked_recently", "Checked recently");
+        return tr("gui.update.status.checked_recently");
       }
       return automaticChecksEnabled
-        ? tr("gui.update.status.automatic", "Automatic")
-        : tr("gui.update.status.manual", "Manual check");
+        ? tr("gui.update.status.automatic")
+        : tr("gui.update.status.manual");
     }
     if (result.status === "update_available") {
-      return tr("gui.update.status.available", "Update available");
+      return tr("gui.update.status.available");
     }
     if (result.status === "ahead") {
-      return tr("gui.update.status.ahead", "Newer build");
+      return tr("gui.update.status.ahead");
     }
-    return tr("gui.update.status.current", "Up to date");
+    return tr("gui.update.status.current");
   }
 
   function statusIcon(): string {
@@ -79,37 +79,37 @@
 
   function summary(): string {
     if (phase === "checking") {
-      return tr("gui.update.checking_body", "Contacting the stable Squallz release channel on GitHub.");
+      return tr("gui.update.checking_body");
     }
     if (phase === "error") {
-      return tr(errorKey, tr("gui.update.failed_body", "Squallz could not check GitHub Releases. Check your connection and try again."));
+      return tr(errorKey, tr("gui.update.failed_body"));
     }
     if (result?.status === "update_available") {
       if (result.metadataSource === "latest_release_manifest") {
-        return tr("gui.update.available_manifest_body", "Squallz {version} is available. GitHub API access was limited, so package details and SHA-256 came from the release manifest. Review them before downloading.")
+        return tr("gui.update.available_manifest_body")
           .replace("{version}", `v${result.latestVersion}`);
       }
       if (result.metadataSource === "latest_release_redirect") {
-        return tr("gui.update.available_fallback_body", "Squallz {version} is ready. GitHub limited package details, so review and download it from the release page.")
+        return tr("gui.update.available_fallback_body")
           .replace("{version}", `v${result.latestVersion}`);
       }
-      return tr("gui.update.available_body", "Squallz {version} is ready. Review the package trust state before downloading.")
+      return tr("gui.update.available_body")
         .replace("{version}", `v${result.latestVersion}`);
     }
     if (result?.status === "ahead") {
-      return tr("gui.update.ahead_body", "This build is newer than the latest stable GitHub Release.");
+      return tr("gui.update.ahead_body");
     }
     if (result) {
-      return tr("gui.update.current_body", "You have the latest stable version published on GitHub.");
+      return tr("gui.update.current_body");
     }
     if (lastSuccessAt !== null) {
       return automaticChecksEnabled
-        ? tr("gui.update.recent_check_body", "A stable release check succeeded in the last 24 hours. You can check again now.")
-        : tr("gui.update.recent_manual_body", "A stable release check succeeded in the last 24 hours. Automatic checks are off.");
+        ? tr("gui.update.recent_check_body")
+        : tr("gui.update.recent_manual_body");
     }
     return automaticChecksEnabled
-      ? tr("gui.update.automatic_idle_body", "Squallz checks GitHub for stable releases at most once every 24 hours. Checking does not download or install updates.")
-      : tr("gui.update.idle_body", "Check GitHub for stable releases whenever you want. Checking does not download or install updates.");
+      ? tr("gui.update.automatic_idle_body")
+      : tr("gui.update.idle_body");
   }
 
   function lastCheckedLabel(): string {
@@ -123,7 +123,7 @@
       dateStyle: "medium",
       timeStyle: "medium",
     }).format(checkedAt);
-    return tr("gui.update.last_successful_check", "Last successful check: {time}")
+    return tr("gui.update.last_successful_check")
       .replace("{time}", formatted);
   }
 
@@ -139,9 +139,9 @@
   function packageDetail(): string {
     if (!result?.assetName) {
       if (result?.metadataSource === "latest_release_redirect") {
-        return tr("gui.update.package_metadata_limited", "GitHub limited detailed package metadata. Open the release page to choose and verify the package.");
+        return tr("gui.update.package_metadata_limited");
       }
-      return tr("gui.update.package_unavailable", "No package is published for this platform and architecture.");
+      return tr("gui.update.package_unavailable");
     }
     const size = result.assetSizeBytes === null
       ? ""
@@ -151,12 +151,12 @@
 
   function trustLabel(): string {
     if (result?.assetTrust === "developer_id_notarized") {
-      return tr("gui.update.trust.notarized", "Developer ID signed, notarized, and accompanied by trust evidence.");
+      return tr("gui.update.trust.notarized");
     }
     if (result?.assetTrust === "unsigned_preview") {
-      return tr("gui.update.trust.unsigned", "Unsigned package. Verify its SHA-256 and GitHub Artifact Attestation before opening it.");
+      return tr("gui.update.trust.unsigned");
     }
-    return tr("gui.update.trust.unavailable", "Open the release page to review available packages and verification details.");
+    return tr("gui.update.trust.unavailable");
   }
 
   function trustTone(): string {
@@ -205,7 +205,7 @@
     actionFailed = false;
     if (!trustedUpdateUrl(url, kind)) {
       actionFailed = true;
-      actionMessage = tr("gui.update.open_failed", "The verified Squallz release link could not be opened.");
+      actionMessage = tr("gui.update.open_failed");
       return;
     }
     try {
@@ -214,12 +214,12 @@
       await openUrl(url);
       if (!isCurrent()) return;
       actionMessage = kind === "download"
-        ? tr("gui.update.download_opened", "Opened the package download in your browser. Verify it before installing.")
-        : tr("gui.update.release_opened", "Opened the Squallz release page in your browser.");
+        ? tr("gui.update.download_opened")
+        : tr("gui.update.release_opened");
     } catch {
       if (!isCurrent()) return;
       actionFailed = true;
-      actionMessage = tr("gui.update.open_failed", "The verified Squallz release link could not be opened.");
+      actionMessage = tr("gui.update.open_failed");
     }
   }
 
@@ -249,8 +249,8 @@
       const copied = outcome === "copied";
       actionFailed = !copied;
       actionMessage = copied
-        ? tr("gui.update.sha256_copied", "SHA-256 copied.")
-        : tr("gui.update.sha256_copy_failed", "Could not copy the SHA-256.");
+        ? tr("gui.update.sha256_copied")
+        : tr("gui.update.sha256_copy_failed");
     } finally {
       if (copyRequest === request) copyRequest = null;
     }
@@ -263,7 +263,7 @@
       <Icon name={statusIcon()} size={18} />
     </div>
     <div class="update-check-title">
-      <strong>{tr("gui.update.title", "Software updates")}</strong>
+      <strong>{tr("gui.update.title")}</strong>
       <span>{summary()}</span>
       {#if lastCheckedText}
         <small class="update-check-last-checked">{lastCheckedText}</small>
@@ -274,23 +274,23 @@
 
   <div class="update-check-version-grid">
     <div>
-      <span>{tr("gui.update.installed_version", "Installed")}</span>
+      <span>{tr("gui.update.installed_version")}</span>
       <strong>v{currentVersion()}</strong>
     </div>
     <div>
-      <span>{tr("gui.update.stable_version", "Latest stable")}</span>
+      <span>{tr("gui.update.stable_version")}</span>
       <strong>{result ? `v${result.latestVersion}` : "—"}</strong>
     </div>
     <div>
-      <span>{tr("gui.update.channel", "Channel")}</span>
-      <strong>{tr("gui.update.channel_stable", "Stable · GitHub")}</strong>
+      <span>{tr("gui.update.channel")}</span>
+      <strong>{tr("gui.update.channel_stable")}</strong>
     </div>
   </div>
 
   {#if result?.status === "update_available"}
     <div class="update-check-package">
       <div>
-        <span>{tr("gui.update.package", "Package")}</span>
+        <span>{tr("gui.update.package")}</span>
         <strong>{platformLabel(result.platform)} · {result.architecture}</strong>
         <small>{packageDetail()}</small>
       </div>
@@ -301,11 +301,11 @@
       {#if result.assetSha256}
         <div class="update-check-digest">
           <div>
-            <span>{tr("gui.update.sha256", "Package SHA-256")}</span>
+            <span>{tr("gui.update.sha256")}</span>
             <code>{result.assetSha256}</code>
           </div>
           <button type="button" class="secondary-lite" disabled={copyRequest !== null} aria-busy={copyRequest !== null} onclick={() => void copyPackageSha256()}>
-            <Icon name="copy" size={15} />{copyRequest ? tr("common.copying", "Copying…") : tr("gui.update.copy_sha256", "Copy SHA-256")}
+            <Icon name="copy" size={15} />{copyRequest ? tr("common.copying") : tr("gui.update.copy_sha256")}
           </button>
         </div>
       {/if}
@@ -321,19 +321,19 @@
     >
       <Icon name={phase === "checking" ? "hourglass" : "rotate-cw"} size={15} />
       {phase === "checking"
-        ? tr("gui.update.checking", "Checking…")
+        ? tr("gui.update.checking")
         : result || phase === "error"
-          ? tr("gui.update.check_again", "Check again")
-          : tr("gui.update.check", "Check for updates")}
+          ? tr("gui.update.check_again")
+          : tr("gui.update.check")}
     </button>
     {#if result?.status === "update_available" && result.downloadUrl}
       <button type="button" class="primary-lite" onclick={openDownload}>
-        <Icon name="external-link" size={15} />{tr("gui.update.download", "Download package")}
+        <Icon name="external-link" size={15} />{tr("gui.update.download")}
       </button>
     {/if}
     {#if result}
       <button type="button" class="secondary-lite" onclick={openRelease}>
-        <Icon name="external-link" size={15} />{tr("gui.update.release_notes", "Release details")}
+        <Icon name="external-link" size={15} />{tr("gui.update.release_notes")}
       </button>
     {/if}
   </div>

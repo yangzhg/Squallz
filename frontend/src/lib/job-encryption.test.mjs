@@ -16,7 +16,16 @@ test("task records retain output protection while clearing credentials and execu
     const { ipc } = await server.ssrLoadModule("/src/lib/ipc.ts");
     let nextId = 0;
     const submissions = [];
-    ipc.submitJob = async (spec) => { submissions.push(spec); return ++nextId; };
+    ipc.submitJob = async (spec) => {
+      submissions.push(spec);
+      const clean = { ...spec };
+      for (const key of ["password", "src_password", "dest_password", "replacement_guard", "expected_archive_id"])
+        if (key in clean) clean[key] = null;
+      const required = (spec.kind === "compress" ? spec.password !== null || spec.encrypt_names
+        : spec.kind === "convert" ? spec.dest_password !== null || spec.encrypt_names
+        : spec.kind === "export_sqz" && spec.dest_password !== null);
+      return { ...snapshot(++nextId, required), spec: clean, owned_by_requester: true };
+    };
     const convert = { kind: "convert", src: "/source.7z", dest: "/output.zip", level: 5,
       src_encoding: null, src_password: "source-secret", dest_password: "output-secret",
       encrypt_names: false, split_size: null, split_mode: "generic",
@@ -33,6 +42,14 @@ test("task records retain output protection while clearing credentials and execu
         add: [], delete: ["report.txt"], rename: [], mkdir: [], encoding: null,
         excludes: [], content_policy: "keep_all_files", password: "source-secret", level: 6 }, false],
     ];
+    const snapshot = (id, required, version = 1) => ({
+      id, version, spec: { ...convert, src_password: null, dest_password: null, replacement_guard: null },
+      output_password_required: required, origin: "file_manager", owned_by_requester: false,
+      state: "queued", queue_position: null, queue_wait_reason: null, cpu_threads: 1,
+      stream_buffer_limit_bytes: null, progress: { done: 0, total: 0, current: "", current_done: 0,
+        current_total: 0, speed: 0, interruptible: true }, error: null, result: null,
+      interaction: null, question: null,
+    });
     for (const [spec, required] of inputs) {
       const id = await jobs.submitJob(spec);
       const task = jobs.tasks().find((item) => item.id === id);
@@ -43,14 +60,6 @@ test("task records retain output protection while clearing credentials and execu
         assert.equal(task.spec.expected_archive_id, null);
       }
     }
-    const snapshot = (id, required, version = 1) => ({
-      id, version, spec: { ...convert, src_password: null, dest_password: null, replacement_guard: null },
-      output_password_required: required, origin: "file_manager", owned_by_requester: false,
-      state: "queued", queue_position: null, queue_wait_reason: null, cpu_threads: 1,
-      stream_buffer_limit_bytes: null, progress: { done: 0, total: 0, current: "", current_done: 0,
-        current_total: 0, speed: 0, interruptible: true }, error: null, result: null,
-      interaction: null, question: null,
-    });
     const records = [snapshot(1, true), snapshot(20, true), snapshot(21, false)];
     ipc.jobSnapshots = async () => ({ revision: 1, reset: true, upserts: records, removed: [] });
     dispose = await jobs.initJobEvents();

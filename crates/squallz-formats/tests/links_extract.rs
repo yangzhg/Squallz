@@ -11,10 +11,11 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, UNIX_EPOCH};
 
-use common::{engine, TempDir};
+use common::{engine, read_archive_entries, TempDir};
 use squallz_core::api::{
     ControlToken, CreateOptions, ExtractOptions, NoProgress, OpenOptions, SymlinkPolicy,
 };
+use squallz_core::CreateCommitPolicy;
 
 fn extract_with(archive: &Path, dest: &Path, symlinks: SymlinkPolicy) {
     let opts = ExtractOptions {
@@ -66,6 +67,7 @@ fn zip_follow_materializes_content_copies() {
             &archive,
             &[root],
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &NoProgress,
             &ctl,
         )
@@ -73,7 +75,7 @@ fn zip_follow_materializes_content_copies() {
 
     let out = tmp.path().join("out");
     extract_with(&archive, &out, SymlinkPolicy::Follow);
-    let archived = engine().list(&archive, &OpenOptions::default()).unwrap();
+    let archived = read_archive_entries(&engine(), &archive, &OpenOptions::default()).unwrap();
 
     // Direct and chained links become regular files with the target bytes.
     for name in ["tree/link.txt", "tree/chain.txt"] {
@@ -108,6 +110,7 @@ fn zip_follow_skips_cycles() {
             &archive,
             &[root],
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &NoProgress,
             &ctl,
         )
@@ -128,6 +131,7 @@ fn preserve_policy_still_creates_symlinks() {
             &archive,
             &[root],
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &NoProgress,
             &ControlToken::new(),
         )
@@ -199,7 +203,9 @@ fn default_driver_hardlink_copy_inherits_target_time() {
     let archive = tmp.path().join("hard.tar");
     hardlink_tar(&archive, b"fallback content");
     let engine = engine();
-    let mut reader = engine.open(&archive, &OpenOptions::default()).unwrap();
+    let mut reader = engine
+        .open(&archive, &OpenOptions::default(), &ControlToken::default())
+        .unwrap();
     let out = tmp.path().join("out");
     squallz_format_api::extract_entries(
         &mut *reader,
@@ -234,7 +240,7 @@ fn tar_hardlink_with_excluded_target_is_skipped() {
     let archive = tmp.path().join("hard.tar");
     hardlink_tar(&archive, b"fallback content");
 
-    let entries = engine().list(&archive, &OpenOptions::default()).unwrap();
+    let entries = read_archive_entries(&engine(), &archive, &OpenOptions::default()).unwrap();
     let alias = entries
         .iter()
         .find(|e| e.path.display.ends_with("alias.txt"))

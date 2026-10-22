@@ -60,9 +60,9 @@
     <strong id={titleId}>{title}</strong>
     <span>
       {#if confirmingReload}
-        {tFallback("gui.view_recovery.reload_confirmation", "Reloading resets this window's unsubmitted changes and current view. Submitted tasks continue running. Reload this window?")}
+        {tFallback("gui.view_recovery.reload_confirmation")}
       {:else if reloadRequired}
-        {tFallback("gui.view_recovery.retry_failed", "This view still could not be loaded. Reload this window to try again.")}
+        {tFallback("gui.view_recovery.retry_failed")}
       {:else}
         {body}
       {/if}
@@ -71,16 +71,16 @@
   <div class="deferred-workspace-actions">
     {#if confirmingReload}
       <button bind:this={cancelButton} type="button" onclick={() => void cancelReload()} onkeydown={onConfirmationKeydown}>
-        {tFallback("gui.common.cancel", "Cancel")}
+        {tFallback("gui.common.cancel")}
       </button>
       <button type="button" class:classic-primary={classic} class:primary-lite={!classic} onclick={() => reloadWindow(recovery)} onkeydown={onConfirmationKeydown}>
-        <Icon name="rotate-cw" size={15} />{tFallback("gui.view_recovery.reload", "Reload window")}
+        <Icon name="rotate-cw" size={15} />{tFallback("gui.view_recovery.reload")}
       </button>
     {:else}
       {@render children?.()}
       {#if reloadRequired}
         <button bind:this={reloadButton} type="button" class:classic-primary={classic} class:primary-lite={!classic} onclick={() => void confirmReload()}>
-          <Icon name="rotate-cw" size={15} />{tFallback("gui.view_recovery.reload", "Reload window")}
+          <Icon name="rotate-cw" size={15} />{tFallback("gui.view_recovery.reload")}
         </button>
       {:else}
         <button type="button" class:classic-primary={classic} class:primary-lite={!classic} onclick={onRetry}>

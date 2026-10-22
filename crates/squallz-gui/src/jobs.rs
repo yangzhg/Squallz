@@ -1,12 +1,11 @@
 //! Job execution: every compress/extract/test/convert runs through the core
-//! [`JobQueue`]. Progress is forwarded as throttled `job://progress` events,
-//! state changes as `job://state`; mid-job questions (conflicts, passwords)
-//! park the worker on the [`AskBridge`] until the frontend answers.
+//! [`JobQueue`]. Authoritative `job://snapshot` updates carry progress, state
+//! and questions; mid-job questions park the worker on the [`AskBridge`]
+//! until the frontend answers. Revision deltas recover missed updates.
 
 use std::collections::{HashMap, HashSet};
-use std::io;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use squallz_core::api::{ControlToken, Detected, FormatError};
@@ -17,19 +16,20 @@ use squallz_core::{
 
 use crate::audit::{self, OperationAudit, OperationAuditRecord};
 use crate::bridge::{AskAnswer, AskBridge};
-use crate::dto::{
-    ErrorDto, JobSnapshotDescription, JobSpec, SettingsDto, SfxCreateCapabilityDto, StateEvent,
-};
-use crate::events::{emit, EventSink, EV_STATE};
+use crate::dto::{ErrorDto, JobSnapshotDescription, JobSpec, SettingsDto, SfxCreateCapabilityDto};
+use crate::events::{emit, EventSink, EV_SNAPSHOT};
 use crate::source_cleanup_journal::SourceCleanupJournal;
 use crate::state::{AppState, ResolvedArchiveSource};
 
 mod execution;
 mod output;
+pub(crate) mod results;
 mod snapshots;
+pub use results::JobResult;
 mod source_cleanup;
 
 pub use source_cleanup::SourceCleanupRecoveryNotice;
+pub(crate) use source_cleanup::SourceCleanupResult;
 use source_cleanup::{SourceCleanup, SystemTrashAdapter, TrashAdapter};
 mod progress;
 
@@ -195,7 +195,6 @@ fn job_supports_pause(spec: &JobSpec) -> bool {
 #[derive(Clone)]
 struct ManagedJob {
     queue_id: JobId,
-    cancel_flag: Arc<AtomicBool>,
     owner_window: Option<String>,
     events: Arc<dyn EventSink>,
     pausable: bool,
@@ -372,59 +371,6 @@ fn redact_source_error(error: &mut ErrorDto, redactions: &[(String, String)]) {
     }
 }
 
-fn redact_source_json(value: &mut serde_json::Value, redactions: &[(String, String)]) {
-    match value {
-        serde_json::Value::String(text) => {
-            *text = redact_source_text(text, redactions);
-        }
-        serde_json::Value::Array(items) => {
-            for item in items {
-                redact_source_json(item, redactions);
-            }
-        }
-        serde_json::Value::Object(fields) => {
-            for item in fields.values_mut() {
-                redact_source_json(item, redactions);
-            }
-        }
-        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {}
-    }
-}
-
-fn redact_format_error_path(error: FormatError, path: &str, display: &str) -> FormatError {
-    if path.is_empty() || !error.to_string().contains(path) {
-        return error;
-    }
-    let replace = |detail: String| detail.replace(path, display);
-    if let Some(output) = error.destination_changed_path() {
-        return FormatError::destination_changed(PathBuf::from(replace(
-            output.display().to_string(),
-        )));
-    }
-    if let Some(output) = error.output_exists_path() {
-        return FormatError::output_exists(PathBuf::from(replace(output.display().to_string())));
-    }
-    match error {
-        FormatError::Io(error) => {
-            FormatError::from(io::Error::new(error.kind(), replace(error.to_string())))
-        }
-        FormatError::Unsupported(detail) => FormatError::Unsupported(replace(detail)),
-        FormatError::CorruptArchive(detail) => FormatError::CorruptArchive(replace(detail)),
-        FormatError::PasswordRequired => FormatError::PasswordRequired,
-        FormatError::WrongPassword => FormatError::WrongPassword,
-        FormatError::Cancelled => FormatError::Cancelled,
-        FormatError::PathTraversal(detail) => FormatError::PathTraversal(replace(detail)),
-        FormatError::SymlinkBreakout(detail) => FormatError::SymlinkBreakout(replace(detail)),
-        FormatError::ResourceLimitExceeded(detail) => {
-            FormatError::ResourceLimitExceeded(replace(detail))
-        }
-        FormatError::UnsafeFileName(detail) => FormatError::UnsafeFileName(replace(detail)),
-        FormatError::DiskFull => FormatError::DiskFull,
-        FormatError::DependencyMissing(detail) => FormatError::DependencyMissing(replace(detail)),
-        FormatError::Other(detail) => FormatError::Other(replace(detail)),
-    }
-}
-
 #[derive(Default)]
 struct JobRegistry {
     jobs: HashMap<u64, ManagedJob>,
@@ -590,8 +536,6 @@ impl JobManager {
         let gui_id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let bridge = Arc::clone(&self.bridge);
         let audit = Arc::clone(&self.audit);
-        let cancel_flag = Arc::new(AtomicBool::new(false));
-        let flag = Arc::clone(&cancel_flag);
         let snapshots = Arc::clone(&self.snapshots);
         let sfx_template = self.sfx_template.clone();
         let source_cleanup = Arc::clone(&self.source_cleanup);
@@ -616,7 +560,7 @@ impl JobManager {
             );
             return Ok(gui_id);
         }
-        let queued_version = lock_unpoisoned(&self.snapshots).insert_with_resources(
+        lock_unpoisoned(&self.snapshots).insert_with_resources(
             gui_id,
             owner_window.clone(),
             prepared.snapshot,
@@ -624,26 +568,29 @@ impl JobManager {
             job_resources,
             stream_buffer_limit_bytes,
         );
-        emit_state(&*events, gui_id, queued_version, "queued", None);
+        let queued = lock_unpoisoned(&self.snapshots).owner_snapshot(gui_id);
+        if let Some(snapshot) = queued {
+            emit(&*events, EV_SNAPSHOT, &snapshot);
+        }
         let owner_events = Arc::clone(&events);
         let execution_spec = prepared.execution_spec;
         let source_leases = prepared._source_leases;
         let redactions = prepared.redactions;
         let update_guard = prepared.update_guard;
         let queue_id = self.queue.submit_with_resources(
-            Box::new(move |ctl, queue_sink| {
+            Box::new(move |ctl, phase_gate| {
                 let _source_leases = source_leases;
                 let starting_state = if ctl.is_paused() { "paused" } else { "running" };
-                if let Some(version) =
-                    lock_unpoisoned(&snapshots).set_starting_state(gui_id, starting_state)
-                {
-                    emit_state(&*events, gui_id, version, starting_state, None);
+                let snapshot =
+                    lock_unpoisoned(&snapshots).set_starting_state(gui_id, starting_state);
+                if let Some(snapshot) = snapshot {
+                    emit(&*events, EV_SNAPSHOT, &snapshot);
                 }
                 let sink = EmitProgress::new(
                     gui_id,
                     Arc::clone(&events),
                     Arc::clone(&snapshots),
-                    queue_sink,
+                    phase_gate,
                     &redactions,
                 );
                 let outcome = JobContext {
@@ -653,7 +600,6 @@ impl JobManager {
                     bridge: &bridge,
                     events: &events,
                     ctl,
-                    cancel_flag: &flag,
                     sink: &sink,
                     snapshots: &snapshots,
                     sfx_template: sfx_template.as_deref(),
@@ -664,36 +610,25 @@ impl JobManager {
                 sink.flush();
                 match outcome {
                     Ok(mut result) => {
-                        if let Some(result) = result.as_mut() {
-                            redact_source_json(result, &redactions);
-                        }
-                        record_job_audit(&audit, gui_id, &spec, "done", result.as_ref(), None);
-                        if let Some(version) = lock_unpoisoned(&snapshots).set_state(
+                        result.redact_sources(&redactions);
+                        record_job_audit(&audit, gui_id, &spec, "done", Some(&result), None);
+                        let snapshot = lock_unpoisoned(&snapshots).set_state(
                             gui_id,
                             "done",
                             None,
-                            result.clone(),
-                        ) {
-                            emit(
-                                &*events,
-                                EV_STATE,
-                                &StateEventWithResult {
-                                    id: gui_id,
-                                    version,
-                                    state: "done",
-                                    error: None,
-                                    result,
-                                },
-                            );
+                            Some(result),
+                        );
+                        if let Some(snapshot) = snapshot {
+                            emit(&*events, EV_SNAPSHOT, &snapshot);
                         }
                         Ok(())
                     }
                     Err(FormatError::Cancelled) => {
                         record_job_audit(&audit, gui_id, &spec, "cancelled", None, None);
-                        if let Some(version) =
-                            lock_unpoisoned(&snapshots).set_state(gui_id, "cancelled", None, None)
-                        {
-                            emit_state(&*events, gui_id, version, "cancelled", None);
+                        let snapshot =
+                            lock_unpoisoned(&snapshots).set_state(gui_id, "cancelled", None, None);
+                        if let Some(snapshot) = snapshot {
+                            emit(&*events, EV_SNAPSHOT, &snapshot);
                         }
                         Err(FormatError::Cancelled)
                     }
@@ -709,13 +644,14 @@ impl JobManager {
                             None,
                             Some(error.key.clone()),
                         );
-                        if let Some(version) = lock_unpoisoned(&snapshots).set_state(
+                        let snapshot = lock_unpoisoned(&snapshots).set_state(
                             gui_id,
                             "failed",
-                            Some(error.clone()),
+                            Some(error),
                             None,
-                        ) {
-                            emit_state(&*events, gui_id, version, "failed", Some(error));
+                        );
+                        if let Some(snapshot) = snapshot {
+                            emit(&*events, EV_SNAPSHOT, &snapshot);
                         }
                         Err(queue_error)
                     }
@@ -727,7 +663,6 @@ impl JobManager {
             gui_id,
             ManagedJob {
                 queue_id,
-                cancel_flag,
                 owner_window,
                 events: owner_events,
                 pausable,
@@ -760,12 +695,12 @@ impl JobManager {
         {
             return Err(job_unavailable_error());
         }
-        let Some(version) =
+        let Some(snapshot) =
             lock_unpoisoned(&self.snapshots).set_state(gui_id, "paused", None, None)
         else {
             return Err(job_unavailable_error());
         };
-        emit_state(&*entry.events, gui_id, version, "paused", None);
+        emit(&*entry.events, EV_SNAPSHOT, &snapshot);
         Ok(())
     }
 
@@ -784,12 +719,12 @@ impl JobManager {
             Some(JobState::Running) => "running",
             _ => return Err(job_unavailable_error()),
         };
-        let Some(version) =
+        let Some(snapshot) =
             lock_unpoisoned(&self.snapshots).set_state(gui_id, resumed_state, None, None)
         else {
             return Err(job_unavailable_error());
         };
-        emit_state(&*entry.events, gui_id, version, resumed_state, None);
+        emit(&*entry.events, EV_SNAPSHOT, &snapshot);
         if resumed_state == "queued" {
             self.sync_queue_positions();
         }
@@ -985,13 +920,12 @@ impl JobManager {
             if !cancelled.contains(&entry.queue_id) {
                 continue;
             }
-            entry.cancel_flag.store(true, Ordering::Relaxed);
             self.bridge.wake_cancelled(*gui_id);
             if self.queue.state(entry.queue_id) == Some(JobState::Cancelled) {
-                if let Some(version) =
-                    lock_unpoisoned(&self.snapshots).set_state(*gui_id, "cancelled", None, None)
-                {
-                    emit_state(&*entry.events, *gui_id, version, "cancelled", None);
+                let snapshot =
+                    lock_unpoisoned(&self.snapshots).set_state(*gui_id, "cancelled", None, None);
+                if let Some(snapshot) = snapshot {
+                    emit(&*entry.events, EV_SNAPSHOT, &snapshot);
                 }
             }
         }
@@ -1102,10 +1036,9 @@ impl JobManager {
             JobState::Failed(detail) => ("failed", Some(ErrorDto::other(detail.clone()))),
             JobState::Queued | JobState::Running | JobState::Paused => return,
         };
-        if let Some(version) =
-            lock_unpoisoned(&self.snapshots).set_state(gui_id, state_name, error.clone(), None)
-        {
-            emit_state(events, gui_id, version, state_name, error);
+        let snapshot = lock_unpoisoned(&self.snapshots).set_state(gui_id, state_name, error, None);
+        if let Some(snapshot) = snapshot {
+            emit(events, EV_SNAPSHOT, &snapshot);
         }
     }
 
@@ -1208,23 +1141,12 @@ impl Default for JobManager {
     }
 }
 
-/// `job://state` payload extended with an optional job result (e.g. the
-/// test report counters).
-#[derive(serde::Serialize)]
-struct StateEventWithResult {
-    id: u64,
-    version: u64,
-    state: &'static str,
-    error: Option<ErrorDto>,
-    result: Option<serde_json::Value>,
-}
-
 fn record_job_audit(
     audit: &OperationAudit,
     gui_id: u64,
     spec: &JobSpec,
     state: &str,
-    result: Option<&serde_json::Value>,
+    result: Option<&JobResult>,
     error_key: Option<String>,
 ) {
     let summary = audit::summarize_job(spec);
@@ -1241,19 +1163,6 @@ fn record_job_audit(
     if let Err(e) = audit.append(record) {
         log::warn!("operation audit: cannot append job {gui_id}: {e}");
     }
-}
-
-fn emit_state(events: &dyn EventSink, id: u64, version: u64, state: &str, error: Option<ErrorDto>) {
-    emit(
-        events,
-        EV_STATE,
-        &StateEvent {
-            id,
-            version,
-            state: state.to_owned(),
-            error,
-        },
-    );
 }
 
 #[cfg(test)]

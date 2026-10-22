@@ -2,8 +2,35 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import vm from "node:vm";
 import ts from "typescript";
-import { createTestServer } from "../../tests/runtime.mjs";
+import { englishTranslate, createTestServer } from "../../tests/runtime.mjs";
 import { compileTestScript, readSvelteScriptAsync, selectFunctions } from "../../tests/source.mjs";
+import { extractionFixture } from "../../tests/extraction.mjs";
+
+async function installWorkspaceOwners(server, context) {
+  const fixture = await extractionFixture(server);
+  fixture.install(context);
+  const { RecoverySession } = await server.ssrLoadModule("/src/lib/recovery-session.svelte.ts");
+  const { CreateSession } = await server.ssrLoadModule("/src/lib/create-session.svelte.ts");
+  const { ToolsSession } = await server.ssrLoadModule("/src/lib/tools-session.svelte.ts");
+  context.recoverySession = new RecoverySession({
+    read: () => ({ archive: context.currentArchive, tasks: [], platform: "macos" }),
+    notice: context.showNotice,
+  });
+  context.tools = new ToolsSession({
+    read: () => ({ archive: context.currentArchive, tasks: [], screen: context.screen }),
+  });
+  context.create = new CreateSession({
+    read: () => ({ screen: context.screen, mode: context.mode ?? "modern", defaultDirectory: null }),
+    platform: () => "macos", presets: () => context.presets,
+    notice: context.showNotice, clearFocus() {},
+  });
+  test.after(() => {
+    fixture.dispose();
+    context.recoverySession.dispose();
+    context.tools.dispose();
+    context.create.dispose();
+  });
+}
 
 function row(path, size = 1) {
   return {
@@ -58,7 +85,7 @@ async function withArchive(run, options = {}) {
       dirs: ["docs"], selected: ["docs/old.txt"], ...options,
     });
     try {
-      await run({ archive, ipc, toasts, closed, requests, pendingOpen });
+      await run({ server, archive, ipc, toasts, closed, requests, pendingOpen });
     } finally {
       archive.closeArchive();
     }
@@ -67,7 +94,7 @@ async function withArchive(run, options = {}) {
   }
 }
 
-async function updateRefreshEffect(archive, jobs) {
+async function updateRefreshEffect(server, archive, jobs) {
   const source = await readSvelteScriptAsync(new URL("../App.svelte", import.meta.url), "App.ts");
   const effect = source.statements.find((node) => ts.isExpressionStatement(node)
     && node.getText(source).startsWith("$effect(") && node.getText(source).includes("refreshedUpdateJobs"));
@@ -84,8 +111,7 @@ async function updateRefreshEffect(archive, jobs) {
   const context = {
     jobRows: jobs, archiveOpenStatus: "idle", archiveOpenGeneration: 0,
     archivePickerRequest: null, refreshedUpdateJobs: new Set(),
-    pendingArchiveTaskReview: null, extractDestinationPicker: null, screen: "browse",
-    recoverySourceMode: "current", recoverySourceOverride: null, recoveryPar2Override: null,
+    pendingArchiveTaskReview: null, screen: "browse",
     get currentArchive() { return archive.archive(); },
     get archivePasswordPrompt() { return archive.openPasswordPrompt(); },
     archiveRefreshStatus: archive.archiveRefreshStatus,
@@ -100,7 +126,7 @@ async function updateRefreshEffect(archive, jobs) {
     browseVirtualWindow: () => ({ start: 0, end: 20 }),
     preventCreateSubmissionNavigation: () => false,
     dismissArchiveAddPreparation() {},
-    dismissRecoveryPreparation() {}, dismissArchivePasswordRequest() {}, clearEntryPreviewState() {},
+    dismissArchivePasswordRequest() {}, clearEntryPreviewState() {},
     isPar2Path: () => false, rememberRecent() {}, recordOperation() {}, recordValidationRenderReady() {},
     sameFilePath: (first, second) => first === second,
     pathBaseName: (path) => path.split("/").at(-1),
@@ -108,9 +134,10 @@ async function updateRefreshEffect(archive, jobs) {
     platformKind: () => "macos",
     getDialogModule: async () => ({ open: async () => null }),
     openNativeDialog: (_id, open, options) => open(options),
-    showNotice: (notice) => notices.push(notice), tr: (_key, fallback) => fallback,
+    showNotice: (notice) => notices.push(notice), tr: englishTranslate,
     $effect: (callback) => callback(), untrack: (callback) => callback(),
   };
+  await installWorkspaceOwners(server, context);
   vm.createContext(context);
   return { context, pending, notices, run: () => vm.runInContext(outputText, context) };
 }
@@ -119,9 +146,9 @@ function completedUpdate(id, path = "/tmp/refresh.zip") {
   return { id, state: "done", spec: { kind: "update", path } };
 }
 
-async function passwordRefreshActions(archive) {
+async function passwordRefreshActions(server, archive) {
   const source = await readSvelteScriptAsync(new URL("../App.svelte", import.meta.url), "App.ts");
-  const names = ["cancelTaskReview", "submitPasswordRequest", "cancelPasswordRequest", "dismissArchivePasswordRequest", "dismissArchivePicker", "dismissRecoveryPreparation", "setScreen", "openArchivePath", "archiveEditorVisible", "blockingModalVisible"];
+  const names = ["cancelTaskReview", "submitPasswordRequest", "cancelPasswordRequest", "dismissArchivePasswordRequest", "dismissArchivePicker", "setScreen", "openArchivePath", "archiveEditorVisible", "blockingModalVisible"];
   const declarations = selectFunctions(source, names);
   const outputText = compileTestScript(declarations.map((node) => node.getText(source)).join("\n"));
   const context = {
@@ -131,8 +158,6 @@ async function passwordRefreshActions(archive) {
     workspacePasswordSubmissionAttempted: false, standalonePasswordFocusedInput: null,
     archiveOpenStatus: "idle", archiveOpenGeneration: 7, archivePasswordAttempt: 0,
     archivePickerRequest: null,
-    recoveryPickerStatus: "idle", recoveryPickerRequest: 0, recoveryOutputPreparation: null,
-    dismissCreatePreparation() {}, syncCreatePreflightContext() {},
     dismissArchiveAddPreparation() {},
     archiveUpdateReview: { cancelSourceChoice() {} },
     batchPickerRequest: 0, nestedExtractPickerRequest: 0,
@@ -143,34 +168,32 @@ async function passwordRefreshActions(archive) {
     openArchiveStore: archive.openArchive, cancelArchivePasswordPrompt: archive.cancelPasswordPrompt,
     openPasswordPrompt: archive.openPasswordPrompt, archiveOpenError: archive.archiveOpenError,
     finishOpenedArchive: () => assert.fail("Refresh must not complete a new archive-open workflow"),
-    showNotice: () => {}, tr: (_key, fallback) => fallback,
+    showNotice: () => {}, tr: englishTranslate,
     preventCreateSubmissionNavigation: () => false, preventConvertSubmissionNavigation: () => false,
     clearEntryPreviewState: () => {}, isPar2Path: () => false,
     taskReviewRequestGeneration: 0, nestedExtractDraftGeneration: 0,
     syncUrl: () => {}, tick: async () => {},
     document: { documentElement: {}, body: {}, querySelectorAll: () => [] },
   };
-  const server = await createTestServer();
-  try {
-    const { ArchiveEditSession } = await server.ssrLoadModule("/src/lib/archive-edit-session.svelte.ts");
-    context.archiveEdit = new ArchiveEditSession(() => ({
-      archive: archive.archive(), generation: context.archiveOpenGeneration,
-      opening: context.archiveOpenStatus !== "idle", directory: archive.currentDirs().join("/"),
-      selectedPaths: archive.selectedPaths(), mutationDisabledReason: context.archiveMutationDisabledReason(),
-    }), async () => assert.fail("password refresh must not queue an edit"), () => false,
-    { tr: context.tr, tError: (error) => error.key, emit() {} });
-    context.archiveEdit.open("rename");
-    context.archiveEdit.setTarget("kept.txt");
-  } finally { await server.close(); }
+  await installWorkspaceOwners(server, context);
+  const { ArchiveEditSession } = await server.ssrLoadModule("/src/lib/archive-edit-session.svelte.ts");
+  context.archiveEdit = new ArchiveEditSession(() => ({
+    archive: archive.archive(), generation: context.archiveOpenGeneration,
+    opening: context.archiveOpenStatus !== "idle", directory: archive.currentDirs().join("/"),
+    selectedPaths: archive.selectedPaths(), mutationDisabledReason: context.archiveMutationDisabledReason(),
+  }), async () => assert.fail("password refresh must not queue an edit"), () => false,
+  { tr: context.tr, tError: (error) => error.key, emit() {} });
+  context.archiveEdit.open("rename");
+  context.archiveEdit.setTarget("kept.txt");
   return { context, ...vm.runInNewContext(`${outputText}\n({${declarations.map((node) => node.name.text).join(",")}})`, context) };
 }
 
 test("leaving a refresh password cancels its read and keeps the editor dormant until returning", async () => {
-  await withArchive(async ({ archive, ipc, pendingOpen, closed }) => {
+  await withArchive(async ({ server, archive, ipc, pendingOpen, closed }) => {
     const refreshing = archive.refreshCurrentArchive();
     pendingOpen.reject({ key: "error.password_required", params: {}, detail: "" });
     await refreshing;
-    const run = await passwordRefreshActions(archive);
+    const run = await passwordRefreshActions(server, archive);
     const late = deferred();
     const cancelled = [];
     ipc.cancelArchiveOpen = async (id) => { cancelled.push(id); };
@@ -196,11 +219,11 @@ test("leaving a refresh password cancels its read and keeps the editor dormant u
 });
 
 test("an explicit same-source open abandons password refresh intent and clears its input", async () => {
-  await withArchive(async ({ archive, ipc, pendingOpen }) => {
+  await withArchive(async ({ server, archive, ipc, pendingOpen }) => {
     const refreshing = archive.refreshCurrentArchive();
     pendingOpen.reject({ key: "error.password_required", params: {}, detail: "" });
     await refreshing;
-    const run = await passwordRefreshActions(archive);
+    const run = await passwordRefreshActions(server, archive);
     const next = deferred();
     ipc.openArchive = () => next.promise;
     run.context.finishOpenedArchive = () => { run.context.screen = "browse"; };
@@ -215,11 +238,11 @@ test("an explicit same-source open abandons password refresh intent and clears i
 });
 
 test("refresh password attempts suspend the editor and resume its original session after unlocking", async () => {
-  await withArchive(async ({ archive, ipc, pendingOpen }) => {
+  await withArchive(async ({ server, archive, ipc, pendingOpen }) => {
     const refreshing = archive.refreshCurrentArchive();
     pendingOpen.reject({ key: "error.password_required", params: {}, detail: "" });
     await refreshing;
-    const run = await passwordRefreshActions(archive);
+    const run = await passwordRefreshActions(server, archive);
     assert.equal(archive.openPasswordPrompt().refresh, true);
     assert.equal(run.blockingModalVisible(), false, "the editor must not make the password form inert");
     ipc.openArchive = async () => { throw { key: "error.wrong_password", params: {}, detail: "" }; };
@@ -241,11 +264,11 @@ test("refresh password attempts suspend the editor and resume its original sessi
 });
 
 test("cancelling an in-flight refresh password keeps retry and rejects the late attempt", async () => {
-  await withArchive(async ({ archive, ipc, pendingOpen, closed }) => {
+  await withArchive(async ({ server, archive, ipc, pendingOpen, closed }) => {
     const refreshing = archive.refreshCurrentArchive();
     pendingOpen.reject({ key: "error.password_required", params: {}, detail: "" });
     await refreshing;
-    const run = await passwordRefreshActions(archive);
+    const run = await passwordRefreshActions(server, archive);
     const late = deferred();
     ipc.openArchive = () => late.promise;
     const unlocking = run.submitPasswordRequest();
@@ -277,11 +300,11 @@ test("cancelling an in-flight refresh password keeps retry and rejects the late 
 });
 
 test("a listing failure after a refresh password returns to the retryable editor", async () => {
-  await withArchive(async ({ archive, ipc, pendingOpen }) => {
+  await withArchive(async ({ server, archive, ipc, pendingOpen }) => {
     const refreshing = archive.refreshCurrentArchive();
     pendingOpen.reject({ key: "error.password_required", params: {}, detail: "" });
     await refreshing;
-    const run = await passwordRefreshActions(archive);
+    const run = await passwordRefreshActions(server, archive);
     ipc.openArchive = async () => info(2);
     ipc.listEntries = async () => { throw { key: "error.io", params: {}, detail: "" }; };
     await run.submitPasswordRequest();
@@ -294,7 +317,7 @@ test("a listing failure after a refresh password returns to the retryable editor
 });
 
 test("cancelled refresh retries cannot replace a later archive open", async () => {
-  await withArchive(async ({ archive, ipc, pendingOpen }) => {
+  await withArchive(async ({ server, archive, ipc, pendingOpen }) => {
     const refreshing = archive.refreshCurrentArchive();
     pendingOpen.reject({ key: "error.password_required", params: {}, detail: "" });
     await refreshing;
@@ -310,8 +333,8 @@ test("cancelled refresh retries cannot replace a later archive open", async () =
 });
 
 test("completed updates from one snapshot reopen the current archive only once", async () => {
-  await withArchive(async ({ archive, ipc, pendingOpen }) => {
-    const run = await updateRefreshEffect(archive, [
+  await withArchive(async ({ server, archive, ipc, pendingOpen }) => {
+    const run = await updateRefreshEffect(server, archive, [
       completedUpdate(1), completedUpdate(2), completedUpdate(3),
       completedUpdate(4, "/tmp/other.zip"),
       { ...completedUpdate(5), state: "running" },
@@ -330,8 +353,8 @@ test("completed updates from one snapshot reopen the current archive only once",
     assert.equal(run.notices.length, 1);
   });
   for (const action of ["same-path open", "dialog module cancelled"]) {
-    await withArchive(async ({ archive, ipc, closed, pendingOpen }) => {
-      const run = await updateRefreshEffect(archive, [
+    await withArchive(async ({ server, archive, ipc, closed, pendingOpen }) => {
+      const run = await updateRefreshEffect(server, archive, [
         completedUpdate(1), completedUpdate(2), completedUpdate(3),
       ]);
       const nextOpen = deferred();
@@ -393,8 +416,8 @@ test("completed updates from one snapshot reopen the current archive only once",
 });
 
 test("updates completed during a refresh wait and share one follow-up read", async () => {
-  await withArchive(async ({ archive, ipc, pendingOpen }) => {
-    const run = await updateRefreshEffect(archive, [completedUpdate(1)]);
+  await withArchive(async ({ server, archive, ipc, pendingOpen }) => {
+    const run = await updateRefreshEffect(server, archive, [completedUpdate(1)]);
     const cancelled = [];
     ipc.cancelArchiveOpen = async (id) => { cancelled.push(id); };
     run.run();
@@ -416,8 +439,8 @@ test("updates completed during a refresh wait and share one follow-up read", asy
 });
 
 test("completed updates wait for an encoding change and refresh using its accepted encoding", async () => {
-  await withArchive(async ({ archive, ipc, pendingOpen }) => {
-    const run = await updateRefreshEffect(archive, [completedUpdate(1)]);
+  await withArchive(async ({ server, archive, ipc, pendingOpen }) => {
+    const run = await updateRefreshEffect(server, archive, [completedUpdate(1)]);
     const changing = archive.reopenWithEncoding("shift_jis");
     run.run();
     assert.equal(run.pending.length, 0);
@@ -435,8 +458,8 @@ test("completed updates wait for an encoding change and refresh using its accept
 });
 
 test("failed automatic refreshes stay retryable without looping or refreshing another archive", async () => {
-  await withArchive(async ({ archive, ipc, pendingOpen }) => {
-    const run = await updateRefreshEffect(archive, [completedUpdate(1), completedUpdate(2)]);
+  await withArchive(async ({ server, archive, ipc, pendingOpen }) => {
+    const run = await updateRefreshEffect(server, archive, [completedUpdate(1), completedUpdate(2)]);
     run.context.archiveOpenStatus = "opening";
     run.run();
     assert.equal(run.pending.length, 0);
@@ -457,7 +480,7 @@ test("failed automatic refreshes stay retryable without looping or refreshing an
     assert.equal(run.pending.length, 1);
     assert.equal(run.context.refreshedUpdateJobs.has(3), false);
   });
-  await withArchive(async ({ archive, ipc, requests }) => {
+  await withArchive(async ({ server, archive, ipc, requests }) => {
     const cached = Array.from({ length: 500 }, (_, index) => row(`entry-${index}.txt`));
     archive.installArchivePreview(info(), cached, { total: 1001 });
     const failedPage = deferred();
@@ -507,7 +530,7 @@ test("failed automatic refreshes stay retryable without looping or refreshing an
 });
 
 test("refresh prepares the displayed directory before replacing its rows and archive handle", async () => {
-  await withArchive(async ({ archive, ipc, closed, requests, pendingOpen }) => {
+  await withArchive(async ({ server, archive, ipc, closed, requests, pendingOpen }) => {
     const pendingPage = deferred();
     ipc.listEntries = (id, page, prefix) => {
       requests.push({ id, page, prefix });
@@ -534,7 +557,7 @@ test("refresh prepares the displayed directory before replacing its rows and arc
 });
 
 test("navigation while reopening keeps the user's latest directory", async () => {
-  await withArchive(async ({ archive, pendingOpen }) => {
+  await withArchive(async ({ server, archive, pendingOpen }) => {
     const refreshing = archive.refreshCurrentArchive();
     await archive.enterDirPath("pictures/");
     pendingOpen.resolve(info(2));
@@ -545,7 +568,7 @@ test("navigation while reopening keeps the user's latest directory", async () =>
 });
 
 test("navigation during a refresh page request discards that page and reads the latest directory", async () => {
-  await withArchive(async ({ archive, ipc, requests, pendingOpen }) => {
+  await withArchive(async ({ server, archive, ipc, requests, pendingOpen }) => {
     const pendingPage = deferred();
     ipc.listEntries = async (id, page, prefix) => {
       requests.push({ id, page, prefix });
@@ -565,7 +588,7 @@ test("navigation during a refresh page request discards that page and reads the 
 });
 
 test("a failed refresh keeps the previous view and offers a full reopen retry", async () => {
-  await withArchive(async ({ archive, ipc, toasts, closed, pendingOpen }) => {
+  await withArchive(async ({ server, archive, ipc, toasts, closed, pendingOpen }) => {
     ipc.listEntries = async (_id, page, prefix) => {
       if (prefix === "docs/") throw { key: "error.io", params: {}, detail: "read failed" };
       return { items: [row("root.txt")], total: 1, page };
@@ -591,7 +614,7 @@ test("a failed refresh keeps the previous view and offers a full reopen retry", 
 });
 
 test("a refresh never restores rows or reports success after the archive is closed", async () => {
-  await withArchive(async ({ archive, ipc, closed, requests, pendingOpen }) => {
+  await withArchive(async ({ server, archive, ipc, closed, requests, pendingOpen }) => {
     const pendingPage = deferred();
     ipc.listEntries = (id, page, prefix) => {
       requests.push({ id, page, prefix });
@@ -612,7 +635,7 @@ test("a refresh never restores rows or reports success after the archive is clos
 });
 
 test("refresh replaces search results directly without clearing the query or loading the root", async () => {
-  await withArchive(async ({ archive, ipc, requests, pendingOpen }) => {
+  await withArchive(async ({ server, archive, ipc, requests, pendingOpen }) => {
     const searches = [];
     ipc.searchEntries = async (id, page, query) => {
       searches.push({ id, page, query });
@@ -629,7 +652,7 @@ test("refresh replaces search results directly without clearing the query or loa
 });
 
 test("large archive refresh loads only the visible pages and follows scrolling during the request", async () => {
-  await withArchive(async ({ archive, ipc, requests, pendingOpen }) => {
+  await withArchive(async ({ server, archive, ipc, requests, pendingOpen }) => {
     const pendingPage = deferred();
     let visible = { start: 4_490, end: 4_530 };
     ipc.listEntries = async (id, page, prefix) => {
@@ -651,7 +674,7 @@ test("large archive refresh loads only the visible pages and follows scrolling d
 });
 
 test("refresh loads the last valid viewport when deletion shortens the list", async () => {
-  await withArchive(async ({ archive, ipc, pendingOpen }) => {
+  await withArchive(async ({ server, archive, ipc, pendingOpen }) => {
     ipc.listEntries = async (_id, page) => ({
       items: page === 0 ? Array.from({ length: 25 }, (_, index) => row(`docs/item-${index}`)) : [],
       total: 25, page,
@@ -665,7 +688,7 @@ test("refresh loads the last valid viewport when deletion shortens the list", as
 });
 
 test("a newer search replaces a pending refresh search, including its late failure", async () => {
-  await withArchive(async ({ archive, ipc, pendingOpen, toasts }) => {
+  await withArchive(async ({ server, archive, ipc, pendingOpen, toasts }) => {
     const pendingSearch = deferred();
     const searches = [];
     ipc.searchEntries = async (id, page, query) => {
@@ -687,7 +710,7 @@ test("a newer search replaces a pending refresh search, including its late failu
 });
 
 test("a newer archive supersedes a pending refresh and keeps its own view", async () => {
-  await withArchive(async ({ archive, ipc, closed, requests, pendingOpen }) => {
+  await withArchive(async ({ server, archive, ipc, closed, requests, pendingOpen }) => {
     const pendingPage = deferred();
     ipc.listEntries = (id, page, prefix) => {
       requests.push({ id, page, prefix });
@@ -711,7 +734,7 @@ test("a newer archive supersedes a pending refresh and keeps its own view", asyn
 });
 
 test("refresh password retry preserves the browse context and selected filename encoding", async () => {
-  await withArchive(async ({ archive, ipc, pendingOpen }) => {
+  await withArchive(async ({ server, archive, ipc, pendingOpen }) => {
     const refreshing = archive.refreshCurrentArchive();
     pendingOpen.reject({ key: "error.password_required", params: {}, detail: "" });
     assert.equal((await refreshing).status, "failed");
@@ -731,7 +754,7 @@ test("refresh password retry preserves the browse context and selected filename 
 });
 
 test("filename encoding changes reuse atomic refresh", async () => {
-  await withArchive(async ({ archive, ipc }) => {
+  await withArchive(async ({ server, archive, ipc }) => {
     ipc.openArchive = async (_path, _password, encoding) => {
       assert.equal(encoding, "shift_jis");
       return { ...info(2), encoding_override: encoding };
@@ -746,7 +769,7 @@ test("filename encoding changes reuse atomic refresh", async () => {
 });
 
 test("retry remains available after dismissing a refresh notification and retains the requested encoding", async () => {
-  await withArchive(async ({ archive, ipc, toasts, pendingOpen }) => {
+  await withArchive(async ({ server, archive, ipc, toasts, pendingOpen }) => {
     const reopening = archive.reopenWithEncoding("shift_jis");
     pendingOpen.reject({ key: "error.io", params: {}, detail: "read failed" });
     const result = await reopening;
@@ -770,7 +793,7 @@ test("retry remains available after dismissing a refresh notification and retain
 });
 
 test("a dismissed refresh retry cannot supersede a newer archive open", async () => {
-  await withArchive(async ({ archive, ipc, toasts, pendingOpen }) => {
+  await withArchive(async ({ server, archive, ipc, toasts, pendingOpen }) => {
     const refreshing = archive.refreshCurrentArchive();
     pendingOpen.reject({ key: "error.io", params: {}, detail: "read failed" });
     await refreshing;
@@ -788,7 +811,7 @@ test("a dismissed refresh retry cannot supersede a newer archive open", async ()
 });
 
 test("refresh leaves a missing folder at its nearest surviving parent", async () => {
-  await withArchive(async ({ archive, ipc, requests, toasts, pendingOpen }) => {
+  await withArchive(async ({ server, archive, ipc, requests, toasts, pendingOpen }) => {
     ipc.resolveArchiveDirectory = async (id, prefix) => {
       assert.equal(id, 2);
       assert.equal(prefix, "docs/removed/");
@@ -805,7 +828,7 @@ test("refresh leaves a missing folder at its nearest surviving parent", async ()
 });
 
 test("refresh preserves an existing empty folder", async () => {
-  await withArchive(async ({ archive, ipc, toasts, pendingOpen }) => {
+  await withArchive(async ({ server, archive, ipc, toasts, pendingOpen }) => {
     ipc.listEntries = async (_id, page) => ({ items: [], total: 0, page });
     const refreshing = archive.refreshCurrentArchive();
     pendingOpen.resolve(info(2));
@@ -817,7 +840,7 @@ test("refresh preserves an existing empty folder", async () => {
 });
 
 test("a search keeps its query when its missing browsing folder is resolved", async () => {
-  await withArchive(async ({ archive, ipc, pendingOpen }) => {
+  await withArchive(async ({ server, archive, ipc, pendingOpen }) => {
     ipc.resolveArchiveDirectory = async () => "";
     ipc.searchEntries = async (_id, page, query) => {
       assert.equal(query, "new");
@@ -833,7 +856,7 @@ test("a search keeps its query when its missing browsing folder is resolved", as
 });
 
 test("navigation supersedes a pending directory resolution", async () => {
-  await withArchive(async ({ archive, ipc, pendingOpen, toasts }) => {
+  await withArchive(async ({ server, archive, ipc, pendingOpen, toasts }) => {
     const pendingDirectory = deferred();
     let resolving = false;
     ipc.resolveArchiveDirectory = async (_id, prefix) => {
@@ -856,7 +879,7 @@ test("navigation supersedes a pending directory resolution", async () => {
 });
 
 test("navigation to a missing folder displays a real parent instead of a phantom empty folder", async () => {
-  await withArchive(async ({ archive, ipc, requests }) => {
+  await withArchive(async ({ server, archive, ipc, requests }) => {
     ipc.listEntries = async (id, page, prefix) => {
       requests.push({ id, page, prefix });
       return { items: prefix ? [] : [row("kept.txt")], total: prefix ? 0 : 1, page };
@@ -883,21 +906,10 @@ test("virtual rows keep cold and mixed page slots and clamp after the list shrin
     assert.ok(window.top <= total * 40);
     assert.equal(window.top + (window.end - window.start) * 40 + window.bottom, total * 40);
   }
-  const names = ["browseVirtualWindow", "browseEntries", "browsePaddingTop", "browsePaddingBottom", "toDisplayEntry"];
+  const names = ["browseVirtualWindow", "browseEntries", "browsePaddingTop", "browsePaddingBottom", "toDisplayEntry", "archiveBrowserSurface", "onBrowseVirtualScroll"];
   const helpers = selectFunctions(source, names);
-  const surfaces = ["classicArchiveBrowserSurface", "modernArchiveBrowserSurface"].map((name) => {
-    const [surface] = selectFunctions(source, [name]);
-    const rows = surface.body.statements.find((node) => ts.isVariableStatement(node)
-      && node.declarationList.declarations.some((item) => item.name.getText(source) === "rows"));
-    const result = surface.body.statements.find((node) => ts.isReturnStatement(node)).expression;
-    const view = result.properties.find((node) => node.name?.getText(source) === "view").initializer;
-    const fields = view.properties.filter((node) => ["rows", "startIndex", "rowsPending", "paddingTop", "paddingBottom"]
-      .includes(node.name?.getText(source)));
-    assert.equal(fields.length, 5);
-    return `function ${name}Rows() { ${rows.getText(source)} return { ${fields.map((node) => node.getText(source)).join(",")} }; }`;
-  });
-  const runtime = compileTestScript([...helpers.map((node) => node.getText(source)), ...surfaces].join("\n"), { target: ts.ScriptTarget.ES2022 });
-  await withArchive(async ({ archive, ipc, requests }) => {
+  const runtime = compileTestScript(helpers.map((node) => node.getText(source)).join("\n"), { target: ts.ScriptTarget.ES2022 });
+  await withArchive(async ({ server, archive, ipc, requests }) => {
     const cached = Array.from({ length: 500 }, (_, index) => row(`entry-${index}.txt`));
     archive.installArchivePreview(info(), cached, { total: 10_000 });
     const pendingPages = new Map();
@@ -914,11 +926,18 @@ test("virtual rows keep cold and mixed page slots and clamp after the list shrin
       browseScrollTop: 0, browseViewportHeight: 420, MODERN_ROW_HEIGHT: 42, CLASSIC_ROW_HEIGHT: 29,
       VIRTUAL_OVERSCAN_ROWS: 12, entryType: (entry) => entry.entry_type,
       formatBytes: String, formatModified: () => "", entryAttributeLabel: () => "File",
-      tr: (_key, fallback) => fallback, isEntrySelected: () => false,
+      tr: englishTranslate, isEntrySelected: () => false,
       isEntryPreviewActive: () => false, isEntryPreviewBusy: () => false,
       entrySelectionLabel: () => "Select", previewEntryActionLabel: () => "Preview", previewActionIcon: () => "eye",
+      archiveBrowseRecoveryState: () => null, archiveSelectionControl: () => ({}), selectedSummary: () => "",
+      archiveEditingStatus: () => null, archiveEdit: { reviewView: null }, archiveStructureWarningText: () => null,
+      archivePreviewActions: () => ({}), openCurrentArchiveRecoveryConfiguration() {}, toggleAllArchiveEntries() {},
     };
-    const app = vm.runInNewContext(`${runtime}\n({browseVirtualWindow, classicArchiveBrowserSurfaceRows, modernArchiveBrowserSurfaceRows})`, context);
+    const app = vm.runInNewContext(`${runtime}\n({browseVirtualWindow, archiveBrowserSurface})`, context);
+    const classic = () => app.archiveBrowserSurface(29).view;
+    const modern = () => app.archiveBrowserSurface(42).view;
+    const onScroll = app.archiveBrowserSurface(42).onBrowseScroll;
+    const scrollTo = (top) => onScroll({ currentTarget: { scrollTop: top, clientHeight: 420 } });
     function checkSlots(surface, height, pending) {
       const window = app.browseVirtualWindow(height);
       const view = surface();
@@ -935,12 +954,12 @@ test("virtual rows keep cold and mixed page slots and clamp after the list shrin
       });
       return view;
     }
-    for (const [surface, height] of [[app.classicArchiveBrowserSurfaceRows, 29], [app.modernArchiveBrowserSurfaceRows, 42]]) {
-      context.browseScrollTop = 500 * height;
+    for (const [surface, height] of [[classic, 29], [modern, 42]]) {
+      scrollTo(500 * height);
       const mixed = checkSlots(surface, height, true);
       assert.equal(mixed.rows.filter(Boolean).length, 12, "cached rows must stay in their original slots");
       assert.ok(mixed.rows.some((entry) => entry === null));
-      context.browseScrollTop = 10_000 * height;
+      scrollTo(10_000 * height);
       const cold = checkSlots(surface, height, true);
       assert.equal(cold.rows.filter(Boolean).length, 0);
     }
@@ -948,25 +967,25 @@ test("virtual rows keep cold and mixed page slots and clamp after the list shrin
     const loadedPage = Array.from({ length: 500 }, (_, index) => row(`entry-${500 + index}.txt`));
     pendingPages.get(1).resolve({ items: loadedPage, total: 10_000, page: 1 });
     await until(() => archive.rowAt(500) !== null);
-    for (const [surface, height] of [[app.classicArchiveBrowserSurfaceRows, 29], [app.modernArchiveBrowserSurfaceRows, 42]]) {
-      context.browseScrollTop = 500 * height;
+    for (const [surface, height] of [[classic, 29], [modern, 42]]) {
+      scrollTo(500 * height);
       assert.ok(checkSlots(surface, height, false).rows.every(Boolean));
     }
     pendingPages.get(19).reject({ key: "error.io", params: {}, detail: "page read failed" });
     await until(() => archive.archiveBrowseError() !== null);
-    context.browseScrollTop = 10_000 * 42;
-    const failed = checkSlots(app.modernArchiveBrowserSurfaceRows, 42, false);
+    scrollTo(10_000 * 42);
+    const failed = checkSlots(modern, 42, false);
     assert.ok(failed.rows.every((entry) => entry === null));
     const retrying = archive.retryArchiveBrowse();
     await until(() => requests.filter(({ page }) => page === 19).length === 2);
-    const retryView = checkSlots(app.modernArchiveBrowserSurfaceRows, 42, true);
+    const retryView = checkSlots(modern, 42, true);
     assert.equal(retryView.startIndex, failed.startIndex);
     pendingPages.get(19).resolve({ items: Array.from({ length: 500 }, (_, index) => row(`entry-${9500 + index}.txt`)),
       total: 10_000, page: 19 });
     await retrying;
-    assert.ok(checkSlots(app.modernArchiveBrowserSurfaceRows, 42, false).rows.every(Boolean));
+    assert.ok(checkSlots(modern, 42, false).rows.every(Boolean));
     archive.installArchivePreview(info(2), cached.slice(0, 25), { total: 25 });
-    assert.ok(checkSlots(app.modernArchiveBrowserSurfaceRows, 42, false).rows.every(Boolean));
+    assert.ok(checkSlots(modern, 42, false).rows.every(Boolean));
     assert.equal(archive.totalRows(), 25);
     for (const [page, pending] of pendingPages) pending.resolve({ items: [row("stale.txt")], total: 10_000, page });
     await new Promise((resolve) => setImmediate(resolve));

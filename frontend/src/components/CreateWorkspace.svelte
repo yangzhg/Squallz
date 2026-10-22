@@ -1,6 +1,6 @@
 <script lang="ts" module>
+  import type { FormatCapabilityCard } from "../lib/ui-model";
   import type { ComponentProps } from "svelte";
-  import type { CreateSourceListSurface } from "./CreateSourceList.svelte";
 
   type ArchivePresetPickerComponent = typeof import("./ArchivePresetPicker.svelte").default;
   type CreateContentPolicyOptionsComponent = typeof import("./CreateContentPolicyOptions.svelte").default;
@@ -25,8 +25,7 @@
 
   export interface CreateWorkspaceSurface {
     onReady?: () => void;
-    tr: (key: string, fallback: string) => string;
-    sources: CreateSourceListSurface;
+    tr: (key: string, fallback?: string) => string;
     profiles: CreateWorkspaceChoice[];
     formats: CreateWorkspaceChoice[];
     formatNote: string;
@@ -80,20 +79,14 @@
       }>;
       recoveryCapability: string;
       updateMode: string;
-      featuredFormats: Array<{
-        name: string;
-        state: string;
-        create: string;
-        volumes: string;
-        encrypt: string;
-        note: string;
-      }>;
+      featuredFormats: FormatCapabilityCard[];
     };
   }
 </script>
 
 <script lang="ts">
   import { onMount } from "svelte";
+  import type { CreateSession } from "../lib/create-session.svelte";
   import ArchivePresetPicker from "./ArchivePresetPicker.svelte";
   import CreateContentPolicyOptions from "./CreateContentPolicyOptions.svelte";
   import CreateOutputOptions from "./CreateOutputOptions.svelte";
@@ -107,11 +100,12 @@
 
   let {
     variant,
-    surface,
+    session,
   }: {
     variant: CreateWorkspaceVariant;
-    surface: CreateWorkspaceSurface;
+    session: CreateSession;
   } = $props();
+  let surface = $derived(session.view.surface(variant));
   onMount(() => surface.onReady?.());
 </script>
 
@@ -119,12 +113,12 @@
   <div class="create-sheet modern-create">
     <div class="sheet-head">
       <div>
-        <span class="eyebrow">{surface.tr("gui.create.eyebrow", "Create archive")}</span>
-        <h1>{surface.tr("gui.create.real_preflight_title", "Create an archive")}</h1>
-        <p>{surface.tr("gui.create.real_preflight_body", "Add sources, choose a format and options, then review safety checks.")}</p>
+        <span class="eyebrow">{surface.tr("gui.create.eyebrow")}</span>
+        <h1>{surface.tr("gui.create.real_preflight_title")}</h1>
+        <p>{surface.tr("gui.create.real_preflight_body")}</p>
       </div>
     </div>
-    <CreateSourceList variant="modern" surface={surface.sources} />
+    <CreateSourceList variant="modern" {session} />
 
     <div class="create-workflow">
       <section class="create-main-panel">
@@ -132,9 +126,9 @@
           <div class="create-core-settings">
             <div class="create-choice-line">
               <span class="create-choice-label" aria-hidden="true">
-                {surface.tr("gui.create.compression_presets", "Compression level")}
+                {surface.tr("gui.create.compression_presets")}
               </span>
-              <div class="preset-row" aria-label={surface.tr("gui.create.compression_presets", "Compression level")}>
+              <div class="preset-row" aria-label={surface.tr("gui.create.compression_presets")}>
                 {#each surface.profiles as profile (profile.id)}
                   <button
                     class:selected={profile.selected}
@@ -150,9 +144,9 @@
 
             <div class="create-choice-line">
               <span class="create-choice-label" aria-hidden="true">
-                {surface.tr("gui.create.archive_format", "Archive format")}
+                {surface.tr("gui.create.archive_format")}
               </span>
-              <div class="format-segments" aria-label={surface.tr("gui.create.archive_format", "Archive format")}>
+              <div class="format-segments" aria-label={surface.tr("gui.create.archive_format")}>
                 {#each surface.formats as format (format.id)}
                   <button
                     class:selected={format.selected}
@@ -166,8 +160,8 @@
                 <span
                   class="format-boundary-pill"
                   role="note"
-                  title={surface.tr("gui.create.rar_not_launch_claim", "Squallz does not create RAR archives")}
-                >{surface.tr("gui.create.rar_read_only", "RAR · Extract only")}</span>
+                  title={surface.tr("gui.create.rar_not_launch_claim")}
+                >{surface.tr("gui.create.rar_read_only")}</span>
               </div>
             </div>
             <div class="format-note">{surface.formatNote}</div>
@@ -191,7 +185,7 @@
 
             <div class="level-control">
               <div>
-                <strong>{surface.tr("gui.create.compression_level", "Compression level {level}").replace("{level}", String(surface.compression.level))}</strong>
+                <strong>{surface.tr("gui.create.compression_level").replace("{level}", String(surface.compression.level))}</strong>
                 <span>{surface.compression.detail}</span>
               </div>
               {#if surface.compression.custom}
@@ -248,8 +242,8 @@
           <summary onkeydown={surface.advanced.onKeydown}>
             <span class="create-advanced-summary-icon"><Icon name="settings" size={17} /></span>
             <span>
-              <strong>{surface.tr("gui.create.advanced.title", "More options")}</strong>
-              <small>{surface.tr("gui.create.advanced.detail", "Save location, completion, source handling, content rules, self-extracting, password, split volumes, and recovery")}</small>
+              <strong>{surface.tr("gui.create.advanced.title")}</strong>
+              <small>{surface.tr("gui.create.advanced.detail")}</small>
             </span>
             <Icon name="chevron-down" size={16} class="create-advanced-chevron" />
           </summary>
@@ -259,7 +253,7 @@
               <CreateContentPolicyOptions {...surface.content} />
               <div class="recovery-callout">
                 <div>
-                  <span class="block-label">{surface.tr("gui.recovery.title", "Recovery")}</span>
+                  <span class="block-label">{surface.tr("gui.recovery.title")}</span>
                   <strong>{surface.recovery.capability}</strong>
                   <p>{surface.tr("gui.create.recovery_separate_jobs", "Creating the archive and generating recovery data are separate jobs; use Recovery when you want PAR2 or SQZ repair evidence.")}</p>
                 </div>
@@ -267,7 +261,7 @@
                   disabled={surface.recovery.disabled}
                   title={surface.recovery.disabledReason}
                   onclick={surface.recovery.onOpen}
-                >{surface.tr("common.change", "Change")}</button>
+                >{surface.tr("common.change")}</button>
               </div>
             </div>
             <aside class="create-advanced-column create-advanced-column-secondary">
@@ -292,11 +286,11 @@
     <section class="classic-property-sheet classic-create">
       <header>
         <div>
-          <h1>{surface.tr("gui.create.add_to_archive", "Add to archive")}</h1>
-          <p>{surface.tr("gui.create.classic_intro", "Build the source list, set the format and options, then review before creating.")}</p>
+          <h1>{surface.tr("gui.create.add_to_archive")}</h1>
+          <p>{surface.tr("gui.create.classic_intro")}</p>
         </div>
       </header>
-      <CreateSourceList variant="classic" surface={surface.sources} />
+      <CreateSourceList variant="classic" {session} />
 
       <div class="classic-preset-wrap">
         <ArchivePresetPicker {...surface.preset} />
@@ -306,7 +300,7 @@
         <CreateSetupSummary {...surface.setupSummary} />
       </div>
 
-      <div class="classic-tabs" role="group" aria-label={surface.tr("gui.create.sections", "Create sections")}>
+      <div class="classic-tabs" role="group" aria-label={surface.tr("gui.create.sections")}>
         {#each surface.classic.sections as section (section.id)}
           <button
             type="button"
@@ -319,12 +313,12 @@
 
       <div class="classic-form-grid">
         <div id="classic-create-general" class="classic-label classic-create-section-target">
-          {surface.tr("gui.create.archive_name", "Archive name")}
+          {surface.tr("gui.create.archive_name")}
         </div>
         <div class="classic-input classic-copy-wrap">{surface.classic.archiveName}</div>
         <CreateOutputOptions {...surface.output} />
-        <div class="classic-label">{surface.tr("gui.create.archive_format", "Archive format")}</div>
-        <div class="classic-segments" aria-label={surface.tr("gui.create.classic_archive_format", "Classic archive format")}>
+        <div class="classic-label">{surface.tr("gui.create.archive_format")}</div>
+        <div class="classic-segments" aria-label={surface.tr("gui.create.classic_archive_format")}>
           {#each surface.formats as format (format.id)}
             <button
               class:active={format.selected}
@@ -338,10 +332,10 @@
           <span
             class="format-boundary-pill"
             role="note"
-            title={surface.tr("gui.create.rar_not_launch_claim", "Squallz does not create RAR archives")}
-          >{surface.tr("gui.create.rar_read_only", "RAR · Extract only")}</span>
+            title={surface.tr("gui.create.rar_not_launch_claim")}
+          >{surface.tr("gui.create.rar_read_only")}</span>
         </div>
-        <div class="classic-label">{surface.tr("gui.create.format_boundary", "Format boundary")}</div>
+        <div class="classic-label">{surface.tr("gui.create.format_boundary")}</div>
         <div class="classic-input accent classic-copy-wrap">{surface.formatNote}</div>
         {#if surface.sqzPayload}
           <div class="classic-label">{surface.sqzPayload.label}</div>
@@ -360,7 +354,7 @@
           </div>
         {/if}
         <div id="classic-create-compression" class="classic-label classic-create-section-target">
-          {surface.tr("gui.create.compression_profile", "Compression profile")}
+          {surface.tr("gui.create.compression_profile")}
         </div>
         <div class="classic-segments classic-profile-segments">
           {#each surface.profiles as profile (profile.id)}
@@ -374,10 +368,10 @@
             >{profile.label}</button>
           {/each}
         </div>
-        <div class="classic-label">{surface.tr("gui.create.compression_method", "Compression method")}</div>
+        <div class="classic-label">{surface.tr("gui.create.compression_method")}</div>
         <div class="classic-input classic-copy-wrap">{surface.compression.method}</div>
         {#if surface.compression.custom}
-          <div class="classic-label">{surface.tr("gui.create.custom_level", "Custom level")}</div>
+          <div class="classic-label">{surface.tr("gui.create.custom_level")}</div>
           <div class="classic-input classic-custom-level">
             <input
               type="range"
@@ -421,10 +415,10 @@
         <CreateSfxOptions {...surface.sfx} />
         <CreateProtectionOptions {...surface.protection} />
         <div id="classic-create-recovery" class="classic-label classic-create-section-target">
-          {surface.tr("gui.recovery.title", "Recovery")}
+          {surface.tr("gui.recovery.title")}
         </div>
         <div class="classic-input accent classic-copy-wrap">{surface.classic.recoveryCapability}</div>
-        <div class="classic-label">{surface.tr("gui.create.update_mode", "Update mode")}</div>
+        <div class="classic-label">{surface.tr("gui.create.update_mode")}</div>
         <div class="classic-input classic-copy-wrap">{surface.classic.updateMode}</div>
         <div id="classic-create-preflight" class="classic-create-preflight classic-create-section-target">
           <CreatePreflightStatus {...surface.preflight} />
@@ -442,7 +436,7 @@
           <div>
             <strong>{format.name}</strong>
             <span>{format.state}</span>
-            <small>{surface.tr("gui.format.card_capability_line", "Create {create} · Split {volumes} · Encrypt {encrypt}")
+            <small>{surface.tr("gui.format.card_capability_line")
               .replace("{create}", format.create)
               .replace("{volumes}", format.volumes)
               .replace("{encrypt}", format.encrypt)}</small>

@@ -4,6 +4,10 @@
 
 import { ipc } from "./ipc";
 import type { ErrorDto } from "./ipc";
+import english from "../../../locales/en-US.json";
+
+type Parameters = Record<string, string | number>;
+const defaultMessages: Record<string, string> = english;
 
 const store = $state({
   lang: "en-US",
@@ -12,13 +16,16 @@ const store = $state({
 });
 
 const fallbackLang = "en-US";
-const fallbackTables: Record<string, Record<string, string> | undefined> = {};
-const fallbackLoaders: Record<string, () => Promise<{ default: Record<string, string> }>> = Object.fromEntries(
-  Object.entries(import.meta.glob("../../../locales/*.json")).flatMap(([path, loader]) => {
-    const tag = path.match(/\/([^/]+)\.json$/)?.[1];
-    return tag ? [[tag, loader as () => Promise<{ default: Record<string, string> }>]] : [];
-  }),
-);
+const fallbackTables: Record<string, Record<string, string> | undefined> = { "en-US": defaultMessages };
+const fallbackLoaders: Record<string, () => Promise<{ default: Record<string, string> }>> = {
+  "en-US": async () => ({ default: defaultMessages }),
+  ...Object.fromEntries(
+    Object.entries(import.meta.glob(["../../../locales/*.json", "!../../../locales/en-US.json"])).flatMap(([path, loader]) => {
+      const tag = path.match(/\/([^/]+)\.json$/)?.[1];
+      return tag ? [[tag, loader as () => Promise<{ default: Record<string, string> }>]] : [];
+    }),
+  ),
+};
 const fallbackLanguageTags = Object.keys(fallbackLoaders).sort();
 let localeLoadGeneration = 0;
 
@@ -101,25 +108,29 @@ export function i18nReady(): boolean {
 }
 
 /** Translates a key, substituting `{name}` placeholders. */
-function interpolate(template: string, params?: Record<string, string | number>): string {
+function interpolate(template: string, params?: Parameters): string {
   if (!params) return template;
   return template.replace(/\{([^{}]+)\}/g, (placeholder, name: string) =>
     Object.prototype.hasOwnProperty.call(params, name) ? String(params[name]) : placeholder,
   );
 }
 
-export function t(key: string, params?: Record<string, string | number>): string {
+export function t(key: string, params?: Parameters): string {
   return interpolate(store.table[key] ?? key, params);
 }
 
 /** Uses bundled English copy while the locale table is still loading. */
 export function tFallback(
   key: string,
-  fallback: string,
-  params?: Record<string, string | number>,
+  fallback?: string | Parameters,
+  params?: Parameters,
 ): string {
-  const translated = t(key, params);
-  return translated === key ? interpolate(fallback, params) : translated;
+  const explicit = typeof fallback === "string" ? fallback : undefined;
+  const values = typeof fallback === "object" ? fallback : params;
+  const translated = t(key, values);
+  return translated === key
+    ? interpolate(explicit ?? defaultMessages[key] ?? key, values)
+    : translated;
 }
 
 /** Renders a structured backend error through the locale table. */

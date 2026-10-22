@@ -26,7 +26,9 @@ pub fn run(
     output: Option<PathBuf>,
     as_json: bool,
 ) -> Result<(), CliError> {
-    let estimate = ctx.engine.estimate_create_inputs(&inputs, &excludes)?;
+    let estimate =
+        ctx.engine
+            .estimate_create_inputs(&inputs, &excludes, |_count, _path| {}, &ctx.ctl)?;
     let disk = output
         .as_deref()
         .map(|path| disk_preflight(path, estimate.output_budget_bytes()))
@@ -318,5 +320,36 @@ mod tests {
             "cli.estimate.disk.blocked"
         );
         assert_eq!(estimate_status_key(None), "common.done");
+    }
+
+    #[test]
+    fn estimate_honours_cancelled_context_before_reporting_a_real_tree() {
+        let dir =
+            std::env::temp_dir().join(format!("sqz-unit-estimate-cancel-{}", std::process::id()));
+        let root = dir.join("project");
+        std::fs::create_dir_all(&root).unwrap();
+        let input = root.join("payload.txt");
+        let output = dir.join("planned.zip");
+        std::fs::write(&input, b"source payload").unwrap();
+        std::fs::write(&output, b"previous output").unwrap();
+        let ctx = Ctx {
+            engine: squallz_core::Engine::new(squallz_formats::registry()),
+            loc: std::sync::Arc::new(squallz_i18n::Localizer::load(Some("en-US"))),
+            ctl: squallz_core::api::ControlToken::new(),
+            quiet: true,
+            verbose: false,
+            output_style: Default::default(),
+            color: Default::default(),
+            accent: Default::default(),
+        };
+        ctx.ctl.cancel();
+
+        assert!(matches!(
+            run(&ctx, vec![root], vec![], Some(output.clone()), true),
+            Err(CliError::Format(FormatError::Cancelled))
+        ));
+        assert_eq!(std::fs::read(&input).unwrap(), b"source payload");
+        assert_eq!(std::fs::read(&output).unwrap(), b"previous output");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

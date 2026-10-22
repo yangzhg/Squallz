@@ -9,6 +9,7 @@ use squallz_core::api::{
     ControlToken, CreateOptions, EntryPath, ExtractOptions, FormatError, NoProgress, OpenOptions,
     ProgressPhase, ProgressSink,
 };
+use squallz_core::CreateCommitPolicy;
 
 #[derive(Debug, PartialEq, Eq)]
 enum Event {
@@ -61,17 +62,8 @@ fn run_operation(
                 control,
             )
             .map(|report| assert!(report.is_ok())),
-        "extract" => engine.extract(
-            archive,
-            destination,
-            None,
-            &open,
-            &extract,
-            progress,
-            control,
-        ),
-        "extract_report" => engine
-            .extract_with_report(
+        "extract" => engine
+            .extract(
                 archive,
                 destination,
                 None,
@@ -82,7 +74,7 @@ fn run_operation(
             )
             .map(drop),
         "guarded_extract" => engine
-            .plan_and_extract_with_report_guarded_and_structure_controlled(
+            .extract_planned(
                 archive,
                 destination,
                 archive,
@@ -96,14 +88,17 @@ fn run_operation(
                 |_| Ok(()),
             )
             .map(drop),
-        "convert" => engine.convert(
-            archive,
-            destination,
-            &open,
-            &CreateOptions::default(),
-            progress,
-            control,
-        ),
+        "convert" => engine
+            .convert(
+                archive,
+                destination,
+                &open,
+                &CreateOptions::default(),
+                CreateCommitPolicy::ReplaceExisting,
+                progress,
+                control,
+            )
+            .map(drop),
         _ => panic!("unknown test operation"),
     }
 }
@@ -120,17 +115,12 @@ fn archive_operations_report_opening_before_entry_work() {
                 &archive,
                 std::slice::from_ref(&source),
                 &CreateOptions::default(),
+                CreateCommitPolicy::ReplaceExisting,
                 &NoProgress,
                 &ControlToken::default(),
             )
             .unwrap();
-        for operation in [
-            "test",
-            "extract",
-            "extract_report",
-            "guarded_extract",
-            "convert",
-        ] {
+        for operation in ["test", "extract", "guarded_extract", "convert"] {
             let destination = temp.path().join(format!("{format}-{operation}.zip"));
             let progress = OpeningProgress::default();
             run_operation(
@@ -188,17 +178,12 @@ fn cancellation_from_opening_feedback_preserves_existing_outputs() {
             &archive,
             &[source],
             &CreateOptions::default(),
+            CreateCommitPolicy::ReplaceExisting,
             &NoProgress,
             &ControlToken::default(),
         )
         .unwrap();
-    for operation in [
-        "test",
-        "extract",
-        "extract_report",
-        "guarded_extract",
-        "convert",
-    ] {
+    for operation in ["test", "extract", "guarded_extract", "convert"] {
         let destination = temp.path().join(format!("{operation}.zip"));
         let original = if operation == "convert" {
             destination.clone()

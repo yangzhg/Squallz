@@ -43,7 +43,7 @@ export type SettingsEffect =
 
 type SettingsHost = {
   platform: () => DesktopPathPlatform;
-  tr: (key: string, fallback: string) => string;
+  tr: (key: string, fallback?: string) => string;
   emit: (effect: SettingsEffect) => void;
 };
 type InitialSettings = { paletteOverride?: PaletteId | null; defaultExtractDir?: string | null };
@@ -136,30 +136,30 @@ export class SettingsSession {
   get colorsSaveState() { return this.saveState("colors", this.colorsDirty); }
 
   get defaultCreateFolderError(): string {
-    return this.folderError(this.#general.defaultCreateDir, this.tr("gui.settings.folder.default_create", "Default create folder"));
+    return this.folderError(this.#general.defaultCreateDir, this.tr("gui.settings.folder.default_create"));
   }
   get defaultExtractFolderError(): string {
-    return this.folderError(this.#general.defaultExtractDir, this.tr("gui.settings.folder.default_extract", "Default extract folder"));
+    return this.folderError(this.#general.defaultExtractDir, this.tr("gui.settings.folder.default_extract"));
   }
   get generalValidationError() { return this.defaultCreateFolderError || this.defaultExtractFolderError; }
   get securityOutputError(): string {
-    return this.numberError(this.#security.maxOutputGiB, 1, 8192, this.tr("gui.settings.security.max_output_gib", "Max output GiB"));
+    return this.numberError(this.#security.maxOutputGiB, 1, 8192, this.tr("gui.settings.security.max_output_gib"));
   }
   get securityEntriesError(): string {
-    return this.numberError(this.#security.maxEntries, 1, 10_000_000, this.tr("gui.settings.security.max_entries", "Max entries"));
+    return this.numberError(this.#security.maxEntries, 1, 10_000_000, this.tr("gui.settings.security.max_entries"));
   }
   get securityRatioError(): string {
-    return this.numberError(this.#security.maxCompressionRatio, 1, 100_000, this.tr("gui.settings.security.ratio_guard", "Ratio guard"));
+    return this.numberError(this.#security.maxCompressionRatio, 1, 100_000, this.tr("gui.settings.security.ratio_guard"));
   }
   get securityValidationError() { return this.securityOutputError || this.securityEntriesError || this.securityRatioError; }
   get performanceParallelJobsError(): string {
-    return this.optionalNumberError(this.#performance.parallelJobs, 1, 8, this.tr("gui.settings.performance.custom_parallel_jobs", "Custom parallel tasks"));
+    return this.optionalNumberError(this.#performance.parallelJobs, 1, 8, this.tr("gui.settings.performance.custom_parallel_jobs"));
   }
   get performanceThreadsError(): string {
-    return this.optionalNumberError(this.#performance.threads, 1, 64, this.tr("gui.settings.performance.custom_threads", "Custom threads"));
+    return this.optionalNumberError(this.#performance.threads, 1, 64, this.tr("gui.settings.performance.custom_threads"));
   }
   get performanceMemoryError(): string {
-    return this.optionalNumberError(this.#performance.memoryKiB, 8, 64, this.tr("gui.settings.performance.custom_buffer_kib", "Custom buffer KiB"));
+    return this.optionalNumberError(this.#performance.memoryKiB, 8, 64, this.tr("gui.settings.performance.custom_buffer_kib"));
   }
   get performanceValidationError() { return this.performanceParallelJobsError || this.performanceThreadsError || this.performanceMemoryError; }
   get customAccentValid() { return normalizeHexColor(this.#colors.input) !== null; }
@@ -247,7 +247,7 @@ export class SettingsSession {
       this.applySecurity(settings, !this.isDraftCurrent("security", generation));
       this.updateSnapshotLabel();
       this.finishSave("security", generation, "saved");
-      this.notice(this.tr("gui.settings.security.saved", "Security settings saved"));
+      this.notice(this.tr("gui.settings.security.saved"));
     } catch (error) {
       this.finishSave("security", generation, "error");
       this.notice(isSettingsPersistenceFailure(error) ? this.persistenceFailureLabel() : this.applyFailureLabel());
@@ -264,7 +264,7 @@ export class SettingsSession {
       this.applyPerformance(settings, !this.isDraftCurrent("performance", generation));
       this.updateSnapshotLabel();
       this.finishSave("performance", generation, "saved");
-      this.notice(this.tr("gui.settings.performance.saved", "Performance settings saved"));
+      this.notice(this.tr("gui.settings.performance.saved"));
     } catch (error) {
       this.finishSave("performance", generation, "error");
       this.notice(isSettingsPersistenceFailure(error) ? this.persistenceFailureLabel() : this.applyFailureLabel());
@@ -276,7 +276,7 @@ export class SettingsSession {
       : normalizeHexColor(this.#colors.accent) ?? defaultCustomAccent;
     if (!accent) {
       this.#colors.saveError = true;
-      this.notice(this.tr("gui.colors.invalid_hex", "Enter a valid #RRGGBB color"));
+      this.notice(this.tr("gui.colors.invalid_hex"));
       return;
     }
     this.#colors.accent = accent;
@@ -290,12 +290,12 @@ export class SettingsSession {
       this.applyColors(settings, !this.isDraftCurrent("colors", generation));
       this.finishSave("colors", generation, "saved");
       this.host.emit({ kind: "palettePreviewChanged" });
-      this.notice(this.tr("gui.colors.saved", "Theme colors saved"));
+      this.notice(this.tr("gui.colors.saved"));
     } catch (error) {
       const persistenceFailed = isSettingsPersistenceFailure(error);
       this.finishSave("colors", generation, persistenceFailed ? "error" : "session");
       this.notice(persistenceFailed ? this.persistenceFailureLabel()
-        : this.tr("gui.colors.saved_preview", "Theme colors apply to this session but were not saved"));
+        : this.tr("gui.colors.saved_preview"));
     }
   };
 
@@ -315,7 +315,7 @@ export class SettingsSession {
       this.updateSnapshotLabel();
       this.finishSave("general", generation, "saved");
       this.host.emit({ kind: "generalSaved", settings });
-      this.notice(this.tr("gui.settings.general.saved", "General settings saved"));
+      this.notice(this.tr("gui.settings.general.saved"));
       this.host.emit({ kind: "automaticUpdates", enabled: settings.check_updates_automatically !== false });
     } catch (error) {
       if (isSettingsPersistenceFailure(error)) {
@@ -341,34 +341,34 @@ export class SettingsSession {
       this.finishSave("general", generation, sessionApplied ? requiresPersistence ? "session" : "saved" : "error");
       this.notice(sessionApplied
         ? requiresPersistence
-          ? this.tr("gui.settings.general.saved_preview", "General changes apply to this session but were not saved")
-          : this.tr("gui.settings.general.matches_saved", "General settings now match the saved values")
-        : this.tr("gui.settings.previous_apply_failed", "Earlier changes were not applied. Review the current draft and save again."));
+          ? this.tr("gui.settings.general.saved_preview")
+          : this.tr("gui.settings.general.matches_saved")
+        : this.tr("gui.settings.previous_apply_failed"));
     }
   };
 
   setDefaultsSnapshotLabel(): void {
-    this.#snapshotLabel = this.tr("gui.settings.snapshot.defaults_active", "Saved settings · defaults");
+    this.#snapshotLabel = this.tr("gui.settings.snapshot.defaults_active");
   }
 
   updateSnapshotLabel(): void {
     const { parallelJobs, threads, memoryKiB } = this.#savedPerformance;
-    const parallel = parallelJobs === null ? this.tr("gui.settings.snapshot.parallel_auto", "parallel auto")
-      : this.tr("gui.settings.snapshot.parallel_count", "{count} parallel").replace("{count}", String(parallelJobs));
-    const workers = threads === null ? this.tr("gui.settings.snapshot.workers_auto", "encoder threads auto")
-      : this.tr("gui.settings.snapshot.workers_count", "{count} encoder threads").replace("{count}", String(threads));
-    const memory = memoryKiB === null ? this.tr("gui.settings.snapshot.buffer_auto", "buffer auto")
-      : this.tr("gui.settings.snapshot.buffer_kib", "{count} KiB buffer")
+    const parallel = parallelJobs === null ? this.tr("gui.settings.snapshot.parallel_auto")
+      : this.tr("gui.settings.snapshot.parallel_count").replace("{count}", String(parallelJobs));
+    const workers = threads === null ? this.tr("gui.settings.snapshot.workers_auto")
+      : this.tr("gui.settings.snapshot.workers_count").replace("{count}", String(threads));
+    const memory = memoryKiB === null ? this.tr("gui.settings.snapshot.buffer_auto")
+      : this.tr("gui.settings.snapshot.buffer_kib")
         .replace("{count}", numberFormatter.format(wholeSetting(memoryKiB, 64, 1, Number.MAX_SAFE_INTEGER)));
-    this.#snapshotLabel = this.tr("gui.settings.snapshot.summary", "Saved settings · {safety} · {parallel} · {workers} · {buffer}")
+    this.#snapshotLabel = this.tr("gui.settings.snapshot.summary")
       .replace("{safety}", this.#savedSecurityCustom
-        ? this.tr("gui.settings.snapshot.custom_safety", "Custom safety")
-        : this.tr("gui.settings.snapshot.default_safety", "Default safety"))
+        ? this.tr("gui.settings.snapshot.custom_safety")
+        : this.tr("gui.settings.snapshot.default_safety"))
       .replace("{parallel}", parallel).replace("{workers}", workers).replace("{buffer}", memory);
   }
 
   persistenceFailureLabel(): string {
-    return this.tr("gui.settings.save_failed", "Could not save settings. Check disk access and try again.");
+    return this.tr("gui.settings.save_failed");
   }
 
   private applyGeneral(settings: SettingsDto, preserveDraft: boolean): void {
@@ -442,13 +442,13 @@ export class SettingsSession {
   private normalizeFolder(value: string): string | null { return normalizeDesktopFolder(value, this.host.platform()); }
   private folderError(value: string, label: string): string {
     return !value.trim() || this.normalizeFolder(value) ? ""
-      : this.tr("gui.settings.folder.absolute_required", "{name} must be an absolute folder path. Choose a folder or clear the field.")
+      : this.tr("gui.settings.folder.absolute_required")
         .replace("{name}", label);
   }
 
   private numberError(value: NumericSetting, min: number, max: number, label: string): string {
     return typeof value === "number" && Number.isFinite(value) && Number.isInteger(value) && value >= min && value <= max ? ""
-      : this.tr("gui.settings.number.invalid_range", "{label} must be a whole number from {min} to {max}")
+      : this.tr("gui.settings.number.invalid_range")
         .replace("{label}", label).replace("{min}", numberFormatter.format(min)).replace("{max}", numberFormatter.format(max));
   }
   private optionalNumberError(value: NumericSetting, min: number, max: number, label: string): string {
@@ -480,8 +480,8 @@ export class SettingsSession {
     return dirty ? "dirty" : "saved";
   }
   private applyFailureLabel(): string {
-    return this.tr("gui.settings.apply_failed", "Could not apply these settings. Try again from the desktop app.");
+    return this.tr("gui.settings.apply_failed");
   }
   private notice(message: string): void { this.host.emit({ kind: "notice", message }); }
-  private tr(key: string, fallback: string): string { return this.host.tr(key, fallback); }
+  private tr(key: string, fallback?: string): string { return this.host.tr(key, fallback); }
 }

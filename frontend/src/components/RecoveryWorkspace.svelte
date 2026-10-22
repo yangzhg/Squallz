@@ -1,24 +1,24 @@
 <script lang="ts">
   import Icon from "./Icon.svelte";
   import RecoveryTargetPicker from "./RecoveryTargetPicker.svelte";
+  import type { RecoverySession } from "../lib/recovery-session.svelte";
   import type {
-    RecoveryWorkspaceActions,
     RecoveryWorkspaceTranslate,
     RecoveryWorkspaceVariant,
-    RecoveryWorkspaceView,
   } from "../lib/recovery-workspace";
 
   let {
     variant,
-    view,
-    actions,
+    session,
     tr,
   }: {
     variant: RecoveryWorkspaceVariant;
-    view: RecoveryWorkspaceView;
-    actions: RecoveryWorkspaceActions;
+    session: RecoverySession;
     tr: RecoveryWorkspaceTranslate;
   } = $props();
+
+  let view = $derived(session.view());
+  const actions = $derived(session.actions);
 
   type WorkspaceAction = Readonly<{
     id: string;
@@ -34,7 +34,7 @@
   let primaryActions = $derived<WorkspaceAction[]>([
     {
       id: "protect",
-      label: tr("gui.recovery.protect_archive", "Protect archive"),
+      label: tr("gui.recovery.protect_archive"),
       icon: "shield-alert",
       disabledReason: view.protectDisabledReason,
       recommended: false,
@@ -42,7 +42,7 @@
     },
     {
       id: "verify",
-      label: tr("gui.recovery.verify_with_par2", "Verify recovery capacity"),
+      label: tr("gui.recovery.verify_with_par2"),
       icon: "check-circle",
       disabledReason: view.verifyDisabledReason,
       recommended: view.verifyRecommended,
@@ -50,7 +50,7 @@
     },
     {
       id: "repair",
-      label: tr("gui.recovery.repair_with_par2", "Repair with PAR2"),
+      label: tr("gui.recovery.repair_with_par2"),
       icon: "rotate-cw",
       disabledReason: view.repairDisabledReason,
       recommended: view.repairRecommended,
@@ -59,7 +59,7 @@
     ...(view.beyondCapacity
       ? [{
           id: "extract-readable",
-          label: tr("gui.recovery.extract_readable_files", "Extract readable files"),
+          label: tr("gui.recovery.extract_readable_files"),
           icon: "folder-open",
           disabledReason: view.bestEffortDisabledReason,
           recommended: true,
@@ -71,7 +71,7 @@
   let formatActions = $derived<WorkspaceAction[]>([
     {
       id: "repair-zip",
-      label: tr("gui.recovery.repair_zip_index", "Repair ZIP index"),
+      label: tr("gui.recovery.repair_zip_index"),
       icon: "rotate-cw",
       disabledReason: view.zipDisabledReason,
       recommended: false,
@@ -79,7 +79,7 @@
     },
     {
       id: "repair-sqz",
-      label: tr("gui.recovery.repair_sqz", "Repair SQZ"),
+      label: tr("gui.recovery.repair_sqz"),
       icon: "shield-alert",
       disabledReason: view.sqzRepairDisabledReason,
       recommended: false,
@@ -87,7 +87,7 @@
     },
     {
       id: "export-sqz",
-      label: tr("gui.recovery.export_sqz", "Export SQZ"),
+      label: tr("gui.recovery.export_sqz"),
       icon: "external-link",
       disabledReason: view.sqzExportDisabledReason,
       recommended: false,
@@ -96,7 +96,7 @@
     ...(!view.beyondCapacity
       ? [{
           id: "extract-readable",
-          label: tr("gui.recovery.extract_readable_files", "Extract readable files"),
+          label: tr("gui.recovery.extract_readable_files"),
           icon: "folder-open",
           disabledReason: view.bestEffortDisabledReason,
           recommended: false,
@@ -110,7 +110,7 @@
   }
 
   function redundancyPresetLabel(percent: number): string {
-    return tr("gui.recovery.use_redundancy_percent", "Use {percent}% redundancy")
+    return tr("gui.recovery.use_redundancy_percent")
       .replace("{percent}", percent.toLocaleString());
   }
 
@@ -118,9 +118,8 @@
     return view.protectedSourceCount > 1
       ? tr(
           "gui.recovery.protection_scope_volumes",
-          "All {count} volume files · one recovery set",
         ).replace("{count}", view.protectedSourceCount.toLocaleString())
-      : tr("gui.recovery.protection_scope_single", "This archive file");
+      : tr("gui.recovery.protection_scope_single");
   }
 </script>
 
@@ -132,20 +131,20 @@
 >
   <header class="recovery-workspace-head" class:sheet-head={variant === "modern"}>
     <div class="recovery-workspace-heading">
-      <span class="eyebrow">{tr("gui.recovery.title", "Recovery")}</span>
-      <h1>{tr("gui.recovery.protect_repair_title", "Protect and repair archives")}</h1>
-      <p>{tr("gui.recovery.protect_repair_body", "PAR2 protects standard archives. ZIP index rebuild handles missing central directories when payloads are intact.")}</p>
-      <div class="recovery-safety-strip" aria-label={tr("gui.recovery.safety_summary", "Recovery action safety summary")}>
-        <span><Icon name="archive" size={14} />{tr("gui.recovery.source_unchanged", "Source files stay unchanged")}</span>
-        <span><Icon name="shield-alert" size={14} />{tr("gui.recovery.verify_capacity_first", "Verify capacity before repair")}</span>
-        <span><Icon name="check-circle" size={14} />{tr("gui.recovery.requires_existing_data", "Repair requires PAR2 or SQZ data")}</span>
+      <span class="eyebrow">{tr("gui.recovery.title")}</span>
+      <h1>{tr("gui.recovery.protect_repair_title")}</h1>
+      <p>{tr("gui.recovery.protect_repair_body")}</p>
+      <div class="recovery-safety-strip" aria-label={tr("gui.recovery.safety_summary")}>
+        <span><Icon name="archive" size={14} />{tr("gui.recovery.source_unchanged")}</span>
+        <span><Icon name="shield-alert" size={14} />{tr("gui.recovery.verify_capacity_first")}</span>
+        <span><Icon name="check-circle" size={14} />{tr("gui.recovery.requires_existing_data")}</span>
       </div>
     </div>
     <div
       class="recovery-workspace-primary-actions"
       class:sheet-action-row={variant === "modern"}
       class:classic-button-row={variant === "classic"}
-      aria-label={tr("gui.recovery.primary_actions", "Recovery actions")}
+      aria-label={tr("gui.recovery.primary_actions")}
     >
       {#each primaryActions as action (action.id)}
         <button
@@ -198,24 +197,24 @@
 
   <div class="recovery-layout recovery-workspace-layout">
     <section class="recovery-main recovery-workspace-main">
-      <div class="panel-title"><Icon name="archive" size={16} />{tr("gui.recovery.par2_protection", "PAR2 protection")}</div>
+      <div class="panel-title"><Icon name="archive" size={16} />{tr("gui.recovery.par2_protection")}</div>
       <div class="recovery-protection-summary">
         <div>
-          <span class="block-label">{tr("gui.recovery.current_workflow", "Current workflow")}</span>
-          <strong>{tr("gui.recovery.par2_sidecar", "PAR2 sidecar")}</strong>
+          <span class="block-label">{tr("gui.recovery.current_workflow")}</span>
+          <strong>{tr("gui.recovery.par2_sidecar")}</strong>
           <p>{tr("gui.recovery.par2_protection_body", "Protect writes new PAR2 recovery data beside the archive. Choose how much additional recovery data to create; Verify reports measured repair capacity.")}</p>
           <div class="recovery-strength-control">
             <div class="recovery-strength-heading">
-              <span>{tr("gui.recovery.recovery_strength", "Recovery strength")}</span>
+              <span>{tr("gui.recovery.recovery_strength")}</span>
               <small id={`${variant}-recovery-strength-hint`}>
-                {tr("gui.recovery.recovery_strength_hint", "More redundancy survives more damage, but uses more disk space.")}
+                {tr("gui.recovery.recovery_strength_hint")}
               </small>
             </div>
             <div class="recovery-strength-options">
               <div
                 class="recovery-strength-presets"
                 role="group"
-                aria-label={tr("gui.recovery.redundancy_presets", "Recovery strength presets")}
+                aria-label={tr("gui.recovery.redundancy_presets")}
               >
                 {#each recoveryRedundancyPresets as percent}
                   <button
@@ -228,7 +227,7 @@
                 {/each}
               </div>
               <label class="recovery-strength-custom">
-                <span>{tr("gui.recovery.custom_redundancy", "Custom")}</span>
+                <span>{tr("gui.recovery.custom_redundancy")}</span>
                 <span class="recovery-strength-input">
                   <input
                     type="number"
@@ -258,26 +257,26 @@
           </div>
         </div>
         <dl class="recovery-fact-list">
-          <div><dt>{tr("common.target", "Target")}</dt><dd>{view.sourceName}</dd></div>
-          <div><dt>{tr("gui.recovery.requested_redundancy", "Requested redundancy")}</dt><dd>{view.requestedRedundancy}</dd></div>
-          <div><dt>{tr("gui.recovery.protection_scope", "Protection scope")}</dt><dd>{protectionScopeLabel()}</dd></div>
-          <div><dt>{tr("gui.recovery.repair_capacity", "Repair capacity")}</dt><dd>{view.repairCapacity}</dd></div>
-          <div><dt>{tr("gui.recovery.repair_output", "Repair output")}</dt><dd>{view.repairOutputMode}</dd></div>
-          <div><dt>{tr("gui.recovery.planned_index", "Planned PAR2 index")}</dt><dd>{view.plannedIndex}</dd></div>
+          <div><dt>{tr("common.target")}</dt><dd>{view.sourceName}</dd></div>
+          <div><dt>{tr("gui.recovery.requested_redundancy")}</dt><dd>{view.requestedRedundancy}</dd></div>
+          <div><dt>{tr("gui.recovery.protection_scope")}</dt><dd>{protectionScopeLabel()}</dd></div>
+          <div><dt>{tr("gui.recovery.repair_capacity")}</dt><dd>{view.repairCapacity}</dd></div>
+          <div><dt>{tr("gui.recovery.repair_output")}</dt><dd>{view.repairOutputMode}</dd></div>
+          <div><dt>{tr("gui.recovery.planned_index")}</dt><dd>{view.plannedIndex}</dd></div>
         </dl>
       </div>
 
       <section class={`verify-card tone-${view.resultTone}`} aria-labelledby={`${variant}-recovery-result-title`}>
         <div class="recovery-result-status" role="status" aria-live="polite" aria-atomic="true">
           <div class="verify-score">
-            <span id={`${variant}-recovery-result-title`}>{tr("gui.recovery.verify_result", "Verify result")}</span>
+            <span id={`${variant}-recovery-result-title`}>{tr("gui.recovery.verify_result")}</span>
             <strong>{view.resultTitle}</strong>
           </div>
           {#if view.metrics}
             <div class="block-math">
-              <div><b>{view.metrics.blocksNeeded}</b><span>{tr("gui.recovery.blocks_needed", "damaged or missing blocks")}</span></div>
-              <div><b>{view.metrics.recoveryBlocksAvailable}</b><span>{tr("gui.recovery.recovery_blocks_available", "recovery blocks available")}</span></div>
-              <div><b>{view.metrics.remainingMargin}</b><span>{tr("gui.recovery.remaining_margin", "remaining margin")}</span></div>
+              <div><b>{view.metrics.blocksNeeded}</b><span>{tr("gui.recovery.blocks_needed")}</span></div>
+              <div><b>{view.metrics.recoveryBlocksAvailable}</b><span>{tr("gui.recovery.recovery_blocks_available")}</span></div>
+              <div><b>{view.metrics.remainingMargin}</b><span>{tr("gui.recovery.remaining_margin")}</span></div>
             </div>
             <p>{view.resultExplanation}</p>
           {:else}
@@ -292,10 +291,10 @@
 
     <aside class="recovery-side recovery-workspace-side">
       <section class="sqz-recovery-card">
-        <span class="block-label">{tr("gui.recovery.format_workflow", "Format workflow")}</span>
+        <span class="block-label">{tr("gui.recovery.format_workflow")}</span>
         <strong>{view.formatWorkflowTitle}</strong>
         <p>{view.formatWorkflowBody}</p>
-        <div class="recovery-format-actions" aria-label={tr("gui.recovery.format_specific_tools", "Format-specific tools")}>
+        <div class="recovery-format-actions" aria-label={tr("gui.recovery.format_specific_tools")}>
           {#each formatActions as action (action.id)}
             <button
               type="button"

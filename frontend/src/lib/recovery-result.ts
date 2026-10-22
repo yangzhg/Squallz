@@ -1,4 +1,10 @@
-export type RecoveryResult = Record<string, unknown> | null;
+import type { JobResult } from "./job-result";
+
+export type RecoveryResult = JobResult | null;
+
+export function recoveryReport(result: RecoveryResult) {
+  return result?.kind === "protect" || result?.kind === "verify_recovery" || result?.kind === "repair_recovery" ? result : null;
+}
 
 export type RecoveryRepairGate = "verify_first" | "no_damage" | "over_capacity" | null;
 
@@ -29,24 +35,13 @@ export function recoveryRouteForOpen(
   return { ...route };
 }
 
-function recordValue(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : null;
-}
-
-function nonEmptyString(value: unknown): string | null {
-  return typeof value === "string" && value.length > 0 ? value : null;
-}
-
 export function readRecoveryProtectionResult(
   result: RecoveryResult,
   fallbackRecovery: string,
 ): RecoveryProtectionResult {
-  const reported = Array.isArray(result?.outputs)
-    ? result.outputs.filter((value): value is string => nonEmptyString(value) !== null)
-    : [];
-  const recovery = nonEmptyString(result?.recovery) ?? fallbackRecovery;
+  const report = recoveryReport(result);
+  const reported = report?.outputs ?? [];
+  const recovery = report?.recovery ?? fallbackRecovery;
   const primaryOutput = reported.includes(recovery)
     ? recovery
     : reported[0] ?? recovery;
@@ -54,29 +49,11 @@ export function readRecoveryProtectionResult(
   return { primaryOutput, outputs };
 }
 
-export function recoveryResultMetrics(result: RecoveryResult): Record<string, unknown> | null {
-  return recordValue(result?.metrics);
-}
-
-export function recoveryResultNumber(result: RecoveryResult, key: string): number | null {
-  const value = recoveryResultMetrics(result)?.[key];
-  return typeof value === "number" && Number.isFinite(value) ? value : null;
-}
-
-export function recoveryResultBoolean(result: RecoveryResult, key: string): boolean | null {
-  const value = recoveryResultMetrics(result)?.[key];
-  return typeof value === "boolean" ? value : null;
-}
-
-export function recoveryResultOk(result: RecoveryResult): boolean | null {
-  const value = result?.ok;
-  return typeof value === "boolean" ? value : null;
-}
-
-export function recoveryResultOperation(result: RecoveryResult): string | null {
-  const value = result?.operation;
-  return typeof value === "string" ? value : null;
-}
+export function recoveryResultMetrics(result: RecoveryResult) { return recoveryReport(result)?.metrics ?? null; }
+export function recoveryResultNumber(result: RecoveryResult, key: "blocks_needed" | "recovery_blocks_available" | "blocks_repaired" | "files_repaired"): number | null { return recoveryResultMetrics(result)?.[key] ?? null; }
+export function recoveryResultBoolean(result: RecoveryResult, key: "no_damage" | "all_correct" | "repair_possible"): boolean | null { return recoveryResultMetrics(result)?.[key] ?? null; }
+export function recoveryResultOk(result: RecoveryResult): boolean | null { return recoveryReport(result)?.ok ?? null; }
+export function recoveryResultOperation(result: RecoveryResult): string | null { return recoveryReport(result)?.operation ?? null; }
 
 export function recoveryResultHasNoDamage(result: RecoveryResult): boolean {
   if (

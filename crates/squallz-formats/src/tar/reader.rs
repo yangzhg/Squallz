@@ -14,6 +14,8 @@ use squallz_format_api::{
     ProgressSink, ReadSeek, SafetyLimits, StreamFactory, TestSummary, TEST_PROBLEM_PREVIEW_LIMIT,
 };
 
+use crate::testing::test_entry_with_problems;
+
 /// Chunk size when draining entry data and compound stream tails.
 const READ_CHUNK: usize = 64 * 1024;
 /// Maximum decompressed data accepted after TAR's logical end marker. This
@@ -155,8 +157,6 @@ impl TarArchiveReader {
         mut record_problem: impl FnMut(String),
     ) -> Result<u64, FormatError> {
         let archive = self.rebuild()?;
-        let mut buf = vec![0u8; READ_CHUNK];
-        let mut done = 0u64;
         let mut entries_tested = 0u64;
         let mut accountant = LimitsAccountant::new(*limits);
         for item in archive.entries()? {
@@ -198,29 +198,17 @@ impl TarArchiveReader {
             }
             accountant.check_entry(&meta)?;
             entries_tested += 1;
-            let path = &meta.path;
-            let mut entry_output_bytes = 0;
             // Draining validates entry framing and, for compound inputs, the
             // underlying stream's integrity checks.
-            loop {
-                ctl.checkpoint()?;
-                match entry.read(&mut buf) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        accountant.add_entry_output_bytes(
-                            &meta,
-                            &mut entry_output_bytes,
-                            n as u64,
-                        )?;
-                        done = done.saturating_add(n as u64);
-                        progress.on_progress(done, 0, path);
-                    }
-                    Err(e) => {
-                        record_problem(format!("{path}: {e}"));
-                        break;
-                    }
-                }
-            }
+            test_entry_with_problems(
+                Ok(&mut entry),
+                &meta,
+                &mut accountant,
+                0,
+                progress,
+                ctl,
+                &mut record_problem,
+            )?;
         }
         match self.validate_stream_end(ctl) {
             Ok(()) => {}
@@ -229,6 +217,7 @@ impl TarArchiveReader {
             }
             Err(error) => record_problem(error.to_string()),
         }
+        let done = accountant.output_bytes();
         progress.on_progress(done, done, &EntryPath::from_utf8(""));
         Ok(entries_tested)
     }
@@ -326,18 +315,6 @@ impl ArchiveReader for TarArchiveReader {
         opts: &ExtractOptions,
         progress: &dyn ProgressSink,
         ctl: &ControlToken,
-    ) -> Result<(), FormatError> {
-        self.extract_with_report(dest, selection, opts, progress, ctl)
-            .map(drop)
-    }
-
-    fn extract_with_report(
-        &mut self,
-        dest: &Path,
-        selection: Option<&[EntryPath]>,
-        opts: &ExtractOptions,
-        progress: &dyn ProgressSink,
-        ctl: &ControlToken,
     ) -> Result<ExtractReport, FormatError> {
         if selection.is_some_and(<[EntryPath]>::is_empty) {
             return Ok(empty_extract_report(dest, progress));
@@ -381,7 +358,7 @@ impl ArchiveReader for TarArchiveReader {
             }
         }
         self.validate_stream_end(ctl)?;
-        sink.finish_with_report(progress, ctl)
+        sink.finish(progress, ctl)
     }
 
     fn test_summary(

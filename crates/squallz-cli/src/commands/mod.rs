@@ -6,17 +6,19 @@ mod check_update;
 mod checksum;
 mod compress;
 mod convert;
+mod create;
 mod doctor;
 mod duplicates;
 mod estimate;
-mod export;
 mod extract;
+mod file_manager;
 mod info;
 mod list;
 mod nested;
 mod preset;
 mod recovery;
 mod reports;
+mod runtime;
 pub(crate) mod sfx;
 mod test;
 mod update;
@@ -25,14 +27,16 @@ use std::io::IsTerminal;
 use std::path::Path;
 use std::sync::Arc;
 
-use clap::{error::ErrorKind, CommandFactory};
+use clap::error::ErrorKind;
 use squallz_core::api::{split_volume_name, ControlToken, Detected, FormatError, ProgressSink};
 use squallz_core::{
     inspect_create_destination_with_progress, CreateArtifactKind, CreateCommitPolicy, Engine,
 };
 use squallz_i18n::Localizer;
 
-use crate::args::{effective_compression_level, AccentArg, Cli, Cmd, ColorArg, OutputStyleArg};
+use crate::args::{
+    effective_compression_level, localized_command, AccentArg, Cmd, ColorArg, OutputStyleArg,
+};
 use crate::errors::CliError;
 use crate::progress::fmt_bytes;
 use crate::ui::{self, Tone};
@@ -494,96 +498,13 @@ fn wrapped_height(cells: &[Vec<String>]) -> usize {
 /// Dispatches one parsed subcommand.
 pub fn dispatch(cmd: Cmd, ctx: &Ctx) -> Result<(), CliError> {
     match cmd {
-        Cmd::Compress {
-            inputs,
-            output,
-            format,
-            level,
-            profile,
-            password,
-            encrypt_names,
-            excludes,
-            content_policy,
-            split,
-            split_mode,
-            threads,
-            memory_limit,
-            test_after_create,
-            file_manager_preset,
+        Cmd::FileManager {
+            action,
+            paths,
             json,
-        } => {
-            let mut level = level;
-            let mut excludes = excludes;
-            let mut split = split;
-            let mut test_after_create = test_after_create;
-            if file_manager_preset {
-                let preset = crate::file_manager_presets::load_create_options()?;
-                if level.is_none() && profile.is_none() {
-                    level = Some(preset.level);
-                }
-                let mut preset_excludes = preset.excludes;
-                preset_excludes.append(&mut excludes);
-                excludes = crate::content_policy::resolve_create_excludes(
-                    Some(squallz_core::CreateContentPolicy::Custom),
-                    preset_excludes,
-                );
-                if split.is_none() {
-                    split = preset.split;
-                }
-                test_after_create |= preset.test_after_create;
-            }
-            let excludes = crate::content_policy::resolve_create_excludes(
-                content_policy.map(Into::into),
-                excludes,
-            );
-            compress::run(
-                ctx,
-                inputs,
-                output,
-                format,
-                effective_compression_level(level, profile),
-                password,
-                encrypt_names,
-                excludes,
-                split,
-                split_mode.unwrap_or_default().into(),
-                threads,
-                memory_limit,
-                test_after_create,
-                json,
-            )
-        }
-        Cmd::Pack {
-            inputs,
-            output,
-            level,
-            profile,
-            inner_format,
-            recovery,
-            excludes,
-            content_policy,
-            split,
-            threads,
-            memory_limit,
-            test_after_create,
-            json,
-        } => compress::run_pack(
-            ctx,
-            inputs,
-            output,
-            effective_compression_level(level, profile),
-            inner_format,
-            recovery,
-            crate::content_policy::resolve_create_excludes(
-                content_policy.map(Into::into),
-                excludes,
-            ),
-            split,
-            threads,
-            memory_limit,
-            test_after_create,
-            json,
-        ),
+        } => file_manager::run(ctx, action, paths, json),
+        Cmd::Compress(args) => compress::run(ctx, args),
+        Cmd::Pack(args) => compress::run_pack(ctx, args),
         Cmd::Sfx { cmd } => sfx::run(ctx, cmd),
         Cmd::Estimate {
             inputs,
@@ -629,22 +550,11 @@ pub fn dispatch(cmd: Cmd, ctx: &Ctx) -> Result<(), CliError> {
             max_output_bytes,
             max_entries,
             max_compression_ratio,
-            file_manager_preset,
             json,
-        } => {
-            let (overwrite, encoding, symlinks) = if file_manager_preset {
-                let preset = crate::file_manager_presets::load_extract_options()?;
-                (
-                    preset.overwrite,
-                    encoding.or(preset.encoding),
-                    preset.symlinks,
-                )
-            } else {
-                (overwrite, encoding, symlinks)
-            };
-            extract::run(
-                ctx,
-                archive,
+        } => extract::run(
+            ctx,
+            extract::CliExtractRequest {
+                source: extract::CliExtractSource::Archive(archive),
                 dest,
                 includes,
                 overwrite,
@@ -653,14 +563,15 @@ pub fn dispatch(cmd: Cmd, ctx: &Ctx) -> Result<(), CliError> {
                 symlinks,
                 smart,
                 best_effort,
-                threads,
-                memory_limit,
-                max_output_bytes,
-                max_entries,
-                max_compression_ratio,
-                json,
-            )
-        }
+                resources: crate::args::resource_options(threads, memory_limit),
+                limits: crate::args::safety_limits(
+                    max_output_bytes,
+                    max_entries,
+                    max_compression_ratio,
+                ),
+                json_output: json,
+            },
+        ),
         Cmd::Convert {
             src,
             output,
@@ -678,18 +589,22 @@ pub fn dispatch(cmd: Cmd, ctx: &Ctx) -> Result<(), CliError> {
             json,
         } => convert::run(
             ctx,
-            src,
-            output,
-            password,
-            out_password,
-            encrypt_names,
-            split,
-            split_mode.unwrap_or_default().into(),
-            effective_compression_level(level, profile),
-            encoding,
-            threads,
-            memory_limit,
-            force,
+            convert::ConversionRequest {
+                kind: convert::ConversionKind::Convert,
+                source: src,
+                output,
+                open: squallz_core::api::OpenOptions {
+                    password: password.map(squallz_core::api::Password::new),
+                    encoding_override: encoding,
+                },
+                out_password,
+                encrypt_names,
+                split,
+                split_mode: split_mode.unwrap_or_default().into(),
+                level: effective_compression_level(level, profile),
+                resources: crate::args::resource_options(threads, memory_limit),
+                force,
+            },
             json,
         ),
         Cmd::Nested { cmd } => nested::run(ctx, cmd),
@@ -703,15 +618,21 @@ pub fn dispatch(cmd: Cmd, ctx: &Ctx) -> Result<(), CliError> {
             memory_limit,
             force,
             json,
-        } => export::run(
+        } => convert::run(
             ctx,
-            archive,
-            output,
-            effective_compression_level(level, profile),
-            out_password,
-            threads,
-            memory_limit,
-            force,
+            convert::ConversionRequest {
+                kind: convert::ConversionKind::Export,
+                source: archive,
+                output,
+                open: squallz_core::api::OpenOptions::default(),
+                out_password,
+                encrypt_names: false,
+                split: None,
+                split_mode: squallz_core::api::SplitOutputMode::Generic,
+                level: effective_compression_level(level, profile),
+                resources: crate::args::resource_options(threads, memory_limit),
+                force,
+            },
             json,
         ),
         Cmd::Update {
@@ -742,7 +663,7 @@ pub fn dispatch(cmd: Cmd, ctx: &Ctx) -> Result<(), CliError> {
             .into_iter()
             .find(|(_, _, sources, destinations)| sources != destinations);
             if let Some((source, destination, sources, destinations)) = mismatch {
-                let mut command = Cli::command();
+                let mut command = localized_command(&ctx.loc);
                 command.build();
                 let message = format!(
                     "--{source} and --{destination} must occur equally often ({sources} source paths, {destinations} destination paths)"

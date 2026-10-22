@@ -48,6 +48,7 @@ function harness() {
     search: "reports", filterText: () => context.search, clearArchiveFilter: () => { context.search = ""; },
     passwordCancelled: false, cancelPasswordRequest: () => { context.passwordCancelled = true; },
     jobSubmitInFlight: false, submittingJobSpec: null,
+    tools: { leave() {} },
     focusBlockingTaskIfAny: () => null, submitArchiveJob: async () => 9,
   };
   vm.createContext(context);

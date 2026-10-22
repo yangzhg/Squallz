@@ -42,7 +42,7 @@ const presetDestinations: Record<ExtractDestinationMode, ExtractArchivePresetOpt
   same: { base: "archive_parent", layout: "direct" },
 };
 
-/** Owns ordinary archive extraction options; the host admits desktop replies and owns native plans. */
+/** Ordinary extraction options and immutable plan/job snapshots. */
 export class ExtractOptionsDraft {
   #state = $state<ExtractOptionsState>({
     destinationMode: "smart", customDest: "", smartBaseOverride: null,

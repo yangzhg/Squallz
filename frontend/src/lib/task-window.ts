@@ -28,13 +28,14 @@ export interface TaskWindowLaunchState {
   status: TaskWindowShellStatus;
 }
 
-export type TaskWindowTranslate = (key: string, fallback: string) => string;
+export type TaskWindowTranslate = (key: string, fallback?: string) => string;
 export type TaskWindowShellStatus =
   | "waiting"
   | "starting"
   | "started"
   | "no-selection"
   | "preset-error"
+  | "resolve-error"
   | "requires-desktop-service"
   | "reconnecting"
   | "reconnect-error"
@@ -144,9 +145,9 @@ export function taskWindowWaitingMessage(
   translate: TaskWindowTranslate,
 ): string {
   if (!action) {
-    return translate("gui.external_task.waiting_body", "Tasks started from Finder or a file manager will appear here.");
+    return translate("gui.external_task.waiting_body");
   }
-  return translate("gui.external_task.waiting_action", "Waiting for {action} to start")
+  return translate("gui.external_task.waiting_action")
     .replace("{action}", taskWindowActionLabel(action, translate));
 }
 
@@ -156,11 +157,11 @@ export function taskWindowShellTitle(
 ): string {
   switch (state.status) {
     case "reconnecting":
-      return translate("gui.external_task.title_reconnecting", "Reconnecting to your task");
+      return translate("gui.external_task.title_reconnecting");
     case "reconnect-error":
-      return translate("gui.external_task.title_reconnect_error", "Task connection unavailable");
+      return translate("gui.external_task.title_reconnect_error");
     case "task-unavailable":
-      return translate("gui.external_task.title_task_unavailable", "Task unavailable");
+      return translate("gui.external_task.title_task_unavailable");
     case "starting":
       return taskWindowActionStatusMessage(
         "gui.external_task.title_starting_action",
@@ -169,15 +170,17 @@ export function taskWindowShellTitle(
         translate,
       );
     case "started":
-      return translate("gui.external_task.title_started", "Task started");
+      return translate("gui.external_task.title_started");
     case "no-selection":
-      return translate("gui.external_task.title_no_selection", "No file selected");
+      return translate("gui.external_task.title_no_selection");
     case "preset-error":
-      return translate("gui.external_task.title_preset_error", "Preset needs attention");
+      return translate("gui.external_task.title_preset_error");
+    case "resolve-error":
+      return translate("gui.external_task.title_resolve_error");
     case "requires-desktop-service":
-      return translate("gui.external_task.title_requires_desktop_service", "Desktop service unavailable");
+      return translate("gui.external_task.title_requires_desktop_service");
     case "busy":
-      return translate("gui.external_task.title_busy", "Task already running");
+      return translate("gui.external_task.title_busy");
     case "waiting":
       if (state.pendingAction) {
         return taskWindowActionStatusMessage(
@@ -187,7 +190,7 @@ export function taskWindowShellTitle(
           translate,
         );
       }
-      return translate("gui.external_task.title_waiting", "Ready for a task");
+      return translate("gui.external_task.title_waiting");
   }
 }
 
@@ -207,11 +210,11 @@ export function taskWindowShellMessage(
 ): string {
   switch (state.status) {
     case "reconnecting":
-      return translate("gui.external_task.reconnecting", "Loading this window's task and its latest result.");
+      return translate("gui.external_task.reconnecting");
     case "reconnect-error":
-      return translate("gui.external_task.reconnect_error", "The task status could not be loaded. Retry to reconnect to the existing task.");
+      return translate("gui.external_task.reconnect_error");
     case "task-unavailable":
-      return translate("gui.external_task.task_unavailable", "No task is available for this window. If it never started, launch it again from your file manager; otherwise check the output folder.");
+      return translate("gui.external_task.task_unavailable");
     case "starting":
       return taskWindowActionStatusMessage(
         "gui.external_task.starting_action",
@@ -220,20 +223,20 @@ export function taskWindowShellMessage(
         translate,
       );
     case "started":
-      return translate("gui.external_task.started", "Task window started");
+      return translate("gui.external_task.started");
     case "no-selection":
-      return translate("gui.external_task.no_selection", "No file was provided for this action");
+      return translate("gui.external_task.no_selection");
     case "preset-error":
       return translate(
         "gui.external_task.preset_error",
-        "The file-manager preset could not be used. Open Squallz, review it, then try again.",
       );
+    case "resolve-error":
+      return translate("gui.external_task.resolve_error");
     case "requires-desktop-service":
-      return translate("gui.external_task.requires_desktop_service", "This action requires the desktop service");
+      return translate("gui.external_task.requires_desktop_service");
     case "busy":
       return translate(
         "gui.task.one_at_a_time_notice",
-        "Finish or cancel the current task before starting another one",
       );
     case "waiting":
       return taskWindowWaitingMessage(state.pendingAction, translate);
@@ -246,12 +249,13 @@ export function taskWindowSubmitNotice(
 ): string | null {
   switch (status) {
     case "started":
-      return translate("gui.external_task.started", "Task window started");
+      return translate("gui.external_task.started");
     case "no-selection":
-      return translate("gui.external_task.no_selection", "No file was provided for this action");
+      return translate("gui.external_task.no_selection");
     case "requires-desktop-service":
-      return translate("gui.external_task.requires_desktop_service", "This action requires the desktop service");
+      return translate("gui.external_task.requires_desktop_service");
     case "preset-error":
+    case "resolve-error":
       return null;
     case "waiting":
     case "starting":

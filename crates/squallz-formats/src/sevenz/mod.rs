@@ -8,7 +8,7 @@ mod writer;
 
 use squallz_format_api::{
     ArchiveFormat, ArchiveReader, ArchiveWriter, ControlToken, CreateOptions, FormatCapabilities,
-    FormatError, OpenOptions, PhysicalFileIdentity, ReadSeek, WriteSeek,
+    FormatError, OpenOptions, ReadSeek, WriteSeek,
 };
 
 /// 7z signature: `7z¼¯'\x1c`.
@@ -51,39 +51,22 @@ impl ArchiveFormat for SevenZFormat {
         &self,
         src: Box<dyn ReadSeek>,
         opts: &OpenOptions,
-    ) -> Result<Box<dyn ArchiveReader>, FormatError> {
-        Ok(Box::new(reader::SevenZArchiveReader::open(src, opts)?))
-    }
-
-    fn open_with_control(
-        &self,
-        src: Box<dyn ReadSeek>,
-        opts: &OpenOptions,
         ctl: &ControlToken,
     ) -> Result<Box<dyn ArchiveReader>, FormatError> {
         ctl.checkpoint()?;
-        Ok(Box::new(reader::SevenZArchiveReader::open_controlled(
-            src, opts, ctl,
-        )?))
-    }
-
-    fn open_file_with_control(
-        &self,
-        _source_path: &std::path::Path,
-        _source_identity: Option<PhysicalFileIdentity>,
-        src: Box<dyn ReadSeek>,
-        opts: &OpenOptions,
-        ctl: &ControlToken,
-    ) -> Result<Box<dyn ArchiveReader>, FormatError> {
-        self.open_with_control(src, opts, ctl)
+        Ok(Box::new(reader::SevenZArchiveReader::open(src, opts, ctl)?))
     }
 
     fn create(
         &self,
         dst: Box<dyn WriteSeek>,
         opts: &CreateOptions,
+        ctl: &ControlToken,
     ) -> Result<Box<dyn ArchiveWriter>, FormatError> {
-        Ok(Box::new(writer::SevenZArchiveWriter::new(dst, opts)?))
+        ctl.checkpoint()?;
+        let writer = writer::SevenZArchiveWriter::new(dst, opts)?;
+        ctl.checkpoint()?;
+        Ok(Box::new(writer))
     }
 }
 

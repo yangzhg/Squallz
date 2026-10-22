@@ -1,3 +1,4 @@
+import { englishTranslate } from "../../tests/runtime.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
 import vm from "node:vm";
@@ -5,20 +6,18 @@ import { compileTestScript, readSvelteScript, selectFunctions } from "../../test
 
 function harness() {
   const source = readSvelteScript(new URL("../App.svelte", import.meta.url), "App.ts");
-  const names=["cancelTaskReview","prepareTaskReview","closeTaskCenter","openTaskCenterDetails","returnToTaskCenter","adoptRecoveryTargetFromTask","testTaskUsesRecoveryContext","dismissRecoveryPreparation"];
+  const names=["cancelTaskReview","prepareTaskReview","closeTaskCenter","openTaskCenterDetails","returnToTaskCenter"];
   const declarations = selectFunctions(source, names);
   const calls=[];
   const context={taskWindowMode:false,taskReviewRequestGeneration:0,pendingTaskReviewId:null,screen:"browse",currentArchive:{id:1},
     taskReviewScreen:()=>"extract",previewTaskSpecForReview:()=>null,
     ipc:{reviewJobSpec:async(id)=>{calls.push(["resolve",id]);return {kind:"extract",path:`squallz-archive://${id}`};}},
     reviewTask:async(task,displayed)=>calls.push(["restore",task.spec,displayed]),
-    showNotice:(message)=>calls.push(["notice",message]),tr:(_key,fallback)=>fallback,
+    showNotice:(message)=>calls.push(["notice",message]),tr:englishTranslate,
     taskCenterReturnFocus:null,taskCenterOpen:true,taskCenterSelectedTaskId:7,taskCenterFocusTaskId:null,
     restoreTaskWorkspaceFocus:()=>{},
+    tools:{leave(){}},
     tick:()=>Promise.resolve(),sameFilePath:(left,right)=>left===right,
-    recoverySourceMode:"none",recoverySourceOverride:null,recoveryPar2Override:null,
-    recoveryPickerStatus:"idle",recoveryPickerRequest:0,recoveryOutputPreparation:null,
-    recoverySourcePath:()=>null,recoveryContextTaskIds:new Set(),
   };
   const outputText = compileTestScript(declarations.map((node) => node.getText(source)).join("\n"));
   const api=vm.runInNewContext(`${outputText}\n({${names.join(",")}})`,context);
@@ -91,19 +90,4 @@ test("review loading rejects duplicate clicks and only releases its own pending 
   waiting.get(8).reject(new Error("late failure"));
   await retry;
   assert.equal(run.calls.length,count,"cancelled review failures stay silent");
-});
-
-test("recovery uses the current inner archive without exposing its handle or selecting a displayed path as a file",()=>{
-  const run=harness();const displayed=task();const actual={...displayed,spec:{...displayed.spec,path:"squallz-archive://7",best_effort:true}};
-  run.context.currentArchive={id:7,source:actual.spec.path,path:displayed.spec.path};
-  assert.equal(run.api.adoptRecoveryTargetFromTask(actual,displayed.spec),true);
-  assert.equal(run.context.recoverySourceMode,"current");
-  assert.equal(run.context.recoverySourceOverride,null);
-  assert.equal(run.api.testTaskUsesRecoveryContext({...actual,spec:{...actual.spec,kind:"test"}}),false);
-  run.context.currentArchive={id:8,source:"/Archives/other.zip",path:"/Archives/other.zip"};
-  run.context.recoverySourceMode="selected";
-  run.context.recoverySourceOverride="/Archives/kept.zip";
-  assert.equal(run.api.adoptRecoveryTargetFromTask(actual,displayed.spec),false);
-  assert.equal(run.context.recoverySourceOverride,"/Archives/kept.zip");
-  assert.match(run.calls.at(-1)[1],/Reopen the original archive/);
 });

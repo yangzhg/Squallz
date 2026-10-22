@@ -2,6 +2,8 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
+use super::JobResult;
+
 use squallz_core::{JobResources, QueueWaitReason};
 
 use crate::dto::{ErrorDto, JobSnapshotDescription, JobSpec};
@@ -26,8 +28,8 @@ pub enum JobInteraction {
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(tag = "kind", content = "prompt", rename_all = "snake_case")]
 pub enum JobQuestion {
-    Conflict(crate::dto::AskConflictEvent),
-    Password(crate::dto::AskPasswordEvent),
+    Conflict(crate::dto::JobConflictPrompt),
+    Password(crate::dto::JobPasswordPrompt),
 }
 
 impl JobQuestion {
@@ -81,7 +83,9 @@ impl Default for JobProgressSnapshot {
 pub struct JobStateSnapshot {
     pub id: u64,
     pub version: u64,
-    pub spec: JobSpec,
+    /// Immutable description: included on registration and full recovery only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spec: Option<JobSpec>,
     pub output_password_required: bool,
     pub origin: JobOrigin,
     pub owned_by_requester: bool,
@@ -92,7 +96,7 @@ pub struct JobStateSnapshot {
     pub stream_buffer_limit_bytes: Option<u64>,
     pub progress: JobProgressSnapshot,
     pub error: Option<ErrorDto>,
-    pub result: Option<serde_json::Value>,
+    pub result: Option<JobResult>,
     pub interaction: Option<JobInteraction>,
     pub question: Option<JobQuestion>,
 }
@@ -109,6 +113,7 @@ pub struct JobSnapshotDelta {
 struct StoredJobSnapshot {
     id: u64,
     version: u64,
+    created_version: u64,
     description: JobSnapshotDescription,
     origin: JobOrigin,
     owner_window: Option<String>,
@@ -119,7 +124,7 @@ struct StoredJobSnapshot {
     stream_buffer_limit_bytes: Option<u64>,
     progress: JobProgressSnapshot,
     error: Option<ErrorDto>,
-    result: Option<serde_json::Value>,
+    result: Option<JobResult>,
     question: Option<JobQuestion>,
     dismissed_by: HashSet<String>,
 }
@@ -192,6 +197,7 @@ impl JobSnapshotStore {
             StoredJobSnapshot {
                 id,
                 version,
+                created_version: version,
                 description,
                 origin,
                 owner_window,
@@ -219,8 +225,8 @@ impl JobSnapshotStore {
         id: u64,
         state: &str,
         error: Option<ErrorDto>,
-        result: Option<serde_json::Value>,
-    ) -> Option<u64> {
+        result: Option<JobResult>,
+    ) -> Option<JobStateSnapshot> {
         let current = self.jobs.get(&id)?;
         if is_terminal_snapshot_state(&current.state) || current.state == state {
             return None;
@@ -251,10 +257,10 @@ impl JobSnapshotStore {
             self.terminal_order.push_back(id);
             self.prune_terminal();
         }
-        Some(version)
+        self.owner_snapshot(id)
     }
 
-    pub(super) fn set_starting_state(&mut self, id: u64, state: &str) -> Option<u64> {
+    pub(super) fn set_starting_state(&mut self, id: u64, state: &str) -> Option<JobStateSnapshot> {
         if self.jobs.get(&id)?.state != "queued" {
             return None;
         }
@@ -265,7 +271,7 @@ impl JobSnapshotStore {
         &mut self,
         id: u64,
         progress: &mut JobProgressSnapshot,
-    ) -> Option<u64> {
+    ) -> Option<JobStateSnapshot> {
         let current = self.jobs.get(&id)?;
         if current.state != "running"
             || current.question.is_some()
@@ -280,10 +286,10 @@ impl JobSnapshotStore {
         let record = self.jobs.get_mut(&id)?;
         record.version = version;
         record.progress = progress.clone();
-        Some(version)
+        self.owner_snapshot(id)
     }
 
-    pub(super) fn ask(&mut self, id: u64, mut question: JobQuestion) -> Option<JobQuestion> {
+    pub(super) fn ask(&mut self, id: u64, mut question: JobQuestion) -> Option<JobStateSnapshot> {
         let current = self.jobs.get(&id)?;
         if is_terminal_snapshot_state(&current.state) {
             return None;
@@ -295,9 +301,9 @@ impl JobSnapshotStore {
         }
         let record = self.jobs.get_mut(&id)?;
         record.version = version;
-        record.question = Some(question.clone());
+        record.question = Some(question);
         record.progress.speed = 0;
-        Some(question)
+        self.owner_snapshot(id)
     }
 
     pub(super) fn clear_question(&mut self, id: u64) -> Option<u64> {
@@ -359,11 +365,24 @@ impl JobSnapshotStore {
         self.sync_queue_positions(&ids);
     }
 
+    /// This payload is emitted only through the originating owner's scoped sink.
+    pub(super) fn owner_snapshot(&self, id: u64) -> Option<JobStateSnapshot> {
+        let record = self.jobs.get(&id)?;
+        let mut snapshot = snapshot_for_requester(
+            record,
+            record.owner_window.as_deref().unwrap_or("main"),
+            false,
+        );
+        snapshot.owned_by_requester = true;
+        snapshot.question = record.question.clone();
+        Some(snapshot)
+    }
+
     pub(super) fn snapshot(&self, requester: &str, id: u64) -> Option<JobStateSnapshot> {
         self.jobs
             .get(&id)
             .filter(|record| stored_snapshot_visible_to(record, requester))
-            .map(|record| snapshot_for_requester(record, requester))
+            .map(|record| snapshot_for_requester(record, requester, true))
     }
 
     pub(super) fn review_spec(&self, requester: &str, id: u64) -> Option<JobSpec> {
@@ -389,7 +408,13 @@ impl JobSnapshotStore {
             .values()
             .filter(|record| stored_snapshot_visible_to(record, requester))
             .filter(|record| reset || record.version > baseline)
-            .map(|record| snapshot_for_requester(record, requester))
+            .map(|record| {
+                snapshot_for_requester(
+                    record,
+                    requester,
+                    reset || record.created_version > baseline,
+                )
+            })
             .collect();
         let removed = if reset {
             Vec::new()
@@ -492,11 +517,15 @@ fn removal_visible_to(removal: &SnapshotRemoval, requester: &str) -> bool {
     }
 }
 
-fn snapshot_for_requester(record: &StoredJobSnapshot, requester: &str) -> JobStateSnapshot {
+fn snapshot_for_requester(
+    record: &StoredJobSnapshot,
+    requester: &str,
+    include_spec: bool,
+) -> JobStateSnapshot {
     JobStateSnapshot {
         id: record.id,
         version: record.version,
-        spec: record.description.spec.clone(),
+        spec: include_spec.then(|| record.description.spec.clone()),
         output_password_required: record.description.output_password_required,
         origin: record.origin,
         owned_by_requester: record.owner_window.as_deref() == Some(requester),
@@ -525,9 +554,65 @@ pub(super) fn job_unavailable_error() -> ErrorDto {
 
 #[cfg(test)]
 mod tests {
-    use super::super::test_support::checksum_job;
+    use super::super::test_support::{checksum_job, compress_file_job};
     use super::*;
     use std::path::Path;
+
+    #[test]
+    fn live_updates_and_known_deltas_do_not_repeat_large_immutable_descriptions() {
+        let mut store = JobSnapshotStore::default();
+        let mut spec = compress_file_job(Path::new("input"), Path::new("output.zip"));
+        if let JobSpec::Compress {
+            inputs, password, ..
+        } = &mut spec
+        {
+            *inputs = (0..20_000)
+                .map(|index| format!("source/directory-{index}/report-with-a-long-name.txt"))
+                .collect();
+            *password = Some("private-password".into());
+        }
+        let registration = store.insert(1, Some("task-owner".into()), spec, "running");
+        let full = store.snapshot("task-owner", 1).unwrap();
+        let full_json = serde_json::to_string(&full).unwrap();
+        assert!(full_json.len() > 1_000_000);
+        assert!(!full_json.contains("private-password"));
+        assert!(full.output_password_required);
+        assert!(full.owned_by_requester);
+
+        let live = store
+            .set_progress(
+                1,
+                &mut JobProgressSnapshot {
+                    done: 40,
+                    total: 100,
+                    current: "report.txt".into(),
+                    ..JobProgressSnapshot::default()
+                },
+            )
+            .unwrap();
+        assert!(live.spec.is_none());
+        assert!(live.owned_by_requester);
+        assert!(live.output_password_required);
+        let live_json = serde_json::to_string(&live).unwrap();
+        assert!(live_json.len() < 1_024);
+        assert!(!live_json.contains("\"spec\""));
+        assert_eq!(live.progress.done, 40);
+
+        let known = store.delta("task-owner", Some(registration));
+        assert!(!known.reset);
+        assert_eq!(known.upserts.len(), 1);
+        assert!(known.upserts[0].spec.is_none());
+        assert!(serde_json::to_string(&known).unwrap().len() < 1_024);
+        for since in [None, Some(0), Some(u64::MAX)] {
+            let recovery = store.delta("task-owner", since);
+            assert!(recovery.upserts[0].spec.is_some());
+            assert_eq!(recovery.upserts[0].progress.done, 40);
+        }
+        let observer = store.delta("main", Some(0));
+        assert!(observer.upserts[0].spec.is_some());
+        assert!(!observer.upserts[0].owned_by_requester);
+        assert!(store.delta("task-other", Some(0)).upserts.is_empty());
+    }
 
     #[test]
     fn waiting_and_stopped_jobs_clear_speed_without_losing_progress() {
@@ -551,7 +636,7 @@ mod tests {
         store
             .ask(
                 1,
-                JobQuestion::Password(crate::dto::AskPasswordEvent {
+                JobQuestion::Password(crate::dto::JobPasswordPrompt {
                     id: 1,
                     version: 0,
                     name: "reports.zip".into(),
@@ -667,16 +752,23 @@ mod tests {
                 },
             )
             .unwrap();
-        assert!(progress_version > owner_version);
+        assert!(progress_version.version > owner_version);
         let done_version = store
             .set_state(
                 2,
                 "done",
                 None,
-                Some(serde_json::json!({"operation": "checksum"})),
+                Some(JobResult::Checksum(squallz_core::ChecksumReport {
+                    algorithm: squallz_core::ChecksumAlgorithm::Sha256,
+                    input_count: 0,
+                    entries_scanned: 0,
+                    files_hashed: 0,
+                    bytes_hashed: 0,
+                    items: Vec::new(),
+                })),
             )
             .unwrap();
-        assert!(done_version > progress_version);
+        assert!(done_version.version > progress_version.version);
         assert!(store.set_state(2, "running", None, None).is_none());
         assert!(store
             .set_progress(2, &mut JobProgressSnapshot::default())
@@ -691,7 +783,7 @@ mod tests {
         assert!(store.snapshot("main", 2).is_some());
         let main_baseline = store.revision;
         store.dismiss("task-owner", &[2]).unwrap();
-        let removed = store.delta("task-owner", Some(done_version));
+        let removed = store.delta("task-owner", Some(done_version.version));
         assert!(!removed.reset);
         assert!(removed.upserts.is_empty());
         assert_eq!(removed.removed, vec![2]);
@@ -782,7 +874,7 @@ mod tests {
         assert!(store.set_starting_state(2, "running").is_none());
         let paused = store.snapshot("main", 2).unwrap();
         assert_eq!(paused.state, "paused");
-        assert_eq!(paused.version, paused_version);
+        assert_eq!(paused.version, paused_version.version);
     }
 
     #[test]
