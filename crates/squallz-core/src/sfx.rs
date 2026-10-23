@@ -2001,7 +2001,7 @@ fn read_file_at(file: &File, buffer: &mut [u8], offset: u64) -> io::Result<usize
 mod tests {
     use super::*;
     use std::io::Cursor;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::Arc;
 
     use squallz_format_api::{
@@ -2081,11 +2081,24 @@ mod tests {
     }
 
     fn temp_file(tag: &str) -> PathBuf {
+        static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
         std::env::temp_dir().join(format!(
             "squallz-sfx-{tag}-{}-{}",
             std::process::id(),
-            std::thread::current().name().unwrap_or("test")
+            TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed)
         ))
+    }
+
+    #[test]
+    fn temporary_file_names_are_portable_and_unique() {
+        let first = temp_file("portable");
+        let second = temp_file("portable");
+
+        for path in [&first, &second] {
+            check_windows_portability(path.file_name().unwrap().to_str().unwrap()).unwrap();
+        }
+        assert_ne!(first, second);
     }
 
     fn write_single_file_sfx(path: &Path, payload: &[u8], payload_crc32: u32) {

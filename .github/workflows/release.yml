@@ -541,8 +541,8 @@ jobs:
         if: runner.os == 'Windows'
         shell: bash
         run: |
-          cargo test -p squallz-core \
-            tests::windows_file_operation_retries_only_transient_share_locks \
+          cargo test -p squallz-format-api \
+            file_ops::tests::windows_file_operation_retries_only_transient_share_locks \
             --lib -- --exact
           cargo test -p squallz-core \
             sfx::tests::staged_sfx_releases_windows_write_handle_before_digest \
