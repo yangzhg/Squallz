@@ -255,12 +255,15 @@ a release has the same platform signature:
 | State | Meaning |
 | --- | --- |
 | `developer-id-notarized` | The macOS DMG passed Developer ID signing, Apple notarization, stapling, Gatekeeper, and final hash checks. |
-| `unsigned-preview` | No platform signing or notarization evidence is claimed. Windows and Linux packages currently use this state. |
+| `unsigned-preview` | No platform signing or notarization evidence is claimed. This includes unsigned macOS DMGs and current Windows and Linux packages. |
 | `source` | Source archive; desktop code signing does not apply. |
 
-The public macOS workflow publishes only a DMG after the full trust chain
-passes. It does not fall back to an unsigned macOS package. Older releases that
-do not report a trust state should be treated as unsigned previews.
+Stable releases may contain unsigned packages. The `unsigned-preview` trust
+state describes the absence of platform signing evidence; it does not mean the
+GitHub Release is a prerelease. Public macOS packages are DMGs, with optional
+Developer ID signing and notarization. When signing is enabled, every signing
+and notarization check must pass; a failure stops publication. Treat older
+assets without a reported trust state as unsigned.
 
 Before any platform asset is collected, the release workflow runs the frontend
 and Rust qualification checks. Each platform job then executes its packaged
@@ -296,29 +299,26 @@ If either command fails or macOS blocks a DMG marked
 or use **Open Anyway** for a package whose published trust claim does not match
 the macOS result.
 
-An `unsigned-preview` app may be blocked even when its checksum is correct.
-Only bypass that warning for a build you made yourself or a preview whose source
-and provenance you have verified. Control-click the app and choose **Open**; if
-needed, macOS also exposes **Open Anyway** under **Privacy & Security**. Removing
-quarantine is a last resort for a verified preview:
+An `unsigned-preview` DMG has no Developer ID or Apple notarization proof, even
+when its checksum and GitHub attestation match. After verifying those records,
+mount the DMG and copy Squallz to **Applications**. If macOS blocks the first
+launch because the developer cannot be verified, you can choose **System
+Settings → Privacy & Security → Open Anyway** for that app, then confirm
+**Open**. Managed Macs may prevent this exception. See
+[Apple's installation guidance](https://support.apple.com/en-us/102445).
+Stop if macOS reports malware, damage, or a mismatch with the published trust
+state. Keep Gatekeeper enabled.
 
-```sh
-xattr -dr com.apple.quarantine /path/to/Squallz.app
-```
+### Windows and Linux
 
-For a verified preview CLI that lacks execute permission:
-
-```sh
-xattr -d com.apple.quarantine /path/to/sqz
-chmod +x /path/to/sqz
-```
-
-### Windows and Linux previews
-
-Current Windows and Linux downloads are `unsigned-preview`. On Windows, verify
-the checksum and provenance before choosing **More info** → **Run anyway** in a
-SmartScreen warning. Do not restore a file quarantined by security software if
-you cannot verify its source.
+Current Windows and Linux downloads are `unsigned-preview`. Windows may show an
+unknown-publisher or SmartScreen warning. Verify the checksum, provenance, and
+GitHub attestation before choosing **More info** → **Run anyway**, if Windows
+offers that option. Smart App Control or an organization's policy may block
+unsigned applications entirely; contact the administrator in that case and
+keep system protections enabled. See
+[Microsoft's SmartScreen guidance](https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/smartscreen-reputation).
+Stop if security software detects malware or the published records do not match.
 
 On Linux, a verified AppImage or binary may need execute permission:
 
@@ -327,7 +327,7 @@ chmod +x /path/to/Squallz
 chmod +x /path/to/sqz
 ```
 
-If you cannot verify an unsigned preview, delete it and build from source.
+If you cannot verify an unsigned package, delete it and build from source.
 
 Project checks:
 

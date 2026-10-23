@@ -89,13 +89,32 @@ def make_bundle_config(root: Path, platform: str, target: str) -> Path:
     return path
 
 
+def make_desktop_package(
+    root: Path, platform: str, profile: str = "release"
+) -> tuple[Path, Path]:
+    config_name, target, asset_name = {
+        "windows-x64": ("windows", "nsis", "Squallz-setup.exe"),
+        "linux-x64": ("linux", "appimage", "Squallz.AppImage"),
+    }[platform]
+    template_path = root / "target/release/sqz-sfx-template.stub"
+    template = (
+        make_linux_template(template_path, b"dedicated runtime")
+        if config_name == "linux"
+        else make_executable(template_path, b"dedicated runtime")
+    )
+    make_bundle_config(root, config_name, target)
+    artifact = make_executable(root / "target" / profile / "bundle" / target / asset_name)
+    return template, artifact
+
+
 class FakeDesktopBundle:
     def __init__(
         self,
         platform: str,
         template: Path,
-        include_windows_cli: bool = True,
-        include_windows_gui: bool = True,
+        include_cli: bool = True,
+        include_gui: bool = True,
+        fail_phase: str | None = None,
         desktop_mime_types: tuple[str, ...] = (
             "application/zip",
             "application/x-7z-compressed",
@@ -103,10 +122,11 @@ class FakeDesktopBundle:
     ) -> None:
         self.platform = platform
         self.template = template
-        self.include_windows_cli = include_windows_cli
-        self.include_windows_gui = include_windows_gui
+        self.include_cli = include_cli
+        self.include_gui = include_gui
         self.desktop_mime_types = desktop_mime_types
         self.commands: list[list[str]] = []
+        self.cli = FakeSqz("1.2.3", fail_phase=fail_phase)
 
     def __call__(
         self,
@@ -116,7 +136,7 @@ class FakeDesktopBundle:
         **_: object,
     ) -> subprocess.CompletedProcess[str]:
         self.commands.append(command)
-        if self.platform == "linux":
+        if self.platform == "linux" and command[1:] == ["--appimage-extract"]:
             if cwd is None:
                 raise AssertionError("Linux bundle extraction requires a working directory")
             packaged = (
@@ -135,17 +155,28 @@ class FakeDesktopBundle:
                 f"MimeType={';'.join(self.desktop_mime_types)};\n",
                 encoding="utf-8",
             )
-        elif any(argument.startswith("/D=") for argument in command):
+            if self.include_cli:
+                make_executable(
+                    Path(cwd) / "squashfs-root/usr/bin/sqz-sidecar",
+                    b"full CLI fixture" * 8,
+                )
+            if self.include_gui:
+                make_executable(Path(cwd) / "squashfs-root/usr/bin/squallz-gui")
+        elif self.platform == "windows" and any(
+            argument.startswith("/D=") for argument in command
+        ):
             destination = Path(
                 next(argument[3:] for argument in command if argument.startswith("/D="))
             )
             packaged = destination / smoke.SFX_RESOURCE_TARGET
             make_executable(packaged, self.template.read_bytes())
-            if self.include_windows_cli:
-                make_executable(destination / "sqz-sidecar.exe")
-            if self.include_windows_gui:
+            if self.include_cli:
+                make_executable(destination / "sqz-sidecar.exe", b"full CLI fixture" * 8)
+            if self.include_gui:
                 make_executable(destination / "Squallz.exe")
             make_executable(destination / "uninstall.exe")
+        elif Path(command[0]).name != "uninstall.exe":
+            return self.cli(command)
         return subprocess.CompletedProcess(command, 0, "", "")
 
 
@@ -714,23 +745,15 @@ class ReleaseBinarySmokeTests(unittest.TestCase):
             ):
                 smoke.require_dedicated_template_size(template, binary)
 
-    def test_platform_bundle_config_and_real_package_contain_the_runtime(self) -> None:
+    def test_installed_packages_run_zip_and_sfx_round_trips(self) -> None:
         cases = (
-            ("windows-x64", "windows", "nsis", "Squallz-setup.exe"),
-            ("linux-x64", "linux", "appimage", "Squallz.AppImage"),
+            ("windows-x64", "windows"),
+            ("linux-x64", "linux"),
         )
-        for platform, config_name, target, artifact_name in cases:
+        for platform, config_name in cases:
             with self.subTest(platform=platform), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
-                template_path = root / "target/release/sqz-sfx-template.stub"
-                template = (
-                    make_linux_template(template_path, b"dedicated runtime")
-                    if platform == "linux-x64"
-                    else make_executable(template_path, b"dedicated runtime")
-                )
-                make_bundle_config(root, config_name, target)
-                bundle_dir = root / "target/debug/bundle" / target
-                artifact = make_executable(bundle_dir / artifact_name)
+                template, artifact = make_desktop_package(root, platform, "debug")
                 runner = FakeDesktopBundle(config_name, template)
 
                 actual = smoke.require_packaged_desktop_runtime(
@@ -739,52 +762,117 @@ class ReleaseBinarySmokeTests(unittest.TestCase):
                     "debug",
                     template,
                     root / "smoke",
+                    "1.2.3",
                     runner,
                 )
 
                 self.assertEqual(actual, artifact.resolve())
-                self.assertEqual(len(runner.commands), 3 if config_name == "windows" else 1)
+                install_root = (
+                    root / "smoke/nsis-install"
+                    if config_name == "windows"
+                    else root / "smoke/appimage-extract/squashfs-root"
+                )
+                packaged_cli = install_root / (
+                    "sqz-sidecar.exe" if config_name == "windows" else "usr/bin/sqz-sidecar"
+                )
+                cli_commands = [
+                    command
+                    for command in runner.cli.commands
+                    if Path(command[0]) == packaged_cli.resolve()
+                ]
+                self.assertEqual(len(cli_commands), 8)
+                self.assertEqual(cli_commands[0][1:], ["--version"])
+                for index, operation in enumerate(
+                    ("compress", "list", "test", "extract"), 1
+                ):
+                    self.assertIn(operation, cli_commands[index])
+                sfx_create = cli_commands[6]
+                packaged_template = (
+                    install_root / smoke.SFX_RESOURCE_TARGET
+                    if config_name == "windows"
+                    else install_root / "usr/lib/Squallz" / smoke.SFX_RESOURCE_TARGET
+                )
+                self.assertEqual(
+                    Path(sfx_create[sfx_create.index("--stub") + 1]),
+                    packaged_template.resolve(),
+                )
+                self.assertEqual(
+                    smoke.extracted_files(root / "smoke/packaged-smoke/sfx-extracted"),
+                    smoke.source_files(root / "smoke/packaged-smoke/release smoke"),
+                )
                 if config_name == "windows":
                     self.assertEqual(
-                        runner.commands[1],
-                        [
-                            str((root / "smoke/nsis-install/sqz-sidecar.exe").resolve()),
-                            "--version",
-                        ],
+                        runner.commands[-1],
+                        [str(install_root / "uninstall.exe"), "/S"],
                     )
 
-    def test_windows_package_requires_the_installed_cli_and_desktop_app(self) -> None:
+    def test_packages_require_the_installed_cli_and_desktop_app(self) -> None:
         cases = (
-            (False, True, "did not provide the packaged CLI"),
-            (True, False, "did not provide the desktop app"),
+            ("windows-x64", "windows", False, True, "packaged CLI"),
+            ("windows-x64", "windows", True, False, "desktop app"),
+            ("linux-x64", "linux", False, True, "packaged CLI"),
+            ("linux-x64", "linux", True, False, "desktop app"),
         )
-        for include_cli, include_gui, message in cases:
-            with self.subTest(message=message), tempfile.TemporaryDirectory() as tmp:
+        for platform, config_name, include_cli, include_gui, message in cases:
+            with (
+                self.subTest(platform=platform, missing=message),
+                tempfile.TemporaryDirectory() as tmp,
+            ):
                 root = Path(tmp)
-                template = make_executable(
-                    root / "target/release/sqz-sfx-template.stub",
-                    b"dedicated runtime",
-                )
-                make_bundle_config(root, "windows", "nsis")
-                make_executable(
-                    root / "target/release/bundle/nsis/Squallz-setup.exe"
-                )
+                template, _ = make_desktop_package(root, platform)
                 runner = FakeDesktopBundle(
-                    "windows",
+                    config_name,
                     template,
-                    include_windows_cli=include_cli,
-                    include_windows_gui=include_gui,
+                    include_cli=include_cli,
+                    include_gui=include_gui,
                 )
 
                 with self.assertRaisesRegex(smoke.SmokeError, message):
                     smoke.require_packaged_desktop_runtime(
                         root,
-                        "windows-x64",
+                        platform,
                         "release",
                         template,
                         root / "smoke",
+                        "1.2.3",
                         runner,
                     )
+                self.assertEqual(runner.cli.commands, [])
+                if config_name == "windows":
+                    self.assertEqual(Path(runner.commands[-1][0]).name, "uninstall.exe")
+
+    def test_packaged_cli_failure_aborts_and_windows_uninstalls(self) -> None:
+        cases = (
+            ("windows-x64", "windows"),
+            ("linux-x64", "linux"),
+        )
+        for platform, config_name in cases:
+            with self.subTest(platform=platform), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                template, _ = make_desktop_package(root, platform)
+                runner = FakeDesktopBundle(config_name, template, fail_phase="extract")
+
+                with self.assertRaisesRegex(
+                    smoke.SmokeError, "extract failed with exit code 7"
+                ):
+                    smoke.require_packaged_desktop_runtime(
+                        root,
+                        platform,
+                        "release",
+                        template,
+                        root / "smoke",
+                        "1.2.3",
+                        runner,
+                    )
+
+                extract_command = runner.cli.commands[-1]
+                self.assertIn("extract", extract_command)
+                self.assertEqual(
+                    Path(extract_command[0]).name,
+                    "sqz-sidecar.exe" if config_name == "windows" else "sqz-sidecar",
+                )
+                if config_name == "windows":
+                    self.assertEqual(Path(runner.commands[-1][0]).name, "uninstall.exe")
 
     def test_platform_bundle_config_rejects_the_wrong_target(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -834,6 +922,7 @@ class ReleaseBinarySmokeTests(unittest.TestCase):
                             "debug",
                             template,
                             root / "smoke",
+                            "1.2.3",
                             runner,
                         )
 

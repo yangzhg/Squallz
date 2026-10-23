@@ -350,7 +350,7 @@
   "cli.check_update.release_url": "Release URL",
   "cli.check_update.no_install": "No update was downloaded or installed.",
   "cli.check_update.trust.notarized": "Release metadata reports Developer ID signing and notarization",
-  "cli.check_update.trust.unsigned": "Unsigned preview; verify its SHA-256 and GitHub Artifact Attestation before use",
+  "cli.check_update.trust.unsigned": "Unsigned package; verify its SHA-256 and GitHub Artifact Attestation before use",
   "cli.check_update.trust.unavailable": "Trust evidence is unavailable; review the release before use",
   "cli.check_update.source.github_api": "GitHub Releases API",
   "cli.check_update.source.latest_release_redirect": "GitHub latest-release redirect",

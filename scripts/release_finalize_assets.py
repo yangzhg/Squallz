@@ -180,6 +180,8 @@ def main() -> int:
                 "developer-id-notarized requires exactly one primary release asset"
             )
         asset = primary_assets[0]
+        if not asset.name.endswith(".dmg"):
+            raise SystemExit("developer-id-notarized requires a DMG release asset")
         artifact_sha256 = sha256_file(asset)
         require_developer_id_evidence(
             trust_evidence_source,

@@ -80,12 +80,17 @@ class ReleaseFinalizeAssetsTests(unittest.TestCase):
         cases = (
             ("source", "source"),
             ("unsigned-preview", "linux-x64"),
+            ("unsigned-preview", "windows-x64"),
+            ("unsigned-preview", "macos-arm64"),
+            ("unsigned-preview", "macos-x64"),
         )
         for trust_state, platform in cases:
-            with self.subTest(trust_state=trust_state), tempfile.TemporaryDirectory() as tmp:
+            with self.subTest(trust_state=trust_state, platform=platform), tempfile.TemporaryDirectory() as tmp:
                 assets_dir = Path(tmp) / "assets"
                 assets_dir.mkdir()
-                asset = assets_dir / "Squallz.tar.gz"
+                asset = assets_dir / (
+                    "Squallz.dmg" if platform.startswith("macos-") else "Squallz.tar.gz"
+                )
                 asset.write_bytes(b"release artifact")
 
                 result = self.run_finalize(
@@ -114,6 +119,9 @@ class ReleaseFinalizeAssetsTests(unittest.TestCase):
                 self.assertEqual(provenance["trust"]["state"], trust_state)
                 self.assertIs(provenance["trust"]["unsigned"], True)
                 self.assertNotIn("trust_evidence", manifest)
+                self.assertNotIn("evidence", provenance["trust"])
+                self.assertNotIn("trust_evidence", provenance["verification"])
+                self.assertEqual(list(assets_dir.glob("*.trust.json")), [])
                 metadata_paths = (
                     assets_dir / f"{asset.name}.sha256",
                     assets_dir / f"{asset.name}.provenance.json",
@@ -279,6 +287,51 @@ class ReleaseFinalizeAssetsTests(unittest.TestCase):
 
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("requires --profile release", result.stderr)
+
+    def test_developer_id_notarized_rejects_non_dmg_asset(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            assets_dir = root / "assets"
+            assets_dir.mkdir()
+            asset = assets_dir / "Squallz.app.zip"
+            asset.write_bytes(b"artifact")
+            evidence_path = root / "trust-summary.json"
+            self.write_evidence(evidence_path, asset)
+
+            result = self.run_finalize(
+                assets_dir,
+                trust_state="developer-id-notarized",
+                trust_evidence=evidence_path,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("requires a DMG release asset", result.stderr)
+
+    def test_unsigned_macos_rejects_stale_signed_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            assets_dir = root / "assets"
+            assets_dir.mkdir()
+            asset = assets_dir / "Squallz.dmg"
+            asset.write_bytes(b"artifact")
+            evidence_path = root / "trust-summary.json"
+            self.write_evidence(evidence_path, asset)
+            signed = self.run_finalize(
+                assets_dir,
+                trust_state="developer-id-notarized",
+                trust_evidence=evidence_path,
+            )
+            self.assertEqual(signed.returncode, 0, signed.stderr)
+            provenance_path = assets_dir / f"{asset.name}.provenance.json"
+            original_provenance = provenance_path.read_bytes()
+
+            unsigned = self.run_finalize(
+                assets_dir, trust_state="unsigned-preview"
+            )
+
+            self.assertNotEqual(unsigned.returncode, 0)
+            self.assertIn("trust evidence metadata is not allowed", unsigned.stderr)
+            self.assertEqual(provenance_path.read_bytes(), original_provenance)
 
     def test_untrusted_state_rejects_trust_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

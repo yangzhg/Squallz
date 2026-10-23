@@ -307,8 +307,9 @@ line.
 - Publish the NSIS installer as the exact Windows desktop update asset. Publish
   a tar archive containing `Squallz.AppImage` as the exact Linux desktop update
   asset. Do not put a standalone GUI executable under either update name: it
-  has no bundled SFX runtime. Windows and Linux packages remain explicitly
-  marked as unsigned previews until their platform signing pipelines exist.
+  has no bundled SFX runtime. Windows and Linux packages use the
+  `unsigned-preview` trust state to identify their lack of platform signing
+  evidence, including when they belong to a stable release.
 - A signed macOS source app is accepted, but its outer signature is not copied.
   The generated SFX omits the `sqz-sidecar` helper and Quick Look extension.
   Sign the outer `.app` with hardened runtime and a secure timestamp, verify with

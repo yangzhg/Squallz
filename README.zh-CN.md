@@ -227,11 +227,12 @@ GitHub Release 中的每个文件都有独立的信任状态，不能把同一�
 | 状态 | 含义 |
 | --- | --- |
 | `developer-id-notarized` | macOS DMG 已通过 Developer ID 签名、Apple 公证、staple、Gatekeeper 和最终哈希检查。 |
-| `unsigned-preview` | 不声明平台签名或公证证据；当前 Windows 和 Linux 包使用这一状态。 |
+| `unsigned-preview` | 不声明平台签名或公证证据；未签名 macOS DMG 与当前 Windows、Linux 包使用这一状态。 |
 | `source` | 源码归档，不适用桌面代码签名。 |
 
-公开 macOS 流程只有在完整信任链通过后才会发布 DMG，不会降级上传未签名的 macOS 包。没有标注
-信任状态的旧版本应按未签名预览版处理。
+正式版本允许包含未签名包。`unsigned-preview` 表示缺少平台签名证据，与 GitHub Release 是否
+标记为预发布无关。公开 macOS 包统一使用 DMG，Developer ID 签名和 Apple 公证可选；启用后，
+所有签名、公证检查必须通过，失败即停止发布。没有标注信任状态的旧附件应按未签名包处理。
 
 每个主要附件都有同名 `.sha256`、`.provenance.json` 和 GitHub Artifact Attestation；
 `developer-id-notarized` DMG 还会带同名 `.trust.json`。运行下载文件前先核对这些证据：
@@ -256,26 +257,19 @@ spctl --assess --type open --context context:primary-signature --verbose=4 /path
 如果任一命令失败，或系统拦截了标记为 `developer-id-notarized` 的 DMG，应停止安装并反馈发布问题。
 不要对“发布声明”和系统检查结果不一致的包移除 quarantine，也不要选择“仍要打开”。
 
-未签名预览版即使 checksum 正确也可能被系统拦截。只有在自己构建，或已经核对来源和 provenance
-时才绕过提示：先右键或按住 Control 打开应用；确有需要时，再到“隐私与安全性”选择“仍要打开”。
-移除 quarantine 只作为已验证预览版的最后手段：
+`unsigned-preview` DMG 即使 checksum 和 GitHub attestation 一致，也没有 Developer ID 或
+Apple 公证证明。核对这些记录后，挂载 DMG 并把 Squallz 复制到“应用程序”。如果首次启动时
+提示无法验证开发者，可以前往“系统设置 → 隐私与安全性 → 仍要打开”，再确认打开该应用。
+受管理的 Mac 可能禁止这种例外，具体见 [Apple 安装说明](https://support.apple.com/en-us/102445)。
+如果系统报告恶意软件、文件损坏，或结果与发布的信任状态不一致，应停止安装。保持 Gatekeeper 开启。
 
-```sh
-xattr -dr com.apple.quarantine /path/to/Squallz.app
-```
+### Windows 和 Linux
 
-已验证的预览版 CLI 如果没有执行权限，可以运行：
-
-```sh
-xattr -d com.apple.quarantine /path/to/sqz
-chmod +x /path/to/sqz
-```
-
-### Windows 和 Linux 预览版
-
-当前 Windows 和 Linux 下载标记为 `unsigned-preview`。Windows 出现 SmartScreen 警告时，先核对
-checksum 和 provenance，再选择“更多信息 → 仍要运行”。如果无法验证来源，不要恢复被安全软件
-隔离的文件。
+当前 Windows 和 Linux 下载标记为 `unsigned-preview`。Windows 可能提示未知发布者或显示
+SmartScreen 警告。先核对 checksum、provenance 和 GitHub attestation；系统提供选项时，再选择
+“更多信息 → 仍要运行”。Smart App Control 或组织策略可能完全阻止未签名应用，此时请联系管理员，
+保持系统保护开启。具体见 [Microsoft SmartScreen 说明](https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/smartscreen-reputation)。
+如果安全软件报告恶意软件，或发布记录不匹配，应停止安装。
 
 Linux 上已验证的 AppImage 或二进制可能需要补执行权限：
 
@@ -284,7 +278,7 @@ chmod +x /path/to/Squallz
 chmod +x /path/to/sqz
 ```
 
-无法验证未签名预览版时，请删除它并从源码构建。
+无法验证未签名包时，请删除它并从源码构建。
 
 常用校验：
 

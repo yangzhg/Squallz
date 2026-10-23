@@ -1,7 +1,8 @@
-# macOS 正式发布
+# macOS 发布与签名
 
-本文说明 Squallz 的 macOS Developer ID 签名、公证和发布约束。工作流入口是
-`.github/workflows/release.yml`，签名后的最终分发物是 DMG。
+Squallz 允许发布未签名 macOS DMG，也支持可选的 Developer ID 签名和 Apple 公证。
+工作流入口是 `.github/workflows/release.yml`，公开发布的最终分发物统一为 DMG。
+签名状态与版本是否为正式版分别记录。
 
 ## 用户创建的自解压应用
 
@@ -24,7 +25,7 @@ Developer ID Application 身份，再让用户选择独立输出并填写已有 
 随后交给共享任务队列执行。任务快照、历史、审计和可见错误不会保留身份或 profile；
 GUI 只是安全入口，不复制第二套签名或公证实现。
 
-## 两类构建
+## 公开发布与非公开构建
 
 公开发布只接受以下组合：
 
@@ -38,22 +39,36 @@ GUI 只是安全入口，不复制第二套签名或公证实现。
 SHA 生成所有来源信息。缺少标签、版本不一致或检出失败都会终止发布。
 
 非公开构建是 preview。它可以只构建某个平台，也可以使用 debug profile。preview 不读取发布
-凭据，产物沿用现有范围，并标记为 `unsigned-preview`。手动 preview 不使用 `release_tag` 输入，
-版本名为 `run-<run number>-<commit>`，避免和正式版本混淆。
+凭据，标记为 `unsigned-preview`。macOS 的 release profile 会生成并检查 DMG，同时保留 preview
+的 app 和 CLI 附件；debug profile 构建 app。手动 preview 不使用 `release_tag` 输入，版本名为
+`run-<run number>-<commit>`，避免和正式版本混淆。
+
+macOS 签名由显式配置控制：
+
+| 触发方式 | 配置 |
+| --- | --- |
+| 手动公开发布 | `sign_macos=false` 默认发布未签名 DMG；设为 `true` 启用签名和公证 |
+| 推送版本标签 | 仓库 Actions variable `SIGN_MACOS_RELEASE=true` 启用签名和公证；未设置时默认关闭 |
+| 非公开 preview | 不支持签名；`sign_macos=true` 会使配置检查失败 |
+
+关闭签名时无需 Apple secrets。启用签名后，凭据、签名或公证任一检查失败都会停止发布，
+不能自动降级成未签名包。
 
 公开发布中各产物分别记录信任状态：
 
 | 状态 | 含义 |
 | --- | --- |
 | `developer-id-notarized` | macOS DMG 已完成 Developer ID 签名、公证、staple 和 Gatekeeper 检查 |
-| `unsigned-preview` | 没有平台签名或公证证明；当前 Windows 和 Linux 包也使用这一状态 |
+| `unsigned-preview` | 没有平台签名或公证证明；未签名 macOS DMG 与当前 Windows、Linux 包使用这一状态 |
 | `source` | 源码归档，不适用桌面代码签名 |
 
-发布说明和 provenance 必须按文件展示实际状态，不能把整批产物笼统写成“已签名”或“未签名”。
+`unsigned-preview` 只描述平台信任证据，与 GitHub Release 的 prerelease 标记无关，正式版本也可以
+使用这一状态。发布说明和 provenance 必须按文件展示实际状态，不能把整批产物笼统写成“已签名”
+或“未签名”。
 
 ## GitHub Actions secrets
 
-仓库需要配置以下 secrets，公开 macOS 构建缺少任意一项都会失败，不会降级为未签名包：
+启用 macOS 签名时，仓库需要配置以下全部 secrets，缺少任意一项都会失败：
 
 | Secret | 内容 |
 | --- | --- |
@@ -79,37 +94,42 @@ evidence。仓库不需要额外的 keychain 密码 secret。
 
 1. 独立 qualification job 在任何平台打包前执行前端测试、检查和生产构建，以及 Rust 格式、
    Clippy 和完整测试。失败后源码包、平台包和公开发布任务都会保持关闭。
-2. Tauri 构建步骤只接收 `APPLE_CERTIFICATE`、`APPLE_CERTIFICATE_PASSWORD` 和
-   `APPLE_SIGNING_IDENTITY`，并只构建 `app,dmg`。不要把 App Store Connect API 变量放进该
-   步骤的环境。
-3. 公证步骤把 `.p8` 解码到 runner 临时目录，退出时立即删除，然后调用
+2. 公开 macOS 包构建 `app,dmg`。关闭签名时，构建步骤不读取 Apple 凭据；启用签名时，Tauri
+   只接收 `APPLE_CERTIFICATE`、`APPLE_CERTIFICATE_PASSWORD` 和 `APPLE_SIGNING_IDENTITY`。
+   不要把 App Store Connect API 变量放进该步骤的环境。
+3. 启用签名时，公证步骤把 `.p8` 解码到 runner 临时目录，退出时立即删除，然后调用
    `scripts/macos_release_trust.py notarize`。
-4. trust 工具检查 app 和 DMG 的签名，提交 Apple 公证，等待 `Accepted`，执行 staple，并运行
-   Gatekeeper 检查。它还会以只读方式挂载 DMG，核对根目录、应用内容和挂载后的 Gatekeeper
-   结果。任一环节失败都会终止 job。
+4. 签名分支的 trust 工具检查 app 和 DMG 的签名，提交 Apple 公证，等待 `Accepted`，执行 staple，
+   并运行 Gatekeeper 检查。它还会以只读方式挂载 DMG，核对根目录、应用内容和挂载后的 Gatekeeper
+   结果。任一环节失败都会终止 job。未签名 DMG 仍须通过对应的结构和内容检查，但不声明
+   Developer ID、Apple 公证或 Gatekeeper 放行证明。
 5. `scripts/release_binary_smoke.py` 执行最终 `.app` 内的 `sqz`，离线完成 ZIP 创建、创建后
    测试、列出、独立测试、解压和逐字节比对。该检查只证明候选 CLI 及内置 ZIP 路径可运行，
    不替代 DMG 干净机器安装或 GUI 验收。
-6. `scripts/release_finalize_assets.py` 校验 `trust-summary.json` 和最终 DMG 的 SHA-256。只有
-   `status=pass`、公证状态为 `Accepted`、staple 和 Gatekeeper 都通过时，产物才能标记为
-   `developer-id-notarized`。
-7. 公开 macOS job 只收集最终 DMG，不发布 `.app.zip` 或裸 `sqz` CLI。Windows、Linux 和源码
-   打包路径保持不变。
+6. `scripts/release_finalize_assets.py` 生成最终 DMG 的 SHA-256 和 provenance。签名分支还会
+   校验 `trust-summary.json`。只有 `status=pass`、公证状态为 `Accepted`、staple 和 Gatekeeper
+   都通过时，产物才能标记为 `developer-id-notarized`。
+7. 公开 macOS job 只收集最终 DMG，不发布 `.app.zip` 或裸 `sqz` CLI。
 
-完整 trust evidence 以 `macos-release-trust-*` Actions artifact 保存，不进入 GitHub Release。
-与 DMG 对应的 `<DMG>.trust.json` 会随 `squallz-*` 包上传，供最终发布清单和用户核验。GitHub
-Release 下载阶段只读取 `squallz-*` artifacts，防止把完整 job 证据目录当成产品附件。
+签名分支的完整 trust evidence 以 `macos-release-trust-*` Actions artifact 保存，不进入 GitHub
+Release。与已签名 DMG 对应的 `<DMG>.trust.json` 会随 `squallz-*` 包上传，供最终发布清单和用户
+核验。未签名 DMG 不附带公证 trust summary。GitHub Release 下载阶段只读取 `squallz-*`
+artifacts，防止把完整 job 证据目录当成产品附件。
 
 ## 失败处理
 
-以下情况不能通过重跑未签名构建来绕过：
+以下情况会终止发布：
 
-- secret 缺失，或 `APPLE_SIGNING_IDENTITY` 不是指定 Team ID 的 Developer ID Application 身份；
 - 标签不存在，标签版本和任一项目版本不一致，或实际检出 SHA 不正确；
 - Tauri 没有生成预期的 `.app`，或生成的 DMG 不是唯一文件；
-- `codesign` 校验失败，Apple 公证没有返回 `Accepted`，staple 或 Gatekeeper 检查失败；
-- trust summary 的 schema、架构、状态或 DMG SHA-256 不匹配；
+- 应用、DMG 的结构或内容不符合打包合同，或最终包的运行检查失败；
 - 最终收集阶段发现缺失或多个 DMG。
+
+启用签名时，下列失败也会终止发布，且不能自动重试为未签名包：
+
+- secret 缺失，或 `APPLE_SIGNING_IDENTITY` 不是指定 Team ID 的 Developer ID Application 身份；
+- `codesign` 校验失败，Apple 公证没有返回 `Accepted`，staple 或 Gatekeeper 检查失败；
+- trust summary 的 schema、架构、状态或 DMG SHA-256 不匹配。
 
 处理失败时保留 Actions 日志；如果 trust 工具已经启动，也保留它生成的非敏感证据。修复证书、
 版本或构建问题后重新运行同一标签。发布流程会再次核对标签目标，并移除旧运行遗留的 Release
@@ -126,14 +146,22 @@ python3 scripts/macos_release_trust.py inspect \
 ```
 
 `inspect` 不接收公证证明，按设计返回 `status=blocked` 和退出码 2；结构或打包错误返回退出码 1。
-它不能生成 `pass`，也不能替代正式发布的签名、公证和 Gatekeeper 检查。
+它不能生成签名信任状态的 `pass`。检查未签名包的结构结果时，必须区分 `packaging_valid` 与
+缺少签名、公证证明导致的 `blocked`；已签名发布仍须完成完整签名、公证和 Gatekeeper 检查。
 
 ## 本地核验
 
-从 GitHub Release 下载 DMG 后，可以再次执行系统检查：
+从 GitHub Release 下载 DMG 后，先核对同名 `.sha256`、`.provenance.json` 和 GitHub Artifact
+Attestation：
 
 ```sh
 shasum -a 256 Squallz-*.dmg
+gh attestation verify /path/to/Squallz.dmg --repo yangzhg/Squallz
+```
+
+对标记为 `developer-id-notarized` 的 DMG，继续检查 Apple ticket 和 Gatekeeper：
+
+```sh
 xcrun stapler validate Squallz-*.dmg
 spctl --assess --type open --context context:primary-signature --verbose=4 Squallz-*.dmg
 ```
@@ -145,12 +173,18 @@ codesign --verify --deep --strict --verbose=2 /Volumes/Squallz/Squallz.app
 spctl --assess --type execute --verbose=4 /Volumes/Squallz/Squallz.app
 ```
 
-同时核对同名 `.sha256`、`.provenance.json`、`.trust.json` 和 GitHub Artifact Attestation。
+同时核对同名 `.trust.json`。任一检查与发布的签名状态不一致时，应停止安装并报告问题。
+
+`unsigned-preview` DMG 没有 Apple 公证证明，不能通过上述检查推断其已获平台认证。核对来源和
+文件记录后，挂载 DMG，把 Squallz 复制到“应用程序”。首次打开若提示无法验证开发者，可按
+[Apple 说明](https://support.apple.com/en-us/102445)到“系统设置 → 隐私与安全性”选择该应用的
+“仍要打开”，再确认打开。受管理设备可能不允许例外；若系统提示恶意软件或文件损坏，应停止安装。
+保持 Gatekeeper 开启。
 
 ## 自解压产物的签名边界
 
-这套工作流只签名并公证 Squallz 官方 app 和 DMG，不替用户签名任意自解压内容。用户创建 macOS
-自解压 app 后，payload 和 manifest 已改变，原模板的外层签名不再有效；发布者必须使用自己的
+启用签名后，这套工作流只签名并公证 Squallz 官方 app 和 DMG，不替用户签名任意自解压内容。
+用户创建 macOS 自解压 app 后，payload 和 manifest 已改变，原模板的外层签名不再有效；发布者必须使用自己的
 Developer ID 从内到外重新签名，再公证最终分发物。Windows Authenticode 也应在 SFX 组装完成后
 执行。布局和顺序见 [Squallz self-extracting archives](SELF_EXTRACTING.md)。
 

@@ -19,31 +19,31 @@ EXPECTED_PLATFORMS = {
         "architecture": "all",
         "profile": "source",
         "kind": "source-archive",
-        "trust_state": "source",
+        "trust_states": ("source",),
     },
     "macos-arm64": {
         "architecture": "arm64",
         "profile": "release",
         "kind": "desktop-binary",
-        "trust_state": "developer-id-notarized",
+        "trust_states": ("unsigned-preview", "developer-id-notarized"),
     },
     "macos-x64": {
         "architecture": "x64",
         "profile": "release",
         "kind": "desktop-binary",
-        "trust_state": "developer-id-notarized",
+        "trust_states": ("unsigned-preview", "developer-id-notarized"),
     },
     "windows-x64": {
         "architecture": "x64",
         "profile": "release",
         "kind": "desktop-binary",
-        "trust_state": "unsigned-preview",
+        "trust_states": ("unsigned-preview",),
     },
     "linux-x64": {
         "architecture": "x64",
         "profile": "release",
         "kind": "desktop-binary",
-        "trust_state": "unsigned-preview",
+        "trust_states": ("unsigned-preview",),
     },
 }
 REQUIRED_RELEASE_NOTE_HEADINGS = ("## Highlights", "## Known limitations")
@@ -170,13 +170,15 @@ def validate_asset(
     if not isinstance(platform, str) or platform not in EXPECTED_PLATFORMS:
         raise ReleaseError(f"{asset.name} has an unexpected platform")
     expected_build = EXPECTED_PLATFORMS[platform]
+    build_trust_state = build.get("trust_state")
+    if build_trust_state not in expected_build["trust_states"]:
+        raise ReleaseError(f"{asset.name} has invalid build.trust_state")
     expected_fields = {
         "version": version,
         "architecture": expected_build["architecture"],
         "profile": expected_build["profile"],
         "kind": expected_build["kind"],
-        "trust_state": expected_build["trust_state"],
-        "unsigned": expected_build["trust_state"] != "developer-id-notarized",
+        "unsigned": build_trust_state != "developer-id-notarized",
     }
     for key, expected in expected_fields.items():
         if not matches_expected(build.get(key), expected):
@@ -184,7 +186,11 @@ def validate_asset(
 
     trust = require_mapping(evidence.get("trust"), "trust", asset.name)
     trust_state = trust.get("state")
-    if trust_state not in TRUST_STATES or trust_state != build.get("trust_state"):
+    if (
+        not isinstance(trust_state, str)
+        or trust_state not in TRUST_STATES
+        or trust_state != build_trust_state
+    ):
         raise ReleaseError(f"{asset.name} has inconsistent trust state")
     if trust.get("unsigned") is not build.get("unsigned"):
         raise ReleaseError(f"{asset.name} has inconsistent unsigned state")
@@ -203,9 +209,10 @@ def validate_asset(
     if verification.get("checksum_file") != checksum_path.name:
         raise ReleaseError(f"{asset.name} references the wrong checksum file")
 
+    if platform.startswith("macos-") and not asset.name.endswith(".dmg"):
+        raise ReleaseError(f"public macOS asset is not a DMG: {asset.name}")
+
     if trust_state == "developer-id-notarized":
-        if not asset.name.endswith(".dmg"):
-            raise ReleaseError(f"trusted macOS asset is not a DMG: {asset.name}")
         trust_path = asset.with_name(f"{asset.name}.trust.json")
         trust_ref = require_mapping(trust.get("evidence"), "trust.evidence", asset.name)
         verification_ref = require_mapping(
@@ -359,8 +366,10 @@ def prepare_release(
         "Trust is reported per asset. Verify the checksum and GitHub Artifact Attestation before running a download.",
         "",
         "- `developer-id-notarized`: signed with the Squallz Developer ID, accepted by Apple notarization, stapled, and checked with Gatekeeper.",
-        "- `unsigned-preview`: not covered by a platform signing identity or notarization record.",
+        "- `unsigned-preview`: not covered by a platform signing identity or notarization record. This describes signing status, not the release channel; stable releases may include unsigned assets.",
         "- `source`: source archive; desktop code-signing does not apply.",
+        "",
+        "Unsigned macOS downloads may require approval in System Settings > Privacy & Security. Windows may show an unknown-publisher or SmartScreen warning. Managed devices may block unsigned applications.",
         "",
         "## Downloads",
         "",

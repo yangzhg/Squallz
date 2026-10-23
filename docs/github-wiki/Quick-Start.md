@@ -4,6 +4,13 @@
 
 Use Squallz from the desktop app for interactive archive work, or use `sqz` when you need repeatable commands, CI jobs, or JSON output.
 
+Download packages from [GitHub Releases](https://github.com/yangzhg/Squallz/releases).
+Stable releases may include unsigned macOS DMGs and Windows installers. Verify
+the checksum, provenance, and GitHub attestation, then follow the
+[platform installation guidance](https://github.com/yangzhg/Squallz#release-trust)
+for Gatekeeper or SmartScreen prompts. Device policy may prevent unsigned apps
+from running.
+
 ```mermaid
 flowchart TD
   A["Choose input files"] --> B{"Need recovery?"}
@@ -71,6 +78,11 @@ sqz doctor --strict
 ## 中文
 
 交互式归档工作优先使用桌面应用；需要可重复命令、CI 或 JSON 输出时使用 `sqz`。
+
+从 [GitHub Releases](https://github.com/yangzhg/Squallz/releases) 下载软件包。
+正式版本可能包含未签名 macOS DMG 和 Windows 安装包。先核对 checksum、provenance 和
+GitHub attestation，再按[平台安装说明](https://github.com/yangzhg/Squallz/blob/main/README.zh-CN.md#发布产物的信任状态)
+处理 Gatekeeper 或 SmartScreen 提示。设备策略可能禁止运行未签名应用。
 
 ## 从源码安装
 

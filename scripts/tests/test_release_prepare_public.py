@@ -38,9 +38,18 @@ def sha256_file(path: Path) -> str:
 
 
 class ReleasePreparePublicTests(unittest.TestCase):
-    def create_fixture(self, assets_dir: Path) -> None:
+    def create_fixture(
+        self,
+        assets_dir: Path,
+        *,
+        macos_trust: Optional[dict[str, str]] = None,
+        macos_suffix: str = ".dmg",
+    ) -> None:
         assets_dir.mkdir()
         for name, platform, architecture, profile, kind, trust_state in ASSETS:
+            if platform.startswith("macos-"):
+                name = name.removesuffix(".dmg") + macos_suffix
+                trust_state = (macos_trust or {}).get(platform, trust_state)
             asset = assets_dir / name
             asset.write_bytes(f"artifact:{name}".encode("utf-8"))
             digest = sha256_file(asset)
@@ -159,6 +168,137 @@ class ReleasePreparePublicTests(unittest.TestCase):
             self.assertIn("Some formats require external tools.", notes)
             self.assertIn("## Asset trust", notes)
             self.assertIn("Squallz-v1.2.3-macos-arm64.dmg", notes)
+
+    def test_unsigned_macos_release_preserves_per_asset_trust(self) -> None:
+        cases = (
+            {"macos-arm64": "unsigned-preview", "macos-x64": "unsigned-preview"},
+            {"macos-arm64": "unsigned-preview"},
+        )
+        for macos_trust in cases:
+            with self.subTest(macos_trust=macos_trust), tempfile.TemporaryDirectory() as tmp:
+                assets_dir = Path(tmp) / "assets"
+                self.create_fixture(assets_dir, macos_trust=macos_trust)
+
+                result = self.run_prepare(assets_dir)
+
+                self.assertEqual(result.returncode, 0, result.stderr)
+                manifest = json.loads(
+                    (assets_dir / "RELEASE_ASSETS_MANIFEST.json").read_text(
+                        encoding="utf-8"
+                    )
+                )
+                records = {item["platform"]: item for item in manifest["assets"]}
+                for platform in ("macos-arm64", "macos-x64"):
+                    state = macos_trust.get(platform, "developer-id-notarized")
+                    self.assertEqual(records[platform]["trust_state"], state)
+                    self.assertTrue(records[platform]["name"].endswith(".dmg"))
+                    self.assertEqual(
+                        (assets_dir / f"{records[platform]['name']}.trust.json").exists(),
+                        state == "developer-id-notarized",
+                    )
+                notes = (assets_dir / "RELEASE_NOTES.md").read_text(encoding="utf-8")
+                self.assertIn("stable releases may include unsigned assets", notes)
+                self.assertIn("System Settings > Privacy & Security", notes)
+                self.assertIn("SmartScreen", notes)
+
+    def test_unsigned_macos_public_assets_still_require_dmg(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            assets_dir = Path(tmp) / "assets"
+            self.create_fixture(
+                assets_dir,
+                macos_trust={"macos-arm64": "unsigned-preview", "macos-x64": "unsigned-preview"},
+                macos_suffix=".app.zip",
+            )
+
+            result = self.run_prepare(assets_dir)
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("public macOS asset is not a DMG", result.stderr)
+
+    def test_unsigned_macos_rejects_claimed_or_orphaned_trust_evidence(self) -> None:
+        for location in ("trust", "verification", "sidecar"):
+            with self.subTest(location=location), tempfile.TemporaryDirectory() as tmp:
+                assets_dir = Path(tmp) / "assets"
+                self.create_fixture(
+                    assets_dir, macos_trust={"macos-arm64": "unsigned-preview"}
+                )
+                name = "Squallz-v1.2.3-macos-arm64.dmg"
+                provenance_path = assets_dir / f"{name}.provenance.json"
+                provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+                if location == "sidecar":
+                    (assets_dir / f"{name}.trust.json").write_text("{}", encoding="utf-8")
+                else:
+                    key = "evidence" if location == "trust" else "trust_evidence"
+                    provenance[location][key] = {"name": f"{name}.trust.json", "sha256": "b" * 64}
+                    provenance_path.write_text(json.dumps(provenance), encoding="utf-8")
+
+                result = self.run_prepare(assets_dir)
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(
+                    "sidecars are incomplete" if location == "sidecar" else "unsigned asset carries trusted evidence",
+                    result.stderr,
+                )
+
+    def test_mixed_release_does_not_downgrade_invalid_signed_evidence(self) -> None:
+        for mutation in ("missing", "notarization", "architecture", "artifact", "checksum"):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as tmp:
+                assets_dir = Path(tmp) / "assets"
+                self.create_fixture(
+                    assets_dir, macos_trust={"macos-arm64": "unsigned-preview"}
+                )
+                name = "Squallz-v1.2.3-macos-x64.dmg"
+                trust_path = assets_dir / f"{name}.trust.json"
+                if mutation == "missing":
+                    trust_path.unlink()
+                else:
+                    evidence = json.loads(trust_path.read_text(encoding="utf-8"))
+                    if mutation == "notarization":
+                        evidence["notarization"]["status"] = "Invalid"
+                    elif mutation == "architecture":
+                        evidence["architecture"] = "arm64"
+                    elif mutation == "artifact":
+                        evidence["artifact"]["sha256"] = "b" * 64
+                    else:
+                        evidence["gatekeeper"] = False
+                    trust_path.write_text(json.dumps(evidence), encoding="utf-8")
+                    if mutation != "checksum":
+                        provenance_path = assets_dir / f"{name}.provenance.json"
+                        provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+                        digest = sha256_file(trust_path)
+                        provenance["trust"]["evidence"]["sha256"] = digest
+                        provenance["verification"]["trust_evidence"]["sha256"] = digest
+                        provenance_path.write_text(json.dumps(provenance), encoding="utf-8")
+
+                result = self.run_prepare(assets_dir)
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse((assets_dir / "RELEASE_ASSETS_MANIFEST.json").exists())
+
+    def test_unsigned_macos_keeps_build_source_and_trust_checks(self) -> None:
+        mutations = {
+            "version": lambda value: value["build"].update(version="v0.0.0"),
+            "source": lambda value: value["source"].update(sha="b" * 40),
+            "build.trust_state": lambda value: value["build"].update(trust_state="source"),
+            "build.unsigned": lambda value: value["build"].update(unsigned=False),
+            "trust state": lambda value: value["trust"].update(state="developer-id-notarized"),
+            "unsigned state": lambda value: value["trust"].update(unsigned=False),
+        }
+        for field, mutate in mutations.items():
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as tmp:
+                assets_dir = Path(tmp) / "assets"
+                self.create_fixture(
+                    assets_dir, macos_trust={"macos-arm64": "unsigned-preview"}
+                )
+                provenance_path = assets_dir / "Squallz-v1.2.3-macos-arm64.dmg.provenance.json"
+                provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+                mutate(provenance)
+                provenance_path.write_text(json.dumps(provenance), encoding="utf-8")
+
+                result = self.run_prepare(assets_dir)
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(field, result.stderr)
 
     def test_curated_notes_require_highlights_and_known_limitations(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

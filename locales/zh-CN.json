@@ -350,7 +350,7 @@
   "cli.check_update.release_url": "发布页面",
   "cli.check_update.no_install": "本次检查没有下载或安装更新。",
   "cli.check_update.trust.notarized": "发布元数据显示已使用 Developer ID 签名并通过公证",
-  "cli.check_update.trust.unsigned": "未签名预览版；使用前请核对 SHA-256 和 GitHub 构建证明",
+  "cli.check_update.trust.unsigned": "未签名软件包；使用前请核对 SHA-256 和 GitHub 构建证明",
   "cli.check_update.trust.unavailable": "暂无信任证据；使用前请先查看发布详情",
   "cli.check_update.source.github_api": "GitHub Releases API",
   "cli.check_update.source.latest_release_redirect": "GitHub 最新版重定向",

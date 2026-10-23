@@ -319,6 +319,7 @@ def require_packaged_desktop_runtime(
     profile: str,
     template: Path,
     workspace: Path,
+    expected_version: str,
     runner: Runner = subprocess.run,
 ) -> Path:
     configured_mime_types = require_desktop_bundle_config(
@@ -342,6 +343,23 @@ def require_packaged_desktop_runtime(
         if configured_mime_types is None:
             raise SmokeError("Linux desktop bundle config has no MIME associations")
         require_packaged_linux_mime_types(app_dir, configured_mime_types)
+        packaged_cli = app_dir / "usr/bin/sqz-sidecar"
+        for path, description in (
+            (packaged_cli, "packaged CLI"),
+            (app_dir / "usr/bin/squallz-gui", "desktop app"),
+        ):
+            if not path.is_file() or path.is_symlink() or not os.access(path, os.X_OK):
+                raise SmokeError(
+                    f"Linux AppImage did not provide an executable {description}"
+                )
+        run_smoke(
+            packaged_cli,
+            expected_version,
+            workspace / "packaged-smoke",
+            platform,
+            packaged_runtime,
+            runner,
+        )
         return bundle
 
     install_root = workspace / "nsis-install"
@@ -354,8 +372,9 @@ def require_packaged_desktop_runtime(
     uninstaller = install_root / "uninstall.exe"
     validation_error: SmokeError | None = None
     try:
+        packaged_runtime = install_root / SFX_RESOURCE_TARGET
         require_packaged_runtime_file(
-            install_root / SFX_RESOURCE_TARGET,
+            packaged_runtime,
             template,
             "windows",
         )
@@ -369,11 +388,12 @@ def require_packaged_desktop_runtime(
         )
         if not any(path.is_file() and not path.is_symlink() for path in gui_candidates):
             raise SmokeError("Windows NSIS installation did not provide the desktop app")
-        invoke(
+        run_smoke(
             packaged_cli,
-            "Windows NSIS packaged CLI",
-            ("--version",),
-            workspace,
+            expected_version,
+            workspace / "packaged-smoke",
+            platform,
+            packaged_runtime,
             runner,
         )
     except SmokeError as error:
@@ -1075,6 +1095,7 @@ def main() -> int:
                     args.profile,
                     host_template,
                     workspace,
+                    version,
                 )
             count = run_smoke(
                 binary,
