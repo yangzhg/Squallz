@@ -84,6 +84,18 @@ pub(super) struct WorkspaceDebt {
 }
 
 #[derive(Debug)]
+struct RepairWorkspaceLock {
+    file: File,
+}
+
+impl Drop for RepairWorkspaceLock {
+    fn drop(&mut self) {
+        // Forked or cloned descriptors can outlive this workspace's ownership.
+        let _ = fs4::FileExt::unlock(&self.file);
+    }
+}
+
+#[derive(Debug)]
 pub(super) struct RepairWorkspaceTarget {
     parent: PathBuf,
     parent_file: File,
@@ -91,20 +103,21 @@ pub(super) struct RepairWorkspaceTarget {
     key: String,
     journal: PathBuf,
     journal_temp: PathBuf,
-    _lock: File,
+    _lock: RepairWorkspaceLock,
 }
 
 #[derive(Debug)]
 pub(super) struct RepairWorkspace {
-    target: RepairWorkspaceTarget,
     journal: OpenJournal,
     path: PathBuf,
     directory: File,
     owner_path: PathBuf,
-    owner: File,
+    owner: RepairWorkspaceLock,
     workspace_identity: StoredIdentity,
     owner_identity: StoredIdentity,
     owner_token: String,
+    // Keep the target exclusive until the workspace handles and owner are released.
+    target: RepairWorkspaceTarget,
 }
 
 struct ActiveWorkspaceBinding<'a> {
@@ -222,6 +235,7 @@ impl RepairWorkspaceTarget {
         if let Err(error) = fs4::FileExt::try_lock(&owner).map_err(io::Error::from) {
             return Err(self.debt(None, error.to_string()));
         }
+        let owner = RepairWorkspaceLock { file: owner };
         if let Err(error) = create_private_directory(&workspace) {
             let bound_workspace = fs::symlink_metadata(&workspace).ok().map(|_| workspace);
             return Err(self.debt(bound_workspace, error.to_string()));
@@ -232,7 +246,7 @@ impl RepairWorkspaceTarget {
         let workspace_identity = squallz_core::physical_file_identity(&directory)
             .map(StoredIdentity::from)
             .map_err(|error| self.debt(Some(workspace.clone()), error.to_string()))?;
-        let owner_identity = squallz_core::physical_file_identity(&owner)
+        let owner_identity = squallz_core::physical_file_identity(&owner.file)
             .map(StoredIdentity::from)
             .map_err(|error| self.debt(Some(workspace.clone()), error.to_string()))?;
         let active = JournalRecord {
@@ -252,7 +266,6 @@ impl RepairWorkspaceTarget {
             .map_err(|error| self.debt(Some(workspace.clone()), error.to_string()))?;
 
         Ok(RepairWorkspace {
-            target: self,
             journal,
             path: workspace,
             directory,
@@ -261,6 +274,7 @@ impl RepairWorkspaceTarget {
             workspace_identity,
             owner_identity,
             owner_token,
+            target: self,
         })
     }
 
@@ -340,7 +354,7 @@ impl RepairWorkspaceTarget {
         }
         (operations.sync_parent)()
             .map_err(|error| self.debt(Some(workspace.clone()), error.to_string()))?;
-        self.remove_bound_owner(&owner_path, &owner, Some(owner_identity))
+        self.remove_bound_owner(&owner_path, &owner.file, Some(owner_identity))
             .map_err(|error| self.debt(Some(workspace.clone()), error.to_string()))?;
         (operations.sync_parent)()
             .map_err(|error| self.debt(Some(workspace.clone()), error.to_string()))?;
@@ -421,10 +435,10 @@ impl RepairWorkspaceTarget {
                 fs4::FileExt::try_lock(&owner)
                     .map_err(io::Error::from)
                     .map_err(|error| self.debt(None, error.to_string()))?;
-                owner
+                RepairWorkspaceLock { file: owner }
             }
         };
-        self.remove_bound_owner(&owner_path, &owner, None)
+        self.remove_bound_owner(&owner_path, &owner.file, None)
             .map_err(|error| self.debt(None, error.to_string()))?;
         self.parent_file
             .sync_all()
@@ -450,7 +464,7 @@ impl RepairWorkspaceTarget {
             ),
         };
         if let Some(owner) = owner {
-            self.remove_bound_owner(&owner_path, &owner, Some(owner_identity))
+            self.remove_bound_owner(&owner_path, &owner.file, Some(owner_identity))
                 .map_err(|error| self.debt(workspace.clone(), error.to_string()))?;
             self.parent_file
                 .sync_all()
@@ -489,7 +503,7 @@ impl RepairWorkspaceTarget {
         workspace_identity: StoredIdentity,
         owner_identity: StoredIdentity,
         owner_token: &str,
-    ) -> io::Result<(File, File)> {
+    ) -> io::Result<(File, RepairWorkspaceLock)> {
         self.ensure_parent_binding()?;
         let directory = squallz_core::open_directory_no_follow(workspace)?;
         #[cfg(unix)]
@@ -523,7 +537,7 @@ impl RepairWorkspaceTarget {
         owner_path: &Path,
         owner_identity: StoredIdentity,
         owner_token: &str,
-    ) -> io::Result<File> {
+    ) -> io::Result<RepairWorkspaceLock> {
         let mut owner = squallz_core::open_regular_file_no_follow_read_write(owner_path)?;
         let metadata = owner.metadata()?;
         #[cfg(unix)]
@@ -561,6 +575,7 @@ impl RepairWorkspaceTarget {
                     format!("private PAR2 repair workspace is still in use: {error}"),
                 )
             })?;
+        let owner = RepairWorkspaceLock { file: owner };
         if StoredIdentity::from(squallz_core::physical_path_identity(owner_path)?) != owner_identity
         {
             return Err(io::Error::other(
@@ -911,7 +926,7 @@ impl RepairWorkspace {
                 .map_err(|error| self.target.debt(Some(self.path.clone()), error.to_string()))?,
         ) != self.workspace_identity
             || StoredIdentity::from(
-                squallz_core::physical_file_identity(&self.owner).map_err(|error| {
+                squallz_core::physical_file_identity(&self.owner.file).map_err(|error| {
                     self.target.debt(Some(self.path.clone()), error.to_string())
                 })?,
             ) != self.owner_identity
@@ -1045,7 +1060,7 @@ fn invalid_identity(identity: StoredIdentity) -> bool {
     identity.filesystem == 0 && identity.entry == 0
 }
 
-fn acquire_lock(path: &Path, control: &ControlToken) -> Result<File, FormatError> {
+fn acquire_lock(path: &Path, control: &ControlToken) -> Result<RepairWorkspaceLock, FormatError> {
     let file = match create_private_file(path) {
         Ok(file) => {
             file.sync_all()?;
@@ -1079,18 +1094,19 @@ fn acquire_lock(path: &Path, control: &ControlToken) -> Result<File, FormatError
             Err(fs4::TryLockError::Error(error)) => return Err(error.into()),
         }
     }
+    let lock = RepairWorkspaceLock { file };
     let metadata = fs::symlink_metadata(path)?;
     if metadata.file_type().is_symlink()
         || !metadata.is_file()
         || squallz_core::physical_path_identity(path)?
-            != squallz_core::physical_file_identity(&file)?
+            != squallz_core::physical_file_identity(&lock.file)?
     {
         return Err(FormatError::Io(io::Error::new(
             io::ErrorKind::InvalidData,
             "PAR2 repair target lock changed while it was being acquired",
         )));
     }
-    Ok(file)
+    Ok(lock)
 }
 
 fn create_private_directory(path: &Path) -> io::Result<()> {
@@ -1278,7 +1294,7 @@ mod tests {
         active: JournalRecord,
         workspace: PathBuf,
         owner_path: PathBuf,
-        owner: File,
+        owner: RepairWorkspaceLock,
         directory: File,
     }
 
@@ -1310,9 +1326,11 @@ mod tests {
         owner.write_all(token.as_bytes())?;
         owner.sync_all()?;
         fs4::FileExt::try_lock(&owner).map_err(io::Error::from)?;
+        let owner = RepairWorkspaceLock { file: owner };
         create_private_directory(&workspace)?;
         let directory = squallz_core::open_directory_no_follow(&workspace)?;
-        let owner_identity = StoredIdentity::from(squallz_core::physical_file_identity(&owner)?);
+        let owner_identity =
+            StoredIdentity::from(squallz_core::physical_file_identity(&owner.file)?);
         let workspace_identity =
             StoredIdentity::from(squallz_core::physical_file_identity(&directory)?);
         write_synced_test_file(&workspace.join("private.bin"), b"private repair data")?;
@@ -1440,6 +1458,32 @@ mod tests {
                 .into());
             }
         }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn target_drop_releases_lock_while_a_cloned_handle_remains_open(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let root = test_root("retained-target-handle")?;
+        let output = root.join("archive.repaired.zip");
+        let target = RepairWorkspaceTarget::lock(&output, &ControlToken::default())?;
+        let path = lock_path(&target.key);
+        let retained = target._lock.file.try_clone()?;
+        let contender = squallz_core::open_regular_file_no_follow_read_write(&path)?;
+        assert!(matches!(
+            fs4::FileExt::try_lock(&contender),
+            Err(fs4::TryLockError::WouldBlock)
+        ));
+
+        drop(target);
+
+        fs4::FileExt::try_lock(&contender).map_err(io::Error::from)?;
+        fs4::FileExt::unlock(&contender)?;
+        drop(contender);
+        drop(retained);
+        fs::remove_dir_all(&root)?;
+        let _ = fs::remove_file(path);
         Ok(())
     }
 
@@ -1715,6 +1759,8 @@ mod tests {
             let workspace_path = workspace.path().to_path_buf();
             let owner_path = workspace.owner_path.clone();
             let key = workspace.target.key.clone();
+            #[cfg(unix)]
+            let retained_owner = workspace.owner.file.try_clone()?;
             drop(workspace);
 
             let target = RepairWorkspaceTarget::lock(&output, &ControlToken::default())?;
@@ -1771,6 +1817,15 @@ mod tests {
                 )
                 .expect_err("the injected cleanup operation must fail");
 
+            assert!(
+                debt.reason.contains(if fail_remove {
+                    "injected workspace removal failure"
+                } else {
+                    "injected workspace removal parent sync failure"
+                }),
+                "unexpected cleanup error: {}",
+                debt.reason
+            );
             assert_eq!(debt.workspace.as_deref(), Some(workspace_path.as_path()));
             assert!(target.journal.exists());
             assert_eq!(workspace_path.exists(), fail_remove);
@@ -1779,6 +1834,8 @@ mod tests {
             assert!(!target.journal.exists());
             assert!(!workspace_path.exists());
             assert!(!owner_path.exists());
+            #[cfg(unix)]
+            drop(retained_owner);
             drop(target);
             fs::remove_dir_all(&root)?;
             let _ = fs::remove_file(lock_path(&key));

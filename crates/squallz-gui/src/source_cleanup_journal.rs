@@ -68,7 +68,20 @@ pub(crate) struct SourceCleanupJournal {
 pub(crate) struct PendingSourceCleanup {
     journal_path: PathBuf,
     record: SourceCleanupRecord,
-    _lock: File,
+    _lock: SourceCleanupLock,
+}
+
+#[derive(Debug)]
+struct SourceCleanupLock {
+    file: File,
+}
+
+impl Drop for SourceCleanupLock {
+    fn drop(&mut self) {
+        // A child between fork and exec may still hold the open-file description.
+        // Release ownership now rather than waiting for every descriptor to close.
+        let _ = fs4::FileExt::unlock(&self.file);
+    }
 }
 
 impl SourceCleanupJournal {
@@ -604,7 +617,7 @@ fn write_new_journal(path: &Path, contents: &[u8]) -> io::Result<()> {
     sync_directory(parent)
 }
 
-fn acquire_lock(journal_path: &Path) -> io::Result<File> {
+fn acquire_lock(journal_path: &Path) -> io::Result<SourceCleanupLock> {
     let parent = journal_path.parent().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -637,12 +650,14 @@ fn acquire_lock(journal_path: &Path) -> io::Result<File> {
         }
     };
     fs4::FileExt::try_lock(&file).map_err(io::Error::from)?;
+    let lock = SourceCleanupLock { file };
+    let file = &lock.file;
     let path_metadata = fs::symlink_metadata(&lock_path)?;
     let file_metadata = file.metadata()?;
     if path_metadata.file_type().is_symlink()
         || !path_metadata.is_file()
         || !file_metadata.is_file()
-        || !same_file_identity(&lock_path, &file)?
+        || !same_file_identity(&lock_path, file)?
     {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -664,7 +679,7 @@ fn acquire_lock(journal_path: &Path) -> io::Result<File> {
         file.sync_all()?;
         sync_directory(parent)?;
     }
-    Ok(file)
+    Ok(lock)
 }
 
 fn create_dir_all_durable(path: &Path) -> io::Result<()> {
@@ -1324,6 +1339,9 @@ mod tests {
         let root = temp_dir("lock");
         let (journal, record) = fixture(&root, &OsString::from("source.txt"));
         let pending = journal.begin(&record).unwrap();
+        // A forked child can retain the same open-file description until exec.
+        #[cfg(unix)]
+        let inherited_lock = pending._lock.file.try_clone().unwrap();
         let second = SourceCleanupJournal::at_path(journal.path().unwrap().to_path_buf());
 
         assert_eq!(
@@ -1341,6 +1359,8 @@ mod tests {
             second.recover_pending().unwrap(),
             SourceCleanupRecovery::Cleared
         );
+        #[cfg(unix)]
+        drop(inherited_lock);
         fs::remove_dir_all(root).unwrap();
     }
 

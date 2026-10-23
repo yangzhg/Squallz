@@ -680,6 +680,7 @@ mod tests {
         let owner = lock_unpoisoned(&workspace.owner)
             .take()
             .expect("preview owner should be available");
+        fs4::FileExt::unlock(&owner).expect("abandoned preview owner should release its lock");
         drop(owner);
         drop(workspace);
     }
@@ -933,12 +934,21 @@ mod tests {
         let stale_owner = stale.owner_path.clone();
         write_private_test_file(&stale_root.join("entry-stale.txt"), b"private preview")
             .expect("stale preview should be written");
+        // A concurrent spawn may retain the same Unix file description.
+        #[cfg(unix)]
+        let retained_owner = lock_unpoisoned(&stale.owner)
+            .as_ref()
+            .expect("stale preview owner should be available")
+            .try_clone()
+            .expect("stale preview owner should be duplicated");
         abandon_workspace(stale);
 
         let replacement = PlaintextWorkspace::create_in(base.path())
             .expect("replacement workspace should initialize");
         assert!(!stale_root.exists());
         assert!(!stale_owner.exists());
+        #[cfg(unix)]
+        drop(retained_owner);
         drop(replacement);
     }
 
