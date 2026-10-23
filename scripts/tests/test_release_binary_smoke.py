@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 SCRIPTS = Path(__file__).resolve().parents[1]
@@ -125,18 +126,25 @@ class FakeDesktopBundle:
         self.include_cli = include_cli
         self.include_gui = include_gui
         self.desktop_mime_types = desktop_mime_types
-        self.commands: list[list[str]] = []
+        self.commands: list[list[str] | str] = []
+        self.install_root: Path | None = None
         self.cli = FakeSqz("1.2.3", fail_phase=fail_phase)
 
     def __call__(
         self,
-        command: list[str],
+        command: list[str] | str,
         *,
         cwd: Path | None = None,
         **_: object,
     ) -> subprocess.CompletedProcess[str]:
         self.commands.append(command)
-        if self.platform == "linux" and command[1:] == ["--appimage-extract"]:
+        if isinstance(command, str):
+            if self.platform != "windows" or self.install_root is None:
+                raise AssertionError(
+                    "only an installed Windows bundle may be uninstalled"
+                )
+            shutil.rmtree(self.install_root)
+        elif self.platform == "linux" and command[1:] == ["--appimage-extract"]:
             if cwd is None:
                 raise AssertionError("Linux bundle extraction requires a working directory")
             packaged = (
@@ -168,6 +176,7 @@ class FakeDesktopBundle:
             destination = Path(
                 next(argument[3:] for argument in command if argument.startswith("/D="))
             )
+            self.install_root = destination
             packaged = destination / smoke.SFX_RESOURCE_TARGET
             make_executable(packaged, self.template.read_bytes())
             if self.include_cli:
@@ -801,10 +810,8 @@ class ReleaseBinarySmokeTests(unittest.TestCase):
                     smoke.source_files(root / "smoke/packaged-smoke/release smoke"),
                 )
                 if config_name == "windows":
-                    self.assertEqual(
-                        runner.commands[-1],
-                        [str(install_root / "uninstall.exe"), "/S"],
-                    )
+                    self.assertIsInstance(runner.commands[-1], str)
+                    self.assertFalse(install_root.exists())
 
     def test_packages_require_the_installed_cli_and_desktop_app(self) -> None:
         cases = (
@@ -839,7 +846,8 @@ class ReleaseBinarySmokeTests(unittest.TestCase):
                     )
                 self.assertEqual(runner.cli.commands, [])
                 if config_name == "windows":
-                    self.assertEqual(Path(runner.commands[-1][0]).name, "uninstall.exe")
+                    self.assertIsInstance(runner.commands[-1], str)
+                    self.assertFalse((root / "smoke/nsis-install").exists())
 
     def test_packaged_cli_failure_aborts_and_windows_uninstalls(self) -> None:
         cases = (
@@ -872,7 +880,102 @@ class ReleaseBinarySmokeTests(unittest.TestCase):
                     "sqz-sidecar.exe" if config_name == "windows" else "sqz-sidecar",
                 )
                 if config_name == "windows":
-                    self.assertEqual(Path(runner.commands[-1][0]).name, "uninstall.exe")
+                    self.assertIsInstance(runner.commands[-1], str)
+                    self.assertFalse((root / "smoke/nsis-install").exists())
+
+    def test_windows_uninstall_waits_for_the_external_copy_with_an_unquoted_path(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="release smoke ") as tmp:
+            root = Path(tmp)
+            template, artifact = make_desktop_package(root, "windows-x64")
+            workspace = root / "smoke"
+            install_root = workspace / "nsis-install"
+            runner = FakeDesktopBundle("windows", template)
+
+            def run(command, **options):
+                if isinstance(command, str):
+                    copied = workspace / "nsis-uninstall.exe"
+                    self.assertEqual(
+                        copied.read_bytes(),
+                        (install_root / "uninstall.exe").read_bytes(),
+                    )
+                    self.assertEqual(command, f'"{copied}" /S _?={install_root}')
+                    self.assertEqual(options["timeout"], 60)
+                    self.assertFalse(options.get("shell", False))
+                return runner(command, **options)
+
+            actual = smoke.require_packaged_desktop_runtime(
+                root, "windows-x64", "release", template, workspace, "1.2.3", run
+            )
+
+            self.assertEqual(actual, artifact.resolve())
+            self.assertFalse(install_root.exists())
+
+    def test_windows_uninstall_failures_are_reported_with_any_validation_failure(self) -> None:
+        cases = (
+            ("nonzero", "Windows NSIS cleanup failed with exit code 9"),
+            ("timeout", "Windows NSIS cleanup timed out"),
+            (
+                "remaining-files",
+                "Windows NSIS cleanup left the installation directory behind",
+            ),
+        )
+        for failure, expected in cases:
+            for validation_failure in (None, "extract"):
+                with (
+                    self.subTest(cleanup=failure, validation=validation_failure),
+                    tempfile.TemporaryDirectory() as tmp,
+                ):
+                    root = Path(tmp)
+                    template, _ = make_desktop_package(root, "windows-x64")
+                    runner = FakeDesktopBundle(
+                        "windows", template, fail_phase=validation_failure
+                    )
+
+                    def run(command, **options):
+                        if isinstance(command, str):
+                            if failure == "timeout":
+                                raise subprocess.TimeoutExpired(
+                                    command, options["timeout"]
+                                )
+                            return subprocess.CompletedProcess(
+                                command, 9 if failure == "nonzero" else 0, "", ""
+                            )
+                        return runner(command, **options)
+
+                    with self.assertRaises(smoke.SmokeError) as raised:
+                        smoke.require_packaged_desktop_runtime(
+                            root, "windows-x64", "release", template,
+                            root / "smoke", "1.2.3", run,
+                        )
+
+                    self.assertIn(expected, str(raised.exception))
+                    if validation_failure is not None:
+                        self.assertIn(
+                            "extract failed with exit code 7", str(raised.exception)
+                        )
+
+    def test_windows_uninstaller_copy_failure_preserves_the_validation_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            template, _ = make_desktop_package(root, "windows-x64")
+            runner = FakeDesktopBundle("windows", template, fail_phase="extract")
+
+            with (
+                mock.patch.object(
+                    smoke.shutil, "copyfile", side_effect=OSError("copy failed")
+                ),
+                self.assertRaises(smoke.SmokeError) as raised,
+            ):
+                smoke.require_packaged_desktop_runtime(
+                    root, "windows-x64", "release", template,
+                    root / "smoke", "1.2.3", runner,
+                )
+
+            self.assertIn("extract failed with exit code 7", str(raised.exception))
+            self.assertIn(
+                "Windows NSIS cleanup could not prepare the uninstaller",
+                str(raised.exception),
+            )
 
     def test_platform_bundle_config_rejects_the_wrong_target(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

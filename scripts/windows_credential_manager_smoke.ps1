@@ -153,6 +153,9 @@ try {
     }
 
     $List = & cmdkey.exe /list 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Stop-Failed "cmdkey /list failed with exit code $LASTEXITCODE" $ArchivePath $TargetName
+    }
     if ($List | Select-String -SimpleMatch $TargetName) {
         Stop-Failed "test credential was not deleted" $ArchivePath $TargetName
     }
@@ -163,3 +166,5 @@ try {
 } finally {
     Remove-TestCredential
 }
+
+exit 0

@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -288,21 +289,28 @@ def require_packaged_linux_mime_types(
 
 
 def invoke_bundle_artifact(
-    command: Sequence[os.PathLike[str] | str],
+    command: str | Sequence[os.PathLike[str] | str],
     phase: str,
     workspace: Path,
     runner: Runner,
+    *,
+    timeout: float | None = None,
 ) -> None:
     try:
         result = runner(
-            [os.fspath(argument) for argument in command],
+            command
+            if isinstance(command, str)
+            else [os.fspath(argument) for argument in command],
             cwd=workspace,
             capture_output=True,
             text=True,
             encoding="utf-8",
             errors="replace",
             check=False,
+            timeout=timeout,
         )
+    except subprocess.TimeoutExpired as error:
+        raise SmokeError(f"{phase} timed out") from error
     except OSError as error:
         raise SmokeError(f"{phase} could not start") from error
     if result.returncode != 0:
@@ -403,15 +411,31 @@ def require_packaged_desktop_runtime(
             raise validation_error
         raise SmokeError("Windows NSIS installation did not provide an uninstaller")
     try:
+        cleanup_uninstaller = workspace / "nsis-uninstall.exe"
+        try:
+            shutil.copyfile(uninstaller, cleanup_uninstaller)
+        except OSError as error:
+            raise SmokeError(
+                "Windows NSIS cleanup could not prepare the uninstaller"
+            ) from error
+        # NSIS needs an external copy and a final, unquoted _?= path to wait
+        # for the actual uninstaller and receive its exit code.
+        cleanup_command = subprocess.list2cmdline([str(cleanup_uninstaller), "/S"])
         invoke_bundle_artifact(
-            (uninstaller, "/S"),
+            f"{cleanup_command} _?={install_root}",
             "Windows NSIS cleanup",
             workspace,
             runner,
+            timeout=60,
         )
-    except SmokeError:
-        if validation_error is None:
-            raise
+        if install_root.exists():
+            raise SmokeError(
+                "Windows NSIS cleanup left the installation directory behind"
+            )
+    except SmokeError as cleanup_error:
+        if validation_error is not None:
+            raise SmokeError(f"{validation_error}; {cleanup_error}") from cleanup_error
+        raise
     if validation_error is not None:
         raise validation_error
     return bundle
