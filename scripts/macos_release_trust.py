@@ -969,14 +969,15 @@ def code_signature_record(
 
 
 def validate_distribution_root(mount: Path) -> None:
-    expected = {".DS_Store", ".VolumeIcon.icns", "Applications", "Squallz.app"}
+    required = {".VolumeIcon.icns", "Applications", "Squallz.app"}
+    allowed = required | {".DS_Store"}
     try:
         entries = {entry.name: entry for entry in os.scandir(mount)}
     except OSError as error:
         raise TrustError("mounted DMG root could not be read") from error
-    if set(entries) != expected:
-        unexpected = sorted(set(entries) - expected)
-        missing = sorted(expected - set(entries))
+    unexpected = sorted(set(entries) - allowed)
+    missing = sorted(required - set(entries))
+    if unexpected or missing:
         details: list[str] = []
         if unexpected:
             details.append(f"unexpected: {', '.join(unexpected)}")
@@ -995,7 +996,9 @@ def validate_distribution_root(mount: Path) -> None:
     if target != "/Applications":
         raise TrustError("mounted DMG Applications must link to /Applications")
     for name in (".DS_Store", ".VolumeIcon.icns"):
-        entry = entries[name]
+        entry = entries.get(name)
+        if entry is None:
+            continue
         if entry.is_symlink() or not entry.is_file(follow_symlinks=False):
             raise TrustError(f"mounted DMG {name} is not a regular file")
 

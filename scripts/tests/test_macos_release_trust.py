@@ -607,6 +607,23 @@ class MacosReleaseTrustTests(unittest.TestCase):
 
         self.assertEqual(redacted, "failed to open <private-key-path>")
 
+    def test_distribution_root_allows_ci_without_finder_layout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            mount = Path(tmp)
+            (mount / ".VolumeIcon.icns").write_bytes(b"icon")
+            (mount / "Squallz.app").mkdir()
+            (mount / "Applications").symlink_to("/Applications")
+
+            validate_distribution_root(mount)
+
+            (mount / ".DS_Store").symlink_to(mount / ".VolumeIcon.icns")
+            with self.assertRaisesRegex(TrustError, "DS_Store is not a regular file"):
+                validate_distribution_root(mount)
+            (mount / ".DS_Store").unlink()
+            (mount / ".VolumeIcon.icns").unlink()
+            with self.assertRaisesRegex(TrustError, "missing: .VolumeIcon.icns"):
+                validate_distribution_root(mount)
+
     def test_evidence_directory_must_be_empty(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             directory = Path(tmp)
