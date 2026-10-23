@@ -325,7 +325,7 @@ jobs:
         run: cargo clippy --all-targets --all-features -- -D warnings
 
       - name: Test Rust workspace
-        run: cargo test --all
+        run: cargo test --all --no-fail-fast
 
       - name: Check ZIP fuzz target
         run: cargo check --manifest-path fuzz/Cargo.toml --bins

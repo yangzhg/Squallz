@@ -112,13 +112,13 @@ impl Engine {
                 let output = match output {
                     Some(output) => output,
                     None => {
-                        let mut name = if paths.len() == 1 {
+                        let mut name = if let Some(name) = first
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .filter(|_| paths.len() == 1)
+                        {
                             let stem = self.archive_stem(first);
-                            if first
-                                .file_name()
-                                .and_then(|name| name.to_str())
-                                .is_none_or(|name| name == stem)
-                            {
+                            if name == stem {
                                 first.file_stem().unwrap_or_default().to_owned()
                             } else {
                                 stem.into()
@@ -365,11 +365,17 @@ mod tests {
                 .path()
                 .join(std::ffi::OsString::from_vec(b"source-\xff.txt".to_vec()));
             fs::write(&input, b"non-UTF8 source").unwrap();
-            let ExternalTaskPlan::Compress { output, .. } = engine
+            let existing_volume = root.path().join("Archive.7z.002");
+            fs::write(&existing_volume, b"existing fallback volume").unwrap();
+            let ExternalTaskPlan::Compress {
+                output,
+                inputs,
+                options,
+            } = engine
                 .resolve_external_task(
                     &document,
                     ExternalTaskAction::CompressTo7z,
-                    vec![input],
+                    vec![input.clone()],
                     None,
                 )
                 .unwrap()
@@ -377,7 +383,44 @@ mod tests {
             else {
                 panic!("compress plan")
             };
-            assert_eq!(output.file_name().unwrap().as_bytes(), b"source-\xff.7z");
+            assert_eq!(inputs, std::slice::from_ref(&input));
+            assert_eq!(
+                inputs[0].file_name().unwrap().as_bytes(),
+                b"source-\xff.txt"
+            );
+            assert_eq!(options.split, Some(512 * 1024));
+            assert_eq!(output, root.path().join("Archive (2).7z"));
+            assert_eq!(output.file_name().unwrap().to_str(), Some("Archive (2).7z"));
+
+            let occupied_link = output;
+            let missing_target = root.path().join("missing fallback");
+            std::os::unix::fs::symlink(&missing_target, &occupied_link).unwrap();
+            let ExternalTaskPlan::Compress {
+                output,
+                inputs,
+                options,
+            } = engine
+                .resolve_external_task(
+                    &document,
+                    ExternalTaskAction::CompressTo7z,
+                    vec![input.clone()],
+                    None,
+                )
+                .unwrap()
+                .unwrap()
+            else {
+                panic!("compress plan")
+            };
+            assert_eq!(inputs, std::slice::from_ref(&input));
+            assert_eq!(options.split, Some(512 * 1024));
+            assert_eq!(output, root.path().join("Archive (3).7z"));
+            assert_eq!(output.file_name().unwrap().to_str(), Some("Archive (3).7z"));
+            assert_eq!(fs::read(&input).unwrap(), b"non-UTF8 source");
+            assert_eq!(
+                fs::read(&existing_volume).unwrap(),
+                b"existing fallback volume"
+            );
+            assert_eq!(fs::read_link(&occupied_link).unwrap(), missing_target);
         }
     }
 
