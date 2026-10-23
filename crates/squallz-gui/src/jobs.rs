@@ -679,26 +679,28 @@ impl JobManager {
         if !entry.pausable {
             return Err(job_unavailable_error());
         }
-        let before = self
-            .queue
-            .state(entry.queue_id)
-            .ok_or_else(job_unavailable_error)?;
-        if !matches!(before, JobState::Queued | JobState::Running) {
-            return Err(job_unavailable_error());
-        }
-        if !self.queue.try_pause(entry.queue_id) {
-            return Err(job_unavailable_error());
-        }
-        let after = self.queue.state(entry.queue_id);
-        if after != Some(JobState::Paused)
-            && !(before == JobState::Queued && after == Some(JobState::Queued))
-        {
-            return Err(job_unavailable_error());
-        }
-        let Some(snapshot) =
-            lock_unpoisoned(&self.snapshots).set_state(gui_id, "paused", None, None)
-        else {
-            return Err(job_unavailable_error());
+        let snapshot = {
+            let mut snapshots = lock_unpoisoned(&self.snapshots);
+            let before = self
+                .queue
+                .state(entry.queue_id)
+                .ok_or_else(job_unavailable_error)?;
+            if !matches!(before, JobState::Queued | JobState::Running) {
+                return Err(job_unavailable_error());
+            }
+            if !self.queue.try_pause(entry.queue_id) {
+                return Err(job_unavailable_error());
+            }
+            let after = self.queue.state(entry.queue_id);
+            if after != Some(JobState::Paused)
+                && !(before == JobState::Queued && after == Some(JobState::Queued))
+            {
+                return Err(job_unavailable_error());
+            }
+            let Some(snapshot) = snapshots.set_state(gui_id, "paused", None, None) else {
+                return Err(job_unavailable_error());
+            };
+            snapshot
         };
         emit(&*entry.events, EV_SNAPSHOT, &snapshot);
         Ok(())
@@ -707,22 +709,28 @@ impl JobManager {
     /// Resumes a paused job.
     pub fn resume_for_window(&self, requester: &str, gui_id: u64) -> Result<(), ErrorDto> {
         let entry = self.managed_job_for_control(requester, gui_id)?;
-        let snapshot_paused = lock_unpoisoned(&self.snapshots)
-            .snapshot(requester, gui_id)
-            .is_some_and(|snapshot| snapshot.state == "paused");
-        if !snapshot_paused {
-            return Err(job_unavailable_error());
-        }
-        self.queue.resume(entry.queue_id);
-        let resumed_state = match self.queue.state(entry.queue_id) {
-            Some(JobState::Queued) => "queued",
-            Some(JobState::Running) => "running",
-            _ => return Err(job_unavailable_error()),
-        };
-        let Some(snapshot) =
-            lock_unpoisoned(&self.snapshots).set_state(gui_id, resumed_state, None, None)
-        else {
-            return Err(job_unavailable_error());
+        let (snapshot, resumed_state) = {
+            // Workers publish their starting and terminal snapshots before
+            // returning to the core queue. Keep that publication behind the
+            // resume transition so a fast job cannot finish between resuming
+            // its token and updating the presentation state.
+            let mut snapshots = lock_unpoisoned(&self.snapshots);
+            let snapshot_paused = snapshots
+                .snapshot(requester, gui_id)
+                .is_some_and(|snapshot| snapshot.state == "paused");
+            if !snapshot_paused {
+                return Err(job_unavailable_error());
+            }
+            self.queue.resume(entry.queue_id);
+            let resumed_state = match self.queue.state(entry.queue_id) {
+                Some(JobState::Queued) => "queued",
+                Some(JobState::Running) => "running",
+                _ => return Err(job_unavailable_error()),
+            };
+            let Some(snapshot) = snapshots.set_state(gui_id, resumed_state, None, None) else {
+                return Err(job_unavailable_error());
+            };
+            (snapshot, resumed_state)
         };
         emit(&*entry.events, EV_SNAPSHOT, &snapshot);
         if resumed_state == "queued" {
