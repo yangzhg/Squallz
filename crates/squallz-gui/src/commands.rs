@@ -605,7 +605,7 @@ fn requested_page_size(page_size: Option<usize>) -> usize {
 }
 
 fn requested_dir_prefix(dir_prefix: Option<&str>) -> &str {
-    dir_prefix.map_or("", |dir_prefix| dir_prefix)
+    dir_prefix.unwrap_or("")
 }
 
 /// All registered formats with capabilities (drives the compress dialog).

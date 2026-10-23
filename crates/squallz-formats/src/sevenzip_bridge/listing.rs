@@ -185,7 +185,7 @@ fn push_list_block(entries: &mut Vec<EntryMeta>, block: &BTreeMap<String, String
         block
             .get("Size")
             .and_then(|value| value.trim().parse::<u64>().ok())
-            .map_or(0, |size| size)
+            .unwrap_or(0)
     };
     entries.push(EntryMeta {
         path: EntryPath::from_utf8(path),
