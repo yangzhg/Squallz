@@ -117,7 +117,7 @@
   import { recordOperation } from "../lib/history.svelte";
   import {
     desktopIntegrationActions,
-    externalOpenActionCopy,
+    externalOpenActionLabelKey,
     type DesktopIntegrationAction,
   } from "../lib/external-tasks";
   import {
@@ -570,8 +570,7 @@
   }
 
   function integrationActionLabel(action: DesktopIntegrationAction): string {
-    const copy = externalOpenActionCopy(action);
-    return tr(copy.labelKey, copy.fallbackLabel);
+    return tr(externalOpenActionLabelKey(action));
   }
 
   function integrationApplyLabel(): string {
@@ -658,7 +657,7 @@
       return tr("gui.settings.integration.removing_detail");
     }
     if (integrationUnavailable || integrationSnapshot?.health === "unavailable") {
-      return tr("gui.settings.integration.status_help", "No previous result is shown. Refresh or try Repair.");
+      return tr("gui.settings.integration.status_help");
     }
     if (!integrationSnapshot || integrationSnapshot.health === "missing") {
       return tr("gui.settings.integration.install_detail");
@@ -674,7 +673,7 @@
     return folder
       ? tr("gui.settings.integration.verified_in")
           .replace("{folder}", folder)
-      : tr("gui.settings.integration.verified_detail", "Managed files and launchers match this version.");
+      : tr("gui.settings.integration.verified_detail");
   }
 
   function integrationActionSnapshot(
@@ -1242,15 +1241,15 @@
   }
 
   function paletteName(palette: Palette): string {
-    return tr(`gui.colors.palette.${palette.id}.name`, palette.name);
+    return tr(`gui.colors.palette.${palette.id}.name`);
   }
 
   function paletteMood(palette: Palette): string {
-    return tr(`gui.colors.palette.${palette.id}.mood`, palette.mood);
+    return tr(`gui.colors.palette.${palette.id}.mood`);
   }
 
   function paletteNote(palette: Palette): string {
-    return tr(`gui.colors.palette.${palette.id}.note`, palette.note);
+    return tr(`gui.colors.palette.${palette.id}.note`);
   }
 
   function activePaletteName(): string {
@@ -1672,7 +1671,7 @@
         />
         <div class="setting-callout">
           <strong>{tr("gui.settings.general.boundary_title")}</strong>
-          <span>{tr("gui.settings.general.boundary_body", "Password, recovery, unsafe path, and conflict prompts remain visible in their workflows.")}</span>
+          <span>{tr("gui.settings.general.boundary_body")}</span>
         </div>
       </section>
     </div>
@@ -1786,14 +1785,14 @@
     <div class="settings-layout">
       <section class="settings-main-panel">
         <div class="settings-metric-grid performance-metric-grid">
-          <div class:invalid-setting={Boolean(settings.performanceParallelJobsError)}><span>{tr("gui.settings.performance.parallel_tasks")}</span><strong>{settings.performance.parallelJobs === null ? tr("common.auto", "Auto") : formattedDraftNumber(settings.performance.parallelJobs)}</strong><small>{tr("gui.settings.performance.parallel_tasks_hint")}</small></div>
-          <div class:invalid-setting={Boolean(settings.performanceThreadsError)}><span>{tr("gui.settings.performance.workers")}</span><strong>{settings.performance.threads === null ? tr("common.auto", "Auto") : formattedDraftNumber(settings.performance.threads)}</strong><small>{tr("gui.settings.performance.workers_hint")}</small></div>
-          <div class:invalid-setting={Boolean(settings.performanceMemoryError)}><span>{tr("gui.settings.performance.stream_buffer")}</span><strong>{settings.performance.memoryKiB === null ? tr("common.auto", "Auto") : streamBufferKiBLabel(settings.performance.memoryKiB)}</strong><small>{tr("gui.settings.performance.copy_buffers")}</small></div>
+          <div class:invalid-setting={Boolean(settings.performanceParallelJobsError)}><span>{tr("gui.settings.performance.parallel_tasks")}</span><strong>{settings.performance.parallelJobs === null ? tr("common.auto") : formattedDraftNumber(settings.performance.parallelJobs)}</strong><small>{tr("gui.settings.performance.parallel_tasks_hint")}</small></div>
+          <div class:invalid-setting={Boolean(settings.performanceThreadsError)}><span>{tr("gui.settings.performance.workers")}</span><strong>{settings.performance.threads === null ? tr("common.auto") : formattedDraftNumber(settings.performance.threads)}</strong><small>{tr("gui.settings.performance.workers_hint")}</small></div>
+          <div class:invalid-setting={Boolean(settings.performanceMemoryError)}><span>{tr("gui.settings.performance.stream_buffer")}</span><strong>{settings.performance.memoryKiB === null ? tr("common.auto") : streamBufferKiBLabel(settings.performance.memoryKiB)}</strong><small>{tr("gui.settings.performance.copy_buffers")}</small></div>
         </div>
         <div class="level-control settings-slider">
-          <div><strong>{tr("gui.settings.performance.parallel_tasks")} · {settings.performance.parallelJobs === null ? tr("common.auto", "Auto") : formattedDraftNumber(settings.performance.parallelJobs)}</strong><span>{tr("gui.settings.performance.parallel_tasks_body")}</span></div>
+          <div><strong>{tr("gui.settings.performance.parallel_tasks")} · {settings.performance.parallelJobs === null ? tr("common.auto") : formattedDraftNumber(settings.performance.parallelJobs)}</strong><span>{tr("gui.settings.performance.parallel_tasks_body")}</span></div>
           <div class="mode-segments worker-segments" aria-label={tr("gui.settings.performance.parallel_tasks")}>
-            <button class:active={settings.performance.parallelJobs === null} aria-pressed={settings.performance.parallelJobs === null} onclick={() => settings.setPerformance("parallelJobs", null)}>{tr("common.auto", "Auto")}</button>
+            <button class:active={settings.performance.parallelJobs === null} aria-pressed={settings.performance.parallelJobs === null} onclick={() => settings.setPerformance("parallelJobs", null)}>{tr("common.auto")}</button>
             <button class:active={settings.performance.parallelJobs === 1} aria-pressed={settings.performance.parallelJobs === 1} onclick={() => settings.setPerformance("parallelJobs", 1)}>1</button>
             <button class:active={settings.performance.parallelJobs === 2} aria-pressed={settings.performance.parallelJobs === 2} onclick={() => settings.setPerformance("parallelJobs", 2)}>2</button>
             <button class:active={settings.performance.parallelJobs === 4} aria-pressed={settings.performance.parallelJobs === 4} onclick={() => settings.setPerformance("parallelJobs", 4)}>4</button>
@@ -1814,9 +1813,9 @@
             />
             {#if settings.performanceParallelJobsError}<small id="settings-performance-parallel-jobs-error" class="settings-field-error" role="status">{settings.performanceParallelJobsError}</small>{/if}
           </label>
-          <div><strong>{tr("gui.settings.performance.worker_threads")} · {settings.performance.threads === null ? tr("common.auto", "Auto") : formattedDraftNumber(settings.performance.threads)}</strong><span>{tr("gui.settings.performance.worker_threads_body")}</span></div>
-          <div class="mode-segments worker-segments" aria-label={tr("gui.settings.performance.worker_threads", "Worker threads")}>
-            <button class:active={settings.performance.threads === null} aria-pressed={settings.performance.threads === null} onclick={() => settings.setPerformance("threads", null)}>{tr("common.auto", "Auto")}</button>
+          <div><strong>{tr("gui.settings.performance.worker_threads")} · {settings.performance.threads === null ? tr("common.auto") : formattedDraftNumber(settings.performance.threads)}</strong><span>{tr("gui.settings.performance.worker_threads_body")}</span></div>
+          <div class="mode-segments worker-segments" aria-label={tr("gui.settings.performance.worker_threads")}>
+            <button class:active={settings.performance.threads === null} aria-pressed={settings.performance.threads === null} onclick={() => settings.setPerformance("threads", null)}>{tr("common.auto")}</button>
             <button class:active={settings.performance.threads === 4} aria-pressed={settings.performance.threads === 4} onclick={() => settings.setPerformance("threads", 4)}>4</button>
             <button class:active={settings.performance.threads === 8} aria-pressed={settings.performance.threads === 8} onclick={() => settings.setPerformance("threads", 8)}>8</button>
             <button class:active={settings.performance.threads === 16} aria-pressed={settings.performance.threads === 16} onclick={() => settings.setPerformance("threads", 16)}>16</button>
@@ -1837,9 +1836,9 @@
             />
             {#if settings.performanceThreadsError}<small id="settings-performance-threads-error" class="settings-field-error" role="status">{settings.performanceThreadsError}</small>{/if}
           </label>
-          <div><strong>{tr("gui.settings.performance.stream_buffer_memory")} · {settings.performance.memoryKiB === null ? tr("common.auto", "Auto") : streamBufferKiBLabel(settings.performance.memoryKiB)}</strong><span>{tr("gui.settings.performance.stream_buffer_body")}</span></div>
+          <div><strong>{tr("gui.settings.performance.stream_buffer_memory")} · {settings.performance.memoryKiB === null ? tr("common.auto") : streamBufferKiBLabel(settings.performance.memoryKiB)}</strong><span>{tr("gui.settings.performance.stream_buffer_body")}</span></div>
           <div class="mode-segments worker-segments" aria-label={tr("gui.settings.performance.stream_buffer_memory")}>
-            <button class:active={settings.performance.memoryKiB === null} aria-pressed={settings.performance.memoryKiB === null} onclick={() => settings.setPerformance("memoryKiB", null)}>{tr("common.auto", "Auto")}</button>
+            <button class:active={settings.performance.memoryKiB === null} aria-pressed={settings.performance.memoryKiB === null} onclick={() => settings.setPerformance("memoryKiB", null)}>{tr("common.auto")}</button>
             <button class:active={settings.performance.memoryKiB === 8} aria-pressed={settings.performance.memoryKiB === 8} onclick={() => settings.setPerformance("memoryKiB", 8)}>{streamBufferKiBLabel(8)}</button>
             <button class:active={settings.performance.memoryKiB === 16} aria-pressed={settings.performance.memoryKiB === 16} onclick={() => settings.setPerformance("memoryKiB", 16)}>{streamBufferKiBLabel(16)}</button>
             <button class:active={settings.performance.memoryKiB === 32} aria-pressed={settings.performance.memoryKiB === 32} onclick={() => settings.setPerformance("memoryKiB", 32)}>{streamBufferKiBLabel(32)}</button>
@@ -2017,14 +2016,14 @@
             <Icon name="archive" size={17} />
             <span>
               <strong>{tr("gui.settings.integration.native_volumes_title")}</strong>
-              <small>{tr("gui.settings.integration.native_volumes_body", "ZIP .z01/.zip and RAR partN.rar carry format-specific disk metadata. They are not interchangeable with .001 byte splits.")}</small>
+              <small>{tr("gui.settings.integration.native_volumes_body")}</small>
             </span>
           </div>
           <div class="generic">
             <Icon name="repeat" size={17} />
             <span>
               <strong>{tr("gui.settings.integration.generic_volumes_title")}</strong>
-              <small>{tr("gui.settings.integration.generic_volumes_body", "Squallz can split supported outputs into a continuous .001/.002 sequence. This does not create native ZIP, RAR, or Split WIM volumes.")}</small>
+              <small>{tr("gui.settings.integration.generic_volumes_body")}</small>
             </span>
           </div>
         </div>
@@ -2056,7 +2055,7 @@
 
       <IntegrationHealthPanel
         panelTitle={tr("gui.settings.integration.file_manager_action_files").replace("{fileManager}", fileManagerLabel())}
-        healthTitle={tr("gui.settings.integration.health_title", "Integration health")}
+        healthTitle={tr("gui.settings.integration.health_title")}
         platform={platformNameLabel()}
         scope={integrationScopeLabel()}
         summary={integrationSummaryLabel()}

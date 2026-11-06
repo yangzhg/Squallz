@@ -68,7 +68,7 @@
     if (value === "default_directory") {
       return defaultFolder
         ? tr("gui.create.output.destination.default_directory_detail").replace("{folder}", defaultFolder)
-        : tr("gui.create.output.destination.default_directory_missing", "No default create folder is set; Squallz will ask where to save.");
+        : tr("gui.create.output.destination.default_directory_missing");
     }
     return tr("gui.create.output.destination.ask_detail");
   }
@@ -86,9 +86,9 @@
       return tr("gui.create.output.completion.reveal_detail").replace("{fileManager}", fileManager);
     }
     if (value === "open_in_squallz") {
-      return tr("gui.create.output.completion.open_detail", "Open the finished standard archive in the Squallz browser.");
+      return tr("gui.create.output.completion.open_detail");
     }
-    return tr("gui.create.output.completion.none_detail", "Stay on the current screen when the task finishes.");
+    return tr("gui.create.output.completion.none_detail");
   }
 
   function postSuccessTitle(value: PostSuccessAction): string {
@@ -99,8 +99,8 @@
 
   function postSuccessDetail(value: PostSuccessAction): string {
     return value === "trash_source"
-      ? tr("gui.create.output.source.trash_detail", "After the archive is committed, verify that every source is unchanged, then move it to {trash}.").replace("{trash}", trashName)
-      : tr("gui.create.output.source.keep_detail", "Leave every source file and folder where it is.");
+      ? tr("gui.create.output.source.trash_detail").replace("{trash}", trashName)
+      : tr("gui.create.output.source.keep_detail");
   }
 
   function optionDisabled(value: CreateCompletionAction): boolean {
@@ -249,7 +249,7 @@
     {#if postSuccess === "trash_source"}
       <p class="create-output-warning" role="status">
         <Icon name="alert-triangle" size={15} />
-        <span>{tr("gui.create.output.source.trash_warning", "Check the archive before emptying {trash}. If Squallz cannot move every source, it leaves the rest in place and reports the result.").replace("{trash}", trashName)}</span>
+        <span>{tr("gui.create.output.source.trash_warning").replace("{trash}", trashName)}</span>
       </p>
     {/if}
   </fieldset>
@@ -260,7 +260,7 @@
     <header>
       <div>
         <h2><Icon name="archive" size={16} />{tr("gui.create.output.title")}</h2>
-        <p>{tr("gui.create.output.intro", "Choose where the archive goes and what Squallz does after a successful task.")}</p>
+        <p>{tr("gui.create.output.intro")}</p>
       </div>
     </header>
     {@render destinationFields()}

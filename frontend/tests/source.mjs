@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import ts from "typescript";
+import vm from "node:vm";
 
 function parseSvelteScript(component, fileName) {
   const script = component.match(/<script lang="ts">([\s\S]*?)<\/script>/u)?.[1];
@@ -64,4 +65,10 @@ export function compileTestScript(code, compilerOptions = {
   module: ts.ModuleKind.CommonJS,
 }) {
   return ts.transpileModule(code, { compilerOptions }).outputText;
+}
+
+export function evaluateFunctions(source, names, context) {
+  const declarations = selectFunctions(source, names);
+  const code = declarations.map((node) => node.getText(source)).join("\n");
+  return vm.runInNewContext(`${compileTestScript(code)}\n({${names.join(",")}})`, context);
 }

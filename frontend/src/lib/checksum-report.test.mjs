@@ -1,10 +1,9 @@
 import { jobResult } from "../../tests/job-results.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
-import vm from "node:vm";
 
 import { createTestServer } from "../../tests/runtime.mjs";
-import { compileTestScript, readSvelteScript, selectFunctions } from "../../tests/source.mjs";
+import { evaluateFunctions, readSvelteScript } from "../../tests/source.mjs";
 import { extractionFixture } from "../../tests/extraction.mjs";
 
 const server = await createTestServer();
@@ -20,16 +19,15 @@ const extraction = await extractionFixture(server);
 test.afterEach(() => extraction.dispose());
 const { loadLocale, tFallback } = await server.ssrLoadModule("/src/lib/i18n.svelte.ts");
 await loadLocale("en-US");
+const source = readSvelteScript(new URL("../App.svelte", import.meta.url), "App.ts");
 
 function reportHarness({ navigation = false } = {}) {
-  const source = readSvelteScript(new URL("../App.svelte", import.meta.url), "App.ts");
   const names = ["viewTaskResults", "localToolsSurface",
     "preventCreateSubmissionNavigation", "preventTaskWorkspaceNavigation",
     ...(navigation ? ["setScreen", "preventConvertSubmissionNavigation", "dismissTaskDialog",
       "openTaskCenter", "closeTaskCenter", "openTaskCenterDetails", "returnToTaskCenter",
       "cancelTaskReview",
       "focusChecksumResultPanel", "focusPendingChecksumResult", "focusDuplicateReportPanel"] : [])];
-  const functions = selectFunctions(source, names).map((node) => node.getText(source)).join("\n");
   const calls = [];
   const document = { documentElement: {}, body: {}, activeElement: null, querySelectorAll: () => [] };
   document.activeElement = document.body;
@@ -102,9 +100,8 @@ function reportHarness({ navigation = false } = {}) {
   }, { checksumPath: "/new/files", manifestPath: "/new/SHA256SUMS", checksumExcludes: "" });
   test.after(() => { tools.dispose(); context.recoverySession.dispose(); context.create.dispose(); });
   context.tools = tools;
-  const outputText = compileTestScript(functions);
   context.calls = calls;
-  return vm.runInNewContext(`${outputText}\n({${names.join(",")}, context:globalThis, calls, tools})`, context);
+  return { ...evaluateFunctions(source, names, context), context, calls, tools };
 }
 
 function checksumTask(id, kind = "checksum") {

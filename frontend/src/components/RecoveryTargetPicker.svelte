@@ -159,7 +159,7 @@
       <p>
         {usesDefaultPar2
           ? tr("gui.recovery.default_par2_detail")
-          : tr("gui.recovery.selected_par2_detail", "Verify this PAR2 set to confirm it matches the archive and measure repair capacity.")}
+          : tr("gui.recovery.selected_par2_detail")}
       </p>
       <div class="recovery-target-actions">
         <button

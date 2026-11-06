@@ -128,7 +128,7 @@
       onclick={() => toggleManagement()}
     >
       <Icon name="settings" size={14} />
-      {manageOpen ? tr("common.done", "Done") : tr("gui.presets.manage")}
+      {manageOpen ? tr("common.done") : tr("gui.presets.manage")}
     </button>
   </div>
 

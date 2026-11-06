@@ -202,7 +202,7 @@
         <div>
           <span class="block-label">{tr("gui.recovery.current_workflow")}</span>
           <strong>{tr("gui.recovery.par2_sidecar")}</strong>
-          <p>{tr("gui.recovery.par2_protection_body", "Protect writes new PAR2 recovery data beside the archive. Choose how much additional recovery data to create; Verify reports measured repair capacity.")}</p>
+          <p>{tr("gui.recovery.par2_protection_body")}</p>
           <div class="recovery-strength-control">
             <div class="recovery-strength-heading">
               <span>{tr("gui.recovery.recovery_strength")}</span>

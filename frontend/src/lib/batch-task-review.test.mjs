@@ -1,3 +1,4 @@
+import { deferred } from "../../tests/async.mjs";
 import { jobResult } from "../../tests/job-results.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -88,12 +89,6 @@ function harness() {
   fixture.install(context);
   const outputText = compileTestScript(declarations.map((node) => node.getText(source)).join("\n"));
   return {...vm.runInNewContext(`${outputText}\n({${names.join(",")}})`,context),context,calls};
-}
-
-function deferred() {
-  let resolve, reject;
-  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
-  return { promise, resolve, reject };
 }
 
 const settle = () => new Promise((resolve) => setImmediate(resolve));

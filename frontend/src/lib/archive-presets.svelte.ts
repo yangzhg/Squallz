@@ -198,7 +198,7 @@ export class ArchivePresetSession {
     if (selected) next.presets[index] = preset;
     else next.presets.push(preset);
     if (await this.#persist(kind, next, operation === "update" ? "gui.presets.operation_updated" : "gui.presets.operation_saved",
-      operation === "update" ? "Preset updated" : "Preset saved", name)) {
+      name)) {
       if (operation === "save_as") this.#selections[kind].id = id;
       this.#selections[kind].name = name;
     }
@@ -213,7 +213,7 @@ export class ArchivePresetSession {
       const key = bindingKey(kind, target);
       if (next.bindings[key] === selected.id) next.bindings[key] = defaultPresetIds[kind];
     }
-    if (await this.#persist(kind, next, "gui.presets.operation_deleted", "Preset deleted", selected.label)) {
+    if (await this.#persist(kind, next, "gui.presets.operation_deleted", selected.label)) {
       if (this.port[kind].disabledReason()) this.clearSelection(kind);
       else this.apply(kind, defaultPresetIds[kind], false);
     }
@@ -227,7 +227,7 @@ export class ArchivePresetSession {
       this.port.notice(this.finderDisabledReason()); return;
     }
     next.bindings[bindingKey(kind, target)] = enabled ? selected.id : null;
-    await this.#persist(kind, next, "gui.presets.operation_binding", "Preset default changed", archivePresetDisplayName(selected));
+    await this.#persist(kind, next, "gui.presets.operation_binding", archivePresetDisplayName(selected));
   }
 
   #snapshot(): ArchivePresetDocument | null { return this.#document ? $state.snapshot(this.#document) : null; }
@@ -243,7 +243,7 @@ export class ArchivePresetSession {
     }
     return `${Array.from(requested).slice(0, 32).join("")} ${Date.now().toString(36)}`;
   }
-  async #persist(kind: PresetKind, next: ArchivePresetDocument, key: string, fallback: string, detail: string): Promise<boolean> {
+  async #persist(kind: PresetKind, next: ArchivePresetDocument, key: string, detail: string): Promise<boolean> {
     if (this.#disposed || this.#selections[kind].mutation === "saving") return false;
     this.#selections[kind].mutation = "saving";
     try {
@@ -252,8 +252,8 @@ export class ArchivePresetSession {
       this.#document = saved;
       this.#loadState = "ready";
       this.#selections[kind].mutation = "idle";
-      this.port.notice(tr(key, fallback));
-      recordOperation({ status: "done", title: tr(key, fallback), detail });
+      this.port.notice(tr(key));
+      recordOperation({ status: "done", title: tr(key), detail });
       return true;
     } catch (error) {
       if (this.#disposed) return false;

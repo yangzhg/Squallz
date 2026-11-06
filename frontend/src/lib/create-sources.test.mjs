@@ -1,12 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createTestServer } from "../../tests/runtime.mjs";
+import { withTestServer } from "../../tests/runtime.mjs";
 
 test("create source roots retain path identity and platform semantics", async (context) => {
-  const server = await createTestServer();
-
-  try {
+  await withTestServer(async (server) => {
     const {
       createSourcePaths,
       includesCreateSourcePath,
@@ -123,7 +121,5 @@ test("create source roots retain path identity and platform semantics", async (c
         [{ path: "C:\\Data\\one.txt", kind: "file" }],
       );
     });
-  } finally {
-    await server.close();
-  }
+  });
 });

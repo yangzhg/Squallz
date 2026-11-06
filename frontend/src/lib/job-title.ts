@@ -19,22 +19,22 @@ export function jobTitleFor(spec: JobSpec): string {
     case "test":
       return translate("gui.task.job.test", { name: basename(spec.path) });
     case "convert":
-      return translate("gui.task.job.convert", "Convert {from} -> {to}", {
+      return translate("gui.task.job.convert", {
         from: basename(spec.src),
         to: basename(spec.dest),
       });
     case "export_sqz":
-      return translate("gui.task.job.export_sqz", "Export SQZ {from} -> {to}", {
+      return translate("gui.task.job.export_sqz", {
         from: basename(spec.src),
         to: basename(spec.dest),
       });
     case "repair_sqz":
-      return translate("gui.task.job.repair_sqz", "Repair SQZ {from} -> {to}", {
+      return translate("gui.task.job.repair_sqz", {
         from: basename(spec.src),
         to: basename(spec.dest),
       });
     case "repair_zip":
-      return translate("gui.task.job.repair_zip", "Rebuild ZIP index {from} -> {to}", {
+      return translate("gui.task.job.repair_zip", {
         from: basename(spec.src),
         to: basename(spec.dest),
       });

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createTestServer } from "../../tests/runtime.mjs";
+import { withTestServer } from "../../tests/runtime.mjs";
 
 const passwordError = (scope, wrong = false) => ({
   key: wrong ? "error.wrong_password" : "error.password_required",
@@ -9,21 +9,17 @@ const passwordError = (scope, wrong = false) => ({
 const nextTurn = () => new Promise((resolve) => setImmediate(resolve));
 
 async function withFlow(run) {
-  const server = await createTestServer();
-  try {
+  await withTestServer(async (server) => {
     const { createPreviewPasswordFlow } = await server.ssrLoadModule("/src/lib/preview-password.svelte.ts");
     const cancellations = [];
     await run(createPreviewPasswordFlow(async (id) => { cancellations.push(id); }), cancellations);
-  } finally {
-    await server.close();
-  }
+  });
 }
 
 const context = { outerName: "outer.zip", innerName: "inner.7z", isCurrent: () => true };
 
 test("both password layouts retain labelled input, error context, cancellation and session guidance", async () => {
-  const server = await createTestServer();
-  try {
+  await withTestServer(async (server) => {
     const { render } = await server.ssrLoadModule("svelte/server");
     const { default: Workspace } = await server.ssrLoadModule("/src/components/PasswordWorkspace.svelte");
     const { loadLocale, tFallback, t } = await server.ssrLoadModule("/src/lib/i18n.svelte.ts");
@@ -61,9 +57,7 @@ test("both password layouts retain labelled input, error context, cancellation a
         assert.doesNotMatch(empty, /gui\.[a-z_.]+/);
       }
     }
-  } finally {
-    await server.close();
-  }
+  });
 });
 
 test("preview prompts for distinct passwords, retries only the rejected layer, and forgets inputs", async () => {

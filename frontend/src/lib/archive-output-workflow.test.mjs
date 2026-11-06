@@ -1,3 +1,4 @@
+import { deferred } from "../../tests/async.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createTestServer, englishTranslate } from "../../tests/runtime.mjs";
@@ -9,13 +10,6 @@ const { destinationInspectionCancelled } = await server.ssrLoadModule("/src/lib/
 const { ipc } = await server.ssrLoadModule("/src/lib/ipc.ts");
 const original = { ...ipc };
 test.afterEach(() => Object.assign(ipc, original));
-
-function deferred() {
-  let resolve;
-  let reject;
-  const promise = new Promise((accept, fail) => { resolve = accept; reject = fail; });
-  return { promise, resolve, reject };
-}
 
 function workflowFor(kind, extra = {}) {
   let request = 0;

@@ -106,9 +106,7 @@ export class RecoverySession {
       notice = tr("gui.recovery.multiple_sidecar_sets_choose")
         .replace("{name}", pathBaseName(sidecar)).replace("{count}", sidecarSetCount.toLocaleString());
     } else if (sidecarCount > 1) {
-      notice = tr(archivePath ? "gui.recovery.sidecar_set_loaded" : "gui.recovery.sidecar_set_loaded_choose_archive",
-        archivePath ? "{name} selected from {count} PAR2 files. Other recovery volumes will be found beside it."
-          : "{name} selected from {count} PAR2 files. Choose the matching archive.")
+      notice = tr(archivePath ? "gui.recovery.sidecar_set_loaded" : "gui.recovery.sidecar_set_loaded_choose_archive")
         .replace("{name}", pathBaseName(sidecar)).replace("{count}", sidecarCount.toLocaleString());
     } else if (archivePath) {
       notice = tr("gui.recovery.set_loaded").replace("{name}", pathBaseName(archivePath));
@@ -370,7 +368,7 @@ export class RecoverySession {
       const { open } = await this.ports.dialogs();
       if (!isCurrent()) return;
       const selected = await this.ports.openDialog(`recovery.choose-${kind}`, open, {
-        title: archive ? tr("gui.recovery.choose_archive") : tr("gui.recovery.choose_par2", "Choose PAR2 file"),
+        title: archive ? tr("gui.recovery.choose_archive") : tr("gui.recovery.choose_par2"),
         multiple: false,
         directory: false,
         ...(archive ? {} : { filters: [{ name: tr("gui.recovery.par2_files"), extensions: ["par2"] }] }),
@@ -404,7 +402,7 @@ export class RecoverySession {
   useCurrentArchive() {
     const archive = this.ports.read().archive;
     if (!archive) {
-      this.ports.notice(tr("gui.recovery.no_current_archive", "No archive is currently open."));
+      this.ports.notice(tr("gui.recovery.no_current_archive"));
       return;
     }
     this.leave();
@@ -418,7 +416,7 @@ export class RecoverySession {
   useDefaultPar2() {
     const source = this.sourcePath();
     if (!source) {
-      this.ports.notice(tr("gui.recovery.choose_archive_before_default_par2", "Choose an archive before using its default PAR2 file."));
+      this.ports.notice(tr("gui.recovery.choose_archive_before_default_par2"));
       return;
     }
     this.leave();
@@ -961,7 +959,7 @@ export class RecoverySession {
   private redundancyLabel(): string {
     const redundancy = this.redundancyValue();
     if (redundancy === null) return this.redundancyError();
-    return tr("gui.recovery.redundancy_percent", "{percent}% requested redundancy")
+    return tr("gui.recovery.redundancy_percent")
       .replace("{percent}", redundancy.toLocaleString());
   }
 
@@ -988,14 +986,13 @@ export class RecoverySession {
         }
       : null;
     const formatWorkflowTitle = sourceIsSqz
-      ? tr("gui.recovery.sqz_capable_not_checked", "SQZ recovery capable · not checked")
+      ? tr("gui.recovery.sqz_capable_not_checked")
       : source
         ? tr("gui.recovery.par2_sidecar_workflow")
         : tr("gui.recovery.no_archive_selected");
     const formatWorkflowBody = sourceIsSqz
       ? tr(
           "gui.recovery.sqz_capability_body",
-          "SQZ supports embedded recovery, but this file has not been checked until a repair or test task reports a result.",
         )
       : source
         ? tr(
@@ -1003,7 +1000,6 @@ export class RecoverySession {
           )
         : tr(
             "gui.recovery.choose_archive_for_capabilities",
-            "Choose an archive to see the recovery tools available for its format.",
           );
 
     return {

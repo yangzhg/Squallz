@@ -227,7 +227,7 @@ function taskSpeedLabel(task: TaskDialogModel): string {
 
 export function taskProgressSummary(task: TaskDialogModel): string {
   if (task.state === "submitting") {
-    return tr("gui.task.progress_submitting", "Opening the progress window before archive execution starts");
+    return tr("gui.task.progress_submitting");
   }
   if (task.scanEntries != null) {
     return withWaitingState(task, t("gui.task.progress_scan", { count: task.scanEntries }));
@@ -465,7 +465,7 @@ export function taskControlCalloutTitle(task: TaskDialogModel): string {
 
 export function taskControlCalloutDetail(task: TaskDialogModel): string {
   if (task.controlIntent === "cancel") {
-    return tr("gui.task.control_cancel_detail", "Stopping at the next safe checkpoint. New archive actions stay blocked until the engine confirms cancellation.");
+    return tr("gui.task.control_cancel_detail");
   }
   if (task.controlIntent === "pause") {
     return tr("gui.task.control_pause_detail");
@@ -732,7 +732,7 @@ export function taskResultDetailRows(task: TaskDialogModel): TaskResultDetailRow
     if (repairPossible !== null) {
       rows.push({
         label: tr("gui.task.recovery.repair_possible"),
-        value: repairPossible ? tr("common.yes", "Yes") : tr("common.no", "No"),
+        value: repairPossible ? tr("common.yes") : tr("common.no"),
       });
     }
     appendRecoveryMetricRow(
@@ -791,7 +791,7 @@ export function taskResultDetailRows(task: TaskDialogModel): TaskResultDetailRow
           value: result.preservedOutputs.length.toLocaleString(),
         },
         {
-          label: tr("gui.task.result_preserved_output_set", "Preserved file list"),
+          label: tr("gui.task.result_preserved_output_set"),
           value: result.preservedOutputs.join("\n"),
           scrollable: true,
         },
@@ -879,7 +879,7 @@ export function taskResultDetailRows(task: TaskDialogModel): TaskResultDetailRow
   if (report.kind === "checksum") {
     rows.push(
       {
-        label: tr("gui.checksum.algorithm", "Algorithm"),
+        label: tr("gui.checksum.algorithm"),
         value: report.algorithm.toUpperCase(),
       },
       {
@@ -935,7 +935,7 @@ export function taskResultDetailRows(task: TaskDialogModel): TaskResultDetailRow
   if (report.kind === "duplicate_scan") {
     rows.push(
       {
-        label: tr("gui.duplicates.groups", "Duplicate groups"),
+        label: tr("gui.duplicates.groups"),
         value: report.duplicate_groups.toLocaleString(),
       },
       {
@@ -1096,7 +1096,6 @@ function taskFailureNextStepDetail(task: TaskDialogModel): string {
   if (key === "error.sfx_recovery") {
     return tr(
       "gui.task.failure.next_sfx_recovery",
-      "Leave the target and every listed recovery path untouched. Copy them to a safe folder, then verify {target}. If the target is unusable, restore the listed previous output. Review the journal and every listed path before trying again.",
       {
         target: task.error?.params.target
           || (task.spec.kind === "compress" ? task.spec.dest : "the target"),
@@ -1104,15 +1103,14 @@ function taskFailureNextStepDetail(task: TaskDialogModel): string {
     );
   }
   if (key === "error.password_required" || key === "error.wrong_password") {
-    return tr("gui.task.failure.next_password", "Return to the task settings and enter the password again.");
+    return tr("gui.task.failure.next_password");
   }
   if (key === "error.disk_full") {
-    return tr("gui.task.failure.next_disk_full", "Free space on the destination and temporary volumes, then review the destination before restarting.");
+    return tr("gui.task.failure.next_disk_full");
   }
   if (key === "error.destination_changed") {
     return tr(
       "gui.task.failure.next_destination_changed",
-      "Review the current destination and confirm replacement again, or choose a different output. Squallz did not replace it.",
     );
   }
   if (key === "error.input_changed") {
@@ -1148,11 +1146,10 @@ function taskFailureNextStepDetail(task: TaskDialogModel): string {
   if (key === "error.unsupported_split_wim_create") {
     return tr(
       "error.unsupported_split_wim_create",
-      "Creating native Split WIM (.swm) is not supported. Create a standalone .wim instead.",
     );
   }
   if (key === "error.corrupt_archive") {
-    return tr("gui.task.failure.next_corrupt", "Keep every split volume together, then test the archive or open Recovery.");
+    return tr("gui.task.failure.next_corrupt");
   }
   if (key === "error.path_traversal" || key === "error.symlink_breakout" || key === "error.unsafe_filename") {
     return tr("gui.task.failure.next_unsafe");
@@ -1167,7 +1164,7 @@ function taskFailureNextStepDetail(task: TaskDialogModel): string {
     return tr("gui.task.failure.next_unsupported");
   }
   if (key === "error.io") {
-    return tr("gui.task.failure.next_io", "Check that the source and destination still exist and that Squallz can read and write them.");
+    return tr("gui.task.failure.next_io");
   }
   return tr("gui.task.failure.next_generic");
 }

@@ -172,10 +172,7 @@
     const key = last
       ? "gui.task_center.last_item"
       : "gui.task_center.current_item";
-    const fallback = last
-      ? "Last: {name}"
-      : "Current: {name}";
-    return tr(key, fallback)
+    return tr(key)
       .replace("{name}", pathBaseName(task.current) || task.current);
   }
 
@@ -323,11 +320,11 @@
   {:else}
     <p class="task-center-scope-note">
       <Icon name="info" size={14} />
-      {tr("gui.task_center.scope", "App and file-manager tasks share one queue. Drag waiting tasks to reorder; arrow buttons remain available.")}
+      {tr("gui.task_center.scope")}
     </p>
   {/if}
 
-  <div class="task-center-list" aria-label={tr("gui.task_center.list", "Tasks in this window")}>
+  <div class="task-center-list" aria-label={tr("gui.task_center.list")}>
     {#if submittingTask}
       {@const submittingTitle = taskTitleLabel(submittingTask)}
       {@const submittingKind = taskKindLabel(submittingTask)}
@@ -341,7 +338,7 @@
         </header>
         <div class="task-center-pending">
           <Icon name="hourglass" size={15} />
-          <span>{tr("gui.task_center.submitting", "Adding to the queue...")}</span>
+          <span>{tr("gui.task_center.submitting")}</span>
         </div>
       </article>
     {/if}

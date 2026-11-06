@@ -16,63 +16,32 @@
 </script>
 
 <script lang="ts">
-  import Icon from "./Icon.svelte";
-  import DeferredViewError from "./DeferredViewError.svelte";
+  import DeferredView from "./DeferredView.svelte";
 
   let {
     surface,
   }: {
     surface: PasswordWorkspaceSurface;
   } = $props();
-
-  let workspace = $state(workspaceLoader.load());
-  function retry(): void {
-    workspace = workspaceLoader.retry();
-  }
 </script>
 
-{#await workspace}
-  {#if surface.variant === "modern"}
-    <div class="password-workspace">
-      <section class="deferred-workspace-state" role="status" aria-live="polite" aria-busy="true">
-        <Icon name="hourglass" size={20} />
-        <div>
-          <strong>{surface.tr("gui.password.loading")}</strong>
-          <span>{surface.tr("gui.password.loading_body")}</span>
-        </div>
-      </section>
+<DeferredView
+  loader={workspaceLoader} classic={surface.variant === "classic"}
+  loadingTag={surface.variant === "classic" ? "div" : "section"}
+  loadingTitle={surface.tr("gui.password.loading")}
+  loadingBody={surface.tr("gui.password.loading_body")}
+  failureTitle={surface.tr("gui.password.load_failed")}
+  failureBody={surface.tr("gui.password.load_failed_body")}
+  retryLabel={surface.tr("gui.task_surface.retry")}
+>
+  {#snippet frame(content, failed)}
+    <div class={surface.variant === "classic" ? "classic-dialog-body password-workspace" : "password-workspace"}>
+      {#if surface.variant === "classic" && !failed}
+        <section class="password-request">{@render content()}</section>
+      {:else}
+        {@render content()}
+      {/if}
     </div>
-  {:else}
-    <div class="classic-dialog-body password-workspace">
-      <section class="password-request">
-        <div class="deferred-workspace-state" role="status" aria-live="polite" aria-busy="true">
-          <Icon name="hourglass" size={20} />
-          <div>
-            <strong>{surface.tr("gui.password.loading")}</strong>
-            <span>{surface.tr("gui.password.loading_body")}</span>
-          </div>
-        </div>
-      </section>
-    </div>
-  {/if}
-{:then Workspace}
-  <Workspace {surface} />
-{:catch error}
-  {#if surface.variant === "modern"}
-    <div class="password-workspace">
-      <DeferredViewError
-        {error} title={surface.tr("gui.password.load_failed")}
-        body={surface.tr("gui.password.load_failed_body")}
-        retryLabel={surface.tr("gui.task_surface.retry")} onRetry={retry}
-      />
-    </div>
-  {:else}
-    <div class="classic-dialog-body password-workspace">
-      <DeferredViewError
-        {error} title={surface.tr("gui.password.load_failed")}
-        body={surface.tr("gui.password.load_failed_body")}
-        retryLabel={surface.tr("gui.task_surface.retry")} onRetry={retry} classic
-      />
-    </div>
-  {/if}
-{/await}
+  {/snippet}
+  {#snippet children(Workspace)}<Workspace {surface} />{/snippet}
+</DeferredView>

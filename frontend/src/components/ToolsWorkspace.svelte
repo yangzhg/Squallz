@@ -159,7 +159,7 @@
             : surface.tr("gui.checksum.report_manifest")}</dt>
           <dd>{#each report.context.sources as source}<span>{source}</span>{/each}</dd>
         </div>
-        <div><dt>{surface.tr("gui.checksum.algorithm", "Algorithm")}</dt><dd>{report.context.algorithm}</dd></div>
+        <div><dt>{surface.tr("gui.checksum.algorithm")}</dt><dd>{report.context.algorithm}</dd></div>
         {#each report.summary as item}
           <div><dt>{item.label}</dt><dd>{item.value}</dd></div>
         {/each}

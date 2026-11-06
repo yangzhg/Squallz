@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test, { after, before } from "node:test";
-import vm from "node:vm";
 import { englishTranslate, createTestServer } from "../../tests/runtime.mjs";
-import { compileTestScript, readSvelteScriptAsync, selectFunctions } from "../../tests/source.mjs";
+import { evaluateFunctions, readSvelteScript } from "../../tests/source.mjs";
+
+const source = readSvelteScript(new URL("../App.svelte", import.meta.url), "App.ts");
 
 let server;
 let actions;
@@ -93,9 +94,6 @@ test("checkbox focus permits archive select-all without taking text editing away
 });
 
 async function appHandlers(overrides = {}, names = ["onEntryKeydown", "runEntryContextAction"]) {
-  const source = await readSvelteScriptAsync(new URL("../App.svelte", import.meta.url), "App.ts");
-  const functions = selectFunctions(source, names);
-  const outputText = compileTestScript(functions.map((node) => node.getText(source)).join("\n"));
   const context = {
     archiveSelectionBusyReason: () => "",
     tick: () => Promise.resolve(),
@@ -108,7 +106,7 @@ async function appHandlers(overrides = {}, names = ["onEntryKeydown", "runEntryC
     }), async () => assert.fail("admission tests must not queue an edit"), context.blockSelectionScopedAction,
     { tr: context.tr, tError: (error) => error.key, emit() {} });
   }
-  return { ...vm.runInNewContext(`${outputText}\n({ ${names.join(", ")} })`, context), context };
+  return { ...evaluateFunctions(source, names, context), context };
 }
 
 test("archive editing checks the source and registered capabilities while reading and recovery stay available", async () => {

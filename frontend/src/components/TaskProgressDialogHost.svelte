@@ -12,8 +12,7 @@
 
 <script lang="ts">
   import { tick } from "svelte";
-  import Icon from "./Icon.svelte";
-  import DeferredViewError from "./DeferredViewError.svelte";
+  import DeferredView, { type DeferredViewMessages } from "./DeferredView.svelte";
   import { cssVariables } from "../lib/css-variables";
   import { trapModalFocus } from "../lib/modal-focus";
 
@@ -28,16 +27,10 @@
     onUnavailableBack,
   }: {
     surface: TaskProgressDialogSurfaceProps;
-    loadingTitle: string;
-    loadingBody: string;
-    failureTitle: string;
-    failureBody: string;
-    retryLabel: string;
     backLabel: string;
     onUnavailableBack?: () => void;
-  } = $props();
+  } & DeferredViewMessages = $props();
 
-  let component = $state(taskDialogLoader.load());
   let fallbackCard = $state<HTMLElement | null>(null);
   let presentation = $derived(surface.presentation ?? "dialog");
   let loadingTitleId = $derived(`task-surface-${presentation}-loading-title`);
@@ -47,10 +40,6 @@
     if (fallbackCard === null) return;
     void tick().then(() => fallbackCard?.focus());
   });
-
-  function retry(): void {
-    component = taskDialogLoader.retry();
-  }
 
   function onFallbackKeydown(event: KeyboardEvent): void {
     if (event.key === "Escape" && !event.defaultPrevented) {
@@ -63,65 +52,35 @@
   }
 </script>
 
-{#await component}
-  <section
-    id={surface.rootId}
-    class={`${surface.rootClass} task-surface-shell`}
-    use:cssVariables={surface.rootVariables ?? {}}
-    role={presentation === "dialog" ? "presentation" : undefined}
-    data-task-presentation={presentation}
-  >
-    <div
-      bind:this={fallbackCard}
-      class="task-modal-card task-surface-load-card"
-      role={presentation === "dialog" ? "dialog" : "region"}
-      aria-modal={presentation === "dialog" ? "true" : undefined}
-      aria-labelledby={loadingTitleId}
-      tabindex="-1"
-      onkeydown={onFallbackKeydown}
+{#snippet back()}
+  <button type="button" aria-keyshortcuts="Escape" onclick={onUnavailableBack}>{backLabel}</button>
+{/snippet}
+
+<DeferredView
+  loader={taskDialogLoader} {loadingTitle} {loadingBody} {failureTitle} {failureBody} {retryLabel}
+  {loadingTitleId} {failureTitleId} class="task-surface-deferred"
+  recovery={{ taskId: surface.task.id }} actions={onUnavailableBack ? back : undefined}
+>
+  {#snippet frame(content, failed)}
+    <section
+      id={surface.rootId}
+      class={`${surface.rootClass} task-surface-shell`}
+      use:cssVariables={surface.rootVariables ?? {}}
+      role={presentation === "dialog" ? "presentation" : undefined}
+      data-task-presentation={presentation}
     >
-      <section class="deferred-workspace-state task-surface-deferred" role="status" aria-live="polite" aria-busy="true">
-        <Icon name="hourglass" size={20} />
-        <div>
-          <strong id={loadingTitleId}>{loadingTitle}</strong>
-          <span>{loadingBody}</span>
-        </div>
-        {#if onUnavailableBack}
-          <div class="deferred-workspace-actions">
-            <button type="button" aria-keyshortcuts="Escape" onclick={onUnavailableBack}>{backLabel}</button>
-          </div>
-        {/if}
-      </section>
-    </div>
-  </section>
-{:then TaskProgressDialog}
-  <TaskProgressDialog {...surface} />
-{:catch error}
-  <section
-    id={surface.rootId}
-    class={`${surface.rootClass} task-surface-shell`}
-    use:cssVariables={surface.rootVariables ?? {}}
-    role={presentation === "dialog" ? "presentation" : undefined}
-    data-task-presentation={presentation}
-  >
-    <div
-      bind:this={fallbackCard}
-      class="task-modal-card task-surface-load-card"
-      role={presentation === "dialog" ? "dialog" : "region"}
-      aria-modal={presentation === "dialog" ? "true" : undefined}
-      aria-labelledby={failureTitleId}
-      tabindex="-1"
-      onkeydown={onFallbackKeydown}
-    >
-      <DeferredViewError
-        {error} title={failureTitle} body={failureBody} {retryLabel} onRetry={retry}
-        titleId={failureTitleId} class="task-surface-deferred"
-        recovery={{ taskId: surface.task.id }}
+      <div
+        bind:this={fallbackCard}
+        class="task-modal-card task-surface-load-card"
+        role={presentation === "dialog" ? "dialog" : "region"}
+        aria-modal={presentation === "dialog" ? "true" : undefined}
+        aria-labelledby={failed ? failureTitleId : loadingTitleId}
+        tabindex="-1"
+        onkeydown={onFallbackKeydown}
       >
-        {#if onUnavailableBack}
-          <button type="button" aria-keyshortcuts="Escape" onclick={onUnavailableBack}>{backLabel}</button>
-        {/if}
-      </DeferredViewError>
-    </div>
-  </section>
-{/await}
+        {@render content()}
+      </div>
+    </section>
+  {/snippet}
+  {#snippet children(TaskProgressDialog)}<TaskProgressDialog {...surface} />{/snippet}
+</DeferredView>

@@ -31,42 +31,30 @@ export type PaletteId = "aqua" | "sage" | "nordic" | "copper" | "aubergine" | "m
 export type ChecksumAlgorithmId = ChecksumAlgorithm;
 export type Palette = {
   id: PaletteId;
-  name: string;
-  mood: string;
   accent: string;
   support: string;
   base: string;
   darkAccent?: string;
   darkSupport?: string;
   darkBase?: string;
-  note: string;
 };
 
 type CreateProfile = {
-  label: string;
   level: number;
-  detail: string;
 };
 
 type CreateFormat = {
   label: string;
   extension: string;
-  filterName: string;
   extensions: string[];
-  method: string;
-  password: string;
   can_encrypt_data: boolean;
   can_encrypt_names: boolean;
-  split: string;
-  recovery: string;
-  note: string;
 };
 
 export type ScreenAction = {
   screen: Screen;
-  label: string;
+  labelKey: string;
   icon: string;
-  detail: string;
 };
 
 export const screenIds: Screen[] = [
@@ -108,77 +96,47 @@ export const createProfileIds: CreateProfileId[] = ["fast", "balanced", "maximum
 export const createFormatIds: CreateFormatId[] = ["zip", "7z", "sqz", "tar.zst", "wim"];
 
 export const createProfiles: Record<CreateProfileId, CreateProfile> = {
-  fast: { label: "Fast", level: 2, detail: "Quick sharing, lower CPU pressure" },
-  balanced: { label: "Balanced", level: 6, detail: "Good ratio without making the Mac feel busy" },
-  maximum: { label: "Maximum", level: 9, detail: "Best ratio for long-term storage" },
-  custom: { label: "Custom", level: 6, detail: "User-defined level saved for future jobs" },
+  fast: { level: 2 },
+  balanced: { level: 6 },
+  maximum: { level: 9 },
+  custom: { level: 6 },
 };
 
 export const createFormats: Record<CreateFormatId, CreateFormat> = {
   zip: {
     label: "ZIP",
     extension: "zip",
-    filterName: "ZIP archive",
     extensions: ["zip"],
-    method: "Deflate",
-    password: "Data encryption only; file names remain visible",
     can_encrypt_data: true,
     can_encrypt_names: false,
-    split: "Generic .zip.001/.002 or native .z01 … .zip volumes",
-    recovery: "Use PAR2 after create for open-format recovery",
-    note: "Best for sharing with Windows and built-in tools",
   },
   "7z": {
     label: "7Z",
     extension: "7z",
-    filterName: "7Z archive",
     extensions: ["7z"],
-    method: "LZMA2",
-    password: "AES-256 can encrypt file names",
     can_encrypt_data: true,
     can_encrypt_names: true,
-    split: "Squallz .7z.001/.002 byte-split set",
-    recovery: "Use PAR2 sidecar for standard 7Z recovery",
-    note: "Best ratio and privacy for long-term archives",
   },
   sqz: {
     label: "SQZ",
     extension: "sqz",
-    filterName: "SQZ archive",
     extensions: ["sqz"],
-    method: "Squallz container",
-    password: "SQZ does not encrypt the container itself; use an encrypted inner archive when needed",
     can_encrypt_data: false,
     can_encrypt_names: false,
-    split: "SQZV .sqz.001/.002 volumes with recovery sidecars",
-    recovery: "Embedded recovery is available through SQZ workflows",
-    note: "Best when self-repair and export are more important than ubiquity",
   },
   "tar.zst": {
     label: "TAR.ZST",
     extension: "tar.zst",
-    filterName: "TAR.ZST archive",
     extensions: ["tar.zst", "tzst"],
-    method: "TAR + Zstandard",
-    password: "No built-in encryption",
     can_encrypt_data: false,
     can_encrypt_names: false,
-    split: "Squallz .tar.zst.001/.002 byte-split set",
-    recovery: "Use PAR2 sidecar after create",
-    note: "Fast developer archives with strong compression speed",
   },
   wim: {
     label: "WIM",
     extension: "wim",
-    filterName: "WIM image",
     extensions: ["wim"],
-    method: "External wimlib-imagex capture",
-    password: "No Squallz password layer for WIM",
     can_encrypt_data: false,
     can_encrypt_names: false,
-    split: "Generic .wim.001/.002 or native .swm, 2.swm, … volumes",
-    recovery: "Use PAR2 sidecar after image creation",
-    note: "Requires SQUALLZ_WIMLIB or wimlib-imagex on PATH",
   },
 };
 
@@ -195,24 +153,24 @@ export const nav = [
 ];
 
 export const settingsSections: ScreenAction[] = [
-  { screen: "settingsGeneral", label: "General", icon: "settings", detail: "Startup, language, defaults" },
-  { screen: "appearance", label: "Appearance", icon: "list", detail: "Display settings and interface mode" },
-  { screen: "colors", label: "Colors", icon: "palette", detail: "Palettes and custom accent" },
-  { screen: "settingsSecurity", label: "Security", icon: "shield-alert", detail: "Extraction and test limits" },
-  { screen: "settingsPerformance", label: "Performance", icon: "hourglass", detail: "Workers, task flow, scale limits" },
-  { screen: "passwordBook", label: "Password Book", icon: "lock", detail: "Secret-store status and saved archive secrets" },
-  { screen: "integration", label: "Formats & Integration", icon: "archive", detail: "Archive capabilities and file-manager actions" },
+  { screen: "settingsGeneral", labelKey: "gui.settings.section.general", icon: "settings" },
+  { screen: "appearance", labelKey: "gui.settings.section.appearance", icon: "list" },
+  { screen: "colors", labelKey: "gui.settings.section.colors", icon: "palette" },
+  { screen: "settingsSecurity", labelKey: "gui.settings.section.security", icon: "shield-alert" },
+  { screen: "settingsPerformance", labelKey: "gui.settings.section.performance", icon: "hourglass" },
+  { screen: "passwordBook", labelKey: "gui.settings.section.password_book", icon: "lock" },
+  { screen: "integration", labelKey: "gui.settings.section.formats_integration", icon: "archive" },
 ];
 
 export const quickActions: ScreenAction[] = [
-  { screen: "extract", label: "Extract archive", icon: "archive", detail: "Destination, conflicts, password" },
-  { screen: "batch", label: "Batch extract review", icon: "list", detail: "Review all archives before starting" },
-  { screen: "checksum", label: "Checksum files", icon: "check-circle", detail: "SHA-256, BLAKE3, CRC32" },
-  { screen: "duplicates", label: "Find duplicates", icon: "search", detail: "BLAKE3 scan with CLI parity" },
-  { screen: "settingsSecurity", label: "Security settings", icon: "shield-alert", detail: "Safety limits and guards" },
-  { screen: "passwordBook", label: "Password Book", icon: "lock", detail: "Saved archive password status" },
-  { screen: "colors", label: "Open Colors", icon: "palette", detail: "Accent palette and contrast guard" },
-  { screen: "integration", label: "Formats & Integration", icon: "settings", detail: "Archive capabilities and file-manager actions" },
+  { screen: "extract", labelKey: "gui.quick.extract_archive", icon: "archive" },
+  { screen: "batch", labelKey: "gui.quick.batch_extract_review", icon: "list" },
+  { screen: "checksum", labelKey: "gui.quick.checksum_files", icon: "check-circle" },
+  { screen: "duplicates", labelKey: "gui.quick.find_duplicates", icon: "search" },
+  { screen: "settingsSecurity", labelKey: "gui.quick.security_settings", icon: "shield-alert" },
+  { screen: "passwordBook", labelKey: "gui.quick.password_book", icon: "lock" },
+  { screen: "colors", labelKey: "gui.quick.open_colors", icon: "palette" },
+  { screen: "integration", labelKey: "gui.quick.formats_integration", icon: "settings" },
 ];
 
 export const classicCommands = [
@@ -234,84 +192,63 @@ export const classicCommands = [
 export const palettes: Palette[] = [
   {
     id: "aqua",
-    name: "Aqua Graphite",
-    mood: "Default",
     accent: "#0A7C86",
     support: "#12805C",
     base: "#F6F8FA",
     darkAccent: "#20C7BE",
     darkSupport: "#46D8CF",
     darkBase: "#12151A",
-    note: "Clean teal, graphite neutrals, calm utility feel.",
   },
   {
     id: "sage",
-    name: "Sage Titanium",
-    mood: "Quiet",
     accent: "#4F7D67",
     support: "#6F7F8B",
     base: "#F7F8F5",
     darkAccent: "#88CAA5",
     darkSupport: "#A6DDBD",
     darkBase: "#12151A",
-    note: "Muted sage with titanium gray for restrained desktop work.",
   },
   {
     id: "nordic",
-    name: "Nordic Blue",
-    mood: "Precise",
     accent: "#315F8F",
     support: "#6E879F",
     base: "#F4F7FA",
     darkAccent: "#6DA4DF",
     darkSupport: "#91C4F7",
     darkBase: "#12151A",
-    note: "Cool professional blue without turning the app into one flat hue.",
   },
   {
     id: "copper",
-    name: "Ink Copper",
-    mood: "Premium",
     accent: "#9A5A2E",
     support: "#344054",
     base: "#F8F6F2",
     darkAccent: "#D59B62",
     darkSupport: "#EFB879",
     darkBase: "#12151A",
-    note: "Ink neutrals with a restrained copper accent for classic tools.",
   },
   {
     id: "aubergine",
-    name: "Aubergine Steel",
-    mood: "Editorial",
     accent: "#6E506F",
     support: "#5D7280",
     base: "#F7F5F8",
     darkAccent: "#BF93C4",
     darkSupport: "#D7AFD9",
     darkBase: "#12151A",
-    note: "Deep wine-plum balanced by steel so it avoids purple overload.",
   },
   {
     id: "mono",
-    name: "Monochrome Pro",
-    mood: "Minimal",
     accent: "#475569",
     support: "#334155",
     base: "#F6F7F9",
     darkAccent: "#B8C4D2",
     darkSupport: "#D1DBE6",
     darkBase: "#12151A",
-    note: "Graphite-first UI for users who want the app to disappear.",
   },
   {
     id: "custom",
-    name: "Custom Accent",
-    mood: "Personal",
     accent: defaultCustomAccent,
     support: "#64748B",
     base: "#F6F8FA",
-    note: "Saved custom color with automatic light and dark contrast.",
   },
 ];
 

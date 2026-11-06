@@ -280,7 +280,7 @@ export class ExtractWorkspaceSession {
 
   get planWait() { return tr("gui.extract.plan_wait_before_start"); }
   get planError() {
-    return this.plan.errorKey ? tr(this.plan.errorKey, "Squallz could not refresh this preview. Check the archive and destination, then try again.") : "";
+    return this.plan.errorKey ? tr(this.plan.errorKey) : "";
   }
   get spaceFailure(): string {
     const plan = this.plan.plan;

@@ -19,36 +19,13 @@ export const desktopIntegrationActions = [
 ] as const satisfies readonly ExternalOpenAction[];
 export type DesktopIntegrationAction = (typeof desktopIntegrationActions)[number];
 
-export interface ExternalOpenActionCopy {
-  labelKey: string;
-  fallbackLabel: string;
-}
-
-const externalOpenActionCopyByAction: Record<ExternalOpenAction, ExternalOpenActionCopy> = {
-  checksum: {
-    labelKey: "gui.settings.integration.context_action.checksum",
-    fallbackLabel: "Checksum",
-  },
-  "extract-here": {
-    labelKey: "gui.settings.integration.context_action.extract_here",
-    fallbackLabel: "Extract Here",
-  },
-  "extract-to-folder": {
-    labelKey: "gui.settings.integration.context_action.extract_to_archive",
-    fallbackLabel: "Extract to <archive>/",
-  },
-  "extract-sfx": {
-    labelKey: "gui.external_task.extract_sfx",
-    fallbackLabel: "Extract self-extractor",
-  },
-  "compress-to-7z": {
-    labelKey: "gui.settings.integration.context_action.compress_to_7z",
-    fallbackLabel: "Compress to 7Z",
-  },
-  "test-archive": {
-    labelKey: "gui.settings.integration.context_action.test_archive",
-    fallbackLabel: "Test archive",
-  },
+const externalOpenActionLabelKeys: Record<ExternalOpenAction, string> = {
+  checksum: "gui.settings.integration.context_action.checksum",
+  "extract-here": "gui.settings.integration.context_action.extract_here",
+  "extract-to-folder": "gui.settings.integration.context_action.extract_to_archive",
+  "extract-sfx": "gui.external_task.extract_sfx",
+  "compress-to-7z": "gui.settings.integration.context_action.compress_to_7z",
+  "test-archive": "gui.settings.integration.context_action.test_archive",
 };
 
 export function externalOpenAction(value: string | null | undefined): ExternalOpenAction | null {
@@ -59,6 +36,6 @@ export function isExternalOpenAction(value: string | null | undefined): value is
   return externalOpenAction(value) !== null;
 }
 
-export function externalOpenActionCopy(action: ExternalOpenAction): ExternalOpenActionCopy {
-  return externalOpenActionCopyByAction[action];
+export function externalOpenActionLabelKey(action: ExternalOpenAction): string {
+  return externalOpenActionLabelKeys[action];
 }

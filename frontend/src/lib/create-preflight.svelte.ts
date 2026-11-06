@@ -270,7 +270,7 @@ export class CreatePreflightSession {
       const selected = await this.services.openNativeDialog(`create.${kind}`, open, {
         title: kind === "files"
           ? this.tr("gui.create.choose_files_to_archive")
-          : this.tr("gui.create.choose_folder_to_archive", "Choose folder to archive"),
+          : this.tr("gui.create.choose_folder_to_archive"),
         multiple: true,
         directory: kind === "folder",
       });
@@ -359,7 +359,7 @@ export class CreatePreflightSession {
     } else if (draft.outputExtension === "swm") {
       filterName = this.tr("gui.create.split_wim_filter");
     } else {
-      filterName = this.tr(`gui.create.format.${draft.format}.filter`, createFormats[draft.format].filterName);
+      filterName = this.tr(`gui.create.format.${draft.format}.filter`);
     }
     const platform = this.services.platform();
     const selected = await this.services.saveNativeDialog("create.save-archive", save, {
@@ -460,7 +460,7 @@ export class CreatePreflightSession {
         const message = error instanceof DestinationInspectionError
           ? error.detail
             ? this.presentation.tError(error.detail)
-            : this.tr("gui.create.destination_recheck_failed", "Could not check the destination. Review it and try again.")
+            : this.tr("gui.create.destination_recheck_failed")
           : this.tr("gui.create.save_dialog_requires_desktop_dialog");
         this.finishIssue("destination", message);
         return;

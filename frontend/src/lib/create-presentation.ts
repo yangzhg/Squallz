@@ -1,7 +1,7 @@
 import { outputProtectionControls } from "./output-options-presentation";
 import { tFallback as tr } from "./i18n.svelte";
 import {
-  createFormats, createFormatIds, createProfiles, createProfileIds,
+  createFormats, createFormatIds, createProfileIds,
   type CreateFormatId, type CreateProfileId,
 } from "./ui-model";
 import { desktopBasename } from "./desktop-path";
@@ -47,17 +47,6 @@ export class CreatePresentation {
       case "native_zip_part_size_limit": return tr("gui.create.native_zip_part_size_limit");
       case "sfx_requires_zip": return tr("gui.create.sfx_requires_zip");
     }
-  };
-
-  profileData = (profileId: CreateProfileId) => {
-    if (profileId === "custom") {
-      return {
-        label: tr("gui.create.profile.custom"),
-        level: this.session.options.state.customLevel,
-        detail: tr("gui.create.profile.custom.detail", "Choose an exact compression level"),
-      };
-    }
-    return createProfiles[profileId];
   };
 
   trashSourceDisabledReason = (): string => {
@@ -125,7 +114,7 @@ export class CreatePresentation {
       const folder = this.session.port.read().defaultDirectory;
       return folder
         ? this.session.joinFolder(folder, name)
-        : tr("gui.create.output.preview_default_missing", "Default create folder is not set · Squallz will ask");
+        : tr("gui.create.output.preview_default_missing");
     }
     const droppedParent = commonCreateSourceParent(this.session.inputs, this.session.port.platform());
     return droppedParent
@@ -161,27 +150,27 @@ export class CreatePresentation {
   };
 
   profileLabel = (profileId: CreateProfileId): string => {
-    return tr(`gui.create.profile.${profileId}`, createProfiles[profileId].label);
+    return tr(`gui.create.profile.${profileId}`);
   };
 
   profileDetail = (profileId: CreateProfileId): string => {
-    return tr(`gui.create.profile.${profileId}.detail`, createProfiles[profileId].detail);
+    return tr(`gui.create.profile.${profileId}.detail`);
   };
 
   formatMethod = (formatId: CreateFormatId = this.session.options.state.format): string => {
-    return tr(`gui.create.format.${formatId}.method`, createFormats[formatId].method);
+    return tr(`gui.create.format.${formatId}.method`);
   };
 
   formatSplit = (formatId: CreateFormatId = this.session.options.state.format): string => {
-    return tr(`gui.create.format.${formatId}.split`, createFormats[formatId].split);
+    return tr(`gui.create.format.${formatId}.split`);
   };
 
   formatRecovery = (formatId: CreateFormatId = this.session.options.state.format): string => {
-    return tr(`gui.create.format.${formatId}.recovery`, createFormats[formatId].recovery);
+    return tr(`gui.create.format.${formatId}.recovery`);
   };
 
   formatNoteFor = (formatId: CreateFormatId = this.session.options.state.format): string => {
-    return tr(`gui.create.format.${formatId}.note`, createFormats[formatId].note);
+    return tr(`gui.create.format.${formatId}.note`);
   };
 
   sourceKindLabel = (kind: CreateSourceKind): string => {
@@ -266,7 +255,7 @@ export class CreatePresentation {
         if (preflight.requestKind === "destination") {
           return preflight.cancelPending
             ? tr("gui.create.cancelling_destination_check")
-            : tr("gui.create.checking_existing_destination", "Checking the current output before replacement");
+            : tr("gui.create.checking_existing_destination");
         }
         return preflight.current
           || tr("gui.create.waiting_destination");
@@ -402,12 +391,7 @@ export class CreatePresentation {
         : this.session.options.state.splitMode === "native"
           ? "gui.create.native_split_summary_pending"
           : "gui.create.split_summary_pending";
-      const fallback = nativeWim
-        ? "{size} target per part · native .swm set; one large file may exceed the target"
-        : this.session.options.state.splitMode === "native"
-          ? "{size} per part · native ZIP set ending in .zip"
-          : "{size} per part · final count appears after preflight and write";
-      return tr(key, fallback)
+      return tr(key)
         .replace("{size}", size);
     }
     const count = Math.max(1, Math.trunc(this.session.preflight.state.plan.split_volume_count_budget ?? 1));
@@ -798,7 +782,7 @@ export class CreatePresentation {
           },
           {
             id: "preflight",
-            label: tr("gui.create.input_preflight", "Preflight"),
+            label: tr("gui.create.input_preflight"),
             targetId: "classic-create-preflight",
             onSelect: () => void this.session.showSection("preflight", "classic-create-preflight"),
           },

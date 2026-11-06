@@ -1,8 +1,8 @@
+import { deferred } from "../../tests/async.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
-import vm from "node:vm";
 import { createTestServer, englishTranslate } from "../../tests/runtime.mjs";
-import { compileTestScript, readSvelteScript, selectFunctions } from "../../tests/source.mjs";
+import { evaluateFunctions, readSvelteScript } from "../../tests/source.mjs";
 
 const server = await createTestServer();
 test.after(() => server.close());
@@ -10,20 +10,12 @@ const { archiveKeyboardTarget, archiveTabStopPath } = await server.ssrLoadModule
 const source = readSvelteScript(new URL("../App.svelte", import.meta.url), "App.ts");
 
 function harness(names, overrides = {}) {
-  const declarations = selectFunctions(source, names);
-  const outputText = compileTestScript(declarations.map((node) => node.getText(source)).join("\n"));
   const context = { archiveKeyboardTarget, MODERN_ROW_HEIGHT: 42, CLASSIC_ROW_HEIGHT: 42,
     archiveKeyboardRequest: 0, taskReviewRequestGeneration: 0, screen: "browse", mode: "modern",
     currentArchive: { id: 1 }, archiveDirs: [], filterText: () => "", taskCenterOpen: false,
     blockingModalVisible: () => false, archiveSelectionBusyReason: () => "", tick: async () => {},
     ...overrides };
-  return { ...vm.runInNewContext(`${outputText}\n({${names.join(",")}})`, context), context };
-}
-
-function deferred() {
-  let resolve;
-  const promise = new Promise(done => { resolve = done; });
-  return { promise, resolve };
+  return { ...evaluateFunctions(source, names, context), context };
 }
 
 test("archive keyboard movement stays in bounds and pages by the visible row count", () => {

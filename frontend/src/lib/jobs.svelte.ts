@@ -324,7 +324,6 @@ function reportSourceCleanup(task: Task): void {
       kind: "warning",
       title: tFallback(
         "gui.toast.source_cleanup_recovery",
-        "Archive created · Preserved outside {trash}: {count} · Recovery needed beside the previous location",
         { count: recoveryRequired.toLocaleString(), trash },
       ),
     });

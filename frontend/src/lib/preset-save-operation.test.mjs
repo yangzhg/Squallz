@@ -1,3 +1,4 @@
+import { deferred } from "../../tests/async.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createTestServer } from "../../tests/runtime.mjs";
@@ -20,13 +21,6 @@ test.before(async () => {
 });
 test.beforeEach(() => clearOperationHistory());
 test.afterEach(() => Object.assign(ipc, originalIpc));
-
-function deferred() {
-  let resolve;
-  let reject;
-  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
-  return { promise, resolve, reject };
-}
 
 function controlledIpc() {
   const writes = [];

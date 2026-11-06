@@ -1,6 +1,6 @@
 import {
   externalOpenAction,
-  externalOpenActionCopy,
+  externalOpenActionLabelKey,
   isExternalOpenAction,
   type ExternalOpenAction,
 } from "./external-tasks";
@@ -28,7 +28,7 @@ export interface TaskWindowLaunchState {
   status: TaskWindowShellStatus;
 }
 
-export type TaskWindowTranslate = (key: string, fallback?: string) => string;
+export type TaskWindowTranslate = (key: string) => string;
 export type TaskWindowShellStatus =
   | "waiting"
   | "starting"
@@ -136,8 +136,7 @@ export function activeTaskWindowLaunchState(action: ExternalOpenAction): TaskWin
 }
 
 export function taskWindowActionLabel(action: ExternalOpenAction, translate: TaskWindowTranslate): string {
-  const copy = externalOpenActionCopy(action);
-  return translate(copy.labelKey, copy.fallbackLabel);
+  return translate(externalOpenActionLabelKey(action));
 }
 
 export function taskWindowWaitingMessage(
@@ -165,7 +164,6 @@ export function taskWindowShellTitle(
     case "starting":
       return taskWindowActionStatusMessage(
         "gui.external_task.title_starting_action",
-        "Starting {action}",
         state.pendingAction,
         translate,
       );
@@ -185,7 +183,6 @@ export function taskWindowShellTitle(
       if (state.pendingAction) {
         return taskWindowActionStatusMessage(
           "gui.external_task.title_waiting_action",
-          "Waiting for {action}",
           state.pendingAction,
           translate,
         );
@@ -196,12 +193,11 @@ export function taskWindowShellTitle(
 
 function taskWindowActionStatusMessage(
   key: string,
-  fallback: string,
   action: ExternalOpenAction | null,
   translate: TaskWindowTranslate,
 ): string {
-  if (!action) return translate(key, fallback);
-  return translate(key, fallback).replace("{action}", taskWindowActionLabel(action, translate));
+  if (!action) return translate(key);
+  return translate(key).replace("{action}", taskWindowActionLabel(action, translate));
 }
 
 export function taskWindowShellMessage(
@@ -218,7 +214,6 @@ export function taskWindowShellMessage(
     case "starting":
       return taskWindowActionStatusMessage(
         "gui.external_task.starting_action",
-        "Starting {action}",
         state.pendingAction,
         translate,
       );

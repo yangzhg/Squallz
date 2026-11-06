@@ -111,7 +111,7 @@
       </form>
     {:else}
       <div class="password-request-body">
-        <p>{surface.tr("gui.password.no_active_request", "No password request is active")}</p>
+        <p>{surface.tr("gui.password.no_active_request")}</p>
         <p>{surface.tr("gui.password.no_active_request_body")}</p>
       </div>
       <footer class="modal-actions password-request-actions">

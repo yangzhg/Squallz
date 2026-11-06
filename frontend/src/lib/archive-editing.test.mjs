@@ -1,15 +1,10 @@
+import { deferred } from "../../tests/async.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
 import vm from "node:vm";
 import ts from "typescript";
 import { englishTranslate, createTestServer } from "../../tests/runtime.mjs";
 import { compileTestScript, readSvelteScriptAsync, selectFunctions } from "../../tests/source.mjs";
-
-function deferred() {
-  let resolve, reject;
-  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
-  return { promise, resolve, reject };
-}
 
 async function loadEditing(overrides = {}) {
   const server = await createTestServer();

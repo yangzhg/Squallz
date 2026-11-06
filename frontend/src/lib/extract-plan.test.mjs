@@ -1,3 +1,4 @@
+import { deferred } from "../../tests/async.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createTestServer } from "../../tests/runtime.mjs";
@@ -12,13 +13,6 @@ test.beforeEach(() => {
   ipc.cancelExtractPlan = async () => {};
 });
 test.afterEach(() => Object.assign(ipc, originalIpc));
-
-function deferred() {
-  let resolve;
-  let reject;
-  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
-  return { promise, resolve, reject };
-}
 
 function input(overrides = {}) {
   return { archiveId: 1, path: "archive-source:one", displayPath: "/Photos.zip",

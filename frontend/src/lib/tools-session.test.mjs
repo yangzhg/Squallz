@@ -1,3 +1,4 @@
+import { deferred } from "../../tests/async.mjs";
 import { jobResult } from "../../tests/job-results.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -8,13 +9,6 @@ test.after(() => server.close());
 const { ToolsSession } = await server.ssrLoadModule("/src/lib/tools-session.svelte.ts");
 const { loadLocale } = await server.ssrLoadModule("/src/lib/i18n.svelte.ts");
 await loadLocale("en-US");
-
-function deferred() {
-  let resolve;
-  let reject;
-  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
-  return { promise, resolve, reject };
-}
 
 function harness(overrides = {}) {
   const context = { archive: null, tasks: [], screen: "checksum", copyScope: "checksum:modern", visibleTaskId: null };

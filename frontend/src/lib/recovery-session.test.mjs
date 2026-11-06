@@ -1,13 +1,8 @@
+import { deferred } from "../../tests/async.mjs";
 import { jobResult } from "../../tests/job-results.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createTestServer } from "../../tests/runtime.mjs";
-
-function deferred() {
-  let resolve, reject;
-  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
-  return { promise, resolve, reject };
-}
+import { withTestServer } from "../../tests/runtime.mjs";
 
 function archiveInfo(extension = "zip") {
   const path = `/archives/A.${extension}`;
@@ -16,8 +11,7 @@ function archiveInfo(extension = "zip") {
 }
 
 async function withSession(run) {
-  const server = await createTestServer();
-  try {
+  await withTestServer(async (server) => {
     const { RecoverySession } = await server.ssrLoadModule("/src/lib/recovery-session.svelte.ts");
     const { ipc } = await server.ssrLoadModule("/src/lib/ipc.ts");
     const history = await server.ssrLoadModule("/src/lib/history.svelte.ts");
@@ -61,9 +55,7 @@ async function withSession(run) {
     };
     await run({ session, state, services, dialogs, notices, submitted, native, ipc, history, prepare, navigate });
     session.dispose();
-  } finally {
-    await server.close();
-  }
+  });
 }
 
 test("recovery owns source routing, exact report binding and authoritative inner archive handles", async () => {

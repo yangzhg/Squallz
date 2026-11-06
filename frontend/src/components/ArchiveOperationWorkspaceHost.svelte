@@ -1,6 +1,7 @@
 <script lang="ts" module>
   import type { Component } from "svelte";
   import { createDeferredComponentLoader } from "../lib/deferred-component";
+  import type { DeferredViewMessages } from "./DeferredView.svelte";
   import type {
     ConvertRouteBridge,
     ConvertRouteOwner,
@@ -29,13 +30,7 @@
   import type { ArchivePresetSession } from "../lib/archive-presets.svelte";
 
   type WorkspaceKind = "create" | "convert" | "extract";
-  type WorkspaceProps = {
-    loadingTitle: string;
-    loadingBody: string;
-    failureTitle: string;
-    failureBody: string;
-    retryLabel: string;
-  } & (
+  type WorkspaceProps = DeferredViewMessages & (
     | { kind: "create"; variant: CreateWorkspaceVariant; session: CreateSession }
     | {
         kind: "convert";
@@ -68,72 +63,40 @@
 </script>
 
 <script lang="ts">
-  import Icon from "./Icon.svelte";
-  import DeferredViewError from "./DeferredViewError.svelte";
+  import DeferredView from "./DeferredView.svelte";
 
   let props: WorkspaceProps = $props();
 
-  let retryWorkspace = $state<{ kind: WorkspaceKind; promise: Promise<WorkspaceComponent> } | null>(null);
-  let workspace = $derived(
-    retryWorkspace?.kind === props.kind
-      ? retryWorkspace.promise
-      : workspaceLoaders[props.kind].load(),
-  );
   let modernClass = $derived(
     props.kind === "extract" ? "extract-view modern-extract" : `create-sheet modern-${props.kind}`,
   );
   let classicClass = $derived(
     props.kind === "create" ? "classic-property-sheet classic-create" : `classic-extract-sheet classic-${props.kind}`,
   );
-
-  function retry(): void {
-    retryWorkspace = {
-      kind: props.kind,
-      promise: workspaceLoaders[props.kind].retry(),
-    };
-  }
 </script>
 
-{#await workspace}
-  {#if props.variant === "modern"}
-    <div class={modernClass}>
-      <section class="deferred-workspace-state" role="status" aria-live="polite" aria-busy="true">
-        <Icon name="hourglass" size={20} />
-        <div>
-          <strong>{props.loadingTitle}</strong>
-          <span>{props.loadingBody}</span>
-        </div>
-      </section>
+<DeferredView
+  loader={workspaceLoaders[props.kind]} classic={props.variant === "classic"}
+  loadingTag={props.variant === "classic" ? "div" : "section"}
+  loadingTitle={props.loadingTitle} loadingBody={props.loadingBody}
+  failureTitle={props.failureTitle} failureBody={props.failureBody} retryLabel={props.retryLabel}
+>
+  {#snippet frame(content, failed)}
+    <div class={props.variant === "modern" ? modernClass : "classic-dialog-body"}>
+      {#if props.variant === "classic" && !failed}
+        <section class={classicClass}>{@render content()}</section>
+      {:else}
+        {@render content()}
+      {/if}
     </div>
-  {:else}
-    <div class="classic-dialog-body">
-      <section class={classicClass}>
-        <div class="deferred-workspace-state" role="status" aria-live="polite" aria-busy="true">
-          <Icon name="hourglass" size={20} />
-          <div>
-            <strong>{props.loadingTitle}</strong>
-            <span>{props.loadingBody}</span>
-          </div>
-        </div>
-      </section>
-    </div>
-  {/if}
-{:then Workspace}
-  {#if props.kind === "convert"}
-    <Workspace variant={props.variant} owner={props.owner} bridge={props.bridge} />
-  {:else if props.kind === "extract"}
-    <Workspace variant={props.variant} session={props.session} view={props.view} presets={props.presets} bridge={props.bridge} />
-  {:else}
-    <Workspace variant={props.variant} session={props.session} />
-  {/if}
-{:catch error}
-  {#if props.variant === "modern"}
-    <div class={modernClass}>
-      <DeferredViewError {error} title={props.failureTitle} body={props.failureBody} retryLabel={props.retryLabel} onRetry={retry} />
-    </div>
-  {:else}
-    <div class="classic-dialog-body">
-      <DeferredViewError {error} title={props.failureTitle} body={props.failureBody} retryLabel={props.retryLabel} onRetry={retry} classic />
-    </div>
-  {/if}
-{/await}
+  {/snippet}
+  {#snippet children(Workspace)}
+    {#if props.kind === "convert"}
+      <Workspace variant={props.variant} owner={props.owner} bridge={props.bridge} />
+    {:else if props.kind === "extract"}
+      <Workspace variant={props.variant} session={props.session} view={props.view} presets={props.presets} bridge={props.bridge} />
+    {:else}
+      <Workspace variant={props.variant} session={props.session} />
+    {/if}
+  {/snippet}
+</DeferredView>

@@ -21,11 +21,9 @@ export class ExtractPresentation {
     return this.session.plan.phase === "ready"
       ? tr(
           "gui.extract.plan_ready_body",
-          "The selected scope, smart layout, and destination below come from the same core plan the task will rebuild before extraction.",
         )
       : tr(
           "gui.extract.plan_checking_body",
-          "Reading the archive layout and checking the current destination without writing files.",
         );
   }
 

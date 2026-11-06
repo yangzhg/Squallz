@@ -1,3 +1,4 @@
+import { deferred } from "../../tests/async.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createTestServer, englishTranslate } from "../../tests/runtime.mjs";
@@ -8,12 +9,6 @@ const { ipc } = await server.ssrLoadModule("/src/lib/ipc.ts");
 const { runArchiveDiskPreflight } = await server.ssrLoadModule("/src/lib/archive-disk-preflight.ts");
 const { authorizeArchiveOutput, refreshArchiveOutputAuthorization, DestinationInspectionError } =
   await server.ssrLoadModule("/src/lib/archive-output-authorization.ts");
-
-function deferred() {
-  let resolve, reject;
-  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
-  return { promise, resolve, reject };
-}
 
 function diskOptions(events, isCurrent = () => true) {
   return { destinationDirectory: "/output", isCurrent,

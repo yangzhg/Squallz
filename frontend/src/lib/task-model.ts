@@ -52,7 +52,7 @@ export function taskStateLabel(state: string | null | undefined): string {
   if (state === "queued") return tFallback("gui.task.state.waiting");
   if (state === "running") return tFallback("gui.task.state.running");
   if (state === "paused") return tFallback("gui.task.state.paused");
-  if (state === "pausing") return tFallback("gui.task.state.pausing", "Pausing...");
+  if (state === "pausing") return tFallback("gui.task.state.pausing");
   if (state === "done") return tFallback("gui.task.state.done");
   if (state === "failed") return tFallback("gui.task.state.failed");
   if (state === "cancelled") return tFallback("gui.task.state.cancelled");

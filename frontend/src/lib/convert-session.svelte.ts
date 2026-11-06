@@ -20,7 +20,6 @@ import {
   createFormatIds,
   createFormats,
   createProfileIds,
-  createProfiles,
   type CreateFormatId,
   type CreateProfileId,
 } from "./ui-model";
@@ -109,18 +108,18 @@ export class ConvertSession implements ConvertRouteHandle {
   }
 
   private profileLabel(profile: CreateProfileId = this.draft.profile): string {
-    return this.tr(`gui.create.profile.${profile}`, createProfiles[profile].label);
+    return this.tr(`gui.create.profile.${profile}`);
   }
 
   private profileDetail(profile: CreateProfileId = this.draft.profile): string {
     if (profile === "custom") {
       return this.tr("gui.convert.custom_level_detail");
     }
-    return this.tr(`gui.create.profile.${profile}.detail`, createProfiles[profile].detail);
+    return this.tr(`gui.create.profile.${profile}.detail`);
   }
 
   private formatMethod(format: CreateFormatId = this.draft.format): string {
-    return this.tr(`gui.create.format.${format}.method`, createFormats[format].method);
+    return this.tr(`gui.create.format.${format}.method`);
   }
 
   private methodLabel(): string {
@@ -178,7 +177,7 @@ export class ConvertSession implements ConvertRouteHandle {
   private volumePreview(): string {
     const splitSize = this.output.splitSize;
     if (splitSize === null) {
-      return this.tr("gui.convert.single_archive_summary", "Single converted archive · no numbered parts");
+      return this.tr("gui.convert.single_archive_summary");
     }
     const nativeWim = this.draft.splitMode === "native" && this.draft.format === "wim";
     const key = nativeWim
@@ -186,12 +185,7 @@ export class ConvertSession implements ConvertRouteHandle {
       : this.draft.splitMode === "native"
         ? "gui.convert.native_split_summary"
         : "gui.convert.split_summary";
-    const fallback = nativeWim
-      ? "{size} target per part · native .swm set; one large file may exceed the target"
-      : this.draft.splitMode === "native"
-        ? "{size} per part · native ZIP set ending in .zip"
-        : "{size} per part · the exact file list appears when conversion finishes";
-    return this.tr(key, fallback).replace("{size}", formatBytes(splitSize));
+    return this.tr(key).replace("{size}", formatBytes(splitSize));
   }
 
   private sourceSummary(): string {
@@ -214,7 +208,7 @@ export class ConvertSession implements ConvertRouteHandle {
     if (archive && sourceMatchesConvertTarget(archive.format, format)) {
       return this.tr("gui.convert.same_format_note");
     }
-    return this.tr(`gui.create.format.${format}.note`, createFormats[format].note);
+    return this.tr(`gui.create.format.${format}.note`);
   }
 
   private requiredReason(): string {
@@ -239,18 +233,18 @@ export class ConvertSession implements ConvertRouteHandle {
 
   private optionIssue(issue: OutputOptionIssue | null): string {
     if (!issue) return "";
-    const messages: Record<OutputOptionIssue, [string, string]> = {
-      password_required: ["gui.convert.password_required", "Enter a new destination password, or turn off file content encryption."],
-      confirm_password_required: ["gui.convert.confirm_password_required", "Confirm the destination password before starting"],
-      passwords_do_not_match: ["gui.convert.passwords_do_not_match", "The destination passwords do not match"],
-      invalid_part_size: ["gui.convert.invalid_part_size", "Enter a part size of at least 0.1 MiB"],
-      native_zip_part_size_limit: ["gui.create.native_zip_part_size_limit", "Native ZIP parts cannot exceed 4 GiB − 1 byte"],
-      custom_level_invalid: ["gui.create.custom_level_invalid", "Use a compression level from 1 to 9"],
-      encryption_format_change: ["gui.create.encryption_format_change", "Turn off file content encryption before choosing a format that cannot encrypt files."],
-      name_encryption_format_change: ["gui.create.name_encryption_format_change", "Turn off file name encryption before choosing a format that cannot hide names."],
-      native_layout_unavailable: ["gui.create.native_layout_unavailable", "Native volume layout is available for ZIP and WIM; self-extracting output must remain a single ZIP."],
+    const messages: Record<OutputOptionIssue, string> = {
+      password_required: "gui.convert.password_required",
+      confirm_password_required: "gui.convert.confirm_password_required",
+      passwords_do_not_match: "gui.convert.passwords_do_not_match",
+      invalid_part_size: "gui.convert.invalid_part_size",
+      native_zip_part_size_limit: "gui.create.native_zip_part_size_limit",
+      custom_level_invalid: "gui.create.custom_level_invalid",
+      encryption_format_change: "gui.create.encryption_format_change",
+      name_encryption_format_change: "gui.create.name_encryption_format_change",
+      native_layout_unavailable: "gui.create.native_layout_unavailable",
     };
-    return this.tr(...messages[issue]);
+    return this.tr(messages[issue]);
   }
 
   private levelError(): string {
@@ -348,7 +342,7 @@ export class ConvertSession implements ConvertRouteHandle {
         title: this.tr("gui.convert.save_as"),
         defaultPath: defaultDest,
         filters: [{
-          name: this.tr(`gui.create.format.${targetFormat}.filter`, createFormats[targetFormat].filterName),
+          name: this.tr(`gui.create.format.${targetFormat}.filter`),
           extensions: this.output.outputExtension === "swm"
             ? ["swm"]
             : createFormats[targetFormat].extensions,
@@ -685,7 +679,7 @@ export class ConvertSession implements ConvertRouteHandle {
               rangeAriaLabel: labelWithReason(
                 variant === "classic"
                   ? this.tr("gui.convert.classic_custom_level")
-                  : this.tr("gui.convert.custom_level", "Conversion compression level"),
+                  : this.tr("gui.convert.custom_level"),
                 lockedReason,
               ),
               numberAriaLabel: labelWithReason(
@@ -714,7 +708,7 @@ export class ConvertSession implements ConvertRouteHandle {
         ...protection,
         splitDisabled: false,
         nativeSplitKind: this.output.nativeSplitKind,
-        splitCapability: this.tr(`gui.create.format.${this.draft.format}.split`, createFormats[this.draft.format].split),
+        splitCapability: this.tr(`gui.create.format.${this.draft.format}.split`),
         splitSummary: this.volumePreview(),
         passwordTitle: this.tr("gui.convert.destination_password"),
         splitTitle: this.tr("gui.convert.output_volumes"),

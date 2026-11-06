@@ -524,8 +524,8 @@
   <div class="create-sheet modern-convert">
     <div class="sheet-head">
       <div>
-        <h1 id="convert-workspace-heading" tabindex="-1">{surface.tr("gui.convert.title", "Convert archive")}</h1>
-        <p>{surface.tr("gui.convert.subtitle", "Choose the output format, compression, protection, and volume layout. Squallz converts without modifying the source.")}</p>
+        <h1 id="convert-workspace-heading" tabindex="-1">{surface.tr("gui.convert.title")}</h1>
+        <p>{surface.tr("gui.convert.subtitle")}</p>
       </div>
     </div>
 
@@ -606,7 +606,7 @@
     <section class="classic-extract-sheet classic-convert">
       <header>
         <div>
-          <h1 id="convert-workspace-heading" tabindex="-1">{surface.tr("gui.convert.title", "Convert archive")}</h1>
+          <h1 id="convert-workspace-heading" tabindex="-1">{surface.tr("gui.convert.title")}</h1>
           <p>{surface.tr("gui.convert.classic_intro")}</p>
         </div>
       </header>

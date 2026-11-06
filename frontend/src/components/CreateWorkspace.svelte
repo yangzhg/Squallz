@@ -280,7 +280,7 @@
                 <div>
                   <span class="block-label">{surface.tr("gui.recovery.title")}</span>
                   <strong>{surface.recovery.capability}</strong>
-                  <p>{surface.tr("gui.create.recovery_separate_jobs", "Creating the archive and generating recovery data are separate jobs; use Recovery when you want PAR2 or SQZ repair evidence.")}</p>
+                  <p>{surface.tr("gui.create.recovery_separate_jobs")}</p>
                 </div>
                 <button
                   disabled={surface.recovery.disabled}

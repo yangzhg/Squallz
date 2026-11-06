@@ -13,3 +13,12 @@ export function createTestServer() {
     server: { hmr: false, middlewareMode: true },
   });
 }
+
+export async function withTestServer(run) {
+  const server = await createTestServer();
+  try {
+    return await run(server);
+  } finally {
+    await server.close();
+  }
+}

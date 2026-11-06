@@ -11,8 +11,7 @@
 </script>
 
 <script lang="ts">
-  import Icon from "./Icon.svelte";
-  import DeferredViewError from "./DeferredViewError.svelte";
+  import DeferredView, { type DeferredViewMessages } from "./DeferredView.svelte";
 
   let {
     surface,
@@ -23,34 +22,12 @@
     retryLabel,
   }: {
     surface: ClassicArchiveBrowserSurfaceProps;
-    loadingTitle: string;
-    loadingBody: string;
-    failureTitle: string;
-    failureBody: string;
-    retryLabel: string;
-  } = $props();
-
-  let browser = $state(browserLoader.load());
-
-  function retry(): void {
-    browser = browserLoader.retry();
-  }
+  } & DeferredViewMessages = $props();
 </script>
 
-{#await browser}
-  <div class="classic-body classic-browser-deferred">
-    <section class="deferred-workspace-state" role="status" aria-live="polite" aria-busy="true">
-      <Icon name="hourglass" size={20} />
-      <div>
-        <strong>{loadingTitle}</strong>
-        <span>{loadingBody}</span>
-      </div>
-    </section>
-  </div>
-{:then ClassicArchiveBrowser}
-  <ClassicArchiveBrowser {...surface} />
-{:catch error}
-  <div class="classic-body classic-browser-deferred">
-    <DeferredViewError {error} title={failureTitle} body={failureBody} {retryLabel} onRetry={retry} classic />
-  </div>
-{/await}
+<DeferredView loader={browserLoader} {loadingTitle} {loadingBody} {failureTitle} {failureBody} {retryLabel} classic>
+  {#snippet frame(content)}
+    <div class="classic-body classic-browser-deferred">{@render content()}</div>
+  {/snippet}
+  {#snippet children(ClassicArchiveBrowser)}<ClassicArchiveBrowser {...surface} />{/snippet}
+</DeferredView>

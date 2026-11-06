@@ -1,3 +1,4 @@
+import { deferred } from "../../tests/async.mjs";
 import assert from "node:assert/strict";
 import test, { after, before } from "node:test";
 import { createTestServer } from "../../tests/runtime.mjs";
@@ -9,13 +10,6 @@ before(async () => {
   ({ createNativeMenuPublisher } = await server.ssrLoadModule("/src/lib/native-menu.ts"));
 });
 after(async () => server?.close());
-
-function deferred() {
-  let resolve;
-  let reject;
-  const promise = new Promise((ok, fail) => { resolve = ok; reject = fail; });
-  return { promise, resolve, reject };
-}
 
 test("menu publication serializes updates and skips superseded pending selections", async () => {
   const first = deferred();

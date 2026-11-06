@@ -214,12 +214,9 @@ export function buildCustomPaletteData(hex: string, theme: ResolvedTheme, contra
   const support = tokens["--accent-2"];
   return {
     id: "custom",
-    name: "Custom Accent",
-    mood: "Personal",
     accent,
     support,
     base: theme === "dark" ? DARK_BASE : LIGHT_BASE,
-    note: "Saved custom color with automatic light and dark contrast.",
   };
 }
 

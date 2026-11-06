@@ -1,12 +1,7 @@
+import { deferred } from "../../tests/async.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createTestServer } from "../../tests/runtime.mjs";
-
-function deferred() {
-  let resolve, reject;
-  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
-  return { promise, resolve, reject };
-}
+import { withTestServer } from "../../tests/runtime.mjs";
 
 const info = (id = 1, read_only = false) => ({
   id, name: `archive-${id}.zip`, path: `/archives/${id}.zip`, source: `/archives/${id}.zip`,
@@ -19,8 +14,7 @@ const wrong = { key: "error.wrong_password", params: {}, detail: "" };
 const cancelled = { key: "error.cancelled", params: {}, detail: "" };
 
 async function withBook(run) {
-  const server = await createTestServer();
-  try {
+  await withTestServer(async (server) => {
     const book = await server.ssrLoadModule("/src/lib/archive.svelte.ts");
     const { ipc } = await server.ssrLoadModule("/src/lib/ipc.ts");
     const requests = [];
@@ -34,9 +28,7 @@ async function withBook(run) {
     };
     book.installArchivePreview(info(), []);
     await run({ book, ipc, requests, cancellations, save: (password = "correct") => book.rememberArchivePassword(info().path, password, "utf-8") });
-  } finally {
-    await server.close();
-  }
+  });
 }
 
 test("Password Book verifies once, reports failures, and preserves saved credentials during replacement", () => withBook(async ({ book, requests, save }) => {

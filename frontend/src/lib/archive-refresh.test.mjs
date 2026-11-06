@@ -1,3 +1,4 @@
+import { deferred } from "../../tests/async.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
 import vm from "node:vm";
@@ -45,13 +46,6 @@ function info(id = 1) {
     format: "zip", entry_count: 1, volumes: null, non_utf8_name_count: 0,
     garbled_count: 0, suggested_encoding: null, encoding_override: "gbk", read_only: false,
   };
-}
-
-function deferred() {
-  let resolve;
-  let reject;
-  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
-  return { promise, resolve, reject };
 }
 
 async function until(predicate) {

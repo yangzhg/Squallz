@@ -2113,15 +2113,15 @@
   }
 
   function formatCreateLabel(format: FormatDto): string {
-    if (!format.can_create) return tr("common.no", "No");
+    if (!format.can_create) return tr("common.no");
     if (format.id === "wim") return tr("gui.format.create.if_wimlib");
-    return tr("common.yes", "Yes");
+    return tr("common.yes");
   }
 
   function formatEncryptLabel(format: FormatDto): string {
     if (format.can_encrypt_names) return tr("gui.format.encrypt.names_data");
     if (format.can_encrypt_data) return tr("gui.format.encrypt.data");
-    return tr("common.no", "No");
+    return tr("common.no");
   }
 
   function formatNote(format: FormatDto): string {
@@ -2202,29 +2202,13 @@
   }
 
   function archiveOutputFilterName(format: "zip" | "7z" | "tar.zst" | "tar" | "sqz"): string {
-    return tr(`gui.dialog.filter.${format.replace(".", "_")}`, {
-      zip: "ZIP archive",
-      "7z": "7Z archive",
-      "tar.zst": "TAR.ZST archive",
-      tar: "TAR archive",
-      sqz: "SQZ container",
-    }[format]);
+    return tr(`gui.dialog.filter.${format.replace(".", "_")}`);
   }
 
   function historyLastLabel(): string {
     return historyRows.length > 0
       ? tr("gui.history.local_only")
       : tr("gui.history.no_activity");
-  }
-
-  function isSettingsWorkspaceScreen(value: Screen): value is SettingsScreen {
-    return value === "appearance"
-      || value === "colors"
-      || value === "settingsGeneral"
-      || value === "settingsSecurity"
-      || value === "settingsPerformance"
-      || value === "passwordBook"
-      || value === "integration";
   }
 
   function settingsWorkspaceProps(settingsScreen: SettingsScreen): SettingsWorkspaceProps {
@@ -2826,36 +2810,20 @@
 
   function navLabel(label: string): string {
     const key = `gui.nav.${labelKey(label)}`;
-    return tr(key, label);
+    return tr(key);
   }
 
   function toolbarLabel(label: string): string {
     const key = `gui.toolbar.${labelKey(label)}`;
-    return tr(key, label);
+    return tr(key);
   }
 
   function actionLabel(label: string): string {
-    return tr(`gui.action.${labelKey(label)}`, label);
+    return tr(`gui.action.${labelKey(label)}`);
   }
 
   function classicCommandLabel(label: string): string {
-    return tr(`gui.classic.command.${labelKey(label)}`, label);
-  }
-
-  function settingsSectionLabel(label: string): string {
-    return tr(`gui.settings.section.${labelKey(label)}`, label);
-  }
-
-  function settingsSectionDetail(label: string, detail: string): string {
-    return tr(`gui.settings.section.${labelKey(label)}.detail`, detail);
-  }
-
-  function quickActionLabel(label: string): string {
-    return tr(`gui.quick.${labelKey(label)}`, label);
-  }
-
-  function quickActionDetail(label: string, detail: string): string {
-    return tr(`gui.quick.${labelKey(label)}.detail`, detail);
+    return tr(`gui.classic.command.${labelKey(label)}`);
   }
 
   function noArchiveLabel(): string {
@@ -2943,12 +2911,12 @@
             .replace("{language}", languageLabel(settings.language))
             .replace("{createFolder}", defaultCreateFolderLabel(settings.default_create_dir ?? ""))
             .replace("{folder}", defaultExtractFolderLabel(settings.default_extract_dir ?? ""))
-            .replace("{reveal}", settings.reveal_after_extract ? tr("common.on", "on") : tr("common.off", "off"))
+            .replace("{reveal}", settings.reveal_after_extract ? tr("common.on") : tr("common.off"))
             .replace(
               "{updates}",
               settings.check_updates_automatically !== false
-                ? tr("common.on", "on")
-                : tr("common.off", "off"),
+                ? tr("common.on")
+                : tr("common.off"),
             ),
         });
         break;
@@ -3502,8 +3470,7 @@
   function entrySelectionLabel(entry: DisplayEntry): string {
     const name = entry.name || entry.source?.path || tr("gui.selection.entry");
     const key = isEntrySelected(entry) ? "gui.selection.deselect_entry" : "gui.selection.select_entry";
-    const fallback = isEntrySelected(entry) ? "Deselect {name}" : "Select {name}";
-    return tr(key, fallback).replace("{name}", name);
+    return tr(key).replace("{name}", name);
   }
 
   function entryPreviewForPath(entryPath: string): EntryPreviewDto | null {
@@ -4791,11 +4758,10 @@
     error: unknown,
     nested: boolean,
     fallbackKey: string,
-    fallback: string,
   ): string {
     if (isErrorDto(error)) {
       if (error.key.startsWith("error.preview_")) {
-        return tr(error.key, fallback);
+        return tr(error.key, tr(fallbackKey));
       }
       if (error.key === "error.resource_limit") {
         return nested
@@ -4803,7 +4769,7 @@
           : tr("gui.preview.resource_limit");
       }
     }
-    return tr(fallbackKey, fallback);
+    return tr(fallbackKey);
   }
 
   function previewBusy(): boolean {
@@ -5270,7 +5236,6 @@
         error,
         false,
         "gui.preview.failed",
-        "Could not open this item",
       );
       previewSession.failPreparation(preparation, {
         entryPath,
@@ -5299,11 +5264,11 @@
   ) {
     if (action === "preview") {
       if (!currentArchive) {
-        showNotice(tr("gui.preview.open_archive_first", "Open an archive before previewing entries"));
+        showNotice(tr("gui.preview.open_archive_first"));
         return;
       }
       if (!entryPath) {
-        showNotice(tr("gui.preview.select_one", "Select one file entry to preview"));
+        showNotice(tr("gui.preview.select_one"));
         return;
       }
       if (!archiveLikePath(entryPath)) {
@@ -5391,8 +5356,6 @@
         error,
         true,
         action === "preview" ? "gui.preview.nested_failed" : "gui.preview.open_nested_requires_desktop_service",
-        action === "preview" ? "Could not preview this nested archive"
-          : "Could not open this inner archive. Preview it or extract it instead.",
       );
       previewSession.failPreparation(preparation, {
         entryPath,
@@ -5432,7 +5395,6 @@
         error,
         false,
         "gui.preview.reveal_failed",
-        "Cannot reveal the prepared file in the file manager",
       ));
     }
   }
@@ -5493,7 +5455,6 @@
         error,
         false,
         "gui.preview.open_failed_ready",
-        "Could not open this item. Try again or extract it instead.",
       ).replace("{name}", preview.display_name);
       const entryType = entryTypeForPath(preview.entry_path);
       previewSession.failFileAction(action, currentArchive?.source ?? null, {
@@ -6467,7 +6428,7 @@
   function passwordPromptName(): string {
     return (archivePasswordPrompt ? pathBaseName(archivePasswordPrompt.path) : null)
       ?? previewPasswordPrompt?.name
-      ?? tr("gui.password.no_prompt", "No password prompt");
+      ?? tr("gui.password.no_prompt");
   }
 
   function passwordPromptDetail(): string {
@@ -6482,7 +6443,7 @@
         ? tr("gui.preview.inner_password")
         : tr("gui.preview.outer_password");
     }
-    return tr("gui.password.no_prompt_pending", "No password request is active.");
+    return tr("gui.password.no_prompt_pending");
   }
 
   function passwordSessionDetail(): string {
@@ -6502,7 +6463,7 @@
 
   async function submitTaskPasswordRequest(prompt: typeof jobPasswordPrompt) {
     if (!prompt || !isCurrentTaskPasswordPrompt(prompt)) {
-      showNotice(tr("gui.password.no_prompt_pending", "No password request is active."));
+      showNotice(tr("gui.password.no_prompt_pending"));
       return;
     }
     jobPasswordSubmissionAttempted = true;
@@ -6530,7 +6491,7 @@
 
   async function submitPasswordRequest() {
     if (!archivePasswordPrompt && !previewPasswordPrompt) {
-      showNotice(tr("gui.password.no_prompt_pending", "No password request is active."));
+      showNotice(tr("gui.password.no_prompt_pending"));
       return;
     }
     workspacePasswordSubmissionAttempted = true;
@@ -6619,7 +6580,7 @@
 
   async function answerConflictDecision(prompt: typeof jobConflictPrompt, decision: TaskConflictDecision, applyAll: boolean) {
     if (!prompt || !isCurrentTaskConflictPrompt(prompt)) {
-      showNotice(tr("gui.conflict.no_prompt_pending", "No conflict request is active"));
+      showNotice(tr("gui.conflict.no_prompt_pending"));
       return;
     }
     const answer = normalizeTaskConflictAnswer(decision, applyAll);
@@ -6945,7 +6906,7 @@
     const disabledTitle = classicCommandDisabledTitle(label);
     if (disabledTitle) return disabledTitle;
     if (label === "Extract To") return extractView.extractDestinationHint();
-    if (label === "Info") return tr("gui.archive.info_title", "Show archive information");
+    if (label === "Info") return tr("gui.archive.info_title");
     return "";
   }
 
@@ -6963,7 +6924,7 @@
       : classicCommandLabel(label);
   }
 
-  function isSettingsScreen(value: Screen = screen): boolean {
+  function isSettingsScreen(value: Screen = screen): value is SettingsScreen {
     return (
       value === "appearance" ||
       value === "colors" ||
@@ -6973,6 +6934,13 @@
       value === "passwordBook" ||
       value === "integration"
     );
+  }
+
+  function isOperationWorkspaceScreen(value: Screen): boolean {
+    return value === "create" || value === "convert" || value === "extract"
+      || value === "batch" || value === "nestedExtract" || value === "updateReview"
+      || value === "checksum" || value === "duplicates" || value === "password"
+      || value === "recovery";
   }
 
   function titleForScreen() {
@@ -6999,6 +6967,75 @@
     return archiveTitle();
   }
 </script>
+
+{#snippet operationWorkspace(variant: "modern" | "classic")}
+  {#if screen === "convert"}
+    <ArchiveOperationWorkspaceHost
+      kind="convert"
+      {variant}
+      owner={convertRouteOwner}
+      bridge={convertRouteBridge}
+      loadingTitle={tr("gui.convert.workspace_loading")}
+      loadingBody={tr("gui.convert.workspace_loading_body")}
+      failureTitle={tr("gui.convert.workspace_load_failed")}
+      failureBody={tr("gui.convert.workspace_load_failed_body")}
+      retryLabel={tr("gui.convert.workspace_retry")}
+    />
+  {:else if screen === "create"}
+    <ArchiveOperationWorkspaceHost
+      kind="create"
+      {variant}
+      session={create}
+      loadingTitle={tr("gui.create.workspace_loading")}
+      loadingBody={tr("gui.create.workspace_loading_body")}
+      failureTitle={tr("gui.create.workspace_load_failed")}
+      failureBody={tr("gui.create.workspace_load_failed_body")}
+      retryLabel={tr("gui.create.workspace_retry")}
+    />
+  {:else if screen === "extract"}
+    <ArchiveOperationWorkspaceHost
+      kind="extract"
+      {variant}
+      session={extraction} view={extractView} {presets} bridge={extractWorkspaceBridge()}
+      loadingTitle={tr("gui.extract.workspace_loading")}
+      loadingBody={tr("gui.extract.workspace_loading_body")}
+      failureTitle={tr("gui.extract.workspace_load_failed")}
+      failureBody={tr("gui.extract.workspace_load_failed_body")}
+      retryLabel={tr("gui.extract.workspace_retry")}
+    />
+  {:else if screen === "batch"}
+    <ToolsWorkspaceHost surface={extractionReviewSurface("batch", variant)} />
+  {:else if screen === "nestedExtract"}
+    <ToolsWorkspaceHost surface={extractionReviewSurface("nested", variant)} />
+  {:else if screen === "updateReview"}
+    <ToolsWorkspaceHost surface={archiveUpdateWorkspaceSurface(variant)} />
+  {:else if screen === "checksum"}
+    <ToolsWorkspaceHost surface={localToolsSurface("checksum", variant)} />
+  {:else if screen === "duplicates"}
+    <ToolsWorkspaceHost surface={localToolsSurface("duplicates", variant)} />
+  {:else if screen === "password"}
+    <PasswordWorkspaceHost surface={passwordWorkspaceSurface(variant)} />
+  {:else if screen === "recovery"}
+    {#if variant === "classic"}
+      <div class="classic-dialog-body" class:with-archive-return={showArchiveReturnBar()}>
+        {#if showArchiveReturnBar()}
+          <ArchiveReturnStrip
+            title={archiveTitle()}
+            detail={archiveReturnDetail()}
+            contextLabel={tr("gui.archive.current_context")}
+            actionLabel={tr("gui.archive.back_to_current")}
+            buttonClass="classic-primary"
+            iconSize={15}
+            onReturn={returnToCurrentArchive}
+          />
+        {/if}
+        <RecoveryWorkspaceHost {variant} session={recoverySession} {tr} />
+      </div>
+    {:else}
+      <RecoveryWorkspaceHost {variant} session={recoverySession} {tr} />
+    {/if}
+  {/if}
+{/snippet}
 
 <div class:task-center-layout={taskCenterVisible()}>
   <ToastHost
@@ -7236,7 +7273,7 @@
         </div>
         <div class="modern-toolbar" aria-label={tr("gui.aria.primary_actions")}>
           {#if isSettingsScreen()}
-            <button onclick={() => setScreen("browse")}><Icon name="archive" size={16} />{tr("gui.settings.back_to_archives", "Archives")}</button>
+            <button onclick={() => setScreen("browse")}><Icon name="archive" size={16} />{tr("gui.settings.back_to_archives")}</button>
           {:else if currentArchive || screen === "recent"}
             <button disabled={!appActionEnabled("open_archive")} aria-busy={archiveOpenStatus === "opening"} onclick={() => void runAppAction("open_archive")}><Icon name="folder-open" size={16} />{archiveOpenStatus === "opening" ? toolbarLabel("Opening") : toolbarLabel("Open")}</button>
             {#if screen === "browse" && currentArchive}
@@ -7280,7 +7317,7 @@
           {#each quickActions as action}
             <button role="menuitem" disabled={navigationDisabled(action.screen)} title={navigationDisabledReason(action.screen)} onclick={() => chooseQuickAction(action.screen)}>
               <Icon name={action.icon} size={15} />
-              <span><strong>{quickActionLabel(action.label)}</strong><small>{quickActionDetail(action.label, action.detail)}</small></span>
+              <span><strong>{tr(action.labelKey)}</strong><small>{tr(`${action.labelKey}.detail`)}</small></span>
             </button>
           {/each}
         </div>
@@ -7333,7 +7370,7 @@
           {#if isSettingsScreen()}
             <aside class="settings-workspace-rail" aria-label={tr("gui.settings.sections")}>
               <div class="panel-title"><Icon name="settings" size={16} />{tr("gui.settings.title")}</div>
-              <SettingsRouteList sections={settingsSections} active={screen} labelFor={settingsSectionLabel} detailFor={settingsSectionDetail} onChoose={setScreen} />
+              <SettingsRouteList sections={settingsSections} active={screen} onChoose={setScreen} />
             </aside>
           {/if}
           {#if showArchiveReturnBar()}
@@ -7350,7 +7387,7 @@
               <div class="sheet-head">
                 <div>
                   <span class="eyebrow">{tr("gui.recent.eyebrow")}</span>
-                  <h1>{tr("gui.recent.title", "Recent archives")}</h1>
+                  <h1>{tr("gui.recent.title")}</h1>
                   <p>{tr("gui.recent.subtitle")}</p>
                 </div>
                 <button class="primary sheet-action" disabled={!appActionEnabled("open_archive")} onclick={() => void runAppAction("open_archive")}><Icon name="folder-open" size={17} />{archiveOpenStatus === "opening" ? toolbarLabel("Opening") : toolbarLabel("Open")}</button>
@@ -7381,60 +7418,8 @@
                 </aside>
               </div>
             </div>
-          {:else if screen === "convert"}
-            <ArchiveOperationWorkspaceHost
-              kind="convert"
-              variant="modern"
-              owner={convertRouteOwner}
-              bridge={convertRouteBridge}
-              loadingTitle={tr("gui.convert.workspace_loading")}
-              loadingBody={tr("gui.convert.workspace_loading_body")}
-              failureTitle={tr("gui.convert.workspace_load_failed")}
-              failureBody={tr("gui.convert.workspace_load_failed_body")}
-              retryLabel={tr("gui.convert.workspace_retry")}
-            />
-          {:else if screen === "create"}
-            <ArchiveOperationWorkspaceHost
-              kind="create"
-              variant="modern"
-              session={create}
-              loadingTitle={tr("gui.create.workspace_loading")}
-              loadingBody={tr("gui.create.workspace_loading_body")}
-              failureTitle={tr("gui.create.workspace_load_failed")}
-              failureBody={tr("gui.create.workspace_load_failed_body")}
-              retryLabel={tr("gui.create.workspace_retry")}
-            />
-          {:else if screen === "extract"}
-            <ArchiveOperationWorkspaceHost
-              kind="extract"
-              variant="modern"
-              session={extraction} view={extractView} {presets} bridge={extractWorkspaceBridge()}
-              loadingTitle={tr("gui.extract.workspace_loading")}
-              loadingBody={tr("gui.extract.workspace_loading_body")}
-              failureTitle={tr("gui.extract.workspace_load_failed")}
-              failureBody={tr("gui.extract.workspace_load_failed_body")}
-              retryLabel={tr("gui.extract.workspace_retry")}
-            />
-          {:else if screen === "batch"}
-            <ToolsWorkspaceHost surface={extractionReviewSurface("batch", "modern")} />
-          {:else if screen === "nestedExtract"}
-            <ToolsWorkspaceHost surface={extractionReviewSurface("nested", "modern")} />
-          {:else if screen === "updateReview"}
-            <ToolsWorkspaceHost surface={archiveUpdateWorkspaceSurface("modern")} />
-          {:else if screen === "checksum"}
-            <ToolsWorkspaceHost surface={localToolsSurface("checksum", "modern")} />
-          {:else if screen === "duplicates"}
-            <ToolsWorkspaceHost surface={localToolsSurface("duplicates", "modern")} />
-          {:else if screen === "password"}
-            <PasswordWorkspaceHost
-              surface={passwordWorkspaceSurface("modern")}
-            />
-          {:else if screen === "recovery"}
-            <RecoveryWorkspaceHost
-              variant="modern"
-              session={recoverySession}
-              {tr}
-            />
+          {:else if isOperationWorkspaceScreen(screen)}
+            {@render operationWorkspace("modern")}
           {:else if screen === "archiveInfo"}
             <div class="settings-view modern-archive-info">
               <div class="sheet-head">
@@ -7483,7 +7468,7 @@
                 </aside>
               </div>
             </div>
-          {:else if isSettingsWorkspaceScreen(screen)}
+          {:else if isSettingsScreen(screen)}
             <SettingsWorkspaceHost
               workspace={settingsWorkspaceProps(screen)}
               loadingTitle={tr("gui.settings.workspace_loading")}
@@ -7696,7 +7681,7 @@
           {#each quickActions as action}
             <button role="menuitem" disabled={navigationDisabled(action.screen)} title={navigationDisabledReason(action.screen)} onclick={() => chooseQuickAction(action.screen)}>
               <Icon name={action.icon} size={15} />
-              <span><strong>{quickActionLabel(action.label)}</strong><small>{quickActionDetail(action.label, action.detail)}</small></span>
+              <span><strong>{tr(action.labelKey)}</strong><small>{tr(`${action.labelKey}.detail`)}</small></span>
             </button>
           {/each}
         </div>
@@ -7749,73 +7734,8 @@
             </div>
           </section>
         </div>
-      {:else if screen === "convert"}
-        <ArchiveOperationWorkspaceHost
-          kind="convert"
-          variant="classic"
-          owner={convertRouteOwner}
-          bridge={convertRouteBridge}
-          loadingTitle={tr("gui.convert.workspace_loading")}
-          loadingBody={tr("gui.convert.workspace_loading_body")}
-          failureTitle={tr("gui.convert.workspace_load_failed")}
-          failureBody={tr("gui.convert.workspace_load_failed_body")}
-          retryLabel={tr("gui.convert.workspace_retry")}
-        />
-      {:else if screen === "create"}
-        <ArchiveOperationWorkspaceHost
-          kind="create"
-          variant="classic"
-          session={create}
-          loadingTitle={tr("gui.create.workspace_loading")}
-          loadingBody={tr("gui.create.workspace_loading_body")}
-          failureTitle={tr("gui.create.workspace_load_failed")}
-          failureBody={tr("gui.create.workspace_load_failed_body")}
-          retryLabel={tr("gui.create.workspace_retry")}
-        />
-      {:else if screen === "extract"}
-        <ArchiveOperationWorkspaceHost
-          kind="extract"
-          variant="classic"
-          session={extraction} view={extractView} {presets} bridge={extractWorkspaceBridge()}
-          loadingTitle={tr("gui.extract.workspace_loading")}
-          loadingBody={tr("gui.extract.workspace_loading_body")}
-          failureTitle={tr("gui.extract.workspace_load_failed")}
-          failureBody={tr("gui.extract.workspace_load_failed_body")}
-          retryLabel={tr("gui.extract.workspace_retry")}
-        />
-      {:else if screen === "batch"}
-        <ToolsWorkspaceHost surface={extractionReviewSurface("batch", "classic")} />
-      {:else if screen === "nestedExtract"}
-        <ToolsWorkspaceHost surface={extractionReviewSurface("nested", "classic")} />
-      {:else if screen === "updateReview"}
-        <ToolsWorkspaceHost surface={archiveUpdateWorkspaceSurface("classic")} />
-      {:else if screen === "checksum"}
-        <ToolsWorkspaceHost surface={localToolsSurface("checksum", "classic")} />
-      {:else if screen === "duplicates"}
-        <ToolsWorkspaceHost surface={localToolsSurface("duplicates", "classic")} />
-      {:else if screen === "password"}
-        <PasswordWorkspaceHost
-          surface={passwordWorkspaceSurface("classic")}
-        />
-      {:else if screen === "recovery"}
-        <div class="classic-dialog-body" class:with-archive-return={showArchiveReturnBar()}>
-          {#if showArchiveReturnBar()}
-            <ArchiveReturnStrip
-              title={archiveTitle()}
-              detail={archiveReturnDetail()}
-              contextLabel={tr("gui.archive.current_context")}
-              actionLabel={tr("gui.archive.back_to_current")}
-              buttonClass="classic-primary"
-              iconSize={15}
-              onReturn={returnToCurrentArchive}
-            />
-          {/if}
-          <RecoveryWorkspaceHost
-            variant="classic"
-            session={recoverySession}
-            {tr}
-          />
-        </div>
+      {:else if isOperationWorkspaceScreen(screen)}
+        {@render operationWorkspace("classic")}
       {:else}
         {#if classicArchiveStartVisible()}
           <div class="classic-start-body">
@@ -7850,7 +7770,7 @@
           <span>{create.view.splitCapability()} · {create.view.formatRecovery()}</span>
           <strong>{create.view.diskPreflightStatusbar()}</strong>
         {:else if screen === "convert"}
-          <span>{tr("gui.convert.title", "Convert archive")}</span>
+          <span>{tr("gui.convert.title")}</span>
           <span>{tr("gui.convert.status_source_target")
             .replace("{source}", convertRouteStatus.sourceFormat)
             .replace("{target}", convertRouteStatus.targetLabel)}</span>

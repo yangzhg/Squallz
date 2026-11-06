@@ -1,3 +1,4 @@
+import { deferred } from "../../tests/async.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createTestServer } from "../../tests/runtime.mjs";
@@ -15,12 +16,6 @@ test.beforeEach(async () => {
   await loadLocale("en-US");
 });
 test.afterEach(() => Object.assign(ipc, originalIpc));
-
-function deferred() {
-  let resolve;
-  const promise = new Promise((yes) => { resolve = yes; });
-  return { promise, resolve };
-}
 
 function harness(initial = {}) {
   const effects = [];

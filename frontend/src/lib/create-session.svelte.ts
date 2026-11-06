@@ -230,13 +230,13 @@ export class CreateSession {
   chooseProfile = (next: CreateProfileId) => {
     if (!this.edit({ kind: "profile", value: next })) return;
     this.persistProfile(next);
-    const profile = this.view.profileData(next);
+    const profile = this.view.profileLabel(next);
     recordOperation({
       status: "info",
       title: tr("gui.create.profile_selected_operation"),
-      detail: `${profile.label} · level ${profile.level}`,
+      detail: `${profile} · level ${this.options.compressionLevel}`,
     });
-    this.port.notice(tr("gui.create.profile_selected_notice").replace("{profile}", profile.label));
+    this.port.notice(tr("gui.create.profile_selected_notice").replace("{profile}", profile));
   };
 
   chooseFormat = (next: CreateFormatId) => {

@@ -1,3 +1,4 @@
+import { deferred } from "../../tests/async.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
 import vm from "node:vm";
@@ -5,13 +6,6 @@ import vm from "node:vm";
 import { englishTranslate, createTestServer } from "../../tests/runtime.mjs";
 import { compileTestScript, readSvelteScript, selectFunctions } from "../../tests/source.mjs";
 import { extractionFixture } from "../../tests/extraction.mjs";
-
-function deferred() {
-  let resolve;
-  let reject;
-  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
-  return { promise, resolve, reject };
-}
 
 function archiveInfo(id, name = "outer.zip") {
   return {
@@ -62,7 +56,7 @@ async function withNestedOpen(run, { systemOpen = false } = {}) {
   const server = await createTestServer();
   try {
     const archive = await server.ssrLoadModule("/src/lib/archive.svelte.ts");
-    const { ipc } = await server.ssrLoadModule("/src/lib/ipc.ts");
+    const { ipc, isErrorDto } = await server.ssrLoadModule("/src/lib/ipc.ts");
     const closed = [];
     const cancelledPreviews = [];
     ipc.closeArchive = async (id) => { closed.push(id); };
@@ -82,13 +76,13 @@ async function withNestedOpen(run, { systemOpen = false } = {}) {
     const { RecoverySession } = await server.ssrLoadModule("/src/lib/recovery-session.svelte.ts");
     const systemOpenHelpers = systemOpen ? await server.ssrLoadModule("/src/lib/preview-presentation.ts") : {};
     const names = ["clearNotice", "cancelTaskReview", "nestedArchiveAction", "extractNestedPreviewArchive", "retryEntryPreview", "runPreviewWithPassword", "clearEntryPreviewState", "entryPreviewForPath", "hasPreparedPreviewForPath", "selectOnlyEntry", "selectEntry", "toggleEntrySelection", "activateEntry", "submitPasswordRequest", "cancelPasswordRequest", "dismissArchivePasswordRequest", "dismissArchivePicker", "setScreen", "openArchivePath", "openRecoverySet", "passwordPromptDetail", "submitPreviewEntry",
-      "openRecoveryConfiguration", "saveNativeDialog", "openNativeDialog", "withNativeDialog", "openExtractWorkspace", "selectedJobPaths"];
+      "openRecoveryConfiguration", "saveNativeDialog", "openNativeDialog", "withNativeDialog", "openExtractWorkspace", "selectedJobPaths", "previewFailureMessage"];
     if (systemOpen) names.push("openEntryPreview", "repairFilenameEncoding", "setMode");
     const declarations = selectFunctions(source, names).map((node) => node.getText(source));
     const notices = [];
     const operations = [];
     const context = {
-      ...systemOpenHelpers, ipc, adoptOpenedArchive: archive.adoptOpenedArchive,
+      ...systemOpenHelpers, ipc, isErrorDto, adoptOpenedArchive: archive.adoptOpenedArchive,
       appNotice: null, noticeTimer: null, clearTimeout, nativeDialogCount: 0,
       taskReviewRequestGeneration: 0, nestedExtractDraftGeneration: 0,
       syncUrl: () => {}, tick: async () => {},
@@ -134,7 +128,6 @@ async function withNestedOpen(run, { systemOpen = false } = {}) {
       joinFolderPath: (parent, child) => `${parent}/${child}`,
       waitForPreviewFeedbackFrame: async () => {}, archiveEncodingForJob: () => null,
       entryTypeForPath: () => "file", previewPolicyFor: () => ({ kind: "nested" }),
-      previewFailureMessage: (_error, _nested, _key, fallback) => fallback,
       archiveSelectionBusyReason: () => "",
       selectRow: archive.selectRow, toggleSelect: archive.toggleSelect, selectedPaths: archive.selectedPaths,
       pathBaseName: (path) => path.split("/").at(-1),
@@ -727,7 +720,7 @@ test("system opening and encoding repair keep preparation and feedback within th
     assert.equal(context.appNotice, null, "system opening clears older feedback before waiting");
     context.appNotice = "newer independent feedback";
     assert.equal(await opening, false);
-    assert.match(context.entryPreviewFailure.message, /Could not open this item.*Try again or extract/u);
+    assert.equal(context.entryPreviewFailure.message, "Could not open: notes.txt");
     assert.equal(context.entryPreview.preview_id, preview.preview_id, "system-open failure keeps the prepared file retryable");
     assert.equal(context.appNotice, "newer independent feedback", "a late system-open failure preserves other actions' feedback");
     assert.deepEqual(notices, [], "system-open failure is visible inline without a duplicate notice");
@@ -746,7 +739,7 @@ test("system opening and encoding repair keep preparation and feedback within th
     preparing.resolve(preparedFile);
     await automaticOpening;
     assert.equal(context.appNotice, "newer preparation feedback", "automatic system opening preserves feedback received during preparation");
-    assert.match(context.entryPreviewFailure.message, /Could not open this item.*Try again or extract/u);
+    assert.equal(context.entryPreviewFailure.message, "Could not open: notes.txt");
     assert.equal(context.entryPreview.preview_id, preparedFile.preview_id);
     assert.deepEqual(notices, []);
 

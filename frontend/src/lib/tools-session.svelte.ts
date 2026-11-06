@@ -128,7 +128,7 @@ export class ToolsSession {
   targetLabel(kind: "checksum" | "duplicate_scan"): string {
     return this.target(kind) || (kind === "checksum"
       ? tr("gui.checksum.choose_file_or_folder")
-      : tr("gui.duplicates.choose_folder_or_open_archive", "Choose a folder or open an archive"));
+      : tr("gui.duplicates.choose_folder_or_open_archive"));
   }
 
   targetName(kind: "checksum" | "duplicate_scan"): string {
@@ -202,7 +202,7 @@ export class ToolsSession {
       },
       manifest: {
         purpose: "checksum.manifest",
-        title: tr("gui.checksum.choose_manifest", "Choose checksum manifest"),
+        title: tr("gui.checksum.choose_manifest"),
         unchanged: tr("gui.checksum.manifest_unchanged"),
         selected: tr("gui.checksum.manifest_selected"),
         failure: tr("gui.checksum.choose_manifest_requires_desktop_dialog"),
@@ -433,7 +433,6 @@ export class ToolsSession {
   }
 
   algorithmHint(algorithm: ChecksumAlgorithmId): string {
-    const hints = { sha256: "Default", sha224: "SHA-2", sha384: "Signed releases", sha512: "Wide SHA-2", sha1: "Weak", md5: "Weak", blake3: "Fast", crc32: "ZIP CRC" };
-    return tr(`gui.checksum.algorithm_${algorithm}_hint`, hints[algorithm]);
+    return tr(`gui.checksum.algorithm_${algorithm}_hint`);
   }
 }

@@ -1,12 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { englishTranslate, createTestServer } from "../../tests/runtime.mjs";
+import { englishTranslate, withTestServer } from "../../tests/runtime.mjs";
 
 test("conversion target helpers preserve explicit formats and safe extensions", async () => {
-  const server = await createTestServer();
-
-  try {
+  await withTestServer(async (server) => {
     const helpers = await server.ssrLoadModule("/src/lib/convert-format.ts");
     const outputOptions = await server.ssrLoadModule("/src/lib/archive-output-options.ts");
     assert.equal(helpers.suggestedConvertTargetFormat("ZIP"), "7z");
@@ -48,14 +46,11 @@ test("conversion target helpers preserve explicit formats and safe extensions", 
     assert.equal(outputOptions.resolveSplitSizeBytes("custom", "4", "gib"), 4 * 1024 ** 3);
     assert.equal(outputOptions.resolveSplitSizeBytes("custom", "1.5", "gib"), 1.5 * 1024 ** 3);
     assert.equal(outputOptions.resolveSplitSizeBytes("custom", "0.05", "mib"), null);
-  } finally {
-    await server.close();
-  }
+  });
 });
 
 test("conversion preflight checks the exact core budgets before review", async () => {
-  const server = await createTestServer();
-  try {
+  await withTestServer(async (server) => {
     const [{ ArchiveOutputWorkflow }, { ipc }] = await Promise.all([
       server.ssrLoadModule("/src/lib/archive-output-workflow.svelte.ts"),
       server.ssrLoadModule("/src/lib/ipc.ts"),
@@ -117,15 +112,11 @@ test("conversion preflight checks the exact core budgets before review", async (
     } finally {
       Object.assign(ipc, original);
     }
-  } finally {
-    await server.close();
-  }
+  });
 });
 
 test("convert lazy sessions isolate roots and preserve only non-sensitive drafts", async () => {
-  const server = await createTestServer();
-
-  try {
+  await withTestServer(async (server) => {
     const [{ convertSessionFor }, { ipc }] = await Promise.all([
       server.ssrLoadModule("/src/lib/convert-session.svelte.ts"),
       server.ssrLoadModule("/src/lib/ipc.ts"),
@@ -507,15 +498,11 @@ test("convert lazy sessions isolate roots and preserve only non-sensitive drafts
     } finally {
       Object.assign(ipc, original);
     }
-  } finally {
-    await server.close();
-  }
+  });
 });
 
 test("disposed convert sessions ignore late submission failures", async () => {
-  const server = await createTestServer();
-
-  try {
+  await withTestServer(async (server) => {
     const [{ convertSessionFor }, { ipc }] = await Promise.all([
       server.ssrLoadModule("/src/lib/convert-session.svelte.ts"),
       server.ssrLoadModule("/src/lib/ipc.ts"),
@@ -662,7 +649,5 @@ test("disposed convert sessions ignore late submission failures", async () => {
     } finally {
       Object.assign(ipc, original);
     }
-  } finally {
-    await server.close();
-  }
+  });
 });

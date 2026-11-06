@@ -21,16 +21,13 @@
 </script>
 
 <script lang="ts">
-  import Icon from "./Icon.svelte";
-  import DeferredViewError from "./DeferredViewError.svelte";
+  import DeferredView from "./DeferredView.svelte";
 
   let {
     surface,
   }: {
     surface: ToolsWorkspaceSurface;
   } = $props();
-
-  let workspace = $state(workspaceLoader.load());
 
   let loadingTitle = $derived(
     surface.tr("gui.tools.workspace_loading")
@@ -49,54 +46,26 @@
         ? "settings-view modern-checksum"
         : "settings-view modern-duplicates",
   );
-
-  function retry(): void {
-    workspace = workspaceLoader.retry();
-  }
 </script>
 
-{#await workspace}
-  {#if surface.variant === "modern"}
-    <div class={modernClass}>
-      <section class="deferred-workspace-state" role="status" aria-live="polite" aria-busy="true">
-        <Icon name="hourglass" size={20} />
-        <div>
-          <strong>{loadingTitle}</strong>
-          <span>{surface.tr("gui.tools.workspace_loading_body")}</span>
-        </div>
-      </section>
+<DeferredView
+  loader={workspaceLoader} classic={surface.variant === "classic"}
+  loadingTag={surface.variant === "classic" ? "div" : "section"}
+  {loadingTitle} loadingBody={surface.tr("gui.tools.workspace_loading_body")}
+  {failureTitle} failureBody={surface.tr("gui.tools.workspace_load_failed_body")}
+  retryLabel={surface.tr("gui.tools.workspace_retry")}
+>
+  {#snippet frame(content, failed)}
+    <div
+      class={surface.variant === "modern" ? modernClass : "classic-dialog-body"}
+      class:with-archive-return={surface.variant === "classic" && !failed && surface.archiveReturn.visible}
+    >
+      {#if surface.variant === "classic" && !failed}
+        <section class="classic-extract-sheet">{@render content()}</section>
+      {:else}
+        {@render content()}
+      {/if}
     </div>
-  {:else}
-    <div class="classic-dialog-body" class:with-archive-return={surface.archiveReturn.visible}>
-      <section class="classic-extract-sheet">
-        <div class="deferred-workspace-state" role="status" aria-live="polite" aria-busy="true">
-          <Icon name="hourglass" size={20} />
-          <div>
-            <strong>{loadingTitle}</strong>
-            <span>{surface.tr("gui.tools.workspace_loading_body")}</span>
-          </div>
-        </div>
-      </section>
-    </div>
-  {/if}
-{:then Workspace}
-  <Workspace {surface} />
-{:catch error}
-  {#if surface.variant === "modern"}
-    <div class={modernClass}>
-      <DeferredViewError
-        {error} title={failureTitle}
-        body={surface.tr("gui.tools.workspace_load_failed_body")}
-        retryLabel={surface.tr("gui.tools.workspace_retry")} onRetry={retry}
-      />
-    </div>
-  {:else}
-    <div class="classic-dialog-body">
-      <DeferredViewError
-        {error} title={failureTitle}
-        body={surface.tr("gui.tools.workspace_load_failed_body")}
-        retryLabel={surface.tr("gui.tools.workspace_retry")} onRetry={retry} classic
-      />
-    </div>
-  {/if}
-{/await}
+  {/snippet}
+  {#snippet children(Workspace)}<Workspace {surface} />{/snippet}
+</DeferredView>

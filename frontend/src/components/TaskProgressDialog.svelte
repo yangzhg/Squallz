@@ -386,7 +386,7 @@
         </footer>
       </form>
     {:else if conflictQuestion}
-      <section class="task-question-card" aria-label={tr("gui.screen.conflict", "Conflict handling") }>
+      <section class="task-question-card" aria-label={tr("gui.screen.conflict") }>
         <header class="task-question-head">
           <span class="task-question-icon warning"><Icon name="alert-triangle" size={18} /></span>
           <div>
@@ -396,8 +396,8 @@
         </header>
         <div class="task-question-conflict">
           <strong>{conflictQuestion.path}</strong>
-          <span><b>{tr("gui.conflict.existing", "Existing")}</b>{conflictQuestion.existing}</span>
-          <span><b>{tr("gui.conflict.incoming", "Incoming")}</b>{conflictQuestion.incoming}</span>
+          <span><b>{tr("gui.conflict.existing")}</b>{conflictQuestion.existing}</span>
+          <span><b>{tr("gui.conflict.incoming")}</b>{conflictQuestion.incoming}</span>
         </div>
         {#if actionFailure}
           <p class="task-question-error" role="alert">{actionFailure}</p>
@@ -414,7 +414,7 @@
           <button type="button" onclick={() => onAnswerConflict("abort", false)}>{tr("gui.conflict.cancel_extraction")}</button>
           <button type="button" onclick={() => onAnswerConflict("skip", conflictApplyAll)}>{tr("gui.conflict.skip")}</button>
           <button class="conflict-danger" type="button" onclick={() => onAnswerConflict("overwrite", conflictApplyAll)}>{tr("gui.conflict.overwrite")}</button>
-          <button class="primary-lite" type="button" onclick={() => onAnswerConflict("rename", conflictApplyAll)}>{tr("gui.conflict.rename", "Keep both")}</button>
+          <button class="primary-lite" type="button" onclick={() => onAnswerConflict("rename", conflictApplyAll)}>{tr("gui.conflict.rename")}</button>
         </footer>
       </section>
     {/if}

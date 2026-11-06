@@ -11,8 +11,7 @@
 </script>
 
 <script lang="ts">
-  import Icon from "./Icon.svelte";
-  import DeferredViewError from "./DeferredViewError.svelte";
+  import DeferredView, { type DeferredViewMessages } from "./DeferredView.svelte";
 
   let {
     surface,
@@ -25,38 +24,17 @@
   }: {
     surface: ModernInspectorSurfaceProps;
     ariaLabel: string;
-    loadingTitle: string;
-    loadingBody: string;
-    failureTitle: string;
-    failureBody: string;
-    retryLabel: string;
-  } = $props();
-
-  let component = $state(inspectorLoader.load());
+  } & DeferredViewMessages = $props();
   let previewOpen = $derived(
     surface.view.kind === "archive" && Boolean(
       surface.view.preview.nested || surface.view.preview.busy ||
       surface.view.preview.failed || surface.view.preview.entry,
     ),
   );
-
-  function retry(): void {
-    component = inspectorLoader.retry();
-  }
 </script>
 
 <aside class="modern-inspector" class:preview-open={previewOpen} aria-label={ariaLabel}>
-  {#await component}
-    <section class="deferred-workspace-state" role="status" aria-live="polite" aria-busy="true">
-      <Icon name="hourglass" size={20} />
-      <div>
-        <strong>{loadingTitle}</strong>
-        <span>{loadingBody}</span>
-      </div>
-    </section>
-  {:then ModernInspector}
-    <ModernInspector {...surface} />
-  {:catch error}
-    <DeferredViewError {error} title={failureTitle} body={failureBody} {retryLabel} onRetry={retry} />
-  {/await}
+  <DeferredView loader={inspectorLoader} {loadingTitle} {loadingBody} {failureTitle} {failureBody} {retryLabel}>
+    {#snippet children(ModernInspector)}<ModernInspector {...surface} />{/snippet}
+  </DeferredView>
 </aside>

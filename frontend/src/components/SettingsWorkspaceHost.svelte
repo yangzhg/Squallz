@@ -9,8 +9,7 @@
 </script>
 
 <script lang="ts">
-  import Icon from "./Icon.svelte";
-  import DeferredViewError from "./DeferredViewError.svelte";
+  import DeferredView, { type DeferredViewMessages } from "./DeferredView.svelte";
   import type { SettingsWorkspaceProps } from "./SettingsWorkspace.svelte";
 
   let {
@@ -22,30 +21,9 @@
     retryLabel,
   }: {
     workspace: SettingsWorkspaceProps;
-    loadingTitle: string;
-    loadingBody: string;
-    failureTitle: string;
-    failureBody: string;
-    retryLabel: string;
-  } = $props();
-
-  let component = $state(workspaceLoader.load());
-
-  function retry(): void {
-    component = workspaceLoader.retry();
-  }
+  } & DeferredViewMessages = $props();
 </script>
 
-{#await component}
-  <section class="deferred-workspace-state" role="status" aria-live="polite" aria-busy="true">
-    <Icon name="hourglass" size={20} />
-    <div>
-      <strong>{loadingTitle}</strong>
-      <span>{loadingBody}</span>
-    </div>
-  </section>
-{:then Workspace}
-  <Workspace {...workspace} />
-{:catch error}
-  <DeferredViewError {error} title={failureTitle} body={failureBody} {retryLabel} onRetry={retry} />
-{/await}
+<DeferredView loader={workspaceLoader} {loadingTitle} {loadingBody} {failureTitle} {failureBody} {retryLabel}>
+  {#snippet children(Workspace)}<Workspace {...workspace} />{/snippet}
+</DeferredView>

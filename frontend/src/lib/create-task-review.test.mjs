@@ -1,9 +1,9 @@
+import { deferred } from "../../tests/async.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
-import vm from "node:vm";
 
 import { englishTranslate, createTestServer } from "../../tests/runtime.mjs";
-import { compileTestScript, readSvelteScript, selectFunctions } from "../../tests/source.mjs";
+import { evaluateFunctions, readSvelteScript } from "../../tests/source.mjs";
 
 const server = await createTestServer();
 test.after(() => server.close());
@@ -15,6 +15,7 @@ const { RecoverySession } = await server.ssrLoadModule("/src/lib/recovery-sessio
 const { ipc } = await server.ssrLoadModule("/src/lib/ipc.ts");
 const originalIpc = { ...ipc };
 test.after(() => Object.assign(ipc, originalIpc));
+const source = readSvelteScript(new URL("../App.svelte", import.meta.url), "App.ts");
 
 function taskSpec(overrides = {}) {
   return {
@@ -30,12 +31,10 @@ function taskSpec(overrides = {}) {
 
 async function harness({ navigation = false, preparation = false, preview = false } = {}) {
   // Host routing and DOM focus remain integration tests; every Create command uses its real owner.
-  const source = readSvelteScript(new URL("../App.svelte", import.meta.url), "App.ts");
   const names = ["reviewTask", "preventCreateSubmissionNavigation", "preventConvertSubmissionNavigation",
     "preventTaskWorkspaceNavigation", "applyCreatePreflightEffect",
     ...(preparation ? ["setMode", "createPrimaryAction", "focusCreatePrimaryAction"] : []),
     ...(navigation ? ["setScreen", "dismissTaskDialog", "closeTaskCenter", "cancelTaskReview"] : [])];
-  const declarations = selectFunctions(source, names);
   const calls = [];
   let requestId = 0;
   const context = {
@@ -120,9 +119,8 @@ async function harness({ navigation = false, preparation = false, preview = fals
     context.document.querySelector = () => ({ focus() { calls.push(["review-focus"]); } });
     context.document.getElementById = () => ({ focus() { calls.push(["primary-focus"]); } });
   }
-  const outputText = compileTestScript(declarations.map((node) => node.getText(source)).join("\n"));
   context.calls = calls;
-  const run = vm.runInNewContext(outputText + "\n({" + names.join(",") + ", create, context:globalThis, calls})", context);
+  const run = { ...evaluateFunctions(source, names, context), create, context, calls };
   for (const method of ["inspectCreateDestination", "cancelCreateDestinationInspection", "uniqueCreateDestination",
     "planCreate", "cancelCreatePlan", "checkDiskSpace", "tempDir"]) ipc[method] = (...args) => context.ipc[method](...args);
   create.syncContext();
@@ -442,13 +440,6 @@ test("edited formats adapt the original output suggestion and cancelled selectio
   assert.equal(run.create.preflight.state.issueStage, "destination");
   assert.match(run.calls.findLast(([name]) => name === "notice")[1], /Destination selection cancelled/);
 });
-
-function deferred() {
-  let resolve;
-  let reject;
-  const promise = new Promise((accept, fail) => { resolve = accept; reject = fail; });
-  return { promise, resolve, reject };
-}
 
 async function waitFor(predicate, label) {
   for (let attempt = 0; attempt < 100; attempt += 1) {

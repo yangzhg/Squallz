@@ -1,3 +1,4 @@
+import { deferred } from "../../tests/async.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createTestServer } from "../../tests/runtime.mjs";
@@ -68,12 +69,6 @@ test("fitting respects both the design cap and available monitor work area", () 
     workArea: { position: { x: 0, y: 0 }, size: { width: 1000, height: 700 } },
   }), request(1000)), null, "a smaller monitor cannot force an existing window to shrink");
 });
-
-function deferred() {
-  let resolve;
-  const promise = new Promise((yes) => { resolve = yes; });
-  return { promise, resolve };
-}
 
 function fitterFixture(overrides = {}) {
   let current = geometry();

@@ -87,7 +87,7 @@
       hint={tr("gui.excludes.create_hint")}
       countLabel={tr("gui.excludes.count").replace("{count}", String(rules.length))}
       value={rulesText}
-      placeholder={tr("gui.excludes.placeholder", ".git\nnode_modules\n*.tmp")}
+      placeholder={tr("gui.excludes.placeholder")}
       ariaLabel={tr("gui.create.exclude_glob_rules")}
       {rules}
       emptyLabel={tr("gui.create.no_rules")}
@@ -101,7 +101,7 @@
 {#if variant === "modern"}
   <section class="content-policy-card">
     <h2><Icon name="folder-open" size={16} />{tr("gui.create.content_policy.title")}</h2>
-    <p>{tr("gui.create.content_policy.intro", "Choose what to do with platform-specific helper files.")}</p>
+    <p>{tr("gui.create.content_policy.intro")}</p>
     {@render policyFields()}
   </section>
 {:else}

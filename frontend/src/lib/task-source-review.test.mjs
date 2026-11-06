@@ -1,13 +1,12 @@
 import { englishTranslate } from "../../tests/runtime.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
-import vm from "node:vm";
-import { compileTestScript, readSvelteScript, selectFunctions } from "../../tests/source.mjs";
+import { evaluateFunctions, readSvelteScript } from "../../tests/source.mjs";
+
+const source = readSvelteScript(new URL("../App.svelte", import.meta.url), "App.ts");
 
 function harness() {
-  const source = readSvelteScript(new URL("../App.svelte", import.meta.url), "App.ts");
   const names=["cancelTaskReview","prepareTaskReview","closeTaskCenter","openTaskCenterDetails","returnToTaskCenter"];
-  const declarations = selectFunctions(source, names);
   const calls=[];
   const context={taskWindowMode:false,taskReviewRequestGeneration:0,pendingTaskReviewId:null,screen:"browse",currentArchive:{id:1},
     taskReviewScreen:()=>"extract",previewTaskSpecForReview:()=>null,
@@ -19,8 +18,7 @@ function harness() {
     tools:{leave(){}},
     tick:()=>Promise.resolve(),sameFilePath:(left,right)=>left===right,
   };
-  const outputText = compileTestScript(declarations.map((node) => node.getText(source)).join("\n"));
-  const api=vm.runInNewContext(`${outputText}\n({${names.join(",")}})`,context);
+  const api = evaluateFunctions(source, names, context);
   return {review:api.prepareTaskReview,api,context,calls};
 }
 

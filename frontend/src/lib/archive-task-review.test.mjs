@@ -1,8 +1,8 @@
+import { deferred } from "../../tests/async.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
-import vm from "node:vm";
 import { englishTranslate, createTestServer } from "../../tests/runtime.mjs";
-import { compileTestScript, readSvelteScript, selectFunctions } from "../../tests/source.mjs";
+import { evaluateFunctions, readSvelteScript } from "../../tests/source.mjs";
 import { settingsDto } from "../../tests/settings.mjs";
 import { extractionFixture } from "../../tests/extraction.mjs";
 
@@ -43,15 +43,15 @@ function archive(path = "/original/photos.zip", id = 1, encoding = null) {
   return { id, path, source: path, name: path.split("/").at(-1), encoding_override: encoding };
 }
 
+const source = readSvelteScript(new URL("../App.svelte", import.meta.url), "App.ts");
+
 function harness() {
-  const source = readSvelteScript(new URL("../App.svelte", import.meta.url), "App.ts");
   const names = ["cancelTaskReview", "reviewTask", "reviewExtractTask", "reviewConvertTask", "reviewArchiveTask", "restoreExtractTaskDraft", "finishOpenedArchive",
     "openArchivePath", "openArchiveFromDialog", "dismissArchivePicker", "openExtractWorkspace",
     "cancelPasswordRequest", "submitPasswordRequest", "dismissArchivePasswordRequest",
     "isCurrentTaskPasswordPrompt", "submitTaskPasswordRequest", "cancelTaskPasswordRequest", "passwordWorkspaceSurface",
     "passwordPromptName", "passwordPromptDetail", "passwordSessionDetail", "passwordFailureDetail", "taskPasswordQuestion",
     "setScreen", "preventTaskWorkspaceNavigation", "archiveEncodingForJob"];
-  const declarations = selectFunctions(source, names);
   const calls = [];
   const context = {
     calls, taskReviewScreen, taskWindowMode: false, currentArchive: archive(),
@@ -132,21 +132,13 @@ function harness() {
       symlinks: 0, hardlinks: 0, other: 0, total_bytes: 12, estimated_conflicts: 0,
       required_free_bytes: 12300, available_bytes: 20000, space_ok: true };
   };
-  const outputText = compileTestScript(declarations.map((node) => node.getText(source)).join("\n"));
-  return vm.runInNewContext(`${outputText}\n({${declarations.map((node) => node.name.text).join(",")},context:globalThis,calls})`,context);
+  return { ...evaluateFunctions(source, names, context), context, calls };
 }
 
 async function loadPreset(run, preset) {
   const original = ipc.getArchivePresets;
   ipc.getArchivePresets = async () => ({ version: 1, presets: [preset], bindings: {} });
   try { await run.context.presets.load(); } finally { ipc.getArchivePresets = original; }
-}
-
-function deferred() {
-  let resolve;
-  let reject;
-  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
-  return { promise, resolve, reject };
 }
 
 async function withArchiveStore(run, exercise) {

@@ -2,12 +2,10 @@ import { jobResult } from "../../tests/job-results.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createTestServer } from "../../tests/runtime.mjs";
+import { withTestServer } from "../../tests/runtime.mjs";
 
 test("created archive opening falls back to reveal only when opening fails", async () => {
-  const server = await createTestServer();
-
-  try {
+  await withTestServer(async (server) => {
     const { openCreatedOutputWithFallback } = await server.ssrLoadModule(
       "/src/lib/create-completion.ts",
     );
@@ -50,15 +48,11 @@ test("created archive opening falls back to reveal only when opening fails", asy
       "unavailable",
     );
     assert.equal(reveals, 2);
-  } finally {
-    await server.close();
-  }
+  });
 });
 
 test("created archive results retain integrity-test evidence", async () => {
-  const server = await createTestServer();
-
-  try {
+  await withTestServer(async (server) => {
     const { readCreateResult } = await server.ssrLoadModule("/src/lib/create-result.ts");
     const result = readCreateResult(
       jobResult("compress", {
@@ -75,7 +69,5 @@ test("created archive results retain integrity-test evidence", async () => {
     const missingResult = readCreateResult(null, "/tmp/fallback.zip", false);
     assert.equal(missingResult.testedAfterCreate, false);
     assert.equal(missingResult.entriesTestedAfterCreate, 0);
-  } finally {
-    await server.close();
-  }
+  });
 });

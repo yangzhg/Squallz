@@ -22,11 +22,11 @@ export function outputProtectionControls(
     splitMode: state.splitMode,
     customSplitAmount: state.customSplitAmount,
     customSplitUnit: state.customSplitUnit,
-    passwordCapability: tr(`gui.create.format.${state.format}.password`, format.password),
+    passwordCapability: tr(`gui.create.format.${state.format}.password`),
     nameEncryptionCapability: format.can_encrypt_names
       ? tr("gui.create.name_encryption_available")
       : state.format === "zip"
-        ? tr("gui.create.name_encryption_zip_visible", "ZIP names stay visible; use 7Z")
+        ? tr("gui.create.name_encryption_zip_visible")
         : tr("gui.create.name_encryption_unavailable"),
     passwordError: state.validationAttempted || state.passwordConfirmation.length > 0
       || (state.encryptionEnabled && state.password.length === 0) ? passwordError : "",
