@@ -705,7 +705,7 @@ fn run_checksum_check_job(
             report.checked,
             report.algorithm.id()
         ),
-        result: checksum_check_report_json(&report),
+        result: checksum_check_report_json(report),
     })
 }
 
@@ -731,7 +731,7 @@ fn run_duplicates_job(
             report.duplicate_groups(),
             report.files_scanned
         ),
-        result: duplicate_report_json(&report, min_size),
+        result: duplicate_report_json(report, min_size),
     })
 }
 

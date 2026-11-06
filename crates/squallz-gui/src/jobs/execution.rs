@@ -1436,7 +1436,7 @@ impl JobContext<'_> {
                     ctl,
                 )?;
                 ctl.checkpoint()?;
-                Ok(JobResult::ChecksumCheck(ChecksumCheckReport::from(&report)))
+                Ok(JobResult::ChecksumCheck(ChecksumCheckReport::from(report)))
             }
             JobSpec::DuplicateScan {
                 inputs,
@@ -1456,7 +1456,7 @@ impl JobContext<'_> {
                     .find_duplicate_files(&inputs, excludes, *min_size, sink, ctl)?;
                 ctl.checkpoint()?;
                 Ok(JobResult::DuplicateScan(DuplicateReport::new(
-                    &report, *min_size,
+                    report, *min_size,
                 )))
             }
         }

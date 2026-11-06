@@ -28,7 +28,7 @@ pub fn run(
     let report = result?;
 
     if as_json {
-        print_pretty_json(&duplicate_report_json(&report, min_size))?;
+        print_pretty_json(&duplicate_report_json(report, min_size))?;
     } else if ctx.is_modern() {
         print_modern(ctx, &report, min_size, &excludes);
     } else {

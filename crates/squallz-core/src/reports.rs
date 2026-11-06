@@ -67,11 +67,11 @@ pub struct ChecksumCheckReport {
     #[serde(flatten)]
     pub report: ChecksumVerificationReport,
 }
-impl From<&ChecksumVerificationReport> for ChecksumCheckReport {
-    fn from(report: &ChecksumVerificationReport) -> Self {
+impl From<ChecksumVerificationReport> for ChecksumCheckReport {
+    fn from(report: ChecksumVerificationReport) -> Self {
         Self {
             ok: report.is_ok(),
-            report: report.clone(),
+            report,
         }
     }
 }
@@ -101,7 +101,7 @@ pub struct DuplicateReport {
     pub groups: Vec<DuplicateGroupReport>,
 }
 impl DuplicateReport {
-    pub fn new(report: &DuplicateScanReport, min_size: u64) -> Self {
+    pub fn new(report: DuplicateScanReport, min_size: u64) -> Self {
         Self {
             hash_algorithm: "blake3",
             input_count: report.input_count,
@@ -116,18 +116,22 @@ impl DuplicateReport {
             reclaimable_bytes: report.reclaimable_bytes(),
             groups: report
                 .groups
-                .iter()
-                .map(|group| DuplicateGroupReport {
-                    hash: group.hash.clone(),
-                    hash_algorithm: "blake3",
-                    size: group.size,
-                    count: group.count(),
-                    reclaimable_bytes: group.reclaimable_bytes(),
-                    paths: group
-                        .paths
-                        .iter()
-                        .map(|p| p.display().to_string())
-                        .collect(),
+                .into_iter()
+                .map(|group| {
+                    let count = group.count();
+                    let reclaimable_bytes = group.reclaimable_bytes();
+                    DuplicateGroupReport {
+                        hash: group.hash,
+                        hash_algorithm: "blake3",
+                        size: group.size,
+                        count,
+                        reclaimable_bytes,
+                        paths: group
+                            .paths
+                            .into_iter()
+                            .map(|p| p.display().to_string())
+                            .collect(),
+                    }
                 })
                 .collect(),
         }
@@ -190,8 +194,11 @@ mod tests {
                 error: Some("missing".into()),
             }],
         };
+        let items_buffer = report.items.as_ptr();
+        let report = ChecksumCheckReport::from(report);
+        assert_eq!(report.report.items.as_ptr(), items_buffer);
         assert_eq!(
-            json!(ChecksumCheckReport::from(&report)),
+            json!(report),
             json!({
                 "ok": false, "algorithm": "sha256",
                 "manifest": "目录/SHA256SUMS", "checked": 1, "passed": 0, "failed": 1,
@@ -216,8 +223,11 @@ mod tests {
                 paths: vec!["a".into(), "b".into(), "c".into()],
             }],
         };
+        let hash_buffer = report.groups[0].hash.as_ptr();
+        let report = DuplicateReport::new(report, 4);
+        assert_eq!(report.groups[0].hash.as_ptr(), hash_buffer);
         assert_eq!(
-            json!(DuplicateReport::new(&report, 4)),
+            json!(report),
             json!({
                 "hash_algorithm": "blake3",
                 "input_count": 2, "entries_scanned": 7, "files_scanned": 6, "bytes_scanned": 25,
@@ -228,7 +238,7 @@ mod tests {
             })
         );
         assert_eq!(
-            json!(DuplicateReport::new(&DuplicateScanReport::default(), 0))["groups"],
+            json!(DuplicateReport::new(DuplicateScanReport::default(), 0))["groups"],
             json!([])
         );
     }
@@ -263,7 +273,7 @@ mod tests {
             ..DuplicateScanReport::default()
         };
         assert_eq!(
-            json!(DuplicateReport::new(&report, 0))["groups"][0]["paths"][0],
+            json!(DuplicateReport::new(report, 0))["groups"][0]["paths"][0],
             path.to_string_lossy().as_ref()
         );
     }

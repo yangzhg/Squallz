@@ -284,7 +284,7 @@ mod tests {
                     digest: "ab".into(),
                 }],
             }),
-            JobResult::ChecksumCheck(ChecksumCheckReport::from(&ChecksumVerificationReport {
+            JobResult::ChecksumCheck(ChecksumCheckReport::from(ChecksumVerificationReport {
                 algorithm: ChecksumAlgorithm::Sha256,
                 manifest: source.into(),
                 checked: 1,
@@ -300,7 +300,7 @@ mod tests {
                 }],
             })),
             JobResult::DuplicateScan(DuplicateReport::new(
-                &DuplicateScanReport {
+                DuplicateScanReport {
                     groups: vec![DuplicateGroup {
                         hash: "ab".into(),
                         size: 64,

@@ -32,12 +32,12 @@ pub(crate) fn checksum_report_json(report: &ChecksumReport) -> Value {
     value["operation"] = json!("checksum");
     value
 }
-pub(crate) fn checksum_check_report_json(report: &ChecksumVerificationReport) -> Value {
+pub(crate) fn checksum_check_report_json(report: ChecksumVerificationReport) -> Value {
     let mut value = json!(ChecksumCheckReport::from(report));
     value["operation"] = json!("checksum_check");
     value
 }
-pub(crate) fn duplicate_report_json(report: &DuplicateScanReport, min_size: u64) -> Value {
+pub(crate) fn duplicate_report_json(report: DuplicateScanReport, min_size: u64) -> Value {
     let mut value = json!(DuplicateReport::new(report, min_size));
     value["ok"] = json!(true);
     value["operation"] = json!("duplicates");

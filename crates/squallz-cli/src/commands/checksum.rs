@@ -63,14 +63,15 @@ pub fn run(
             .verify_checksum_manifest(&manifest, algorithm, &progress, &ctx.ctl);
         progress.finish();
         let report = report?;
+        let is_ok = report.is_ok();
         if as_json {
-            print_pretty_json(&checksum_check_report_json(&report))?;
+            print_pretty_json(&checksum_check_report_json(report))?;
         } else if ctx.is_modern() {
             print_check_modern(ctx, &report);
         } else {
             print_check_classic(&report);
         }
-        return if report.is_ok() {
+        return if is_ok {
             Ok(())
         } else {
             Err(CliError::Exit(EXIT_INTEGRITY))
