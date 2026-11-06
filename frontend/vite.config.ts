@@ -1,6 +1,5 @@
 import { defineConfig } from "vite";
 import { svelte } from "@sveltejs/vite-plugin-svelte";
-import tailwindcss from "@tailwindcss/vite";
 
 const targetPlatform =
   process.env.SQUALLZ_TARGET_PLATFORM ??
@@ -12,7 +11,7 @@ const targetPlatform =
 
 // Vite config tuned for Tauri: fixed port, no auto-open, target per WebKit.
 export default defineConfig({
-  plugins: [svelte(), tailwindcss()],
+  plugins: [svelte()],
   clearScreen: false,
   define: {
     __SQUALLZ_TARGET_PLATFORM__: JSON.stringify(targetPlatform),
