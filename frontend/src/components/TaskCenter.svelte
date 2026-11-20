@@ -8,7 +8,9 @@
     taskCenterCounts,
     taskCenterRows,
     taskQueueDropBeforeId,
-    taskQueuePosition,
+    taskQueuePositions,
+    type TaskCenterFilter,
+    type TaskQueuePosition,
     type TaskQueueDropEdge,
   } from "../lib/task-center";
   import {
@@ -36,6 +38,9 @@
 
   let {
     tasks,
+    filter,
+    onFilter,
+    summary,
     submittingTask = null,
     notice = null,
     rootClass,
@@ -52,6 +57,9 @@
     onClear,
   }: {
     tasks: readonly Task[];
+    filter: TaskCenterFilter;
+    onFilter: (filter: TaskCenterFilter) => void;
+    summary: string;
     submittingTask?: TaskDialogModel | null;
     notice?: string | null;
     rootClass: string;
@@ -69,40 +77,27 @@
   } = $props();
 
   let panel: HTMLElement | null = null;
+  let list: HTMLElement | null = null;
   let closeButton: HTMLButtonElement | null = null;
-  let orderedRows = $derived(taskCenterRows(tasks));
+  let orderedRows = $derived(taskCenterRows(tasks, filter));
   let counts = $derived(taskCenterCounts(tasks));
-  let activeCount = $derived(counts.active + (submittingTask ? 1 : 0));
-  let reorderableCount = $derived(
-    tasks.filter((task) => task.state === "queued" && task.queuePosition !== null).length,
-  );
+  let showSubmitting = $derived(submittingTask && (filter === "all" || filter === "queue"));
+  const filters = ["all", "queue", "attention", "results"] as const;
+  let filterCounts = $derived({
+    all: counts.total + Number(Boolean(submittingTask)),
+    queue: counts.active + counts.waiting + Number(Boolean(submittingTask)),
+    attention: counts.attention,
+    results: counts.completed,
+  });
+  let canClear = $derived(counts.clearable > 0 && (filter === "all" || filter === "results"));
+  let queuePositions = $derived(taskQueuePositions(tasks));
   let draggedTaskId = $state<number | null>(null);
   let dropTargetId = $state<number | null>(null);
   let dropEdge = $state<TaskQueueDropEdge | null>(null);
   let dragPointerId: number | null = null;
   let dragHandle: HTMLElement | null = null;
 
-  function countSummary(): string {
-    const unconfirmed = tasks.find(taskStatusUnavailable);
-    if (unconfirmed) return taskOutcomeStateLabel(unconfirmed);
-    if (counts.attention > 0) {
-      return tr("gui.task_center.summary_attention")
-        .replace("{count}", counts.attention.toLocaleString());
-    }
-    if (activeCount > 0 || counts.waiting > 0) {
-      return tr("gui.task_center.summary_active")
-        .replace("{active}", activeCount.toLocaleString())
-        .replace("{waiting}", counts.waiting.toLocaleString());
-    }
-    if (counts.completed > 0) {
-      return tr("gui.task_center.summary_completed")
-        .replace("{count}", counts.completed.toLocaleString());
-    }
-    return tr("gui.task_center.summary_idle");
-  }
-
-  function queuedDetail(task: Task): string {
-    const position = taskQueuePosition(tasks, task.id);
+  function queuedDetail(task: Task, position: TaskQueuePosition | null): string {
     if (!position) return tr("gui.task_center.waiting");
     if (task.queueWaitReason === "cpu_budget") {
       return tr(
@@ -146,8 +141,8 @@
     return null;
   }
 
-  function taskDetail(task: Task): string {
-    if (task.state === "queued") return queuedDetail(task);
+  function taskDetail(task: Task, queuePosition: TaskQueuePosition | null): string {
+    if (task.state === "queued") return queuedDetail(task, queuePosition);
     if (task.state === "done" || task.state === "failed" || task.state === "cancelled") {
       return taskDialogResultSummary(task);
     }
@@ -184,7 +179,7 @@
     return (
       task.state === "queued" &&
       task.queuePosition !== null &&
-      reorderableCount > 1 &&
+      queuePositions.size > 1 &&
       !taskControlsBusy(task)
     );
   }
@@ -265,8 +260,17 @@
     onClose();
   }
 
+  function selectFilter(value: TaskCenterFilter): void {
+    if (list) list.scrollTop = 0;
+    onFilter(value);
+  }
+
   onMount(() => {
-    void tick().then(() => {
+    void tick().then(async () => {
+      if (focusTaskId !== null && filter !== "all" && !orderedRows.some((task) => task.id === focusTaskId)) {
+        onFilter("all");
+        await tick();
+      }
       const taskButton = focusTaskId === null
         ? null
         : panel?.querySelector<HTMLButtonElement>(`[data-task-details-id="${focusTaskId}"]`);
@@ -290,10 +294,10 @@
   aria-labelledby="task-center-title"
 >
   <header class="task-center-head">
+    <span class="task-center-mark"><Icon name="list" size={21} /></span>
     <div>
-      <span class="eyebrow">{tr("gui.task_center.eyebrow")}</span>
       <h2 id="task-center-title">{tr("gui.task_center.title")}</h2>
-      <p aria-live="polite">{countSummary()}</p>
+      {#if filterCounts.all}<p aria-live="polite">{summary}</p>{/if}
     </div>
     <button
       bind:this={closeButton}
@@ -306,26 +310,26 @@
     ><Icon name="x" size={17} /></button>
   </header>
 
-  <div class="task-center-counts" aria-label={tr("gui.task_center.counts")}>
-    <span><b>{activeCount}</b>{tr("gui.task_center.active")}</span>
-    <span><b>{counts.waiting}</b>{tr("gui.task_center.waiting_count")}</span>
-    <span class:attention={counts.attention > 0}><b>{counts.attention}</b>{tr("gui.task_center.attention")}</span>
-  </div>
+  {#if filterCounts.all || filter !== "all"}
+    <div class="task-center-filters" role="radiogroup" aria-label={tr("gui.task_center.filters")}>
+      {#each filters as option}
+        <label>
+          <input type="radio" name="task-center-filter" value={option} checked={filter === option} onchange={() => selectFilter(option)} />
+          <span>{tr(`gui.task_center.filter_${option}`)}</span><b>{filterCounts[option]}</b>
+        </label>
+      {/each}
+    </div>
+  {/if}
 
   {#if tasks.some(taskStatusUnavailable)}
     <section class="task-status-notice" role="status">
       <Icon name="alert-triangle" size={16} />
       <p>{taskStatusUnavailableMessage()}</p>
     </section>
-  {:else}
-    <p class="task-center-scope-note">
-      <Icon name="info" size={14} />
-      {tr("gui.task_center.scope")}
-    </p>
   {/if}
 
-  <div class="task-center-list" aria-label={tr("gui.task_center.list")}>
-    {#if submittingTask}
+  <section bind:this={list} class="task-center-list" aria-label={tr("gui.task_center.list")}>
+    {#if submittingTask && showSubmitting}
       {@const submittingTitle = taskTitleLabel(submittingTask)}
       {@const submittingKind = taskKindLabel(submittingTask)}
       <article class="task-center-row" data-task-state="submitting">
@@ -347,7 +351,7 @@
       {@const tone = taskTone(task)}
       {@const taskTitle = taskTitleLabel(task)}
       {@const taskKind = taskKindLabel(task)}
-      {@const queuePosition = taskQueuePosition(tasks, task.id)}
+      {@const queuePosition = queuePositions.get(task.id) ?? null}
       {@const showCpuResource = task.cpuThreads > 1 && (
         task.state === "queued" || task.state === "running" || task.state === "paused"
       )}
@@ -365,38 +369,36 @@
       >
         <header>
           <div>
-            <strong class="task-center-title" title={taskTitle}>{taskTitle}</strong>
-            <span class="task-center-kind" title={taskKind}>{taskKind}</span>
-            {#if task.origin === "file_manager" || showCpuResource || showBufferResource}
-              <div class="task-center-tags">
-                {#if task.origin === "file_manager"}
-                  <span class="task-center-origin">{tr("gui.task_center.origin_file_manager")}</span>
-                {/if}
-                {#if showCpuResource}
-                  <span class="task-center-resource">{taskCpuLabel(task)}</span>
-                {/if}
-                {#if showBufferResource}
-                  <span class="task-center-resource">{taskBufferLabel(task)}</span>
-                {/if}
-              </div>
-            {/if}
+            <button class="task-center-title task-center-open" type="button" data-task-details-id={task.id}
+              aria-label={tr("gui.task_center.open_details").replace("{name}", taskTitle)} onclick={() => onDetails(task)}>
+              <span>{taskTitle}</span><Icon name="chevron-right" size={14} />
+            </button>
           </div>
           <small class={`state-${tone}`}>{taskState(task)}</small>
         </header>
+        <div class="task-center-tags">
+          <span>{taskKind}</span>
+          {#if task.origin === "file_manager"}
+            <span>{tr("gui.task_center.origin_file_manager")}</span>
+          {/if}
+          {#if showCpuResource}
+            <span>{taskCpuLabel(task)}</span>
+          {/if}
+          {#if showBufferResource}
+            <span>{taskBufferLabel(task)}</span>
+          {/if}
+        </div>
 
         {#if (task.state === "running" || task.state === "paused") && task.total > 0 && !taskOverallProgressIndeterminate(task)}
-          <div class="task-center-progress-line">
-            <progress
-              class="task-center-progress"
-              value={taskProgressPercent(task)}
-              max="100"
-              aria-label={tr("gui.task_center.progress_for").replace("{name}", taskTitleLabel(task))}
-            ></progress>
-            <strong>{taskProgressPercent(task)}%</strong>
-          </div>
+          <progress
+            class="task-center-progress"
+            value={taskProgressPercent(task)}
+            max="100"
+            aria-label={tr("gui.task_center.progress_for").replace("{name}", taskTitle)}
+          ></progress>
         {/if}
 
-        <p>{taskDetail(task)}</p>
+        <p>{taskDetail(task, queuePosition)}</p>
         {#if interactionDetail(task)}
           <p class="task-center-interaction">
             <Icon name={task.interaction === "password" ? "lock" : "alert-triangle"} size={14} />
@@ -424,7 +426,7 @@
               <Icon name="play" size={14} />{taskResumeButtonLabel(task)}
             </button>
           {/if}
-          {#if queuePosition && reorderableCount > 1}
+          {#if queuePosition && queuePositions.size > 1}
             <div
               class="task-center-reorder"
               role="group"
@@ -453,12 +455,6 @@
               ><Icon name={task.queueMoveIntent === "later" ? "hourglass" : "chevron-down"} size={14} /></button>
             </div>
           {/if}
-          <button
-            class="primary-lite"
-            type="button"
-            data-task-details-id={task.id}
-            onclick={() => onDetails(task)}
-          ><Icon name="external-link" size={14} />{tr("gui.task_center.details")}</button>
           {#if (task.state === "running" || task.state === "paused" || task.state === "queued") && task.interruptible}
             <button
               class="danger"
@@ -470,27 +466,31 @@
         </div>
       </article>
     {:else}
-      {#if !submittingTask}
+      {#if !showSubmitting}
         <section class="task-center-empty">
           <span><Icon name="check-circle" size={20} /></span>
           <div>
-            <strong>{tr("gui.task_center.empty_title")}</strong>
-            <p>{tr("gui.task_center.empty_detail")}</p>
+            {#if filterCounts.all}
+              <strong>{tr("gui.task_center.empty_filter")}</strong>
+            {:else}
+              <strong>{tr("gui.task_center.empty_title")}</strong>
+              <p>{tr("gui.task_center.empty_detail")}</p>
+            {/if}
           </div>
         </section>
       {/if}
     {/each}
-  </div>
+  </section>
 
-  <footer class="task-center-footer">
-    {#if notice}<div class="surface-notice" role="status">{notice}</div>{/if}
-    {#if counts.clearable > 0}
-      <button type="button" onclick={onClear}>
-        {tr("gui.task_center.clear_completed")
-          .replace("{count}", counts.clearable.toLocaleString())}
-      </button>
-    {:else}
-      <span>{tr("gui.task_center.attention_kept")}</span>
-    {/if}
-  </footer>
+  {#if notice || canClear}
+    <footer class="task-center-footer">
+      {#if notice}<div class="surface-notice" role="status">{notice}</div>{/if}
+      {#if canClear}
+        <button type="button" onclick={onClear}>
+          {tr("gui.task_center.clear_completed")
+            .replace("{count}", counts.clearable.toLocaleString())}
+        </button>
+      {/if}
+    </footer>
+  {/if}
 </aside>

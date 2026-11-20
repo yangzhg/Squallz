@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tick } from "svelte";
   import { tFallback as tr } from "../lib/i18n.svelte";
   import { desktopBasename, desktopDirname } from "../lib/desktop-path";
   import type { CreateSession } from "../lib/create-session.svelte";
@@ -9,8 +10,12 @@
   let selectedCount = $derived(session.selectedCount());
   let allSelected = $derived(session.allSelected());
   let lockedReason = $derived(session.view.sourcesLockedReason());
+  let modern = $derived(variant === "modern");
+  let empty = $derived(session.sources.length === 0);
 
   let selectAllInput = $state<HTMLInputElement | null>(null);
+  let sourceList: HTMLElement;
+  let addFiles: HTMLButtonElement;
 
   $effect(() => {
     if (selectAllInput) selectAllInput.indeterminate = selectedCount > 0 && !allSelected;
@@ -20,6 +25,18 @@
     if (kind === "folder") return "folder";
     if (kind === "file") return "file";
     return "archive";
+  }
+
+  async function removeSources(path?: string): Promise<void> {
+    const active = document.activeElement;
+    const row = active?.closest(".create-source-row");
+    const index = row?.parentElement ? Array.from(row.parentElement.children).indexOf(row) : 0;
+    if (path === undefined) session.removeSelected();
+    else session.removeSource(path);
+    await tick();
+    if (!sourceList?.isConnected || document.activeElement !== document.body) return;
+    const remaining = sourceList.querySelectorAll<HTMLInputElement>(".create-source-row input");
+    (remaining[Math.min(index, remaining.length - 1)] ?? addFiles).focus();
   }
 
   function handleKeydown(event: KeyboardEvent): void {
@@ -44,7 +61,7 @@
       && !(event.target instanceof HTMLButtonElement)
     ) {
       event.preventDefault();
-      session.removeSelected();
+      void removeSources();
     }
   }
 </script>
@@ -52,19 +69,26 @@
 <svelte:window onkeydown={handleKeydown} />
 
 <section
+  bind:this={sourceList}
   class:classic={variant === "classic"}
   class="create-source-list"
   aria-label={tr("gui.create.sources.aria")}
 >
   <header class="create-source-list-head">
     <div class="create-source-list-title">
-      <span class="create-source-list-mark"><Icon name="archive" size={18} /></span>
-      <div>
+      {#if modern}
+        <h1>{tr("gui.create.real_preflight_title")}</h1>
+        <p>{tr(empty ? "gui.create.sources.empty_body" : "gui.create.real_preflight_body")}</p>
+      {:else}
+        <span class="create-source-list-mark"><Icon name="archive" size={18} /></span>
         <h2>{tr("gui.create.sources.heading")}</h2>
-      </div>
+      {/if}
     </div>
     <div class="create-source-list-add">
       <button
+        bind:this={addFiles}
+        id={modern && empty ? "create-primary-source-action" : undefined}
+        class:primary={modern && empty}
         type="button"
         disabled={session.preflight.sourcesLocked()}
         aria-busy={session.preflight.state.picker?.kind === "files"}
@@ -79,9 +103,15 @@
         onclick={() => void session.chooseSources("folder")}
       ><Icon name="folder-open" size={15} />{session.view.sourcePickerLabel("folder")}</button>
     </div>
+    {#if modern}
+      <span class="create-format-art" aria-hidden="true">
+        <Icon name="archive" size={17} />
+        <b>{session.formatData.label}</b>
+      </span>
+    {/if}
   </header>
 
-  {#if session.sources.length === 0}
+  {#if empty && !modern}
     <div class="create-source-list-empty">
       <span class="create-source-list-empty-mark"><Icon name="folder-open" size={22} /></span>
       <div>
@@ -89,7 +119,7 @@
         <span>{tr("gui.create.sources.empty_body")}</span>
       </div>
     </div>
-  {:else}
+  {:else if !empty}
     <div class="create-source-list-toolbar">
       <label class="create-source-select-all">
         <input
@@ -108,7 +138,7 @@
         class="create-source-remove-selected"
         disabled={selectedCount === 0 || Boolean(lockedReason)}
         title={lockedReason}
-        onclick={session.removeSelected}
+        onclick={() => void removeSources()}
       >{tr("gui.create.sources.remove_selected")}</button>
     </div>
 
@@ -140,7 +170,7 @@
             disabled={Boolean(lockedReason)}
             title={removeLabel}
             aria-label={removeLabel}
-            onclick={() => session.removeSource(row.path)}
+            onclick={() => void removeSources(row.path)}
           ><Icon name="x" size={15} /></button>
         </div>
       {/each}

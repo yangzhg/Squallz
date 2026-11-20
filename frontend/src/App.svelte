@@ -14,10 +14,12 @@
   } from "./lib/extract-options-draft.svelte";
   import { CreateSession } from "./lib/create-session.svelte";
   import ArchiveStartState from "./components/ArchiveStartState.svelte";
+  import RecentWorkspace from "./components/RecentWorkspace.svelte";
   import ArchiveReturnStrip from "./components/ArchiveReturnStrip.svelte";
   import ArchiveEntryEditor from "./components/ArchiveEntryEditor.svelte";
   import type { ArchiveEditingState } from "./components/ArchiveEditingStatus.svelte";
   import AppIcon from "./components/AppIcon.svelte";
+  import WorkspaceNavigation from "./components/WorkspaceNavigation.svelte";
   import ClassicArchiveBrowserHost from "./components/ClassicArchiveBrowserHost.svelte";
   import {
     archiveRowWindow, displayArchiveEntry,
@@ -243,6 +245,7 @@
     taskCenterActionableCount,
     taskCenterCounts,
     taskSubmissionBlockReason,
+    type TaskCenterFilter,
     type TaskSubmissionBlockReason,
   } from "./lib/task-center";
   import {
@@ -271,7 +274,6 @@
   import { deriveCustomPaletteTokens } from "./lib/theme";
   import {
     classicCommands,
-    nav,
     paletteIds,
     quickActions,
     screenIds,
@@ -414,6 +416,7 @@
   let LoadedMacosSfxPublisher = $state<MacosSfxPublisherComponentType | null>(null);
   let macosSfxPublisherLoad: Promise<MacosSfxPublisherComponentType> | null = null;
   let taskCenterOpen = $state(windowRecovery.taskCenter ?? false);
+  let taskCenterFilter = $state<TaskCenterFilter>("all");
   let taskCenterSelectedTaskId = $state<number | null>(null);
   let taskCenterFocusTaskId = $state<number | null>(null);
   let taskCenterReturnFocus: HTMLElement | null = null;
@@ -5619,6 +5622,7 @@
     tools.leave();
     cancelTaskReview();
     taskCenterOpen = false;
+    taskCenterFilter = "all";
     taskCenterSelectedTaskId = null;
     taskCenterFocusTaskId = null;
     restoreTaskWorkspaceFocus();
@@ -5814,6 +5818,9 @@
   function taskCenterSurface(): TaskCenterSurfaceProps {
     return {
       tasks: jobRows,
+      filter: taskCenterFilter,
+      onFilter: (filter) => { taskCenterFilter = filter; },
+      summary: taskCenterSummaryLabel(),
       submittingTask: submittingTaskModel(),
       notice: appNotice,
       rootClass: `task-center-panel design-root platform-${activePlatform} palette-${settingsSession.colors.palette} theme-${activeTheme} density-${activeDensityChoice}`,
@@ -6712,19 +6719,6 @@
     }
   }
 
-  function screenForNav(label: string): Screen {
-    if (label === "Recent") return "recent";
-    if (label === "Create") return "create";
-    if (label === "Extract") return "extract";
-    if (label === "Convert") return "convert";
-    if (label === "Checksum") return "checksum";
-    if (label === "Duplicates") return "duplicates";
-    if (label === "Recovery") return "recovery";
-    if (label === "Settings") return "settingsGeneral";
-    if (label === "Appearance") return "appearance";
-    return "browse";
-  }
-
   function currentNavigationScreen(): Screen {
     if (isSettingsScreen()) return "settingsGeneral";
     if (["batch", "nestedExtract", "password"].includes(screen)) return "extract";
@@ -7187,31 +7181,35 @@
   <main class={`design-root modern-root platform-${activePlatform} palette-${settingsSession.colors.palette} theme-${activeTheme} density-${activeDensityChoice}`} use:cssVariables={customPaletteVariables()} class:drop-active={dragActive} aria-hidden={blockingModalVisible() || modeSelectionBlocked ? "true" : undefined} inert={blockingModalVisible() || modeSelectionBlocked}>
     <section class="window modern-window" aria-label={isSettingsScreen() ? tr("gui.aria.squallz_settings") : tr("gui.aria.modern_archive_browser")}>
       <header class="modern-titlebar" data-tauri-drag-region>
-        <div class="brand-lockup">
+        <div class="brand-lockup" class:has-route-picker={!isSettingsScreen()}>
           <div class="brand-glyph"><AppIcon size={36} title="Squallz" /></div>
-          <div>
+          <div class="brand-caption">
             <strong>Squallz</strong>
             <span>{titleForScreen()}</span>
           </div>
+          {#if !isSettingsScreen()}
+            <WorkspaceNavigation compact current={currentNavigationScreen()} {tr} disabled={navigationDisabled}
+              disabledReason={navigationDisabledReason} onChoose={navigateToScreen} />
+          {/if}
         </div>
         <div class="modern-toolbar" aria-label={tr("gui.aria.primary_actions")}>
           {#if isSettingsScreen()}
-            <button onclick={() => setScreen("browse")}><Icon name="archive" size={16} />{tr("gui.settings.back_to_archives")}</button>
-          {:else if currentArchive || screen === "recent"}
-            <button disabled={!appActionEnabled("open_archive")} aria-busy={archiveOpenStatus === "opening"} onclick={() => void runAppAction("open_archive")}><Icon name="folder-open" size={16} />{archiveOpenStatus === "opening" ? toolbarLabel("Opening") : toolbarLabel("Open")}</button>
+            <button title={tr("gui.settings.back_to_archives")} onclick={() => setScreen("browse")}><Icon name="archive" size={16} />{tr("gui.settings.back_to_archives")}</button>
+          {:else if currentArchive && screen !== "recent"}
+            <button disabled={!appActionEnabled("open_archive")} title={toolbarLabel("Open")} aria-busy={archiveOpenStatus === "opening"} onclick={() => void runAppAction("open_archive")}><Icon name="folder-open" size={16} />{archiveOpenStatus === "opening" ? toolbarLabel("Opening") : toolbarLabel("Open")}</button>
           {/if}
           {#if !isSettingsScreen()}
             <button
               bind:this={quickActionButton}
-              class="icon-only"
               aria-label={tr("gui.quick.title")}
+              title={tr("gui.quick.title")}
               aria-haspopup="menu"
               aria-expanded={activePopover === "quickActions"}
               onclick={toggleQuickActions}
-            ><Icon name="sparkles" size={16} /></button>
+            ><Icon name="sparkles" size={16} /><span>{tr("gui.quick.title")}</span></button>
           {/if}
           <button
-            class="icon-only task-center-trigger"
+            class="task-center-trigger"
             class:attention={taskCenterHasAttention()}
             aria-label={taskCenterTriggerLabel()}
             title={taskCenterTriggerLabel()}
@@ -7220,6 +7218,7 @@
             onclick={(event) => openTaskCenter(event.currentTarget)}
           >
             <Icon name="list" size={16} />
+            <span>{tr("gui.task_center.title")}</span>
             {#if taskCenterBadgeCount() > 0}
               <span class="task-center-trigger-badge">{Math.min(taskCenterBadgeCount(), 99)}</span>
             {/if}
@@ -7250,21 +7249,8 @@
         class:no-archive-shell={screen === "browse" && !currentArchive}
         class:no-inspector-shell={!isSettingsScreen() && !showArchiveInspector()}
       >
-        <aside class="modern-sidebar" aria-label={tr("gui.aria.navigation")}>
-          <div class="sidebar-section">
-            {#each nav as item}
-              <button
-                disabled={navigationDisabled(screenForNav(item[1]))}
-                title={navigationDisabledReason(screenForNav(item[1]))}
-                class:current={currentNavigationScreen() === screenForNav(item[1])}
-                aria-current={currentNavigationScreen() === screenForNav(item[1]) ? "page" : undefined}
-                onclick={() => navigateToScreen(screenForNav(item[1]))}
-              >
-                <Icon name={item[0]} size={16} />
-                <span>{navLabel(item[1])}</span>
-              </button>
-            {/each}
-          </div>
+        <WorkspaceNavigation current={currentNavigationScreen()} {tr} disabled={navigationDisabled}
+          disabledReason={navigationDisabledReason} onChoose={navigateToScreen}>
           {#if !hideOperationHistory && jobRows.length > 0}
             <button
               class="recent-card history-card"
@@ -7279,7 +7265,7 @@
               <small>{historyLastLabel()}</small>
             </button>
           {/if}
-        </aside>
+        </WorkspaceNavigation>
 
         <section
           class="modern-content"
@@ -7303,41 +7289,16 @@
             />
           {/if}
           {#if screen === "recent"}
-            <div class="create-sheet modern-recent">
-              <div class="sheet-head">
-                <div>
-                  <span class="eyebrow">{tr("gui.recent.eyebrow")}</span>
-                  <h1>{tr("gui.recent.title")}</h1>
-                  <p>{tr("gui.recent.subtitle")}</p>
-                </div>
-                <button class="primary sheet-action" disabled={!appActionEnabled("open_archive")} onclick={() => void runAppAction("open_archive")}><Icon name="folder-open" size={17} />{archiveOpenStatus === "opening" ? toolbarLabel("Opening") : toolbarLabel("Open")}</button>
-              </div>
-
-              <div class="create-grid">
-                <section class="create-main-panel">
-                  <div class="panel-title"><Icon name="archive" size={16} />{tr("gui.recent.list_title")}</div>
-                  <div class="limits-table recent-table">
-                    <div><b>{tr("common.name")}</b><b>{tr("common.path")}</b><b>{tr("common.action")}</b></div>
-                    {#each recentFiles() as path}
-                      <div><span>{pathBaseName(path) || path}</span><span>{path}</span><button onclick={() => void openArchivePath(path, "dialog")}>{tr("gui.recent.reopen")}</button></div>
-                    {:else}
-                      <div><span>{tr("gui.recent.none")}</span><span>{tr("gui.recent.open_to_start")}</span><button disabled={!appActionEnabled("open_archive")} onclick={() => void runAppAction("open_archive")}>{toolbarLabel("Open")}</button></div>
-                    {/each}
-                  </div>
-                </section>
-                <aside class="create-side-panel">
-                  <section>
-                    <div class="panel-title"><Icon name="check-circle" size={16} />{tr("gui.recent.current_title")}</div>
-                    <strong>{currentArchive ? currentArchive.name : noArchiveLabel()}</strong>
-                    <p>{currentArchive ? currentArchive.path : openArchiveFirstLabel()}</p>
-                  </section>
-                  <section>
-                    <div class="panel-title"><Icon name="shield-alert" size={16} />{tr("gui.recent.privacy_title")}</div>
-                    <p>{tr("gui.recent.privacy_body")}</p>
-                  </section>
-                </aside>
-              </div>
-            </div>
+            <RecentWorkspace
+              paths={recentFiles()}
+              current={currentArchive}
+              platform={activePlatform}
+              canOpen={appActionEnabled("open_archive")}
+              opening={archiveOpenStatus === "opening"}
+              onOpen={() => void runAppAction("open_archive")}
+              onReopen={(path) => void openArchivePath(path, "dialog")}
+              onReturn={returnToCurrentArchive}
+            />
           {:else if isOperationWorkspaceScreen(screen)}
             {@render operationWorkspace("modern")}
           {:else if screen === "archiveInfo"}
@@ -7411,15 +7372,22 @@
 		            {:else}
 	              <ArchiveStartState
 	                variant="modern"
-	                eyebrow={tr("gui.archive.secure_archive")}
-	                title={noArchiveLabel()}
-	                body={tr("gui.empty.no_archive_summary")}
-	                openLabel={archiveOpenStatus === "opening" ? toolbarLabel("Opening") : toolbarLabel("Open")}
-	                createLabel={toolbarLabel("Create")}
+	                title={tr("gui.archive.workspace_title")}
+	                body={tr("gui.archive.workspace_drop")}
+	                openLabel={archiveOpenStatus === "opening" ? toolbarLabel("Opening") : tr("gui.archive.open_dialog_title")}
+	                createLabel={tr("gui.classic.create_archive")}
 	                openBusy={archiveOpenStatus === "opening"}
 	                onOpen={() => void runAppAction("open_archive")}
 	                onCreate={() => void runAppAction("create_archive")}
-		              />
+	              >
+	                {@const latest = recentFiles()[0]}
+	                {#if latest}
+	                  <button type="button" class="archive-start-recent" title={latest}
+	                    disabled={!appActionEnabled("open_archive")} onclick={() => void openArchivePath(latest, "dialog")}>
+	                    <Icon name="history" size={15} /><span>{tr("gui.recent.latest")}</span><strong>{latest}</strong>
+	                  </button>
+	                {/if}
+	              </ArchiveStartState>
 		            {/if}
 	            </div>
 	          {/if}

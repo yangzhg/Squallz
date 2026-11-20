@@ -126,7 +126,7 @@ test("task center keeps attention visible and follows authoritative waiting orde
       taskCenterCounts,
       taskCenterRows,
       taskQueueDropBeforeId,
-      taskQueuePosition,
+      taskQueuePositions,
       taskSubmissionBlockReason,
     } = await server.ssrLoadModule("/src/lib/task-center.ts");
 
@@ -155,6 +155,9 @@ test("task center keeps attention visible and follows authoritative waiting orde
     ];
 
     assert.deepEqual(taskCenterRows(rows).map((row) => row.id), [12, 16, 15, 14, 13, 11, 17]);
+    assert.deepEqual(taskCenterRows(rows, "queue").map((row) => row.id), [12, 14, 13]);
+    assert.deepEqual(taskCenterRows(rows, "attention").map((row) => row.id), [12, 16, 15]);
+    assert.deepEqual(taskCenterRows(rows, "results").map((row) => row.id), [16, 15, 11, 17]);
     assert.deepEqual(taskCenterCounts(rows), {
       active: 1,
       waiting: 2,
@@ -165,23 +168,21 @@ test("task center keeps attention visible and follows authoritative waiting orde
     });
     assert.equal(taskCenterActionableCount(rows), 5);
     assert.equal(taskCenterActionableCount([rows[1]]), 1);
-    assert.deepEqual(taskQueuePosition(rows, 13), {
+    const positions = taskQueuePositions(rows);
+    assert.deepEqual(positions.get(13), {
       position: 2,
       aheadInQueue: 2,
       canMoveEarlier: true,
       canMoveLater: false,
     });
-    assert.deepEqual(taskQueuePosition(rows, 14), {
+    assert.deepEqual(positions.get(14), {
       position: 1,
       aheadInQueue: 1,
       canMoveEarlier: false,
       canMoveLater: true,
     });
-    assert.equal(taskQueuePosition(rows, 12), null);
-    assert.equal(
-      taskQueuePosition([...rows, task(18, "queued", { queuePosition: null })], 18),
-      null,
-    );
+    assert.equal(positions.has(12), false);
+    assert.equal(taskQueuePositions([...rows, task(18, "queued", { queuePosition: null })]).has(18), false);
     assert.equal(taskQueueDropBeforeId(rows, 13, 14, "before"), 14);
     assert.equal(taskQueueDropBeforeId(rows, 13, 14, "after"), undefined);
     assert.equal(taskQueueDropBeforeId(rows, 14, 13, "after"), null);

@@ -18,6 +18,7 @@ export interface TaskQueuePosition {
 }
 
 export type TaskQueueDropEdge = "before" | "after";
+export type TaskCenterFilter = "all" | "queue" | "attention" | "results";
 
 export type TaskSubmissionBlockReason =
   | "starting"
@@ -66,8 +67,14 @@ function reorderableQueuedTasks(tasks: readonly Task[]): Task[] {
 }
 
 /** Stable task-center order: attention, active work, backend queue order, then newest completed work. */
-export function taskCenterRows(tasks: readonly Task[]): Task[] {
+export function taskCenterRows(tasks: readonly Task[], filter: TaskCenterFilter = "all"): Task[] {
   return tasks
+    .filter((task) => {
+      if (filter === "queue") return !isTerminal(task);
+      if (filter === "attention") return needsAttention(task);
+      if (filter === "results") return isTerminal(task);
+      return true;
+    })
     .map((task, index) => ({ task, index }))
     .sort((left, right) => {
       const priority = rowPriority(left.task) - rowPriority(right.task);
@@ -108,19 +115,15 @@ export function taskCenterActionableCount(tasks: readonly Task[]): number {
 }
 
 /** Position in the shared FIFO queue across app and file-manager entry points. */
-export function taskQueuePosition(
-  tasks: readonly Task[],
-  taskId: number,
-): TaskQueuePosition | null {
+export function taskQueuePositions(tasks: readonly Task[]): Map<number, TaskQueuePosition> {
   const waiting = reorderableQueuedTasks(tasks);
-  const index = waiting.findIndex((task) => task.id === taskId);
-  if (index < 0) return null;
-  return {
+  const active = tasks.filter(isActive).length;
+  return new Map(waiting.map((task, index) => [task.id, {
     position: index + 1,
-    aheadInQueue: tasks.filter(isActive).length + index,
+    aheadInQueue: active + index,
     canMoveEarlier: index > 0,
     canMoveLater: index < waiting.length - 1,
-  };
+  }]));
 }
 
 /**

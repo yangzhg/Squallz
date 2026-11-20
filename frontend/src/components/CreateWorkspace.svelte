@@ -115,7 +115,7 @@
 </script>
 
 {#snippet createAction()}
-  {#if !surface.review}
+  {#if !surface.review && (variant === "classic" || session.sources.length > 0)}
     <footer class="workspace-action-bar" class:classic={variant === "classic"}>
       <div class="workspace-action-summary">
         <span>{surface.tr("gui.create.output.preview")}</span>
@@ -138,59 +138,26 @@
 
 {#if variant === "modern"}
   <div class="create-sheet modern-create">
-    <div class="sheet-head">
-      <div>
-        <h1>{surface.tr("gui.create.real_preflight_title")}</h1>
-        <p>{surface.tr("gui.create.real_preflight_body")}</p>
-      </div>
-    </div>
     <CreateSourceList variant="modern" {session} />
 
     <div class="create-workflow">
       <section class="create-main-panel">
-        <div class="create-settings-section">
-          <div class="create-core-settings">
-            <div class="create-choice-line">
-              <span class="create-choice-label" aria-hidden="true">
-                {surface.tr("gui.create.compression_presets")}
-              </span>
-              <div class="preset-row" aria-label={surface.tr("gui.create.compression_presets")}>
-                {#each surface.profiles as profile (profile.id)}
-                  <button
-                    class:selected={profile.selected}
-                    aria-pressed={profile.selected}
-                    disabled={profile.disabled}
-                    title={profile.title}
-                    aria-label={profile.ariaLabel}
-                    onclick={profile.onSelect}
-                  >{profile.label}</button>
-                {/each}
-              </div>
+        <div class="create-core-settings">
+          <section class="create-choice-group" aria-labelledby="create-format-heading">
+            <h2 id="create-format-heading">{surface.tr("gui.create.archive_format")}</h2>
+            <div class="format-segments" role="group" aria-labelledby="create-format-heading">
+              {#each surface.formats as format (format.id)}
+                <button
+                  class:selected={format.selected}
+                  aria-pressed={format.selected}
+                  disabled={format.disabled}
+                  title={format.title}
+                  aria-label={format.ariaLabel}
+                  onclick={format.onSelect}
+                >{format.label}</button>
+              {/each}
             </div>
-
-            <div class="create-choice-line">
-              <span class="create-choice-label" aria-hidden="true">
-                {surface.tr("gui.create.archive_format")}
-              </span>
-              <div class="format-segments" aria-label={surface.tr("gui.create.archive_format")}>
-                {#each surface.formats as format (format.id)}
-                  <button
-                    class:selected={format.selected}
-                    aria-pressed={format.selected}
-                    disabled={format.disabled}
-                    title={format.title}
-                    aria-label={format.ariaLabel}
-                    onclick={format.onSelect}
-                  >{format.label}</button>
-                {/each}
-                <span
-                  class="format-boundary-pill"
-                  role="note"
-                  title={surface.tr("gui.create.rar_not_launch_claim")}
-                >{surface.tr("gui.create.rar_read_only")}</span>
-              </div>
-            </div>
-            <div class="format-note">{surface.formatNote}</div>
+            <p class="format-note">{surface.formatNote}</p>
 
             {#if surface.sqzPayload}
               <div class="field-label">{surface.sqzPayload.label}</div>
@@ -208,6 +175,23 @@
                 {/each}
               </div>
             {/if}
+
+            <small class="create-format-limit" title={surface.tr("gui.create.rar_not_launch_claim")}>{surface.tr("gui.create.rar_read_only")}</small>
+          </section>
+          <section class="create-choice-group" aria-labelledby="create-level-heading">
+            <h2 id="create-level-heading">{surface.tr("gui.create.compression_presets")}</h2>
+            <div class="preset-row" role="group" aria-labelledby="create-level-heading">
+              {#each surface.profiles as profile (profile.id)}
+                <button
+                  class:selected={profile.selected}
+                  aria-pressed={profile.selected}
+                  disabled={profile.disabled}
+                  title={profile.title}
+                  aria-label={profile.ariaLabel}
+                  onclick={profile.onSelect}
+                >{profile.label}</button>
+              {/each}
+            </div>
 
             <div class="level-control">
               <div>
@@ -253,11 +237,10 @@
                 {/if}
               {/if}
             </div>
-          </div>
-
+          </section>
         </div>
 
-        <CreateOutputOptions {...surface.output} />
+        <CreateOutputOptions {...surface.output} showOutputPreview={session.sources.length === 0} />
 
         <details
           class="create-advanced-disclosure"
@@ -265,11 +248,8 @@
           ontoggle={(event) => surface.advanced.onToggle(event.currentTarget.open)}
         >
           <summary onkeydown={surface.advanced.onKeydown}>
-            <span class="create-advanced-summary-icon"><Icon name="settings" size={17} /></span>
-            <span>
-              <strong>{surface.tr("gui.create.advanced.title")}</strong>
-              <small>{surface.tr("gui.create.advanced.detail")}</small>
-            </span>
+            <strong>{surface.tr("gui.create.advanced.title")}</strong>
+            <small>{surface.tr("gui.create.advanced.detail")}</small>
             <Icon name="chevron-down" size={16} class="create-advanced-chevron" />
           </summary>
           <div class="create-advanced-grid">
@@ -297,7 +277,7 @@
         </details>
 
         <details class="workspace-summary-disclosure">
-          <summary>{surface.setupSummary.heading}</summary>
+          <summary><strong>{surface.setupSummary.heading}</strong><Icon name="chevron-down" size={16} class="create-advanced-chevron" /></summary>
           <CreateSetupSummary {...surface.setupSummary} />
         </details>
 

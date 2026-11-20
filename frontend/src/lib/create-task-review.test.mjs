@@ -851,6 +851,8 @@ test("same-page creation completes all checks, cancels cleanly and retains an in
     props: { variant, session: run.create },
   }).body;
   const { run } = await creationPreparation();
+  const primaryButton = (body) => body.match(/<button\b[^>]*id="create-primary-source-action"[^>]*>[\s\S]*?<\/button>/)?.[0];
+  assert.match(primaryButton(workspaceBody(run, "modern")), /Review and create/);
   const firstDraft = run.create.captureRun();
   await run.create.start(taskSpec().inputs, "dialog");
   assert.deepEqual(run.calls.filter(([name]) => ["save", "inspection", "confirm", "plan", "workspace-space",
@@ -898,6 +900,9 @@ test("same-page creation completes all checks, cancels cleanly and retains an in
   assert.equal(run.create.preflight.state.phase, "ready");
   assert.equal(run.create.preflight.state.pending, null);
   assert.equal(run.create.sources.length, 0);
+  const emptyWorkspace = workspaceBody(run, "modern");
+  assert.match(primaryButton(emptyWorkspace), /Add files/);
+  assert.doesNotMatch(emptyWorkspace, /workspace-action-bar/);
   assert.deepEqual(JSON.parse(JSON.stringify(submitted)), taskSpec({ split_size: null, split_mode: "generic",
     replacement_guard: "current-output" }));
 

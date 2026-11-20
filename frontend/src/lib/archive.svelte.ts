@@ -13,7 +13,7 @@ import {
   type Page,
   type PasswordBookStatus,
 } from "./ipc";
-import { t, tError } from "./i18n.svelte";
+import { t, tError, tFallback } from "./i18n.svelte";
 import { pushToast, removeToastByKey } from "./toasts.svelte";
 import { cancelPasswordBookPreview, readPasswordBookPreview, savePasswordBookPreview, forgetPasswordBookPreview, preparedNestedPreviewRows, sortPreviewEntries } from "./dev-preview-data";
 
@@ -1219,7 +1219,9 @@ const RECENT_KEY = "squallz.recent";
 export function recentFiles(): string[] {
   try {
     const raw = localStorage.getItem(RECENT_KEY);
-    return raw ? (JSON.parse(raw) as string[]) : [];
+    const paths: unknown = raw && JSON.parse(raw);
+    if (!Array.isArray(paths)) return [];
+    return [...new Set(paths.filter((path): path is string => typeof path === "string" && path.length > 0))].slice(0, 5);
   } catch {
     return [];
   }
@@ -1228,7 +1230,11 @@ export function recentFiles(): string[] {
 export function rememberRecent(path: string): void {
   const list = recentFiles().filter((p) => p !== path);
   list.unshift(path);
-  localStorage.setItem(RECENT_KEY, JSON.stringify(list.slice(0, 5)));
+  try {
+    localStorage.setItem(RECENT_KEY, JSON.stringify(list.slice(0, 5)));
+  } catch {
+    pushToast({ key: "recent-save", kind: "warning", title: tFallback("gui.recent.save_failed") });
+  }
 }
 
 export function installArchivePreview(

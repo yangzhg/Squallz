@@ -14,6 +14,8 @@
     postSuccess,
     testAfterCreate,
     testAfterCreateRequired,
+    outputPreview,
+    showOutputPreview = false,
     defaultFolder,
     fileManager,
     trashName,
@@ -35,6 +37,7 @@
     testAfterCreate: boolean;
     testAfterCreateRequired: boolean;
     outputPreview: string;
+    showOutputPreview?: boolean;
     defaultFolder: string;
     fileManager: string;
     trashName: string;
@@ -129,10 +132,15 @@
       "gui.create.output.integrity.detail",
     );
   }
+  const completionSummary = $derived([
+    completion !== "none" && completionTitle(completion),
+    testAfterCreate && tr("gui.create.output.integrity.enabled_summary"),
+    postSuccessTitle(postSuccess),
+  ].filter(Boolean).join(" · "));
 </script>
 
 {#snippet destinationFields()}
-  <fieldset class="create-output-fieldset" disabled={disabled} title={disabledReason}>
+  <fieldset class="create-output-fieldset create-destination-field" disabled={disabled} title={disabledReason}>
     <legend>{tr("gui.create.output.destination.title")}</legend>
     <div class="create-output-options" role="radiogroup">
       {#each destinationOptions as value}
@@ -257,15 +265,16 @@
 
 {#if variant === "modern"}
   <section class="create-output-card">
-    <header>
-      <div>
-        <h2><Icon name="archive" size={16} />{tr("gui.create.output.title")}</h2>
-        <p>{tr("gui.create.output.intro")}</p>
-      </div>
-    </header>
     {@render destinationFields()}
+    {#if showOutputPreview}
+      <p class="create-destination-preview"><span>{tr("gui.create.output.preview")}</span><strong>{outputPreview}</strong></p>
+    {/if}
     <details class="workspace-summary-disclosure create-completion-options">
-      <summary>{tr("gui.create.output.completion.title")}</summary>
+      <summary>
+        <strong>{tr("gui.create.output.completion.title")}</strong>
+        <small class:warning={postSuccess === "trash_source"}>{completionSummary}</small>
+        <Icon name="chevron-down" size={16} class="create-advanced-chevron" />
+      </summary>
       {@render completionFields()}
       {@render integrityFields()}
       {@render sourceFields()}

@@ -140,17 +140,26 @@ export const createFormats: Record<CreateFormatId, CreateFormat> = {
   },
 };
 
-export const nav = [
-  ["archive", "Recent"],
-  ["folder-open", "Archives"],
-  ["sparkles", "Create"],
-  ["archive", "Extract"],
-  ["repeat", "Convert"],
-  ["check-circle", "Checksum"],
-  ["search", "Duplicates"],
-  ["shield-alert", "Recovery"],
-  ["settings", "Settings"],
+export const navigationGroups: { labelKey: string; items: ScreenAction[] }[] = [
+  { labelKey: "gui.nav.library", items: [
+    { screen: "recent", labelKey: "gui.nav.recent", icon: "history" },
+    { screen: "browse", labelKey: "gui.nav.archives", icon: "folder-open" },
+  ] },
+  { labelKey: "gui.nav.operations", items: [
+    { screen: "create", labelKey: "gui.nav.create", icon: "file-plus" },
+    { screen: "extract", labelKey: "gui.nav.extract", icon: "archive" },
+    { screen: "convert", labelKey: "gui.nav.convert", icon: "repeat" },
+  ] },
+  { labelKey: "gui.nav.tools", items: [
+    { screen: "checksum", labelKey: "gui.nav.checksum", icon: "check-circle" },
+    { screen: "duplicates", labelKey: "gui.nav.duplicates", icon: "search" },
+    { screen: "recovery", labelKey: "gui.nav.recovery", icon: "shield-alert" },
+  ] },
 ];
+
+export const settingsNavigation: ScreenAction = {
+  screen: "settingsGeneral", labelKey: "gui.nav.settings", icon: "settings",
+};
 
 export const settingsSections: ScreenAction[] = [
   { screen: "settingsGeneral", labelKey: "gui.settings.section.general", icon: "settings" },
