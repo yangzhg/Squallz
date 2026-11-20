@@ -72,10 +72,11 @@ test("App ignores a key already consumed by the focused overlay", () => {
 
 test("app shortcuts and workspace Escape leave an active text composition to the input method", () => {
   const run = menuHarness();
-  const event = keyboardEvent();
-  event.isComposing = true;
-  run.listeners.keydown(event);
-  assert.equal(event.defaultPrevented, false);
+  for (const flags of [{ isComposing: true }, { isComposing: false, keyCode: 229 }]) {
+    const event = Object.assign(keyboardEvent(), flags);
+    run.listeners.keydown(event);
+    assert.equal(event.defaultPrevented, false);
+  }
   assert.equal(run.context.shortcutCalls, 0);
   assert.equal(run.context.workflowCalls, 0);
 });

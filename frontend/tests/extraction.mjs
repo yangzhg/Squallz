@@ -13,7 +13,7 @@ export async function extractionFixture(server) {
         defaultDirectory: context.settingsSession?.appliedGeneral.defaultExtractDir || null,
         fallbackPaths: context.runtimePreviews?.batchPaths?.length ? context.runtimePreviews.batchPaths
           : context.currentArchive ? [context.currentArchive.source] : [],
-        platform: context.platformKind?.() ?? "macos", presetId: context.presets.selection("extract").id,
+        platform: context.platformKind?.() ?? "macos",
         archiveTitle: context.currentArchive?.name ?? "archive",
       }),
       choose: async (purpose, options, isCurrent) => {

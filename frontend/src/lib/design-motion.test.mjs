@@ -245,28 +245,28 @@ test("archive previews keep their text visible throughout the opening animation"
   assert.equal(motionStyle(panel, "reduce").animation, undefined);
 });
 
-test("disclosure and review content fade while controls keep their native focus and geometry", () => {
+test("expanded options and reviews highlight their borders while content stays readable", () => {
   for (const variant of ["modern-create", "classic-create"]) {
     const page = element("div", [variant]);
     const details = element("details", ["workspace-summary-disclosure"], page, [], { open: "" });
     const review = element("section", ["create-plan-review"], page);
     const content = element("section", ["create-setup-summary"], details);
-    for (const target of [content, element("div", ["create-plan-review-copy"], review), element("div", ["archive-preset-manager"], page)]) {
-      assert.match(motionStyle(target, "no-preference").animation, /^content-fade var\(--motion-duration-fast\)/u);
+    for (const target of [details, review, element("div", ["archive-preset-manager"], page)]) {
+      assert.match(motionStyle(target, "no-preference").animation, /^surface-border-enter var\(--motion-duration-fast\)/u);
       assert.equal(motionStyle(target, "reduce").animation, undefined);
     }
-    for (const target of [element("summary", [], details), element("div", ["create-plan-review-actions"], review)]) {
+    for (const target of [content, element("summary", [], details), element("div", ["create-plan-review-copy"], review), element("div", ["create-plan-review-actions"], review)]) {
       assert.equal(motionStyle(target, "no-preference").animation, undefined);
     }
     delete details.attributes.open;
-    assert.equal(motionStyle(content, "no-preference").animation, undefined);
+    assert.equal(motionStyle(details, "no-preference").animation, undefined);
   }
   const check = element("svg", ["extract-destination-check"]);
   assert.match(motionStyle(check, "no-preference").transition, /^opacity var\(--motion-duration-fast\)/u);
   assert.equal(motionStyle(check, "reduce").transition, undefined);
 });
 
-test("page content fades without transforming ancestors or the sticky action bar", () => {
+test("page content and sticky actions are visible and stationary on their first frame", () => {
   const root = element("div", ["design-root"]);
   const containers = [
     ["modern-content", "recent-workspace"],
@@ -288,14 +288,11 @@ test("page content fades without transforming ancestors or the sticky action bar
   ];
   for (const [page, container] of containers) {
     const target = element("div", [container], element("div", [page], root));
-    const normal = motionStyle(target, "no-preference");
-    const name = normal["animation-name"] ?? normal.animation?.split(" ")[0];
-    const keyframes = stylesheet.children.find((node) => node.type === "Atrule" && node.name === "keyframes" && node.prelude === name);
-    assert.ok(keyframes, `${page}: content must animate`);
-    const declarations = keyframes.block.children.flatMap((frame) => frame.block.children);
-    assert.ok(declarations.length > 0);
-    assert.ok(declarations.every((declaration) => declaration.property === "opacity"), `${page}: fade must not establish a transformed containing block`);
-    assert.equal(motionStyle(target, "reduce").animation, "none", page);
+    for (const preference of ["no-preference", "reduce"]) {
+      const style = motionStyle(target, preference);
+      assert.equal(style.animation, undefined, page);
+      assert.equal(style["animation-name"], undefined, page);
+    }
   }
   const actionBar = element("footer", ["workspace-action-bar"], element("div", ["modern-create"], root));
   assert.equal(motionStyle(actionBar, "no-preference").animation, undefined);

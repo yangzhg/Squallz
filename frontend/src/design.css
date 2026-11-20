@@ -15133,16 +15133,6 @@ select.classic-input:focus {
   }
 }
 
-@keyframes content-fade {
-  from {
-    opacity: 0;
-  }
-
-  to {
-    opacity: 1;
-  }
-}
-
 @keyframes surface-border-enter {
   from {
     border-color: var(--color-accent);
@@ -15177,10 +15167,10 @@ select.classic-input:focus {
       box-shadow var(--motion-duration-fast) var(--motion-ease-standard);
   }
 
-  :is(.modern-create, .classic-create) :is(.create-advanced-disclosure, .workspace-summary-disclosure)[open] > :not(summary),
-  :is(.modern-create, .classic-create) .create-plan-review > :is(.create-plan-review-copy, .create-plan-review-metrics),
+  :is(.modern-create, .classic-create) :is(.create-advanced-disclosure, .workspace-summary-disclosure)[open],
+  :is(.modern-create, .classic-create) .create-plan-review,
   :is(.modern-extract, .classic-extract, .modern-create, .classic-create) .archive-preset-manager {
-    animation: content-fade var(--motion-duration-fast) var(--motion-ease-standard);
+    animation: surface-border-enter var(--motion-duration-fast) var(--motion-ease-standard);
   }
 
   .extract-destination-check {
@@ -15223,29 +15213,6 @@ select.classic-input:focus {
   .first-run-modern-card,
   .first-run-classic-card {
     animation: content-enter var(--motion-duration-base) var(--motion-ease-standard) backwards;
-  }
-
-  .recent-workspace,
-  .archive-start-state,
-  .modern-convert > .sheet-head,
-  .modern-extract > .sheet-head,
-  .settings-view > .sheet-head,
-  .appearance-view > .sheet-head,
-  .colors-view > .sheet-head,
-  .integration-view > .sheet-head,
-  .classic-property-sheet > header,
-  .modern-create > .create-source-list,
-  .modern-create > .create-workflow,
-  .modern-convert > .create-workflow,
-  .modern-extract > .extract-layout,
-  .settings-view > .settings-layout,
-  .settings-view > .password-book-layout,
-  .settings-view > .checksum-workspace,
-  .settings-view > .duplicates-workspace,
-  .appearance-view > .appearance-layout,
-  .colors-view > .appearance-layout,
-  .integration-view > .integration-layout {
-    animation: content-fade var(--motion-duration-base) var(--motion-ease-standard) backwards;
   }
 
   .first-run-modern-card {
@@ -15358,26 +15325,6 @@ select.classic-input:focus {
   .first-run-modern-card,
   .first-run-classic-card,
   .task-window-empty,
-  .recent-workspace,
-  .archive-start-state,
-  .modern-convert > .sheet-head,
-  .modern-create > .create-source-list,
-  .modern-create > .create-workflow,
-  .modern-convert > .create-workflow,
-  .modern-extract > .sheet-head,
-  .modern-extract > .extract-layout,
-  .settings-view > .sheet-head,
-  .settings-view > .settings-layout,
-  .settings-view > .password-book-layout,
-  .settings-view > .checksum-workspace,
-  .settings-view > .duplicates-workspace,
-  .appearance-view > .sheet-head,
-  .appearance-view > .appearance-layout,
-  .colors-view > .sheet-head,
-  .colors-view > .appearance-layout,
-  .integration-view > .sheet-head,
-  .integration-view > .integration-layout,
-  .classic-property-sheet > header,
   .toast-card,
   .task-center-surface,
   .sfx-publish-card,

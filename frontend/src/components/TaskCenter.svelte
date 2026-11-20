@@ -10,6 +10,7 @@
     taskQueueDropBeforeId,
     taskQueuePositions,
     type TaskCenterFilter,
+    type TaskCenterListPosition,
     type TaskQueuePosition,
     type TaskQueueDropEdge,
   } from "../lib/task-center";
@@ -46,6 +47,7 @@
     rootClass,
     rootVariables = {},
     focusTaskId = null,
+    takeListPosition,
     onClose,
     onPause,
     onResume,
@@ -65,6 +67,7 @@
     rootClass: string;
     rootVariables?: CssVariableMap;
     focusTaskId?: number | null;
+    takeListPosition: (id: number | null) => TaskCenterListPosition | null;
     onClose: () => void;
     onPause: TaskAction;
     onResume: TaskAction;
@@ -72,7 +75,7 @@
     onMoveLater: TaskAction;
     onMoveBefore: TaskMoveBeforeAction;
     onCancel: TaskAction;
-    onDetails: TaskAction;
+    onDetails: (task: Task, position: TaskCenterListPosition) => void;
     onClear: () => void;
   } = $props();
 
@@ -279,18 +282,38 @@
     });
   });
 
-  onMount(() => {
-    void tick().then(async () => {
-      if (focusTaskId !== null && filter !== "all" && !orderedRows.some((task) => task.id === focusTaskId)) {
+  function openDetails(task: Task, index: number, button: HTMLButtonElement): void {
+    if (!list) return;
+    onDetails(task, { taskId: task.id, index, offset: button.getBoundingClientRect().top - list.getBoundingClientRect().top });
+  }
+
+  async function focusList(): Promise<void> {
+    await tick();
+    if (!panel?.isConnected || !list) return;
+    const position = takeListPosition(focusTaskId);
+    let targetId = focusTaskId;
+    if (targetId !== null && !orderedRows.some((task) => task.id === targetId)) {
+      if (position) {
+        targetId = orderedRows[Math.min(position.index, orderedRows.length - 1)]?.id ?? null;
+      } else if (filter !== "all" && tasks.some((task) => task.id === targetId)) {
         onFilter("all");
         await tick();
       }
-      const taskButton = focusTaskId === null
-        ? null
-        : panel?.querySelector<HTMLButtonElement>(`[data-task-details-id="${focusTaskId}"]`);
-      (taskButton ?? closeButton)?.focus();
-    });
-  });
+    }
+    if (!panel?.isConnected || !list) return;
+    const button = targetId === null ? null : list.querySelector<HTMLButtonElement>(`[data-task-details-id="${targetId}"]`);
+    if (button && position) {
+      const bounds = button.getBoundingClientRect();
+      const offset = Math.max(0, Math.min(position.offset, list.clientHeight - bounds.height));
+      list.scrollTop += bounds.top - list.getBoundingClientRect().top - offset;
+      button.focus({ preventScroll: true });
+    } else {
+      const filterButton = position ? panel.querySelector<HTMLInputElement>(".task-center-filters input:checked") : null;
+      (button ?? filterButton ?? closeButton)?.focus();
+    }
+  }
+
+  onMount(() => { void focusList(); });
 </script>
 
 <svelte:window
@@ -361,7 +384,7 @@
       </article>
     {/if}
 
-    {#each orderedRows as task (task.id)}
+    {#each orderedRows as task, index (task.id)}
       {@const tone = taskTone(task)}
       {@const taskTitle = taskTitleLabel(task)}
       {@const taskKind = taskKindLabel(task)}
@@ -384,7 +407,8 @@
         <header>
           <div>
             <button class="task-center-title task-center-open" type="button" data-task-details-id={task.id}
-              aria-label={tr("gui.task_center.open_details").replace("{name}", taskTitle)} onclick={() => onDetails(task)}>
+              aria-label={tr("gui.task_center.open_details").replace("{name}", taskTitle)}
+              onclick={(event) => openDetails(task, index, event.currentTarget)}>
               <span>{taskTitle}</span><Icon name="chevron-right" size={14} />
             </button>
           </div>

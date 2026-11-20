@@ -16,7 +16,6 @@ export interface ExtractWorkspacePort {
     defaultDirectory: string | null;
     fallbackPaths: readonly string[];
     platform: DesktopPathPlatform;
-    presetId: string | null;
     archiveTitle: string;
   };
   choose: (purpose: string, options: {
@@ -54,6 +53,9 @@ export class ExtractWorkspaceSession {
   get state() { return this.options.state; }
   get choosing() { return this.#picker !== null; }
   get archive() { return this.port.read().archive; }
+  get needsDestination(): boolean {
+    return !!this.archive && this.state.destinationMode === "choose" && !this.state.customDest;
+  }
   get destination(): string {
     const { archive, defaultDirectory } = this.port.read();
     return archive ? this.options.requestedDestination({
@@ -66,17 +68,20 @@ export class ExtractWorkspaceSession {
     const { archive, defaultDirectory } = this.port.read();
     return this.options.smartBase(defaultDirectory, archive ? dirname(archive.path) : this.destination);
   }
+  get displayDestination(): string {
+    return this.destination || tr("gui.extract.destination_not_selected");
+  }
   get effectiveDestination(): string {
     if (this.archive && this.state.destinationMode === "smart") {
       if ((this.plan.phase === "ready" || this.plan.phase === "blocked") && this.plan.plan) return this.plan.plan.destination;
-      return tr("gui.extract.smart_destination_value")
-        .replace("{base}", this.destination);
+      return tr("gui.extract.smart_destination_value", { base: this.destination });
     }
-    return this.destination;
+    return this.displayDestination;
   }
   get input(): ExtractPlanInput | null {
     const { archive, screen } = this.port.read();
-    return archive && screen === "extract" ? this.options.snapshotPlan(archive, this.destination) : null;
+    return archive && screen === "extract" && !this.needsDestination
+      ? this.options.snapshotPlan(archive, this.destination) : null;
   }
 
   sync(): void {
@@ -175,7 +180,7 @@ export class ExtractWorkspaceSession {
         title: tr("gui.extract.choose_destination_title"),
         multiple: false,
         directory: true,
-        defaultPath: this.state.customDest.trim() || this.destination,
+        defaultPath: this.state.customDest || this.destination || this.smartBase,
       }, isCurrent);
       if (!isCurrent()) return false;
       if (typeof path === "string" && this.options.acceptDestination(path)) {
@@ -201,20 +206,13 @@ export class ExtractWorkspaceSession {
       this.port.notice(reason);
       return;
     }
+    if (this.needsDestination) {
+      await this.chooseDestination();
+      return;
+    }
     if (this.plan.phase === "loading" || this.plan.phase === "blocked") {
       this.port.notice(this.plan.phase === "blocked" ? this.spaceFailure : this.planWait);
       return;
-    }
-    if (this.state.destinationMode === "choose" && !this.state.customDest.trim()) {
-      const before = this.port.read();
-      const { scope, selection } = this.state;
-      if (!await this.chooseDestination()) return;
-      const after = this.port.read();
-      if (after.archive !== before.archive || after.screen !== before.screen || this.state.scope !== scope
-        || this.state.selection !== selection || after.presetId !== before.presetId
-        || this.state.destinationMode !== "choose" || !this.state.customDest.trim() || this.choosing) {
-        return;
-      }
     }
     const { archive, screen, archiveTitle } = this.port.read();
     if (!archive || screen !== "extract") return;
@@ -233,8 +231,7 @@ export class ExtractWorkspaceSession {
       return;
     }
     const action = snapshot.input.selection ? tr("gui.extract.selected_queued") : tr("gui.extract.all_queued");
-    const success = tr("gui.extract.started_to_destination")
-      .replace("{action}", action).replace("{destination}", plan.destination);
+    const success = tr("gui.extract.started_to_destination", { action, destination: plan.destination });
     if (await this.port.submitArchive(this.options.extractJob(snapshot, plan), success,
       tr("gui.precondition.open_before_extract"))) {
       recordOperation({ status: "queued", title: action, detail: `${archiveTitle} -> ${plan.destination}` });
@@ -259,19 +256,18 @@ export class ExtractWorkspaceSession {
         : tr("gui.precondition.open_before_copy_out"));
       return;
     }
-    if (this.state.destinationMode === "choose" && !this.state.customDest.trim()) {
+    if (this.needsDestination) {
       if (!await this.chooseDestination()) return;
       const after = this.port.read();
       if (after.archive !== before.archive || after.screen !== before.screen || after.selectionBusy
         || after.selection.size !== selection.length || selection.some((path) => !after.selection.has(path))
-        || this.state.destinationMode !== "choose" || !this.state.customDest.trim() || this.choosing) {
+        || this.state.destinationMode !== "choose" || !this.state.customDest || this.choosing) {
         return;
       }
     }
     const destination = this.effectiveDestination;
     const action = tr("gui.copy_out.selected_queued");
-    const success = tr("gui.copy_out.started_to_destination")
-      .replace("{action}", action).replace("{destination}", destination);
+    const success = tr("gui.copy_out.started_to_destination", { action, destination });
     if (await this.port.submitArchive(this.options.copyOutJob(before.archive, this.destination, selection), success,
       tr("gui.precondition.open_before_copy_out"))) {
       recordOperation({ status: "queued", title: action, detail: `${before.archiveTitle} -> ${destination}` });

@@ -143,3 +143,57 @@ test("retry from the keyboard keeps focus inside the plan when the button disapp
     assert.equal(focusedWhenLoading, activeElement === button ? headingElement : outside);
   }
 });
+
+test("an ask-for-folder preset plans and writes only to the folder actually chosen", async () => {
+  const { session, context, calls } = harness();
+  const { render } = await server.ssrLoadModule("svelte/server");
+  const { default: Workspace } = await server.ssrLoadModule("/src/components/ExtractWorkspace.svelte");
+  const { loadLocale, tFallback: tr } = await server.ssrLoadModule("/src/lib/i18n.svelte.ts");
+  const checked = [];
+  ipc.planExtract = async (_path, _display, dest) => {
+    checked.push(dest);
+    return { destination: dest, space_ok: dest !== "/default/archive", input_guard: "checked" };
+  };
+  session.open("all", null);
+  await session.selectDestination("archive");
+  await session.retry();
+  assert.equal(session.plan.phase, "blocked");
+  session.applyPreset({ ...session.options.snapshotPreset(null), destination: { base: "ask", layout: "direct" } });
+  session.sync();
+  assert.equal(session.plan.phase, "idle");
+  assert.equal(session.input, null);
+  assert.deepEqual(checked, ["/default/archive"]);
+  const bridge = { archiveTitle: "outer.zip", archiveLine: "/Archive/outer.zip", warning: "",
+    password: "", testEnabled: true, onReady() {}, onTest() {}, onBatch() {} };
+  for (const locale of ["en-US", "zh-CN"]) {
+    await loadLocale(locale);
+    for (const variant of ["modern", "classic"]) {
+      const { body } = render(Workspace, { props: { variant, session, view: context.extractView, presets: context.presets, bridge } });
+      assert.ok(body.includes(tr("gui.extract.destination_not_selected")));
+      assert.ok(body.includes(tr("gui.extract.choose_before_plan")));
+      assert.equal(context.extractView.extractActionLabel(variant), tr("gui.extract.choose_destination_title"));
+      assert.equal(context.extractView.extractStartBlockedReason(), "");
+    }
+  }
+  await session.start();
+  assert.equal(session.input, null, "cancelling the picker leaves the destination undecided");
+  assert.deepEqual(checked, ["/default/archive"]);
+  const folder = "/Archives/$&-selected ";
+  context.openNativeDialog = async () => folder;
+  await session.start();
+  assert.equal(session.destination, folder);
+  assert.equal(calls.some(([kind]) => kind === "submit"), false);
+  session.sync();
+  await session.plan.request(session.input);
+  assert.deepEqual(checked, ["/default/archive", folder]);
+  assert.ok(context.extractView.extractDestinationHint().includes(folder));
+  let chooserDefault;
+  context.openNativeDialog = async (_purpose, _open, options) => { chooserDefault = options.defaultPath; return null; };
+  await session.selectDestination("choose");
+  assert.equal(chooserDefault, folder);
+  await session.start();
+  const jobs = calls.filter(([kind]) => kind === "submit");
+  assert.equal(jobs.length, 1);
+  assert.equal(jobs[0][1].dest, folder);
+  assert.equal(jobs[0][1].expected_destination, folder);
+});

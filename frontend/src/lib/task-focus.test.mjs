@@ -2,7 +2,53 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import vm from "node:vm";
 import ts from "typescript";
-import { compileTestScript, readSvelteScript, selectFunctions } from "../../tests/source.mjs";
+import { compileTestScript, evaluateFunctions, readSvelteScript, selectFunctions } from "../../tests/source.mjs";
+
+test("returning to a filtered task list restores the row, its visible position, or its remaining neighbor", async () => {
+  const source = readSvelteScript(new URL("../components/TaskCenter.svelte", import.meta.url), "TaskCenter.ts");
+  const rows = Array.from({ length: 24 }, (_, index) => ({ id: index + 1 }));
+  const opened = rows[19];
+  for (const change of ["inserted", "finished", "cleared", "empty"]) {
+    let position;
+    let focused;
+    const rowHeight = 80;
+    const list = {
+      clientHeight: 320, scrollTop: 19 * rowHeight - 32,
+      getBoundingClientRect: () => ({ top: 100 }),
+      querySelector(selector) {
+        const index = context.orderedRows.findIndex((task) => selector === `[data-task-details-id="${task.id}"]`);
+        if (index < 0) return null;
+        return {
+          getBoundingClientRect: () => ({ top: 100 + index * rowHeight - list.scrollTop, height: 24 }),
+          focus: (options) => {
+            assert.equal(options?.preventScroll, true);
+            focused = context.orderedRows[index].id;
+          },
+        };
+      },
+    };
+    const context = {
+      list, panel: { isConnected: true, querySelector: () => ({ focus: () => { focused = "filter"; } }) },
+      tasks: rows, orderedRows: rows, filter: "queue", focusTaskId: opened.id, tick: async () => {},
+      onDetails: (task, saved) => { assert.equal(task, opened); position = saved; },
+      takeListPosition: (id) => { assert.equal(id, position.taskId); return position; },
+      onFilter: () => assert.fail("returning from details must preserve the selected filter"),
+    };
+    const center = evaluateFunctions(source, ["openDetails", "focusList"], context);
+    center.openDetails(opened, 19, list.querySelector('[data-task-details-id="20"]'));
+    assert.equal(position.offset, 32);
+    list.scrollTop = 0;
+    if (change === "inserted") context.orderedRows = [{ id: 25 }, ...rows];
+    else context.orderedRows = change === "empty" ? [] : rows.filter((task) => task !== opened);
+    if (change === "cleared") context.tasks = context.orderedRows;
+    await center.focusList();
+    assert.equal(focused, change === "empty" ? "filter" : change === "inserted" ? 20 : 21);
+    if (focused !== "filter") {
+      const button = list.querySelector(`[data-task-details-id="${focused}"]`);
+      assert.equal(button.getBoundingClientRect().top - list.getBoundingClientRect().top, 32);
+    }
+  }
+});
 
 function harness() {
   const source = readSvelteScript(new URL("../App.svelte", import.meta.url), "App.ts");

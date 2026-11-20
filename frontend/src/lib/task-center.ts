@@ -20,6 +20,12 @@ export interface TaskQueuePosition {
 export type TaskQueueDropEdge = "before" | "after";
 export type TaskCenterFilter = "all" | "queue" | "attention" | "results";
 
+export interface TaskCenterListPosition {
+  taskId: number;
+  index: number;
+  offset: number;
+}
+
 export type TaskSubmissionBlockReason =
   | "starting"
   | "task-window-busy"

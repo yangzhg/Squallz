@@ -36,7 +36,7 @@
   const labelWithDisabledReason = (label: string, reason: string) => reason ? `${label} · ${reason}` : label;
   let archiveRequiredReason = $derived(session.archiveRequiredReason);
   let startBlockedReason = $derived(view.extractStartBlockedReason());
-  let startLabel = $derived(variant === "modern" ? view.extractActionLabel() : tr("gui.extract.start"));
+  let startLabel = $derived(view.extractActionLabel(variant));
   let batchLabel = $derived(variant === "modern"
     ? tr("gui.extract.review_batch")
     : tr("gui.extract.batch_review"));
@@ -110,7 +110,7 @@
           </div>
           <div class="extract-destination-detail">
             <span>{view.extractDestinationFieldLabel()}</span>
-            <strong>{session.destination}</strong>
+            <strong>{session.displayDestination}</strong>
             {#if session.state.destinationMode === "smart" && session.archive}<p>{tr("gui.extract.smart_tip")}</p>{/if}
           </div>
           <div class="extract-policy-fields">
@@ -188,7 +188,7 @@
           <h2>{tr("gui.batch.destination")}</h2>
           <div class="classic-form-grid compact">
             <div class="classic-label">{view.extractDestinationFieldLabel()}</div>
-            <div class="classic-input accent classic-extract-destination-path">{session.destination}</div>
+            <div class="classic-input accent classic-extract-destination-path">{session.displayDestination}</div>
             <div class="classic-label">{tr("common.mode")}</div>
             <div class="classic-segments">
               {#each destinations as choice (choice.mode)}

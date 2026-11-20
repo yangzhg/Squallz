@@ -636,8 +636,13 @@ test("extract destination can be reselected and stale choosers cannot change or 
       if (replaceAfterAcceptance) {
         assert.equal(jobs.length, 0, `${caller} must recheck its context after awaiting the accepted chooser`);
         assert.equal(task.calls.some(([name]) => name === "plan"), false);
+      } else if (caller === "start") {
+        assert.equal(jobs.length, 0, "choosing a destination returns to the write plan for review");
+        assert.equal(task.context.extraction.input.dest, "/accepted");
+        await task.context.extraction.start();
+        assert.equal(task.calls.find(([name]) => name === "submit")[1].dest, "/accepted");
       } else {
-        assert.equal(jobs.length, 1, `${caller} must retain normal accepted submission`);
+        assert.equal(jobs.length, 1, "copy-out retains normal accepted submission");
         assert.equal(jobs[0][1].path, "/original/photos.zip");
         assert.equal(jobs[0][1].dest, "/accepted");
       }

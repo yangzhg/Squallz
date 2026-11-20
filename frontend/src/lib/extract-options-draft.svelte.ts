@@ -144,7 +144,7 @@ export class ExtractOptionsDraft {
     switch (this.#state.destinationMode) {
       case "smart": return this.smartBase(paths.defaultDirectory, paths.archiveParent);
       case "same": return paths.archiveParent;
-      case "choose": return this.#state.customDest.trim() || paths.archiveFolder;
+      case "choose": return this.#state.customDest;
       case "archive": return paths.archiveFolder;
     }
   }

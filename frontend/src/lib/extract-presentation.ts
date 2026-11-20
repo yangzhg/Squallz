@@ -17,6 +17,7 @@ export class ExtractPresentation {
 
   extractPlanDescription(): string {
     if (!this.session.archive) return this.session.destination;
+    if (this.session.needsDestination) return tr("gui.extract.choose_before_plan");
     if (this.session.plan.phase === "blocked") return this.session.spaceFailure;
     return tr("gui.extract.plan_checking_body");
   }
@@ -96,10 +97,9 @@ export class ExtractPresentation {
   extractDestinationDetail(mode: ExtractDestinationMode): string {
     if (!this.session.archive) return this.session.destination;
     if (mode === "same") return dirname(this.session.archive.path);
-    if (mode === "choose") return this.session.state.customDest.trim() || tr("gui.extract.pick_another_folder");
+    if (mode === "choose") return this.session.state.customDest || tr("gui.extract.pick_another_folder");
     if (mode === "smart") {
-      return tr("gui.extract.smart_destination_value")
-        .replace("{base}", this.session.smartBase);
+      return tr("gui.extract.smart_destination_value", { base: this.session.smartBase });
     }
     return this.archiveFolder();
   }
@@ -111,8 +111,9 @@ export class ExtractPresentation {
       : tr("gui.selection.all_entries");
   }
 
-  extractActionLabel(): string {
-    if (!this.session.archive) return tr("gui.extract.start");
+  extractActionLabel(variant: "modern" | "classic" = "modern"): string {
+    if (this.session.needsDestination) return tr("gui.extract.choose_destination_title");
+    if (!this.session.archive || variant === "classic") return tr("gui.extract.start");
     return this.session.state.scope === "selection"
       ? tr("gui.action.extract_selected")
       : tr("gui.action.extract_all");
@@ -138,8 +139,8 @@ export class ExtractPresentation {
   }
 
   extractDestinationHint(): string {
-    return tr("gui.extract.destination_hint")
-      .replace("{destination}", this.session.effectiveDestination);
+    return this.session.needsDestination ? tr("gui.extract.choose_before_plan")
+      : tr("gui.extract.destination_hint", { destination: this.session.effectiveDestination });
   }
 
   extractStartBlockedReason(): string {
@@ -151,6 +152,7 @@ export class ExtractPresentation {
     if (this.session.state.scope === "selection" && this.session.state.selection.length === 0) {
       return tr("gui.precondition.select_before_extract");
     }
+    if (this.session.needsDestination) return "";
     if (this.session.plan.phase === "blocked") return this.session.spaceFailure;
     if (this.session.plan.phase === "error") return this.session.planError;
     if (this.session.plan.phase !== "ready") {

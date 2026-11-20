@@ -244,6 +244,39 @@ test("Escape clears archive search only after input method editing finishes", ()
   assert.deepEqual(calls, ["prevent", "stop", "clear"]);
 });
 
+test("Down from a completed search selects the first match and hands keyboard navigation to its row", () => {
+  const origin = {};
+  const document = { activeElement: origin };
+  const first = { path: "reports/summary.txt", display: "summary.txt", entry_type: "file", encoding: "utf-8", size: 20 };
+  const calls = [];
+  let canFocus;
+  const app = harness(["onArchiveFilterKeydown"], {
+    document, filterText: () => "summary", filterPending: () => false, archiveBrowseError: () => null,
+    rowAt: (index) => index === 0 ? first : null, displayArchiveEntry, tr: englishTranslate,
+    selectOnlyEntry: (entry) => calls.push(["select", entry.virtualIndex, entry.source.path]),
+    focusArchiveRow(index, path, guard) { calls.push(["focus", index, path]); canFocus = guard; },
+  });
+  const event = { key: "ArrowDown", currentTarget: origin,
+    preventDefault: () => calls.push("prevent"), stopPropagation: () => calls.push("stop") };
+  for (const flags of [{ isComposing: true }, { keyCode: 229 }, { defaultPrevented: true },
+    { shiftKey: true }, { ctrlKey: true }, { altKey: true }, { metaKey: true }]) {
+    app.onArchiveFilterKeydown({ ...event, ...flags });
+  }
+  for (const overrides of [{ filterText: () => " " }, { filterPending: () => true },
+    { rowAt: () => null }, { archiveBrowseError: () => ({}) }, { archiveSelectionBusyReason: () => "Refreshing" }]) {
+    const saved = Object.fromEntries(Object.keys(overrides).map((key) => [key, app.context[key]]));
+    Object.assign(app.context, overrides);
+    app.onArchiveFilterKeydown(event);
+    Object.assign(app.context, saved);
+  }
+  assert.deepEqual(calls, []);
+  app.onArchiveFilterKeydown(event);
+  assert.deepEqual(calls, ["prevent", "stop", ["select", 0, first.path], ["focus", 0, first.path]]);
+  assert.equal(canFocus(), true);
+  document.activeElement = {};
+  assert.equal(canFocus(), false);
+});
+
 test("loaded keyboard targets preserve range intent and ignore stale requests or changed selection", async () => {
   for (const change of ["none", "descendant", "selection", "focus", "archive", "sort", "navigation", "mode", "modal", "tasks", "newer", "missing"]) {
     const waiting = deferred();

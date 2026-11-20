@@ -247,6 +247,7 @@
     taskCenterCounts,
     taskSubmissionBlockReason,
     type TaskCenterFilter,
+    type TaskCenterListPosition,
     type TaskSubmissionBlockReason,
   } from "./lib/task-center";
   import {
@@ -420,6 +421,7 @@
   let taskCenterFilter = $state<TaskCenterFilter>("all");
   let taskCenterSelectedTaskId = $state<number | null>(null);
   let taskCenterFocusTaskId = $state<number | null>(null);
+  let taskCenterListPosition: TaskCenterListPosition | null = null;
   let taskCenterReturnFocus: HTMLElement | null = null;
   let jobEventsReady = $state(false);
   let initialTaskWindowSubmitted = false;
@@ -564,7 +566,6 @@
       fallbackPaths: runtimePreviews.batchPaths.length > 0
         ? runtimePreviews.batchPaths : currentArchive ? [currentArchive.source] : [],
       platform: platformKind(),
-      presetId: presets.selection("extract").id,
       archiveTitle: archiveTitle(),
     }),
     choose: async (purpose, options, isCurrent) => {
@@ -1559,7 +1560,7 @@
     };
 
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.defaultPrevented || event.isComposing) return;
+      if (event.defaultPrevented || event.isComposing || event.keyCode === 229) return;
       if (!nativeMenuConnection) {
         const action = appActionForShortcut(event, activePlatform);
         if (action && appActionEnabled(action)) {
@@ -2845,10 +2846,23 @@
   }
 
   function onArchiveFilterKeydown(event: KeyboardEvent): void {
-    if (event.key !== "Escape" || event.defaultPrevented || event.isComposing || event.keyCode === 229 || !filterText()) return;
+    if (event.defaultPrevented || event.isComposing || event.keyCode === 229 || !filterText()) return;
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      clearArchiveFilter();
+      return;
+    }
+    if (event.key !== "ArrowDown" || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey
+      || !filterText().trim() || filterPending() || archiveBrowseError() || archiveSelectionBusyReason()
+      || taskCenterOpen || blockingModalVisible()) return;
+    const first = rowAt(0);
+    if (!first) return;
     event.preventDefault();
     event.stopPropagation();
-    clearArchiveFilter();
+    const input = event.currentTarget;
+    selectOnlyEntry(displayArchiveEntry(first, 0, true, tr));
+    void focusArchiveRow(0, first.path, () => document.activeElement === input);
   }
 
   function applySettingsEffect(effect: SettingsEffect): void {
@@ -4678,7 +4692,7 @@
           : tr("gui.archive.single"),
       ],
       [tr("common.selection"), selectedSummary()],
-      [extractView.extractDestinationFieldLabel(), extraction.destination],
+      [extractView.extractDestinationFieldLabel(), extraction.displayDestination],
     ];
   }
 
@@ -5549,6 +5563,7 @@
     taskCenterFilter = "all";
     taskCenterSelectedTaskId = null;
     taskCenterFocusTaskId = null;
+    taskCenterListPosition = null;
     restoreTaskWorkspaceFocus();
   }
 
@@ -5575,9 +5590,10 @@
     });
   }
 
-  function openTaskCenterDetails(task: Task): void {
+  function openTaskCenterDetails(task: Task, position: TaskCenterListPosition): void {
     tools.leave();
     cancelTaskReview();
+    taskCenterListPosition = position;
     taskCenterFocusTaskId = task.id;
     taskCenterSelectedTaskId = task.id;
   }
@@ -5750,6 +5766,11 @@
       rootClass: `task-center-panel design-root platform-${activePlatform} palette-${settingsSession.colors.palette} theme-${activeTheme} density-${activeDensityChoice}`,
       rootVariables: customPaletteVariables(),
       focusTaskId: taskCenterFocusTaskId,
+      takeListPosition: (id) => {
+        const position = taskCenterListPosition;
+        taskCenterListPosition = null;
+        return position?.taskId === id ? position : null;
+      },
       onClose: closeTaskCenter,
       onPause: pauseCurrentTask,
       onResume: resumeCurrentTask,
@@ -7268,7 +7289,7 @@
                   <div class="panel-title"><Icon name="archive" size={16} />{extractView.extractDestinationFieldLabel()}</div>
                   <div class="setting-callout">
                     <strong>{extractView.extractDestinationTitle(extraction.state.destinationMode)}</strong>
-                    <span>{extraction.destination}</span>
+                    <span>{extraction.displayDestination}</span>
                   </div>
                   <div class="settings-route-list">
                     <button class="settings-route-card" onclick={() => openExtractWorkspace("all")}>
@@ -7471,6 +7492,7 @@
                 disabled={!currentArchive || screen !== "browse"}
                 aria-label={tr("gui.list.search_aria")}
                 aria-busy={filterPending()}
+                aria-keyshortcuts="ArrowDown Escape"
                 title={tr("gui.list.search_shortcut")}
                 placeholder={tr("gui.list.search_placeholder")}
                 oninput={(event) => updateArchiveFilter(event.currentTarget.value)}
@@ -7550,7 +7572,7 @@
                   <div class="classic-label">{tr("common.mode")}</div>
                   <div class="classic-input accent">{extractView.extractDestinationTitle(extraction.state.destinationMode)}</div>
                   <div class="classic-label">{tr("common.destination")}</div>
-                  <div class="classic-input classic-copy-wrap">{extraction.destination}</div>
+                  <div class="classic-input classic-copy-wrap">{extraction.displayDestination}</div>
                 </div>
               </aside>
             </div>
@@ -7603,7 +7625,7 @@
           {@const extractScopeStatus = `${extractView.extractSelectionLabel()} · ${extractView.extractDestinationTitle(extraction.state.destinationMode)}`}
           {@const extractConflictStatus = tr("gui.extract.status_conflicts").replace("{mode}", extractOverwriteLabel(extraction.state.overwrite)).replace("{password}", extractPasswordLabel())}
           {@const extractConflictCompactStatus = tr("gui.extract.status_conflicts").replace("{mode}", extractOverwriteLabel(extraction.state.overwrite)).replace("{password}", extractPasswordStatusbarLabel())}
-          {@const extractDestinationStatus = tr("gui.extract.status_destination").replace("{destination}", extraction.effectiveDestination)}
+          {@const extractDestinationStatus = tr("gui.extract.status_destination", { destination: extraction.effectiveDestination })}
           <span title={extractActionStatus}>{extractActionStatus}</span>
           <span title={extractScopeStatus}>{extractScopeStatus}</span>
           <span title={extractConflictStatus}>{extractConflictCompactStatus}</span>

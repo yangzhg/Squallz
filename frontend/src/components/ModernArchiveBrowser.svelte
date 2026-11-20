@@ -304,6 +304,7 @@
         value={view.filterText}
         aria-label={tr("gui.list.search_aria")}
         aria-busy={view.filterPending}
+        aria-keyshortcuts="ArrowDown Escape"
         title={tr("gui.list.search_shortcut")}
         placeholder={tr("gui.list.search_placeholder")}
         oninput={(event) => onSearchInput(event.currentTarget.value)}
