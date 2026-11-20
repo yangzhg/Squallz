@@ -118,7 +118,12 @@ export function checksumResultLine(
   item: ChecksumItem,
 ): string {
   const path = checksumItemText(item, "path");
-  if (kind === "checksum") return `${checksumItemText(item, "digest")}  ${path}`;
+  if (kind === "checksum") {
+    const digest = checksumItemText(item, "digest");
+    if (!/[\\\r\n]/u.test(path)) return `${digest}  ${path}`;
+    const escaped = path.replaceAll("\\", "\\\\").replaceAll("\n", "\\n").replaceAll("\r", "\\r");
+    return `\\${digest}  ${escaped}`;
+  }
   return [
     checksumItemStatus(item),
     path,

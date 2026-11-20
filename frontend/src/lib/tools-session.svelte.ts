@@ -121,8 +121,8 @@ export class ToolsSession {
   target(kind: "checksum" | "duplicate_scan"): string {
     const archive = this.port.read().archive;
     return kind === "checksum"
-      ? this.#draft.checksumPath.trim() || (archive && !archive.read_only ? archive.path : "")
-      : this.#draft.duplicatePath.trim() || (archive ? dirname(archive.path) : "");
+      ? this.#draft.checksumPath || (archive && !archive.read_only ? archive.path : "")
+      : this.#draft.duplicatePath || (archive ? dirname(archive.path) : "");
   }
 
   targetLabel(kind: "checksum" | "duplicate_scan"): string {
@@ -139,7 +139,7 @@ export class ToolsSession {
   }
 
   get manifestLabel(): string {
-    return this.#draft.manifestPath.trim() || tr("gui.checksum.choose_manifest_prompt");
+    return this.#draft.manifestPath || tr("gui.checksum.choose_manifest_prompt");
   }
 
   get hasArchive(): boolean { return this.port.read().archive !== null; }
@@ -235,7 +235,7 @@ export class ToolsSession {
   }
 
   async submit(kind: ToolKind): Promise<void> {
-    const target = kind === "checksum_check" ? this.#draft.manifestPath.trim() : this.target(kind);
+    const target = kind === "checksum_check" ? this.#draft.manifestPath : this.target(kind);
     const missing = kind === "checksum"
       ? tr("gui.checksum.choose_before_checksumming")
       : kind === "checksum_check"
@@ -379,7 +379,7 @@ export class ToolsSession {
         ? task.spec.algorithm === this.#draft.algorithm && task.spec.inputs.length === 1 && task.spec.inputs[0] === this.target("checksum")
           && JSON.stringify(task.spec.excludes) === JSON.stringify(this.excludes("checksum"))
         : task?.spec.kind === "checksum_check"
-          ? task.spec.algorithm === this.#draft.algorithm && task.spec.manifest === this.#draft.manifestPath.trim() : false,
+          ? task.spec.algorithm === this.#draft.algorithm && task.spec.manifest === this.#draft.manifestPath : false,
       state: task ? taskOutcomeStateLabel(task) : taskStateLabel(null),
       feedback: this.copyFeedback(kind)?.message ?? null, feedbackDanger: this.copyFeedback(kind)?.tone === "danger",
       copyPending: this.copyPending(kind, task?.id ?? null), onCopy: () => void this.copyResults(kind),

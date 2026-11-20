@@ -1,7 +1,7 @@
 //! Local-file checksum calculation shared by CLI and GUI surfaces.
 
 use std::fs::File;
-use std::io::Read;
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -170,7 +170,7 @@ pub(crate) fn verify_checksum_manifest(
     ctl: &ControlToken,
 ) -> Result<ChecksumVerificationReport, FormatError> {
     ctl.checkpoint()?;
-    let text = std::fs::read_to_string(manifest)?;
+    let reader = BufReader::new(File::open(manifest)?);
     let base_dir = match manifest
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
@@ -178,7 +178,7 @@ pub(crate) fn verify_checksum_manifest(
         Some(path) => path,
         None => Path::new("."),
     };
-    let expected = parse_manifest(&text, base_dir, algorithm)?;
+    let expected = parse_manifest(reader, base_dir, algorithm, ctl)?;
     ctl.checkpoint()?;
 
     let total_bytes = expected
@@ -299,13 +299,16 @@ struct ExpectedChecksum {
 }
 
 fn parse_manifest(
-    text: &str,
+    reader: impl BufRead,
     base_dir: &Path,
     algorithm: ChecksumAlgorithm,
+    ctl: &ControlToken,
 ) -> Result<Vec<ExpectedChecksum>, FormatError> {
     let mut out = Vec::new();
-    for (idx, raw_line) in text.lines().enumerate() {
-        let line = raw_line.trim();
+    for (idx, raw_line) in reader.lines().enumerate() {
+        ctl.checkpoint()?;
+        let raw_line = raw_line?;
+        let line = raw_line.trim_start();
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
@@ -315,7 +318,8 @@ fn parse_manifest(
                 idx + 1
             ))
         })?;
-        let digest = digest.trim().to_ascii_lowercase();
+        let escaped_digest = digest.strip_prefix('\\');
+        let digest = escaped_digest.unwrap_or(digest).to_ascii_lowercase();
         if digest.len() != algorithm.digest_len()
             || !digest.chars().all(|ch| ch.is_ascii_hexdigit())
         {
@@ -325,14 +329,25 @@ fn parse_manifest(
                 idx + 1
             )));
         }
-        let path = path.trim_start_matches(|ch: char| ch.is_whitespace() || ch == '*');
+        // After the separator, only one optional text/binary marker is syntax.
+        // All remaining characters, including spaces and stars, name the file.
+        let path = path.strip_prefix([' ', '*']).unwrap_or(path);
         if path.is_empty() {
             return Err(FormatError::Other(format!(
                 "invalid checksum manifest line {}: missing path",
                 idx + 1
             )));
         }
-        let path = PathBuf::from(path);
+        let path = if escaped_digest.is_some() {
+            PathBuf::from(unescape_manifest_path(path).ok_or_else(|| {
+                FormatError::Other(format!(
+                    "invalid filename escape on manifest line {}",
+                    idx + 1
+                ))
+            })?)
+        } else {
+            PathBuf::from(path)
+        };
         let path = if path.is_absolute() {
             path
         } else {
@@ -349,6 +364,24 @@ fn parse_manifest(
         ));
     }
     Ok(out)
+}
+
+fn unescape_manifest_path(path: &str) -> Option<String> {
+    let mut decoded = String::with_capacity(path.len());
+    let mut chars = path.chars();
+    while let Some(ch) = chars.next() {
+        decoded.push(if ch == '\\' {
+            match chars.next()? {
+                '\\' => '\\',
+                'n' => '\n',
+                'r' => '\r',
+                _ => return None,
+            }
+        } else {
+            ch
+        });
+    }
+    Some(decoded)
 }
 
 fn checksum_file(
@@ -613,6 +646,43 @@ mod tests {
             .iter()
             .any(|done| *done > 0 && *done < bytes.len() as u64));
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn manifest_preserves_literal_paths_and_decodes_only_marked_escapes() {
+        let digest = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+        let cases = [
+            ("", "   spaced ", " spaced "),
+            ("", "  *star", "*star"),
+            ("", " **star", "*star"),
+            ("", " path", "path"),
+            ("", "\tplain", "plain"),
+            ("", "  raw\\name", "raw\\name"),
+            ("\\", "  a\\nb\\rc\\\\d", "a\nb\rc\\d"),
+        ];
+        let base = std::path::Path::new("manifests");
+        for (prefix, field, path) in cases {
+            let record = format!("  # comment\r\n{prefix}{digest}{field}\r\n");
+            let items = super::parse_manifest(
+                record.as_bytes(),
+                base,
+                ChecksumAlgorithm::Sha256,
+                &ControlToken::default(),
+            )
+            .unwrap();
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0].path, base.join(path));
+        }
+        for invalid in ["name\\x", "name\\"] {
+            let record = format!("\n\\{digest}  {invalid}");
+            let result = super::parse_manifest(
+                record.as_bytes(),
+                base,
+                ChecksumAlgorithm::Sha256,
+                &ControlToken::default(),
+            );
+            assert!(matches!(result, Err(FormatError::Other(reason)) if reason.contains("line 2")));
+        }
     }
 
     #[test]

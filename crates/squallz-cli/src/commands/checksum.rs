@@ -97,7 +97,16 @@ pub fn run(
 
 fn print_classic(report: &ChecksumReport) {
     for item in &report.items {
-        println!("{}  {}", item.digest, path_string(&item.path));
+        let path = item.path.to_string_lossy();
+        if path.contains(['\\', '\n', '\r']) {
+            let escaped = path
+                .replace('\\', "\\\\")
+                .replace('\n', "\\n")
+                .replace('\r', "\\r");
+            println!("\\{}  {escaped}", item.digest);
+        } else {
+            println!("{}  {path}", item.digest);
+        }
     }
 }
 

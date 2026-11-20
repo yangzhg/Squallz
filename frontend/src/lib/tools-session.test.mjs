@@ -67,6 +67,26 @@ test("tool picker cancellation and failure preserve inputs and explain the outco
   }
 });
 
+test("file tools preserve the full path returned by the picker", async () => {
+  const path = "/data/ *report  ";
+  for (const [picker, kind] of [["file", "checksum"], ["folder", "checksum"], ["manifest", "checksum_check"], ["duplicates", "duplicate_scan"]]) {
+    let submitted;
+    const run = harness({
+      choose: async () => path,
+      submitJob: async (spec) => { submitted = spec; return 1; },
+    });
+    await run.tools.choose(picker);
+    assert.equal(picker === "manifest" ? run.tools.manifestLabel : run.tools.targetLabel(kind), path);
+    await run.tools.submit(kind);
+    assert.equal(kind === "checksum_check" ? submitted.manifest : submitted.inputs[0], path);
+    if (kind !== "duplicate_scan") {
+      run.context.tasks.push({ id: 1, state: "done", spec: submitted, result: jobResult(kind) });
+      assert.equal(run.tools.checksumReport(kind).matchesInput, true);
+    }
+    run.tools.dispose();
+  }
+});
+
 test("an older clipboard completion cannot replace or shorten the newer feedback timer", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const writes = [];

@@ -104,6 +104,12 @@ function reportHarness({ navigation = false } = {}) {
   return { ...evaluateFunctions(source, names, context), context, calls, tools };
 }
 
+test("copied checksum records preserve filenames and occupy one line each", () => {
+  const result = (path) => taskModel.checksumResultLine("checksum", { path, digest: "abc" });
+  assert.equal(result(" *report "), "abc   *report ");
+  assert.equal(result("a\\folder\nb\rc"), "\\abc  a\\\\folder\\nb\\rc");
+});
+
 function checksumTask(id, kind = "checksum") {
   return { id, state: "done", expanded: true,
     spec: kind === "checksum"
